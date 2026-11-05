@@ -204,6 +204,61 @@ describe("copy-before-clobber: a file this session did not create", () => {
 		expect(resultText(result)).toContain("could not be copied aside");
 		expect(resultText(result)).toContain("not recoverable from here");
 	});
+
+	test("an edit create that overwrites a file keeps it, and does not claim it afterwards", async () => {
+		const target = path.join(tempDir, "register.md");
+		await fs.writeFile(target, DOOMED);
+		const session = makeSession(tempDir);
+
+		const created = await new EditTool(session, "patch").execute("edit-create-over", {
+			path: "register.md",
+			edits: [{ op: "create", diff: "replacement\n" }],
+		});
+
+		expect(created.isError).toBeFalsy();
+		expect(await Bun.file(target).text()).toBe("replacement\n");
+		expect(await Bun.file((await backupFiles())[0]!).text()).toBe(DOOMED);
+		// Overwriting a file is not authoring it: the next write is insured too.
+		await new WriteTool(session).execute("rewrite", { path: "register.md", content: "gone\n" });
+		expect(await backupFiles()).toHaveLength(2);
+	});
+
+	test("a copy whose index entry cannot be written is still reported as saved", async () => {
+		await fs.writeFile(path.join(tempDir, "register.md"), DOOMED);
+		const now = new Date();
+		const day = `${now.getFullYear()}-${`${now.getMonth() + 1}`.padStart(2, "0")}-${`${now.getDate()}`.padStart(2, "0")}`;
+		// A directory where the day's index belongs: the copy lands, the append does not.
+		await fs.mkdir(path.join(getClobberBackupsDir(), day, "index.jsonl"), { recursive: true });
+
+		const result = await new WriteTool(makeSession(tempDir)).execute("clobber", {
+			path: "register.md",
+			content: "gone\n",
+		});
+
+		const backups = await backupFiles();
+		expect(backups).toHaveLength(1);
+		expect(await Bun.file(backups[0]!).text()).toBe(DOOMED);
+		expect(resultText(result)).toContain("were copied to");
+		expect(resultText(result)).not.toContain("could not be copied aside");
+	});
+
+	test("a move that also rewrites its source keeps the source's pre-move content", async () => {
+		await fs.writeFile(path.join(tempDir, "a.md"), DOOMED);
+
+		// Patch mode refuses a rename onto an existing destination and refuses an
+		// update with no hunks, so the rewritten source is the half of the move
+		// branch this mode can reach.
+		const rewritten = await new EditTool(makeSession(tempDir), "patch").execute("move-rewrite", {
+			path: "a.md",
+			edits: [{ op: "update", diff: "@@\n-register entry 2\n+clobbered", rename: "a-moved.md" }],
+		});
+
+		expect(rewritten.isError).toBeFalsy();
+		expect(await Bun.file(path.join(tempDir, "a.md")).exists()).toBe(false);
+		const backups = await backupFiles();
+		expect(backups).toHaveLength(1);
+		expect(await Bun.file(backups[0]!).text()).toBe(DOOMED);
+	});
 });
 
 describe("copy-before-clobber: another session's directory", () => {

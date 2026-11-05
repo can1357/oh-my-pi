@@ -15,9 +15,11 @@
  * cannot be taken degrades to a note saying so. Nothing here throws.
  *
  * What it costs on the ordinary path — a session rewriting a file it created —
- * is one `stat`, one `realpath` and a map lookup. The `realpath` is what makes
- * the sessions-root test agree with itself when `~/.omp` or the target is
- * reached through a symlink; a lexical test would miss those and under-insure.
+ * is two `stat`s and two `realpath`s: one pair to decide (measured ~96 µs) and
+ * one in {@link noteOwnWrite} to refresh the record (~38 µs), against a write
+ * that takes milliseconds. The `realpath`s are what make the sessions-root test
+ * agree with itself when `~/.omp` or the target is reached through a symlink; a
+ * lexical test is cheaper and would under-insure.
  *
  * Bounds (see {@link RETENTION_DAYS}, {@link STORE_BUDGET_BYTES},
  * {@link MAX_BACKUP_BYTES}): copies live under `~/.omp/agent/clobbered/<date>/`
@@ -241,13 +243,16 @@ async function listDayDirs(root: string): Promise<string[]> {
 }
 
 /**
- * Bytes a day holds, read from its index rather than by stat-ing every entry:
- * one file read per day instead of one syscall per backup, which is what keeps
- * the sweep off the critical path of a tool call in a store with many entries.
- * A day whose index is missing or corrupt reports 0 and is therefore never the
- * reason the budget sweep fires.
+ * Bytes a day holds. The index is the fast answer — one file read per day
+ * instead of one syscall per backup, which is what keeps the sweep off the
+ * critical path of a tool call in a store with many entries. A day whose index
+ * is missing or unreadable is counted the slow way rather than reported as
+ * empty, so copies whose index line never landed still weigh on the budget.
+ *
+ * Both answers are logical bytes: a sparse file or a reflink counts what it
+ * says it holds, not what it occupies.
  */
-async function dayBytesFromIndex(dayDir: string): Promise<number> {
+async function dayBytes(dayDir: string): Promise<number> {
 	let total = 0;
 	try {
 		const text = await Bun.file(path.join(dayDir, INDEX_NAME)).text();
@@ -257,8 +262,18 @@ async function dayBytesFromIndex(dayDir: string): Promise<number> {
 			const bytes = entry && typeof entry === "object" && "bytes" in entry ? entry.bytes : undefined;
 			if (typeof bytes === "number") total += bytes;
 		}
+		return total;
 	} catch (error) {
-		if (!isEnoent(error)) logger.debug("Clobber backup index unreadable", { dayDir, error: String(error) });
+		logger.debug("Clobber backup index unreadable; sizing the day by hand", { dayDir, error: String(error) });
+	}
+	total = 0;
+	try {
+		for (const entry of await fs.readdir(dayDir, { withFileTypes: true })) {
+			if (!entry.isFile() || entry.name === INDEX_NAME) continue;
+			total += (await fs.stat(path.join(dayDir, entry.name)).catch(() => undefined))?.size ?? 0;
+		}
+	} catch (error) {
+		if (!isEnoent(error)) logger.debug("Clobber backup day unreadable", { dayDir, error: String(error) });
 	}
 	return total;
 }
@@ -288,7 +303,7 @@ async function sweepStore(root: string, today: string): Promise<void> {
 	let total = 0;
 	const sizes = new Map<string, number>();
 	for (const day of kept) {
-		const bytes = await dayBytesFromIndex(path.join(root, day));
+		const bytes = await dayBytes(path.join(root, day));
 		sizes.set(day, bytes);
 		total += bytes;
 	}
@@ -344,15 +359,26 @@ export async function backupBeforeClobber(
 		// A reflink where the filesystem has one, a plain copy everywhere else —
 		// never a hard link, which the in-place truncate below would follow.
 		await fs.copyFile(target, destination, fs.constants.COPYFILE_FICLONE);
-		// The name alone cannot say where the bytes came from; the day's index can,
-		// and the sweep reads it instead of stat-ing every entry.
-		await fs.appendFile(
-			path.join(dayDir, INDEX_NAME),
-			`${JSON.stringify({ at: now.toISOString(), reason, from: target, to: destination, bytes: size })}\n`,
-		);
-		if (sweptStores.get(root) !== day) {
-			sweptStores.set(root, day);
-			await sweepStore(root, day);
+		// Past this point the bytes ARE saved, so nothing below may downgrade the
+		// answer to "could not be copied": the index and the sweep are bookkeeping,
+		// and a caller told its content is gone when a copy exists is worse than a
+		// store that is briefly untidy.
+		try {
+			// The name alone cannot say where the bytes came from; the day's index
+			// can, and the sweep reads it instead of stat-ing every entry.
+			await fs.appendFile(
+				path.join(dayDir, INDEX_NAME),
+				`${JSON.stringify({ at: now.toISOString(), reason, from: target, to: destination, bytes: size })}\n`,
+			);
+			if (sweptStores.get(root) !== day) {
+				sweptStores.set(root, day);
+				await sweepStore(root, day);
+			}
+		} catch (error) {
+			logger.warn("Clobber backup bookkeeping failed; the copy itself is on disk", {
+				to: destination,
+				error: error instanceof Error ? error.message : String(error),
+			});
 		}
 		return { kind: "saved", reason, from: target, to: destination, bytes: size };
 	} catch (error) {

@@ -717,14 +717,18 @@ export class EditTool implements AgentTool<TInput> {
 	async #write(request: EditWriteRequest, signal?: AbortSignal, clobberNotes?: string[]): Promise<EditWriteResponse> {
 		// Before the op switch, so no branch can act first: a delete, an
 		// ACP-routed update and a local update all destroy what is at
-		// `request.path`, and a create has nothing there to lose. The move
-		// branch below insures its destination separately.
-		if (request.op !== "create" && request.op !== "move") {
+		// `request.path`. A `create` is here too — patch mode lets one overwrite
+		// an existing file, and an `apply_patch` delete-then-add for one path is
+		// staged as a create — and costs nothing when the path really is absent.
+		// The move branch below insures both of its ends separately.
+		if (request.op !== "move") {
 			await this.#insureClobber(request.path, request.displayPath, clobberNotes);
 		}
 		if (request.op === "delete") {
-			await deleteFileWithFallback(request.path, Bun.file(request.path));
+			// Before the unlink: once the leaf is gone the path no longer resolves
+			// to the key the record was filed under.
 			forgetOwnWrite(this.session, request.path);
+			await deleteFileWithFallback(request.path, Bun.file(request.path));
 			if (this.session.enableLsp ?? true) {
 				await notifyWorkspaceWatchedFiles(
 					this.session.cwd,
@@ -761,18 +765,31 @@ export class EditTool implements AgentTool<TInput> {
 			);
 			// A plain rename carries the source's bytes to the destination and
 			// loses nothing; a move that also rewrites the file destroys them, and
-			// the source is about to be unlinked.
-			const sourceBytes = await Bun.file(request.path)
-				.bytes()
-				.catch(() => undefined);
-			if (sourceBytes !== undefined && Buffer.compare(sourceBytes, Buffer.from(request.content, "utf8")) !== 0) {
+			// the source is about to be unlinked. Length answers that for every
+			// move that changes it, so only an equal-length rewrite reads the
+			// bytes, and a source that cannot be read is insured rather than
+			// assumed unchanged.
+			const contentBytes = Buffer.from(request.content, "utf8");
+			const sourceSize = (
+				await Bun.file(request.path)
+					.stat()
+					.catch(() => undefined)
+			)?.size;
+			let rewritten = true;
+			if (sourceSize === contentBytes.byteLength) {
+				const sourceBytes = await Bun.file(request.path)
+					.bytes()
+					.catch(() => undefined);
+				rewritten = sourceBytes === undefined || Buffer.compare(sourceBytes, contentBytes) !== 0;
+			}
+			if (rewritten) {
 				await this.#insureClobber(request.path, request.displayPath, clobberNotes);
 			}
 			await writeFileWithFallback(request.moveTo, request.content);
 			if (mode !== undefined) await chmodMovedFile(request.moveTo, mode);
+			forgetOwnWrite(this.session, request.path);
 			await deleteFileWithFallback(request.path, Bun.file(request.path));
 			await noteOwnWrite(this.session, request.moveTo, !destinationExisted);
-			forgetOwnWrite(this.session, request.path);
 			if (this.session.enableLsp ?? true) {
 				await notifyWorkspaceWatchedFiles(
 					this.session.cwd,
@@ -806,6 +823,9 @@ export class EditTool implements AgentTool<TInput> {
 
 		// The pre-image is the only way to tell "the write never landed" from
 		// "something else rewrote the file"; a stat cannot (coarse mtimes).
+		// Whether the path existed is what decides ownership below, not the
+		// operation's label: a `create` that overwrote a file did not create it.
+		let existedBefore: boolean;
 		let preWriteBytes: Uint8Array | undefined;
 		if (request.op === "update") {
 			try {
@@ -813,7 +833,9 @@ export class EditTool implements AgentTool<TInput> {
 			} catch (error) {
 				if (!isEnoent(error)) throw error;
 			}
-		} else if (request.op === "create") {
+			existedBefore = preWriteBytes !== undefined;
+		} else {
+			existedBefore = await Bun.file(request.path).exists();
 			await mkdirAllowingFallback(path.dirname(request.path));
 		}
 
@@ -832,7 +854,7 @@ export class EditTool implements AgentTool<TInput> {
 				return this.#deferredDiagnostics.begin(request.path);
 			},
 		);
-		await noteOwnWrite(this.session, request.path, request.op === "create");
+		await noteOwnWrite(this.session, request.path, !existedBefore);
 
 		if (preWriteBytes !== undefined) {
 			// Fail when a content-changing write left disk at the pre-image. Compare
