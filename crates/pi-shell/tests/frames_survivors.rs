@@ -128,29 +128,46 @@ fn survivor() -> (Rig, Arc<Program>, Vpid) {
 	(rig, program, owner)
 }
 
-fn reports() -> (Vec<Lost>, Vec<Lost>) {
+fn reports() -> (Vec<Lost>, Vec<Lost>, Vec<Lost>) {
 	let (mut rig, program, owner) = survivor();
 	let (shell, host, store) = rig.parts();
 	let mut cx = Cx { host, store };
 	shell.control().request_suspend();
 	assert!(matches!(shell.step(&mut cx, Budget::default()), Step::SuspendReady));
 	let externalized = shell.externalize(&mut cx).unwrap();
-	let mut store = MemStore::from_bytes(&rig.store.to_bytes()).unwrap();
+	let snapshot = rig.store.to_bytes();
+	let mut store = MemStore::from_bytes(&snapshot).unwrap();
 	let engine = Engine::new(EngineConfig::default());
 	let (_, host, _) = rig.parts();
 	let (mut restored, report) =
 		Shell::restore(&engine, &mut Cx { host, store: &mut store }, RestoreOpts::default()).unwrap();
 	assert_eq!(report.vprocs, 1, "the ended owner is not recreated");
 	assert_eq!(report.runs, 0, "the ended script is not resumed");
+	let mut recovery_store = MemStore::from_bytes(&snapshot).unwrap();
+	let (mut recovered, recovery) =
+		Shell::restore(&engine, &mut Cx { host, store: &mut recovery_store }, RestoreOpts {
+			drop_frames: true,
+		})
+		.unwrap();
+	assert_eq!(recovery.vprocs, 0, "explicit recovery does not rebuild frames");
+	assert_eq!(recovery.runs, 0, "explicit recovery does not resume scripts");
+	assert!(recovery.abandoned.is_empty(), "the owner's script already ended");
 	assert!(program.running(), "neither snapshot operation terminates the original program");
 	let expected = Lost::Ext { vpid: owner, pid: program.pid() };
-	println!("expected={expected:?} externalize={:?} restore={:?}", externalized.lost, report.lost);
+	println!(
+		"expected={expected:?} externalize={:?} restore={report:?} recovery={recovery:?}",
+		externalized.lost
+	);
 	// A second image must not invent a new live handle for an already lost
 	// program.
 	let again = restored
 		.externalize(&mut Cx { host, store: &mut store })
 		.unwrap();
 	assert!(again.lost.is_empty(), "a restored loss is not a live external");
+	let again = recovered
+		.externalize(&mut Cx { host, store: &mut recovery_store })
+		.unwrap();
+	assert!(again.lost.is_empty(), "a recovered loss is not a live external");
 	assert_eq!(
 		externalized
 			.lost
@@ -160,12 +177,20 @@ fn reports() -> (Vec<Lost>, Vec<Lost>) {
 		externalized.lost.len()
 	);
 	assert_eq!(report.lost.iter().filter(|lost| **lost == expected).count(), report.lost.len());
-	(externalized.lost, report.lost)
+	assert_eq!(
+		recovery
+			.lost
+			.iter()
+			.filter(|lost| **lost == expected)
+			.count(),
+		recovery.lost.len()
+	);
+	(externalized.lost, report.lost, recovery.lost)
 }
 
 #[test]
 fn externalize_reports_a_program_that_ignored_its_owners_term() {
-	let (externalized, _) = reports();
+	let (externalized, ..) = reports();
 	assert_eq!(
 		externalized.len(),
 		1,
@@ -175,12 +200,29 @@ fn externalize_reports_a_program_that_ignored_its_owners_term() {
 
 #[test]
 fn restore_reports_a_program_that_ignored_its_owners_term() {
-	let (_, restored) = reports();
+	let (_, restored, _) = reports();
 	assert_eq!(
 		restored.len(),
 		1,
 		"restore must report the same surviving program's owner and native pid"
 	);
+}
+
+#[test]
+fn dropping_frames_reports_a_program_that_ignored_its_owners_term() {
+	let (_, _, recovered) = reports();
+	assert_eq!(
+		recovered.len(),
+		1,
+		"explicit recovery must report the surviving program's owner and native pid"
+	);
+}
+
+#[test]
+fn restore_modes_report_the_same_survivors_from_one_image() {
+	let (_, restored, recovered) = reports();
+	assert_eq!(restored.len(), 1, "the image records one surviving program");
+	assert_eq!(recovered, restored, "dropping frames must not discard survivor metadata");
 }
 
 #[test]
