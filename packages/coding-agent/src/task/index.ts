@@ -552,6 +552,26 @@ type BlankableKey = (typeof BLANKABLE_KEYS)[number] | "task" | "taskFile";
 function isBlankString(value: unknown): boolean {
 	return typeof value === "string" && value.trim() === "";
 }
+/**
+ * A value that names nothing: an empty or whitespace-only string, or an array with no entry that
+ * names anything. Both are what a model sends for a field it has nothing to put in, and the
+ * per-call gate refuses either — it fires for any value that is not `undefined`, before a selector
+ * is ever looked at, so `model: []` is answered with "Per-call model is disabled… Omit model" for a
+ * field the caller filled with nothing.
+ *
+ * A *populated* array stays. `task.md` documents "no roles, arrays, globs or partial IDs", so one
+ * is a real mistake that deserves a real message rather than being silently dropped.
+ *
+ * Measured, because an earlier revision of this file asserted the opposite and was wrong: shared
+ * validation does **not** turn an array into its string form. Through `validateAgentToolArguments`,
+ * `[]` arrives as `[]` and `[""]` as `[""]`. That also means the raw streamed arguments and the
+ * validated ones agree on arrays, so dropping one here cannot split the speculative launcher's
+ * plan from dispatch's — which was the stated reason for leaving them, and it did not hold.
+ */
+function isBlankValue(value: unknown): boolean {
+	if (typeof value === "string") return value.trim() === "";
+	return Array.isArray(value) && !value.some(entry => isRealString(entry));
+}
 
 /** A string that names something: the other half of a `task`/`taskFile` pair that was really chosen. */
 function isRealString(value: unknown): boolean {
@@ -571,11 +591,10 @@ function isRealString(value: unknown): boolean {
  * non-empty `task` instructions") rather than be told to choose between two fields it already
  * chose between. A blank `taskFile` alone is untouched and keeps the absolute-path refusal.
  *
- * Only an empty string counts. `null` is left alone: an `outputSchema: null` is a real signal —
- * presence, not truthiness, makes the caller's schema win, so it is how an internal caller says
- * "no schema, and ignore the agent's own". An empty ARRAY is left alone too: shared validation
- * turns an array into its string form, so `[]` reaches dispatch as `"[]"`, a real selector the
- * gate must still refuse.
+ * `null` is left alone: an `outputSchema: null` is a real signal — presence, not truthiness, makes
+ * the caller's schema win, so it is how an internal caller says "no schema, and ignore the agent's
+ * own". An array that names nothing is dropped; see {@link isBlankValue} for why, and for the
+ * measurement that corrects what this comment used to claim about arrays.
  *
  * The copy keeps every contract-bearing field however the caller stores it. A spread takes own
  * enumerable properties only, and an internal caller bypassing the wire schema may hand us an
@@ -589,7 +608,7 @@ function withoutBlankFields<T extends TaskItem | TaskParams>(item: T): T {
 	if (isRealString(item.task) || isBlankString(item.task)) keys.push("taskFile");
 	let out = item;
 	for (const key of keys) {
-		if (!isBlankString(item[key])) continue;
+		if (!isBlankValue(item[key])) continue;
 		if (out === item) out = copyTaskFields(item, {});
 		delete out[key];
 	}

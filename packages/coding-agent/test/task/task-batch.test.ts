@@ -1112,11 +1112,35 @@ describe("batch model placement", () => {
 		expect(run).not.toHaveBeenCalled();
 	});
 
-	// Only a string counts as a placeholder. An empty ARRAY must still be refused: the speculative
-	// launcher plans from the raw streamed arguments and dispatch from the validated ones, shared
-	// validation turns `[]` into its string form on the way, and dropping it made the two disagree —
-	// a child started speculatively for a call that dispatch then refused.
-	it("refuses an empty-array model instead of treating it as left out", async () => {
+	// An array that names nothing is filler too, and three work streams outside this one were blocked
+	// by it: the gate fires for any value that is not `undefined`, before a selector is looked at, so
+	// `model: []` was answered with "Per-call model is disabled… Omit model" for a field the caller
+	// filled with nothing. Measured: shared validation does NOT turn an array into its string form —
+	// `[]` arrives as `[]` — so the raw and validated arguments agree and dropping it cannot split
+	// the speculative launcher's plan from dispatch's.
+	it.each([
+		["an empty array", [] as unknown],
+		["an array of blanks", ["", "  "]],
+	] as const)("dispatches a call whose model is %s", async (_label, model) => {
+		const seance = loadBundledAgents().find(agent => agent.name === "seance");
+		if (!seance) throw new Error("Expected the bundled seance agent");
+		mockDiscovery([taskAgent, seance]);
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Pong"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": true, "async.enabled": false, "task.perCallModel": "off" } }),
+		);
+		const result = await tool.execute("task-empty-array-model", {
+			context: "Shared context",
+			tasks: [{ task: "Reply PONG.", solutionSpace: "one fixed answer", agent: "task", model }],
+		} as never);
+		expect(result.isError).toBeFalsy();
+		expect(run).toHaveBeenCalledTimes(1);
+		expect(run.mock.calls[0]?.[0].perCallModelGrants).toBeUndefined();
+	});
+
+	// A populated array is a real mistake, not filler: `model` is documented as one exact selector,
+	// "no roles, arrays, globs or partial IDs". It must keep reaching the gate rather than be dropped.
+	it("still refuses a populated array model", async () => {
 		const seance = loadBundledAgents().find(agent => agent.name === "seance");
 		if (!seance) throw new Error("Expected the bundled seance agent");
 		mockDiscovery([taskAgent, seance]);
@@ -1124,9 +1148,9 @@ describe("batch model placement", () => {
 		const tool = await TaskTool.create(
 			createSession({ settings: { "task.batch": true, "async.enabled": false, "task.perCallModel": "off" } }),
 		);
-		const result = await tool.execute("task-empty-array-model", {
+		const result = await tool.execute("task-populated-array-model", {
 			context: "Shared context",
-			tasks: [{ task: "Reply PONG.", solutionSpace: "one fixed answer", agent: "task", model: [] }],
+			tasks: [{ task: "Reply PONG.", solutionSpace: "one fixed answer", agent: "task", model: ["openai/gpt-5.4"] }],
 		} as never);
 		expect(result.isError).toBe(true);
 		expect(run).not.toHaveBeenCalled();
