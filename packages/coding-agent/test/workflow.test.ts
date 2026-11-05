@@ -9,11 +9,16 @@
  * is the "controllable fake executor recording to disk + SIGKILL" variant the
  * task brief allows instead of a full live task spawn.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { A2aAgentBridge } from "@oh-my-pi/pi-coding-agent/a2a/agent-bridge";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { acquireSessionSpawnPermit, releaseSessionSpawnPermit } from "@oh-my-pi/pi-coding-agent/task/spawn-limiter";
+import * as structuredModule from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
+import type { StructuredSubagentResult } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { hashAgentCall, WorkflowJournal, resolveWorkflowJournalPath } from "@oh-my-pi/pi-coding-agent/workflow/journal";
 import { BUILTIN_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/builtin-names";
@@ -185,7 +190,35 @@ function journalLines(dir: string): Array<Record<string, unknown>> {
 		.map(line => JSON.parse(line) as Record<string, unknown>);
 }
 
+/** A `runStructuredSubagent` return value with the child's settled fields overridden. */
+function structuredResult(dir: string, overrides: Record<string, unknown>): StructuredSubagentResult {
+	return {
+		result: {
+			index: 0,
+			id: "wf-child",
+			agent: "task",
+			agentSource: "bundled",
+			task: "workflow prompt",
+			assignment: "workflow prompt",
+			exitCode: 0,
+			output: "",
+			stderr: "",
+			truncated: false,
+			durationMs: 1,
+			tokens: 0,
+			requests: 1,
+			...overrides,
+		},
+		policy: {},
+		mergeSummary: "",
+		changesApplied: null,
+		artifactsDir: dir,
+		temporaryArtifacts: false,
+	} as unknown as StructuredSubagentResult;
+}
+
 afterEach(() => {
+	vi.restoreAllMocks();
 	for (const proc of childProcesses.splice(0)) {
 		try {
 			proc.kill(9);
@@ -436,6 +469,75 @@ describe("workflow tool", () => {
 		expect(lines.map(line => line.status)).toEqual(["started", "failed"]);
 		expect(lines[1].error).toContain("agent exploded");
 		expect(lines[1].result).toBeNull();
+	});
+
+	it("journals a non-throwing child failure as failed and re-executes it on resume", async () => {
+		const dir = tempDir();
+		const script = `return (await agent("one")).result;`;
+		const run = vi.spyOn(structuredModule, "runStructuredSubagent");
+		run.mockResolvedValueOnce(
+			structuredResult(dir, {
+				exitCode: 1,
+				output: "half done",
+				stderr: "boom",
+				error: "provider exploded",
+			}),
+		);
+		const first = new WorkflowTool(makeSession(dir));
+		await expect(first.execute("call-1", { script })).rejects.toThrow(/provider exploded/);
+
+		const journal = new WorkflowJournal(path.join(dir, "workflow", "session", "journal.jsonl"));
+		const runId = journalLinearRunId(dir);
+		// The executor reports this failure as a value; the journal must not
+		// record it as a completed call (a resume would then replay it as an
+		// answer instead of retrying).
+		expect(journal.readRun(runId)?.calls.map(call => [call.index, call.status])).toEqual([[0, "failed"]]);
+		expect(journal.readRun(runId)?.calls[0].error).toContain("provider exploded");
+
+		run.mockResolvedValueOnce(structuredResult(dir, { exitCode: 0, output: "the answer\n" }));
+		const second = new WorkflowTool(makeSession(dir));
+		const result = await second.execute("call-2", { script, resumeFrom: runId });
+		const details = result.details as { executed: number; cached: number; result: unknown };
+		expect(details.executed).toBe(1);
+		expect(details.cached).toBe(0);
+		expect(details.result).toBe("the answer");
+		expect(run).toHaveBeenCalledTimes(2);
+	});
+
+	it("takes the session's shared spawn slot, refusing under maxConcurrency=1 + refuse", async () => {
+		const dir = tempDir();
+		const session = {
+			...makeSession(dir),
+			settings: Settings.isolated({ "task.maxConcurrency": 1, "task.concurrencyPolicy": "refuse" }),
+		} as ToolSession;
+		// A permit already held by another spawn path in this session (a task
+		// call, the pi.spawnSubagent seam) must bound workflow agent() too.
+		await acquireSessionSpawnPermit(session);
+		try {
+			const tool = new WorkflowTool(session);
+			await expect(
+				tool.execute("call-1", { script: `return (await agent("one")).result;` }),
+			).rejects.toThrow(/Concurrent subagent limit reached/);
+		} finally {
+			releaseSessionSpawnPermit(session);
+		}
+	});
+
+	it("rejects a remote A2A agent instead of running its placeholder definition locally", async () => {
+		const dir = tempDir();
+		const bridge = new A2aAgentBridge();
+		bridge.add({
+			name: "a2a:main",
+			description: "Remote Main",
+			url: "http://127.0.0.1:7391/",
+			cardName: "Main",
+			skillId: "main",
+		});
+		const session = { ...makeSession(dir), getA2aBridge: () => bridge } as ToolSession;
+		const tool = new WorkflowTool(session);
+		await expect(
+			tool.execute("call-1", { script: `return (await agent("work", { agent: "a2a:main" })).result;` }),
+		).rejects.toThrow(/remote A2A agent and can only be spawned by the task tool/);
 	});
 
 	it("rejects an unknown resumeFrom run", async () => {

@@ -386,7 +386,9 @@ rejects with the executor's preflight error when the spawn fails before
 registration. It takes the session's shared spawn permit, so
 `task.concurrencyPolicy = "refuse"` rejects a seam spawn with the same
 `SpawnRefusedError` text a `task` call gets, and the permit is held until the
-detached run settles. Hosts without a tool session reject the call.
+detached run settles. A remote `a2a:<skill>` name is rejected before an id is
+reserved: only the task tool routes those to their endpoint. Hosts without a
+tool session reject the call.
 
 Covering tests: `test/a2a-server.test.ts` (card contract, auth, method set,
 addressing, spawn seam, loopback enforcement, SSE, token file).

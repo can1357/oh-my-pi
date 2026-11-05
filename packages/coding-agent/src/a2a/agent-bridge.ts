@@ -15,6 +15,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
+import type { ToolSession } from "../tools";
 import { cfgA2aToken } from "../task/settings";
 import type { AgentDefinition } from "../task/types";
 import { type AgentCard, A2A_PROTOCOL_VERSION, type AgentCardSkill } from "./card";
@@ -101,6 +102,20 @@ export class A2aAgentBridge implements A2aBridgeApi {
 			source: "user",
 			blocking: true,
 		}));
+	}
+}
+
+/**
+ * Reject a remote A2A agent name on a spawn path that cannot route to its
+ * endpoint. Only the task tool routes `a2a:` names to the remote bridge; the
+ * workflow VM and the `pi.spawnSubagent` seam would otherwise run the
+ * placeholder definition locally — an agent whose system prompt is just the
+ * endpoint URL, with the caller's prompt as its assignment.
+ */
+export function assertNotRemoteA2aAgent(session: Pick<ToolSession, "getA2aBridge">, agent: string | undefined): void {
+	const remote = agent === undefined ? undefined : session.getA2aBridge?.()?.get(agent);
+	if (remote) {
+		throw new Error(`Agent "${remote.name}" is a remote A2A agent and can only be spawned by the task tool.`);
 	}
 }
 

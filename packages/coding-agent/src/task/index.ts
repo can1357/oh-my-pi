@@ -66,7 +66,7 @@ import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./ev
 import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "./model-approval";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
-import { mapWithConcurrencyLimitAllSettled, normalizeConcurrencyLimit, Semaphore } from "./parallel";
+import { mapWithConcurrencyLimitAllSettled } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/tools/task";
 import { repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
 import {
@@ -78,6 +78,7 @@ import {
 	type StructuredSubagentRequest,
 } from "./structured-subagent";
 import { SpawnRefusedError, SpawnRun, type SpawnPermit } from "./spawn-run";
+import { acquireSessionSpawnPermit, releaseSessionSpawnPermit } from "./spawn-limiter";
 import { type TaskLauncher, TaskLaunchSession } from "./speculative-launch";
 import type { TextTap } from "../job-widgets/text-tap";
 import type { SubagentToolResult } from "./executor";
@@ -88,14 +89,12 @@ import { type A2aRuntimeAgent, spawnA2aAgent } from "../a2a/agent-bridge";
 import {
 	cfgA2aClientTimeoutMs,
 	cfgTaskBatch,
-	cfgTaskConcurrencyPolicy,
 	cfgTaskDisabledAgents,
 	cfgTaskEnableEffort,
 	cfgTaskEnableLsp,
 	cfgTaskFile,
 	cfgTaskIsolationApply,
 	cfgTaskIsolationEnabled,
-	cfgTaskMaxConcurrency,
 	cfgTaskMaxRecursionDepth,
 	cfgTaskMaxRuntimeMs,
 	cfgTaskSpeculativeLaunch,
@@ -835,18 +834,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	readonly #discoveredAgents: AgentDefinition[];
 	readonly #blockedAgent: string | undefined;
 	/**
-	 * One semaphore per TaskTool instance (i.e. per session): bounds concurrent
-	 * subagents across parallel `task` calls within the session. Resized in
-	 * place from `task.maxConcurrency` before every acquire/release so a
-	 * mid-session settings change (UI toggle, `/settings`) applies to both new
-	 * spawns and work already parked in the semaphore queue. `task.concurrencyPolicy`
+	 * Every path that can spawn in this session — this tool, the
+	 * `pi.spawnSubagent` seam, and `workflow` `agent()` — takes its permit from
+	 * the session's shared semaphore (`./spawn-limiter`), so
+	 * `task.maxConcurrency` bounds them together. `task.concurrencyPolicy`
 	 * decides what a spawn does when no slot is free: `"queue"` parks it in that
-	 * queue, `"refuse"` raises a `SpawnRefusedError` with the live counts.
+	 * semaphore's FIFO, `"refuse"` raises a `SpawnRefusedError` with the live
+	 * counts.
 	 */
-	#spawnSemaphore: Semaphore | undefined;
 	readonly #permit: SpawnPermit = {
-		acquire: signal => this.#acquireSpawnPermit(signal),
-		release: () => this.#releaseSpawnSemaphore(),
+		acquire: signal => acquireSessionSpawnPermit(this.session, signal),
+		release: () => releaseSessionSpawnPermit(this.session),
 	};
 	/** Streamed calls' speculative launches, keyed by tool-call id until dispatch adopts or discards them. */
 	readonly #launchSessions = new Map<string, TaskLaunchSession>();
@@ -1088,37 +1086,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		return this.#launch({ toolCallId, params: spawn, index, agentId, detached });
 	}
 
-	#getSpawnSemaphore(): Semaphore {
-		const max = cfgTaskMaxConcurrency.get(this.session.settings);
-		if (this.#spawnSemaphore) {
-			this.#spawnSemaphore.resize(max);
-		} else {
-			this.#spawnSemaphore = new Semaphore(max);
-		}
-		return this.#spawnSemaphore;
-	}
-
-	/**
-	 * Take one spawn slot for a run. Under `task.concurrencyPolicy = "refuse"` a
-	 * full semaphore raises a {@link SpawnRefusedError} instead of parking the
-	 * spawn, so the model learns the limit rather than blocking on a slot it
-	 * cannot observe. `#getSpawnSemaphore` resizes in place from the live
-	 * setting first, so both the decision and the reported limit follow a
-	 * mid-session change. An already-aborted call is delegated to `acquire` to
-	 * keep raising the caller's abort reason.
-	 */
-	async #acquireSpawnPermit(signal: AbortSignal): Promise<void> {
-		const semaphore = this.#getSpawnSemaphore();
-		if (signal.aborted) return semaphore.acquire(signal);
-		if (cfgTaskConcurrencyPolicy.get(this.session.settings) !== "refuse") return semaphore.acquire(signal);
-		if (semaphore.tryAcquire()) return;
-		throw new SpawnRefusedError({
-			running: semaphore.running,
-			waiting: semaphore.waiting,
-			limit: normalizeConcurrencyLimit(cfgTaskMaxConcurrency.get(this.session.settings)),
-		});
-	}
-
 	/**
 	 * Publish the single progress frame a refused spawn emits. A spawn refused at
 	 * its permit never reaches the executor, which owns the normal progress
@@ -1147,10 +1114,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			refusalReason: args.refusal.reason,
 		};
 		emitSubagentFrame(this.session.eventBus, this.session.subagentEventBus, TASK_SUBAGENT_PROGRESS_CHANNEL, payload);
-	}
-
-	#releaseSpawnSemaphore(): void {
-		this.#getSpawnSemaphore().release();
 	}
 
 	/**

@@ -13,6 +13,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildAgentCard } from "@oh-my-pi/pi-coding-agent/a2a/card";
+import { A2aAgentBridge } from "@oh-my-pi/pi-coding-agent/a2a/agent-bridge";
 import {
 	type A2aTask,
 	RPC_ERRORS,
@@ -818,6 +819,73 @@ describe("spawnSubagent seam", () => {
 				},
 			),
 		).rejects.toThrow("preflight rejected the spawn");
+	});
+	it("refuses a second seam spawn under maxConcurrency=1 + refuse, as AGENT_REJECTED", async () => {
+		AgentRegistry.resetGlobalForTests();
+		const registry = AgentRegistry.global();
+		const running = Promise.withResolvers<StructuredSubagentResult>();
+		// The seam shares the session's limiter with the task tool; a detached
+		// run keeps the only slot until it settles.
+		const session = {
+			settings: Settings.isolated({ "task.maxConcurrency": 1, "task.concurrencyPolicy": "refuse" }),
+		} as unknown as ToolSession;
+		const spawn = (options: SpawnSubagentOptions) =>
+			spawnSubagentViaExecutor(session, options, {
+				reserveId: async () => "Spawn-Limit",
+				run: async () => {
+					registry.register({ id: "Spawn-Limit", displayName: "Spawn Limit", kind: "sub", status: "running" });
+					return await running.promise;
+				},
+			});
+		const { handle } = startServer({ spawn });
+
+		const first = await rpc(handle, {
+			jsonrpc: "2.0",
+			id: 31,
+			method: "SendMessage",
+			params: { message: { messageId: "m-7", role: "ROLE_USER", parts: [{ text: "first run" }] } },
+		});
+		expect(first.status).toBe(200);
+		expect(taskResult(first.json).id).toBe("Spawn-Limit");
+
+		const second = await rpc(handle, {
+			jsonrpc: "2.0",
+			id: 32,
+			method: "SendMessage",
+			params: { message: { messageId: "m-8", role: "ROLE_USER", parts: [{ text: "second run" }] } },
+		});
+		expect(second.status).toBe(200);
+		const error = errorResult(second.json);
+		expect(error.code).toBe(RPC_ERRORS.AGENT_REJECTED);
+		expect(error.message).toContain("Concurrent subagent limit reached (1 running; task.maxConcurrency=1)");
+
+		running.resolve(undefined as unknown as StructuredSubagentResult);
+	});
+
+	it("rejects a remote A2A agent name before reserving an id", async () => {
+		const bridge = new A2aAgentBridge();
+		bridge.add({
+			name: "a2a:main",
+			description: "Remote Main",
+			url: "http://127.0.0.1:7391/",
+			cardName: "Main",
+			skillId: "main",
+		});
+		const session = { getA2aBridge: () => bridge } as unknown as ToolSession;
+		await expect(
+			spawnSubagentViaExecutor(
+				session,
+				{ agent: "a2a:main", prompt: "run remotely" },
+				{
+					reserveId: async () => {
+						throw new Error("reserve must not run");
+					},
+					run: async () => {
+						throw new Error("run must not run");
+					},
+				},
+			),
+		).rejects.toThrow(/remote A2A agent and can only be spawned by the task tool/);
 	});
 });
 
