@@ -16,8 +16,96 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { hashAgentCall, WorkflowJournal, resolveWorkflowJournalPath } from "@oh-my-pi/pi-coding-agent/workflow/journal";
+import { BUILTIN_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/builtin-names";
+import { BUILTIN_TOOLS } from "@oh-my-pi/pi-coding-agent/tools";
 import { WorkflowTool, type WorkflowToolDetails } from "@oh-my-pi/pi-coding-agent/workflow/tool";
-import type { WorkflowAgentCaller } from "@oh-my-pi/pi-coding-agent/workflow/vm";
+import { assertNoModuleLoading, type WorkflowAgentCaller } from "@oh-my-pi/pi-coding-agent/workflow/vm";
+
+/**
+ * Independent snapshot of every global the workflow contract may expose.
+ * Deliberately duplicated from the implementation allowlist: if either list
+ * broadens without the other, the sweep test fails.
+ */
+const EXPECTED_GLOBAL_NAMES = new Set<string>([
+	"AggregateError",
+	"Array",
+	"ArrayBuffer",
+	"AsyncDisposableStack",
+	"Atomics",
+	"BigInt",
+	"BigInt64Array",
+	"BigUint64Array",
+	"Boolean",
+	"DataView",
+	"Date",
+	"DisposableStack",
+	"Error",
+	"EvalError",
+	"FinalizationRegistry",
+	"Float16Array",
+	"Float32Array",
+	"Float64Array",
+	"Function",
+	"Infinity",
+	"Int16Array",
+	"Int32Array",
+	"Int8Array",
+	"Intl",
+	"Iterator",
+	"JSON",
+	"Map",
+	"Math",
+	"NaN",
+	"Number",
+	"Object",
+	"Promise",
+	"Proxy",
+	"RangeError",
+	"ReferenceError",
+	"Reflect",
+	"RegExp",
+	"Set",
+	"ShadowRealm",
+	"SharedArrayBuffer",
+	"String",
+	"SuppressedError",
+	"Symbol",
+	"SyntaxError",
+	"Temporal",
+	"TypeError",
+	"URIError",
+	"Uint16Array",
+	"Uint32Array",
+	"Uint8Array",
+	"Uint8ClampedArray",
+	"WeakMap",
+	"WeakRef",
+	"WeakSet",
+	"WebAssembly",
+	"console",
+	"decodeURI",
+	"decodeURIComponent",
+	"encodeURI",
+	"encodeURIComponent",
+	"escape",
+	"eval",
+	"globalThis",
+	"isFinite",
+	"isNaN",
+	"parseFloat",
+	"parseInt",
+	"undefined",
+	"unescape",
+	"agent",
+	"parallel",
+	"pipeline",
+	"phase",
+	"log",
+	"clock",
+	"args",
+	"require",
+	"process",
+]);
 
 const tempDirs: string[] = [];
 const childProcesses: ReturnType<typeof Bun.spawn>[] = [];
@@ -156,6 +244,36 @@ describe("workflow journal", () => {
 		const run = journal.readRun("run-2");
 		expect(run?.calls).toHaveLength(1);
 		expect(run?.calls[0].result).toBe("ok");
+	});
+
+	it("starts a fresh line when appending after a truncated tail", () => {
+		const dir = tempDir();
+		const journalPath = path.join(dir, "journal.jsonl");
+		const journal = new WorkflowJournal(journalPath);
+		journal.append({
+			runId: "run-3",
+			index: 0,
+			promptHash: "abc",
+			agent: "default",
+			result: "ok",
+			tokens: 1,
+			status: "completed",
+		});
+		fs.appendFileSync(journalPath, '{"runId":"run-3","index":1,"promptHa');
+		journal.append({
+			runId: "run-3",
+			index: 2,
+			promptHash: "def",
+			agent: "default",
+			result: "second",
+			tokens: 2,
+			status: "completed",
+		});
+		const run = journal.readRun("run-3");
+		expect(run?.calls.map(call => [call.index, call.result])).toEqual([
+			[0, "ok"],
+			[2, "second"],
+		]);
 	});
 
 	it("is stable across key order and sensitive to agent/prompt changes", () => {
@@ -358,7 +476,7 @@ describe("workflow tool", () => {
 			tool.execute("call-1", {
 				script: `await parallel([1], async () => { await parallel([2], async () => {}); }); return "unreachable";`,
 			}),
-		).rejects.toThrow(/nested parallel\(\)\/pipeline\(\) is not supported/);
+		).rejects.toThrow(/only one parallel\(\)\/pipeline\(\) may be in flight/);
 	});
 
 	it("runs pipeline stages sequentially per item", async () => {
@@ -374,6 +492,56 @@ describe("workflow tool", () => {
 		expect(runner.calls).toEqual(["a1", "a2", "b1", "b2"]);
 		expect(textOf(result)).toContain("[b1]->[a1]");
 		expect(textOf(result)).toContain("[b2]->[a2]");
+	});
+
+	it("moves an item to the next pipeline stage while another is still in the first", async () => {
+		const dir = tempDir();
+		const a2Started = concurrencyGate(1);
+		const releaseA1 = concurrencyGate(1);
+		const b1Ran = concurrencyGate(1);
+		const releaseA2 = concurrencyGate(1);
+		const calls: string[] = [];
+		const runner: WorkflowAgentCaller = async prompt => {
+			calls.push(prompt);
+			if (prompt === "a1") await releaseA1.promise;
+			if (prompt === "a2") {
+				a2Started.release();
+				await releaseA2.promise;
+			}
+			if (prompt === "b1") b1Ran.release();
+			return { result: prompt, tokens: 1 };
+		};
+		const tool = new WorkflowTool(makeSession(dir), { runner });
+		const execution = tool.execute("call-1", {
+			script: `return await pipeline([1, 2], async (n) => (await agent("a" + n)).result, async (prev) => (await agent("b" + (prev === "a1" ? 1 : 2))).result);`,
+		});
+
+		await a2Started.promise;
+		releaseA1.release();
+		await b1Ran.promise;
+		expect(calls).toEqual(["a1", "a2", "b1"]);
+		releaseA2.release();
+		await execution;
+		expect(calls).toEqual(["a1", "a2", "b1", "b2"]);
+	});
+
+	it("streams phase and log updates", async () => {
+		const dir = tempDir();
+		const tool = new WorkflowTool(makeSession(dir), {
+			runner: recordingRunner(prompt => ({ result: prompt, tokens: 0 })),
+		});
+		const updates: string[] = [];
+		await tool.execute("call-1", { script: `phase("scan"); log("hello", 42); return 1;` }, undefined, partial => {
+			const first = partial.content[0];
+			if (first !== undefined && first.type === "text") updates.push(first.text);
+		});
+		expect(updates).toEqual(["workflow phase: scan", "workflow log: hello 42"]);
+	});
+
+	it("is registered as a builtin tool", async () => {
+		expect(BUILTIN_TOOL_NAMES).toContain("workflow");
+		const tool = await BUILTIN_TOOLS.workflow(makeSession(tempDir()));
+		expect(tool?.name).toBe("workflow");
 	});
 
 	it("returns a deterministic clock counter and exposes args", async () => {
@@ -398,7 +566,11 @@ describe("workflow determinism", () => {
 		{ name: "Math.random", script: `return Math.random();`, pattern: /Math\.random is disabled.*determinism/ },
 		{ name: "require", script: `return require("node:fs");`, pattern: /require is not available.*workflow scripts/ },
 		{ name: "process", script: `return process.env;`, pattern: /process is not available.*workflow scripts/ },
-		{ name: "static import", script: `import fs from "node:fs";\nreturn fs;`, pattern: /import/ },
+		{
+			name: "static import",
+			script: `import fs from "node:fs";\nreturn fs;`,
+			pattern: /workflow script syntax error:.*import/,
+		},
 		{
 			name: "dynamic import",
 			script: `return await import("node:fs");`,
@@ -421,6 +593,82 @@ describe("workflow determinism", () => {
 			await expect(tool.execute("call-1", { script: testCase.script })).rejects.toThrow(testCase.pattern);
 		});
 	}
+
+	it("bounds a synchronous infinite loop", async () => {
+		const dir = tempDir();
+		const tool = new WorkflowTool(makeSession(dir), {
+			runner: recordingRunner(prompt => ({ result: prompt, tokens: 0 })),
+			syncTimeoutMs: 50,
+		});
+		await expect(tool.execute("call-1", { script: `while (true) {}` })).rejects.toThrow(/synchronous time limit/);
+	});
+
+	it("cancels the wait on a non-settling script via the abort signal", async () => {
+		const dir = tempDir();
+		const started = concurrencyGate(1);
+		const controller = new AbortController();
+		const runner: WorkflowAgentCaller = async () => {
+			started.release();
+			return await new Promise<never>(() => {});
+		};
+		const tool = new WorkflowTool(makeSession(dir), { runner });
+		const execution = tool.execute("call-1", { script: `return await agent("hang");` }, controller.signal);
+		await started.promise;
+		controller.abort();
+		await expect(execution).rejects.toThrow(/Operation aborted/);
+		expect(journalLines(dir).map(line => line.status)).toEqual(["started"]);
+	});
+
+	it("exposes only the documented global allowlist", async () => {
+		const dir = tempDir();
+		const tool = new WorkflowTool(makeSession(dir), {
+			runner: recordingRunner(prompt => ({ result: prompt, tokens: 0 })),
+		});
+		const hostileNames = [
+			"Bun",
+			"fetch",
+			"setTimeout",
+			"setInterval",
+			"WebSocket",
+			"crypto",
+			"performance",
+			"navigator",
+		];
+		const result = await tool.execute("call-1", {
+			script: `
+				return {
+					names: Object.getOwnPropertyNames(globalThis).sort(),
+					hostile: ${JSON.stringify(hostileNames)}.map(name => [name, typeof globalThis[name]]),
+				};
+			`,
+		});
+		const details = result.details as { result: { names: string[]; hostile: Array<[string, string]> } };
+		const unexpected = details.result.names.filter(name => !EXPECTED_GLOBAL_NAMES.has(name));
+		expect(unexpected).toEqual([]);
+		for (const required of [
+			"Object",
+			"Promise",
+			"JSON",
+			"Math",
+			"Date",
+			"agent",
+			"parallel",
+			"pipeline",
+			"phase",
+			"log",
+			"clock",
+			"args",
+			"console",
+		]) {
+			expect(details.result.names).toContain(required);
+		}
+		expect(details.result.hostile).toEqual(hostileNames.map(name => [name, "undefined"]));
+	});
+
+	it("rejects module loading in the preflight itself", () => {
+		expect(() => assertNoModuleLoading(`import fs from "node:fs";`)).toThrow(/workflow script syntax error:.*import/);
+		expect(() => assertNoModuleLoading(`return import("node:fs");`)).toThrow(/dynamic import\(\) is not available/);
+	});
 
 	it("does not leak host bridge functions into the script scope", async () => {
 		const dir = tempDir();

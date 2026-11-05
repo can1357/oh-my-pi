@@ -58,6 +58,8 @@ export interface WorkflowToolOptions {
 	runner?: WorkflowAgentCaller;
 	/** Override the session-derived journal location. */
 	journalPath?: string;
+	/** Bound on the script's synchronous portion (default: 30 s). */
+	syncTimeoutMs?: number;
 }
 
 export const WORKFLOW_TOOL_NAME = "workflow";
@@ -109,7 +111,7 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 	readonly approval = "exec" as const;
 	readonly label = "Workflow";
 	readonly description =
-		"Run one deterministic JavaScript workflow over subagents. The script body is an async function with agent(prompt, opts?), parallel(items, fn, {concurrency}) (default 4), pipeline(items, ...stages), phase(name), log(...), clock(), and args. agent() spawns a task subagent and returns { result, tokens }. parallel/pipeline support one level of fan-out; nesting them is rejected. Determinism is enforced: require, import/import(), process, Date, Date.now, Math.random, eval, and new Function are rejected. Every call is journaled; pass resumeFrom to replay a completed prefix and execute only the divergence tail.";
+		"Run one deterministic JavaScript workflow over subagents. The script body is an async function with agent(prompt, opts?), parallel(items, fn, {concurrency}) (default 4), pipeline(items, ...stages), phase(name), log(...), clock(), and args. agent() spawns a task subagent and returns { result, tokens }. Only one parallel/pipeline fan-out may be in flight at a time; nesting or overlapping them is rejected. Determinism is enforced: require, import/import(), process, Date, Date.now, Math.random, eval, and new Function are rejected. Every call is journaled; pass resumeFrom to replay a completed prefix and execute only the divergence tail.";
 	readonly parameters = workflowSchema;
 	readonly strict = true;
 	readonly loadMode = "essential" as const;
@@ -131,7 +133,7 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 		_id: string,
 		params: WorkflowParams,
 		signal?: AbortSignal,
-		_onUpdate?: AgentToolUpdateCallback<WorkflowToolDetails>,
+		onUpdate?: AgentToolUpdateCallback<WorkflowToolDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<WorkflowToolDetails>> {
 		throwIfAborted(signal);
@@ -218,8 +220,14 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 				script: params.script,
 				args: params.args ?? "",
 				agent: journalRunner,
+				...(signal !== undefined ? { signal } : {}),
+				...(this.#options.syncTimeoutMs !== undefined ? { syncTimeoutMs: this.#options.syncTimeoutMs } : {}),
+				onLog: line => onUpdate?.({ content: [{ type: "text", text: `workflow log: ${line}` }] }),
+				onPhase: name => onUpdate?.({ content: [{ type: "text", text: `workflow phase: ${name}` }] }),
 			});
 		} catch (error) {
+			// An abort must surface as an abort, not as a script failure.
+			if (signal?.aborted) throwIfAborted(signal);
 			const reason = error instanceof WorkflowScriptError ? error.message : errorMessage(error);
 			throw new ToolError(`workflow ${runId} failed: ${reason}\njournal: ${journalPath}`);
 		}

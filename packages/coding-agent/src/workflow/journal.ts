@@ -110,7 +110,28 @@ export class WorkflowJournal {
 	/** Append one state transition and flush to the OS synchronously. */
 	append(line: WorkflowJournalLine): void {
 		fs.mkdirSync(path.dirname(this.path), { recursive: true });
+		// A kill can truncate the line being written. Without a separator the
+		// next append would concatenate onto it and lose that record too.
+		if (this.#endsWithoutNewline()) fs.appendFileSync(this.path, "\n", "utf8");
 		fs.appendFileSync(this.path, `${JSON.stringify(line)}\n`, "utf8");
+	}
+
+	#endsWithoutNewline(): boolean {
+		let stat: fs.Stats;
+		try {
+			stat = fs.statSync(this.path);
+		} catch {
+			return false;
+		}
+		if (stat.size === 0) return false;
+		const buffer = Buffer.alloc(1);
+		const fd = fs.openSync(this.path, "r");
+		try {
+			fs.readSync(fd, buffer, 0, 1, stat.size - 1);
+		} finally {
+			fs.closeSync(fd);
+		}
+		return buffer[0] !== 0x0a;
 	}
 
 	/** Fold every line for `runId` into the run's latest per-index call states. */

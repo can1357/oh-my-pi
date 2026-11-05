@@ -448,12 +448,21 @@ The context is the enforcement point, not a lint pass:
   syntax error, dynamic import is caught with `@babel/parser`);
 - `codeGeneration` is disabled, so `eval` and `new Function` throw `EvalError`;
 - `ShadowRealm` is removed because `ShadowRealm.evaluate()` would create an
-  unguarded realm.
+  unguarded realm;
+- after the prelude, every global outside a documented allowlist is deleted or
+  poisoned, so a runtime-injected host helper (`Bun`, `fetch`, timers,
+  `WebSocket`, `crypto`, `performance`, …) is never visible.
 
-`parallel`/`pipeline` support one level of fan-out; nesting them is rejected.
-Only primitives, JSON strings, and null-prototype frozen bridge functions
-cross the VM boundary, and the bridges are deleted from the global object
-before user code runs.
+Only one `parallel`/`pipeline` fan-out may be in flight at a time; nesting or
+overlapping them is rejected. Only primitives, JSON strings, and null-prototype
+frozen bridge functions cross the VM boundary, and the bridges are deleted from
+the global object before user code runs.
+
+The synchronous portion of a script (everything before its first `await`) is
+bounded by `runInContext`'s timeout (30 s). The tool's abort signal cancels the
+wait on an asynchronous script, but it cannot stop a tight synchronous loop —
+that is what the VM timeout is for — and asynchronous continuations already
+queued in the sandbox keep running after an abort.
 
 ### Journal and `resumeFrom`
 
@@ -467,7 +476,9 @@ Every `agent()` call appends synchronously to
 ```
 
 `status` is `started`, `completed`, `failed`, or `cached`; a killed run keeps
-its completed prefix, and a truncated final line is ignored on read.
+its completed prefix, and a truncated final line is ignored on read. If the
+last line was truncated mid-write, the next append starts on a fresh line so
+the new record is not concatenated onto the broken one.
 
 `resumeFrom: "<runId>"` matches the prior run by call index **and** prompt
 hash (prompt + agent + context). The matching completed/cached prefix is
@@ -484,9 +495,10 @@ parent resumes and asserts the first call is not re-executed):
 PI_CODING_AGENT_DIR=$HOME/.omp-fork bun test packages/coding-agent/test/workflow.test.ts
 ```
 
-The tool class is exported as `WorkflowTool` (`WorkflowTool.create(session)`);
-this wave does not add it to `BUILTIN_TOOL_NAMES`, so mounting is explicit and
-the default tool inventory is unchanged.
+The tool is registered as the `workflow` built-in
+(`BUILTIN_TOOLS.workflow` → `WorkflowTool.create`) with `loadMode: "essential"`,
+so ordinary sessions see it in the top-level schema. Docs:
+`docs/tools/workflow.md`.
 
 ## Rebase ritual
 

@@ -51,6 +51,10 @@ export interface WorkflowRunOptions {
 	agent: WorkflowAgentCaller;
 	onLog?: (line: string) => void;
 	onPhase?: (name: string) => void;
+	/** Cancels the await of the script's envelope (the sandbox itself cannot be interrupted asynchronously). */
+	signal?: AbortSignal;
+	/** Bound on the synchronous portion, i.e. until the script first awaits. */
+	syncTimeoutMs?: number;
 }
 
 export interface WorkflowRunResult {
@@ -68,8 +72,99 @@ export class WorkflowScriptError extends Error {
 	}
 }
 
+/** Bound on synchronous script execution; `runInContext` interrupts a tight loop. */
+export const DEFAULT_WORKFLOW_SYNC_TIMEOUT_MS = 30_000;
+
 const WRAP_HEAD = "(async () => {\n";
 const WRAP_TAIL = "\n})";
+
+/**
+ * Globals permitted to survive inside the workflow context. Everything else —
+ * including runtime-injected host helpers — is deleted or poisoned after the
+ * prelude. `Date`, `Math`, `ShadowRealm`, `Temporal`, `console`, `require`, and
+ * `process` in this list are the deterministic/throwing stubs installed by the
+ * prelude, never the host originals.
+ */
+export const WORKFLOW_GLOBAL_ALLOWLIST: readonly string[] = [
+	"AggregateError",
+	"Array",
+	"ArrayBuffer",
+	"AsyncDisposableStack",
+	"Atomics",
+	"BigInt",
+	"BigInt64Array",
+	"BigUint64Array",
+	"Boolean",
+	"DataView",
+	"Date",
+	"DisposableStack",
+	"Error",
+	"EvalError",
+	"FinalizationRegistry",
+	"Float16Array",
+	"Float32Array",
+	"Float64Array",
+	"Function",
+	"Infinity",
+	"Int16Array",
+	"Int32Array",
+	"Int8Array",
+	"Intl",
+	"Iterator",
+	"JSON",
+	"Map",
+	"Math",
+	"NaN",
+	"Number",
+	"Object",
+	"Promise",
+	"Proxy",
+	"RangeError",
+	"ReferenceError",
+	"Reflect",
+	"RegExp",
+	"Set",
+	"ShadowRealm",
+	"SharedArrayBuffer",
+	"String",
+	"SuppressedError",
+	"Symbol",
+	"SyntaxError",
+	"Temporal",
+	"TypeError",
+	"URIError",
+	"Uint16Array",
+	"Uint32Array",
+	"Uint8Array",
+	"Uint8ClampedArray",
+	"WeakMap",
+	"WeakRef",
+	"WeakSet",
+	"WebAssembly",
+	"console",
+	"decodeURI",
+	"decodeURIComponent",
+	"encodeURI",
+	"encodeURIComponent",
+	"escape",
+	"eval",
+	"globalThis",
+	"isFinite",
+	"isNaN",
+	"parseFloat",
+	"parseInt",
+	"undefined",
+	"unescape",
+	"agent",
+	"parallel",
+	"pipeline",
+	"phase",
+	"log",
+	"clock",
+	"args",
+	"require",
+	"process",
+];
 
 /**
  * Reject module loading before the VM compiles anything. Static `import` is a
@@ -78,7 +173,7 @@ const WRAP_TAIL = "\n})";
  * otherwise surface a host-realm TypeError whose constructor chain reaches the
  * host `Function`.
  */
-function assertNoModuleLoading(script: string): void {
+export function assertNoModuleLoading(script: string): void {
 	let ast: unknown;
 	try {
 		ast = parse(`${WRAP_HEAD}${script}${WRAP_TAIL}`, { sourceType: "script" });
@@ -195,7 +290,7 @@ const WORKFLOW_PRELUDE = String.raw`
 	let poolDepth = 0;
 	const enterPool = () => {
 		if (poolDepth > 0) {
-			throw new Error("nested parallel()/pipeline() is not supported: use one level of fan-out per workflow");
+			throw new Error("only one parallel()/pipeline() may be in flight at a time; await the current fan-out before starting another");
 		}
 		poolDepth += 1;
 	};
@@ -363,6 +458,57 @@ function errorText(error: unknown): string {
 	return String(error);
 }
 
+/** Reject the wait on abort; the script's own asynchronous continuations cannot be cancelled. */
+function awaitWithSignal<T>(pending: Promise<T>, signal?: AbortSignal): Promise<T> {
+	if (signal === undefined) return pending;
+	if (signal.aborted) return Promise.reject(new Error("workflow run aborted"));
+	const { promise, resolve, reject } = Promise.withResolvers<T>();
+	const onAbort = (): void => reject(new Error("workflow run aborted"));
+	signal.addEventListener("abort", onAbort, { once: true });
+	pending.then(
+		value => {
+			signal.removeEventListener("abort", onAbort);
+			resolve(value);
+		},
+		error => {
+			signal.removeEventListener("abort", onAbort);
+			reject(error);
+		},
+	);
+	return promise;
+}
+
+/**
+ * Deny-by-default global sweep. A runtime can inject a host helper into a new
+ * `node:vm` context (Bun exposed `console`/`ShadowRealm` this way); the
+ * allowlist names every global the workflow contract needs, and anything else
+ * is removed before user code can see it.
+ */
+const WORKFLOW_HARDEN =
+	String.raw`(() => {
+	"use strict";
+	const allowed = new Set(` +
+	JSON.stringify(WORKFLOW_GLOBAL_ALLOWLIST) +
+	String.raw`);
+	for (const name of Object.getOwnPropertyNames(globalThis)) {
+		if (allowed.has(name)) continue;
+		let removed = false;
+		try { removed = delete globalThis[name]; } catch {}
+		if (removed) continue;
+		try {
+			Object.defineProperty(globalThis, name, {
+				configurable: false,
+				enumerable: false,
+				get: function forbiddenGlobal() {
+					throw new ReferenceError(name + " is not available in workflow scripts");
+				},
+			});
+		} catch {
+			try { globalThis[name] = undefined; } catch {}
+		}
+	}
+})();`;
+
 function isEnvelope(value: unknown): value is { ok: boolean; value?: unknown; error?: string; stack?: string } {
 	return isRecord(value) && typeof value.ok === "boolean";
 }
@@ -452,18 +598,32 @@ export async function runWorkflowScript(options: WorkflowRunOptions): Promise<Wo
 
 	try {
 		new vm.Script(WORKFLOW_PRELUDE, { filename: "workflow-prelude.js" }).runInContext(context);
+		new vm.Script(WORKFLOW_HARDEN, { filename: "workflow-harden.js" }).runInContext(context);
 	} catch (error) {
 		throw new WorkflowScriptError(`workflow sandbox prelude failed: ${errorText(error)}`, { cause: error });
 	}
 
+	const syncTimeoutMs = options.syncTimeoutMs ?? DEFAULT_WORKFLOW_SYNC_TIMEOUT_MS;
 	let pending: unknown;
 	try {
-		pending = new vm.Script(scriptEnvelope(options.script), { filename: "workflow-script.js" }).runInContext(context);
+		pending = new vm.Script(scriptEnvelope(options.script), { filename: "workflow-script.js" }).runInContext(
+			context,
+			{
+				timeout: syncTimeoutMs,
+			},
+		);
 	} catch (error) {
-		throw new WorkflowScriptError(`workflow script syntax error: ${errorText(error)}`, { cause: error });
+		const detail = errorText(error);
+		if (/timed out/i.test(detail)) {
+			throw new WorkflowScriptError(
+				`workflow script exceeded its ${syncTimeoutMs}ms synchronous time limit; move long-running work into agent() calls`,
+				{ cause: error },
+			);
+		}
+		throw new WorkflowScriptError(`workflow script syntax error: ${detail}`, { cause: error });
 	}
 
-	const envelopeJson = await Promise.resolve(pending);
+	const envelopeJson = await awaitWithSignal(Promise.resolve(pending), options.signal);
 	if (typeof envelopeJson !== "string") {
 		throw new WorkflowScriptError("workflow script returned an unexpected envelope");
 	}
