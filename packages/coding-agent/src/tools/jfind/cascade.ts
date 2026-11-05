@@ -387,7 +387,7 @@ class Cascade {
 		}
 		onProgress?.(`verifying ${survivors.length} passages in ${chosen.size} files`);
 		const results = new Map<number, { score: number; heat: HeatRange[]; lines: number; bytes: number }>();
-		let timeout: CascadeResult["timeout"];
+		let timeout: FindTimeout | undefined;
 		const verification = this.#dispatch(verifyJobs, (job, outcome) => {
 			if (!outcome.ok) {
 				this.#fail("verification", outcome.error);

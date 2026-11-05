@@ -9,7 +9,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { InternalUrlFilesystem } from "@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem";
 import { ChainJudge } from "@oh-my-pi/pi-coding-agent/judgment";
-import { FindTool } from "@oh-my-pi/pi-coding-agent/tools/jfind";
+import { FIND_TIMEOUT_MS, FindTool } from "@oh-my-pi/pi-coding-agent/tools/jfind";
 import {
 	type SpotlightClient,
 	SpotlightError,
@@ -495,7 +495,9 @@ describe("jfind cascade", () => {
 	function stubDeadline(): AbortController {
 		const deadline = new AbortController();
 		const realTimeout = AbortSignal.timeout.bind(AbortSignal);
-		vi.spyOn(AbortSignal, "timeout").mockImplementation(ms => (ms === 20_000 ? deadline.signal : realTimeout(ms)));
+		vi.spyOn(AbortSignal, "timeout").mockImplementation(ms =>
+			ms === FIND_TIMEOUT_MS ? deadline.signal : realTimeout(ms),
+		);
 		return deadline;
 	}
 
@@ -566,9 +568,9 @@ describe("jfind cascade", () => {
 				throw new Error("request aborted");
 			});
 			const error = await rejectionOf(findTool(dir).execute("x", { query: "token refresh", grep_keywords: [] }));
-			expect(error).toBeInstanceOf(ToolError);
-			expect((error as ToolError).message).toContain('at "filename ranking 0/1"');
-			expect((error as ToolError).message).toContain("Narrow `path`");
+			if (!(error instanceof ToolError)) throw error;
+			expect(error.message).toContain('at "filename ranking 0/1"');
+			expect(error.message).toContain("Narrow `path`");
 		} finally {
 			await removeWithRetries(dir);
 		}
