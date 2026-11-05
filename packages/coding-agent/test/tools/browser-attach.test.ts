@@ -645,7 +645,8 @@ describe("pickElectronTarget", () => {
 			try {
 				await waitForCdp(`http://127.0.0.1:${port}`, 15_000);
 				const app = { cdp_url: `http://127.0.0.1:${port}` };
-				const viewport = { width: 390, height: 844, scale: 1 };
+				// No `scale`: the window keeps its own device scale (2 here).
+				const viewport = { width: 390, height: 844 };
 				// An open that fails after adopting the page (a file where the downloads folder goes) leaves no size
 				// behind. No `url` after it: Chrome drops a leftover size when the page navigates.
 				const notAFolder = path.join(root, "not-a-folder");
@@ -674,15 +675,20 @@ describe("pickElectronTarget", () => {
 				expect(observed).toEqual(window);
 				expect(opened.details).toMatchObject({ viewport: window });
 				await invoke({ action: "close", name });
-				const sized = await invoke({ action: "open", name, app, viewport });
-				const asked = { width: 390, height: 844, deviceScaleFactor: 1 };
-				expect(sized.details).toMatchObject({ viewport: asked });
-				const page = await invoke({
+				const pageSize = {
 					action: "run",
 					name,
 					code: "return await tab.evaluate(() => ({ width: innerWidth, height: innerHeight, deviceScaleFactor: devicePixelRatio }));",
+				};
+				const sized = await invoke({ action: "open", name, app, viewport });
+				const asked = { width: 390, height: 844, deviceScaleFactor: 2 };
+				expect(sized.details).toMatchObject({ viewport: asked });
+				expect((await invoke(pageSize)).details).toMatchObject({ value: asked });
+				// Reopening the live tab resizes it the same way.
+				await invoke({ action: "open", name, app, viewport: { width: 400, height: 800 } });
+				expect((await invoke(pageSize)).details).toMatchObject({
+					value: { width: 400, height: 800, deviceScaleFactor: 2 },
 				});
-				expect(page.details).toMatchObject({ value: asked });
 			} finally {
 				await invoke({ action: "close", name }).catch(() => {});
 				child.kill();
