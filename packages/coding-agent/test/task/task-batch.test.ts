@@ -1314,11 +1314,14 @@ describe("batch model placement", () => {
 	// The boundary the four value-tests above are drawn against, pinned from the other side.
 	//
 	// `guardBatchAgent` refuses inside the wire-schema narrow, and this asserts against the schema
-	// rather than the tool for a measured reason: the tool is `lenientArgValidation`, so a narrow
-	// rejection falls back to the raw arguments and `execute` proceeds anyway. A test driven through
-	// `tool.execute` is therefore green whichever way the narrow tests presence, which is how round 6
-	// found that restoring `Object.hasOwn` here left every committed test passing. The schema is the
-	// only place the difference is observable.
+	// rather than the tool because neither route through the tool shows the narrow's decision:
+	// `tool.execute` bypasses schema validation altogether, and shared validation repairs the input
+	// by dropping an own key holding `undefined` before the narrow's verdict can matter — measured,
+	// and it succeeds that way even with `lenientArgValidation` off, so this is not the lenient
+	// fallback to raw arguments an earlier version of this comment claimed. A test driven through
+	// the tool is therefore green whichever way the narrow tests presence, which is how round 6 found
+	// that restoring `Object.hasOwn` here left every committed test passing. The schema is the only
+	// place the difference is observable.
 	it("admits a batch call whose top-level agent is an own key holding undefined, and refuses a real one", () => {
 		const schema = getTaskSchema({ isolationEnabled: false, batchEnabled: true });
 		const item = { task: "Do A.", solutionSpace: "one fixed answer", agent: "task" };
