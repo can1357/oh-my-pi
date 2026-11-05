@@ -72,7 +72,13 @@ export class OpenAIHttpError extends ProviderHttpError {
 				return { detail: error, code: undefined };
 			}
 			if (typeof envelope.message === "string" && envelope.message.length > 0) {
-				return { detail: envelope.message, code: undefined };
+				// A status in `code` loses to a real code; when it is all the body carries, it is
+				// still the only thing worth reporting.
+				const rootCode = Reflect.get(bodyJson, "code");
+				return {
+					detail: envelope.message,
+					code: typeof rootCode === "string" && rootCode.length > 0 ? rootCode : undefined,
+				};
 			}
 		}
 		return { detail: bodyText, code: undefined };
@@ -96,7 +102,7 @@ const HTTP_STATUS_CODE_PATTERN = /^\d{3}$/;
  * a string of exactly three digits. Every reader of this envelope and every level of it asks this
  * one function, because a `"403"` one level up that counts as a code hides the real code beneath.
  */
-function machineCode(value: unknown): string | undefined {
+export function machineCode(value: unknown): string | undefined {
 	return typeof value === "string" && value.length > 0 && !HTTP_STATUS_CODE_PATTERN.test(value) ? value : undefined;
 }
 

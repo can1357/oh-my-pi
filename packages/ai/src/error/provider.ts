@@ -100,8 +100,13 @@ export function contentPolicyRefusalDetails(error: unknown): RefusalStopDetails 
 			}
 		} else {
 			const code: unknown = Reflect.get(link, "code");
-			if (typeof code === "string" && isContentPolicyRefusal(code, link.message)) {
-				return { type: "refusal", category: code, explanation: link.message };
+			// The provider's own sentence, not a label the transport put in its place: a Codex
+			// rate-limit message replacing an eligibility denial's wording would read as a content
+			// refusal and stop rotating to the sibling account that can serve it.
+			const own: unknown = Reflect.get(link, "providerMessage");
+			const message = typeof own === "string" && own.length > 0 ? own : link.message;
+			if (typeof code === "string" && isContentPolicyRefusal(code, message)) {
+				return { type: "refusal", category: code, explanation: message };
 			}
 		}
 		link = link.cause;

@@ -4493,7 +4493,10 @@ export function throwOpenAIResponsesEventError(
  * would send the turn to the generic transient classifier.
  */
 function throwOpenAIResponsesRefusal(error: Record<string, unknown>, provider: string): void {
-	const code = typeof error.code === "string" ? error.code : typeof error.type === "string" ? error.type : undefined;
+	const code =
+		AIError.machineCode(error.code) ??
+		AIError.machineCode(error.type) ??
+		(typeof error.code === "string" ? error.code : typeof error.type === "string" ? error.type : undefined);
 	const message = typeof error.message === "string" ? error.message : undefined;
 	if (code !== undefined && AIError.isContentPolicyRefusal(code, message)) {
 		throw new AIError.ProviderRefusalError(code, message || "no message", { provider });

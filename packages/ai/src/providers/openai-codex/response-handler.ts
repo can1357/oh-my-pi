@@ -1,5 +1,5 @@
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
-import { ProviderHttpError, responseErrorEnvelope } from "../../error";
+import { machineCode, ProviderHttpError, responseErrorEnvelope } from "../../error";
 
 export type CodexRateLimit = {
 	used_percent?: number;
@@ -25,11 +25,18 @@ export type CodexErrorInfo = {
 /** Non-2xx response from the Codex backend, with the parsed body retained. */
 export class CodexApiError extends ProviderHttpError {
 	readonly info: CodexErrorInfo;
+	/**
+	 * The body's own sentence, kept beside the friendly one a reader sees. A classifier must judge
+	 * the provider's wording: a rate-limit label standing in for an eligibility denial reads as a
+	 * content refusal, and an eligibility denial is exactly what a sibling account can serve.
+	 */
+	readonly providerMessage: string;
 
 	constructor(info: CodexErrorInfo, headers?: Headers) {
 		super(info.friendlyMessage || info.message, info.status, { headers, code: info.code });
 		this.name = "CodexApiError";
 		this.info = info;
+		this.providerMessage = info.message;
 	}
 
 	static async fromResponse(response: Response): Promise<CodexApiError> {
@@ -74,11 +81,13 @@ export async function parseCodexError(response: Response): Promise<CodexErrorInf
 		const rawCode: unknown = err.code;
 		const rawType: unknown = err.type;
 		const code =
-			typeof rawCode === "string"
+			machineCode(rawCode) ??
+			machineCode(rawType) ??
+			(typeof rawCode === "string"
 				? rawCode
 				: typeof rawType === "string"
 					? rawType
-					: String(rawCode ?? rawType ?? "");
+					: String(rawCode ?? rawType ?? ""));
 		errorCode = code || undefined;
 		const errResetsAt = typeof err.resets_at === "number" ? err.resets_at : undefined;
 		const minutesUntil = (resetsAt: number | undefined): number | undefined =>

@@ -300,6 +300,10 @@ describe("OpenAIHttpError.parseEnvelope — where the error actually is", () => 
 		});
 	});
 
+	it("reports a lone status at the body root, where it is the only code there is", () => {
+		expect(body({ code: "403", message: "Forbidden" })).toEqual({ detail: "Forbidden", code: "403" });
+	});
+
 	it("still reports a lone status code when the body carries nothing else", () => {
 		// The rule demotes a status BELOW a real code; it does not throw the status away when it
 		// is all the host sent.
@@ -353,5 +357,37 @@ describe("a refusal code in free text, and only where a code can appear", () => 
 		"upstream timed out while we were discussing reasoning_extraction with support",
 	])("does not classify prose that merely mentions the code: %s", message => {
 		expect(blocked(message)).toBe(false);
+	});
+});
+
+describe("contentPolicyRefusalDetails — whose sentence the classifier judges", () => {
+	class TransportLabelledError extends Error {
+		readonly code = "cyber_policy";
+		readonly providerMessage: string;
+
+		constructor(displayMessage: string, providerMessage: string) {
+			super(displayMessage);
+			this.providerMessage = providerMessage;
+		}
+	}
+
+	it("keeps an account-eligibility denial rotatable when the transport relabelled it", () => {
+		// A Codex 429 reports "ChatGPT rate limit exceeded." in place of the body's own sentence.
+		// Judging the label turns an enrolment denial — which a sibling account can serve — into a
+		// content refusal, and the rotation that would have answered it never happens.
+		const error = new TransportLabelledError(
+			"ChatGPT rate limit exceeded.",
+			"Join Trusted Access for Cyber to continue.",
+		);
+		expect(AIError.contentPolicyRefusalDetails(error)).toBeUndefined();
+	});
+
+	it("reports the provider's own explanation for a real refusal", () => {
+		const error = new TransportLabelledError("ChatGPT rate limit exceeded.", "Provider declined the request");
+		expect(AIError.contentPolicyRefusalDetails(error)).toEqual({
+			type: "refusal",
+			category: "cyber_policy",
+			explanation: "Provider declined the request",
+		});
 	});
 });

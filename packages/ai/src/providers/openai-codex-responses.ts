@@ -4694,7 +4694,13 @@ function createCodexRefusalError(
 	const event = codexFailureEventSchema(rawEvent);
 	if (event instanceof type.errors) return undefined;
 	const nestedError = event.error ?? event.response?.error;
-	const code = nestedError?.code ?? nestedError?.type ?? event.code;
+	const code =
+		AIError.machineCode(nestedError?.code) ??
+		AIError.machineCode(nestedError?.type) ??
+		AIError.machineCode(event.code) ??
+		nestedError?.code ??
+		nestedError?.type ??
+		event.code;
 	const message = nestedError?.message ?? event.message ?? event.response?.message;
 	if (code === undefined || !AIError.isContentPolicyRefusal(code, message)) return undefined;
 	return new AIError.ProviderRefusalError(code, message || "no message", { provider });
