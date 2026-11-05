@@ -3053,7 +3053,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		cfgModelRoles.listen(this, () => this.#advisors.reconcileModelRoles());
 		// Governor waits this session's own requests start are announced here; in a worker the
 		// subscription is the local fan-out of the one the worker made with the main thread.
-		this.addDisposer(this.#modelRegistry.authStorage.governor.onEvent(event => this.#handleGovernorEvent(event)));
+		const unsubscribeGovernor = this.#modelRegistry.authStorage.governor?.onEvent(event =>
+			this.#handleGovernorEvent(event),
+		);
+		if (unsubscribeGovernor) this.addDisposer(unsubscribeGovernor);
 		// Re-derive the active model's effective context window when the
 		// extended-context setting flips at runtime, or a per-model compaction
 		// point moves past (or back inside) a standard window or is switched on/off: the registry
