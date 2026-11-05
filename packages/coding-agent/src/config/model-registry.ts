@@ -4359,7 +4359,7 @@ export interface ProviderConfigInput {
 		baseUrl?: string;
 		reasoning: boolean;
 		thinking?: ThinkingConfig;
-		input: ("text" | "image")[];
+		input: Model<Api>["input"];
 		supportsTools?: boolean;
 		cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 		contextWindow: number;
