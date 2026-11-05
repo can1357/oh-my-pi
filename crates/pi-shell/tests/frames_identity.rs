@@ -91,3 +91,43 @@ fn foreign_engine_identity_is_refused_before_any_record_access() {
 fn dropping_frames_cannot_read_a_foreign_ir_record_schema() {
 	refuses_foreign_records(RestoreOpts { drop_frames: true });
 }
+
+fn refuses_foreign_magic(opts: RestoreOpts) {
+	let mut inner = MemStore::from_bytes(include_bytes!("fixtures/frames-v29.store")).unwrap();
+	let mut frames = inner.get_blob(BlobSlot::Frames).unwrap().unwrap();
+	assert_eq!(&frames[..5], b"OBF1\x0f", "the fixture has the current IR version");
+	frames[..4].copy_from_slice(b"BAD!");
+	inner.put_blob(BlobSlot::Frames, &frames).unwrap();
+	let before = inner.to_bytes();
+	let mut store = ObservedStore { inner, reads: 0, writes: 0, blob_reads: 0, blob_writes: 0 };
+	let engine = Engine::new(EngineConfig::default());
+	let mut host = FakeHost::new();
+	let result = Shell::restore(&engine, &mut Cx { host: &mut host, store: &mut store }, opts);
+	match &result {
+		Ok((_, report)) => println!(
+			"restore=Ok({report:?}); record_reads={} record_writes={} blob_reads={} blob_writes={}",
+			store.reads, store.writes, store.blob_reads, store.blob_writes
+		),
+		Err(error) => println!(
+			"restore={error:?}; display={error}; record_reads={} record_writes={} blob_reads={} \
+			 blob_writes={}",
+			store.reads, store.writes, store.blob_reads, store.blob_writes
+		),
+	}
+	assert!(matches!(result, Err(RestoreError::Incompatible { why: Incompatibility::Magic })));
+	assert_eq!(store.reads, 0, "no foreign record can reach an engine consumer");
+	assert_eq!(store.writes, 0, "refusal does not recover or modify root state");
+	assert_eq!(store.blob_reads, 1, "the identity check reads only the Frames blob");
+	assert_eq!(store.blob_writes, 0, "refusal does not consume the Frames blob");
+	assert_eq!(store.inner.to_bytes(), before);
+}
+
+#[test]
+fn foreign_magic_is_refused_before_any_record_access() {
+	refuses_foreign_magic(RestoreOpts::default());
+}
+
+#[test]
+fn dropping_frames_cannot_bypass_foreign_magic() {
+	refuses_foreign_magic(RestoreOpts { drop_frames: true });
+}
