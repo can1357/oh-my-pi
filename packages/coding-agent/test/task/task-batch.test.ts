@@ -14,6 +14,8 @@
  *    runtime for internal callers.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as os from "node:os";
+import * as path from "node:path";
 import { Agent, type AgentTool, validateAgentToolArguments } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
@@ -1015,6 +1017,55 @@ describe("batch model placement", () => {
 		const result = await tool.execute("task-blank-field", args as TaskParams);
 		expect(result.isError).toBeFalsy();
 		expect(run).toHaveBeenCalledTimes(1);
+	});
+
+	// The fifth field, and the mirror image of the blank `taskFile` above: with `task.file` on, a model
+	// that fills every property and means to use `taskFile` sends `task: ""` beside it, and the
+	// `task`/`taskFile` choice saw both as "provided" and refused the whole call.
+	it("dispatches an item whose blank `task` sits beside a real `taskFile`", async () => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Pong"));
+		const taskFile = path.join(os.tmpdir(), "omp-task-blank-task-probe", "work.md");
+		await Bun.write(taskFile, "Reply with the single word PONG.\n");
+		const tool = await TaskTool.create(
+			createSession({
+				settings: { "task.batch": true, "async.enabled": false, "task.perCallModel": "off", "task.file": true },
+			}),
+		);
+		const args = validateAgentToolArguments(tool as unknown as AgentTool, {
+			type: "toolCall",
+			id: "task-blank-task",
+			name: tool.name,
+			arguments: {
+				context: "Shared context",
+				tasks: [{ task: "", taskFile, solutionSpace: "one fixed answer", name: "Pong", agent: "task" }],
+			},
+		});
+		const result = await tool.execute("task-blank-task", args as TaskParams);
+		expect(result.isError).toBeFalsy();
+		expect(run).toHaveBeenCalledTimes(1);
+	});
+
+	// A blank `task` with no task file names no work at all. Dropping it unconditionally would turn
+	// this into the "exactly one of" message, which tells the caller to choose between two fields it
+	// already chose between. The specific refusal must survive.
+	it.each([
+		["with task.file on", { "task.file": true }],
+		["with task.file off", {}],
+	] as const)("still refuses a blank `task` that has no task file (%s)", async (_label, extra) => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": true, "async.enabled": false, ...extra } }),
+		);
+		const result = await tool.execute("task-blank-task-alone", {
+			context: "Shared context",
+			tasks: [{ task: "", solutionSpace: "one fixed answer", name: "Pong", agent: "task" }],
+		} as never);
+		expect(result.isError).toBe(true);
+		expect(getFirstText(result)).toMatch(/non-empty|missing `task`/i);
+		expect(getFirstText(result)).not.toMatch(/exactly one of/i);
+		expect(run).not.toHaveBeenCalled();
 	});
 
 	// Only a string counts as a placeholder. An empty ARRAY must still be refused: the speculative

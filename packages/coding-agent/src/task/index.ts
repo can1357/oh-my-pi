@@ -501,6 +501,11 @@ function isBlankString(value: unknown): boolean {
  * per-call gate, the seance checks and the `task`/`taskFile` choice would otherwise refuse a call
  * that names nothing at all.
  *
+ * `task` is the fifth, and the only conditional one: it is dropped only beside a real `taskFile`,
+ * which is the mirror image of the blank `taskFile` beside a real `task`. A blank `task` with no
+ * task file names no work at all, and must keep reporting exactly that instead of degrading into
+ * the "exactly one of" message.
+ *
  * Only a string counts. An empty array is left alone deliberately: shared validation turns an
  * array into its string form, so `[]` arrives at dispatch as `"[]"` — a real selector the gate
  * must still refuse — while the speculative launcher sees the raw `[]`, and dropping it here made
@@ -508,7 +513,11 @@ function isBlankString(value: unknown): boolean {
  */
 function withoutBlankFields<T extends TaskItem | TaskParams>(item: T): T {
 	let out = item;
-	for (const key of BLANKABLE_KEYS) {
+	const keys =
+		isBlankString(item.task) && typeof item.taskFile === "string" && item.taskFile.trim() !== ""
+			? [...BLANKABLE_KEYS, "task" as const]
+			: BLANKABLE_KEYS;
+	for (const key of keys) {
 		if (!isBlankString(item[key])) continue;
 		if (out === item) out = { ...item };
 		delete out[key];
@@ -519,11 +528,11 @@ function withoutBlankFields<T extends TaskItem | TaskParams>(item: T): T {
 /** Whether a call, or any of its items, carries one of those placeholders. */
 function carriesBlankField(params: unknown): boolean {
 	if (!isRecord(params)) return false;
-	if (BLANKABLE_KEYS.some(key => isBlankString(params[key]))) return true;
+	const blank = (value: Record<string, unknown>): boolean =>
+		BLANKABLE_KEYS.some(key => isBlankString(value[key])) || isBlankString(value.task);
+	if (blank(params)) return true;
 	const tasks: unknown = params.tasks;
-	return (
-		Array.isArray(tasks) && tasks.some(task => isRecord(task) && BLANKABLE_KEYS.some(key => isBlankString(task[key])))
-	);
+	return Array.isArray(tasks) && tasks.some(task => isRecord(task) && blank(task));
 }
 
 /**
@@ -767,7 +776,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		if (!isRecord(args)) return undefined;
 		const items = Array.isArray(args.tasks) ? args.tasks : [args];
 		return items.flatMap(item =>
-			isRecord(item) && typeof item.taskFile === "string" ? (taskFilePath(this.session, item.taskFile) ?? []) : [],
+			// A blank `taskFile` is filler the dispatch path drops; scoping an approval to it would
+			// restrict the grant to a path the run never reads.
+			isRecord(item) && typeof item.taskFile === "string" && item.taskFile.trim()
+				? (taskFilePath(this.session, item.taskFile) ?? [])
+				: [],
 		);
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
@@ -782,7 +795,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		if (typeof params.model === "string" && params.model.trim()) {
 			lines.push(`Model: ${truncateForPrompt(params.model)}`);
 		}
-		if (typeof params.task === "string") {
+		if (typeof params.task === "string" && params.task.trim()) {
 			lines.push(`Task:\n${truncateForPrompt(params.task)}`);
 		}
 		if (typeof params.taskFile === "string" && params.taskFile.trim()) {
@@ -815,7 +828,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					lines.push(`Name: ${truncateForPrompt(firstTask.name)}`);
 				}
 				lines.push(`Agent: ${truncateForPrompt(effectiveAgent(firstTask))}`);
-				if ("task" in firstTask && typeof firstTask.task === "string") {
+				if ("task" in firstTask && typeof firstTask.task === "string" && firstTask.task.trim()) {
 					lines.push(`Task:\n${truncateForPrompt(firstTask.task)}`);
 				}
 			}
