@@ -33,6 +33,8 @@ pub(crate) struct SourceUnit<'a> {
 	pub syntax:     Option<&'a UnitSyntax>,
 	pub projection: u32,
 	pub nodes:      &'a [trace::Node],
+	/// See [`trace::Unit::callout`].
+	pub callout:    bool,
 }
 #[derive(Debug)]
 pub(crate) struct Observation<'a> {

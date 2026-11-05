@@ -45,6 +45,29 @@ fn present(trace: &RunTrace, options: &Options) -> Value {
 	serde_json::from_str(&trace.presentation_json(options).unwrap()).unwrap()
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn callout_scripts_are_drawn_by_their_command_but_eval_code_gets_a_frame() {
+	let frames = |p: &Value| {
+		p["rows"]
+			.as_array()
+			.unwrap()
+			.iter()
+			.filter(|row| row["id"].as_str().is_some_and(|id| id.starts_with("frame-")))
+			.count()
+	};
+	let shell = Shell::new(None);
+	// `timeout` and `xargs` run their operands through scripts of their own.
+	let trace = run(&shell, "timeout 5 true; echo a | xargs -n1 true").await;
+	let live = present(&trace, &Options::default());
+	assert_eq!(frames(&live), 0, "{live}");
+	let stored = StoredVisualization::from_snapshot_json(&trace.snapshot_json()).unwrap();
+	let restored: Value =
+		serde_json::from_str(&stored.presentation_json(&Options::default()).unwrap()).unwrap();
+	assert_eq!(frames(&restored), 0, "{restored}");
+
+	let trace = run(&shell, "x=true; eval \"$x\"").await;
+	assert_eq!(frames(&present(&trace, &Options::default())), 1);
+}
 #[test]
 fn legacy_boundary_includes_heredoc_without_parsing_unannounced_future_syntax() {
 	use crate::bash::{

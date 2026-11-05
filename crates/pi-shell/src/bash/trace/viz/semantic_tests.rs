@@ -101,6 +101,7 @@ impl VizSource for Fixture {
 			syntax:     Some(&unit.syntax),
 			projection: 0,
 			nodes:      &unit.nodes,
+			callout:    false,
 		})
 	}
 

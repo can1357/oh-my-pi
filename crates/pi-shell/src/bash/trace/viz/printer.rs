@@ -227,12 +227,14 @@ pub fn render(source: &impl VizSource, runtime: &Runtime<'_>, options: &Options)
 			children: HashSet::new(),
 		};
 		p.root_units();
-		// Dynamic units with no proven outer origin remain explicitly unlocated.
+		// Dynamic units with no proven outer origin remain explicitly
+		// unlocated; a callout's script is drawn by its calling command.
 		for index in 0..source.unit_count() {
 			let Some(unit) = source.unit(index) else {
 				continue;
 			};
 			if unit.at.is_some()
+				|| unit.callout
 				|| p.children.contains(&unit.index)
 				|| unit.syntax.and_then(|s| s.parent.as_ref()).is_some()
 			{
@@ -248,7 +250,7 @@ pub fn render(source: &impl VizSource, runtime: &Runtime<'_>, options: &Options)
 					origin:   None,
 					analysis: &analysis,
 				};
-				p.frame(unit.index, 0, "dynamic shell source · original location unavailable", None);
+				p.frame(unit.index, 0, "built at runtime · not in the command text", None);
 				p.tree(&syntax.tree, &context, 1);
 			}
 		}
