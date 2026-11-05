@@ -3,7 +3,6 @@ import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
-import { isMainThread } from "node:worker_threads";
 import packageJson from "../package.json" with { type: "json" };
 import { embeddedAddon } from "./embedded-addon.js";
 import { bindingsHaveReleaseIdentity, bindingsReleaseVersion, containsVersionStamp } from "./version-sentinel.js";
@@ -780,8 +779,38 @@ export function staleWorkspaceAddonNotice(addon) {
 	);
 }
 
-/** Whether this process has already written the mismatched-addon notice. */
+/**
+ * Whether the copy of this module running on the current thread has already
+ * written the mismatched-addon notice. One per loaded copy, which is one per
+ * main thread in every shape this package ships; the write itself is confined
+ * to the main thread by {@link onMainThread}.
+ */
 const staleNoticeState = { reported: false };
+
+/** Memoized answer from {@link onMainThread}; `undefined` until first asked. */
+let mainThreadAnswer;
+
+/**
+ * True on a process's main thread, false inside a worker thread.
+ *
+ * Resolved through `createRequire` on first use rather than imported at module
+ * scope: `packages/coding-agent/src/cli.ts` keeps `node:worker_threads` out of
+ * ordinary startup on purpose, and this module is reached statically from
+ * `sqlite-locks` on launches that never load an addon. Asking only when a
+ * mismatch has already been found keeps that boundary. A runtime without the
+ * builtin answers "main thread", which is the safe side: the notice prints.
+ * @returns {boolean}
+ */
+function onMainThread() {
+	if (mainThreadAnswer === undefined) {
+		try {
+			mainThreadAnswer = createRequire(import.meta.url)("node:worker_threads").isMainThread !== false;
+		} catch {
+			mainThreadAnswer = true;
+		}
+	}
+	return mainThreadAnswer;
+}
 
 /**
  * Write {@link staleWorkspaceAddonNotice} once, from the main thread, when a
@@ -793,7 +822,9 @@ const staleNoticeState = { reported: false };
  * long after interactive mode owns the terminal — the subagent, JS-eval and
  * tab workers all start then, so a per-worker write paints into a rendered
  * frame. The main thread has already said it at startup; a worker repeating it
- * adds nothing and costs the display.
+ * adds nothing and costs the display. A worker *process* keeps the notice: it
+ * has its own main thread, and `subprocess/worker-client.ts` captures its
+ * stderr to a file rather than the terminal.
  *
  * Latched, because `loadNative()` is not a startup-only call: the lazy
  * entrypoints in `clipboard.js` and friends call it on every invocation.
@@ -805,8 +836,8 @@ const staleNoticeState = { reported: false };
  *
  * The write is a synchronous `fs.writeSync` to fd 2 for the same reason as
  * {@link startupMarker}: it must survive a crash that follows it. `write` and
- * `state` are injectable so a test can exercise the latch without consuming
- * this process's.
+ * `state` are injectable so a test can exercise the guards without consuming
+ * this copy's latch.
  * @param {{ isWorkspaceLoad: boolean }} ctx
  * @param {NonNullable<ReturnType<typeof nativeAddonStatus>>} addon
  * @param {{ write?: (text: string) => void; state?: { reported: boolean } }} [deps]
@@ -814,7 +845,9 @@ const staleNoticeState = { reported: false };
  */
 export function reportStaleWorkspaceAddon(ctx, addon, deps = {}) {
 	const state = deps.state ?? staleNoticeState;
-	if (!isMainThread || !ctx.isWorkspaceLoad || !addon.stale || state.reported) return false;
+	// Thread identity last: the three cheap gates reject every ordinary launch
+	// before `node:worker_threads` is resolved at all.
+	if (!ctx.isWorkspaceLoad || !addon.stale || state.reported || !onMainThread()) return false;
 	state.reported = true;
 	try {
 		(deps.write ?? (text => fs.writeSync(2, text)))(staleWorkspaceAddonNotice(addon));

@@ -160,4 +160,29 @@ describe("stale workspace addon notice", () => {
 		expect(reportStaleWorkspaceAddon({ isWorkspaceLoad: true }, current, deps)).toBe(false);
 		expect(written).toHaveLength(0);
 	});
+
+	// fd 2 is shared, and the subagent, JS-eval and tab workers all start after
+	// interactive mode owns the terminal, so a worker that writes the notice
+	// paints into a rendered frame. Driven in a real worker rather than behind
+	// a seam: the guard reads thread identity, so only a thread can prove it.
+	it("stays silent in a worker thread while its missing-symbol diagnostic survives", async () => {
+		const worker = new Worker(new URL("./fixtures/stale-notice-worker.ts", import.meta.url).href, {
+			type: "module",
+		});
+		const { promise, resolve, reject } = Promise.withResolvers<{
+			wrote: boolean;
+			writes: number;
+			symbolDiagnostic: string;
+		}>();
+		worker.addEventListener("message", event => resolve(event.data));
+		worker.addEventListener("error", event => reject(new Error(String(event.message ?? event))));
+		const reply = await promise;
+		worker.terminate();
+		expect(reply.wrote).toBe(false);
+		expect(reply.writes).toBe(0);
+		// The notice is a display courtesy; the per-symbol diagnostic is the
+		// contract, and a worker needs it as much as the main thread.
+		expect(reply.symbolDiagnostic).toContain("RunTrace");
+		expect(reply.symbolDiagnostic).toContain("bun run build:native");
+	});
 });

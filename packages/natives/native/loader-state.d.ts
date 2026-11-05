@@ -158,8 +158,9 @@ export function missingNativeClass(
 export function staleWorkspaceAddonNotice(addon: NativeAddonStatus): string;
 
 /**
- * Write {@link staleWorkspaceAddonNotice} once per process, from the main
- * thread, and only on a workspace load. Returns whether this call wrote it.
+ * Write {@link staleWorkspaceAddonNotice} once, from the main thread, and only
+ * on a workspace load. The latch is per loaded copy of this module. Returns
+ * whether this call wrote it.
  */
 export function reportStaleWorkspaceAddon(
 	ctx: { isWorkspaceLoad: boolean },
