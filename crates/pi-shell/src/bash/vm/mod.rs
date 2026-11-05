@@ -2057,10 +2057,8 @@ impl Shell {
 									task.signal(sig);
 								}
 							},
-							Live::Ext(ext) => {
-								if !alone || replaced {
-									let _ = ext.signal(sig);
-								}
+							Live::Ext(ext) if !alone || replaced => {
+								let _ = ext.signal(sig);
 							},
 							_ => {},
 						}
