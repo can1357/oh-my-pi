@@ -44,19 +44,6 @@ export const cfgSpotlightExperimentScoreFree = register({
 });
 
 /**
- * Share of edit-likely reads (a code file read by a main session, or one the session already read or edited) kept
- * whole when shaping would cut them: the model gets the plain page and the trace (`gated: true`) records the would-be
- * cut. Drawn after the holdout coin and before the score-free one.
- */
-export const cfgSpotlightExperimentEditGate = register({
-	id: "spotlight.experiment.editGate",
-	env: { name: "PI_SPOTLIGHT_EDIT_GATE", parse: parseShare },
-	type: "number",
-	default: 0.5,
-	validate: raw => validateShare("spotlight.experiment.editGate", raw),
-});
-
-/**
  * The tools whose results the experiment shapes and journals, by name (`*`: every tool). A tool left out returns its
  * plain result and is not journaled.
  */

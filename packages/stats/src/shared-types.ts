@@ -517,8 +517,8 @@ export interface SpotlightResultRow {
  *   cuts' original-size mix), the stand-in until held-out results accumulate;
  * - `scoreFree`: shortened by the no-score fallback rules because a random coin skipped Spotlight
  *   (`spotlight.experiment.scoreFree`), the model saw the cut: against `applied`, what Spotlight's scores add;
- * - `gated`: an edit-likely read (see {@link SpotlightEditGate}) the edit gate kept whole, the model saw plain's
- *   page: against edit-likely reads cut anyway, what the gate saves.
+ * - `gated`: a read pi's former edit gate (removed) kept whole, the model saw plain's page; only in transcripts
+ *   journaled while the gate ran.
  * `applied` holds only cuts Spotlight scored (score-free cuts and cuts whose Spotlight calls failed are not in it).
  */
 export type SpotlightCutGroup = "applied" | "holdout" | "reference" | "scoreFree" | "gated";
@@ -587,9 +587,7 @@ export interface SpotlightOverhead {
 /**
  * The net once fetch-backs that would have happened anyway are taken out: held-out results (the model saw them
  * unshaped) show how much of a would-be cut's output the agent reads again regardless, per tool; only recoveries
- * beyond that baseline are the cut's cost. Reads are measured in two strata, edit-likely (see
- * {@link SpotlightEditGateReads}) or not, each against its own holdouts, or against all the tool's holdouts while it has
- * fewer than `minHoldouts`.
+ * beyond that baseline are the cut's cost. A tool's baseline is thin while it has fewer than `minHoldouts`.
  */
 export interface SpotlightAdjustedTool {
 	tool: SpotlightTool;
@@ -600,7 +598,7 @@ export interface SpotlightAdjustedTool {
 	holdouts: number;
 	/** Recovered tokens per held-out would-be cut, over all the tool's holdouts (session-clustered bootstrap). */
 	baselinePerCut: SpotlightEstimate;
-	/** Σ over the tool's strata of max(0, recovered − the stratum's baseline per cut × cuts). */
+	/** max(0, recovered − baseline per cut × cuts). */
 	excessTokens: SpotlightEstimate;
 }
 
@@ -671,47 +669,10 @@ export interface SpotlightStepCell {
 	/** Σ (plain − out), negative cuts (wider than `plain`) included. */
 	savedTokens: number;
 	recoveredTokens: number;
-	/** max(0, recovered − Σ each cut's holdout baseline (its tool's, a read's by edit-likely stratum)). */
+	/** max(0, recovered − Σ each cut's holdout baseline (its tool's)). */
 	excessTokens: number;
 	/** (saved − excess) / saved: the share of the saving that stays saved; null when the cell saved nothing (≤ 0). */
 	keptShare: number | null;
-}
-
-/**
- * Edit-likely reads, cut vs kept whole. A read is edit-likely when it reads a code file (by extension)
- * and the session is a main agent or the session already read or edited that file. pi marks them (`editLikely`)
- * and keeps a random share whole (`gated`, `spotlight.experiment.editGate`); results journaled before pi marked
- * them are classified by the same rule here.
- */
-export interface SpotlightEditGateReads {
-	/** Edit-likely reads shaping changed and the model saw cut. */
-	cut: number;
-	/** Edit-likely reads the gate kept whole. */
-	gated: number;
-	/** Edit-likely reads held out (also seen whole; a random share of the would-be cuts). */
-	heldOut: number;
-	/** Fetch-back rate (the fetch-back card's rule), session-clustered bootstrap. */
-	cutFetchBack: SpotlightEstimate;
-	/** Gated and held-out reads together: the reads shown whole. */
-	wholeFetchBack: SpotlightEstimate;
-	/** Requests that did nothing but fetch back, per 100 reads, in each group. */
-	cutTurnsPer100: number;
-	wholeTurnsPer100: number;
-	/**
-	 * Holdout-adjusted net $ per 100 edit-likely reads cut: the cuts' carried saving, less the price of the recovered
-	 * tokens beyond what whole reads fetch back anyway (would-be recovered tokens per whole read), less the cost of the
-	 * fetch-back-only requests beyond the whole reads' rate of them, less Spotlight's bill for the cuts. Positive means
-	 * cutting them pays, negative that the gate saves.
-	 */
-	cutNetUsdPer100: SpotlightEstimate;
-}
-
-/** The edit-aware gate's effect. */
-export interface SpotlightEditGate {
-	/** Edit-likely reads with a recorded call; null without any cut, gated or held out. */
-	reads: SpotlightEditGateReads | null;
-	/** Share of read results that are edit-likely. */
-	editLikelyShare: number | null;
 }
 
 /** What the experiment costs in agent time. */
@@ -787,9 +748,6 @@ export interface SpotlightDashboardStats {
 	steps: SpotlightStepCell[];
 	timeCost: SpotlightTimeCost;
 	coverage: SpotlightCoverageRow[];
-	editGate: SpotlightEditGate;
-	/** Edit-likely reads the edit gate kept whole in the range. */
-	gated: number;
 	fetchBack: SpotlightFetchBackCell[];
 	economics: SpotlightCutEconomics[];
 	gaps: SpotlightGapCount[];

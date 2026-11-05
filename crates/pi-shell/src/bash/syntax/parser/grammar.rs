@@ -202,8 +202,7 @@ impl Parser<'_> {
 			hi = hi.max(self.base + end as u32);
 		}
 		let mut list = List { items };
-		super::finish::fill_docs(&mut list, &self.docs);
-		let node_count = super::finish::assign_ids(&mut list);
+		let node_count = super::finish::assign_ids_with_docs(&mut list, &self.docs);
 		Ok(Some(CompleteCommand {
 			span: Span::new(lo, hi.max(lo)),
 			line,
@@ -679,6 +678,7 @@ impl Parser<'_> {
 				name,
 				extra_names: Vec::new(),
 				keyword,
+				traced: false,
 				body: Box::new(body),
 			}),
 			redirs: Vec::new(),
