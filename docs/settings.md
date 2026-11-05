@@ -613,6 +613,18 @@ A prompt whose active model has no usable credential walks the same chain before
 
 Retry model fallback is not context promotion. `contextPromotion.enabled: false` only disables [context promotion](./models.md#context-promotion) to a model's `contextPromotionTarget`; set `retry.modelFallback: false` to stop `retry.fallbackChains` from switching the active model after provider errors. Same-model retries and compaction remain available.
 
+### Usage governor
+
+Opt-in pacing of paid quota across the agent processes on this machine. The governor waits a request that would take its OAuth account past the allowance line, using cached usage windows only. See [Usage governor](./usage-governor.md) for the model, coverage and limits.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `usageGovernor.enabled` | boolean | `false` | Turns admission and governed account ranking on. Off creates no ledger file and leaves the dispatch path unchanged. |
+| `usageGovernor.leadPct` | number, 0 to 100 | `25` | Share of a window's allowance usable ahead of linear pacing at the window start. It decays to 0 at reset. |
+| `usageGovernor.interactiveReserve` | `hold` or `spend` | `hold` | `hold`: foreground requests keep the account reserve. An interactive turn that cannot send waits, or moves to the role's next model when `retry.usageAwareFallback` is on. `spend`: foreground requests may use the reserve. |
+
+`retry.usageReservePct` is also the governor's reset target, and `auth.accountPolicies[].reservePct` overrides it per account. The governor never chooses a model or provider.
+
 ### Tools and approvals
 
 ```yaml
