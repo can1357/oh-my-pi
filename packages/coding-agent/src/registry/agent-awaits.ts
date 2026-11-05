@@ -160,9 +160,21 @@ interface AwaitRegistry {
  * agents register (a spawned job's agent registers with it). Jobs whose
  * delivery is suppressed are skipped, as `waitForOwnerJobs` skips them. The
  * holds are interruptible: a message still reaches the owner.
+ *
+ * Setting this up takes several holds and two subscriptions, and a worker's
+ * registry answers each over a proxy. A failure part-way through releases
+ * what it already took and throws: no caller holds the release function yet,
+ * so a hold left behind could never be released and would go on telling other
+ * agents that `ownerId` waits on a job it no longer does.
  */
 export function holdOwnedJobs(registry: AwaitRegistry, manager: OwnedJobSource, ownerId: string): () => void {
 	const holds = new Map<string, () => void>();
+	const unsubscribers: Array<() => void> = [];
+	const release = (): void => {
+		for (const unsubscribe of unsubscribers.splice(0)) unsubscribe();
+		for (const releaseHold of holds.values()) releaseHold();
+		holds.clear();
+	};
 	const sync = (): void => {
 		const running = new Set<string>();
 		for (const job of manager.getRunningJobs({ ownerId })) {
@@ -171,17 +183,18 @@ export function holdOwnedJobs(registry: AwaitRegistry, manager: OwnedJobSource, 
 			if (!holds.has(job.id))
 				holds.set(job.id, registry.awaits.hold(ownerId, [awaitNodeOfJob(job)], { interruptible: true }));
 		}
-		for (const [id, release] of holds) {
+		for (const [id, releaseHold] of holds) {
 			if (running.has(id)) continue;
-			release();
+			releaseHold();
 			holds.delete(id);
 		}
 	};
-	sync();
-	const unsubscribers = [manager.onJobSettled(sync), registry.onChange(sync)];
-	return () => {
-		for (const unsubscribe of unsubscribers) unsubscribe();
-		for (const release of holds.values()) release();
-		holds.clear();
-	};
+	try {
+		sync();
+		unsubscribers.push(manager.onJobSettled(sync), registry.onChange(sync));
+	} catch (error) {
+		release();
+		throw error;
+	}
+	return release;
 }

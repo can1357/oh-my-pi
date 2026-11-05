@@ -12,6 +12,7 @@ import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { holdOwnedJobs } from "@oh-my-pi/pi-coding-agent/registry/agent-awaits";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -124,5 +125,43 @@ describe("AgentSession.settleAsyncWork and idle waits of the agents it waits on"
 		settling.resolve();
 		await settled;
 		expect(workerWaits).toEqual([[expect.objectContaining({ from: "Peer", body: "the schema changed" })]]);
+	});
+
+	it("strands no hold when a later one of the settle's holds fails", async () => {
+		// A worker's registry answers each hold over a proxy, and the caller has
+		// no release function until the whole set is taken: a failure part-way
+		// through must release what it already took, or the agents those holds
+		// name are refused their idle wait forever.
+		const registry = AgentRegistry.global();
+		registry.register({ id: "Lead", displayName: "Lead", kind: "sub", session: null as never, status: "running" });
+		const manager = new AsyncJobManager({});
+		cleanups.push(async () => {
+			await manager.dispose({ timeoutMs: 100 });
+		});
+		const first = Promise.withResolvers<string>();
+		const second = Promise.withResolvers<string>();
+		manager.register("task", "First", async () => first.promise, {
+			id: "First",
+			agentId: "First",
+			ownerId: "Lead",
+		});
+		manager.register("task", "Second", async () => second.promise, {
+			id: "Second",
+			agentId: "Second",
+			ownerId: "Lead",
+		});
+		const realHold = registry.awaits.hold.bind(registry.awaits);
+		let holdCalls = 0;
+		vi.spyOn(registry.awaits, "hold").mockImplementation((waiter, awaited, options) => {
+			if (++holdCalls === 2) throw new Error("proxy awaits.hold failed");
+			return realHold(waiter, awaited, options);
+		});
+		expect(() => holdOwnedJobs(registry, manager, "Lead")).toThrow("proxy awaits.hold failed");
+		expect(holdCalls).toBe(2);
+		vi.restoreAllMocks();
+		expect(registry.awaits.waitersOn("First")).toEqual([]);
+		expect(registry.awaits.waitersOn("Second")).toEqual([]);
+		first.resolve("done");
+		second.resolve("done");
 	});
 });

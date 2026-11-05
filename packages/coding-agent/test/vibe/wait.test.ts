@@ -121,6 +121,24 @@ describe("vibe wait completion classification", () => {
 		expect(deliveries).toEqual([{ jobId: turn.jobId, text: "delivered later" }]);
 	});
 
+	it("does not also deliver a settled result the wait returned", async () => {
+		// Unwatching an unconsumed finished job re-delivers it at once, so the
+		// watch must outlive the snapshot the wait consumes: otherwise the
+		// director reads the same turn output twice, once as its wait result and
+		// once as an async delivery.
+		const deliveries: Array<{ jobId: string; text: string }> = [];
+		const turn = startTurn({ onDelivery: (jobId, text) => deliveries.push({ jobId, text }) });
+		const pending = VibeSessionRegistry.global().wait(session, { timeoutMs: 1_000 });
+		turn.complete("worker result");
+
+		const outcome = await pending;
+		expect(outcome.settled[0]).toMatchObject({ jobId: turn.jobId, resultText: "worker result" });
+		expect(manager.isJobResultConsumed(turn.jobId)).toBe(true);
+		await manager.drainDeliveries({ timeoutMs: 1_000 });
+
+		expect(deliveries).toEqual([]);
+	});
+
 	it("returns a cancelled worker settlement without classifying it as timeout", async () => {
 		const turn = startTurn();
 		const pending = VibeSessionRegistry.global().wait(session, { timeoutMs: 1_000 });

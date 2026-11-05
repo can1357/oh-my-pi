@@ -347,11 +347,12 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	}
 
 	/**
-	 * Block until an owned job settles, an owned service finishes, a direct message arrives, the window elapses, or the call aborts.
-	 * The window is the caller's `timeout` when given, else the ladder rung.
-	 * With neither jobs nor a service, the block is a reply wait: it also ends once no agent asked can still reply.
-	 * An `idleWait` block (nothing owed, the caller gave a deadline) ends only on a direct message, an interrupt
-	 * (steering, an aside, a job result), an agent starting to block on the caller's result, or `capMs`.
+	 * Watch the jobs this wait is for, block, and build its result, then unwatch.
+	 * The watch spans both: a job recovered into the result is consumed first,
+	 * while one left unreported (a message or an interrupt won the race) is
+	 * re-enqueued for its ordinary async delivery when the watch ends. One
+	 * `finally` covers both, so a failure while the block is being set up
+	 * releases the watch too instead of leaving the job's result undelivered.
 	 */
 	async #blockUntilWake(args: {
 		jobs: AsyncJob[];
@@ -365,14 +366,40 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		capMs: number | undefined;
 		idleWait: boolean;
 	}): Promise<AgentToolResult<CoordinationDetails>> {
+		const watchedIds = args.jobs.map(job => job.id);
+		args.manager?.watchJobs(watchedIds);
+		try {
+			return await this.#waitForWake(args);
+		} finally {
+			args.manager?.unwatchJobs(watchedIds);
+		}
+	}
+
+	/**
+	 * Block until an owned job settles, an owned service finishes, a direct message arrives, the window elapses, or the call aborts.
+	 * The window is the caller's `timeout` when given, else the ladder rung.
+	 * With neither jobs nor a service, the block is a reply wait: it also ends once no agent asked can still reply.
+	 * An `idleWait` block (nothing owed, the caller gave a deadline) ends only on a direct message, an interrupt
+	 * (steering, an aside, a job result), an agent starting to block on the caller's result, or `capMs`.
+	 * {@link #blockUntilWake} owns the job watch around this call.
+	 */
+	async #waitForWake(args: {
+		jobs: AsyncJob[];
+		manager: AsyncJobManagerApi | undefined;
+		messaging: WaitMessaging | undefined;
+		serviceRunning: boolean;
+		idle: IdleStreak | undefined;
+		signal: AbortSignal | undefined;
+		onUpdate: AgentToolUpdateCallback<CoordinationDetails> | undefined;
+		capMs: number | undefined;
+		idleWait: boolean;
+	}): Promise<AgentToolResult<CoordinationDetails>> {
 		const { jobs, manager, messaging, serviceRunning, idle, signal, onUpdate, capMs, idleWait } = args;
 		const streak = idle && Date.now() - idle.endedAt < WAIT_LADDER_RESET_MS ? idle : undefined;
 		const rung = streak ? Math.min(streak.rung + 1, WAIT_LADDER_MS.length - 1) : 0;
 		// An explicit `timeout` replaces the ladder window for this call; an
 		// elapsed one still counts towards the idle streak and its reminder.
 		const windowMs = capMs ?? WAIT_LADDER_MS[rung];
-		const watchedIds = jobs.map(job => job.id);
-		manager?.watchJobs(watchedIds);
 		const replyWait = !idleWait && messaging !== undefined && jobs.length === 0 && !serviceRunning;
 		let noReply: PendingReplies | undefined;
 		let awaitedBy: string[] = [];
@@ -497,74 +524,67 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		} finally {
 			for (const release of cleanup.reverse()) release();
 		}
-		// Unwatch only after the result is built: a job recovered below is
-		// consumed first, while one left unreported (message or interrupt won
-		// the race) is re-enqueued for its ordinary async delivery.
-		try {
-			// A dequeued message wins a photo-finish with a job: the job remains
-			// deliverable, whereas a lost message cannot be recovered from the bus.
-			const message = await busLeg;
-			if (message && messaging) return messageResult(messaging.senderId, takeQueuedMessages(messaging, message));
-			if (signal?.aborted) {
-				// Steering, a peer IRC, or a completion notice cut the wait short:
-				// the designed wake path, so the message injects after a normal
-				// result. Any other abort stops the run.
-				if (signal.reason === TOOL_INTERRUPT_ABORT_REASON) {
-					// A direct message queued in the session inbox (it missed the
-					// bus waiter) is returned here rather than injected after.
-					if (messaging) {
-						const queued = takeQueuedMessages(messaging);
-						if (queued.length > 0) return messageResult(messaging.senderId, queued);
-					}
-					// Not `useless`: a message woke the agent, which the loop guard
-					// must treat as progress rather than an idle poll.
-					return {
-						content: [{ type: "text", text: "Wait interrupted by message." }],
-						details: { op: "wait", jobs: [], interrupted: true },
-					};
+		// A dequeued message wins a photo-finish with a job: the job remains
+		// deliverable, whereas a lost message cannot be recovered from the bus.
+		const message = await busLeg;
+		if (message && messaging) return messageResult(messaging.senderId, takeQueuedMessages(messaging, message));
+		if (signal?.aborted) {
+			// Steering, a peer IRC, or a completion notice cut the wait short:
+			// the designed wake path, so the message injects after a normal
+			// result. Any other abort stops the run.
+			if (signal.reason === TOOL_INTERRUPT_ABORT_REASON) {
+				// A direct message queued in the session inbox (it missed the
+				// bus waiter) is returned here rather than injected after.
+				if (messaging) {
+					const queued = takeQueuedMessages(messaging);
+					if (queued.length > 0) return messageResult(messaging.senderId, queued);
 				}
-				throwIfAborted(signal);
-			}
-			if (manager && jobs.length > 0) {
-				const result = buildJobResult(this.session, manager, "wait", jobs, []);
-				if (wake === "timeout") return this.#elapsed(result, rung, streak, windowMs);
-				// A finished service is news even while every watched job still runs.
-				if (wake !== "service") return result;
-				const { useless: _idle, ...woke } = result;
-				return woke;
-			}
-			if (wake === "timeout") {
-				const span = formatDuration(windowMs);
-				const text = idleWait
-					? "Deadline reached: no message, steer or job result arrived."
-					: replyWait
-						? `No reply within ${span}.`
-						: `No service finished within ${span}. Read proc:// for status.`;
-				// A wait that ran out with nothing to report is an idle poll.
-				const result: AgentToolResult<CoordinationDetails> = {
-					content: [{ type: "text", text }],
-					details: { op: "wait", jobs: [] },
-					useless: true,
+				// Not `useless`: a message woke the agent, which the loop guard
+				// must treat as progress rather than an idle poll.
+				return {
+					content: [{ type: "text", text: "Wait interrupted by message." }],
+					details: { op: "wait", jobs: [], interrupted: true },
 				};
-				return this.#elapsed(result, rung, streak, windowMs);
 			}
-			return {
-				content: [
-					{
-						type: "text",
-						text:
-							wake === "unanswerable" && noReply
-								? noReplyText(noReply)
-								: wake === "awaited"
-									? `Nothing to wait for: ${awaitedText(awaitedBy)}`
-									: "A service finished. Read proc:// for its status and output.",
-					},
-				],
-				details: { op: "wait", jobs: [] },
-			};
-		} finally {
-			manager?.unwatchJobs(watchedIds);
+			throwIfAborted(signal);
 		}
+		if (manager && jobs.length > 0) {
+			const result = buildJobResult(this.session, manager, "wait", jobs, []);
+			if (wake === "timeout") return this.#elapsed(result, rung, streak, windowMs);
+			// A finished service is news even while every watched job still runs.
+			if (wake !== "service") return result;
+			const { useless: _idle, ...woke } = result;
+			return woke;
+		}
+		if (wake === "timeout") {
+			const span = formatDuration(windowMs);
+			const text = idleWait
+				? "Deadline reached: no message, steer or job result arrived."
+				: replyWait
+					? `No reply within ${span}.`
+					: `No service finished within ${span}. Read proc:// for status.`;
+			// A wait that ran out with nothing to report is an idle poll.
+			const result: AgentToolResult<CoordinationDetails> = {
+				content: [{ type: "text", text }],
+				details: { op: "wait", jobs: [] },
+				useless: true,
+			};
+			return this.#elapsed(result, rung, streak, windowMs);
+		}
+		return {
+			content: [
+				{
+					type: "text",
+					text:
+						wake === "unanswerable" && noReply
+							? noReplyText(noReply)
+							: wake === "awaited"
+								? `Nothing to wait for: ${awaitedText(awaitedBy)}`
+								: "A service finished. Read proc:// for its status and output.",
+				},
+			],
+			details: { op: "wait", jobs: [] },
+		};
 	}
 
 	/**

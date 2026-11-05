@@ -196,13 +196,19 @@ export class WorkPool {
 							return job ? [job.promise] : [];
 						}),
 					);
+					// Consume before the unwatch below: unwatching an unconsumed
+					// finished batch re-delivers its result to the owner, which
+					// already has it in this aggregate.
 					manager.consumeJobResults(batchIds);
-					manager.unwatchJobs(batchIds);
 					this.closed = true;
 					const summary = `Pool \`${this.name}\` drained: ${this.items.length} item(s), ${this.batches.length} batch(es).`;
 					this.#card(signal.aborted ? "cancelled" : "completed", this.ownerId, summary);
 					return this.#renderAggregateResult();
 				} finally {
+					// A drain that threw reported nothing, so its batches keep
+					// their ordinary delivery; either way the watch ends here
+					// instead of outliving the pool.
+					manager.unwatchJobs(this.batches.map(batch => batch.jobId));
 					signal.removeEventListener("abort", onAbort);
 				}
 			},

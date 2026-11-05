@@ -1003,9 +1003,14 @@ describe("wait", () => {
 				// The progress consumer throws while the parent's wait is being set
 				// up. The call rejects, so it waits on nothing: it must not go on
 				// telling the child that its parent cannot act, nor keep the
-				// progress interval alive.
+				// progress interval alive, nor keep the child's job watched — a
+				// watched job's result is never delivered on its own.
 				vi.useFakeTimers();
+				const delivered: string[] = [];
 				const manager = new AsyncJobManager({ onJobComplete: () => {} });
+				manager.registerDeliverySink("Main", jobId => {
+					delivered.push(jobId);
+				});
 				const childRun = registerChild(manager);
 				let updates = 0;
 				const onUpdate = () => {
@@ -1015,6 +1020,7 @@ describe("wait", () => {
 				const parentWait = new WaitTool(session(manager, "Main")).execute("parent-wait", {}, undefined, onUpdate);
 				await expect(parentWait).rejects.toThrow("consumer progress failed");
 				expect(AgentRegistry.global().awaits.waitersOn("Child")).toEqual([]);
+				expect(manager.isDeliverySuppressed("Child")).toBe(false);
 				const childWait = new WaitTool(session(manager, "Child")).execute("child-idle", { timeout: 600 });
 				await flushMicrotasks();
 				await IrcBus.global().send({ from: "Main", to: "Child", body: "the schema changed" });
@@ -1022,7 +1028,12 @@ describe("wait", () => {
 				// The interval the ended call started fires no further update.
 				vi.advanceTimersByTime(5_000);
 				expect(updates).toBe(1);
+				// The child's result still reaches its owner on its own.
+				vi.useRealTimers();
 				childRun.resolve("done");
+				await manager.getJob("Child")?.promise;
+				await manager.drainDeliveries({ timeoutMs: 1_000 });
+				expect(delivered).toEqual(["Child"]);
 			});
 
 			describe("with the service-broker refresh slow to answer", () => {
