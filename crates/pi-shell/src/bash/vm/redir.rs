@@ -1318,30 +1318,79 @@ impl File for Cat {
 #[error("cannot overwrite existing file")]
 struct NoClobberRefused;
 
-/// The error a `noclobber` reopen gives when the existing file cannot be
-/// opened at all: [`judge_unopenable`] then decides, and the marker tells
-/// [`open_into`] the reopen, not the exclusive create, produced it.
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-struct NoClobberUnopenable(std::io::Error);
+/// A mark a `noclobber` stage leaves on an error so a later stage knows
+/// which stage produced it. The error's own kind is kept, so it still
+/// reads as the operating system reported it.
+trait NoClobberMark: std::error::Error + Send + Sync + Sized + 'static {
+	fn new(err: std::io::Error) -> Self;
+	fn into_inner(self) -> std::io::Error;
 
-impl NoClobberUnopenable {
-	/// Mark `err` as a failed reopen, keeping its kind.
+	/// Mark `err`.
 	fn wrap(err: std::io::Error) -> std::io::Error {
-		std::io::Error::new(err.kind(), Self(err))
+		std::io::Error::new(err.kind(), Self::new(err))
 	}
 
-	/// The error [`Self::wrap`] carried.
+	/// Whether `err` carries this mark.
+	fn marks(err: &std::io::Error) -> bool {
+		err.get_ref()
+			.is_some_and(<dyn std::error::Error + Send + Sync>::is::<Self>)
+	}
+
+	/// The error this mark carried, or `err` unchanged when it has none.
 	fn unwrap(err: std::io::Error) -> std::io::Error {
+		if !Self::marks(&err) {
+			return err;
+		}
 		let kind = err.kind();
 		match err.into_inner() {
 			Some(inner) => match inner.downcast::<Self>() {
-				Ok(this) => this.0,
+				Ok(this) => this.into_inner(),
 				Err(other) => std::io::Error::new(kind, other),
 			},
 			None => kind.into(),
 		}
 	}
+}
+
+/// The error a `noclobber` reopen gives when the existing file cannot be
+/// opened at all: [`judge_unopenable`] then decides, and the mark tells
+/// [`open_into`] the reopen, not the exclusive create, produced it.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct NoClobberUnopenable(std::io::Error);
+
+impl NoClobberMark for NoClobberUnopenable {
+	fn new(err: std::io::Error) -> Self {
+		Self(err)
+	}
+
+	fn into_inner(self) -> std::io::Error {
+		self.0
+	}
+}
+
+/// The error a `noclobber` redirection has settled on: no stage may act
+/// on it again. [`judge_unopenable`] can leave an `EEXIST` of the reopen's
+/// own in place, and unmarked that reads as the exclusive create's, so the
+/// recovery would start again and the open would repeat without end.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct NoClobberSettled(std::io::Error);
+
+impl NoClobberMark for NoClobberSettled {
+	fn new(err: std::io::Error) -> Self {
+		Self(err)
+	}
+
+	fn into_inner(self) -> std::io::Error {
+		self.0
+	}
+}
+
+/// Whether `err` is `noclobber`'s own refusal.
+fn is_refusal(err: &std::io::Error) -> bool {
+	err.get_ref()
+		.is_some_and(<dyn std::error::Error + Send + Sync>::is::<NoClobberRefused>)
 }
 
 /// What a `noclobber` redirection does when the reopen could not open the
@@ -1350,10 +1399,12 @@ impl NoClobberUnopenable {
 /// a path whose metadata cannot be read at all — there bash adds `O_EXCL`
 /// and its create reports `EEXIST` (a dangling symlink). A path that is
 /// readable and not regular keeps the open's own error (`>dir` is `Is a
-/// directory` in Bash 5.2.21 and 5.3.0).
+/// directory` in Bash 5.2.21 and 5.3.0), marked as settled: that error can
+/// itself be an `EEXIST`, which unmarked would read as the exclusive
+/// create's and start the recovery again.
 fn judge_unopenable(st: std::io::Result<Stat>, err: std::io::Error) -> std::io::Error {
 	match st {
-		Ok(st) if st.kind != StatKind::File => err,
+		Ok(st) if st.kind != StatKind::File => NoClobberSettled::wrap(err),
 		_ => std::io::Error::new(std::io::ErrorKind::AlreadyExists, NoClobberRefused),
 	}
 }
@@ -1381,15 +1432,15 @@ impl FsPending<Box<dyn File>> for NoClobberPath {
 	}
 }
 
-/// Whether the object `file` IS a regular file. [`File::kind`] says how
-/// the engine must drive it, and a provider's regular file that cannot be
-/// seeked is driven as a device, so the object's own `fstat` is asked
-/// first and the driving category is only the fallback.
-fn opened_is_regular(file: &dyn File) -> bool {
-	match file.stat() {
-		Ok(st) => st.kind == StatKind::File,
-		Err(_) => file.kind() == FileKind::Regular,
-	}
+/// Whether the object `st` describes IS a regular file, the only object
+/// `noclobber` protects. [`File::kind`] says how the engine must DRIVE an
+/// object — a provider's regular file that cannot be seeked is driven as a
+/// device, a here-document as a seekable regular object — so it cannot
+/// answer this question. An object with no host metadata is no file on any
+/// filesystem and is written, as bash writes to everything its own stat
+/// does not call a regular file.
+fn is_regular_object(st: std::io::Result<Stat>) -> bool {
+	st.is_ok_and(|st| st.kind == StatKind::File)
 }
 
 /// `noclobber`'s plain reopen of an existing file: a regular file is
@@ -1400,7 +1451,7 @@ struct NoClobberReopen(Box<dyn FsPending<Box<dyn File>>>);
 impl NoClobberReopen {
 	fn judge(r: std::io::Result<Box<dyn File>>) -> std::io::Result<Box<dyn File>> {
 		match r {
-			Ok(file) if opened_is_regular(file.as_ref()) => {
+			Ok(file) if is_regular_object(file.stat()) => {
 				Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, NoClobberRefused))
 			},
 			Err(err) => Err(NoClobberUnopenable::wrap(err)),
@@ -1466,8 +1517,9 @@ fn early_refusal(cx: &mut Cx<'_>, abs: &BString, flags: OpenFlags) -> Option<std
 /// redirection that names a descriptor the shell holds instead of a file
 /// (`/dev/fd/N`, `/dev/stdout`, a session's `/dev/tty`). Under `noclobber`
 /// (`flags` holds [`OpenFlags::EXCL`]) the object behind the alias is
-/// judged exactly as an opened path is: a regular file is refused, a FIFO
-/// or a device is written.
+/// judged exactly as an opened path is, by what it IS
+/// ([`is_regular_object`]): a regular file is refused, and a FIFO, a
+/// device or a here-document is written.
 fn install_held(
 	k: &mut Kernel,
 	vp: &mut Vproc,
@@ -1478,7 +1530,7 @@ fn install_held(
 	flags: OpenFlags,
 	line: u32,
 ) -> Result<(), Halt> {
-	if flags.contains(OpenFlags::EXCL) && h.kind() == Some(FileKind::Regular) {
+	if flags.contains(OpenFlags::EXCL) && h.stat().is_some_and(is_regular_object) {
 		return Err(fail(k, vp, cx, line, Diag::NoClobber { path: path.clone() }));
 	}
 	for &fd in fds {
@@ -1556,17 +1608,18 @@ fn open_into(
 			None => start_open(vp, cx, &mut tcx, &abs, flags, mode, false),
 		},
 	};
-	// The exclusive create met an existing file: open it as it is. The
-	// reopen's own failure is marked ([`NoClobberUnopenable`]) and belongs
-	// to the stage below, however its kind reads: an `EEXIST` from the
-	// reopen is not a second exclusive create to recover from, and
-	// recovering from it again would repeat the open without end.
+	// The exclusive create met an existing file: open it as it is. Only an
+	// unmarked `EEXIST` is the create's own. The reopen's failure is marked
+	// for the stage below ([`NoClobberUnopenable`]) and an error the stages
+	// have settled on is marked as settled ([`NoClobberSettled`]), however
+	// their kinds read: recovering from either of those again would repeat
+	// the open without end.
 	if let Poll::Ready(Err(err)) = &res
 		&& flags.contains(OpenFlags::EXCL)
 		&& err.kind() == std::io::ErrorKind::AlreadyExists
-		&& !err
-			.get_ref()
-			.is_some_and(|e| e.is::<NoClobberRefused>() || e.is::<NoClobberUnopenable>())
+		&& !is_refusal(err)
+		&& !NoClobberUnopenable::marks(err)
+		&& !NoClobberSettled::marks(err)
 	{
 		io(vp).redir.opening = None;
 		res = start_open(vp, cx, &mut tcx, &abs, flags, mode, true);
@@ -1574,7 +1627,7 @@ fn open_into(
 	// That reopen could not open it either: the path's own kind decides
 	// ([`judge_unopenable`]).
 	if let Poll::Ready(Err(err)) = &res
-		&& err.get_ref().is_some_and(|e| e.is::<NoClobberUnopenable>())
+		&& NoClobberUnopenable::marks(err)
 	{
 		let Poll::Ready(Err(err)) = std::mem::replace(&mut res, Poll::Pending) else {
 			unreachable!("matched a ready error just above")
@@ -1595,10 +1648,10 @@ fn open_into(
 			Ok(())
 		},
 		Poll::Ready(Err(err)) => {
-			let d = if err.get_ref().is_some_and(|e| e.is::<NoClobberRefused>()) {
+			let d = if is_refusal(&err) {
 				Diag::NoClobber { path: path.clone() }
 			} else {
-				Diag::Io { path: path.clone(), err }
+				Diag::Io { path: path.clone(), err: NoClobberSettled::unwrap(err) }
 			};
 			k.diag(cx, vp, line, d);
 			Err(Halt::Failed)

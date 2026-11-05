@@ -33,6 +33,10 @@ pub fn cached<'s>(sc: &'s Scratch, p: &Probe) -> Option<&'s ProbeResult> {
 /// `/dev/stdout`, `/dev/stderr`: the fd number. The engine runs inside the
 /// host process, so opening these through the host would reach the host's
 /// descriptors instead of the shell's.
+///
+/// Only the spelling the host's own `/dev/fd` resolves names a descriptor:
+/// `/dev/fd/03` and `/dev/fd/+3` are no file there, and bash reports that
+/// instead of writing to descriptor 3.
 pub fn dev_fd(path: &[u8]) -> Option<i32> {
 	let n = match path {
 		b"/dev/stdin" => return Some(0),
@@ -43,6 +47,9 @@ pub fn dev_fd(path: &[u8]) -> Option<i32> {
 			.or_else(|| path.strip_prefix(b"/proc/self/fd/"))
 			.or_else(|| path.strip_prefix(b"/proc/thread-self/fd/"))?,
 	};
+	if !n.iter().all(u8::is_ascii_digit) || n.is_empty() || (n.len() > 1 && n[0] == b'0') {
+		return None;
+	}
 	std::str::from_utf8(n).ok()?.parse().ok()
 }
 
