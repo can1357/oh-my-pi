@@ -72,7 +72,10 @@ bridge answers, registers it as the `chrome` MCP server with its 81 `chrome_*`
 / page tools. A missing bridge is skipped silently — no error, no prompt
 notice — and the built-in `browser` prelude stays available as an isolated
 Chrome for Testing fallback. Turn the probe off with the `browser.chromeMcp`
-setting (default on).
+setting (default on), or add `chrome` to the user-level `disabledServers` list
+in `mcp.json`. A per-server `"enabled": false` on a `chrome` entry does *not*
+stop auto-discovery: the suppressed entry never reaches the merged config, so
+the probe sees a free name — only the two off-switches above do.
 
 Requirements:
 

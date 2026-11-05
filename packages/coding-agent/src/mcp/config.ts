@@ -203,9 +203,11 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 
 	// Auto-discovered after every filter: chrome-mcp is the base browser, not a
 	// user-configured browser-automation server the filter is meant to shadow.
-	// An existing `chrome` entry owns the name — never probe for or overwrite it —
-	// and the user-level disabled list still wins. The probe is bounded and
-	// local-only; a missing bridge registers nothing.
+	// An enabled `chrome` entry owns the name — never probe for or overwrite it.
+	// A per-server `enabled: false` entry is suppressed and never reaches
+	// `configs`, so it does NOT stop discovery: the user-level `disabledServers`
+	// list and the `browser.chromeMcp` setting are the off-switches. The probe is
+	// bounded and local-only; a missing bridge registers nothing.
 	if (options?.chromeMcp && !(CHROME_MCP_SERVER_NAME in configs) && !disabledServers.has(CHROME_MCP_SERVER_NAME)) {
 		const discovered = await discoverChromeMcp(
 			options.chromeMcpUrl === undefined ? {} : { url: options.chromeMcpUrl },
