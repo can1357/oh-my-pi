@@ -3698,15 +3698,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const release = options?.blocked ? holdOwnedJobs(AgentRegistry.global(), manager, this.#agentId) : undefined;
 		try {
 			await manager.waitForOwnerJobs(this.#agentId, { excludeSuppressed: true });
-			// Still inside the hold: the delivery is what enqueues the async-result
-			// follow-up, and that turn can start new owner jobs. Releasing before
-			// it would tell an agent among them that this session is free, and its
-			// idle `wait` would park for a message this session cannot send.
-			await manager.drainDeliveries({ filter: { ownerId: this.#agentId } });
-			await this.waitForIdle();
 		} finally {
 			release?.();
 		}
+		await manager.drainDeliveries({ filter: { ownerId: this.#agentId } });
+		await this.waitForIdle();
 	}
 
 	/**

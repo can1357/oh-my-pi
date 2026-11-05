@@ -13,6 +13,7 @@ import * as structured from "../../src/task/structured-subagent";
 import type { AgentDefinition } from "../../src/task/types";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { WorkPool, WorkPoolRegistry } from "../../src/task/workpool";
+import { awaitNodeOfJob } from "../../src/registry/agent-awaits";
 import type { ToolSession } from "../../src/tools";
 
 const AGENT: AgentDefinition = {
@@ -456,6 +457,96 @@ describe("WorkPool dispatch", () => {
 		first.resolve();
 		await finishPool(session, workpool);
 		expect(workpool.peek().pending).toBe(0);
+	});
+
+	it("leaves nothing queued when the manager refuses the aggregate registration", async () => {
+		// The items go in before the registration that makes them reportable. With
+		// the manager's running-job slot already taken, that registration is
+		// refused, and the push must leave nothing behind: the next push does
+		// register the aggregate, whose drain would otherwise count an item no
+		// dispatch chain can run, so the pool job would stay running for good.
+		const manager = new AsyncJobManager({ retentionMs: 0, maxRunningJobs: 1 });
+		managers.add(manager);
+		const occupant = Promise.withResolvers<string>();
+		const occupying = manager.register("bash", "hold the only slot", async () => occupant.promise, {
+			ownerId: "Main",
+		});
+		const session = {
+			cwd: "/tmp",
+			hasUI: false,
+			settings: Settings.isolated({
+				"task.maxConcurrency": 1,
+				"task.maxRuntimeMs": 0,
+				"launch.enabled": false,
+			}),
+			asyncJobManager: manager,
+			getAgentId: () => "Main",
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			getArtifactsDir: () => null,
+		} satisfies ToolSession;
+		AgentRegistry.global().register({ id: "Main", displayName: "Main", kind: "main", status: "idle", session: null });
+		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			const id = request.identity?.id ?? "missing";
+			markIdle(id);
+			return execution(id);
+		});
+		const workpool = pool(session, "refused-registration");
+
+		expect(() => workpool.push(["first"])).toThrow();
+		expect(workpool.items).toHaveLength(0);
+
+		occupant.resolve("slot released");
+		await manager.getJob(occupying)?.promise;
+		expect(workpool.push(["second"])).toEqual(["refused-registration#2"]);
+		await finishPool(session, workpool);
+
+		expect(workpool.items.filter(item => item.status === "queued")).toHaveLength(0);
+		expect(manager.getJob(workpool.name)?.status).not.toBe("running");
+	});
+
+	it("keeps the pool's dependency on its worker until the turn has settled", async () => {
+		// Settling a turn awaits the worker's yield-contract reset and can start
+		// the next turn. The pool node must stay blocked on the worker
+		// throughout, because that is the link through which an agent waiting on
+		// the pool job reads "blocked on the worker"; with the link gone, that
+		// agent's idle wait parks instead of refusing.
+		const session = makeSession([], 1);
+		const registry = AgentRegistry.global();
+		const clearing = Promise.withResolvers<void>();
+		const whileSettling: string[][] = [];
+		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			const id = request.identity?.id ?? "missing";
+			registry.register({
+				id,
+				displayName: id,
+				kind: "sub",
+				status: "idle",
+				session: {
+					setWorkPoolYieldItems: async () => {
+						whileSettling.push(registry.awaits.waitersOn(id));
+						await clearing.promise;
+					},
+				} as unknown as AgentSession,
+			});
+			return execution(id);
+		});
+		const workpool = pool(session, "settling");
+		// What a `wait` on the pool job takes: `Main` blocks on the pool node.
+		const release = registry.awaits.hold("Main", [awaitNodeOfJob({ id: "settling", ownerId: "Main" })], {
+			interruptible: true,
+		});
+
+		workpool.push(["one"]);
+		await until(() => whileSettling.length > 0);
+		const worker = workpool.agents[0]?.id;
+
+		expect(worker).toBeDefined();
+		expect(whileSettling[0]).toEqual(["Main"]);
+		clearing.resolve();
+		await finishPool(session, workpool);
+		expect(registry.awaits.waitersOn(worker ?? "")).toEqual([]);
+		release();
 	});
 });
 

@@ -166,7 +166,19 @@ export class WorkPool {
 			this.items.push(item);
 			queued.push(item);
 		}
-		this.#ensurePoolJob();
+		try {
+			this.#ensurePoolJob();
+		} catch (error) {
+			// The push did not happen: a registration the manager refused (its
+			// running-job limit, most often) leaves nothing to report these items,
+			// and a later push that does register would count them in its drain
+			// while no dispatch chain can ever run them.
+			for (const item of queued) {
+				const index = this.items.indexOf(item);
+				if (index >= 0) this.items.splice(index, 1);
+			}
+			throw error;
+		}
 		for (const item of queued) this.#queueDispatch(item);
 		return queued.map(item => item.id);
 	}

@@ -211,6 +211,7 @@ export class TanCommandController {
 								logger.warn("Tan clone abort failed", { error: String(error) });
 							});
 						};
+						signal.addEventListener("abort", abortClone, { once: true });
 						// The fork inherits the parent's todo list via session entries;
 						// its reminders would drag the tan back onto the parent's task.
 						// Clear runtime state and persist an empty edit so reloads agree.
@@ -293,12 +294,6 @@ export class TanCommandController {
 							}
 						});
 						try {
-							// The listener goes on inside the region whose `finally`
-							// takes it off: the setup above can throw, and a listener
-							// left on the parent's turn signal would reach for a
-							// session the outer `finally` has already disposed. An
-							// abort during that setup is caught by the check below.
-							signal.addEventListener("abort", abortClone, { once: true });
 							if (signal.aborted) {
 								abortClone();
 								throw new Error("Aborted before execution");
