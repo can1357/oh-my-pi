@@ -35,6 +35,7 @@ import type { ToolSession } from "../tools";
 import { routeWriteThroughBridge } from "../tools/acp-bridge";
 import { approvalTargetKey } from "../tools/approval-targets";
 import { strictestApproval, truncateForPrompt } from "../tools/approval";
+import { backupBeforeClobber, clobberBackupNote, forgetCreatedPath, recordCreatedPath } from "../tools/clobber-backup";
 import {
 	deleteFileWithFallback,
 	hasFileWriteFallback,
@@ -544,11 +545,12 @@ export class EditTool implements AgentTool<TInput> {
 		}
 		const editSession = open.native;
 		const batch = getLspBatchRequest(context?.toolCall);
+		const clobberNotes: string[] = [];
 		let outcome;
 		try {
 			outcome = await editSession.apply(
 				{ lspBatchId: batch?.id, lspFlush: batch?.flush ?? false },
-				(_error, request) => this.#write(request, signal),
+				(_error, request) => this.#write(request, signal, clobberNotes),
 			);
 			if (outcome.isError && batch?.flush) {
 				await flushLspWritethroughBatch(batch.id, this.session.cwd, signal);
@@ -564,7 +566,7 @@ export class EditTool implements AgentTool<TInput> {
 
 		if (outcome.isError) {
 			return {
-				content: [{ type: "text", text: outcome.text }],
+				content: [{ type: "text", text: [outcome.text, ...clobberNotes].join("\n") }],
 				details: { diff: "", errorKind: outcome.errorKind },
 				isError: true,
 			};
@@ -576,7 +578,7 @@ export class EditTool implements AgentTool<TInput> {
 			...(details ? { details } : {}),
 		};
 		const record = createEditBlackboxRecorder(this.session, this.mode, params);
-		const notes: string[] = [];
+		const notes: string[] = [...clobberNotes];
 		for (const file of outcome.files) {
 			if (!file.parseRegressed || file.oldText === undefined || file.newText === undefined) continue;
 			const snapshot: AppliedEditSnapshot = {
@@ -701,7 +703,18 @@ export class EditTool implements AgentTool<TInput> {
 		}
 	}
 
-	async #write(request: EditWriteRequest, signal?: AbortSignal): Promise<EditWriteResponse> {
+	/**
+	 * Copy aside what `target` holds before this edit replaces it, when losing
+	 * it would be unrecoverable, and note where the copy went. Never blocks the
+	 * edit: with no note sink the copy is still taken, and a failed copy is
+	 * reported, not raised.
+	 */
+	async #insureClobber(target: string, displayPath: string, notes: string[] | undefined): Promise<void> {
+		const note = clobberBackupNote(await backupBeforeClobber(this.session, target), displayPath);
+		if (note) notes?.push(note);
+	}
+
+	async #write(request: EditWriteRequest, signal?: AbortSignal, clobberNotes?: string[]): Promise<EditWriteResponse> {
 		if (request.op === "delete") {
 			await deleteFileWithFallback(request.path, Bun.file(request.path));
 			if (this.session.enableLsp ?? true) {
@@ -732,9 +745,17 @@ export class EditTool implements AgentTool<TInput> {
 			}
 			const mode = await movedFileMode(request.path);
 			await mkdirAllowingFallback(path.dirname(request.moveTo));
+			const destinationExisted = await Bun.file(request.moveTo).exists();
+			await this.#insureClobber(
+				request.moveTo,
+				path.relative(this.session.cwd, request.moveTo) || request.moveTo,
+				clobberNotes,
+			);
 			await writeFileWithFallback(request.moveTo, request.content);
 			if (mode !== undefined) await chmodMovedFile(request.moveTo, mode);
 			await deleteFileWithFallback(request.path, Bun.file(request.path));
+			if (!destinationExisted) recordCreatedPath(this.session, request.moveTo);
+			forgetCreatedPath(this.session, request.path);
 			if (this.session.enableLsp ?? true) {
 				await notifyWorkspaceWatchedFiles(
 					this.session.cwd,
@@ -778,6 +799,7 @@ export class EditTool implements AgentTool<TInput> {
 		} else if (request.op === "create") {
 			await mkdirAllowingFallback(path.dirname(request.path));
 		}
+		await this.#insureClobber(request.path, request.displayPath, clobberNotes);
 
 		// `begin()` claims this mutation's version; only bump when the writethrough
 		// never began a deferred fetch for the path (LSP off, unflushed batch).
@@ -794,6 +816,7 @@ export class EditTool implements AgentTool<TInput> {
 				return this.#deferredDiagnostics.begin(request.path);
 			},
 		);
+		if (request.op === "create") recordCreatedPath(this.session, request.path);
 
 		if (preWriteBytes !== undefined) {
 			// Fail when a content-changing write left disk at the pre-image. Compare

@@ -545,6 +545,9 @@ export interface ToolSession {
 	/** Native snapshots, clipboard registers, and no-op guard shared by edit calls. */
 	editStore?: EditStore;
 
+	/** Absolute paths this session created, so copy-before-clobber knows what it may replace freely. */
+	clobberCreatedPaths?: Set<string>;
+
 	/** Per-session log of unresolved git merge conflict regions surfaced by
 	 *  `read`. Each entry gets a stable id N referenced by `write conflict://N`
 	 *  to splice the recorded region with replacement content. Lazily initialized
