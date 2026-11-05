@@ -14,7 +14,7 @@
 
 ### Fixed
 
-- `fetchWithRetry` now retries the transport failures the provider classifier already treats as transient, including `EPROTO` TLS-handshake and connection-reset wording, instead of surfacing the rejection immediately
+- `fetchWithRetry` now retries the transport failures the provider classifier already treats as transient, including `EPROTO` TLS-handshake and connection-reset wording, instead of surfacing the rejection immediately ([#18168](https://github.com/can1357/oh-my-pi/pull/18168) by [@excniesNIED](https://github.com/excniesNIED))
 
 ## [18.16.0] - 2026-11-02
 
