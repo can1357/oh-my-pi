@@ -10,7 +10,7 @@
 
 ### Fixed
 
-- Fixed newly published Azure models missing after catalog refresh
+- Fixed newly published Azure models missing after catalog refresh ([#18173](https://github.com/can1357/oh-my-pi/issues/18173), [#18174](https://github.com/can1357/oh-my-pi/pull/18174) by [@dunkpi](https://github.com/dunkpi))
 
 ## [18.16.0] - 2026-11-02
 
