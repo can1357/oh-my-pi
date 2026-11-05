@@ -9,6 +9,7 @@
 - The bash tool's built-in `rsync` now waits for the producer of a FIFO named as `--early-input`, as rsync 3.5.1 does, instead of closing its reader again before the producer opens and leaving it waiting for ever ([#17864](https://github.com/can1357/oh-my-pi/pull/17864) by [@sjawhar](https://github.com/sjawhar))
 - The bash tool's built-in `rsync` now stops its remote shell with SIGUSR1 after its own exit line, as rsync 3.5.1 does, and passes on what the other end prints for it (`received SIGUSR1 (code 19)`), instead of killing it outright the moment the command is cancelled ([#17864](https://github.com/can1357/oh-my-pi/pull/17864) by [@sjawhar](https://github.com/sjawhar))
 - The bash tool's built-in `rsync` now always ends a local copy whose protocol check fails with `received SIGUSR1 (code 19)` from its receiver, as rsync 3.5.1 does, instead of sometimes `received SIGINT, SIGTERM, or SIGHUP (code 20)` ([#17794](https://github.com/can1357/oh-my-pi/pull/17794) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's built-in `rsync --timeout` ending a transfer with `io timeout` while its sender waits for input ([#17849](https://github.com/can1357/oh-my-pi/pull/17849) by [@sjawhar](https://github.com/sjawhar))
 ### Changed
 
 - Made the bash tool's shell faster on string appends (`s+=x`), sourcing files full of function definitions (each body compiles on first call), quoted `"$var"`/`"$1"` arguments and file redirections
