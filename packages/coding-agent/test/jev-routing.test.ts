@@ -327,3 +327,96 @@ describe("filterAvailable edge cases", () => {
 		expect(res.excluded).toEqual([]);
 	});
 });
+
+import { ModelControls } from "../src/session/model-controls";
+import { cfgJevRoutingEnabled, cfgJevRoutingTiers } from "../src/routing";
+
+describe("ModelControls.applyJevRouting sticky hold & context gate", () => {
+	const CHEAP_MODEL = {
+		provider: "openai",
+		id: "gpt-5-mini",
+		api: "openai-responses",
+		kind: "chat",
+		name: "GPT-5 Mini",
+		input: ["text"],
+	} as never;
+
+	const TOP_MODEL = {
+		provider: "openai",
+		id: "gpt-5",
+		api: "openai-responses",
+		kind: "chat",
+		name: "GPT-5",
+		input: ["text"],
+	} as never;
+
+	function makeHost(initialModel = TOP_MODEL) {
+		let activeModel = initialModel;
+		const switches: string[] = [];
+		const settings = Settings.isolated({});
+		cfgJevRoutingEnabled.set(settings, true);
+		cfgJevRoutingTiers.set(settings, [
+			{ id: "cheap", model: "openai/gpt-5-mini", capability: "simple", availability: { maxContextTokens: 16_000 } },
+			{ id: "top", model: "openai/gpt-5", capability: "complex", availability: { maxContextTokens: 8_000 } },
+		]);
+		const host = {
+			agent: {
+				setThinkingLevel: () => {},
+				setDisableReasoning: () => {},
+				metadataForProvider: () => undefined,
+			},
+			settings,
+			modelRegistry: {
+				getAvailable: () => [CHEAP_MODEL, TOP_MODEL],
+				hasConfiguredAuth: () => true,
+				refreshSelectedModelMetadata: async (m: unknown) => m,
+				clearSuppressedSelector: () => {},
+				resolver: () => "test-key",
+			},
+			sessionManager: {
+				appendModelChange: () => {},
+				appendThinkingLevelChange: () => {},
+				getLastModelChangeRole: () => undefined,
+			},
+			providerSessionState: new Map(),
+			model: () => activeModel,
+			sessionId: () => "sess-1",
+			promptGeneration: () => 1,
+			resolveActiveEditMode: () => "hashline",
+			syncAfterModelChange: async () => {},
+			setModelWithProviderSessionReset: async (m: { id: string }) => {
+				activeModel = m as never;
+				switches.push(m.id);
+			},
+			clearActiveRetryFallback: () => {},
+			clearInheritedProviderPromptCacheKey: () => {},
+			magicKeywordEnabled: () => false,
+			emit: () => {},
+			emitSessionEvent: async () => {},
+			emitNotice: () => {},
+		};
+		return { host: host as never, switches, settings };
+	}
+
+	it("routes to the sole available tier and holds sticky across follow-up turns until gated or compacted", async () => {
+		const { host, switches, settings } = makeHost(TOP_MODEL);
+		const controls = new ModelControls(host, {});
+
+		// At contextTokens=12_000, 'top' (max 8_000) is gated and only 'cheap' (max 16_000) is available -> switches to cheap.
+		await controls.applyJevRouting("fix typo", 1, 12_000);
+		expect(switches).toEqual(["gpt-5-mini"]);
+
+		// Now raise 'top' maxContextTokens to 64_000 so both tiers are available.
+		// Because 'cheap' is sticky and contextTokens=14_000 (> 50% of 12_000), sticky hold preserves 'cheap' without judge call.
+		cfgJevRoutingTiers.set(settings, [
+			{ id: "cheap", model: "openai/gpt-5-mini", capability: "simple", availability: { maxContextTokens: 16_000 } },
+			{ id: "top", model: "openai/gpt-5", capability: "complex", availability: { maxContextTokens: 64_000 } },
+		]);
+		await controls.applyJevRouting("another follow-up", 1, 14_000);
+		expect(switches).toEqual(["gpt-5-mini"]);
+
+		// When contextTokens grows to 20_000, 'cheap' (max 16_000) is gated -> exits sticky hold and switches to sole available 'top'.
+		await controls.applyJevRouting("large context turn", 1, 20_000);
+		expect(switches).toEqual(["gpt-5-mini", "gpt-5"]);
+	});
+});

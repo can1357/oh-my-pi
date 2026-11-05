@@ -987,7 +987,8 @@ export class ModelControls {
 			);
 			return;
 		}
-		const top = tiers[tiers.length - 1];
+		const availableTiers = tiers.filter(t => filtered.available.some(a => a.id === t.id));
+		const top = availableTiers[availableTiers.length - 1] ?? tiers[tiers.length - 1];
 		const current = this.#model;
 
 		// User override: a current model outside the pool that routing did not
@@ -1045,7 +1046,7 @@ export class ModelControls {
 
 		if (this.#host.promptGeneration() !== generation) return;
 
-		const target = tiers.find(t => t.id === decision.tier) ?? top;
+		const target = availableTiers.find(t => t.id === decision.tier) ?? top;
 		if (current && modelsAreEqual(target.model, current)) {
 			this.#routedTierId = target.id;
 			this.#lastRoutedAt = Date.now();
