@@ -44,11 +44,7 @@ thiserror = "2.0.18"
 ansi-width = "0.1.1"
 argmax = "0.4.0"
 bigdecimal = "0.4"
-binary-heap-plus = "0.5.0"
 bstr = "1.12.0"
-bytecount = { version = "0.6.8", features = ["runtime-dispatch-simd"] }
-codesnake = "0.3"
-compare = "0.1.0"
 flume = "0.12"
 foldhash = "0.2.0"
 glob = "0.3.1"
@@ -60,7 +56,6 @@ grep-printer = "0.3"
 grep-regex = "0.1"
 grep-searcher = "0.1"
 hex = "0.4.3"
-hostname = "0.4"
 # `sort` collates and reads numbers per call from the shell's locale; uucore's
 # i18n helpers cache one process-wide locale.
 icu_collator = { version = "2.0", default-features = false, features = ["compiled_data"] }
@@ -70,8 +65,6 @@ icu_provider = { version = "2.0", default-features = false }
 ignore = "0.4"
 indicatif = "0.18.0"
 jaq-core = "3.1.1"
-# `@csv` and `@tsv` moved here in jaq 3; the other formats stay out.
-jaq-fmts = { version = "0.1.1", default-features = false, features = ["tabular"] }
 jaq-json = "2.0.3"
 jaq-std = "3.0.3"
 jiff = { version = "0.2.18", features = ["tzdb-bundle-platform"] }
@@ -84,9 +77,9 @@ onig = { version = "6.4", default-features = false }
 os_display = "0.1.4"
 parse_datetime = "0.16"
 pi-ast = { workspace = true, optional = true }
+pi-diff.workspace = true
 pi-walker.workspace = true
 pi-vfs.workspace = true
-platform-info = "2.0.3"
 rand = { version = "0.10.0", features = ["std_rng"] }
 rayon = "1.10"
 regex = "1.11"
@@ -94,13 +87,11 @@ rustc-hash = "2.1.1"
 self_cell = "1.0.4"
 serde_json = "1"
 smallvec.workspace = true
-similar = "3.2.0"
 tempfile = "3.15.0"
 tokio-util = "0.7"
 xutf.workspace = true
 libc = "0.2.172"
 uutils_term_grid = "0.8"
-yansi = "1.0.1"
 
 [dependencies.uucore]
 version = "0.8.0"
@@ -166,25 +157,25 @@ dns-lookup = "3.0.1"
 [target."cfg(unix)".dependencies]
 nix = { version = "0.31.3", features = ["fs", "poll", "process", "resource", "signal", "term", "user"] }
 notify = { version = "=8.2.0", features = ["macos_kqueue"] }
-rlimit = "0.11.0"
-rustix = { version = "1.1.4", features = ["fs", "process", "time"] }
+rustix = { version = "1.1.4", features = ["fs", "process", "system", "time"] }
 uucore = { version = "0.8.0", features = ["fsxattr", "safe-traversal"] }
 
 [target."cfg(windows)".dependencies]
 notify = "=8.2.0"
 rustix = { version = "1.1.4", features = ["fs", "process", "time"] }
 windows-sys = { version = "0.61", features = [
+  "Wdk_System_SystemServices",
   "Win32_Foundation",
   "Win32_Networking_WinSock",
   "Win32_Storage_FileSystem",
   "Win32_System_IO",
   "Win32_System_SystemInformation",
+  "Win32_System_SystemServices",
   "Win32_System_WindowsProgramming",
 ] }
 
 [dev-dependencies]
 anyhow = "1.0.102"
-pretty_assertions = { version = "1.4.1", features = ["unstable"] }
 tempfile = "3"
 
 [features]

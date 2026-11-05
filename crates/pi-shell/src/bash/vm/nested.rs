@@ -222,7 +222,17 @@ fn launch(
 		.map_or_else(|| cx.host.user().home, |h| BString::from(h.as_bytes()));
 	let mut startup = Vec::new();
 	let mut notes = Vec::new();
-	match args.startup_files(pairs, &home, args.interactive) {
+	// A program's shell sets up no user completion or history: an
+	// interactive nested shell skips its rc files
+	// ([`crate::bash::Profile::Tool`]).
+	let rc = match super::is_tool(cx.store, vp) {
+		Ok(tool) => !tool,
+		Err(err) => {
+			k.fail(err);
+			return Some(Flow::Discard(1));
+		},
+	};
+	match args.startup_files_with(pairs, &home, args.interactive, rc) {
 		Ok(files) => {
 			for candidates in files {
 				for path in candidates {
@@ -267,6 +277,16 @@ fn launch(
 		*s = stdin;
 	}
 	child.frames.push(Frame::new(None, 0, kind));
+	if k.mask.contains(crate::bash::event::EventKind::UnitCompiled)
+		&& !stdin
+		&& k.trace_sources.len() < crate::bash::trace::history::HISTORY_EVENTS
+		&& let Some(origin) = exec::literal_script_origin(vp, src, true)
+	{
+		k.trace_sources
+			.entry(child.vpid)
+			.or_default()
+			.insert(child.frames.len(), origin);
+	}
 	for text in startup.iter().rev() {
 		push_script(&mut child, text, 1, ScriptKind::Source);
 	}
@@ -319,6 +339,11 @@ fn fresh_shell(
 		MiscKey::LastArg,
 		MiscKey::History,
 		MiscKey::HistoryCounts,
+		MiscKey::HistoryTimes,
+		MiscKey::ZshHistory,
+		MiscKey::ZshHistoryState,
+		MiscKey::ZshHistoryLine,
+		MiscKey::ZshHistoryStack,
 		MiscKey::DisabledBuiltins,
 		MiscKey::LoadedBuiltins,
 		MiscKey::ForeignEnv,
@@ -392,9 +417,12 @@ fn fresh_shell(
 	};
 	let need_shell = !matches!(ov.vars.get(&b"SHELL"[..]), Some(Some(_)));
 	let values = if args.mode.dialect() == crate::bash::ids::Dialect::Zsh {
-		super::zsh_startup_values(cx)
+		super::zsh_startup_values(cx, k.engine.config().platform)
 	} else {
-		startup_values(cx, &args.shell_name, ppid, need_shell)
+		startup_values(cx, &args.shell_name, ppid, k.engine.config().platform, super::StartupVars {
+			lookup_shell: need_shell,
+			interactive:  args.interactive,
+		})
 	};
 	for (name, var, forced) in values {
 		if forced || !matches!(ov.vars.get(name), Some(Some(_))) {

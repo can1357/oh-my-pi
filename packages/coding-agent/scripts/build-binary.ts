@@ -1,6 +1,5 @@
 #!/usr/bin/env bun
 
-import { createRequire } from "node:module";
 import * as path from "node:path";
 import { compileCodingAgent } from "./compile-binary";
 
@@ -40,22 +39,6 @@ export function resolveCrossBuild(value: string | undefined): CrossBuild | null 
 	}
 }
 
-// Transformers.js is an optional, native-heavy dependency that is never bundled
-// into the binary; the tiny-model worker `bun install`s it into a runtime cache
-// on first use. The `catalog:` spec cannot be resolved from inside the compiled
-// bunfs (issue #1763), so embed the concrete installed version here for the
-// worker to pin its runtime install against.
-const transformersManifest: unknown = createRequire(import.meta.url)("@huggingface/transformers/package.json");
-if (
-	typeof transformersManifest !== "object" ||
-	transformersManifest === null ||
-	!("version" in transformersManifest) ||
-	typeof transformersManifest.version !== "string"
-) {
-	throw new Error("@huggingface/transformers package manifest has no string version");
-}
-const transformersVersion = transformersManifest.version;
-
 async function runCommand(command: string[]): Promise<void> {
 	const proc = Bun.spawn(command, {
 		cwd: packageDir,
@@ -87,7 +70,6 @@ async function main(): Promise<void> {
 			repoRoot,
 			entrypoint: path.join(packageDir, "src", "cli.ts"),
 			outfile: outputPath,
-			transformersVersion,
 			native: crossBuild ?? { platform: process.platform, arch: process.arch },
 			target: crossBuild?.target,
 			executablePath: Bun.env.BUN_COMPILE_EXECUTABLE_PATH || undefined,

@@ -398,6 +398,16 @@ pub enum Diag {
 		/// What it reports.
 		diag: Box<Self>,
 	},
+	/// A zsh message printed with a line of its own instead of the
+	/// command's: zsh's parser messages while `zcompile` reads a file
+	/// carry the line in that file.
+	#[error("{msg}")]
+	ZshAtLine {
+		/// The line zsh prints.
+		line: u32,
+		/// Message.
+		msg:  BString,
+	},
 	/// A non-fatal parser warning (``warning: here-document at line 2 …``).
 	#[error("{msg}")]
 	Warning {
@@ -596,6 +606,9 @@ pub struct ZshSite<'a> {
 	/// zsh's `lineno` (relative to the function, the eval'd string, the
 	/// file); 0 prints no line.
 	pub line:   u32,
+	/// `MULTIBYTE` in a UTF-8 locale: names print UTF-8 characters as they
+	/// are (zsh `nicezputs`); otherwise every non-ASCII byte is `\M-x`.
+	pub utf8:   bool,
 }
 
 /// The full stderr line for `diag` printed by zsh-dialect code (zsh
@@ -621,25 +634,75 @@ pub fn render_zsh(diag: &Diag, site: ZshSite<'_>) -> Vec<u8> {
 		},
 		_ => diag,
 	};
-	if site.line > 0 {
-		out.extend_from_slice(site.line.format_into(&mut fmt::NumBuffer::new()).as_bytes());
+	// Without a script name (`shinstdin`) zsh prints no line at all.
+	let line = match body {
+		Diag::ZshAtLine { line, .. } if !site.prefix.is_empty() => *line,
+		_ => site.line,
+	};
+	if line > 0 {
+		out.extend_from_slice(line.format_into(&mut fmt::NumBuffer::new()).as_bytes());
 		out.extend_from_slice(b": ");
 	} else {
 		out.push(b' ');
 	}
-	zsh_message(body, &mut out);
+	zsh_message(body, site.utf8, &mut out);
 	out.push(b'\n');
 	out
 }
 
+/// zsh `nicechar` of byte `c`: `\M-` for a byte with the top bit, `^X`
+/// for a control character, `^?`, `\n`, `\t`.
+fn zsh_nicechar(c: u8, out: &mut Vec<u8>) {
+	let mut c = c;
+	if c & 0x80 != 0 {
+		out.extend_from_slice(b"\\M-");
+		c &= 0x7f;
+		if (0x20..0x7f).contains(&c) {
+			out.push(c);
+			return;
+		}
+	}
+	match c {
+		0x7f => out.extend_from_slice(b"^?"),
+		b'\n' => out.extend_from_slice(b"\\n"),
+		b'\t' => out.extend_from_slice(b"\\t"),
+		0..0x20 => {
+			out.push(b'^');
+			out.push(c + 0x40);
+		},
+		_ => out.push(c),
+	}
+}
+
+/// zsh `nicezputs` of the raw text `s` (the `%s` of `zerr`): printable
+/// characters as they are (UTF-8 ones with `utf8`), the rest by
+/// [`zsh_nicechar`], an undecodable byte at a time.
+fn zsh_nicezputs(s: &[u8], utf8: bool, out: &mut Vec<u8>) {
+	let mut i = 0;
+	while i < s.len() {
+		if utf8 && s[i] > 0x7f {
+			let (ch, len) = bstr::decode_utf8(&s[i..]);
+			if let Some(ch) = ch
+				&& !ch.is_control()
+			{
+				out.extend_from_slice(&s[i..i + len]);
+				i += len;
+				continue;
+			}
+		}
+		zsh_nicechar(s[i], out);
+		i += 1;
+	}
+}
+
 /// zsh's text for the condition `diag` reports, where it differs from
 /// bash's (zsh 5.9 `exec.c`, `params.c`, `glob.c`, `subst.c` messages).
-fn zsh_message(diag: &Diag, out: &mut Vec<u8>) {
+fn zsh_message(diag: &Diag, utf8: bool, out: &mut Vec<u8>) {
 	use std::io::Write;
 
 	let text = |out: &mut Vec<u8>, a: &[u8], b: &[u8]| {
 		out.extend_from_slice(a);
-		out.extend_from_slice(b);
+		zsh_nicezputs(b, utf8, out);
 	};
 	match diag {
 		Diag::CommandNotFound { name } => text(out, b"command not found: ", name),
@@ -650,7 +713,7 @@ fn zsh_message(diag: &Diag, out: &mut Vec<u8>) {
 		Diag::InvalidIdent { name } => text(out, b"not an identifier: ", name),
 		Diag::NoMatch { pattern } => text(out, b"no matches found: ", pattern),
 		Diag::Unbound { name } => {
-			out.extend_from_slice(name);
+			zsh_nicezputs(name, utf8, out);
 			out.extend_from_slice(b": parameter not set");
 		},
 		Diag::BadSubst { .. } => out.extend_from_slice(b"bad substitution"),

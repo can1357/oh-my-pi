@@ -1,7 +1,26 @@
 import type { Message } from "@oh-my-pi/pi-ai";
 import { messageTexts } from "../context";
 import type { CallContext, ShapedTool } from "../types";
-import { identifiers, norm, WITNESS_CHARS, words } from "./lines";
+import { identifiers, norm, pairKey, WITNESS_CHARS, words } from "./lines";
+
+/** What of the model's context a result's lines are checked against before they collapse as shown before. */
+export interface Seen {
+	/** Normalised lines (≥ {@link WITNESS_CHARS} chars). */
+	lines: Set<string>;
+	/**
+	 * Each normalised line paired with the next of the same text ({@link pairKey}), short and blank lines included: a
+	 * run collapses only in the order the context holds it, so a dropped, moved or changed line splits it.
+	 */
+	pairs: Set<string>;
+}
+
+/** Keys of one text (or several) for a {@link Seen}. */
+interface SeenKeys {
+	lines: string[];
+	pairs: string[];
+}
+
+const emptySeen = (): Seen => ({ lines: new Set(), pairs: new Set() });
 
 /**
  * Per-session shaping state. Every result is decided once, at arrival; this is what later results read:
@@ -9,16 +28,16 @@ import { identifiers, norm, WITNESS_CHARS, words } from "./lines";
  */
 export interface ShapeState {
 	/**
-	 * Normalised lines (≥ 12 chars) already in the agent's context: task, its words, commands, earlier results. Rebuilt
+	 * Lines already in the agent's context, and their order: task, its words, commands, earlier results. Rebuilt
 	 * from the model's context before each result ({@link syncSeen}), so lines that left it (compaction, a prune, a
 	 * clear, another branch) no longer count.
 	 */
-	seen: Set<string>;
+	seen: Seen;
 	/**
-	 * Lines noted per call whose result is not in the context yet (a sibling call of the same turn): they stay seen
+	 * Keys noted per call whose result is not in the context yet (a sibling call of the same turn): they stay seen
 	 * across a {@link syncSeen} until the call's result lands there or the call leaves the context.
 	 */
-	pending: Map<string, string[]>;
+	pending: Map<string, SeenKeys>;
 	/** Identifiers of the conversation (task, what the agent said, intents, commands): bodies it names stay open. */
 	names: Set<string>;
 	/** Lowercase words of the conversation, for the window's lexical score. */
@@ -37,7 +56,7 @@ export interface ShapeState {
 
 export function newShapeState(): ShapeState {
 	return {
-		seen: new Set(),
+		seen: emptySeen(),
 		pending: new Map(),
 		names: new Set(),
 		words: new Set(),
@@ -55,14 +74,22 @@ export function newShapeState(): ShapeState {
  */
 const kSeenKeys = Symbol("spotlight.seenKeys");
 
-type KeyedMessage = Message & { [kSeenKeys]?: string[] };
+type KeyedMessage = Message & { [kSeenKeys]?: SeenKeys };
 
-function seenKeys(text: string, out: string[] = []): string[] {
+function seenKeys(text: string, out: SeenKeys = { lines: [], pairs: [] }): SeenKeys {
+	let prev: string | undefined;
 	for (const line of text.split("\n")) {
 		const key = norm(line);
-		if (key.length >= WITNESS_CHARS) out.push(key);
+		if (key.length >= WITNESS_CHARS) out.lines.push(key);
+		if (prev !== undefined) out.pairs.push(pairKey(prev, key));
+		prev = key;
 	}
 	return out;
+}
+
+function addKeys(seen: Seen, keys: SeenKeys): void {
+	for (const key of keys.lines) seen.lines.add(key);
+	for (const pair of keys.pairs) seen.pairs.add(pair);
 }
 
 /**
@@ -72,18 +99,18 @@ function seenKeys(text: string, out: string[] = []): string[] {
  * longer counts, so its lines never collapse to "as shown before". Each call shaped resyncs first.
  */
 export function syncSeen(state: ShapeState, messages: readonly Message[]): void {
-	const seen = new Set<string>();
+	const seen = emptySeen();
 	const calls = new Set<string>();
 	const results = new Set<string>();
 	for (const message of messages) {
 		const keyed = message as KeyedMessage;
 		let keys = keyed[kSeenKeys];
 		if (!keys) {
-			keys = [];
+			keys = { lines: [], pairs: [] };
 			for (const text of messageTexts(message)) seenKeys(text, keys);
 			if (Object.isExtensible(keyed)) Object.defineProperty(keyed, kSeenKeys, { value: keys });
 		}
-		for (const key of keys) seen.add(key);
+		addKeys(seen, keys);
 		if (message.role === "toolResult") results.add(message.toolCallId);
 		else if (message.role === "assistant") {
 			for (const block of message.content) if (block.type === "toolCall") calls.add(block.id);
@@ -94,18 +121,21 @@ export function syncSeen(state: ShapeState, messages: readonly Message[]): void 
 			state.pending.delete(id);
 			continue;
 		}
-		for (const key of keys) seen.add(key);
+		addKeys(seen, keys);
 	}
 	state.seen = seen;
 }
 
 function addSeen(state: ShapeState, text: string, toolCallId: string | undefined): void {
 	const keys = seenKeys(text);
-	for (const key of keys) state.seen.add(key);
-	if (toolCallId === undefined || keys.length === 0) return;
+	addKeys(state.seen, keys);
+	if (toolCallId === undefined || (keys.lines.length === 0 && keys.pairs.length === 0)) return;
 	const pending = state.pending.get(toolCallId);
-	if (pending) pending.push(...keys);
-	else state.pending.set(toolCallId, keys);
+	if (!pending) state.pending.set(toolCallId, keys);
+	else {
+		for (const key of keys.lines) pending.lines.push(key);
+		for (const pair of keys.pairs) pending.pairs.push(pair);
+	}
 }
 
 function addConversation(state: ShapeState, text: string): void {
