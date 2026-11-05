@@ -232,3 +232,69 @@ it("refuses within a tick when the block starts while the broker refresh hangs",
 	expect(elapsedMs).toBeLessThan(5_000);
 	expect(settled).toBe(true);
 }, 120_000);
+
+it("leaves no refresh tick behind when the proxy awaits subscription rejects", async () => {
+	// The refresh takes its re-read tick before it subscribes, and a worker's
+	// subscription is an RPC request that main can reject. A rejection must
+	// release the tick with everything else: otherwise an ended call goes on
+	// reading main's awaits table once a second until the worker exits.
+	const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "awaits-setup-"));
+	cleanups.push(() => fs.rm(cwd, { recursive: true, force: true }));
+	const runtimeDir = getDaemonRuntimeDir(await canonicalProjectDir(cwd));
+	await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
+	const token = path.join(runtimeDir, "broker.token");
+	expect(Bun.spawnSync(["mkfifo", token]).exitCode).toBe(0);
+
+	const registry = AgentRegistry.global();
+	for (const id of ["Main", "Child"] as const) {
+		registry.register({
+			id,
+			displayName: id,
+			kind: id === "Main" ? "main" : "sub",
+			...(id === "Child" ? { parentId: "Main" } : {}),
+			session: { isStreaming: true } as never,
+			status: "running",
+		});
+	}
+	const probe = await startWorker();
+	cleanups.push(() => probe.close());
+	cleanups.push(async () => {
+		try {
+			const handle = await fs.open(token, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
+			await handle.writeFile("0".repeat(32), "utf8");
+			await handle.close();
+		} catch {
+			// No reader left: nothing to release.
+		}
+		await fs.rm(token, { force: true });
+	});
+
+	// Count the reads the worker's tick would make, over the real link.
+	let reads = 0;
+	const realWaitersOn = registry.awaits.waitersOn.bind(registry.awaits);
+	vi.spyOn(registry.awaits, "waitersOn").mockImplementation(id => {
+		reads++;
+		return realWaitersOn(id);
+	});
+	vi.spyOn(registry.awaits, "onChange").mockImplementation(() => {
+		throw new Error("injected awaits subscription setup failure");
+	});
+
+	const failures: string[] = [];
+	for (let attempt = 0; attempt < 3; attempt++) {
+		try {
+			await probe.childIdleTextWithBroker(cwd, 1);
+		} catch (error) {
+			failures.push(String(error));
+		}
+	}
+	expect(failures).toHaveLength(3);
+	const readsWhenRejected = reads;
+	// A leak has no event to await, and the timer that would fire it lives in
+	// another thread, where no fake clock of this one reaches: the only way to
+	// see it is to let real time pass. 2.4 s is past all three one-second call
+	// deadlines and two re-read intervals, so a surviving tick has fired twice.
+	await Bun.sleep(2_400);
+
+	expect(reads).toBe(readsWhenRejected);
+}, 120_000);

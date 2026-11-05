@@ -43,17 +43,20 @@ const WAIT_NOTICE_RUNG = 1;
 const WAIT_SETTLE_WINDOW_MS = 1500;
 const PROGRESS_INTERVAL_MS = 500;
 /**
- * How often a parked idle wait re-reads who is blocked on the caller, instead
- * of trusting only the change notification.
+ * How often an idle wait re-reads who is blocked on the caller, instead of
+ * trusting only the change notification: on the parked block and on the
+ * owned-service refresh that runs before it.
  *
  * A forwarded subscription can be dropped on main after a single failed
  * delivery (`MainSessionBridge.forward`), and a worker then never hears that a
- * block started; without a re-read the caller would park on for its whole
+ * block started; without a re-read the caller would hold on for its whole
  * deadline while an agent waits on its result. One second because the read is
  * cheap — an in-memory graph walk on main, one sync call on an already-open
- * link in a worker, the same call this block already makes once on entry — and
- * because `timeout` itself is clamped to whole seconds, so a finer tick could
- * not show up in the result anyway.
+ * link in a worker, the same call the idle wait already makes once on entry —
+ * and because the refusal it produces is worth at most the rest of a deadline
+ * the caller chose in seconds. A `timeout` is bounded, not rounded
+ * (`clampTimeout`), so a fractional one keeps its fraction: `timeout: 1.25`
+ * returns at about 1,264 ms, having re-read once.
  */
 const WAITERS_RECHECK_INTERVAL_MS = 1_000;
 
@@ -330,52 +333,49 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			...(signal ? [signal] : []),
 			...(budgetMs === undefined ? [] : [AbortSignal.timeout(budgetMs)]),
 		]);
-		const refresh = listServicesTolerant(this.session, refreshSignal).then(
-			() => undefined,
-			(error: unknown) => ({ error }),
-		);
-		const stopped = Promise.withResolvers<undefined>();
-		const onStop = () => stopped.resolve(undefined);
-		// An abort event does not replay: a signal already aborted when the
-		// listener goes on (an interrupt that landed before the refresh began)
-		// would never resolve `stopped`, and the race would run to the broker's
-		// own completion instead of the caller's bound.
-		if (refreshSignal.aborted) onStop();
-		else refreshSignal.addEventListener("abort", onStop, { once: true });
-		// An agent may start blocking on the caller while the broker answers.
-		// The change notification is not trusted on its own, for the same
-		// reason the parked idle block does not trust it: a worker's registry
-		// is a proxy, and main drops a forwarded subscription after one failed
-		// delivery. So the table is re-read on the same tick as there. Without
-		// that re-read a lost notification keeps the caller's parent blocked
-		// for the broker's whole answer, up to the caller's entire `timeout`.
 		const checkAwaited = () => {
 			if (awaited().length > 0) awaitedStop.abort();
 		};
-		const recheck = setInterval(checkAwaited, WAITERS_RECHECK_INTERVAL_MS);
-		recheck.unref?.();
-		// Every release this race acquires registers here, so each one runs
-		// however the race ends: a refresh that threw must leave behind neither
-		// the subscription, nor the abort listener, nor the tick.
-		const cleanup: Array<() => void> = [
-			() => clearInterval(recheck),
-			() => refreshSignal.removeEventListener("abort", onStop),
-		];
-		const unsubscribe = registry?.awaits.onChange(checkAwaited);
-		if (unsubscribe) cleanup.push(unsubscribe);
+		const stopped = Promise.withResolvers<undefined>();
+		const onStop = () => stopped.resolve(undefined);
+		// Everything the race acquires registers its release here as it is
+		// taken, and the `finally` below runs them however the race ends.
+		// Setting the race up calls out to the caller's registry, and a
+		// worker's is an RPC proxy whose subscription request can reject: that
+		// must not strand the tick, which would go on reading main's awaits
+		// table once a second for a call that already ended.
+		const cleanup: Array<() => void> = [];
 		let failure: { error: unknown } | undefined;
 		try {
+			const refresh = listServicesTolerant(this.session, refreshSignal).then(
+				() => undefined,
+				(error: unknown) => ({ error }),
+			);
+			// An abort event does not replay: a signal already aborted when the
+			// listener goes on (an interrupt that landed before the refresh began)
+			// would never resolve `stopped`, and the race would run to the broker's
+			// own completion instead of the caller's bound.
+			if (refreshSignal.aborted) onStop();
+			else {
+				refreshSignal.addEventListener("abort", onStop, { once: true });
+				cleanup.push(() => refreshSignal.removeEventListener("abort", onStop));
+			}
+			// An agent may start blocking on the caller while the broker answers.
+			// The change notification is not trusted on its own, for the same
+			// reason the parked idle block does not trust it: a worker's registry
+			// is a proxy, and main drops a forwarded subscription after one failed
+			// delivery. So the table is re-read on the same tick as there. Without
+			// that re-read a lost notification keeps the caller's parent blocked
+			// for the broker's whole answer, up to the caller's entire `timeout`.
+			const recheck = setInterval(checkAwaited, WAITERS_RECHECK_INTERVAL_MS);
+			recheck.unref?.();
+			cleanup.push(() => clearInterval(recheck));
+			const unsubscribe = registry?.awaits.onChange(checkAwaited);
+			if (unsubscribe) cleanup.push(unsubscribe);
 			failure = await Promise.race([refresh, stopped.promise]);
 		} finally {
 			releaseAll([...cleanup].reverse());
 		}
-		// An interrupt landing during the refresh (most often the notice of the
-		// job this wait is for) ends the wait as one landing just after it does:
-		// the checks after the refresh and the aborted wake path. A deadline
-		// passing during it does too: the block finds no budget left and returns
-		// at once with what tracking it has. So does an agent starting to block
-		// on the caller: the idle branch refuses. Any other failure is the
-		// caller's to see.
 		if (failure && !refreshSignal.aborted) throw failure.error;
 	}
 
