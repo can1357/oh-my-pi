@@ -1,7 +1,8 @@
 //! How the cli tests start processes, all through [`command`]: hermetic
-//! (none of the caller's environment, a fixed [`PATH`], stdin `/dev/null`,
-//! stdout and stderr pipes, on Unix nothing but stdio inherited) and bounded
-//! (on Unix in its own process group, killed with whatever it left in it).
+//! (none of the caller's environment — a fixed [`PATH`] and the account's
+//! own name, nothing else — stdin `/dev/null`, stdout and stderr pipes, on
+//! Unix nothing but stdio inherited) and bounded (on Unix in its own
+//! process group, killed with whatever it left in it).
 
 #![allow(dead_code, reason = "each test crate uses a subset")]
 
@@ -12,6 +13,12 @@ use std::{
 	thread::{self, JoinHandle},
 	time::{Duration, Instant},
 };
+#[cfg(unix)]
+use std::{
+	ffi::{CStr, OsString},
+	os::unix::ffi::OsStringExt as _,
+	sync::LazyLock,
+};
 
 /// The `PATH` the test process gets, instead of the caller's. The tests
 /// that run a real external (`sh`, `cat`) need one, and a fixed one keeps
@@ -19,6 +26,50 @@ use std::{
 /// `PATH` has no coreutils, `cat` was not found and the test failed. A test
 /// that cares about the search sets its own.
 const PATH: &str = "/usr/bin:/bin";
+
+/// The name of the account the tests run as, read from the password
+/// database rather than taken from the caller's `USER`.
+///
+/// The shell answers `$USERNAME` out of `USER`
+/// (`crates/pi-shell/src/process/host.rs`, `read_user`), and two tests need
+/// a real name in it: `zsh_mod_files_owners_match_zsh` chowns to
+/// `$USERNAME` and `zsh_mod_watch` watches `$USER`. Clearing the
+/// environment leaves them with no name at all, and inheriting one lets the
+/// caller hand them somebody else's; the uid answers the question the tests
+/// are actually asking.
+#[cfg(unix)]
+static ACCOUNT_NAME: LazyLock<Option<OsString>> = LazyLock::new(|| {
+	let mut buf = vec![0u8; 1024];
+	loop {
+		// SAFETY: `passwd` is plain data, so an all-zero one is valid; the
+		// call below overwrites it before anything reads it.
+		let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+		let mut found: *mut libc::passwd = std::ptr::null_mut();
+		// SAFETY: `pwd`, `found` and `buf` are live for the call and passed
+		// with `buf`'s real length; `getpwuid_r` writes only into them, and
+		// `getuid` has no preconditions.
+		let rc = unsafe {
+			libc::getpwuid_r(
+				libc::getuid(),
+				std::ptr::from_mut(&mut pwd),
+				buf.as_mut_ptr().cast(),
+				buf.len(),
+				std::ptr::from_mut(&mut found),
+			)
+		};
+		if rc == libc::ERANGE && buf.len() < 1 << 16 {
+			buf.resize(buf.len() * 2, 0);
+			continue;
+		}
+		if rc != 0 || found.is_null() {
+			return None;
+		}
+		// SAFETY: a non-null `found` means `pwd` is filled in and `pw_name`
+		// points into `buf`, which is still alive here.
+		let name = unsafe { CStr::from_ptr(pwd.pw_name) };
+		return Some(OsString::from_vec(name.to_bytes().to_vec()));
+	}
+});
 
 /// How long a test process may run before it is killed.
 pub const LIMIT: Duration = Duration::from_secs(30);
@@ -45,6 +96,10 @@ pub fn open_fds() -> Vec<i32> {
 pub fn command(program: impl AsRef<OsStr>) -> Command {
 	let mut cmd = Command::new(program);
 	cmd.env_clear().env("PATH", PATH);
+	#[cfg(unix)]
+	if let Some(user) = ACCOUNT_NAME.as_deref() {
+		cmd.env("USER", user);
+	}
 	cmd.stdin(Stdio::null())
 		.stdout(Stdio::piped())
 		.stderr(Stdio::piped());
