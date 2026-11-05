@@ -917,36 +917,49 @@ exit 64
 				...rest,
 			)) as typeof globalThis.setTimeout);
 
+		// Tell the two runs apart by dispatch order, not by command text: the line
+		// executeBash hands the shell is the command plus whatever the host prepends
+		// (a PI_SHELL_PREFIX / CLAUDE_CODE_SHELL_PREFIX shell prefix, a direnv
+		// `unset -v`). The owner is dispatched first, and the overlapping command is
+		// not started until it has been.
 		const ownerResult = Promise.withResolvers<ShellRunResult>();
 		const isolatedResult = Promise.withResolvers<ShellRunResult>();
-		const ownerDispatched = Promise.withResolvers<void>();
-		const isolatedDispatched = Promise.withResolvers<void>();
-		vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation(options => {
-			if (options.command === "owner") {
-				ownerDispatched.resolve();
+		const ownerDispatched = Promise.withResolvers<Shell>();
+		const isolatedDispatched = Promise.withResolvers<Shell>();
+		let runCalls = 0;
+		vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation(function (this: Shell) {
+			runCalls++;
+			if (runCalls === 1) {
+				ownerDispatched.resolve(this);
 				return ownerResult.promise;
 			}
-			isolatedDispatched.resolve();
+			isolatedDispatched.resolve(this);
 			return isolatedResult.promise;
 		});
-		const abortSpy = vi.spyOn(piNatives.Shell.prototype, "abort").mockResolvedValue();
+		const abortedShells: Shell[] = [];
+		vi.spyOn(piNatives.Shell.prototype, "abort").mockImplementation(function (this: Shell) {
+			abortedShells.push(this);
+			return Promise.resolve();
+		});
 
 		const owner = executeBash("owner", {
 			cwd: tempDir,
 			timeout: 0,
 			sessionKey: "stalled-one-shot-timeout",
 		});
-		await ownerDispatched.promise;
+		const ownerShell = await ownerDispatched.promise;
 		const overlapping = executeBash("isolated", {
 			cwd: tempDir,
 			timeout: 1000,
 			sessionKey: "stalled-one-shot-timeout",
 		});
-		await isolatedDispatched.promise;
+		const isolatedShell = await isolatedDispatched.promise;
 
 		const result = await overlapping;
 		expect(result.cancelled).toBe(true);
-		expect(abortSpy).toHaveBeenCalledTimes(1);
+		expect(isolatedShell).not.toBe(ownerShell);
+		expect(abortedShells).toHaveLength(1);
+		expect(abortedShells[0]).toBe(isolatedShell);
 
 		isolatedResult.resolve({ exitCode: undefined, cancelled: true, timedOut: true });
 		ownerResult.resolve({ exitCode: 0, cancelled: false, timedOut: false });
