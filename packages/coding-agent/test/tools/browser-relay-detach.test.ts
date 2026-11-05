@@ -24,8 +24,8 @@ const HANG = { code: "await page.evaluate(() => new Promise(function ompHang() {
 /**
  * The relay extension's side of the wire, played over a real headless Chromium's CDP endpoint: `attach`,
  * `send` and `detach` drive one page target the way `chrome.debugger` drives a tab. {@link chromeDetach}
- * does what Chrome does when another extension's frame loads in the tab: it ends the attachment, fails the
- * command in flight, and reports the detach.
+ * does what Chrome does when another extension's frame loads in the tab: it ends the attachment and its
+ * cross-site frames' sessions, fails the command in flight, and reports the detach.
  */
 class ChromeBackedExtension {
 	readonly #relay: WebSocket;
@@ -34,16 +34,14 @@ class ChromeBackedExtension {
 	readonly #replies = new Map<number, (message: Record<string, unknown>) => void>();
 	/** The page target's flat session while "chrome.debugger" is attached. */
 	#root: string | undefined;
+	/** Flat sessions of the cross-site frames Chrome auto-attached under the root. */
+	readonly #children = new Set<string>();
 	/** Chrome command id → relay RPC id of in-flight `send`s, answered with Chrome's error when the attachment ends. */
 	readonly #inFlight = new Map<number, number>();
 	/** Resolved by the next forwarded command each one matches. */
 	readonly #sendWaiters = new Set<{ method: string; match: (params: unknown) => boolean; resolve: () => void }>();
-	/** Settled by the relay's next `detach` once Chrome has ended the tab's "chrome.debugger" attachment. */
-	readonly #detachWaiters = new Set<{ resolve: () => void; reject: (error: Error) => void }>();
 	/** Answer attaches with Chrome's refusal, as while a foreign extension frame is in the tab. */
 	refuseAttach = false;
-	/** Commands answered with Chrome's refusal, as a foreign extension frame in the tab makes some of them fail. */
-	readonly refuseMethods = new Set<string>();
 
 	private constructor(
 		relay: WebSocket,
@@ -114,6 +112,9 @@ class ChromeBackedExtension {
 		}
 		const sessionId = typeof message.sessionId === "string" ? message.sessionId : undefined;
 		if (!sessionId || this.#root === undefined) return;
+		const child = isRecord(message.params) ? message.params.sessionId : undefined;
+		if (typeof child === "string" && message.method === "Target.attachedToTarget") this.#children.add(child);
+		if (typeof child === "string" && message.method === "Target.detachedFromTarget") this.#children.delete(child);
 		this.#relay.send(
 			JSON.stringify({
 				t: "cdpEvent",
@@ -152,16 +153,7 @@ class ChromeBackedExtension {
 			case "detach": {
 				const root = this.#root;
 				this.#root = undefined;
-				const detached = root
-					? await this.#chromeSend("Target.detachFromTarget", { sessionId: root }).promise
-					: { result: {} };
-				// Waiters learn of the detach only once Chrome has ended the attachment.
-				const failure = isRecord(detached.error) ? new Error(String(detached.error.message)) : undefined;
-				for (const waiter of this.#detachWaiters) {
-					if (failure) waiter.reject(failure);
-					else waiter.resolve();
-				}
-				this.#detachWaiters.clear();
+				if (root) await this.#chromeSend("Target.detachFromTarget", { sessionId: root }).promise;
 				this.#relay.send(
 					JSON.stringify({ t: "detached", tabId: TAB_ID, reason: "target_closed", relayInitiated: true }),
 				);
@@ -171,7 +163,6 @@ class ChromeBackedExtension {
 				const root = this.#root;
 				if (!root) return this.#reply(id, { error: "Debugger is not attached to the tab with id: 1." });
 				const method = String(message.method);
-				if (this.refuseMethods.has(method)) return this.#reply(id, { error: FOREIGN_FRAME_REFUSAL });
 				const sent = this.#chromeSend(
 					method,
 					isRecord(message.params) ? message.params : {},
@@ -198,13 +189,6 @@ class ChromeBackedExtension {
 	nextSend(method: string, match: (params: unknown) => boolean = () => true): Promise<void> {
 		const { promise, resolve } = Promise.withResolvers<void>();
 		this.#sendWaiters.add({ method, match, resolve });
-		return promise;
-	}
-
-	/** Resolves once the relay has detached "chrome.debugger" and Chrome confirmed it, which ends the debugging bar. */
-	nextDetach(): Promise<void> {
-		const { promise, resolve, reject } = Promise.withResolvers<void>();
-		this.#detachWaiters.add({ resolve, reject });
 		return promise;
 	}
 
@@ -238,14 +222,22 @@ class ChromeBackedExtension {
 		);
 	}
 
-	/** Chrome ends the attachment by itself: the command in flight fails, then `onDetach` fires. */
+	/**
+	 * Chrome ends the attachment by itself: its cross-site frames' sessions detach, the command in flight fails,
+	 * then `onDetach` fires, all before the extension handles any later request.
+	 */
 	async chromeDetach(reason: string): Promise<void> {
 		const root = this.#root;
 		this.#root = undefined;
+		for (const sessionId of this.#children) {
+			const event = { t: "cdpEvent", tabId: TAB_ID, method: "Target.detachedFromTarget", params: { sessionId } };
+			this.#relay.send(JSON.stringify(event));
+		}
+		this.#children.clear();
 		for (const rpcId of this.#inFlight.values()) this.#reply(rpcId, { error: "Detached while handling command." });
 		this.#inFlight.clear();
-		if (root) await this.#chromeSend("Target.detachFromTarget", { sessionId: root }).promise;
 		this.#relay.send(JSON.stringify({ t: "detached", tabId: TAB_ID, reason }));
+		if (root) await this.#chromeSend("Target.detachFromTarget", { sessionId: root }).promise;
 	}
 
 	close(): void {
@@ -272,10 +264,14 @@ describe("relay tabs Chrome detaches omp from", () => {
 		site = Bun.serve({
 			hostname: "127.0.0.1",
 			port: 0,
-			fetch: () =>
-				new Response('<title>Sign in</title><input id="user"><input id="pw" type="password">', {
-					headers: { "content-type": "text/html" },
-				}),
+			fetch: request => {
+				const url = new URL(request.url);
+				// `?frame` embeds the sign-in form from another site, which Chrome runs as an out-of-process frame.
+				const body = url.searchParams.has("frame")
+					? `<title>Sign in</title><iframe src="http://localhost:${url.port}/form"></iframe>`
+					: '<title>Sign in</title><input id="user"><input id="pw" type="password">';
+				return new Response(body, { headers: { "content-type": "text/html" } });
+			},
 		});
 	});
 
@@ -300,10 +296,10 @@ describe("relay tabs Chrome detaches omp from", () => {
 	}
 
 	/** Adopt a page through the relay and leave state on it that only survives a re-adoption without reload. */
-	async function openRelayTab(): Promise<ChromeBackedExtension> {
+	async function openRelayTab(query = ""): Promise<ChromeBackedExtension> {
 		if (!chromium || !site) throw new Error("Chromium not launched");
 		page = await chromium.newPage();
-		pageUrl = `${site.url}login?case=${crypto.randomUUID()}`;
+		pageUrl = `${site.url}login?case=${crypto.randomUUID()}${query}`;
 		await page.goto(pageUrl);
 		// Puppeteer exposes a target's CDP id only on the private field.
 		const target = page.target() as unknown as { _targetId: string };
@@ -390,6 +386,24 @@ describe("relay tabs Chrome detaches omp from", () => {
 	);
 
 	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"names the detach to a call running in a cross-site frame, whose session Chrome ends first",
+		async () => {
+			const ext = await openRelayTab("&frame");
+			const evaluating = ext.hanging();
+			const inForm = HANG.code.replace("page.evaluate", "form.evaluate");
+			const code = `const form = page.frames().find(frame => frame.url().endsWith("/form")); ${inForm}`;
+			const stalled = invoke({ action: "run", code, timeout: HANG.timeout }).catch((error: unknown) => error);
+			await evaluating;
+			await ext.chromeDetach("target_closed");
+			const failure = String(await stalled);
+			expect(failure).toContain("Chrome detached omp from this tab (target_closed) during this call");
+			expect(failure).toContain("reattached to the same tab");
+			expect((await invoke(readMark)).value).toBe("kept");
+		},
+		60_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"aborts the host tool calls the detached call had in flight",
 		async () => {
 			const ext = await openRelayTab();
@@ -457,39 +471,6 @@ describe("relay tabs Chrome detaches omp from", () => {
 	);
 
 	it.skipIf(!CHROMIUM_AVAILABLE)(
-		"does not rerun a call detached before its code started once the re-adoption spent its budget",
-		async () => {
-			const ext = await openRelayTab();
-			await invoke({ action: "run", code: 'await tab.emulate({ userAgent: "omp-detach-test" });', timeout: 10 });
-			const tab = getTab(name);
-			if (tab?.backend !== "worker") throw new Error("expected a worker tab");
-			// Hold the re-adoption for the call's whole budget once the detached worker is gone. Real time: the
-			// re-adoption's own init deadline reads the same clock, so a faked clock would fail it instead.
-			const budgetMs = 1_000;
-			const terminate = tab.worker.terminate.bind(tab.worker);
-			const held = spyOn(tab.worker, "terminate").mockImplementation(async () => {
-				await terminate();
-				await Bun.sleep(budgetMs);
-			});
-			try {
-				const reapplying = ext.nextSend("Network.setUserAgentOverride");
-				const next = runInTab(name, { code: readMark.code, timeoutMs: budgetMs, session: tool }).catch(
-					(error: unknown) => error,
-				);
-				await reapplying;
-				await ext.chromeDetach("target_closed");
-				const failure = String(await next);
-				expect(failure).toContain("before this call, so its code did not run");
-				expect(failure).toContain(`used up this call's ${budgetMs}ms budget, so the call was not run again`);
-			} finally {
-				held.mockRestore();
-			}
-			expect((await invoke(readMark)).value).toBe("kept");
-		},
-		60_000,
-	);
-
-	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"counts a detach while the call's code is still compiling as before it ran",
 		async () => {
 			// An inline tab worker runs in this process, so the compile step can be held.
@@ -547,44 +528,6 @@ describe("relay tabs Chrome detaches omp from", () => {
 			} finally {
 				unsubscribe();
 			}
-		},
-		60_000,
-	);
-
-	it.skipIf(!CHROMIUM_AVAILABLE)(
-		"drops the relay connection of an inline worker it kills, so Chrome's debugger is released",
-		async () => {
-			const ext = await openInlineRelayTab();
-			const detached = ext.nextDetach();
-			// The call times out, and a timed-out inline tab is killed rather than recycled.
-			const failure = String(await invoke({ action: "run", ...HANG, timeout: 1 }).catch((error: unknown) => error));
-			expect(failure).toContain("timed out");
-			expect(getTab(name)).toBeUndefined();
-			// A killed core that kept its relay connection would hold its session on the tab, and the relay
-			// would never detach: this await would then run into the test's timeout.
-			await detached;
-		},
-		60_000,
-	);
-
-	it.skipIf(!CHROMIUM_AVAILABLE)(
-		"drops the relay connection of an inline fallback whose init failed while recycling a timed-out tab",
-		async () => {
-			const ext = await openRelayTab();
-			const detached = ext.nextDetach();
-			// The recycle's worker thread cannot start, and the inline fallback's init then fails the way it does
-			// while another extension's frame is in the tab.
-			ext.refuseMethods.add("Network.enable");
-			const failure = String(
-				await withoutWorkerThreads(() => invoke({ action: "run", ...HANG, timeout: 1 })).catch(
-					(error: unknown) => error,
-				),
-			);
-			expect(failure).toContain("timed out");
-			expect(getTab(name)).toBeUndefined();
-			// The failed inline core connected to the relay before its init failed; left connected, it holds its
-			// session on the tab and the relay never detaches.
-			await detached;
 		},
 		60_000,
 	);

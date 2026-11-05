@@ -120,12 +120,15 @@ function Summary({ args, result }: ToolRenderProps): ReactNode {
 		);
 	}
 	if (op === "wait") {
-		const waited = d ? parseMsg(d.waited) : null;
-		if (waited) {
+		const waited = d ? parseInbox(d.waited) : [];
+		if (waited.length > 0) {
+			const senders = [...new Set(waited.map(msg => msg.from))].join(", ");
 			return (
 				<>
-					{opBadge} <span className="tv-pattern">← {waited.from}</span>{" "}
-					<span className="tv-muted">{truncate(normalizeWs(waited.body), 80)}</span>
+					{opBadge} <span className="tv-pattern">← {senders}</span>{" "}
+					<span className="tv-muted">
+						{waited.length === 1 ? truncate(normalizeWs(waited[0]!.body), 80) : `${waited.length} messages`}
+					</span>
 				</>
 			);
 		}
@@ -181,11 +184,11 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 	const message = str(args.message);
 	const d = detailsRecord(result);
 	const receipts = parseReceipts(d?.receipts);
-	const waited = d ? parseMsg(d.waited) : null;
+	const waited = parseInbox(d?.waited);
 	const timedOut = d ? d.waited === null : false;
 	const inbox = parseInbox(d?.inbox);
 	const peers = parsePeers(d?.peers);
-	const structured = receipts.length > 0 || waited !== null || timedOut || inbox.length > 0 || peers.length > 0;
+	const structured = receipts.length > 0 || waited.length > 0 || timedOut || inbox.length > 0 || peers.length > 0;
 	return (
 		<>
 			<Badges
@@ -210,17 +213,19 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 					))}
 				</div>
 			)}
-			{waited && (
+			{waited.length > 0 && (
 				<div className="tv-list">
-					<Row k={`← ${waited.from}`}>
-						{waited.body}
-						{waited.replyTo && (
-							<>
-								{" "}
-								<Badge>reply</Badge>
-							</>
-						)}
-					</Row>
+					{waited.map((msg, i) => (
+						<Row key={i} k={`← ${msg.from}`}>
+							{msg.body}
+							{msg.replyTo && (
+								<>
+									{" "}
+									<Badge>reply</Badge>
+								</>
+							)}
+						</Row>
+					))}
 				</div>
 			)}
 			{timedOut && <Note tone="warn">No reply yet — they may answer later; check inbox or wait again.</Note>}

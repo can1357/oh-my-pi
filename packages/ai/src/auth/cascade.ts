@@ -369,6 +369,13 @@ export class KeyCascade implements KeysApi {
 		}
 	}
 
+	/** Warm selection metadata during session startup without choosing or pinning an account. */
+	async prefetchUsage(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<void> {
+		options?.signal?.throwIfAborted();
+		if (this.source(provider)?.kind !== "oauth") return;
+		await this.#deps.selector.prefetchUsage(provider, sessionId, options);
+	}
+
 	async #resolve(
 		provider: string,
 		sessionId?: string,

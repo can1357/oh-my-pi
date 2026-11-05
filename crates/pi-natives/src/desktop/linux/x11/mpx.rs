@@ -526,15 +526,13 @@ impl Mpx {
 		} else {
 			Raw::KeyRelease(last.keycode)
 		};
-		if control::cleanup(|| self.wait_raw(slave, raw, 1))? {
-			Ok(())
-		} else {
-			Err(DesktopError::input_failed(format!(
+		control::cleanup(|| self.wait_raw(slave, raw, 1))?.ok_or_else(|| {
+			DesktopError::input_failed(format!(
 				"the X server did not confirm the virtual keyboard's last key within {}ms; the keys \
 				 may not have been delivered",
 				KEY_CONFIRM_TIMEOUT.as_millis()
-			)))
-		}
+			))
+		})
 	}
 
 	/// Points the virtual keyboard's own focus at `window`; the core focus is
@@ -567,6 +565,37 @@ impl Mpx {
 			format_args!("window {window} cannot take the virtual keyboard focus (not viewable)"),
 			DesktopError::background_unavailable,
 		))
+	}
+
+	/// Takes the virtual keyboard's focus off `target`, or the window around
+	/// or inside it holding that focus. Xorg sends a window core `FocusIn` only
+	/// for the first keyboard to focus it, so a virtual focus left there hides
+	/// a takeover's activation of `target` from the window manager. A focus on
+	/// an unrelated window hides nothing and stays, as do `None` and
+	/// `PointerRoot`.
+	pub(super) fn release_focus(&self, target: Window) -> CoreResult<()> {
+		let focused = self
+			.conn
+			.xinput_xi_get_focus(self.master_keyboard)
+			.ok()
+			.and_then(|cookie| cookie.reply().ok())
+			.map(|reply| reply.focus);
+		let wm = Wm { conn: &self.conn, root: self.root, atoms: &self.atoms };
+		// None and PointerRoot (0 and 1) are no window.
+		let holds_target = focused.is_some_and(|window| {
+			window > 1 && (wm.is_within(window, target) || wm.is_within(target, window))
+		});
+		if !holds_target {
+			return Ok(());
+		}
+		control::check()?;
+		if let Ok(cookie) = self
+			.conn
+			.xinput_xi_set_focus(NONE, CURRENT_TIME, self.master_keyboard)
+		{
+			let _ = cookie.check();
+		}
+		Ok(())
 	}
 
 	pub(super) const fn inhibit(&mut self) {
@@ -770,9 +799,9 @@ fn relative_steps(path: &[(i16, i16)]) -> Vec<(i32, i32)> {
 		return steps;
 	};
 	let (mut last_x, mut last_y) = (i32::from(start_x), i32::from(start_y));
-	for segment in path.windows(2) {
-		let (from_x, from_y) = (f64::from(segment[0].0), f64::from(segment[0].1));
-		let (to_x, to_y) = (f64::from(segment[1].0), f64::from(segment[1].1));
+	for &[(from_x, from_y), (to_x, to_y)] in path.array_windows() {
+		let (from_x, from_y) = (f64::from(from_x), f64::from(from_y));
+		let (to_x, to_y) = (f64::from(to_x), f64::from(to_y));
 		let length = (to_x - from_x).hypot(to_y - from_y);
 		let count = (length / DRAG_STEP_MAX_PX).ceil().max(1.0) as u32;
 		for index in 1..=count {
@@ -1072,10 +1101,7 @@ impl Owner {
 	}
 
 	fn from_pointer_name(name: &str) -> Option<Self> {
-		let mut parts = name
-			.strip_prefix(OWNER_PREFIX)?
-			.strip_suffix(" pointer")?
-			.split('.');
+		let mut parts = name.strip_circumfix(OWNER_PREFIX, " pointer")?.split('.');
 		let domain = u64::from_str_radix(parts.next()?, 16).ok()?;
 		let pid = u32::from_str_radix(parts.next()?, 16).ok()?;
 		let start = u64::from_str_radix(parts.next()?, 16).ok()?;

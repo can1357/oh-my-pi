@@ -64,6 +64,8 @@ describe("storage process-exit cleanup", () => {
 		const historyModule = HISTORY_STORAGE_MODULE;
 		const agentModule = AGENT_STORAGE_MODULE;
 		const script = [
+			'import { postmortem } from "@oh-my-pi/pi-utils";',
+			"postmortem.installProcessHandlers();",
 			`import { HistoryStorage } from ${JSON.stringify(historyModule)};`,
 			`import { AgentStorage } from ${JSON.stringify(agentModule)};`,
 			`const history = HistoryStorage.open(${JSON.stringify(historyDbPath)});`,
@@ -117,6 +119,7 @@ describe("storage process-exit cleanup", () => {
 		const agentDbPath = path.join(tempDir, "agent.db");
 		const script = [
 			'import { postmortem } from "@oh-my-pi/pi-utils";',
+			"postmortem.installProcessHandlers();",
 			`import { HistoryStorage } from ${JSON.stringify(HISTORY_STORAGE_MODULE)};`,
 			`import { AgentStorage } from ${JSON.stringify(AGENT_STORAGE_MODULE)};`,
 			"await postmortem.cleanup();",
@@ -155,6 +158,7 @@ describe("storage process-exit cleanup", () => {
 		const checkpointed = path.join(tempDir, "agent-checkpoint.db");
 		const script = [
 			'import { postmortem } from "@oh-my-pi/pi-utils";',
+			"postmortem.installProcessHandlers();",
 			`import { AgentStorage } from ${JSON.stringify(AGENT_STORAGE_MODULE)};`,
 			"const gate = Promise.withResolvers();",
 			'postmortem.register("blocker", () => gate.promise);',
@@ -203,6 +207,7 @@ describe("storage process-exit cleanup", () => {
 		// not re-arm, the exit callback would never fire and the sample would be lost.
 		const script = [
 			'import { postmortem } from "@oh-my-pi/pi-utils";',
+			"postmortem.installProcessHandlers();",
 			`import { AgentStorage } from ${JSON.stringify(AGENT_STORAGE_MODULE)};`,
 			"await postmortem.cleanup();",
 			`const agent = await AgentStorage.open(${JSON.stringify(agentDbPath)});`,
@@ -240,6 +245,7 @@ describe("storage process-exit cleanup", () => {
 		// finalized, so writes through the same handle keep working afterward.
 		const script = [
 			'import { postmortem } from "@oh-my-pi/pi-utils";',
+			"postmortem.installProcessHandlers();",
 			`import { AgentStorage } from ${JSON.stringify(AGENT_STORAGE_MODULE)};`,
 			`const agent = await AgentStorage.open(${JSON.stringify(agentDbPath)});`,
 			'agent.recordUsage("command", "before-cleanup");',

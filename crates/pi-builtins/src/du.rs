@@ -6,11 +6,11 @@
 use std::{
 	collections::HashSet,
 	ffi::{OsStr, OsString},
+	fmt::NumBuffer,
 	io::{self, Read, Write},
 	path::{Path, PathBuf},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::PossibleValue};
 use glob::Pattern;
 use jiff::{
@@ -35,16 +35,11 @@ use uucore::{
 
 use crate::{
 	block_size::{BlockSize, Scale},
-	host::{Host, StreamWriter, Utility, format_usage, matches_parser, os_bytes_lossy, strip_errno, util},
+	host::{Host, StreamWriter, Utility, format_usage, matches_parser, os_bytes_lossy, strip_errno},
 	locale::{NumericSymbols, ctype_is_utf8, numeric_symbols},
 	quoting_style::quoting_style_by_name,
 	time_zone::shell_time_zone,
 };
-
-/// Registration for the `du` builtin.
-pub(crate) fn du_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Du, SE>()
-}
 
 mod options {
 	pub const HELP: &str = "help";
@@ -772,7 +767,7 @@ fn show_date(out: &mut Vec<u8>, time: Option<(i64, i64)>, format: &str, zone: &T
 		return;
 	};
 	let Ok(timestamp) = jiff::Timestamp::new(seconds, i32::try_from(nanos).unwrap_or(0)) else {
-		out.extend_from_slice(seconds.to_string().as_bytes());
+		out.extend_from_slice(seconds.format_into(&mut NumBuffer::new()).as_bytes());
 		return;
 	};
 	let zoned = Zoned::new(timestamp, zone.clone());
@@ -785,7 +780,7 @@ fn show_date(out: &mut Vec<u8>, time: Option<(i64, i64)>, format: &str, zone: &T
 	if formatted.is_ok() {
 		out.extend_from_slice(&rendered);
 	} else {
-		out.extend_from_slice(seconds.to_string().as_bytes());
+		out.extend_from_slice(seconds.format_into(&mut NumBuffer::new()).as_bytes());
 	}
 }
 
@@ -926,9 +921,9 @@ fn run(host: &mut Host, matches: &ArgMatches) -> i32 {
 		match read_input(host, name) {
 			Ok(data) => {
 				for line in data.split(|&b| b == b'\n') {
-					let end = line.iter().rposition(|b| !b.is_ascii_whitespace()).map_or(0, |last| last + 1);
-					if end > 0 {
-						excludes.add(&String::from_utf8_lossy(&line[..end]));
+					let line = line.trim_ascii_end();
+					if !line.is_empty() {
+						excludes.add(&String::from_utf8_lossy(line));
 					}
 				}
 			},
@@ -1137,7 +1132,7 @@ mod tests {
 
 	fn du(cwd: &Path, args: &[&str]) -> (i32, String, String) {
 		let (code, out, err) = du_env(cwd, args, &[], "");
-		(code, String::from_utf8_lossy(&out).into_owned(), err)
+		(code, String::from_utf8_lossy_owned(out), err)
 	}
 
 	/// The fixture tree: nested dirs, a 300 KiB file, a 50 MiB sparse file,

@@ -13,22 +13,31 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 const authStorage = await AuthStorage.create(path.join(process.cwd(), "auth.db"));
 authStorage.keys.setRuntime("anthropic", "test-key");
 const modelRegistry = new ModelRegistry(authStorage, path.join(process.cwd(), "models.yml"));
-// The first turn stays in flight long enough for a test to send a second prompt
-// while streaming and promote it — the delay dwarfs a local RPC round trip.
-const started: MockResponse = { content: ["Started"], delayMs: 1000 };
-// QUEUED_RPC_SCRIPT varies only the first model call:
-// - "internal-steer": queues a non-user (agent-attributed) steer as the call starts.
+const started: MockResponse = { content: ["Started"] };
+// Streams until the test aborts the turn; the delay only bounds a leaked process.
+const held: MockResponse = { content: ["Started"], delayMs: 600_000 };
+// QUEUED_RPC_SCRIPT varies only the first model call, which otherwise answers at once:
+// - "hold": streams until aborted.
+// - "until-steer": streams until a steer is queued (e.g. a follow-up promoted mid-turn), then
+//   answers without taking it, so the steer runs as the next turn.
+// - "internal-steer": queues a non-user (agent-attributed) steer as the call starts, then holds.
 // - "live-steer": the provider claims the first user steer into the streaming response,
-//   as a live-steering provider (Codex `response.steer`) does.
-// - "hold": streams until aborted, for tests whose queueing outlasts the default delay.
+//   as a live-steering provider (Codex `response.steer`) does, then holds.
 const firstCall: Record<string, MockHandler> = {
-	hold: { content: ["Started"], delayMs: 60_000 },
+	hold: held,
+	"until-steer": async (_context, options) => {
+		const live = options?.liveSteering;
+		const signal = options?.signal;
+		if (!live || !signal) throw new Error("queued-message-rpc-agent: the mock call has no live steering channel");
+		await live.wait(signal);
+		return started;
+	},
 	"internal-steer": () => {
 		void session.sendCustomMessage(
 			{ customType: "test-internal-steer", content: "internal steer", display: true, attribution: "agent" },
 			{ deliverAs: "steer" },
 		);
-		return started;
+		return held;
 	},
 	"live-steer": async (_context, options) => {
 		const live = options?.liveSteering;
@@ -37,7 +46,7 @@ const firstCall: Record<string, MockHandler> = {
 			await live.wait(signal);
 			(await live.claim(signal))?.accept();
 		}
-		return started;
+		return held;
 	},
 };
 const mock = createMockModel({
