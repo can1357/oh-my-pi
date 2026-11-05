@@ -492,3 +492,93 @@ async fn round_five_rows() {
 	])
 	.await;
 }
+
+/// Round-6 review rows, each the output and status of Bash 5.2.21 and 5.3.0
+/// for the same `-c` string. bash runs the ERR trap before it reads
+/// `exit_immediately_on_error`, so the action's own `set -e`/`set +e`
+/// decides whether the failed command ends the shell; a RETURN trap is a
+/// nested trap like any other, so a jump out of it carries the status that
+/// trap saved; a declaration builtin's `-i` value error is the assignment
+/// jump; and an arithmetic error in a `for ((;;))` header ends only that
+/// loop, with status 1.
+#[tokio::test(flavor = "multi_thread")]
+async fn round_six_rows() {
+	check(&[
+		// `errexit` is read when the ERR trap action ends.
+		(
+			r##"trap 'trap '"'"'set -e; : $((7/0)); echo TRAP_BAD'"'"' ERR; (exit 9); echo EXIT_AFTER' EXIT; exit 7"##,
+			"",
+			9,
+		),
+		(
+			r##"trap 'trap '"'"'set -e; true; : $((7/0)); echo TRAP_BAD'"'"' ERR; (exit 9); echo EXIT_AFTER' EXIT; exit 7"##,
+			"",
+			9,
+		),
+		(
+			r##"trap 'trap '"'"'set -e; : $((7/0)); echo TRAP_BAD'"'"' ERR; false; echo EXIT_AFTER' EXIT; exit 7"##,
+			"",
+			1,
+		),
+		(
+			r##"trap 'set -e; trap '"'"'set +e; : ${a.b}; echo TRAP_BAD'"'"' ERR; (exit 9); echo EXIT_AFTER' EXIT; exit 7"##,
+			"EXIT_AFTER\n",
+			7,
+		),
+		(
+			r##"trap 'set -e; trap '"'"'set +e; : $((7/0)); echo TRAP_BAD'"'"' ERR; (exit 9); echo EXIT_AFTER' EXIT; exit 7"##,
+			"EXIT_AFTER\n",
+			7,
+		),
+		(
+			r##"trap 'set -e; trap '"'"'set +e; false; echo OK_ERR'"'"' ERR; (exit 9); echo EXIT_AFTER' EXIT; exit 7"##,
+			"OK_ERR\nEXIT_AFTER\n",
+			7,
+		),
+		// A RETURN trap nested in the EXIT trap's action.
+		(
+			r##"trap 'set -E -T; trap '"'"': ${review_missing?BOOM}; echo TRAP_BAD'"'"' RETURN; f(){ return 9; }; f; echo EXIT_AFTER' EXIT; exit 7"##,
+			"",
+			0,
+		),
+		(
+			r##"trap 'set -T; trap '"'"': ${u?BOOM}; echo TB'"'"' RETURN; f(){ (exit 5); return 9; }; f; echo AFTER:$?' EXIT; exit 7"##,
+			"",
+			5,
+		),
+		(
+			r##"trap 'set -E; trap '"'"': ${review_missing?BOOM}'"'"' RETURN; f(){ return 9; }; f; echo AFTER' EXIT; exit 7"##,
+			"AFTER\n",
+			7,
+		),
+		// A declaration builtin's `-i` value error makes the assignment jump.
+		(r##"declare -i I=bad!; echo NEXT:$?"##, "", 1),
+		(r##"trap 'set -e; declare -i I=bad!; echo NEXT:$?' EXIT; exit 7"##, "", 7),
+		(r##"f(){ local -i I=bad!; echo IN:$?; }; f; echo NEXT:$?"##, "", 1),
+		// An arithmetic error in a `for ((;;))` header ends only that loop.
+		(r##"for ((i=0; 1/0; i++)); do :; done; echo NEXT:$?"##, "NEXT:1\n", 0),
+		(r##"set -e; for ((i=0; 1/0; i++)); do :; done; echo NEXT:$?"##, "NEXT:1\n", 0),
+		(
+			r##"trap 'set -e; for ((i=0; 1/0; i++)); do :; done; echo NEXT:$?' EXIT; exit 7"##,
+			"NEXT:1\n",
+			7,
+		),
+		(r##"for ((i=bad!; i<3; i++)); do echo B; done; echo NEXT:$?"##, "NEXT:1\n", 0),
+		(r##"for ((i=0; i<3; i=bad!)); do echo B; done; echo NEXT:$?"##, "B\nNEXT:1\n", 0),
+		(
+			r##"for x in 1 2; do for ((i=0; 1/0; i++)); do :; done; echo IN:$?; done; echo NEXT:$?"##,
+			"IN:1\nIN:1\nNEXT:0\n",
+			0,
+		),
+		(
+			r##"for ((i=0; i<3; i++)); do for ((j=0; 1/0; j++)); do :; done; echo IN:$?; break; done; echo NEXT:$?"##,
+			"IN:1\nNEXT:0\n",
+			0,
+		),
+		// The loop still runs when its header is sound.
+		(r##"for ((i=0; i<2; i++)); do echo B$i; done; echo NEXT:$?"##, "B0\nB1\nNEXT:0\n", 0),
+		(r##"for ((;;)); do echo ONCE; break; done; echo NEXT:$?"##, "ONCE\nNEXT:0\n", 0),
+		(r##"i=0; for ((; i<2; i++)); do echo B$i; done; echo NEXT:$?"##, "B0\nB1\nNEXT:0\n", 0),
+	])
+	.await;
+}
