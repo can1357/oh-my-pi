@@ -9,6 +9,7 @@ import { YAML } from "bun";
 
 import {
 	cfgProvidersMaxInFlightRequests,
+	cfgRetryFallbackChains,
 	cfgTemperature,
 	cfgTopK,
 	cfgTopP,
@@ -101,6 +102,16 @@ describe("settings registry", () => {
 		expect(() => lookup("steeringMode")?.override(settings, "sometimes")).toThrow("Invalid value for steeringMode");
 		expect(cfgTemperature.get(settings)).toBe(0.2);
 		expect(cfgTemperature.provenance(settings)).toBe("runtime");
+	});
+
+	it("rejects invalid fallback entry writes and runtime overrides without replacing the live policy", () => {
+		const chains = { advisor: ["openai/backup"], review_openai: [] };
+		const settings = Settings.isolated({ "retry.fallbackChains": chains });
+
+		expect(() => cfgRetryFallbackChains.setEntry(settings, "advisor", ["@task"])).toThrow("retry.fallbackChains");
+		expect(cfgRetryFallbackChains.get(settings)).toEqual(chains);
+		expect(() => cfgRetryFallbackChains.override(settings, { advisor: ["openai/"] })).toThrow("retry.fallbackChains");
+		expect(cfgRetryFallbackChains.get(settings)).toEqual(chains);
 	});
 
 	it("recomputes a derivation only when one of its inputs changes", () => {

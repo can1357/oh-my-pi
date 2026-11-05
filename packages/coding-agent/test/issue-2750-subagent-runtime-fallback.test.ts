@@ -613,38 +613,6 @@ describe("subagent runtime model resolution", () => {
 		expect(childModelRole).toBeUndefined();
 	});
 
-	it("leaves malformed default fallback entries for child validation", async () => {
-		const primary = model("lm-studio", "local-reviewer");
-		let childFallbackChains: unknown;
-		let childModelRole: string | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			if (!options) throw new Error("Expected createAgentSession options");
-			childFallbackChains = options.settings ? cfgRetryFallbackChains.get(options.settings) : undefined;
-			childModelRole = options.settings?.getModelRoles()["subagent:single-model-invalid-default-fallback"];
-			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
-		});
-
-		const agent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
-		await runSubprocess({
-			cwd: "/tmp",
-			agent,
-			task: "work",
-			index: 0,
-			id: "single-model-invalid-default-fallback",
-			modelOverride: "lm-studio/local-reviewer",
-			settings: Settings.isolated({ "retry.fallbackChains": { default: [123] } as never }),
-			modelRegistry: {
-				refresh: async () => {},
-				getAvailable: () => [primary],
-				getApiKey: async () => "test-key",
-			} as never,
-			enableLsp: false,
-		});
-
-		expect(childFallbackChains).toEqual({ default: [123] });
-		expect(childModelRole).toBeUndefined();
-	});
-
 	it("preserves upstream routing selectors in the child retry fallback chain", async () => {
 		const routedModel = model("openrouter", "z-ai/glm-4.7");
 		let childFallbackChains: Record<string, string[]> | undefined;
@@ -772,7 +740,12 @@ describe("subagent runtime fallback on a real provider error", () => {
 	 * Spawns a real `pinned-worker` child whose role shares the `default` model. The primary
 	 * fails every request with a retryable error; `default`'s chain names a fallback that yields.
 	 */
-	async function runPinnedWorker(id: string, roleChain: string[] | undefined) {
+	async function runPinnedWorker(
+		id: string,
+		roleChain: string[] | undefined,
+		role = "pinned-worker",
+		modelOverride = "primary/bad-runtime-model",
+	) {
 		const authStorage = createInMemoryAuthStorage();
 		authStorage.keys.setRuntime("primary", "test-key");
 		authStorage.keys.setRuntime("fallback", "test-key");
@@ -810,13 +783,13 @@ describe("subagent runtime fallback on a real provider error", () => {
 					systemPrompt: "test",
 					tools: ["read"],
 					source: "bundled",
-					model: ["@pinned-worker"],
+					model: [`@${role}`],
 				},
 				task: "work",
 				index: 0,
 				id,
-				modelOverride: ["primary/bad-runtime-model"],
-				modelRole: "pinned-worker",
+				modelOverride: [modelOverride],
+				modelRole: role,
 				authStorage,
 				modelRegistry,
 				settings: Settings.isolated({
@@ -829,11 +802,12 @@ describe("subagent runtime fallback on a real provider error", () => {
 					"advisor.enabled": false,
 					modelRoles: {
 						default: "primary/bad-runtime-model",
-						"pinned-worker": "primary/bad-runtime-model",
+						[role]: "primary/bad-runtime-model",
+						smol: "fallback/working-model",
 					},
 					"retry.fallbackChains": {
 						default: ["fallback/working-model"],
-						...(roleChain ? { "pinned-worker": roleChain } : {}),
+						...(roleChain ? { [role]: roleChain } : {}),
 					},
 				}),
 				enableLsp: false,
@@ -862,4 +836,20 @@ describe("subagent runtime fallback on a real provider error", () => {
 		expect(result.resolvedModel).toBe("fallback/working-model");
 		expect(result.resolvedModelIsFallback).toBe(true);
 	});
+
+	for (const fallback of ["@smol", "working-model"]) {
+		it(`recovers a @judge child through its inherited ${fallback} fallback`, async () => {
+			const { result, primaryRequests, fallbackRequests } = await runPinnedWorker(
+				`JudgeFallback${fallback === "@smol" ? "Alias" : "Fuzzy"}`,
+				[fallback],
+				"judge",
+				"@judge",
+			);
+			expect(primaryRequests).toBeGreaterThan(0);
+			expect(fallbackRequests).toBeGreaterThan(0);
+			expect(result.exitCode).toBe(0);
+			expect(result.resolvedModel).toBe("fallback/working-model");
+			expect(result.resolvedModelIsFallback).toBe(true);
+		});
+	}
 });

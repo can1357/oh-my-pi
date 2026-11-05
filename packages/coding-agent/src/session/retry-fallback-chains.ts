@@ -2,7 +2,8 @@ import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../config/model-registry";
 import { cfgModelRoles } from "../config/model-settings";
-import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import { parseRetryFallbackModelString } from "../config/retry-fallback-validation";
 import { formatModelString, formatModelStringWithRouting } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import {
@@ -103,11 +104,10 @@ export function parseRetryFallbackSelector(
 ): RetryFallbackSelector | undefined {
 	const trimmed = selector.trim();
 	if (!trimmed) return undefined;
-	const parsed = parseModelString(trimmed, {
-		allowMaxSuffix: true,
-		allowAutoAlias: true,
-		isLiteralModelId: (provider, id) => modelLookup?.find(provider, id) !== undefined,
-	});
+	const parsed = parseRetryFallbackModelString(
+		trimmed,
+		(provider, id) => modelLookup?.find(provider, id) !== undefined,
+	);
 	if (!parsed) return undefined;
 	return {
 		raw: trimmed,

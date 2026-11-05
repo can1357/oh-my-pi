@@ -22,6 +22,7 @@ import {
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { ModelRegistry } from "../config/model-registry";
+import { isKindRole } from "../config/model-roles";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import {
 	previewLine,
@@ -169,7 +170,13 @@ import {
 	cfgDefaultThinkingLevel,
 } from "../session/settings";
 import { cfgDisabledProviders } from "../config/model-settings";
-import { getRetryFallbackRole, installRetryFallbackRole } from "../session/retry-fallback-chains";
+import {
+	getRetryFallbackRole,
+	installRetryFallbackRole,
+	isRetryFallbackWildcardKey,
+	parseRetryFallbackSelector,
+	parseRetryFallbackWildcard,
+} from "../session/retry-fallback-chains";
 import {
 	cfgCompactionModelThresholdsEnabled,
 	cfgCompactionThresholdPercent,
@@ -331,15 +338,47 @@ function resolveSubagentInheritedRetryFallbackChain(
 	const configuredChains = cfgRetryFallbackChains.get(settings);
 	// An explicitly emptied role chain means "no fallbacks", not "inherit
 	// default" — mirrors expandDefaultRetryFallbackChains.
-	const fallbackChain = (role !== undefined ? configuredChains?.[role] : undefined) ?? configuredChains?.default;
+	const roleChain = role !== undefined ? configuredChains?.[role] : undefined;
+	const fallbackChain = roleChain ?? configuredChains?.default;
 	if (!Array.isArray(fallbackChain) || !fallbackChain.every(entry => typeof entry === "string")) {
 		return undefined;
 	}
 	const disabledProviders = new Set(cfgDisabledProviders.get(settings));
-	return fallbackChain.filter(entry => {
+	if (role === undefined || roleChain == null || !isKindRole(role)) {
+		return fallbackChain.filter(entry => {
+			const resolved = resolveModelOverride([entry], modelRegistry, settings);
+			return !resolved.model || !disabledProviders.has(resolved.model.provider);
+		});
+	}
+	const chain: string[] = [];
+	for (const entry of fallbackChain) {
+		// Wildcards swap the current model's id at retry time; resolving them now
+		// would freeze that dynamic behavior to an arbitrary catalog model.
+		if (isRetryFallbackWildcardKey(entry)) {
+			const { provider } = parseRetryFallbackWildcard(entry, candidate => modelRegistry.hasProvider(candidate));
+			if (!disabledProviders.has(provider)) chain.push(entry);
+			continue;
+		}
 		const resolved = resolveModelOverride([entry], modelRegistry, settings);
-		return !resolved.model || !disabledProviders.has(resolved.model.provider);
-	});
+		if (resolved.model && disabledProviders.has(resolved.model.provider)) continue;
+		const concrete = parseRetryFallbackSelector(entry);
+		if (concrete && disabledProviders.has(concrete.provider)) continue;
+		// Keep concrete selectors, including discovery-pending ones, verbatim.
+		// Kind-role aliases and fuzzy patterns must become chat selectors before
+		// installing them under the synthetic subagent role.
+		if (
+			concrete &&
+			(!resolved.model || resolveModelOverride([entry], modelRegistry, settings, { exactOnly: true }).model)
+		) {
+			chain.push(entry);
+		} else if (resolved.model) {
+			const selector = formatModelStringWithRouting(resolved.model);
+			chain.push(
+				resolved.explicitThinkingLevel ? formatModelSelectorValue(selector, resolved.thinkingLevel) : selector,
+			);
+		}
+	}
+	return chain;
 }
 
 function installSubagentRetryFallbackChain(args: {
