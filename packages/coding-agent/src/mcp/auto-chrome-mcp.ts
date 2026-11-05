@@ -49,8 +49,9 @@ interface ProbeReply {
 }
 
 function isLoopbackHost(hostname: string): boolean {
-	const host = hostname.toLowerCase();
-	return host === "127.0.0.1" || host === "localhost" || host === "[::1]";
+	// IP literals only: a `localhost` hosts-file entry can point off-box, and the
+	// bridge is always reached by its loopback address.
+	return hostname === "127.0.0.1" || hostname === "[::1]";
 }
 
 async function postJsonRpc(

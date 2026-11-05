@@ -183,10 +183,12 @@ export class HttpTransport implements MCPTransport {
 	 *
 	 * The transport fully owns `MCP-Protocol-Version`: it is stripped from
 	 * configured headers so a user's `mcp.json` can never inject it, and added
-	 * only once a version is negotiated (required by the MCP Streamable HTTP spec
-	 * after `initialize`). Before negotiation — the `initialize` request itself —
-	 * no protocol-version header is sent from either source. On the stateless
-	 * 2026 transport, configured session and routing headers are stripped too.
+	 * from the negotiated version on the legacy slot (required by the MCP
+	 * Streamable HTTP spec after `initialize`). Before legacy negotiation — the
+	 * `initialize` request itself — no protocol-version header is sent from
+	 * either source; modern requests supply it in their generated headers. On
+	 * the stateless 2026 transport, configured session and routing headers are
+	 * stripped too.
 	 */
 	#fetch(init: MCPFetchInit, generated: Record<string, string>): Promise<Response> {
 		const configured =
@@ -253,17 +255,12 @@ export class HttpTransport implements MCPTransport {
 		this.#protocolVersion = version;
 	}
 
-	/** `true` once {@link negotiate} selected the 2026-07-28 stateless era. */
-	get isModern(): boolean {
-		return this.#era === "modern";
-	}
-
 	/**
 	 * Decide the wire era for a `streamable-http` endpoint, before any
 	 * handshake. The client identity is captured for the per-request `_meta`
-	 * envelope and a `server/discover` probe runs on the modern slot (no
-	 * `MCP-Protocol-Version` header — a probe is the first sender of the
-	 * envelope claim, and the version derives from the body). Servers that
+	 * envelope and a `server/discover` probe runs on the modern slot; the probe
+	 * itself carries `MCP-Protocol-Version: 2026-07-28` (via {@link #modernHeaders})
+	 * and declares the revision in the body envelope. Servers that
 	 * answer with an overlapping modern revision select the modern era;
 	 * anything else (probe HTTP error, unsupported-version refusal, malformed
 	 * result) falls back to the legacy `initialize` handshake so pre-2026
@@ -336,11 +333,6 @@ export class HttpTransport implements MCPTransport {
 		} finally {
 			operation.clear();
 		}
-	}
-
-	/** Result of the `server/discover` probe; non-null only in the modern era. */
-	get discoverResult(): MCPDiscoverResult | null {
-		return this.#discoverResult;
 	}
 
 	/**

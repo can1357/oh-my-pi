@@ -26,7 +26,10 @@ export interface LoadMCPConfigsOptions {
 	 * The probe is local-only and silently skipped when the bridge is not running.
 	 */
 	chromeMcp?: boolean;
-	/** Probe endpoint override; loopback only. Defaults to the local bridge endpoint. */
+	/**
+	 * @internal Probe endpoint override for tests; loopback only.
+	 * Defaults to the local bridge endpoint.
+	 */
 	chromeMcpUrl?: string;
 	/** Session-local extension roots for post-startup rediscovery (explicit + mode + configured). */
 	extensionRoots?: EffectiveExtensionRoots;
@@ -200,8 +203,10 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 
 	// Auto-discovered after every filter: chrome-mcp is the base browser, not a
 	// user-configured browser-automation server the filter is meant to shadow.
-	// The probe is bounded and local-only; a missing bridge registers nothing.
-	if (options?.chromeMcp && !disabledServers.has(CHROME_MCP_SERVER_NAME)) {
+	// An existing `chrome` entry owns the name — never probe for or overwrite it —
+	// and the user-level disabled list still wins. The probe is bounded and
+	// local-only; a missing bridge registers nothing.
+	if (options?.chromeMcp && !(CHROME_MCP_SERVER_NAME in configs) && !disabledServers.has(CHROME_MCP_SERVER_NAME)) {
 		const discovered = await discoverChromeMcp(
 			options.chromeMcpUrl === undefined ? {} : { url: options.chromeMcpUrl },
 		);

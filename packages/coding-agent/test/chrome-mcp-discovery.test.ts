@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
+import { getConfigRootDir, getMCPConfigPath, setAgentDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	CHROME_MCP_PROBE_TIMEOUT_MS,
@@ -27,8 +28,18 @@ interface RecordedRequest {
 
 let server: Bun.Server<undefined> | null = null;
 const tempDirs: string[] = [];
+const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
+
+beforeEach(async () => {
+	// User-level mcp.json (disabledServers) must not leak into the real profile.
+	const agentDir = await mkdtemp(path.join(tmpdir(), "chrome-mcp-agent-"));
+	tempDirs.push(agentDir);
+	setAgentDir(agentDir);
+});
 
 afterEach(async () => {
+	setAgentDir(originalAgentDir ?? fallbackAgentDir);
 	server?.stop(true);
 	server = null;
 	await Promise.all(tempDirs.splice(0).map(dir => rm(dir, { recursive: true, force: true })));
@@ -89,6 +100,12 @@ async function tempCwd(): Promise<string> {
 	return dir;
 }
 
+async function writeMCPConfig(scope: "user" | "project", cwd: string, config: unknown): Promise<void> {
+	const configPath = getMCPConfigPath(scope, cwd);
+	await mkdir(path.dirname(configPath), { recursive: true });
+	await Bun.write(configPath, `${JSON.stringify(config)}\n`);
+}
+
 describe("chrome-mcp bridge probe", () => {
 	it("initializes, lists tools through the session id, and stamps the bridge origin", async () => {
 		const bridge = startBridge();
@@ -120,6 +137,13 @@ describe("chrome-mcp bridge probe", () => {
 		expect(Date.now() - started).toBeLessThan(1_000);
 	});
 
+	it("refuses a hostname alias such as localhost, accepting IP literals only", async () => {
+		const bridge = startBridge();
+		const aliasUrl = bridge.url.replace("127.0.0.1", "localhost");
+		expect(await probeChromeMcp({ url: aliasUrl })).toBeNull();
+		expect(bridge.requests).toHaveLength(0);
+	});
+
 	it("builds a streamable-http config and source for the live bridge", async () => {
 		const bridge = startBridge();
 		const discovered = await discoverChromeMcp({ url: bridge.url });
@@ -148,6 +172,45 @@ describe("chrome-mcp config registration", () => {
 		expect(configs[CHROME_MCP_SERVER_NAME]).toMatchObject({ type: "streamable-http", url: bridge.url });
 		expect(sources[CHROME_MCP_SERVER_NAME]?.provider).toBe("chrome-mcp");
 		expect(bridge.requests.map(request => request.method)).toEqual(["initialize", "tools/list"]);
+	});
+
+	it("does not probe or overwrite a user-configured chrome server", async () => {
+		const bridge = startBridge();
+		const cwd = await tempCwd();
+		await writeMCPConfig("project", cwd, {
+			mcpServers: { chrome: { type: "http", url: "http://127.0.0.1:9999/custom" } },
+		});
+
+		const { configs, sources } = await loadAllMCPConfigs(cwd, {
+			chromeMcp: true,
+			chromeMcpUrl: bridge.url,
+			filterExa: false,
+			filterBrowser: false,
+		});
+
+		expect(configs[CHROME_MCP_SERVER_NAME]).toMatchObject({
+			type: "http",
+			url: "http://127.0.0.1:9999/custom",
+		});
+		expect(sources[CHROME_MCP_SERVER_NAME]?.provider).not.toBe("chrome-mcp");
+		expect(bridge.requests).toHaveLength(0);
+	});
+
+	it("honors a user-level disabled chrome entry and skips probing", async () => {
+		const bridge = startBridge();
+		const cwd = await tempCwd();
+		await writeMCPConfig("user", cwd, { mcpServers: {}, disabledServers: ["chrome"] });
+
+		const { configs, sources } = await loadAllMCPConfigs(cwd, {
+			chromeMcp: true,
+			chromeMcpUrl: bridge.url,
+			filterExa: false,
+			filterBrowser: false,
+		});
+
+		expect(configs[CHROME_MCP_SERVER_NAME]).toBeUndefined();
+		expect(sources[CHROME_MCP_SERVER_NAME]).toBeUndefined();
+		expect(bridge.requests).toHaveLength(0);
 	});
 
 	it("does not probe or register when the setting is off", async () => {
