@@ -1677,6 +1677,11 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 			// `local -p NAME` reports the running function's own variable.
 			let var = if kind == DeclareKind::Local {
 				func_local(ctx, name)?
+			} else if matches!(name.as_slice(), b"BASH_ARGC" | b"BASH_ARGV") {
+				// `declare_builtin`'s named lookup invokes `get_bashargcv`,
+				// unlike a listing of every variable.
+				crate::bash::vm::callstack::read_base(ctx.k, ctx.cx.store, ctx.vp)?;
+				crate::bash::vm::callstack::listed_array(ctx.k, ctx.cx.store, ctx.vp, name)?
 			} else {
 				declared(ctx, name)?
 			};
@@ -3243,7 +3248,7 @@ pub fn shopt(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 				change_option(ctx, OptId::Errtrace, set);
 				change_option(ctx, OptId::Functrace, set);
 				if set {
-					crate::bash::vm::callstack::read_base(ctx.k, ctx.cx.store, ctx.vp)?;
+					crate::bash::vm::callstack::init_argv(ctx.k, ctx.cx.store, ctx.vp)?;
 				}
 			}
 		}

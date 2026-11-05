@@ -27,6 +27,7 @@
 
 ### Fixed
 
+- Fixed the bash tool's `BASH_ARGC` and `BASH_ARGV` capturing and retaining the wrong arguments across sourced files, `extdebug` changes and named `declare -p` reads
 - Fixed the bash tool's `. file args` at the top level putting the caller's positional parameters back only when the file left them untouched: as in Bash, they come back unless the file used the `set` builtin, so a `shift` in a sourced file no longer leaks out of it
 - Fixed the bash tool's `FUNCNAME`, `BASH_SOURCE`, `BASH_LINENO`, `BASH_ARGC`, `BASH_ARGV` and `caller` being empty inside the operand of a host callout (`timeout`, `nohup`, `env`, `ifne`, `xargs`, `find -exec`, `git`): the operand now sees the calling frames, as an ordinary `( … )` subshell of the same caller does
 - Fixed the bash tool installing a host callout's launch vector (`timeout`, `nohup`, `env`, `ifne`, `xargs`, `find -exec`, `git`) as the subshell's positional parameters: an EXIT trap the operand installed read `$@` as the command the callout ran, an operand's own `set --` or `shift` was discarded when the operand finished — a `trap 'rm -f "$@"' EXIT` removed the caller's names instead of its own — and a callout inside a callout showed the outer wrapper's command line to the inner operand

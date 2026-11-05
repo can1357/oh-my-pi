@@ -56,8 +56,10 @@ use crate::bash::{
 /// Version of the [`Image`] layout; part of the header and the build id.
 /// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
 /// variant: an exec target holds it by index. 30 adds each vproc's
-/// `args_set` (bash's `changed_dollar_vars & ARGS_SETBLTIN`).
-pub const FRAMES_VERSION: u32 = 30;
+/// `args_set` (bash's `changed_dollar_vars & ARGS_SETBLTIN`); 31 adds each
+/// vproc's `argv_init` and each call's `pop_args` obligation: a popped
+/// argument base stays initialized across restores.
+pub const FRAMES_VERSION: u32 = 31;
 
 const MAGIC: [u8; 4] = *b"OBF1";
 
@@ -264,6 +266,8 @@ struct ProcImage {
 	/// Whether the `set` builtin replaced the positional parameters outside
 	/// any function since the innermost `.` file started.
 	args_set:      bool,
+	/// Whether bash's argument base has been initialized, even if popped.
+	argv_init:     bool,
 	/// The pseudo-signal traps the vproc set itself.
 	own_traps:     super::proc::OwnTraps,
 	/// Current mode (the root's is also `MiscKey::Mode`).
@@ -617,6 +621,7 @@ impl Shell {
 				command,
 				calls: p.calls.clone(),
 				args_set: p.args_set,
+				argv_init: p.argv_init,
 				own_traps: p.own_traps,
 				mode: p.mode,
 				zsh: p.zsh.clone(),
@@ -842,6 +847,7 @@ impl Shell {
 			vp.subshell = p.subshell;
 			vp.calls = p.calls;
 			vp.args_set = p.args_set;
+			vp.argv_init = p.argv_init;
 			vp.own_traps = p.own_traps;
 			vp.mode = p.mode;
 			vp.zsh = p.zsh;

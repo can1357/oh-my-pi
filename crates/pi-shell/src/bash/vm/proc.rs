@@ -97,6 +97,9 @@ pub struct Vproc {
 	/// it set, outside any function, keeps its own parameters instead of
 	/// putting the caller's back ([`super::callstack::truncate`]).
 	pub args_set:      bool,
+	/// bash's `bash_argv_initialized`: the base was captured once, even if
+	/// a later source-file unwind popped it. Inherited by subshells.
+	pub argv_init:     bool,
 	/// The traps this vproc set itself: a subshell lists its parent's but
 	/// runs only its own (ERR, DEBUG and RETURN also under
 	/// `errtrace`/`functrace`; bash 5.3 keeps listing inherited signal
@@ -1718,7 +1721,9 @@ impl Live {
 // (`ExecState::resumed`, 368 → 376 B): the bench measured 1,832 B per idle
 // vproc with both. The line editor's boxed state (`Vproc::zle`, 8 B) brings
 // that to at most 1,840 B.
-const _: () = assert!(size_of::<Vproc>() <= 672, "Vproc grew (idle vproc ≤ 2 KiB)");
+// The durable argument-base flag (`Vproc::argv_init`) adds 8 B. The memory
+// bench measured 1,848 B per idle vproc on 2026-11-05 (target ≤ 2,048).
+const _: () = assert!(size_of::<Vproc>() <= 680, "Vproc grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<Frame>() <= 256, "Frame grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<Scratch>() <= 216, "Scratch grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<ExecState>() <= 376, "ExecState grew (idle vproc ≤ 2 KiB)");

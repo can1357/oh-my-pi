@@ -138,6 +138,11 @@ pub fn source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	} else {
 		text.iter().copied().filter(|&c| c != 0).collect()
 	};
+	if !rest.is_empty() && ctx.option(OptId::Extdebug)? {
+		// `source_builtin` initializes the base from the caller before
+		// installing the file's own parameters under debugging_mode.
+		crate::bash::vm::callstack::init_argv(ctx.k, ctx.cx.store, ctx.vp)?;
+	}
 	let restore = source_args(ctx, rest, true)?;
 	// As for `eval`: the file sees the caller's `$?`.
 	push_script(ctx.vp, &text, 1, ScriptKind::Source);

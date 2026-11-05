@@ -1715,9 +1715,11 @@ impl Shell {
 		}
 		let calls = callstack::inherited(&self.procs[parent]);
 		let args_set = self.procs[parent].args_set;
+		let argv_init = self.procs[parent].argv_init;
 		let mut vp = Vproc::new(vpid, Some(parent_vpid), fds, cwd, Some(overlay), true);
 		vp.calls = calls;
 		vp.args_set = args_set;
+		vp.argv_init = argv_init;
 		vp.lineage = lineage.unwrap_or(parent_lineage);
 		vp.status = status;
 		vp.scopes = scopes;
@@ -2671,6 +2673,7 @@ impl Vproc {
 			spare: Vec::new(),
 			calls: Vec::new(),
 			args_set: false,
+			argv_init: false,
 			own_traps: proc::OwnTraps::EMPTY,
 			trap_frames: 0,
 			mode: ModeId::Bash,
@@ -2801,6 +2804,7 @@ impl Vproc {
 		vp.calls = callstack::inherited(self);
 		// bash forks the whole shell, `changed_dollar_vars` included.
 		vp.args_set = self.args_set;
+		vp.argv_init = self.argv_init;
 		vp.trace_base = xtrace::level(self) - 1;
 		// Started from a context where `set -e` is ignored (the parent's op
 		// is a condition, or its frame runs in one): so is the child.

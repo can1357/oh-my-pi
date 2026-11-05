@@ -4,9 +4,9 @@
 //!
 //! bash keeps them as real arrays it pushes and pops around function calls
 //! and `.` files (`execute_function`, `_evalfile`). Here a vproc keeps the
-//! pushes as [`Call`]s ([`Vproc::calls`]): each is tied to the frame that
-//! made it and leaves with that frame, a subshell starts with a copy of its
-//! parent's, and the arrays are built from them when read.
+//! pushes as [`Call`]s ([`Vproc::calls`]). A frame's level leaves with the
+//! frame, but an argument push can outlive it; a subshell inherits both.
+//! The arrays are built from the remaining pushes when read.
 
 use bstr::BString;
 use serde::{Deserialize, Serialize};
@@ -25,12 +25,17 @@ use crate::bash::{
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Call {
 	/// What was pushed.
-	pub kind:  CallKind,
-	/// The frame count right after the frame that made the push (its index
-	/// plus one): the push ends when that frame pops. 0 for a push this
-	/// vproc's frames never pop (one inherited from a parent shell, the
-	/// `BASH_ARGV` base).
-	pub depth: u32,
+	pub kind:     CallKind,
+	/// The frame count right after the frame that made the level (its index
+	/// plus one). 0 for an inherited level or a bare argument push.
+	pub depth:    u32,
+	/// An unconditional `pop_args` registered by `execute_function`
+	/// (`execute_cmd.c:5343-5347`) or an argument-less `.` (`_evalfile`,
+	/// `evalfile.c:270-278`). A `.` with arguments instead tests `extdebug`
+	/// at exit (`uw_maybe_pop_dollar_vars`, `source.def:102-109`), even if
+	/// no arguments were pushed at entry. Each pop takes the innermost
+	/// remaining push, not necessarily this level's own arguments.
+	pub pop_args: bool,
 }
 
 /// The arrays a [`Call`] pushed onto.
@@ -69,9 +74,8 @@ pub enum CallKind {
 		/// file name as given).
 		argzero: Option<BString>,
 	},
-	/// bash's `init_bash_argv`: the positional parameters pushed onto
-	/// `BASH_ARGV` once, before the first function call (or `.` with
-	/// arguments) under `extdebug`.
+	/// An argument push with no frame level: `init_bash_argv`'s base, or
+	/// arguments left behind when a level's end did not pop them.
 	Args(Vec<BString>),
 }
 
@@ -180,10 +184,9 @@ pub fn array(
 		b"BASH_ARGC" | b"BASH_ARGV" => {
 			// bash's `get_bashargcv`: read at the top level before any base
 			// was pushed, the arrays show the positional parameters.
-			let base = (!in_function(vp)
-				&& !vp.calls.iter().any(|c| matches!(c.kind, CallKind::Args(_))))
-			.then(|| state::positional_scoped(&k.root, store, vp).map(<[BString]>::to_vec))
-			.transpose()?;
+			let base = (!in_function(vp) && !vp.argv_init)
+				.then(|| state::positional_scoped(&k.root, store, vp).map(<[BString]>::to_vec))
+				.transpose()?;
 			argcv(vp, name, base.as_deref())
 		},
 		_ => return Ok(None),
@@ -230,27 +233,54 @@ pub fn listed(
 	store: &mut dyn StateStore,
 	vp: &Vproc,
 ) -> Result<Vec<(BString, Var)>, StoreError> {
-	let indexed = |items: Vec<BString>| Var {
-		attrs: Attrs::NONE,
-		value: VarValue::Indexed(items.into_iter().zip(0i64..).map(|(v, i)| (i, v)).collect()),
-	};
 	let mut vars = Vec::with_capacity(6);
-	// bash lists `BASH_ARGC`/`BASH_ARGV` as stored: the top-level base
-	// `get_bashargcv` adds only on a read (`declare -a BASH_ARGC=()`).
-	for name in [&b"BASH_ARGC"[..], b"BASH_ARGV"] {
-		vars.push((BString::from(name), indexed(argcv(vp, name, None))));
+	for name in
+		[&b"BASH_ARGC"[..], b"BASH_ARGV", b"BASH_LINENO", b"BASH_SOURCE", b"DIRSTACK", b"FUNCNAME"]
+	{
+		if let Some(var) = listed_array(k, store, vp, name)? {
+			vars.push((BString::from(name), var));
+		}
 	}
-	for name in [&b"BASH_LINENO"[..], b"BASH_SOURCE"] {
-		let items = array(k, store, vp, name)?.unwrap_or_default();
-		vars.push((BString::from(name), indexed(items)));
-	}
-	vars.push((BString::from("DIRSTACK"), indexed(Vec::new())));
-	let funcname = array(k, store, vp, b"FUNCNAME")?.map_or_else(
-		|| Var { attrs: Attrs::INDEXED.with(Attrs::INVISIBLE), value: VarValue::Indexed(Vec::new()) },
-		indexed,
-	);
-	vars.push((BString::from("FUNCNAME"), funcname));
 	Ok(vars)
+}
+
+/// One call-stack array as `declare`/`set` list it, without invoking
+/// `get_bashargcv`. A named `declare -p` invokes that getter separately.
+/// `None` for a name this module does not list.
+///
+/// # Errors
+///
+/// A store failure reading the run origin.
+pub fn listed_array(
+	k: &Kernel,
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+	name: &[u8],
+) -> Result<Option<Var>, StoreError> {
+	let items = match name {
+		// bash's listing path reads the stored arrays, not the dynamic
+		// getter: a listing alone does not initialize the base.
+		b"BASH_ARGC" | b"BASH_ARGV" => Some(argcv(vp, name, None)),
+		b"DIRSTACK" => Some(Vec::new()),
+		b"BASH_LINENO" | b"BASH_SOURCE" | b"FUNCNAME" => array(k, store, vp, name)?,
+		_ => return Ok(None),
+	};
+	let attrs = if items.is_none() {
+		Attrs::INDEXED.with(Attrs::INVISIBLE)
+	} else {
+		Attrs::NONE
+	};
+	Ok(Some(Var {
+		attrs,
+		value: VarValue::Indexed(
+			items
+				.unwrap_or_default()
+				.into_iter()
+				.zip(0i64..)
+				.map(|(v, i)| (i, v))
+				.collect(),
+		),
+	}))
 }
 
 /// The file a function defined now records as its source (bash's
@@ -291,29 +321,29 @@ pub fn definition_file(
 ///
 /// A store failure reading the positional parameters.
 pub fn read_base(k: &Kernel, store: &mut dyn StateStore, vp: &mut Vproc) -> Result<(), StoreError> {
-	if in_function(vp) || vp.calls.iter().any(|c| matches!(c.kind, CallKind::Args(_))) {
-		return Ok(());
+	if !in_function(vp) {
+		init_argv(k, store, vp)?;
 	}
-	let base = state::positional_scoped(&k.root, store, vp)?.to_vec();
-	init_argv(vp, || base);
 	Ok(())
 }
 
-/// Push bash's `init_bash_argv` base (the positional parameters `args`)
-/// unless it was pushed already in this shell.
+/// bash's `init_bash_argv`: push the current positional parameters once
+/// per shell. The initialized flag stays set even if a later `pop_args`
+/// removes the base. `shopt_set_debug_mode` calls this inside functions too.
 ///
-/// It goes at the BOTTOM of the pushes, not the end: it is the outermost
-/// level, below every `.` file and function call already there, so
-/// [`argcv`] (innermost first) lists it last as bash does, and
-/// [`truncate`] still reaches the `.` pushes above it. Appended instead, a
-/// base pushed while a `.` file was running read out above that file's own
-/// push and stopped `truncate`'s pop, which silently dropped the caller's
-/// positional parameters.
-fn init_argv(vp: &mut Vproc, args: impl FnOnce() -> Vec<BString>) {
-	if !vp.calls.iter().any(|c| matches!(c.kind, CallKind::Args(_))) {
+/// The base goes at the bottom, below any filename or function pushes.
+///
+/// # Errors
+///
+/// A store failure reading the positional parameters.
+pub fn init_argv(k: &Kernel, store: &mut dyn StateStore, vp: &mut Vproc) -> Result<(), StoreError> {
+	if !vp.argv_init {
+		let args = state::positional_scoped(&k.root, store, vp)?.to_vec();
 		vp.calls
-			.insert(0, Call { kind: CallKind::Args(args()), depth: 0 });
+			.insert(0, Call { kind: CallKind::Args(args), depth: 0, pop_args: false });
+		vp.argv_init = true;
 	}
+	Ok(())
 }
 
 /// Record a function call the frame just pushed made: `name` defined in
@@ -339,15 +369,17 @@ pub fn push_function(
 	vp.args_set = false;
 	let argv = if state::option(&mut k.root, store, vp, OptId::Extdebug)? {
 		// The caller's parameters: the frame is pushed, its scope not yet.
-		let base = state::positional_scoped(&k.root, store, vp)?.to_vec();
-		init_argv(vp, || base);
+		init_argv(k, store, vp)?;
 		Some(args.to_vec())
 	} else {
 		None
 	};
 	let depth = vp.frames.len() as u32;
-	vp.calls
-		.push(Call { kind: CallKind::Function { name, file, line, argv }, depth });
+	vp.calls.push(Call {
+		pop_args: argv.is_some(),
+		kind: CallKind::Function { name, file, line, argv },
+		depth,
+	});
 	Ok(())
 }
 
@@ -368,11 +400,16 @@ pub fn push_source(
 	restore: Option<Box<SourceSave>>,
 	argzero: Option<BString>,
 ) -> Result<(), StoreError> {
+	let extdebug = state::option(&mut k.root, store, vp, OptId::Extdebug)?;
+	if !extdebug && !in_function(vp) && vp.mode.dialect() == crate::bash::ids::Dialect::Bash {
+		// `_evalfile` looks up both arrays through `get_bashargcv` after
+		// `source_builtin` installed the file's arguments. A failed open
+		// never reaches this lookup (Bash 5.3).
+		init_argv(k, store, vp)?;
+	}
 	let argv = if args.is_empty() {
 		Some(vec![file.clone()])
-	} else if state::option(&mut k.root, store, vp, OptId::Extdebug)? {
-		let base = state::positional_scoped(&k.root, store, vp)?.to_vec();
-		init_argv(vp, || base);
+	} else if extdebug {
 		Some(args.to_vec())
 	} else {
 		None
@@ -381,6 +418,7 @@ pub fn push_source(
 	vp.calls.push(Call {
 		kind: CallKind::Source { file, line, argv, restore, argzero, ended: false },
 		depth,
+		pop_args: args.is_empty(),
 	});
 	Ok(())
 }
@@ -395,11 +433,42 @@ pub fn push_source(
 /// while the file ran ([`Vproc::args_set`], which the file's end clears
 /// either way). zsh's `bin_dot` always puts them back.
 pub fn truncate(root: &mut state::Root, store: &mut dyn StateStore, vp: &mut Vproc, frames: usize) {
-	while vp.calls.last().is_some_and(|c| c.depth as usize > frames) {
-		let Some(Call { kind: CallKind::Source { restore: Some(save), .. }, .. }) = vp.calls.pop()
-		else {
-			continue;
+	// `pop_args` can leave detached pushes above a level that is ending.
+	// Find that level rather than assuming the last push belongs to it.
+	while let Some(mut index) = vp.calls.iter().rposition(|c| c.depth as usize > frames) {
+		let pop_args = match &vp.calls[index].kind {
+			CallKind::Source { restore: Some(save), .. } if save.bash => {
+				// `uw_maybe_pop_dollar_vars`: only a source with arguments
+				// tests debugging_mode at exit, not when its push was made.
+				match state::option(root, store, vp, OptId::Extdebug) {
+					Ok(on) => on,
+					Err(err) => {
+						root.fail(err);
+						false
+					},
+				}
+			},
+			_ => vp.calls[index].pop_args,
 		};
+		if pop_args {
+			index = pop_argv(vp, index);
+		}
+		let (argv, restore) = match vp.calls.remove(index).kind {
+			CallKind::Source { argv, restore, .. } => (argv, restore),
+			CallKind::Function { argv, .. } => (argv, None),
+			CallKind::Args(_) => continue,
+		};
+		if let Some(argv) = argv {
+			// bash's argument arrays are separate from the frame arrays:
+			// a push not consumed by `pop_args` survives the level's end,
+			// in its original position relative to every other push.
+			vp.calls.insert(index, Call {
+				kind:     CallKind::Args(argv),
+				depth:    0,
+				pop_args: false,
+			});
+		}
+		let Some(save) = restore else { continue };
 		let SourceSave { args, bash } = *save;
 		if bash {
 			let kept = vp.args_set
@@ -417,7 +486,24 @@ pub fn truncate(root: &mut state::Root, store: &mut dyn StateStore, vp: &mut Vpr
 		}
 		state::set_positional(root, store, vp, args);
 	}
-	vp.calls.retain(|c| c.depth as usize <= frames);
+}
+
+/// bash's `pop_args`: consume one innermost argument push, independently
+/// of its owner. Return the ending level's index after removing a bare push.
+fn pop_argv(vp: &mut Vproc, owner: usize) -> usize {
+	let Some(index) = vp.calls.iter().rposition(|c| c.kind.argv().is_some()) else {
+		return owner;
+	};
+	match &mut vp.calls[index].kind {
+		CallKind::Function { argv, .. } | CallKind::Source { argv, .. } => *argv = None,
+		CallKind::Args(_) => {
+			vp.calls.remove(index);
+			if index < owner {
+				return owner - 1;
+			}
+		},
+	}
+	owner
 }
 
 pub fn source_argzero(vp: &Vproc) -> Option<&BString> {
@@ -464,8 +550,7 @@ pub fn push_callout_base(
 	vp: &mut Vproc,
 ) -> Result<(), StoreError> {
 	if state::option(&mut k.root, store, vp, OptId::Extdebug)? {
-		let base = state::positional_scoped(&k.root, store, vp)?.to_vec();
-		init_argv(vp, || base);
+		init_argv(k, store, vp)?;
 	}
 	Ok(())
 }
@@ -475,7 +560,7 @@ pub fn push_callout_base(
 pub fn inherited(vp: &Vproc) -> Vec<Call> {
 	vp.calls
 		.iter()
-		.map(|c| Call { kind: c.kind.clone(), depth: 0 })
+		.map(|c| Call { kind: c.kind.clone(), depth: 0, pop_args: false })
 		.collect()
 }
 
@@ -519,6 +604,7 @@ mod tests {
 				argv: argv.map(|a| a.iter().map(|s| BString::from(*s)).collect()),
 			},
 			depth,
+			pop_args: argv.is_some(),
 		}
 	}
 
@@ -527,7 +613,7 @@ mod tests {
 	#[test]
 	fn argv_pushes_read_innermost_first_with_arguments_reversed() {
 		let calls = [
-			Call { kind: CallKind::Args(Vec::new()), depth: 0 },
+			Call { kind: CallKind::Args(Vec::new()), depth: 0, pop_args: false },
 			function("f1", Some(&["1", "x"]), 1),
 			function("f2", Some(&["2", "y"]), 2),
 		];
