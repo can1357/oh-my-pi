@@ -71,7 +71,10 @@ describe("restoreSession (omp --restore)", () => {
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
-		for (const id of ids) AgentRegistry.global().unregister(id);
+		for (const id of ids) {
+			const ref = AgentRegistry.global().get(id);
+			if (ref) AgentRegistry.global().unregister(id, ref);
+		}
 		await manager?.dispose({ timeoutMs: 1000 });
 		manager = undefined;
 		tempDir?.removeSync();

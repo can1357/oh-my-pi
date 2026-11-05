@@ -404,7 +404,8 @@ describe("persisted roster latch semantics", () => {
 		expect(countReaddirs(readdirs, scanDir(rootFile))).toBe(1);
 		// A release removes the ref the latch restored; the next ensure sees the
 		// missing ref and re-scans to restore it.
-		expect(registry.unregister("Worker")).toBe(true);
+		const worker = registry.get("Worker")!;
+		expect(registry.unregister("Worker", worker)).toBe(true);
 		await ensurePersistedRoster(registry, rootFile);
 		expect(registry.get("Worker")?.sessionFile).toBe(childFile);
 		expect(countReaddirs(readdirs, scanDir(rootFile))).toBe(2);

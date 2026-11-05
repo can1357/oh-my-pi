@@ -882,7 +882,7 @@ describe("structured subagent primitive", () => {
 				await ref?.session?.dispose();
 			} finally {
 				try {
-					AgentRegistry.global().unregister(agentId);
+					if (ref) AgentRegistry.global().unregister(agentId, ref);
 					if (artifactsDir) await fs.rm(artifactsDir, { recursive: true, force: true });
 				} finally {
 					unregisterCustomApis(sourceId);
@@ -967,7 +967,7 @@ describe("structured subagent primitive", () => {
 				await ref?.session?.dispose();
 			} finally {
 				try {
-					AgentRegistry.global().unregister(agentId);
+					if (ref) AgentRegistry.global().unregister(agentId, ref);
 					if (artifactDir) await fs.rm(artifactDir, { recursive: true, force: true });
 				} finally {
 					unregisterCustomApis(sourceId);

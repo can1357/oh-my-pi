@@ -988,8 +988,10 @@ describe("persisted subagent revival", () => {
 			expect(() => options!.assertDispatchModel!(rootMentionModel)).toThrow(/not approved/);
 		} finally {
 			await lifecycle.dispose();
-			registry.unregister(childId);
-			registry.unregister(parentId);
+			for (const id of [childId, parentId]) {
+				const ref = registry.get(id);
+				if (ref) registry.unregister(id, ref);
+			}
 		}
 	});
 
@@ -1081,8 +1083,10 @@ describe("persisted subagent revival", () => {
 				expect(options!.assertDispatchModel!(target)).toBeUndefined();
 			} finally {
 				await lifecycle.dispose();
-				registry.unregister(childId);
-				registry.unregister(parentId);
+				for (const id of [childId, parentId]) {
+					const ref = registry.get(id);
+					if (ref) registry.unregister(id, ref);
+				}
 			}
 		},
 	);
@@ -1235,7 +1239,8 @@ describe("persisted subagent revival", () => {
 			expect(() => nested(rootModel)).toThrow(/not approved/);
 
 			// A parked parent grants nothing; the root's model is not substituted.
-			registry.unregister(parentId);
+			const parkedParent = registry.get(parentId)!;
+			registry.unregister(parentId, parkedParent);
 			expect(() => nested(parentModel)).toThrow(`Parent agent "${parentId}"`);
 			// An unavailable model is not an approval denial, so the parked parent is not blamed for it.
 			const missing = perCallModelFixture("missing-model");
@@ -1249,7 +1254,8 @@ describe("persisted subagent revival", () => {
 			expect(direct(rootModel)).toBeUndefined();
 			expect(() => direct(parentModel)).toThrow(/not approved/);
 		} finally {
-			registry.unregister(parentId);
+			const leftoverParent = registry.get(parentId);
+			if (leftoverParent) registry.unregister(parentId, leftoverParent);
 		}
 	});
 
@@ -1854,8 +1860,10 @@ describe("cold revival replays the system prompt the last request sent", () => {
 	afterEach(async () => {
 		await Promise.all(sessions.splice(0).map(session => session.dispose()));
 		AgentLifecycleManager.resetGlobalForTests();
-		AgentRegistry.global().unregister("prompt-blocks");
-		AgentRegistry.global().unregister("Peer");
+		for (const id of ["prompt-blocks", "Peer"]) {
+			const ref = AgentRegistry.global().get(id);
+			if (ref) AgentRegistry.global().unregister(id, ref);
+		}
 	});
 
 	function createTool(name: string): AgentTool {
@@ -2214,7 +2222,10 @@ describe("cold revival replays the system prompt the last request sent", () => {
 		registerPeer();
 		await spawned.session.refreshBaseSystemPrompt(() => false);
 		expect(spawned.session.systemPrompt.join("\n")).not.toContain("`Peer`");
-		const { warm } = await parkAndRevive(() => AgentRegistry.global().unregister("Peer"));
+		const { warm } = await parkAndRevive(() => {
+			const peer = AgentRegistry.global().get("Peer");
+			if (peer) AgentRegistry.global().unregister("Peer", peer);
+		});
 		expect(warm.requests[0]).toEqual(spawned.requests.at(-1)!);
 	});
 

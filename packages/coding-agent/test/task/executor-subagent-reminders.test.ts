@@ -313,7 +313,8 @@ describe("runSubprocess yield reminders", () => {
 				/no text \(thinking only\)/,
 			);
 		} finally {
-			AgentRegistry.global().unregister("subagent-race");
+			const raceRef = AgentRegistry.global().get("subagent-race");
+			if (raceRef) AgentRegistry.global().unregister("subagent-race", raceRef);
 		}
 	});
 	it("waits out a running turn before installing the pooled contract", async () => {
@@ -363,7 +364,8 @@ describe("runSubprocess yield reminders", () => {
 			expect(result.exitCode).toBe(0);
 			expect(result.output).toContain('"batch": true');
 		} finally {
-			AgentRegistry.global().unregister("subagent-prewait");
+			const prewaitRef = AgentRegistry.global().get("subagent-prewait");
+			if (prewaitRef) AgentRegistry.global().unregister("subagent-prewait", prewaitRef);
 		}
 	});
 	it("fails the follow-up instead of installing under a wedged turn", async () => {
@@ -397,7 +399,8 @@ describe("runSubprocess yield reminders", () => {
 			expect(calls).toEqual(["waitForIdle", "waitForIdle", "waitForIdle"]);
 			expect(calls).not.toContain("setYield");
 		} finally {
-			AgentRegistry.global().unregister("subagent-wedged");
+			const wedgedRef = AgentRegistry.global().get("subagent-wedged");
+			if (wedgedRef) AgentRegistry.global().unregister("subagent-wedged", wedgedRef);
 		}
 	});
 	it("drives the reacquired session when parking replaces the worker mid-install", async () => {
@@ -442,7 +445,8 @@ describe("runSubprocess yield reminders", () => {
 			expect(result.exitCode).toBe(0);
 			expect(result.output).toContain('"revived": true');
 		} finally {
-			AgentRegistry.global().unregister("subagent-revive");
+			const reviveRef = AgentRegistry.global().get("subagent-revive");
+			if (reviveRef) AgentRegistry.global().unregister("subagent-revive", reviveRef);
 		}
 	});
 	it("fails fast when parking replaces the worker on every install", async () => {
@@ -472,7 +476,8 @@ describe("runSubprocess yield reminders", () => {
 			).rejects.toThrow("was replaced during every install attempt");
 			expect(ensureLive).toHaveBeenCalledTimes(4);
 		} finally {
-			AgentRegistry.global().unregister("subagent-churn");
+			const churnRef = AgentRegistry.global().get("subagent-churn");
+			if (churnRef) AgentRegistry.global().unregister("subagent-churn", churnRef);
 		}
 	});
 	it("waits out a wake running on the replacement worker before reinstalling", async () => {
@@ -525,7 +530,8 @@ describe("runSubprocess yield reminders", () => {
 			expect(result.exitCode).toBe(0);
 			expect(result.output).toContain('"revived": true');
 		} finally {
-			AgentRegistry.global().unregister("subagent-revive-wake");
+			const reviveWakeRef = AgentRegistry.global().get("subagent-revive-wake");
+			if (reviveWakeRef) AgentRegistry.global().unregister("subagent-revive-wake", reviveWakeRef);
 		}
 	});
 	it("sends reminder prompt when subagent stops without yield", async () => {

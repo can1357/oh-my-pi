@@ -3542,9 +3542,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Cancel async jobs registered by *this* agent only. Used by lifecycle
-	 * transitions (newSession, switchSession, handoff, dispose) so a subagent
-	 * cleans up its own background work without touching its parent's jobs.
+	 * Cancel the async work of *this* agent's tree. Used by lifecycle
+	 * transitions (newSession, switchSession, conversation branching, reset,
+	 * dispose) so a conversation that ends takes its own background work with
+	 * it without touching its parent's jobs.
+	 *
+	 * Scope is the ref this agent currently holds, by LINEAGE: its own jobs and
+	 * those of the agents spawned under it. An id alone would be the wrong
+	 * scope in both directions — it would miss the descendants (which is how
+	 * `/new` left a retained grandchild running) and it would hit the work of a
+	 * later agent that took the id. When this session holds no registry ref
+	 * there is no tree to speak of, and only its own directly owned rows are
+	 * cancelled.
 	 *
 	 * Cleanup runs against this session's scoped manager: running jobs are
 	 * cancelled, finished rows are evicted with their pending deliveries, and any
@@ -3563,11 +3572,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		releaseJudgmentBatches(this.#agentId);
 		WorkPoolRegistry.global().releaseOwner(this.#agentId);
 		const manager = this.#asyncJobManager;
-		// Only this session's own jobs: the work of agents spawned under it ends
-		// with those agents, when the registry ends their refs (the job manager's
-		// end hook), not with this conversation.
-		manager?.cancelAll({ ownerId: this.#agentId }, reason);
-		manager?.evictCompletedJobs({ ownerId: this.#agentId });
+		const ref = this.#agentRegistry?.get(this.#agentId);
+		const filter =
+			ref === undefined
+				? { ownerId: this.#agentId }
+				: { ownerId: this.#agentId, includeDescendants: true, agentLineage: ref.lineage };
+		manager?.cancelAll(filter, reason);
+		manager?.evictCompletedJobs(filter);
 		// Invalidate this owner's in-flight/drained deliveries against the new
 		// generation, then drop any async-result follow-up already queued, so a
 		// prior session's background result cannot inject into the next transcript.

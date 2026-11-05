@@ -45,8 +45,9 @@ async function runWorker(options: {
 	const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-executor-exact-model-"));
 	const authStorage = await AuthStorage.create(":memory:");
 	cleanups.push(async () => {
-		await AgentRegistry.global().get(agentId)?.session?.dispose();
-		AgentRegistry.global().unregister(agentId);
+		const ref = AgentRegistry.global().get(agentId);
+		await ref?.session?.dispose();
+		if (ref) AgentRegistry.global().unregister(agentId, ref);
 		unregisterCustomApis(sourceId);
 		authStorage.close();
 		await fs.rm(cwd, { recursive: true, force: true });

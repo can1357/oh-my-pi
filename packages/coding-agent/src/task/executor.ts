@@ -5403,8 +5403,14 @@ async function driveSubprocess(options: ExecutorOptions, lifecycle: AgentLifecyc
 					AgentRegistry.global().get(id)?.generation === runRef.generation ? runRef : undefined,
 				);
 			}
+			// The lineage this run ran as. It is read from the ref the run held,
+			// never looked up from `id` here: by now the id may name a later
+			// agent, and reaping by that id would cancel the replacement's work.
+			// Undefined means the run never registered a ref, and then only the
+			// chainless jobs owned by the id can be its own.
+			const reapLineage = runRef?.lineage;
 			if (jobManager && !keepOwnerJobs) {
-				const reap = await jobManager.cancelAndReapOwnerJobs(id, cleanupDeadlineAt, runRef?.lineage);
+				const reap = await jobManager.cancelAndReapOwnerJobs(id, cleanupDeadlineAt, reapLineage);
 				if (!reap.settled) {
 					deferCleanup(reap.completion);
 					logger.warn("Subagent async job cleanup exceeded its deadline", {
@@ -5437,12 +5443,12 @@ async function driveSubprocess(options: ExecutorOptions, lifecycle: AgentLifecyc
 			if (jobManager && !keepOwnerJobs) {
 				if (deferredSessionShutdown) {
 					const finalReap = Promise.allSettled([deferredSessionShutdown]).then(async () => {
-						const reap = await jobManager.cancelAndReapOwnerJobs(id, Date.now(), runRef?.lineage);
+						const reap = await jobManager.cancelAndReapOwnerJobs(id, Date.now(), reapLineage);
 						await reap.completion;
 					});
 					lateCleanups.push(finalReap);
 				} else {
-					const reap = await jobManager.cancelAndReapOwnerJobs(id, cleanupDeadlineAt, runRef?.lineage);
+					const reap = await jobManager.cancelAndReapOwnerJobs(id, cleanupDeadlineAt, reapLineage);
 					if (!reap.settled) {
 						deferCleanup(reap.completion);
 						logger.warn("Subagent async job cleanup exceeded its deadline after session shutdown", {

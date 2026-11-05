@@ -180,8 +180,10 @@ describe("AgentSession.dumpSessionArchiveToTmpDir", () => {
 			expect(workerText).not.toContain("request in flight");
 			expect(workerText).not.toContain("in flight, not persisted");
 		} finally {
-			registry.unregister("Scout");
-			registry.unregister("Worker");
+			for (const id of ["Scout", "Worker"]) {
+				const ref = registry.get(id);
+				if (ref) registry.unregister(id, ref);
+			}
 			scout.agent.state.isStreaming = false;
 			worker.agent.state.isStreaming = false;
 			await scout.dispose();

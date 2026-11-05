@@ -430,7 +430,7 @@ describe("AsyncJobManager", () => {
 			{ ownerId: "owner" },
 		);
 
-		const reap = await manager.cancelAndReapOwnerJobs("owner", Date.now());
+		const reap = await manager.cancelAndReapOwnerJobs("owner", Date.now(), undefined);
 
 		expect(reap.settled).toBe(false);
 		expect(reap.pendingJobIds).toEqual([jobId]);
@@ -513,6 +513,91 @@ describe("AsyncJobManager", () => {
 		await manager.waitForAll();
 	});
 
+	test("a finished run reaps the jobs of the agent it ran as, not of the agent that holds the id now", async () => {
+		const registry = new AgentRegistry();
+		const manager = new AsyncJobManager({ onJobComplete: async () => {}, agents: registry });
+		agent(registry, "Main");
+		agent(registry, "Alpha", "Main");
+		agent(registry, "Beta", "Main");
+		const oldLane = agent(registry, "Lane", "Alpha");
+		const oldWork = manager.register("bash", "old lane", runUntilAborted, { ownerId: "Lane" });
+		expect(registry.unregister("Lane", oldLane)).toBe(true);
+		expect(manager.getJob(oldWork)?.status).toBe("cancelled");
+		// The id is spawned again under Beta and starts its own work.
+		agent(registry, "Lane", "Beta");
+		const newWork = manager.register("bash", "new lane", runUntilAborted, { ownerId: "Lane" });
+
+		// Only now does the OLD run finalize and reap. It must reach nothing of
+		// the live agent that happens to carry the same id.
+		const reap = await manager.cancelAndReapOwnerJobs("Lane", Date.now() + 1_000, oldLane.lineage);
+
+		expect(reap.settled).toBe(true);
+		expect(manager.getJob(newWork)?.status).toBe("running");
+		manager.cancel(newWork);
+		await manager.waitForAll();
+	});
+
+	test("an owner alias keeps naming the agent that bound it across that agent's reopen", async () => {
+		const registry = new AgentRegistry();
+		const manager = new AsyncJobManager({ onJobComplete: async () => {}, agents: registry });
+		agent(registry, "Main");
+		const lane = agent(registry, "Lane", "Main");
+		manager.bindOwnerAlias("Lane/advisor#1", "Lane");
+		// Killed into its tombstone, then revived from its transcript.
+		expect(registry.setStatus("Lane", "aborted", lane)).toBe(true);
+		const reopened = registry.reopen("Lane", lane);
+		expect(reopened).toBeDefined();
+		// The revived agent's advisor starts work under the same alias.
+		const advisorWork = manager.register("bash", "advisor", runUntilAborted, { ownerId: "Lane/advisor#1" });
+
+		expect(registry.unregister("Lane", reopened!)).toBe(true);
+
+		expect(manager.getJob(advisorWork)?.status).toBe("cancelled");
+		await manager.waitForAll();
+	});
+
+	test("an owner alias does not pull work into the tree of a later agent that took the id", async () => {
+		const registry = new AgentRegistry();
+		const manager = new AsyncJobManager({ onJobComplete: async () => {}, agents: registry });
+		agent(registry, "Main");
+		agent(registry, "Lane", "Main");
+		manager.bindOwnerAlias("Lane/advisor#1", "Lane");
+		// A fresh spawn of the same id: a new agent, a new lineage.
+		const replacement = agent(registry, "Lane", "Main");
+		const strayWork = manager.register("bash", "stray", runUntilAborted, { ownerId: "Lane/advisor#1" });
+
+		expect(registry.unregister("Lane", replacement)).toBe(true);
+
+		expect(manager.getJob(strayWork)?.status).toBe("running");
+		manager.cancel(strayWork);
+		await manager.waitForAll();
+	});
+
+	test("a job whose body ends its own agent while registering is cancelled by that end", async () => {
+		const registry = new AgentRegistry();
+		const manager = new AsyncJobManager({ onJobComplete: async () => {}, agents: registry });
+		agent(registry, "Main");
+		const lane = agent(registry, "Lane", "Main");
+		const jobId = manager.register(
+			"bash",
+			"ends its agent",
+			async context => {
+				// The end lands while this body runs, before `register` returned.
+				registry.unregister("Lane", lane);
+				if (context.signal.aborted) return "stopped";
+				return await runUntilAborted(context);
+			},
+			{ ownerId: "Lane" },
+		);
+
+		try {
+			expect(manager.getJob(jobId)?.status).toBe("cancelled");
+		} finally {
+			manager.cancel(jobId);
+			await manager.waitForAll();
+		}
+	});
+
 	test.each(["single", "bulk"] as const)("keeps %s cancelled work reapable past retention", async kind => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({ retentionMs: 25 });
@@ -530,7 +615,7 @@ describe("AsyncJobManager", () => {
 			if (kind === "single") manager.cancel(jobId);
 			else manager.cancelAll({ ownerId: "owner" });
 			vi.advanceTimersByTime(50);
-			const reap = await manager.cancelAndReapOwnerJobs("owner", Date.now());
+			const reap = await manager.cancelAndReapOwnerJobs("owner", Date.now(), undefined);
 			expect(reap.settled).toBe(false);
 			expect(reap.pendingJobIds).toEqual([jobId]);
 			release.resolve();

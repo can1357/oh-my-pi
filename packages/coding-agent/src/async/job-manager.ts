@@ -438,15 +438,25 @@ export interface AsyncJobManagerApi {
 	/** Wait until every job owned by `ownerId` settled; false when `timeoutMs` elapses first. */
 	waitForOwnerJobs(ownerId: string, options?: { timeoutMs?: number; excludeSuppressed?: boolean }): Promise<boolean>;
 	/**
-	 * Cancel every job owned by `ownerId` and, with `agentLineage`, every job of
-	 * that lineage's tree, then wait until `deadlineAt`.
+	 * Cancel the jobs of the tree of the agent `ownerId` ran as — the ref whose
+	 * `lineage` is `agentLineage` — then wait until `deadlineAt`.
+	 *
+	 * `agentLineage` is REQUIRED, and is the lineage of the ref the caller ran
+	 * as, never a lineage looked up from the id afterwards: an id can belong to
+	 * a later agent by then. Pass `undefined` only when the caller never had a
+	 * ref at all; it then reaps just the jobs registered with no owner chain,
+	 * which are the only ones such a caller can own.
 	 */
-	cancelAndReapOwnerJobs(ownerId: string, deadlineAt: number, agentLineage?: number): Promise<AsyncJobReapResult>;
+	cancelAndReapOwnerJobs(ownerId: string, deadlineAt: number, agentLineage: number | undefined): Promise<AsyncJobReapResult>;
 	/**
 	 * Make `alias` an owner id of `agentId`: jobs owned by `alias`, and agents
 	 * registered with `alias` as their parent, belong to that agent's tree. A
-	 * session's advisor owns its work under such an alias. The alias lasts
-	 * until the agent ends.
+	 * session's advisor owns its work under such an alias.
+	 *
+	 * The alias is bound to the agent's ref as it is NOW — its lineage is
+	 * captured here — so it survives that agent being reopened (same lineage,
+	 * new generation) and stops resolving the moment a different agent takes
+	 * the id.
 	 */
 	bindOwnerAlias(alias: string, agentId: string): void;
 	drainDeliveries(options?: { timeoutMs?: number; filter?: AsyncJobFilter }): Promise<boolean>;
@@ -478,8 +488,12 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	readonly #watchedJobs = new Set<string>();
 	/** Lineages of each job's owner and of every agent above it, recorded when the job registered. */
 	readonly #ownerLineages = new WeakMap<AsyncJob, ReadonlySet<number>>();
-	/** Owner aliases ({@link bindOwnerAlias}) to the agent id they belong to. */
-	readonly #ownerAliases = new Map<string, string>();
+	/**
+	 * Owner aliases ({@link bindOwnerAlias}) to the agent they belong to, with
+	 * the lineage that agent had when the alias was bound: an alias names one
+	 * incarnation of an id, never whichever agent holds the id later.
+	 */
+	readonly #ownerAliases = new Map<string, { readonly agentId: string; readonly lineage: number | undefined }>();
 	readonly #consumedJobResults = new Set<string>();
 	readonly #evictionTimers = new Map<string, NodeJS.Timeout>();
 	readonly #releasedForegroundJobs = new Set<string>();
@@ -520,15 +534,32 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 				: undefined;
 		const out: AsyncJob[] = [];
 		for (const job of jobs) {
-			if (job.ownerId === filter.ownerId || (lineage !== undefined && this.#inLineage(job, lineage))) {
-				out.push(job);
-			}
+			const owned =
+				lineage === undefined
+					? job.ownerId === filter.ownerId
+					: this.#ownedByTree(job, filter.ownerId, lineage);
+			if (owned) out.push(job);
 		}
 		return out;
 	}
 
 	#inLineage(job: AsyncJob, lineage: number): boolean {
 		return this.#ownerLineages.get(job)?.has(lineage) === true;
+	}
+
+	/**
+	 * Whether `job` belongs to the tree of the agent identified by `ownerId` and
+	 * `lineage`: it carries that lineage in the chain recorded when it
+	 * registered, or — for a job registered with no chain at all — it is
+	 * directly owned by that id. A job owned by the id but carrying a chain that
+	 * does not contain `lineage` belongs to a DIFFERENT incarnation of the id
+	 * and is not ours. This is the one ownership rule; `#endAgentTree`,
+	 * `cancelAndReapOwnerJobs` and the `includeDescendants` read path all use it
+	 * so they cannot drift.
+	 */
+	#ownedByTree(job: AsyncJob, ownerId: string | undefined, lineage: number | undefined): boolean {
+		if (lineage !== undefined && this.#inLineage(job, lineage)) return true;
+		return job.ownerId === ownerId && !this.#ownerLineages.has(job);
 	}
 
 	#visibleJobs(filter?: AsyncJobFilter): AsyncJob[] {
@@ -613,6 +644,12 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		};
 		const chain = this.#ownerChain(job.ownerId);
 		if (chain) this.#ownerLineages.set(job, chain);
+		// Publish the row BEFORE the body runs. The body's synchronous prologue
+		// can end an agent (directly, or by failing in a way that unregisters
+		// it), and the end hook scans this map: a job inserted afterwards would
+		// be invisible to that scan and the once-only hook never revisits it,
+		// so the agent would end with this job still running.
+		this.#jobs.set(id, job);
 
 		const reportProgress = async (text: string, details?: AsyncJobDetails): Promise<void> => {
 			job.progressText = text;
@@ -677,7 +714,6 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			}
 		})();
 
-		this.#jobs.set(id, job);
 		return id;
 	}
 
@@ -903,7 +939,8 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	}
 
 	bindOwnerAlias(alias: string, agentId: string): void {
-		if (alias !== agentId) this.#ownerAliases.set(alias, agentId);
+		if (alias === agentId) return;
+		this.#ownerAliases.set(alias, { agentId, lineage: this.#agents?.get(agentId)?.lineage });
 	}
 
 	/**
@@ -922,7 +959,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		const errors: unknown[] = [];
 		for (const job of this.#jobs.values()) {
 			if (job.status !== "running") continue;
-			if (!this.#inLineage(job, ref.lineage) && !(job.ownerId === ref.id && !this.#ownerLineages.has(job))) continue;
+			if (!this.#ownedByTree(job, ref.id, ref.lineage)) continue;
 			try {
 				this.#cancelJob(job);
 			} catch (error) {
@@ -930,8 +967,14 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 				errors.push(error);
 			}
 		}
-		for (const [alias, agentId] of this.#ownerAliases) {
-			if (agentId === ref.id) this.#ownerAliases.delete(alias);
+		// An alias belongs to the incarnation that bound it, so it is dropped
+		// only when that incarnation is really gone — not when a ref of it ends
+		// into a tombstone it can be reopened from, which keeps the lineage and
+		// would otherwise leave a revived advisor's work recording no ancestry.
+		for (const [alias, bound] of this.#ownerAliases) {
+			if (bound.agentId !== ref.id || bound.lineage !== ref.lineage) continue;
+			const live = this.#agents?.get(ref.id);
+			if (live === undefined || live.lineage !== ref.lineage) this.#ownerAliases.delete(alias);
 		}
 		if (errors.length > 0) throw new AgentTreeCancelError(ref.id, failedJobIds, errors);
 	}
@@ -953,7 +996,10 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			seen.add(id);
 			const aliased = this.#ownerAliases.get(id);
 			if (aliased !== undefined) {
-				id = aliased;
+				// The alias names one incarnation: if the id now holds another,
+				// the chain ends here rather than adopting a stranger's tree.
+				if (aliased.lineage !== undefined) expectedLineage = aliased.lineage;
+				id = aliased.agentId;
 				continue;
 			}
 			const ref = agents.get(id);
@@ -1045,20 +1091,22 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	}
 
 	/**
-	 * Cancel every job owned by `ownerId` and, given `agentLineage`, every job of
-	 * that lineage's tree (see {@link AsyncJobFilter.includeDescendants}), then
-	 * wait only until `deadlineAt` for them to settle. The returned completion
-	 * keeps waiting for actual process settlement when the deadline expires, so
-	 * callers can move that cleanup out of the user-visible Task wait without
-	 * losing ownership of the live work.
+	 * Cancel the jobs of the tree of the agent `ownerId` ran as — the ref whose
+	 * `lineage` is `agentLineage` (see {@link AsyncJobFilter.includeDescendants})
+	 * — then wait only until `deadlineAt` for them to settle. The returned
+	 * completion keeps waiting for actual process settlement when the deadline
+	 * expires, so callers can move that cleanup out of the user-visible Task
+	 * wait without losing ownership of the live work.
+	 *
+	 * `agentLineage` is required: see the interface declaration for why an id
+	 * alone must not decide what a finished run reaps.
 	 */
 	async cancelAndReapOwnerJobs(
 		ownerId: string,
 		deadlineAt: number,
-		agentLineage?: number,
+		agentLineage: number | undefined,
 	): Promise<AsyncJobReapResult> {
-		const owned = (job: AsyncJob): boolean =>
-			job.ownerId === ownerId || (agentLineage !== undefined && this.#inLineage(job, agentLineage));
+		const owned = (job: AsyncJob): boolean => this.#ownedByTree(job, ownerId, agentLineage);
 		for (const job of this.#jobs.values()) {
 			if (job.status === "running" && owned(job)) this.#cancelJob(job);
 		}

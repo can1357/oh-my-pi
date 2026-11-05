@@ -775,8 +775,11 @@ async function registerPersistedSubagentsFromDir(
 			if (existing?.sessionFile !== sessionFile) {
 				const metadata = await readPersistedAgentMetadata(sessionFile);
 				if (!shouldContinue()) return;
-				// The id is reused across `/new`; refresh it to the current session's file.
-				if (existing) registry.unregister(advisorId);
+				// The id is reused across `/new`; refresh it to the current session's
+				// file. End exactly the ref we read: this id is deliberately recycled,
+				// and an unregister by id alone would cancel whichever advisor tree
+				// holds it now.
+				if (existing) registry.unregister(advisorId, existing);
 				registry.register({
 					id: advisorId,
 					displayName,

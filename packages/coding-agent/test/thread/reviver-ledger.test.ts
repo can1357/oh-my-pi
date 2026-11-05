@@ -56,7 +56,8 @@ describe("MainSessionBridge reviver ledger", () => {
 
 		register("Removed-Sub");
 		adopt("Removed-Sub");
-		registry.unregister("Removed-Sub");
+		const removedRef = registry.get("Removed-Sub");
+		if (removedRef) registry.unregister("Removed-Sub", removedRef);
 		expect(bridge.reviverCount).toBe(0);
 
 		register("Forgot-Sub");

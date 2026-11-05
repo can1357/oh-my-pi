@@ -150,10 +150,12 @@ describe("InteractiveMode HUD pills", () => {
 			expect(prop(idle, "actions")).toEqual({ click: "agents.open" });
 			expect(prop(idle, "title")).toStartWith("No agents running · 1 in this session");
 
-			registry.unregister(id);
+			const registered = registry.get(id);
+			if (registered) registry.unregister(id, registered);
 			expect(agentsSegment()).toBeUndefined();
 		} finally {
-			registry.unregister(id);
+			const leftover = registry.get(id);
+			if (leftover) registry.unregister(id, leftover);
 		}
 	});
 });

@@ -142,7 +142,7 @@ export class RemoteAgentRegistry implements AgentRegistryApi {
 		return this.#remote.callSync("detachSession", id, expected);
 	}
 
-	unregister(id: string, expected?: AgentRefExpectation): boolean {
+	unregister(id: string, expected: AgentRefExpectation): boolean {
 		return this.#remote.callSync("unregister", id, expected);
 	}
 

@@ -818,7 +818,7 @@ export class CollabGuestLink {
 		for (const snap of agents) seen.add(snap.id);
 		for (const ref of this.agentRegistry.list()) {
 			if (!seen.has(ref.id)) {
-				this.agentRegistry.unregister(ref.id);
+				this.agentRegistry.unregister(ref.id, ref);
 				this.#agentHasTranscript.delete(ref.id);
 			}
 		}
@@ -849,7 +849,7 @@ export class CollabGuestLink {
 
 	#clearAgentMirror(): void {
 		for (const ref of this.agentRegistry.list()) {
-			this.agentRegistry.unregister(ref.id);
+			this.agentRegistry.unregister(ref.id, ref);
 		}
 		this.#agentHasTranscript.clear();
 	}

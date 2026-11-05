@@ -1015,7 +1015,8 @@ describe("AgentSession aside delivery", () => {
 				details: { from: "ParentMarkerSender", fromParent: true },
 			});
 		} finally {
-			registry.unregister(recipient);
+			const recipientRef = registry.get(recipient);
+			if (recipientRef) registry.unregister(recipient, recipientRef);
 		}
 	});
 

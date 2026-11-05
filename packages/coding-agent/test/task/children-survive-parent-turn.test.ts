@@ -1110,3 +1110,34 @@ it("reports a failing end hook to the caller that ended the agent, and still end
 		authStorage.close();
 	}
 }, 120_000);
+
+// `/new`, a session switch and conversation branching all end the conversation
+// through the one `#cancelOwnAsyncJobs`, which now ends the agent's tree rather
+// than its own job rows. `/new` is the route asserted here: measured at the
+// previous head, the switch route already cancelled this descendant by another
+// path, so it discriminates nothing and is not kept as a second row.
+it("ending the conversation with /new cancels a descendant whose ancestors' runs already returned", async () => {
+	laneEnd = "budget";
+	shape = "blocking";
+	const { authStorage, session } = await harness({ idleTtlMs: 0 });
+	try {
+		await session.prompt("Fan out.");
+		const manager = session.asyncJobManager!;
+		await until(
+			() =>
+				AgentRegistry.global().get("Lane")?.status === "idle" &&
+				AgentRegistry.global().get("Lane.Arm")?.status === "idle",
+			"both ancestor runs to end",
+		);
+		const grand = manager.getJob("Lane.Arm.Grand")!;
+		expect(grand.status).toBe("running");
+
+		await session.newSession();
+
+		expect(grand.status).toBe("cancelled");
+	} finally {
+		await Bun.write(gateFile, "go");
+		await session.dispose();
+		authStorage.close();
+	}
+}, 120_000);

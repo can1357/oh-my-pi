@@ -43,7 +43,8 @@ export type AgentRegistryProtocol = {
 		boolean
 	>;
 	detachSession: RpcMethod<[id: string, expected?: AgentRefExpectation], boolean>;
-	unregister: RpcMethod<[id: string, expected?: AgentRefExpectation], boolean>;
+	/** The expectation is required: ending a ref cancels its tree's work, so it must name the ref, not the id. */
+	unregister: RpcMethod<[id: string, expected: AgentRefExpectation], boolean>;
 	get: RpcMethod<[id: string], AgentRef | undefined>;
 	list: RpcMethod<[], AgentRef[]>;
 	listVisibleTo: RpcMethod<[id: string], AgentRef[]>;

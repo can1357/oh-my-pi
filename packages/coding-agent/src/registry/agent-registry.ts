@@ -12,6 +12,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
 import { AgentAwaits, type AgentAwaitsApi } from "./agent-awaits";
+import { registerRpcError } from "../thread/rpc";
 import { oneLineLabel } from "@oh-my-pi/pi-tui/tools/task";
 
 import { MAIN_AGENT_ID, type AgentStatus, type AgentMetricsSummary } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
@@ -129,6 +130,19 @@ export class AgentEndHookError extends AggregateError {
 	}
 }
 
+// The error crosses the worker link whenever a ref is ended from the other
+// side. Without a factory the receiver gets a plain Error carrying the right
+// name, `instanceof AgentEndHookError` fails, and a kill that ended the agent
+// but could not cancel all of its tree is reported as if the agent had already
+// finished on its own. Registered here, with the class, so it holds for every
+// link without an install step; the wire copies `agentId` and `errors` back
+// over the placeholders.
+registerRpcError("AgentEndHookError", message => {
+	const error = new AgentEndHookError("", []);
+	error.message = message;
+	return error;
+});
+
 export type RegistryEvent =
 	| { type: "registered"; ref: AgentRef }
 	| { type: "status_changed"; ref: AgentRef }
@@ -191,8 +205,14 @@ export interface AgentRegistryApi {
 	): boolean;
 	/** Detach the live session of `id` when it still matches `expected`. */
 	detachSession(id: string, expected?: AgentRefExpectation): boolean;
-	/** Remove `id` when it still matches `expected`. */
-	unregister(id: string, expected?: AgentRefExpectation): boolean;
+	/**
+	 * Remove `id` when it still matches `expected`. The expectation is REQUIRED:
+	 * ending a ref now cancels that agent's tree's work, so an unregister by id
+	 * alone would end whichever agent holds the id at the time — the
+	 * recycled-identity defect this design exists to make impossible. A caller
+	 * that means "whatever is registered now" passes the ref it just read.
+	 */
+	unregister(id: string, expected: AgentRefExpectation): boolean;
 	/** The current ref for `id`. */
 	get(id: string): AgentRef | undefined;
 	/** Every registered ref. */
@@ -481,7 +501,7 @@ export class AgentRegistry implements AgentRegistryApi {
 		return true;
 	}
 
-	unregister(id: string, expected?: AgentRefExpectation): boolean {
+	unregister(id: string, expected: AgentRefExpectation): boolean {
 		const ref = this.#refs.get(id);
 		if (!ref || !this.#matchesExpected(ref, expected)) return false;
 		this.#refs.delete(id);
