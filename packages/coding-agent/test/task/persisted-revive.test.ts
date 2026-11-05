@@ -589,6 +589,25 @@ describe("persisted subagent revival", () => {
 		expect(capturedOptions?.agentName).toBe("scout");
 	});
 
+	it("keys a revived subagent's soft request budget on its persisted agent name, not the ref display name", async () => {
+		const cwd = makeTempDir("@pi-revive-soft-budget-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, { agent: "scout" });
+		let capturedBudget: number | undefined;
+		vi.spyOn(executorModule, "attachIrcWakeTurnMonitor").mockImplementation((_session, options) => {
+			capturedBudget = options.softRequestBudget;
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
+			async () => ({ session: createRevivedSession([]).session }) as CreateAgentSessionResult,
+		);
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedBudget).toBe(100);
+	});
+
 	it("restores the live account pool for the persisted agent name, so a revived agent stays restricted", async () => {
 		const cwd = makeTempDir("@pi-revive-account-pool-");
 		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, { agent: "scout" });
