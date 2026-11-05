@@ -301,9 +301,8 @@ async fn getopts_special_variable_assignments_propagate_indexed_subscript_errors
 async fn the_exit_trap_runs_after_the_discarded_command_is_unwound() {
 	run(
 		"exit-trap-scope",
-		"a=(zero one)\nx=global\ntrap 'echo \
-		 EXIT:x=$x:func=${FUNCNAME[*]}:status=$?' EXIT\nf(){ local x=local; (( a[1+] )); echo \
-		 BAD; }\nf\necho AFTER\n",
+		"a=(zero one)\nx=global\ntrap 'echo EXIT:x=$x:func=${FUNCNAME[*]}:status=$?' EXIT\nf(){ \
+		 local x=local; (( a[1+] )); echo BAD; }\nf\necho AFTER\n",
 		"EXIT:x=global:func=:status=1\n",
 		true,
 		1,
@@ -340,14 +339,15 @@ fn a_command_substitution_syntax_error_reports_the_status_of_its_origin() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let path = dir.path().join("main.bash");
 	std::fs::write(&path, script).expect("script fixture");
-	let from_file =
-		obash_support::output(obash_support::obash().arg(&path).current_dir(dir.path()));
+	let from_file = obash_support::output(obash_support::obash().arg(&path).current_dir(dir.path()));
 	assert_eq!(String::from_utf8_lossy(&from_file.stdout), "");
 	assert!(!from_file.stderr.is_empty());
 	assert_eq!(from_file.status.code(), Some(2), "a script file reports the parser's status");
 
 	let from_command = obash_support::output(
-		obash_support::obash().args(["-c", script]).current_dir(dir.path()),
+		obash_support::obash()
+			.args(["-c", script])
+			.current_dir(dir.path()),
 	);
 	assert_eq!(String::from_utf8_lossy(&from_command.stdout), "");
 	assert!(!from_command.stderr.is_empty());

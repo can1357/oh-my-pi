@@ -650,8 +650,7 @@ fn settle_subscript_error(
 ) -> Result<builtins::Outcome, Need> {
 	match r {
 		Err(Need::Sub(
-			Stop::Fail(d @ Diag::ArithSubscript { .. })
-			| Stop::Fatal(d @ Diag::ArithSubscript { .. }),
+			Stop::Fail(d @ Diag::ArithSubscript { .. }) | Stop::Fatal(d @ Diag::ArithSubscript { .. }),
 		)) if ctx.vp.mode.dialect() == crate::bash::ids::Dialect::Bash => {
 			ctx.diag(d);
 			Ok(builtins::Outcome { status: 1, control: Control::ArithSubscript })
