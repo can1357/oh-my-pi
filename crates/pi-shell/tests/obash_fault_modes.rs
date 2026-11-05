@@ -322,11 +322,18 @@ fn a_fifo_read_in_flight_survives_snapshots() {
 	}
 }
 
-/// The main vproc's slice would run the whole loop before the background
-/// job starts its external; `/bin/sh -c :` blocks it first, so the job's
-/// `sleep` is in flight at every snapshot of the loop.
-const EXTERNAL_IN_FLIGHT: &str = "/bin/sleep 0.3 & /bin/sh -c :; i=0; while [ $i -lt 100 ]; do \
-                                  i=$((i + 1)); done; wait; echo done $i";
+/// A completed native command need not block the main vproc, so it cannot
+/// ensure the background job ran before a snapshot. The readiness barrier
+/// waits for the child, which stays alive until the loop releases it.
+const EXTERNAL_IN_FLIGHT: &str = r#"
+d=$(mktemp -d)
+/bin/sh -c ': > "$1/ready"; until [ -f "$1/release" ]; do /bin/sleep .01; done' sh "$d" &
+/bin/sh -c 'until [ -f "$1/ready" ]; do /bin/sleep .01; done' sh "$d"
+i=0; while [ $i -lt 100 ]; do i=$((i + 1)); done
+: > "$d/release"
+wait
+rm -rf "$d"
+echo done $i"#;
 
 /// Under the default policy a snapshot that would lose the external in
 /// flight is not restored; the run matches the plain one.

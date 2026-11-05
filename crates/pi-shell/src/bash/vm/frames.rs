@@ -469,6 +469,15 @@ impl Shell {
 			reissued_fs: std::mem::take(&mut self.k.dropped_fs),
 			..ExternalizeReport::default()
 		};
+		// kill already removed these programs' owner frames. Report their
+		// loss from live state; the unchanged Frames image cannot carry it
+		// into RestoreReport, which reconstructs frame-backed losses only.
+		report.lost.extend(
+			self
+				.surviving_externals
+				.iter()
+				.map(|(vpid, child)| Lost::Ext { vpid: *vpid, pid: child.pid() }),
+		);
 		// Function bodies: a restored shell loads them by id rather than
 		// recompiling the canonical text, which would lose the definition's
 		// line numbers.
@@ -687,6 +696,7 @@ impl Shell {
 			slice: None,
 			gone: Vec::new(),
 			orphans: Vec::new(),
+			surviving_externals: Vec::new(),
 		};
 		let mut report = RestoreReport::default();
 		let mut restored = false;

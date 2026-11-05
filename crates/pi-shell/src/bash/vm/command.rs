@@ -1910,6 +1910,23 @@ fn spawned_external(
 			if !k.bangs.is_empty() {
 				k.settle_bang(vp.vpid, Some(pid));
 			}
+			if st(vp).exec_as.is_some() {
+				// Bash's exec_builtin calls reset_signal_handlers before
+				// shell_execve: a successful replacement keeps ignored signals,
+				// but none of the old shell's caught actions, including EXIT.
+				// Do this only after spawn succeeds so execfail retains them.
+				match state::listed_traps(&k.root, cx.store, vp) {
+					Ok(traps) => {
+						for (key, record) in traps {
+							if matches!(record, Record::Trap { ref action, .. } if !action.is_empty()) {
+								state::store_record(&mut k.root, cx.store, vp, key, None);
+							}
+						}
+						vp.own_traps = super::proc::OwnTraps::EMPTY;
+					},
+					Err(err) => k.fail(err),
+				}
+			}
 			scratch(vp).live = Live::Ext(child);
 			let s = st(vp);
 			s.waiting = Some(Awaited::Ext { pid });
