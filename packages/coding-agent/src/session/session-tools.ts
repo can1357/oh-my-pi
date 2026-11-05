@@ -651,9 +651,10 @@ export class SessionTools {
 	}
 
 	/**
-	 * Discovers this session's skills again and adopts them only when they hold one the list lacks;
-	 * otherwise the list, the prompt and the process snapshot stay as they were. The process snapshot
-	 * follows only while it is this session's list, so another session's stays published.
+	 * Discovers this session's skills again and adopts them when they differ from the list (a skill
+	 * added, or one removed, which a stale-skill miss joining this pass must see gone); otherwise the
+	 * list, the prompt and the process snapshot stay as they were. The process snapshot follows only
+	 * while it is this session's list, so another session's stays published.
 	 */
 	#adoptNewSkills(): Promise<readonly Skill[]> {
 		return this.runToolRegistryMutation(async () => {
@@ -661,7 +662,12 @@ export class SessionTools {
 			resetCapabilities();
 			const { discovered, skillsSettings } = await this.#discoverSkills();
 			const held = new Set(this.#skills.map(skill => `${skill.name}\0${skill.filePath}`));
-			if (discovered.skills.every(skill => held.has(`${skill.name}\0${skill.filePath}`))) return this.#skills;
+			if (
+				discovered.skills.length === this.#skills.length &&
+				discovered.skills.every(skill => held.has(`${skill.name}\0${skill.filePath}`))
+			) {
+				return this.#skills;
+			}
 			const published = getActiveSkills() === this.#skills;
 			this.#skills = discovered.skills;
 			this.#skillWarnings = discovered.warnings;

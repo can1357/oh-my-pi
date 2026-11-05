@@ -583,6 +583,34 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		}
 	});
 
+	it("a copied list resolves a namespaced skill the holder's current list gained, and bare paths in the older skill", async () => {
+		const skill = (name: string, dir: string): AgentSession["skills"][number] => ({
+			name,
+			description: `${name} skill.`,
+			filePath: path.join(dir, "SKILL.md"),
+			baseDir: dir,
+			source: "project",
+		});
+		const firstDir = path.join(tempDir, "first", "calendar");
+		const secondDir = path.join(tempDir, "second", "calendar");
+		fs.mkdirSync(firstDir, { recursive: true });
+		fs.mkdirSync(secondDir, { recursive: true });
+		fs.writeFileSync(path.join(firstDir, "SKILL.md"), "First calendar skill.\n");
+		fs.writeFileSync(path.join(firstDir, "notes.md"), "First calendar notes.\n");
+		fs.writeFileSync(path.join(secondDir, "SKILL.md"), "Second calendar skill.\n");
+		const bare = skill("calendar", firstDir);
+		const captured = [bare];
+		const current = [bare, skill("calendar/calendar", secondDir)];
+		const toolSession = { skills: captured, skillRediscoveryHost: () => ({ skills: current }) };
+		const context = { skills: captured, session: toolSession as unknown as ToolSession };
+		const handler = new SkillProtocolHandler();
+
+		const namespaced = await handler.resolve(parseInternalUrl("skill://calendar/calendar"), context);
+		expect(namespaced.content).toContain("Second calendar skill.");
+		const inside = await handler.resolve(parseInternalUrl("skill://calendar/notes.md"), context);
+		expect(inside.content).toContain("First calendar notes.");
+	});
+
 	it("lookups through a copy of the skill list taken before the upgrade rediscover once", async () => {
 		const session = await startSession();
 		// A tool session copied before the upgrade (as a spread copy of the primary's) keeps the old
