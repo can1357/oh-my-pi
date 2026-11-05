@@ -347,9 +347,9 @@ export default function (pi: ExtensionAPI) {
 
 - Keys: `tab.<id>.label` / `tab.<id>.lead`, `group.<tab>.<group>`, `setting.<path>.label` / `.description` / `.warning`, `setting.<path>.option.<value>.label` / `.description`, `chrome.<name>`.
 - `group.<tab>.<group>` is keyed by the canonical group name (`Theme`, `Status Line`, …); the translation changes the heading and the sidebar label, not the section id derived from it.
-- `setDisplayCatalog(undefined)` restores English. Values in `strings` are used verbatim; `chrome.envNote.override` and `chrome.envNote.fallback` are templates whose `{env}` placeholder is filled with the environment variable name.
+- `setDisplayCatalog(undefined)` restores English. Values in `strings` are used verbatim; `chrome.envNote.override` and `chrome.envNote.fallback` are templates whose `{env}` placeholder is filled with the environment variable name, `chrome.limit` takes `{limit}`, `chrome.matches` takes `{count}`, and `chrome.searchEditHint` takes `{edit}` and `{cancel}` (the resolved key hints). Stored values are never looked up: the `true`/`false` value column and enum values stay canonical English.
 - `pi.pi.getDisplayCatalog()` returns the active catalog; `pi.pi.displayText` / `pi.pi.displayTemplate` are the same lookups the overlay uses, if an extension needs to match its own text.
-- The Plugins tab renders its own English UI and is unaffected.
+- The Plugins tab's label is `chrome.pluginsTab`; its own page content renders in English and is unaffected.
 
 ### Message delivery semantics
 

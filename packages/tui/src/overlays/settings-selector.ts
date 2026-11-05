@@ -55,7 +55,7 @@ import {
 	tabDisplayLead,
 	tabDisplayMetadata,
 } from "./settings-defs";
-import { displayText } from "./display-catalog";
+import { displayTemplate, displayText } from "./display-catalog";
 import { SnapcompactShapePreview } from "./snapcompact-shape-preview";
 import { themePickerOptions } from "./theme-selector";
 import type { SelectPickerOptions } from "../native/picker";
@@ -458,7 +458,10 @@ class ProviderLimitsSubmenu extends Container {
 			return {
 				value: provider,
 				label: provider,
-				description: limit === undefined ? displayText("chrome.unlimited", "Unlimited") : `Limit: ${limit}`,
+				description:
+					limit === undefined
+						? displayText("chrome.unlimited", "Unlimited")
+						: displayTemplate("chrome.limit", `Limit: ${limit}`, { limit: String(limit) }),
 			};
 		});
 		const clearItem: SelectItem[] =
@@ -566,7 +569,11 @@ function getSettingsTabs(): Tab[] {
 			const icon = theme.symbol(meta.icon);
 			return { id, label: `${icon} ${meta.label}`, short: icon };
 		}),
-		{ id: "plugins", label: `${theme.icon.package} Plugins`, short: theme.icon.package },
+		{
+			id: "plugins",
+			label: `${theme.icon.package} ${displayText("chrome.pluginsTab", "Plugins")}`,
+			short: theme.icon.package,
+		},
 	];
 }
 
@@ -745,7 +752,12 @@ export class SettingsSelectorComponent implements Component {
 	/** Single-line search banner: accent icon, editable query with live cursor, right-aligned match count. */
 	#renderSearchBanner(width: number): string {
 		const icon = theme.symbol("icon.search");
-		const countText = this.#searchMatchCount === 1 ? "1 match" : `${this.#searchMatchCount} matches`;
+		const countText =
+			this.#searchMatchCount === 1
+				? displayText("chrome.matchOne", "1 match")
+				: displayTemplate("chrome.matches", `${this.#searchMatchCount} matches`, {
+						count: String(this.#searchMatchCount),
+					});
 		const rightWidth = visibleWidth(countText) + 1; // trailing margin
 		const prefix = ` ${theme.fg("accent", icon)} `;
 		// The input pads itself to exactly this width and keeps the cursor in view.
@@ -1185,7 +1197,10 @@ export class SettingsSelectorComponent implements Component {
 		if (searching) {
 			const count = this.#searchMatchCount;
 			if (memo.search?.input !== this.#searchInput || memo.search.count !== count) {
-				const countText = count === 1 ? "1 match" : `${count} matches`;
+				const countText =
+					count === 1
+						? displayText("chrome.matchOne", "1 match")
+						: displayTemplate("chrome.matches", `${count} matches`, { count: String(count) });
 				memo.search = {
 					input: this.#searchInput,
 					count,
@@ -1466,7 +1481,7 @@ export class SettingsSelectorComponent implements Component {
 		// Plugins hosts its own UI; it is not part of the schema-backed search.
 		empty.push({
 			id: "plugins",
-			label: `${theme.icon.package} Plugins`,
+			label: `${theme.icon.package} ${displayText("chrome.pluginsTab", "Plugins")}`,
 			short: theme.icon.package,
 			muted: true,
 		});
@@ -1935,7 +1950,7 @@ export class SettingsSelectorComponent implements Component {
 		if (this.#callbacks.getStatusLinePreview) {
 			return this.#callbacks.getStatusLinePreview();
 		}
-		return theme.fg("dim", "(preview not available)");
+		return theme.fg("dim", displayText("chrome.previewUnavailable", "(preview not available)"));
 	}
 
 	/**
