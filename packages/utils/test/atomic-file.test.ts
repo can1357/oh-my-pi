@@ -10,26 +10,35 @@ import {
 	writeFileAtomically,
 	writeFileAtomicallySync,
 } from "../src/atomic-file";
+import { getAgentDir, setAgentDir } from "../src/dirs";
 import { removeWithRetries } from "../src/temp";
 
 /**
- * Following a symlink is something a config writer asks for. These tests keep
- * the two apart: `root` is any directory, because the config writers no longer
- * care where the file lives, and `project` stands for a checkout's own `.omp`,
- * the one place a config write must not follow a link.
+ * A config write follows a link only while every step stays inside a directory
+ * omp keeps, so `root` is made the agent directory for the duration — without
+ * that these tests would run in territory omp does not own and would never
+ * reach the branch they are about. `outside` is ordinary user territory and
+ * `project` is a checkout's own `.omp`; neither is followed.
  */
 let root: string;
+let outside: string;
 let project: string;
+let originalAgentDir: string;
 
 beforeEach(async () => {
+	originalAgentDir = getAgentDir();
 	root = await fs.mkdtemp(path.join(os.tmpdir(), "atomic-file-"));
+	outside = await fs.mkdtemp(path.join(os.tmpdir(), "atomic-outside-"));
 	project = path.join(root, "checkout", ".omp");
 	await fs.mkdir(project, { recursive: true });
+	setAgentDir(root);
 });
 
 afterEach(async () => {
+	setAgentDir(originalAgentDir);
 	await fs.chmod(path.join(root, "locked"), 0o700).catch(() => {});
 	await removeWithRetries(root).catch(() => {});
+	await removeWithRetries(outside).catch(() => {});
 });
 
 const isRoot = process.getuid?.() === 0;
@@ -306,5 +315,40 @@ describe("writes to a plain destination are unchanged", () => {
 		expect(await fs.readFile(destination, "utf8")).toBe("payload");
 		expect((await fs.stat(destination)).ino).toBe(stagedIno);
 		expect(fsSync.existsSync(staged)).toBe(false);
+	});
+});
+
+describe("a config write follows a link only while it stays inside omp's directories", () => {
+	// The narrowing, stated two-sided. A link whose target leaves omp's roots is
+	// replaced — which is what upstream main does with every link, so nothing a
+	// user has today is lost — and that is deliberate, not a gap.
+	test("a link pointing out of omp's directories is replaced, as it is on main", async () => {
+		const away = path.join(outside, "dotfiles-marketplaces.json");
+		const link = path.join(root, "marketplaces.json");
+		await linkTo(away, link, "the dotfiles copy");
+
+		await writeConfigFileAtomically(link, "new", 0o644);
+
+		expect(await fs.readFile(away, "utf8")).toBe("the dotfiles copy");
+		expect((await fs.lstat(link)).isSymbolicLink()).toBe(false);
+		expect(await fs.readFile(link, "utf8")).toBe("new");
+	});
+
+	test("a chain is followed only as far as it stays inside them", async () => {
+		const away = path.join(outside, "away.json");
+		const inside = path.join(root, "inside.json");
+		const entry = path.join(root, "entry.json");
+		await fs.writeFile(away, "the dotfiles copy");
+		await fs.symlink(away, inside);
+		await fs.symlink(inside, entry);
+
+		await writeConfigFileAtomically(entry, "new", 0o644);
+
+		// The first hop stays inside and is followed; the second leaves, so the
+		// link that would have left is the one replaced.
+		expect(await fs.readFile(away, "utf8")).toBe("the dotfiles copy");
+		expect((await fs.lstat(entry)).isSymbolicLink()).toBe(true);
+		expect((await fs.lstat(inside)).isSymbolicLink()).toBe(false);
+		expect(await fs.readFile(inside, "utf8")).toBe("new");
 	});
 });

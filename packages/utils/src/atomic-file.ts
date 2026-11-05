@@ -57,6 +57,30 @@ function containsSequence(segments: readonly string[], wanted: readonly string[]
 }
 
 /**
+ * Whether `candidate` stays inside a directory omp itself keeps: the config
+ * root, the profile-independent root, or the agent directory. The physical
+ * location decides, so an alias or a `..` cannot spell a way out of it.
+ *
+ * A config write follows a link only while every step stays inside these. A
+ * link whose target leaves them is left alone and replaced, which is what a
+ * write on upstream main does with every link — so this narrowing takes nothing
+ * away that users have today, and it keeps the rule a property of the path
+ * rather than an open-ended question about territory omp does not own.
+ */
+function insideOmpRoots(candidate: string): boolean {
+	const resolved = path.resolve(candidate);
+	let dir = path.dirname(resolved);
+	try {
+		dir = fs.realpathSync.native(dir);
+	} catch {
+		// Not on disk yet; judge the lexical spelling of its parent.
+	}
+	return [getConfigRootDir(), getBaseConfigRoot(), getAgentDir()].some(
+		root => relativePathWithinRoot(root, dir) !== null || path.resolve(root) === dir,
+	);
+}
+
+/**
  * Whether the link at `filePath` lives inside some *project's* config directory,
  * and so inside a tree a checkout produced. Both names are matched, because omp
  * uses both: `getProjectAgentDir()` builds one from the constant, while
@@ -77,18 +101,22 @@ function containsSequence(segments: readonly string[], wanted: readonly string[]
  */
 function insideAProjectConfigDir(filePath: string): boolean {
 	const resolved = path.resolve(filePath);
-	let here = resolved;
+	// The DIRECTORY the link sits in, canonicalized — never the link itself.
+	// Containment of the whole path would be answered for the link's TARGET, so
+	// a project link pointing at a file in omp's own root would lose its
+	// project marker and be followed.
+	let dir = path.dirname(resolved);
 	try {
-		here = path.join(fs.realpathSync.native(path.dirname(resolved)), path.basename(resolved));
+		dir = fs.realpathSync.native(dir);
 	} catch {
 		// Not on disk yet; the lexical spelling is all there is to judge.
 	}
-	let searched = here;
+	let searched = dir;
 	for (const root of [getConfigRootDir(), getBaseConfigRoot(), getAgentDir()]) {
-		const below = relativePathWithinRoot(root, here);
+		const below = relativePathWithinRoot(root, dir);
 		if (below !== null && below.length < searched.length) searched = below;
 	}
-	const segments = searched.split(path.sep);
+	const segments = [...searched.split(path.sep), path.basename(resolved)];
 	return projectConfigDirNames().some(name => containsSequence(segments, name));
 }
 
@@ -108,10 +136,11 @@ function insideAProjectConfigDir(filePath: string): boolean {
 export async function resolveConfigWriteTarget(filePath: string): Promise<string> {
 	let current = filePath;
 	for (let hop = 0; hop <= MAX_SYMLINK_HOPS; hop++) {
-		// Asked of every hop, not just the entry: a link outside any project can
-		// point at one inside a checkout's config directory, and it is that link
-		// the repository controls.
-		if (insideAProjectConfigDir(current)) return current;
+		// Both asked of every hop, not just the entry: a link outside any project
+		// can point at one inside a checkout's config directory, and it is that
+		// link the repository controls; and a chain may leave omp's roots at any
+		// step, not only the first.
+		if (!insideOmpRoots(current) || insideAProjectConfigDir(current)) return current;
 		let link: string;
 		try {
 			link = await fs.promises.readlink(current);
@@ -132,14 +161,19 @@ export async function resolveConfigWriteTarget(filePath: string): Promise<string
 		// basename would throw that requirement away and write the file anyway, so
 		// the spelling is handed on whole and the staging `open` refuses it.
 		if (namesADirectory(joined)) return joined;
+		let next: string;
 		try {
-			current = path.join(await fs.promises.realpath(path.dirname(joined)), path.basename(joined));
+			next = path.join(await fs.promises.realpath(path.dirname(joined)), path.basename(joined));
 		} catch (error) {
 			// The named directory is not there; the write will fail on it, as a plain
 			// write through the same link does.
 			if (!endsSymlinkWalk(error)) throw error;
-			current = joined;
+			next = joined;
 		}
+		// The step leaves omp's directories: stop here and let the write replace
+		// this link, which is what a write on upstream main does with every link.
+		if (!insideOmpRoots(next)) return current;
+		current = next;
 	}
 	throw symlinkLoopError(filePath);
 }
@@ -148,7 +182,7 @@ export async function resolveConfigWriteTarget(filePath: string): Promise<string
 function resolveWriteTargetSync(filePath: string): string {
 	let current = filePath;
 	for (let hop = 0; hop <= MAX_SYMLINK_HOPS; hop++) {
-		if (insideAProjectConfigDir(current)) return current;
+		if (!insideOmpRoots(current) || insideAProjectConfigDir(current)) return current;
 		let link: string;
 		try {
 			link = fs.readlinkSync(current);
@@ -162,12 +196,15 @@ function resolveWriteTargetSync(filePath: string): string {
 			? link
 			: `${fs.realpathSync.native(path.dirname(current))}${path.sep}${link}`;
 		if (namesADirectory(joined)) return joined;
+		let next: string;
 		try {
-			current = path.join(fs.realpathSync.native(path.dirname(joined)), path.basename(joined));
+			next = path.join(fs.realpathSync.native(path.dirname(joined)), path.basename(joined));
 		} catch (error) {
 			if (!endsSymlinkWalk(error)) throw error;
-			current = joined;
+			next = joined;
 		}
+		if (!insideOmpRoots(next)) return current;
+		current = next;
 	}
 	throw symlinkLoopError(filePath);
 }
