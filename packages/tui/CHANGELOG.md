@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The shell card projects a leading `cd <dir> &&` written into the command into its dim working-directory prefix, matching how the executor routes that directory through `cwd` ([#18152](https://github.com/can1357/oh-my-pi/pull/18152) by [@DuncanBetts](https://github.com/DuncanBetts))
+
 ### Breaking Changes
 
 - Shell visualization uses native engine presentation instead of TypeScript document/parser/printer APIs; node identifiers are opaque `unit:source:node` strings, and native `shell` nodes receive presentation data only, not raw traces.
@@ -73,6 +77,7 @@
 - Edit and Write animate their streaming spinner in the card header, as Eval does, and show their `preview` / `streaming` label in the card's bottom border instead of on a row below the content; `streaming` ends once the content has fully arrived ([#17732](https://github.com/can1357/oh-my-pi/pull/17732) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - `!` shell and `$` Python runs show their spinner, and then `exit N` or `cancelled`, in the frame's bottom border instead of on rows of their own; the spinner is the status spinner tool headers use ([#17732](https://github.com/can1357/oh-my-pi/pull/17732) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - GitHub run-watch job rows use the shared status glyphs: a running job shows the running glyph instead of a warning-colored dot, a queued job the pending glyph instead of a hollow circle (a job in a state omp does not recognize keeps the circle), and a passed job's glyph is green like other success glyphs. Ask's multi-line custom answer lines up under its first line in every symbol preset ([#17732](https://github.com/can1357/oh-my-pi/pull/17732) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+
 
 ### Fixed
 

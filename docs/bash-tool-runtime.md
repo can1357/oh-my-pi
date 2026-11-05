@@ -25,7 +25,8 @@ Set `bash.enabled: false` in settings to remove the model-facing `bash` tool fro
 `BashTool.execute()` currently handles input as follows:
 
 - trims service names and normalizes empty readiness fields,
-- extracts a leading single-line `cd <path> && ...` into `cwd` when `cwd` was not supplied, unless the path needs shell expansion,
+- extracts a leading single-line `cd <path> && ...` into `cwd` when `cwd` was not supplied, unless the path needs shell expansion (`$`, backticks, `(`) — `extractLeadingCdTarget` in `@oh-my-pi/pi-utils`; `~`/`~user` targets are kept verbatim because `resolveToCwd` expands them,
+- and the TUI card applies the same projection, so it shows `$ cd <relative-dir> && <rest>` rather than the model's absolute path inside the command body. `scheme://…` and `@`-shorthand targets are left verbatim in the body: the card derives its label with plain path arithmetic while the executor resolves `cwd` through `expandPath`, so any label would name a directory that never ran. A target equal to the project directory has no relative label, so the prefix falls back to the home-shortened project dir (`cd ~/repo && bun check`) instead of dropping the `cd` from the headline.
 - rejects `async: true` when `async.enabled` is false,
 - defaults finite-command `timeout` to 300 seconds; `0` explicitly disables the command deadline,
 - rejects `async: true` or any supplied `timeout` in named-service mode; readiness uses `ready.timeout`,

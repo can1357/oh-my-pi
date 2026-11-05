@@ -1,5 +1,5 @@
 import type { Component } from "../tui";
-import { getProjectDir, jsonContainerEnd, sanitizeText } from "@oh-my-pi/pi-utils";
+import { extractLeadingCdTarget, getProjectDir, jsonContainerEnd, sanitizeText } from "@oh-my-pi/pi-utils";
 import { highlightCode, type Theme } from "../theme/theme";
 import { renderStatusLine } from "../render/status-line";
 import { framedToolCard, type ToolCardSnapshot } from "../render/tool-card";
@@ -11,6 +11,7 @@ import {
 	formatToolWorkingDirectory,
 	previewWindowRows,
 	replaceTabs,
+	shortenPath,
 } from "../render/render-utils";
 import {
 	formatMinimizedMeta,
@@ -234,6 +235,12 @@ export interface BashRenderArgs {
 	env?: Record<string, unknown>;
 	timeout?: number;
 	cwd?: string;
+	/** Original unprojected executable command string for copying. */
+	rawCommand?: string;
+	/** True when a leading `cd <path> &&` was projected into `cwd`. */
+	__projectedCd?: boolean;
+	/** Display-only workdir label for a `cd` to the project dir itself, which has no relative label. */
+	__workdirLabel?: string;
 	__partialJson?: string;
 	[key: string]: unknown;
 }
@@ -294,7 +301,7 @@ export function formatBashCommandLines(args: BashRenderArgs, uiTheme: Theme): st
 
 /** The dim `$ cd <dir> && NAME="…" ` prefix ahead of a command's first line (trailing space included). */
 export function bashCommandPrefix(args: BashRenderArgs, uiTheme: Theme): string {
-	const displayWorkdir = formatToolWorkingDirectory(args.cwd, getProjectDir());
+	const displayWorkdir = args.__workdirLabel ?? formatToolWorkingDirectory(args.cwd, getProjectDir());
 	const envAssignments = formatBashEnvAssignments(getBashEnvForDisplay(args));
 	const prefixParts = ["$"];
 	if (displayWorkdir) prefixParts.push(`cd ${shellVizText(displayWorkdir)} &&`);
@@ -307,12 +314,15 @@ export function bashCommandPrefix(args: BashRenderArgs, uiTheme: Theme): string 
  * built from the same decoded display args (incl. streamed `__partialJson` env) as the ANSI path.
  */
 export function formatBashCommandText(args: BashRenderArgs): string {
-	const displayWorkdir = formatToolWorkingDirectory(args.cwd, getProjectDir());
+	const displayWorkdir = args.__projectedCd
+		? undefined
+		: (args.__workdirLabel ?? formatToolWorkingDirectory(args.cwd, getProjectDir()));
 	const envAssignments = formatBashEnvAssignments(getBashEnvForDisplay(args));
 	const parts: string[] = [];
 	if (displayWorkdir) parts.push(`cd ${shellVizText(displayWorkdir)} &&`);
 	if (envAssignments) parts.push(envAssignments);
-	parts.push(replaceTabs(sanitizeText(args.command || "…")));
+	const commandToRun = args.rawCommand ?? args.command;
+	parts.push(replaceTabs(sanitizeText(commandToRun || "…")));
 	return parts.join(" ");
 }
 
@@ -454,9 +464,32 @@ function shellRunState(
 }
 
 function toBashRenderArgs<TArgs>(args: TArgs | undefined, config: ShellRendererConfig<TArgs>): BashRenderArgs {
+	const command = config.resolveCommand?.(args);
+	const cwd = config.resolveCwd?.(args);
+	// The executor routes a leading `cd <path> && ...` through its structured
+	// `cwd` parameter, so the card projects that same directory as the call's
+	// workdir prefix instead of leaving the raw path inside the command body.
+	// One parser backs both halves, so the card cannot drift from what ran.
+	const cd = !cwd && command !== undefined ? extractLeadingCdTarget(command) : null;
+	// Two shapes need care. Aliased targets (`file:///tmp`, `@/tmp`) are rewritten by the
+	// executor's own path resolver, which plain path arithmetic cannot undo, so any label
+	// would name a directory that never ran and the command stays verbatim in the body. A
+	// target equal to the project dir has no relative label at all —
+	// formatToolWorkingDirectory returns undefined for it, which would silently drop the
+	// `cd` from the headline — so it gets an explicit home-shortened label and the dimmed
+	// prefix keeps naming the command's `cd`. Either way the executor still routes the
+	// call through `cwd`.
+	const aliased = cd !== null && (cd.path.includes("://") || cd.path.startsWith("@"));
+	const projectDir = getProjectDir();
+	const label = cd !== null && !aliased ? formatToolWorkingDirectory(cd.path, projectDir) : undefined;
+	const projectDirLabel = cd !== null && !aliased && label === undefined ? shortenPath(projectDir) : undefined;
+	const projected = cd !== null && !aliased && (label !== undefined || projectDirLabel !== undefined) ? cd : null;
 	return {
-		command: config.resolveCommand?.(args),
-		cwd: config.resolveCwd?.(args),
+		command: projected ? projected.rest : command,
+		cwd: projected ? projected.path : cwd,
+		rawCommand: command,
+		__projectedCd: projected !== null,
+		__workdirLabel: projectDirLabel,
 		env: config.resolveEnv?.(args),
 		__partialJson: getPartialJson(args),
 	};
@@ -468,9 +501,11 @@ function visualCommandLines(
 	uiTheme: Theme,
 	width: number,
 ): string[] {
-	const prefix = bashCommandPrefix(args, uiTheme);
+	const effectiveArgs = args.__projectedCd ? { ...args, cwd: undefined, __workdirLabel: undefined } : args;
+	const prefix = bashCommandPrefix(effectiveArgs, uiTheme);
 	const hasContext =
-		!!formatToolWorkingDirectory(args.cwd, getProjectDir()) || !!formatBashEnvAssignments(getBashEnvForDisplay(args));
+		!!formatToolWorkingDirectory(effectiveArgs.cwd, getProjectDir()) ||
+		!!formatBashEnvAssignments(getBashEnvForDisplay(effectiveArgs));
 	return [...(hasContext ? [prefix.trimEnd()] : []), ...renderShellVisualization(presentation, uiTheme, width, false)];
 }
 
