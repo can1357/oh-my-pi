@@ -176,10 +176,13 @@ export class PeerAgentSession implements AgentSessionHandle {
 	}
 
 	subscribe(listener: AgentSessionEventListener): () => void {
-		this.#listeners.add(listener);
+		// Open the remote subscription before retaining the listener: a failed
+		// open hands back no release, so a listener left in the set would be
+		// revived by the next caller's successful open.
 		if (!this.#unsubscribe) {
 			this.#unsubscribe = mainBridge().remote.callSync("subscribe", this, event => this.#dispatch(event));
 		}
+		this.#listeners.add(listener);
 		return () => {
 			if (!this.#listeners.delete(listener) || this.#listeners.size > 0) return;
 			const unsubscribe = this.#unsubscribe;
@@ -189,12 +192,12 @@ export class PeerAgentSession implements AgentSessionHandle {
 	}
 
 	subscribeRunState(listener: (state: SessionRunState) => void): () => void {
-		this.#runStateListeners.add(listener);
 		if (!this.#unsubscribeRunState) {
 			this.#unsubscribeRunState = mainBridge().remote.callSync("subscribeRunState", this, state =>
 				this.#dispatchRunState(state),
 			);
 		}
+		this.#runStateListeners.add(listener);
 		return () => {
 			if (!this.#runStateListeners.delete(listener) || this.#runStateListeners.size > 0) return;
 			const unsubscribe = this.#unsubscribeRunState;
