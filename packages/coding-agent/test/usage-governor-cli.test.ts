@@ -32,20 +32,6 @@ const LINE_TOLERANCE = 1e-6;
 /** Clock slack on an admission compared with its admissible time: one timer tick. */
 const ADMISSION_SLACK_MS = 5;
 
-/**
- * Hosts omp contacts at startup for model discovery, before any scenario traffic. Measured with the
- * tripwire on this branch, not assumed. Loopback discovery probes bypass the tripwire via NO_PROXY.
- */
-const STARTUP_DISCOVERY_HOSTS: Record<string, true> = {
-	"catalog.stencil.so": true,
-	"coding-intl.dashscope.aliyuncs.com": true,
-	"hyper.charm.land": true,
-	"api.commandcode.ai": true,
-	"api.kilo.ai": true,
-	"api.venice.ai": true,
-	"zenmux.ai": true,
-};
-
 /** The governor block of `omp usage --json`, validated at the process boundary. */
 const GovernorJson = type({
 	config: { enabled: "boolean", lead: "number", interactiveReserve: "'hold' | 'spend'" },
@@ -103,18 +89,9 @@ function windowsFor(status: GovernorStatus, email: string): GovernorWindow[] {
 	return (status?.windows ?? []).filter(window => window.accountLabel?.includes(email));
 }
 
-/**
- * Every tripwire record is startup discovery: a CONNECT to a known catalog host. Nothing names a
- * provider or usage route, and nothing reached the fake through the proxy.
- */
+/** No proxied network connections are permitted during a scenario. */
 function assertConfined(proof: GovernorProof): void {
-	for (const record of proof.tripwire.records) {
-		const [method, target = ""] = record.requestLine.split(" ");
-		expect(method).toBe("CONNECT");
-		const host = target.split(":")[0] ?? "";
-		expect(STARTUP_DISCOVERY_HOSTS[host]).toBe(true);
-	}
-	expect(proof.tripwire.records.filter(record => record.requestLine.includes("/govplan")).length).toBe(0);
+	expect(proof.tripwire.records).toEqual([]);
 }
 
 /** Real-HOME baseline, taken when this file loads: before any scenario runs. */
@@ -350,11 +327,14 @@ describe("usage governor CLI proof: scenarios", () => {
 			expect(proof.fake.records.filter(record => record.kind === "unexpected")).toEqual([]);
 			expect(proof.fake.account("a").usedFraction).toBe(0.95);
 			expect(proof.fake.account("b").usedFraction).toBe(0.95);
-			assertConfined(proof);
 		} finally {
 			probe.kill("SIGINT");
 			await probe.exited;
-			proof.close();
+			try {
+				assertConfined(proof);
+			} finally {
+				proof.close();
+			}
 		}
 	}, 90_000);
 

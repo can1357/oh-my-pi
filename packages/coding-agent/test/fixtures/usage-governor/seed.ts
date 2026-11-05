@@ -1,6 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { AuthStorage } from "@oh-my-pi/pi-ai";
+import { MODELS_DEV_CATALOG_PROVIDER_IDS, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
+import { SPECIAL_MODEL_MANAGER_PROVIDER_IDS } from "../../../src/config/model-provider-discovery";
 import type { FakeAccountSpec } from "./fake-provider";
 
 /** Access tokens are fake and never expire; a refresh would be a defect (see govplan-extension). */
@@ -44,6 +46,19 @@ export function writeScenarioConfig(agentDir: string, settings: ScenarioSettings
 	if (settings.interactiveReserve !== undefined) usageGovernor.interactiveReserve = settings.interactiveReserve;
 	const config = {
 		usageGovernor,
+		disabledProviders: [
+			...new Set([
+				...PROVIDER_DESCRIPTORS.map(descriptor => descriptor.providerId),
+				...MODELS_DEV_CATALOG_PROVIDER_IDS,
+				...SPECIAL_MODEL_MANAGER_PROVIDER_IDS,
+				"local",
+				"web",
+				"ollama",
+				"llama.cpp",
+				"apple",
+				"lm-studio",
+			]),
+		].filter(provider => provider !== "govplan" && provider !== "govplan-g"),
 		modelRoles: { default: "govplan/m", task: "govplan-g/m" },
 		retry: {
 			usageReservePct: 10,
