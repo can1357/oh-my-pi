@@ -452,3 +452,43 @@ async fn round_four_rows() {
 	])
 	.await;
 }
+
+/// Round-5 review rows, each the output and status of Bash 5.2.21 and 5.3.0
+/// for the same `-c` string. A subshell hands the catch around it on to its
+/// own children, so an assignment's arithmetic error keeps the status of
+/// that catch however deep the nesting; and a trap nested in the EXIT
+/// trap's action is answered with the status its own frame saved, which for
+/// an ERR trap is the status of the command that failed, not a constant 1.
+#[tokio::test(flavor = "multi_thread")]
+async fn round_five_rows() {
+	check(&[
+		// An assignment's arithmetic error through nested children.
+		(
+			r##"trap '( ( declare -i I; I=bad! ); echo TWO:$? ); echo ONE:$?' EXIT; exit 7"##,
+			"TWO:7\nONE:0\n",
+			7,
+		),
+		(
+			r##"trap '( v=$( declare -i I; I=bad! ); echo TWO:$? ); echo ONE:$?' EXIT; exit 7"##,
+			"TWO:7\nONE:0\n",
+			7,
+		),
+		(
+			r##"trap '( ( declare -a A; A[bad!]=x ); echo TWO:$? )' EXIT; exit 7"##,
+			"TWO:7\n",
+			7,
+		),
+		(r##"( ( declare -i I; I=bad! ); echo TWO:$? ); echo ONE:$?"##, "TWO:1\nONE:0\n", 0),
+		// An ERR trap nested in the EXIT trap's action starts with the
+		// status of the command that failed.
+		(r##"trap 'trap '"'"': ${x?boom}'"'"' ERR; (exit 9)' EXIT; exit 7"##, "", 9),
+		(r##"trap 'trap '"'"': ${x?boom}'"'"' ERR; (exit 42)' EXIT; exit 7"##, "", 42),
+		(r##"trap 'trap '"'"': ${x?boom}'"'"' ERR; false' EXIT; exit 7"##, "", 1),
+		(
+			r##"trap 'trap '"'"'declare -i I; I=bad!'"'"' ERR; (exit 9)' EXIT; exit 7"##,
+			"",
+			9,
+		),
+	])
+	.await;
+}

@@ -346,20 +346,27 @@ impl OwnTraps {
 /// which keeps the whole landing inside an idle vproc's spare bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Landing {
-	/// What catches a jump out of the parent, which answers the child's
-	/// jump too.
-	pub catch:     LandingCatch,
-	/// The status that catch saved (an EXIT trap's, or that of a trap
-	/// running inside its action); 0 for the shell's own catch.
-	pub saved:     u8,
+	/// What answers a `FORCE_EOF`, a `DISCARD` or an `ERREXIT` out of the
+	/// child: its own catch when it has one (a subshell, a command
+	/// substitution), else the catch around the parent.
+	pub catch:        LandingCatch,
+	/// The status `catch` saved (an EXIT trap's, or that of a trap running
+	/// inside its action); 0 for a shell's or a subshell's own catch.
+	pub saved:        u8,
+	/// What answers an assignment's arithmetic error, which a subshell's
+	/// and a command substitution's own catch does not: the catch around
+	/// them, handed on however deep the nesting goes.
+	pub assign:       LandingCatch,
+	/// The status `assign` saved.
+	pub assign_saved: u8,
 	/// The shell landed in runs the EXIT trap the child inherited: bash
 	/// resets a forked child's traps only once its words are expanded.
-	pub exit_trap: bool,
+	pub exit_trap:    bool,
 	/// The child is a lone simple command the shell forked before it
 	/// expanded anything, so it has no catch of its own at all
 	/// (`CMD_NO_FORK`). A subshell, a command substitution and a pipeline
 	/// stage that is not one simple command have their own.
-	pub simple:    bool,
+	pub simple:       bool,
 }
 
 /// Which of bash's catches a landing is, each with its own answer to a

@@ -2212,14 +2212,16 @@ fn catch(cx: &mut Cx<'_>, vp: &Vproc) -> Catch {
 				};
 			},
 			TrapKey::Return => {},
-			// The innermost one decides. `run_pending_traps` puts the
-			// status back around a signal trap, and `run_debug_trap`
-			// around a DEBUG trap; an ERR trap leaves the failure status
-			// its nested evaluation set.
-			TrapKey::Signal(_) | TrapKey::Debug if inner_trap.is_none() => {
+			// The innermost one decides, with the status its own frame
+			// saved: `run_pending_traps` puts that status back around a
+			// signal trap, `run_debug_trap` around a DEBUG trap, and an
+			// ERR trap's action starts with the status of the command that
+			// failed (`trap 'trap '"'"': ${x?boom}'"'"' ERR; (exit 9)'
+			// EXIT; exit 7` is 9 in both bashes, and 1 when `false`
+			// triggers the trap).
+			TrapKey::Signal(_) | TrapKey::Debug | TrapKey::Err if inner_trap.is_none() => {
 				inner_trap = Some(status);
 			},
-			TrapKey::Err if inner_trap.is_none() => inner_trap = Some(1),
 			TrapKey::Signal(_) | TrapKey::Err | TrapKey::Debug => {},
 		}
 	}
@@ -2282,14 +2284,18 @@ fn jump_status(cx: &mut Cx<'_>, vp: &mut Vproc, code: JumpCode) -> i32 {
 			if landing.exit_trap {
 				vp.own_traps = vp.own_traps.with(TrapKey::Exit);
 			}
-			answer(landing.catch, i32::from(landing.saved))
+			if code == JumpCode::AssignDiscard {
+				answer(landing.assign, i32::from(landing.assign_saved))
+			} else {
+				answer(landing.catch, i32::from(landing.saved))
+			}
 		},
 		// A subshell's own catch answers every code but an assignment's,
 		// which the catch around the subshell answers (the landing it
 		// keeps).
 		Catch::Own if code == JumpCode::AssignDiscard => {
 			match vp.fork_landing {
-				Some(landing) => answer(landing.catch, i32::from(landing.saved)),
+				Some(landing) => answer(landing.assign, i32::from(landing.assign_saved)),
 				None => answer(LandingCatch::Own, 0),
 			}
 		},
@@ -2342,32 +2348,50 @@ fn fork_landing(cx: &mut Cx<'_>, vp: &Vproc, simple: bool) -> Landing {
 	let byte = |status: i32| u8::try_from(status & 0xff).unwrap_or(0);
 	match catch(cx, vp) {
 		Catch::ExitTrap(saved) => Landing {
-			catch: LandingCatch::ExitTrap,
-			saved: byte(saved),
-			exit_trap: false,
+			catch:        LandingCatch::ExitTrap,
+			saved:        byte(saved),
+			assign:       LandingCatch::ExitTrap,
+			assign_saved: byte(saved),
+			exit_trap:    false,
 			simple,
 		},
 		// The child of such a trap lands on that trap's status.
-		Catch::TrapInExitTrap(status) => {
-			Landing { catch: LandingCatch::Trap, saved: byte(status), exit_trap: false, simple }
+		Catch::TrapInExitTrap(status) => Landing {
+			catch:        LandingCatch::Trap,
+			saved:        byte(status),
+			assign:       LandingCatch::Trap,
+			assign_saved: byte(status),
+			exit_trap:    false,
+			simple,
 		},
-		Catch::Shell => Landing {
-			catch: if shell_command(cx, vp) {
+		Catch::Shell => {
+			let shell = if shell_command(cx, vp) {
 				LandingCatch::ShellCommand
 			} else {
 				LandingCatch::ShellScript
-			},
-			saved: 0,
-			exit_trap: true,
-			simple,
+			};
+			Landing {
+				catch:        shell,
+				saved:        0,
+				assign:       shell,
+				assign_saved: 0,
+				exit_trap:    true,
+				simple,
+			}
 		},
 		// `vp` runs a function: bash reset its traps before.
 		Catch::Fork(landing) => Landing { exit_trap: false, simple, ..landing },
-		// A subshell runs only the EXIT trap it set itself.
+		// A subshell's own catch answers every code but an assignment's
+		// arithmetic error, which the catch around it answers; it hands
+		// that one on however deep the nesting goes
+		// (`trap '( ( declare -i I; I=bad! ); echo TWO:$? )' EXIT; exit 7`
+		// prints `TWO:7` in both bashes).
 		Catch::Own => Landing {
-			catch: LandingCatch::Own,
-			saved: 0,
-			exit_trap: vp.own_traps.has(TrapKey::Exit),
+			catch:        LandingCatch::Own,
+			saved:        0,
+			assign:       vp.fork_landing.map_or(LandingCatch::Own, |landing| landing.assign),
+			assign_saved: vp.fork_landing.map_or(0, |landing| landing.assign_saved),
+			exit_trap:    vp.own_traps.has(TrapKey::Exit),
 			simple,
 		},
 	}
