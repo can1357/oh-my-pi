@@ -65,4 +65,30 @@ Body`;
 		expect(result.body).toBe("Body");
 		expect(warnSpy).toHaveBeenCalled();
 	});
+
+	it("keeps HTML comments in the body and plain documents", () => {
+		const withFrontmatter = parseFrontmatter("---\nname: x\n---\nUse <!-- keep --> marker\n", {});
+		expect(withFrontmatter.frontmatter).toEqual({ name: "x" });
+		expect(withFrontmatter.body).toBe("Use <!-- keep --> marker");
+
+		const plain = parseFrontmatter("# T\n\ntext <!-- keep --> tail\n", {});
+		expect(plain.body).toBe("# T\n\ntext <!-- keep --> tail\n");
+
+		const inline = parseFrontmatter("abc<!--x-->def", {});
+		expect(inline.body).toBe("abc<!--x-->def");
+	});
+
+	it("strips HTML comments inside the frontmatter block without flattening nested values", () => {
+		const result = parseFrontmatter("---\n<!-- reviewed -->\nname: rev\ntools:\n  - read\n  - grep\n---\nBody\n", {
+			level: "off",
+		});
+		expect(result.frontmatter).toEqual({ name: "rev", tools: ["read", "grep"] });
+		expect(result.body).toBe("Body");
+	});
+
+	it("recovers frontmatter behind a leading HTML comment on its own line", () => {
+		const result = parseFrontmatter("<!-- exported -->\n---\nname: x\n---\nBody\n", {});
+		expect(result.frontmatter).toEqual({ name: "x" });
+		expect(result.body).toBe("Body");
+	});
 });

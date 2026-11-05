@@ -11,7 +11,7 @@ import type { FetchImpl, Model } from "../types";
 const gzip = promisify(zlib.gzip);
 
 /** Bodies below one TCP segment gain nothing from compression; skip them. */
-const MIN_COMPRESSED_BODY_BYTES = 1024;
+export const MIN_COMPRESSED_BODY_BYTES = 1024;
 
 /**
  * zlib's default level: on multi-MB transcripts ~35% smaller than level 1 for
@@ -31,6 +31,17 @@ const ZSTD_LEVEL = 3;
  * the next request falls back to that host's next accepted encoding.
  */
 const rejectedEncodings = new Set<string>();
+
+/**
+ * `<origin> <status>` pairs where a non-JSON refusal of a compressed body
+ * recurred on the uncompressed resend: something in front of the host refuses
+ * every request (a blocking proxy, an edge challenge), not the encoding. Later
+ * refusals with that status skip the resend instead of doubling each attempt.
+ */
+const encodingUnrelatedRefusals = new Set<string>();
+
+/** Why a failed compressed request may be an encoding rejection. */
+type RejectionSuspect = "host" | "proxy";
 
 type RequestHeaders = RequestInit["headers"];
 
@@ -67,14 +78,41 @@ function compress(body: string | ArrayBufferView, encoding: RequestBodyEncoding)
 	return encoding === "zstd" ? Bun.zstdCompress(bytes, { level: ZSTD_LEVEL }) : gzip(bytes, { level: GZIP_LEVEL });
 }
 
-async function mayBeEncodingRejection(response: Response, policy: RequestCompressionPolicy): Promise<boolean> {
-	if (response.status !== 400 && response.status !== 415) return false;
-	if (!policy.rejection) return true;
+/** Reads a clone of {@link response}'s body; `undefined` when it cannot be read. */
+async function bodyText(response: Response): Promise<string | undefined> {
 	try {
-		return policy.rejection.test(await response.clone().text());
+		return await response.clone().text();
+	} catch {
+		return undefined;
+	}
+}
+
+function isJson(text: string): boolean {
+	try {
+		JSON.parse(text);
+		return true;
 	} catch {
 		return false;
 	}
+}
+
+/**
+ * `host`: a JSON 400/415 matching the host's rejection pattern (or any JSON
+ * 400/415 when none is assigned). `proxy`: a 400/403/415 whose body is not JSON,
+ * empty included — provider APIs answer errors in JSON, so the body is presumed
+ * to come from a proxy or TLS-inspecting gateway that may refuse a compressed
+ * upload the host itself decodes.
+ */
+async function suspectEncodingRejection(
+	response: Response,
+	policy: RequestCompressionPolicy,
+): Promise<RejectionSuspect | undefined> {
+	if (response.status !== 400 && response.status !== 403 && response.status !== 415) return undefined;
+	const body = await bodyText(response);
+	if (body === undefined) return undefined;
+	if (!isJson(body)) return "proxy";
+	if (response.status === 403) return undefined;
+	return (policy.rejection?.test(body) ?? true) ? "host" : undefined;
 }
 
 /**
@@ -87,9 +125,12 @@ async function mayBeEncodingRejection(response: Response, policy: RequestCompres
  * Install it beneath any body rewriter or signer (e.g. the cch attestation
  * patch): those must see the uncompressed bytes. Other hosts, small bodies,
  * bodies that already carry `Content-Encoding`, and `PI_REQUEST_COMPRESSION=0`
- * pass through untouched. A possible rejection is resent uncompressed once;
- * only when that resend succeeds is the encoding latched off for the host, so
- * a genuine 400 never disables compression.
+ * pass through untouched. A possible rejection — the host's decode error, or a
+ * non-JSON 400/403/415 from a proxy in front of it — is resent uncompressed
+ * once; only when that resend succeeds is the encoding latched off for the
+ * host, so a genuine 400 never disables compression. When a non-JSON refusal
+ * recurs uncompressed with the same status and a non-JSON body, that status
+ * stops being re-checked for the host.
  */
 export function wrapFetchForRequestCompression(base: FetchImpl, model: Model): FetchImpl {
 	const wrapped: FetchImpl = async (input, init) => {
@@ -128,7 +169,10 @@ export function wrapFetchForRequestCompression(base: FetchImpl, model: Model): F
 			body: compressed,
 			headers: withContentEncoding(init?.headers, encoding),
 		});
-		if (!(await mayBeEncodingRejection(response, policy))) return response;
+		const suspect = await suspectEncodingRejection(response, policy);
+		if (!suspect) return response;
+		const refusal = `${origin} ${response.status}`;
+		if (suspect === "proxy" && encodingUnrelatedRefusals.has(refusal)) return response;
 
 		await response.body?.cancel().catch(() => {});
 		const plain = await base(input, init);
@@ -139,6 +183,11 @@ export function wrapFetchForRequestCompression(base: FetchImpl, model: Model): F
 				encoding,
 				status: response.status,
 			});
+		} else if (suspect === "proxy" && plain.status === response.status) {
+			// A JSON body means the resend reached the provider; its own error says
+			// nothing about whether the proxy refuses every request.
+			const plainBody = await bodyText(plain);
+			if (plainBody !== undefined && !isJson(plainBody)) encodingUnrelatedRefusals.add(refusal);
 		}
 		return plain;
 	};
@@ -146,7 +195,8 @@ export function wrapFetchForRequestCompression(base: FetchImpl, model: Model): F
 	return wrapped;
 }
 
-/** Test hook: clears every per-host rejection latch. */
+/** Test hook: clears every per-host latch. */
 export function resetRequestCompressionForTesting(): void {
 	rejectedEncodings.clear();
+	encodingUnrelatedRefusals.clear();
 }

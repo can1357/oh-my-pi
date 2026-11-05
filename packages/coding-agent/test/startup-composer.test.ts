@@ -10,6 +10,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as pluginHelpers from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import { Composer, type ComposerPreferences } from "@oh-my-pi/pi-tui/prompt/composer";
 import * as composerCache from "@oh-my-pi/pi-tui/prompt/composer-cache";
@@ -43,6 +44,7 @@ import {
 	cfgStartupQuiet,
 	cfgStartupSetupWizard,
 	cfgStartupShowSplash,
+	cfgTuiCompleteScrollback,
 	cfgTuiImeSafeCursor,
 	cfgTuiMaxInlineImages,
 	cfgTuiResizeScrollback,
@@ -93,6 +95,11 @@ class InputTrackingTerminal extends CountingTerminal {
 		this.inputEnables += 1;
 	}
 }
+
+// `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
+afterEach(() => {
+	clearOmpExtensionCliRoots();
+});
 
 describe("outer startup collaboration gate", () => {
 	it.each(["completes", "fails"] as const)("keeps guest mutations gated until outer startup %s", async result => {
@@ -295,6 +302,7 @@ describe("Composer prepaint", () => {
 			showHardwareCursor: cfgShowHardwareCursor.get(settings),
 			maxInlineImages: cfgTuiMaxInlineImages.get(settings),
 			resizeScrollback: cfgTuiResizeScrollback.get(settings),
+			completeScrollback: cfgTuiCompleteScrollback.get(settings),
 			imeSafeCursor: cfgTuiImeSafeCursor.get(settings),
 			autocompleteMaxVisible: cfgAutocompleteMaxVisible.get(settings),
 			spellingTypoDetection: cfgSpellingTypoDetection.get(settings),
@@ -332,7 +340,6 @@ describe("Composer prepaint", () => {
 			const mode = new InteractiveMode(
 				testSession.session,
 				"test",
-				undefined,
 				undefined,
 				undefined,
 				undefined,
@@ -412,7 +419,6 @@ describe("Composer prepaint", () => {
 				undefined,
 				undefined,
 				undefined,
-				undefined,
 				adoptedComposer,
 			);
 			lease.adopt();
@@ -462,7 +468,6 @@ describe("Composer prepaint", () => {
 		const mode = new InteractiveMode(
 			testSession.session,
 			"test",
-			undefined,
 			undefined,
 			undefined,
 			undefined,
@@ -523,7 +528,6 @@ describe("Composer prepaint", () => {
 			undefined,
 			undefined,
 			undefined,
-			undefined,
 			lease.composer,
 		);
 		lease.adopt();
@@ -551,7 +555,6 @@ describe("Composer prepaint", () => {
 		const mode = new InteractiveMode(
 			testSession.session,
 			"test",
-			undefined,
 			undefined,
 			undefined,
 			undefined,
@@ -632,7 +635,6 @@ describe("Composer prepaint", () => {
 		const mode = new InteractiveMode(
 			testSession.session,
 			"test",
-			undefined,
 			undefined,
 			undefined,
 			undefined,
@@ -770,7 +772,6 @@ describe("Composer prepaint", () => {
 				undefined,
 				undefined,
 				undefined,
-				undefined,
 				lease.composer,
 			);
 			lease.adopt();
@@ -828,6 +829,7 @@ describe("Composer prepaint", () => {
 			showHardwareCursor: config.showHardwareCursor,
 			maxInlineImages: config.maxInlineImages,
 			resizeScrollback: config.resizeScrollback,
+			completeScrollback: config.completeScrollback,
 			imeSafeCursor: config.imeSafeCursor,
 			autocompleteMaxVisible: config.autocompleteMaxVisible,
 			spellingTypoDetection: cfgSpellingTypoDetection.get(settings),

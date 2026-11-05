@@ -11,6 +11,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import toolResultNote from "../src/prompts/system/snapcompact-toolresult-note.md" with { type: "text" };
 import {
 	estimateInlineSavings,
@@ -113,6 +114,19 @@ describe("SnapcompactInlineTransformer", () => {
 		);
 		const context = makeContext();
 		expect(await transformer.transform(context, makeModel({ input: ["text"] }))).toBe(context);
+	});
+
+	it("is a no-op for models whose wire strips image input", async () => {
+		// Declares image input, but the Chat Completions guard replaces every
+		// image with a placeholder, so imaged tool results would reach it empty.
+		const model = getBundledModel("venice", "deepseek-v4-1-flash");
+		const options = withTestShape({ renderSystemPrompt: "all", renderToolResults: true });
+		const context = makeContext();
+		expect(await new SnapcompactInlineTransformer(options).transform(context, model)).toBe(context);
+		expect(
+			estimateInlineSavings({ options, model, systemPrompt: context.systemPrompt ?? [], messages: context.messages })
+				.visionCapable,
+		).toBe(false);
 	});
 
 	it("treats Copilot business/enterprise endpoints as vision-capable when the model input includes image", async () => {

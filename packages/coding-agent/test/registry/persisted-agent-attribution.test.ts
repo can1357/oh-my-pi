@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -355,5 +356,34 @@ describe("persisted agent model attribution", () => {
 		const history = registry.get("Branching")?.history;
 		expect(history?.metrics?.requests).toBe(1);
 		expect(history?.metrics?.cost).toBeCloseTo(0.3);
+	});
+});
+
+describe("persisted history rescans", () => {
+	it("reads a transcript again only after it changed", async () => {
+		using tempDir = TempDir.createSync("@omp-history-rescan-");
+		const rootFile = path.join(tempDir.path(), "main.jsonl");
+		const transcriptFile = path.join(tempDir.path(), "main", "Worker.jsonl");
+		const registry = await historyFor(tempDir.path(), "Worker", [
+			...transcriptHead(),
+			assistant("a1", "si", SONNET, "stop", [{ type: "text", text: "done" }], 0.5),
+		]);
+		const ref = registry.get("Worker")!;
+		expect(ref.history?.directCost).toBeCloseTo(0.5);
+		const changed: string[] = [];
+		registry.onChange(event => {
+			if (event.type === "metadata_changed") changed.push(event.ref.id);
+		});
+
+		await registerPersistedSubagents(registry, rootFile);
+		expect(changed).toEqual([]);
+
+		await fs.appendFile(
+			transcriptFile,
+			`${assistant("a2", "a1", SONNET, "stop", [{ type: "text", text: "more" }], 0.25)}\n`,
+		);
+		await registerPersistedSubagents(registry, rootFile);
+		expect(changed).toEqual(["Worker"]);
+		expect(ref.history?.directCost).toBeCloseTo(0.75);
 	});
 });

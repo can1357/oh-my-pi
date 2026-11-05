@@ -36,18 +36,18 @@ pub mod edit;
 pub mod fd;
 pub mod file_lock;
 pub mod glob;
-pub mod glob_util;
 pub mod grammars;
 pub mod grep;
+pub mod held_files;
 pub mod highlight;
 /// HDiffPatch single-stream binary patch application.
 pub mod hpatch;
 pub mod html;
-pub mod iofs;
 /// Local IPC over Unix domain sockets / Windows named pipes.
 pub mod ipc;
 pub mod js;
 pub mod keys;
+pub mod line_match;
 pub mod live;
 pub mod memory;
 pub mod mermaid;

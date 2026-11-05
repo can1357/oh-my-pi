@@ -1,5 +1,5 @@
 import { quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
-import { getAntigravityUserAgent } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
+import { getAntigravityHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import * as AIError from "../error";
 import type {
 	CredentialRankingContext,
@@ -310,8 +310,6 @@ function getQuotaSummaryCounterName(counterKey: string): string | undefined {
 	switch (counterKey) {
 		case "google":
 			return "Google";
-		case "google-argon":
-			return "Gemini 4 Argon";
 		case "anthropic":
 			return "Anthropic";
 		case "openai":
@@ -367,8 +365,17 @@ function buildQuotaSummaryReport(
 		for (const counterKey of counterKeys) {
 			const counterName = getQuotaSummaryCounterName(counterKey);
 			const windowId = window?.id ?? bucket.window ?? bucket.bucketId ?? "default";
+			// The API's bucket `displayName` is generic ("Weekly Limit Remaining"),
+			// so Argon's dedicated weekly bucket needs its own name to stay
+			// distinguishable from the shared Gemini weekly bucket in usage views.
 			const label =
-				sharedGroup !== undefined ? "Claude & GPT (shared)" : counterKey === "google" ? "Gemini" : counterName;
+				sharedGroup !== undefined
+					? "Claude & GPT (shared)"
+					: counterKey === "google"
+						? "Gemini"
+						: counterKey === "google-argon"
+							? "Gemini (Argon)"
+							: counterName;
 			limits.push({
 				id: `${params.provider}:${counterKey}:default:${bucket.bucketId ?? windowId}`,
 				label: label ?? group?.displayName ?? bucket.displayName ?? "Usage",
@@ -436,7 +443,7 @@ async function fetchAntigravityEndpoint(
 				headers: {
 					Authorization: `Bearer ${request.accessToken}`,
 					"Content-Type": "application/json",
-					"User-Agent": getAntigravityUserAgent(),
+					...getAntigravityHeaders(),
 				},
 				body: JSON.stringify({ project: request.projectId }),
 				signal: request.signal,

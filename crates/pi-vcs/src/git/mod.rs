@@ -300,7 +300,7 @@ pub(crate) fn normalize_path(path: &Path) -> PathBuf {
 pub(crate) fn relative_prefix(root: &Path, dir: &Path) -> Option<String> {
 	let absolute = std::path::absolute(dir).ok()?;
 	let relative = absolute.strip_prefix(root).ok()?;
-	if relative.as_os_str().is_empty() {
+	if relative.is_empty() {
 		return Some(String::new());
 	}
 	let mut prefix = relative
@@ -321,10 +321,7 @@ fn config_has_reftable(content: &str) -> bool {
 	for line in content.lines() {
 		let line = strip_config_comment(line);
 		let line = line.trim();
-		if let Some(section) = line
-			.strip_prefix('[')
-			.and_then(|rest| rest.strip_suffix(']'))
-		{
+		if let Some(section) = line.strip_circumfix('[', ']') {
 			in_extensions = section.trim().eq_ignore_ascii_case("extensions");
 			continue;
 		}
@@ -338,8 +335,8 @@ fn config_has_reftable(content: &str) -> bool {
 			continue;
 		}
 		let mut value = value.trim();
-		if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
-			value = value[1..value.len() - 1].trim();
+		if let Some(inner) = value.strip_circumfix('"', '"') {
+			value = inner.trim();
 		}
 		let value = value.to_ascii_lowercase();
 		if value == "reftable" || value.starts_with("reftable:") {

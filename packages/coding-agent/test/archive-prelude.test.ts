@@ -12,7 +12,7 @@ import type {
 import { createArchivePrelude } from "@oh-my-pi/pi-coding-agent/archive/prelude-definition";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
-import { recordSessionRecap, resetSessionIndexForTests } from "@oh-my-pi/pi-coding-agent/session/session-index";
+import { recordSessionRecap, closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { sessionDirForCwd } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { getConfigRootDir, removeSyncWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
@@ -63,13 +63,13 @@ beforeEach(() => {
 	app = path.join(root, "app");
 	lib = path.join(root, "lib");
 	HistoryStorage.close();
-	resetSessionIndexForTests();
+	closeSessionIndex();
 	setAgentDir(path.join(root, "agent"));
 });
 
 afterEach(() => {
 	HistoryStorage.close();
-	resetSessionIndexForTests();
+	closeSessionIndex();
 	if (originalAgentDir) {
 		setAgentDir(originalAgentDir);
 	} else {

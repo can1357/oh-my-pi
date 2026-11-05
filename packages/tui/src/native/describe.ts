@@ -9,7 +9,7 @@
  *   ]);
  * }
  */
-import type { TspKind, TspProps, TspSpan, TspText } from "@oh-my-pi/pi-wire";
+import type { TspKind, TspPropNode, TspProps, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { NativeChild, NativeNode } from "./node";
 
 /** A node of any kind. */
@@ -76,6 +76,23 @@ export function withHidden(described: NativeNode, hidden: boolean): NativeNode {
 	return node(described.k, { ...described.p, hidden: true } as TspProps, described.c, described.key);
 }
 
+/**
+ * A described tree as the node tree a prop carries (a `hovercard`): plain
+ * nodes only, since nothing reconciles inside a prop; component children
+ * (which describe themselves per frame) are left out.
+ */
+export function propNode(described: NativeNode): TspPropNode {
+	const out: { k: TspKind; p?: TspProps; c?: TspPropNode[]; key?: string } = { k: described.k };
+	if (described.p !== undefined) out.p = described.p;
+	if (described.c !== undefined) {
+		const children: TspPropNode[] = [];
+		for (const child of described.c) if ("k" in child) children.push(propNode(child));
+		out.c = children;
+	}
+	if (described.key !== undefined) out.key = described.key;
+	return out as TspPropNode;
+}
+
 /** Stable node key for an arbitrary identity string; keys join into `/` keypaths, so identities are hashed. */
 export function stableKey(identity: string): string {
 	return Bun.hash(identity).toString(36);
@@ -115,10 +132,15 @@ export function elapsed(age: number, stopped?: boolean): NativeNode {
 }
 
 /**
- * Keycap for one key id (`"ctrl+o"` → keys `["ctrl", "o"]`); the terminal
- * draws platform glyphs. A literal `+` key survives (`"+"`, `"ctrl++"`).
+ * The key names of one key id (`"ctrl+o"` → `["ctrl", "o"]`), as `kbd` and
+ * `button` `keys` take them. A literal `+` key survives (`"+"`, `"ctrl++"`).
  */
-export function kbd(key: string, nodeKey?: string): NativeNode {
+export function keyNames(key: string): string[] {
 	const keys = key === "+" ? ["+"] : key.endsWith("++") ? [...key.slice(0, -2).split("+"), "+"] : key.split("+");
-	return node("kbd", { keys: keys.filter(part => part.length > 0) }, undefined, nodeKey);
+	return keys.filter(part => part.length > 0);
+}
+
+/** Keycap for one key id ({@link keyNames}); the terminal draws platform glyphs. */
+export function kbd(key: string, nodeKey?: string): NativeNode {
+	return node("kbd", { keys: keyNames(key) }, undefined, nodeKey);
 }

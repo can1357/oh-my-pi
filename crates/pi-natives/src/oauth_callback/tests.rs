@@ -325,8 +325,9 @@ async fn wait_wakes_on_callback_published_after_it_starts() {
 	.unwrap();
 	let latency = publisher.await.unwrap().elapsed();
 	assert_eq!(url, "omp-test://callback?code=late");
-	// Well under POLL_INTERVAL: only the directory watch can wake the wait this
-	// fast.
+	// A poll would claim it most of a POLL_INTERVAL later (2 s in tests); only
+	// the directory watch wakes the wait well inside a quarter of that, even
+	// on a loaded runner.
 	assert!(latency < POLL_INTERVAL / 4, "callback claimed {latency:?} after publication");
 	fs::remove_dir_all(home).unwrap();
 }

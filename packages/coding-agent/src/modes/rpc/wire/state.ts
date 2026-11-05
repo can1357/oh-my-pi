@@ -17,7 +17,7 @@ export const stateDefs = {
 	CacheWarmingMode: "'off' | 'streaming' | 'idle'",
 	MessageUpdates: doc(
 		"'full' | 'delta'",
-		"`set_event_filter` projection: `delta` drops the accumulated snapshots from `message_update`.",
+		"`set_event_filter` projection: `delta` replaces the accumulated snapshots with the block a start/end event touches.",
 	),
 	TodoStatus: "'pending' | 'in_progress' | 'completed' | 'abandoned' | 'blocked'",
 	GoalOp: "'get' | 'create' | 'resume' | 'pause' | 'drop'",
@@ -157,10 +157,34 @@ export const stateDefs = {
 		outputBytes: "number.integer",
 		"artifactId?": "string",
 		"artifactElidedBytes?": "number.integer",
+		"elidedBytes?": doc(
+			"number.integer",
+			"Bytes dropped from the middle of `output`, which keeps the head and tail.",
+		),
+		"elidedLines?": doc("number.integer", "Lines dropped from the middle of `output`."),
+		"columnDroppedBytes?": doc(
+			"number.integer",
+			"Bytes the per-line column cap cut from `output`, across all lines.",
+		),
+		"columnTruncatedLines?": doc(
+			"number.integer",
+			"Lines of `output` the per-line column cap cut; the artifact holds them whole.",
+		),
+		"columnTruncatedRange?": doc(
+			"LineRange",
+			"First and last lines the column cap cut, numbered as in the artifact; absent when the numbering cannot match it.",
+		),
+		"columnMax?": doc("number.integer", "The per-line column cap in UTF-8 bytes, set when it cut a line."),
 		"artifactError?": JSON_OBJECT,
+		"minimized?": JSON_OBJECT,
 		"workingDir?": "string",
 		"images?": "ImageContent[]",
+		"trace?": doc(
+			JSON_OBJECT,
+			"The embedded shell's final `ShellTrace` of the run; only when the caller asked for one.",
+		),
 	},
+	LineRange: { first: "number.integer", last: "number.integer" },
 	FastModeResult: { enabled: "boolean", active: "boolean" },
 	CompactionResult: {
 		summary: "string",
@@ -208,6 +232,14 @@ export const stateDefs = {
 	),
 	BranchMessage: { entryId: "string", text: "string" },
 	BranchResult: { text: "string", cancelled: "boolean" },
+	NavigateTreeResult: {
+		cancelled: "boolean",
+		"aborted?": doc("boolean", "Only ever `true`: `abort_branch_summary` stopped the summary; nothing moved."),
+		"editorText?": doc(
+			"string",
+			"The target was a user message: its text, for the editor; the leaf moved to its parent.",
+		),
+	},
 	TokenUsage: {
 		input: "number.integer",
 		output: "number.integer",
@@ -230,6 +262,7 @@ export const stateDefs = {
 		cost: "number",
 		"credits?": "SessionCredits",
 		"routedModels?": "Record<string, number>",
+		"editRejections?": doc("Record<string, number>", "Failed edits by the engine's `errorKind`."),
 		"contextUsage?": "ContextUsage",
 	},
 	MessagesPage: {
@@ -284,6 +317,7 @@ export const stateDefs = {
 	BtwHistoryTurn: doc(
 		{
 			question: "string",
+			"images?": doc("ImageContent[]", "Images attached to the question."),
 			answer: "string",
 			status: "BtwStatus",
 			createdAt: "number.integer",
@@ -295,6 +329,7 @@ export const stateDefs = {
 	BtwHistoryRecord: doc(
 		{
 			question: "string",
+			"images?": doc("ImageContent[]", "Images attached to the question."),
 			answer: "string",
 			status: "BtwStatus",
 			createdAt: "number.integer",

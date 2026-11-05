@@ -112,6 +112,71 @@ describe("wrapFetchForRequestCompression", () => {
 		expect(calls[1].body).toBe(LARGE_BODY);
 	});
 
+	it.each([403, 415])(
+		"resends uncompressed and stops compressing when a proxy answers %d with its own page",
+		async status => {
+			const page = new Response("<html><body>Compressed uploads are blocked by policy.</body></html>", {
+				status,
+				headers: { "Content-Type": "text/html" },
+			});
+			const { calls, fetch } = captureFetch([page]);
+			const toAnthropic = wrapFetchForRequestCompression(fetch, anthropic);
+
+			const response = await toAnthropic(ANTHROPIC_URL, post());
+			await toAnthropic(ANTHROPIC_URL, post());
+
+			expect(response.status).toBe(200);
+			expect(calls.map(call => call.headers["Content-Encoding"])).toEqual(["gzip", undefined, undefined]);
+			expect(calls[1].body).toBe(LARGE_BODY);
+		},
+	);
+
+	it("stops resending once a proxy refuses the uncompressed body with the same status", async () => {
+		const blocked = () => new Response("<html><body>Access denied.</body></html>", { status: 403 });
+		const { calls, fetch } = captureFetch([blocked(), blocked(), blocked()]);
+		const toAnthropic = wrapFetchForRequestCompression(fetch, anthropic);
+
+		const first = await toAnthropic(ANTHROPIC_URL, post());
+		const second = await toAnthropic(ANTHROPIC_URL, post());
+
+		expect([first.status, second.status]).toEqual([403, 403]);
+		expect(calls.map(call => call.headers["Content-Encoding"])).toEqual(["gzip", undefined, "gzip"]);
+	});
+
+	it("keeps resending when the uncompressed resend reaches the provider's own JSON error", async () => {
+		const blocked = () => new Response("<html><body>Compressed uploads are blocked.</body></html>", { status: 403 });
+		const denied = new Response('{"error":{"message":"Model not accessible."}}', { status: 403 });
+		const { calls, fetch } = captureFetch([blocked(), denied, blocked()]);
+		const toAnthropic = wrapFetchForRequestCompression(fetch, anthropic);
+
+		const first = await toAnthropic(ANTHROPIC_URL, post());
+		const second = await toAnthropic(ANTHROPIC_URL, post());
+
+		expect([first.status, second.status]).toEqual([403, 200]);
+		expect(calls.map(call => call.headers["Content-Encoding"])).toEqual(["gzip", undefined, "gzip", undefined]);
+	});
+
+	it("resends uncompressed when a proxy drops Content-Encoding and Anthropic cannot parse the gzip bytes", async () => {
+		const unparsed = new Response(
+			JSON.stringify({
+				type: "error",
+				error: {
+					type: "invalid_request_error",
+					message: "The request body is not valid JSON: expected value at line 1 column 1",
+				},
+			}),
+			{ status: 400 },
+		);
+		const { calls, fetch } = captureFetch([unparsed]);
+		const toAnthropic = wrapFetchForRequestCompression(fetch, anthropic);
+
+		const response = await toAnthropic(ANTHROPIC_URL, post());
+		await toAnthropic(ANTHROPIC_URL, post());
+
+		expect(response.status).toBe(200);
+		expect(calls.map(call => call.headers["Content-Encoding"])).toEqual(["gzip", undefined, undefined]);
+	});
+
 	it("falls back to the host's next accepted encoding once the preferred one is rejected", async () => {
 		const { calls, fetch } = captureFetch([copilotRejection()]);
 		const wrapped = wrapFetchForRequestCompression(fetch, copilot);
@@ -141,6 +206,20 @@ describe("wrapFetchForRequestCompression", () => {
 		const response = await wrapFetchForRequestCompression(fetch, anthropic)(ANTHROPIC_URL, post());
 
 		expect(calls).toHaveLength(1);
+		expect(await response.text()).toBe(error);
+	});
+
+	it("surfaces a host's own JSON 403 once, even where every 400/415 is re-checked", async () => {
+		const codex = model("openai-codex", "openai-codex-responses", "https://chatgpt.com/backend-api");
+		const error = '{"error":{"message":"Your workspace does not have access to this model."}}';
+		const { calls, fetch } = captureFetch([new Response(error, { status: 403 })]);
+
+		const response = await wrapFetchForRequestCompression(fetch, codex)(
+			"https://chatgpt.com/backend-api/codex/responses",
+			post(),
+		);
+
+		expect(calls.map(call => call.headers["Content-Encoding"])).toEqual(["zstd"]);
 		expect(await response.text()).toBe(error);
 	});
 });

@@ -22,11 +22,19 @@ import { createFileRecorder, formatResultPath, resultSnapshotPath } from "./file
 import { type FileMatchSection, formatFileMatches } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
 import { formatMatchLine } from "@oh-my-pi/pi-tui/tools/match-line-format";
 
-import { relativeSearchResultPath, resolveSearchResultPath, resolveToolSearchScope } from "./path-utils";
+import {
+	parseSearchPath,
+	relativeSearchResultPath,
+	resolveSearchResultPath,
+	resolveToolSearchScope,
+	searchPathTier,
+} from "./path-utils";
+import { searchApprovalCacheTargets } from "./search-approval-targets";
 import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
 import { isRawSelector } from "./read-selector";
 import { capParseErrors, formatCodeFrameLine, formatParseErrors } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { singleLine } from "@oh-my-pi/pi-tui/utils";
 import { toolResult } from "./tool-result";
 
 import { cfgTaskDisabledAgents } from "../task/settings";
@@ -135,7 +143,14 @@ async function runMultiTargetAstGrep(
 
 export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolDetails> {
 	readonly name = "ast_grep";
-	readonly approval = "read" as const;
+	readonly approval = searchPathTier;
+	/** `always-ask-cached` keys: the tree (or file) of every root it searches, as `grep` reports them. */
+	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined =>
+		searchApprovalCacheTargets(
+			toPathList((args as { path?: string } | null | undefined)?.path),
+			this.session.cwd,
+			entry => parseSearchPath(entry).basePath,
+		);
 	readonly label = "AST Grep";
 	readonly summary = "Search code with AST patterns (structural grep)";
 	get description(): string {
@@ -345,7 +360,9 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 							.map(([key, value]) => `${key}=${value}`)
 							.join(", ");
 						modelOut.push(`  meta: ${serializedMeta}`);
-						displayOut.push(`  meta: ${serializedMeta}`);
+						// A capture can span lines; its display row stays one row, so the
+						// renderer can tell it from the match's code frames and file headers.
+						displayOut.push(`  meta: ${singleLine(serializedMeta)}`);
 					}
 					fileMatchCounts.set(relativePath, (fileMatchCounts.get(relativePath) ?? 0) + 1);
 				}

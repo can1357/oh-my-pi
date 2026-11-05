@@ -3,11 +3,12 @@
  *
  * - `session_titles`: session id → display title, written whenever a title is
  *   created or renamed ({@link SessionManager.setSessionName}) and backfilled by
- *   the recent-session fallback scan. Lets the welcome "Recent sessions" list
- *   resolve names from a stat + lookup instead of content-scanning every session
- *   file in the project directory (multi-hundred-ms on dirs with thousands of
- *   sessions). A title has no life beyond its session; `omp gc` drops rows of
- *   archived sessions.
+ *   the recent-session fallback scan and the resume picker's full scan. Lets the
+ *   welcome "Recent sessions" list resolve names from a stat + lookup, and the
+ *   resume picker show its rows before reading any session file, instead of
+ *   content-scanning every session file in the project directory (seconds on
+ *   dirs with thousands of sessions). A title has no life beyond its session;
+ *   `omp gc` drops rows of archived sessions.
  * - `session_recaps`: append-only journal of idle recaps
  *   ({@link SessionManager.recordRecap}). Recaps are side-channel output that
  *   never enters the session JSONL or LLM context; this table is their only
@@ -22,9 +23,14 @@
 import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isSqliteBusyError, sqliteFileIdentity, type SqliteFileIdentity } from "@oh-my-pi/pi-utils";
+import {
+	isSqliteBusyError,
+	readSalvageableRows,
+	sqliteFileIdentity,
+	type SqliteFileIdentity,
+} from "@oh-my-pi/pi-utils";
 import { getHistoryDbPath } from "@oh-my-pi/pi-utils/dirs";
-import { getDbBusyTimeoutMs } from "@oh-my-pi/pi-utils/env";
+import { getDbBusyTimeoutMs, isBunTestRuntime } from "@oh-my-pi/pi-utils/env";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 
 const SESSION_INDEX_DDL = `
@@ -69,6 +75,11 @@ function closeHandle(): void {
 }
 
 function openSessionIndex(): SessionIndexHandle | undefined {
+	// A test run never writes the user's history.db: under the test runner the
+	// index opens only an agent dir the test chose (`setAgentDir` exports
+	// PI_CODING_AGENT_DIR). Otherwise every test naming a file-backed session
+	// leaves a title row behind in the real index.
+	if (isBunTestRuntime() && !process.env.PI_CODING_AGENT_DIR) return undefined;
 	const dbPath = getHistoryDbPath();
 	// A quarantined history.db is unlinked and recreated at the same path, so
 	// the path alone still matches a handle pinned to the dead inode. Reopen
@@ -99,7 +110,7 @@ ON CONFLICT(session_id) DO UPDATE SET
 	title = excluded.title,
 	updated_at = excluded.updated_at
 			`),
-			selectTitle: db.prepare("SELECT title FROM session_titles WHERE session_id = ?"),
+			selectTitle: db.prepare("SELECT title FROM session_titles WHERE session_id = ? AND typeof(title) = 'text'"),
 			insertRecap: db.prepare("INSERT INTO session_recaps (session_id, cwd, recap) VALUES (?, ?, ?)"),
 		};
 		failedPath = undefined;
@@ -126,6 +137,45 @@ export function recordSessionTitle(sessionId: string, title: string): void {
 	} catch (error) {
 		logger.debug("Session title index write failed", { sessionId, error: String(error) });
 	}
+}
+
+/**
+ * Record (or replace) many indexed titles in one transaction, so a picker
+ * scan backfilling thousands of sessions pays one commit instead of one per
+ * row. Best-effort like {@link recordSessionTitle}.
+ */
+export function recordSessionTitles(titles: ReadonlyMap<string, string>): void {
+	if (titles.size === 0) return;
+	const index = openSessionIndex();
+	if (!index) return;
+	try {
+		index.db.transaction(() => {
+			for (const [sessionId, title] of titles) index.upsertTitle.run(sessionId, title);
+		})();
+	} catch (error) {
+		logger.debug("Session title index write failed", { count: titles.size, error: String(error) });
+	}
+}
+
+/**
+ * Every indexed title by session id, in one query: the resume picker
+ * pre-populates its rows from it before any session file is read. Empty when
+ * the index is unavailable or unreadable.
+ */
+export function listSessionTitles(): Map<string, string> {
+	const titles = new Map<string, string>();
+	const index = openSessionIndex();
+	if (!index) return titles;
+	try {
+		// A damaged page can decode foreign bytes into these columns; never hand them to callers.
+		using statement = index.db.prepare<{ session_id: string; title: string }, []>(
+			"SELECT session_id, title FROM session_titles WHERE typeof(session_id) = 'text' AND typeof(title) = 'text'",
+		);
+		for (const row of statement.iterate()) titles.set(row.session_id, row.title);
+	} catch (error) {
+		logger.debug("Session title index read failed", { error: String(error) });
+	}
+	return titles;
 }
 
 /** Indexed title for a session id, or undefined when unindexed/unavailable. */
@@ -190,7 +240,8 @@ export function listSessionRecaps(query: SessionRecapQuery = {}): SessionRecap[]
 	if (query.sessionIds?.length === 0) return [];
 	const index = openSessionIndex();
 	if (!index) return [];
-	const where: string[] = [];
+	// A damaged page can decode foreign bytes into these columns; never hand them to callers.
+	const where = ["typeof(recap) = 'text'", "typeof(cwd) = 'text'", "typeof(created_at) = 'integer'"];
 	const params: SQLQueryBindings[] = [];
 	if (query.sessionIds) {
 		where.push(`session_id IN (${query.sessionIds.map(() => "?").join(", ")})`);
@@ -223,8 +274,63 @@ export function listSessionRecaps(query: SessionRecapQuery = {}): SessionRecap[]
 	}
 }
 
-/** @internal Close the cached connection so the next call re-resolves the db path — test-only. */
-export function resetSessionIndexForTests(): void {
+/** Closes the cached connection; the next call reopens it. History recovery closes it so Windows can replace history.db. */
+export function closeSessionIndex(): void {
 	closeHandle();
 	failedPath = undefined;
+}
+
+interface SalvagedTitle {
+	session_id: unknown;
+	title: unknown;
+	updated_at: unknown;
+}
+
+interface SalvagedRecap {
+	session_id: unknown;
+	cwd: unknown;
+	recap: unknown;
+	created_at: unknown;
+}
+
+function readSalvageable<T extends object>(source: Database, table: string, columns: string): T[] {
+	try {
+		return readSalvageableRows<T>(source, table, columns);
+	} catch (error) {
+		logger.warn("Session index salvage could not read table", { table, error: String(error) });
+		return [];
+	}
+}
+
+/**
+ * Copies the readable titles and recaps of a quarantined history.db into the
+ * replacement `target`. Runs once per quarantined store, so recaps append
+ * as-is; a title already rewritten in the replacement keeps the newer value.
+ */
+export function salvageSessionIndex(source: Database, target: Database): { titles: number; recaps: number } {
+	target.run(SESSION_INDEX_DDL);
+	const titles = readSalvageable<SalvagedTitle>(source, "session_titles", "session_id, title, updated_at").filter(
+		row =>
+			typeof row.session_id === "string" && typeof row.title === "string" && Number.isSafeInteger(row.updated_at),
+	);
+	const recaps = readSalvageable<SalvagedRecap>(source, "session_recaps", "session_id, cwd, recap, created_at").filter(
+		row =>
+			typeof row.session_id === "string" &&
+			typeof row.cwd === "string" &&
+			typeof row.recap === "string" &&
+			Number.isSafeInteger(row.created_at),
+	);
+	using upsertTitle = target.prepare(`
+INSERT INTO session_titles (session_id, title, updated_at) VALUES (?, ?, ?)
+ON CONFLICT(session_id) DO UPDATE SET title = excluded.title, updated_at = excluded.updated_at
+WHERE excluded.updated_at > session_titles.updated_at
+	`);
+	for (const row of titles) upsertTitle.run(row.session_id as string, row.title as string, row.updated_at as number);
+	using insertRecap = target.prepare(
+		"INSERT INTO session_recaps (session_id, cwd, recap, created_at) VALUES (?, ?, ?, ?)",
+	);
+	for (const row of recaps) {
+		insertRecap.run(row.session_id as string, row.cwd as string, row.recap as string, row.created_at as number);
+	}
+	return { titles: titles.length, recaps: recaps.length };
 }

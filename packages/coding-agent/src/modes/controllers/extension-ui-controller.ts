@@ -27,6 +27,8 @@ import type {
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
+import { cfgExtensionAssistantTextRenderers } from "../../extensibility/settings";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import {
 	type AskDialogPrompt,
@@ -38,6 +40,7 @@ import { installExtensionComposerShape } from "@oh-my-pi/pi-tui/overlays/compose
 import { EditorTopGap } from "@oh-my-pi/pi-tui/prompt/editor-top-gap";
 import { boundPromptTitle, HookEditorComponent, type HookEditorOptions } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
+import { extensionLinkClicksAvailable } from "@oh-my-pi/pi-tui/render/extension-links";
 import { HookSelectorComponent, type HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
@@ -46,11 +49,9 @@ import { disambiguateDisplayLabels, sanitizeCarriageReturns } from "@oh-my-pi/pi
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { launchTerminal } from "../../subprocess/terminal-launch";
+import { approvalAnswerForChoice, approvalChoiceLabels, approvalOnceLabel } from "../../tools/approval";
 
 const MAX_WIDGET_LINES = 10;
-/** Approval answers, as a collab guest's select shows them. */
-const APPROVE_OPTION = "Approve";
-const DENY_OPTION = "Deny";
 
 /**
  * Footer hint for a guest-rendered ask selector. The guest's selector handles
@@ -139,11 +140,28 @@ export class ExtensionUiController {
 			this.#composerShapeDisposers.push(installExtensionComposerShape(definition));
 		}
 		this.ctx.syncComposerShape();
+		this.ctx.syncExtensionLinks();
 	}
 
 	/** Remove extension-owned composer styles from the process registries. */
 	disposeComposerShapes(): void {
 		for (const dispose of this.#composerShapeDisposers.splice(0)) dispose();
+	}
+
+	/**
+	 * Redraw every transcript component of the reply sent at `timestamp` (one per tool-call segment),
+	 * and the link browser's copy while it is open. A plain terminal cannot repaint rows it already
+	 * moved into scrollback, so a reply with retired rows rebuilds the scrollback, as the
+	 * thinking-visibility toggle does (once the link browser closes, if it covers the screen); one
+	 * still in the live viewport (and any block in Tern's native view) just repaints.
+	 */
+	#rerenderAssistantMessage(timestamp: number): void {
+		if (!cfgExtensionAssistantTextRenderers.get(this.ctx.settings)) return;
+		this.ctx.rerenderInLinkBrowser(timestamp);
+		this.ctx.redrawTranscriptBlocks(
+			this.ctx.chatContainer.children,
+			child => child instanceof AssistantMessageComponent && child.rerenderMessage(timestamp),
+		);
 	}
 
 	/**
@@ -161,6 +179,9 @@ export class ExtensionUiController {
 			approve: (prompt, dialogOptions) => this.showCollabAwareApproval(prompt, dialogOptions),
 			notify: (message, type) => this.showHookNotify(message, type),
 			onTerminalInput: handler => this.addExtensionTerminalInputListener(handler),
+			rerenderMessage: timestamp => this.#rerenderAssistantMessage(timestamp),
+			refreshTranscript: ids => this.ctx.refreshTranscriptPresentation(new Set(ids)),
+			getLinkClicksAvailable: extensionLinkClicksAvailable,
 			setStatus: (key, text) => this.setHookStatus(key, text),
 			setWorkingMessage: message => this.ctx.setWorkingMessage(message),
 			setWidget: (key, content, options) => this.setHookWidget(key, content, options),
@@ -253,10 +274,13 @@ export class ExtensionUiController {
 			resolvePlanReview: (reviewId, choice, input) => this.ctx.resolvePlanReview(reviewId, choice, input),
 			getPendingPlanReview: () => this.ctx.getPendingPlanReview(),
 			openPlanReview: () => this.ctx.openPlanReview({ fromExtension: true }),
+			sessionModes: this.ctx.sessionModes,
+			keybindings: this.ctx.keybindings,
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
 			runEphemeralTurn: args => this.ctx.session.runEphemeralTurn(args),
+			startLive: options => this.ctx.startRemoteLive(options),
 		};
 		const commandActions: ExtensionCommandContextActions = {
 			getContextUsage: () => this.ctx.session.getContextUsage(),
@@ -484,10 +508,13 @@ export class ExtensionUiController {
 			resolvePlanReview: (reviewId, choice, input) => this.ctx.resolvePlanReview(reviewId, choice, input),
 			getPendingPlanReview: () => this.ctx.getPendingPlanReview(),
 			openPlanReview: () => this.ctx.openPlanReview({ fromExtension: true }),
+			sessionModes: this.ctx.sessionModes,
+			keybindings: this.ctx.keybindings,
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
 			runEphemeralTurn: args => this.ctx.session.runEphemeralTurn(args),
+			startLive: options => this.ctx.startRemoteLive(options),
 		};
 		const commandActions: ExtensionCommandContextActions = {
 			getContextUsage: () => this.ctx.session.getContextUsage(),
@@ -664,8 +691,9 @@ export class ExtensionUiController {
 
 	/**
 	 * The tool-approval prompt in the composer's place; a collab guest answers it as a select over
-	 * the full prompt with the same choices: Approve, the prompt's "for this session" choice when it
-	 * offers one, and Deny. Locally it shows the compact prompt (the details summarized to a
+	 * the full prompt with the same choices ({@link approvalChoiceLabels}): the prompt's grants when
+	 * it offers any, Approve, its "for this session" choice when it offers one, and Deny. Locally it
+	 * shows the compact prompt (the details summarized to a
 	 * row, so the composer beneath keeps its room) over that list, and the expand key
 	 * swaps in the full one, wrapped — even when the two match, since a row the summary kept whole
 	 * can still clip. The composer stays mounted beneath it and takes the typing: a user message
@@ -678,10 +706,11 @@ export class ExtensionUiController {
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionApprovalAnswer> {
 		const sessionLabel = prompt.session;
+		const onceLabel = approvalOnceLabel(prompt);
 		const request: CollabUiRequestDraft = {
 			kind: "select",
 			title: prompt.full,
-			options: sessionLabel ? [APPROVE_OPTION, sessionLabel, DENY_OPTION] : [APPROVE_OPTION, DENY_OPTION],
+			options: approvalChoiceLabels(prompt),
 		};
 		const session = this.ctx.session;
 		const agent = session.agent;
@@ -713,7 +742,7 @@ export class ExtensionUiController {
 					const editor = this.ctx.editor;
 					const dialog = new ApprovalDialogComponent(
 						prompt.compact,
-						{ onApprove: () => settle(APPROVE_OPTION), onDeny: () => settle(DENY_OPTION) },
+						{ onApprove: () => settle(onceLabel), onDeny: () => settle("Deny") },
 						{
 							tui: this.ctx.ui,
 							fullPrompt: prompt.full,
@@ -724,6 +753,12 @@ export class ExtensionUiController {
 							...(sessionLabel
 								? { session: { label: sessionLabel, onApprove: () => settle(sessionLabel) } }
 								: {}),
+							...(prompt.grants?.length
+								? {
+										grants: prompt.grants,
+										onGrant: (grant, always) => settle(always ? grant.alwaysLabel : grant.label),
+									}
+								: {}),
 							draft: {
 								hasDraft: () =>
 									editor.getText().length > 0 || editor.pendingImages.length > 0 || editor.pasteInFlight,
@@ -731,6 +766,7 @@ export class ExtensionUiController {
 							},
 						},
 					);
+					this.ctx.closeLinkBrowser();
 					this.ctx.editorContainer.clear();
 					this.ctx.editorContainer.addChild(dialog);
 					this.ctx.editorContainer.addChild(editor);
@@ -750,8 +786,7 @@ export class ExtensionUiController {
 					};
 				}),
 			);
-			if (choice === APPROVE_OPTION) return "once";
-			return sessionLabel !== undefined && choice === sessionLabel ? "session" : "deny";
+			return approvalAnswerForChoice(prompt, choice);
 		} finally {
 			unsubscribe();
 		}
@@ -794,16 +829,19 @@ export class ExtensionUiController {
 			let promptResolve: ((value: AskDialogPromptValue | undefined) => void) | undefined;
 			let closed = false;
 			const draftEditor = this.ctx.editor;
+			// A draft in progress when the ask lands keeps the keyboard, so in-flight
+			// typing never answers by accident; up/down hand input to the ask and the
+			// draft stays parked beneath it until the ask closes.
 			const inputGuard =
 				draftEditor.getText().length > 0
 					? {
 							isBlocked: () => draftEditor.getText().length > 0,
 							handleInput: (keyData: string) => draftEditor.handleDraftEdit(keyData),
-							hint: "Finish or clear the current prompt to answer",
+							hint: "typing edits your prompt",
 							// Show the draft's insertion cursor while it owns input; drop it
-							// once the draft clears and the ask controls take over.
-							syncPresentation: () => {
-								draftEditor.focused = draftEditor.getText().length > 0;
+							// once the ask controls take over.
+							syncPresentation: (blocked: boolean) => {
+								draftEditor.focused = blocked;
 							},
 						}
 					: undefined;
@@ -849,6 +887,7 @@ export class ExtensionUiController {
 					() => finishPrompt(undefined),
 					{ promptStyle: true, externalEditor: editDialogExternally, question: prompt.question, ...options },
 				);
+				this.ctx.closeLinkBrowser();
 				this.ctx.editorContainer.clear();
 				this.ctx.editorContainer.addChild(promptEditor);
 				this.ctx.ui.setFocus(promptEditor);
@@ -894,6 +933,7 @@ export class ExtensionUiController {
 					inputGuard,
 				},
 			);
+			this.ctx.closeLinkBrowser();
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(askDialog);
 			if (inputGuard) this.ctx.editorContainer.addChild(this.ctx.editor);
@@ -934,6 +974,7 @@ export class ExtensionUiController {
 		const remote = host.requestGuestUi(
 			request,
 			signal ? AbortSignal.any([signal, remoteAbort.signal]) : remoteAbort.signal,
+			{ retainOnReconnect: true },
 		);
 		if (!remote) return local(signal);
 		const localWinner = local(signal ? AbortSignal.any([signal, localAbort.signal]) : localAbort.signal).then(
@@ -1095,7 +1136,7 @@ export class ExtensionUiController {
 		request: CollabUiRequestDraft,
 		signal: AbortSignal,
 	): Promise<GuestUiResult> {
-		const remote = host.requestGuestUi(request, signal);
+		const remote = host.requestGuestUi(request, signal, { retainOnReconnect: true });
 		if (!remote) return { kind: "unavailable" };
 		const result = await remote;
 		if (result.kind === "unavailable") return { kind: "unavailable" };
@@ -1149,6 +1190,7 @@ export class ExtensionUiController {
 					slider: extra?.slider,
 				},
 			);
+			this.ctx.closeLinkBrowser();
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(this.ctx.hookSelector);
 			this.ctx.ui.setFocus(this.ctx.hookSelector);
@@ -1197,9 +1239,11 @@ export class ExtensionUiController {
 				{
 					timeout: dialogOptions?.timeout,
 					onTimeout: dialogOptions?.onTimeout,
+					secret: dialogOptions?.secret,
 					tui: this.ctx.ui,
 				},
 			);
+			this.ctx.closeLinkBrowser();
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(this.ctx.hookInput);
 			this.ctx.ui.setFocus(this.ctx.hookInput);
@@ -1238,6 +1282,7 @@ export class ExtensionUiController {
 				() => settle(undefined),
 				{ ...editorOptions, externalEditor: editDialogExternally },
 			);
+			this.ctx.closeLinkBrowser();
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(this.ctx.hookEditor);
 			this.ctx.ui.setFocus(this.ctx.hookEditor);
@@ -1347,6 +1392,7 @@ export class ExtensionUiController {
 					return;
 				}
 				editorReplaced = true;
+				this.ctx.closeLinkBrowser();
 				this.ctx.editorContainer.clear();
 				this.ctx.editorContainer.addChild(component);
 				this.ctx.ui.setFocus(component);
@@ -1429,10 +1475,17 @@ export class ExtensionUiController {
 			options?.deliverAs === "aside";
 		if (startsTurn && this.#rejectGuestExtensionTurn()) return;
 		const wasStreaming = this.ctx.session.isStreaming;
+		const messageCountBefore = this.ctx.session.messages.length;
 		const normalized = normalizeCustomMessagePayload(message);
 		this.ctx.session
 			.sendCustomMessage(normalized, options)
-			.then(() => this.#applyCustomMessageDisplay(wasStreaming, normalized.display))
+			.then(() => {
+				// `deliverAs: "nextTurn"` without a trigger is the one idle arm that appends
+				// to the session silently (no message_start/message_end), so nothing else
+				// paints it and nothing else in the transcript changed.
+				const silentAppend = options?.deliverAs === "nextTurn" && options.triggerTurn !== true;
+				this.#applyCustomMessageDisplay(wasStreaming, normalized, silentAppend ? messageCountBefore : undefined);
+			})
 			.catch((err: unknown) => {
 				this.ctx.showError(`Extension sendMessage failed: ${err instanceof Error ? err.message : String(err)}`);
 			});
@@ -1446,16 +1499,40 @@ export class ExtensionUiController {
 		});
 	};
 
-	#applyCustomMessageDisplay(wasStreaming: boolean, shouldDisplay: boolean | undefined): void {
+	/**
+	 * @param silentAppendBaseline message count before a silent idle `nextTurn` append,
+	 *   or `undefined` when the send was not such an append.
+	 */
+	#applyCustomMessageDisplay(
+		wasStreaming: boolean,
+		message: { customType: string; display?: boolean },
+		silentAppendBaseline: number | undefined,
+	): void {
 		// For non-streaming cases with display=true, update UI
 		// (streaming cases update via message_end event).
 		// Gate on initialChatRendered (#1955): an extension's session_start
 		// sendMessage({display:true}) runs before renderInitialMessages, which would
 		// re-render from session entries AND re-append via preserveExistingChat,
-		// duplicating the message. After the initial render the rebuild must run.
-		if (!wasStreaming && shouldDisplay && this.ctx.initialChatRendered) {
-			this.ctx.rebuildChatFromMessages();
+		// duplicating the message. After the initial render the chat must be updated.
+		if (wasStreaming || !message.display || !this.ctx.initialChatRendered) return;
+		if (silentAppendBaseline !== undefined && !this.ctx.session.isStreaming) {
+			// Append only the new message instead of replaying the whole transcript (#12183).
+			// The count and type checks fail when the send did not land as a plain append
+			// (e.g. it was queued behind a turn that began meanwhile), which falls through
+			// to the rebuild below.
+			const messages = this.ctx.session.messages;
+			const appended = messages.at(-1);
+			if (
+				messages.length === silentAppendBaseline + 1 &&
+				appended?.role === "custom" &&
+				appended.customType === message.customType
+			) {
+				this.ctx.addMessageToChat(appended);
+				this.ctx.ui.requestRender();
+				return;
+			}
 		}
+		this.ctx.rebuildChatFromMessages();
 	}
 
 	/**

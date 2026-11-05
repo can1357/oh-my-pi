@@ -7,24 +7,20 @@ import * as path from "node:path";
 import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import { renderProgressBar } from "../components/progress-bar";
 import { Text } from "../components/text";
-import {
-	Ellipsis,
-	fileHyperlink,
-	getTreeBranch,
-	renderStatusLine,
-	renderTreeList,
-	truncateToWidth,
-	uriHyperlink,
-} from "../render";
+import { fileHyperlink, getTreeBranch, renderStatusLine, renderTreeList, uriHyperlink } from "../render";
 import {
 	createCachedComponent,
+	FILE_NAME_COLOR,
+	fitHeaderedRows,
 	formatCount,
 	formatEmptyMessage,
 	formatErrorMessage,
+	formatStyledPath,
 	PREVIEW_LIMITS,
 	replaceTabs,
 } from "../render/render-utils";
-import type { Theme, ThemeColor } from "../theme/theme";
+import { getLanguageFromPath } from "../lang-from-path";
+import { highlightCode, isHighlightLanguage, type Theme, type ThemeColor } from "../theme/theme";
 import type { Component } from "../tui";
 import type { OutputMeta } from "./output-meta";
 import type {
@@ -37,7 +33,6 @@ import type {
 import type { TspTone } from "@oh-my-pi/pi-wire";
 import { code, col, compact, keyed, node, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
-import { getLanguageFromPath } from "../lang-from-path";
 import { fileHref, fileRow, inlineErrorView } from "./native-view";
 import { splitUrlScheme } from "./url-scheme-host";
 
@@ -175,14 +170,19 @@ function renderHit(hit: FindHit, rangeLimit: number, cwd: string | undefined, ra
 		return absPath === undefined ? text : fileHyperlink(absPath, text, { line });
 	};
 	const coverage = hit.truncated ? `${hit.linesSeen} lines judged, partial` : `${hit.linesSeen} lines judged`;
-	const lines = [
-		`${gauge(hit.contentScore, theme)} ${theme.fg(scoreColor(hit.contentScore), hit.contentScore.toFixed(2))} ${link(theme.fg("accent", hit.rel))} ${theme.fg("dim", coverage)}`,
-	];
+	// URL hits show whole in the file-name color; file hits get the dim directory.
+	const label = isUrlHit ? theme.fg(FILE_NAME_COLOR, hit.rel) : formatStyledPath(hit.rel, theme);
+	const score = theme.fg(scoreColor(hit.contentScore), hit.contentScore.toFixed(2));
+	const lines = [`${gauge(hit.contentScore, theme)} ${score} ${link(label)} ${theme.fg("dim", coverage)}`];
 	const ranges = [...hit.ranges].sort((a, b) => b.p - a.p || a.start - b.start).slice(0, rangeLimit);
+	const lang = getLanguageFromPath(hit.rel);
 	ranges.forEach((range, index) => {
 		const span = range.start === range.end ? String(range.start) : `${range.start}-${range.end}`;
 		const ref = link(theme.fg("muted", `:${span}`), range.start);
-		const snippet = theme.fg("toolOutput", replaceTabs(range.snippet.trim()));
+		const source = replaceTabs(range.snippet.trim());
+		const snippet = isHighlightLanguage(lang)
+			? highlightCode(source, lang, theme).join("\n")
+			: theme.fg("toolOutput", source);
 		const branch = theme.fg("dim", getTreeBranch(index === ranges.length - 1, theme));
 		lines.push(`  ${branch} ${ref} ${theme.fg("dim", range.p.toFixed(2))} ${snippet}`);
 	});
@@ -214,10 +214,14 @@ function describeHit(hit: FindHit, rangeLimit: number, cwd: string | undefined, 
 		href: isUrlHit || cwd === undefined ? undefined : fileHref(path.join(cwd, rawRel)),
 		key: "hit",
 	});
-	const lang = getLanguageFromPath(hit.rel);
 	const snippets = ranges.map(range =>
 		keyed(
-			code(range.snippet.trimEnd(), { lang, start: range.start, numbers: true, title: range.p.toFixed(2) }),
+			code(range.snippet.trimEnd(), {
+				path: hit.rel,
+				start: range.start,
+				numbers: true,
+				title: range.p.toFixed(2),
+			}),
 			`${range.start}-${range.end}`,
 		),
 	);
@@ -253,7 +257,7 @@ export const findToolRenderer = {
 			},
 			uiTheme,
 		);
-		return new Text(text, 1, 0);
+		return new Text(text, 0, 0);
 	},
 
 	renderResult(
@@ -266,7 +270,7 @@ export const findToolRenderer = {
 		const text = result.content?.find(c => c.type === "text")?.text ?? "";
 
 		if (result.isError) {
-			return new Text(formatErrorMessage(text || "Unknown error", uiTheme), 1, 0);
+			return new Text(formatErrorMessage(text || "Unknown error", uiTheme), 0, 0);
 		}
 
 		// Streaming progress: the tool reports the phase it is in.
@@ -282,7 +286,7 @@ export const findToolRenderer = {
 				},
 				uiTheme,
 			);
-			return new Text(header, 1, 0);
+			return new Text(header, 0, 0);
 		}
 
 		const { hits, stats, threshold } = details;
@@ -314,7 +318,7 @@ export const findToolRenderer = {
 					: "No relevant passages found";
 			const lines = [header, formatEmptyMessage(empty, uiTheme)];
 			for (const failure of stats.failures) lines.push(uiTheme.fg("warning", failure));
-			return new Text(lines.join("\n"), 1, 0);
+			return new Text(lines.join("\n"), 0, 0);
 		}
 
 		const header = renderStatusLine(
@@ -354,9 +358,8 @@ export const findToolRenderer = {
 					extra.push(uiTheme.fg("dim", `keywords: ${details.keywords.join(", ")}`));
 					for (const failure of stats.failures) extra.push(uiTheme.fg("warning", failure));
 				}
-				return [header, ...hitLines, ...extra].map(line => truncateToWidth(line, width, Ellipsis.Omit));
+				return fitHeaderedRows(header, [...hitLines, ...extra], width);
 			},
-			{ paddingX: 1 },
 		);
 	},
 	describeCall(args: FindRenderArgs): NativeToolView {

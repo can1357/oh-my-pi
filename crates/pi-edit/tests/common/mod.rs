@@ -119,6 +119,7 @@ impl Workspace {
 			allow_fuzzy: true,
 			fuzzy_threshold: 0.95,
 			enforce_seen_lines: false,
+			max_columns: 512,
 			raw_input: false,
 		};
 		Self { dir, store: EditStore::new(), config }
@@ -355,9 +356,5 @@ async fn run_case(case: &Value, default_mode: EditMode) -> Result<(), String> {
 			problems.push(format!("expected {writes} writes, got {actual}"));
 		}
 	}
-	if problems.is_empty() {
-		Ok(())
-	} else {
-		Err(problems.join("\n"))
-	}
+	problems.is_empty().ok_or_else(|| problems.join("\n"))
 }

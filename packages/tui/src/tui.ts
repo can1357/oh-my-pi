@@ -21,13 +21,14 @@ import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import type { TspFrame, TspNode, TspText } from "@oh-my-pi/pi-wire";
 import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
 import { TuiDebugServer } from "./debug-server";
-import { isKeyRelease, matchesKey } from "./keys";
+import { extractPrintableText, isKeyRelease, matchesKey } from "./keys";
 import { KITTY_PLACEHOLDER } from "./kitty-graphics";
 import { LoopWatchdog } from "./loop-watchdog";
 import { assumedTspHello, NativeBackend, type NativeHost } from "./native/backend";
 import { col } from "./native/describe";
 import { TSP_PREFIX, type TspHello } from "./native/encode";
 import type { DescribeContext, NativeNode, NativeScreen, NativeSurfaceProvider, NativeUiEvent } from "./native/node";
+import { cropSixelTop } from "./sixel";
 import { STDOUT_BACKLOG_CLEAR_BYTES, setAltScreenActive, type Terminal } from "./terminal";
 import { classifyTerminalMultiplexerModule, terminalMultiplexerSessions } from "./terminal-multiplexer";
 import {
@@ -36,6 +37,7 @@ import {
 	encodeKittyDeleteImage,
 	encodeKittyDeletePlacement,
 	encodeKittyPlacementLine,
+	getCellDimensions,
 	getTerminalBackgroundColor,
 	ImageProtocol,
 	isImageProtocolForced,
@@ -46,10 +48,13 @@ import {
 	shouldEnableSynchronizedOutputByDefault,
 	synchronizedOutputUserOverride,
 	TERMINAL,
+	withDirectPlacementLift,
 } from "./terminal-capabilities";
 import { onTerminalBackgroundFallbackChange } from "./theme/theme";
 import { compositeLineAt } from "./render/composite";
+import { stripExtensionLinkMarkers } from "./render/extension-links";
 import { tmuxMultiplexer } from "./multiplexers/tmux";
+import { minFrameIntervalMs } from "./frame-rate";
 import {
 	Ellipsis,
 	getWidthConfigEpoch,
@@ -107,6 +112,11 @@ const PAINT_END_NO_SYNC = ENABLE_AUTOWRAP;
 // native text selection.
 const MOUSE_TRACKING_ON = "\x1b[?1000h\x1b[?1003h\x1b[?1006h";
 const MOUSE_TRACKING_OFF = "\x1b[?1006l\x1b[?1003l\x1b[?1000l";
+// Cell-size replies: CSI 6 ; height ; width t in pixels, and iTerm2's
+// OSC 1337 ; ReportCellSize = height ; width [; scale] ST in points.
+const CELL_SIZE_REPLY = /^\x1b\[6;(\d+);(\d+)t$/;
+const ITERM2_CELL_SIZE_REPLY =
+	/^\x1b\]1337;ReportCellSize=(\d+(?:\.\d+)?);(\d+(?:\.\d+)?)(?:;(\d+(?:\.\d+)?))?(?:\x07|\x1b\\)$/;
 
 type MouseTrackingState = "off" | "inline" | "full";
 
@@ -203,7 +213,9 @@ export interface TUIStartOptions {
 	 * switches to raw input and replays the kernel-buffered keystrokes.
 	 *
 	 * A terminal expected to speak TSP needs raw input from the start, so it
-	 * gets it; its keystrokes are held instead (TSP events and the cell-size
+	 * gets it. Plain typing (printable text, Backspace) still edits the focused
+	 * component live, as the kernel echo shows it elsewhere; the first other key
+	 * and every key after it are held instead (TSP events and the cell-size
 	 * reply still apply) until {@link TUI.releaseHeldInput} replays them.
 	 */
 	deferInput?: boolean;
@@ -296,6 +308,13 @@ export interface Component {
 
 	/** User actions on nodes this component described (toggle, select, activate, custom). */
 	handleNativeEvent?(event: NativeUiEvent): void;
+
+	/**
+	 * Native transcript blocks drawn right after this one as siblings (a `TranscriptContainer` child only): notes
+	 * about the block that must show while it is collapsed, such as a tool card's Spotlight notice. The terminal
+	 * rows never show them. Return the same array while unchanged.
+	 */
+	nativeTrailers?(): readonly Component[];
 
 	/**
 	 * Pure preflight for focused input that must precede TUI-wide input listeners
@@ -638,6 +657,18 @@ export class Container implements Component {
 	}
 }
 
+/**
+ * `component`'s own native description, or `null` when it draws as rendered rows: it has no
+ * `describe`, answers `null`, or is a Container subclass that paints its own rows but inherits the
+ * plain column description, which would lose that rendering.
+ */
+export function ownDescription(component: Component, cx: DescribeContext): NativeNode | null {
+	const describe = component.describe;
+	if (describe === undefined) return null;
+	if (describe === Container.prototype.describe && component.render !== Container.prototype.render) return null;
+	return describe.call(component, cx);
+}
+
 interface HardwareCursorState {
 	row: number;
 	col: number;
@@ -918,6 +949,7 @@ export class TUI extends Container {
 	/** True from the end of start() until stop(): the terminal modes start listeners enable are live. */
 	#started = false;
 	#paintListeners = new Set<PaintListener>();
+	#frameWriteListeners = new Set<(data: string) => void>();
 
 	/** Global callback for debug key (Shift+Ctrl+D). Called before input is forwarded to focused component. */
 	onDebug?: () => void;
@@ -930,12 +962,22 @@ export class TUI extends Container {
 	 * `#scheduleRender` to inflate the next render delay proportionally so a
 	 * spike of slow frames (large transcript diffs, huge assistant text wrap,
 	 * component-tree walks) does not busy-loop the CPU: the throttle would
-	 * otherwise collapse to zero once `elapsed >= MIN_RENDER_INTERVAL_MS` and
+	 * otherwise collapse to zero once `elapsed` passes the frame interval and
 	 * fire the next frame immediately (see #4145).
 	 */
 	#lastFrameCostMs = 0;
-	static readonly #MIN_RENDER_INTERVAL_MS = 1000 / 30;
-	static readonly #INPUT_RENDER_GRACE_MS = TUI.#MIN_RENDER_INTERVAL_MS;
+	/**
+	 * Cadence of frames a keystroke is waiting on. Pinned at the historical 30 fps regardless of
+	 * the `tui.maxFps` ceiling (see {@link minFrameIntervalMs}): the ceiling exists to quiet panes
+	 * nobody is typing in, and the one being typed in must echo within a frame.
+	 */
+	static readonly #INPUT_FRAME_INTERVAL_MS = 1000 / 30;
+	static readonly #INPUT_RENDER_GRACE_MS = TUI.#INPUT_FRAME_INTERVAL_MS;
+	/**
+	 * Set when the pending render was requested by terminal input, so `#scheduleRender` paces it
+	 * at `#INPUT_FRAME_INTERVAL_MS` instead of the ceiling; cleared when that frame paints.
+	 */
+	#inputRenderPending = false;
 	/**
 	 * Cap on the adaptive floor derived from `#lastFrameCostMs`. Bounds the UI
 	 * responsiveness at ~5 fps under sustained heavy renders — anything slower
@@ -999,6 +1041,8 @@ export class TUI extends Container {
 	#screenImagePlacements = new Map<number, LiveImagePlacement>();
 	#altImagePlacements = new Map<number, LiveImagePlacement>();
 	#nextImagePlacementId = 1;
+	/** Last top-clipped SIXEL crop; only the block straddling row 0 is ever cropped. */
+	#sixelCrop: { source: string; pixels: number; maxHeightPixels: number; output: string } | undefined;
 	#ghosttyInitialImageDelayDone = false;
 	#ghosttyInitialImageDelayTimer: RenderTimer | undefined;
 	#ghosttyImageReadyAtMs = 0;
@@ -1015,7 +1059,8 @@ export class TUI extends Container {
 	#inputDeferred = false;
 	/**
 	 * Keystrokes held since a TSP `deferInput` start, replayed by
-	 * releaseHeldInput(); undefined when not holding.
+	 * releaseHeldInput(); undefined when not holding, empty while plain typing
+	 * still goes through live.
 	 */
 	#heldInput: string[] | undefined;
 	/**
@@ -1129,6 +1174,14 @@ export class TUI extends Container {
 		this.#paintListeners.add(listener);
 		return () => {
 			this.#paintListeners.delete(listener);
+		};
+	}
+
+	/** Observe actual ANSI frame writes, including transient resize paints; returns the unsubscribe. */
+	addFrameWriteListener(listener: (data: string) => void): () => void {
+		this.#frameWriteListeners.add(listener);
+		return () => {
+			this.#frameWriteListeners.delete(listener);
 		};
 	}
 
@@ -1303,6 +1356,11 @@ export class TUI extends Container {
 				const index = this.overlayStack.indexOf(entry);
 				if (index !== -1) {
 					this.overlayStack.splice(index, 1);
+					// Overlays opened over this one return focus to where it would have.
+					for (const other of this.overlayStack) {
+						if (other.preFocus && isOverlayFocusTarget(component, other.preFocus))
+							other.preFocus = entry.preFocus;
+					}
 					// Restore focus if this overlay or one of its owned targets had focus
 					if (isOverlayFocusTarget(component, this.#focusedComponent)) {
 						this.setFocus(this.#getKeyHolderOverlay()?.component ?? entry.preFocus);
@@ -2431,8 +2489,13 @@ export class TUI extends Container {
 		}
 	}
 
-	addInputListener(listener: InputListener): () => void {
-		this.#inputListeners.add(listener);
+	/** Registers a key listener; `prepend` gives a foreground input owner first refusal over global shortcuts. */
+	addInputListener(listener: InputListener, options?: { prepend?: boolean }): () => void {
+		if (options?.prepend) {
+			this.#inputListeners = new Set([listener, ...this.#inputListeners]);
+		} else {
+			this.#inputListeners.add(listener);
+		}
 		return () => {
 			this.#inputListeners.delete(listener);
 		};
@@ -2562,6 +2625,9 @@ export class TUI extends Container {
 		// Query terminal for cell size in pixels: CSI 16 t
 		// Response format: CSI 6 ; height ; width t
 		this.terminal.write("\x1b[16t");
+		// iTerm2 never answers CSI 16 t. Without a size, rows reserved for an image
+		// and crops of a partly scrolled one assume 9x18 cells and land offset.
+		if (TERMINAL.imageProtocol === ImageProtocol.Iterm2) this.terminal.write("\x1b]1337;ReportCellSize\x1b\\");
 	}
 
 	/**
@@ -2750,6 +2816,16 @@ export class TUI extends Container {
 			});
 			return;
 		}
+		// A render while a keystroke's latch is set rides the fixed input cadence: an animation frame
+		// parked further out under the `tui.maxFps` ceiling is replaced by one the keystroke can ride.
+		// Input listeners (scroll wheel, toggles) and focused components alike request through here.
+		if (this.#inputRenderPending && this.#renderTimer && !this.#nativeLive) {
+			this.#renderTimer.cancel();
+			this.#renderTimer = undefined;
+			this.#renderRequested = true;
+			this.#scheduleRender();
+			return;
+		}
 		this.#requestOrdinaryRender();
 	}
 
@@ -2854,7 +2930,12 @@ export class TUI extends Container {
 		}
 		const now = this.#renderScheduler.now();
 		const elapsed = now - this.#lastRenderAt;
-		const cadenceDelay = Math.max(0, TUI.#MIN_RENDER_INTERVAL_MS - elapsed);
+		// Animation and content frames land no closer than the `tui.maxFps` ceiling allows; a frame
+		// a keystroke is waiting on keeps the fixed input cadence.
+		const frameIntervalMs = this.#inputRenderPending
+			? Math.min(TUI.#INPUT_FRAME_INTERVAL_MS, minFrameIntervalMs())
+			: minFrameIntervalMs();
+		const cadenceDelay = Math.max(0, frameIntervalMs - elapsed);
 		// Adaptive backpressure — target ~50% render duty cycle: the next frame
 		// starts no sooner than `last_frame_end + last_frame_cost`, i.e.
 		// `last_frame_start + 2 × last_frame_cost`. So `elapsed` (which counts
@@ -2877,6 +2958,7 @@ export class TUI extends Container {
 	 */
 	#executeRender(): void {
 		if (this.#deferRenderForOutputBacklog()) return;
+		this.#inputRenderPending = false;
 		const start = this.#renderScheduler.now();
 		this.#lastRenderAt = start;
 		this.#doRender();
@@ -2947,8 +3029,17 @@ export class TUI extends Container {
 			data = data.slice(0, searchFrom + match.index) + data.slice(searchFrom + match.index + match[0].length);
 		}
 		if (data.length === 0) return;
+		// Every keystroke arms the input latch before any consumer runs, so whichever consumer
+		// requests the paint — an input listener or the focused component — it is paced at the input
+		// cadence, not the ceiling. Input that triggers no render leaves the latch for the next frame
+		// to consume at the 30 fps floor once; harmless.
+		this.#inputRenderPending = true;
 
-		if (this.#heldInput !== undefined && this.#focusedComponent === this.#heldFocus) {
+		if (
+			this.#heldInput !== undefined &&
+			this.#focusedComponent === this.#heldFocus &&
+			!this.#typesThroughHold(data)
+		) {
 			this.#holdInput(data);
 			return;
 		}
@@ -2967,7 +3058,6 @@ export class TUI extends Container {
 				this.setFocus(focusedOverlay.preFocus);
 			}
 		}
-
 		// Ctrl+C/Esc use app-level double-press windows. Give those gestures one
 		// frame to drain queued input before an ordinary repaint; delaying every
 		// key would make idle navigation pay a full frame of latency.
@@ -3039,6 +3129,18 @@ export class TUI extends Container {
 	}
 
 	/**
+	 * Whether a keystroke typed during a TSP startup hold edits the focused
+	 * component now: plain typing (printable text, Backspace) and key releases,
+	 * while nothing is queued ahead of them. The draft then grows as it is typed,
+	 * like a cooked tty's echo; a shortcut waits for the handlers that act on it,
+	 * and whatever follows it waits behind it to keep typing order.
+	 */
+	#typesThroughHold(data: string): boolean {
+		if (this.#heldInput!.length > 0) return false;
+		return extractPrintableText(data) !== undefined || matchesKey(data, "backspace") || isKeyRelease(data);
+	}
+
+	/**
 	 * Queue a keystroke typed before the app installed its key handlers; input
 	 * listeners see it once, on replay. The cell-size reply is a terminal report,
 	 * consumed now. Ctrl+C/Ctrl+D release the queue so a stalled startup stays
@@ -3051,14 +3153,19 @@ export class TUI extends Container {
 	}
 
 	#consumeCellSizeResponse(data: string): boolean {
-		// Response format: ESC [ 6 ; height ; width t
-		const match = data.match(/^\x1b\[6;(\d+);(\d+)t$/);
-		if (!match) {
-			return false;
+		let heightPx: number;
+		let widthPx: number;
+		const pixels = CELL_SIZE_REPLY.exec(data);
+		if (pixels) {
+			heightPx = parseInt(pixels[1], 10);
+			widthPx = parseInt(pixels[2], 10);
+		} else {
+			const points = ITERM2_CELL_SIZE_REPLY.exec(data);
+			if (!points) return false;
+			const scale = points[3] ? Number(points[3]) : 1;
+			heightPx = Math.round(Number(points[1]) * scale);
+			widthPx = Math.round(Number(points[2]) * scale);
 		}
-
-		const heightPx = parseInt(match[1], 10);
-		const widthPx = parseInt(match[2], 10);
 		if (heightPx <= 0 || widthPx <= 0) {
 			return true;
 		}
@@ -3274,21 +3381,42 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * Clip a Kitty direct placement and record its live owner; history
-	 * placements have no mutable owner. Other direct placements (SIXEL,
-	 * iTerm2) have no delete command and composite over whatever pixels they
-	 * land on, so the rows they paint above `screenRow` are erased first.
+	 * Clip direct placements to the visible source slice: Kitty tracks a live
+	 * placement owner, while SIXEL crops the encoded raster. An iTerm2 image
+	 * or a Kitty transmit-and-display image cannot be cropped, so a block
+	 * clipped at the top is omitted rather than painted over following text.
+	 * SIXEL and iTerm2 have no delete command and composite over existing
+	 * pixels, so erase the visible rows they paint above the line before repainting.
+	 *
+	 * `frameRow` is the line's row within the frame it was rendered in, so at
+	 * most that many rows above it belong to its image block. A viewport whose
+	 * top clips a block sits below history rows on screen; bounding the lift by
+	 * the physical row instead would erase and paint over those history rows
+	 * just before they scroll into native scrollback.
 	 */
 	#imageLineSequence(
 		line: string,
-		screenRow: number,
+		frameRow: number,
 		placements: Map<number, LiveImagePlacement> | undefined,
 		placementRow: number,
 	): string {
-		if (screenRow < 0) return line;
+		if (frameRow < 0) return line;
 		const parsed = parseKittyDirectPlacementLine(line);
 		if (!parsed) {
-			const lift = Math.min(directPlacementLift(line), screenRow);
+			const requestedLift = directPlacementLift(line);
+			const lift = Math.min(requestedLift, frameRow);
+			if (requestedLift > lift) {
+				const cellHeight = getCellDimensions().heightPx;
+				const cropPixels = Math.round((requestedLift - lift) * cellHeight);
+				const maxHeightPixels = Math.floor((frameRow + 1) * cellHeight);
+				const clipped = line.replace(/\x1bP[0-9;]*q[\s\S]*?\x1b\\/g, sequence =>
+					this.#cropSixel(sequence, cropPixels, maxHeightPixels),
+				);
+				// Re-anchoring an uncropped OSC/APC image would paint its hidden
+				// rows below the reserved slice, over the following text.
+				if (clipped === line) return "";
+				line = withDirectPlacementLift(clipped, lift);
+			}
 			return lift > 0 ? `\x1b[${lift}A${`${ERASE_LINE}\x1b[B`.repeat(lift)}${line}` : line;
 		}
 		const previous = placements?.get(placementRow);
@@ -3302,10 +3430,36 @@ export class TUI extends Container {
 				placementId,
 				columns: parsed.columns,
 				rows: parsed.rows,
-				screenRow,
+				screenRow: frameRow,
 				imageHeightPx: this.#imageBudget.getPlacementGeometry(parsed.imageId)?.heightPx ?? 0,
 			})
 		);
+	}
+
+	/**
+	 * Crop a SIXEL raster whose top rows lie above the viewport. A raster the
+	 * cropper cannot parse is dropped: painting it whole would overwrite the
+	 * rows below the visible slice.
+	 */
+	#cropSixel(source: string, pixels: number, maxHeightPixels: number): string {
+		const cached = this.#sixelCrop;
+		if (
+			cached !== undefined &&
+			cached.pixels === pixels &&
+			cached.maxHeightPixels === maxHeightPixels &&
+			cached.source === source
+		) {
+			return cached.output;
+		}
+		let output: string;
+		try {
+			output = cropSixelTop(source, pixels, maxHeightPixels);
+		} catch (err) {
+			logger.warn("Dropping top-clipped SIXEL image that cannot be cropped", { err });
+			output = "";
+		}
+		this.#sixelCrop = { source, pixels, maxHeightPixels, output };
+		return output;
 	}
 
 	#terminalLine(line: PreparedLine): string {
@@ -3345,6 +3499,16 @@ export class TUI extends Container {
 				listener(paint);
 			} catch (err) {
 				logger.error("TUI paint listener failed", { err });
+			}
+		}
+	}
+
+	#notifyFrameWrite(data: string): void {
+		for (const listener of this.#frameWriteListeners) {
+			try {
+				listener(data);
+			} catch (err) {
+				logger.error("TUI frame write listener failed", { err });
 			}
 		}
 	}
@@ -3629,9 +3793,9 @@ export class TUI extends Container {
 				buffer += `\x1b[${newTop + index + 1};1H${this.#lineRewriteSequence(
 					current,
 					width,
-					newTop + index,
+					index,
 					this.#osc66SpacerGlyphWidth(prepared.lines, index),
-					{ imagePlacements: this.#screenImagePlacements },
+					{ imagePlacements: this.#screenImagePlacements, imageRow: newTop + index },
 				)}`;
 			}
 			if (this.#providerWindow.length > rows && newTop + rows < height) {
@@ -3664,15 +3828,18 @@ export class TUI extends Container {
 			}
 			for (let index = 0; index < rows; index++) {
 				if (screenRow > startTop) buffer += "\n";
+				// Replay-split rows continue the history ledger written above them;
+				// the provider's own rows reach no higher than its viewport top.
+				const moved = index < replayViewportRows;
 				append(
 					this.#lineRewriteSequence(
 						prepared.rows[index]!,
 						width,
-						Math.min(screenRow, height - 1),
+						moved ? Math.min(screenRow, height - 1) : index,
 						this.#osc66SpacerGlyphWidth(prepared.lines, index),
 						{
 							blankRow: compactReplay,
-							imagePlacements: index < replayViewportRows ? undefined : this.#screenImagePlacements,
+							imagePlacements: moved ? undefined : this.#screenImagePlacements,
 							imageRow: newTop + index,
 						},
 					),
@@ -3709,6 +3876,7 @@ export class TUI extends Container {
 			this.terminal.write(this.#rebuildNoticeSequence(width, height));
 		}
 		this.terminal.write(buffer);
+		this.#notifyFrameWrite(buffer);
 		this.#debugPaint = {
 			lines: prepared.lines,
 			windowTop: this.#debugNextWindowTop,
@@ -4010,45 +4178,48 @@ export class TUI extends Container {
 			LINE_FIT_MAX_SOURCE_CODE_UNITS,
 			Math.max(LINE_FIT_MIN_SOURCE_CODE_UNITS, safeWidth * LINE_FIT_SOURCE_WIDTH_MULTIPLIER),
 		);
+		// Extension link markers exist only for hit-testing; the terminal must never get an openable
+		// hyperlink. Strip before fitting (so a cut cannot split one) and before classifying.
+		const output = stripExtensionLinkMarkers(raw);
 
 		let source: string;
 		let classification: LineClassification;
-		if (raw.length <= maxSourceLength) {
+		if (output.length <= maxSourceLength) {
 			// The overwhelmingly common path classifies image markers, OSC 8,
 			// ANSI validity, OSC 66, non-ASCII, and exact ASCII width together.
-			classification = this.#classifyLine(raw, safeWidth);
+			classification = this.#classifyLine(output, safeWidth);
 			if (classification.isImage) {
 				return {
 					raw,
 					width,
 					widthEpoch,
 					imageProtocol,
-					line: raw,
-					terminalContent: raw,
+					line: output,
+					terminalContent: output,
 					asciiWidth: undefined,
 					isImage: true,
 					hasOsc8: false,
 				};
 			}
-			source = raw;
+			source = output;
 		} else {
 			// Fitting a giant source can discard everything after the visible
 			// prefix. Preserve image rows verbatim first, but do not scan the
 			// entire source for width/OSC metadata that will immediately vanish.
-			if (TERMINAL.isImageLine(raw)) {
+			if (TERMINAL.isImageLine(output)) {
 				return {
 					raw,
 					width,
 					widthEpoch,
 					imageProtocol,
-					line: raw,
-					terminalContent: raw,
+					line: output,
+					terminalContent: output,
 					asciiWidth: undefined,
 					isImage: true,
 					hasOsc8: false,
 				};
 			}
-			source = this.#lineFitSource(raw, safeWidth, maxSourceLength);
+			source = this.#lineFitSource(output, safeWidth, maxSourceLength);
 			// Preserve the former lineRewriteSequence classification: fitting can
 			// move a marker from outside the raw scan window into the prepared
 			// line's window, at which point terminal image dispatch owns it.
@@ -4291,10 +4462,15 @@ export class TUI extends Container {
 		);
 	}
 
+	/**
+	 * Terminal bytes that rewrite one row. `frameRow` is the row's index within
+	 * the frame it belongs to (see {@link #imageLineSequence}); `imageRow`, the
+	 * physical row keying live Kitty placements, defaults to it.
+	 */
 	#lineRewriteSequence(
 		line: PreparedLine,
 		width: number,
-		screenRow = -1,
+		frameRow = -1,
 		spacerGlyphWidth = -1,
 		options?: { blankRow?: boolean; imagePlacements?: Map<number, LiveImagePlacement>; imageRow?: number },
 	): string {
@@ -4315,7 +4491,7 @@ export class TUI extends Container {
 		} else if (line.isImage) {
 			rewrite =
 				ERASE_LINE +
-				this.#imageLineSequence(line.line, screenRow, options?.imagePlacements, options?.imageRow ?? screenRow);
+				this.#imageLineSequence(line.line, frameRow, options?.imagePlacements, options?.imageRow ?? frameRow);
 		} else {
 			const terminalLine = this.#terminalLine(line);
 			if (options?.blankRow) {
@@ -4507,9 +4683,9 @@ export class TUI extends Container {
 		} else if (hideCursor) {
 			cursorBuffer = "\x1b[?25l";
 		}
-		this.terminal.write(
-			`${this.#paintBeginSequence}${prelude}${full ? "\x1b[H" : ""}${rowsBuffer}${cursorBuffer}${this.#paintEndSequence}`,
-		);
+		const frame = `${this.#paintBeginSequence}${prelude}${full ? "\x1b[H" : ""}${rowsBuffer}${cursorBuffer}${this.#paintEndSequence}`;
+		this.terminal.write(frame);
+		this.#notifyFrameWrite(frame);
 		this.#debugPaint = {
 			lines: prepared.lines,
 			windowTop: 0,

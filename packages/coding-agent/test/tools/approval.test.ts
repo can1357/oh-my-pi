@@ -515,6 +515,12 @@ describe("tool-owned dynamic approval declarations", () => {
 			"rm -rf -v /",
 			"rm -rf -i /",
 			"rm -v -rf /",
+			"dd if=/dev/zero of=/dev/sda bs=1M",
+			"dd if=image.iso of=/dev/disk2 bs=4m",
+			"dd if=/dev/urandom of=/dev/nvme0n1",
+			"dd if=image.img of=/dev/ttyS0",
+			"dd if=image.img of=/dev/nullb0",
+			"dd if=big.mov of=/dev/null; dd if=image.iso of=/dev/sdb",
 		]) {
 			expect(bashApproval(command)).toEqual({ tier: "exec", override: true, reason: "Critical pattern detected" });
 		}
@@ -531,6 +537,11 @@ describe("tool-owned dynamic approval declarations", () => {
 			"rm -rf -- ./build",
 			"rm --recursive --force ./dist",
 			"rm -v /tmp/scratch",
+			"dd if=big.mov of=/dev/null bs=4m count=100",
+			"dd if=/dev/sda of=/dev/null bs=1M count=10",
+			"dd if=big.mov of=/dev/stdout",
+			"dd if=big.mov of=/dev/fd/1 status=none",
+			"dd if=big.mov of=/dev/null 2>&1",
 		]) {
 			expect(bashApproval(command)).toBe("exec");
 		}

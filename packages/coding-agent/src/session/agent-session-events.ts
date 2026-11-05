@@ -44,6 +44,24 @@ export type AgentSessionEvent =
 			/** True when compaction was skipped for a benign reason. */
 			skipped?: boolean;
 	  }
+	// One pair per manual compaction (RPC `compact`, `/compact`, extension
+	// `ctx.compact()`), emitted once the live turn is aborted; fallback passes to
+	// the next configured method stay inside the same pair.
+	| {
+			type: "manual_compaction_start";
+			/** The `/compact <mode>` subcommand, when one was given. */
+			mode?: string;
+	  }
+	| {
+			type: "manual_compaction_end";
+			/** Present when the compaction committed. */
+			result?: CompactionResult;
+			/** True when the compaction was cancelled (abort, or a `session_before_compact` hook). */
+			aborted: boolean;
+			/** True when there was nothing to compact; `errorMessage` says why. */
+			skipped?: boolean;
+			errorMessage?: string;
+	  }
 	| {
 			type: "auto_retry_start";
 			attempt: number;

@@ -46,6 +46,8 @@ export interface JudgmentWire {
 	imagesRequireOptIn?: boolean;
 	/** Whether this wire drops per-image detail metadata. */
 	ignoresImageDetail?: boolean;
+	/** Whether this dialect forwards `box` questions; others reject them before sending. */
+	boxes?: boolean;
 	/** The response's answers and usage; `undefined` when the payload is not this API's response shape. */
 	decode(payload: unknown): DecodedJudgment | undefined;
 }

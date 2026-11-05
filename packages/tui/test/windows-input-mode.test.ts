@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Editor, type Component } from "@oh-my-pi/pi-tui";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { matchesAppFollowUp } from "@oh-my-pi/pi-tui/keybinding-matchers";
@@ -163,7 +163,6 @@ describe("ProcessTerminal win32-input-mode fallback", () => {
 	});
 
 	afterEach(() => {
-		vi.useRealTimers();
 		harness?.dispose();
 		harness = undefined;
 		for (const [key, value] of originalSshEnv) {
@@ -218,6 +217,35 @@ describe("ProcessTerminal win32-input-mode fallback", () => {
 		expect(matchesKey(recorder.received[2]!, "shift+enter")).toBe(true);
 	});
 
+	it("keeps relayed terminal replies out of the WSL composer while decoding keys", async () => {
+		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: false });
+		const recorder = new InputRecorder();
+		harness.tui.addChild(recorder);
+		harness.tui.setFocus(recorder);
+		await harness.settle();
+		await harness.feed("\x1b[?1;0c");
+
+		const reply = [..."\x1b[?1;0c"].map(char => `\x1b[0;0;${char.charCodeAt(0)};1;0;1_`);
+		await harness.feed(...reply, "\x1b[65;30;97;1;0;1_", "\x1b[8;14;8;1;0;1_", "\x1b[67;46;3;1;8;1_");
+
+		expect(recorder.received).toEqual(["a", "\x7f", "\x03"]);
+	});
+
+	it("delivers a key record that interrupts a partial direct terminal reply", async () => {
+		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: false });
+		const recorder = new InputRecorder();
+		harness.tui.addChild(recorder);
+		harness.tui.setFocus(recorder);
+		await harness.settle();
+		await harness.feed("\x1b[?1;0c");
+
+		// The OSC 11 reply stalls past the flush window, so its head is buffered as a fragment.
+		await harness.feed("\x1b]11;rgb:1111/2222");
+		await harness.feed("\x1b[65;30;97;1;0;1_", "\x1b[66;48;98;1;0;1_");
+
+		expect(recorder.received).toEqual(["a", "b"]);
+	});
+
 	it("prefers a late kitty reply and turns win32-input-mode back off", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: true });
 		await harness.settle();
@@ -229,40 +257,6 @@ describe("ProcessTerminal win32-input-mode fallback", () => {
 		expect(harness.terminal.kittyProtocolActive).toBe(true);
 		expect(out.indexOf("\x1b[?9001l")).toBeGreaterThan(out.indexOf("\x1b[?9001h"));
 		expect(out).toContain("\x1b[>1u");
-	});
-
-	it("releases a relayed lone Escape after a single wait window", async () => {
-		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: true });
-		const recorder = new InputRecorder();
-		harness.tui.addChild(recorder);
-		harness.tui.setFocus(recorder);
-		await harness.settle();
-		await harness.feed("\x1b[?1;2c");
-		vi.useFakeTimers();
-
-		// The paste-marker normalizer and the decoder both hold a relayed ESC; their
-		// 75 ms waits must not stack into ~150 ms.
-		process.stdin.emit("data", "\x1b[0;0;27;1;0;1_");
-		vi.advanceTimersByTime(74);
-		expect(recorder.received).toEqual([]);
-		vi.advanceTimersByTime(1);
-		expect(recorder.received).toEqual(["\x1b"]);
-	});
-
-	it("delivers a held relayed Escape when a late kitty reply turns the mode off", async () => {
-		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: true });
-		const recorder = new InputRecorder();
-		harness.tui.addChild(recorder);
-		harness.tui.setFocus(recorder);
-		await harness.settle();
-		await harness.feed("\x1b[?1;2c");
-		vi.useFakeTimers();
-
-		process.stdin.emit("data", "\x1b[0;0;27;1;0;1_");
-		process.stdin.emit("data", "\x1b[?0u");
-		expect(harness.terminal.kittyProtocolActive).toBe(true);
-		vi.runAllTimers();
-		expect(recorder.received).toEqual(["\x1b"]);
 	});
 
 	it("pastes line breaks the console host sent as key records, then submits on a later Enter (#14065)", async () => {

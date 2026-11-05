@@ -3,7 +3,7 @@
  * transcript components. Built-in renderers live beside this file; the
  * coding-agent tools implement the matching `*Details` payloads.
  */
-import type { TspPreview, TspText, TspTone, TspToolProps } from "@oh-my-pi/pi-wire";
+import type { ShellTrace, ShellVizPresentation, TspPreview, TspText, TspTone, TspToolProps } from "@oh-my-pi/pi-wire";
 import type { NativeChild } from "../native/node";
 import type { Component } from "../tui";
 import type { Theme } from "../theme/theme";
@@ -28,14 +28,25 @@ export interface RenderResultOptions {
 	executionStarted?: boolean;
 	/**
 	 * Milliseconds since this call began executing (`tool_execution_start`),
-	 * or its total once settled; undefined before it starts. Native describe
-	 * hooks only.
+	 * or its total once settled; undefined before it starts. The terminal
+	 * transcript's options object computes it on read, so a render-time read
+	 * is live while the block's spinner ticks.
 	 */
 	elapsedMs?: number;
 	/** The call was abandoned without a final result (turn aborted, sealed). Native describe hooks only. */
 	cancelled?: boolean;
 	/** The native host shows files by path (`cx.supports("media")`). Native describe hooks only. */
 	media?: boolean;
+	/** The native host draws raw JSON values (`cx.supports("json")`). Native describe hooks only. */
+	json?: boolean;
+	/** The native host draws a live shell trace (`cx.supports("shell")`). Native describe hooks only. */
+	shell?: boolean;
+	/** Native semantic presentation, decoded and cached by the tool component. */
+	shellPresentation?: ShellVizPresentation;
+	/** Validated immutable trace associated with shellPresentation. */
+	shellTrace?: ShellTrace;
+	/** Explicit seeks/resets change this epoch; ordinary playback ticks do not. */
+	shellReplayEpoch?: number;
 }
 
 /** Render options for a result, plus the tool-specific context the transcript threads through. */
@@ -195,6 +206,11 @@ export interface ToolRenderer<TArgs = unknown, TDetails = unknown> {
 	 * `options.spinnerFrame`.
 	 */
 	animatedPartialResult?: boolean | ((args: TArgs) => boolean);
+	/**
+	 * Repaint the block once a second while its call executes, for renderers
+	 * that show live `options.elapsedMs` without consuming the spinner frame.
+	 */
+	tickElapsed?: boolean;
 	/**
 	 * Whether replacing a pending call render with the first result requires a
 	 * full viewport repaint. Use for merged renderers whose pending rows can be

@@ -1,12 +1,14 @@
-import { type Component, Container, type HistoryBatch } from "../tui";
+import { type Component, Container, type HistoryBatch, ownDescription } from "../tui";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { popLoopPhase, pushLoopPhase } from "@oh-my-pi/pi-utils";
-import { renderForScrollback } from "../components/image";
+import { measureRender, renderForScrollback } from "../components/image";
 import { col } from "../native/describe";
-import type { NativeNode } from "../native/node";
+import type { DescribeContext, NativeNode } from "../native/node";
+import { sameItems } from "../native/memo";
 import { isNativeSettled, settleNative } from "../native/settle";
 import { isUsageRowBlock } from "../overlays/usage-row";
 import { isToolActivityComponent } from "./tool-activity";
+import { directPlacementLift, ImageProtocol, iterm2ImagePayload, TERMINAL } from "../terminal-capabilities";
 
 /** Shared animation time supplied by the constrained transcript root. */
 export interface AnimationFrame {
@@ -68,6 +70,18 @@ interface FinalizableBlock {
 }
 
 /**
+ * Lets a block pack against its neighbors. Two consecutive compact blocks
+ * (blocks that draw nothing between them don't count) have no blank separator
+ * row between them in the terminal, and a native (TSP) surface groups each
+ * such run into one gapless entry. The hook is read every frame, so a block
+ * may change its answer at any time (expanded, collapsed, re-presented).
+ */
+export interface CompactTranscriptBlock {
+	/** Whether the block's current presentation is compact rows. */
+	isTranscriptBlockCompact?(): boolean;
+}
+
+/**
  * Block lifecycle:
  * - `active`: still mutating; renders live and counts against tool admission.
  * - `settled`: finalized but retained in the mutable viewport until pressure.
@@ -118,16 +132,34 @@ interface RowSplit {
 	readonly width: number;
 	readonly hash: number | bigint;
 	readonly text: string;
+	/**
+	 * Inline images in the committed rows, in order, each with its payload and
+	 * the length of `text` before it. Their reserved rows carry no content, so
+	 * relocating by `text` alone would stop above an image and make the
+	 * archived image live again at another width; payload and offset tell the
+	 * archived image apart from a replacement or one moved elsewhere.
+	 */
+	readonly images: readonly { readonly payload: string; readonly offset: number }[];
 	/** Seam of the last render it was located in; renders are memoized per frame. */
 	located?: { readonly rendered: readonly string[]; readonly count: number };
 }
 
 type RetirementPolicy = "pressure" | "flush";
 type Offered =
-	| { batch: HistoryBatch; kind: "append"; entry: number; emittedEnd: number }
-	/** Whole blocks `[frontier, end)`, then optionally the head rows of block `end`. */
-	| { batch: HistoryBatch; kind: "commit"; end: number; split?: RowSplit }
-	| { batch: HistoryBatch; kind: "replay" };
+	/** `lead`: the rows start with the blank history owed the head (see {@link RowsAbove}). */
+	| { batch: HistoryBatch; kind: "append"; entry: number; emittedEnd: number; lead: boolean }
+	/**
+	 * Whole blocks `[frontier, end)`, then optionally the head rows of block
+	 * `end`; `historyEnd` is what history ends with once it is acknowledged.
+	 */
+	| { batch: HistoryBatch; kind: "commit"; end: number; split?: RowSplit; historyEnd: RowsAbove }
+	| { batch: HistoryBatch; kind: "replay"; historyEnd: RowsAbove };
+
+/**
+ * Compactness of the last non-empty block above when its separator is still
+ * owed; `undefined` when none is (nothing above, or rows ending in a blank).
+ */
+type RowsAbove = boolean | undefined;
 
 /** Rows a progressive-append retirement offers, and the stable count they bring the head to. */
 interface AppendBatch {
@@ -150,9 +182,41 @@ const RETIREMENT_BUDGET_MS = 8;
 const EMPTY_ROWS: readonly string[] = [];
 const EMPTY_STABLE_ROWS: readonly TranscriptStableRow[] = [];
 
+/** A block's full-allocation render taken by {@link TranscriptContainer}'s walk-order measurement. */
+interface MeasuredBlock {
+	rows: readonly string[];
+	/** Whether the render observed a budgeted image; see {@link measureRender}. */
+	images: boolean;
+}
+
 function isFinalized(component: Component): boolean {
 	const block = component as Component & FinalizableBlock;
 	return (block.isTranscriptBlockFinalized?.() ?? true) && block.isTranscriptBlockPending?.() !== true;
+}
+
+function isCompact(component: Component): boolean {
+	return (component as Component & CompactTranscriptBlock).isTranscriptBlockCompact?.() === true;
+}
+
+/** Blank rows before a non-empty block: one, unless none is owed or both blocks are compact. */
+function separatorRows(above: RowsAbove, compact: boolean): number {
+	return above === undefined || (above && compact) ? 0 : 1;
+}
+
+/** Whether a native surface lays out nothing of `component` (a hidden node, or a `col`/`row` of such nodes). */
+function describesNothing(component: Component, cx: DescribeContext, depth = 0): boolean {
+	// `null`: the reconciler draws it as rows.
+	const described = ownDescription(component, cx);
+	return described !== null && isVoidNode(described, cx, depth);
+}
+
+function isVoidNode(described: NativeNode, cx: DescribeContext, depth: number): boolean {
+	if ((described.p as { hidden?: boolean } | undefined)?.hidden === true) return true;
+	if ((described.k !== "col" && described.k !== "row") || depth > 16) return false;
+	for (const child of described.c ?? []) {
+		if ("k" in child ? !isVoidNode(child, cx, depth + 1) : !describesNothing(child, cx, depth + 1)) return false;
+	}
+	return true;
 }
 
 function blockMode(component: Component): TranscriptBlockMode {
@@ -180,7 +244,33 @@ function contentOf(rows: readonly string[]): string {
  */
 function rowSplit(scrollback: readonly string[], rows: number, width: number): RowSplit {
 	const committed = scrollback.slice(0, rows);
-	return { rows, width, hash: Bun.hash(committed.join("\n")), text: contentOf(committed) };
+	const images: { payload: string; offset: number }[] = [];
+	let text = "";
+	for (const row of committed) {
+		if (TERMINAL.isImageLine(row)) images.push({ payload: iterm2ImagePayload(row) ?? row, offset: text.length });
+		text += contentOf([row]);
+	}
+	return { rows, width, hash: Bun.hash(committed.join("\n")), text, images };
+}
+
+/**
+ * `cut` moved to just below an image it would split, on terminals that cannot
+ * draw part of an image (iTerm2's inline images). There the image row draws
+ * the whole picture upward over its reserved rows; once some of those rows are
+ * in scrollback, the picture has nowhere to go and is dropped, so the image
+ * must reach scrollback whole. Kitty and SIXEL draw the visible part instead.
+ */
+function cutBelowWholeImage(rows: readonly string[], cut: number): number {
+	const protocol = TERMINAL.imageProtocol;
+	if (protocol === null || protocol === ImageProtocol.Kitty || protocol === ImageProtocol.Sixel) return cut;
+	// Only reserved rows sit between a cut inside an image and its image row,
+	// so the first image row at or below the cut decides.
+	for (let index = Math.max(0, cut); index < rows.length; index++) {
+		const row = rows[index]!;
+		if (!TERMINAL.isImageLine(row)) continue;
+		return index - directPlacementLift(row) < cut ? index + 1 : cut;
+	}
+	return cut;
 }
 
 /** Whether `prefix` matches `rows` byte-for-byte from the top. */
@@ -216,6 +306,39 @@ export interface TranscriptViewportSpan {
 	end: number;
 }
 
+/**
+ * One native entry for a run of consecutive compact transcript blocks: a
+ * gapless column whose members stay component children, so each describes
+ * itself, keeps its wire id and receives its own native events.
+ */
+class CompactRun implements Component {
+	#members: readonly Component[] = [];
+	#node: NativeNode | undefined;
+
+	/** Adopt `children[start, end)` as the members; the description holds while they are unchanged. */
+	setMembers(children: readonly Component[], start: number, end: number): void {
+		const members = this.#members;
+		let same = members.length === end - start;
+		for (let index = 0; same && index < members.length; index++) same = members[index] === children[start + index];
+		if (same) return;
+		this.#members = children.slice(start, end);
+		this.#node = undefined;
+	}
+
+	/** Rows for a surface that cannot describe the run: the members' rows, packed. */
+	render(width: number): readonly string[] {
+		return this.#members.flatMap(member => member.render(width));
+	}
+
+	describe(): NativeNode {
+		this.#node ??= col(this.#members, { role: "omp.compact", gap: "none" });
+		return this.#node;
+	}
+}
+
+/** {@link TranscriptContainer.nativeBlocks}' run wrappers while no run has formed. */
+const NO_RUNS: ReadonlyMap<Component, CompactRun> = new Map();
+
 /** Owns transcript order, live capacity, and ordered immutable retirement. */
 export class TranscriptContainer extends Container {
 	#entries: TranscriptEntry[] = [];
@@ -247,7 +370,7 @@ export class TranscriptContainer extends Container {
 	 * composition, with no block mutation possible in between; replaying the
 	 * first measurement spares every block its second render per frame.
 	 */
-	#frameRows = new Map<TranscriptEntry, readonly string[]>();
+	#frameRows = new Map<TranscriptEntry, MeasuredBlock>();
 	#frameRowsWidth = 0;
 	#releaseFailures = new WeakSet<Component>();
 	/** The `children` array `#entries` last mirrored; see {@link #syncEntries}. */
@@ -257,6 +380,10 @@ export class TranscriptContainer extends Container {
 	/** Block list handed to the native frame provider, reused while the children are unchanged. */
 	#nativeBlocks: readonly Component[] = [];
 	#nativeNode: NativeNode | undefined;
+	/** `true` when history ends with a compact block whose separator was withheld; history rows never change. */
+	#historyEnd: RowsAbove;
+	/** Native wrappers of compact runs keyed by their first member; see {@link nativeBlocks}. */
+	#nativeRuns: ReadonlyMap<Component, CompactRun> = NO_RUNS;
 	override addChild(component: Component): void {
 		if (isToolActivityComponent(component)) component.setToolActivityVisible(this.#toolActivityVisible);
 		super.addChild(component);
@@ -319,6 +446,7 @@ export class TranscriptContainer extends Container {
 		this.#replayPending = false;
 		this.#replayRequested = false;
 		this.#lastViewportSpans = [];
+		this.#historyEnd = undefined;
 	}
 
 	setToolActivityVisible(visible: boolean): void {
@@ -347,6 +475,7 @@ export class TranscriptContainer extends Container {
 		if (this.#offered?.kind === "append" || (this.#offered?.kind === "commit" && this.#offered.split)) {
 			this.#offered = undefined;
 		}
+		this.#historyEnd = undefined;
 		for (const entry of this.#entries) {
 			entry.emitted = 0;
 			entry.stableRows = EMPTY_STABLE_ROWS;
@@ -474,42 +603,71 @@ export class TranscriptContainer extends Container {
 		this.#syncEntries();
 		this.#settleFinalized();
 		let total = 0;
+		let above = this.#projectedHistoryEnd();
 		for (const { entry, index } of this.#liveEntries()) {
-			const block = this.#liveBlockRows(entry, index, width);
-			if (block.length > 0) total += block.length + (total > 0 ? 1 : 0);
+			const block = this.#liveBlock(entry, index, width).rows;
+			if (block.length === 0) continue;
+			const compact = isCompact(entry.component);
+			total += separatorRows(above, compact) + block.length;
+			above = compact;
 			if (total > limit) break;
 		}
 		return total;
 	}
 
-	/** One live block's un-emitted rows at `width`, rendered against its full-height allocation. */
-	#liveBlockRows(entry: TranscriptEntry, index: number, width: number): readonly string[] {
-		const rows = this.#measuredRows(entry, width);
+	/** One live block's un-emitted rows at `width`, measured against its full-height allocation. */
+	#liveBlock(entry: TranscriptEntry, index: number, width: number): MeasuredBlock {
+		const measured = this.#measure(entry, width);
 		const emitted = this.#projectedEmittedRowCount(entry, index, width);
-		return emitted === 0 ? rows : rows.slice(emitted);
+		return emitted === 0 ? measured : { rows: measured.rows.slice(emitted), images: measured.images };
+	}
+
+	/** What native history ends with once the unacknowledged offer, if any, lands. */
+	#projectedHistoryEnd(): RowsAbove {
+		const offered = this.#offered;
+		if (offered === undefined) return this.#historyEnd;
+		return offered.kind === "append" ? undefined : offered.historyEnd;
+	}
+
+	/** Index into `live` of the first non-empty block when history owes it a separator, else -1. */
+	#owedLead(live: readonly { entry: TranscriptEntry; index: number }[], width: number): number {
+		const historyEnd = this.#projectedHistoryEnd();
+		if (historyEnd === undefined) return -1;
+		for (let cursor = 0; cursor < live.length; cursor++) {
+			const { entry, index } = live[cursor]!;
+			if (this.#liveBlock(entry, index, width).rows.length === 0) continue;
+			return separatorRows(historyEnd, isCompact(entry.component)) > 0 ? cursor : -1;
+		}
+		return -1;
 	}
 
 	/**
 	 * One block's blank-trimmed render at its full-height allocation. Inside an
 	 * open frame the first measurement of each block is replayed to later ones,
 	 * leaving whatever allocation the viewport has since rendered it at.
+	 *
+	 * Measurements run in walk order, not display order, so they render under
+	 * {@link measureRender}: a block whose images they observed must render
+	 * again in display order before its rows are laid out.
 	 */
-	#measuredRows(entry: TranscriptEntry, width: number): readonly string[] {
-		if (this.#openFrame === undefined) {
-			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
-			return this.#renderEntry(entry, width);
-		}
+	#measure(entry: TranscriptEntry, width: number): MeasuredBlock {
+		if (this.#openFrame === undefined) return this.#measureEntry(entry, width);
 		if (this.#frameRowsWidth !== width) {
 			this.#frameRows.clear();
 			this.#frameRowsWidth = width;
 		}
-		let rows = this.#frameRows.get(entry);
-		if (rows === undefined) {
-			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
-			rows = this.#renderEntry(entry, width);
-			this.#frameRows.set(entry, rows);
+		let measured = this.#frameRows.get(entry);
+		if (measured === undefined) {
+			measured = this.#measureEntry(entry, width);
+			this.#frameRows.set(entry, measured);
 		}
-		return rows;
+		return measured;
+	}
+
+	#measureEntry(entry: TranscriptEntry, width: number): MeasuredBlock {
+		this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
+		const { value: rows, images } = measureRender(() => this.#renderEntry(entry, width));
+		return { rows, images };
 	}
 
 	#closeFrame(): void {
@@ -571,6 +729,7 @@ export class TranscriptContainer extends Container {
 		// show — the whole ledger on a resumed session's first paint (#12933).
 		const shown: Array<{ entry: TranscriptEntry; index: number }> = [];
 		const blocks: (readonly string[])[] = [];
+		const measuredImages: boolean[] = [];
 		let unrendered = 0;
 		for (let cursor = live.length - 1; cursor >= 0; cursor--) {
 			if (shown.length > capacity) {
@@ -578,15 +737,15 @@ export class TranscriptContainer extends Container {
 				break;
 			}
 			const candidate = live[cursor]!;
-			const block = this.#liveBlockRows(candidate.entry, candidate.index, width);
-			if (block.length === 0) continue;
+			const block = this.#liveBlock(candidate.entry, candidate.index, width);
+			if (block.rows.length === 0) continue;
 			shown.push(candidate);
-			blocks.push(block);
+			blocks.push(block.rows);
+			measuredImages.push(block.images);
 		}
 		shown.reverse();
 		blocks.reverse();
-		let total = 0;
-		for (const block of blocks) total += block.length + (total > 0 ? 1 : 0);
+		measuredImages.reverse();
 		if (shown.length === 0) {
 			this.#lastViewportSpans = [];
 			return EMPTY_ROWS;
@@ -596,11 +755,33 @@ export class TranscriptContainer extends Container {
 			// emergency layout consults them only where it must.
 			return this.#renderEmergency(shown, live.slice(0, unrendered), width, capacity, frame);
 		}
+		// The walk ran newest-first, so the images it measured claimed no
+		// display slot (see #measure). Render those blocks again oldest-first:
+		// the image budget keeps the newest images live by observation order.
+		for (let blockIndex = 0; blockIndex < shown.length; blockIndex++) {
+			if (!measuredImages[blockIndex]) continue;
+			const { entry, index } = shown[blockIndex]!;
+			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, frame);
+			blocks[blockIndex] = this.#renderEntry(entry, width).slice(
+				this.#projectedEmittedRowCount(entry, index, width),
+			);
+		}
+		// Separator rows above each block; the first one's is owed by history.
+		const gaps: number[] = [];
+		let above = this.#projectedHistoryEnd();
+		let total = 0;
+		for (let blockIndex = 0; blockIndex < shown.length; blockIndex++) {
+			const compact = isCompact(shown[blockIndex]!.entry.component);
+			const gap = separatorRows(above, compact);
+			gaps.push(gap);
+			total += gap + blocks[blockIndex]!.length;
+			above = compact;
+		}
 		if (total <= capacity) {
 			const output: string[] = [];
 			const owners: (Component | undefined)[] = [];
 			for (let blockIndex = 0; blockIndex < blocks.length; blockIndex++) {
-				if (output.length > 0) {
+				if (gaps[blockIndex]! > 0) {
 					output.push("");
 					owners.push(undefined);
 				}
@@ -673,19 +854,21 @@ export class TranscriptContainer extends Container {
 		// The one path that must compose the whole ledger in a single frame; the
 		// phase label attributes any watchdog block here instead of "unknown".
 		pushLoopPhase("ui.transcript-replay");
-		let rows: readonly string[];
+		let replay: { rows: readonly string[]; historyEnd: RowsAbove };
 		try {
-			rows = this.#renderReplay(width);
+			replay = this.#renderReplay(width);
 		} finally {
 			popLoopPhase();
 		}
 		this.#replayPending = false;
-		if (rows.length === 0) {
+		if (replay.rows.length === 0) {
+			// The cleared history holds no transcript rows.
+			this.#historyEnd = undefined;
 			this.#releaseCommittedRenderCaches();
 			return undefined;
 		}
-		const batch: HistoryBatch = { id: this.#nextBatchId++, rows, kind: "replay" };
-		this.#offered = { batch, kind: "replay" };
+		const batch: HistoryBatch = { id: this.#nextBatchId++, rows: replay.rows, kind: "replay" };
+		this.#offered = { batch, kind: "replay", historyEnd: replay.historyEnd };
 		return batch;
 	}
 
@@ -704,9 +887,11 @@ export class TranscriptContainer extends Container {
 			if (entry === undefined) return undefined;
 			const before = this.#renderStablePrefix(entry, entry.emitted, width);
 			const after = this.#renderStablePrefix(entry, offered.emittedEnd, width);
-			rows = after.slice(before.length);
+			const added = after.slice(before.length);
+			rows = offered.lead ? ["", ...added] : added;
 		} else if (offered.kind === "commit") {
-			rows = this.#renderRange(this.#frontier, offered.end, width, true).rows;
+			const retirement = this.#renderRange(this.#frontier, offered.end, width, this.#historyEnd);
+			rows = retirement.rows;
 			const head = offered.split ? this.#entries[offered.end] : undefined;
 			if (head !== undefined && offered.split !== undefined) {
 				// The offer's fingerprint covers bytes of a discarded frame history
@@ -719,10 +904,15 @@ export class TranscriptContainer extends Container {
 					width === offered.split.width ? offered.split.rows : this.#splitRowCount(head, offered.split, width);
 				const end = Math.min(cut, scrollback.length);
 				offered.split = rowSplit(scrollback, end, width);
-				rows = [...rows, ...scrollback.slice(start, end)];
+				if (separatorRows(retirement.above, isCompact(head.component)) > 0) retirement.rows.push("");
+				retirement.rows.push(...scrollback.slice(start, end));
+			} else {
+				offered.historyEnd = this.#closeRange(retirement.rows, retirement.above, offered.end, width);
 			}
 		} else {
-			rows = this.#renderReplay(width);
+			const replay = this.#renderReplay(width);
+			offered.historyEnd = replay.historyEnd;
+			rows = replay.rows;
 		}
 		offered.batch = { id: offered.batch.id, rows, kind: offered.batch.kind };
 		return offered.batch;
@@ -743,7 +933,7 @@ export class TranscriptContainer extends Container {
 		// Only a render publishes a block's stable rows, so the head renders
 		// before its progressive-append eligibility is read.
 		const head = this.#entries[this.#frontier];
-		if (head !== undefined) this.#measuredRows(head, width);
+		if (head !== undefined) this.#measure(head, width);
 		const appendHead =
 			policy === "pressure" &&
 			head?.mode === "appendOnly" &&
@@ -760,23 +950,38 @@ export class TranscriptContainer extends Container {
 		// region costs one full render per block, which on a resumed session's
 		// first paint is every message it ever had (#12933). The progressive
 		// append path below needs the exact live height to size its emission,
-		// and only runs while a streaming head pins retirement.
+		// and only runs while a streaming head pins retirement. Heights include
+		// the separator below each block, and above the first one if history owes it.
+		const lead = this.#owedLead(live, width);
 		let tailRows = 0;
 		let liveRows = 0;
 		let keep = 0;
 		let fits = true;
+		// Compactness of the nearest non-empty block below the cursor.
+		let below: boolean | undefined;
+		// Separator rows between the first block that does not fit and the tail.
+		let boundaryGap = 0;
+		// The first live block fits; only the blank history owes it does not.
+		let leadOnly = false;
 		for (let cursor = live.length - 1; cursor >= 0; cursor--) {
 			const candidate = live[cursor]!;
-			const height = this.#liveBlockRows(candidate.entry, candidate.index, width).length;
-			if (height > 0) liveRows += height + (liveRows > 0 ? 1 : 0);
-			if (fits) {
-				const next = height > 0 ? tailRows + height + (tailRows > 0 ? 1 : 0) : tailRows;
-				if (next > room) {
-					fits = false;
-					keep = cursor + 1;
-				} else {
-					tailRows = next;
+			const rows = this.#liveBlock(candidate.entry, candidate.index, width).rows.length;
+			if (rows > 0) {
+				const compact = isCompact(candidate.entry.component);
+				const gap = below === undefined ? 0 : separatorRows(compact, below);
+				const height = rows + gap + (cursor === lead ? 1 : 0);
+				liveRows += height;
+				if (fits) {
+					if (tailRows + height > room) {
+						fits = false;
+						keep = cursor + 1;
+						boundaryGap = gap;
+						leadOnly = cursor === lead && tailRows + height - 1 <= room;
+					} else {
+						tailRows += height;
+					}
 				}
+				below = compact;
 			}
 			if (!fits && appendHead === undefined) break;
 		}
@@ -785,6 +990,13 @@ export class TranscriptContainer extends Container {
 			this.#pinnedFrontier = undefined;
 			return undefined;
 		}
+		if (leadOnly && policy === "pressure" && this.#liveCount() < MAX_LIVE_BLOCKS) {
+			// Retire just that blank: every block's rows are still on screen.
+			const batch: HistoryBatch = { id: this.#nextBatchId++, rows: [""], kind: "append" };
+			this.#offered = { batch, kind: "commit", end: this.#frontier, historyEnd: undefined };
+			this.#pinnedFrontier = undefined;
+			return batch;
+		}
 
 		if (appendHead !== undefined && keep > 0) {
 			// Emit as many finished rows as the overflow needs, in one batch. A
@@ -792,17 +1004,19 @@ export class TranscriptContainer extends Container {
 			// and the live region has to fall back under `room` to stay readable:
 			// rows left behind here are rows dropped from the top of the viewport.
 			// `liveRows` is exact here: the append path measured every live block.
-			const overflow = liveRows - room;
+			// A blank history owes the head goes out first, within the overflow.
+			const leadRows = lead === 0 ? 1 : 0;
+			const overflow = liveRows - room - leadRows;
 			const { rows, emittedEnd } =
 				this.#measuredAppendBatch(appendHead, width, overflow) ??
 				this.#renderedAppendBatch(appendHead, width, overflow);
 			if (emittedEnd > appendHead.emitted) {
 				const batch: HistoryBatch = {
 					id: this.#nextBatchId++,
-					rows,
+					rows: leadRows > 0 ? ["", ...rows] : rows,
 					kind: "append",
 				};
-				this.#offered = { batch, kind: "append", entry: this.#frontier, emittedEnd };
+				this.#offered = { batch, kind: "append", entry: this.#frontier, emittedEnd, lead: leadRows > 0 };
 				this.#pinnedFrontier = undefined;
 				return batch;
 			}
@@ -819,13 +1033,19 @@ export class TranscriptContainer extends Container {
 		// screen; the rest stays live, so a later shrink of the chrome or the
 		// tail refills the screen from live rows instead of opening a band no
 		// frame can fill (rows still on screen cannot return from scrollback).
+		// One exception: on a terminal that cannot draw part of an image, a cut
+		// inside an image moves below it (cutBelowWholeImage), so up to that
+		// image's height of on-screen rows commits early. A later shrink can then
+		// open a band that tall, which beats losing the image.
 		let split: { index: number; rows: readonly string[]; split: RowSplit } | undefined;
 		if (policy === "pressure" && keep > 0 && limit === this.#frontier + keep) {
 			const boundary = live[keep - 1]!;
-			const visible = room - tailRows - (tailRows > 0 ? 1 : 0);
+			const visible = room - tailRows - boundaryGap;
 			if (boundary.entry.state === "settled" && visible > 0) {
 				const offer = this.#splitOffer(boundary.entry, width, visible);
-				if (offer !== undefined) {
+				if (offer === "whole") {
+					limit = boundary.index + 1;
+				} else if (offer !== undefined) {
 					split = { index: boundary.index, ...offer };
 					limit = boundary.index;
 				}
@@ -840,27 +1060,33 @@ export class TranscriptContainer extends Container {
 		}
 		this.#pinnedFrontier = undefined;
 		pushLoopPhase("ui.transcript-retire");
-		let retirement: { rows: readonly string[]; end: number };
+		let rows: string[];
+		let historyEnd: RowsAbove;
+		let reached: number;
 		try {
 			// Shutdown must hand over the full prefix; a live frame stops at the
 			// budget and offers the rest on the next frames.
-			retirement = this.#renderRange(
+			const retirement = this.#renderRange(
 				this.#frontier,
 				end,
 				width,
-				true,
+				this.#historyEnd,
 				policy === "flush" ? undefined : RETIREMENT_BUDGET_MS,
 			);
+			rows = retirement.rows;
+			reached = retirement.end;
+			if (split !== undefined && reached !== split.index) split = undefined;
+			if (split === undefined) {
+				historyEnd = this.#closeRange(rows, retirement.above, reached, width);
+			} else {
+				if (separatorRows(retirement.above, isCompact(this.#entries[split.index]!.component)) > 0) rows.push("");
+				rows.push(...split.rows);
+			}
 		} finally {
 			popLoopPhase();
 		}
-		if (split !== undefined && retirement.end !== split.index) split = undefined;
-		const batch: HistoryBatch = {
-			id: this.#nextBatchId++,
-			rows: split === undefined ? retirement.rows : [...retirement.rows, ...split.rows],
-			kind: "append",
-		};
-		this.#offered = { batch, end: retirement.end, kind: "commit", split: split?.split };
+		const batch: HistoryBatch = { id: this.#nextBatchId++, rows, kind: "append" };
+		this.#offered = { batch, end: reached, kind: "commit", split: split?.split, historyEnd };
 		return batch;
 	}
 
@@ -868,18 +1094,25 @@ export class TranscriptContainer extends Container {
 	 * The head rows of settled `entry` beyond its committed prefix that leave
 	 * `visible` rows live, or undefined when nothing would remain committed
 	 * past that prefix or the scrollback render would not line up row for row.
+	 * `"whole"` when keeping an image whole moves the cut to the block's end:
+	 * the block then retires in full, with the blank row that separates it from
+	 * the next block, which a split never carries.
 	 */
 	#splitOffer(
 		entry: TranscriptEntry,
 		width: number,
 		visible: number,
-	): { rows: readonly string[]; split: RowSplit } | undefined {
-		const measured = this.#measuredRows(entry, width);
+	): { rows: readonly string[]; split: RowSplit } | "whole" | undefined {
+		const measured = this.#measure(entry, width).rows;
 		const start = this.#emittedRowCount(entry, width);
-		const total = measured.length - visible;
-		if (total <= start) return undefined;
-		const scrollback = renderForScrollback(() => this.#renderEntry(entry, width));
+		const cut = measured.length - visible;
+		if (cut <= start) return undefined;
+		// The boundary block stays live, so the viewport renders it in display
+		// order; this render precedes the retired blocks and must claim no slot.
+		const scrollback = measureRender(() => renderForScrollback(() => this.#renderEntry(entry, width))).value;
 		if (scrollback.length !== measured.length) return undefined;
+		const total = cutBelowWholeImage(scrollback, cut);
+		if (total >= scrollback.length) return "whole";
 		return { rows: scrollback.slice(start, total), split: rowSplit(scrollback, total, width) };
 	}
 
@@ -894,6 +1127,7 @@ export class TranscriptContainer extends Container {
 			// zero with the offer still live) must not move it backwards.
 			if (entry === undefined || offered.entry !== this.#frontier || offered.emittedEnd <= entry.emitted) return;
 			entry.emitted = offered.emittedEnd;
+			this.#historyEnd = undefined;
 		} else if (offered.kind === "commit") {
 			for (let index = this.#frontier; index < offered.end; index++) {
 				this.#retireEntry(this.#entries[index]!);
@@ -901,8 +1135,10 @@ export class TranscriptContainer extends Container {
 			this.#frontier = offered.end;
 			const head = offered.split ? this.#entries[offered.end] : undefined;
 			if (head !== undefined) head.split = offered.split;
+			this.#historyEnd = offered.historyEnd;
 		} else {
 			this.#releaseCommittedRenderCaches();
+			this.#historyEnd = offered.historyEnd;
 		}
 		this.#offered = undefined;
 		if (this.#replayRequested) this.#startReplay();
@@ -918,46 +1154,100 @@ export class TranscriptContainer extends Container {
 		const cap = Math.max(0, Math.trunc(maxRows));
 		if (cap === 0) return EMPTY_ROWS;
 		const rows: string[] = [];
+		let below: boolean | undefined;
 		for (let index = this.#entries.length - 1; index >= 0; index--) {
 			const entry = this.#entries[index]!;
 			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
 			const block = trimBlankEdges(entry.component.render(width));
 			if (entry.state === "committed") this.#releaseRenderCaches(entry);
 			if (block.length === 0) continue;
-			if (rows.length > 0) rows.unshift("");
+			const compact = isCompact(entry.component);
+			if (below !== undefined && separatorRows(compact, below) > 0) rows.unshift("");
 			rows.unshift(...block);
+			below = compact;
 			if (rows.length >= cap) break;
 		}
 		return rows.length > cap ? rows.slice(rows.length - cap) : rows;
 	}
 
 	/**
-	 * The transcript's blocks for a native (TSP) surface, one component per
-	 * `main` child in transcript order; ids follow component identity, so
+	 * The transcript's blocks for a native (TSP) surface, one `main` child
+	 * per block in transcript order; ids follow component identity, so
 	 * inserts, removals (rewind, displacement) and reorders become targeted ops.
 	 * Finalized blocks are settled as a hint; they stay editable, so a later
 	 * expansion, late result or reaction still reaches them wherever they sit.
+	 * A block's {@link Component.nativeTrailers} follow it as blocks of their own.
 	 * No retirement happens on this path: the whole transcript is one document.
-	 * Returns the same array while the block list is unchanged.
+	 *
+	 * Each run of two or more consecutive compact blocks
+	 * ({@link CompactTranscriptBlock}), with any blocks between them that
+	 * describe nothing at `cx`, is one gapless entry whose members stay
+	 * component children, keeping their own description, wire id and native
+	 * events. A compact block's trailers are members of its run; a trailer of
+	 * any other block is not. The entry is the same object while the same block
+	 * leads the run, and it never settles: a member joining later may still be live.
+	 *
+	 * Returns the same array while the entries are unchanged.
 	 */
-	nativeBlocks(): readonly Component[] {
+	nativeBlocks(cx: DescribeContext): readonly Component[] {
 		this.#syncEntries();
 		const children = this.children;
-		for (const child of children) {
+		// Copies only once some block has trailers; `owners[i]` is the block whose compactness `flat[i]` takes.
+		let flat: Component[] | undefined;
+		let owners: Component[] | undefined;
+		for (let i = 0; i < children.length; i++) {
+			const child = children[i]!;
 			if (!isNativeSettled(child) && isFinalized(child)) settleNative(child);
+			flat?.push(child);
+			owners?.push(child);
+			const trailers = child.nativeTrailers?.();
+			if (!trailers?.length) continue;
+			flat ??= children.slice(0, i + 1);
+			owners ??= children.slice(0, i + 1);
+			for (const trailer of trailers) {
+				flat.push(trailer);
+				owners.push(child);
+			}
 		}
-		const previous = this.#nativeBlocks;
-		if (previous.length === children.length && previous.every((child, index) => child === children[index])) {
-			return previous;
+		const units: readonly Component[] = flat ?? children;
+		const compactAt = (at: number): boolean => isCompact((owners ?? units)[at]!);
+		// Copies only once a run forms.
+		let blocks: Component[] | undefined;
+		let runs: Map<Component, CompactRun> | undefined;
+		let index = 0;
+		while (index < units.length) {
+			const first = units[index]!;
+			let last = index;
+			if (compactAt(index)) {
+				// The run reaches over blocks that describe nothing and ends at its last compact member.
+				for (let probe = index + 1; probe < units.length; probe++) {
+					if (compactAt(probe)) last = probe;
+					else if (!describesNothing(units[probe]!, cx)) break;
+				}
+			}
+			if (last === index) {
+				blocks?.push(first);
+				index++;
+				continue;
+			}
+			const run = this.#nativeRuns.get(first) ?? new CompactRun();
+			run.setMembers(units, index, last + 1);
+			(runs ??= new Map()).set(first, run);
+			(blocks ??= units.slice(0, index)).push(run);
+			index = last + 1;
 		}
-		this.#nativeBlocks = children.slice();
+		this.#nativeRuns = runs ?? NO_RUNS;
+		const next = blocks ?? units;
+		if (sameItems(this.#nativeBlocks, next)) return this.#nativeBlocks;
+		// `children` mutates in place: keep a snapshot.
+		this.#nativeBlocks = next === children ? children.slice() : next;
 		this.#nativeNode = undefined;
 		return this.#nativeBlocks;
 	}
 
 	/** Embedded as a child (transcript viewers): a stack of the {@link nativeBlocks}. */
-	override describe(): NativeNode {
-		const blocks = this.nativeBlocks();
+	override describe(cx: DescribeContext): NativeNode {
+		const blocks = this.nativeBlocks(cx);
 		this.#nativeNode ??= col(blocks, { role: "omp.transcript" });
 		return this.#nativeNode;
 	}
@@ -967,14 +1257,17 @@ export class TranscriptContainer extends Container {
 		this.#syncEntries();
 		this.#childStartRows.clear();
 		const rows: string[] = [];
+		let above: RowsAbove;
 		for (const entry of this.#entries) {
 			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
 			const block = this.#renderEntry(entry, width);
 			if (entry.state === "committed") this.#releaseRenderCaches(entry);
 			if (block.length === 0) continue;
-			if (rows.length > 0) rows.push("");
+			const compact = isCompact(entry.component);
+			if (separatorRows(above, compact) > 0) rows.push("");
 			this.#childStartRows.set(entry.component, rows.length);
 			rows.push(...block);
+			above = compact;
 		}
 		return rows;
 	}
@@ -1085,7 +1378,7 @@ export class TranscriptContainer extends Container {
 	 * content stays live: it can repeat committed text but never drop any.
 	 */
 	#splitRowCount(entry: TranscriptEntry, split: RowSplit, width: number): number {
-		const rendered = this.#measuredRows(entry, width);
+		const rendered = this.#measure(entry, width).rows;
 		if (split.located?.rendered === rendered) return split.located.count;
 		let count = 0;
 		if (
@@ -1096,13 +1389,40 @@ export class TranscriptContainer extends Container {
 			count = split.rows;
 		} else {
 			let consumed = 0;
-			while (count < rendered.length && consumed < split.text.length) {
-				const row = contentOf([rendered[count]!]);
-				// An empty-content row matches at any offset, so the walk cannot
-				// tell it apart from a revealed row history never received.
-				if (row.length === 0 || !split.text.startsWith(row, consumed)) break;
-				consumed += row.length;
-				count++;
+			let image = 0;
+			while (count < rendered.length && (consumed < split.text.length || image < split.images.length)) {
+				const row = rendered[count]!;
+				const content = contentOf([row]);
+				if (content.length > 0) {
+					if (!split.text.startsWith(content, consumed)) break;
+					consumed += content.length;
+					count++;
+					continue;
+				}
+				// An empty-content row matches at any offset, so the walk cannot tell it
+				// apart from a revealed row history never received; only the next
+				// archived image carries the seam on, through its own reserved rows to
+				// its row, whatever its height here.
+				let index = count;
+				while (
+					index < rendered.length &&
+					!TERMINAL.isImageLine(rendered[index]!) &&
+					contentOf([rendered[index]!]).length === 0
+				) {
+					index++;
+				}
+				const imageRow = rendered[index];
+				if (
+					imageRow === undefined ||
+					!TERMINAL.isImageLine(imageRow) ||
+					(iterm2ImagePayload(imageRow) ?? imageRow) !== split.images[image]?.payload ||
+					consumed !== split.images[image]?.offset ||
+					index - count !== directPlacementLift(imageRow)
+				) {
+					break;
+				}
+				count = index + 1;
+				image++;
 			}
 		}
 		split.located = { rendered, count };
@@ -1198,7 +1518,9 @@ export class TranscriptContainer extends Container {
 	}
 
 	/**
-	 * Compose entries `[start, end)` as one ordered retirement payload.
+	 * Compose entries `[start, end)` as one ordered retirement payload below
+	 * rows ending as `above` says, without the separator the last block owes
+	 * what follows (see {@link #closeRange}).
 	 *
 	 * `budgetMs` stops the walk after the first block that crosses it — always
 	 * at least one block — and reports the index actually reached, so a single
@@ -1210,9 +1532,9 @@ export class TranscriptContainer extends Container {
 		start: number,
 		end: number,
 		width: number,
-		trailingBlank: boolean,
+		above: RowsAbove,
 		budgetMs?: number,
-	): { rows: readonly string[]; end: number } {
+	): { rows: string[]; end: number; above: RowsAbove } {
 		const rows: string[] = [];
 		const startedAt = budgetMs === undefined ? 0 : performance.now();
 		let reached = start;
@@ -1231,28 +1553,59 @@ export class TranscriptContainer extends Container {
 			const block = rendered.slice(emittedRows);
 			reached = index + 1;
 			if (block.length > 0) {
-				if (rows.length > 0) rows.push("");
+				const compact = isCompact(entry.component);
+				if (separatorRows(above, compact) > 0) rows.push("");
 				rows.push(...block);
+				above = compact;
 			}
 			if (budgetMs !== undefined && performance.now() - startedAt >= budgetMs) break;
 		}
-		if (trailingBlank && rows.length > 0) rows.push("");
-		return { rows, end: reached };
+		return { rows, end: reached, above };
 	}
 
-	#renderReplay(width: number): readonly string[] {
-		const rows = Array.from(this.#renderRange(0, this.#frontier, width, true).rows);
+	/**
+	 * End retired `rows` with the separator their last block owes the first
+	 * non-empty live block from `next`, withheld when both are compact, and
+	 * return what history then ends with. After a compact block with no
+	 * non-empty live block yet, the separator stays owed: the next block's
+	 * lead row (see {@link #owedLead}) draws it unless that block packs.
+	 */
+	#closeRange(rows: string[], above: RowsAbove, next: number, width: number): RowsAbove {
+		if (above === undefined) return undefined;
+		if (above) {
+			for (let index = next; index < this.#entries.length; index++) {
+				const entry = this.#entries[index]!;
+				if (this.#liveBlock(entry, index, width).rows.length === 0) continue;
+				if (isCompact(entry.component)) return above;
+				rows.push("");
+				return undefined;
+			}
+			return above;
+		}
+		rows.push("");
+		return undefined;
+	}
+
+	/** The committed ledger and the head rows already in history, and what that history ends with. */
+	#renderReplay(width: number): { rows: readonly string[]; historyEnd: RowsAbove } {
+		const range = this.#renderRange(0, this.#frontier, width, undefined);
 		const head = this.#entries[this.#frontier];
+		let headRows: readonly string[] = EMPTY_ROWS;
 		if (head?.split !== undefined) {
 			this.#setAllocation(head.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
 			const committed = this.#splitRowCount(head, head.split, width);
-			rows.push(...renderForScrollback(() => this.#renderEntry(head, width)).slice(0, committed));
+			headRows = renderForScrollback(() => this.#renderEntry(head, width)).slice(0, committed);
 		} else if (head?.mode === "appendOnly" && head.emitted > 0) {
 			this.#setAllocation(head.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
 			this.#renderEntry(head, width);
-			rows.push(...this.#renderStablePrefix(head, head.emitted, width));
+			headRows = this.#renderStablePrefix(head, head.emitted, width);
 		}
-		return rows;
+		if (head === undefined || headRows.length === 0) {
+			return { rows: range.rows, historyEnd: this.#closeRange(range.rows, range.above, this.#frontier, width) };
+		}
+		if (separatorRows(range.above, isCompact(head.component)) > 0) range.rows.push("");
+		range.rows.push(...headRows);
+		return { rows: range.rows, historyEnd: undefined };
 	}
 
 	#completeFullyEmittedHeads(width: number): void {
@@ -1260,10 +1613,10 @@ export class TranscriptContainer extends Container {
 			const entry = this.#entries[this.#frontier]!;
 			if (entry.state !== "settled") return;
 			if (entry.split !== undefined) {
-				if (this.#splitRowCount(entry, entry.split, width) < this.#measuredRows(entry, width).length) return;
+				if (this.#splitRowCount(entry, entry.split, width) < this.#measure(entry, width).rows.length) return;
 			} else {
 				if (entry.mode !== "appendOnly") return;
-				const rendered = this.#measuredRows(entry, width);
+				const rendered = this.#measure(entry, width).rows;
 				if (entry.emitted !== entry.stableRows.length) return;
 				if (this.#renderStablePrefix(entry, entry.emitted, width).length !== rendered.length) return;
 			}
@@ -1328,7 +1681,7 @@ export class TranscriptContainer extends Container {
 		let hiddenBelow = 0;
 		for (const candidate of behind) {
 			if (candidate.entry.state !== "active") continue;
-			if (this.#liveBlockRows(candidate.entry, candidate.index, width).length > 0) hiddenBelow++;
+			if (this.#liveBlock(candidate.entry, candidate.index, width).rows.length > 0) hiddenBelow++;
 		}
 		let behindEmergency: { candidate: { entry: TranscriptEntry; index: number }; row: string } | null | undefined;
 		const findBehindEmergency = () => {
@@ -1339,7 +1692,7 @@ export class TranscriptContainer extends Container {
 				if (candidate.entry.state !== "settled") continue;
 				const block = candidate.entry.component as Component & FinalizableBlock;
 				if (block.renderTranscriptBlockEmergencyRow === undefined) continue;
-				if (this.#liveBlockRows(candidate.entry, candidate.index, width).length === 0) continue;
+				if (this.#liveBlock(candidate.entry, candidate.index, width).rows.length === 0) continue;
 				const row = block.renderTranscriptBlockEmergencyRow(width);
 				if (row === undefined) continue;
 				behindEmergency = { candidate, row };

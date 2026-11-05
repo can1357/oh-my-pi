@@ -2,6 +2,128 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `ptree` commands spawned with `subreaper: true` no longer leave a descendant that ignores SIGTERM running after a graceful stop (an `AbortSignal`, `kill()` without a hard grace, or dispose); the subreaper stays alive through the grace period and the hard sweep then ends every descendant ([#18018](https://github.com/can1357/oh-my-pi/pull/18018) by [@sjawhar](https://github.com/sjawhar))
+
+### Added
+
+- Added `getUpdateStateDir()` (`~/.omp/update`), holding the auto-update status file, its worker log, and the update install lock
+- Added `logger.setLogForwarder(forwarder)` (`LogForwarder { emit, flush }`), which routes a thread's records — `withContext` fields merged, context reduced to clone-safe JSON — to another thread instead of its own file and sinks, and `logger.emitForeign(event)`, which writes such a record with its original timestamp and runs the sinks without the caller's `withContext` fields
+- Added `expandTilde(path, home?)` (`@oh-my-pi/pi-utils/path`), which expands a leading `~` to the home directory; `@oh-my-pi/pi-coding-agent/tools/path-utils` re-exports it ([#17931](https://github.com/can1357/oh-my-pi/pull/17931) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.16.0] - 2026-11-02
+
+### Added
+
+- Added `isPidAlive` (signal-0 liveness probe) and `asStrictBytes` (a `Uint8Array` narrowed to its own `ArrayBuffer` for WebCrypto)
+- Added `ensureSqliteLockShim()`, which `openSqliteDatabase`/`openSqliteDatabaseSync` call before opening a store, so on Linux the process's SQLite locks are open-file-description locks that other closes of the file cannot release ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
+- Added `assertNotHeldOpen(path)` (`@oh-my-pi/pi-utils/held-file`), which throws `EBUSY` for a SQLite database or `-shm` this process holds open ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
+
+### Changed
+
+- `acp` runtime validators (`zNewSessionResponse`, `zSessionNotification`, …) now report each failing field's path and reason in `error.issues` instead of a single `Invalid <label>`; `ValidationError` issue paths are typed `PropertyKey[]` ([#17699](https://github.com/can1357/oh-my-pi/pull/17699))
+
+## [18.15.0] - 2026-11-01
+
+### Added
+
+- Added abortable `sleepUntil` for wall-clock deadline waits that include system sleep, with bounded timer slices to recheck deadlines after resume ([#17606](https://github.com/can1357/oh-my-pi/pull/17606) by [@zhiland](https://github.com/zhiland)).
+
+### Fixed
+
+- Importing pi-utils no longer installs process-wide signal and fatal handlers in embedding hosts; exit-time cleanup stays installed ([#17674](https://github.com/can1357/oh-my-pi/issues/17674)).
+
+## [18.14.2] - 2026-10-31
+
+### Added
+
+- Added `oklabDistance`, the perceptual distance between two hex colors ([#17520](https://github.com/can1357/oh-my-pi/pull/17520))
+
+## [18.14.1] - 2026-10-31
+
+### Added
+
+- Added `isFileLockHeld`, which reports whether a file lock is held without acquiring it ([#17428](https://github.com/can1357/oh-my-pi/pull/17428) by [@andrebrait](https://github.com/andrebrait))
+
+## [18.14.0] - 2026-10-29
+
+### Added
+
+- Added `logger.withContext(fields, fn)` to attach contextual fields to all records produced during a function and its asynchronous work, plus `logger.withoutContext(fn)` for work that should not inherit caller context.
+
+### Fixed
+
+- Fixed `untilAborted` so promises passed to an already-aborted signal are still observed, preventing later rejections from being reported as unhandled.
+
+## [18.13.3] - 2026-10-28
+
+### Changed
+
+- Updated Bun engine requirement to ≥1.4.4
+
+## [18.13.2] - 2026-10-27
+
+### Added
+
+- Added `deadlineMs` and `waitMessage` cleanup registration options: shutdown waits longer for that callback, but only while it is still pending, and says so on stderr once nothing else is left to wait for ([#17128](https://github.com/can1357/oh-my-pi/pull/17128) by [@sjawhar](https://github.com/sjawhar))
+- A process stopped by SIGTERM now prints its registered recovery commands after the terminal is handed back, so a stopped omp session shows `omp --resume <id>` instead of leaving its last frame above the shell prompt like a crash ([#17119](https://github.com/can1357/oh-my-pi/pull/17119) by [@sjawhar](https://github.com/sjawhar))
+
+### Fixed
+
+- Fixed plain TAR archives requiring a whole-container memory buffer to list entries or read a selected member ([#17175](https://github.com/can1357/oh-my-pi/pull/17175) by [@alphastorm](https://github.com/alphastorm))
+
+## [18.13.1] - 2026-10-27
+
+### Added
+
+- Added an optional `maxFractionDigits` to `formatNumber()` that caps decimals on values below 1,000 ([#16973](https://github.com/can1357/oh-my-pi/pull/16973) by [@DusKing1](https://github.com/DusKing1))
+
+## [18.13.0] - 2026-10-26
+
+### Added
+
+- Added `parseHeifImageMimeType()`, which identifies HEIC, HEIF and AVIF images from a file header ([#16612](https://github.com/can1357/oh-my-pi/pull/16612) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `$whichAll()`, which returns every PATH match for a command in PATH order ([#16824](https://github.com/can1357/oh-my-pi/issues/16824))
+
+### Changed
+
+- Faster lenient JSONL session parsing when recovering past malformed lines ([#16995](https://github.com/can1357/oh-my-pi/pull/16995) by [@GTanger](https://github.com/GTanger))
+
+### Fixed
+
+- `setProcessName()` no longer assigns `process.title` on Windows, where it overwrites the shared console title ([#16842](https://github.com/can1357/oh-my-pi/issues/16842))
+- `setProcessName()` no longer assigns `process.title` on Windows, where it overwrites the shared console title ([#16842](https://github.com/can1357/oh-my-pi/issues/16842))
+- Fixed inline code spans rendering flush against the surrounding text when a backslash preceded the closing backtick ([#16972](https://github.com/can1357/oh-my-pi/pull/16972) by [@akainth015](https://github.com/akainth015))
+
+## [18.12.6] - 2026-10-21
+
+### Added
+
+- Added `RpcConnection.requestCancellable()` and `Client.requestPermission(params, { signal })`; client connections abort a handler and answer `-32800` when the peer sends `$/cancel_request`, while agent connections keep running the request and return its real result ([#15885](https://github.com/can1357/oh-my-pi/pull/15885) by [@marcintustin](https://github.com/marcintustin))
+
+## [18.12.4] - 2026-10-20
+
+### Breaking Changes
+
+- `readTarEntriesFromBuffer()` in `@oh-my-pi/pi-utils/ar/tar` now returns `Promise<ArchiveIndexEntry[]>` instead of `ArchiveIndexEntry[]`; `await` its result ([#16394](https://github.com/can1357/oh-my-pi/pull/16394) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Added
+
+- Added `maxStreamSize` to `ArchiveLimits` (default 4 GB): the most a large `.tar.gz` or `.tar.zst` may decompress in one pass, so a decompression bomb fails instead of running without bound ([#16394](https://github.com/can1357/oh-my-pi/pull/16394) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed `bun test` runs writing their logs into your real `~/.omp/logs`: test processes now log to a per-user `omp-test-logs-<uid>/` under the OS temp dir ([#16386](https://github.com/can1357/oh-my-pi/pull/16386) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `.tar.gz` and `.tar.zst` archives that decompress past 256 MB failing to list or read with a raw `Cannot create a Buffer larger than …` error; a bare `.gz` or `.zst` that large now names the archive size limit ([#16394](https://github.com/can1357/oh-my-pi/pull/16394) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed frontmatter repair deleting HTML comments from document bodies and plain markdown; it now strips only leading comments ahead of the opening delimiter, so prompt bodies keep their comments ([#16481](https://github.com/can1357/oh-my-pi/pull/16481) by [@adi-IL](https://github.com/adi-IL)).
+
+## [18.12.2] - 2026-10-18
+
+### Added
+
+- Added `readSalvageableRows()` to read the rows of a damaged SQLite table that are still readable, skipping only the damaged pages ([#15751](https://github.com/can1357/oh-my-pi/pull/15751) by [@Shadorain](https://github.com/Shadorain))
+
 ## [18.12.0] - 2026-10-17
 
 ### Added

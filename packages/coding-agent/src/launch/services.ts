@@ -27,6 +27,8 @@ export interface ServiceStart {
 	cwd?: string;
 	pty?: boolean;
 	ready?: ServiceReady;
+	/** Overlay on the configured shell env; wins over it. */
+	env?: Record<string, string>;
 }
 
 const serviceStateKey = Symbol("ownedServices");
@@ -236,7 +238,7 @@ export async function startService(
 		name: params.name,
 		application: shell.shell,
 		args: [...shell.args, `${shell.prefix ? `${shell.prefix} ` : ""}${params.command}`],
-		env: shell.env,
+		env: { ...shell.env, ...params.env },
 		cwd: resolveToCwd(params.cwd ?? session.cwd, session.cwd),
 		pty: params.pty ?? true,
 		ready: ready

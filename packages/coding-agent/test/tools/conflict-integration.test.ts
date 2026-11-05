@@ -282,6 +282,21 @@ describe("read surfaces conflicts as a warning footer", () => {
 		expect(text).toContain("No unresolved git merge conflicts");
 	});
 
+	it("`:conflicts` past the scan byte cap points to a ranged read that registers the rest", async () => {
+		// 10240 lines of exactly 1 KiB fill the 10 MiB scan cap, so the block at L10241 is never scanned.
+		const filler = `${"a".repeat(1023)}\n`.repeat(10_240);
+		await Bun.write(path.join(tempDir, "huge.ts"), filler + TWO_WAY);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+
+		const summary = getText(await read.execute("read-huge-conflicts", { path: "huge.ts:conflicts" }));
+		expect(summary).toContain("`huge.ts:10241-`");
+
+		await read.execute("read-huge-tail", { path: "huge.ts:10241-" });
+		const block = getText(await read.execute("read-huge-block", { path: "conflict://1" }));
+		expect(block).toContain("<<<<<<<");
+	});
+
 	it("window-mode warning shows visible-of-total when window misses some conflicts", async () => {
 		const filePath = path.join(tempDir, "wide.ts");
 		await Bun.write(filePath, TWO_BLOCKS);
@@ -293,6 +308,69 @@ describe("read surfaces conflicts as a warning footer", () => {
 		const text = getText(result);
 		expect(text).toContain("1 of 2 unresolved");
 		expect(text).toContain("read `wide.ts:conflicts`");
+	});
+
+	it("names the registered ids and the `:conflicts` read when a hidden block's id is guessed", async () => {
+		const filePath = path.join(tempDir, "six.ts");
+		await Bun.write(filePath, TWO_BLOCKS.repeat(3));
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+
+		// Lines 1-18 hold the first three of six blocks (L1, L7, L13).
+		const windowText = getText(await read.execute("read-six-window", { path: "six.ts:1-18" }));
+		expect(windowText).toContain("3 of 6 unresolved");
+
+		const guess = read.execute("read-six-guess", { path: "conflict://4" });
+		await expect(guess).rejects.toThrow("Registered: #1, #2, #3 in six.ts.");
+
+		await read.execute("read-six-conflicts", { path: "six.ts:conflicts" });
+		const fourth = getText(await read.execute("read-six-fourth", { path: "conflict://4" }));
+		expect(fourth).toContain("b-ours");
+		expect(fourth).toContain("b-theirs");
+	});
+
+	it("lists every file's registered ids when a resolved id is used again", async () => {
+		await Bun.write(path.join(tempDir, "a.ts"), TWO_BLOCKS);
+		await Bun.write(path.join(tempDir, "b.ts"), TWO_WAY);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-a-window", { path: "a.ts:1-5" });
+		await read.execute("read-b", { path: "b.ts" });
+		await write.execute("write-a-1", { path: "conflict://1", content: "@ours" });
+
+		const again = write.execute("write-a-1-again", { path: "conflict://1", content: "@ours" });
+		await expect(again).rejects.toThrow("Registered: #2 in b.ts.");
+		await expect(read.execute("read-a-1-again", { path: "conflict://1" })).rejects.toThrow("`<path>:conflicts`");
+	});
+
+	it("names registered files relative to the current cwd, not the cwd they were read from", async () => {
+		await fs.mkdir(path.join(tempDir, "a"));
+		await fs.mkdir(path.join(tempDir, "b"));
+		await Bun.write(path.join(tempDir, "a", "x.ts"), TWO_WAY);
+		await Bun.write(path.join(tempDir, "b", "x.ts"), TWO_WAY);
+		const session = createTestSession(path.join(tempDir, "a"));
+		const read = await getTool(session, "read");
+
+		await read.execute("read-a-x", { path: "x.ts" });
+		session.cwd = path.join(tempDir, "b");
+		await read.execute("read-b-x", { path: "x.ts" });
+
+		const guess = read.execute("read-x-guess", { path: "conflict://3" });
+		await expect(guess).rejects.toThrow(
+			`Registered: #1 in ${path.join(tempDir, "a", "x.ts").replaceAll(path.sep, "/")}; #2 in x.ts.`,
+		);
+	});
+
+	it("caps the registered ids a not-found error lists", async () => {
+		await Bun.write(path.join(tempDir, "ten.ts"), TWO_BLOCKS.repeat(5));
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+
+		await read.execute("read-ten-conflicts", { path: "ten.ts:conflicts" });
+		const guess = read.execute("read-ten-guess", { path: "conflict://99" });
+		await expect(guess).rejects.toThrow("Registered: #1, #2, #3, #4, #5, #6, #7, #8 (+2 more) in ten.ts.");
 	});
 });
 
@@ -501,6 +579,126 @@ describe("write resolves conflicts via conflict://N", () => {
 		});
 		await expect(promise).rejects.toThrow(/only accepts the tokens @ours\/@theirs\/@base\/@both/);
 		expect(await Bun.file(filePath).text()).toBe(TWO_BLOCKS);
+	});
+
+	it("rejects a per-id block whose every value is literal instead of pasting it into each block", async () => {
+		const filePath = path.join(tempDir, "directives-all-literal.ts");
+		await Bun.write(filePath, TWO_BLOCKS);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-directives-all-literal", { path: "directives-all-literal.ts" });
+		// No line is `<id>: @side`, but every line names a registered id. Hashline
+		// stripping used to eat the `1:`/`2:` heads as line numbers and write
+		// `foo\nbar` into both blocks.
+		const promise = write.execute("write-directives-all-literal", {
+			path: "conflict://*",
+			content: "1: foo\n2: bar",
+		});
+		await expect(promise).rejects.toThrow(/only accepts the tokens @ours\/@theirs\/@base\/@both/);
+		expect(await Bun.file(filePath).text()).toBe(TWO_BLOCKS);
+		expect(session.conflictHistory?.get(1)).toBeDefined();
+		expect(session.conflictHistory?.get(2)).toBeDefined();
+	});
+
+	it("rejects an all-literal per-id block without hashline mode too", async () => {
+		const filePath = path.join(tempDir, "directives-all-literal-plain.ts");
+		await Bun.write(filePath, TWO_BLOCKS);
+		const session = createTestSession(tempDir, { hasEditTool: false });
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-directives-all-literal-plain", { path: "directives-all-literal-plain.ts" });
+		const promise = write.execute("write-directives-all-literal-plain", {
+			path: "conflict://*",
+			content: "1: foo\n2: bar",
+		});
+		await expect(promise).rejects.toThrow(/Malformed `conflict:\/\/\*` per-id block/);
+		expect(await Bun.file(filePath).text()).toBe(TWO_BLOCKS);
+	});
+
+	it("rejects a per-id block whose literal value runs over several lines", async () => {
+		const filePath = path.join(tempDir, "directives-multiline.ts");
+		await Bun.write(filePath, TWO_BLOCKS);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-directives-multiline", { path: "directives-multiline.ts" });
+		const promise = write.execute("write-directives-multiline", {
+			path: "conflict://*",
+			content: "1: const x = 1;\n   const y = 2;\n2: bar",
+		});
+		await expect(promise).rejects.toThrow(/Malformed `conflict:\/\/\*` per-id block/);
+		expect(await Bun.file(filePath).text()).toBe(TWO_BLOCKS);
+	});
+
+	it("still strips copied line numbers from a uniform bulk write when they name no conflict", async () => {
+		const filePath = path.join(tempDir, "directives-numbered.ts");
+		await Bun.write(filePath, TWO_WAY);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-directives-numbered", { path: "directives-numbered.ts" });
+		const result = await write.execute("write-directives-numbered", {
+			path: "conflict://*",
+			content: "42:cleanline\n",
+		});
+		expect(getText(result)).toContain("Resolved 1 conflict");
+		expect(await Bun.file(filePath).text()).toBe("line 1\ncleanline\nline N\n");
+	});
+
+	it("still strips copied hashline rows that run past the registered ids", async () => {
+		const filePath = path.join(tempDir, "directives-rows.ts");
+		await Bun.write(filePath, TWO_BLOCKS);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-directives-rows", { path: "directives-rows.ts" });
+		// #1 and #2 are registered, but row 3 shows these are copied `LINE:` prefixes.
+		const result = await write.execute("write-directives-rows", {
+			path: "conflict://*",
+			content: "1:a\n2:b\n3:c",
+		});
+		expect(getText(result)).toContain("Resolved 2 conflicts");
+		expect(await Bun.file(filePath).text()).toBe("a\nb\nc\nmiddle\na\nb\nc\ntail\n");
+	});
+
+	it("resolves per-id directives behind copied line numbers that do not count up by one", async () => {
+		const filePath = path.join(tempDir, "directives-sparse-rows.ts");
+		await Bun.write(filePath, TWO_BLOCKS);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-directives-sparse-rows", { path: "directives-sparse-rows.ts" });
+		const result = await write.execute("write-directives-sparse-rows", {
+			path: "conflict://*",
+			content: "40:#1 = @ours\n45:#2 = @theirs",
+		});
+		expect(getText(result)).toContain("Resolved 2 conflicts");
+		expect(await Bun.file(filePath).text()).toBe("a-ours\nmiddle\nb-theirs\ntail\n");
+	});
+
+	it("rejects an all-literal per-id block behind copied line numbers that do not count up by one", async () => {
+		const filePath = path.join(tempDir, "directives-sparse-literal.ts");
+		await Bun.write(filePath, TWO_BLOCKS);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-directives-sparse-literal", { path: "directives-sparse-literal.ts" });
+		const promise = write.execute("write-directives-sparse-literal", {
+			path: "conflict://*",
+			content: "40:#1 = literal\n45:#2 = literal",
+		});
+		await expect(promise).rejects.toThrow(/Malformed `conflict:\/\/\*` per-id block/);
+		expect(await Bun.file(filePath).text()).toBe(TWO_BLOCKS);
+		expect(session.conflictHistory?.get(1)).toBeDefined();
+		expect(session.conflictHistory?.get(2)).toBeDefined();
 	});
 
 	it("still treats pure-literal content as a uniform bulk write (no false directive rejection)", async () => {

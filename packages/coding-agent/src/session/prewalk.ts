@@ -26,6 +26,7 @@ import type { PlanProposalHandler } from "../tools/resolve";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { PlanYolo, Prewalk } from "./agent-session-types";
 import { PREWALK_PLAN_MESSAGE_TYPE } from "./messages";
+import { PREWALK_MODEL_CHANGE_ROLE } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 import { cfgPrewalkAuto } from "./settings";
 const PREWALK_CONTINUE_MESSAGE_TYPE = "prewalk-continue";
@@ -79,13 +80,14 @@ export interface PrewalkCoordinatorHost {
 	/** Judges a new task for `prewalk.auto`; undefined when there is nothing to judge. */
 	classifyAutoPrewalk(request: string, signal: AbortSignal): Promise<AutoPrewalkDecision | undefined>;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
-	setModelTemporary(
-		model: Model,
-		thinkingLevel?: ConfiguredThinkingLevel,
-		options?: { ephemeral?: boolean },
-	): Promise<void>;
+	setModelTemporary(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void>;
 	setActiveToolsByName(names: string[]): Promise<void>;
-	restoreNonMCPToolPresentation(nonMCPToolNames: string[], nonMCPMountedToolNames: string[]): Promise<void>;
+	restoreNonMCPToolPresentation(
+		nonMCPToolNames: string[],
+		nonMCPMountedToolNames: string[],
+		registeredToolNames: readonly string[],
+	): Promise<void>;
+	getAllToolNames(): string[];
 	getActiveToolNames(): string[];
 	getEnabledToolNames(): string[];
 	getMountedXdevToolNames(): string[];
@@ -126,7 +128,7 @@ export class PrewalkCoordinator {
 	#continuePending = false;
 	#todoSeen = false;
 	#planYolo: PlanYolo | undefined;
-	#planYoloPreviousNonMCPPresentation: { enabled: string[]; mounted: string[] } | undefined;
+	#planYoloPreviousNonMCPPresentation: { enabled: string[]; mounted: string[]; registered: string[] } | undefined;
 	#planYoloArmed = false;
 	#handoff: PrewalkHandoff | undefined;
 	/** The pending arm `prewalk.auto` made, as opposed to a manual or configured one. */
@@ -136,7 +138,17 @@ export class PrewalkCoordinator {
 
 	constructor(host: PrewalkCoordinatorHost, options: PrewalkCoordinatorOptions = {}) {
 		this.#host = host;
-		this.#prewalk = options.prewalk;
+		const prewalk = options.prewalk;
+		const handoff = prewalk ? host.sessionManager.getSessionLocalModelChange() : undefined;
+		// A revived session still on the target its recorded handoff switched to has spent this prewalk;
+		// one that starts elsewhere (an explicit startup model, a fallback) keeps the arm.
+		const target = prewalk ? `${prewalk.target.provider}/${prewalk.target.id}` : undefined;
+		const current = host.model();
+		const spent =
+			handoff?.role === PREWALK_MODEL_CHANGE_ROLE &&
+			handoff.model === target &&
+			`${current?.provider}/${current?.id}` === target;
+		this.#prewalk = spent ? undefined : prewalk;
 		this.#planYolo = options.planYolo;
 		this.#autoSuppressed = options.suppressAutoPrewalk === true;
 	}
@@ -211,7 +223,7 @@ export class PrewalkCoordinator {
 
 	async #restoreSource(handoff: PrewalkHandoff): Promise<void> {
 		try {
-			await this.#host.setModelTemporary(handoff.source, handoff.sourceThinkingLevel, { ephemeral: true });
+			await this.#host.setModelTemporary(handoff.source, handoff.sourceThinkingLevel);
 			// Temporary selection treats undefined as "keep/default"; restoration must preserve
 			// the original selector, including auto or an explicitly inherited effort.
 			this.#host.restoreThinkingLevel(handoff.sourceThinkingLevel);
@@ -363,7 +375,7 @@ export class PrewalkCoordinator {
 		const source = this.#host.model();
 		const sourceThinkingLevel = this.#host.configuredThinkingLevel();
 		const auto = this.#autoArm === prewalk;
-		await this.#host.setModelTemporary(target, prewalk.thinkingLevel, { ephemeral: true });
+		await this.#host.setModelTemporary(target, prewalk.thinkingLevel);
 		this.#clearPrewalkState();
 		if (source) {
 			this.#handoff = {
@@ -471,7 +483,7 @@ export class PrewalkCoordinator {
 			return "rejected";
 		}
 
-		await this.#host.setModelTemporary(source, sourceThinkingLevel, { ephemeral: true });
+		await this.#host.setModelTemporary(source, sourceThinkingLevel);
 		if (!active) return this.arm(target, targetThinkingLevel) ? "armed" : "reset";
 		if (this.#isNoop(active)) {
 			this.#scrubPlanNudge();
@@ -487,6 +499,7 @@ export class PrewalkCoordinator {
 		this.#planYoloArmed = true;
 		const previousEnabledTools = this.#host.getEnabledToolNames();
 		const previousMountedTools = this.#host.getMountedXdevToolNames();
+		const previousRegisteredTools = this.#host.getAllToolNames();
 		const previousPlanModeState = this.#host.getPlanModeState();
 		const planModeState: PlanModeState = {
 			enabled: true,
@@ -513,6 +526,7 @@ export class PrewalkCoordinator {
 		this.#planYoloPreviousNonMCPPresentation = {
 			enabled: previousEnabledTools.filter(name => !isMCPToolName(name)),
 			mounted: previousMountedTools.filter(name => !isMCPToolName(name)),
+			registered: previousRegisteredTools,
 		};
 		this.#host.setPlanProposalHandler(title => this.#finalizePlanYoloProposal(title));
 	}
@@ -591,7 +605,11 @@ export class PrewalkCoordinator {
 		const previousPresentation = this.#planYoloPreviousNonMCPPresentation;
 		try {
 			if (previousPresentation) {
-				await this.#host.restoreNonMCPToolPresentation(previousPresentation.enabled, previousPresentation.mounted);
+				await this.#host.restoreNonMCPToolPresentation(
+					previousPresentation.enabled,
+					previousPresentation.mounted,
+					previousPresentation.registered,
+				);
 			}
 		} catch (error) {
 			this.#host.setPlanModeState(state);
@@ -600,7 +618,7 @@ export class PrewalkCoordinator {
 		this.#host.setPlanProposalHandler(null);
 		this.#planYolo = undefined;
 		this.#planYoloPreviousNonMCPPresentation = undefined;
-		await this.#host.setModelTemporary(planYolo.target, planYolo.thinkingLevel, { ephemeral: true });
+		await this.#host.setModelTemporary(planYolo.target, planYolo.thinkingLevel);
 		this.#host.emitNotice(
 			"info",
 			`Plan-yolo: plan approved, switched to ${planYolo.target.provider}/${planYolo.target.id} to implement "${resolvedTitle}".`,

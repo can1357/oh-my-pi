@@ -65,11 +65,14 @@ describe("edit native views", () => {
 		expect(collect(view.body, "card")).toHaveLength(0);
 		const sections = (view.body ?? []).filter(isNode).filter(child => child.k === "section");
 		expect(sections).toHaveLength(2);
-		for (const section of sections) {
+		// Each diff names its own file, which Tern picks the grammar from.
+		const files = sections.map(section => {
 			const diffs = collect(section.c, "diff");
 			expect(diffs).toHaveLength(1);
-			expect(prop(diffs[0]!, "path")).toBeUndefined();
-		}
+			expect(prop(diffs[0]!, "lang")).toBeUndefined();
+			return prop(diffs[0]!, "path");
+		});
+		expect(files).toEqual(["/tmp/a.ts", "/tmp/b.py"]);
 		const heads = sections.map(section => spanText(section, "head"));
 		expect(heads[0]).toContain("a.ts");
 		expect(heads[0]).toContain("+2");
@@ -90,6 +93,18 @@ describe("edit native views", () => {
 		expect(view.tool.target).toContain("edit-file.ts");
 		expect(view.tool.target).not.toContain("\x1b[31m");
 		expect(view.tool.target).not.toContain("\x01");
+	});
+
+	it("locates a refused edit by its streamed preview whether or not the result classes the failure", () => {
+		const refused = (details?: { diff: string; errorKind: string }) =>
+			editToolRenderer.describeResult(
+				{ content: [{ type: "text", text: "Edit rejected" }], details, isError: true },
+				{ ...done, renderContext: { editDiffPreview: { diff: "+42|x", firstChangedLine: 42 } } },
+				{ path: "/tmp/a.ts" },
+			);
+		const classed = refused({ diff: "", errorKind: "unseen_lines" });
+		expect(classed.tool?.target).toContain("a.ts:42");
+		expect(classed).toEqual(refused());
 	});
 
 	it("keeps aligned raw per-file paths out of multi-file native section labels", () => {

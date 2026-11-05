@@ -6,6 +6,7 @@ import {
 	extractMcpAuthServerUrl,
 	extractOAuthChallengeScopes,
 	fetchResourceMetadataScopes,
+	OAuthIssuerMismatchError,
 	rfc9728ProtectedResourceMetadataUrl,
 } from "@oh-my-pi/pi-coding-agent/mcp/oauth-discovery";
 import { type FetchInput, mockFetch } from "./helpers/fetch-mock";
@@ -744,6 +745,84 @@ describe("RFC 9728 path-inserted protected resource", () => {
 		expect(calls[0]).toBe(pathfulPr);
 		expect(calls).toContain(tenantOidc);
 		expect(calls).not.toContain(originAs);
+	});
+
+	it("uses an authorization server advertised at the resource's own URL", async () => {
+		const serverUrl = "https://host.example";
+		const metadataUrl = `${serverUrl}/.well-known/oauth-protected-resource`;
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			if (String(input) === metadataUrl) {
+				return Response.json({ resource: serverUrl, authorization_servers: [serverUrl] });
+			}
+			if (String(input) === `${serverUrl}/.well-known/oauth-authorization-server`) {
+				return Response.json({
+					issuer: serverUrl,
+					authorization_endpoint: `${serverUrl}/authorize`,
+					token_endpoint: `${serverUrl}/token`,
+				});
+			}
+			return new Response("not found", { status: 404 });
+		});
+
+		for (const resourceMetadataUrl of [undefined, metadataUrl]) {
+			const oauth = await discoverOAuthEndpoints(serverUrl, undefined, resourceMetadataUrl, { fetch: fetchImpl });
+			expect(oauth).toMatchObject({
+				authorizationUrl: `${serverUrl}/authorize`,
+				tokenUrl: `${serverUrl}/token`,
+				issuerUrl: serverUrl,
+				resource: serverUrl,
+			});
+		}
+	});
+
+	it("reports the advertised AS issuer mismatch instead of falling back to an unadvertised origin-root AS", async () => {
+		// LiteLLM-style gateway: `/slack/mcp` advertises `https://gw.example/slack`,
+		// whose AS metadata wrongly claims the origin as issuer. The origin-root
+		// protected-resource metadata advertises the gateway's generic AS, which
+		// validates but was never listed for this resource.
+		const gw = "https://gw.example";
+		const slackAs = {
+			issuer: gw,
+			authorization_endpoint: `${gw}/slack/authorize`,
+			token_endpoint: `${gw}/slack/token`,
+		};
+		const rootAs = {
+			issuer: gw,
+			authorization_endpoint: `${gw}/v1/mcp/oauth/authorize`,
+			token_endpoint: `${gw}/v1/mcp/oauth/token`,
+		};
+		const routes: Record<string, unknown> = {
+			[`${gw}/.well-known/oauth-protected-resource/slack/mcp`]: { authorization_servers: [`${gw}/slack`] },
+			[`${gw}/.well-known/oauth-authorization-server/slack`]: slackAs,
+			[`${gw}/slack/.well-known/oauth-authorization-server`]: slackAs,
+			[`${gw}/.well-known/oauth-protected-resource`]: { resource: gw, authorization_servers: [gw] },
+			[`${gw}/.well-known/oauth-authorization-server`]: rootAs,
+			[`${gw}/.well-known/openid-configuration`]: rootAs,
+		};
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			const body = routes[String(input)];
+			return body
+				? new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } })
+				: new Response("not found", { status: 404 });
+		});
+		const serverUrl = `${gw}/slack/mcp`;
+
+		// Advertised via the 401 resource_metadata hint, and found by resource-server probing.
+		for (const resourceMetadataUrl of [rfc9728ProtectedResourceMetadataUrl(serverUrl), undefined]) {
+			const discovery = discoverOAuthEndpoints(serverUrl, undefined, resourceMetadataUrl, { fetch: fetchImpl });
+			await expect(discovery).rejects.toBeInstanceOf(OAuthIssuerMismatchError);
+			await expect(discovery).rejects.toThrow(
+				"Could not discover OAuth endpoints: authorization server https://gw.example/slack " +
+					"(advertised by https://gw.example/.well-known/oauth-protected-resource/slack/mcp) " +
+					"returned metadata with issuer https://gw.example (RFC 8414 §3.3 requires an exact match).",
+			);
+		}
+
+		// A challenge naming both the resource metadata and an `Mcp-Auth-Server` hint for the
+		// valid but unadvertised origin AS: the advertised list wins, so the hint is not a way around it.
+		await expect(
+			discoverOAuthEndpoints(serverUrl, gw, rfc9728ProtectedResourceMetadataUrl(serverUrl), { fetch: fetchImpl }),
+		).rejects.toBeInstanceOf(OAuthIssuerMismatchError);
 	});
 });
 

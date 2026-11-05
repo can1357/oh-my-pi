@@ -7,7 +7,7 @@ import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
 
 const SELECTED_BASE_URL = "https://anthropic-grounding.example.test/v1";
 
-function createFixture(modelId = "claude-haiku-4-5") {
+function createFixture(modelId = "claude-haiku-4-5", baseUrl = SELECTED_BASE_URL) {
 	const authStorage = createInMemoryAuthStorage();
 	authStorage.keys.setRuntime("anthropic", "selected-anthropic-key");
 	const modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
@@ -16,7 +16,7 @@ function createFixture(modelId = "claude-haiku-4-5") {
 		name: `Selected ${modelId}`,
 		api: "anthropic-messages",
 		provider: "anthropic",
-		baseUrl: SELECTED_BASE_URL,
+		baseUrl,
 		reasoning: false,
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -210,6 +210,27 @@ describe("Anthropic search request body", () => {
 		}
 	});
 
+	it("omits temperature for Haiku 5.5 despite an explicit zero value", async () => {
+		const fixture = createFixture("claude-haiku-5-5");
+		try {
+			expect(fixture.model.compat?.supportsSamplingParams).toBe(false);
+			const cap = makeCaptureFetch();
+			await searchAnthropic({
+				query: "sampling compatibility",
+				systemPrompt: "Use web search.",
+				temperature: 0,
+				authStorage: fixture.authStorage,
+				modelRegistry: fixture.modelRegistry,
+				model: fixture.model,
+				fetch: cap.fetch,
+			});
+
+			expect(cap.body()).not.toHaveProperty("temperature");
+		} finally {
+			fixture.authStorage.close();
+		}
+	});
+
 	it("preserves temperature for compatible selected models", async () => {
 		const fixture = createFixture("claude-haiku-4-5");
 		try {
@@ -227,6 +248,31 @@ describe("Anthropic search request body", () => {
 			expect(cap.body()?.model).toBe("claude-haiku-4-5");
 			expect(cap.body()?.temperature).toBe(0.1);
 		} finally {
+			fixture.authStorage.close();
+		}
+	});
+
+	it("sends API version 2026-10-21 without temperature when opted in on the official API", async () => {
+		const fixture = createFixture("claude-haiku-4-5", "https://api.anthropic.com");
+		const previous = Bun.env.PI_ANTHROPIC_API_VERSION;
+		Bun.env.PI_ANTHROPIC_API_VERSION = "2026-10-21";
+		try {
+			const cap = makeCaptureFetch();
+			await searchAnthropic({
+				query: "sampling compatibility",
+				systemPrompt: "Use web search.",
+				temperature: 0.1,
+				authStorage: fixture.authStorage,
+				modelRegistry: fixture.modelRegistry,
+				model: fixture.model,
+				fetch: cap.fetch,
+			});
+
+			expect(cap.headers()?.get("anthropic-version")).toBe("2026-10-21");
+			expect(cap.body()).not.toHaveProperty("temperature");
+		} finally {
+			if (previous === undefined) delete Bun.env.PI_ANTHROPIC_API_VERSION;
+			else Bun.env.PI_ANTHROPIC_API_VERSION = previous;
 			fixture.authStorage.close();
 		}
 	});
@@ -271,6 +317,49 @@ describe("Anthropic search request body", () => {
 
 			expect(cap.headers()?.get("authorization")).toBe("Bearer sk-ant-api03-console-key");
 			expect(cap.headers()?.get("x-tenant")).toBe("tenant-a");
+		} finally {
+			fixture.authStorage.close();
+		}
+	});
+});
+
+describe("Anthropic search answer", () => {
+	it("keeps cited fragments in one paragraph and breaks only where text resumes after a search", async () => {
+		const fixture = createFixture();
+		const citation = { type: "web_search_result_location", url: "https://pi.dev", title: "Pi", cited_text: "MCP" };
+		const fetch: FetchImpl = async () =>
+			new Response(
+				JSON.stringify({
+					id: "msg_test",
+					model: "claude-haiku-4-5",
+					content: [
+						{ type: "text", text: "Let me look that up." },
+						{ type: "server_tool_use", id: "srvtoolu_1", name: "web_search", input: { query: "pi mcp" } },
+						{ type: "web_search_tool_result", tool_use_id: "srvtoolu_1", content: [] },
+						{ type: "text", text: "" },
+						{ type: "text", text: "His objection was that " },
+						{ type: "text", text: "MCP floods the context window", citations: [citation] },
+						{ type: "text", text: ". There is also a " },
+						{ type: "text", text: "model router", citations: [citation] },
+						{ type: "text", text: "." },
+					],
+					usage: { input_tokens: 1, output_tokens: 2 },
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		try {
+			const response = await searchAnthropic({
+				query: "pi mcp",
+				systemPrompt: "Use web search.",
+				authStorage: fixture.authStorage,
+				modelRegistry: fixture.modelRegistry,
+				model: fixture.model,
+				fetch,
+			});
+
+			expect(response.answer).toBe(
+				"Let me look that up.\n\nHis objection was that MCP floods the context window. There is also a model router.",
+			);
 		} finally {
 			fixture.authStorage.close();
 		}
