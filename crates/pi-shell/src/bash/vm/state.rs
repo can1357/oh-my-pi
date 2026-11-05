@@ -347,18 +347,101 @@ pub struct Root {
 	fault:             Option<StoreError>,
 	/// The root vproc's in-place fields as last written ([`sync_root`]).
 	synced:            Synced,
-	/// Deletions the store refused, to make again at the next
-	/// [`sync_root`]: a record the engine dropped must not stay in the
-	/// store, or a snapshot carries a job or a child the shell no longer
-	/// has (a restored shell found both).
-	retry_dels:        Vec<KeyBuf>,
-	/// Disown transitions the store refused. Bash `delete_job` discards
-	/// the job's process records with its table entry; our running vproc
-	/// must instead keep that ownership release until its marker is
-	/// written or its exit deletes the record, even after a store fault.
-	retry_disowns:     Vec<Vpid>,
+	/// Latest deletions and proc ownership decisions not yet accepted by
+	/// the store. Other refused root fields are rebuilt by the dirty sync.
+	pending:           PendingWrites,
 	/// zsh's history events as last written (mirrors their store record).
 	pub hist_events:   parking_lot::Mutex<super::builtins::history::model::EventsCache>,
+}
+
+/// One current intent per key; acknowledgements address its generation,
+/// not the key alone. An obsolete replay never owns the replacement entry.
+#[derive(Debug, Default)]
+struct PendingWrites {
+	sequence: u64,
+	current:  hashbrown::HashMap<KeyBuf, PendingWrite>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingWrite {
+	sequence: u64,
+	value:    ProcIntent,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ProcIntent {
+	Delete,
+	Proc { parent: Option<Vpid>, status: Option<i32> },
+}
+
+impl PendingWrites {
+	fn submit(&mut self, key: Key<'_>, value: Option<ProcIntent>) -> u64 {
+		self.sequence = self
+			.sequence
+			.checked_add(1)
+			.expect("store intent sequence exhausted");
+		if let Some(value) = value {
+			self
+				.current
+				.insert(key.to_buf(), PendingWrite { sequence: self.sequence, value });
+		} else {
+			// Root fields reconstructed by sync also replace an older deletion.
+			self.current.remove(&key);
+		}
+		self.sequence
+	}
+
+	fn value(&self, key: Key<'_>) -> Option<ProcIntent> {
+		self.current.get(&key).map(|intent| intent.value)
+	}
+
+	/// Acknowledging any generation other than the current one is a no-op.
+	fn acknowledge(&mut self, key: Key<'_>, sequence: u64) {
+		if let hashbrown::hash_map::EntryRef::Occupied(entry) = self.current.entry_ref(&key)
+			&& entry.get().sequence == sequence
+		{
+			entry.remove();
+		}
+	}
+
+	fn attempt(
+		&mut self,
+		store: &mut dyn StateStore,
+		key: Key<'_>,
+		sequence: u64,
+	) -> Result<(), StoreError> {
+		let Some(intent) = self
+			.current
+			.get(&key)
+			.filter(|intent| intent.sequence == sequence)
+		else {
+			return Ok(());
+		};
+		let change = match intent.value {
+			ProcIntent::Delete => Change::Del(key),
+			ProcIntent::Proc { parent, status } => Change::Put(key, Record::Proc { parent, status }),
+		};
+		store.apply(change)?;
+		self.acknowledge(key, sequence);
+		Ok(())
+	}
+
+	fn replay(&mut self, store: &mut dyn StateStore) -> Option<StoreError> {
+		let tickets: Vec<_> = self
+			.current
+			.iter()
+			.map(|(key, intent)| (key.clone(), intent.sequence))
+			.collect();
+		let mut fault = None;
+		for (key, sequence) in tickets {
+			if let Err(err) = self.attempt(store, key.as_key(), sequence)
+				&& fault.is_none()
+			{
+				fault = Some(err);
+			}
+		}
+		fault
+	}
 }
 
 /// The root vproc's fields the interpreter updates in place (`vp.status = …`
@@ -569,8 +652,8 @@ impl Root {
 	/// A disowned proc, including an ownership release not yet accepted by
 	/// the store. Adoption and exit must observe the same transition.
 	pub fn disowned(&mut self, store: &mut dyn StateStore, vpid: Vpid) -> bool {
-		if self.retry_disowns.contains(&vpid) {
-			return true;
+		if let Some(intent) = self.pending.value(Key::Proc(vpid)) {
+			return matches!(intent, ProcIntent::Proc { parent: Some(super::DISOWNED), .. });
 		}
 		match store.get(Key::Proc(vpid)) {
 			Ok(Some(Record::Proc { parent: Some(super::DISOWNED), .. })) => true,
@@ -586,47 +669,27 @@ impl Root {
 	/// ([`Self::fail`]).
 	pub fn write(&mut self, store: &mut dyn StateStore, change: Change<'_>) {
 		self.note(&change);
-		let key = match &change {
-			Change::Del(key) | Change::Put(key, _) => Some(key.to_buf()),
-			_ => None,
+		let result = match change {
+			Change::Del(key) => {
+				let sequence = self.pending.submit(key, Some(ProcIntent::Delete));
+				self.pending.attempt(store, key, sequence)
+			},
+			Change::Put(key @ Key::Proc(_), Record::Proc { parent, status }) => {
+				let sequence = self
+					.pending
+					.submit(key, Some(ProcIntent::Proc { parent, status }));
+				self.pending.attempt(store, key, sequence)
+			},
+			change => {
+				if let Change::Put(key, _) = &change {
+					self.pending.submit(*key, None);
+				}
+				store.apply(change)
+			},
 		};
-		let proc = match &change {
-			Change::Del(Key::Proc(v)) | Change::Put(Key::Proc(v), _) => Some(*v),
-			_ => None,
-		};
-		let disown = matches!(
-			&change,
-			Change::Put(Key::Proc(_), Record::Proc { parent: Some(super::DISOWNED), status: None })
-		);
-		let deleting = matches!(change, Change::Del(_));
-		if let Err(err) = store.apply(change) {
+		if let Err(err) = result {
 			self.fail(err);
-			// What the store holds is no longer what this cache claims, and
-			// a refused deletion leaves a record nothing else deletes.
 			self.synced.dirty = true;
-			if disown
-				&& let Some(v) = proc
-				&& !self.retry_disowns.contains(&v)
-			{
-				self.retry_disowns.push(v);
-			}
-			if deleting
-				&& let Some(key) = key
-				&& !self.retry_dels.contains(&key)
-			{
-				self.retry_dels.push(key);
-			}
-		} else {
-			if let Some(v) = proc {
-				self.retry_disowns.retain(|queued| *queued != v);
-			}
-			if !deleting
-				&& let Some(key) = key
-				&& !self.retry_dels.is_empty()
-			{
-				// A newer value supersedes a previously refused deletion.
-				self.retry_dels.retain(|queued| *queued != key);
-			}
 		}
 	}
 
@@ -3143,16 +3206,10 @@ fn write_jobs(root: &mut Root, store: &mut dyn StateStore, jobs: &JobTable, forc
 /// contract's granularity for these fields.
 pub fn sync_root(root: &mut Root, store: &mut dyn StateStore, vp: &Vproc) {
 	debug_assert!(vp.overlay.is_none(), "only the root vproc's fields are in the store");
-	// A write refused since the last sync left this cache claiming records
-	// the store never took: write them all again, and make every deletion
-	// the store refused again first (`write` queues them).
 	let all = std::mem::take(&mut root.synced.dirty);
-	for key in std::mem::take(&mut root.retry_dels) {
-		root.write(store, Change::Del(key.as_key()));
-	}
-	for v in std::mem::take(&mut root.retry_disowns) {
-		let rec = Record::Proc { parent: Some(super::DISOWNED), status: None };
-		root.write(store, Change::Put(Key::Proc(v), rec));
+	if let Some(err) = root.pending.replay(store) {
+		root.fail(err);
+		root.synced.dirty = true;
 	}
 	if all || vp.status != root.synced.status {
 		root.synced.status = vp.status;
@@ -3912,6 +3969,64 @@ mod tests {
 			println!("{report}");
 		}
 		assert_eq!(failed_cases, 0, "{}", failures.join("\n"));
+	}
+
+	#[test]
+	fn proc_retry_obsolete_replays_and_acknowledgements_cannot_replace_current_intents() {
+		let values = [
+			ProcIntent::Delete,
+			ProcIntent::Proc { parent: Some(super::super::DISOWNED), status: None },
+			ProcIntent::Proc { parent: Some(Vpid(1)), status: Some(23) },
+		];
+		for key in [Key::Proc(Vpid(42)), Key::Proc(Vpid(43))] {
+			let other = if key == Key::Proc(Vpid(42)) {
+				Key::Proc(Vpid(43))
+			} else {
+				Key::Proc(Vpid(42))
+			};
+			for old_value in values {
+				for new_value in values {
+					let mut pending = PendingWrites::default();
+					let mut store = crate::bash::MemStore::new();
+					let old = pending.submit(key, Some(old_value));
+					let independent = pending
+						.submit(other, Some(ProcIntent::Proc { parent: Some(Vpid(1)), status: Some(7) }));
+					let current = pending.submit(key, Some(new_value));
+					pending.acknowledge(key, old);
+					pending.attempt(&mut store, key, old).unwrap();
+					assert_eq!(
+						store.get(key).unwrap(),
+						None,
+						"an obsolete replay must not publish its value"
+					);
+					pending.attempt(&mut store, other, independent).unwrap();
+					pending.attempt(&mut store, key, current).unwrap();
+					let wanted = match new_value {
+						ProcIntent::Delete => None,
+						ProcIntent::Proc { parent, status } => Some(Record::Proc { parent, status }),
+					};
+					assert_eq!(
+						store.get(key).unwrap(),
+						wanted.as_ref(),
+						"old acknowledgement must leave the new intent retryable"
+					);
+					assert_eq!(
+						store.get(other).unwrap(),
+						Some(&Record::Proc { parent: Some(Vpid(1)), status: Some(7) })
+					);
+					let newest = pending
+						.submit(key, Some(ProcIntent::Proc { parent: Some(Vpid(1)), status: Some(37) }));
+					pending.acknowledge(key, current);
+					pending.attempt(&mut store, key, current).unwrap();
+					pending.attempt(&mut store, key, newest).unwrap();
+					assert_eq!(
+						store.get(key).unwrap(),
+						Some(&Record::Proc { parent: Some(Vpid(1)), status: Some(37) }),
+						"a removed and resubmitted key must not reuse an acknowledged generation"
+					);
+				}
+			}
+		}
 	}
 
 	fn shell() -> (crate::bash::MemStore, Root, Vproc) {
