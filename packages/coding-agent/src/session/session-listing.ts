@@ -12,7 +12,7 @@ import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { EVAL_STATE_CONTEXT_TYPE } from "../eval/state";
 import { visitEntriesFromFile } from "./session-loader";
-import { type LocatedSession, locateSessions } from "./session-locator";
+import { type LocatedSession, locateSessions, unindexedSessionRoots } from "./session-locator";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { listSessionTitles, lookupSessionTitle, recordSessionTitle, recordSessionTitles } from "./session-index";
@@ -1705,5 +1705,16 @@ export async function resolveResumableSession(
 		if (session && sessionMatchesResumeArg(session, sessionArg)) return { session, scope: "global" };
 	}
 	if (archived) throw new ArchivedSessionError(sessionArg, archived.path, archived.livePath);
+
+	// A root an older omp wrote has no index until `omp session reindex`
+	// rebuilds it, and an upgrade must cost a user nothing: list such a root as
+	// this function did before there was an index. Only roots that were never
+	// rebuilt are listed, and only after the index found nothing, so the walk
+	// disappears for good once each root has been rebuilt once.
+	for (const root of await unindexedSessionRoots()) {
+		const sessions = await listAllSessions(storage, root);
+		const match = sessions.find(session => sessionMatchesResumeArg(session, sessionArg));
+		if (match) return { session: match, scope: "global" };
+	}
 	return undefined;
 }

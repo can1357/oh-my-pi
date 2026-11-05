@@ -32,7 +32,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getProfileSessionsDirs, getSessionsDir } from "@oh-my-pi/pi-utils/dirs";
+import { getSessionsDir } from "@oh-my-pi/pi-utils/dirs";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { hasFsCode, isEacces, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils/fs-error";
 import * as logger from "@oh-my-pi/pi-utils/logger";
@@ -93,7 +93,15 @@ function extraRoots(): string[] {
 
 /**
  * Every root a lookup consults, in order: this process's sessions root and its
- * archive, the configured extra roots, then each profile's root and archive.
+ * archive, then the configured extra roots.
+ *
+ * Other profiles' roots are **not** consulted. A profile is a boundary a user
+ * chose, and reaching across it would let a session under one profile open
+ * another's transcripts — a change of default behaviour with a privacy
+ * character, which does not belong in a fix for finding a session by id. A
+ * user who wants one profile's sessions visible from another names that root
+ * in `session.extraRoots` (or `PI_SESSION_EXTRA_ROOTS`), which is also how a
+ * sessions tree on another disk is reached.
  */
 export function sessionLocatorRoots(): string[] {
 	const roots: string[] = [];
@@ -104,8 +112,7 @@ export function sessionLocatorRoots(): string[] {
 	const own = getSessionsDir();
 	add(own);
 	add(archiveRootFor(own));
-	for (const root of extraRoots()) add(root);
-	for (const root of getProfileSessionsDirs()) {
+	for (const root of extraRoots()) {
 		add(root);
 		add(archiveRootFor(root));
 	}
@@ -672,6 +679,19 @@ export async function sessionLocatorMayBeIncomplete(root: string = getSessionsDi
 	}
 }
 
+/**
+ * The roots a lookup consults that were never rebuilt with `omp session
+ * reindex`, so a session an older omp wrote there is in no index and only a
+ * directory listing of that root can find it. Empty once every root has been
+ * rebuilt, which is what lets the listing fall away.
+ */
+export async function unindexedSessionRoots(roots: readonly string[] = sessionLocatorRoots()): Promise<string[]> {
+	const incomplete = await Promise.all(
+		roots.map(async root => ((await sessionLocatorMayBeIncomplete(root)) ? root : undefined)),
+	);
+	return incomplete.filter((root): root is string => root !== undefined);
+}
+
 /** What {@link rebuildSessionLocator} did to one root. */
 export interface SessionLocatorRebuild {
 	root: string;
@@ -863,10 +883,33 @@ export async function rebuildSessionLocator(root: string): Promise<SessionLocato
 				kept.add(line);
 				lines.push(`${line}\n`);
 			};
+			// A row the walk did not produce is kept only while its file could
+			// still be there. Without this the snapshot grows for ever — every
+			// session ever deleted, moved or archived keeps a row, and a lookup
+			// reads the whole file of every root. A row is dropped only on a
+			// definite ENOENT for a path inside this root: a file that cannot be
+			// read for any other reason, or that lies outside the root (a
+			// `--session-dir` session, recorded absolute), is kept, because
+			// "cannot tell" must never mean "delete".
+			const carried: string[] = [];
 			for (const line of previous.split("\n")) {
 				const tab = line.indexOf("\t");
-				if (tab > 0 && SESSION_ID_RE.test(line.slice(0, tab)) && line.length > tab + 1) keep(line);
+				if (tab > 0 && SESSION_ID_RE.test(line.slice(0, tab)) && line.length > tab + 1) carried.push(line);
 			}
+			const live = await Promise.all(
+				carried.map(async line => {
+					const stored = decodeStoredPath(line.slice(line.indexOf("\t") + 1));
+					if (stored === undefined || path.isAbsolute(stored)) return true;
+					const candidate = path.join(resolvedRoot, stored.split("/").join(path.sep));
+					try {
+						await fs.promises.lstat(candidate);
+						return true;
+					} catch (error) {
+						return !isEnoent(error);
+					}
+				}),
+			);
+			for (let i = 0; i < carried.length; i++) if (live[i]) keep(carried[i]);
 			for (const line of walked) keep(line);
 			// Unique per call: two reindexes of one root in one process may start in the same millisecond.
 			const staged = `${snapshot}.${process.pid}.${crypto.randomUUID()}.tmp`;

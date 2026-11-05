@@ -1563,16 +1563,26 @@ export class SessionManager {
 	/**
 	 * Record the session file's path in the session index the first time this
 	 * session is durably written at it, so a lookup by id finds it without
-	 * walking the sessions tree (see `session-locator.ts`). A failed append
-	 * (an index log that cannot be written for now) is tried again on the next
-	 * durable write, never given up on.
+	 * walking the sessions tree (see `session-locator.ts`).
+	 *
+	 * Attempted once per location, whether it succeeds or fails. A failed
+	 * append means the index log could not be written — a full or read-only
+	 * disk, or a mode a user set — and none of that clears between two entries
+	 * of one turn. Retrying per entry would make every append pay a failed
+	 * write plus the work that decides how loudly to report it, turning a
+	 * degraded disk into a directory walk per message.
+	 *
+	 * A move changes the location, so it gets its own attempt; a transient
+	 * failure at one location is recovered by `omp session reindex`, which
+	 * derives the whole root, rather than by trying again per entry.
 	 */
 	#noteLocation(): void {
 		if (!this.#persist || !this.#sessionFile || !this.#sessionId) return;
 		if (!(this.#storage instanceof FileSessionStorage)) return;
 		const location = `${this.#sessionId}\0${this.#sessionFile}`;
 		if (location === this.#indexedLocation) return;
-		if (recordSessionLocation(this.#sessionId, this.#sessionFile)) this.#indexedLocation = location;
+		this.#indexedLocation = location;
+		recordSessionLocation(this.#sessionId, this.#sessionFile);
 	}
 
 	/**

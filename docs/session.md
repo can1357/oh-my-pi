@@ -653,8 +653,17 @@ Each sessions root holds up to two files of `<id>\t<path>` lines, the path relat
 A lookup reads both files of every root, in order:
 
 1. this process's sessions root (`~/.omp/agent/sessions`) and its archive (`~/.omp/agent/archive/sessions`);
-2. `session.extraRoots` (or `PI_SESSION_EXTRA_ROOTS`);
-3. every other profile's sessions root and archive (`~/.omp/agent`, `~/.omp/profiles/<name>/agent`, and their `$XDG_DATA_HOME/omp` forms). A process with an overridden agent directory (`PI_CODING_AGENT_DIR`) consults only its own root, its archive and the extra roots.
+2. each root named in `session.extraRoots` (or `PI_SESSION_EXTRA_ROOTS`) and its archive.
+
+Another profile's sessions root is consulted **only** when it is named in `session.extraRoots`. A
+profile is a boundary its user chose, and finding a session by id does not cross it: a session under
+one profile cannot open another's transcripts by default. Naming the root is also how a sessions tree
+on another disk is reached.
+
+A root this release has never rebuilt with `omp session reindex` has no index to read, so a lookup
+that finds nothing in the indexes falls back to listing such a root — exactly what the previous
+release did for every lookup. An upgrade therefore costs nothing and needs no command, and the
+listing disappears for that root once it has been rebuilt once.
 
 Each matching line names candidate paths: its relative path, then that path plus `.gz` (how `omp gc` stores a compressed transcript), under its own root first and then under every other root. The first that exists and still holds the recorded id in its header is the match, so a line whose path now holds another session never answers for the old one; a copy whose header cannot be read is skipped in favour of the next. Lookups read index files, stat candidates and read their headers; they never list a directory. The newest match wins. A key outside `[A-Za-z0-9_-]` matches nothing. Commands that resolve an id without starting the settings stack (`omp session`, `omp share`, `omp render`) apply the persisted `session.extraRoots` first.
 

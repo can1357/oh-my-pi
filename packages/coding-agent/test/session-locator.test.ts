@@ -171,7 +171,7 @@ describe("session index: lookups by id", () => {
 		expect(await findSessionFiles(childId.slice(0, 13))).toEqual([childFile]);
 	});
 
-	it("resolves without listing any directory but the current project's", async () => {
+	it("resolves without listing any directory but the current project's, once the root is indexed", async () => {
 		// A tree of 200 project buckets beside the target, 25 transcripts each.
 		const sessionsRoot = getSessionsDir();
 		for (let bucket = 0; bucket < 200; bucket++) {
@@ -186,6 +186,11 @@ describe("session index: lookups by id", () => {
 		const parentId = parent.getSessionId();
 		await child.close();
 		await parent.close();
+		// The no-listing promise belongs to an indexed root: until a root has
+		// been rebuilt once, a lookup still lists it so an upgrading user loses
+		// nothing. This is the steady state every user reaches after one
+		// `omp session reindex`, and the state the promise is about.
+		await rebuildSessionLocator(sessionsRoot);
 
 		const localDir = computeDefaultSessionDir(cwdB, new FileSessionStorage());
 		const probe = countListings(path.resolve(sessionsRoot), localDir);
@@ -208,6 +213,9 @@ describe("session index: lookups by id", () => {
 			const child = await subagentSession(parent, cwdA, "Deep");
 			const childId = child.getSessionId();
 			await child.close();
+			// An indexed root: the no-listing promise is about the steady state,
+			// not about a root this release has never rebuilt.
+			await rebuildSessionLocator(getSessionsDir());
 			const log = path.join(getSessionsDir(), SESSION_LOCATOR_FILE);
 			fs.chmodSync(log, 0o400);
 			try {
@@ -325,7 +333,7 @@ describe("session index: lookups by id", () => {
 		);
 	});
 
-	it("indexes sessions an older omp wrote only on reindex, and says so until then", async () => {
+	it("costs an upgrading user nothing, and indexes what only a reindex can reach", async () => {
 		const legacyId = "019a0000-1111-7222-8333-444455556666";
 		const nestedId = "019a0000-9999-7222-8333-444455556666";
 		const bucket = path.join(getSessionsDir(), "--legacy-project--");
@@ -334,8 +342,15 @@ describe("session index: lookups by id", () => {
 		writeTranscript(legacy, legacyId, "/legacy/project");
 		writeTranscript(nested, nestedId, "/legacy/project");
 
-		expect(await resolveResumableSession(legacyId, cwdB)).toBeUndefined();
+		// Nothing has been indexed yet, exactly as after an upgrade. A session
+		// the previous release could find is still found, by listing the root
+		// this release has not rebuilt — an upgrade must not cost a user a
+		// session, and must not require them to run a command first.
 		expect(await sessionLocatorMayBeIncomplete()).toBe(true);
+		expect((await resolveResumableSession(legacyId, cwdB))?.session.path).toBe(legacy);
+		// The nested transcript is what the previous release could NOT find, and
+		// no listing reaches it: that one waits for the index.
+		expect(await resolveResumableSession(nestedId, cwdB)).toBeUndefined();
 
 		const rebuilt = await rebuildSessionLocator(getSessionsDir());
 		expect(rebuilt.indexed).toBe(2);
@@ -346,6 +361,41 @@ describe("session index: lookups by id", () => {
 		// The rebuilt index is renamed into place: no staging file is left behind.
 		expect(fs.readdirSync(getSessionsDir()).filter(name => name.endsWith(".tmp"))).toEqual([]);
 	});
+
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"drops a row whose file is gone, and keeps one it cannot check",
+		async () => {
+			const sessions = getSessionsDir();
+			const goneId = "019a001b-0000-7000-8000-000000000001";
+			const keptId = "019a001b-0000-7000-8000-000000000002";
+			const unknownId = "019a001b-0000-7000-8000-000000000003";
+			const bucket = path.join(sessions, "--pruned--");
+			const gone = path.join(bucket, `2026-01-02T03-04-05-000Z_${goneId}.jsonl`);
+			const kept = path.join(bucket, `2026-01-02T03-04-06-000Z_${keptId}.jsonl`);
+			const unreadableBucket = path.join(sessions, "--unreadable--");
+			const unknown = path.join(unreadableBucket, `2026-01-02T03-04-07-000Z_${unknownId}.jsonl`);
+			writeTranscript(gone, goneId, "/p");
+			writeTranscript(kept, keptId, "/p");
+			writeTranscript(unknown, unknownId, "/p");
+			expect((await rebuildSessionLocator(sessions)).indexed).toBe(3);
+
+			// One file deleted, and one whose directory cannot be searched at all.
+			fs.rmSync(gone);
+			fs.chmodSync(unreadableBucket, 0o000);
+			try {
+				await rebuildSessionLocator(sessions);
+				const rows = fs.readFileSync(path.join(sessions, SESSION_LOCATOR_BASE_FILE), "utf8");
+				// Gone for certain: dropped, so what a lookup reads stays bounded.
+				expect(rows).not.toContain(goneId);
+				// Still there: kept.
+				expect(rows).toContain(keptId);
+				// Could not be checked: kept, because "cannot tell" is not "delete".
+				expect(rows).toContain(unknownId);
+			} finally {
+				fs.chmodSync(unreadableBucket, 0o700);
+			}
+		},
+	);
 
 	it("reports a transcript it read without finding an id, rather than counting it as walked", async () => {
 		const bucket = path.join(getSessionsDir(), "--no-id--");
@@ -1113,37 +1163,45 @@ describe("session index: lookups by id", () => {
 			}
 		});
 
-		it.skipIf(unlessRoot)(
-			"records a session moved while its index log could not be written, at its next write",
-			async () => {
-				const parent = await persistedSession(cwdA);
-				const childId = "019a0013-0000-7000-8000-000000000001";
-				const artifacts = parent.getSessionFile()!.slice(0, -".jsonl".length);
-				writeTranscript(path.join(artifacts, "Worker.jsonl"), childId, cwdA);
-				await rebuildSessionLocator(getSessionsDir());
-				const log = path.join(getSessionsDir(), SESSION_LOCATOR_FILE);
-				fs.chmodSync(log, 0o400);
-				try {
-					await parent.moveTo(cwdB);
-				} finally {
-					fs.chmodSync(log, 0o600);
+		it.skipIf(unlessRoot)("attempts a session's index line once per location, not once per entry", async () => {
+			const parent = await persistedSession(cwdA);
+			const childId = "019a0013-0000-7000-8000-000000000001";
+			const artifacts = parent.getSessionFile()!.slice(0, -".jsonl".length);
+			writeTranscript(path.join(artifacts, "Worker.jsonl"), childId, cwdA);
+			await rebuildSessionLocator(getSessionsDir());
+			const log = path.join(getSessionsDir(), SESSION_LOCATOR_FILE);
+			const appends = spyOn(fs, "appendFileSync");
+			fs.chmodSync(log, 0o400);
+			try {
+				await parent.moveTo(cwdB);
+				const afterMove = appends.mock.calls.filter(call => String(call[0]) === log).length;
+				expect(afterMove).toBeGreaterThan(0);
+				// Four more entries at the same location: a log that cannot be
+				// written now will not be writable two messages later, and a
+				// degraded disk must not cost a failed write and a directory
+				// walk per message.
+				for (let i = 0; i < 4; i++) {
+					parent.appendMessage({ role: "user", content: `entry ${i}`, timestamp: 3 + i });
+					await parent.flush();
 				}
-				const movedChild = path.join(parent.getSessionFile()!.slice(0, -".jsonl".length), "Worker.jsonl");
-				parent.appendMessage({ role: "user", content: "after the log recovered", timestamp: 3 });
-				await parent.flush();
-				await parent.close();
-				const cwdC = path.join(agentDir, "project-c");
-				fs.mkdirSync(cwdC);
-				expect((await resolveResumableSession(parent.getSessionId(), cwdC))?.session.path).toBe(
-					parent.getSessionFile()!,
-				);
-				// The subagent transcript the move carried is not written again, and
-				// nothing queues it: a reindex of its root is what derives it afresh.
-				expect(await resolveResumableSession(childId, cwdC)).toBeUndefined();
-				await rebuildSessionLocator(getSessionsDir());
-				expect((await resolveResumableSession(childId, cwdC))?.session.path).toBe(movedChild);
-			},
-		);
+				expect(appends.mock.calls.filter(call => String(call[0]) === log).length).toBe(afterMove);
+			} finally {
+				appends.mockRestore();
+				fs.chmodSync(log, 0o600);
+			}
+			const movedChild = path.join(parent.getSessionFile()!.slice(0, -".jsonl".length), "Worker.jsonl");
+			await parent.close();
+			const cwdC = path.join(agentDir, "project-c");
+			fs.mkdirSync(cwdC);
+			// Neither the parent's new path nor the transcript its move carried
+			// is in the index, and nothing queues either: a reindex of the root
+			// is what derives them afresh.
+			await rebuildSessionLocator(getSessionsDir());
+			expect((await resolveResumableSession(parent.getSessionId(), cwdC))?.session.path).toBe(
+				parent.getSessionFile()!,
+			);
+			expect((await resolveResumableSession(childId, cwdC))?.session.path).toBe(movedChild);
+		});
 
 		it.skipIf(unlessRoot)(
 			"serialises reindexes of one root reached through a symlink and its real path",
@@ -1347,17 +1405,30 @@ describe("session index: profiles", () => {
 		await fsp.rm(cwd, { recursive: true, force: true });
 	});
 
-	it("resolves a session another profile created", async () => {
+	it("keeps another profile's sessions out of a lookup unless that root is configured", async () => {
 		setProfile("work");
 		const session = await persistedSession(cwd);
 		const id = session.getSessionId();
 		const file = session.getSessionFile()!;
+		const workRoot = getSessionsDir();
 		await session.close();
 		expect(file.startsWith(path.join(configRoot, "profiles", "work"))).toBe(true);
 
 		setProfile(undefined);
 		const otherCwd = path.join(cwd, "elsewhere");
 		fs.mkdirSync(otherCwd);
-		expect((await resolveResumableSession(id, otherCwd))?.session.path).toBe(file);
+		// A profile is a boundary the user chose. Finding a session by id does
+		// not reach across it: that would be a change of default behaviour with
+		// a privacy character, arriving inside a bug fix.
+		expect(await resolveResumableSession(id, otherCwd)).toBeUndefined();
+
+		// Naming the root opts in, the same way a sessions tree on another disk
+		// is reached.
+		configureSessionExtraRoots([workRoot]);
+		try {
+			expect((await resolveResumableSession(id, otherCwd))?.session.path).toBe(file);
+		} finally {
+			configureSessionExtraRoots([]);
+		}
 	});
 });
