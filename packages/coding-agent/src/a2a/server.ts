@@ -47,6 +47,8 @@ export const A2A_HOST = "127.0.0.1";
 export const DEFAULT_A2A_PORT = 7391;
 export const AGENT_CARD_PATH = "/.well-known/agent-card.json";
 export const A2A_TOKEN_FILENAME = "a2a.token";
+/** How long a stream waits on a SUBMITTED (reserved, not yet registered) spawn. */
+const PENDING_SPAWN_GRACE_MS = 30_000;
 const RPC_PATHS: ReadonlySet<string> = new Set(["/", "/rpc"]);
 
 /** The bus surface the bridge uses: one fire-and-forget delivery. */
@@ -149,10 +151,14 @@ function streamTaskResponse(
 	const stop = (): void => settle(true);
 	activeStreams.add(stop);
 	let lastSignature = `${task.status.state}|${task.status.timestamp ?? ""}`;
+	// A SUBMITTED task is a reserved spawn whose run is still starting: its id
+	// is not in the registry yet, and that must not read as a terminal failure.
+	let pendingUntil = task.metadata?.pending === true ? Date.now() + PENDING_SPAWN_GRACE_MS : 0;
 	const emit = (): void => {
 		if (closed) return;
 		const ref = options.registry.get(task.id);
 		if (!ref) {
+			if (pendingUntil > 0 && Date.now() < pendingUntil) return;
 			const update: TaskStatusUpdateEvent = {
 				taskId: task.id,
 				contextId: task.contextId ?? "",
@@ -163,6 +169,7 @@ function streamTaskResponse(
 			stop();
 			return;
 		}
+		pendingUntil = 0;
 		const snapshot = taskFromAgentRef(ref);
 		const signature = `${snapshot.status.state}|${snapshot.status.timestamp ?? ""}|${ref.activity ?? ""}`;
 		if (signature === lastSignature) return;

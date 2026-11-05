@@ -321,6 +321,9 @@ extension in the request metadata:
   the session's configured default; `metadata.context` is shared background
   like a `task` batch context). The response's task id **is** the new agent id.
 - `metadata.to: "main"` is an alias for the main agent's id.
+- A spawn whose child session has not registered yet answers `TASK_STATE_SUBMITTED`
+  with `metadata.pending: true` (id reserved, run starting). Poll `GetTask` for
+  that id instead of retrying `SendMessage` — a retry spawns a second agent.
 
 ### Status mapping
 

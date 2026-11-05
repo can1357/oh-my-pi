@@ -113,6 +113,19 @@ class FakeRegistry {
 		this.#emit({ type: "metadata_changed", ref });
 	}
 
+	/** Register a ref the way the executor does (new generation, `registered` event). */
+	register(input: { id: string; displayName: string; kind: AgentRef["kind"]; status?: AgentRef["status"] }): AgentRef {
+		const ref = makeRef({
+			id: input.id,
+			displayName: input.displayName,
+			kind: input.kind,
+			...(input.status ? { status: input.status } : {}),
+		});
+		this.#refs.set(ref.id, ref);
+		this.#emit({ type: "registered", ref });
+		return ref;
+	}
+
 	emit(event: RegistryEvent): void {
 		this.#emit(event);
 	}
@@ -651,6 +664,51 @@ describe("spawnSubagent seam", () => {
 				},
 			),
 		).rejects.toThrow("preflight rejected the spawn");
+	});
+});
+
+describe("A2A streaming a pending spawn", () => {
+	it("stays open on SUBMITTED and never reports a vanished-agent failure", async () => {
+		const registry = new FakeRegistry();
+		const { handle } = startServer({
+			registry,
+			spawn: async () => {
+				throw new SpawnPendingError("Spawn-late");
+			},
+		});
+		const response = await fetch(handle.url, {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+			body: JSON.stringify({
+				jsonrpc: "2.0",
+				id: 22,
+				method: "SendStreamingMessage",
+				params: { message: { messageId: "m-4b", role: "ROLE_USER", parts: [{ text: "start late" }] } },
+			}),
+		});
+		const sse = openSse(response);
+		try {
+			await sse.until(text => text.includes('"result":{"task"'));
+			expect(sse.text).toContain("TASK_STATE_SUBMITTED");
+			expect(sse.text).toContain('"pending":true');
+
+			// A progress notification for the reserved id before registration must
+			// not be read as a vanished agent: the run is still starting.
+			registry.emit({ type: "metadata_changed", ref: makeRef({ id: "Spawn-late", status: "running" }) });
+			expect(sse.text).not.toContain("TASK_STATE_FAILED");
+
+			registry.register({ id: "Spawn-late", displayName: "Late", kind: "sub", status: "running" });
+			await sse.until(text => text.includes("statusUpdate"));
+			expect(sse.text).toContain("TASK_STATE_WORKING");
+
+			registry.get("Spawn-late")!.history = { outputPath: "/tmp/late.md" };
+			registry.setStatus("Spawn-late", "idle");
+			await sse.toEnd();
+			expect(sse.text).toContain("TASK_STATE_COMPLETED");
+			expect(sse.text).not.toContain("TASK_STATE_FAILED");
+		} finally {
+			sse.cancel();
+		}
 	});
 });
 
