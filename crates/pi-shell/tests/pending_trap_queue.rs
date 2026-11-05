@@ -6,14 +6,14 @@
 //! once when `catch_flag` is clear, clears it when it starts, then scans
 //! the signal numbers upwards once, running the action of each signal
 //! still pending when the scan reaches it. So the signals pending when a
-//! scan starts never interleave, a delivery that arrives WHILE an action
-//! runs starts a nested scan (which sees the live queue), a repeat of the
-//! signal whose action is running is dropped when that action ends, and a
-//! `return` that jumps out of the scan abandons what it had not reached.
+//! scan starts never interleave. A fresh delivery while an action runs can
+//! start a nested scan, including the same ordinary signal (but not WINCH).
+//! A repeat still pending when its action ends is dropped. A `return` that
+//! jumps out of the scan abandons what it had not reached.
 //!
-//! Every golden below was measured on Bash 5.2.21 (`/usr/bin/bash`) and
-//! Bash 5.3.0 in script mode, ten runs each; the two versions agree on
-//! every row, and every run of a row was identical.
+//! The Bash goldens use script-file measurements on Bash 5.3.0, checked
+//! against Bash 5.2.21 (`/usr/bin/bash`). The function-trap test also protects
+//! the shared queue's existing zsh behavior.
 //!
 //! The scripts name `/bin/sleep` and `/bin/true` by path on purpose. This
 //! engine has `sleep` and `true` as builtins, so a bare `sleep` is neither
@@ -22,6 +22,8 @@
 #![cfg(unix)]
 
 use pi_shell::{Shell, ShellRunOptions, cancel::CancelToken};
+
+mod obash_support;
 
 /// Runs each script in a fresh shell and asserts Bash's output and exit
 /// status 0, reporting every row that differs. The channel carries the
@@ -255,4 +257,136 @@ async fn a_delivery_waits_for_the_foreground_command() {
 		),
 	])
 	.await;
+}
+
+/// Ordinary signals can recursively interrupt their own action. Bash's
+/// default `EVALNEST_MAX` is zero (unlimited), not 128.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ordinary_signal_can_interrupt_its_own_action() {
+	assert_bash_outputs(&[
+		(
+			r#"n=0; trap 'n=$((n+1)); echo enter=$n; if [ $n -lt 3 ]; then kill -USR1 $BASHPID; fi; echo leave=$n' USR1; kill -USR1 $BASHPID; echo end=$n"#,
+			"enter=1\nenter=2\nenter=3\nleave=3\nleave=3\nleave=3\nend=3\n",
+		),
+		(
+			r#"n=0; trap 'n=$((n+1)); echo old=$n; trap "echo new" USR1; kill -USR1 $BASHPID; echo tail' USR1; kill -USR1 $BASHPID; echo end"#,
+			"old=1\nnew\ntail\nend\n",
+		),
+		(
+			r#"n=0; trap 'n=$((n+1)); if [ $n -le 132 ]; then kill -USR1 $BASHPID; fi' USR1; kill -USR1 $BASHPID; echo after=$n"#,
+			"after=133\n",
+		),
+	])
+	.await;
+}
+
+/// A batch owns the action captured before its first child, even when
+/// that action replaces, ignores, or resets the live CHLD disposition.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chld_batch_keeps_its_original_action() {
+	assert_bash_outputs(&[
+		(
+			r#"n=0; trap 'n=$((n+1)); echo old=$n; trap "echo new" CHLD' CHLD; /bin/true | /bin/true | /bin/true | /bin/sleep .2; echo end=$n"#,
+			"old=1\nold=2\nold=3\nold=4\nend=4\n",
+		),
+		(
+			r#"n=0; trap 'n=$((n+1)); echo old=$n; trap "" CHLD' CHLD; /bin/true | /bin/true | /bin/true | /bin/sleep .2; echo end=$n"#,
+			"old=1\nold=2\nold=3\nold=4\nend=4\n",
+		),
+		(
+			r#"n=0; trap 'n=$((n+1)); echo old=$n; trap - CHLD' CHLD; /bin/true | /bin/true | /bin/true | /bin/sleep .2; echo end=$n"#,
+			"old=1\nold=2\nold=3\nold=4\nend=4\n",
+		),
+	])
+	.await;
+}
+
+/// Exercise the real script-file snapshot consumer, not a queue clone.
+/// Exact Bash output also prevents plain and restored runs agreeing on
+/// the same bug. Counters ensure restoration was not silently skipped.
+#[test]
+fn a_snapshot_keeps_owed_children_and_the_running_action_before_later_signals() {
+	let rows = [
+		(
+			r#"n=0; trap 'n=$((n+1)); echo chld=$n' CHLD; /bin/true & /bin/true & /bin/true & /bin/sleep .2; echo end=$n; wait"#,
+			"chld=1\nchld=2\nchld=3\nchld=4\nend=4\n",
+		),
+		(
+			r#"trap 'echo one-start; echo one-end' USR1; trap 'echo term-start; echo term-end' TERM; /bin/bash -c 'kill -USR1 $PPID; kill -TERM $PPID'; echo end"#,
+			"one-start\none-end\nterm-start\nterm-end\nend\n",
+		),
+		(
+			r#"n=0; trap 'n=$((n+1)); echo enter=$n; if [ $n -lt 3 ]; then kill -USR1 $BASHPID; fi; echo leave=$n' USR1; kill -USR1 $BASHPID; echo end=$n"#,
+			"enter=1\nenter=2\nenter=3\nleave=3\nleave=3\nleave=3\nend=3\n",
+		),
+		(
+			r#"n=0; trap 'n=$((n+1)); echo old=$n; trap "echo new" CHLD' CHLD; /bin/true | /bin/true | /bin/true | /bin/sleep .2; echo end=$n"#,
+			"old=1\nold=2\nold=3\nold=4\nend=4\n",
+		),
+	];
+	let mut mismatches = Vec::new();
+	for (row, (script, expected)) in rows.into_iter().enumerate() {
+		for mode in ["step", "exec"] {
+			let dir = tempfile::tempdir().unwrap();
+			let path = dir.path().join("script.sh");
+			let stats = dir.path().join("stats");
+			std::fs::write(&path, script).unwrap();
+			let output = obash_support::output(
+				obash_support::obash()
+					.arg("--fault=1:1")
+					.arg(format!("--fault-mode={mode}"))
+					.arg(&path)
+					.env("PI_SHELL_FAULT_STATS", &stats),
+			);
+			let counters = std::fs::read_to_string(stats).unwrap();
+			let restored: u64 = counters
+				.split_whitespace()
+				.find_map(|field| field.strip_prefix("restored="))
+				.unwrap()
+				.parse()
+				.unwrap();
+			assert!(restored > 0, "{mode}: {counters}");
+			assert!(counters.split_whitespace().any(|field| field == "lost=0"), "{counters}");
+			if !output.status.success()
+				|| output.stdout != expected.as_bytes()
+				|| !output.stderr.is_empty()
+			{
+				mismatches.push(format!(
+					"row {row} {mode}: expected {expected:?}; got {output:?}; {counters}"
+				));
+			}
+		}
+	}
+	assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+/// A reset-to-default stop parks the whole scan until CONT. The marker
+/// tests timing, not Bash's job-status text or whether TTIN is coalesced.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pending_default_stop_parks_later_actions_and_commands_until_cont() {
+	assert_bash_outputs(&[(
+		r#"d=$(mktemp -d); set -m; f(){ trap 'echo reset; trap - TSTP' USR1; trap 'echo old-tstp' TSTP; trap '[ -e "$d/continued" ] || echo EARLY-ttin' TTIN; /bin/sleep .4; [ -e "$d/continued" ] || echo EARLY-after; echo after; }; f & p=$!; /bin/sleep .1; kill -USR1 "$p"; kill -TSTP "$p"; kill -TTIN "$p"; /bin/sleep .6; : > "$d/continued"; echo continue; kill -CONT "$p"; /bin/sleep .2; wait "$p"; rm -rf "$d""#,
+		"reset\ncontinue\nafter\n",
+	)])
+	.await;
+}
+
+#[test]
+fn a_chld_function_trap_still_runs_for_completed_background_jobs() {
+	let script = r#"n=0; TRAPCHLD() { n=$((n+1)); echo chld=$n; }; /bin/true & /bin/true & /bin/true & /bin/sleep .2; wait; echo end=$n"#;
+	for mode in ["plain", "step", "exec"] {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("script.zsh");
+		std::fs::write(&path, script).unwrap();
+		let mut command = obash_support::obash();
+		if mode != "plain" {
+			command
+				.arg("--fault=1:1")
+				.arg(format!("--fault-mode={mode}"));
+		}
+		let output = obash_support::output(command.arg("--emulate=zsh").arg(path));
+		assert!(output.status.success(), "{mode}: {output:?}");
+		assert_eq!(output.stdout, b"chld=1\nchld=2\nchld=3\nend=3\n", "{mode}: {output:?}");
+		assert!(output.stderr.is_empty(), "{mode}: {output:?}");
+	}
 }
