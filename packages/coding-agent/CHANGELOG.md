@@ -102,6 +102,7 @@
 
 ### Changed
 
+- Introduced a cap-watch mechanism to synchronize cost-gate states across threads, ensuring subagents immediately honor a cost cap set on the main thread
 - Optimized RPC wire protocol and task streaming via raw-pass encoding to minimize serialization and scanning overhead
 - Local Whisper speech-to-text and the local tiny model install their Transformers.js runtime on first use instead of with omp, so installs are smaller; first use needs network access
 - Local Parakeet and Nemotron speech runtimes now install on first use in source and npm installs too, reducing initial install size; first use needs network access
