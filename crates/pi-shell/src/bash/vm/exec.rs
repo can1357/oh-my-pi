@@ -436,7 +436,14 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			// (`subshell_environment`): it ends where a fatal error lands,
 			// with its EXIT trap.
 			Flow::Discard(status) if super::nested::in_subshell(cx.store, vp) => {
-				let status = jump_status(k, cx, vp, Some(status));
+				let status = jump_status(k, cx, vp, Jump::Discard(status));
+				exit_shell(k, vp, cx, status);
+			},
+			// With `errexit` on the jump is bash's `ERREXIT`, which no
+			// `parse_and_execute` carries on from: the shell ends with the
+			// failure status wherever the jump lands.
+			Flow::Discard(status) if errexit_on(k, cx, vp) => {
+				let status = jump_status(k, cx, vp, Jump::Discard(status));
 				exit_shell(k, vp, cx, status);
 			},
 			Flow::Discard(status) => {
@@ -2078,6 +2085,24 @@ fn stopped(
 	}
 }
 
+/// What kind of jump a vproc makes out of the place it is running: which
+/// `parse_and_execute` catches it, and whether `errexit` raises bash's
+/// `ERREXIT` in its place.
+#[derive(Clone, Copy)]
+enum Jump {
+	/// bash's `FORCE_EOF`: `${x?}`, `set -u`, a posix shell's assignment
+	/// error. No `parse_and_execute` catches it.
+	Fatal,
+	/// bash's `DISCARD` out of a place that cannot carry on (a subshell):
+	/// a bad substitution or an arithmetic error in a word.
+	Discard(i32),
+	/// An arithmetic error in an assignment (`A[bad!]=x`, `declare -i I;
+	/// I=bad!`). It leaves every `eval`, `.` and function like a fatal
+	/// error, but it keeps the status of the place it lands, and
+	/// `errexit` never raises `ERREXIT` in its place.
+	Assign(i32),
+}
+
 /// A fatal shell error (bash's `jump_to_top_level (FORCE_EOF)`: `${x?}`,
 /// `set -u`, a posix shell's assignment error): the shell exits with the
 /// status of the place the jump lands ([`jump_status`]), unlike `exit n`
@@ -2087,15 +2112,15 @@ pub fn fatal(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Flow {
 		// zsh: 127 from a `-c` string, 1 elsewhere (`zsh_exit` decides the rest).
 		return Flow::Exit(if shell_command(cx, vp) { 127 } else { 1 });
 	}
-	Flow::Exit(jump_status(k, cx, vp, None))
+	Flow::Exit(jump_status(k, cx, vp, Jump::Fatal))
 }
 
-/// A command bash discards where it must not go on (a posix shell's
-/// assignment error before a command that is not a special builtin):
-/// the discard landing of [`jump_status`], never the "carry on with the
-/// next command" of a plain [`Flow::Discard`].
-pub fn discard_jump(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Flow {
-	Flow::Exit(jump_status(k, cx, vp, Some(1)))
+/// An arithmetic error in an assignment ([`Jump::Assign`]): no `eval`,
+/// `.` or function contains it, and the status is the one of the place
+/// its jump lands, never the "carry on with the next command" of a plain
+/// [`Flow::Discard`].
+pub fn assign_jump(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Flow {
+	Flow::Exit(jump_status(k, cx, vp, Jump::Assign(1)))
 }
 
 /// Whether `vp` runs a `-c` string as the shell itself (a nested shell,
@@ -2168,22 +2193,16 @@ fn catch(cx: &mut Cx<'_>, vp: &Vproc) -> Catch {
 	vp.fork_landing.map_or(Catch::Own, Catch::Fork)
 }
 
-/// The status `vp` exits with after a fatal error (`discarded` `None`) or
-/// a command it discards with status `discarded` in a subshell (bash's
-/// `parse_and_execute` hands `DISCARD` on there): where the jump lands
-/// decides. A forked command that has not dispatched its program yet runs
-/// the EXIT trap it inherited, as bash's child does before it resets its
-/// traps ([`forked_dispatch`]).
-fn jump_status(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, discarded: Option<i32>) -> i32 {
-	match catch(cx, vp) {
-		// With `errexit` on, the jump out of the EXIT trap's action is bash's
-		// `ERREXIT`, which `run_exit_trap` answers with the failure status
-		// rather than the status it saved.
-		Catch::ExitTrap(_)
-			if state::option(&mut k.root, cx.store, vp, OptId::Errexit).unwrap_or(false) =>
-		{
-			1
-		},
+/// The status `vp` exits with after a jump of kind `jump`: where the jump
+/// lands decides. A forked command that has not dispatched its program
+/// yet runs the EXIT trap it inherited, as bash's child does before it
+/// resets its traps ([`forked_dispatch`]).
+fn jump_status(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, jump: Jump) -> i32 {
+	let discarded = match jump {
+		Jump::Fatal => None,
+		Jump::Discard(status) | Jump::Assign(status) => Some(status),
+	};
+	let landed = match catch(cx, vp) {
 		Catch::ExitTrap(saved) => saved,
 		// The nested trap's status, which the EXIT trap's own catch would
 		// have replaced with the status it saved.
@@ -2207,7 +2226,17 @@ fn jump_status(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, discarded: Optio
 			}
 		},
 		Catch::Own => discarded.unwrap_or(1),
+	};
+	// With `errexit` on, bash raises `ERREXIT` where it would have raised
+	// `FORCE_EOF` or `DISCARD`, and every catch answers that with the
+	// failure status: `run_exit_trap` and `run_one_command` both return
+	// `last_command_exit_value`, and a child the shell forked before it
+	// expanded anything carries it too. An arithmetic error in an
+	// assignment is not one of these ([`Jump::Assign`]).
+	if matches!(jump, Jump::Fatal | Jump::Discard(_)) && errexit_on(k, cx, vp) {
+		return 1;
 	}
+	landed
 }
 
 /// A forked lone simple command ([`Vproc::fork_landing`]) dispatches its
@@ -2256,11 +2285,25 @@ fn fork_landing(cx: &mut Cx<'_>, vp: &Vproc) -> Landing {
 /// Whether the pipeline stage or job body at `entry` is one simple command
 /// (`!` before it for a job): bash forks it before it expands anything
 /// (`execute_simple_command`), so it has no `top_level` of its own.
+///
+/// A command substitution or process substitution in the command's own
+/// words, assignments or redirections lowers to a block the main flow
+/// jumps over, before the command's `Exec`: those jumps are part of the
+/// one simple command, so follow them.
 fn forks_simple(unit: &Unit, entry: u32) -> bool {
 	let code = |at: u32| unit.ops.get(at as usize).map(|op| op.code);
-	code(entry) == Some(Opcode::Exec)
-		&& (code(entry + 1) == Some(Opcode::SubExit)
-			|| (code(entry + 1) == Some(Opcode::Not) && code(entry + 2) == Some(Opcode::SubExit)))
+	let mut at = entry;
+	// Each jump goes forward, over its own block, so this ends.
+	while code(at) == Some(Opcode::Jmp) {
+		let over = unit.ops[at as usize].a;
+		if over <= at {
+			return false;
+		}
+		at = over;
+	}
+	code(at) == Some(Opcode::Exec)
+		&& (code(at + 1) == Some(Opcode::SubExit)
+			|| (code(at + 1) == Some(Opcode::Not) && code(at + 2) == Some(Opcode::SubExit)))
 }
 
 /// Expansion errors end the shell: posix mode, not interactive.

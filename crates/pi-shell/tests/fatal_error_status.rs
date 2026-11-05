@@ -280,3 +280,93 @@ async fn round_two_rows() {
 	])
 	.await;
 }
+
+/// Round-3 review rows, each the output and status of Bash 5.2.21 and 5.3.0
+/// for the same `-c` string. With `errexit` on, bash raises `ERREXIT` where
+/// it would have raised its `FORCE_EOF` or its `DISCARD`, and every catch
+/// answers that with 1: the EXIT trap's action, a trap nested in it, the
+/// shell itself, and a child the shell forked before it expanded anything.
+/// An arithmetic error in an assignment is bash's own jump instead: no
+/// `eval`, `.` or function contains it, `errexit` does not change it, and it
+/// keeps the status of the place it lands. A command substitution in a
+/// forked command's words leaves it one simple command, which lands where
+/// its parent's jump would have.
+#[tokio::test(flavor = "multi_thread")]
+async fn round_three_rows() {
+	check(&[
+		// `errexit` and a child the shell forked before it expanded anything.
+		(
+			r##"trap 'set -e; : ${u?BOOM} | :; echo P:${PIPESTATUS[*]}' EXIT; exit 7"##,
+			"P:1 0\n",
+			7,
+		),
+		(r##"trap ': ${u?BOOM} | :; echo P:${PIPESTATUS[*]}' EXIT; exit 7"##, "P:7 0\n", 7),
+		(r##"set -e; : ${u?BOOM} & wait $!; echo W:$?"##, "", 1),
+		(r##"set -e; : ${u?BOOM} | :; echo P:${PIPESTATUS[*]}"##, "P:1 0\n", 0),
+		(r##"trap 'set -e; : ${u?BOOM} & wait $!; echo W:$?' EXIT; exit 7"##, "", 1),
+		// `errexit` and a trap nested in the EXIT trap's action.
+		(r##"trap 'set -e; trap '"'"': ${u?BOOM}'"'"' DEBUG; :' EXIT; exit 7"##, "", 1),
+		(
+			r##"trap 'set -e; trap '"'"': ${u?BOOM}'"'"' USR2; kill -USR2 $$' EXIT; exit 7"##,
+			"",
+			1,
+		),
+		(
+			r##"trap 'trap '"'"'set -e; : ${u?BOOM}'"'"' USR2; kill -USR2 $$; echo AFTER' EXIT; exit 7"##,
+			"",
+			1,
+		),
+		// `errexit` and a discarded command (a bad substitution).
+		(r##"trap 'set -e; : ${x.y}; echo AFTER' EXIT; exit 3"##, "", 1),
+		(r##"set -e; trap ': ${x.y}; echo AFTER' EXIT; exit 3"##, "", 1),
+		(r##"trap ': ${x.y}; echo AFTER' EXIT; exit 3"##, "", 3),
+		(r##"trap 'set -e; : ${x.y} | cat; echo P:${PIPESTATUS[0]}' EXIT; exit 7"##, "P:1\n", 7),
+		(r##"trap ': ${x.y} | cat; echo P:${PIPESTATUS[0]}' EXIT; exit 7"##, "P:7\n", 7),
+		(r##"trap 'set -e; trap '"'"': ${x.y}'"'"' DEBUG; :; echo AFTER' EXIT; exit 7"##, "", 1),
+		// An arithmetic error in an assignment: no catch of eval, `.` or a
+		// function, and `errexit` does not change it.
+		(r##"declare -a A; eval 'A[bad!]=x'; echo AFTER:$?"##, "", 1),
+		(r##"declare -i I; eval 'I=bad!'; echo AFTER:$?"##, "", 1),
+		(r##"set -o posix; declare -i I; eval 'I=bad!'; echo AFTER:$?"##, "", 1),
+		(r##"set -o posix; declare -i I; I=bad!; echo AFTER:$?"##, "", 1),
+		(r##"set -o posix; declare -ia A; A=x/0; echo AFTER:$?"##, "", 1),
+		(r##"f(){ declare -a A; A[bad!]=x; }; f; echo AFTER:$?"##, "", 1),
+		(r##"set -o posix; declare -a A; eval 'A[bad!]=x'; echo AFTER:$?"##, "", 1),
+		(
+			r##"trap 'eval '"'"'set -o posix; declare -a A; A[bad!]=x'"'"'; echo BAD' EXIT; exit 7"##,
+			"",
+			7,
+		),
+		(
+			r##"set -e; trap 'eval '"'"'set -o posix; declare -a A; A[bad!]=x'"'"'' EXIT; exit 7"##,
+			"",
+			7,
+		),
+		(
+			r##"trap 'set -e; declare -a A; A[bad!]=x | cat; echo P:${PIPESTATUS[0]}' EXIT; exit 7"##,
+			"P:7\n",
+			7,
+		),
+		(r##"set -e; declare -a A; A[bad!]=x & wait $!; echo W:$?"##, "", 1),
+		(r##"x=$( declare -a A; A[bad!]=x; echo IN ); echo "[$x] AFTER:$?""##, "[] AFTER:1\n", 0),
+		// A posix temporary-environment assignment error is a discard `eval`
+		// and `.` catch.
+		(r##"set -o posix; readonly R; eval 'R=x /usr/bin/true'; echo AFTER:$?"##, "AFTER:1\n", 0),
+		(
+			r##"trap 'eval '"'"'set -o posix; readonly R; R=x /usr/bin/true'"'"'; echo BAD' EXIT; exit 7"##,
+			"BAD\n",
+			7,
+		),
+		// A command substitution in the words of a forked simple command.
+		(r##": "${u?BOOM}" "$( echo ready )" & wait $!; echo W:$?"##, "W:127\n", 0),
+		(r##": "${u?BOOM}" "$( echo ready )" | cat; echo P:${PIPESTATUS[0]}"##, "P:127\n", 0),
+		(
+			r##"trap 'echo T:$?' EXIT; : "${u?BOOM}" "$( echo ready )" & wait $!; echo W:$?"##,
+			"T:127\nW:127\nT:0\n",
+			0,
+		),
+		(r##"x="$( echo a )" : "${u?BOOM}" & wait $!; echo W:$?"##, "W:127\n", 0),
+		(r##": "${u?BOOM}" > "$( echo /dev/null )" & wait $!; echo W:$?"##, "W:127\n", 0),
+	])
+	.await;
+}

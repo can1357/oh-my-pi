@@ -454,7 +454,13 @@ fn assignment_statement(
 			Err(stop) => return Some(exec::stop_flow(k, vp, cx, line, stop)),
 		};
 		if let Err(d) = assign_now(k, vp, cx, &a.name, None, a.append, AssignValue::Scalar(value)) {
+			// An arithmetic error in the value (`declare -i I; I=bad!`) is
+			// bash's own jump: no `eval`, `.` or function contains it.
+			let arith = matches!(d, Diag::Arith { .. } | Diag::ArithSubscript { .. });
 			k.diag(cx, vp, line, d);
+			if arith {
+				return Some(exec::assign_jump(k, vp, cx));
+			}
 			// bash abandons the rest of the command line after a failed
 			// assignment statement; a posix shell exits.
 			if state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
@@ -1007,13 +1013,14 @@ fn expand(
 					.unwrap_or(false)
 				{
 					// A special builtin ends the shell with the fatal
-					// status; any other command ends it with the discard
-					// one, and never runs.
+					// status; any other command abandons the line with the
+					// discard one, and never runs. `eval` and `.` catch
+					// that discard, as bash's `parse_and_execute` does.
 					if IntrinsicId::from_name(&st(vp).argv[0]).is_some_and(is_special) {
 						return Some(exec::fatal(k, vp, cx));
 					}
 					if !matches!(st(vp).target, Some(Target::Function(_))) {
-						return Some(exec::discard_jump(k, vp, cx));
+						return Some(Flow::Discard(1));
 					}
 					let s = st(vp);
 					s.status = 1;
@@ -1073,16 +1080,18 @@ fn expand(
 			if let Err(d) =
 				assign_now(k, vp, cx, &name, index.as_ref().map(|i| i.as_slice()), append, value)
 			{
-				// An arithmetic error in the subscript abandons the line
-				// wherever it lands (bash's `DISCARD`), a failed assignment
-				// ends a posix shell (its `FORCE_EOF`).
-				let arith = matches!(d, Diag::ArithSubscript { .. });
+				// An arithmetic error in the subscript or in the value is
+				// bash's own jump: it leaves every `eval`, `.` and
+				// function, and keeps the status of the place it lands.
+				let arith = matches!(d, Diag::Arith { .. } | Diag::ArithSubscript { .. });
 				k.diag(cx, vp, line, d);
+				if arith {
+					return Some(exec::assign_jump(k, vp, cx));
+				}
 				// bash abandons the rest of the command line after a failed
 				// assignment statement; a posix shell exits.
-				if !arith
-					&& state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
-						.unwrap_or(false)
+				if state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
+					.unwrap_or(false)
 				{
 					return Some(exec::fatal(k, vp, cx));
 				}
