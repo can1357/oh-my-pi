@@ -240,3 +240,23 @@ it("a superseded session that never ran a turn still cancels the work it owns", 
 		authStorage.close();
 	}
 }, 60_000);
+
+it("learns the ref it runs as when the registry attaches it, not when the change event arrives", async () => {
+	const registry = AgentRegistry.global();
+	const jobManager = new AsyncJobManager({ agents: registry });
+	// A session that owns work and is attached, superseded and disposed inside
+	// one synchronous run: the registry's change event cannot have been
+	// delivered yet, so only the attach itself can have told it its lineage.
+	const events: string[] = [];
+	const unsubscribe = registry.onChange(event => events.push(event.type));
+	const ref = registry.register({ id: "Solo", displayName: "Solo", kind: "sub", session: null });
+	const session = { instanceKey: "solo", recordOwnAgentRef: () => recorded.push(registry.get("Solo")?.lineage) };
+	const recorded: Array<number | undefined> = [];
+
+	expect(registry.attachSession("Solo", session as never, null, ref)).toBe(true);
+
+	// The attach told the session synchronously, before any listener ran.
+	expect(recorded).toEqual([ref.lineage]);
+	unsubscribe();
+	await jobManager.dispose({ timeoutMs: 200 });
+}, 30_000);

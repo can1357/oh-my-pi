@@ -135,7 +135,12 @@ export class RemoteAgentRegistry implements AgentRegistryApi {
 		sessionFile?: string | null,
 		expected?: AgentRefExpectation,
 	): boolean {
-		return this.#remote.callSync("attachSession", id, session, sessionFile, expected);
+		const attached = this.#remote.callSync("attachSession", id, session, sessionFile, expected);
+		// The session is local to this worker, so tell it here: main's registry
+		// holds only a proxy of it, and its change event reaches this thread
+		// asynchronously — too late for a session superseded before delivery.
+		if (attached) session.recordOwnAgentRef?.();
+		return attached;
 	}
 
 	detachSession(id: string, expected?: AgentRefExpectation): boolean {

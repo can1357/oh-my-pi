@@ -491,9 +491,12 @@ export class AgentRegistry implements AgentRegistryApi {
 			ref.sessionFile = sessionFile;
 		}
 		ref.lastActivity = Date.now();
-		// Attaching a session is how a ref gains its identity for everyone
-		// watching: the session this ref runs as can only learn its own lineage
-		// here, because nothing else tells it which ref it got.
+		// The session can only learn which ref it runs as here, and it must know
+		// before it can be superseded: afterwards its id names the replacement
+		// and its own lineage is unrecoverable. Telling it directly is
+		// synchronous for a session homed on this thread; the event also carries
+		// the attach, for watchers and for a session reached only by proxy.
+		session.recordOwnAgentRef?.();
 		this.#emit({ type: "metadata_changed", ref });
 		return true;
 	}

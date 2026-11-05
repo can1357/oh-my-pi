@@ -97,6 +97,13 @@ export interface AgentSessionAdvisorOverview {
 export interface AgentSessionHandle {
 	/** Cross-thread identity token: `${homeThreadId}:${snowflake}`, unique per session object. */
 	readonly instanceKey: string;
+	/**
+	 * Tells a session that the registry has just attached it to its ref, so it
+	 * can record the lineage it runs as while the registry still answers for it.
+	 * Optional: only a session that owns async work needs it, and the change
+	 * event it would otherwise wait for crosses the thread link asynchronously.
+	 */
+	recordOwnAgentRef?(): void;
 	/** Agent loop pause flag and live state. */
 	readonly agent: AgentSessionLoopHandle;
 	/** Session-manager reads. */
