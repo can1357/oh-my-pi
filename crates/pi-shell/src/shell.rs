@@ -1328,16 +1328,21 @@ async fn run_shell_command_segmented_chain(
 		}
 	}
 
+	// The chain ran to its end, so its trace is finished with the command's
+	// real final status even when the run then fails for output its consumer
+	// lost: a command that has ended must never be left reported as still
+	// executing.
+	if let Some(status) = last_status
+		&& let Some(trace) = options.trace.as_ref()
+	{
+		trace.finish_segments(status);
+	}
 	if let Some(undelivered) = undelivered {
 		return Err(undelivered.into());
 	}
 	let Some(status) = last_status else {
 		return Err(Error::msg("Segmented chain executed no segments"));
 	};
-
-	if let Some(trace) = options.trace.as_ref() {
-		trace.finish_segments(status);
-	}
 
 	let minimized_out = aggregate
 		// Only surface telemetry when the segmented chain actually rewrote the
