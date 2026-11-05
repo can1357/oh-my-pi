@@ -210,31 +210,9 @@ export class AdvisorEmissionGuard {
 	}
 
 	/**
-	 * Record that a still-pending note was re-raised at a strictly higher
-	 * severity and is being escalated in place — no new admission, no extra
-	 * budget. Keeps the dedupe rank and any current-update slot coherent, so a
-	 * later equal/lower repeat of the text stays suppressed and displacement
-	 * compares the note's real rank. No-op when `rank` does not exceed the
-	 * recorded rank.
-	 */
-	escalatePending(note: string, rank: number): void {
-		const key = normalizeAdvisorNote(note);
-		if (!key) return;
-		const seenRank = this.#seen.get(key) ?? 0;
-		if (rank <= seenRank) return;
-		// Shares admit's bounded recording: a key that aged out of the FIFO
-		// history and is re-tracked here MUST re-enter the eviction queue,
-		// otherwise it becomes a permanent, unevictable entry.
-		this.#recordRank(key, rank);
-		const slot = this.#slots.find(s => s.key === key);
-		if (slot && slot.rank < rank) slot.rank = rank;
-	}
-
-	/**
 	 * Record the highest admitted rank for a key, FIFO-bounding the history:
 	 * first-seen keys enter the eviction queue and the oldest entry is dropped
-	 * beyond {@link #capacity}. The single recording path shared by {@link
-	 * admit} and {@link escalatePending}.
+	 * beyond {@link #capacity}.
 	 */
 	#recordRank(key: string, rank: number): void {
 		const isNew = !this.#seen.has(key);

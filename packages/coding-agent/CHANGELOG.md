@@ -31,6 +31,7 @@
 
 ### Changed
 
+- Advisor concerns raised while the agent is mid-turn now reach it at its next step as non-interrupting asides instead of after the turn completes; only blockers interrupt a running tool ([#10600](https://github.com/can1357/oh-my-pi/issues/10600), [#13775](https://github.com/can1357/oh-my-pi/pull/13775) by [@rthiago](https://github.com/rthiago)).
 - Text Verbosity now defaults to low and applies to Codex too, matching the official Codex client: shorter answers that finish sooner; set `textVerbosity` to `medium` for the old length
 - A cost cap set on the main thread now applies to running subagents immediately
 - RPC wire protocol and task streaming have lower serialization overhead
@@ -53,6 +54,7 @@
 
 ### Fixed
 
+- Fixed advisor notes lingering invisibly until the next prompt when they arrived after the agent's last step or while it was idle; they are now shown as advisor cards ([#10600](https://github.com/can1357/oh-my-pi/issues/10600), [#13775](https://github.com/can1357/oh-my-pi/pull/13775) by [@rthiago](https://github.com/rthiago)).
 - Subagents loading MCP tools (such as Kata's `load_*`) no longer change the main session's tools or system prompt
 - Mounting an MCP tool mid-session on prefix-bound models no longer changes the eval tool description, and the mount notice now reaches the model
 - Worker-thread subagents are faster: switching views on long transcripts no longer lags, `wait` no longer streams full transcripts, and they stall less on a busy main thread
