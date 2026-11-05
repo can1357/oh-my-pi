@@ -296,17 +296,20 @@ pub struct TrapQueue {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Scan {
 	/// The lowest signal number the scan has still to examine.
-	pub cursor:    u32,
+	pub cursor:      u32,
 	/// `Vproc::frames.len()` when the scan started: the action it started
 	/// has ended once the stack is back to this depth, and the scan is
 	/// abandoned once the stack is below it (bash's `longjmp` out of
 	/// `run_pending_traps`, from a `return` in the action).
-	pub depth:     usize,
+	pub depth:       usize,
 	/// bash `running_trap - 1`: the signal whose action is running.
-	pub running:   Option<Signal>,
+	pub running:     Option<Signal>,
 	/// Runs of the `SIGCHLD` action this scan still owes (bash's
 	/// `run_sigchld_trap (nchild)` loop).
-	pub chld_left: u32,
+	pub chld_left:   u32,
+	/// A captured text action and dialect. `None` uses zsh's function-trap
+	/// dispatch, whose surrounding trap script is empty.
+	pub chld_action: Option<(BString, ModeId)>,
 }
 
 impl PendingTraps {
@@ -331,15 +334,42 @@ impl PendingTraps {
 		self.0.as_deref().map_or(SigSet::EMPTY, |q| q.queued)
 	}
 
-	/// A restored shell takes the queue it was snapshotted with; it has no
-	/// scan in progress, so whatever is queued is unclaimed.
-	pub fn restore(&mut self, queued: SigSet) {
-		if queued == SigSet::EMPTY {
-			return;
+	/// Rebuild scans from the trap frames in a version-29 image. A queued
+	/// copy of a running ordinary signal is a fresh delivery (its original
+	/// bit was cleared before the action), so it can nest. Otherwise resume
+	/// the action first, then drain the queue from the lowest signal.
+	pub fn restore(&mut self, queued: SigSet, frames: &[Frame], chld: u32, mode: ModeId) {
+		for (depth, frame) in frames.iter().enumerate() {
+			let FrameKind::Script {
+				src,
+				what: ScriptKind::Trap { key: crate::bash::store::TrapKey::Signal(sig), .. },
+				..
+			} = &frame.kind
+			else {
+				continue;
+			};
+			let q = self.get();
+			let is_chld = *sig == Signal::Chld;
+			q.chld_running |= is_chld;
+			q.scans.push(Scan {
+				cursor: 0,
+				depth,
+				running: Some(*sig),
+				chld_left: if is_chld { chld } else { 0 },
+				chld_action: (is_chld && !src.is_empty())
+					.then(|| (src.clone(), frame.unit.as_ref().map_or(mode, |u| u.mode))),
+			});
 		}
-		let q = self.get();
-		q.queued = queued;
-		q.catch = true;
+		if queued != SigSet::EMPTY || self.0.is_some() {
+			let q = self.get();
+			q.queued = queued;
+			q.catch = (q.scans.is_empty() && queued != SigSet::EMPTY)
+				|| q.scans.iter().any(|scan| {
+					scan.running.is_some_and(|sig| {
+						!matches!(sig, Signal::Chld | Signal::Winch) && queued.contains(sig)
+					})
+				});
+		}
 	}
 
 	/// The queue, allocated on first use.
@@ -362,8 +392,8 @@ pub struct JobTable {
 	pub current:  Option<u32>,
 	/// The previous job (`%-`), by number.
 	pub previous: Option<u32>,
-	/// `SIGCHLD` trap runs owed: bash runs the trap once per child that
-	/// finished while it was set, however many finished at once.
+	/// Unstarted `SIGCHLD` actions, including the running batch's remainder.
+	/// Decremented when each action starts, so a snapshot retains the debt.
 	pub chld:     u32,
 	/// A forked subshell (`( )`, `&`, a pipeline stage, `<( )`): bash runs
 	/// it without job control and with an empty job table. A command

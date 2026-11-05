@@ -245,9 +245,9 @@ struct ProcImage {
 	/// A subshell's own state (`None` for the root vproc).
 	fields:        Option<Fields>,
 	out:           Vec<PendingWrite>,
-	/// The signals queued for the trap scan; the scans themselves are not
-	/// serialized, as a restored shell starts its own (bash's
-	/// `run_pending_traps` state lives on the C stack).
+	/// Queued signals. Restore rebuilds active scans from their existing
+	/// trap script frames and the persisted job counter, without extending
+	/// the version-29 postcard layout.
 	pending_traps: SigSet,
 	stopped:       bool,
 	transient:     bool,
@@ -806,7 +806,6 @@ impl Shell {
 				vp
 			};
 			vp.out = p.out.into();
-			vp.traps.restore(p.pending_traps);
 			vp.stopped = p.stopped;
 			vp.procsubs = p.procsubs;
 			vp.coprocs = p.coprocs;
@@ -984,6 +983,8 @@ impl Shell {
 				}
 				vp.frames.push(frame);
 			}
+			vp.traps
+				.restore(p.pending_traps, &vp.frames, vp.jobs.chld, vp.mode);
 			procs.push(Box::new(vp));
 		}
 		if procs.is_empty() {

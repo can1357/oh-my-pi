@@ -84,8 +84,14 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			}
 		}
 		// bash's `run_pending_traps` (`trap.c`), one step.
-		if !vp.traps.is_idle() && run_pending_traps(k, vp, cx) {
-			continue;
+		if !vp.traps.is_idle() {
+			let started = run_pending_traps(k, vp, cx);
+			if vp.stopped {
+				return;
+			}
+			if started {
+				continue;
+			}
 		}
 		if !vp.restore_opts.is_empty() {
 			for saved in std::mem::take(&mut vp.restore_opts) {
@@ -3418,10 +3424,6 @@ pub const fn mode_of(vp: &Vproc) -> ModeId {
 	vp.mode
 }
 
-/// How deep bash lets trap actions nest (`evalnest_max`): past this, a
-/// delivery that arrives inside an action starts no further scan.
-const TRAP_NEST_MAX: usize = 128;
-
 /// One step of bash's `run_pending_traps` (`trap.c`): go on with the
 /// innermost scan whose action has ended, or start a new scan for a
 /// delivery no scan has taken, and start the action of the first signal
@@ -3442,7 +3444,13 @@ fn run_pending_traps(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 			// without `catch_flag`, so they never run (bash's `longjmp`
 			// out of `run_pending_traps`).
 			Some(at) if depth < at => {
-				vp.traps.get().scans.pop();
+				let q = vp.traps.get();
+				if let Some(scan) = q.scans.pop()
+					&& scan.running == Some(Signal::Chld)
+				{
+					vp.jobs.chld -= scan.chld_left;
+					q.chld_running = false;
+				}
 			},
 			// Its action is still running: only a fresh delivery nests.
 			Some(at) if depth > at => {
@@ -3487,22 +3495,16 @@ fn start_scan(vp: &mut Vproc) -> bool {
 	if nested.is_some_and(|s| s.running == Some(Signal::Winch)) && q.queued.contains(Signal::Winch) {
 		return false;
 	}
-	let too_deep = nested.is_some() && q.scans.len() >= TRAP_NEST_MAX;
 	q.catch = false;
-	if too_deep {
-		// bash reports `trap handler: maximum trap handler level
-		// exceeded` here and jumps to the top level; this engine has no
-		// jump at this point, so the delivery is dropped instead.
-		return false;
-	}
+	// Bash's default EVALNEST_MAX is zero: no trap-nesting limit.
 	q.scans
-		.push(Scan { cursor: 0, depth, running: None, chld_left: 0 });
+		.push(Scan { cursor: 0, depth, running: None, chld_left: 0, chld_action: None });
 	true
 }
 
 /// Start the next action of the innermost scan: another run of the
 /// `SIGCHLD` action it still owes, or the lowest-numbered signal at or
-/// above its cursor that is queued. `true` when a trap frame was pushed.
+/// above its cursor that is queued. `true` when an action starts or the vproc stops.
 fn advance_scan(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 	let platform = k.engine.config().platform;
 	loop {
@@ -3516,8 +3518,23 @@ fn advance_scan(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 		// its count had (`run_sigchld_trap`).
 		if let Some(sig) = scan.running {
 			if sig == Signal::Chld && scan.chld_left > 0 {
-				q.scans.last_mut().expect("checked above").chld_left -= 1;
-				if start_trap(k, vp, cx, TrapKey::Signal(Signal::Chld)) {
+				let scan = q.scans.last_mut().expect("checked above");
+				scan.chld_left -= 1;
+				let action = scan.chld_action.take();
+				vp.jobs.chld -= 1;
+				let started = match &action {
+					Some((action, mode)) => {
+						push_trap(k, vp, cx, TrapKey::Signal(Signal::Chld), action, *mode)
+					},
+					None => start_trap(k, vp, cx, TrapKey::Signal(Signal::Chld)),
+				};
+				vp.traps
+					.get()
+					.scans
+					.last_mut()
+					.expect("the batch scan")
+					.chld_action = action;
+				if started {
 					return true;
 				}
 				continue;
@@ -3525,6 +3542,7 @@ fn advance_scan(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 			q.scans.last_mut().expect("checked above").running = None;
 			if sig == Signal::Chld {
 				q.chld_running = false;
+				q.scans.last_mut().expect("checked above").chld_action = None;
 			} else {
 				q.queued = q.queued.without(sig);
 			}
@@ -3541,7 +3559,7 @@ fn advance_scan(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 			return false;
 		};
 		q.scans.last_mut().expect("checked above").cursor = number + 1;
-		if start_action(k, vp, cx, sig) {
+		if start_action(k, vp, cx, sig) || vp.stopped {
 			return true;
 		}
 	}
@@ -3559,7 +3577,7 @@ fn start_action(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, sig: Signal) ->
 		if vp.traps.get().chld_running {
 			return false;
 		}
-		let owed = std::mem::take(&mut vp.jobs.chld);
+		let owed = vp.jobs.chld;
 		{
 			let q = vp.traps.get();
 			q.queued = q.queued.without(sig);
@@ -3571,12 +3589,45 @@ fn start_action(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, sig: Signal) ->
 			scan.running = Some(sig);
 			scan.chld_left = owed - 1;
 		}
-		if start_trap(k, vp, cx, key) {
+		let action = match state::record(cx.store, vp, Key::Trap(key)) {
+			Ok(Some(Record::Trap { action, mode })) if !action.is_empty() => {
+				Some((action.clone(), *mode))
+			},
+			Ok(None) if vp.mode.dialect() == crate::bash::ids::Dialect::Zsh => None,
+			Ok(_) => {
+				vp.jobs.chld = 0;
+				let q = vp.traps.get();
+				q.chld_running = false;
+				let scan = q.scans.last_mut().expect("the batch scan");
+				scan.running = None;
+				scan.chld_left = 0;
+				return false;
+			},
+			Err(err) => {
+				k.fail(err);
+				return false;
+			},
+		};
+		// Unstarted actions stay in the persisted job counter. Moving the
+		// whole batch into the transient scan would lose it on restore.
+		vp.jobs.chld -= 1;
+		let started = match &action {
+			Some((action, mode)) => push_trap(k, vp, cx, key, action, *mode),
+			None => start_trap(k, vp, cx, key),
+		};
+		vp.traps
+			.get()
+			.scans
+			.last_mut()
+			.expect("the batch scan")
+			.chld_action = action;
+		if started {
 			return true;
 		}
 		let q = vp.traps.get();
 		q.chld_running = false;
 		let scan = q.scans.last_mut().expect("a scan is running");
+		vp.jobs.chld -= scan.chld_left;
 		scan.running = None;
 		scan.chld_left = 0;
 		return false;
@@ -3634,7 +3685,8 @@ fn resend_default(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, sig: Signal) 
 	}
 }
 
-/// Run a configured trap in the interrupted shell, without re-entering it.
+/// Run a configured trap in the interrupted shell. Only pseudo-traps
+/// exclude recursive entry here; signal scans own their own exclusions.
 pub fn start_trap(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, key: TrapKey) -> bool {
 	// A subshell lists its parent's EXIT trap but runs only its own.
 	if key == TrapKey::Exit && vp.parent.is_some() && !vp.own_traps.has(key) {
@@ -3683,9 +3735,11 @@ pub fn start_trap(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, key: TrapKey)
 			}
 		}
 	}
-	// No trap runs inside its own action; a function called from the
-	// DEBUG trap loses the RETURN trap (bash's `execute_function`).
-	if vp.trap_frames != 0
+	// Pseudo-traps do not re-enter their own action; a function called
+	// from DEBUG also loses RETURN (bash's `execute_function`). Ordinary
+	// signals are recursive (`trap.c`'s RECURSIVE_SIG).
+	if !matches!(key, TrapKey::Signal(_))
+		&& vp.trap_frames != 0
 		&& vp.frames.iter().any(|f| {
 			matches!(f.kind,
 		FrameKind::Script { what: ScriptKind::Trap { key: active, .. }, .. }
