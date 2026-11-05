@@ -191,6 +191,11 @@ behavior {
 	// (reference-content/openai-compatibility recommends the Responses API).
 	exclude-models provider="scaleway" prefix="whisper-" prefix="qwen3-embedding-" prefix="bge-" prefix="lightonocr-" \
 		exact="gpt-oss-120b"
+	// Zro's /v1/models roster repeats every model under a `zro/` alias, lists
+	// the `auto` router (no price of its own, it routes each request to another
+	// listed model), and keeps the retired deepseek-v4-flash-0731 id, which
+	// reroutes to deepseek-v4.1-flash (zro.moonmath.ai/docs/models/retired).
+	exclude-models provider="zro" prefix="zro/" exact="auto" exact="deepseek-v4-flash-0731"
 	// SuperGrok's roster interleaves media models the chat picker cannot
 	// serve; the dedicated tool surfaces route them instead.
 	exclude-models provider="xai-oauth" exact="grok-imagine-image-quality" exact="grok-imagine-image-2.0" \

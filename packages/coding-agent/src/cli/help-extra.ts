@@ -45,6 +45,7 @@ export function getExtraHelpText(): string {
   SINGULARITYAPI_DEV_API_KEY - SingularityAPI universal gateway (300+ models)
   SINGULARITYAPI_TECH_API_KEY - SingularityAPI reserved DeepSeek lanes
   SCW_SECRET_KEY             - Scaleway Generative APIs models
+  ZRO_API_KEY                - Zro (MoonMath) open-weight coding models
 
   ${chalk.dim("# Cloud Providers")}
   AWS_PROFILE                - AWS Bedrock (or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY)

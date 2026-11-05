@@ -8239,3 +8239,56 @@ export function scalewayModelManagerOptions(
 		mapModel: mapWithBundledReference,
 	});
 }
+
+// ---------------------------------------------------------------------------
+// Zro
+// ---------------------------------------------------------------------------
+
+/**
+ * Zro discovery configuration: the API key plus optional base-URL and fetch
+ * overrides. Consumed by {@link zroModelManagerOptions}, and exported for
+ * extensions and tests that construct the manager directly.
+ */
+export interface ZroModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Zro's `/v1/models` is a LiteLLM roster: rows carry `max_input_tokens` and
+ * `max_output_tokens` but no prices or modalities. Those wire limits win over
+ * the bundled reference, which supplies everything else.
+ */
+function mapZroModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> {
+	const model = mapWithBundledReference(entry, defaults, reference);
+	return {
+		...model,
+		contextWindow: toPositiveNumber(entry.max_input_tokens, model.contextWindow),
+		maxTokens: toPositiveNumber(entry.max_output_tokens, model.maxTokens),
+	};
+}
+
+/**
+ * Zro model manager: OpenAI-compatible chat completions at
+ * `zro.moonmath.ai/v1`. The authored seed in `providers/zro.kdl` is the
+ * reference each live row merges names, modalities, and prices from. A
+ * successful fetch is the complete roster and prunes retired rows, while the
+ * `zro/` aliases and the `auto` router are excluded by rule.
+ */
+export function zroModelManagerOptions(config?: ZroModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "zro",
+		defaultBaseUrl: "https://zro.moonmath.ai/v1",
+		config,
+		dynamicModelsAuthoritative: true,
+		requireApiKey: true,
+		filterModel: (_entry, model) => !isExcludedModel("zro", model.id),
+		mapModel: mapZroModel,
+	});
+}

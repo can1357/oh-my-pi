@@ -151,6 +151,8 @@
 ### Fixed
 
 - Browser: a headless Chrome launched in-process by an SDK embedding or a `bun test` run now exits when that process is killed, instead of running on with its temporary profile on Linux and macOS ([#17908](https://github.com/can1357/oh-my-pi/pull/17908) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `ZRO_API_KEY` to the `omp --help` environment list for the new Zro provider
+- Added `ZRO_API_KEY` to the `omp --help` environment list for the new Zro provider ([#17869](https://github.com/can1357/oh-my-pi/pull/17869) by [@rico-vz](https://github.com/rico-vz))
 
 ## [18.16.0] - 2026-11-02
 
