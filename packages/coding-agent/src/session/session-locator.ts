@@ -155,29 +155,62 @@ function appendIndexLine(indexFile: string, line: string, createRoot: boolean): 
 }
 
 /**
- * Whether a reindex of `root` would find `relative` again. The walk enters
- * only real directories inside a bucket: it never follows a symlinked
- * directory (so a scan cannot leave the root), skips every dot-entry (gc
- * scratch), ignores the root's own top level, and takes a `.jsonl.gz` only
- * directly in a bucket. Its scope is therefore permanently narrower than the
- * index's domain, and a path outside it is known to the index alone.
+ * Whether a reindex of `root` would demonstrably find session `id` at
+ * `relative` again.
+ *
+ * This decides whether a failed append is reported quietly or loudly, so it
+ * answers positively or not at all: true only when every read the recovery
+ * depends on succeeds here and now, and false — be loud — in every other
+ * case, including ones nobody thought to list. Shape is not evidence. A path
+ * of the right shape under a bucket the walk cannot list, or beside a
+ * snapshot the publish step will refuse to replace, is not recovered by any
+ * reindex, and promising one is worse than saying nothing.
+ *
+ * Each check performs the operation the reindex itself performs, so a mode,
+ * an ACL or a read-only mount answers for itself rather than being
+ * enumerated here:
+ * - the root's own top level and every ancestor directory list
+ *   ({@link scanRootTranscripts}, {@link scanTranscripts});
+ * - every ancestor is a real directory, because the walk sees a symlinked
+ *   one and never enters it;
+ * - the transcript yields an id: its bytes are readable, or its generated
+ *   `<timestamp>_<id>` name already records `id`;
+ * - `root`'s snapshot is readable if it exists, because
+ *   {@link rebuildSessionLocator} refuses to publish over one it cannot read
+ *   and so recovers nothing.
+ *
+ * Never throws; anything unexpected is `false`, which is the loud direction.
+ * Publishing also *writes* the snapshot, which cannot be tested without side
+ * effects — but a write that fails there makes `omp session reindex` exit
+ * non-zero in front of the person who ran it, so that case is already loud
+ * without this predicate's help.
  */
-function reindexWouldFind(root: string, relative: string): boolean {
-	const parts = relative.split("/");
-	if (parts.length < 2 || parts.some(part => part.startsWith("."))) return false;
-	const name = parts[parts.length - 1];
-	if (!name.endsWith(SESSION_SUFFIX) && !(parts.length === 2 && name.endsWith(ARCHIVED_SUFFIX))) return false;
-	let dir = root;
-	for (const part of parts.slice(0, -1)) {
-		dir = path.join(dir, part);
-		try {
-			// A symlinked bucket or directory is seen but never entered.
+function reindexDemonstrablyRecovers(root: string, relative: string, id: string): boolean {
+	try {
+		const parts = relative.split("/");
+		if (parts.length < 2 || parts.some(part => part.startsWith("."))) return false;
+		const name = parts[parts.length - 1];
+		if (!name.endsWith(SESSION_SUFFIX) && !(parts.length === 2 && name.endsWith(ARCHIVED_SUFFIX))) return false;
+		let dir = root;
+		fs.readdirSync(dir);
+		for (const part of parts.slice(0, -1)) {
+			dir = path.join(dir, part);
 			if (!fs.lstatSync(dir).isDirectory()) return false;
-		} catch {
-			return false;
+			fs.readdirSync(dir);
 		}
+		const file = path.join(root, relative);
+		// The walk collects a file, following a symlinked transcript as it does.
+		if (!fs.statSync(file).isFile()) return false;
+		if (generatedNameId(file) !== id) fs.accessSync(file, fs.constants.R_OK);
+		try {
+			fs.accessSync(path.join(root, SESSION_LOCATOR_BASE_FILE), fs.constants.R_OK);
+		} catch (error) {
+			if (!isEnoent(error)) return false;
+		}
+		return true;
+	} catch {
+		return false;
 	}
-	return true;
 }
 
 /**
@@ -186,9 +219,10 @@ function reindexWouldFind(root: string, relative: string): boolean {
  * `file`, relative to it; a file outside every root is recorded by absolute
  * path in this process's sessions root. Never throws: a log that misses a
  * line costs a lookup, not a session. Returns whether the line was written,
- * so a caller can try again on its next write. A line the next reindex could
- * not derive again ({@link reindexWouldFind}) is reported at error level when
- * it cannot be written, because that session is then findable by id nowhere.
+ * so a caller can try again on its next write. A failed append is reported
+ * at error level unless a reindex is demonstrably able to derive the line
+ * again ({@link reindexDemonstrablyRecovers}), because the session is then
+ * findable by id nowhere and nothing else will say so.
  */
 export function recordSessionLocation(
 	id: string,
@@ -203,7 +237,7 @@ export function recordSessionLocation(
 		appendIndexLine(indexFile, `\n${id}\t${encodeStoredPath(owner?.relative ?? absolute)}\n`, owner === undefined);
 		return true;
 	} catch (error) {
-		if (owner !== undefined && reindexWouldFind(owner.root, owner.relative)) {
+		if (owner !== undefined && reindexDemonstrablyRecovers(owner.root, owner.relative, id)) {
 			logger.warn("Session index append failed; `omp session reindex` rebuilds it", {
 				indexFile,
 				id,
@@ -212,7 +246,7 @@ export function recordSessionLocation(
 			});
 		} else {
 			logger.error(
-				"Session index append failed for a path no reindex walks, so this session is no longer findable by id: a reindex rebuilds a root from the transcripts in its buckets, and never enters a symlinked directory, a dot-entry, or the root's own top level",
+				"Session index append failed and no reindex will recover this session: a reindex derives a root only from transcripts it can read, in buckets it can list, and it refuses to publish over a snapshot it cannot read",
 				{ indexFile, id, file: absolute, error: String(error) },
 			);
 		}

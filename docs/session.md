@@ -642,6 +642,12 @@ Resolving a session id (`omp --resume <id>`, `--fork <id>`, `/resume <id>`, `/pi
 Each sessions root holds up to two files of `<id>\t<path>` lines, the path relative to that root, or absolute for a file outside every root (a `--session-dir` session is recorded in the default root's index); `%`, tab, CR and LF in a path are percent-encoded.
 
 - `.session-index.tsv` is the log. `SessionManager` appends a line the first time a session is durably written at a path: a new session, a fork (with every subagent transcript copied into its artifact tree), a subagent transcript in its parent's artifact directory, a session moved to another project (with every transcript its artifact tree carried). An append that fails (a log that cannot be written for now) is logged and tried again on the session's next durable write. `omp session unpack` records the unpacked session's tree, and `omp gc` records an archived session's tree in the archive's own log. A transcript a move, copy or archive cannot read keeps every id the index had for it at its old path, and so does every transcript under a directory it cannot enter. A move or copy whose tree could not all be recorded (a transcript, directory or index file it could not read, a log line it could not write) is logged and dropped, never queued: the index is a cache derived from the session files, and `omp session reindex` rebuilds a root from that root's own tree. Each line is one `O_APPEND` write that starts with its own newline, so a crash loses at most that line and a torn line never spoils the next. Nothing rewrites, renames or truncates the log, so no append is ever lost.
+  A dropped line is reported at **error** level, naming the session and its file, unless a reindex is
+  demonstrably able to derive it again: that is decided by performing, then and there, every read the
+  recovery depends on — the root and each ancestor directory list, each ancestor is a real directory,
+  the transcript is present and yields an id, and the root's snapshot is readable if it exists. The
+  shape of a path is not evidence. Anything that cannot be demonstrated is reported loudly, because a
+  session whose only record was that line is then findable by id nowhere and nothing else will say so.
 - `.session-index.base.tsv` is the snapshot `omp session reindex` writes: every line the snapshot held when the reindex publishes, plus one for each session file under the root. It adds and never removes.
 
 A lookup reads both files of every root, in order:

@@ -17,6 +17,7 @@ import {
 	locateSessions,
 	rebuildSessionLocator,
 	recordSessionLocation,
+	SESSION_LOCATOR_BASE_FILE,
 	SESSION_LOCATOR_FILE,
 	type SessionLocatorRebuild,
 	sessionLocatorMayBeIncomplete,
@@ -937,13 +938,15 @@ describe("session index: lookups by id", () => {
 					const strandedId = "019a0017-0000-7000-8000-000000000002";
 					const walked = path.join(bucket, `2026-01-02T03-04-05-000Z_${walkedId}.jsonl`);
 					const stranded = path.join(linked, `2026-01-02T03-04-05-000Z_${strandedId}.jsonl`);
+					fs.writeFileSync(walked, "");
+					fs.writeFileSync(stranded, "");
 					expect(recordSessionLocation(walkedId, walked)).toBe(false);
 					expect(error).not.toHaveBeenCalled();
 					expect(warn).toHaveBeenCalledTimes(1);
 					expect(recordSessionLocation(strandedId, stranded)).toBe(false);
 					expect(warn).toHaveBeenCalledTimes(1);
 					expect(error).toHaveBeenCalledTimes(1);
-					expect(String(error.mock.calls[0]?.[0])).toContain("no longer findable by id");
+					expect(String(error.mock.calls[0]?.[0])).toContain("no reindex will recover this session");
 					expect(error.mock.calls[0]?.[1]).toMatchObject({ id: strandedId, file: stranded });
 				} finally {
 					fs.chmodSync(log, 0o600);
@@ -952,6 +955,68 @@ describe("session index: lookups by id", () => {
 				}
 			},
 		);
+
+		// The shape of a path is not evidence that a rebuild recovers it: the
+		// walk must be able to list the bucket, and the reindex must be able to
+		// publish. Each case here is a well-shaped path under a readable root
+		// whose recovery is nonetheless impossible, so a quiet
+		// "`omp session reindex` rebuilds it" would be a false promise.
+		for (const { what, obstruct } of [
+			{
+				what: "a bucket the walk cannot list",
+				obstruct: (sessions: string, bucket: string) => fs.chmodSync(bucket, 0o300),
+			},
+			{
+				what: "a snapshot the reindex will not publish over",
+				obstruct: (sessions: string) => {
+					const snapshot = path.join(sessions, SESSION_LOCATOR_BASE_FILE);
+					fs.writeFileSync(snapshot, "");
+					fs.chmodSync(snapshot, 0o000);
+				},
+			},
+			{
+				what: "a transcript whose bytes cannot be read",
+				obstruct: (sessions: string, bucket: string, file: string) => fs.chmodSync(file, 0o000),
+			},
+		]) {
+			it.skipIf(unlessRoot)(`reports a failed index append left unrecoverable by ${what}`, async () => {
+				const sessions = getSessionsDir();
+				const bucket = path.join(sessions, "--obstructed--");
+				fs.mkdirSync(bucket, { recursive: true });
+				const id = "019a0018-0000-7000-8000-000000000001";
+				// A name that does NOT record the id, so deriving the row needs the
+				// file's header — as it does for every subagent transcript.
+				const file = path.join(bucket, "Worker.jsonl");
+				fs.writeFileSync(file, "");
+				const log = path.join(sessions, SESSION_LOCATOR_FILE);
+				fs.writeFileSync(log, "");
+				const warn = spyOn(logger, "warn").mockImplementation(() => {});
+				const error = spyOn(logger, "error").mockImplementation(() => {});
+				try {
+					// Quiet while nothing obstructs recovery: this is the control for
+					// the obstruction below, in the same process and the same tree.
+					fs.chmodSync(log, 0o400);
+					expect(recordSessionLocation(id, file)).toBe(false);
+					expect(error).not.toHaveBeenCalled();
+					expect(warn).toHaveBeenCalledTimes(1);
+
+					obstruct(sessions, bucket, file);
+					expect(recordSessionLocation(id, file)).toBe(false);
+					expect(warn).toHaveBeenCalledTimes(1);
+					expect(error).toHaveBeenCalledTimes(1);
+					expect(String(error.mock.calls[0]?.[0])).toContain("no reindex will recover this session");
+					expect(error.mock.calls[0]?.[1]).toMatchObject({ id, file });
+				} finally {
+					fs.chmodSync(log, 0o600);
+					fs.chmodSync(bucket, 0o700);
+					fs.chmodSync(file, 0o600);
+					const snapshot = path.join(sessions, SESSION_LOCATOR_BASE_FILE);
+					if (fs.existsSync(snapshot)) fs.chmodSync(snapshot, 0o600);
+					error.mockRestore();
+					warn.mockRestore();
+				}
+			});
+		}
 
 		it.skipIf(unlessRoot)(
 			"records a session moved while its index log could not be written, at its next write",
