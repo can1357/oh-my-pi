@@ -376,6 +376,51 @@ describe("relay tabs Chrome detaches omp from", () => {
 	}
 
 	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"returns the recovered page when Chrome detaches during an open's navigation",
+		async () => {
+			const ext = await openRelayTab();
+			await releaseTab(name, { keepPage: true });
+			const requested = Promise.withResolvers<void>();
+			const finish = Promise.withResolvers<Response>();
+			const login = Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				fetch: request => {
+					if (new URL(request.url).pathname === "/pending.png") {
+						requested.resolve();
+						return finish.promise;
+					}
+					return new Response('<title>Login</title><input id="user"><img src="/pending.png">', {
+						headers: { "content-type": "text/html" },
+					});
+				},
+			});
+			try {
+				const opened = invoke({
+					action: "open",
+					app: { relay: true, target: "case=" },
+					url: String(login.url),
+					timeout: 20,
+				}).catch((error: unknown) => error);
+				await requested.promise;
+				await ext.chromeDetach("target_closed");
+				finish.resolve(new Response(""));
+				const result = await opened;
+				if (result instanceof Error) throw result;
+				expect(result.text).toContain("reattached to the same tab");
+				expect((await invoke({ action: "run", code: "return await tab.title();", timeout: 10 })).value).toBe(
+					"Login",
+				);
+				expect(page?.isClosed()).toBe(false);
+			} finally {
+				finish.resolve(new Response(""));
+				login.stop(true);
+			}
+		},
+		60_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"fails the call in flight at once, names the cause, and re-adopts the same page for the next call",
 		async () => {
 			const ext = await openRelayTab();

@@ -290,6 +290,8 @@ class RecoverableWorkerError extends ToolError {}
 class WorkerMessageError extends ToolError {}
 /** A worker `tab.goto` outlasted its budget; the page stays on what loaded. */
 class NavigationTimeoutError extends ToolError {}
+/** The relay detach interrupted a call, but the same page is usable on a replacement worker. */
+class DebuggerReattachedError extends ToolError {}
 /** The page's renderer crashed; the run that reports it recycles the worker. */
 class RendererCrashedError extends ToolError {}
 /** Chrome ended the debugger attachment of a relay tab; the worker runs nothing more and the tab is re-adopted. */
@@ -492,7 +494,7 @@ async function acquireTabImpl(
 						`await tab.emulate({ viewport: ${JSON.stringify({ width: opts.viewport.width, height: opts.viewport.height, scale: opts.viewport.deviceScaleFactor })} });`,
 					);
 				}
-				const reuse = async (): Promise<void> => {
+				const reuse = async (): Promise<string | undefined> => {
 					if (reuseSteps.length) {
 						await runInTabWithSnapshot(
 							name,
@@ -504,11 +506,11 @@ async function acquireTabImpl(
 							{ cwd: getProjectDir() },
 						);
 					}
-					if (opts.url) await navigateOpenedTab(name, opts.url, opts, startedAt);
+					if (opts.url) return await navigateOpenedTab(name, opts.url, opts, startedAt);
 				};
 				let note: string | undefined;
 				try {
-					await reuse();
+					note = await reuse();
 				} catch (error) {
 					// The tab's renderer had crashed: the failed step reloaded the page on a new worker, so the
 					// open goes on with it once. A tab closed by the crash, or a second crash, fails the open.
@@ -517,7 +519,8 @@ async function acquireTabImpl(
 					)
 						throw error;
 					note = RENDERER_RELOADED_NOTE;
-					await reuse();
+					const navigationNote = await reuse();
+					if (navigationNote) note += `\n${navigationNote}`;
 				}
 				// The user may have navigated or switched tabs since: the result reports where the page is now.
 				if (existing.backend === "tern") existing.info = await existing.ternTab.readyInfo();
@@ -644,17 +647,17 @@ async function acquireTabImpl(
 	// this process dies abnormally before its own teardown closes the tab.
 	const scope = sharedScopeOf(browser);
 	if (scope) void recordSharedTarget(scope, info.targetId);
-	if (opts.url) await navigateOpenedTab(name, opts.url, opts, startedAt, tab);
-	return { tab, created: true };
+	const note = opts.url ? await navigateOpenedTab(name, opts.url, opts, startedAt, tab) : undefined;
+	return { tab, created: true, note };
 }
 
 /**
  * Navigate a tab for an open, within what is left of the open's budget. A
  * page that outlasts it fails with goto's own report while the tab stays on
  * what loaded, instead of losing to the open's bare deadline. A tab this open
- * created (`created`) is kept only for that timeout: a navigation that fails
- * outright, or an open cancelled or past its deadline, closes it again so the
- * failed open leaves nothing behind.
+ * created (`created`) is kept for that timeout or a successfully recovered relay
+ * detach: other navigation failures, or an open cancelled or past its deadline,
+ * close it again so the failed open leaves nothing behind.
  */
 async function navigateOpenedTab(
 	name: string,
@@ -662,7 +665,7 @@ async function navigateOpenedTab(
 	opts: AcquireTabOptions,
 	startedAt: number,
 	created?: WorkerTabSession,
-): Promise<void> {
+): Promise<string | undefined> {
 	const remainingMs = opts.timeoutMs - (performance.now() - startedAt);
 	const gotoMs = Math.max(1, Math.round(remainingMs - Math.min(OPEN_NAVIGATION_REPORT_MS, remainingMs / 2)));
 	try {
@@ -677,6 +680,9 @@ async function navigateOpenedTab(
 			{ cwd: getProjectDir() },
 		);
 	} catch (error) {
+		if (error instanceof DebuggerReattachedError && !opts.signal?.aborted && tabs.get(name)?.state === "alive") {
+			return error.message;
+		}
 		if (created && (opts.signal?.aborted || !(error instanceof NavigationTimeoutError))) {
 			await rollBackCreatedTab(name, created);
 			throw error;
@@ -1154,14 +1160,14 @@ async function runInTabWithSnapshot(
 				if (opts.signal?.aborted) throw new ToolAbortError();
 				if (!reattached) throw new ToolError(lost);
 				if (error.when === "during" || opts.readopted) {
-					throw new ToolError(
+					throw new DebuggerReattachedError(
 						`${detached}. omp reattached to the same tab on a new worker without reloading it, so the next call works; check the page before repeating this one. ${WORKER_RESETS}.`,
 					);
 				}
 				// Nothing ran: run the call on the new worker, within what the re-adoption left of its budget.
 				const remainingMs = Math.floor(opts.timeoutMs - (performance.now() - startedAt));
 				if (remainingMs <= 0) {
-					throw new ToolError(
+					throw new DebuggerReattachedError(
 						`${detached}. omp reattached to the same tab on a new worker without reloading it, but that used up this call's ${opts.timeoutMs}ms budget, so the call was not run again; repeat it. ${WORKER_RESETS}.`,
 					);
 				}
