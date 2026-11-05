@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
@@ -172,6 +172,7 @@ describe("retry saga ownership across an interruption", () => {
 		const harness = active;
 		active = undefined;
 		await harness?.dispose();
+		vi.restoreAllMocks();
 	});
 
 	/** Primes enough history for a manual compaction to have something to summarize. */
@@ -331,6 +332,44 @@ describe("retry saga ownership across an interruption", () => {
 		await compacting;
 		await turn;
 		await parked;
+		await harness.session.waitForIdle();
+
+		const errors = harness.errorEntries();
+		expect(errors).toHaveLength(1);
+		expect(errors[0]?.errorMessage).toContain("503");
+		expect(errors[0]?.recovery).toBeUndefined();
+		expect(errors[0]?.presentation.kind).toBe("full");
+	});
+
+	it("leaves them to nobody when the abort that preserved the saga then rejects", async () => {
+		// The saga is told it is coming back the instant before `abort()` is awaited, so an abort
+		// that rejects leaves it preserved for a compaction that never starts. The pass must still
+		// abandon it on the way out; keying that on anything set *after* the abort would not.
+		const harness = await createHarness([ANSWER, TRANSIENT, "hold", ANSWER], {
+			"compaction.enabled": true,
+			"compaction.autoContinue": true,
+		});
+		active = harness;
+		await primeContext(harness);
+
+		const turn = harness.session.prompt("Continue the work");
+		await Promise.race([
+			harness.held,
+			turn.then(() => {
+				throw new Error("The turn ended before the compaction barrier");
+			}),
+		]);
+		const realAbort = harness.session.abort.bind(harness.session);
+		vi.spyOn(harness.session, "abort").mockImplementation(async options => {
+			await realAbort(options);
+			throw new Error("abort rejected after the saga was preserved");
+		});
+
+		await expect(harness.session.compact()).rejects.toThrow("abort rejected after the saga was preserved");
+		await turn;
+		await harness.session.waitForIdle();
+
+		await harness.session.prompt("A new, unrelated task");
 		await harness.session.waitForIdle();
 
 		const errors = harness.errorEntries();

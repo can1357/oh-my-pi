@@ -80,11 +80,33 @@ export class OpenAIHttpError extends ProviderHttpError {
 }
 
 /**
- * The inner envelope of a doubly wrapped error (`{ error: { error: { code, message } } }`), or
- * `undefined` when `error` is an ordinary envelope. An inner value only wins when the outer
- * carries no code or type of its own and the inner is a plain object with one of its own.
+ * How many wrapper levels a resolve walks. The bound exists only so a malformed or hostile payload
+ * cannot make the parse walk forever; the deepest nesting anyone here has a case for is three, and
+ * the limit is well clear of it so that the depth is never the thing that loses a code.
  */
-export function wrappedErrorEnvelope(error: object): object | undefined {
+const MAX_WRAPPED_ENVELOPE_DEPTH = 8;
+
+/**
+ * The envelope inside a wrapped error (`{ error: { error: { code, message } } }`), or `undefined`
+ * when `error` is already an ordinary envelope.
+ *
+ * This is the single answer to "which object is the error", and every reader of an OpenAI-wire
+ * error asks it rather than walking itself. Four review rounds of this pull request were spent on
+ * two readers of one envelope disagreeing — about whether an `error` field beside a code is the
+ * envelope, and about how deep a wrapper may be — and a disagreement is worse than either answer:
+ * one reader recognised a refusal that the other reported as a plain failure, and the turn fell
+ * between them into the generic transient classifier.
+ *
+ * The rules, in one place:
+ * - an inner value only wins when the outer carries no `code` or `type` **string** of its own. A
+ *   number in `code` is a status wearing the field's name, not a machine-readable code;
+ * - the inner must be a plain, non-array object;
+ * - it wins when it carries a `code`, `type` or `message` of its own, **or** when it is itself
+ *   nothing but another wrapper around one. A gateway that fronts a gateway produces exactly that
+ *   intermediate level, and refusing to walk through it loses the code at the bottom.
+ */
+export function wrappedErrorEnvelope(error: object, depth = 0): object | undefined {
+	if (depth >= MAX_WRAPPED_ENVELOPE_DEPTH) return undefined;
 	const outerCode = Reflect.get(error, "code");
 	const outerType = Reflect.get(error, "type");
 	if (typeof outerCode === "string" || typeof outerType === "string") return undefined;
@@ -93,10 +115,15 @@ export function wrappedErrorEnvelope(error: object): object | undefined {
 	const innerCode = Reflect.get(inner, "code");
 	const innerType = Reflect.get(inner, "type");
 	const innerMessage = Reflect.get(inner, "message");
-	if (typeof innerCode !== "string" && typeof innerType !== "string" && typeof innerMessage !== "string") {
-		return undefined;
+	if (typeof innerCode === "string" || typeof innerType === "string" || typeof innerMessage === "string") {
+		// This level carries fields of its own, so it is an answer; keep resolving in case a
+		// further wrapper below it carries the code, because the innermost envelope is the one
+		// every reader wants.
+		return wrappedErrorEnvelope(inner, depth + 1) ?? inner;
 	}
-	return inner;
+	// Nothing of its own: a pure intermediate wrapper, which a gateway fronting a gateway produces.
+	// Walk through it rather than stopping, or the code at the bottom is lost.
+	return wrappedErrorEnvelope(inner, depth + 1);
 }
 
 /** Non-2xx response from the Anthropic API. */

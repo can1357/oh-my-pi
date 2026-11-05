@@ -4431,12 +4431,8 @@ export function throwOpenAIResponsesEventError(
 ): never {
 	const envelope = event as unknown as Record<string, unknown>;
 	if (event.type === "error") {
-		let error = isRecord(envelope.error) ? envelope.error : envelope;
-		for (let depth = 0; depth < 2; depth++) {
-			const inner = AIError.wrappedErrorEnvelope(error);
-			if (!inner) break;
-			error = inner as Record<string, unknown>;
-		}
+		const selected = isRecord(envelope.error) ? envelope.error : envelope;
+		const error = (AIError.wrappedErrorEnvelope(selected) ?? selected) as Record<string, unknown>;
 		const inBand = AIError.createInBandProviderError(event);
 		if (inBand) throw inBand;
 		throwOpenAIResponsesRefusal(error, provider);
@@ -4453,18 +4449,13 @@ export function throwOpenAIResponsesEventError(
 		: isRecord(statusDetails?.error)
 			? statusDetails.error
 			: undefined;
-	// A gateway may wrap the envelope in itself, and then the refusal code sits a level in; read it,
-	// or the turn carries `unknown: no message` and rotates every sibling credential. Only a real
-	// wrapper is descended into: an `error` field beside a code of its own is a diagnostic, and
-	// taking it would lose the code the outer already carries. Two levels, which is the bound the
-	// shared in-band probe documents and applies — the two must not disagree about how deep a
-	// wrapper can be, or one of them recognises a refusal the other reports as a plain failure.
-	let error = selectedError as Record<string, unknown> | undefined;
-	for (let depth = 0; error && depth < 2; depth++) {
-		const inner = AIError.wrappedErrorEnvelope(error);
-		if (!inner) break;
-		error = inner as Record<string, unknown>;
-	}
+	// One call, one authority: `wrappedErrorEnvelope` descends only a real wrapper, walks through a
+	// pure intermediate one, and refuses an `error` field beside a code of its own. Walking here
+	// instead is how this reader and the shared in-band probe came to disagree about how deep a
+	// wrapper may be, and a disagreement loses the code between them.
+	const error = selectedError
+		? ((AIError.wrappedErrorEnvelope(selectedError) ?? selectedError) as Record<string, unknown>)
+		: undefined;
 	const details = isRecord(response?.incomplete_details) ? response.incomplete_details : undefined;
 	const inBand = details ? undefined : AIError.createInBandProviderError({ ...response, error });
 	if (inBand) throw inBand;

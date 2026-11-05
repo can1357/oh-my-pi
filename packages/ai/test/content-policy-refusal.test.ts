@@ -173,37 +173,62 @@ type RefusalCarrier =
 	| "sse-gateway-wrapped"
 	| "sse-diagnostic-beside-the-code"
 	| "sse-code-carried-as-type"
-	| "http403-numeric-code-beside-the-type";
+	| "http403-numeric-code-beside-the-type"
+	| "sse-numeric-code-beside-the-type"
+	| "sse-wrapped-three-deep"
+	| "http403-wrapped-three-deep";
 
 /** A transient cause a gateway may attach beside a refusal; it must never replace it. */
 const INNER_DIAGNOSTIC = { code: "server_error", message: "upstream diagnostic", status: 503 };
 
+/**
+ * A refusal whose own message reads like a throttle. In band there is no status field to
+ * contradict the text, so this is what makes a mis-read code retryable rather than merely wrong.
+ */
+const RETRY_WORDED_REFUSAL = "This content was flagged for possible cybersecurity risk. Please retry in a moment.";
+
+/** The message the carrier sends, which is also the explanation it must surface. */
+function refusalMessageOn(carrier: RefusalCarrier): string {
+	return carrier === "sse-numeric-code-beside-the-type" ? RETRY_WORDED_REFUSAL : REFUSAL_MESSAGE;
+}
+
 /** The same `cyber_policy` refusal on the given carrier, in the wire format `api` streams. */
 function refusalOn(api: Api, carrier: RefusalCarrier): Response {
-	const error = { code: "cyber_policy", message: REFUSAL_MESSAGE };
+	const message = refusalMessageOn(carrier);
+	const error = { code: "cyber_policy", message };
 	// Some gateways wrap the error envelope in itself; the refusal code sits one level deeper.
 	if (carrier === "http403-gateway-wrapped") return Response.json({ error: { error } }, { status: 403 });
+	// A gateway fronting a gateway: the middle level carries nothing of its own, so a reader that
+	// refuses to walk through it never reaches the code at the bottom.
+	if (carrier === "http403-wrapped-three-deep") {
+		return Response.json({ error: { error: { error } } }, { status: 403 });
+	}
 	// The provider's own envelope may carry the code as `type` with a NUMBER in `code` — a status
 	// wearing the field's name. A reader that takes `code` first gets "400" and the only code the
 	// body carried is gone.
 	if (carrier === "http403-numeric-code-beside-the-type") {
-		return Response.json({ error: { code: 400, type: "cyber_policy", message: REFUSAL_MESSAGE } }, { status: 403 });
+		return Response.json({ error: { code: 400, type: "cyber_policy", message } }, { status: 403 });
 	}
 	if (!carrier.startsWith("sse")) return Response.json({ error }, { status: carrier === "http403" ? 403 : 400 });
 	// In band: an HTTP 200 whose stream carries the failure. Each API reads that frame with its own
 	// code, and a refusal arriving this way used to lose its code — to the wrapper, to a diagnostic
-	// beside it, or to being written as `type` rather than `code`. Chat Completions carries the
-	// provider's `type` beside the code; a gateway that wraps the envelope wraps that whole object
-	// rather than adding a sibling type of its own.
+	// beside it, to being written as `type` rather than `code`, to a number in `code` masking that
+	// `type`, or to an intermediate wrapper level carrying nothing of its own. Chat Completions
+	// carries the provider's `type` beside the code; a gateway that wraps the envelope wraps that
+	// whole object rather than adding a sibling type of its own.
 	const inner = api === "openai-completions" ? { ...error, type: "invalid_request_error" } : error;
 	const streamed =
 		carrier === "sse-gateway-wrapped"
 			? { error: inner }
-			: carrier === "sse-diagnostic-beside-the-code"
-				? { ...inner, error: INNER_DIAGNOSTIC }
-				: carrier === "sse-code-carried-as-type"
-					? { type: "cyber_policy", message: REFUSAL_MESSAGE }
-					: inner;
+			: carrier === "sse-wrapped-three-deep"
+				? { error: { error: inner } }
+				: carrier === "sse-diagnostic-beside-the-code"
+					? { ...inner, error: INNER_DIAGNOSTIC }
+					: carrier === "sse-code-carried-as-type"
+						? { type: "cyber_policy", message }
+						: carrier === "sse-numeric-code-beside-the-type"
+							? { code: 400, type: "cyber_policy", message }
+							: inner;
 	if (api !== "openai-completions") return failedResponse(streamed);
 	// Chat Completions streams a failure as an in-band `error` chunk.
 	return new Response(`data: ${JSON.stringify({ error: streamed })}\n\ndata: [DONE]\n\n`, {
@@ -223,6 +248,9 @@ describe("content-policy refusals on every OpenAI-wire API and carrier", () => {
 		"sse-diagnostic-beside-the-code",
 		"sse-code-carried-as-type",
 		"http403-numeric-code-beside-the-type",
+		"sse-numeric-code-beside-the-type",
+		"sse-wrapped-three-deep",
+		"http403-wrapped-three-deep",
 	];
 	it.each(apis.flatMap(api => carriers.map(carrier => ({ api, carrier }))))(
 		"$api $carrier: one attempt, no rotation, the refusal's stopDetails kept",
@@ -257,12 +285,13 @@ describe("content-policy refusals on every OpenAI-wire API and carrier", () => {
 			expect(credentials).toHaveLength(1);
 			expect(credentials[0]).toContain(POOL[0]);
 			expect(result.stopReason).toBe("error");
+			const message = refusalMessageOn(carrier);
 			expect(result.stopDetails).toEqual({
 				type: "refusal",
 				category: "cyber_policy",
-				explanation: REFUSAL_MESSAGE,
+				explanation: message,
 			});
-			expect(result.errorMessage).toBe(`Refusal (cyber_policy): ${REFUSAL_MESSAGE}`);
+			expect(result.errorMessage).toBe(`Refusal (cyber_policy): ${message}`);
 		},
 	);
 });

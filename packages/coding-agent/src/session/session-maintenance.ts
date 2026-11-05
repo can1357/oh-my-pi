@@ -1227,6 +1227,13 @@ export class SessionMaintenance {
 		// The owning pass reports progress as one `manual_compaction_start`/`_end`
 		// pair; nested fallback passes return their result through it.
 		let manualCompactionStarted = false;
+		/**
+		 * Set the instant before the `preserveCompaction` abort, which is what tells the retry
+		 * saga it is coming back. Deliberately NOT `manualCompactionStarted`, which is set after
+		 * that abort resolves: an abort that rejects would then leave the preserved saga owned by
+		 * nobody, and the next prompt's success would mark this turn's errors recovered.
+		 */
+		let preservedRetrySaga = false;
 		let manualCompactionResult: CompactionResult | undefined;
 		let manualCompactionError: unknown;
 		const finish = (result: CompactionResult): CompactionResult => {
@@ -1259,6 +1266,7 @@ export class SessionMaintenance {
 				// its behalf would nudge the model on the previous transcript instead.
 				const interruptedActiveTurn = this.#host.agent.state.isStreaming;
 				this.#host.disconnectFromAgent();
+				preservedRetrySaga = true;
 				await this.#host.abort({ goalReason: "internal", preserveCompaction: true });
 				resumeInterruptedTurn =
 					(interruptedActiveTurn || inheritedResume) &&
@@ -1683,7 +1691,7 @@ export class SessionMaintenance {
 				// the saga ends now, or the next prompt's success marks the interrupted
 				// turn's errors recovered and the transcript stops rendering them.
 				if (!((compactionCommitted || rejectedAsNoOp || inheritedResume) && resumeInterruptedTurn)) {
-					if (manualCompactionStarted) this.#host.abortRetry();
+					if (preservedRetrySaga) this.#host.abortRetry();
 				} else if (this.#promptsAwaitingCleanup > 0) {
 					// A prompt parked on the barrier just resolved is the user's next
 					// intent and takes the session instead (its continuation is a

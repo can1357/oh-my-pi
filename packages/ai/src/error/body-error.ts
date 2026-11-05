@@ -189,21 +189,34 @@ function readInBandSignal(frame: unknown): InBandSignal | undefined {
 	if (typeof frame !== "object" || frame === null || Array.isArray(frame)) return undefined;
 	const root = frame as Record<string, unknown>;
 	const nested = root.error ?? (root.response as Record<string, unknown> | undefined)?.error;
-	// Azure-compatible gates double-wrap (`{ error: { error: { code, message } } }`), so descend —
-	// but only into a value that really is a wrapper. An `error` field beside a code of its own is
-	// a diagnostic, and taking it discards the code this whole signal is read from: an outer
-	// refusal became its inner transient cause and the turn was retried as if the provider were
-	// merely busy. Still at most two levels, so a deep payload cannot extend the parse.
-	let error: Record<string, unknown> | undefined;
-	if (typeof nested === "object" && nested !== null) {
-		error = nested as Record<string, unknown>;
-		for (let depth = 0; depth < 2; depth++) {
-			const inner = wrappedErrorEnvelope(error);
-			if (!inner) break;
-			error = inner as Record<string, unknown>;
-		}
-	}
-	const code = normalizeCodeToken(error?.code ?? root.code) ?? normalizeCodeToken(error?.type ?? root.type);
+	// `wrappedErrorEnvelope` is the single answer to which object is the error: it descends only a
+	// real wrapper, walks through a pure intermediate one, and refuses an `error` field beside a
+	// code of its own. Asking it rather than walking here is what keeps this probe and the
+	// providers' own readers from disagreeing — a disagreement cost this pull request two rounds,
+	// because this probe steps aside for a refusal and the reporter it steps aside for did not
+	// recognise the same one.
+	const nestedObject = typeof nested === "object" && nested !== null ? (nested as Record<string, unknown>) : undefined;
+	const error = nestedObject
+		? ((wrappedErrorEnvelope(nestedObject) ?? nestedObject) as Record<string, unknown>)
+		: undefined;
+	// A machine-readable code is a string; a number in `code` is a status wearing the field's name.
+	// Prefer a string from either field before falling back to a number, or a refusal written
+	// `{ code: 400, type: "cyber_policy" }` reads as "400", the refusal guard below misses it, and
+	// the frame is claimed as a transient failure before the provider's own reporter ever runs.
+	const stringCode =
+		typeof error?.code === "string"
+			? error.code
+			: typeof root.code === "string"
+				? root.code
+				: typeof error?.type === "string"
+					? error.type
+					: typeof root.type === "string"
+						? root.type
+						: undefined;
+	const code =
+		normalizeCodeToken(stringCode) ??
+		normalizeCodeToken(error?.code ?? root.code) ??
+		normalizeCodeToken(error?.type ?? root.type);
 	if (code !== undefined && NON_RETRYABLE_CODE_PATTERN.test(code)) return undefined;
 	// A flat retryable code/type is itself an in-band failure: Responses-API
 	// `error` events expose `{ type: "rate_limit_error" }` with no `error` member,
