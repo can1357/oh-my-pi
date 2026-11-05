@@ -30,7 +30,7 @@
 
 ### Fixed
 
-- Malformed `retry.fallbackChains` values are rejected before saving or replacing live settings, instead of reaching fallback routing; valid selectors remain independent of provider discovery.
+- Malformed `retry.fallbackChains` values are rejected before saving or replacing live settings, instead of reaching fallback routing; valid selectors remain independent of provider discovery ([#18165](https://github.com/can1357/oh-my-pi/pull/18165) by [@rmorgans](https://github.com/rmorgans))
 - Thin tool images are padded to the vision model's minimum height or width instead of causing a 400 on the next turn ([#18081](https://github.com/can1357/oh-my-pi/issues/18081))
 - JSON query truncation notices now report the 50KB read budget instead of the bytes shown ([#18022](https://github.com/can1357/oh-my-pi/pull/18022) by [@eggpeat](https://github.com/eggpeat))
 - Extension links stay clickable and extension-drawn replies and custom messages keep their renderers on every launch, not only the first after an edit; `ctx.ui.getLinkClicksAvailable()` no longer turns false on later launches ([#18116](https://github.com/can1357/oh-my-pi/pull/18116) by [@materemias](https://github.com/materemias))
