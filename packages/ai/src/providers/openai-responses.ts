@@ -879,7 +879,10 @@ const streamOpenAIResponsesOnce = (
 			 */
 			const effectiveRequestServiceTier = (): ServiceTier | undefined => {
 				if (!serviceTierCapacityRetry) return options?.serviceTier;
-				const sent = activeParams?.service_tier;
+				// `chained.params` is the body that goes on the wire: an `onPayload`
+				// hook may have returned a replacement object rather than mutating
+				// the one the builder produced.
+				const sent = chained?.params?.service_tier;
 				return sent ?? undefined;
 			};
 			/**
