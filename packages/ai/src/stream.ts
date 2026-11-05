@@ -68,6 +68,13 @@ import type {
 	ThinkingBudgets,
 	ToolChoice,
 } from "./types";
+import {
+	admitSend,
+	type AdmittedSend,
+	currentUsageAdmission,
+	type UsageAdmissionCall,
+} from "./usage-governor/admission";
+import type { UsageAdmissionOutcome } from "./usage-governor/types";
 import { getHeaderCaseInsensitive, resolveCacheRetention } from "./utils";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { applyGlyphCodec } from "./utils/glyph-codec";
@@ -630,19 +637,32 @@ export const __providerInFlightForTesting = {
 	},
 };
 
-function withProviderInFlightLimit<
-	TOptions extends Pick<StreamOptions, "signal" | "maxInFlightRequests" | "beforeDispatch">,
->(
+/**
+ * Dispatch fields that usage admission and the provider slot read. `apiKey` is loose because simple
+ * options carry an ApiKey resolver; only a static string is ever fingerprinted.
+ */
+type DispatchOptions = Pick<
+	StreamOptions,
+	"signal" | "maxInFlightRequests" | "beforeDispatch" | "credentialId" | "usageContext"
+> & { apiKey?: unknown };
+
+/**
+ * The one chokepoint every chat send passes through: usage admission, then the provider slot when
+ * `limit` is set, then `beforeDispatch`, then `dispatch`. Admission runs before the slot so a pacing
+ * wait never holds a concurrency permit. With no active admission and no limit, the no-limit path
+ * below stays synchronous.
+ */
+function withAdmittedDispatch<TOptions extends DispatchOptions>(
 	model: Model<Api>,
 	options: TOptions | undefined,
+	limit: number | undefined,
 	dispatch: (limited: boolean) => AssistantMessageEventStream,
 ): AssistantMessageEventStream {
 	// Leaked-thinking healing folds in here — the one shared provider-dispatch
 	// chokepoint — so the loop guard (which wraps this) sees healed events and all
 	// provider exits are covered by one wrap. Official first-party providers are
 	// exempt (see `healLeakedThinking`); healing is otherwise idempotent.
-	const limit = resolveProviderInFlightLimit(model.provider, options);
-	if (limit === undefined) {
+	if (limit === undefined && currentUsageAdmission()?.active !== true) {
 		options?.beforeDispatch?.();
 		return healLeakedThinking(model, dispatch(false));
 	}
@@ -671,17 +691,30 @@ function withProviderInFlightLimit<
 				});
 			}
 		};
+		let send: AdmittedSend | undefined;
+		// Nothing reaches the wire before `dispatch` returns; a failure after that may already have sent.
+		let outcome: UsageAdmissionOutcome = "not-sent";
 		try {
+			const call: UsageAdmissionCall = {
+				credentialId: options?.credentialId,
+				bearer: typeof options?.apiKey === "string" ? options.apiKey : undefined,
+				provider: model.provider,
+				modelId: model.id,
+				baseUrl: model.baseUrl,
+				context: options?.usageContext,
+			};
+			send = await admitSend(call, options?.signal);
 			const startedWaitingAt = Date.now();
 			release = await acquireProviderInFlightSlot(model.provider, limit, options?.signal);
-			if (Date.now() - startedWaitingAt >= PROVIDER_INFLIGHT_SIGNAL_FALLBACK_MS) {
+			if (limit !== undefined && Date.now() - startedWaitingAt >= PROVIDER_INFLIGHT_SIGNAL_FALLBACK_MS) {
 				logger.debug("Provider in-flight limit wait completed", { provider: model.provider, limit });
 			}
 			if (options?.signal?.aborted) {
 				throw options.signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch");
 			}
 			options?.beforeDispatch?.();
-			const inner = healLeakedThinking(model, dispatch(true));
+			const inner = healLeakedThinking(model, dispatch(limit !== undefined));
+			outcome = "sent";
 			let terminalEvent: AssistantMessageEvent | undefined;
 			for await (const event of inner) {
 				if (event.type === "done" || event.type === "error") {
@@ -691,6 +724,7 @@ function withProviderInFlightLimit<
 				outer.push(event);
 				if (outer.done) {
 					await releaseBestEffort();
+					send?.settle("sent");
 					return;
 				}
 			}
@@ -699,16 +733,26 @@ function withProviderInFlightLimit<
 			// result first lets an immediate follow-up turn contend with its own
 			// still-live lease, which is particularly costly on Windows.
 			await releaseBestEffort();
+			send?.settle("sent");
 			if (!outer.done) {
 				if (terminalEvent) outer.push(terminalEvent);
 				else outer.end(result);
 			}
 		} catch (error) {
 			await releaseBestEffort();
+			send?.settle(outcome);
 			if (!outer.done) outer.fail(error);
 		}
 	})();
 	return outer;
+}
+
+function withProviderInFlightLimit<TOptions extends DispatchOptions>(
+	model: Model<Api>,
+	options: TOptions | undefined,
+	dispatch: (limited: boolean) => AssistantMessageEventStream,
+): AssistantMessageEventStream {
+	return withAdmittedDispatch(model, options, resolveProviderInFlightLimit(model.provider, options), dispatch);
 }
 
 function createVertexAuthenticatedFetch(options: StreamOptions | undefined): FetchImpl {
@@ -1450,17 +1494,15 @@ function streamSimpleRequest<TApi extends Api>(
 
 	// GitLab Duo Workflow - IDE workflow protocol + WebSocket action bridge
 	if (model.api === "gitlab-duo-agent") {
-		// Does not route through withProviderInFlightLimit, so heal explicitly.
-		return withThinkingLoopGuard(model, requestOptions, opts => {
-			opts?.beforeDispatch?.();
-			return healLeakedThinking(
-				model,
+		// No provider slot applies to this transport, but the send still goes through the shared admission path.
+		return withThinkingLoopGuard(model, requestOptions, opts =>
+			withAdmittedDispatch(model, { ...opts, apiKey }, undefined, () =>
 				streamGitLabDuoWorkflow(model as Model<"gitlab-duo-agent">, context, {
 					...opts,
 					apiKey,
 				}),
-			);
-		});
+			),
+		);
 	}
 
 	// Kimi Code - route to dedicated handler that wraps OpenAI or Anthropic API
@@ -1794,6 +1836,7 @@ function mapOptionsForApi<TApi extends Api>(
 		apiKey: apiKey ?? (typeof options?.apiKey === "string" ? options.apiKey : undefined),
 		credentialId: options?.credentialId,
 		oauthIdentity: options?.oauthIdentity,
+		usageContext: options?.usageContext,
 		cacheRetention: options?.cacheRetention,
 		headers: options?.headers,
 		initiatorOverride: options?.initiatorOverride,

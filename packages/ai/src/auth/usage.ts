@@ -496,6 +496,14 @@ export class UsageService implements UsageApi {
 		return this.#deps.store.getClientUsageSummary?.(sinceMs) ?? { clients: [] };
 	}
 
+	/** Last good cached OAuth report for a credential; reads the cache only, never fetches, refreshes or prunes. */
+	cachedReport(provider: Provider, credential: AuthCredential, options?: { baseUrl?: string }): UsageReport | null {
+		if (credential.type !== "oauth") return null;
+		return this.#deps.cache.lastGood(
+			this.#deps.cache.reportKey(oauthUsageRequest(provider, credential, options?.baseUrl)),
+		);
+	}
+
 	/** Merge rate-limit headers into the latest account report. */
 	ingestHeaders(
 		provider: Provider,

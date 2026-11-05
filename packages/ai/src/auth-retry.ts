@@ -4,6 +4,8 @@ import * as AIError from "./error";
 import { isAuthRetryableError, isInvalidatedOAuthTokenError } from "./error/auth-classify";
 import { isAccountPolicyError, isUsageLimit } from "./error/flags";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
+import { admitSend, currentUsageAdmission, type UsageAdmissionCall } from "./usage-governor/admission";
+import type { UsageRequestContext } from "./usage-governor/types";
 
 /**
  * Context passed to an {@link ApiKeyResolver} on each resolution attempt.
@@ -307,6 +309,25 @@ async function runOAuthAttempt<T>(
 }
 
 /**
+ * Runs one send behind usage admission: admit, send, then settle as sent. The send runs only after admission,
+ * so the outcome is "sent" however it ends. With no active seam, `run` starts synchronously, as before.
+ */
+async function admittedSend<T>(
+	call: UsageAdmissionCall,
+	signal: AbortSignal | undefined,
+	run: () => Promise<T>,
+): Promise<T> {
+	if (currentUsageAdmission()?.active !== true) return run();
+	const send = await admitSend(call, signal);
+	if (send === undefined) return run();
+	try {
+		return await run();
+	} finally {
+		send.settle("sent");
+	}
+}
+
+/**
  * Runs an auth-protected operation through the central a/b/c retry policy.
  *
  * - A static string key (or any non-resolver) → a single `attempt` with no
@@ -329,21 +350,38 @@ async function runOAuthAttempt<T>(
 export async function withAuth<T>(
 	key: ApiKey | undefined,
 	attempt: (key: string) => Promise<T>,
-	opts?: { isAuthError?: (error: unknown) => boolean; signal?: AbortSignal; missingKeyMessage?: string },
+	opts?: {
+		isAuthError?: (error: unknown) => boolean;
+		signal?: AbortSignal;
+		missingKeyMessage?: string;
+		/** Attribution for usage admission of each attempt. */
+		usage?: { provider?: string; modelId?: string; baseUrl?: string; context?: UsageRequestContext };
+	},
 ): Promise<T> {
 	const isAuthError = opts?.isAuthError ?? isAuthRetryableError;
 	const missingKey = (): Error => new AIError.MissingApiKeyError(undefined, opts?.missingKeyMessage);
+	// The stored credential row each resolved bearer came from, so every attempt admits under its own row.
+	const credentialByBearer = new Map<string, number | undefined>();
+	const recordResolved = (resolved: ApiKeyResolution): void => {
+		const bearer = resolvedApiKeyBearer(resolved);
+		if (bearer === undefined) return;
+		credentialByBearer.set(bearer, typeof resolved === "string" ? undefined : resolved?.credentialId);
+	};
+	const runAttempt = (key: string): Promise<T> => {
+		const credentialId = credentialByBearer.get(key);
+		return admittedSend({ ...opts?.usage, credentialId, bearer: key }, opts?.signal, () => attempt(key));
+	};
 
 	if (!isApiKeyResolver(key)) {
 		if (key === undefined) throw missingKey();
-		return attempt(key);
+		return runAttempt(key);
 	}
 
 	const resolver = key;
 	const signal = opts?.signal;
 	let initialKey: string | undefined;
 	try {
-		initialKey = await resolveApiKeyOnce(resolver, signal);
+		initialKey = await resolveApiKeyOnce(resolver, signal, recordResolved);
 	} catch (error) {
 		// A resolver that deliberately reports a missing key keeps that type.
 		if (error instanceof AIError.MissingApiKeyError) throw error;
@@ -359,17 +397,17 @@ export async function withAuth<T>(
 	const state = createAuthRetryKeyState(initialKey);
 	let lastError: unknown;
 	try {
-		return await attempt(initialKey);
+		return await runAttempt(initialKey);
 	} catch (error) {
 		if (!isAuthError(error)) throw error;
 		lastError = error;
 	}
 
 	while (true) {
-		const nextKey = await resolveNextAuthRetryKey(state, resolver, lastError, signal);
+		const nextKey = await resolveNextAuthRetryKey(state, resolver, lastError, signal, recordResolved);
 		if (nextKey === undefined) break;
 		try {
-			return await attempt(nextKey);
+			return await runAttempt(nextKey);
 		} catch (error) {
 			if (!isAuthError(error)) throw error;
 			lastError = error;
@@ -402,6 +440,8 @@ export interface WithOAuthAccessOptions {
 	 */
 	seed?: OAuthAccess;
 	missingAccessMessage?: string;
+	/** Attribution for usage admission of each attempt; the provider is the `provider` argument. */
+	usage?: { modelId?: string; context?: UsageRequestContext };
 }
 
 /**
@@ -433,6 +473,17 @@ export async function withOAuthAccess<T>(
 ): Promise<T> {
 	const isAuthError = opts?.isAuthError ?? isAuthRetryableError;
 	const { sessionId, signal } = opts ?? {};
+	// Each attempt admits under the credential that produced its access token.
+	const admittedAttempt = (access: OAuthAccess): Promise<T> => {
+		const call: UsageAdmissionCall = {
+			provider,
+			modelId: opts?.usage?.modelId,
+			context: opts?.usage?.context,
+			credentialId: access.credentialId,
+			bearer: access.accessToken,
+		};
+		return admittedSend(call, signal, () => attempt(access));
+	};
 
 	let lastAccess = opts?.seed ?? (await storage.oauth.access(provider, sessionId, { signal }));
 	if (!lastAccess) {
@@ -447,7 +498,7 @@ export async function withOAuthAccess<T>(
 	let attemptCount = 1;
 	let refreshedCurrent = false;
 	let tokenRefreshReplayUsed = false;
-	let attemptResult = await runOAuthAttempt(lastAccess, attempt, isAuthError);
+	let attemptResult = await runOAuthAttempt(lastAccess, admittedAttempt, isAuthError);
 	if (attemptResult.ok) return attemptResult.result;
 
 	let lastError = attemptResult.error;
@@ -475,7 +526,7 @@ export async function withOAuthAccess<T>(
 			attemptedBearers.add(bearer);
 			attemptCount += 1;
 			lastAccess = next;
-			attemptResult = await runOAuthAttempt(next, attempt, isAuthError);
+			attemptResult = await runOAuthAttempt(next, admittedAttempt, isAuthError);
 			if (attemptResult.ok) return attemptResult.result;
 			lastError = attemptResult.error;
 			continue;
@@ -503,7 +554,7 @@ export async function withOAuthAccess<T>(
 						attemptedBearers.add(bearer);
 						attemptCount += 1;
 						lastAccess = next;
-						attemptResult = await runOAuthAttempt(next, attempt, isAuthError);
+						attemptResult = await runOAuthAttempt(next, admittedAttempt, isAuthError);
 						if (attemptResult.ok) return attemptResult.result;
 						lastError = attemptResult.error;
 						continue;
@@ -541,7 +592,7 @@ export async function withOAuthAccess<T>(
 		attemptCount += 1;
 		lastAccess = next;
 		refreshedCurrent = !directRotation;
-		attemptResult = await runOAuthAttempt(next, attempt, isAuthError);
+		attemptResult = await runOAuthAttempt(next, admittedAttempt, isAuthError);
 		if (attemptResult.ok) return attemptResult.result;
 		lastError = attemptResult.error;
 	}

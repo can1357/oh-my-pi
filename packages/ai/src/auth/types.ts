@@ -20,6 +20,7 @@ import type {
 	UsageResetCredit,
 	UsageResetCredits,
 } from "../usage";
+import type { UsageGovernorConfig } from "../usage-governor/types";
 
 /** Default remaining quota protected for accounts without an explicit policy override. */
 export const DEFAULT_USAGE_RESERVE_PCT = 10;
@@ -347,6 +348,10 @@ export type AuthStorageOptions = {
 	usageFetch?: typeof fetch;
 	usageRequestTimeoutMs?: number;
 	usageLogger?: UsageLogger;
+	/**
+	 * Usage governor ledger and live configuration. Absent: the governor is inert, creates no file and admits nothing.
+	 */
+	governor?: { dbPath: string; config?: UsageGovernorConfig };
 	/**
 	 * Resolve a config value (API key, header value, etc.) to an actual value.
 	 * - coding-agent injects its resolveConfigValue (supports "!command" syntax via pi-natives)
@@ -1257,6 +1262,11 @@ export interface UsageApi {
 		baseUrlResolver?: (provider: Provider) => string | undefined;
 		signal?: AbortSignal;
 	}): Promise<UsageReport[] | null>;
+	/**
+	 * Last good usage report already cached for an OAuth credential, read without any network call, refresh,
+	 * prune or block reconciliation. Returns `null` when no report is cached or the credential is not OAuth.
+	 */
+	cachedReport(provider: Provider, credential: AuthCredential, options?: { baseUrl?: string }): UsageReport | null;
 	/** Ingest provider usage limits from response headers. */
 	ingestHeaders(
 		provider: Provider,

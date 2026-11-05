@@ -54,6 +54,7 @@ import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICodexResponsesOptions } from "./providers/openai-codex-responses";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
 import type { OpenAIResponsesOptions } from "./providers/openai-responses";
+import type { UsageRequestContext } from "./usage-governor/types";
 import type { kStreamingPartialJson } from "./utils/block-symbols";
 import type { AssistantMessageEventStream } from "./utils/event-stream";
 
@@ -517,6 +518,11 @@ export interface StreamOptions {
 	credentialId?: number;
 	/** @internal Non-secret identity of the bearer serving this attempt; never persisted in history. */
 	oauthIdentity?: OAuthRequestIdentity;
+	/**
+	 * @internal Caller attribution for usage admission: the model role and source that issued this request.
+	 * Read by pi-ai's admission seam only; never sent on the wire.
+	 */
+	usageContext?: UsageRequestContext;
 	cacheRetention?: CacheRetention;
 	/**
 	 * Anthropic preserved-thinking behavior when a signed block no longer matches

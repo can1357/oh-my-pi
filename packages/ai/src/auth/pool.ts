@@ -1,4 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import { fingerprintBearer } from "./bearer-fingerprint";
 import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-credential-store";
 import type { BlockStoreHealth } from "./blocks";
 import type { AccountPolicies } from "./policy";
@@ -22,11 +23,6 @@ import type { UsageCredential } from "../usage";
 
 const OAUTH_BEARER_FINGERPRINT_HISTORY_LIMIT = 8;
 const MAX_PENDING_DISABLED_EVENTS = 32;
-
-/** SHA-256 bearer fingerprint, so superseded OAuth token bytes never enter the identity cache. */
-function fingerprintOAuthBearer(bearer: string): string {
-	return Bun.SHA256.hash(bearer, "base64url");
-}
 
 /** One stored credential row as cached in memory. */
 export type StoredCredential = { id: number; credential: AuthCredential };
@@ -355,7 +351,7 @@ export class CredentialPool implements CredentialsApi {
 
 	noteBearer(provider: string, bearer: string, credentialId: number | undefined): void {
 		if (credentialId === undefined) return;
-		const fingerprint = fingerprintOAuthBearer(bearer);
+		const fingerprint = fingerprintBearer(bearer);
 		const byCredentialId = this.#oauthBearerFingerprints.get(provider) ?? new Map<number, string[]>();
 		const history = byCredentialId.get(credentialId) ?? [];
 		const nextHistory = history.filter(previous => previous !== fingerprint);
@@ -366,7 +362,11 @@ export class CredentialPool implements CredentialsApi {
 	}
 
 	idForBearer(provider: string, bearer: string): number | undefined {
-		const fingerprint = fingerprintOAuthBearer(bearer);
+		return this.idForBearerFingerprint(provider, fingerprintBearer(bearer));
+	}
+
+	/** Maps a bearer fingerprint (see {@link fingerprintBearer}) to the stored row it was issued for. */
+	idForBearerFingerprint(provider: string, fingerprint: string): number | undefined {
 		for (const [credentialId, history] of this.#oauthBearerFingerprints.get(provider) ?? []) {
 			if (history.includes(fingerprint)) return credentialId;
 		}

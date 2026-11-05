@@ -46,6 +46,8 @@ export type UsageRankedCandidate<T extends AuthCredential> = UsageCandidate<T> &
 	blockedUntil?: number;
 	inReserve: boolean;
 	reserveMeasured?: boolean;
+	/** Governor admissible time (ms) for an account paced by the usage governor; earlier admits sooner. */
+	pacedUntil?: number;
 	accountPriority: number;
 	hasPriorityBoost: boolean;
 	allowanceSpent: boolean;
@@ -104,6 +106,12 @@ function compareUsageRankedCandidatePriority(
 	// allowance yields to any sibling whose renewable allowance is left (#13889).
 	if (left.allowanceSpent !== right.allowanceSpent) return left.allowanceSpent ? 1 : -1;
 	if (left.inReserve !== right.inReserve) return left.inReserve ? 1 : -1;
+	// Within the reserve group, the account that clears its governor pacing soonest goes first, so a forced wait is the shortest available.
+	if (left.inReserve && right.inReserve) {
+		const leftPacedUntil = left.pacedUntil ?? 0;
+		const rightPacedUntil = right.pacedUntil ?? 0;
+		if (leftPacedUntil !== rightPacedUntil) return leftPacedUntil - rightPacedUntil;
+	}
 	if (left.hasPriorityBoost !== right.hasPriorityBoost) return left.hasPriorityBoost ? -1 : 1;
 	// Short-window guard: candidates whose primary (e.g. 5h) window is
 	// nearly exhausted rank behind cool ones regardless of drain urgency —

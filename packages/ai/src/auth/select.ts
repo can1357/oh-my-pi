@@ -72,6 +72,27 @@ export type TryOAuthOptions = {
 	onTransientRefreshFailure?: (error: unknown) => void;
 };
 
+/** Governor pacing seam for account choice. Read-only: never fetches, refreshes or writes. */
+export interface UsagePacing {
+	/** Synchronous. False keeps account choice exactly as it is without the governor. */
+	readonly active: boolean;
+	/** Pacing of one account under the background reserve, from its already-fetched report. */
+	pacing(
+		provider: string,
+		credential: OAuthCredential,
+		usage: UsageReport,
+		context: CredentialRankingContext,
+	): UsagePacingMeasure;
+}
+
+/** Governor view of one account: whether its window was measured, and when it admits the next request. */
+export interface UsagePacingMeasure {
+	/** True when at least one applicable window had a fresh, measured usage fraction. */
+	measured: boolean;
+	/** Earliest admissible time (ms) when the account is paced; undefined when it admits now or does not gate. */
+	pacedUntil?: number;
+}
+
 /** Services consulted by CredentialSelector for policy, usage, blocks, refresh, and session affinity. */
 export interface CredentialSelectorDeps {
 	store: AuthCredentialStore;
@@ -82,6 +103,8 @@ export interface CredentialSelectorDeps {
 	usage: UsageService;
 	refresher: OAuthRefresher;
 	strategies: RankingStrategyResolver;
+	/** Governor pacing for account choice; absent or inactive leaves ranking unchanged. */
+	pacing?: UsagePacing;
 }
 
 /** Picks which stored credential serves a request: ordering, usage ranking, OAuth refresh ladder. */
@@ -348,20 +371,28 @@ export class CredentialSelector {
 		return candidates[0]?.selection ?? fallback;
 	}
 
+	/** Whether the usage governor paces this selector's accounts. */
+	#governed(): boolean {
+		return this.#deps.pacing?.active === true;
+	}
+
 	#oauthUsagePolicy(
 		provider: string,
 		credentials: readonly OAuthSelection[],
 		strategy: CredentialRankingStrategy | undefined,
 		hasPlanRequirement: boolean,
 	): { policyReserveEnabled: boolean; checkUsage: boolean } {
+		const governed = this.#governed();
 		const hasAccountPolicy = credentials.some(
 			({ credential }) => this.#deps.policies.forCredential(provider, credential) !== undefined,
 		);
 		const canFetchPolicyUsage = strategy !== undefined || this.#deps.usage.canFetchOAuthUsage(provider);
-		const policyReserveEnabled = hasAccountPolicy && canFetchPolicyUsage;
+		const policyReserveEnabled = (hasAccountPolicy || governed) && canFetchPolicyUsage;
 		return {
 			policyReserveEnabled,
-			checkUsage: (strategy !== undefined || policyReserveEnabled) && (credentials.length > 1 || hasPlanRequirement),
+			checkUsage:
+				(strategy !== undefined || policyReserveEnabled) &&
+				(credentials.length > 1 || hasPlanRequirement || governed),
 		};
 	}
 
@@ -523,6 +554,11 @@ export class CredentialSelector {
 				reservePct === undefined || !Number.isFinite(reservePct)
 					? undefined
 					: Math.max(0, Math.min(1, reservePct / 100));
+			const pacing =
+				usage !== null && this.#deps.pacing?.active === true
+					? this.#deps.pacing.pacing(args.provider, selection.credential, usage, args.rankingContext)
+					: undefined;
+			const pacedUntil = pacing?.pacedUntil;
 			ranked.push({
 				selection,
 				usage,
@@ -530,10 +566,15 @@ export class CredentialSelector {
 				blocked,
 				blockedUntil,
 				inReserve:
-					reserveFraction !== undefined &&
-					remainingFraction !== undefined &&
-					isWithinUsageReserve(remainingFraction, reserveFraction),
-				reserveMeasured: reserveFraction !== undefined && remainingFraction !== undefined,
+					pacedUntil !== undefined ||
+					(reserveFraction !== undefined &&
+						remainingFraction !== undefined &&
+						isWithinUsageReserve(remainingFraction, reserveFraction)),
+				reserveMeasured:
+					pacedUntil !== undefined ||
+					pacing?.measured === true ||
+					(reserveFraction !== undefined && remainingFraction !== undefined),
+				pacedUntil,
 				accountPriority: policy?.priority === undefined || !Number.isFinite(policy.priority) ? 0 : policy.priority,
 				allowanceSpent: remainingFraction === 0,
 				reclaimReady:
