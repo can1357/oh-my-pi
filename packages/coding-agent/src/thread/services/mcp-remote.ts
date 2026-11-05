@@ -17,10 +17,18 @@ export const MCP_MANAGER_KIND = "mcp-manager";
 /** Listener for server notification frames. */
 export type McpNotificationListener = (serverName: string, method: string, params: unknown) => void;
 
+/** Reply to {@link McpManagerProtocol.tools}. */
+export interface McpToolsReply {
+	/** Version of main's current tool set; it changes whenever the set does. */
+	readonly version: number;
+	/** The current tools; omitted when the caller already holds `version`. */
+	readonly tools?: CustomTool<TSchema, MCPToolDetails>[];
+}
+
 /** Protocol a {@link RemoteMCPManager} speaks to its main-thread manager. */
 export type McpManagerProtocol = {
-	/** Current tools as plain cross-thread views (data + `execute` running on main). */
-	tools: RpcMethod<[], CustomTool<TSchema, MCPToolDetails>[]>;
+	/** Current tools as plain cross-thread views (data + `execute` running on main), unless `knownVersion` is current. */
+	tools: RpcMethod<[knownVersion: number], McpToolsReply>;
 	/** Subscribe; the returned unsubscribe is synchronous for the worker. */
 	onToolsChanged: RpcMethod<[listener: () => void], () => void>;
 	onNotification: RpcMethod<[listener: McpNotificationListener], () => void>;
@@ -42,13 +50,22 @@ export type McpManagerProtocol = {
 /** Worker-side proxy of one main-thread `MCPManager`. */
 export class RemoteMCPManager implements MCPManagerApi {
 	readonly #remote: RemoteObject<McpManagerProtocol>;
+	/** Tool views of main's tool set at {@link #toolsVersion}; 0 before the first fetch. */
+	#tools: CustomTool<TSchema, MCPToolDetails>[] = [];
+	#toolsVersion = 0;
 
 	constructor(remote: RemoteObject<McpManagerProtocol>) {
 		this.#remote = remote;
 	}
 
+	/** Main's current tools; the views cross only when main's tool set changed since the last call. */
 	getTools(): CustomTool<TSchema, MCPToolDetails>[] {
-		return this.#remote.callSync("tools");
+		const reply = this.#remote.callSync("tools", this.#toolsVersion);
+		if (reply.tools) {
+			this.#tools = reply.tools;
+			this.#toolsVersion = reply.version;
+		}
+		return this.#tools;
 	}
 
 	addToolsChangedListener(listener: () => void): () => void {
