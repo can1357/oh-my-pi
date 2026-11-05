@@ -3547,13 +3547,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * dispose) so a conversation that ends takes its own background work with
 	 * it without touching its parent's jobs.
 	 *
-	 * Scope is the ref this agent currently holds, by LINEAGE: its own jobs and
-	 * those of the agents spawned under it. An id alone would be the wrong
-	 * scope in both directions — it would miss the descendants (which is how
-	 * `/new` left a retained grandchild running) and it would hit the work of a
-	 * later agent that took the id. When this session holds no registry ref
-	 * there is no tree to speak of, and only its own directly owned rows are
-	 * cancelled.
+	 * Scope is the ref THIS session runs as, by LINEAGE: its own jobs and those
+	 * of the agents spawned under it. An id alone would be the wrong scope in
+	 * both directions — it would miss the descendants (which is how `/new` left
+	 * a retained grandchild running) and it would hit the work of a later agent
+	 * that took the id. When the id's current ref is not this session's, or
+	 * there is no ref at all, there is no tree to name and only this session's
+	 * own directly owned rows are cancelled.
 	 *
 	 * Cleanup runs against this session's scoped manager: running jobs are
 	 * cancelled, finished rows are evicted with their pending deliveries, and any
@@ -3572,11 +3572,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		releaseJudgmentBatches(this.#agentId);
 		WorkPoolRegistry.global().releaseOwner(this.#agentId);
 		const manager = this.#asyncJobManager;
-		const ref = this.#agentRegistry?.get(this.#agentId);
+		// The ref must be THIS session's. By the time a superseded session is
+		// disposed, its agent id belongs to the replacement, and scoping to that
+		// ref's lineage would cancel the replacement's tree — the very mistake
+		// of reconstructing ownership from a string id. Without our own ref
+		// there is no tree to name, so only our own rows are cancelled, as
+		// before: a superseded ref cancels nothing of its successor's.
+		const current = this.#agentRegistry?.get(this.#agentId);
+		const own = current?.session === this ? current : undefined;
 		const filter =
-			ref === undefined
+			own === undefined
 				? { ownerId: this.#agentId }
-				: { ownerId: this.#agentId, includeDescendants: true, agentLineage: ref.lineage };
+				: { ownerId: this.#agentId, includeDescendants: true, agentLineage: own.lineage };
 		manager?.cancelAll(filter, reason);
 		manager?.evictCompletedJobs(filter);
 		// Invalidate this owner's in-flight/drained deliveries against the new
