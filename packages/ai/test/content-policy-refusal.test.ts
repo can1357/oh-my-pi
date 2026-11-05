@@ -63,6 +63,36 @@ async function runAgainstPool(respond: () => Response) {
 	return { result: await stream.result(), bearers };
 }
 
+describe("error envelopes a gateway doubly wrapped", () => {
+	// A gateway may wrap the envelope in itself, and the inner object is then the real error.
+	it("reads the refusal code out of the inner envelope instead of rotating every credential", async () => {
+		const { result, bearers } = await runAgainstPool(() =>
+			Response.json({ error: { error: { code: "cyber_policy", message: REFUSAL_MESSAGE } } }, { status: 403 }),
+		);
+
+		expect(bearers).toEqual(["Bearer credential-A"]);
+		expect(result.stopDetails).toEqual({ type: "refusal", category: "cyber_policy", explanation: REFUSAL_MESSAGE });
+	});
+
+	// An `error` field beside a valid outer code is a diagnostic, not the envelope. Taking it
+	// loses the outer code: a refusal read that way stops being a refusal and rotates every
+	// sibling credential, which is the account walk this pull request exists to prevent.
+	it.each([
+		{ name: "an empty array", diagnostic: [] as unknown },
+		{ name: "an object carrying no code", diagnostic: { trace_id: "abc", detail: "diagnostic only" } },
+	])("keeps the outer refusal code when the inner value is $name", async ({ diagnostic }) => {
+		const { result, bearers } = await runAgainstPool(() =>
+			Response.json(
+				{ error: { code: "cyber_policy", message: REFUSAL_MESSAGE, error: diagnostic } },
+				{ status: 403 },
+			),
+		);
+
+		expect(bearers).toEqual(["Bearer credential-A"]);
+		expect(result.stopDetails).toEqual({ type: "refusal", category: "cyber_policy", explanation: REFUSAL_MESSAGE });
+	});
+});
+
 describe("provider content-policy refusals", () => {
 	it("attempts a cyber_policy refusal once and surfaces the provider's code and message as a refusal", async () => {
 		const { result, bearers } = await runAgainstPool(() => failedResponse("cyber_policy", REFUSAL_MESSAGE));
