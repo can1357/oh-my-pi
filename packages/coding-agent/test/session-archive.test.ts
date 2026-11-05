@@ -4236,7 +4236,11 @@ async function pipeHolding(fifo: string, payload: string = PIPE_PAYLOAD): Promis
 const PIPE_PAYLOAD = "UNIQUE USER INPUT WAITING IN A PIPE, 52 BYTES LONG.\n";
 
 // `notes.jsonl` is the review's own shape: named like a transcript, so it is
-// also among the files the archive run checks for subagent sessions.
+// also among the files the archive run checks for subagent sessions. #17488's
+// round 56 made a name in the live session tree resolve through its link and
+// be judged by what it reaches, so the refusal names the FIFO rather than the
+// link; the artifact name (`pipe`) is refused before it is resolved and still
+// names the link.
 for (const name of ["pipe", "notes.jsonl"]) {
 	test(
 		`an archive run neither waits on nor drains a FIFO an artifact links to, and names it (${name})`,
@@ -4253,7 +4257,7 @@ for (const name of ["pipe", "notes.jsonl"]) {
 				expect(await pipe.left()).toBe(PIPE_PAYLOAD);
 				if (outcome !== "hung") {
 					expect(outcome.archive?.errors.join("\n")).toContain(
-						name === "notes.jsonl" ? `${link} is a symbolic link, not a regular file` : `${link} links to a FIFO`,
+						name === "notes.jsonl" ? `${link} is a FIFO, not a regular file` : `${link} links to a FIFO`,
 					);
 					if (name === "notes.jsonl") expect(outcome.archive?.archived).toBe(0);
 				}
