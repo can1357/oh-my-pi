@@ -66,8 +66,19 @@ export function runtimeAgentName(skillId: string): string {
 export class A2aAgentBridge implements A2aBridgeApi {
 	readonly #agents = new Map<string, A2aRuntimeAgent>();
 
-	/** Register or replace one remote agent; re-adding a card replaces its skills. */
+	/**
+	 * Register one remote agent. Re-adding the SAME endpoint (refresh) replaces
+	 * its skills under the same name; adding a DIFFERENT endpoint that already
+	 * owns the name registers under a `-2`/`-3`… suffix so sibling terminals
+	 * serving the same skill ids (e.g. two `Main` agents) both stay reachable.
+	 */
 	add(agent: A2aRuntimeAgent): A2aRuntimeAgent {
+		const existing = this.#agents.get(agent.name);
+		if (existing !== undefined && existing.url !== agent.url) {
+			let suffix = 2;
+			while (this.#agents.has(`${agent.name}-${suffix}`)) suffix += 1;
+			agent = { ...agent, name: `${agent.name}-${suffix}` };
+		}
 		this.#agents.set(agent.name, agent);
 		return agent;
 	}

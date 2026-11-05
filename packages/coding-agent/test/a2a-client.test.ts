@@ -23,6 +23,7 @@ import {
 	A2A_WAITING_FOR_INPUT_TEXT,
 	A2aAgentBridge,
 	addA2aAgentsFromUrl,
+	runtimeAgentName,
 } from "@oh-my-pi/pi-coding-agent/a2a/agent-bridge";
 import { AGENT_CARD_PATH, type A2aServerHandle, createA2aServer } from "@oh-my-pi/pi-coding-agent/a2a/server";
 import { type AgentCard, buildAgentCard } from "@oh-my-pi/pi-coding-agent/a2a/card";
@@ -616,5 +617,37 @@ describe("two-instance loop (task-9 server as counterparty)", () => {
 		} finally {
 			handle.stop();
 		}
+	});
+});
+
+describe("A2aAgentBridge cross-terminal name collisions", () => {
+	it("different endpoints with the same skill id register under -2/-3 suffixes", () => {
+		const bridge = new A2aAgentBridge();
+		const base = runtimeAgentName("Main");
+		bridge.add({ name: base, skillId: "Main", description: "t1", cardName: "omp", url: "http://127.0.0.1:7601/" });
+		bridge.add({ name: base, skillId: "Main", description: "t2", cardName: "omp", url: "http://127.0.0.1:7602/" });
+		bridge.add({ name: base, skillId: "Main", description: "t3", cardName: "omp", url: "http://127.0.0.1:7603/" });
+		const listed = bridge.list().map(agent => `${agent.name}:${agent.url}`);
+		expect(listed).toEqual([
+			"a2a:Main:http://127.0.0.1:7601/",
+			"a2a:Main-2:http://127.0.0.1:7602/",
+			"a2a:Main-3:http://127.0.0.1:7603/",
+		]);
+	});
+
+	it("re-adding the same endpoint refreshes in place without a suffix", () => {
+		const bridge = new A2aAgentBridge();
+		const base = runtimeAgentName("Main");
+		bridge.add({ name: base, skillId: "Main", description: "t1", cardName: "omp", url: "http://127.0.0.1:7601/" });
+		bridge.add({ name: base, skillId: "Main", description: "t2", cardName: "omp", url: "http://127.0.0.1:7602/" });
+		bridge.add({
+			name: base,
+			skillId: "Main",
+			description: "t1 refreshed",
+			cardName: "omp",
+			url: "http://127.0.0.1:7601/",
+		});
+		const listed = bridge.list().map(agent => `${agent.name}:${agent.description}`);
+		expect(listed).toEqual(["a2a:Main:t1 refreshed", "a2a:Main-2:t2"]);
 	});
 });
