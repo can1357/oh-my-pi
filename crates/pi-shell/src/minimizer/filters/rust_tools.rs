@@ -41,11 +41,12 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 ///
 /// Two main shapes are handled:
 ///
-/// - **Check mode** emits `Diff in <path> at line <N>:` headers followed by
-///   per-hunk `+`/`-` lines. We collect the set of affected files, print a
-///   one-line header (`N files reformatted (M with diffs):`), the first 3 file
-///   paths, and elide every diff body — the agent rarely needs the full diff
-///   inline; the artifact reference carries the original.
+/// - **Check mode** emits `Diff in <path>:<N>:` headers (older releases: `Diff
+///   in <path> at line <N>:`) followed by per-hunk `+`/`-` lines. We collect
+///   the set of affected files, print a one-line header (`N files need
+///   formatting:`), the first 3 file paths, and elide every diff body — the
+///   agent rarely needs the full diff inline; the artifact reference carries
+///   the original.
 /// - **Silent runs** (rustfmt formatted in place, no `--check`) emit no stdout.
 ///   The empty buffer passes through; no transformation.
 ///
@@ -72,7 +73,11 @@ fn condense_rustfmt(input: &str, exit_code: i32) -> String {
 		files.iter().filter(|f| seen.insert(**f)).collect()
 	};
 	let total = unique.len();
-	let _ = writeln!(out, "{total} files reformatted:");
+	if total == 1 {
+		out.push_str("1 file needs formatting:\n");
+	} else {
+		let _ = writeln!(out, "{total} files need formatting:");
+	}
 	for file in unique.iter().take(3) {
 		out.push_str("  ");
 		out.push_str(file);
@@ -88,12 +93,15 @@ fn collect_diff_files(input: &str) -> Vec<&str> {
 	let mut files = Vec::new();
 	for line in input.lines() {
 		if let Some(rest) = line.strip_prefix("Diff in ") {
-			// rest looks like: `<path> at line <N>:`
-			let path = rest
-				.split(" at line ")
-				.next()
-				.unwrap_or(rest)
-				.trim_end_matches(':');
+			// rest looks like `<path>:<N>:` or `<path> at line <N>:`.
+			let rest = rest.strip_suffix(':').unwrap_or(rest);
+			let path = match rest.split_once(" at line ") {
+				Some((path, _)) => path,
+				None => rest
+					.rsplit_once(':')
+					.filter(|(_, line)| line.parse::<u32>().is_ok())
+					.map_or(rest, |(path, _)| path),
+			};
 			files.push(path);
 		}
 	}
@@ -123,7 +131,7 @@ mod tests {
 		let context = ctx("rustfmt", "rustfmt --check src/", &cfg);
 		let out = filter(&context, &input, 1);
 		assert!(out.changed);
-		assert!(out.text.contains("50 files reformatted"));
+		assert!(out.text.contains("50 files need formatting:"));
 		assert!(out.text.contains("src/file_0.rs"));
 		assert!(out.text.contains("[…47 files elided…]"));
 		// Diff bodies must be elided.
@@ -131,6 +139,22 @@ mod tests {
 		// Savings ratio ≥ 0.7
 		let saved_ratio = 1.0 - (out.text.len() as f64 / input.len() as f64);
 		assert!(saved_ratio >= 0.7, "expected ≥0.7 savings, got {saved_ratio}");
+	}
+
+	#[test]
+	fn rustfmt_counts_files_not_diff_locations() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let context = ctx("rustfmt", "rustfmt --check src/x.rs", &cfg);
+		// rustfmt 1.8 output: one header per diff location, `<path>:<line>:`.
+		let input = "Diff in /p/src/x.rs:1:\n-fn  a(){}\n+fn a() {}\n fn f1() {}\nDiff in \
+		             /p/src/x.rs:19:\n fn f20() {}\n-fn  b(){}\n+fn b() {}\nDiff in \
+		             /p/src/x.rs:40:\n-fn  c(){}\n+fn c() {}\n \n";
+		let out = filter(&context, input, 1);
+		assert!(
+			out.text
+				.starts_with("1 file needs formatting:\n  /p/src/x.rs\n")
+		);
+		assert!(!out.text.contains(":19"));
 	}
 
 	#[test]

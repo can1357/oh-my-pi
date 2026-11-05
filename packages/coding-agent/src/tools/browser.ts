@@ -692,6 +692,7 @@ async function runBrowser(
 		timeoutMs,
 		signal,
 		session,
+		waitsForDownload: params.action === "call" && params.chain?.[0]?.method === "waitForDownload",
 	});
 
 	if (screenshots.length) details.screenshots = screenshots;

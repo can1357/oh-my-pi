@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Frustration counting agent-attributed messages as user messages; historical stats are corrected after the next sync ([#18183](https://github.com/can1357/oh-my-pi/issues/18183)).
+
 ## [18.16.0] - 2026-11-02
 
 ### Fixed

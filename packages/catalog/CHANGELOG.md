@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Fixed newly published Azure models missing after catalog refresh ([#18173](https://github.com/can1357/oh-my-pi/issues/18173), [#18174](https://github.com/can1357/oh-my-pi/pull/18174) by [@dunkpi](https://github.com/dunkpi))
 - Factory Droid no longer hides a model when live routing's family default leaves it no upstream (an empty default, one naming none of its upstreams, or none serving the account's region); like Droid, it uses the model's registry upstream. An empty per-model route still hides the model ([#17862](https://github.com/can1357/oh-my-pi/pull/17862) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
