@@ -8,7 +8,7 @@
  * storage for the transcripts, whatever the filesystem does with the rest.
  */
 import * as path from "node:path";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 import type { SessionStorage } from "./session-storage";
 
 /**
@@ -86,14 +86,24 @@ export async function copyTranscriptTree(
  * passes `*`: it keeps the session's unsent prompt draft (`draft.txt`) beside
  * the subagent transcripts, and no directory move carries its rows. Returns
  * the files it moved, so a later failed step can move them back with
- * {@link restoreTranscripts}. All or nothing: when one move fails, the ones
- * before it are moved back before the error is thrown. A storage with a
- * refusing rename never replaces nor skips a taken destination, whether it
- * was taken before the move or another client takes it while the move runs:
- * that move fails with `EEXIST` naming it, so the session's tree never ends
- * up split or holding another session's child. Under file storage the
- * directory move already placed what it could, and a transcript whose
- * destination is taken stays where it is.
+ * {@link restoreTranscripts}.
+ *
+ * The two storage families need opposite failure handling, because the
+ * caller's rollback can undo different amounts of work:
+ *
+ * - **A storage with a refusing rename** (key-indexed) is all or nothing:
+ *   when one move fails, the ones before it are moved back before the error
+ *   is thrown. It never replaces nor skips a taken destination, whether it
+ *   was taken before the move or another client takes it while the move runs
+ *   — that move fails with `EEXIST` naming it, so the session's tree never
+ *   ends up split or holding another session's child.
+ * - **File storage STRANDS**, exactly as `mergeDirectoryInto` does, and never
+ *   throws once moving has begun. The directory move ran first and has
+ *   already placed everything it could; a caller that rolls its session file
+ *   back cannot put those files back, so throwing here would leave the
+ *   session at its old path with its subagent transcripts under another
+ *   session's directory. A transcript whose destination is taken, or whose
+ *   move fails for any other reason, stays where it is and is logged.
  */
 export async function moveTranscriptTree(
 	storage: SessionStorage,
@@ -102,17 +112,30 @@ export async function moveTranscriptTree(
 	pattern = "*.jsonl",
 ): Promise<TranscriptPlacement[]> {
 	const moved: TranscriptPlacement[] = [];
+	const stranded: string[] = [];
+	// A refusing rename marks the key-indexed family; file storage has none.
+	const allOrNothing = storage.renameNoReplace !== undefined;
 	await storage.refresh?.();
 	try {
 		for (const from of listTranscriptTree(storage, fromDir, pattern)) {
 			const to = path.join(toDir, path.relative(fromDir, from));
-			if (!storage.renameNoReplace && (await storage.exists(to))) continue;
-			storage.ensureDirSync(path.dirname(to));
 			try {
+				if (!storage.renameNoReplace && (await storage.exists(to))) {
+					stranded.push(from);
+					continue;
+				}
+				storage.ensureDirSync(path.dirname(to));
 				await (storage.renameNoReplace ? storage.renameNoReplace(from, to) : storage.rename(from, to));
 			} catch (err) {
 				if (isEnoent(err)) continue;
-				throw err;
+				if (allOrNothing) throw err;
+				stranded.push(from);
+				logger.warn("Left a subagent transcript at its old path while moving a session", {
+					from,
+					to,
+					error: String(err),
+				});
+				continue;
 			}
 			moved.push({ from, to });
 		}
@@ -127,6 +150,13 @@ export async function moveTranscriptTree(
 			);
 		}
 		throw err;
+	}
+	if (stranded.length > 0) {
+		logger.warn("Moved a session; some subagent transcripts stayed at their old paths", {
+			fromDir,
+			toDir,
+			stranded: stranded.length,
+		});
 	}
 	return moved;
 }

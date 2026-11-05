@@ -502,3 +502,36 @@ for (const kind of ["file", "sql"] as const) {
 		);
 	});
 }
+
+describe("session move onto a destination that cannot take every transcript", () => {
+	test(
+		"file storage: the move completes and the transcript it could not place stays at the source",
+		async () => {
+			const fx = await openFixture("file");
+			const { manager, file, grandchild } = await seed(fx);
+			const movedDir = path.join(getSessionsDir(fx.agentDir), "--moved--");
+			// The destination already holds this session's directory, with a
+			// plain file where the source keeps the `Worker/` subagent
+			// directory. Merging strands `Worker`, and the storage pass that
+			// follows cannot even ask whether `Worker/Worker.Helper.jsonl`
+			// exists there: the lookup fails with ENOTDIR.
+			const destArtifactsDir = path.join(movedDir, path.basename(file).slice(0, -".jsonl".length));
+			await fs.mkdir(destArtifactsDir, { recursive: true });
+			await Bun.write(path.join(destArtifactsDir, "Worker"), "not a directory");
+
+			await manager.moveTo(fx.tempDir.join("moved"), movedDir);
+			const movedFile = manager.getSessionFile()!;
+			await manager.close();
+
+			// The session moved: its file is at the destination and gone from
+			// the source, so `--continue` and `history://` still find it.
+			expect(movedFile).toBe(path.join(movedDir, path.basename(file)));
+			expect(await fx.storage.exists(movedFile)).toBe(true);
+			expect(await fx.storage.exists(file)).toBe(false);
+			// The transcript that could not be placed stayed where it was
+			// rather than being lost or left under the destination session.
+			expect(await fx.storage.exists(grandchild)).toBe(true);
+		},
+		STEP_TIMEOUT_MS,
+	);
+});

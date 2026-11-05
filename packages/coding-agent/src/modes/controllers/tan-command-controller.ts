@@ -42,6 +42,10 @@ function extractAssistantText(message: AssistantMessage | undefined): string {
  * (the parent session's; a row under `session.storage: sql`), with its local
  * artifacts directory. A fork that failed before writing leaves only the
  * directory, if anything.
+ *
+ * Both removals are always attempted, as the pair of `fs.rm` calls this
+ * replaced were: a transcript the storage refuses to delete must not also
+ * strand the clone's artifacts directory on disk.
  */
 async function removeCloneSession(
 	cloneFile: string,
@@ -54,15 +58,16 @@ async function removeCloneSession(
 			logger.warn("/tan: failed to close the clone of a failed dispatch", { cloneFile, error: String(error) });
 		});
 	}
+	let artifactsRemoved = false;
 	try {
 		await storage.deleteSessionWithArtifacts(cloneFile);
-		return;
+		artifactsRemoved = true;
 	} catch (error) {
 		if (!isEnoent(error)) {
 			logger.warn("/tan: failed to remove the clone of a failed dispatch", { cloneFile, error: String(error) });
-			return;
 		}
 	}
+	if (artifactsRemoved) return;
 	await fs.rm(cloneFile.slice(0, -".jsonl".length), { recursive: true, force: true }).catch(error => {
 		logger.warn("/tan: failed to remove the clone's artifacts", { cloneFile, error: String(error) });
 	});
