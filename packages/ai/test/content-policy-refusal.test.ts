@@ -281,6 +281,17 @@ function refusalOn(api: Api, carrier: RefusalCarrier): Response {
 	// `sse-in-status-details` puts the same envelope in `response.status_details.error`, the
 	// position one Responses-family reader consulted and the Codex one did not. Chat Completions
 	// has no such field, so for that API the carrier is the ordinary in-band chunk.
+	// The root-code-with-a-diagnostic shape on the Responses family is an `error` EVENT whose own
+	// root carries the code, with the diagnostic beside it — the frame an arm drove when three of
+	// the four wires reported the diagnostic and exited 1 while Chat Completions reported the
+	// refusal and exited 4 on identical bytes.
+	if (carrier === "sse-root-code-beside-a-diagnostic" && api !== "openai-completions") {
+		const frame = JSON.stringify({ type: "error", ...error, error: INNER_DIAGNOSTIC });
+		return new Response(`event: error\ndata: ${frame}\n\n`, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+	}
 	if (api !== "openai-completions") return failedResponse(streamed, carrier === "sse-in-status-details");
 	// `sse-flat-root-chunk` puts the code at the ROOT of the chunk with no `error` object at all,
 	// which is what cost this wire its code: its reporter returned a generic error before ever

@@ -5263,6 +5263,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (this.#recovery.isClassifierRefusal(msg)) {
 				this.#prunedTerminalFailure = msg;
 				this.#recovery.removeAssistantMessageFromActiveContext(msg);
+				// Pruning it from the replayed context must not erase it from the TRANSCRIPT. This
+				// is the same #6249 problem the branch below solves for every other terminal
+				// errored turn, and a refusal is the one a user most needs to see: without this
+				// the branch ends holding nothing but the user's own message, which is what makes
+				// a refusal look like the session stopping for no reason.
+				await this.#recovery.persistTerminalEmptyErrorTurn(msg);
 			} else if (!AIError.isContextOverflow(msg, this.model?.contextWindow ?? 0)) {
 				// No retry, fallback, or compaction continuation fired: this errored
 				// turn ends the run. #persistSessionMessageIfMissing dropped it as an

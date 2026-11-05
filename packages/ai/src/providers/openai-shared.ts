@@ -4423,6 +4423,19 @@ export function isOpenAIResponsesStalePreviousResponseError(error: unknown): boo
 	);
 }
 
+/**
+ * A stream event without its `type`, for asking which object the error is.
+ *
+ * On a response body a `type` string can be the error's own code; on a stream EVENT it names the
+ * event — `error`, `response.failed` — so the resolver's last position would read that name as a
+ * code. Dropping it keeps one resolver serving both shapes instead of a second reader for events.
+ */
+function withoutEventType(envelope: Record<string, unknown>): Record<string, unknown> {
+	if (typeof envelope.type !== "string") return envelope;
+	const { type: _eventName, ...rest } = envelope;
+	return rest;
+}
+
 /** Preserve one error/usage mapping for ordinary processing and pre-generation validation negotiation. */
 export function throwOpenAIResponsesEventError(
 	event: ResponseStreamEvent,
@@ -4431,8 +4444,7 @@ export function throwOpenAIResponsesEventError(
 ): never {
 	const envelope = event as unknown as Record<string, unknown>;
 	if (event.type === "error") {
-		const selected = isRecord(envelope.error) ? envelope.error : envelope;
-		const error = (AIError.wrappedErrorEnvelope(selected) ?? selected) as Record<string, unknown>;
+		const error = (AIError.responseErrorEnvelope(withoutEventType(envelope)) ?? envelope) as Record<string, unknown>;
 		const inBand = AIError.createInBandProviderError(event);
 		if (inBand) throw inBand;
 		throwOpenAIResponsesRefusal(error, provider);
@@ -4443,19 +4455,19 @@ export function throwOpenAIResponsesEventError(
 	}
 	const response = isRecord(envelope.response) ? envelope.response : undefined;
 	if (event.type === "response.failed") populateResponsesUsageFromResponse(output, event.response?.usage);
+	// Kept for the fallback message below, which reports a `status_details.reason` when the body
+	// carries no error object at all. Which object the ERROR is, is not decided here.
 	const statusDetails = isRecord(response?.status_details) ? response.status_details : undefined;
-	const selectedError = isRecord(response?.error)
-		? response.error
-		: isRecord(statusDetails?.error)
-			? statusDetails.error
-			: undefined;
-	// One call, one authority: `wrappedErrorEnvelope` descends only a real wrapper, walks through a
-	// pure intermediate one, and refuses an `error` field beside a code of its own. Walking here
-	// instead is how this reader and the shared in-band probe came to disagree about how deep a
-	// wrapper may be, and a disagreement loses the code between them.
-	const error = selectedError
-		? ((AIError.wrappedErrorEnvelope(selectedError) ?? selectedError) as Record<string, unknown>)
-		: undefined;
+	// One call, one authority, for the whole event rather than a position picked here:
+	// `responseErrorEnvelope` knows the root's own code, `error`, `response.error` and
+	// `response.status_details.error`, in precedence order. Picking a position here is what made
+	// this reader disagree with the ones beside it — a root refusal with a diagnostic below it
+	// reported the diagnostic and exited 1 while Chat Completions reported the refusal and exited
+	// 4 on identical bytes. A new body position belongs in that function, never here.
+	//
+	// `type` is dropped first because on a stream event it names the event (`response.failed`),
+	// and the resolver's last position would otherwise read that name as the error's code.
+	const error = AIError.responseErrorEnvelope(withoutEventType(envelope)) as Record<string, unknown> | undefined;
 	const details = isRecord(response?.incomplete_details) ? response.incomplete_details : undefined;
 	const inBand = details ? undefined : AIError.createInBandProviderError({ ...response, error });
 	if (inBand) throw inBand;

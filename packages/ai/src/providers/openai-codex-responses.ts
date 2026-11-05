@@ -4605,47 +4605,32 @@ const innerFailureEventSchema = type({
 });
 
 /**
- * Normalise a Codex failure event into the one shape the schema below reads: a single `error`
- * object, resolved to its innermost envelope, in the top-level and the `response` positions.
+ * Normalise a Codex failure event so the schema below, and the four consumers that read its
+ * output, all see the error in one place: a single `error` object at the top of the event.
  *
- * Two things it repairs, both the same defect — a reader disagreeing with the reader beside it
- * about which object the error is:
- * - a wrapped envelope (`{ error: { error: { code, message } } }`). The schema accepts a wrapper
- *   and reads nothing out of it, so a refusal carried that way arrives with no code at all.
- * - `response.status_details.error`, which the Responses reader in `openai-shared` consults and
- *   this one did not. Byte-identical bodies therefore gave exit 4 with the provider's own code on
- *   one wire and a plain `status=failed` line on the other; a Codex user lost the reason, the exit
- *   status and the refusal retry allowance.
+ * The position it comes from is **not decided here**. `responseErrorEnvelope` owns that — the
+ * event's own `code`, then `error` resolved to its innermost envelope, then `response.error`, then
+ * `response.status_details.error` — and every other reader of an OpenAI-wire error asks the same
+ * function. Deciding it here is what made this reader disagree with the Responses reader beside
+ * it: identical bytes gave the provider's own code and exit 4 on one wire and a bare
+ * `status=failed` line on the other, and a Codex user lost the reason, the exit status and the
+ * refusal-retry allowance. **A new body position is a row in that function, never a branch here.**
  *
- * Only a real wrapper is descended into: an `error` field beside a code of its own is a diagnostic.
- * Returns `raw` itself when nothing needs moving, so the ordinary event allocates nothing.
+ * `type` is dropped before asking, because on a stream event it names the event rather than the
+ * error. Returns `raw` itself when nothing moves, so the ordinary event allocates nothing.
  */
 function unwrapCodexFailureEnvelope(raw: unknown): unknown {
 	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return raw;
 	const event = raw as Record<string, unknown>;
-	const error =
-		typeof event.error === "object" && event.error !== null
-			? (AIError.wrappedErrorEnvelope(event.error) ?? event.error)
-			: event.error;
-	const response = event.response;
-	let unwrappedResponse = response;
-	if (typeof response === "object" && response !== null && !Array.isArray(response)) {
-		const record = response as Record<string, unknown>;
-		const statusDetails = record.status_details;
-		const nested: unknown =
-			typeof record.error === "object" && record.error !== null
-				? record.error
-				: typeof statusDetails === "object" && statusDetails !== null
-					? (statusDetails as Record<string, unknown>).error
-					: undefined;
-		const responseError =
-			typeof nested === "object" && nested !== null
-				? (AIError.wrappedErrorEnvelope(nested) ?? nested)
-				: record.error;
-		if (responseError !== record.error) unwrappedResponse = { ...record, error: responseError };
-	}
-	if (error === event.error && unwrappedResponse === response) return raw;
-	return { ...event, error, response: unwrappedResponse };
+	const withoutType = typeof event.type === "string" ? { ...event, type: undefined } : event;
+	const resolved = AIError.responseErrorEnvelope(withoutType);
+	// `resolved` may be the event root itself, and that is the point: with `type` stripped the
+	// resolver only returns the root when the root carries a `code` string of its own, which is
+	// the refusal with a diagnostic beside it. Rejecting that case is what kept this wire
+	// reporting the diagnostic while the other three reported the refusal.
+	const error = resolved ?? event.error;
+	if (error === event.error) return raw;
+	return { ...event, error };
 }
 
 const codexFailureEventSchema = type("unknown").pipe(raw => {

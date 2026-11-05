@@ -247,8 +247,14 @@ const ACCOUNT_POLICY_PATTERN = /trusted access for cyber/i;
  * rotate; the verdict is not stable for a given input, so callers may retry the
  * same request a bounded number of times.
  */
-const CONTENT_POLICY_REFUSAL_CODES: Readonly<Record<string, true>> = { cyber_policy: true };
-const CONTENT_POLICY_REFUSAL_PATTERN = /\bcyber_policy\b/i;
+const CONTENT_POLICY_REFUSAL_CODES: Readonly<Record<string, true>> = {
+	cyber_policy: true,
+	// The organization's own classifier refused the content, so every credential in that
+	// organization sees the same verdict: rotating spends siblings on a decided answer. Whether it
+	// is worth RESENDING is a separate question, answered by `UNSTABLE_REFUSAL_CODES` below.
+	reasoning_extraction: true,
+};
+const CONTENT_POLICY_REFUSAL_PATTERN = /\b(?:cyber_policy|reasoning_extraction)\b/i;
 
 /**
  * Whether a provider error `code` plus `message` is a content-policy refusal
@@ -271,19 +277,31 @@ export function isProviderRefusal(message: Pick<AssistantMessage, "stopReason" |
 }
 
 /**
- * Whether a failed turn is a provider refusal whose verdict is not stable for
- * a given input — a content-policy refusal code such as `cyber_policy`, which
- * the same request sometimes clears — so resending it on the same model may
- * succeed. Classifier refusals without such a code (Anthropic `refusal`,
- * `sensitive`) are reproduced by a resend and walk fallback models instead.
+ * Refusal categories whose verdict is **not stable for the same input**, so resending the same
+ * request on the same model may clear it. These earn the bounded same-model retry allowance
+ * (`retry.refusalRetries`); a refusal outside this set is reproduced by a resend and walks the
+ * fallback models instead.
+ *
+ * This is a DIFFERENT question from {@link CONTENT_POLICY_REFUSAL_CODES}, which answers "may a
+ * sibling credential see something different" — and the two were one table until the answers
+ * diverged. `reasoning_extraction` is a false flag on legitimate reasoning replay: a cold call
+ * clears it the overwhelming majority of the time, so it must retry and the turn must continue,
+ * while still never rotating credentials, because the classifier belongs to the organization and
+ * not to the key.
+ */
+const UNSTABLE_REFUSAL_CODES: Readonly<Record<string, true>> = {
+	cyber_policy: true,
+	reasoning_extraction: true,
+};
+
+/**
+ * Whether a failed turn is a provider refusal whose verdict is not stable for a given input, so
+ * resending it on the same model may succeed. Classifier refusals without such a code (Anthropic
+ * `refusal`, `sensitive`) are reproduced by a resend and walk fallback models instead.
  */
 export function isUnstableProviderRefusal(message: Pick<AssistantMessage, "stopReason" | "stopDetails">): boolean {
 	const category = message.stopDetails?.category;
-	return (
-		isProviderRefusal(message) &&
-		typeof category === "string" &&
-		Object.hasOwn(CONTENT_POLICY_REFUSAL_CODES, category)
-	);
+	return isProviderRefusal(message) && typeof category === "string" && Object.hasOwn(UNSTABLE_REFUSAL_CODES, category);
 }
 
 export const ANTHROPIC_ACCOUNT_POLICY_PATTERN =

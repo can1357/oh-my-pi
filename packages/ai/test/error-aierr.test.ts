@@ -279,15 +279,14 @@ describe("OpenAIHttpError.parseEnvelope — where the error actually is", () => 
 	});
 });
 
-describe("which refusals this change makes non-rotating", () => {
-	// The two refusal classes want OPPOSITE handling, so the boundary between them is a contract
-	// in its own right. `cyber_policy` is a real account-policy block: a sibling credential sees
-	// the same content, so resending wastes calls. A `reasoning_extraction` refusal is a false
-	// flag on legitimate reasoning replay that a plain retry almost always clears, and this change
-	// must not pull it into the non-rotating net.
-	it("covers cyber_policy and nothing else", () => {
+describe("which refusals never rotate credentials", () => {
+	// Two questions that used to share one table and now do not. THIS one is "may a sibling
+	// credential see something different": for an organization's own classifier the answer is no,
+	// for both codes, so rotating spends siblings on a decided verdict. Whether a resend is worth
+	// trying is the other question, and the session tests answer it.
+	it("covers the organization-classifier codes and nothing else", () => {
 		expect(AIError.isContentPolicyRefusal("cyber_policy", "declined")).toBe(true);
-		expect(AIError.isContentPolicyRefusal("reasoning_extraction", "declined")).toBe(false);
+		expect(AIError.isContentPolicyRefusal("reasoning_extraction", "declined")).toBe(true);
 		expect(AIError.isContentPolicyRefusal("sensitive", "declined")).toBe(false);
 		expect(AIError.isContentPolicyRefusal("refusal", "declined")).toBe(false);
 	});
