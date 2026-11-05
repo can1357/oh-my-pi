@@ -8,7 +8,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { sandboxCommand } from "./confinement";
+import { checkConfinement, sandboxCommand } from "./confinement";
 import { type FakeAccountSpec, type FakeProvider, type FakeRecord, startFakeProvider } from "./fake-provider";
 import { type ScenarioSettings, seedAuthDb, writeScenarioConfig } from "./seed";
 import { type Tripwire, startTripwire } from "./tripwire";
@@ -177,6 +177,7 @@ export class GovernorProof {
 	readonly tripwire: Tripwire;
 	readonly specs: readonly FakeAccountSpec[];
 	readonly #env: Record<string, string>;
+	#confinementChecked = false;
 
 	private constructor(tempDir: TempDir, specs: readonly FakeAccountSpec[]) {
 		this.tempDir = tempDir;
@@ -192,9 +193,16 @@ export class GovernorProof {
 	static async create(specs: readonly FakeAccountSpec[], settings: ScenarioSettings): Promise<GovernorProof> {
 		const tempDir = TempDir.createSync("@usage-governor-proof-");
 		const proof = new GovernorProof(tempDir, specs);
-		await seedAuthDb(proof.agentDir, specs);
-		writeScenarioConfig(proof.agentDir, settings);
-		return proof;
+		try {
+			await seedAuthDb(proof.agentDir, specs);
+			writeScenarioConfig(proof.agentDir, settings);
+			await checkConfinement(proof);
+			proof.#confinementChecked = true;
+			return proof;
+		} catch (error) {
+			proof.close();
+			throw error;
+		}
 	}
 
 	/**
@@ -235,6 +243,7 @@ export class GovernorProof {
 
 	/** Start an `omp` child in the proof's cwd and allowlisted environment. */
 	spawnOmp(args: readonly string[]): Bun.Subprocess<"ignore", "pipe", "pipe"> {
+		if (!this.#confinementChecked) throw new Error("confinement controls have not passed for this proof");
 		return Bun.spawn(sandboxCommand(this, this.ompCommand(args)), {
 			cwd: this.tempDir.path(),
 			env: {},

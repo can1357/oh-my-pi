@@ -17,6 +17,7 @@ export interface Tripwire {
 	/** Proxy URL for the child environment, for example `http://127.0.0.1:41235`. */
 	readonly url: string;
 	readonly records: readonly TripwireRecord[];
+	clearRecords(): void;
 	close(): void;
 }
 
@@ -59,6 +60,9 @@ export function startTripwire(now: () => number = Date.now): Tripwire {
 		url: `http://127.0.0.1:${listener.port}`,
 		get records() {
 			return records;
+		},
+		clearRecords() {
+			records.length = 0;
 		},
 		close() {
 			listener.stop(true);

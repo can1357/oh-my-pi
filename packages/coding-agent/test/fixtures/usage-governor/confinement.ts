@@ -6,6 +6,8 @@ interface ProbeResult {
 	error?: string;
 	code?: string;
 	errno?: number;
+	names?: string[];
+	cause?: { code?: string; errno?: number; message?: string };
 	sockets: number[];
 }
 
@@ -50,6 +52,11 @@ export async function runProbe(
 }
 
 export async function checkConfinement(proof: GovernorProof): Promise<void> {
+	const environment = await runProbe(proof, "env");
+	const actualNames = [...(environment.names ?? [])].sort();
+	const expectedNames = Object.keys(proof.env).sort();
+	if (JSON.stringify(actualNames) !== JSON.stringify(expectedNames) || environment.sockets.length !== 0)
+		throw new Error(`sandbox child environment or socket control failed: ${JSON.stringify(environment)}`);
 	const controls: Array<{ host: string; reason: string }> = [{ host: "127.0.0.1", reason: "other loopback port" }];
 	const address = Object.values(os.networkInterfaces())
 		.flat()
@@ -79,18 +86,29 @@ export async function checkConfinement(proof: GovernorProof): Promise<void> {
 			server.stop(true);
 		}
 	}
-	for (const target of ["https://example.com/", "https://192.0.2.1:443/"]) {
-		const start = Date.now();
-		const result = await runProbe(proof, "fetch", target);
-		console.log(`sandbox control ${target}: elapsed=${Date.now() - start}ms result=${JSON.stringify(result)}`);
-		if (result.code !== "EPERM") throw new Error(`external sandbox denial not proven: ${JSON.stringify(result)}`);
+	const named = await runProbe(proof, "fetch", "https://example.com/");
+	const namedCodes = [named.code, named.cause?.code];
+	if (namedCodes.includes("ENOTFOUND")) {
+		console.log(`sandbox control external name: DNS unresolved (no socket denial claimed): ${JSON.stringify(named)}`);
+	} else if (namedCodes.includes("EPERM")) {
+		console.log(`sandbox control external name: request refused with EPERM: ${JSON.stringify(named)}`);
+	} else {
+		throw new Error(`external name neither denied nor unresolved: ${JSON.stringify(named)}`);
 	}
+	const numeric = await runProbe(proof, "fetch", "https://192.0.2.1:443/");
+	console.log(`sandbox control TEST-NET socket: ${JSON.stringify(numeric)}`);
+	if (![numeric.code, numeric.cause?.code].includes("EPERM"))
+		throw new Error(`TEST-NET socket denial not proven: ${JSON.stringify(numeric)}`);
 	const account = proof.specs[0];
 	if (!account) throw new Error("sandbox control requires a fake account");
 	const before = proof.fake.records.length;
 	const fake = await runProbe(proof, "fetch", `${proof.fake.url}/${account.provider}/usage`, account.bearer);
 	console.log(`sandbox control fake: ${JSON.stringify(fake)}`);
 	if (fake.status !== 200 || proof.fake.records.length !== before + 1) throw new Error("sandbox fake control failed");
+	if ([...proof.tripwire.records].length !== 0)
+		throw new Error(
+			`unexpected proxy traffic before tripwire positive control: ${JSON.stringify(proof.tripwire.records)}`,
+		);
 	const proxy = await runProbe(proof, "egress", "https://example.invalid/");
 	console.log(`sandbox control tripwire: ${JSON.stringify(proxy)} records=${JSON.stringify(proof.tripwire.records)}`);
 	if (
@@ -99,4 +117,7 @@ export async function checkConfinement(proof: GovernorProof): Promise<void> {
 		!JSON.stringify(proxy).includes("502")
 	)
 		throw new Error("sandbox proxy control failed");
+	// The positive control is separate from the scenario's zero-egress assertion.
+	proof.tripwire.clearRecords();
+	if ([...proof.tripwire.records].length !== 0) throw new Error("sandbox tripwire did not reset");
 }

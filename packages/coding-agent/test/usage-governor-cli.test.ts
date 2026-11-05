@@ -10,9 +10,9 @@
  *
  * `OMP_PROOF_BINARY` runs the same scenarios against a compiled binary (spec 7.3).
  */
-import { beforeAll, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { checkConfinement, sandboxCommand } from "./fixtures/usage-governor/confinement";
+import { sandboxCommand } from "./fixtures/usage-governor/confinement";
 import type { FakeAccountSpec, FakeRecord } from "./fixtures/usage-governor/fake-provider";
 import { WINDOW_MS } from "./fixtures/usage-governor/fake-provider";
 import {
@@ -98,15 +98,6 @@ function assertConfined(proof: GovernorProof): void {
 /** Real-HOME baseline, taken when this file loads: before any scenario runs. */
 const INITIAL_REAL_HOME: StatSnapshot[] = statRealHome();
 
-beforeAll(async () => {
-	const proof = await GovernorProof.create([account("govplan", "a")], { enabled: true });
-	try {
-		await checkConfinement(proof);
-	} finally {
-		proof.close();
-	}
-}, 60_000);
-
 describe("usage governor CLI proof: confinement", () => {
 	test("the child environment is an allowlist with no inherited credentials or profile state", async () => {
 		const canaries: Record<string, string> = {
@@ -130,7 +121,8 @@ describe("usage governor CLI proof: confinement", () => {
 			});
 			const [exitCode, stdout] = await Promise.all([probe.exited, new Response(probe.stdout).text()]);
 			expect(exitCode).toBe(0);
-			const { names } = JSON.parse(stdout) as { names: string[] };
+			const { names, sockets } = JSON.parse(stdout) as { names: string[]; sockets: number[] };
+			expect(sockets).toEqual([]);
 			expect(forbiddenNames(names)).toEqual([]);
 			for (const name of Object.keys(canaries)) expect(names).not.toContain(name);
 			const values = Object.values(proof.env);
