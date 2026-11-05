@@ -255,6 +255,10 @@ impl File for StreamFile {
 		self.with(FileKind::Device, |f| f.kind())
 	}
 
+	fn stat(&self) -> io::Result<crate::bash::Stat> {
+		self.with(Err(io::ErrorKind::Unsupported.into()), |f| f.stat())
+	}
+
 	fn on_filesystem(&self) -> bool {
 		self.with(false, |f| f.on_filesystem())
 	}

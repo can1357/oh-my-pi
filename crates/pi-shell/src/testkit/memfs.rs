@@ -508,7 +508,7 @@ impl File for NullFile {
 	}
 
 	fn on_filesystem(&self) -> bool {
-		true
+		false
 	}
 
 	fn os_handle(&self) -> Option<OsHandle> {
@@ -838,6 +838,10 @@ impl File for LockedFile {
 
 	fn kind(&self) -> FileKind {
 		FileKind::Regular
+	}
+
+	fn stat(&self) -> io::Result<Stat> {
+		self.file.stat()
 	}
 
 	fn on_filesystem(&self) -> bool {

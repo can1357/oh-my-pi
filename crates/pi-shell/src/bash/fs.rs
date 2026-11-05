@@ -273,7 +273,9 @@ pub trait File: Send {
 	/// being overwritten ([`crate::bash::vm::redir`]'s `noclobber`) reads
 	/// this, and a wrapper that inherited a default would silently answer
 	/// for the object it wraps. A new implementation must say what it is,
-	/// and a wrapper must forward the question.
+	/// and a wrapper that forwards this MUST forward [`Self::stat`] too:
+	/// `true` with no metadata means "a file whose kind cannot be
+	/// established", which that decision refuses.
 	fn on_filesystem(&self) -> bool;
 	/// Whether writes must pass through the engine to observe visible output.
 	fn observes_output(&self) -> bool {

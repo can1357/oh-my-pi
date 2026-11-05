@@ -187,6 +187,17 @@ async fn noclobber_judges_a_descriptor_alias_by_the_object_behind_it() {
 			status: 0,
 			files:  &[("f", Some("ORIGINAL"))],
 		},
+		// The run's own captured output is not a file on any filesystem
+		// either, and reaches the decision through the engine's stream
+		// wrapper: `noclobber` must not refuse a write to it.
+		Row {
+			script: "set -o noclobber; echo b &>/dev/stdout; echo s=$?; echo c >/dev/stdout; echo \
+			         t=$?",
+			fifos:  &[],
+			output: "b\ns=0\nc\nt=0\n",
+			status: 0,
+			files:  &[],
+		},
 		// A here-string and a here-document are not files on any filesystem,
 		// so there is nothing for `noclobber` to protect: Bash writes to the
 		// alias of one. The engine drives such a document as a seekable

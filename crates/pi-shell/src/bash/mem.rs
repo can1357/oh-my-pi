@@ -447,6 +447,10 @@ impl File for MemFile {
 		self.file_ref().kind()
 	}
 
+	fn stat(&self) -> io::Result<crate::bash::fs::Stat> {
+		self.file_ref().stat()
+	}
+
 	fn on_filesystem(&self) -> bool {
 		self.file_ref().on_filesystem()
 	}
