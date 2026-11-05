@@ -5,7 +5,9 @@ import {
 	formatExitCodeNotice,
 	WALL_TIME_NOTICE_MIN_MS,
 } from "@oh-my-pi/pi-tui/tools/bash";
+import { formatToolWorkingDirectory } from "@oh-my-pi/pi-tui/render/render-utils";
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
@@ -32,6 +34,7 @@ import type {
 	ClientBridgeTerminalHandle,
 	ClientBridgeTerminalOutput,
 } from "../session/client-bridge";
+import { escapeHarnessTags } from "../session/harness-tags";
 import { DEFAULT_MAX_BYTES, enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
@@ -436,6 +439,10 @@ type ManagedBashJobCompletion =
 
 interface ManagedBashJobHandle {
 	jobId: string;
+	/** The command the job runs. */
+	command: string;
+	/** Directory the command runs in. */
+	cwd: string;
 	completion: Promise<ManagedBashJobCompletion>;
 	getLatestText: () => string;
 	getLatestTrace: () => ShellTrace | undefined;
@@ -923,7 +930,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	}
 
 	#buildBackgroundStartResult(
-		jobId: string,
+		job: ManagedBashJobHandle,
 		previewText: string,
 		timeoutSec: number | undefined,
 		options: {
@@ -934,7 +941,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		} = {},
 	): AgentToolResult<BashToolDetails> {
 		const details: BashToolDetails = {
-			async: { state: "running", jobId, type: "bash" },
+			async: { state: "running", jobId: job.jobId, type: "bash" },
 		};
 		if (options.trace) details.trace = options.trace;
 		if (options.replies?.length) details.replies = [...options.replies];
@@ -954,7 +961,17 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (options.notices?.length) {
 			lines.push(...options.notices, "");
 		}
-		lines.push(formatBackgroundNotice(jobId, timeoutSec));
+		// The command and directory are model-authored text: escaped like job output, they cannot
+		// close or forge a harness block.
+		lines.push(
+			escapeHarnessTags(
+				formatBackgroundNotice(job.jobId, timeoutSec, {
+					command: job.command,
+					// A `local://`-style cwd stays as written; a host directory shows relative to the session's.
+					cwd: path.isAbsolute(job.cwd) ? formatToolWorkingDirectory(job.cwd, this.session.cwd) : job.cwd,
+				}),
+			),
+		);
 		return {
 			content: [{ type: "text", text: lines.join("\n") }],
 			details,
@@ -1149,6 +1166,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 		return {
 			jobId,
+			command: options.command,
+			cwd: options.commandCwd,
 			completion: completion.promise,
 			getLatestText: () => latestText,
 			getLatestTrace: () => liveTrace ?? latestProgressDetails?.trace,
@@ -1361,7 +1380,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				intent: this.session.getToolCallIntent?.(toolCallId),
 				toolCallId,
 			});
-			return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
+			return this.#buildBackgroundStartResult(job, "", timeoutSec, {
 				requestedTimeoutSec,
 				notices: pendingNotices,
 				trace: job.getLatestTrace(),
@@ -1407,7 +1426,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				toolCallId,
 			});
 			if (startBackgrounded) {
-				return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
+				return this.#buildBackgroundStartResult(job, "", timeoutSec, {
 					requestedTimeoutSec,
 					notices: pendingNotices,
 					trace: job.getLatestTrace(),
@@ -1444,7 +1463,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				waitResult.kind === "steer"
 					? [...job.notices, "Backgrounded early to handle an incoming message; the command keeps running."]
 					: job.notices;
-			return this.#buildBackgroundStartResult(job.jobId, job.getLatestText(), timeoutSec, {
+			return this.#buildBackgroundStartResult(job, job.getLatestText(), timeoutSec, {
 				requestedTimeoutSec,
 				notices,
 				replies: job.replies,

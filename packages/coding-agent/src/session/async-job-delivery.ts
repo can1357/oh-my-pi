@@ -12,6 +12,7 @@ import { prompt } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobType } from "../async";
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
+import { formatCommandIdentity } from "@oh-my-pi/pi-tui/tools/bash";
 import { escapeHarnessTags } from "./harness-tags";
 import type { CustomMessage } from "./messages";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
@@ -127,7 +128,11 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 		// Job output (a command's output, or a task's `<task-result>` around a
 		// subagent's output), a subagent's payload and its validation error are
 		// text the job controls: it must not close the `<system-notice>` it renders
-		// into or open a forged harness block.
+		// into or open a forged harness block. Neither may the label naming it.
+		// A bash job is named by its command in both headers, as its start notice
+		// named it: parallel calls' start results arrive in completion order.
+		const command = entry.job?.type === "bash" ? entry.job.process?.command : undefined;
+		const headerLabel = command === undefined ? entry.job?.label : formatCommandIdentity(command);
 		return {
 			jobId: entry.jobId,
 			agentUrlId,
@@ -138,6 +143,8 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			status: entry.job?.status,
 			agentId: entry.job?.agentId,
 			label: entry.job?.label,
+			headerLabel: headerLabel ? escapeHarnessTags(headerLabel) : undefined,
+			namedByCommand: command !== undefined,
 			durationMs: entry.durationMs,
 			meta: entry.job?.latestDetails?.meta,
 			structured,
