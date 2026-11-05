@@ -210,6 +210,7 @@ Current runtime behavior is connection-event driven:
 - Reconnect is also explicit via `/mcp reconnect <name>` or broader `/mcp reload`.
 - A remote server whose connect failed while no OAuth login for it resolved is recorded. When the model next asks for an `mcp__…` tool, the manager polls the credential store (another process sharing `agent.db` may have stored a login, e.g. `/mcp reauth` in another session) and reconnects that server once if a login now resolves. Nothing is retried without a stored login, and no timer runs.
 - A server that is down does not vanish: when the model asks for an `mcp__…` tool that is not mounted, the `xd://` "No such tool" error and the agent loop's "Tool … not found" error both name each configured server that is not connected, its last error and `/mcp reauth` / `/mcp reconnect` (`MCPManager.explainMissingTool`).
+- A `lazy` server stays out of that report while it is dormant: nothing has asked it to connect, so it is not a failure, and `/mcp list` shows it as connecting on first use. Once a first use — a `DeferredMCPTool`'s reconnect fallback, `/mcp reconnect`, `/mcp test` — fails, the failure is recorded and named like any other server's, including the stored-login recovery above; the server still takes no part in the startup barrier `waitForStartup` reads.
 
 Operationally:
 

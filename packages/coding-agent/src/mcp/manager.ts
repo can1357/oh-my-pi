@@ -439,7 +439,17 @@ export class MCPManager implements MCPManagerApi {
 	}
 
 	#emitConnectionStatus(event: McpConnectionStatusEvent): void {
-		if (event.type === "failed" && this.#startupServers.has(event.serverName)) {
+		// Every server this manager holds a config for, not only the startup
+		// barrier's members: a `lazy` server is dropped from `#startupServers`
+		// on purpose — dormant is not a failure — but once something asks it to
+		// connect (a deferred tool's reconnect fallback, `/mcp reconnect`) and
+		// that attempt fails, it is unavailable like any other server and
+		// `explainMissingTool` has to name it. A server that was never tried
+		// emits no `failed` event, so it stays out of the report.
+		if (
+			event.type === "failed" &&
+			(this.#startupServers.has(event.serverName) || this.#serverConfigs.has(event.serverName))
+		) {
 			this.#startupFailures.set(event.serverName, event.error);
 			const config = this.#serverConfigs.get(event.serverName);
 			if (

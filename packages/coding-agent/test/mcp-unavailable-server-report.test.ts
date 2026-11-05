@@ -254,4 +254,62 @@ describe("MCP server that is not connected", () => {
 			await session.credentials.poll();
 		}
 	});
+
+	/**
+	 * A `lazy: true` server is deliberately outside the startup barrier:
+	 * dormant is not a failure, and `/mcp list` shows it as connecting on
+	 * first use. The moment something asks it to connect and that connect
+	 * fails, it is as unavailable as any other server, so the note has to
+	 * name it — a failure is recorded for every server the manager holds a
+	 * config for, not only the barrier's members.
+	 */
+	it("ignores a dormant lazy server and names it once its first connect fails", async () => {
+		const lazyServer = startLoginRequiredServer();
+		// One attempt, no ladder: the failure is reported without the retry sleeps.
+		const lazyManager = new MCPManager(tempDir, null, undefined, {
+			ladderMs: [],
+			retryBaseMs: 60_000,
+			retryMaxMs: 60_000,
+		});
+		lazyManager.setAuthStorage(session);
+		try {
+			const lazyConfig: MCPHttpServerConfig = { type: "http", url: lazyServer.url, timeout: 2_000, lazy: true };
+			await lazyManager.connectServers({ dormant: lazyConfig }, {});
+			const dormant = await lazyManager.waitForStartup(GUARD_MS);
+
+			// Dormant by design: nothing was tried, so nothing failed — and with
+			// no cached catalog it has no tools, which is still not a failure.
+			expect(lazyServer.state.refusedPosts).toBe(0);
+			expect(dormant.failed).toHaveLength(0);
+			expect(lazyManager.explainMissingTool("mcp__dormant_ping")).toBeUndefined();
+
+			// First use — `/mcp reconnect`, the path a deferred tool's fallback
+			// also takes — fails: from here it is a real failure.
+			await lazyManager.reconnectServer("dormant", { manual: true });
+			expect(lazyServer.state.refusedPosts).toBeGreaterThan(0);
+			const note = lazyManager.explainMissingTool("mcp__dormant_ping");
+			expect(note).toContain("dormant");
+			expect(note).toContain("401");
+			expect(note).toContain("/mcp reauth <server>");
+			expect(note).toContain("/mcp reconnect <server>");
+			// Still no startup-barrier member: print mode must not wait on it.
+			expect((await lazyManager.waitForStartup(GUARD_MS)).failed).toHaveLength(0);
+
+			// And a login another session stores brings it back with no restart.
+			await otherSession.credentials.set(mcpOAuthCredentialId(lazyServer.url), {
+				type: "oauth",
+				access: GOOD_TOKEN,
+				refresh: "unused-refresh",
+				expires: Date.now() + 3_600_000,
+			});
+			lazyManager.explainMissingTool("mcp__dormant_ping");
+			await toolRegistered(lazyManager, "mcp__dormant_ping");
+			expect(lazyManager.getConnectionStatus("dormant")).toBe("connected");
+		} finally {
+			await lazyManager.disconnectAll();
+			lazyServer.stop();
+			await otherSession.credentials.remove(mcpOAuthCredentialId(lazyServer.url));
+			await session.credentials.poll();
+		}
+	});
 });
