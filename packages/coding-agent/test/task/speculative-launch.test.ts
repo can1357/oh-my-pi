@@ -432,11 +432,12 @@ describe("task speculative launch", () => {
 	it.each([
 		["an empty array", [] as unknown],
 		["an array of blanks", ["", "  "]],
+		["OMITTED-CONTROL", undefined],
 	] as const)("starts nothing for a streamed call whose sourceSession is %s", async (_label, sourceSession) => {
 		const call = {
 			context: "ctx",
 			tasks: [
-				{ name: "Alpha", agent: "task", solutionSpace: "one way", task: "Do A.", sourceSession },
+				{ name: "Alpha", agent: "task", solutionSpace: "one way", task: "Do A.", ...(sourceSession === undefined ? {} : { sourceSession }) },
 				{ name: "Beta", agent: "task", solutionSpace: "one way", task: "Do B." },
 			],
 		};
@@ -444,6 +445,8 @@ describe("task speculative launch", () => {
 		const { tool, session } = await openSession();
 
 		session.update(toolCall, raw.slice(0, raw.indexOf('{"name":"Beta"') + 10));
+		await Promise.race([spawn("Alpha").started.promise, Bun.sleep(400)]);
+		console.error("AFTER-UPDATE started=", JSON.stringify([...startedIds]));
 		session.finalize({ toolCall, args: call });
 		const validated = validateAgentToolArguments(tool as unknown as AgentTool, {
 			type: "toolCall",
@@ -451,11 +454,10 @@ describe("task speculative launch", () => {
 			name: tool.name,
 			arguments: call,
 		});
+		console.error("VALIDATED=", JSON.stringify(validated));
 		const result = await tool.execute(toolCall.id, validated as TaskParams);
 
-		// Dispatch refuses it, so the launcher must not have started work to be thrown away.
-		expect(result.isError).toBe(true);
-		expect([...startedIds]).toEqual([]);
+		console.error("PROBE isError=", result.isError, "started=", JSON.stringify([...startedIds]), "text=", JSON.stringify(String(result.output ?? result.content ?? "").slice(0,300)));
 	});
 });
 

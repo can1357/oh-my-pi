@@ -1234,8 +1234,8 @@ describe("batch model placement", () => {
 	// any object and an array is one, so an array `outputSchema` survives validation and nothing
 	// downstream shape-checks it. Before this change arrays were never filler for any key, so an
 	// `outputSchema: []` stayed the caller's schema; adding an array arm for every blankable key made
-	// it blank and dropped it, handing the agent's own schema to a caller that asked for none. Only
-	// `model` and `sourceSession` have an array arm now, which restores that.
+	// it blank and dropped it, handing the agent's own schema to a caller that asked for none.
+	// `model` is the only key with an array arm now, which restores that.
 	it.each([
 		["an empty array", [] as unknown],
 		["an array of blanks", ["", "  "]],
