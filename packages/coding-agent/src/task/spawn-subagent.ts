@@ -24,6 +24,21 @@ import {
 /** Upper bound on how long a spawn waits for the child's registry ref. */
 const SPAWN_REF_TIMEOUT_MS = 15_000;
 
+/**
+ * The run was reserved but its registry ref did not appear in time. The run is
+ * still live: callers must report the reserved id as pending/submitted instead
+ * of failing, or a client retry would spawn a duplicate agent.
+ */
+export class SpawnPendingError extends Error {
+	readonly agentId: string;
+
+	constructor(agentId: string) {
+		super(`Subagent ${agentId} was reserved but did not register in time; the run is still starting`);
+		this.name = "SpawnPendingError";
+		this.agentId = agentId;
+	}
+}
+
 /** Executor boundary; tests substitute a fake without a live model or session. */
 export interface SpawnSubagentExecutor {
 	reserveId: (session: ToolSession, identity: StructuredSubagentIdentity | undefined) => Promise<string>;
@@ -63,6 +78,7 @@ export async function spawnSubagentViaExecutor(
 	session: ToolSession,
 	options: SpawnSubagentOptions,
 	executor: SpawnSubagentExecutor = defaultExecutor,
+	refTimeoutMs = SPAWN_REF_TIMEOUT_MS,
 ): Promise<AgentRef> {
 	const prompt = options.prompt.trim();
 	if (prompt.length === 0) throw new Error("spawnSubagent requires a non-empty prompt");
@@ -91,6 +107,7 @@ export async function spawnSubagentViaExecutor(
 		registry,
 		id,
 		run.then(() => undefined),
+		refTimeoutMs,
 	);
 }
 
@@ -103,14 +120,14 @@ async function awaitRegisteredRef(
 	registry: AgentRegistryApi,
 	id: string,
 	failure: Promise<undefined>,
+	timeoutMs: number,
 ): Promise<AgentRef> {
 	const existing = registry.get(id);
 	if (existing) return existing;
 	const { promise, resolve, reject } = Promise.withResolvers<AgentRef>();
-	const timer = setTimeout(
-		() => reject(new Error(`Subagent ${id} did not register within ${SPAWN_REF_TIMEOUT_MS}ms`)),
-		SPAWN_REF_TIMEOUT_MS,
-	);
+	const timer = setTimeout(() => reject(new SpawnPendingError(id)), timeoutMs);
+	// A spawn must not pin the event loop for the whole timeout.
+	timer.unref?.();
 	const unsubscribe = registry.onChange(event => {
 		if (event.ref.id === id) resolve(event.ref);
 	});

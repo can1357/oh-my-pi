@@ -15,6 +15,10 @@
 
 import type { SpawnSubagentOptions } from "../extensibility/extensions/types";
 import { MAIN_AGENT_ID, type AgentRef, type AgentRegistryApi } from "../registry/agent-registry";
+import { PerCallModelError } from "../task/model-approval";
+import { SpawnRefusedError } from "../task/spawn-run";
+import { SpawnPendingError } from "../task/spawn-subagent";
+import { StructuredSubagentError } from "../task/structured-subagent";
 import type { IrcDeliveryReceipt, IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 
 /** A2A v1.0 task lifecycle states (proto enum names; JSON keeps them verbatim). */
@@ -50,6 +54,12 @@ export const RPC_ERRORS = {
 	TASK_NOT_CANCELABLE: -32002,
 	UNSUPPORTED_OPERATION: -32004,
 	CONTENT_TYPE_NOT_SUPPORTED: -32005,
+	/**
+	 * A spawn was refused before any agent existed (spawn policy, unknown or
+	 * disabled agent, model-approval denial). HTTP 200: the bridge worked, the
+	 * request was rejected — clients must not read this as a bridge failure.
+	 */
+	AGENT_REJECTED: -32010,
 } as const;
 
 export type JsonRpcId = string | number | null;
@@ -124,6 +134,8 @@ export interface TaskStatusUpdateEvent {
 	taskId: string;
 	contextId: string;
 	status: A2aTaskStatus;
+	/** True on the last event of a stream: the task reached a terminal state. */
+	final?: boolean;
 	metadata?: Record<string, unknown>;
 }
 
@@ -313,9 +325,23 @@ export interface A2aDispatchDeps {
 
 export const A2A_SENDER_ID = "a2a";
 
-/** Resolve an omp address: an exact agent id, or the `main` alias. */
+/**
+ * Resolve an omp address: an exact agent id, or the `main` alias. Advisor
+ * transcripts are not peers — the agent card and ListTasks already hide them,
+ * so GetTask/CancelTask must not reach them either.
+ */
 export function resolveAddressedRef(registry: Pick<AgentRegistryApi, "get">, to: string): AgentRef | undefined {
-	return registry.get(to) ?? (to.toLowerCase() === "main" ? registry.get(MAIN_AGENT_ID) : undefined);
+	const ref = registry.get(to) ?? (to.toLowerCase() === "main" ? registry.get(MAIN_AGENT_ID) : undefined);
+	return ref?.kind === "advisor" ? undefined : ref;
+}
+
+/** Whether a spawn failure is a pre-spawn refusal the client can act on. */
+function isSpawnRejection(error: unknown): error is Error {
+	return (
+		(error instanceof StructuredSubagentError && error.kind === "preflight") ||
+		error instanceof SpawnRefusedError ||
+		error instanceof PerCallModelError
+	);
 }
 
 /**
@@ -340,11 +366,32 @@ export async function sendA2aMessage(params: unknown, deps: A2aDispatchDeps): Pr
 	if (!deps.spawn) {
 		throw new RpcError(RPC_ERRORS.INTERNAL_ERROR, "spawnSubagent is not available in this host");
 	}
-	const ref = await deps.spawn({
-		prompt: request.text,
-		...(request.agent !== undefined ? { agent: request.agent } : {}),
-		...(request.context !== undefined ? { context: request.context } : {}),
-	});
+	let ref: AgentRef;
+	try {
+		ref = await deps.spawn({
+			prompt: request.text,
+			...(request.agent !== undefined ? { agent: request.agent } : {}),
+			...(request.context !== undefined ? { context: request.context } : {}),
+		});
+	} catch (error) {
+		// The run was reserved and is still starting: report the id as SUBMITTED
+		// rather than a failure, so a client does not retry into a duplicate agent.
+		if (error instanceof SpawnPendingError) {
+			return {
+				id: error.agentId,
+				contextId: MAIN_AGENT_ID,
+				status: { state: TASK_STATE.SUBMITTED, timestamp: new Date().toISOString() },
+				metadata: { agentId: error.agentId, spawned: true, pending: true },
+			};
+		}
+		if (isSpawnRejection(error)) {
+			throw new RpcError(RPC_ERRORS.AGENT_REJECTED, error.message, {
+				httpStatus: 200,
+				data: [{ reason: "SPAWN_REJECTED" }],
+			});
+		}
+		throw error;
+	}
 	return taskFromAgentRef(ref, { spawned: true });
 }
 

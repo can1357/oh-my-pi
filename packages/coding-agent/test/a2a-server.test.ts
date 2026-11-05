@@ -26,7 +26,10 @@ import {
 	type A2aServerHandle,
 	createA2aServer,
 	resolveA2aToken,
+	startA2aServer,
 } from "@oh-my-pi/pi-coding-agent/a2a/server";
+import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SpawnSubagentOptions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import {
 	AgentRegistry,
@@ -35,11 +38,14 @@ import {
 	type RegistryEvent,
 	type RegistryListener,
 } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import type {
-	StructuredSubagentRequest,
-	StructuredSubagentResult,
+import { SpawnPendingError, spawnSubagentViaExecutor } from "@oh-my-pi/pi-coding-agent/task/spawn-subagent";
+import { cfgA2aEnabled, cfgA2aPort } from "@oh-my-pi/pi-coding-agent/task/settings";
+import {
+	StructuredSubagentError,
+	type StructuredSubagentRequest,
+	type StructuredSubagentResult,
 } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
-import { spawnSubagentViaExecutor } from "@oh-my-pi/pi-coding-agent/task/spawn-subagent";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { IrcDeliveryReceipt, IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 
@@ -400,6 +406,30 @@ describe("A2A JSON-RPC methods", () => {
 		expect(task.status.state).toBe(TASK_STATE.CANCELED);
 	});
 
+	it("hides advisor transcripts from GetTask", async () => {
+		const { handle } = startServer({ refs: [makeRef({ id: "__advisor", kind: "advisor", status: "running" })] });
+		const { json } = await rpc(handle, { jsonrpc: "2.0", id: 15, method: "GetTask", params: { id: "__advisor" } });
+		expect(errorResult(json).code).toBe(RPC_ERRORS.TASK_NOT_FOUND);
+	});
+
+	it("reports a refused spawn as AGENT_REJECTED (HTTP 200), not an internal error", async () => {
+		const { handle } = startServer({
+			spawn: async () => {
+				throw new StructuredSubagentError("preflight", 'Agent "nope" is disabled in settings.');
+			},
+		});
+		const { status, json } = await rpc(handle, {
+			jsonrpc: "2.0",
+			id: 16,
+			method: "SendMessage",
+			params: { message: { messageId: "m-4", role: "ROLE_USER", parts: [{ text: "go" }] } },
+		});
+		expect(status).toBe(200);
+		const error = errorResult(json);
+		expect(error.code).toBe(RPC_ERRORS.AGENT_REJECTED);
+		expect(error.message).toContain("disabled");
+	});
+
 	it("rejects malformed SendMessage params with -32602", async () => {
 		const { handle } = startServer({});
 		const { json } = await rpc(handle, {
@@ -411,6 +441,11 @@ describe("A2A JSON-RPC methods", () => {
 		expect(errorResult(json).code).toBe(RPC_ERRORS.INVALID_PARAMS);
 	});
 });
+
+/** A non-loopback IPv4 interface, when this host has one. */
+const externalIpv4 = Object.values(os.networkInterfaces())
+	.flat()
+	.find(entry => entry !== undefined && entry.family === "IPv4" && !entry.internal)?.address;
 
 describe("A2A network surface", () => {
 	it("refuses to bind anything but loopback", () => {
@@ -427,19 +462,26 @@ describe("A2A network surface", () => {
 		).toThrow(/127\.0\.0\.1/);
 	});
 
-	it("is unreachable through a non-loopback interface", async () => {
+	it.skipIf(externalIpv4 === undefined)("is unreachable through a non-loopback interface", async () => {
+		const address = externalIpv4;
+		if (!address) throw new Error("unreachable: no external IPv4 interface");
 		const { handle } = startServer({});
-		const external = Object.values(os.networkInterfaces())
-			.flat()
-			.find(entry => entry !== undefined && entry.family === "IPv4" && !entry.internal);
-		if (!external) return; // No external IPv4 interface on this host: nothing to prove.
 		// Integration probe of the real bind: the connect deadline is the only
 		// timer here, not a sleep between assertions.
 		await expect(
-			fetch(`http://${external.address}:${handle.port}${AGENT_CARD_PATH}`, {
+			fetch(`http://${address}:${handle.port}${AGENT_CARD_PATH}`, {
 				signal: AbortSignal.timeout(1500),
 			}),
 		).rejects.toThrow();
+	});
+});
+
+describe("A2A opt-in", () => {
+	it("is off by default and only enabled per run by --a2a-port", () => {
+		expect(cfgA2aEnabled.default).toBe(false);
+		expect(cfgA2aPort.default).toBe(7391);
+		expect(parseArgs([]).a2aPort).toBeUndefined();
+		expect(parseArgs(["--a2a-port", "7123"]).a2aPort).toBe(7123);
 	});
 });
 
@@ -501,11 +543,13 @@ describe("A2A streaming", () => {
 			await sse.until(text => text.includes("statusUpdate"));
 			expect(sse.text).toContain("TASK_STATE_WORKING");
 			expect(sse.text).toContain('"taskId":"beta"');
+			expect(sse.text).toContain('"final":false');
 
 			registry.get("beta")!.history = { outputPath: "/tmp/beta.md" };
 			registry.setStatus("beta", "idle");
 			await sse.toEnd();
 			expect(sse.text).toContain("TASK_STATE_COMPLETED");
+			expect(sse.text).toContain('"final":true');
 		} finally {
 			sse.cancel();
 		}
@@ -574,6 +618,25 @@ describe("spawnSubagent seam", () => {
 		).rejects.toThrow(/non-empty prompt/);
 	});
 
+	it("reports a reserved id as pending when registration times out", async () => {
+		AgentRegistry.resetGlobalForTests();
+		const never = Promise.withResolvers<StructuredSubagentResult>();
+		const spawn = spawnSubagentViaExecutor(
+			{} as unknown as ToolSession,
+			{ prompt: "slow start" },
+			{
+				reserveId: async () => "Spawn-late",
+				run: async () => await never.promise,
+			},
+			0,
+		);
+		await expect(spawn).rejects.toBeInstanceOf(SpawnPendingError);
+		await spawn.catch(error => {
+			expect((error as SpawnPendingError).agentId).toBe("Spawn-late");
+		});
+		never.resolve(undefined as unknown as StructuredSubagentResult);
+	});
+
 	it("rejects when the run fails before the child registers", async () => {
 		AgentRegistry.resetGlobalForTests();
 		await expect(
@@ -588,6 +651,38 @@ describe("spawnSubagent seam", () => {
 				},
 			),
 		).rejects.toThrow("preflight rejected the spawn");
+	});
+});
+
+describe("A2A agent card discovery", () => {
+	it("serves discovery descriptions and never AgentDefinition system prompts", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-a2a-card-"));
+		try {
+			const registry = new FakeRegistry([makeRef({ id: "leaky", displayName: "Leaky Agent" })]);
+			const definition: AgentDefinition = {
+				name: "leaky",
+				description: "Leaky agent description",
+				systemPrompt: "SECRET SYSTEM PROMPT",
+				source: "project",
+			};
+			const handle = await startA2aServer({
+				settings: Settings.isolated(),
+				agentDir: dir,
+				port: 0,
+				registry: registry.asApi(),
+				bus: new FakeBus(),
+				session: { cwd: dir, getSessionAgents: () => [definition] },
+			});
+			handles.push(handle);
+			const body = await (await fetch(`${handle.url}${AGENT_CARD_PATH}`)).text();
+			const parsed: unknown = JSON.parse(body);
+			expect(asObject(parsed, "agent card").protocolVersion).toBe("1.0");
+			expect(body).toContain("Leaky agent description");
+			expect(body).not.toContain("SECRET SYSTEM PROMPT");
+			expect(body).not.toContain("systemPrompt");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
 	});
 });
 

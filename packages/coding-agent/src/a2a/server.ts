@@ -35,6 +35,7 @@ import {
 	type TaskStatusUpdateEvent,
 	RPC_ERRORS,
 	RpcError,
+	TASK_STATE,
 	TERMINAL_TASK_STATES,
 	dispatchA2aMethod,
 	sendA2aMessage,
@@ -119,6 +120,7 @@ function streamTaskResponse(
 	id: JsonRpcId,
 	task: A2aTask,
 	options: Pick<A2aServerOptions, "registry" | "streamPollMs">,
+	activeStreams: Set<() => void>,
 ): Response {
 	const encoder = new TextEncoder();
 	let closed = false;
@@ -130,43 +132,50 @@ function streamTaskResponse(
 		if (closed) return;
 		controller?.enqueue(encoder.encode(`data: ${JSON.stringify(rpcSuccess(id, result))}\n\n`));
 	};
-	const cleanup = (): void => {
+	const settle = (close: boolean): void => {
 		if (closed) return;
 		closed = true;
 		clearInterval(timer);
 		unsubscribe?.();
-		try {
-			controller?.close();
-		} catch {
-			// Already cancelled by the client.
+		activeStreams.delete(stop);
+		if (close) {
+			try {
+				controller?.close();
+			} catch {
+				// Already cancelled by the client.
+			}
 		}
 	};
-	let lastSignature = `${task.status.state}|${task.status.timestamp ?? ""}|${task.metadata?.activity ?? ""}`;
+	const stop = (): void => settle(true);
+	activeStreams.add(stop);
+	let lastSignature = `${task.status.state}|${task.status.timestamp ?? ""}`;
 	const emit = (): void => {
 		if (closed) return;
 		const ref = options.registry.get(task.id);
 		if (!ref) {
-			frame({
-				statusUpdate: {
-					taskId: task.id,
-					contextId: task.contextId ?? "",
-					status: { state: "TASK_STATE_FAILED", timestamp: new Date().toISOString() },
-				},
-			});
-			cleanup();
+			const update: TaskStatusUpdateEvent = {
+				taskId: task.id,
+				contextId: task.contextId ?? "",
+				status: { state: TASK_STATE.FAILED, timestamp: new Date().toISOString() },
+				final: true,
+			};
+			frame({ statusUpdate: update });
+			stop();
 			return;
 		}
 		const snapshot = taskFromAgentRef(ref);
 		const signature = `${snapshot.status.state}|${snapshot.status.timestamp ?? ""}|${ref.activity ?? ""}`;
 		if (signature === lastSignature) return;
 		lastSignature = signature;
+		const final = TERMINAL_TASK_STATES.has(snapshot.status.state);
 		const update: TaskStatusUpdateEvent = {
 			taskId: snapshot.id,
 			contextId: snapshot.contextId ?? "",
 			status: snapshot.status,
+			final,
 		};
 		frame({ statusUpdate: update });
-		if (TERMINAL_TASK_STATES.has(snapshot.status.state)) cleanup();
+		if (final) stop();
 	};
 
 	const stream = new ReadableStream<Uint8Array>({
@@ -174,18 +183,20 @@ function streamTaskResponse(
 			controller = streamController;
 			frame({ task });
 			if (TERMINAL_TASK_STATES.has(task.status.state)) {
-				cleanup();
+				stop();
 				return;
 			}
 			unsubscribe = options.registry.onChange(event => {
 				if (event.ref.id === task.id) emit();
 			});
-			timer = setInterval(emit, options.streamPollMs ?? 250);
+			const interval = setInterval(emit, options.streamPollMs ?? 250);
+			timer = interval;
+			// An SSE stream must not pin the event loop: `server.unref()` alone
+			// cannot release a per-stream interval.
+			interval.unref?.();
 		},
 		cancel() {
-			closed = true;
-			clearInterval(timer);
-			unsubscribe?.();
+			settle(false);
 		},
 	});
 
@@ -207,6 +218,8 @@ export function createA2aServer(options: A2aServerOptions): A2aServerHandle {
 		throw new Error(`A2A server binds ${A2A_HOST} only (refusing host ${host})`);
 	}
 	if (options.token.length === 0) throw new Error("A2A server requires a non-empty bearer token");
+	/** Every open stream's stop closure: `stop()` closes them, `server.stop` alone does not. */
+	const activeStreams = new Set<() => void>();
 	const dispatchDeps = {
 		registry: options.registry,
 		send: (message: Omit<IrcMessage, "id" | "ts">) => options.bus.send(message),
@@ -247,7 +260,7 @@ export function createA2aServer(options: A2aServerOptions): A2aServerHandle {
 			try {
 				if (rpc.method === "SendStreamingMessage") {
 					const task = await sendA2aMessage(rpc.params, dispatchDeps);
-					return streamTaskResponse(rpc.id, task, options);
+					return streamTaskResponse(rpc.id, task, options, activeStreams);
 				}
 				const result = await dispatchA2aMethod(rpc.method, rpc.params, dispatchDeps);
 				return jsonResponse(rpcSuccess(rpc.id, result));
@@ -270,6 +283,8 @@ export function createA2aServer(options: A2aServerOptions): A2aServerHandle {
 		port,
 		url: `http://${host}:${port}/`,
 		stop(): void {
+			for (const stopStream of activeStreams) stopStream();
+			activeStreams.clear();
 			server.stop(true);
 		},
 	};
@@ -348,15 +363,26 @@ export async function startA2aServer(options: StartA2aServerOptions): Promise<A2
 		agentDir: options.agentDir ?? options.settings.getAgentDir(),
 		explicitToken: cfgA2aToken.get(options.settings),
 	});
-	const card =
-		options.card ??
-		(async (): Promise<AgentCard> => {
+	// Discovery is a filesystem scan; the card route is public and may be hit by
+	// any local page, so memoize the descriptions and only re-read the registry
+	// (cheap, live) per request. A failed scan is retried on the next request.
+	let descriptionsPromise: Promise<Map<string, string>> | undefined;
+	const loadDescriptions = (): Promise<Map<string, string>> => {
+		descriptionsPromise ??= (async () => {
 			const cwd = options.session?.cwd ?? process.cwd();
 			const discovery = await discoverAgents(cwd, undefined, options.session?.effectiveExtensionRoots?.());
 			const sessionAgents = options.session?.getSessionAgents?.() ?? [];
-			const descriptions = new Map(
-				[...discovery.agents, ...sessionAgents].map(agent => [agent.name, agent.description] as const),
-			);
+			return new Map([...discovery.agents, ...sessionAgents].map(agent => [agent.name, agent.description] as const));
+		})().catch(error => {
+			descriptionsPromise = undefined;
+			throw error;
+		});
+		return descriptionsPromise;
+	};
+	const card =
+		options.card ??
+		(async (): Promise<AgentCard> => {
+			const descriptions = await loadDescriptions();
 			const skills = registry
 				.list()
 				.filter(ref => ref.kind !== "advisor")
@@ -366,13 +392,19 @@ export async function startA2aServer(options: StartA2aServerOptions): Promise<A2
 					description: descriptions.get(ref.history?.agent ?? ref.id),
 				}));
 			return buildAgentCard({
-				url: `http://${A2A_HOST}:${options.port ?? cfgA2aPort.get(options.settings)}/`,
+				url: `http://${A2A_HOST}:${handle.port}/`,
 				version: options.version ?? VERSION,
 				skills,
 			});
 		});
 
-	return createA2aServer({ ...options, token, card });
+	const handle = createA2aServer({
+		...options,
+		port: options.port ?? cfgA2aPort.get(options.settings),
+		token,
+		card,
+	});
+	return handle;
 }
 
 /** Process-global wiring used by the CLI: the shared registry plus its IRC bus. */
