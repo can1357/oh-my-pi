@@ -651,3 +651,56 @@ fn transfer_lookups_accept_a_segments_gap_index() {
 		}
 	}
 }
+
+/// A top-level `--fake-super` operand that another process swaps between a
+/// stored symlink and a real symlink to some other file, while the sender
+/// reads it as a link, never yields that other file's contents. The sender
+/// decides what the operand is with one open that does not follow a final
+/// symlink, as upstream's `do_open_nofollow` does. A review found the earlier
+/// shape: it asked for the type, then opened normally, and a swap between the
+/// two made the open follow the new symlink and send the file it pointed at
+/// as the link's target, so a privileged sender could be made to read and
+/// send a file it should not.
+///
+/// A thread swaps the operand by atomic renames as fast as it can while the
+/// reads run. Both shapes must actually be seen, so the test cannot pass
+/// without the race having been run.
+#[cfg(unix)]
+#[test]
+fn a_fake_super_operand_swapped_during_its_read_never_sends_what_it_points_at() {
+	use std::os::unix::fs::symlink;
+	use std::sync::atomic::Ordering;
+
+	let dir = tempfile::tempdir().unwrap();
+	let base = dir.path().to_path_buf();
+	std::fs::write(base.join("secret"), b"SECRET-CONTENTS").unwrap();
+	let operand = base.join("op");
+	std::fs::write(&operand, b"stored/target").unwrap();
+	let fs = pi_vfs::BlockingFs::native();
+
+	let stop = Arc::new(AtomicBool::new(false));
+	let swapper = {
+		let (stop, base) = (Arc::clone(&stop), base.clone());
+		std::thread::spawn(move || {
+			let (op, file, link) = (base.join("op"), base.join("tmp-file"), base.join("tmp-link"));
+			while !stop.load(Ordering::Relaxed) {
+				std::fs::write(&file, b"stored/target").unwrap();
+				std::fs::rename(&file, &op).unwrap();
+				symlink(base.join("secret"), &link).unwrap();
+				std::fs::rename(&link, &op).unwrap();
+			}
+		})
+	};
+	let (mut stored, mut real, mut leaked) = (0u32, 0u32, 0u32);
+	for _ in 0..20_000 {
+		match read_operand_link(&fs, &operand).unwrap() {
+			Some(target) if target == b"stored/target" => stored += 1,
+			Some(_) => leaked += 1,
+			None => real += 1,
+		}
+	}
+	stop.store(true, Ordering::Relaxed);
+	swapper.join().unwrap();
+	assert!(stored > 0 && real > 0, "the swap never raced the reads: {stored} stored, {real} real");
+	assert_eq!(leaked, 0, "{leaked} of 20000 reads sent the swapped-in symlink's file ({stored} stored, {real} real)");
+}

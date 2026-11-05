@@ -16,6 +16,8 @@
 - Fixed the bash tool's built-in `rsync` sometimes ending a cancelled run with exit code 12 instead of 20 ([#17852](https://github.com/can1357/oh-my-pi/pull/17852) by [@sjawhar](https://github.com/sjawhar))
 - The bash tool's built-in `rsync` now reports `Too many levels of symbolic links`, as rsync 3.5.1 does, instead of `Operation not supported` when a destination entry it must set permissions on is a symlink ([#17776](https://github.com/can1357/oh-my-pi/pull/17776) by [@sjawhar](https://github.com/sjawhar))
 - With `--insecure-links`, the bash tool's built-in `rsync` now sets the permissions of what such a symlink points to, as rsync 3.5.1 does, instead of failing with exit 23 ([#17776](https://github.com/can1357/oh-my-pi/pull/17776) by [@sjawhar](https://github.com/sjawhar))
+- The bash tool's built-in `rsync --fake-super` now stores a symlink on Linux as rsync 3.5.1 does, as a regular file holding its target with the real type in the stat record, and reads such a file back as a symlink when sending ([#17865](https://github.com/can1357/oh-my-pi/pull/17865) by [@sjawhar](https://github.com/sjawhar))
+- The bash tool's built-in `rsync -b --inplace` now backs up a read-only destination file, as rsync 3.5.1 does, instead of failing with `Permission denied` ([#17865](https://github.com/can1357/oh-my-pi/pull/17865) by [@sjawhar](https://github.com/sjawhar))
 ### Changed
 
 - Made the bash tool's shell faster on string appends (`s+=x`), sourcing files full of function definitions (each body compiles on first call), quoted `"$var"`/`"$1"` arguments and file redirections

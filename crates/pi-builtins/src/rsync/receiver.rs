@@ -64,7 +64,7 @@ use crate::rsync::{
 	scan::FlistReceiver,
 	session::Ctx,
 	token::TokenDecoder,
-	tree::{self, Tree, TreeOpts},
+	tree::{self, FakeLinks, Tree, TreeOpts},
 	usage,
 	wire::ReadExt,
 	xattr::{self, XattrCtx, XattrReceiver},
@@ -407,6 +407,7 @@ impl<'a, 'b> Receiver<'a, 'b> {
 					insecure_links: self.ctx.opts.insecure_links,
 					operator_named: true,
 					confine: self.ctx.opts.confine_root.as_ref().map(|c| self.ctx.paths.resolve(c)),
+					fake_links: FakeLinks::for_run(self.ctx.opts.am_root, false),
 				};
 				Tree::open(&self.ctx.fs, &parent, &opts).ok().map(|tree| AbsPartial { tree, leaf })
 			});
@@ -450,6 +451,7 @@ impl<'a, 'b> Receiver<'a, 'b> {
 			insecure_links: opts.insecure_links,
 			operator_named: true,
 			confine: opts.confine_root.as_ref().map(|c| self.ctx.paths.resolve(c)),
+			fake_links: FakeLinks::for_run(opts.am_root, false),
 		};
 		let tree = Tree::open(&self.ctx.fs, &p.tree.root().join(p.parent()), &tree_opts)?;
 		let rel = p.rel.file_name().map_or_default(PathBuf::from);

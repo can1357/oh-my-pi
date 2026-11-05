@@ -17,7 +17,7 @@ use crate::rsync::{
 	log::{Debug as DebugFlag, Info, LogCode, strerror},
 	paths::{self, bytes_os_lossy, is_separator},
 	session::Ctx,
-	tree::{Tree, TreeOpts},
+	tree::{FakeLinks, Tree, TreeOpts},
 };
 
 /// Upstream full_fname for an operator path: quoted, relative names prefixed with the
@@ -32,7 +32,12 @@ fn full_path(ctx: &Ctx, raw: &[u8]) -> Vec<u8> {
 
 /// The destination is an explicit transfer root: `--confine-root` does not bound it.
 fn root_opts(ctx: &Ctx) -> TreeOpts {
-	TreeOpts { insecure_links: ctx.opts.insecure_links, operator_named: true, confine: None }
+	TreeOpts {
+		insecure_links: ctx.opts.insecure_links,
+		operator_named: true,
+		confine: None,
+		fake_links: FakeLinks::for_run(ctx.opts.am_root, false),
+	}
 }
 
 /// Paths named by options (`--compare-dest`/`--copy-dest`/`--link-dest`,
@@ -43,6 +48,7 @@ pub(super) fn option_opts(ctx: &Ctx) -> TreeOpts {
 		insecure_links: ctx.opts.insecure_links,
 		operator_named: true,
 		confine: ctx.opts.confine_root.as_ref().map(PathBuf::from),
+		fake_links: FakeLinks::for_run(ctx.opts.am_root, false),
 	}
 }
 

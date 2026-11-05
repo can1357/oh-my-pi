@@ -1116,6 +1116,155 @@ fn cancelled_run_exits_20() {
 	assert_eq!(crate::host::run_caught::<Rsync>(parsed, &mut host), RERR_SIGNAL);
 }
 
+/// What `dir/name` holds without following a symlink: its mode, its contents
+/// (a symlink's target), and its `--fake-super` stat record, when the
+/// filesystem has user xattrs.
+#[cfg(target_os = "linux")]
+fn stored(dir: &Path, name: &str) -> (u32, Vec<u8>, Option<Vec<u8>>) {
+	use std::os::unix::ffi::OsStrExt;
+	use std::os::unix::fs::MetadataExt;
+	let path = dir.join(name);
+	let meta = fs::symlink_metadata(&path).unwrap();
+	let contents = if meta.file_type().is_symlink() {
+		fs::read_link(&path).unwrap().as_os_str().as_bytes().to_vec()
+	} else {
+		fs::read(&path).unwrap()
+	};
+	let tree = crate::rsync::tree::Tree::open(
+		&pi_vfs::BlockingFs::native(),
+		dir,
+		&crate::rsync::tree::TreeOpts::default(),
+	)
+	.unwrap();
+	let record = tree
+		.get_xattr(Path::new(name), std::ffi::OsStr::new(crate::rsync::meta::XSTAT_ATTR), false)
+		.ok()
+		.flatten();
+	(meta.mode(), contents, record)
+}
+
+/// Whether user xattrs can be set on regular files under `dir`.
+#[cfg(target_os = "linux")]
+fn user_xattrs_work(dir: &Path) -> bool {
+	fs::write(dir.join("xattr-probe"), b"").unwrap();
+	let tree =
+		crate::rsync::tree::Tree::open(&pi_vfs::BlockingFs::native(), dir, &crate::rsync::tree::TreeOpts::default())
+			.unwrap();
+	let works = tree.set_xattr(Path::new("xattr-probe"), std::ffi::OsStr::new("user.probe"), b"1", false).is_ok();
+	fs::remove_file(dir.join("xattr-probe")).unwrap();
+	works
+}
+
+/// Linux keeps no user xattr on a symlink, so `--fake-super` stores one as a
+/// regular file holding its target (mode 0777 plus owner read-write) with the
+/// real type in the stat record, reads such a file back as a symlink when
+/// sending, and replaces a real symlink at the destination with a stored
+/// one. Captured from rsync 3.5.1: `rsync -ai --fake-super src/ d1/` stores
+/// `link -> f` as `0o100777`, contents `f`, `user.rsync.%stat` =
+/// `120777 0,0 UID:GID`; a rerun prints nothing; `--fake-super d1/ d2/` lists
+/// `cL+++++++++ link -> f` and stores it again; a real symlink in the
+/// destination gets `cLc........ link -> f`.
+#[cfg(target_os = "linux")]
+#[test]
+fn fake_super_stores_symlinks_as_files_holding_their_targets() {
+	use std::os::unix::fs::{MetadataExt, symlink};
+	let dir = tempfile::tempdir().unwrap();
+	if !user_xattrs_work(dir.path()) {
+		return;
+	}
+	let src = dir.path().join("src");
+	fs::create_dir_all(&src).unwrap();
+	fs::write(src.join("f"), b"data\n").unwrap();
+	symlink("f", src.join("link")).unwrap();
+	symlink("nowhere", src.join("dangling")).unwrap();
+	let me = fs::metadata(dir.path()).unwrap();
+	let record = format!("120777 0,0 {}:{}", me.uid(), me.gid()).into_bytes();
+
+	let (code, out, err) = run(&["-ai", "--fake-super", "src/", "d1/"], dir.path());
+	assert_eq!((code, err.as_str()), (0, ""), "{out}");
+	assert!(out.contains("cL+++++++++ link -> f\n") && out.contains("cL+++++++++ dangling -> nowhere\n"), "{out}");
+	let d1 = dir.path().join("d1");
+	assert_eq!(stored(&d1, "link"), (0o100777, b"f".to_vec(), Some(record.clone())));
+	assert_eq!(stored(&d1, "dangling"), (0o100777, b"nowhere".to_vec(), Some(record.clone())));
+
+	let (code, out, err) = run(&["-ai", "--fake-super", "src/", "d1/"], dir.path());
+	assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""));
+
+	let (code, out, err) = run(&["-ai", "--fake-super", "d1/", "d2/"], dir.path());
+	assert_eq!((code, err.as_str()), (0, ""), "{out}");
+	assert!(out.contains("cL+++++++++ link -> f\n"), "{out}");
+	assert_eq!(stored(&dir.path().join("d2"), "link"), (0o100777, b"f".to_vec(), Some(record.clone())));
+	// Named as an operand, a stored symlink is read the same way.
+	let (code, out, err) = run(&["-ai", "--fake-super", "d1/link", "d3/"], dir.path());
+	assert_eq!((code, err.as_str()), (0, ""), "{out}");
+	assert!(out.contains("cL+++++++++ link -> f\n"), "{out}");
+	assert_eq!(stored(&dir.path().join("d3"), "link"), (0o100777, b"f".to_vec(), Some(record.clone())));
+
+	// A real symlink in the destination is replaced by a stored one; with its
+	// time as the source's, only the target is reported, and with another
+	// time the time too (rsync 3.5.1: `cLc........` and `cLc.t......`).
+	let set_link_time = |path: &Path, secs: libc::time_t| {
+		use std::os::unix::ffi::OsStrExt;
+		let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+		let time = libc::timespec { tv_sec: secs, tv_nsec: 0 };
+		let times = [time, time];
+		let rc = unsafe { libc::utimensat(libc::AT_FDCWD, name.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) };
+		assert_eq!(rc, 0, "{}", io::Error::last_os_error());
+	};
+	set_link_time(&src.join("link"), 978_307_200);
+	for (name, secs, line) in [("d4", 978_307_200, "cLc........ link -> f\n"), ("d5", 1_012_608_000, "cLc.t...... link -> f\n")] {
+		let dest = dir.path().join(name);
+		fs::create_dir_all(&dest).unwrap();
+		symlink("f", dest.join("link")).unwrap();
+		set_link_time(&dest.join("link"), secs);
+		let (code, out, err) = run(&["-ai", "--fake-super", "src/", &format!("{name}/")], dir.path());
+		assert_eq!((code, err.as_str()), (0, ""), "{out}");
+		assert!(out.contains(line), "{out}");
+		assert_eq!(stored(&dest, "link"), (0o100777, b"f".to_vec(), Some(record.clone())));
+		assert_eq!(fs::symlink_metadata(dest.join("link")).unwrap().mtime(), 978_307_200);
+	}
+}
+
+/// `-b --inplace` copies a read-only destination file to its backup through
+/// the handle that created the backup, as upstream's unlink_and_reopen does,
+/// so the backup and the update both succeed. Captured from rsync 3.5.1
+/// (`rsync -aib --inplace --backup-dir=BAK src/ dst/`, `dst/f` mode 0400):
+/// exit 0, `dst/f` updated with the source's mode, `BAK/f` the old contents
+/// with mode 0400.
+#[cfg(unix)]
+#[test]
+fn inplace_backup_of_a_read_only_file_succeeds() {
+	use std::os::unix::fs::PermissionsExt;
+	let dir = tempfile::tempdir().unwrap();
+	let (src, dst, bak) = (dir.path().join("src"), dir.path().join("dst"), dir.path().join("bak"));
+	fs::create_dir_all(&src).unwrap();
+	fs::create_dir_all(&dst).unwrap();
+	fs::write(src.join("f"), b"data\n").unwrap();
+	fs::set_permissions(src.join("f"), fs::Permissions::from_mode(0o664)).unwrap();
+	let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(978_307_200);
+	let read_only_original = || {
+		let f = dst.join("f");
+		if f.exists() {
+			fs::set_permissions(&f, fs::Permissions::from_mode(0o600)).unwrap();
+		}
+		fs::write(&f, b"old-contents\n").unwrap();
+		fs::set_permissions(&f, fs::Permissions::from_mode(0o400)).unwrap();
+		fs::File::open(&f).unwrap().set_modified(old).unwrap();
+	};
+	let backup_dir = format!("--backup-dir={}", bak.display());
+	for whole_file in ["-W", "--no-W"] {
+		read_only_original();
+		let (code, out, err) = run(&["-aib", "--inplace", whole_file, &backup_dir, "src/", "dst/"], dir.path());
+		assert_eq!((code, err.as_str()), (0, ""), "{whole_file}: {out}");
+		assert!(out.contains(">f.stp..... f\n"), "{whole_file}: {out}");
+		assert_eq!(fs::read(dst.join("f")).unwrap(), b"data\n");
+		assert_eq!(fs::metadata(dst.join("f")).unwrap().permissions().mode() & 0o7777, 0o664);
+		assert_eq!(fs::read(bak.join("f")).unwrap(), b"old-contents\n");
+		assert_eq!(fs::metadata(bak.join("f")).unwrap().permissions().mode() & 0o7777, 0o400);
+		fs::remove_file(bak.join("f")).unwrap();
+	}
+}
+
 #[test]
 fn local_archive_copy_then_noop_rerun() {
 	let dir = tempfile::tempdir().unwrap();

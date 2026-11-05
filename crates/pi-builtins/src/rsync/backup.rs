@@ -47,7 +47,7 @@ use crate::rsync::{
 	meta::{self, ATTRS_ACCURATE_TIME, AttrHooks},
 	paths::{self, bytes_path},
 	session::Ctx,
-	tree::{Tree, TreeOpts},
+	tree::{FakeLinks, Tree, TreeOpts},
 	xattr::{self, XattrCtx, XattrSet},
 };
 
@@ -220,7 +220,9 @@ fn relative_backup_tree(ctx: &Ctx, trees: &DestTrees, dir: &[u8], create: bool) 
 					// Above the anchor: its physical parent (a symlink-free path).
 					let here = ctx.fs.canonicalize(ctx.paths.resolve(cur.root()))?;
 					let parent = here.parent().ok_or_else(paths::loop_error)?.to_path_buf();
-					stack = vec![Tree::open(&ctx.fs, &parent, &TreeOpts::default())?];
+					// The policy for what is written there, as for the destination.
+					let opts = TreeOpts { fake_links: FakeLinks::for_run(ctx.opts.am_root, false), ..TreeOpts::default() };
+					stack = vec![Tree::open(&ctx.fs, &parent, &opts)?];
 				}
 				if let Some(p) = phys.as_mut() {
 					p.pop();
@@ -301,6 +303,7 @@ fn absolute_backup_tree(ctx: &Ctx, host: PathBuf, create: bool) -> io::Result<Tr
 		insecure_links: ctx.opts.insecure_links,
 		operator_named: true,
 		confine: ctx.opts.confine_root.as_ref().map(PathBuf::from),
+		fake_links: FakeLinks::for_run(ctx.opts.am_root, false),
 	};
 	let tree = Tree::open(&ctx.fs, &base, &opts)?;
 	if missing.is_empty() {
@@ -542,7 +545,7 @@ fn duplicate(
 	let opts = &ctx.opts;
 	let mode = st.mode();
 	let link = if mode_is_lnk(mode) {
-		match dest.read_link(path) {
+		match dest.read_link_entry(path) {
 			Ok(t) => Some(paths::path_bytes(&t).into_owned()),
 			Err(_) => return Ok(BackupOutcome::Absent),
 		}
@@ -640,7 +643,7 @@ fn skips_unsafe_link(ctx: &Ctx, dest: &Tree, path: &Path, rel: &[u8], mode: u32)
 		return false;
 	}
 	let logger = &ctx.logger;
-	let target = dest.read_link(path).ok().map(|t| paths::path_bytes(&t).into_owned());
+	let target = dest.read_link_entry(path).ok().map(|t| paths::path_bytes(&t).into_owned());
 	match target.filter(|t| !t.is_empty()) {
 		None => {
 			if logger.levels().info(Info::Symsafe) >= 1 {
@@ -1130,6 +1133,37 @@ mod tests {
 		let (ctx, trees, _) = setup(&dest, backup_opts(Some("foreign/sub"), ""), &OUT);
 		assert!(backup_path(&ctx, &trees, b"f0").unwrap().is_none());
 		assert!(!base.join("sub").exists());
+	}
+
+	/// Under `--fake-super` the walk of a relative backup dir still follows a
+	/// real symlink in it (rsync 3.5.1: `--backup-dir=alias/new` with
+	/// `alias -> real` puts the backup in `real/new`), and a tree reached
+	/// above the destination with `..` stores symlinks as the destination does.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn fake_super_backup_dirs_follow_real_symlinks_and_store_links() {
+		let tmp = tempfile::tempdir().unwrap();
+		let base = tmp.path().canonicalize().unwrap();
+		let dest = base.join("dest");
+		put(&dest, "f0", "OLD");
+		std::fs::create_dir_all(dest.join("real")).unwrap();
+		link(&dest, "alias", "real");
+		let fake = |dir: &str| Options { am_root: -1, ..backup_opts(Some(dir), "") };
+		let receiving = TreeOpts { fake_links: FakeLinks::Receiving, ..TreeOpts::default() };
+
+		let (ctx, mut trees, _) = setup(&dest, fake("alias/new"), &OUT);
+		trees.dest = Tree::open(&ctx.fs, &dest, &receiving).unwrap();
+		assert!(backup_path(&ctx, &trees, b"f0").unwrap().is_some());
+		assert!(dest.join("real/new").is_dir(), "the backup dir is reached through alias");
+		assert!(!dest.join("new").exists());
+
+		let (ctx, mut trees, _) = setup(&dest, fake("../bak"), &OUT);
+		trees.dest = Tree::open(&ctx.fs, &dest, &receiving).unwrap();
+		let (tree, path) = backup_path(&ctx, &trees, b"f0").unwrap().expect("backup path");
+		tree.symlink(Path::new("somewhere"), &path).unwrap();
+		let stored = std::fs::symlink_metadata(base.join("bak/f0")).unwrap();
+		assert!(stored.file_type().is_file(), "a stored symlink, not a real one");
+		assert_eq!(std::fs::read(base.join("bak/f0")).unwrap(), b"somewhere");
 	}
 
 	/// B11: under `--fake-super` a special file is a regular placeholder plus the
