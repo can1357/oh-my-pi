@@ -101,6 +101,14 @@ test("a copy never replaces a transcript already at the destination", async () =
  * destination appears AFTER `exists` has truthfully answered "no", which is
  * precisely what the old `exists`-then-`writeText` lost. The exclusive write
  * has to keep the other writer's bytes.
+ *
+ * **What this test cannot tell you**, measured by round 12's Anthropic arm
+ * rather than assumed: deleting the fast path while keeping the exclusive
+ * write fails this test with the identical message, and the race is still
+ * closed in that tree. So a failure here means "the window is not handled as
+ * written", not specifically "the race reopened". Two real clients against
+ * SQLite and PostgreSQL are what distinguish those; this is the cheap guard
+ * that runs on every commit.
  */
 test("a destination that appears after the existence check is kept, not replaced", async () => {
 	tempDir = TempDir.createSync("@omp-r11-copy-race-");

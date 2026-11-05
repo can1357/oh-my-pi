@@ -90,13 +90,20 @@ export interface TranscriptPlacement {
  * A key-indexed storage passes `*` so the session's draft row goes too.
  * Returns the files it copied.
  *
- * **Never replaces, and decides that in one step.** A file already at the
- * destination wins, whether the filesystem copy of the artifacts directory
- * placed it, or another client of a shared store committed it while this copy
- * was reading its source. Asking `exists` and then writing would lose that
- * second one: the write lands after the absence it checked stopped being
- * true, so the store keeps this copy's bytes and drops the ones the other
- * client committed. The exclusive write is the whole decision.
+ * **Never replaces, and the exclusive write is what decides that.** A file
+ * already at the destination wins, whether the filesystem copy of the
+ * artifacts directory placed it, or another client of a shared store
+ * committed it while this copy was reading its source. An `exists` check
+ * cannot decide it: the write would land after the absence it saw stopped
+ * being true, keeping this copy's bytes and dropping the ones the other
+ * client committed.
+ *
+ * There IS an `exists` check in the loop below, and it decides nothing — it
+ * only avoids reading a source whose destination is already there, which
+ * under file storage is almost every source, since the caller's directory
+ * copy has usually placed them all. Without it this read a whole tree and
+ * threw the bytes away. A destination that appears after it answers still
+ * reaches the exclusive write, and still wins.
  */
 export async function copyTranscriptTree(
 	storage: SessionStorage,
