@@ -1456,9 +1456,13 @@ async fn pkill_builtin_excludes_own_pid() {
 
 /// A background subshell, group or function with an EXIT trap runs it when
 /// a terminating signal ends it, then ends with the signal's status, as in
-/// Bash 5.2 and 5.3; a signal it traps does not end it. Regression: the job
-/// ended at once, its EXIT trap never ran, and `( … ) &` was killed around
-/// the subshell that held the trap.
+/// Bash 5.2 and 5.3; a signal it traps does not end it. The trap sees the
+/// last completed command's `$?`, not the signal's status, and its own
+/// `exit` does not change what the job ends with: bash dies of the signal
+/// after the trap. Regression: the job ended at once and its EXIT trap
+/// never ran; `( … ) &` was killed around the subshell that held the trap;
+/// then the trap saw `$?` as the signal's status and `exit 7` in it made
+/// the job end 7.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_subshell_runs_its_exit_trap_when_a_signal_ends_it() {
@@ -1474,6 +1478,12 @@ async fn a_subshell_runs_its_exit_trap_when_a_signal_ends_it() {
 			"( trap 'echo X' EXIT; kill -PIPE $BASHPID; echo no ) & wait $!; echo \"pipe=$?\"",
 			"( trap 'echo T' TERM; trap 'echo X' EXIT; kill -TERM $BASHPID; echo after ) & wait $!; \
 			 echo \"trapped=$?\"",
+			"( trap 'echo \"q=$?\"' EXIT; false; /bin/sleep 30 ) & p=$!; /bin/sleep 0.3; kill \
+			 \"$p\"; wait \"$p\"; echo \"last=$?\"",
+			"( trap 'echo \"q=$?\"; exit 7' EXIT; /bin/sleep 30 ) & p=$!; /bin/sleep 0.3; kill \
+			 \"$p\"; wait \"$p\"; echo \"trapexit=$?\"",
+			"( trap 'echo \"q=$?\"; false' EXIT; /bin/sleep 30 ) & p=$!; /bin/sleep 0.3; kill \
+			 \"$p\"; wait \"$p\"; echo \"trapfalse=$?\"",
 			"( /bin/sleep 30 ) & p=$!; /bin/sleep 0.3; kill \"$p\"; wait \"$p\"; echo \
 			 \"untrapped=$?\"",
 		]
@@ -1496,6 +1506,12 @@ async fn a_subshell_runs_its_exit_trap_when_a_signal_ends_it() {
 		"after",
 		"X",
 		"trapped=0",
+		"q=1",
+		"last=143",
+		"q=0",
+		"trapexit=143",
+		"q=0",
+		"trapfalse=143",
 		"untrapped=143",
 		"",
 	]
@@ -1562,6 +1578,46 @@ async fn a_redirection_past_the_open_file_limit_fails() {
 		"bash: line 17: 1: Bad file descriptor",
 		"exec=1",
 		"notmade",
+		"",
+	]
+	.join("\n");
+	assert_eq!(output, expected);
+}
+
+/// A duplication onto its own source makes no descriptor, so it succeeds
+/// however far past `ulimit -n` that number is, as in Bash 5.2 and 5.3 --
+/// for `N>&N`, `N<&N` and `N>&N-`, on an external, a group, a function and
+/// a background job -- and a target below the limit is unaffected by a
+/// source above it. Regression: the limit was tested against the target
+/// alone, so `15>&15` under `ulimit -n 9` failed with `15: Bad file
+/// descriptor` where Bash never calls `dup2` at all.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_self_duplication_is_not_held_to_the_open_file_limit() {
+	let script = [
+		"exec 15>/dev/null 16<&0",
+		"ulimit -n 9",
+		": 15>&15; echo \"selfdup=$?\"",
+		": 16<&16; echo \"selfdupin=$?\"",
+		": 15>&15-; echo \"selfmove=$?\"",
+		"/bin/true 15>&15; echo \"external=$?\"",
+		"{ : 15>&15; }; echo \"group=$?\"",
+		"f() { :; }; f 15>&15; echo \"function=$?\"",
+		"/bin/true 15>&15 & wait $!; echo \"background=$?\"",
+		": 1>&15; echo \"below=$?\"",
+	]
+	.join("\n");
+	let (result, output) = execute_captured(script).await;
+	assert_eq!(result.exit_code, Some(0), "{output:?}");
+	let expected = [
+		"selfdup=0",
+		"selfdupin=0",
+		"selfmove=0",
+		"external=0",
+		"group=0",
+		"function=0",
+		"background=0",
+		"below=0",
 		"",
 	]
 	.join("\n");

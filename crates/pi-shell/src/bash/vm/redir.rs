@@ -487,7 +487,10 @@ fn install(
 					return Err(fail(k, vp, cx, line, Diag::Io { path, err }));
 				};
 				let fd = target_fd(k, vp, cx, r, false, line).map_err(|d| fail(k, vp, cx, line, d))?;
-				if past_limit(vp, cx, fd) {
+				// A duplication onto its own source makes no descriptor, so bash
+				// never calls `dup2` for it and it is not held to the limit
+				// (`15>&15`, `15<&15`, `15>&15-` all succeed under `ulimit -n 9`).
+				if src != fd && past_limit(vp, cx, fd) {
 					// bash's `dup2` fails; it names the source word.
 					let word = match r.target {
 						RedirTargetIr::Word(w) => word_text(unit, w),

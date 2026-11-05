@@ -446,10 +446,13 @@ impl ChildFds {
 
 	/// Orders the `dup2`s so that none replaces a source still to be read:
 	/// one is made once no other still to be made reads its target. A
-	/// source at its own target (whose `dup2` would leave it close-on-exec)
-	/// and, where every one left reads another's target, one source of the
-	/// ring are moved to a number no fd is given at; that copy is the only
-	/// descriptor this adds, one per ring.
+	/// source already at its own target costs nothing: no other fd can
+	/// target that number, so it is made first, and the child has only to
+	/// clear its close-on-exec flag — which `dup2` to the same number does
+	/// (POSIX's `posix_spawn_file_actions_adddup2` with equal descriptors),
+	/// and which [`fork_exec`]'s hook does itself. Only where every pair
+	/// left reads another's target is one source moved to a number no fd is
+	/// given at; that copy is the only descriptor this adds, one per ring.
 	fn plan(&mut self) -> io::Result<()> {
 		let mut targets: Vec<i32> = self.map.iter().map(|(t, _)| *t).collect();
 		targets.sort_unstable();
@@ -460,26 +463,31 @@ impl ChildFds {
 		}
 		let mut done = vec![false; pending.len()];
 		let mut ordered = Vec::with_capacity(pending.len());
+		// A source at its own target needs neither a descriptor nor an order.
+		// Regression: each was moved aside instead, so a command given 90 fds
+		// that already sat at their numbers needed 90 more descriptors before
+		// any `dup2` ran and died with `Too many open files`.
+		for (i, &(target, src)) in pending.iter().enumerate() {
+			if target == src {
+				done[i] = true;
+				ordered.push((target, src));
+				*readers.get_mut(&src).expect("counted") -= 1;
+			}
+		}
 		while ordered.len() < pending.len() {
-			let selfish = pending
-				.iter()
-				.zip(&done)
-				.position(|(&(t, s), &d)| !d && t == s);
 			let mut progressed = false;
-			if selfish.is_none() {
-				for (i, &(target, src)) in pending.iter().enumerate() {
-					if !done[i] && readers.get(&target).copied().unwrap_or(0) == 0 {
-						done[i] = true;
-						ordered.push((target, src));
-						*readers.get_mut(&src).expect("counted") -= 1;
-						progressed = true;
-					}
+			for (i, &(target, src)) in pending.iter().enumerate() {
+				if !done[i] && readers.get(&target).copied().unwrap_or(0) == 0 {
+					done[i] = true;
+					ordered.push((target, src));
+					*readers.get_mut(&src).expect("counted") -= 1;
+					progressed = true;
 				}
 			}
 			if progressed {
 				continue;
 			}
-			let at = selfish.unwrap_or_else(|| done.iter().position(|d| !d).expect("one left"));
+			let at = done.iter().position(|d| !d).expect("one left");
 			let from = pending[at].1;
 			let moved = off_targets(from, &targets)?;
 			let to = moved.as_raw_fd();
@@ -989,7 +997,14 @@ fn fork_exec(prog: &Program<'_>, fds: &[(i32, RawFd)], place: Place) -> io::Resu
 			}
 			libc::umask(mask);
 			for &(target, src) in &extra {
-				if libc::dup2(src, target) < 0 {
+				if src == target {
+					// `dup2` to the same number is a no-op that leaves the
+					// descriptor close-on-exec, and the child needs only the
+					// flag cleared; it owns this descriptor table.
+					if libc::fcntl(target, libc::F_SETFD, 0) < 0 {
+						return Err(io::Error::last_os_error());
+					}
+				} else if libc::dup2(src, target) < 0 {
 					return Err(io::Error::last_os_error());
 				}
 			}
@@ -1181,7 +1196,14 @@ fn fork_redirs(
 				child_fail(&exec_diag, errno(), 126, texts);
 			}
 			for &(target, src) in &raw {
-				if libc::dup2(src, target) < 0 {
+				if src == target {
+					// As in `fork_exec`: `dup2` to the same number is a no-op
+					// that leaves the descriptor close-on-exec, so the child
+					// clears the flag on its own copy instead.
+					if libc::fcntl(target, libc::F_SETFD, 0) < 0 {
+						child_fail(&exec_diag, errno(), 126, texts);
+					}
+				} else if libc::dup2(src, target) < 0 {
 					child_fail(&exec_diag, errno(), 126, texts);
 				}
 			}

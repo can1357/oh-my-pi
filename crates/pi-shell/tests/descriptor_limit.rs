@@ -209,3 +209,32 @@ fn a_child_holds_one_descriptor_per_source() {
 	expected.push_str("SAVED\nsaved=[]\nswap=err,out\nBA ring=0\n");
 	assert_eq!(run(&script), (Some(0), expected));
 }
+
+/// An fd already at its own number costs no descriptor here: under a limit
+/// of 128, a command given 90 of them runs, in the foreground and as a
+/// background job, and one mixed with a real duplication still reaches the
+/// child with both. Regression: each such fd was moved to a spare number
+/// first, so 90 of them needed 90 more descriptors before any `dup2` ran
+/// and the command died with `Too many open files`, which is the very cost
+/// this one-descriptor-per-source rule exists to remove.
+#[test]
+fn a_self_targeted_fd_costs_no_descriptor() {
+	if !in_limited_child("a_self_targeted_fd_costs_no_descriptor") {
+		return;
+	}
+
+	let hold = (14..=103)
+		.map(|fd| format!("{fd}>/dev/null"))
+		.collect::<Vec<_>>()
+		.join(" ");
+	let selves = (14..=103)
+		.map(|fd| format!("{fd}>&{fd}"))
+		.collect::<Vec<_>>()
+		.join(" ");
+	let mut script = format!("exec {hold}\n");
+	let _ = writeln!(script, "/bin/true {selves}; echo \"self=$?\"");
+	let _ = writeln!(script, "/bin/true {selves} & wait $!; echo \"background=$?\"");
+	script.push_str("exec 7>&1 8>&1\n");
+	script.push_str("/bin/sh -c 'printf S >&7' 7>&7 8>&8 1>/dev/null; echo \" mixed=$?\"\n");
+	assert_eq!(run(&script), (Some(0), "self=0\nbackground=0\nS mixed=0\n".to_string()));
+}

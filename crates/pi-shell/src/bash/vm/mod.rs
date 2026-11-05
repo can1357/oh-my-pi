@@ -432,6 +432,12 @@ pub struct Kernel {
 	/// slice: that kept ~600 bytes per idle vproc; the target is ≤ 2 KiB).
 	#[expect(clippy::vec_box, reason = "slack capacity of 8-byte slots, not of whole vprocs")]
 	pub spawned:            Vec<Box<Vproc>>,
+	/// Vprocs a terminating signal has already decided the exit status of,
+	/// while their own EXIT trap still runs: bash dies of the signal after
+	/// the trap, so the trap's own `exit` does not change it. Kept here
+	/// rather than on [`Vproc`], which has an 8-byte-scale size budget, and
+	/// empty but for the moment between a signal and the trap's end.
+	pub signal_exits:       Vec<(Vpid, i32)>,
 	/// `$RANDOM` generator state (written through as `MiscKey::Random` by
 	/// [`Kernel::next_random`] and [`Kernel::seed_random`]).
 	pub rand:               state::Random,
@@ -541,6 +547,7 @@ impl Kernel {
 			shell_pid,
 			dropped_fs: 0,
 			spawned: Vec::new(),
+			signal_exits: Vec::new(),
 			rand: state::Random::new(1),
 			start_ns: 0,
 			startup: Vec::new(),
@@ -1839,7 +1846,12 @@ impl Shell {
 			let p = &self.procs[i];
 			// A subshell vproc exits once its frames and diagnostics are done.
 			if p.transient && !p.has_work() && p.out.is_empty() {
-				let p = self.procs.remove(i);
+				let mut p = self.procs.remove(i);
+				// bash dies of the terminating signal after running its EXIT
+				// trap: the status is the signal's, not the trap's own `exit`.
+				if let Some(at) = self.k.signal_exits.iter().position(|&(v, _)| v == p.vpid) {
+					p.status = self.k.signal_exits.swap_remove(at).1;
+				}
 				self.k.trace_sources.remove(&p.vpid);
 				self.k.trace_unit_origins.remove(&p.vpid);
 				jobctl::forget_vproc(&mut self.k, p.vpid);
@@ -2133,6 +2145,7 @@ impl Shell {
 		}
 		if self.procs[i].transient {
 			let p = self.procs.remove(i);
+			self.k.signal_exits.retain(|&(v, _)| v != p.vpid);
 			self.k.trace_sources.remove(&p.vpid);
 			self.k.trace_unit_origins.remove(&p.vpid);
 			self.k.settle_bang(p.vpid, None);
@@ -2350,7 +2363,17 @@ impl Shell {
 						set_stopped(p, false);
 						changed.push((p.vpid, None));
 					}
-					exec::exit_shell(&mut self.k, &mut self.procs[i], cx, sig.exit_status(platform));
+					// bash's handler does not set `$?` before the trap: the trap
+					// sees the last completed command's status, and the signal's
+					// status is pinned for after it.
+					let keep = self.procs[i].status;
+					let vpid = self.procs[i].vpid;
+					let status = sig.exit_status(platform);
+					match self.k.signal_exits.iter_mut().find(|(v, _)| *v == vpid) {
+						Some(entry) => entry.1 = status,
+						None => self.k.signal_exits.push((vpid, status)),
+					}
+					exec::exit_shell(&mut self.k, &mut self.procs[i], cx, keep);
 				},
 				DefaultAction::Terminate => self.kill(cx, i, sig, sig.exit_status(platform)),
 				DefaultAction::Stop | DefaultAction::Continue => {
