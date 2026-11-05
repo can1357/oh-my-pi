@@ -20,7 +20,10 @@ import { defaultSessionStorage, readSessionTextFrom, type SessionStorage } from 
  */
 function transcriptSource(storage: () => SessionStorage): AgentTranscriptSource {
 	return {
-		stat: file => storage().statSync(file),
+		stat: file => {
+			const stat = storage().statSync(file);
+			return { size: stat.size, mtimeMs: stat.mtimeMs, dev: stat.dev, ino: stat.ino };
+		},
 		readFrom: async (file, offset) => (await readSessionTextFrom(storage(), file, offset)).text,
 		parseEntries: text => {
 			const entries = parseSessionEntries(text).filter(

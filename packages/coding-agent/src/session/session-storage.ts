@@ -83,6 +83,13 @@ export interface SessionStorageStat {
 	 * directory and `true` for a symlink to a regular file.
 	 */
 	isFile: boolean;
+	/**
+	 * Filesystem identity, when the backend has one. A change in either is a
+	 * different file at the same path, which no comparison of size, time or
+	 * content can see; a key-indexed backend has no identity and omits both.
+	 */
+	dev?: number;
+	ino?: number;
 }
 
 export interface SessionStorageWriter {
@@ -1177,6 +1184,8 @@ export class FileSessionStorage implements SessionStorage {
 			mtime: stats.mtime,
 			birthtimeMs: stats.birthtimeMs,
 			isFile: stats.isFile(),
+			dev: stats.dev,
+			ino: stats.ino,
 		};
 	}
 
@@ -1251,8 +1260,12 @@ export class FileSessionStorage implements SessionStorage {
 	async readTextFrom(path: string, offset: number, maxBytes?: number): Promise<{ text: string; size: number }> {
 		const { size } = await fsp.stat(path);
 		if (offset >= size) return { text: "", size };
-		const end = maxBytes === undefined ? undefined : offset + Math.max(0, maxBytes);
-		return { text: await Bun.file(path).slice(offset, end).text(), size };
+		// Never past the size this call reported. A caller advances its cursor by
+		// the `size` it is given, so bytes appended between the stat and the read
+		// would be returned once here and again from the next read — the fd read
+		// this replaced was bounded by the same stat.
+		const limit = maxBytes === undefined ? size : Math.min(size, offset + Math.max(0, maxBytes));
+		return { text: await Bun.file(path).slice(offset, limit).text(), size };
 	}
 
 	async readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {

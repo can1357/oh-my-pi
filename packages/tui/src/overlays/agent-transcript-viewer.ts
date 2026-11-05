@@ -51,6 +51,15 @@ export type AgentTranscriptEntry = SessionMessageEntryLike | { type: "model_chan
 export interface AgentTranscriptStat {
 	size: number;
 	mtimeMs: number;
+	/**
+	 * Filesystem identity, when the host has one. A file-backed transcript
+	 * reports the device and inode it was stat'd on, and a change in either is
+	 * a different file at the same path — a rotation, which no comparison of
+	 * size, time or content can see. A key-indexed host has no identity to
+	 * report and omits both.
+	 */
+	dev?: number;
+	ino?: number;
 }
 
 /** Transcript reads and session parsing supplied by the host. */
@@ -101,8 +110,16 @@ export interface AgentTranscriptViewerDeps {
 
 /** How often to re-stat a local transcript for growth (advisor/live tail). */
 const POLL_MS = 250;
-/** Every Nth idle poll re-reads the anchor, catching a rewrite that keeps size and mtime. */
+/** Every Nth idle poll re-reads the anchor, catching a rewrite of the tail that keeps size and mtime. */
 const IDLE_VERIFY_EVERY = 5;
+/**
+ * Every Nth idle poll re-reads the whole transcript and compares what was
+ * rendered, catching a rewrite *before* the anchor — an edit to an early
+ * message that keeps the file's size and restores its mtime changes nothing
+ * the cheaper checks look at. Rarer than the anchor check because it costs a
+ * full read.
+ */
+const FULL_VERIFY_EVERY = 20;
 /** UTF-16 units of rendered text a tail read must find unchanged before it appends. */
 const ANCHOR_CHARS = 4096;
 
@@ -115,6 +132,35 @@ interface LocalTranscriptState {
 	/** The rendered text that ends at {@link offset}, starting at byte {@link anchorOffset}. */
 	anchor: string;
 	anchorOffset: number;
+	/** The rendered text's hash and length in UTF-16 units, for the whole-transcript verify. */
+	rendered: RenderedHash;
+}
+
+/**
+ * A polynomial hash of rendered transcript text, in a form that can be
+ * extended by an append as cheaply as it can be recomputed whole:
+ * `H(a + b) = H(a) * base^|b| + H(b)`. A plain digest would have to re-hash
+ * the entire rendered prefix on every append, which is quadratic over a
+ * session; this costs the length of the append.
+ */
+const HASH_BASE = 131n;
+const HASH_MOD = 2305843009213693951n; // 2^61 - 1, a Mersenne prime
+
+interface RenderedHash {
+	value: bigint;
+	length: number;
+}
+
+function hashRendered(text: string): RenderedHash {
+	let value = 0n;
+	for (let i = 0; i < text.length; i++) value = (value * HASH_BASE + BigInt(text.charCodeAt(i) + 1)) % HASH_MOD;
+	return { value, length: text.length };
+}
+
+function concatRendered(a: RenderedHash, b: RenderedHash): RenderedHash {
+	let shift = 1n;
+	for (let i = 0; i < b.length; i++) shift = (shift * HASH_BASE) % HASH_MOD;
+	return { value: (a.value * shift + b.value) % HASH_MOD, length: a.length + b.length };
 }
 
 /** The last {@link ANCHOR_CHARS} of `text`, rendered text that ends at byte `offset`, and the byte it starts at. */
@@ -260,22 +306,26 @@ export class AgentTranscriptViewer implements Component {
 			return;
 		}
 		const state = this.#localState;
-		if (!state || state.path !== sessionFile || stat.size < state.offset) {
-			// A new transcript, or one cut below what is rendered: rebuild.
+		if (
+			!state ||
+			state.path !== sessionFile ||
+			stat.size < state.offset ||
+			// A different file at the same path: rotation, which no content check
+			// can see because the content may be identical.
+			(stat.dev !== undefined && stat.dev !== state.seen.dev) ||
+			(stat.ino !== undefined && stat.ino !== state.seen.ino)
+		) {
+			// A new transcript, one cut below what is rendered, or a rotation: rebuild.
 			this.#readLocal(sessionFile, stat, undefined);
 			return;
 		}
 		// Idle fast path: an unchanged size and mtime costs one stat; the anchor is
 		// re-read only every Nth idle poll so a rewrite that keeps both is still noticed.
-		if (
-			stat.size === state.seen.size &&
-			stat.mtimeMs === state.seen.mtimeMs &&
-			++this.#idlePolls < IDLE_VERIFY_EVERY
-		) {
-			return;
-		}
-		this.#idlePolls = 0;
-		this.#readLocal(sessionFile, stat, state);
+		const idle = stat.size === state.seen.size && stat.mtimeMs === state.seen.mtimeMs;
+		if (idle && ++this.#idlePolls % IDLE_VERIFY_EVERY !== 0) return;
+		const full = !idle || this.#idlePolls % FULL_VERIFY_EVERY === 0;
+		if (!idle) this.#idlePolls = 0;
+		this.#readLocal(sessionFile, stat, state, full && idle);
 	}
 
 	#clearLocal(reason: string): void {
@@ -291,14 +341,29 @@ export class AgentTranscriptViewer implements Component {
 	 * rendered end. Without a state, or when the anchor text changed (a rewrite,
 	 * not an append), read all of it and rebuild.
 	 */
-	#readLocal(sessionFile: string, stat: AgentTranscriptStat, state: LocalTranscriptState | undefined): void {
+	#readLocal(
+		sessionFile: string,
+		stat: AgentTranscriptStat,
+		state: LocalTranscriptState | undefined,
+		verifyWhole = false,
+	): void {
 		this.#localReadInFlight = true;
-		const from = state?.anchorOffset ?? 0;
+		// A whole-transcript verify reads from the start so the rendered prefix
+		// can be compared, not just the anchor at its end.
+		const from = verifyWhole ? 0 : (state?.anchorOffset ?? 0);
 		void this.#deps.transcript
 			.readFrom(sessionFile, from)
 			.then(text => {
 				this.#localReadInFlight = false;
 				if (this.#disposed) return;
+				if (verifyWhole && state) {
+					const prefix = text.slice(0, state.rendered.length);
+					const unchanged =
+						prefix.length === state.rendered.length && hashRendered(prefix).value === state.rendered.value;
+					if (unchanged) this.#appendLocal(state, stat, text.slice(state.rendered.length));
+					else this.#applyLocalFull(sessionFile, stat, text);
+					return;
+				}
 				if (state && text.startsWith(state.anchor)) this.#appendLocal(state, stat, text.slice(state.anchor.length));
 				else if (from > 0) this.#readLocal(sessionFile, stat, undefined);
 				else this.#applyLocalFull(sessionFile, stat, text);
@@ -321,8 +386,9 @@ export class AgentTranscriptViewer implements Component {
 		this.#localUnavailable = "";
 		this.#localState = {
 			path: sessionFile,
-			seen: { size: stat.size, mtimeMs: stat.mtimeMs },
+			seen: { size: stat.size, mtimeMs: stat.mtimeMs, dev: stat.dev, ino: stat.ino },
 			offset,
+			rendered: hashRendered(complete),
 			...anchorAt(complete, offset),
 		};
 		this.#model = undefined;
@@ -337,8 +403,9 @@ export class AgentTranscriptViewer implements Component {
 		const parsed = complete ? this.#extractMessages(this.#deps.transcript.parseEntries(complete)) : [];
 		this.#localState = {
 			path: state.path,
-			seen: { size: stat.size, mtimeMs: stat.mtimeMs },
+			seen: { size: stat.size, mtimeMs: stat.mtimeMs, dev: stat.dev, ino: stat.ino },
 			offset,
+			rendered: concatRendered(state.rendered, hashRendered(complete)),
 			// A long append holds the whole anchor; a short one extends the previous one.
 			...anchorAt(complete.length >= ANCHOR_CHARS ? complete : state.anchor + complete, offset),
 		};

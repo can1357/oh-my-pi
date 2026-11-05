@@ -18,11 +18,21 @@ import type { SessionStorage } from "./session-storage";
 export function listTranscriptTree(storage: SessionStorage, dir: string, pattern = "*.jsonl"): string[] {
 	const found: string[] = [];
 	const seen = new Set<string>();
+	const matches = (name: string): boolean =>
+		pattern === "*" || (pattern.startsWith("*.") ? name.endsWith(pattern.slice(1)) : name === pattern);
 	const walk = (current: string): void => {
 		const resolved = path.resolve(current);
 		if (seen.has(resolved)) return;
 		seen.add(resolved);
-		found.push(...storage.listFilesSync(current, pattern));
+		// This enumerates one session's subagent tree, so it takes regular files
+		// only and shows dot-named ones, the rule stated on
+		// `SessionStorage.listFilesSync`. Through the glob it did the opposite,
+		// and a `*.jsonl` symlink to a FIFO in an artifacts directory made every
+		// caller that reads what this returns — `omp report` among them — block
+		// on an open that never returns.
+		for (const entry of storage.listEntriesSync(current)) {
+			if (entry.isFile && matches(entry.name)) found.push(path.join(current, entry.name));
+		}
 		for (const name of storage.listDirsSync(current)) walk(path.join(current, name));
 	};
 	walk(dir);
