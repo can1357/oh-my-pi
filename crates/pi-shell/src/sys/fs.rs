@@ -1032,6 +1032,10 @@ mod pipe {
 			FileKind::Pipe
 		}
 
+		fn on_filesystem(&self) -> bool {
+			false
+		}
+
 		fn os_handle(&self) -> Option<OsHandle> {
 			// Externals would write before the consumer connects: pump instead.
 			None

@@ -220,6 +220,10 @@ impl File for MemFile {
 		FileKind::Pipe
 	}
 
+	fn on_filesystem(&self) -> bool {
+		false
+	}
+
 	fn os_handle(&self) -> Option<OsHandle> {
 		None
 	}
@@ -827,6 +831,10 @@ impl File for Gate {
 		FileKind::Pipe
 	}
 
+	fn on_filesystem(&self) -> bool {
+		false
+	}
+
 	fn os_handle(&self) -> Option<OsHandle> {
 		None
 	}
@@ -913,6 +921,10 @@ impl File for Trickle {
 		FileKind::Pipe
 	}
 
+	fn on_filesystem(&self) -> bool {
+		false
+	}
+
 	fn os_handle(&self) -> Option<OsHandle> {
 		None
 	}
@@ -967,6 +979,10 @@ impl File for Silent {
 
 	fn kind(&self) -> FileKind {
 		FileKind::Pipe
+	}
+
+	fn on_filesystem(&self) -> bool {
+		false
 	}
 
 	fn os_handle(&self) -> Option<OsHandle> {

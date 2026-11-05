@@ -170,6 +170,10 @@ impl File for PipeReader {
 		FileKind::Pipe
 	}
 
+	fn on_filesystem(&self) -> bool {
+		false
+	}
+
 	fn os_handle(&self) -> Option<OsHandle> {
 		None
 	}
@@ -214,6 +218,10 @@ impl File for PipeWriter {
 
 	fn kind(&self) -> FileKind {
 		FileKind::Pipe
+	}
+
+	fn on_filesystem(&self) -> bool {
+		false
 	}
 
 	fn os_handle(&self) -> Option<OsHandle> {
@@ -272,6 +280,10 @@ impl File for MemBuf {
 
 	fn kind(&self) -> FileKind {
 		FileKind::Regular
+	}
+
+	fn on_filesystem(&self) -> bool {
+		false
 	}
 
 	fn os_handle(&self) -> Option<OsHandle> {
@@ -435,6 +447,10 @@ impl File for MemFile {
 		self.file_ref().kind()
 	}
 
+	fn on_filesystem(&self) -> bool {
+		self.file_ref().on_filesystem()
+	}
+
 	fn os_handle(&self) -> Option<OsHandle> {
 		None
 	}
@@ -547,6 +563,10 @@ impl File for Capture {
 
 	fn kind(&self) -> FileKind {
 		FileKind::Pipe
+	}
+
+	fn on_filesystem(&self) -> bool {
+		false
 	}
 
 	fn os_handle(&self) -> Option<OsHandle> {

@@ -268,9 +268,13 @@ pub trait File: Send {
 	/// pipeline buffers, captures — is not, and says so here rather than
 	/// through the errno of [`Self::stat`], which a provider can also
 	/// report for a real file it could not stat.
-	fn on_filesystem(&self) -> bool {
-		false
-	}
+	///
+	/// Deliberately without a default: a decision that protects a file from
+	/// being overwritten ([`crate::bash::vm::redir`]'s `noclobber`) reads
+	/// this, and a wrapper that inherited a default would silently answer
+	/// for the object it wraps. A new implementation must say what it is,
+	/// and a wrapper must forward the question.
+	fn on_filesystem(&self) -> bool;
 	/// Whether writes must pass through the engine to observe visible output.
 	fn observes_output(&self) -> bool {
 		false

@@ -561,6 +561,10 @@ mod tests {
 			crate::bash::FileKind::Pipe
 		}
 
+		fn on_filesystem(&self) -> bool {
+			false
+		}
+
 		fn os_handle(&self) -> Option<crate::bash::OsHandle> {
 			None
 		}

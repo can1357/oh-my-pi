@@ -1260,6 +1260,10 @@ impl File for Tee {
 		FileKind::Pipe
 	}
 
+	fn on_filesystem(&self) -> bool {
+		false
+	}
+
 	fn os_handle(&self) -> Option<OsHandle> {
 		None
 	}
@@ -1301,6 +1305,10 @@ impl File for Cat {
 
 	fn kind(&self) -> FileKind {
 		FileKind::Pipe
+	}
+
+	fn on_filesystem(&self) -> bool {
+		false
 	}
 
 	fn os_handle(&self) -> Option<OsHandle> {

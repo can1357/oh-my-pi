@@ -456,6 +456,10 @@ impl File for TaggedOutput {
 			.unwrap_or_else(|| Err(io::ErrorKind::Unsupported.into()))
 	}
 
+	fn on_filesystem(&self) -> bool {
+		self.base.on_filesystem()
+	}
+
 	fn dup(&self) -> io::Result<Box<dyn File>> {
 		Ok(Box::new(Self { base: self.base.dup()?, tag: self.tag }))
 	}
