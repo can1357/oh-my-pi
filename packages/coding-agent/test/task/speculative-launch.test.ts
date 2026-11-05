@@ -454,22 +454,24 @@ describe("task speculative launch", () => {
 			],
 		};
 		const raw = JSON.stringify(call);
+		// Wait on an event, not a duration. The defect is that a launch gets *scheduled*, and
+		// `#schedule` awaits `sink.authorizeLaunch` at the head of the launch chain — before the agent
+		// resolution, worktree and executor work that make the start itself slow. So authorization is
+		// the earliest observable proof that a launch was planned, and it is reached in microtasks.
+		//
+		// A bounded wall-clock cap was tried here first and measurement rejected it. It had ample
+		// margin on an idle box — a review arm measured 48 reverted starts reaching the executor in
+		// ≤19.71 ms against a 400 ms cap — but injecting a 650 ms authorization delay loses the race
+		// while the launch still happens at 651–661 ms. A cap that is ample on a quiet machine and
+		// short on a busy one is the same defect with a timing dependency, and a no-start snapshot
+		// taken after a cap cannot prove settling. The predecessor of that cap, a 50-microtask drain,
+		// was shorter still and reported "nothing started" under the revert.
+		const authorize = vi.spyOn(sink, "authorizeLaunch");
 		const { tool, session } = await openSession();
 
 		session.update(toolCall, raw.slice(0, raw.indexOf('{"name":"Beta"') + 10));
-		// Give a queued launch a real chance to reach the mocked executor, because `Alpha` starting is
-		// the defect and its absence is what this asserts. The wait is a cap, not a settle: the race
-		// resolves the moment `Alpha` starts, so the passing path pays it only when nothing starts.
-		//
-		// A microtask drain was tried here first and is not enough — measured: with the fix reverted,
-		// 50 drained microtasks still reported "idle" while a real wait reports "started", because the
-		// launch path awaits more than microtasks before it reaches the executor. That made this very
-		// test green for the wrong reason, which is the defect it exists to catch, one layer up.
-		const started = await Promise.race([
-			spawn("Alpha").started.promise.then(() => "started" as const),
-			Bun.sleep(400).then(() => "idle" as const),
-		]);
-		expect(started).toBe("idle");
+		for (let turn = 0; turn < 100; turn++) await Promise.resolve();
+		expect(authorize).not.toHaveBeenCalled();
 		expect([...startedIds]).toEqual([]);
 
 		session.finalize({ toolCall, args: call });
