@@ -89,6 +89,8 @@ export interface PendingRun {
 	 * cancellation into the still-running `runInProcessTab` body (issue #4499).
 	 */
 	closeAc?: AbortController;
+	/** A direct `tab.waitForDownload()` call: it holds the tab until a download finishes. */
+	waitsForDownload?: boolean;
 }
 
 interface TabSessionBase<TBrowser extends BrowserHandle = BrowserHandle> {
@@ -217,6 +219,8 @@ export interface RunInTabOptions {
 	timeoutMs: number;
 	signal?: AbortSignal;
 	session: ToolSession;
+	/** The call is a direct `tab.waitForDownload()`. */
+	waitsForDownload?: boolean;
 }
 
 export interface ReleaseTabOptions {
@@ -881,7 +885,13 @@ async function acquireTernTab(
 export async function runInTab(name: string, opts: RunInTabOptions): Promise<RunResultOk> {
 	const result = await runInTabWithSnapshot(
 		name,
-		{ code: opts.code, timeoutMs: opts.timeoutMs, signal: opts.signal, session: opts.session },
+		{
+			code: opts.code,
+			timeoutMs: opts.timeoutMs,
+			signal: opts.signal,
+			session: opts.session,
+			waitsForDownload: opts.waitsForDownload,
+		},
 		{
 			cwd: opts.session.cwd,
 			browserScreenshotDir: expandBrowserScreenshotDir(opts.session),
@@ -907,6 +917,7 @@ async function runInTabWithSnapshot(
 		session?: ToolSession;
 		/** This run follows a re-adoption that a detach before the previous attempt caused; it is not retried again. */
 		readopted?: boolean;
+		waitsForDownload?: boolean;
 	},
 	snapshot: SessionSnapshot,
 ): Promise<RunResultOk> {
@@ -932,8 +943,11 @@ async function runInTabWithSnapshot(
 		);
 	}
 	if (tab.pending.size > 0) {
+		const waitingForDownload = [...tab.pending.values()].some(run => run.waitsForDownload);
 		throw new ToolError(
-			`Tab ${JSON.stringify(name)} is busy: another call on this tab is still running. Await each call before starting the next instead of running them together (Promise.all, asyncio.gather), or group the steps in one tab.run(...)`,
+			waitingForDownload
+				? `Tab ${JSON.stringify(name)} is busy: tab.waitForDownload() holds the tab until a download finishes, so the step that starts the download cannot run beside it. Start the wait and that step in one run: await tab.run("const download = tab.waitForDownload(); await tab.click('#export'); return await download;")`
+				: `Tab ${JSON.stringify(name)} is busy: another call on this tab is still running. Await each call before starting the next instead of running them together (Promise.all, asyncio.gather), or group the steps in one tab.run(...)`,
 		);
 	}
 	// An already-aborted call never runs: without this early exit the worker
@@ -969,6 +983,7 @@ async function runInTabWithSnapshot(
 		signal: opts.signal,
 		toolCalls: new Map(),
 		closeAc,
+		waitsForDownload: opts.waitsForDownload,
 	};
 	// Register BEFORE the unfreeze await below. Settle-freeze guards on
 	// `pending` (and undoes a transition already in flight when it observes
