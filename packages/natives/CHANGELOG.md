@@ -27,6 +27,8 @@
 
 ### Fixed
 
+- Fixed Git worktree operations to honor relative links and preserve valid worktrees during cleanup ([#17335](https://github.com/can1357/oh-my-pi/pull/17335) by [@camjac251](https://github.com/camjac251)).
+- Fixed smart Git worktree creation ignoring valueless or invalid `worktree.guessRemote` settings ([#17335](https://github.com/can1357/oh-my-pi/pull/17335) by [@camjac251](https://github.com/camjac251)).
 - Fixed the bash tool's `$!` inside a command substitution, a `( )` subshell or a pipeline stage: it now names the parent's last background job, as in Bash ([#18107](https://github.com/can1357/oh-my-pi/pull/18107) by [@sjawhar](https://github.com/sjawhar))
 - Fixed Windows `rsync` treating a one-letter daemon host such as `h::module` as a local drive path ([#18048](https://github.com/can1357/oh-my-pi/pull/18048) by [@jchanghong023](https://github.com/jchanghong023))
 - Removed embedded-shell compiler warnings and fixed history saves hanging when a stale lock cannot be removed
@@ -140,9 +142,6 @@
 - Fixed built-in bash commands such as `cat`, `grep`, `head`, `wc`, `read`, and `mapfile` hanging at the end of FIFO input on macOS; `read -t` now returns at EOF.
 - Fixed ANSI text wrapping for styled underlines, background colours, and colon-form RGB colours.
 - Fixed clicking in native audio playback when the queue runs dry mid-waveform by smoothly fading output to silence and back.
-- Fixed `wrapTextWithAnsi` continuing a wrapped styled underline (`4:3`, `4:4`) as a background colour, `4:0` setting background `40`, and colon-form colours (`38:2::r:g:b`) being dropped ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
-- Fixed Git worktree operations to honor relative links and preserve valid worktrees during cleanup ([#17335](https://github.com/can1357/oh-my-pi/pull/17335) by [@camjac251](https://github.com/camjac251)).
-- Fixed smart Git worktree creation ignoring valueless or invalid `worktree.guessRemote` settings ([#17335](https://github.com/can1357/oh-my-pi/pull/17335) by [@camjac251](https://github.com/camjac251)).
 
 ## [18.13.3] - 2026-10-28
 
