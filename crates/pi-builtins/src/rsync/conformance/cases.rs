@@ -134,7 +134,9 @@ pub(super) const LOCAL: &[Case] = &[
 	c("one_file_system", 0, "", &["-aix", "src/", "dst/"]),
 	c("copy_links", 23, "", &["-aiL", "src/", "dst/"]),
 	c("copy_dirlinks", 0, "", &["-aik", "src/", "dst/"]),
-	c("keep_dirlinks", 0, "keepdir", &["-aiK", "src/", "dst/"]),
+	// rsync 3.5.1 refuses to set the permissions of `dst/sub`, a symlink to a
+	// directory, and exits 23 (measured in every run).
+	c("keep_dirlinks", 23, "keepdir", &["-aiK", "src/", "dst/"]),
 	c("no_keep_dirlinks", 0, "keepdir", &["-ai", "src/", "dst/"]),
 	c("keep_dirlinks_outside", 23, "keepdir_out", &["-aiK", "src/", "dst/"]),
 	c("copy_unsafe_links", 23, "", &["-ai", "--copy-unsafe-links", "src/", "dst/"]),

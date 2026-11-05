@@ -267,14 +267,20 @@ fn apply(w: &Path, tweak: &str) {
 			write_file(&j("dst/big-1.bin"), &big, 0o644, OLD, 0);
 		}
 		// A destination symlink to a directory inside the destination (`-K`).
+		// The target's mode differs from `src/sub`'s under any umask, so both
+		// clients try to set it through the symlink and are refused.
 		"keepdir" => {
 			fs::create_dir_all(j("dst/realsub")).unwrap();
+			chmod(&j("dst/realsub"), 0o700);
 			symlink("realsub", j("dst/sub")).unwrap();
 			set_time(&j("dst/sub"), OLD, 0);
 		}
-		// A destination symlink to a directory outside the destination.
+		// A destination symlink to a directory outside the destination. The
+		// target's mode differs from `src/sub`'s under any umask, as for
+		// `keepdir`.
 		"keepdir_out" => {
 			fs::create_dir_all(j("elsewhere")).unwrap();
+			chmod(&j("elsewhere"), 0o700);
 			fs::create_dir_all(j("dst")).unwrap();
 			symlink("../elsewhere", j("dst/sub")).unwrap();
 			set_time(&j("dst/sub"), OLD, 0);

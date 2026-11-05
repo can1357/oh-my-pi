@@ -14,6 +14,8 @@
 - Fixed the bash tool's built-in `rsync --server` with `--timeout` timing out while its output was blocked, although its peer kept sending keepalives ([#17852](https://github.com/can1357/oh-my-pi/pull/17852) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the bash tool's built-in `rsync --server` keeping its output open after a run that timed out, so the next command still found it ([#17852](https://github.com/can1357/oh-my-pi/pull/17852) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the bash tool's built-in `rsync` sometimes ending a cancelled run with exit code 12 instead of 20 ([#17852](https://github.com/can1357/oh-my-pi/pull/17852) by [@sjawhar](https://github.com/sjawhar))
+- The bash tool's built-in `rsync` now reports `Too many levels of symbolic links`, as rsync 3.5.1 does, instead of `Operation not supported` when a destination entry it must set permissions on is a symlink ([#17776](https://github.com/can1357/oh-my-pi/pull/17776) by [@sjawhar](https://github.com/sjawhar))
+- With `--insecure-links`, the bash tool's built-in `rsync` now sets the permissions of what such a symlink points to, as rsync 3.5.1 does, instead of failing with exit 23 ([#17776](https://github.com/can1357/oh-my-pi/pull/17776) by [@sjawhar](https://github.com/sjawhar))
 ### Changed
 
 - Made the bash tool's shell faster on string appends (`s+=x`), sourcing files full of function definitions (each body compiles on first call), quoted `"$var"`/`"$1"` arguments and file redirections

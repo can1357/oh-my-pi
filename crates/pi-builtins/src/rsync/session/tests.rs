@@ -1583,6 +1583,26 @@ fn files_from_forwarding_collapses_lines() {
 	assert_eq!(lock(&implied).check(b"b/c", false), crate::rsync::filter::Verdict::Include);
 }
 
+/// `--insecure-links` restores the legacy chmod: a destination directory that
+/// is a symlink (`-K`) gets the source directory's mode on what it points to,
+/// and the run succeeds, as with rsync 3.5.1 (exit 0, mode set).
+#[cfg(unix)]
+#[test]
+fn insecure_links_sets_a_mode_through_a_destination_symlink() {
+	use std::os::unix::fs::{PermissionsExt, symlink};
+	let dir = tempfile::tempdir().unwrap();
+	make_tree(&dir.path().join("src"));
+	fs::set_permissions(dir.path().join("src/sub"), fs::Permissions::from_mode(0o755)).unwrap();
+	fs::create_dir_all(dir.path().join("dst/realsub")).unwrap();
+	fs::set_permissions(dir.path().join("dst/realsub"), fs::Permissions::from_mode(0o700)).unwrap();
+	symlink("realsub", dir.path().join("dst/sub")).unwrap();
+	let (code, _, err) = run(&["-aK", "--insecure-links", "src/", "dst/"], dir.path());
+	assert_eq!((code, err.as_str()), (0, ""));
+	let mode = fs::metadata(dir.path().join("dst/realsub")).unwrap().permissions().mode() & 0o7777;
+	assert_eq!(mode, 0o755);
+	assert!(fs::symlink_metadata(dir.path().join("dst/sub")).unwrap().file_type().is_symlink());
+}
+
 /// A `--log-file` that cannot be opened is reported as rsync 3.5.1 reports
 /// it, and the copy goes on. Measured with rsync 3.5.1 under `LC_ALL=C`: a
 /// missing directory, a directory, and (not as root) a directory it may not

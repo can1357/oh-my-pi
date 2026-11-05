@@ -58,7 +58,7 @@ use std::{
 
 use pi_vfs::{BlockingFs, DirOptions, FileTime, Metadata, NodeKind, OpenOptions, Permissions};
 
-use crate::rsync::consts::MAXPATHLEN;
+use crate::rsync::consts::{MAXPATHLEN, mode_is_lnk};
 use crate::rsync::paths::{self, is_absolute_bytes, is_separator};
 use crate::rsync::time::split_time;
 
@@ -853,7 +853,7 @@ impl Tree {
 						}
 						let path = self.inner.root.join(OsStr::from_bytes(at.name.as_bytes()));
 						sys::bind_socket_at(at.dir.fd(), &at.name, &path)?;
-						chmod_nofollow(at.dir.fd(), &at.name, perm)?;
+						chmod_nofollow(at.dir.fd(), &at.name, perm, AtLink::Refuse)?;
 					}
 				},
 				NodeKind::CharDevice(rdev) => {
@@ -882,7 +882,7 @@ impl Tree {
 		let current = sys::st_mode(&st) & 0o7777;
 		let wanted = (current & 0o7000) | (mode & 0o777 & !mask);
 		if current != wanted {
-			let _ = chmod_nofollow(at.dir.fd(), &at.name, wanted);
+			let _ = chmod_nofollow(at.dir.fd(), &at.name, wanted, AtLink::Refuse);
 		}
 	}
 
@@ -940,16 +940,46 @@ impl Tree {
 
 	// ----- attributes ---------------------------------------------------------
 
-	/// Never follows a final symlink (lchmod semantics; Unsupported where impossible).
+	/// Sets the mode of the entry at `rel`, which is not a symlink. A symlink
+	/// found there is refused with `ELOOP` and left alone, as upstream's
+	/// `do_fchmodat_nofollow` refuses it; [`Tree::chmod_link`] sets a
+	/// symlink's own mode. Under `--insecure-links` the symlink is followed
+	/// instead: upstream's resolver is off there, and `do_chmod` calls
+	/// chmod(2), which changes what the symlink points to.
 	pub(crate) fn chmod(&self, rel: &Path, mode: u32) -> io::Result<()> {
+		self.chmod_entry(rel, mode, AtLink::Refuse)
+	}
+
+	/// Sets the mode of the symlink at `rel` itself (lchmod semantics;
+	/// `EOPNOTSUPP` where the platform cannot), upstream's `do_chmod` for an
+	/// `S_ISLNK` mode.
+	pub(crate) fn chmod_link(&self, rel: &Path, mode: u32) -> io::Result<()> {
+		self.chmod_entry(rel, mode, AtLink::SetOwn)
+	}
+
+	/// Sets the mode of the entry at `rel` as upstream's `set_file_attrs`
+	/// does for an entry of `mode` (its `S_IFMT` included): a symlink's own
+	/// mode ([`Tree::chmod_link`]) for a symlink, otherwise [`Tree::chmod`],
+	/// which refuses a symlink found there (`S_ISLNK(mode) ? do_chmod :
+	/// do_fchmodat_nofollow`). Only the permission bits of `mode` are set.
+	pub(crate) fn chmod_for(&self, rel: &Path, mode: u32) -> io::Result<()> {
+		if mode_is_lnk(mode) { self.chmod_link(rel, mode) } else { self.chmod(rel, mode) }
+	}
+
+	fn chmod_entry(&self, rel: &Path, mode: u32, at_link: AtLink) -> io::Result<()> {
+		let link = at_link == AtLink::SetOwn;
+		let follow = !link && self.insecure();
 		#[cfg(unix)]
 		if let Some(root) = self.native_root() {
 			let at = self.locate(root, rel)?;
-			return chmod_nofollow(at.dir.fd(), &at.name, mode & 0o7777);
+			if follow {
+				return sys::fchmodat(at.dir.some(), &at.name, mode & 0o7777, false);
+			}
+			return chmod_nofollow(at.dir.fd(), &at.name, mode & 0o7777, at_link);
 		}
 		let path = self.path_of(rel)?;
-		if self.inner.fs.symlink_metadata(&path)?.is_symlink() {
-			return Err(err::unsupported());
+		if !follow && self.inner.fs.symlink_metadata(&path)?.is_symlink() {
+			return Err(if link { err::unsupported() } else { err::looped() });
 		}
 		self.inner.fs.set_permissions(&path, Permissions::from_mode(mode & 0o7777))
 	}
@@ -1205,17 +1235,33 @@ impl Tree {
 	}
 }
 
-/// chmod of `dir/name` that never follows a final symlink: a regular file,
-/// directory, or (on Linux) FIFO is pinned with `O_NOFOLLOW` and changed
-/// with `fchmod`; a symlink gets `fchmodat(AT_SYMLINK_NOFOLLOW)` (lchmod;
-/// `EOPNOTSUPP` where the platform cannot); anything else falls back to
+/// What a chmod does with a symlink found at the entry it changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AtLink {
+	/// Refuses it with `ELOOP` and leaves it alone (upstream's
+	/// `do_fchmodat_nofollow`).
+	Refuse,
+	/// Sets the symlink's own mode (lchmod; upstream's `do_chmod` for an
+	/// `S_ISLNK` mode).
+	SetOwn,
+}
+
+/// chmod of `dir/name` that never follows a final symlink, upstream's
+/// `do_fchmodat_nofollow`: a symlink is refused with `ELOOP` unless `link`
+/// asks for the symlink's own mode, which gets
+/// `fchmodat(AT_SYMLINK_NOFOLLOW)` (lchmod; `EOPNOTSUPP` where the platform
+/// cannot); a regular file, directory, or (on Linux) FIFO is pinned with
+/// `O_NOFOLLOW` and changed with `fchmod`; anything else falls back to
 /// `fchmodat(AT_SYMLINK_NOFOLLOW)`. On macOS a FIFO is never opened (that
 /// would make us a reader); an ungrantable setgid is retried without it.
 #[cfg(unix)]
-fn chmod_nofollow(dir: BorrowedFd<'_>, name: &std::ffi::CStr, mode: u32) -> io::Result<()> {
+fn chmod_nofollow(dir: BorrowedFd<'_>, name: &std::ffi::CStr, mode: u32, at_link: AtLink) -> io::Result<()> {
 	let st = sys::fstatat(Some(dir), name, true)?;
 	if sys::is_lnk(&st) {
-		return sys::fchmodat(Some(dir), name, mode, true);
+		return match at_link {
+			AtLink::Refuse => Err(err::looped()),
+			AtLink::SetOwn => sys::fchmodat(Some(dir), name, mode, true),
+		};
 	}
 	let fifo = sys::is_fifo(&st);
 	if sys::is_reg(&st) || sys::is_dir(&st) || fifo {
@@ -1596,7 +1642,17 @@ mod tests {
 			std::fs::set_permissions(base.join("file"), std::fs::Permissions::from_mode(0o600)).unwrap();
 			symlink("file", base.join("link")).unwrap();
 			let tree = open_tree(&base, &TreeOpts::default());
-			let _ = tree.chmod(Path::new("link"), 0o777);
+			// A symlink where an entry that is not one is expected is refused
+			// with ELOOP, as rsync 3.5.1's do_fchmodat_nofollow refuses it, and
+			// neither it nor its target changes. chmod_link asks for the
+			// symlink's own mode: lchmod, which Linux refuses as unsupported.
+			let refused = tree.chmod(Path::new("link"), 0o777).unwrap_err();
+			assert_eq!(refused.raw_os_error(), Some(libc::ELOOP));
+			let own = tree.chmod_link(Path::new("link"), 0o777);
+			#[cfg(target_os = "linux")]
+			assert_eq!(own.unwrap_err().raw_os_error(), Some(libc::EOPNOTSUPP));
+			#[cfg(not(target_os = "linux"))]
+			let _ = own;
 			let mode = std::fs::metadata(base.join("file")).unwrap().permissions().mode();
 			assert_eq!(mode & 0o7777, 0o600);
 			tree.chmod(Path::new("file"), 0o640).unwrap();
@@ -1605,6 +1661,24 @@ mod tests {
 			tree.chmod(Path::new(""), 0o750).unwrap();
 			let mode = std::fs::metadata(&base).unwrap().permissions().mode();
 			assert_eq!(mode & 0o7777, 0o750);
+		}
+
+		/// Under `--insecure-links` a chmod of an entry that is not a symlink
+		/// follows a symlink standing in its place, as upstream's do_chmod does
+		/// once the resolver is off; the symlink's own mode is still lchmod.
+		#[test]
+		fn insecure_links_chmod_follows_a_symlink() {
+			let (_guard, base) = tempdir();
+			std::fs::create_dir(base.join("realsub")).unwrap();
+			std::fs::set_permissions(base.join("realsub"), std::fs::Permissions::from_mode(0o700)).unwrap();
+			symlink("realsub", base.join("sub")).unwrap();
+			let mode_of = || std::fs::metadata(base.join("realsub")).unwrap().permissions().mode() & 0o7777;
+			let tree = open_tree(&base, &opts_insecure());
+			let _ = tree.chmod_link(Path::new("sub"), 0o755);
+			assert_eq!(mode_of(), 0o700);
+			tree.chmod(Path::new("sub"), 0o755).unwrap();
+			assert_eq!(mode_of(), 0o755);
+			assert!(std::fs::symlink_metadata(base.join("sub")).unwrap().file_type().is_symlink());
 		}
 
 		#[test]
