@@ -8,6 +8,16 @@ export function enoent(p: string): NodeJS.ErrnoException {
 	return err;
 }
 
+/** Node-shaped `EEXIST` error for a destination path a refusing rename found taken. */
+export function eexist(p: string): NodeJS.ErrnoException {
+	const err = new Error(`EEXIST: file already exists, rename to '${p}'`) as NodeJS.ErrnoException;
+	err.code = "EEXIST";
+	err.errno = -17;
+	err.path = p;
+	err.syscall = "rename";
+	return err;
+}
+
 /** Node-shaped `ENOTDIR` error for a regular file where a directory component is required. */
 export function enotdir(p: string): NodeJS.ErrnoException {
 	const err = new Error(`ENOTDIR: not a directory, open '${p}'`) as NodeJS.ErrnoException;

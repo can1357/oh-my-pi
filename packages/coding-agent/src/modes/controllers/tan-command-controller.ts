@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { prompt, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, prompt, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 import backgroundTanDispatchPrompt from "../../prompts/system/background-tan-dispatch.md" with { type: "text" };
 import tanContextSwitchPrompt from "../../prompts/system/tan-context-switch.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
@@ -11,6 +11,7 @@ import type { AgentSession } from "../../session/agent-session";
 import { BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE } from "../../session/messages";
 import { isHiddenUserCompanion } from "../../session/queued-messages";
 import { SessionManager } from "../../session/session-manager";
+import type { SessionStorage } from "../../session/session-storage";
 import { createMCPProxyTools, createSubagentSettings, followMCPTools } from "../../task/executor";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../../tools/todo";
 import type { InteractiveModeContext } from "../types";
@@ -34,11 +35,42 @@ function extractAssistantText(message: AssistantMessage | undefined): string {
 		.trim();
 }
 
-async function removeCloneSession(cloneFile: string): Promise<void> {
-	await Promise.allSettled([
-		fs.rm(cloneFile, { force: true }),
-		fs.rm(cloneFile.slice(0, -6), { recursive: true, force: true }),
-	]);
+/**
+ * Remove a clone whose dispatch failed. Its manager is sealed first, so
+ * closing it writes nothing more and only gives up the clone's ownership lease
+ * and writer. Then its transcript goes from the storage the fork wrote it to
+ * (the parent session's; a row under `session.storage: sql`), with its local
+ * artifacts directory. A fork that failed before writing leaves only the
+ * directory, if anything.
+ *
+ * Both removals are always attempted, as the pair of `fs.rm` calls this
+ * replaced were: a transcript the storage refuses to delete must not also
+ * strand the clone's artifacts directory on disk.
+ */
+async function removeCloneSession(
+	cloneFile: string,
+	clone: SessionManager | undefined,
+	storage: SessionStorage,
+): Promise<void> {
+	if (clone) {
+		clone.seal();
+		await clone.close().catch((error: unknown) => {
+			logger.warn("/tan: failed to close the clone of a failed dispatch", { cloneFile, error: String(error) });
+		});
+	}
+	let artifactsRemoved = false;
+	try {
+		await storage.deleteSessionWithArtifacts(cloneFile);
+		artifactsRemoved = true;
+	} catch (error) {
+		if (!isEnoent(error)) {
+			logger.warn("/tan: failed to remove the clone of a failed dispatch", { cloneFile, error: String(error) });
+		}
+	}
+	if (artifactsRemoved) return;
+	await fs.rm(cloneFile.slice(0, -".jsonl".length), { recursive: true, force: true }).catch(error => {
+		logger.warn("/tan: failed to remove the clone's artifacts", { cloneFile, error: String(error) });
+	});
 }
 
 export class TanCommandController {
@@ -127,9 +159,12 @@ export class TanCommandController {
 		await this.ctx.sessionManager.ensureOnDisk();
 		await this.ctx.sessionManager.flush();
 
+		// The clone lives where this session lives, so a failed dispatch removes it from there.
+		const parentStorage = this.ctx.sessionManager.getStorage();
 		let jobId = "";
+		let forkedClone: SessionManager | undefined;
 		try {
-			const cloneManager = await SessionManager.forkFrom(parentFile, cwd, sessionDir, undefined, {
+			const cloneManager = await SessionManager.forkFrom(parentFile, cwd, sessionDir, parentStorage, {
 				copyArtifacts: false,
 				suppressBreadcrumb: true,
 				sessionFile: cloneFile,
@@ -143,6 +178,7 @@ export class TanCommandController {
 				// parent's in-flight call as its own pending work (issue #11118).
 				repairInterruptedTail: true,
 			});
+			forkedClone = cloneManager;
 
 			jobId = manager.register(
 				"task",
@@ -332,7 +368,7 @@ export class TanCommandController {
 				{ ownerId, agentId: cloneId },
 			);
 		} catch (error) {
-			if (cloneFile) await removeCloneSession(cloneFile);
+			await removeCloneSession(cloneFile, forkedClone, parentStorage);
 			this.ctx.showError(error instanceof Error ? error.message : String(error));
 			return false;
 		}

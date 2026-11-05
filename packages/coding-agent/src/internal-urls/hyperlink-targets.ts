@@ -45,6 +45,8 @@ export async function resolveMarkdownLinkHrefs(
 						extractUriScheme(href) === "file" ? url.fileURLToPath(href) : decodeURIComponent(filePath);
 					sourcePath = path.resolve(context?.cwd ?? process.cwd(), expandPath(decoded));
 				}
+				// The terminal or editor opens the target from the local filesystem, so only
+				// a local file may be linked: a transcript held as a SQL row keeps its href.
 				const stat = await fs.stat(sourcePath);
 				if (!stat.isFile() && !stat.isDirectory()) return;
 				const target = fileUriForTerminal(sourcePath, undefined, TERMINAL.id);

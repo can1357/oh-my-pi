@@ -14,7 +14,7 @@ import {
 } from "@oh-my-pi/pi-utils/dirs";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import * as logger from "@oh-my-pi/pi-utils/logger";
-import type { SessionStorage } from "./session-storage";
+import { defaultSessionStorage, type SessionStorage } from "./session-storage";
 
 const migratedSessionRoots = new Set<string>();
 
@@ -235,14 +235,19 @@ export function sessionDirForCwd(cwd: string, sessionsRoot: string = getSessions
  * is not cwd-derived (a custom `--session-dir`), or when git metadata is
  * unreadable.
  */
-export async function worktreeSessionDirs(cwd: string, sessionDir: string): Promise<string[]> {
+export async function worktreeSessionDirs(
+	cwd: string,
+	sessionDir: string,
+	storage: SessionStorage = defaultSessionStorage(),
+): Promise<string[]> {
 	const sessionsRoot = resolveManagedSessionRoot(sessionDir, cwd);
 	if (!sessionsRoot) return [];
 	try {
 		const repo = vcs.git(cwd);
 		const prefix = repo?.prefixOf(cwd);
 		if (!repo || prefix == null) return [];
-		const dirs = new Set(managedWorktreeSessionDirs(repo.primaryRoot(), prefix, sessionsRoot));
+		await storage.refresh?.();
+		const dirs = new Set(managedWorktreeSessionDirs(repo.primaryRoot(), prefix, sessionsRoot, storage));
 		for (const worktree of await repo.worktrees()) {
 			dirs.add(sessionDirForCwd(path.resolve(worktree.path, prefix), sessionsRoot));
 		}
@@ -262,9 +267,16 @@ const WORKTREE_NAME_PROBE = "{worktree}";
  * the repository at `primaryRoot`, matched by directory name. Those worktrees
  * live at `<worktree base>/<slug>-<hashPath(primaryRoot)>[-<n>]` (see
  * `createSessionWorktree` and `resolveAvailableWorktreePath`), so the match
- * needs no git metadata and survives the worktree's removal.
+ * needs no git metadata and survives the worktree's removal. The bucket names
+ * come from `storage`: a key-indexed one (`session.storage: sql`) keeps a
+ * bucket as a key prefix with no directory on disk.
  */
-function managedWorktreeSessionDirs(primaryRoot: string, prefix: string, sessionsRoot: string): string[] {
+function managedWorktreeSessionDirs(
+	primaryRoot: string,
+	prefix: string,
+	sessionsRoot: string,
+	storage: SessionStorage,
+): string[] {
 	// Encode against the canonical base: a live worktree's directory was named
 	// from its realpath, and the probe path does not exist to be resolved.
 	const probe = path.join(resolveEquivalentPath(getWorktreesDir()), WORKTREE_NAME_PROBE, prefix);
@@ -276,7 +288,11 @@ function managedWorktreeSessionDirs(primaryRoot: string, prefix: string, session
 	const name = new RegExp(`^[\\w.-]+-(?:${[...hashes].join("|")})(?:-\\d+)?$`);
 	let entries: string[];
 	try {
-		entries = fs.readdirSync(sessionsRoot);
+		// Every name the sessions root holds, as the `readdirSync` this replaced
+		// returned: `listDirsSync` keeps only real directories, which drops a
+		// session bucket that is a symlink to one — and this listing matches
+		// names, it does not descend, so there is no loop to guard against.
+		entries = storage.listEntriesSync(sessionsRoot).map(entry => entry.name);
 	} catch {
 		return [];
 	}
@@ -525,8 +541,18 @@ export async function readTerminalBreadcrumbEntry(): Promise<TerminalBreadcrumb 
 		if (!parsed) return null;
 		const { cwd: breadcrumbCwd, sessionFile, fresh, cwdIdentity } = parsed;
 
-		const stat = fs.statSync(sessionFile, { throwIfNoEntry: false });
-		const exists = stat?.isFile() === true;
+		// Through the configured storage: under `session.storage: sql` the
+		// target is a row, and a filesystem check would drop every breadcrumb.
+		// A regular file, as the `statSync(...).isFile()` this replaced required:
+		// `existsSync` also accepts a directory named `*.jsonl`, and continuing
+		// one fails the launch with EISDIR instead of ignoring the breadcrumb.
+		const exists = ((): boolean => {
+			try {
+				return defaultSessionStorage().statSync(sessionFile).isFile;
+			} catch {
+				return false;
+			}
+		})();
 		// A materialized target resumes normally; a missing target is honored only
 		// for a never-written lazy fresh-session boundary.
 		if (exists || fresh) return { cwd: breadcrumbCwd, sessionFile, exists, fresh, cwdIdentity };

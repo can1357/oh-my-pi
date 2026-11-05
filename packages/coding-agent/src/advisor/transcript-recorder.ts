@@ -1,10 +1,10 @@
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Message, UserMessage } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import { visitEntriesFromFileStream } from "../session/session-loader";
 import { SessionManager } from "../session/session-manager";
+import { defaultSessionStorage, type SessionStorage } from "../session/session-storage";
 import { fingerprintMessage } from "./message-fingerprint";
 
 /**
@@ -53,6 +53,12 @@ export interface LoadAdvisorTranscriptCostsOptions {
 	 * scan (#10129).
 	 */
 	providersBySlug?: Map<string, Set<string>>;
+	/**
+	 * Storage the transcripts are read from: the owning session's, where its
+	 * {@link AdvisorTranscriptRecorder}s write them. Omitted: the default
+	 * session storage.
+	 */
+	storage?: SessionStorage;
 }
 
 interface AdvisorTranscriptCostFileSnapshot {
@@ -73,28 +79,43 @@ interface AdvisorTranscriptCostFileSnapshot {
  * Only the session's own advisors count: subagent advisors write to
  * `<session>/<SubId>/__advisor.jsonl`, and their spend belongs to the subagent,
  * not to this roster. Hence the scan stays at the top level of the directory.
+ *
+ * The transcripts are read where {@link AdvisorTranscriptRecorder} writes them:
+ * the session's storage (`options.storage`), which keeps them as rows rather
+ * than files under `session.storage: sql`.
  */
 export async function loadAdvisorTranscriptCosts(
 	sessionFile: string | undefined,
 	options: LoadAdvisorTranscriptCostsOptions = {},
 ): Promise<Map<string, number>> {
 	await options.beforeSnapshot;
+	const storage = options.storage ?? defaultSessionStorage();
 	const snapshots: AdvisorTranscriptCostFileSnapshot[] = [];
 	if (sessionFile?.endsWith(JSONL_SUFFIX)) {
 		const directory = sessionFile.slice(0, -JSONL_SUFFIX.length);
-		const dirents = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
-		for (const dirent of dirents) {
+		await storage.refresh?.();
+		let names: string[] = [];
+		try {
+			// Regular files only, as the `Dirent.isFile()` this replaced required.
+			names = storage
+				.listEntriesSync(directory)
+				.filter(entry => entry.isFile)
+				.map(entry => entry.name);
+		} catch (err) {
+			logger.debug("advisor transcript listing failed", { err: String(err) });
+		}
+		for (const name of names) {
 			if (options.shouldContinue?.() === false) break;
-			if (!dirent.isFile() || !isAdvisorTranscriptName(dirent.name)) continue;
-			const file = path.join(directory, dirent.name);
+			const file = path.join(directory, name);
+			if (!isAdvisorTranscriptName(name)) continue;
 			try {
 				snapshots.push({
 					file,
 					slug:
-						dirent.name === ADVISOR_TRANSCRIPT_FILENAME
+						name === ADVISOR_TRANSCRIPT_FILENAME
 							? ""
-							: dirent.name.slice(`${ADVISOR_TRANSCRIPT_STEM}.`.length, -JSONL_SUFFIX.length),
-					maxBytes: (await fs.stat(file)).size,
+							: name.slice(`${ADVISOR_TRANSCRIPT_STEM}.`.length, -JSONL_SUFFIX.length),
+					maxBytes: storage.statSync(file).size,
 				});
 			} catch {}
 		}
@@ -131,7 +152,7 @@ export async function loadAdvisorTranscriptCosts(
 						}
 					}
 				},
-				{ maxBytes: snapshot.maxBytes, shouldContinue: options.shouldContinue },
+				{ maxBytes: snapshot.maxBytes, shouldContinue: options.shouldContinue, storage },
 			);
 		} catch (err) {
 			logger.debug("advisor transcript cost read failed", { file: path.basename(snapshot.file), err: String(err) });
@@ -187,6 +208,8 @@ export class AdvisorTranscriptRecorder {
 	#replayCursor = 0;
 	/** Target file {@link #replayWindow} belongs to; a switch starts a fresh window. */
 	#windowFile: string | undefined;
+	/** Storage the transcript is written to; `undefined` opens it in the default session storage. */
+	readonly #storage: SessionStorage | undefined;
 
 	/**
 	 * @param filename Transcript filename within the session dir. Defaults to
@@ -195,14 +218,18 @@ export class AdvisorTranscriptRecorder {
 	 * @param after Optional barrier the queue starts behind — used on the advisor
 	 *   on→off→on toggle so a fresh recorder's first `open` waits for the prior
 	 *   recorder's `close` and the two never hold the same file at once.
+	 * @param storage Storage of the owning session, which holds its transcript
+	 *   tree; {@link loadAdvisorTranscriptCosts} reads the spend back from it.
 	 */
 	constructor(
 		private readonly resolveSessionFile: () => string | undefined,
 		private readonly resolveCwd: () => string,
 		filename: string = ADVISOR_TRANSCRIPT_FILENAME,
 		after?: Promise<unknown>,
+		storage?: SessionStorage,
 	) {
 		this.#filename = filename;
+		this.#storage = storage;
 		this.#queue = after
 			? after.then(
 					() => {},
@@ -269,7 +296,7 @@ export class AdvisorTranscriptRecorder {
 		this.#enqueue(async () => {
 			if (file !== this.#file) {
 				await this.#closeManager();
-				this.#manager = await SessionManager.open(file, undefined, undefined, {
+				this.#manager = await SessionManager.open(file, undefined, this.#storage, {
 					initialCwd: cwd,
 					suppressBreadcrumb: true,
 				});

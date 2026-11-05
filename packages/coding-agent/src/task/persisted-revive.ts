@@ -35,6 +35,7 @@ import {
 	type PersistedSessionInit,
 	SessionManager,
 } from "../session/session-manager";
+import { defaultSessionStorage, type SessionStorage } from "../session/session-storage";
 import type { EventBus } from "../utils/event-bus";
 import {
 	attachIrcWakeTurnMonitor,
@@ -81,6 +82,8 @@ export interface PersistedSubagentReviveContext {
 	eventBus?: EventBus;
 	/** Root-scoped observability bus the revived run's frames also publish to. */
 	subagentEventBus?: EventBus;
+	/** Storage holding the top-level session's subagent transcripts; defaults to the configured session storage. */
+	storage?: SessionStorage;
 }
 
 /**
@@ -93,6 +96,7 @@ export interface PersistedReviveSpec {
 	readonly displayName: string;
 	readonly parentId: string | undefined;
 	readonly sessionFile: string;
+	readonly storage?: SessionStorage;
 	/** Depth derived from the persisted parent chain (drives capability gating). */
 	readonly taskDepth: number;
 	/** The consulted source of a persisted seance session. */
@@ -151,7 +155,8 @@ export function createPersistedSubagentReviverFactory(
 	return async ref => {
 		const sessionFile = ref.sessionFile;
 		if (!sessionFile) return undefined;
-		const peek = await SessionManager.peekSessionInit(sessionFile);
+		const storage = ctx.storage ?? defaultSessionStorage();
+		const peek = await SessionManager.peekSessionInit(sessionFile, storage);
 		// No persisted contract (pre-session_init file) or the recorded workspace
 		// is gone (isolated/merged worktree, moved dir): leave it transcript-only
 		// (history://) rather than resurrect a wrong or broken session.
@@ -203,6 +208,7 @@ export function createPersistedSubagentReviverFactory(
 				displayName: ref.displayName,
 				parentId: ref.parentId,
 				sessionFile,
+				storage,
 				taskDepth,
 				restoredSeance,
 				root: ctx.session,
@@ -219,7 +225,7 @@ export function createPersistedSubagentReviverFactory(
 				subagentEventBus: ctx.subagentEventBus,
 			};
 			// Worker mode: a revival is placed like a fresh spawn (main thread or a worker).
-			const pool = subagentWorkerPool(ctx.settings);
+			const pool = subagentWorkerPool(ctx.settings, storage);
 			return pool
 				? revivePersistedPlaced(pool, spec, expectedRef, revivePersistedSubagent)
 				: revivePersistedSubagent(spec, expectedRef);
@@ -238,7 +244,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 	const registry = AgentRegistry.global();
 	// Re-open fresh on every revive: park closes the writer, so this takes
 	// the single-writer lock cleanly and restores the full message history.
-	const reopened = await SessionManager.open(sessionFile, undefined, undefined, {
+	const reopened = await SessionManager.open(sessionFile, undefined, spec.storage, {
 		suppressBreadcrumb: true,
 		throwIfMissing: true,
 	});

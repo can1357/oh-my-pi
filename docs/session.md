@@ -11,7 +11,7 @@ Covers:
 - Migration/compatibility behavior when loading old or malformed files
 - Context reconstruction (`buildSessionContext`)
 - Persistence guarantees, failure behavior, truncation/blob externalization
-- Storage abstractions (`FileSessionStorage`, `MemorySessionStorage`) and related utilities
+- Storage abstractions (`FileSessionStorage`, `MemorySessionStorage`, the `SqlSessionStorage` schema) and related utilities
 
 Does not cover `/tree` UI rendering behavior beyond semantics that affect session data.
 
@@ -30,6 +30,7 @@ Does not cover `/tree` UI rendering behavior beyond semantics that affect sessio
 - [`src/session/session-storage.ts`](../packages/coding-agent/src/session/session-storage.ts) — storage abstractions
 - [`src/session/session-title-slot.ts`](../packages/coding-agent/src/session/session-title-slot.ts) — fixed-width current-title slot
 - [`src/session/indexed-session-storage.ts`](../packages/coding-agent/src/session/indexed-session-storage.ts) — local index + ordered remote-backed storage adapter
+- [`src/session/sql-session-storage.ts`](../packages/coding-agent/src/session/sql-session-storage.ts) — PostgreSQL/MySQL/SQLite storage: session rows plus appended parts
 - [`src/session/messages.ts`](../packages/coding-agent/src/session/messages.ts) — custom-message transformers
 - [`src/session/blob-store.ts`](../packages/coding-agent/src/session/blob-store.ts) — content-addressed blob store
 - [`src/session/history-storage.ts`](../packages/coding-agent/src/session/history-storage.ts) — prompt history (separate subsystem)
@@ -593,8 +594,141 @@ Implementations and adapters:
 - `FileSessionStorage`: real local files
 - `MemorySessionStorage`: map/chunk-backed in-memory storage for non-persistent sessions and tests
 - `IndexedSessionStorage`: shared local index plus ordered remote publication used by Redis/SQL-backed storage
+- `SqlSessionStorage`: a PostgreSQL, MySQL, or SQLite session table (`omp_session_files`, created on first use) keyed by the same path string a file session would have, with each session's content in a `<table>_parts` table (see [SQL session storage](#sql-session-storage))
 
 `SessionStorageWriter` exposes `append`, optional `appendSync`, `flush`, optional `flushSync`, `isOpen`, `close`, and `getError`.
+
+### Selecting the storage
+
+The root command (interactive, print, RPC and ACP modes, and `omp join`) resolves one process-wide default storage at start-up (`resolveSessionStorage` in `session-storage-config.ts`, installed with `setDefaultSessionStorage`) before it opens any session; every `SessionManager` factory, `resolveResumableSession`, the session picker, recent-session listing, the session archive's listing and lookup by id, and the subagent transcript discovery behind `/export` and `/dump all` fall back to `defaultSessionStorage()` when no storage is passed, so a session written to SQL is found by `--resume`, `--continue`, the picker, and the archive, and exports with its subagents, without a second path. `--export` and `omp share` read a session without reaching that install, so each resolves and installs the same storage itself first. `omp gc`'s blob sweep resolves `session.storage` the same way at maintenance time so it can discover a SQL-only session's blob references; its archive and WAL sweeps are unrelated to the transcript backend and stay on-disk-tree-only. `omp render`, `omp anonymize`, `omp cleanse`, `omp compress` and session-id shell completion (`omp __complete sessions`) install the configured storage too, so each finds a SQL-stored session. `omp stats` does not read it: under `sql` it refuses rather than counting an empty tree.
+
+- `session.storage: file` (default) — the JSONL tree above; nothing is read or logged.
+- `session.storage: sql` — read the file `session.sql.dsnFile` names, trim it, open it with `Bun.SQL` (dialect from the URL scheme: `postgres://`, `mysql://`, `sqlite:`), and `await SqlSessionStorage.create({ client })`, which creates both tables (migrating an older session table) and warms the index. `OMP_SESSION_STORAGE` and `OMP_SESSION_SQL_DSN_FILE` take precedence over both settings.
+- SQL-backed sessions run subagents inline on the main thread until a session-storage service for workers exists; `task.workerThreads` does not offload their runs, follow-up turns, or revivals. File-backed sessions keep worker placement.
+- For PostgreSQL and MySQL, an omp-created SQL client holds at most two connections and returns idle connections after five seconds. The next session operation reconnects if needed. This pool policy is built in; callers using `SqlSessionStorage` directly keep control of their own client.
+- Resume takes the same value as today, `--resume=<session path>`: under SQL that string is the row's `path` key, and it embeds the home-relative sessions root, so the resuming process needs the same storage variables and the same home directory.
+- Refusals (exit 1, message on stderr): `sql` with no file named anywhere names both `OMP_SESSION_SQL_DSN_FILE` and `session.sql.dsnFile`; a missing or unreadable file — `<source> names <path>, which could not be read: <reason>`; a blank file — `<source> names <path>, which is empty`; contents the driver cannot parse — `<source> names <path>, but its contents are not a connection URL the database driver accepts`; an unreachable database — `<source> names <path>, but the session database could not be opened: <driver error> (<code>)`; any other storage value — `<source> is "<value>"; expected "file" or "sql"`. `<source>` is the variable or setting that supplied the value; the connection string itself is never printed.
+- There is exactly one fallback to files, and only one kind of launch gets it: a resume of a session whose transcript is already a file on disk, before this run has written anything to the database. Such a launch continues on the file store instead of refusing, because the whole conversation is in that file either way and nothing is torn. It is loud: a warning naming the session, the connection file and the reason, and one line appended to a ledger. The launch also prints the warning to the terminal, not only to the log: a session that stopped being a database row is visible where the person is looking. Which launches qualify is decided on the normalized arguments, so `--continue <id>` naming a session that does not exist refuses rather than falling back onto an unrelated one. A launch that would create a new session never qualifies, however it is spelled: `--fork`, a foreign-session import, the resume picker (whose session is not chosen yet), and a transcript carrying a `departed` transfer marker, which every resume route turns into a fork. The latch is read again after the ledger line is written, so a database write landing while the fallback is being recorded halts the launch. Recording the line is the last thing the resolution awaits, and the safety of that last window rests on one invariant: **a launch resolves exactly one session storage**, the one being decided, so no store exists in the process that could commit a write inside it. A process that resolves a second store in-process — an SDK embedder giving a session its own storage — breaks that premise, and the window becomes reachable; this rule decides one launch's storage and would need revisiting there. Every other `sql` launch — a new session above all — refuses as above, and once this run has committed a write to the database no launch falls back at all: a connection lost mid-session halts the session rather than continuing its transcript in a file, which would split one conversation over two stores.
+- The fallback ledger is append-only JSON lines at `session.sql.fallbackLedger` / `OMP_SESSION_SQL_FALLBACK_LEDGER`, defaulting to `<agentDir>/session-sql-fallbacks.jsonl`. The line is written when the fallback is decided, with `session_id` as the fixed-width placeholder `(unresolved)`, and the launch names the session in place once it has opened one. Writing the real line at the decision is what proves the ledger can take it: appending an empty string proves only that the path opens, and a ledger at a file-size limit passes that and then fails the write it certified. **Known limit:** the id is the session the launch *opened*. When the launch later moves off that session file — another process holds its ownership lease, so the first write continues into a fresh session — the recorded id is the opened one, not the one that went on. Committing after the move would instead lose the line whenever a crash precedes the first write, and a missing line defeats the mechanism where a stale id only makes one investigation harder. A launch that ends before opening a session leaves the placeholder, including when a signal kills it. The placeholder carries a nonce (`(unresolved) a68cadff46ed`), so two launches falling back in the same millisecond with the same connection file on the same host do not write identical lines and each names its own. The refinement scans and writes through one descriptor, so a rotation between the two lands in the file that was scanned rather than at a stale offset in whatever now holds the name. `session_id` is space-padded to 36 characters so the refinement never changes the line's length; a reader trims it. One line per fallback, under 4 KB so concurrent appends from separate processes do not interleave: `{"ts","session_id","reason","dsn_path","host"}`, where `reason` is `dsn-missing`, `dsn-unreadable` or `db-unreachable`. A deployment reading fleet health points the setting at a file its health reading can see, and counts the lines by reason: a warning that nobody counts lets a broken connection file degrade a fleet silently, which is what this ledger exists to prevent. The count is therefore load-bearing — a ledger that cannot be written refuses the launch, naming both why the database failed and why the record did, rather than falling back to files unrecorded. Each line's `session_id` and `dsn_path` are trimmed with an ellipsis where needed to hold the 4 KB cap. Only the root command offers the fallback at all: `--export`, `omp share`, `omp gc` and session-id resolution install the configured storage without a resume probe, so under a broken `sql` connection each refuses rather than reading a file tree the session may not be in.
+- A project that holds both a file-stored session and a SQL-stored one, resumed while the database is down, continues the newest **file** session, which can be older than the SQL one. The fallback warning says the database is unusable, but not that the session it continued is behind; an operator mid-migration should expect this.
+- Tool artifacts and image blobs stay under the agent directory on local disk in either mode; only the transcript moves. `omp gc`'s archive and WAL sweeps keep working on that on-disk tree; the blob sweep also reads a SQL-only session's transcript straight from the table so it never deletes a blob that transcript still references.
+- Joining a collab session (`/join`) needs file storage: the guest's replica of the host session is a local file, so under `sql` the join refuses with an error naming `session.storage` rather than resuming an empty session.
+- The resume picker's F2 rename reads and writes the session through the configured storage. Under file storage it first takes the session's ownership lease and leaves a session another process owns alone. A SQL-backed session has no lease, so under `sql` the rename does not check whether another process has the session open.
+- These features work only on the JSONL tree. Under `sql` each refuses with `<feature> is unavailable with session.storage: sql: <reason>` instead of acting on an empty tree:
+   - `omp gc --compress` (or `gc.compress`) and the background `gc.autoCompress` run compress session files in place on disk. `omp gc` skips the compress and archive steps and runs the others; `gc.autoCompress` writes the refusal to `gc-auto-compress.log` and does not start.
+   - `omp stats`, `/stats`, `/trace` and the `/usage` activity heatmap read session files. `/usage` still shows provider quotas.
+   - `omp session lease` and RPC `get_session_lease` probe the file ownership lease, which a SQL-backed session never takes. `omp session pack`, `unpack`, and `moved` work only on session files on disk.
+- `omp cleanse`, `omp compress` and session completion (`omp __complete sessions`) read the configured storage.
+- The debug menu's "Clear artifact cache" removes tool output files (`<id>.<tool>.log`) older than 30 days from the sessions' artifacts directories, in both storages. Nothing else there is removed: not transcripts or their sidecars, subagent outputs, `/btw` conversations or drafts, and never a session or project directory. It does not follow a directory replaced by a symlink, and leaves a file replaced since it was listed.
+- Resume forks a session that `omp session moved` marked as moved away (`forkIfMovedAway`). Only a session file can carry that mark, so a SQL-stored session always resumes in place.
+
+### SQL session storage
+
+`SqlSessionStorage` (`sql-session-storage.ts`) keeps sessions in PostgreSQL, MySQL/MariaDB, or SQLite through `bun:sql`, in two tables:
+
+- `<table>` (default `omp_session_files`): one row per session file with `path`, `content`, `mtime_ms`, the title fields, and `byte_len`, the session's size in UTF-8 bytes.
+- `<table>_parts`: the session's content as parts keyed by (`path`, `start_offset`), where `start_offset` is the part's byte offset in the session.
+
+A session's content is its row's `content` followed by its parts in `start_offset` order. `content` is non-empty only on rows written before parts existed, until the session's next full write.
+
+- An append is one transaction: it adds the line's byte length to `byte_len`, which takes the session row's lock, and inserts the line as a part at the old length. Concurrent writers serialize on that lock, and an append writes only the appended bytes.
+- A full write (rewrite, size-checked replace, create-if-missing, truncate) is one transaction that locks the row, compares `byte_len` with the expected size, empties `content`, and replaces the parts with parts of at most 1 MiB split on UTF-8 character boundaries. No stored value grows past 1 MiB or the longest appended line, so sessions stay clear of PostgreSQL's 1 GB field limit.
+- Delete and rename remove or move the row and its parts in one transaction. Warming the index reads session rows only; a sliced read fetches only the bytes of the parts covering its head and tail windows, and a read from an offset (`readTextFrom`) only the session's size and the bytes of the parts covering `[offset, offset + maxBytes)`, each in one query whatever the part count.
+- `moveTo()` refreshes the store before it checks the destination and refuses a destination that holds any session, a copy of the moving session included, because another process may have it open. It moves the session and every row under its artifacts directory with a rename that never replaces (`renameNoReplace`): one `UPDATE … SET path` whose primary key rejects a destination row that exists, or that another client inserts during the move. The transaction then rolls back, the rows already moved go back (a key written at an old path since is kept, and the move reports the failed rollback), and the move fails with `SessionMoveRefusedError` naming the taken key. Redis storage does the same check, rename, mtime and title update in one script.
+- Deleting a session removes its row and, in the same transaction, every row whose path starts with its artifacts directory (`substr(path, 1, n)`, so `%` and `_` stay literal) together with exactly those rows' parts, including rows another client committed after this client last refreshed. PostgreSQL (a `DELETE … RETURNING` feeding the parts `DELETE`) and MySQL (a multi-table `DELETE`) do it in one statement, so a child another client commits during the delete is either removed whole or kept whole; SQLite's `BEGIN IMMEDIATE` keeps every other writer out meanwhile. Redis finds and deletes the keys and their metadata in one script.
+- SQL storage has no cross-process session ownership: two omp processes can hold the same session open, and nothing stops the second one writing it during or after a move or delete, so its entry lands at the old key. A session lease with fenced writes is planned in a follow-on change.
+- PostgreSQL and MySQL run a write again, up to five attempts, when the database aborts it as a deadlock victim; each attempt recomputes everything under its own locks. On MySQL a full write deletes a session's parts only after a non-locking look finds some, so creating sessions at once takes no gap locks.
+- On SQLite every store in a process runs one call at a time per database file, across all the clients of that file (keyed by `client.options.filename`; in-memory databases, and wrappers that do not pass `options` through, queue per client), and opens every write with `BEGIN IMMEDIATE`. Clients of one file in one process therefore take turns and never wait on each other. When a client has no busy timeout, the store sets 5 s: a write then waits for another process's write lock, and if the lock is not released in time it fails at `BEGIN`, before changing anything. Keep your own transactions off a client the store uses: Bun runs each client on one connection, so the store's statements would join them.
+- Table names are limited to 57 characters, so `<table>_parts` stays within the 63-character identifier limit.
+
+With `createTable` on (the default), `create()` creates both tables when missing. On a session table from an older Oh My Pi it adds `byte_len`, backfills it from each row's `content` where it is null, and creates `<table>_parts`. Stop every older Oh My Pi process that writes the table before the first upgraded one starts: an older version appends to `content` without updating `byte_len`.
+
+With `createTable: false`, `create()` runs no DDL and refuses to start, naming what is missing, until the session table has `byte_len` and `<table>_parts` exists; it also refuses while any row's `byte_len` is null. Apply the schema in your own migration, substituting your table name for `omp_session_files`. A new database creates the session table with `byte_len`; an existing session table adds the column and backfills it. Both then create the parts table.
+
+PostgreSQL:
+
+```sql
+-- New database
+CREATE TABLE omp_session_files (path TEXT PRIMARY KEY, content TEXT NOT NULL, mtime_ms BIGINT NOT NULL,
+  title TEXT, title_source TEXT, title_updated_at TEXT, byte_len BIGINT);
+-- Existing session table
+ALTER TABLE omp_session_files ADD COLUMN byte_len BIGINT;
+UPDATE omp_session_files SET byte_len = octet_length(content) WHERE byte_len IS NULL;
+-- Both
+CREATE TABLE omp_session_files_parts (path TEXT NOT NULL, start_offset BIGINT NOT NULL, content TEXT NOT NULL,
+  PRIMARY KEY (path, start_offset));
+```
+
+MySQL / MariaDB:
+
+```sql
+-- New database
+CREATE TABLE omp_session_files (path VARCHAR(512) NOT NULL PRIMARY KEY, content LONGTEXT NOT NULL,
+  mtime_ms BIGINT NOT NULL, title TEXT NULL, title_source VARCHAR(16) NULL, title_updated_at VARCHAR(64) NULL,
+  byte_len BIGINT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+-- Existing session table
+ALTER TABLE omp_session_files ADD COLUMN byte_len BIGINT NULL;
+UPDATE omp_session_files SET byte_len = length(content) WHERE byte_len IS NULL;
+-- Both
+CREATE TABLE omp_session_files_parts (path VARCHAR(512) NOT NULL, start_offset BIGINT NOT NULL,
+  content LONGTEXT NOT NULL, PRIMARY KEY (path, start_offset))
+  ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+```
+
+SQLite:
+
+```sql
+-- New database
+CREATE TABLE omp_session_files (path TEXT PRIMARY KEY, content TEXT NOT NULL, mtime_ms INTEGER NOT NULL,
+  title TEXT, title_source TEXT, title_updated_at TEXT, byte_len INTEGER);
+-- Existing session table
+ALTER TABLE omp_session_files ADD COLUMN byte_len INTEGER;
+UPDATE omp_session_files SET byte_len = length(cast(content AS blob)) WHERE byte_len IS NULL;
+-- Both
+CREATE TABLE omp_session_files_parts (path TEXT NOT NULL, start_offset INTEGER NOT NULL, content TEXT NOT NULL,
+  PRIMARY KEY (path, start_offset));
+```
+
+Before running an older Oh My Pi against the tables, roll back. Stop the newer processes first. The statements fold each session's parts into its row's `content`, then delete the parts of, and clear `byte_len` on, only those rows whose `content` now measures `byte_len`. A session whose fold failed keeps its parts and `byte_len`, so this version still reads it whole, even when the client carries on past an error.
+
+A session cannot be folded when its content exceeds the older version's single-value limit: 1 GB on PostgreSQL, `max_allowed_packet` on MySQL (64 MiB by default on MySQL 8, 4 MiB on 5.7, at most 1 GB), and `SQLITE_MAX_LENGTH` on SQLite (1,000,000,000 bytes by default). On PostgreSQL, on SQLite, and on MySQL in strict mode (the default), one such session makes the whole fold statement fail, so nothing is folded until that session is removed or the limit is raised.
+
+```sql
+-- PostgreSQL
+BEGIN;
+UPDATE omp_session_files AS s SET content = s.content || p.content
+FROM (SELECT path, string_agg(content, '' ORDER BY start_offset) AS content
+      FROM omp_session_files_parts GROUP BY path) AS p
+WHERE p.path = s.path;
+DELETE FROM omp_session_files_parts
+WHERE path IN (SELECT path FROM omp_session_files WHERE octet_length(content) = byte_len);
+UPDATE omp_session_files SET byte_len = NULL WHERE octet_length(content) = byte_len;
+COMMIT;
+
+-- MySQL / MariaDB (GROUP_CONCAT truncates at group_concat_max_len, 1024 bytes by default)
+SET SESSION group_concat_max_len = 18446744073709551615;
+START TRANSACTION;
+UPDATE omp_session_files AS s
+JOIN (SELECT path, GROUP_CONCAT(content ORDER BY start_offset SEPARATOR '') AS content
+      FROM omp_session_files_parts GROUP BY path) AS p ON p.path = s.path
+SET s.content = CONCAT(s.content, p.content)
+WHERE length(CONCAT(s.content, p.content)) = s.byte_len;
+DELETE FROM omp_session_files_parts
+WHERE path IN (SELECT path FROM omp_session_files WHERE length(content) = byte_len);
+UPDATE omp_session_files SET byte_len = NULL WHERE length(content) = byte_len;
+COMMIT;
+
+-- SQLite 3.44 or later
+BEGIN;
+UPDATE omp_session_files SET content = content || (
+  SELECT string_agg(content, '' ORDER BY start_offset) FROM omp_session_files_parts AS p
+  WHERE p.path = omp_session_files.path)
+WHERE path IN (SELECT path FROM omp_session_files_parts);
+DELETE FROM omp_session_files_parts
+WHERE path IN (SELECT path FROM omp_session_files WHERE length(cast(content AS blob)) = byte_len);
+UPDATE omp_session_files SET byte_len = NULL WHERE length(cast(content AS blob)) = byte_len;
+COMMIT;
+```
 
 ### Manual storage maintenance
 

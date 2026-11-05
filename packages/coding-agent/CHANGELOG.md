@@ -2,8 +2,16 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `SqlSessionStorage` with `createTable: false` refuses to start until the session table has a `byte_len` column and a `<table>_parts` table exists; docs/session.md gives the DDL, backfill, and rollback for each dialect. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+- `SqlSessionStorage` refuses table names longer than 57 characters, leaving room for the `<table>_parts` table. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+- An older Oh My Pi can no longer read a SQL session table this version has written until you run the rollback in docs/session.md. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+
 ### Added
 
+- Sessions can now be stored in PostgreSQL, MySQL, or SQLite instead of JSONL files: set `session.storage: sql` and point `session.sql.dsnFile` at a file holding the connection string (or set `OMP_SESSION_STORAGE=sql` and `OMP_SESSION_SQL_DSN_FILE`); `--resume`, `--continue`, the session picker, and listing follow the same store, and joining a collab session needs file storage. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+- Under `session.storage: sql`, a resume of a session whose transcript is still a file on disk goes on using that file when the database cannot be reached, warning with the connection file and the reason and appending a line to `session.sql.fallbackLedger` (default `<agentDir>/session-sql-fallbacks.jsonl`); a fallback that cannot be recorded refuses too, a new session still refuses to start — including `--fork`, a foreign import, the resume picker, and a session already moved away — and a session that has already written to the database halts instead of continuing in a file ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
 - Added `skills.manualSkills` glob patterns to keep skills available manually while hiding them from the model catalog, without editing their `SKILL.md` files ([#18114](https://github.com/can1357/oh-my-pi/pull/18114) by [@Shadorain](https://github.com/Shadorain))
 - Added Keenable as a web search engine (`web/keenable`). It uses `KEENABLE_API_KEY` or a stored `keenable` credential when present; an explicit selection without a key uses Keenable's keyless public endpoint ([#17953](https://github.com/can1357/oh-my-pi/pull/17953) by [@KGKallasmaa](https://github.com/KGKallasmaa))
 - Bash commands now visualize execution incrementally in Raw or Python-like Pseudo, with variable values beside their latest setter and bounded replay history for foreground and background jobs; PTY and user-shell runs retain their plain command view.
@@ -133,6 +141,22 @@
 ### Fixed
 
 - Browser: a headless Chrome launched in-process by an SDK embedding or a `bun test` run now exits when that process is killed, instead of running on with its temporary profile on Linux and macOS ([#17908](https://github.com/can1357/oh-my-pi/pull/17908) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed the debug menu's "Clear artifact cache" deleting whole project directories, session transcripts included; it now removes only tool output files older than 30 days and keeps transcripts, subagent outputs, `/btw` conversations and drafts. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+- A failed `/tan` dispatch no longer leaves its clone's transcript behind or keeps the clone's ownership lease, under file and SQL session storage. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+- Under `session.storage: sql`, `omp stats`, `/stats`, `/trace`, `omp session pack/unpack/moved/lease`, RPC `get_session_lease` and `gc.autoCompress` refuse with a message naming the setting instead of acting on an empty file tree, and the `/usage` heatmap says why it is empty while quotas still show. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+- `omp cleanse`, `omp compress` and session-name completion now use the configured session storage instead of always reading the JSONL tree. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+- Under `session.storage: sql`, the all-projects resume picker lists the sessions the table holds; moving, forking and deleting a session include the unsent prompt draft and the subagent transcripts other omp processes wrote, deleting one included while the delete runs; a failed move keeps the subagent transcripts together; and a move never replaces or skips a session or subagent transcript at the destination, whether another omp process wrote it before or during the move. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+- Under `session.storage: sql`, a resumed session reads its subagents' transcripts through `history://`, `/seance` finds a source session the table holds instead of reporting it missing, and the resume picker renames a session the table holds instead of failing. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+- SQL session storage appends write only the appended entry instead of rewriting the whole session. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+- Long sessions in SQL session storage no longer fail to append as they approach PostgreSQL's 1 GB field limit. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+- SQL session storage on SQLite waits for another process's write instead of failing with `database is locked`. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+- Starting SQL session storage on PostgreSQL no longer waits for, and holds up, other processes' session writes. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a `session.sql.dsnFile` whose contents are not a connection URL surfacing the driver's parse error (which embeds the connection string) instead of a refusal that names only the variable and the path. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+- SQL and Redis session storage no longer warn `Session persistence failed: Session file changed before rewrite` when a new session writes again before its first save lands, as every `omp -p` run and every `/btw` branch did. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+- Fixed SQL session storage holding Bun's default ten database connections per omp process; configured PostgreSQL and MySQL stores now use at most two and release them after five seconds of inactivity. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 

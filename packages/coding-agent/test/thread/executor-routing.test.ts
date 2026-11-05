@@ -25,6 +25,7 @@ import type { AuthStorage } from "../../src/session/auth-storage";
 import { CostGate } from "../../src/session/cost-gate";
 import { convertToLlm } from "../../src/session/messages";
 import { SessionManager } from "../../src/session/session-manager";
+import { MemorySessionStorage } from "../../src/session/session-storage";
 import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../../src/task/executor";
 import { createPersistedSubagentReviverFactory } from "../../src/task/persisted-revive";
 import { type AgentDefinition, TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "../../src/task/types";
@@ -342,6 +343,40 @@ function rootSession(): AgentSession {
 
 describe("subagent runs routed into pooled workers", () => {
 	it(
+		"completes non-transferable storage runs inline while the file default runs in a worker",
+		async () => {
+			const storage = new MemorySessionStorage();
+			const inline = await runSubprocess(runOptions("InlineStorage", "ping", { sessionStorage: storage }));
+			expect(inline.error).toBeUndefined();
+			expect(inline.output).toBe("pong");
+			const local = AgentRegistry.global().get("InlineStorage")?.session;
+			expect(local).toBeInstanceOf(AgentSession);
+			const transcript = local?.sessionManager.getSessionFile();
+			if (!transcript) throw new Error("inline child has no transcript");
+			expect(await storage.readText(transcript)).toContain("pong");
+			const followUp = await runSubagentFollowUpTurn({
+				id: "InlineStorage",
+				agent: AGENT,
+				message: "again",
+				structured: false,
+			});
+			expect(followUp.output).toBe("pong");
+			await AgentLifecycleManager.global().park("InlineStorage");
+			const receipt = await IrcBus.global().send({ from: MAIN_AGENT_ID, to: "InlineStorage", body: "wake" });
+			expect(receipt.outcome).toBe("revived");
+			const woken = AgentRegistry.global().get("InlineStorage")?.session;
+			expect(woken).toBeInstanceOf(AgentSession);
+			await waitFor(() => !woken?.isStreaming && !woken?.ircWakesPending);
+
+			const file = await runSubprocess(runOptions("FileStorage", "ping"));
+			expect(file.error).toBeUndefined();
+			expect(file.output).toBe("pong");
+			expect(pool.forThread(mirrorOf(AgentRegistry.global().get("FileStorage")?.session).home)?.alive).toBe(true);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
 		"warms a worker with a throwaway session sealed off from main, then runs subagents there",
 		async () => {
 			const failures: string[] = [];
@@ -492,6 +527,8 @@ describe("subagent runs routed into pooled workers", () => {
 		async () => {
 			const running = runSubprocess(runOptions("Lost", HANG_TASK));
 			await server.hung();
+			// Receiving the HTTP request does not drain the worker's event queue on main.
+			await waitFor(() => lifecycleStatuses.some(frame => frame.id === "Lost" && frame.status === "started"));
 			const [worker] = pool.workers();
 			if (!worker) throw new Error("no pooled worker");
 			worker.terminate("worker crashed: boom");

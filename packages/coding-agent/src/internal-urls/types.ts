@@ -21,6 +21,7 @@ import type { Skill } from "../extensibility/skills";
 import type { AgentRegistryApi } from "../registry/agent-registry";
 import type { LocalProtocolOptions } from "./local-protocol";
 import type { SessionEntry } from "../session/session-entries";
+import type { SessionStorage } from "../session/session-storage";
 import type { ToolSession } from "../tools";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import type { ProcReadDetails, ProcWriteDetails } from "@oh-my-pi/pi-tui/tools/proc-render";
@@ -264,6 +265,13 @@ export interface ResolveContext {
 	 * file: those handlers keep their existing in-memory behavior.
 	 */
 	sessionFile?: string;
+	/**
+	 * Storage holding the calling session's transcript tree (its own and its
+	 * subagents' transcripts; `sessionTreeStorage`). Transcript readers
+	 * (`history://`, `agent://` progress, their persisted-roster refresh and
+	 * on-disk scans) read it; absent, they read the default session storage.
+	 */
+	storage?: SessionStorage;
 	/**
 	 * Calling session's stable session-manager id. Sessions that have no
 	 * session file yet (SDK, embedded, `-p`) are only addressable by this id,

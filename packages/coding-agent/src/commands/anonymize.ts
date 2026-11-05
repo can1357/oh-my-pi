@@ -5,6 +5,7 @@ import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { runAnonymizeCommand } from "../cli/anonymize-cli";
 import { reportCliUsageError } from "../cli/args";
 import { anonymizeHelp as commandHelp } from "../cli/command-help";
+import { installSessionStorageForCommand } from "../cli/session-arg";
 
 export default class Anonymize extends Command {
 	static description = commandHelp.description;
@@ -23,6 +24,7 @@ export default class Anonymize extends Command {
 
 	async run(): Promise<void> {
 		const { args, flags } = await this.parse(Anonymize);
+		if (!(await installSessionStorageForCommand())) return;
 		try {
 			await runAnonymizeCommand({ session: args.session, out: flags.out });
 		} catch (error) {

@@ -8,6 +8,7 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { Settings } from "../../../src/config/settings";
+import { defaultSessionStorage } from "../../../src/session/session-storage";
 import {
 	createTerminalLauncher,
 	terminalLaunchCapabilities,
@@ -64,6 +65,10 @@ function createContext(
 	};
 	const flush = vi.fn(async () => undefined);
 	const sessionManager = {
+		// `/fork` asks the session's storage whether the transcript is stored:
+		// a double without it answers "unavailable" and the placement
+		// assertions below stop exercising anything.
+		getStorage: () => defaultSessionStorage(),
 		getHeader: vi.fn(() => undefined),
 		getCwd: vi.fn(() => options.cwd ?? "/workspace/project"),
 		getSessionFile: vi.fn(() => sessionFile),

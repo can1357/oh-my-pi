@@ -2,10 +2,13 @@
  * View usage statistics dashboard.
  */
 
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { statsHelp as commandHelp } from "../cli/command-help";
+import { installSessionStorageForCommand } from "../cli/session-arg";
 import type { StatsCommandArgs } from "../cli/stats-cli";
 import * as statsCli from "../cli/stats-cli";
+import { SessionStorageUnsupportedError } from "../session/session-storage-config";
 import * as theme from "@oh-my-pi/pi-tui/theme";
 
 export default class Stats extends Command {
@@ -19,6 +22,9 @@ export default class Stats extends Command {
 
 	async run(): Promise<void> {
 		const { flags } = await this.parse(Stats);
+		// The stats store ingests session files: read the configured storage so
+		// `session.storage: sql` refuses instead of reporting no sessions.
+		if (!(await installSessionStorageForCommand())) return;
 
 		const cmd: StatsCommandArgs = {
 			port: flags.port,
@@ -28,6 +34,12 @@ export default class Stats extends Command {
 		};
 
 		await theme.initTheme();
-		await statsCli.runStatsCommand(cmd);
+		try {
+			await statsCli.runStatsCommand(cmd);
+		} catch (error) {
+			if (!(error instanceof SessionStorageUnsupportedError)) throw error;
+			process.stderr.write(`${chalk.red(`error: ${error.message}`)}\n`);
+			process.exitCode = 1;
+		}
 	}
 }

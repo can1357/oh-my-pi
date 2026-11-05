@@ -1585,7 +1585,8 @@ export class SessionAdvisors {
 
 			// Persist this advisor's turns to `<session>/__advisor[.<slug>].jsonl`
 			// (resolved lazily so it follows session switches) for stats attribution
-			// and Agent Hub observability, without registering it as a peer.
+			// and Agent Hub observability, without registering it as a peer. It goes
+			// to the session's own storage, beside the rest of its transcript tree.
 			const recorder = new AdvisorTranscriptRecorder(
 				() => this.#host.sessionManager.getSessionFile(),
 				() => this.#host.sessionManager.getCwd(),
@@ -1595,6 +1596,7 @@ export class SessionAdvisors {
 				this.#advisorCostSnapshotBarrier
 					? Promise.all([this.#advisorRecorderClosed, this.#advisorCostSnapshotBarrier])
 					: this.#advisorRecorderClosed,
+				this.#host.sessionManager.getStorage(),
 			);
 			const runtime = new AdvisorRuntime(advisorAgentFacade, {
 				snapshotMessages: () => this.#host.agent.state.messages,

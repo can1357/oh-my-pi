@@ -27,7 +27,7 @@ import { buildSessionContext } from "./session-context";
 import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./session-entries";
 import { migrateToCurrentVersion } from "./session-migrations";
 import { isExternalizableImagePosition, isPersistenceTruncatedString } from "./session-persistence";
-import { FileSessionStorage, type SessionStorage } from "./session-storage";
+import { defaultSessionStorage, FileSessionStorage, type SessionStorage } from "./session-storage";
 import { enotdir } from "./session-storage-errors";
 import {
 	parseTitleSlotFromContent,
@@ -119,6 +119,14 @@ export interface VisitEntriesFromFileStreamOptions {
 	 * callers derive the exact snapshot size without re-stating the file.
 	 */
 	onBytesConsumed?: (bytes: number) => void;
+	/**
+	 * Storage holding the transcript. Only a file backend streams; a
+	 * key-indexed one (`session.storage: sql`) has no stream to open, so its
+	 * record is read whole and fed through the same parser. Defaults to the
+	 * configured storage, which is what a resumed session's own transcripts
+	 * live in.
+	 */
+	storage?: SessionStorage;
 }
 
 /** Controls how a missing session file is handled. */
@@ -191,13 +199,22 @@ const SESSION_HEADER_FIRST_READ = 16 * 1024;
 const HEADER_INCOMPLETE = Symbol("header-incomplete");
 
 /**
- * The session id in `filePath`'s header, or `undefined` when there is no file
- * there or it does not start with a valid session header. Reads
- * {@link SESSION_HEADER_FIRST_READ} bytes, and up to
- * {@link SESSION_HEADER_READ_LIMIT} only when the first record runs past them.
+ * The session id in `filePath`'s header, or `undefined` when the storage holds
+ * nothing there or it does not start with a valid session header. A file
+ * backend reads {@link SESSION_HEADER_FIRST_READ} bytes, and up to
+ * {@link SESSION_HEADER_READ_LIMIT} only when the first record runs past them;
+ * a key-indexed backend reads the same prefix window through the storage.
  */
-export async function readSessionHeaderId(filePath: string): Promise<string | undefined> {
+export async function readSessionHeaderId(
+	filePath: string,
+	storage: SessionStorage = defaultSessionStorage(),
+): Promise<string | undefined> {
 	try {
+		if (!(storage instanceof FileSessionStorage)) {
+			const [prefix] = await storage.readTextSlices(filePath, SESSION_HEADER_READ_LIMIT, 0);
+			const id = sessionHeaderIdFromPrefix(new TextEncoder().encode(prefix), true);
+			return id === HEADER_INCOMPLETE ? undefined : id;
+		}
 		const id = await peekFile(filePath, SESSION_HEADER_FIRST_READ, prefix =>
 			sessionHeaderIdFromPrefix(prefix, prefix.length < SESSION_HEADER_FIRST_READ),
 		);
@@ -241,6 +258,22 @@ function sessionHeaderIdFromPrefix(prefix: Uint8Array, final: boolean): string |
 	if (end === -1) return final ? undefined : HEADER_INCOMPLETE;
 	const entry = tryParseJson<FileEntry>(text.slice(0, end)) ?? undefined;
 	return isValidSessionHeader(entry) ? entry.id : undefined;
+}
+
+/**
+ * The transcript's bytes, as chunks. A file backend streams them, so a
+ * multi-megabyte transcript is never held whole; a key-indexed backend
+ * (`session.storage: sql`) stores the transcript as one record with no stream
+ * to open, so its content arrives as a single chunk — the same read
+ * {@link loadSessionFile} already performs on those backends. A missing
+ * transcript raises ENOENT from either source, which the caller tolerates.
+ */
+async function* transcriptByteChunks(filePath: string, storage: SessionStorage): AsyncGenerator<Uint8Array> {
+	if (storage instanceof FileSessionStorage) {
+		yield* Bun.file(filePath).stream();
+		return;
+	}
+	yield new TextEncoder().encode(await storage.readText(filePath));
 }
 
 /** Parse session JSONL and visit each entry without retaining prior entries. */
@@ -397,7 +430,7 @@ export async function visitEntriesFromFileStream(
 		// delivering its bytes (macOS) or ignores the bound and streams the whole
 		// file (Windows).
 		let unread = maxBytes;
-		for await (const streamed of Bun.file(filePath).stream()) {
+		for await (const streamed of transcriptByteChunks(filePath, options.storage ?? defaultSessionStorage())) {
 			if (stopped) break;
 			const chunk = streamed.byteLength > unread ? streamed.subarray(0, unread) : streamed;
 			unread -= chunk.byteLength;
@@ -467,7 +500,7 @@ export async function visitEntriesFromFileStream(
 /** Exported for testing — the ≥8MiB streaming path (works on any file size). */
 export async function loadEntriesFromFileStream(
 	filePath: string,
-	options?: Pick<VisitEntriesFromFileStreamOptions, "throwIfMissing">,
+	options?: Pick<VisitEntriesFromFileStreamOptions, "throwIfMissing" | "storage">,
 ): Promise<SessionLoadResult> {
 	const entries: FileEntry[] = [];
 	let malformedRecords = 0;
@@ -485,6 +518,7 @@ export async function loadEntriesFromFileStream(
 			onBytesConsumed: bytes => {
 				bytesConsumed += bytes;
 			},
+			storage: options?.storage,
 		},
 	);
 	return {
@@ -510,7 +544,7 @@ async function loadWithKnownSize(
 	options?: { throwIfMissing?: boolean },
 ): Promise<{ loaded: SessionLoadResult; sourceSize: number }> {
 	if (shouldStreamEntries(storage, size)) {
-		const loaded = await loadEntriesFromFileStream(filePath, { throwIfMissing: options?.throwIfMissing });
+		const loaded = await loadEntriesFromFileStream(filePath, { throwIfMissing: options?.throwIfMissing, storage });
 		const sourceSize = loaded.sourceSize ?? 0;
 		return { loaded: loaded.invalidHeader ? { ...loaded, entries: [] } : loaded, sourceSize };
 	}
@@ -545,7 +579,7 @@ export async function hasFileAsPathComponent(filePath: string): Promise<boolean>
 /** Load and validate a session while retaining malformed-record diagnostics. */
 export async function loadSessionFile(
 	filePath: string,
-	storage: SessionStorage = new FileSessionStorage(),
+	storage: SessionStorage = defaultSessionStorage(),
 	options: LoadSessionOptions = {},
 ): Promise<SessionLoadResult> {
 	try {
@@ -585,7 +619,7 @@ export async function loadSessionFile(
  */
 export async function loadEntriesFromFile(
 	filePath: string,
-	storage: SessionStorage = new FileSessionStorage(),
+	storage: SessionStorage = defaultSessionStorage(),
 	options?: { throwIfMissing?: boolean },
 ): Promise<FileEntry[]> {
 	return (await loadSessionFile(filePath, storage, options)).entries;
@@ -598,18 +632,22 @@ export async function loadEntriesFromFile(
 export async function visitEntriesFromFile(
 	filePath: string,
 	visit: (entry: FileEntry) => void | boolean,
-	storage: SessionStorage = new FileSessionStorage(),
+	storage: SessionStorage = defaultSessionStorage(),
 ): Promise<void> {
 	const size = storage.statSync(filePath).size;
 	if (shouldStreamEntries(storage, size)) {
 		let sawFirstEntry = false;
-		await visitEntriesFromFileStream(filePath, entry => {
-			if (!sawFirstEntry) {
-				sawFirstEntry = true;
-				if (!isValidSessionHeader(entry)) return false;
-			}
-			return visit(entry);
-		});
+		await visitEntriesFromFileStream(
+			filePath,
+			entry => {
+				if (!sawFirstEntry) {
+					sawFirstEntry = true;
+					if (!isValidSessionHeader(entry)) return false;
+				}
+				return visit(entry);
+			},
+			{ storage },
+		);
 		return;
 	}
 
@@ -773,9 +811,13 @@ export function resolveBlobRefsInEntriesSync(entries: FileEntry[], blobStore: Bl
  * latest compaction) so failed/aborted tail turns stay visible, unlike the
  * provider-context builder which drops them. Does NOT create a writer or take
  * the session lock — safe to call against a file another session is writing.
+ * Reads through `storage`, the storage holding the transcript.
  */
-export async function loadSessionMessagesReadOnly(filePath: string): Promise<AgentMessage[]> {
-	const entries = await loadEntriesFromFile(filePath);
+export async function loadSessionMessagesReadOnly(
+	filePath: string,
+	storage: SessionStorage = defaultSessionStorage(),
+): Promise<AgentMessage[]> {
+	const entries = await loadEntriesFromFile(filePath, storage);
 	if (entries.length === 0) return [];
 	migrateToCurrentVersion(entries);
 	for (const entry of entries) repairTruncatedSnapcompactFrames(entry);

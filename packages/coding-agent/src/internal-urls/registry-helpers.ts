@@ -3,11 +3,9 @@
  * registered agent sessions.
  */
 
-import type { Dirent } from "node:fs";
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isEnoent } from "@oh-my-pi/pi-utils";
 import { AgentRegistry } from "../registry/agent-registry";
+import { defaultSessionStorage, type SessionStorage } from "../session/session-storage";
 
 const extraArtifactsDirs = new Set<string>();
 /** Deepest nesting `sessionFilesFromDisk` descends below an artifacts dir. */
@@ -69,56 +67,44 @@ export function artifactsDirsFromRegistry(options?: { preferredDir?: string }): 
  * `<artifactsDir>/<AgentId>.jsonl`, and its own children nest one level deeper
  * under `<artifactsDir>/<AgentId>/<AgentId>.<ChildId>.jsonl`. Advisor
  * transcripts (`__advisor*.jsonl`) are observability-only and excluded;
- * EPERM-rewrite backups (`.bak`) are skipped. When the same id appears in
- * multiple dirs, the first hit wins (registry dirs are scanned first; a
- * `preferredDir` from the caller root is scanned before them). Directory
- * listings are prefetched in parallel; the walk itself stays a sequential
- * depth-first pass so first-hit order is unaffected. In `onlyPreferred` mode,
- * only the supplied directory is scanned, with direct files before descendants.
- * `preserveDuplicates` retains every candidate path per id for ambiguity checks.
+ * EPERM-rewrite backups (`.bak`) are skipped. The walk goes through the
+ * session storage (`options.storage`, else the configured one), which is where
+ * the transcripts are: under a key-indexed backend (`session.storage: sql`) a
+ * resumed session's subagent transcripts are rows, and a directory walk of
+ * the artifacts tree finds nothing. When the same id appears in multiple dirs,
+ * the first hit wins (registry dirs are scanned first; a `preferredDir` from
+ * the caller root is scanned before them). Within one directory both modes
+ * keep the orders they had when this walked the filesystem directly:
+ * `onlyPreferred` records direct files before it descends, so a direct
+ * transcript beats a nested same-id copy, while a full walk takes the
+ * directory's entries in their own order and descends as it meets them, so
+ * whichever of `Worker.jsonl` and `Z/Worker.jsonl` the directory lists first
+ * wins. That order is what `listEntriesSync` exists to carry across the
+ * storage abstraction. `preserveDuplicates` retains every candidate path per
+ * id for ambiguity checks.
  */
 export function sessionFilesFromDisk(
 	preferredDir: string | undefined,
-	options: { onlyPreferred?: boolean; preserveDuplicates: true },
+	options: { onlyPreferred?: boolean; preserveDuplicates: true; storage?: SessionStorage },
 ): Promise<Map<string, string[]>>;
 export function sessionFilesFromDisk(
 	preferredDir?: string,
-	options?: { onlyPreferred?: boolean; preserveDuplicates?: false },
+	options?: { onlyPreferred?: boolean; preserveDuplicates?: false; storage?: SessionStorage },
 ): Promise<Map<string, string>>;
 export async function sessionFilesFromDisk(
 	preferredDir?: string,
-	options?: { onlyPreferred?: boolean; preserveDuplicates?: boolean },
+	options?: { onlyPreferred?: boolean; preserveDuplicates?: boolean; storage?: SessionStorage },
 ): Promise<Map<string, string> | Map<string, string[]>> {
+	const storage = options?.storage ?? defaultSessionStorage();
 	const dirs = options?.onlyPreferred ? [] : artifactsDirsFromRegistry();
 	if (preferredDir) dirs.unshift(preferredDir);
-	const listings = new Map<string, Promise<Dirent[] | null>>();
-	const list = (dir: string, depth: number): Promise<Dirent[] | null> => {
-		let listing = listings.get(dir);
-		if (listing) return listing;
-		listing = readDirEntries(dir);
-		listings.set(dir, listing);
-		// Fan out to subdirectories as soon as this listing lands. Rejections
-		// are surfaced (in walk order) by the awaiting scan below.
-		listing.then(
-			entries => {
-				if (!entries || depth >= MAX_SCAN_DEPTH) return;
-				for (const entry of entries) {
-					if (entry.isDirectory()) list(path.join(dir, entry.name), depth + 1);
-				}
-			},
-			() => {},
-		);
-		return listing;
-	};
-	for (const dir of dirs) list(dir, 0);
 
 	const found = options?.preserveDuplicates ? new Map<string, string[]>() : new Map<string, string>();
 	const seenDirs = new Set<string>();
-	const recordFile = (dir: string, entry: Dirent): void => {
-		if (!entry.isFile() || !entry.name.endsWith(".jsonl")) return;
-		if (entry.name.startsWith("__advisor")) return;
-		const id = entry.name.slice(0, -".jsonl".length);
-		const file = path.join(dir, entry.name);
+	const recordFile = (file: string): void => {
+		const name = path.basename(file);
+		if (!name.endsWith(".jsonl") || name.startsWith("__advisor")) return;
+		const id = name.slice(0, -".jsonl".length);
 		if (options?.preserveDuplicates) {
 			const files = found as Map<string, string[]>;
 			const candidates = files.get(id);
@@ -129,52 +115,63 @@ export async function sessionFilesFromDisk(
 			if (!files.has(id)) files.set(id, file);
 		}
 	};
-	const scan = async (dir: string, depth: number): Promise<void> => {
+	const scan = (dir: string, depth: number): void => {
 		if (depth > MAX_SCAN_DEPTH || seenDirs.has(dir)) return;
 		seenDirs.add(dir);
-		const entries = await list(dir, depth);
-		if (!entries) return;
+		const entries = storage.listEntriesSync(dir);
 		if (options?.onlyPreferred) {
 			// Prefer a direct transcript over a nested same-id copy.
-			for (const entry of entries) recordFile(dir, entry);
 			for (const entry of entries) {
-				if (entry.isDirectory()) await scan(path.join(dir, entry.name), depth + 1);
+				if (entry.isFile) recordFile(path.join(dir, entry.name));
+			}
+			for (const entry of entries) {
+				if (entry.isDirectory) scan(path.join(dir, entry.name), depth + 1);
 			}
 			return;
 		}
 		for (const entry of entries) {
-			if (entry.isDirectory()) {
-				await scan(path.join(dir, entry.name), depth + 1);
-				continue;
-			}
-			recordFile(dir, entry);
+			if (entry.isDirectory) scan(path.join(dir, entry.name), depth + 1);
+			// Regular files only: a symlink, a FIFO or a device node named
+			// `*.jsonl` is not a transcript, and handing one to the reader can
+			// block forever.
+			else if (entry.isFile) recordFile(path.join(dir, entry.name));
 		}
 	};
-	for (const dir of dirs) await scan(dir, 0);
+	for (const dir of dirs) scan(dir, 0);
 	return found;
-}
-
-/** Directory entries of `dir`, or null when it is missing or not a directory. */
-async function readDirEntries(dir: string): Promise<Dirent[] | null> {
-	try {
-		return await fs.readdir(dir, { withFileTypes: true });
-	} catch (err) {
-		if (isEnoent(err) || (err as NodeJS.ErrnoException).code === "ENOTDIR") return null;
-		throw err;
-	}
 }
 
 /**
  * Availability half of the `history://` resolution semantics: true when a
  * transcript for `agentId` can be served from a registered ref's live session
- * or retained session file, or from an on-disk `.jsonl` under a known
- * artifacts dir. Hint surfaces use this so they only advertise
- * `history://<agentId>` links that `HistoryProtocolHandler` can actually
- * resolve. A retained sessionFile path is verified on disk before it counts,
- * and probing never throws: a stale path or unreadable artifacts subtree
- * reads as unavailable instead of disturbing the caller's delivery path.
+ * or retained session file, or from a stored `.jsonl` under a known artifacts
+ * dir. Hint surfaces use this so they only advertise `history://<agentId>`
+ * links that `HistoryProtocolHandler` can actually resolve. `storage` is the
+ * caller's session tree storage, the one `history://` reads for the same
+ * caller ({@link ResolveContext.storage}); omitted, the default session
+ * storage. A retained sessionFile path is verified against that storage
+ * before it counts, and probing never throws: a stale path or unreadable
+ * artifacts subtree reads as unavailable instead of disturbing the caller's
+ * delivery path.
  */
-export async function hasResolvableTranscript(agentId: string): Promise<boolean> {
+/**
+ * Whether `file` is a regular file in `storage`; false for a directory, a
+ * missing path, or any fault. Follows symlinks, as the filesystem `stat` the
+ * check replaced did: a retained transcript reached through a symlink is
+ * readable and must still be advertised.
+ */
+function isStoredFile(file: string, storage: SessionStorage): boolean {
+	try {
+		return storage.statSync(file).isFile;
+	} catch {
+		return false;
+	}
+}
+
+export async function hasResolvableTranscript(
+	agentId: string,
+	storage: SessionStorage = defaultSessionStorage(),
+): Promise<boolean> {
 	try {
 		const registry = AgentRegistry.global();
 		const lower = agentId.toLowerCase();
@@ -184,24 +181,17 @@ export async function hasResolvableTranscript(agentId: string): Promise<boolean>
 		if (ref?.session) return true;
 		// A running worker resolves to a "no transcript yet" note, not an error.
 		if (ref?.status === "running") return true;
-		if (ref?.sessionFile && (await isReadableFile(ref.sessionFile))) return true;
-		const files = await sessionFilesFromDisk();
+		// A regular file, not merely something at that path: a retained path that
+		// is now a directory resolves to no transcript, and promising one makes
+		// a hint surface advertise a `history://` link that cannot be served.
+		if (ref?.sessionFile && isStoredFile(ref.sessionFile, storage)) return true;
+		const files = await sessionFilesFromDisk(undefined, { storage });
 		for (const id of files.keys()) {
 			if (id.toLowerCase() === lower) return true;
 		}
 	} catch {
-		// Availability probing is advisory; any filesystem failure means the
+		// Availability probing is advisory; any storage failure means the
 		// transcript cannot be promised, never that delivery should fail.
 	}
 	return false;
-}
-
-/** True when `file` exists and is a regular file; never throws. */
-async function isReadableFile(file: string): Promise<boolean> {
-	try {
-		const stat = await fs.stat(file);
-		return stat.isFile();
-	} catch {
-		return false;
-	}
 }

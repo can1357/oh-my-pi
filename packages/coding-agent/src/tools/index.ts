@@ -348,11 +348,14 @@ export interface ToolSession {
 	/** Get session file */
 	getSessionFile: () => string | null;
 	/**
-	 * Owning journal; full SDK managers also supply registered identity and the
-	 * cost ledger (`appendModelUsage`) without changing advisor-local IDs.
+	 * Owning journal; full SDK managers also supply registered identity, the
+	 * cost ledger (`appendModelUsage`) without changing advisor-local IDs, and
+	 * the storage its subagents' transcripts are written to (`getStorage`).
 	 */
 	sessionManager?: Pick<SessionManager, "appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries"> &
-		Partial<Pick<SessionManager, "getSessionId" | "getLeafId" | "appendModelUsage" | "getArtifactContent">>;
+		Partial<
+			Pick<SessionManager, "getSessionId" | "getLeafId" | "appendModelUsage" | "getArtifactContent" | "getStorage">
+		>;
 	/** Get eval kernel owner ID for session-scoped retained-kernel cleanup. */
 	getEvalKernelOwnerId?: () => string | null;
 	/** Current enabled eval prelude definitions. */

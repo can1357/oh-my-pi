@@ -126,7 +126,8 @@ export function toWorkerCustomTool<TParams extends TSchema, TDetails>(
  * `perCallModelGrants` crosses intact (its `settings` becomes the worker's live mirror).
  */
 export function bridgeIntegrationOptions(options: ExecutorOptions): ExecutorOptions {
-	const bridged: ExecutorOptions = { ...options };
+	// Placement admitted the storage's worker-local file default; never send the main-thread instance.
+	const bridged: ExecutorOptions = { ...options, sessionStorage: undefined };
 	const extensionRoots = options.extensionRoots;
 	if (extensionRoots) bridged.extensionRoots = rpcSync(() => extensionRoots());
 	const seance = options.preparedSession;

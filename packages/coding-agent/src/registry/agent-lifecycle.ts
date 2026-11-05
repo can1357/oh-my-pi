@@ -23,6 +23,7 @@
  */
 
 import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
 import { trackLateCleanup } from "../utils/late-cleanup";
@@ -41,8 +42,12 @@ export type AgentReviver = (expected: AgentRef) => Promise<AgentSessionHandle>;
 const AGENT_RELEASE_GRACE_MS = 5000;
 
 async function persistAgentTombstone(sessionFile: string): Promise<void> {
+	const tombstone = getAgentTombstonePath(sessionFile);
 	try {
-		await fs.writeFile(getAgentTombstonePath(sessionFile), "", { encoding: "utf8", flag: "wx", mode: 0o600 });
+		// The sidecar is a local file in every storage mode. Under `session.storage:
+		// sql` the transcript is a row, so the directory beside it may not exist yet.
+		await fs.mkdir(path.dirname(tombstone), { recursive: true });
+		await fs.writeFile(tombstone, "", { encoding: "utf8", flag: "wx", mode: 0o600 });
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
 	}

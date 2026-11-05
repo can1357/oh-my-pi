@@ -6,10 +6,11 @@
  */
 import * as fsSync from "node:fs";
 import * as os from "node:os";
+import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
-import { ensureSqliteLockShim, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
+import { ensureSqliteLockShim, isEnoent, isEnotdir, toError } from "@oh-my-pi/pi-utils";
 import {
 	APP_NAME,
 	directoryIsMissing,
@@ -120,16 +121,33 @@ import {
 } from "./session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
 import {
+	findMostRecentNonEmptySession,
 	findSessionContinuation,
 	type PickerListing,
 	readSessionInfo,
-	resolveResumeTarget,
 	resolveResumableSession,
+	resolveResumeTarget,
 	type SessionContinuation,
 	type SessionInfo,
 } from "./session/session-listing";
-import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
-import { forkIfMovedAway } from "./session/session-transfer";
+import {
+	ForkSourceNotFoundError,
+	resolveBreadcrumbToInteractiveRoot,
+	SessionManager,
+	SessionMoveRefusedError,
+} from "./session/session-manager";
+import type { FileEntry } from "./session/session-entries";
+import { computeDefaultSessionDir, readTerminalBreadcrumbEntry } from "./session/session-paths";
+import { FileSessionStorage, setDefaultSessionStorage } from "./session/session-storage";
+import { resolveSessionStorage, SessionStorageConfigError } from "./session/session-storage-config";
+import {
+	commitSessionStorageFallback,
+	commitSessionStorageFallbackSync,
+	pendingSessionStorageFallback,
+	UNRESOLVED_SESSION,
+} from "./session/session-storage-fallback";
+import { forkIfMovedAway, lastSessionTransfer } from "./session/session-transfer";
+import { pathIsWithin } from "./security/preflight";
 import { shouldShowStartupSplash } from "./startup-splash";
 import {
 	discoverSystemPromptOverride,
@@ -218,15 +236,19 @@ type SessionPicker = (
 
 /** Resume/import-only graph boundary; ordinary launches never construct a picker. */
 async function loadSessionPicker(init?: { foreign?: boolean }): Promise<SessionPicker> {
-	const [{ selectSession }, { HistoryStorage }, { loadPinnedSessionIds, setSessionPinned }, { FileSessionStorage }] =
-		await Promise.all([
-			import("@oh-my-pi/pi-tui/apps/session-picker"),
-			import("./session/history-storage"),
-			import("./session/session-pins"),
-			import("./session/session-storage"),
-		]);
+	const [
+		{ selectSession },
+		{ HistoryStorage },
+		{ loadPinnedSessionIds, setSessionPinned },
+		{ defaultSessionStorage },
+	] = await Promise.all([
+		import("@oh-my-pi/pi-tui/apps/session-picker"),
+		import("./session/history-storage"),
+		import("./session/session-pins"),
+		import("./session/session-storage"),
+	]);
 	return (sessions, options) => {
-		const storage = new FileSessionStorage();
+		const storage = defaultSessionStorage();
 		// The picker runs before interactive mode loads the user's keymap, and its pin keys are remappable.
 		KeybindingsManager.create();
 		return selectSession(sessions, options, {
@@ -308,6 +330,97 @@ function rejectNoUiWithoutRpc(args: Pick<Args, "noUi" | "mode">): void {
 	if (!args.noUi || args.mode === "rpc" || args.mode === "rpc-ui") return;
 	process.stderr.write(`${chalk.red("Error: --no-ui requires --mode rpc or --mode rpc-ui")}\n`);
 	process.exit(1);
+}
+
+/**
+ * Whether continuing `file` would continue it, rather than open a fork. Every
+ * resume route — `--resume`, `--continue`, `--restore`, auto-resume, the
+ * picker — passes through `forkIfMovedAway`, which forks when the transcript's
+ * last transfer marker is `departed`; a declined move does the same. That one
+ * marker is therefore the whole class, and reading it here is not a
+ * per-caller patch. A transcript that cannot be read answers `false`.
+ */
+async function continuableFileSession(file: string, storage: FileSessionStorage): Promise<boolean> {
+	try {
+		const entries = Bun.JSONL.parse(await storage.readText(file)) as FileEntry[];
+		return lastSessionTransfer(entries)?.kind !== "departed";
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Whether this launch continues a session whose transcript is already a file
+ * on disk. Asked only when `session.storage: sql` is
+ * selected and the database cannot be used, to decide whether the launch may
+ * fall back to file storage (see `session/session-storage-fallback.ts`). It
+ * looks only at the file tree — the store that would be fallen back to — and
+ * answers `false` for anything it cannot resolve there, so a doubtful launch
+ * refuses rather than forks. It answers whether, never which: the launch can
+ * land on a different session than any prediction, so the ledger line is
+ * written later, naming the session actually opened.
+ */
+export async function resumableFileSessionId(
+	parsed: Args,
+	rawArgs: readonly string[] | undefined,
+	cwd: string,
+): Promise<boolean> {
+	// `--fork` makes the launch create a new session whatever the resume flags
+	// say (see `normalizeContinueSessionArgs` and the fork branch below), and a
+	// new session never falls back. A foreign import is a new session too.
+	if (parsed.noSession || parsed.fork !== undefined || isForeignSessionImport(parsed)) return false;
+	const storage = new FileSessionStorage();
+	try {
+		// `--continue <id>` is still spelled as `continue` plus a positional at
+		// this point; the launch normalizes it into `resume` later. Decide from
+		// the normalized form on a copy, or an unresolvable id would read as
+		// "continue this project's newest session" and fall back naming a
+		// session the user never asked for.
+		const args: Args = { ...parsed, messages: [...parsed.messages], fileArgs: [...parsed.fileArgs] };
+		normalizeContinueSessionArgs(args, rawArgs);
+		const selector = typeof args.restore === "string" ? args.restore : args.resume;
+		if (typeof selector === "string") {
+			// `resolveResumeTarget`, not `resolveResumableSession`: the launch
+			// follows a continuation to a newer file, and that newer file is the
+			// one whose transfer marker decides whether resuming forks.
+			const target = await resolveResumeTarget(selector, cwd, args.sessionDir);
+			const file = target?.session.path;
+			return file !== undefined && (await continuableFileSession(file, storage));
+		}
+		// Bare `--continue` and the interactive auto-resume take this project's
+		// most recent session. `--resume` with no value opens the picker, whose
+		// choice is not known yet, so it refuses rather than record a fallback
+		// against a session the user may not pick.
+		if (!args.continue) return false;
+		// Ask the question `continueRecent` will answer, with its own helpers,
+		// not an easier one: "is there any continuable transcript" accepts a
+		// project whose only transcript is a header-only empty, or whose newest
+		// is departed, and the launch then starts a new session or forks.
+		const breadcrumb = await readTerminalBreadcrumbEntry();
+		// A fresh, never-materialized boundary makes `continueRecent` start a
+		// new session whatever else the directory holds.
+		if (breadcrumb?.fresh && !breadcrumb.exists) return false;
+		const dir = args.sessionDir ?? computeDefaultSessionDir(cwd, storage);
+		let chosen: string | null = null;
+		if (breadcrumb?.exists) {
+			// The breadcrumb's own three steps, from `continueRecent`: a crumb
+			// pointing at a subagent transcript resolves up to the interactive
+			// session, one outside an explicit `--session-dir` is out of scope
+			// and ignored, and one recorded in another cwd reaches a re-rooting
+			// branch that may move the session — not predictable from here, so
+			// that launch refuses rather than guesses.
+			const root = resolveBreadcrumbToInteractiveRoot(breadcrumb.sessionFile, storage);
+			if (path.resolve(breadcrumb.cwd) !== path.resolve(cwd)) return false;
+			if (!args.sessionDir || pathIsWithin(root, path.resolve(dir))) chosen = root;
+			else chosen = await findMostRecentNonEmptySession(dir, storage);
+		} else {
+			chosen = await findMostRecentNonEmptySession(dir, storage);
+		}
+		return chosen !== null && (await continuableFileSession(chosen, storage));
+	} catch (err) {
+		logger.warn("Could not tell whether this launch resumes a session file", { error: toError(err).message });
+		return false;
+	}
 }
 
 /** Fail an interactive launch whose stdin is not a terminal: the TUI cannot run there. */
@@ -1855,6 +1968,17 @@ export async function runRootCommand(
 			}
 			let result: string;
 			try {
+				// The session to export is read through the configured storage (a table row
+				// under `session.storage: sql`); the install below runs only after this branch.
+				// A refusal exits through the catch with the same message that install prints.
+				setDefaultSessionStorage(
+					await resolveSessionStorage({
+						settings:
+							deps.settings ??
+							(await Settings.loadReadOnly({ cwd: getProjectDir(), configFiles: parsedArgs.config })),
+						env: process.env,
+					}),
+				);
 				const outputPath = parsedArgs.messages.length > 0 ? parsedArgs.messages[0] : undefined;
 				const { exportFromFile } = await import("./export/html");
 				result = await exportFromFile(parsedArgs.export, outputPath);
@@ -1972,6 +2096,50 @@ export async function runRootCommand(
 		const settingsInstance = await settingsPromise;
 		// Process-lifetime: broker/account-policy edits reconfigure the shared credential store.
 		createAuthStorageSettingsSync(settingsInstance, authStorage);
+		// Install the configured session storage before anything lists or opens a
+		// session — every session listing and SessionManager below reads through
+		// this default. A refusal names only the variable or setting and the path;
+		// it never echoes the connection string. The one exception is a launch
+		// that resumes a session whose transcript is already a file on disk: it
+		// continues on the file store, loudly and with a ledger line, because it
+		// tears nothing (see `session/session-storage-fallback.ts`).
+		try {
+			setDefaultSessionStorage(
+				await logger.time("resolveSessionStorage", resolveSessionStorage, {
+					settings: settingsInstance,
+					env: process.env,
+					resumableFileSession: () => resumableFileSessionId(parsedArgs, rawArgs, getProjectDir()),
+				}),
+			);
+		} catch (error) {
+			if (!(error instanceof SessionStorageConfigError)) throw error;
+			process.stderr.write(`${chalk.red(`Error: ${error.message}`)}\n`);
+			process.exit(1);
+		}
+		// A fallback is a degraded launch, so say so where the user is looking,
+		// not only in the log: the ledger is for the fleet, this line is for the
+		// person whose session just stopped being a database row.
+		const fallback = pendingSessionStorageFallback();
+		if (fallback) {
+			writeStartupWarning(
+				`session.storage is sql, but the session database is unusable (${fallback.reason}: ${fallback.dsnPath}); ` +
+					`continuing this resumed session on file storage`,
+			);
+			// A launch that dies before it opens a session must still be counted:
+			// an uncounted fallback is the silent degradation the ledger exists
+			// to catch. Each of these is a no-op once the real commit has run.
+			// A default signal death runs no `exit` handler, so the signals get
+			// their own synchronous append rather than an awaited one.
+			process.once("exit", () => {
+				commitSessionStorageFallbackSync(UNRESOLVED_SESSION);
+			});
+			for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
+				process.once(signal, () => {
+					commitSessionStorageFallbackSync(UNRESOLVED_SESSION);
+					process.kill(process.pid, signal);
+				});
+			}
+		}
 		if (parsedArgs.approvalMode) {
 			// Runtime override (not persisted): every `tools.approvalMode` read downstream
 			// sees this value. The wrapper still honours --auto-approve / --yolo on top of it.
@@ -2324,6 +2492,15 @@ export async function runRootCommand(
 			const notice = formatSessionContinuationNotice(continuation);
 			if (isInteractive) notifs.push({ kind: "warn", message: notice });
 			else process.stderr.write(`${chalk.yellow(notice)}\n`);
+		}
+		// The fallback's one ledger line, now that the launch knows which session
+		// it opened. A resolve-time line would name whichever session a probe
+		// predicted, and the launch can land on another: a continuation
+		// redirect, `continueRecent`'s own choice, or another process holding
+		// the lease. Written once; a launch that never opens a session still
+		// records one through the exit guard below.
+		if (pendingSessionStorageFallback()) {
+			await commitSessionStorageFallback(sessionManager?.getSessionId() ?? UNRESOLVED_SESSION);
 		}
 		if (sessionManager && (parsedArgs.continue || parsedArgs.resume || parsedArgs.fork || foreignSource)) {
 			const pendingToolWarning = describePendingToolCalls(sessionManager.getBranch());
@@ -2683,6 +2860,7 @@ export async function runRootCommand(
 					enableLsp: sessionOptions.enableLsp ?? true,
 					eventBus,
 					subagentEventBus,
+					storage: session.sessionManager.getStorage(),
 				}),
 				() => Math.trunc(Number(cfgTaskAgentIdleTtlMs.get(settingsInstance)) || 0),
 			);
@@ -2881,7 +3059,14 @@ export async function runRootCommand(
 						startDeferredStartupWork,
 						startupLease,
 						initialArgs.goal,
-						parsedArgs.restore ? () => restoreSession(session, { eventBus, subagentEventBus }) : undefined,
+						parsedArgs.restore
+							? () =>
+									restoreSession(session, {
+										eventBus,
+										subagentEventBus,
+										storage: session.sessionManager.getStorage(),
+									})
+							: undefined,
 						refreshScopedModelsAfterLogin,
 					);
 				} finally {

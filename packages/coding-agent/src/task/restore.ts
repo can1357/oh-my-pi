@@ -20,6 +20,7 @@ import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
 import { hasRestorableTurn } from "../session/exit-diagnostics";
 import { extractSessionInit } from "../session/session-manager";
+import type { SessionStorage } from "../session/session-storage";
 import { collectSubSessions } from "../session/sub-sessions";
 import type { EventBus } from "../utils/event-bus";
 import { runSubagentFollowUpTurn, softRequestBudgetFor } from "./executor";
@@ -31,6 +32,8 @@ import { cfgTaskMaxRuntimeMs } from "./settings";
 export interface RestoreOptions {
 	eventBus?: EventBus;
 	subagentEventBus?: EventBus;
+	/** Storage the session's subagent transcripts live in (its manager's); default: the default session storage. */
+	storage?: SessionStorage;
 }
 
 /** What `omp --restore` went on with. */
@@ -63,9 +66,10 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 	const manager = session.asyncJobManager;
 	if (!sessionFile || !manager) return [];
 	const registry = AgentRegistry.global();
-	await ensurePersistedRoster(registry, sessionFile);
+	await ensurePersistedRoster(registry, sessionFile, options.storage);
 	const subSessions = await collectSubSessions(sessionFile, {
 		onUnreadable: key => logger.warn("Subagent transcript unreadable; not restored", { key }),
+		storage: options.storage,
 	});
 	// Parents first: a child's result is delivered to its parent's session.
 	const keys = Object.keys(subSessions).sort((a, b) => a.split("/").length - b.split("/").length);

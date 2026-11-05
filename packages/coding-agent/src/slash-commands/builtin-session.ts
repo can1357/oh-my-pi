@@ -3,6 +3,7 @@ import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
+import { assertSessionsOnDisk, STATS_DISK_ONLY_REASON } from "../session/session-storage-config";
 import {
 	getChangelogPath,
 	parseChangelog,
@@ -191,6 +192,8 @@ function launchSessionStatsDashboard(
 	args: StatsDashboardArgs,
 	owner: Pick<SlashCommandRuntime, "settings" | "session" | "sessionManager">,
 ): Promise<StatsDashboardLaunchResult> {
+	// Throws inside the callers' try: they report the refusal as the launch failure.
+	assertSessionsOnDisk(owner.sessionManager.getStorage(), "/stats", STATS_DISK_ONLY_REASON);
 	const judge = resolveJudge({
 		settings: owner.settings,
 		registry: owner.session.modelRegistry,

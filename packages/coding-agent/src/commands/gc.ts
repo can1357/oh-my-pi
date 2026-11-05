@@ -4,7 +4,8 @@
 
 import { Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { gcHelp as commandHelp } from "../cli/command-help";
-import { collectGcErrors, type GcCommandArgs, runGcCommand } from "../cli/gc-cli";
+import { collectGcErrors, type GcCommandArgs, type GcResult, runGcCommand } from "../cli/gc-cli";
+import { SessionStorageConfigError } from "../session/session-storage-config";
 
 export default class Gc extends Command {
 	static description = commandHelp.description;
@@ -51,7 +52,19 @@ export default class Gc extends Command {
 				compressAfterDays: flags["compress-after-days"],
 			},
 		};
-		const result = await runGcCommand(cmd);
+		// A store that cannot be opened is the user's configuration, not a
+		// crash: every sibling command prints one line and exits 1, and this
+		// also runs unattended from auto-maintenance, where a stack trace is
+		// noise.
+		let result: GcResult;
+		try {
+			result = await runGcCommand(cmd);
+		} catch (err) {
+			if (!(err instanceof SessionStorageConfigError)) throw err;
+			process.stderr.write(`Error: ${err.message}\n`);
+			process.exitCode = 1;
+			return;
+		}
 		const errors = collectGcErrors(result);
 		if (errors.length > 0) {
 			process.stderr.write(

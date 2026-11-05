@@ -11,6 +11,7 @@
 import { type GeneratedProvider, getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import { Command } from "@oh-my-pi/pi-utils/cli";
 import { completeHelp as commandHelp } from "../cli/command-help";
+import { installSessionStorageForCommand } from "../cli/session-arg";
 import { SessionManager } from "../session/session-manager";
 
 export default class Complete extends Command {
@@ -24,6 +25,7 @@ export default class Complete extends Command {
 		if (kind === "models") {
 			completeModels(prefix);
 		} else if (kind === "sessions") {
+			if (!(await installSessionStorageForCommand())) return;
 			await completeSessions(prefix);
 		}
 	}

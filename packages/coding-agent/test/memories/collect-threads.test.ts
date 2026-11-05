@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { collectThreads } from "@oh-my-pi/pi-coding-agent/memories";
 
 function makeFakeSession(sessionDir: string): AgentSession {
@@ -11,6 +12,7 @@ function makeFakeSession(sessionDir: string): AgentSession {
 			getSessionDir: () => sessionDir,
 			getCwd: () => sessionDir,
 			getSessionId: () => "current-active-session",
+			getStorage: () => new FileSessionStorage(),
 		},
 	} as unknown as AgentSession;
 }

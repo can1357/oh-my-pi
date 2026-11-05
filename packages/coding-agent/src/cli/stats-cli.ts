@@ -9,6 +9,8 @@ import { truncateToWidth } from "@oh-my-pi/pi-tui/utils";
 import { postmortem } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { openStandaloneJudge } from "../judgment/standalone";
+import { defaultSessionStorage } from "../session/session-storage";
+import { assertSessionsOnDisk, STATS_DISK_ONLY_REASON } from "../session/session-storage-config";
 import { openTernPage } from "../tools/browser/tern/user-page";
 import { openPath } from "../utils/open";
 
@@ -70,6 +72,8 @@ export interface StatsCommandArgs {
 // =============================================================================
 
 export async function runStatsCommand(cmd: StatsCommandArgs): Promise<void> {
+	assertSessionsOnDisk(defaultSessionStorage(), "omp stats", STATS_DISK_ONLY_REASON);
+
 	// Lazy import to avoid loading stats module when not needed
 	const {
 		closeDb,

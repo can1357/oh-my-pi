@@ -31,7 +31,13 @@ import { BLOB_HASH_RE, BLOB_STAGING_RE, blobStagingPath } from "../session/blob-
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { parseTerminalBreadcrumb } from "../session/session-paths";
 import { readSessionHeaderId } from "../session/session-loader";
-import { FileSessionStorage, SESSION_STAGING_RE, tryAcquireSessionLease } from "../session/session-storage";
+import {
+	FileSessionStorage,
+	SESSION_STAGING_RE,
+	type SessionStorage,
+	tryAcquireSessionLease,
+} from "../session/session-storage";
+import { resolveSessionStorage } from "../session/session-storage-config";
 import {
 	type CompressCandidate,
 	type CompressMethod,
@@ -77,6 +83,13 @@ const HEADER_SNIFF_BYTES = 4096;
  * write grace.
  */
 const STALE_POINTER_GRACE_MS = DAY_MS;
+/**
+ * The session files on disk. The archive and compress phases run only while
+ * the configured storage keeps sessions there, and collab replicas are always
+ * files (a guest refuses to join under `session.storage: sql`), so those
+ * phases read them through this, never through the process default.
+ */
+const LOCAL_SESSION_FILES = new FileSessionStorage();
 
 export interface GcCommandFlags {
 	apply?: boolean;
@@ -185,6 +198,14 @@ export interface CompressGcResult {
 	errors: string[];
 }
 
+/** A phase this run did not perform because it works only on session files on disk. */
+export interface GcRefusal {
+	phase: "archive" | "compress";
+	/** The phase was named on the command line, so its refusal fails the run. */
+	requested: boolean;
+	reason: string;
+}
+
 export interface GcResult {
 	agentDir: string;
 	apply: boolean;
@@ -193,6 +214,8 @@ export interface GcResult {
 	archive?: ArchiveGcResult;
 	compress?: CompressGcResult;
 	wal?: WalGcResult;
+	/** Phases skipped because the configured session storage does not keep sessions on disk. */
+	refused?: GcRefusal[];
 	lockPath: string;
 }
 
@@ -336,6 +359,9 @@ export function collectGcErrors(result: GcResult): string[] {
 		...(result.blobs?.errors ?? []).map(error => `blobs: ${error}`),
 		...(result.archive?.errors ?? []).map(error => `archive: ${error}`),
 		...(result.compress?.errors ?? []).map(error => `compress: ${error}`),
+		// A phase the settings enabled is reported and skipped; one the command
+		// line asked for cannot be done, so the run fails.
+		...(result.refused ?? []).filter(refusal => refusal.requested).map(r => `${r.phase}: ${r.reason}`),
 	];
 }
 
@@ -442,31 +468,62 @@ async function collectBackupJsonlFiles(root: string): Promise<string[]> {
 	}
 }
 
-async function collectReferencedBlobHashes(sessionRoots: string[], exactSessionFiles: string[]): Promise<Set<string>> {
-	const files = new Map<string, string>();
-	const decoder = new TextDecoder();
+function collectBlobHashesFromText(text: string, hashes: Set<string>): void {
+	for (const match of text.matchAll(BLOB_REF_RE)) {
+		const hash = match[1]?.toLowerCase();
+		if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
+	}
+}
+
+async function collectReferencedBlobHashes(
+	sessionRoots: string[],
+	exactSessionFiles: string[],
+	storage: SessionStorage,
+): Promise<Set<string>> {
+	const fsFiles = new Map<string, string>();
 	for (const root of sessionRoots) {
 		for (const file of [
 			...(await collectJsonlFiles(root)),
 			...(await collectCompressedJsonlFiles(root)),
 			...(await collectBackupJsonlFiles(root)),
 		]) {
-			files.set(normalizePathForComparison(file), file);
+			fsFiles.set(normalizePathForComparison(file), file);
 		}
 	}
 	for (const file of exactSessionFiles) {
-		files.set(normalizePathForComparison(file), file);
+		fsFiles.set(normalizePathForComparison(file), file);
 	}
 
+	const decoder = new TextDecoder();
 	const hashes = new Set<string>();
-	for (const file of files.values()) {
+	for (const file of fsFiles.values()) {
 		// Keep raw-text matching: recoverable malformed records can still own blobs.
-		await scanSessionLinesIfPresent(file, line => {
-			for (const match of decoder.decode(line).matchAll(BLOB_REF_RE)) {
-				const hash = match[1]?.toLowerCase();
-				if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
+		await scanSessionLinesIfPresent(file, line => collectBlobHashesFromText(decoder.decode(line), hashes));
+	}
+
+	// A key-indexed backend (SQL, Redis) never puts transcripts on the local
+	// filesystem, so the scan above proves nothing about a session stored
+	// there: read every path the store holds — subagents at any depth, custom
+	// `--session` paths, and rows whose path also names a stale local copy —
+	// so a reference in any of them keeps its blob.
+	if (!(storage instanceof FileSessionStorage)) {
+		const stored = storage.listAllSync?.();
+		if (stored === undefined) {
+			throw new Error(
+				"blob gc cannot enumerate the configured session storage, so it cannot prove a blob unreferenced",
+			);
+		}
+		for (const file of stored) {
+			let text: string;
+			try {
+				text = await storage.readText(file);
+			} catch (error) {
+				// Removed since the listing: it references nothing anymore.
+				if (codeOf(error) === "ENOENT") continue;
+				throw error;
 			}
-		});
+			collectBlobHashesFromText(text, hashes);
+		}
 	}
 	return hashes;
 }
@@ -618,10 +675,17 @@ async function restoreReusedBlob(moved: string, canonical: string, result: BlobG
 	}
 }
 
-async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string): Promise<BlobGcResult> {
+async function runBlobGc(
+	options: ResolvedGcOptions,
+	archiveSessionsRoot: string,
+	storage: SessionStorage,
+): Promise<BlobGcResult> {
 	const blobDir = getBlobsDir(options.agentDir);
 	const sessionsRoot = getSessionsDir(options.agentDir);
 	const defaultRoots = [sessionsRoot, archiveSessionsRoot];
+	// Local files only: a registered path the filesystem lacks is read from a
+	// key-indexed store by `collectReferencedBlobHashes`, which reads every
+	// path that store holds.
 	const exactSessionFiles = new Map<string, string>();
 	for (const file of await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))) {
 		if (!(await statIfPresent(file))?.isFile()) continue;
@@ -630,7 +694,7 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 	for (const file of await collectBreadcrumbSessionFiles(getTerminalSessionsDir(options.agentDir))) {
 		exactSessionFiles.set(normalizePathForComparison(file), file);
 	}
-	const referenced = await collectReferencedBlobHashes(defaultRoots, [...exactSessionFiles.values()]);
+	const referenced = await collectReferencedBlobHashes(defaultRoots, [...exactSessionFiles.values()], storage);
 	const { candidates, staging } = await collectBlobCandidates(blobDir);
 	const result: BlobGcResult = {
 		referenced: referenced.size,
@@ -695,8 +759,14 @@ async function listFilesIfPresent(dir: string): Promise<string[]> {
 	}
 }
 
-/** Whether a pointer's target is verifiably gone; unreadable targets count as present. */
-async function sessionFileMissing(sessionFile: string): Promise<boolean> {
+/**
+ * Whether a pointer's target is verifiably gone; unreadable targets count as
+ * present. A key-indexed store (`session.storage: sql`) is asked first: the
+ * session it holds has no file, so the filesystem alone can only ever veto
+ * the removal, never authorize it.
+ */
+async function sessionFileMissing(sessionFile: string, storage: SessionStorage): Promise<boolean> {
+	if (!(storage instanceof FileSessionStorage) && (await storage.exists(sessionFile))) return false;
 	try {
 		return !(await fs.stat(sessionFile)).isFile();
 	} catch (error) {
@@ -713,6 +783,7 @@ async function sessionFileMissing(sessionFile: string): Promise<boolean> {
 async function collectDanglingPointers(
 	dir: string,
 	kind: StaleCandidate["kind"],
+	storage: SessionStorage,
 	resolveTarget: (text: string) => string | undefined,
 ): Promise<StaleCandidate[]> {
 	const deleteBeforeMs = Date.now() - STALE_POINTER_GRACE_MS;
@@ -721,7 +792,7 @@ async function collectDanglingPointers(
 		const stat = await statIfPresent(file);
 		if (!stat || stat.mtimeMs > deleteBeforeMs) continue;
 		const target = resolveTarget(await readTextIfPresent(file));
-		if (!target || !(await sessionFileMissing(target))) continue;
+		if (!target || !(await sessionFileMissing(target, storage))) continue;
 		candidates.push({ kind, paths: [file], bytes: stat.size });
 	}
 	return candidates;
@@ -747,15 +818,15 @@ async function collectExpiredFiles(
 	return files.slice(options.staleRetainNewest).filter(entry => entry.mtimeMs < deleteBeforeMs);
 }
 
-async function runStaleGc(options: ResolvedGcOptions): Promise<StaleGcResult> {
+async function runStaleGc(options: ResolvedGcOptions, storage: SessionStorage): Promise<StaleGcResult> {
 	const markersDir = getCustomSessionFilesDir(options.agentDir);
 	const breadcrumbDir = getTerminalSessionsDir(options.agentDir);
 	const candidates: StaleCandidate[] = [
-		...(await collectDanglingPointers(markersDir, "danglingMarkers", text => {
+		...(await collectDanglingPointers(markersDir, "danglingMarkers", storage, text => {
 			const recorded = text.trim();
 			return recorded ? path.resolve(recorded) : undefined;
 		})),
-		...(await collectDanglingPointers(breadcrumbDir, "staleBreadcrumbs", text => {
+		...(await collectDanglingPointers(breadcrumbDir, "staleBreadcrumbs", storage, text => {
 			const crumb = parseTerminalBreadcrumb(text);
 			// A fresh crumb is a lazy `/new` boundary that `--continue` honors
 			// before its transcript exists. It stays until the session materializes
@@ -830,7 +901,7 @@ async function runStaleGc(options: ResolvedGcOptions): Promise<StaleGcResult> {
  */
 async function tryAcquireSessionFileLease(sessionFile: string): Promise<FileLockHandle | null | undefined> {
 	try {
-		const sessionId = await readSessionHeaderId(sessionFile);
+		const sessionId = await readSessionHeaderId(sessionFile, LOCAL_SESSION_FILES);
 		return sessionId === undefined ? undefined : tryAcquireSessionLease(sessionId);
 	} catch {
 		return null;
@@ -846,7 +917,7 @@ async function listActiveSessions(sessionsRoot: string): Promise<SessionInfo[]> 
 		throw error;
 	}
 
-	const storage = new FileSessionStorage();
+	const storage = LOCAL_SESSION_FILES;
 	const sessions: SessionInfo[] = [];
 	for (const entry of entries) {
 		if (!entry.isDirectory()) continue;
@@ -859,7 +930,7 @@ async function listActiveSessions(sessionsRoot: string): Promise<SessionInfo[]> 
 async function listNestedSessionsReadOnly(artifactsRoot: string): Promise<SessionInfo[]> {
 	const files = await collectJsonlFiles(artifactsRoot);
 	const dirs = [...new Set(files.map(file => path.dirname(file)))].sort();
-	const storage = new FileSessionStorage();
+	const storage = LOCAL_SESSION_FILES;
 	const sessions: SessionInfo[] = [];
 	for (const dir of dirs) sessions.push(...(await listSessionsReadOnly(dir, storage)));
 	sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
@@ -1904,7 +1975,7 @@ async function collectSessionFiles(session: SessionInfo): Promise<string[]> {
 async function readArtifactSessionId(file: string): Promise<string | undefined> {
 	const prefix = (await Bun.file(file).slice(0, HEADER_SNIFF_BYTES).text()).replace(/^[ \t\r\n]+/, "");
 	if (prefix !== "" && prefix[0] !== "{") return undefined;
-	return readSessionHeaderId(file);
+	return readSessionHeaderId(file, LOCAL_SESSION_FILES);
 }
 
 /**
@@ -2316,6 +2387,9 @@ function renderText(result: GcResult): string {
 			if (compress.errors.length > 0) lines.push(`compress errors: ${compress.errors.length}`);
 		}
 	}
+	for (const refusal of result.refused ?? []) {
+		lines.push(`${refusal.phase}: not run, ${refusal.reason}`);
+	}
 	if (result.wal) {
 		const state = result.wal.checkpointed ? "checkpointed" : "checkpoint dry-run";
 		lines.push(`wal: ${state}, ${formatBytes(result.wal.walBytes)} across ${result.wal.databases.length} dbs`);
@@ -2323,20 +2397,57 @@ function renderText(result: GcResult): string {
 	return `${lines.join("\n")}\n`;
 }
 
+/**
+ * Phases that work only on session files on disk, and why each is unavailable
+ * while sessions are rows in a key-indexed store (`session.storage: sql`).
+ */
+const DISK_ONLY_PHASE_REASONS = {
+	archive:
+		"archiving gzips session files on disk and judges which sessions are cold from those files, but this store keeps sessions as database rows that phase cannot see",
+	compress:
+		"compression rewrites session files on disk in place, but this store keeps sessions as database rows that phase cannot see",
+} as const;
+
 export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	const options = await resolveOptions(args.flags);
 	const archiveRoot = getArchivedSessionsDir(options.agentDir);
 	const result = await withGcLock(options.agentDir, async lockPath => {
 		const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath };
+		// Every phase that judges a session's liveness asks the configured
+		// storage, never only the filesystem: under `session.storage: sql` a
+		// session the files never show is still live.
+		const storage =
+			options.runStale || options.runBlobs || options.runArchive || options.runCompress
+				? await resolveSessionStorage({
+						settings: await Settings.loadReadOnly({ agentDir: options.agentDir }),
+						env: process.env,
+					})
+				: undefined;
+		const sessionsOnDisk = storage === undefined || storage instanceof FileSessionStorage;
+		const refuse = (phase: GcRefusal["phase"], requested: boolean | undefined): void => {
+			next.refused ??= [];
+			next.refused.push({
+				phase,
+				requested: requested === true,
+				reason: `unavailable with session.storage: sql: ${DISK_ONLY_PHASE_REASONS[phase]}`,
+			});
+		};
 		// Stale cleanup may prune a missing first-save target's registry marker.
-		const registeredSessionPaths = options.runArchive
-			? await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))
-			: [];
+		const registeredSessionPaths =
+			options.runArchive && sessionsOnDisk
+				? await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))
+				: [];
 		// Pruned collab replicas release their blobs to this run's sweep.
-		if (options.runStale) next.stale = await runStaleGc(options);
-		if (options.runBlobs) next.blobs = await runBlobGc(options, archiveRoot);
-		if (options.runArchive) next.archive = await runArchiveGc(options, archiveRoot, registeredSessionPaths);
-		if (options.runCompress) next.compress = await runCompressGc(options, archiveRoot);
+		if (options.runStale && storage) next.stale = await runStaleGc(options, storage);
+		if (options.runBlobs && storage) next.blobs = await runBlobGc(options, archiveRoot, storage);
+		if (options.runArchive) {
+			if (sessionsOnDisk) next.archive = await runArchiveGc(options, archiveRoot, registeredSessionPaths);
+			else refuse("archive", args.flags.archive);
+		}
+		if (options.runCompress) {
+			if (sessionsOnDisk) next.compress = await runCompressGc(options, archiveRoot);
+			else refuse("compress", args.flags.compress);
+		}
 		if (options.runWal) next.wal = await runWalGc(options);
 		return next;
 	});

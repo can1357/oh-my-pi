@@ -118,11 +118,7 @@ describe("AgentTranscriptViewer native esc", () => {
 		};
 		const deps = {
 			agentId: "a1",
-			transcript: {
-				sessionFile: () => undefined,
-				fs: { openSync: missing, closeSync: missing, readSync: missing, readFileSync: missing, statSync: missing },
-				parseEntries: () => [],
-			},
+			transcript: { stat: missing, readFrom: missing, parseEntries: () => [] },
 			registry: { get: () => ({ id: "a1", kind: "task", status: "running" }) },
 			lifecycle: () => ({}),
 			ui: { terminal: { rows: 40, columns: 100 }, requestRender: () => {} },

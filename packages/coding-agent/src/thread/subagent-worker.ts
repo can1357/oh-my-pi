@@ -29,6 +29,7 @@ import { workerHostEntry } from "@oh-my-pi/pi-utils/worker-host";
 import { SUBAGENT_WORKER_ARG } from "../cli/worker-selectors";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
+import { defaultSessionStorage, type SessionStorage } from "../session/session-storage";
 import { cfgTaskWorkerThreads } from "../task/settings";
 import { firstSharedModule, SubagentCodeChangedError } from "./code-skew";
 import { isMainThread, type ThreadId } from "./identity";
@@ -582,7 +583,14 @@ let testPool: SubagentWorkerPool | undefined;
  * The process-wide pool when worker mode is on: main thread, `task.workerThreads > 0`,
  * and a CLI worker host (or a pool injected by tests). `undefined` means run subagents in-process.
  */
-export function subagentWorkerPool(settings: Settings): SubagentWorkerPool | undefined {
+export function subagentWorkerPool(
+	settings: Settings,
+	storage: SessionStorage = defaultSessionStorage(),
+): SubagentWorkerPool | undefined {
+	if (!storage.crossesWorkerBoundary) {
+		logger.debug("Session storage cannot cross the worker boundary; subagent runs inline");
+		return undefined;
+	}
 	if (testPool) return testPool;
 	if (!isMainThread() || workerHostEntry() === null || cfgTaskWorkerThreads.get(settings) <= 0) return undefined;
 	processPoolSettings = settings;

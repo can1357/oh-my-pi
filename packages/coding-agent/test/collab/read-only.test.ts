@@ -17,6 +17,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { defaultSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
@@ -44,6 +45,10 @@ function makeHostContext(): HostHarness {
 		sessionManager: {
 			getSessionId: () => "sess-1",
 			getCwd: () => "/tmp",
+			// The host serves a registered agent's transcript through the session's
+			// storage, not through `fs` — a double without it answers every fetch
+			// with a read error that reads like an empty transcript.
+			getStorage: () => defaultSessionStorage(),
 			snapshotForReplication: () => ({
 				header: { type: "session", id: "sess-1", timestamp: new Date().toISOString(), cwd: "/tmp" },
 				entries: [],

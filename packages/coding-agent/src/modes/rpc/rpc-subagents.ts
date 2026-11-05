@@ -1,9 +1,9 @@
-import * as fs from "node:fs/promises";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { type AgentRef, AgentRegistry } from "../../registry/agent-registry";
 import type { AgentSessionHandle } from "../../session/agent-session-handle";
 import type { FileEntry, SessionMessageEntry } from "../../session/session-entries";
 import { parseSessionEntries } from "../../session/session-loader";
+import { defaultSessionStorage, readSessionTextFrom, type SessionStorage } from "../../session/session-storage";
 import { type AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 import {
 	type SubagentEventPayload,
@@ -67,12 +67,15 @@ function addPruned(set: Set<string>, value: string, maxSize: number): void {
 	}
 }
 
-export async function readRpcSubagentTranscript(sessionFile: string, fromByte = 0): Promise<RpcSubagentMessagesResult> {
+export async function readRpcSubagentTranscript(
+	sessionFile: string,
+	fromByte = 0,
+	storage: SessionStorage = defaultSessionStorage(),
+): Promise<RpcSubagentMessagesResult> {
 	let startByte = Number.isFinite(fromByte) ? Math.max(0, Math.trunc(fromByte)) : 0;
-	const file = Bun.file(sessionFile);
-	let size: number;
+	let read: { text: string; size: number };
 	try {
-		({ size } = await fs.stat(sessionFile));
+		read = await readSessionTextFrom(storage, sessionFile, startByte);
 	} catch (err) {
 		if (!isEnoent(err)) throw err;
 		return {
@@ -85,12 +88,14 @@ export async function readRpcSubagentTranscript(sessionFile: string, fromByte = 
 		};
 	}
 	let reset = false;
-	if (startByte > size) {
+	if (startByte > read.size) {
+		// The transcript was rewritten shorter: read it again from the start.
 		startByte = 0;
 		reset = true;
+		read = await readSessionTextFrom(storage, sessionFile, 0);
 	}
 
-	const text = startByte >= size ? "" : await file.slice(startByte).text();
+	const text = read.text;
 	const lastNewline = text.lastIndexOf("\n");
 	const completeText = lastNewline >= 0 ? text.slice(0, lastNewline + 1) : "";
 	const entries = completeText.length > 0 ? parseSessionEntries(completeText) : [];

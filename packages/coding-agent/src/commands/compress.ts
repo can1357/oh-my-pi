@@ -1,6 +1,7 @@
 import { postmortem } from "@oh-my-pi/pi-utils";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { compressHelp as commandHelp } from "../cli/command-help";
+import { installSessionStorageForCommand } from "../cli/session-arg";
 import { CliUsageError } from "../cli/usage-error";
 import { runCompressCommand } from "../compress";
 
@@ -32,6 +33,8 @@ export default class Compress extends Command {
 		if (flags.rounds <= 0) throw new CliUsageError("--rounds must be a positive integer");
 		if (flags.agents <= 0) throw new CliUsageError("--agents must be a positive integer");
 		if (flags.inPlace && flags.out) throw new CliUsageError("--in-place and --out are mutually exclusive");
+		if (!(await installSessionStorageForCommand())) return;
+
 		const result = await runCompressCommand({
 			files,
 			model: flags.model,

@@ -3,6 +3,7 @@
  * their {@link ResolveContext}/{@link WriteContext} here instead of assembling
  * per-tool literals, so every handler sees the same caller identity.
  */
+import { sessionTreeStorage } from "../session/session-storage";
 import type { ToolSession } from "../tools";
 import { getExperimentalContextSession } from "../tools/context-notes";
 import type { LocalProtocolOptions } from "./local-protocol";
@@ -45,6 +46,7 @@ export function sessionResolveContext(
 		settings: session.settings,
 		signal: options.signal,
 		sessionFile: session.getSessionFile() ?? undefined,
+		storage: sessionTreeStorage(session),
 		experimentalContextManagement: cfgCompactionExperimentalContextManagement.get(session.settings) === true,
 		getSessionBranch: () => getExperimentalContextSession(session).getBranch(),
 		sessionId: session.sessionManager?.getSessionId?.() ?? session.getSessionId?.() ?? undefined,

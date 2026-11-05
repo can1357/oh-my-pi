@@ -6,6 +6,7 @@ import * as ai from "@oh-my-pi/pi-ai";
 import { Effort, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { defaultSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import {
 	buildMemoryToolDeveloperInstructions,
 	getMemoryRoot,
@@ -83,6 +84,9 @@ async function createFixture(overrides?: Partial<Record<string, unknown>>): Prom
 	});
 	const session = {
 		sessionManager: {
+			// The extraction pipeline reads a thread's transcripts through the
+			// session's storage; a double without it dies before the first phase.
+			getStorage: () => defaultSessionStorage(),
 			getSessionFile: () => sessionFile,
 			getSessionDir: () => sessionDir,
 			getSessionId: () => "current-thread",

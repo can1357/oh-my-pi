@@ -30,6 +30,7 @@ import agentPromptDoc from "../prompts/internal-urls/agent.md" with { type: "tex
 import agentProgressTemplate from "../prompts/tools/agent-url-progress.md" with { type: "text" };
 import agentSupersededTemplate from "../prompts/tools/agent-url-superseded.md" with { type: "text" };
 import { loadSessionMessagesReadOnly } from "../session/session-loader";
+import { defaultSessionStorage, type SessionStorage, sessionTreeStorage } from "../session/session-storage";
 import { artifactsDirsFromRegistry } from "./registry-helpers";
 import type {
 	InternalResource,
@@ -192,7 +193,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		if (progress && to === "all") throw new Error("agent://all broadcasts cannot be ?progress updates.");
 		if (!content.trim()) throw new Error("agent:// messages require non-empty content.");
 		const result = await executeSend(
-			{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
+			{ registry, senderId, sessionFileHint: session.getSessionFile?.(), storage: sessionTreeStorage(session) },
 			{ to, message: content, progress },
 		);
 		return {
@@ -224,7 +225,9 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			// non-terminal yield, or parked before publishing) is the same
 			// registry `write agent://<id>` delivers to: answer with its progress.
 			const ref = registry.get(outputId);
-			if (ref && ref.kind !== "advisor") return this.#resolveProgress(url, ref, extraction);
+			if (ref && ref.kind !== "advisor") {
+				return this.#resolveProgress(url, ref, extraction, context?.storage ?? defaultSessionStorage());
+			}
 			if (!scan) throw new Error("No session - agent outputs unavailable");
 			if (!scan.anyDirExists) throw new Error("No artifacts directory found");
 			const registered = registry
@@ -313,9 +316,15 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	 * Progress view of a registered agent that has not published `<id>.md`:
 	 * its status, every accepted `yield` (non-terminal sections included), and
 	 * its latest assistant text. Reads the live session's messages, else the
-	 * retained session file. JSON-path extraction needs the published output.
+	 * retained session file in the caller's session tree `storage`. JSON-path
+	 * extraction needs the published output.
 	 */
-	async #resolveProgress(url: InternalUrl, ref: AgentRef, extraction: boolean): Promise<InternalResource> {
+	async #resolveProgress(
+		url: InternalUrl,
+		ref: AgentRef,
+		extraction: boolean,
+		storage: SessionStorage,
+	): Promise<InternalResource> {
 		if (extraction) {
 			throw new Error(
 				`Output ${ref.id} is not published yet (status: ${ref.status}); read agent://${ref.id} for its progress.`,
@@ -327,7 +336,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			messages = ref.session.messages;
 			source = "live session";
 		} else if (ref.sessionFile) {
-			messages = await loadSessionMessagesReadOnly(ref.sessionFile);
+			messages = await loadSessionMessagesReadOnly(ref.sessionFile, storage);
 			source = "session file (read-only)";
 		}
 		const sections = yieldSections(messages);
@@ -366,7 +375,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		const seanceDir = context?.session?.seanceSourceArtifactsDir;
 		if (seanceDir) return [seanceDir];
 		const rootSessionFile = context?.sessionFile
-			? await ensurePersistedRoster(AgentRegistry.global(), context.sessionFile)
+			? await ensurePersistedRoster(AgentRegistry.global(), context.sessionFile, context.storage)
 			: undefined;
 		return artifactsDirsFromRegistry(rootSessionFile ? { preferredDir: rootSessionFile.slice(0, -6) } : undefined);
 	}
