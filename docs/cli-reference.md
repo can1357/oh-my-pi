@@ -329,11 +329,17 @@ worktree callers carry relocatable ignored caches such as `node_modules`.
 Directories containing `pyvenv.cfg` or `CMakeCache.txt` are not carried, even
 when they are nested or ignore themselves. Recreate Python environments and
 CMake build trees in the new worktree so their absolute paths name the new
-checkout. Tracked files inside excluded directories are restored from Git;
-when keeping changes, their live source contents and staged state are preserved.
+checkout. Neither is a repository checkout nested under the source — a
+directory with a `.git` entry of its own, such as a `.worktrees/` of linked
+worktrees, a submodule, or an unrelated clone. A worktree carries the committed
+tree, not another repository's working directory, so those are dropped at any
+depth; the source keeps them untouched. Tracked files inside excluded
+directories are restored from Git; when keeping changes, their live source
+contents and staged state are preserved.
 
 Clean clones also discard carried files that are untracked under the target
 commit's own ignore rules, after its tree and index have been written. Caches
-ignored by the target remain, even if the source did not ignore them. Nested
-repositories are preserved and symlinks are not followed. This target-ignore
-cleanup is skipped when keeping the source's uncommitted changes.
+ignored by the target remain, even if the source did not ignore them. That
+cleanup enters no nested repository and follows no symlink; by then a clone
+holds no nested repository anyway. This target-ignore cleanup is skipped when
+keeping the source's uncommitted changes.
