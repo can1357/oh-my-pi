@@ -329,22 +329,24 @@ worktree callers carry relocatable ignored caches such as `node_modules`.
 Directories containing `pyvenv.cfg` or `CMakeCache.txt` are not carried, even
 when they are nested or ignore themselves. Recreate Python environments and
 CMake build trees in the new worktree so their absolute paths name the new
-checkout. Nor is a checkout whose `.git` is a *pointer* into this repository's
-administrative files — a `gitdir:` file or symlink, as a linked worktree and an
-absorbed submodule have. Copying one gives the new worktree another worktree's
-`HEAD` and index, or a submodule whose `git status` fails with `not a git
-repository`, so its contents are dropped at any depth and the directory is left
-empty, which is what Git materializes for a gitlink. The source keeps them
-untouched. A nested clone that stands on its own (`.git` is a directory) is
-carried like any other ignored cache, since package managers keep such clones
-inside them. Tracked files inside excluded directories are restored from Git;
-when keeping changes, their live source contents and staged state are
-preserved.
+checkout. Nor is a checkout whose `.git` leads out of the new worktree: a
+`gitdir:` file or a symlink resolving outside it, or into the worktree's own
+`.git`, as a linked worktree and an absorbed submodule of this repository
+have. Copying one gives the new worktree another worktree's `HEAD` and index,
+or a submodule whose `git status` fails with `not a git repository`, so its
+contents are dropped at any depth and the directory is left empty, which is
+what Git materializes for a gitlink. The source keeps them untouched. A
+checkout carrying its own metadata is kept and carried like any other ignored
+cache — a `.git` directory, a `.git` naming a path inside the checkout, or a
+vendored clone's own submodule, whose `gitdir:` lands inside that clone —
+since package managers keep such clones inside those caches. Tracked files
+inside excluded directories are restored from Git; when keeping changes, their
+live source contents and staged state are preserved.
 
 Clean clones also discard carried files that are untracked under the target
 commit's own ignore rules, after its tree and index have been written. Caches
 ignored by the target remain, even if the source did not ignore them. Nested
 repositories are preserved and symlinks are not followed, so an emptied
-pointer directory survives this pass only where the target tracks or ignores
-it. This target-ignore cleanup is skipped when keeping the source's
+directory survives this pass only where the target tracks or ignores it. This
+target-ignore cleanup is skipped when keeping the source's
 uncommitted changes.
