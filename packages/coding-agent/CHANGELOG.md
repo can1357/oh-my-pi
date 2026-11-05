@@ -34,6 +34,12 @@
 
 ### Fixed
 
+- Switching the view between subagents running on worker threads no longer lags on long transcripts: refocusing an agent only fetches what it added since you last viewed it, and a viewed subagent's tool calls no longer rebuild its whole transcript on the worker
+- The main thread no longer re-scans every plain update a worker-thread subagent sends (transcripts, events, state), saving several milliseconds per large transcript
+- Streaming a large batch `task` call no longer costs the main thread time that grows quadratically with the call's size (about 80 ms → 2 ms for a 200 KB call)
+- Subagents on worker threads no longer copy the whole MCP tool list on every MCP tool call, and no longer wait on the main thread when an auto-backgrounded bash or eval call finishes
+- Subagents on worker threads stall less on a busy main thread: without a `session.maxCost` cap they no longer ask the main thread before every request, and with API-key providers they no longer ask it for OAuth account and usage-header bookkeeping after every response
+- `wait` on an agent's reply no longer makes a subagent on a worker thread stream every event and its full transcript to the main thread while it waits
 - Agents using `computer` from Eval now `zoom` for a legible close-up instead of cropping the saved screenshot file, which is downscaled to the capture size on large or Retina windows ([#18158](https://github.com/can1357/oh-my-pi/pull/18158) by [@will-bogusz](https://github.com/will-bogusz))
 - Python eval `@tool` definitions with type annotations now register on Python 3.9 instead of failing with `module 'types' has no attribute 'UnionType'` ([#18143](https://github.com/can1357/oh-my-pi/pull/18143) by [@Winston-Hsiao](https://github.com/Winston-Hsiao))
 - `read` of an SEC EDGAR filing document or filing folder (`sec.gov/Archives/edgar/data/<cik>/<accession>/…`) returns that document instead of the company's profile and recent filings list ([#18150](https://github.com/can1357/oh-my-pi/pull/18150) by [@will-bogusz](https://github.com/will-bogusz))

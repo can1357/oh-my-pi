@@ -19,6 +19,7 @@
 
 - The built-in `jq` used by the bash tool now reports errors as plain text with `line:column` locations.
 - Work-profile flamegraphs are now static SVGs with hoverable titles.
+- The shell's built-in `grep -r`, `rg`, `find` and `fd` are faster on small and large trees: short searches no longer start a thread pool, and output reaches pipes in batches instead of per file.
 
 ### Fixed
 
