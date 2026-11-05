@@ -459,7 +459,7 @@ fn assignment_statement(
 			let arith = matches!(d, Diag::Arith { .. } | Diag::ArithSubscript { .. });
 			k.diag(cx, vp, line, d);
 			if arith {
-				return Some(exec::assign_jump(k, vp, cx));
+				return Some(exec::assign_jump(vp, cx));
 			}
 			// bash abandons the rest of the command line after a failed
 			// assignment statement; a posix shell exits.
@@ -1086,7 +1086,7 @@ fn expand(
 				let arith = matches!(d, Diag::Arith { .. } | Diag::ArithSubscript { .. });
 				k.diag(cx, vp, line, d);
 				if arith {
-					return Some(exec::assign_jump(k, vp, cx));
+					return Some(exec::assign_jump(vp, cx));
 				}
 				// bash abandons the rest of the command line after a failed
 				// assignment statement; a posix shell exits.

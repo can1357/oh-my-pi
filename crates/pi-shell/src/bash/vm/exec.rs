@@ -16,6 +16,7 @@ use super::{
 	is_ident, probe,
 	proc::{
 		AssignValue, Atom, Bang, BangStage, Coproc, Depths, Frame, FrameKind, InlineStage, Landing,
+		LandingCatch,
 		LastBg, LoopKind, LoopRec, ParseSnapshot, PendingSub, PendingWrite, Probe, ProbeResult, Run,
 		Saved, Scratch, ScriptKind, Slot, TryEnd, Vproc,
 	},
@@ -442,21 +443,27 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			},
 			// bash's `parse_and_execute` hands the jump on in a subshell
 			// (`subshell_environment`): it ends where a fatal error lands,
-			// with its EXIT trap.
+			// with its EXIT trap. The site set the status to 1 first,
+			// except an arithmetic error's, which bash leaves as it is.
 			Flow::Discard(status) if super::nested::in_subshell(cx.store, vp) => {
-				let status = jump_status(k, cx, vp, Jump::Discard(status));
+				vp.status = status;
+				let code =
+					if errexit_jump(k, cx, vp) { JumpCode::Errexit } else { JumpCode::Discard };
+				let status = jump_status(cx, vp, code);
 				exit_shell(k, vp, cx, status);
 			},
 			Flow::DiscardArith(status) if super::nested::in_subshell(cx.store, vp) => {
-				let status = jump_status(k, cx, vp, Jump::Arith(status));
+				vp.status = status;
+				let status = jump_status(cx, vp, JumpCode::Discard);
 				exit_shell(k, vp, cx, status);
 			},
-			// With `errexit` on the jump is bash's `ERREXIT`, which no
-			// `parse_and_execute` carries on from: the shell ends with the
-			// failure status wherever the jump lands. An arithmetic error
-			// is not one of these ([`Jump::Arith`]).
+			// With `errexit` in force the code is bash's `ERREXIT`, which
+			// no `parse_and_execute` carries on from: the shell ends where
+			// the jump lands, with the status at the site. An arithmetic
+			// error is never `ERREXIT`.
 			Flow::Discard(status) if errexit_jump(k, cx, vp) => {
-				let status = jump_status(k, cx, vp, Jump::Discard(status));
+				vp.status = status;
+				let status = jump_status(cx, vp, JumpCode::Errexit);
 				exit_shell(k, vp, cx, status);
 			},
 			Flow::Discard(status) | Flow::DiscardArith(status) => {
@@ -2098,46 +2105,58 @@ fn stopped(
 	}
 }
 
-/// What kind of jump a vproc makes out of the place it is running: which
-/// `parse_and_execute` catches it, and whether `errexit` raises bash's
-/// `ERREXIT` in its place.
-#[derive(Clone, Copy)]
-enum Jump {
-	/// bash's `FORCE_EOF`: `${x?}`, `set -u`, a posix shell's assignment
-	/// error. No `parse_and_execute` catches it.
-	Fatal,
-	/// bash's `DISCARD` of an expansion that cannot carry on (a bad
-	/// substitution). `errexit` raises `ERREXIT` in its place.
-	Discard(i32),
-	/// An arithmetic error in a word (`: $((7/0))`). It lands like a
-	/// `Discard`, and `eval` and `.` catch it the same way, but `errexit`
-	/// never raises `ERREXIT` in its place.
-	Arith(i32),
-	/// An arithmetic error in an assignment (`A[bad!]=x`, `declare -i I;
-	/// I=bad!`). It leaves every `eval`, `.` and function like a fatal
-	/// error, no child's own catch answers it, and `errexit` never raises
-	/// `ERREXIT` in its place.
-	Assign(i32),
+/// One of bash's `jump_to_top_level` codes, which is all a catch needs to
+/// answer a jump: every catch answers with either the status it saved or
+/// `last_command_exit_value` as it stands at the jump site, which is
+/// `vp.status` here. `EXITPROG` and `EXITBLTIN` (`exit n`) are
+/// [`Flow::Exit`], whose status every catch takes as it is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JumpCode {
+	/// `FORCE_EOF`: a fatal error (`${x?}`, `set -u`, a posix shell's
+	/// assignment error). The site sets the status to 1 first.
+	ForceEof,
+	/// `DISCARD`: an expansion or an arithmetic error. The site sets the
+	/// status to 1 first, except an arithmetic error's, which bash leaves
+	/// as it is.
+	Discard,
+	/// `ERREXIT`: what bash raises in place of either of those while
+	/// `errexit` is in force ([`errexit_jump`]).
+	Errexit,
+	/// `DISCARD` from an arithmetic error in an **assignment**, which
+	/// leaves `last_command_exit_value` as it is. Measured against both
+	/// bashes: no `eval`, `.`, function, subshell or command substitution
+	/// answers this one — the catch that answers is the one that would
+	/// have answered a jump out of the enclosing shell, with the status it
+	/// saved (`trap '( declare -i I; I=bad!; echo INNER ); echo AFTER:$?'
+	/// EXIT; exit 7` prints `AFTER:7`, and the same shape at the top level
+	/// prints `AFTER:1`).
+	AssignDiscard,
 }
 
 /// A fatal shell error (bash's `jump_to_top_level (FORCE_EOF)`: `${x?}`,
 /// `set -u`, a posix shell's assignment error): the shell exits with the
 /// status of the place the jump lands ([`jump_status`]), unlike `exit n`
-/// whose status is `n` wherever it runs.
+/// whose status is `n` wherever it runs. The site sets the status to 1
+/// first, as bash's does, and `errexit` raises `ERREXIT` in its place.
 pub fn fatal(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Flow {
 	if vp.mode.dialect() == Dialect::Zsh {
 		// zsh: 127 from a `-c` string, 1 elsewhere (`zsh_exit` decides the rest).
 		return Flow::Exit(if shell_command(cx, vp) { 127 } else { 1 });
 	}
-	Flow::Exit(jump_status(k, cx, vp, Jump::Fatal))
+	vp.status = 1;
+	let code =
+		if errexit_jump(k, cx, vp) { JumpCode::Errexit } else { JumpCode::ForceEof };
+	Flow::Exit(jump_status(cx, vp, code))
 }
 
-/// An arithmetic error in an assignment ([`Jump::Assign`]): no `eval`,
-/// `.` or function contains it, and the status is the one of the place
-/// its jump lands, never the "carry on with the next command" of a plain
-/// [`Flow::Discard`].
-pub fn assign_jump(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Flow {
-	Flow::Exit(jump_status(k, cx, vp, Jump::Assign(1)))
+/// An arithmetic error in an assignment (`A[bad!]=x`, `declare -i I;
+/// I=bad!`): bash's `DISCARD` from a site that leaves
+/// `last_command_exit_value` as it is and never raises `ERREXIT`.
+/// Measured: no `eval`, `.` or function carries on from it, so it ends
+/// the vproc where its jump lands instead of taking the
+/// "carry on with the next command" of a plain [`Flow::Discard`].
+pub fn assign_jump(vp: &mut Vproc, cx: &mut Cx<'_>) -> Flow {
+	Flow::Exit(jump_status(cx, vp, JumpCode::AssignDiscard))
 }
 
 /// Whether `vp` runs a `-c` string as the shell itself (a nested shell,
@@ -2208,71 +2227,74 @@ fn catch(cx: &mut Cx<'_>, vp: &Vproc) -> Catch {
 		return Catch::Shell;
 	}
 	// Only a lone simple command the shell forked before it expanded
-	// anything has no catch of its own; every other child keeps its
-	// landing for [`Jump::Assign`] alone.
+	// anything has no catch of its own; every other child has one, and
+	// keeps its parent's landing for nothing.
 	vp.fork_landing.filter(|landing| landing.simple).map_or(Catch::Own, Catch::Fork)
 }
 
-/// The status `vp` exits with after a jump of kind `jump`: where the jump
-/// lands decides. A forked command that has not dispatched its program
-/// yet runs the EXIT trap it inherited, as bash's child does before it
-/// resets its traps ([`forked_dispatch`]).
-fn jump_status(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, jump: Jump) -> i32 {
-	let discarded = match jump {
-		Jump::Fatal => None,
-		Jump::Discard(status) | Jump::Arith(status) | Jump::Assign(status) => Some(status),
-	};
-	// An arithmetic error in an assignment is the one jump no child's own
-	// catch answers: it takes the status of the place its parent's jump
-	// would have landed, a subshell and a command substitution included.
-	let assign = matches!(jump, Jump::Assign(_));
-	let landed = match catch(cx, vp) {
-		Catch::ExitTrap(saved) => saved,
-		// The nested trap's status, which the EXIT trap's own catch would
-		// have replaced with the status it saved. An assignment's jump
-		// leaves the nested action as a fatal error does.
-		Catch::TrapInExitTrap(status) if assign => status,
-		Catch::TrapInExitTrap(status) => discarded.unwrap_or(status),
-		// An assignment's jump leaves a child of any kind with the status
-		// of the place its parent's jump would have landed; only a trap
-		// action the child runs itself (above) answers it.
-		_ if assign && vp.fork_landing.is_some() => {
-			let landing = vp.fork_landing.expect("checked");
-			if landing.simple && landing.exit_trap {
-				vp.own_traps = vp.own_traps.with(TrapKey::Exit);
-			}
-			i32::from(landing.assign)
-		},
-		// `run_one_command`: 127 for `FORCE_EOF`, 1 for `DISCARD`.
-		Catch::Shell if discarded.is_some() => 1,
-		Catch::Shell => {
-			if shell_command(cx, vp) {
-				127
+/// The status `vp` exits with after a jump of code `code`: the catch it
+/// reaches answers with either the status that catch saved or
+/// `last_command_exit_value` as it stands at the site, which is
+/// `vp.status` here — bash's own rule, one answer per catch:
+/// `run_exit_trap` (`trap.c`), `run_one_command` (`shell.c`), `reader_loop`
+/// (`eval.c`) and `execute_in_subshell` (`execute_cmd.c`). A forked command
+/// that has not dispatched its program yet runs the EXIT trap it
+/// inherited, as bash's child does before it resets its traps
+/// ([`forked_dispatch`]).
+fn jump_status(cx: &mut Cx<'_>, vp: &mut Vproc, code: JumpCode) -> i32 {
+	// bash's `last_command_exit_value` at the jump site.
+	let at_site = vp.status;
+	let answer = |landing: LandingCatch, saved: i32| match landing {
+		// `run_exit_trap`: `ERREXIT` with the status at the site, every
+		// other code with the status it saved.
+		LandingCatch::ExitTrap | LandingCatch::Trap => {
+			if code == JumpCode::Errexit {
+				at_site
 			} else {
-				1
+				saved
 			}
 		},
+		// `run_one_command`, the `-c` string.
+		LandingCatch::ShellCommand => match code {
+			JumpCode::ForceEof => 127,
+			JumpCode::Discard | JumpCode::AssignDiscard => 1,
+			JumpCode::Errexit => at_site,
+		},
+		// `reader_loop` for a script, and `execute_in_subshell` for a
+		// subshell or a command substitution: the status at the site, a
+		// zero raised to 1.
+		LandingCatch::ShellScript | LandingCatch::Own => {
+			if at_site == 0 {
+				1
+			} else {
+				at_site
+			}
+		},
+	};
+	match catch(cx, vp) {
+		Catch::ExitTrap(saved) => answer(LandingCatch::ExitTrap, saved),
+		// A trap running inside the EXIT trap's action: its own
+		// `parse_and_execute` saved the status the trap started with.
+		Catch::TrapInExitTrap(saved) => answer(LandingCatch::Trap, saved),
+		Catch::Shell if shell_command(cx, vp) => answer(LandingCatch::ShellCommand, 0),
+		Catch::Shell => answer(LandingCatch::ShellScript, 0),
 		Catch::Fork(landing) => {
 			if landing.exit_trap {
 				vp.own_traps = vp.own_traps.with(TrapKey::Exit);
 			}
-			match discarded {
-				Some(status) => landing.discard.map_or(status, i32::from),
-				None => i32::from(landing.fatal),
+			answer(landing.catch, i32::from(landing.saved))
+		},
+		// A subshell's own catch answers every code but an assignment's,
+		// which the catch around the subshell answers (the landing it
+		// keeps).
+		Catch::Own if code == JumpCode::AssignDiscard => {
+			match vp.fork_landing {
+				Some(landing) => answer(landing.catch, i32::from(landing.saved)),
+				None => answer(LandingCatch::Own, 0),
 			}
 		},
-		Catch::Own => discarded.unwrap_or(1),
-	};
-	// With `errexit` on, bash raises `ERREXIT` where it would have raised
-	// `FORCE_EOF` or `DISCARD`, and every catch answers that with the
-	// failure status: `run_exit_trap` and `run_one_command` both return
-	// `last_command_exit_value`, and a child the shell forked before it
-	// expanded anything carries it too. An arithmetic error is not one of
-	// these ([`Jump::Arith`], [`Jump::Assign`]).
-	if matches!(jump, Jump::Fatal | Jump::Discard(_)) && errexit_jump(k, cx, vp) {
-		return 1;
+		Catch::Own => answer(LandingCatch::Own, 0),
 	}
-	landed
 }
 
 /// Whether `errexit` raises bash's `ERREXIT` for a jump out of where `vp`
@@ -2310,50 +2332,45 @@ pub const fn forked_dispatch(vp: &mut Vproc, builtin: bool) {
 	}
 }
 
-/// The landing a child `vp` forks now keeps ([`Vproc::fork_landing`]).
-/// `simple` is a lone simple command the shell forks before it expands
-/// anything (a pipeline stage or a job), which has no catch of its own;
-/// every other child keeps only where an assignment's arithmetic error
-/// lands, which its own catch does not answer.
+/// The landing a child `vp` forks now keeps ([`Vproc::fork_landing`]):
+/// which catch answers a jump out of the parent, and the status that
+/// catch saved. `simple` is a lone simple command the shell forks before
+/// it expands anything (a pipeline stage or a job), which has no catch of
+/// its own, so that catch answers its jumps too.
 fn fork_landing(cx: &mut Cx<'_>, vp: &Vproc, simple: bool) -> Landing {
 	// A status is a byte, as bash's is; the mask makes this exact.
 	let byte = |status: i32| u8::try_from(status & 0xff).unwrap_or(0);
-	let landing = match catch(cx, vp) {
+	match catch(cx, vp) {
 		Catch::ExitTrap(saved) => Landing {
-			fatal:     byte(saved),
-			discard:   Some(byte(saved)),
-			assign:    byte(saved),
+			catch: LandingCatch::ExitTrap,
+			saved: byte(saved),
 			exit_trap: false,
-			simple:    true,
+			simple,
 		},
 		// The child of such a trap lands on that trap's status.
-		Catch::TrapInExitTrap(status) => Landing {
-			fatal:     byte(status),
-			discard:   Some(byte(status)),
-			assign:    byte(status),
-			exit_trap: false,
-			simple:    true,
+		Catch::TrapInExitTrap(status) => {
+			Landing { catch: LandingCatch::Trap, saved: byte(status), exit_trap: false, simple }
 		},
 		Catch::Shell => Landing {
-			fatal:     if shell_command(cx, vp) { 127 } else { 1 },
-			discard:   Some(1),
-			assign:    1,
+			catch: if shell_command(cx, vp) {
+				LandingCatch::ShellCommand
+			} else {
+				LandingCatch::ShellScript
+			},
+			saved: 0,
 			exit_trap: true,
-			simple:    true,
+			simple,
 		},
 		// `vp` runs a function: bash reset its traps before.
-		Catch::Fork(landing) => Landing { exit_trap: false, ..landing },
-		// A subshell runs only the EXIT trap it set itself, and hands on
-		// the assignment landing it was given.
+		Catch::Fork(landing) => Landing { exit_trap: false, simple, ..landing },
+		// A subshell runs only the EXIT trap it set itself.
 		Catch::Own => Landing {
-			fatal:     1,
-			discard:   None,
-			assign:    vp.fork_landing.map_or(1, |landing| landing.assign),
+			catch: LandingCatch::Own,
+			saved: 0,
 			exit_trap: vp.own_traps.has(TrapKey::Exit),
-			simple:    true,
+			simple,
 		},
-	};
-	Landing { simple, ..landing }
+	}
 }
 
 /// Whether the pipeline stage or job body at `entry` is one simple command

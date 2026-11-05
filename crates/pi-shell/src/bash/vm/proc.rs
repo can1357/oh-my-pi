@@ -346,22 +346,38 @@ impl OwnTraps {
 /// which keeps the whole landing inside an idle vproc's spare bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Landing {
-	/// After a fatal error (bash's `FORCE_EOF`: `${x?}`, `set -u`).
-	pub fatal:     u8,
-	/// After a discarded command (bash's `DISCARD`: an arithmetic error,
-	/// a bad substitution); `None`: the command's own status.
-	pub discard:   Option<u8>,
-	/// After an arithmetic error in an assignment, which no child's own
-	/// catch answers: every child keeps this one, a subshell included.
-	pub assign:    u8,
+	/// What catches a jump out of the parent, which answers the child's
+	/// jump too.
+	pub catch:     LandingCatch,
+	/// The status that catch saved (an EXIT trap's, or that of a trap
+	/// running inside its action); 0 for the shell's own catch.
+	pub saved:     u8,
 	/// The shell landed in runs the EXIT trap the child inherited: bash
 	/// resets a forked child's traps only once its words are expanded.
 	pub exit_trap: bool,
 	/// The child is a lone simple command the shell forked before it
-	/// expanded anything, so it has no catch of its own at all. A
-	/// subshell, a command substitution and a pipeline stage that is not
-	/// one simple command have their own, and keep only `assign`.
+	/// expanded anything, so it has no catch of its own at all
+	/// (`CMD_NO_FORK`). A subshell, a command substitution and a pipeline
+	/// stage that is not one simple command have their own.
 	pub simple:    bool,
+}
+
+/// Which of bash's catches a landing is, each with its own answer to a
+/// jump ([`super::exec`]): `run_exit_trap` (`trap.c`), `run_one_command`
+/// (`shell.c`), `reader_loop` (`eval.c`), `execute_in_subshell`
+/// (`execute_cmd.c`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LandingCatch {
+	/// `run_exit_trap`: the EXIT trap's action.
+	ExitTrap,
+	/// A trap running inside the EXIT trap's action.
+	Trap,
+	/// `run_one_command`: the shell running a `-c` string.
+	ShellCommand,
+	/// `reader_loop`: the shell running a script.
+	ShellScript,
+	/// `execute_in_subshell`: a subshell or a command substitution.
+	Own,
 }
 
 /// `getopts` progress between calls (bash's `sh_optind`, `sh_curopt` and
