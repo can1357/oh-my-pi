@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { createReadStream } from "node:fs";
+import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { createGunzip } from "node:zlib";
@@ -212,6 +213,32 @@ export async function readSessionHeaderId(filePath: string): Promise<string | un
 		if (isEnoent(err) || isEnotdir(err) || isEisdir(err)) return undefined;
 		throw err;
 	}
+}
+
+/**
+ * {@link readSessionHeaderId} without awaiting, for a caller that must decide
+ * inside a synchronous error handler. Same parser and same two bounds, so an
+ * id it returns is one the asynchronous reader returns too. Throws what the
+ * file system throws, including a permission error, so a caller deciding
+ * whether recovery is possible treats "could not tell" as "could not
+ * recover". Reads the bytes as they are: an `omp gc` `.jsonl.gz` has no
+ * readable header here, and its id is not demonstrated by this function.
+ */
+export function sessionHeaderIdSync(filePath: string): string | undefined {
+	const readPrefix = (limit: number): string | undefined | typeof HEADER_INCOMPLETE => {
+		const fd = nodeFs.openSync(filePath, "r");
+		try {
+			const buffer = Buffer.alloc(limit);
+			const read = nodeFs.readSync(fd, buffer, 0, limit, 0);
+			return sessionHeaderIdFromPrefix(buffer.subarray(0, read), read < limit);
+		} finally {
+			nodeFs.closeSync(fd);
+		}
+	};
+	const first = readPrefix(SESSION_HEADER_FIRST_READ);
+	if (first !== HEADER_INCOMPLETE) return first;
+	const full = readPrefix(SESSION_HEADER_READ_LIMIT);
+	return full === HEADER_INCOMPLETE ? undefined : full;
 }
 
 /**

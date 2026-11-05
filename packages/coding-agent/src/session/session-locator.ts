@@ -36,7 +36,7 @@ import { getProfileSessionsDirs, getSessionsDir } from "@oh-my-pi/pi-utils/dirs"
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { hasFsCode, isEacces, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils/fs-error";
 import * as logger from "@oh-my-pi/pi-utils/logger";
-import { readGzipSessionHeaderId, readSessionHeaderId } from "./session-loader";
+import { readGzipSessionHeaderId, readSessionHeaderId, sessionHeaderIdSync } from "./session-loader";
 
 /** The append-only log inside each sessions root. A dotfile, so bucket and transcript globs skip it. */
 export const SESSION_LOCATOR_FILE = ".session-index.tsv";
@@ -173,8 +173,10 @@ function appendIndexLine(indexFile: string, line: string, createRoot: boolean): 
  *   ({@link scanRootTranscripts}, {@link scanTranscripts});
  * - every ancestor is a real directory, because the walk sees a symlinked
  *   one and never enters it;
- * - the transcript yields an id: its bytes are readable, or its generated
- *   `<timestamp>_<id>` name already records `id`;
+ * - the transcript yields *this* id, by the generated `<timestamp>_<id>` name
+ *   recording it or by reading the header the rebuild reads. Permission to
+ *   open a file is not evidence that an id comes out of it: a header past the
+ *   reader's ceiling is perfectly readable and yields nothing;
  * - `root`'s snapshot is readable if it exists, because
  *   {@link rebuildSessionLocator} refuses to publish over one it cannot read
  *   and so recovers nothing.
@@ -201,7 +203,8 @@ function reindexDemonstrablyRecovers(root: string, relative: string, id: string)
 		const file = path.join(root, relative);
 		// The walk collects a file, following a symlinked transcript as it does.
 		if (!fs.statSync(file).isFile()) return false;
-		if (generatedNameId(file) !== id) fs.accessSync(file, fs.constants.R_OK);
+		// Derive the id, rather than checking we are allowed to try.
+		if (generatedNameId(file) !== id && sessionHeaderIdSync(file) !== id) return false;
 		try {
 			fs.accessSync(path.join(root, SESSION_LOCATOR_BASE_FILE), fs.constants.R_OK);
 		} catch (error) {
@@ -763,16 +766,28 @@ export async function rebuildSessionLocator(root: string): Promise<SessionLocato
 	const walked: string[] = [];
 	for (let i = 0; i < files.length; i += HEADER_READ_CONCURRENCY) {
 		const batch = files.slice(i, i + HEADER_READ_CONCURRENCY);
-		const headerIds = await Promise.all(batch.map(file => sessionIdOfFile(file).catch(() => undefined)));
+		// Keep each failure, rather than deciding afterwards whether one happened:
+		// a read can fail for reasons a permission check passes (descriptor
+		// exhaustion, EIO, a header past the loader's ceiling), and a rebuild that
+		// silently drops those publishes an incomplete snapshot reporting success.
+		const headers = await Promise.all(
+			batch.map(file =>
+				sessionIdOfFile(file).then(
+					id => ({ id }),
+					(error: unknown) => ({ id: undefined, error }),
+				),
+			),
+		);
+		const headerIds = headers.map(header => header.id);
 		for (let j = 0; j < batch.length; j++) {
 			const relative = relativeInside(resolvedRoot, batch[j]);
 			if (relative === undefined) continue;
-			if (!headerIds[j]) {
-				try {
-					await fs.promises.access(batch[j], fs.constants.R_OK);
-				} catch (error) {
-					result.unreadable.push(unreadableEntry(batch[j], error));
-				}
+			const failure = headers[j].error;
+			if (failure !== undefined) result.unreadable.push(unreadableEntry(batch[j], failure));
+			else if (!headerIds[j] && generatedNameId(batch[j]) === undefined) {
+				// Read cleanly, yielded no id, and the name records none either: the
+				// row cannot be derived, and nothing else would say so.
+				result.unreadable.push(unreadableEntry(batch[j], new Error("no session id in its header or its name")));
 			}
 			// A generated `<timestamp>_<id>.jsonl` that no longer reads as that
 			// session (replaced, or unreadable now) is also recorded under the id

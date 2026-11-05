@@ -780,36 +780,42 @@ describe("session index: lookups by id", () => {
 			const childId = "019a000e-0000-7000-8000-000000000001";
 			const child = path.join(getSessionsDir(), "--race--", "parent", "Worker.jsonl");
 			writeTranscript(child, childId, "/r");
-			fs.chmodSync(child, 0o000);
-			// Hold the first reindex right after it has seen the file unreadable.
-			const access = fs.promises.access.bind(fs.promises);
-			const sawUnreadable = Promise.withResolvers<void>();
+			// Hold the first reindex after its walk, just before it takes the
+			// per-root publish lock: `realpath` of the root is the last thing it
+			// does outside the lock. (It used to be held at a permission probe
+			// that no longer exists: a rebuild now keeps the read failure itself
+			// rather than asking afterwards whether one happened.)
+			const realpath = fs.promises.realpath.bind(fs.promises);
+			const walked = Promise.withResolvers<void>();
 			const resume = Promise.withResolvers<void>();
 			let paused = false;
-			const accessSpy = spyOn(fs.promises, "access").mockImplementation(async (file, mode) => {
-				const result = access(file, mode);
-				if (!paused && path.resolve(String(file)) === child) {
+			const realpathSpy = spyOn(fs.promises, "realpath").mockImplementation(async (target, options) => {
+				const result = await realpath(target, options);
+				if (!paused && String(target) === getSessionsDir()) {
 					paused = true;
-					await result.catch(() => undefined);
-					sawUnreadable.resolve();
+					walked.resolve();
 					await resume.promise;
 				}
 				return result;
 			});
+			// A second session the first reindex never saw: if its publish
+			// overwrote rather than merged, this row would be gone.
+			const laterId = "019a000e-0000-7000-8000-000000000002";
+			const later = path.join(getSessionsDir(), "--race--", "parent", "Later.jsonl");
 			try {
 				const stale = rebuildSessionLocator(getSessionsDir());
-				await sawUnreadable.promise;
-				fs.chmodSync(child, 0o600);
-				expect((await rebuildSessionLocator(getSessionsDir())).indexed).toBe(1);
-				expect((await resolveResumableSession(childId, cwdB))?.session.path).toBe(child);
+				await walked.promise;
+				writeTranscript(later, laterId, "/r");
+				expect((await rebuildSessionLocator(getSessionsDir())).indexed).toBe(2);
+				expect((await resolveResumableSession(laterId, cwdB))?.session.path).toBe(later);
 				resume.resolve();
 				await stale;
 			} finally {
 				resume.resolve();
-				accessSpy.mockRestore();
-				fs.chmodSync(child, 0o600);
+				realpathSpy.mockRestore();
 			}
 			expect((await resolveResumableSession(childId, cwdB))?.session.path).toBe(child);
+			expect((await resolveResumableSession(laterId, cwdB))?.session.path).toBe(later);
 		});
 
 		it.skipIf(unlessRoot)(
@@ -956,11 +962,12 @@ describe("session index: lookups by id", () => {
 			},
 		);
 
-		// The shape of a path is not evidence that a rebuild recovers it: the
-		// walk must be able to list the bucket, and the reindex must be able to
-		// publish. Each case here is a well-shaped path under a readable root
-		// whose recovery is nonetheless impossible, so a quiet
-		// "`omp session reindex` rebuilds it" would be a false promise.
+		// The shape of a path is not evidence that a rebuild recovers it, and
+		// neither is permission to open its transcript: the walk must be able to
+		// list the bucket, an id must actually come out of the file, and the
+		// reindex must be able to publish. Each case here is a well-shaped path
+		// under a readable root whose recovery is nonetheless impossible, so a
+		// quiet "`omp session reindex` rebuilds it" would be a false promise.
 		for (const { what, obstruct } of [
 			{
 				what: "a bucket the walk cannot list",
@@ -978,6 +985,22 @@ describe("session index: lookups by id", () => {
 				what: "a transcript whose bytes cannot be read",
 				obstruct: (sessions: string, bucket: string, file: string) => fs.chmodSync(file, 0o000),
 			},
+			{
+				// Readable, well-formed, and still yields no id: the first record
+				// runs past the header reader's ceiling, so the rebuild derives
+				// nothing from it. Permission was never the question.
+				what: "a readable transcript whose header the rebuild cannot reach",
+				obstruct: (sessions: string, bucket: string, file: string) => {
+					const header = JSON.parse(fs.readFileSync(file, "utf8").split("\n")[0]) as Record<string, unknown>;
+					header.title = "x".repeat(1024 * 1024);
+					fs.writeFileSync(file, `${JSON.stringify(header)}\n`);
+				},
+			},
+			{
+				// Nothing in the bytes and nothing in the name.
+				what: "a transcript carrying no session id at all",
+				obstruct: (sessions: string, bucket: string, file: string) => fs.writeFileSync(file, ""),
+			},
 		]) {
 			it.skipIf(unlessRoot)(`reports a failed index append left unrecoverable by ${what}`, async () => {
 				const sessions = getSessionsDir();
@@ -985,9 +1008,11 @@ describe("session index: lookups by id", () => {
 				fs.mkdirSync(bucket, { recursive: true });
 				const id = "019a0018-0000-7000-8000-000000000001";
 				// A name that does NOT record the id, so deriving the row needs the
-				// file's header — as it does for every subagent transcript.
+				// file's header — as it does for every subagent transcript. The
+				// header is real, so the baseline below is genuinely recoverable
+				// and the quiet control means something.
 				const file = path.join(bucket, "Worker.jsonl");
-				fs.writeFileSync(file, "");
+				writeTranscript(file, id, cwdA);
 				const log = path.join(sessions, SESSION_LOCATOR_FILE);
 				fs.writeFileSync(log, "");
 				const warn = spyOn(logger, "warn").mockImplementation(() => {});
