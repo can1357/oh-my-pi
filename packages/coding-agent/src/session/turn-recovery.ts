@@ -2359,6 +2359,12 @@ export class TurnRecovery {
 				// candidate is still active silently drops a reasoning-capable primary's
 				// configured effort and the model restore never reapplies it.
 				await this.#host.setModelWithProviderSessionReset(previousModel);
+				// The model restore's reconciliation awaited: this is a fresh ownership
+				// window. An explicit selection landing in that window advances
+				// `#fallbackGeneration` and installs the newer model and its configured
+				// effort; applying the cancelled turn's saved effort on top would journal
+				// an older value over the user's newer choice.
+				if (generation !== this.#fallbackGeneration || this.#host.model() !== previousModel) return false;
 				this.#host.setThinkingLevel(currentThinkingLevel);
 				// The pre-swap synchronization may already have committed the candidate's
 				// base prompt (edit-mode or inline-descriptor change) before cancellation

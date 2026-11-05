@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import type { AgentMessage, SyntheticToolResultDetails } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { type AssistantMessage, Effort, type ToolResultMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -242,6 +242,83 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		expect(thinkingChanges).toEqual([]);
 		expect(emittedEvents).toEqual([]);
 	});
+	it("keeps rollback ownership when an explicit selection lands during the restore swap", async () => {
+		const fallback = getBundledModel("openai", "gpt-4o-mini");
+		if (!fallback) throw new Error("Expected bundled fallback model");
+		const selectedModel = { ...fallback, baseUrl: "https://user-selected-route.example" };
+		let activeModel: Model = model;
+		const fallbackApplied = Promise.withResolvers<void>();
+		const syncStarted = Promise.withResolvers<void>();
+		const releaseSync = Promise.withResolvers<void>();
+		const restoreStarted = Promise.withResolvers<void>();
+		const releaseRestore = Promise.withResolvers<void>();
+		const modelChanges: string[] = [];
+		const emittedEvents: string[] = [];
+		const thinkingChanges: unknown[] = [];
+		const host = createHost(model, modelRegistry);
+		host.model = () => activeModel;
+		host.configuredThinkingLevel = () => Effort.High;
+		host.setThinkingLevel = level => thinkingChanges.push(level);
+		host.sessionManager = {
+			appendModelChange: (selector: string) => modelChanges.push(selector),
+			getLeafId: () => null,
+			discardEntryDurably: async () => {},
+			getSessionId: () => "replay-unsafe-session",
+		} as never;
+		host.setModelWithProviderSessionReset = async nextModel => {
+			activeModel = nextModel;
+			if (nextModel === fallback) {
+				fallbackApplied.resolve();
+			} else if (nextModel === model) {
+				// The rollback's restore swap is a fresh ownership window: an explicit
+				// selection lands here while the reconciliation is still pending.
+				restoreStarted.resolve();
+				await releaseRestore.promise;
+			}
+		};
+		host.syncAfterModelChange = async () => {
+			syncStarted.resolve();
+			await releaseSync.promise;
+		};
+		host.emitSessionEvent = async event => {
+			emittedEvents.push(event.type);
+		};
+		const recovery = new TurnRecovery(host);
+		const controller = new AbortController();
+		const applying = recovery.applyRetryFallbackCandidate(
+			"default",
+			{
+				raw: `${fallback.provider}/${fallback.id}`,
+				provider: fallback.provider,
+				id: fallback.id,
+				thinkingLevel: undefined,
+			},
+			`${model.provider}/${model.id}`,
+			{ pinFallback: true, apiKey: "***", signal: controller.signal },
+		);
+
+		await fallbackApplied.promise;
+		// Abort only after the post-swap ownership check: gate the post-swap
+		// synchronization so the abort lands inside it, reaching the rollback path
+		// that durably discards the fallback `model_change`.
+		await syncStarted.promise;
+		controller.abort();
+		releaseSync.resolve();
+		await restoreStarted.promise;
+		// The explicit selection advances the fallback generation and installs the
+		// newer model while the restore's own reconciliation is still pending.
+		activeModel = selectedModel;
+		recovery.clearActiveRetryFallback();
+		releaseRestore.resolve();
+		const committed = await applying;
+
+		expect(committed).toBe(false);
+		// The cancelled turn's effort must not be journaled over the newer
+		// selection's choice: only the fallback application itself touches effort.
+		expect(thinkingChanges).toHaveLength(1);
+		expect(activeModel).toBe(selectedModel);
+	});
+
 	it("rolls back a committed fallback when cancellation lands during post-swap synchronization", async () => {
 		const fallback = getBundledModel("openai", "gpt-4o-mini");
 		if (!fallback) throw new Error("Expected bundled fallback model");

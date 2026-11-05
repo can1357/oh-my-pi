@@ -414,6 +414,34 @@ describe("early quota reset recovery", () => {
 		}
 	});
 
+	it("honors a sibling non-quota cooldown that lands while the recovery probe is in flight", async () => {
+		env = await createEnv();
+		const { registry } = env;
+		const clock = useMockClock();
+		scriptedReports.anthropic = { status: "exhausted" };
+		const options = { sessionId: "session-a", reserveFraction: 0.1 };
+		// A sibling's long quota-scoped cooldown anchors the shared record; session
+		// A's own shorter deadline is quota-scoped too (usage-limit failure time
+		// recorded), so no non-quota deadline applies yet.
+		registry.suppressSelector(PRIMARY_SELECTOR, clock.now() + 60 * 60_000, clock.now());
+		registry.suppressSelector(PRIMARY_SELECTOR, clock.now() + 30_000, clock.now(), "session-a");
+		clock.advance(100);
+		const started = Promise.withResolvers<void>();
+		const released = Promise.withResolvers<void>();
+		fetchGate = { promise: released.promise, open: () => released.resolve(), started: () => started.resolve() };
+		const probe = registry.isSelectorSuppressedWithRecovery(PRIMARY_SELECTOR, options);
+		await started.promise;
+		// Session A's quota deadline lapses while the probe is in flight, and a
+		// sibling session reports a pure rate limit (no usage-limit failure time):
+		// this installs a non-quota deadline on the shared selector record.
+		clock.advance(60_000);
+		registry.suppressSelector(PRIMARY_SELECTOR, clock.now() + 30 * 60_000);
+		released.resolve();
+		// A's expired session-local entry is stale, not fresh evidence: the newly
+		// installed non-quota deadline must keep the selector suppressed.
+		expect(await probe).toBe(true);
+	});
+
 	it("keeps an explicit account pin when recovery evidence would release a warm affinity", async () => {
 		env = await createEnv();
 		const { registry, authStorage } = env;

@@ -4272,7 +4272,11 @@ export class ModelRegistry {
 				const current = this.#activeSuppressedRecord(normalizedSelector);
 				if (current === undefined) return false;
 				// The session's own deadline can also lapse during the probe while a
-				// sibling session's longer cooldown keeps the selector-wide record alive.
+				// sibling session's longer non-quota cooldown keeps the selector-wide
+				// record alive. That deadline applies regardless of quota evidence: the
+				// stale session entry here is not fresh evidence, so honor the active
+				// non-quota deadline before reading the session-local expiry.
+				if (current.record.nonQuotaUntilMs > Date.now()) return true;
 				const currentSessionUntilMs =
 					options.sessionId !== undefined ? current.record.untilMsBySession?.get(options.sessionId) : undefined;
 				return currentSessionUntilMs === undefined || currentSessionUntilMs > Date.now();
