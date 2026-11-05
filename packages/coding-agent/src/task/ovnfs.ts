@@ -1,5 +1,6 @@
 /**
- * ovnfs checkouts as isolated subagent workspaces (experimental, `ovnfs.enabled`).
+ * ovnfs checkouts as isolated subagent workspaces (experimental, `ovnfs.enabled`,
+ * used when `isolation.backend` is auto and the ovnfs binary is found).
  *
  * Instead of cloning the repository, an isolated run works in an ovnfs checkout: a
  * copy-on-write view of the repository served by the ovnfs daemon, ready in
@@ -20,7 +21,7 @@
  * removes the checkouts of runs that crashed ({@link releaseOvnfsCheckout}).
  *
  * @example
- * // Picked by the task runner when `ovnfs.enabled` is on:
+ * // Picked by the task runner when ovnfs is found and `isolation.backend` is auto:
  * const open = ovnfsWorkspace("/work/ovnfs/bin/ovnfs");
  * const workspace = await open(repoRoot, "AuthRefactor"); // workspace.dir: /work/.tree/agents/omp-authrefactor-1a2b3c
  */
@@ -277,7 +278,7 @@ export function ovnfsWorkspace(command: string): OpenWorkspace {
 		} catch (err) {
 			await fs.rm(baseDir, { recursive: true, force: true });
 			throw new Error(
-				`ovnfs isolation failed: ${err instanceof Error ? err.message : String(err)} (turn off ovnfs.enabled to use native isolation)`,
+				`ovnfs isolation failed: ${err instanceof Error ? err.message : String(err)} (turn off ovnfs.enabled or set isolation.backend to use native isolation)`,
 			);
 		}
 	};

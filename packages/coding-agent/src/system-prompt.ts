@@ -611,7 +611,7 @@ export interface BuildSystemPromptOptions {
 	xdevDocs?: string;
 	/** Whether Auto-QA grievance reporting is enabled; renders the `xd://report_issue` note. */
 	autoQaEnabled?: boolean;
-	/** ovnfs command (`ovnfs.enabled`); renders the separate-checkout guidance. */
+	/** ovnfs command when `ovnfs.enabled` and the binary is found (`ovnfsCommand`); renders the separate-checkout guidance. */
 	ovnfs?: string;
 	/** Whether active `write` is restricted to xd:// dispatch and the plan artifact sandbox. */
 	writeTransportOnly?: boolean;
