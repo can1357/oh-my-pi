@@ -64,15 +64,12 @@ interface SpotlightWireRequest {
 function fakeSpotlight(options: {
 	score?: (item: string) => number;
 	hang?: boolean;
-	/** Sees each ranking request's `source`. */
-	onSource?: (source: string) => void;
 	/** Sees each ranking request's parsed JSON body. */
 	onRequest?: (request: SpotlightWireRequest) => void;
 }): typeof fetch {
 	return (async (_url: string | URL | Request, init?: RequestInit) => {
 		const body = JSON.parse(String(init?.body)) as SpotlightWireRequest;
 		if (body.items.length === 1 && body.items[0] === "ok") throw new Error("warm-up refused");
-		options.onSource?.(body.source);
 		options.onRequest?.(body);
 		if (options.hang) {
 			const aborted = Promise.withResolvers<never>();
@@ -159,8 +156,7 @@ describe("spotlight probe prefixes", () => {
 	function expectPrefixProbes(requests: SpotlightWireRequest[]): void {
 		expect(requests).toHaveLength(1);
 		for (const { probe } of Object.values(requests[0]!.questions)) {
-			expect(probe.endsWith("`")).toBe(true);
-			expect(probe).toMatch(/\S$/);
+			expect(probe).toMatch(/`$/);
 		}
 	}
 
@@ -724,7 +720,7 @@ describe("spotlight shaping of any tool", () => {
 					const file = /(?:input, |key-)(\d+)/.exec(item);
 					return file ? 0.4 - Number(file[1]) / 100 : 0.1;
 				},
-				onSource,
+				onRequest: request => onSource?.(request.source),
 			}),
 		);
 	it("cuts a long grep output to the ranked lines under their file headings, recoverable from its artifact", async () => {
