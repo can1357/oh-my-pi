@@ -112,6 +112,51 @@ fn closer_reaches_600(bounded_only: bool) -> i32 {
 	libc::WEXITSTATUS(status)
 }
 
+/// The check of each descriptor one by one costs one `close(2)` per
+/// number below its bound, and the forked child of every deferred
+/// background spawn pays it before its first redirection. The bound must
+/// therefore be what the kernel says it can give out — Linux's
+/// `fs.nr_open`, `kern.maxfilesperproc` on macOS and the BSDs — and not
+/// a constant above it. macOS leaves the hard open-file limit at
+/// `RLIM_INFINITY` and `kern.maxfilesperproc` at 24,576, so a constant
+/// of 1,048,576 there is 42 times the numbers the kernel can ever hand
+/// out, and the whole cost of the arm.
+#[test]
+fn the_sweep_bound_is_the_kernel_ceiling_and_not_a_constant_above_it() {
+	// A macOS host: soft 10,240, hard RLIM_INFINITY, ceiling 24,576.
+	assert_eq!(super::sweep_bound(Some(24_576), Some(10_240), None), 24_576, "macOS defaults");
+	// Lowered limits do not lower it: a descriptor opened before the
+	// lowering stays open and valid above them.
+	assert_eq!(super::sweep_bound(Some(24_576), Some(64), Some(64)), 24_576, "lowered limits");
+	// A limit an administrator raised above the published ceiling wins.
+	assert_eq!(
+		super::sweep_bound(Some(24_576), Some(65_536), Some(65_536)),
+		65_536,
+		"a limit above the ceiling"
+	);
+	// Linux's published default.
+	assert_eq!(super::sweep_bound(Some(1 << 20), Some(1024), None), 1 << 20, "Linux defaults");
+	// Nothing published: the limits cannot bound it on their own, so the
+	// last resort stands.
+	assert_eq!(super::sweep_bound(None, Some(64), Some(64)), 1 << 20, "no published ceiling");
+}
+
+/// This host publishes its ceiling, and the bound the spawn path uses
+/// must be that number raised to any higher limit, never a constant
+/// chosen without reading it.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn the_hosts_sweep_bound_comes_from_the_number_its_kernel_publishes() {
+	let published: u64 = std::fs::read_to_string("/proc/sys/fs/nr_open")
+		.expect("Linux publishes fs.nr_open")
+		.trim()
+		.parse()
+		.expect("fs.nr_open is a number");
+	let (soft, hard) = crate::sys::rlimit::get(Rlimit::Nofile).unwrap();
+	let want = published.max(soft.unwrap_or(0)).max(hard.unwrap_or(0));
+	assert_eq!(i64::from(super::descriptor_bound()), i64::try_from(want).unwrap());
+}
+
 struct Unpark(thread::Thread);
 
 impl Wake for Unpark {

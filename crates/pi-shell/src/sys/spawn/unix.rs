@@ -1018,20 +1018,84 @@ fn errno() -> i32 {
 	io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
-/// One past the highest descriptor this process can hold, for the child's
-/// check of every descriptor when it can neither close whole ranges nor
-/// list them. Never below 1,048,576, Linux's default `nr_open` and the
-/// highest number a process gets unless an administrator raises it; above
-/// it when a limit is higher. The current limits cannot bound it on their
-/// own: both of them can be lowered under a descriptor already open, which
-/// stays open and valid above them. Read before a fork.
-fn descriptor_bound() -> i32 {
-	const MOST: u64 = 1 << 20;
-	let limit = match rlimit::get(Rlimit::Nofile) {
-		Ok((soft, hard)) => soft.unwrap_or(0).max(hard.unwrap_or(0)).max(MOST),
-		Err(_) => MOST,
+/// The kernel's own ceiling on the descriptor numbers it will give this
+/// process, from where the operating system publishes it: `fs.nr_open`
+/// on Linux, `kern.maxfilesperproc` on macOS and the BSDs. `None` where
+/// the system publishes none, or it cannot be read. For the parent,
+/// before a fork: on Linux it reads a file.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn kernel_descriptor_ceiling() -> Option<u64> {
+	fs::read_to_string("/proc/sys/fs/nr_open")
+		.ok()?
+		.trim()
+		.parse()
+		.ok()
+}
+
+/// [`kernel_descriptor_ceiling`] from `kern.maxfilesperproc`.
+#[cfg(any(
+	target_vendor = "apple",
+	target_os = "freebsd",
+	target_os = "dragonfly",
+	target_os = "netbsd",
+	target_os = "openbsd"
+))]
+fn kernel_descriptor_ceiling() -> Option<u64> {
+	let mut name = [libc::CTL_KERN, libc::KERN_MAXFILESPERPROC];
+	let mut value: libc::c_int = 0;
+	let mut len = size_of::<libc::c_int>();
+	// SAFETY: `name` holds the two elements its length says, and the
+	// kernel writes one `c_int` into `value`, whose size it is given.
+	let read = unsafe {
+		libc::sysctl(
+			name.as_mut_ptr(),
+			2,
+			(&raw mut value).cast(),
+			&raw mut len,
+			std::ptr::null_mut(),
+			0,
+		)
 	};
-	i32::try_from(limit).unwrap_or(i32::MAX)
+	(read == 0 && value > 0).then_some(value as u64)
+}
+
+/// [`kernel_descriptor_ceiling`] where the system publishes nothing.
+#[cfg(not(any(
+	target_os = "linux",
+	target_os = "android",
+	target_vendor = "apple",
+	target_os = "freebsd",
+	target_os = "dragonfly",
+	target_os = "netbsd",
+	target_os = "openbsd"
+)))]
+fn kernel_descriptor_ceiling() -> Option<u64> {
+	None
+}
+
+/// One past the highest descriptor this process can hold, for the
+/// child's check of every descriptor when it can neither close whole
+/// ranges nor list them, from the kernel's `ceiling` and the current
+/// `soft` and `hard` open-file limits (`None` for `RLIM_INFINITY`).
+/// Never below 1,048,576, Linux's default `nr_open` and the highest
+/// number a process gets unless an administrator raises it; above it
+/// when a limit is higher. The current limits cannot bound it on their
+/// own: both of them can be lowered under a descriptor already open,
+/// which stays open and valid above them.
+fn sweep_bound(ceiling: Option<u64>, soft: Option<u64>, hard: Option<u64>) -> i32 {
+	const MOST: u64 = 1 << 20;
+	let bound = ceiling
+		.unwrap_or(0)
+		.max(soft.unwrap_or(0))
+		.max(hard.unwrap_or(0))
+		.max(MOST);
+	i32::try_from(bound).unwrap_or(i32::MAX)
+}
+
+/// [`sweep_bound`] for this process, read before a fork.
+fn descriptor_bound() -> i32 {
+	let (soft, hard) = rlimit::get(Rlimit::Nofile).unwrap_or((None, None));
+	sweep_bound(kernel_descriptor_ceiling(), soft, hard)
 }
 
 /// Close every descriptor that is not one of `keep` (the command's own,
