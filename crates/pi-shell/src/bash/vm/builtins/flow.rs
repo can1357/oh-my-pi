@@ -67,6 +67,14 @@ pub fn source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		ctx.builtin_usage();
 		return done(2);
 	};
+	// bash's `source_file`: a `.` with a file operand starts with no `set` of
+	// its own recorded, whether or not it was given arguments and whether or
+	// not the file can be read. So an enclosing file's `set` does not make
+	// this one keep its parameters, a `set` in this one reaches the file
+	// around it when this one saved nothing, and a `.` of a missing file, a
+	// directory or a binary file ends the enclosing file's record too. A
+	// usage error above leaves it alone: that `.` never started.
+	ctx.vp.args_set = false;
 	let posix = ctx.option(OptId::Posix)?;
 	let mut path = None;
 	if !file.contains(&b'/') {
@@ -130,11 +138,6 @@ pub fn source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	} else {
 		text.iter().copied().filter(|&c| c != 0).collect()
 	};
-	// bash's `source_file`: the file starts with no `set` of its own
-	// recorded, whether or not it was given arguments. So an enclosing
-	// file's `set` does not make this one keep its parameters, and a `set`
-	// in this one reaches the file around it when this one saved nothing.
-	ctx.vp.args_set = false;
 	let restore = source_args(ctx, rest, true)?;
 	// As for `eval`: the file sees the caller's `$?`.
 	push_script(ctx.vp, &text, 1, ScriptKind::Source);

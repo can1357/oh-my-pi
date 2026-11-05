@@ -137,6 +137,95 @@ async fn a_sourced_file_keeps_its_parameters_only_after_the_set_builtin() {
 	])
 	.await;
 }
+/// Calling a function, and starting another `.` file whose read fails, both
+/// end the enclosing file's record of a `set` of its own, so the caller's
+/// parameters come back. Measured on Bash 5.2.21 and 5.3.0.
+#[tokio::test]
+async fn a_function_call_and_a_failed_source_end_the_set_record() {
+	const RUN: &str = "set -- p1 p2\n. ./lib.sh A B C\necho \"after: $#:[$*]\"";
+	assert_rows(&[
+		// A function call with arguments, and one without.
+		(&[("lib.sh", "set -- S1 S2\ng(){ :; }\ng G\n")], RUN, "after: 2:[p1 p2]\n"),
+		(&[("lib.sh", "set -- S1 S2\ng(){ :; }\ng\n")], RUN, "after: 2:[p1 p2]\n"),
+		// Through `eval`, and nested.
+		(&[("lib.sh", "set -- S1 S2\ng(){ :; }\neval g\n")], RUN, "after: 2:[p1 p2]\n"),
+		(&[("lib.sh", "set -- S1 S2\nh(){ :; }\ng(){ h; }\ng\n")], RUN, "after: 2:[p1 p2]\n"),
+		// A `set` after the call is the file's own again.
+		(&[("lib.sh", "g(){ :; }\ng\nset -- S1 S2\n")], RUN, "after: 2:[S1 S2]\n"),
+		// The call ran in a subshell, so it ended nothing here.
+		(&[("lib.sh", "set -- S1 S2\ng(){ :; }\n( g )\n")], RUN, "after: 2:[S1 S2]\n"),
+		(&[("lib.sh", "set -- S1 S2\ng(){ :; }\ng | cat\n")], RUN, "after: 2:[S1 S2]\n"),
+		// A builtin and an external end nothing.
+		(&[("lib.sh", "set -- S1 S2\ntrue\n:\n")], RUN, "after: 2:[S1 S2]\n"),
+		(&[("lib.sh", "set -- S1 S2\n/bin/true\n")], RUN, "after: 2:[S1 S2]\n"),
+		// A `.` whose file is missing, or a directory.
+		(&[("lib.sh", "set -- S1 S2\n. ./absent Q 2>/dev/null\n")], RUN, "after: 2:[p1 p2]\n"),
+		(&[("lib.sh", "set -- S1 S2\n. ./absent 2>/dev/null\n")], RUN, "after: 2:[p1 p2]\n"),
+		(
+			&[("lib.sh", "set -- S1 S2\nmkdir -p adir\n. ./adir 2>/dev/null\n")],
+			RUN,
+			"after: 2:[p1 p2]\n",
+		),
+		// A `.` with no operand at all is a usage error, not a file: it ends
+		// nothing.
+		(&[("lib.sh", "set -- S1 S2\n. 2>/dev/null\n")], RUN, "after: 2:[S1 S2]\n"),
+	])
+	.await;
+}
+
+/// A sourced file's RETURN trap runs while the file's own parameters and
+/// its `BASH_ARGV` push are still in place, and after its `FUNCNAME`,
+/// `BASH_SOURCE` and `BASH_LINENO` level has gone. Measured on Bash 5.2.21
+/// and 5.3.0.
+#[tokio::test]
+async fn a_sourced_files_return_trap_runs_before_the_parameters_go_back() {
+	let show = "trap 'echo \"  trap: $#:[$*] ARGC=[${BASH_ARGC[*]}] S0=${BASH_SOURCE[0]##*/} \
+	            F0=${FUNCNAME[0]}\"' RETURN\n";
+	assert_rows(&[
+		// At the top level the trap sees the file's parameters, and its own
+		// `set` is the file's, so the file keeps it. `BASH_SOURCE` is empty
+		// there: the file's level has gone and a command string has no
+		// `main` level.
+		(
+			&[("lib.sh", &format!("{show}set -- IN FILE\n"))],
+			"set -- p1 p2\nshopt -s extdebug\n. ./lib.sh A B\necho \"after: $#:[$*]\"",
+			"  trap: 2:[IN FILE] ARGC=[2 2] S0= F0=\nafter: 2:[IN FILE]\n",
+		),
+		(
+			&[("lib.sh", &format!("{show}:\n"))],
+			"set -- p1 p2\nshopt -s extdebug\n. ./lib.sh A B\necho \"after: $#:[$*]\"",
+			"  trap: 2:[A B] ARGC=[2 2] S0= F0=\nafter: 2:[p1 p2]\n",
+		),
+		// Inside a function the function's parameters always come back, and
+		// the function's own RETURN trap runs after them.
+		(
+			&[("lib.sh", &format!("{show}:\n"))],
+			"set -- p1 p2\nshopt -s extdebug\nf() { . ./lib.sh A B; echo \"  f: $#:[$*]\"; }\nf FUN \
+			 PARAM\necho \"after: $#:[$*]\"",
+			"  trap: 2:[A B] ARGC=[2 2 2] S0=bash F0=f\n  f: 2:[FUN PARAM]\n  trap: 2:[FUN PARAM] \
+			 ARGC=[2 2] S0=bash F0=f\nafter: 2:[p1 p2]\n",
+		),
+	])
+	.await;
+}
+
+/// `extdebug` switched on inside the caller still gives a callout's operand
+/// the caller's arguments as the `BASH_ARGV` base, not the command the
+/// callout runs its operand from.
+#[tokio::test]
+async fn a_callout_operand_sees_the_callers_argument_base() {
+	let report = "report() { echo \"  ARGC=[${BASH_ARGC[*]}] ARGV=[${BASH_ARGV[*]}]\"; }";
+	assert_callout_matches_subshell(&[(
+		&[],
+		&format!(
+			"set -- p1 p2\n{report}\nf() {{ shopt -s extdebug; timeout 5 report A B; }}\nf X Y Z"
+		),
+		&[],
+		&format!("set -- p1 p2\n{report}\nf() {{ shopt -s extdebug; ( report A B ); }}\nf X Y Z"),
+		"  ARGC=[2 3] ARGV=[B A Z Y X]\n",
+	)])
+	.await;
+}
 
 /// Each `.` file decides on its own: entering one forgets the enclosing
 /// file's `set`, and a nested file that ended gives the one around it nothing

@@ -4650,9 +4650,16 @@ pub const ENTRY_DEBUG: u32 = u32::MAX;
 
 /// Start the RETURN trap of function or `.` frame `target`, the frames
 /// above it to unwind when it ends. Its `$LINENO` is the function body's
-/// line, or the line of the `.` command, whose level of the call-stack
-/// arrays has already ended (bash runs it after `_evalfile`). `false` when
-/// no trap runs.
+/// line, or the line of the `.` command.
+///
+/// bash runs a `.` file's RETURN trap from `_evalfile`, which has already
+/// popped the file's `FUNCNAME`/`BASH_SOURCE`/`BASH_LINENO` level, and
+/// before `source_builtin` puts the positional parameters back and pops
+/// the `BASH_ARGV` push. So the level is ended here
+/// ([`super::callstack::end_source`]) rather than truncated, and the trap
+/// sees the file's own parameters and its argument push; the unwind that
+/// follows pops the frame and puts the parameters back. Measured on Bash
+/// 5.2.21 and 5.3.0.
 fn return_trap(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, target: usize) -> bool {
 	let body = match &vp.frames[target] {
 		Frame { kind: FrameKind::Function { .. }, unit: Some(unit), .. } => {
@@ -4662,7 +4669,8 @@ fn return_trap(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, target: usize) -
 	};
 	let line = body.or_else(|| {
 		let line = super::callstack::source_line(vp, target + 1);
-		super::callstack::truncate(&mut k.root, cx.store, vp, target);
+		super::callstack::truncate(&mut k.root, cx.store, vp, target + 1);
+		super::callstack::end_source(vp, target + 1);
 		line
 	});
 	if !start_trap(k, vp, cx, TrapKey::Return) {

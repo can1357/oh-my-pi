@@ -59,6 +59,12 @@ pub enum CallKind {
 		argv:    Option<Vec<BString>>,
 		/// What the end of the file puts back (`. file args`).
 		restore: Option<Box<SourceSave>>,
+		/// bash runs a `.` file's RETURN trap between `_evalfile`, which
+		/// pops the `FUNCNAME`/`BASH_SOURCE`/`BASH_LINENO` level, and
+		/// `source_builtin`, which puts the positional parameters back and
+		/// pops the `BASH_ARGV` push. While the trap runs this is set: the
+		/// level is out of those three arrays and still on the other two.
+		ended:   bool,
 		/// zsh FUNCTION_ARGZERO at the `.`: `$0` while the file runs (the
 		/// file name as given).
 		argzero: Option<BString>,
@@ -101,6 +107,18 @@ fn has_main(store: &mut dyn StateStore, vp: &Vproc) -> Result<bool, StoreError> 
 	))
 }
 
+/// Whether a push is a level of `FUNCNAME`, `BASH_SOURCE`, `BASH_LINENO`
+/// and `caller`: the `BASH_ARGV` base never is, and a `.` file whose
+/// RETURN trap is running has already left them ([`CallKind::Source`]'s
+/// `ended`) while it is still on `BASH_ARGC`/`BASH_ARGV`.
+const fn level_visible(kind: &CallKind) -> bool {
+	match kind {
+		CallKind::Args(_) => false,
+		CallKind::Source { ended, .. } => !*ended,
+		CallKind::Function { .. } => true,
+	}
+}
+
 /// One of bash's call-stack arrays as `vp` sees it, innermost level first
 /// (`FUNCNAME`, `BASH_SOURCE`, `BASH_LINENO`, `BASH_ARGC`, `BASH_ARGV`).
 /// `None` for another name, and for `FUNCNAME` outside any function (bash
@@ -116,12 +134,7 @@ pub fn array(
 	vp: &Vproc,
 	name: &[u8],
 ) -> Result<Option<Vec<BString>>, StoreError> {
-	let levels = || {
-		vp.calls
-			.iter()
-			.rev()
-			.filter(|c| !matches!(c.kind, CallKind::Args(_)))
-	};
+	let levels = || vp.calls.iter().rev().filter(|c| level_visible(&c.kind));
 	Ok(Some(match name {
 		b"FUNCNAME" => {
 			if !in_function(vp) {
@@ -252,10 +265,15 @@ pub fn definition_file(
 	store: &mut dyn StateStore,
 	vp: &Vproc,
 ) -> Result<BString, StoreError> {
-	let innermost = vp.calls.iter().rev().find_map(|c| match &c.kind {
-		CallKind::Function { file, .. } | CallKind::Source { file, .. } => Some(file),
-		CallKind::Args(_) => None,
-	});
+	let innermost = vp
+		.calls
+		.iter()
+		.rev()
+		.filter(|c| level_visible(&c.kind))
+		.find_map(|c| match &c.kind {
+			CallKind::Function { file, .. } | CallKind::Source { file, .. } => Some(file),
+			CallKind::Args(_) => None,
+		});
 	if let Some(file) = innermost {
 		return Ok(file.clone());
 	}
@@ -306,6 +324,11 @@ pub fn push_function(
 	line: u32,
 	args: &[BString],
 ) -> Result<(), StoreError> {
+	// bash's `execute_function` gives the function its own parameters, which
+	// ends the enclosing `.` file's record of a `set` of its own: a file that
+	// calls a function, with or without arguments, puts the caller's
+	// parameters back. Measured on Bash 5.2.21 and 5.3.0.
+	vp.args_set = false;
 	let argv = if state::option(&mut k.root, store, vp, OptId::Extdebug)? {
 		// The caller's parameters: the frame is pushed, its scope not yet.
 		let base = state::positional(&k.root, store, vp)?;
@@ -347,8 +370,10 @@ pub fn push_source(
 		None
 	};
 	let depth = vp.frames.len() as u32;
-	vp.calls
-		.push(Call { kind: CallKind::Source { file, line, argv, restore, argzero }, depth });
+	vp.calls.push(Call {
+		kind: CallKind::Source { file, line, argv, restore, argzero, ended: false },
+		depth,
+	});
 	Ok(())
 }
 
@@ -387,15 +412,54 @@ pub fn truncate(root: &mut state::Root, store: &mut dyn StateStore, vp: &mut Vpr
 	vp.calls.retain(|c| c.depth as usize <= frames);
 }
 
-/// zsh `$0` inside a `.` file run under FUNCTION_ARGZERO, when no function
-/// call is nearer: the file name as given. `None` when a function call
-/// (or nothing) is the innermost level.
 pub fn source_argzero(vp: &Vproc) -> Option<&BString> {
-	vp.calls.iter().rev().find_map(|c| match &c.kind {
-		CallKind::Source { argzero, .. } => Some(argzero.as_ref()),
-		CallKind::Function { .. } => Some(None),
-		CallKind::Args(_) => None,
-	})?
+	vp.calls
+		.iter()
+		.rev()
+		.filter(|c| level_visible(&c.kind))
+		.find_map(|c| match &c.kind {
+			CallKind::Source { argzero, .. } => Some(argzero.as_ref()),
+			CallKind::Function { .. } => Some(None),
+			CallKind::Args(_) => None,
+		})?
+}
+
+/// Take the `.` file read by frame `frames - 1` out of `FUNCNAME`,
+/// `BASH_SOURCE`, `BASH_LINENO` and `caller`, leaving its `BASH_ARGV` push
+/// and the positional parameters it saved: bash runs the file's RETURN
+/// trap between the two (`_evalfile` pops the level, `source_builtin`
+/// puts the parameters back afterwards).
+pub fn end_source(vp: &mut Vproc, frames: usize) {
+	if let Some(Call { kind: CallKind::Source { ended, .. }, .. }) = vp
+		.calls
+		.iter_mut()
+		.rev()
+		.find(|c| c.depth as usize == frames)
+	{
+		*ended = true;
+	}
+}
+
+/// Push bash's `init_bash_argv` base for a host callout about to replace
+/// `vp`'s positional parameters with its operand's: the subshell inherits
+/// the push, so the operand reads the caller's arguments on `BASH_ARGV`
+/// rather than the command the callout runs its operand from. Only under
+/// `extdebug`, which is the only state in which bash pushes a base when a
+/// level is entered.
+///
+/// # Errors
+///
+/// A store failure reading `extdebug` or the positional parameters.
+pub fn push_callout_base(
+	k: &mut Kernel,
+	store: &mut dyn StateStore,
+	vp: &mut Vproc,
+) -> Result<(), StoreError> {
+	if state::option(&mut k.root, store, vp, OptId::Extdebug)? {
+		let base = state::positional(&k.root, store, vp)?;
+		init_argv(vp, || base);
+	}
+	Ok(())
 }
 
 /// The calls a subshell of `vp` starts with: all of them, none tied to its

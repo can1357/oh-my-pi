@@ -1703,6 +1703,16 @@ impl Shell {
 		// caller's call-stack arrays (`FUNCNAME`, `BASH_SOURCE`,
 		// `BASH_LINENO`, `BASH_ARGC`, `BASH_ARGV`, and what `caller` reads
 		// from them), as `Vproc::fork` gives an ordinary `( … )` child.
+		// A callout that replaces the parameters pushes the caller's
+		// argument base first, or the child's own lazy push would record
+		// the command the callout runs its operand from as the shell's
+		// arguments.
+		if script.args.is_some()
+			&& let Some(store) = store.as_deref_mut()
+			&& let Err(err) = callstack::push_callout_base(&mut self.k, store, &mut self.procs[parent])
+		{
+			self.k.root.fail(err);
+		}
 		let calls = callstack::inherited(&self.procs[parent]);
 		let args_set = self.procs[parent].args_set;
 		let mut vp = Vproc::new(vpid, Some(parent_vpid), fds, cwd, Some(overlay), true);
