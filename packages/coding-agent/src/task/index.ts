@@ -244,8 +244,15 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string 
 	// Presence here means "the caller named this field", so every test reads the value rather than
 	// `Object.hasOwn`: an own key holding `undefined` names nothing, and internal callers do produce
 	// them — `repairTaskParams` and `copyTaskFields` both materialize `context`/`tasks` that way, so a
-	// `hasOwn` test refuses a call that asked for nothing. The rest of the file tests `!== undefined`
-	// for the same reason.
+	// `hasOwn` test refuses a call that asked for nothing. `guardBatchAgent` in ./types tests `agent`
+	// the same way for the same reason, before undeclared-key deletion.
+	//
+	// Two presence tests are deliberately NOT value tests. `#resultParams` reads
+	// `Object.hasOwn(params, "outputSchema")` because `resolveSchema` in ./structured-subagent tests
+	// presence the same way and the carrying chain (`resolveSpawnItems`, `spawnParamsFor`) uses `in`:
+	// an own `outputSchema: undefined` is how a caller says "no schema, and ignore the agent's own",
+	// and converting it would desynchronise the two and hand that agent's schema back to a caller
+	// that said none. `copyTaskFields`' is on its destination and controls preservation, not refusal.
 	// `schema` is not declared on `TaskParams`; it is the stale alias a caller may still send.
 	if ((params as { schema?: unknown }).schema !== undefined) {
 		return "The task tool uses `outputSchema`; rename the stale `schema` field.";
@@ -327,7 +334,9 @@ function invalidScalarReason(item: TaskItem | undefined, label: string): string 
 	for (const field of ["name", "agent"] as const) {
 		const value: unknown = item?.[field];
 		if (value !== undefined && typeof value !== "string") {
-			return `${label} has an invalid \`${field}\`: expected a string, got ${Bun.inspect(value)}.`;
+			// Truncated like every other place this file interpolates caller data: the value can be a
+			// whole array or object, and this string goes into the result the model reads.
+			return `${label} has an invalid \`${field}\`: expected a string, got ${truncateForPrompt(Bun.inspect(value))}.`;
 		}
 	}
 	return undefined;

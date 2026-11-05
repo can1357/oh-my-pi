@@ -26,7 +26,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
-import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import { type AgentDefinition, getTaskSchema } from "@oh-my-pi/pi-coding-agent/task/types";
 import { loadBundledAgents } from "@oh-my-pi/pi-coding-agent/task/agents";
 import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -1285,6 +1285,50 @@ describe("batch model placement", () => {
 		expect(getFirstText(result)).toContain(`invalid \`${field}\``);
 		expect(getFirstText(result)).not.toContain("TypeError");
 		expect(run).not.toHaveBeenCalled();
+	});
+
+	// The boundary the four value-tests above are drawn against, pinned from the other side.
+	//
+	// `guardBatchAgent` refuses inside the wire-schema narrow, and this asserts against the schema
+	// rather than the tool for a measured reason: the tool is `lenientArgValidation`, so a narrow
+	// rejection falls back to the raw arguments and `execute` proceeds anyway. A test driven through
+	// `tool.execute` is therefore green whichever way the narrow tests presence, which is how round 6
+	// found that restoring `Object.hasOwn` here left every committed test passing. The schema is the
+	// only place the difference is observable.
+	it("admits a batch call whose top-level agent is an own key holding undefined, and refuses a real one", () => {
+		const schema = getTaskSchema({ isolationEnabled: false, batchEnabled: true });
+		const item = { task: "Do A.", solutionSpace: "one fixed answer", agent: "task" };
+
+		const namedNothing = schema({ context: "ctx", agent: undefined, tasks: [item] });
+		expect(isRecord(namedNothing)).toBe(true);
+		expect(String(namedNothing)).not.toContain("not at the top level");
+
+		const namedSomething = schema({ context: "ctx", agent: "task", tasks: [item] });
+		expect(String(namedSomething)).toContain("`agent` specified in `tasks[].agent`, not at the top level");
+	});
+
+	// The other half of that boundary, and the one place presence deliberately still decides.
+	// `#resultParams` reads `Object.hasOwn(params, "outputSchema")` on purpose, because
+	// `resolveSchema` in ./structured-subagent tests presence the same way and the carrying chain
+	// (`resolveSpawnItems`, `spawnParamsFor`) uses `in`. An own key holding `undefined` therefore
+	// means "no schema, and ignore the agent's own" — converting this one to a value test would
+	// desynchronise it from the resolver and hand the agent's schema back to a caller that said none.
+	it("lets an own `outputSchema: undefined` suppress the agent's own declared schema", async () => {
+		mockDiscovery({ ...taskAgent, output: { type: "object" } });
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Pong"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": true, "async.enabled": false, "task.structured": true } }),
+		);
+		const result = await tool.execute("task-own-undefined-schema", {
+			context: "Shared context",
+			tasks: [{ task: "Do work", solutionSpace: "c", agent: "task", name: "Suppressed", outputSchema: undefined }],
+		} as never);
+		expect(result.isError).toBeFalsy();
+		expect(run).toHaveBeenCalledTimes(1);
+		const options = run.mock.calls[0]?.[0] as unknown as Record<string, unknown>;
+		expect(options.outputSchemaSource).toBe("caller");
+		expect(options.outputSchemaOverridesAgent).toBe(true);
+		expect(options.outputSchema).toBeUndefined();
 	});
 
 	// An internal caller bypasses the wire schema and may hold its real `model` anywhere an object can
