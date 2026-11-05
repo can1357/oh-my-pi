@@ -960,6 +960,113 @@ describe("AsyncJobManager", () => {
 		await manager.dispose();
 	});
 
+	test("a run on one manager does not hand its slot to work started inside another manager's run", async () => {
+		// Managers nest when one process holds more than one: a run on A calls
+		// into B, and B's run registers work back on A. A's slot covers work A's
+		// run started, and B's run is not that — B is accounting for it. Letting
+		// the outer scope stay readable inside B hands A's slot to work B owns,
+		// which over-admits exactly as keying the lend on the owner did.
+		//
+		// This is why the run scope is one storage holding its manager rather
+		// than one storage per manager: `run()` replaces the single store, so
+		// the innermost manager wins and A's guard rejects it.
+		const a = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: async () => {} });
+		const b = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: async () => {} });
+		const releaseA = Promise.withResolvers<void>();
+		const releaseB = Promise.withResolvers<void>();
+		let fromInsideB: string | undefined;
+		let grantedInsideB = false;
+
+		const onA = hostRunning(a, "A-host", async () => {
+			// Inside A's run, start a run on B. Everything below happens inside
+			// B's body, which is still lexically inside A's.
+			b.register(
+				"task",
+				"B-host",
+				async () => {
+					fromInsideB = a.register("bash", "from-B", async () => "from-B done", { ownerId: "Main" });
+					const slot = a.acquireSlot(new AbortController().signal, {});
+					void slot.then(release => {
+						grantedInsideB = true;
+						release();
+					});
+					await releaseB.promise;
+					return "B done";
+				},
+				{ id: "B-host", ownerId: "Main" },
+			);
+			await releaseA.promise;
+		});
+
+		await waitForCondition(() => fromInsideB !== undefined);
+		// A is full with its own run, and work started inside B's run must wait
+		// for it like any other outsider rather than riding A's slot.
+		expect(a.atCapacity).toBe(true);
+		expect(a.getJob(fromInsideB!)?.waitingForSlot).toBe(true);
+		expect(grantedInsideB).toBe(false);
+
+		releaseB.resolve();
+		releaseA.resolve();
+		await onA;
+		// Queued, not refused: it runs once A's own run frees the slot.
+		await waitForCondition(() => a.getJob(fromInsideB!)?.status === "completed");
+		await a.waitForAll();
+		await b.waitForAll();
+		await a.dispose();
+		await b.dispose();
+	});
+
+	test("a slot request made inside another manager's run does not take the outer run's slot either", async () => {
+		// The sibling of the test above, deliberately separate rather than one
+		// more assertion in it. In the combined scenario the registration takes
+		// the single hand-down first, so a later request queues for that reason
+		// alone and would pass even with the isolation broken. Nothing registers
+		// on A here, so the only thing that can grant this request is A's run
+		// scope leaking into B's body — which is exactly what must not happen.
+		const a = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: async () => {} });
+		const b = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: async () => {} });
+		const releaseA = Promise.withResolvers<void>();
+		const releaseB = Promise.withResolvers<void>();
+		const idle = new AbortController().signal;
+		let request: Promise<() => void> | undefined;
+		let granted = false;
+
+		const onA = hostRunning(a, "A-host", async () => {
+			b.register(
+				"task",
+				"B-host",
+				async () => {
+					request = a.acquireSlot(idle, {});
+					void request.then(() => {
+						granted = true;
+					});
+					await releaseB.promise;
+					return "B done";
+				},
+				{ id: "B-host", ownerId: "Main" },
+			);
+			await releaseA.promise;
+		});
+
+		await waitForCondition(() => request !== undefined);
+		// A scheduling turn, so a wrong grant has settled its `then` by now.
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(a.atCapacity).toBe(true);
+		expect(granted).toBe(false);
+
+		releaseB.resolve();
+		releaseA.resolve();
+		await onA;
+		// Queued, not dropped: it is granted once A's own run frees the slot.
+		(await request!)();
+		expect(granted).toBe(true);
+		await a.waitForAll();
+		await b.waitForAll();
+		await a.dispose();
+		await b.dispose();
+	});
+
 	test("a top-level request still queues at the cap: the hand-down needs a host that holds a slot", async () => {
 		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: async () => {} });
 		const idle = new AbortController().signal;

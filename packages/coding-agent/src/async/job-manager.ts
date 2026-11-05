@@ -485,6 +485,26 @@ export interface AsyncJobManagerApi {
 	isDeliverySuppressed(jobId: string): boolean;
 }
 
+/**
+ * The job whose run is executing on this thread, with the manager that owns it.
+ *
+ * One storage for every manager, holding the manager, rather than one storage
+ * per manager. The difference is only visible when managers nest — a run on A
+ * calls into B, and B's run registers work back on A — and there it is the
+ * whole point. A single storage is *replaced* by the innermost `run()`, so
+ * inside B's body the store names B and A's guard rejects it: work B starts
+ * cannot borrow the slot of the A-run further out. Give each manager its own
+ * storage and A's scope stays readable inside B, so that work takes A's slot
+ * and the cap over-admits — the same over-admission round 6 found by another
+ * route.
+ *
+ * In-process only: an `AsyncLocalStorage` does not cross a thread boundary, so
+ * the hand-down covers work started inside a run on this thread and nothing a
+ * worker-hosted run starts. See the "Queued jobs" section of
+ * `docs/agent-hub.md` for the paths that are therefore uncovered.
+ */
+const runningJob = new AsyncLocalStorage<{ readonly manager: AsyncJobManager; readonly job: AsyncJob }>();
+
 export class AsyncJobManager implements AsyncJobManagerApi {
 	static #instance: AsyncJobManager | undefined;
 
@@ -539,14 +559,14 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	/** The slot each job holds, so a host can be asked for its slot; the inverse of {@link HeldSlot.job}. */
 	readonly #slotOfJob = new Map<AsyncJob, object>();
 	/**
-	 * The job whose run is executing, so work it starts records it as its host.
-	 *
-	 * Per manager and in-process only: an `AsyncLocalStorage` does not cross a
-	 * thread boundary, so the hand-down covers work started inside a run on
-	 * this thread and nothing a worker-hosted run starts. See the "Queued jobs"
-	 * section of `docs/agent-hub.md`.
+	 * The job whose run is executing on this manager, so work it starts records
+	 * it as its host. Reads the module-level scope and ignores a store another
+	 * manager entered: see {@link runningJob} for why that matters.
 	 */
-	readonly #runningJob = new AsyncLocalStorage<AsyncJob>();
+	get #runningJob(): AsyncJob | undefined {
+		const store = runningJob.getStore();
+		return store?.manager === this ? store.job : undefined;
+	}
 	#nextAutoId = 1;
 	readonly #deliverySinks = new Map<string, AsyncJobDeliverySink>();
 	readonly #onJobComplete: AsyncJobManagerOptions["onJobComplete"];
@@ -747,7 +767,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		if (signal.aborted) return Promise.reject(signal.reason);
 		const { jobId } = request ?? {};
 		const requester = this.#jobFor(jobId);
-		const carriedHost = this.#runningJob.getStore();
+		const carriedHost = this.#runningJob;
 		const token = {};
 		let released = false;
 		const release = (): void => {
@@ -821,7 +841,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		// The job whose run is registering this one. Recorded now, while it is a
 		// fact rather than something to infer later from ids that cannot tell a
 		// cell's own `tool.task()` from an unrelated clone of the same agent.
-		const host = this.#runningJob.getStore();
+		const host = this.#runningJob;
 		// At the cap the job is accepted and waits for a slot behind every request
 		// that already waits, so jobs start in the order they were registered. A
 		// caller-gated job takes no slot; its caller takes slots for its work.
@@ -899,7 +919,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 				// awaits, so the hand-down knows what is work inside this run and
 				// what merely shares its owner. This is the one place that fact is
 				// available without being inferred.
-				const outcome = await this.#runningJob.run(job, () =>
+				const outcome = await runningJob.run({ manager: this, job }, () =>
 					run({
 						jobId: id,
 						signal: abortController.signal,
