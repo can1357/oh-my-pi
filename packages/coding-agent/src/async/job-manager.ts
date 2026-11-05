@@ -300,14 +300,6 @@ export interface AsyncJobRegisterOptions {
 	 * (an IRC wake turn), which queueing could not hold back.
 	 */
 	startImmediately?: boolean;
-	/**
-	 * The job whose run is starting this work, named explicitly because the
-	 * caller is across a thread boundary and the in-process scope cannot reach
-	 * it: a subagent in a worker registers through RPC, and the handler on this
-	 * thread runs outside any job's run. A caller on this thread leaves it
-	 * unset — the scope already knows, and it wins over this.
-	 */
-	hostJobId?: string;
 	/** Register the job as backing a foreground call; see {@link AsyncJob.foreground}. */
 	foreground?: boolean;
 	/** The process the job runs; see {@link AsyncJob.process}. */
@@ -410,8 +402,6 @@ export interface SlotRequest {
 	 * launch) can only take a pool slot.
 	 */
 	jobId?: string;
-	/** See {@link AsyncJobRegisterOptions.hostJobId}: the run starting this work, across a thread. */
-	hostJobId?: string;
 }
 
 /**
@@ -495,30 +485,6 @@ export interface AsyncJobManagerApi {
 	isDeliverySuppressed(jobId: string): boolean;
 }
 
-/**
- * The job whose run is executing on this thread, with the manager that owns it.
- *
- * Module-level rather than per manager because a caller outside the manager has
- * to read it: placing a subagent on a worker thread happens in
- * `thread/executor-routing.ts`, which has no manager in hand and must still
- * record *which job's run* it is placing work for. The manager is kept beside
- * the job so a second manager in the same process never reads a foreign row.
- */
-const runningJob = new AsyncLocalStorage<{ readonly manager: AsyncJobManager; readonly job: AsyncJob }>();
-
-/**
- * The id of the job whose run is executing here, for a caller that has no
- * manager in hand. Undefined outside any job's run.
- *
- * This is a **job** id, which is the only name the manager resolves. An agent
- * id is not interchangeable with it: `register()` suffixes a colliding id, a
- * blocking subagent has no job row at all, and a speculative launch asks for a
- * slot before one exists.
- */
-export function currentHostJobId(): string | undefined {
-	return runningJob.getStore()?.job.id;
-}
-
 export class AsyncJobManager implements AsyncJobManagerApi {
 	static #instance: AsyncJobManager | undefined;
 
@@ -572,11 +538,15 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	readonly #hostOfJob = new WeakMap<AsyncJob, AsyncJob>();
 	/** The slot each job holds, so a host can be asked for its slot; the inverse of {@link HeldSlot.job}. */
 	readonly #slotOfJob = new Map<AsyncJob, object>();
-	/** The job whose run is executing, so work it starts records it as its host. */
-	get #runningJob(): AsyncJob | undefined {
-		const store = runningJob.getStore();
-		return store?.manager === this ? store.job : undefined;
-	}
+	/**
+	 * The job whose run is executing, so work it starts records it as its host.
+	 *
+	 * Per manager and in-process only: an `AsyncLocalStorage` does not cross a
+	 * thread boundary, so the hand-down covers work started inside a run on
+	 * this thread and nothing a worker-hosted run starts. See the "Queued jobs"
+	 * section of `docs/agent-hub.md`.
+	 */
+	readonly #runningJob = new AsyncLocalStorage<AsyncJob>();
 	#nextAutoId = 1;
 	readonly #deliverySinks = new Map<string, AsyncJobDeliverySink>();
 	readonly #onJobComplete: AsyncJobManagerOptions["onJobComplete"];
@@ -775,11 +745,9 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	acquireSlot(signal: AbortSignal, request?: SlotRequest): Promise<() => void> {
 		if (this.#disposed) return Promise.reject(new Error("Async job manager is disposed"));
 		if (signal.aborted) return Promise.reject(signal.reason);
-		const { jobId, hostJobId } = request ?? {};
+		const { jobId } = request ?? {};
 		const requester = this.#jobFor(jobId);
-		// The scope wins where it exists; `hostJobId` is how a caller across a
-		// thread names the run the scope cannot reach.
-		const carriedHost = this.#runningJob ?? this.#jobFor(hostJobId);
+		const carriedHost = this.#runningJob.getStore();
 		const token = {};
 		let released = false;
 		const release = (): void => {
@@ -853,7 +821,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		// The job whose run is registering this one. Recorded now, while it is a
 		// fact rather than something to infer later from ids that cannot tell a
 		// cell's own `tool.task()` from an unrelated clone of the same agent.
-		const host = this.#runningJob ?? this.#jobFor(options?.hostJobId);
+		const host = this.#runningJob.getStore();
 		// At the cap the job is accepted and waits for a slot behind every request
 		// that already waits, so jobs start in the order they were registered. A
 		// caller-gated job takes no slot; its caller takes slots for its work.
@@ -931,7 +899,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 				// awaits, so the hand-down knows what is work inside this run and
 				// what merely shares its owner. This is the one place that fact is
 				// available without being inferred.
-				const outcome = await runningJob.run({ manager: this, job }, () =>
+				const outcome = await this.#runningJob.run(job, () =>
 					run({
 						jobId: id,
 						signal: abortController.signal,

@@ -839,11 +839,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			acquire: async signal => {
 				const releasePermit = await this.#permit.acquire(signal);
 				try {
-					// No `hostJobId` here: the run that is starting this spawn supplies
-					// it. On the main thread that is the manager's own run scope; on a
-					// worker it is the scope `runSubagentRunRequest` enters from the id
-					// the main side recorded at placement. The session's agent id is
-					// not that fact — it names an agent, not a job row.
+					// The run starting this spawn supplies the host: on the main
+					// thread that is the manager's own run scope. A session's agent id
+					// is not that fact — it names an agent, not a job row — and the
+					// scope does not cross into a worker, so a spawn started by a
+					// worker-hosted run queues at a full cap rather than handing down.
 					const releaseSlot = await manager.acquireSlot(signal, { jobId: jobId() });
 					return () => {
 						releaseSlot();

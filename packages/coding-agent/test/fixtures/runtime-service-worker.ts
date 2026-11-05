@@ -11,11 +11,7 @@ import { CostCapError, type CostGateApi } from "../../src/session/cost-gate";
 import type { SubagentMainApi, SubagentWorkerApi, WorkerThreadLink } from "../../src/thread/protocol";
 import { type RpcFrame, RpcLink } from "../../src/thread/rpc";
 import { asyncJobsThreadService } from "../../src/thread/services/async-jobs";
-import {
-	RemoteAsyncJob,
-	RemoteAsyncJobManager,
-	runWithWorkerHostJob,
-} from "../../src/thread/services/async-jobs-remote";
+import { RemoteAsyncJob, RemoteAsyncJobManager } from "../../src/thread/services/async-jobs-remote";
 import { runtimeThreadService } from "../../src/thread/services/runtime";
 import { RemoteArtifactManager, RemoteCostGate, RemoteEventBus } from "../../src/thread/services/runtime-remote";
 import { settingsThreadService } from "../../src/thread/services/settings";
@@ -107,17 +103,6 @@ const probe: RuntimeProbe = async (op, ...args) => {
 		case "append":
 			body(args[0]).tap?.append(String(args[1]));
 			return true;
-		// A run the main side placed on this thread: everything it starts names
-		// that run without the caller supplying an id, the way a subagent's async
-		// `bash` or nested spawn does.
-		case "placedSlot":
-			return await runWithWorkerHostJob(String(args[1]), async () => {
-				const release = await manager(args[0]).acquireSlot(new AbortController().signal, {});
-				release();
-				return true;
-			});
-		case "placedRegister":
-			return runWithWorkerHostJob(String(args[1]), () => registerBody(manager(args[0]), String(args[2]), false));
 		case "abortState": {
 			const signal = body(args[0]).signal;
 			return {
@@ -157,7 +142,6 @@ const probe: RuntimeProbe = async (op, ...args) => {
 		case "acquireSlot":
 			releaseSlot = await manager(args[0]).acquireSlot(new AbortController().signal, {
 				jobId: args[1] === undefined ? undefined : String(args[1]),
-				hostJobId: args[2] === undefined ? undefined : String(args[2]),
 			});
 			return true;
 		case "releaseSlot":

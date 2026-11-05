@@ -111,7 +111,6 @@ import { type EventBus, emitSubagentFrame } from "../utils/event-bus";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { isMainThread } from "../thread/identity";
 import { runFollowUpTurnOnHome, runSubprocessPlaced } from "../thread/executor-routing";
-import { runWithWorkerHostJob } from "../thread/services/async-jobs-remote";
 import { existingSubagentWorkerPool, subagentWorkerPool } from "../thread/subagent-worker";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
@@ -4379,25 +4378,19 @@ export interface SubagentRunRequest {
 	readonly options: ExecutorOptions;
 	/** Root compaction thresholds tagged on `options.settings` (a symbol property, which never crosses). */
 	readonly rootThresholds: RootCompactionThresholds | undefined;
-	/**
-	 * The main-side job whose run placed this subagent here, so everything the
-	 * run registers over the link names it. The manager's own run scope is an
-	 * `AsyncLocalStorage` and stops at the thread boundary; this crosses it.
-	 */
-	readonly hostJobId: string | undefined;
 }
 
 /** Package `options` for a worker, carrying what the settings' symbol tag holds explicitly. */
-export function subagentRunRequest(options: ExecutorOptions, hostJobId?: string): SubagentRunRequest {
+export function subagentRunRequest(options: ExecutorOptions): SubagentRunRequest {
 	const settings: SubagentChainSettings | undefined = options.settings;
-	return { options, rootThresholds: settings?.[kRootCompactionThresholds], hostJobId };
+	return { options, rootThresholds: settings?.[kRootCompactionThresholds] };
 }
 
 /** Worker entry of a routed run: re-tag the settings mirror, then run here. */
 export function runSubagentRunRequest(request: SubagentRunRequest): Promise<SingleResult> {
 	const settings: SubagentChainSettings | undefined = request.options.settings;
 	if (settings && request.rootThresholds) settings[kRootCompactionThresholds] = request.rootThresholds;
-	return runWithWorkerHostJob(request.hostJobId, () => runSubprocessOnThisThread(request.options));
+	return runSubprocessOnThisThread(request.options);
 }
 
 /**

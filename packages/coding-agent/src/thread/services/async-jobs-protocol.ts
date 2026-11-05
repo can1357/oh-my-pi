@@ -95,7 +95,6 @@ export interface WireRegisterOptions {
 	readonly onProgress?: (text: string, details?: AsyncJobDetails) => void | Promise<void>;
 	readonly queued?: boolean;
 	readonly startImmediately?: boolean;
-	readonly hostJobId?: string;
 	readonly foreground?: boolean;
 	readonly intent?: string;
 	readonly feed?: WireJobFeed;

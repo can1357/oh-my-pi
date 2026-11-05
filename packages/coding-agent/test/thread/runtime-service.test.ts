@@ -12,7 +12,7 @@ import { cfgSessionMaxCost } from "../../src/session/settings";
 import type { MainThreadLink, SubagentMainApi, SubagentWorkerApi } from "../../src/thread/protocol";
 import { type RpcFrame, RpcLink } from "../../src/thread/rpc";
 import type { ThreadService, WorkerPeer } from "../../src/thread/services";
-import { asyncJobsThreadService, setWorkerHostJob } from "../../src/thread/services/async-jobs";
+import { asyncJobsThreadService } from "../../src/thread/services/async-jobs";
 import { runtimeThreadService } from "../../src/thread/services/runtime";
 import { settingsThreadService } from "../../src/thread/services/settings";
 import { EventBus } from "../../src/utils/event-bus";
@@ -290,128 +290,53 @@ describe("runtime thread services: async jobs", () => {
 		for (const service of SERVICES) service.onWorkerExit?.(racing.peer, "crash");
 		expect(await slotIsFree()).toBe(true);
 
-		// The hand-down across the link: this is the behaviour the branch exists
-		// for, and the worker is where it is hardest, because the manager's own
-		// per-run scope cannot cross a thread. The main side records what each
-		// worker is running when it places the run, and the handler reads that —
-		// never an id the worker sends.
-		const hostRelease = Promise.withResolvers<void>();
-		const hostId = manager.register(
-			"task",
-			"WorkerHost",
-			async () => {
-				await hostRelease.promise;
-				return "host done";
-			},
-			{ id: "WorkerHost", agentId: "WorkerHost", ownerId: "Main" },
-		);
-		expect(manager.atCapacity).toBe(true);
-
-		// A link with nothing recorded against it names a live job as its host.
-		// A supplied id is just a string: honouring one hands the slot that job's
-		// own work is waiting for to unrelated work, so it must queue instead.
-		const forger = await startWorker();
-		let forgedGranted = false;
-		void forger("acquireSlot", manager, "Forged.Child", hostId).then(() => {
-			forgedGranted = true;
-		});
-		// Nothing fires when a request correctly waits, so this negative check
-		// needs a real moment; a wrong grant returns on the next round trip.
-		await Bun.sleep(250);
-		expect(forgedGranted).toBe(false);
-
-		// The link the host's run was actually placed on, recorded before it asks
-		// as a real placement records it. Same request, and it is granted while
-		// the host still holds: the hand-down the branch exists for, over the link.
-		const nested = await startWorker();
-		const nestedEntry = started.at(-1);
-		if (!nestedEntry) throw new Error("no worker entry");
-		const forgetHost = setWorkerHostJob(nestedEntry.peer.threadId, hostId);
-		// A worker hosts more than one run once the pool is at its worker limit.
-		// A sibling placed on the same thread, and then ended, must not take this
-		// run's record with it: holding one id per thread would have overwritten
-		// it here and dropped it on the undo, and the request below would be
-		// refused — or worse, earlier, granted the sibling's slot.
-		setWorkerHostJob(nestedEntry.peer.threadId, "SiblingRun")();
-		expect(await nested("acquireSlot", manager, "WorkerHost.Child", hostId)).toBe(true);
-		// The child runs on its host's slot, not a second counted one: the cap is
-		// still full. That is the other half of the documented bound — a hand-down
-		// adds a running job without adding a slot the pool could issue.
-		expect(manager.atCapacity).toBe(true);
-		// And the forged request is still waiting, not riding the same slot.
-		expect(forgedGranted).toBe(false);
-
-		await nested("releaseSlot");
-		forgetHost();
-		hostRelease.resolve();
-		// The forged request was never wrong to make, only wrong to hand a borrowed
-		// slot: once the host's own pool slot frees it is granted normally, which
-		// also proves it had really been queued rather than dropped.
-		for (let i = 0; i < 200 && !forgedGranted; i++) await Bun.sleep(25);
-		expect(forgedGranted).toBe(true);
-		await forger("releaseSlot");
-		expect(await slotIsFree()).toBe(true);
-		// Four real workers, each paying module init on a shared box. Bun's default
-		// 5 s bound is a quiet-machine number: this failed on one run in two under
-		// gate contention while every assertion still held. The bound is here to
-		// turn a hang into a named failure, not to measure anything, so it is far
-		// wider than the work.
+		// Three real workers, each paying module init on a shared box. Bun's
+		// default 5 s bound is a quiet-machine number: this failed on one run in
+		// two under gate contention while every assertion still held. The bound
+		// is here to turn a hang into a named failure, not to measure anything,
+		// so it is far wider than the work.
 	}, 120_000);
 
-	it("a run placed on a worker hosts its own registrations, and each of those hosts the next level", async () => {
-		// What the previous rounds could not reach. The carry used to work only
-		// when the worker itself named a host, and the one name it sent was the
-		// session's agent id — which the manager resolves in a job map, so it
-		// named someone else's job or none at all. Two consequences are asserted
-		// here: a placed run's own work needs no name, and a job that run
-		// registers is nameable in turn, so a grandchild is not stranded.
+	it("does not hand a main-side run's slot down to a job a worker registers: the worker-hosted case is uncovered", async () => {
+		// The documented boundary, asserted so a future change has to face it.
+		// The hand-down is an `AsyncLocalStorage` and does not cross a thread, so
+		// work a worker-hosted run starts queues at a full cap instead of taking
+		// the placing run's slot. Linking the two was attempted over five rounds
+		// and withdrawn; see the "Queued jobs" section of `docs/agent-hub.md`.
+		//
+		// Asserting it keeps the cap's bound honest in the other direction too: a
+		// name arriving from a worker must never buy a slot, which is what three
+		// of those rounds got wrong.
 		const manager = new AsyncJobManager({ maxRunningJobs: 1 });
 		managers.push(manager);
 		const hostRelease = Promise.withResolvers<void>();
 		const hostId = manager.register(
 			"task",
-			"PlacedHost",
+			"MainHost",
 			async () => {
 				await hostRelease.promise;
 				return "host done";
 			},
-			// The agent id differs from the job id on purpose: only the job id is
-			// a name this manager can resolve.
-			{ id: "job-7", agentId: "PlacedHost", ownerId: "Main" },
+			{ id: "MainHost", agentId: "MainHost", ownerId: "Main" },
 		);
-		expect(hostId).toBe("job-7");
+		expect(manager.getJob(hostId)?.waitingForSlot).not.toBe(true);
 		expect(manager.atCapacity).toBe(true);
 
 		const worker = await startWorker();
-		const entry = started.at(-1);
-		if (!entry) throw new Error("no worker entry");
-		// Exactly what a real placement records now: the job id, not the agent id.
-		const forgetHost = setWorkerHostJob(entry.peer.threadId, hostId);
-
-		// The run's own work supplies no host — an async `bash` inside a
-		// worker-hosted subagent sends none — and is still granted at a full cap.
-		expect(await worker("placedSlot", manager, hostId)).toBe(true);
-
-		// A job that run registers starts on the host's slot rather than queueing,
-		// and the cap is unchanged because the slot was handed down, not issued.
-		const childId = await worker("placedRegister", manager, hostId, "PlacedHost");
-		if (typeof childId !== "string") throw new Error("placedRegister returned no id");
-		// No wait: main hands the slot down inside the same `register` call the
-		// worker is still blocked on, so the row is already admitted here.
-		expect(manager.getJob(childId)?.waitingForSlot).not.toBe(true);
-		expect(manager.getJob(childId)?.queued).not.toBe(true);
+		const childId = await jobId(worker, manager, "MainHost");
+		// Queued, not handed down. This is the uncovered case stated as a fact.
+		expect(manager.getJob(childId)).toMatchObject({ queued: true, waitingForSlot: true });
 		expect(manager.atCapacity).toBe(true);
 
-		// The grandchild: work inside the child's run names the child. Before the
-		// child was recorded as this thread's own, that name was refused and the
-		// grandchild queued behind a parent waiting for it.
-		expect(await worker("acquireSlot", manager, "PlacedHost.Child.Leaf", childId)).toBe(true);
-		expect(manager.atCapacity).toBe(true);
-
-		await worker("releaseSlot");
-		await worker("finish", childId, "child done");
-		forgetHost();
+		// And it is queued, not lost. The child's body only runs once the host's
+		// slot frees, so `finish` can only be answered after admission: awaiting
+		// the job's own promise is the real signal, not a guessed delay. Were it
+		// never admitted, this would hang to the test's bound as a named failure.
 		hostRelease.resolve();
+		await manager.getJob(hostId)!.promise;
+		await worker("finish", childId, "child done");
+		await manager.getJob(childId)!.promise;
+		expect(manager.getJob(childId)).toMatchObject({ status: "completed", waitingForSlot: false });
 		await manager.waitForAll();
 	}, 120_000);
 });
