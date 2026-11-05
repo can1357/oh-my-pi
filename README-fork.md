@@ -364,6 +364,56 @@ registration. Hosts without a tool session reject the call.
 Covering tests: `test/a2a-server.test.ts` (card contract, auth, method set,
 addressing, spawn seam, loopback enforcement, SSE, token file).
 
+## A2A bridge (client)
+
+The client side turns a remote bridge into task-tool agents. `/a2a add` reads
+the remote AgentCard and registers one **runtime** agent per card skill in the
+session's in-memory bridge — no `.md` files, nothing persisted:
+
+```bash
+/a2a add http://127.0.0.1:7391          # card fetched from /.well-known/agent-card.json
+/a2a add http://10.0.0.5:7391 --token $REMOTE_TOKEN
+/a2a list                               # a2a:main — Main omp agent (http://127.0.0.1:7391/)
+/a2a remove a2a:main
+```
+
+Spawn one through the ordinary `task` tool; the call goes to the remote
+endpoint and the answer comes back in the standard `<task-result>` envelope:
+
+```jsonc
+{ "agent": "a2a:main", "task": "summarize the failing tests" }
+```
+
+Wire behavior:
+
+- `SendMessage` (PascalCase, role `ROLE_USER`, text parts) then `GetTask`
+  polling — A2A is async-first, so an hour-long remote run is normal.
+- Final text comes from `artifacts[].parts[].text`, then the status message,
+  then the last `ROLE_AGENT` history message. The bridge server inlines a
+  completed run's published output as an artifact, so an answer crosses the
+  wire; `metadata.outputPath` is never read by the client (it names a file on
+  the server's disk).
+- `TASK_STATE_INPUT_REQUIRED` / `TASK_STATE_AUTH_REQUIRED` are *interrupted*,
+  not terminal: the spawn fails with `waiting for input; unavailable in omp v1`
+  (or `authentication required; …`) instead of hanging.
+- Connect is bounded at 10s per request. The whole-run budget defaults to
+  unlimited; `a2a.clientTimeoutMs` (ms, `0` = no limit) opts into a deadline.
+  Polling starts at 2s and backs off to 30s.
+
+| Knob                   | Default | Meaning                                    |
+| ---------------------- | ------- | ------------------------------------------ |
+| `a2a.clientTimeoutMs`  | `0`     | Total budget for a remote spawn; 0 = none  |
+
+The bearer token used for RPC comes from `--token`, then the `a2a.token`
+setting, then `<agent dir>/a2a.token` (read-only: registering never generates
+credentials). Registrations are session-scoped: `/resume` starts empty, and a
+local subagent does not inherit its parent's remote roster.
+
+Covering tests: `test/a2a-client.test.ts` (wire methods, polling/backoff,
+artifact and message text, interrupted states, connect/auth errors,
+`/a2a add` registration, task-tool spawn, and the two-instance loop against
+`test/a2a-server.test.ts`'s server).
+
 ## Rebase ritual
 
 1. Sync the mirror (fast-forward only) and push it:

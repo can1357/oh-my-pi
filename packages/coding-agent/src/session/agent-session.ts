@@ -117,6 +117,7 @@ import { writeArchive } from "@oh-my-pi/pi-utils/ar";
 import { frameDataBytesBudget, readerIncludesThinking } from "@oh-my-pi/snapcompact";
 import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { formatUsageResetWindow } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import { A2aAgentBridge } from "../a2a/agent-bridge";
 import { loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager, type AsyncJobManagerApi } from "../async";
 import { classifyAutoPrewalk } from "../auto-prewalk/classifier";
@@ -1053,6 +1054,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	readonly #models: ModelControls;
 	readonly #tools: SessionTools;
+	/**
+	 * Session-scoped remote agents registered by `/a2a add` (`a2a:<skill>`).
+	 * In-memory only: they are not agent-definition files and never persist
+	 * across sessions.
+	 */
+	readonly a2aBridge = new A2aAgentBridge();
 	readonly #prewalk: PrewalkCoordinator;
 
 	readonly #providerBoundary: SessionProviderBoundary;

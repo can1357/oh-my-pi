@@ -30,6 +30,14 @@ export const TASK_STATE = {
 	FAILED: "TASK_STATE_FAILED",
 	CANCELED: "TASK_STATE_CANCELED",
 	REJECTED: "TASK_STATE_REJECTED",
+	/**
+	 * Interrupted states: the task stays open until a human answers. The omp
+	 * agent lifecycle never parks there, so the bridge serves them to clients
+	 * that switch on the full v1.0 enum; omp's own client reports them as
+	 * unusable instead of polling forever.
+	 */
+	INPUT_REQUIRED: "TASK_STATE_INPUT_REQUIRED",
+	AUTH_REQUIRED: "TASK_STATE_AUTH_REQUIRED",
 } as const;
 export type TaskState = (typeof TASK_STATE)[keyof typeof TASK_STATE];
 
@@ -207,6 +215,40 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 		: undefined;
 }
 
+/** Largest published output inlined as a task artifact; the rest is a client-side read concern. */
+export const A2A_ARTIFACT_MAX_CHARS = 100_000;
+
+/**
+ * Attach a completed run's published output to the task as a text artifact.
+ *
+ * A2A clients cannot read `metadata.outputPath`: it names a file on the
+ * *server's* disk. Without the artifact a remote client learns the task
+ * completed but never sees its answer, so `SendMessage`/`GetTask` inline the
+ * output (bounded by {@link A2A_ARTIFACT_MAX_CHARS}). A failed read leaves the
+ * task unchanged; the metadata path stays for same-host diagnostics.
+ */
+export async function attachOutputArtifact(
+	task: A2aTask,
+	readOutput: ((path: string) => Promise<string | undefined>) | undefined,
+): Promise<A2aTask> {
+	if (!readOutput || task.status.state !== TASK_STATE.COMPLETED) return task;
+	if (Array.isArray(task.artifacts) && task.artifacts.length > 0) return task;
+	const outputPath = asRecord(task.metadata)?.outputPath;
+	if (typeof outputPath !== "string" || outputPath.length === 0) return task;
+	const text = await readOutput(outputPath);
+	if (text === undefined) return task;
+	return {
+		...task,
+		artifacts: [
+			{
+				artifactId: `${task.id}:output`,
+				name: "output",
+				parts: [{ text: text.slice(0, A2A_ARTIFACT_MAX_CHARS) }],
+			},
+		],
+	};
+}
+
 function invalidParams(message: string, data?: unknown): RpcError {
 	return new RpcError(RPC_ERRORS.INVALID_PARAMS, message, { data });
 }
@@ -319,6 +361,8 @@ export interface A2aDispatchDeps {
 	send: (message: Omit<IrcMessage, "id" | "ts">) => Promise<IrcDeliveryReceipt>;
 	/** Spawn a subagent through the extension seam; absent on hosts without a session. */
 	spawn?: (options: SpawnSubagentOptions) => Promise<AgentRef>;
+	/** Read a completed run's published output for the task artifact; absent leaves tasks text-free. */
+	readOutput?: (path: string) => Promise<string | undefined>;
 	/** Sender agent id recorded on bus messages. */
 	senderId?: string;
 }
@@ -399,12 +443,12 @@ export async function sendA2aMessage(params: unknown, deps: A2aDispatchDeps): Pr
 export async function dispatchA2aMethod(method: string, params: unknown, deps: A2aDispatchDeps): Promise<unknown> {
 	switch (method) {
 		case "SendMessage":
-			return { task: await sendA2aMessage(params, deps) };
+			return { task: await attachOutputArtifact(await sendA2aMessage(params, deps), deps.readOutput) };
 		case "GetTask": {
 			const id = parseTaskIdParams(params);
 			const ref = resolveAddressedRef(deps.registry, id);
 			if (!ref) throw new RpcError(RPC_ERRORS.TASK_NOT_FOUND, `Task not found: ${id}`, { httpStatus: 404 });
-			return taskFromAgentRef(ref);
+			return attachOutputArtifact(taskFromAgentRef(ref), deps.readOutput);
 		}
 		case "ListTasks": {
 			const request = parseListTasksParams(params);

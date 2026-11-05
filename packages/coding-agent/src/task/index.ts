@@ -84,7 +84,9 @@ import type { SubagentToolResult } from "./executor";
 import { appendToolResult, createTaskWidgetInputs } from "./widget-inputs";
 
 import { cfgAsyncEnabled } from "../tools/settings";
+import { type A2aRuntimeAgent, spawnA2aAgent } from "../a2a/agent-bridge";
 import {
+	cfgA2aClientTimeoutMs,
 	cfgTaskBatch,
 	cfgTaskConcurrencyPolicy,
 	cfgTaskDisabledAgents,
@@ -922,11 +924,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
 			this.#discoveredAgents;
 		const sessionAgents = this.session.advertisedSessionAgents?.() ?? this.session.getSessionAgents?.() ?? [];
+		// Remote A2A agents are live registrations: unlike the frozen session-agent
+		// surface, `/a2a add` must reach the model on the next description read.
+		const a2aAgents = this.session.getA2aBridge?.()?.definitions() ?? [];
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
 		const isolationEnabled = cfgTaskIsolationEnabled.get(this.session.settings);
 		const perCallModel = perCallModelEnabled(this.session.settings, "task");
 		return renderDescription({
-			agents,
+			agents: [...agents, ...a2aAgents],
 			sessionAgents,
 			isolationEnabled: !planMode && isolationEnabled,
 			applyIsolatedChanges: cfgTaskIsolationApply.get(this.session.settings),
@@ -2029,6 +2034,18 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const taskFileMetadata =
 			params.taskFile !== undefined ? { taskFile: params.taskFile, taskFileSha256: params.taskFileSha256 } : {};
 		const context = this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined;
+		const remoteAgent = this.session.getA2aBridge?.()?.get(params.agent ?? "");
+		if (remoteAgent) {
+			return this.#runA2aSpawn({
+				agent: remoteAgent,
+				params,
+				preAllocatedId,
+				spawnIndex,
+				startTime,
+				signal,
+				onUpdate,
+			});
+		}
 		let latestProgress: AgentProgress | undefined;
 		try {
 			const execution = await runStructuredSubagent({
@@ -2118,6 +2135,74 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				},
 			};
 		}
+	}
+
+	/**
+	 * Run one remote `a2a:` spawn and fold the outcome into the standard
+	 * `<task-result>` envelope. Registered remote agents declare `blocking: true`,
+	 * so this runs inline on the task call; the A2A wire itself is async-first.
+	 */
+	async #runA2aSpawn(args: {
+		agent: A2aRuntimeAgent;
+		params: SpawnParams;
+		preAllocatedId?: string;
+		spawnIndex: number;
+		startTime: number;
+		signal?: AbortSignal;
+		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>;
+	}): Promise<AgentToolResult<TaskToolDetails>> {
+		const assignment = (args.params.task ?? "").trim();
+		const id =
+			args.preAllocatedId ?? (await this.#outputManager().allocate(args.params.name?.trim() || generateTaskName()));
+		const progress: AgentProgress = {
+			index: args.spawnIndex,
+			id,
+			agent: args.agent.name,
+			agentSource: "user",
+			status: "running",
+			task: renderSubagentUserPrompt(assignment),
+			assignment,
+			recentTools: [],
+			recentOutput: [],
+			toolCount: 0,
+			requests: 0,
+			tokens: 0,
+			cost: 0,
+			durationMs: 0,
+		};
+		args.onUpdate?.({
+			content: [{ type: "text", text: `Running agent ${id}...` }],
+			details: {
+				projectAgentsDir: null,
+				results: [],
+				totalDurationMs: Date.now() - args.startTime,
+				progress: [progress],
+			},
+		});
+		const outcome = await spawnA2aAgent({
+			agent: args.agent,
+			prompt: assignment,
+			timeoutMs: cfgA2aClientTimeoutMs.get(this.session.settings),
+			signal: args.signal,
+		});
+		const durationMs = Date.now() - args.startTime;
+		const result: SingleResult = {
+			index: args.spawnIndex,
+			id,
+			agent: args.agent.name,
+			agentSource: "user",
+			task: renderSubagentUserPrompt(assignment),
+			assignment,
+			exitCode: outcome.exitCode,
+			output: outcome.output,
+			stderr: "",
+			truncated: false,
+			durationMs,
+			tokens: 0,
+			requests: 1,
+			...(outcome.error !== undefined ? { error: outcome.error } : {}),
+		};
+		return this.#buildResultPayload(result, null, durationMs, "");
 	}
 
 	/** Build the tool result (summary text + details) for a settled run. */

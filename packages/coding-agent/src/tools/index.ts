@@ -2,6 +2,7 @@ import type { AgentOptions, AgentTelemetryConfig, AgentTool, AgentToolContext } 
 import type { EditStore } from "@oh-my-pi/pi-natives";
 import type { FetchImpl, ImageContent, Message, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
+import type { A2aBridgeApi } from "../a2a/agent-bridge";
 import type { AsyncJobManagerApi } from "../async/job-manager";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
@@ -423,6 +424,11 @@ export interface ToolSession {
 	getSessionSpawns: () => string | null;
 	/** Session-scoped agent definitions (user-tagged model pseudonyms) merged after discovered agents. */
 	getSessionAgents?: () => readonly AgentDefinition[];
+	/**
+	 * Session-scoped remote A2A agents (`a2a:<skill>`) registered by `/a2a add`.
+	 * In-memory, unlike {@link getSessionAgents}: nothing is written to disk.
+	 */
+	getA2aBridge?: () => A2aBridgeApi | undefined;
 	/**
 	 * Session agents baked into the current base prompt surface. The task
 	 * description lists these instead of the live set so tagging a model

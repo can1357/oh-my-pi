@@ -735,6 +735,19 @@ export const cfgA2aToken = register({
 	},
 });
 
+export const cfgA2aClientTimeoutMs = register({
+	id: "a2a.clientTimeoutMs",
+	type: "number",
+	default: 0,
+	ui: {
+		tab: "tasks",
+		group: "A2A",
+		label: "A2A Client Timeout",
+		description:
+			"Total budget for a remote `a2a:` spawn in milliseconds; 0 waits indefinitely (A2A tasks can run for hours). Connect timeout stays 10s per request.",
+	},
+});
+
 export const cfgTaskShowResolvedModelBadge = register({
 	id: "task.showResolvedModelBadge",
 	type: "boolean",
