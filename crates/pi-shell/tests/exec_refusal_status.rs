@@ -26,6 +26,9 @@ struct Row {
 	fifo:   bool,
 	script: &'static str,
 	status: i32,
+	/// Fragments the output must contain. One that begins with `!` must
+	/// NOT appear: that is how a row proves the shell did not reach for a
+	/// report bash does not make here.
 	wants:  &'static [&'static str],
 }
 
@@ -82,6 +85,48 @@ fn nothing(_dir: &std::path::Path) {}
 
 fn symlink_loop(dir: &std::path::Path) {
 	std::os::unix::fs::symlink("s", dir.join("s")).expect("symlink");
+}
+
+/// `/` and 124 `x`: what Bash 5.3.0 names of the interpreter written by
+/// [`long_interpreter`], which is one byte shorter than the line.
+macro_rules! long_interp {
+	() => {
+		"/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+	};
+}
+const LONG_INTERP: &str = long_interp!();
+
+/// The whole report, so the row proves where the name STOPS: one `x` more
+/// would not match.
+const LONG_WANT: &str = concat!(long_interp!(), ": bad interpreter: No such file or directory");
+
+/// An interpreter of `/` plus 125 `x`, one byte past what bash samples:
+/// `#!` plus 126 bytes is 128, and bash names only the first 127 bytes of
+/// the file, so it reports [`LONG_INTERP`] and drops the last `x`.
+fn long_interpreter(dir: &std::path::Path) {
+	assert_eq!(LONG_INTERP.len(), 125, "`#!` plus this must be one byte past the sample");
+	write(&dir.join("s"), &format!("#!{LONG_INTERP}x\necho hi\n"), 0o755);
+}
+
+/// A `#!` line ending in a carriage return, as a file edited on Windows
+/// does. Both Bash versions name the interpreter with the CR shown as
+/// `^M` rather than writing the control byte out.
+fn interpreter_with_a_carriage_return(dir: &std::path::Path) {
+	write(&dir.join("s"), "#!/does/not/exist\r\necho hi\n", 0o755);
+}
+
+/// `#!` and nothing but blanks, and no newline at all: bash names an
+/// EMPTY interpreter here rather than treating the file as one without a
+/// `#!` line.
+fn blank_interpreter_without_a_newline(dir: &std::path::Path) {
+	write(&dir.join("s"), "#!\t  ", 0o755);
+}
+
+/// A script the shell may execute but not read, whose interpreter is
+/// missing. Nothing can name that interpreter, so bash reports the file
+/// it was given instead, with 127.
+fn unreadable_missing_interpreter(dir: &std::path::Path) {
+	write(&dir.join("s"), "#!/does/not/exist\necho hi\n", 0o111);
 }
 
 /// Immediate spawns. Upstream main already probes the refused file for all
@@ -176,12 +221,67 @@ const IMMEDIATE: &[Row] = &[
 		status: 126,
 		wants:  &["Too many levels of symbolic links"],
 	},
+	Row {
+		name:   "interpreter-with-a-carriage-return",
+		setup:  interpreter_with_a_carriage_return,
+		fifo:   false,
+		script: "./s",
+		status: 126,
+		wants:  &["/does/not/exist^M: bad interpreter: No such file or directory", "!exist\r"],
+	},
+	Row {
+		name:   "long-interpreter",
+		setup:  long_interpreter,
+		fifo:   false,
+		script: "./s",
+		status: 126,
+		wants:  &[LONG_WANT],
+	},
+	Row {
+		name:   "blank-interpreter-without-a-newline",
+		setup:  blank_interpreter_without_a_newline,
+		fifo:   false,
+		script: "./s",
+		status: 126,
+		wants:  &[": bad interpreter: "],
+	},
+	Row {
+		name:   "unreadable-missing-interpreter",
+		setup:  unreadable_missing_interpreter,
+		fifo:   false,
+		script: "./s",
+		status: 127,
+		wants:  &["cannot execute: required file not found"],
+	},
+	Row {
+		name:   "argument-list-too-long",
+		setup:  missing_interpreter,
+		fifo:   false,
+		script: "x=xxxxxxxxxx; for i in 1 2 3 4 5; do x=$x$x$x$x$x$x$x$x$x$x; done; ./s \"$x\"",
+		status: 126,
+		wants:  &["Argument list too long", "!bad interpreter"],
+	},
+	Row {
+		name:   "path-lookup-missing-interpreter",
+		setup:  missing_interpreter,
+		fifo:   false,
+		script: "PATH=$PWD:$PATH s",
+		status: 126,
+		wants:  &["/s: /does/not/exist: bad interpreter: No such file or directory"],
+	},
 ];
 
 /// Deferred spawns: `f` is a FIFO the refused command writes to and another
 /// job reads, so the open blocks and the spawn waits. Each script reports
 /// the refused command's own status with `echo status=$?`, so the row
 /// asserts that status in the output and 0 for the script itself.
+///
+/// Two rows do NOT reach the forked child's reporter, and are here so the
+/// change cannot alter what they do: `deferred-missing-interpreter-in-the-
+/// foreground`, whose FIFO an engine I/O worker opens, so the engine
+/// reports the refusal itself; and `deferred-text-without-shebang`, which
+/// the engine deliberately keeps for its `ENOEXEC` script fallback. Every
+/// other row was observed entering the child.
 const DEFERRED: &[Row] = &[
 	Row {
 		name:   "deferred-missing-interpreter",
@@ -247,6 +347,60 @@ const DEFERRED: &[Row] = &[
 		status: 0,
 		wants:  &["status=0"],
 	},
+	Row {
+		name:   "deferred-interpreter-with-a-carriage-return",
+		setup:  interpreter_with_a_carriage_return,
+		fifo:   true,
+		script: "/bin/cat f >out & p=$!; ./s >f & q=$!; wait $q; echo status=$?; wait $p",
+		status: 0,
+		wants:  &[
+			"/does/not/exist^M: bad interpreter: No such file or directory",
+			"status=126",
+			"!exist\r",
+		],
+	},
+	Row {
+		name:   "deferred-long-interpreter",
+		setup:  long_interpreter,
+		fifo:   true,
+		script: "/bin/cat f >out & p=$!; ./s >f & q=$!; wait $q; echo status=$?; wait $p",
+		status: 0,
+		wants:  &[LONG_WANT, "status=126"],
+	},
+	Row {
+		name:   "deferred-blank-interpreter-without-a-newline",
+		setup:  blank_interpreter_without_a_newline,
+		fifo:   true,
+		script: "/bin/cat f >out & p=$!; ./s >f & q=$!; wait $q; echo status=$?; wait $p",
+		status: 0,
+		wants:  &[": bad interpreter: ", "status=126"],
+	},
+	Row {
+		name:   "deferred-unreadable-missing-interpreter",
+		setup:  unreadable_missing_interpreter,
+		fifo:   true,
+		script: "/bin/cat f >out & p=$!; ./s >f & q=$!; wait $q; echo status=$?; wait $p",
+		status: 0,
+		wants:  &["cannot execute: required file not found", "status=127"],
+	},
+	Row {
+		name:   "deferred-argument-list-too-long",
+		setup:  missing_interpreter,
+		fifo:   true,
+		script: "x=xxxxxxxxxx; for i in 1 2 3 4 5; do x=$x$x$x$x$x$x$x$x$x$x; done; /bin/cat f >out \
+		         & p=$!; ./s \"$x\" >f & q=$!; wait $q; echo status=$?; wait $p",
+		status: 0,
+		wants:  &["Argument list too long", "status=126", "!bad interpreter"],
+	},
+	Row {
+		name:   "deferred-path-lookup-missing-interpreter",
+		setup:  missing_interpreter,
+		fifo:   true,
+		script: "/bin/cat f >out & p=$!; PATH=$PWD:$PATH s >f & q=$!; wait $q; echo status=$?; wait \
+		         $p",
+		status: 0,
+		wants:  &["/s: /does/not/exist: bad interpreter: No such file or directory", "status=126"],
+	},
 ];
 
 /// Runs every row in a fresh shell and a fresh directory, reporting all
@@ -279,7 +433,10 @@ async fn check(rows: &[Row]) {
 			.wants
 			.iter()
 			.copied()
-			.filter(|w| !output.contains(w))
+			.filter(|w| match w.strip_prefix('!') {
+				Some(absent) => output.contains(absent),
+				None => !output.contains(w),
+			})
 			.collect();
 		if result.exit_code != Some(row.status) || !missing.is_empty() {
 			bad.push(format!(

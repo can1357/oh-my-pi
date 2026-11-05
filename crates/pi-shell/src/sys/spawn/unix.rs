@@ -1010,26 +1010,42 @@ fn child_say(parts: &[&[u8]], status: i32) -> ! {
 	unsafe { libc::_exit(status) }
 }
 
-/// The interpreter of a `#!` line in `sample`: what follows `#!` up to the
-/// first blank or the end of the line, with leading blanks dropped. `None`
-/// when `sample` does not begin with `#!`. Bash reads at most one buffer,
-/// so a line longer than `sample` is cut exactly where bash cuts it.
-fn shebang(sample: &[u8]) -> Option<&[u8]> {
+/// The `#!` interpreter in `sample` as bash's `getinterp` reads it: what
+/// follows `#!` up to the first blank or the end of the line, with leading
+/// blanks dropped. `None` when `sample` does not begin with `#!`; an empty
+/// slice when it does and nothing follows, which bash reports as an empty
+/// interpreter rather than as a file without one.
+///
+/// The second element is true when a trailing carriage return was dropped:
+/// bash prints that as `^M`, and the caller writes those two bytes instead
+/// of the control byte. This mirrors `interpreter` in `bash/vm/command.rs`,
+/// which the engine uses when it reports the same refusal itself.
+fn shebang(sample: &[u8]) -> Option<(&[u8], bool)> {
 	let rest = sample.strip_prefix(b"#!")?;
 	let rest = rest.split(|b| *b == b'\n').next().unwrap_or(rest);
-	let start = rest.iter().position(|b| !matches!(b, b' ' | b'\t'))?;
+	let start = rest
+		.iter()
+		.position(|b| !matches!(b, b' ' | b'\t'))
+		.unwrap_or(rest.len());
 	let rest = &rest[start..];
 	let end = rest
 		.iter()
 		.position(|b| matches!(b, b' ' | b'\t'))
 		.unwrap_or(rest.len());
-	Some(&rest[..end])
+	let interp = &rest[..end];
+	match interp.split_last() {
+		Some((b'\r', head)) => Some((head, true)),
+		_ => Some((interp, false)),
+	}
 }
 
 /// bash's `shell_execve` report, made in the forked child of
 /// [`fork_redirs`] after `execve` failed: it LOOKS at the program, because
-/// the errno alone does not say why the kernel refused it. Status 127 only
-/// for a program that is not there, 126 for every refusal of one that is.
+/// the errno alone does not say why the kernel refused it. The branches
+/// and their statuses are those of `refused` in `bash/vm/command.rs`, which
+/// reports the identical refusal when the spawn was not deferred; see
+/// [`ChildRedirs`] for the contract both uphold.
+///
 /// Async-signal-safe: `stat`, `access`, `open`, `read`, `close`, `write`
 /// and `_exit` on a stack buffer, without allocating.
 ///
@@ -1044,23 +1060,30 @@ unsafe fn exec_refused(
 	texts: &[Vec<u8>],
 ) -> ! {
 	let text = errno_text(errno, texts);
+	// The status the kernel's own refusal earned. Only naming an
+	// interpreter overrides it, exactly as bash's `shell_execve` does: a
+	// program replaced between the failed exec and this look still reports
+	// what its own `execve` returned.
+	let status = if errno == libc::ENOENT { 127 } else { 126 };
 	// SAFETY: `st` is writable and `path` is NUL-terminated.
 	let mut st: libc::stat = unsafe { std::mem::zeroed() };
 	// SAFETY: as above.
 	let stat_ok = unsafe { libc::stat(path, &raw mut st) } == 0;
 	// bash names a directory as one, whatever the kernel called it.
 	if stat_ok && st.st_mode & libc::S_IFMT == libc::S_IFDIR {
-		child_say(&[diag, b"Is a directory\n"], 126);
+		child_say(&[diag, b"Is a directory\n"], status);
 	}
 	// bash's `executable_file`: a program it may not execute, or one that
-	// is not there, keeps the kernel's own words.
+	// is not there, keeps the kernel's own words. So do the two errors the
+	// program itself did not cause.
 	// SAFETY: as above.
-	if !stat_ok || unsafe { libc::access(path, libc::X_OK) } != 0 {
-		child_say(&[diag, text, b"\n"], if errno == libc::ENOENT { 127 } else { 126 });
+	let executable = stat_ok && unsafe { libc::access(path, libc::X_OK) } == 0;
+	if !executable || errno == libc::E2BIG || errno == libc::ENOMEM {
+		child_say(&[diag, text, b"\n"], status);
 	}
 	// SAFETY: as above; the descriptor is closed below.
 	let fd = unsafe { libc::open(path, libc::O_RDONLY | libc::O_CLOEXEC) };
-	let mut buf = [0u8; 128];
+	let mut buf = [0u8; crate::bash::SAMPLE];
 	let read = if fd < 0 {
 		0
 	} else {
@@ -1070,10 +1093,11 @@ unsafe fn exec_refused(
 		unsafe { libc::close(fd) };
 		usize::try_from(n).unwrap_or(0)
 	};
-	let sample = &buf[..read];
-	if let Some(interp) = shebang(sample) {
-		// bash's `sys_error`: no line number before this one.
-		child_say(&[sys_diag, interp, b": bad interpreter: ", text, b"\n"], 126);
+	if let Some((interp, cr)) = shebang(&buf[..read]) {
+		// bash's `sys_error`: no line number before this one, and 126
+		// whatever the kernel's errno was.
+		let tail: &[u8] = if cr { b"^M" } else { b"" };
+		child_say(&[sys_diag, interp, tail, b": bad interpreter: ", text, b"\n"], 126);
 	}
 	if errno == libc::ENOEXEC {
 		// bash's `check_binary_file`: the engine runs a text file without
@@ -1081,7 +1105,13 @@ unsafe fn exec_refused(
 		// this is the binary one.
 		child_say(&[diag, b"cannot execute binary file: ", text, b"\n"], 126);
 	}
-	child_say(&[diag, text, b"\n"], if errno == libc::ENOENT { 127 } else { 126 })
+	if errno == libc::ENOENT {
+		// The program is there and may be executed, so the `ENOENT` came
+		// from something it names that is not — an interpreter this child
+		// could not read. bash cannot name it either, and says so.
+		child_say(&[diag, b"cannot execute: required file not found\n"], 127);
+	}
+	child_say(&[diag, text, b"\n"], status)
 }
 
 /// The last OS error number. Async-signal-safe.

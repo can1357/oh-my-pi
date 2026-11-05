@@ -2399,7 +2399,10 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 				_ => None,
 			};
 			let redirs = redirs.map(|list| {
-				let name = argv0(vp);
+				// The same name [`refused`] prints: the word as written when it
+				// has a `/`, else what the PATH search resolved it to.
+				let n = argv0(vp);
+				let name = if n.contains(&b'/') { n } else { path.clone() };
 				ChildRedirs {
 					list,
 					exec_diag: super::redir::diag_prefix(k, cx, vp, line, &name),
@@ -4862,9 +4865,13 @@ fn not_found_hook(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) ->
 
 /// The `#!` interpreter of `text` as bash's `getinterp` reads it (a
 /// trailing CR shown as `^M`).
+///
+/// bash samples the file into a fixed buffer and reads the interpreter out
+/// of that, so it never names more than [`crate::bash::SAMPLE`] bytes of
+/// the file, whatever the `#!` line's real length is.
 fn interpreter(text: &[u8]) -> BString {
 	let line = text
-		.get(2..)
+		.get(2..crate::bash::SAMPLE.min(text.len()))
 		.unwrap_or_default()
 		.split(|&c| c == b'\n')
 		.next()

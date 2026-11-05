@@ -383,6 +383,13 @@ pub struct SpawnSpec<'a> {
 	pub ctty:        Option<OsHandle>,
 }
 
+/// How many bytes of a refused program bash can name an interpreter out
+/// of: it samples the file into a fixed buffer and reads the `#!` line
+/// from that, so an interpreter longer than this is cut here, exactly as
+/// Bash 5.3.0 cuts it. Measured against Bash 5.3.0 on `#!/` plus 124 to
+/// 129 `x` bytes: it names 127 bytes of the file and no more.
+pub const SAMPLE: usize = 127;
+
 /// The redirections a spawned process applies itself ([`SpawnSpec::redirs`]).
 ///
 /// Bash's forked child opens a redirection's file after the fork, so a
@@ -399,15 +406,22 @@ pub struct SpawnSpec<'a> {
 ///
 /// When the exec fails the process reports it as bash's `shell_execve`
 /// does, on its own fd 2 so the command's redirections apply: it LOOKS at
-/// the program, because the kernel's errno alone does not say why. A
-/// directory is `Is a directory`; a file it may not execute keeps the
-/// kernel's own words; an executable whose `#!` interpreter could not run
-/// is `exec_sys_diag` then `INTERP: bad interpreter: ` and the description,
+/// the program, because the kernel's errno alone does not say why. In
+/// bash's order: a directory is `Is a directory`; a file that is not there
+/// or may not be executed, and `E2BIG`/`ENOMEM`, keep the kernel's own
+/// words; an executable whose first [`SAMPLE`] bytes begin with `#!` is
+/// `exec_sys_diag` then `INTERP: bad interpreter: ` and the description,
 /// which is what Bash 5.3.0 reports and the only place a line number is
 /// left out (bash's `sys_error`); an `ENOEXEC` with no `#!` is `cannot
-/// execute binary file: ` and the description. Everything else is
-/// `exec_diag` and the description. The status is 127 only for a program
-/// that is not there at all, and 126 for every refusal of one that is.
+/// execute binary file: ` and the description; an `ENOENT` for a file that
+/// IS there is `cannot execute: required file not found`. Everything else
+/// is `exec_diag` and the description.
+///
+/// The status is 126 whenever the interpreter could be named, and
+/// otherwise 127 for `ENOENT` and 126 for every other error — so a program
+/// replaced between the failed exec and the look still reports the status
+/// its own `execve` earned.
+///
 /// The engine's `ENOEXEC` fallback cannot run after this return; a host may
 /// refuse the deferred spawn to let the engine apply the redirections and
 /// retry when the executable may need that fallback.
