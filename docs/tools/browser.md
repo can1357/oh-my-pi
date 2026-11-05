@@ -69,6 +69,7 @@ await tab.close();
 | `timeout`             | Seconds; default 30, capped by positive `tools.maxTimeout`, then clamped to 1–300. First-use Chromium installation is outside the open deadline. An open that runs out names the step it stalled in: launching or connecting to the browser, closing a tab to reopen it, or opening the tab.                                                                                                                                                                     |
 
 If Chrome detaches the relay during an open's navigation and omp reattaches to the same page, the open returns that tab with a recovery notice instead of closing it. Check its current page before repeating the navigation; reattachment does not reload it or retry input that may already have landed.
+If reattachment uses up the budget before navigation starts, the open still fails but keeps the recovered tab available through `browser.tab(name)`.
 
 Reopening with init scripts, a download directory, a user-agent override, or `ignore_https_errors: true` recycles an existing tab so those worker-init options can take effect.
 

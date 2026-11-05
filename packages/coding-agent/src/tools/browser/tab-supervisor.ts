@@ -210,7 +210,7 @@ export interface AcquireTabOptions {
 export interface AcquireTabResult {
 	tab: TabSession;
 	created: boolean;
-	/** What the open recovered from before reusing the tab, for its result. */
+	/** What the open recovered from, for its result. */
 	note?: string;
 }
 
@@ -291,7 +291,14 @@ class WorkerMessageError extends ToolError {}
 /** A worker `tab.goto` outlasted its budget; the page stays on what loaded. */
 class NavigationTimeoutError extends ToolError {}
 /** The relay detach interrupted a call, but the same page is usable on a replacement worker. */
-class DebuggerReattachedError extends ToolError {}
+class DebuggerReattachedError extends ToolError {
+	constructor(
+		message: string,
+		readonly when: "during" | "before",
+	) {
+		super(message);
+	}
+}
 /** The page's renderer crashed; the run that reports it recycles the worker. */
 class RendererCrashedError extends ToolError {}
 /** Chrome ended the debugger attachment of a relay tab; the worker runs nothing more and the tab is re-adopted. */
@@ -680,10 +687,14 @@ async function navigateOpenedTab(
 			{ cwd: getProjectDir() },
 		);
 	} catch (error) {
-		if (error instanceof DebuggerReattachedError && !opts.signal?.aborted && tabs.get(name)?.state === "alive") {
+		if (error instanceof DebuggerReattachedError && error.when === "during" && !opts.signal?.aborted) {
 			return error.message;
 		}
-		if (created && (opts.signal?.aborted || !(error instanceof NavigationTimeoutError))) {
+		if (
+			created &&
+			(opts.signal?.aborted ||
+				!(error instanceof NavigationTimeoutError || error instanceof DebuggerReattachedError))
+		) {
 			await rollBackCreatedTab(name, created);
 			throw error;
 		}
@@ -1162,6 +1173,7 @@ async function runInTabWithSnapshot(
 				if (error.when === "during" || opts.readopted) {
 					throw new DebuggerReattachedError(
 						`${detached}. omp reattached to the same tab on a new worker without reloading it, so the next call works; check the page before repeating this one. ${WORKER_RESETS}.`,
+						error.when,
 					);
 				}
 				// Nothing ran: run the call on the new worker, within what the re-adoption left of its budget.
@@ -1169,6 +1181,7 @@ async function runInTabWithSnapshot(
 				if (remainingMs <= 0) {
 					throw new DebuggerReattachedError(
 						`${detached}. omp reattached to the same tab on a new worker without reloading it, but that used up this call's ${opts.timeoutMs}ms budget, so the call was not run again; repeat it. ${WORKER_RESETS}.`,
+						error.when,
 					);
 				}
 				// Its pending entry must go first, or the tab reads as busy.
