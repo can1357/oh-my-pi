@@ -132,13 +132,19 @@ describe("final tool-call arguments", () => {
 		);
 	}
 
-	it("caps raw invalid argument diagnostics without retaining executable preview keys", async () => {
+	it("caps raw invalid argument diagnostics on the fault, without retaining executable preview keys", async () => {
 		const raw = JSON.stringify({ ...args, content: "x".repeat(600) }).slice(0, -2);
 		const result = await streamCall(raw, "tool_calls");
 		const call = result.content.find(block => block.type === "toolCall");
 		if (!call) throw new Error("Expected tool call");
-		const bounded = raw.slice(0, 512) + "… [truncated " + (raw.length - 512) + " chars]";
-		expect(call.arguments).toEqual({ __parseError: expect.any(String), __rawJson: bounded });
+		const diagnostic = call.arguments as Record<string, unknown>;
+		expect(Object.keys(diagnostic).sort()).toEqual(["__parseError", "__rawJson"]);
+		const bounded = String(diagnostic.__rawJson);
+		expect(bounded.length).toBeLessThanOrEqual(512);
+		// The cut is on the fault: this payload was truncated mid-object, so the
+		// excerpt ends where the input does and drops the head instead.
+		expect(bounded).toEndWith(raw.slice(-64));
+		expect(bounded).toStartWith("… [");
 		// The validation error shows the same bound, not a second truncation of it.
 		expect(() => validateToolArguments(tool, call)).toThrow(`Raw JSON:\n${bounded}`);
 	});

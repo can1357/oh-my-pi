@@ -25,6 +25,7 @@ import type {
 	ToolSpeculationPolicy,
 } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
+import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { $env, isRecord, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
 import type { EffectiveExtensionRoots } from "../capability/types";
@@ -236,9 +237,28 @@ function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
 }
 
 /**
+ * The refusal for arguments whose root is not an object at all. The shape it
+ * asks for has to be the shape the current setting accepts: advising
+ * `{ context, tasks }` while `task.batch` is off walks the caller into the
+ * "task.batch is disabled" refusal, which is the unrecoverable round-trip this
+ * change exists to remove.
+ */
+function nonRecordArgumentsMessage(params: unknown, batchEnabled: boolean): string {
+	const shape = batchEnabled
+		? "`{ context, tasks: [{ task, solutionSpace, name?, agent? }] }`, one item per subagent"
+		: "`{ task, solutionSpace, name?, agent? }`, one agent per call";
+	return `The task tool's arguments must be an object. This call's arrived as ${describeNonRecordArguments(params)}, so the tool could read no field from them at all. Send the call as ${shape}.`;
+}
+
+/**
  * Reject legacy fields and shape/configuration combinations the current tool
  * cannot accept. `outputSchema` is a first-class per-spawn field; stale
  * `schema` remains an eval-only alias and is rejected.
+ *
+ * `params` is a record here: `planSpawns` is the only caller and judges the
+ * raw root before the repair runs, because everything below reads `params` as
+ * an object. A duplicate check here would be dead code wearing a guard's
+ * comment, which is worse than no comment at all.
  */
 function validateShapeParams(batchEnabled: boolean, params: TaskParams): string | undefined {
 	if (Object.hasOwn(params, "schema")) {
@@ -299,6 +319,94 @@ function validateTaskInput(item: TaskItem | undefined, label: string, fileEnable
 	return undefined;
 }
 
+/**
+ * Name the shape of a non-object argument root, without a length or any other
+ * digit: these words are rendered into an error whose text the HTTP-status
+ * classifiers scan for a bare `401`/`403`/`429`/`5xx`.
+ */
+function describeNonRecordArguments(params: unknown): string {
+	if (params === null) return "`null`";
+	if (Array.isArray(params)) return "an array";
+	switch (typeof params) {
+		case "string":
+			return "a string";
+		case "number":
+			return "a number";
+		case "boolean":
+			return "a boolean";
+		case "undefined":
+			return "nothing at all";
+		default:
+			return `a ${typeof params}`;
+	}
+}
+
+/** Most root keys the refusal names before it stops counting. */
+const NAMED_FIELDS_LIMIT = 8;
+/** Longest single key name the refusal reproduces. */
+const NAMED_FIELD_MAX_LENGTH = 40;
+
+/**
+ * Render the keys a call carried, bounded in three ways, because the keys are
+ * the model's own text: how many are named, how long each may be, and what a
+ * key may contain. The tool is `lenientArgValidation`, so every unknown root
+ * key survives to here — 5,000 of them produced a 44,078-character refusal,
+ * growing linearly in a count the model chooses, on the one path whose
+ * recorded failure is a model re-sending the same call.
+ *
+ * A key that is itself a number is still reproduced: naming the key is the
+ * point, so this cannot be digit-free the way the parse diagnostic is.
+ */
+function namedReceivedFields(received: string[]): string {
+	const named = received.slice(0, NAMED_FIELDS_LIMIT).map(key => {
+		// Cut first, then sanitize: cutting sanitized text splits an astral pair
+		// and leaves a lone surrogate in the refusal. A backtick would close the
+		// quoting around the name, and a newline would break out of the list.
+		const cut = key.length > NAMED_FIELD_MAX_LENGTH ? `${key.slice(0, NAMED_FIELD_MAX_LENGTH)}…` : key;
+		return `\`${sanitizeText(cut).replaceAll("`", "'").replace(/\s+/g, " ")}\``;
+	});
+	return received.length > NAMED_FIELDS_LIMIT ? `${named.join(", ")} and others` : named.join(", ");
+}
+
+/**
+ * The refusal for a `task.batch` call that carries neither `tasks` nor a flat
+ * `task`/`taskFile`. It names what the call *did* carry, because the bare
+ * "Missing `tasks`" it replaces was unrecoverable in practice: a model that
+ * wrote its whole brief into the shared `context` and omitted the work read
+ * "provide a `tasks` array … with a shared `context`" as a field it had
+ * already supplied, re-sent the same shape, and gave up
+ * (dispatch://INFRA-1270 — 22 recorded refusals, every one a `context` with
+ * no work, one lane burning six calls in 57s before abandoning the tool).
+ *
+ * An empty argument object is reported as its own case: no field is missing
+ * there, nothing arrived at all, and a caller chasing a dropped or
+ * undecodable tool-call payload must be able to tell the two apart.
+ *
+ * Only fields holding a value are named. `repairTaskParams` rebuilds the
+ * object as `{ ...params, task, context, tasks }` whenever it repairs
+ * anything, so an absent `task` or `tasks` becomes an own property holding
+ * `undefined`; naming those would report fields the caller never sent. JSON
+ * cannot carry `undefined`, so for a wire call this is exactly the set of
+ * fields the model wrote.
+ */
+function missingWorkMessage(params: TaskParams): string {
+	// `validateShapeParams` rejected a non-record root before this ran.
+	const present = Object.entries(params).filter(([, value]) => value !== undefined);
+	if (present.length === 0) {
+		return `No field of this \`task\` call reached the tool: not a missing \`tasks\`, but nothing at all. Note that the harness strips the \`${INTENT_FIELD}\` intent before the tool sees the call, so a call carrying only \`${INTENT_FIELD}\` arrives exactly like this — that is the likeliest cause, not a lost payload. Arguments that failed to parse are refused as invalid JSON instead, naming the fault, so this is not that. Send the call again as \`{ context, tasks: [{ task, solutionSpace, name?, agent? }] }\`.`;
+	}
+	const received = present.map(([key]) => key).filter(key => key !== INTENT_FIELD);
+	if (received.length === 0) {
+		return `Missing \`tasks\`. The call carried its \`${INTENT_FIELD}\` intent and nothing else — no \`context\` and no work to run. Send the call again as \`{ context, tasks: [{ task, solutionSpace, name?, agent? }] }\`, one item per subagent.`;
+	}
+	const carried = `The call carried ${namedReceivedFields(received)} and no work to run.`;
+	const contextNote =
+		typeof params.context === "string" && params.context.trim() !== ""
+			? " `context` is shared background for the batch — it is never a task and spawns nothing on its own, so a brief written into it runs nowhere."
+			: "";
+	return `Missing \`tasks\`. ${carried}${contextNote} Every agent's instructions go in \`tasks[].task\`: \`{ context, tasks: [{ task, solutionSpace, name?, agent? }] }\`, one item per subagent.`;
+}
+
 function validateSpawnParams(
 	params: TaskParams,
 	batchEnabled: boolean,
@@ -347,7 +455,7 @@ function validateSpawnParams(
 		return undefined;
 	}
 	if (batchEnabled && params.task === undefined && params.taskFile === undefined) {
-		return "Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`.";
+		return missingWorkMessage(params);
 	}
 	return (
 		validateTaskInput(params, "The call", fileEnabled) ??
@@ -488,6 +596,12 @@ interface SpawnPlan {
  * Repair, validate, and normalize a call into its spawns. Returns the
  * validation error the call reports instead when the shape is rejected. Shared
  * by dispatch and the speculative launcher so both derive identical spawns.
+ *
+ * The root's shape is judged on the **raw** arguments, before the repair runs:
+ * `repairTaskParams` returns `{ ...params, task, context, tasks }` whenever it
+ * repairs anything, and spreading an array produces a plain object, so an
+ * array carrying a double-encoded `context` would otherwise arrive here as a
+ * record and be described as one.
  */
 function planSpawns(
 	rawParams: unknown,
@@ -497,6 +611,9 @@ function planSpawns(
 	seanceAdvertised: boolean,
 	settings: Settings,
 ): SpawnPlan | string {
+	if (rawParams === null || typeof rawParams !== "object" || Array.isArray(rawParams)) {
+		return nonRecordArgumentsMessage(rawParams, batchEnabled);
+	}
 	const params = repairTaskParams(rawParams as TaskParams);
 	const error =
 		validateShapeParams(batchEnabled, params) ??
@@ -724,6 +841,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		);
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
+		// The approval prompt is built from the RAW arguments, before `execute`
+		// and so before `planSpawns` judges the root: `null` reached the reads
+		// below and threw `TypeError: null is not an object` out of the prompt,
+		// where `approvalRestrictionPaths` two lines above already guards.
+		if (!isRecord(args)) return [];
 		const params = args as Partial<TaskParams>;
 		const lines: string[] = [];
 		if (typeof params.agent === "string") {

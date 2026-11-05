@@ -17,6 +17,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent, type AgentTool, validateAgentToolArguments } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { parseToolCallArguments } from "@oh-my-pi/pi-ai/utils/tool-call-arguments";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
@@ -263,6 +264,188 @@ describe("task.batch validation", () => {
 
 		expect(getFirstText(result)).toContain("Missing `tasks`");
 		expect(result.isError).toBe(true);
+	});
+
+	/**
+	 * Decode a call the way a provider stream does — raw streamed JSON through
+	 * `parseToolCallArguments`, then the shared lenient validation the task
+	 * tool runs under — and execute it. The reported failure
+	 * (dispatch://INFRA-1270) was believed to be a decode failure, so the
+	 * regression has to come through the decode path, not a hand-built object.
+	 */
+	async function decodeAndExecute(
+		rawJson: string,
+		settings: Record<string, unknown>,
+	): Promise<{ text: string; decoded: unknown }> {
+		mockDiscovery();
+		const tool = await TaskTool.create(createSession({ settings }));
+		const decoded = parseToolCallArguments(rawJson);
+		const args = validateAgentToolArguments(tool as unknown as AgentTool, {
+			type: "toolCall",
+			id: "decoded-call",
+			name: tool.name,
+			arguments: decoded,
+		});
+		const result = await tool.execute("decoded-call", args as TaskParams);
+		return { text: getFirstText(result), decoded };
+	}
+
+	it("names the fields a context-only batch call carried instead of only the one it lacks", async () => {
+		// The recorded shape: a long multi-paragraph brief with numbered lists,
+		// backticks and parentheses written into the shared `context`, no `tasks`.
+		const brief = [
+			"Review round 10 of `owner/repo` pull request #18122 (head 05a23ac2).",
+			"",
+			"1. Read the brief at `/tmp/arms/shared.md` FIRST and in full.",
+			"2. Drive the real consumers (the `plugin install` command), not a script you find on disk.",
+			"3. Report a verdict in the exact shape the brief names.",
+		].join("\n");
+		const rawJson = JSON.stringify({ i: "Dispatch review pair at head", context: brief });
+
+		const { text, decoded } = await decodeAndExecute(rawJson, { "task.batch": true });
+
+		// The arguments survived decoding intact: the refusal is about shape, not bytes.
+		expect(isRecord(decoded) && typeof decoded.context === "string" ? decoded.context : null).toBe(brief);
+		// The exact list, so a harness-only field cannot creep into it.
+		expect(text).toContain("The call carried `context` and no work to run.");
+		expect(text).toContain("tasks[].task");
+	});
+
+	it("never tells a call that carried only its intent that its arguments were lost", async () => {
+		// Two shapes, because the dispatch step decides which one the tool sees.
+		// With intent tracing on — the production default — `agent-loop` strips
+		// `i` before validation, so the tool is handed `{}` and the refusal must
+		// not blame a lost payload for a field the harness removed on purpose.
+		// With tracing off the tool sees `i` itself. Asserting only the second
+		// shape is what let the misleading wording ship: the test called
+		// `execute` directly and skipped the step that discards the evidence.
+		const stripped = await decodeAndExecute("{}", { "task.batch": true });
+		expect(stripped.text).toContain("harness strips the `i` intent");
+		expect(stripped.text).not.toContain("arguments were lost");
+		expect(stripped.text).not.toContain("lost before the tool ran");
+
+		const kept = await decodeAndExecute(JSON.stringify({ i: "Dispatching the pair" }), { "task.batch": true });
+		expect(kept.text).toContain("carried its `i` intent and nothing else");
+		expect(kept.text).not.toContain("arguments were lost");
+	});
+
+	// A non-record root survives lenient validation and reaches dispatch as it
+	// arrived. `null` threw a TypeError out of `validateShapeParams`, and a
+	// string enumerated its character indices as if they were fields the caller
+	// sent — a long one putting a status-like number into the refusal.
+	it.each([
+		['"work"', "a string"],
+		[`"${"x".repeat(600)}"`, "a string"],
+		["[]", "an array"],
+		["false", "a boolean"],
+		["0", "a number"],
+		["null", "`null`"],
+	])("reports a non-object argument root as its shape, not as fields: %s", async (rawJson, shape) => {
+		const { text } = await decodeAndExecute(rawJson, { "task.batch": true });
+		expect(text).toContain(`arrived as ${shape}`);
+		expect(text).not.toContain("The call carried `0`");
+		expect(text).not.toContain("reached the tool");
+		expect(text).not.toMatch(/\b(?:401|403|429|500|502|503|504)\b/);
+	});
+
+	it("bounds the field list it echoes back, in count and in each name", async () => {
+		// Every unknown root key survives lenient validation, so the list is the
+		// model's own text and its length is the model's own choice. The long,
+		// backticked and newline-bearing keys go FIRST: placed after the count
+		// cap they fall outside the rendered prefix, and the assertions below
+		// then pass with the per-name protections removed.
+		const many: Record<string, unknown> = {
+			[`long${"g".repeat(200)}`]: 1,
+			"back`tick": 1,
+			"two\nlines\nhere": 1,
+		};
+		for (let i = 0; i < 400; i++) many[`field${i}`] = i;
+
+		const { text } = await decodeAndExecute(JSON.stringify(many), { "task.batch": true });
+
+		expect(text).toContain("and others");
+		expect(text.length).toBeLessThan(600);
+		expect(text).toContain("`long" + "g".repeat(36) + "…`");
+		expect(text).toContain("back'tick");
+		expect(text).toContain("`two lines here`");
+		expect(text.split("\n")).toHaveLength(1);
+	});
+
+	it("judges the root shape before the repair can reshape it", async () => {
+		// `repairTaskParams` returns `{ ...params, task, context, tasks }` when it
+		// repairs anything, and spreading an ARRAY produces a plain object — so an
+		// array carrying a double-encoded `context` reached validation as a record
+		// and was described as one.
+		const asArray: unknown[] = [];
+		// TWO escaped newlines: `repairDoubleEncodedJsonString` deliberately leaves
+		// a single non-structural escape alone, so one of them fires no repair at
+		// all and `validateShapeParams` rejects the array on its own — the test
+		// then passes with the `planSpawns` guard removed, guarding nothing.
+		(asArray as unknown as Record<string, unknown>).context = String.raw`Line one\nLine two\nLine three`;
+		(asArray as unknown as Record<string, unknown>).tasks = [{ task: "Work.", solutionSpace: "c" }];
+
+		const { text } = await decodeAndExecute(JSON.stringify({ wrapped: 1 }), { "task.batch": true });
+		expect(text).not.toContain("arrived as an array");
+
+		mockDiscovery();
+		const tool = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
+		const result = await tool.execute("array-root", asArray as unknown as TaskParams);
+		expect(getFirstText(result)).toContain("arrived as an array");
+		expect(result.isError).toBe(true);
+	});
+
+	it("advises the shape the current setting accepts when the arguments are not an object", async () => {
+		// Advising `{ context, tasks }` while task.batch is off walks the caller
+		// into "task.batch is disabled, so the task tool does not accept `tasks`
+		// or `context`" — the unrecoverable round-trip this whole change removes.
+		const off = await decodeAndExecute('"work"', { "task.batch": false });
+		expect(off.text).toContain("`{ task, solutionSpace, name?, agent? }`");
+		expect(off.text).not.toContain("tasks:");
+
+		const on = await decodeAndExecute('"work"', { "task.batch": true });
+		expect(on.text).toContain("tasks: [{ task, solutionSpace, name?, agent? }]");
+	});
+
+	it("cuts a long key on a character boundary, not through an astral pair", async () => {
+		// 39 ASCII units, so the astral pair STRADDLES the 40-unit cut. At 38 the
+		// first pair ends exactly on the boundary and nothing is ever severed.
+		const key = `${"a".repeat(39)}🧞🧞`;
+		const { text } = await decodeAndExecute(JSON.stringify({ [key]: 1 }), { "task.batch": true });
+		expect(text.isWellFormed()).toBe(true);
+	});
+
+	it("never names a field the double-encoding repair materialised", async () => {
+		// A `context` whose newlines are double-encoded makes `repairTaskParams`
+		// rebuild the params as `{ ...params, task, context, tasks }`, so absent
+		// `task` and `tasks` become own properties holding `undefined`. The
+		// refusal must not report them as fields the caller sent.
+		const rawJson = JSON.stringify({ context: String.raw`Line one\nLine two\nLine three` });
+
+		const { text } = await decodeAndExecute(rawJson, { "task.batch": true });
+
+		expect(text).toContain("The call carried `context` and no work to run.");
+	});
+
+	it("reports no field reaching the tool as nothing received, not as one absent field", async () => {
+		const { text } = await decodeAndExecute("{}", { "task.batch": true });
+		expect(text).toContain("No field of this `task` call reached the tool");
+		expect(text).not.toContain("no work to run");
+	});
+
+	it("builds an approval prompt from a non-record root instead of throwing", async () => {
+		// The prompt is built from the RAW arguments, before `planSpawns` judges
+		// the root, so `null` threw `TypeError: null is not an object` out of the
+		// approval path while `approvalRestrictionPaths` beside it already
+		// guarded. Nothing else covers this: deleting the guard leaves the whole
+		// task suite green.
+		mockDiscovery();
+		const tool = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
+		for (const root of [null, undefined, "work", 0, false, []]) {
+			expect(() => tool.formatApprovalDetails(root)).not.toThrow();
+			expect(tool.formatApprovalDetails(root)).toEqual([]);
+		}
+		// A real call still describes itself.
+		expect(tool.formatApprovalDetails({ agent: "task", task: "Work." }).join("\n")).toContain("Agent: task");
 	});
 
 	it("rejects the stale schema argument regardless of batch mode", async () => {
