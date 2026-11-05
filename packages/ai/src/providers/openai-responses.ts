@@ -867,11 +867,21 @@ const streamOpenAIResponsesOnce = (
 			// later rebuild re-applies it, so a strict-tools or stale-chain repair
 			// cannot resurrect the tier the host just said it has no capacity for.
 			let serviceTierCapacityRetry: ServiceTierCapacityRetry | undefined;
-			// The tier the request was actually served on: a recovery that dropped
-			// `service_tier` must not keep accounting the turn at the refused tier's
-			// rate when the response carries no tier echo of its own.
-			const effectiveRequestServiceTier = (): ServiceTier | undefined =>
-				serviceTierCapacityRetry?.dropServiceTier ? undefined : options?.serviceTier;
+			/**
+			 * The tier the request the host accepted actually asked for, used when
+			 * the response carries no tier echo of its own.
+			 *
+			 * Once a capacity recovery has rewritten the request, the caller's
+			 * original choice is no longer what went out: the refused tier was
+			 * dropped, and an `onPayload` hook may since have chosen another. Read
+			 * the sent body in that case, so the turn is neither discounted at the
+			 * tier the host refused nor billed flat for one a hook picked.
+			 */
+			const effectiveRequestServiceTier = (): ServiceTier | undefined => {
+				if (!serviceTierCapacityRetry) return options?.serviceTier;
+				const sent = activeParams?.service_tier;
+				return sent ?? undefined;
+			};
 			/**
 			 * Re-aim a freshly built request at the standard tier before anything
 			 * downstream reads its wire id. The effort-fallback key is derived from
