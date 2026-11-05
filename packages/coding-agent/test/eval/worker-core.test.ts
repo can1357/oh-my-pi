@@ -95,6 +95,7 @@ function installFatalCapture(): {
 describe("WorkerCore", () => {
 	it("keeps state and reports a late bridge rejection once without killing the worker", async () => {
 		const workerUrl = pathToFileURL(path.resolve(import.meta.dir, "../../src/eval/js/worker-core.ts")).href;
+		const browserPrelude = await Bun.file(path.resolve(import.meta.dir, "../../src/tools/browser/prelude.js")).text();
 		const probe = `
 import { WorkerCore } from ${JSON.stringify(workerUrl)};
 process.once("uncaughtException", () => process.exit(17));
@@ -120,20 +121,38 @@ const waitFor = predicate => {
 	waiters.push({ predicate, resolve });
 	return promise;
 };
-const snapshot = { cwd: process.cwd(), sessionId: "late-bridge" };
+const snapshot = { cwd: process.cwd(), sessionId: "late-bridge",
+	preludes: [{ name: "browser", exports: ["browser"], source: ${JSON.stringify(browserPrelude)} }] };
 const core = new WorkerCore(transport, { mode: "isolated" });
 send({ type: "init", snapshot });
-const call = waitFor(message => message.type === "tool-call");
 const first = waitFor(message => message.type === "result" && message.runId === "first");
 send({ type: "run", runId: "first", filename: "[first].js", snapshot,
-	code: 'var kept = 42; var floating = __omp_call_tool__("browser.waitForDownload", {}); throw new Error("Tab is busy");' });
-const pending = await call;
+	code: 'var kept = 42; var floating = Array.from({length: 13}, () => browser.tab("main").waitForDownload()); throw new Error("Tab is busy");' });
 await first;
-const warning = waitFor(message => message.type === "log" && message.msg.includes("finished eval cell"));
-send({ type: "tool-reply", id: pending.id, reply: { ok: false,
-	error: { name: "ToolError", message: "browser.waitForDownload() timed out" } } });
-await warning;
-for (const runId of ["second", "third"]) {
+for (let index = 0; index < 257; index++) {
+	const runId = "evict-" + index;
+	const result = waitFor(message => message.type === "result" && message.runId === runId);
+	send({ type: "run", runId, filename: "[" + runId + "].js", snapshot, code: "" });
+	await result;
+}
+const calls = messages.filter(message => message.type === "tool-call");
+if (calls.length !== 13) throw new Error("expected thirteen pending browser calls");
+const rejectCall = async pending => {
+	const warning = waitFor(message => message.type === "log" && message.msg.includes("finished eval cell"));
+	send({ type: "tool-reply", id: pending.id, reply: { ok: false,
+		error: { name: "ToolError", message: "timed out" } } });
+	await warning;
+};
+for (const pending of calls.slice(0, 12)) await rejectCall(pending);
+const gateCall = waitFor(message => message.type === "tool-call" && message.runId === "second");
+const second = waitFor(message => message.type === "result" && message.runId === "second");
+send({ type: "run", runId: "second", filename: "[second].js", snapshot,
+	code: 'await __omp_call_tool__("read", {}); print(kept);' });
+const gate = await gateCall;
+await rejectCall(calls[12]);
+send({ type: "tool-reply", id: gate.id, reply: { ok: true, value: null } });
+await second;
+for (const runId of ["third", "fourth"]) {
 	const result = waitFor(message => message.type === "result" && message.runId === runId);
 	send({ type: "run", runId, filename: "[" + runId + "].js", snapshot, code: "print(kept);" });
 	await result;
@@ -156,16 +175,24 @@ console.log(JSON.stringify(messages));
 		]);
 		expect(exitCode, stderr).toBe(0);
 		const messages: WorkerOutbound[] = JSON.parse(stdout);
-		expect(messages.filter(message => message.type === "result")).toMatchObject([
+		expect(
+			messages.filter(message => message.type === "result" && !message.runId.startsWith("evict-")),
+		).toMatchObject([
 			{ runId: "first", ok: false },
 			{ runId: "second", ok: true },
 			{ runId: "third", ok: true },
+			{ runId: "fourth", ok: true },
 		]);
 		const text = messages.filter(message => message.type === "text");
-		expect(text.filter(message => message.chunk.includes("browser.waitForDownload"))).toMatchObject([
-			{ runId: "second", chunk: expect.stringContaining("Unhandled rejection") },
+		const notices = text.filter(message => message.chunk.includes("browser.waitForDownload"));
+		expect(notices).toHaveLength(11);
+		expect(notices.filter(message => message.runId === "second")).toHaveLength(10);
+		expect(notices.filter(message => message.runId === "third")).toHaveLength(1);
+		expect(notices.every(message => message.chunk.includes("[first].js"))).toBe(true);
+		expect(text.filter(message => message.chunk.includes("more late rejections"))).toMatchObject([
+			{ runId: "second", chunk: expect.stringContaining("2 more late rejections") },
 		]);
-		expect(text.filter(message => message.chunk === "42\n")).toHaveLength(2);
+		expect(text.filter(message => message.chunk === "42\n")).toHaveLength(3);
 	});
 
 	it("delivers a completion handle id after its creating cell finishes", async () => {
