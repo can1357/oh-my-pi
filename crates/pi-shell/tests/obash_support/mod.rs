@@ -65,7 +65,7 @@ pub static TEST_PATH: LazyLock<OsString> = LazyLock::new(|| {
 	let searched: Vec<PathBuf> = SYSTEM_DIRS
 		.iter()
 		.map(PathBuf::from)
-		.chain(std::env::split_paths(&caller).filter(|dir| dir.is_absolute()))
+		.chain(std::env::split_paths(&caller).filter_map(absolute_dir))
 		.collect();
 	let mut needed = vec![false; searched.len()];
 	for program in REQUIRED {
@@ -76,6 +76,31 @@ pub static TEST_PATH: LazyLock<OsString> = LazyLock::new(|| {
 	let kept = searched.iter().zip(&needed).filter(|&(_, &used)| used).map(|(dir, _)| dir);
 	std::env::join_paths(kept).expect("a directory holding one of these programs separates PATH")
 });
+
+/// One of the caller's `PATH` entries as an absolute directory.
+///
+/// A relative entry is legal and usable — a launcher that says
+/// `PATH=../../store` finds its programs — so it is resolved rather than
+/// dropped, against the TEST PROCESS's working directory and once. It has
+/// to be resolved here because the children do not share that directory:
+/// several tests give the process they start a `current_dir` of their own,
+/// and a relative entry passed through would mean a different place in
+/// each of them.
+///
+/// An empty entry means the working directory in the same way, and is
+/// skipped rather than resolved: it would put whatever directory the suite
+/// happens to be run from on every child's `PATH`, which is the kind of
+/// dependence on the caller this harness exists to remove.
+fn absolute_dir(dir: PathBuf) -> Option<PathBuf> {
+	if dir.as_os_str().is_empty() {
+		return None;
+	}
+	if dir.is_absolute() {
+		Some(dir)
+	} else {
+		std::env::current_dir().ok().map(|cwd| cwd.join(dir))
+	}
+}
 
 /// Whether `path` is a program THIS ACCOUNT can execute, following links:
 /// a Nix store entry reached through a profile is a symlink.
