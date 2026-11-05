@@ -5,6 +5,7 @@
 ### Breaking Changes
 
 - Replaced visualization-only `parseShell()` with engine-owned `RunTrace.present()` and `ShellVisualization` APIs.
+- Embedded-shell Frames snapshots use layout 30; layout-29 execution cannot resume after upgrading. Restore refuses it without deleting the snapshot; with the same IR version, explicitly dropping frames preserves root state but abandons running scripts with status 255.
 
 ### Added
 
@@ -27,6 +28,8 @@
 
 ### Fixed
 
+- Shell snapshots and restores now report external programs that outlived their virtual owner, with the original owner and native process identifiers.
+- Shell restore now refuses an incompatible engine image before reading state-store records; dropping frames cannot bypass a different IR record schema.
 - Fixed the bash tool's `$!` inside a command substitution, a `( )` subshell or a pipeline stage: it now names the parent's last background job, as in Bash ([#18107](https://github.com/can1357/oh-my-pi/pull/18107) by [@sjawhar](https://github.com/sjawhar))
 - Fixed Windows `rsync` treating a one-letter daemon host such as `h::module` as a local drive path ([#18048](https://github.com/can1357/oh-my-pi/pull/18048) by [@jchanghong023](https://github.com/jchanghong023))
 - Removed embedded-shell compiler warnings and fixed history saves hanging when a stale lock cannot be removed

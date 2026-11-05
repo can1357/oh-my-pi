@@ -36,7 +36,7 @@ mod zsh;
 use std::{
 	collections::{HashMap, HashSet, VecDeque},
 	sync::Arc,
-	task::Waker,
+	task::{Context, Waker},
 };
 
 use bstr::{BStr, BString};
@@ -66,7 +66,7 @@ use crate::bash::{
 	event::{AssignScope, Event, EventData, EventMask, Origin, OriginChain, OriginLink},
 	fd::{FdOrigin, FdRef, FdTable},
 	fs::File,
-	host::{EnvView, Host, StdFd, Verdict},
+	host::{EnvView, ExtProc, Host, StdFd, Verdict},
 	ids::{CallId, CmdTag, JobId, ModeId, RunId, ToolRef, UnitId, Vpid},
 	ir::{self, Unit},
 	signal::{DefaultAction, SigTarget, Signal},
@@ -361,26 +361,29 @@ pub enum CallOutcome {
 /// caches). Persistent state lives in the [`StateStore`]. `Send`; holds no
 /// host references.
 pub struct Shell {
-	k:       Kernel,
+	k:                   Kernel,
 	/// Boxed: a `Vproc` is ~650 bytes and the vector doubles, so idle
 	/// subshells would pay up to twice that in spare capacity (target:
 	/// ≤ 2 KiB per idle vproc).
 	#[expect(clippy::vec_box, reason = "slack capacity of 8-byte slots, not of whole vprocs")]
-	procs:   Vec<Box<Vproc>>,
-	rr:      usize,
+	procs:               Vec<Box<Vproc>>,
+	rr:                  usize,
 	/// A slice cut short by the step budget or a control request: the vproc
 	/// and the ops it has left. The next step continues it, so which vproc
 	/// runs when depends only on op counts, never on where the host's steps,
 	/// pauses or snapshots fall.
-	slice:   Option<(Vpid, u32)>,
+	slice:               Option<(Vpid, u32)>,
 	/// Subshell vprocs that ended since the last orphan check: their
 	/// children are orphans ([`EngineConfig::end_orphan_jobs`] only).
 	///
 	/// [`EngineConfig::end_orphan_jobs`]: crate::bash::EngineConfig::end_orphan_jobs
-	gone:    Vec<Vpid>,
+	gone:                Vec<Vpid>,
 	/// Orphaned job trees still watched for in-engine work (see the
 	/// `orphans` module); empty unless [`Self::gone`] ever had entries.
-	orphans: Vec<Vpid>,
+	orphans:             Vec<Vpid>,
+	/// External programs still running after their owner was unwound. Their
+	/// handles stay here until exit, without keeping a dead vproc or frame.
+	surviving_externals: Vec<(Vpid, Box<dyn ExtProc>)>,
 }
 
 /// Shell-wide state shared by all vprocs (kept apart from `procs` so ops can
@@ -1557,6 +1560,7 @@ impl Shell {
 			slice: None,
 			gone: Vec::new(),
 			orphans: Vec::new(),
+			surviving_externals: Vec::new(),
 		})
 	}
 
@@ -1766,6 +1770,7 @@ impl Shell {
 		let start = cx.host.now_ns();
 		let mut ops = 0u32;
 		loop {
+			self.poll_surviving_externals();
 			if let Some(err) = self.k.root.take_fault() {
 				self.fail_all(cx, &err);
 			}
@@ -2098,10 +2103,22 @@ impl Shell {
 		None
 	}
 
+	/// Release handles whose programs have exited, also before a snapshot
+	/// taken without another scheduler step.
+	fn poll_surviving_externals(&mut self) {
+		if !self.surviving_externals.is_empty() {
+			let mut task_cx = Context::from_waker(&self.k.waker);
+			self
+				.surviving_externals
+				.retain_mut(|(_, child)| child.poll_wait(&mut task_cx).is_pending());
+		}
+	}
+
 	/// Terminate vproc `i` with `status`: signal its task or external, end its
 	/// scripts. Transient vprocs are removed.
 	fn kill(&mut self, cx: &mut Cx<'_>, i: usize, sig: Signal, status: i32) {
 		let p = &mut self.procs[i];
+		let mut task_cx = Context::from_waker(&self.k.waker);
 		for f in &mut p.frames {
 			if let Some(sc) = f.scratch.as_mut() {
 				match &mut sc.live {
@@ -2111,6 +2128,12 @@ impl Shell {
 						let _ = e.cont();
 					},
 					_ => {},
+				}
+				if let Live::Ext(child) = &mut sc.live
+					&& child.poll_wait(&mut task_cx).is_pending()
+					&& let Live::Ext(child) = std::mem::replace(&mut sc.live, Live::None)
+				{
+					self.surviving_externals.push((p.vpid, child));
 				}
 			}
 		}
@@ -2385,29 +2408,31 @@ impl Shell {
 	}
 
 	/// Number of the root's background jobs that still wait for a running
-	/// external process, or for the host to finish starting one (`sh -c
-	/// 'sleep 9' &`, a pipeline stage); jobs that
-	/// only run in-engine work (a builtin `sleep`, a loop) are not counted.
+	/// external process, or for the host to finish starting one, plus external
+	/// programs that outlived their owner. Jobs that only run in-engine work
+	/// (a builtin `sleep`, a loop) are not counted.
 	/// A host keeping a shell alive for its externals asks this between
 	/// scripts.
 	pub fn live_external_jobs(&self) -> usize {
+		let survivors = self.surviving_externals.len();
 		let Some(root) = self.procs.first() else {
-			return 0;
+			return survivors;
 		};
-		root
-			.jobs
-			.iter()
-			.filter(|job| {
-				self.procs.iter().any(|p| {
-					self.in_job(p.vpid, job.vpid)
-						&& p.frames.iter().any(|f| {
-							f.scratch
-								.as_ref()
-								.is_some_and(|sc| matches!(sc.live, Live::Ext(_) | Live::Spawn(_)))
-						})
+		survivors
+			+ root
+				.jobs
+				.iter()
+				.filter(|job| {
+					self.procs.iter().any(|p| {
+						self.in_job(p.vpid, job.vpid)
+							&& p.frames.iter().any(|f| {
+								f.scratch
+									.as_ref()
+									.is_some_and(|sc| matches!(sc.live, Live::Ext(_) | Live::Spawn(_)))
+							})
+					})
 				})
-			})
-			.count()
+				.count()
 	}
 
 	/// Answer a [`Step::Call`]. Unknown ids (cancelled scripts) are ignored.

@@ -56,7 +56,7 @@ use crate::bash::{
 /// Version of the [`Image`] layout; part of the header and the build id.
 /// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
 /// variant: an exec target holds it by index.
-pub const FRAMES_VERSION: u32 = 29;
+pub const FRAMES_VERSION: u32 = 30;
 
 const MAGIC: [u8; 4] = *b"OBF1";
 
@@ -94,6 +94,9 @@ struct Image {
 	bangs:     Vec<super::proc::Bang>,
 	/// Their commands' redirections still deciding ([`Kernel::deferrals`]).
 	deferrals: Vec<super::proc::Deferral>,
+	/// External programs whose owner frames are gone. Restore reports their
+	/// loss without resuming a completed virtual process.
+	survivors: Vec<(Vpid, u32)>,
 }
 
 /// One fd object.
@@ -478,6 +481,7 @@ impl Shell {
 	/// serialization fails.
 	pub fn externalize(&mut self, cx: &mut Cx<'_>) -> Result<ExternalizeReport, ExtError> {
 		self.see_epoch(cx);
+		self.poll_surviving_externals();
 		// Subshells a host submitted since the last step become vprocs (and
 		// proc records) first.
 		self.adopt(cx);
@@ -492,6 +496,16 @@ impl Shell {
 			reissued_fs: std::mem::take(&mut self.k.dropped_fs),
 			..ExternalizeReport::default()
 		};
+		let surviving_externals: Vec<_> = self
+			.surviving_externals
+			.iter()
+			.map(|(vpid, child)| (*vpid, child.pid()))
+			.collect();
+		report.lost.extend(
+			surviving_externals
+				.iter()
+				.map(|&(vpid, pid)| Lost::Ext { vpid, pid }),
+		);
 		// Function bodies: a restored shell loads them by id rather than
 		// recompiling the canonical text, which would lose the definition's
 		// line numbers.
@@ -644,6 +658,7 @@ impl Shell {
 			mems: fds.mems,
 			bangs: k.bangs.clone(),
 			deferrals: k.deferrals.clone(),
+			survivors: surviving_externals,
 		};
 		let mut bytes = postcard::to_stdvec(&header).map_err(ExtError::Encode)?;
 		bytes.extend_from_slice(&postcard::to_stdvec(&image).map_err(ExtError::Encode)?);
@@ -673,6 +688,17 @@ impl Shell {
 		cx: &mut Cx<'_>,
 		opts: RestoreOpts,
 	) -> Result<(Self, RestoreReport), RestoreError> {
+		let bytes = cx.store.get_blob(BlobSlot::Frames)?;
+		let frames = if let Some(bytes) = bytes.as_deref() {
+			let (header, body) =
+				postcard::take_from_bytes::<Header>(bytes).map_err(RestoreError::Corrupt)?;
+			if !opts.drop_frames || header.ir != IR_VERSION {
+				check(&header).map_err(|why| RestoreError::Incompatible { why })?;
+			}
+			Some((header, body))
+		} else {
+			None
+		};
 		let root = Root::load(cx.store)?;
 		let argv0 = state::root_misc(cx.store, MiscKey::Argv0)?
 			.map_or_else(|| BString::from("bash"), BString::from);
@@ -712,12 +738,11 @@ impl Shell {
 			slice: None,
 			gone: Vec::new(),
 			orphans: Vec::new(),
+			surviving_externals: Vec::new(),
 		};
 		let mut report = RestoreReport::default();
 		let mut restored = false;
-		if let Some(bytes) = cx.store.get_blob(BlobSlot::Frames)? {
-			let (header, body) =
-				postcard::take_from_bytes::<Header>(&bytes).map_err(RestoreError::Corrupt)?;
+		if let Some((header, body)) = frames {
 			if opts.drop_frames {
 				for &run in &header.runs {
 					shell.k.done.push_back((run, 255));
@@ -725,7 +750,6 @@ impl Shell {
 				}
 				report.abandoned = header.runs;
 			} else {
-				check(&header).map_err(|why| RestoreError::Incompatible { why })?;
 				let image: Image = postcard::from_bytes(body).map_err(RestoreError::Corrupt)?;
 				shell.apply(engine, cx, image, &mut stdio, &mut report)?;
 				shell.seed_orphans();
@@ -756,6 +780,11 @@ impl Shell {
 		stdio: &mut [Option<FdRef>; 3],
 		report: &mut RestoreReport,
 	) -> Result<(), RestoreError> {
+		report.lost.extend(
+			img.survivors
+				.into_iter()
+				.map(|(vpid, pid)| Lost::Ext { vpid, pid }),
+		);
 		// The root vproc as `restore` loaded it from the store: the image
 		// holds its execution position, the store its fields.
 		let loaded = self

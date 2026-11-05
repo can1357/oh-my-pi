@@ -43,10 +43,28 @@
 //! # What is lost
 //!
 //! [`ExternalizeReport::lost`] lists, without changing the running shell:
-//! every external process in flight, every task whose `checkpoint` returned
-//! `None`, and every fd backed by a host object that cannot be re-acquired
-//! (per-run stdio). After restore their waiters see status 137 and a `Lost`
-//! event; lost fds read EOF and fail writes with "Bad file descriptor".
+//! every external process in flight, including programs that outlived their
+//! virtual owner, every task whose `checkpoint` returned `None`, and every fd
+//! backed by a host object that cannot be re-acquired (per-run stdio).
+//! [`RestoreReport::lost`] also reports those ownerless programs with their
+//! original virtual-process and native-process identifiers; it does not
+//! recreate their completed owners. Lost commands with waiters finish with
+//! status 137 and a `Lost` event; lost fds read EOF and fail writes with
+//! "Bad file descriptor".
+//!
+//! # Engine upgrades
+//!
+//! Frames images require the same layout version and engine build. An
+//! incompatible image returns
+//! [`RestoreError::Incompatible`](crate::bash::RestoreError::Incompatible)
+//! before reading any state-store records and leaves the stored image intact.
+//! There is no automatic migration or abandonment. With the same IR version,
+//! a host can explicitly use [`RestoreOpts::drop_frames`] to keep root state
+//! and abandon running scripts with status 255. A differing IR version is
+//! refused in every restore mode because record keys may have changed.
+//! A shell already running in the old library continues there, but its frames
+//! cannot be resumed by an incompatible new library. Stores without a Frames
+//! image do not have this layout restriction.
 
 use serde::{Deserialize, Serialize};
 
@@ -59,8 +77,8 @@ use crate::bash::{
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RestoreOpts {
 	/// Ignore the frames blob: keep root state, abandon the scripts that were
-	/// running (each reports `Done` with status 255). The fallback after
-	/// [`RestoreError::Incompatible`](crate::bash::RestoreError::Incompatible).
+	/// running (each reports `Done` with status 255). Recovery for a different
+	/// frames layout or build, but not a different IR record schema.
 	pub drop_frames: bool,
 }
 
@@ -100,9 +118,9 @@ pub struct RestoreReport {
 /// Something a snapshot cannot carry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Lost {
-	/// An external process in flight.
+	/// An external process in flight, even if its virtual owner has ended.
 	Ext {
-		/// Its virtual process.
+		/// Its original virtual process (which need not be restored).
 		vpid: Vpid,
 		/// OS pid.
 		pid:  u32,
