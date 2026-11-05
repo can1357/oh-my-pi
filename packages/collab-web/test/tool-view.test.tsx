@@ -131,20 +131,28 @@ describe("ToolView xd:// dispatches", () => {
 		expect(html).toContain("tv-badge--ok");
 	});
 
-	it("renders a received wait message without falling back to JSON", () => {
+	it("renders every received wait message without falling back to JSON", () => {
 		const html = renderToStaticMarkup(
 			<ToolView
 				name="wait"
 				defaultOpen
 				args={{}}
 				result={{
-					content: [{ type: "text", text: "[42] Worker: ready" }],
-					details: { op: "wait", waited: { id: "42", from: "Worker", to: "Main", body: "ready", ts: 0 } },
+					content: [{ type: "text", text: "[42] Worker: ready\n\n[43] Reviewer: looks good" }],
+					details: {
+						op: "wait",
+						waited: [
+							{ id: "42", from: "Worker", to: "Main", body: "ready", ts: 0 },
+							{ id: "43", from: "Reviewer", to: "Main", body: "looks good", ts: 1 },
+						],
+					},
 				}}
 			/>,
 		);
 		expect(html).toContain("← Worker");
 		expect(html).toContain("ready");
+		expect(html).toContain("← Reviewer");
+		expect(html).toContain("looks good");
 		expect(html).not.toContain("tv-out-title");
 	});
 

@@ -99,6 +99,7 @@ fn spec<'a>(argv: &'a [BString], env: &'a EnvView, pgroup: PgroupSpec) -> SpawnS
 		rlimits: &[],
 		lineage: crate::bash::Lineage::default(),
 		redirs: None,
+		ctty: None,
 	}
 }
 
@@ -575,6 +576,22 @@ fn inherit_abandon_escalation_spares_the_hosts_group() {
 	bystander.wait().unwrap();
 }
 
+/// Reaping retires a process-only leak scope before its pid can be reused.
+#[test]
+fn reaping_retires_inherited_process_scope() {
+	let env = EnvView::default();
+	let s = spawner(Sessions::Inherit, Duration::from_secs(2));
+	let a = sh("exit 0");
+	let mut p = s.spawn(spec(&a, &env, NEW)).unwrap();
+	let scope = Scope::Process { pid: p.pid() as i32 };
+	assert!(s.shared.state.groups.lock().list.contains(&scope));
+	assert_eq!(wait(&mut p), ExitStatus::Exited(0));
+	// A live ExtProc still pins the zombie's identity for signals.
+	assert!(s.shared.state.groups.lock().list.contains(&scope));
+	drop(p);
+	assert!(!s.shared.state.groups.lock().list.contains(&scope));
+}
+
 #[test]
 fn inherit_leftovers_track_the_child_itself() {
 	let env = EnvView::default();
@@ -617,7 +634,8 @@ fn stop_and_cont_reach_every_member_of_the_group() {
 }
 
 /// Cancel of a running external: TERM to the group at once, KILL after the
-/// grace. Prints the measured grace for the phase report.
+/// grace. Observe the fixture, not a full process-table scan that can itself
+/// outlast the grace on a busy host.
 fn abandon_escalates(grace: Duration) -> Duration {
 	let env = EnvView::default();
 	let s = spawner(Sessions::Share, grace);
@@ -625,12 +643,25 @@ fn abandon_escalates(grace: Duration) -> Duration {
 	let a = sh("trap '' TERM; /bin/sleep 30; exit 0");
 	let p = s.spawn(spec(&a, &env, NEW)).unwrap();
 	let group = p.pid() as i32;
-	until("sleep started", || live_group(group).len() == 2);
+	let mut members = Vec::new();
+	until("sleep started", || {
+		members = live_group(group);
+		members.len() == 2
+	});
 	let start = Instant::now();
 	drop(p);
-	thread::sleep(grace / 2);
-	assert_eq!(live_group(group).len(), 2, "TERM is ignored, KILL waits for the grace");
-	until("group killed", || live_group(group).is_empty());
+	until("group killed", || {
+		let mut killed = true;
+		for member in &members {
+			let gone = proc::info(member.pid)
+				.is_none_or(|now| now.start != member.start || now.state == ProcState::Zombie);
+			if gone {
+				assert!(start.elapsed() >= grace, "KILL before the grace: pid {}", member.pid);
+			}
+			killed &= gone;
+		}
+		killed
+	});
 	let measured = start.elapsed();
 	eprintln!("TERM→KILL escalation: grace {grace:?}, measured {measured:?}");
 	assert!(measured >= grace, "KILL before the grace: {measured:?}");
@@ -1034,6 +1065,27 @@ fn ignored_signals_reach_the_child_through_the_fork_path() {
 }
 
 #[test]
+fn signal_the_host_ignores_after_a_spawn_is_reset_in_later_children() {
+	let env = EnvView::default();
+	let s = NativeSpawner::default();
+	let a = sh("kill -USR2 $$; exit 7");
+	assert_eq!(wait(&mut s.spawn(spec(&a, &env, NEW)).unwrap()), ExitStatus::Signaled(Signal::Usr2));
+	// SAFETY: nextest runs each test in its own process; nothing else here
+	// uses USR2, and the default comes back below.
+	unsafe { libc::signal(libc::SIGUSR2, libc::SIG_IGN) };
+	crate::sys::dispositions_changed();
+	let status = wait(&mut s.spawn(spec(&a, &env, NEW)).unwrap());
+	// SAFETY: as above.
+	unsafe { libc::signal(libc::SIGUSR2, libc::SIG_DFL) };
+	crate::sys::dispositions_changed();
+	assert_eq!(
+		status,
+		ExitStatus::Signaled(Signal::Usr2),
+		"the host's new SIG_IGN leaked into the child"
+	);
+}
+
+#[test]
 fn umask_probe_preserves_concurrent_file_creation_mask() {
 	use std::{
 		os::unix::fs::{OpenOptionsExt, PermissionsExt},
@@ -1172,6 +1224,49 @@ fn an_impossible_rlimit_fails_the_spawn_with_the_os_error() {
 	assert_eq!(err.raw_os_error(), Some(libc::EINVAL), "{err}");
 }
 
+/// A reused descriptor map must not reuse another command's working directory.
+#[test]
+fn consecutive_spawns_apply_their_current_cwd() {
+	let s = NativeSpawner::default();
+	let env = EnvView::default();
+	for cwd in ["/", "/usr", "/"] {
+		let a = sh(&format!("test . -ef {cwd}"));
+		let mut sp = spec(&a, &env, NEW);
+		sp.cwd = cwd.as_bytes().as_bstr();
+		let mut p = s.spawn(sp).unwrap();
+		assert_eq!(wait(&mut p), ExitStatus::Exited(0), "{cwd}");
+	}
+}
+
+/// Cached C environments must track changes, deletion, and recovery after
+/// rejecting an invalid command environment.
+#[test]
+fn consecutive_spawns_receive_their_current_environment() {
+	let s = NativeSpawner::default();
+	for (value, script) in [
+		(Some("first"), r#"test "$SPAWN_CACHE" = first"#),
+		(Some("second"), r#"test "$SPAWN_CACHE" = second"#),
+		(None, r#"test "${SPAWN_CACHE+x}" != x"#),
+	] {
+		let pairs = value
+			.into_iter()
+			.map(|v| ("SPAWN_CACHE".into(), v.into()))
+			.collect();
+		let env = EnvView::new(pairs);
+		let a = sh(script);
+		for _ in 0..2 {
+			let mut p = s.spawn(spec(&a, &env, NEW)).unwrap();
+			assert_eq!(wait(&mut p), ExitStatus::Exited(0));
+		}
+	}
+	let a = sh(r#"test "$SPAWN_CACHE" = recovered"#);
+	let invalid = EnvView::new(vec![("SPAWN_CACHE".into(), BString::from(b"bad\0value"))]);
+	assert_eq!(s.spawn(spec(&a, &invalid, NEW)).err().unwrap().kind(), io::ErrorKind::InvalidInput);
+	let env = EnvView::new(vec![("SPAWN_CACHE".into(), "recovered".into())]);
+	let mut p = s.spawn(spec(&a, &env, NEW)).unwrap();
+	assert_eq!(wait(&mut p), ExitStatus::Exited(0));
+}
+
 #[test]
 fn cwd_env_and_argv0_reach_the_child() {
 	let s = NativeSpawner::default();
@@ -1184,6 +1279,22 @@ fn cwd_env_and_argv0_reach_the_child() {
 	let mut p = s.spawn(sp).unwrap();
 	assert_eq!(wait(&mut p), ExitStatus::Exited(0));
 	assert_eq!(out.captured(), b"/usr\nb a r|name0\n");
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn missing_spawn_chdir_uses_fork_with_the_requested_cwd() {
+	let mut s = NativeSpawner::default();
+	Arc::get_mut(&mut s.shared).unwrap().state.add_chdir = None;
+	let env = EnvView::default();
+	let a = argv(&["/bin/pwd"]);
+	let out = MemFile::default();
+	let mut sp = spec(&a, &env, NEW);
+	sp.cwd = b"/usr".as_bstr();
+	sp.stdio = [StdioSpec::Null, out.boxed(), StdioSpec::Null];
+	let mut p = s.spawn(sp).unwrap();
+	assert_eq!(wait(&mut p), ExitStatus::Exited(0));
+	assert_eq!(out.captured(), b"/usr\n");
 }
 
 #[test]

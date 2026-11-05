@@ -1768,7 +1768,7 @@ describe("lsp regressions", () => {
 		);
 		const resultText = sanitizeText(result.render(120).join("\n"));
 		const normalizedResultText = resultText.replace(/\s+/g, " ");
-		expect(normalizedResultText).toContain("symbol: foo bar baz");
+		expect(normalizedResultText).toContain("src/example.ts:10 (foo bar baz)");
 		expect(resultText).not.toContain("\t");
 	});
 
@@ -1814,7 +1814,8 @@ describe("lsp regressions", () => {
 		expect(lines.every(line => Bun.stringWidth(line) <= width)).toBe(true);
 		expect(text.match(/x/g)?.length).toBe(200);
 		expect(text).not.toContain("…");
-		const rowContents = lines.map(line => line.replace(/^│\s+[├└│]?─?\s*/, "").replace(/\s*│$/, ""));
+		// Each row past the header, tree connector and guide rail stripped: the note reads whole across its rows.
+		const rowContents = lines.slice(1).map(line => line.replace(/^\s*(?:[├└│]─?)?\s*/, ""));
 		expect(rowContents.join(" ").replace(/\s+/g, " ")).toContain(note);
 	});
 

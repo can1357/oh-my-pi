@@ -471,6 +471,8 @@ export type RelayControlToHost = { t: "peer-joined" | "peer-left"; peer: number 
 export type RelayControlToGuest = { t: "room-closed" };
 export type RelayControlMessage = RelayControlToHost | RelayControlToGuest;
 
+export * from "./shell-trace";
+export * from "./shell-viz";
 export * from "./stream";
 export * from "./task-result";
 export * from "./tsp";

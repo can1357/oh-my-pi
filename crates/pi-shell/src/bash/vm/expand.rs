@@ -78,7 +78,17 @@ pub enum Stop {
 	ZshSub {
 		/// The body.
 		text: BString,
+		/// A hook function call zsh makes from an expansion
+		/// (`subst_string_by_func`: `zsh_directory_name`): it runs in the
+		/// current shell, its output not captured; the replay sees its
+		/// status.
+		here: bool,
 	},
+	/// A zsh user math function must run first (zsh `callmathfunc`'s
+	/// `doshfunc`): the op parks while the shell function runs in the
+	/// current shell, then replays with its value (zsh `lastmathval`) and
+	/// status logged.
+	MathCall(Box<MathCall>),
 	/// A zsh expansion needs a file-system answer first (the PATH search of
 	/// `=cmd`): the op performs the probe, logs its answer
 	/// ([`super::exec::probe_atom`]) and replays.
@@ -93,6 +103,18 @@ pub enum Stop {
 	Fatal(Diag),
 	/// The state store failed.
 	Store(StoreError),
+}
+
+/// A call of the shell function behind a zsh math function
+/// ([`Stop::MathCall`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MathCall {
+	/// The shell function (defined, not an autoload stub).
+	pub func:    BString,
+	/// Its `$0`: the math function's name.
+	pub argzero: BString,
+	/// Its positional parameters.
+	pub args:    Vec<BString>,
 }
 
 impl From<StoreError> for Stop {
@@ -363,7 +385,7 @@ impl<'e, 'c> Expander<'e, 'c> {
 		// A quoted scalar parameter already is one complete field. Read it
 		// into a recycled buffer without building a splitting/globbing sink.
 		if w.braces.is_none()
-			&& let [Part::Param(p)] = w.parts.as_slice()
+			&& let Some(p) = lone_param(w)
 			&& p.quoted
 			&& matches!(p.op, OpIr::None)
 		{
@@ -432,7 +454,7 @@ impl<'e, 'c> Expander<'e, 'c> {
 		if w.fixed {
 			return Ok(BString::from(fixed_text(w).into_owned()));
 		}
-		if let [Part::Param(p)] = w.parts.as_slice()
+		if let Some(p) = lone_param(w)
 			&& matches!(p.op, OpIr::None)
 			&& let Some(value) = self.with_scalar(p, |s| BString::from(s))?
 		{
@@ -661,10 +683,20 @@ impl<'e, 'c> Expander<'e, 'c> {
 		let unit = self
 			.k
 			.engine
-			.text_unit(text, super::TextKind::Arith, self.vp_mode())
+			.text_unit(
+				text,
+				super::TextKind::Arith,
+				self.vp_mode(),
+				self
+					.k
+					.mask
+					.contains(crate::bash::event::EventKind::UnitCompiled),
+			)
 			.map_err(|e| Stop::Fail(Diag::Syntax { msg: e.msg }))?;
-		let word = unit.words.last().cloned().unwrap_or_default();
-		self.scalar(&unit, &word)
+		match unit.words.last() {
+			Some(word) => self.scalar(&unit, word),
+			None => Ok(BString::default()),
+		}
 	}
 
 	/// bash `expand_array_subscript` (arithmetic expansion, `Q_ARITH`): each
@@ -1975,9 +2007,8 @@ impl<'e, 'c> Expander<'e, 'c> {
 	/// `${x@P}`: bash `decode_prompt_string`, then (with `promptvars`)
 	/// parameter, command and arithmetic expansion of the result like a
 	/// here-document body (`expand_prompt_string`). Text an escape produces
-	/// is backslash-protected from that pass. The date, time, tty and
-	/// command-number escapes are not supported and fail loudly.
-	fn prompt(&mut self, text: &[u8]) -> X<BString> {
+	/// is backslash-protected from that pass.
+	pub fn prompt(&mut self, text: &[u8]) -> X<BString> {
 		let opt = |ex: &mut Self, id| state::option(&mut ex.k.root, ex.cx.store, ex.vp, id);
 		let posix = opt(self, OptId::Posix)?;
 		let editing = opt(self, OptId::Emacs)? || opt(self, OptId::Vi)?;
@@ -2026,16 +2057,23 @@ impl<'e, 'c> Expander<'e, 'c> {
 				b']' if editing => lit(&mut out, &[0x02]),
 				b'[' | b']' => {},
 				b'0'..=b'7' => {
-					let mut code = u32::from(esc - b'0');
-					let mut count = 1;
-					while count < 3
-						&& let Some(&digit @ b'0'..=b'7') = text.get(i)
-					{
-						code = code * 8 + u32::from(digit - b'0');
-						i += 1;
-						count += 1;
+					// bash `read_octal` over the next three characters: all
+					// of them (or all up to the end) must be octal digits,
+					// else the backslash stands for itself.
+					let digits = &text[i - 1..(i + 2).min(text.len())];
+					if digits.iter().all(|c| (b'0'..=b'7').contains(c)) {
+						let code = digits
+							.iter()
+							.fold(0u32, |n, &d| n * 8 + u32::from(d - b'0'));
+						let byte = (code & 0xff) as u8;
+						if byte != 0 {
+							lit(&mut out, &[byte]);
+						}
+						i += digits.len() - 1;
+					} else {
+						out.push(b'\\');
+						i -= 1;
 					}
-					lit(&mut out, &[(code & 0xff) as u8]);
 				},
 				b's' => lit(&mut out, b"bash"),
 				b'v' | b'V' => {
@@ -2072,10 +2110,60 @@ impl<'e, 'c> Expander<'e, 'c> {
 				},
 				// No history list: the next history number is 1.
 				b'!' => lit(&mut out, b"1"),
-				b'd' | b't' | b'T' | b'@' | b'A' | b'D' | b'#' | b'l' => {
-					return Err(Stop::Fail(Diag::Unsupported {
-						what: format!("prompt escape \\{}", char::from(esc)).into(),
-					}));
+				b'D' if text.get(i) != Some(&b'{') => {
+					out.push(b'\\');
+					out.push(esc);
+				},
+				b'd' | b't' | b'T' | b'@' | b'A' | b'D' => {
+					let fmt: Vec<u8> = match esc {
+						b'd' => b"%a %b %d".to_vec(),
+						b't' => b"%H:%M:%S".to_vec(),
+						b'T' => b"%I:%M:%S".to_vec(),
+						b'@' => b"%I:%M %p".to_vec(),
+						b'A' => b"%H:%M".to_vec(),
+						_ => {
+							// `\D{format}`; an empty one is the locale's time.
+							let start = i + 1;
+							let end = text[start..]
+								.iter()
+								.position(|&c| c == b'}')
+								.map_or(text.len(), |p| start + p);
+							let f = text[start..end].to_vec();
+							i = (end + 1).min(text.len());
+							if f.is_empty() { b"%X".to_vec() } else { f }
+						},
+					};
+					let shown = self.prompt_time(&fmt)?;
+					lit(&mut out, &shown);
+				},
+				b'#' => {
+					let n = match state::record(
+						self.cx.store,
+						self.vp,
+						crate::bash::store::Key::Misc(crate::bash::store::MiscKey::BashCommandNumber),
+					)? {
+						Some(crate::bash::store::Record::Misc(v)) => v.clone(),
+						_ => BString::from("1"),
+					};
+					lit(&mut out, &n);
+				},
+				b'l' => {
+					// The base name of standard input's terminal, `tty`
+					// without one.
+					let h = self.vp.fds.get(0).and_then(|f| f.os_handle());
+					let name = h.and_then(|h| {
+						let t = self.cx.host.terminal()?;
+						if t.is_terminal(h) {
+							t.name(h).ok()
+						} else {
+							None
+						}
+					});
+					let shown = match &name {
+						Some(n) => BString::from(n.rsplit(|&c| c == b'/').next().unwrap_or_default()),
+						None => BString::from("tty"),
+					};
+					lit(&mut out, &shown);
 				},
 				_ => {
 					out.push(b'\\');
@@ -2089,10 +2177,34 @@ impl<'e, 'c> Expander<'e, 'c> {
 		let unit = self
 			.k
 			.engine
-			.text_unit(&out, super::TextKind::HereDoc, self.vp_mode())
+			.text_unit(
+				&out,
+				super::TextKind::HereDoc,
+				self.vp_mode(),
+				self
+					.k
+					.mask
+					.contains(crate::bash::event::EventKind::UnitCompiled),
+			)
 			.map_err(|err| Stop::Fail(Diag::Syntax { msg: err.msg }))?;
 		let word = unit.words.last().cloned().unwrap_or_default();
 		self.scalar(&unit, &word)
+	}
+
+	/// The current local time in strftime `fmt` (`TZ` as exported), for
+	/// the prompt's `\d \t \T \@ \A \D{…}`.
+	fn prompt_time(&mut self, fmt: &[u8]) -> X<Vec<u8>> {
+		// The wall clock: `now_ns` is monotonic.
+		let secs = self.cx.host.wall().secs;
+		let tz = state::lookup(&self.k.root, self.cx.store, self.vp, b"TZ")?
+			.filter(|v| v.attrs.contains(crate::bash::store::Attrs::EXPORT))
+			.and_then(Var::as_scalar)
+			.map(BString::from);
+		let (offset, abbr) = self
+			.cx
+			.host
+			.tz_offset(tz.as_ref().map(|t| t.as_bstr()), secs);
+		Ok(super::builtins::strftime::format(fmt, secs, offset, &abbr))
 	}
 
 	/// `\w` (`$PWD` with `$HOME` shown as `~`) or `\W` (its last component,
@@ -2802,27 +2914,29 @@ fn dynamic_value(
 
 /// Whether [`Expander::dynamic`] computes `name` (keep in sync).
 const fn is_dynamic(name: &[u8]) -> bool {
-	matches!(
-		name,
-		b"RANDOM"
-			| b"SRANDOM"
-			| b"SECONDS"
-			| b"EPOCHSECONDS"
-			| b"EPOCHREALTIME"
-			| b"LINENO"
-			| b"BASH_COMMAND"
-			| b"BASH_CMDS"
-			| b"BASH_ALIASES"
-			| b"DIRSTACK"
-			| b"BASHPID"
-			| b"BASH_SUBSHELL"
-			| b"PIPESTATUS"
-			| b"FUNCNAME"
-			| b"BASH_SOURCE"
-			| b"BASH_LINENO"
-			| b"BASH_ARGC"
-			| b"BASH_ARGV"
-	)
+	// Most names fail on the first byte, before the string compares.
+	matches!(name.first(), Some(b'B' | b'D' | b'E' | b'F' | b'L' | b'P' | b'R' | b'S'))
+		&& matches!(
+			name,
+			b"RANDOM"
+				| b"SRANDOM"
+				| b"SECONDS"
+				| b"EPOCHSECONDS"
+				| b"EPOCHREALTIME"
+				| b"LINENO"
+				| b"BASH_COMMAND"
+				| b"BASH_CMDS"
+				| b"BASH_ALIASES"
+				| b"DIRSTACK"
+				| b"BASHPID"
+				| b"BASH_SUBSHELL"
+				| b"PIPESTATUS"
+				| b"FUNCNAME"
+				| b"BASH_SOURCE"
+				| b"BASH_LINENO"
+				| b"BASH_ARGC"
+				| b"BASH_ARGV"
+		)
 }
 
 /// Value of a dynamic variable.
@@ -3246,13 +3360,33 @@ pub fn compound_text(elems: &[CompoundElem]) -> BString {
 		}
 		if let Some(key) = &e.key {
 			text.push(b'[');
-			text.extend_from_slice(&quote::single(key));
+			text.extend_from_slice(&compound_quote(key));
 			text.extend_from_slice(if e.append { b"]+=" } else { b"]=" });
 		}
-		text.extend_from_slice(&quote::single(&e.value));
+		text.extend_from_slice(&compound_quote(&e.value));
 	}
 	text.push(b')');
 	text
+}
+
+/// One word of [`compound_text`]. A zsh value with a NUL byte (p10k's
+/// `typeset -a x=( $'a\0b' )`) stays raw inside single quotes: the
+/// `$'\0'` form [`quote::single`] would write ends the value when re-read.
+fn compound_quote(word: &[u8]) -> BString {
+	if !word.contains(&0) {
+		return quote::single(word);
+	}
+	let mut out = Vec::with_capacity(word.len() + 2);
+	out.push(b'\'');
+	for &c in word {
+		if c == b'\'' {
+			out.extend_from_slice(b"'\\''");
+		} else {
+			out.push(c);
+		}
+	}
+	out.push(b'\'');
+	BString::from(out)
 }
 
 /// Whether `IFS` holds character `c` (one byte, or with `wide` one UTF-8
@@ -3628,6 +3762,17 @@ impl Fields<'_> {
 	}
 }
 
+/// The parameter of a word that is one parameter expansion and nothing
+/// else: `$x`, `${x}`, or `"$x"`, whose closing quote leaves an empty quoted
+/// part after it.
+fn lone_param(w: &Word) -> Option<&ParamIr> {
+	match w.parts.as_slice() {
+		[Part::Param(p)] => Some(p),
+		[Part::Param(p), Part::Quoted(q)] if q.is_empty() => Some(p),
+		_ => None,
+	}
+}
+
 /// Evaluate already-expanded arithmetic text (`let`, `declare -i`
 /// values, array subscripts set by builtins).
 pub fn arith_value(
@@ -3706,7 +3851,12 @@ pub fn compound_string(
 	let mode = super::exec::mode_of(vp);
 	let unit = k
 		.engine
-		.text_unit(text, super::TextKind::Compound, mode)
+		.text_unit(
+			text,
+			super::TextKind::Compound,
+			mode,
+			k.mask.contains(crate::bash::event::EventKind::UnitCompiled),
+		)
 		.map_err(|e| Stop::Fail(Diag::Syntax { msg: e.msg }))?;
 	let Some(Part::Compound(elems)) = unit.words.last().and_then(|w| w.parts.first()) else {
 		return Ok(Vec::new());
@@ -3728,6 +3878,19 @@ pub fn compound_string(
 		}));
 	}
 	Ok(out)
+}
+
+/// `((…))`'s evaluation of text with nothing to expand (no `$`, backquote,
+/// backslash or quote): no substitution can run, so it needs no
+/// [`Expander`] or replay log. Warnings carry `((`.
+pub fn arith_command(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vp: &mut Vproc,
+	text: &[u8],
+) -> Result<i64, Diag> {
+	let mut env = Vars { k, cx, vp, prefix: Some("(("), expanded: false };
+	arith::eval(text, &mut env).map_err(Diag::from)
 }
 
 /// `let`'s evaluation: with `assoc_expand_once` (`expanded`) bash treats
@@ -3776,7 +3939,7 @@ impl arith::Env for Vars<'_, '_> {
 			},
 			Err(Stop::Fail(d) | Stop::Fatal(d)) => d,
 			Err(Stop::Store(_)) => Diag::StoreFailed,
-			Err(Stop::Sub { .. } | Stop::ZshSub { .. }) => Diag::Unsupported {
+			Err(Stop::Sub { .. } | Stop::ZshSub { .. } | Stop::MathCall(_)) => Diag::Unsupported {
 				what: "command substitution in a subscript met during arithmetic evaluation".into(),
 			},
 			Err(Stop::Probe(_)) => Diag::Unsupported {
@@ -3807,7 +3970,7 @@ impl arith::Env for Vars<'_, '_> {
 			},
 			Err(Stop::Fail(d) | Stop::Fatal(d)) => d,
 			Err(Stop::Store(_)) => Diag::StoreFailed,
-			Err(Stop::Sub { .. } | Stop::ZshSub { .. }) => Diag::Unsupported {
+			Err(Stop::Sub { .. } | Stop::ZshSub { .. } | Stop::MathCall(_)) => Diag::Unsupported {
 				what: "command substitution in a subscript met during arithmetic evaluation".into(),
 			},
 			Err(Stop::Probe(_)) => Diag::Unsupported {
@@ -3934,17 +4097,23 @@ impl arith::Env for Vars<'_, '_> {
 				),
 				Ok(true)
 			) {
+				super::builtins::emit_assignment(self.k, self.cx, self.vp, name, Level::Dynamic);
 				return Ok(());
 			}
 		}
 		let mut var = Var::scalar("", Attrs::NONE);
 		assign_number(&mut var, index, text);
 		state::store_var(&mut self.k.root, self.cx.store, self.vp, name, Some(var), Level::Dynamic);
+		super::builtins::emit_assignment(self.k, self.cx, self.vp, name, Level::Dynamic);
 		Ok(())
 	}
 
 	fn cache(&self) -> &arith::Cache {
 		self.k.engine.arith()
+	}
+
+	fn compiled(&mut self, text: &[u8]) -> Arc<arith::Expr> {
+		self.k.arith_recent.get(text, self.k.engine.arith())
 	}
 
 	fn is_assoc(&mut self, name: &[u8]) -> bool {
@@ -4019,6 +4188,7 @@ impl Vars<'_, '_> {
 	/// `value` as [`arith::Env::get`] returns it: an unset one is an error
 	/// under `set -u`, naming `name` (bash names the array for an unset
 	/// element).
+	#[inline]
 	fn unbound_checked(
 		&mut self,
 		name: &[u8],

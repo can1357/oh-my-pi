@@ -374,8 +374,8 @@ describe("tool path arrays", () => {
 		viewer.dispose();
 
 		// The hub chat now renders through grepToolRenderer.renderCall; the
-		// single-string `paths` arg shows up as the "in <paths>" scope meta on the
-		// pending call line (a completed result merges the call line away).
+		// single-string `paths` arg shows up as the "in <paths>" scope of the
+		// header subject on the pending call line (a completed result merges the call line away).
 		expect(rendered).toContain("in folder with spaces/");
 		await removeWithRetries(tmp);
 	});

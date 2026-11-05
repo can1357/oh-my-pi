@@ -27,6 +27,7 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+base64.workspace = true
 blake3.workspace = true
 bstr.workspace = true
 bytes.workspace = true
@@ -36,9 +37,9 @@ flume.workspace = true
 hashbrown.workspace = true
 jiff = { workspace = true, features = ["tzdb-bundle-platform"] }
 libm.workspace = true
-# obash's allocator (`src/bin/obash`), as in the shell it is benchmarked as.
-mimalloc.workspace = true
 parking_lot.workspace = true
+# zsh/pcre (`pcre_compile`, `pcre_match`, `-pcre-match`).
+pcre2-sys.workspace = true
 pi-builtins.workspace = true
 pi-vcs.workspace = true
 pi-vfs.workspace = true
@@ -62,7 +63,6 @@ windows-sys.workspace = true
 winreg.workspace = true
 
 [dev-dependencies]
-criterion.workspace = true
 tempfile.workspace = true
 
 # The engine benches print their own statistics.
