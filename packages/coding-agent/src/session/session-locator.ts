@@ -155,12 +155,40 @@ function appendIndexLine(indexFile: string, line: string, createRoot: boolean): 
 }
 
 /**
+ * Whether a reindex of `root` would find `relative` again. The walk enters
+ * only real directories inside a bucket: it never follows a symlinked
+ * directory (so a scan cannot leave the root), skips every dot-entry (gc
+ * scratch), ignores the root's own top level, and takes a `.jsonl.gz` only
+ * directly in a bucket. Its scope is therefore permanently narrower than the
+ * index's domain, and a path outside it is known to the index alone.
+ */
+function reindexWouldFind(root: string, relative: string): boolean {
+	const parts = relative.split("/");
+	if (parts.length < 2 || parts.some(part => part.startsWith("."))) return false;
+	const name = parts[parts.length - 1];
+	if (!name.endsWith(SESSION_SUFFIX) && !(parts.length === 2 && name.endsWith(ARCHIVED_SUFFIX))) return false;
+	let dir = root;
+	for (const part of parts.slice(0, -1)) {
+		dir = path.join(dir, part);
+		try {
+			// A symlinked bucket or directory is seen but never entered.
+			if (!fs.lstatSync(dir).isDirectory()) return false;
+		} catch {
+			return false;
+		}
+	}
+	return true;
+}
+
+/**
  * Record that session `id` is now stored at `file`. The line goes to the log
  * of the root among `roots` (default: {@link sessionLocatorRoots}) that holds
  * `file`, relative to it; a file outside every root is recorded by absolute
  * path in this process's sessions root. Never throws: a log that misses a
  * line costs a lookup, not a session. Returns whether the line was written,
- * so a caller can try again on its next write.
+ * so a caller can try again on its next write. A line the next reindex could
+ * not derive again ({@link reindexWouldFind}) is reported at error level when
+ * it cannot be written, because that session is then findable by id nowhere.
  */
 export function recordSessionLocation(
 	id: string,
@@ -175,11 +203,19 @@ export function recordSessionLocation(
 		appendIndexLine(indexFile, `\n${id}\t${encodeStoredPath(owner?.relative ?? absolute)}\n`, owner === undefined);
 		return true;
 	} catch (error) {
-		logger.warn("Session index append failed; `omp session reindex` rebuilds it", {
-			indexFile,
-			id,
-			error: String(error),
-		});
+		if (owner !== undefined && reindexWouldFind(owner.root, owner.relative)) {
+			logger.warn("Session index append failed; `omp session reindex` rebuilds it", {
+				indexFile,
+				id,
+				file: absolute,
+				error: String(error),
+			});
+		} else {
+			logger.error(
+				"Session index append failed for a path no reindex walks, so this session is no longer findable by id: a reindex rebuilds a root from the transcripts in its buckets, and never enters a symlinked directory, a dot-entry, or the root's own top level",
+				{ indexFile, id, file: absolute, error: String(error) },
+			);
+		}
 		return false;
 	}
 }

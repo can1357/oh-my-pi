@@ -27,6 +27,7 @@ import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-st
 import { resolveSeanceSource } from "@oh-my-pi/pi-coding-agent/task/seance";
 import { getConfigRootDir, getSessionsDir, setAgentDir, Snowflake } from "@oh-my-pi/pi-utils";
 import { __resetDirsFromEnvForTests, setProfile } from "@oh-my-pi/pi-utils/dirs";
+import * as logger from "@oh-my-pi/pi-utils/logger";
 import { makeAssistantMessage } from "./session-manager/helpers";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -914,6 +915,43 @@ describe("session index: lookups by id", () => {
 			await session.close();
 			expect((await resolveResumableSession(id, cwdB))?.session.id).toBe(id);
 		});
+
+		it.skipIf(unlessRoot)(
+			"reports a failed index append no reindex could undo, and stays quiet about one it could",
+			async () => {
+				const bucket = path.join(getSessionsDir(), "--walked--");
+				const outside = path.join(agentDir, "outside-bucket");
+				fs.mkdirSync(bucket, { recursive: true });
+				fs.mkdirSync(outside, { recursive: true });
+				// The walk never enters a symlinked bucket, so for a transcript in
+				// one the index line is the only record of where it is.
+				const linked = path.join(getSessionsDir(), "--linked--");
+				fs.symlinkSync(outside, linked);
+				const log = path.join(getSessionsDir(), SESSION_LOCATOR_FILE);
+				fs.writeFileSync(log, "");
+				fs.chmodSync(log, 0o400);
+				const warn = spyOn(logger, "warn").mockImplementation(() => {});
+				const error = spyOn(logger, "error").mockImplementation(() => {});
+				try {
+					const walkedId = "019a0017-0000-7000-8000-000000000001";
+					const strandedId = "019a0017-0000-7000-8000-000000000002";
+					const walked = path.join(bucket, `2026-01-02T03-04-05-000Z_${walkedId}.jsonl`);
+					const stranded = path.join(linked, `2026-01-02T03-04-05-000Z_${strandedId}.jsonl`);
+					expect(recordSessionLocation(walkedId, walked)).toBe(false);
+					expect(error).not.toHaveBeenCalled();
+					expect(warn).toHaveBeenCalledTimes(1);
+					expect(recordSessionLocation(strandedId, stranded)).toBe(false);
+					expect(warn).toHaveBeenCalledTimes(1);
+					expect(error).toHaveBeenCalledTimes(1);
+					expect(String(error.mock.calls[0]?.[0])).toContain("no longer findable by id");
+					expect(error.mock.calls[0]?.[1]).toMatchObject({ id: strandedId, file: stranded });
+				} finally {
+					fs.chmodSync(log, 0o600);
+					error.mockRestore();
+					warn.mockRestore();
+				}
+			},
+		);
 
 		it.skipIf(unlessRoot)(
 			"records a session moved while its index log could not be written, at its next write",
