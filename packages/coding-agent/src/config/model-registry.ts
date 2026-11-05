@@ -4508,7 +4508,7 @@ export interface ProviderConfigInput {
 		/** Reviewed capability; omitted when request-time discovery should determine support. */
 		reasoning?: boolean;
 		thinking?: ThinkingConfig;
-		input: ("text" | "image")[];
+		input: Model<Api>["input"];
 		supportsTools?: boolean;
 		cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 		contextWindow: number;
