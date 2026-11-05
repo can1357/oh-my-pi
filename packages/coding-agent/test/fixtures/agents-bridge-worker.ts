@@ -236,6 +236,7 @@ function isInit(value: unknown): value is SubagentWorkerInit {
 		value !== null &&
 		Reflect.get(value, "type") === "subagent-worker-init" &&
 		isThreadId(Reflect.get(value, "threadId")) &&
+		Reflect.get(value, "framePort") instanceof MessagePort &&
 		Reflect.get(value, "replyPort") instanceof MessagePort &&
 		Reflect.get(value, "counter") instanceof SharedArrayBuffer
 	);
@@ -252,9 +253,10 @@ port.on("message", (message: unknown) => {
 		if (!isInit(message)) return;
 		threadName = message.threadId;
 		setCurrentThreadId(message.threadId);
+		const frames = message.framePort;
 		const link: WorkerThreadLink = new RpcLink(
 			{
-				send: frame => port.postMessage(frame),
+				send: frame => frames.postMessage(frame),
 				listen: handler => {
 					frameHandler = handler;
 					return () => {

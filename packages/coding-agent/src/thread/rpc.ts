@@ -450,7 +450,11 @@ export class RpcLink<Local extends RpcApi, Remote extends RpcApi> {
 		return typedResult<Remote[K]["result"]>(this.#requestSync(method, args));
 	}
 
-	/** Close the link: reject pending calls, drop handles, detach the endpoint. Idempotent. */
+	/**
+	 * Close the link: reject pending calls, drop handles, detach the endpoint. Idempotent.
+	 * Frames the endpoint has not handed to the link yet are dropped: an owner that must not
+	 * lose them delivers them first (`SubagentWorker` drains its frame port before closing).
+	 */
 	close(reason = "closed"): void {
 		if (this.#closed !== undefined) return;
 		this.#closed = reason;

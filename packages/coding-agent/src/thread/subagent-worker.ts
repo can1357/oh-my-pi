@@ -2,12 +2,13 @@
  * Main-thread side of subagent host workers.
  *
  * {@link SubagentWorker} owns one Bun worker running `./subagent-worker-entry`:
- * it posts the raw init (thread id + sync reply channel), writes the worker's
- * log records from spawn on (`./worker-log`), builds the
+ * it posts the raw init (thread id, frame port, sync reply channel), writes the
+ * worker's log records from spawn on (`./worker-log`), builds the
  * {@link MainThreadLink}, installs every {@link ThreadService}'s main hooks,
  * boots the worker with their globals, and turns any worker death (crash,
  * exit, undeliverable message, termination) into exactly one link close plus
- * one `onWorkerExit` per service.
+ * one `onWorkerExit` per service, after dispatching every RPC frame and log
+ * record the worker posted on its frame port before it died.
  *
  * {@link SubagentWorkerPool} places each run main places (a top-level spawn, a
  * cold revival) on the main thread or a worker. Workers pay off only once
@@ -23,7 +24,7 @@
  * process-wide pool, or `undefined` when worker mode is off (subagents then run
  * in-process); `task.workerThreads` is read live on every placement.
  */
-import { MessageChannel } from "node:worker_threads";
+import { MessageChannel, receiveMessageOnPort } from "node:worker_threads";
 import { getProjectDir, logger, postmortem } from "@oh-my-pi/pi-utils";
 import { workerHostEntry } from "@oh-my-pi/pi-utils/worker-host";
 import { SUBAGENT_WORKER_ARG } from "../cli/worker-selectors";
@@ -131,7 +132,10 @@ export class SubagentWorker implements WorkerPeer {
 	readonly #services: readonly ThreadService[];
 	readonly #options: SubagentWorkerOptions;
 	readonly #replyPort: MessagePort;
+	/** Where the worker posts its RPC frames, and its log records once ready; see {@link #die}. */
+	readonly #framePort: MessagePort;
 	readonly #handshake = Promise.withResolvers<void>();
+	#frames: ((frame: RpcFrame) => void) | undefined;
 	#runs = 0;
 	#holds = 0;
 	#booted = false;
@@ -146,15 +150,18 @@ export class SubagentWorker implements WorkerPeer {
 		// Unref'd until someone holds it: a booting spare never keeps the process alive.
 		worker.unref();
 		const channel = new MessageChannel();
+		const frameChannel = new MessageChannel();
 		const counter = new SharedArrayBuffer(4);
 		this.#replyPort = channel.port1;
-		let frames: ((frame: RpcFrame) => void) | undefined;
+		this.#framePort = frameChannel.port1;
 		// Attached at spawn, before the link exists: the worker's log records arrive from its first module on.
 		worker.addEventListener("message", (event: MessageEvent) => {
 			const data: unknown = event.data;
-			if (isFrame(data)) frames?.(data);
-			else if (isSubagentWorkerLog(data)) receiveWorkerLog(this.threadId, data);
+			if (isSubagentWorkerLog(data)) receiveWorkerLog(this.threadId, data);
 			else if (typeof data === "object" && data !== null && Reflect.get(data, "type") === "subagent-worker-ready") {
+				// Every record the worker posted here precedes `ready`; the rest share the frame port.
+				this.#framePort.on("message", (message: unknown) => this.#receive(message));
+				this.#framePort.unref();
 				const changed: unknown = Reflect.get(data, "changedModules");
 				const shared = Array.isArray(changed)
 					? firstSharedModule(changed.filter(item => typeof item === "string"))
@@ -167,9 +174,9 @@ export class SubagentWorker implements WorkerPeer {
 			{
 				send: frame => worker.postMessage(frame),
 				listen: handler => {
-					frames = handler;
+					this.#frames = handler;
 					return () => {
-						if (frames === handler) frames = undefined;
+						if (this.#frames === handler) this.#frames = undefined;
 					};
 				},
 			},
@@ -182,7 +189,7 @@ export class SubagentWorker implements WorkerPeer {
 		worker.addEventListener("messageerror", () => this.#die("worker sent an undeliverable message"));
 		worker.addEventListener("close", event => this.#die(`worker exited with code ${event.code}`));
 		this.#handshake.promise.catch(() => {});
-		this.ready = this.#start(channel.port2, counter);
+		this.ready = this.#start(channel.port2, frameChannel.port2, counter);
 		// Callers that never await `ready` must not turn a failed start into an unhandled rejection.
 		this.ready.catch(() => {});
 	}
@@ -235,12 +242,15 @@ export class SubagentWorker implements WorkerPeer {
 		});
 	}
 
-	/** Stop the worker; the link closes and exit hooks run with `reason`. Idempotent. */
+	/**
+	 * Stop the worker; every frame it already posted is dispatched, then the link closes and exit
+	 * hooks run with `reason`. Idempotent.
+	 */
 	terminate(reason = "terminated"): void {
 		this.#die(reason);
 	}
 
-	async #start(replyPort: MessagePort, counter: SharedArrayBuffer): Promise<void> {
+	async #start(replyPort: MessagePort, framePort: MessagePort, counter: SharedArrayBuffer): Promise<void> {
 		const timeoutMs = this.#options.initTimeoutMs ?? DEFAULT_INIT_TIMEOUT_MS;
 		const deadline = Promise.withResolvers<never>();
 		const timer = setTimeout(
@@ -256,11 +266,12 @@ export class SubagentWorker implements WorkerPeer {
 			const init: SubagentWorkerInit = {
 				type: "subagent-worker-init",
 				threadId: this.threadId,
+				framePort,
 				replyPort,
 				counter,
 				mainStartedAt: performance.timeOrigin,
 			};
-			this.#worker.postMessage(init, [replyPort]);
+			this.#worker.postMessage(init, [framePort, replyPort]);
 			await Promise.race([this.#handshake.promise, deadline.promise]);
 			const globals: Record<string, unknown> = {};
 			for (const service of this.#services) {
@@ -306,10 +317,33 @@ export class SubagentWorker implements WorkerPeer {
 		}
 	}
 
+	/** One message from the frame port: an RPC frame for the link, or a log record. */
+	#receive(message: unknown): void {
+		if (isFrame(message)) this.#frames?.(message);
+		else if (isSubagentWorkerLog(message)) receiveWorkerLog(this.threadId, message);
+		else logger.warn("Subagent worker sent an unknown message", { threadId: this.threadId });
+	}
+
 	#die(reason: string): void {
 		if (this.#exitReason !== undefined) return;
 		this.#exitReason = reason;
 		this.#worker.terminate();
+		// Bun drops a terminated worker's undelivered `parentPort` messages, but what the worker posted
+		// on the frame port stays queued there. Dispatch it in send order before the link closes and the
+		// exit hooks run: a run's lifecycle frames, results and records outlive the worker, and a late
+		// frame can never follow the failure the exit hooks report.
+		for (
+			let received = receiveMessageOnPort(this.#framePort);
+			received;
+			received = receiveMessageOnPort(this.#framePort)
+		) {
+			try {
+				this.#receive(received.message);
+			} catch (error) {
+				logger.error("Subagent worker frame failed after exit", { threadId: this.threadId, err: error });
+			}
+		}
+		this.#framePort.close();
 		this.#handshake.reject(new Error(`Subagent worker ${this.threadId} exited before ready: ${reason}`));
 		this.link.close(reason);
 		this.#replyPort.close();

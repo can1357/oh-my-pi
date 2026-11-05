@@ -5,7 +5,10 @@
  * either through the CLI host selector (`__omp_worker_subagent`, which installs
  * a buffering inbox before importing this module) or directly as a module URL
  * (tests, SDK embedding). The first message is the raw
- * {@link SubagentWorkerInit}; everything after it is an RPC frame.
+ * {@link SubagentWorkerInit}; everything after it is an RPC frame. The worker
+ * posts its own RPC frames on the init's frame port, never on `parentPort`, so
+ * main still receives them when it terminates this worker before dispatching
+ * them.
  *
  * Its first import routes every log record to main (`./worker-log-install`)
  * before the rest of its graph evaluates. Like the CLI's network bootstrap, it
@@ -27,6 +30,7 @@ import { isThreadId, setCurrentThreadId } from "./identity";
 import type { SubagentWorkerInit, SubagentWorkerReady, WorkerThreadLink } from "./protocol";
 import { type RpcFrame, RpcLink } from "./rpc";
 import { THREAD_SERVICES } from "./services/index";
+import { workerLogPort } from "./worker-log";
 import { warmUpSubagentWorker } from "./worker-warm-up";
 
 installGlobalProxyFetch();
@@ -40,6 +44,7 @@ function isInit(value: unknown): value is SubagentWorkerInit {
 		value !== null &&
 		Reflect.get(value, "type") === "subagent-worker-init" &&
 		isThreadId(Reflect.get(value, "threadId")) &&
+		Reflect.get(value, "framePort") instanceof MessagePort &&
 		Reflect.get(value, "replyPort") instanceof MessagePort &&
 		Reflect.get(value, "counter") instanceof SharedArrayBuffer &&
 		typeof Reflect.get(value, "mainStartedAt") === "number"
@@ -66,9 +71,10 @@ let started = false;
 
 function start(init: SubagentWorkerInit): void {
 	setCurrentThreadId(init.threadId);
+	const frames = init.framePort;
 	const link: WorkerThreadLink = new RpcLink(
 		{
-			send: frame => port.postMessage(frame),
+			send: frame => frames.postMessage(frame),
 			listen: handler => {
 				frameHandler = handler;
 				return () => {
@@ -89,7 +95,9 @@ function start(init: SubagentWorkerInit): void {
 		type: "subagent-worker-ready",
 		changedModules: loadedModulesChangedSince(init.mainStartedAt),
 	};
+	// `ready` follows every record posted on `parentPort` so far; later records share the frame port.
 	port.postMessage(ready);
+	workerLogPort()?.moveTo(frames);
 }
 
 function dispatch(message: unknown): void {
