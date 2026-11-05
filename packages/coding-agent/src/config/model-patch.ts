@@ -329,14 +329,15 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 		// multiplier form re-derived from the configured card (the same rule
 		// `finalizeCustomModel` applies to a new custom model, so a `models.yml`
 		// row and a same-id patch of the bundled row price alike). Then the
-		// row's existing tier, which keeps a tier a host states as absolute
-		// figures of its own -- the first-party `gpt-5.6` card
-		// (`providers/openai.kdl`) and Cursor's rows (`providers/cursor.kdl`) --
-		// rather than letting a partial override of one leg silently delete it.
-		// A host whose rule is in multiplier form never reaches this step; it is
-		// rescaled above. An all-zero card with no tier of its own inherits
-		// none: a row declared free that still charged the list tier past the
-		// threshold was the worst of these.
+		// row's existing tier, which keeps a tier the rules state as absolute
+		// figures rather than as a multiple of the card -- the first-party
+		// `gpt-5.6` card (`providers/openai.kdl`), Cursor's rows
+		// (`providers/cursor.kdl`) and Claude Haiku 5.5's
+		// (`classes/anthropic.kdl`) -- rather than letting a partial override of
+		// one leg silently delete it. A row whose rule is in multiplier form
+		// never reaches this step; it is rescaled above. An all-zero card with
+		// no tier of its own inherits none: a row declared free that still
+		// charged the list tier past the threshold was the worst of these.
 		const free = card.input === 0 && card.output === 0 && card.cacheRead === 0 && card.cacheWrite === 0;
 		const longContext =
 			patch.cost.longContext ??
