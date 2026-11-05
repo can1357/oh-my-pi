@@ -116,6 +116,41 @@ export function createOAuthProvenance(): {
 	};
 }
 
+/**
+ * Carries the serving credential's organization on an error thrown out of a
+ * request, for failures that produce no `AssistantMessage` to stamp: a socket
+ * reset, a TLS failure or a request timeout before response headers. The
+ * attempt's credential is resolved before the socket opens, so the identity is
+ * known even then, and the failed turn is the same spend as a successful one.
+ *
+ * Symbol-keyed and non-enumerable so it never reaches a log line, a JSON
+ * serialization or a structured-clone boundary that the error itself crosses.
+ */
+const REQUEST_ORGANIZATION_ID = Symbol.for("omp.ai.request.organizationId");
+
+/**
+ * Record the organization of the credential an attempt used on the error that
+ * attempt threw. A non-object throw carries nothing and is left alone.
+ */
+export function attachRequestOrganizationId(error: unknown, organizationId: string | undefined): void {
+	if (organizationId === undefined || typeof error !== "object" || error === null) return;
+	// A frozen or sealed error (a shared sentinel) must not break the request.
+	if (!Object.isExtensible(error)) return;
+	Object.defineProperty(error, REQUEST_ORGANIZATION_ID, {
+		value: organizationId,
+		enumerable: false,
+		configurable: true,
+		writable: true,
+	});
+}
+
+/** Read back the organization {@link attachRequestOrganizationId} recorded, if any. */
+export function requestOrganizationId(error: unknown): string | undefined {
+	if (typeof error !== "object" || error === null) return undefined;
+	const value = (error as Record<symbol, unknown>)[REQUEST_ORGANIZATION_ID];
+	return typeof value === "string" ? value : undefined;
+}
+
 /** A static bearer string, or a {@link ApiKeyResolver} that mints/rotates one. */
 export type ApiKey = string | ApiKeyResolver;
 

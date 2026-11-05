@@ -15,7 +15,13 @@ import {
 } from "@oh-my-pi/pi-catalog/model-thinking";
 import { $env, getProviderInFlightRoot, isEnoent, isPidAlive, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
-import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
+import {
+	attachRequestOrganizationId,
+	createAuthRetryKeyState,
+	isApiKeyResolver,
+	resolvedApiKeyBearer,
+	resolveNextAuthRetryKey,
+} from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
 import { getEnvApiKey } from "./env-api-key";
 import * as AIError from "./error";
@@ -1301,9 +1307,15 @@ function streamSimpleRequest<TApi extends Api>(
 						error instanceof Error ? error.message : undefined,
 					)
 				) {
-					return { error: contextualizeAuthRetryError(model, error), bufferedEvents };
+					const retryError = contextualizeAuthRetryError(model, error);
+					attachRequestOrganizationId(retryError, organizationId);
+					return { error: retryError, bufferedEvents };
 				}
 				flushBuffered();
+				// A failure before response headers produces no message to stamp, so
+				// the attempt's organization rides out on the error itself and the
+				// failed chat span names the same account a successful one would.
+				attachRequestOrganizationId(error, organizationId);
 				outer.fail(error);
 			}
 			return undefined;

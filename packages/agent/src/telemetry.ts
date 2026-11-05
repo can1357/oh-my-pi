@@ -31,6 +31,7 @@ import {
 	type Message,
 	type Model,
 	type OneshotRetryOptions,
+	requestOrganizationId,
 	retryTransientCompletion,
 	type ServiceTier,
 	type SimpleStreamOptions,
@@ -1206,6 +1207,11 @@ export async function finishChatSpan(
  * (e.g. the provider stream threw mid-iteration). Mirrors `finishChatSpan`'s
  * span-end side effects and pushes a failed `ChatRecord` to the collector so
  * the run summary still reflects the failed step.
+ *
+ * The organization comes off the thrown error, where `streamSimple` stamped
+ * the attempt's resolved credential: a request that failed before response
+ * headers has no message to read it from, and that turn is the same spend as
+ * a successful one.
  */
 export function failChatSpan(
 	telemetry: AgentTelemetry | undefined,
@@ -1228,6 +1234,8 @@ export function failChatSpan(
 		span.setAttribute(GenAIAttr.ErrorType, options.errorType ?? "Error");
 		span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
 	}
+	const organizationId = requestOrganizationId(err);
+	if (organizationId !== undefined) span.setAttribute(OmpGenAIAttr.AuthOrganizationId, organizationId);
 	telemetry?.collector.failChat(span, {
 		errorType: options.errorType ?? (err instanceof Error ? err.name || "Error" : "Error"),
 	});
