@@ -4478,9 +4478,14 @@ export class ModelRegistry {
 				// two spellings of one, and two declarations of one name combine in
 				// declaration order into the value that is sent. Sorted, two
 				// registrations sending `Bearer one, Bearer two` and `Bearer two,
-				// Bearer one` share a namespace and the second serves the first's
-				// roster. This namespace is introduced by this change, so it is fixed
-				// here rather than costing an `extension-v3` bump later.
+				// Bearer one` hash to one namespace. Today that collision has no
+				// observable consequence — an extension manager has no
+				// `restoreCachedHeaders`, so a header-carrying extension row is never
+				// served from cache at all, measured at this head and at upstream —
+				// so this is fixed on the rule rather than on a failing test. It is
+				// fixed now because this namespace is introduced by this change;
+				// correcting it later would cost an `extension-v3` bump, which is a
+				// rediscovery every user pays for.
 				cacheProviderId: scopeModelCacheProviderIdToEndpoint(
 					`${providerName}:extension-v2:${Bun.hash(
 						canonicalJson([
