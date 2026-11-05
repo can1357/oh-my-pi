@@ -367,8 +367,9 @@ fn redirections_left_to_the_process_do_not_hold_the_spawn() {
 	let a = sh("echo $$");
 	let mut sp = spec(&a, &env, NEW);
 	sp.redirs = Some(ChildRedirs {
-		list:      vec![child_open(&[1], &fifo, WRITE)],
-		exec_diag: BString::from("test: /bin/sh: "),
+		list:          vec![child_open(&[1], &fifo, WRITE)],
+		exec_diag:     BString::from("test: line 1: /bin/sh: "),
+		exec_sys_diag: BString::from("test: /bin/sh: "),
 	});
 	// Returns although nothing reads the FIFO yet.
 	let mut p = s.spawn(sp).expect("spawn");
@@ -389,8 +390,9 @@ fn failures_left_to_the_process_are_its_own_message_and_status() {
 	let mut sp = spec(&a, &env, NEW);
 	let missing = std::path::Path::new("/nonexistent/dir/f");
 	sp.redirs = Some(ChildRedirs {
-		list:      vec![child_open(&[2], &err, WRITE), child_open(&[1], missing, WRITE)],
-		exec_diag: BString::from("test: /bin/sh: "),
+		list:          vec![child_open(&[2], &err, WRITE), child_open(&[1], missing, WRITE)],
+		exec_diag:     BString::from("test: line 1: /bin/sh: "),
+		exec_sys_diag: BString::from("test: /bin/sh: "),
 	});
 	let mut p = s.spawn(sp).expect("spawn");
 	assert_eq!(wait(&mut p), ExitStatus::Exited(1));
@@ -402,14 +404,15 @@ fn failures_left_to_the_process_are_its_own_message_and_status() {
 	let a = argv(&["/nonexistent/prog"]);
 	let mut sp = spec(&a, &env, NEW);
 	sp.redirs = Some(ChildRedirs {
-		list:      vec![child_open(&[2], &err, WRITE)],
-		exec_diag: BString::from("test: /nonexistent/prog: "),
+		list:          vec![child_open(&[2], &err, WRITE)],
+		exec_diag:     BString::from("test: line 1: /nonexistent/prog: "),
+		exec_sys_diag: BString::from("test: /nonexistent/prog: "),
 	});
 	let mut p = s.spawn(sp).expect("the spawn does not wait for the exec");
 	assert_eq!(wait(&mut p), ExitStatus::Exited(127));
 	assert_eq!(
 		std::fs::read_to_string(&err).unwrap(),
-		"test: /nonexistent/prog: No such file or directory\n"
+		"test: line 1: /nonexistent/prog: No such file or directory\n"
 	);
 	std::fs::remove_file(&err).unwrap();
 }

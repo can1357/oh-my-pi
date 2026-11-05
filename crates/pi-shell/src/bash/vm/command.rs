@@ -2400,7 +2400,11 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 			};
 			let redirs = redirs.map(|list| {
 				let name = argv0(vp);
-				ChildRedirs { list, exec_diag: super::redir::diag_prefix(k, cx, vp, line, &name) }
+				ChildRedirs {
+					list,
+					exec_diag: super::redir::diag_prefix(k, cx, vp, line, &name),
+					exec_sys_diag: super::redir::sys_diag_prefix(k, cx, vp, line, &name),
+				}
 			});
 			let child_redirs = redirs.is_some();
 			let spec = SpawnSpec {

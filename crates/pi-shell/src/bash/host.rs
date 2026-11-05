@@ -395,17 +395,31 @@ pub struct SpawnSpec<'a> {
 /// opens (or the exec) to complete. The process applies `list` in order;
 /// when an entry fails it writes that entry's `diag`, the error's
 /// description (`strerror`) and a newline to its fd 2 and exits with
-/// status 1. When the exec fails it writes `exec_diag`, the description and
-/// a newline and exits with 127 (not found) or 126 (any other error), as
-/// bash's child does. The engine's `ENOEXEC` fallback cannot run after this
-/// return; a host may refuse the deferred spawn to let the engine apply the
-/// redirections and retry when the executable may need that fallback.
+/// status 1.
+///
+/// When the exec fails the process reports it as bash's `shell_execve`
+/// does, on its own fd 2 so the command's redirections apply: it LOOKS at
+/// the program, because the kernel's errno alone does not say why. A
+/// directory is `Is a directory`; a file it may not execute keeps the
+/// kernel's own words; an executable whose `#!` interpreter could not run
+/// is `exec_sys_diag` then `INTERP: bad interpreter: ` and the description,
+/// which is what Bash 5.3.0 reports and the only place a line number is
+/// left out (bash's `sys_error`); an `ENOEXEC` with no `#!` is `cannot
+/// execute binary file: ` and the description. Everything else is
+/// `exec_diag` and the description. The status is 127 only for a program
+/// that is not there at all, and 126 for every refusal of one that is.
+/// The engine's `ENOEXEC` fallback cannot run after this return; a host may
+/// refuse the deferred spawn to let the engine apply the redirections and
+/// retry when the executable may need that fallback.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChildRedirs {
 	/// The redirections, in order.
-	pub list:      Vec<ChildRedir>,
+	pub list:          Vec<ChildRedir>,
 	/// What precedes an exec failure's description (`bash: line 1: cmd: `).
-	pub exec_diag: BString,
+	pub exec_diag:     BString,
+	/// The same without the line number (`bash: cmd: `), for the one report
+	/// bash makes with `sys_error`: `bad interpreter`.
+	pub exec_sys_diag: BString,
 }
 
 /// One redirection of [`ChildRedirs`].

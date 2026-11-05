@@ -275,8 +275,12 @@ async fn check(rows: &[Row]) {
 			.await
 			.expect("shell execution");
 		let output: String = rx.drain().collect();
-		let missing: Vec<&str> =
-			row.wants.iter().copied().filter(|w| !output.contains(w)).collect();
+		let missing: Vec<&str> = row
+			.wants
+			.iter()
+			.copied()
+			.filter(|w| !output.contains(w))
+			.collect();
 		if result.exit_code != Some(row.status) || !missing.is_empty() {
 			bad.push(format!(
 				"{}: status {:?} (want {}), output {output:?} missing {missing:?}",
