@@ -1170,9 +1170,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	readonly #autoTitle: boolean;
 	#titleGenerationInFlightFor: string | undefined;
 	/** First-message auto-title that may be retried from conversation context.
-	 *  Once the title model declines the message (greeting-like or too ambiguous,
-	 *  e.g. a pasted image plus "help") AND the assistant has replied, the title is
-	 *  regenerated once from the recent user/assistant/thinking turns. */
+	 *  Once the operator's message has been declined — by the title model (too
+	 *  ambiguous, e.g. a pasted image plus "help"), or before any request by the
+	 *  deterministic pre-filter in {@link #noteTitleInput} (a greeting, or a
+	 *  request that is all attachment, code or markup) — AND the assistant has
+	 *  replied, the title is regenerated once from the recent
+	 *  user/assistant/thinking turns. At most one such request per operator
+	 *  message: no assistant turn ever arms it. */
 	#deferredTitle: { sessionId: string; declined: boolean; replied: boolean; words: number } | undefined;
 	/** What the next automatic title names (see {@link #maybeStartTitle}). */
 	#titleInput: TitleInput | undefined;
@@ -11217,12 +11221,32 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#scheduleTitleRefresh("drift");
 	}
 
-	/** Record an operator message as the title source while an auto-titled session is unnamed. */
+	/**
+	 * Record an operator message as the title source while an auto-titled session
+	 * is unnamed.
+	 *
+	 * A message the deterministic pre-filter declines ({@link isLowSignalTitleInput}:
+	 * a greeting, or a request that cleans away to nothing because it is all file
+	 * attachment, code or markup) names no task a title model could read, so it
+	 * records no title input. That decline is the deferral's first half: without
+	 * arming {@link #deferredTitle} here, the only trigger left is another operator
+	 * message, and a session launched from one `@brief.md` and then left to run
+	 * alone never gets one — it stays unnamed for its whole life. Arming it instead
+	 * retitles once from the assistant's own reading of the task, exactly as an
+	 * attachment-only request already does ({@link #titleWithTitleModel}).
+	 */
 	#noteTitleInput(message: AgentMessage): void {
 		if (!this.#autoTitle || this.sessionName || $env.PI_NO_TITLE) return;
 		const text = operatorTitleText(message);
-		if (!text || isLowSignalTitleInput(text)) return;
-		this.#titleInput = { sessionId: this.sessionManager.getSessionId(), text, replied: false, tried: false };
+		if (!text) return;
+		const sessionId = this.sessionManager.getSessionId();
+		if (isLowSignalTitleInput(text)) {
+			// An untried earlier message still owns the next request; it arms its own deferral.
+			if (this.#titleInput?.sessionId === sessionId && !this.#titleInput.tried) return;
+			this.#deferredTitle = { sessionId, declined: true, replied: false, words: 0 };
+			return;
+		}
+		this.#titleInput = { sessionId, text, replied: false, tried: false };
 	}
 
 	/**
