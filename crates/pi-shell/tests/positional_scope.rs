@@ -209,6 +209,48 @@ async fn a_sourced_files_return_trap_runs_before_the_parameters_go_back() {
 	.await;
 }
 
+/// The `BASH_ARGV` base is the outermost level, below every `.` file and
+/// function call already running: a base pushed while a `.` file runs must
+/// list after that file's own push, and must not stop the file putting the
+/// caller's parameters back. Measured on Bash 5.2.21 and 5.3.0.
+#[tokio::test]
+async fn the_argument_base_sits_below_a_running_sourced_file() {
+	let arrays = "echo \"  in argc=<${BASH_ARGC[*]}> argv=<${BASH_ARGV[*]}>\"\n";
+	assert_rows(&[
+		// A `.` without arguments pushes the file name; the base the file's
+		// own read adds belongs under it.
+		(
+			&[("lib.sh", arrays)],
+			"set -- ROOT ONE TWO\n. ./lib.sh\necho \"after: $#:[$*]\"",
+			"  in argc=<1 3> argv=<./lib.sh TWO ONE ROOT>\nafter: 3:[ROOT ONE TWO]\n",
+		),
+		// The same with arguments and `extdebug` on from the start.
+		(
+			&[("lib.sh", arrays)],
+			"set -- ROOT ONE TWO\nshopt -s extdebug\n. ./lib.sh X Y\necho \"after: $#:[$*]\"",
+			"  in argc=<2 3> argv=<Y X TWO ONE ROOT>\nafter: 3:[ROOT ONE TWO]\n",
+		),
+		// `extdebug` switched on inside the file, then a read and a `shift`:
+		// the caller's parameters still come back.
+		(
+			&[("lib.sh", "shopt -s extdebug\n: \"${BASH_ARGV[*]}\"\nshift\n")],
+			"set -- ROOT ONE TWO\n. ./lib.sh -a -b VALUE\necho \"after: $#:[$*]\"",
+			"after: 3:[ROOT ONE TWO]\n",
+		),
+		// The same with a function call and with a callout as the trigger.
+		(
+			&[("lib.sh", "shopt -s extdebug\ng(){ :; }\ng\nshift\n")],
+			"set -- ROOT ONE TWO\n. ./lib.sh -a -b VALUE\necho \"after: $#:[$*]\"",
+			"after: 3:[ROOT ONE TWO]\n",
+		),
+		(
+			&[("lib.sh", "shopt -s extdebug\ntimeout 2 true\nshift\n")],
+			"set -- ROOT ONE TWO\n. ./lib.sh -a -b VALUE\necho \"after: $#:[$*]\"",
+			"after: 3:[ROOT ONE TWO]\n",
+		),
+	])
+	.await;
+}
 /// `extdebug` switched on inside the caller still gives a callout's operand
 /// the caller's arguments as the `BASH_ARGV` base, not the command the
 /// callout runs its operand from.

@@ -301,10 +301,18 @@ pub fn read_base(k: &Kernel, store: &mut dyn StateStore, vp: &mut Vproc) -> Resu
 
 /// Push bash's `init_bash_argv` base (the positional parameters `args`)
 /// unless it was pushed already in this shell.
+///
+/// It goes at the BOTTOM of the pushes, not the end: it is the outermost
+/// level, below every `.` file and function call already there, so
+/// [`argcv`] (innermost first) lists it last as bash does, and
+/// [`truncate`] still reaches the `.` pushes above it. Appended instead, a
+/// base pushed while a `.` file was running read out above that file's own
+/// push and stopped `truncate`'s pop, which silently dropped the caller's
+/// positional parameters.
 fn init_argv(vp: &mut Vproc, args: impl FnOnce() -> Vec<BString>) {
 	if !vp.calls.iter().any(|c| matches!(c.kind, CallKind::Args(_))) {
 		vp.calls
-			.push(Call { kind: CallKind::Args(args()), depth: 0 });
+			.insert(0, Call { kind: CallKind::Args(args()), depth: 0 });
 	}
 }
 
