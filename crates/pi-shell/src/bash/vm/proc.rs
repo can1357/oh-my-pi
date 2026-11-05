@@ -1572,8 +1572,8 @@ pub enum Awaited {
 	/// Without `force` (`wait -f`) a job that stops ends the wait (status
 	/// 128 + the stop signal), as in bash with job control. A waited job
 	/// stays in the table, reported, until bash's `cleanup_dead_jobs`;
-	/// `fg` (`foreground`) deletes it at once. `kept`: the pid and status
-	/// of trailing operands that named only kept statuses.
+	/// `fg` (`foreground`) deletes it at once. `kept`: a final operand
+	/// which named a kept status (pid 0 for an invalid operand).
 	Jobs {
 		force:      bool,
 		foreground: bool,
@@ -1592,6 +1592,14 @@ pub enum Awaited {
 	AnyJob {
 		kept: Option<(u32, i32)>,
 		woke: bool,
+	},
+	/// One ordinary `wait` operand, then resolution at the next argv index.
+	/// Appended instead of changing `Jobs`: old snapshots contain that
+	/// variant's resolved children and final kept operand already.
+	WaitOperand {
+		force:    bool,
+		kept_pid: u32,
+		next:     usize,
 	},
 }
 

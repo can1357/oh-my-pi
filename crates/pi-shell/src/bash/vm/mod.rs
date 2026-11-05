@@ -622,7 +622,7 @@ impl Kernel {
 		status: i32,
 	) {
 		// A disowned child's status is collected by no one.
-		if let Ok(Some(Record::Proc { parent: Some(DISOWNED), .. })) = store.get(Key::Proc(vpid)) {
+		if self.root.disowned(store, vpid) {
 			self.root.write(store, Change::Del(Key::Proc(vpid)));
 			return;
 		}
@@ -665,6 +665,36 @@ impl Kernel {
 		let status = self.proc_state(store, vpid)?.exited()?;
 		self.root.write(store, Change::Del(Key::Proc(vpid)));
 		Some(status)
+	}
+
+	/// Bash `wait_for_background_pids` runs `cleanup_dead_jobs` (including
+	/// `procsub_prune`) before `bgp_clear`: completed non-job statuses are
+	/// forgotten even when no explicit wait moved them to the kept table.
+	/// An enclosing foreground pipeline / substitution still owns its
+	/// children, so an inline `lastpipe` stage must not collect those.
+	pub fn forget_completed_nonjobs(&mut self, store: &mut dyn StateStore, vp: &Vproc) {
+		let mut ended = Vec::new();
+		let result = store.scan(Table::Proc, &mut |key, rec| {
+			if let (Key::Proc(v), Record::Proc { parent: Some(parent), status: Some(_) }) = (key, rec)
+				&& *parent == vp.vpid
+				&& vp.jobs.by_vpid(v).is_none()
+				&& !vp.frames.iter().any(|f| {
+					f.scratch.as_ref().is_some_and(|sc| {
+						sc.children.iter().any(|(child, _)| *child == v)
+							|| matches!(sc.sub, Some(proc::PendingSub::Fork { vpid, .. }) if vpid == v)
+							|| sc.exec.as_ref().is_some_and(|e| e.wait_for.contains(&v))
+					})
+				}) {
+				ended.push(v);
+			}
+		});
+		if let Err(err) = result {
+			self.root.fail(err);
+			return;
+		}
+		for v in ended {
+			self.root.write(store, Change::Del(Key::Proc(v)));
+		}
 	}
 
 	/// Delete job `number` of `vp` (bash `delete_job`): `keep` keeps its
@@ -1672,9 +1702,7 @@ impl Shell {
 	fn adopt(&mut self, cx: &mut Cx<'_>) {
 		for p in &self.k.spawned {
 			// A job disowned before its first turn keeps its disowned record.
-			if let Ok(Some(Record::Proc { parent: Some(DISOWNED), .. })) =
-				cx.store.get(Key::Proc(p.vpid))
-			{
+			if self.k.root.disowned(cx.store, p.vpid) {
 				continue;
 			}
 			let rec = Record::Proc { parent: p.parent, status: None };
@@ -2378,6 +2406,7 @@ fn interrupt_wait(p: &mut Vproc, status: i32) {
 			e.waiting,
 			Some(
 				proc::Awaited::Jobs { .. }
+					| proc::Awaited::WaitOperand { .. }
 					| proc::Awaited::AllJobs { .. }
 					| proc::Awaited::AnyJob { .. }
 			)

@@ -442,6 +442,7 @@ fn foreground(ctx: &mut Ctx<'_, '_>, word: Option<&BString>) -> R {
 		force:      false,
 		foreground: true,
 		kept:       None,
+		next:       None,
 	};
 	Ok(Outcome { status: 0, control: Control::Wait(wait) })
 }

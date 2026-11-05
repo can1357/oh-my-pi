@@ -2627,17 +2627,27 @@ fn run_builtin(
 		}
 		let log = std::mem::take(&mut sc.logs[Slot::Builtin as usize]);
 		let (res, log) = {
-			let e = sc.exec.as_ref().expect("exec");
+			let mut e = sc.exec.take().expect("exec");
 			let mut ctx = Ctx::new(k, cx, vp, sc.probes(), line, name);
 			ctx.log = log;
 			ctx.compound.clone_from(&e.compound);
 			ctx.arrayref.clone_from(&e.arrayref);
 			ctx.resumed = e.resumed;
-			let r = builtins::run(id, &mut ctx, &e.argv);
+			let r = if id == IntrinsicId::Wait
+				&& let Some(Awaited::WaitOperand { force, next: index, .. }) = e.waiting
+				&& index != 0
+			{
+				let children = std::mem::take(&mut e.wait_for);
+				builtins::flow::wait_operand(&mut ctx, &e.argv[index..], index, force, None, children)
+			} else {
+				builtins::run(id, &mut ctx, &e.argv)
+			};
 			// Not through `command`.
 			let fatal = ctx.usage_error && !e.via_command;
 			let log = std::mem::take(&mut ctx.log);
-			(r.map(|o| (o, ctx.chunks, fatal)), log)
+			let result = (r.map(|o| (o, ctx.chunks, fatal)), log);
+			sc.exec = Some(e);
+			result
 		};
 		// The slot still holds the empty `Vec` `take` left there (the
 		// builtin has only `sc.probes()`): no drop of that placeholder.
@@ -2688,11 +2698,22 @@ fn run_builtin(
 					},
 					Control::Wait(w) => {
 						e.wait_for = w.children;
-						e.wait_into = w.into.map(Box::new);
+						if let Some(into) = w.into {
+							e.wait_into = Some(Box::new(into));
+						}
 						e.waiting = Some(if w.any {
 							Awaited::AnyJob { kept: w.kept, woke: false }
 						} else if w.all {
 							Awaited::AllJobs { keep: w.kept.map(|(pid, _)| pid) }
+						} else if let Some(next) = w.next {
+							if let Some((_, status)) = w.kept {
+								e.status = status;
+							}
+							Awaited::WaitOperand {
+								force: w.force,
+								kept_pid: w.kept.map_or(0, |(pid, _)| pid),
+								next,
+							}
 						} else {
 							Awaited::Jobs {
 								force:      w.force,
@@ -3049,7 +3070,14 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 			}
 			status
 		},
-		Some(Awaited::Jobs { force, foreground, kept }) => {
+		Some(waiting @ (Awaited::Jobs { .. } | Awaited::WaitOperand { .. })) => {
+			let (force, foreground, kept, next) = match waiting {
+				Awaited::Jobs { force, foreground, kept } => (force, foreground, kept, 0),
+				Awaited::WaitOperand { force, kept_pid, next } => {
+					(force, false, (kept_pid != 0).then_some((kept_pid, st(vp).status)), next)
+				},
+				_ => unreachable!("jobs wait"),
+			};
 			// zsh deletes a job once it reports it; bash marks it reported and
 			// keeps it until `cleanup_dead_jobs`, so `%%` and `wait %N` still
 			// find it.
@@ -3112,9 +3140,13 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 			}
 			if let Some((pid, status)) = kept {
 				last = status;
-				// bash reports the LAST operand: an invalid one leaves no
-				// child to name, so `wait -p` writes no variable at all.
 				waited = (pid != 0).then_some(pid);
+			}
+			if next != 0 {
+				// Resume the operand loop through the normal builtin context,
+				// without re-expanding argv or re-reading wait's options.
+				st(vp).stage = Stage::Dispatch;
+				return None;
 			}
 			if let Some(pid) = waited {
 				waited_into(k, vp, cx, line, pid);
@@ -3145,6 +3177,7 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 			for number in done {
 				k.delete_job(cx.store, vp, number, true);
 			}
+			k.forget_completed_nonjobs(cx.store, vp);
 			vp.jobs.retain_kept(|_| false);
 			st(vp).status
 		},

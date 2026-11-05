@@ -894,6 +894,7 @@ impl Shell {
 									| Awaited::Call(_)
 									| Awaited::Frame
 									| Awaited::Jobs { .. }
+									| Awaited::WaitOperand { .. }
 									| Awaited::AllJobs { .. }
 									| Awaited::AnyJob { .. },
 								)

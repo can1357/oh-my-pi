@@ -538,6 +538,7 @@ pub fn wait(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			crate::bash::vm::state::unset_var(&mut ctx.k.root, ctx.cx.store, ctx.vp, base, false);
 		}
 	}
+	let index = 1 + args.len() - o.rest.len();
 	let args = o.rest;
 	if any {
 		return wait_any(ctx, args, into);
@@ -545,75 +546,77 @@ pub fn wait(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	if args.is_empty() {
 		return wait_all(ctx, force);
 	}
-	let mut list = Vec::new();
-	let mut status = 0;
-	// Trailing operands that named no running child (a kept status, or an
-	// error with pid 0): bash returns the last operand's status.
+	wait_operand(ctx, args, index, force, into, Vec::new())
+}
+
+/// Bash `wait_builtin` calls `wait_for_single_pid` / `wait_for_job`
+/// before reading the next word: `wait_for` can delete jobs that an
+/// earlier operand reported. Keep the next argv index, not a resolved
+/// vpid, so only numeric operands can use `bgp_search` after that deletion.
+pub fn wait_operand(
+	ctx: &mut Ctx<'_, '_>,
+	args: &[BString],
+	index: usize,
+	force: bool,
+	into: Option<BString>,
+	mut children: Vec<Vpid>,
+) -> R {
+	let a = &args[0];
+	let mut next = (args.len() > 1).then_some(index + 1);
 	let mut kept = None;
 	let zsh = ctx.vp.mode.dialect() == crate::bash::ids::Dialect::Zsh;
-	for a in args {
-		if zsh && !a.iter().all(u8::is_ascii_digit) {
-			// zsh `bin_fg`: any other word is a job spec; a bad one ends
-			// the arguments with status 127.
-			if let Some(v) = zsh_wait_job(ctx, a)? {
-				list.push(v);
-				continue;
-			}
-			status = 127;
-			break;
+	if zsh && !a.iter().all(u8::is_ascii_digit) {
+		// zsh `bin_fg`: a bad job spec ends the operand loop.
+		if let Some(v) = zsh_wait_job(ctx, a)? {
+			children.push(v);
+		} else {
+			kept = Some((0, 127));
+			next = None;
 		}
-		if a.first().is_some_and(u8::is_ascii_digit) {
-			let Some(pid) = number(a).and_then(|n| u32::try_from(n).ok()) else {
-				// Stop reading operands, but still wait for the earlier ones.
-				// The malformed operand decides the status and names no child.
-				ctx.usage(format!("`{}': not a pid or valid job spec", a.as_bstr()));
-				status = 1;
-				kept = Some((0, 1));
-				break;
-			};
+	} else if a.first().is_some_and(u8::is_ascii_digit) {
+		if let Some(pid) = number(a).and_then(|n| u32::try_from(n).ok()) {
 			match child(ctx, pid) {
-				Child::Waitable(v) => {
-					list.push(v);
-					kept = None;
-				},
+				Child::Waitable(v) => children.push(v),
 				Child::Kept(s) => kept = Some((pid, s)),
 				Child::None => {
 					ctx.usage(format!("pid {pid} is not a child of this shell"));
-					status = 127;
-					kept = Some((0, 127));
-				},
-			}
-		} else if a.starts_with(b"%") {
-			match super::jobs::spec(ctx, a) {
-				Ok(n) => {
-					let job = ctx.vp.jobs.get(n).map(|j| (j.vpid, j.state));
-					if let Some((_, crate::bash::vm::proc::JobState::Stopped(_))) = job {
-						ctx.diag(Diag::Warning {
-							msg: format!("warning: wait_for_job: job {n} is stopped").into(),
-						});
-					}
-					list.extend(job.map(|(v, _)| v));
-					kept = None;
-				},
-				Err(bad) => {
-					if matches!(bad, super::jobs::Bad::Missing) {
-						super::jobs::no_such_job(ctx, a);
-					}
-					status = 127;
 					kept = Some((0, 127));
 				},
 			}
 		} else {
+			// Earlier operands have already been waited for; a malformed
+			// numeric operand ends the loop without reading later ones.
 			ctx.usage(format!("`{}': not a pid or valid job spec", a.as_bstr()));
-			status = 1;
 			kept = Some((0, 1));
+			next = None;
 		}
+	} else if a.starts_with(b"%") {
+		match super::jobs::spec(ctx, a) {
+			Ok(n) => {
+				if let Some(job) = ctx.vp.jobs.get(n) {
+					let (v, stopped) =
+						(job.vpid, matches!(job.state, crate::bash::vm::proc::JobState::Stopped(_)));
+					if stopped {
+						ctx.diag(Diag::Warning {
+							msg: format!("warning: wait_for_job: job {n} is stopped").into(),
+						});
+					}
+					children.push(v);
+				}
+			},
+			Err(bad) => {
+				if matches!(bad, super::jobs::Bad::Missing) {
+					super::jobs::no_such_job(ctx, a);
+				}
+				kept = Some((0, 127));
+			},
+		}
+	} else {
+		ctx.usage(format!("`{}': not a pid or valid job spec", a.as_bstr()));
+		kept = Some((0, 1));
 	}
-	if list.is_empty() && kept.is_none() {
-		return done(status);
-	}
-	let wait = Wait { children: list, all: false, any: false, into, force, foreground: false, kept };
-	Ok(Outcome { status, control: Control::Wait(wait) })
+	let wait = Wait { children, all: false, any: false, into, force, foreground: false, kept, next };
+	Ok(Outcome { status: 0, control: Control::Wait(wait) })
 }
 
 /// zsh `getjob` and `bin_fg`'s in-use check for `wait SPEC`: the job's
@@ -741,6 +744,7 @@ fn wait_all(ctx: &mut Ctx<'_, '_>, force: bool) -> R {
 		force,
 		foreground: false,
 		kept: keep.map(|v| (v.0, 0)),
+		next: None,
 	};
 	Ok(Outcome { status: 0, control: Control::Wait(wait) })
 }
@@ -796,6 +800,7 @@ fn wait_any(ctx: &mut Ctx<'_, '_>, args: &[BString], into: Option<BString>) -> R
 					force: true,
 					foreground: false,
 					kept: Some((pid, status)),
+					next: None,
 				};
 				return Ok(Outcome { status: 0, control: Control::Wait(wait) });
 			}
@@ -843,7 +848,15 @@ fn wait_any(ctx: &mut Ctx<'_, '_>, args: &[BString], into: Option<BString>) -> R
 	list.sort_unstable_by_key(|&(n, _)| n);
 	let mut children: Vec<Vpid> = list.into_iter().map(|(_, v)| v).collect();
 	children.extend(subs);
-	let wait =
-		Wait { children, all: false, any: true, into, force: true, foreground: false, kept: None };
+	let wait = Wait {
+		children,
+		all: false,
+		any: true,
+		into,
+		force: true,
+		foreground: false,
+		kept: None,
+		next: None,
+	};
 	Ok(Outcome { status: 0, control: Control::Wait(wait) })
 }

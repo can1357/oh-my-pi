@@ -352,6 +352,11 @@ pub struct Root {
 	/// store, or a snapshot carries a job or a child the shell no longer
 	/// has (a restored shell found both).
 	retry_dels:        Vec<KeyBuf>,
+	/// Disown transitions the store refused. Bash `delete_job` discards
+	/// the job's process records with its table entry; our running vproc
+	/// must instead keep that ownership release until its marker is
+	/// written or its exit deletes the record, even after a store fault.
+	retry_disowns:     Vec<Vpid>,
 }
 
 /// The root vproc's fields the interpreter updates in place (`vp.status = …`
@@ -558,6 +563,22 @@ impl Root {
 		self.fault.take()
 	}
 
+	/// A disowned proc, including an ownership release not yet accepted by
+	/// the store. Adoption and exit must observe the same transition.
+	pub fn disowned(&mut self, store: &mut dyn StateStore, vpid: Vpid) -> bool {
+		if self.retry_disowns.contains(&vpid) {
+			return true;
+		}
+		match store.get(Key::Proc(vpid)) {
+			Ok(Some(Record::Proc { parent: Some(super::DISOWNED), .. })) => true,
+			Err(err) => {
+				self.fail(err);
+				false
+			},
+			_ => false,
+		}
+	}
+
 	/// Apply `change` to the store now; a failure is kept
 	/// ([`Self::fail`]).
 	pub fn write(&mut self, store: &mut dyn StateStore, change: Change<'_>) {
@@ -566,26 +587,43 @@ impl Root {
 			Change::Del(key) | Change::Put(key, _) => Some(key.to_buf()),
 			_ => None,
 		};
+		let proc = match &change {
+			Change::Del(Key::Proc(v)) | Change::Put(Key::Proc(v), _) => Some(*v),
+			_ => None,
+		};
+		let disown = matches!(
+			&change,
+			Change::Put(Key::Proc(_), Record::Proc { parent: Some(super::DISOWNED), status: None })
+		);
 		let deleting = matches!(change, Change::Del(_));
 		if let Err(err) = store.apply(change) {
 			self.fail(err);
 			// What the store holds is no longer what this cache claims, and
 			// a refused deletion leaves a record nothing else deletes.
 			self.synced.dirty = true;
+			if disown
+				&& let Some(v) = proc
+				&& !self.retry_disowns.contains(&v)
+			{
+				self.retry_disowns.push(v);
+			}
 			if deleting
 				&& let Some(key) = key
 				&& !self.retry_dels.contains(&key)
 			{
 				self.retry_dels.push(key);
 			}
-		} else if !deleting
-			&& let Some(key) = key
-			&& !self.retry_dels.is_empty()
-		{
-			// A write that succeeded supersedes the deletion of the same key
-			// that an earlier one refused: replaying that deletion would take
-			// the newer value with it.
-			self.retry_dels.retain(|queued| *queued != key);
+		} else {
+			if let Some(v) = proc {
+				self.retry_disowns.retain(|queued| *queued != v);
+			}
+			if !deleting
+				&& let Some(key) = key
+				&& !self.retry_dels.is_empty()
+			{
+				// A newer value supersedes a previously refused deletion.
+				self.retry_dels.retain(|queued| *queued != key);
+			}
 		}
 	}
 
@@ -2945,6 +2983,10 @@ pub fn sync_root(root: &mut Root, store: &mut dyn StateStore, vp: &Vproc) {
 	let all = std::mem::take(&mut root.synced.dirty);
 	for key in std::mem::take(&mut root.retry_dels) {
 		root.write(store, Change::Del(key.as_key()));
+	}
+	for v in std::mem::take(&mut root.retry_disowns) {
+		let rec = Record::Proc { parent: Some(super::DISOWNED), status: None };
+		root.write(store, Change::Put(Key::Proc(v), rec));
 	}
 	if all || vp.status != root.synced.status {
 		root.synced.status = vp.status;

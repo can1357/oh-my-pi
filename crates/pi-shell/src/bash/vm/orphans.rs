@@ -160,7 +160,12 @@ fn in_engine(p: &Vproc) -> bool {
 				e.target == Some(Target::Intrinsic(IntrinsicId::Wait))
 					&& matches!(
 						e.waiting,
-						Some(Awaited::Jobs { .. } | Awaited::AllJobs { .. } | Awaited::AnyJob { .. })
+						Some(
+							Awaited::Jobs { .. }
+								| Awaited::WaitOperand { .. }
+								| Awaited::AllJobs { .. }
+								| Awaited::AnyJob { .. }
+						)
 					)
 			});
 			waits || matches!(sc.live, Live::Task(_))

@@ -132,11 +132,13 @@ pub struct Wait {
 	pub force:      bool,
 	/// `fg`: the job is deleted once it ends, its status not kept.
 	pub foreground: bool,
-	/// Operands only: the pid and status of the last operands when they
-	/// named only kept statuses (bash `bgpids`), which `wait` returns (and
-	/// `-p` gets) after `children`. Without operands: `$!`'s pid when that
-	/// child had finished before the `wait`, whose status stays kept.
+	/// The pid and status of this operand when it names only a kept
+	/// status, or pid 0 for an invalid operand. Without operands: `$!`'s
+	/// pid when that child had finished before the wait.
 	pub kept:       Option<(u32, i32)>,
+	/// Ordinary `wait`: the next operand's argv index, resolved only after
+	/// this operand has completed and cleaned up the job table.
+	pub next:       Option<usize>,
 }
 
 /// `name` and the subscript of a `name[subscript]` variable reference.
