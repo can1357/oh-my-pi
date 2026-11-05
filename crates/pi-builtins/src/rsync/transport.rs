@@ -1434,6 +1434,31 @@ mod tests {
 
 		const DUMP: &str = "for a in \"$@\"; do printf '%s\\0' \"$a\"; done; printf '\\n--\\n'; cat\n";
 
+		/// The remote shell (`ssh`) leads its own session: in the host's it
+		/// could open `/dev/tty` and prompt (host key, password) on the user's
+		/// terminal underneath the TUI.
+		#[test]
+		fn remote_shell_leads_its_own_session() {
+			let dir = tempfile::tempdir().unwrap();
+			let rsh = script(dir.path(), "fake-rsh", "echo $$; cat >/dev/null\n");
+			let logger = logger();
+			let cancel = Arc::new(AtomicBool::new(false));
+			let mut conn = spawn_shell(&child_env(dir.path()), &base_cfg(&rsh, &logger), cancel).expect("spawn");
+			let mut line = Vec::new();
+			let mut byte = [0u8; 1];
+			while conn.reader.read(&mut byte).unwrap() == 1 && byte[0] != b'\n' {
+				line.push(byte[0]);
+			}
+			let pid: libc::pid_t = std::str::from_utf8(&line).unwrap().parse().unwrap();
+			// SAFETY: getsid only queries session ids; the child is still
+			// running (blocked on stdin).
+			let (child_sid, host_sid) = unsafe { (libc::getsid(pid), libc::getsid(0)) };
+			drop(std::mem::replace(&mut conn.writer, Box::new(io::sink())));
+			conn.finish().unwrap();
+			assert_eq!(child_sid, pid);
+			assert_ne!(child_sid, host_sid);
+		}
+
 		#[test]
 		fn remote_command_line_matches_reference() {
 			let dir = tempfile::tempdir().unwrap();

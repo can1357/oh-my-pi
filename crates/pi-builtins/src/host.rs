@@ -1673,7 +1673,10 @@ impl Destination {
 /// That last one matters more than it looks: the host process's fd 2 belongs to
 /// the TUI, so a child left with inherited stderr writes straight into the
 /// rendered frame. [`ChildEnv::command`] therefore always pipes stderr, and
-/// [`ChildEnv::forward_stderr`] drains it to the command's own fd 2.
+/// [`ChildEnv::forward_stderr`] drains it to the command's own fd 2. For the
+/// same reason the child leads a new session without a controlling terminal,
+/// the embedded shell's policy for externals: `rsync`'s `ssh` would otherwise
+/// prompt on (and read keystrokes from) the user's terminal under the TUI.
 #[derive(Clone)]
 pub(crate) struct ChildEnv {
 	cwd:    PathBuf,
@@ -1692,7 +1695,8 @@ fn native_working_dir<'a>(filesystem: &BlockingFs, cwd: &'a Path) -> io::Result<
 
 impl ChildEnv {
 	/// Builds a `Command` for `program` with the shell's working directory and
-	/// environment, and with stderr piped.
+	/// environment, stderr piped, and (unix) in a new session with no
+	/// controlling terminal, so a `/dev/tty` open fails instead of prompting.
 	///
 	/// Stdin and stdout are left untouched for the caller to wire; they default
 	/// to inherited, so a caller that leaves them alone MUST redirect them.
@@ -1704,6 +1708,8 @@ impl ChildEnv {
 			.env_clear()
 			.envs(self.env.iter().map(|(k, v)| (k, v)))
 			.stderr(std::process::Stdio::piped());
+		#[cfg(unix)]
+		std::os::unix::process::CommandExt::setsid(&mut command, true);
 		Ok(command)
 	}
 
