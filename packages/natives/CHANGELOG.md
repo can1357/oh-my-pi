@@ -37,7 +37,7 @@
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
 - Fixed GTK3 Open and Save file dialogs on Linux: `ax()` and element input no longer fail there with `has 0 matching AT-SPI frames`, and Wayland window lists include them ([#18011](https://github.com/can1357/oh-my-pi/pull/18011) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `capabilities()` on Wayland desktops whose xdg-desktop-portal has no RemoteDesktop backend, such as sway, reporting `input: true`: it now reports `input: false` and `inputPermission: "unavailable"`, and typing and key presses fail at once naming the missing portal ([#18012](https://github.com/can1357/oh-my-pi/pull/18012) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed minimized `git diff`, `git show` and `diff -r` output leaving binary files, pure renames and mode-only changes out of its file list and count: binary files now show as `Bin`, as in `git diff --stat`
+- Fixed minimized `git diff`, `git show` and `diff -r` output leaving binary files, pure renames and mode-only changes out of its file list and count: binary files now show as `Bin`, as in `git diff --stat` ([#18148](https://github.com/can1357/oh-my-pi/pull/18148) by [@will-bogusz](https://github.com/will-bogusz))
 ### Fixed
 
 - Fixed `el.type` and `el.press(keys)` on Wayland moving focus inside the element's app (GNOME showed "… is ready") before refusing the call: they are now refused before anything reaches the app ([#17915](https://github.com/can1357/oh-my-pi/pull/17915) by [@will-bogusz](https://github.com/will-bogusz))
