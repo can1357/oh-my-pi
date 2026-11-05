@@ -208,6 +208,14 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 		let fresh = vp.frames[fi].scratch.is_none();
 		if fresh && starts {
 			note_command(vp, unit, op);
+			// bash samples `was_error_trap` before the command runs
+			// (`execute_cmd.c`), so a trap the command itself installs does
+			// not fire for that command.
+			let armed = matches!(
+				state::record(cx.store, vp, Key::Trap(TrapKey::Err)),
+				Ok(Some(Record::Trap { action, .. })) if !action.is_empty()
+			);
+			vp.frames[fi].err_trap_armed = armed;
 		}
 		// bash's DEBUG trap: before a simple command, `[[ ]]`, `(( ))`, each
 		// arith-for expression, a `case` or `select` command and each `for`
@@ -498,7 +506,14 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 		}
 		let zsh = unit.mode.dialect() == Dialect::Zsh;
 		let errexit = errexit_failed && (errexit_on(k, cx, vp) || (zsh && zsh_errreturn_exits(k, cx, vp)));
-		if failed_command && start_trap(k, vp, cx, TrapKey::Err) {
+		// bash's `was_error_trap`, sampled before the command ran: a trap
+		// the command itself installs does not fire for it. Only an `Exec`
+		// samples at its own start (`starts_command` is unconditional for
+		// it), so only an `Exec` is gated; zsh's ZERR has no such test.
+		let armed = zsh
+			|| op.code != Opcode::Exec
+			|| vp.frames.get(fi).is_some_and(|f| f.err_trap_armed);
+		if failed_command && armed && start_trap(k, vp, cx, TrapKey::Err) {
 			set_trap_line(vp, err_line);
 			for frame in &mut vp.frames[..fi.saturating_add(1)] {
 				frame.err_reported = true;

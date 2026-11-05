@@ -2353,18 +2353,18 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 				let lhs = Lhs { name, index: index.as_ref().map(|i| i.as_slice()), append };
 				match set_value(ctx.k, ctx.cx, ctx.vp, lhs, assign_value, level) {
 					Ok(()) => {},
-					// An arithmetic error in a subscript abandons the rest of
-					// the line (bash `jump_to_top_level (DISCARD)`).
+					// `declare -i I=bad!`, `declare "A[bad!]=3"`: the value's
+					// and the subscript's arithmetic errors are both the
+					// assignment error of the ordinary assignment this
+					// builtin performs — the same jump, not a failed builtin
+					// and not a plain discard (`eval 'declare "A[bad!]=3"'`
+					// prints nothing and is 1 in both bashes, and
+					// `trap '( declare -i "A[bad!]=3" ); echo OUT:$?' EXIT;
+					// exit 7` prints `OUT:7`).
 					Err(d @ Diag::ArithSubscript { .. }) => {
 						ctx.diag(d);
-						return Ok(super::Outcome { status: 1, control: super::Control::DiscardAll });
+						return Ok(super::Outcome { status: 1, control: super::Control::AssignJump });
 					},
-					// `declare -i I=bad!` / `local -i I=bad!`: the integer
-					// attribute evaluates the value, and its error is the
-					// assignment error of an ordinary `I=bad!` on an integer
-					// variable — the same jump, not a failed builtin
-					// (`declare -i I=bad!; echo NEXT:$?` prints nothing and
-					// is 1 in both bashes).
 					Err(d @ Diag::Arith { .. }) => {
 						ctx.err(d);
 						return Ok(super::Outcome { status: 1, control: super::Control::AssignJump });

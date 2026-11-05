@@ -1062,6 +1062,12 @@ pub struct Frame {
 	pub debug_errexit:     bool,
 	/// A failing nested command already ran the ERR trap.
 	pub err_reported:      bool,
+	/// bash's `was_error_trap`: whether an ERR trap was set when the
+	/// command running in this frame started. bash samples it before the
+	/// command and runs the trap only if it was set then, so a trap the
+	/// command itself installs does not fire for the command
+	/// (`f(){ trap 'echo T' ERR; false; }; f` prints `T` once).
+	pub err_trap_armed:    bool,
 	/// Called (function, `eval`, `source`, subshell) from a context where
 	/// `set -e` is ignored: an `if`/`while`/`until` condition, a `&&`/`||`
 	/// list except its last command, a `!` pipeline.
@@ -1094,6 +1100,7 @@ impl Frame {
 			debug_pc: None,
 			debug_trap_local: false,
 			err_trap_local: false,
+			err_trap_armed: false,
 			return_trap_local: false,
 			trace_local: false,
 			debug_errexit: false,
