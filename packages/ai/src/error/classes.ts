@@ -61,7 +61,10 @@ export class OpenAIHttpError extends ProviderHttpError {
 				const { message, code, type } = source;
 				return {
 					detail: typeof message === "string" && message.length > 0 ? message : bodyText,
-					code: typeof code === "string" ? code : typeof type === "string" ? type : undefined,
+					code:
+						machineCode(code) ??
+						machineCode(type) ??
+						(typeof code === "string" ? code : typeof type === "string" ? type : undefined),
 				};
 			}
 			const error = envelope.error;
@@ -83,6 +86,20 @@ export class OpenAIHttpError extends ProviderHttpError {
  */
 const MAX_WRAPPED_ENVELOPE_DEPTH = 8;
 
+/** A `code` or `type` that is only three digits is an HTTP status in that field, not a machine code. */
+const HTTP_STATUS_CODE_PATTERN = /^\d{3}$/;
+
+/**
+ * The machine-readable code in a `code` or `type` field, or `undefined` when the field holds none.
+ *
+ * A code is a non-empty **string**: a number there is a status wearing the field's name, and so is
+ * a string of exactly three digits. Every reader of this envelope and every level of it asks this
+ * one function, because a `"403"` one level up that counts as a code hides the real code beneath.
+ */
+function machineCode(value: unknown): string | undefined {
+	return typeof value === "string" && value.length > 0 && !HTTP_STATUS_CODE_PATTERN.test(value) ? value : undefined;
+}
+
 /**
  * The envelope inside a wrapped error (`{ error: { error: { code, message } } }`), or `undefined`
  * when `error` is already an ordinary envelope.
@@ -93,8 +110,9 @@ const MAX_WRAPPED_ENVELOPE_DEPTH = 8;
  * turn falls between them into the generic transient classifier.
  *
  * The rules, in one place:
- * - an inner value only wins when the outer carries no `code` or `type` **string** of its own. A
- *   number in `code` is a status wearing the field's name, not a machine-readable code;
+ * - an inner value only wins when the outer carries no machine-readable `code` or `type` of its
+ *   own. A number in `code`, or a string of exactly three digits, is a status wearing the field's
+ *   name rather than a machine-readable code, and a status must not hide the code below it;
  * - the inner must be a plain, non-array object;
  * - it wins when it carries a `code`, `type` or `message` of its own, **or** when it is itself
  *   nothing but another wrapper around one. A gateway that fronts a gateway produces exactly that
@@ -102,9 +120,9 @@ const MAX_WRAPPED_ENVELOPE_DEPTH = 8;
  */
 export function wrappedErrorEnvelope(error: object, depth = 0): object | undefined {
 	if (depth >= MAX_WRAPPED_ENVELOPE_DEPTH) return undefined;
-	const outerCode = Reflect.get(error, "code");
-	const outerType = Reflect.get(error, "type");
-	if (typeof outerCode === "string" || typeof outerType === "string") return undefined;
+	if (machineCode(Reflect.get(error, "code")) !== undefined || machineCode(Reflect.get(error, "type")) !== undefined) {
+		return undefined;
+	}
 	const inner: unknown = Reflect.get(error, "error");
 	if (typeof inner !== "object" || inner === null || Array.isArray(inner)) return undefined;
 	const innerCode = Reflect.get(inner, "code");
@@ -120,9 +138,6 @@ export function wrappedErrorEnvelope(error: object, depth = 0): object | undefin
 	// Walk through it rather than stopping, or the code at the bottom is lost.
 	return wrappedErrorEnvelope(inner, depth + 1);
 }
-
-/** A `code` that is only three digits is an HTTP status in the code field, not a machine code. */
-const HTTP_STATUS_CODE_PATTERN = /^\d{3}$/;
 
 /**
  * Which object a reader should take an error out of, given a parsed response body.
@@ -149,8 +164,7 @@ export function responseErrorEnvelope(bodyJson: unknown): object | undefined {
 	// The root's own machine code outranks an `error` object beside it, which is a diagnostic.
 	// A THREE-DIGIT STRING is not a machine code: it is an HTTP status wearing the field's name,
 	// the same way a number in `code` is, and letting one win hides the real envelope beneath it.
-	const rootCode = Reflect.get(bodyJson, "code");
-	if (typeof rootCode === "string" && !HTTP_STATUS_CODE_PATTERN.test(rootCode)) return bodyJson;
+	if (machineCode(Reflect.get(bodyJson, "code")) !== undefined) return bodyJson;
 	// A root `type` is ambiguous in a way no ordering of positions can settle: a wire body writes
 	// its code there, and a stream frame writes its own name there, and the two shapes are
 	// identical. `{ type: "error", error: { code: "cyber_policy" } }` must read the inner object;

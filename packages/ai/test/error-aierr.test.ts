@@ -277,6 +277,37 @@ describe("OpenAIHttpError.parseEnvelope — where the error actually is", () => 
 		expect(body({ response: { status: "completed", output: [] } }).code).toBeUndefined();
 		expect(body({ id: "resp_1", output: [] }).code).toBeUndefined();
 	});
+
+	it("reads past a three-digit string status at any depth, not only at the body root", () => {
+		// `"403"` in `code` is the HTTP status wearing the field's name. The root already refused
+		// to read one as a code; a wrapper level that still counted one hid the refusal beneath it,
+		// and the declined content then went to every stored credential.
+		expect(
+			body({
+				error: {
+					code: "403",
+					message: "Forbidden",
+					error: { code: "cyber_policy", message: "Provider declined the request" },
+				},
+			}),
+		).toEqual({ detail: "Provider declined the request", code: "cyber_policy" });
+	});
+
+	it("prefers a machine code in `type` to a three-digit status in `code` beside it", () => {
+		expect(body({ error: { code: "403", type: "cyber_policy", message: "Provider declined the request" } })).toEqual({
+			detail: "Provider declined the request",
+			code: "cyber_policy",
+		});
+	});
+
+	it("still reports a lone status code when the body carries nothing else", () => {
+		// The rule demotes a status BELOW a real code; it does not throw the status away when it
+		// is all the host sent.
+		expect(body({ error: { code: "403", message: "Forbidden" } })).toEqual({
+			detail: "Forbidden",
+			code: "403",
+		});
+	});
 });
 
 describe("which refusals never rotate credentials", () => {

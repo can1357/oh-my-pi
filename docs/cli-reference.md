@@ -240,13 +240,19 @@ messages arrive in `message_end`, and opaque provider replay payloads are omitte
 Terminal turn failures produce a nonzero exit status in both text and JSON modes.
 A run stopped by `--max-cost` exits with status `3`: the cap message goes to
 stderr (a `cost-gate` notice in JSON mode) and no answer is printed.
-A run whose last turn the provider refused (an Anthropic refusal, an OpenAI
-`cyber_policy` refusal once `retry.refusalRetries` is spent) exits with status `4`.
+A run whose last turn the provider refused (an Anthropic `refusal` or `sensitive`
+stop, an OpenAI `cyber_policy` refusal once `retry.refusalRetries` is spent)
+exits with status `4`.
 Text mode writes `Retrying (N/M): Refusal (<code>): <provider message>` to stderr
-for each refused attempt it retries, then `Refusal (<code>): <provider message>`
-for the final one; JSON mode carries the same line in the final message's
-`errorMessage` and `{ type: "refusal", category: <code>, explanation: <provider message> }`
-in its `stopDetails`.
+for each refused attempt it retries, then the final error line; JSON mode carries
+that same line in the final message's `errorMessage` and the refusal in its
+`stopDetails`. The shape depends on what the provider sent: a refusal with a code
+gives `Refusal (<code>): <provider message>` and
+`{ type: "refusal", category: <code>, explanation: <provider message> }`, a
+refusal with no category gives `Refusal: <provider message>`, and a `sensitive`
+stop keeps its own text and `{ type: "sensitive", … }`. To count every refusal,
+match `stopDetails.type` against both `"refusal"` and `"sensitive"`, or use the
+exit status.
 
 `plan.defaultOnStartup` is ignored in print mode because there is no plan-review
 UI. Use `--plan-yolo` for unattended planning and implementation.

@@ -110,7 +110,7 @@ Settings:
 
 - `retry.enabled` (default `true`)
 - `retry.maxRetries` (default `10`)
-- `retry.refusalRetries` (default `3`; same-model retries of a refusal whose category is one the classifier's verdict is unstable for — OpenAI `cyber_policy` and Anthropic `reasoning_extraction` — counted apart from `retry.maxRetries`; `0` surfaces the first refusal; a refusal carrying any other category never retries the same model and walks `retry.fallbackChains` only)
+- `retry.refusalRetries` (default `3`; same-model retries of a content refusal whose verdict is unstable for the same input (`cyber_policy` on the OpenAI wires, `reasoning_extraction` from the classifier), counted apart from `retry.maxRetries`; `0` removes the resend and keeps the fallback walk, so a turn no model answers ends on the first refusal of the last model tried; every other classifier refusal walks `retry.fallbackChains` only)
 - `retry.baseDelayMs` (default `500`)
 - `retry.maxDelayMs` (default `300000`, 5 minutes; `<= 0` disables the fail-fast cap)
 - `retry.waitForUsageReset` (default `false`; allows provider-timed usage resets to exceed the delay cap)
