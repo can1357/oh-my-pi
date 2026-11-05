@@ -72,6 +72,7 @@
 - Added `tui.maxFps` (also `--max-fps` and `PI_MAX_FPS`) to cap how often the TUI repaints; keystroke echo keeps 30 fps ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 - The idle recap no longer disappears when the session is resumed, restarted or its transcript is rebuilt; the latest recap stays at the end until the conversation moves on ([#18113](https://github.com/can1357/oh-my-pi/pull/18113) by [@materemias](https://github.com/materemias))
 - Fixed a chat session that ends up on the model assigned to the `web` (or another model-kind) role adopting that role's retry fallback chain and cycling `web/*` search providers as chat models, each failing with `Unhandled API in mapOptionsForApi: web-search` ([#18056](https://github.com/can1357/oh-my-pi/pull/18056) by [@haesol-shin](https://github.com/haesol-shin))
+- Fixed `task.maxEffort` letting a subagent run on a model it can't hold to the ceiling when that model resolves only after extension or provider discovery; the spawn now fails with the same error as a model resolved up front ([#9664](https://github.com/can1357/oh-my-pi/pull/9664) by [@aktanazat](https://github.com/aktanazat))
 
 ### Changed
 
@@ -93,6 +94,7 @@
 - Subagent and task prompts no longer tell agents to message or broadcast before editing shared files; subagents message only to get unblocked and wait only on their own jobs
 - Subagents can no longer broadcast: `write agent://all` from a subagent fails and points it at a direct `agent://<id>` message, and subagent prompts no longer advertise `agent://all`. The main agent can still broadcast
 - Factory Droid Gemini 4 Argon sessions keep its earlier turns intact through save and reload, and the image clamp counts those turns at the size Argon is sent ([#17861](https://github.com/can1357/oh-my-pi/pull/17861) by [@will-bogusz](https://github.com/will-bogusz))
+- Task results now tell the parent agent when a subagent ran on a different model or effort than it asked for: a `<model-receipt>` line names the model and thinking level that ran and a reason code (`model-auth-fallback`, `effort-unsupported`, `effort-clamped`, `model-retry-fallback`) ([#9647](https://github.com/can1357/oh-my-pi/issues/9647), [#9664](https://github.com/can1357/oh-my-pi/pull/9664) by [@aktanazat](https://github.com/aktanazat))
 
 ### Fixed
 - A grouped `read` row that names a URL links the whole URL instead of only its last path segment, so a click anywhere on the visible URL opens it; the row's last `/` no longer splits it into a dim prefix and a linked tail ([#18071](https://github.com/can1357/oh-my-pi/pull/18071) by [@iacore](https://github.com/iacore))
