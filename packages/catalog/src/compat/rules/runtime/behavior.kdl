@@ -73,15 +73,17 @@ behavior {
 		fallback "Flash" substring="flash"
 		fallback "Pro" substring="pro"
 	}
-	// Antigravity reports independent backend-family counters. Exact memberships
-	// cover bundled/current ids; fallbacks preserve the same counter for newly
-	// discovered family ids.
+	// Antigravity reports backend-family counters, with a separate weekly bucket
+	// for Gemini 4 Argon. Exact memberships cover bundled/current ids; fallbacks
+	// preserve the same counter for newly discovered family ids.
 	quota-tiers provider="google-antigravity" {
 		tier "anthropic" "claude-opus-4-6"
+		tier "google-argon" "gemini-4-argon"
 		tier "google" "gemini-3-pro" "gemma-3" "tab_flash_lite_preview" \
 			"tab_jump_flash_lite_preview"
 		tier "openai" "gpt-oss-120b" "openai/gpt-oss-120b"
 		fallback "anthropic" substring="claude-"
+		fallback "google-argon" substring="gemini-4-argon"
 		fallback "google" substring="gemini-"
 		fallback "google" substring="gemma-"
 		fallback "google" substring="tab_"
