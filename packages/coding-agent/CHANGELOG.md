@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `autolearn_capture_start` and `autolearn_capture_end` (`completed` | `aborted` | `error`) session events, delivered to RPC hosts and to extensions via `pi.on(...)`, so hosts can tell when a background auto-learn capture turn is running ([#15966](https://github.com/can1357/oh-my-pi/pull/15966) by [@Vignesh-285](https://github.com/Vignesh-285))
+- Added `autolearn_capture_start` and `autolearn_capture_end` (`completed` | `aborted` | `error`) session events, delivered to RPC hosts and to extensions via `pi.on(...)`, so hosts can tell when a background auto-learn capture turn is running ([#15966](https://github.com/can1357/oh-my-pi/pull/15966) by [@Vignesh-285](https://github.com/Vignesh-285), [#18207](https://github.com/can1357/oh-my-pi/pull/18207) by [@thiefjim](https://github.com/thiefjim))
 
 ### Fixed
 
