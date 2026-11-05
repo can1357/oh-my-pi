@@ -263,6 +263,19 @@ export interface AttachmentMarkerPart {
 	tail: string;
 }
 
+/**
+ * One piece of a paste a host delivers into a prompt: text the person supplied, or the
+ * attachment token that prompt's own `attachImage` returned. The host knows which is which — it
+ * read one from the clipboard and received the other from the prompt — so a prompt never has to
+ * find its tokens in the person's characters.
+ */
+export type PasteDelivery = { text: string } | { attachment: string };
+
+/** What a delivery reads as: an attachment piece is its token. */
+export function pasteDeliveryText(piece: PasteDelivery): string {
+	return "text" in piece ? piece.text : piece.attachment;
+}
+
 /** Render parts back to the text the person saw: literals verbatim, markers from their numbers. */
 export function renderAttachmentText(parts: readonly AttachmentTextPart[]): string {
 	let out = "";

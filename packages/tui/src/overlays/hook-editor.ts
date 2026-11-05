@@ -14,6 +14,8 @@ import {
 	type AttachmentTextPart,
 	chipLabel,
 	compactAttachmentParts,
+	type PasteDelivery,
+	pasteDeliveryText,
 	renderAttachmentText,
 	visionMarkerTail,
 } from "../prompt/composer-attachments";
@@ -141,7 +143,7 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 	#onPasteImage: HookEditorOptions["onPasteImage"];
 	#onPasteImagePath: HookEditorOptions["onPasteImagePath"];
 	#pasteHandler = new BracketedPasteHandler();
-	#pendingPastes: { settled: boolean; text: string | undefined }[] = [];
+	#pendingPastes: { settled: boolean; content: readonly PasteDelivery[] | undefined }[] = [];
 	/** Attachment token in the buffer → the marker it stands for; the provenance of every marker
 	 *  this prompt inserted. A person who types the same characters produces typed text. */
 	#markers = new Map<string, AttachmentMarkerPart>();
@@ -428,21 +430,37 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		return this.#token({ kind: "image", n: this.#images.length, tail: visionMarkerTail(dims) });
 	}
 
-	/** Reserve ordered clipboard delivery. Completion accepts nonempty text once, or releases on undefined. */
-	beginPaste(): (text: string | undefined) => boolean {
+	/**
+	 * Reserve ordered clipboard delivery. Completion accepts one nonempty delivery, or releases
+	 * on undefined. A host that attached an image through {@link attachImage} delivers its token
+	 * as its own {@link PasteDelivery} piece rather than splicing it into the pasted text: the
+	 * token then enters the buffer as the atom it is, and the person's own characters — which
+	 * may read exactly like one — stay text.
+	 */
+	beginPaste(): (content: string | readonly PasteDelivery[] | undefined) => boolean {
 		if (this.#disposed) return () => false;
-		const pending: { settled: boolean; text: string | undefined } = { settled: false, text: undefined };
+		const pending: { settled: boolean; content: readonly PasteDelivery[] | undefined } = {
+			settled: false,
+			content: undefined,
+		};
 		this.#pendingPastes.push(pending);
-		return text => {
+		return content => {
 			if (this.#disposed || pending.settled) return false;
+			const pieces = typeof content === "string" ? [{ text: content }] : content;
+			const delivery = pieces?.filter(piece => pasteDeliveryText(piece).length > 0);
 			pending.settled = true;
-			pending.text = text;
+			pending.content = delivery?.length ? delivery : undefined;
 			// A failed/empty read releases the wait, but must not submit an answer.
-			if (!text) this.#submitQueued = false;
+			if (!pending.content) this.#submitQueued = false;
 			let delivered = 0;
 			for (const paste of this.#pendingPastes) {
 				if (!paste.settled) break;
-				if (paste.text) this.#editor.pasteText(paste.text);
+				for (const piece of paste.content ?? []) {
+					if ("text" in piece) this.#editor.pasteText(piece.text);
+					// Already registered by `attachImage`; inserting the label alone keeps the
+					// paste's own spacing, where `insertAtom` would add a space of its own.
+					else this.#editor.insertText(piece.attachment);
+				}
 				delivered++;
 			}
 			if (delivered > 0) this.#pendingPastes.splice(0, delivered);
@@ -450,7 +468,7 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 				this.#submitQueued = false;
 				this.#submitCurrentText(true);
 			}
-			return !!text;
+			return pending.content !== undefined;
 		};
 	}
 

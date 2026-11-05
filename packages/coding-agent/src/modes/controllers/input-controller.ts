@@ -35,6 +35,8 @@ import {
 	chipLabel,
 	compactImageMarkers,
 	formatVisionMarker,
+	type PasteDelivery,
+	pasteDeliveryText,
 	shiftImageMarkers,
 } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import { expandEmoticons } from "@oh-my-pi/pi-tui/prompt/emoji-autocomplete";
@@ -144,8 +146,12 @@ function isExpandable(obj: unknown): obj is Expandable {
 /** Minimal contract for any component that can receive a paste payload directly. */
 interface PasteTarget {
 	pasteText(text: string): void;
-	/** Reserve delivery before an async clipboard read; undefined releases it without text. */
-	beginPaste?(): (text: string | undefined) => boolean;
+	/**
+	 * Reserve delivery before an async clipboard read; undefined releases it without text. A
+	 * paste made of several pieces says which came from {@link attachImage} and which are the
+	 * person's characters, so a prompt never has to find its own tokens in pasted text.
+	 */
+	beginPaste?(): (content: string | readonly PasteDelivery[] | undefined) => boolean;
 	/** The prompt accepts pasted images (the ask dialog's answer and note editors). */
 	acceptsImages?: boolean;
 	/** Attach an image; returns the marker to deliver as pasted text. */
@@ -2586,23 +2592,29 @@ export class InputController {
 	 */
 	#beginPromptImagePaste(target: Component & PasteTarget): PromptImagePaste {
 		const finishPaste = target.beginPaste?.();
-		const pasted: string[] = [];
+		const pasted: PasteDelivery[] = [];
+		const push = (piece: PasteDelivery) => {
+			// Pieces are joined by a space, as the flat delivery was.
+			if (pasted.length > 0) pasted.push({ text: " " });
+			pasted.push(piece);
+		};
 		return {
 			sink: {
 				attach: async (image, unsupportedMessage, sourcePath) => {
 					const marker = await this.#attachPromptImage(target, image, unsupportedMessage, sourcePath);
 					if (marker === undefined) return false;
-					pasted.push(marker);
+					push({ attachment: marker });
 					return true;
 				},
 				pasteText: text => {
-					pasted.push(text);
+					push({ text });
 				},
 			},
 			finish: () => {
-				const text = pasted.join(" ");
-				if (finishPaste) finishPaste(text || undefined);
-				else if (text && this.ctx.ui.getFocused() === target) target.pasteText(text);
+				if (finishPaste) finishPaste(pasted.length > 0 ? pasted : undefined);
+				else if (pasted.length > 0 && this.ctx.ui.getFocused() === target) {
+					target.pasteText(pasted.map(pasteDeliveryText).join(""));
+				}
 				this.ctx.ui.requestRender();
 			},
 		};

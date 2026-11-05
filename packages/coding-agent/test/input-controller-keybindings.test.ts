@@ -1211,7 +1211,7 @@ describe("InputController image paste into an image-accepting prompt", () => {
 
 	it("recovers the clipboard bitmap for a vanished path and reports a missing one like the main editor (#2375)", async () => {
 		const context = await createPromptContext();
-		const delivered: (string | undefined)[] = [];
+		const delivered: (string | readonly unknown[] | undefined)[] = [];
 		const attached: ImageContent[] = [];
 		context.setFocused({
 			pasteText: vi.fn(),
@@ -1220,8 +1220,8 @@ describe("InputController image paste into an image-accepting prompt", () => {
 				attached.push(image);
 				return `[Image #${attached.length}]`;
 			},
-			beginPaste: () => (text: string | undefined) => {
-				delivered.push(text);
+			beginPaste: () => (content: string | readonly unknown[] | undefined) => {
+				delivered.push(content);
 				return true;
 			},
 		});
@@ -1239,7 +1239,8 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		clipboardImage = null;
 		await controller.handleImagePathPaste(tempDir.join("missing.png"));
 
-		expect(delivered).toEqual(["[Image #1]"]);
+		// The image is delivered as its own piece, so the prompt knows it is a token of its own.
+		expect(delivered).toEqual([[{ attachment: "[Image #1]" }]]);
 		expect(attached.map(image => imageAttachmentSource(image)?.path)).toEqual([
 			expect.stringMatching(/^local:\/\/pasted-image-[0-9a-f]+\.png$/),
 		]);

@@ -3320,36 +3320,24 @@ export class Editor implements Component, Focusable {
 	}
 
 	/** Expand collapsed markers — `[Paste #N]` tokens and registered atom labels — into their
-	 *  stored content, keeping each run's origin. Longer atom labels are tried first so `#1`
-	 *  never shadows `#10`. A paste's body is scanned once more for atom labels, because a host
-	 *  that delivers an attachment token through the paste channel buries its token there, and a
-	 *  token left inside a literal run would lose the attachment it stands for. Paste markers
-	 *  inside a body stay verbatim: those are the person's own characters, not a token this
-	 *  editor placed. */
+	 *  stored content, keeping each run's origin. Single pass, so replaced content is never
+	 *  rescanned: a paste's body is the person's own characters, and text in it that reads like
+	 *  a token or another paste marker survives verbatim. Longer atom labels are tried first so
+	 *  `#1` never shadows `#10`. A host that delivers an attachment through the paste channel
+	 *  passes it as its own piece ({@link PasteDelivery}) rather than burying its token in a
+	 *  body, so nothing is lost by not looking there. */
 	#expandRuns(text: string): ExpandedRun[] {
-		const labels = [...this.#atoms.keys()].sort((a, b) => b.length - a.length).map(RegExp.escape);
 		const sources: string[] = [];
 		for (const pasteId of this.#pastes.keys()) {
 			sources.push(`\\[Paste #${pasteId}(?:, (?:\\+\\d+ lines|\\d+ chars))?\\]`);
 		}
-		sources.push(...labels);
+		for (const label of [...this.#atoms.keys()].sort((a, b) => b.length - a.length)) {
+			sources.push(RegExp.escape(label));
+		}
 		if (sources.length === 0) return [{ text }];
 		const runs: ExpandedRun[] = [];
 		const literal = (value: string) => {
 			if (value) runs.push({ text: value });
-		};
-		const atomRegex = labels.length > 0 ? new RegExp(labels.join("|"), "g") : undefined;
-		const expandAtoms = (body: string) => {
-			if (!atomRegex) return literal(body);
-			let at = 0;
-			for (const hit of body.matchAll(atomRegex)) {
-				const expansion = this.#atoms.get(hit[0]);
-				if (expansion === undefined) continue;
-				literal(body.slice(at, hit.index));
-				runs.push({ text: expansion, atom: hit[0] });
-				at = hit.index + hit[0].length;
-			}
-			literal(body.slice(at));
 		};
 		const markerRegex = new RegExp(sources.join("|"), "g");
 		let last = 0;
@@ -3358,7 +3346,7 @@ export class Editor implements Component, Focusable {
 			const expansion = paste ? this.#pastes.get(Number(paste[1])) : this.#atoms.get(match[0]);
 			if (expansion === undefined) continue;
 			literal(text.slice(last, match.index));
-			if (paste) expandAtoms(expansion);
+			if (paste) literal(expansion);
 			else runs.push({ text: expansion, atom: match[0] });
 			last = match.index + match[0].length;
 		}

@@ -346,9 +346,10 @@ describe("HookEditorComponent prompt-style mode", () => {
 		});
 	});
 
-	it("keeps an image whose token the host delivered inside one large paste", () => {
-		// The paste handler collapses a long delivery into `[Paste #N]`; the attachment token
-		// buried in its body must still expand, or the image is dropped before the answer is built.
+	it("keeps an image the host delivered as its own piece of one large paste", () => {
+		// The host reserves one paste, attaches the image, and delivers its token as a piece of
+		// its own beside the pasted text: the token enters the buffer as the atom it is, even
+		// though the text beside it collapses into `[Paste #N]`.
 		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
 		const onSubmit = vi.fn();
 		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
@@ -356,7 +357,7 @@ describe("HookEditorComponent prompt-style mode", () => {
 			acceptImages: true,
 		});
 		const finishPaste = component.beginPaste();
-		finishPaste(`actual ${component.attachImage(image)}${largePasteText()}`);
+		finishPaste([{ text: "actual " }, { attachment: component.attachImage(image)! }, { text: largePasteText() }]);
 
 		component.handleInput("\r");
 
@@ -364,6 +365,29 @@ describe("HookEditorComponent prompt-style mode", () => {
 			`actual [Image #1]${largePasteText()}`,
 			[image],
 			["actual ", { kind: "image", n: 1, tail: "" }, largePasteText()],
+		);
+	});
+
+	it("leaves a pasted file name that reads like an attachment token as text", () => {
+		// `user-📷 #1.png` is a real file the person pasted the name of. Only the piece the host
+		// marked as an attachment is this prompt's token; the characters beside it are never
+		// searched, so the name reaches the answer whole and the real image keeps its marker.
+		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
+		const onSubmit = vi.fn();
+		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
+			promptStyle: true,
+			acceptImages: true,
+		});
+		const token = component.attachImage(image)!;
+		const typed = ` beside user-${token}.png\n${largePasteText()}`;
+		component.beginPaste()([{ text: "actual " }, { attachment: token }, { text: typed }]);
+
+		component.handleInput("\r");
+
+		expect(onSubmit).toHaveBeenCalledWith(
+			`actual [Image #1]${typed}`,
+			[image],
+			["actual ", { kind: "image", n: 1, tail: "" }, typed],
 		);
 	});
 
@@ -382,21 +406,17 @@ describe("HookEditorComponent prompt-style mode", () => {
 				return Promise.resolve(text);
 			},
 		});
-		const token = component.attachImage(image);
-		const finishPaste = component.beginPaste();
-		finishPaste(`literal [Paste #1]; ${token}\n${largePasteText()}`);
-		const body = `literal [Paste #1]; [Image #1]\n${largePasteText()}`;
+		const token = component.attachImage(image)!;
+		const pasted = `literal [Paste #1]; ${largePasteText()}`;
+		component.beginPaste()([{ text: pasted }, { text: " " }, { attachment: token }]);
+		const body = `${pasted} [Image #1]`;
 
 		component.handleNativeEvent({ type: "action", key: "actions/external", act: "external", mods: [] });
 		await Promise.resolve();
-		expect(handedOut).toBe(`literal [Paste #1]; ${token}\n${largePasteText()}`);
+		expect(handedOut).toBe(`${pasted} ${token}`);
 		component.handleInput("\r");
 
-		expect(onSubmit).toHaveBeenCalledWith(
-			body,
-			[image],
-			["literal [Paste #1]; ", { kind: "image", n: 1, tail: "" }, `\n${largePasteText()}`],
-		);
+		expect(onSubmit).toHaveBeenCalledWith(body, [image], [`${pasted} `, { kind: "image", n: 1, tail: "" }]);
 	});
 
 	it("keeps a typed marker in the same field as an attachment out of the submitted runs", () => {

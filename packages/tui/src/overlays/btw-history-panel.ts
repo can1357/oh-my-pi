@@ -22,7 +22,12 @@ import {
 	splitBtwInject,
 } from "./btw-history";
 import { BtwInjectAnswer, type BtwInjectState, describeBtwInjectAnswer } from "./btw-inject";
-import { compactImageMarkers, formatVisionMarker } from "../prompt/composer-attachments";
+import {
+	compactImageMarkers,
+	formatVisionMarker,
+	type PasteDelivery,
+	pasteDeliveryText,
+} from "../prompt/composer-attachments";
 import { extractImagePastePathsFromText } from "../prompt/custom-editor";
 import { BracketedPasteHandler } from "../bracketed-paste";
 import { getMarkdownTheme, type ThemeColor, theme } from "../theme/theme";
@@ -459,14 +464,19 @@ export class BtwHistoryPanel implements Component, Focusable {
 		return formatVisionMarker("image", composer.images.length, dims);
 	}
 
-	/** Reserve ordered delivery for an image paste. Completion delivers its marker once, or releases on undefined. */
-	beginPaste(): (text: string | undefined) => boolean {
+	/**
+	 * Reserve ordered delivery for an image paste. Completion delivers its marker once, or
+	 * releases on undefined. This composer numbers its markers in the text it sends, so a
+	 * delivery split into pieces is flattened back to one string.
+	 */
+	beginPaste(): (content: string | readonly PasteDelivery[] | undefined) => boolean {
 		const composer = this.#composer;
 		if (!composer) return () => false;
 		const pending: { settled: boolean; text: string | undefined } = { settled: false, text: undefined };
 		composer.pendingPastes.push(pending);
-		return text => {
+		return content => {
 			if (this.#composer !== composer || pending.settled) return false;
+			const text = typeof content === "string" ? content : content?.map(pasteDeliveryText).join("");
 			pending.settled = true;
 			pending.text = text;
 			// A failed read releases the wait, but must not send the follow-up without its image.
