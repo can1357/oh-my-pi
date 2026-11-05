@@ -50,7 +50,7 @@ use crate::rsync::handshake::{self, Negotiated, Roles, Setup};
 use crate::rsync::iconv;
 use crate::rsync::log::{self, Info, LogCode, LogConfig, Logger, OutLevels, ReportGate, Role, Stats};
 use crate::rsync::meta::MetaOpts;
-use crate::rsync::mux::{IoCounters, Msg, MuxReader, MuxWriter, ReadConfig, ReadProbe, WriteConfig};
+use crate::rsync::mux::{IoCounters, Msg, MuxReader, MuxWriter, ReadConfig, ReadProbe, WriteConfig, WriteProbe};
 use crate::rsync::operands::{self, OperandConfig, Operands, Remote};
 use crate::rsync::options::{self, FilesFromFd, Options, Parsed};
 use crate::rsync::paths::{self, bytes_os_lossy};
@@ -353,6 +353,10 @@ struct HostIo {
 	tz: jiff::tz::TimeZone,
 	env: Arc<HashMap<String, String>>,
 	argv0: OsString,
+	/// A `--server` run's stdio when both are descriptors, for the
+	/// connection's readiness probes ([`transport::stdio_probes`]).
+	#[cfg(unix)]
+	server_stdio: Option<transport::ServerStdio>,
 }
 
 impl HostIo {
@@ -387,6 +391,8 @@ impl HostIo {
 			tz: crate::time_zone::shell_time_zone(host),
 			env,
 			argv0,
+			#[cfg(unix)]
+			server_stdio: None,
 		}
 	}
 
@@ -506,15 +512,29 @@ fn report(logger: &Logger, err: &RsyncError) {
 // ---------------------------------------------------------------------------
 // Entry point
 
+/// The shell's stdin and stdout, duplicated, when both are descriptors (see
+/// [`transport::ServerStdio`]).
+#[cfg(unix)]
+fn server_stdio(host: &Host) -> Option<transport::ServerStdio> {
+	let stdin = host.stdin.file().try_borrow_as_fd().ok()?.try_clone_to_owned().ok()?;
+	let stdout = host.stdout.try_borrow_as_fd().ok()?.try_clone_to_owned().ok()?;
+	Some(Arc::new((stdin, stdout)))
+}
+
 /// Entry point used by the Utility impl. `argv[0]` is the program name.
 pub(crate) fn run(host: &mut Host, argv: Vec<OsString>) -> i32 {
 	let env: Arc<HashMap<String, String>> =
 		Arc::new(host.env().map(|(k, v)| (k.to_string(), v.to_string())).collect());
 	let argv0 = argv.first().cloned().unwrap_or_else(|| OsString::from("rsync"));
-	let io = HostIo::new(host, env, argv0);
+	#[cfg_attr(not(unix), allow(unused_mut, reason = "server stdio probes are unix-only"))]
+	let mut io = HostIo::new(host, env, argv0);
 	let args = argv.get(1..).unwrap_or(&[]);
-	let getenv = |k: &str| io.getenv(k);
 	let server_like = args.iter().any(|a| a == "--server");
+	#[cfg(unix)]
+	if server_like {
+		io.server_stdio = server_stdio(host);
+	}
+	let getenv = |k: &str| io.getenv(k);
 	let code = match options::parse(args, &getenv) {
 		Ok(Parsed::Help) => {
 			io.print(&usage::help_text());
@@ -1097,6 +1117,7 @@ fn make_streams(
 	conn_reader: Box<dyn Read + Send>,
 	conn_writer: Box<dyn Write + Send>,
 	probe: Option<ReadProbe>,
+	writable: Option<WriteProbe>,
 	abort: &Arc<AtomicBool>,
 	stop: Option<&Arc<AtomicBool>>,
 	opts: &Options,
@@ -1108,6 +1129,7 @@ fn make_streams(
 		timeout,
 		cancel: Some(Arc::clone(abort)),
 		stop: stop.cloned(),
+		writable,
 	};
 	let writer = MuxWriter::new(conn_writer, counters.clone(), wcfg);
 	let mut reader = MuxReader::new(conn_reader, counters.clone(), Arc::clone(abort), ReadConfig { timeout });
@@ -1431,13 +1453,13 @@ fn client_start(
 	let mut batch_gen: Option<Box<dyn Read + Send>> = None;
 	let mut batch_flags = None;
 	let mut batch_writer = None;
-	let (conn_reader, conn_writer, probe, peer): (Box<dyn Read + Send>, Box<dyn Write + Send>, Option<ReadProbe>, PeerKind) =
+	let (conn_reader, conn_writer, probe, writable, peer): (Box<dyn Read + Send>, Box<dyn Write + Send>, Option<ReadProbe>, Option<WriteProbe>, PeerKind) =
 		match (&ops.remote, batch) {
 			(None, Some(BatchFiles::Read { data, flags })) => {
 				batch_flags = Some(flags);
 				let (gen_out, gen_in) = transport::local_pair(Arc::clone(&abort));
 				batch_gen = Some(gen_in.reader);
-				(data, gen_out.writer, None, PeerKind::None)
+				(data, gen_out.writer, None, gen_out.writable, PeerKind::None)
 			}
 			(None, other) => {
 				if let Some(BatchFiles::Write { data, script }) = other {
@@ -1475,7 +1497,12 @@ fn client_start(
 						code
 					})
 					.map_err(|e| RsyncError::new(crate::rsync::exit::RERR_IPC, syserr_text(Role::Client, &e, "fork")).at("pipe.c", 112))?;
-				(client.reader, client.writer, client.probe, PeerKind::Local { handle: Some(handle), kill: Arc::clone(&kill), report, reported })
+				(client.reader, client.writer, client.probe, client.writable, PeerKind::Local {
+					handle: Some(handle),
+					kill: Arc::clone(&kill),
+					report,
+					reported,
+				})
 			}
 			(Some(remote), other) => {
 				if let Some(BatchFiles::Write { data, script }) = other {
@@ -1501,11 +1528,12 @@ fn client_start(
 				let reader = std::mem::replace(&mut conn.reader, Box::new(io::empty()));
 				let writer = std::mem::replace(&mut conn.writer, Box::new(io::sink()));
 				let probe = conn.probe.take();
+				let writable = conn.writable.take();
 				let peer = if conn.child.is_some() { PeerKind::Child(Some(conn)) } else { PeerKind::None };
-				(reader, writer, probe, peer)
+				(reader, writer, probe, writable, peer)
 			}
 		};
-	let streams = make_streams(conn_reader, conn_writer, probe, &abort, Some(&io.host_cancel), &opts);
+	let streams = make_streams(conn_reader, conn_writer, probe, writable, &abort, Some(&io.host_cancel), &opts);
 	let end = ClientRun {
 		io,
 		opts,
@@ -2056,6 +2084,23 @@ struct LocalServer {
 	reported: Arc<ReportGate>,
 }
 
+/// A connection's reader and writer, and its probes for input and for room.
+type StdioConn = (Box<dyn Read + Send>, Box<dyn Write + Send>, Option<ReadProbe>, Option<WriteProbe>);
+
+/// The connection of a `--server` run, the shell's stdin and stdout, with
+/// readiness probes when both are descriptors, as a socket has them; then a
+/// write goes out when its probe reports room. Elsewhere it has none, and a
+/// stats flush there can mark a write that then waits for room (see
+/// [`MuxWriter::flush_for_stats`]).
+fn stdio_conn(io: &HostIo) -> StdioConn {
+	#[cfg(unix)]
+	if let Some(stdio) = &io.server_stdio {
+		let (probe, writable) = transport::stdio_probes(stdio);
+		return (Box::new(io.stdin.clone()), Box::new(transport::RoomWrites(io.stdout_raw.clone())), Some(probe), Some(writable));
+	}
+	(Box::new(io.stdin.clone()), Box::new(io.stdout_raw.clone()), None, None)
+}
+
 fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 	let startup = startup_logger(io, true);
 	if opts.am_daemon {
@@ -2079,12 +2124,15 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 	let client_logs = local.as_ref().is_some_and(|local| local.client_logs);
 	let report_gate = local.as_ref().map(|local| Arc::clone(&local.report));
 	let reported_gate = local.as_ref().map(|local| Arc::clone(&local.reported));
-	let (conn_reader, conn_writer, probe, client_info, local_filters): (Box<dyn Read + Send>, Box<dyn Write + Send>, Option<ReadProbe>, Vec<u8>, Option<Filters>) =
+	let (conn_reader, conn_writer, probe, writable, client_info, local_filters): (Box<dyn Read + Send>, Box<dyn Write + Send>, Option<ReadProbe>, Option<WriteProbe>, Vec<u8>, Option<Filters>) =
 		match local {
-			Some(LocalServer { conn, client_info, filters, .. }) => (conn.reader, conn.writer, conn.probe, client_info, Some(filters)),
-			None => (Box::new(io.stdin.clone()), Box::new(io.stdout_raw.clone()), None, Vec::new(), None),
+			Some(LocalServer { conn, client_info, filters, .. }) => (conn.reader, conn.writer, conn.probe, conn.writable, client_info, Some(filters)),
+			None => {
+				let (reader, writer, probe, writable) = stdio_conn(io);
+				(reader, writer, probe, writable, Vec::new(), None)
+			},
 		};
-	let mut streams = make_streams(conn_reader, conn_writer, probe, &abort, None, &opts);
+	let mut streams = make_streams(conn_reader, conn_writer, probe, writable, &abort, None, &opts);
 	let mut opts = opts;
 	if opts.secluded_pending() {
 		let argv = match handshake::read_secluded_args(&mut streams.reader, &io.fs, &io.cwd, opts.max_alloc) {
@@ -2615,13 +2663,16 @@ impl SideRun {
 			fail(err);
 			return outcome;
 		}
-		if let Err(e) = w.flush() {
-			drop(r);
-			fail(wire_fail(&ctx, &e, Role::Sender));
-			return outcome;
-		}
-		// handle_stats
-		let total_read = counters.total_read() as i64;
+		// io_flush(FULL_FLUSH), then handle_stats: the read total stops at the
+		// flush's last write, before the peer's answer to it.
+		let total_read = match w.flush_for_stats() {
+			Ok(read) => read as i64,
+			Err(e) => {
+				drop(r);
+				fail(wire_fail(&ctx, &e, Role::Sender));
+				return outcome;
+			},
+		};
 		let total_written = counters.total_written() as i64;
 		outcome.totals = Some((total_read, total_written));
 		outcome.end = Some(Instant::now());

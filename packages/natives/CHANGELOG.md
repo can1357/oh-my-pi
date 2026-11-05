@@ -10,6 +10,10 @@
 - The bash tool's built-in `rsync` now stops its remote shell with SIGUSR1 after its own exit line, as rsync 3.5.1 does, and passes on what the other end prints for it (`received SIGUSR1 (code 19)`), instead of killing it outright the moment the command is cancelled ([#17864](https://github.com/can1357/oh-my-pi/pull/17864) by [@sjawhar](https://github.com/sjawhar))
 - The bash tool's built-in `rsync` now always ends a local copy whose protocol check fails with `received SIGUSR1 (code 19)` from its receiver, as rsync 3.5.1 does, instead of sometimes `received SIGINT, SIGTERM, or SIGHUP (code 20)` ([#17794](https://github.com/can1357/oh-my-pi/pull/17794) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the bash tool's built-in `rsync --timeout` ending a transfer with `io timeout` while its sender waits for input ([#17849](https://github.com/can1357/oh-my-pi/pull/17849) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's built-in `rsync` sometimes reporting 5 bytes too many received in the summary and `--stats` of a run that sends ([#17852](https://github.com/can1357/oh-my-pi/pull/17852) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's built-in `rsync --server` with `--timeout` timing out while its output was blocked, although its peer kept sending keepalives ([#17852](https://github.com/can1357/oh-my-pi/pull/17852) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's built-in `rsync --server` keeping its output open after a run that timed out, so the next command still found it ([#17852](https://github.com/can1357/oh-my-pi/pull/17852) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's built-in `rsync` sometimes ending a cancelled run with exit code 12 instead of 20 ([#17852](https://github.com/can1357/oh-my-pi/pull/17852) by [@sjawhar](https://github.com/sjawhar))
 ### Changed
 
 - Made the bash tool's shell faster on string appends (`s+=x`), sourcing files full of function definitions (each body compiles on first call), quoted `"$var"`/`"$1"` arguments and file redirections

@@ -191,7 +191,7 @@ fn open_socket_out(
 		#[cfg(unix)]
 		super::no_sigpipe(std::os::fd::AsFd::as_fd(&stream));
 		let ctl = ConnCtl::default();
-		let (mut reader, mut writer, probe) = sock_halves(Sock::Tcp(stream), cancel, &ctl);
+		let (mut reader, mut writer, probe, writable) = sock_halves(Sock::Tcp(stream), cancel, &ctl);
 		if let Some(proxy) = &proxy {
 			match establish_proxy(&mut *reader, &mut *writer, cfg.host, cfg.port, proxy, logger) {
 				Ok(true) => {}
@@ -203,7 +203,7 @@ fn open_socket_out(
 			let line = format!("Connected to {host} ({})\n", sock::numeric_host(addr));
 			logger.rprintf(LogCode::Info, line.as_bytes());
 		}
-		connected = Some(Connection { reader, writer, probe: Some(probe), child: None, ctl });
+		connected = Some(Connection { reader, writer, probe: Some(probe), writable: Some(writable), child: None, ctl });
 		break;
 	}
 
@@ -575,8 +575,8 @@ fn sock_exec(
 			// the client sees the connection close.
 			Err(_) => None,
 		};
-		let (reader, writer, probe) = sock_halves(Sock::Tcp(ours), &cancel, &ctl);
-		Ok(Connection { reader, writer, probe: Some(probe), child, ctl })
+		let (reader, writer, probe, writable) = sock_halves(Sock::Tcp(ours), &cancel, &ctl);
+		Ok(Connection { reader, writer, probe: Some(probe), writable: Some(writable), child, ctl })
 	}
 	#[cfg(windows)]
 	{
