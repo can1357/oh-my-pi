@@ -34,9 +34,21 @@ export class KeyOverrides {
 	#configOverrides: Map<string, string> = new Map();
 	#configFallbacks: Map<string, string> = new Map();
 	#configValueResolver: (config: string) => Promise<string | undefined>;
+	#resolverConfigured: boolean;
 
 	constructor(resolver?: (config: string) => Promise<string | undefined>) {
 		this.#configValueResolver = resolver ?? defaultConfigValueResolver;
+		this.#resolverConfigured = resolver !== undefined;
+	}
+
+	/**
+	 * Whether a host resolver was supplied, rather than the built-in fallback
+	 * that cannot run `!command`. A host that attaches this storage to something
+	 * else reads this before installing its own: the supplied one may be bound to
+	 * the settings this storage was opened for, and replacing it loses them.
+	 */
+	get resolverConfigured(): boolean {
+		return this.#resolverConfigured;
 	}
 
 	has(provider: string): boolean {
@@ -137,6 +149,7 @@ export class KeyOverrides {
 	 */
 	setResolver(resolver: (config: string) => Promise<string | undefined>): void {
 		this.#configValueResolver = resolver;
+		this.#resolverConfigured = true;
 	}
 }
 
@@ -617,5 +630,9 @@ export class KeyCascade implements KeysApi {
 
 	setResolver(resolver: (config: string) => Promise<string | undefined>): void {
 		this.#deps.overrides.setResolver(resolver);
+	}
+
+	resolverConfigured(): boolean {
+		return this.#deps.overrides.resolverConfigured;
 	}
 }

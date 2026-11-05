@@ -1047,6 +1047,14 @@ export interface KeysApi {
 	 */
 	setResolver(resolver: (config: string) => Promise<string | undefined>): void;
 	/**
+	 * Whether a host resolver was supplied, rather than the built-in fallback
+	 * that cannot run `!command`. A host attaching this storage to something else
+	 * reads this first: the supplied resolver may be bound to the settings the
+	 * storage was opened for, and replacing it loses that scope's
+	 * `providers.commandTimeoutSeconds`.
+	 */
+	resolverConfigured(): boolean;
+	/**
 	 * Build an {@link ApiKeyResolver} backed by this storage, implementing the
 	 * central a/b/c auth-retry policy:
 	 *

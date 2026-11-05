@@ -1046,6 +1046,35 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}
 		});
 
+		// Building a ModelRegistry over a discovered store used to replace that store's
+		// resolver with the unscoped one, so the scope survived discovery and died one
+		// layer out. `omp token` and `omp usage` both build this registry; a review arm
+		// measured a 1 s helper succeeding under a 0.2 s scope, and an 11 s helper killed
+		// at 10 s under a 15 s one.
+		//
+		// The scope must be LONGER than the limit this describe leaves on the process, or
+		// the test passes against the broken tree by luck: losing the scope then falls back
+		// to a residue that happens to refuse the same helper. A first draft did exactly
+		// that and passed at the defective head.
+		test("building a ModelRegistry over a discovered store keeps that store's limit", async () => {
+			const restoreEnv = withoutBrokerEnv();
+			const agentDir = scopeWithTimeout("registry-agent", 30);
+			const settings = await Settings.loadReadOnly({ cwd: tempDir, agentDir });
+			const storage = await discoverAuthStorage(agentDir, { settings });
+			try {
+				const modelsPath = path.join(agentDir, "models.yml");
+				fs.writeFileSync(modelsPath, "providers: {}\n");
+				// The registry is the consumer; constructing it is what used to break the store.
+				new ModelRegistry(storage, modelsPath);
+				const marker = path.join(tempDir, "registry-scope");
+				storage.keys.setConfig("scope-probe", `!sleep 1; printf %s ${shellQuote(marker)}`);
+				expect(await storage.keys.get("scope-probe")).toBe(marker);
+			} finally {
+				storage.close();
+				restoreEnv();
+			}
+		}, 30_000);
+
 		test("discovering a store for another scope does not change an open store's limit", async () => {
 			const restoreEnv = withoutBrokerEnv();
 			const shortDir = scopeWithTimeout("pair-short", 0.5);

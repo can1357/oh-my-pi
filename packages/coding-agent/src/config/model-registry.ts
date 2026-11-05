@@ -646,7 +646,14 @@ export class ModelRegistry {
 		this.#modelsConfigFile = ModelsConfigFile.relocate(modelsPath ?? path.join(getAgentDir(), "models.yml"));
 		this.#cacheDbPath =
 			options?.cacheDbPath ?? (modelsPath ? path.join(path.dirname(modelsPath), "models.db") : undefined);
-		if (!this.#owner) this.authStorage.keys.setResolver(resolveConfigValue);
+		// Upgrade a storage that was created without a host resolver so its stored and
+		// config credential references can run `!command` at all. A storage that already
+		// HAS one keeps it: discovery binds that resolver to the settings the storage was
+		// opened for, and replacing it here took `omp token` and `omp usage` back to the
+		// process-wide time limit.
+		if (!this.#owner && !this.authStorage.keys.resolverConfigured()) {
+			this.authStorage.keys.setResolver(resolveConfigValue);
+		}
 		// Load config and cache-backed layers synchronously in the constructor.
 		this.#loadModels();
 	}
