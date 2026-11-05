@@ -92,6 +92,7 @@ export type IrcBusProtocol = {
 		IrcMessage | null
 	>;
 	take: RpcMethod<[agentId: string, from?: string], IrcMessage | undefined>;
+	restore: RpcMethod<[message: IrcMessage], void>;
 	unreadCount: RpcMethod<[agentId: string], number>;
 	recordReply: RpcMethod<[from: string, to: string], void>;
 };

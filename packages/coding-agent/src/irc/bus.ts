@@ -71,6 +71,12 @@ export interface IrcBusApi {
 	): Promise<IrcMessage | null>;
 	/** Consume the oldest pending message for `agentId` (optionally from `from`). */
 	take(agentId: string, from?: string): IrcMessage | undefined;
+	/**
+	 * Put a message a caller took but could not hand to its recipient back in
+	 * the recipient's mailbox, with its original id and timestamp, so the next
+	 * `wait` or inbox read finds it in its original order.
+	 */
+	restore(message: IrcMessage): void;
 	/** Unread count for the local Agent Hub overlay. */
 	unreadCount(agentId: string): number;
 	/** Count a settled job of agent `from` owned by `to` as `from`'s reply to `to`. */
@@ -378,6 +384,27 @@ export class IrcBus implements IrcBusApi {
 	 */
 	take(agentId: string, from?: string): IrcMessage | undefined {
 		return this.#takeFromMailbox(agentId, msg => from === undefined || msg.from === from);
+	}
+
+	/**
+	 * Put `message` back in its recipient's mailbox after a caller took it and
+	 * could not hand it over (a `wait` that failed before it could return the
+	 * message it had already consumed). The message keeps its id and
+	 * timestamp, so the next read orders it where it belongs; a message
+	 * already back in the mailbox is not duplicated.
+	 */
+	restore(message: IrcMessage): void {
+		const mailbox = this.#mailboxes.get(message.to);
+		if (!mailbox) {
+			this.#enqueue(message);
+			return;
+		}
+		if (mailbox.some(queued => queued.id === message.id)) return;
+		// Ids are snowflakes, so they break a tie within one millisecond.
+		const after = mailbox.findIndex(
+			queued => queued.ts > message.ts || (queued.ts === message.ts && queued.id > message.id),
+		);
+		mailbox.splice(after === -1 ? mailbox.length : after, 0, message);
 	}
 
 	/** Unread count for the local Agent Hub overlay. */

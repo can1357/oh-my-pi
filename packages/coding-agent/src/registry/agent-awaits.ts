@@ -191,7 +191,12 @@ export function holdOwnedJobs(registry: AwaitRegistry, manager: OwnedJobSource, 
 	};
 	try {
 		sync();
-		unsubscribers.push(manager.onJobSettled(sync), registry.onChange(sync));
+		// One `push` per subscription: taking both in one expression evaluates
+		// them before either is stored, so a second subscription that throws
+		// leaves the first listener installed and unreachable, and it goes on
+		// taking holds after this call ended.
+		unsubscribers.push(manager.onJobSettled(sync));
+		unsubscribers.push(registry.onChange(sync));
 	} catch (error) {
 		release();
 		throw error;

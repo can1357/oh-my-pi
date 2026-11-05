@@ -300,6 +300,7 @@ function serveBus(bridge: MainSessionBridge): RpcServe<IrcBus, IrcBusProtocol> {
 				options,
 			),
 		take: (bus, agentId, from) => bus.take(agentId, from),
+		restore: (bus, message) => bus.restore(message),
 		unreadCount: (bus, agentId) => bus.unreadCount(agentId),
 		recordReply: (bus, from, to) => bus.recordReply(from, to),
 	};

@@ -1036,6 +1036,26 @@ describe("wait", () => {
 				expect(delivered).toEqual(["Child"]);
 			});
 
+			test("a failed progress update puts back the message its wait had already taken", async () => {
+				// The wait's bus waiter consumes a direct message the moment one
+				// arrives, and only a returned result hands it to the caller. The
+				// progress consumer sends one and then throws: the rejected call
+				// must put the message back, or it is in no mailbox, no inbox and
+				// no result.
+				const manager = new AsyncJobManager({ onJobComplete: () => {} });
+				const childRun = registerChild(manager);
+				const onUpdate = () => {
+					void IrcBus.global().send({ from: "Child", to: "Main", body: "the schema changed" });
+					throw new Error("consumer progress failed");
+				};
+				const parentWait = new WaitTool(session(manager, "Main")).execute("parent-wait", {}, undefined, onUpdate);
+				await expect(parentWait).rejects.toThrow("consumer progress failed");
+				await flushMicrotasks();
+				const recovered = await new WaitTool(session(manager, "Main")).execute("parent-retry", {});
+				expect(recovered.details?.waited).toMatchObject([{ from: "Child", body: "the schema changed" }]);
+				childRun.resolve("done");
+			});
+
 			describe("with the service-broker refresh slow to answer", () => {
 				// The refresh does not observe its signal (client creation, token
 				// read): only the wait itself can stop waiting on it.

@@ -368,8 +368,18 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	}): Promise<AgentToolResult<CoordinationDetails>> {
 		const watchedIds = args.jobs.map(job => job.id);
 		args.manager?.watchJobs(watchedIds);
+		// The bus waiter consumes a direct message the moment one arrives, and
+		// only a returned result hands it to the caller. A call that ends any
+		// other way puts it back, so the message is not lost between the bus
+		// and a caller that never saw it.
+		const consumed: { message?: Promise<IrcMessage | null> } = {};
 		try {
-			return await this.#waitForWake(args);
+			return await this.#waitForWake(args, consumed);
+		} catch (error) {
+			void consumed.message?.then(message => {
+				if (message) IrcBus.global().restore(message);
+			});
+			throw error;
 		} finally {
 			args.manager?.unwatchJobs(watchedIds);
 		}
@@ -381,19 +391,23 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	 * With neither jobs nor a service, the block is a reply wait: it also ends once no agent asked can still reply.
 	 * An `idleWait` block (nothing owed, the caller gave a deadline) ends only on a direct message, an interrupt
 	 * (steering, an aside, a job result), an agent starting to block on the caller's result, or `capMs`.
-	 * {@link #blockUntilWake} owns the job watch around this call.
+	 * {@link #blockUntilWake} owns the job watch around this call, and puts back
+	 * the message `consumed` names when this call does not return it.
 	 */
-	async #waitForWake(args: {
-		jobs: AsyncJob[];
-		manager: AsyncJobManagerApi | undefined;
-		messaging: WaitMessaging | undefined;
-		serviceRunning: boolean;
-		idle: IdleStreak | undefined;
-		signal: AbortSignal | undefined;
-		onUpdate: AgentToolUpdateCallback<CoordinationDetails> | undefined;
-		capMs: number | undefined;
-		idleWait: boolean;
-	}): Promise<AgentToolResult<CoordinationDetails>> {
+	async #waitForWake(
+		args: {
+			jobs: AsyncJob[];
+			manager: AsyncJobManagerApi | undefined;
+			messaging: WaitMessaging | undefined;
+			serviceRunning: boolean;
+			idle: IdleStreak | undefined;
+			signal: AbortSignal | undefined;
+			onUpdate: AgentToolUpdateCallback<CoordinationDetails> | undefined;
+			capMs: number | undefined;
+			idleWait: boolean;
+		},
+		consumed: { message?: Promise<IrcMessage | null> },
+	): Promise<AgentToolResult<CoordinationDetails>> {
 		const { jobs, manager, messaging, serviceRunning, idle, signal, onUpdate, capMs, idleWait } = args;
 		const streak = idle && Date.now() - idle.endedAt < WAIT_LADDER_RESET_MS ? idle : undefined;
 		const rung = streak ? Math.min(streak.rung + 1, WAIT_LADDER_MS.length - 1) : 0;
@@ -427,6 +441,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 						.wait(messaging.senderId, { directOnly: true, repliesFrom: asked }, 0, busAbort.signal)
 						.catch(() => null)
 				: undefined;
+			consumed.message = busLeg;
 			// A reply wait re-checks whether an agent asked can still answer on
 			// every block change (including an asked agent opening or closing a
 			// dialog that waits on the user), status change, and end of an asked

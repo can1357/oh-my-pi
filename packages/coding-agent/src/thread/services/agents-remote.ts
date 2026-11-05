@@ -262,6 +262,10 @@ export class RemoteIrcBus implements IrcBusApi {
 		return this.#remote.callSync("take", agentId, from);
 	}
 
+	restore(message: IrcMessage): void {
+		this.#remote.notify("restore", message);
+	}
+
 	unreadCount(agentId: string): number {
 		return this.#remote.callSync("unreadCount", agentId);
 	}

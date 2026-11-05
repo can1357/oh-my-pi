@@ -164,4 +164,41 @@ describe("AgentSession.settleAsyncWork and idle waits of the agents it waits on"
 		first.resolve("done");
 		second.resolve("done");
 	});
+
+	it("leaves no job-settle listener behind when the registry subscription fails", async () => {
+		// The two subscriptions are taken one at a time, each stored before the
+		// next: a job-settle listener that survived a failed call would take new
+		// holds whenever a job settles, long after the settle it belonged to
+		// ended, and refuse the remaining agent's waits.
+		const registry = AgentRegistry.global();
+		registry.register({ id: "Lead", displayName: "Lead", kind: "sub", session: null as never, status: "running" });
+		const manager = new AsyncJobManager({});
+		cleanups.push(async () => {
+			await manager.dispose({ timeoutMs: 100 });
+		});
+		const first = Promise.withResolvers<string>();
+		const second = Promise.withResolvers<string>();
+		manager.register("task", "First", async () => first.promise, {
+			id: "First",
+			agentId: "First",
+			ownerId: "Lead",
+		});
+		manager.register("task", "Second", async () => second.promise, {
+			id: "Second",
+			agentId: "Second",
+			ownerId: "Lead",
+		});
+		vi.spyOn(registry, "onChange").mockImplementation(() => {
+			throw new Error("proxy registry subscribe failed");
+		});
+		expect(() => holdOwnedJobs(registry, manager, "Lead")).toThrow("proxy registry subscribe failed");
+		vi.restoreAllMocks();
+		expect(registry.awaits.waitersOn("First")).toEqual([]);
+		expect(registry.awaits.waitersOn("Second")).toEqual([]);
+		// A job settling must not wake a listener the failed call left behind.
+		first.resolve("done");
+		await manager.getJob("First")?.promise;
+		expect(registry.awaits.waitersOn("Second")).toEqual([]);
+		second.resolve("done");
+	});
 });
