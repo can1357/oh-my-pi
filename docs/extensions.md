@@ -661,6 +661,7 @@ and `/new`. Commands retain their explicit prefill and session-transition action
 - `ttsr_triggered`
 - `todo_reminder`
 - `goal_updated`
+- `autolearn_capture_start` / `autolearn_capture_end` — `{ outcome: "completed" | "aborted" | "error" }` on end. With `autolearn.autoContinue`, a qualifying turn schedules a private capture turn that runs after `agent_end` with no `agent_start`, and its `learn`/`manage_skill` tool calls fire `tool_call` like any other. Each start pairs 1:1, in order, with one end; a status integration should treat the span as background work, not a busy primary turn.
 - `credential_disabled`
 
 ### Link activation
