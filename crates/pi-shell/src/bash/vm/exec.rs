@@ -120,10 +120,25 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 					}
 				}
 				if start_trap(k, vp, cx, TrapKey::Signal(sig)) {
-					// The rest of this run of the loop waits for the action.
-					vp.held_traps = vp.pending_traps;
+					// The rest of this run of the loop waits for the action;
+					// a nested action holds what its caller held too.
+					for held in vp.pending_traps.iter() {
+						vp.held_traps = vp.held_traps.with(held);
+					}
 					vp.pending_traps = crate::bash::signal::SigSet::EMPTY;
 					continue;
+				}
+				// No action ran: the signal is not lost. Either its trap is
+				// gone, and it takes the disposition it has now, or the
+				// action could not start yet and it waits with the held set.
+				match trap_gone(k, vp, cx, sig) {
+					true if sig.default_action() == crate::bash::signal::DefaultAction::Terminate => {
+						let status = sig.exit_status(platform);
+						exit_shell(k, vp, cx, status);
+						continue;
+					},
+					true => {},
+					false => vp.held_traps = vp.held_traps.with(sig),
 				}
 			}
 		}
@@ -587,6 +602,30 @@ fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 
 fn top_frame(vp: &mut Vproc) -> &mut Frame {
 	vp.frames.last_mut().expect("ops run in a frame")
+}
+
+/// How deep a signal's action may nest in itself (bash's `evalnest_max`
+/// default, which bounds the same recursion).
+const TRAP_NEST_MAX: u32 = 128;
+
+/// Whether `sig` has no action of its own any more (the vproc's trap was
+/// removed or set to ignore while it was pending): it then takes the
+/// disposition it has now, as bash's `run_pending_traps` does when it
+/// finds `DEFAULT_SIG` in `trap_list` and resends the signal to itself.
+fn trap_gone(
+	k: &mut Kernel,
+	vp: &Vproc,
+	cx: &mut Cx<'_>,
+	sig: crate::bash::signal::Signal,
+) -> bool {
+	match state::record(cx.store, vp, Key::Trap(TrapKey::Signal(sig))) {
+		Ok(Some(Record::Trap { action, .. })) => action.is_empty(),
+		Ok(_) => true,
+		Err(err) => {
+			k.fail(err);
+			false
+		},
+	}
 }
 
 /// Start the next run or finish the current one; `false` when idle.
@@ -3523,14 +3562,21 @@ pub fn start_trap(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, key: TrapKey)
 			}
 		}
 	}
-	// No trap runs inside its own action; a function called from the
-	// DEBUG trap loses the RETURN trap (bash's `execute_function`).
+	// A pseudo-trap does not run inside its own action, and a function
+	// called from the DEBUG trap loses the RETURN trap (bash's
+	// `execute_function`). A signal's action does nest in itself: bash's
+	// `run_pending_traps` refuses that only for `SIGWINCH`, and bounds the
+	// depth with `evalnest_max` instead.
+	let nests = matches!(key, TrapKey::Signal(sig) if sig != crate::bash::signal::Signal::Winch);
 	if vp.trap_frames != 0
-		&& vp.frames.iter().any(|f| {
-			matches!(f.kind,
+		&& (nests && vp.trap_frames >= TRAP_NEST_MAX
+			|| !nests
+				&& vp.frames.iter().any(|f| {
+					matches!(f.kind,
 		FrameKind::Script { what: ScriptKind::Trap { key: active, .. }, .. }
 			if active == key || (key == TrapKey::Return && active == TrapKey::Debug))
-		}) {
+				}))
+	{
 		return false;
 	}
 	let (action, trap_mode) = match state::record(cx.store, vp, Key::Trap(key)) {

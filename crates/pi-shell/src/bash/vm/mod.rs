@@ -1991,28 +1991,14 @@ impl Shell {
 		// control) is signalled as a group; otherwise the signal reaches the
 		// job's subshell, not the command it is running.
 		let group = job.is_some_and(|(_, control)| control);
-		// Without its own process group a job whose subshell traps (or
-		// ignores) the signal gets it in that subshell alone, and in the
-		// processes that subshell is only waiting on to exit (the stages of
-		// `a | b &`): bash signals the job's pipeline, not what the subshell
-		// runs meanwhile.
+		// Without its own process group a job is signalled as bash signals
+		// it: each process of its pipeline (the job's subshell and the
+		// stages it only waits on), never what one of those is running
+		// meanwhile. A stage that traps the signal therefore keeps its own
+		// foreground command, and runs its action when that command ends.
 		let members = match job_root {
 			Some(v) if !group && !matches!(sig, Signal::Kill | Signal::Stop) => {
-				match self.procs.iter().position(|p| p.vpid == v) {
-					Some(i) => match state::record(
-						cx.store,
-						&self.procs[i],
-						crate::bash::store::Key::Trap(crate::bash::store::TrapKey::Signal(sig)),
-					) {
-						Ok(Some(Record::Trap { .. })) => Some(self.job_members(v)),
-						Ok(_) => None,
-						Err(err) => {
-							self.k.fail(err);
-							return;
-						},
-					},
-					None => None,
-				}
+				Some(self.job_members(v))
 			},
 			_ => None,
 		};
