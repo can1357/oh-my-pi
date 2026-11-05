@@ -40,6 +40,7 @@
 
 ### Fixed
 
+- Tern acknowledgements and visibility reports no longer appear as text in the editor when they arrive during a paste, including through Windows ConPTY.
 - The `find` card marks searches cut short by its 20 s budget as `timed out` ([#18161](https://github.com/can1357/oh-my-pi/pull/18161) by [@will-bogusz](https://github.com/will-bogusz))
 - Tern's classic renderer no longer leaves stale inline images over text while an answer streams or the pane resizes.
 - The native composer's first frame shows the cached thinking/effort level instead of the plain model icon.

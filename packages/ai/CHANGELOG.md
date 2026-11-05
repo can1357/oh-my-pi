@@ -14,6 +14,7 @@
 
 - Changing the Codex ultrafast service tier now opens a connection for the selected tier, so requests route correctly
 - Factory Droid requests and login now match the current Droid client
+- Codex HTTP requests (turns, compaction, image generation, web search, model discovery) no longer send `OpenAI-Beta: responses=experimental`, matching the official Codex client
 
 ### Fixed
 
