@@ -586,7 +586,12 @@ impl<S: VizSource> Printer<'_, S> {
 				.collect();
 			let mut analysis = analysis::program(&program, AHEAD, &ids);
 			analysis.arithmetic = Arc::clone(&self.analysis.arithmetic);
-			Arc::new(Ahead { map: source::script_map(self.source, lo, hi - lo), program, ids, analysis })
+			Arc::new(Ahead {
+				map: source::script_map(self.source, lo, hi - lo),
+				program,
+				ids,
+				analysis,
+			})
 		});
 		self
 			.source

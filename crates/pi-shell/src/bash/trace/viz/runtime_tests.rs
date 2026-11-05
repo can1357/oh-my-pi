@@ -64,8 +64,10 @@ fn rows(p: &Value) -> Vec<(String, &Value)> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn uncompiled_script_is_parsed_ahead_without_outcomes_until_it_stops_parsing() {
-	// A command still streaming in: nothing has run, its last line is unfinished.
-	let trace = RunTrace::new("cd /tmp && git add -A\nfor f in *.go; do echo \"$f\"; done\nif true; th");
+	// A command still streaming in: nothing has run, its last line is
+	// unfinished.
+	let trace =
+		RunTrace::new("cd /tmp && git add -A\nfor f in *.go; do echo \"$f\"; done\nif true; th");
 	let streaming = present(&trace, &Options::default());
 	let shown = rows(&streaming);
 	let texts: Vec<&str> = shown.iter().map(|(text, _)| text.as_str()).collect();
@@ -96,7 +98,11 @@ async fn callout_scripts_are_drawn_by_their_command_but_eval_code_gets_a_frame()
 			.as_array()
 			.unwrap()
 			.iter()
-			.filter(|row| row["id"].as_str().is_some_and(|id| id.starts_with("frame-")))
+			.filter(|row| {
+				row["id"]
+					.as_str()
+					.is_some_and(|id| id.starts_with("frame-"))
+			})
 			.count()
 	};
 	let shell = Shell::new(None);
