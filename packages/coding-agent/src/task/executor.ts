@@ -4922,6 +4922,11 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					preloadedPreparedExtensions: options.preloadedPreparedExtensions,
 					preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
 					hasUI: false,
+					usageContext: {
+						source: "subagent",
+						role: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
+						interactive: false,
+					},
 					prewalk,
 					spawns: spawnsEnv,
 					taskDepth: childDepth,

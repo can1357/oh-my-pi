@@ -23,7 +23,10 @@ import type {
 	ServiceTier,
 	ServiceTierByFamily,
 	SimpleStreamOptions,
+	UsageRequestContext,
+	UsageRequestSource,
 } from "@oh-my-pi/pi-ai";
+import { configureUsageAdmission, currentUsageAdmission } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import type { DiscoverAuthStorageOptions } from "@oh-my-pi/pi-ai/auth-broker/discover";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
@@ -35,7 +38,7 @@ import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { $env } from "@oh-my-pi/pi-utils/env";
-import { getAgentDir, getModelDbPath, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
+import { getAgentDir, getModelDbPath, getProjectDir, getUsageGovernorDbPath } from "@oh-my-pi/pi-utils/dirs";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import * as prompt from "@oh-my-pi/pi-utils/prompt";
@@ -195,6 +198,7 @@ import {
 } from "./session/agent-session";
 import {
 	createAuthStorageSettingsSync,
+	resolveEffectiveSettings,
 	discoverAuthStorage as discoverAuthStorageFromConfig,
 	type EffectiveSettingsScope,
 	loadEffectiveAuthAccountPolicyConfig,
@@ -386,6 +390,7 @@ import {
 	cfgTierAnthropic,
 	cfgTierGoogle,
 	cfgTierOpenai,
+	usageGovernorConfig,
 } from "./session/settings";
 import { cfgInterruptMode } from "./modes/settings";
 import { cfgFollowUpMode } from "./modes/settings";
@@ -935,6 +940,11 @@ export interface CreateAgentSessionOptions {
 	/** Whether UI is available (enables interactive tools like ask). Default: false */
 	hasUI?: boolean;
 	/**
+	 * Usage-governor attribution of this session's own turns: a subagent stamps `subagent` here, and the
+	 * default is `turn` with the session's model role. Read per request and never sent on the wire.
+	 */
+	usageContext?: UsageRequestContext;
+	/**
 	 * When a resumed session's saved models cannot be restored even after
 	 * discovery, allow continuing with a warning on another model: the settings
 	 * default at startup (`modelFallbackMessage`), or the current model when
@@ -1118,15 +1128,23 @@ export async function discoverAuthStorage(
 		Omit<EffectiveSettingsScope, "agentDir"> = {},
 ): Promise<AuthStorage> {
 	const { settings, cwd, ...discoveryOptions } = options;
-	const policy = await loadEffectiveAuthAccountPolicyConfig({ settings, cwd, agentDir });
-	return discoverAuthStorageFromConfig(agentDir, {
+	const effectiveSettings = await resolveEffectiveSettings({ settings, cwd, agentDir });
+	const policy = await loadEffectiveAuthAccountPolicyConfig({ settings: effectiveSettings, agentDir });
+	const storage = await discoverAuthStorageFromConfig(agentDir, {
 		...discoveryOptions,
 		accountPolicies: discoveryOptions.accountPolicies ?? policy.accountPolicies,
 		authStorageOptions: {
 			...discoveryOptions.authStorageOptions,
 			defaultReservePct: discoveryOptions.authStorageOptions?.defaultReservePct ?? policy.defaultReservePct,
+			governor: discoveryOptions.authStorageOptions?.governor ?? {
+				dbPath: getUsageGovernorDbPath(agentDir),
+				config: usageGovernorConfig(effectiveSettings),
+			},
 		},
 	});
+	// First registration wins: a child or command storage never displaces the main session's seam.
+	if (!currentUsageAdmission()) configureUsageAdmission(storage.governor);
+	return storage;
 }
 
 /**
@@ -4745,6 +4763,26 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// One-shot launch-latency marker: fired the first time the loop dispatches
 		// a chat request to the provider transport. See onFirstChatDispatch.
 		let notifyFirstChatDispatch = options.onFirstChatDispatch;
+		// Usage-governor attribution (`usageContext`), read per request so the role and session follow the
+		// live session. A subagent session stamps its own source through `options.usageContext`.
+		const usageRole = (): string =>
+			options.usageContext?.role ?? sessionManager.getLastModelChangeRole({ skipEphemeral: true }) ?? "default";
+		const usageInteractive = options.hasUI === true;
+		const turnUsageBase: Pick<UsageRequestContext, "source" | "interactive"> = options.usageContext ?? {
+			source: "turn",
+			interactive: usageInteractive,
+		};
+		const turnUsageContext = (): UsageRequestContext => ({
+			...turnUsageBase,
+			role: usageRole(),
+			sessionId: session?.sessionId,
+		});
+		const attributedUsage = (source: UsageRequestSource, interactive: boolean) => (): UsageRequestContext => ({
+			source,
+			role: usageRole(),
+			interactive,
+			sessionId: session?.sessionId,
+		});
 		// Shared, settings-aware stream wrapper used by the main agent, advisor,
 		// and side-channel requests (`/btw`, `/omfg`, IRC auto-replies, handoff).
 		// Keeps OpenRouter sticky-routing variants, antigravity endpoint routing,
@@ -4765,6 +4803,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						notify: (level, message) => session?.emitNotice(level, message, "anthropic-slow-mode"),
 						onLane: lane => session?.noteAnthropicSlowModeLane(lane),
 						disableServerSideFallback: options.disableServerSideFallback,
+						usageContext: turnUsageContext,
 					}),
 					currentCostGate,
 				),
@@ -4778,6 +4817,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			withCredentialRedaction(cfgSecretsEnabled.get(settings), () =>
 				settingsBoundStreamFn(streamModel, context, streamOptions),
 			);
+		const stampUsage =
+			(usage: () => UsageRequestContext, next: StreamFn): StreamFn =>
+			(streamModel, context, streamOptions) =>
+				next(streamModel, context, { ...streamOptions, usageContext: streamOptions?.usageContext ?? usage() });
+		// Side and advisor requests stamp their own source; a caller's stamp wins.
+		const sideStreamFn = stampUsage(attributedUsage("side", usageInteractive), settingsAwareStreamFn);
+		const advisorStreamFn = stampUsage(attributedUsage("advisor", false), settingsAwareStreamFn);
 		// Primary-agent (and its auto-learn capture twin) provider options read per
 		// request, so `/settings` changes to budgets, Kimi format, or the Codex
 		// websocket policy reach the next call without a session recreate.
@@ -4789,6 +4835,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				kimiApiFormat: streamOptions?.kimiApiFormat ?? (kimiApiFormat === "auto" ? undefined : kimiApiFormat),
 			});
 		};
+		// Background requests (cache warming and auto-learn capture) stamp `background`.
+		const backgroundStreamFn = stampUsage(attributedUsage("background", false), primaryStreamFn);
 		// Prompt-cache warmer for the main agent loop only: replays the last
 		// request through the same primary wrapper just before the entry would
 		// expire, so idle gaps do not force a full-prefix cache re-write.
@@ -4797,7 +4845,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			options.cacheWarming === false
 				? undefined
 				: new CacheWarmer({
-						stream: (model, context, streamOptions) => primaryStreamFn(model, context, streamOptions),
+						stream: (model, context, streamOptions) => backgroundStreamFn(model, context, streamOptions),
 						getPromptTokens: () => session.lastPromptTokens(),
 						getMode: () => cfgProvidersCacheWarming.get(settings),
 						decide: event => extensionRunner.emitCacheWarmingDecision(event),
@@ -5157,8 +5205,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			createAdvisorTransformProviderContext: () => createTransformProviderContext(),
 			onPayload,
 			onResponse,
-			sideStreamFn: settingsAwareStreamFn,
-			advisorStreamFn: settingsAwareStreamFn,
+			sideStreamFn,
+			advisorStreamFn,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
@@ -5745,7 +5793,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					hideThinkingSummary: agent.hideThinkingSummary,
 					maxRetryDelayMs: agent.maxRetryDelayMs,
 					getToolContext: toolCall => toolContextStore.getContext(toolCall),
-					streamFn: primaryStreamFn,
+					streamFn: backgroundStreamFn,
 					transformToolCallArguments,
 					// No fallback resolver: only `learn`/`manage_skill` execute here (the rest are refused
 					// copies), and the primary's resolver could reach main-session MCP tools.

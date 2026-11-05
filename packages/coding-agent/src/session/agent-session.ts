@@ -82,7 +82,13 @@ import type {
 	UsageReport,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { type Effort, serviceTierFamily, streamSimple } from "@oh-my-pi/pi-ai";
+import {
+	type Effort,
+	serviceTierFamily,
+	streamSimple,
+	type UsageGovernorEvent,
+	type UsageGovernorWaitReason,
+} from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
@@ -991,6 +997,15 @@ function todoRetryMatches(failed: Record<string, unknown>, retry: Record<string,
 	}
 	return true;
 }
+
+/** Shortest governor wait a session announces, in milliseconds. */
+const USAGE_GOVERNOR_NOTICE_MIN_WAIT_MS = 5_000;
+/** Why a governed request waits, worded for the session notice. */
+const USAGE_GOVERNOR_REASON_TEXT: Record<UsageGovernorWaitReason, string> = {
+	"over-allowance": "over its usage allowance",
+	"reserve-held": "holding its reserve",
+	exhausted: "exhausted until its reset",
+};
 
 export class AgentSession implements SettingsScope, AgentViewSession {
 	/**
@@ -3036,6 +3051,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// Re-evaluate append-only context mode when the setting changes at runtime.
 		cfgProviderAppendOnlyContext.listen(this, () => this.#syncAppendOnlyContext(this.model));
 		cfgModelRoles.listen(this, () => this.#advisors.reconcileModelRoles());
+		// Governor waits this session's own requests start are announced here; in a worker the
+		// subscription is the local fan-out of the one the worker made with the main thread.
+		this.addDisposer(this.#modelRegistry.authStorage.governor.onEvent(event => this.#handleGovernorEvent(event)));
 		// Re-derive the active model's effective context window when the
 		// extended-context setting flips at runtime, or a per-model compaction
 		// point moves past (or back inside) a standard window or is switched on/off: the registry
@@ -6409,6 +6427,27 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				logger.warn("Session change callback failed", { error: String(error) });
 			}
 		}
+	}
+
+	/** Announce a governor wait this session's own request started, when it lasts at least the notice minimum. */
+	#handleGovernorEvent(event: UsageGovernorEvent): void {
+		if (event.kind !== "wait-start" || event.wait.sessionId !== this.sessionId) return;
+		const { wait } = event;
+		if (wait.untilMs === undefined) return;
+		const waitMs = wait.untilMs - wait.startedAtMs;
+		if (waitMs < USAGE_GOVERNOR_NOTICE_MIN_WAIT_MS) return;
+		const window = wait.bindingLabel ? ` ${wait.bindingLabel}` : "";
+		const usage =
+			wait.usedFraction === undefined
+				? ""
+				: ` (${Math.round(wait.usedFraction * 100)}% used${
+						wait.allowedFraction === undefined ? "" : `, ${Math.round(wait.allowedFraction * 100)}% allowed`
+					})`;
+		this.emitNotice(
+			"info",
+			`Paced ${Math.ceil(waitMs / 1000)}s on ${wait.provider}${window}: ${USAGE_GOVERNOR_REASON_TEXT[wait.reason]}${usage}.`,
+			"usage-governor",
+		);
 	}
 
 	/** Run one abortable auto-learn capture outside the primary agent loop. */

@@ -74,6 +74,13 @@ import type {
 	UsageLimitMarkResult,
 	UsageProvider,
 	UsageReport,
+	UsageAdmissionGrant,
+	UsageAdmissionOutcome,
+	UsageAdmissionRequest,
+	UsageGovernorConfig,
+	UsageGovernorEvent,
+	UsageGovernorStatus,
+	GovernorApi,
 } from "@oh-my-pi/pi-ai";
 import { DEFAULT_USAGE_PROVIDERS } from "@oh-my-pi/pi-ai/usage/registry";
 import type {
@@ -468,6 +475,9 @@ class RemoteUsage implements UsageApi {
 			baseUrls: baseUrlTable(this.#availability, options?.baseUrlResolver, options?.provider),
 		});
 	}
+	cachedReport(provider: Provider, credential: AuthCredential, options?: { baseUrl?: string }): UsageReport | null {
+		return this.#remote.callSync("usage.cachedReport", provider, credential, options);
+	}
 	ingestHeaders(
 		provider: Provider,
 		headers: Record<string, string>,
@@ -610,6 +620,53 @@ class RemoteBlocks implements BlocksApi {
 }
 
 /**
+ * Worker half of the main thread's usage governor. `config` is read once at construction and then
+ * follows the `config` events, so `active` stays synchronous on the dispatch path. The same
+ * subscription carries wait events to every local listener; nothing else crosses the link until a
+ * request is admitted.
+ */
+class RemoteGovernor implements GovernorApi {
+	readonly #remote: AuthRemote;
+	readonly #listeners = new Set<(event: UsageGovernorEvent) => void>();
+	#config: UsageGovernorConfig;
+
+	constructor(remote: AuthRemote) {
+		this.#remote = remote;
+		this.#config = remote.callSync("governor.config", event => this.#deliver(event));
+	}
+
+	get config(): UsageGovernorConfig {
+		return this.#config;
+	}
+	get active(): boolean {
+		return this.#config.enabled;
+	}
+	configure(config: UsageGovernorConfig): void {
+		this.#config = config;
+		this.#remote.notify("governor.configure", config);
+	}
+	admit(request: UsageAdmissionRequest, signal?: AbortSignal): Promise<UsageAdmissionGrant | undefined> {
+		return this.#remote.call("governor.admit", request, signal);
+	}
+	settle(grantId: string, outcome: UsageAdmissionOutcome): void {
+		this.#remote.notify("governor.settle", grantId, outcome);
+	}
+	status(options?: { provider?: string; waitLimit?: number }): UsageGovernorStatus {
+		return this.#remote.callSync("governor.status", options);
+	}
+	onEvent(listener: (event: UsageGovernorEvent) => void): () => void {
+		this.#listeners.add(listener);
+		return () => {
+			this.#listeners.delete(listener);
+		};
+	}
+	#deliver(event: UsageGovernorEvent): void {
+		if (event.kind === "config") this.#config = event.config;
+		for (const listener of Array.from(this.#listeners)) listener(event);
+	}
+}
+
+/**
  * Backend of a worker thread's `AuthStorage`: every namespace runs on the main
  * thread's instance, so pins, restrictions, refresh single-flight, round-robin,
  * and block/usage caches have one owner. The store's lifetime belongs to the
@@ -625,6 +682,7 @@ export class RemoteAuthStorageBackend implements AuthStorageBackend {
 	readonly limits: LimitsApi;
 	readonly resets: ResetsApi;
 	readonly blocks: BlocksApi;
+	readonly governor: GovernorApi;
 	readonly #remote: AuthRemote;
 
 	constructor(remote: AuthRemote) {
@@ -639,6 +697,7 @@ export class RemoteAuthStorageBackend implements AuthStorageBackend {
 		this.limits = new RemoteLimits(remote);
 		this.resets = new RemoteResets(remote, availability);
 		this.blocks = new RemoteBlocks(remote);
+		this.governor = new RemoteGovernor(remote);
 	}
 
 	setAccountPolicies(config: AuthAccountPolicyConfig): void {

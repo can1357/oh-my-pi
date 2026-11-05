@@ -23,7 +23,13 @@
  * - The Anthropic slow-mode lane registry: the worker's process singleton takes
  *   its lanes from main's, so every thread shares one state per account.
  */
-import { AuthStorage, type SessionRestrictionLease, type UsageProvider } from "@oh-my-pi/pi-ai";
+import {
+	AuthStorage,
+	configureUsageAdmission,
+	currentUsageAdmission,
+	type SessionRestrictionLease,
+	type UsageProvider,
+} from "@oh-my-pi/pi-ai";
 import { AuthBrokerError, AuthBrokerStreamUnsupportedError } from "@oh-my-pi/pi-ai/auth-broker";
 import { getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import {
@@ -265,6 +271,8 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 				signal: options?.signal,
 				baseUrlResolver: tableResolver(options?.baseUrls),
 			}),
+		"usage.cachedReport": (storage, provider, credential, options) =>
+			storage.usage.cachedReport(provider, credential, options),
 		"usage.ingestHeaders": (storage, provider, headers, options) =>
 			storage.usage.ingestHeaders(provider, headers, options),
 		"usage.invalidate": (storage, provider, signal) => storage.usage.invalidate(provider, signal),
@@ -312,6 +320,23 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 		"blocks.deleteAll": (storage, credentialId) => storage.blocks.deleteAll(credentialId),
 
 		setAccountPolicies: (storage, config) => storage.setAccountPolicies(config),
+		"governor.config": (storage, listener) => {
+			if (listener) {
+				trackWorkerSubscription(
+					state.subscriptions,
+					storage.governor.onEvent(event => settleQuietly(listener(event))),
+				);
+			}
+			return storage.governor.config;
+		},
+		"governor.configure": (storage, config) => storage.governor.configure(config),
+		"governor.admit": async (storage, request, signal) => {
+			const grant = await storage.governor.admit(request, signal);
+			// A plain copy: the wire carries the grant's data, never the ledger's object.
+			return grant ? { id: grant.id, waitedMs: grant.waitedMs } : undefined;
+		},
+		"governor.settle": (storage, grantId, outcome) => storage.governor.settle(grantId, outcome),
+		"governor.status": (storage, options) => storage.governor.status(options),
 	};
 }
 
@@ -478,10 +503,12 @@ export const authService: ThreadService = {
 
 	installWorker(link: WorkerThreadLink): void {
 		registerAuthErrors();
-		link.importClass<AuthStorage, AuthStorageProtocol>(
-			AUTH_STORAGE_KIND,
-			remote => new AuthStorage(new RemoteAuthStorageBackend(remote)),
-		);
+		link.importClass<AuthStorage, AuthStorageProtocol>(AUTH_STORAGE_KIND, remote => {
+			const storage = new AuthStorage(new RemoteAuthStorageBackend(remote));
+			// First registration wins, as on the main thread: this worker's governor is the seam its sends consult.
+			if (!currentUsageAdmission()) configureUsageAdmission(storage.governor);
+			return storage;
+		});
 		link.importClass<ModelRegistry, ModelRegistryProtocol>(MODEL_REGISTRY_KIND, mirrorModelRegistry);
 		link.importClass<RemoteSlowModeLanes, SlowModeLanesProtocol>(
 			SLOW_MODE_LANES_KIND,

@@ -68,6 +68,12 @@ import type {
 	UsageLimitMarkResult,
 	UsageProvider,
 	UsageReport,
+	UsageAdmissionGrant,
+	UsageAdmissionOutcome,
+	UsageAdmissionRequest,
+	UsageGovernorConfig,
+	UsageGovernorEvent,
+	UsageGovernorStatus,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
 import type { ModelRefreshStrategy } from "@oh-my-pi/pi-catalog/model-manager";
@@ -219,6 +225,11 @@ export type AuthStorageProtocol = {
 	"sessions.release": RpcMethod<[provider: string, sessionId: string], boolean>;
 
 	"usage.reports": RpcMethod<[options?: WireUsageReportsOptions], UsageReport[] | null>;
+	/** Cache-only read of a credential's last good usage report; never fetches. */
+	"usage.cachedReport": RpcMethod<
+		[provider: Provider, credential: AuthCredential, options?: { baseUrl?: string }],
+		UsageReport | null
+	>;
 	"usage.ingestHeaders": RpcMethod<
 		[
 			provider: Provider,
@@ -264,6 +275,13 @@ export type AuthStorageProtocol = {
 	"blocks.upsert": RpcMethod<[block: StoredCredentialBlock], void>;
 	"blocks.delete": RpcMethod<[credentialId: number, providerKey: string, blockScope: string], void>;
 	"blocks.deleteAll": RpcMethod<[credentialId: number], void>;
+
+	/** Sync read of the live config; the listener receives the config and wait events that follow it. */
+	"governor.config": RpcMethod<[listener?: (event: UsageGovernorEvent) => void], UsageGovernorConfig>;
+	"governor.configure": RpcMethod<[config: UsageGovernorConfig], void>;
+	"governor.admit": RpcMethod<[request: UsageAdmissionRequest, signal?: AbortSignal], UsageAdmissionGrant | undefined>;
+	"governor.settle": RpcMethod<[grantId: string, outcome: UsageAdmissionOutcome], void>;
+	"governor.status": RpcMethod<[options?: { provider?: string; waitLimit?: number }], UsageGovernorStatus>;
 
 	setAccountPolicies: RpcMethod<[config: AuthAccountPolicyConfig], void>;
 };

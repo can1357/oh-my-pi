@@ -13,6 +13,7 @@
 import { fitOutputTokensToContextWindow, type StreamFn, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import { type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
+import type { UsageRequestContext } from "@oh-my-pi/pi-ai/usage-governor/types";
 import { serverSideFallbackModels } from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
 import type { Settings } from "../config/settings";
 import { type AnthropicSlowModeLanes, anthropicSlowModeLanes } from "./anthropic-slow-mode";
@@ -75,6 +76,11 @@ export interface SettingsStreamSlowModeContext {
 	onLane?: (lane: string) => void;
 	/** Never inject the opt-in server-side fallback chain (per-call `model` workers never switch models). */
 	disableServerSideFallback?: boolean;
+	/**
+	 * Usage-governor attribution for a request that does not stamp its own (a caller's `usageContext`
+	 * on the stream options wins). Read per call so the role and session follow the live session.
+	 */
+	usageContext?: () => UsageRequestContext | undefined;
 }
 
 /**
@@ -183,6 +189,7 @@ export function createSettingsAwareStreamFn(
 			streamIdleTimeoutMs: streamOptions?.streamIdleTimeoutMs ?? streamIdleTimeoutMs,
 			maxRetryDelayMs: streamOptions?.maxRetryDelayMs ?? cfgRetryMaxDelayMs.get(settings),
 			maxInFlightRequests,
+			usageContext: streamOptions?.usageContext ?? slowModeContext?.usageContext?.(),
 			loopGuard: {
 				enabled: cfgModelLoopGuardEnabled.get(settings),
 				checkAssistantContent: cfgModelLoopGuardCheckAssistantContent.get(settings),
