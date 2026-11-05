@@ -8164,7 +8164,7 @@ mod tests {
 	#[test]
 	fn iphone_mirroring_taps_are_primed_once_per_call_and_never_after_a_refusal() {
 		use crate::desktop::error::ErrorCode;
-		let (down, up) = (CGEventType::LeftMouseDown as u32, CGEventType::LeftMouseUp as u32);
+		let (down, up) = (CGEventType::LeftMouseDown.0, CGEventType::LeftMouseUp.0);
 		let log = std::cell::RefCell::new(Vec::new());
 		let check = || {
 			log.borrow_mut().push(("check", 0));
@@ -8176,7 +8176,7 @@ mod tests {
 		};
 		primed(42, check, prime, || {
 			report_taps(2, check, |event_type, _| {
-				log.borrow_mut().push(("post", event_type as u32));
+				log.borrow_mut().push(("post", event_type.0));
 				Ok(())
 			})
 		})
