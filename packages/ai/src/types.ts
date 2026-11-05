@@ -682,6 +682,18 @@ export interface StreamOptions {
 	 */
 	onResponse?: (response: ProviderResponseMetadata, model?: Model<Api>, signal?: AbortSignal) => void | Promise<void>;
 	/**
+	 * Optional callback naming the organization of the credential each attempt
+	 * resolved, fired before the request is sent and again on every auth-retry
+	 * rotation, so the last call names the account that actually served.
+	 * `undefined` when the resolved key belongs to no stored account.
+	 *
+	 * The only way to attribute a request that failed before response headers:
+	 * there is no `AssistantMessage` to read `organizationId` from, and the
+	 * thrown error cannot carry it — one error object can be shared by two
+	 * requests, which would attribute one account's failure to another.
+	 */
+	onRequestOrganization?: (organizationId: string | undefined) => void;
+	/**
 	 * Optional callback for raw Server-Sent Events as they arrive from HTTP streaming providers,
 	 * plus synthesized SSE-shaped frames for the Codex WebSocket transport (one synthetic frame
 	 * per JSON request/response message). WebSocket frames are tagged with a leading

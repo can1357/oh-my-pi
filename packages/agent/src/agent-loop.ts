@@ -2151,6 +2151,16 @@ async function streamAssistantResponse(
 		return userOnResponse?.(response, modelInfo);
 	};
 
+	// Same shape for the organization each attempt resolved, which the failed
+	// chat span has no other source for: a request that fails before response
+	// headers produces no message carrying it.
+	let capturedOrganizationId: string | undefined;
+	const userOnRequestOrganization = config.onRequestOrganization;
+	const captureOnRequestOrganization: AgentLoopConfig["onRequestOrganization"] = organizationId => {
+		capturedOrganizationId = organizationId;
+		userOnRequestOrganization?.(organizationId);
+	};
+
 	// Cursor executes its tools server-side during the stream and hands each
 	// result to `cursorOnToolResult`; the host persists them after the assistant
 	// message, so this loop never runs them and never sees them. A follow-up the
@@ -2220,6 +2230,7 @@ async function streamAssistantResponse(
 				cwd: effectiveCwd,
 				signal: finalRequestSignal,
 				onResponse: captureOnResponse,
+				onRequestOrganization: captureOnRequestOrganization,
 				cursorOnToolResult: collectCursorToolResult,
 				liveSteering: providerCall.liveSteering,
 			});
@@ -2704,6 +2715,7 @@ async function streamAssistantResponse(
 			errorObject: err,
 			responseHeaders: capturedHeaders,
 			baseUrl: model.baseUrl,
+			organizationId: capturedOrganizationId,
 		});
 		throw err;
 	}

@@ -20,6 +20,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
 	GenAIAttr,
 	GenAIOperation,
+	type InstrumentedChatSpanOptions,
 	instrumentedCompleteSimple,
 	OmpGenAIAttr,
 	resolveTelemetry,
@@ -126,54 +127,58 @@ describe("chat span credential organization", () => {
 		const span = await chatSpanFor(reply());
 
 		expect(span).toBeDefined();
-		expect(span?.attributes).not.toHaveProperty(OmpGenAIAttr.AuthOrganizationId);
+		// Indexed, never `toHaveProperty`: the attribute name contains dots, which
+		// that matcher reads as a nested path, so it can never see this key.
+		expect(span?.attributes[OmpGenAIAttr.AuthOrganizationId]).toBeUndefined();
 	});
 });
 
 /**
  * A pre-header transport failure never reaches `finishChatSpan`: `runAttempt`
  * in `packages/ai/src/stream.ts` fails the outer stream and the chat span ends
- * through `failChatSpan`. These cases drive the real `completeSimple` against a
- * registered API that fails before any event, so the attempt's resolved
- * credential — not a process default — is the only source of the organization.
+ * through `failChatSpan`, with no message to read the organization from. The
+ * attempt reports it through `SimpleStreamOptions.onRequestOrganization`
+ * instead, before the socket opens. These cases drive the real
+ * `completeSimple` against a registered API that fails before any event, so
+ * the attempt's own resolved credential is the only possible source.
  */
 const FAIL_SOURCE_ID = "chat-span-organization-failure-test";
 const FAIL_API = "chat-span-organization-failure-test" as Api;
 const ORG = "d0529c17-8bdc-42a1-9569-875928df83fe";
-/** Placeholder bearers: nothing in these tests reaches a provider. */
-const OAUTH_BEARER = "bearer-from-a-stored-oauth-credential";
-const STATIC_KEY = "key-that-belongs-to-no-stored-account";
+const SIBLING_ORG = "4c1f7f0a-6f2e-4a1d-9b3c-2f55a0d6c7e1";
+/** Placeholder bearer: nothing in these tests reaches a provider. */
+const BEARER = "bearer-from-a-stored-credential";
 
-const FAIL_MODEL = {
-	id: "test-model",
-	name: "test-model",
-	api: FAIL_API,
-	provider: "test-provider",
-	contextWindow: 1000,
-	maxTokens: 100,
-} as unknown as Model<Api>;
+const FAIL_MODEL: Model<Api> = { ...MODEL, api: FAIL_API, provider: "test-provider" };
 
-async function failedChatSpanFor(apiKey: SimpleStreamOptions["apiKey"]): Promise<ReadableSpan | undefined> {
+/** Registers an API whose every attempt fails before emitting any event. */
+function registerFailingApi(error: () => Error): void {
 	registerCustomApi(
 		FAIL_API,
 		() => {
 			const stream = new AssistantMessageEventStream();
-			// A socket reset before any event: no status, no headers, not rotatable.
-			queueMicrotask(() => stream.fail(new TypeError("fetch failed")));
+			queueMicrotask(() => stream.fail(error()));
 			return stream;
 		},
 		FAIL_SOURCE_ID,
 	);
+}
+
+async function failedChatSpanFor(
+	options: SimpleStreamOptions,
+	retry?: InstrumentedChatSpanOptions["retry"],
+): Promise<ReadableSpan | undefined> {
 	const telemetry = resolveTelemetry(
 		{ conversationId: "conv-org-fail", tracer: provider.getTracer("chat-span-organization-test") },
 		"session-org-fail",
 	);
 	await expect(
-		instrumentedCompleteSimple(FAIL_MODEL, CTX, { apiKey } as SimpleStreamOptions, {
+		instrumentedCompleteSimple(FAIL_MODEL, CTX, options, {
 			telemetry,
 			oneshotKind: "organization_failure_test",
+			retry,
 		}),
-	).rejects.toThrow("fetch failed");
+	).rejects.toThrow();
 	return exporter.getFinishedSpans().find(span => span.attributes[GenAIAttr.OperationName] === GenAIOperation.Chat);
 }
 
@@ -183,22 +188,70 @@ describe("chat span credential organization on a pre-header failure", () => {
 	});
 
 	it("stamps the attempt's organization on a span that failed before response headers", async () => {
-		const span = await failedChatSpanFor(() => ({
-			apiKey: OAUTH_BEARER,
-			credentialId: 7,
-			oauthIdentity: { orgId: ORG },
-		}));
+		// A socket reset before any event: no status, no headers, not rotatable.
+		registerFailingApi(() => new TypeError("fetch failed"));
+
+		const span = await failedChatSpanFor({
+			apiKey: () => ({ apiKey: BEARER, credentialId: 7, oauthIdentity: { orgId: ORG } }),
+		} as SimpleStreamOptions);
 
 		expect(span).toBeDefined();
 		expect(span?.status.code).toBe(SpanStatusCode.ERROR);
 		expect(span?.attributes[OmpGenAIAttr.AuthOrganizationId]).toBe(ORG);
 	});
 
-	it("leaves the attribute off a pre-header failure served by a key with no stored account", async () => {
-		const span = await failedChatSpanFor(STATIC_KEY);
+	it("leaves the attribute off when the attempt's credential carries no organization", async () => {
+		registerFailingApi(() => new TypeError("fetch failed"));
+
+		// A resolved credential without an organization rather than a bare string
+		// key: this enters the same attempt path as the case above and reports
+		// `undefined` from it, so the absence is the code under test's answer.
+		const span = await failedChatSpanFor({
+			apiKey: () => ({ apiKey: BEARER, credentialId: 7 }),
+		} as SimpleStreamOptions);
 
 		expect(span).toBeDefined();
 		expect(span?.status.code).toBe(SpanStatusCode.ERROR);
-		expect(span?.attributes).not.toHaveProperty(OmpGenAIAttr.AuthOrganizationId);
+		expect(span?.attributes[OmpGenAIAttr.AuthOrganizationId]).toBeUndefined();
+	});
+
+	it("names the last sibling tried when every account's auth fails and rotation is exhausted", async () => {
+		registerFailingApi(() => Object.assign(new Error("401 authentication_error"), { status: 401 }));
+		const offered = [
+			{ apiKey: `${BEARER}-1`, credentialId: 1, oauthIdentity: { orgId: ORG } },
+			{ apiKey: `${BEARER}-2`, credentialId: 2, oauthIdentity: { orgId: SIBLING_ORG } },
+		];
+		let resolved = 0;
+
+		const span = await failedChatSpanFor({
+			apiKey: () => offered[resolved++],
+		} as unknown as SimpleStreamOptions);
+
+		expect(resolved).toBeGreaterThan(1);
+		expect(span).toBeDefined();
+		expect(span?.attributes[OmpGenAIAttr.AuthOrganizationId]).toBe(SIBLING_ORG);
+	});
+
+	it("does not carry an earlier attempt's organization onto a retry that resolved no credential", async () => {
+		// 503 is transient for the oneshot retry layer and not rotatable by auth
+		// retry, so attempt 2 is a whole fresh request. Its resolver throws, so it
+		// never reaches an attempt and reports no organization at all: the span
+		// must be left without one rather than inheriting attempt 1's account.
+		registerFailingApi(() => Object.assign(new Error("503 service unavailable"), { status: 503 }));
+		let resolved = 0;
+		const apiKey = (): { apiKey: string; credentialId: number; oauthIdentity: { orgId: string } } => {
+			resolved += 1;
+			if (resolved > 1) throw new Error("broker unreachable");
+			return { apiKey: BEARER, credentialId: 1, oauthIdentity: { orgId: ORG } };
+		};
+
+		const span = await failedChatSpanFor({ apiKey } as unknown as SimpleStreamOptions, {
+			baseDelayMs: 1,
+			maxAttempts: 2,
+		});
+
+		expect(resolved).toBe(2);
+		expect(span).toBeDefined();
+		expect(span?.attributes[OmpGenAIAttr.AuthOrganizationId]).toBeUndefined();
 	});
 });

@@ -15,13 +15,7 @@ import {
 } from "@oh-my-pi/pi-catalog/model-thinking";
 import { $env, getProviderInFlightRoot, isEnoent, isPidAlive, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
-import {
-	attachRequestOrganizationId,
-	createAuthRetryKeyState,
-	isApiKeyResolver,
-	resolvedApiKeyBearer,
-	resolveNextAuthRetryKey,
-} from "./auth-retry";
+import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
 import { getEnvApiKey } from "./env-api-key";
 import * as AIError from "./error";
@@ -1237,6 +1231,11 @@ function streamSimpleRequest<TApi extends Api>(
 			oauthIdentity?: OAuthRequestIdentity,
 		): Promise<AuthRetryFailure | undefined> => {
 			const organizationId = oauthIdentity?.orgId;
+			// Before the socket opens, so a caller can attribute a request that
+			// fails before response headers, where no message ever exists. Each
+			// rotation re-enters here, so the last call names the account that
+			// actually served.
+			requestOptions.onRequestOrganization?.(organizationId);
 			const bufferedEvents: AssistantMessageEvent[] = [];
 			let emittedReplayUnsafeEvent = false;
 			const flushBuffered = (): void => {
@@ -1307,15 +1306,9 @@ function streamSimpleRequest<TApi extends Api>(
 						error instanceof Error ? error.message : undefined,
 					)
 				) {
-					const retryError = contextualizeAuthRetryError(model, error);
-					attachRequestOrganizationId(retryError, organizationId);
-					return { error: retryError, bufferedEvents };
+					return { error: contextualizeAuthRetryError(model, error), bufferedEvents };
 				}
 				flushBuffered();
-				// A failure before response headers produces no message to stamp, so
-				// the attempt's organization rides out on the error itself and the
-				// failed chat span names the same account a successful one would.
-				attachRequestOrganizationId(error, organizationId);
 				outer.fail(error);
 			}
 			return undefined;
