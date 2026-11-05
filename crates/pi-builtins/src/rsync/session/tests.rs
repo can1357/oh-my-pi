@@ -103,6 +103,37 @@ fn daemon_mode_is_refused() {
 }
 
 /// Captured from rsync 3.5.1: `rsync --protocol=19 -a src/ d/` on a local copy.
+/// A local copy's server half that its client stops before the half has
+/// finished its own side of the protocol exchange ends as rsync 3.5.1's
+/// local child does when SIGUSR1 reaches it there: `received SIGUSR1 (code
+/// 19) at main.c(1687)`, not the line of a cancelled exchange. Here the stop
+/// is raised before the half starts, so its exchange always fails as
+/// cancelled. Before, only a protocol mismatch took that path, and the race
+/// this covers showed up about 3 times in 2,000 runs of
+/// `too_old_protocol_is_a_mismatch`, so a regression would have been a rare
+/// flake; a review asked for this deterministic test.
+#[test]
+fn a_local_half_stopped_during_its_protocol_exchange_ends_with_sigusr1() {
+	let dir = tempfile::tempdir().unwrap();
+	let (mut host, cap) = crate::host::Host::for_test("rsync", Vec::new(), dir.path());
+	let mut io = HostIo::new(&mut host, Arc::new(HashMap::new()), OsString::from("rsync"));
+	let kill = Arc::new(AtomicBool::new(true));
+	io.cancel = Arc::clone(&kill);
+	let getenv = |_: &str| None;
+	let argv: Vec<OsString> = ["-a", "src/", "d/"].iter().map(OsString::from).collect();
+	let Ok(Parsed::Run(client)) = options::parse(&argv, &getenv) else {
+		panic!("the client's options did not parse");
+	};
+	let mut sopts = options::local_server_options(&client, &getenv).unwrap();
+	sopts.args = vec![OsString::from("."), OsString::from("d/")];
+	sopts.old_style_args = 2;
+	let filters = Filters::new(FilterConfig { am_server: true, local_server: true, role: Role::Server, ..FilterConfig::default() });
+	let (_client, server) = transport::local_pair(Arc::clone(&kill));
+	let info = handshake::local_client_info(&client, false);
+	let code = server_main(&io, sopts, Some(LocalServer { conn: server, client_info: info, filters }));
+	assert_eq!((code, cap.err()), (RERR_SIGNAL1, "rsync error: received SIGUSR1 (code 19) at main.c(1687) [Receiver=3.5.1]\n".to_owned()));
+}
+
 #[test]
 fn too_old_protocol_is_a_mismatch() {
 	let dir = tempfile::tempdir().unwrap();
