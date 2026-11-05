@@ -30,7 +30,7 @@
 
 ### Fixed
 
-- The project-local TUI debug tool's `start` with a `file` entry runs that entry with `bun` under the installed `omp` binary, instead of sending its path to omp as the first prompt
+- The project-local TUI debug tool's `start` with a `file` entry runs that entry with `bun` under the installed `omp` binary, instead of sending its path to omp as the first prompt ([#18156](https://github.com/can1357/oh-my-pi/pull/18156) by [@will-bogusz](https://github.com/will-bogusz))
 - Thin tool images are padded to the vision model's minimum height or width instead of causing a 400 on the next turn ([#18081](https://github.com/can1357/oh-my-pi/issues/18081))
 - JSON query truncation notices now report the 50KB read budget instead of the bytes shown ([#18022](https://github.com/can1357/oh-my-pi/pull/18022) by [@eggpeat](https://github.com/eggpeat))
 - Extension links stay clickable and extension-drawn replies and custom messages keep their renderers on every launch, not only the first after an edit; `ctx.ui.getLinkClicksAvailable()` no longer turns false on later launches ([#18116](https://github.com/can1357/oh-my-pi/pull/18116) by [@materemias](https://github.com/materemias))
