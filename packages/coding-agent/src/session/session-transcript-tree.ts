@@ -112,6 +112,15 @@ export async function copyTranscriptTree(
 	await storage.refresh?.();
 	for (const from of listTranscriptTree(storage, fromDir, pattern, { strandOnFailure: strand })) {
 		const to = path.join(toDir, path.relative(fromDir, from));
+		// A cheap skip, not the decision. Under file storage the caller's
+		// directory copy has usually placed every transcript already, so
+		// without this each one is read whole and thrown away — measured at
+		// one byte read per byte of tree against none at the merge base. The
+		// exclusive write below is still what makes a taken destination win,
+		// so a destination that appears after this check is kept, not
+		// replaced: this only avoids reading a source that is certainly
+		// pointless to read.
+		if (await storage.exists(to)) continue;
 		let content: string;
 		try {
 			content = await storage.readText(from);

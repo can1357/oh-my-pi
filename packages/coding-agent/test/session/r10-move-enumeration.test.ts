@@ -92,3 +92,42 @@ test("a copy never replaces a transcript already at the destination", async () =
 	expect(fs.readFileSync(path.join(to, "A.jsonl"), "utf8")).toBe('{"who":"keeper"}\n');
 	expect(fs.readFileSync(path.join(to, "B.jsonl"), "utf8")).toBe('{"who":"fresh"}\n');
 });
+
+/**
+ * The `exists` fast path in `copyTranscriptTree` is an optimisation, never the
+ * decision: without it a fork reads every transcript the directory copy has
+ * already placed and throws the bytes away. Putting it back is also the one
+ * way the closed race could reopen, so this drives the window directly — the
+ * destination appears AFTER `exists` has truthfully answered "no", which is
+ * precisely what the old `exists`-then-`writeText` lost. The exclusive write
+ * has to keep the other writer's bytes.
+ */
+test("a destination that appears after the existence check is kept, not replaced", async () => {
+	tempDir = TempDir.createSync("@omp-r11-copy-race-");
+	const from = tempDir.join("from");
+	const to = tempDir.join("to");
+	fs.mkdirSync(from, { recursive: true });
+	fs.mkdirSync(to, { recursive: true });
+	fs.writeFileSync(path.join(from, "A.jsonl"), '{"who":"source"}\n');
+
+	const storage = new FileSessionStorage();
+	const racing = Object.create(storage) as FileSessionStorage;
+	const destination = path.join(to, "A.jsonl");
+	let raced = false;
+	// Answers that the destination is free, and another writer publishes it in
+	// the instant after that answer and before this copy reaches its write.
+	racing.exists = async (p: string): Promise<boolean> => {
+		if (p === destination && !raced) {
+			raced = true;
+			fs.writeFileSync(destination, '{"who":"other client"}\n');
+			return false;
+		}
+		return storage.exists(p);
+	};
+
+	const copied = await copyTranscriptTree(racing, from, to);
+
+	expect(copied).toEqual([]);
+	expect(fs.readFileSync(path.join(to, "A.jsonl"), "utf8")).toBe('{"who":"other client"}\n');
+	expect(fs.readFileSync(path.join(from, "A.jsonl"), "utf8")).toBe('{"who":"source"}\n');
+});

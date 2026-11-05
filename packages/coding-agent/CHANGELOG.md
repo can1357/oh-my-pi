@@ -5,6 +5,7 @@
 ### Breaking Changes
 
 - `SqlSessionStorage` with `createTable: false` refuses to start until the session table has a `byte_len` column and a `<table>_parts` table exists; docs/session.md gives the DDL, backfill, and rollback for each dialect. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+- `SessionStorage` requires two new members: `writeTextNoReplace(path, content)` and `renameNoReplace(path, nextPath)`, each rejecting with `EEXIST` when the destination is taken rather than replacing it. A session store implemented outside this repository must add both; the tree copy and the tree move call them directly, so a store without them fails with `TypeError: storage.writeTextNoReplace is not a function`. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
 - `SqlSessionStorage` refuses table names longer than 57 characters, leaving room for the `<table>_parts` table. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
 - An older Oh My Pi can no longer read a SQL session table this version has written until you run the rollback in docs/session.md. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
 
@@ -80,6 +81,7 @@
 - Factory Droid Gemini 4 Argon sessions keep its earlier turns intact through save and reload, and the image clamp counts those turns at the size Argon is sent ([#17861](https://github.com/can1357/oh-my-pi/pull/17861) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
+
 - Fixed a second `ask` note on a later single-select question reopening and replacing the previous question's note ([#17979](https://github.com/can1357/oh-my-pi/issues/17979))
 
 - Retrying an aborted turn keeps the unsent composer draft instead of clearing it ([#17977](https://github.com/can1357/oh-my-pi/pull/17977) by [@Shadorain](https://github.com/Shadorain))
