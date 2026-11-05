@@ -10,8 +10,9 @@
  *
  * `OMP_PROOF_BINARY` runs the same scenarios against a compiled binary (spec 7.3).
  */
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
+import { checkConfinement, sandboxCommand } from "./fixtures/usage-governor/confinement";
 import type { FakeAccountSpec, FakeRecord } from "./fixtures/usage-governor/fake-provider";
 import { WINDOW_MS } from "./fixtures/usage-governor/fake-provider";
 import {
@@ -97,6 +98,15 @@ function assertConfined(proof: GovernorProof): void {
 /** Real-HOME baseline, taken when this file loads: before any scenario runs. */
 const INITIAL_REAL_HOME: StatSnapshot[] = statRealHome();
 
+beforeAll(async () => {
+	const proof = await GovernorProof.create([account("govplan", "a")], { enabled: true });
+	try {
+		await checkConfinement(proof);
+	} finally {
+		proof.close();
+	}
+}, 60_000);
+
 describe("usage governor CLI proof: confinement", () => {
 	test("the child environment is an allowlist with no inherited credentials or profile state", async () => {
 		const canaries: Record<string, string> = {
@@ -113,8 +123,8 @@ describe("usage governor CLI proof: confinement", () => {
 		}
 		const proof = await GovernorProof.create([account("govplan", "a")], { enabled: true });
 		try {
-			const probe = Bun.spawn([process.execPath, CHILD_PROBE, "env"], {
-				env: { ...proof.env },
+			const probe = Bun.spawn(sandboxCommand(proof, [process.execPath, CHILD_PROBE, "env"]), {
+				env: {},
 				stdout: "pipe",
 				stderr: "pipe",
 			});
@@ -140,11 +150,14 @@ describe("usage governor CLI proof: confinement", () => {
 		const proof = await GovernorProof.create([account("govplan", "a")], { enabled: true });
 		try {
 			const before = proof.tripwire.records.length;
-			const probe = Bun.spawn([process.execPath, CHILD_PROBE, "egress", "https://example.invalid/"], {
-				env: { ...proof.env },
-				stdout: "pipe",
-				stderr: "pipe",
-			});
+			const probe = Bun.spawn(
+				sandboxCommand(proof, [process.execPath, CHILD_PROBE, "egress", "https://example.invalid/"]),
+				{
+					env: {},
+					stdout: "pipe",
+					stderr: "pipe",
+				},
+			);
 			const [exitCode, stdout] = await Promise.all([probe.exited, new Response(probe.stdout).text()]);
 			expect(exitCode).toBe(0);
 			// The tripwire refuses the tunnel, so the probe reports a proxy refusal and never a status.

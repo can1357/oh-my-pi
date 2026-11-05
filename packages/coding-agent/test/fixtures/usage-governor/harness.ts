@@ -8,6 +8,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { sandboxCommand } from "./confinement";
 import { type FakeAccountSpec, type FakeProvider, type FakeRecord, startFakeProvider } from "./fake-provider";
 import { type ScenarioSettings, seedAuthDb, writeScenarioConfig } from "./seed";
 import { type Tripwire, startTripwire } from "./tripwire";
@@ -234,9 +235,9 @@ export class GovernorProof {
 
 	/** Start an `omp` child in the proof's cwd and allowlisted environment. */
 	spawnOmp(args: readonly string[]): Bun.Subprocess<"ignore", "pipe", "pipe"> {
-		return Bun.spawn(this.ompCommand(args), {
+		return Bun.spawn(sandboxCommand(this, this.ompCommand(args)), {
 			cwd: this.tempDir.path(),
-			env: { ...this.#env },
+			env: {},
 			stdin: "ignore",
 			stdout: "pipe",
 			stderr: "pipe",

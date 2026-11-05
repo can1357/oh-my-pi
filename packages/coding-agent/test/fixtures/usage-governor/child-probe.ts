@@ -1,23 +1,47 @@
-/**
- * Runs as a child under the proof's confinement environment. Two modes:
- *
- * - `env`: prints the names of every variable the child inherited, as JSON on stdout.
- * - `egress`: fetches a non-loopback HTTPS URL through the proxy environment. The tripwire must
- *   record the attempt, which proves the control path is live. The probe reports the outcome.
- */
-const mode = process.argv[2];
+import { fstatSync, readdirSync } from "node:fs";
 
-if (mode === "env") {
-	process.stdout.write(`${JSON.stringify({ names: Object.keys(process.env).sort() })}\n`);
-} else if (mode === "egress") {
-	const target = process.argv[3] ?? "https://example.invalid/";
+const sockets: number[] = [];
+for (const name of readdirSync("/dev/fd")) {
+	const fd = Number(name);
+	if (!Number.isInteger(fd) || fd < 3) continue;
 	try {
-		const response = await fetch(target, { signal: AbortSignal.timeout(5_000) });
-		process.stdout.write(`${JSON.stringify({ status: response.status })}\n`);
+		if (fstatSync(fd).isSocket()) sockets.push(fd);
+	} catch {}
+}
+if (sockets.length) throw new Error(`inherited socket descriptors: ${sockets.join(",")}`);
+
+const mode = process.argv[2];
+if (mode === "env") {
+	console.log(JSON.stringify({ names: Object.keys(process.env).sort(), sockets }));
+} else if (mode === "fetch" || mode === "egress") {
+	const target = process.argv[3];
+	if (mode === "fetch") {
+		for (const name of [
+			"PI_PROXY",
+			"HTTPS_PROXY",
+			"HTTP_PROXY",
+			"ALL_PROXY",
+			"https_proxy",
+			"http_proxy",
+			"all_proxy",
+		]) {
+			delete process.env[name];
+		}
+	}
+	try {
+		const response = await fetch(target, {
+			signal: AbortSignal.timeout(3000),
+			headers: process.argv[4] ? { authorization: `Bearer ${process.argv[4]}` } : {},
+		});
+		console.log(JSON.stringify({ status: response.status, sockets }));
 	} catch (error) {
-		process.stdout.write(`${JSON.stringify({ error: error instanceof Error ? error.message : String(error) })}\n`);
+		const e = error as Error & {
+			code?: string;
+			errno?: number;
+			cause?: { code?: string; errno?: number; message?: string };
+		};
+		console.log(JSON.stringify({ error: e.message, code: e.code, errno: e.errno, cause: e.cause, sockets }));
 	}
 } else {
-	process.stderr.write(`unknown probe mode ${mode}\n`);
-	process.exit(2);
+	throw new Error(`unknown probe mode ${mode}`);
 }
