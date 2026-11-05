@@ -209,35 +209,46 @@ export async function copySessionArtifacts(
 	destinationSessionFile: string,
 	storage: SessionStorage = defaultSessionStorage(),
 ): Promise<void> {
-	// Artifacts sit beside the journal's real name: a session reached through a
-	// symlink keeps them next to the link's target, not next to the link.
+	// Tool artifacts sit beside the journal's real name: a session reached
+	// through a symlink keeps them next to the link's target, not next to the
+	// link.
 	let realSource = sourceSessionFile;
 	try {
 		realSource = await fs.promises.realpath(sourceSessionFile);
 	} catch {}
 	const sourceArtifactsDir = artifactsDirectoryFor(realSource);
+	// A key-indexed storage keys a transcript by the path the session was
+	// opened under, and the local filesystem's opinion of that path is not its
+	// key: resolving a same-named local symlink would look the children up
+	// under a path the store has never heard of and copy none of them. Only
+	// file storage, whose transcripts really are files beside the real name,
+	// follows the link.
+	const storedSourceArtifactsDir =
+		storage instanceof FileSessionStorage ? sourceArtifactsDir : artifactsDirectoryFor(sourceSessionFile);
 	const destinationArtifactsDir = artifactsDirectoryFor(destinationSessionFile);
-	if (!sourceArtifactsDir || !destinationArtifactsDir) return;
-	if (path.resolve(sourceArtifactsDir) === path.resolve(destinationArtifactsDir)) return;
-	try {
-		if ((await fs.promises.stat(sourceArtifactsDir)).isDirectory()) {
-			// Create the destination first and merge into it: Bun's `cp` fails with
-			// EEXIST when another writer (the moved session's artifact manager,
-			// `local://`) creates the directory while the copy is starting.
-			await fs.promises.mkdir(destinationArtifactsDir, { recursive: true });
-			await fs.promises.cp(sourceArtifactsDir, destinationArtifactsDir, {
-				recursive: true,
-				force: false,
-				errorOnExist: false,
-			});
-		}
-	} catch (error) {
-		if (!isEnoent(error)) {
-			logger.warn("Failed to copy session artifacts", {
-				sourceArtifactsDir,
-				destinationArtifactsDir,
-				error: toError(error).message,
-			});
+	if (!sourceArtifactsDir || !storedSourceArtifactsDir || !destinationArtifactsDir) return;
+	if (path.resolve(storedSourceArtifactsDir) === path.resolve(destinationArtifactsDir)) return;
+	if (path.resolve(sourceArtifactsDir) !== path.resolve(destinationArtifactsDir)) {
+		try {
+			if ((await fs.promises.stat(sourceArtifactsDir)).isDirectory()) {
+				// Create the destination first and merge into it: Bun's `cp` fails with
+				// EEXIST when another writer (the moved session's artifact manager,
+				// `local://`) creates the directory while the copy is starting.
+				await fs.promises.mkdir(destinationArtifactsDir, { recursive: true });
+				await fs.promises.cp(sourceArtifactsDir, destinationArtifactsDir, {
+					recursive: true,
+					force: false,
+					errorOnExist: false,
+				});
+			}
+		} catch (error) {
+			if (!isEnoent(error)) {
+				logger.warn("Failed to copy session artifacts", {
+					sourceArtifactsDir,
+					destinationArtifactsDir,
+					error: toError(error).message,
+				});
+			}
 		}
 	}
 	try {
@@ -245,13 +256,13 @@ export async function copySessionArtifacts(
 		// transcripts; under file storage the directory copy above carried it.
 		await copyTranscriptTree(
 			storage,
-			sourceArtifactsDir,
+			storedSourceArtifactsDir,
 			destinationArtifactsDir,
 			storage instanceof FileSessionStorage ? "*.jsonl" : "*",
 		);
 	} catch (error) {
 		logger.warn("Failed to copy subagent transcripts", {
-			sourceArtifactsDir,
+			sourceArtifactsDir: storedSourceArtifactsDir,
 			destinationArtifactsDir,
 			error: toError(error).message,
 		});

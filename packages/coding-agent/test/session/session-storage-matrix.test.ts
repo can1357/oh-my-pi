@@ -535,3 +535,31 @@ describe("session move onto a destination that cannot take every transcript", ()
 		STEP_TIMEOUT_MS,
 	);
 });
+
+describe("fork from a stored session whose path is also a local symlink", () => {
+	test(
+		"sql storage: the fork keeps the children, because a key is not a filesystem path",
+		async () => {
+			const fx = await openFixture("sql");
+			const { manager, file } = await seed(fx);
+			await manager.close();
+			// A local file of the same name as the stored key, pointing
+			// somewhere else. The store has never heard of its target, so
+			// resolving the link loses every child.
+			const decoy = fx.tempDir.join("decoy.jsonl");
+			await Bun.write(decoy, "");
+			await fs.rm(file, { force: true });
+			await fs.symlink(decoy, file);
+
+			const fork = await SessionManager.forkFrom(file, fx.cwd, fx.sessionDir, fx.storage, {
+				suppressBreadcrumb: true,
+			});
+			const forkFile = fork.getSessionFile()!;
+			await fork.close();
+
+			expect(await messageTexts(fx.storage, forkFile)).toEqual(["root question", "root answer"]);
+			expect(await childKeys(fx.storage, forkFile)).toEqual(CHILDREN);
+		},
+		STEP_TIMEOUT_MS,
+	);
+});
