@@ -375,18 +375,7 @@ fn condense_status(input: &str) -> String {
 			in_staged = false;
 			continue;
 		}
-		if parse_long_status_line(trimmed, in_staged, in_untracked, &mut summary) {
-			continue;
-		}
-		if !trimmed.starts_with('(')
-			&& !trimmed.ends_with(':')
-			&& !trimmed.starts_with("use ")
-			&& !trimmed.starts_with("no changes added")
-			&& in_untracked
-		{
-			summary.untracked += 1;
-			push_status_path(&mut summary, "??", trimmed);
-		}
+		parse_long_status_line(trimmed, line, in_staged, in_untracked, &mut summary);
 	}
 
 	if status_has_no_signal(&summary) && state.is_none() {
@@ -484,10 +473,21 @@ fn is_short_status(status: &str) -> bool {
 
 fn parse_long_status_line(
 	line: &str,
+	raw: &str,
 	in_staged: bool,
 	in_untracked: bool,
 	summary: &mut StatusSummary,
-) -> bool {
+) {
+	if in_untracked {
+		// Untracked entries are indented and carry no status prefix; git's own
+		// messages in that section (`nothing added to commit…`, a stash pop's
+		// `Dropped …`) are flush left, and its hints are parenthesized.
+		if raw.starts_with([' ', '\t']) && !line.starts_with('(') {
+			summary.untracked += 1;
+			push_status_path(summary, "??", line);
+		}
+		return;
+	}
 	// `modified:`/`deleted:` are staged or unstaged depending on the active
 	// section; `new file:`/`renamed:` only appear staged. The unmerged-path
 	// forms are always conflicts regardless of section.
@@ -513,15 +513,9 @@ fn parse_long_status_line(
 				summary.unstaged += 1;
 			}
 			push_status_path(summary, label, path.trim());
-			return true;
+			return;
 		}
 	}
-	if in_untracked && !line.starts_with('(') && !line.ends_with(':') {
-		summary.untracked += 1;
-		push_status_path(summary, "??", line);
-		return true;
-	}
-	false
 }
 
 fn push_status_path(summary: &mut StatusSummary, label: &str, path: &str) {
@@ -1647,12 +1641,7 @@ fn condense_stash(command: &str, input: &str, exit_code: i32) -> String {
 			return "ok stashed\n".to_string();
 		}
 		if sub == "apply" || sub == "pop" || sub == "branch" {
-			let compacted = condense_status(input);
-			return if compacted == input {
-				input.to_string()
-			} else {
-				compacted
-			};
+			return condense_stash_status(input);
 		}
 		if sub == "create" {
 			return input.to_string();
@@ -1665,6 +1654,24 @@ fn condense_stash(command: &str, input: &str, exit_code: i32) -> String {
 	}
 
 	condense_noisy_output(input)
+}
+
+/// `stash apply`/`pop`/`branch` print the restored tree's status; `pop` then
+/// confirms the drop on its own last line, which the summary keeps.
+fn condense_stash_status(input: &str) -> String {
+	let (status, dropped) = match input.trim_end().rsplit_once('\n') {
+		Some((status, last)) if last.starts_with("Dropped ") => (status, Some(last)),
+		_ => (input, None),
+	};
+	let mut out = condense_status(status);
+	if let Some(dropped) = dropped {
+		if !out.is_empty() && !out.ends_with('\n') {
+			out.push('\n');
+		}
+		out.push_str(dropped);
+		out.push('\n');
+	}
+	out
 }
 
 fn condense_stash_list(input: &str) -> String {
@@ -2857,6 +2864,23 @@ hint: See the 'Note about fast-forwards' in 'git push --help' for details.
 		assert!(!out.text.contains("state:"), "{:?}", out.text);
 		assert!(out.text.contains("untracked 1"), "{:?}", out.text);
 		assert!(out.text.contains("?? Next command to do.md"), "{:?}", out.text);
+	}
+
+	#[test]
+	fn stash_pop_keeps_drop_line_and_counts_only_indented_untracked_entries() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = test_ctx(Some("stash"), "git stash pop", &cfg);
+		// Untracked files named like git's own closing lines are still entries.
+		let input = "On branch main\nUntracked files:\n  (use \"git add <file>...\" to include in \
+		             what will be committed)\n\tno changes added.md\n\tDropped stash@{0}\n\nnothing \
+		             added to commit but untracked files present (use \"git add\" to \
+		             track)\nDropped refs/stash@{0} (0123abcd)\n";
+		let out = filter(&ctx, input, 0);
+		assert!(out.text.contains("untracked 2"), "{:?}", out.text);
+		assert!(out.text.contains("?? no changes added.md"), "{:?}", out.text);
+		assert!(out.text.contains("?? Dropped stash@{0}"), "{:?}", out.text);
+		assert!(!out.text.contains("?? nothing added"), "{:?}", out.text);
+		assert!(out.text.ends_with("\nDropped refs/stash@{0} (0123abcd)\n"), "{:?}", out.text);
 	}
 
 	// --- Pull summaries ---
