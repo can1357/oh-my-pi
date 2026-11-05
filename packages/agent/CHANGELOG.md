@@ -6,6 +6,7 @@
 
 - Added `wireToolsFingerprint()`, a hash of the tool specs a request sends ([#17496](https://github.com/can1357/oh-my-pi/pull/17496) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `Agent.queuedMessageGate`, a synchronous `QueuedMessageGate` consulted before every queued-message delivery batch (it can drop candidates) and told when claimed messages go back undelivered
+- Chat spans carry `omp.gen_ai.auth.organization_id`, the organization of the credential that served the turn, so spend and attribution pipelines can tell one machine's several logins apart; absent for a key that belongs to no stored account, and absent on a turn that failed before producing a message — a failed request owns no attempt-owned carrier for it, and three that were built and measured each wrote another request's account onto a real span
 ### Fixed
 
 - Fixed steering and follow-up queue notifications observing a batch before its preparation claim was installed and missing the transition to delivery, leaving pending-message snapshots stale after asynchronous preparation.

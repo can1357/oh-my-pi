@@ -984,3 +984,126 @@ describe("streamSimple resolver auth retry", () => {
 		expect(attempts).toBe(0);
 	});
 });
+
+/** Bearer placeholders named rather than inlined: an `apiKey: "…"` literal trips the push-time secret scan. */
+const KEY_ALPHA = "alpha-bearer";
+const KEY_BETA = "beta-bearer";
+
+/**
+ * The organization that served a turn is read from the resolved credential,
+ * not from a provider response header, so it is on the message a spend or
+ * attribution pipeline reads even on a provider that reports no such header
+ * and on the session's first request. Rotation must re-stamp it: a turn
+ * finished by a sibling account must not be filed under the account that
+ * failed.
+ */
+describe("streamSimple credential organization", () => {
+	afterEach(() => {
+		unregisterCustomApis(SOURCE_ID);
+	});
+
+	it("stamps the resolved credential's organization on the finished message", async () => {
+		registerCustomApi(
+			API,
+			() => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => ok(stream));
+				return stream;
+			},
+			SOURCE_ID,
+		);
+
+		const stream = streamSimple(model(), context, {
+			apiKey: async () => ({ apiKey: KEY_ALPHA, credentialId: 3, oauthIdentity: { orgId: "org-alpha" } }),
+		});
+		const done: AssistantMessage[] = [];
+		for await (const event of stream) {
+			if (event.type === "done") done.push(event.message);
+		}
+		const result = await stream.result();
+
+		expect(done[0]?.organizationId).toBe("org-alpha");
+		expect(result.organizationId).toBe("org-alpha");
+		expect(result.credentialId).toBe(3);
+	});
+
+	it("names the account that actually served after an auth retry rotates away", async () => {
+		let attempts = 0;
+		registerCustomApi(
+			API,
+			() => {
+				attempts += 1;
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => (attempts === 1 ? stream.fail(authError()) : ok(stream)));
+				return stream;
+			},
+			SOURCE_ID,
+		);
+
+		const stream = streamSimple(model(), context, {
+			apiKey: async ctx =>
+				ctx.error === undefined
+					? { apiKey: KEY_ALPHA, credentialId: 1, oauthIdentity: { orgId: "org-alpha" } }
+					: { apiKey: KEY_BETA, credentialId: 2, oauthIdentity: { orgId: "org-beta" } },
+		});
+		for await (const _event of stream) {
+			// drain
+		}
+		const result = await stream.result();
+
+		expect(attempts).toBe(2);
+		expect(result.organizationId).toBe("org-beta");
+		expect(result.credentialId).toBe(2);
+	});
+
+	it("attributes a terminal error, which is billed spend the result path never sees", async () => {
+		registerCustomApi(
+			API,
+			() => {
+				const stream = new AssistantMessageEventStream();
+				// A fresh terminal message, as the thinking-loop guard builds: it carries
+				// the attempt's usage and ends the turn, so nothing downstream re-stamps it.
+				const failed = assistantError("provider refused the request");
+				failed.usage = { ...usage(), input: 120, totalTokens: 120 };
+				queueMicrotask(() => stream.push({ type: "error", reason: "error", error: failed }));
+				return stream;
+			},
+			SOURCE_ID,
+		);
+
+		const stream = streamSimple(model(), context, {
+			apiKey: async () => ({ apiKey: KEY_ALPHA, credentialId: 4, oauthIdentity: { orgId: "org-alpha" } }),
+		});
+		const errors: AssistantMessage[] = [];
+		for await (const event of stream) {
+			if (event.type === "error") errors.push(event.error);
+		}
+
+		expect(errors).toHaveLength(1);
+		expect(errors[0]?.organizationId).toBe("org-alpha");
+		expect(errors[0]?.credentialId).toBe(4);
+		// The point of attributing it: the provider billed these tokens.
+		expect(errors[0]?.usage?.input).toBe(120);
+	});
+
+	it("leaves the organization unset for a key that carries no stored account", async () => {
+		registerCustomApi(
+			API,
+			() => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => ok(stream));
+				return stream;
+			},
+			SOURCE_ID,
+		);
+
+		const stream = streamSimple(model(), context, { apiKey: async () => "plain-api-key" });
+		for await (const _event of stream) {
+			// drain
+		}
+		const result = await stream.result();
+
+		expect(result.organizationId).toBeUndefined();
+		expect(result.credentialId).toBeUndefined();
+	});
+});

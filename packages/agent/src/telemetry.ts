@@ -160,6 +160,15 @@ export const enum OmpGenAIAttr {
 	GatewayRoutedTo = "omp.gen_ai.gateway.routed_to",
 	/** Cloudflare AI Gateway response-cache status (`cf-aig-cache-status`), never prompt-cache. */
 	GatewayResponseCacheStatus = "omp.gen_ai.gateway.response_cache.status",
+	/**
+	 * Organization the credential that served the turn belongs to, read from
+	 * the stored credential rather than a response header, so a spend or
+	 * attribution pipeline can tell one machine's several logins apart on the
+	 * session's first request and on providers that report no such header.
+	 * Absent when the serving key carries no organization (an API key, an env
+	 * var, `--api-key`).
+	 */
+	AuthOrganizationId = "omp.gen_ai.auth.organization_id",
 	/** Caller-level reason a judgment ran (`find`, `ttsr`, `judge_batch`, …). */
 	JudgmentPurpose = "omp.gen_ai.judgment.purpose",
 	/** Questions the caller asked in one judgment request. */
@@ -1230,6 +1239,9 @@ function applyChatResponseAttributes(span: Span, message: AssistantMessage): voi
 	if (message.responseId) span.setAttribute(GenAIAttr.ResponseId, message.responseId);
 	if (message.upstreamProvider) {
 		span.setAttribute(OmpGenAIAttr.ResponseUpstreamProvider, message.upstreamProvider);
+	}
+	if (message.organizationId) {
+		span.setAttribute(OmpGenAIAttr.AuthOrganizationId, message.organizationId);
 	}
 	if (message.ttft != null) span.setAttribute(GenAIAttr.ResponseTimeToFirstChunk, message.ttft / 1000);
 	const finishReason = mapStopReason(message.stopReason);
