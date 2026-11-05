@@ -145,6 +145,18 @@ export function missingNativeExport(
 	addon?: NativeAddonStatus | null,
 ): (() => never) | undefined;
 
+/**
+ * Stub for a class the addon does not provide: `undefined` on a current addon,
+ * a class whose constructor throws on a stale one.
+ */
+export function missingNativeClass(
+	symbolName: string,
+	addon?: NativeAddonStatus | null,
+): (new (...args: unknown[]) => never) | undefined;
+
+/** Notice a workspace tree prints once when its addon is from another release. */
+export function staleWorkspaceAddonNotice(addon: NativeAddonStatus): string;
+
 /** Actionable text for {@link missingNativeExport}. */
 export function missingNativeExportMessage(symbolName: string, addon?: NativeAddonStatus | null): string;
 

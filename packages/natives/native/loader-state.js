@@ -694,6 +694,32 @@ export function missingNativeExport(symbolName, addon = loadedAddon) {
 }
 
 /**
+ * Stand-in for a *class* the loaded addon does not provide.
+ *
+ * `missingNativeExport` covers the function half of the generated surface in
+ * `native/index.js`; classes were exported bare, so a class the stale addon
+ * predates reached callers as `undefined` and `new Thing(...)` threw
+ * `undefined is not a constructor` from the callsite's own file — a stack that
+ * names the caller and never the addon. The same release mismatch therefore
+ * read as a defect in whatever code ran first.
+ *
+ * Same staleness rule as the function stub: only a stale addon gets a
+ * stand-in, so `typeof native.Thing === "function"` capability probes against
+ * a current addon keep their meaning.
+ * @param {string} symbolName
+ * @param {ReturnType<typeof nativeAddonStatus>} [addon]
+ * @returns {(new (...args: unknown[]) => never) | undefined}
+ */
+export function missingNativeClass(symbolName, addon = loadedAddon) {
+	if (!addon?.stale) return undefined;
+	return class MissingNativeClass {
+		constructor() {
+			throw new Error(missingNativeExportMessage(symbolName, addon));
+		}
+	};
+}
+
+/**
  * Actionable text for {@link missingNativeExport}. `addon` is injectable so the
  * wording can be pinned without a stale `.node` on disk.
  * @param {string} symbolName
@@ -713,6 +739,40 @@ export function missingNativeExportMessage(symbolName, addon = loadedAddon) {
 		`@oh-my-pi/pi-natives export \`${symbolName}\` is missing: ${addon.path} is ${loaded}, not ` +
 		`@${addon.packageVersion} — ${rebuild}.`
 	);
+}
+
+/**
+ * One-line notice for a workspace tree running an addon from another release.
+ *
+ * The missing-symbol stubs above only speak when a caller touches a symbol the
+ * old addon predates. A stale addon also *changes behaviour* of symbols it
+ * does have — an older shell, an older grep — and those failures carry no
+ * marker at all, so a run of them reads as broken code rather than a tree that
+ * never rebuilt. This notice gives every such failure its provenance.
+ * @param {NonNullable<ReturnType<typeof nativeAddonStatus>>} addon
+ * @returns {string}
+ */
+export function staleWorkspaceAddonNotice(addon) {
+	const loaded = addon.version ? `@oh-my-pi/pi-natives@${addon.version}` : "an addon without a release stamp";
+	return (
+		`[pi-natives] ${addon.path} is ${loaded}, but this checkout is @${addon.packageVersion}. ` +
+		"Symbols added since that build are missing and shared ones may behave differently; " +
+		"run `bun run build:native` before trusting results from this tree.\n"
+	);
+}
+
+/**
+ * Emit {@link staleWorkspaceAddonNotice} once per process. Synchronous write
+ * to fd 2 for the same reason as {@link startupMarker}: this runs at import
+ * time, before any TUI owns the terminal, and must survive a later crash.
+ * @param {NonNullable<ReturnType<typeof nativeAddonStatus>>} addon
+ */
+function reportStaleWorkspaceAddon(addon) {
+	try {
+		fs.writeSync(2, staleWorkspaceAddonNotice(addon));
+	} catch {
+		// stderr unavailable; the notice is best-effort, the stubs still speak
+	}
 }
 
 /**
@@ -881,6 +941,10 @@ export function loadNative() {
 			installNativeTokioRuntime(bindings);
 			configureGrammarDir(bindings, ctx.nativesDir);
 			loadedAddon = describeLoadedAddon(bindings, candidate, ctx);
+			// Only a workspace load reaches here stale: every other path makes
+			// `validateLoadedBindings` throw first, so this never fires on an
+			// installed or compiled omp.
+			if (loadedAddon.stale) reportStaleWorkspaceAddon(loadedAddon);
 	        cleanupStaleNativeVersions({ nativesDir: ctx.nativesDir, currentVersion: ctx.packageVersion });
 			startupMarker("native:loadNative:done");
 			return bindings;

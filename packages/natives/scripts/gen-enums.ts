@@ -95,8 +95,17 @@ function buildGeneratedBlock(dts: string): string {
 	if (classes.length > 0) {
 		lines.push("// classes");
 		for (const name of classes) {
+			// `DesktopSession` keeps its adapter: that already turns an addon
+			// without the current desktop ABI into a throwing class naming the
+			// rebuild, which covers the absent-class case too.
+			// Every other class gets `missingNativeClass`, the constructor-side
+			// twin of the function stub below. Without it a class the stale
+			// addon predates was a bare `undefined`, and `new Thing(...)` threw
+			// `undefined is not a constructor` from the caller's own file.
 			const binding =
-				name === "DesktopSession" ? `adaptDesktopSession(nativeBindings.${name})` : `nativeBindings.${name}`;
+				name === "DesktopSession"
+					? `adaptDesktopSession(nativeBindings.${name})`
+					: `nativeBindings.${name} ?? missingNativeClass("${name}")`;
 			lines.push(`export const ${name} = ${binding};`);
 		}
 	}
