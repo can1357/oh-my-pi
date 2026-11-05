@@ -73,8 +73,20 @@ pub static TEST_PATH: LazyLock<OsString> = LazyLock::new(|| {
 			needed[at] = true;
 		}
 	}
-	let kept = searched.iter().zip(&needed).filter(|&(_, &used)| used).map(|(dir, _)| dir);
-	std::env::join_paths(kept).expect("a directory holding one of these programs separates PATH")
+	let kept = searched
+		.iter()
+		.zip(&needed)
+		.filter(|&(_, &used)| used)
+		// A directory whose own name holds the list separator cannot go on
+		// a `PATH` at all, and the question is asked of the function that
+		// would reject it rather than of a hardcoded character. Dropping
+		// it loses the programs in it; letting `join_paths` fail would
+		// instead panic every spawn in the binary, which is worse — and a
+		// working directory named `a:b` reaches this through a relative
+		// entry, so it is not hypothetical.
+		.filter(|(dir, _)| std::env::join_paths([dir.as_path()]).is_ok())
+		.map(|(dir, _)| dir);
+	std::env::join_paths(kept).unwrap_or_default()
 });
 
 /// One of the caller's `PATH` entries as an absolute directory.
@@ -87,29 +99,45 @@ pub static TEST_PATH: LazyLock<OsString> = LazyLock::new(|| {
 /// and a relative entry passed through would mean a different place in
 /// each of them.
 ///
-/// An empty entry means the working directory in the same way, and is
-/// skipped rather than resolved: it would put whatever directory the suite
-/// happens to be run from on every child's `PATH`, which is the kind of
-/// dependence on the caller this harness exists to remove.
+/// An **empty** entry means the working directory in the same way, and is
+/// skipped. The honest reason is not that this keeps the working
+/// directory off the children's `PATH`: when nothing resolves at all the
+/// result is an empty `PATH`, which a shell reads as the working
+/// directory anyway, exactly as the merge base does. It is skipped
+/// because an entry naming no directory cannot be resolved to one place
+/// for children that each choose their own.
 fn absolute_dir(dir: PathBuf) -> Option<PathBuf> {
 	if dir.as_os_str().is_empty() {
 		return None;
 	}
 	if dir.is_absolute() {
-		Some(dir)
-	} else {
-		std::env::current_dir().ok().map(|cwd| cwd.join(dir))
+		return Some(dir);
+	}
+	// When the working directory cannot be read — it has been removed, or
+	// is unreachable — the entry is kept as it stands rather than dropped:
+	// the kernel still resolves `../store/cat` from a deleted directory,
+	// and passing it on is what this harness did before it resolved
+	// anything.
+	match std::env::current_dir() {
+		Ok(cwd) => Some(cwd.join(dir)),
+		Err(_) => Some(dir),
 	}
 }
 
-/// Whether `path` is a program THIS ACCOUNT can execute, following links:
+/// Whether `path` is a program this process can execute, following links:
 /// a Nix store entry reached through a profile is a symlink.
 ///
 /// The question is asked of the kernel rather than of the mode bits,
 /// because `mode & 0o111` is the union of the owner, group and other bits
-/// and not this account's permission: a file we own with mode `0001` is
+/// and not a permission anybody has: a file we own with mode `0001` is
 /// executable by everyone except us, and treating it as a program hides a
 /// usable one later on the search path.
+///
+/// It is asked about the EFFECTIVE user and group, with `AT_EACCESS`,
+/// because those are the ids `exec` will check. Plain `access(2)` answers
+/// for the real ids, and under `setpriv` — real 60001, effective 1000 —
+/// it called every program unusable and left the `PATH` empty while the
+/// shell could have run them.
 fn is_program(path: &Path) -> bool {
 	#[cfg(unix)]
 	{
@@ -122,8 +150,12 @@ fn is_program(path: &Path) -> bool {
 			return false;
 		};
 		// SAFETY: `c_path` is a NUL-terminated string that outlives the
-		// call; `access` only reads it.
-		unsafe { libc::access(c_path.as_ptr(), libc::X_OK) == 0 }
+		// call; `faccessat` only reads it, and `AT_FDCWD` with an
+		// absolute path ignores the directory argument.
+		let rc = unsafe {
+			libc::faccessat(libc::AT_FDCWD, c_path.as_ptr(), libc::X_OK, libc::AT_EACCESS)
+		};
+		rc == 0
 	}
 	#[cfg(not(unix))]
 	{
