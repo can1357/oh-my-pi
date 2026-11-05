@@ -348,26 +348,15 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			};
 		}
 		if ((job || agent) && session.asyncJobManager) {
-			const result = await executeCancel(
-				session,
-				session.asyncJobManager,
-				ownerId,
-				[job?.id ?? id],
-				forceToken.length > 0 ? forceToken : undefined,
-			);
-			// A kill dispatched straight to the job manager never reaches the
-			// lifecycle's consume; burn the token here so it stays one-shot.
+			const result = await executeCancel(session, session.asyncJobManager, ownerId, [job?.id ?? id]);
+			// The lifecycle never consumes the token; burn it here so the
+			// model-facing grant stays one-shot whichever cancel path ran.
 			if (gatedAgentId !== undefined)
 				capabilityTokens.consume(forceToken, CapabilityAction.agentRelease, gatedAgentId);
 			return { content: result.content, details: { proc: result.details } };
 		}
 		if (agent) {
-			const outcome = await cancelAgentRegistration(
-				session,
-				ownerId,
-				id,
-				forceToken.length > 0 ? forceToken : undefined,
-			);
+			const outcome = await cancelAgentRegistration(session, ownerId, id);
 			if (gatedAgentId !== undefined)
 				capabilityTokens.consume(forceToken, CapabilityAction.agentRelease, gatedAgentId);
 			return {

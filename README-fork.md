@@ -72,7 +72,10 @@ bridge answers, registers it as the `chrome` MCP server with its 81 `chrome_*`
 / page tools. A missing bridge is skipped silently — no error, no prompt
 notice — and the built-in `browser` prelude stays available as an isolated
 Chrome for Testing fallback. Turn the probe off with the `browser.chromeMcp`
-setting (default on).
+setting (default on), or add `chrome` to the user-level `disabledServers` list
+in `mcp.json`. A per-server `"enabled": false` on a `chrome` entry does *not*
+stop auto-discovery: the suppressed entry never reaches the merged config, so
+the probe sees a free name — only the two off-switches above do.
 
 Requirements:
 
@@ -128,6 +131,13 @@ What is refused (always as a `failed` receipt naming the reason, never a throw):
 | Duplicate | same (sender, recipient, sha256(body)) within 30 s                        |
 | Hop chain | more than 28 senders in `IrcMessage.hops` (the bus appends the sender)    |
 
+An empty rate window always admits one message, whatever its size: a lone
+500-character report costs 125 tokens and goes through even though it exceeds
+the whole 30-token budget. Flood semantics are unchanged — that message spends
+the window, so the rest of the burst is refused until the window slides past
+it. (The per-sender window map is capped at 256 senders: idle windows are
+swept first, and a burst of distinct live senders evicts the oldest.)
+
 Progress notes (`?progress`) and automated wake relays are exempt from the
 duplicate check — both are meant to repeat — and `wait`, broadcast expansion,
 and the internal display relay (`#relayToMainUi`) are untouched. A busy
@@ -156,9 +166,12 @@ ritual".
 
 `task.concurrencyPolicy` decides what a `task` spawn does when every
 `task.maxConcurrency` slot is busy (default `32`; `0` means unlimited). One
-session-scoped semaphore bounds every `SpawnRun`, and the permit is taken on
-the main thread in `SpawnRun` before `runSubprocess` — so the policy covers
-both direct and worker-thread dispatch (`task.workerThreads`).
+session-scoped semaphore bounds every spawn in that session — the `task` tool,
+the `pi.spawnSubagent` seam, and `workflow` `agent()` calls all take the same
+permit — and the task tool's permit is taken on the main thread in `SpawnRun`
+before `runSubprocess`, so the policy covers both direct and worker-thread
+dispatch (`task.workerThreads`). A detached seam run keeps its slot until the
+run settles, not only until it registers.
 
 | Policy            | What a spawn over the cap does                                                         |
 | ----------------- | -------------------------------------------------------------------------------------- |
@@ -182,11 +195,15 @@ Concurrent subagent limit reached (1 running; task.maxConcurrency=1). Do not ret
   `refusalReason: "concurrency_limit"` — the existing observability channel,
   no new event; it is emitted for spawns that already have a progress row, and
   observers keyed by agent id may ignore a frame for an unknown id.
-- Enforcement lives in `packages/coding-agent/src/task/index.ts`
-  (`#acquireSpawnPermit`), the error in `task/spawn-run.ts`
-  (`SpawnRefusedError`), the non-blocking take in `task/parallel.ts`
-  (`Semaphore.tryAcquire`, `running`, `waiting`), and the setting in
-  `task/settings.ts`. Covering tests: `test/spawn-refusal.test.ts`.
+- Enforcement lives in `packages/coding-agent/src/task/spawn-limiter.ts` (the
+  session-scoped semaphore and policy check shared by every spawn path), the
+  error in `task/spawn-run.ts` (`SpawnRefusedError`), the non-blocking take in
+  `task/parallel.ts` (`Semaphore.tryAcquire`, `running`, `waiting`), and the
+  setting in `task/settings.ts`. A refusal is currently only ever
+  `concurrency_limit`: depth, request-budget, and token-budget refusals surface
+  as ordinary task errors in v1 and never ride the progress frame. Covering
+  tests: `test/spawn-refusal.test.ts` and `test/a2a-server.test.ts` (the seam
+  refusal).
 
 ## Subagent token budget and handback
 
@@ -315,11 +332,21 @@ extension in the request metadata:
 - `metadata.to` names an existing agent. The message goes through the IRC bus,
   so an idle agent is woken, a parked or killed one is revived from its
   transcript, and the delivery receipt (`injected`/`woken`/`revived`/`failed`)
-  lands in `result.task.metadata.delivery`.
+  lands in `result.task.metadata.delivery`. A `failed` receipt is a JSON-RPC
+  error `-32011` (`DELIVERY_FAILED`), never a success task: a client cannot
+  mistake a refused delivery for an accepted one. On
+  `SendStreamingMessage` the stream instead ends with a final
+  `TASK_STATE_FAILED` update carrying the receipt's error.
+- Bridge deliveries are marked `external` on the bus: each is one
+  authenticated request identified by its A2A `messageId`, so the agent-loop
+  ingress guards (body-hash duplicate, per-sender rate) do not apply. The
+  loopback-only, bearer-authenticated bridge is their throttle.
 - No `metadata.to` spawns a new agent through `pi.spawnSubagent` with ordinary
   subagent rights (`metadata.agent` selects the agent definition, defaulting to
   the session's configured default; `metadata.context` is shared background
   like a `task` batch context). The response's task id **is** the new agent id.
+  `metadata.spawn: true` forces a spawn even when `metadata.to` is present —
+  spawn wins over delivery (a wire test pins that preference).
 - `metadata.to: "main"` is an alias for the main agent's id.
 - A spawn whose child session has not registered yet answers `TASK_STATE_SUBMITTED`
   with `metadata.pending: true` (id reserved, run starting). Poll `GetTask` for
@@ -359,7 +386,12 @@ The seam resolves with the agent's registry ref as soon as the child session
 registers (not when the run settles), runs through the task executor with the
 same spawn policy, model approval, and concurrency limits as a `task` call, and
 rejects with the executor's preflight error when the spawn fails before
-registration. Hosts without a tool session reject the call.
+registration. It takes the session's shared spawn permit, so
+`task.concurrencyPolicy = "refuse"` rejects a seam spawn with the same
+`SpawnRefusedError` text a `task` call gets, and the permit is held until the
+detached run settles. A remote `a2a:<skill>` name is rejected before an id is
+reserved: only the task tool routes those to their endpoint. Hosts without a
+tool session reject the call.
 
 Covering tests: `test/a2a-server.test.ts` (card contract, auth, method set,
 addressing, spawn seam, loopback enforcement, SSE, token file).
@@ -431,11 +463,19 @@ return found.map(f => f.result);
 
 | Helper                                        | Contract                                                                 |
 | --------------------------------------------- | ------------------------------------------------------------------------ |
-| `agent(prompt, opts?)`                        | Spawns one inline `task` subagent (agent/context in `opts`) and resolves `{ result, tokens, cached? }` |
+| `agent(prompt, opts?)`                        | Spawns one inline `task` subagent (agent/context in `opts`) and resolves `{ result, tokens, cached? }`; takes the session's shared spawn slot |
 | `parallel(items, fn, { concurrency })`        | Bounded worker pool, results in item order; concurrency defaults to `4` |
 | `pipeline(items, ...stages)`                  | Each item flows through stages in order; items overlap                  |
 | `phase(name)` / `log(...)` / `clock()`        | Progress markers, run log, deterministic 1-based counter                |
 | `args`                                        | The call's `args` string (default `""`)                                 |
+
+`agent()` acquires the session spawn permit that `task` and the
+`pi.spawnSubagent` seam use, so `task.maxConcurrency`/`task.concurrencyPolicy`
+bound workflow fan-out too. A child that settles with a non-zero exit code, an
+`error`, or an abort is an error, not a result: the journal records `failed`,
+the run fails, and `resumeFrom` re-executes the call instead of caching the
+failure as a completed answer. Remote `a2a:<skill>` agents are rejected here —
+only the task tool routes them to their endpoint.
 
 ### Determinism rules
 
@@ -515,9 +555,9 @@ authorizes exactly one execution.
   in-memory map with an `unref`'d TTL timer and are never persisted: a restart
   cannot resurrect an authorization the user has not repeated.
 - `requireCapabilityToken({ action, target, force, consequence, retry })`
-  validates without consuming — the innermost mutation spends the token, so a
-  tool → job-control → lifecycle chain burns it once, at the point of no
-  return. A missing, spent, expired, or mismatched token produces
+  validates without consuming — the surface that owns the retry channel spends
+  the token itself (`proc://<id>/kill` burns it after dispatching the cancel),
+  so a replay refuses. A missing, spent, expired, or mismatched token produces
   `CapabilityRequiredError` whose message names the fresh token and the exact
   parameter that carries it; nothing has been destroyed when it is thrown.
 
@@ -526,8 +566,14 @@ Gated surfaces and their graduated rules:
 | Surface | Refuses | Stays tokenless |
 | --- | --- | --- |
 | `task/isolation-runner.ts` → `discardIsolationWorkspace(handle, { force })` | deleting a worktree that still holds staged, unstaged, or untracked files | a provably clean worktree; a run whose delta already reached disk (patch artifacts or a task branch) |
-| `registry/agent-lifecycle.ts` → `release(id, expected, { force })` | releasing an agent that owes turns to queued peer messages (`ircWakesPending`) or whose parked/aborted transcript exists only in memory (`sessionFile === null`) | releasing a session-backed agent with nothing unsaved; lifecycle teardown (`{ teardown: true }`), where nothing survives the call anyway |
-| `internal-urls/proc-protocol.ts` → `write { path: "proc://<id>/kill" }` | cancelling an **agent** (task job or jobless registration) that still holds unsaved output; the retry carries the token as the write's `content` | bash jobs (their output stays readable through `proc://<id>`), services (their log stays on disk), and settled rows |
+| `internal-urls/proc-protocol.ts` → `write { path: "proc://<id>/kill" }` | cancelling an **agent** (task job or jobless registration) that owes turns to queued peer messages or whose parked/aborted transcript exists only in memory; the retry carries the token as the write's `content` | bash jobs (their output stays readable through `proc://<id>`), services (their log stays on disk), settled rows, and every release with nothing unsaved |
+| Agent Hub `x`, RPC `cancel_subagent`, collab guest `kill` | nothing — these are the user's explicit decision and have no force parameter to carry a token back | always |
+
+The gate deliberately lives at the model-facing `proc://<id>/kill` and nowhere
+deeper: `AgentLifecycleManager.release` never refuses. An interactive kill
+surface that refused could not be completed — the user has no channel to hand
+the lifecycle a token — which is worse than the queued-message loss it would
+prevent.
 
 The `proc://` gate is backward compatible: it only reuses `content`, which kill
 already accepted and ignored, and the prompt doc still advertises "omit

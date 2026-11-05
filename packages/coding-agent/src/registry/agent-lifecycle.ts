@@ -24,7 +24,6 @@
 
 import * as fs from "node:fs/promises";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
-import { CapabilityAction, capabilityTokens, requireCapabilityToken } from "../safety/capability-tokens";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import {
@@ -135,24 +134,16 @@ interface ReopeningAgent {
 export interface AgentReleaseOptions {
 	/** Keep a terminal `aborted` row (explicit kill) instead of unregistering the ref. */
 	tombstone?: boolean;
-	/**
-	 * One-shot capability token from a previous refusal. Required when
-	 * {@link unsavedAgentWork} reports work that this release would destroy.
-	 */
-	force?: string;
-	/**
-	 * Internal teardown (lifecycle dispose, session end): nothing survives the
-	 * call, so unsaved output cannot be recovered by refusing either. Never set
-	 * by a caller that could ask the user instead.
-	 */
-	teardown?: boolean;
 }
 
 /**
  * Why releasing `ref` would destroy work that has no other copy, as a refusal
  * clause; `undefined` when the release only disposes a session whose output is
  * already durable. The model-facing kill paths (`proc://<id>/kill`, job cancel)
- * use the same predicate so a refusal is never a surprise.
+ * enforce this predicate: they are the only callers with a retry channel that
+ * can carry a one-shot capability token back. Interactive kill surfaces
+ * (Agent Hub, RPC `cancel_subagent`, collab) are the user's explicit decision
+ * and release directly — `release` itself never refuses.
  */
 export function unsavedAgentWork(ref: AgentRef): string | undefined {
 	if (ref.session?.ircWakesPending)
@@ -661,19 +652,11 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		const onRelease = adopted && adopted.ref === ref ? adopted.onRelease : undefined;
 		if (!ref) return false;
 
-		// Releasing this ref is the point of no return for its unsaved output: refuse
-		// before touching the registry, then spend the token exactly once, here.
-		const unsaved = options?.teardown === true ? undefined : unsavedAgentWork(ref);
-		if (unsaved) {
-			requireCapabilityToken({
-				action: CapabilityAction.agentRelease,
-				target: id,
-				force: options?.force?.trim(),
-				consequence: `releasing ${unsaved}`,
-				retry: token => `force: ${JSON.stringify(token)}`,
-			});
-			capabilityTokens.consume(options?.force, CapabilityAction.agentRelease, id);
-		}
+		// This is the point of no return for the ref's unsaved output, but the
+		// refusal lives at the model-facing kill surfaces that can hand back a
+		// retry token (`proc://<id>/kill`, job cancel); an interactive kill
+		// (Agent Hub, RPC `cancel_subagent`, collab) has no channel for one and
+		// must be able to finish. See `unsavedAgentWork`.
 		if (adopted?.ref === ref) {
 			clearTimeout(adopted.timer);
 			this.#adopted.delete(id);
@@ -738,7 +721,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		const ids = [...new Set([...this.#adopted.keys(), ...this.#parks.keys()])];
 		await Promise.all(
 			ids.map(async id => {
-				const release = this.release(id, undefined, { teardown: true }).then(() => {});
+				const release = this.release(id, undefined).then(() => {});
 				try {
 					await untilAborted(AbortSignal.timeout(Math.max(0, deadlineAt - Date.now())), () => release);
 				} catch (error) {

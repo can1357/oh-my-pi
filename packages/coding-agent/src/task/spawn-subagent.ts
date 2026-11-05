@@ -10,9 +10,11 @@
  */
 
 import { logger } from "@oh-my-pi/pi-utils";
+import { assertNotRemoteA2aAgent } from "../a2a/agent-bridge";
 import type { SpawnSubagentOptions } from "../extensibility/extensions/types";
 import { AgentRegistry, type AgentRef, type AgentRegistryApi } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
+import { acquireSessionSpawnPermit, releaseSessionSpawnPermit } from "./spawn-limiter";
 import {
 	type StructuredSubagentIdentity,
 	type StructuredSubagentRequest,
@@ -82,27 +84,44 @@ export async function spawnSubagentViaExecutor(
 ): Promise<AgentRef> {
 	const prompt = options.prompt.trim();
 	if (prompt.length === 0) throw new Error("spawnSubagent requires a non-empty prompt");
+	// Only the task tool can route a remote A2A agent to its endpoint; here the
+	// executor would run the placeholder definition locally.
+	assertNotRemoteA2aAgent(session, options.agent);
 	const registry = AgentRegistry.global();
-	const id = await executor.reserveId(session, { label: options.agent });
-	const run = executor.run({
-		session,
-		invocationKind: "task",
-		assignment: prompt,
-		agent: options.agent,
-		context: options.context,
-		identity: { id },
-		detached: true,
-		retainArtifacts: true,
-		keepAlive: true,
-	});
+	// The seam is one more spawn path in this session: it takes the same
+	// semaphore as the task tool and workflow agent(), so task.maxConcurrency
+	// and task.concurrencyPolicy apply. A refused spawn throws before reserving.
+	await acquireSessionSpawnPermit(session);
+	let id: string;
+	let run: Promise<StructuredSubagentResult>;
+	try {
+		id = await executor.reserveId(session, { label: options.agent });
+		run = executor.run({
+			session,
+			invocationKind: "task",
+			assignment: prompt,
+			agent: options.agent,
+			context: options.context,
+			identity: { id },
+			detached: true,
+			retainArtifacts: true,
+			keepAlive: true,
+		});
+	} catch (error) {
+		releaseSessionSpawnPermit(session);
+		throw error;
+	}
 	// The run outlives this call: log a later failure instead of leaving an
-	// unhandled rejection, and let the ref's lifecycle carry the outcome.
-	void run.catch(error => {
+	// unhandled rejection, let the ref's lifecycle carry the outcome, and hold
+	// the spawn slot until the run actually settles — not merely until it
+	// registers.
+	const settled = run.catch(error => {
 		logger.warn("spawnSubagent run failed", {
 			agentId: id,
 			error: error instanceof Error ? error.message : String(error),
 		});
 	});
+	void settled.finally(() => releaseSessionSpawnPermit(session));
 	return awaitRegisteredRef(
 		registry,
 		id,

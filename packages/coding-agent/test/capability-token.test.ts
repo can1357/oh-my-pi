@@ -270,8 +270,11 @@ describe("failed isolated run", () => {
 	});
 });
 
-describe("agent release", () => {
-	it("refuses to release a parked agent whose transcript exists only in memory", async () => {
+describe("interactive agent release", () => {
+	it("releases a parked agent whose transcript exists only in memory without a token", async () => {
+		// Agent Hub, RPC `cancel_subagent` and collab kills have no force channel;
+		// they are the user's explicit decision and must be able to finish. The
+		// refusal lives at the model-facing proc://kill surface instead.
 		const registry = new AgentRegistry();
 		const ref = registry.register({
 			id: "parked-memory",
@@ -284,44 +287,26 @@ describe("agent release", () => {
 		expect(unsavedAgentWork(ref)).toBeDefined();
 		const lifecycle = new AgentLifecycleManager(registry);
 
-		const refusal = await refusalMessage(lifecycle.release("parked-memory"));
-		expect(refusal.message).toContain(refusal.error.token);
-		expect(refusal.message).toContain("force:");
-		expect(registry.get("parked-memory")).toBe(ref);
-
-		expect(await lifecycle.release("parked-memory", undefined, { force: refusal.error.token })).toBeTrue();
+		expect(await lifecycle.release("parked-memory")).toBeTrue();
 		expect(registry.get("parked-memory")).toBeUndefined();
 	});
 
-	it("refuses a replayed release token", async () => {
+	it("tombstones an agent that still owes queued messages", async () => {
 		const registry = new AgentRegistry();
-		registry.register({
-			id: "parked-memory",
-			displayName: "Parked Memory",
+		const ref = registry.register({
+			id: "busy",
+			displayName: "Busy",
 			kind: "sub",
 			parentId: "Main",
-			status: "parked",
-			session: null,
+			status: "aborted",
+			session: fakeSession({ ircWakesPending: true }),
+			sessionFile: "/tmp/busy.jsonl",
 		});
+		expect(unsavedAgentWork(ref)).toBeDefined();
 		const lifecycle = new AgentLifecycleManager(registry);
-		const refusal = await refusalMessage(lifecycle.release("parked-memory"));
-		await lifecycle.release("parked-memory", undefined, { force: refusal.error.token });
 
-		const registry2 = new AgentRegistry();
-		registry2.register({
-			id: "parked-memory",
-			displayName: "Parked Memory",
-			kind: "sub",
-			parentId: "Main",
-			status: "parked",
-			session: null,
-		});
-		const lifecycle2 = new AgentLifecycleManager(registry2);
-		const replay = await refusalMessage(
-			lifecycle2.release("parked-memory", undefined, { force: refusal.error.token }),
-		);
-		expect(replay.error.token).not.toBe(refusal.error.token);
-		expect(registry2.get("parked-memory")).toBeDefined();
+		expect(await lifecycle.release("busy", ref, { tombstone: true })).toBeTrue();
+		expect(registry.get("busy")?.status).toBe("aborted");
 	});
 
 	it("releases a session-backed agent without a token", async () => {

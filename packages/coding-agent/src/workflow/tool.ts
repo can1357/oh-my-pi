@@ -18,6 +18,8 @@ import { randomUUID } from "node:crypto";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { assertNotRemoteA2aAgent } from "../a2a/agent-bridge";
+import { acquireSessionSpawnPermit, releaseSessionSpawnPermit } from "../task/spawn-limiter";
 import { runStructuredSubagent } from "../task/structured-subagent";
 import type { ToolSession } from "../tools";
 import { throwIfAborted } from "../tools/tool-errors";
@@ -68,19 +70,41 @@ export const WORKFLOW_TOOL_NAME = "workflow";
 export function createWorkflowAgentRunner(session: ToolSession, signal?: AbortSignal): WorkflowAgentCaller {
 	return async (prompt, opts) => {
 		throwIfAborted(signal);
-		const { result } = await runStructuredSubagent({
-			session,
-			invocationKind: "task",
-			assignment: prompt,
-			...(opts?.agent !== undefined ? { agent: opts.agent } : {}),
-			...(opts?.context !== undefined ? { context: opts.context } : {}),
-			structured: false,
-			detached: false,
-			enableIrc: false,
-			...(signal !== undefined ? { signal } : {}),
-			identity: { label: opts?.agent !== undefined ? `workflow:${opts.agent}` : "workflow" },
-		});
-		return { result: result.output.trim(), tokens: result.tokens ?? 0 };
+		// Only the task tool can route a remote A2A agent to its endpoint; the VM
+		// would run the placeholder definition locally.
+		assertNotRemoteA2aAgent(session, opts?.agent);
+		// One more spawn path in the session, behind the same semaphore as the
+		// task tool and the pi.spawnSubagent seam.
+		await acquireSessionSpawnPermit(session, signal);
+		try {
+			const { result } = await runStructuredSubagent({
+				session,
+				invocationKind: "task",
+				assignment: prompt,
+				...(opts?.agent !== undefined ? { agent: opts.agent } : {}),
+				...(opts?.context !== undefined ? { context: opts.context } : {}),
+				structured: false,
+				detached: false,
+				enableIrc: false,
+				...(signal !== undefined ? { signal } : {}),
+				identity: { label: opts?.agent !== undefined ? `workflow:${opts.agent}` : "workflow" },
+			});
+			// The executor reports a failed run as a value, not a throw. Mirror its
+			// success predicate (`!aborted && exitCode === 0 && !error`) so the
+			// journal records `failed` and a resume re-executes instead of caching
+			// the failure as a completed answer.
+			if (result.aborted === true || result.exitCode !== 0 || result.error !== undefined) {
+				const reason =
+					result.error ??
+					(result.aborted === true
+						? result.abortReason?.trim() || "the run was aborted"
+						: `the run exited with code ${result.exitCode}`);
+				throw new Error(reason);
+			}
+			return { result: result.output.trim(), tokens: result.tokens ?? 0 };
+		} finally {
+			releaseSessionSpawnPermit(session);
+		}
 	};
 }
 

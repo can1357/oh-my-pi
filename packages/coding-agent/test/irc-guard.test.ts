@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus, type IrcBusApi } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { IrcIngressGuard } from "@oh-my-pi/pi-coding-agent/irc/ingress-guard";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -131,6 +132,29 @@ describe("IrcBus ingress guard", () => {
 		const afterWindow = await bus.send({ from: "0-Sender", to: "0-Sink", body: "fresh".padEnd(40, "y") });
 		expect(afterWindow.outcome).toBe("injected");
 		expect(sink.delivered).toHaveLength(4);
+	});
+
+	it("delivers a lone message larger than the whole rate budget, then cuts the burst", async () => {
+		const bus = makeBus();
+		const { sink } = registerPeers();
+		// 500 chars = 125 tokens, more than four times the 30-token budget. A
+		// single long report from a subagent must never be refused by a budget it
+		// alone exceeds: an empty window always admits one message.
+		const longBody = "a".repeat(500);
+		const first = await bus.send({ from: "0-Sender", to: "0-Sink", body: longBody });
+		expect(first.outcome).toBe("injected");
+		expect(sink.delivered[0]?.body).toBe(longBody);
+
+		// Flood semantics stay intact: the long message spent the window, so the
+		// rest of the burst is refused until the window slides past it.
+		const followUp = await bus.send({ from: "0-Sender", to: "0-Sink", body: "short follow-up" });
+		expect(followUp.outcome).toBe("failed");
+		expect(followUp.error).toStartWith("rate limited");
+
+		clock.now += 501;
+		const afterWindow = await bus.send({ from: "0-Sender", to: "0-Sink", body: "after the window" });
+		expect(afterWindow.outcome).toBe("injected");
+		expect(sink.delivered.map(message => message.body)).toEqual([longBody, "after the window"]);
 	});
 
 	it("counts the rate budget per sender: two senders under the limit both pass", async () => {
@@ -383,6 +407,37 @@ describe("IrcBus ingress guard", () => {
 			"injected",
 		);
 		expect((await bus.send({ from: "0-Worker", to: "0-Sink", body: "two".padEnd(40, "x") })).outcome).toBe("failed");
+	});
+});
+
+describe("IrcIngressGuard sender-window cap", () => {
+	const limits = { rateLimitTokens: 30, dedupWindowMs: 0, maxHops: 0 };
+
+	it("evicts the oldest window when a sweep cannot free a slot", () => {
+		const guard = new IrcIngressGuard();
+		// 300 senders all inside one 500 ms window: the idle sweep cannot free
+		// anything, so the cap must evict the oldest window rather than grow.
+		for (let index = 0; index < 300; index++) {
+			expect(
+				guard.check(
+					{ id: `m-${index}`, from: `sender-${index}`, to: "sink", body: `x${index}`, ts: index },
+					limits,
+				),
+			).toBeUndefined();
+		}
+		expect(guard.rateWindowCount).toBe(256);
+	});
+
+	it("sweeps idle senders first, keeping the live ones", () => {
+		const guard = new IrcIngressGuard();
+		for (let index = 0; index < 256; index++) {
+			guard.check({ id: `m-${index}`, from: `sender-${index}`, to: "sink", body: `x${index}`, ts: 0 }, limits);
+		}
+		// Every window above is 600 ms old: a new sender's sweep frees them all.
+		expect(
+			guard.check({ id: "late", from: "late-sender", to: "sink", body: "late", ts: 600 }, limits),
+		).toBeUndefined();
+		expect(guard.rateWindowCount).toBe(1);
 	});
 });
 

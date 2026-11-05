@@ -31,7 +31,7 @@ export const CAPABILITY_TOKEN_TTL_MS = 10 * 60 * 1000;
 export const CapabilityAction = {
 	/** Delete an isolation worktree that still holds uncommitted changes. */
 	isolationDiscard: "isolation-discard",
-	/** Release an agent registration whose unsaved output has no other copy. */
+	/** Kill an agent registration whose unsaved output has no other copy (`proc://<id>/kill`). */
 	agentRelease: "agent-release",
 } as const;
 export type CapabilityAction = (typeof CapabilityAction)[keyof typeof CapabilityAction];

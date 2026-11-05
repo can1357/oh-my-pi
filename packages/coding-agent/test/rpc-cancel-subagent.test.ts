@@ -90,6 +90,35 @@ describe("handleRpcCancelSubagent", () => {
 		expect(ref?.session).toBeNull();
 	});
 
+	test("kills a subagent that still owes queued peer messages (no force channel)", async () => {
+		emitLifecycle("Busy", "started");
+		AgentRegistry.global().register({
+			id: "Busy",
+			displayName: "Busy",
+			kind: "sub",
+			session: {
+				ircWakesPending: true,
+				abort: async () => {
+					calls.push("abort:Busy");
+				},
+				dispose: async () => {
+					calls.push("dispose:Busy");
+				},
+			} as never,
+			sessionFile: ownSessionFile,
+			status: "running",
+		});
+
+		// An RPC host has no force parameter to hand back: the kill must finish
+		// instead of asking for a capability token it cannot supply.
+		await expect(handleRpcCancelSubagent(registry, "Busy")).resolves.toBe(true);
+
+		expect(calls).toEqual(["abort:Busy", "dispose:Busy"]);
+		const ref = AgentRegistry.global().get("Busy");
+		expect(ref?.status).toBe("aborted");
+		expect(ref?.session).toBeNull();
+	});
+
 	test("does not touch another session's same-name subagent", async () => {
 		// This session's roster lists SubagentA, but the process-global registry
 		// now holds a different session's agent under the same id.

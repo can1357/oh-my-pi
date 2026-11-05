@@ -414,15 +414,15 @@ export function buildJobResult(
 
 /**
  * `cancel`: kill the named jobs; returns immediately with outcomes + snapshots.
- * `force` carries the caller's one-shot capability token through to an agent
- * release that would otherwise destroy unsaved output.
+ * The model-facing `proc://<id>/kill` surface authorizes a release that would
+ * destroy unsaved output with a one-shot capability token before calling here
+ * (see `internal-urls/proc-protocol.ts`); the lifecycle itself never refuses.
  */
 export async function executeCancel(
 	session: ToolSession,
 	manager: AsyncJobManagerApi,
 	ownerId: string | undefined,
 	ids: string[],
-	force?: string,
 ): Promise<AgentToolResult<CoordinationDetails>> {
 	const cancelOutcomes: CancelOutcome[] = [];
 	for (const id of ids) {
@@ -431,7 +431,7 @@ export async function executeCancel(
 			// No job by this id (or it belongs to another agent): a budget-aborted
 			// keep-alive subagent lives on as a jobless registration long after its
 			// job row is reaped, so let cancel reach the agent registration too.
-			cancelOutcomes.push(await cancelAgentRegistration(session, ownerId, id, force));
+			cancelOutcomes.push(await cancelAgentRegistration(session, ownerId, id));
 			continue;
 		}
 		if (existing.status !== "running") {
@@ -439,7 +439,7 @@ export async function executeCancel(
 			// The agent registration behind it (job id == agent id for task
 			// spawns) can outlive the row as an idle/parked zombie — try the
 			// registration kill before reporting the row as already done.
-			const regOutcome = await cancelAgentRegistration(session, ownerId, id, force);
+			const regOutcome = await cancelAgentRegistration(session, ownerId, id);
 			cancelOutcomes.push(
 				regOutcome.status === "cancelled"
 					? regOutcome
@@ -474,7 +474,6 @@ export async function cancelAgentRegistration(
 	session: ToolSession,
 	ownerId: string | undefined,
 	id: string,
-	force?: string,
 ): Promise<CancelOutcome> {
 	const registry = session.agentRegistry;
 	const ref = registry?.get(id);
@@ -493,7 +492,7 @@ export async function cancelAgentRegistration(
 			await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
 		}
 		if (lifecycle) {
-			await lifecycle.release(id, undefined, force === undefined ? undefined : { force });
+			await lifecycle.release(id, undefined);
 		} else {
 			await ref.session?.dispose();
 			registry?.unregister(id);

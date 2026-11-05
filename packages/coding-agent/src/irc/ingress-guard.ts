@@ -64,6 +64,11 @@ export class IrcIngressGuard {
 	/** Highest send time seen; see {@link IrcIngressGuard.check}. */
 	#lastNow = 0;
 
+	/** Sender windows currently retained; bounded by {@link MAX_RATE_SENDERS}. */
+	get rateWindowCount(): number {
+		return this.#rates.size;
+	}
+
 	/**
 	 * Refuse `message` under `limits`, or return `undefined` to let it through.
 	 * An accepted send spends its caller's rate budget and claims its dedup key.
@@ -105,14 +110,31 @@ export class IrcIngressGuard {
 		// leans on the upstream invariant that only the main agent broadcasts
 		// (`irc/messaging.ts`: "Only the main agent can broadcast"); if subagents
 		// ever regain broadcast, charge its legs again.
-		if (message.broadcast || message.wakeRelay) return undefined;
+		// Bridge deliveries are external client requests, not agent-loop traffic:
+		// they have no shared sender budget to spend.
+		if (message.broadcast || message.wakeRelay || message.external) return undefined;
 		let window = this.#rates.get(message.from);
 		if (!window) {
 			// Agent ids are unique per spawn, so a long-lived process would keep one
-			// window per agent ever seen. Sweep senders that left the window first.
+			// window per agent ever seen. Sweep senders that left the window first;
+			// when every window is still live (a burst of 256+ distinct senders),
+			// evict the oldest anyway — the map stays bounded either way, at the
+			// cost of a reset budget for that one sender.
 			if (this.#rates.size >= MAX_RATE_SENDERS) {
 				for (const [sender, idle] of this.#rates) {
 					if (now - (idle.times.at(-1) ?? 0) >= IRC_RATE_WINDOW_MS) this.#rates.delete(sender);
+				}
+				if (this.#rates.size >= MAX_RATE_SENDERS) {
+					let oldestSender: string | undefined;
+					let oldestSent = Number.POSITIVE_INFINITY;
+					for (const [sender, idle] of this.#rates) {
+						const lastSent = idle.times.at(-1) ?? 0;
+						if (lastSent < oldestSent) {
+							oldestSent = lastSent;
+							oldestSender = sender;
+						}
+					}
+					if (oldestSender !== undefined) this.#rates.delete(oldestSender);
 				}
 			}
 			window = { times: [], costs: [], head: 0, total: 0 };
@@ -130,7 +152,12 @@ export class IrcIngressGuard {
 		}
 		// A message costs its body length in characters / 4, at least one token.
 		const cost = Math.max(1, Math.ceil(message.body.length / CHARS_PER_TOKEN));
-		if (window.total + cost > limit) {
+		// An empty window always admits one message, however expensive: a single
+		// long report (a subagent's answer, a 500-character summary) must never be
+		// refused by a budget it alone exceeds. Flood semantics are unchanged —
+		// the message spends the whole window, so the rest of the burst is cut
+		// until the window slides past it.
+		if (window.total > 0 && window.total + cost > limit) {
 			return {
 				reason: "rate-limited",
 				error: `rate limited: "${message.from}" may send ${limit} tokens per ${IRC_RATE_WINDOW_MS} ms and this message costs ${cost} — wait a moment or send less`,
@@ -146,7 +173,9 @@ export class IrcIngressGuard {
 		// Progress notes and automated wake relays are meant to repeat: an agent
 		// may send the same interim line twice, and two wake turns can end with
 		// identical output. Neither is the repetition loop dedup exists to stop.
-		if (windowMs <= 0 || message.progress || message.wakeRelay) return undefined;
+		// An external bridge request is identified by its own A2A `messageId`, so
+		// the same text twice is two requests, not a loop.
+		if (windowMs <= 0 || message.progress || message.wakeRelay || message.external) return undefined;
 		while (this.#dedupHead < this.#dedupOrder.length) {
 			const entry = this.#dedupOrder[this.#dedupHead]!;
 			if (now - entry.ts < windowMs) break;
