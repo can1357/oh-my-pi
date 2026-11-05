@@ -62,6 +62,7 @@ import type { XdevMountedState } from "../tools/xdev";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../render/index";
 import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
 import { chatTranscriptDisplayPreferences } from "./display-preferences";
+import { type ToolRunCall, toolRunOf } from "./tool-run";
 import { FenceFigure } from "./fence-figure";
 import { SpotlightNotices } from "./spotlight";
 import { sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
@@ -992,7 +993,9 @@ export class ToolExecutionComponent extends Container {
 			(pendingCallConsumesSpinner || partialResultConsumesSpinner);
 		// A collapsed title row draws its own spinner glyph for any live call.
 		const isLiveTitleRow =
-			this.rendersCollapsedTitleRow() && this.#nativeStatus() === "running" && !isBackgroundAsyncRunning;
+			(this.rendersCollapsedTitleRow() || toolRunOf(this)?.collapsed() === true) &&
+			this.#nativeStatus() === "running" &&
+			!isBackgroundAsyncRunning;
 		// TSP terminals clock spinners themselves; the frame counter is ANSI-only.
 		const needsSpinner =
 			!isNativeRendering() &&
@@ -1098,6 +1101,7 @@ export class ToolExecutionComponent extends Container {
 	isTranscriptBlockPending(): boolean {
 		// A collapsed title row never draws the figure, so its raster cannot gate history.
 		if (chatTranscriptDisplayPreferences.collapsedToolTitles && !this.#expanded) return false;
+		if (toolRunOf(this)?.collapsed()) return false;
 		return (
 			this.#toolActivityVisible &&
 			this.#presentation.shown.mode === "full" &&
@@ -1125,7 +1129,21 @@ export class ToolExecutionComponent extends Container {
 		// A parked background task's call already returned; job frames that land
 		// while it is still live keep updating it, but it must not gate history.
 		if (this.#parkedBackground) return true;
-		return !this.#isPartial;
+		return !this.#isPartial && (toolRunOf(this)?.tailFinalized(this) ?? true);
+	}
+
+	/** Task cards stay out of tool runs: their live subagent rows are click targets of their own. */
+	toolRunCalls(): readonly ToolRunCall[] | undefined {
+		if (this.#toolName === "task" || this.#presentation.shown.mode === "hidden") return undefined;
+		const { label, detail } = this.#titleParts();
+		const status = (
+			{ pending: "pending", running: "running", done: "success", error: "error", cancelled: "warning" } as const
+		)[this.#nativeStatus()];
+		return [{ label, detail, status }];
+	}
+
+	isToolRunExpanded(): boolean {
+		return this.#expanded;
 	}
 
 	/**
@@ -1134,6 +1152,8 @@ export class ToolExecutionComponent extends Container {
 	 * Callers intersect with the live registry, which decides focusability.
 	 */
 	getClickFocusAgentIds(): string[] {
+		const run = toolRunOf(this);
+		if (run?.clickable()) return [run.clickId];
 		if (this.#toolName !== "task") return [];
 		return taskCardAgentIds(this.#result?.details);
 	}
@@ -1268,6 +1288,7 @@ export class ToolExecutionComponent extends Container {
 			return false;
 		}
 		const mode = this.#presentation.shown.mode;
+		if (mode !== "hidden" && toolRunOf(this)?.collapsed()) return true;
 		return mode === "compact" || (mode === "full" && this.rendersCollapsedTitleRow());
 	}
 
@@ -1704,6 +1725,8 @@ export class ToolExecutionComponent extends Container {
 		}
 		const presentation = this.#presentation.draw();
 		if (presentation.mode === "hidden") return [];
+		const runRows = toolRunOf(this)?.rowsFor(this, width, this.#allocation);
+		if (runRows !== undefined) return runRows;
 		if (presentation.mode === "compact") {
 			// A squeezed allocation keeps the head (identity, spinner) and as many rows as fit.
 			return compactRows(this.#compactText(width), presentation, width, this.#compactGlyph()).slice(
@@ -1767,22 +1790,30 @@ export class ToolExecutionComponent extends Container {
 
 	/** One row per call: status glyph, tool label, primary target. Ctrl+O restores the full card. */
 	#renderTitleRow(width: number): readonly string[] {
-		const summary = this.#activitySummary();
 		const status = (
 			{ pending: "pending", running: "running", done: "success", error: "error", cancelled: "warning" } as const
 		)[this.#nativeStatus()];
-		// Without a renderer summary the detail is a generic command/path/input guess or a
-		// "running" placeholder; a search's query or pattern names the call better.
-		const generic = this.#renderer?.activitySummary === undefined || summary.detail === "running";
-		const target = ((generic ? this.#titleTarget() : undefined) ?? summary.detail ?? "").replace(/\s+/g, " ").trim();
-		const detail = target ? theme.fg("muted", ` · ${sanitizeText(target)}`) : "";
-		const label = sanitizeText(summary.label).replace(/\s+/g, " ");
+		const { label, detail: target } = this.#titleParts();
+		const detail = target ? theme.fg("muted", ` · ${target}`) : "";
 		return [
 			truncateToWidth(
 				`${formatStatusIcon(status, theme, this.#spinnerFrame)} ${theme.fg("toolTitle", theme.bold(label))}${detail}`,
 				width,
 			),
 		];
+	}
+
+	/** Sanitized one-line label and primary target, shared by the title row and tool-run summaries. */
+	#titleParts(): { label: string; detail: string | undefined } {
+		const summary = this.#activitySummary();
+		// Without a renderer summary the detail is a generic command/path/input guess or a
+		// "running" placeholder; a search's query or pattern names the call better.
+		const generic = this.#renderer?.activitySummary === undefined || summary.detail === "running";
+		const target = ((generic ? this.#titleTarget() : undefined) ?? summary.detail ?? "").replace(/\s+/g, " ").trim();
+		return {
+			label: sanitizeText(summary.label).replace(/\s+/g, " "),
+			detail: target ? sanitizeText(target) : undefined,
+		};
 	}
 
 	/** Search-style primary targets the shared summary fallback leaves out. */

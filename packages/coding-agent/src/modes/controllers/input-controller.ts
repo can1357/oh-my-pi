@@ -30,6 +30,7 @@ import { HistorySearchComponent } from "@oh-my-pi/pi-tui/overlays/history-search
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { isToolRunClickId, toggleToolRun } from "@oh-my-pi/pi-tui/chat/tool-run";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 import {
 	chipLabel,
@@ -86,6 +87,7 @@ import {
 	cfgBareExitOnEmptySession,
 	cfgBareSlashCommands,
 	cfgDisplayCollapsedToolTitles,
+	cfgDisplayGroupToolCalls,
 	cfgDisplayHideToolActivity,
 	cfgDoubleEscapeAction,
 	cfgEmojiAutocomplete,
@@ -947,6 +949,12 @@ export class InputController {
 	#focusClickedAgent(screenRow: number): void {
 		const candidates = this.#viewportCandidates(screenRow);
 		if (candidates.length === 0) return;
+		// A tool-run row toggles that run between its summary and its calls, in the live viewport.
+		const toolRunId = candidates.find(isToolRunClickId);
+		if (toolRunId !== undefined) {
+			if (toggleToolRun(toolRunId)) this.ctx.ui.requestRender();
+			return;
+		}
 		const refs = AgentRegistry.global().list();
 		const scoped = refs.filter(ref => candidates.includes(ref.id));
 		// A live agent wins over the expander sentinel: task names are
@@ -3111,9 +3119,11 @@ export class InputController {
 				child.setExpanded(expanded);
 			}
 		}
-		// Title mode hides every tool body in committed history too, so Ctrl+O must replay it;
-		// otherwise blocks already committed to terminal history keep their presentation.
-		if (cfgDisplayCollapsedToolTitles.get(this.ctx.settings)) this.ctx.ui.resetDisplay();
+		// Title mode and tool runs hide tool bodies in committed history too, so Ctrl+O must replay
+		// it; otherwise blocks already committed to terminal history keep their presentation.
+		const replay =
+			cfgDisplayCollapsedToolTitles.get(this.ctx.settings) || cfgDisplayGroupToolCalls.get(this.ctx.settings);
+		if (replay) this.ctx.ui.resetDisplay();
 		else this.ctx.ui.requestRender(true);
 	}
 

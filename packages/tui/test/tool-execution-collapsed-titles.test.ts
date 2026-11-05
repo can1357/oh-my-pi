@@ -257,6 +257,23 @@ describe("display.collapsedToolTitles", () => {
 			expect(transcript.liveRowCount(100)).toBe(rendered.length);
 		});
 
+		it("packs back-to-back title rows and their metrics rows without blanks", () => {
+			setChatTranscriptDisplayPreferences({ collapsedToolTitles: true });
+			const { transcript } = mountTranscript();
+			const second = mount({ path: "src/next.ts" });
+			second.updateResult({ content: [{ type: "text", text: "secret-output" }] }, false);
+			transcript.addChild(second);
+			transcript.addChild(createUsageRowBlock(usage, 1000, undefined, 1_700_000_000_000));
+			const rendered = rows(transcript);
+			expect(rendered).toEqual([
+				expect.stringContaining("Probe · src/app.ts"),
+				expect.stringContaining("20.0/s"),
+				expect.stringContaining("Probe · src/next.ts"),
+				expect.stringContaining("20.0/s"),
+			]);
+			expect(transcript.liveRowCount(100)).toBe(4);
+		});
+
 		it("keeps a blank above the metrics row once the card is expanded", () => {
 			setChatTranscriptDisplayPreferences({ collapsedToolTitles: true });
 			const { c, transcript } = mountTranscript();

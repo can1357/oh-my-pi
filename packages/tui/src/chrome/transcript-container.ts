@@ -7,6 +7,8 @@ import type { DescribeContext, NativeNode } from "../native/node";
 import { sameItems } from "../native/memo";
 import { isNativeSettled, settleNative } from "../native/settle";
 import { isUsageRowBlock } from "../overlays/usage-row";
+import { chatTranscriptDisplayPreferences } from "../chat/display-preferences";
+import { asToolRunMember, leaveToolRun, ToolRun, type ToolRunMemberBlock, toolRunOf } from "../chat/tool-run";
 import { isToolActivityComponent } from "./tool-activity";
 import { directPlacementLift, ImageProtocol, iterm2ImagePayload, TERMINAL } from "../terminal-capabilities";
 
@@ -600,8 +602,7 @@ export class TranscriptContainer extends Container {
 	 * a lower bound, guaranteed only to be greater than `limit`.
 	 */
 	liveRowCount(width: number, limit = Number.POSITIVE_INFINITY): number {
-		this.#syncEntries();
-		this.#settleFinalized();
+		this.#prepare(width);
 		let total = 0;
 		let above = this.#projectedHistoryEnd();
 		for (const { entry, index } of this.#liveEntries()) {
@@ -714,8 +715,7 @@ export class TranscriptContainer extends Container {
 	}
 
 	#composeViewport(width: number, rows: number, frame: AnimationFrame): readonly string[] {
-		this.#syncEntries();
-		this.#settleFinalized();
+		this.#prepare(width);
 		const live = this.#liveEntries();
 		const capacity = Math.max(0, Math.trunc(rows));
 		if (live.length === 0 || capacity === 0) {
@@ -919,8 +919,7 @@ export class TranscriptContainer extends Container {
 	}
 
 	#peekBatch(width: number, capacity: number, policy: RetirementPolicy): HistoryBatch | undefined {
-		this.#syncEntries();
-		this.#settleFinalized();
+		this.#prepare(width);
 		if (this.#offered !== undefined) return this.#offered.batch;
 		const replay = this.#peekReplayBatch(width);
 		if (replay !== undefined) return replay;
@@ -1151,6 +1150,7 @@ export class TranscriptContainer extends Container {
 	 */
 	renderTail(width: number, maxRows: number): readonly string[] {
 		this.#syncEntries();
+		this.#linkToolRuns(width);
 		const cap = Math.max(0, Math.trunc(maxRows));
 		if (cap === 0) return EMPTY_ROWS;
 		const rows: string[] = [];
@@ -1255,6 +1255,7 @@ export class TranscriptContainer extends Container {
 	/** Full semantic render used by exports and non-terminal commands. */
 	override render(width: number): readonly string[] {
 		this.#syncEntries();
+		this.#linkToolRuns(width);
 		this.#childStartRows.clear();
 		const rows: string[] = [];
 		let above: RowsAbove;
@@ -1626,6 +1627,7 @@ export class TranscriptContainer extends Container {
 	}
 
 	#retireEntry(entry: TranscriptEntry): void {
+		toolRunOf(entry.component)?.freezeIfHead(entry.component);
 		entry.state = "committed";
 		entry.emitted = 0;
 		entry.split = undefined;
@@ -1778,6 +1780,78 @@ export class TranscriptContainer extends Container {
 
 	#setAllocation(component: Component, rows: number, frame: AnimationFrame): void {
 		(component as Component & TranscriptPresentationTarget).setTranscriptAllocation?.(rows, frame);
+	}
+
+	/** Sync, link tool runs, then settle: run membership decides whether a run's head is final. */
+	#prepare(width: number): void {
+		this.#syncEntries();
+		this.#linkToolRuns(width);
+		this.#settleFinalized();
+	}
+
+	/**
+	 * Link the live tail's back-to-back tool blocks into runs
+	 * (`display.groupToolCalls`). A run spans tool blocks with nothing visible
+	 * between them; usage rows inside it are absorbed. Membership is re-derived
+	 * every pass, so a transient row (a live thinking head) between two calls
+	 * stops splitting them once it draws nothing. A run whose head already left
+	 * for history is final: its members keep it, and later calls start afresh.
+	 */
+	#linkToolRuns(width: number): void {
+		if (!chatTranscriptDisplayPreferences.groupToolCalls) return;
+		const start = this.#offered?.kind === "commit" ? this.#offered.end : this.#frontier;
+		let run: ToolRun | undefined;
+		let head: TranscriptEntry | undefined;
+		let members: ToolRunMemberBlock[] = [];
+		const close = (): void => {
+			if (run === undefined || head === undefined) return;
+			run.link(members);
+			// A head that settled before a later call joined draws that call's progress again.
+			if (head.state === "settled" && !isFinalized(head.component)) head.state = "active";
+			run = undefined;
+			head = undefined;
+			members = [];
+		};
+		for (let index = start; index < this.#entries.length; index++) {
+			const entry = this.#entries[index]!;
+			const member = asToolRunMember(entry.component);
+			const calls = member?.toolRunCalls();
+			if (member === undefined || calls === undefined) {
+				if (this.#measure(entry, width).rows.length > 0) close();
+				continue;
+			}
+			const existing = toolRunOf(member);
+			if (existing !== undefined && existing.head !== member && this.#isRetiringHead(existing, start)) {
+				close();
+				continue;
+			}
+			if (calls.length === 0) {
+				if (run !== undefined) {
+					members.push(member);
+					continue;
+				}
+				leaveToolRun(member);
+				if (this.#measure(entry, width).rows.length > 0) close();
+				continue;
+			}
+			// A head partly committed by pressure keeps its rows; a new call starts its own run.
+			if (head?.split !== undefined) close();
+			if (run === undefined) {
+				run = existing?.head === member && !existing.frozen ? existing : new ToolRun();
+				head = entry;
+			}
+			members.push(member);
+		}
+		close();
+	}
+
+	/** Whether `run`'s head is history already, or sits in the commit batch offered ahead of `start`. */
+	#isRetiringHead(run: ToolRun, start: number): boolean {
+		if (run.frozen) return true;
+		for (let index = this.#frontier; index < start; index++) {
+			if (this.#entries[index]!.component === run.head) return true;
+		}
+		return false;
 	}
 
 	#settleFinalized(): void {

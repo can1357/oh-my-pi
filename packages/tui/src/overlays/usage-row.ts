@@ -1,6 +1,7 @@
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import { Container } from "../tui";
 import { chatTranscriptDisplayPreferences } from "../chat/display-preferences";
+import { type ToolRunCall, toolRunOf } from "../chat/tool-run";
 import { Spacer } from "../components/spacer";
 import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import { theme } from "../theme/theme";
@@ -188,7 +189,25 @@ class UsageRowBlock extends Container {
 
 	/** Title mode packs the turn's metrics against the title rows of its calls. */
 	isTranscriptBlockCompact(): boolean {
-		return chatTranscriptDisplayPreferences.collapsedToolTitles;
+		return chatTranscriptDisplayPreferences.collapsedToolTitles || toolRunOf(this)?.collapsed() === true;
+	}
+
+	override render(width: number): readonly string[] {
+		return toolRunOf(this)?.rowsFor(this, width) ?? super.render(width);
+	}
+
+	/** A tool run absorbs the row of a turn that only called tools, without counting it as a call. */
+	toolRunCalls(): readonly ToolRunCall[] {
+		return [];
+	}
+
+	isToolRunExpanded(): boolean {
+		return false;
+	}
+
+	getClickFocusAgentIds(): string[] {
+		const run = toolRunOf(this);
+		return run?.clickable() ? [run.clickId] : [];
 	}
 
 	/**

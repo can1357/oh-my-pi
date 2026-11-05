@@ -26,6 +26,7 @@ import { wrapTreeLine } from "../render/hanging-wrap";
 import { wrapTextWithAnsi } from "../utils";
 import { canonicalizeMessage } from "./thinking-display";
 import { chatTranscriptDisplayPreferences } from "./display-preferences";
+import { type ToolRunCall, toolRunOf } from "./tool-run";
 import { internalUrlSchemeSpec, splitUrlScheme } from "../tools/url-scheme-host";
 import { SpotlightNotices } from "./spotlight";
 import type { ToolExecutionHandle } from "./tool-execution";
@@ -442,6 +443,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	 */
 	override render(width: number): readonly string[] {
 		if (!this.#toolActivityVisible) return [];
+		const runRows = toolRunOf(this)?.rowsFor(this, width);
+		if (runRows !== undefined) return runRows;
 		if (this.#builtTitleMode !== chatTranscriptDisplayPreferences.collapsedToolTitles) this.#updateDisplay();
 		const entries = [...this.#entries.values()];
 		const drawn = entries.map(entry => entry.presentation.draw());
@@ -511,12 +514,32 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		// flight — parallel reads can finalize the group (a sibling tool starts and
 		// breaks the run) before a read's `tool_execution_end` lands. Keep the block
 		// active so the late result updates the pending preview.
-		return !this.#hasPendingEntries();
+		return !this.#hasPendingEntries() && (toolRunOf(this)?.tailFinalized(this) ?? true);
+	}
+
+	toolRunCalls(): readonly ToolRunCall[] {
+		return [...this.#entries.values()]
+			.filter(entry => entry.presentation.shown.mode !== "hidden")
+			.map(entry => ({
+				label: "Read",
+				detail: entry.path,
+				status: entry.status === "pending" ? "running" : entry.status,
+			}));
+	}
+
+	isToolRunExpanded(): boolean {
+		return this.#expanded;
+	}
+
+	getClickFocusAgentIds(): string[] {
+		const run = toolRunOf(this);
+		return run?.clickable() ? [run.clickId] : [];
 	}
 
 	/** Compact only while every read it draws is a compact row; title mode draws full reads as title rows. */
 	isTranscriptBlockCompact(): boolean {
 		if (!this.#toolActivityVisible) return false;
+		if (toolRunOf(this)?.collapsed()) return true;
 		const titleRows = chatTranscriptDisplayPreferences.collapsedToolTitles && !this.#expanded;
 		let compact = false;
 		for (const entry of this.#entries.values()) {
