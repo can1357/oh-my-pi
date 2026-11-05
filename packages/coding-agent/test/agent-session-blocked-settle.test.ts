@@ -201,4 +201,45 @@ describe("AgentSession.settleAsyncWork and idle waits of the agents it waits on"
 		expect(registry.awaits.waitersOn("Second")).toEqual([]);
 		second.resolve("done");
 	});
+
+	it("releases every hold even when a subscription's detach throws", async () => {
+		// Release runs over unrelated resources: a detach that throws must not
+		// strand the holds behind it, or the agents they name go on being
+		// refused their own waits after the settle ended.
+		const registry = AgentRegistry.global();
+		registry.register({ id: "Lead", displayName: "Lead", kind: "sub", session: null as never, status: "running" });
+		const manager = new AsyncJobManager({});
+		cleanups.push(async () => {
+			await manager.dispose({ timeoutMs: 100 });
+		});
+		const first = Promise.withResolvers<string>();
+		const second = Promise.withResolvers<string>();
+		manager.register("task", "First", async () => first.promise, {
+			id: "First",
+			agentId: "First",
+			ownerId: "Lead",
+		});
+		manager.register("task", "Second", async () => second.promise, {
+			id: "Second",
+			agentId: "Second",
+			ownerId: "Lead",
+		});
+		const realOnChange = registry.onChange.bind(registry);
+		vi.spyOn(registry, "onChange").mockImplementation(listener => {
+			const detach = realOnChange(listener);
+			return () => {
+				detach();
+				throw new Error("injected unsubscribe failure after detach");
+			};
+		});
+		const release = holdOwnedJobs(registry, manager, "Lead");
+		vi.restoreAllMocks();
+		expect(registry.awaits.waitersOn("First")).toEqual(["Lead"]);
+		// The failure still reaches the caller, after every release has run.
+		expect(release).toThrow("injected unsubscribe failure after detach");
+		expect(registry.awaits.waitersOn("First")).toEqual([]);
+		expect(registry.awaits.waitersOn("Second")).toEqual([]);
+		first.resolve("done");
+		second.resolve("done");
+	});
 });

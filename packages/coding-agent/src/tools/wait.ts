@@ -19,6 +19,7 @@ import type { AgentRegistryApi } from "../registry/agent-registry";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import { throwIfAborted } from "./tool-errors";
+import { releaseAll } from "../utils/late-cleanup";
 import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
 
 import { cfgLaunchEnabled, cfgToolsMaxTimeout } from "./settings";
@@ -537,7 +538,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				}
 			}
 		} finally {
-			for (const release of cleanup.reverse()) release();
+			releaseAll([...cleanup].reverse());
 		}
 		// A dequeued message wins a photo-finish with a job: the job remains
 		// deliverable, whereas a lost message cannot be recovered from the bus.

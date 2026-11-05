@@ -45,6 +45,7 @@ import { type AgentProgress, oneLineLabel, type SingleResult } from "@oh-my-pi/p
 import type { ToolSession } from "../tools";
 import { formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { releaseAll } from "../utils/late-cleanup";
 import { calculateTokensPerSecond } from "../utils/token-rate";
 
 import {
@@ -1025,7 +1026,7 @@ export class VibeSessionRegistry {
 					);
 					waitEndedByTimeout = (await Promise.race(racePromises)) === "timeout";
 				} finally {
-					for (const release of cleanup.reverse()) release();
+					releaseAll([...cleanup].reverse());
 				}
 			}
 

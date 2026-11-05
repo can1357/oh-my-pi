@@ -4,6 +4,7 @@ import { awaitNodeOfJob } from "../registry/agent-awaits";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { ToolAbortError } from "../tools/tool-errors";
+import { releaseAll } from "../utils/late-cleanup";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { withBridgeTimeoutPause } from "./bridge-timeout";
 import { type CompletionAttempt, getCompletionHandle, type CompletionHandleEntry } from "./completion-bridge";
@@ -252,7 +253,7 @@ export async function runEvalWait(
 				}
 				outcome = await waitForSettlement(resolved, timeoutMs, options.signal);
 			} finally {
-				for (const release of cleanup.reverse()) release();
+				releaseAll([...cleanup].reverse());
 			}
 			for (const handle of resolved) emitLatestProgress(handle);
 			if (outcome === "aborted") {

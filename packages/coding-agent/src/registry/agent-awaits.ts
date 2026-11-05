@@ -10,6 +10,7 @@
  * agents it waits on are recorded as its holds, so blocking on such a job
  * blocks on them too. Such nodes are never reported as waiters.
  */
+import { releaseAll } from "../utils/late-cleanup";
 
 /**
  * Stands in for the user among awaited ids: an agent with a dialog open that
@@ -177,9 +178,12 @@ export function holdOwnedJobs(registry: AwaitRegistry, manager: OwnedJobSource, 
 	let ended = false;
 	const release = (): void => {
 		ended = true;
-		for (const unsubscribe of unsubscribers.splice(0)) unsubscribe();
-		for (const releaseHold of holds.values()) releaseHold();
+		// Every release runs even if one throws: a subscription whose detach
+		// fails must not strand the holds, which would go on refusing the
+		// agents they name their own waits.
+		const releases = [...unsubscribers.splice(0), ...holds.values()];
 		holds.clear();
+		releaseAll(releases);
 	};
 	const sync = (): void => {
 		if (ended) return;
