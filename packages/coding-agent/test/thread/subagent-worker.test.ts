@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import * as fs from "node:fs";
 import * as path from "node:path";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
 import { RpcClosedError } from "../../src/thread/rpc";
@@ -12,7 +11,6 @@ import {
 	SubagentWorkerPool,
 	type SubagentWorkerPoolOptions,
 } from "../../src/thread/subagent-worker";
-import { CODE_SKEW_SHARED } from "../fixtures/code-skew-shared";
 
 const cleanups: Array<() => void> = [];
 
@@ -63,18 +61,6 @@ async function leaseFrom(pool: SubagentWorkerPool): Promise<{ worker: SubagentWo
 	const worker = placement.worker;
 	if (!worker) throw new Error("the pool kept the run on the main thread");
 	return { worker, release: () => placement.release() };
-}
-
-/** Mark `file` as written after this process started; restored after the test. */
-function touchFile(file: string): void {
-	const { atime, mtime } = fs.statSync(file);
-	fs.utimesSync(file, atime, new Date());
-	cleanups.push(() => fs.utimesSync(file, atime, mtime));
-}
-
-/** Mark the fixture module `name` as edited after this process started. */
-function touchFixture(name: string): void {
-	touchFile(path.join(import.meta.dir, "../fixtures", name));
 }
 
 function probeService(): ThreadService & { installed: WorkerPeer[]; exits: string[] } {
@@ -294,53 +280,16 @@ describe("SubagentWorkerPool", () => {
 		expect(pool.workers()).toEqual([]);
 	});
 
-	it("keeps runs on the main thread once a worker loads code that changed under the main thread", async () => {
-		expect(CODE_SKEW_SHARED).toBe("shared");
-		touchFixture("code-skew-shared.ts");
-		const pool = workerOnlyPool(2, {
-			worker: { entry: new URL("../fixtures/code-skew-worker.ts", import.meta.url) },
-		});
-
-		const first = await pool.acquire();
-		expect(first.worker).toBeUndefined();
-		expect(pool.mainRuns).toBe(1);
-		expect(pool.workers()).toEqual([]);
-		// Decided for the process: no further worker is even started, whatever the concurrency.
-		const second = await pool.acquire();
-		expect(second.worker).toBeUndefined();
-		expect(pool.mainRuns).toBe(2);
-		pool.prewarm(32);
-		await nextImmediate();
-		expect(pool.workers()).toEqual([]);
-		first.release();
-		second.release();
-		expect(pool.mainRuns).toBe(0);
-	});
-
-	it("still uses a worker when only modules the main thread never loaded changed", async () => {
-		touchFixture("code-skew-worker-only.ts");
+	it("fails a run whose worker dies at startup with that worker's own error", async () => {
 		const pool = workerOnlyPool(1, {
-			worker: { entry: new URL("../fixtures/code-skew-worker.ts", import.meta.url) },
+			worker: { entry: new URL("../fixtures/subagent-fatal-worker.ts", import.meta.url) },
 		});
 
-		const lease = await leaseFrom(pool);
-		expect(lease.worker.booted).toBe(true);
-		lease.release();
-	});
-
-	it("still uses a worker when the native addon both threads loaded was written after main started", async () => {
-		// What a compiled binary's first run does: it extracts the addon to the natives dir, then loads it.
-		let addon: string | undefined;
-		for (const modulePath in require.cache) if (modulePath.endsWith(".node")) addon ??= modulePath;
-		if (!addon) throw new Error("the main thread loaded no native addon");
-		touchFile(addon);
-		const pool = workerOnlyPool(1, {
-			worker: { entry: new URL("../fixtures/code-skew-worker.ts", import.meta.url) },
-		});
-
-		const lease = await leaseFrom(pool);
-		expect(lease.worker.booted).toBe(true);
-		lease.release();
+		await expect(pool.acquire()).rejects.toThrow(
+			/exited before ready: worker crashed: .*Cannot find module '\.\/gone'/s,
+		);
+		expect(pool.runsInFlight).toBe(0);
+		expect(pool.workers()).toEqual([]);
 	});
 
 	it("restarts an idle worker's countdown on prewarm instead of starting another", async () => {
