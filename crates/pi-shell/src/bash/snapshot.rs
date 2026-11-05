@@ -58,13 +58,13 @@
 //! incompatible image returns
 //! [`RestoreError::Incompatible`](crate::bash::RestoreError::Incompatible)
 //! before reading any state-store records and leaves the stored image intact.
-//! There is no automatic migration or abandonment. With the same IR version,
-//! a host can explicitly use [`RestoreOpts::drop_frames`] to keep root state
-//! and abandon running scripts with status 255. A differing IR version is
-//! refused in every restore mode because record keys may have changed.
-//! A shell already running in the old library continues there, but its frames
-//! cannot be resumed by an incompatible new library. Stores without a Frames
-//! image do not have this layout restriction.
+//! There is no automatic migration or abandonment. With the same magic and
+//! IR version, a host can explicitly use [`RestoreOpts::drop_frames`] to keep
+//! root state and abandon running scripts with status 255. Differing magic or
+//! IR versions are refused in every restore mode because record keys may
+//! differ. A shell already running in the old library continues there, but its
+//! frames cannot be resumed by an incompatible new library. Stores without a
+//! Frames image do not have this layout restriction.
 
 use serde::{Deserialize, Serialize};
 
@@ -78,7 +78,7 @@ use crate::bash::{
 pub struct RestoreOpts {
 	/// Ignore the frames blob: keep root state, abandon the scripts that were
 	/// running (each reports `Done` with status 255). Recovery for a different
-	/// frames layout or build, but not a different IR record schema.
+	/// frames layout or build, but not a different magic or IR record schema.
 	pub drop_frames: bool,
 }
 

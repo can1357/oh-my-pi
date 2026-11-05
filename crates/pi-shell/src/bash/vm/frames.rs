@@ -11,8 +11,9 @@
 //! Layout: a postcard [`Header`] (magic `OBF1`, IR version, frames version,
 //! engine build id, ids of the scripts in flight) followed by a postcard
 //! [`Image`] of every vproc, script, frame and staged op. The header decodes
-//! on its own, so an incompatible blob can still be abandoned with
-//! `RestoreOpts { drop_frames: true }`.
+//! on its own, so a blob with the same magic and IR version can still be
+//! abandoned with `RestoreOpts { drop_frames: true }` when its build or layout
+//! differs.
 //!
 //! Fds: the image numbers every distinct fd object once ([`FdObjImage`];
 //! slots, saved fds and substitutions refer to it by index), and every
@@ -679,10 +680,12 @@ impl Shell {
 	///
 	/// # Errors
 	///
-	/// [`RestoreError::Incompatible`] for frames of another IR version or
-	/// engine build (retry with `drop_frames`), [`RestoreError::Corrupt`] /
-	/// [`RestoreError::InvalidUnit`] for undecodable or inconsistent blobs,
-	/// [`RestoreError::MissingUnit`], [`RestoreError::Store`].
+	/// [`RestoreError::Incompatible`] for frames with another magic, IR
+	/// version, layout or engine build. `drop_frames` bypasses only layout
+	/// and build differences, never magic or IR version differences.
+	/// [`RestoreError::Corrupt`] / [`RestoreError::InvalidUnit`] for
+	/// undecodable or inconsistent blobs, [`RestoreError::MissingUnit`],
+	/// [`RestoreError::Store`].
 	pub fn restore(
 		engine: &Arc<Engine>,
 		cx: &mut Cx<'_>,
@@ -692,8 +695,9 @@ impl Shell {
 		let frames = if let Some(bytes) = bytes.as_deref() {
 			let (header, body) =
 				postcard::take_from_bytes::<Header>(bytes).map_err(RestoreError::Corrupt)?;
-			if !opts.drop_frames || header.ir != IR_VERSION {
-				check(&header).map_err(|why| RestoreError::Incompatible { why })?;
+			match check(&header) {
+				Err(Incompatibility::Build) if opts.drop_frames => {},
+				checked => checked.map_err(|why| RestoreError::Incompatible { why })?,
 			}
 			Some((header, body))
 		} else {
