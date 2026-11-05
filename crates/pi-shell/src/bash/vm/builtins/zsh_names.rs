@@ -499,7 +499,17 @@ fn hashed(ctx: &mut Ctx<'_, '_>) -> Result<Vec<(BString, BString)>, Need> {
 		.collect())
 }
 
-/// zsh's `DEFAULT_PATH` (`command -p`).
+/// zsh's `DEFAULT_PATH` (`command -p`), joined for `platform`.
+fn default_path(platform: crate::bash::ids::Platform) -> BString {
+	let separator = crate::bash::vm::probe::path_separator(platform);
+	let bytes: Vec<u8> = DEFAULT_PATH
+		.iter()
+		.map(|&byte| if byte == b':' { separator } else { byte })
+		.collect();
+	BString::from(bytes)
+}
+
+/// zsh's `DEFAULT_PATH` (`command -p`) on a POSIX host.
 const DEFAULT_PATH: &[u8] = b"/bin:/usr/bin:/usr/ucb:/usr/local/bin";
 
 /// `$PATH` search for `name` (zsh `findcmd`); `defpath`: search zsh's
@@ -511,7 +521,7 @@ fn findcmd(ctx: &mut Ctx<'_, '_>, name: &[u8], defpath: bool) -> Result<Option<B
 			.then(|| name.into()));
 	}
 	let path = if defpath {
-		BString::from(DEFAULT_PATH)
+		default_path(ctx.k.engine.config().platform)
 	} else {
 		ctx.scalar(b"PATH")?.unwrap_or_default()
 	};
@@ -1612,7 +1622,8 @@ fn whence_one(
 	let mut found: Vec<BString> = Vec::new();
 	if all && name.first() != Some(&b'/') {
 		let path = ctx.scalar(b"PATH")?.unwrap_or_default();
-		for dir in path.split(|&c| c == b':') {
+		let separator = crate::bash::vm::probe::path_separator(ctx.k.engine.config().platform);
+		for dir in path.split(|&c| c == separator) {
 			let full: BString = if dir.is_empty() {
 				name.into()
 			} else {
