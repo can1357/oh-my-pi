@@ -182,7 +182,7 @@ describe("registry file I/O", () => {
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-mkt-test-"));
 		marketplacesPath = path.join(tmpDir, "marketplaces.json");
 		installedPath = path.join(tmpDir, "installed_plugins.json");
-		// A registry write only follows a symlink inside a directory omp owns.
+		// A registry write asks to follow a symlink; a temp agent dir keeps it contained.
 		originalAgentDir = getAgentDir();
 		setAgentDir(tmpDir);
 	});

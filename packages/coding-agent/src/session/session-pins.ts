@@ -40,7 +40,8 @@ export async function loadPinnedSessionIds(agentDir: string = getAgentDir()): Pr
  * each other's update (load-load-write-write), and a crash mid-write leaves
  * the previous pins file intact instead of a truncated one that degrades to
  * an empty set. The replace preserves the destination across Windows
- * EPERM/EEXIST rename failures (`replaceFileAtomically`).
+ * EPERM/EEXIST rename failures (`replaceConfigFileAtomically`, which also
+ * follows a symlinked pins file so a shared profile keeps sharing it).
  */
 async function updateSessionPin(
 	sessionId: string,

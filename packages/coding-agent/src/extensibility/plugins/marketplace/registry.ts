@@ -11,9 +11,9 @@
  * location. Path helpers compute the default paths from the dir singleton.
  *
  * All three are staged next to their path and published with
- * `replaceFileAtomically`, the shared helper: one rename, a symlinked
- * destination inside omp's own directories resolved first so the link
- * survives, and the Windows replacement fallback.
+ * `replaceConfigFileAtomically`, the shared helper's config form: one rename,
+ * a symlinked destination followed so the link survives, and the Windows
+ * replacement fallback.
  */
 
 import * as fs from "node:fs/promises";
