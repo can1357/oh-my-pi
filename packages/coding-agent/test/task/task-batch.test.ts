@@ -1230,6 +1230,51 @@ describe("batch model placement", () => {
 		expect(run).not.toHaveBeenCalled();
 	});
 
+	// A review bot read that the batch schema declares no top-level `isolated` and carries
+	// `"+": "delete"`, and concluded the refusal below can never fire on the wire. Measured, each
+	// step separately: the emitted root properties really are `["context","tasks"]` only;
+	// `tool.parameters(...)` really does strip `isolated`; and `validateAgentToolArguments(...)`
+	// nonetheless returns it, so the refusal fires and nothing spawns. The conclusion is wrong even
+	// though its premise holds.
+	//
+	// What this test does *not* claim is which step puts the key back. An earlier version of this
+	// comment said `keepUnknownRootKeys` restores unknown root keys for a lenient tool; forcing that
+	// option to `false` leaves both rows green, so that is not the mechanism and the claim is
+	// withdrawn rather than restated. The rows stand on the observable they assert.
+	//
+	// They are still worth keeping: the sibling refusal rows call `execute` directly and never
+	// traverse validation, which is exactly the interaction the bot questioned. Both isolation
+	// settings, because `isolated` is declared on no batch variant either way.
+	it.each([
+		["isolation enabled", true],
+		["isolation disabled", false],
+	] as const)("keeps a batch top-level isolated through validation so the refusal fires (%s)", async (_l, on) => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(
+			createSession({
+				settings: { "task.batch": true, "async.enabled": false, "task.isolation.enabled": on },
+			}),
+		);
+		const args = validateAgentToolArguments(tool as unknown as AgentTool, {
+			type: "toolCall",
+			id: "task-root-isolated",
+			name: tool.name,
+			arguments: {
+				context: "Shared context",
+				isolated: true,
+				tasks: [{ task: "Reply PONG.", solutionSpace: "one fixed answer", agent: "task", name: "Pong" }],
+			},
+		});
+		// The restore is the thing under test: without it the key is gone here and the refusal below
+		// cannot fire, so the call would dispatch instead.
+		expect((args as Record<string, unknown>).isolated).toBe(true);
+		const result = await tool.execute("task-root-isolated", args as TaskParams);
+		expect(result.isError).toBe(true);
+		expect(getFirstText(result)).toContain("Top-level `isolated` is not part of the batch shape");
+		expect(run).not.toHaveBeenCalled();
+	});
+
 	// The other half of the scoping, and the case it actually changes. `outputSchemaInputSchema` admits
 	// any object and an array is one, so an array `outputSchema` survives validation and nothing
 	// downstream shape-checks it. Before this change arrays were never filler for any key, so an
