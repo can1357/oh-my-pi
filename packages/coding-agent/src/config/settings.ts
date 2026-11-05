@@ -50,6 +50,7 @@ import {
 	inheritWarnings,
 	reportDropped,
 	lookup as lookupSetting,
+	rejectedValueMetadata,
 	resetRegistryForTest,
 	settingValuesEqual,
 	type ValueCacheEntry,
@@ -506,6 +507,25 @@ function configuredValue(merged: RawSettings, setting: AnySetting, cwd: string):
 	return resolvePathScopedStringArray(setting, value, cwd) ?? value;
 }
 
+let permissiveDefaults: { registered: number; settings: AnySetting[] } | undefined;
+
+/**
+ * Settings whose unset state is permissive (`RecordDefinition.permissiveDefault`, e.g.
+ * `tools.approval`): a value one of them rejects counts wherever a config file holds it.
+ */
+function permissiveDefaultSettings(): readonly AnySetting[] {
+	const registered = allSettings();
+	if (permissiveDefaults?.registered !== registered.length) {
+		permissiveDefaults = {
+			registered: registered.length,
+			settings: registered.filter(
+				setting => setting.definition.type === "record" && setting.definition.permissiveDefault === true,
+			),
+		};
+	}
+	return permissiveDefaults.settings;
+}
+
 function resolvePathScopedStringArray(setting: AnySetting, value: unknown, cwd: string): string[] | undefined {
 	const scope = setting.definition.pathScoped;
 	if (!scope || !Array.isArray(value)) return undefined;
@@ -704,7 +724,9 @@ export class Settings {
 	/**
 	 * Runtime-override layer for dotted constructor `overrides`: legacy ids migrate first, then every
 	 * path must belong to a registered setting and every value is normalized and checked like a
-	 * handle `override`. `undefined` values are skipped; `null` stays as an unset tombstone.
+	 * handle `override`. `undefined` values are skipped; `null` stays as an unset tombstone, except
+	 * where unset is permissive (`tools.approval`): there it would erase every lower value, so it is
+	 * refused like any other value the setting rejects.
 	 *
 	 * @throws Error on an unknown setting or a value its definition rejects.
 	 */
@@ -718,7 +740,7 @@ export class Settings {
 		assertKnownSettingPaths(layer);
 		for (const setting of allSettings()) {
 			const value = getByPath(layer, setting.segments);
-			if (value === undefined || value === null) continue;
+			if (value === undefined || (value === null && !setting.rejects(value))) continue;
 			const normalized = setting.definition.normalize ? setting.definition.normalize(value) : value;
 			setting.assertWritable(normalized);
 			setByPath(layer, setting.segments, normalized);
@@ -939,8 +961,10 @@ export class Settings {
 	/**
 	 * Safe metadata for config values this instance ignores because their setting rejects them, each
 	 * with its file: those project and `--config` files dropped as they loaded, and a rejected value
-	 * read as unset (a global one, say) once its setting has been read. An overlay also reports what its
-	 * parent ignores now, not only what it ignored when the overlay was made. Never exposes the raw value.
+	 * read as unset (a global one, say) once its setting has been read. Where unset is permissive
+	 * (`tools.approval`), every rejected value the global file holds counts too, even one a higher
+	 * layer's value hides from every read. An overlay also reports what its parent ignores now, not only
+	 * what it ignored when the overlay was made. Never exposes the raw value.
 	 */
 	ignoredValues(): IgnoredValue[] {
 		const ignored = new Map<string, IgnoredValue>();
@@ -950,6 +974,12 @@ export class Settings {
 		for (const value of this.#parent?.ignoredValues() ?? []) add(value);
 		for (const value of this.warnState.invalid.values()) add(value);
 		for (const layer of this.warnState.dropped.values()) for (const value of layer.values()) add(value);
+		for (const setting of permissiveDefaultSettings()) {
+			const value = getByPath(this.#global, setting.segments);
+			if (setting.rejects(value)) {
+				add({ setting, source: this.#configPath ?? undefined, ...rejectedValueMetadata(value) });
+			}
+		}
 		return [...ignored.values()];
 	}
 
@@ -961,16 +991,6 @@ export class Settings {
 	 */
 	isConfigured(setting: AnySetting): boolean {
 		return this.rawValue(setting) !== undefined;
-	}
-
-	/**
-	 * Whether the merged layers hold `setting`'s key with no value (`approval:` in YAML, read as
-	 * `null`), which {@link rawValue} and {@link isConfigured} take as unset. Only a setting whose unset
-	 * state is permissive needs to tell the two apart: `tools.approval` reads such a key as a
-	 * restriction it could not read, not as no policies.
-	 */
-	isConfiguredNull(setting: AnySetting): boolean {
-		return getByPath(this.#mergedView(), setting.segments) === null;
 	}
 
 	/**
@@ -2593,6 +2613,17 @@ export class Settings {
 		const asWritten = this.#migrateRawSettings(merged, quarantineInvalid);
 		const dropped = new Map<AnySetting, unknown>();
 		const settings = this.#dropRejected(asWritten, dropped);
+		// Where unset is permissive (`tools.approval`), a value a lower file holds counts even when a
+		// higher file's value hides it: unreadable is sticky, so it is dropped and reported like the rest.
+		for (const setting of permissiveDefaultSettings()) {
+			if (dropped.has(setting)) continue;
+			for (let index = items.length - 1; index >= 0; index--) {
+				const value = getByPath(items[index].data as RawSettings, setting.segments);
+				if (!setting.rejects(value)) continue;
+				dropped.set(setting, value);
+				break;
+			}
+		}
 		// The files merged before the filter ran, so a rejected value in a higher file has already
 		// replaced what the lower files hold for that setting. Bring back what they hold that the setting
 		// accepts, merged in file order: a `tools.approval: {bash: deny}` in one file must not vanish
@@ -4133,11 +4164,12 @@ export class Settings {
 	}
 
 	/**
-	 * `data`, one project or `--config` file, without the values its settings reject (the wrong type,
-	 * or not one of an enum's values), each added to `dropped` for the caller to report. Such a value
-	 * reads as unset in its own file, so the files and layers beneath still apply rather than being
-	 * replaced by it while the layers merge. A definition with `validate` keeps its value for that
-	 * check, which then fails the load on its own terms.
+	 * `data`, one project or `--config` file, without the values its settings reject (see
+	 * `Setting.rejects`: the wrong type, not one of an enum's values, or a key left empty where unset is
+	 * permissive), each added to `dropped` for the caller to report. Such a value reads as unset in its
+	 * own file, so the files and layers beneath still apply rather than being replaced by it while the
+	 * layers merge. A definition with `validate` keeps its value for that check, which then fails the
+	 * load on its own terms.
 	 */
 	#dropRejected(data: RawSettings, dropped: Map<AnySetting, unknown>, prefix = ""): RawSettings {
 		const result: RawSettings = {};
@@ -4147,7 +4179,7 @@ export class Settings {
 			const setting = lookupSetting(id);
 			if (!setting) {
 				setOwn(result, key, isRecord(value) ? this.#dropRejected(value, dropped, id) : value);
-			} else if (value === null || value === undefined || setting.definition.validate || setting.accepts(value)) {
+			} else if (setting.definition.validate || !setting.rejects(value)) {
 				setOwn(result, key, value);
 			} else {
 				dropped.set(setting, value);

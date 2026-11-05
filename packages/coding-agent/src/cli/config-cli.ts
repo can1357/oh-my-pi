@@ -268,7 +268,7 @@ async function handleList(flags: { json?: boolean }): Promise<void> {
 			{ value?: unknown; redacted?: true; type: string; description: string; ignored?: IgnoredEntry[] }
 		> = {};
 		for (const def of defs) {
-			const value = def.setting.get(settings);
+			const value = def.setting.displayValue(def.setting.get(settings));
 			result[def.path] =
 				def.setting.isCredential && value
 					? { redacted: true, type: def.type, description: def.description }
@@ -306,7 +306,7 @@ async function handleList(flags: { json?: boolean }): Promise<void> {
 			// single-value request and is left alone. An unset or cleared ("")
 			// credential keeps its ordinary rendering: masking it would imply one
 			// is configured.
-			const value = def.setting.get(settings);
+			const value = def.setting.displayValue(def.setting.get(settings));
 			const valueStr = def.setting.isCredential && value ? REDACTED : formatValue(value);
 			const typeStr = getTypeDisplay(def);
 			console.log(`  ${chalk.white(def.path)} = ${valueStr} ${chalk.dim(typeStr)}`);
@@ -321,7 +321,8 @@ async function handleList(flags: { json?: boolean }): Promise<void> {
  * (`enabledModels`, `enabledProviders`, `disabledProviders`) keep their `{ path, … }` entries
  * unresolved, so a host can edit the layer's own value without dropping them. Defaults, other
  * layers and the environment are not consulted. Credentials are redacted as in `list`. A value
- * the setting rejects, which every read ignores, is marked so and names what was expected.
+ * the setting rejects, which every read ignores, is marked so and names what was expected; an entry
+ * the setting cannot read shows by its shape (`Setting.displayValue`).
  */
 async function handleListLayer(scope: ConfigScope, flags: { json?: boolean }): Promise<void> {
 	const layer = scope === "project" ? settings.getProjectSettings() : settings.getGlobalSettings();
@@ -331,7 +332,6 @@ async function handleListLayer(scope: ConfigScope, flags: { json?: boolean }): P
 		for (const segment of def.setting.segments) value = isRecord(value) ? value[segment] : undefined;
 		if (value !== undefined) entries.push([def, value]);
 	}
-	const ignored = (def: CliSettingDef, value: unknown) => value !== null && !def.setting.accepts(value);
 
 	if (flags.json) {
 		const result: Record<
@@ -348,9 +348,13 @@ async function handleListLayer(scope: ConfigScope, flags: { json?: boolean }): P
 			}
 		> = {};
 		for (const [def, value] of entries) {
-			const rejected = ignored(def, value);
+			const rejected = def.setting.rejects(value);
 			result[def.path] = {
-				...(rejected ? {} : def.setting.isCredential && value ? { redacted: true } : { value }),
+				...(rejected
+					? {}
+					: def.setting.isCredential && value
+						? { redacted: true }
+						: { value: def.setting.displayValue(value) }),
 				type: def.type,
 				description: def.description,
 				...(rejected ? { ignored: true, ...rejectedValueMetadata(value), expected: def.setting.expected } : {}),
@@ -362,12 +366,12 @@ async function handleListLayer(scope: ConfigScope, flags: { json?: boolean }): P
 
 	console.log(chalk.bold(`Settings in the ${scope} layer:\n`));
 	for (const [def, value] of entries) {
-		const rejected = ignored(def, value);
+		const rejected = def.setting.rejects(value);
 		const valueStr = rejected
 			? chalk.yellow(`(ignored: ${describeRejectedValue(value)})`)
 			: def.setting.isCredential && value
 				? REDACTED
-				: formatValue(value);
+				: formatValue(def.setting.displayValue(value));
 		const note = rejected ? ` ${chalk.yellow(`(expected ${def.setting.expected})`)}` : "";
 		console.log(`  ${chalk.white(def.path)} = ${valueStr} ${chalk.dim(getTypeDisplay(def))}${note}`);
 	}
@@ -387,7 +391,7 @@ function handleGet(key: string | undefined, flags: { json?: boolean }): void {
 		process.exit(1);
 	}
 
-	const value = def.setting.get(settings);
+	const value = def.setting.displayValue(def.setting.get(settings));
 
 	if (flags.json) {
 		const ignored = ignoredEntries(def.setting).map(([, entry]) => entry);
@@ -435,7 +439,7 @@ async function handleSet(key: string | undefined, value: string | undefined, fla
 
 	// Report the value written to config.yml. When another layer or an environment variable still
 	// supplies the effective value, say which instead of echoing its value as if it had been set.
-	const saved = globalValue(def.setting);
+	const saved = def.setting.displayValue(globalValue(def.setting));
 	const shadow = shadowingSource(def.setting);
 
 	if (flags.json) {
@@ -515,7 +519,7 @@ async function handleReset(key: string | undefined, flags: { json?: boolean }): 
 	}
 
 	// The effective value may now come from another layer or the environment: never echo a credential.
-	const value = def.setting.get(settings);
+	const value = def.setting.displayValue(def.setting.get(settings));
 	const redacted = def.setting.isCredential && !!value;
 	if (flags.json) {
 		console.log(JSON.stringify(redacted ? { key: def.path, redacted: true } : { key: def.path, value }));

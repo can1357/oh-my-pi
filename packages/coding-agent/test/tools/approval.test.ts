@@ -21,7 +21,8 @@ import type { MCPServerConnection, MCPToolDefinition } from "../../src/mcp/types
 import { Settings } from "../../src/config/settings";
 import { EditTool } from "../../src/edit";
 import type { ToolSession } from "../../src/tools";
-import { loadHandEditedSettings } from "../helpers/hand-edited-settings";
+import * as path from "node:path";
+import { loadHandEditedSettings, writeHandEditedConfig } from "../helpers/hand-edited-settings";
 
 type ApprovalTool = Pick<AgentTool, "name" | "approval" | "formatApprovalDetails">;
 
@@ -322,6 +323,176 @@ describe("tools.approval entries as a user writes them by hand", () => {
 			});
 		}
 		expect(warn.mock.calls.filter(([message]) => String(message).startsWith("Approval:"))).toHaveLength(1);
+	});
+
+	it("keeps a lower project file's deny under a higher project file's value that is not a record, with a --config record over both", async () => {
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
+		using dir = TempDir.createSync("@pi-approval-project-files-");
+		const options = await writeHandEditedConfig(dir, { overlays: [{ tools: { approval: { read: "allow" } } }] });
+		await Bun.write(
+			path.join(options.cwd, ".omp", "settings.json"),
+			JSON.stringify({ tools: { approval: { bash: "deny" } } }),
+		);
+		await Bun.write(path.join(options.cwd, ".omp", "config.yml"), "tools:\n  approval: deny-bash\n");
+		const settings = await Settings.loadReadOnly(options);
+		const { userPolicies } = resolveApprovalFromContext({ settings });
+		// A pattern allow on bash would run the command if the lower deny were lost.
+		const patternAllow = tool("bash", { tier: "exec", policy: "allow" });
+		expect(resolveApproval(patternAllow, {}, "yolo", userPolicies)).toMatchObject({ policy: "deny", source: "user" });
+		expect(resolveApproval(tool("read", "read"), {}, "yolo", userPolicies)).toMatchObject({
+			policy: "prompt",
+			source: "user",
+		});
+		expect(resolveApproval(tool("write", "write"), {}, "yolo", userPolicies)).toMatchObject({
+			policy: "prompt",
+			source: "user",
+		});
+	});
+
+	it.each([
+		["the global file", { global: { tools: { approval: "deny-bash" } } }],
+		["a project file", { project: { tools: { approval: "deny-bash" } } }],
+		["a --config file", { overlays: [{ tools: { approval: "deny-bash" } }] }],
+	])("asks before every tool call when only %s holds a value that is not a record", async (_label, layers) => {
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
+		using dir = TempDir.createSync("@pi-approval-layer-unreadable-");
+		const settings = await loadHandEditedSettings(dir, layers);
+		const { userPolicies } = resolveApprovalFromContext({ settings });
+		expect(resolveApproval(tool("read", "read"), {}, "yolo", userPolicies)).toMatchObject({
+			policy: "prompt",
+			source: "user",
+			reason: "tools.approval is a string of 9 characters, not a record of tool policies such as {bash: deny}",
+		});
+	});
+
+	// A value someone wrote to restrain tools and that cannot be read is sticky at the whole-record level,
+	// wherever it sits: beneath a higher file's record or above a lower one, in the global file, a project
+	// file or a --config file. The record in effect keeps only its denies; every other call asks, even one
+	// that record allows.
+	const placements: [string, (dir: TempDir, unreadable: string | null) => Promise<Settings>][] = [
+		[
+			"in the global file beneath a project record",
+			(dir, unreadable) =>
+				loadHandEditedSettings(dir, {
+					global: { tools: { approval: unreadable } },
+					project: { tools: { approval: { bash: "deny", read: "allow" } } },
+				}),
+		],
+		[
+			"in a lower project file beneath a higher project file's record",
+			async (dir, unreadable) => {
+				const options = await writeHandEditedConfig(dir, {});
+				// The project's settings.json ranks below its config.yml.
+				await Bun.write(
+					path.join(options.cwd, ".omp", "settings.json"),
+					JSON.stringify({ tools: { approval: unreadable } }),
+				);
+				await Bun.write(
+					path.join(options.cwd, ".omp", "config.yml"),
+					"tools:\n  approval:\n    bash: deny\n    read: allow\n",
+				);
+				return Settings.loadReadOnly(options);
+			},
+		],
+		[
+			"in a lower --config file beneath a higher one's record",
+			(dir, unreadable) =>
+				loadHandEditedSettings(dir, {
+					overlays: [
+						{ tools: { approval: unreadable } },
+						{ tools: { approval: { bash: "deny", read: "allow" } } },
+					],
+				}),
+		],
+		[
+			"in a project file above a global record",
+			(dir, unreadable) =>
+				loadHandEditedSettings(dir, {
+					global: { tools: { approval: { bash: "deny", read: "allow" } } },
+					project: { tools: { approval: unreadable } },
+				}),
+		],
+		[
+			"in a --config file above a global record",
+			(dir, unreadable) =>
+				loadHandEditedSettings(dir, {
+					global: { tools: { approval: { bash: "deny", read: "allow" } } },
+					overlays: [{ tools: { approval: unreadable } }],
+				}),
+		],
+		[
+			"in a higher project file above a lower project file's record",
+			async (dir, unreadable) => {
+				const options = await writeHandEditedConfig(dir, {});
+				await Bun.write(
+					path.join(options.cwd, ".omp", "settings.json"),
+					JSON.stringify({ tools: { approval: { bash: "deny", read: "allow" } } }),
+				);
+				await Bun.write(
+					path.join(options.cwd, ".omp", "config.yml"),
+					`tools:\n  approval: ${unreadable === null ? "" : unreadable}\n`,
+				);
+				return Settings.loadReadOnly(options);
+			},
+		],
+	];
+	const unreadableValues: [string, string | null, string][] = [
+		["a value that is not a record", "deny-bash", "tools.approval is a string of 9 characters"],
+		["a key left empty", null, "tools.approval is empty"],
+	];
+	for (const [where, load] of placements) {
+		for (const [what, unreadable, shape] of unreadableValues) {
+			it(`keeps only the denies in effect and asks for everything else with ${what} ${where}`, async () => {
+				vi.spyOn(logger, "warn").mockImplementation(() => {});
+				using dir = TempDir.createSync("@pi-approval-sticky-");
+				const settings = await load(dir, unreadable);
+				const { userPolicies } = resolveApprovalFromContext({ settings });
+				// A `bash.patterns` allow would run the command if the deny were lost.
+				const patternAllow = tool("bash", { tier: "exec", policy: "allow" });
+				expect(resolveApproval(patternAllow, {}, "yolo", userPolicies)).toMatchObject({
+					policy: "deny",
+					source: "user",
+				});
+				expect(resolveApproval(tool("read", "read"), {}, "yolo", userPolicies)).toMatchObject({
+					policy: "prompt",
+					source: "user",
+					reason: `${shape}, not a record of tool policies such as {bash: deny}`,
+				});
+			});
+		}
+	}
+
+	it("keeps a value beneath a usable record unreadable for an overlay of the settings and after each reload", async () => {
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
+		using dir = TempDir.createSync("@pi-approval-sticky-reload-");
+		const settings = await loadHandEditedSettings(
+			dir,
+			{
+				global: { tools: { approval: null } },
+				project: { tools: { approval: { bash: "deny", read: "allow" } } },
+			},
+			{ reloadable: true },
+		);
+		const child = settings.overlay();
+		const readPolicy = (scope: Settings) =>
+			resolveApproval(tool("read", "read"), {}, "yolo", resolveApprovalFromContext({ settings: scope }).userPolicies)
+				.policy;
+		expect([readPolicy(settings), readPolicy(child)]).toEqual(["prompt", "prompt"]);
+		// Fixed in the global file: the project record applies again, in the overlay too.
+		await Bun.write(dir.join("agent", "config.yml"), "tools:\n  approval:\n    write: prompt\n");
+		await settings.reloadFromDisk();
+		expect([readPolicy(settings), readPolicy(child)]).toEqual(["allow", "allow"]);
+		// Broken again, with a value that is not a record this time.
+		await Bun.write(dir.join("agent", "config.yml"), "tools:\n  approval: deny-bash\n");
+		await settings.reloadFromDisk();
+		expect([readPolicy(settings), readPolicy(child)]).toEqual(["prompt", "prompt"]);
+	});
+
+	it("refuses a runtime override that leaves tools.approval empty, which would erase every lower deny", () => {
+		const message = "Invalid value for tools.approval: null (length 4) (expected a record)";
+		expect(() => Settings.isolated({ "tools.approval": null })).toThrow(message);
+		const parent = Settings.isolated({ "tools.approval": { bash: "deny" } });
+		expect(() => parent.overlay({ "tools.approval": null })).toThrow(message);
 	});
 
 	it("refuses to write an entry no policy names", () => {

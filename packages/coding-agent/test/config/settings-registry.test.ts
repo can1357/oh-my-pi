@@ -20,6 +20,7 @@ import { cfgTaskAgentPrewalk, cfgTaskMaxConcurrency } from "@oh-my-pi/pi-coding-
 import { cfgEvalPy } from "@oh-my-pi/pi-coding-agent/eval/settings";
 import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgSearxngBasicPassword, cfgSearxngEndpoint } from "@oh-my-pi/pi-coding-agent/web/settings";
+import { cfgToolsApproval } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 const tick = () => Promise.resolve();
 
@@ -179,10 +180,15 @@ describe("settings registry", () => {
 		capture(() => Settings.isolated({ "task.perCallModelAllow": secret }));
 		capture(() => Settings.isolated({ "task.perCallModelAllow": [{ token: secret }] }));
 		capture(() => Settings.isolated({ temperature: secret }));
+		// `tools.approval` has an entry normalizer, but whole values still travel through the generic
+		// record parse/write paths: neither can reveal a token when a user edits the setting by hand.
+		capture(() => Settings.isolated({ "tools.approval": secret }));
+		capture(() => cfgToolsApproval.set(Settings.isolated(), secret as never));
+		capture(() => cfgToolsApproval.parse(secret));
 		for (const id of ["temperature", "compaction.enabled", "steeringMode", "task.agentPrewalk"]) {
 			capture(() => lookup(id)?.parse(secret));
 		}
-		expect(errors).toHaveLength(10);
+		expect(errors).toHaveLength(13);
 		expect(errors.join("\n")).not.toContain(secret);
 		expect(errors).toContain(
 			`Error: Invalid session.maxCost: expected a positive USD amount, got string (length ${secret.length}).`,

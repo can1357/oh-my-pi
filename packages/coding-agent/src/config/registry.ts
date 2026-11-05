@@ -166,6 +166,19 @@ export interface RecordDefinition<T = unknown> extends DefinitionBase {
 	default: Readonly<Record<string, T>>;
 	env?: SettingEnv<Readonly<Record<string, T>>>;
 	ui?: UiBase;
+	/**
+	 * The default grants what a configured value restrains (`tools.approval`: `{}` means no policies),
+	 * so a value this setting cannot read must never read as unset. A key left empty (`null`) is
+	 * rejected rather than unset, and `Settings.ignoredValues` lists every rejected value a config file
+	 * holds, even one a higher layer's or file's value hides (see {@link Setting.rejects}).
+	 */
+	permissiveDefault?: true;
+	/**
+	 * Whether an entry is one this setting can read. Only writes check entries (`normalize`), so a
+	 * config file can still hold one it cannot; every surface that shows the value shows such an entry
+	 * by its shape alone (see {@link Setting.displayValue}).
+	 */
+	readableEntry?: (entry: unknown) => boolean;
 }
 
 /** Any setting definition accepted by {@link register}. */
@@ -626,6 +639,34 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 			case "record":
 				return typeof value === "object" && value !== null && !Array.isArray(value);
 		}
+	}
+
+	/**
+	 * Whether a config file's `value` for this setting is one the setting rejects, so it reads as unset
+	 * in that file: the wrong type, or not one of an enum's values. A key left empty (`null`) is unset,
+	 * not rejected, except where unset is permissive ({@link RecordDefinition.permissiveDefault}).
+	 */
+	rejects(value: unknown): boolean {
+		if (value === undefined) return false;
+		if (value === null) return this.definition.type === "record" && this.definition.permissiveDefault === true;
+		return !this.accepts(value);
+	}
+
+	/**
+	 * `value` as a surface may show it (the config CLI, `cfg://`, the settings panel): a record entry
+	 * this setting cannot read ({@link RecordDefinition.readableEntry}) becomes its shape,
+	 * `(unreadable: string (length 6))`, never its text, since a misplaced token is the likeliest one.
+	 */
+	displayValue(value: unknown): unknown {
+		const readable = this.definition.type === "record" ? this.definition.readableEntry : undefined;
+		if (!readable || !this.accepts(value)) return value;
+		let shown: Record<string, unknown> | undefined;
+		for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+			if (readable(entry)) continue;
+			shown ??= { ...(value as Record<string, unknown>) };
+			shown[key] = `(unreadable: ${describeRejectedValue(entry)})`;
+		}
+		return shown ?? value;
 	}
 
 	/** What {@link accepts} requires, for messages: "one of a, b", "an array", "a number". */

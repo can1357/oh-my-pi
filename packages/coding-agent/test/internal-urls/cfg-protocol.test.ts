@@ -51,6 +51,39 @@ describe("CfgProtocolHandler", () => {
 		expect(resource.content).not.toContain("sekrit");
 	});
 
+	it("shows an unreadable tools.approval entry by its shape, never its text, in reads and write prompts", async () => {
+		const dir = TempDir.createSync("@pi-cfg-unreadable-approval-");
+		try {
+			// A token pasted into the wrong place is the likeliest unreadable entry worth hiding.
+			const secret = "cfg-approval-entry-token-17619";
+			const settings = await loadHandEditedSettings(dir, {
+				global: { tools: { approval: { bash: "deny", read: secret } } },
+			});
+			const shown = JSON.stringify({ bash: "deny", read: `(unreadable: string (length ${secret.length}))` });
+			const leaf = await read("cfg://tools/approval", settings);
+			const tree = await read("cfg://tools", settings);
+			const asked: CfgChangeRequest[] = [];
+			setCfgApprovalHost({
+				approve: async request => (asked.push(request), "deny"),
+				applied: () => {},
+				persistentSettings: settings,
+			});
+			const declined = await write("cfg://tools/approval", '{"bash":"deny"}', settings);
+			expect(leaf.content).toStartWith(`tools.approval: ${shown}`);
+			expect(asked.map(request => request.previous)).toEqual([shown]);
+			const output = [
+				leaf.content,
+				tree.content,
+				JSON.stringify(asked),
+				textOf(declined),
+				JSON.stringify(declined.details),
+			];
+			expect(output.join("\n")).not.toContain(secret);
+		} finally {
+			dir.removeSync();
+		}
+	});
+
 	it("refuses writes when no host can ask the user", async () => {
 		const settings = Settings.isolated();
 		await expect(write("cfg://advisor/enabled", "true", settings)).rejects.toThrow("requires user approval");

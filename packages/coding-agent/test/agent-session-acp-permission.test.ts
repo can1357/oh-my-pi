@@ -96,7 +96,7 @@ async function createSession(
 		xdev?: XdevState;
 		builtInToolNames?: string[];
 		persist?: boolean;
-		/** Settings to run with instead of an isolated instance built from `settingsOverrides`; used by the config-file tests. */
+		/** Settings to run with instead of an isolated instance built from `settingsOverrides`. */
 		settings?: Settings;
 	},
 ): Promise<AgentSession> {
@@ -450,6 +450,7 @@ it("explicit yolo still gates a destructive tool whose hand-edited policy is not
 		logWarn.mockRestore();
 	}
 });
+
 /**
  * Minimal runner for wrapping a tool exactly as an ACP session does: no
  * interactive UI (so the inner tier gate fails closed) and no event handlers.
