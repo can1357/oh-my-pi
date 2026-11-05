@@ -1178,15 +1178,18 @@ describe("batch model placement", () => {
 
 			// A populated array is a real mistake, not filler, and must reach a message that says what to
 			// send instead. With the gate off that is "omit model"; with it on, the exact selector form.
-			// A non-string entry is populated too: the looser `!some(isRealString)` predicate dropped
-			// `[123]` silently, which contradicted the rule it was written under.
+			//
+			// A non-string entry belongs here for the refusal, not for the predicate: the declared element
+			// type is `string`, so validation rewrites `[123]` to the JSON text `"[123]"` before dispatch
+			// sees it, and it never reaches the array branch at all. The predicate's non-string case is
+			// pinned on the raw path instead, below.
 			it.each([
-				["a real selector", ["openai/gpt-5.4"] as unknown],
-				["two selectors", ["openai/gpt-5.4", "anthropic/claude-opus-5"]],
-				["a non-string entry", [123]],
+				["a real selector", ["openai/gpt-5.4"] as unknown, true],
+				["two selectors", ["openai/gpt-5.4", "anthropic/claude-opus-5"], true],
+				["a non-string entry", [123], false],
 			] as const)(
 				`refuses a validated call whose model is %s (seance ${seanceLabel}, gate ${gate})`,
-				async (_label, model) => {
+				async (_label, model, survivesAsArray) => {
 					const { result, spawned } = await dispatchArrayModel(seanceAdvertised, gate, model);
 					expect(result.isError).toBe(true);
 					expect(spawned).toBe(0);
@@ -1194,13 +1197,65 @@ describe("batch model placement", () => {
 						expect(getFirstText(result)).toMatch(/Omit model to use the agent's configured model/);
 					} else {
 						expect(getFirstText(result)).toMatch(/one exact provider\/model-id selector/);
-						// The value quoted back is the one the caller sent, not a stringified rewrite of it.
-						expect(getFirstText(result)).toContain(JSON.stringify(model));
+						// A genuine string array is quoted back as the array the caller sent. A non-string one is
+						// quoted as the JSON text validation rewrote it to, which is what the caller will see.
+						const quoted = survivesAsArray ? JSON.stringify(model) : JSON.stringify(JSON.stringify(model));
+						expect(getFirstText(result)).toContain(`value ${quoted}.`);
 					}
 				},
 			);
 		}
 	}
+
+	// Where the predicate's non-string case IS reachable: an internal caller bypassing the wire schema,
+	// which is also what the lenient raw path hands dispatch when a sibling item fails validation.
+	// `every(isBlankString)` keeps a malformed selector so the gate refuses it; the looser
+	// `!some(isRealString)` called it blank and dropped it, and the task then spawned with the gate
+	// never consulted.
+	it.each([
+		["a numeric entry", [123] as unknown],
+		["an object entry", [{ provider: "openai" }]],
+		["a nested array", [["openai/gpt-5.4"]]],
+	] as const)("refuses an internal call whose model array holds %s", async (_label, model) => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": true, "async.enabled": false, "task.perCallModel": "off" } }),
+		);
+		const result = await tool.execute("task-raw-array-model", {
+			context: "Shared context",
+			tasks: [{ task: "Reply PONG.", solutionSpace: "one fixed answer", agent: "task", name: "Pong", model }],
+		} as never);
+		expect(result.isError).toBe(true);
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	// The other half of the scoping, and the case it actually changes. `outputSchemaInputSchema` admits
+	// any object and an array is one, so an array `outputSchema` survives validation and nothing
+	// downstream shape-checks it. Before this change arrays were never filler for any key, so an
+	// `outputSchema: []` stayed the caller's schema; adding an array arm for every blankable key made
+	// it blank and dropped it, handing the agent's own schema to a caller that asked for none. Only
+	// `model` and `sourceSession` have an array arm now, which restores that.
+	it.each([
+		["an empty array", [] as unknown],
+		["an array of blanks", ["", "  "]],
+		["a populated array", [{ type: "object" }]],
+	] as const)("keeps %s as the caller's `outputSchema` rather than treating it as filler", async (_l, schema) => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Pong"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": true, "async.enabled": false, "task.structured": true } }),
+		);
+		const result = await tool.execute("task-array-output-schema", {
+			context: "Shared context",
+			tasks: [{ task: "Do work", solutionSpace: "c", agent: "task", name: "Arr", outputSchema: schema }],
+		} as never);
+		expect(result.isError).toBeFalsy();
+		expect(run).toHaveBeenCalledTimes(1);
+		const options = run.mock.calls[0]?.[0] as unknown as Record<string, unknown>;
+		expect(options.outputSchemaSource).toBe("caller");
+		expect(options.outputSchema).toEqual(schema);
+	});
 
 	// Regression: lenient argument repair deletes keys an item's schema does not declare, at any depth, so an
 	// item that needs repair (`name: 5`) loses a real `model` unless the item schema keeps declaring it. The

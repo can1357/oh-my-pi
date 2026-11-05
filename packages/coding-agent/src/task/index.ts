@@ -553,28 +553,39 @@ function isBlankString(value: unknown): boolean {
 	return typeof value === "string" && value.trim() === "";
 }
 /**
- * A value that names nothing: an empty or whitespace-only string, or an array whose every entry is
- * one. Both are what a model sends for a field it has nothing to put in, and the per-call gate
- * refuses either — it fires for any value that is not `undefined`, before a selector is ever looked
- * at, so `model: []` was answered with "Per-call model is disabled… Omit model" for a field the
- * caller filled with nothing.
+ * The keys whose array form can be filler. An array that names nothing is only safe to drop where
+ * its *populated* form reaches a refusal that says what to send instead —
+ * `invalidModelSelectorReason` for `model`, the seance checks for `sourceSession`.
  *
- * `every` on a blank, not `!some` on a real one. They differ on an array holding a non-string —
- * `[123]`, `[{…}]`, `[["…"]]` — which the looser form called blank and dropped, contradicting the
- * rule below. Two review arms found it independently, and both found that swapping the predicate
- * left 127 tests green, which is why the distinction is pinned by a test now.
+ * `outputSchema` is deliberately not here, and leaving it in was a defect this change introduced:
+ * `outputSchemaInputSchema` admits any `object`, and an array is one, so `outputSchema: [{…}]`
+ * survives validation and nothing downstream shape-checks it (`resolveSchema` takes it by presence).
+ * Treating an array as filler there turned "silently ignored" into "silently malformed" for a key
+ * outside this change's subject.
+ */
+const ARRAY_BLANKABLE_KEYS: Partial<Record<BlankableKey, true>> = { model: true, sourceSession: true };
+
+/**
+ * An array that names nothing — `[]`, or one whose every entry is a blank string. That is what a
+ * model sends for a selector it has nothing to put in, and the per-call gate refuses it: the gate
+ * fires for any value that is not `undefined`, before a selector is looked at, so `model: []` was
+ * answered with "Per-call model is disabled… Omit model" for a field filled with nothing.
  *
- * A *populated* array stays, including a non-string one. `task.md` documents "no roles, arrays,
- * globs or partial IDs", so one is a real mistake, and `invalidModelSelectorReason` answers it with
- * the exact selector form to send instead.
+ * A *populated* array stays. `task.md` documents "no roles, arrays, globs or partial IDs", so one
+ * is a real mistake, and `invalidModelSelectorReason` answers it with the exact selector form.
+ *
+ * `every` on a blank rather than `!some` on a real one. They differ on an array holding a
+ * non-string, which the looser form called blank and dropped. On the wire that case is
+ * unreachable — the declared element type is `string`, so validation rewrites such an array to its
+ * JSON text before dispatch sees it — but an internal caller and the lenient raw path both reach
+ * it, and dropping a malformed selector there would spawn with the gate never consulted.
  *
  * This is safe on both planning paths only because ./types declares `model` as `string | string[]`
  * unconditionally. While that widening was seance-only, the narrow schema rewrote an array to its
  * JSON text, so dispatch saw `"[]"` where the speculative launcher — which plans from the raw
  * arguments — saw `[]`, and the two disagreed wherever seance was hidden.
  */
-function isBlankValue(value: unknown): boolean {
-	if (typeof value === "string") return value.trim() === "";
+function isBlankArray(value: unknown): boolean {
 	return Array.isArray(value) && value.every(entry => isBlankString(entry));
 }
 
@@ -598,8 +609,8 @@ function isRealString(value: unknown): boolean {
  *
  * `null` is left alone: an `outputSchema: null` is a real signal — presence, not truthiness, makes
  * the caller's schema win, so it is how an internal caller says "no schema, and ignore the agent's
- * own". An array that names nothing is dropped; see {@link isBlankValue} for why, and for the
- * measurement that corrects what this comment used to claim about arrays.
+ * own". An array that names nothing is dropped, but only for `model` and `sourceSession`; see
+ * {@link ARRAY_BLANKABLE_KEYS} for why `outputSchema` is not one of them.
  *
  * The copy keeps every contract-bearing field however the caller stores it. A spread takes own
  * enumerable properties only, and an internal caller bypassing the wire schema may hand us an
@@ -613,7 +624,8 @@ function withoutBlankFields<T extends TaskItem | TaskParams>(item: T): T {
 	if (isRealString(item.task) || isBlankString(item.task)) keys.push("taskFile");
 	let out = item;
 	for (const key of keys) {
-		if (!isBlankValue(item[key])) continue;
+		const blank = isBlankString(item[key]) || (ARRAY_BLANKABLE_KEYS[key] === true && isBlankArray(item[key]));
+		if (!blank) continue;
 		if (out === item) out = copyTaskFields(item, {});
 		delete out[key];
 	}

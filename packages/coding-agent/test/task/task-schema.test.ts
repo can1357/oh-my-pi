@@ -179,13 +179,21 @@ describe("task schema seance fields", () => {
 			for (const isolationEnabled of [false, true]) {
 				const schema = getTaskSchema({ batchEnabled, isolationEnabled });
 				expect(JSON.stringify(schema.toJsonSchema())).not.toContain('"sourceSession"');
-				const call = (model: unknown): unknown =>
-					batchEnabled
+				// Assert the value the schema *kept*, not merely that validation passed: with `"+": "delete"`
+				// a schema that does not declare `model` at all accepts every one of these and silently
+				// drops the key, so an acceptance-only assertion passes against the field this PR exists
+				// to keep declared.
+				const kept = (model: unknown): unknown => {
+					const out = batchEnabled
 						? schema({ context: "c", tasks: [{ task: "x", solutionSpace: "c", model }] })
 						: schema({ task: "x", solutionSpace: "c", model });
-				expect(call("openai/gpt-5.4") instanceof type.errors).toBe(false);
-				expect(call(["openai/gpt-5.4"]) instanceof type.errors).toBe(false);
-				expect(call([]) instanceof type.errors).toBe(false);
+					expect(out instanceof type.errors).toBe(false);
+					const item = batchEnabled ? (out as { tasks: Array<{ model?: unknown }> }).tasks[0] : out;
+					return (item as { model?: unknown }).model;
+				};
+				expect(kept("openai/gpt-5.4")).toBe("openai/gpt-5.4");
+				expect(kept(["openai/gpt-5.4"])).toEqual(["openai/gpt-5.4"]);
+				expect(kept([])).toEqual([]);
 			}
 		}
 	});
