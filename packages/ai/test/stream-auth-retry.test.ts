@@ -1064,8 +1064,8 @@ describe("streamSimple credential organization", () => {
 				// A fresh terminal message, as the thinking-loop guard builds: it carries
 				// the attempt's usage and ends the turn, so nothing downstream re-stamps it.
 				const failed = assistantError("provider refused the request");
-				failed.usage = usage();
-				queueMicrotask(() => stream.push({ type: "error", error: failed }));
+				failed.usage = { ...usage(), input: 120, totalTokens: 120 };
+				queueMicrotask(() => stream.push({ type: "error", reason: "error", error: failed }));
 				return stream;
 			},
 			SOURCE_ID,
@@ -1082,6 +1082,8 @@ describe("streamSimple credential organization", () => {
 		expect(errors).toHaveLength(1);
 		expect(errors[0]?.organizationId).toBe("org-alpha");
 		expect(errors[0]?.credentialId).toBe(4);
+		// The point of attributing it: the provider billed these tokens.
+		expect(errors[0]?.usage?.input).toBe(120);
 	});
 
 	it("leaves the organization unset for a key that carries no stored account", async () => {
