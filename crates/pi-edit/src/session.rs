@@ -4,10 +4,9 @@
 //! Threading and callbacks live in the napi layer; this type is single
 //! threaded and pure apart from file reads and the writer trait.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use async_trait::async_trait;
-use pi_ast::SupportLang;
 
 use crate::{
 	diff_string::{CompactDiffOptions, build_compact_diff_preview},
@@ -16,6 +15,7 @@ use crate::{
 	},
 	error::{EditError, EditResult},
 	files::{FileCache, FileSource},
+	modes::hashline::syntax::edit_can_break_syntax,
 	notebook,
 	path_policy::{PathPolicy, UrlResolution, canonical_key},
 	store::{EditStore, Snapshot, file_hash, seen_lines_from_body},
@@ -596,15 +596,6 @@ pub fn source_parses(code: &str, path: &str) -> bool {
 	let code = if code.is_empty() { "\n" } else { code };
 	pi_ast::summary::parse_code_status(code, None, Some(path))
 		.is_ok_and(|language| language.is_some())
-}
-
-/// Whether an edit can leave `path` syntactically broken.
-///
-/// Not for Markdown: every character sequence is a CommonMark document, so an
-/// `ERROR` node in tree-sitter-md's tree (a GFM table row with an empty `||`
-/// cell) is a grammar gap, not a broken file.
-pub fn edit_can_break_syntax(path: &str) -> bool {
-	SupportLang::from_path(Path::new(path)) != Some(SupportLang::Markdown)
 }
 
 /// The persisted bytes differ from what was sent (an editor reformatted on

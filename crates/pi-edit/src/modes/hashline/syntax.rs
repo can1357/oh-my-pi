@@ -2,10 +2,12 @@
 
 use std::{
 	collections::{HashMap, VecDeque},
+	path::Path,
 	sync::{LazyLock, Mutex},
 };
 
 use pi_ast::{
+	SupportLang,
 	block::{
 		BlockRangeOptions, EnclosingBoundaryOptions, LineRange, NodeSpan, enclosing_block_boundaries,
 		node_chain_at,
@@ -108,4 +110,13 @@ pub fn parses_cleanly(path: Option<&str>, text: &str) -> bool {
 		insert_fifo(parses, parse_order, cache_key, parsed);
 	}
 	parsed
+}
+
+/// Whether an edit can leave `path` syntactically broken.
+///
+/// Not for Markdown: every character sequence is a CommonMark document, so an
+/// `ERROR` node in tree-sitter-md's tree (a GFM table row with an empty `||`
+/// cell) is a grammar gap, not a broken file.
+pub(crate) fn edit_can_break_syntax(path: &str) -> bool {
+	SupportLang::from_path(Path::new(path)) != Some(SupportLang::Markdown)
 }

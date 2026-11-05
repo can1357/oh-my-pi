@@ -18,12 +18,11 @@ use super::{
 		repeated_boundary_echo_message, textual_boundary_echo_warning,
 		trailing_comma_replacement_message, two_sided_boundary_echo_message,
 	},
-	syntax::{enclosing_boundaries, node_chain, parses_cleanly},
+	syntax::{edit_can_break_syntax, enclosing_boundaries, node_chain, parses_cleanly},
 	types::{Anchor, ApplyResult, BlockResolution, Cursor, Edit},
 };
 use crate::{
 	error::{EditError, Rejection},
-	session::edit_can_break_syntax,
 	store::Clipboard,
 };
 
