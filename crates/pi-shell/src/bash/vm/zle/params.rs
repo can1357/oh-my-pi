@@ -393,7 +393,9 @@ pub fn get(ex: &mut Expander<'_, '_>, zp: Zp) -> X<Option<PValue>> {
 		Zp::Predisplay => text(from_line(&ed.predisplay)),
 		Zp::Rbuffer => text(from_line(&ed.line[ed.cs.min(ed.line.len())..])),
 		Zp::RegionActive => num(ed.region_active),
-		Zp::RegionHighlight => Some(PValue::Array(super::refresh::get_region_highlight(&ed.region_highlights))),
+		Zp::RegionHighlight => {
+			Some(PValue::Array(super::refresh::get_region_highlight(&ed.region_highlights)))
+		},
 		Zp::Registers => {
 			let mut out = Vec::with_capacity(36);
 			for (i, r) in zle.vibuf.iter().enumerate() {
@@ -434,9 +436,9 @@ pub fn get(ex: &mut Expander<'_, '_>, zp: Zp) -> X<Option<PValue>> {
 		},
 		Zp::YankStart => num(ed.yank.0),
 		Zp::YankEnd => num(ed.yank.1),
-		Zp::YankActive => {
-			num(u8::from(ed.lastcmd & wflags::YANK != 0) + u8::from(ed.lastcmd & wflags::YANKAFTER != 0))
-		},
+		Zp::YankActive => num(
+			u8::from(ed.lastcmd & wflags::YANK != 0) + u8::from(ed.lastcmd & wflags::YANKAFTER != 0),
+		),
 		Zp::IsearchStart => num(ed.ls.isearch.0),
 		Zp::IsearchEnd => num(ed.ls.isearch.1),
 		Zp::IsearchActive => num(u8::from(ed.ls.isearch_active)),

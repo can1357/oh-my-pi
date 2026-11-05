@@ -710,7 +710,13 @@ impl Curses {
 			.map(|y| {
 				let s = src(y);
 				(0..cols)
-					.map(|x| if s >= 0 && s < rows { self.cell(w, s, x) } else { blank })
+					.map(|x| {
+						if s >= 0 && s < rows {
+							self.cell(w, s, x)
+						} else {
+							blank
+						}
+					})
 					.collect()
 			})
 			.collect();

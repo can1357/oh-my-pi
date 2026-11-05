@@ -21,24 +21,14 @@ const KEY: Duration = Duration::from_millis(60);
 const QUIET: Duration = Duration::from_millis(300);
 
 /// Bindings for the widgets emacs mode leaves unbound.
-const BINDS: &str = "bindkey -e\n\
-	bindkey '^Xf' emacs-forward-word\n\
-	bindkey '^Xb' emacs-backward-word\n\
-	bindkey '^Xd' delete-word\n\
-	bindkey '^Xh' backward-delete-word\n\
-	bindkey '^Xt' gosmacs-transpose-chars\n\
-	bindkey '^Xk' kill-region\n\
-	bindkey '^Xa' deactivate-region\n\
-	bindkey '^Xl' backward-kill-line\n\
-	bindkey '^Xc' copy-prev-shell-word\n\
-	bindkey '^Xp' push-line-or-edit\n\
-	bindkey '^Xi' push-input\n\
-	bindkey '^Xn' universal-argument\n\
-	bindkey '^XB' argument-base\n\
-	bindkey '^Xy' redo\n\
-	bindkey '^Xs' split-undo\n\
-	bindkey '^X#' pound-insert\n\
-	bindkey '^[^M' self-insert-unmeta\n";
+const BINDS: &str =
+	"bindkey -e\nbindkey '^Xf' emacs-forward-word\nbindkey '^Xb' emacs-backward-word\nbindkey \
+	 '^Xd' delete-word\nbindkey '^Xh' backward-delete-word\nbindkey '^Xt' \
+	 gosmacs-transpose-chars\nbindkey '^Xk' kill-region\nbindkey '^Xa' deactivate-region\nbindkey \
+	 '^Xl' backward-kill-line\nbindkey '^Xc' copy-prev-shell-word\nbindkey '^Xp' \
+	 push-line-or-edit\nbindkey '^Xi' push-input\nbindkey '^Xn' universal-argument\nbindkey '^XB' \
+	 argument-base\nbindkey '^Xy' redo\nbindkey '^Xs' split-undo\nbindkey '^X#' \
+	 pound-insert\nbindkey '^[^M' self-insert-unmeta\n";
 
 /// `zsh -f -i` with `PS1`/`RPS1` and the rc file (the bindings, then
 /// `rc`), sourced with `.` as the first command since `-f` skips
@@ -333,9 +323,9 @@ fn bracketed_paste_magic() {
 	// `bracketed-paste-magic` replays the paste through `zle -U`,
 	// `.read-command` and `.self-insert`, with `split-undo` and `.undo`.
 	// Sourced: the file only defines the functions.
-	let rc = "source /usr/share/zsh/5.9/functions/bracketed-paste-magic\n\
-	          zle -N bracketed-paste bracketed-paste-magic\n\
-	          zstyle ':bracketed-paste-magic' active-widgets '.self-*' 'backward-kill-word'\n";
+	let rc = "source /usr/share/zsh/5.9/functions/bracketed-paste-magic\nzle -N bracketed-paste \
+	          bracketed-paste-magic\nzstyle ':bracketed-paste-magic' active-widgets '.self-*' \
+	          'backward-kill-word'\n";
 	same(rc, BPM_KEYS);
 }
 
@@ -347,8 +337,9 @@ const BPM_KEYS: &[&str] =
 fn bracketed_paste_magic_autoloaded() {
 	// As users set it up: the autoloaded file calls the function on its
 	// first load (`$zsh_eval_context` ends in `loadautofunc`).
-	let rc = "autoload -Uz bracketed-paste-magic\nzle -N bracketed-paste bracketed-paste-magic\n\
-	          zstyle ':bracketed-paste-magic' active-widgets '.self-*' 'backward-kill-word'\n";
+	let rc = "autoload -Uz bracketed-paste-magic\nzle -N bracketed-paste \
+	          bracketed-paste-magic\nzstyle ':bracketed-paste-magic' active-widgets '.self-*' \
+	          'backward-kill-word'\n";
 	same(rc, BPM_KEYS);
 }
 

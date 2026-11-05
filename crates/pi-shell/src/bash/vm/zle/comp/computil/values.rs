@@ -120,7 +120,9 @@ fn parse_cvdef(args: &[BString]) -> Result<Cvdef, String> {
 		let mut xor = None;
 		if at(p, 0) == b'(' {
 			let mut list = Vec::new();
-			let Some(e) = xor_list(p, 0, &mut list) else { return invalid("invalid argument") };
+			let Some(e) = xor_list(p, 0, &mut list) else {
+				return invalid("invalid argument");
+			};
 			k = e;
 			xor = Some(list);
 		}
@@ -228,7 +230,9 @@ fn dollar_quotes(v: Vec<u8>) -> Vec<u8> {
 
 /// zsh `cv_inactive`.
 fn cv_inactive(d: &mut Cvdef, v: usize) {
-	let Some(xor) = std::mem::take(&mut d.vals[v].xor) else { return };
+	let Some(xor) = std::mem::take(&mut d.vals[v].xor) else {
+		return;
+	};
 	for x in &xor {
 		if let Some(o) = cv_get_val(d, x) {
 			d.vals[o].active = false;
@@ -451,7 +455,9 @@ pub fn compvalues(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 	if !gate(ctx) {
 		return done(1);
 	}
-	let Some(a0) = args.first() else { return warn(ctx, "not enough arguments") };
+	let Some(a0) = args.first() else {
+		return warn(ctx, "not enough arguments");
+	};
 	if a0.len() != 2 || a0[0] != b'-' {
 		return warn(ctx, format!("invalid argument: {}", lossy(a0)));
 	}

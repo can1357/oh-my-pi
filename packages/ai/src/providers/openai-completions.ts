@@ -697,6 +697,11 @@ export interface OpenAICompletionsOptions extends StreamOptions {
 	openrouterVariant?: string;
 	/** Opt-in GPT-5.6+ prompt-cache policy. Unsupported explicit mode fails locally. */
 	promptCache?: OpenAIPromptCacheOptions;
+	/**
+	 * Send no `X-Stainless-Timeout` for the first-event budget. For adapter
+	 * wrappers whose native client strips the SDK telemetry headers.
+	 */
+	omitStainlessTimeoutHeader?: boolean;
 }
 
 type AppliedToolStrictMode = "mixed" | "all_strict" | "none";
@@ -973,7 +978,7 @@ const streamOpenAICompletionsOnce = (
 				}
 				try {
 					const headersWithTimeout = { ...headers };
-					if (requestTimeoutMs !== undefined) {
+					if (requestTimeoutMs !== undefined && !options?.omitStainlessTimeoutHeader) {
 						headersWithTimeout["X-Stainless-Timeout"] = Math.floor(requestTimeoutMs / 1000).toString();
 					}
 					const { events, response, requestId } = await postOpenAIStream<ChatCompletionChunk>({

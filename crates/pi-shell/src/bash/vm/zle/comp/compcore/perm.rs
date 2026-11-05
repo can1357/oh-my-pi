@@ -4,6 +4,10 @@
 
 use std::cmp::Ordering;
 
+use super::super::{
+	Comp, isset,
+	types::{Cexpl, Cmatch, Cmgroup, GId, cgf, cmf},
+};
 use crate::{
 	bash::{
 		syntax::zsh::tok::unmetafy,
@@ -11,11 +15,6 @@ use crate::{
 		zshopt::ZshOpt,
 	},
 	sys::langinfo::Collator,
-};
-
-use super::super::{
-	Comp, isset,
-	types::{Cexpl, Cmatch, Cmgroup, GId, cgf, cmf},
 };
 
 /// zsh `zstrcmp(as, bs, SORTIT_IGNORING_BACKSLASHES | (numeric ?
@@ -259,7 +258,12 @@ pub fn makearray(
 /// arrays keep their first `nbeg`/`nend` entries).
 pub fn dupmatch(m: &Cmatch, nbeg: i32, nend: i32) -> Cmatch {
 	let cut = |v: &Option<Vec<i32>>, n: i32| {
-		v.as_ref().map(|v| v.iter().copied().take(usize::try_from(n).unwrap_or(0)).collect())
+		v.as_ref().map(|v| {
+			v.iter()
+				.copied()
+				.take(usize::try_from(n).unwrap_or(0))
+				.collect()
+		})
 	};
 	Cmatch { brpl: cut(&m.brpl, nbeg), brsl: cut(&m.brsl, nend), ..m.clone() }
 }
