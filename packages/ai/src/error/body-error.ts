@@ -40,7 +40,7 @@
  * text pattern is not required to match, so the retry decision is stated rather
  * than hoped for.
  */
-import { ProviderHttpError, wrappedErrorEnvelope } from "./classes";
+import { ProviderHttpError, responseErrorEnvelope } from "./classes";
 import { attach, create, Flag, isContentPolicyRefusal } from "./flags";
 import { isOpaqueStatusBody } from "./rate-limit";
 import { ProviderResponseError } from "./provider";
@@ -188,17 +188,19 @@ interface InBandSignal {
 function readInBandSignal(frame: unknown): InBandSignal | undefined {
 	if (typeof frame !== "object" || frame === null || Array.isArray(frame)) return undefined;
 	const root = frame as Record<string, unknown>;
-	const nested = root.error ?? (root.response as Record<string, unknown> | undefined)?.error;
-	// `wrappedErrorEnvelope` is the single answer to which object is the error: it descends only a
-	// real wrapper, walks through a pure intermediate one, and refuses an `error` field beside a
-	// code of its own. Asking it rather than walking here is what keeps this probe and the
-	// providers' own readers from disagreeing — a disagreement cost this pull request two rounds,
-	// because this probe steps aside for a refusal and the reporter it steps aside for did not
-	// recognise the same one.
-	const nestedObject = typeof nested === "object" && nested !== null ? (nested as Record<string, unknown>) : undefined;
-	const error = nestedObject
-		? ((wrappedErrorEnvelope(nestedObject) ?? nestedObject) as Record<string, unknown>)
-		: undefined;
+	// `responseErrorEnvelope` is the single answer to which object the error is, for the whole
+	// body: the root's own code, then `error` resolved to its innermost envelope, then the two
+	// `response.*` positions, then a root `type`. This probe used to select for itself, and the
+	// disagreement that produced is the one defect this pull request kept finding: the probe
+	// recognises a refusal and steps aside for the provider's reporter, and the reporter — asking
+	// a different question of the same bytes — reports a plain failure. Asking the same function
+	// is what makes stepping aside safe.
+	const selected = responseErrorEnvelope(root);
+	const error = selected === root ? undefined : (selected as Record<string, unknown> | undefined);
+	// What qualifies the frame as a failure at all, kept separate from which object the error is:
+	// a string envelope (`{ error: "..." }`) is a failure the resolver cannot return, and a body
+	// whose envelope sits only in `response.status_details.error` must qualify on that too.
+	const nested = root.error ?? (root.response as Record<string, unknown> | undefined)?.error ?? error;
 	// A machine-readable code is a string; a number in `code` is a status wearing the field's name.
 	// Prefer a string from either field before falling back to a number, or a refusal written
 	// `{ code: 400, type: "cyber_policy" }` reads as "400", the refusal guard below misses it, and
