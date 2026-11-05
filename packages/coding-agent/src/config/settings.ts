@@ -1192,25 +1192,27 @@ export class Settings {
 	/**
 	 * {@link ignoredValues} without what a parent ignores, which a child reads live from that parent.
 	 * This is what a {@link mirrorState} carries: a child mirror that froze its parent's records would
-	 * keep asking after the parent's file is repaired. An overlay shares its parent's warning state
-	 * and global layer, so what the parent reports is subtracted rather than assumed absent.
+	 * keep asking after the parent's file is repaired.
+	 *
+	 * An overlay copies its parent's `invalid` records when it is made (`inheritWarnings`) and shares
+	 * its global layer, and its own writes are checked, so a rejected value it reports is always the
+	 * parent's; only a root instance contributes those.
 	 */
 	#ownIgnoredValues(): IgnoredValue[] {
-		const inherited = new Set(
-			(this.#parent?.ignoredValues() ?? []).map(({ setting, source }) => `${setting.id}\0${source ?? ""}`),
-		);
 		const ignored = new Map<string, IgnoredValue>();
 		const add = ({ setting, source, valueType, valueLength }: IgnoredValue): void => {
-			const key = `${setting.id}\0${source ?? ""}`;
-			if (!inherited.has(key)) ignored.set(key, { setting, source, valueType, valueLength });
+			ignored.set(`${setting.id}\0${source ?? ""}`, { setting, source, valueType, valueLength });
 		};
 		for (const value of this.#mirroredIgnored) add(value);
-		for (const value of this.warnState.invalid.values()) add(value);
+		if (!this.#parent) for (const value of this.warnState.invalid.values()) add(value);
 		for (const layer of this.warnState.dropped.values()) for (const value of layer.values()) add(value);
-		for (const setting of permissiveDefaultSettings()) {
-			const value = getByPath(this.#global, setting.segments);
-			if (setting.rejects(value)) {
-				add({ setting, source: this.#configPath ?? undefined, ...rejectedValueMetadata(value) });
+		// An overlay shares its parent's global layer, so only a root scans it.
+		if (!this.#parent) {
+			for (const setting of permissiveDefaultSettings()) {
+				const value = getByPath(this.#global, setting.segments);
+				if (setting.rejects(value)) {
+					add({ setting, source: this.#configPath ?? undefined, ...rejectedValueMetadata(value) });
+				}
 			}
 		}
 		return [...ignored.values()];
