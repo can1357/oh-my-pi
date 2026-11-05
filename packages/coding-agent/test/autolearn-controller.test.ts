@@ -55,6 +55,8 @@ class FakeSession {
 		if (error) throw error;
 	}
 
+	notifyAutolearnCapturePending(): void {}
+
 	getPlanModeState(): { enabled: boolean } | undefined {
 		return this.planEnabled ? { enabled: true } : undefined;
 	}
@@ -1204,5 +1206,114 @@ describe("autolearn capture lifecycle events", () => {
 		release.resolve();
 		await extensionSawEnd.promise;
 		expect(seen).toEqual(["autolearn_capture_start", "autolearn_capture_end:completed"]);
+	});
+
+	it("has extensions handle the capture start before the capture turn runs", async () => {
+		const handlerEntered = Promise.withResolvers<void>();
+		const releaseHandler = Promise.withResolvers<void>();
+		let handlerFinished = false;
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				// A slow observer: the capture turn's tool calls must not overtake it.
+				pi.on("autolearn_capture_start", async () => {
+					handlerEntered.resolve();
+					await releaseHandler.promise;
+					handlerFinished = true;
+				});
+			},
+			tempDir.path(),
+			new EventBus(),
+			runtime,
+			"slow-capture-observer",
+		);
+		const { session: current } = createSession({ extension: { extension, runtime } });
+		let handlerFinishedWhenCaptureRan: boolean | undefined;
+		const capture = current.runAutolearnCapture(async () => {
+			handlerFinishedWhenCaptureRan = handlerFinished;
+		});
+		await handlerEntered.promise;
+		releaseHandler.resolve();
+		await capture;
+		expect(handlerFinishedWhenCaptureRan).toBe(true);
+	});
+
+	/** Controller whose captures hold until released; records lifecycle frames in order. */
+	function holdCaptures(current: AgentSession) {
+		const runs = [Promise.withResolvers<void>(), Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+		const releases = runs.map(() => Promise.withResolvers<void>());
+		const frames: string[] = [];
+		const allSettled = Promise.withResolvers<void>();
+		let started = 0;
+		let outstanding = 0;
+		new AutoLearnController({
+			session: current,
+			settings: current.settings,
+			capture: () =>
+				current.runAutolearnCapture(async signal => {
+					const index = started++;
+					runs[index]!.resolve();
+					const release = releases[index]!;
+					signal.addEventListener("abort", () => release.reject(new Error("aborted")), { once: true });
+					await release.promise;
+				}),
+		});
+		current.subscribe(event => {
+			if (event.type === "autolearn_capture_start") {
+				outstanding++;
+				frames.push("start");
+			} else if (event.type === "autolearn_capture_end") {
+				outstanding--;
+				frames.push(`end:${event.outcome}`);
+				if (outstanding === 0) allSettled.resolve();
+			} else if (event.type === "agent_end") {
+				frames.push("agent_end");
+			}
+		});
+		return { runs, releases, frames, allSettled: allSettled.promise, captureRuns: () => started };
+	}
+
+	it("joins further qualifying turns to the capture already queued, keeping starts and ends paired", async () => {
+		const { session: current } = createSession({ toolTurns: 5 });
+		const { runs, releases, frames, allSettled, captureRuns } = holdCaptures(current);
+
+		await current.prompt("turn 1");
+		await current.prompt("turn 2");
+		await current.prompt("turn 3");
+		// Turn 3 joins the capture turn 2 queued: no second start, no end for a capture still running.
+		expect(frames).toEqual(["start", "agent_end", "start", "agent_end", "agent_end"]);
+
+		releases[0]!.resolve();
+		await runs[1]!.promise;
+		releases[1]!.resolve();
+		await allSettled;
+		expect(frames.slice(5)).toEqual(["end:completed", "end:completed"]);
+		expect(captureRuns()).toBe(2);
+	});
+
+	it("still runs the queued capture after an abort settles the in-flight one", async () => {
+		const { session: current } = createSession({ toolTurns: 5 });
+		const { runs, releases, frames, allSettled } = holdCaptures(current);
+
+		await current.prompt("turn 1");
+		await current.prompt("turn 2");
+		await current.abort();
+		await runs[1]!.promise;
+		releases[1]!.resolve();
+		await allSettled;
+		expect(frames).toEqual(["start", "agent_end", "start", "agent_end", "end:aborted", "end:completed"]);
+	});
+
+	it("settles a queued capture as aborted without running it when the session is disposed", async () => {
+		const { session: current } = createSession({ toolTurns: 5 });
+		const { frames, allSettled, captureRuns } = holdCaptures(current);
+
+		await current.prompt("turn 1");
+		await current.prompt("turn 2");
+		session = undefined;
+		await current.dispose();
+		await allSettled;
+		expect(frames).toEqual(["start", "agent_end", "start", "agent_end", "end:aborted", "end:aborted"]);
+		expect(captureRuns()).toBe(1);
 	});
 });

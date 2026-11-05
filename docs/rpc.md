@@ -885,7 +885,7 @@ Common event types:
 - `todo_reminder`, `todo_auto_clear`
 - `irc_message`, `notice`, `goal_updated`
 - `queue_update`
-- `autolearn_capture_start`, `autolearn_capture_end` (`outcome`: `completed` | `aborted` | `error`): a private auto-learn capture turn was scheduled, before the `agent_end` that triggered it, and later settled. Starts and ends pair 1:1 in order.
+- `autolearn_capture_start`, `autolearn_capture_end` (`outcome`: `completed` | `aborted` | `error`): a private auto-learn capture turn was scheduled, before the `agent_end` that triggered it, and later settled. At most one capture waits behind a running one; later qualifying turns join it without another start. Starts and ends pair 1:1 in order.
 
 ### `queue_update` event
 

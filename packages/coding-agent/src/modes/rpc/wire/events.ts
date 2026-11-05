@@ -195,7 +195,7 @@ export const eventDefs = {
 	),
 	AutoLearnCaptureStartEvent: doc(
 		{ type: "'autolearn_capture_start'" },
-		"A private auto-learn capture turn was scheduled (starting immediately or queued behind an in-flight capture); the `agent_end` that triggered it follows this frame. Paired 1:1 in FIFO order with `autolearn_capture_end`.",
+		"A private auto-learn capture turn was scheduled (starting immediately or queued behind an in-flight capture); the `agent_end` that triggered it follows this frame. At most one capture is queued: later qualifying turns join it without another frame. Paired 1:1 in FIFO order with `autolearn_capture_end`.",
 	),
 	AutoLearnCaptureEndEvent: doc(
 		{ type: "'autolearn_capture_end'", outcome: "'completed' | 'aborted' | 'error'" },

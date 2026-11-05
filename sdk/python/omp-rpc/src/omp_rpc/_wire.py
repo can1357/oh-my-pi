@@ -1261,7 +1261,7 @@ class QueueUpdateEvent:
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class AutoLearnCaptureStartEvent:
-    """A private auto-learn capture turn was scheduled (starting immediately or queued behind an in-flight capture); the `agent_end` that triggered it follows this frame. Paired 1:1 in FIFO order with `autolearn_capture_end`."""
+    """A private auto-learn capture turn was scheduled (starting immediately or queued behind an in-flight capture); the `agent_end` that triggered it follows this frame. At most one capture is queued: later qualifying turns join it without another frame. Paired 1:1 in FIFO order with `autolearn_capture_end`."""
     type: Literal["autolearn_capture_start"] = "autolearn_capture_start"
 
 
@@ -4017,7 +4017,7 @@ class WireClient:
         return self._listen("queue_update", listener)
 
     def on_autolearn_capture_start(self, listener: Callable[[AutoLearnCaptureStartEvent], None]) -> Callable[[], None]:
-        """Subscribe to `autolearn_capture_start`: A private auto-learn capture turn was scheduled (starting immediately or queued behind an in-flight capture); the `agent_end` that triggered it follows this frame. Paired 1:1 in FIFO order with `autolearn_capture_end`."""
+        """Subscribe to `autolearn_capture_start`: A private auto-learn capture turn was scheduled (starting immediately or queued behind an in-flight capture); the `agent_end` that triggered it follows this frame. At most one capture is queued: later qualifying turns join it without another frame. Paired 1:1 in FIFO order with `autolearn_capture_end`."""
         return self._listen("autolearn_capture_start", listener)
 
     def on_autolearn_capture_end(self, listener: Callable[[AutoLearnCaptureEndEvent], None]) -> Callable[[], None]:

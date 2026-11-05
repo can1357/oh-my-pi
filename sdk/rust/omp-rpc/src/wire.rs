@@ -3940,7 +3940,7 @@ pub struct QueueUpdateEvent {
 	pub live_steered: i64,
 }
 
-/// A private auto-learn capture turn was scheduled (starting immediately or queued behind an in-flight capture); the `agent_end` that triggered it follows this frame. Paired 1:1 in FIFO order with `autolearn_capture_end`.
+/// A private auto-learn capture turn was scheduled (starting immediately or queued behind an in-flight capture); the `agent_end` that triggered it follows this frame. At most one capture is queued: later qualifying turns join it without another frame. Paired 1:1 in FIFO order with `autolearn_capture_end`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AutoLearnCaptureStartEvent {}
 
@@ -3994,7 +3994,7 @@ pub enum RpcAgentEvent {
 	GoalUpdated(GoalUpdatedEvent),
 	/// Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes.
 	QueueUpdate(QueueUpdateEvent),
-	/// A private auto-learn capture turn was scheduled (starting immediately or queued behind an in-flight capture); the `agent_end` that triggered it follows this frame. Paired 1:1 in FIFO order with `autolearn_capture_end`.
+	/// A private auto-learn capture turn was scheduled (starting immediately or queued behind an in-flight capture); the `agent_end` that triggered it follows this frame. At most one capture is queued: later qualifying turns join it without another frame. Paired 1:1 in FIFO order with `autolearn_capture_end`.
 	AutolearnCaptureStart(AutoLearnCaptureStartEvent),
 	/// The oldest unsettled capture turn announced by `autolearn_capture_start` settled with this outcome.
 	AutolearnCaptureEnd(AutoLearnCaptureEndEvent),
