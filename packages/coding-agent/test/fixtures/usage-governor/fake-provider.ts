@@ -37,6 +37,8 @@ export interface FakeAccountSpec {
 	weeklyUsedFraction?: number;
 	/** Banked resets served with the usage report; `usable` marks them redeemable now. */
 	bankedResets?: { count: number; usable: boolean };
+	/** Paid overage balance, separate from the included renewable window and banked resets. */
+	creditBalance?: number;
 	/** Usage endpoint answers 500 while true. */
 	failUsage?: boolean;
 }
@@ -120,6 +122,14 @@ function usageReport(account: AccountState, nowMs: number): Record<string, unkno
 			},
 		],
 	};
+	if (account.creditBalance !== undefined) {
+		(report.limits as Array<Record<string, unknown>>).push({
+			id: "paid-credits",
+			label: "Paid credits",
+			scope: { provider: account.provider, accountId: account.accountId },
+			amount: { remaining: account.creditBalance, unit: "credits" },
+		});
+	}
 	if (account.bankedResets) {
 		const { count, usable } = account.bankedResets;
 		report.resetCredits = {
@@ -201,6 +211,14 @@ function messageText(message: ChatMessage): string {
  * steps (`task`, then `wait`, then text); a subagent (`govplan-g`) answers with text.
  */
 function replyFor(provider: FakeProviderId, messages: ChatMessage[], toolResultCount: number): ScriptedReply {
+	if (
+		provider === "govplan" &&
+		messages.some(message => message.role === "user" && messageText(message).includes("ROUTE_PIN"))
+	) {
+		return toolResultCount < 5
+			? { kind: "tool", name: "govplan_pin_probe", args: {} }
+			: { kind: "text", text: "done" };
+	}
 	const delegates =
 		provider === "govplan" &&
 		messages.some(message => message.role === "user" && messageText(message).includes("DELEGATE"));

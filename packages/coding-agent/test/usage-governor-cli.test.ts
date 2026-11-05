@@ -260,6 +260,75 @@ describe("usage governor CLI proof: scenarios", () => {
 		}
 	}, 120_000);
 
+	test("routing moves an automatic pin within one session when A crosses its pacing line", async () => {
+		const proof = await GovernorProof.create(
+			[
+				account("govplan", "a", { usedFraction: 0, resetInMs: 25_000, perRequest: 0.2 }),
+				account("govplan", "b", { usedFraction: 0, resetInMs: 60_000, perRequest: 0.2 }),
+			],
+			{ enabled: true },
+		);
+		try {
+			const result = await proof.runOmp(["-p", "ROUTE_PIN"], 90_000);
+			expect(result.exitCode).toBe(0);
+			const chats = proof.chats();
+			expect(chats.length).toBe(6);
+			const pins =
+				chats.at(-1)?.toolResults?.map(text => JSON.parse(text) as { sessionId: string; email: string }) ?? [];
+			expect(pins.length).toBe(5);
+			expect(new Set(pins.map(pin => pin.sessionId)).size).toBe(1);
+			expect(pins[0].sessionId.length).toBeGreaterThan(0);
+			for (let index = 0; index < pins.length; index += 1) {
+				expect(pins[index].email).toBe(`govplan-${chats[index].label}@example.invalid`);
+			}
+			const firstB = pins.findIndex(pin => pin.email === "govplan-b@example.invalid");
+			expect(firstB).toBeGreaterThan(0);
+			expect(pins.slice(0, firstB).every(pin => pin.email === "govplan-a@example.invalid")).toBe(true);
+			expect(pins.slice(firstB).every(pin => pin.email === "govplan-b@example.invalid")).toBe(true);
+			// The next fixed-cost request would cross A's line (and its 90% reserve).
+			expect((chats[firstB - 1].usedFraction ?? 0) + 0.2).toBeGreaterThan(
+				allowedAt(chats[firstB - 1].resetsAt!, chats[firstB].atMs),
+			);
+			assertConfined(proof);
+		} finally {
+			proof.close();
+		}
+	}, 120_000);
+
+	test("routing prefers included allowance to a credit-serving account", async () => {
+		const proof = await GovernorProof.create(
+			[
+				account("govplan", "credit", { usedFraction: 1, resetInMs: 25_000, perRequest: 0, creditBalance: 100 }),
+				account("govplan", "included", { usedFraction: 0, resetInMs: 60_000, perRequest: 0.05 }),
+			],
+			{ enabled: true },
+		);
+		try {
+			const result = await proof.runOmp(["-p", "credit routing"]);
+			expect(result.exitCode).toBe(0);
+			const usage = proof.fake.records.filter(record => record.kind === "usage");
+			expect(usage.some(record => record.label === "credit" && record.usedFraction === 1)).toBe(true);
+			expect(usage.some(record => record.label === "included" && record.usedFraction === 0)).toBe(true);
+			expect(proof.chats().map(record => record.label)).toEqual(["included"]);
+			assertConfined(proof);
+		} finally {
+			proof.close();
+		}
+		// With no included sibling and the governor disabled, the same spent account
+		// still serves a request using its paid balance.
+		const control = await GovernorProof.create(
+			[account("govplan", "credit", { usedFraction: 1, resetInMs: 25_000, perRequest: 0, creditBalance: 100 })],
+			{ enabled: false },
+		);
+		try {
+			expect((await control.runOmp(["-p", "credit control"])).exitCode).toBe(0);
+			expect(control.chats().map(record => record.label)).toEqual(["credit"]);
+			assertConfined(control);
+		} finally {
+			control.close();
+		}
+	}, 120_000);
+
 	test("role restriction: default-role sends wait and never reach govplan-g; subagent sends are reserved as subagent", async () => {
 		// Both govplan accounts sit at 50 % with the line already crossed. Both govplan-g accounts are fresh.
 		const specs = [

@@ -1,5 +1,6 @@
 import type { UsageProvider, UsageReport } from "@oh-my-pi/pi-ai";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { type } from "@oh-my-pi/omptype";
 
 /**
  * Loaded with `-e` into the child `omp`. Registers two loopback providers whose base URLs,
@@ -14,6 +15,22 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 export default function govplanExtension(pi: ExtensionAPI): void {
 	const fake = process.env.GOVPLAN_FAKE_URL;
 	if (!fake) throw new Error("GOVPLAN_FAKE_URL is required by the govplan fixture");
+
+	pi.registerTool({
+		name: "govplan_pin_probe",
+		label: "Governor pin probe",
+		description: "Record the current session account and invalidate fixture usage.",
+		parameters: type({}),
+		loadMode: "essential",
+		approval: "read",
+		async execute(_id, _params, _signal, _onUpdate, ctx) {
+			const sessionId = ctx.sessionManager.getSessionId();
+			const auth = ctx.modelRegistry.authStorage;
+			const identity = auth.oauth.identity("govplan", sessionId);
+			await auth.usage.invalidate("govplan");
+			return { content: [{ type: "text", text: JSON.stringify({ sessionId, email: identity?.email }) }] };
+		},
+	});
 
 	for (const provider of ["govplan", "govplan-g"] as const) {
 		const usage: UsageProvider = {
