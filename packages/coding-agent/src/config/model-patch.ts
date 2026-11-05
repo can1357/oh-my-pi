@@ -321,19 +321,26 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 		// A configured price replaces the catalog's card, so a tier that is a
 		// FUNCTION of that card has to be recomputed from it: keeping the list
 		// tier billed a row declared at half price, or free, at the list rates.
-		// Order: the patch's own tier, then the rule's multiplier form re-derived
-		// from the configured card (the same rule `finalizeCustomModel` applies
-		// to a new custom model, so a `models.yml` row and a same-id patch of the
-		// bundled row price alike), then the row's existing tier. That last step
-		// keeps an absolute tier a provider publishes as its own figure (the
-		// first-party `gpt-5.6` card, Cursor's and Devin's discovered tiers),
-		// which a partial override of one leg must not silently delete.
-		// A card declared entirely free carries no tier at all: a free row that
-		// still charged the list tier past the threshold was the worst of these.
+		// Order: the patch's own tier wins outright, because a config that
+		// states both a card and a tier has said exactly what it wants -- "free
+		// below the threshold, charged above it" is a tariff a gateway really
+		// publishes, and an all-zero card must not be read as "free at every
+		// context length" when the config says otherwise. Then the rule's
+		// multiplier form re-derived from the configured card (the same rule
+		// `finalizeCustomModel` applies to a new custom model, so a `models.yml`
+		// row and a same-id patch of the bundled row price alike). Then the
+		// row's existing tier, which keeps a tier a host states as absolute
+		// figures of its own -- the first-party `gpt-5.6` card
+		// (`providers/openai.kdl`) and Cursor's rows (`providers/cursor.kdl`) --
+		// rather than letting a partial override of one leg silently delete it.
+		// A host whose rule is in multiplier form never reaches this step; it is
+		// rescaled above. An all-zero card with no tier of its own inherits
+		// none: a row declared free that still charged the list tier past the
+		// threshold was the worst of these.
 		const free = card.input === 0 && card.output === 0 && card.cacheRead === 0 && card.cacheWrite === 0;
-		const longContext = free
-			? undefined
-			: (patch.cost.longContext ?? ruleScaledLongContextTier(toModelSpec(result), card) ?? base.cost.longContext);
+		const longContext =
+			patch.cost.longContext ??
+			(free ? undefined : (ruleScaledLongContextTier(toModelSpec(result), card) ?? base.cost.longContext));
 		result.cost = longContext ? { ...card, longContext } : card;
 	}
 	let compat: ModelSpec<Api>["compat"];
