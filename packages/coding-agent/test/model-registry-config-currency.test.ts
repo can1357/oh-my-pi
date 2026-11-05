@@ -262,35 +262,33 @@ describe("a configured discovery keeps the configuration it started under", () =
 		expect(registry.find("probe", "listed-model")).toBeUndefined();
 	});
 
-	// A declaration named exactly `Authorization` is left out of the identity
-	// altogether, which looks like an oversight and is not: discovery assembles
-	// its bearer as `{ ...configured, Authorization: ... }`, so that one
-	// property is overwritten and can never reach the wire, whatever it holds.
-	// A configured `authorization` survives beside the generated one and is
-	// combined with it, so it stays.
+	// `authorization` is the one field whose exact spelling is kept, because it
+	// is the one a generated header collides with by exact match: discovery
+	// assembles its bearer as `{ ...configured, Authorization: ... }`. Review
+	// measured three ways an exact `Authorization` is NOT inert — a provider
+	// that generates no bearer sends it as written, a `!command` value runs even
+	// when the property is overwritten and a later header can see what it did,
+	// and its position changes the combined value beside another casing. So it
+	// is kept, and only its spelling is special.
 	const auth = (name: string, value: string) => probeConfig(`    headers:\n      ${name}: ${value}\n`);
 
-	test("an exact Authorization declaration never reaches the wire, and the lowercase one does", async () => {
+	test("the two spellings of authorization send different requests", async () => {
 		held.release();
-		const overwritten = await headersSentUnder(auth("Authorization", "Bearer manual-config"));
-		const generatedOnly = await headersSentUnder(probeConfig());
-		expect(overwritten).toEqual(generatedOnly);
-		expect(await headersSentUnder(auth("authorization", "Bearer manual-config"))).not.toEqual(generatedOnly);
-	});
-
-	test("changing the value of an exact Authorization declaration does not refuse the discovery", async () => {
-		// It sends nothing either way, so it cannot be a configuration change.
-		fs.writeFileSync(modelsPath, auth("Authorization", "Bearer manual-config"));
-		await reloadDuringDiscovery(() => writeWithNewMtime(modelsPath, auth("Authorization", "Bearer something-else")));
-		expect(sent).toEqual([MODELS_URL]);
-		expect(registry.find("probe", "listed-model")).toBeDefined();
+		expect(await headersSentUnder(auth("Authorization", "Bearer manual-config"))).not.toEqual(
+			await headersSentUnder(auth("authorization", "Bearer manual-config")),
+		);
 	});
 
 	test("respelling a configured Authorization header refuses the discovery", async () => {
-		// The exact-case one is dropped and the lowercase one is not, so these
-		// two configurations send different credentials.
 		fs.writeFileSync(modelsPath, auth("Authorization", "Bearer manual-config"));
 		await reloadDuringDiscovery(() => writeWithNewMtime(modelsPath, auth("authorization", "Bearer manual-config")));
+		expect(sent).toEqual([]);
+		expect(registry.find("probe", "listed-model")).toBeUndefined();
+	});
+
+	test("changing the value of an exact Authorization declaration refuses the discovery", async () => {
+		fs.writeFileSync(modelsPath, auth("Authorization", "Bearer manual-config"));
+		await reloadDuringDiscovery(() => writeWithNewMtime(modelsPath, auth("Authorization", "Bearer something-else")));
 		expect(sent).toEqual([]);
 		expect(registry.find("probe", "listed-model")).toBeUndefined();
 	});

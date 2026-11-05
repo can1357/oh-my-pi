@@ -243,11 +243,15 @@ function canonicalJson(value: unknown): string {
  *    alternative is a rule with two kinds in it, which would have to decide
  *    per value whether order matters, and would err toward sending a header
  *    resolved under a configuration that no longer exists.
- *  - **An exact `Authorization` declaration is dropped.** Discovery assembles
- *    its bearer as `{ ...configured, Authorization: … }`
- *    (`model-discovery.ts`), so that one property is overwritten and can
- *    never reach the wire, whatever it holds; a configured `authorization`
- *    survives beside the generated one and is combined with it, so it stays.
+ *  - **Except for `authorization`**, the one field a generated header can
+ *    collide with: discovery assembles its bearer as
+ *    `{ ...configured, Authorization: … }`, so the exact spelling decides
+ *    whether a configured declaration is replaced by the generated value,
+ *    kept beside it and combined with it, or — when no bearer is generated at
+ *    all, as for a keyless provider — sent exactly as written. A declaration
+ *    whose value is a `!command` also still runs when it is overwritten, and a
+ *    later header can see what it did. The spelling is part of the request
+ *    there, and nowhere else.
  *
  * The resolved headers would answer all of this directly, and are not
  * available: resolution is async and executes a process per `!command`, while
@@ -255,9 +259,10 @@ function canonicalJson(value: unknown): string {
  * after every configuration mutation.
  */
 function canonicalHeaderIdentity(headers: Record<string, string>): Array<[string, string]> {
-	return Object.entries(headers)
-		.filter(([name]) => name !== "Authorization")
-		.map(([name, value]): [string, string] => [name.toLowerCase(), value]);
+	return Object.entries(headers).map(([name, value]): [string, string] => {
+		const field = name.toLowerCase();
+		return [field === "authorization" ? name : field, value];
+	});
 }
 
 /**
