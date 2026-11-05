@@ -538,6 +538,15 @@ function latchOwnershipValid(registry: AgentRegistryApi, owned: Map<string, stri
 	return true;
 }
 
+/** Whether `file` is a regular file in `storage`; false for a directory, a missing path, or any fault. */
+function isStoredFile(file: string, storage: SessionStorage): boolean {
+	try {
+		return storage.statSync(file).isFile;
+	} catch {
+		return false;
+	}
+}
+
 function resolveRootSessionFile(
 	registry: AgentRegistryApi,
 	storage: SessionStorage,
@@ -557,7 +566,10 @@ function resolveRootSessionFile(
 	// top-level siblings invisible to deep children.
 	for (;;) {
 		const parentFile: string = `${path.dirname(current)}.jsonl`;
-		if (parentFile === current || !storage.existsSync(parentFile)) return current;
+		// A regular file, as the `Bun.file(...).exists()` this replaced reported:
+		// `existsSync` also accepts a directory named `*.jsonl`, which would make
+		// the climb mistake it for a parent transcript.
+		if (parentFile === current || !isStoredFile(parentFile, storage)) return current;
 		current = parentFile;
 	}
 }

@@ -34,6 +34,7 @@ import {
 	sqlStoreHasWritten,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage-fallback";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as sessionPaths from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 import { SESSION_TRANSFER_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/session-transfer";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
@@ -343,6 +344,16 @@ describe("sql → file fallback", () => {
 });
 
 describe("which launches may fall back", () => {
+	// The probe reads the terminal breadcrumb, which is this test process's own
+	// real one: ambient, shared, and nothing here owns it. Each case states the
+	// breadcrumb it means to test.
+	beforeEach(() => {
+		vi.spyOn(sessionPaths, "readTerminalBreadcrumbEntry").mockResolvedValue(null);
+	});
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
 	/** A session file written exactly as `SessionManager.createEmptySessionFile` writes one. */
 	let seq = 0;
 	function writeTranscript(dir: string, cwd: string): string {
