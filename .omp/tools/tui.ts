@@ -29,7 +29,7 @@ import {
 	type PtyDimensions,
 	PtySession,
 } from "@oh-my-pi/pi-natives";
-import { isCompiledBinary } from "@oh-my-pi/pi-utils";
+import { $which, isCompiledBinary } from "@oh-my-pi/pi-utils";
 import type * as KittyVt from "kitty-vt-wasm";
 import type { Color, KittyEvent, KittyTerminal } from "kitty-vt-wasm";
 import { tmpdir } from "node:os";
@@ -1081,7 +1081,7 @@ function ptyDimensions(cols: number, rows: number): PtyDimensions {
  */
 function bunRuntime(): string {
 	if (!isCompiledBinary()) return process.execPath;
-	const bun = Bun.which("bun");
+	const bun = $which("bun");
 	if (!bun) {
 		throw new Error("`file` needs `bun` on PATH under the compiled omp; pass `bin` instead");
 	}
