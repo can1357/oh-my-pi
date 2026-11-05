@@ -22,6 +22,7 @@
 ### Fixed
 - Ask notes added on successive single-select questions now start with an empty editor and stay with their respective answers ([#17979](https://github.com/can1357/oh-my-pi/issues/17979))
 
+- Opening and closing the external editor on an ask custom answer or note no longer turns a `[Image #N]` the person typed into an attachment marker: the editor is handed the attachment tokens themselves. `HookEditorComponent` refuses `images` without the `parts` that name them instead of recovering markers from the prefill text, and `Editor.getExpandedRuns()` expands registered atoms inside a collapsed `[Paste #N]` body, so an image whose token a host delivered through the paste channel is no longer dropped ([#17843](https://github.com/can1357/oh-my-pi/pull/17843) by [@sjawhar](https://github.com/sjawhar))
 - Closing an overlay that others were opened over no longer leaves them returning focus to it once they close ([#16476](https://github.com/can1357/oh-my-pi/pull/16476))
 
 ### Changed

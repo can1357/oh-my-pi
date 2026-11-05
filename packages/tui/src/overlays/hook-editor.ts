@@ -15,7 +15,6 @@ import {
 	chipLabel,
 	compactAttachmentParts,
 	renderAttachmentText,
-	VISION_MARKER_REGEX,
 	visionMarkerTail,
 } from "../prompt/composer-attachments";
 import { extractImagePastePathsFromText } from "../prompt/custom-editor";
@@ -94,7 +93,11 @@ export interface HookEditorOptions {
 	question?: string;
 	/** Allow clipboard images to be attached to this prompt. */
 	acceptImages?: boolean;
-	/** Images this prompt's markers already name, in marker order. */
+	/**
+	 * Images this prompt's markers name, in marker order. `parts` must name them: a prompt given
+	 * images it has no runs for cannot tell its own markers from the person's words, so it
+	 * refuses to open.
+	 */
 	images?: readonly ImageContent[];
 	/**
 	 * The prefilled draft as the runs a previous submission of this prompt produced
@@ -190,12 +193,18 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		this.#editor.setMaxHeight(options?.maxHeight ?? Math.max(3, termRows - 12));
 		this.#editor.setScrollbarVisible(true);
 		const parts = this.#acceptImages ? options?.parts : undefined;
+		if (this.#images.length > 0 && !parts?.length) {
+			// Without the runs that name them nothing can tell this prompt's own markers from
+			// the person's words, and guessing them out of the text is the defect #17843 is
+			// about. Attachments are prefilled as runs or not at all.
+			throw new Error("HookEditorComponent: prefilled images need the runs that name them (options.parts)");
+		}
 		if (parts?.length) {
 			// Re-editing a draft this prompt produced: restore each marker as the token that
 			// produced it, so its provenance survives the round trip.
 			this.#editor.setText(parts.map(part => this.#token(part)).join(""));
 		} else if (prefill) {
-			this.#editor.setText(this.#images.length > 0 ? this.#collapsePrefillMarkers(prefill) : prefill);
+			this.#editor.setText(prefill);
 		}
 		// Hint
 		const followUpKeys = boundKeys("app.message.followUp", ["ctrl+q", "ctrl+enter"]);
@@ -401,22 +410,6 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		return label;
 	}
 
-	/**
-	 * Re-collapse the markers of a prefill that arrived as plain text beside its images — this
-	 * prompt's own earlier output, round-tripped through a host that kept no runs. Markers are
-	 * recognized by their characters here, the one place that is unavoidable: without it the
-	 * attachments they name would be dropped on submit. A host that supplies `parts` never
-	 * reaches this.
-	 */
-	#collapsePrefillMarkers(prefill: string): string {
-		const count = this.#images.length;
-		return prefill.replace(VISION_MARKER_REGEX, (match, kind: string, index: string, tail: string) => {
-			const n = Number(index);
-			if (n > count) return match;
-			return this.#token({ kind: kind === "Video" ? "video" : "image", n, tail });
-		});
-	}
-
 	/** Whether this prompt opted into clipboard image attachments. */
 	get acceptsImages(): boolean {
 		return this.#acceptImages && !this.#disposed;
@@ -560,29 +553,27 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 	}
 
 	/**
-	 * Re-collapse the markers this prompt wrote back into their tokens. The external editor hands
-	 * back plain text, so this is the one place a marker is recognized by its characters: text
-	 * the person typed there that is byte-identical to one of this prompt's own markers collapses
-	 * with it. Without it an attachment would silently vanish from the answer.
+	 * The buffer as the person sees it: pastes expanded to their content, attachment tokens left
+	 * standing. The external editor therefore hands the tokens back as tokens, and an attachment
+	 * keeps its provenance across the round trip without a marker's characters ever being
+	 * matched. A token the person deletes there drops its attachment, as deleting it here does.
 	 */
-	#collapseKnownMarkers(text: string): string {
-		if (this.#markers.size === 0) return text;
-		const tokens = new Map<string, string>();
-		for (const [label, part] of this.#markers) tokens.set(renderAttachmentText([part]), label);
-		const sources = [...tokens.keys()].sort((a, b) => b.length - a.length).map(RegExp.escape);
-		return text.replace(new RegExp(sources.join("|"), "g"), match => tokens.get(match) ?? match);
+	#tokenizedText(): string {
+		let out = "";
+		for (const run of this.#editor.getExpandedRuns()) out += run.atom ?? run.text;
+		return out;
 	}
 
 	async #openExternalEditor(): Promise<void> {
 		const externalEditor = this.#externalEditor;
 		if (!externalEditor) return;
 
-		const currentText = this.#editor.getExpandedText();
+		const currentText = this.#tokenizedText();
 		try {
 			this.#tui.stop();
 			const result = await externalEditor(currentText);
 			if (!this.#disposed && result !== null) {
-				this.#editor.setText(this.#collapseKnownMarkers(result));
+				this.#editor.setText(result);
 			}
 		} finally {
 			this.#tui.start();

@@ -919,8 +919,9 @@ export class ExtensionUiController {
 				promptResolve = resolve;
 				openPrompt(prompt, prefill?.text, {
 					acceptImages: true,
-					images: prefill?.images,
-					parts: prefill?.parts,
+					// Attachments and the runs that name them travel together; a prefill with one
+					// and not the other has no provenance, and the prompt refuses it.
+					...(prefill?.parts?.length ? { images: prefill.images, parts: prefill.parts } : {}),
 					onPasteImage: () => this.ctx.handleImagePaste(),
 					onPasteImagePath: path => this.ctx.handleImagePathPaste(path),
 				});

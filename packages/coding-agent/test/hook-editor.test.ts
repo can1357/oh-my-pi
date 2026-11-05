@@ -270,18 +270,12 @@ describe("HookEditorComponent prompt-style mode", () => {
 		const later: ImageContent = { type: "image", data: "later", mimeType: "image/png" };
 		const earlier: ImageContent = { type: "image", data: "earlier", mimeType: "image/png" };
 		const onSubmit = vi.fn();
-		const component = new HookEditorComponent(
-			createTui(),
-			"Prompt",
-			"[Image #2] then [Image #1]",
-			onSubmit,
-			vi.fn(),
-			{
-				promptStyle: true,
-				acceptImages: true,
-				images: [later, earlier],
-			},
-		);
+		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
+			promptStyle: true,
+			acceptImages: true,
+			images: [later, earlier],
+			parts: [{ kind: "image", n: 2, tail: "" }, " then ", { kind: "image", n: 1, tail: "" }],
+		});
 
 		component.handleInput("\r");
 
@@ -296,15 +290,81 @@ describe("HookEditorComponent prompt-style mode", () => {
 		const first: ImageContent = { type: "image", data: "first", mimeType: "image/png" };
 		const second: ImageContent = { type: "image", data: "second", mimeType: "image/jpeg" };
 		const onSubmit = vi.fn();
-		const component = new HookEditorComponent(createTui(), "Prompt", "[Image #2]", onSubmit, vi.fn(), {
+		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
 			promptStyle: true,
 			acceptImages: true,
 			images: [first, second],
+			parts: [{ kind: "image", n: 2, tail: "" }],
 		});
 
 		component.handleInput("\r");
 
 		expect(onSubmit).toHaveBeenCalledWith("[Image #1]", [second], [{ kind: "image", n: 1, tail: "" }]);
+	});
+
+	it("refuses to open with images it has no runs for", () => {
+		// Guessing which characters of a prefill are markers is the defect #17843 is about, so a
+		// prompt handed attachments without their runs fails loudly instead of inventing them.
+		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
+		expect(
+			() =>
+				new HookEditorComponent(createTui(), "Prompt", "[Image #1]", vi.fn(), vi.fn(), {
+					promptStyle: true,
+					acceptImages: true,
+					images: [image],
+				}),
+		).toThrow(/runs that name them/);
+	});
+
+	it("keeps an attachment and every typed marker across an unchanged external editor", () => {
+		// Opening and closing the editor must not change the answer. The editor is handed the
+		// attachment token, not the marker it stands for, so an identical return keeps the
+		// image a marker run and the person's own `[Image #1, 3x3]` text literal.
+		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
+		const onSubmit = vi.fn();
+		let handedOut: string | undefined;
+		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
+			promptStyle: true,
+			acceptImages: true,
+			externalEditor: text => {
+				handedOut = text;
+				return Promise.resolve(text);
+			},
+		});
+		const token = component.attachImage(image, { width: 3, height: 3 });
+		component.pasteText(`shot ${token} of user-[Image #1, 3x3].png`);
+
+		component.handleNativeEvent({ type: "action", key: "actions/external", act: "external", mods: [] });
+		return Promise.resolve().then(() => {
+			expect(handedOut).toBe(`shot ${token} of user-[Image #1, 3x3].png`);
+			component.handleInput("\r");
+			expect(onSubmit).toHaveBeenCalledWith(
+				"shot [Image #1, 3x3] of user-[Image #1, 3x3].png",
+				[image],
+				["shot ", { kind: "image", n: 1, tail: ", 3x3" }, " of user-[Image #1, 3x3].png"],
+			);
+		});
+	});
+
+	it("keeps an image whose token the host delivered inside one large paste", () => {
+		// The paste handler collapses a long delivery into `[Paste #N]`; the attachment token
+		// buried in its body must still expand, or the image is dropped before the answer is built.
+		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
+		const onSubmit = vi.fn();
+		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
+			promptStyle: true,
+			acceptImages: true,
+		});
+		const finishPaste = component.beginPaste();
+		finishPaste(`actual ${component.attachImage(image)}${largePasteText()}`);
+
+		component.handleInput("\r");
+
+		expect(onSubmit).toHaveBeenCalledWith(
+			`actual [Image #1]${largePasteText()}`,
+			[image],
+			["actual ", { kind: "image", n: 1, tail: "" }, largePasteText()],
+		);
 	});
 
 	it("keeps a typed marker in the same field as an attachment out of the submitted runs", () => {
