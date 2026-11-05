@@ -4,7 +4,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import * as capability from "@oh-my-pi/pi-coding-agent/capability";
-import type { CapabilityResult } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import type { ProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/types";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -295,12 +294,7 @@ describe("write tool read projection guard", () => {
 	it.skipIf(process.platform === "win32")(
 		"writes a bounded projection to a new ssh:// file and still guards existing ones",
 		async () => {
-			vi.spyOn(capability, "loadCapability").mockResolvedValue({
-				items: [],
-				all: [],
-				warnings: [],
-				providers: [],
-			} as CapabilityResult<unknown>);
+			vi.spyOn(capability, "loadCapability").mockResolvedValue({ items: [], all: [], warnings: [], providers: [] });
 			fakeSshTransport(() => tmpDir);
 			const session = createSession(tmpDir);
 			cfgReadDefaultLimit.set(session.settings, 20);
