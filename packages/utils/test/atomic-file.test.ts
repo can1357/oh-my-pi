@@ -405,3 +405,25 @@ describe("a `..` in the path given to the writer is resolved by the filesystem",
 		expect((await fs.lstat(link)).isSymbolicLink()).toBe(false);
 	});
 });
+
+describe("a declared root that is itself a symlink", () => {
+	// `PI_CODING_AGENT_DIR` or a home directory can be given as a link to the
+	// real directory. Comparing the declared spelling with the canonical one then
+	// says the link sitting in that root is not in any root at all.
+	test("still counts as a root, so a link directly in it is followed", async () => {
+		const real = path.join(outside, "real-root");
+		const declared = path.join(outside, "declared-root");
+		await fs.mkdir(real);
+		await fs.symlink(real, declared);
+		setAgentDir(declared);
+
+		const target = path.join(declared, "shared.json");
+		const link = path.join(declared, "marketplaces.json");
+		await linkTo(target, link);
+
+		await writeConfigFileAtomically(link, "new", 0o644);
+
+		expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+		expect(await fs.readFile(target, "utf8")).toBe("new");
+	});
+});
