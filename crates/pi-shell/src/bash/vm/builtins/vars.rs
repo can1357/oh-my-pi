@@ -2359,6 +2359,16 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 						ctx.diag(d);
 						return Ok(super::Outcome { status: 1, control: super::Control::DiscardAll });
 					},
+					// `declare -i I=bad!` / `local -i I=bad!`: the integer
+					// attribute evaluates the value, and its error is the
+					// assignment error of an ordinary `I=bad!` on an integer
+					// variable — the same jump, not a failed builtin
+					// (`declare -i I=bad!; echo NEXT:$?` prints nothing and
+					// is 1 in both bashes).
+					Err(d @ Diag::Arith { .. }) => {
+						ctx.err(d);
+						return Ok(super::Outcome { status: 1, control: super::Control::AssignJump });
+					},
 					Err(d) => {
 						ctx.err(d);
 						status = 1;

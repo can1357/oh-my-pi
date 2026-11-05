@@ -955,10 +955,15 @@ pub enum ScriptKind {
 		key:           crate::bash::store::TrapKey,
 		status:        i32,
 		cancel:        Option<i32>,
-		return_target: Option<usize>,
-		/// An ERR trap run by `set -e`: the shell exits with `status` when
-		/// the trap ends.
-		exit:          bool,
+		/// The frame a RETURN trap unwinds to when its action ends, and
+		/// the status to put back there: bash runs the trap *before* the
+		/// `return`'s value takes effect, so its action sees the status
+		/// the function left (`trap 'echo R:$?' RETURN;
+		/// f(){ (exit 5); return 9; }; f; echo A:$?` prints `R:5` then
+		/// `A:9`), and so does a jump out of it.
+		return_target: Option<(u32, i32)>,
+		/// What the end of the action does ([`TrapExit`]).
+		exit:          TrapExit,
 	},
 	/// Shell code a builtin runs as zsh's `execode`/`execstring` do with
 	/// a context name (`zstyle -e` values, `zregexparse` guards and
@@ -968,6 +973,22 @@ pub enum ScriptKind {
 	/// (recorded in [`crate::bash::store::MiscKey::ZshCodeError`] for the
 	/// builtin, which runs again when the frame returns).
 	Code(CodeKind),
+}
+
+/// What the end of an ERR trap action does to the shell.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrapExit {
+	/// Nothing; the interrupted command carries on.
+	#[default]
+	No,
+	/// The shell exits with the frame's saved status, decided when the
+	/// trap started (zsh `ERR_EXIT`/`ERR_RETURN`).
+	Now,
+	/// bash `execute_cmd.c:873-880`: `run_error_trap` runs first and
+	/// `exit_immediately_on_error` is read only after it returns, so a
+	/// `set +e` inside the action cancels the exit and a `set -e` inside
+	/// it causes one.
+	IfErrexit,
 }
 
 /// What a [`ScriptKind::Code`] frame runs (its `zsh_eval_context` word).
@@ -1574,6 +1595,10 @@ pub enum Transfer {
 	/// The rest of the line is abandoned with this status (a `-c` string
 	/// whole).
 	DiscardAll(i32),
+	/// A declaration builtin's arithmetic error in an assignment value
+	/// (`declare -i I=bad!`, `local -i I=bad!`): the same jump an ordinary
+	/// assignment's makes ([`super::exec::assign_jump`]).
+	AssignJump,
 	/// `exec command`: the shell exits with the command's status.
 	Exec,
 }

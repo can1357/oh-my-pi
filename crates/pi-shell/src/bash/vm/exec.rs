@@ -18,7 +18,7 @@ use super::{
 		AssignValue, Atom, Bang, BangStage, Coproc, Depths, Frame, FrameKind, InlineStage, Landing,
 		LandingCatch,
 		LastBg, LoopKind, LoopRec, ParseSnapshot, PendingSub, PendingWrite, Probe, ProbeResult, Run,
-		Saved, Scratch, ScriptKind, Slot, TryEnd, Vproc,
+		Saved, Scratch, ScriptKind, Slot, TrapExit, TryEnd, Vproc,
 	},
 	redir,
 	state::{self, Level, Root, Scope, Var, VarMap},
@@ -404,7 +404,6 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				zsh_return_flow(k, vp, cx, op, status, ignore_errexit);
 			},
 			Flow::Return(status) => {
-				vp.status = status;
 				// `${ ;}` ends like a function; a subshell of a function
 				// (`( return )`, `$( return )`) exits.
 				let target = vp.frames.iter().rposition(|f| {
@@ -416,7 +415,13 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 					)
 				});
 				if let Some(i) = target {
-					if vp.frames[i].kind == FrameKind::NoFork || !return_trap(k, vp, cx, i) {
+					// bash's `run_return_trap` runs before the `return`'s
+					// value takes effect: the action, and a jump out of it,
+					// see the status the body left.
+					if vp.frames[i].kind == FrameKind::NoFork
+						|| !return_trap(k, vp, cx, i, status)
+					{
+						vp.status = status;
 						unwind(&mut k.root, cx.store, vp, i);
 					}
 				} else if vp.parent.is_some() && in_function_scope(k, cx, vp) {
@@ -491,16 +496,23 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			finish_cancel(&mut k.root, cx.store, vp, cancellation.expect("checked"));
 			continue;
 		}
-		let errexit = errexit_failed
-			&& (errexit_on(k, cx, vp)
-				|| (unit.mode.dialect() == Dialect::Zsh && zsh_errreturn_exits(k, cx, vp)));
+		let zsh = unit.mode.dialect() == Dialect::Zsh;
+		let errexit = errexit_failed && (errexit_on(k, cx, vp) || (zsh && zsh_errreturn_exits(k, cx, vp)));
 		if failed_command && start_trap(k, vp, cx, TrapKey::Err) {
 			set_trap_line(vp, err_line);
 			for frame in &mut vp.frames[..fi.saturating_add(1)] {
 				frame.err_reported = true;
 			}
-			if errexit {
-				mark_trap_exit(vp);
+			// bash runs the ERR trap first and reads
+			// `exit_immediately_on_error` only after it returns
+			// (`execute_cmd.c:869-880`), so the action's own `set -e` /
+			// `set +e` decides; zsh settles it before the trap.
+			if zsh {
+				if errexit {
+					mark_trap_exit(vp, TrapExit::Now);
+				}
+			} else if errexit_failed {
+				mark_trap_exit(vp, TrapExit::IfErrexit);
 			}
 		} else if errexit {
 			let status = vp.status;
@@ -542,7 +554,7 @@ fn zsh_return_flow(
 		// trap runs inside the function, then the shell exits.
 		if start_trap(k, vp, cx, TrapKey::Err) {
 			set_trap_line(vp, line_of(vp, op.node));
-			mark_trap_exit(vp);
+			mark_trap_exit(vp, TrapExit::Now);
 		} else {
 			exit_shell(k, vp, cx, status);
 		}
@@ -580,16 +592,15 @@ fn zsh_return_flow(
 	}
 }
 
-/// The trap just started exits the shell when it ends (`set -e` after the
-/// ERR trap): its frame is the innermost trap frame (a zsh `TRAPZERR`
-/// function runs above it).
-fn mark_trap_exit(vp: &mut Vproc) {
+/// What the end of the trap just started does ([`TrapExit`]): its frame is
+/// the innermost trap frame (a zsh `TRAPZERR` function runs above it).
+fn mark_trap_exit(vp: &mut Vproc, how: TrapExit) {
 	let trap = vp.frames.iter_mut().rev().find_map(|f| match &mut f.kind {
 		FrameKind::Script { what: ScriptKind::Trap { exit, .. }, .. } => Some(exit),
 		_ => None,
 	});
 	if let Some(exit) = trap {
-		*exit = true;
+		*exit = how;
 	}
 }
 
@@ -697,7 +708,7 @@ fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 			..
 		}) = vp.frames.last_mut()
 		{
-			*exit = true;
+			*exit = TrapExit::Now;
 		}
 		return;
 	}
@@ -1098,8 +1109,10 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 				what: ScriptKind::Trap { status, cancel, return_target, exit, .. },
 				..
 			} => (Some(status), false, cancel, return_target, exit),
-			FrameKind::Script { what: ScriptKind::Source, .. } => (None, true, None, None, false),
-			_ => (None, false, None, None, false),
+			FrameKind::Script { what: ScriptKind::Source, .. } => {
+				(None, true, None, None, TrapExit::No)
+			},
+			_ => (None, false, None, None, TrapExit::No),
 		};
 		let debug = matches!(frame.kind, FrameKind::Script {
 			what: ScriptKind::Trap { key: TrapKey::Debug, .. },
@@ -1116,7 +1129,8 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		// The text of a zsh command substitution (`child_text`) ends its
 		// child: the child's own EXIT trap runs.
 		let sub_end = eval && top == 0 && vp.parent.is_some() && mode.dialect() == Dialect::Zsh;
-		if source && return_trap(k, vp, cx, top) {
+		let left = vp.status;
+		if source && return_trap(k, vp, cx, top, left) {
 			return None;
 		}
 		pop_frame(&mut k.root, cx.store, vp);
@@ -1133,8 +1147,13 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		if let Some(cancel) = cancel {
 			finish_cancel(&mut k.root, cx.store, vp, cancel);
 		} else if let Some(status) = status
-			&& exit
-		{
+			&& match exit {
+				TrapExit::No => false,
+				TrapExit::Now => true,
+				// bash reads `exit_immediately_on_error` only after
+				// `run_error_trap` returns.
+				TrapExit::IfErrexit => errexit_on(k, cx, vp),
+			} {
 			exit_shell(k, vp, cx, status);
 		} else if func_trap && trap_status != 0 && vp.mode.dialect() == Dialect::Zsh {
 			// zsh `dotrapargs`: a function trap returning non-zero forces
@@ -1142,8 +1161,9 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 			zsh_discard(k, vp, cx, trap_status);
 		} else if let Some(status) = status {
 			vp.status = status;
-			if let Some(target) = return_target {
-				unwind(&mut k.root, cx.store, vp, target);
+			if let Some((target, ret)) = return_target {
+				vp.status = ret;
+				unwind(&mut k.root, cx.store, vp, target as usize);
 			} else if debug
 				&& trap_status != 0
 				&& state::option(&mut k.root, cx.store, vp, OptId::Extdebug).unwrap_or(false)
@@ -1622,7 +1642,8 @@ fn end_unit(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) {
 		},
 		FrameKind::Function { .. } => {
 			let target = vp.frames.len() - 1;
-			if !return_trap(k, vp, cx, target) {
+			let left = vp.status;
+			if !return_trap(k, vp, cx, target, left) {
 				pop_frame(&mut k.root, cx.store, vp);
 			}
 		},
@@ -2173,13 +2194,11 @@ fn shell_command(cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 enum Catch {
 	/// `run_exit_trap`: the EXIT trap being run, with the status it saved.
 	ExitTrap(i32),
-	/// An ERR, DEBUG or signal trap running inside the EXIT trap's action:
-	/// the jump leaves both actions, and the status is the one the nested
-	/// `parse_and_execute` leaves in `last_command_exit_value` — 1 for an
-	/// ERR or DEBUG trap, and for a signal trap the status `run_pending_traps`
-	/// puts back, the one the trap started with — not the status the EXIT
-	/// trap saved. A RETURN trap is not one of these: its own
-	/// `return_catch` swallows the jump, so what encloses it decides.
+	/// A trap running inside the EXIT trap's action: the jump leaves both
+	/// actions, and the status is the one that trap's own
+	/// `_run_trap_internal` put in `trap_saved_exit_value` when it started
+	/// (`trap.c:1127`) — not the status the EXIT trap saved. Every trap
+	/// kind does this, a RETURN trap included.
 	TrapInExitTrap(i32),
 	/// The shell itself (`run_one_command` for a `-c` string, `reader_loop`
 	/// for a script).
@@ -2198,7 +2217,7 @@ fn catch(cx: &mut Cx<'_>, vp: &Vproc) -> Catch {
 	// The innermost trap action the jump leaves decides, from the inside
 	// out: `run_exit_trap` catches every jump out of its own action, and a
 	// trap that runs inside that action takes the status of the moment
-	// with it. A RETURN trap catches nothing a jump cares about.
+	// with it.
 	let mut inner_trap = None;
 	for frame in vp.frames.iter().rev() {
 		let FrameKind::Script { what: ScriptKind::Trap { key, status, .. }, .. } = frame.kind else {
@@ -2211,18 +2230,19 @@ fn catch(cx: &mut Cx<'_>, vp: &Vproc) -> Catch {
 					None => Catch::ExitTrap(status),
 				};
 			},
-			TrapKey::Return => {},
 			// The innermost one decides, with the status its own frame
-			// saved: `run_pending_traps` puts that status back around a
-			// signal trap, `run_debug_trap` around a DEBUG trap, and an
-			// ERR trap's action starts with the status of the command that
-			// failed (`trap 'trap '"'"': ${x?boom}'"'"' ERR; (exit 9)'
-			// EXIT; exit 7` is 9 in both bashes, and 1 when `false`
-			// triggers the trap).
-			TrapKey::Signal(_) | TrapKey::Debug | TrapKey::Err if inner_trap.is_none() => {
-				inner_trap = Some(status);
-			},
-			TrapKey::Signal(_) | TrapKey::Err | TrapKey::Debug => {},
+			// saved: `_run_trap_internal` writes it to
+			// `trap_saved_exit_value` for every trap kind, so
+			// `run_pending_traps` puts it back around a signal trap,
+			// `run_debug_trap` around a DEBUG trap, an ERR trap's action
+			// starts with the status of the command that failed
+			// (`trap 'trap '"'"': ${x?boom}'"'"' ERR; (exit 9)' EXIT;
+			// exit 7` is 9 in both bashes, and 1 when `false` triggers the
+			// trap), and a RETURN trap with the status the function left
+			// (`trap 'set -T; trap '"'"': ${u?BOOM}'"'"' RETURN;
+			// f(){ (exit 5); return 9; }; f' EXIT; exit 7` is 5).
+			_ if inner_trap.is_none() => inner_trap = Some(status),
+			_ => {},
 		}
 	}
 	if !super::nested::in_subshell(cx.store, vp) {
@@ -3116,14 +3136,16 @@ fn plain_arith(
 			let line = line_of(vp, op.node);
 			k.diag(cx, vp, line, d);
 			vp.status = 1;
-			// `((…))` continues; an arith-for header error leaves the loop
-			// (approximated by discarding the command).
+			// `((…))` continues; an arith-for header error ends that loop
+			// with status 1 and the script carries on, as bash's
+			// `execute_arith_for_command` does — `eval_arith_for_expr`
+			// passes `evalexp` an `okp`, so it reports instead of jumping.
 			if unit
 				.nodes
 				.get(op.node as usize)
 				.is_some_and(|n| n.kind == NodeKind::ArithFor)
 			{
-				Flow::Discard(1)
+				Flow::Break { n: 1, cont: false }
 			} else {
 				Flow::Next
 			}
@@ -3369,14 +3391,14 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 					};
 					k.diag(cx, vp, line, d);
 					vp.status = 1;
-					// `((…))` continues; an arith-for header error leaves the
-					// loop (approximated by discarding the command).
+					// As in [`plain_arith`]: the loop ends with status 1
+					// and the script carries on.
 					if unit
 						.nodes
 						.get(op.node as usize)
 						.is_some_and(|n| n.kind == NodeKind::ArithFor)
 					{
-						Flow::Discard(1)
+						Flow::Break { n: 1, cont: false }
 					} else {
 						Flow::Next
 					}
@@ -4923,7 +4945,7 @@ fn push_trap(
 		status,
 		cancel: None,
 		return_target: None,
-		exit: false,
+		exit: TrapExit::No,
 	});
 	if let Some(saved) = restore {
 		super::mode::set_mode(&mut k.root, cx.store, vp, trap_mode);
@@ -5012,7 +5034,13 @@ pub const ENTRY_DEBUG: u32 = u32::MAX;
 /// line, or the line of the `.` command, whose level of the call-stack
 /// arrays has already ended (bash runs it after `_evalfile`). `false` when
 /// no trap runs.
-fn return_trap(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, target: usize) -> bool {
+fn return_trap(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	target: usize,
+	status: i32,
+) -> bool {
 	let body = match &vp.frames[target] {
 		Frame { kind: FrameKind::Function { .. }, unit: Some(unit), .. } => {
 			Some(super::callstack::body_line(unit))
@@ -5030,17 +5058,17 @@ fn return_trap(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, target: usize) -
 	if let Some(line) = line {
 		set_trap_line(vp, line);
 	}
-	mark_return(vp, target);
+	mark_return(vp, target, status);
 	true
 }
 
-fn mark_return(vp: &mut Vproc, target: usize) {
+fn mark_return(vp: &mut Vproc, target: usize, status: i32) {
 	if let Some(Frame {
 		kind: FrameKind::Script { what: ScriptKind::Trap { return_target, .. }, .. },
 		..
 	}) = vp.frames.last_mut()
 	{
-		*return_target = Some(target);
+		*return_target = Some((target as u32, status));
 	}
 }
 

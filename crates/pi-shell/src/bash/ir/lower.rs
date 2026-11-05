@@ -731,12 +731,18 @@ impl Lower {
 				self.emit(Opcode::Enter, 0, 0, id);
 				// The header's expressions are not commands: a zero value
 				// neither runs the ERR trap nor exits under `set -e`.
+				// `LoopEnter` comes first so that an error in any of the
+				// three leaves this loop only (bash's
+				// `execute_arith_for_command` raises `loop_level` before it
+				// evaluates the initialisation, and returns
+				// `EXECUTION_FAILURE` from the loop); `Jmp cond` below
+				// keeps the initialisation to the first pass.
 				self.cond += 1;
+				let enter = self.emit(Opcode::LoopEnter, 0, 0, id);
 				if !f.init.src.trim_ascii().is_empty() {
 					let (a, b) = self.arith(&f.init.src);
 					self.emit(Opcode::Arith, a, b, id);
 				}
-				let enter = self.emit(Opcode::LoopEnter, 0, 0, id);
 				let cond = self.here();
 				if f.cond.src.trim_ascii().is_empty() {
 					self.emit(Opcode::SetStatus, 0, 0, id);

@@ -3990,6 +3990,11 @@ fn settle_builtin(
 			e.stage = Stage::Output;
 			None
 		},
+		Control::AssignJump => {
+			e.control = Some(Transfer::AssignJump);
+			e.stage = Stage::Output;
+			None
+		},
 		Control::Exit => {
 			e.control = Some(Transfer::Exit(outcome.status));
 			e.stage = Stage::Output;
@@ -4640,6 +4645,7 @@ fn finish(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Flow {
 	let e = st(vp);
 	let (status, t0, control) = (e.status, e.t0, e.control);
 	let in_shell = matches!(e.target, Some(Target::Function(_) | Target::Intrinsic(_)));
+	let prior = vp.status;
 	vp.status = status;
 	vp.pipestatus.clear();
 	vp.pipestatus.push(status);
@@ -4665,7 +4671,14 @@ fn finish(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Flow {
 	}
 	match control {
 		None => Flow::Next,
-		Some(Transfer::Return(n)) => Flow::Return(n),
+		// bash's `return` longjmps without touching
+		// `last_command_exit_value`: the RETURN trap's action, and a jump
+		// out of it, see the status the body left, and the return's value
+		// takes effect when the trap ends (`exec::return_trap`).
+		Some(Transfer::Return(n)) => {
+			vp.status = prior;
+			Flow::Return(n)
+		},
 		Some(Transfer::Break { n, cont }) => Flow::Break { n, cont },
 		Some(Transfer::Exit(n)) => Flow::Exit(n),
 		Some(Transfer::DiscardAll(n)) => {
@@ -4688,6 +4701,7 @@ fn finish(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Flow {
 				Flow::Discard(n)
 			}
 		},
+		Some(Transfer::AssignJump) => exec::assign_jump(vp, cx),
 		Some(Transfer::Exec) => Flow::Exit(status),
 	}
 }
