@@ -123,3 +123,19 @@ describe("formatRequestError", () => {
 		expect(formatRequestError({ errorMessage: null, errorRetryAfterMs: null })).toBeNull();
 	});
 });
+
+// A failure may carry no provider text at all and still have something to say:
+// a refused wait is recorded as shown text alone. Gating a stats error view on
+// the raw text hid exactly that failure.
+describe("a textless refusal is still shown", () => {
+	it("renders the explanation when the provider sent no words of its own", () => {
+		expect(
+			formatRequestError({
+				errorMessage: null,
+				errorDisplayMessage:
+					"(server asked to wait 30 s before retrying; the caller's 10 s providerRetryWaitCeilingMs refused it, so the provider did not retry)",
+				errorRetryAfterMs: 30_000,
+			}),
+		).toContain("the caller's 10 s providerRetryWaitCeilingMs refused it");
+	});
+});

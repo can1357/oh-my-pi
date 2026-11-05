@@ -25,7 +25,9 @@ import {
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
-import { retryAfterMsOf } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
+import * as AIError from "@oh-my-pi/pi-ai/error";
+import { retryWaitRefusal } from "@oh-my-pi/pi-ai/utils/retry-wait";
+import { retryAfterMsOf, thrownErrorDisplayText } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import {
@@ -2218,9 +2220,16 @@ export class Agent {
 					: String(err);
 			const shouldEmitVisibleError = !stoppedForAbort;
 			// The server's wait rides on the thrown error's headers; the message
-			// keeps it structured beside the plain `errorMessage`.
+			// keeps it structured beside the plain `errorMessage`. A refusal rides
+			// on the same error as a mark, and this message is the only thing a
+			// reader of the turn sees, so it is recorded on the message here —
+			// otherwise a wait a layer below already refused reaches the person as
+			// a bare provider failure.
 			const errorRetryAfterMs = stoppedForAbort ? undefined : retryAfterMsOf(err);
 			const errorRetryAfter = errorRetryAfterMs === undefined ? {} : { errorRetryAfterMs };
+			const refusedWait = stoppedForAbort ? undefined : retryWaitRefusal(err);
+			const thrownDisplay = stoppedForAbort ? undefined : thrownErrorDisplayText(err);
+			const errorDisplay = thrownDisplay === undefined ? {} : { errorDisplayMessage: thrownDisplay };
 			const assistantPartial = partial?.role === "assistant" ? partial : undefined;
 			const hadAssistantStart = assistantPartial !== undefined;
 			// Same contract as the normal drain in `#emitCursorSplitAssistantMessage`:
@@ -2248,6 +2257,7 @@ export class Agent {
 							stopReason: "error",
 							errorMessage,
 							...errorRetryAfter,
+							...errorDisplay,
 						}
 					: {
 							role: "assistant",
@@ -2266,8 +2276,10 @@ export class Agent {
 							stopReason: stoppedForAbort ? "aborted" : "error",
 							errorMessage,
 							...errorRetryAfter,
+							...errorDisplay,
 							timestamp: Date.now(),
 						};
+			if (refusedWait !== undefined) AIError.recordRefusedRetryWait(errorMsg, refusedWait);
 
 			if (shouldEmitVisibleError) {
 				if (!turnOpen) {

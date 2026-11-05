@@ -13,6 +13,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { assistantErrorText, assistantTurnError } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import { type RefusedRetryWait, retryWaitRefusal } from "@oh-my-pi/pi-ai/utils/retry-wait";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 const REFUSED: RefusedRetryWait = { waitMs: 30_000, limitMs: 10_000, option: "providerRetryWaitCeilingMs" };
 

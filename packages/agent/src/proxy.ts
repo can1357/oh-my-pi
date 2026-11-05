@@ -518,10 +518,11 @@ function copyTerminalFields(frame: object, partial: AssistantMessage): void {
 		if (check && !check(value)) continue;
 		target[key] = value;
 	}
-	// A copied refusal is the field alone; the words that go with it were built
-	// in the upstream process and are not a frame key. The one recorder
-	// completes it here, so a relayed refusal reads as one recorded locally
-	// rather than arriving as a field no display renders.
+	// A frame may carry the refusal field without the words that go with it:
+	// the two are separate keys, and an upstream that copied only fields sends
+	// one. The one recorder completes it here — and appends nothing when the
+	// frame did carry its shown text — so a relayed refusal reads as one
+	// recorded locally rather than as a field no display renders.
 	const refused = partial.errorRetryWaitRefusal;
 	if (refused !== undefined) AIError.recordRefusedRetryWait(partial, refused);
 }
