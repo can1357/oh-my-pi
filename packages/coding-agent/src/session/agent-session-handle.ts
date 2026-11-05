@@ -169,6 +169,8 @@ export interface AgentViewSessionManager extends AgentSessionManagerHandle {
 	getBranch(fromId?: string): SessionEntry[];
 	/** Id of the current leaf entry. */
 	getLeafId(): string | null;
+	/** The newest entry that moves the conversation, when the active branch ends at it (`conversationTip`). */
+	getConversationTip(): SessionEntry | undefined;
 	/** Artifacts directory of the consulted seance source, when this is a seance session. */
 	getSeanceSourceArtifactsDir(): string | null;
 	/** Append a custom entry (a worker-homed session appends on its home thread). */

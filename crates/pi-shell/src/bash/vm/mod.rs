@@ -209,7 +209,8 @@ pub struct Script {
 	/// back when it ends (`None`: the shell's current mode, which an
 	/// `emulate` in the script changes for later runs too).
 	pub mode:         Option<ModeId>,
-	/// Positional parameters for the script.
+	/// Positional parameters for the script, replacing the inherited current
+	/// positional scope in a new subshell without changing its caller.
 	pub args:         Option<Vec<BString>>,
 	/// Which virtual process runs it.
 	pub vproc:        VprocSel,
@@ -691,6 +692,19 @@ impl Kernel {
 		}
 	}
 
+	/// Whether `vp` started child vproc `vpid` (its record names `vp` as
+	/// parent): a subshell copies `$!`, not its parent's children.
+	pub fn started(&mut self, store: &mut dyn StateStore, vp: Vpid, vpid: Vpid) -> bool {
+		match store.get(Key::Proc(vpid)) {
+			Ok(Some(Record::Proc { parent, .. })) => *parent == Some(vp),
+			Ok(_) => false,
+			Err(err) => {
+				self.root.fail(err);
+				false
+			},
+		}
+	}
+
 	/// Take the exit status of finished child vproc `vpid` (its record goes);
 	/// `None` while it runs or when unknown.
 	pub fn proc_collect(&mut self, store: &mut dyn StateStore, vpid: Vpid) -> Option<i32> {
@@ -1087,7 +1101,7 @@ fn startup_vars(k: &mut Kernel, cx: &mut Cx<'_>, init: &ShellInit) -> Result<(),
 	let values = if init.mode.dialect() == crate::bash::ids::Dialect::Zsh {
 		zsh_startup_values(cx, k.engine.config().platform)
 	} else {
-		startup_values(cx, &init.argv0, ppid, StartupVars {
+		startup_values(cx, &init.argv0, ppid, k.engine.config().platform, StartupVars {
 			lookup_shell: need_shell && !deferred_shell,
 			interactive:  init.interactive,
 		})
@@ -1279,6 +1293,7 @@ pub fn startup_values(
 	cx: &Cx<'_>,
 	argv0: &[u8],
 	ppid: u32,
+	platform: crate::bash::ids::Platform,
 	options: StartupVars,
 ) -> Vec<(&'static [u8], Var, bool)> {
 	let user = cx.host.user();
@@ -1305,7 +1320,7 @@ pub fn startup_values(
 		(b"SHELL", shell),
 		(b"TERM", BString::from("dumb")),
 		// bash's `DEFAULT_PATH_VALUE` when the environment has no PATH.
-		(b"PATH", BString::from(crate::bash::invocation::DEFAULT_PATH)),
+		(b"PATH", BString::from(crate::bash::invocation::default_path(platform))),
 	];
 	let mut out = Vec::with_capacity(defaults.len() + 2 + usize::from(options.interactive));
 	if options.interactive {
@@ -1650,9 +1665,6 @@ impl Shell {
 					.insert(name, Some(Var::scalar(value, Attrs::EXPORT)));
 			}
 		}
-		if let Some(args) = script.args {
-			overlay.positional = Some(args);
-		}
 		let mut fds = p.fds.clone();
 		if let Some(stdio) = stdio {
 			for (fd, s) in stdio.into_iter().enumerate() {
@@ -1665,7 +1677,7 @@ impl Shell {
 		}
 		let cwd = script.cwd.unwrap_or_else(|| p.cwd.clone());
 		let status = p.status;
-		let mut scopes = match store {
+		let mut scopes = match store.as_deref_mut() {
 			Some(store) => state::copy_scopes(&self.k.root, store, p).unwrap_or_else(|err| {
 				self.k.root.fail(err);
 				Vec::new()
@@ -1691,6 +1703,15 @@ impl Shell {
 		vp.lineage = lineage.unwrap_or(parent_lineage);
 		vp.status = status;
 		vp.scopes = scopes;
+		if let Some(args) = script.args {
+			// A copied function scope takes precedence over the overlay: install
+			// the script's arguments at that level, as `set --` does.
+			if let Some(store) = store {
+				state::set_positional(&mut self.k.root, store, &mut vp, args);
+			} else if let Some(overlay) = &mut vp.overlay {
+				overlay.positional = Some(args);
+			}
+		}
 		vp.mode = mode;
 		vp.runs.push_back(run);
 		self.k.spawned.push(Box::new(vp));
@@ -2719,6 +2740,9 @@ impl Vproc {
 		// Exact: `clone_from` into the empty vector reserves four slots.
 		vp.pipestatus.reserve_exact(self.pipestatus.len());
 		vp.pipestatus.extend_from_slice(&self.pipestatus);
+		// `$!` is a parameter every subshell copies; `wait` and `kill`
+		// still check that the child it names is this vproc's own.
+		vp.last_bg = self.last_bg;
 		vp.getopts.clone_from(&self.getopts);
 		vp.command.clone_from(&self.command);
 		vp.rlimits.clone_from(&self.rlimits);

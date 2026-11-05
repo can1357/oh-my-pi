@@ -1535,7 +1535,7 @@ describe("askToolRenderer malformed call args", () => {
 			theme!,
 		);
 		const text = stripAnsi(rendered.render(120).join("\n"));
-		expect(text).toContain("[q1]");
+		expect(text).toContain("Ask: q1");
 		expect(text).toContain("Pick one");
 		expect(text).toContain("Alpha");
 	});
@@ -1567,10 +1567,138 @@ describe("askToolRenderer malformed call args", () => {
 			theme!,
 		);
 		const text = stripAnsi(rendered.render(120).join("\n"));
-		expect(text).toContain("[ok]");
+		expect(text).toContain("Ask: ok");
 		expect(text).toContain("Real question");
 		expect(text).toContain("BareString");
 		expect(text).toContain("Proper");
+	});
+});
+
+describe("askToolRenderer question layout", () => {
+	const questions = [
+		{
+			id: "db",
+			question: "Which database?",
+			options: [{ label: "Postgres", description: "Relational" }, { label: "SQLite" }],
+		},
+		{ id: "features", question: "Which flows?", options: [{ label: "Email" }], multi: true },
+	];
+
+	it("tags each question with its id and flags instead of a section header", () => {
+		const rendered = askToolRenderer.renderCall({ questions }, { expanded: true, isPartial: false }, darkTheme);
+		const lines = stripAnsi(rendered.render(100).join("\n")).split("\n");
+		expect(lines[0]).toContain("Ask: 2 questions");
+		expect(lines.find(line => line.includes("Which database?"))).toContain("Which database? (db · 2 options)");
+		expect(lines.find(line => line.includes("Which flows?"))).toContain("Which flows? (features · multi · 1 option)");
+		expect(lines.some(line => line.includes("[db]") || line.includes("[features]"))).toBe(false);
+	});
+
+	it("gives a tag its own row when the question ends in a list or code block, or the tag would not fit", () => {
+		const trailing = [
+			{ id: "list", question: "Which approach?\n\n- alpha\n- beta", options: [{ label: "A" }] },
+			{ id: "fence", question: "Keep this?\n\n```ts\nconst a = 1;\n```", options: [{ label: "Yes" }] },
+			// At width 60 the frame holds 56 columns: the 39-column question, its 1-column indent, a
+			// space and the 16-column tag need one more.
+			{ id: "fit", question: "x".repeat(39), options: [{ label: "A" }] },
+		];
+		const rendered = askToolRenderer.renderCall(
+			{ questions: trailing },
+			{ expanded: true, isPartial: false },
+			darkTheme,
+		);
+		const lines = stripAnsi(rendered.render(60).join("\n")).split("\n");
+		for (const tag of ["(list · 1 option)", "(fence · 1 option)", "(fit · 1 option)"]) {
+			expect(lines.find(line => line.includes(tag))).toStartWith(`│  ${tag}`);
+		}
+	});
+
+	it("wraps a tag wider than the row under its indent, without a blank row", () => {
+		const id = "which-database-should-the-new-billing-service-use-in-production";
+		const rendered = askToolRenderer.renderCall(
+			{ questions: [{ id, question: "Short?", options: [{ label: "A" }] }, questions[1]] },
+			{ expanded: true, isPartial: false },
+			darkTheme,
+		);
+		const lines = stripAnsi(rendered.render(60).join("\n")).split("\n");
+		const question = lines.findIndex(line => line.includes("Short?"));
+		expect(lines[question + 1]).toStartWith("│  (which-database");
+		expect(lines[question + 2]).toMatch(/^│ {2}\S/);
+		expect(lines.slice(question + 1, question + 3).join("")).toContain("1 option)");
+	});
+
+	it("keeps a model-supplied id with a newline on one row of the header and the tag", () => {
+		const broken = { id: "db\nchoice", question: "Which database?", options: [{ label: "Postgres" }] };
+		const lone = stripAnsi(
+			askToolRenderer
+				.renderCall({ questions: [broken] }, { expanded: true, isPartial: false }, darkTheme)
+				.render(100)
+				.join("\n"),
+		).split("\n");
+		expect(lone[0]).toContain("Ask: db choice");
+		expect(lone[1]).toStartWith("│");
+		const multi = stripAnsi(
+			askToolRenderer
+				.renderCall({ questions: [broken, questions[1]] }, { expanded: true, isPartial: false }, darkTheme)
+				.render(100)
+				.join("\n"),
+		);
+		expect(multi).toContain("Which database? (db choice · 1 option)");
+	});
+
+	it("names a lone question by its id and counts its options in the footer", () => {
+		const rendered = askToolRenderer.renderCall(
+			{ questions: [questions[0]] },
+			{ expanded: true, isPartial: false },
+			darkTheme,
+		);
+		const lines = stripAnsi(rendered.render(100).join("\n")).split("\n");
+		expect(lines[0]).toContain("Ask: db");
+		expect(lines.at(-1)).toContain("2 options");
+		expect(lines.join("\n")).not.toContain("(db");
+	});
+
+	it("tags answered questions with their id and multi flag, without option counts", () => {
+		const rendered = askToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "" }],
+				details: {
+					results: [
+						{
+							id: "db",
+							question: "Which database?",
+							options: ["Postgres"],
+							multi: false,
+							selectedOptions: ["Postgres"],
+						},
+						{
+							id: "features",
+							question: "Which flows?",
+							options: ["Email"],
+							multi: true,
+							selectedOptions: ["Email"],
+						},
+					],
+				},
+			},
+			{ expanded: true, isPartial: false },
+			darkTheme,
+		);
+		const text = stripAnsi(rendered.render(100).join("\n"));
+		expect(text).toContain("Ask: 2 questions");
+		expect(text).toContain("Which database? (db)");
+		expect(text).toContain("Which flows? (features · multi)");
+	});
+
+	it("keeps the question subject on a failed ask", () => {
+		const rendered = askToolRenderer.renderResult(
+			{ content: [{ type: "text", text: "Prompt cancelled by user" }] },
+			{ expanded: false, isPartial: false },
+			darkTheme,
+			{ questions },
+		);
+		const text = stripAnsi(rendered.render(100).join("\n"));
+		expect(text).toContain("Ask: 2 questions");
+		expect(text).toContain("Prompt cancelled by user");
 	});
 });
 
@@ -2207,7 +2335,7 @@ describe("AskTool carriage-return sanitization", () => {
 			theme!,
 		);
 		const text = stripAnsi(rendered.render(120).join("\n"));
-		expect(text).toContain("[q 3a]");
+		expect(text).toContain("Ask: q 3a");
 		expect(text).toContain("Q3 A?");
 		expect(text).not.toContain("\r");
 
@@ -2261,7 +2389,7 @@ describe("AskTool carriage-return sanitization", () => {
 			theme!,
 		);
 		const multiText = stripAnsi(multi.render(120).join("\n"));
-		expect(multiText).toContain("[q 3a]");
+		expect(multiText).toContain("Ask: q 3a");
 		expect(multiText).toContain("Q3 A?");
 		expect(multiText).toContain("Abort log");
 		expect(multiText).not.toContain("\r");
