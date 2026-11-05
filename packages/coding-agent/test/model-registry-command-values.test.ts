@@ -17,10 +17,8 @@ import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import "@oh-my-pi/pi-coding-agent/session/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import {
-	resolveAuthBrokerConfig,
-	resolveEffectiveSettings,
-} from "@oh-my-pi/pi-coding-agent/session/auth-broker-config";
+import { discoverAuthStorage } from "@oh-my-pi/pi-coding-agent/sdk";
+import { resolveAuthBrokerConfig } from "@oh-my-pi/pi-coding-agent/session/auth-broker-config";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { getAgentDir, removeSyncWithRetries, Snowflake, setAgentDir } from "@oh-my-pi/pi-utils";
 
@@ -1002,9 +1000,28 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		return agentDir;
 	}
 
+	/** Hides and restores the broker environment a discovery would otherwise pick up. */
+	function withoutBrokerEnv(): () => void {
+		const previousAgentDir = getAgentDir();
+		const previousEnv = Object.fromEntries(
+			["PI_CODING_AGENT_DIR", "OMP_AUTH_BROKER_URL", "OMP_AUTH_BROKER_TOKEN"].map(key => [key, process.env[key]]),
+		);
+		delete process.env.OMP_AUTH_BROKER_URL;
+		delete process.env.OMP_AUTH_BROKER_TOKEN;
+		return () => {
+			setAgentDir(previousAgentDir);
+			for (const [key, value] of Object.entries(previousEnv)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		};
+	}
+
 	// Each case starts from a 0.5 s process limit left by an earlier owner, shorter than its 1 s helper,
-	// so only the limit the case's own settings name lets the helper finish.
-	describe.skipIf(process.platform === "win32")("standalone command time limit", () => {
+	// so only the limit the case's own scope names lets the helper finish. Every case drives the consumer
+	// a user reaches — a discovered credential store, `omp auth-broker`'s config resolution — never the
+	// resolver on its own, because the defect these guard was invisible one level in.
+	describe.skipIf(process.platform === "win32")("each scope's own command time limit", () => {
 		beforeEach(() => {
 			expect(Settings.current).toBeNull();
 			bindEffects(Settings.isolated({ "providers.commandTimeoutSeconds": 0.5 }))();
@@ -1014,54 +1031,87 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			clearConfigValueCache();
 		});
 
-		test("credential discovery's read-only load names the limit (omp token)", async () => {
-			const agentDir = scopeWithTimeout("standalone-agent", 30);
-			await resolveEffectiveSettings({ cwd: tempDir, agentDir });
-			const marker = path.join(tempDir, "standalone");
-			expect(await resolveConfigValue(`!sleep 1; printf %s ${shellQuote(marker)}`)).toBe(marker);
-		});
-
-		test("settings a caller passes to credential discovery name the limit (omp usage)", async () => {
-			const agentDir = scopeWithTimeout("explicit-agent", 30);
+		test("a discovered credential store runs a !command key under its own scope's limit", async () => {
+			const restoreEnv = withoutBrokerEnv();
+			const agentDir = scopeWithTimeout("store-agent", 30);
 			const settings = await Settings.loadReadOnly({ cwd: tempDir, agentDir });
-			await resolveEffectiveSettings({ settings });
-			const marker = path.join(tempDir, "explicit");
-			expect(await resolveConfigValue(`!sleep 1; printf %s ${shellQuote(marker)}`)).toBe(marker);
+			const storage = await discoverAuthStorage(agentDir, { settings });
+			try {
+				const marker = path.join(tempDir, "store-scope");
+				storage.keys.setConfig("scope-probe", `!sleep 1; printf %s ${shellQuote(marker)}`);
+				expect(await storage.keys.get("scope-probe")).toBe(marker);
+			} finally {
+				storage.close();
+				restoreEnv();
+			}
 		});
 
-		test("a !command broker token runs under the agent dir's limit (omp auth-broker, auth-gateway)", async () => {
-			const agentDir = scopeWithTimeout(
-				"broker-agent",
+		test("discovering a store for another scope does not change an open store's limit", async () => {
+			const restoreEnv = withoutBrokerEnv();
+			const shortDir = scopeWithTimeout("pair-short", 0.5);
+			const longDir = scopeWithTimeout("pair-long", 30);
+			const shortSettings = await Settings.loadReadOnly({ cwd: tempDir, agentDir: shortDir });
+			const longSettings = await Settings.loadReadOnly({ cwd: tempDir, agentDir: longDir });
+			const shortStore = await discoverAuthStorage(shortDir, { settings: shortSettings });
+			let longStore: AuthStorage | undefined;
+			try {
+				// The short scope's own limit kills its 1 s helper, before any other scope exists.
+				shortStore.keys.setConfig("scope-probe", `!sleep 1; printf %s ${shellQuote("before")}`);
+				expect(await shortStore.keys.get("scope-probe")).toBeUndefined();
+				longStore = await discoverAuthStorage(longDir, { settings: longSettings });
+				// Opening the 30 s scope must not relax the 0.5 s one: a different command, so no cache hit.
+				shortStore.keys.setConfig("scope-probe", `!sleep 1; printf %s ${shellQuote("after")}`);
+				expect(await shortStore.keys.get("scope-probe")).toBeUndefined();
+				// And the long scope still gets its own 30 s limit, so this is not "everything is short now".
+				longStore.keys.setConfig("scope-probe", `!sleep 1; printf %s ${shellQuote("long")}`);
+				expect(await longStore.keys.get("scope-probe")).toBe("long");
+			} finally {
+				longStore?.close();
+				shortStore.close();
+				restoreEnv();
+			}
+		}, 30_000);
+
+		test("a !command broker token runs under its own agent dir's limit, after a shorter scope resolved", async () => {
+			const shortDir = scopeWithTimeout(
+				"broker-short",
+				0.5,
+				`auth:\n  broker:\n    url: http://127.0.0.1:9\n    token: short-literal-token\n`,
+			);
+			const longDir = scopeWithTimeout(
+				"broker-long",
 				30,
 				`auth:\n  broker:\n    url: http://127.0.0.1:9\n    token: ${JSON.stringify("!sleep 1; printf broker-token")}\n`,
 			);
-			const previousAgentDir = getAgentDir();
-			const previousEnv = Object.fromEntries(
-				["PI_CODING_AGENT_DIR", "OMP_AUTH_BROKER_URL", "OMP_AUTH_BROKER_TOKEN"].map(key => [key, process.env[key]]),
-			);
-			delete process.env.OMP_AUTH_BROKER_URL;
-			delete process.env.OMP_AUTH_BROKER_TOKEN;
-			setAgentDir(agentDir);
+			const restoreEnv = withoutBrokerEnv();
 			try {
+				setAgentDir(shortDir);
+				expect(await resolveAuthBrokerConfig()).toEqual({
+					url: "http://127.0.0.1:9",
+					token: "short-literal-token",
+				});
+				setAgentDir(longDir);
 				expect(await resolveAuthBrokerConfig()).toEqual({ url: "http://127.0.0.1:9", token: "broker-token" });
 			} finally {
-				setAgentDir(previousAgentDir);
-				for (const [key, value] of Object.entries(previousEnv)) {
-					if (value === undefined) delete process.env[key];
-					else process.env[key] = value;
-				}
+				restoreEnv();
 			}
-		});
+		}, 30_000);
 
-		test("settings that drive effects keep their limit when discovery loads another scope", async () => {
+		test("settings that drive effects keep their limit when another scope opens a store", async () => {
+			const restoreEnv = withoutBrokerEnv();
 			const releaseOwner = bindEffects(Settings.isolated({ "providers.commandTimeoutSeconds": 30 }));
+			const agentDir = scopeWithTimeout("owned-scope", 0.5);
+			const settings = await Settings.loadReadOnly({ cwd: tempDir, agentDir });
+			const storage = await discoverAuthStorage(agentDir, { settings });
 			try {
-				await resolveEffectiveSettings({ cwd: tempDir, agentDir: scopeWithTimeout("other-scope", 0.5) });
 				const marker = path.join(tempDir, "owned");
-				expect(await resolveConfigValue(`!sleep 1; printf %s ${shellQuote(marker)}`)).toBe(marker);
+				storage.keys.setConfig("scope-probe", `!sleep 1; printf %s ${shellQuote(marker)}`);
+				expect(await storage.keys.get("scope-probe")).toBe(marker);
 			} finally {
+				storage.close();
 				releaseOwner();
+				restoreEnv();
 			}
-		});
+		}, 30_000);
 	});
 });

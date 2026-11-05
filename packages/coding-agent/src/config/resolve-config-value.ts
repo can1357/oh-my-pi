@@ -7,8 +7,13 @@ const COMMAND_FAILURE_RETRY_MS = 30_000;
 export const DEFAULT_COMMAND_TIMEOUT_MS = 10_000;
 /** Set by the `providers.commandTimeoutSeconds` effect of the settings that drive effects. */
 let commandTimeoutMs = DEFAULT_COMMAND_TIMEOUT_MS;
-/** Reads the time limit from the settings a process without a settings owner resolves credentials for. */
-let readStandaloneCommandTimeoutMs: (() => number) | undefined;
+/**
+ * Reads the `!command` time limit of ONE resolution or storage operation, from
+ * the settings that operation belongs to. Carried by the operation (see
+ * {@link resolveConfigValue}), never installed process-wide: two scopes that
+ * resolve credentials in one process each keep their own limit.
+ */
+export type CommandTimeoutSource = () => number;
 /** Fresh stdout, served without re-running the command until it is invalidated. */
 const commandResultCache = new Map<string, string>();
 /**
@@ -58,24 +63,13 @@ export function configureCommandTimeoutMs(timeoutMs: number): void {
 }
 
 /**
- * Name the source of the time limit for a process whose effects no settings
- * instance drives (a standalone command such as `omp token`, `omp usage` or
- * `omp auth-broker status`): `read` is consulted at each run, so it follows the
- * settings that credential resolution was given. While some settings drive
- * effects (`Settings.init`, an SDK session's `bindEffects`), their limit wins
- * and this source is not consulted, so it never overrides an owner. With
- * `keepExisting`, a source named earlier (by a caller that passed its own
- * settings) stays.
+ * The limit of a run starting now. Settings that drive effects (`Settings.init`,
+ * an SDK session's `bindEffects`) own the process, so their limit wins; otherwise
+ * the operation's own source decides, and a process with neither keeps the default.
  */
-export function useStandaloneCommandTimeout(read: () => number, options?: { keepExisting?: boolean }): void {
-	if (options?.keepExisting && readStandaloneCommandTimeoutMs !== undefined) return;
-	readStandaloneCommandTimeoutMs = read;
-}
-
-/** The limit of a run starting now: the effect owner's, else the standalone source's, else the last one set. */
-function currentCommandTimeoutMs(): number {
-	if (effectsSettings() !== undefined || readStandaloneCommandTimeoutMs === undefined) return commandTimeoutMs;
-	const timeoutMs = readStandaloneCommandTimeoutMs();
+function commandTimeoutMsFor(source: CommandTimeoutSource | undefined): number {
+	if (effectsSettings() !== undefined || source === undefined) return commandTimeoutMs;
+	const timeoutMs = source();
 	return Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_COMMAND_TIMEOUT_MS;
 }
 
@@ -124,7 +118,10 @@ function errnoCode(error: unknown): string {
 	return typeof code === "string" ? code : "unknown";
 }
 
-async function resolveCommandValue(valueConfig: string): Promise<string | undefined> {
+async function resolveCommandValue(
+	valueConfig: string,
+	commandTimeout: CommandTimeoutSource | undefined,
+): Promise<string | undefined> {
 	const command = commandKey(valueConfig);
 	const cached = commandResultCache.get(command);
 	if (cached !== undefined) return cached;
@@ -132,20 +129,19 @@ async function resolveCommandValue(valueConfig: string): Promise<string | undefi
 	const retryAt = commandFailureRetryAt.get(command);
 	if (retryAt !== undefined && Date.now() < retryAt) return lastGood;
 	const generation = commandGeneration.get(command) ?? 0;
-	const run = commandInFlight.get(command) ?? startCommandRun(command);
+	const run = commandInFlight.get(command) ?? startCommandRun(command, commandTimeoutMsFor(commandTimeout));
 	// After a failed run, the retry runs in the background while the last good value serves.
 	if (retryAt !== undefined && lastGood !== undefined) return lastGood;
 	const value = await run;
 	// An invalidation while the run was in flight (a 401, an explicit refresh) made its
 	// output stale: resolve again instead of handing the old value to this waiter.
-	if ((commandGeneration.get(command) ?? 0) !== generation) return resolveCommandValue(valueConfig);
+	if ((commandGeneration.get(command) ?? 0) !== generation) return resolveCommandValue(valueConfig, commandTimeout);
 	// A 401 during the run drops the last good value, so read it after the run.
 	return value ?? commandLastGood.get(command);
 }
 
-function startCommandRun(command: string): Promise<string | undefined> {
+function startCommandRun(command: string, timeoutMs: number): Promise<string | undefined> {
 	const generation = commandGeneration.get(command) ?? 0;
-	const timeoutMs = currentCommandTimeoutMs();
 	const startedAt = performance.now();
 	const promise: Promise<string | undefined> = runConfigCommand(command, timeoutMs)
 		.then(outcome => {
@@ -191,9 +187,17 @@ async function runConfigCommand(command: string, timeoutMs: number): Promise<Com
  * Resolve a configuration value. Command values execute asynchronously; their
  * successful stdout is cached, and a failed re-run serves the last good stdout
  * until a 401 rejects it. Environment-backed and literal values stay live.
+ *
+ * `commandTimeout` is the time limit of THIS operation, read from the settings
+ * the caller is resolving for. A caller with settings in hand binds it once (see
+ * `session/auth-broker-config.ts`) so two scopes in one process never inherit
+ * each other's limit; settings that drive effects still win over it.
  */
-export async function resolveConfigValue(valueConfig: string): Promise<string | undefined> {
-	if (isCommandConfigValue(valueConfig)) return await resolveCommandValue(valueConfig);
+export async function resolveConfigValue(
+	valueConfig: string,
+	commandTimeout?: CommandTimeoutSource,
+): Promise<string | undefined> {
+	if (isCommandConfigValue(valueConfig)) return await resolveCommandValue(valueConfig, commandTimeout);
 	const envValue = $envExact(valueConfig);
 	return envValue || valueConfig;
 }
@@ -314,5 +318,4 @@ export function createConfigHeaderResolver(
 export function clearConfigValueCache(): void {
 	invalidateAllCommandConfigs("rejected");
 	commandTimeoutMs = DEFAULT_COMMAND_TIMEOUT_MS;
-	readStandaloneCommandTimeoutMs = undefined;
 }

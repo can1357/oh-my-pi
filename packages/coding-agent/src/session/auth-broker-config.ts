@@ -36,7 +36,7 @@ import {
 import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
 import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
 import { combine, type ScopeLike } from "../config/registry";
-import { resolveConfigValue, useStandaloneCommandTimeout } from "../config/resolve-config-value";
+import { resolveConfigValue } from "../config/resolve-config-value";
 import { Settings } from "../config/settings";
 import type { AuthStorage } from "./auth-storage";
 
@@ -57,21 +57,28 @@ export interface EffectiveSettingsScope {
  * Resolve the settings auth discovery must honor: the explicit instance, else the
  * global instance when it targets the same agent dir (and cwd, when given), else a
  * read-only load so `--config`/`PI_CONFIG_FILES`/project overlays still apply.
- *
- * The result also becomes the source of the `!command` time limit for a process
- * whose effects no settings instance drives (`omp token`, `omp usage`, the broker
- * and gateway commands): such a process has no effect to apply
- * `providers.commandTimeoutSeconds`. Settings that drive effects (`Settings.init`,
- * an SDK session's `bindEffects`) keep their own limit; this never writes over it.
  */
 export async function resolveEffectiveSettings({
 	settings,
 	cwd,
 	agentDir = getAgentDir(),
 }: EffectiveSettingsScope = {}): Promise<Settings> {
-	const effective = settings ?? (await currentOrReadOnlySettings(cwd, agentDir));
-	useStandaloneCommandTimeout(() => cfgProvidersCommandTimeoutSeconds.get(effective) * 1_000);
-	return effective;
+	return settings ?? (await currentOrReadOnlySettings(cwd, agentDir));
+}
+
+/**
+ * A config-value resolver bound to ONE scope's settings, so every `!command` it
+ * runs uses that scope's `providers.commandTimeoutSeconds`.
+ *
+ * This is why the limit is not a process-wide slot: a process resolves
+ * credentials for several scopes at once — two broker agent dirs, two SDK
+ * credential stores — and an installed callback made whichever scope ran first
+ * (or last) decide for all of them. Settings that drive effects still win, so an
+ * owner's limit is never overridden; see `config/resolve-config-value.ts`.
+ */
+export function scopedConfigValueResolver(settings: Settings): (config: string) => Promise<string | undefined> {
+	const commandTimeout = () => cfgProvidersCommandTimeoutSeconds.get(settings) * 1_000;
+	return config => resolveConfigValue(config, commandTimeout);
 }
 
 async function currentOrReadOnlySettings(cwd: string | undefined, agentDir: string): Promise<Settings> {
@@ -121,15 +128,12 @@ export function resolveAuthBrokerConfig(): Promise<AuthBrokerClientConfig | null
 	const key = `${process.env.OMP_AUTH_BROKER_URL ?? ""}\u0000${process.env.OMP_AUTH_BROKER_TOKEN ?? ""}\u0000${getAgentDir()}`;
 	if (cachedConfigPromise && cachedConfigKey === key) return cachedConfigPromise;
 	const agentDir = getAgentDir();
-	// A `!command` broker token runs under the limit of this agent dir's settings
-	// (see `resolveEffectiveSettings`): the broker and gateway commands reach here
-	// directly. Settings a caller already gave credential discovery stay the source.
-	const promise = currentOrReadOnlySettings(undefined, agentDir).then(settings => {
-		useStandaloneCommandTimeout(() => cfgProvidersCommandTimeoutSeconds.get(settings) * 1_000, {
-			keepExisting: true,
-		});
-		return resolveAuthBrokerConfigShared({ agentDir, configValueResolver: resolveConfigValue });
-	});
+	// A `!command` broker token runs under the limit of THIS agent dir's settings:
+	// the broker and gateway commands reach here directly, and another agent dir
+	// resolving in the same process carries its own.
+	const promise = currentOrReadOnlySettings(undefined, agentDir).then(settings =>
+		resolveAuthBrokerConfigShared({ agentDir, configValueResolver: scopedConfigValueResolver(settings) }),
+	);
 	cachedConfigKey = key;
 	cachedConfigPromise = promise;
 	promise.catch(() => {
@@ -171,7 +175,7 @@ export interface AuthStorageSettingsSync {
 export function createAuthStorageSettingsSync(scope: ScopeLike, authStorage: AuthStorage): AuthStorageSettingsSync {
 	const settings = "settings" in scope ? scope.settings : scope;
 	const agentDir = settings.getAgentDir();
-	const resolveOptions = { agentDir, configValueResolver: resolveConfigValue };
+	const resolveOptions = { agentDir, configValueResolver: scopedConfigValueResolver(settings) };
 	// Snapshot the connection `authStorage` was opened with, before any edit lands.
 	let activeBroker: Promise<AuthBrokerClientConfig | null> = resolveAuthBrokerConfigShared(resolveOptions).catch(
 		() => null,
@@ -227,16 +231,21 @@ export function createAuthStorageSettingsSync(scope: ScopeLike, authStorage: Aut
  * pi-ai so the CLI, subagents, and the catalog generator all see the same
  * credentials.
  *
- * Default `agentDir` is the current configured agent directory.
+ * Default `agentDir` is the current configured agent directory. The store keeps
+ * the settings it was discovered for as the source of its `!command` time
+ * limit, so opening a second store for another scope cannot change this one's.
  */
-export function discoverAuthStorage(
+export async function discoverAuthStorage(
 	agentDir: string = getAgentDir(),
-	options?: Omit<DiscoverAuthStorageOptions, "agentDir" | "configValueResolver">,
+	options?: Omit<DiscoverAuthStorageOptions, "agentDir" | "configValueResolver"> &
+		Omit<EffectiveSettingsScope, "agentDir">,
 ): Promise<AuthStorage> {
+	const { settings, cwd, ...discoveryOptions } = options ?? {};
+	const effective = await resolveEffectiveSettings({ settings, cwd, agentDir });
 	return discoverAuthStorageShared({
-		...options,
+		...discoveryOptions,
 		agentDir,
-		configValueResolver: resolveConfigValue,
+		configValueResolver: scopedConfigValueResolver(effective),
 	});
 }
 
