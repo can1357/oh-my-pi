@@ -112,11 +112,17 @@ class CloseHoldingStorage implements SessionStorage {
 	writeText(p: string, content: string): Promise<void> {
 		return this.#inner.writeText(p, content);
 	}
+	writeTextNoReplace(p: string, content: string): Promise<void> {
+		return this.#inner.writeTextNoReplace(p, content);
+	}
 	writeTextAtomic(p: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
 		return this.#inner.writeTextAtomic(p, content, options);
 	}
 	rename(p: string, nextPath: string): Promise<void> {
 		return this.#inner.rename(p, nextPath);
+	}
+	renameNoReplace(p: string, nextPath: string): Promise<void> {
+		return this.#inner.renameNoReplace(p, nextPath);
 	}
 	unlink(p: string): Promise<void> {
 		return this.#inner.unlink(p);

@@ -11,10 +11,11 @@ import {
 	tryAcquireFileLock,
 	withFileLockSync,
 } from "@oh-my-pi/pi-utils/file-lock";
-import { type FsError, hasFsCode, isEnoent } from "@oh-my-pi/pi-utils/fs-error";
+import { type FsError, hasFsCode, isEexist, isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { peekFileEnds } from "@oh-my-pi/pi-utils/peek-file";
 import { isPidAlive } from "@oh-my-pi/pi-utils/pid";
+import { eexist } from "./session-storage-errors";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { isAssistantMessageLine } from "./session-entries";
@@ -321,6 +322,14 @@ export interface SessionStorage {
 	 */
 	hasAssistantTurn?(path: string): Promise<boolean>;
 	writeText(path: string, content: string): Promise<void>;
+	/**
+	 * {@link writeText} that never replaces: when `path` is taken, including
+	 * by another client of a shared store between a caller's check and this
+	 * write, it rejects with `EEXIST` naming `path` and writes nothing. A tree
+	 * copy needs this rather than `exists()` then `writeText`, which loses the
+	 * destination a concurrent writer published in between.
+	 */
+	writeTextNoReplace(path: string, content: string): Promise<void>;
 	writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void>;
 	/** Streaming {@link writeTextAtomic}, optional on the same terms as {@link writeLinesSync}. */
 	writeLinesAtomic?(path: string, lines: readonly string[], options?: WriteTextAtomicOptions): Promise<void>;
@@ -328,10 +337,11 @@ export interface SessionStorage {
 	/**
 	 * {@link rename} that never replaces: when `nextPath` is taken, including
 	 * by another client of a shared store while the rename runs, it rejects
-	 * with `EEXIST` naming `nextPath` and changes neither path. Optional: only
-	 * key-indexed backends (`session.storage: sql`) implement it.
+	 * with `EEXIST` naming `nextPath` and changes neither path. A tree move
+	 * needs this rather than `exists()` then `rename`, which silently
+	 * replaces a destination published between the two calls.
 	 */
-	renameNoReplace?(path: string, nextPath: string): Promise<void>;
+	renameNoReplace(path: string, nextPath: string): Promise<void>;
 	unlink(path: string): Promise<void>;
 	deleteSessionWithArtifacts(sessionPath: string): Promise<void>;
 	/**
@@ -1291,6 +1301,37 @@ export class FileSessionStorage implements SessionStorage {
 		await Bun.write(path, content, { createPath: true });
 	}
 
+	async writeTextNoReplace(fpath: string, content: string): Promise<void> {
+		await fs.promises.mkdir(path.resolve(fpath, ".."), { recursive: true });
+		// `wx` is the kernel's own check-and-create: no window between asking
+		// whether the path is taken and taking it.
+		await fs.promises.writeFile(fpath, content, { flag: "wx" });
+	}
+
+	/**
+	 * `link(2)` refuses an existing target where `rename(2)` silently replaces
+	 * it, so a destination another writer published since the caller looked
+	 * wins. Where hard links are unavailable an exclusive copy keeps the same
+	 * guarantee. The source is unlinked once the destination exists; a source
+	 * that cannot be removed has still been placed, so the move succeeded.
+	 */
+	async renameNoReplace(fpath: string, nextPath: string): Promise<void> {
+		await fs.promises.mkdir(path.resolve(nextPath, ".."), { recursive: true });
+		try {
+			await fs.promises.link(fpath, nextPath);
+		} catch (err) {
+			if (isEexist(err)) throw err;
+			await fs.promises.copyFile(fpath, nextPath, fs.constants.COPYFILE_EXCL);
+		}
+		try {
+			await fs.promises.unlink(fpath);
+		} catch (err) {
+			if (!isEnoent(err)) {
+				logger.debug("Transcript placed but its source copy could not be removed", { fpath, nextPath });
+			}
+		}
+	}
+
 	async writeTextAtomic(fpath: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
 		await this.#publishAtomic(fpath, tempPath => fs.promises.writeFile(tempPath, content), options);
 	}
@@ -2074,6 +2115,12 @@ export class MemorySessionStorage implements SessionStorage {
 		return Promise.resolve();
 	}
 
+	writeTextNoReplace(path: string, content: string): Promise<void> {
+		if (this.existsSync(path)) return Promise.reject(eexist(path));
+		this.writeTextSync(path, content);
+		return Promise.resolve();
+	}
+
 	writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
 		if (options?.commitGuard && !options.commitGuard()) return Promise.resolve();
 		this.writeTextSync(path, content, { expectedSize: options?.expectedSize });
@@ -2086,6 +2133,11 @@ export class MemorySessionStorage implements SessionStorage {
 		this.#files.set(nextPath, entry);
 		this.#files.delete(path);
 		return Promise.resolve();
+	}
+
+	renameNoReplace(path: string, nextPath: string): Promise<void> {
+		if (this.#files.has(nextPath)) return Promise.reject(eexist(nextPath));
+		return this.rename(path, nextPath);
 	}
 
 	unlink(path: string): Promise<void> {

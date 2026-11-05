@@ -259,6 +259,9 @@ export async function copySessionArtifacts(
 			storedSourceArtifactsDir,
 			destinationArtifactsDir,
 			storage instanceof FileSessionStorage ? "*.jsonl" : "*",
+			// The stranding policy is the storage family's default: a fork
+			// whose source tree holds a directory this process cannot read
+			// still carries every child it can reach.
 		);
 	} catch (error) {
 		logger.warn("Failed to copy subagent transcripts", {
@@ -2656,15 +2659,18 @@ export class SessionManager {
 	 * Move a session transcript through the storage that holds it. A file
 	 * backend cannot rename across devices, so it falls back to a copy; a
 	 * `"move"` records that in the relocation, so appends that land while the
-	 * copy runs reach the destination too. On a storage with a refusing rename
-	 * neither a `"move"` nor a `"rollback"` replaces: a destination (or, for a
-	 * rollback, an old path) another client wrote since fails with `EEXIST`
-	 * and changes neither path.
+	 * copy runs reach the destination too. On a KEY-INDEXED storage neither a
+	 * `"move"` nor a `"rollback"` replaces: a destination (or, for a rollback,
+	 * an old path) another client wrote since fails with `EEXIST` and changes
+	 * neither path. **File storage keeps replacing here**, which is what
+	 * `claimDestination` has already decided for it — routing it through the
+	 * refusing rename instead breaks a move onto a destination nobody writes,
+	 * which `session-manager-shared-session-file.test.ts` pins.
 	 */
 	async #moveSessionFile(from: string, to: string, mode: "move" | "rollback"): Promise<void> {
 		try {
-			if (this.#storage.renameNoReplace) await this.#storage.renameNoReplace(from, to);
-			else await this.#storage.rename(from, to);
+			if (this.#storage instanceof FileSessionStorage) await this.#storage.rename(from, to);
+			else await this.#storage.renameNoReplace(from, to);
 		} catch (error) {
 			if (!(this.#storage instanceof FileSessionStorage) || !isFsError(error) || error.code !== "EXDEV") throw error;
 			if (mode === "move" && this.#sessionFileRelocating) this.#sessionFileRelocating.copying = true;
@@ -2821,6 +2827,11 @@ export class SessionManager {
 							oldArtifactsDir,
 							newArtifactsDir,
 							this.#storage instanceof FileSessionStorage ? "*.jsonl" : "*",
+							// The stranding policy is the storage family's default, and
+							// it matters here: under file storage the directory move
+							// above has already run and the rollback below cannot undo
+							// it, so nothing here may throw. What it cannot place, or
+							// cannot even list, stays at the source and is logged.
 						);
 					}
 				} catch (err) {
@@ -2853,7 +2864,13 @@ export class SessionManager {
 						}
 					}
 
-					throw this.#storage.renameNoReplace ? refusedByTakenKey(err) : err;
+					// A key-indexed store reports a taken destination key as the
+					// refusal it is. File storage strands instead of failing the
+					// move, so anything that reaches here from it is a real
+					// fault and keeps its own error. This asks the storage
+					// family directly: `renameNoReplace` is now on every
+					// storage, so its presence no longer tells them apart.
+					throw this.#storage instanceof FileSessionStorage ? err : refusedByTakenKey(err);
 				}
 
 				if (sessionFileExisted && sessionPathChanged) {

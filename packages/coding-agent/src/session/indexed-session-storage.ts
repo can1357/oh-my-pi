@@ -441,6 +441,32 @@ export class IndexedSessionStorage implements SessionStorage {
 		await pending;
 	}
 
+	/**
+	 * The backend's own insert-if-missing decides: `expectedSize: null` makes
+	 * the write conditional on the key being free inside the store's
+	 * transaction, so a row another client commits between a caller's check
+	 * and this write is kept and reported as `EEXIST`, never overwritten.
+	 */
+	async writeTextNoReplace(path: string, content: string): Promise<void> {
+		await this.#awaitPath(path);
+		if (this.#index.has(path)) throw eexist(path);
+		const previous = this.#index.get(path);
+		const mtimeMs = this.#allocMtimeMs();
+		const title = titleUpdateFromSlot(parseTitleSlotFromContent(content));
+		this.#setIndex(path, byteLength(content), mtimeMs, title ?? null);
+		this.#pushFrame(path, { mtimeMs, previous });
+		try {
+			await this.#enqueuePath(path, () => this.#backend.writeFull(path, content, mtimeMs, title, null), {
+				trackDrain: false,
+			});
+			this.#dropFrame(path, mtimeMs);
+		} catch (err) {
+			this.#restoreIndex(path, previous);
+			this.#abandonFrame(path, mtimeMs);
+			throw err instanceof SessionWriteConflictError ? eexist(path) : err;
+		}
+	}
+
 	async writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
 		const commitGuard = options?.commitGuard;
 		if (commitGuard && !commitGuard()) return;

@@ -7,7 +7,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
-import { $env, isEnoent, prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, isEnoent, logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import {
@@ -741,18 +741,35 @@ async function leaseArtifacts(
  * the lease's storage, which keeps them as rows rather than files under
  * `session.storage: sql`, so removing the directory alone would leave them in
  * the database.
+ *
+ * The directory removal and the unregister are what this function is for, and
+ * the `fs.rm` it is built on never threw. So the storage pass in front of them
+ * may not either: a transcript it cannot enumerate or cannot delete leaves the
+ * row behind and is logged, while the lease is still released. Letting the
+ * listing throw here would leak the whole directory AND keep the lease
+ * registered — strictly worse than the stray row it was trying to avoid.
  */
 async function removeTemporaryLease(lease: ArtifactLease): Promise<void> {
 	const { storage } = lease;
-	for (const transcript of listTranscriptTree(storage, lease.artifactsDir)) {
-		try {
-			await storage.unlink(transcript);
-		} catch (err) {
-			if (!isEnoent(err)) throw err;
+	try {
+		for (const transcript of listTranscriptTree(storage, lease.artifactsDir, "*.jsonl", {
+			strandOnFailure: true,
+		})) {
+			try {
+				await storage.unlink(transcript);
+			} catch (err) {
+				if (!isEnoent(err)) {
+					logger.warn("Left a temporary lease's transcript in the store", {
+						transcript,
+						error: String(err),
+					});
+				}
+			}
 		}
+	} finally {
+		await fs.rm(lease.artifactsDir, { recursive: true, force: true });
+		lease.unregister?.();
 	}
-	await fs.rm(lease.artifactsDir, { recursive: true, force: true });
-	lease.unregister?.();
 }
 
 /**
