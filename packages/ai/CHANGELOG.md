@@ -6,7 +6,7 @@
 
 - Added opt-in standard Responses WebSockets for catalog-supported models, with incremental turns and session-scoped HTTP/SSE fallback; OMP enables them through settings ([#17354](https://github.com/can1357/oh-my-pi/pull/17354) by [@TatsukiMeng](https://github.com/TatsukiMeng))
 - `AuthStorage` can be constructed over an `AuthStorageBackend` (its namespaces plus `setAccountPolicies`/`replaceStore`/`close`) instead of a credential store, so another thread's instance can serve every call
-- Added `AuthStorage.keys.generation(provider)`, a counter that moves on every change to a provider's runtime key, config key or config fallback (and on a resolver swap), and `keys.batch(change)`, which counts a group of writes once per provider they actually changed
+- Added `AuthStorage.keys.generation(provider)`, a counter that moves on every change to a provider's runtime key, config key or config fallback (and on a resolver swap), and `keys.batch(change)`, which counts a group of writes once per provider they actually changed ([#18017](https://github.com/can1357/oh-my-pi/pull/18017) by [@sjawhar](https://github.com/sjawhar))
 - Anthropic sessions on the official API now use message threads (`message-threads-2026-08-12`, as Claude Code does): after the first turn each request sends only the new messages, cutting time to first token in long conversations; a refused or expired thread replays the full conversation automatically. `statefulResponses: false` or `PI_ANTHROPIC_MESSAGE_THREADS=0` turns it off, `PI_ANTHROPIC_MESSAGE_THREADS=1` opts other endpoints in
 
 ### Fixed

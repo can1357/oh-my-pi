@@ -1873,11 +1873,15 @@ export class ModelRegistry {
 	/** `#fetch` that refuses to send once `providerId`'s configuration epoch is no longer `epoch`. */
 	#guardedFetch(providerId: string, epoch: number): FetchImpl {
 		const fetchImpl = this.#fetch;
-		const guarded = (input: Parameters<FetchImpl>[0], init?: Parameters<FetchImpl>[1]) =>
+		// Annotated rather than cast: `FetchImpl`'s own parameter types flow into
+		// the arrow contextually, and `preconnect` is optional on it, so the
+		// callable and the property are both checked against the real type.
+		const guarded: FetchImpl = (input, init) =>
 			this.#configEpoch(providerId) === epoch
 				? fetchImpl(input, init)
 				: Promise.reject(new Error(`Provider ${providerId}: configuration changed during model discovery`));
-		return Object.assign(guarded, { preconnect: fetchImpl.preconnect }) as FetchImpl;
+		guarded.preconnect = fetchImpl.preconnect;
+		return guarded;
 	}
 
 	#descriptorBaseUrl(providerId: string): string | undefined {
@@ -3087,12 +3091,23 @@ export class ModelRegistry {
 		// fetch guarded by this identity, so a key resolved under one
 		// configuration never reaches another configuration's endpoint.
 		const identityAtStart = new Map<string, string>();
-		const epochAtStart = new Map<string, number>();
 		for (const { providerId } of [...standardProviderDescriptors, ...enabledSpecialProviderDescriptors]) {
 			identityAtStart.set(providerId, this.#providerConfigIdentity(providerId));
-			epochAtStart.set(providerId, this.#configEpoch(providerId));
 		}
-		const isUnchanged = (providerId: string) => this.#configEpoch(providerId) === epochAtStart.get(providerId);
+		// The epoch travels WITH its descriptor rather than in a lookup table beside
+		// it. A table has to answer for a provider it may not hold, and the only
+		// answers available are an assertion or a re-read after the await — and a
+		// re-read reports "unchanged" for exactly the change this guard exists to
+		// catch. Pairing them makes the missing case unrepresentable.
+		const standardAtStart = standardProviderDescriptors.map(descriptor => ({
+			descriptor,
+			epoch: this.#configEpoch(descriptor.providerId),
+		}));
+		const specialAtStart = enabledSpecialProviderDescriptors.map(descriptor => ({
+			descriptor,
+			epoch: this.#configEpoch(descriptor.providerId),
+		}));
+		const isUnchanged = (providerId: string, epoch: number) => this.#configEpoch(providerId) === epoch;
 		const standardProviderKeys = await Promise.all(
 			standardProviderDescriptors.map(descriptor => {
 				const cacheProviderId = isCredentialScopedModelCacheProvider(descriptor.providerId)
@@ -3121,10 +3136,10 @@ export class ModelRegistry {
 			),
 		);
 		const options: ModelManagerOptions<Api>[] = [];
-		for (let i = 0; i < standardProviderDescriptors.length; i++) {
-			const descriptor = standardProviderDescriptors[i];
+		for (let i = 0; i < standardAtStart.length; i++) {
+			const { descriptor, epoch } = standardAtStart[i];
 			// The configuration moved while the key resolved: the next pass discovers it.
-			if (!isUnchanged(descriptor.providerId)) continue;
+			if (!isUnchanged(descriptor.providerId, epoch)) continue;
 			const apiKey = standardProviderKeys[i];
 			const hasExplicitVllmConfig =
 				descriptor.providerId === "vllm" &&
@@ -3147,7 +3162,7 @@ export class ModelRegistry {
 				const discoveryConfig = {
 					apiKey: isDiscoveryBearerApiKey(apiKey) ? apiKey : undefined,
 					baseUrl: this.#descriptorBaseUrl(descriptor.providerId),
-					fetch: this.#guardedFetch(descriptor.providerId, epochAtStart.get(descriptor.providerId)!),
+					fetch: this.#guardedFetch(descriptor.providerId, epoch),
 					region: identity?.region,
 					inferenceRegion: identity?.inferenceRegion,
 					orgId: identity?.orgId,
@@ -3163,20 +3178,14 @@ export class ModelRegistry {
 			}
 		}
 
-		for (let i = 0; i < enabledSpecialProviderDescriptors.length; i++) {
-			const descriptor = enabledSpecialProviderDescriptors[i];
-			if (!isUnchanged(descriptor.providerId)) continue;
+		for (let i = 0; i < specialAtStart.length; i++) {
+			const { descriptor, epoch } = specialAtStart[i];
+			if (!isUnchanged(descriptor.providerId, epoch)) continue;
 			const key = descriptor.resolveKey(specialKeys[i]);
 			if (!isAuthenticated(key)) {
 				continue;
 			}
-			options.push(
-				descriptor.createOptions(
-					key,
-					specialKeys[i],
-					this.#guardedFetch(descriptor.providerId, epochAtStart.get(descriptor.providerId)!),
-				),
-			);
+			options.push(descriptor.createOptions(key, specialKeys[i], this.#guardedFetch(descriptor.providerId, epoch)));
 		}
 
 		// Catalog-only providers have no endpoint manager. Give their bundled
@@ -4462,9 +4471,25 @@ export class ModelRegistry {
 				// into them, with a credential they were never discovered with. An
 				// identical re-registration (each session start re-registers every
 				// active source) keeps its cache.
+				//
+				// `headers` goes through `canonicalHeaderIdentity`, not through
+				// `canonicalJson`, because `canonicalJson` sorts member names and a
+				// header identity cannot: it has no way to tell two field names from
+				// two spellings of one, and two declarations of one name combine in
+				// declaration order into the value that is sent. Sorted, two
+				// registrations sending `Bearer one, Bearer two` and `Bearer two,
+				// Bearer one` share a namespace and the second serves the first's
+				// roster. This namespace is introduced by this change, so it is fixed
+				// here rather than costing an `extension-v3` bump later.
 				cacheProviderId: scopeModelCacheProviderIdToEndpoint(
 					`${providerName}:extension-v2:${Bun.hash(
-						canonicalJson([sourceId ?? "", providerApi, providerApiKey, providerAuthHeader, providerHeaders]),
+						canonicalJson([
+							sourceId ?? "",
+							providerApi,
+							providerApiKey,
+							providerAuthHeader,
+							providerHeaders && canonicalHeaderIdentity(providerHeaders),
+						]),
 					).toString(36)}`,
 					config.baseUrl,
 				),
