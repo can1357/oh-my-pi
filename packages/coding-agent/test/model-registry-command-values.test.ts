@@ -14,6 +14,7 @@ import {
 	resolveConfigValue,
 	resolveCredentialConfigValue,
 } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
+import { SessionAccountPoolScope } from "@oh-my-pi/pi-coding-agent/config/account-pools";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -1087,23 +1088,56 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		});
 
 		test("the failure a resolution produced survives a concurrent invalidation", async () => {
-			// The reason used to be read from a shared map after the value came back
-			// undefined; an invalidation landing in between restored the unhelpful
-			// "no key". The reason now travels with the resolution that produced it.
+			// The reason used to be read from a shared map only after the value came
+			// back undefined, and an invalidation landing in that window restored the
+			// unhelpful "no key". It now travels with the resolution that produced it.
+			// The window is one await boundary wide, so this drives it exactly: start
+			// the resolution, then invalidate before its continuation runs.
 			const config = "!false";
 			clearConfigValueCache();
+			expect(await resolveConfigValue(config)).toBeUndefined();
 			const credential = resolveCredentialConfigValue(config).then(
 				value => value,
 				(error: unknown) => error,
 			);
-			const probe = resolveConfigValue(config).then(value => {
-				invalidateCommandConfig(config, "refresh");
-				return value;
-			});
-			expect(await probe).toBeUndefined();
+			invalidateAllCommandConfigs("refresh");
 			const failure = await credential;
 			expect(failure).toBeInstanceOf(CredentialSourceError);
 			expect((failure as Error).message).toBe("the command `false` exited with status 1");
+		});
+
+		test("a derived bearer header follows the credential rule, not the literal fallback", async () => {
+			// `authHeader: true` derives Authorization from the apiKey config. Resolving
+			// it generically sent the variable's own name and overwrote a valid runtime
+			// key; it must add no header instead.
+			const name = `OMP_TEST_EMPTY_HDR_${Snowflake.next()}`;
+			process.env[name] = "";
+			try {
+				const registry = providerWithApiKey(name);
+				const model = registry.find("custom-proxy", "custom-model");
+				if (!model) throw new Error("Expected custom model");
+				expect((await registry.resolveModelHeaders(model))?.Authorization).toBeUndefined();
+			} finally {
+				delete process.env[name];
+			}
+		});
+
+		test("the pool-scoped request facade reports the source too", async () => {
+			// The scope replaces getApiKeyAndHeaders with its own session-scoped copy,
+			// and every session started with oauthAccountPools gets it. A second copy
+			// of the facade is how one of them ended up back on the availability probe.
+			const registry = providerWithApiKey("!false");
+			const model = registry.find("custom-proxy", "custom-model");
+			if (!model) throw new Error("Expected custom model");
+			const scope = new SessionAccountPoolScope(authStorage, { "custom-proxy": ["pool-identity"] }, "pool-session");
+			try {
+				expect(await scope.registry(registry).getApiKeyAndHeaders(model)).toEqual({
+					ok: false,
+					error: "No API key for provider custom-proxy: the command `false` exited with status 1",
+				});
+			} finally {
+				scope.release();
+			}
 		});
 
 		test("the historical request facade reports the source, not a generic missing key", async () => {
@@ -1133,6 +1167,14 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			expect((await requestRefusal(providerWithApiKey(`!${shellQuote(script)}`))).message).toBe(
 				`No API key for provider custom-proxy: the command \`${script}\` exited with status 1`,
 			);
+			// A substitution is not parsed, and the scan desynchronises inside it, so
+			// nothing after it is printed. Showing the text there put the secret in
+			// the error and in ~/.omp/logs.
+			const subst = await requestRefusal(providerWithApiKey("!SECRET=$(echo 'sk-live-not-a-real-key') false"));
+			expect(subst.message).toBe(
+				"No API key for provider custom-proxy: the command `SECRET=… …` exited with status 1",
+			);
+			expect(subst.message).not.toContain("sk-live-not-a-real-key");
 			// The home directory is shortened out, like every other path we show. The
 			// home is a stub pointing at tempDir: a fixture must never write, or even
 			// name, a path under the real home.

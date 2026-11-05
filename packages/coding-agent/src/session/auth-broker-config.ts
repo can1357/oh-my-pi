@@ -36,7 +36,11 @@ import {
 import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
 import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
 import { combine, type ScopeLike } from "../config/registry";
-import { resolveConfigValue, useStandaloneCommandTimeout } from "../config/resolve-config-value";
+import {
+	resolveConfigValue,
+	resolveCredentialConfigValue,
+	useStandaloneCommandTimeout,
+} from "../config/resolve-config-value";
 import { Settings } from "../config/settings";
 import type { AuthStorage } from "./auth-storage";
 
@@ -128,7 +132,11 @@ export function resolveAuthBrokerConfig(): Promise<AuthBrokerClientConfig | null
 		useStandaloneCommandTimeout(() => cfgProvidersCommandTimeoutSeconds.get(settings) * 1_000, {
 			keepExisting: true,
 		});
-		return resolveAuthBrokerConfigShared({ agentDir, configValueResolver: resolveConfigValue });
+		return resolveAuthBrokerConfigShared({
+			agentDir,
+			configValueResolver: resolveConfigValue,
+			credentialValueResolver: resolveCredentialConfigValue,
+		});
 	});
 	cachedConfigKey = key;
 	cachedConfigPromise = promise;
@@ -171,7 +179,11 @@ export interface AuthStorageSettingsSync {
 export function createAuthStorageSettingsSync(scope: ScopeLike, authStorage: AuthStorage): AuthStorageSettingsSync {
 	const settings = "settings" in scope ? scope.settings : scope;
 	const agentDir = settings.getAgentDir();
-	const resolveOptions = { agentDir, configValueResolver: resolveConfigValue };
+	const resolveOptions = {
+		agentDir,
+		configValueResolver: resolveConfigValue,
+		credentialValueResolver: resolveCredentialConfigValue,
+	};
 	// Snapshot the connection `authStorage` was opened with, before any edit lands.
 	let activeBroker: Promise<AuthBrokerClientConfig | null> = resolveAuthBrokerConfigShared(resolveOptions).catch(
 		() => null,
@@ -237,6 +249,7 @@ export function discoverAuthStorage(
 		...options,
 		agentDir,
 		configValueResolver: resolveConfigValue,
+		credentialValueResolver: resolveCredentialConfigValue,
 	});
 }
 

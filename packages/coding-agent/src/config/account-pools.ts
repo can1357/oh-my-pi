@@ -2,7 +2,7 @@ import type { AuthApiKeyOptions, AuthStorage, SessionRestrictionLease } from "@o
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
-import type { ModelRegistry } from "./model-registry";
+import { type ModelRegistry, requestAuthFromCredential } from "./model-registry";
 
 /**
  * Provider id → OAuth identity keys one session may authenticate with; see
@@ -136,17 +136,20 @@ export class SessionAccountPoolScope {
 			getApiKeyWithCredentialForProvider,
 			getApiKeyForProvider: (provider, sessionId, options) =>
 				target.getApiKeyForProvider(provider, this.#sessionIdFor(provider, sessionId), options),
-			getApiKeyAndHeaders: async model => {
-				try {
-					const apiKey = await getApiKey(model);
-					if (apiKey === undefined) {
-						return { ok: false, error: `No API key found for "${model.provider}"` };
-					}
-					return { ok: true, apiKey, headers: await target.getProviderHeaders(model.provider) };
-				} catch (error) {
-					return { ok: false, error: error instanceof Error ? error.message : String(error) };
-				}
-			},
+			// The request path, through the shared facade body: reading the scoped
+			// availability probe here left a pooled session reporting "No API key
+			// found" for a credential source that named its own failure.
+			getApiKeyAndHeaders: model =>
+				requestAuthFromCredential(
+					model.provider,
+					() =>
+						getApiKeyWithCredentialForProvider(model.provider, undefined, {
+							baseUrl: model.baseUrl,
+							modelId: model.id,
+							accountIds: model.accountAccess && Object.keys(model.accountAccess),
+						}),
+					() => target.getProviderHeaders(model.provider),
+				),
 			resolver: ((
 				resolverTarget: string | ApiKeyResolverModel,
 				optionsOrSessionId?: ApiKeyResolverOptions | string,

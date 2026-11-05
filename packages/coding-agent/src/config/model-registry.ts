@@ -297,6 +297,28 @@ export type ResolvedRequestAuth =
 	| { ok: false; error: string };
 
 /**
+ * The historical Pi extension facade's body. It is a request path, so it reads
+ * the credential the way a request does and lets a configured source that
+ * produced nothing be reported by name instead of flattened into "No API key
+ * found". The account-pool scope overrides the method with its own session
+ * scoping, so the body lives here: two copies is how one of them ended up back
+ * on the availability probe.
+ */
+export async function requestAuthFromCredential(
+	provider: string,
+	resolveCredential: () => Promise<ResolvedApiKey | undefined>,
+	resolveHeaders: () => Promise<Record<string, string> | undefined>,
+): Promise<ResolvedRequestAuth> {
+	try {
+		const apiKey = (await resolveCredential())?.apiKey;
+		if (apiKey === undefined) return { ok: false, error: `No API key found for "${provider}"` };
+		return { ok: true, apiKey, headers: await resolveHeaders() };
+	} catch (error) {
+		return { ok: false, error: error instanceof Error ? error.message : String(error) };
+	}
+}
+
+/**
  * Model registry - loads and manages models, resolves API keys via AuthStorage.
  */
 export class ModelRegistry {
@@ -3688,27 +3710,18 @@ export class ModelRegistry {
 		});
 	}
 
-	/**
-	 * Resolve request authentication through the historical Pi extension facade.
-	 * It is a request path, so it reads the credential the way a request does:
-	 * a configured source that produced nothing is reported by name through the
-	 * catch below, not flattened into "No API key found".
-	 */
+	/** Resolve request authentication through the historical Pi extension facade. */
 	async getApiKeyAndHeaders(model: Model<Api>): Promise<ResolvedRequestAuth> {
-		try {
-			const resolved = await this.getApiKeyWithCredentialForProvider(model.provider, undefined, {
-				baseUrl: model.baseUrl,
-				modelId: model.id,
-			});
-			const apiKey = resolved?.apiKey;
-			if (apiKey === undefined) {
-				return { ok: false, error: `No API key found for "${model.provider}"` };
-			}
-			const headers = await this.getProviderHeaders(model.provider);
-			return { ok: true, apiKey, headers };
-		} catch (error) {
-			return { ok: false, error: error instanceof Error ? error.message : String(error) };
-		}
+		return await requestAuthFromCredential(
+			model.provider,
+			() =>
+				this.getApiKeyWithCredentialForProvider(model.provider, undefined, {
+					baseUrl: model.baseUrl,
+					modelId: model.id,
+					accountIds: model.accountAccess && Object.keys(model.accountAccess),
+				}),
+			() => this.getProviderHeaders(model.provider),
+		);
 	}
 
 	/**
@@ -3752,11 +3765,14 @@ export class ModelRegistry {
 		if (this.#isKeylessProvider(provider)) {
 			return { apiKey: kNoAuth };
 		}
+		// A caller holding the model passes its own entitlements: looking them up by
+		// id loses what a supplied model object carries, and the account chosen then
+		// need not list that model.
 		const accountAccess = options?.modelId ? this.find(provider, options.modelId)?.accountAccess : undefined;
 		return this.authStorage.keys.getWithCredential(provider, sessionId, {
 			baseUrl: options?.baseUrl,
 			modelId: options?.modelId,
-			accountIds: accountAccess && Object.keys(accountAccess),
+			accountIds: options?.accountIds ?? (accountAccess && Object.keys(accountAccess)),
 			forceRefresh: options?.forceRefresh,
 			refreshReason: options?.refreshReason,
 			rejectedAccessToken: options?.rejectedAccessToken,

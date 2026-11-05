@@ -718,7 +718,7 @@ in `models.yml` belong to tier 2, not this fallback tier.
 
 - Value is first treated as an environment variable name.
 - If the env var is unset, the literal string is used as the token.
-- If the env var is set to the empty string, resolution produces no value: a variable that exists is meant as the credential, so its empty value is not replaced by the variable's own name. This holds for every config value read this way, not only credentials — a `headers` or MCP value naming an empty variable is omitted rather than sent as the variable's name.
+- If the env var is set to the empty string, the literal fallback still applies here, but **credential** resolution refuses instead: a variable that exists is meant to hold the credential, so its empty value is not sent as the variable's own name. A `headers` value, an MCP value and the auth broker's URL are unchanged — an empty variable still resolves to the variable's name for them, exactly as before.
 
 If `authHeader: true` and provider `apiKey` is set, models get:
 

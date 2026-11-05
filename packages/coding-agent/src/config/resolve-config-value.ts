@@ -266,17 +266,28 @@ export async function resolveCredentialConfigValue(valueConfig: string): Promise
 /** A leading `NAME=value` environment assignment of a simple command. */
 const COMMAND_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
+/** Unquoted shell syntax we do not parse, and will not print past. */
+const SHELL_METACHARACTER = /[$`|&;<>(){}*?!~#\n]/;
+
 /**
  * Split off the first shell word of `command`, honoring quotes and backslash
  * escapes, so a program path containing spaces stays one word.
+ *
+ * `safe` is false when the word contains unquoted shell syntax this does not
+ * understand — a substitution, a pipeline, a glob. The scan desynchronises
+ * from the real shell there, and the text after it is as likely to be a secret
+ * as a program name, so callers must print `…` rather than the word.
  */
-function firstShellWord(command: string): { word: string; rest: string } {
+function firstShellWord(command: string): { word: string; rest: string; safe: boolean } {
 	let word = "";
 	let quote: '"' | "'" | undefined;
+	let safe = true;
 	let index = 0;
 	for (; index < command.length; index++) {
 		const char = command[index];
 		if (quote !== undefined) {
+			// A substitution inside double quotes still runs.
+			if (quote === '"' && (char === "$" || char === "`")) safe = false;
 			if (char === quote) quote = undefined;
 			else word += char;
 			continue;
@@ -290,9 +301,10 @@ function firstShellWord(command: string): { word: string; rest: string } {
 			continue;
 		}
 		if (char === undefined || /\s/.test(char)) break;
+		if (SHELL_METACHARACTER.test(char)) safe = false;
 		word += char;
 	}
-	return { word, rest: command.slice(index).trim() };
+	return { word, rest: command.slice(index).trim(), safe };
 }
 
 /**
@@ -303,17 +315,28 @@ function firstShellWord(command: string): { word: string; rest: string } {
  */
 function commandLabel(command: string): string {
 	let rest = command.trim();
-	const assignments: string[] = [];
+	const parts: string[] = [];
+	let elided = false;
 	while (rest.length > 0) {
 		const next = firstShellWord(rest);
 		if (next.word.length === 0 || !COMMAND_ASSIGNMENT.test(next.word)) break;
-		assignments.push(`${next.word.slice(0, next.word.indexOf("="))}=…`);
+		parts.push(`${next.word.slice(0, next.word.indexOf("="))}=…`);
+		// The name is safe, the value was not parsed: stop before printing anything
+		// after a substitution we do not understand. `SECRET=$(mint) prog` reads as
+		// `SECRET=… …`, never as the substitution's text.
+		if (!next.safe) {
+			elided = true;
+			break;
+		}
 		rest = next.rest;
 	}
-	const { word, rest: args } = firstShellWord(rest);
-	const parts = assignments;
-	if (word.length > 0) parts.push(shortenPath(word));
-	if (args.length > 0 || parts.length === 0) parts.push("…");
+	if (!elided) {
+		const program = firstShellWord(rest);
+		if (program.word.length > 0 && program.safe) parts.push(shortenPath(program.word));
+		else elided = true;
+		if (program.rest.length > 0) elided = true;
+	}
+	if (elided || parts.length === 0) parts.push("…");
 	return parts.join(" ");
 }
 
@@ -441,7 +464,15 @@ export function createConfigHeaderResolver(
 		}
 		if (options?.authHeader && options.apiKeyConfig) {
 			const keyConfig = options.apiKeyConfig;
-			const apiKey = await untilAborted(signal, () => resolveConfigValue(keyConfig));
+			// The derived bearer is a credential, so it follows the credential rule: a
+			// source that produced nothing adds no header, instead of sending the
+			// variable's own name over a valid runtime key. Headers never throw.
+			const apiKey = await untilAborted(signal, () =>
+				resolveCredentialConfigValue(keyConfig).catch(error => {
+					if (error instanceof CredentialSourceError) return undefined;
+					throw error;
+				}),
+			);
 			if (apiKey) {
 				resolved.Authorization = `Bearer ${apiKey}`;
 				hasResolved = true;

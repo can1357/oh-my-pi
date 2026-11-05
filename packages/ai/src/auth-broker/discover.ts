@@ -39,11 +39,15 @@ export interface AuthBrokerClientConfig {
 export interface ResolveAuthBrokerConfigOptions {
 	agentDir?: string;
 	configValueResolver?: (config: string) => Promise<string | undefined>;
+	/** Resolver for credential-shaped values (the broker token). Defaults to {@link configValueResolver}. */
+	credentialValueResolver?: (config: string) => Promise<string | undefined>;
 }
 
 export interface DiscoverAuthStorageOptions {
 	agentDir?: string;
 	configValueResolver?: (config: string) => Promise<string | undefined>;
+	/** Resolver for credential-shaped values (the broker token). Defaults to {@link configValueResolver}. */
+	credentialValueResolver?: (config: string) => Promise<string | undefined>;
 	cachePath?: string;
 	sourceLabel?: string;
 	/** Programmatic pool for SDK hosts. Takes precedence over the environment file. */
@@ -384,6 +388,10 @@ export async function resolveAuthBrokerConfig(
 ): Promise<AuthBrokerClientConfig | null> {
 	const agentDir = options.agentDir ?? getAgentDir();
 	const resolveConfig = options.configValueResolver ?? defaultResolveConfigValue;
+	// The broker's token is a credential and the URL is not, so they do not read
+	// the same resolver: a token naming an empty variable must not be sent as the
+	// variable's own name.
+	const resolveCredential = options.credentialValueResolver ?? resolveConfig;
 
 	const envUrl = process.env.OMP_AUTH_BROKER_URL;
 	const envToken = process.env.OMP_AUTH_BROKER_TOKEN;
@@ -397,7 +405,7 @@ export async function resolveAuthBrokerConfig(
 			if (resolved && resolved.length > 0) url = resolved;
 		}
 		if (fromConfig.token) {
-			const resolved = await resolveConfig(fromConfig.token);
+			const resolved = await resolveCredential(fromConfig.token);
 			if (resolved && resolved.length > 0) configToken = resolved;
 		}
 	}
@@ -517,6 +525,7 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 	const brokerConfig = await resolveAuthBrokerConfig({
 		agentDir,
 		configValueResolver: options.configValueResolver,
+		credentialValueResolver: options.credentialValueResolver,
 	});
 	const { accountPolicies, defaultReservePct } = await loadAuthAccountPolicyConfig({
 		agentDir,
@@ -533,6 +542,7 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 	const storage = new AuthStorage(store, {
 		...options.authStorageOptions,
 		configValueResolver: options.configValueResolver,
+		credentialValueResolver: options.credentialValueResolver,
 		sourceLabel,
 		accountPolicies,
 		defaultReservePct,
