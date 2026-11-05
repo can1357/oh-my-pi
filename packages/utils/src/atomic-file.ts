@@ -64,7 +64,10 @@ function projectConfigDirNames(): string[][] {
 		path
 			.normalize(name)
 			.split(path.sep)
-			.filter(segment => segment !== "" && segment !== "."),
+			// `.` and `..` are traversal, not name. `PI_CONFIG_DIR=../custom` names
+			// the directory `custom` beside the project, and a canonical path never
+			// carries a `..` component for the matcher to find.
+			.filter(segment => segment !== "" && segment !== "." && segment !== ".."),
 	);
 }
 
