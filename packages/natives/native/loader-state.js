@@ -786,12 +786,19 @@ export function staleWorkspaceAddonNotice(addon) {
 	);
 }
 
-/** Process-wide record of whether the stale-addon notice has been emitted. */
+/**
+ * Whether the stale-addon notice has been emitted by this module instance.
+ * One per JavaScript realm, so a worker thread that imports natives gets its
+ * own, and so does a second copy of this package resolved in the same
+ * process. That is the intended scope: the latch exists to stop one realm
+ * repainting the line on every lazy `loadNative()`, not to coordinate realms.
+ */
 const staleNoticeState = { reported: false };
 
 /**
- * Emit {@link staleWorkspaceAddonNotice} at most once per process, and only
- * for the one mismatch this loader tolerates: a workspace load.
+ * Emit {@link staleWorkspaceAddonNotice} at most once per module instance
+ * (see {@link staleNoticeState}), and only for the one mismatch this loader
+ * tolerates: a workspace load.
  *
  * Both guards matter. `loadNative()` is not called once at startup — the lazy
  * entrypoints in `clipboard.js` and friends call it on every invocation — so
@@ -803,8 +810,8 @@ const staleNoticeState = { reported: false };
  *
  * The write is a synchronous `fs.writeSync` to fd 2 for the same reason as
  * {@link startupMarker}: it must survive a crash that follows it. `write` and
- * `state` are injectable so the latch can be exercised without a
- * process-global.
+ * `state` are injectable so a test can exercise the latch without consuming
+ * the module's own.
  * @param {{ isWorkspaceLoad: boolean }} ctx
  * @param {NonNullable<ReturnType<typeof nativeAddonStatus>>} addon
  * @param {{ write?: (text: string) => void; state?: { reported: boolean } }} [deps]

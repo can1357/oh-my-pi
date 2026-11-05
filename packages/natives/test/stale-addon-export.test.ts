@@ -139,7 +139,7 @@ describe("stale workspace addon notice", () => {
 	// `loadNative()` is not a startup-only call: `native/clipboard.js` and the
 	// other lazy entrypoints call it on every invocation, so an unlatched
 	// notice would repaint under a running TUI on every clipboard copy.
-	it("emits at most once per process", () => {
+	it("emits at most once against a given latch", () => {
 		const written: string[] = [];
 		const state = { reported: false };
 		const deps = { write: (text: string) => written.push(text), state };
