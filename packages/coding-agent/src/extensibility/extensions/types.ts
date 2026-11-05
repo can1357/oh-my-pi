@@ -110,6 +110,8 @@ import type { BashToolDetails } from "@oh-my-pi/pi-tui/tools/bash";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import type { EventBus } from "../../utils/event-bus";
 import type {
+	AutolearnCaptureEndEvent,
+	AutolearnCaptureStartEvent,
 	AgentEndEvent,
 	AgentStartEvent,
 	AutoCompactionEndEvent,
@@ -1281,6 +1283,8 @@ export interface ToolExecutionEndEvent {
 }
 
 export type {
+	AutolearnCaptureEndEvent,
+	AutolearnCaptureStartEvent,
 	AutoCompactionEndEvent,
 	AutoCompactionStartEvent,
 	AutoRetryEndEvent,
@@ -1678,6 +1682,8 @@ export type ExtensionEvent =
 	| RetryFallbackSucceededEvent
 	| TtsrTriggeredEvent
 	| TodoReminderEvent
+	| AutolearnCaptureStartEvent
+	| AutolearnCaptureEndEvent
 	| GoalUpdatedEvent
 	| CredentialDisabledEvent
 	| McpNotificationEvent
@@ -1903,6 +1909,8 @@ export interface ExtensionAPI {
 	on(event: "retry_fallback_succeeded", handler: ExtensionHandler<RetryFallbackSucceededEvent>): void;
 	on(event: "ttsr_triggered", handler: ExtensionHandler<TtsrTriggeredEvent>): void;
 	on(event: "todo_reminder", handler: ExtensionHandler<TodoReminderEvent>): void;
+	on(event: "autolearn_capture_start", handler: ExtensionHandler<AutolearnCaptureStartEvent>): void;
+	on(event: "autolearn_capture_end", handler: ExtensionHandler<AutolearnCaptureEndEvent>): void;
 	on(event: "goal_updated", handler: ExtensionHandler<GoalUpdatedEvent>): void;
 	on(event: "credential_disabled", handler: ExtensionHandler<CredentialDisabledEvent>): void;
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;

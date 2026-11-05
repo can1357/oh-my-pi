@@ -165,7 +165,12 @@ import { emitSessionShutdownEvent, TOP_LEVEL_AGENT, UNAVAILABLE_ANNOTATIONS } fr
 import { extensionEventFromSessionEvent } from "../extensibility/extensions/lifecycle-mirror";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
-import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
+import type {
+	AutolearnCaptureEndEvent,
+	AutolearnCaptureStartEvent,
+	CompactOptions,
+	ContextUsage,
+} from "../extensibility/extensions/types";
 import type { CustomCommandContext } from "../extensibility/custom-commands/types";
 import { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
 import {
@@ -6415,6 +6420,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
+	 * Deliver a capture lifecycle event to subscribers synchronously (RPC ordering
+	 * against `agent_end` depends on it) and to extensions without awaiting them.
+	 */
+	#emitAutolearnCaptureEvent(event: AutolearnCaptureStartEvent | AutolearnCaptureEndEvent): void {
+		void this.#emitSessionEvent(event, { detachExtensions: true });
+	}
+
+	/**
 	 * Announce a coalesced pending auto-learn capture synchronously inside the
 	 * qualifying turn's `agent_end` dispatch while an earlier capture is still in
 	 * flight, so later subscribers see `autolearn_capture_start` before that
@@ -6426,12 +6439,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	notifyAutolearnCapturePending(): void {
 		if (this.#isDisposed || !this.#autolearnCaptureTask) return;
 		if (this.#autolearnCapturePendingAnnounced) {
-			this.#emit({ type: "autolearn_capture_end", outcome: "aborted" });
+			this.#emitAutolearnCaptureEvent({ type: "autolearn_capture_end", outcome: "aborted" });
 		}
 		this.#autolearnCapturePendingAnnounced = true;
 		this.#autolearnCapturePendingAborted = false;
 		this.#autolearnCaptureSkipNextPending = false;
-		this.#emit({ type: "autolearn_capture_start" });
+		this.#emitAutolearnCaptureEvent({ type: "autolearn_capture_start" });
 	}
 
 	/** Run one abortable auto-learn capture outside the primary agent loop. */
@@ -6444,7 +6457,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (this.#autolearnCapturePendingAnnounced) {
 				this.#autolearnCapturePendingAnnounced = false;
 				this.#autolearnCapturePendingAborted = false;
-				this.#emit({ type: "autolearn_capture_end", outcome: "aborted" });
+				this.#emitAutolearnCaptureEvent({ type: "autolearn_capture_end", outcome: "aborted" });
 			}
 			return;
 		}
@@ -6477,20 +6490,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// when queued behind a prior capture): the AutoLearnController subscriber
 		// is still inside the `agent_end` dispatch, so every later subscriber (RPC
 		// mode's forwarder) sees `autolearn_capture_start` before the `agent_end`
-		// that triggered it.
+		// that triggered it, and extensions see it before the capture's tool calls.
 		if (!preAnnounced) {
-			this.#emit({ type: "autolearn_capture_start" });
+			this.#emitAutolearnCaptureEvent({ type: "autolearn_capture_start" });
 		}
 		try {
 			await task;
 		} finally {
 			if (this.#autolearnCaptureTask === task) this.#autolearnCaptureTask = undefined;
-			this.#emit({ type: "autolearn_capture_end", outcome });
+			this.#emitAutolearnCaptureEvent({ type: "autolearn_capture_end", outcome });
 			if (this.#autolearnCapturePendingAnnounced && this.#autolearnCapturePendingAborted) {
 				this.#autolearnCapturePendingAnnounced = false;
 				this.#autolearnCapturePendingAborted = false;
 				this.#autolearnCaptureSkipNextPending = true;
-				this.#emit({ type: "autolearn_capture_end", outcome: "aborted" });
+				this.#emitAutolearnCaptureEvent({ type: "autolearn_capture_end", outcome: "aborted" });
 			}
 		}
 	}
@@ -6504,7 +6517,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#autolearnCapturePendingAnnounced = false;
 				this.#autolearnCapturePendingAborted = false;
 				this.#autolearnCaptureSkipNextPending = true;
-				this.#emit({ type: "autolearn_capture_end", outcome: "aborted" });
+				this.#emitAutolearnCaptureEvent({ type: "autolearn_capture_end", outcome: "aborted" });
 			}
 		}
 	}

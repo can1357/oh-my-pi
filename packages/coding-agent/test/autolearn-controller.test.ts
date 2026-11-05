@@ -23,12 +23,16 @@ import { AutoLearnController, buildAutoLearnInstructions } from "@oh-my-pi/pi-co
 import { cfgAutolearnEnabled } from "@oh-my-pi/pi-coding-agent/autolearn/settings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { Extension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { createAutoLearnCaptureRunner } from "@oh-my-pi/pi-coding-agent/sdk";
 import { type RpcAgentProcess, RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 class FakeSession {
 	readonly listeners: Array<(event: AgentSessionEvent) => void> = [];
@@ -843,6 +847,8 @@ describe("autolearn capture lifecycle events", () => {
 	function createSession(options?: {
 		/** Model calls that answer with a tool call before the final text answer. */
 		toolTurns?: number;
+		/** Extension loaded into the session's runner. */
+		extension?: { extension: Extension; runtime: ExtensionRuntime };
 	}): { events: AgentSessionEvent[]; session: AgentSession } {
 		const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
 		const probeTool: AgentTool = {
@@ -899,12 +905,23 @@ describe("autolearn capture lifecycle events", () => {
 			"todo.enabled": false,
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		const sessionManager = SessionManager.inMemory(tempDir.path());
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 		const built = new AgentSession({
 			agent,
-			sessionManager: SessionManager.inMemory(tempDir.path()),
+			sessionManager,
 			settings,
-			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
+			modelRegistry,
 			toolRegistry: new Map([[probeTool.name, probeTool]]),
+			extensionRunner: options?.extension
+				? new ExtensionRunner(
+						[options.extension.extension],
+						options.extension.runtime,
+						tempDir.path(),
+						sessionManager,
+						modelRegistry,
+					)
+				: undefined,
 		});
 		session = built;
 		const events: AgentSessionEvent[] = [];
@@ -1144,5 +1161,48 @@ describe("autolearn capture lifecycle events", () => {
 			{ type: "autolearn_capture_start" },
 			{ type: "autolearn_capture_end", outcome: "completed" },
 		]);
+	});
+
+	it("delivers capture lifecycle events to extensions through pi.on", async () => {
+		const seen: string[] = [];
+		const extensionSawStart = Promise.withResolvers<void>();
+		const extensionSawEnd = Promise.withResolvers<void>();
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("autolearn_capture_start", event => {
+					seen.push(event.type);
+					extensionSawStart.resolve();
+				});
+				pi.on("autolearn_capture_end", event => {
+					seen.push(`${event.type}:${event.outcome}`);
+					extensionSawEnd.resolve();
+				});
+			},
+			tempDir.path(),
+			new EventBus(),
+			runtime,
+			"capture-observer",
+		);
+		const { session: current } = createSession({ toolTurns: 5, extension: { extension, runtime } });
+		const release = Promise.withResolvers<void>();
+		new AutoLearnController({
+			session: current,
+			settings: current.settings,
+			capture: () =>
+				current.runAutolearnCapture(async () => {
+					await release.promise;
+				}),
+		});
+
+		await current.prompt("go");
+		await extensionSawStart.promise;
+		// The capture is still held: an extension tracking pane state knows a
+		// background capture is running and has not seen it settle.
+		expect(seen).toEqual(["autolearn_capture_start"]);
+
+		release.resolve();
+		await extensionSawEnd.promise;
+		expect(seen).toEqual(["autolearn_capture_start", "autolearn_capture_end:completed"]);
 	});
 });
