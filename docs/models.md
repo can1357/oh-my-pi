@@ -393,7 +393,9 @@ No API key for provider openai: the command `mint-token.sh` exited 0 but printed
 No API key for provider openai: environment variable OPENAI_API_KEY is set but empty
 ```
 
-Only the command's first word appears: the arguments of a credential command can carry secrets.
+Only the program appears, never an argument: a credential command's arguments carry secrets, and so does the value of a leading `NAME=value` assignment, which is shown as `NAME=…`. A quoted program path keeps its spaces and the home directory is shortened, so the label still matches what you wrote in `models.yml`.
+
+This covers a variable that is **set and empty**. An **unset** variable still falls back to the literal, so `apiKey: MY_PROVIDER_API_KEY` with nothing exported still sends `Authorization: Bearer MY_PROVIDER_API_KEY` and still earns the provider's 401 — the literal fallback is what makes a plain inline key work, and OMP cannot tell the two uses apart. Export the variable, even empty, to get the named refusal instead.
 
 When a 401 prompted the re-resolution, the message says so and keeps the provider's rejection, so a stale token whose re-mint is broken reads as the broken re-mint rather than as wrong credentials:
 
@@ -716,7 +718,7 @@ in `models.yml` belong to tier 2, not this fallback tier.
 
 - Value is first treated as an environment variable name.
 - If the env var is unset, the literal string is used as the token.
-- If the env var is set to the empty string, resolution produces no value: a variable that exists is meant as the credential, so its empty value is not replaced by the variable's own name.
+- If the env var is set to the empty string, resolution produces no value: a variable that exists is meant as the credential, so its empty value is not replaced by the variable's own name. This holds for every config value read this way, not only credentials — a `headers` or MCP value naming an empty variable is omitted rather than sent as the variable's name.
 
 If `authHeader: true` and provider `apiKey` is set, models get:
 

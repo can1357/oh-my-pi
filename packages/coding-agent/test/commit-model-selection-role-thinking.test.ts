@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { resolvePrimaryModel, resolveSmolModel } from "@oh-my-pi/pi-coding-agent/commit/model-selection";
+import { CredentialSourceError } from "@oh-my-pi/pi-ai/error";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
@@ -40,6 +41,42 @@ describe("commit role thinking selection", () => {
 			const smol = await resolveSmolModel(settings, registry, commitModel, "fallback-key");
 			expect(smol.model.id).toBe(defaultModel.id);
 			expect(smol.thinkingLevel).toBe(Effort.Minimal);
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	it("reports a credential source that produced nothing, not a generic missing key", async () => {
+		// Commit generation is a request path: it must read the credential through the
+		// request resolver, or a broken `!command` reaches the user as "No API key
+		// available for model …" with nothing to act on.
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const settings = Settings.isolated({ modelRoles: { commit: `${model.provider}/${model.id}` } });
+		const authStorage = createInMemoryAuthStorage();
+		try {
+			const registry = {
+				getAvailable: () => [model],
+				// The availability probe stays quiet, exactly as it does in production.
+				getApiKey: async () => undefined,
+				getApiKeyForProvider: async () => undefined,
+				getApiKeyWithCredentialForProvider: async () => {
+					throw new CredentialSourceError(
+						model.provider,
+						"No API key for provider anthropic: the command `mint` exited with status 1",
+					);
+				},
+				authStorage,
+				resolver: () => async () => {
+					throw new CredentialSourceError(
+						model.provider,
+						"No API key for provider anthropic: the command `mint` exited with status 1",
+					);
+				},
+			};
+
+			await expect(resolvePrimaryModel(undefined, settings, registry)).rejects.toThrow(
+				"No API key for provider anthropic: the command `mint` exited with status 1",
+			);
 		} finally {
 			authStorage.close();
 		}

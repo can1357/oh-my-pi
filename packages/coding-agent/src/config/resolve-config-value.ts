@@ -1,5 +1,6 @@
 import { CredentialSourceError } from "@oh-my-pi/pi-ai/error";
 import { executeShell } from "@oh-my-pi/pi-natives";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { $envExact, directoryIsEnterable, getProjectDir, logger, ptree, untilAborted } from "@oh-my-pi/pi-utils";
 import { effectsSettings } from "./registry";
 
@@ -23,8 +24,8 @@ const commandFailureRetryAt = new Map<string, number>();
  * the value is invalidated. A credential that resolves to nothing is reported
  * with it, instead of as a provider's 401 or a bare "No API key".
  */
-const commandLastFailure = new Map<string, { outcome: CommandFailure; timeoutMs: number }>();
-const commandInFlight = new Map<string, Promise<string | undefined>>();
+const commandLastFailure = new Map<string, CommandFailureRecord>();
+const commandInFlight = new Map<string, Promise<CommandResolution>>();
 const commandGeneration = new Map<string, number>();
 
 /**
@@ -43,6 +44,17 @@ type CommandFailure = {
 };
 
 type CommandOutcome = { ok: true; value: string } | CommandFailure;
+
+/** A failed run, with the time limit it ran under, for the message. */
+type CommandFailureRecord = { outcome: CommandFailure; timeoutMs: number };
+
+/**
+ * What resolving a command value produced: its stdout, or nothing together with
+ * the run that explains it. The reason travels with the resolution rather than
+ * being looked up afterwards, so a concurrent invalidation cannot erase it
+ * between a caller finding no value and reporting why.
+ */
+type CommandResolution = { value: string } | { value: undefined; failure?: CommandFailureRecord };
 
 /** Materialize request headers for models and discovery without property-access side effects. */
 export type ConfigHeaderResolver = (signal?: AbortSignal) => Promise<Record<string, string> | undefined>;
@@ -133,30 +145,42 @@ function errnoCode(error: unknown): string {
 	return typeof code === "string" ? code : "unknown";
 }
 
-async function resolveCommandValue(valueConfig: string): Promise<string | undefined> {
+async function resolveCommandResolution(valueConfig: string): Promise<CommandResolution> {
 	const command = commandKey(valueConfig);
 	const cached = commandResultCache.get(command);
-	if (cached !== undefined) return cached;
+	if (cached !== undefined) return { value: cached };
 	const lastGood = commandLastGood.get(command);
 	const retryAt = commandFailureRetryAt.get(command);
-	if (retryAt !== undefined && Date.now() < retryAt) return lastGood;
+	if (retryAt !== undefined && Date.now() < retryAt) {
+		// Inside the backoff window no run happens, so the recorded failure is this
+		// resolution's reason. It is read with no await in between, so nothing can clear
+		// it between deciding there is no value and saying why.
+		if (lastGood !== undefined) return { value: lastGood };
+		return { value: undefined, failure: commandLastFailure.get(command) };
+	}
 	const generation = commandGeneration.get(command) ?? 0;
 	const run = commandInFlight.get(command) ?? startCommandRun(command);
 	// After a failed run, the retry runs in the background while the last good value serves.
-	if (retryAt !== undefined && lastGood !== undefined) return lastGood;
-	const value = await run;
+	if (retryAt !== undefined && lastGood !== undefined) return { value: lastGood };
+	const settled = await run;
 	// An invalidation while the run was in flight (a 401, an explicit refresh) made its
 	// output stale: resolve again instead of handing the old value to this waiter.
-	if ((commandGeneration.get(command) ?? 0) !== generation) return resolveCommandValue(valueConfig);
+	if ((commandGeneration.get(command) ?? 0) !== generation) return resolveCommandResolution(valueConfig);
+	if (settled.value !== undefined) return settled;
 	// A 401 during the run drops the last good value, so read it after the run.
-	return value ?? commandLastGood.get(command);
+	const served = commandLastGood.get(command);
+	return served !== undefined ? { value: served } : settled;
 }
 
-function startCommandRun(command: string): Promise<string | undefined> {
+async function resolveCommandValue(valueConfig: string): Promise<string | undefined> {
+	return (await resolveCommandResolution(valueConfig)).value;
+}
+
+function startCommandRun(command: string): Promise<CommandResolution> {
 	const generation = commandGeneration.get(command) ?? 0;
 	const timeoutMs = currentCommandTimeoutMs();
 	const startedAt = performance.now();
-	const promise: Promise<string | undefined> = runConfigCommand(command, timeoutMs)
+	const promise: Promise<CommandResolution> = runConfigCommand(command, timeoutMs)
 		.then(outcome => {
 			const current = (commandGeneration.get(command) ?? 0) === generation;
 			if (outcome.ok) {
@@ -166,7 +190,7 @@ function startCommandRun(command: string): Promise<string | undefined> {
 					commandResultCache.set(command, outcome.value);
 					commandLastGood.set(command, outcome.value);
 				}
-				return outcome.value;
+				return { value: outcome.value };
 			}
 			// Never log the command: its arguments can carry tokens.
 			logger.warn("config: !command value resolution failed", {
@@ -177,11 +201,12 @@ function startCommandRun(command: string): Promise<string | undefined> {
 				timeoutMs,
 				servingLastGoodValue: current && commandLastGood.has(command),
 			});
+			const failure: CommandFailureRecord = { outcome, timeoutMs };
 			if (current) {
 				commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
-				commandLastFailure.set(command, { outcome, timeoutMs });
+				commandLastFailure.set(command, failure);
 			}
-			return undefined;
+			return { value: undefined, failure };
 		})
 		.finally(() => {
 			if (commandInFlight.get(command) === promise) commandInFlight.delete(command);
@@ -203,15 +228,12 @@ async function runConfigCommand(command: string, timeoutMs: number): Promise<Com
 /**
  * Resolve a configuration value. Command values execute asynchronously; their
  * successful stdout is cached, and a failed re-run serves the last good stdout
- * until a 401 rejects it. Environment-backed and literal values stay live. A
- * value naming an environment variable that is set but empty resolves to
- * nothing, not to the variable's name.
+ * until a 401 rejects it. Environment-backed and literal values stay live.
  */
 export async function resolveConfigValue(valueConfig: string): Promise<string | undefined> {
 	if (isCommandConfigValue(valueConfig)) return await resolveCommandValue(valueConfig);
 	const envValue = $envExact(valueConfig);
-	if (envValue === undefined) return valueConfig;
-	return envValue.length > 0 ? envValue : undefined;
+	return envValue || valueConfig;
 }
 
 /**
@@ -219,22 +241,80 @@ export async function resolveConfigValue(valueConfig: string): Promise<string | 
  * source that produced nothing rejects with {@link CredentialSourceError}
  * naming the source and what it returned, so the failure is never sent on as a
  * missing or rejected key.
+ *
+ * Only credentials are read this way. Every other config value — a header, an
+ * MCP value, the auth broker's URL — keeps {@link resolveConfigValue}'s
+ * literal fallback, so this change cannot alter what they resolve to.
  */
 export async function resolveCredentialConfigValue(valueConfig: string): Promise<string | undefined> {
-	const value = await resolveConfigValue(valueConfig);
-	if (value !== undefined) return value;
-	const why = describeUnresolvedConfigValue(valueConfig);
-	if (why !== undefined) throw new CredentialSourceError(undefined, why);
-	return undefined;
+	if (isCommandConfigValue(valueConfig)) {
+		const resolution = await resolveCommandResolution(valueConfig);
+		if (resolution.value !== undefined) return resolution.value;
+		const failure = resolution.failure;
+		if (failure === undefined) return undefined;
+		const what = describeCommandFailure(failure.outcome, failure.timeoutMs);
+		throw new CredentialSourceError(undefined, `the command \`${commandLabel(commandKey(valueConfig))}\` ${what}`);
+	}
+	// A variable that exists was meant to hold the credential, so its empty value is a
+	// configuration failure rather than a literal key worth sending as a bearer.
+	if ($envExact(valueConfig) === "") {
+		throw new CredentialSourceError(undefined, `environment variable ${valueConfig} is set but empty`);
+	}
+	return await resolveConfigValue(valueConfig);
+}
+
+/** A leading `NAME=value` environment assignment of a simple command. */
+const COMMAND_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/**
+ * Split off the first shell word of `command`, honoring quotes and backslash
+ * escapes, so a program path containing spaces stays one word.
+ */
+function firstShellWord(command: string): { word: string; rest: string } {
+	let word = "";
+	let quote: '"' | "'" | undefined;
+	let index = 0;
+	for (; index < command.length; index++) {
+		const char = command[index];
+		if (quote !== undefined) {
+			if (char === quote) quote = undefined;
+			else word += char;
+			continue;
+		}
+		if (char === '"' || char === "'") {
+			quote = char;
+			continue;
+		}
+		if (char === "\\" && index + 1 < command.length) {
+			word += command[++index];
+			continue;
+		}
+		if (char === undefined || /\s/.test(char)) break;
+		word += char;
+	}
+	return { word, rest: command.slice(index).trim() };
 }
 
 /**
- * The program a command runs, for messages. Only the first word is shown: the
- * arguments of a credential command can carry secrets.
+ * The program a command runs, for messages. Only the program is shown, never an
+ * argument: a credential command's arguments carry secrets. The same is true of
+ * a leading `NAME=value` assignment, so those are reported by name with the
+ * value dropped, and the home directory is shortened out of the program path.
  */
 function commandLabel(command: string): string {
-	const program = command.split(/\s+/, 1)[0] ?? command;
-	return program === command ? program : `${program} …`;
+	let rest = command.trim();
+	const assignments: string[] = [];
+	while (rest.length > 0) {
+		const next = firstShellWord(rest);
+		if (next.word.length === 0 || !COMMAND_ASSIGNMENT.test(next.word)) break;
+		assignments.push(`${next.word.slice(0, next.word.indexOf("="))}=…`);
+		rest = next.rest;
+	}
+	const { word, rest: args } = firstShellWord(rest);
+	const parts = assignments;
+	if (word.length > 0) parts.push(shortenPath(word));
+	if (args.length > 0 || parts.length === 0) parts.push("…");
+	return parts.join(" ");
 }
 
 function formatSeconds(ms: number): string {
@@ -257,21 +337,6 @@ function describeCommandFailure(failure: CommandFailure, timeoutMs: number): str
 		case "cwd-unavailable":
 			return "was not run: the project directory is not accessible";
 	}
-}
-
-/**
- * Why a config value currently resolves to nothing, or `undefined` when it
- * does not (or the reason is unknown): a command's latest failed run, or an
- * environment variable that is set but empty.
- */
-export function describeUnresolvedConfigValue(valueConfig: string): string | undefined {
-	if (isCommandConfigValue(valueConfig)) {
-		const command = commandKey(valueConfig);
-		const failure = commandLastFailure.get(command);
-		if (!failure) return undefined;
-		return `the command \`${commandLabel(command)}\` ${describeCommandFailure(failure.outcome, failure.timeoutMs)}`;
-	}
-	return $envExact(valueConfig) === "" ? `environment variable ${valueConfig} is set but empty` : undefined;
 }
 
 function trimmedOutcome(output: string): CommandOutcome {

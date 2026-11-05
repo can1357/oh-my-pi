@@ -3688,10 +3688,19 @@ export class ModelRegistry {
 		});
 	}
 
-	/** Resolve request authentication through the historical Pi extension facade. */
+	/**
+	 * Resolve request authentication through the historical Pi extension facade.
+	 * It is a request path, so it reads the credential the way a request does:
+	 * a configured source that produced nothing is reported by name through the
+	 * catch below, not flattened into "No API key found".
+	 */
 	async getApiKeyAndHeaders(model: Model<Api>): Promise<ResolvedRequestAuth> {
 		try {
-			const apiKey = await this.getApiKey(model);
+			const resolved = await this.getApiKeyWithCredentialForProvider(model.provider, undefined, {
+				baseUrl: model.baseUrl,
+				modelId: model.id,
+			});
+			const apiKey = resolved?.apiKey;
 			if (apiKey === undefined) {
 				return { ok: false, error: `No API key found for "${model.provider}"` };
 			}

@@ -12,6 +12,7 @@ import {
 	invalidateAllCommandConfigs,
 	invalidateCommandConfig,
 	resolveConfigValue,
+	resolveCredentialConfigValue,
 } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
@@ -1063,20 +1064,92 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}
 		});
 
-		test("an environment variable set to the empty string is refused, not sent as its own name", async () => {
+		test("an environment variable set to the empty string is refused as a credential only", async () => {
 			const name = `OMP_TEST_EMPTY_KEY_${Snowflake.next()}`;
 			process.env[name] = "";
 			try {
-				// Without this, the literal fallback makes the variable's name the bearer.
-				expect(await resolveConfigValue(name)).toBeUndefined();
+				// The credential path refuses: without this, the literal fallback makes the
+				// variable's own name the bearer and the user gets the provider's 401.
 				expect((await requestRefusal(providerWithApiKey(name))).message).toBe(
 					`No API key for provider custom-proxy: environment variable ${name} is set but empty`,
 				);
+				// Every other config value keeps the documented literal fallback. Changing
+				// this resolver for all of them silently turned a configured auth broker
+				// into the local store instead of failing, so the stricter rule is the
+				// credential resolver's alone.
+				expect(await resolveConfigValue(name)).toBe(name);
+				expect(await resolveCredentialConfigValue(`${name}_UNSET_LITERAL`)).toBe(`${name}_UNSET_LITERAL`);
 			} finally {
 				delete process.env[name];
 			}
-			// An unset variable keeps the documented literal fallback.
+			// An unset variable keeps the literal fallback on the credential path too.
 			expect(await resolveConfigValue(name)).toBe(name);
+		});
+
+		test("the failure a resolution produced survives a concurrent invalidation", async () => {
+			// The reason used to be read from a shared map after the value came back
+			// undefined; an invalidation landing in between restored the unhelpful
+			// "no key". The reason now travels with the resolution that produced it.
+			const config = "!false";
+			clearConfigValueCache();
+			const credential = resolveCredentialConfigValue(config).then(
+				value => value,
+				(error: unknown) => error,
+			);
+			const probe = resolveConfigValue(config).then(value => {
+				invalidateCommandConfig(config, "refresh");
+				return value;
+			});
+			expect(await probe).toBeUndefined();
+			const failure = await credential;
+			expect(failure).toBeInstanceOf(CredentialSourceError);
+			expect((failure as Error).message).toBe("the command `false` exited with status 1");
+		});
+
+		test("the historical request facade reports the source, not a generic missing key", async () => {
+			// getApiKeyAndHeaders is a request path: it must not read the availability
+			// probe, or the fix stops at the edge of the new API.
+			const registry = providerWithApiKey("!false");
+			const model = registry.find("custom-proxy", "custom-model");
+			if (!model) throw new Error("Expected custom model");
+			expect(await registry.getApiKeyAndHeaders(model)).toEqual({
+				ok: false,
+				error: "No API key for provider custom-proxy: the command `false` exited with status 1",
+			});
+		});
+
+		test("the label names the program only: no argument, no assignment value, no home path", async () => {
+			// A leading `NAME=value` is as much a secret as an argument, and the message
+			// also reaches ~/.omp/logs, which users paste into bug reports.
+			expect((await requestRefusal(providerWithApiKey("!SECRET_TOKEN=hunter2 false"))).message).toBe(
+				"No API key for provider custom-proxy: the command `SECRET_TOKEN=… false` exited with status 1",
+			);
+			// A quoted program path keeps its spaces, or an operator cannot match the
+			// message against their config (and every `C:\Program Files\…` hits this).
+			const spaced = path.join(tempDir, "my scripts");
+			fs.mkdirSync(spaced, { recursive: true });
+			const script = path.join(spaced, "mint.sh");
+			fs.writeFileSync(script, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+			expect((await requestRefusal(providerWithApiKey(`!${shellQuote(script)}`))).message).toBe(
+				`No API key for provider custom-proxy: the command \`${script}\` exited with status 1`,
+			);
+			// The home directory is shortened out, like every other path we show. The
+			// home is a stub pointing at tempDir: a fixture must never write, or even
+			// name, a path under the real home.
+			const homed = spyOn(os, "homedir").mockReturnValue(fs.realpathSync(tempDir));
+			try {
+				// Positive, and after symlinks: the fixture must live under the temp root,
+				// whatever the path we were handed resolves to.
+				const root = fs.realpathSync(tempDir);
+				const underHome = path.join(root, "home-mint.sh");
+				expect(path.resolve(underHome).startsWith(`${root}${path.sep}`)).toBe(true);
+				fs.writeFileSync(underHome, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+				expect((await requestRefusal(providerWithApiKey(`!${underHome}`))).message).toBe(
+					"No API key for provider custom-proxy: the command `~/home-mint.sh` exited with status 1",
+				);
+			} finally {
+				homed.mockRestore();
+			}
 		});
 
 		test("a 401 whose re-resolution yields nothing reports the source, not the rejection", async () => {
@@ -1106,8 +1179,11 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 
 			expect(attempted).toEqual(["stale-key"]);
 			expect(failure).toBeInstanceOf(CredentialSourceError);
+			// The label shortens $HOME, so build the expectation the same way rather
+			// than assuming the OS temp dir sits outside it.
+			const label = script.startsWith(`${os.homedir()}/`) ? `~${script.slice(os.homedir().length)}` : script;
 			expect((failure as Error).message).toBe(
-				`No API key for provider custom-proxy: the command \`${script}\` exited with status 1. ` +
+				`No API key for provider custom-proxy: the command \`${label}\` exited with status 1. ` +
 					"It was re-resolved because the provider rejected the previous key: 401 authentication_error",
 			);
 			expect((failure as Error).cause).toBeInstanceOf(Error);
