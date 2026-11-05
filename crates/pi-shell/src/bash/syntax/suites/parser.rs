@@ -184,7 +184,7 @@ fn collect_cond(e: &CondExpr, out: &mut Vec<u32>) {
 		},
 		CondExpr::Word(w) => collect_word(w, out),
 		CondExpr::Not { expr, .. } | CondExpr::Group { expr, .. } => collect_cond(expr, out),
-		CondExpr::And(terms) | CondExpr::Or(terms) => {
+		CondExpr::And(terms, _) | CondExpr::Or(terms, _) => {
 			for term in terms {
 				collect_cond(term, out);
 			}

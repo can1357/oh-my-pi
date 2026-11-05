@@ -1444,7 +1444,9 @@ impl Ctx<'_> {
 			return Some(first);
 		}
 		let mut terms = vec![first];
+		let mut ops = Vec::new();
 		while self.lx.tok == T::Dbar {
+			ops.push(self.tok_span().lo);
 			self.zshlex();
 			while self.cond_sep() {
 				self.zshlex();
@@ -1454,7 +1456,7 @@ impl Ctx<'_> {
 				self.zshlex();
 			}
 		}
-		Some(CondExpr::Or(terms))
+		Some(CondExpr::Or(terms, ops.into_boxed_slice()))
 	}
 
 	/// zsh `par_cond_1`: `cond_2 { SEPER } { DAMPER { SEPER } cond_2 }`.
@@ -1467,7 +1469,9 @@ impl Ctx<'_> {
 			return Some(first);
 		}
 		let mut terms = vec![first];
+		let mut ops = Vec::new();
 		while self.lx.tok == T::Damper {
+			ops.push(self.tok_span().lo);
 			self.zshlex();
 			while self.cond_sep() {
 				self.zshlex();
@@ -1477,15 +1481,14 @@ impl Ctx<'_> {
 				self.zshlex();
 			}
 		}
-		Some(CondExpr::And(terms))
+		Some(CondExpr::And(terms, ops.into_boxed_slice()))
 	}
 
 	/// zsh `par_cond_2`: `BANG cond_2 | INPAR cond OUTPAR | STRING STRING
 	/// STRING | STRING STRING | STRING ( INANG | OUTANG ) STRING`. A run of
 	/// `BANG`s is read in a loop and kept as one node.
 	fn par_cond_2(&mut self) -> Option<CondExpr> {
-		let mut bangs = 0;
-		let mut lo = 0;
+		let mut bangs: Vec<u32> = Vec::new();
 		loop {
 			while self.cond_sep() {
 				self.zshlex();
@@ -1493,17 +1496,15 @@ impl Ctx<'_> {
 			if self.lx.tok != T::Bang {
 				break;
 			}
-			if bangs == 0 {
-				lo = self.tok_span().lo;
-			}
+			bangs.push(self.tok_span().lo);
 			self.zshlex();
-			bangs += 1;
 		}
 		let e = self.par_cond_operand()?;
-		Some(if bangs == 0 {
-			e
-		} else {
-			CondExpr::Not { bangs, lo, expr: Box::new(e) }
+		Some(match bangs.split_first() {
+			None => e,
+			Some((&lo, rest)) => {
+				CondExpr::Not { lo, rest: rest.to_vec().into_boxed_slice(), expr: Box::new(e) }
+			},
 		})
 	}
 

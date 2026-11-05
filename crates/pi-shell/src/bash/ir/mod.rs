@@ -85,9 +85,10 @@ use crate::bash::{
 /// IR version; part of the frames header.
 ///
 /// Version 15 flattens conditional chains in the serialized syntax of
-/// alias-expanded deferred functions, and version 16 gives each conditional
-/// operator the offset it was read at.
-pub const IR_VERSION: u32 = 16;
+/// alias-expanded deferred functions, version 16 gives each conditional
+/// operator the offset it was read at, and version 17 records every `!` of
+/// a run and every `&&`/`||` of a chain rather than deriving them.
+pub const IR_VERSION: u32 = 17;
 
 /// Opcodes.
 #[derive(

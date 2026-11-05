@@ -561,9 +561,9 @@ mod native {
 				("rhs", word(m, rhs)),
 			]),
 			CondExpr::Word(w) => V::Obj(vec![("type", s(b"word")), ("word", word(m, w))]),
-			CondExpr::Not { bangs, expr, .. } => {
+			CondExpr::Not { rest, expr, .. } => {
 				let mut v = cond(m, expr);
-				for _ in 0..*bangs {
+				for _ in 0..=rest.len() {
 					v = V::Obj(vec![("type", s(b"not")), ("expr", v)]);
 				}
 				v
@@ -571,8 +571,8 @@ mod native {
 			CondExpr::Group { expr, .. } => {
 				V::Obj(vec![("type", s(b"group")), ("expr", cond(m, expr))])
 			},
-			CondExpr::And(terms) | CondExpr::Or(terms) => {
-				let kind: &[u8] = if matches!(e, CondExpr::And(_)) {
+			CondExpr::And(terms, _) | CondExpr::Or(terms, _) => {
+				let kind: &[u8] = if matches!(e, CondExpr::And(..)) {
 					b"and"
 				} else {
 					b"or"
@@ -1688,19 +1688,13 @@ mod shfmt {
 					("X", self.word(lhs, true)),
 					("Y", self.word(rhs, true)),
 				]),
-				CondExpr::Not { bangs, lo, expr } => {
-					// The run's `!`s stand one byte each from `lo` on, with
-					// only trivia between them. Collecting them forward and
-					// wrapping from the innermost out keeps both walks loops.
-					let mut at = *lo;
-					let mut bang = Vec::with_capacity(*bangs);
-					for _ in 0..*bangs {
-						bang.push(at);
-						at = self.skip_ws(at + 1);
-					}
+				CondExpr::Not { lo, rest, expr } => {
+					// Every `!` of the run carries the offset the parser read
+					// it at; wrapping from the innermost out keeps this a
+					// loop, as the run itself is.
 					let hi = Self::test_span(expr).1;
 					let mut v = self.test(expr);
-					for &olo in bang.iter().rev() {
+					for &olo in std::iter::once(lo).chain(rest.iter()).rev() {
 						v = V::Obj(vec![
 							("Type", s(b"UnaryTest")),
 							("Pos", p(olo)),
@@ -1720,8 +1714,8 @@ mod shfmt {
 					("Rparen", p(*rparen)),
 					("X", self.test(expr)),
 				]),
-				CondExpr::And(terms) | CondExpr::Or(terms) => {
-					let op: &[u8] = if matches!(e, CondExpr::And(_)) {
+				CondExpr::And(terms, ops) | CondExpr::Or(terms, ops) => {
+					let op: &[u8] = if matches!(e, CondExpr::And(..)) {
 						b"&&"
 					} else {
 						b"||"
@@ -1729,13 +1723,13 @@ mod shfmt {
 					let (last, rest) = terms.split_last().expect("logical chain has operands");
 					let (_, end) = Self::test_span(last);
 					let mut rhs = self.test(last);
-					for lhs in rest.iter().rev() {
-						let (lo, hi) = Self::test_span(lhs);
+					for (lhs, &olo) in rest.iter().zip(ops.iter()).rev() {
+						let (lo, _) = Self::test_span(lhs);
 						rhs = V::Obj(vec![
 							("Type", s(b"BinaryTest")),
 							("Pos", p(lo)),
 							("End", p(end)),
-							("OpPos", p(self.find(hi, op))),
+							("OpPos", p(olo)),
 							("Op", s(op)),
 							("X", self.test(lhs)),
 							("Y", rhs),
@@ -1756,7 +1750,7 @@ mod shfmt {
 				CondExpr::Binary { lhs, rhs, .. } => (lhs.span.lo, rhs.span.hi),
 				CondExpr::Not { lo, expr, .. } => (*lo, Self::test_span(expr).1),
 				CondExpr::Group { lparen, rparen, .. } => (*lparen, rparen + 1),
-				CondExpr::And(terms) | CondExpr::Or(terms) => {
+				CondExpr::And(terms, _) | CondExpr::Or(terms, _) => {
 					let first = terms.first().expect("logical chain has operands");
 					let last = terms.last().expect("logical chain has operands");
 					(Self::test_span(first).0, Self::test_span(last).1)

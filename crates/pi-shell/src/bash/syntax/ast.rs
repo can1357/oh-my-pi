@@ -364,20 +364,22 @@ pub enum CondExpr {
 	Word(Word),
 	/// `! ! … expr`: a run of `!`s, at least one, kept as one node so its
 	/// length sets no recursion depth. The operand is never itself `Not`.
-	/// `lo` is the offset of the first `!`; the others follow it, one byte
-	/// each, separated by nothing but blanks, comments and continuations.
+	/// The run holds `1 + rest.len()` of them.
 	Not {
-		/// How many `!` the run holds.
-		bangs: usize,
 		/// Offset of the first `!`.
-		lo:    u32,
+		lo:   u32,
+		/// Offsets of the `!`s after the first, in source order. Empty for
+		/// a lone `!`, which allocates nothing.
+		rest: Box<[u32]>,
 		/// What the run negates.
-		expr:  Box<Self>,
+		expr: Box<Self>,
 	},
-	/// `a && b && …`: at least two operands, in source order.
-	And(Vec<Self>),
-	/// `a || b || …`: at least two operands, in source order.
-	Or(Vec<Self>),
+	/// `a && b && …`: at least two operands in source order, and the
+	/// offset of each `&&` between them.
+	And(Vec<Self>, Box<[u32]>),
+	/// `a || b || …`: at least two operands in source order, and the
+	/// offset of each `||` between them.
+	Or(Vec<Self>, Box<[u32]>),
 	/// `( expr )`, with the offsets of both parentheses.
 	Group {
 		/// Offset of `(`.

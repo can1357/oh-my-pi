@@ -941,10 +941,12 @@ impl Parser<'_> {
 			return Ok(first);
 		}
 		let mut terms = vec![first];
+		let mut ops = Vec::new();
 		while *tok == T::OrOr {
+			ops.push(self.cond_tok_lo);
 			terms.push(self.cond_and(tok)?);
 		}
-		Ok(CondExpr::Or(terms))
+		Ok(CondExpr::Or(terms, ops.into_boxed_slice()))
 	}
 
 	fn cond_and(&mut self, tok: &mut T) -> CResult<CondExpr> {
@@ -953,10 +955,12 @@ impl Parser<'_> {
 			return Ok(first);
 		}
 		let mut terms = vec![first];
+		let mut ops = Vec::new();
 		while *tok == T::AndAnd {
+			ops.push(self.cond_tok_lo);
 			terms.push(self.cond_term(tok)?);
 		}
-		Ok(CondExpr::And(terms))
+		Ok(CondExpr::And(terms, ops.into_boxed_slice()))
 	}
 
 	fn cond_msg(&self, text: &[u8], pre: &[u8], post: &[u8]) -> CondFail {
@@ -991,31 +995,28 @@ impl Parser<'_> {
 	fn cond_term(&mut self, tok: &mut T) -> CResult<CondExpr> {
 		// A run of `!`s is read in a loop and kept as one node, so its length
 		// sets no recursion depth here or in any later walk of the tree.
-		let mut bangs = 0;
-		let mut lo = 0;
+		let mut bangs: Vec<u32> = Vec::new();
 		let operand = loop {
 			let t = self.cond_skip_newlines()?;
 			*tok = t.kind;
 			let at = t.lo;
 			match t.kind {
-				T::Bang => bangs += 1,
+				T::Bang => bangs.push(at),
 				T::Word | T::Assign | T::Number => {
 					let w = Self::tok_word(t);
 					if !is_plain(&w, b"!") {
 						break self.cond_word_operand(w, tok)?;
 					}
-					bangs += 1;
+					bangs.push(at);
 				},
 				_ => break self.cond_token_operand(t, tok)?,
 			}
-			if bangs == 1 {
-				lo = at;
-			}
 		};
-		Ok(if bangs == 0 {
-			operand
-		} else {
-			CondExpr::Not { bangs, lo, expr: Box::new(operand) }
+		Ok(match bangs.split_first() {
+			None => operand,
+			Some((&lo, rest)) => {
+				CondExpr::Not { lo, rest: rest.to_vec().into_boxed_slice(), expr: Box::new(operand) }
+			},
 		})
 	}
 

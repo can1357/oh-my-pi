@@ -896,13 +896,13 @@ impl Lower {
 				let c = self.cond_ir(CondIr::Word(w));
 				self.emit(Opcode::CondTest, c, 0, id);
 			},
-			syn::CondExpr::Not { bangs, expr, .. } => {
+			syn::CondExpr::Not { rest, expr, .. } => {
 				// A run of `!`s, lowered at once: bash's trace shows one `!`
 				// on a primary under an odd number of them.
-				let mut nots = *bangs;
+				let mut nots = 1 + rest.len();
 				let mut leaf = expr.as_ref();
-				while let syn::CondExpr::Not { bangs: more, expr: i, .. } = leaf {
-					nots += more;
+				while let syn::CondExpr::Not { rest: more, expr: i, .. } = leaf {
+					nots += 1 + more.len();
 					leaf = i;
 				}
 				let primary = matches!(
@@ -922,8 +922,8 @@ impl Lower {
 				}
 				self.emit(Opcode::Not, 0, 0, id);
 			},
-			syn::CondExpr::And(terms) | syn::CondExpr::Or(terms) => {
-				let (code, c) = if matches!(e, syn::CondExpr::And(_)) {
+			syn::CondExpr::And(terms, _) | syn::CondExpr::Or(terms, _) => {
+				let (code, c) = if matches!(e, syn::CondExpr::And(..)) {
 					(Opcode::BrFail, construct::AND)
 				} else {
 					(Opcode::BrOk, construct::OR)
@@ -1674,20 +1674,22 @@ mod tests {
 				(name == b"emit").then_some(b"echo frozen")
 			}
 		}
-		let src = b"f() { emit; [[ ! a && -n b || ( c ) ]]; }\n".as_slice();
+		let src = b"f() { emit; [[ ! ! a && -n b || ( c == d ) ]]; }\n".as_slice();
 		let mut parser = syn::Parser::new(src, syn::Features::NONE, &Aliases);
 		let cc = parser.next_command().unwrap().unwrap();
 		let lazy = lower_deferred(&cc, src, ModeId::Bash, syn::Features::NONE).unwrap();
 		let deferred = lazy.funcs[0].body.deferred.as_ref().unwrap();
 		#[rustfmt::skip]
-		const WIRE: [u8; 103] = [
-			0, 3, 4, 41, 1, 2, 4, 10, 10, 5, 10, 10, 0, 0, 1, 6, 10, 10, 0, 0, 2, 7, 10, 10, 1, 0,
-			4, 101, 99, 104, 111, 8, 10, 10, 1, 0, 6, 102, 114, 111, 122, 101, 110, 0, 0, 0, 0, 9,
-			12, 38, 10, 12, 38, 0, 0, 1, 11, 12, 38, 10, 5, 2, 4, 2, 3, 1, 15, 2, 12, 17, 18, 1, 0,
-			1, 97, 0, 2, 45, 110, 22, 13, 25, 26, 1, 0, 1, 98, 6, 30, 34, 2, 14, 32, 33, 1, 0, 1,
-			99, 0, 0, 0, 0, 0,
+		const WIRE: [u8; 119] = [
+			0, 3, 4, 48, 1, 2, 4, 10, 10, 5, 10, 10, 0, 0, 1, 6, 10, 10, 0, 0, 2, 7,
+			10, 10, 1, 0, 4, 101, 99, 104, 111, 8, 10, 10, 1, 0, 6, 102, 114, 111, 122, 101, 110, 0,
+			0, 0, 0, 9, 12, 45, 10, 12, 45, 0, 0, 1, 11, 12, 45, 10, 5, 2, 4, 2, 3, 15,
+			1, 17, 2, 12, 19, 20, 1, 0, 1, 97, 0, 2, 45, 110, 24, 13, 27, 28, 1, 0, 1, 98,
+			1, 21, 6, 32, 41, 1, 2, 61, 61, 36, 14, 34, 35, 1, 0, 1, 99, 15, 39, 40, 1, 0,
+			1, 100, 1, 29, 0, 0, 0, 0, 0,
 		];
-		assert_eq!((crate::bash::ir::IR_VERSION, deferred.as_slice()), (16, WIRE.as_slice()));
+
+		assert_eq!((crate::bash::ir::IR_VERSION, deferred.as_slice()), (17, WIRE.as_slice()));
 	}
 
 	// Goldens: bash 5.3 `printf '%q' $'…'` and upstream nquote3/nquote4.

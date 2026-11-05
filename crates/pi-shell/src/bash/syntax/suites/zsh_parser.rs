@@ -348,8 +348,13 @@ fn conditions_arith_time_coproc_and_separators() {
 	let CommandKind::Cond(cond) = first_cmd(b"[[ -o opt && $a == b* || ! -f x ]]").kind else {
 		panic!()
 	};
-	let CondExpr::Or(terms) = cond else { panic!() };
-	assert!(matches!(terms.as_slice(), [CondExpr::And(_), CondExpr::Not { bangs: 1, .. }]));
+	let CondExpr::Or(terms, _) = cond else {
+		panic!()
+	};
+	assert!(matches!(
+		terms.as_slice(),
+		[CondExpr::And(..), CondExpr::Not { rest, .. }] if rest.is_empty()
+	));
 	let CommandKind::Cond(CondExpr::Unary { op, .. }) = first_cmd(b"[[ a ]]").kind else {
 		panic!()
 	};

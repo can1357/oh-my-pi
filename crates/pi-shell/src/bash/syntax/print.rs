@@ -704,8 +704,8 @@ impl<'a> Bp<'a> {
 	fn cond(&mut self, e: &CondExpr) {
 		let mut e = e;
 		let mut invert = false;
-		while let CondExpr::Not { bangs, expr, .. } = e {
-			invert ^= bangs % 2 == 1;
+		while let CondExpr::Not { rest, expr, .. } = e {
+			invert ^= rest.len() % 2 == 0;
 			e = expr;
 		}
 		if invert {
@@ -717,8 +717,8 @@ impl<'a> Bp<'a> {
 				self.cond(expr);
 				self.put(b" )");
 			},
-			CondExpr::And(terms) | CondExpr::Or(terms) => {
-				let op: &[u8] = if matches!(e, CondExpr::And(_)) {
+			CondExpr::And(terms, _) | CondExpr::Or(terms, _) => {
+				let op: &[u8] = if matches!(e, CondExpr::And(..)) {
 					b" && "
 				} else {
 					b" || "

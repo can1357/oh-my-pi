@@ -661,21 +661,21 @@ impl Text {
 	/// (and the reverse) and around a negated `!`/`&&`/`||`.
 	fn cond(&mut self, e: &CondExpr) {
 		match ungroup(e) {
-			CondExpr::Not { bangs, expr, .. } => {
+			CondExpr::Not { rest, expr, .. } => {
 				// Each `!` inside another one is a negated `!`, so zsh shows
 				// it in parentheses: `! ( ! -n a )`.
-				for _ in 1..*bangs {
+				for _ in 0..rest.len() {
 					self.s(b"! ( ");
 				}
 				self.s(b"! ");
 				self.cond_paren(expr, |x| {
 					matches!(x, CondExpr::Not { .. } | CondExpr::And(..) | CondExpr::Or(..))
 				});
-				for _ in 1..*bangs {
+				for _ in 0..rest.len() {
 					self.s(b" )");
 				}
 			},
-			CondExpr::And(terms) => {
+			CondExpr::And(terms, _) => {
 				for (i, term) in terms.iter().enumerate() {
 					if i > 0 {
 						self.s(b" && ");
@@ -683,7 +683,7 @@ impl Text {
 					self.cond_paren(term, |x| matches!(x, CondExpr::Or(..)));
 				}
 			},
-			CondExpr::Or(terms) => {
+			CondExpr::Or(terms, _) => {
 				for (i, term) in terms.iter().enumerate() {
 					if i > 0 {
 						self.s(b" || ");

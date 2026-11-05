@@ -46,6 +46,18 @@ pub enum RestoreError {
 		/// The unit.
 		unit: UnitId,
 	},
+	/// A unit blob was written by another IR version. Its layout is not
+	/// this build's, so decoding it would yield a different function
+	/// while looking like a success.
+	#[error("unit {unit} was written by IR version {found}, this build is {expected}")]
+	UnitVersion {
+		/// The unit.
+		unit:     UnitId,
+		/// Version the blob carries.
+		found:    u32,
+		/// Version this build writes.
+		expected: u32,
+	},
 	/// A unit blob does not decode.
 	#[error("unit {unit} is corrupt")]
 	CorruptUnit {
