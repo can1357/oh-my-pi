@@ -697,6 +697,44 @@ export const cfgTaskPrewalk = register({
 	},
 });
 
+// A2A bridge. `enabled` is opt-in: the server listens on loopback with bearer
+// auth, and nothing starts unless the setting or `--a2a-port` asks for it.
+export const cfgA2aEnabled = register({
+	id: "a2a.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tasks",
+		group: "A2A",
+		label: "A2A Bridge",
+		description: "Serve the Agent2Agent v1.0 JSON-RPC bridge on 127.0.0.1; bearer token in <agent dir>/a2a.token",
+	},
+});
+
+export const cfgA2aPort = register({
+	id: "a2a.port",
+	type: "number",
+	default: 7391,
+	ui: {
+		tab: "tasks",
+		group: "A2A",
+		label: "A2A Port",
+		description: "Loopback port for the A2A bridge (`--a2a-port` overrides it for this run)",
+	},
+});
+
+export const cfgA2aToken = register({
+	id: "a2a.token",
+	type: "string",
+	default: "",
+	ui: {
+		tab: "tasks",
+		group: "A2A",
+		label: "A2A Bearer Token",
+		description: "Bearer token for the A2A bridge; empty generates and reuses <agent dir>/a2a.token (mode 600)",
+	},
+});
+
 export const cfgTaskShowResolvedModelBadge = register({
 	id: "task.showResolvedModelBadge",
 	type: "boolean",

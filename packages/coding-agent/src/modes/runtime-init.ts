@@ -12,6 +12,7 @@ import { getSessionSlashCommands } from "../extensibility/extensions/get-command
 import type { ExtensionError, ExtensionMode, ExtensionUIContext } from "../extensibility/extensions/types";
 import type { AgentSession } from "../session/agent-session";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
+import { spawnSubagentForSession } from "../task/spawn-subagent";
 
 /** Action name for an extension-originated send failure. */
 export type ExtensionSendAction = "extension_send" | "extension_send_user";
@@ -137,6 +138,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			setSessionName: async name => {
 				await session.sessionManager.setSessionName(name, "user");
 			},
+			spawnSubagent: options => spawnSubagentForSession(session, options),
 		},
 		// ExtensionContextActions
 		{

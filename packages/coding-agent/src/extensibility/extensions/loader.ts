@@ -55,10 +55,12 @@ import type {
 	RegisteredCommand,
 	ShortcutConflict,
 	SourceInfo,
+	SpawnSubagentOptions,
 	ToolDefinition,
 	ToolInfo,
 	TranscriptPresenter,
 } from "./types";
+import type { AgentRef } from "../../registry/agent-registry";
 
 installLegacyPiSpecifierShim();
 
@@ -194,6 +196,10 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	}
 
 	setSessionName(): Promise<void> {
+		throw new ExtensionRuntimeNotInitializedError();
+	}
+
+	spawnSubagent(): Promise<AgentRef> {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
 }
@@ -374,6 +380,12 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" | "aside" },
 	): void {
 		this.runtime.sendMessage(message, options);
+	}
+
+	spawnSubagent(options: SpawnSubagentOptions): Promise<AgentRef> {
+		const spawn = this.runtime.spawnSubagent;
+		if (!spawn) throw new Error("This extension host does not support spawning subagents");
+		return spawn(options);
 	}
 
 	sendUserMessage(content: string | (TextContent | ImageContent)[], options?: SendUserMessageOptions): void {

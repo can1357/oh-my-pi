@@ -857,6 +857,11 @@ export class ExtensionRunner {
 		this.runtime.setServiceTier = actions.setServiceTier ?? throwUnsupportedServiceTierAction;
 		this.runtime.getSessionName = actions.getSessionName;
 		this.runtime.setSessionName = actions.setSessionName;
+		this.runtime.spawnSubagent =
+			actions.spawnSubagent ??
+			(() => {
+				throw new Error("This extension host does not support spawning subagents");
+			});
 		this.runtime.registerProvider = (name, config, sourceId) => {
 			this.modelRegistry.registerProvider(name, config, sourceId);
 		};

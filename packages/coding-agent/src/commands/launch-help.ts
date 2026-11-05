@@ -118,6 +118,10 @@ export const launchHelp = {
 			description:
 				"Milliseconds between spinner frames (default 80; 0 = static). Overrides tui.spinnerInterval and PI_SPINNER_INTERVAL for this run",
 		}),
+		"a2a-port": Flags.string({
+			description:
+				"Serve the Agent2Agent v1.0 JSON-RPC bridge on 127.0.0.1:<port> (implies a2a.enabled; bearer token in <agent dir>/a2a.token)",
+		}),
 		"max-fps": Flags.string({
 			description:
 				"Repaint ceiling in frames per second (default 30; 1-120); keystroke echo keeps 30 fps. Overrides tui.maxFps and PI_MAX_FPS for this run",

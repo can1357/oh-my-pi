@@ -1190,6 +1190,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	readonly #eval: EvalRunner;
 	readonly #evalToolSession: ToolSession | undefined;
+
+	/**
+	 * The session's tool-facing view (the object `createTools` binds to), for
+	 * host seams that must run a subagent through the task executor, e.g.
+	 * `ExtensionAPI.spawnSubagent` and the A2A bridge.
+	 */
+	get toolSession(): ToolSession | undefined {
+		return this.#evalToolSession;
+	}
 	/** Manager owned by this top-level session; subagents borrow but never dispose it. */
 	readonly #ownedAsyncJobManager: AsyncJobManager | undefined;
 	/** Manager of this session's root, used for its own job queries and deliveries. */
