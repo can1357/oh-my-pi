@@ -65,6 +65,8 @@ export type WorkerCoreOptions =
 
 /** Finished-cell filenames retained for attributing rejections that surface after the run settled. */
 const RECENT_CELL_FILES_MAX = 256;
+/** Detailed late errors shown by the next cell before summarizing the remainder. */
+const LATE_REJECTION_NOTICES_MAX = 10;
 
 function errorPayload(error: unknown): RunErrorPayload {
 	if (error instanceof Error) {
@@ -194,7 +196,7 @@ export class WorkerCore {
 			}
 			if (recent) {
 				const payload = errorPayload(reason);
-				if (this.#lateRejections.length < 10) {
+				if (this.#lateRejections.length < LATE_REJECTION_NOTICES_MAX) {
 					this.#lateRejections.push(
 						`Unhandled rejection from finished eval cell ${recent} (missing await?): ${payload.stack ?? `${payload.name ?? "Error"}: ${payload.message}`}\n`,
 					);
@@ -491,15 +493,8 @@ export class WorkerCore {
 				let call = name;
 				if (name === "__prelude__" && isRecord(args) && typeof args.name === "string") {
 					call = args.name;
-					if (isRecord(args.parameters)) {
-						const chain = args.parameters.chain;
-						if (Array.isArray(chain)) {
-							for (const step of chain) {
-								if (isRecord(step) && typeof step.method === "string") call += `.${step.method}`;
-							}
-						} else if (typeof args.parameters.action === "string") {
-							call += `.${args.parameters.action}`;
-						}
+					if (isRecord(args.parameters) && typeof args.parameters.action === "string") {
+						call += `.${args.parameters.action}`;
 					}
 				}
 				error.stack = `${error.stack ?? error.message}\n    at ${call} (${active.filename})`;

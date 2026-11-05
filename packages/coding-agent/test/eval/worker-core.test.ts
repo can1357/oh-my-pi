@@ -184,7 +184,7 @@ console.log(JSON.stringify(messages));
 			{ runId: "fourth", ok: true },
 		]);
 		const text = messages.filter(message => message.type === "text");
-		const notices = text.filter(message => message.chunk.includes("browser.waitForDownload"));
+		const notices = text.filter(message => message.chunk.includes("at browser.call"));
 		expect(notices).toHaveLength(11);
 		expect(notices.filter(message => message.runId === "second")).toHaveLength(10);
 		expect(notices.filter(message => message.runId === "third")).toHaveLength(1);
