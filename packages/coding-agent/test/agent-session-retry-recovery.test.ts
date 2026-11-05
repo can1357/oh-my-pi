@@ -948,6 +948,49 @@ describe("AgentSession retry recovery", () => {
 		expect(requestedModels).toEqual([primary, primary, fallback, third, fourth]);
 	});
 
+	it("keeps the hold allowance for a chain candidate that only becomes available later in the saga", async () => {
+		// The first drop finds every chain candidate suppressed: no consult could
+		// have run, so the retry stays on the model without deferring anything.
+		// Charging the two-hold allowance for it would leave only one hold for the
+		// two real deferrals that follow, and the fallback the saga does reach
+		// would walk on instead of getting its own held retry.
+		const models = {
+			primary: getBundledModel("anthropic", "claude-sonnet-4-5"),
+			fallback: getBundledModel("openai", "gpt-5.5"),
+			rest: [getBundledModel("google", "gemini-2.5-flash")],
+		};
+		const suppressed = [models.fallback, ...models.rest].map(entry => `${entry.provider}/${entry.id}`);
+		for (const selector of suppressed) modelRegistry.suppressSelector(selector, Date.now() + 3_600_000);
+		let retryStarts = 0;
+		const third = suppressed[1];
+		const { primary, fallback, requestedModels } = await runFallbackChainRecovery(
+			[
+				droppedAfterThinking,
+				droppedAfterThinking,
+				droppedAfterThinking,
+				droppedAfterThinking,
+				droppedAfterThinking,
+				{ content: ["recovered on the last fallback"], stopReason: "stop" },
+			],
+			2,
+			models,
+			{},
+			session =>
+				session.subscribe(event => {
+					// `auto_retry_start` is announced after the hold decision of the
+					// failure that scheduled it, so the chain is dead for the first
+					// drop and ready for every one after it.
+					if (event.type !== "auto_retry_start") return;
+					retryStarts += 1;
+					if (retryStarts === 1) {
+						for (const selector of suppressed) modelRegistry.clearSuppressedSelector(selector);
+					}
+				}),
+		);
+
+		expect(requestedModels).toEqual([primary, primary, primary, fallback, fallback, third]);
+	});
+
 	it("keeps a repeated wire failure on the same model for two retries, then consults the fallback chain", async () => {
 		// The same-model hold is bounded: a third drop falls through to the chain
 		// rather than keep retrying the primary for ever.

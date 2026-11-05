@@ -945,6 +945,8 @@ export type AnthropicClientOptionsResult = {
 	maxRetries: number;
 	maxRetryDelayMs?: number;
 	retryPolicy?: ProviderRetryPolicy;
+	/** The budget the client's own wire retries are admitted, waited and armed against. */
+	replayBudget?: ReplayBudget;
 	defaultHeaders: Record<string, string>;
 	fetch?: FetchImpl;
 	fetchOptions?: AnthropicFetchOptions;
@@ -4259,6 +4261,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 			maxRetries: 5,
 			maxRetryDelayMs,
 			retryPolicy,
+			replayBudget,
 			defaultHeaders,
 			fetch: wrapFetchForCopilotFallback(
 				cchFetch,
@@ -4336,6 +4339,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 			maxRetries: 5,
 			maxRetryDelayMs,
 			retryPolicy,
+			replayBudget,
 			defaultHeaders,
 			fetch: cchFetch,
 			fetchOptions,
@@ -4356,6 +4360,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 			maxRetries: 5,
 			maxRetryDelayMs,
 			retryPolicy,
+			replayBudget,
 			defaultHeaders,
 			fetch: cchFetch,
 			fetchOptions,
@@ -4385,6 +4390,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		maxRetries: 5,
 		maxRetryDelayMs,
 		retryPolicy,
+		replayBudget,
 		defaultHeaders,
 		fetch: cchFetch,
 		fetchOptions,

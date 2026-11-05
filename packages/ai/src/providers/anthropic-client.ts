@@ -28,7 +28,9 @@ import { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeout
 
 export { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeoutError };
 
+import { findRetryRefusal } from "@oh-my-pi/pi-utils";
 import type { FetchImpl } from "../types";
+import type { ReplayBudget } from "../utils/replay-budget";
 import { getRetryAfterMsFromHeaders, getShouldRetryFromHeaders, retryWaitBounds } from "../utils/retry-after";
 import {
 	DEFAULT_MAX_RETRY_DELAY_MS,
@@ -104,6 +106,14 @@ export interface AnthropicClientOptions {
 	 * so this is what a direct provider call needs.
 	 */
 	retryPolicy?: ProviderRetryPolicy;
+	/**
+	 * The call's replay budget. Every resend this client's own retry loop makes
+	 * is a replay like any other rung's: it is admitted, its wait is raced
+	 * against the deadline and it is armed, so the send gate around `fetch`
+	 * ({@link ReplayBudget.gateFetch}) checks the request that carries it.
+	 * Unset, the loop keeps its plain bounded backoff.
+	 */
+	replayBudget?: ReplayBudget;
 	/** Pre-response timeout in milliseconds. Defaults to 10 minutes. */
 	timeout?: number;
 	defaultHeaders?: Record<string, string>;
@@ -267,6 +277,7 @@ export class AnthropicHttpClient {
 	): Promise<Response> {
 		const opts = this.#options;
 		const fetchFn: FetchImpl = opts.fetch ?? fetch;
+		const replayBudget = opts.replayBudget;
 		const callerSignal = options?.signal;
 		const timeoutMs = options?.timeout ?? opts.timeout ?? DEFAULT_TIMEOUT_MS;
 		const maxRetries = Math.max(0, options?.maxRetries ?? opts.maxRetries ?? DEFAULT_MAX_RETRIES);
@@ -284,9 +295,22 @@ export class AnthropicHttpClient {
 				response = await this.#fetchOnce(fetchFn, url, method, headers, body, timeoutMs, callerSignal);
 			} catch (error) {
 				if (callerSignal?.aborted) throw createAbortError();
+				// A request the budget refused as it was handed to the transport
+				// stands for the failure its replay replaced; resending it is the
+				// one thing that refusal forbids.
+				if (findRetryRefusal(error)) throw error;
 				if (attempt < maxRetries) {
-					await this.#backoff(policy, attempt, undefined, callerSignal);
-					continue;
+					const delayMs = Math.min(calculateAnthropicRetryDelayMs(attempt), waitBounds.maxDelayMs);
+					if (replayBudget === undefined) {
+						await this.#backoff(policy, delayMs, callerSignal);
+						continue;
+					}
+					const failure =
+						error instanceof AIError.AnthropicConnectionTimeoutError
+							? error
+							: new AIError.AnthropicConnectionError(error, url);
+					if (await replayBudget.replayAfterDelay(delayMs, failure, callerSignal, policy)) continue;
+					throw failure;
 				}
 				if (error instanceof AIError.AnthropicConnectionTimeoutError) throw error;
 				throw new AIError.AnthropicConnectionError(error, url);
@@ -308,8 +332,22 @@ export class AnthropicHttpClient {
 					markRetryWaitRefused(failure, refusedWait);
 					throw failure;
 				}
+				// The stated wait has just been checked against the ceiling, so only
+				// the client's own ladder is shortened to it — the same clamp
+				// `sleepBeforeRetry` applies, hoisted here so the budget admits the
+				// wait this retry will actually sleep.
+				const delayMs =
+					getRetryAfterMsFromHeaders(response.headers) ??
+					Math.min(calculateAnthropicRetryDelayMs(attempt), waitBounds.maxDelayMs);
+				if (replayBudget !== undefined) {
+					// The failure is materialized before the wait, because a refusal
+					// answers with it and the body cannot be read afterwards.
+					const failure = await AIError.AnthropicApiError.fromResponse(response, callerSignal);
+					if (await replayBudget.replayAfterDelay(delayMs, failure, callerSignal, policy)) continue;
+					throw failure;
+				}
 				await response.body?.cancel().catch(() => {});
-				await this.#backoff(policy, attempt, response.headers, callerSignal);
+				await this.#backoff(policy, delayMs, callerSignal);
 				continue;
 			}
 
@@ -352,19 +390,14 @@ export class AnthropicHttpClient {
 	}
 
 	/**
-	 * Sleeps before the next wire attempt. The server-stated wait is the shared
-	 * reader's; a wait past the call's bound never reaches here, because the
-	 * loop refused it above. The client's own ladder is the fallback, and
-	 * {@link sleepBeforeRetry} shortens only that to the bound and sleeps it
-	 * through the call's retry-wait hook.
+	 * Sleeps `delayMs` before the next wire attempt, for a call with no replay
+	 * budget. The wait is the shared reader's server-stated one (a wait past
+	 * the call's bound never reaches here, because the loop refused it above)
+	 * or the client's own ladder already shortened to the bound;
+	 * {@link sleepBeforeRetry} keeps it there and sleeps it through the call's
+	 * retry-wait hook.
 	 */
-	async #backoff(
-		policy: ProviderRetryPolicy,
-		attempt: number,
-		responseHeaders: Headers | undefined,
-		signal: AbortSignal | undefined,
-	): Promise<void> {
-		const delayMs = getRetryAfterMsFromHeaders(responseHeaders) ?? calculateAnthropicRetryDelayMs(attempt);
+	async #backoff(policy: ProviderRetryPolicy, delayMs: number, signal: AbortSignal | undefined): Promise<void> {
 		try {
 			await sleepBeforeRetry(policy, delayMs, signal);
 		} catch {

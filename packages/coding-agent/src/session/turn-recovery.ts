@@ -3227,7 +3227,12 @@ export class TurnRecovery {
 			holdsChainForSameModel =
 				chainConsultable && heldConnection && this.#hasRetryFallbackCandidate(currentSelector);
 			if (chainConsultable && heldConnection) {
-				this.#connectionHoldsSpent++;
+				// Charged only when a ready candidate was actually held. With the
+				// chain offering none — every candidate suppressed or cooling down —
+				// nothing was deferred, and charging the allowance for it stops the
+				// holds before two real deferrals happened, so a candidate that
+				// becomes available later in the saga never gets its own hold.
+				if (holdsChainForSameModel) this.#connectionHoldsSpent++;
 			} else if (chainConsultable) {
 				if (classifierRefusal) {
 					this.#refusalWalkTried.add(refusalWalkKey);
