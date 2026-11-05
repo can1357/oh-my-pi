@@ -1129,7 +1129,16 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			const registry = providerWithApiKey("!false");
 			const model = registry.find("custom-proxy", "custom-model");
 			if (!model) throw new Error("Expected custom model");
-			const scope = new SessionAccountPoolScope(authStorage, { "custom-proxy": ["pool-identity"] }, "pool-session");
+			// The pool covers a different provider: a pooled session that also configures
+			// a models.yml apiKey for the SAME provider is refused by the restriction
+			// before the credential command ever runs, so such a fixture cannot reach
+			// the facade it claims to test. The scope's facade still serves every other
+			// provider, which is the path that was on the availability probe.
+			const scope = new SessionAccountPoolScope(
+				authStorage,
+				{ "pooled-elsewhere": ["pool-identity"] },
+				"pool-session",
+			);
 			try {
 				expect(await scope.registry(registry).getApiKeyAndHeaders(model)).toEqual({
 					ok: false,

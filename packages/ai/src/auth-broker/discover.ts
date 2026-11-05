@@ -542,7 +542,6 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 	const storage = new AuthStorage(store, {
 		...options.authStorageOptions,
 		configValueResolver: options.configValueResolver,
-		credentialValueResolver: options.credentialValueResolver,
 		sourceLabel,
 		accountPolicies,
 		defaultReservePct,
