@@ -120,10 +120,12 @@ const taskSchemaNoIsolation = type({
 	"+": "delete",
 });
 function guardBatchAgent(schema: BaseType): BaseType {
-	// Inspect the input before undeclared-key deletion can erase the requested agent.
+	// Inspect the input before undeclared-key deletion can erase the requested agent. Presence is the
+	// value, not the key: an own `agent` holding `undefined` names no agent, and refusing it would
+	// reject a call that asked for nothing — `validateShapeParams` tests the same field the same way.
 	return schema.in
 		.narrow((params, ctx) => {
-			if (params !== null && typeof params === "object" && Object.hasOwn(params, "agent")) {
+			if (params !== null && typeof params === "object" && "agent" in params && params.agent !== undefined) {
 				return ctx.reject("a batch with `agent` specified in `tasks[].agent`, not at the top level");
 			}
 			return true;

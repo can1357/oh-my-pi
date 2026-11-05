@@ -1220,6 +1220,73 @@ describe("batch model placement", () => {
 		expect(run).not.toHaveBeenCalled();
 	});
 
+	// The refusals above test the value, not the key. An own key holding `undefined` names nothing,
+	// and internal callers do produce them — `repairTaskParams` and `copyTaskFields` both materialize
+	// `context`/`tasks` that way — so an `Object.hasOwn` test refused a call that asked for nothing.
+	it.each([
+		["isolated", { isolated: undefined }],
+		["agent", { agent: undefined }],
+		["schema", { schema: undefined }],
+	] as const)("dispatches a batch call whose top-level %s is an own key holding undefined", async (_f, extra) => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Pong"));
+		const tool = await TaskTool.create(
+			createSession({
+				settings: { "task.batch": true, "async.enabled": false, "task.isolation.enabled": true },
+			}),
+		);
+		const result = await tool.execute("task-own-undefined", {
+			context: "Shared context",
+			...extra,
+			tasks: [{ task: "Reply PONG.", solutionSpace: "one fixed answer", name: "Pong", agent: "task" }],
+		} as never);
+		expect(result.isError).toBeFalsy();
+		expect(run).toHaveBeenCalledTimes(1);
+	});
+
+	// A real top-level value still gets its own actionable refusal, on the same three fields.
+	it.each([
+		["isolated", { isolated: true }, /Top-level `isolated` is not part of the batch shape/],
+		["agent", { agent: "task" }, /`agent`/],
+		["schema", { schema: { type: "object" } }, /rename the stale `schema` field/],
+	] as const)("still refuses a real top-level %s on a batch call", async (_f, extra, expected) => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(
+			createSession({
+				settings: { "task.batch": true, "async.enabled": false, "task.isolation.enabled": true },
+			}),
+		);
+		const result = await tool.execute("task-real-top-level", {
+			context: "Shared context",
+			...extra,
+			tasks: [{ task: "Reply PONG.", solutionSpace: "one fixed answer", name: "Pong", agent: "task" }],
+		} as never);
+		expect(result.isError).toBe(true);
+		expect(getFirstText(result)).toMatch(expected);
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	// The scalar guard covers the flat call shape too, not only batch items: the throw is reachable
+	// from either, and guarding the shape that happened to be reported would have left the other.
+	it.each([
+		["name", { name: 123 }],
+		["agent", { agent: 7 }],
+	] as const)("reports a non-string %s on a flat call instead of throwing", async (field, fill) => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(createSession({ settings: { "task.batch": false, "async.enabled": false } }));
+		const result = await tool.execute("task-flat-scalars", {
+			task: "Do work",
+			solutionSpace: "c",
+			...fill,
+		} as never);
+		expect(result.isError).toBe(true);
+		expect(getFirstText(result)).toContain(`invalid \`${field}\``);
+		expect(getFirstText(result)).not.toContain("TypeError");
+		expect(run).not.toHaveBeenCalled();
+	});
+
 	// An internal caller bypasses the wire schema and may hold its real `model` anywhere an object can
 	// hold a property. Spreading own enumerable properties to drop a blank sibling deletes the rest,
 	// so the gate would never see the selector: the task would spawn on the agent's configured model

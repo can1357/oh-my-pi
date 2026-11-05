@@ -242,10 +242,16 @@ function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
  * `schema` remains an eval-only alias and is rejected.
  */
 function validateShapeParams(batchEnabled: boolean, params: TaskParams): string | undefined {
-	if (Object.hasOwn(params, "schema")) {
+	// Presence here means "the caller named this field", so every test reads the value rather than
+	// `Object.hasOwn`: an own key holding `undefined` names nothing, and internal callers do produce
+	// them — `repairTaskParams` and `copyTaskFields` both materialize `context`/`tasks` that way, so a
+	// `hasOwn` test refuses a call that asked for nothing. The rest of the file tests `!== undefined`
+	// for the same reason.
+	// `schema` is not declared on `TaskParams`; it is the stale alias a caller may still send.
+	if ((params as { schema?: unknown }).schema !== undefined) {
 		return "The task tool uses `outputSchema`; rename the stale `schema` field.";
 	}
-	if (batchEnabled && params.tasks !== undefined && Object.hasOwn(params, "agent")) {
+	if (batchEnabled && params.tasks !== undefined && params.agent !== undefined) {
 		return "Top-level `agent` is not part of the batch shape. Set `tasks[].agent` instead.";
 	}
 	// Every other flat-form field sent at a batch call's top level is refused with its own message —
@@ -254,7 +260,7 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string 
 	// whether a child writes into the user's live checkout, and a call that asked for isolation and
 	// silently did not get it is worse than one that was told where to put the flag. Refusing also
 	// keeps the speculative launcher and dispatch in agreement, since both refuse.
-	if (batchEnabled && params.tasks !== undefined && Object.hasOwn(params, "isolated")) {
+	if (batchEnabled && params.tasks !== undefined && params.isolated !== undefined) {
 		return "Top-level `isolated` is not part of the batch shape. Set `tasks[].isolated` instead.";
 	}
 	if (!batchEnabled) {
@@ -309,6 +315,25 @@ function validateTaskInput(item: TaskItem | undefined, label: string, fileEnable
 	return undefined;
 }
 
+/**
+ * Reject a `name` or `agent` that is not a string, before anything trims or interpolates one.
+ *
+ * That is safe to skip for a validated call, but `lenientArgValidation` means a call whose wire
+ * schema fails arrives raw, with nothing coerced — and `.trim()` on a `name: 123` threw a
+ * `TypeError` out of the tool instead of reporting the shape. Both call shapes run this: the batch
+ * items reach it per item, the flat form as the whole call, because the throw is reachable from
+ * either and guarding only the shape that was reported would leave the other.
+ */
+function invalidScalarReason(item: TaskItem | undefined, label: string): string | undefined {
+	for (const field of ["name", "agent"] as const) {
+		const value: unknown = item?.[field];
+		if (value !== undefined && typeof value !== "string") {
+			return `${label} has an invalid \`${field}\`: expected a string, got ${Bun.inspect(value)}.`;
+		}
+	}
+	return undefined;
+}
+
 function validateSpawnParams(
 	params: TaskParams,
 	batchEnabled: boolean,
@@ -333,16 +358,8 @@ function validateSpawnParams(
 		for (let i = 0; i < tasks.length; i++) {
 			const item = tasks[i];
 			const label = `Task ${i + 1}${typeof item?.name === "string" && item.name ? ` (\`${item.name}\`)` : ""}`;
-			// `name` and `agent` are trimmed further down without a type check. That is safe for a
-			// validated call, but when a later item fails the wire schema the lenient path hands
-			// dispatch the raw arguments, where nothing has coerced a `name: 123` to a string — and
-			// `.trim` on it threw a `TypeError` out of the tool instead of reporting the shape.
-			for (const field of ["name", "agent"] as const) {
-				const value: unknown = item?.[field];
-				if (value !== undefined && typeof value !== "string") {
-					return `${label} has an invalid \`${field}\`: expected a string, got ${Bun.inspect(value)}.`;
-				}
-			}
+			const scalarError = invalidScalarReason(item, label);
+			if (scalarError) return scalarError;
 			const inputError = validateTaskInput(item, label, fileEnabled);
 			if (inputError) return inputError;
 			const effortError = validateEffort(item.effort, label);
@@ -371,6 +388,7 @@ function validateSpawnParams(
 		return "Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`.";
 	}
 	return (
+		invalidScalarReason(params, "The call") ??
 		validateTaskInput(params, "The call", fileEnabled) ??
 		validateEffort(params.effort, "The call") ??
 		validateModel(params, "The call", defaultAgent, settings)
