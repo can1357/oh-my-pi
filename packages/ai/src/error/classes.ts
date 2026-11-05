@@ -125,6 +125,9 @@ export function wrappedErrorEnvelope(error: object, depth = 0): object | undefin
 	return wrappedErrorEnvelope(inner, depth + 1);
 }
 
+/** A `code` that is only three digits is an HTTP status in the code field, not a machine code. */
+const HTTP_STATUS_CODE_PATTERN = /^\d{3}$/;
+
 /**
  * Which object a reader should take an error out of, given a parsed response body.
  *
@@ -152,7 +155,13 @@ export function wrappedErrorEnvelope(error: object, depth = 0): object | undefin
  */
 export function responseErrorEnvelope(bodyJson: unknown): object | undefined {
 	if (typeof bodyJson !== "object" || bodyJson === null || Array.isArray(bodyJson)) return undefined;
-	if (typeof Reflect.get(bodyJson, "code") === "string") return bodyJson;
+	// The root's own machine code outranks an `error` object beside it, which is a diagnostic.
+	// A THREE-DIGIT STRING is not a machine code: it is an HTTP status wearing the field's name,
+	// the same way a number in `code` is, and letting one win hid a real envelope beneath it —
+	// a quota refusal under `{ code: "429", message: "Too Many Requests", error: { … } }` was
+	// read as a plain 429 and retried to the budget instead of ending in one request.
+	const rootCode = Reflect.get(bodyJson, "code");
+	if (typeof rootCode === "string" && !HTTP_STATUS_CODE_PATTERN.test(rootCode)) return bodyJson;
 	// A root `type` is ambiguous in a way no ordering of positions can settle: a wire body writes
 	// its code there, and a stream frame writes its own name there, and the two shapes are
 	// identical. `{ type: "error", error: { code: "cyber_policy" } }` must read the inner object;

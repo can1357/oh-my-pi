@@ -188,7 +188,8 @@ type RefusalCarrier =
 	| "http403-root-discriminator-with-inner-envelope"
 	| "sse-root-discriminator-with-inner-envelope"
 	| "sse-root-code-beside-a-diagnostic"
-	| "http403-type-code-beside-a-diagnostic";
+	| "http403-type-code-beside-a-diagnostic"
+	| "http403-status-string-code-over-an-envelope";
 
 /** A transient cause a gateway may attach beside a refusal; it must never replace it. */
 const INNER_DIAGNOSTIC = { code: "server_error", message: "upstream diagnostic", status: 503 };
@@ -240,6 +241,17 @@ function refusalOn(api: Api, carrier: RefusalCarrier): Response {
 	// structurally identical to the discriminator carrier above — `{ type, error: {...} }` — and
 	// only the vocabulary separates them: "cyber_policy" is a code this system knows, "error" is
 	// a frame name it does not.
+	// A root `code` holding a three-digit STATUS, with a root message beside it, over a real
+	// envelope. Treating "403" as the body's machine code hides the refusal underneath it. The
+	// status here is deliberately NOT retryable: a refusal delivered on a 429 or 503 is resent by
+	// the transport before any reader sees the body, which is a separate limitation this pull
+	// request names and does not fix, and mixing the two would make this row prove neither.
+	if (carrier === "http403-status-string-code-over-an-envelope") {
+		return Response.json(
+			{ code: "403", message: "Forbidden", error: { code: "cyber_policy", message: REFUSAL_MESSAGE } },
+			{ status: 403 },
+		);
+	}
 	if (carrier === "http403-type-code-beside-a-diagnostic") {
 		return Response.json(
 			{ type: "cyber_policy", message: REFUSAL_MESSAGE, error: INNER_DIAGNOSTIC },
@@ -363,6 +375,7 @@ describe("content-policy refusals on every OpenAI-wire API and carrier", () => {
 		"sse-root-discriminator-with-inner-envelope",
 		"sse-root-code-beside-a-diagnostic",
 		"http403-type-code-beside-a-diagnostic",
+		"http403-status-string-code-over-an-envelope",
 	];
 	it.each(apis.flatMap(api => carriers.map(carrier => ({ api, carrier }))))(
 		"$api $carrier: one attempt, no rotation, the refusal's stopDetails kept",
