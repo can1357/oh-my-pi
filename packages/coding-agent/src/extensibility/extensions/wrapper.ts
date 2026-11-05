@@ -22,6 +22,7 @@ import {
 	resolveApprovalFromContext,
 	sessionApprovalScope,
 	truncateForPrompt,
+	userPolicyReasonLine,
 } from "../../tools/approval";
 import { getApprovalGrants } from "../../tools/approval-cache";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
@@ -367,8 +368,11 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// place. Denies were enforced above, and provider safety checks remain
 		// independently required.
 		const policyKey = resolved.policyKey ?? this.tool.name;
+		// A key that names the device only by case (`MCP__X`) is the policy the outer gate already
+		// asked about under the device's own name, so compare ignoring case.
 		const explicitPrompt =
-			resolved.override || (Object.hasOwn(userPolicies, policyKey) && policyKey !== context?.xdevPolicyKey);
+			resolved.override ||
+			(Object.hasOwn(userPolicies, policyKey) && policyKey.toLowerCase() !== context?.xdevPolicyKey?.toLowerCase());
 		const xdevBypass = context?.xdevPolicyKey !== undefined && effectiveParams === params;
 		const acpBypass =
 			context !== undefined &&
@@ -445,6 +449,15 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 						`Tool "${this.tool.name}" requires approval but no interactive UI available.\n` +
 							`Reason: ${resolved.reason}\n` +
 							`A restricted folder (tools.restrictedFolders) asks in every approval mode.`,
+					);
+				}
+				// An unreadable `tools.approval` entry or value made the call ask: the fix is in the config
+				// file, not the approval mode, and the person needs to find which file.
+				if (resolved.source === "user" && resolved.reason) {
+					throw new Error(
+						`Tool "${this.tool.name}" requires approval but no interactive UI available.${userPolicyReasonLine(resolved)}\n` +
+							"`omp config get tools.approval` shows the value in effect, and `omp config list --scope global` " +
+							"or `--scope project` the file holding it.",
 					);
 				}
 				throw new Error(

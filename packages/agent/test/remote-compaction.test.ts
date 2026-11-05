@@ -537,6 +537,37 @@ describe("buildOpenAiNativeHistory call-id tracking", () => {
 		]);
 	});
 
+	test("drops backend-only passthrough metadata from stored native items", () => {
+		// Codex 400s `Unknown parameter: 'input[N].internal_chat_message_metadata_passthrough.content_token_count'`.
+		const metadata = { content_token_count: 74, turn_id: "turn_1" };
+		const assistant = codexAssistant([{ callId: "call_a" }, { callId: "call_b" }], true);
+		const payload = assistant.providerPayload;
+		if (payload?.type !== "openaiResponsesHistory") throw new Error("expected native history");
+		payload.items[1]!.internal_chat_message_metadata_passthrough = metadata;
+		const previousReplacementHistory = [
+			{
+				type: "message",
+				role: "user",
+				content: [{ type: "input_text", text: "retained" }],
+				internal_chat_message_metadata_passthrough: { turn_id: "turn_0" },
+			},
+		];
+		const items = buildOpenAiNativeHistory(
+			[assistant, toolResultFor("call_a"), toolResultFor("call_b")],
+			CODEX_MODEL,
+			previousReplacementHistory,
+		);
+		expect(items.some(item => Object.hasOwn(item, "internal_chat_message_metadata_passthrough"))).toBe(false);
+		expect(items.flatMap(item => (typeof item.call_id === "string" ? [[item.type, item.call_id]] : []))).toEqual([
+			["function_call", "call_a"],
+			["function_call", "call_b"],
+			["function_call_output", "call_a"],
+			["function_call_output", "call_b"],
+		]);
+		// Stored session history is left unchanged.
+		expect(payload.items[1]!.internal_chat_message_metadata_passthrough).toBe(metadata);
+	});
+
 	test("pairs a reused call id positionally and keeps a different-kind output", () => {
 		const shared = "call_reused";
 		const history = {
