@@ -1090,6 +1090,18 @@ fn fork_redirs(
 			for step in &steps {
 				match step {
 					ChildStep::Open { fds, path, flags, mode, diag } => {
+						let mut st = std::mem::zeroed::<libc::stat>();
+						// bash's `noclobber_open` stats the path and refuses an
+						// existing regular file without opening it, so nothing the
+						// file holds — a lease, a mode that forbids writing — can
+						// delay or colour the refusal. Anything else is opened, and
+						// the object opened is what decides.
+						if *flags & libc::O_EXCL != 0
+							&& libc::stat(path.as_ptr(), &raw mut st) == 0
+							&& st.st_mode & libc::S_IFMT == libc::S_IFREG
+						{
+							child_fail_with(diag, b"cannot overwrite existing file", 1);
+						}
 						let mut fd = libc::open(path.as_ptr(), *flags, libc::c_uint::from(*mode));
 						if fd < 0 && errno() == libc::EEXIST && *flags & libc::O_EXCL != 0 {
 							// `noclobber`'s exclusive create met an existing file:
@@ -1098,7 +1110,7 @@ fn fork_redirs(
 							// words (`Diag::NoClobber`).
 							let plain = *flags & !(libc::O_CREAT | libc::O_EXCL | libc::O_TRUNC);
 							fd = libc::open(path.as_ptr(), plain);
-							let mut st = std::mem::zeroed::<libc::stat>();
+
 							if fd >= 0 {
 								if libc::fstat(fd, &raw mut st) == 0
 									&& st.st_mode & libc::S_IFMT == libc::S_IFREG

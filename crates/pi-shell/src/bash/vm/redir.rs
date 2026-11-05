@@ -1381,6 +1381,17 @@ impl FsPending<Box<dyn File>> for NoClobberPath {
 	}
 }
 
+/// Whether the object `file` IS a regular file. [`File::kind`] says how
+/// the engine must drive it, and a provider's regular file that cannot be
+/// seeked is driven as a device, so the object's own `fstat` is asked
+/// first and the driving category is only the fallback.
+fn opened_is_regular(file: &dyn File) -> bool {
+	match file.stat() {
+		Ok(st) => st.kind == StatKind::File,
+		Err(_) => file.kind() == FileKind::Regular,
+	}
+}
+
 /// `noclobber`'s plain reopen of an existing file: a regular file is
 /// refused once opened ([`NoClobberRefused`]), anything else passes, and a
 /// file that cannot be opened at all is marked for [`judge_unopenable`].
@@ -1389,7 +1400,7 @@ struct NoClobberReopen(Box<dyn FsPending<Box<dyn File>>>);
 impl NoClobberReopen {
 	fn judge(r: std::io::Result<Box<dyn File>>) -> std::io::Result<Box<dyn File>> {
 		match r {
-			Ok(file) if file.kind() == FileKind::Regular => {
+			Ok(file) if opened_is_regular(file.as_ref()) => {
 				Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, NoClobberRefused))
 			},
 			Err(err) => Err(NoClobberUnopenable::wrap(err)),
@@ -1429,6 +1440,25 @@ fn judge_path(
 			}
 			r
 		},
+	}
+}
+
+/// bash's `noclobber_open` stats the path and refuses an existing regular
+/// file without opening it, so nothing the file holds — a lease, a mode
+/// that forbids writing — can delay or colour the refusal. Only an answer
+/// the filesystem has at once is used: where it has none, the open
+/// decides, as it does for everything else, and the object it returns
+/// stays the authority (a path whose kind changes after this look is
+/// still judged by what was opened).
+fn early_refusal(cx: &mut Cx<'_>, abs: &BString, flags: OpenFlags) -> Option<std::io::Error> {
+	if !flags.contains(OpenFlags::EXCL) {
+		return None;
+	}
+	match cx.host.fs().stat(BStr::new(abs), true) {
+		FsPoll::Ready(Ok(st)) if st.kind == StatKind::File => {
+			Some(std::io::Error::new(std::io::ErrorKind::AlreadyExists, NoClobberRefused))
+		},
+		_ => None,
 	}
 }
 
@@ -1521,13 +1551,22 @@ fn open_into(
 	let mut tcx = Context::from_waker(&k.waker);
 	let mut res = match io(vp).redir.opening.as_mut() {
 		Some(p) => p.poll(&mut tcx),
-		None => start_open(vp, cx, &mut tcx, &abs, flags, mode, false),
+		None => match early_refusal(cx, &abs, flags) {
+			Some(err) => Poll::Ready(Err(err)),
+			None => start_open(vp, cx, &mut tcx, &abs, flags, mode, false),
+		},
 	};
-	// The exclusive create met an existing file: open it as it is.
+	// The exclusive create met an existing file: open it as it is. The
+	// reopen's own failure is marked ([`NoClobberUnopenable`]) and belongs
+	// to the stage below, however its kind reads: an `EEXIST` from the
+	// reopen is not a second exclusive create to recover from, and
+	// recovering from it again would repeat the open without end.
 	if let Poll::Ready(Err(err)) = &res
 		&& flags.contains(OpenFlags::EXCL)
 		&& err.kind() == std::io::ErrorKind::AlreadyExists
-		&& !err.get_ref().is_some_and(|e| e.is::<NoClobberRefused>())
+		&& !err
+			.get_ref()
+			.is_some_and(|e| e.is::<NoClobberRefused>() || e.is::<NoClobberUnopenable>())
 	{
 		io(vp).redir.opening = None;
 		res = start_open(vp, cx, &mut tcx, &abs, flags, mode, true);
