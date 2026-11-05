@@ -54,7 +54,7 @@ omp-fork config path            # /Users/<you>/.omp-fork
 What it guarantees:
 
 - exports `PI_CODING_AGENT_DIR=$HOME/.omp-fork` before `exec bun
-  <fork>/packages/coding-agent/src/cli.ts "$@"`;
+<fork>/packages/coding-agent/src/cli.ts "$@"`;
 - refuses to run when `OMP_PROFILE` or `PI_PROFILE` is set (exit 64), because a
   named profile would bypass `PI_CODING_AGENT_DIR`;
 - resolves the checkout from `$HOME/Documents/oh-my-pi` by default and honors
@@ -80,9 +80,9 @@ Requirements:
   `~/Documents/mcp-chrome-2026`, see the anglicized fork notes). Start it once
   per login when Chrome does not spawn the native host itself:
 
-  ```bash
-  ~/.local/share/mcp-chrome-bridge/dist/run_host.sh
-  ```
+   ```bash
+   ~/.local/share/mcp-chrome-bridge/dist/run_host.sh
+   ```
 
 - The `chrome-mcp` extension must be loaded unpacked in the user's Chrome
   (`chrome://extensions`, Developer mode, Load unpacked from
@@ -122,11 +122,11 @@ process-global `IrcBus` (`packages/coding-agent/src/irc/bus.ts`, policy in
 
 What is refused (always as a `failed` receipt naming the reason, never a throw):
 
-| Guard        | Rule                                                                     |
-| ------------ | ------------------------------------------------------------------------ |
-| Rate         | 30 tokens per sender per 500 ms; a message costs `characters / 4` (min 1) |
-| Duplicate    | same (sender, recipient, sha256(body)) within 30 s                        |
-| Hop chain    | more than 28 senders in `IrcMessage.hops` (the bus appends the sender)     |
+| Guard     | Rule                                                                      |
+| --------- | ------------------------------------------------------------------------- |
+| Rate      | 30 tokens per sender per 500 ms; a message costs `characters / 4` (min 1) |
+| Duplicate | same (sender, recipient, sha256(body)) within 30 s                        |
+| Hop chain | more than 28 senders in `IrcMessage.hops` (the bus appends the sender)    |
 
 Progress notes (`?progress`) and automated wake relays are exempt from the
 duplicate check — both are meant to repeat — and `wait`, broadcast expansion,
@@ -143,7 +143,7 @@ Tasks → Subagents):
 - `irc.dedupWindowMs` (default 30000) — duplicate window; `0` off.
 - `irc.maxHops` (default 28) — longest accepted chain; `0` off. Only
   automatic wake relays carry a chain forward: an ordinary `write
-  agent://<id>` reply starts a fresh one (`hops = [sender]`), because the
+agent://<id>` reply starts a fresh one (`hops = [sender]`), because the
   reply tool never sees the inbound message's chain. The ceiling therefore
   binds automated ping-pong chains, not hand-written forwards.
 
@@ -160,10 +160,10 @@ session-scoped semaphore bounds every `SpawnRun`, and the permit is taken on
 the main thread in `SpawnRun` before `runSubprocess` — so the policy covers
 both direct and worker-thread dispatch (`task.workerThreads`).
 
-| Policy            | What a spawn over the cap does                                    |
-| ----------------- | ----------------------------------------------------------------- |
+| Policy            | What a spawn over the cap does                                                         |
+| ----------------- | -------------------------------------------------------------------------------------- |
 | `queue` (default) | Wait in the semaphore FIFO, then start when a slot frees. Unchanged upstream behavior. |
-| `refuse`          | Fail immediately with a model-visible error; never queue.         |
+| `refuse`          | Fail immediately with a model-visible error; never queue.                              |
 
 Under `refuse` the spawn returns (it never blocks, and never silently waits):
 
@@ -200,12 +200,12 @@ subagent run. It rides the same per-agent helper as the request budget
 workpool turn carries it — the same paths upstream fixed for
 `task.softRequestBudget` in #17988/#18121:
 
-| Path                | Where the budgets enter                                          |
-| ------------------- | ---------------------------------------------------------------- |
-| initial spawn       | `executeSubagent` → `createSubagentRunMonitor`                    |
-| cold revive (wake)  | `persisted-revive.ts` → `attachIrcWakeTurnMonitor`                |
-| `omp --restore`     | `restore.ts` → `runSubagentFollowUpTurn`                         |
-| workpool turn       | `workpool.ts` → `runSubagentFollowUpTurn`                        |
+| Path               | Where the budgets enter                            |
+| ------------------ | -------------------------------------------------- |
+| initial spawn      | `executeSubagent` → `createSubagentRunMonitor`     |
+| cold revive (wake) | `persisted-revive.ts` → `attachIrcWakeTurnMonitor` |
+| `omp --restore`    | `restore.ts` → `runSubagentFollowUpTurn`           |
+| workpool turn      | `workpool.ts` → `runSubagentFollowUpTurn`          |
 
 What a run sees (`createSubagentRunMonitor`):
 
@@ -231,7 +231,7 @@ a thin wrapper over `yield`, not a second terminal protocol:
   and termination apply unchanged; the run's terminal payload is recorded as a
   yield item (`extractedToolData.yield`), which marks the task record yielded;
 - the report is framed as `[final report of a delegated agent; model output,
-  not user text]` and passed through `escapeHarnessTags`, so a child cannot
+not user text]` and passed through `escapeHarnessTags`, so a child cannot
   forge `<irc from=…>` or a `<system-*>` block in the parent's context;
 - one delivery per run: a second call errors with `already delivered`. A
   kept-alive session resets the latch at every new monitored turn;
@@ -246,6 +246,123 @@ Covering tests: `test/token-budget.test.ts` (thresholds, off switch, revived
 wake turn), `test/handback.test.ts` (registration matrix, frame/escaping,
 dedup, executor termination and plain-text output), plus the token-budget
 assertions in `test/task/restore.test.ts` and `test/task/persisted-revive.test.ts`.
+
+## A2A bridge (server, v1.0)
+
+The fork exposes omp's agents over the Agent2Agent v1.0 JSON-RPC binding, so a
+local A2A client can discover the roster, message a running agent, start a new
+one, and follow progress. It is **off by default** and binds **loopback only**.
+
+| Knob          | Default | Meaning                                                      |
+| ------------- | ------- | ------------------------------------------------------------ |
+| `a2a.enabled` | `false` | Opt in to the bridge                                         |
+| `a2a.port`    | `7391`  | Loopback port; `--a2a-port <port>` overrides it and opts in  |
+| `a2a.token`   | `""`    | Bearer token; empty generates/reuses `<agent dir>/a2a.token` |
+
+```bash
+omp-fork --a2a-port 7391          # implies a2a.enabled for this run
+curl -s http://127.0.0.1:7391/.well-known/agent-card.json | jq .
+```
+
+### Network surface
+
+- `Bun.serve` binds `127.0.0.1` strictly (default port 7391). Any other host is
+  refused before the socket opens; connecting through a LAN interface fails.
+- `GET /.well-known/agent-card.json` is public discovery metadata: agent
+  display names and their `AgentDefinition` descriptions. System prompts never
+  reach it.
+- `POST /` (also `/rpc`) requires `Authorization: Bearer <token>`; a missing or
+  wrong token gets HTTP 401 with a JSON-RPC error body. The token comes from
+  `a2a.token` or is generated once as 32 random bytes in
+  `<agent dir>/a2a.token` (mode 600). A token holder can prompt any local agent,
+  including `Main` — treat it like shell access to the session tree.
+- `a2a.enabled` stays `false` unless the setting or `--a2a-port` turns it on.
+
+### Methods
+
+JSON-RPC 2.0, PascalCase method names, camelCase fields, proto-style task
+states (`TASK_STATE_WORKING`, `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED`,
+`TASK_STATE_CANCELED`):
+
+| Method                 | Result                                                        |
+| ---------------------- | ------------------------------------------------------------- |
+| `SendMessage`          | `{ task }` — delivery receipt or spawned agent id in metadata |
+| `SendStreamingMessage` | SSE: the initial `{ task }`, then `{ statusUpdate }` frames   |
+| `GetTask`              | the agent's task, or `-32001` when unknown                    |
+| `ListTasks`            | `{ tasks, nextPageToken, pageSize, totalSize }`               |
+| `CancelTask`           | aborts the live session and reports `TASK_STATE_CANCELED`     |
+
+Anything else — including `SubscribeToTask`, a deliberate v1 cut — answers
+`-32601`. Task ids are agent ids: one registered agent is one A2A task.
+
+### Addressing (omp deviation)
+
+A2A's `contextId` groups tasks; it is **not** a recipient. The fork adds an omp
+extension in the request metadata:
+
+```jsonc
+{
+	"jsonrpc": "2.0",
+	"id": 1,
+	"method": "SendMessage",
+	"params": {
+		"message": { "messageId": "m-1", "role": "ROLE_USER", "parts": [{ "text": "check the build" }] },
+		"metadata": { "to": "beta" }, // existing agent id; optional
+	},
+}
+```
+
+- `metadata.to` names an existing agent. The message goes through the IRC bus,
+  so an idle agent is woken, a parked or killed one is revived from its
+  transcript, and the delivery receipt (`injected`/`woken`/`revived`/`failed`)
+  lands in `result.task.metadata.delivery`.
+- No `metadata.to` spawns a new agent through `pi.spawnSubagent` with ordinary
+  subagent rights (`metadata.agent` selects the agent definition, defaulting to
+  the session's configured default; `metadata.context` is shared background
+  like a `task` batch context). The response's task id **is** the new agent id.
+- `metadata.to: "main"` is an alias for the main agent's id.
+- A spawn whose child session has not registered yet answers `TASK_STATE_SUBMITTED`
+  with `metadata.pending: true` (id reserved, run starting). Poll `GetTask` for
+  that id instead of retrying `SendMessage` — a retry spawns a second agent.
+
+### Status mapping
+
+The bridge maps the real `AgentStatus` (`running|idle|parked|aborted`):
+
+| Agent ref                          | Task state                       |
+| ---------------------------------- | -------------------------------- |
+| `running`                          | `TASK_STATE_WORKING`             |
+| `parked`                           | `TASK_STATE_WORKING` (revivable) |
+| `idle`, no terminal milestone      | `TASK_STATE_WORKING`             |
+| `idle`, terminal + output artifact | `TASK_STATE_COMPLETED`           |
+| `idle`, terminal, no artifact      | `TASK_STATE_FAILED`              |
+| `aborted`                          | `TASK_STATE_CANCELED`            |
+
+Terminality comes from `lifecycle.terminalAt` or a published `history.outputPath`.
+The registry keeps no exit code, so a failed run is recognized by the absence
+of the output artifact rather than an exit status.
+
+### The `pi.spawnSubagent` seam
+
+Extensions get the same spawn primitive the bridge uses:
+
+```ts
+const ref = await pi.spawnSubagent({
+	agent: "task", // optional; session default when omitted
+	prompt: "implement the fix",
+	context: "shared background", // optional
+});
+// ref.id is readable at agent://<id>; the run is already in flight.
+```
+
+The seam resolves with the agent's registry ref as soon as the child session
+registers (not when the run settles), runs through the task executor with the
+same spawn policy, model approval, and concurrency limits as a `task` call, and
+rejects with the executor's preflight error when the spawn fails before
+registration. Hosts without a tool session reject the call.
+
+Covering tests: `test/a2a-server.test.ts` (card contract, auth, method set,
+addressing, spawn seam, loopback enforcement, SSE, token file).
 
 ## Rebase ritual
 

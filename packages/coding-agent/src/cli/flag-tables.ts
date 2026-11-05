@@ -232,6 +232,15 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--session-dir": (result, value) => {
 		result.sessionDir = value;
 	},
+	"--a2a-port": (result, value) => {
+		const port = Number(value);
+		if (!Number.isInteger(port) || port < 1 || port > 65535) {
+			throw new CliUsageError(
+				`Invalid --a2a-port value: ${JSON.stringify(value)}. Expected a port between 1 and 65535.`,
+			);
+		}
+		result.a2aPort = port;
+	},
 	"--models": (result, value) => {
 		result.models = value.split(",").map(s => s.trim());
 	},

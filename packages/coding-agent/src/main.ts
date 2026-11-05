@@ -198,7 +198,7 @@ import {
 	cfgSessionWorktreeScope,
 } from "./session/settings";
 import { cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings";
-import { cfgTaskAgentIdleTtlMs } from "./task/settings";
+import { cfgA2aEnabled, cfgA2aPort, cfgTaskAgentIdleTtlMs } from "./task/settings";
 import { cfgSkillsIncludeSkills } from "./extensibility/settings";
 import { cfgWorkspaceAdditionalDirectories } from "./session/context-settings";
 
@@ -2688,6 +2688,37 @@ export async function runRootCommand(
 			);
 			if (parsedArgs.apiKey && !sessionOptions.model && session.model) {
 				authStorage.keys.setRuntime(session.model.provider, parsedArgs.apiKey);
+			}
+
+			// A2A bridge: opt-in (setting or `--a2a-port`), loopback only, and a
+			// startup failure is a notice — a bridge must never keep a session from
+			// starting. Loaded lazily so ordinary launches skip the module.
+			const a2aPort = parsedArgs.a2aPort;
+			if (a2aPort !== undefined || cfgA2aEnabled.get(settingsInstance)) {
+				try {
+					const [{ startA2aServer, defaultA2aDeps }, { spawnSubagentForSession }] = await Promise.all([
+						import("./a2a/server"),
+						import("./task/spawn-subagent"),
+					]);
+					const a2a = await startA2aServer({
+						settings: settingsInstance,
+						session: {
+							cwd: session.sessionManager.getCwd(),
+							getSessionAgents: () => session.getSessionAgents(),
+							effectiveExtensionRoots: () => session.effectiveExtensionRoots,
+						},
+						port: a2aPort ?? cfgA2aPort.get(settingsInstance),
+						...defaultA2aDeps(),
+						spawn: options => spawnSubagentForSession(session, options),
+						version: VERSION,
+					});
+					postmortem.register("a2a-server", () => a2a.stop(), { exitOnly: true });
+					notifs.push({ kind: "info", message: `A2A bridge listening on ${a2a.url}` });
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					notifs.push({ kind: "error", message: `A2A bridge failed to start: ${message}` });
+					process.stderr.write(chalk.red(`A2A bridge failed to start: ${message}\n`));
+				}
 			}
 
 			const configuredScope = parsedArgs.models ?? cfgEnabledModels.get(settingsInstance);

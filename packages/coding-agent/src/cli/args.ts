@@ -72,6 +72,8 @@ export interface Args {
 	mode?: Mode;
 	noSession?: boolean;
 	sessionDir?: string;
+	/** `--a2a-port <port>`: serve the A2A bridge on 127.0.0.1 for this run (implies `a2a.enabled`). */
+	a2aPort?: number;
 	providerSessionId?: string;
 	providerPromptCacheKey?: string;
 	fork?: string;

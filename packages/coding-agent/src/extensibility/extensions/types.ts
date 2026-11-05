@@ -93,6 +93,7 @@ import type * as PiCodingAgent from "../../index";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { LoopLimitConfig } from "../../modes/loop-limit";
 import type { MemoryRuntimeContext } from "../../memory-backend";
+import type { AgentRef } from "../../registry/agent-registry";
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import type { NativeToolView } from "@oh-my-pi/pi-tui/tools/renderer";
@@ -1816,6 +1817,19 @@ export type ShortcutConflict =
 	| { kind: "extension"; extensionPath: string };
 
 /**
+ * Options for {@link ExtensionAPI.spawnSubagent}: a background subagent with
+ * the same rights as a `task` spawn, addressed as `agent://<id>` once created.
+ */
+export interface SpawnSubagentOptions {
+	/** Agent definition name (e.g. `"task"`); defaults to the session's configured default subagent. */
+	agent?: string;
+	/** The prompt delivered to the spawned agent; must be non-empty. */
+	prompt: string;
+	/** Shared background rendered into the child's prompt, like a `task` call's context. */
+	context?: string;
+}
+
+/**
  * ExtensionAPI passed to extension factory functions.
  *
  * Methods retain their extension binding when destructured or passed as callbacks.
@@ -1981,6 +1995,23 @@ export interface ExtensionAPI {
 	 * same load-time and process-wide notes above apply.
 	 */
 	registerFileDeleteFallback(handler: FileDeleteFallbackHandler): void;
+
+	// =========================================================================
+	// Subagent Spawning
+	// =========================================================================
+
+	/**
+	 * Spawn a background subagent through the task executor and resolve with its
+	 * registry ref as soon as the child session registers — not when the run
+	 * settles. The child has ordinary subagent rights: `agent` resolves like a
+	 * `task` call's agent (defaulting to the session's configured default) and
+	 * the same spawn policy, model approval, and concurrency limits apply.
+	 *
+	 * Rejects with the executor's preflight/spawn error when the run fails
+	 * before the child registers. The ref stays readable at `agent://<id>`;
+	 * idle/parked refs are woken or revived by addressing them.
+	 */
+	spawnSubagent(options: SpawnSubagentOptions): Promise<AgentRef>;
 
 	// =========================================================================
 	// Command, Shortcut, Flag Registration
@@ -2410,6 +2441,8 @@ export interface ExtensionActions {
 	setServiceTier?: SetServiceTierHandler;
 	getSessionName: () => string | undefined;
 	setSessionName: (name: string) => Promise<void>;
+	/** Spawn a background subagent; absent on hosts without a session. */
+	spawnSubagent?: (options: SpawnSubagentOptions) => Promise<AgentRef>;
 }
 
 /** Actions for ExtensionContext (ctx.* in event handlers). */

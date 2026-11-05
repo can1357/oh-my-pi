@@ -27,6 +27,7 @@ import type {
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
+import { spawnSubagentForSession } from "../../task/spawn-subagent";
 import { cfgExtensionAssistantTextRenderers } from "../../extensibility/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
@@ -264,6 +265,7 @@ export class ExtensionUiController {
 			getCommands: () => getSessionSlashCommands(this.ctx.session),
 			getSessionName: () => this.ctx.sessionManager.getSessionName(),
 			setSessionName: name => this.#updateSessionName(name),
+			spawnSubagent: options => spawnSubagentForSession(this.ctx.session, options),
 		};
 		const contextActions: ExtensionContextActions = {
 			getModel: () => this.ctx.session.model,
@@ -498,6 +500,7 @@ export class ExtensionUiController {
 			getCommands: () => getSessionSlashCommands(this.ctx.session),
 			getSessionName: () => this.ctx.sessionManager.getSessionName(),
 			setSessionName: name => this.#updateSessionName(name),
+			spawnSubagent: options => spawnSubagentForSession(this.ctx.session, options),
 		};
 		const contextActions: ExtensionContextActions = {
 			getModel: () => this.ctx.session.model,
