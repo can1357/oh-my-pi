@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { launchHeadlessBrowser, removeUserDataDir } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
+import {
+	closeLaunchedBrowser,
+	launchHeadlessBrowser,
+	removeUserDataDir,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { chromiumAvailable } from "./chromium-probe";
 declare const location: { hostname: string };
 
@@ -42,7 +46,7 @@ test.skipIf(!CHROMIUM_AVAILABLE)(
 					await context.close();
 				}
 			} finally {
-				await browser.close();
+				await closeLaunchedBrowser(browser);
 			}
 		} finally {
 			if (userDataDir) await removeUserDataDir(userDataDir);
