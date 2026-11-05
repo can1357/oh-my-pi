@@ -144,7 +144,14 @@ impl<'s> Parser<'s> {
 
 	/// Offset of the cursor in the source, plus the sub-parser base; inside an
 	/// alias expansion, the offset just after the aliased word.
+	///
+	/// A sub-parser over text that is not in the source at all (the code of a
+	/// backquoted substitution inside alias text) reports its base for every
+	/// token: its buffer's own offsets are bytes of another buffer.
 	pub(super) fn off(&self) -> u32 {
+		if self.flat {
+			return self.base;
+		}
 		self.base + self.src_pos() as u32
 	}
 

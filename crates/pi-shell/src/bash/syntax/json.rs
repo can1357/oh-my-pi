@@ -1589,7 +1589,9 @@ mod shfmt {
 						("Coproc", p(lo)),
 					];
 					if let Some(name) = &cp.name {
-						let nlo = self.skip_ws(fwd(lo, c.span.hi, 6));
+						// `skip_ws` scans the source, which holds nothing of
+						// a coproc the parser read from alias text.
+						let nlo = self.skip_ws(fwd(lo, c.span.hi, 6)).clamp(lo, c.span.hi);
 						let nhi = fwd(nlo, c.span.hi, name.len() as u32);
 						f.push((
 							"Name",
@@ -1963,12 +1965,8 @@ mod shfmt {
 					V::Obj(f)
 				})
 				.collect();
-			let mut f = vec![
-				("Pos", p(lo)),
-				("End", p(hi)),
-				("Lparen", p(lo)),
-				("Rparen", p(back(lo, hi, 1))),
-			];
+			let mut f =
+				vec![("Pos", p(lo)), ("End", p(hi)), ("Lparen", p(lo)), ("Rparen", p(back(lo, hi, 1)))];
 			if !es.is_empty() {
 				f.push(("Elems", V::Arr(es)));
 			}
@@ -2226,11 +2224,7 @@ mod shfmt {
 							("End", p(fwd(name_hi, hi, 2))),
 							(
 								"Parts",
-								V::Arr(vec![self.lit_with(
-									fwd(name_hi, hi, 1),
-									fwd(name_hi, hi, 2),
-									at,
-								)]),
+								V::Arr(vec![self.lit_with(fwd(name_hi, hi, 1), fwd(name_hi, hi, 2), at)]),
 							),
 						]),
 					));

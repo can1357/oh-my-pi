@@ -214,6 +214,8 @@ pub struct Parser<'s> {
 	src:            &'s [u8],
 	/// Offset added to every span (sub-parsers of backquoted text).
 	base:           u32,
+	/// This parser's buffer is not in the source: every offset is `base`.
+	flat:           bool,
 	feat:           Features,
 	aliases:        &'s dyn AliasLookup,
 	/// Current input buffer: `src` or an alias value.
@@ -362,6 +364,7 @@ impl<'s> Parser<'s> {
 		Self {
 			src,
 			base: 0,
+			flat: false,
 			feat,
 			aliases,
 			buf: src,
@@ -561,9 +564,10 @@ const fn empty_word(lo: u32, hi: u32) -> Word {
 /// Parse `code` (text bash re-parses at run time: a backquoted command, a
 /// `$((…))` that is not arithmetic) as one list; spans are shifted by
 /// `base`. Aliases are not expanded.
-fn sub_parse_list(code: &[u8], feat: Features, base: u32) -> PResult<List> {
+fn sub_parse_list(code: &[u8], feat: Features, base: u32, flat: bool) -> PResult<List> {
 	let mut p = Parser::new(code, feat, NO_ALIASES);
 	p.base = base;
+	p.flat = flat;
 	let mut list = List::default();
 	while let Some(cc) = p.next_command() {
 		list.items.extend(cc?.list.items);

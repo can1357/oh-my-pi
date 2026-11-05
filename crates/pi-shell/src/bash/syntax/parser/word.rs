@@ -397,6 +397,9 @@ impl<'s> Parser<'s> {
 					// array element (`[k]=v`), read as a group.
 					let sub_lo = self.off();
 					self.bump();
+					// After the `[`, from the cursor: in alias text it is
+					// `sub_lo`, because the cursor does not advance there.
+					let sub_inner = self.off();
 					acc.lit.push(b'[');
 					acc.flush();
 					let start = acc.parts.len();
@@ -408,7 +411,7 @@ impl<'s> Parser<'s> {
 						self.bump();
 					}
 					acc.lit.push(b']');
-					sub = Some((start, end, Span::new(sub_lo + 1, inner_hi)));
+					sub = Some((start, end, Span::new(sub_inner, inner_hi)));
 					scan = Scan::AfterSub;
 				},
 				b'[' => {
@@ -642,7 +645,8 @@ impl<'s> Parser<'s> {
 				i += 1;
 			}
 		}
-		let body = super::sub_parse_list(&code, self.feat, text_lo).unwrap_or_default();
+		let flat = !self.in_source();
+		let body = super::sub_parse_list(&code, self.feat, text_lo, flat).unwrap_or_default();
 		Ok(WordPart::Comsub(Box::new(Comsub { kind: ComsubKind::Backtick, body, text })))
 	}
 
@@ -972,7 +976,8 @@ impl<'s> Parser<'s> {
 				bracket: false,
 			}));
 		}
-		let body = super::sub_parse_list(&text, self.feat, lo).unwrap_or_default();
+		let flat = !self.in_source();
+		let body = super::sub_parse_list(&text, self.feat, lo, flat).unwrap_or_default();
 		Ok(WordPart::Comsub(Box::new(Comsub { kind: ComsubKind::Dollar, body, text })))
 	}
 
@@ -1197,6 +1202,8 @@ impl<'s> Parser<'s> {
 		if matches!(name, ParamName::Var(_)) && self.peek() == Some(b'[') {
 			let lo = self.off();
 			self.bump();
+			// After the `[`, from the cursor: in alias text it is `lo`.
+			let ilo = self.off();
 			let at = self.peek();
 			if matches!(at, Some(b'@' | b'*')) && self.peek_at(1) == Some(b']') {
 				self.bump();
@@ -1215,7 +1222,7 @@ impl<'s> Parser<'s> {
 				self.bump();
 				index = Some(Subscript::Expr(Word {
 					id:    NodeId(0),
-					span:  Span::new(lo + 1, hi),
+					span:  Span::new(ilo, hi),
 					parts: merge_lits(parts),
 				}));
 			}

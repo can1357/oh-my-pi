@@ -462,7 +462,11 @@ fn word_part_positions_are_read_from_the_buffer_the_part_came_from() {
 			let shfmt: serde_json::Value = serde_json::from_str(&json).unwrap();
 			let mut bad = Vec::new();
 			range_faults(&shfmt, None, "", &mut bad);
-			let how = if aliased { "through an alias" } else { "as source" };
+			let how = if aliased {
+				"through an alias"
+			} else {
+				"as source"
+			};
 			for fault in bad {
 				faults.push(format!(
 					"{} {how} in {offsets:?}: {fault}",
