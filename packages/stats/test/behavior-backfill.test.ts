@@ -128,6 +128,7 @@ describe("behavior backfill", () => {
 		expect(getFrustrationOverall(null).messages).toBe(1);
 		expect(getFileOffset(sessionFile)).not.toBeNull();
 	});
+
 	it("does not re-wipe existing progress when the backfill sentinel is already pending", async () => {
 		const sessionFile = await writeSessionFile();
 		await syncAllSessions();
