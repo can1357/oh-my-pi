@@ -728,28 +728,34 @@ interface BlobReferenceNames {
 }
 
 /**
- * Live names follow directory aliases by content, but each real directory is
- * walked only once. A name this cannot resolve, list or look at is reported
- * rather than thrown: it may hide a transcript, and a sweep that cannot see
- * every transcript deletes nothing — see {@link collectReferencedBlobHashes}.
+ * Every transcript-shaped name under `root`, found by what each directory
+ * holds rather than by a glob, so a dangling link is a name like any other
+ * and reaches the strict reader. Directory aliases are followed by content
+ * and each real directory is walked once. A name this cannot resolve, list
+ * or look at is reported rather than thrown: it may hide a transcript, and
+ * a sweep that cannot see every transcript deletes nothing — see
+ * {@link collectReferencedBlobHashes}.
  */
-async function collectLiveBlobReferenceFiles(root: string): Promise<BlobReferenceNames> {
+async function collectBlobReferenceNames(root: string): Promise<BlobReferenceNames> {
 	const files: string[] = [];
 	const unreadable: string[] = [];
 	const directories = new Set<string>();
 	const walk = async (dir: string): Promise<void> => {
+		// Only a root that resolves to nothing is passed over: a tree gc has
+		// never written is nothing to report. Everything else is reported,
+		// `ENOENT` included — a directory this run has already resolved and
+		// then cannot list was moved, replaced or refused while the walk was
+		// in it, and may have held a transcript, so the sweep deletes nothing.
 		const real = await fs.realpath(dir).catch((error: unknown) => {
 			const code = codeOf(error);
-			if (code !== "ENOENT" && code !== "ENOTDIR")
+			if (dir !== root || (code !== "ENOENT" && code !== "ENOTDIR"))
 				unreadable.push(`${dir} could not be resolved (${errorMessage(error)})`);
 			return undefined;
 		});
 		if (real === undefined || directories.has(real)) return;
 		directories.add(real);
 		const entries = await fs.readdir(dir, { withFileTypes: true }).catch((error: unknown) => {
-			const code = codeOf(error);
-			if (code !== "ENOENT" && code !== "ENOTDIR")
-				unreadable.push(`${dir} could not be listed (${errorMessage(error)})`);
+			unreadable.push(`${dir} could not be listed (${errorMessage(error)})`);
 			return undefined;
 		});
 		if (!entries) return;
@@ -788,32 +794,18 @@ async function collectReferencedBlobHashes(
 	const files = new Map<string, { file: string; noFollow: boolean }>();
 	const decoder = new TextDecoder();
 	for (const { root, noFollow } of sessionRoots) {
-		if (!noFollow) {
-			// A following glob skips dangling links, while a non-following one
-			// misses them behind directory aliases. Walk live names, including
-			// hidden ones, and read only transcript patterns. Every root shares
-			// one blob store: an unreadable transcript could reference any blob,
-			// so the entire sweep stops before deleting anything.
-			const live = await collectLiveBlobReferenceFiles(root);
-			unreadable.push(...live.unreadable);
-			for (const file of live.files) {
-				files.set(normalizePathForComparison(file), { file, noFollow });
-			}
-			continue;
-		}
-		for (const glob of BLOB_REFERENCE_GLOBS) {
-			let names: string[];
-			try {
-				names = await Array.fromAsync(glob.scan({ cwd: root, followSymlinks: true, dot: true }));
-			} catch (error) {
-				if (codeOf(error) === "ENOENT") continue;
-				unreadable.push(`${root} could not be listed (${errorMessage(error)})`);
-				continue;
-			}
-			for (const name of names) {
-				const file = path.join(root, name);
-				files.set(normalizePathForComparison(file), { file, noFollow });
-			}
+		// Every root is walked, never globbed. A following glob skips a
+		// dangling link and a non-following one misses names behind a
+		// directory alias, and either way a transcript name nobody can read
+		// would be passed over instead of refusing the sweep — in the archive
+		// and the reclaim tree as much as in the live one. The walk finds a
+		// name by what its directory holds, so a dangling link reaches the
+		// strict reader, which refuses it by name. `noFollow` keeps its
+		// meaning: how that reader opens a name once the walk has found it.
+		const found = await collectBlobReferenceNames(root);
+		unreadable.push(...found.unreadable);
+		for (const file of found.files) {
+			files.set(normalizePathForComparison(file), { file, noFollow });
 		}
 	}
 	for (const file of exactSessionFiles) {
@@ -1049,7 +1041,9 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 	try {
 		scan = await collectBlobCandidates(blobDir);
 	} catch (error) {
-		// Nothing to delete can be named, so there is nothing to refuse.
+		// Nothing to delete can be named, so there is nothing left to refuse —
+		// but every name already found unreadable is still reported.
+		result.errors.push(...unreadable);
 		result.errors.push(`${blobDir} could not be read (${errorMessage(error)}), so no blob was looked at`);
 		return result;
 	}
@@ -4630,16 +4624,17 @@ async function reclaimSessionGc(
 }
 
 export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
+	// A refusal before anything runs — bad flags, a lock somebody holds, one
+	// an older gc left — throws, and `commands/gc.ts` turns it into the
+	// command's reported error: nothing ran, so there is no result to carry
+	// it. Everything a run does reach is reported in the result instead.
 	const options = await resolveOptions(args.flags);
+	const phaseFailures: string[] = [];
 	const archiveRoot = getArchivedSessionsDir(options.agentDir);
 	// A preview writes nothing, the lock included: it reads the lock instead
 	// of taking it — see {@link withoutGcLock}.
-	const phaseFailures: string[] = [];
-	// No phase ends the command. A phase that throws instead of returning is
-	// named here, the rest of the run goes on, and the result — JSON on
-	// stdout, a non-zero exit from {@link collectGcErrors} — still reaches
-	// whoever asked. A preview that printed a stack trace and nothing else
-	// was the defect this guards (#18224).
+	// No phase ends the command either. A phase that throws instead of
+	// returning is named, and the rest of the run goes on.
 	const phase = async <T>(name: string, run: () => Promise<T>): Promise<T | undefined> => {
 		try {
 			return await run();
@@ -4674,7 +4669,6 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	if (lockNotReleased.length > 0) result.lockNotReleased = lockNotReleased;
 	if (phaseFailures.length > 0) result.phaseFailures = phaseFailures;
 
-	const output = options.json ? `${JSON.stringify(result, null, 2)}\n` : renderText(result);
-	process.stdout.write(output);
+	process.stdout.write(options.json ? `${JSON.stringify(result, null, 2)}\n` : renderText(result));
 	return result;
 }

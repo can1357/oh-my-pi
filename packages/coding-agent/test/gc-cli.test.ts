@@ -345,6 +345,94 @@ describe("runGcCommand blob sweep", () => {
 		expect(await Bun.file(blob).text()).toBe("KEEP UNDER EACCES");
 	});
 
+	// The archive and reclaim roots were globbed with `followSymlinks`, which
+	// passes a dangling link over in silence, so a transcript nobody could
+	// read did not refuse the sweep there as it did in the live tree.
+	for (const owned of ["sessions", "reclaimed"] as const) {
+		test(`a dangling transcript under archive/${owned} refuses the sweep instead of being passed over`, async () => {
+			const blob = await writeBlob(root, hashFor(`archive-${owned}-orphan`), "KEEP OVER DANGLING ARCHIVE");
+			await agePath(blob);
+			const name = owned === "sessions" ? "gone.jsonl.gz" : path.join("gone", "gone.jsonl");
+			const file = path.join(root, "archive", owned, "project", name);
+			await fs.mkdir(path.dirname(file), { recursive: true });
+			await fs.symlink(path.join(root, "missing", "archived.jsonl.gz"), file);
+
+			const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+			expect(result.blobs).toMatchObject({ wouldDelete: 0, deleted: 0 });
+			expect(result.blobs?.errors.join("\n")).toContain(file);
+			expect(await Bun.file(blob).text()).toBe("KEEP OVER DANGLING ARCHIVE");
+		});
+	}
+
+	// A directory this run resolved and then could not list was moved,
+	// replaced or refused while the walk was in it: `ENOENT` there is no
+	// proof it held no transcript.
+	test("a session directory that vanishes between the walk's look and its listing refuses the sweep", async () => {
+		const blob = await writeBlob(root, hashFor("vanishing-orphan"), "KEEP OVER VANISHED DIRECTORY");
+		await agePath(blob);
+		const bucket = path.join(getSessionsDir(root), "project");
+		await fs.mkdir(bucket, { recursive: true });
+		const readdir = fs.readdir;
+		const spy = spyOn(fs, "readdir").mockImplementation((async (...args: Parameters<typeof fs.readdir>) => {
+			if (String(args[0]) === bucket) throw Object.assign(new Error("ENOENT: vanished"), { code: "ENOENT" });
+			return await Reflect.apply(readdir, fs, args);
+		}) as typeof fs.readdir);
+		let result: GcResult;
+		try {
+			result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+		} finally {
+			spy.mockRestore();
+		}
+
+		expect(result.blobs).toMatchObject({ wouldDelete: 0, deleted: 0 });
+		expect(result.blobs?.errors.join("\n")).toContain(bucket);
+		expect(await Bun.file(blob).exists()).toBe(true);
+	});
+
+	// Every name already found unreadable is still reported when the blob
+	// directory itself cannot be listed, instead of being dropped with it.
+	test("a blob directory that cannot be listed still reports the transcript that could not be read", async () => {
+		const file = path.join(getSessionsDir(root), "project", "dangling.jsonl");
+		await fs.mkdir(path.dirname(file), { recursive: true });
+		await fs.symlink(path.join(root, "gone.jsonl"), file);
+		const readdir = fs.readdir;
+		const spy = spyOn(fs, "readdir").mockImplementation((async (...args: Parameters<typeof fs.readdir>) => {
+			if (String(args[0]) === getBlobsDir(root)) {
+				throw Object.assign(new Error("EIO: injected blob listing"), { code: "EIO" });
+			}
+			return await Reflect.apply(readdir, fs, args);
+		}) as typeof fs.readdir);
+		let result: GcResult;
+		try {
+			result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+		} finally {
+			spy.mockRestore();
+		}
+
+		const reported = result.blobs?.errors.join("\n") ?? "";
+		expect(reported).toContain(file);
+		expect(reported).toContain("EIO: injected blob listing");
+		expect(result.blobs).toMatchObject({ deleted: 0 });
+	});
+
+	// A refusal before anything runs reaches the caller as the command's
+	// error: a `--json` object on stdout and a line on stderr, never a stack
+	// trace with nothing on stdout.
+	test("a preview refused by a held lock reports the refusal instead of ending the command", async () => {
+		const lockPath = path.join(root, "gc.lock");
+		await Bun.write(lockPath, `${process.pid}\n${new Date().toISOString()}\n`);
+		writes.length = 0;
+		stderrWrites.length = 0;
+		process.exitCode = 0;
+
+		await runCli(["gc", "--agent-dir", root, "--json"]);
+
+		expect(process.exitCode).toBe(1);
+		expect(stderrWrites.join("")).toContain(`GC did not run: GC already running: ${lockPath}`);
+		expect(JSON.parse(writes.join(""))).toMatchObject({ error: expect.stringContaining("GC already running") });
+	});
+
 	test("round56 a dangling hidden transcript behind a live directory link stops blob deletion", async () => {
 		const blob = await writeBlob(root, hashFor("offloaded-nested-reference"), "KEEP OFFLOADED CHILD IMAGE");
 		await agePath(blob);
@@ -1507,16 +1595,20 @@ describe("runGcCommand cold-session archive", () => {
 
 		// Named but unacknowledged: the one-way flag belongs to the step that
 		// gives the live copy up, and nothing is given up without it. The gate
-		// runs in `resolveOptions`, before the gc lock, so it refuses the run
-		// rather than reporting an error from inside one.
-		await expect(runCli(["gc", "--agent-dir", root, "--reclaim", "archive-me", "--apply"])).rejects.toThrow(
-			"--forward-only",
-		);
+		// runs in `resolveOptions`, before the gc lock, so no phase runs; the
+		// refusal reaches the caller as the command's reported error.
+		stderrWrites.length = 0;
+		process.exitCode = 0;
+		await runCli(["gc", "--agent-dir", root, "--reclaim", "archive-me", "--apply"]);
+		expect(stderrWrites.join("")).toContain("--forward-only");
+		expect(process.exitCode).toBe(1);
 		expect(await Bun.file(session).exists()).toBe(true);
 
-		await expect(
-			runCli(["gc", "--agent-dir", root, "--reclaim", "archive-me", "--blobs", "--apply", "--forward-only"]),
-		).rejects.toThrow("--reclaim runs alone");
+		stderrWrites.length = 0;
+		process.exitCode = 0;
+		await runCli(["gc", "--agent-dir", root, "--reclaim", "archive-me", "--blobs", "--apply", "--forward-only"]);
+		expect(stderrWrites.join("")).toContain("--reclaim runs alone");
+		expect(process.exitCode).toBe(1);
 		expect(await Bun.file(session).exists()).toBe(true);
 
 		stderrWrites.length = 0;

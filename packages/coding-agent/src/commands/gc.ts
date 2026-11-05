@@ -90,6 +90,17 @@ export default class Gc extends Command {
 		let result: GcResult;
 		try {
 			result = await runGcCommand(cmd);
+		} catch (error) {
+			// A refusal before anything ran: bad flags, a lock somebody holds,
+			// one an older gc left, a settings file that cannot be read. The
+			// caller gets it as this command's error — a `--json` object on
+			// stdout and a line on stderr — never as a stack trace with
+			// nothing on stdout (#18224).
+			const refusal = error instanceof Error ? error.message : String(error);
+			if (flags.json) process.stdout.write(`${JSON.stringify({ error: refusal }, null, 2)}\n`);
+			process.stderr.write(`GC did not run: ${refusal}\n`);
+			process.exitCode = 1;
+			return;
 		} finally {
 			disposeStderrLog?.();
 		}

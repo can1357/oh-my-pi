@@ -9,6 +9,7 @@
 - `omp gc --reclaim` deletes no original: it moves the session's transcript and artifact tree into `<agentDir>/archive/reclaimed/`, which a restore or opening the session moves back, and keeps the live copy whenever the kernel cannot prove no other process holds the files open — on macOS, on Windows and on filesystems without file leases, always ([#17488](https://github.com/can1357/oh-my-pi/pull/17488) by [@sjawhar](https://github.com/sjawhar))
 - After upgrading, a `gc.lock` a killed older `omp gc` left behind is named and kept instead of removed; move it aside once by hand ([#17488](https://github.com/can1357/oh-my-pi/pull/17488) by [@sjawhar](https://github.com/sjawhar))
 - An `omp gc` killed while it moved a copy aside can leave the whole file at `.<name>.<16 hex digits>.leaving`; compare it with what stands at the ordinary name, then remove it ([#17488](https://github.com/can1357/oh-my-pi/pull/17488) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --compress` compresses nothing on macOS and says why: a compressed copy takes its original's name only once the kernel shows no other process holds either file open, and omp cannot get that proof there ([#17639](https://github.com/can1357/oh-my-pi/pull/17639) by [@sjawhar](https://github.com/sjawhar))
 
 ### Added
 
@@ -42,7 +43,7 @@
 ### Fixed
 
 - `omp gc --blobs` no longer deletes a blob that only a symlinked, archived, reclaimed or half-moved transcript references ([#17488](https://github.com/can1357/oh-my-pi/pull/17488) by [@sjawhar](https://github.com/sjawhar))
-- `omp gc --json` reports a transcript, pointer or directory it could not read under `blobs.errors` with nothing deleted, and a phase that fails under `phaseFailures`, instead of ending the command on a stack trace with nothing on stdout ([#18224](https://github.com/can1357/oh-my-pi/pull/18224) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --json` reports a transcript, pointer or directory it could not read under `blobs.errors` with nothing deleted, and a phase that fails under `phaseFailures`; a refusal before anything runs — bad flags, a lock somebody holds — comes back as `{"error": …}` on stdout with a line on stderr, instead of a stack trace with nothing on stdout ([#18224](https://github.com/can1357/oh-my-pi/pull/18224) by [@sjawhar](https://github.com/sjawhar))
 - An archived or reclaimed session opens, resumes, forks, renders, packs, anonymizes and exports again, bringing its artifacts and subagent transcripts home first and saying so while it does ([#17488](https://github.com/can1357/oh-my-pi/pull/17488) by [@sjawhar](https://github.com/sjawhar))
 - `omp gc` says what it could not read — a transcript, a lock, an archive bucket, an owner probe — as a named failed check, instead of as "not a session file", "a running process owns" or "GC already running" ([#17488](https://github.com/can1357/oh-my-pi/pull/17488) by [@sjawhar](https://github.com/sjawhar))
 - `omp gc` without `--apply` writes nothing anywhere: no `gc.lock`, no log file, and no settings migration ([#17488](https://github.com/can1357/oh-my-pi/pull/17488), [#17639](https://github.com/can1357/oh-my-pi/pull/17639) by [@sjawhar](https://github.com/sjawhar))
