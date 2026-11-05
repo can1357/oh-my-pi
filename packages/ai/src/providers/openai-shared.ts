@@ -1450,8 +1450,12 @@ export function readOpenRouterRawMetadata(
 
 /** What a tier-capacity refusal changes before the request is resent. */
 export interface ServiceTierCapacityRetry {
+	/** Wire id the host refused. Only a body still naming it is re-aimed. */
+	refusedModel?: string;
 	/** Standard-tier wire id to send instead, when the refused route pinned the tier in its id. */
 	model?: string;
+	/** Tier the refused request carried in `service_tier`, if it carried one. */
+	refusedServiceTier?: string;
 	/** Whether the resent request must drop the `service_tier` field it carried. */
 	dropServiceTier: boolean;
 }
@@ -1474,10 +1478,16 @@ export function resolveServiceTierCapacityRetry(
 	params: { model?: unknown; service_tier?: unknown },
 ): ServiceTierCapacityRetry | undefined {
 	if (!AIError.isServiceTierCapacityError(error)) return undefined;
-	const peer = typeof params.model === "string" ? serviceTierPeerFor(params.model) : undefined;
-	const dropServiceTier = typeof params.service_tier === "string" && params.service_tier !== "default";
-	if (!peer && !dropServiceTier) return undefined;
-	return { ...(peer ? { model: peer.peerId } : {}), dropServiceTier };
+	const refusedModel = typeof params.model === "string" ? params.model : undefined;
+	const peer = refusedModel !== undefined ? serviceTierPeerFor(refusedModel) : undefined;
+	const refusedServiceTier =
+		typeof params.service_tier === "string" && params.service_tier !== "default" ? params.service_tier : undefined;
+	if (!peer && refusedServiceTier === undefined) return undefined;
+	return {
+		...(peer ? { refusedModel, model: peer.peerId } : {}),
+		...(refusedServiceTier !== undefined ? { refusedServiceTier } : {}),
+		dropServiceTier: refusedServiceTier !== undefined,
+	};
 }
 
 /**
@@ -1491,13 +1501,21 @@ export function canRerouteServiceTierCapacity(params: { model?: unknown; service
 	return typeof params.service_tier === "string" && params.service_tier !== "default";
 }
 
-/** Apply a resolved tier-capacity resend to one request-parameter object. */
+/**
+ * Re-aim one request-parameter object at the standard tier.
+ *
+ * Only a field that still names the refused route is replaced. A freshly built
+ * request always does, so this is unconditional in practice there; after an
+ * `onPayload` hook it is not, and a hook that deliberately chose some other
+ * model or tier keeps its choice rather than being silently overwritten by a
+ * recovery it was not party to.
+ */
 export function applyServiceTierCapacityRetry(
 	params: { model?: unknown; service_tier?: unknown },
 	retry: ServiceTierCapacityRetry,
 ): void {
-	if (retry.model !== undefined) params.model = retry.model;
-	if (retry.dropServiceTier) delete params.service_tier;
+	if (retry.model !== undefined && params.model === retry.refusedModel) params.model = retry.model;
+	if (retry.dropServiceTier && params.service_tier === retry.refusedServiceTier) delete params.service_tier;
 }
 
 /** Decide whether an OpenAI-family request should retry once with non-strict tools. */
