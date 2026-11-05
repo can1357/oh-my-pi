@@ -1,6 +1,7 @@
 import { isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils/fetch-retry";
 import type { Api, AssistantMessage, Usage } from "../types";
 import { AwsCredentialsError } from "./aws";
+import { CONTENT_POLICY_REFUSAL_CODES, UNSTABLE_REFUSAL_CODES } from "./refusal-codes";
 import {
 	AnthropicConnectionError,
 	AnthropicConnectionTimeoutError,
@@ -247,13 +248,6 @@ const ACCOUNT_POLICY_PATTERN = /trusted access for cyber/i;
  * rotate; the verdict is not stable for a given input, so callers may retry the
  * same request a bounded number of times.
  */
-const CONTENT_POLICY_REFUSAL_CODES: Readonly<Record<string, true>> = {
-	cyber_policy: true,
-	// The organization's own classifier refused the content, so every credential in that
-	// organization sees the same verdict: rotating spends siblings on a decided answer. Whether it
-	// is worth RESENDING is a separate question, answered by `UNSTABLE_REFUSAL_CODES` below.
-	reasoning_extraction: true,
-};
 const CONTENT_POLICY_REFUSAL_PATTERN = /\b(?:cyber_policy|reasoning_extraction)\b/i;
 
 /**
@@ -289,10 +283,6 @@ export function isProviderRefusal(message: Pick<AssistantMessage, "stopReason" |
  * while still never rotating credentials, because the classifier belongs to the organization and
  * not to the key.
  */
-const UNSTABLE_REFUSAL_CODES: Readonly<Record<string, true>> = {
-	cyber_policy: true,
-	reasoning_extraction: true,
-};
 
 /**
  * Whether a failed turn is a provider refusal whose verdict is not stable for a given input, so

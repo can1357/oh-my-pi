@@ -187,7 +187,8 @@ type RefusalCarrier =
 	| "http403-in-status-details"
 	| "http403-root-discriminator-with-inner-envelope"
 	| "sse-root-discriminator-with-inner-envelope"
-	| "sse-root-code-beside-a-diagnostic";
+	| "sse-root-code-beside-a-diagnostic"
+	| "http403-type-code-beside-a-diagnostic";
 
 /** A transient cause a gateway may attach beside a refusal; it must never replace it. */
 const INNER_DIAGNOSTIC = { code: "server_error", message: "upstream diagnostic", status: 503 };
@@ -235,6 +236,16 @@ function refusalOn(api: Api, carrier: RefusalCarrier): Response {
 	}
 	// The same discriminator with the envelope sitting directly beside it. Ranking a root `type`
 	// above the inner envelope read the code as `"error"` and spent every stored credential.
+	// The refusal code written in the root's `type` with a diagnostic object beside it. This is
+	// structurally identical to the discriminator carrier above — `{ type, error: {...} }` — and
+	// only the vocabulary separates them: "cyber_policy" is a code this system knows, "error" is
+	// a frame name it does not.
+	if (carrier === "http403-type-code-beside-a-diagnostic") {
+		return Response.json(
+			{ type: "cyber_policy", message: REFUSAL_MESSAGE, error: INNER_DIAGNOSTIC },
+			{ status: 403 },
+		);
+	}
 	if (carrier === "http403-root-discriminator-with-inner-envelope") {
 		return Response.json({ type: "error", error }, { status: 403 });
 	}
@@ -351,6 +362,7 @@ describe("content-policy refusals on every OpenAI-wire API and carrier", () => {
 		"http403-root-discriminator-with-inner-envelope",
 		"sse-root-discriminator-with-inner-envelope",
 		"sse-root-code-beside-a-diagnostic",
+		"http403-type-code-beside-a-diagnostic",
 	];
 	it.each(apis.flatMap(api => carriers.map(carrier => ({ api, carrier }))))(
 		"$api $carrier: one attempt, no rotation, the refusal's stopDetails kept",

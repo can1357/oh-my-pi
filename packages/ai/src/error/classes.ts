@@ -1,6 +1,7 @@
 import type { CapturedHttpErrorResponse } from "../utils/http-inspector";
 import { AbortError } from "./abort";
 import { networkFailureMessage } from "./network-cause";
+import { isKnownRefusalCode } from "./refusal-codes";
 
 /** Prefix on errors raised when an Anthropic SSE stream envelope is malformed. */
 export const STREAM_ENVELOPE_ERROR_PREFIX = "Anthropic stream envelope error:";
@@ -152,6 +153,15 @@ export function wrappedErrorEnvelope(error: object, depth = 0): object | undefin
 export function responseErrorEnvelope(bodyJson: unknown): object | undefined {
 	if (typeof bodyJson !== "object" || bodyJson === null || Array.isArray(bodyJson)) return undefined;
 	if (typeof Reflect.get(bodyJson, "code") === "string") return bodyJson;
+	// A root `type` is ambiguous in a way no ordering of positions can settle: a wire body writes
+	// its code there, and a stream frame writes its own name there, and the two shapes are
+	// identical. `{ type: "error", error: { code: "cyber_policy" } }` must read the inner object;
+	// `{ type: "cyber_policy", error: { code: "server_error" } }` must read the root. Only whether
+	// the string is a code this system knows separates them, so the vocabulary decides. A root
+	// `type` outside it falls through to the nested positions below and is read as a frame name —
+	// the one residual, and the reason that teaching the vocabulary a new code also teaches the
+	// resolver to find it.
+	if (isKnownRefusalCode(Reflect.get(bodyJson, "type"))) return bodyJson;
 	const error: unknown = Reflect.get(bodyJson, "error");
 	if (typeof error === "object" && error !== null && !Array.isArray(error)) {
 		return wrappedErrorEnvelope(error) ?? error;
