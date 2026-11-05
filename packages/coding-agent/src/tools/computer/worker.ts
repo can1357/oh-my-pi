@@ -482,6 +482,7 @@ async function entryExists(local: string): Promise<boolean> {
 const MENU_ROUTE =
 	"Use the window's menu bar with win.menu.select(...), or an element action such as press(), instead.";
 const MENU_TREE_LIMIT = 150;
+const MENU_TREE_SKIPPABLE = ["AxFailed:", BACKGROUND_UNAVAILABLE, "InvalidTarget:"];
 /** AX roles of the controls that open a menu when pressed, as native's `open_menu` reads them. */
 const MENU_CONTROL_ROLES = ["AXPopUpButton", "AXMenuButton"];
 const MENU_CONTROL_ROUTE =
@@ -1386,12 +1387,11 @@ class Win {
 				try {
 					children = await nativeCall(signal, () => this.#session.menuItems(this.id, item.path));
 				} catch (error) {
-					// Lazy submenus stay listed so their paths can be requested explicitly.
-					if (
-						error instanceof ToolError &&
-						["AxFailed:", "BackgroundUnavailable:", "InvalidTarget:"].some(code => error.message.startsWith(code))
-					)
+					// A refusal or AX timeout stops expansion, but keeps discovered paths available.
+					if (error instanceof ToolError && MENU_TREE_SKIPPABLE.some(code => error.message.startsWith(code))) {
+						budget = 0;
 						continue;
+					}
 					throw error;
 				}
 				if (children.length > budget) continue;
