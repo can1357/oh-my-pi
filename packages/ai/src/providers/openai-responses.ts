@@ -94,6 +94,7 @@ import {
 	applyOpenAIExtraBody,
 	applyOpenAIGatewayRouting,
 	applyResponsesCompatPolicy,
+	applyServiceTierCapacityRetry,
 	applyVercelResponsesCacheControls,
 	applyWireModelIdTransform,
 	buildResponsesDeltaInput,
@@ -122,6 +123,7 @@ import {
 	resolveOpenAIRequestSetup,
 	resolveOpenAIResponsesOutputClamp,
 	resolveReasoningSummaryOption,
+	resolveServiceTierCapacityRetry,
 	type ResponsesToolNaming,
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
@@ -1062,6 +1064,7 @@ const streamOpenAIResponsesOnce = (
 				});
 			};
 			let strictRetryAvailable = true;
+			let serviceTierRetryAvailable = true;
 			let activeStrictToolsApplied = builtParams.strictToolsApplied;
 			let forceDisableStrictTools = false;
 			const openResponsesStreamWithFallbacks = async (): Promise<AsyncIterable<ResponseStreamEvent>> => {
@@ -1114,6 +1117,24 @@ const streamOpenAIResponsesOnce = (
 									fallback: reasoningEffortFallback,
 								};
 								continue;
+							}
+							// A tier the host has no capacity for: re-aim the same request
+							// at standard serving. Once only — a second refusal means the
+							// peer is genuinely unavailable too, and must surface.
+							if (serviceTierRetryAvailable && !requestSignal.aborted) {
+								const tierRetry = resolveServiceTierCapacityRetry(error, chained.params);
+								if (tierRetry) {
+									serviceTierRetryAvailable = false;
+									applyServiceTierCapacityRetry(chained.params, tierRetry);
+									applyServiceTierCapacityRetry(activeParams, tierRetry);
+									activeRawRequestDump.body = chained.params;
+									logger.warn("openai-responses: service tier unavailable, retrying on the standard peer", {
+										model: model.id,
+										peer: tierRetry.model,
+										droppedServiceTier: tierRetry.dropServiceTier,
+									});
+									continue;
+								}
 							}
 							const compiledGrammarTooLarge =
 								model.compat.retryWithoutStrictOnGrammarError &&

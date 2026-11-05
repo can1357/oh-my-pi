@@ -232,6 +232,31 @@ export function pricingPeerFor(
 }
 
 /**
+ * The standard-tier peer of a tier-suffixed wire id, and the tier its suffix
+ * names: `gpt-6.1-sol-flex` → `{ peerId: "gpt-6.1-sol", tier: "flex" }`. The
+ * longest declared suffix wins, so `-ultrafast` is never read as `-fast`.
+ *
+ * Read **only** after a host has refused the request for want of capacity on
+ * that tier — never during discovery, identity resolution or pricing, where a
+ * tier route is its own model with its own metadata and price. Returns
+ * `undefined` for an id carrying no declared tier suffix, and for one that is
+ * nothing but the suffix.
+ */
+export function serviceTierPeerFor(wireModelId: string): { peerId: string; tier: string } | undefined {
+	let match: { peerId: string; tier: string } | undefined;
+	let matchedLength = 0;
+	const lower = wireModelId.toLowerCase();
+	for (const rule of behavior.serviceTierPeers) {
+		if (rule.suffix.length <= matchedLength || !lower.endsWith(rule.suffix)) continue;
+		const peerId = wireModelId.slice(0, -rule.suffix.length);
+		if (!peerId) continue;
+		match = { peerId, tier: rule.tier };
+		matchedLength = rule.suffix.length;
+	}
+	return match;
+}
+
+/**
  * Built-in default model selector chains per agent role (`smol`, `slow`,
  * `image`, …), most preferred first, in declaration order.
  */

@@ -409,6 +409,27 @@ behavior {
 	pricing-peer provider="minimax-code-cn" peers="minimax-cn" "minimax" {
 		alias "MiniMax-M3.1-Flash-Preview" peer-id="MiniMax-M3"
 	}
+	// A host that bakes the serving tier into the model id serves that tier as
+	// its own route: `<plain>-flex` is `<plain>` answered from flex capacity,
+	// and the two ids differ only in which pool serves them. When the host
+	// refuses the route for want of capacity — OpenAI's `flex_unavailable`,
+	// which it reports as a 500 — the request itself is still servable, so
+	// recovery re-aims it at the plain id. Retrying the tier id unchanged only
+	// asks the same absent pool again, which is why the id is what moves.
+	//
+	// Read only after such a refusal, never during discovery, identity
+	// resolution or pricing, so a tier route keeps its own metadata and its own
+	// price. The longest matching suffix wins, so `-ultrafast` is never read as
+	// `-fast`. `-fast` covers Factory Droid's and Codex's priority routes;
+	// Cursor's `-fast` effort lane shares the spelling but cannot reach here,
+	// because Cursor's Connect error vocabulary carries no tier-capacity code.
+	service-tier-peer {
+		suffix "-flex" tier="flex"
+		suffix "-scale" tier="scale"
+		suffix "-priority" tier="priority"
+		suffix "-ultrafast" tier="ultrafast"
+		suffix "-fast" tier="priority"
+	}
 	hosted-default provider="zai-search" model="glm-4.7"
 	hosted-default provider="synthetic-search" model="auto"
 	// Built-in default model selector chains per agent role, most preferred

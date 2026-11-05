@@ -329,6 +329,16 @@ export interface CompiledPricingPeer {
 	aliases: { model: string; peerId: string }[];
 }
 
+/**
+ * One tier-suffixed route: a wire-id suffix a host appends to name a serving
+ * tier, and the tier it names. Stripping the suffix yields the standard-tier
+ * peer the same request is servable on.
+ */
+export interface CompiledServiceTierPeer {
+	suffix: string;
+	tier: string;
+}
+
 /** Provider timezone assumption for offset-less absolute retry-reset timestamps. */
 export interface CompiledRetryResetTimezone {
 	provider: string;
@@ -349,6 +359,8 @@ export interface CompiledBehavior {
 	excludeModels: CompiledExcludeModels[];
 	planRequirements: CompiledPlanRequirement[];
 	pricingPeers: CompiledPricingPeer[];
+	/** Tier-suffixed wire-id routes, read only after a tier-capacity refusal. */
+	serviceTierPeers: CompiledServiceTierPeer[];
 	retryResetTimezones: CompiledRetryResetTimezone[];
 	retiredProviders: string[];
 	/** Hosts whose prefix caches benefit from a stable append-only conversation. */

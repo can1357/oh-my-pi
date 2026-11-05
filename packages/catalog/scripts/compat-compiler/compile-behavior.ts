@@ -18,6 +18,7 @@ import type {
 	CompiledModelOperations,
 	CompiledPlanRequirement,
 	CompiledPricingPeer,
+	CompiledServiceTierPeer,
 	CompiledRetryResetTimezone,
 	CompiledQuotaRule,
 	CompiledResponsesHeuristic,
@@ -295,6 +296,29 @@ function parsePricingPeer(node: KdlNodeView): CompiledPricingPeer {
 	return rule;
 }
 
+/**
+ * `service-tier-peer { suffix "-flex" tier="flex" … }` — the wire-id suffixes a
+ * host appends to name a serving tier. Suffixes are unique and must begin with
+ * a separator, so stripping one cannot swallow part of a model name.
+ */
+function parseServiceTierPeers(node: KdlNodeView): CompiledServiceTierPeer[] {
+	const children = ensureContainer(node, []);
+	const peers: CompiledServiceTierPeer[] = [];
+	for (const child of children) {
+		if (child.name !== "suffix") unexpected(child, "service-tier-peer");
+		ensureLeaf(child, ["tier"]);
+		const values = positionalStrings(child);
+		const tier = requiredProp(child, "tier");
+		const suffix = values[0];
+		if (values.length !== 1 || !suffix || !tier) malformed(child);
+		if (!suffix.startsWith("-") || suffix.length < 2) malformed(child);
+		if (peers.some(peer => peer.suffix === suffix)) malformed(child);
+		peers.push({ suffix, tier });
+	}
+	if (peers.length === 0) malformed(node);
+	return peers;
+}
+
 /** `role-defaults "<role>" { model "<selector>" … }` → the role's ordered selector chain. */
 function parseRoleDefaults(node: KdlNodeView): { role: string; models: string[] } {
 	validateProps(node, []);
@@ -330,6 +354,7 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 		planRequirements: [],
 		retryResetTimezones: [],
 		pricingPeers: [],
+		serviceTierPeers: [],
 		roleDefaults: {},
 	};
 	if (!source) return behavior;
@@ -401,6 +426,10 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 				break;
 			case "pricing-peer":
 				behavior.pricingPeers.push(parsePricingPeer(node));
+				break;
+			case "service-tier-peer":
+				if (behavior.serviceTierPeers.length > 0) malformed(node);
+				behavior.serviceTierPeers = parseServiceTierPeers(node);
 				break;
 			case "retired-providers": {
 				ensureLeaf(node, []);

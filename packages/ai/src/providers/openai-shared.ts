@@ -1,4 +1,5 @@
 import { toClinePassWireModelId } from "@oh-my-pi/pi-catalog/cline-pass-model-id";
+import { serviceTierPeerFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { toFirepassWireModelId, toFireworksWireModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
@@ -1445,6 +1446,47 @@ export function readOpenRouterRawMetadata(
 	if (typeof raw !== "string") return undefined;
 	const trimmed = raw.trim();
 	return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** What a tier-capacity refusal changes before the request is resent. */
+export interface ServiceTierCapacityRetry {
+	/** Standard-tier wire id to send instead, when the refused route pinned the tier in its id. */
+	model?: string;
+	/** Whether the resent request must drop the `service_tier` field it carried. */
+	dropServiceTier: boolean;
+}
+
+/**
+ * Resolve the standard-tier resend for a request a host refused for want of
+ * capacity on the tier it asked for (OpenAI's `flex_unavailable`, reported as
+ * a 500). A tier can be named two ways, and a request may use both:
+ *
+ *  - in the wire id, where `<plain>-flex` is a route onto flex capacity — the
+ *    peer comes from the catalog's `service-tier-peer` vocabulary; and
+ *  - in the `service_tier` field, where the same id serves every tier.
+ *
+ * Returns `undefined` when the failure is not a tier-capacity refusal, and —
+ * decisively — when neither spelling is present, because then the resend would
+ * be byte-identical and would only ask the same absent pool again.
+ */
+export function resolveServiceTierCapacityRetry(
+	error: unknown,
+	params: { model?: unknown; service_tier?: unknown },
+): ServiceTierCapacityRetry | undefined {
+	if (!AIError.isServiceTierCapacityError(error)) return undefined;
+	const peer = typeof params.model === "string" ? serviceTierPeerFor(params.model) : undefined;
+	const dropServiceTier = typeof params.service_tier === "string" && params.service_tier !== "default";
+	if (!peer && !dropServiceTier) return undefined;
+	return { ...(peer ? { model: peer.peerId } : {}), dropServiceTier };
+}
+
+/** Apply a resolved tier-capacity resend to one request-parameter object. */
+export function applyServiceTierCapacityRetry(
+	params: { model?: unknown; service_tier?: unknown },
+	retry: ServiceTierCapacityRetry,
+): void {
+	if (retry.model !== undefined) params.model = retry.model;
+	if (retry.dropServiceTier) delete params.service_tier;
 }
 
 /** Decide whether an OpenAI-family request should retry once with non-strict tools. */

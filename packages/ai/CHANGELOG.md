@@ -29,6 +29,7 @@
 - Fixed reranking when Cohere-compatible responses omit the model field
 - Reranking requests now send configured model headers, including custom `Authorization`
 - Provider retries no longer retry responses explicitly marked non-retryable
+- A request the host refuses for want of service-tier capacity (OpenAI's `flex_unavailable`) now retries on the standard tier instead of failing, re-aiming a tier-suffixed model id at its standard peer
 
 ## [18.16.0] - 2026-11-02
 

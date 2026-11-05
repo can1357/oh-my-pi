@@ -97,6 +97,7 @@ import {
 	applyOpenAIGatewayRouting,
 	applyOpenAIServiceTier,
 	applyProviderReportedCost,
+	applyServiceTierCapacityRetry,
 	applyWireModelIdTransform,
 	calculateOpenAIUsageAccounting,
 	clearOpenAIStrictToolsState,
@@ -118,6 +119,8 @@ import {
 	resolveOpenAICompletionsOutputClamp,
 	resolveOpenAIOutputTokenParam,
 	resolveOpenAIRequestSetup,
+	resolveServiceTierCapacityRetry,
+	type ServiceTierCapacityRetry,
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
 } from "./openai-shared";
@@ -937,6 +940,9 @@ const streamOpenAICompletionsOnce = (
 			const completionsUrl = query
 				? `${trimmedBaseUrl}/chat/completions?${new URLSearchParams(query)}`
 				: `${trimmedBaseUrl}/chat/completions`;
+			// Set once the host refuses the serving tier for want of capacity; every
+			// request built after that is re-aimed at standard serving.
+			let serviceTierCapacityRetry: ServiceTierCapacityRetry | undefined;
 			const createCompletionsStream = async (toolStrictModeOverride?: ToolStrictModeOverride) => {
 				const effectiveToolStrictModeOverride = disableStrictTools ? "none" : toolStrictModeOverride;
 				const builtParams = buildParams(model, context, options, effectiveToolStrictModeOverride);
@@ -960,6 +966,7 @@ const streamOpenAICompletionsOnce = (
 				const replacedParams = await options?.onPayload?.(params, model);
 				if (replacedParams !== undefined) params = replacedParams as typeof params;
 				activeRequestParams = params;
+				if (serviceTierCapacityRetry) applyServiceTierCapacityRetry(params, serviceTierCapacityRetry);
 				rawRequestDump = {
 					provider: model.provider,
 					api: output.api,
@@ -1035,6 +1042,10 @@ const streamOpenAICompletionsOnce = (
 								explicitDisable: isExplicitDisable,
 							})
 						: undefined;
+				const tierCapacityRetry =
+					!serviceTierCapacityRetry && activeRequestParams && !requestSignal.aborted
+						? resolveServiceTierCapacityRetry(error, activeRequestParams)
+						: undefined;
 				if (reasoningEffortFallback !== undefined && activeReasoningEffortFallbackKey) {
 					const retryMarker = `${activeReasoningEffortFallbackKey}:${String(reasoningEffortFallback)}`;
 					if (attemptedReasoningEffortFallbacks.has(retryMarker)) throw error;
@@ -1059,6 +1070,17 @@ const streamOpenAICompletionsOnce = (
 					disableStrictToolsForScope(providerSessionState, strictToolsScope);
 					disableStrictTools = true;
 					openaiStream = await createCompletionsStream("none");
+				} else if (tierCapacityRetry) {
+					// A tier the host has no capacity for: re-aim the same request at
+					// standard serving. Once only — a second refusal means the peer is
+					// genuinely unavailable too, and must surface.
+					serviceTierCapacityRetry = tierCapacityRetry;
+					logger.warn("openai-completions: service tier unavailable, retrying on the standard peer", {
+						model: model.id,
+						peer: tierCapacityRetry.model,
+						droppedServiceTier: tierCapacityRetry.dropServiceTier,
+					});
+					openaiStream = await createCompletionsStream();
 				} else {
 					if (
 						!shouldRetryWithoutStrictTools(error, capturedErrorResponse, {
