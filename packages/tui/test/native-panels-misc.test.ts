@@ -490,11 +490,11 @@ describe("BtwHistoryPanel native events", () => {
 			for (const child of root.c ?? []) if (isNode(child)) collect(child);
 		};
 		collect(history.describe());
-		expect(metas).toEqual([
-			"Follow-up · 22:30",
-			"Follow-up · Nov 5, 2026 at 09:15",
-			"Follow-up · Nov 5, 2026 at 11:00",
-		]);
+		expect(metas).toHaveLength(3);
+		expect(metas[0]).toBe("Follow-up · 22:30");
+		// ICU's date/time joiner varies by platform (" at " on macOS, ", " on Linux); pin the date and time, not the glue.
+		expect(metas[1]).toMatch(/^Follow-up · Nov 5, 2026\D+09:15$/);
+		expect(metas[2]).toMatch(/^Follow-up · Nov 5, 2026\D+11:00$/);
 	});
 });
 

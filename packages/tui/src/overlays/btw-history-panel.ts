@@ -55,6 +55,11 @@ function getDisplayTurns(record: BtwHistoryRecord): readonly BtwHistoryTurn[] {
 	return record.title === undefined ? turns : [{ ...turns[0]!, question: record.title }, ...turns.slice(1)];
 }
 
+/** Whether two timestamps fall on the same calendar day in the local time zone. */
+function isSameLocalDay(a: number | Date, b: number | Date): boolean {
+	return new Date(a).toDateString() === new Date(b).toDateString();
+}
+
 interface BtwHistoryPanelOptions {
 	records: readonly BtwHistoryRecord[];
 	onClose: () => void;
@@ -244,7 +249,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 	/** A history row's stamp: the time for a question asked today, its date (and year, if not this one) before. */
 	#listStamp(timestamp: number, now: Date): string {
 		const date = new Date(timestamp);
-		if (date.toDateString() === now.toDateString()) return this.#timeFormat.format(date);
+		if (isSameLocalDay(date, now)) return this.#timeFormat.format(date);
 		return (date.getFullYear() === now.getFullYear() ? this.#dayFormat : this.#yearDayFormat).format(date);
 	}
 
@@ -784,9 +789,14 @@ export class BtwHistoryPanel implements Component, Focusable {
 		const meta: TspSpan[] =
 			index === 0
 				? [span(this.#dateFormat.format(turn.createdAt))]
-				: new Date(turn.createdAt).toDateString() === new Date(topicCreatedAt).toDateString()
-					? [span("Follow-up · "), span(this.#timeFormat.format(turn.createdAt))]
-					: [span("Follow-up · "), span(this.#dateFormat.format(turn.createdAt))];
+				: [
+						span("Follow-up · "),
+						span(
+							(isSameLocalDay(turn.createdAt, topicCreatedAt) ? this.#timeFormat : this.#dateFormat).format(
+								turn.createdAt,
+							),
+						),
+					];
 		const status = describeStatus(turn.status);
 		if (status) meta.push(span("  ·  "), ...status);
 		// The question stays markdown so its inline code and links render.
