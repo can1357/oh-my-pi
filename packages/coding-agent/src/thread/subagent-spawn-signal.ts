@@ -21,7 +21,7 @@ const EVAL_TAIL_CHARS = 16;
 
 /** One streaming tool call of the current message. */
 type CallState =
-	| { readonly kind: "task"; readonly scanner: BatchArgsScanner; raw: string; spawns: number }
+	| { readonly kind: "task"; readonly scanner: BatchArgsScanner; spawns: number }
 	| { readonly kind: "eval"; tail: string; spawns: number }
 	| { readonly kind: "other"; spawns: 0 };
 
