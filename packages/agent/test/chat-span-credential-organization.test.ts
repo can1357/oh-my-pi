@@ -19,7 +19,9 @@ import {
 	OmpGenAIAttr,
 	resolveTelemetry,
 } from "@oh-my-pi/pi-agent-core/telemetry";
-import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai/types";
+import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai/types";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	BasicTracerProvider,
@@ -69,6 +71,21 @@ function reply(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
 	};
 }
 
+const CUSTOM_API_SOURCE = "chat-span-credential-organization-test";
+const CUSTOM_API = "chat-span-credential-organization-api" as Api;
+
+// The boundary test needs the real `completeSimple` path, which means a
+// provider it can register — and a registered API is a runtime name the `Api`
+// union cannot spell, so this one model is cast where the others are built.
+const FAIL_MODEL = {
+	id: "test-model",
+	name: "Test Model",
+	api: CUSTOM_API,
+	provider: "test-provider",
+	contextWindow: 1000,
+	maxTokens: 100,
+} as Model<Api>;
+
 let exporter: InMemorySpanExporter;
 let provider: BasicTracerProvider;
 
@@ -78,6 +95,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+	unregisterCustomApis(CUSTOM_API_SOURCE);
 	exporter.reset();
 	await provider.shutdown();
 });
@@ -129,9 +147,9 @@ describe("chat span credential organization", () => {
 		expect(span?.attributes[OmpGenAIAttr.AuthOrganizationId]).toBeUndefined();
 	});
 
-	it("leaves the attribute off a turn that never produced a message", async () => {
+	it("leaves the attribute off a turn whose credential resolved but which produced no final message", async () => {
 		// The boundary this change draws, and it is deliberate. A request that
-		// fails before it resolves a credential ends its span through
+		// ends without a final assistant result ends its span through
 		// `failChatSpan`, which has no message to read the organization from —
 		// and a failed request owns no object that could carry one. Three
 		// carriers were built and measured: the thrown error (one error object is
@@ -139,19 +157,46 @@ describe("chat span credential organization", () => {
 		// stream options (a cache warmer clones them and replays into a live
 		// turn's observer), and a per-request token (cannot tell the caller's own
 		// next request from an inherited replay). Each wrote another account's
-		// organization onto a real span, which is worse than none. So the failed
-		// span carries none, and this pins that rather than leaving it to drift.
+		// organization onto a real span, which is worse than none.
+		//
+		// The resolver here really does hand back an organization, and the real
+		// `completeSimple` path really does resolve it, so reintroducing any of
+		// those carriers reds this test. A version that merely rejected before
+		// reaching the credential layer would stay green against exactly the
+		// behaviour it is meant to forbid.
+		let resolvedOrg: string | undefined;
+		registerCustomApi(
+			CUSTOM_API,
+			() => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => stream.fail(new TypeError("fetch failed")));
+				return stream;
+			},
+			CUSTOM_API_SOURCE,
+		);
 		const telemetry = resolveTelemetry(
 			{ conversationId: "conv-org-fail", tracer: provider.getTracer("chat-span-organization-test") },
 			"session-org-fail",
 		);
 		await expect(
-			instrumentedCompleteSimple(MODEL, CTX, {} as SimpleStreamOptions, {
-				telemetry,
-				oneshotKind: "organization_failure_test",
-				completeImpl: () => Promise.reject(new TypeError("fetch failed")),
-			}),
+			instrumentedCompleteSimple(
+				FAIL_MODEL,
+				CTX,
+				{
+					apiKey: async () => {
+						resolvedOrg = "d0529c17-8bdc-42a1-9569-875928df83fe";
+						return { apiKey: "alpha-bearer", credentialId: 7, oauthIdentity: { orgId: resolvedOrg } };
+					},
+				} as SimpleStreamOptions,
+				{
+					telemetry,
+					oneshotKind: "organization_failure_test",
+				},
+			),
 		).rejects.toThrow("fetch failed");
+
+		// The precondition that makes the absence below mean something.
+		expect(resolvedOrg).toBe("d0529c17-8bdc-42a1-9569-875928df83fe");
 
 		const span = exporter.getFinishedSpans().find(s => s.attributes[GenAIAttr.OperationName] === GenAIOperation.Chat);
 		expect(span).toBeDefined();

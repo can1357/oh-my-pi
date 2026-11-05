@@ -1326,7 +1326,10 @@ export interface AssistantMessage {
 	 * the credential rather than from a response header, so it is present on a
 	 * session's first request and on providers that report no organization
 	 * header. Absent when the serving key carries no organization: an API-key
-	 * login, a `models.yml` `apiKey`, an env var, `--api-key`.
+	 * login, a `models.yml` `apiKey`, an env var, `--api-key`. Absent too when
+	 * no message was produced at all — the value rides on this object, so a
+	 * request that throws before completing one carries none even if its
+	 * credential resolved.
 	 */
 	organizationId?: string;
 	contextSnapshot?: ContextSnapshot;

@@ -165,8 +165,16 @@ export const enum OmpGenAIAttr {
 	 * the stored credential rather than a response header, so a spend or
 	 * attribution pipeline can tell one machine's several logins apart on the
 	 * session's first request and on providers that report no such header.
-	 * Absent when the serving key carries no organization (an API key, an env
-	 * var, `--api-key`).
+	 *
+	 * Absent in two cases. The serving key may carry no organization at all (an
+	 * API key, an env var, `--api-key`). And the turn may have produced no final
+	 * assistant message: this attribute rides on that message, so a turn ended
+	 * through `failChatSpan` carries none — including one whose credential
+	 * resolved successfully, and one that streamed partial content before
+	 * throwing. Resolving an organization-bearing credential is not sufficient;
+	 * a final result is. That boundary is deliberate: a failed request owns no
+	 * object only it can write, and every carrier tried wrote another request's
+	 * account onto a real span.
 	 */
 	AuthOrganizationId = "omp.gen_ai.auth.organization_id",
 	/** Caller-level reason a judgment ran (`find`, `ttsr`, `judge_batch`, …). */
