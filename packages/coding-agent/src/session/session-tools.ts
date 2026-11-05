@@ -10,12 +10,20 @@ import type { ModelRegistry } from "../config/model-registry";
 import { formatModelString } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
+import { clearPluginRootsAndCaches } from "../discovery/helpers";
 import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
 import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/extensions";
 import { type EvalPreludeDefinition, evalPreludeSummary } from "../eval/preludes";
 import { isEvalBridgeToolCallable } from "../eval/tool-bridge-policy";
 import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
-import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
+import {
+	getActiveSkills,
+	type LoadSkillsResult,
+	loadSkills,
+	type Skill,
+	type SkillWarning,
+	setActiveSkills,
+} from "../extensibility/skills";
 import { type LocalProtocolOptions } from "../internal-urls";
 import { stripXdUrlPrefix, XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { deduplicateMCPToolsByName, resolveMCPToolAlias } from "../mcp/tool-bridge";
@@ -272,6 +280,13 @@ const EVAL_PRELUDE_NOTICE_MESSAGE_TYPE = "eval-prelude-notice";
 /** Custom entry holding the digest of the base prompt the branch's primary model calls are built from. */
 const SYSTEM_PROMPT_DIGEST_CUSTOM_TYPE = "system-prompt-digest";
 
+/**
+ * Least time between two rediscoveries started by `skill://` names no loaded skill owns, so a typo
+ * read in a loop (a shell resolving one URL per spawned command) costs one pass per interval
+ * rather than one per read, while a skill installed after a miss is found once it has passed.
+ */
+const UNKNOWN_SKILL_REDISCOVERY_INTERVAL_MS = 2_000;
+
 /** Equal digests mean equal prompt blocks. */
 function systemPromptDigest(blocks: readonly string[]): string {
 	let hash = BigInt(blocks.length);
@@ -472,6 +487,8 @@ export class SessionTools {
 	#skillsReloadable: boolean;
 	/** The skill rediscovery in flight, shared by concurrent misses (see {@link shareSkillRediscovery}). */
 	#skillsRediscovery: Promise<readonly Skill[]> | undefined;
+	/** Earliest time (ms since epoch) a name no loaded skill owns may start another rediscovery. */
+	#nextUnknownSkillRediscovery = 0;
 	/**
 	 * Prompt surface committed by the last system-prompt rebuild. The
 	 * provider-visible system prompt is deliberately byte-stable across
@@ -617,6 +634,55 @@ export class SessionTools {
 			this.#skillsRediscovery = undefined;
 		});
 		return this.#skillsRediscovery;
+	}
+
+	/**
+	 * Skills rediscovered for a `skill://` name the list lacks (one created or installed since the
+	 * list was taken, or a typo): joins a pass in flight, else starts one unless another such miss
+	 * started one within {@link UNKNOWN_SKILL_REDISCOVERY_INTERVAL_MS}. Undefined when skipped.
+	 */
+	rediscoverSkillsForUnknownName(): Promise<readonly Skill[]> | undefined {
+		if (!this.#skillsRediscovery) {
+			const now = Date.now();
+			if (now < this.#nextUnknownSkillRediscovery) return undefined;
+			this.#nextUnknownSkillRediscovery = now + UNKNOWN_SKILL_REDISCOVERY_INTERVAL_MS;
+		}
+		return this.shareSkillRediscovery(() => this.#adoptNewSkills());
+	}
+
+	/**
+	 * Discovers this session's skills again and adopts them only when they hold one the list lacks;
+	 * otherwise the list, the prompt and the process snapshot stay as they were. The process snapshot
+	 * follows only while it is this session's list, so another session's stays published.
+	 */
+	#adoptNewSkills(): Promise<readonly Skill[]> {
+		return this.runToolRegistryMutation(async () => {
+			clearPluginRootsAndCaches();
+			resetCapabilities();
+			const { discovered, skillsSettings } = await this.#discoverSkills();
+			const held = new Set(this.#skills.map(skill => `${skill.name}\0${skill.filePath}`));
+			if (discovered.skills.every(skill => held.has(`${skill.name}\0${skill.filePath}`))) return this.#skills;
+			const published = getActiveSkills() === this.#skills;
+			this.#skills = discovered.skills;
+			this.#skillWarnings = discovered.warnings;
+			this.#skillsSettings = skillsSettings;
+			if (published) setActiveSkills(this.#skills);
+			await this.refreshBaseSystemPrompt();
+			this.#host.notifyCommandMetadataChanged();
+			return this.#skills;
+		});
+	}
+
+	/** A fresh discovery of this session's skills, with the skills settings it ran under. */
+	async #discoverSkills(): Promise<{ discovered: LoadSkillsResult; skillsSettings: SkillsSettings }> {
+		const skillsSettings = cfgSkills.get(this.#host.settings);
+		const discovered = await loadSkills({
+			...skillsSettings,
+			cwd: this.#host.sessionManager.getCwd(),
+			disabledExtensions: cfgDisabledExtensions.get(this.#host.settings),
+			extensionRoots: this.#host.effectiveExtensionRoots(),
+		});
+		return { discovered, skillsSettings };
 	}
 
 	/** Diagnostics produced while loading the current skills. */
@@ -2050,13 +2116,7 @@ export class SessionTools {
 		return this.runToolRegistryMutation(async () => {
 			resetCapabilities();
 			if (this.#skillsReloadable) {
-				const skillsSettings = cfgSkills.get(this.#host.settings);
-				const discovered = await loadSkills({
-					...skillsSettings,
-					cwd: this.#host.sessionManager.getCwd(),
-					disabledExtensions: cfgDisabledExtensions.get(this.#host.settings),
-					extensionRoots: this.#host.effectiveExtensionRoots(),
-				});
+				const { discovered, skillsSettings } = await this.#discoverSkills();
 				this.#skills = discovered.skills;
 				this.#skillWarnings = discovered.warnings;
 				this.#skillsSettings = skillsSettings;
