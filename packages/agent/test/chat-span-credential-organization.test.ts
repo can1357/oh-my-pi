@@ -19,7 +19,8 @@ import {
 	OmpGenAIAttr,
 	resolveTelemetry,
 } from "@oh-my-pi/pi-agent-core/telemetry";
-import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai/types";
+import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	BasicTracerProvider,
 	InMemorySpanExporter,
@@ -28,17 +29,20 @@ import {
 } from "@opentelemetry/sdk-trace-base";
 import { SpanStatusCode } from "@opentelemetry/api";
 
-const MODEL = {
+const MODEL: Model<"anthropic-messages"> = buildModel({
 	id: "claude-opus-5",
 	name: "claude-opus-5",
 	api: "anthropic-messages",
 	provider: "anthropic",
 	baseUrl: "https://api.anthropic.com",
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
 	contextWindow: 200_000,
 	maxTokens: 32_768,
-} as unknown as Model<Api>;
+});
 
-const CTX = { systemPrompt: [], messages: [] } as unknown as Context;
+const CTX: Context = { systemPrompt: [], messages: [] };
 
 function usage(): Usage {
 	return {
@@ -62,7 +66,7 @@ function reply(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
 		stopReason: "stop",
 		timestamp: 0,
 		...overrides,
-	} as AssistantMessage;
+	};
 }
 
 let exporter: InMemorySpanExporter;
