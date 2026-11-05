@@ -5,6 +5,7 @@ use std::{
 	collections::{BTreeMap, BTreeSet},
 	ffi::OsStr,
 	fs,
+	io::Read,
 	path::{Path, PathBuf},
 	process::{Command, Stdio},
 };
@@ -1972,7 +1973,15 @@ fn git_entry_points_outside(root: &Path, dir: &Path) -> bool {
 				};
 				gitdir
 			},
-			_ => link,
+			// A directory can be the repository, and a target that is not
+			// there yet is still a pointer naming where it should be.
+			Ok(pointed) if pointed.is_dir() => link,
+			Err(_) => link,
+			// A FIFO, a socket or a device is none of those. Git opens no
+			// repository through one — it walks up to the enclosing
+			// repository and calls this an ordinary folder — so neither does
+			// this walk, and the directory keeps its contents.
+			Ok(_) => return false,
 		}
 	} else {
 		let Some(gitdir) = read_gitfile(&entry) else {
@@ -2013,16 +2022,28 @@ fn git_entry_points_outside(root: &Path, dir: &Path) -> bool {
 ///
 /// The marker is matched as strictly as Git matches it, because the answer
 /// here is not symmetric. An empty `.git`, one whose marker lacks its space
-/// or follows a junk line, and one too large for Git to read, all open no
-/// repository — measured: `fatal: invalid gitfile format`. Calling such a
-/// file a pointer anyway risks emptying a directory that is not a checkout,
-/// which costs a user untracked files; declining to costs a clone some junk
-/// on disk. The cheap direction wins.
+/// or follows a junk line, and one past Git's own one-megabyte ceiling, all
+/// open no repository — measured: `fatal: invalid gitfile format` and `too
+/// large to be a .git file`. Calling such a file a pointer anyway risks
+/// emptying a directory that is not a checkout, which costs a user untracked
+/// files; declining to costs a clone some junk on disk. The cheap direction
+/// wins. The ceiling is Git's exact one for the same reason in reverse: a
+/// lower guess would carry a pointer Git happily follows out of the clone.
 fn read_gitfile(path: &Path) -> Option<PathBuf> {
-	let bytes = fs::read(path).ok()?;
-	// Git refuses a `.git` far larger than a path. Its own ceiling is higher
-	// than this one, and staying under it only ever keeps a directory.
-	if bytes.len() > 4 * 4096 {
+	// Git's own ceiling, measured against 2.43.0: 1 048 576 bytes opens, one
+	// byte more gives `too large to be a .git file`. Guessing a smaller cap
+	// would carry every pointer between the two, which is how another
+	// session's `HEAD` reaches the clone. Reading is bounded by the same
+	// number, so a sparse or endless `.git` cannot pull gigabytes in before
+	// the check sees its size.
+	const CEILING: u64 = 1 << 20;
+	let mut bytes = Vec::new();
+	fs::File::open(path)
+		.ok()?
+		.take(CEILING + 1)
+		.read_to_end(&mut bytes)
+		.ok()?;
+	if bytes.len() as u64 > CEILING {
 		return None;
 	}
 	let value = bytes.strip_prefix(b"gitdir: ".as_slice())?;
@@ -3305,10 +3326,18 @@ mod tests {
 				"{name} is not a gitfile Git accepts, so the directory stays"
 			);
 		}
-		// Too large for Git to read as a gitfile, pointer-shaped or not.
+		// Git's ceiling is exactly one megabyte: 1 048 576 bytes it reads,
+		// 1 048 577 it refuses with `too large to be a .git file`. A padded
+		// pointer below the line is one Git follows, so it must be judged,
+		// not waved through as a non-pointer.
+		assert!(case("padded-under-the-ceiling", &|dir| {
+			let mut contents = b"gitdir: ../../outside\0".to_vec();
+			contents.resize(1 << 20, b'x');
+			fs::write(dir.join(".git"), contents).unwrap();
+		}));
 		assert!(!case("oversize", &|dir| {
-			let mut contents = b"gitdir: ../../outside\n".to_vec();
-			contents.resize(4 * 4096 + 1, b'x');
+			let mut contents = b"gitdir: ../../outside\0".to_vec();
+			contents.resize((1 << 20) + 1, b'x');
 			fs::write(dir.join(".git"), contents).unwrap();
 		}));
 
@@ -3397,6 +3426,20 @@ mod tests {
 					.status()
 					.expect("mkfifo runs");
 				assert!(made.success(), "mkfifo failed");
+				fs::write(dir.join("own.txt"), "ordinary content\n").unwrap();
+			}));
+			// A symlink onto a FIFO outside the clone. Git opens no
+			// repository through it — it walks up to the enclosing one and
+			// calls this an ordinary folder — so the directory is not a
+			// nested checkout either, and keeps its contents.
+			assert!(!case("link-to-fifo-outside", &|dir| {
+				let fifo = outside.join("pipe");
+				let made = std::process::Command::new("mkfifo")
+					.arg(&fifo)
+					.status()
+					.expect("mkfifo runs");
+				assert!(made.success(), "mkfifo failed");
+				symlink(&fifo, dir.join(".git")).unwrap();
 				fs::write(dir.join("own.txt"), "ordinary content\n").unwrap();
 			}));
 		}
