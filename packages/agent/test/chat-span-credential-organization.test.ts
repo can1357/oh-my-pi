@@ -100,6 +100,20 @@ describe("chat span credential organization", () => {
 		expect(span?.attributes[OmpGenAIAttr.AuthOrganizationId]).toBe("d0529c17-8bdc-42a1-9569-875928df83fe");
 	});
 
+	it("attributes a turn that ended in a terminal error after the provider billed it", async () => {
+		const span = await chatSpanFor(
+			reply({
+				stopReason: "error",
+				errorMessage: "provider refused the request",
+				organizationId: "d0529c17-8bdc-42a1-9569-875928df83fe",
+			}),
+		);
+
+		expect(span).toBeDefined();
+		expect(span?.attributes[OmpGenAIAttr.AuthOrganizationId]).toBe("d0529c17-8bdc-42a1-9569-875928df83fe");
+		expect(span?.attributes[GenAIAttr.UsageInputTokens]).toBe(1);
+	});
+
 	it("leaves the attribute off a turn served by a key with no stored account", async () => {
 		const span = await chatSpanFor(reply());
 

@@ -1056,6 +1056,34 @@ describe("streamSimple credential organization", () => {
 		expect(result.credentialId).toBe(2);
 	});
 
+	it("attributes a terminal error, which is billed spend the result path never sees", async () => {
+		registerCustomApi(
+			API,
+			() => {
+				const stream = new AssistantMessageEventStream();
+				// A fresh terminal message, as the thinking-loop guard builds: it carries
+				// the attempt's usage and ends the turn, so nothing downstream re-stamps it.
+				const failed = assistantError("provider refused the request");
+				failed.usage = usage();
+				queueMicrotask(() => stream.push({ type: "error", error: failed }));
+				return stream;
+			},
+			SOURCE_ID,
+		);
+
+		const stream = streamSimple(model(), context, {
+			apiKey: async () => ({ apiKey: KEY_ALPHA, credentialId: 4, oauthIdentity: { orgId: "org-alpha" } }),
+		});
+		const errors: AssistantMessage[] = [];
+		for await (const event of stream) {
+			if (event.type === "error") errors.push(event.error);
+		}
+
+		expect(errors).toHaveLength(1);
+		expect(errors[0]?.organizationId).toBe("org-alpha");
+		expect(errors[0]?.credentialId).toBe(4);
+	});
+
 	it("leaves the organization unset for a key that carries no stored account", async () => {
 		registerCustomApi(
 			API,

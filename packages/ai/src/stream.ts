@@ -1245,9 +1245,13 @@ function streamSimpleRequest<TApi extends Api>(
 					// survives a provider that sends no organization header and is already
 					// known on the first request. Rotation re-enters with the new attempt's
 					// identity, so the value always names the account that actually served.
+					// Terminal errors carry it too: a turn that failed after the provider
+					// billed input tokens is still spend, and its own message is what
+					// reaches the chat span.
 					if (organizationId !== undefined) {
 						if ("partial" in event) event.partial.organizationId = organizationId;
 						else if (event.type === "done") event.message.organizationId = organizationId;
+						else event.error.organizationId = organizationId;
 					}
 					if (!emittedReplayUnsafeEvent && event.type === "start") {
 						bufferedEvents.push(event);
