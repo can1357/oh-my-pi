@@ -714,5 +714,25 @@ describe("settings registry", () => {
 			source.mirrorState(),
 		);
 		expect(userApprovalPolicy(readUserApprovalPolicies(mirror), "bash")).toMatchObject(expected);
+
+		// A child mirror reads its parent's rejection live, so repairing the file reaches it too; a
+		// child that froze the parent's record would keep asking after the file is fixed.
+		const childSource = source.overlay({});
+		const child = Settings.mirror(
+			{
+				write: () => childSource.mirrorState(),
+				refresh: () => Promise.resolve(childSource.mirrorState()),
+				cloneForCwd: cwd => Promise.resolve(childSource.cloneForCwd(cwd)),
+			},
+			childSource.mirrorState(),
+			mirror,
+		);
+		expect(userApprovalPolicy(readUserApprovalPolicies(child), "bash")).toMatchObject(expected);
+
+		fs.writeFileSync(overlay, YAML.stringify({ tools: { approval: { bash: "allow" } } }));
+		await source.reloadFromDisk();
+		mirror.applyMirrorState(source.mirrorState());
+		expect(userApprovalPolicy(readUserApprovalPolicies(mirror), "bash")).toEqual({ policy: "allow", key: "bash" });
+		expect(userApprovalPolicy(readUserApprovalPolicies(child), "bash")).toEqual({ policy: "allow", key: "bash" });
 	});
 });

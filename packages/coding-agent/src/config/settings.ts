@@ -1069,7 +1069,7 @@ export class Settings {
 			derived: this.#derived,
 			projectShellPathSource: this.#projectShellPathSource,
 			overlayShellPathSource: this.#overlayShellPathSource,
-			ignored: this.ignoredValues().map(({ setting, source, valueType, valueLength }) => ({
+			ignored: this.#ownIgnoredValues().map(({ setting, source, valueType, valueLength }) => ({
 				id: setting.id,
 				source,
 				valueType,
@@ -1182,10 +1182,23 @@ export class Settings {
 	 */
 	ignoredValues(): IgnoredValue[] {
 		const ignored = new Map<string, IgnoredValue>();
+		for (const value of this.#parent?.ignoredValues() ?? []) {
+			ignored.set(`${value.setting.id}\0${value.source ?? ""}`, value);
+		}
+		for (const value of this.#ownIgnoredValues()) ignored.set(`${value.setting.id}\0${value.source ?? ""}`, value);
+		return [...ignored.values()];
+	}
+
+	/**
+	 * {@link ignoredValues} without what a parent ignores, which a child reads live from that parent.
+	 * This is what a {@link mirrorState} carries: a child mirror that froze its parent's records would
+	 * keep asking after the parent's file is repaired.
+	 */
+	#ownIgnoredValues(): IgnoredValue[] {
+		const ignored = new Map<string, IgnoredValue>();
 		const add = ({ setting, source, valueType, valueLength }: IgnoredValue): void => {
 			ignored.set(`${setting.id}\0${source ?? ""}`, { setting, source, valueType, valueLength });
 		};
-		for (const value of this.#parent?.ignoredValues() ?? []) add(value);
 		for (const value of this.#mirroredIgnored) add(value);
 		for (const value of this.warnState.invalid.values()) add(value);
 		for (const layer of this.warnState.dropped.values()) for (const value of layer.values()) add(value);
