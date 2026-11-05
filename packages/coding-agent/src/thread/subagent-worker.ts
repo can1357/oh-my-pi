@@ -54,12 +54,12 @@ const DEFAULT_IDLE_MS = 60_000;
  * handful of them share the main thread fine; past this, the main thread (which also
  * drives the TUI) gets its first helper, and one more per doubling.
  */
-export const SUBAGENT_WORKER_THRESHOLD = 4;
+export const SUBAGENT_WORKER_THRESHOLD = 9;
 
 /**
  * Worker threads the pool may use with `inFlight` subagent runs main placed (counting the
- * one being placed): 0 below `threshold`, then one per doubling — [4,8) → 1, [8,16) → 2,
- * [16,32) → 3, … — capped at `maxWorkers`.
+ * one being placed): 0 below `threshold`, then one per doubling — [9,18) → 1, [18,36) → 2,
+ * [36,72) → 3, … — capped at `maxWorkers`.
  */
 export function allowedSubagentWorkers(
 	inFlight: number,

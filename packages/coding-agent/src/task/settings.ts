@@ -452,7 +452,7 @@ export const cfgTaskWorkerThreads = register({
 		group: "Subagents",
 		label: "Subagent Worker Threads",
 		description:
-			"Maximum worker threads for subagents. Up to 3 concurrent subagents run on the main thread; at 4 one worker joins, and one more each time the count doubles (8, 16, 32). Workers stop a minute after no subagent is live in them; 0 keeps every subagent on the main thread",
+			"Maximum worker threads for subagents. Up to 8 concurrent subagents run on the main thread; at 9 one worker joins, and one more each time the count doubles (18, 36, 72). Workers stop a minute after no subagent is live in them; 0 keeps every subagent on the main thread",
 		options: [
 			{ value: "0", label: "Main thread only" },
 			{ value: "1", label: "Up to 1 worker" },
