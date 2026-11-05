@@ -187,6 +187,52 @@ async fn noclobber_judges_a_descriptor_alias_by_the_object_behind_it() {
 			status: 0,
 			files:  &[("f", Some("ORIGINAL"))],
 		},
+		// A here-string and a here-document are not files on any filesystem,
+		// so there is nothing for `noclobber` to protect: Bash writes to the
+		// alias of one. The engine drives such a document as a seekable
+		// regular object, which is how it must be read, not what it is.
+		Row {
+			script: "exec 3<<<X\nset -o noclobber; : &>/dev/fd/3; echo s=$?; read -r v <&3; echo \
+			         d=$v",
+			fifos:  &[],
+			output: "s=0\nd=X\n",
+			status: 0,
+			files:  &[],
+		},
+		Row {
+			script: "exec 3<<EOF\nX\nEOF\nset -o noclobber; : >/dev/fd/3; echo s=$?; read -r v <&3; \
+			         echo d=$v",
+			fifos:  &[],
+			output: "s=0\nd=X\n",
+			status: 0,
+			files:  &[],
+		},
+	])
+	.await;
+}
+
+/// `/dev/fd/N` names a descriptor only in the spelling the host's own
+/// `/dev/fd` resolves. `/dev/fd/03` is no such file on Linux, so Bash
+/// 5.2.21 and 5.3.0 both report that, with and without `noclobber`, and
+/// the file behind descriptor 3 is untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_descriptor_alias_is_only_its_canonical_spelling() {
+	check(&[
+		Row {
+			script: "printf ORIGINAL >f; exec 3<>f; set -o noclobber; printf BAD >/dev/fd/03; echo \
+			         s=$?",
+			fifos:  &[],
+			output: "/dev/fd/03: No such file or directory\ns=1\n",
+			status: 0,
+			files:  &[("f", Some("ORIGINAL"))],
+		},
+		Row {
+			script: "printf ORIGINAL >f; exec 3<>f; printf BAD >/dev/fd/03; echo s=$?",
+			fifos:  &[],
+			output: "/dev/fd/03: No such file or directory\ns=1\n",
+			status: 0,
+			files:  &[("f", Some("ORIGINAL"))],
+		},
 	])
 	.await;
 }

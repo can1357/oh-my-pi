@@ -1008,3 +1008,64 @@ async fn noclobber_settles_when_the_reopen_also_reports_the_file_exists() {
 		);
 	}
 }
+
+/// A descriptor the shell already holds is judged by what the object IS,
+/// exactly as an opened path is. A provider's regular file that cannot be
+/// seeked is driven as a device, so the driving category would let
+/// `>/dev/fd/3` overwrite it.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn noclobber_judges_a_held_provider_descriptor_by_what_it_is() {
+	for seekable in [true, false] {
+		for op in [">", "&>", ">&"] {
+			let directory = tempfile::tempdir().expect("isolated provider filesystem");
+			fs::write(directory.path().join("f"), b"ORIGINAL").expect("regular provider file");
+			let script = format!("exec 3<>virtual://f; set -C; printf BAD {op}/dev/fd/3; echo s=$?");
+			let run = tokio::time::timeout(
+				Duration::from_secs(20),
+				run_script(provider(directory.path(), seekable), None, &script),
+			)
+			.await
+			.expect("the run finishes");
+			assert_eq!(run.stdout, "s=1\n", "seekable={seekable} `{op}`: {}", run.stderr);
+			assert!(
+				run.stderr
+					.contains("/dev/fd/3: cannot overwrite existing file"),
+				"seekable={seekable} `{op}`: {}",
+				run.stderr
+			);
+			assert_eq!(
+				fs::read_to_string(directory.path().join("f")).expect("kept"),
+				"ORIGINAL",
+				"seekable={seekable} `{op}`"
+			);
+		}
+	}
+}
+
+/// The reopen of a path that is NOT a regular file may itself report that
+/// the file exists. The path's own kind then leaves the open's error in
+/// place, and that error must still end the redirection: taken for the
+/// exclusive create's own answer it would start the recovery again, and
+/// the open would repeat until the run's limit.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn noclobber_settles_when_a_nonregular_reopen_reports_the_file_exists() {
+	for op in [">", "&>", ">&"] {
+		let directory = tempfile::tempdir().expect("isolated provider filesystem");
+		fs::create_dir(directory.path().join("existing")).expect("a directory, not a regular file");
+		let script = format!("set -C; echo BAD {op}virtual://existing; echo s=$?");
+		let run = tokio::time::timeout(
+			Duration::from_secs(20),
+			run_script(provider_refusing_every_open(directory.path()), None, &script),
+		)
+		.await
+		.expect("the redirection settles instead of opening without end");
+		assert_eq!(run.stdout, "s=1\n", "`{op}`: {}", run.stderr);
+		assert!(run.stderr.contains("virtual://existing: "), "`{op}`: {}", run.stderr);
+		assert!(
+			directory.path().join("existing").is_dir(),
+			"`{op}`: the directory is still a directory"
+		);
+	}
+}
