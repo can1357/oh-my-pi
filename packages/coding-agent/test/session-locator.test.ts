@@ -1075,6 +1075,44 @@ describe("session index: lookups by id", () => {
 			});
 		}
 
+		it.skipIf(unlessRoot)("judges the snapshot on the descriptor it opened, never on its path", async () => {
+			// A path checked by name and then reopened by name is two different
+			// objects if anything renames it in between — and the second can be a
+			// fifo that parks this handler for ever. The guarantee is structural:
+			// one descriptor, opened without blocking, checked and read. So this
+			// asserts the absence of a second path-based open rather than trying
+			// to win a race, which no test can do reliably.
+			const sessions = getSessionsDir();
+			const bucket = path.join(sessions, "--by-descriptor--");
+			fs.mkdirSync(bucket, { recursive: true });
+			const id = "019a001a-0000-7000-8000-000000000001";
+			const file = path.join(bucket, "Worker.jsonl");
+			writeTranscript(file, id, cwdA);
+			const snapshot = path.join(sessions, SESSION_LOCATOR_BASE_FILE);
+			fs.writeFileSync(snapshot, "");
+			const log = path.join(sessions, SESSION_LOCATOR_FILE);
+			fs.writeFileSync(log, "");
+			fs.chmodSync(log, 0o400);
+			const warn = spyOn(logger, "warn").mockImplementation(() => {});
+			const readFile = spyOn(fs, "readFileSync");
+			const open = spyOn(fs, "openSync");
+			try {
+				expect(recordSessionLocation(id, file)).toBe(false);
+				expect(warn).toHaveBeenCalledTimes(1);
+				// Read through a descriptor, not through the path.
+				expect(readFile.mock.calls.filter(call => call[0] === snapshot)).toEqual([]);
+				const opens = open.mock.calls.filter(call => call[0] === snapshot);
+				expect(opens.length).toBe(1);
+				expect(Number(opens[0]?.[1]) & fs.constants.O_NONBLOCK).toBe(fs.constants.O_NONBLOCK);
+			} finally {
+				open.mockRestore();
+				readFile.mockRestore();
+				warn.mockRestore();
+				fs.chmodSync(log, 0o600);
+				fs.rmSync(snapshot, { force: true });
+			}
+		});
+
 		it.skipIf(unlessRoot)(
 			"records a session moved while its index log could not be written, at its next write",
 			async () => {

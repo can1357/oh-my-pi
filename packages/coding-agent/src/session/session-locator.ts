@@ -155,6 +155,29 @@ function appendIndexLine(indexFile: string, line: string, createRoot: boolean): 
 }
 
 /**
+ * Read `file` as a regular file, through a single descriptor, without ever
+ * blocking: opened `O_NONBLOCK` (which does nothing to a regular file, and
+ * returns rather than waiting for a writer on a fifo), checked with `fstat`
+ * on the descriptor that was opened, and read from that same descriptor.
+ *
+ * Checking a path and then reopening it by name inspects two different
+ * objects if anything renames it in between, which is why the check lives on
+ * the descriptor. Throws `ENOENT` when there is nothing there, the file
+ * system's own error when it cannot be read, and `EISDIR`-like errors for a
+ * path that is not a regular file; a caller on a failure path treats
+ * every one of those as "cannot demonstrate recovery".
+ */
+function readableRegularFile(file: string): void {
+	const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+	try {
+		if (!fs.fstatSync(fd).isFile()) throw new Error(`${file} is not a regular file`);
+		fs.readSync(fd, Buffer.alloc(1), 0, 1, 0);
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
+/**
  * Whether a reindex of `root` would demonstrably find session `id` at
  * `relative` again.
  *
@@ -209,21 +232,14 @@ function reindexDemonstrablyRecovers(root: string, relative: string, id: string)
 		if (!fs.statSync(file).isFile()) return false;
 		// Derive the id, rather than checking we are allowed to try.
 		if (generatedNameId(file) !== id && sessionHeaderIdSync(file) !== id) return false;
-		const snapshot = path.join(root, SESSION_LOCATOR_BASE_FILE);
-		let published: fs.Stats | undefined;
+		// One descriptor, opened without blocking, checked and read: a path
+		// checked by `stat` and then reopened by name is two different objects
+		// if anything renames it in between, and the rename need not be
+		// adversarial to park this handler for ever.
 		try {
-			published = fs.statSync(snapshot);
+			readableRegularFile(path.join(root, SESSION_LOCATOR_BASE_FILE));
 		} catch (error) {
 			if (!isEnoent(error)) return false;
-		}
-		if (published !== undefined) {
-			// Anything other than a regular file is the loud answer without
-			// opening it: a directory would fail the publish's read, and opening
-			// a fifo or a device here would block this error handler forever.
-			if (!published.isFile()) return false;
-			// Then read it, as the publish step does. Permission to open a file
-			// is not evidence that its bytes come out.
-			fs.readFileSync(snapshot);
 		}
 		return true;
 	} catch {
