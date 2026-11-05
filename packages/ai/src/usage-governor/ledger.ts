@@ -6,7 +6,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { Database } from "bun:sqlite";
+import { Database } from "bun:sqlite";
 import { isPidAlive, openSqliteDatabaseSync } from "@oh-my-pi/pi-utils";
 import {
 	admissionVerdict,
@@ -193,6 +193,22 @@ export class UsageLedger {
 	static open(dbPath: string): UsageLedger {
 		fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 		return openSqliteDatabaseSync(dbPath, db => new UsageLedger(initialize(db)), { recoverCorruption: true });
+	}
+
+	/**
+	 * Open an existing ledger without any write side effect: no directory creation, no corruption
+	 * recovery, no schema initialization. Used by status and ranking reads. Throws when the file is
+	 * absent or unreadable.
+	 */
+	static openReadOnly(dbPath: string): UsageLedger {
+		const db = new Database(dbPath, { readonly: true });
+		try {
+			db.run("PRAGMA busy_timeout = 1000");
+			return new UsageLedger(db);
+		} catch (error) {
+			db.close();
+			throw error;
+		}
 	}
 
 	/** Release the file handle. The ledger is disposable; a later open recreates it if needed. */

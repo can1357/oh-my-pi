@@ -320,6 +320,10 @@ async function admittedSend<T>(
 	if (currentUsageAdmission()?.active !== true) return run();
 	const send = await admitSend(call, signal);
 	if (send === undefined) return run();
+	if (signal?.aborted) {
+		send.settle("not-sent");
+		throw signal.reason;
+	}
 	try {
 		return await run();
 	} finally {

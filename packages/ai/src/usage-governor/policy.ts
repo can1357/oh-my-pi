@@ -60,7 +60,7 @@ export interface QuotaIdentity {
 /** Quota key: duplicate rows and shared copies of one upstream quota are charged once. */
 export function quotaKey(identity: QuotaIdentity): string {
 	if (identity.sharedGroup !== undefined) {
-		return `${identity.provider} | group:${identity.sharedGroup} | win:${identity.windowId}`;
+		return `${identity.provider} | acct:${identity.accountIdentity} | group:${identity.sharedGroup} | win:${identity.windowId}`;
 	}
 	return `${identity.provider} | acct:${identity.accountIdentity} | limit:${identity.limitId}`;
 }
@@ -120,7 +120,18 @@ export function applicableWindows(input: {
 			generation: governorGeneration(resetsAt),
 		});
 	}
-	return windows;
+	return dedupeByQuota(windows);
+}
+
+/** One window per quota key; the most restrictive (exhausted, then highest used fraction) wins. */
+function dedupeByQuota(windows: ApplicableWindow[]): ApplicableWindow[] {
+	const byKey = new Map<string, ApplicableWindow>();
+	const score = (window: ApplicableWindow): number => (window.exhausted ? 2 : 0) + (window.usedFraction ?? 0);
+	for (const window of windows) {
+		const kept = byKey.get(window.quotaKey);
+		if (kept === undefined || score(window) > score(kept)) byKey.set(window.quotaKey, window);
+	}
+	return [...byKey.values()];
 }
 
 function windowDuration(
@@ -189,9 +200,12 @@ export interface WindowDecision {
 export function evaluateWindow(input: WindowPolicyInput): WindowDecision {
 	const { nowMs, lead, reserve, resetsAt, fetchedAt } = input;
 	if (nowMs - fetchedAt > GOVERNOR_STALE_MS) return { state: "stale", admissibleAtMs: nowMs };
-	if (input.usedFraction === undefined) return { state: "unknown", admissibleAtMs: nowMs };
 	// A reset that has already passed has no admissible time to pace toward; the next snapshot names the next window.
 	if (resetsAt <= nowMs) return { state: "unknown", admissibleAtMs: nowMs };
+	if (input.exhausted && input.usedFraction === undefined) {
+		return { state: "closed", admissibleAtMs: resetsAt, reason: "exhausted" };
+	}
+	if (input.usedFraction === undefined) return { state: "unknown", admissibleAtMs: nowMs };
 	const headroom = 1 - reserve;
 	const need = input.usedFraction + (input.pending + 1) * input.costPerRequest;
 	if (input.exhausted || input.usedFraction >= 1) {
