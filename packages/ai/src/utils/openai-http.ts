@@ -63,13 +63,15 @@ function isConcurrencyAdmissionRejection(response: Response, bodyText: string): 
 }
 
 /**
- * A tier-capacity refusal (`flex_unavailable`) states that the serving pool the
- * request named is empty, not that the request failed — resending identical
- * bytes only asks the same absent pool again, and spends the whole transport
- * budget doing it. Surface it at once so the provider loop can re-aim the
- * request at the standard tier instead.
+ * Whether a non-2xx body is a tier-capacity refusal (`flex_unavailable`): the
+ * serving pool the request named is empty, not a statement that the request
+ * failed. Resending identical bytes only asks the same absent pool again and
+ * spends the whole transport budget doing it, so a caller that can re-aim the
+ * request at another tier composes this into its own `shouldRetryResponse` to
+ * surface the refusal at once. It is not applied here, because a caller with
+ * no reroute still has the transport retry as its only recovery.
  */
-function isServiceTierCapacityRejection(bodyText: string): boolean {
+export function isServiceTierCapacityRejection(bodyText: string): boolean {
 	if (!bodyText) return false;
 	let bodyJson: unknown;
 	try {
@@ -131,12 +133,10 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 			// under the removed SDK client. A proxy concurrency-admission 429
 			// (`rate_limit_type: max_parallel_requests`) surfaces immediately instead of
 			// being slept-and-retried here; session recovery owns its backoff/fallback
-			// (issue #8854). A service-tier capacity refusal surfaces immediately too,
-			// for the reason above its predicate.
+			// (issue #8854).
 			shouldRetryResponse: async (response, bodyText) =>
 				getShouldRetryFromHeaders(response.headers) !== false &&
 				!isConcurrencyAdmissionRejection(response, bodyText) &&
-				!isServiceTierCapacityRejection(bodyText) &&
 				(init.shouldRetryResponse === undefined || (await init.shouldRetryResponse(response, bodyText))),
 			// Bun's native fetch enforces a hard ~300s pre-response timeout (issue #2422).
 			// Cold large-context streams legitimately exceed it; the caller's

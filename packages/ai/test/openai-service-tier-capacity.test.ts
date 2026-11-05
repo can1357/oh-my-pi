@@ -1,12 +1,31 @@
 import { describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
+import { streamFactoryDroid } from "@oh-my-pi/pi-ai/providers/factory-droid";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
-import type { AssistantMessage, AssistantMessageEvent, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
+import type { AssistantMessage, AssistantMessageEvent, Context, FetchImpl, Model, Tool } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { serviceTierPeerFor } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { factoryModel, WORKOS_TOKEN } from "./helpers/factory-droid";
 
 const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 1 }] };
+
+const echoTool: Tool = { name: "echo", description: "Echo input", parameters: type({ text: "string" }) };
+
+/** The strict-tools rejection both OpenAI-family loops repair by resending without `strict`. */
+function strictToolsRejection(): Response {
+	return new Response(
+		JSON.stringify({
+			error: {
+				message: "Invalid schema for function 'echo': strict mode is unsupported",
+				type: "invalid_request_error",
+				code: "invalid_function_parameters",
+			},
+		}),
+		{ status: 400, headers: { "content-type": "application/json" } },
+	);
+}
 
 /**
  * OpenAI's capacity refusal for a serving tier: a 500 whose body carries
@@ -172,28 +191,30 @@ describe("service-tier capacity refusals", () => {
 		expect(sent.map(entry => entry.model)).toEqual(["gpt-6.1-sol-flex", "gpt-6.1-sol"]);
 	});
 
-	it("responses: resending the refused id unchanged would not recover, so the peer is tried once and the failure surfaces", async () => {
-		// Every id is refused: this is what a plain same-id retry looks like, and
-		// it is why the id change is the fix rather than another attempt.
+	it("responses: the refused id is never resent; the peer is reached once and the failure surfaces", async () => {
+		// Every id is refused. The flex route is not resent even once — that is
+		// what makes the id change the fix rather than another attempt — and the
+		// peer, having no reroute of its own, keeps its ordinary transport retries
+		// before the failure reaches the caller.
 		const { fetch, sent } = recordingFetch(() => tierUnavailable());
 		const failure = await drainToFailure(
 			streamOpenAIResponses(responsesModel("gpt-6.1-sol-flex"), context, { apiKey: "k", fetch }),
 		);
 		expect(failure).toMatch(/service tier is currently unavailable/i);
-		// Exactly two attempts: the flex route, then its peer. No busy loop.
-		expect(sent.map(entry => entry.model)).toEqual(["gpt-6.1-sol-flex", "gpt-6.1-sol"]);
-	});
+		expect(sent.filter(entry => entry.model === "gpt-6.1-sol-flex")).toHaveLength(1);
+		expect(sent.map(entry => entry.model).slice(1)).not.toContain("gpt-6.1-sol-flex");
+	}, 60_000);
 
-	it("responses: a request that named no tier is not re-aimed", async () => {
-		// An ordinary 500 carrying the code on a plain id has nothing to change;
-		// re-sending identical bytes would only ask the same absent pool again.
+	it("responses: a request that named no tier is never re-aimed", async () => {
+		// An ordinary 500 carrying the code on a plain id has nothing to change, so
+		// no peer is ever invented; the request keeps its own identity throughout.
 		const { fetch, sent } = recordingFetch(() => tierUnavailable());
 		const failure = await drainToFailure(
 			streamOpenAIResponses(responsesModel("gpt-6.1-sol"), context, { apiKey: "k", fetch }),
 		);
 		expect(failure).toMatch(/service tier is currently unavailable/i);
-		expect(sent).toHaveLength(1);
-	});
+		expect(new Set(sent.map(entry => entry.model))).toEqual(new Set(["gpt-6.1-sol"]));
+	}, 60_000);
 
 	it("responses: drops service_tier when the tier rode in the field rather than the id", async () => {
 		const { fetch, sent } = recordingFetch(entry => (entry.serviceTier ? tierUnavailable() : responsesOk()));
@@ -220,5 +241,98 @@ describe("service-tier capacity refusals", () => {
 		);
 		expect(message.stopReason).toBe("stop");
 		expect(sent.map(entry => entry.model)).toEqual(["gpt-6.1-sol-flex", "gpt-6.1-sol"]);
+	});
+
+	it("responses: a recovered turn is not accounted at the tier the host refused", async () => {
+		// The response carries no `service_tier` echo, so accounting falls back to
+		// what the request asked for. After the retry dropped the field, that must
+		// be standard — billing a standard turn at the flex rate halves the cost.
+		const { fetch } = recordingFetch(entry => (entry.serviceTier ? tierUnavailable() : responsesOk()));
+		const message = await collect(
+			streamOpenAIResponses(responsesModel("gpt-6.1-sol"), context, {
+				apiKey: "k",
+				fetch,
+				serviceTier: "flex",
+			}),
+		);
+		expect(message.stopReason).toBe("stop");
+		expect(message.serviceTier).not.toBe("flex");
+	});
+
+	it("responses: the standard peer survives a later strict-tools repair", async () => {
+		// The strict-tools fallback rebuilds the request from the original model.
+		// Without carrying the tier selection across that rebuild it resurrects
+		// the refused flex id, and the turn fails on a route that would serve it.
+		const { fetch, sent } = recordingFetch(entry => {
+			if (entry.model.endsWith("-flex")) return tierUnavailable();
+			if (sent.length === 2) return strictToolsRejection();
+			return responsesOk();
+		});
+		const message = await collect(
+			streamOpenAIResponses(
+				responsesModel("gpt-6.1-sol-flex"),
+				{ ...context, tools: [echoTool] },
+				{
+					apiKey: "k",
+					fetch,
+				},
+			),
+		);
+		expect(message.stopReason).toBe("stop");
+		expect(sent.map(entry => entry.model)).toEqual(["gpt-6.1-sol-flex", "gpt-6.1-sol", "gpt-6.1-sol"]);
+	});
+
+	it("completions: a strict-tools rejection of the standard peer is still repaired", async () => {
+		// The capacity retry must re-enter the repair loop, not run beside it:
+		// a rejection of the resent request has to reach the strict-tools branch.
+		const { fetch, sent } = recordingFetch(entry => {
+			if (entry.model.endsWith("-flex")) return tierUnavailable();
+			if (sent.length === 2) return strictToolsRejection();
+			return completionsOk();
+		});
+		const message = await collect(
+			streamOpenAICompletions(
+				completionsModel("gpt-6.1-sol-flex"),
+				{ ...context, tools: [echoTool] },
+				{
+					apiKey: "k",
+					fetch,
+				},
+			),
+		);
+		expect(message.stopReason).toBe("stop");
+		expect(sent.map(entry => entry.model)).toEqual(["gpt-6.1-sol-flex", "gpt-6.1-sol", "gpt-6.1-sol"]);
+	});
+
+	it("responses: a request with no reroute keeps its transport retry", async () => {
+		// Capacity can return between attempts. Declining the transport retry is
+		// only sound where a reroute replaces it; a plain id with no tier field
+		// has none, so resending stays its only recovery.
+		let refusals = 0;
+		const { fetch, sent } = recordingFetch(() => (refusals++ === 0 ? tierUnavailable() : responsesOk()));
+		const message = await collect(
+			streamOpenAIResponses(responsesModel("gpt-6.1-sol"), context, { apiKey: "k", fetch }),
+		);
+		expect(message.stopReason).toBe("stop");
+		expect(sent.map(entry => entry.model)).toEqual(["gpt-6.1-sol", "gpt-6.1-sol"]);
+	});
+
+	it("factory-droid: its OpenAI-wire tier routes recover on the standard peer too", async () => {
+		// Factory delegates `gpt-*-ultrafast` to the Responses streamer, so the
+		// recovery reaches a real public adapter with a catalog-declared tier
+		// route — not only the hand-built models above.
+		const sent: { model: string; serviceTier?: string }[] = [];
+		const fetch: FetchImpl = async (_url, init) => {
+			const body = JSON.parse(String(init?.body ?? "{}")) as { model?: string; service_tier?: string };
+			sent.push({ model: String(body.model), ...(body.service_tier ? { serviceTier: body.service_tier } : {}) });
+			return body.model?.endsWith("-ultrafast") ? tierUnavailable("ultrafast_unavailable") : responsesOk();
+		};
+		const message = await streamFactoryDroid(factoryModel("gpt-6.1-sol-ultrafast"), context, {
+			apiKey: WORKOS_TOKEN,
+			fetch,
+		}).result();
+		expect(message.stopReason).toBe("stop");
+		expect(sent.map(entry => entry.model)).toEqual(["gpt-6.1-sol-ultrafast", "gpt-6.1-sol"]);
+		expect(sent[1].serviceTier).toBeUndefined();
 	});
 });

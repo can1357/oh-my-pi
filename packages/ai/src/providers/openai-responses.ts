@@ -39,7 +39,7 @@ import {
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
-import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
+import { isServiceTierCapacityRejection, OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { getProxyForUrl } from "../utils/proxy";
 import { toolNamesByWire } from "../utils/tool-names";
@@ -95,6 +95,7 @@ import {
 	applyOpenAIGatewayRouting,
 	applyResponsesCompatPolicy,
 	applyServiceTierCapacityRetry,
+	canRerouteServiceTierCapacity,
 	applyVercelResponsesCacheControls,
 	applyWireModelIdTransform,
 	buildResponsesDeltaInput,
@@ -124,6 +125,7 @@ import {
 	resolveOpenAIResponsesOutputClamp,
 	resolveReasoningSummaryOption,
 	resolveServiceTierCapacityRetry,
+	type ServiceTierCapacityRetry,
 	type ResponsesToolNaming,
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
@@ -1019,8 +1021,13 @@ const streamOpenAIResponsesOnce = (
 							copilotCacheSnapshot,
 						),
 						shouldRetryResponse: (response, bodyText) =>
-							!AIError.isRequestBodyReadTimeout(response.status, bodyText) ||
-							lastSubmittedRequestWasFullReplay !== true,
+							(!AIError.isRequestBodyReadTimeout(response.status, bodyText) ||
+								lastSubmittedRequestWasFullReplay !== true) &&
+							// Resending identical bytes cannot find capacity the host just
+							// said it has none of — but only decline the transport retry
+							// when this request has somewhere else to go, so a deployment
+							// with no standard peer keeps today's recovery.
+							!(canRerouteServiceTierCapacity(requestParams) && isServiceTierCapacityRejection(bodyText)),
 						// Transient 408/429/5xx get Retry-After-aware transport
 						// retries; the first-event watchdog aborts `requestSignal`,
 						// so retries cannot extend the caller's deadline.
@@ -1064,7 +1071,15 @@ const streamOpenAIResponsesOnce = (
 				});
 			};
 			let strictRetryAvailable = true;
-			let serviceTierRetryAvailable = true;
+			// Set once the host refuses the serving tier for want of capacity. Every
+			// later rebuild re-applies it, so a strict-tools or stale-chain repair
+			// cannot resurrect the tier the host just said it has no capacity for.
+			let serviceTierCapacityRetry: ServiceTierCapacityRetry | undefined;
+			// The tier the request was actually served on: a recovery that dropped
+			// `service_tier` must not keep accounting the turn at the refused tier's
+			// rate when the response carries no tier echo of its own.
+			const effectiveRequestServiceTier = (): ServiceTier | undefined =>
+				serviceTierCapacityRetry?.dropServiceTier ? undefined : options?.serviceTier;
 			let activeStrictToolsApplied = builtParams.strictToolsApplied;
 			let forceDisableStrictTools = false;
 			const openResponsesStreamWithFallbacks = async (): Promise<AsyncIterable<ResponseStreamEvent>> => {
@@ -1121,10 +1136,10 @@ const streamOpenAIResponsesOnce = (
 							// A tier the host has no capacity for: re-aim the same request
 							// at standard serving. Once only — a second refusal means the
 							// peer is genuinely unavailable too, and must surface.
-							if (serviceTierRetryAvailable && !requestSignal.aborted) {
+							if (!serviceTierCapacityRetry && !requestSignal.aborted) {
 								const tierRetry = resolveServiceTierCapacityRetry(error, chained.params);
 								if (tierRetry) {
-									serviceTierRetryAvailable = false;
+									serviceTierCapacityRetry = tierRetry;
 									applyServiceTierCapacityRetry(chained.params, tierRetry);
 									applyServiceTierCapacityRetry(activeParams, tierRetry);
 									activeRawRequestDump.body = chained.params;
@@ -1154,8 +1169,12 @@ const streamOpenAIResponsesOnce = (
 								disableStrictToolsForScope(providerSessionState, strictToolsScope);
 								const fallback = await prepareRequest(true);
 								chained = fallback.chained;
-								activeRawRequestDump.body = chained.params;
 								activeParams = fallback.builtParams.params;
+								if (serviceTierCapacityRetry) {
+									applyServiceTierCapacityRetry(chained.params, serviceTierCapacityRetry);
+									applyServiceTierCapacityRetry(activeParams, serviceTierCapacityRetry);
+								}
+								activeRawRequestDump.body = chained.params;
 								activeTrailingScaffoldingItems = fallback.builtParams.trailingScaffoldingItems;
 								continue;
 							}
@@ -1199,6 +1218,10 @@ const streamOpenAIResponsesOnce = (
 							// breaker only trips when each retry stores and the next turn re-chains.
 							currentParams.store = !zdrRejection;
 							const retryParams = await applyPayloadReplacement(currentParams);
+							if (serviceTierCapacityRetry) {
+								applyServiceTierCapacityRetry(retryParams, serviceTierCapacityRetry);
+								applyServiceTierCapacityRetry(currentParams, serviceTierCapacityRetry);
+							}
 							chained = { params: retryParams };
 							activeRawRequestDump.body = retryParams;
 							activeParams = currentParams;
@@ -1257,7 +1280,7 @@ const streamOpenAIResponsesOnce = (
 						onCompleted: () => {
 							sawTerminalResponseEvent = true;
 						},
-						requestServiceTier: options?.serviceTier,
+						requestServiceTier: effectiveRequestServiceTier(),
 						toolNamesByWire: wireToolNames,
 					});
 
@@ -1377,7 +1400,7 @@ const streamOpenAIResponsesOnce = (
 										onCompleted: () => {
 											resumedSawTerminal = true;
 										},
-										requestServiceTier: options?.serviceTier,
+										requestServiceTier: effectiveRequestServiceTier(),
 										toolNamesByWire: wireToolNames,
 									},
 								);

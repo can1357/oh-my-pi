@@ -46,7 +46,7 @@ import {
 	iterateWithIdleTimeout,
 	iterateWithTerminalGrace,
 } from "../utils/idle-iterator";
-import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
+import { isServiceTierCapacityRejection, OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import {
@@ -98,6 +98,7 @@ import {
 	applyOpenAIServiceTier,
 	applyProviderReportedCost,
 	applyServiceTierCapacityRetry,
+	canRerouteServiceTierCapacity,
 	applyWireModelIdTransform,
 	calculateOpenAIUsageAccounting,
 	clearOpenAIStrictToolsState,
@@ -1001,6 +1002,12 @@ const streamOpenAICompletionsOnce = (
 							copilotCacheKey,
 							copilotCacheSnapshot,
 						),
+						// Resending identical bytes cannot find capacity the host just
+						// said it has none of — but only decline the transport retry
+						// when this request has somewhere else to go, so a deployment
+						// with no standard peer keeps today's recovery.
+						shouldRetryResponse: (_response, bodyText) =>
+							!(canRerouteServiceTierCapacity(params) && isServiceTierCapacityRejection(bodyText)),
 						// Transient 408/429/5xx get Retry-After-aware transport retries.
 						// The first-event watchdog above aborts `requestSignal`, which
 						// bounds every attempt and backoff sleep — retries cannot
@@ -1027,62 +1034,77 @@ const streamOpenAICompletionsOnce = (
 			// omits `cached_tokens`; captured here for the usage parser.
 			let responseHeaders: Headers | undefined;
 			let openaiStream: AsyncIterable<ChatCompletionChunk>;
-			try {
-				openaiStream = await createCompletionsStream();
-			} catch (error) {
-				const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
-				// A caller disable with a retained effort preference is still an
-				// explicit disable: without this, a fieldless rejection of the
-				// resulting `none` resolves to a delete-effort retry that gets
-				// cached and strips later enabled turns.
-				const isExplicitDisable = options?.disableReasoning === true;
-				const reasoningEffortFallback =
-					activeReasoningEffortFallbackKey && activeRequestParams && !requestSignal.aborted
-						? resolveOpenAIReasoningEffortFallback(error, capturedErrorResponse, activeRequestParams, {
-								explicitDisable: isExplicitDisable,
-							})
-						: undefined;
-				const tierCapacityRetry =
-					!serviceTierCapacityRetry && activeRequestParams && !requestSignal.aborted
-						? resolveServiceTierCapacityRetry(error, activeRequestParams)
-						: undefined;
-				if (reasoningEffortFallback !== undefined && activeReasoningEffortFallbackKey) {
-					const retryMarker = `${activeReasoningEffortFallbackKey}:${String(reasoningEffortFallback)}`;
-					if (attemptedReasoningEffortFallbacks.has(retryMarker)) throw error;
-					attemptedReasoningEffortFallbacks.add(retryMarker);
-					requestReasoningEffortFallbacks.set(activeReasoningEffortFallbackKey, reasoningEffortFallback);
+			// A request repair is confirmed only by the open that carries it, so the
+			// effort fallback is remembered for the session after the retry connects,
+			// not when it is chosen. Every repair below sets its state and re-enters
+			// the loop, so a capacity reroute and a strict-tools or effort rejection
+			// compose instead of the second one escaping unrepaired.
+			let pendingReasoningEffortFallback: { key: string; fallback: OpenAIReasoningEffortFallback } | undefined;
+			while (true) {
+				try {
 					openaiStream = await createCompletionsStream();
-					// Explicit-disable fallbacks stay per-request so a reasoning-off
-					// side request cannot downgrade later normal turns sharing
-					// the session state.
-					if (!isExplicitDisable) {
+					if (pendingReasoningEffortFallback) {
 						rememberOpenAIReasoningEffortFallback(
 							providerSessionState,
-							activeReasoningEffortFallbackKey,
-							reasoningEffortFallback,
+							pendingReasoningEffortFallback.key,
+							pendingReasoningEffortFallback.fallback,
 						);
+						pendingReasoningEffortFallback = undefined;
 					}
-				} else if (
-					model.compat.retryWithoutStrictOnGrammarError &&
-					!disableStrictTools &&
-					isCompiledGrammarTooLargeStrictError(error, capturedErrorResponse)
-				) {
-					disableStrictToolsForScope(providerSessionState, strictToolsScope);
-					disableStrictTools = true;
-					openaiStream = await createCompletionsStream("none");
-				} else if (tierCapacityRetry) {
-					// A tier the host has no capacity for: re-aim the same request at
-					// standard serving. Once only — a second refusal means the peer is
-					// genuinely unavailable too, and must surface.
-					serviceTierCapacityRetry = tierCapacityRetry;
-					logger.warn("openai-completions: service tier unavailable, retrying on the standard peer", {
-						model: model.id,
-						peer: tierCapacityRetry.model,
-						droppedServiceTier: tierCapacityRetry.dropServiceTier,
-					});
-					openaiStream = await createCompletionsStream();
-				} else {
+					break;
+				} catch (error) {
+					const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
+					// A caller disable with a retained effort preference is still an
+					// explicit disable: without this, a fieldless rejection of the
+					// resulting `none` resolves to a delete-effort retry that gets
+					// cached and strips later enabled turns.
+					const isExplicitDisable = options?.disableReasoning === true;
+					const reasoningEffortFallback =
+						activeReasoningEffortFallbackKey && activeRequestParams && !requestSignal.aborted
+							? resolveOpenAIReasoningEffortFallback(error, capturedErrorResponse, activeRequestParams, {
+									explicitDisable: isExplicitDisable,
+								})
+							: undefined;
+					const tierCapacityRetry =
+						!serviceTierCapacityRetry && activeRequestParams && !requestSignal.aborted
+							? resolveServiceTierCapacityRetry(error, activeRequestParams)
+							: undefined;
+					if (reasoningEffortFallback !== undefined && activeReasoningEffortFallbackKey) {
+						const retryMarker = `${activeReasoningEffortFallbackKey}:${String(reasoningEffortFallback)}`;
+						if (attemptedReasoningEffortFallbacks.has(retryMarker)) throw error;
+						attemptedReasoningEffortFallbacks.add(retryMarker);
+						requestReasoningEffortFallbacks.set(activeReasoningEffortFallbackKey, reasoningEffortFallback);
+						// Explicit-disable fallbacks stay per-request so a reasoning-off
+						// side request cannot downgrade later normal turns sharing
+						// the session state.
+						pendingReasoningEffortFallback = isExplicitDisable
+							? undefined
+							: { key: activeReasoningEffortFallbackKey, fallback: reasoningEffortFallback };
+						continue;
+					}
 					if (
+						model.compat.retryWithoutStrictOnGrammarError &&
+						!disableStrictTools &&
+						isCompiledGrammarTooLargeStrictError(error, capturedErrorResponse)
+					) {
+						disableStrictToolsForScope(providerSessionState, strictToolsScope);
+						disableStrictTools = true;
+						continue;
+					}
+					if (tierCapacityRetry) {
+						// A tier the host has no capacity for: re-aim the same request at
+						// standard serving. Once only — a second refusal means the peer is
+						// genuinely unavailable too, and must surface.
+						serviceTierCapacityRetry = tierCapacityRetry;
+						logger.warn("openai-completions: service tier unavailable, retrying on the standard peer", {
+							model: model.id,
+							peer: tierCapacityRetry.model,
+							droppedServiceTier: tierCapacityRetry.dropServiceTier,
+						});
+						continue;
+					}
+					if (
+						disableStrictTools ||
 						!shouldRetryWithoutStrictTools(error, capturedErrorResponse, {
 							model,
 							strictToolsApplied: appliedStrictTools,
@@ -1095,7 +1117,6 @@ const streamOpenAICompletionsOnce = (
 					// subsequent request doesn't pay a strict-400 + retry round-trip.
 					disableStrictToolsForScope(providerSessionState, strictToolsScope);
 					disableStrictTools = true;
-					openaiStream = await createCompletionsStream("none");
 				}
 			}
 			if (premiumRequestsTotal !== undefined) {

@@ -1480,6 +1480,17 @@ export function resolveServiceTierCapacityRetry(
 	return { ...(peer ? { model: peer.peerId } : {}), dropServiceTier };
 }
 
+/**
+ * Whether a tier-capacity refusal of this request would have somewhere to go.
+ * The transport asks before declining its own retry: a request that names no
+ * tier in either spelling has no reroute above it, so resending it is still
+ * the only recovery it has and must stay available.
+ */
+export function canRerouteServiceTierCapacity(params: { model?: unknown; service_tier?: unknown }): boolean {
+	if (typeof params.model === "string" && serviceTierPeerFor(params.model) !== undefined) return true;
+	return typeof params.service_tier === "string" && params.service_tier !== "default";
+}
+
 /** Apply a resolved tier-capacity resend to one request-parameter object. */
 export function applyServiceTierCapacityRetry(
 	params: { model?: unknown; service_tier?: unknown },
