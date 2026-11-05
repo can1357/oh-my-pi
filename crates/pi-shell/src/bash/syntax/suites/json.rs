@@ -241,3 +241,63 @@ fn an_exported_conditional_keeps_its_operators_whatever_stands_before_them() {
 		assert_eq!(expr["End"]["Offset"], end, "chain ends after its last operand in {text}");
 	}
 }
+
+struct OneAlias(&'static [u8], &'static [u8]);
+
+impl AliasLookup for OneAlias {
+	fn alias(&self, name: &[u8]) -> Option<&[u8]> {
+		(name == self.0).then_some(self.1)
+	}
+}
+
+/// Record every node of `v` whose `End` offset is before its `Pos` offset.
+fn backwards_ranges(v: &serde_json::Value, path: &str, bad: &mut Vec<String>) {
+	match v {
+		serde_json::Value::Object(map) => {
+			let at = |k: &str| map.get(k)?.get("Offset")?.as_u64();
+			if let (Some(pos), Some(end)) = (at("Pos"), at("End"))
+				&& end < pos
+			{
+				bad.push(format!("{path}: Pos {pos} > End {end}"));
+			}
+			for (k, child) in map {
+				backwards_ranges(child, &format!("{path}.{k}"), bad);
+			}
+		},
+		serde_json::Value::Array(items) => {
+			for (i, child) in items.iter().enumerate() {
+				backwards_ranges(child, &format!("{path}[{i}]"), bad);
+			}
+		},
+		_ => {},
+	}
+}
+
+#[test]
+fn an_alias_expanded_conditional_exports_no_backwards_range() {
+	// The text an alias expands to is not in the source, so no position
+	// inside it can be found by reading the source. Every `!` of a run and
+	// every `&&` / `||` of a chain carries the offset the parser read it
+	// at, which for alias text is the alias word's own position. Before
+	// that, the export kept only the first `!` and scanned the source
+	// forward for the later ones: the scan walked off the alias word and
+	// the second `!` was exported with its end before its start, around a
+	// child inside it. A consumer that slices the source with such a range
+	// panics or selects nothing.
+	let src = b"check\n";
+	let table = OneAlias(b"check", b"[[ ! ! a && -n b || ( c ) ]]");
+	let mut parser = Parser::new(src, Features::NONE, &table);
+	let mut commands = Vec::new();
+	while let Some(cmd) = parser.next_command() {
+		commands.push(cmd.expect("the aliased conditional parses"));
+	}
+	let program = Program { commands };
+	for offsets in [Offsets::Bytes, Offsets::Utf16] {
+		let json = to_json(src, &program, JsonDialect::Shfmt, offsets);
+		let shfmt: serde_json::Value = serde_json::from_str(&json).unwrap();
+		assert_eq!(shfmt["Stmts"][0]["Cmd"]["X"]["Op"], "||", "the aliased chain is exported");
+		let mut bad = Vec::new();
+		backwards_ranges(&shfmt, "", &mut bad);
+		assert!(bad.is_empty(), "{offsets:?}: {} backwards ranges: {bad:?}\n{json}", bad.len());
+	}
+}
