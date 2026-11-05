@@ -35,7 +35,15 @@ async function withConfigLock<T>(filePath: string, fn: (writePath: string) => Pr
 	// at one target would otherwise hold two different locks while performing
 	// read-modify-write on one file, and one of them would be lost.
 	const writePath = await resolveConfigWriteTarget(filePath);
-	return withFileLock(writePath, () => fn(writePath));
+	try {
+		return await withFileLock(writePath, () => fn(writePath));
+	} finally {
+		// Readers cache by the path they asked for. The write landed on the
+		// link's target and cleared that key, so without this the link's key
+		// keeps the bytes from before the write and every reader that goes
+		// through the link sees the old config.
+		invalidateFsCache(filePath);
+	}
 }
 
 /**

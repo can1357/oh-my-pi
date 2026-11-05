@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
+import { readFile as readFileCapability } from "../../src/capability/fs";
 import {
 	addMCPServer,
 	readDisabledServers,
@@ -67,5 +69,33 @@ describe("config-writer concurrent mutations", () => {
 
 		const config = await readMCPConfigFile(nestedPath);
 		expect(Object.keys(config.mcpServers ?? {})).toEqual(["alpha"]);
+	});
+});
+
+// The write lands on the link's target, so it clears the target's cache key.
+// Readers ask for the path they were given — the link — and would keep the
+// bytes from before the write unless that key is cleared too.
+describe("a linked MCP config", () => {
+	it("is readable through the link straight after a write", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-link-"));
+		const previousAgentDir = getAgentDir();
+		setAgentDir(root);
+		try {
+			const target = path.join(root, "mcp.json");
+			const link = path.join(root, "profile-mcp.json");
+			await fs.writeFile(target, JSON.stringify({ mcpServers: { old: { command: "old" } } }));
+			await fs.symlink(target, link);
+			// Populate the reader's cache under the link's own key.
+			await readFileCapability(link);
+
+			await addMCPServer(link, "fresh", { command: "fresh" });
+
+			expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+			const seen = JSON.parse((await readFileCapability(link)) ?? "{}") as { mcpServers: Record<string, unknown> };
+			expect(Object.keys(seen.mcpServers).sort()).toEqual(["fresh", "old"]);
+		} finally {
+			setAgentDir(previousAgentDir);
+			await fs.rm(root, { recursive: true, force: true });
+		}
 	});
 });

@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getAgentDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
-import { replaceConfigFileAtomically, resolveConfigWriteTarget } from "@oh-my-pi/pi-utils/atomic-file";
+import { replaceFileAtomically, resolveConfigWriteTarget } from "@oh-my-pi/pi-utils/atomic-file";
 import type { SessionInfo } from "./session-listing";
 
 const PINS_FILENAME = "session-pins.json";
@@ -41,7 +41,7 @@ export async function loadPinnedSessionIds(agentDir: string = getAgentDir()): Pr
  * the previous pins file intact instead of a truncated one that degrades to
  * an empty set. The replace preserves the destination across Windows
  * EPERM/EEXIST rename failures (`replaceConfigFileAtomically`, which also
- * follows a symlinked pins file so a shared profile keeps sharing it).
+ * publishes the path this already resolved, so a shared profile keeps its link).
  */
 async function updateSessionPin(
 	sessionId: string,
@@ -64,7 +64,7 @@ async function updateSessionPin(
 		const tmpPath = `${target}.${process.pid}.${randomUUID()}.tmp`;
 		try {
 			await fs.writeFile(tmpPath, JSON.stringify([...pinned], null, "\t"), { encoding: "utf-8", mode: 0o600 });
-			await replaceConfigFileAtomically(tmpPath, target);
+			await replaceFileAtomically(tmpPath, target);
 		} catch (error) {
 			await fs.rm(tmpPath, { force: true }).catch(() => {});
 			throw error;
