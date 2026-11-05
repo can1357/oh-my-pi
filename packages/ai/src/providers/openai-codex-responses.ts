@@ -2173,7 +2173,6 @@ async function handleCodexStreamFailure(
 		streamResponseHeaders: context.requestContext.streamResponseHeaders,
 	});
 	AIError.applyFinalizeResult(output, result);
-	output.errorRetryWaitRefusal = result.retryWaitRefusal;
 	// Report the requests this module owns even when processing never started.
 	output.providerReplays = providerReplaysFrom(context.requestContext.wire.attempts);
 	context.requestContext.replayBudget?.stamp(output);

@@ -99,12 +99,23 @@ export function formatFolder(folder: string): string {
 }
 
 /**
- * A failed request's error as a person reads it: the raw `errorMessage` plus
- * the server's retry wait from its own column, rendered here and nowhere
- * earlier. Grouping, search and sorting keep reading the raw text.
+ * A failed request's error as a person reads it: the text omp built for a
+ * person when ingest stored one, else the provider's own, plus the server's
+ * retry wait from its own column, rendered here and nowhere earlier.
+ *
+ * `errorDisplayMessage` is preferred for the same reason every other renderer
+ * prefers it: it is where omp's own additions live, the note saying which
+ * bound refused a server-stated wait among them. Reading the raw text here
+ * showed a refused wait as an invitation to retry, with the explanation
+ * sitting unread in the same row. Grouping, search and sorting keep reading
+ * the raw text, which is what makes them low-cardinality.
  */
-export function formatRequestError(row: Pick<MessageStats, "errorMessage" | "errorRetryAfterMs">): string | null {
-	return row.errorMessage === null ? null : withRetryWait(row.errorMessage, row.errorRetryAfterMs ?? undefined);
+export function formatRequestError(
+	row: Pick<MessageStats, "errorMessage" | "errorDisplayMessage" | "errorRetryAfterMs">,
+): string | null {
+	if (row.errorMessage === null && (row.errorDisplayMessage ?? null) === null) return null;
+	const shown = row.errorDisplayMessage || row.errorMessage;
+	return shown === null ? null : withRetryWait(shown, row.errorRetryAfterMs ?? undefined);
 }
 
 export function formatBytes(value: number): string {

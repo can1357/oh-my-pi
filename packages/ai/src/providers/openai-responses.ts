@@ -1624,7 +1624,6 @@ const streamOpenAIResponsesOnce = (
 			});
 			AIError.applyFinalizeResult(output, result);
 			replayBudget?.stamp(output);
-			output.errorRetryWaitRefusal = result.retryWaitRefusal;
 			if (AIError.isRequestBodyReadTimeout(result.status, result.message) && lastSubmittedRequestWasFullReplay) {
 				output.requestBodyReadTimeoutFullReplay = true;
 			}

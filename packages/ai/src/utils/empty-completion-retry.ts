@@ -20,12 +20,7 @@ import type { AssistantMessage, AssistantMessageEvent, Context, FetchImpl } from
 import { AssistantMessageEventStream } from "./event-stream";
 import { longestServerWaitMs, ReplayBudget, type ReplayArm, sleepUnderBudget } from "./replay-budget";
 import { providerRetryWaitMs, retryWaitBounds } from "./retry-after";
-import {
-	DEFAULT_MAX_RETRY_DELAY_MS,
-	hasRefusedRetryWaitNote,
-	refusedRetryWaitNote,
-	retryWaitRefusal,
-} from "./retry-wait";
+import { DEFAULT_MAX_RETRY_DELAY_MS, retryWaitRefusal } from "./retry-wait";
 import { withWireCount } from "./wire-attempts";
 
 export const MAX_EMPTY_COMPLETION_RETRIES = 2;
@@ -323,17 +318,13 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 function withRefusalNote(event: AssistantMessageEvent): AssistantMessageEvent {
 	if (event.type !== "error") return event;
 	const refused = retryWaitRefusal(event.error);
-	const message = event.error.errorMessage;
-	if (refused === undefined || message === undefined) return event;
-	const shown = event.error.errorDisplayMessage ?? message;
-	return {
-		...event,
-		error: {
-			...event.error,
-			errorRetryWaitRefusal: refused,
-			errorDisplayMessage: hasRefusedRetryWaitNote(shown) ? shown : `${shown} ${refusedRetryWaitNote(refused)}`,
-		},
-	};
+	if (refused === undefined) return event;
+	// A copy: the message belongs to the layer below. The copy is then handed to
+	// the one recorder, so this wrapper is not a second producer of
+	// "structured and shown" that could drift from it.
+	const error = { ...event.error };
+	AIError.recordRefusedRetryWait(error, refused);
+	return { ...event, error };
 }
 
 function terminalReplays(event: AssistantMessageEvent): number | undefined {

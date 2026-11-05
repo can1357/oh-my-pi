@@ -1928,7 +1928,6 @@ const streamOpenAICompletionsOnce = (
 			});
 			AIError.applyFinalizeResult(output, result);
 			replayBudget?.stamp(output);
-			output.errorRetryWaitRefusal = result.retryWaitRefusal;
 			// Some providers via OpenRouter include extra details here.
 			const rawMetadata = readOpenRouterRawMetadata(capturedErrorResponse);
 			if (rawMetadata) AIError.editErrorText(output, text => `${text}\n${rawMetadata}`);

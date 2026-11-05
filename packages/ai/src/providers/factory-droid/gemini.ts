@@ -631,7 +631,6 @@ export function streamFactoryDroidGemini(
 				streamResponseHeaders,
 			});
 			AIError.applyFinalizeResult(output, result);
-			output.errorRetryWaitRefusal = result.retryWaitRefusal;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime !== undefined) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: result.stopReason, error: output });

@@ -423,7 +423,11 @@ async function runMock(
 	partial.errorMessage = response.errorMessage;
 	partial.providerReplays = response.providerReplays;
 	partial.errorRetryAfterMs = response.errorRetryAfterMs;
-	partial.errorRetryWaitRefusal = response.errorRetryWaitRefusal;
+	// Through the one recorder, so a fixture cannot describe a refusal no
+	// display renders — a shape a relay would then forward unchanged.
+	if (response.errorRetryWaitRefusal !== undefined) {
+		AIError.recordRefusedRetryWait(partial, response.errorRetryWaitRefusal);
+	}
 	partial.usage = mergeUsage(response.usage);
 	partial.serviceTier = response.serviceTier;
 	partial.duration = performance.now() - perfStart;

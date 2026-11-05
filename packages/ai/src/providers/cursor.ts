@@ -2415,7 +2415,6 @@ function streamCursorWithWireMode(
 			// caller's retry loop actually rebuilds on the rotated id; if that id
 			// rejects too, `canRotate` is false and the original status surfaces.
 			if (rotatedRejection) output.errorId = AIError.create(AIError.Flag.Transient);
-			output.errorRetryWaitRefusal = result.retryWaitRefusal;
 			// Every request this turn sent beyond the first — a checkpoint resume, a
 			// drop to HTTP/1, a replay on the discovered wire model. Cursor resumes
 			// from a fresh checkpoint even after visible progress, so the content

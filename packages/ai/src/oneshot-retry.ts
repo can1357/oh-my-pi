@@ -6,6 +6,7 @@ import {
 	type HeadersLike,
 	providerRetryWaitMs,
 } from "./utils/retry-after";
+import { retryWaitRefusal } from "./utils/retry-wait";
 
 /**
  * Transient-failure retry for **oneshot** (non-agent-loop) completions.
@@ -186,8 +187,12 @@ export async function retryTransientCompletion(
 
 		// A provider below this layer already rejected the server's stated wait.
 		// Its structured refusal is authoritative: retrying here would replace it
-		// with this loop's local backoff.
+		// with this loop's local backoff. A failure arrives either as a message
+		// carrying the field or as a thrown error carrying the mark, and the two
+		// must be read alike — otherwise the shape a provider happens to use
+		// decides whether its refusal is honoured.
 		if (message && message.errorRetryWaitRefusal !== undefined) return message;
+		if (thrown !== undefined && retryWaitRefusal(thrown) !== undefined) throw thrown;
 		const errorMessage =
 			thrown !== undefined
 				? thrown instanceof Error

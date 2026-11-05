@@ -330,7 +330,15 @@ function isGatewayFailureFrame(frame: PiNativeWireEvent): frame is GatewayFailur
 function sanitizeRelayedRefusal(frame: AssistantMessageEvent): AssistantMessageEvent {
 	if (frame.type !== "error") return frame;
 	const refusal: unknown = frame.error.errorRetryWaitRefusal;
-	if (refusal !== undefined && !isRefusedRetryWait(refusal)) delete frame.error.errorRetryWaitRefusal;
+	if (refusal === undefined) return frame;
+	if (!isRefusedRetryWait(refusal)) {
+		delete frame.error.errorRetryWaitRefusal;
+		return frame;
+	}
+	// A valid refusal arrives as the field alone from a relay that only copied
+	// fields. The recorder completes it, so a relayed refusal reads the same as
+	// one this process recorded itself.
+	AIError.recordRefusedRetryWait(frame.error, refusal);
 	return frame;
 }
 

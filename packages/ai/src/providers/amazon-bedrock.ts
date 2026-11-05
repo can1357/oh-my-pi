@@ -1147,7 +1147,6 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			// The thinking-block diagnostic is omp's local text: shown, never classified.
 			AIError.applyFinalizeResult(output, result, (result.displayMessage ?? result.message) + diagnostics);
 			replayBudget?.stamp(output);
-			output.errorRetryWaitRefusal = result.retryWaitRefusal;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: result.stopReason, error: output });

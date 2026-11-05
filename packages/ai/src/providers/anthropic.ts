@@ -3965,7 +3965,6 @@ const streamAnthropicOnce = (
 				result,
 				transport ? shown : maybeAddReplayUnsignedThinkingHint(model, result.message, shown),
 			);
-			output.errorRetryWaitRefusal = result.retryWaitRefusal;
 			output.providerReplays = reportedProviderReplays();
 			replayBudget?.stamp(output);
 			output.duration = performance.now() - startTime;

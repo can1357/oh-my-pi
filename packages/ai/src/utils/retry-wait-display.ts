@@ -18,6 +18,7 @@
  */
 import { withRetryWait } from "@oh-my-pi/pi-utils";
 import { getHeadersFromError, getRetryAfterMsFromHeaders, retryWaitHeaders } from "./retry-after";
+import { markRetryWaitRefused, type RefusedRetryWait } from "./retry-wait";
 
 /** What a renderer needs off a failed turn: the two error texts and the server's wait. */
 interface DisplayableFailure {
@@ -25,6 +26,8 @@ interface DisplayableFailure {
 	/** What omp shows, when it differs from the provider's own text. Never classified. */
 	readonly errorDisplayMessage?: string;
 	readonly errorRetryAfterMs?: number;
+	/** The refusal a lower layer recorded, so a thrown failure keeps the fact. */
+	readonly errorRetryWaitRefusal?: RefusedRetryWait;
 }
 
 /**
@@ -67,6 +70,12 @@ export function thrownErrorDisplayText(error: unknown): string | undefined {
  * `retry-after-ms` header (`retryWaitHeaders`), never in the text, and the text
  * omp shows rides along as `errorDisplayMessage` — separate, so a dump path that
  * names HOME can never reach a decision.
+ *
+ * A refusal the message carries rides along too, as the mark every reader of a
+ * thrown failure looks for. Without it the words survive for whoever prints
+ * this Error straight away and the fact is lost to everyone else — a recovery
+ * layer replays a wait a lower layer already refused, and a relay that rebuilds
+ * a message from this Error has nothing to record.
  */
 export function assistantTurnError(
 	message: DisplayableFailure,
@@ -79,5 +88,6 @@ export function assistantTurnError(
 	if (message.errorDisplayMessage !== undefined) {
 		Object.assign(error, { errorDisplayMessage: message.errorDisplayMessage });
 	}
+	if (message.errorRetryWaitRefusal !== undefined) markRetryWaitRefused(error, message.errorRetryWaitRefusal);
 	return error;
 }

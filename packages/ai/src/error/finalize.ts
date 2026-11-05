@@ -192,13 +192,17 @@ export function applyFinalizeResult(
  * — records it here, so none of them can ship half of it. Nothing is appended
  * twice, and the classification the message already carries is left alone: a
  * refusal is not a reason.
+ *
+ * A failure may carry no text at all, which is a legal message; the note still
+ * stands on its own, because the bound that stopped the retry is the whole of
+ * what there is to say about such a failure.
  */
 export function recordRefusedRetryWait(output: AssistantMessage, refused: RefusedRetryWait): void {
 	if (output.errorRetryWaitRefusal === undefined) output.errorRetryWaitRefusal = refused;
 	const shown = output.errorDisplayMessage ?? output.errorMessage;
-	if (shown !== undefined && !hasRefusedRetryWaitNote(shown)) {
-		output.errorDisplayMessage = `${shown} ${refusedRetryWaitNote(refused)}`;
-	}
+	if (shown !== undefined && hasRefusedRetryWaitNote(shown)) return;
+	const note = refusedRetryWaitNote(refused);
+	output.errorDisplayMessage = shown === undefined || shown === "" ? note : `${shown} ${note}`;
 }
 
 /**

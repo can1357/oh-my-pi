@@ -1211,7 +1211,6 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					: `${shown}\n${explanation}`;
 			}
 			replayBudget?.stamp(output);
-			output.errorRetryWaitRefusal = result.retryWaitRefusal;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: result.stopReason, error: output });

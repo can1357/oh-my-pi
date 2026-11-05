@@ -1216,7 +1216,6 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			});
 			AIError.applyFinalizeResult(output, result);
 			replayBudget?.stamp(output);
-			output.errorRetryWaitRefusal = result.retryWaitRefusal;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: result.stopReason, error: output });

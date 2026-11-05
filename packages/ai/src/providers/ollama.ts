@@ -816,7 +816,6 @@ const streamOllamaOnce = (
 				AIError.applyFinalizeResult(output, result);
 			}
 			replayBudget?.stamp(output);
-			output.errorRetryWaitRefusal = result.retryWaitRefusal;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) {
 				output.ttft = firstTokenTime - startTime;

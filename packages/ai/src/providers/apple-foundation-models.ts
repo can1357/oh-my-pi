@@ -400,7 +400,6 @@ export const streamAppleFoundationModels: StreamFunction<"apple-foundation-model
 				signal: options.signal,
 			});
 			AIError.applyFinalizeResult(output, result);
-			output.errorRetryWaitRefusal = result.retryWaitRefusal;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: result.stopReason, error: output });

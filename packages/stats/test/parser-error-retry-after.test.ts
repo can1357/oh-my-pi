@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { formatRequestError } from "@oh-my-pi/omp-stats/client/data/formatters";
 import { getRecentRequests, initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
 import { parseSessionFile } from "@oh-my-pi/omp-stats/parser";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
@@ -95,5 +96,30 @@ describe("the server's retry wait in stats.db", () => {
 		]);
 
 		expect(requestFor("u1")).toMatchObject({ errorMessage: "429 rate_limit_error", errorRetryAfterMs: 12_000 });
+	});
+});
+
+// The request views read a stored failure through one formatter. Ingest keeps
+// the raw text and the shown text in separate columns; reading the raw one here
+// showed a refused wait as an invitation to retry, with the explanation sitting
+// unread in the same row.
+describe("formatRequestError", () => {
+	it("shows the stored explanation, not the provider's own words", () => {
+		expect(
+			formatRequestError({
+				errorMessage: "503 overloaded",
+				errorDisplayMessage:
+					"503 overloaded (server asked to wait 17.1 s before retrying; the caller's 12.5 s providerRetryWaitCeilingMs refused it, so the provider did not retry)",
+				errorRetryAfterMs: 17_125,
+			}),
+		).toContain("the caller's 12.5 s providerRetryWaitCeilingMs refused it");
+	});
+
+	it("falls back to the provider's words when omp stored none of its own", () => {
+		expect(formatRequestError({ errorMessage: "503 overloaded", errorRetryAfterMs: null })).toBe("503 overloaded");
+	});
+
+	it("has nothing to show for a request that did not fail", () => {
+		expect(formatRequestError({ errorMessage: null, errorRetryAfterMs: null })).toBeNull();
 	});
 });

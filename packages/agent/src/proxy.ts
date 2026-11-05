@@ -20,6 +20,7 @@ import {
 	type StreamingPartialJsonCarrier,
 	setStreamingPartialJson,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getFailureRetryAfterMs, isRetryWaitMs } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { isRefusedRetryWait } from "@oh-my-pi/pi-ai/utils/retry-wait";
 import { parseToolCallArguments } from "@oh-my-pi/pi-ai/utils/tool-call-arguments";
@@ -517,6 +518,12 @@ function copyTerminalFields(frame: object, partial: AssistantMessage): void {
 		if (check && !check(value)) continue;
 		target[key] = value;
 	}
+	// A copied refusal is the field alone; the words that go with it were built
+	// in the upstream process and are not a frame key. The one recorder
+	// completes it here, so a relayed refusal reads as one recorded locally
+	// rather than arriving as a field no display renders.
+	const refused = partial.errorRetryWaitRefusal;
+	if (refused !== undefined) AIError.recordRefusedRetryWait(partial, refused);
 }
 
 /**
