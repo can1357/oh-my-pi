@@ -359,11 +359,12 @@ type PendingRetryError = {
 	attempt: number;
 	note: string;
 	/**
-	 * The prompt whose saga recorded this error. A cancelled in-flight retry leaves its
-	 * entries behind, and the next prompt's saga must not mark another prompt's errors
-	 * superseded — nothing superseded them, and a superseded error is not rendered.
+	 * The retry saga that recorded this error. A cancelled in-flight retry leaves its entries
+	 * behind, and the next saga must not mark them — nothing superseded them, and a superseded
+	 * error is not rendered. The saga, not the prompt: a fork or a compaction continuation bumps
+	 * the prompt generation mid-saga, and the errors a later success recovers are still its own.
 	 */
-	generation: number;
+	saga: number;
 };
 
 /** How a retry saga's pending error entries are annotated when it closes. */
@@ -410,6 +411,8 @@ export class TurnRecovery {
 	 * `#refusalRetryCount`.
 	 */
 	#refusalExemptAttempts = 0;
+	/** Identifies the current retry saga, so a pending error outlives its own saga unmarked. */
+	#retrySagaEpoch = 0;
 	/** Per-model account walk allowance, snapshotted once and cleared when the retry saga ends. */
 	readonly #accountPolicyRotationsRemaining = new Map<string, number>();
 	#requestBodyReadTimeoutRecoveryPromptSequence: number | undefined;
@@ -903,6 +906,8 @@ export class TurnRecovery {
 
 	/** Resolve the pending retry promise; the saga is over, and so is its refusal walk. */
 	resolveRetry(): void {
+		// A new saga starts here: entries an abandoned one left behind belong to no live saga.
+		this.#retrySagaEpoch++;
 		this.#refusalWalkTried.clear();
 		this.#refusalRetryCount = 0;
 		this.#refusalExemptAttempts = 0;
@@ -1025,16 +1030,15 @@ export class TurnRecovery {
 			recovery,
 			attempt: this.#retryAttempt,
 			note,
-			generation: this.#host.promptGeneration(),
+			saga: this.#retrySagaEpoch,
 		});
 	}
 
 	async #markPendingRetryErrors(completion: RetryErrorCompletion): Promise<RetryErrorUpdate[]> {
 		if (this.#pendingRetryErrors.length === 0) return [];
-		// Only this prompt's errors: a cancelled in-flight retry leaves the previous prompt's
-		// entries in the list, and this saga superseded none of them.
-		const generation = this.#host.promptGeneration();
-		const pendingHere = this.#pendingRetryErrors.filter(pending => pending.generation === generation);
+		// Only this saga's errors: a cancelled in-flight retry leaves its entries in the list,
+		// and the saga that closes next superseded none of them.
+		const pendingHere = this.#pendingRetryErrors.filter(pending => pending.saga === this.#retrySagaEpoch);
 		if (pendingHere.length === 0) return [];
 		const branch = this.#host.sessionManager.getBranchView();
 		const branchById = new Map<string, SessionEntry>();

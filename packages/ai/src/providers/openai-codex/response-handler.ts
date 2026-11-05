@@ -1,5 +1,5 @@
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
-import { ProviderHttpError } from "../../error";
+import { ProviderHttpError, wrappedErrorEnvelope } from "../../error";
 
 export type CodexRateLimit = {
 	used_percent?: number;
@@ -48,9 +48,10 @@ export async function parseCodexError(response: Response): Promise<CodexErrorInf
 		const parsed = JSON.parse(raw) as { error?: Record<string, unknown> };
 		// A gateway may wrap the envelope in itself (`{ error: { error: { code, message } } }`);
 		// the inner one carries the code, and without it a refusal reads as a plain failure.
+		// Only when the outer has no code or type: an `error` field beside a valid outer code is
+		// a diagnostic, and taking it would lose the plan and reset the outer carries.
 		const outer = parsed?.error ?? {};
-		const inner = outer.error;
-		const err = (typeof inner === "object" && inner !== null ? inner : outer) as Record<string, unknown>;
+		const err = (wrappedErrorEnvelope(outer) ?? outer) as Record<string, unknown>;
 
 		const headers = response.headers;
 		const primary = {

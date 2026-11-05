@@ -55,8 +55,9 @@ export class OpenAIHttpError extends ProviderHttpError {
 			if (typeof error === "object" && error !== null) {
 				// Some gateways wrap the envelope in itself (`{ error: { error: { code, message } } }`);
 				// read the inner one, or its code is lost and a refusal looks like a plain failure.
-				const nested = Reflect.get(error, "error");
-				const source = (typeof nested === "object" && nested !== null ? nested : error) as {
+				// Only when the outer carries no code of its own: an `error` field beside a valid
+				// outer code is a diagnostic, not the envelope, and the outer code is the answer.
+				const source = (wrappedErrorEnvelope(error) ?? error) as {
 					message?: unknown;
 					code?: unknown;
 					type?: unknown;
@@ -76,6 +77,26 @@ export class OpenAIHttpError extends ProviderHttpError {
 		}
 		return { detail: bodyText, code: undefined };
 	}
+}
+
+/**
+ * The inner envelope of a doubly wrapped error (`{ error: { error: { code, message } } }`), or
+ * `undefined` when `error` is an ordinary envelope. An inner value only wins when the outer
+ * carries no code or type of its own and the inner is a plain object with one of its own.
+ */
+export function wrappedErrorEnvelope(error: object): object | undefined {
+	const outerCode = Reflect.get(error, "code");
+	const outerType = Reflect.get(error, "type");
+	if (typeof outerCode === "string" || typeof outerType === "string") return undefined;
+	const inner: unknown = Reflect.get(error, "error");
+	if (typeof inner !== "object" || inner === null || Array.isArray(inner)) return undefined;
+	const innerCode = Reflect.get(inner, "code");
+	const innerType = Reflect.get(inner, "type");
+	const innerMessage = Reflect.get(inner, "message");
+	if (typeof innerCode !== "string" && typeof innerType !== "string" && typeof innerMessage !== "string") {
+		return undefined;
+	}
+	return inner;
 }
 
 /** Non-2xx response from the Anthropic API. */
