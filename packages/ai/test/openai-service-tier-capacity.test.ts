@@ -366,6 +366,35 @@ describe("service-tier capacity refusals", () => {
 		expect(sent.map(entry => entry.model)).toEqual(["gpt-6.1-sol-flex", "gpt-6.1-sol", "third-responses-reasoner"]);
 	});
 
+	it("responses: a rebuild is re-aimed even when a hook chose the route that was refused", async () => {
+		// The hook can change the model on the very first attempt, so the route the
+		// host refuses is the hook's, not the builder's. A later rebuild starts from
+		// the builder's id again, which never matched the refused one — so the
+		// fresh-build re-aim has to be unconditional, and only the post-hook one
+		// may compare.
+		const { fetch, sent } = recordingFetch(entry => {
+			if (entry.model.endsWith("-flex")) return tierUnavailable();
+			if (sent.length === 2) return strictToolsRejection();
+			return responsesOk();
+		});
+		const message = await collect(
+			streamOpenAIResponses(
+				responsesModel("gpt-6.1-sol-flex"),
+				{ ...context, tools: [echoTool] },
+				{
+					apiKey: "k",
+					fetch,
+					onPayload: payload => {
+						const body = payload as { model?: unknown };
+						return body.model === "gpt-6.1-sol-flex" ? { ...body, model: "hook-reasoner-flex" } : body;
+					},
+				},
+			),
+		);
+		expect(message.stopReason).toBe("stop");
+		expect(sent.map(entry => entry.model)).toEqual(["hook-reasoner-flex", "hook-reasoner", "hook-reasoner"]);
+	});
+
 	it("factory-droid: its OpenAI-wire tier routes recover on the standard peer too", async () => {
 		// Factory delegates `gpt-*-ultrafast` to the Responses streamer, so the
 		// recovery reaches a real public adapter with a catalog-declared tier

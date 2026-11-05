@@ -124,6 +124,7 @@ import {
 	resolveOpenAIRequestSetup,
 	resolveOpenAIResponsesOutputClamp,
 	resolveReasoningSummaryOption,
+	reapplyServiceTierCapacityRetryAfterHook,
 	resolveServiceTierCapacityRetry,
 	type ServiceTierCapacityRetry,
 	type ResponsesToolNaming,
@@ -902,7 +903,7 @@ const streamOpenAIResponsesOnce = (
 				// handed the model row, whose id is still the tier one. Re-aim before
 				// the effort key is derived from the payload's own wire id, so the
 				// hook cannot undo a recovery it knows nothing about.
-				reaimForServiceTierCapacity(payload);
+				if (serviceTierCapacityRetry) reapplyServiceTierCapacityRetryAfterHook(payload, serviceTierCapacityRetry);
 				applyReasoningEffortFallbackForRequest(payload);
 				return payload;
 			};

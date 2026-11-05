@@ -1502,15 +1502,32 @@ export function canRerouteServiceTierCapacity(params: { model?: unknown; service
 }
 
 /**
- * Re-aim one request-parameter object at the standard tier.
+ * Re-aim a freshly built request at the standard tier.
  *
- * Only a field that still names the refused route is replaced. A freshly built
- * request always does, so this is unconditional in practice there; after an
- * `onPayload` hook it is not, and a hook that deliberately chose some other
- * model or tier keeps its choice rather than being silently overwritten by a
- * recovery it was not party to.
+ * Unconditional, because a request the builder just produced always carries
+ * the route the model row selects — which is the tier one. Use
+ * {@link reapplyServiceTierCapacityRetryAfterHook} on a body an `onPayload`
+ * hook has already seen.
  */
 export function applyServiceTierCapacityRetry(
+	params: { model?: unknown; service_tier?: unknown },
+	retry: ServiceTierCapacityRetry,
+): void {
+	if (retry.model !== undefined) params.model = retry.model;
+	if (retry.dropServiceTier) delete params.service_tier;
+}
+
+/**
+ * Re-aim a body an `onPayload` hook returned, correcting only a field that
+ * still names the route the host refused.
+ *
+ * A hook that restated the refused id or tier — it is handed the model row,
+ * whose id is the tier one — would otherwise undo the recovery. A hook that
+ * deliberately chose some other model or tier keeps its choice: that is a
+ * decision the recovery was not party to, and overwriting it would silently
+ * discard the caller's own routing.
+ */
+export function reapplyServiceTierCapacityRetryAfterHook(
 	params: { model?: unknown; service_tier?: unknown },
 	retry: ServiceTierCapacityRetry,
 ): void {

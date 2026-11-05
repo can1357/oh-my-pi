@@ -120,6 +120,7 @@ import {
 	resolveOpenAICompletionsOutputClamp,
 	resolveOpenAIOutputTokenParam,
 	resolveOpenAIRequestSetup,
+	reapplyServiceTierCapacityRetryAfterHook,
 	resolveServiceTierCapacityRetry,
 	type ServiceTierCapacityRetry,
 	shouldDropAutoToolChoiceForReasoning,
@@ -971,8 +972,9 @@ const streamOpenAICompletionsOnce = (
 				const replacedParams = await options?.onPayload?.(params, model);
 				if (replacedParams !== undefined) params = replacedParams as typeof params;
 				activeRequestParams = params;
-				// A payload hook may hand back a body that re-states the refused id.
-				if (serviceTierCapacityRetry) applyServiceTierCapacityRetry(params, serviceTierCapacityRetry);
+				// A payload hook may hand back a body that re-states the refused id;
+				// a body it re-routed somewhere else of its own accord stands.
+				if (serviceTierCapacityRetry) reapplyServiceTierCapacityRetryAfterHook(params, serviceTierCapacityRetry);
 				rawRequestDump = {
 					provider: model.provider,
 					api: output.api,
