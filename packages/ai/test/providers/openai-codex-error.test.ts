@@ -1,8 +1,10 @@
 import { describe, expect, it } from "bun:test";
+import * as AIError from "../../src/error";
 import {
 	createCodexProviderStreamError,
 	isRetryableCodexFailureEvent,
 } from "../../src/providers/openai-codex-responses";
+import { CodexApiError, parseCodexError } from "../../src/providers/openai-codex/response-handler";
 
 describe("isRetryableCodexFailureEvent", () => {
 	it("classifies retryable codes from nested error.code, error.type, then rawEvent.code", () => {
@@ -103,5 +105,44 @@ describe("createCodexProviderStreamError", () => {
 		expect(err.code).toBe("server_error");
 		expect(err.retryable).toBe(true);
 		expect(err.message).toContain("nested boom");
+	});
+});
+
+describe("which string in a Codex error body is the machine code", () => {
+	const body = async (status: number, payload: unknown) =>
+		await parseCodexError(new Response(JSON.stringify(payload), { status }));
+
+	it("prefers a refusal in `type` to an HTTP status sitting in `code`", async () => {
+		// `"403"` is the status wearing the code field's name. Taking it leaves nothing in the
+		// cause chain that says refusal, and the declined content then goes to every stored
+		// credential instead of stopping on one.
+		const info = await body(403, {
+			error: { code: "403", type: "cyber_policy", message: "Provider declined the request" },
+		});
+		expect(info.code).toBe("cyber_policy");
+		expect(AIError.contentPolicyRefusalDetails(new CodexApiError(info))).toEqual({
+			type: "refusal",
+			category: "cyber_policy",
+			explanation: "Provider declined the request",
+		});
+	});
+
+	it("still reports a status when the body carries no machine code at all", async () => {
+		const info = await body(403, { error: { code: "403", message: "Forbidden" } });
+		expect(info.code).toBe("403");
+		expect(AIError.contentPolicyRefusalDetails(new CodexApiError(info))).toBeUndefined();
+	});
+
+	it("keeps an eligibility denial rotatable when the transport relabels it", async () => {
+		// The 429 branch replaces the body's sentence with "ChatGPT rate limit exceeded.".
+		// Classification must still see the enrolment wording, or the sibling account that can
+		// serve this request is never tried.
+		const info = await body(429, {
+			error: { code: "cyber_policy", message: "Join Trusted Access for Cyber to continue." },
+		});
+		const error = new CodexApiError(info);
+		expect(error.message).toContain("rate limit");
+		expect(AIError.isAccountPolicyError(error)).toBe(true);
+		expect(AIError.contentPolicyRefusalDetails(error)).toBeUndefined();
 	});
 });
