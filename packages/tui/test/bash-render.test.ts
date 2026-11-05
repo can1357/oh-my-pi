@@ -188,8 +188,6 @@ describe("bashToolRenderer", () => {
 			],
 			["deadline", formatBackgroundNotice("bash-42", 300)],
 			["deadline disabled", formatBackgroundNotice("bash-42", undefined)],
-			// Names its command and a directory whose name holds a line break, still on the notice's one line.
-			["command named", formatBackgroundNotice("bash-42", 300, { command: "sleep 30\ntrue", cwd: "sub\nline" })],
 		] as const) {
 			const component = bashToolRenderer.renderResult(
 				{

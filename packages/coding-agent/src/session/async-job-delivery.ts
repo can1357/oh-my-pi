@@ -12,7 +12,6 @@ import { prompt } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobType } from "../async";
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
-import { formatCommandIdentity } from "@oh-my-pi/pi-tui/tools/bash";
 import { escapeHarnessTags } from "./harness-tags";
 import type { CustomMessage } from "./messages";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
@@ -111,6 +110,17 @@ export function taskAgentHandles(
 	return job.status === "completed" && job.agentOutputPublished !== false ? "agent" : "history";
 }
 
+/** Longest command a completion header quotes before eliding its middle. */
+const COMMAND_IDENTITY_MAX_CHARS = 400;
+
+/** A bash command on one line, middle elided past the cap so commands differing only at the end stay distinct. */
+function commandIdentity(command: string): string {
+	const oneLine = command.trim().replace(/\r\n|\r|\n/g, "\\n");
+	if (oneLine.length <= COMMAND_IDENTITY_MAX_CHARS) return oneLine;
+	const keep = COMMAND_IDENTITY_MAX_CHARS / 2;
+	return `${oneLine.slice(0, keep)}…${oneLine.slice(-keep)}`;
+}
+
 export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {
 	if (entries.length === 0) return null;
 	const jobs = entries.map(entry => {
@@ -129,10 +139,10 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 		// subagent's output), a subagent's payload and its validation error are
 		// text the job controls: it must not close the `<system-notice>` it renders
 		// into or open a forged harness block. Neither may the label naming it.
-		// A bash job is named by its command in both headers, as its start notice
-		// named it: parallel calls' start results arrive in completion order.
+		// A bash job is named by its whole command: its label truncates the tail, so parallel jobs
+		// that share a prefix would otherwise read the same in the notice that delivers them.
 		const command = entry.job?.type === "bash" ? entry.job.process?.command : undefined;
-		const headerLabel = command === undefined ? entry.job?.label : formatCommandIdentity(command);
+		const headerLabel = command === undefined ? entry.job?.label : commandIdentity(command);
 		return {
 			jobId: entry.jobId,
 			agentUrlId,

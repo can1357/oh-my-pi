@@ -45,46 +45,23 @@ import { node } from "../native/describe";
 /** Default collapsed shell output preview height. */
 export const BASH_DEFAULT_PREVIEW_LINES = DEFAULT_TERMINAL_PREVIEW_LINES;
 
-/** Longest command a background notice names before eliding its middle; matches the approval prompt's budget. */
-const COMMAND_IDENTITY_MAX_CHARS = 2000;
-
-/**
- * A bash job's command as its background notices name it: on one line (line breaks written `\n`, so
- * line-based notice stripping still finds the notice) and, past {@link COMMAND_IDENTITY_MAX_CHARS},
- * with the middle elided so commands that differ only at the end stay distinguishable.
- */
-export function formatCommandIdentity(command: string): string {
-	const oneLine = command.trim().replace(/\r\n|\r|\n/g, "\\n");
-	if (oneLine.length <= COMMAND_IDENTITY_MAX_CHARS) return oneLine;
-	const keep = COMMAND_IDENTITY_MAX_CHARS / 2;
-	return `${oneLine.slice(0, keep)}[…${oneLine.length - 2 * keep}ch elided…]${oneLine.slice(-keep)}`;
-}
-
 /**
  * LLM-facing footer appended when a tool call becomes a background job. It states the job's kill
  * deadline (`timeoutSec`, `undefined` when disabled) so the model knows the job will die at it before
  * it waits on the result. The deadline counts the job's whole run time, not time left from now: an
- * auto-backgrounded call has already spent its foreground wait. `work` names a bash job's command,
- * and its directory when that is not the session's: parallel calls' results arrive in completion
- * order, so the id alone does not say which call started which job.
+ * auto-backgrounded call has already spent its foreground wait.
  */
-export function formatBackgroundNotice(
-	jobId: string,
-	timeoutSec: number | undefined,
-	work?: { command: string; cwd?: string },
-): string {
+export function formatBackgroundNotice(jobId: string, timeoutSec: number | undefined): string {
 	const deadline =
 		timeoutSec === undefined
 			? " (no deadline)"
 			: ` (killed once it has run ${timeoutSec}s in total; \`timeout: 0\` disables the deadline)`;
-	const cwd = work?.cwd ? ` in ${work.cwd.replace(/\r\n|\r|\n/g, "\\n")}` : "";
-	const named = work ? ` for \`${formatCommandIdentity(work.command)}\`${cwd}` : "";
-	return `Backgrounded as job ${jobId}${named}${deadline}; its output is injected into the conversation as a follow-up the moment it finishes. Do NOT poll for it (no \`sleep\`, \`ps\`, \`pgrep\`, \`top\`, \`pidwait\`, log tailing): every poll is a wasted turn. Do other work, or end your reply and wait to be woken.`;
+	return `Backgrounded as job ${jobId}${deadline}; its output is injected into the conversation as a follow-up the moment it finishes. Do NOT poll for it (no \`sleep\`, \`ps\`, \`pgrep\`, \`top\`, \`pidwait\`, log tailing): every poll is a wasted turn. Do other work, or end your reply and wait to be woken.`;
 }
 
 /**
- * Whether `line` is `formatBackgroundNotice(jobId, …)` for any deadline and label, including the
- * deadline-less `Backgrounded as job <id>; …` form persisted in older transcripts.
+ * Whether `line` is `formatBackgroundNotice(jobId, …)` for any deadline, including the deadline-less
+ * `Backgrounded as job <id>; …` form persisted in older transcripts.
  */
 function isBackgroundNotice(line: string, jobId: string): boolean {
 	const prefix = `Backgrounded as job ${jobId}`;
