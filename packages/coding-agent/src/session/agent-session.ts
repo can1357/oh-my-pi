@@ -14291,7 +14291,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const model = this.model!;
 			const apiKey = await this.#modelRegistry.getApiKey(model, this.sessionId);
 			if (!apiKey) {
-				throw new Error(`No API key for ${model.provider}`);
+				// `getApiKey` is the quiet availability probe: it cannot say why. The same
+				// helper the prompt preflight uses names the source that failed, so a broken
+				// mint command reads as a broken mint command here as well.
+				const sourceFailure = await this.#describeCredentialSourceFailure(model);
+				throw new Error(sourceFailure ?? `No API key for ${model.provider}`);
 			}
 			const result = await generateBranchSummary(entriesToSummarize, {
 				model,

@@ -1227,6 +1227,27 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}
 		});
 
+		// The six inputs a review arm leaked through the real CLI at round 5, each
+		// confirmed in that run's own ~/.omp/logs. They are fixtures rather than a
+		// re-survey: a 46-input survey of the label helper in isolation reported zero
+		// leaks in the same round, because none of these was among its inputs.
+		test.each([
+			// Characters JavaScript calls whitespace and /bin/sh does not. The shell sees
+			// ONE assignment followed by `false`; splitting inside the value printed the
+			// value as the program name.
+			["a nonbreaking space inside an assignment value", "LABEL=x\u00a0sk-live-nbsp false"],
+			["an em space inside an assignment value", "LABEL=x\u2003sk-live-em false"],
+			["a carriage return inside an assignment value", "LABEL=x\rsk-live-cr false"],
+			// Executable words that only LOOK like assignments once quotes and escapes are
+			// removed. The shell runs `LABEL=x` as a program; its argument is not ours to print.
+			["a quoted word that decodes to NAME=value", "'LABEL=x' sk-live-quoted"],
+			["an escaped = in a word that decodes to NAME=value", "LABEL\\=x sk-live-escaped-eq"],
+			["a partly quoted name that decodes to NAME=value", "LA'BEL'=x sk-live-split-name"],
+		])("the label leaks nothing for %s", async (_name, apiKeyConfig) => {
+			const refusal = await requestRefusal(providerWithApiKey(`!${apiKeyConfig}`));
+			expect(refusal.message).not.toContain("sk-live-");
+		});
+
 		test("a 401 whose re-resolution yields nothing reports the source, not the rejection", async () => {
 			const tokenFile = path.join(tempDir, "remint-token.txt");
 			fs.writeFileSync(tokenFile, "stale-key");

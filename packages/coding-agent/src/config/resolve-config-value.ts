@@ -266,6 +266,15 @@ export async function resolveCredentialConfigValue(valueConfig: string): Promise
 /** A leading `NAME=value` environment assignment of a simple command. */
 const COMMAND_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
+/**
+ * What `/bin/sh` treats as a word separator, and nothing else. JavaScript's
+ * `\s` and `String.trim` also match a nonbreaking space, an em space and a
+ * carriage return, which the shell treats as ordinary characters: splitting a
+ * word there desynchronised the scan and printed an assignment's value as the
+ * program name, into the message and into `~/.omp/logs`.
+ */
+const SHELL_BLANK = /[ \t\n]/;
+
 /** Unquoted shell syntax we do not parse, and will not print past. */
 const SHELL_METACHARACTER = /[$`|&;<>(){}*?!~#\n]/;
 
@@ -310,17 +319,31 @@ function firstShellWord(command: string): { word: string; rest: string; safe: bo
 			continue;
 		}
 		if (char === "\\" && index + 1 < command.length) {
+			// A backslash before a newline is a line continuation: the shell removes both
+			// and the word continues, so `fal\<newline>se` is the program `false`.
+			if (command[index + 1] === "\n") {
+				index++;
+				continue;
+			}
 			word += command[++index];
 			continue;
 		}
-		if (char === undefined || /\s/.test(char)) break;
+		if (char === undefined || SHELL_BLANK.test(char)) break;
 		if (SHELL_METACHARACTER.test(char)) safe = false;
 		word += char;
 	}
 	// The command ran out inside a quote: the real shell would not have ended the
 	// word here, so nothing we collected is reliably the program. Fail closed.
 	if (quote !== undefined) safe = false;
-	return { word, rest: command.slice(index).trim(), safe };
+	return { word, rest: trimShellBlanks(command.slice(index)), safe };
+}
+
+function trimShellBlanks(text: string): string {
+	let start = 0;
+	let end = text.length;
+	while (start < end && SHELL_BLANK.test(text[start] as string)) start++;
+	while (end > start && SHELL_BLANK.test(text[end - 1] as string)) end--;
+	return text.slice(start, end);
 }
 
 /**
@@ -330,13 +353,19 @@ function firstShellWord(command: string): { word: string; rest: string; safe: bo
  * value dropped, and the home directory is shortened out of the program path.
  */
 function commandLabel(command: string): string {
-	let rest = command.trim();
+	let rest = trimShellBlanks(command);
 	const parts: string[] = [];
 	let elided = false;
 	while (rest.length > 0) {
+		// Whether this word is a shell assignment is decided on the RAW text, before any
+		// quote or escape removal. Deciding it on the decoded word classified `'LABEL=x'`,
+		// `LABEL\=x` and `LA'BEL'=x` — every one an executable word — as assignments, and
+		// then printed their first ARGUMENT as the program name.
+		const name = COMMAND_ASSIGNMENT.exec(rest)?.[0];
+		if (name === undefined) break;
 		const next = firstShellWord(rest);
-		if (next.word.length === 0 || !COMMAND_ASSIGNMENT.test(next.word)) break;
-		parts.push(`${next.word.slice(0, next.word.indexOf("="))}=…`);
+		if (next.word.length === 0) break;
+		parts.push(`${name.slice(0, -1)}=…`);
 		// The name is safe, the value was not parsed: stop before printing anything
 		// after a substitution we do not understand. `SECRET=$(mint) prog` reads as
 		// `SECRET=… …`, never as the substitution's text.
