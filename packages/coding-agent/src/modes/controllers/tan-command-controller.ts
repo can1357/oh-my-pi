@@ -11,7 +11,7 @@ import type { AgentSession } from "../../session/agent-session";
 import { BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE } from "../../session/messages";
 import { isHiddenUserCompanion } from "../../session/queued-messages";
 import { SessionManager } from "../../session/session-manager";
-import { createMCPProxyTools, createSubagentSettings, followMCPTools } from "../../task/executor";
+import { createSubagentSettings, followMCPTools } from "../../task/executor";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../../tools/todo";
 import type { InteractiveModeContext } from "../types";
 
@@ -152,8 +152,11 @@ export class TanCommandController {
 
 					let clone: AgentSession | undefined;
 					// Mint proxies at clone time (not dispatch time) and subscribe first,
-					// so the clone follows MCP reloads for its whole run.
-					const mcpFollower = mcpManager ? followMCPTools(mcpManager) : undefined;
+					// so the clone follows MCP reloads for its whole run. A fork of the owner
+					// starts from the owner's view, so it renders the owner's exact tools.
+					const mcpFollower = mcpManager
+						? followMCPTools(mcpManager, { scope: cloneManager.getSessionId() })
+						: undefined;
 					try {
 						try {
 							const created = await sdk.createAgentSession({
@@ -174,7 +177,8 @@ export class TanCommandController {
 								settings,
 								hasUI: false,
 								enableMCP: false,
-								mcpTools: mcpManager ? createMCPProxyTools(mcpManager) : undefined,
+								mcpTools: mcpFollower?.proxyTools(),
+								mcpToolScope: mcpFollower?.scope,
 								enableLsp,
 								agentId: cloneId,
 								agentDisplayName: "tan",

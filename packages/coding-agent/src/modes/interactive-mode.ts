@@ -408,6 +408,7 @@ import {
 	cfgDisplayCollapseCompacted,
 	cfgDisplayHideToolActivity,
 	cfgDisplayPinnedAgents,
+	cfgDisplayShellVisualization,
 	cfgDisplayShowTokenUsage,
 	cfgDisplayShowTurnTime,
 	cfgDisplaySubagentLivePreview,
@@ -505,6 +506,7 @@ const cfgLiveUiSettings = combine({
 	"compaction.enabled": cfgCompactionEnabled,
 	"compaction.methodOrder": cfgCompactionMethodOrder,
 	"display.hideToolActivity": cfgDisplayHideToolActivity,
+	"display.shellVisualization": cfgDisplayShellVisualization,
 	"terminal.showImages": cfgTerminalShowImages,
 	"terminal.programStatus": cfgTerminalProgramStatus,
 	hideThinkingBlock: cfgHideThinkingBlock,
@@ -4357,6 +4359,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (
 			any(
 				"display.advisorCollapsedLines",
+				"display.shellVisualization",
 				"display.cacheMissMarker",
 				"display.collapseCompacted",
 				"display.showTokenUsage",

@@ -1,7 +1,8 @@
 //! `grep` builtin implemented on top of the ripgrep libraries.
 //!
-//! Matching uses `grep-regex`/`grep-searcher`; recursive searches walk and
-//! run in parallel through `pi-walker`, printing files in path order. Also hosts
+//! Matching uses `grep-regex`/`grep-searcher`; recursive searches walk
+//! through `pi-walker` and search the files inline, moving to parallel
+//! workers once the search runs long, printing files in path order. Also hosts
 //! the plumbing `rg` shares with it: exit status, record layout, and the
 //! line-length bound.
 
@@ -17,7 +18,6 @@ use std::{
 	},
 };
 
-use futures::{StreamExt, stream};
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum, parser::ValueSource};
 use globset::{Glob, GlobMatcher};
 use grep_matcher::{LineTerminator, Matcher};
@@ -29,6 +29,7 @@ use grep_searcher::{
 use pi_walker::{
 	FileType,
 	exec,
+	fs::FileOpener,
 	grep::{Engine, pcre2_jit_enabled},
 	walk,
 };
@@ -1054,11 +1055,38 @@ struct FileSearch {
 	matched:   io::Result<bool>,
 }
 
-/// What one search worker reuses across files: its searcher, read buffer and output buffer.
+/// What one search worker reuses across files: its searcher, read buffer, output buffer, and the opener of a native tree's files.
 struct Worker {
 	searcher: Searcher,
 	buf:      Vec<u8>,
 	out:      Vec<u8>,
+	opener:   Option<FileOpener>,
+	/// Reused for the path of each listed file.
+	path:     PathBuf,
+	/// Reused for the displayed name of each listed file.
+	display:  PathBuf,
+}
+
+/// A file being searched.
+enum Input {
+	/// A regular file a native walk listed, opened relative to its directory.
+	Listed(pi_walker::fs::File),
+	Source(stdio::Source),
+}
+
+impl Input {
+	/// Reads up to `buf.len()` bytes; 0 at end of input.
+	async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		match self {
+			Self::Listed(file) => {
+				// Reads never suspend: spend the coop budget so a long run
+				// still yields and its cancellation takes effect.
+				tokio::task::coop::consume_budget().await;
+				file.read(buf).await
+			},
+			Self::Source(source) => source.read(buf).await,
+		}
+	}
 }
 
 impl Worker {
@@ -1072,9 +1100,18 @@ impl Worker {
 	}
 }
 
+/// The walked files of a directory operand, searched by index.
+struct Listed {
+	layer: pi_walker::Fs,
+	files: walk::Collection,
+}
+
 /// Everything the concurrent per-file searches of one directory operand share.
 struct DirSearch<M> {
 	fs:       pi_vfs::Fs,
+	/// The directory operand's files; a native tree's open through each
+	/// worker's [`FileOpener`]. `None` for a file operand.
+	listed:   Option<Listed>,
 	halt:     Halt,
 	operand:  OsString,
 	resolved: PathBuf,
@@ -1086,7 +1123,18 @@ struct DirSearch<M> {
 impl<M: Matcher + Send + Sync + 'static> DirSearch<M> {
 	/// A worker whose searcher is built once from the shared builder.
 	fn worker(&self) -> Worker {
-		Worker { searcher: self.searcher.build(), buf: vec![0u8; READ_CHUNK], out: Vec::new() }
+		Worker {
+			searcher: self.searcher.build(),
+			buf:      vec![0u8; READ_CHUNK],
+			out:      Vec::new(),
+			opener:   self
+				.listed
+				.as_ref()
+				.filter(|listed| listed.layer.is_native())
+				.map(|listed| FileOpener::new(&listed.layer)),
+			path:     PathBuf::new(),
+			display:  PathBuf::new(),
+		}
 	}
 
 	/// Classifies one file's search result; a broken pipe stops the search, any other error is reported per file.
@@ -1113,14 +1161,14 @@ impl<M: Matcher + Send + Sync + 'static> DirSearch<M> {
 		FileSearch { out, err, had_error, matched }
 	}
 
-	/// Pushes `source` through the worker's searcher into its output buffer, failing with the cancellation error once the halt is raised.
-	async fn push_source(
+	/// Pushes `input` through the worker's searcher into its output buffer, failing with the cancellation error once the halt is raised.
+	async fn push_input(
 		&self,
-		source: &mut stdio::Source,
+		input: &mut Input,
 		display: &[u8],
 		worker: &mut Worker,
 	) -> io::Result<bool> {
-		let Worker { searcher, buf, out } = worker;
+		let Worker { searcher, buf, out, .. } = worker;
 		let terminator = bound_terminator(searcher, &self.matcher);
 		let mut sink = GrepSink {
 			out,
@@ -1137,7 +1185,7 @@ impl<M: Matcher + Send + Sync + 'static> DirSearch<M> {
 			if self.halt.raised() {
 				return Err(pi_vfs::cancelled());
 			}
-			let read = source.read(buf).await?;
+			let read = input.read(buf).await?;
 			if read == 0 {
 				break;
 			}
@@ -1150,14 +1198,48 @@ impl<M: Matcher + Send + Sync + 'static> DirSearch<M> {
 		Ok(sink.any_match)
 	}
 
+	/// Opens `path`: a listed file of a native tree through the worker's
+	/// opener, anything that fails there (a special file, an error) through
+	/// `fs`, which reports it as a standalone open would.
+	async fn open(&self, worker: &mut Worker, path: &Path) -> io::Result<Input> {
+		if let Some(opener) = &mut worker.opener
+			&& self.fs.is_native_local(path)
+			&& let Ok(file) = opener.open(path).await
+		{
+			return Ok(Input::Listed(file));
+		}
+		stdio::Source::open(&self.fs, path).await.map(Input::Source)
+	}
+
+	/// Searches the `index`th listed file, its paths built in the worker's
+	/// buffers.
+	async fn search_listed(&self, worker: &mut Worker, index: usize) -> FileSearch {
+		let listed = self.listed.as_ref().expect("a directory search lists its files");
+		let rel = listed.files.get(index).path;
+		let (mut path, mut display) = (std::mem::take(&mut worker.path), std::mem::take(&mut worker.display));
+		listed.layer.join_into(&mut path, &self.resolved, rel);
+		if listed.layer.is_native() {
+			listed.layer.join_into(&mut display, Path::new(&self.operand), rel);
+		} else {
+			display = display_path_for_operand(&self.operand, &self.resolved, &path);
+		}
+		let found = self.search_at(worker, &path, &display).await;
+		(worker.path, worker.display) = (path, display);
+		found
+	}
+
 	async fn search(&self, worker: &mut Worker, path: &Path) -> FileSearch {
 		let display_path = display_path_for_operand(&self.operand, &self.resolved, path);
-		match stdio::Source::open(&self.fs, path).await {
-			Ok(mut source) => {
+		self.search_at(worker, path, &display_path).await
+	}
+
+	async fn search_at(&self, worker: &mut Worker, path: &Path, display_path: &Path) -> FileSearch {
+		match self.open(worker, path).await {
+			Ok(mut input) => {
 				let searched = self
-					.push_source(&mut source, display_path.as_os_str().as_encoded_bytes(), worker)
+					.push_input(&mut input, display_path.as_os_str().as_encoded_bytes(), worker)
 					.await;
-				self.finish(&display_path, searched, worker.take_out())
+				self.finish(display_path, searched, worker.take_out())
 			},
 			Err(error) => {
 				let mut err = Vec::new();
@@ -1170,7 +1252,7 @@ impl<M: Matcher + Send + Sync + 'static> DirSearch<M> {
 	}
 }
 
-/// Recursively searches a directory operand on parallel workers, pruning
+/// Recursively searches a directory operand ([`exec::adaptive`]: inline, then on parallel workers), pruning
 /// excluded directories and writing each file's output in path order.
 #[allow(clippy::too_many_arguments)]
 async fn search_dir<M: Matcher + Clone + Send + Sync + 'static, W: Write + Send>(
@@ -1220,11 +1302,11 @@ async fn search_dir<M: Matcher + Clone + Send + Sync + 'static, W: Write + Send>
 			let _ = writeln!(host.stderr, "grep: {}: {}", display_path.display(), error.error);
 		}
 	}
-	let paths: Vec<PathBuf> =
-		(0..files.len()).map(|index| layer.join(resolved, files.get(index).path)).collect();
+	let count = files.len();
 	let workers = if opts.line_buffered { 1 } else { walk_opts.parallelism(&layer) };
 	let shared = Arc::new(DirSearch {
 		fs:       vfs.clone(),
+		listed:   Some(Listed { layer, files }),
 		halt:     Halt { scope, outer: Arc::clone(outer) },
 		operand:  operand.to_owned(),
 		resolved: resolved.to_owned(),
@@ -1234,26 +1316,37 @@ async fn search_dir<M: Matcher + Clone + Send + Sync + 'static, W: Write + Send>
 	});
 	let mut any = false;
 	let mut failed = None;
-	let mut results = exec::ordered(stream::iter(paths), workers, workers, || shared.worker(), {
+	let mut pace = host.output_pace();
+	let mut results = exec::adaptive(0..count, workers, exec::INLINE_BUDGET, || shared.worker(), {
 		let shared = Arc::clone(&shared);
-		move |mut worker: Worker, path: PathBuf| {
+		move |mut worker: Worker, index: usize| {
 			let shared = Arc::clone(&shared);
 			async move {
-				let found = shared.search(&mut worker, &path).await;
+				let found = shared.search_listed(&mut worker, index).await;
 				(worker, found)
 			}
 		}
 	});
 	while let Some(found) = results.next().await {
-		let written = out
-			.write_all(&found.out)
-			.and_then(|()| if opts.line_buffered { out.flush() } else { Ok(()) });
-		if let Err(error) = written {
-			failed = Some(error);
-			break;
+		// Most files print nothing; their empty writes are skipped.
+		if !found.out.is_empty() {
+			let written = out
+				.write_all(&found.out)
+				.and_then(|()| if opts.line_buffered { out.flush() } else { Ok(()) });
+			if let Err(error) = written {
+				failed = Some(error);
+				break;
+			}
 		}
-		let _ = host.stderr.write_all(&found.err);
-		if let Err(error) = host.flush_output().await {
+		if !found.err.is_empty() {
+			let _ = host.stderr.write_all(&found.err);
+		}
+		let delivered = if opts.line_buffered || !results.next_ready() {
+			host.flush_output().await
+		} else {
+			host.pace_output(&mut pace).await
+		};
+		if let Err(error) = delivered {
 			failed = Some(error);
 			break;
 		}
@@ -1625,6 +1718,7 @@ async fn execute_search<M: Matcher + Clone + Send + Sync + 'static>(
 				}
 				let shared = DirSearch {
 					fs:       fs.clone(),
+					listed:   None,
 					halt:     Halt { scope: Arc::clone(&outer), outer: Arc::clone(&outer) },
 					operand:  operand.clone(),
 					resolved: resolved.clone(),

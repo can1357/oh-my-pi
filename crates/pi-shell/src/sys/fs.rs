@@ -590,6 +590,8 @@ fn create_with_mode(
 		let _ = nonblock;
 		o
 	};
+	#[cfg(not(unix))]
+	let _ = process_umask;
 	#[cfg(unix)]
 	if flags.contains(OpenFlags::CREATE) && process_umask.is_none_or(|mask| mode & mask != 0) {
 		use std::os::unix::fs::PermissionsExt as _;

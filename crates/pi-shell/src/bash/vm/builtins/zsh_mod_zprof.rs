@@ -365,11 +365,10 @@ fn report(p: &Prof) -> String {
 	}
 	fs.sort_by(|&a, &b| desc(p.funcs[a].time, p.funcs[b].time));
 	for &i in &fs {
-		out.push_str(
-			"\n-----------------------------------------------------------------------------------\n\\
-			 \
-			 n",
-		);
+		out.push_str(concat!(
+			"\n-------------------------------------------",
+			"----------------------------------------\n\n",
+		));
 		for &ai in &arcs {
 			let a = &p.arcs[ai];
 			if a.to == i {
