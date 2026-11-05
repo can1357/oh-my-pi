@@ -128,6 +128,13 @@ What is refused (always as a `failed` receipt naming the reason, never a throw):
 | Duplicate | same (sender, recipient, sha256(body)) within 30 s                        |
 | Hop chain | more than 28 senders in `IrcMessage.hops` (the bus appends the sender)    |
 
+An empty rate window always admits one message, whatever its size: a lone
+500-character report costs 125 tokens and goes through even though it exceeds
+the whole 30-token budget. Flood semantics are unchanged — that message spends
+the window, so the rest of the burst is refused until the window slides past
+it. (The per-sender window map is capped at 256 senders: idle windows are
+swept first, and a burst of distinct live senders evicts the oldest.)
+
 Progress notes (`?progress`) and automated wake relays are exempt from the
 duplicate check — both are meant to repeat — and `wait`, broadcast expansion,
 and the internal display relay (`#relayToMainUi`) are untouched. A busy
