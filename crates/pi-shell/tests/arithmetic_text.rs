@@ -238,3 +238,44 @@ async fn parameter_arithmetic_offsets_end_at_the_parameter_brace() {
 	)
 	.await;
 }
+
+/// Every present/absent combination of an arithmetic `for` header's three
+/// sections, including the adjacent-semicolon forms (`for ((i=0;;i++))`,
+/// `for ((;;))`). Each header parses as three empty-able clauses rather than
+/// a syntax error, an omitted condition is true, and every loop runs the
+/// number of times Bash 5.2.21 runs it.
+#[tokio::test]
+async fn arithmetic_for_header_empty_section_matrix() {
+	run(
+		concat!(
+			// Initialisation, condition and step all present.
+			"i=9\nfor ((i=0;i<3;i++)); do echo PPP$i; done\necho PPP=$?\n",
+			// Step absent: the body advances the counter.
+			"i=9\nfor ((i=0;i<3;)); do echo PPx$i; i=$((i+1)); done\necho PPx=$?\n",
+			// Condition absent between adjacent semicolons: true, so `break`
+			// is what ends the loop.
+			"i=9\nfor ((i=0;;i++)); do echo PxP$i; [ $i -ge 2 ] && break; done\necho PxP=$?\n",
+			// Condition and step both absent.
+			"i=9\nfor ((i=0;;)); do echo Pxx$i; break; done\necho Pxx=$?\n",
+			// Initialisation absent: the counter keeps the value it had.
+			"i=0\nfor ((;i<3;i++)); do echo xPP$i; done\necho xPP=$?\n",
+			"i=0\nfor ((;i<3;)); do echo xPx$i; i=$((i+1)); done\necho xPx=$?\n",
+			"i=0\nfor ((;;i++)); do echo xxP$i; [ $i -ge 2 ] && break; done\necho xxP=$?\n",
+			// All three absent.
+			"i=0\nfor ((;;)); do echo xxx$i; break; done\necho xxx=$?\n",
+		),
+		concat!(
+			"PPP0\nPPP1\nPPP2\nPPP=0\n",
+			"PPx0\nPPx1\nPPx2\nPPx=0\n",
+			"PxP0\nPxP1\nPxP2\nPxP=0\n",
+			"Pxx0\nPxx=0\n",
+			"xPP0\nxPP1\nxPP2\nxPP=0\n",
+			"xPx0\nxPx1\nxPx2\nxPx=0\n",
+			"xxP0\nxxP1\nxxP2\nxxP=0\n",
+			"xxx0\nxxx=0\n",
+		),
+		false,
+		0,
+	)
+	.await;
+}
