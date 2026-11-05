@@ -79,6 +79,8 @@ struct Cached {
 	raw:          [Option<(usize, Arc<raw::Static>)>; 2],
 	docs:         HashMap<NodeKey, Arc<Vec<Option<Span>>>>,
 	script_utf16: Option<Arc<[u32]>>,
+	/// Parses of uncompiled script byte ranges; the script never changes.
+	ahead:        HashMap<(usize, usize), Option<Arc<Ahead>>>,
 }
 #[derive(Clone, Debug)]
 struct UnitStamp {
@@ -153,6 +155,17 @@ struct Nested {
 	map:      SourceMap,
 	analysis: Analysis,
 }
+/// Unit of script parsed ahead of the engine; no compiled unit has it.
+const AHEAD: u32 = u32::MAX;
+/// Script bytes the engine has not compiled yet, parsed statically.
+#[derive(Debug)]
+struct Ahead {
+	program:  Program,
+	/// Source identity per command: one past its script byte offset.
+	ids:      Vec<u32>,
+	map:      SourceMap,
+	analysis: Analysis,
+}
 #[derive(Clone, Debug)]
 struct ByteOrigins {
 	base: u32,
@@ -205,8 +218,9 @@ pub(crate) fn analyzed(source: &impl VizSource) -> Arc<Analysis> {
 	}
 	Arc::clone(&cache.analysis.as_ref().unwrap().1)
 }
-/// Render only syntax the engine has announced. Uncompiled script bytes stay
-/// literal.
+/// Render announced syntax with its outcomes. Script the engine has not
+/// compiled yet is parsed ahead and drawn without outcomes; what does not
+/// parse stays literal.
 pub fn render(source: &impl VizSource, runtime: &Runtime<'_>, options: &Options) -> Presentation {
 	let analysis = analyzed(source);
 	let original = if options.view == View::Pseudo && options.split {
@@ -478,11 +492,7 @@ impl<S: VizSource> Printer<'_, S> {
 			};
 			let start = at as usize;
 			if start > cursor {
-				self.pending(
-					&source.script()[cursor..start.min(source.script().len())],
-					cursor as u32,
-					0,
-				);
+				self.ahead(cursor, start.min(source.script().len()));
 			}
 			if self.options.layers.idioms
 				&& let Some(end) = self.setup_units(roots, position)
@@ -509,9 +519,83 @@ impl<S: VizSource> Printer<'_, S> {
 			cursor = cursor.max(start.saturating_add(unit.source.len()));
 			position += 1;
 		}
-		if cursor < source.script().len() {
-			self.pending(&source.script()[cursor..], cursor as u32, 0);
+		self.ahead(cursor, source.script().len());
+	}
+
+	/// Draws script bytes `lo..hi` the engine has not compiled (still
+	/// streaming in, or not reached yet) from a static parse with default
+	/// features, so Pseudo shows a command before it runs. Nothing there
+	/// has an outcome until the engine announces it; the first command that
+	/// does not parse and everything after it stay literal, as does a unit
+	/// the engine announced without syntax (its parse may have used aliases
+	/// or features this one lacks) and everything after that.
+	fn ahead(&mut self, lo: usize, hi: usize) {
+		if lo >= hi {
+			return;
 		}
+		let source = self.source;
+		let script: &[u8] = source.script().as_ref();
+		let stop = (0..source.unit_count())
+			.filter_map(|index| source.unit(index)?.at)
+			.map(|at| at as usize)
+			.filter(|at| (lo..hi).contains(at))
+			.min()
+			.unwrap_or(hi);
+		let Some(ahead) = self.parsed_ahead(lo, stop) else {
+			self.pending(&script[lo..hi], lo as u32, 0);
+			return;
+		};
+		let bytes = &script[lo..stop];
+		let mut cursor = 0;
+		for (command, id) in ahead.program.commands.iter().zip(&ahead.ids) {
+			let start = command.span.lo as usize;
+			if start > cursor {
+				self.pending(&bytes[cursor..start], (lo + cursor) as u32, 0);
+			}
+			let context = Context {
+				unit: AHEAD,
+				source: *id,
+				bytes,
+				map: ahead.map.clone(),
+				untraced: None,
+				origin: None,
+				analysis: &ahead.analysis,
+			};
+			self.list(&command.list, &context, 0);
+			cursor = command.span.hi as usize;
+		}
+		self.pending(&script[lo + cursor..hi], (lo + cursor) as u32, 0);
+	}
+
+	fn parsed_ahead(&self, lo: usize, hi: usize) -> Option<Arc<Ahead>> {
+		if let Some(cached) = self.source.cache().inner.lock().ahead.get(&(lo, hi)) {
+			return cached.clone();
+		}
+		let script: &[u8] = self.source.script().as_ref();
+		let mut parser = Parser::new(&script[lo..hi], Features::NONE, NO_ALIASES);
+		let mut commands = Vec::new();
+		while let Some(Ok(command)) = parser.next_command() {
+			commands.push(command);
+		}
+		let parsed = (!commands.is_empty()).then(|| {
+			let program = Program { commands };
+			let ids: Vec<u32> = program
+				.commands
+				.iter()
+				.map(|command| lo as u32 + command.span.lo + 1)
+				.collect();
+			let mut analysis = analysis::program(&program, AHEAD, &ids);
+			analysis.arithmetic = Arc::clone(&self.analysis.arithmetic);
+			Arc::new(Ahead { map: source::script_map(self.source, lo, hi - lo), program, ids, analysis })
+		});
+		self
+			.source
+			.cache()
+			.inner
+			.lock()
+			.ahead
+			.insert((lo, hi), parsed.clone());
+		parsed
 	}
 
 	fn setup_units(&mut self, roots: &[u32], position: usize) -> Option<usize> {

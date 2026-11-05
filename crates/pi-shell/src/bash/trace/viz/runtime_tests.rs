@@ -45,6 +45,50 @@ fn present(trace: &RunTrace, options: &Options) -> Value {
 	serde_json::from_str(&trace.presentation_json(options).unwrap()).unwrap()
 }
 
+fn rows(p: &Value) -> Vec<(String, &Value)> {
+	p["rows"]
+		.as_array()
+		.unwrap()
+		.iter()
+		.map(|row| {
+			let text = row["segments"]
+				.as_array()
+				.unwrap()
+				.iter()
+				.map(|segment| segment["text"].as_str().unwrap())
+				.collect();
+			(text, row)
+		})
+		.collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn uncompiled_script_is_parsed_ahead_without_outcomes_until_it_stops_parsing() {
+	// A command still streaming in: nothing has run, its last line is unfinished.
+	let trace = RunTrace::new("cd /tmp && git add -A\nfor f in *.go; do echo \"$f\"; done\nif true; th");
+	let streaming = present(&trace, &Options::default());
+	let shown = rows(&streaming);
+	let texts: Vec<&str> = shown.iter().map(|(text, _)| text.as_str()).collect();
+	assert_eq!(texts, [
+		"cwd /tmp",
+		"and git add -A",
+		"for f in glob(\"*.go\"):",
+		"print(f\"{f}\")",
+		"if true; th"
+	]);
+	assert!(shown.iter().all(|(_, row)| row["state"].is_null()), "{streaming}");
+	assert_eq!(shown[4].1["role"], "raw", "an unfinished command stays literal");
+
+	// The engine never reaches the last line: it is drawn, but never ran.
+	let shell = Shell::new(None);
+	let trace = run(&shell, "echo a\nexit 0\necho never").await;
+	let ran = present(&trace, &Options::default());
+	let shown = rows(&ran);
+	let (text, row) = shown.last().unwrap();
+	assert_eq!(text, "print(\"never\")");
+	assert!(row["state"].is_null(), "{ran}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn callout_scripts_are_drawn_by_their_command_but_eval_code_gets_a_frame() {
 	let frames = |p: &Value| {
@@ -68,6 +112,7 @@ async fn callout_scripts_are_drawn_by_their_command_but_eval_code_gets_a_frame()
 	let trace = run(&shell, "x=true; eval \"$x\"").await;
 	assert_eq!(frames(&present(&trace, &Options::default())), 1);
 }
+
 #[test]
 fn legacy_boundary_includes_heredoc_without_parsing_unannounced_future_syntax() {
 	use crate::bash::{
