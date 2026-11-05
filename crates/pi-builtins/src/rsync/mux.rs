@@ -24,7 +24,10 @@
 //! connection itself (a [`ReadProbe`], upstream's zero-timeout poll), and bytes
 //! only move at those decision points; with the in-process pipe sized like a
 //! socketpair, what one side sees at a refill depends only on what the other side
-//! wrote before it, as between upstream's processes.
+//! wrote before it, as between upstream's processes. A read that blocks on an empty
+//! connection first arms it ([`InputPoll::arm`]): like a process woken from poll by
+//! the first write, it gets that write alone, even if the connection thread runs
+//! only after the peer wrote more.
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
@@ -1279,7 +1282,7 @@ impl RState {
 
 	/// Whether the connection holds input (or its end) right now.
 	fn input_waiting(&self) -> bool {
-		self.probe.as_ref().is_some_and(|probe| probe())
+		self.probe.as_ref().is_some_and(|probe| probe.waiting())
 	}
 
 	fn inc_suffix(&self) -> &'static str {
@@ -1539,7 +1542,24 @@ pub(crate) struct MuxReader {
 
 /// Whether a connection's reader would return at once (data or end waiting)
 /// without reading: upstream's zero-timeout poll.
-pub(crate) type ReadProbe = Arc<dyn Fn() -> bool + Send + Sync>;
+pub(crate) type ReadProbe = Arc<dyn InputPoll>;
+
+/// The connection side of a [`ReadProbe`].
+pub(crate) trait InputPoll: Send + Sync {
+	/// Whether input (or its end) is waiting right now.
+	fn waiting(&self) -> bool;
+
+	/// The reader is about to block on a connection that holds nothing: the read
+	/// it requests returns what the next write delivers, as a process blocked in
+	/// upstream's poll wakes for it, however late the connection thread runs.
+	fn arm(&self) {}
+}
+
+impl<F: Fn() -> bool + Send + Sync> InputPoll for F {
+	fn waiting(&self) -> bool {
+		self()
+	}
+}
 
 /// What a refill runs instead of the linked writer's output pass; the argument tells
 /// whether input is already waiting.
@@ -1879,7 +1899,13 @@ impl MuxReader {
 				st = sh.read_now(st);
 				continue;
 			}
+			let fresh = st.request.is_none();
 			if st.request_read() {
+				// Armed under the state lock, so before the connection thread can
+				// see the request.
+				if fresh && let Some(probe) = &st.probe {
+					probe.arm();
+				}
 				sh.cond.notify_all();
 			}
 			let mut wait = CANCEL_POLL;
