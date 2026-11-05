@@ -18,6 +18,13 @@ export interface SubagentProgressPayload {
 	sessionFile?: string;
 	/** See {@link SubagentLifecyclePayload.detached}. */
 	detached?: boolean;
+	/**
+	 * Set on the one frame a spawn emits when it was refused before reaching the
+	 * executor (`task.concurrencyPolicy = "refuse"` and a full
+	 * `task.maxConcurrency`). Such a spawn has no lifecycle frames and no live
+	 * session; observers keyed by agent id can ignore a frame for an unknown id.
+	 */
+	refusalReason?: "concurrency_limit";
 }
 
 /** Payload emitted on TASK_SUBAGENT_LIFECYCLE_CHANNEL */

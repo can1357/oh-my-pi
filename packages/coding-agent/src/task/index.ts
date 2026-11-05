@@ -50,6 +50,8 @@ import {
 	canSpawnAtDepth,
 	getTaskSchema,
 	MAX_TASK_FILE_BYTES,
+	type SubagentProgressPayload,
+	TASK_SUBAGENT_PROGRESS_CHANNEL,
 	type TaskToolSchemaInstance,
 } from "./types";
 import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
@@ -58,12 +60,13 @@ import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { AgentRegistry, isResumable } from "../registry/agent-registry";
+import { emitSubagentFrame } from "../utils/event-bus";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
 import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "./model-approval";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
-import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
+import { mapWithConcurrencyLimitAllSettled, normalizeConcurrencyLimit, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/tools/task";
 import { repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
 import {
@@ -74,7 +77,7 @@ import {
 	StructuredSubagentError,
 	type StructuredSubagentRequest,
 } from "./structured-subagent";
-import { SpawnRun, type SpawnPermit } from "./spawn-run";
+import { SpawnRefusedError, SpawnRun, type SpawnPermit } from "./spawn-run";
 import { type TaskLauncher, TaskLaunchSession } from "./speculative-launch";
 import type { TextTap } from "../job-widgets/text-tap";
 import type { SubagentToolResult } from "./executor";
@@ -83,6 +86,7 @@ import { appendToolResult, createTaskWidgetInputs } from "./widget-inputs";
 import { cfgAsyncEnabled } from "../tools/settings";
 import {
 	cfgTaskBatch,
+	cfgTaskConcurrencyPolicy,
 	cfgTaskDisabledAgents,
 	cfgTaskEnableEffort,
 	cfgTaskEnableLsp,
@@ -516,6 +520,27 @@ interface SyncSpawnRef {
 	index: number;
 	run?: SpawnRun;
 	preAllocatedId?: string;
+	/**
+	 * The spawn's pending progress row, when the call already published one
+	 * (mixed calls). A refusal reports its telemetry through this row's frame.
+	 */
+	progress?: AgentProgress;
+}
+
+/**
+ * A spawn refused at its permit is an admission failure, not a task outcome:
+ * surface it as a tool error so the model reads the limit and does not retry.
+ */
+function refusedSpawnPayload(
+	item: ResolvedTaskItem,
+	index: number,
+	error: SpawnRefusedError,
+): AgentToolResult<TaskToolDetails> {
+	return {
+		content: [{ type: "text", text: `Task ${item.name?.trim() || `#${index + 1}`} failed: ${error.message}` }],
+		isError: true,
+		details: { projectAgentsDir: null, results: [], totalDurationMs: 0 },
+	};
 }
 
 /** Merged view of a sync spawn set's payloads: joined text plus flattened results/usage/paths. */
@@ -812,11 +837,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * subagents across parallel `task` calls within the session. Resized in
 	 * place from `task.maxConcurrency` before every acquire/release so a
 	 * mid-session settings change (UI toggle, `/settings`) applies to both new
-	 * spawns and work already parked in the semaphore queue.
+	 * spawns and work already parked in the semaphore queue. `task.concurrencyPolicy`
+	 * decides what a spawn does when no slot is free: `"queue"` parks it in that
+	 * queue, `"refuse"` raises a `SpawnRefusedError` with the live counts.
 	 */
 	#spawnSemaphore: Semaphore | undefined;
 	readonly #permit: SpawnPermit = {
-		acquire: signal => this.#getSpawnSemaphore().acquire(signal),
+		acquire: signal => this.#acquireSpawnPermit(signal),
 		release: () => this.#releaseSpawnSemaphore(),
 	};
 	/** Streamed calls' speculative launches, keyed by tool-call id until dispatch adopts or discards them. */
@@ -1064,6 +1091,57 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			this.#spawnSemaphore = new Semaphore(max);
 		}
 		return this.#spawnSemaphore;
+	}
+
+	/**
+	 * Take one spawn slot for a run. Under `task.concurrencyPolicy = "refuse"` a
+	 * full semaphore raises a {@link SpawnRefusedError} instead of parking the
+	 * spawn, so the model learns the limit rather than blocking on a slot it
+	 * cannot observe. `#getSpawnSemaphore` resizes in place from the live
+	 * setting first, so both the decision and the reported limit follow a
+	 * mid-session change. An already-aborted call is delegated to `acquire` to
+	 * keep raising the caller's abort reason.
+	 */
+	async #acquireSpawnPermit(signal: AbortSignal): Promise<void> {
+		const semaphore = this.#getSpawnSemaphore();
+		if (signal.aborted) return semaphore.acquire(signal);
+		if (cfgTaskConcurrencyPolicy.get(this.session.settings) !== "refuse") return semaphore.acquire(signal);
+		if (semaphore.tryAcquire()) return;
+		throw new SpawnRefusedError({
+			running: semaphore.running,
+			waiting: semaphore.waiting,
+			limit: normalizeConcurrencyLimit(cfgTaskMaxConcurrency.get(this.session.settings)),
+		});
+	}
+
+	/**
+	 * Publish the single progress frame a refused spawn emits. A spawn refused at
+	 * its permit never reaches the executor, which owns the normal progress
+	 * frames, so the refusal rides the same `task:subagent:progress` channel with
+	 * {@link SubagentProgressPayload.refusalReason} set — no new event channel.
+	 * Only spawns that already have a progress row report one: a refusal before
+	 * the row exists has no id to key observers by.
+	 */
+	#reportSpawnRefusal(args: {
+		refusal: SpawnRefusedError;
+		progress: AgentProgress;
+		toolCallId: string;
+		detached: boolean;
+	}): void {
+		const payload: SubagentProgressPayload = {
+			index: args.progress.index,
+			agent: args.progress.agent,
+			agentSource: args.progress.agentSource,
+			task: args.progress.task,
+			parentToolCallId: args.toolCallId,
+			detached: args.detached,
+			assignment: args.progress.assignment,
+			// No `sessionFile`: a refused spawn never created a child session, and
+			// the parent's file would be a wrong transcript link for its row.
+			progress: { ...args.progress, status: "failed" },
+			refusalReason: args.refusal.reason,
+		};
+		emitSubagentFrame(this.session.eventBus, this.session.subagentEventBus, TASK_SUBAGENT_PROGRESS_CHANNEL, payload);
 	}
 
 	#releaseSpawnSemaphore(): void {
@@ -1484,6 +1562,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				index: spawn.index,
 				preAllocatedId: spawn.agentId,
 				run: spawn.run,
+				progress: spawn.progress,
 			})),
 			onItemProgress: onUpdate
 				? (index, progress) => {
@@ -1655,12 +1734,29 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				// An acquire-time abort and a post-acquire abort take the same
 				// path: progress + onSettled have to fire even when the spawn
 				// never reached the executor, otherwise the batch aggregate state
-				// stays "running" forever.
-				const permitHeld = await activeRun.started.then(
-					() => true,
-					() => false,
+				// stays "running" forever. A refusal is a failure the model must
+				// act on, not an abort: it keeps its own message and its own
+				// telemetry frame.
+				const startFailure = await activeRun.started.then(
+					() => undefined,
+					(error: unknown) => ({ error }) as const,
 				);
-				if (!permitHeld || runSignal.aborted) {
+				if (startFailure?.error instanceof SpawnRefusedError && !runSignal.aborted) {
+					progress.status = "failed";
+					onSettled?.(true);
+					this.#reportSpawnRefusal({
+						refusal: startFailure.error,
+						progress,
+						toolCallId,
+						detached: true,
+					});
+					await reportProgress(
+						`Background task ${agentId} failed.`,
+						buildDetails() as unknown as Record<string, unknown>,
+					);
+					throw new TaskJobError(startFailure.error.message);
+				}
+				if (startFailure || runSignal.aborted) {
 					progress.status = "aborted";
 					onSettled?.(true);
 					throw new Error("Aborted before execution");
@@ -1784,7 +1880,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					detached: false,
 				});
 			run.attach({ signal, onUpdate });
-			return await run.result;
+			try {
+				return await run.result;
+			} catch (error) {
+				if (!(error instanceof SpawnRefusedError)) throw error;
+				if (spawn.progress) {
+					this.#reportSpawnRefusal({ refusal: error, progress: spawn.progress, toolCallId, detached: false });
+				}
+				return refusedSpawnPayload(spawn.item, spawn.index, error);
+			}
 		}
 
 		const startTime = Date.now();
@@ -1887,13 +1991,19 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		return results.map((settled, position) => {
 			if (!settled) return undefined;
 			if (settled.status === "fulfilled") return settled.value;
+			const { item, index, progress } = spawns[position];
+			if (settled.reason instanceof SpawnRefusedError) {
+				if (progress) {
+					this.#reportSpawnRefusal({ refusal: settled.reason, progress, toolCallId, detached: false });
+				}
+				return refusedSpawnPayload(item, index, settled.reason);
+			}
 			const message = settled.reason instanceof Error ? settled.reason.message : String(settled.reason);
-			const item = spawns[position].item;
 			return {
 				content: [
 					{
 						type: "text",
-						text: `Task ${item.name?.trim() || `#${spawns[position].index + 1}`} failed: ${message}`,
+						text: `Task ${item.name?.trim() || `#${index + 1}`} failed: ${message}`,
 					},
 				],
 				details: { projectAgentsDir: null, results: [], totalDurationMs: 0 },

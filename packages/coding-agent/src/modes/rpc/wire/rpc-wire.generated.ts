@@ -1131,6 +1131,8 @@ export interface SubagentProgressPayload {
 	assignment?: string;
 	sessionFile?: string;
 	detached?: boolean;
+	/** Why a spawn was refused before reaching the executor (`task.concurrencyPolicy = "refuse"`). */
+	refusalReason?: "concurrency_limit";
 }
 
 export interface SubagentEventPayload {

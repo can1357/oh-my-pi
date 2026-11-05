@@ -152,6 +152,42 @@ the main session's, so a worker-proxied send follows the main policy. Covering
 tests: `test/irc-guard.test.ts` and the pinning suites listed under "Rebase
 ritual".
 
+## Spawn concurrency policy
+
+`task.concurrencyPolicy` decides what a `task` spawn does when every
+`task.maxConcurrency` slot is busy (default `32`; `0` means unlimited). One
+session-scoped semaphore bounds every `SpawnRun`, and the permit is taken on
+the main thread in `SpawnRun` before `runSubprocess` — so the policy covers
+both direct and worker-thread dispatch (`task.workerThreads`).
+
+| Policy            | What a spawn over the cap does                                    |
+| ----------------- | ----------------------------------------------------------------- |
+| `queue` (default) | Wait in the semaphore FIFO, then start when a slot frees. Unchanged upstream behavior. |
+| `refuse`          | Fail immediately with a model-visible error; never queue.         |
+
+Under `refuse` the spawn returns (it never blocks, and never silently waits):
+
+```text
+Concurrent subagent limit reached (1 running; task.maxConcurrency=1). Do not retry; wait for running tasks or ask the user to raise task.maxConcurrency.
+```
+
+- `1 running` is the live running count and `task.maxConcurrency=1` the
+  configured limit; `, N waiting` is added when spawns were parked before the
+  policy flipped. The policy is read at acquire time, so parked queue-mode
+  spawns keep their place and the flip applies to the next acquire.
+- An inline (`blocking`) spawn returns the text as a tool result with
+  `isError: true`; a background spawn fails its job with the same text and the
+  job's error delivery carries it to the model.
+- A refused spawn emits one `task:subagent:progress` frame with
+  `refusalReason: "concurrency_limit"` — the existing observability channel,
+  no new event; it is emitted for spawns that already have a progress row, and
+  observers keyed by agent id may ignore a frame for an unknown id.
+- Enforcement lives in `packages/coding-agent/src/task/index.ts`
+  (`#acquireSpawnPermit`), the error in `task/spawn-run.ts`
+  (`SpawnRefusedError`), the non-blocking take in `task/parallel.ts`
+  (`Semaphore.tryAcquire`, `running`, `waiting`), and the setting in
+  `task/settings.ts`. Covering tests: `test/spawn-refusal.test.ts`.
+
 ## Rebase ritual
 
 1. Sync the mirror (fast-forward only) and push it:
