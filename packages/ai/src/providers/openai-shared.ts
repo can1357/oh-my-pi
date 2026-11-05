@@ -4460,10 +4460,9 @@ export function throwOpenAIResponsesEventError(
 	const statusDetails = isRecord(response?.status_details) ? response.status_details : undefined;
 	// One call, one authority, for the whole event rather than a position picked here:
 	// `responseErrorEnvelope` knows the root's own code, `error`, `response.error` and
-	// `response.status_details.error`, in precedence order. Picking a position here is what made
-	// this reader disagree with the ones beside it — a root refusal with a diagnostic below it
-	// reported the diagnostic and exited 1 while Chat Completions reported the refusal and exited
-	// 4 on identical bytes. A new body position belongs in that function, never here.
+	// `response.status_details.error`, in precedence order. A new body position belongs in that
+	// function, never here, or this reader and the ones beside it answer differently for
+	// identical bytes.
 	//
 	// `type` is dropped first because on a stream event it names the event (`response.failed`),
 	// and the resolver's last position would otherwise read that name as the error's code.
@@ -4489,10 +4488,9 @@ export function throwOpenAIResponsesEventError(
  * refusal.
  *
  * The code may arrive as `type` with `code` null — OpenAI's own envelope does exactly that — so it
- * is read the same way every other reader of this envelope reads it. Reading `code` alone was worse
- * than merely missing the refusal: the in-band probe recognises a refusal by `code ?? type` and
- * steps aside for this reporter, so a disagreement between the two sent the turn to the generic
- * transient classifier and retried the declined content to the budget.
+ * is read the same way every other reader of this envelope reads it. The in-band probe recognises
+ * a refusal by `code ?? type` and steps aside for this reporter, so reading `code` alone here
+ * would send the turn to the generic transient classifier.
  */
 function throwOpenAIResponsesRefusal(error: Record<string, unknown>, provider: string): void {
 	const code = typeof error.code === "string" ? error.code : typeof error.type === "string" ? error.type : undefined;

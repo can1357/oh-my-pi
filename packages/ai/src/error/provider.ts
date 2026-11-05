@@ -1,4 +1,4 @@
-import type { StopDetails } from "../providers/anthropic-wire";
+import type { AssistantMessage, StopDetails } from "../types";
 import { OpenAIHttpError, ProviderHttpError } from "./classes";
 import { attach, create, Flag, isContentPolicyRefusal, isProviderRefusal } from "./flags";
 
@@ -109,15 +109,20 @@ export function contentPolicyRefusalDetails(error: unknown): RefusalStopDetails 
 	return undefined;
 }
 
+/** The part of a failed assistant turn {@link isProviderRefusal} reads. */
+type RefusedTurn = Pick<AssistantMessage, "stopReason" | "stopDetails">;
+
+function isAssistantTurn(value: unknown): value is RefusedTurn {
+	return typeof value === "object" && value !== null && "stopReason" in value && "role" in value;
+}
+
 /**
  * Whether an upstream failure — a thrown error or a failed assistant turn — is
  * a provider refusal of the request's content. Credential rotation must skip
  * it whatever HTTP status carried it: every sibling account sends the same content.
  */
 export function isContentPolicyRefusalError(error: unknown): boolean {
-	if (typeof error === "object" && error !== null && "stopReason" in error && "role" in error) {
-		return isProviderRefusal(error as Parameters<typeof isProviderRefusal>[0]);
-	}
+	if (isAssistantTurn(error)) return isProviderRefusal(error);
 	return contentPolicyRefusalDetails(error) !== undefined;
 }
 

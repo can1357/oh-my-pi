@@ -4611,10 +4611,7 @@ const innerFailureEventSchema = type({
  * The position it comes from is **not decided here**. `responseErrorEnvelope` owns that — the
  * event's own `code`, then `error` resolved to its innermost envelope, then `response.error`, then
  * `response.status_details.error` — and every other reader of an OpenAI-wire error asks the same
- * function. Deciding it here is what made this reader disagree with the Responses reader beside
- * it: identical bytes gave the provider's own code and exit 4 on one wire and a bare
- * `status=failed` line on the other, and a Codex user lost the reason, the exit status and the
- * refusal-retry allowance. **A new body position is a row in that function, never a branch here.**
+ * function. **A new body position is a row in that function, never a branch here.**
  *
  * `type` is dropped before asking, because on a stream event it names the event rather than the
  * error. Returns `raw` itself when nothing moves, so the ordinary event allocates nothing.
@@ -4626,8 +4623,7 @@ function unwrapCodexFailureEnvelope(raw: unknown): unknown {
 	const resolved = AIError.responseErrorEnvelope(withoutType);
 	// `resolved` may be the event root itself, and that is the point: with `type` stripped the
 	// resolver only returns the root when the root carries a `code` string of its own, which is
-	// the refusal with a diagnostic beside it. Rejecting that case is what kept this wire
-	// reporting the diagnostic while the other three reported the refusal.
+	// the refusal with a diagnostic beside it.
 	const error = resolved ?? event.error;
 	if (error === event.error) return raw;
 	return { ...event, error };

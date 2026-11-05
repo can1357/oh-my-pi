@@ -139,8 +139,8 @@ describe("provider content-policy refusals", () => {
 
 	it("does not retry an in-band refusal whose own message reads like a throttle", async () => {
 		// In band there is no status field to contradict the text, so a refusal that asks the
-		// caller to try again used to be read as throttle wording and the same declined content
-		// was sent again. It is still a refusal, and it is still one request.
+		// caller to try again reads as throttle wording unless the refusal guard runs first.
+		// It is still a refusal, and it is still one request.
 		const worded = "This content was flagged for possible cybersecurity risk. Please retry in a moment.";
 		const { result, bearers } = await runAgainstPool(() => failedResponse({ code: "cyber_policy", message: worded }));
 
@@ -283,7 +283,7 @@ function refusalOn(api: Api, carrier: RefusalCarrier): Response {
 	}
 	if (!carrier.startsWith("sse")) return Response.json({ error }, { status: carrier === "http403" ? 403 : 400 });
 	// In band: an HTTP 200 whose stream carries the failure. Each API reads that frame with its own
-	// code, and a refusal arriving this way used to lose its code — to the wrapper, to a diagnostic
+	// code, and a refusal arriving this way can lose its code — to the wrapper, to a diagnostic
 	// beside it, to being written as `type` rather than `code`, to a number in `code` masking that
 	// `type`, or to an intermediate wrapper level carrying nothing of its own. Chat Completions
 	// carries the provider's `type` beside the code; a gateway that wraps the envelope wraps that

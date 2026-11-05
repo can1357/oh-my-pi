@@ -13,20 +13,21 @@
  */
 
 /**
- * Codes where every credential of the refusing organization sees the same verdict, so rotating to
- * a sibling spends it on a decided answer. This is the "may a sibling see something different"
- * question; whether a resend is worth trying is {@link UNSTABLE_REFUSAL_CODES}.
+ * The refusal codes this system knows.
+ *
+ * Membership answers two questions, and today every member answers both the same way:
+ *
+ * - **is rotating to a sibling credential a recovery?** No. The classifier belongs to the
+ *   refusing organization, not to the key, so the siblings this rotation would spend are the
+ *   ones that answer the same way ({@link isContentPolicyRefusal}).
+ * - **is the verdict stable for the same input?** No. The classifier is probabilistic, so
+ *   resending the identical request on the same model may clear it, and these codes earn the
+ *   bounded same-model allowance `retry.refusalRetries` ({@link isUnstableProviderRefusal}).
+ *
+ * A code that ever answers them differently — refused identically on every resend, say — splits
+ * this into two tables at that point, not before.
  */
-export const CONTENT_POLICY_REFUSAL_CODES: Readonly<Record<string, true>> = {
-	cyber_policy: true,
-	reasoning_extraction: true,
-};
-
-/**
- * Codes whose verdict is not stable for the same input, so resending the identical request on the
- * same model may clear it. These earn the bounded same-model allowance (`retry.refusalRetries`).
- */
-export const UNSTABLE_REFUSAL_CODES: Readonly<Record<string, true>> = {
+export const REFUSAL_CODES: Readonly<Record<string, true>> = {
 	cyber_policy: true,
 	reasoning_extraction: true,
 };
@@ -40,8 +41,5 @@ export const UNSTABLE_REFUSAL_CODES: Readonly<Record<string, true>> = {
  * the resolver to find it.
  */
 export function isKnownRefusalCode(value: unknown): value is string {
-	return (
-		typeof value === "string" &&
-		(Object.hasOwn(CONTENT_POLICY_REFUSAL_CODES, value) || Object.hasOwn(UNSTABLE_REFUSAL_CODES, value))
-	);
+	return typeof value === "string" && Object.hasOwn(REFUSAL_CODES, value);
 }

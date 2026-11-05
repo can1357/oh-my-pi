@@ -1,7 +1,7 @@
 import { isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils/fetch-retry";
 import type { Api, AssistantMessage, Usage } from "../types";
 import { AwsCredentialsError } from "./aws";
-import { CONTENT_POLICY_REFUSAL_CODES, UNSTABLE_REFUSAL_CODES } from "./refusal-codes";
+import { REFUSAL_CODES } from "./refusal-codes";
 import {
 	AnthropicConnectionError,
 	AnthropicConnectionTimeoutError,
@@ -260,7 +260,7 @@ const CONTENT_POLICY_REFUSAL_PATTERN =
  * names an account program stays an account-policy denial.
  */
 export function isContentPolicyRefusal(code: string | undefined, message: string | undefined): boolean {
-	if (code === undefined || !Object.hasOwn(CONTENT_POLICY_REFUSAL_CODES, code)) return false;
+	if (code === undefined || !Object.hasOwn(REFUSAL_CODES, code)) return false;
 	return message === undefined || !ACCOUNT_POLICY_PATTERN.test(message);
 }
 
@@ -275,27 +275,14 @@ export function isProviderRefusal(message: Pick<AssistantMessage, "stopReason" |
 }
 
 /**
- * Refusal categories whose verdict is **not stable for the same input**, so resending the same
- * request on the same model may clear it. These earn the bounded same-model retry allowance
- * (`retry.refusalRetries`); a refusal outside this set is reproduced by a resend and walks the
- * fallback models instead.
- *
- * This is a DIFFERENT question from {@link CONTENT_POLICY_REFUSAL_CODES}, which answers "may a
- * sibling credential see something different" — and the two were one table until the answers
- * diverged. `reasoning_extraction` is a false flag on legitimate reasoning replay: a cold call
- * clears it the overwhelming majority of the time, so it must retry and the turn must continue,
- * while still never rotating credentials, because the classifier belongs to the organization and
- * not to the key.
- */
-
-/**
  * Whether a failed turn is a provider refusal whose verdict is not stable for a given input, so
- * resending it on the same model may succeed. Classifier refusals without such a code (Anthropic
- * `refusal`, `sensitive`) are reproduced by a resend and walk fallback models instead.
+ * resending it on the same model may succeed ({@link REFUSAL_CODES}). A classifier refusal
+ * carrying no such category (an Anthropic `refusal` or `sensitive` stop with any other category)
+ * walks the fallback models instead.
  */
 export function isUnstableProviderRefusal(message: Pick<AssistantMessage, "stopReason" | "stopDetails">): boolean {
 	const category = message.stopDetails?.category;
-	return isProviderRefusal(message) && typeof category === "string" && Object.hasOwn(UNSTABLE_REFUSAL_CODES, category);
+	return isProviderRefusal(message) && typeof category === "string" && Object.hasOwn(REFUSAL_CODES, category);
 }
 
 export const ANTHROPIC_ACCOUNT_POLICY_PATTERN =
