@@ -18,12 +18,11 @@ import { taskSubprocessRenderer } from "@oh-my-pi/pi-tui/tools/subprocess";
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import {
-	type AgentTool,
-	type AgentToolResult,
-	type AgentToolUpdateCallback,
-	type ToolSpeculationPolicy,
-	validateAgentToolArguments,
+import type {
+	AgentTool,
+	AgentToolResult,
+	AgentToolUpdateCallback,
+	ToolSpeculationPolicy,
 } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env, isRecord, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
@@ -589,53 +588,6 @@ function withoutBlankFields<T extends TaskItem | TaskParams>(item: T): T {
 }
 
 /**
- * The arguments dispatch will plan from, for the speculative launcher only.
- *
- * The launcher plans from the raw streamed call while dispatch plans from the validated one, and
- * validation rewrites a call in ways that change a spawn: it discards an optional field holding
- * `null`, coerces a value to its declared type, and deletes keys the schema does not declare. The
- * spawn carries `outputSchema` by presence, so an `outputSchema: null` surviving on this side
- * alone makes the two plans unequal: the started child is cancelled and dispatch runs a
- * replacement, two executor runs for one item and a `-2` suffix on the id the caller is shown.
- * Running the same validation dispatch's arguments went through makes the two agree for the
- * finished call, rather than by a list of rewrites kept in step. It says nothing about the
- * streamed prefixes: `TaskLaunchSession.update` does not plan from the call at all, it rebuilds
- * one as `{ context, tasks }`, so anything a spawn reads from a top-level key is invisible there.
- * `spawnParamsFor` reads exactly one, and only on the flat form for that reason.
- *
- * Known residual, measured and not closed by this. Validation is whole-call and all-or-nothing,
- * and its lenient path falls back to the raw arguments when the call fails the schema. The
- * launcher plans once per streamed item, each time for a longer prefix, so a later item that
- * fails the schema while still being accepted at runtime — an item with no `solutionSpace` — can
- * send a prefix that validated down the fallback path, changing the plan an earlier,
- * already-started item was adopted under; that child is then discarded and re-run. It is the
- * launcher's ordinary "the call changed" reconciliation rather than a new failure mode, and
- * `speculative-launch.test.ts` pins it so a fix flips that test rather than going unnoticed.
- * Closing it needs per-item normalization that does not depend on the call's other items.
- *
- * Dispatch keeps its `null`s. For an internal caller an `outputSchema: null` is a real signal —
- * presence, not truthiness, makes the caller's schema win — and internal callers never reach the
- * launcher.
- */
-function asDispatched(tool: TaskTool, args: unknown): unknown {
-	// `AgentTool`'s `renderCall` takes an `unknown` theme where this tool takes `Theme`, which makes
-	// the interface unassignable though every caller passes this very tool; the tests cast the same way.
-	const self = tool as unknown as AgentTool;
-	try {
-		return validateAgentToolArguments(self, {
-			type: "toolCall",
-			id: "task-speculation",
-			name: self.name,
-			arguments: args as Record<string, unknown>,
-		});
-	} catch {
-		// A call this rejects is one dispatch rejects too — and dispatch never reaches `execute` for
-		// it, so no shape check will run. Planning from the raw arguments costs nothing it will keep.
-		return args;
-	}
-}
-
-/**
  * Repair, validate, and normalize a call into its spawns. Returns the
  * validation error the call reports instead when the shape is rejected. Shared
  * by dispatch and the speculative launcher so both derive identical spawns.
@@ -988,9 +940,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			// Returning `undefined` here means "this call is invalid": at finalize the launch session
 			// discards every run it already started, and dispatch then runs them all again — including
 			// an earlier, ordinary item that had already started and done work. A call carrying a
-			// placeholder is valid, so it must never take that branch.
+			// placeholder is valid, so it must never take that branch, and removing the bail that made
+			// it is the whole of what this change does to speculation.
+			//
+			// This plans from the raw streamed arguments, as it does on `main`. Normalizing them to what
+			// dispatch will see was tried and reverted: validation is whole-call, so validating a prefix
+			// that is schema-valid on its own disagrees with a finished call whose lenient path fell
+			// back to raw, which cancelled an already-adopted child. That is a route this change would
+			// have *created*; the ones that remain are reachable with the launcher planning from raw,
+			// as it does here, and the PR body names them as the pre-existing class they belong to.
 			const plan = planSpawns(
-				asDispatched(this, args),
+				args,
 				this.#isBatchEnabled(),
 				cfgTaskFile.get(this.session.settings),
 				this.#defaultAgent(),

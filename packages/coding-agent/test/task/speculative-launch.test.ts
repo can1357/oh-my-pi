@@ -243,15 +243,17 @@ describe("task speculative launch", () => {
 		return names.filter(name => manager.getJob(`${name}-2`) !== undefined);
 	}
 
-	// A placeholder (`model: ""`, `outputSchema: null`, and the other fields a model fills in with
-	// nothing) must leave the launcher and dispatch deriving the same spawn, so the started child is
-	// adopted. Dispatch receives the *validated* arguments, which differ from the raw streamed ones —
-	// validation discards `outputSchema: null` — which is exactly when the two would disagree.
+	// A placeholder is `model: ""` and the other fields a model fills in with nothing. Shared
+	// validation leaves such a call byte-identical, so the launcher planning from the raw streamed
+	// arguments and dispatch planning from the validated ones derive the same spawn and the started
+	// child is adopted. (`outputSchema: null` is deliberately *not* in this fixture: validation does
+	// discard it, which splits the two plans — that is the pre-existing route pinned further down,
+	// not something a placeholder causes.)
 	it("adopts a speculatively launched item whose fields are only placeholders, running it once", async () => {
 		const placeholders = {
 			context: "ctx",
 			tasks: [
-				{ name: "Alpha", agent: "task", solutionSpace: "one way", task: "Do A.", model: "", outputSchema: null },
+				{ name: "Alpha", agent: "task", solutionSpace: "one way", task: "Do A.", model: "", sourceSession: "" },
 			],
 		};
 		const raw = JSON.stringify(placeholders);
@@ -285,7 +287,7 @@ describe("task speculative launch", () => {
 			context: "ctx",
 			tasks: [
 				{ name: "Alpha", agent: "task", solutionSpace: "one way", task: "Do A." },
-				{ name: "Beta", agent: "task", solutionSpace: "one way", task: "Do B.", model: "", outputSchema: null },
+				{ name: "Beta", agent: "task", solutionSpace: "one way", task: "Do B.", model: "", sourceSession: "" },
 			],
 		};
 		const raw = JSON.stringify(mixed);
@@ -311,11 +313,20 @@ describe("task speculative launch", () => {
 		expect([...startedIds].sort()).toEqual(["Alpha", "Beta"]);
 	});
 
+	// PRE-EXISTING ROUTE, pinned so a fix flips this test rather than going unnoticed. Reproduces at
+	// the inherited head `d6358699c872` with no placeholder in the call, and this change neither
+	// opens nor closes it.
+	//
 	// Shared validation discards an optional field holding `null`, and the spawn carries
-	// `outputSchema` by presence, so a streamed `outputSchema: null` made the launcher's plan one key
-	// larger than dispatch's: the started child was cancelled and dispatch ran `Alpha-2`. The launcher
-	// now plans from the validated arguments, so the two agree and the child is adopted.
-	it("matches dispatch for an item whose outputSchema is null, running it once", async () => {
+	// `outputSchema` by presence, so the launcher — which plans from the raw streamed arguments, as it
+	// does on `main` — derives a plan one key larger than dispatch's. Reconciliation discards the
+	// started child and dispatch runs the replacement as `Alpha-2`.
+	//
+	// Normalizing the launcher's arguments to what dispatch will see was tried and reverted: it closes
+	// this case and opens a worse one, because validating a prefix that is schema-valid on its own
+	// disagrees with a finished call whose lenient path fell back to raw, cancelling a child that had
+	// already been adopted. That route would have been *this change's*, which is why it is not here.
+	it("re-runs an item whose outputSchema is null, which this change does not address", async () => {
 		const withNull = {
 			context: "ctx",
 			tasks: [
@@ -340,46 +351,9 @@ describe("task speculative launch", () => {
 		const result = await tool.execute(toolCall.id, validated as TaskParams);
 
 		expect(result.isError).toBeFalsy();
-		expect(result.details?.progress?.map(progress => progress.id)).toEqual(["Alpha", "Beta"]);
-		expect(duplicateJobs(manager, ["Alpha", "Beta"])).toEqual([]);
-		expect([...startedIds].sort()).toEqual(["Alpha", "Beta"]);
-	});
-
-	// The same split, reached through another rewrite validation performs. `isolated: "true"` is left
-	// out on purpose: a coerced value makes the two plans differ on `main` too, independently of
-	// placeholders, and that is the launcher's ordinary reconciliation rather than anything this
-	// change introduced or claims to close.
-	it.each([
-		["an undeclared key", { bogusKey: "x" }],
-		["a null tools list", { tools: null }],
-	] as const)("matches dispatch for an item validation rewrites through %s", async (_label, fill) => {
-		const call = {
-			context: "ctx",
-			tasks: [
-				{ name: "Alpha", agent: "task", solutionSpace: "one way", task: "Do A.", ...fill },
-				{ name: "Beta", agent: "task", solutionSpace: "one way", task: "Do B." },
-			],
-		};
-		const raw = JSON.stringify(call);
-		const { tool, manager, session } = await openSession();
-
-		session.update(toolCall, raw.slice(0, raw.indexOf('{"name":"Beta"') + 10));
-		await spawn("Alpha").started.promise;
-
-		session.finalize({ toolCall, args: call });
-		await spawn("Beta").started.promise;
-		const validated = validateAgentToolArguments(tool as unknown as AgentTool, {
-			type: "toolCall",
-			id: toolCall.id,
-			name: tool.name,
-			arguments: call,
-		});
-		const result = await tool.execute(toolCall.id, validated as TaskParams);
-
-		expect(result.isError).toBeFalsy();
-		expect(result.details?.progress?.map(progress => progress.id)).toEqual(["Alpha", "Beta"]);
-		expect(duplicateJobs(manager, ["Alpha", "Beta"])).toEqual([]);
-		expect([...startedIds].sort()).toEqual(["Alpha", "Beta"]);
+		// The route: Alpha is announced as its replacement, and a duplicate job exists for it.
+		expect(result.details?.progress?.map(progress => progress.id)).toEqual(["Alpha-2", "Beta"]);
+		expect(duplicateJobs(manager, ["Alpha", "Beta"])).toEqual(["Alpha"]);
 	});
 
 	// `TaskLaunchSession.update` does not plan from the call, it rebuilds one as `{ context, tasks }`,
@@ -412,18 +386,16 @@ describe("task speculative launch", () => {
 		},
 	);
 
-	// KNOWN RESIDUAL, pinned so a fix flips this test rather than going unnoticed.
+	// The case that decided `asDispatched` had to go, kept as the guard against reintroducing it.
 	//
 	// Validation is whole-call and all-or-nothing, and its lenient path falls back to the raw
-	// arguments when the call fails the schema. The launcher plans once per streamed item, each time
-	// for a longer prefix, so a later item that fails the schema while still being accepted at
-	// runtime — Beta here, with no `solutionSpace` — sends a prefix that validated down the fallback
-	// path. Alpha's plan then changes after Alpha has already started, and the launcher's ordinary
-	// "the call changed" reconciliation discards it and dispatch runs `Alpha-2`.
-	//
-	// It needs per-item normalization that does not depend on the call's other items. Until then this
-	// records what actually happens; both items still run, and `Alpha` runs twice.
-	it("re-runs an earlier item when a later one sends validation down its lenient path", async () => {
+	// arguments when the call fails the schema. Beta here has no `solutionSpace` — required by the
+	// wire schema, not by the runtime — so the finished call is dispatched from the raw arguments.
+	// The launcher plans from the raw arguments too, so both sides see Alpha's `outputSchema: null`
+	// and the started child is adopted. Normalizing the launcher's arguments breaks exactly this: a
+	// prefix that is schema-valid on its own validates, loses the `null`, and no longer matches the
+	// finished call, so an already-adopted Alpha is cancelled and re-run as `Alpha-2`.
+	it("keeps an adopted item when a later one sends the finished call down the lenient path", async () => {
 		const lenient = {
 			context: "ctx",
 			tasks: [
@@ -447,9 +419,8 @@ describe("task speculative launch", () => {
 		const result = await tool.execute(toolCall.id, validated as TaskParams);
 
 		expect(result.isError).toBeFalsy();
-		// The residual: Alpha is announced as its replacement, and a duplicate job exists for it.
-		expect(result.details?.progress?.map(progress => progress.id)).toEqual(["Alpha-2", "Beta"]);
-		expect(duplicateJobs(manager, ["Alpha", "Beta"])).toEqual(["Alpha"]);
+		expect(result.details?.progress?.map(progress => progress.id)).toEqual(["Alpha", "Beta"]);
+		expect(duplicateJobs(manager, ["Alpha", "Beta"])).toEqual([]);
 	});
 });
 
