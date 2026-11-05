@@ -904,6 +904,15 @@ export function classify(error: unknown, api?: Api): number {
 		const linkStatus = status(link);
 		const textId = classifyText(linkMessage, linkStatus ?? governingTerminalStatus, causeTokenEvidence, api);
 		kinds |= textId & KIND_MASK;
+		// A transport may put a friendly label where the provider's own sentence was: a Codex 429
+		// says "ChatGPT rate limit exceeded." over a body that names Trusted Access. Classify that
+		// sentence too when the error publishes it, or an eligibility denial an enrolled sibling
+		// account could serve reads as something that never rotates.
+		const ownMessage: unknown =
+			typeof link === "object" && link !== null ? Reflect.get(link, "providerMessage") : undefined;
+		if (typeof ownMessage === "string" && ownMessage.length > 0 && ownMessage !== linkMessage) {
+			kinds |= classifyText(ownMessage, linkStatus ?? governingTerminalStatus, causeTokenEvidence, api) & KIND_MASK;
+		}
 		if (isTerminalClientErrorStatus(linkStatus)) governingTerminalStatus = linkStatus;
 
 		link = typeof link === "object" && "cause" in link ? (link as { cause: unknown }).cause : undefined;

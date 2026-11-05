@@ -391,3 +391,21 @@ describe("contentPolicyRefusalDetails — whose sentence the classifier judges",
 		});
 	});
 });
+
+describe("a transport label must not hide the provider's own sentence from the classifier", () => {
+	class RelabelledCodexError extends Error {
+		readonly code = "cyber_policy";
+		readonly status = 429;
+		readonly providerMessage = "This content was flagged. Join Trusted Access for Cyber to continue.";
+
+		constructor() {
+			super("ChatGPT rate limit exceeded.");
+		}
+	}
+
+	it("still sees an account-eligibility denial relabelled as a rate limit", () => {
+		// The denial is rotatable: an enrolled sibling account serves it. Judging only the label
+		// loses that, and the request stops on the one credential that cannot serve it.
+		expect(AIError.is(AIError.classify(new RelabelledCodexError()), AIError.Flag.AccountPolicy)).toBe(true);
+	});
+});
