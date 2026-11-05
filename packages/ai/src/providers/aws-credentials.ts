@@ -19,7 +19,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $env, isEnoent, logger } from "@oh-my-pi/pi-utils";
-import { writeFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 import * as AIError from "../error";
 import type { FetchImpl } from "../types";
 import { raceWithSignal } from "../utils/abort";
@@ -617,18 +616,19 @@ async function refreshSsoToken(
 
 /**
  * Persist a refreshed token so the AWS CLI, other SDKs, and the next OMP process
- * all start from a live token. Written atomically so a concurrent reader never
- * observes a half-written cache entry. This is the plain writer, so a symlinked
- * cache entry is replaced rather than written through, as on main — stated by
- * the call rather than left to depend on where omp's directories happen to be.
- * A failure here is logged and ignored, since the in-memory token is usable.
+ * all start from a live token. Written via temp file + rename so a concurrent
+ * reader never observes a half-written cache entry; a failure here is logged and
+ * ignored, since the in-memory token is still usable for this run.
  */
 async function writeSsoCachedToken(file: string, token: SsoCachedToken): Promise<void> {
 	const target = path.join(os.homedir(), ".aws", "sso", "cache", file);
+	const tmp = `${target}.${process.pid}.tmp`;
 	try {
-		await writeFileAtomically(target, JSON.stringify(token));
+		await fs.promises.writeFile(tmp, JSON.stringify(token), { mode: 0o600 });
+		await fs.promises.rename(tmp, target);
 	} catch (err) {
 		logger.debug("aws-credentials: failed to persist refreshed SSO token", { file, err: String(err) });
+		await fs.promises.rm(tmp, { force: true }).catch(() => {});
 	}
 }
 

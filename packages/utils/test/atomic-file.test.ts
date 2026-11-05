@@ -6,12 +6,37 @@ import * as path from "node:path";
 import {
 	replaceConfigFileAtomically,
 	replaceFileAtomically,
-	writeConfigFileAtomically,
 	writeFileAtomically,
 	writeFileAtomicallySync,
 } from "../src/atomic-file";
 import { getAgentDir, setAgentDir } from "../src/dirs";
 import { removeWithRetries } from "../src/temp";
+
+/**
+ * Stage content and publish it through the one config entry point the module
+ * exports, which is how every production config write reaches the link rule:
+ * `marketplace/registry.ts` stages its JSON and calls
+ * `replaceConfigFileAtomically`. The staging path is a sibling of the path as
+ * GIVEN, never of the resolved destination, exactly as the registry writer
+ * stages beside the registry it was handed — so these tests exercise the real
+ * arrangement rather than a convenience wrapper that no longer exists.
+ */
+async function writeConfigFileAtomically(filePath: string, content: string, mode: number = 0o600): Promise<void> {
+	const staged = `${filePath}.${process.pid}.${crypto.randomUUID()}.staged`;
+	try {
+		const handle = await fs.open(staged, "wx", mode);
+		try {
+			await handle.writeFile(content, "utf8");
+		} finally {
+			await handle.close();
+		}
+		await fs.chmod(staged, mode);
+		await replaceConfigFileAtomically(staged, filePath);
+	} catch (error) {
+		await fs.rm(staged, { force: true }).catch(() => {});
+		throw error;
+	}
+}
 
 /**
  * A config write follows a link only while every step stays inside a directory
@@ -165,21 +190,19 @@ describe("a config write follows a symlinked destination", () => {
 		await expect(writeConfigFileAtomically(a, "new", 0o644)).rejects.toThrow(/ELOOP/);
 	});
 
-	test("the sync writer follows only when asked", async () => {
+	test("the sync writer never follows a link, even inside omp's own directories", async () => {
+		// The boot config migration is its only caller. It is the one writer that
+		// could not opt in even if it wanted to — there is no synchronous config
+		// form — so a link at its destination is replaced, exactly as on main.
 		const target = path.join(root, "real.yml");
 		const link = path.join(root, "link.yml");
 		await linkTo(target, link);
-		const plainTarget = path.join(root, "plain-real.yml");
-		const plainLink = path.join(root, "plain-link.yml");
-		await linkTo(plainTarget, plainLink);
 
-		writeFileAtomicallySync(link, "new", 0o644, true);
-		writeFileAtomicallySync(plainLink, "new", 0o644);
+		writeFileAtomicallySync(link, "new", 0o644);
 
-		expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
-		expect(await fs.readFile(target, "utf8")).toBe("new");
-		expect((await fs.lstat(plainLink)).isSymbolicLink()).toBe(false);
-		expect(await fs.readFile(plainTarget, "utf8")).toBe("old");
+		expect((await fs.lstat(link)).isSymbolicLink()).toBe(false);
+		expect(await fs.readFile(link, "utf8")).toBe("new");
+		expect(await fs.readFile(target, "utf8")).toBe("old");
 	});
 
 	// Root bypasses the directory's mode bits and Windows has no POSIX modes.
@@ -235,7 +258,7 @@ describe("a config write never follows a link inside a project's own config dire
 		expect(await fs.readFile(link, "utf8")).toBe("new");
 	});
 
-	test("the staged-file and sync forms refuse it too", async () => {
+	test("the staged form refuses it too, and the sync writer never reaches the rule", async () => {
 		const victim = path.join(root, "victim-staged");
 		const link = path.join(project, "mcp.json");
 		await linkTo(victim, link, "untouched");
@@ -246,10 +269,14 @@ describe("a config write never follows a link inside a project's own config dire
 		await linkTo(syncVictim, syncLink, "untouched");
 
 		await replaceConfigFileAtomically(staged, link);
-		writeFileAtomicallySync(syncLink, "new", 0o644, true);
+		writeFileAtomicallySync(syncLink, "new", 0o644);
 
+		// Both leave the named file alone, for different reasons worth keeping
+		// apart: the staged config form asks the rule and the rule says no, while
+		// the sync writer never follows anything in the first place.
 		expect(await fs.readFile(victim, "utf8")).toBe("untouched");
 		expect(await fs.readFile(syncVictim, "utf8")).toBe("untouched");
+		expect((await fs.lstat(syncLink)).isSymbolicLink()).toBe(false);
 	});
 
 	test("a nested project directory is recognised at any depth", async () => {

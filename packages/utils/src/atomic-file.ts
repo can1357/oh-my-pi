@@ -159,15 +159,17 @@ function insideAProjectConfigDir(filePath: string): boolean {
  * are followed to their target, so publishing by rename replaces the file the
  * link names instead of the link itself.
  *
- * This is what the `…Config…` writers below use, and nothing else does. A write
- * that does not ask for it keeps replacing a link with a regular file, which is
- * what every caller outside those writers has always done.
+ * This is what {@link replaceConfigFileAtomically} uses, and nothing else does.
+ * It is not exported: one entry point, so a future writer opts in by calling
+ * that function rather than by resolving a path itself and losing the project
+ * rule. A write that does not ask for it keeps replacing a link with a regular
+ * file, which is what every caller outside that one has always done.
  *
  * A dangling link resolves to the path it names, which the write then creates —
  * what a plain write does, including failing when that path's directory does
  * not exist.
  */
-export async function resolveConfigWriteTarget(filePath: string): Promise<string> {
+async function resolveConfigWriteTarget(filePath: string): Promise<string> {
 	let current = filePath;
 	for (let hop = 0; hop <= MAX_SYMLINK_HOPS; hop++) {
 		// Both asked of every hop, not just the entry: a link outside any project
@@ -212,37 +214,6 @@ export async function resolveConfigWriteTarget(filePath: string): Promise<string
 	throw symlinkLoopError(filePath);
 }
 
-/** Synchronous sibling of {@link resolveConfigWriteTarget}. */
-function resolveWriteTargetSync(filePath: string): string {
-	let current = filePath;
-	for (let hop = 0; hop <= MAX_SYMLINK_HOPS; hop++) {
-		if (!insideOmpRoots(current) || insideAProjectConfigDir(current)) return current;
-		let link: string;
-		try {
-			link = fs.readlinkSync(current);
-		} catch (error) {
-			if (endsSymlinkWalk(error)) return current;
-			throw error;
-		}
-		// `.native` asks the operating system; the JavaScript `realpathSync`
-		// collapses `..` lexically, which is the whole defect this avoids.
-		const joined = path.isAbsolute(link)
-			? link
-			: `${fs.realpathSync.native(path.dirname(current))}${path.sep}${link}`;
-		if (namesADirectory(joined)) return joined;
-		let next: string;
-		try {
-			next = path.join(fs.realpathSync.native(path.dirname(joined)), path.basename(joined));
-		} catch (error) {
-			if (!endsSymlinkWalk(error)) throw error;
-			next = joined;
-		}
-		if (!insideOmpRoots(next)) return current;
-		current = next;
-	}
-	throw symlinkLoopError(filePath);
-}
-
 /**
  * Publish a staged sibling file atomically, preserving an existing destination
  * across Windows `EPERM`/`EEXIST` replacement failures.
@@ -275,14 +246,13 @@ async function publishStagedFile(tempPath: string, destination: string): Promise
 		await fs.promises.rename(tempPath, destination);
 		return;
 	} catch (error) {
-		// A rename only fails this way when the destination is on another
-		// filesystem, which here means a link that leaves this one. Copy beside the
-		// real file and publish from there; every same-device destination, in this
-		// directory or another, still moves by rename and keeps its inode.
-		if (hasFsCode(error, "EXDEV")) {
-			await replaceFileAcrossDevices(tempPath, destination);
-			return;
-		}
+		// `EXDEV` is deliberately NOT handled here. On upstream main a rename
+		// across devices throws and the caller decides what that means; exactly one
+		// caller, the browser download mover, wants a copy instead, and it asks for
+		// `replaceFileAcrossDevices` itself. Catching it here would silently turn
+		// every `replaceFileAtomically` into copy + rename + unlink-source for
+		// artifacts, session pins, the skills manifest, plugin runtime config and
+		// sharpshooter memories, none of which asked for that.
 		if (!hasFsCode(error, "EPERM") && !isEexist(error)) throw error;
 		await replaceAfterWindowsRenameFailure(tempPath, destination, error);
 	}
@@ -338,9 +308,8 @@ async function replaceAfterWindowsRenameFailure(
  * rename, so a reader never observes a half-written file and a failed write
  * leaves the destination untouched.
  *
- * A symlink at the destination is replaced, as it always has been. A config
- * writer that wants the link kept asks for it by name:
- * {@link writeConfigFileAtomically}.
+ * A symlink at the destination is replaced, as it always has been. The one
+ * writer form that keeps the link is {@link replaceConfigFileAtomically}.
  *
  * The staged file is created with `mode` (0600 by default) and published with
  * that mode, so the destination stays readable only by its owner even when it
@@ -353,29 +322,6 @@ export async function writeFileAtomically(
 	mode: number = 0o600,
 ): Promise<void> {
 	await stageAndPublish(filePath, content, mode);
-}
-
-/**
- * {@link writeFileAtomically} for a path the person using omp owns, where a
- * symlink is their own arrangement.
- *
- * The link is resolved before staging, so the temp sibling and the published
- * file both land beside the file the link names and the link survives: a shared
- * profile that links its config at another profile's keeps sharing it, and so
- * does a dotfiles tree that links one out to another disk. A path inside a
- * project's config directory is never followed, because that tree is whatever a
- * checkout put there.
- *
- * A target whose directory cannot be written fails here — the staging `open`
- * reports `EACCES`/`EROFS` naming the resolved path — rather than diverting the
- * write to a fresh file at the link.
- */
-export async function writeConfigFileAtomically(
-	filePath: string,
-	content: string | NodeJS.ArrayBufferView,
-	mode: number = 0o600,
-): Promise<void> {
-	await stageAndPublish(await resolveConfigWriteTarget(filePath), content, mode);
 }
 
 async function stageAndPublish(
@@ -407,16 +353,12 @@ async function stageAndPublish(
 
 /**
  * Synchronous sibling of {@link writeFileAtomically} for callers that cannot
- * await, such as the boot-time config migration. `followConfigLink` is the
- * opt-in {@link writeConfigFileAtomically} makes for the asynchronous writers.
+ * await, such as the boot-time config migration. It never follows a symlinked
+ * destination: the one opt-in this module offers is
+ * {@link replaceConfigFileAtomically}, and nothing synchronous asked for it.
  */
-export function writeFileAtomicallySync(
-	filePath: string,
-	content: string,
-	mode: number = 0o600,
-	followConfigLink = false,
-): void {
-	const destination = followConfigLink ? resolveWriteTargetSync(filePath) : filePath;
+export function writeFileAtomicallySync(filePath: string, content: string, mode: number = 0o600): void {
+	const destination = filePath;
 	const tempPath = `${destination}.${process.pid}.${crypto.randomUUID()}.tmp`;
 	let fd: number | undefined;
 	try {
@@ -489,19 +431,25 @@ export async function moveFileAcrossDevices(source: string, destination: string)
  * source that cannot be removed is logged rather than failing the move.
  */
 export async function replaceFileAcrossDevices(source: string, destination: string): Promise<void> {
-	// The destination arrives resolved when `publishStagedFile` falls back here;
-	// a direct caller gets the plain behaviour, like every other non-config path.
 	const staging = `${destination}.${process.pid}.${crypto.randomUUID()}.move`;
 	try {
 		await fs.promises.copyFile(source, staging);
-		// The copy carries the source's mode, which may be read-only; fsync needs
-		// only a readable descriptor.
-		const fd = fs.openSync(staging, "r");
+		// The copy carries the source's mode, which may be read-only — and a
+		// read-only descriptor is NOT enough to flush it: libuv implements fsync on
+		// Windows with `FlushFileBuffers`, which needs `GENERIC_WRITE`, so `"r"`
+		// fails there with `EPERM` while working on POSIX. Make the staged copy
+		// writable for the flush and put its mode back before publishing, so a
+		// 0444 source still moves and the flush holds a descriptor every platform
+		// accepts.
+		const stagedMode = (await fs.promises.stat(staging)).mode & 0o777;
+		await fs.promises.chmod(staging, stagedMode | 0o200);
+		const fd = fs.openSync(staging, "r+");
 		try {
 			fs.fsyncSync(fd);
 		} finally {
 			fs.closeSync(fd);
 		}
+		await fs.promises.chmod(staging, stagedMode);
 		await publishStagedFile(staging, destination);
 	} catch (error) {
 		await fs.promises.rm(staging, { force: true });

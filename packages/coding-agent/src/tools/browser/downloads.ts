@@ -1,10 +1,10 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { isEnoent, toError, untilAborted } from "@oh-my-pi/pi-utils";
+import { hasFsCode, isEnoent, toError, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Browser, CDPSession, Page } from "puppeteer-core";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { replaceFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
+import { replaceFileAcrossDevices, replaceFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 import { devtoolsFrameId } from "./frames";
 
 /** Completed download metadata returned by tab download helpers. */
@@ -248,10 +248,21 @@ async function entryKind(file: string): Promise<"file" | "missing" | "other"> {
 
 /**
  * Move a completed download into a tab's folder, replacing a same-named file as
- * Chromium's own saves do. `replaceFileAtomically` handles the cross-device case
- * itself, so there is nothing left for this caller to catch.
+ * Chromium's own saves do.
+ *
+ * This is the one caller in the tree whose source and destination can sit on
+ * different filesystems — Chromium's download directory and the tab's folder —
+ * so it is the one that asks for a copy when the rename cannot cross. The
+ * shared publisher deliberately lets `EXDEV` out instead of falling back for
+ * everybody, because a copy that unlinks its source is not what a session pin or
+ * a skills manifest asked for.
  */
 async function moveDownload(source: string, target: string): Promise<void> {
 	await fs.mkdir(path.dirname(target), { recursive: true });
-	await replaceFileAtomically(source, target);
+	try {
+		await replaceFileAtomically(source, target);
+	} catch (error) {
+		if (!hasFsCode(error, "EXDEV")) throw error;
+		await replaceFileAcrossDevices(source, target);
+	}
 }

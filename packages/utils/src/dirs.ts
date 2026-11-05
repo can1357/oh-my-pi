@@ -170,29 +170,28 @@ export interface EquivalentPathOptions {
 }
 
 export function resolveEquivalentPath(inputPath: string, options?: EquivalentPathOptions): string {
-	// NOT `path.resolve`: it collapses `..` lexically, and then there is nothing
-	// left for the kernel to resolve differently. Absolute, unnormalized, is what
-	// `.native` needs to follow a `..` the way an open() would.
-	const resolvedPath = path.isAbsolute(inputPath) ? inputPath : `${process.cwd()}${path.sep}${inputPath}`;
+	// Deliberately upstream main's form, unchanged. Every caller of this shares
+	// it — session directory names (`getDefaultSessionDirName`), approval cache
+	// keys, project discovery, plugin-root containment, gc — and a canonicalizer
+	// that resolves differently gives those a different answer for the same path,
+	// which for a key or a directory name is a silent migration. The config write
+	// path does its own kernel-faithful resolution in `atomic-file.ts`, where it
+	// is scoped to the three writers that asked for it.
+	const resolvedPath = path.resolve(inputPath);
 	try {
-		// `.native` asks the operating system. The JavaScript implementation
-		// collapses `..` before following the directory it sits behind, which is
-		// not where a `..` after a symlinked directory actually leads.
-		return fs.realpathSync.native(resolvedPath);
+		return fs.realpathSync(resolvedPath);
 	} catch {
-		// Nothing to resolve against, so fall back to the normalized spelling the
-		// callers that compare paths expect.
-		if (!options?.throughMissing) return path.resolve(inputPath);
+		if (!options?.throughMissing) return resolvedPath;
 	}
 	const missing: string[] = [];
 	let current = resolvedPath;
 	for (;;) {
 		const parent = path.dirname(current);
-		if (parent === current) return path.resolve(inputPath);
+		if (parent === current) return resolvedPath;
 		missing.unshift(path.basename(current));
 		current = parent;
 		try {
-			return path.join(fs.realpathSync.native(current), ...missing);
+			return path.join(fs.realpathSync(current), ...missing);
 		} catch {
 			// Keep walking: a higher ancestor may exist.
 		}
