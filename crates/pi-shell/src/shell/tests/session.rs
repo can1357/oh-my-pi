@@ -2291,6 +2291,52 @@ async fn segmented_chain_runs_to_its_end_after_its_consumer_is_gone() {
 	assert!(err.to_string().contains("not all delivered"), "{err}");
 }
 
+/// A segmented chain whose consumer is gone runs to its end and then fails
+/// for the output it lost. Its trace must still be finished with the real
+/// final status: the early return skipped `finish_segments`, so the
+/// presentation of a command that had ended still said it was executing.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_segmented_chain_that_lost_output_still_finishes_its_trace() {
+	use crate::bash::trace::{RunTrace, history::HistoryData};
+	let _guard = shell_test_lock().lock().await;
+	let root = tempfile::tempdir().expect("scratch directory");
+	let minimizer = printf_minimizer(&root.path().join("minimizer.toml"), None);
+	let command = "printf x; printf done > marker; false";
+	let trace = Arc::new(RunTrace::new(command));
+	let (tx, rx) = flume::bounded::<String>(1);
+	drop(rx);
+	let result = time::timeout(
+		Duration::from_secs(20),
+		Shell::new(Some(ShellOptions { minimizer: Some(minimizer), ..Default::default() })).run(
+			ShellRunOptions {
+				command: command.to_owned(),
+				cwd: Some(root.path().to_str().expect("utf8 cwd").to_owned()),
+				trace: Some(trace.clone()),
+				..Default::default()
+			},
+			Some(tx),
+			CancelToken::default(),
+		),
+	)
+	.await
+	.expect("the run ends");
+	let err = result.expect_err("a run whose output was not all delivered must fail");
+	assert!(err.to_string().contains("not all delivered"), "{err}");
+	let snapshot = trace.snapshot();
+	assert_eq!(snapshot.status, Some(1), "the chain's real final status ends the trace");
+	let last_root_end = snapshot
+		.history
+		.iter()
+		.filter(|entry| {
+			matches!(entry.data, HistoryData::RunEnd { .. }) && entry.vpid == snapshot.root_vpid
+		})
+		.next_back()
+		.expect("the chain submitted at least one segment");
+	assert!(last_root_end.logical_end, "the finished chain is not left executing");
+	assert_eq!(last_root_end.logical_status, Some(1));
+}
+
 /// A consumer gone before the first chunk, then the run's timeout: the
 /// output was already lost, and the run reported only `timed_out`. It must
 /// fail.
