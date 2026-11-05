@@ -11,6 +11,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { SQL } from "bun";
+import * as fsSync from "node:fs";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
@@ -26,6 +27,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/session-storage-config";
 import {
 	commitSessionStorageFallback,
+	commitSessionStorageFallbackSync,
 	fallbackEvent,
 	ledgerLine,
 	noteSqlWriteCommitted,
@@ -38,6 +40,7 @@ import * as sessionPaths from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 import { SESSION_TRANSFER_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/session-transfer";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { listTranscriptTree } from "@oh-my-pi/pi-coding-agent/session/session-transcript-tree";
 import { SqlSessionStorage } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -250,18 +253,182 @@ describe("sql → file fallback", () => {
 		expect(String(after[1]?.session_id).trim()).toBe("01a1a000-0000-7000-8000-00000000bbbb");
 	});
 
-	it("a ledger truncated in place after the fallback was decided is not written past its end", async () => {
+	it("a ledger truncated in place while the refinement is between its read and its write", async () => {
 		const { env, ledger } = brokenSqlEnv();
 		await resolveSessionStorage({ settings: Settings.isolated(), env, resumableFileSession: async () => true });
+		expect(fs.readFileSync(ledger, "utf8").length).toBeGreaterThan(0);
 
-		// Truncation, not rename: the same inode, so one descriptor still points
-		// at it and only checking the bytes before writing can catch this.
-		fs.truncateSync(ledger, 0);
+		// The window that matters: the scan has already read the file, so its
+		// snapshot still holds the line, and the truncation lands before the
+		// write. Without a check on the bytes at the offset the write goes past
+		// a shortened end and fills the gap with NULs.
+		const realReadSync = fsSync.readSync;
+		const spy = vi.spyOn(fsSync, "readSync").mockImplementation(((...args: Parameters<typeof fsSync.readSync>) => {
+			const read = realReadSync(...args);
+			fs.truncateSync(ledger, 0);
+			return read;
+		}) as typeof fsSync.readSync);
+		try {
+			commitSessionStorageFallbackSync("01a1a000-0000-7000-8000-00000000dddd");
+		} finally {
+			spy.mockRestore();
+		}
 
-		await commitSessionStorageFallback("01a1a000-0000-7000-8000-00000000dddd");
+		const after = fs.readFileSync(ledger);
+		expect(after.includes(0)).toBe(false);
+		expect(after.toString("utf8")).toBe("");
+	});
 
-		// Empty, not a hole of NUL bytes with an id stranded past it.
-		expect(fs.readFileSync(ledger, "utf8")).toBe("");
+	it("a ledger replaced while the refinement is between its read and its write", async () => {
+		const { env, ledger } = brokenSqlEnv();
+		await resolveSessionStorage({ settings: Settings.isolated(), env, resumableFileSession: async () => true });
+		const replacement = `${JSON.stringify({ ts: "x", session_id: "keep-me", reason: "dsn-missing", dsn_path: "/p", host: "h" })}\n`;
+
+		// Same window as the truncation above and the same guard answers it: the
+		// scan's snapshot still holds the line, so an offset into it means
+		// nothing for whatever now carries the name.
+		const realReadSync = fsSync.readSync;
+		const spy = vi.spyOn(fsSync, "readSync").mockImplementation(((...args: Parameters<typeof fsSync.readSync>) => {
+			const read = realReadSync(...args);
+			fs.truncateSync(ledger, 0);
+			fs.writeFileSync(ledger, replacement);
+			return read;
+		}) as typeof fsSync.readSync);
+		try {
+			commitSessionStorageFallbackSync("01a1a000-0000-7000-8000-00000000cccc");
+		} finally {
+			spy.mockRestore();
+		}
+
+		// Byte-for-byte what was put there: no id written into another record.
+		expect(fs.readFileSync(ledger, "utf8")).toBe(replacement);
+	});
+
+	it("two launches that would write the same line still each name their own", async () => {
+		// Same millisecond, same host, same connection file: before the
+		// placeholder carried a nonce these two lines were byte-identical, and
+		// each refinement found whichever the scan hit first.
+		const { env, ledger } = brokenSqlEnv();
+		await resolveSessionStorage({ settings: Settings.isolated(), env, resumableFileSession: async () => true });
+		const first = ledgerLines(ledger)[0];
+
+		// A second launch in this ledger, as another process would write it.
+		resetSqlWriteLatchForTest();
+		await resolveSessionStorage({ settings: Settings.isolated(), env, resumableFileSession: async () => true });
+		const both = ledgerLines(ledger);
+		expect(both).toHaveLength(2);
+		expect(String(both[0]?.session_id)).not.toBe(String(both[1]?.session_id));
+		expect(String(both[0]?.session_id)).toContain("(unresolved)");
+		expect(String(both[1]?.session_id)).toContain("(unresolved)");
+
+		// Only the second launch's own line takes its session.
+		await commitSessionStorageFallback("01a1a000-0000-7000-8000-00000000bbbb");
+		const after = ledgerLines(ledger);
+		expect(after).toHaveLength(2);
+		expect(String(after[0]?.session_id)).toBe(String(first?.session_id));
+		expect(String(after[1]?.session_id).trim()).toBe("01a1a000-0000-7000-8000-00000000bbbb");
+	});
+
+	it("a ledger truncated in place while the refinement is between its read and its write", async () => {
+		const { env, ledger } = brokenSqlEnv();
+		await resolveSessionStorage({ settings: Settings.isolated(), env, resumableFileSession: async () => true });
+		expect(fs.readFileSync(ledger, "utf8").length).toBeGreaterThan(0);
+
+		// The window that matters: the scan has already read the file, so its
+		// snapshot still holds the line, and the truncation lands before the
+		// write. Without a check on the bytes at the offset the write goes past
+		// a shortened end and fills the gap with NULs.
+		const realReadSync = fsSync.readSync;
+		const spy = vi.spyOn(fsSync, "readSync").mockImplementation(((...args: Parameters<typeof fsSync.readSync>) => {
+			const read = realReadSync(...args);
+			fs.truncateSync(ledger, 0);
+			return read;
+		}) as typeof fsSync.readSync);
+		try {
+			commitSessionStorageFallbackSync("01a1a000-0000-7000-8000-00000000dddd");
+		} finally {
+			spy.mockRestore();
+		}
+
+		const after = fs.readFileSync(ledger);
+		expect(after.includes(0)).toBe(false);
+		expect(after.toString("utf8")).toBe("");
+	});
+
+	it("a ledger rotated while the refinement is between its read and its write", async () => {
+		const { env, ledger } = brokenSqlEnv();
+		await resolveSessionStorage({ settings: Settings.isolated(), env, resumableFileSession: async () => true });
+		const replacement = `${JSON.stringify({ ts: "x", session_id: "keep-me", reason: "dsn-missing", dsn_path: "/p", host: "h" })}\n`;
+
+		// The rename lands after the scan has read the file, so the scan's
+		// snapshot still holds the line and an offset into it means nothing for
+		// whatever now carries the name.
+		const realReadSync = fsSync.readSync;
+		const spy = vi.spyOn(fsSync, "readSync").mockImplementation(((...args: Parameters<typeof fsSync.readSync>) => {
+			const read = realReadSync(...args);
+			fs.renameSync(ledger, `${ledger}.1`);
+			fs.writeFileSync(ledger, replacement);
+			return read;
+		}) as typeof fsSync.readSync);
+		try {
+			commitSessionStorageFallbackSync("01a1a000-0000-7000-8000-00000000cccc");
+		} finally {
+			spy.mockRestore();
+		}
+
+		// The file now at the name is byte-for-byte what was put there.
+		expect(fs.readFileSync(ledger, "utf8")).toBe(replacement);
+	});
+
+	it("two launches that would write the same line still each name their own", async () => {
+		// Same millisecond, same host, same connection file: before the
+		// placeholder carried a nonce these two lines were byte-identical, and
+		// each refinement found whichever the scan hit first.
+		const { env, ledger } = brokenSqlEnv();
+		await resolveSessionStorage({ settings: Settings.isolated(), env, resumableFileSession: async () => true });
+		const first = ledgerLines(ledger)[0];
+
+		// A second launch in this ledger, as another process would write it.
+		resetSqlWriteLatchForTest();
+		await resolveSessionStorage({ settings: Settings.isolated(), env, resumableFileSession: async () => true });
+		const both = ledgerLines(ledger);
+		expect(both).toHaveLength(2);
+		expect(String(both[0]?.session_id)).not.toBe(String(both[1]?.session_id));
+		expect(String(both[0]?.session_id)).toContain("(unresolved)");
+		expect(String(both[1]?.session_id)).toContain("(unresolved)");
+
+		// Only the second launch's own line takes its session.
+		await commitSessionStorageFallback("01a1a000-0000-7000-8000-00000000bbbb");
+		const after = ledgerLines(ledger);
+		expect(after).toHaveLength(2);
+		expect(String(after[0]?.session_id)).toBe(String(first?.session_id));
+		expect(String(after[1]?.session_id).trim()).toBe("01a1a000-0000-7000-8000-00000000bbbb");
+	});
+
+	it("a ledger truncated in place while the refinement is between its read and its write", async () => {
+		const { env, ledger } = brokenSqlEnv();
+		await resolveSessionStorage({ settings: Settings.isolated(), env, resumableFileSession: async () => true });
+		expect(fs.readFileSync(ledger, "utf8").length).toBeGreaterThan(0);
+
+		// The window that matters: the scan has already read the file, so its
+		// snapshot still holds the line, and the truncation lands before the
+		// write. Without a check on the bytes at the offset the write goes past
+		// a shortened end and fills the gap with NULs.
+		const realReadSync = fsSync.readSync;
+		const spy = vi.spyOn(fsSync, "readSync").mockImplementation(((...args: Parameters<typeof fsSync.readSync>) => {
+			const read = realReadSync(...args);
+			fs.truncateSync(ledger, 0);
+			return read;
+		}) as typeof fsSync.readSync);
+		try {
+			commitSessionStorageFallbackSync("01a1a000-0000-7000-8000-00000000dddd");
+		} finally {
+			spy.mockRestore();
+		}
+
+		const after = fs.readFileSync(ledger);
+		expect(after.includes(0)).toBe(false);
+		expect(after.toString("utf8")).toBe("");
 	});
 
 	it("a ledger rotated after the fallback was decided leaves the new file untouched", async () => {
@@ -517,6 +684,42 @@ describe("default file storage keeps main's listing behaviour", () => {
 
 		const listed = new FileSessionStorage().listFilesSync(dir, "*.jsonl").map(file => path.basename(file));
 		expect(listed).toEqual(["2026-11-04T00-00-00-000Z_abc.jsonl"]);
+	});
+
+	it("a transcript name that is not a regular file is not a transcript", async () => {
+		const dir = makeTempDir("@pi-session-kinds-");
+		fs.writeFileSync(path.join(dir, "Real.jsonl"), "{}\n");
+		fs.symlinkSync(path.join(dir, "Real.jsonl"), path.join(dir, "SymFile.jsonl"));
+		fs.symlinkSync(path.join(dir, "gone.jsonl"), path.join(dir, "Broken.jsonl"));
+		// A FIFO is the one that matters: reading it blocks until an EOF that
+		// never comes, so a walk must never hand its path to the reader.
+		execFileSync("mkfifo", [path.join(dir, "Fifo.jsonl")]);
+
+		const unregister = registerArtifactsDir(dir);
+		try {
+			const found = await sessionFilesFromDisk();
+			expect([...found.keys()].sort()).toEqual(["Real"]);
+		} finally {
+			unregister();
+		}
+	});
+
+	it("the transcript tree walk takes regular files only, dot-named ones included", async () => {
+		// Through `listTranscriptTree`, the call the report bundle and the tree
+		// copy make — not through the primitive it happens to use, which would
+		// assert the rule against itself.
+		const dir = makeTempDir("@pi-session-roster-");
+		const children = path.join(dir, "main");
+		fs.mkdirSync(children);
+		fs.writeFileSync(path.join(children, "Plain.jsonl"), "{}\n");
+		fs.writeFileSync(path.join(children, ".Hidden.jsonl"), "{}\n");
+		fs.writeFileSync(path.join(dir, "away.jsonl"), "{}\n");
+		fs.symlinkSync(path.join(dir, "away.jsonl"), path.join(children, "Linked.jsonl"));
+
+		const walked = listTranscriptTree(new FileSessionStorage(), children)
+			.map(file => path.basename(file))
+			.sort();
+		expect(walked).toEqual([".Hidden.jsonl", "Plain.jsonl"]);
 	});
 
 	it("a transcript name that is not a regular file is not a transcript", async () => {
