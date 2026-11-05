@@ -10,6 +10,7 @@ use gix::bstr::ByteSlice;
 use super::{
 	GitRepo,
 	open::{load_index_or_empty, status_with_fresh_index},
+	read_worktree_gitdir,
 };
 use crate::{
 	error::{Error, Result},
@@ -448,6 +449,32 @@ impl GitRepo {
 			.and_then(|v| nonempty(v.to_str_lossy().trim())))
 	}
 
+	/// Read a Git boolean, including valueless keys which Git treats as true.
+	pub fn config_boolean(&self, key: &str) -> Result<Option<bool>> {
+		if self.is_reftable() {
+			let args = ["config", "--type=bool", "--get", key]
+				.into_iter()
+				.map(str::to_owned)
+				.collect::<Vec<_>>();
+			let out = super::cli::run_sync(self.root(), &args, super::cli::SYNC_TIMEOUT)?;
+			if out.exit_code == 1 {
+				return Ok(None);
+			}
+			let value = out.into_checked(&args)?.stdout;
+			return match value.trim() {
+				"true" => Ok(Some(true)),
+				"false" => Ok(Some(false)),
+				_ => Err(Error::backend("git config", "invalid boolean output")),
+			};
+		}
+		self
+			.gix_fresh()?
+			.config_snapshot()
+			.try_boolean(key)
+			.transpose()
+			.map_err(|err| Error::backend("git config", err))
+	}
+
 	/// List configured remote names.
 	pub fn remote_list(&self) -> Result<Vec<String>> {
 		if self.is_reftable() {
@@ -496,19 +523,7 @@ impl GitRepo {
 				"--porcelain",
 			])?));
 		}
-		let primary_root = self
-			.info()
-			.common_dir
-			.parent()
-			.filter(|_| {
-				self
-					.info()
-					.common_dir
-					.file_name()
-					.is_some_and(|name| name == ".git")
-			})
-			.unwrap_or_else(|| self.root())
-			.to_owned();
+		let primary_root = self.primary_root();
 		let primary_head =
 			parse_head_with_refs(&self.info().common_dir.join("HEAD"), &self.info().common_dir)?;
 		let mut out = vec![entry_from_head(primary_root, &primary_head)];
@@ -520,10 +535,9 @@ impl GitRepo {
 		admins.sort_by_key(std::fs::DirEntry::file_name);
 		for admin in admins {
 			let dir = admin.path();
-			let Ok(pointer) = std::fs::read_to_string(dir.join("gitdir")) else {
+			let Ok(dotgit) = read_worktree_gitdir(&dir) else {
 				continue;
 			};
-			let dotgit = PathBuf::from(pointer.trim());
 			let Some(root) = dotgit.parent().map(Path::to_owned) else {
 				continue;
 			};
@@ -1682,6 +1696,32 @@ mod tests {
 		git(dir.path(), &["config", "custom.value", "  configured  "])?;
 		assert_eq!(repo.config_get("custom.value")?, Some("configured".to_owned()));
 		assert_eq!(repo.config_get("custom.missing")?, None);
+		Ok(())
+	}
+
+	#[test]
+	fn config_boolean_matches_git_for_valueless_and_invalid_entries() -> TestResult {
+		for reftable in [false, true] {
+			let dir = tempfile::tempdir()?;
+			if reftable {
+				if !init_reftable(dir.path())? {
+					continue;
+				}
+			} else {
+				git(dir.path(), &["init", "-q"])?;
+			}
+			let repo = GitRepo::require(dir.path())?;
+			assert_eq!(repo.config_boolean("ompFixture.flag")?, None);
+			git(dir.path(), &["config", "ompFixture.flag", "false"])?;
+			assert_eq!(repo.config_boolean("ompFixture.flag")?, Some(false));
+			let path = dir.path().join(".git/config");
+			let mut config = fs::read_to_string(&path)?;
+			config.push_str("\n[ompFixture]\n\tflag\n");
+			fs::write(path, config)?;
+			assert_eq!(repo.config_boolean("ompFixture.flag")?, Some(true));
+			git(dir.path(), &["config", "--replace-all", "ompFixture.flag", "invalid"])?;
+			assert!(repo.config_boolean("ompFixture.flag").is_err());
+		}
 		Ok(())
 	}
 

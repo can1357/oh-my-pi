@@ -651,7 +651,8 @@ export async function ensureIsolation(
 	preferred?: IsoBackendKind,
 ): Promise<IsolationHandle> {
 	const repoRoot = await getRepoRoot(baseCwd);
-	const sourceCommonDir = vcs.requireGit(repoRoot).info().commonDir;
+	const sourceInfo = vcs.requireGit(repoRoot).info();
+	const sourceCommonDir = sourceInfo.commonDir;
 	const baseDir = getWorktreeDir(getTaskIsolationSegment(repoRoot, id));
 	const mergedDir = path.join(baseDir, TASK_ISOLATION_MOUNT_DIR);
 	const resolution = await natives.isoResolve(preferred ?? null);
@@ -669,6 +670,20 @@ export async function ensureIsolation(
 		await writeIsolationOwner(baseDir, id);
 		try {
 			await natives.isoStart(candidate, repoRoot, mergedDir);
+			// Re-anchor a verbatim copied gitfile before opening it in the new
+			// directory. A separately registered worktree has its own pointer and
+			// must keep it so detachment can remove its own registration.
+			const sourceGit = path.join(repoRoot, ".git");
+			const isolatedGit = path.join(mergedDir, ".git");
+			if ((await fs.lstat(sourceGit)).isFile()) {
+				const [sourcePointer, isolatedPointer] = await Promise.all([
+					fs.readFile(sourceGit, "utf8"),
+					fs.readFile(isolatedGit, "utf8"),
+				]);
+				if (sourcePointer === isolatedPointer) {
+					await fs.writeFile(isolatedGit, `gitdir: ${sourceInfo.gitDir}\n`);
+				}
+			}
 			// Sever the isolation's git metadata from the source checkout. Copy
 			// backends duplicate `repoRoot`'s `.git` verbatim — a linked-worktree
 			// pointer file (or the rcopy `git worktree add` registration) leaves

@@ -28,7 +28,7 @@ import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree"
 
 import { cfgIsolationBackend, cfgWorktreeClone } from "../task/settings";
 
-type WorktreeKind = "pr-checkout" | "task-isolation" | "empty" | "stray";
+type WorktreeKind = "pr-checkout" | "task-isolation" | "empty" | "stray" | "unknown";
 
 const TASK_ISOLATION_MOUNT_DIRS = ["m", "merged"] as const;
 
@@ -43,6 +43,8 @@ export interface WorktreeEntry {
 	branch?: string;
 	/** When set, the entry is unhealthy and `omp worktree clear` will remove it. */
 	orphanReason?: string;
+	/** Inspection failed; preserve this entry rather than assuming it is orphaned. */
+	scanError?: string;
 }
 
 export interface AddWorktreeOptions {
@@ -60,7 +62,7 @@ export interface ListWorktreesOptions {
 }
 
 export interface ClearWorktreesOptions {
-	/** Remove every entry, including live PR-checkout worktrees. */
+	/** Include live worktrees in removal; entries that could not be inspected are always kept. */
 	all: boolean;
 	/** Print what would be removed without touching the filesystem. */
 	dryRun: boolean;
@@ -179,40 +181,69 @@ export async function listWorktrees(options: ListWorktreesOptions): Promise<void
 	}
 	let live = 0;
 	let orphaned = 0;
+	let unknown = 0;
 	for (const entry of entries) {
-		const tag = entry.orphanReason ? chalk.yellow("orphaned") : chalk.green("live    ");
+		const tag = entry.scanError
+			? chalk.yellow("unknown ")
+			: entry.orphanReason
+				? chalk.yellow("orphaned")
+				: chalk.green("live    ");
 		const detail = formatEntryDetail(entry);
 		console.log(`${tag}  ${entry.path}`);
 		if (detail) console.log(`          ${chalk.dim(detail)}`);
-		if (entry.orphanReason) orphaned += 1;
+		if (entry.scanError) unknown += 1;
+		else if (entry.orphanReason) orphaned += 1;
 		else live += 1;
 	}
-	console.log(chalk.dim(`\n${live} live · ${orphaned} orphaned · ${entries.length} total`));
+	console.log(
+		chalk.dim(
+			`\n${live} live · ${orphaned} orphaned${unknown > 0 ? ` · ${unknown} unknown` : ""} · ${entries.length} total`,
+		),
+	);
 }
 
 export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ removed: number; failed: number }> {
 	const entries = await scanWorktrees();
-	const targets = options.all ? entries : entries.filter(entry => entry.orphanReason !== undefined);
+	const skipped = entries
+		.filter(entry => entry.scanError !== undefined)
+		.map(entry => ({ path: entry.path, error: entry.scanError }));
+	const targets = entries.filter(
+		entry => entry.scanError === undefined && (options.all || entry.orphanReason !== undefined),
+	);
+	const skippedResult = skipped.length > 0 ? { skipped } : {};
+	const skippedFailure = skipped.length > 0 ? { failed: skipped.length } : {};
+	const skippedSummary = skipped.length > 0 ? ` · ${skipped.length} skipped` : "";
+	if (!options.json) {
+		for (const entry of skipped) {
+			console.log(`${chalk.yellow("kept   ")}  ${entry.path}`);
+			console.log(`          ${chalk.dim(`cannot inspect worktree: ${entry.error}`)}`);
+		}
+	}
 
 	if (targets.length === 0) {
 		if (options.json) {
-			console.log(JSON.stringify({ removed: 0, kept: entries.length }));
+			console.log(JSON.stringify({ removed: 0, kept: entries.length, ...skippedResult, ...skippedFailure }));
 		} else {
-			console.log(chalk.dim(options.all ? "No worktrees to remove." : "No orphaned worktrees to remove."));
+			const message = options.all ? "No worktrees to remove" : "No orphaned worktrees to remove";
+			console.log(chalk.dim(`${message}${skippedSummary}.`));
 		}
-		return { removed: 0, failed: 0 };
+		return { removed: 0, failed: skipped.length };
 	}
 
 	if (options.dryRun) {
 		if (options.json) {
-			console.log(JSON.stringify({ wouldRemove: targets.map(t => t.path) }, null, 2));
+			console.log(
+				JSON.stringify({ wouldRemove: targets.map(t => t.path), ...skippedResult, ...skippedFailure }, null, 2),
+			);
 		} else {
 			for (const target of targets) {
 				console.log(`${chalk.yellow("would remove")}  ${target.path}`);
 			}
-			console.log(chalk.dim(`\n${targets.length} dir${targets.length === 1 ? "" : "s"} would be removed.`));
+			console.log(
+				chalk.dim(`\n${targets.length} dir${targets.length === 1 ? "" : "s"} would be removed${skippedSummary}.`),
+			);
 		}
-		return { removed: 0, failed: 0 };
+		return { removed: 0, failed: skipped.length };
 	}
 
 	const results: { path: string; ok: boolean; error?: string }[] = [];
@@ -249,10 +280,11 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 	}
 
 	const succeeded = results.filter(r => r.ok).length;
-	const failed = results.length - succeeded;
+	const removalFailures = results.length - succeeded;
+	const failed = removalFailures + skipped.length;
 
 	if (options.json) {
-		console.log(JSON.stringify({ removed: succeeded, failed, results }, null, 2));
+		console.log(JSON.stringify({ removed: succeeded, failed, results, ...skippedResult }, null, 2));
 		return { removed: succeeded, failed };
 	}
 
@@ -264,13 +296,26 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 			if (result.error) console.log(`          ${chalk.dim(result.error)}`);
 		}
 	}
-	console.log(chalk.dim(`\n${succeeded} removed${failed > 0 ? ` · ${chalk.red(`${failed} failed`)}` : ""}`));
+	console.log(
+		chalk.dim(
+			`\n${succeeded} removed${removalFailures > 0 ? ` · ${chalk.red(`${removalFailures} failed`)}` : ""}${skippedSummary}`,
+		),
+	);
 	return { removed: succeeded, failed };
 }
 
 // ───────────────────────────────────────────────────────────────────────────
 // Scanner
 // ───────────────────────────────────────────────────────────────────────────
+
+function ignoreMissing(error: unknown): null {
+	if (isEnoent(error)) return null;
+	throw error;
+}
+
+function unreadableEntry(dir: string, error: unknown, kind: WorktreeKind = "unknown"): WorktreeEntry {
+	return { path: dir, kind, scanError: error instanceof Error ? error.message : String(error) };
+}
 
 async function scanWorktrees(): Promise<WorktreeEntry[]> {
 	const root = getWorktreesDir();
@@ -285,39 +330,43 @@ async function scanWorktrees(): Promise<WorktreeEntry[]> {
 	const entries: WorktreeEntry[] = [];
 	for (const name of topLevel) {
 		const dir = path.join(root, name);
-		const stat = await fs.stat(dir).catch(() => null);
-		if (!stat?.isDirectory()) continue;
-
-		const direct = await classifyDir(dir);
-		if (direct) {
-			entries.push(direct);
-			continue;
-		}
-
-		// Legacy nesting: ~/.omp/wt/<encoded-project>/<branch-or-id>
-		let children: string[];
 		try {
-			children = await fs.readdir(dir);
-		} catch {
-			continue;
-		}
-		let nested = 0;
-		for (const child of children) {
-			const childDir = path.join(dir, child);
-			const childStat = await fs.stat(childDir).catch(() => null);
-			if (!childStat?.isDirectory()) continue;
-			const childClassified = await classifyDir(childDir);
-			if (childClassified) {
-				entries.push(childClassified);
-				nested += 1;
+			const stat = await fs.stat(dir).catch(ignoreMissing);
+			if (!stat?.isDirectory()) continue;
+
+			const direct = await classifyDir(dir);
+			if (direct) {
+				entries.push(direct);
+				continue;
 			}
-		}
-		if (nested === 0) {
-			entries.push({
-				path: dir,
-				kind: children.length === 0 ? "empty" : "stray",
-				orphanReason: children.length === 0 ? "empty directory" : "no recognizable worktree contents",
-			});
+
+			// Legacy nesting: ~/.omp/wt/<encoded-project>/<branch-or-id>
+			const children = await fs.readdir(dir);
+			let nested = 0;
+			for (const child of children) {
+				const childDir = path.join(dir, child);
+				try {
+					const childStat = await fs.stat(childDir).catch(ignoreMissing);
+					if (!childStat?.isDirectory()) continue;
+					const childClassified = await classifyDir(childDir);
+					if (childClassified) {
+						entries.push(childClassified);
+						nested += 1;
+					}
+				} catch (error) {
+					entries.push(unreadableEntry(childDir, error));
+					nested += 1;
+				}
+			}
+			if (nested === 0) {
+				entries.push({
+					path: dir,
+					kind: children.length === 0 ? "empty" : "stray",
+					orphanReason: children.length === 0 ? "empty directory" : "no recognizable worktree contents",
+				});
+			}
+		} catch (error) {
+			entries.push(unreadableEntry(dir, error));
 		}
 	}
 	return entries;
@@ -325,7 +374,7 @@ async function scanWorktrees(): Promise<WorktreeEntry[]> {
 
 async function classifyDir(dir: string): Promise<WorktreeEntry | null> {
 	const gitEntry = path.join(dir, ".git");
-	const gitStat = await fs.stat(gitEntry).catch(() => null);
+	const gitStat = await fs.stat(gitEntry).catch(ignoreMissing);
 	if (gitStat?.isFile()) {
 		return classifyPrCheckout(dir, gitEntry);
 	}
@@ -337,7 +386,7 @@ async function classifyDir(dir: string): Promise<WorktreeEntry | null> {
 	let isIsolation = await Bun.file(path.join(dir, ISOLATION_OWNER_FILE)).exists();
 	if (!isIsolation) {
 		for (const mountDir of TASK_ISOLATION_MOUNT_DIRS) {
-			const mountStat = await fs.stat(path.join(dir, mountDir)).catch(() => null);
+			const mountStat = await fs.stat(path.join(dir, mountDir)).catch(ignoreMissing);
 			if (mountStat?.isDirectory()) {
 				isIsolation = true;
 				break;
@@ -356,46 +405,49 @@ async function classifyDir(dir: string): Promise<WorktreeEntry | null> {
 }
 
 async function classifyPrCheckout(dir: string, gitEntry: string): Promise<WorktreeEntry> {
-	let contents: string;
 	try {
-		contents = await fs.readFile(gitEntry, "utf8");
-	} catch (err) {
-		return {
-			path: dir,
-			kind: "pr-checkout",
-			orphanReason: `cannot read .git file: ${err instanceof Error ? err.message : String(err)}`,
-		};
-	}
-	const match = /^gitdir:\s*(.+?)\s*$/m.exec(contents);
-	const parentGitDir = match?.[1];
-	if (!parentGitDir) {
-		return { path: dir, kind: "pr-checkout", orphanReason: "malformed .git file (no gitdir line)" };
-	}
-	// parentGitDir is `<parent-repo>/.git/worktrees/<name>`; back out the repo root.
-	const parentRepo = path.dirname(path.dirname(path.dirname(parentGitDir)));
-	const branch = await readWorktreeBranch(path.join(parentGitDir, "HEAD"));
+		const contents = await fs.readFile(gitEntry, "utf8");
+		const match = /^gitdir:\s*(.+?)\s*$/m.exec(contents);
+		const gitdir = match?.[1];
+		if (!gitdir) {
+			return { path: dir, kind: "pr-checkout", orphanReason: "malformed .git file (no gitdir line)" };
+		}
+		// Let the filesystem resolve symlinks before `..`, as Git does. Lexical
+		// path.resolve() can point at the wrong repository under a symlinked base.
+		const target = path.isAbsolute(gitdir) ? gitdir : `${path.dirname(gitEntry)}${path.sep}${gitdir}`;
+		const parentGitDir = await fs.realpath(target).catch(error => {
+			if (isEnoent(error)) return path.resolve(path.dirname(gitEntry), gitdir);
+			throw error;
+		});
+		// parentGitDir is `<parent-repo>/.git/worktrees/<name>`; back out the repo root.
+		const parentRepo = path.dirname(path.dirname(path.dirname(parentGitDir)));
+		const branch = await readWorktreeBranch(path.join(parentGitDir, "HEAD"));
 
-	const parentDirStat = await fs.stat(parentGitDir).catch(() => null);
-	if (!parentDirStat?.isDirectory()) {
-		return {
-			path: dir,
-			kind: "pr-checkout",
-			parentRepo,
-			branch,
-			orphanReason: "parent repo no longer tracks this worktree",
-		};
+		const parentDirStat = await fs.stat(parentGitDir).catch(ignoreMissing);
+		if (!parentDirStat?.isDirectory()) {
+			return {
+				path: dir,
+				kind: "pr-checkout",
+				parentRepo,
+				branch,
+				orphanReason: "parent repo no longer tracks this worktree",
+			};
+		}
+		const parentRepoStat = await fs.stat(parentRepo).catch(ignoreMissing);
+		if (!parentRepoStat?.isDirectory()) {
+			return {
+				path: dir,
+				kind: "pr-checkout",
+				parentRepo,
+				branch,
+				orphanReason: "parent repo missing",
+			};
+		}
+		return { path: dir, kind: "pr-checkout", parentRepo, branch };
+	} catch (error) {
+		// A read failure says nothing about ownership or whether deletion is safe.
+		return unreadableEntry(dir, error, "pr-checkout");
 	}
-	const parentRepoStat = await fs.stat(parentRepo).catch(() => null);
-	if (!parentRepoStat?.isDirectory()) {
-		return {
-			path: dir,
-			kind: "pr-checkout",
-			parentRepo,
-			branch,
-			orphanReason: "parent repo missing",
-		};
-	}
-	return { path: dir, kind: "pr-checkout", parentRepo, branch };
 }
 
 async function readWorktreeBranch(headFile: string): Promise<string | undefined> {
@@ -403,8 +455,9 @@ async function readWorktreeBranch(headFile: string): Promise<string | undefined>
 		const head = (await fs.readFile(headFile, "utf8")).trim();
 		const refMatch = /^ref:\s*refs\/heads\/(.+)$/.exec(head);
 		return refMatch?.[1];
-	} catch {
-		return undefined;
+	} catch (error) {
+		if (isEnoent(error)) return undefined;
+		throw error;
 	}
 }
 
@@ -418,9 +471,10 @@ function formatEntryDetail(entry: WorktreeEntry): string {
 		parts.push("task-isolation sandbox");
 	} else if (entry.kind === "empty") {
 		parts.push("legacy project shell");
-	} else {
+	} else if (entry.kind === "stray") {
 		parts.push("unrecognized contents");
 	}
 	if (entry.orphanReason) parts.push(entry.orphanReason);
+	if (entry.scanError) parts.push(`cannot inspect worktree: ${entry.scanError}`);
 	return parts.join(" — ");
 }

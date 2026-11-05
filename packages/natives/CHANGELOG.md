@@ -27,6 +27,8 @@
 
 ### Fixed
 
+- Fixed Git worktree operations to honor relative links and preserve valid worktrees during cleanup ([#17335](https://github.com/can1357/oh-my-pi/pull/17335) by [@camjac251](https://github.com/camjac251)).
+- Fixed smart Git worktree creation ignoring valueless or invalid `worktree.guessRemote` settings ([#17335](https://github.com/can1357/oh-my-pi/pull/17335) by [@camjac251](https://github.com/camjac251)).
 - Fixed the bash tool's `$!` inside a command substitution, a `( )` subshell or a pipeline stage: it now names the parent's last background job, as in Bash ([#18107](https://github.com/can1357/oh-my-pi/pull/18107) by [@sjawhar](https://github.com/sjawhar))
 - Fixed Windows `rsync` treating a one-letter daemon host such as `h::module` as a local drive path ([#18048](https://github.com/can1357/oh-my-pi/pull/18048) by [@jchanghong023](https://github.com/jchanghong023))
 - Removed embedded-shell compiler warnings and fixed history saves hanging when a stale lock cannot be removed
