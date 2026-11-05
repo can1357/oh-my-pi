@@ -1623,3 +1623,67 @@ async fn a_self_duplication_is_not_held_to_the_open_file_limit() {
 	.join("\n");
 	assert_eq!(output, expected);
 }
+
+/// A redirection that fails past `ulimit -n` commits nothing it has not
+/// already had to commit: the descriptor is not installed, so the
+/// failure's own diagnostic reaches the real standard error instead of
+/// the handle the redirection just opened, and a `{var}` is left unset
+/// rather than naming a descriptor that was never made. The file the
+/// redirection names is still created, which is the one side effect Bash
+/// 5.2.21 keeps. Every status, `{var}` value and `made=` value here is
+/// what that bash prints for the same script run as a script file.
+/// Regression: `exec 0<&-; ulimit -n 2; : 2>/dev/null` printed no
+/// diagnostic at all (it went to the `/dev/null` just installed on fd 2),
+/// `ulimit -n 9; : {fd}>&1` left `fd=10`, `: {fd}>g` failed before `g`
+/// was made, and `&>file` was not held to the limit at all.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_redirection_installs_no_descriptor_and_assigns_no_variable() {
+	let dir = tempfile::tempdir().expect("temporary directory");
+	let first = format!("cd '{}'; ulimit -n 9", dir.path().display());
+	let script = [
+		first.as_str(),
+		"unset fd; : {fd}>&1; printf 'dup=%s fd=%s\\n' \"$?\" \"${fd-unset}\"",
+		"unset fd; : {fd}<&0; printf 'dupin=%s fd=%s\\n' \"$?\" \"${fd-unset}\"",
+		"unset fd; : {fd}<<<x; printf 'herestring=%s fd=%s\\n' \"$?\" \"${fd-unset}\"",
+		"unset fd; : {fd}>g; printf 'file=%s fd=%s made=%s\\n' \"$?\" \"${fd-unset}\" \"$([ -e g ] \
+		 && echo yes || echo no)\"",
+		": 12>i; printf 'num=%s made=%s\\n' \"$?\" \"$([ -e i ] && echo yes || echo no)\"",
+		"exec 0<&-",
+		"ulimit -n 2",
+		": 2>h; echo \"swallowed=$?\"",
+		": &>/dev/null; echo \"outerr=$?\"",
+	]
+	.join("\n");
+	let (result, output) = execute_captured(script).await;
+	assert_eq!(result.exit_code, Some(0), "{output:?}");
+	// bash prints `cannot duplicate fd` for a `{var}` target, whose
+	// `F_DUPFD` to 10 fails `EINVAL`, and `N: Bad file descriptor` for a
+	// numbered one, whose `dup2` fails `EBADF`. The here-string's second
+	// line names the allocated fd; bash prints uninitialised memory there
+	// (`file descriptor out of range` and `1860191664` on two runs of the
+	// same script), so there is nothing to match.
+	let expected = [
+		"bash: redirection error: cannot duplicate fd: Invalid argument",
+		"bash: line 2: 1: Invalid argument",
+		"dup=1 fd=unset",
+		"bash: redirection error: cannot duplicate fd: Invalid argument",
+		"bash: line 3: 0: Invalid argument",
+		"dupin=1 fd=unset",
+		"bash: redirection error: cannot duplicate fd: Invalid argument",
+		"bash: line 4: 10: Invalid argument",
+		"herestring=1 fd=unset",
+		"bash: redirection error: cannot duplicate fd: Invalid argument",
+		"bash: line 5: g: Invalid argument",
+		"file=1 fd=unset made=yes",
+		"bash: line 6: 12: Bad file descriptor",
+		"num=1 made=yes",
+		"bash: line 9: 2: Bad file descriptor",
+		"swallowed=1",
+		"bash: line 10: 2: Bad file descriptor",
+		"outerr=1",
+		"",
+	]
+	.join("\n");
+	assert_eq!(output, expected);
+}

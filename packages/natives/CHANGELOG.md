@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed the bash tool's shell failing a command given many file descriptors with `Too many open files` where Bash runs it (`cmd 3>&1 4>&1 …`, or hundreds of `N>file`); a command now needs one descriptor per distinct file, and a redirection to a descriptor at or past `ulimit -n` fails with `Bad file descriptor` as in Bash ([#17802](https://github.com/can1357/oh-my-pi/pull/17802) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's shell committing a redirection that then fails past `ulimit -n`: the failure's own diagnostic went to the handle the redirection had just installed (`: 2>/dev/null` printed nothing at all), `{fd}>&1` left `fd` naming a descriptor that was never opened, and `{fd}>file` failed before the file was made while `&>file` was not held to the limit at all; a failed redirection now installs no descriptor and assigns no variable, and still makes the file, as in Bash ([#17802](https://github.com/can1357/oh-my-pi/pull/17802) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the bash tool's shell not running a background subshell's, group's or function's `EXIT` trap when `kill` ends it; the trap now runs and the job ends with the signal's status, as in Bash ([#17802](https://github.com/can1357/oh-my-pi/pull/17802) by [@sjawhar](https://github.com/sjawhar))
 
 ### Breaking Changes
