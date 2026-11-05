@@ -132,7 +132,7 @@ export class AutoLearnController {
 
 		if (this.#captureInFlight) {
 			this.#capturePending = true;
-			this.#session.notifyAutolearnCapturePending?.();
+			this.#session.notifyAutolearnCapturePending();
 			return;
 		}
 		this.#startCapture();
