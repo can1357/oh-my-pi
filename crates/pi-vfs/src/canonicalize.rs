@@ -38,7 +38,12 @@ pub(crate) trait Resolver: Sync {
 
 fn ends_with_separator(path: &Path) -> bool {
 	let bytes = path.as_os_str().as_encoded_bytes();
-	bytes.ends_with(b"/") || bytes.ends_with(MAIN_SEPARATOR.encode_utf8(&mut [0; 4]).as_bytes())
+	bytes.ends_with(b"/")
+		|| bytes.ends_with(
+			MAIN_SEPARATOR
+				.encode_utf8(&mut [0; char::MAX_LEN_UTF8])
+				.as_bytes(),
+		)
 }
 
 fn remaining_path(parts: &VecDeque<Part>) -> PathBuf {
@@ -105,9 +110,7 @@ pub(crate) async fn canonicalize<R: Resolver>(
 				if followed < SYMLINKS_BEFORE_LOOP_CHECK {
 					followed += 1;
 				} else {
-					let dir = parent_path(&current)
-						.map(Path::to_path_buf)
-						.unwrap_or_default();
+					let dir = parent_path(&current).map_or_default(Path::to_path_buf);
 					if !visited.insert((dir, remaining_path(&pending))) {
 						return Err(symlink_loop());
 					}

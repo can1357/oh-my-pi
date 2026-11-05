@@ -87,6 +87,8 @@ type ThinkingContent struct {
 	Thinking          string  `json:"thinking"`
 	ThinkingSignature *string `json:"thinkingSignature,omitempty"`
 	ItemID            *string `json:"itemId,omitempty"`
+	// Prose the model addressed to the user, returned by the provider as thinking; present it as answer text.
+	Narration *bool `json:"narration,omitempty"`
 	// Extra holds undeclared keys and declared keys whose value did not decode (that field stays zero).
 	// Encoding writes them back, over a declared field with the same key.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -103,6 +105,7 @@ func (v *ThinkingContent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("thinking", &out.Thinking)
 	d.optional("thinkingSignature", &out.ThinkingSignature)
 	d.optional("itemId", &out.ItemID)
+	d.optional("narration", &out.Narration)
 	out.Extra = d.rest()
 	if d.err != nil {
 		return d.err
@@ -1949,7 +1952,7 @@ func (v *CacheWarmingMode) UnmarshalJSON(data []byte) error {
 	return unknownValue("CacheWarmingMode", s)
 }
 
-// `set_event_filter` projection: `delta` drops the accumulated snapshots from `message_update`.
+// `set_event_filter` projection: `delta` replaces the accumulated snapshots with the block a start/end event touches.
 type MessageUpdates string
 
 const (
@@ -2205,6 +2208,8 @@ func (v *ContextUsage) decodeFrom(raw map[string]json.RawMessage) error {
 type QueuedMessagesState struct {
 	Steering []string `json:"steering"`
 	FollowUp []string `json:"followUp"`
+	// Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.
+	LiveSteered int64 `json:"liveSteered"`
 }
 
 func (v *QueuedMessagesState) UnmarshalJSON(data []byte) error {
@@ -2216,6 +2221,7 @@ func (v *QueuedMessagesState) decodeFrom(raw map[string]json.RawMessage) error {
 	d := fieldDecoder{raw: raw, owner: "QueuedMessagesState"}
 	d.required("steering", &out.Steering)
 	d.required("followUp", &out.FollowUp)
+	d.defaulted("liveSteered", &out.LiveSteered, `0`)
 	if d.err != nil {
 		return d.err
 	}
@@ -2369,6 +2375,130 @@ func (v *GoalResult) decodeFrom(raw map[string]json.RawMessage) error {
 	return nil
 }
 
+// Where `/slow` lives: persisted config shared by every session, or this session's flex tier.
+type SlowModeScope string
+
+const (
+	SlowModeScopeSession SlowModeScope = "session"
+	SlowModeScopeGlobal  SlowModeScope = "global"
+)
+
+func (v *SlowModeScope) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SlowModeScope")
+	if err != nil {
+		return err
+	}
+	switch value := SlowModeScope(s); value {
+	case SlowModeScopeSession, SlowModeScopeGlobal:
+		*v = value
+		return nil
+	}
+	return unknownValue("SlowModeScope", s)
+}
+
+// Requests are served on the provider's low-priority (slow) lane.
+type UsageLimitLowPriority struct {
+	// Epoch seconds when the limit that was hit resets.
+	ResetsAtSec float64 `json:"resetsAtSec"`
+	// Percent of the low-priority allowance still available, when reported.
+	AllowanceLeftPercent *int64 `json:"allowanceLeftPercent,omitempty"`
+}
+
+func (v *UsageLimitLowPriority) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "UsageLimitLowPriority", v.decodeFrom)
+}
+
+func (v *UsageLimitLowPriority) decodeFrom(raw map[string]json.RawMessage) error {
+	var out UsageLimitLowPriority
+	d := fieldDecoder{raw: raw, owner: "UsageLimitLowPriority"}
+	d.constant("stage", "low_priority")
+	d.required("resetsAtSec", &out.ResetsAtSec)
+	d.optional("allowanceLeftPercent", &out.AllowanceLeftPercent)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v UsageLimitLowPriority) MarshalJSON() ([]byte, error) {
+	type plain UsageLimitLowPriority
+	return encodeObject(plain(v), `"stage":"low_priority"`, nil)
+}
+
+// Requests run on a short wrap-up allowance past the limit.
+type UsageLimitWrapUp struct {
+	// Whether paid extra usage serves requests once the allowance is spent.
+	ExtraUsage bool `json:"extraUsage"`
+	// Epoch seconds when the limit that was hit resets, if reported.
+	ResetsAtSec *float64 `json:"resetsAtSec,omitempty"`
+}
+
+func (v *UsageLimitWrapUp) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "UsageLimitWrapUp", v.decodeFrom)
+}
+
+func (v *UsageLimitWrapUp) decodeFrom(raw map[string]json.RawMessage) error {
+	var out UsageLimitWrapUp
+	d := fieldDecoder{raw: raw, owner: "UsageLimitWrapUp"}
+	d.constant("stage", "wrap_up")
+	d.required("extraUsage", &out.ExtraUsage)
+	d.optional("resetsAtSec", &out.ResetsAtSec)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v UsageLimitWrapUp) MarshalJSON() ([]byte, error) {
+	type plain UsageLimitWrapUp
+	return encodeObject(plain(v), `"stage":"wrap_up"`, nil)
+}
+
+// Provider-neutral state of an account past its usage limit, discriminated by `stage`.
+type UsageLimitState struct {
+	// Value holds one variant, chosen by "stage" on decode.
+	Value UsageLimitStateVariant
+}
+
+// UsageLimitStateVariant is implemented by the types UsageLimitState can hold.
+type UsageLimitStateVariant interface {
+	isUsageLimitState()
+}
+
+func (UsageLimitLowPriority) isUsageLimitState() {}
+func (UsageLimitWrapUp) isUsageLimitState()      {}
+
+func (v UsageLimitState) MarshalJSON() ([]byte, error) {
+	return encodeVariant("UsageLimitState", v.Value)
+}
+
+func (v *UsageLimitState) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "UsageLimitState", v.decodeFrom)
+}
+
+func (v *UsageLimitState) decodeFrom(raw map[string]json.RawMessage) error {
+	tag, err := unionTag(raw, "UsageLimitState", "stage")
+	if err != nil {
+		return err
+	}
+	var value UsageLimitStateVariant
+	switch tag {
+	case "low_priority":
+		value, err = decodeVariant[UsageLimitLowPriority](raw)
+	case "wrap_up":
+		value, err = decodeVariant[UsageLimitWrapUp](raw)
+	default:
+		return unknownValue("UsageLimitState.stage", tag)
+	}
+	if err != nil {
+		return err
+	}
+	v.Value = value
+	return nil
+}
+
 type SessionState struct {
 	SessionID             string         `json:"sessionId"`
 	Model                 *ModelInfo     `json:"model,omitempty"`
@@ -2383,9 +2513,17 @@ type SessionState struct {
 	AutoCompactionEnabled bool           `json:"autoCompactionEnabled"`
 	FastModeEnabled       bool           `json:"fastModeEnabled"`
 	FastModeActive        bool           `json:"fastModeActive"`
-	TokensPerSecond       *float64       `json:"tokensPerSecond"`
-	MessageCount          int64          `json:"messageCount"`
-	QueuedMessageCount    int64          `json:"queuedMessageCount"`
+	// `/slow` applies to the active model.
+	SlowModeSupported bool `json:"slowModeSupported"`
+	// `/slow` is on for the active model; always `false` when `slowModeSupported` is `false`.
+	SlowModeEnabled bool `json:"slowModeEnabled"`
+	// Where the active model's `/slow` lives; absent when unsupported.
+	SlowModeScope *SlowModeScope `json:"slowModeScope,omitempty"`
+	// Usage-limit stage of the active model's account; absent outside wrap-up and low priority.
+	UsageLimit         *UsageLimitState `json:"usageLimit,omitempty"`
+	TokensPerSecond    *float64         `json:"tokensPerSecond"`
+	MessageCount       int64            `json:"messageCount"`
+	QueuedMessageCount int64            `json:"queuedMessageCount"`
 	// Background jobs or deliveries can still inject a follow-up and wake the session.
 	HasPendingAsyncWork bool `json:"hasPendingAsyncWork"`
 	// Idle with nothing queued or pending; same predicate as `session_settled`.
@@ -2420,12 +2558,16 @@ func (v *SessionState) decodeFrom(raw map[string]json.RawMessage) error {
 	d.defaulted("autoCompactionEnabled", &out.AutoCompactionEnabled, `false`)
 	d.defaulted("fastModeEnabled", &out.FastModeEnabled, `false`)
 	d.defaulted("fastModeActive", &out.FastModeActive, `false`)
+	d.defaulted("slowModeSupported", &out.SlowModeSupported, `false`)
+	d.defaulted("slowModeEnabled", &out.SlowModeEnabled, `false`)
+	d.optional("slowModeScope", &out.SlowModeScope)
+	d.optional("usageLimit", &out.UsageLimit)
 	d.defaulted("tokensPerSecond", &out.TokensPerSecond, `null`)
 	d.defaulted("messageCount", &out.MessageCount, `0`)
 	d.defaulted("queuedMessageCount", &out.QueuedMessageCount, `0`)
 	d.defaulted("hasPendingAsyncWork", &out.HasPendingAsyncWork, `false`)
 	d.defaulted("isSettled", &out.IsSettled, `false`)
-	d.defaulted("queuedMessages", &out.QueuedMessages, `{"steering":[],"followUp":[]}`)
+	d.defaulted("queuedMessages", &out.QueuedMessages, `{"steering":[],"followUp":[],"liveSteered":0}`)
 	d.defaulted("todoPhases", &out.TodoPhases, `[]`)
 	d.scalarOrArray("systemPrompt")
 	d.defaulted("systemPrompt", &out.SystemPrompt, `[]`)
@@ -2440,20 +2582,35 @@ func (v *SessionState) decodeFrom(raw map[string]json.RawMessage) error {
 }
 
 type BashResult struct {
-	Output              string                     `json:"output"`
-	Cancelled           bool                       `json:"cancelled"`
-	Truncated           bool                       `json:"truncated"`
-	TotalLines          int64                      `json:"totalLines"`
-	TotalBytes          int64                      `json:"totalBytes"`
-	OutputLines         int64                      `json:"outputLines"`
-	OutputBytes         int64                      `json:"outputBytes"`
-	ExitCode            *int64                     `json:"exitCode,omitempty"`
-	TimedOut            *bool                      `json:"timedOut,omitempty"`
-	ArtifactID          *string                    `json:"artifactId,omitempty"`
-	ArtifactElidedBytes *int64                     `json:"artifactElidedBytes,omitempty"`
-	ArtifactError       map[string]json.RawMessage `json:"artifactError,omitempty"`
-	WorkingDir          *string                    `json:"workingDir,omitempty"`
-	Images              []ImageContent             `json:"images,omitempty"`
+	Output              string  `json:"output"`
+	Cancelled           bool    `json:"cancelled"`
+	Truncated           bool    `json:"truncated"`
+	TotalLines          int64   `json:"totalLines"`
+	TotalBytes          int64   `json:"totalBytes"`
+	OutputLines         int64   `json:"outputLines"`
+	OutputBytes         int64   `json:"outputBytes"`
+	ExitCode            *int64  `json:"exitCode,omitempty"`
+	TimedOut            *bool   `json:"timedOut,omitempty"`
+	ArtifactID          *string `json:"artifactId,omitempty"`
+	ArtifactElidedBytes *int64  `json:"artifactElidedBytes,omitempty"`
+	// Bytes dropped from the middle of `output`, which keeps the head and tail.
+	ElidedBytes *int64 `json:"elidedBytes,omitempty"`
+	// Lines dropped from the middle of `output`.
+	ElidedLines *int64 `json:"elidedLines,omitempty"`
+	// Bytes the per-line column cap cut from `output`, across all lines.
+	ColumnDroppedBytes *int64 `json:"columnDroppedBytes,omitempty"`
+	// Lines of `output` the per-line column cap cut; the artifact holds them whole.
+	ColumnTruncatedLines *int64 `json:"columnTruncatedLines,omitempty"`
+	// First and last lines the column cap cut, numbered as in the artifact; absent when the numbering cannot match it.
+	ColumnTruncatedRange *LineRange `json:"columnTruncatedRange,omitempty"`
+	// The per-line column cap in UTF-8 bytes, set when it cut a line.
+	ColumnMax     *int64                     `json:"columnMax,omitempty"`
+	ArtifactError map[string]json.RawMessage `json:"artifactError,omitempty"`
+	Minimized     map[string]json.RawMessage `json:"minimized,omitempty"`
+	WorkingDir    *string                    `json:"workingDir,omitempty"`
+	Images        []ImageContent             `json:"images,omitempty"`
+	// The embedded shell's final `ShellTrace` of the run; only when the caller asked for one.
+	Trace map[string]json.RawMessage `json:"trace,omitempty"`
 }
 
 func (v *BashResult) UnmarshalJSON(data []byte) error {
@@ -2474,9 +2631,38 @@ func (v *BashResult) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("timedOut", &out.TimedOut)
 	d.optional("artifactId", &out.ArtifactID)
 	d.optional("artifactElidedBytes", &out.ArtifactElidedBytes)
+	d.optional("elidedBytes", &out.ElidedBytes)
+	d.optional("elidedLines", &out.ElidedLines)
+	d.optional("columnDroppedBytes", &out.ColumnDroppedBytes)
+	d.optional("columnTruncatedLines", &out.ColumnTruncatedLines)
+	d.optional("columnTruncatedRange", &out.ColumnTruncatedRange)
+	d.optional("columnMax", &out.ColumnMax)
 	d.optional("artifactError", &out.ArtifactError)
+	d.optional("minimized", &out.Minimized)
 	d.optional("workingDir", &out.WorkingDir)
 	d.optional("images", &out.Images)
+	d.optional("trace", &out.Trace)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type LineRange struct {
+	First int64 `json:"first"`
+	Last  int64 `json:"last"`
+}
+
+func (v *LineRange) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "LineRange", v.decodeFrom)
+}
+
+func (v *LineRange) decodeFrom(raw map[string]json.RawMessage) error {
+	var out LineRange
+	d := fieldDecoder{raw: raw, owner: "LineRange"}
+	d.required("first", &out.First)
+	d.required("last", &out.Last)
 	if d.err != nil {
 		return d.err
 	}
@@ -2506,12 +2692,13 @@ func (v *FastModeResult) decodeFrom(raw map[string]json.RawMessage) error {
 }
 
 type CompactionResult struct {
-	Summary          string                     `json:"summary"`
-	FirstKeptEntryID string                     `json:"firstKeptEntryId"`
-	TokensBefore     int64                      `json:"tokensBefore"`
-	ShortSummary     *string                    `json:"shortSummary,omitempty"`
-	Details          json.RawMessage            `json:"details,omitempty"`
-	PreserveData     map[string]json.RawMessage `json:"preserveData,omitempty"`
+	Summary                      string                     `json:"summary"`
+	FirstKeptEntryID             string                     `json:"firstKeptEntryId"`
+	TokensBefore                 int64                      `json:"tokensBefore"`
+	ShortSummary                 *string                    `json:"shortSummary,omitempty"`
+	Details                      json.RawMessage            `json:"details,omitempty"`
+	PreserveData                 map[string]json.RawMessage `json:"preserveData,omitempty"`
+	ProviderReplayThroughEntryID *string                    `json:"providerReplayThroughEntryId,omitempty"`
 }
 
 func (v *CompactionResult) UnmarshalJSON(data []byte) error {
@@ -2527,6 +2714,7 @@ func (v *CompactionResult) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("shortSummary", &out.ShortSummary)
 	d.optional("details", &out.Details)
 	d.optional("preserveData", &out.PreserveData)
+	d.optional("providerReplayThroughEntryId", &out.ProviderReplayThroughEntryID)
 	if d.err != nil {
 		return d.err
 	}
@@ -2623,6 +2811,10 @@ func (v *OpenSessionResult) decodeFrom(raw map[string]json.RawMessage) error {
 
 type RemoveQueuedMessageResult struct {
 	Removed bool `json:"removed"`
+	// The removed message's images, so the client can restore them with its text.
+	Images []ImageContent `json:"images,omitempty"`
+	// Only ever `true`: the images exceeded the transport limit and were omitted; the removal still happened.
+	ImagesDropped *bool `json:"imagesDropped,omitempty"`
 }
 
 func (v *RemoveQueuedMessageResult) UnmarshalJSON(data []byte) error {
@@ -2633,6 +2825,8 @@ func (v *RemoveQueuedMessageResult) decodeFrom(raw map[string]json.RawMessage) e
 	var out RemoveQueuedMessageResult
 	d := fieldDecoder{raw: raw, owner: "RemoveQueuedMessageResult"}
 	d.required("removed", &out.Removed)
+	d.optional("images", &out.Images)
+	d.optional("imagesDropped", &out.ImagesDropped)
 	if d.err != nil {
 		return d.err
 	}
@@ -2652,6 +2846,56 @@ func (v *PromoteQueuedMessageResult) decodeFrom(raw map[string]json.RawMessage) 
 	var out PromoteQueuedMessageResult
 	d := fieldDecoder{raw: raw, owner: "PromoteQueuedMessageResult"}
 	d.required("promoted", &out.Promoted)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// Queued user content withdrawn from the queue, as the editor would restore it.
+type RestoredQueuedMessage struct {
+	Text   string         `json:"text"`
+	Images []ImageContent `json:"images,omitempty"`
+}
+
+func (v *RestoredQueuedMessage) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "RestoredQueuedMessage", v.decodeFrom)
+}
+
+func (v *RestoredQueuedMessage) decodeFrom(raw map[string]json.RawMessage) error {
+	var out RestoredQueuedMessage
+	d := fieldDecoder{raw: raw, owner: "RestoredQueuedMessage"}
+	d.required("text", &out.Text)
+	d.optional("images", &out.Images)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// User-authored queued input withdrawn before the abort, oldest first.
+type AbortAndRestoreQueueResult struct {
+	Steering []RestoredQueuedMessage `json:"steering"`
+	FollowUp []RestoredQueuedMessage `json:"followUp"`
+	// Only ever `true`: the full result exceeded the transport limit and every `images` was omitted.
+	ImagesDropped *bool `json:"imagesDropped,omitempty"`
+	// Only ever `true`: even the text-only result exceeded the limit, so only an oldest-first prefix is listed.
+	Truncated *bool `json:"truncated,omitempty"`
+}
+
+func (v *AbortAndRestoreQueueResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "AbortAndRestoreQueueResult", v.decodeFrom)
+}
+
+func (v *AbortAndRestoreQueueResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out AbortAndRestoreQueueResult
+	d := fieldDecoder{raw: raw, owner: "AbortAndRestoreQueueResult"}
+	d.required("steering", &out.Steering)
+	d.required("followUp", &out.FollowUp)
+	d.optional("imagesDropped", &out.ImagesDropped)
+	d.optional("truncated", &out.Truncated)
 	if d.err != nil {
 		return d.err
 	}
@@ -2694,6 +2938,31 @@ func (v *BranchResult) decodeFrom(raw map[string]json.RawMessage) error {
 	d := fieldDecoder{raw: raw, owner: "BranchResult"}
 	d.required("text", &out.Text)
 	d.required("cancelled", &out.Cancelled)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type NavigateTreeResult struct {
+	Cancelled bool `json:"cancelled"`
+	// Only ever `true`: `abort_branch_summary` stopped the summary; nothing moved.
+	Aborted *bool `json:"aborted,omitempty"`
+	// The target was a user message: its text, for the editor; the leaf moved to its parent.
+	EditorText *string `json:"editorText,omitempty"`
+}
+
+func (v *NavigateTreeResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "NavigateTreeResult", v.decodeFrom)
+}
+
+func (v *NavigateTreeResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out NavigateTreeResult
+	d := fieldDecoder{raw: raw, owner: "NavigateTreeResult"}
+	d.required("cancelled", &out.Cancelled)
+	d.optional("aborted", &out.Aborted)
+	d.optional("editorText", &out.EditorText)
 	if d.err != nil {
 		return d.err
 	}
@@ -2766,7 +3035,9 @@ type SessionStats struct {
 	SessionFile       *string            `json:"sessionFile,omitempty"`
 	Credits           *SessionCredits    `json:"credits,omitempty"`
 	RoutedModels      map[string]float64 `json:"routedModels,omitempty"`
-	ContextUsage      *ContextUsage      `json:"contextUsage,omitempty"`
+	// Failed edits by the engine's `errorKind`.
+	EditRejections map[string]float64 `json:"editRejections,omitempty"`
+	ContextUsage   *ContextUsage      `json:"contextUsage,omitempty"`
 }
 
 func (v *SessionStats) UnmarshalJSON(data []byte) error {
@@ -2788,6 +3059,7 @@ func (v *SessionStats) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("sessionFile", &out.SessionFile)
 	d.optional("credits", &out.Credits)
 	d.optional("routedModels", &out.RoutedModels)
+	d.optional("editRejections", &out.EditRejections)
 	d.optional("contextUsage", &out.ContextUsage)
 	if d.err != nil {
 		return d.err
@@ -3009,6 +3281,102 @@ func (v *SubagentMessages) decodeFrom(raw map[string]json.RawMessage) error {
 	return nil
 }
 
+// Side-question turn lifecycle; `interrupted` marks a turn whose process died while it ran.
+type BtwStatus string
+
+const (
+	BtwStatusRunning     BtwStatus = "running"
+	BtwStatusComplete    BtwStatus = "complete"
+	BtwStatusCancelled   BtwStatus = "cancelled"
+	BtwStatusError       BtwStatus = "error"
+	BtwStatusInterrupted BtwStatus = "interrupted"
+)
+
+func (v *BtwStatus) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "BtwStatus")
+	if err != nil {
+		return err
+	}
+	switch value := BtwStatus(s); value {
+	case BtwStatusRunning, BtwStatusComplete, BtwStatusCancelled, BtwStatusError, BtwStatusInterrupted:
+		*v = value
+		return nil
+	}
+	return unknownValue("BtwStatus", s)
+}
+
+// One question and its answer within a side-question topic.
+type BtwHistoryTurn struct {
+	Question  string    `json:"question"`
+	Answer    string    `json:"answer"`
+	Status    BtwStatus `json:"status"`
+	CreatedAt int64     `json:"createdAt"`
+	UpdatedAt int64     `json:"updatedAt"`
+	// Images attached to the question.
+	Images []ImageContent `json:"images,omitempty"`
+	Error  *string        `json:"error,omitempty"`
+}
+
+func (v *BtwHistoryTurn) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "BtwHistoryTurn", v.decodeFrom)
+}
+
+func (v *BtwHistoryTurn) decodeFrom(raw map[string]json.RawMessage) error {
+	var out BtwHistoryTurn
+	d := fieldDecoder{raw: raw, owner: "BtwHistoryTurn"}
+	d.required("question", &out.Question)
+	d.required("answer", &out.Answer)
+	d.required("status", &out.Status)
+	d.required("createdAt", &out.CreatedAt)
+	d.required("updatedAt", &out.UpdatedAt)
+	d.optional("images", &out.Images)
+	d.optional("error", &out.Error)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// A side-question topic: its first turn's fields plus follow-ups; the latest turn is the last follow-up, else the record.
+type BtwHistoryRecord struct {
+	Question  string    `json:"question"`
+	Answer    string    `json:"answer"`
+	Status    BtwStatus `json:"status"`
+	CreatedAt int64     `json:"createdAt"`
+	UpdatedAt int64     `json:"updatedAt"`
+	ID        string    `json:"id"`
+	LeafID    *string   `json:"leafId"`
+	// Images attached to the question.
+	Images    []ImageContent   `json:"images,omitempty"`
+	Error     *string          `json:"error,omitempty"`
+	FollowUps []BtwHistoryTurn `json:"followUps,omitempty"`
+}
+
+func (v *BtwHistoryRecord) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "BtwHistoryRecord", v.decodeFrom)
+}
+
+func (v *BtwHistoryRecord) decodeFrom(raw map[string]json.RawMessage) error {
+	var out BtwHistoryRecord
+	d := fieldDecoder{raw: raw, owner: "BtwHistoryRecord"}
+	d.required("question", &out.Question)
+	d.required("answer", &out.Answer)
+	d.required("status", &out.Status)
+	d.required("createdAt", &out.CreatedAt)
+	d.required("updatedAt", &out.UpdatedAt)
+	d.required("id", &out.ID)
+	d.nullable("leafId", &out.LeafID)
+	d.optional("images", &out.Images)
+	d.optional("error", &out.Error)
+	d.optional("followUps", &out.FollowUps)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
 type LoginProvider struct {
 	ID            string `json:"id"`
 	Name          string `json:"name"`
@@ -3032,6 +3400,56 @@ func (v *LoginProvider) decodeFrom(raw map[string]json.RawMessage) error {
 	}
 	*v = out
 	return nil
+}
+
+// A stored credential `logout` can remove; `active` marks credentials the session may be using.
+type LogoutAccount struct {
+	CredentialID int64             `json:"credentialId"`
+	Provider     string            `json:"provider"`
+	Label        string            `json:"label"`
+	Detail       string            `json:"detail"`
+	Type         LogoutAccountType `json:"type"`
+	Active       bool              `json:"active"`
+}
+
+func (v *LogoutAccount) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "LogoutAccount", v.decodeFrom)
+}
+
+func (v *LogoutAccount) decodeFrom(raw map[string]json.RawMessage) error {
+	var out LogoutAccount
+	d := fieldDecoder{raw: raw, owner: "LogoutAccount"}
+	d.required("credentialId", &out.CredentialID)
+	d.required("provider", &out.Provider)
+	d.required("label", &out.Label)
+	d.required("detail", &out.Detail)
+	d.required("type", &out.Type)
+	d.required("active", &out.Active)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type LogoutAccountType string
+
+const (
+	LogoutAccountTypeAPIKey LogoutAccountType = "api_key"
+	LogoutAccountTypeOauth  LogoutAccountType = "oauth"
+)
+
+func (v *LogoutAccountType) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "LogoutAccountType")
+	if err != nil {
+		return err
+	}
+	switch value := LogoutAccountType(s); value {
+	case LogoutAccountTypeAPIKey, LogoutAccountTypeOauth:
+		*v = value
+		return nil
+	}
+	return unknownValue("LogoutAccountType", s)
 }
 
 type HandoffResult struct {
@@ -3181,7 +3599,10 @@ func (v *NotifyType) UnmarshalJSON(data []byte) error {
 	return unknownValue("NotifyType", s)
 }
 
-type AgentStartEvent struct{}
+type AgentStartEvent struct {
+	// Calls of an unpaired assistant tail a continued run executes before its first model request.
+	ResumedToolCallIds []string `json:"resumedToolCallIds,omitempty"`
+}
 
 func (v *AgentStartEvent) UnmarshalJSON(data []byte) error {
 	return decodeWith(data, "AgentStartEvent", v.decodeFrom)
@@ -3191,6 +3612,7 @@ func (v *AgentStartEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	var out AgentStartEvent
 	d := fieldDecoder{raw: raw, owner: "AgentStartEvent"}
 	d.constant("type", "agent_start")
+	d.optional("resumedToolCallIds", &out.ResumedToolCallIds)
 	if d.err != nil {
 		return d.err
 	}
@@ -3565,6 +3987,68 @@ func (v AutoCompactionEndEvent) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"auto_compaction_end"`, nil)
 }
 
+// A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted.
+type ManualCompactionStartEvent struct {
+	// The `/compact <mode>` subcommand, when one was given.
+	Mode *string `json:"mode,omitempty"`
+}
+
+func (v *ManualCompactionStartEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ManualCompactionStartEvent", v.decodeFrom)
+}
+
+func (v *ManualCompactionStartEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ManualCompactionStartEvent
+	d := fieldDecoder{raw: raw, owner: "ManualCompactionStartEvent"}
+	d.constant("type", "manual_compaction_start")
+	d.optional("mode", &out.Mode)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v ManualCompactionStartEvent) MarshalJSON() ([]byte, error) {
+	type plain ManualCompactionStartEvent
+	return encodeObject(plain(v), `"type":"manual_compaction_start"`, nil)
+}
+
+// Outcome of the compaction announced by the matching `manual_compaction_start`.
+type ManualCompactionEndEvent struct {
+	// The compaction was cancelled (abort, or a `session_before_compact` hook).
+	Aborted bool `json:"aborted"`
+	// Present when the compaction committed.
+	Result *CompactionResult `json:"result,omitempty"`
+	// There was nothing to compact; `errorMessage` says why.
+	Skipped      *bool   `json:"skipped,omitempty"`
+	ErrorMessage *string `json:"errorMessage,omitempty"`
+}
+
+func (v *ManualCompactionEndEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ManualCompactionEndEvent", v.decodeFrom)
+}
+
+func (v *ManualCompactionEndEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ManualCompactionEndEvent
+	d := fieldDecoder{raw: raw, owner: "ManualCompactionEndEvent"}
+	d.constant("type", "manual_compaction_end")
+	d.required("aborted", &out.Aborted)
+	d.optional("result", &out.Result)
+	d.optional("skipped", &out.Skipped)
+	d.optional("errorMessage", &out.ErrorMessage)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v ManualCompactionEndEvent) MarshalJSON() ([]byte, error) {
+	type plain ManualCompactionEndEvent
+	return encodeObject(plain(v), `"type":"manual_compaction_end"`, nil)
+}
+
 type AutoRetryStartEvent struct {
 	Attempt      int64  `json:"attempt"`
 	MaxAttempts  int64  `json:"maxAttempts"`
@@ -3844,6 +4328,7 @@ func (v AdvisorYieldedEvent) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"advisor_yielded"`, nil)
 }
 
+// Rule injection: a TTSR rule matched the stream and its text was injected. Each rule carries at least `name`, `path`, and `content`.
 type TtsrTriggeredEvent struct {
 	Rules []map[string]json.RawMessage `json:"rules"`
 }
@@ -4038,6 +4523,8 @@ func (v GoalUpdatedEvent) MarshalJSON() ([]byte, error) {
 type QueueUpdateEvent struct {
 	Steering []string `json:"steering"`
 	FollowUp []string `json:"followUp"`
+	// Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.
+	LiveSteered int64 `json:"liveSteered"`
 }
 
 func (v *QueueUpdateEvent) UnmarshalJSON(data []byte) error {
@@ -4050,6 +4537,7 @@ func (v *QueueUpdateEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.constant("type", "queue_update")
 	d.required("steering", &out.Steering)
 	d.required("followUp", &out.FollowUp)
+	d.defaulted("liveSteered", &out.LiveSteered, `0`)
 	if d.err != nil {
 		return d.err
 	}
@@ -4087,6 +4575,8 @@ func (ToolStreamUpdateEvent) isRpcAgentEvent()       {}
 func (ToolExecutionEndEvent) isRpcAgentEvent()       {}
 func (AutoCompactionStartEvent) isRpcAgentEvent()    {}
 func (AutoCompactionEndEvent) isRpcAgentEvent()      {}
+func (ManualCompactionStartEvent) isRpcAgentEvent()  {}
+func (ManualCompactionEndEvent) isRpcAgentEvent()    {}
 func (AutoRetryStartEvent) isRpcAgentEvent()         {}
 func (AutoRetryEndEvent) isRpcAgentEvent()           {}
 func (CacheWarmingStartEvent) isRpcAgentEvent()      {}
@@ -4152,6 +4642,10 @@ func (v *RpcAgentEvent) decodeFrom(raw map[string]json.RawMessage) error {
 		value, err = decodeVariant[AutoCompactionStartEvent](raw)
 	case "auto_compaction_end":
 		value, err = decodeVariant[AutoCompactionEndEvent](raw)
+	case "manual_compaction_start":
+		value, err = decodeVariant[ManualCompactionStartEvent](raw)
+	case "manual_compaction_end":
+		value, err = decodeVariant[ManualCompactionEndEvent](raw)
 	case "auto_retry_start":
 		value, err = decodeVariant[AutoRetryStartEvent](raw)
 	case "auto_retry_end":
@@ -4259,6 +4753,8 @@ type PromptError struct {
 	Provider   *string `json:"provider,omitempty"`
 	Model      *string `json:"model,omitempty"`
 	HTTPStatus *int64  `json:"httpStatus,omitempty"`
+	// `cost_cap`: the session reached `session.maxCost` (`--max-cost`) and omp did not send the next request.
+	Code *PromptErrorCode `json:"code,omitempty"`
 }
 
 func (v *PromptError) UnmarshalJSON(data []byte) error {
@@ -4273,11 +4769,31 @@ func (v *PromptError) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("provider", &out.Provider)
 	d.optional("model", &out.Model)
 	d.optional("httpStatus", &out.HTTPStatus)
+	d.optional("code", &out.Code)
 	if d.err != nil {
 		return d.err
 	}
 	*v = out
 	return nil
+}
+
+type PromptErrorCode string
+
+const (
+	PromptErrorCodeCostCap PromptErrorCode = "cost_cap"
+)
+
+func (v *PromptErrorCode) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "PromptErrorCode")
+	if err != nil {
+		return err
+	}
+	switch value := PromptErrorCode(s); value {
+	case PromptErrorCodeCostCap:
+		*v = value
+		return nil
+	}
+	return unknownValue("PromptErrorCode", s)
 }
 
 // Terminal outcome of one accepted `prompt` / `abort_and_prompt`, keyed by request `id`.
@@ -4741,6 +5257,167 @@ func (v LiveEndEvent) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"live_end"`, nil)
 }
 
+// State of one draft-only microphone capture.
+type DictationStateEvent struct {
+	CaptureID string                   `json:"captureId"`
+	State     DictationStateEventState `json:"state"`
+}
+
+func (v *DictationStateEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "DictationStateEvent", v.decodeFrom)
+}
+
+func (v *DictationStateEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out DictationStateEvent
+	d := fieldDecoder{raw: raw, owner: "DictationStateEvent"}
+	d.constant("type", "dictation_state")
+	d.required("captureId", &out.CaptureID)
+	d.required("state", &out.State)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v DictationStateEvent) MarshalJSON() ([]byte, error) {
+	type plain DictationStateEvent
+	return encodeObject(plain(v), `"type":"dictation_state"`, nil)
+}
+
+type DictationStateEventState string
+
+const (
+	DictationStateEventStateStarting     DictationStateEventState = "starting"
+	DictationStateEventStateRecording    DictationStateEventState = "recording"
+	DictationStateEventStateTranscribing DictationStateEventState = "transcribing"
+)
+
+func (v *DictationStateEventState) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "DictationStateEventState")
+	if err != nil {
+		return err
+	}
+	switch value := DictationStateEventState(s); value {
+	case DictationStateEventStateStarting, DictationStateEventStateRecording, DictationStateEventStateTranscribing:
+		*v = value
+		return nil
+	}
+	return unknownValue("DictationStateEventState", s)
+}
+
+// Full accumulated draft preview; replaces the previous preview for this capture.
+type DictationTranscriptEvent struct {
+	CaptureID string `json:"captureId"`
+	Text      string `json:"text"`
+}
+
+func (v *DictationTranscriptEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "DictationTranscriptEvent", v.decodeFrom)
+}
+
+func (v *DictationTranscriptEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out DictationTranscriptEvent
+	d := fieldDecoder{raw: raw, owner: "DictationTranscriptEvent"}
+	d.constant("type", "dictation_transcript")
+	d.required("captureId", &out.CaptureID)
+	d.required("text", &out.Text)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v DictationTranscriptEvent) MarshalJSON() ([]byte, error) {
+	type plain DictationTranscriptEvent
+	return encodeObject(plain(v), `"type":"dictation_transcript"`, nil)
+}
+
+// Exactly one terminal frame per capture; text is the accumulated result.
+type DictationEndEvent struct {
+	CaptureID string  `json:"captureId"`
+	Text      string  `json:"text"`
+	Error     *string `json:"error,omitempty"`
+}
+
+func (v *DictationEndEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "DictationEndEvent", v.decodeFrom)
+}
+
+func (v *DictationEndEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out DictationEndEvent
+	d := fieldDecoder{raw: raw, owner: "DictationEndEvent"}
+	d.constant("type", "dictation_end")
+	d.required("captureId", &out.CaptureID)
+	d.required("text", &out.Text)
+	d.optional("error", &out.Error)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v DictationEndEvent) MarshalJSON() ([]byte, error) {
+	type plain DictationEndEvent
+	return encodeObject(plain(v), `"type":"dictation_end"`, nil)
+}
+
+// Text appended to the running side question's latest answer.
+type BtwDeltaEvent struct {
+	RecordID string `json:"recordId"`
+	Delta    string `json:"delta"`
+}
+
+func (v *BtwDeltaEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "BtwDeltaEvent", v.decodeFrom)
+}
+
+func (v *BtwDeltaEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out BtwDeltaEvent
+	d := fieldDecoder{raw: raw, owner: "BtwDeltaEvent"}
+	d.constant("type", "btw_delta")
+	d.required("recordId", &out.RecordID)
+	d.required("delta", &out.Delta)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v BtwDeltaEvent) MarshalJSON() ([]byte, error) {
+	type plain BtwDeltaEvent
+	return encodeObject(plain(v), `"type":"btw_delta"`, nil)
+}
+
+// Full side-question record on every lifecycle change (started, complete, cancelled, error); the last one per id wins.
+type BtwRecordEvent struct {
+	Record BtwHistoryRecord `json:"record"`
+}
+
+func (v *BtwRecordEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "BtwRecordEvent", v.decodeFrom)
+}
+
+func (v *BtwRecordEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out BtwRecordEvent
+	d := fieldDecoder{raw: raw, owner: "BtwRecordEvent"}
+	d.constant("type", "btw_record")
+	d.required("record", &out.Record)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v BtwRecordEvent) MarshalJSON() ([]byte, error) {
+	type plain BtwRecordEvent
+	return encodeObject(plain(v), `"type":"btw_record"`, nil)
+}
+
 // Output of a builtin slash command.
 type CommandOutputEvent struct {
 	Text string `json:"text"`
@@ -5025,6 +5702,7 @@ type InputUiRequest struct {
 	Title       string  `json:"title"`
 	Placeholder *string `json:"placeholder,omitempty"`
 	Timeout     *int64  `json:"timeout,omitempty"`
+	Secret      *bool   `json:"secret,omitempty"`
 }
 
 func (v *InputUiRequest) UnmarshalJSON(data []byte) error {
@@ -5040,6 +5718,7 @@ func (v *InputUiRequest) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("title", &out.Title)
 	d.optional("placeholder", &out.Placeholder)
 	d.optional("timeout", &out.Timeout)
+	d.optional("secret", &out.Secret)
 	if d.err != nil {
 		return d.err
 	}
@@ -6050,6 +6729,11 @@ func (LivePhaseEvent) isRpcNotification()               {}
 func (LiveLevelsEvent) isRpcNotification()              {}
 func (LiveTranscriptEvent) isRpcNotification()          {}
 func (LiveEndEvent) isRpcNotification()                 {}
+func (DictationStateEvent) isRpcNotification()          {}
+func (DictationTranscriptEvent) isRpcNotification()     {}
+func (DictationEndEvent) isRpcNotification()            {}
+func (BtwDeltaEvent) isRpcNotification()                {}
+func (BtwRecordEvent) isRpcNotification()               {}
 func (CommandOutputEvent) isRpcNotification()           {}
 func (SessionInfoUpdateEvent) isRpcNotification()       {}
 func (ConfigUpdateEvent) isRpcNotification()            {}
@@ -6067,6 +6751,8 @@ func (ToolStreamUpdateEvent) isRpcNotification()        {}
 func (ToolExecutionEndEvent) isRpcNotification()        {}
 func (AutoCompactionStartEvent) isRpcNotification()     {}
 func (AutoCompactionEndEvent) isRpcNotification()       {}
+func (ManualCompactionStartEvent) isRpcNotification()   {}
+func (ManualCompactionEndEvent) isRpcNotification()     {}
 func (AutoRetryStartEvent) isRpcNotification()          {}
 func (AutoRetryEndEvent) isRpcNotification()            {}
 func (CacheWarmingStartEvent) isRpcNotification()       {}
@@ -6125,6 +6811,16 @@ func (v *RpcNotification) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[LiveTranscriptEvent](raw)
 	case "live_end":
 		value, err = decodeVariant[LiveEndEvent](raw)
+	case "dictation_state":
+		value, err = decodeVariant[DictationStateEvent](raw)
+	case "dictation_transcript":
+		value, err = decodeVariant[DictationTranscriptEvent](raw)
+	case "dictation_end":
+		value, err = decodeVariant[DictationEndEvent](raw)
+	case "btw_delta":
+		value, err = decodeVariant[BtwDeltaEvent](raw)
+	case "btw_record":
+		value, err = decodeVariant[BtwRecordEvent](raw)
 	case "command_output":
 		value, err = decodeVariant[CommandOutputEvent](raw)
 	case "session_info_update":
@@ -6159,6 +6855,10 @@ func (v *RpcNotification) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[AutoCompactionStartEvent](raw)
 	case "auto_compaction_end":
 		value, err = decodeVariant[AutoCompactionEndEvent](raw)
+	case "manual_compaction_start":
+		value, err = decodeVariant[ManualCompactionStartEvent](raw)
+	case "manual_compaction_end":
+		value, err = decodeVariant[ManualCompactionEndEvent](raw)
 	case "auto_retry_start":
 		value, err = decodeVariant[AutoRetryStartEvent](raw)
 	case "auto_retry_end":
@@ -6234,6 +6934,11 @@ func (LivePhaseEvent) isRpcServerFrame()               {}
 func (LiveLevelsEvent) isRpcServerFrame()              {}
 func (LiveTranscriptEvent) isRpcServerFrame()          {}
 func (LiveEndEvent) isRpcServerFrame()                 {}
+func (DictationStateEvent) isRpcServerFrame()          {}
+func (DictationTranscriptEvent) isRpcServerFrame()     {}
+func (DictationEndEvent) isRpcServerFrame()            {}
+func (BtwDeltaEvent) isRpcServerFrame()                {}
+func (BtwRecordEvent) isRpcServerFrame()               {}
 func (CommandOutputEvent) isRpcServerFrame()           {}
 func (SessionInfoUpdateEvent) isRpcServerFrame()       {}
 func (ConfigUpdateEvent) isRpcServerFrame()            {}
@@ -6251,6 +6956,8 @@ func (ToolStreamUpdateEvent) isRpcServerFrame()        {}
 func (ToolExecutionEndEvent) isRpcServerFrame()        {}
 func (AutoCompactionStartEvent) isRpcServerFrame()     {}
 func (AutoCompactionEndEvent) isRpcServerFrame()       {}
+func (ManualCompactionStartEvent) isRpcServerFrame()   {}
+func (ManualCompactionEndEvent) isRpcServerFrame()     {}
 func (AutoRetryStartEvent) isRpcServerFrame()          {}
 func (AutoRetryEndEvent) isRpcServerFrame()            {}
 func (CacheWarmingStartEvent) isRpcServerFrame()       {}
@@ -6319,6 +7026,16 @@ func (v *RpcServerFrame) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[LiveTranscriptEvent](raw)
 	case "live_end":
 		value, err = decodeVariant[LiveEndEvent](raw)
+	case "dictation_state":
+		value, err = decodeVariant[DictationStateEvent](raw)
+	case "dictation_transcript":
+		value, err = decodeVariant[DictationTranscriptEvent](raw)
+	case "dictation_end":
+		value, err = decodeVariant[DictationEndEvent](raw)
+	case "btw_delta":
+		value, err = decodeVariant[BtwDeltaEvent](raw)
+	case "btw_record":
+		value, err = decodeVariant[BtwRecordEvent](raw)
 	case "command_output":
 		value, err = decodeVariant[CommandOutputEvent](raw)
 	case "session_info_update":
@@ -6353,6 +7070,10 @@ func (v *RpcServerFrame) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[AutoCompactionStartEvent](raw)
 	case "auto_compaction_end":
 		value, err = decodeVariant[AutoCompactionEndEvent](raw)
+	case "manual_compaction_start":
+		value, err = decodeVariant[ManualCompactionStartEvent](raw)
+	case "manual_compaction_end":
+		value, err = decodeVariant[ManualCompactionEndEvent](raw)
 	case "auto_retry_start":
 		value, err = decodeVariant[AutoRetryStartEvent](raw)
 	case "auto_retry_end":
@@ -6411,6 +7132,25 @@ func (v *NegotiateProtocolResult) decodeFrom(raw map[string]json.RawMessage) err
 	var out NegotiateProtocolResult
 	d := fieldDecoder{raw: raw, owner: "NegotiateProtocolResult"}
 	d.required("protocolVersion", &out.ProtocolVersion)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type SetSlowModeResult struct {
+	Enabled bool `json:"enabled"`
+}
+
+func (v *SetSlowModeResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SetSlowModeResult", v.decodeFrom)
+}
+
+func (v *SetSlowModeResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SetSlowModeResult
+	d := fieldDecoder{raw: raw, owner: "SetSlowModeResult"}
+	d.required("enabled", &out.Enabled)
 	if d.err != nil {
 		return d.err
 	}
@@ -6610,6 +7350,27 @@ func (v *LiveStartResult) decodeFrom(raw map[string]json.RawMessage) error {
 	return nil
 }
 
+type LiveConnectResult struct {
+	Voice     string `json:"voice"`
+	SdpAnswer string `json:"sdpAnswer"`
+}
+
+func (v *LiveConnectResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "LiveConnectResult", v.decodeFrom)
+}
+
+func (v *LiveConnectResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out LiveConnectResult
+	d := fieldDecoder{raw: raw, owner: "LiveConnectResult"}
+	d.required("voice", &out.Voice)
+	d.required("sdpAnswer", &out.SdpAnswer)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
 type LiveMuteResult struct {
 	Muted bool `json:"muted"`
 }
@@ -6622,6 +7383,25 @@ func (v *LiveMuteResult) decodeFrom(raw map[string]json.RawMessage) error {
 	var out LiveMuteResult
 	d := fieldDecoder{raw: raw, owner: "LiveMuteResult"}
 	d.required("muted", &out.Muted)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type DictationStopResult struct {
+	Text string `json:"text"`
+}
+
+func (v *DictationStopResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "DictationStopResult", v.decodeFrom)
+}
+
+func (v *DictationStopResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out DictationStopResult
+	d := fieldDecoder{raw: raw, owner: "DictationStopResult"}
+	d.required("text", &out.Text)
 	if d.err != nil {
 		return d.err
 	}
@@ -6679,6 +7459,27 @@ func (v *SetCacheWarmingResult) decodeFrom(raw map[string]json.RawMessage) error
 	var out SetCacheWarmingResult
 	d := fieldDecoder{raw: raw, owner: "SetCacheWarmingResult"}
 	d.required("mode", &out.Mode)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type GetSessionLeaseResult struct {
+	Held    []string `json:"held"`
+	Unknown []string `json:"unknown"`
+}
+
+func (v *GetSessionLeaseResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "GetSessionLeaseResult", v.decodeFrom)
+}
+
+func (v *GetSessionLeaseResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out GetSessionLeaseResult
+	d := fieldDecoder{raw: raw, owner: "GetSessionLeaseResult"}
+	d.required("held", &out.Held)
+	d.required("unknown", &out.Unknown)
 	if d.err != nil {
 		return d.err
 	}
@@ -6800,6 +7601,44 @@ func (v *LoginResult) decodeFrom(raw map[string]json.RawMessage) error {
 	return nil
 }
 
+type GetLogoutAccountsResult struct {
+	Accounts []LogoutAccount `json:"accounts"`
+}
+
+func (v *GetLogoutAccountsResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "GetLogoutAccountsResult", v.decodeFrom)
+}
+
+func (v *GetLogoutAccountsResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out GetLogoutAccountsResult
+	d := fieldDecoder{raw: raw, owner: "GetLogoutAccountsResult"}
+	d.required("accounts", &out.Accounts)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type LogoutResult struct {
+	RemainingSource *string `json:"remainingSource,omitempty"`
+}
+
+func (v *LogoutResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "LogoutResult", v.decodeFrom)
+}
+
+func (v *LogoutResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out LogoutResult
+	d := fieldDecoder{raw: raw, owner: "LogoutResult"}
+	d.optional("remainingSource", &out.RemainingSource)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
 type PredictWordResult struct {
 	Suffix *string `json:"suffix"`
 }
@@ -6812,6 +7651,63 @@ func (v *PredictWordResult) decodeFrom(raw map[string]json.RawMessage) error {
 	var out PredictWordResult
 	d := fieldDecoder{raw: raw, owner: "PredictWordResult"}
 	d.nullable("suffix", &out.Suffix)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type BtwResult struct {
+	Record BtwHistoryRecord `json:"record"`
+}
+
+func (v *BtwResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "BtwResult", v.decodeFrom)
+}
+
+func (v *BtwResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out BtwResult
+	d := fieldDecoder{raw: raw, owner: "BtwResult"}
+	d.required("record", &out.Record)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type BtwCancelResult struct {
+	Cancelled bool `json:"cancelled"`
+}
+
+func (v *BtwCancelResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "BtwCancelResult", v.decodeFrom)
+}
+
+func (v *BtwCancelResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out BtwCancelResult
+	d := fieldDecoder{raw: raw, owner: "BtwCancelResult"}
+	d.required("cancelled", &out.Cancelled)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type GetBtwHistoryResult struct {
+	Records []BtwHistoryRecord `json:"records"`
+}
+
+func (v *GetBtwHistoryResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "GetBtwHistoryResult", v.decodeFrom)
+}
+
+func (v *GetBtwHistoryResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out GetBtwHistoryResult
+	d := fieldDecoder{raw: raw, owner: "GetBtwHistoryResult"}
+	d.required("records", &out.Records)
 	if d.err != nil {
 		return d.err
 	}
@@ -6914,6 +7810,13 @@ func (c Commands) AbortAndPrompt(ctx context.Context, p AbortAndPromptCommand) e
 	return c.call(ctx, "abort_and_prompt", p, 0, nil)
 }
 
+// AbortAndRestoreQueue sends "abort_and_restore_queue": Withdraw queued user input, then abort the current run; returns the withdrawn input.
+func (c Commands) AbortAndRestoreQueue(ctx context.Context) (AbortAndRestoreQueueResult, error) {
+	var out AbortAndRestoreQueueResult
+	err := c.call(ctx, "abort_and_restore_queue", nil, 0, &out)
+	return out, err
+}
+
 // NewSessionCommand holds the parameters of "new_session".
 type NewSessionCommand struct {
 	ParentSession *string `json:"parentSession,omitempty"`
@@ -6928,10 +7831,12 @@ func (c Commands) NewSession(ctx context.Context, p NewSessionCommand) (Cancella
 
 // OpenSessionCommand holds the parameters of "open_session".
 type OpenSessionCommand struct {
-	SessionDir string `json:"sessionDir"`
+	SessionDir string  `json:"sessionDir"`
+	Provider   *string `json:"provider,omitempty"`
+	ModelID    *string `json:"modelId,omitempty"`
 }
 
-// OpenSession sends "open_session": Continue the newest non-empty session in a directory, or start a fresh one there.
+// OpenSession sends "open_session": Continue the newest non-empty session in a directory, or start a fresh one there. Give provider and modelId together to override the saved model; otherwise an unavailable saved model fails the request.
 func (c Commands) OpenSession(ctx context.Context, p OpenSessionCommand) (OpenSessionResult, error) {
 	var out OpenSessionResult
 	err := c.call(ctx, "open_session", p, 0, &out)
@@ -6955,6 +7860,18 @@ func (c Commands) SetFastMode(ctx context.Context, p SetFastModeCommand) (FastMo
 	var out FastModeResult
 	err := c.call(ctx, "set_fast_mode", p, 0, &out)
 	return out, err
+}
+
+// SetSlowModeCommand holds the parameters of "set_slow_mode".
+type SetSlowModeCommand struct {
+	Enabled bool `json:"enabled"`
+}
+
+// SetSlowMode sends "set_slow_mode": Turn `/slow` on or off for the active model; returns whether it is now on.
+func (c Commands) SetSlowMode(ctx context.Context, p SetSlowModeCommand) (bool, error) {
+	var out SetSlowModeResult
+	err := c.call(ctx, "set_slow_mode", p, 0, &out)
+	return out.Enabled, err
 }
 
 // GoalCommand holds the parameters of "goal".
@@ -7126,6 +8043,20 @@ func (c Commands) LiveStart(ctx context.Context, p LiveStartCommand) (string, er
 	return out.Voice, err
 }
 
+// LiveConnectCommand holds the parameters of "live_connect".
+type LiveConnectCommand struct {
+	SdpOffer     string  `json:"sdpOffer"`
+	Voice        *string `json:"voice,omitempty"`
+	Instructions *string `json:"instructions,omitempty"`
+}
+
+// LiveConnect sends "live_connect": Start a live voice session whose audio runs on a caller-owned WebRTC peer: send its SDP offer, apply the returned answer.
+func (c Commands) LiveConnect(ctx context.Context, p LiveConnectCommand) (LiveConnectResult, error) {
+	var out LiveConnectResult
+	err := c.call(ctx, "live_connect", p, 0, &out)
+	return out, err
+}
+
 // LiveStop sends "live_stop": Stop the live voice session, if any.
 func (c Commands) LiveStop(ctx context.Context) error {
 	return c.call(ctx, "live_stop", nil, 0, nil)
@@ -7141,6 +8072,23 @@ func (c Commands) LiveMute(ctx context.Context, p LiveMuteCommand) (bool, error)
 	var out LiveMuteResult
 	err := c.call(ctx, "live_mute", p, 0, &out)
 	return out.Muted, err
+}
+
+// DictationStartCommand holds the parameters of "dictation_start".
+type DictationStartCommand struct {
+	CaptureID string `json:"captureId"`
+}
+
+// DictationStart sends "dictation_start": Start draft-only speech-to-text; resolves once the microphone is recording.
+func (c Commands) DictationStart(ctx context.Context, p DictationStartCommand) error {
+	return c.call(ctx, "dictation_start", p, 600*time.Second, nil)
+}
+
+// DictationStop sends "dictation_stop": Stop and flush draft-only dictation, returning the accumulated text.
+func (c Commands) DictationStop(ctx context.Context) (string, error) {
+	var out DictationStopResult
+	err := c.call(ctx, "dictation_stop", nil, 600*time.Second, &out)
+	return out.Text, err
 }
 
 // SetModelCommand holds the parameters of "set_model".
@@ -7297,6 +8245,18 @@ func (c Commands) GetSessionStats(ctx context.Context) (SessionStats, error) {
 	return out, err
 }
 
+// GetSessionLeaseCommand holds the parameters of "get_session_lease".
+type GetSessionLeaseCommand struct {
+	SessionIds []string `json:"sessionIds"`
+}
+
+// GetSessionLease sends "get_session_lease": Which of these sessions a running process (this one included) owns, probed without taking ownership. Ids in neither list are free; `unknown` could not be probed.
+func (c Commands) GetSessionLease(ctx context.Context, p GetSessionLeaseCommand) (GetSessionLeaseResult, error) {
+	var out GetSessionLeaseResult
+	err := c.call(ctx, "get_session_lease", p, 0, &out)
+	return out, err
+}
+
 // ExportHTMLCommand holds the parameters of "export_html".
 type ExportHTMLCommand struct {
 	OutputPath *string `json:"outputPath,omitempty"`
@@ -7311,10 +8271,12 @@ func (c Commands) ExportHTML(ctx context.Context, p ExportHTMLCommand) (string, 
 
 // SwitchSessionCommand holds the parameters of "switch_session".
 type SwitchSessionCommand struct {
-	SessionPath string `json:"sessionPath"`
+	SessionPath string  `json:"sessionPath"`
+	Provider    *string `json:"provider,omitempty"`
+	ModelID     *string `json:"modelId,omitempty"`
 }
 
-// SwitchSession sends "switch_session": Switch to another session file.
+// SwitchSession sends "switch_session": Switch to another session file. Give provider and modelId together to override the saved model; otherwise an unavailable saved model fails the request and keeps the current session.
 func (c Commands) SwitchSession(ctx context.Context, p SwitchSessionCommand) (CancellationResult, error) {
 	var out CancellationResult
 	err := c.call(ctx, "switch_session", p, 0, &out)
@@ -7343,6 +8305,38 @@ func (c Commands) Fork(ctx context.Context, p ForkCommand) (CancellationResult, 
 	var out CancellationResult
 	err := c.call(ctx, "fork", p, 0, &out)
 	return out, err
+}
+
+// NavigateTreeCommand holds the parameters of "navigate_tree".
+type NavigateTreeCommand struct {
+	EntryID string `json:"entryId"`
+	// Summarize the abandoned branch at the target.
+	Summarize *bool `json:"summarize,omitempty"`
+	// Instructions for the summarizer.
+	CustomInstructions *string `json:"customInstructions,omitempty"`
+}
+
+// NavigateTree sends "navigate_tree": Move the session's leaf to an entry in the same file, optionally summarizing the branch it leaves; refused while busy.
+func (c Commands) NavigateTree(ctx context.Context, p NavigateTreeCommand) (NavigateTreeResult, error) {
+	var out NavigateTreeResult
+	err := c.call(ctx, "navigate_tree", p, 600*time.Second, &out)
+	return out, err
+}
+
+// AbortBranchSummary sends "abort_branch_summary": Stop a running `navigate_tree` branch summary; the navigation is cancelled.
+func (c Commands) AbortBranchSummary(ctx context.Context) error {
+	return c.call(ctx, "abort_branch_summary", nil, 0, nil)
+}
+
+// SetLabelCommand holds the parameters of "set_label".
+type SetLabelCommand struct {
+	EntryID string  `json:"entryId"`
+	Label   *string `json:"label,omitempty"`
+}
+
+// SetLabel sends "set_label": Set or clear (omit `label`) an entry's label.
+func (c Commands) SetLabel(ctx context.Context, p SetLabelCommand) error {
+	return c.call(ctx, "set_label", p, 0, nil)
 }
 
 // GetBranchMessages sends "get_branch_messages": List user messages that can be branched from.
@@ -7420,6 +8414,31 @@ func (c Commands) Login(ctx context.Context, p LoginCommand) (string, error) {
 	return out.ProviderID, err
 }
 
+// GetLogoutAccountsCommand holds the parameters of "get_logout_accounts".
+type GetLogoutAccountsCommand struct {
+	ProviderID string `json:"providerId"`
+}
+
+// GetLogoutAccounts sends "get_logout_accounts": List the stored credentials `logout` can remove for a provider, active first.
+func (c Commands) GetLogoutAccounts(ctx context.Context, p GetLogoutAccountsCommand) ([]LogoutAccount, error) {
+	var out GetLogoutAccountsResult
+	err := c.call(ctx, "get_logout_accounts", p, 0, &out)
+	return out.Accounts, err
+}
+
+// LogoutCommand holds the parameters of "logout".
+type LogoutCommand struct {
+	ProviderID   string `json:"providerId"`
+	CredentialID int64  `json:"credentialId"`
+}
+
+// Logout sends "logout": Remove one stored credential; fails when it is no longer stored. `remainingSource` names auth that still applies.
+func (c Commands) Logout(ctx context.Context, p LogoutCommand) (LogoutResult, error) {
+	var out LogoutResult
+	err := c.call(ctx, "logout", p, 0, &out)
+	return out, err
+}
+
 // PredictWordCommand holds the parameters of "predict_word".
 type PredictWordCommand struct {
 	Text   string `json:"text"`
@@ -7444,4 +8463,36 @@ type PredictWordFeedbackCommand struct {
 // PredictWordFeedback sends "predict_word_feedback": Report a shown suggestion as accepted or typed past.
 func (c Commands) PredictWordFeedback(ctx context.Context, p PredictWordFeedbackCommand) error {
 	return c.call(ctx, "predict_word_feedback", p, 0, nil)
+}
+
+// BtwCommand holds the parameters of "btw".
+type BtwCommand struct {
+	Question string  `json:"question"`
+	RecordID *string `json:"recordId,omitempty"`
+}
+
+// Btw sends "btw": Ask a side question, or a follow-up in topic `recordId`; returns the record once it is running.
+func (c Commands) Btw(ctx context.Context, p BtwCommand) (BtwHistoryRecord, error) {
+	var out BtwResult
+	err := c.call(ctx, "btw", p, 0, &out)
+	return out.Record, err
+}
+
+// BtwCancelCommand holds the parameters of "btw_cancel".
+type BtwCancelCommand struct {
+	RecordID *string `json:"recordId,omitempty"`
+}
+
+// BtwCancel sends "btw_cancel": Cancel the running side question (only topic `recordId` when given); false when none matches.
+func (c Commands) BtwCancel(ctx context.Context, p BtwCancelCommand) (bool, error) {
+	var out BtwCancelResult
+	err := c.call(ctx, "btw_cancel", p, 0, &out)
+	return out.Cancelled, err
+}
+
+// GetBtwHistory sends "get_btw_history": List the session's side-question records, newest first.
+func (c Commands) GetBtwHistory(ctx context.Context) ([]BtwHistoryRecord, error) {
+	var out GetBtwHistoryResult
+	err := c.call(ctx, "get_btw_history", nil, 0, &out)
+	return out.Records, err
 }

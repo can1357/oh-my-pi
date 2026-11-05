@@ -64,19 +64,21 @@ Schemas sent on the Google JSON Schema path MUST follow:
 
 1. **Unsupported JSON Schema keywords are stripped (except property names under `properties`)**
    - Unsupported keys (`UNSUPPORTED_SCHEMA_FIELDS`):
-      - `$schema`, `$ref`, `$defs`, `$dynamicRef`, `$dynamicAnchor`
+      - `$schema`, `$id`, `$anchor`, `$ref`, `$defs`, `$dynamicRef`, `$dynamicAnchor`
       - `examples`, `prefixItems`, `unevaluatedProperties`, `unevaluatedItems`
-      - `patternProperties`, `additionalProperties`
-      - `minItems`, `maxItems`, `minLength`, `maxLength`
-      - `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`
-      - `pattern`, `format`
+      - `patternProperties`, `additionalProperties`, `propertyNames`
+      - `minItems`, `maxItems`, `uniqueItems`, `contains`, `minContains`, `maxContains`, `additionalItems`
+      - `minLength`, `maxLength`, `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`
+      - `pattern`, `format`, `contentEncoding`, `contentMediaType`, `contentSchema`
       - `dependencies`, `dependentSchemas`, `dependentRequired`
-      - `deprecated`, `readOnly`, `writeOnly`, `$comment`
+      - `x-mcp-header`, `deprecated`, `readOnly`, `writeOnly`, `$comment`
    - Important: keys inside a `properties` object are treated as property names and MUST NOT be stripped by keyword match.
    - Human-meaningful stripped keys (`pattern`, `format`, min/max constraints, `default`, `examples`, etc.) are appended to the sibling `description` as an Anthropic-style spill block: `{pattern: "^foo$", minimum: 0}`. Structural/meta keys such as `$ref`, `$defs`, and `additionalProperties` are not spilled.
 
 2. **`type` arrays are normalized to scalar type + nullable marker**
    - `type: ["T", "null"]` becomes `type: "T"` and `nullable: true`.
+   - `type: ["A", "B", …]` becomes `anyOf: [{ type: "A", …A keywords }, { type: "B", …B keywords }]`; type-specific keywords (`items`, `properties`, `minimum`, …) move into the branches whose type they constrain, and a `null` member becomes `nullable: true`.
+   - A node left with a scalar `type` MUST NOT keep another type's keywords: Gemini rejects `items` beside `type: "string"` with HTTP 400.
    - Google expects scalar type, not `type[]`.
 
 3. **`const` is converted to `enum`**
@@ -91,11 +93,18 @@ The droid CLI's gemini wire (`factory-droid/google-generate`) uses an
 ALLOWLIST copier instead of the shared denylist normalizer — it preserves
 `type`/`title`/`description`/`required`/`format`/`minimum`/`maximum`/
 `minLength`/`maxLength`/`pattern`/`minItems`/`maxItems`/`default`/`example`,
-converts `const` to a stringified single-entry `enum`, merges `allOf`
-(branch `required` lists union), collapses `anyOf`/`oneOf` into the parent
-(parent `properties`/`required` kept, branch properties merged in, a branch
-field required only when every non-null branch requires it, a `null` branch
-becomes `nullable: true`), and silently drops
+converts `const` to a stringified single-entry `enum`, merges `allOf` first
+(branch `required` lists union), then handles `anyOf`/`oneOf` by branch types:
+typed non-null branches of different types stay an `anyOf` (a `null` branch
+becomes `nullable: true`; branch `required` names missing from the branch's
+own `properties` are dropped) when the node has only `title`/`description`/
+`default`/`example` beside it, since the proxy 400s on other fields alongside
+`anyOf` and on a `string` carrying `items`. Otherwise the union collapses into
+the parent (parent `properties`/`required` kept, branch properties merged in, a
+branch field required only when every non-null branch requires it, a `null`
+branch becomes `nullable: true`); for different-type branches only those of
+the node's own type merge (none when no branch has it), or those of the first
+branch's type when the node declares none. It silently drops
 everything else. It never adds `propertyOrdering`, never edits descriptions,
 and does not spill stripped keywords. Use `normalizeSchemaForFactoryDroid`
 only in `packages/ai/src/providers/factory-droid/gemini.ts`; the shared
@@ -115,7 +124,7 @@ For Cloud Code Assist Claude tool declarations, schema MUST satisfy stricter con
 
 1. Start with Google unsupported-key stripping behavior.
 2. **`nullable` keyword MUST be stripped** in CCA Claude path.
-3. `type: ["T", "null"]` becomes `type: "T"` with no `nullable` marker.
+3. `type: ["T", "null"]` becomes `type: "T"` with no `nullable` marker; a multi-type array becomes `anyOf` branches that the combiner rules below collapse.
 4. Human-meaningful stripped keys are appended to `description` with the same spill format used by the Google dispatcher.
 
 ### 3.3 Combiner/union normalization contract

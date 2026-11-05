@@ -47,7 +47,16 @@ export interface CreateTerminalResponse {
 }
 /** Client callbacks handled by a client-side connection. */
 export interface Client {
-	requestPermission(params: RequestPermissionRequest): MaybePromise<RequestPermissionResponse>;
+	/**
+	 * Serve a permission elicit. `options.signal` aborts when the agent
+	 * cancels the request (`$/cancel_request`) — e.g. user steering superseded
+	 * the dialog — so a held handler can end instead of stranding the
+	 * connection's clean-EOF drain.
+	 */
+	requestPermission(
+		params: RequestPermissionRequest,
+		options?: { signal?: AbortSignal },
+	): MaybePromise<RequestPermissionResponse>;
 	sessionUpdate(params: SessionNotification): MaybePromise<void>;
 	readTextFile?(params: ReadTextFileRequest): MaybePromise<ReadTextFileResponse>;
 	writeTextFile?(params: WriteTextFileRequest): MaybePromise<WriteTextFileResponse | void>;
@@ -89,6 +98,17 @@ export class AgentSideConnection {
 	/** Requests permission from the client. */
 	requestPermission(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
 		return this.#connection.request("session/request_permission", params);
+	}
+	/**
+	 * Requests permission from the client, returning a handle that cancels the
+	 * pending wire request (`$/cancel_request`) — used when user steering
+	 * supersedes an open permission dialog instead of waiting behind it.
+	 */
+	requestPermissionWithCancel(params: RequestPermissionRequest): {
+		promise: Promise<RequestPermissionResponse>;
+		cancel(): void;
+	} {
+		return this.#connection.requestCancellable<RequestPermissionResponse>("session/request_permission", params);
 	}
 	/** Reads a client-side text file. */
 	readTextFile(params: ReadTextFileRequest): Promise<ReadTextFileResponse> {
@@ -168,10 +188,18 @@ export class ClientSideConnection {
 	#connection: RpcConnection;
 
 	constructor(toClient: (connection: ClientSideConnection) => Client, stream: Stream) {
-		this.#connection = new RpcConnection(stream, async (method, params, notification) => {
-			if (!client) throw RequestError.internalError(undefined, "Client is not initialized");
-			return dispatchClient(client, method, params, notification);
-		});
+		// Client handlers receive the cancel signal (`requestPermission`'s
+		// `options.signal`), so a peer `$/cancel_request` may answer `-32800`
+		// at once. The agent side keeps the default: its handlers ignore the
+		// signal, and `session/cancel` is ACP's cancellation path for prompts.
+		this.#connection = new RpcConnection(
+			stream,
+			async (method, params, notification, signal) => {
+				if (!client) throw RequestError.internalError(undefined, "Client is not initialized");
+				return dispatchClient(client, method, params, notification, signal);
+			},
+			{ honorsInboundCancellation: true },
+		);
 		const client = toClient(this);
 	}
 	/** Signal aborted when the transport closes. */
@@ -272,10 +300,11 @@ async function dispatchClient(
 	method: string,
 	params: unknown,
 	notification: boolean,
+	signal?: AbortSignal,
 ): Promise<unknown> {
 	switch (method) {
 		case "session/request_permission":
-			return client.requestPermission(params as RequestPermissionRequest);
+			return client.requestPermission(params as RequestPermissionRequest, { signal });
 		case "session/update":
 			return client.sessionUpdate(params as SessionNotification);
 		case "fs/read_text_file":
@@ -322,6 +351,9 @@ async function dispatchClient(
 				params as CompleteElicitationNotification,
 			);
 		default:
+			// The transport already aborted the matching inbound handler;
+			// like the agent side, the notification itself carries no work.
+			if (method === "$/cancel_request") return;
 			if (notification && client.extNotification)
 				return client.extNotification(method, params as Record<string, unknown>);
 			if (!notification && client.extMethod) return client.extMethod(method, params as Record<string, unknown>);

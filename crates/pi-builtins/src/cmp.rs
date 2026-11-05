@@ -11,11 +11,10 @@ use std::{
 	},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use pi_vfs::{BlockingFs, File};
 
-use crate::host::{Host, Stdin, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Stdin, Utility, format_usage, matches_parser};
 
 const OPT_PRINT_BYTES: &str = "print-bytes";
 const OPT_IGNORE_INITIAL: &str = "ignore-initial";
@@ -232,47 +231,29 @@ fn compare(matches: &ArgMatches, host: &mut Host) -> Result<i32, String> {
 	// Cloned so file inputs do not hold a `host` borrow alongside the
 	// `&mut host.stdin` input.
 	let fs = host.fs().clone();
+	// `-l`/`-x` print one line per differing byte: buffer them through the
+	// stdout writer rather than one raw write per formatted piece. Created
+	// first, as it method-borrows `host`.
+	let mut stdout = host.stdout_writer();
 
-	if name1 == OsStr::new("-") {
+	let compared = if name1 == OsStr::new("-") {
 		let input1 = stdin_input(&mut host.stdin);
 		let input2 = open_input(&fs, name2, path2.as_deref().unwrap(), options.no_follow)?;
-		compare_inputs(
-			input1,
-			input2,
-			name1,
-			name2,
-			options,
-			&mut host.stdout,
-			&mut host.stderr,
-			&cancel,
-		)
+		compare_inputs(input1, input2, name1, name2, options, &mut stdout, &mut host.stderr, &cancel)
 	} else if name2 == OsStr::new("-") {
 		let input1 = open_input(&fs, name1, path1.as_deref().unwrap(), options.no_follow)?;
 		let input2 = stdin_input(&mut host.stdin);
-		compare_inputs(
-			input1,
-			input2,
-			name1,
-			name2,
-			options,
-			&mut host.stdout,
-			&mut host.stderr,
-			&cancel,
-		)
+		compare_inputs(input1, input2, name1, name2, options, &mut stdout, &mut host.stderr, &cancel)
 	} else {
 		let input1 = open_input(&fs, name1, path1.as_deref().unwrap(), options.no_follow)?;
 		let input2 = open_input(&fs, name2, path2.as_deref().unwrap(), options.no_follow)?;
-		compare_inputs(
-			input1,
-			input2,
-			name1,
-			name2,
-			options,
-			&mut host.stdout,
-			&mut host.stderr,
-			&cancel,
-		)
-	}
+		compare_inputs(input1, input2, name1, name2, options, &mut stdout, &mut host.stderr, &cancel)
+	};
+	// Output before a failure still lands, ahead of the error message.
+	let flushed = stdout.flush().map_err(io_message);
+	let code = compared?;
+	flushed?;
+	Ok(code)
 }
 
 fn skips(matches: &ArgMatches) -> Result<(u64, u64), String> {
@@ -585,11 +566,6 @@ fn input_error(name: &OsStr, err: &io::Error) -> String {
 
 fn io_message(err: io::Error) -> String {
 	err.to_string()
-}
-
-/// Creates the `cmp` builtin registration.
-pub(crate) fn cmp_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Cmp, SE>()
 }
 
 #[cfg(test)]

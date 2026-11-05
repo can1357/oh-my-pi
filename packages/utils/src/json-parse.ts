@@ -309,15 +309,30 @@ export function parseJsonWithRepair<T>(json: string): T {
 export function parseStreamingJson<T = Record<string, unknown>>(partialJson: string | undefined): T {
 	const trimmed = partialJson?.trimStart();
 	if (!trimmed) return {} as T;
-	try {
-		return JSON.parse(trimmed) as T;
-	} catch {
+	// A container can only be strict JSON once its closer arrived; skip the
+	// doomed full-buffer JSON.parse (and its SyntaxError) while it streams.
+	const first = trimmed.charCodeAt(0);
+	if ((first !== 0x7b && first !== 0x5b) || canCloseContainer(trimmed)) {
 		try {
-			return (new RelaxedJson(trimmed, true).parse() ?? {}) as T;
-		} catch {
-			return {} as T;
-		}
+			return JSON.parse(trimmed) as T;
+		} catch {}
 	}
+	try {
+		return (new RelaxedJson(trimmed, true).parse() ?? {}) as T;
+	} catch {
+		return {} as T;
+	}
+}
+
+/** True when the last non-whitespace character is `}` or `]`. */
+function canCloseContainer(text: string): boolean {
+	for (let i = text.length - 1; i >= 0; i--) {
+		const code = text.charCodeAt(i);
+		// JSON whitespace: space, \t, \n, \r
+		if (code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d) continue;
+		return code === 0x7d || code === 0x5d;
+	}
+	return false;
 }
 
 /**

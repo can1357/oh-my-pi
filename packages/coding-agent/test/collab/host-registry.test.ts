@@ -256,7 +256,7 @@ describe("collab host registry lifecycle (#6099)", () => {
 			}
 		},
 	);
-	for (const completion of ["rollback", "commit", "stop", "writer-left"] as const) {
+	for (const completion of ["rollback", "commit", "stop", "writer-left", "relay-reconnect"] as const) {
 		it("handles an old-room answer during provisional suspension followed by " + completion, async () => {
 			const { ctx, state } = makeHostContext();
 			const originalConnect = CollabSocket.prototype.connect;
@@ -284,7 +284,9 @@ describe("collab host registry lifecycle (#6099)", () => {
 				1,
 			);
 			transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "reader" }, 2);
-			const answer = host.requestGuestUi({ kind: "select", title: "Pending", options: ["Yes", "No"] });
+			const answer = host.requestGuestUi({ kind: "select", title: "Pending", options: ["Yes", "No"] }, undefined, {
+				retainOnReconnect: completion === "relay-reconnect",
+			});
 			if (!answer) throw new Error("host did not retain the dialog");
 			let outcome: CollabGuestUiResult | undefined;
 			void answer.then(result => {
@@ -294,6 +296,7 @@ describe("collab host registry lifecycle (#6099)", () => {
 			const transition = Promise.withResolvers<void>();
 			state.transition = transition.promise;
 			state.sessionId = "provisional";
+			let replay: Mock<CollabSocket["send"]> | undefined;
 			try {
 				transport.onFrame!({ t: "ui-response", reqId: 1, value: "No" }, 2);
 				transport.onFrame!({ t: "ui-response", reqId: 1, value: "Yes" }, 1);
@@ -303,11 +306,31 @@ describe("collab host registry lifecycle (#6099)", () => {
 				if (completion === "stop") {
 					await host.stop("stopped during transition");
 				} else {
-					if (completion === "rollback" || completion === "writer-left") state.sessionId = original;
+					if (completion !== "commit") state.sessionId = original;
 					if (completion === "writer-left") transport.onControl?.({ t: "peer-left", peer: 1 });
 					state.transition = undefined;
 					transition.resolve();
+					if (completion === "relay-reconnect") {
+						transport.onRoomRecreated?.();
+						replay = spyOn(transport, "send");
+						transport.onFrame!(
+							{
+								t: "hello",
+								proto: COLLAB_PROTO,
+								name: "new writer with reused peer id",
+								writeToken: Buffer.from(parsed.writeToken).toString("base64url"),
+							},
+							1,
+						);
+					}
 					await setImmediate();
+					if (completion === "relay-reconnect") {
+						expect(outcome).toBeUndefined();
+						expect(
+							replay?.mock.calls.filter(([frame]) => typeof frame !== "string" && frame.t === "ui-request"),
+						).toHaveLength(1);
+						transport.onFrame!({ t: "ui-response", reqId: 1, value: "No" }, 1);
+					}
 					if (completion === "writer-left") {
 						expect(outcome).toBeUndefined();
 						transport.onFrame!(
@@ -330,11 +353,12 @@ describe("collab host registry lifecycle (#6099)", () => {
 				expect(outcome).toEqual(
 					completion === "rollback"
 						? { kind: "answered", value: "Yes" }
-						: completion === "writer-left"
+						: completion === "writer-left" || completion === "relay-reconnect"
 							? { kind: "answered", value: "No" }
 							: { kind: "unavailable" },
 				);
 			} finally {
+				replay?.mockRestore();
 				state.transition = undefined;
 				transition.resolve();
 			}
@@ -371,7 +395,9 @@ describe("collab host registry lifecycle (#6099)", () => {
 		try {
 			const abort = new AbortController();
 			const answer = host.requestGuestUi({ kind: "select", title: "Pending", options: ["Yes"] }, abort.signal);
-			expect(send.mock.calls.filter(([frame]) => frame.t === "ui-request")).toHaveLength(1);
+			expect(
+				send.mock.calls.filter(([frame]) => typeof frame !== "string" && frame.t === "ui-request"),
+			).toHaveLength(1);
 			const original = state.sessionId;
 			state.sessionId = "provisional";
 			send.mockClear();

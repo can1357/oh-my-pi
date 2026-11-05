@@ -12,15 +12,18 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { cfgContextPromotionEnabled } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { localSession } from "../helpers/local-session";
 
 const AGENT_ID = "ParkedRelease";
 const MOCK_API_SOURCE = "test/parked-subagent-session-release";
@@ -66,6 +69,9 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 	for (const key of ENV_KEYS) restoreEnvValue(key, savedEnv[key]);
 	__resetDirsFromEnvForTests();
+	// The subagent session opened agent.db and models.db under root; Windows cannot delete open files.
+	AgentStorage.close();
+	closeModelCache();
 	await removeWithRetries(root);
 });
 
@@ -73,7 +79,7 @@ afterEach(async () => {
 function weakRefToLiveSession(id: string): WeakRef<AgentSession> {
 	const session = AgentRegistry.global().get(id)?.session;
 	if (!session) throw new Error(`subagent ${id} has no live session to observe`);
-	return new WeakRef(session);
+	return new WeakRef(localSession(session));
 }
 
 async function collected(ref: WeakRef<object>, deadlineMs: number): Promise<boolean> {
@@ -88,15 +94,17 @@ async function collected(ref: WeakRef<object>, deadlineMs: number): Promise<bool
 
 /** Makes a settings write in the live session's own overlay, then observes the overlay weakly (outside the test body). */
 function writeAndObserveLiveSettings(id: string): WeakRef<Settings> {
-	const session = AgentRegistry.global().get(id)?.session;
-	if (!session) throw new Error(`subagent ${id} has no live session to observe`);
+	const session = localSession(AgentRegistry.global().get(id)?.session);
 	cfgContextPromotionEnabled.set(session, true);
 	return new WeakRef(session.settings);
 }
 
 /** Runs `AGENT_ID` to a finished keep-alive state; `release` drops the mock's session-bound recordings. */
 async function runKeptAliveSubagent(): Promise<{ release(): void; close(): void }> {
-	const cwd = path.join(root, "work");
+	// Under the isolated HOME: project discovery walks up from cwd and stops at os.homedir(). On Windows
+	// os.tmpdir() lives under the real home, so a cwd outside the fake HOME would walk into the real
+	// ~/.omp and load the developer's installed plugins as project plugins.
+	const cwd = path.join(root, "home", "work");
 	const artifactsDir = path.join(root, "artifacts");
 	await fs.mkdir(cwd, { recursive: true });
 	await fs.mkdir(artifactsDir, { recursive: true });
@@ -184,7 +192,7 @@ it("parks without retaining the run's settings overlay and revives with the sett
 		// for as long as the parked agent stayed adopted.
 		expect(await collected(settingsRef, COLLECT_DEADLINE_MS)).toBe(true);
 
-		const revived = await AgentLifecycleManager.global().ensureLive(AGENT_ID);
+		const revived = localSession(await AgentLifecycleManager.global().ensureLive(AGENT_ID));
 		expect(cfgContextPromotionEnabled.get(revived)).toBe(true);
 	} finally {
 		run.close();

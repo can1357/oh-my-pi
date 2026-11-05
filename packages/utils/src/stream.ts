@@ -2,9 +2,14 @@ const trailingEvents = new WeakSet<ServerSentEvent>();
 
 import { abortableSource } from "./abortable";
 import { parseStreamingJson } from "./json-parse";
+import { isWhitespace } from "./json-lexer";
 
 const LF = 0x0a;
 const CR = 0x0d;
+
+// Capacity above this is released once the buffered bytes no longer need it,
+// so one oversized frame does not pin its peak buffer for the stream's life.
+const CONCAT_SINK_RETAIN_BYTES = 1024 * 1024;
 
 /**
  * Split a byte stream on LF boundaries.
@@ -89,6 +94,21 @@ export class ConcatSink {
 		return next;
 	}
 
+	/** Drop or right-size an oversized buffer after the buffered length shrank. */
+	#releaseCapacity(): void {
+		const space = this.#space;
+		if (!space || space.length <= CONCAT_SINK_RETAIN_BYTES) return;
+		const length = this.#length;
+		if (length === 0) {
+			this.#space = undefined;
+			return;
+		}
+		if (length * 4 > space.length) return;
+		const next = Buffer.allocUnsafe(length);
+		space.copy(next, 0, 0, length);
+		this.#space = next;
+	}
+
 	append(chunk: Uint8Array) {
 		const n = chunk.length;
 		if (!n) return;
@@ -99,11 +119,10 @@ export class ConcatSink {
 	}
 
 	reset(chunk: Uint8Array) {
+		this.#length = 0;
+		this.#releaseCapacity();
 		const n = chunk.length;
-		if (!n) {
-			this.#length = 0;
-			return;
-		}
+		if (!n) return;
 		const space = this.#ensureCapacity(n);
 		space.set(chunk, 0);
 		this.#length = n;
@@ -127,14 +146,16 @@ export class ConcatSink {
 		if (count <= 0) return;
 		if (count >= this.#length) {
 			this.#length = 0;
-			return;
+		} else {
+			this.#space!.copyWithin(0, count, this.#length);
+			this.#length -= count;
 		}
-		this.#space!.copyWithin(0, count, this.#length);
-		this.#length -= count;
+		this.#releaseCapacity();
 	}
 
 	clear() {
 		this.#length = 0;
+		this.#releaseCapacity();
 	}
 
 	/**
@@ -229,13 +250,14 @@ export class ConcatSink {
 		if (error) throw error;
 		if (done) {
 			this.#length = 0;
-			return;
+		} else {
+			const rem = total - read;
+			if (rem < total) {
+				space.copyWithin(0, read, total);
+			}
+			this.#length = rem;
 		}
-		const rem = total - read;
-		if (rem < total) {
-			space.copyWithin(0, read, total);
-		}
-		this.#length = rem;
+		this.#releaseCapacity();
 	}
 }
 
@@ -592,9 +614,11 @@ export async function* readSseEvents(
  */
 export function parseJsonlLenient<T>(buffer: string, options: { onMalformedRecord?: () => void } = {}): T[] {
 	let entries: T[] | undefined;
+	let cursor = 0;
+	const len = buffer.length;
 
-	while (buffer.length > 0) {
-		const { values, error, read, done } = Bun.JSONL.parseChunk(buffer);
+	while (cursor < len) {
+		const { values, error, read, done } = Bun.JSONL.parseChunk(buffer, cursor);
 		if (values.length > 0) {
 			const ext = values as T[];
 			if (!entries) {
@@ -604,18 +628,22 @@ export function parseJsonlLenient<T>(buffer: string, options: { onMalformedRecor
 			}
 		}
 		if (error) {
-			const nextNewline = buffer.indexOf("\n", read);
-			const malformedEnd = nextNewline === -1 ? buffer.length : nextNewline;
-			if (buffer.substring(read, malformedEnd).trim().length > 0) options.onMalformedRecord?.();
+			let malformedStart = read;
+			while (malformedStart < len && isWhitespace(buffer.charCodeAt(malformedStart))) {
+				malformedStart++;
+			}
+			const nextNewline = buffer.indexOf("\n", malformedStart);
+			const malformedEnd = nextNewline === -1 ? len : nextNewline;
+			if (buffer.substring(malformedStart, malformedEnd).trim().length > 0) options.onMalformedRecord?.();
 			if (nextNewline === -1) break;
-			buffer = buffer.substring(nextNewline + 1);
+			cursor = nextNewline + 1;
 			continue;
 		}
-		if (read === 0) {
-			if (buffer.trim().length > 0) options.onMalformedRecord?.();
+		if (read === cursor) {
+			if (buffer.substring(cursor).trim().length > 0) options.onMalformedRecord?.();
 			break;
 		}
-		buffer = buffer.substring(read);
+		cursor = read;
 		if (done) break;
 	}
 	return entries ?? [];

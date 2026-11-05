@@ -19,6 +19,26 @@ export class MissingApiKeyError extends Error {
 	}
 }
 
+/**
+ * Every usable OAuth credential for a provider failed to refresh with a
+ * retryable error (network blip, timeout, 5xx). The stored credentials are
+ * intact, so this is classified transient: retrying the request can succeed,
+ * unlike {@link MissingApiKeyError}. The refresh failure is kept as `cause`.
+ */
+export class OAuthRefreshUnavailableError extends Error {
+	readonly provider: string;
+
+	constructor(provider: string, cause: unknown) {
+		super(
+			`OAuth token refresh failed for provider ${provider}: ${cause instanceof Error ? cause.message : String(cause)}`,
+			{ cause },
+		);
+		this.name = "OAuthRefreshUnavailableError";
+		this.provider = provider;
+		attach(this, create(Flag.Transient));
+	}
+}
+
 /** A user-facing login flow required an `onPrompt` callback that was not supplied. */
 export class OnPromptRequiredError extends Error {
 	constructor(providerLabel: string) {

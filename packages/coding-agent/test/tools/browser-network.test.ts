@@ -58,6 +58,11 @@ function valueOf(result: { details?: unknown }): unknown {
 	return (result.details as { value?: unknown } | undefined)?.value;
 }
 
+/** Run code that leaves the page's CDP session unable to answer `Fetch.disable`. */
+const STALL_FETCH_DISABLE = `const client = page._client();
+const send = client.send.bind(client);
+client.send = (method, ...args) => (method === "Fetch.disable" ? Promise.withResolvers().promise : send(method, ...args));`;
+
 afterAll(async () => {
 	await releaseAllTabs({ kill: true });
 	await disposeAllVmContexts();
@@ -227,5 +232,44 @@ return { body, seen };`,
 			}),
 		) as Array<{ failureText?: string }>;
 		expect(blocked.some(request => request.failureText === "blocked by allowed_domains")).toBe(true);
+	});
+
+	test("keeps a run's result when interception was never touched and cannot be reset", async () => {
+		const invoke = createHost();
+		await invoke({ action: "open", name: "untouched-interception", url: `${baseUrl}/` });
+		const result = valueOf(
+			await invoke({
+				action: "run",
+				name: "untouched-interception",
+				code: `${STALL_FETCH_DISABLE}
+return "done";`,
+			}),
+		);
+		expect(result).toBe("done");
+	});
+
+	test("keeps a completed run's result when its interception cannot be reset", async () => {
+		const invoke = createHost();
+		await invoke({ action: "open", name: "stuck-interception", url: `${baseUrl}/` });
+		const completed = await invoke({
+			action: "run",
+			name: "stuck-interception",
+			code: `await page.setRequestInterception(true);
+${STALL_FETCH_DISABLE}
+return "done";`,
+		});
+		expect(valueOf(completed)).toBe("done");
+		expect(completed.content).toContainEqual({
+			type: "text",
+			text: "Browser request interception could not be reset after this run; the tab was reattached to a new worker. Tab state set since it was opened was reset (tab.route routes, emulation and user agent, init scripts, element ids, the request log, HAR recording, run globals), any open dialog was dismissed, and any page still loading was stopped.",
+		});
+		const next = valueOf(
+			await invoke({
+				action: "run",
+				name: "stuck-interception",
+				code: `return await tab.evaluate(async url => await (await fetch(url)).json(), ${JSON.stringify(`${baseUrl}/api`)})`,
+			}),
+		);
+		expect(next).toEqual({ source: "fixture" });
 	});
 });

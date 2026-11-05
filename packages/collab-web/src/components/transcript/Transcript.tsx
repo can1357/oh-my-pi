@@ -5,7 +5,7 @@ import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "rea
 import type { ActiveTool, ConnectionPhase } from "../../lib/client";
 import { fmtTokens } from "../../lib/format";
 import type { ToolRenderHost } from "../../tool-render";
-import { Markdown } from "./Markdown";
+import { Markdown, StreamingMarkdown } from "./Markdown";
 import { ToolCard } from "./ToolCard";
 import "./transcript.css";
 
@@ -124,7 +124,7 @@ function AssistantBody({
 			case "redactedThinking":
 				return <ThinkingBlock key={i} text="" redacted />;
 			case "text":
-				return <Markdown key={i} text={block.text} />;
+				return pending ? <StreamingMarkdown key={i} text={block.text} /> : <Markdown key={i} text={block.text} />;
 			case "toolCall": {
 				const act = active.get(block.id);
 				const result = results.get(block.id);

@@ -98,13 +98,11 @@ Place a durable benchmark with the owning package (`packages/natives/bench`, `pa
 const ITERATIONS = 2_000;
 
 function bench(name: string, fn: () => void): number {
-  const start = Bun.nanoseconds();
-  for (let i = 0; i < ITERATIONS; i++) fn();
-  const elapsedMs = (Bun.nanoseconds() - start) / 1e6;
-  console.log(
-    `${name}: ${elapsedMs.toFixed(2)}ms (${(elapsedMs / ITERATIONS).toFixed(6)}ms/op)`,
-  );
-  return elapsedMs;
+	const start = Bun.nanoseconds();
+	for (let i = 0; i < ITERATIONS; i++) fn();
+	const elapsedMs = (Bun.nanoseconds() - start) / 1e6;
+	console.log(`${name}: ${elapsedMs.toFixed(2)}ms (${(elapsedMs / ITERATIONS).toFixed(6)}ms/op)`);
+	return elapsedMs;
 }
 
 bench("feature/js", () => jsImpl(sample));
@@ -127,7 +125,7 @@ Confirm the export is present and `__piNativesBuildVersion()` reports the packag
 
 ### Stale variant or cache wins
 
-x64 candidate order is modern → baseline → unsuffixed for a modern host, and baseline → unsuffixed for a baseline host. Compiled and staged Windows loads can also win from `<getNativesDir()>/<version>` before package paths.
+x64 candidate order is modern → baseline → unsuffixed for a modern host, and baseline → unsuffixed for a baseline host. Compiled and staged Windows loads can also win from `<getNativesDir()>/<version>` before package paths. The root honors `PI_NATIVES_DIR` first (trimmed, `~`-expanded, and normalized; empty or relative values are ignored), then `$XDG_DATA_HOME/omp/natives` when `$XDG_DATA_HOME/omp` exists, otherwise `~/.omp/natives`.
 
 Remove only the stale local artifacts/cache identified by loader diagnostics, then rebuild. The loader best-effort deletes older `major.minor.patch` cache directories after a successful load only when their mtime is at least ten minutes old; it preserves the current-version directory.
 

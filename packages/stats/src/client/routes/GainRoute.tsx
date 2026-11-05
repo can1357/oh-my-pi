@@ -39,7 +39,9 @@ interface SourceRow extends GainSourceTotals {
 
 export function GainRoute({ active, range }: GainRouteProps) {
 	const [project, setProject] = useState<string | null>(null);
-	const gain = useQuery(["gain", range, project], () => getGainDashboardStats(range, project), { enabled: active });
+	const gain = useQuery(["gain", range, project], ({ signal }) => getGainDashboardStats(range, project, signal), {
+		enabled: active,
+	});
 	const meta = rangeMeta(range);
 	const data = gain.data;
 

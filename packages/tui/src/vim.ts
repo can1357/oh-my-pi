@@ -11,9 +11,9 @@ import { getSegmenter, moveWordLeft, moveWordRight } from "./utils";
  * modes, the common motions, and operators built from those motions.
  */
 
-export type VimMode = "insert" | "normal" | "visual" | "visual-line";
+export type VimMode = "insert" | "normal" | "visual" | "visual-line" | "replace";
 
-export type VimOperator = "d" | "y" | "c";
+export type VimOperator = "d" | "y" | "c" | ">" | "<";
 
 export interface VimPosition {
 	line: number;
@@ -38,7 +38,20 @@ export type VimCommand =
 	| { kind: "delete"; from: VimPosition; to: VimPosition; linewise: boolean; insert: boolean }
 	| { kind: "openLine"; below: boolean }
 	| { kind: "paste"; after: boolean; count: number }
-	| { kind: "undo" };
+	| { kind: "undo" }
+	| { kind: "replace"; from: VimPosition; to: VimPosition; text: string }
+	| { kind: "join"; fromLine: number; lines: number }
+	| { kind: "indent"; fromLine: number; toLine: number; out: boolean }
+	| { kind: "retype"; record: VimInsertRecord; times: number; newline: boolean; overwrite: boolean };
+
+/** What an Insert/Replace session typed, relative to where it started; `.` replays it. */
+export interface VimInsertRecord {
+	/** Graphemes removed before the session's start cursor (Backspace past the insert point). */
+	deleteBefore: number;
+	/** Graphemes removed after it (forward delete). */
+	deleteAfter: number;
+	text: string;
+}
 
 const segmenter = getSegmenter();
 
@@ -69,11 +82,111 @@ export function lastGraphemeStart(text: string): number {
 	return prevGraphemeStart(text, text.length);
 }
 
+export function countGraphemes(text: string): number {
+	let count = 0;
+	for (const _ of segmenter.segment(text)) count++;
+	return count;
+}
+
+/** Offset `count` graphemes forward or backward from `offset`, clamped to the text. */
+export function stepGraphemes(text: string, offset: number, count: number, forward: boolean): number {
+	if (count <= 0) return offset;
+	const boundaries: number[] = [];
+	for (const seg of segmenter.segment(text)) boundaries.push(seg.index);
+	boundaries.push(text.length);
+	let i = 0;
+	while (i + 1 < boundaries.length && boundaries[i + 1]! <= offset) i++;
+	const last = boundaries.length - 1;
+	if (forward) return boundaries[Math.min(i + count, last)]!;
+	return boundaries[Math.max(i - count + (boundaries[i]! < offset ? 1 : 0), 0)]!;
+}
+
+/**
+ * What a session turned `before` into, anchored at its start `cursor`: the prefix match stops at the
+ * cursor and the suffix match never crosses it, so typing `aa` before an existing `a` records `aa`
+ * at the cursor rather than after the old one. Comparisons are whole graphemes, so a shared high
+ * surrogate cannot split an emoji into the replayed text.
+ */
+export function diffInsertSession(before: string, cursor: number, after: string): VimInsertRecord {
+	const beforeBounds = graphemeBoundaries(before);
+	const afterBounds = graphemeBoundaries(after);
+	let cursorBound = 0;
+	while (cursorBound + 1 < beforeBounds.length && beforeBounds[cursorBound + 1]! <= cursor) cursorBound++;
+
+	let prefix = 0;
+	while (
+		prefix < cursorBound &&
+		prefix + 1 < afterBounds.length &&
+		before.slice(beforeBounds[prefix]!, beforeBounds[prefix + 1]!) ===
+			after.slice(afterBounds[prefix]!, afterBounds[prefix + 1]!)
+	) {
+		prefix++;
+	}
+
+	const beforeEnd = beforeBounds.length - 1;
+	const afterEnd = afterBounds.length - 1;
+	let suffix = 0;
+	while (
+		beforeEnd - suffix > cursorBound &&
+		afterEnd - suffix > prefix &&
+		before.slice(beforeBounds[beforeEnd - suffix - 1]!, beforeBounds[beforeEnd - suffix]!) ===
+			after.slice(afterBounds[afterEnd - suffix - 1]!, afterBounds[afterEnd - suffix]!)
+	) {
+		suffix++;
+	}
+
+	return {
+		deleteBefore: cursorBound - prefix,
+		deleteAfter: beforeEnd - suffix - cursorBound,
+		text: after.slice(afterBounds[prefix]!, afterBounds[afterEnd - suffix]!),
+	};
+}
+
+/** Inclusive start offsets plus `text.length`, one entry per grapheme boundary. */
+function graphemeBoundaries(text: string): number[] {
+	const bounds = [0];
+	for (const seg of segmenter.segment(text)) {
+		const end = seg.index + seg.segment.length;
+		if (end !== bounds[bounds.length - 1]) bounds.push(end);
+	}
+	if (bounds[bounds.length - 1] !== text.length) bounds.push(text.length);
+	return bounds;
+}
+
 function firstNonBlank(text: string): number {
 	for (const seg of segmenter.segment(text)) {
 		if (seg.segment.trim() !== "") return seg.index;
 	}
 	return 0;
+}
+function findPendingKey(pending: { forward: boolean; till: boolean } | null): string {
+	if (!pending) return "";
+	return pending.till ? (pending.forward ? "t" : "T") : pending.forward ? "f" : "F";
+}
+
+/**
+ * Column of the `count`th grapheme equal to `target`, searching strictly after `fromCol` when
+ * `forward` and strictly before it otherwise. Line-local, like Vim's `f`/`F`.
+ */
+function findGrapheme(text: string, fromCol: number, target: string, forward: boolean, count: number): number | null {
+	if (count < 1 || target.length === 0) return null;
+	const segs = [...segmenter.segment(text)];
+	let here = -1;
+	for (let i = 0; i < segs.length; i++) {
+		if (segs[i]!.index <= fromCol) here = i;
+		else break;
+	}
+	let seen = 0;
+	if (forward) {
+		for (let i = here + 1; i < segs.length; i++) {
+			if (segs[i]!.segment === target && ++seen === count) return segs[i]!.index;
+		}
+	} else {
+		for (let i = here - 1; i >= 0; i--) {
+			if (segs[i]!.segment === target && ++seen === count) return segs[i]!.index;
+		}
+	}
+	return null;
 }
 
 /** Vim's `w`: `moveWordRight` stops at the end of the current word, so skip the gap that follows. */
@@ -157,11 +270,7 @@ function wordObject(text: string, col: number, around: boolean, big: boolean, co
  * leading run when there is none.
  */
 function quoteObject(text: string, col: number, quote: string, around: boolean): [number, number] | null {
-	const marks: number[] = [];
-	for (let i = 0; i < text.length; i++) {
-		if (text.charAt(i) === "\\") i++;
-		else if (text.charAt(i) === quote) marks.push(i);
-	}
+	const marks = quoteMarks(text, quote);
 	for (let p = 0; p + 1 < marks.length; p += 2) {
 		const open = marks[p]!;
 		const close = marks[p + 1]!;
@@ -177,13 +286,13 @@ function quoteObject(text: string, col: number, quote: string, around: boolean):
 }
 
 /** Buffer flattened to one string plus the cursor's offset in it, so scans can cross lines. */
-function flatten(buf: VimBuffer): { text: string; cursor: number } {
+export function flatten(buf: VimBuffer): { text: string; cursor: number } {
 	let cursor = buf.cursorCol;
 	for (let i = 0; i < buf.cursorLine; i++) cursor += (buf.lines[i] ?? "").length + 1;
 	return { text: buf.lines.join("\n"), cursor };
 }
 
-function offsetToPos(lines: readonly string[], offset: number): VimPosition {
+export function offsetToPos(lines: readonly string[], offset: number): VimPosition {
 	let remaining = offset;
 	for (let line = 0; line < lines.length; line++) {
 		const width = (lines[line] ?? "").length;
@@ -254,12 +363,147 @@ function paragraphObject(buf: VimBuffer, around: boolean): TextObjectRange {
 	return { from: { line: first, col: 0 }, to: { line: end, col: (buf.lines[end] ?? "").length }, linewise: true };
 }
 
+const BRACKET_MATCH: Record<string, { mate: string; forward: boolean }> = {
+	"(": { mate: ")", forward: true },
+	")": { mate: "(", forward: false },
+	"[": { mate: "]", forward: true },
+	"]": { mate: "[", forward: false },
+	"{": { mate: "}", forward: true },
+	"}": { mate: "{", forward: false },
+};
+
+/** Quote columns, skipping a backslash and the character after it, same as `i"`/`a"`. */
+function quoteMarks(text: string, quote: string): number[] {
+	const marks: number[] = [];
+	for (let i = 0; i < text.length; i++) {
+		if (text.charAt(i) === "\\") i++;
+		else if (text.charAt(i) === quote) marks.push(i);
+	}
+	return marks;
+}
+
+function quoteMate(marks: readonly number[], col: number): number | null {
+	for (let p = 0; p + 1 < marks.length; p += 2) {
+		const open = marks[p]!;
+		const close = marks[p + 1]!;
+		if (col === open) return close;
+		if (col === close) return open;
+	}
+	return null;
+}
+
+/** Column of the match for `%`: the next bracket or quote on this line, then its pair. */
+function matchDelimiter(buf: VimBuffer): VimPosition | null {
+	const line = buf.lines[buf.cursorLine] ?? "";
+	const quotes = {
+		'"': quoteMarks(line, '"'),
+		"'": quoteMarks(line, "'"),
+	};
+	const quoteAt = (col: number): '"' | "'" | null =>
+		quotes['"'].includes(col) ? '"' : quotes["'"].includes(col) ? "'" : null;
+	let col = buf.cursorCol;
+	while (col < line.length && BRACKET_MATCH[line.charAt(col)] === undefined && quoteAt(col) === null) col++;
+	const quote = quoteAt(col);
+	if (quote) {
+		const mate = quoteMate(quotes[quote], col);
+		return mate === null ? null : { line: buf.cursorLine, col: mate };
+	}
+	const spec = BRACKET_MATCH[line.charAt(col)];
+	if (!spec) return null;
+	const { text, cursor } = flatten({ lines: buf.lines, cursorLine: buf.cursorLine, cursorCol: col });
+	const open = spec.forward ? line.charAt(col) : spec.mate;
+	const close = spec.forward ? spec.mate : line.charAt(col);
+	let depth = 0;
+	let match = -1;
+	if (spec.forward) {
+		for (let i = cursor + 1; i < text.length; i++) {
+			const ch = text.charAt(i);
+			if (ch === open) depth++;
+			else if (ch === close) {
+				if (depth === 0) {
+					match = i;
+					break;
+				}
+				depth--;
+			}
+		}
+	} else {
+		for (let i = cursor - 1; i >= 0; i--) {
+			const ch = text.charAt(i);
+			if (ch === close) depth++;
+			else if (ch === open) {
+				if (depth === 0) {
+					match = i;
+					break;
+				}
+				depth--;
+			}
+		}
+	}
+	return match < 0 ? null : offsetToPos(buf.lines, match);
+}
+
+function isParagraphBlank(lines: readonly string[], line: number): boolean {
+	return (lines[line] ?? "").trim() === "";
+}
+
+/** Line `{`/`}` land on. A missing boundary stays on the first or last line. */
+function paragraphBoundary(lines: readonly string[], line: number, forward: boolean): number {
+	const last = lines.length - 1;
+	if (last < 0) return 0;
+	let i = Math.max(0, Math.min(line, last));
+	if (forward) {
+		if (i < last && !isParagraphBlank(lines, i)) {
+			while (i < last && !isParagraphBlank(lines, i + 1)) i++;
+			return i < last ? i + 1 : last;
+		}
+		while (i < last && isParagraphBlank(lines, i)) i++;
+		while (i < last && !isParagraphBlank(lines, i)) i++;
+		return i;
+	}
+	if (i > 0 && !isParagraphBlank(lines, i)) {
+		while (i > 0 && !isParagraphBlank(lines, i - 1)) i--;
+		return i > 0 ? i - 1 : 0;
+	}
+	while (i > 0 && isParagraphBlank(lines, i)) i--;
+	while (i > 0 && !isParagraphBlank(lines, i - 1)) i--;
+	return i > 0 ? i - 1 : 0;
+}
+
 interface Motion {
 	to: VimPosition;
 	/** Inclusive motions cover the grapheme under `to` when used with an operator. */
 	inclusive: boolean;
 	linewise: boolean;
 }
+
+/** Commands whose count repeats the typed text rather than a motion (`3.` after `ifoo` → `foofoofoo`). */
+const INSERT_KEYS: Record<string, true> = { i: true, a: true, I: true, A: true, o: true, O: true, R: true };
+const EDIT_KINDS: Partial<Record<VimCommand["kind"], true>> = {
+	delete: true,
+	replace: true,
+	join: true,
+	indent: true,
+	paste: true,
+	openLine: true,
+};
+const EMPTY_RECORD: VimInsertRecord = { deleteBefore: 0, deleteAfter: 0, text: "" };
+
+/**
+ * The last change `.` repeats. Normal-mode changes replay their keys so motions and text objects
+ * re-resolve at the new cursor; Visual changes replay the selection's shape, as Vim does.
+ */
+type VimChange =
+	| { kind: "keys"; keys: string[]; count: number | null; insert: VimInsertRecord | null }
+	| {
+			kind: "visual";
+			key: string;
+			linewise: boolean;
+			lines: number;
+			graphemes: number;
+			endCol: number;
+			insert: VimInsertRecord | null;
+	  };
 
 export class VimState {
 	mode: VimMode = "normal";
@@ -271,6 +515,13 @@ export class VimState {
 	#pendingG = false;
 	/** `i` or `a` typed after an operator or in Visual mode — waiting for the object key. */
 	#textObject: "i" | "a" | null = null;
+	/** `f`/`F`/`t`/`T` waiting for the target grapheme. */
+	#findPending: { forward: boolean; till: boolean } | null = null;
+	/** Last find attempt, so `;` repeats it and `,` reverses it. */
+	#lastFind: { forward: boolean; till: boolean; target: string } | null = null;
+	/** `r` waiting for the replacement grapheme. */
+	#replaceChar = false;
+
 	/**
 	 * Vim's "desired column": `j`/`k` remember the column you started from, so descending through a
 	 * short line and back out returns to it instead of collapsing permanently. `null` means the
@@ -278,19 +529,32 @@ export class VimState {
 	 * end-of-line, which keeps `$j` on the end of each line. Every non-vertical command clears it.
 	 */
 	#desiredCol: number | null = null;
+	/** Keys of the Normal-mode command being typed, count digits excluded. */
+	#cmdKeys: string[] = [];
+	/** Every count digit typed in that command, in order. */
+	#cmdCount = "";
+	#lastChange: VimChange | null = null;
+	#stagedChange: VimChange | null = null;
 
-	/** True while a count, operator, `g`, or text-object prefix is half-typed — Escape cancels it. */
+	/** True while a count, operator, `g`, text-object, find, or `r` prefix is half-typed — Escape cancels it. */
 	get pending(): boolean {
-		return this.#count.length > 0 || this.#operator !== null || this.#pendingG || this.#textObject !== null;
+		return (
+			this.#count.length > 0 ||
+			this.#operator !== null ||
+			this.#pendingG ||
+			this.#textObject !== null ||
+			this.#findPending !== null ||
+			this.#replaceChar
+		);
 	}
 
 	/**
-	 * The half-typed command as Vim would echo it (`"2"`, `"d"`, `"2d"`, `"di"`) — empty when
-	 * nothing is pending. Hosts render this next to the mode so a partially entered operator is
+	 * The half-typed command as Vim would echo it (`"2"`, `"d"`, `"2d"`, `"di"`, `"df"`, `"r"`) — empty
+	 * when nothing is pending. Hosts render this next to the mode so a partially entered operator is
 	 * visible instead of silently swallowing the next keystroke.
 	 */
 	get pendingText(): string {
-		return `${this.#count}${this.#operator ?? ""}${this.#pendingG ? "g" : ""}${this.#textObject ?? ""}`;
+		return `${this.#count}${this.#operator ?? ""}${this.#pendingG ? "g" : ""}${this.#textObject ?? ""}${findPendingKey(this.#findPending)}${this.#replaceChar ? "r" : ""}`;
 	}
 
 	get visual(): boolean {
@@ -302,6 +566,20 @@ export class VimState {
 		this.anchor = null;
 		this.#desiredCol = null;
 		this.#clearPending();
+		this.#lastFind = null;
+		this.#cmdKeys = [];
+		this.#cmdCount = "";
+		this.#lastChange = null;
+		this.#stagedChange = null;
+	}
+
+	/** `0` is the line-start motion unless it extends a count already being typed. */
+	#isCountKey(key: string): boolean {
+		return (
+			!this.#findPending &&
+			!this.#replaceChar &&
+			((key >= "1" && key <= "9") || (key === "0" && this.#count.length > 0))
+		);
 	}
 
 	#clearPending(): void {
@@ -309,6 +587,8 @@ export class VimState {
 		this.#operator = null;
 		this.#pendingG = false;
 		this.#textObject = null;
+		this.#findPending = null;
+		this.#replaceChar = false;
 	}
 
 	#takeCount(): number {
@@ -332,11 +612,185 @@ export class VimState {
 	 * through to its regular handling (and, for Escape in Normal mode, to the app's interrupt).
 	 */
 	handleKey(key: string, buf: VimBuffer): VimCommand[] | null {
-		if (key === "escape") return this.#handleEscape(buf);
+		if (key === "escape") {
+			this.#cmdKeys = [];
+			this.#cmdCount = "";
+			return this.#handleEscape(buf);
+		}
 		if (this.mode === "insert") return null;
+		const recording = this.mode === "normal";
+		const dotIsTarget = this.#findPending !== null || this.#replaceChar;
+		if (recording) {
+			if (this.#isCountKey(key)) this.#cmdCount += key;
+			else this.#cmdKeys.push(key);
+		}
+		const commands = this.#dispatch(key, buf);
+		if (recording && !this.pending) {
+			// `#dispatch` may have entered Insert; widen past the narrowing from the early return above.
+			const mode = this.mode as VimMode;
+			const editing = mode === "insert" || mode === "replace";
+			// `.` is skipped only as the top-level repeat command; as an `f`/`t`/`r` target (`df.`)
+			// it completes a recordable edit.
+			if (
+				commands !== null &&
+				(key !== "." || dotIsTarget) &&
+				(editing || commands.some(c => EDIT_KINDS[c.kind] === true))
+			) {
+				// Insert-family commands ignore their own count, so `.` must not multiply what they typed.
+				const insertKey = INSERT_KEYS[this.#cmdKeys[0] ?? ""] === true;
+				const change: VimChange = {
+					kind: "keys",
+					keys: this.#cmdKeys,
+					count: insertKey || this.#cmdCount === "" ? null : Number.parseInt(this.#cmdCount, 10),
+					insert: null,
+				};
+				if (editing) {
+					this.#lastChange = change;
+					this.#stagedChange = null;
+				} else {
+					this.#stagedChange = change;
+				}
+			}
+			this.#cmdKeys = [];
+			this.#cmdCount = "";
+		}
+		return commands;
+	}
 
-		// Count prefix. `0` is the line-start motion unless it extends a count already being typed.
-		if ((key >= "1" && key <= "9") || (key === "0" && this.#count.length > 0)) {
+	/**
+	 * Attach what an Insert/Replace session typed to the change that opened it. After an arrow key
+	 * split the session, Vim's redo becomes a plain insert of the text typed since.
+	 */
+	recordInsert(record: VimInsertRecord, afterArrow: boolean): void {
+		if (afterArrow) {
+			this.#lastChange = { kind: "keys", keys: ["i"], count: null, insert: record };
+		} else if (this.#lastChange !== null) {
+			this.#lastChange = { ...this.#lastChange, insert: record };
+		} else if (record.text !== "" || record.deleteBefore > 0 || record.deleteAfter > 0) {
+			this.#lastChange = { kind: "keys", keys: ["i"], count: null, insert: record };
+		}
+	}
+
+	/** Commit a staged change when the editor confirms text changed. */
+	commitChange(): void {
+		if (this.#stagedChange !== null) {
+			this.#lastChange = this.#stagedChange;
+			this.#stagedChange = null;
+		}
+	}
+
+	/** Discard a staged change when the command was a no-op (e.g. `J` on the last line). */
+	discardChange(): void {
+		this.#stagedChange = null;
+	}
+	#repeat(buf: VimBuffer, dotCount: number | null): VimCommand[] {
+		const change = this.#lastChange;
+		if (change === null) return [];
+		let commands: VimCommand[];
+		let count: number | null = null;
+		if (change.kind === "keys") {
+			count = dotCount ?? change.count;
+			commands = [];
+			// Every key but the last only arms a prefix and edits nothing, so one buffer snapshot holds.
+			for (const key of count === null ? change.keys : [...String(count), ...change.keys]) {
+				commands = this.#dispatch(key, buf) ?? [];
+			}
+			this.#lastChange = { ...change, count };
+		} else {
+			commands = this.#repeatVisual(change, buf);
+		}
+		if (this.mode === "insert" || this.mode === "replace") {
+			const insertKey = change.kind === "keys" && INSERT_KEYS[change.keys[0] ?? ""] === true;
+			commands.push({
+				kind: "retype",
+				record: change.insert ?? EMPTY_RECORD,
+				times: insertKey ? (count ?? 1) : 1,
+				newline: insertKey && change.kind === "keys" && (change.keys[0] === "o" || change.keys[0] === "O"),
+				overwrite: this.mode === "replace",
+			});
+			this.mode = "normal";
+			commands.push({ kind: "mode", mode: "normal" });
+		}
+		return commands;
+	}
+
+	/** Re-applies a Visual change over the same shape starting at the cursor; `.`'s count is ignored. */
+	#repeatVisual(change: Extract<VimChange, { kind: "visual" }>, buf: VimBuffer): VimCommand[] {
+		const fromLine = buf.cursorLine;
+		const toLine = Math.min(fromLine + change.lines - 1, buf.lines.length - 1);
+		const lineAt = (line: number) => buf.lines[line] ?? "";
+		const cursor = cursorOf(buf);
+		let from: VimPosition;
+		let to: VimPosition;
+		if (change.linewise) {
+			from = { line: fromLine, col: 0 };
+			to = { line: toLine, col: lineAt(toLine).length };
+		} else if (change.lines === 1) {
+			from = cursor;
+			to = { line: fromLine, col: stepGraphemes(lineAt(fromLine), buf.cursorCol, change.graphemes, true) };
+		} else {
+			from = cursor;
+			// `endCol` was measured on the original last line, so it can land mid-grapheme on a
+			// destination line with longer clusters; snap it up to a boundary or a replayed `d`
+			// would leave half an emoji behind.
+			const text = lineAt(toLine);
+			const target = Math.min(change.endCol, text.length);
+			let endCol = text.length;
+			for (const seg of segmenter.segment(text)) {
+				if (seg.index >= target) {
+					endCol = seg.index;
+					break;
+				}
+				endCol = seg.index + seg.segment.length;
+			}
+			to = { line: toLine, col: endCol };
+		}
+		return this.#visualEdit(change.key, from, to, change.linewise);
+	}
+
+	#dispatch(key: string, buf: VimBuffer): VimCommand[] | null {
+		// The character after `f`/`t` is the target, including digits. Resolve it before the count prefix.
+		if (this.#findPending) {
+			const spec = this.#findPending;
+			this.#findPending = null;
+			this.#desiredCol = null;
+			this.#lastFind = { ...spec, target: key };
+			const count = this.#count.length > 0 ? Math.max(1, Number.parseInt(this.#count, 10)) : 1;
+			const motion = this.#seek(key, buf, spec, count);
+			if (!motion) {
+				this.#operator = null;
+				this.#count = "";
+				return [];
+			}
+			return this.#applyMotion(buf, motion);
+		}
+		if (this.#replaceChar) {
+			this.#replaceChar = false;
+			const count = this.#count.length > 0 ? Math.max(1, Number.parseInt(this.#count, 10)) : 1;
+			const line = buf.lines[buf.cursorLine] ?? "";
+			// One segmenter pass: stepping with `nextGraphemeStart` would rescan the line per grapheme.
+			let end = -1;
+			let taken = 0;
+			for (const seg of segmenter.segment(line)) {
+				if (seg.index < buf.cursorCol) continue;
+				if (++taken === count) {
+					end = seg.index + seg.segment.length;
+					break;
+				}
+			}
+			this.#count = "";
+			if (end < 0) return [];
+			return [
+				{
+					kind: "replace",
+					from: { line: buf.cursorLine, col: buf.cursorCol },
+					to: { line: buf.cursorLine, col: end },
+					text: key.repeat(count),
+				},
+			];
+		}
+
+		if (this.#isCountKey(key)) {
 			this.#count += key;
 			return [];
 		}
@@ -364,6 +818,21 @@ export class VimState {
 			this.#textObject = key;
 			return [];
 		}
+		if (key === "f" || key === "F" || key === "t" || key === "T") {
+			this.#desiredCol = null;
+			this.#findPending = { forward: key === "f" || key === "t", till: key === "t" || key === "T" };
+			return [];
+		}
+		if ((key === "r" || key === "R") && this.#operator === null && !this.visual) {
+			this.#desiredCol = null;
+			if (key === "R") {
+				this.#takeCount();
+				this.mode = "replace";
+				return [{ kind: "mode", mode: "replace" }];
+			}
+			this.#replaceChar = true;
+			return [];
+		}
 
 		// Only consecutive `j`/`k` carry the desired column; anything else re-anchors it. Counts and
 		// the `g` prefix returned above, so `2j` still continues an established column.
@@ -388,7 +857,7 @@ export class VimState {
 				{ kind: "move", to: this.#clampNormal(buf, cursorOf(buf)) },
 			];
 		}
-		if (this.mode === "insert") {
+		if (this.mode === "insert" || this.mode === "replace") {
 			this.mode = "normal";
 			const text = buf.lines[buf.cursorLine] ?? "";
 			return [
@@ -454,6 +923,31 @@ export class VimState {
 				for (let i = 0; i < count; i++) col = wordEnd(line, col);
 				return { to: at(col), inclusive: true, linewise: false };
 			}
+			case "%": {
+				// `{count}%` jumps to that percentage of the buffer, linewise, like Vim.
+				if (this.#count.length > 0) {
+					if (count > 100) return null;
+					const target = Math.max(0, Math.floor((count * buf.lines.length + 99) / 100) - 1);
+					const text = buf.lines[target] ?? "";
+					return { to: { line: target, col: firstNonBlank(text) }, inclusive: false, linewise: true };
+				}
+				const to = matchDelimiter(buf);
+				return to === null ? null : { to, inclusive: true, linewise: false };
+			}
+			case "{":
+			case "}": {
+				let line = buf.cursorLine;
+				for (let n = 0; n < count; n++) {
+					const next = paragraphBoundary(buf.lines, line, key === "}");
+					if (next === line) break;
+					line = next;
+				}
+				const text = buf.lines[line] ?? "";
+				// No blank line ahead: Vim parks at the end of the buffer, not column 0. A bare move
+				// clamps back onto the last grapheme; an operator still covers the rest of the line.
+				const atBufferEnd = key === "}" && line === buf.lines.length - 1 && text.trim() !== "";
+				return { to: { line, col: atBufferEnd ? text.length : 0 }, inclusive: false, linewise: false };
+			}
 			case "G": {
 				const target = this.#count.length > 0 ? count - 1 : buf.lines.length - 1;
 				return {
@@ -462,9 +956,45 @@ export class VimState {
 					linewise: true,
 				};
 			}
+			case ";":
+			case ",":
+				return this.#repeatFind(key === ";", buf, count);
 			default:
 				return null;
 		}
+	}
+
+	#repeatFind(sameDirection: boolean, buf: VimBuffer, count: number): Motion | null {
+		const last = this.#lastFind;
+		if (!last) return null;
+		const forward = sameDirection ? last.forward : !last.forward;
+		const text = buf.lines[buf.cursorLine] ?? "";
+		// A till lands beside its target, so repeating from the cursor rediscovers that same target.
+		const fromCol = last.till
+			? forward
+				? nextGraphemeStart(text, buf.cursorCol)
+				: prevGraphemeStart(text, buf.cursorCol)
+			: buf.cursorCol;
+		return this.#seek(last.target, buf, { forward, till: last.till }, count, fromCol);
+	}
+
+	/**
+	 * `f`/`F` land on the match and include it. `t`/`T` land on the adjacent grapheme and include
+	 * that grapheme, so the operator stops short of the target. A till that would not move fails.
+	 */
+	#seek(
+		target: string,
+		buf: VimBuffer,
+		spec: { forward: boolean; till: boolean },
+		count: number,
+		fromCol = buf.cursorCol,
+	): Motion | null {
+		const text = buf.lines[buf.cursorLine] ?? "";
+		const match = findGrapheme(text, fromCol, target, spec.forward, count);
+		if (match === null) return null;
+		const land = spec.till ? (spec.forward ? prevGraphemeStart(text, match) : nextGraphemeStart(text, match)) : match;
+		if (land === buf.cursorCol) return null;
+		return { to: { line: buf.cursorLine, col: land }, inclusive: true, linewise: false };
 	}
 
 	/** Turn a resolved motion into either a cursor move, a selection extension, or an operator range. */
@@ -472,13 +1002,20 @@ export class VimState {
 		const operator = this.#operator;
 		this.#operator = null;
 		this.#takeCount();
+		if (operator === ">" || operator === "<") {
+			const fromLine = Math.min(buf.cursorLine, motion.to.line);
+			const toLine = Math.max(buf.cursorLine, motion.to.line);
+			return [{ kind: "indent", fromLine, toLine, out: operator === "<" }];
+		}
 
 		if (operator === null) {
 			// `$` parks on the last grapheme in Normal mode but must still be able to select the
-			// final character in Visual mode, where the cursor is allowed one past it.
-			const to = this.visual
-				? { line: motion.to.line, col: Math.min(motion.to.col, (buf.lines[motion.to.line] ?? "").length) }
-				: this.#clampNormal(buf, motion.to);
+			// final character in Visual mode, where the cursor is allowed one past it. Replace mode
+			// may also sit past the end, so typing there appends instead of overwriting the last grapheme.
+			const to =
+				this.visual || this.mode === "replace"
+					? { line: motion.to.line, col: Math.min(motion.to.col, (buf.lines[motion.to.line] ?? "").length) }
+					: this.#clampNormal(buf, motion.to);
 			return [{ kind: "move", to }];
 		}
 
@@ -494,6 +1031,11 @@ export class VimState {
 	}
 
 	#operate(operator: VimOperator, from: VimPosition, to: VimPosition, linewise: boolean): VimCommand[] {
+		if (operator === ">" || operator === "<") {
+			const fromLine = Math.min(from.line, to.line);
+			const toLine = Math.max(from.line, to.line);
+			return [{ kind: "indent", fromLine, toLine, out: operator === "<" }];
+		}
 		if (operator === "y") {
 			return [
 				{ kind: "yank", from, to, linewise },
@@ -683,6 +1225,36 @@ export class VimState {
 			case "u":
 				this.#takeCount();
 				return [{ kind: "undo" }];
+			case ".": {
+				if (this.#operator !== null) {
+					this.#clearPending();
+					return [];
+				}
+				const dotCount = this.#count.length > 0 ? this.#takeCount() : null;
+				return this.#repeat(buf, dotCount);
+			}
+			case "J": {
+				if (this.#operator !== null) {
+					this.#clearPending();
+					return [];
+				}
+				return [{ kind: "join", fromLine: buf.cursorLine, lines: Math.max(2, this.#takeCount()) }];
+			}
+			case ">":
+			case "<": {
+				if (this.#operator === key) {
+					const span = this.#takeCount();
+					const last = Math.min(buf.cursorLine + span - 1, buf.lines.length - 1);
+					this.#operator = null;
+					return [{ kind: "indent", fromLine: buf.cursorLine, toLine: last, out: key === "<" }];
+				}
+				if (this.#operator !== null) {
+					this.#clearPending();
+					return [];
+				}
+				this.#operator = key;
+				return [];
+			}
 			default:
 				// Normal mode swallows unknown printable keys rather than typing them into the buffer.
 				this.#clearPending();
@@ -717,20 +1289,54 @@ export class VimState {
 			case "d":
 			case "x":
 			case "c":
-			case "s": {
-				const operator: VimOperator = key === "y" ? "y" : key === "c" || key === "s" ? "c" : "d";
+			case "s":
+			case ">":
+			case "<":
+			case "J": {
 				const { from, to } = visualRange(buf, anchor, linewise);
 				this.#clearPending();
 				this.anchor = null;
-				// `#operate` switches to Insert itself for `c`; everything else drops back to Normal.
-				if (operator !== "c") this.mode = "normal";
-				const commands = this.#operate(operator, from, to, linewise);
-				return operator === "c" ? commands : [...commands, { kind: "mode", mode: "normal" }];
+				if (key !== "y") {
+					const change: VimChange = {
+						kind: "visual",
+						key,
+						linewise,
+						lines: to.line - from.line + 1,
+						graphemes:
+							from.line === to.line ? countGraphemes((buf.lines[from.line] ?? "").slice(from.col, to.col)) : 0,
+						endCol: to.col,
+						insert: null,
+					};
+					if (key === "c" || key === "s") {
+						this.#lastChange = change;
+						this.#stagedChange = null;
+					} else {
+						this.#stagedChange = change;
+					}
+				}
+				return this.#visualEdit(key, from, to, linewise);
 			}
 			default:
 				this.#clearPending();
 				return [];
 		}
+	}
+
+	/** Apply a Visual-mode edit key to the span `from`–`to` (end-exclusive), live or from `.`. */
+	#visualEdit(key: string, from: VimPosition, to: VimPosition, linewise: boolean): VimCommand[] {
+		if (key === ">" || key === "<" || key === "J") {
+			this.mode = "normal";
+			const edit: VimCommand =
+				key === "J"
+					? { kind: "join", fromLine: from.line, lines: Math.max(2, to.line - from.line + 1) }
+					: { kind: "indent", fromLine: from.line, toLine: to.line, out: key === "<" };
+			return [edit, { kind: "mode", mode: "normal" }];
+		}
+		const operator: VimOperator = key === "y" ? "y" : key === "c" || key === "s" ? "c" : "d";
+		// `#operate` switches to Insert itself for `c`; everything else drops back to Normal.
+		if (operator !== "c") this.mode = "normal";
+		const commands = this.#operate(operator, from, to, linewise);
+		return operator === "c" ? commands : [...commands, { kind: "mode", mode: "normal" }];
 	}
 }
 

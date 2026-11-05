@@ -88,7 +88,7 @@ _decode_cache_warming_mode = cast("Decoder[CacheWarmingMode]", literal(_CACHE_WA
 
 
 MessageUpdates: TypeAlias = Literal["full", "delta"]
-"""`set_event_filter` projection: `delta` drops the accumulated snapshots from `message_update`."""
+"""`set_event_filter` projection: `delta` replaces the accumulated snapshots with the block a start/end event touches."""
 _MESSAGE_UPDATES_VALUES: Final[frozenset[str]] = frozenset({"full", "delta"})
 _decode_message_updates = cast("Decoder[MessageUpdates]", literal(_MESSAGE_UPDATES_VALUES))
 
@@ -127,6 +127,18 @@ _decode_agent_source = cast("Decoder[AgentSource]", literal(_AGENT_SOURCE_VALUES
 SubagentStatus: TypeAlias = Literal["pending", "running", "completed", "failed", "aborted"]
 _SUBAGENT_STATUS_VALUES: Final[frozenset[str]] = frozenset({"pending", "running", "completed", "failed", "aborted"})
 _decode_subagent_status = cast("Decoder[SubagentStatus]", literal(_SUBAGENT_STATUS_VALUES))
+
+
+SlowModeScope: TypeAlias = Literal["session", "global"]
+"""Where `/slow` lives: persisted config shared by every session, or this session's flex tier."""
+_SLOW_MODE_SCOPE_VALUES: Final[frozenset[str]] = frozenset({"session", "global"})
+_decode_slow_mode_scope = cast("Decoder[SlowModeScope]", literal(_SLOW_MODE_SCOPE_VALUES))
+
+
+BtwStatus: TypeAlias = Literal["running", "complete", "cancelled", "error", "interrupted"]
+"""Side-question turn lifecycle; `interrupted` marks a turn whose process died while it ran."""
+_BTW_STATUS_VALUES: Final[frozenset[str]] = frozenset({"running", "complete", "cancelled", "error", "interrupted"})
+_decode_btw_status = cast("Decoder[BtwStatus]", literal(_BTW_STATUS_VALUES))
 
 
 AutoCompactionReason: TypeAlias = Literal["threshold", "overflow", "idle", "incomplete"]
@@ -200,6 +212,8 @@ class ThinkingContent(TypedDict):
     thinking: str
     thinkingSignature: NotRequired[str]
     itemId: NotRequired[str]
+    narration: NotRequired[bool]
+    """Prose the model addressed to the user, returned by the provider as thinking; present it as answer text."""
 
 
 class RedactedThinkingContent(TypedDict):
@@ -562,6 +576,8 @@ class QueuedMessagesState:
     """Displayable queue-chip text for pending user-authored messages; accepted verbatim by `remove_queued_message`."""
     steering: tuple[str, ...]
     follow_up: tuple[str, ...]
+    live_steered: int = 0
+    """Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -602,6 +618,26 @@ class GoalResult:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class UsageLimitLowPriority:
+    """Requests are served on the provider's low-priority (slow) lane."""
+    stage: Literal["low_priority"] = "low_priority"
+    resets_at_sec: float
+    """Epoch seconds when the limit that was hit resets."""
+    allowance_left_percent: int | None = None
+    """Percent of the low-priority allowance still available, when reported."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class UsageLimitWrapUp:
+    """Requests run on a short wrap-up allowance past the limit."""
+    stage: Literal["wrap_up"] = "wrap_up"
+    extra_usage: bool
+    """Whether paid extra usage serves requests once the allowance is spent."""
+    resets_at_sec: float | None = None
+    """Epoch seconds when the limit that was hit resets, if reported."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class SessionState:
     session_id: str
     model: ModelInfo | None = None
@@ -616,6 +652,14 @@ class SessionState:
     auto_compaction_enabled: bool = False
     fast_mode_enabled: bool = False
     fast_mode_active: bool = False
+    slow_mode_supported: bool = False
+    """`/slow` applies to the active model."""
+    slow_mode_enabled: bool = False
+    """`/slow` is on for the active model; always `false` when `slowModeSupported` is `false`."""
+    slow_mode_scope: SlowModeScope | None = None
+    """Where the active model's `/slow` lives; absent when unsupported."""
+    usage_limit: UsageLimitState | None = None
+    """Usage-limit stage of the active model's account; absent outside wrap-up and low priority."""
     tokens_per_second: float | None = None
     message_count: int = 0
     queued_message_count: int = 0
@@ -623,7 +667,7 @@ class SessionState:
     """Background jobs or deliveries can still inject a follow-up and wake the session."""
     is_settled: bool = False
     """Idle with nothing queued or pending; same predicate as `session_settled`."""
-    queued_messages: QueuedMessagesState = field(default_factory=lambda: parse_queued_messages_state({"steering": [], "followUp": []}, "queuedMessages"))
+    queued_messages: QueuedMessagesState = field(default_factory=lambda: parse_queued_messages_state({"steering": [], "followUp": [], "liveSteered": 0}, "queuedMessages"))
     todo_phases: tuple[TodoPhase, ...] = ()
     system_prompt: tuple[str, ...] = ()
     """System prompt sections, for session dumps."""
@@ -646,9 +690,30 @@ class BashResult:
     timed_out: bool | None = None
     artifact_id: str | None = None
     artifact_elided_bytes: int | None = None
+    elided_bytes: int | None = None
+    """Bytes dropped from the middle of `output`, which keeps the head and tail."""
+    elided_lines: int | None = None
+    """Lines dropped from the middle of `output`."""
+    column_dropped_bytes: int | None = None
+    """Bytes the per-line column cap cut from `output`, across all lines."""
+    column_truncated_lines: int | None = None
+    """Lines of `output` the per-line column cap cut; the artifact holds them whole."""
+    column_truncated_range: LineRange | None = None
+    """First and last lines the column cap cut, numbered as in the artifact; absent when the numbering cannot match it."""
+    column_max: int | None = None
+    """The per-line column cap in UTF-8 bytes, set when it cut a line."""
     artifact_error: JsonObject | None = None
+    minimized: JsonObject | None = None
     working_dir: str | None = None
     images: tuple[ImageContent, ...] | None = None
+    trace: JsonObject | None = None
+    """The embedded shell's final `ShellTrace` of the run; only when the caller asked for one."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class LineRange:
+    first: int
+    last: int
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -665,6 +730,7 @@ class CompactionResult:
     short_summary: str | None = None
     details: JsonValue | None = None
     preserve_data: JsonObject | None = None
+    provider_replay_through_entry_id: str | None = None
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -696,11 +762,33 @@ class OpenSessionResult:
 @dataclass(slots=True, frozen=True, kw_only=True)
 class RemoveQueuedMessageResult:
     removed: bool
+    images: tuple[ImageContent, ...] | None = None
+    """The removed message's images, so the client can restore them with its text."""
+    images_dropped: bool | None = None
+    """Only ever `true`: the images exceeded the transport limit and were omitted; the removal still happened."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class PromoteQueuedMessageResult:
     promoted: bool
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class RestoredQueuedMessage:
+    """Queued user content withdrawn from the queue, as the editor would restore it."""
+    text: str
+    images: tuple[ImageContent, ...] | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class AbortAndRestoreQueueResult:
+    """User-authored queued input withdrawn before the abort, oldest first."""
+    steering: tuple[RestoredQueuedMessage, ...]
+    follow_up: tuple[RestoredQueuedMessage, ...]
+    images_dropped: bool | None = None
+    """Only ever `true`: the full result exceeded the transport limit and every `images` was omitted."""
+    truncated: bool | None = None
+    """Only ever `true`: even the text-only result exceeded the limit, so only an oldest-first prefix is listed."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -713,6 +801,15 @@ class BranchMessage:
 class BranchResult:
     text: str
     cancelled: bool
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class NavigateTreeResult:
+    cancelled: bool
+    aborted: bool | None = None
+    """Only ever `true`: `abort_branch_summary` stopped the summary; nothing moved."""
+    editor_text: str | None = None
+    """The target was a user message: its text, for the editor; the leaf moved to its parent."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -746,6 +843,8 @@ class SessionStats:
     session_file: str | None = None
     credits: SessionCredits | None = None
     routed_models: dict[str, float] | None = None
+    edit_rejections: dict[str, float] | None = None
+    """Failed edits by the engine's `errorKind`."""
     context_usage: ContextUsage | None = None
 
 
@@ -824,11 +923,51 @@ class SubagentMessages:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class BtwHistoryTurn:
+    """One question and its answer within a side-question topic."""
+    question: str
+    answer: str
+    status: BtwStatus
+    created_at: int
+    updated_at: int
+    images: tuple[ImageContent, ...] | None = None
+    """Images attached to the question."""
+    error: str | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class BtwHistoryRecord:
+    """A side-question topic: its first turn's fields plus follow-ups; the latest turn is the last follow-up, else the record."""
+    question: str
+    answer: str
+    status: BtwStatus
+    created_at: int
+    updated_at: int
+    id: str
+    leaf_id: str | None
+    images: tuple[ImageContent, ...] | None = None
+    """Images attached to the question."""
+    error: str | None = None
+    follow_ups: tuple[BtwHistoryTurn, ...] | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class LoginProvider:
     id: str
     name: str
     available: bool
     authenticated: bool
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class LogoutAccount:
+    """A stored credential `logout` can remove; `active` marks credentials the session may be using."""
+    credential_id: int
+    provider: str
+    label: str
+    detail: str
+    type: Literal["api_key", "oauth"]
+    active: bool
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -845,6 +984,8 @@ class PromptAck:
 @dataclass(slots=True, frozen=True, kw_only=True)
 class AgentStartEvent:
     type: Literal["agent_start"] = "agent_start"
+    resumed_tool_call_ids: tuple[str, ...] | None = None
+    """Calls of an unpaired assistant tail a continued run executes before its first model request."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -956,6 +1097,27 @@ class AutoCompactionEndEvent:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class ManualCompactionStartEvent:
+    """A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted."""
+    type: Literal["manual_compaction_start"] = "manual_compaction_start"
+    mode: str | None = None
+    """The `/compact <mode>` subcommand, when one was given."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ManualCompactionEndEvent:
+    """Outcome of the compaction announced by the matching `manual_compaction_start`."""
+    type: Literal["manual_compaction_end"] = "manual_compaction_end"
+    aborted: bool
+    """The compaction was cancelled (abort, or a `session_before_compact` hook)."""
+    result: CompactionResult | None = None
+    """Present when the compaction committed."""
+    skipped: bool | None = None
+    """There was nothing to compact; `errorMessage` says why."""
+    error_message: str | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class AutoRetryStartEvent:
     type: Literal["auto_retry_start"] = "auto_retry_start"
     attempt: int
@@ -1036,6 +1198,7 @@ class AdvisorYieldedEvent:
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class TtsrTriggeredEvent:
+    """Rule injection: a TTSR rule matched the stream and its text was injected. Each rule carries at least `name`, `path`, and `content`."""
     type: Literal["ttsr_triggered"] = "ttsr_triggered"
     rules: tuple[JsonObject, ...]
 
@@ -1092,6 +1255,8 @@ class QueueUpdateEvent:
     type: Literal["queue_update"] = "queue_update"
     steering: tuple[str, ...]
     follow_up: tuple[str, ...]
+    live_steered: int = 0
+    """Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1113,6 +1278,8 @@ class PromptError:
     provider: str | None = None
     model: str | None = None
     http_status: int | None = None
+    code: Literal["cost_cap"] | None = None
+    """`cost_cap`: the session reached `session.maxCost` (`--max-cost`) and omp did not send the next request."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1235,6 +1402,46 @@ class LiveEndEvent:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class DictationStateEvent:
+    """State of one draft-only microphone capture."""
+    type: Literal["dictation_state"] = "dictation_state"
+    capture_id: str
+    state: Literal["starting", "recording", "transcribing"]
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class DictationTranscriptEvent:
+    """Full accumulated draft preview; replaces the previous preview for this capture."""
+    type: Literal["dictation_transcript"] = "dictation_transcript"
+    capture_id: str
+    text: str
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class DictationEndEvent:
+    """Exactly one terminal frame per capture; text is the accumulated result."""
+    type: Literal["dictation_end"] = "dictation_end"
+    capture_id: str
+    text: str
+    error: str | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class BtwDeltaEvent:
+    """Text appended to the running side question's latest answer."""
+    type: Literal["btw_delta"] = "btw_delta"
+    record_id: str
+    delta: str
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class BtwRecordEvent:
+    """Full side-question record on every lifecycle change (started, complete, cancelled, error); the last one per id wins."""
+    type: Literal["btw_record"] = "btw_record"
+    record: BtwHistoryRecord
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class CommandOutputEvent:
     """Output of a builtin slash command."""
     type: Literal["command_output"] = "command_output"
@@ -1313,6 +1520,7 @@ class InputUiRequest:
     title: str
     placeholder: str | None = None
     timeout: int | None = None
+    secret: bool | None = None
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1411,6 +1619,7 @@ class ExtensionUiRequest(ExtensionUiRequestMixin):
     timeout: int | None = None
     message: str | None = None
     placeholder: str | None = None
+    secret: bool | None = None
     prefill: str | None = None
     prompt_style: bool | None = None
     questions: tuple[AskQuestion, ...] | None = None
@@ -1460,6 +1669,23 @@ class NegotiateProtocolResult:
     protocol_version: int
 
 
+@dataclass(slots=True, frozen=True, kw_only=True)
+class LiveConnectResult:
+    voice: str
+    sdp_answer: str
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class GetSessionLeaseResult:
+    held: tuple[str, ...]
+    unknown: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class LogoutResult:
+    remaining_source: str | None = None
+
+
 UserContent: TypeAlias = TextContent | ImageContent
 
 
@@ -1474,11 +1700,15 @@ AssistantMessageEvent: TypeAlias = AssistantStartEvent | AssistantTextStartEvent
 """Streaming update for one assistant message, discriminated by `type`."""
 
 
-RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent
+UsageLimitState: TypeAlias = UsageLimitLowPriority | UsageLimitWrapUp
+"""Provider-neutral state of an account past its usage limit, discriminated by `stage`."""
+
+
+RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | ManualCompactionStartEvent | ManualCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent
 """A session event, discriminated by `type`; `set_event_filter` selects which are sent."""
 
 
-RpcNotification: TypeAlias = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent | UnknownNotification
+RpcNotification: TypeAlias = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | DictationStateEvent | DictationTranscriptEvent | DictationEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent | UnknownNotification
 """Unsolicited outbound frame (everything except responses and host tool/URI requests), discriminated by `type`."""
 
 
@@ -1724,6 +1954,7 @@ def parse_queued_messages_state(value: object, path: str = "QueuedMessagesState"
     return QueuedMessagesState(
         steering=required(payload, "steering", array(decode_str), path),
         follow_up=required(payload, "followUp", array(decode_str), path),
+        live_steered=defaulted(payload, "liveSteered", decode_int, path, 0),
     )
 
 
@@ -1769,6 +2000,24 @@ def parse_goal_result(value: object, path: str = "GoalResult") -> GoalResult:
     )
 
 
+def parse_usage_limit_low_priority(value: object, path: str = "UsageLimitLowPriority") -> UsageLimitLowPriority:
+    payload = expect_object(value, path)
+    required(payload, "stage", cast('Decoder[Literal["low_priority"]]', literal(frozenset({"low_priority"}))), path)
+    return UsageLimitLowPriority(
+        resets_at_sec=required(payload, "resetsAtSec", decode_float, path),
+        allowance_left_percent=optional(payload, "allowanceLeftPercent", decode_int, path),
+    )
+
+
+def parse_usage_limit_wrap_up(value: object, path: str = "UsageLimitWrapUp") -> UsageLimitWrapUp:
+    payload = expect_object(value, path)
+    required(payload, "stage", cast('Decoder[Literal["wrap_up"]]', literal(frozenset({"wrap_up"}))), path)
+    return UsageLimitWrapUp(
+        extra_usage=required(payload, "extraUsage", decode_bool, path),
+        resets_at_sec=optional(payload, "resetsAtSec", decode_float, path),
+    )
+
+
 def parse_session_state(value: object, path: str = "SessionState") -> SessionState:
     payload = expect_object(value, path)
     return SessionState(
@@ -1785,12 +2034,16 @@ def parse_session_state(value: object, path: str = "SessionState") -> SessionSta
         auto_compaction_enabled=defaulted(payload, "autoCompactionEnabled", decode_bool, path, False),
         fast_mode_enabled=defaulted(payload, "fastModeEnabled", decode_bool, path, False),
         fast_mode_active=defaulted(payload, "fastModeActive", decode_bool, path, False),
+        slow_mode_supported=defaulted(payload, "slowModeSupported", decode_bool, path, False),
+        slow_mode_enabled=defaulted(payload, "slowModeEnabled", decode_bool, path, False),
+        slow_mode_scope=optional(payload, "slowModeScope", _decode_slow_mode_scope, path),
+        usage_limit=optional(payload, "usageLimit", parse_usage_limit_state, path),
         tokens_per_second=defaulted(payload, "tokensPerSecond", nullable(decode_float), path, None),
         message_count=defaulted(payload, "messageCount", decode_int, path, 0),
         queued_message_count=defaulted(payload, "queuedMessageCount", decode_int, path, 0),
         has_pending_async_work=defaulted(payload, "hasPendingAsyncWork", decode_bool, path, False),
         is_settled=defaulted(payload, "isSettled", decode_bool, path, False),
-        queued_messages=defaulted(payload, "queuedMessages", parse_queued_messages_state, path, parse_queued_messages_state({"steering": [], "followUp": []}, path)),
+        queued_messages=defaulted(payload, "queuedMessages", parse_queued_messages_state, path, parse_queued_messages_state({"steering": [], "followUp": [], "liveSteered": 0}, path)),
         todo_phases=defaulted(payload, "todoPhases", array(parse_todo_phase), path, ()),
         system_prompt=defaulted(payload, "systemPrompt", scalar_or_array(decode_str), path, ()),
         dump_tools=defaulted(payload, "dumpTools", array(parse_tool_descriptor), path, ()),
@@ -1813,9 +2066,25 @@ def parse_bash_result(value: object, path: str = "BashResult") -> BashResult:
         timed_out=optional(payload, "timedOut", decode_bool, path),
         artifact_id=optional(payload, "artifactId", decode_str, path),
         artifact_elided_bytes=optional(payload, "artifactElidedBytes", decode_int, path),
+        elided_bytes=optional(payload, "elidedBytes", decode_int, path),
+        elided_lines=optional(payload, "elidedLines", decode_int, path),
+        column_dropped_bytes=optional(payload, "columnDroppedBytes", decode_int, path),
+        column_truncated_lines=optional(payload, "columnTruncatedLines", decode_int, path),
+        column_truncated_range=optional(payload, "columnTruncatedRange", parse_line_range, path),
+        column_max=optional(payload, "columnMax", decode_int, path),
         artifact_error=optional(payload, "artifactError", decode_json_object, path),
+        minimized=optional(payload, "minimized", decode_json_object, path),
         working_dir=optional(payload, "workingDir", decode_str, path),
         images=optional(payload, "images", array(parse_image_content), path),
+        trace=optional(payload, "trace", decode_json_object, path),
+    )
+
+
+def parse_line_range(value: object, path: str = "LineRange") -> LineRange:
+    payload = expect_object(value, path)
+    return LineRange(
+        first=required(payload, "first", decode_int, path),
+        last=required(payload, "last", decode_int, path),
     )
 
 
@@ -1836,6 +2105,7 @@ def parse_compaction_result(value: object, path: str = "CompactionResult") -> Co
         short_summary=optional(payload, "shortSummary", decode_str, path),
         details=optional(payload, "details", decode_json, path),
         preserve_data=optional(payload, "preserveData", decode_json_object, path),
+        provider_replay_through_entry_id=optional(payload, "providerReplayThroughEntryId", decode_str, path),
     )
 
 
@@ -1876,6 +2146,8 @@ def parse_remove_queued_message_result(value: object, path: str = "RemoveQueuedM
     payload = expect_object(value, path)
     return RemoveQueuedMessageResult(
         removed=required(payload, "removed", decode_bool, path),
+        images=optional(payload, "images", array(parse_image_content), path),
+        images_dropped=optional(payload, "imagesDropped", decode_bool, path),
     )
 
 
@@ -1883,6 +2155,24 @@ def parse_promote_queued_message_result(value: object, path: str = "PromoteQueue
     payload = expect_object(value, path)
     return PromoteQueuedMessageResult(
         promoted=required(payload, "promoted", decode_bool, path),
+    )
+
+
+def parse_restored_queued_message(value: object, path: str = "RestoredQueuedMessage") -> RestoredQueuedMessage:
+    payload = expect_object(value, path)
+    return RestoredQueuedMessage(
+        text=required(payload, "text", decode_str, path),
+        images=optional(payload, "images", array(parse_image_content), path),
+    )
+
+
+def parse_abort_and_restore_queue_result(value: object, path: str = "AbortAndRestoreQueueResult") -> AbortAndRestoreQueueResult:
+    payload = expect_object(value, path)
+    return AbortAndRestoreQueueResult(
+        steering=required(payload, "steering", array(parse_restored_queued_message), path),
+        follow_up=required(payload, "followUp", array(parse_restored_queued_message), path),
+        images_dropped=optional(payload, "imagesDropped", decode_bool, path),
+        truncated=optional(payload, "truncated", decode_bool, path),
     )
 
 
@@ -1899,6 +2189,15 @@ def parse_branch_result(value: object, path: str = "BranchResult") -> BranchResu
     return BranchResult(
         text=required(payload, "text", decode_str, path),
         cancelled=required(payload, "cancelled", decode_bool, path),
+    )
+
+
+def parse_navigate_tree_result(value: object, path: str = "NavigateTreeResult") -> NavigateTreeResult:
+    payload = expect_object(value, path)
+    return NavigateTreeResult(
+        cancelled=required(payload, "cancelled", decode_bool, path),
+        aborted=optional(payload, "aborted", decode_bool, path),
+        editor_text=optional(payload, "editorText", decode_str, path),
     )
 
 
@@ -1938,6 +2237,7 @@ def parse_session_stats(value: object, path: str = "SessionStats") -> SessionSta
         session_file=optional(payload, "sessionFile", decode_str, path),
         credits=optional(payload, "credits", parse_session_credits, path),
         routed_models=optional(payload, "routedModels", record(decode_float), path),
+        edit_rejections=optional(payload, "editRejections", record(decode_float), path),
         context_usage=optional(payload, "contextUsage", parse_context_usage, path),
     )
 
@@ -2025,6 +2325,35 @@ def parse_subagent_messages(value: object, path: str = "SubagentMessages") -> Su
     )
 
 
+def parse_btw_history_turn(value: object, path: str = "BtwHistoryTurn") -> BtwHistoryTurn:
+    payload = expect_object(value, path)
+    return BtwHistoryTurn(
+        question=required(payload, "question", decode_str, path),
+        answer=required(payload, "answer", decode_str, path),
+        status=required(payload, "status", _decode_btw_status, path),
+        created_at=required(payload, "createdAt", decode_int, path),
+        updated_at=required(payload, "updatedAt", decode_int, path),
+        images=optional(payload, "images", array(parse_image_content), path),
+        error=optional(payload, "error", decode_str, path),
+    )
+
+
+def parse_btw_history_record(value: object, path: str = "BtwHistoryRecord") -> BtwHistoryRecord:
+    payload = expect_object(value, path)
+    return BtwHistoryRecord(
+        question=required(payload, "question", decode_str, path),
+        answer=required(payload, "answer", decode_str, path),
+        status=required(payload, "status", _decode_btw_status, path),
+        created_at=required(payload, "createdAt", decode_int, path),
+        updated_at=required(payload, "updatedAt", decode_int, path),
+        id=required(payload, "id", decode_str, path),
+        leaf_id=required(payload, "leafId", nullable(decode_str), path),
+        images=optional(payload, "images", array(parse_image_content), path),
+        error=optional(payload, "error", decode_str, path),
+        follow_ups=optional(payload, "followUps", array(parse_btw_history_turn), path),
+    )
+
+
 def parse_login_provider(value: object, path: str = "LoginProvider") -> LoginProvider:
     payload = expect_object(value, path)
     return LoginProvider(
@@ -2032,6 +2361,18 @@ def parse_login_provider(value: object, path: str = "LoginProvider") -> LoginPro
         name=required(payload, "name", decode_str, path),
         available=required(payload, "available", decode_bool, path),
         authenticated=required(payload, "authenticated", decode_bool, path),
+    )
+
+
+def parse_logout_account(value: object, path: str = "LogoutAccount") -> LogoutAccount:
+    payload = expect_object(value, path)
+    return LogoutAccount(
+        credential_id=required(payload, "credentialId", decode_int, path),
+        provider=required(payload, "provider", decode_str, path),
+        label=required(payload, "label", decode_str, path),
+        detail=required(payload, "detail", decode_str, path),
+        type=required(payload, "type", cast('Decoder[Literal["api_key", "oauth"]]', literal(frozenset({"api_key", "oauth"}))), path),
+        active=required(payload, "active", decode_bool, path),
     )
 
 
@@ -2053,6 +2394,7 @@ def parse_agent_start_event(value: object, path: str = "AgentStartEvent") -> Age
     payload = expect_object(value, path)
     required(payload, "type", cast('Decoder[Literal["agent_start"]]', literal(frozenset({"agent_start"}))), path)
     return AgentStartEvent(
+        resumed_tool_call_ids=optional(payload, "resumedToolCallIds", array(decode_str), path),
     )
 
 
@@ -2176,6 +2518,25 @@ def parse_auto_compaction_end_event(value: object, path: str = "AutoCompactionEn
         result=optional(payload, "result", parse_compaction_result, path),
         error_message=optional(payload, "errorMessage", decode_str, path),
         skipped=optional(payload, "skipped", decode_bool, path),
+    )
+
+
+def parse_manual_compaction_start_event(value: object, path: str = "ManualCompactionStartEvent") -> ManualCompactionStartEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["manual_compaction_start"]]', literal(frozenset({"manual_compaction_start"}))), path)
+    return ManualCompactionStartEvent(
+        mode=optional(payload, "mode", decode_str, path),
+    )
+
+
+def parse_manual_compaction_end_event(value: object, path: str = "ManualCompactionEndEvent") -> ManualCompactionEndEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["manual_compaction_end"]]', literal(frozenset({"manual_compaction_end"}))), path)
+    return ManualCompactionEndEvent(
+        aborted=required(payload, "aborted", decode_bool, path),
+        result=optional(payload, "result", parse_compaction_result, path),
+        skipped=optional(payload, "skipped", decode_bool, path),
+        error_message=optional(payload, "errorMessage", decode_str, path),
     )
 
 
@@ -2341,6 +2702,7 @@ def parse_queue_update_event(value: object, path: str = "QueueUpdateEvent") -> Q
     return QueueUpdateEvent(
         steering=required(payload, "steering", array(decode_str), path),
         follow_up=required(payload, "followUp", array(decode_str), path),
+        live_steered=defaulted(payload, "liveSteered", decode_int, path, 0),
     )
 
 
@@ -2363,6 +2725,7 @@ def parse_prompt_error(value: object, path: str = "PromptError") -> PromptError:
         provider=optional(payload, "provider", decode_str, path),
         model=optional(payload, "model", decode_str, path),
         http_status=optional(payload, "httpStatus", decode_int, path),
+        code=optional(payload, "code", cast('Decoder[Literal["cost_cap"]]', literal(frozenset({"cost_cap"}))), path),
     )
 
 
@@ -2501,6 +2864,51 @@ def parse_live_end_event(value: object, path: str = "LiveEndEvent") -> LiveEndEv
     )
 
 
+def parse_dictation_state_event(value: object, path: str = "DictationStateEvent") -> DictationStateEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["dictation_state"]]', literal(frozenset({"dictation_state"}))), path)
+    return DictationStateEvent(
+        capture_id=required(payload, "captureId", decode_str, path),
+        state=required(payload, "state", cast('Decoder[Literal["starting", "recording", "transcribing"]]', literal(frozenset({"starting", "recording", "transcribing"}))), path),
+    )
+
+
+def parse_dictation_transcript_event(value: object, path: str = "DictationTranscriptEvent") -> DictationTranscriptEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["dictation_transcript"]]', literal(frozenset({"dictation_transcript"}))), path)
+    return DictationTranscriptEvent(
+        capture_id=required(payload, "captureId", decode_str, path),
+        text=required(payload, "text", decode_str, path),
+    )
+
+
+def parse_dictation_end_event(value: object, path: str = "DictationEndEvent") -> DictationEndEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["dictation_end"]]', literal(frozenset({"dictation_end"}))), path)
+    return DictationEndEvent(
+        capture_id=required(payload, "captureId", decode_str, path),
+        text=required(payload, "text", decode_str, path),
+        error=optional(payload, "error", decode_str, path),
+    )
+
+
+def parse_btw_delta_event(value: object, path: str = "BtwDeltaEvent") -> BtwDeltaEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["btw_delta"]]', literal(frozenset({"btw_delta"}))), path)
+    return BtwDeltaEvent(
+        record_id=required(payload, "recordId", decode_str, path),
+        delta=required(payload, "delta", decode_str, path),
+    )
+
+
+def parse_btw_record_event(value: object, path: str = "BtwRecordEvent") -> BtwRecordEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["btw_record"]]', literal(frozenset({"btw_record"}))), path)
+    return BtwRecordEvent(
+        record=required(payload, "record", parse_btw_history_record, path),
+    )
+
+
 def parse_command_output_event(value: object, path: str = "CommandOutputEvent") -> CommandOutputEvent:
     payload = expect_object(value, path)
     required(payload, "type", cast('Decoder[Literal["command_output"]]', literal(frozenset({"command_output"}))), path)
@@ -2591,6 +2999,7 @@ def parse_input_ui_request(value: object, path: str = "InputUiRequest") -> Input
         title=required(payload, "title", decode_str, path),
         placeholder=optional(payload, "placeholder", decode_str, path),
         timeout=optional(payload, "timeout", decode_int, path),
+        secret=optional(payload, "secret", decode_bool, path),
     )
 
 
@@ -2705,6 +3114,7 @@ def parse_extension_ui_request(value: object, path: str = "ExtensionUiRequest") 
         timeout=optional(payload, "timeout", decode_int, path),
         message=optional(payload, "message", decode_str, path),
         placeholder=optional(payload, "placeholder", decode_str, path),
+        secret=optional(payload, "secret", decode_bool, path),
         prefill=optional(payload, "prefill", decode_str, path),
         prompt_style=optional(payload, "promptStyle", decode_bool, path),
         questions=optional(payload, "questions", array(parse_ask_question), path),
@@ -2761,6 +3171,33 @@ def parse_negotiate_protocol_result(value: object, path: str = "NegotiateProtoco
     )
 
 
+def parse_live_connect_result(value: object, path: str = "LiveConnectResult") -> LiveConnectResult:
+    payload = expect_object(value, path)
+    return LiveConnectResult(
+        voice=required(payload, "voice", decode_str, path),
+        sdp_answer=required(payload, "sdpAnswer", decode_str, path),
+    )
+
+
+def parse_get_session_lease_result(value: object, path: str = "GetSessionLeaseResult") -> GetSessionLeaseResult:
+    payload = expect_object(value, path)
+    return GetSessionLeaseResult(
+        held=required(payload, "held", array(decode_str), path),
+        unknown=required(payload, "unknown", array(decode_str), path),
+    )
+
+
+def parse_logout_result(value: object, path: str = "LogoutResult") -> LogoutResult:
+    payload = expect_object(value, path)
+    return LogoutResult(
+        remaining_source=optional(payload, "remainingSource", decode_str, path),
+    )
+
+
+def parse_usage_limit_state(value: object, path: str = "UsageLimitState") -> UsageLimitState:
+    return dispatch("stage", _USAGE_LIMIT_STATE_CASES)(value, path)
+
+
 def parse_rpc_agent_event(value: object, path: str = "RpcAgentEvent") -> RpcAgentEvent:
     return dispatch("type", _RPC_AGENT_EVENT_CASES)(value, path)
 
@@ -2772,6 +3209,12 @@ def parse_notification(value: object, path: str = "notification") -> RpcNotifica
     if not isinstance(tag, str) or tag not in _RPC_NOTIFICATION_CASES:
         return UnknownNotification(decode_json_object(payload, path))
     return _RPC_NOTIFICATION_CASES[tag](payload, tag)
+
+
+_USAGE_LIMIT_STATE_CASES: Final[dict[str, Decoder[UsageLimitState]]] = {
+        "low_priority": parse_usage_limit_low_priority,
+        "wrap_up": parse_usage_limit_wrap_up,
+}
 
 
 _RPC_AGENT_EVENT_CASES: Final[dict[str, Decoder[RpcAgentEvent]]] = {
@@ -2788,6 +3231,8 @@ _RPC_AGENT_EVENT_CASES: Final[dict[str, Decoder[RpcAgentEvent]]] = {
         "tool_execution_end": parse_tool_execution_end_event,
         "auto_compaction_start": parse_auto_compaction_start_event,
         "auto_compaction_end": parse_auto_compaction_end_event,
+        "manual_compaction_start": parse_manual_compaction_start_event,
+        "manual_compaction_end": parse_manual_compaction_end_event,
         "auto_retry_start": parse_auto_retry_start_event,
         "auto_retry_end": parse_auto_retry_end_event,
         "cache_warming_start": parse_cache_warming_start_event,
@@ -2823,6 +3268,11 @@ _RPC_NOTIFICATION_CASES: Final[dict[str, Decoder[RpcNotification]]] = {
         "live_levels": parse_live_levels_event,
         "live_transcript": parse_live_transcript_event,
         "live_end": parse_live_end_event,
+        "dictation_state": parse_dictation_state_event,
+        "dictation_transcript": parse_dictation_transcript_event,
+        "dictation_end": parse_dictation_end_event,
+        "btw_delta": parse_btw_delta_event,
+        "btw_record": parse_btw_record_event,
         "command_output": parse_command_output_event,
         "session_info_update": parse_session_info_update_event,
         "config_update": parse_config_update_event,
@@ -2840,6 +3290,8 @@ _RPC_NOTIFICATION_CASES: Final[dict[str, Decoder[RpcNotification]]] = {
         "tool_execution_end": parse_rpc_agent_event,
         "auto_compaction_start": parse_rpc_agent_event,
         "auto_compaction_end": parse_rpc_agent_event,
+        "manual_compaction_start": parse_rpc_agent_event,
+        "manual_compaction_end": parse_rpc_agent_event,
         "auto_retry_start": parse_rpc_agent_event,
         "auto_retry_end": parse_rpc_agent_event,
         "cache_warming_start": parse_rpc_agent_event,
@@ -2906,6 +3358,11 @@ class WireClient:
         params: dict[str, object] = {}
         self._command("abort", params)
 
+    def abort_and_restore_queue(self) -> AbortAndRestoreQueueResult:
+        """Withdraw queued user input, then abort the current run; returns the withdrawn input."""
+        params: dict[str, object] = {}
+        return parse_abort_and_restore_queue_result(self._command("abort_and_restore_queue", params), "abort_and_restore_queue")
+
     def new_session(self, parent_session: str | None = None) -> CancellationResult:
         """Start a new session."""
         params: dict[str, object] = {}
@@ -2913,10 +3370,14 @@ class WireClient:
             params["parentSession"] = parent_session
         return parse_cancellation_result(self._command("new_session", params), "new_session")
 
-    def open_session(self, session_dir: str | Path) -> OpenSessionResult:
-        """Continue the newest non-empty session in a directory, or start a fresh one there."""
+    def open_session(self, session_dir: str | Path, *, provider: str | None = None, model_id: str | None = None) -> OpenSessionResult:
+        """Continue the newest non-empty session in a directory, or start a fresh one there. Give provider and modelId together to override the saved model; otherwise an unavailable saved model fails the request."""
         params: dict[str, object] = {}
         params["sessionDir"] = str(session_dir)
+        if provider is not None:
+            params["provider"] = provider
+        if model_id is not None:
+            params["modelId"] = model_id
         return parse_open_session_result(self._command("open_session", params), "open_session")
 
     def get_state(self) -> SessionState:
@@ -2929,6 +3390,12 @@ class WireClient:
         params: dict[str, object] = {}
         params["enabled"] = enabled
         return parse_fast_mode_result(self._command("set_fast_mode", params), "set_fast_mode")
+
+    def set_slow_mode(self, enabled: bool) -> bool:
+        """Turn `/slow` on or off for the active model; returns whether it is now on."""
+        params: dict[str, object] = {}
+        params["enabled"] = enabled
+        return required(expect_object(self._command("set_slow_mode", params), "set_slow_mode"), "enabled", decode_bool, "set_slow_mode")
 
     def goal(self, op: GoalOp, *, objective: str | None = None, token_budget: int | None = None) -> GoalResult:
         """Read or change goal mode with the lifecycle of the interactive `/goal` command."""
@@ -3013,6 +3480,16 @@ class WireClient:
             params["instructions"] = instructions
         return required(expect_object(self._command("live_start", params), "live_start"), "voice", decode_str, "live_start")
 
+    def live_connect(self, sdp_offer: str, *, voice: str | None = None, instructions: str | None = None) -> LiveConnectResult:
+        """Start a live voice session whose audio runs on a caller-owned WebRTC peer: send its SDP offer, apply the returned answer."""
+        params: dict[str, object] = {}
+        params["sdpOffer"] = sdp_offer
+        if voice is not None:
+            params["voice"] = voice
+        if instructions is not None:
+            params["instructions"] = instructions
+        return parse_live_connect_result(self._command("live_connect", params), "live_connect")
+
     def live_stop(self) -> None:
         """Stop the live voice session, if any."""
         params: dict[str, object] = {}
@@ -3024,6 +3501,17 @@ class WireClient:
         if muted is not None:
             params["muted"] = muted
         return required(expect_object(self._command("live_mute", params), "live_mute"), "muted", decode_bool, "live_mute")
+
+    def dictation_start(self, capture_id: str) -> None:
+        """Start draft-only speech-to-text; resolves once the microphone is recording."""
+        params: dict[str, object] = {}
+        params["captureId"] = capture_id
+        self._command("dictation_start", params, timeout=600)
+
+    def dictation_stop(self) -> str:
+        """Stop and flush draft-only dictation, returning the accumulated text."""
+        params: dict[str, object] = {}
+        return required(expect_object(self._command("dictation_stop", params, timeout=600), "dictation_stop"), "text", decode_str, "dictation_stop")
 
     def set_model(self, provider: str, model_id: str) -> ModelInfo:
         """Select a model by provider and id."""
@@ -3124,6 +3612,12 @@ class WireClient:
         params: dict[str, object] = {}
         return parse_session_stats(self._command("get_session_stats", params), "get_session_stats")
 
+    def get_session_lease(self, session_ids: Sequence[str]) -> GetSessionLeaseResult:
+        """Which of these sessions a running process (this one included) owns, probed without taking ownership. Ids in neither list are free; `unknown` could not be probed."""
+        params: dict[str, object] = {}
+        params["sessionIds"] = list(session_ids)
+        return parse_get_session_lease_result(self._command("get_session_lease", params), "get_session_lease")
+
     def export_html(self, output_path: str | Path | None = None) -> Path:
         """Export the session as HTML; returns the written path."""
         params: dict[str, object] = {}
@@ -3131,10 +3625,14 @@ class WireClient:
             params["outputPath"] = str(output_path)
         return Path(required(expect_object(self._command("export_html", params), "export_html"), "path", decode_str, "export_html"))
 
-    def switch_session(self, session_path: str | Path) -> CancellationResult:
-        """Switch to another session file."""
+    def switch_session(self, session_path: str | Path, *, provider: str | None = None, model_id: str | None = None) -> CancellationResult:
+        """Switch to another session file. Give provider and modelId together to override the saved model; otherwise an unavailable saved model fails the request and keeps the current session."""
         params: dict[str, object] = {}
         params["sessionPath"] = str(session_path)
+        if provider is not None:
+            params["provider"] = provider
+        if model_id is not None:
+            params["modelId"] = model_id
         return parse_cancellation_result(self._command("switch_session", params), "switch_session")
 
     def branch(self, entry_id: str) -> BranchResult:
@@ -3149,6 +3647,29 @@ class WireClient:
         if entry_id is not None:
             params["entryId"] = entry_id
         return parse_cancellation_result(self._command("fork", params), "fork")
+
+    def navigate_tree(self, entry_id: str, *, summarize: bool | None = None, custom_instructions: str | None = None) -> NavigateTreeResult:
+        """Move the session's leaf to an entry in the same file, optionally summarizing the branch it leaves; refused while busy."""
+        params: dict[str, object] = {}
+        params["entryId"] = entry_id
+        if summarize is not None:
+            params["summarize"] = summarize
+        if custom_instructions is not None:
+            params["customInstructions"] = custom_instructions
+        return parse_navigate_tree_result(self._command("navigate_tree", params, timeout=600), "navigate_tree")
+
+    def abort_branch_summary(self) -> None:
+        """Stop a running `navigate_tree` branch summary; the navigation is cancelled."""
+        params: dict[str, object] = {}
+        self._command("abort_branch_summary", params)
+
+    def set_label(self, entry_id: str, *, label: str | None = None) -> None:
+        """Set or clear (omit `label`) an entry's label."""
+        params: dict[str, object] = {}
+        params["entryId"] = entry_id
+        if label is not None:
+            params["label"] = label
+        self._command("set_label", params)
 
     def get_branch_messages(self) -> tuple[BranchMessage, ...]:
         """List user messages that can be branched from."""
@@ -3194,6 +3715,19 @@ class WireClient:
         params["providerId"] = provider_id
         return required(expect_object(self._command("login", params, timeout=600), "login"), "providerId", decode_str, "login")
 
+    def get_logout_accounts(self, provider_id: str) -> tuple[LogoutAccount, ...]:
+        """List the stored credentials `logout` can remove for a provider, active first."""
+        params: dict[str, object] = {}
+        params["providerId"] = provider_id
+        return required(expect_object(self._command("get_logout_accounts", params), "get_logout_accounts"), "accounts", array(parse_logout_account), "get_logout_accounts")
+
+    def logout(self, provider_id: str, credential_id: int) -> LogoutResult:
+        """Remove one stored credential; fails when it is no longer stored. `remainingSource` names auth that still applies."""
+        params: dict[str, object] = {}
+        params["providerId"] = provider_id
+        params["credentialId"] = credential_id
+        return parse_logout_result(self._command("logout", params), "logout")
+
     def predict_word(self, text: str, cursor: int) -> str | None:
         """Ghost-text suffix for the prose word ending at `cursor` (a UTF-16 offset); null when none applies."""
         params: dict[str, object] = {}
@@ -3209,6 +3743,26 @@ class WireClient:
         params["suggestion"] = suggestion
         params["accepted"] = accepted
         self._command("predict_word_feedback", params)
+
+    def btw(self, question: str, *, record_id: str | None = None) -> BtwHistoryRecord:
+        """Ask a side question, or a follow-up in topic `recordId`; returns the record once it is running."""
+        params: dict[str, object] = {}
+        params["question"] = question
+        if record_id is not None:
+            params["recordId"] = record_id
+        return required(expect_object(self._command("btw", params), "btw"), "record", parse_btw_history_record, "btw")
+
+    def btw_cancel(self, record_id: str | None = None) -> bool:
+        """Cancel the running side question (only topic `recordId` when given); false when none matches."""
+        params: dict[str, object] = {}
+        if record_id is not None:
+            params["recordId"] = record_id
+        return required(expect_object(self._command("btw_cancel", params), "btw_cancel"), "cancelled", decode_bool, "btw_cancel")
+
+    def get_btw_history(self) -> tuple[BtwHistoryRecord, ...]:
+        """List the session's side-question records, newest first."""
+        params: dict[str, object] = {}
+        return required(expect_object(self._command("get_btw_history", params), "get_btw_history"), "records", array(parse_btw_history_record), "get_btw_history")
 
     def on_ready(self, listener: Callable[[ReadyEvent], None]) -> Callable[[], None]:
         """Subscribe to `ready`: First frame after startup; transport fields are absent on servers without protocol v2."""
@@ -3261,6 +3815,26 @@ class WireClient:
     def on_live_end(self, listener: Callable[[LiveEndEvent], None]) -> Callable[[], None]:
         """Subscribe to `live_end`: Sent exactly once when a live session ends; `error` carries the failure cause."""
         return self._listen("live_end", listener)
+
+    def on_dictation_state(self, listener: Callable[[DictationStateEvent], None]) -> Callable[[], None]:
+        """Subscribe to `dictation_state`: State of one draft-only microphone capture."""
+        return self._listen("dictation_state", listener)
+
+    def on_dictation_transcript(self, listener: Callable[[DictationTranscriptEvent], None]) -> Callable[[], None]:
+        """Subscribe to `dictation_transcript`: Full accumulated draft preview; replaces the previous preview for this capture."""
+        return self._listen("dictation_transcript", listener)
+
+    def on_dictation_end(self, listener: Callable[[DictationEndEvent], None]) -> Callable[[], None]:
+        """Subscribe to `dictation_end`: Exactly one terminal frame per capture; text is the accumulated result."""
+        return self._listen("dictation_end", listener)
+
+    def on_btw_delta(self, listener: Callable[[BtwDeltaEvent], None]) -> Callable[[], None]:
+        """Subscribe to `btw_delta`: Text appended to the running side question's latest answer."""
+        return self._listen("btw_delta", listener)
+
+    def on_btw_record(self, listener: Callable[[BtwRecordEvent], None]) -> Callable[[], None]:
+        """Subscribe to `btw_record`: Full side-question record on every lifecycle change (started, complete, cancelled, error); the last one per id wins."""
+        return self._listen("btw_record", listener)
 
     def on_command_output(self, listener: Callable[[CommandOutputEvent], None]) -> Callable[[], None]:
         """Subscribe to `command_output`: Output of a builtin slash command."""
@@ -3330,6 +3904,14 @@ class WireClient:
         """Subscribe to `auto_compaction_end` frames."""
         return self._listen("auto_compaction_end", listener)
 
+    def on_manual_compaction_start(self, listener: Callable[[ManualCompactionStartEvent], None]) -> Callable[[], None]:
+        """Subscribe to `manual_compaction_start`: A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted."""
+        return self._listen("manual_compaction_start", listener)
+
+    def on_manual_compaction_end(self, listener: Callable[[ManualCompactionEndEvent], None]) -> Callable[[], None]:
+        """Subscribe to `manual_compaction_end`: Outcome of the compaction announced by the matching `manual_compaction_start`."""
+        return self._listen("manual_compaction_end", listener)
+
     def on_auto_retry_start(self, listener: Callable[[AutoRetryStartEvent], None]) -> Callable[[], None]:
         """Subscribe to `auto_retry_start` frames."""
         return self._listen("auto_retry_start", listener)
@@ -3371,7 +3953,7 @@ class WireClient:
         return self._listen("advisor_yielded", listener)
 
     def on_ttsr_triggered(self, listener: Callable[[TtsrTriggeredEvent], None]) -> Callable[[], None]:
-        """Subscribe to `ttsr_triggered` frames."""
+        """Subscribe to `ttsr_triggered`: Rule injection: a TTSR rule matched the stream and its text was injected. Each rule carries at least `name`, `path`, and `content`."""
         return self._listen("ttsr_triggered", listener)
 
     def on_todo_reminder(self, listener: Callable[[TodoReminderEvent], None]) -> Callable[[], None]:
@@ -3404,6 +3986,7 @@ class WireClient:
 
 
 __all__ = [
+    "AbortAndRestoreQueueResult",
     "AdvisorCostChangedEvent",
     "AdvisorYieldedEvent",
     "AgentEndEvent",
@@ -3445,6 +4028,11 @@ __all__ = [
     "BranchMessage",
     "BranchResult",
     "BranchSummaryMessage",
+    "BtwDeltaEvent",
+    "BtwHistoryRecord",
+    "BtwHistoryTurn",
+    "BtwRecordEvent",
+    "BtwStatus",
     "CacheWarmingEndEvent",
     "CacheWarmingMode",
     "CacheWarmingOutcome",
@@ -3462,6 +4050,9 @@ __all__ = [
     "ContextUsage",
     "CustomMessage",
     "DeveloperMessage",
+    "DictationEndEvent",
+    "DictationStateEvent",
+    "DictationTranscriptEvent",
     "EditorUiRequest",
     "Effort",
     "ExtensionError",
@@ -3471,6 +4062,7 @@ __all__ = [
     "FastModeResult",
     "FileMentionItem",
     "FileMentionMessage",
+    "GetSessionLeaseResult",
     "Goal",
     "GoalModeState",
     "GoalOp",
@@ -3485,6 +4077,8 @@ __all__ = [
     "InputUiRequest",
     "InterruptMode",
     "IrcMessageEvent",
+    "LineRange",
+    "LiveConnectResult",
     "LiveEndEvent",
     "LiveLevelsEvent",
     "LivePhase",
@@ -3492,6 +4086,10 @@ __all__ = [
     "LiveRole",
     "LiveTranscriptEvent",
     "LoginProvider",
+    "LogoutAccount",
+    "LogoutResult",
+    "ManualCompactionEndEvent",
+    "ManualCompactionStartEvent",
     "MessageContent",
     "MessageEndEvent",
     "MessageStartEvent",
@@ -3502,6 +4100,7 @@ __all__ = [
     "ModelCost",
     "ModelCycleResult",
     "ModelInfo",
+    "NavigateTreeResult",
     "NegotiateProtocolResult",
     "NoticeEvent",
     "NotifyType",
@@ -3521,6 +4120,7 @@ __all__ = [
     "ReadyEvent",
     "RedactedThinkingContent",
     "RemoveQueuedMessageResult",
+    "RestoredQueuedMessage",
     "RetryFallbackAppliedEvent",
     "RetryFallbackSucceededEvent",
     "RpcAgentEvent",
@@ -3542,6 +4142,7 @@ __all__ = [
     "SlashCommandInput",
     "SlashCommandSource",
     "SlashSubcommand",
+    "SlowModeScope",
     "StopReason",
     "StreamingBehavior",
     "SubagentEvent",
@@ -3580,9 +4181,13 @@ __all__ = [
     "TurnStartEvent",
     "Usage",
     "UsageCost",
+    "UsageLimitLowPriority",
+    "UsageLimitState",
+    "UsageLimitWrapUp",
     "UserContent",
     "UserMessage",
     "WidgetPlacement",
+    "parse_abort_and_restore_queue_result",
     "parse_advisor_cost_changed_event",
     "parse_advisor_yielded_event",
     "parse_agent_end_event",
@@ -3620,6 +4225,10 @@ __all__ = [
     "parse_branch_message",
     "parse_branch_result",
     "parse_branch_summary_message",
+    "parse_btw_delta_event",
+    "parse_btw_history_record",
+    "parse_btw_history_turn",
+    "parse_btw_record_event",
     "parse_cache_warming_end_event",
     "parse_cache_warming_start_event",
     "parse_cancel_ui_request",
@@ -3633,6 +4242,9 @@ __all__ = [
     "parse_context_usage",
     "parse_custom_message",
     "parse_developer_message",
+    "parse_dictation_end_event",
+    "parse_dictation_state_event",
+    "parse_dictation_transcript_event",
     "parse_editor_ui_request",
     "parse_extension_error",
     "parse_extension_ui_request",
@@ -3640,6 +4252,7 @@ __all__ = [
     "parse_fast_mode_result",
     "parse_file_mention_item",
     "parse_file_mention_message",
+    "parse_get_session_lease_result",
     "parse_goal",
     "parse_goal_mode_state",
     "parse_goal_result",
@@ -3651,11 +4264,17 @@ __all__ = [
     "parse_image_content",
     "parse_input_ui_request",
     "parse_irc_message_event",
+    "parse_line_range",
+    "parse_live_connect_result",
     "parse_live_end_event",
     "parse_live_levels_event",
     "parse_live_phase_event",
     "parse_live_transcript_event",
     "parse_login_provider",
+    "parse_logout_account",
+    "parse_logout_result",
+    "parse_manual_compaction_end_event",
+    "parse_manual_compaction_start_event",
     "parse_message_end_event",
     "parse_message_start_event",
     "parse_message_update_event",
@@ -3664,6 +4283,7 @@ __all__ = [
     "parse_model_cost",
     "parse_model_cycle_result",
     "parse_model_info",
+    "parse_navigate_tree_result",
     "parse_negotiate_protocol_result",
     "parse_notice_event",
     "parse_notification",
@@ -3680,6 +4300,7 @@ __all__ = [
     "parse_ready_event",
     "parse_redacted_thinking_content",
     "parse_remove_queued_message_result",
+    "parse_restored_queued_message",
     "parse_retry_fallback_applied_event",
     "parse_retry_fallback_succeeded_event",
     "parse_rpc_agent_event",
@@ -3729,6 +4350,9 @@ __all__ = [
     "parse_turn_start_event",
     "parse_usage",
     "parse_usage_cost",
+    "parse_usage_limit_low_priority",
+    "parse_usage_limit_state",
+    "parse_usage_limit_wrap_up",
     "parse_user_content",
     "parse_user_message",
 ]

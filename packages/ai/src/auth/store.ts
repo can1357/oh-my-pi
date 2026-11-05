@@ -98,6 +98,12 @@ export interface CredentialCacheStore {
 export interface CredentialBlockStore {
 	/** Non-expired block for one (credential, providerKey, scope) key, or undefined. */
 	getCredentialBlock(credentialId: number, providerKey: string, blockScope: string): number | undefined;
+	/**
+	 * Non-expired blocks for one credential and providerKey, keyed by block
+	 * scope (`""` is unscoped), in one read. Optional: selectors fall back to
+	 * {@link CredentialBlockStore.getCredentialBlock} per scope when absent.
+	 */
+	getCredentialBlockScopes?(credentialId: number, providerKey: string): ReadonlyMap<string, number>;
 	/** Earliest time a shared-store block should be eligible for live-usage reconciliation. */
 	getCredentialBlockReconcileAfter(credentialId: number, providerKey: string, blockScope: string): number | undefined;
 	/** Upsert with MAX semantics: keep the later blockedUntilMs on conflict. */
@@ -118,6 +124,20 @@ export interface CredentialRefreshLeaseStore {
 	getCredentialRefreshLeaseExpiresAt(credentialId: number): number | undefined;
 	releaseCredentialRefreshLease(credentialId: number, owner: string): void;
 	renewCredentialRefreshLease(credentialId: number, owner: string, expiresAtMs: number): boolean;
+	/** The lease row as stored, expired or not; `undefined` when no lease row exists. */
+	getCredentialRefreshLeaseHolder?(credentialId: number): CredentialRefreshLeaseHolder | undefined;
+	/**
+	 * Give a lease this owner took back to the holder it replaced, with that
+	 * holder's own expiry, so the holder can still renew it and save the token
+	 * it may have exchanged. Returns false when `owner` no longer holds it.
+	 */
+	handBackCredentialRefreshLease?(credentialId: number, owner: string, holder: CredentialRefreshLeaseHolder): boolean;
+}
+
+/** Owner and expiry of a stored refresh lease row. */
+export interface CredentialRefreshLeaseHolder {
+	owner: string;
+	expiresAtMs: number;
 }
 
 /** Usage history and client-observed request accounting. */
@@ -146,8 +166,8 @@ export interface UsageLedgerStore {
 
 /** Broker-delegated OAuth refresh and usage-report operations. */
 export interface CredentialUpstream {
-	/** Optional hook to notify the underlying store that usage report cache is stale. */
-	invalidateUsageCache(signal?: AbortSignal): Promise<void>;
+	/** Optional hook to notify the underlying store that usage reports (one provider's, when given) are stale. */
+	invalidateUsageCache(provider?: string, signal?: AbortSignal): Promise<void>;
 	/**
 	 * Optional store-supplied OAuth refresh. When present, `AuthStorage` uses
 	 * it before the per-provider local refresh path. `RemoteAuthCredentialStore`
@@ -185,7 +205,7 @@ export interface CredentialUpstream {
 	 *
 	 * `signal` propagates the agent's cancel down to the broker fetch.
 	 */
-	fetchUsageReports(signal?: AbortSignal): Promise<UsageReport[] | null>;
+	fetchUsageReports(signal?: AbortSignal, provider?: Provider): Promise<UsageReport[] | null>;
 	/**
 	 * Optional store-supplied per-credential usage report lookup. When present,
 	 * `AuthStorage` consults this before its own per-credential upstream fetch

@@ -18,15 +18,17 @@
  * owner-only permissions. Endpoints die with the host process, so a crash
  * leaves at most stale metadata that the next list operation prunes best-effort.
  *
- * Transport follows the launch daemon broker conventions: node `net` servers,
- * newline-delimited JSON envelopes, per-request bearer authentication, and
- * bounded buffers. Guests never publish; this registry is host-only.
+ * Transport follows the launch daemon broker conventions: the native
+ * `IpcServer`/`IpcConnection` line framing, newline-delimited JSON envelopes,
+ * per-request bearer authentication, and bounded frames. Guests never publish;
+ * this registry is host-only.
  */
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
-import * as net from "node:net";
 import * as path from "node:path";
-import { getBaseConfigRoot, isEnoent } from "@oh-my-pi/pi-utils";
+import { type } from "@oh-my-pi/omptype";
+import { IpcConnection, IpcServer, ipcEndpoint } from "@oh-my-pi/pi-natives";
+import { getBaseConfigRoot, isEnoent, isFsError } from "@oh-my-pi/pi-utils";
 
 /** Discovery metadata / IPC protocol version. Mixed omp versions fail safely. */
 export const COLLAB_REGISTRY_VERSION = 1;
@@ -133,11 +135,6 @@ export interface CollabPublishOptions extends CollabRegistryOptions {
 	 * stale entry and its successor never share artifacts.
 	 */
 	instanceId?: string;
-	/**
-	 * Base for the short socket directory used when the canonical socket path
-	 * would overflow `sun_path`. Defaults to `/tmp`; tests point it elsewhere.
-	 */
-	socketFallbackBase?: string;
 }
 
 export interface CollabListOptions extends CollabRegistryOptions {
@@ -177,6 +174,18 @@ interface DiscoveryMetadata {
 }
 
 const INSTANCE_ID_PATTERN = /^[a-z0-9-]{8,64}$/;
+const InstanceId = type(INSTANCE_ID_PATTERN);
+const Access = type("'view' | 'control'");
+
+const DiscoveryMetadataShape = type({
+	"+": "delete",
+	version: "number",
+	instanceId: InstanceId,
+	pid: "number.integer > 0",
+	endpoint: "string > 0",
+	createdAt: "number",
+	token: "string > 0",
+});
 
 function parseDiscoveryMetadata(text: string): DiscoveryMetadata | null {
 	let raw: unknown;
@@ -185,22 +194,8 @@ function parseDiscoveryMetadata(text: string): DiscoveryMetadata | null {
 	} catch {
 		return null;
 	}
-	if (typeof raw !== "object" || raw === null) return null;
-	const meta = raw as Record<string, unknown>;
-	if (typeof meta.version !== "number") return null;
-	if (typeof meta.instanceId !== "string" || !INSTANCE_ID_PATTERN.test(meta.instanceId)) return null;
-	if (typeof meta.pid !== "number" || !Number.isInteger(meta.pid) || meta.pid <= 0) return null;
-	if (typeof meta.endpoint !== "string" || meta.endpoint.length === 0) return null;
-	if (typeof meta.createdAt !== "number") return null;
-	if (typeof meta.token !== "string" || meta.token.length === 0) return null;
-	return {
-		version: meta.version,
-		instanceId: meta.instanceId,
-		pid: meta.pid,
-		endpoint: meta.endpoint,
-		createdAt: meta.createdAt,
-		token: meta.token,
-	};
+	const meta = DiscoveryMetadataShape(raw);
+	return meta instanceof type.errors ? null : meta;
 }
 
 function tokenMatches(expected: string, presented: unknown): boolean {
@@ -211,52 +206,32 @@ function tokenMatches(expected: string, presented: unknown): boolean {
 	return crypto.timingSafeEqual(a, b);
 }
 
-function isAccess(value: unknown): value is CollabAccess {
-	return value === "view" || value === "control";
-}
-
-function parseSnapshot(raw: unknown): CollabHostSnapshot | null {
-	if (typeof raw !== "object" || raw === null) return null;
-	const host = raw as Record<string, unknown>;
-	if (typeof host.instanceId !== "string" || !INSTANCE_ID_PATTERN.test(host.instanceId)) return null;
-	if (typeof host.generation !== "number" || !Number.isInteger(host.generation) || host.generation < 1) return null;
-	if (typeof host.pid !== "number" || !Number.isInteger(host.pid)) return null;
-	if (typeof host.sessionId !== "string") return null;
-	if (host.sessionName !== null && typeof host.sessionName !== "string") return null;
-	if (typeof host.cwd !== "string") return null;
-	let model: CollabHostSnapshot["model"] = null;
-	if (host.model !== null) {
-		if (typeof host.model !== "object" || host.model === null) return null;
-		const { provider, id } = host.model as Record<string, unknown>;
-		if (typeof provider !== "string" || typeof id !== "string") return null;
-		model = { provider, id };
-	}
-	if (typeof host.startedAt !== "number") return null;
-	if (typeof host.participants !== "number") return null;
-	if (typeof host.relayConnected !== "boolean") return null;
-	if (typeof host.inputRequired !== "boolean") return null;
+const SnapshotShape = type({
+	"+": "delete",
+	instanceId: InstanceId,
+	generation: "number.integer >= 1",
+	pid: "number.integer",
+	sessionId: "string",
+	sessionName: "string | null",
+	cwd: "string",
+	model: type({ "+": "delete", provider: "string", id: "string" }).or("null"),
+	startedAt: "number",
+	participants: "number",
+	relayConnected: "boolean",
+	inputRequired: "boolean",
 	// `busy` was added after the protocol version shipped, and the version is a
 	// hard gate on both sides: bumping it would make every host invisible to a
 	// differently versioned lister on the same machine. So an older host's
 	// snapshot simply omits the field, and a missing one reads as unknown
 	// (`null`) rather than rejecting an otherwise healthy host.
-	if (host.busy !== undefined && host.busy !== null && typeof host.busy !== "boolean") return null;
-	if (!isAccess(host.access)) return null;
-	return {
-		instanceId: host.instanceId,
-		generation: host.generation,
-		pid: host.pid,
-		sessionId: host.sessionId,
-		sessionName: host.sessionName,
-		cwd: host.cwd,
-		model,
-		startedAt: host.startedAt,
-		participants: host.participants,
-		relayConnected: host.relayConnected,
-		inputRequired: host.inputRequired,
-		busy: typeof host.busy === "boolean" ? host.busy : null,
-		access: host.access,
-	};
+	"busy?": "boolean | null",
+	access: Access,
+});
+
+function parseSnapshot(raw: unknown): CollabHostSnapshot | null {
+	const snapshot = SnapshotShape(raw);
+	if (snapshot instanceof type.errors) return null;
+	return { ...snapshot, busy: snapshot.busy ?? null };
 }
 
 function boundField(value: string): string {
@@ -277,29 +252,25 @@ function boundSnapshot(snapshot: CollabHostSnapshot): CollabHostSnapshot {
 }
 
 /** One request per connection: authenticate, dispatch the op, respond, close. */
-function handleConnection(socket: net.Socket, token: string, source: CollabHostRegistrySource): void {
-	let buffer = "";
+function handleConnection(
+	connection: IpcConnection,
+	token: string,
+	source: CollabHostRegistrySource,
+	onClose: () => void,
+): void {
 	let handled = false;
 	const respond = (payload: object): void => {
 		handled = true;
-		socket.end(`${JSON.stringify(payload)}\n`);
+		connection.send(JSON.stringify(payload));
+		connection.end();
 	};
 	const fail = (error: string): void => respond({ ok: false, v: COLLAB_REGISTRY_VERSION, error });
-	socket.setEncoding("utf8");
-	socket.on("error", () => socket.destroy());
-	socket.on("data", chunk => {
+	// Oversized requests never arrive: the `maxFrameBytes` cap closes the connection natively.
+	connection.start(line => {
 		if (handled) return;
-		buffer += chunk;
-		if (Buffer.byteLength(buffer, "utf8") > MAX_REQUEST_BYTES) {
-			socket.destroy();
-			return;
-		}
-		const newline = buffer.indexOf("\n");
-		if (newline < 0) return;
-		const line = buffer.slice(0, newline).trim();
 		let request: unknown;
 		try {
-			request = JSON.parse(line);
+			request = JSON.parse(line.trim());
 		} catch {
 			fail("malformed_request");
 			return;
@@ -333,7 +304,7 @@ function handleConnection(socket: net.Socket, token: string, source: CollabHostR
 			fail("invalid_operation");
 			return;
 		}
-		if (!isAccess(access)) {
+		if (!Access.allows(access)) {
 			fail("invalid_access");
 			return;
 		}
@@ -359,7 +330,7 @@ function handleConnection(socket: net.Socket, token: string, source: CollabHostR
 			return;
 		}
 		respond({ ok: true, v: COLLAB_REGISTRY_VERSION, url });
-	});
+	}, onClose);
 }
 
 /**
@@ -393,38 +364,24 @@ async function ensurePrivateDir(dir: string): Promise<void> {
 	if (stat && (stat.mode & 0o077) !== 0) await fs.promises.chmod(dir, 0o700);
 }
 
-/** `sun_path` capacity: 104 bytes on macOS, 108 elsewhere; the kernel rejects paths at or past it. */
-const SUN_PATH_LIMIT = process.platform === "darwin" ? 104 : 108;
-const DEFAULT_SOCKET_FALLBACK_BASE = "/tmp";
-
 /**
- * Short owner-private socket directory for registries whose canonical path
- * would overflow `sun_path`: the relocation the SSH control sockets use
- * (#9070), keyed by uid and the canonical registry directory.
+ * Unix files an endpoint leaves on disk: the socket and the native listener's
+ * `<socket>.bind.lock`. Endpoint names are unique per publication, so no other
+ * binder can contend for that lock and unlinking it is race-free.
  */
-function socketFallbackDir(dir: string, base: string): string {
-	const key = new Bun.CryptoHasher("sha256")
-		.update(String(process.getuid?.() ?? 0))
-		.update("\0")
-		.update(dir)
-		.digest("hex")
-		.slice(0, 20);
-	return path.join(base, `omp-collab-${key}`);
+function endpointFiles(endpoint: string): string[] {
+	return process.platform === "win32" ? [] : [endpoint, `${endpoint}.bind.lock`];
 }
 
-/**
- * Where this publication's Unix socket lives. The canonical location is next
- * to the metadata, but a deep config root (long home directory, nested
- * `PI_CONFIG_DIR`) can push that past `sun_path`, and a host that cannot bind
- * would silently stay absent from `omp collab list`. Listers never guess the
- * relocated path; the metadata records the endpoint.
- */
-async function resolveSocketEndpoint(dir: string, entryId: string, fallbackBase: string): Promise<string> {
-	const canonical = path.join(dir, `${entryId}.sock`);
-	if (Buffer.byteLength(canonical) < SUN_PATH_LIMIT) return canonical;
-	const shortDir = socketFallbackDir(dir, fallbackBase);
-	await ensurePrivateDir(shortDir);
-	return path.join(shortDir, `${entryId}.sock`);
+/** Best-effort synchronous unlink; a survivor is pruned by the next list. */
+function removeFilesSync(files: string[]): void {
+	for (const file of files) {
+		try {
+			fs.rmSync(file, { force: true });
+		} catch {
+			// Best-effort.
+		}
+	}
 }
 
 /**
@@ -451,24 +408,21 @@ export async function publishCollabHost(
 	// lister pruning the stale entry can never remove the live successor's.
 	const entryId = crypto.randomBytes(8).toString("hex");
 	const token = crypto.randomBytes(32).toString("hex");
-	const endpoint =
-		process.platform === "win32"
-			? `\\\\.\\pipe\\omp-collab-${entryId}`
-			: await resolveSocketEndpoint(dir, entryId, options?.socketFallbackBase ?? DEFAULT_SOCKET_FALLBACK_BASE);
+	// `<dir>/<entryId>.sock` on Unix (natively relocated when it would overflow
+	// `sun_path`); listers never guess it, the metadata records the endpoint.
+	const endpoint = ipcEndpoint(dir, entryId);
 	const metaPath = path.join(dir, `${entryId}.json`);
 
-	const liveSockets = new Set<net.Socket>();
-	const server = net.createServer(socket => {
-		liveSockets.add(socket);
-		socket.once("close", () => liveSockets.delete(socket));
-		handleConnection(socket, token, source);
-	});
-	const listening = Promise.withResolvers<void>();
-	server.once("error", err => listening.reject(err));
-	server.listen(endpoint, () => listening.resolve());
+	const liveConnections = new Set<IpcConnection>();
+	const server = await IpcServer.listen(
+		endpoint,
+		{ framing: "lines", maxFrameBytes: MAX_REQUEST_BYTES },
+		connection => {
+			liveConnections.add(connection);
+			handleConnection(connection, token, source, () => liveConnections.delete(connection));
+		},
+	);
 	try {
-		await listening.promise;
-		if (process.platform !== "win32") await fs.promises.chmod(endpoint, 0o600);
 		const meta: DiscoveryMetadata = {
 			version: COLLAB_REGISTRY_VERSION,
 			instanceId,
@@ -496,21 +450,16 @@ export async function publishCollabHost(
 			throw err;
 		}
 	} catch (err) {
-		server.close();
-		if (process.platform !== "win32") fs.rmSync(endpoint, { force: true });
+		await server.close();
+		removeFilesSync(endpointFiles(endpoint));
 		throw err;
 	}
 
-	const removeArtifactsSync = (): void => {
-		try {
-			fs.rmSync(metaPath, { force: true });
-			if (process.platform !== "win32") fs.rmSync(endpoint, { force: true });
-		} catch {
-			// Best-effort; a survivor is pruned by the next list.
-		}
-	};
 	// Normal process shutdown without an explicit stop still withdraws the host.
-	process.once("exit", removeArtifactsSync);
+	// The exit hook is synchronous, so it unlinks the socket itself instead of
+	// awaiting `server.close()`.
+	const removeArtifactsOnExit = (): void => removeFilesSync([metaPath, ...endpointFiles(endpoint)]);
+	process.once("exit", removeArtifactsOnExit);
 
 	let closed = false;
 	return {
@@ -518,13 +467,13 @@ export async function publishCollabHost(
 		async close(): Promise<void> {
 			if (closed) return;
 			closed = true;
-			process.off("exit", removeArtifactsSync);
-			const done = Promise.withResolvers<void>();
-			server.close(() => done.resolve());
-			// Sever any lingering clients so close() cannot hang on an open socket.
-			for (const socket of liveSockets) socket.destroy();
-			removeArtifactsSync();
-			await done.promise;
+			process.off("exit", removeArtifactsOnExit);
+			// Sever any lingering clients so no request is answered after withdrawal.
+			for (const connection of liveConnections) connection.destroy();
+			removeFilesSync([metaPath]);
+			// Stops accepting and unlinks the socket file; the bind lock is ours to remove.
+			await server.close();
+			removeFilesSync(endpointFiles(endpoint));
 		},
 	};
 }
@@ -534,36 +483,20 @@ type QueryResult<T> = { status: "ok"; value: T } | { status: "dead" } | { status
 /** Query one endpoint: connect, authenticate, send one request, read one bounded response line. */
 function query(meta: DiscoveryMetadata, request: object, timeoutMs: number): Promise<QueryResult<unknown>> {
 	const { promise, resolve } = Promise.withResolvers<QueryResult<unknown>>();
-	let buffer = "";
-	const socket = net.createConnection({ path: meta.endpoint });
-	const timer = setTimeout(() => finish({ status: "skip" }), timeoutMs);
+	let connection: IpcConnection | undefined;
+	let settled = false;
 	const finish = (result: QueryResult<unknown>): void => {
+		if (settled) return;
+		settled = true;
 		clearTimeout(timer);
-		socket.destroy();
+		connection?.destroy();
 		resolve(result);
 	};
-	socket.setEncoding("utf8");
-	socket.once("error", err => {
-		// Endpoints die with their host process: a refused or missing socket
-		// means the host is gone. Any other error (EMFILE, EACCES, EAGAIN, …)
-		// says nothing about liveness and must not prune a live host.
-		const code = (err as NodeJS.ErrnoException).code;
-		finish({ status: code === "ENOENT" || code === "ECONNREFUSED" ? "dead" : "skip" });
-	});
-	socket.once("connect", () => {
-		socket.write(`${JSON.stringify({ v: COLLAB_REGISTRY_VERSION, token: meta.token, ...request })}\n`);
-	});
-	socket.on("data", chunk => {
-		buffer += chunk;
-		if (Buffer.byteLength(buffer, "utf8") > MAX_RESPONSE_BYTES) {
-			finish({ status: "skip" });
-			return;
-		}
-		const newline = buffer.indexOf("\n");
-		if (newline < 0) return;
+	const timer = setTimeout(() => finish({ status: "skip" }), timeoutMs);
+	const onLine = (line: string): void => {
 		let response: unknown;
 		try {
-			response = JSON.parse(buffer.slice(0, newline));
+			response = JSON.parse(line);
 		} catch {
 			finish({ status: "skip" });
 			return;
@@ -580,8 +513,26 @@ function query(meta: DiscoveryMetadata, request: object, timeoutMs: number): Pro
 			return;
 		}
 		finish({ status: "ok", value: response });
-	});
-	socket.once("close", () => finish({ status: "skip" }));
+	};
+	// An oversized response (past `maxFrameBytes`) closes the connection without a frame: skip.
+	IpcConnection.connect(meta.endpoint, { framing: "lines", timeoutMs, maxFrameBytes: MAX_RESPONSE_BYTES }).then(
+		conn => {
+			if (settled) {
+				conn.destroy();
+				return;
+			}
+			connection = conn;
+			conn.start(onLine, () => finish({ status: "skip" }));
+			conn.send(JSON.stringify({ v: COLLAB_REGISTRY_VERSION, token: meta.token, ...request }));
+		},
+		(err: unknown) => {
+			// Endpoints die with their host process: a refused or missing socket
+			// means the host is gone. Any other error (EMFILE, EACCES, ETIMEDOUT, …)
+			// says nothing about liveness and must not prune a live host.
+			const code = isFsError(err) ? err.code : undefined;
+			finish({ status: code === "ENOENT" || code === "ECONNREFUSED" ? "dead" : "skip" });
+		},
+	);
 	return promise;
 }
 
@@ -610,13 +561,15 @@ async function pruneEntry(dir: string, name: string, meta: DiscoveryMetadata | n
 	try {
 		await fs.promises.rm(path.join(dir, name), { force: true });
 		// Only unlink sockets this registry could have created: beside the
-		// metadata, or in its own relocated socket directory.
+		// metadata, or at the exact relocated endpoint this entry's publication
+		// derives (under the shared `/tmp/omp-<euid>/`, never another socket there).
 		const ownsEndpoint =
 			meta !== null &&
 			process.platform !== "win32" &&
-			(meta.endpoint.startsWith(dir + path.sep) ||
-				meta.endpoint.startsWith(socketFallbackDir(dir, DEFAULT_SOCKET_FALLBACK_BASE) + path.sep));
-		if (ownsEndpoint) await fs.promises.rm(meta.endpoint, { force: true });
+			(meta.endpoint.startsWith(dir + path.sep) || meta.endpoint === ipcEndpoint(dir, path.basename(name, ".json")));
+		if (ownsEndpoint) {
+			for (const file of endpointFiles(meta.endpoint)) await fs.promises.rm(file, { force: true });
+		}
 	} catch {
 		// Best-effort cleanup only (a missing file means someone else already pruned it).
 	}

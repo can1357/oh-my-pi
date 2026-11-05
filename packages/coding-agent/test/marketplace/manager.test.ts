@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
+import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -17,8 +18,9 @@ import * as piUtils from "@oh-my-pi/pi-utils";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 // Minimal marketplace fixture, built once into a temp dir (see beforeAll). It carries only
-// what these tests assert — one plugin entry plus a plugin.json for the version-fallback path —
-// so each install's recursive cache copy stays a single file rather than the full shared fixture.
+// what these tests assert — one plugin entry plus a plugin.json whose version takes precedence
+// over the entry's — so each install's recursive cache copy stays a single file rather than the
+// full shared fixture.
 let FIXTURE_DIR: string;
 
 function buildMinimalFixture(): string {
@@ -43,7 +45,7 @@ function buildMinimalFixture(): string {
 			],
 		}),
 	);
-	// Consulted only when the catalog version is stripped (the version-fallback test).
+	// Takes precedence over the catalog entry version (Claude Code's manifest precedence).
 	fs.writeFileSync(
 		path.join(pluginDir, ".claude-plugin", "plugin.json"),
 		JSON.stringify({ name: "hello-plugin", version: "1.0.0" }),
@@ -115,6 +117,16 @@ function createTestContext(): TestContext {
 	});
 
 	return { manager, tmpDir, clearCount: () => count };
+}
+
+/** Shares `ctx`'s user-level paths but has no project registry, like running omp outside the project. */
+function createOutsideProjectManager(tmpDir: string): MarketplaceManager {
+	return new MarketplaceManager({
+		marketplacesRegistryPath: path.join(tmpDir, "marketplaces.json"),
+		installedRegistryPath: path.join(tmpDir, "installed_plugins.json"),
+		marketplacesCacheDir: path.join(tmpDir, "cache", "marketplaces"),
+		pluginsCacheDir: path.join(tmpDir, "cache", "plugins"),
+	});
 }
 
 function mockPluginManagerPaths(root: string) {
@@ -735,7 +747,12 @@ describe("MarketplaceManager", () => {
 			await manager.addMarketplace(FIXTURE_DIR);
 			await manager.installPlugin("hello-plugin", "test-marketplace");
 
-			const roots = await listOmpExtensionRoots({ cwd: tmpHome, home: tmpHome, repoRoot: null });
+			const roots = await listOmpExtensionRoots({
+				cwd: tmpHome,
+				home: tmpHome,
+				repoRoot: null,
+				extensionRoots: { explicit: [], configured: [], configuredLevel: "user", mode: "merge" },
+			});
 			expect(roots.map(root => root.name)).toEqual([]);
 		} finally {
 			fs.rmSync(tmpHome, { recursive: true, force: true });
@@ -1177,6 +1194,19 @@ describe("MarketplaceManager", () => {
 		expect(fs.existsSync(userEntry.installPath)).toBe(true);
 	});
 
+	it("user-scope uninstall outside the project keeps the cache dir a project install links to", async () => {
+		await ctx.manager.addMarketplace(FIXTURE_DIR);
+		await ctx.manager.installPlugin("hello-plugin", "test-marketplace", { scope: "user" });
+		const projectEntry = await ctx.manager.installPlugin("hello-plugin", "test-marketplace", { scope: "project" });
+
+		await createOutsideProjectManager(ctx.tmpDir).uninstallPlugin("hello-plugin@test-marketplace", "user");
+		expect(fs.existsSync(projectEntry.installPath)).toBe(true);
+
+		// Once the project drops it too, nothing references the cache dir and it is collected.
+		await ctx.manager.uninstallPlugin("hello-plugin@test-marketplace", "project");
+		expect(fs.existsSync(projectEntry.installPath)).toBe(false);
+	});
+
 	it("listInstalledPlugins marks user entry as shadowed when project entry exists for same ID", async () => {
 		await ctx.manager.addMarketplace(FIXTURE_DIR);
 		await ctx.manager.installPlugin("hello-plugin", "test-marketplace", { scope: "user" });
@@ -1191,19 +1221,39 @@ describe("MarketplaceManager", () => {
 	// ── auto-update ──────────────────────────────────────────────────────────
 
 	describe("auto-update", () => {
+		// Writable per-test copy of the shared fixture: these tests mutate plugin manifests.
+		let mktDir: string;
+		beforeEach(() => {
+			mktDir = path.join(ctx.tmpDir, "mkt");
+			fs.cpSync(FIXTURE_DIR, mktDir, { recursive: true });
+		});
+
 		// Read catalogPath from the (single) registered marketplace.
 		async function getCatalogPath(): Promise<string> {
 			const list = await ctx.manager.listMarketplaces();
 			return list[0].catalogPath;
 		}
 
-		// Overwrite the version field on the first plugin entry in the cached catalog.
-		async function bumpCatalogVersion(newVersion: string): Promise<void> {
+		// Set (or remove, when undefined) the `version` field of a JSON file.
+		async function setJsonVersion(file: string, version: string | undefined): Promise<void> {
+			const json = (await Bun.file(file).json()) as Record<string, unknown>;
+			if (version === undefined) delete json.version;
+			else json.version = version;
+			await Bun.write(file, `${JSON.stringify(json, null, 2)}\n`);
+		}
+
+		// Overwrite (or remove) the version field on the first plugin entry in the cached catalog.
+		async function setCatalogEntryVersion(version: string | undefined): Promise<void> {
 			const catalogPath = await getCatalogPath();
-			const content = await Bun.file(catalogPath).text();
-			const catalog = JSON.parse(content) as { plugins: Array<Record<string, unknown>> };
-			catalog.plugins[0] = { ...catalog.plugins[0], version: newVersion };
+			const catalog = (await Bun.file(catalogPath).json()) as { plugins: Array<Record<string, unknown>> };
+			if (version === undefined) delete catalog.plugins[0].version;
+			else catalog.plugins[0].version = version;
 			await Bun.write(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`);
+		}
+
+		// Overwrite (or remove) the version in the marketplace's hello-plugin/.claude-plugin/plugin.json.
+		async function setPluginJsonVersion(version: string | undefined): Promise<void> {
+			await setJsonVersion(path.join(mktDir, "plugins", "hello-plugin", ".claude-plugin", "plugin.json"), version);
 		}
 
 		// Directly patch updatedAt in the marketplaces registry file.
@@ -1217,24 +1267,44 @@ describe("MarketplaceManager", () => {
 			fs.writeFileSync(regPath, JSON.stringify(reg, null, 2));
 		}
 
-		it("checkForUpdates returns outdated plugins", async () => {
-			await ctx.manager.addMarketplace(FIXTURE_DIR);
+		it("checkForUpdates reports a plugin.json version bump when the catalog entry has no version", async () => {
+			await ctx.manager.addMarketplace(mktDir);
+			await setCatalogEntryVersion(undefined);
 			await ctx.manager.installPlugin("hello-plugin", "test-marketplace");
-			await bumpCatalogVersion("2.0.0");
+			await setPluginJsonVersion("2.0.0");
 
 			const updates = await ctx.manager.checkForUpdates();
 
-			expect(updates).toHaveLength(1);
-			expect(updates[0]).toEqual({
-				pluginId: "hello-plugin@test-marketplace",
-				scope: "user",
-				from: "1.0.0",
-				to: "2.0.0",
-			});
+			expect(updates).toEqual([
+				{ pluginId: "hello-plugin@test-marketplace", scope: "user", from: "1.0.0", to: "2.0.0" },
+			]);
+		});
+
+		it("plugin.json version overrides the catalog entry version for install and update checks", async () => {
+			await ctx.manager.addMarketplace(mktDir);
+			await setCatalogEntryVersion("9.9.9");
+
+			const entry = await ctx.manager.installPlugin("hello-plugin", "test-marketplace");
+
+			expect(entry.version).toBe("1.0.0");
+			expect(await ctx.manager.checkForUpdates()).toEqual([]);
+		});
+
+		it("checkForUpdates falls back to the catalog entry version when plugin.json has none", async () => {
+			await ctx.manager.addMarketplace(mktDir);
+			await setPluginJsonVersion(undefined);
+			await ctx.manager.installPlugin("hello-plugin", "test-marketplace");
+			await setCatalogEntryVersion("2.0.0");
+
+			const updates = await ctx.manager.checkForUpdates();
+
+			expect(updates).toEqual([
+				{ pluginId: "hello-plugin@test-marketplace", scope: "user", from: "1.0.0", to: "2.0.0" },
+			]);
 		});
 
 		it("checkForUpdates returns empty when up to date", async () => {
-			await ctx.manager.addMarketplace(FIXTURE_DIR);
+			await ctx.manager.addMarketplace(mktDir);
 			await ctx.manager.installPlugin("hello-plugin", "test-marketplace");
 			// Catalog and installed version are both 1.0.0 — nothing to report.
 
@@ -1242,23 +1312,20 @@ describe("MarketplaceManager", () => {
 			expect(updates).toEqual([]);
 		});
 
-		it("checkForUpdates skips plugins with no catalog version", async () => {
-			await ctx.manager.addMarketplace(FIXTURE_DIR);
+		it("checkForUpdates skips plugins whose catalog side declares no version", async () => {
+			await ctx.manager.addMarketplace(mktDir);
 			await ctx.manager.installPlugin("hello-plugin", "test-marketplace");
 
-			// Strip the version field from the cached catalog entry.
-			const catalogPath = await getCatalogPath();
-			const content = await Bun.file(catalogPath).text();
-			const catalog = JSON.parse(content) as { plugins: Array<Record<string, unknown>> };
-			delete catalog.plugins[0].version;
-			await Bun.write(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`);
+			await setCatalogEntryVersion(undefined);
+			await setPluginJsonVersion(undefined);
+			await setJsonVersion(path.join(mktDir, "plugins", "hello-plugin", "package.json"), undefined);
 
 			const updates = await ctx.manager.checkForUpdates();
 			expect(updates).toEqual([]);
 		});
 
 		it("checkForUpdates handles missing catalog gracefully", async () => {
-			await ctx.manager.addMarketplace(FIXTURE_DIR);
+			await ctx.manager.addMarketplace(mktDir);
 			await ctx.manager.installPlugin("hello-plugin", "test-marketplace");
 
 			// Delete the cached catalog file; checkForUpdates must skip rather than throw.
@@ -1270,9 +1337,9 @@ describe("MarketplaceManager", () => {
 		});
 
 		it("upgradePlugin updates the installed version", async () => {
-			await ctx.manager.addMarketplace(FIXTURE_DIR);
+			await ctx.manager.addMarketplace(mktDir);
 			await ctx.manager.installPlugin("hello-plugin", "test-marketplace");
-			await bumpCatalogVersion("2.0.0");
+			await setPluginJsonVersion("2.0.0");
 
 			const entry = await ctx.manager.upgradePlugin("hello-plugin@test-marketplace");
 			expect(entry.version).toBe("2.0.0");
@@ -1283,22 +1350,65 @@ describe("MarketplaceManager", () => {
 			expect(installed[0].entries[0].version).toBe("2.0.0");
 		});
 
+		it("upgradePlugin names the new version in the registry before it removes the old version's files", async () => {
+			await ctx.manager.addMarketplace(mktDir);
+			const first = await ctx.manager.installPlugin("hello-plugin", "test-marketplace");
+			await setPluginJsonVersion("2.0.0");
+			// A running session that reads the registry while the old directory goes must still find the plugin.
+			const registeredAtRemoval: string[][] = [];
+			const rm = fsp.rm;
+			const rmSpy = spyOn(fsp, "rm").mockImplementation(async (target, options) => {
+				if (target === first.installPath) {
+					const reg = await readInstalledPluginsRegistry(path.join(ctx.tmpDir, "installed_plugins.json"));
+					registeredAtRemoval.push(
+						(reg.plugins["hello-plugin@test-marketplace"] ?? []).map(entry => entry.version),
+					);
+				}
+				return rm(target, options);
+			});
+			try {
+				await ctx.manager.upgradePlugin("hello-plugin@test-marketplace");
+			} finally {
+				rmSpy.mockRestore();
+			}
+
+			expect(registeredAtRemoval).toEqual([["2.0.0"]]);
+			expect(fs.existsSync(first.installPath)).toBe(false);
+		});
+
 		it("upgradePlugin rejects invalid plugin ID", async () => {
 			await expect(ctx.manager.upgradePlugin("no-at-sign")).rejects.toThrow(/Invalid plugin ID/);
 		});
 
 		it("upgradePlugin preserves the scope of the existing install", async () => {
-			await ctx.manager.addMarketplace(FIXTURE_DIR);
+			await ctx.manager.addMarketplace(mktDir);
 			await ctx.manager.installPlugin("hello-plugin", "test-marketplace", { scope: "project" });
-			await bumpCatalogVersion("2.0.0");
+			await setPluginJsonVersion("2.0.0");
 
 			const entry = await ctx.manager.upgradePlugin("hello-plugin@test-marketplace");
 			expect(entry.scope).toBe("project");
 			expect(entry.version).toBe("2.0.0");
 		});
 
+		it("user-scope upgrade outside the project keeps the old cache dir a project install links to", async () => {
+			await ctx.manager.addMarketplace(mktDir);
+			await ctx.manager.installPlugin("hello-plugin", "test-marketplace", { scope: "user" });
+			const projectEntry = await ctx.manager.installPlugin("hello-plugin", "test-marketplace", {
+				scope: "project",
+			});
+			await setPluginJsonVersion("2.0.0");
+
+			const upgraded = await createOutsideProjectManager(ctx.tmpDir).upgradePlugin(
+				"hello-plugin@test-marketplace",
+				"user",
+			);
+
+			expect(upgraded.installPath).not.toBe(projectEntry.installPath);
+			expect(fs.existsSync(projectEntry.installPath)).toBe(true);
+		});
+
 		it("upgradeAllPlugins upgrades outdated plugins and returns results", async () => {
-			await ctx.manager.addMarketplace(FIXTURE_DIR);
+			await ctx.manager.addMarketplace(mktDir);
 			await ctx.manager.installPlugin("hello-plugin", "test-marketplace");
 
 			// Inject a second plugin that has no catalog entry — checkForUpdates will skip it,
@@ -1314,8 +1424,8 @@ describe("MarketplaceManager", () => {
 			];
 			fs.writeFileSync(instRegPath, JSON.stringify(reg, null, 2));
 
-			// Only hello-plugin gets a version bump in the catalog.
-			await bumpCatalogVersion("2.0.0");
+			// Only hello-plugin gets a version bump.
+			await setPluginJsonVersion("2.0.0");
 
 			const results = await ctx.manager.upgradeAllPlugins();
 
@@ -1329,7 +1439,7 @@ describe("MarketplaceManager", () => {
 		});
 
 		it("upgradeAllPlugins returns empty array when all plugins are up to date", async () => {
-			await ctx.manager.addMarketplace(FIXTURE_DIR);
+			await ctx.manager.addMarketplace(mktDir);
 			await ctx.manager.installPlugin("hello-plugin", "test-marketplace");
 			// No catalog modification — installed and catalog both at 1.0.0.
 
@@ -1337,10 +1447,27 @@ describe("MarketplaceManager", () => {
 			expect(results).toEqual([]);
 		});
 
+		it("reaps abandoned clone checkouts but leaves active clones and marketplace caches intact", async () => {
+			const cacheDir = path.join(ctx.tmpDir, "cache", "marketplaces");
+			const abandoned = path.join(cacheDir, `.tmp-clone-${Date.now() - 31 * 60 * 1000}`);
+			const active = path.join(cacheDir, `.tmp-clone-${Date.now()}-inflight`);
+			const marketplace = path.join(cacheDir, "test-marketplace");
+			for (const dir of [abandoned, active, marketplace]) {
+				fs.mkdirSync(dir, { recursive: true });
+				fs.writeFileSync(path.join(dir, "catalog"), "preserve if active");
+			}
+
+			await ctx.manager.refreshStaleMarketplaces();
+
+			expect(fs.existsSync(abandoned)).toBe(false);
+			expect(fs.readFileSync(path.join(active, "catalog"), "utf8")).toBe("preserve if active");
+			expect(fs.readFileSync(path.join(marketplace, "catalog"), "utf8")).toBe("preserve if active");
+		});
+
 		it("refreshStaleMarketplaces skips fresh marketplaces", async () => {
-			await ctx.manager.addMarketplace(FIXTURE_DIR);
+			await ctx.manager.addMarketplace(mktDir);
 			// updatedAt is just now — not past the 24-hour threshold.
-			await bumpCatalogVersion("2.0.0");
+			await setCatalogEntryVersion("2.0.0");
 
 			await ctx.manager.refreshStaleMarketplaces();
 
@@ -1352,9 +1479,9 @@ describe("MarketplaceManager", () => {
 		});
 
 		it("refreshStaleMarketplaces re-fetches stale marketplaces", async () => {
-			await ctx.manager.addMarketplace(FIXTURE_DIR);
+			await ctx.manager.addMarketplace(mktDir);
 			// Tamper with catalog to simulate drift from the real source.
-			await bumpCatalogVersion("2.0.0");
+			await setCatalogEntryVersion("2.0.0");
 
 			// Force updatedAt to 25 hours ago — past the 24-hour staleness threshold.
 			const staleDate = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
@@ -1362,7 +1489,7 @@ describe("MarketplaceManager", () => {
 
 			await ctx.manager.refreshStaleMarketplaces();
 
-			// updateMarketplace re-fetches from FIXTURE_DIR which has version 1.0.0.
+			// updateMarketplace re-fetches from mktDir which has version 1.0.0.
 			const catalogPath = await getCatalogPath();
 			const content = await Bun.file(catalogPath).text();
 			const catalog = JSON.parse(content) as { plugins: Array<{ version?: string }> };
@@ -1370,10 +1497,10 @@ describe("MarketplaceManager", () => {
 		});
 
 		it("upgradePluginAcrossScopes upgrades in all scopes, returns both entries", async () => {
-			await ctx.manager.addMarketplace(FIXTURE_DIR);
+			await ctx.manager.addMarketplace(mktDir);
 			await ctx.manager.installPlugin("hello-plugin", "test-marketplace", { scope: "user" });
 			await ctx.manager.installPlugin("hello-plugin", "test-marketplace", { scope: "project" });
-			await bumpCatalogVersion("2.0.0");
+			await setPluginJsonVersion("2.0.0");
 
 			const entries = await ctx.manager.upgradePluginAcrossScopes("hello-plugin@test-marketplace");
 

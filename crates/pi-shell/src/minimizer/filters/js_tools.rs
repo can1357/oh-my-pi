@@ -3,6 +3,8 @@
 //! Covers command output that is not already handled by the package-manager,
 //! test-runner, or lint filters.
 
+use std::fmt::NumBuffer;
+
 use crate::minimizer::{MinimizerCtx, MinimizerOutput, primitives};
 
 const SUPPORTED_TOOLS: &[&str] = &["next", "prettier", "prisma"];
@@ -84,7 +86,7 @@ fn filter_next(input: &str, exit_code: i32) -> String {
 		}
 
 		if is_error_or_warning(trimmed) || is_next_summary(trimmed) {
-			push_line(&mut out, trimmed);
+			primitives::push_line(&mut out, trimmed.trim_end());
 			kept_any = true;
 			continue;
 		}
@@ -93,17 +95,17 @@ fn filter_next(input: &str, exit_code: i32) -> String {
 		}
 		if is_next_route_header(trimmed) {
 			in_route_table = true;
-			push_line(&mut out, trimmed);
+			primitives::push_line(&mut out, trimmed.trim_end());
 			kept_any = true;
 			continue;
 		}
 		if in_route_table && is_next_route_or_legend(trimmed) {
-			push_line(&mut out, trimmed);
+			primitives::push_line(&mut out, trimmed.trim_end());
 			kept_any = true;
 			continue;
 		}
 		if exit_code != 0 && !is_spinner_frame(trimmed) {
-			push_line(&mut out, trimmed);
+			primitives::push_line(&mut out, trimmed.trim_end());
 			kept_any = true;
 		}
 	}
@@ -216,11 +218,11 @@ fn filter_prettier(input: &str, exit_code: i32) -> String {
 	if !errors.is_empty() {
 		out.push_str("Prettier errors\n");
 		for error in errors.iter().take(20) {
-			push_line(&mut out, error);
+			primitives::push_line(&mut out, error.trim_end());
 		}
 		if errors.len() > 20 {
 			out.push_str("[…");
-			out.push_str(&(errors.len() - 20).to_string());
+			out.push_str((errors.len() - 20).format_into(&mut NumBuffer::new()));
 			out.push_str(" errors elided…]\n");
 		}
 		return out;
@@ -234,7 +236,7 @@ fn filter_prettier(input: &str, exit_code: i32) -> String {
 			return "Prettier: no formatting issues\n".to_string();
 		}
 		out.push_str("Prettier: ");
-		out.push_str(&files.len().to_string());
+		out.push_str(files.len().format_into(&mut NumBuffer::new()));
 		out.push_str(" file(s) need formatting\n");
 		push_file_list(&mut out, &files, 30);
 		return out;
@@ -242,7 +244,7 @@ fn filter_prettier(input: &str, exit_code: i32) -> String {
 
 	if saw_write || !files.is_empty() {
 		out.push_str("Prettier: ");
-		out.push_str(&files.len().to_string());
+		out.push_str(files.len().format_into(&mut NumBuffer::new()));
 		out.push_str(" file(s) written\n");
 		push_file_list(&mut out, &files, 30);
 		return out;
@@ -267,15 +269,22 @@ fn looks_like_file(line: &str) -> bool {
 		path.rsplit('.').next(),
 		Some(
 			"js"
-				| "jsx" | "ts"
-				| "tsx" | "json"
+				| "jsx"
+				| "ts"
+				| "tsx"
+				| "json"
 				| "jsonc"
-				| "md" | "mdx"
-				| "css" | "scss"
-				| "sass" | "html"
-				| "yaml" | "yml"
+				| "md"
+				| "mdx"
+				| "css"
+				| "scss"
+				| "sass"
+				| "html"
+				| "yaml"
+				| "yml"
 				| "graphql"
-				| "vue" | "svelte"
+				| "vue"
+				| "svelte"
 		)
 	)
 }
@@ -294,16 +303,16 @@ fn filter_prisma(input: &str, exit_code: i32) -> String {
 		}
 		if is_prisma_schema_change_header(trimmed) {
 			in_schema_changes = true;
-			push_line(&mut out, trimmed);
+			primitives::push_line(&mut out, trimmed.trim_end());
 			continue;
 		}
 		if in_schema_changes && is_prisma_change_line(trimmed) {
-			push_line(&mut out, trimmed);
+			primitives::push_line(&mut out, trimmed.trim_end());
 			continue;
 		}
 		if should_keep_prisma_line(trimmed, exit_code) {
 			in_schema_changes = false;
-			push_line(&mut out, trimmed);
+			primitives::push_line(&mut out, trimmed.trim_end());
 		}
 	}
 
@@ -388,18 +397,13 @@ fn is_spinner_frame(line: &str) -> bool {
 
 fn push_file_list(out: &mut String, files: &[String], limit: usize) {
 	for file in files.iter().take(limit) {
-		push_line(out, file);
+		primitives::push_line(out, file.trim_end());
 	}
 	if files.len() > limit {
 		out.push_str("[…");
-		out.push_str(&(files.len() - limit).to_string());
+		out.push_str((files.len() - limit).format_into(&mut NumBuffer::new()));
 		out.push_str(" files elided…]\n");
 	}
-}
-
-fn push_line(out: &mut String, line: &str) {
-	out.push_str(line.trim_end());
-	out.push('\n');
 }
 
 #[cfg(test)]

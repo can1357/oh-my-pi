@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { createConnection, type Socket } from "node:net";
+import * as os from "node:os";
+import { IpcConnection, ipcEndpoint } from "@oh-my-pi/pi-natives";
 import { type Component, Input, Text, TUI, type TuiDebugTreeNode } from "../src";
 import { VirtualTerminal } from "./virtual-terminal";
 
@@ -13,35 +14,35 @@ interface DebugReply {
 }
 
 class DebugClient {
-	readonly #socket: Socket;
-	#buffer = "";
+	readonly #connection: IpcConnection;
 	#pending: PromiseWithResolvers<DebugReply> | undefined;
 
-	constructor(socket: Socket) {
-		this.#socket = socket;
-		socket.setEncoding("utf8");
-		socket.on("data", chunk => {
-			this.#buffer += chunk;
-			const newline = this.#buffer.indexOf("\n");
-			if (newline === -1) return;
-			const line = this.#buffer.slice(0, newline);
-			this.#buffer = this.#buffer.slice(newline + 1);
-			const pending = this.#pending;
-			this.#pending = undefined;
-			pending?.resolve(JSON.parse(line) as DebugReply);
-		});
+	constructor(connection: IpcConnection) {
+		this.#connection = connection;
+		connection.start(
+			frame => {
+				const pending = this.#pending;
+				this.#pending = undefined;
+				pending?.resolve(JSON.parse(frame) as DebugReply);
+			},
+			reason => {
+				const pending = this.#pending;
+				this.#pending = undefined;
+				pending?.reject(new Error(`debug socket closed: ${reason ?? "eof"}`));
+			},
+		);
 	}
 
 	async request(request: Record<string, unknown>): Promise<DebugReply> {
 		if (this.#pending !== undefined) throw new Error("debug client request already pending");
 		const pending = Promise.withResolvers<DebugReply>();
 		this.#pending = pending;
-		this.#socket.write(`${JSON.stringify(request)}\n`);
+		this.#connection.send(JSON.stringify(request));
 		return pending.promise;
 	}
 
 	close(): void {
-		this.#socket.destroy();
+		this.#connection.destroy();
 	}
 }
 
@@ -51,17 +52,13 @@ async function nextEventLoopTurn(): Promise<void> {
 	await turn.promise;
 }
 
+/** The TUI starts its debug listener asynchronously; dial until it binds. */
 async function connectDebugSocket(path: string): Promise<DebugClient> {
 	for (let attempt = 0; attempt < 100; attempt++) {
-		const connected = Promise.withResolvers<Socket>();
-		const socket = createConnection(path);
-		socket.once("connect", () => connected.resolve(socket));
-		socket.once("error", error => connected.reject(error));
 		try {
-			return new DebugClient(await connected.promise);
+			return new DebugClient(await IpcConnection.connect(path, { framing: "lines", timeoutMs: 1000 }));
 		} catch {
-			socket.destroy();
-			await nextEventLoopTurn();
+			await Bun.sleep(10);
 		}
 	}
 	throw new Error(`debug socket did not become available: ${path}`);
@@ -88,7 +85,7 @@ async function paintedText(client: DebugClient): Promise<DebugReply> {
 
 test("OMP_TUI_DEBUG drives and inspects a live TUI", async () => {
 	const previousDebugPath = process.env.OMP_TUI_DEBUG;
-	const socketPath = `/tmp/pi-tui-${process.pid}-${Bun.randomUUIDv7().slice(0, 8)}.sock`;
+	const socketPath = ipcEndpoint(os.tmpdir(), `pi-tui-${process.pid}-${Bun.randomUUIDv7().slice(0, 8)}`);
 	process.env.OMP_TUI_DEBUG = socketPath;
 	const terminal = new VirtualTerminal(50, 12);
 	const tui = new TUI(terminal);

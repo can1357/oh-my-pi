@@ -151,6 +151,11 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 		suppress: suppressServer,
 	});
 
+	// Discovery warnings (e.g. a Claude plugin manifest timeout below Claude
+	// Code's 1000ms minimum) must reach the user, not vanish with the
+	// CapabilityResult.
+	for (const warning of result.warnings) logger.warn(warning);
+
 	// Convert to legacy format and preserve source metadata.
 	let configs: Record<string, MCPServerConfig> = {};
 	let sources: Record<string, SourceMeta> = {};

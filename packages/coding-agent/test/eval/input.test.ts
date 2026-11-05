@@ -1,10 +1,15 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, mock } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../src/config/settings";
+import { CursorExecHandlers } from "../../src/cursor";
 import { prepareEvalSource } from "../../src/eval/input";
+import { disposeVmContextsByOwner } from "../../src/eval/js/context-manager";
 import type { ToolSession } from "../../src/tools";
+import { EvalTool, type EvalToolParams } from "../../src/tools/eval";
 
 function session(cwd: string): ToolSession {
 	return {
@@ -15,6 +20,77 @@ function session(cwd: string): ToolSession {
 		getSessionSpawns: () => null,
 	};
 }
+
+async function cursorEval(args: Record<string, unknown>): Promise<{ isError: boolean; text: string }> {
+	using tmp = TempDir.createSync("@eval-input-");
+	const ownerId = `eval-input-${crypto.randomUUID()}`;
+	const context: ToolSession = {
+		...session(tmp.path()),
+		settings: Settings.isolated({ "eval.autoBackground.enabled": false }),
+		getEvalSessionId: () => ownerId,
+		getEvalKernelOwnerId: () => ownerId,
+	};
+	const bridge = new CursorExecHandlers({
+		cwd: tmp.path(),
+		tools: new Map([["eval", new EvalTool(context) as AgentTool]]),
+	});
+	try {
+		const result = await bridge.mcp({
+			name: "eval",
+			providerIdentifier: "pi-agent",
+			toolName: "eval",
+			toolCallId: crypto.randomUUID(),
+			args,
+			rawArgs: {},
+		});
+		return {
+			isError: result.isError === true,
+			text: result.content
+				.filter(part => part.type === "text")
+				.map(part => part.text)
+				.join("\n"),
+		};
+	} finally {
+		await disposeVmContextsByOwner(ownerId);
+	}
+}
+
+describe("eval argument validation", () => {
+	it("refuses a Python language alias from Cursor instead of running Python as JavaScript", async () => {
+		const result = await cursorEval({
+			language: "python",
+			code: 'import time\ntime.sleep(60)\nprint("WAIT_COMPLETE")',
+			timeout: 120,
+		});
+		expect(result.isError).toBe(true);
+		expect(result.text).toContain('Validation failed for tool "eval"');
+		expect(result.text).toContain("language");
+		expect(result.text).toContain('"py"');
+		expect(result.text).toContain('"js"');
+	});
+
+	it("reports missing code in a Cursor cells-shaped call as an input error", async () => {
+		const result = await cursorEval({ cells: [{ language: "py", code: "print(1)" }], timeout: 120 });
+		expect(result.isError).toBe(true);
+		expect(result.text).toContain('Validation failed for tool "eval"');
+		expect(result.text).toContain("code");
+	});
+
+	it("refuses invalid input before invoking a proxy executor", async () => {
+		const proxyExecutor = mock(async () => ({ content: [], details: undefined }));
+		const tool = new EvalTool(null, { proxyExecutor });
+		await expect(
+			tool.execute("invalid-proxy", { language: "ruby", code: "puts 1" } as unknown as EvalToolParams),
+		).rejects.toBeInstanceOf(ToolError);
+		expect(proxyExecutor).not.toHaveBeenCalled();
+	});
+
+	it("still executes canonical JavaScript input through Cursor", async () => {
+		const result = await cursorEval({ language: "js", code: 'console.log("VALID_EVAL")' });
+		expect(result.isError).toBe(false);
+		expect(result.text).toContain("VALID_EVAL");
+	});
+});
 
 describe("eval percent commands", () => {
 	it("re-reads quoted script paths on each explicit load", async () => {

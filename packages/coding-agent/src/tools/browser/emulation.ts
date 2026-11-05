@@ -1,5 +1,7 @@
+import { untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { Device, Frame, NetworkConditions, Page, Permission } from "puppeteer-core";
+import { pressKey } from "./interactions";
 import { applyViewport } from "./launch";
 
 /** Viewport dimensions accepted by runtime emulation. */
@@ -237,29 +239,19 @@ export class BrowserEmulationController {
 	}
 
 	/** Copy the page's current selection using the platform keyboard shortcut. */
-	async clipboardCopy(): Promise<ClipboardActionResult> {
+	async clipboardCopy(signal?: AbortSignal): Promise<ClipboardActionResult> {
 		this.#clipboardShim = undefined;
-		await this.#grantPermissions(["clipboard-read", "clipboard-write"]);
+		await untilAborted(signal, () => this.#grantPermissions(["clipboard-read", "clipboard-write"]));
 		const modifier = process.platform === "darwin" ? "Meta" : "Control";
-		await this.#page.keyboard.down(modifier);
-		try {
-			await this.#page.keyboard.press("c");
-		} finally {
-			await this.#page.keyboard.up(modifier);
-		}
+		await pressKey(this.#page, `${modifier}+c`, undefined, signal);
 		return { source: "page" };
 	}
 
 	/** Paste the page clipboard into the focused control using the platform keyboard shortcut. */
-	async clipboardPaste(): Promise<ClipboardActionResult> {
-		await this.#grantPermissions(["clipboard-read", "clipboard-write"]);
+	async clipboardPaste(signal?: AbortSignal): Promise<ClipboardActionResult> {
+		await untilAborted(signal, () => this.#grantPermissions(["clipboard-read", "clipboard-write"]));
 		const modifier = process.platform === "darwin" ? "Meta" : "Control";
-		await this.#page.keyboard.down(modifier);
-		try {
-			await this.#page.keyboard.press("v");
-		} finally {
-			await this.#page.keyboard.up(modifier);
-		}
+		await pressKey(this.#page, `${modifier}+v`, undefined, signal);
 		return { source: "page" };
 	}
 

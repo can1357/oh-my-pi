@@ -15,11 +15,10 @@ use std::{
 	time::Instant,
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use jiff::{Timestamp, fmt::strtime, tz::TimeZone};
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Utility, format_usage, matches_parser};
 
 const OPT_RELATIVE: &str = "relative";
 const OPT_INCREMENTAL: &str = "incremental";
@@ -136,8 +135,11 @@ fn timestamp_lines(matches: &ArgMatches, host: &mut Host) -> io::Result<i32> {
 		return Ok(130);
 	}
 	let cancel = host.cancel_flag();
+	// Line-buffered on the live pipes `ts` usually feeds, so each stamped
+	// line leaves as one write as soon as it is complete; created before the
+	// reader, as it method-borrows `host`.
+	let mut out = host.stdout_writer();
 	let mut reader = BufReader::new(&mut host.stdin);
-	let out = &mut host.stdout;
 	let start_wall = Timestamp::now();
 	let start_mono = Instant::now();
 	let mut last_wall = start_wall;
@@ -158,7 +160,7 @@ fn timestamp_lines(matches: &ArgMatches, host: &mut Host) -> io::Result<i32> {
 
 		match mode {
 			Mode::Relative => {
-				write_relative_line(out, content, Timestamp::now(), &tz)?;
+				write_relative_line(&mut out, content, Timestamp::now(), &tz)?;
 			},
 			Mode::Absolute => {
 				let zoned = Timestamp::now().to_zoned(tz.clone());
@@ -188,9 +190,8 @@ fn timestamp_lines(matches: &ArgMatches, host: &mut Host) -> io::Result<i32> {
 		if had_newline {
 			out.write_all(b"\n")?;
 		}
-		// `ts` is commonly used on live pipes; make each line visible promptly.
-		out.flush()?;
 	}
+	out.flush()?;
 	Ok(0)
 }
 
@@ -275,11 +276,10 @@ fn parse_leading_timestamp(line: &[u8], year: i16, tz: &TimeZone) -> Option<(usi
 		}
 	}
 
-	if line.len() < SYSLOG_LEN || (line.len() > SYSLOG_LEN && !line[SYSLOG_LEN].is_ascii_whitespace())
-	{
+	let (&(mut prefix), rest) = line.split_first_chunk::<SYSLOG_LEN>()?;
+	if rest.first().is_some_and(|byte| !byte.is_ascii_whitespace()) {
 		return None;
 	}
-	let mut prefix: [u8; SYSLOG_LEN] = line[..SYSLOG_LEN].try_into().ok()?;
 	if prefix[4] == b' ' {
 		prefix[4] = b'0';
 	}
@@ -323,11 +323,6 @@ fn render_relative(then: Timestamp, now: Timestamp) -> String {
 	} else {
 		format!("in {count}{unit}")
 	}
-}
-
-/// Creates the `ts` builtin registration.
-pub(crate) fn ts_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Ts, SE>()
 }
 
 #[cfg(test)]

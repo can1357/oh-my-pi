@@ -112,7 +112,10 @@ impl Drop for NativeBorrowBarrier {
 /// protected until the future and its captured arguments have been dropped.
 #[doc(hidden)]
 pub struct NativeBorrowScope {
-  storage: Box<NativeBorrowStorage>,
+  // The TLS conversion stack stores the storage address too, so the allocation must be owned
+  // through a raw pointer: keeping a `Box` here would retag the storage as `Unique` on every
+  // move of `Self` and invalidate the pointer stashed in `NATIVE_BORROW_SCOPES`.
+  storage: ptr::NonNull<NativeBorrowStorage>,
   collecting: bool,
 }
 
@@ -140,15 +143,15 @@ impl NativeBorrowScope {
   }
 
   unsafe fn new_inner(root_values: bool) -> Self {
-    let mut storage = Box::<NativeBorrowStorage>::default();
+    let storage = unsafe { &mut *Box::into_raw(Box::<NativeBorrowStorage>::default()) };
     storage.root_values = root_values;
     storage.owner_thread = root_values.then(|| thread::current().id());
-    let storage_ptr = (&mut *storage) as *mut NativeBorrowStorage;
-    NATIVE_BORROW_SCOPES.with(|scopes| scopes.borrow_mut().push(storage_ptr));
-    Self {
-      storage,
+    let scope = Self {
+      storage: ptr::NonNull::from(storage),
       collecting: true,
-    }
+    };
+    NATIVE_BORROW_SCOPES.with(|scopes| scopes.borrow_mut().push(scope.storage.as_ptr()));
+    scope
   }
 
   /// Stops argument conversion from adding guards while retaining all acquired borrows.
@@ -157,7 +160,7 @@ impl NativeBorrowScope {
     if !self.collecting {
       return;
     }
-    let expected = (&mut *self.storage) as *mut NativeBorrowStorage;
+    let expected = self.storage.as_ptr();
     NATIVE_BORROW_SCOPES.with(|scopes| {
       let actual = scopes
         .borrow_mut()
@@ -172,14 +175,22 @@ impl NativeBorrowScope {
   #[doc(hidden)]
   pub fn release(mut self, env: sys::napi_env) {
     self.finish();
-    self.storage.release(Some(env));
+    unsafe {
+      self.storage.as_mut().release(Some(env));
+      drop(Box::from_raw(self.storage.as_ptr()));
+    }
+    // The storage is already deallocated; skipping `Drop` prevents freeing it twice.
+    std::mem::forget(self);
   }
 }
 
 impl Drop for NativeBorrowScope {
   fn drop(&mut self) {
     self.finish();
-    self.storage.release(None);
+    unsafe {
+      self.storage.as_mut().release(None);
+      drop(Box::from_raw(self.storage.as_ptr()));
+    }
   }
 }
 

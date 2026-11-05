@@ -148,7 +148,7 @@ async function parseMultipart(bytes: Uint8Array, contentType: string): Promise<T
 	return {
 		modelId,
 		request: {
-			audio: new Uint8Array(await file.arrayBuffer()),
+			audio: file,
 			mimeType: mimeTypeForFile(file),
 			fileName: file.name || undefined,
 			language: stringField(form, "language"),
@@ -235,9 +235,5 @@ export function encodeResponse(result: TranscriptionResult): TranscriptionRespon
 	};
 }
 
-export function formatError(status: number, errorType: string, message: string): Response {
-	return new Response(JSON.stringify({ error: { code: status, type: errorType, message } }), {
-		status,
-		headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" },
-	});
-}
+/** @deprecated Use `codedErrorResponse` from `auth-gateway/http`. */
+export { codedErrorResponse as formatError } from "../auth-gateway/http";

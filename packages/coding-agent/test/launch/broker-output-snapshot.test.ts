@@ -195,12 +195,13 @@ process.stdout.write("READY\\x1b[6n");
 				timeoutMs: 1_000,
 			});
 			if (logs.op !== "logs") throw new Error("unexpected logs result");
-			// Coordinates come from whichever terminal answered the probe: on
-			// Windows ConPTY answers from the console's real cursor position,
-			// while on POSIX the broker's headless responder is the only thing
-			// that can answer, and it reports home (1;1). Pin that exactly — a
-			// POSIX regression where the responder stopped answering while
-			// something else did would otherwise pass.
+			// Coordinates come from whichever terminal answered the probe. The
+			// broker's headless responder reports home (1;1): it is the only
+			// answer on POSIX and under current ConPTY, which forwards the probe.
+			// Older inbox conhost answers from the console's real cursor
+			// position before the probe reaches the broker, so Windows accepts
+			// any report. Pin POSIX exactly — a regression where the responder
+			// stopped answering while something else did would otherwise pass.
 			expect(logs.text).toMatch(process.platform === "win32" ? /CPR:\d+:\d+/u : /CPR:1:1/u);
 			expect(logs.text).not.toContain("\x1b[1;1R");
 		} finally {

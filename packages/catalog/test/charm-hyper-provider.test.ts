@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
-import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
+import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { normalizeCharmHyperBaseUrl } from "@oh-my-pi/pi-catalog/wire/charm-hyper";
 import { isCatalogDescriptor, resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";

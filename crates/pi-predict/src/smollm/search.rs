@@ -15,72 +15,79 @@
 //! refined only when a partial token is expanded, so it is an upper bound and
 //! the confidence is conservative.
 
-use std::{
-	cmp::Ordering,
-	collections::{BinaryHeap, HashMap},
-	sync::Arc,
-};
+use std::{cmp::Ordering, collections::BinaryHeap, sync::Arc};
 
+use super::tokenizer::TokenBytes;
 use crate::prose::is_word_char;
 
 /// Token-text lookups for prefix-constrained decoding.
 pub struct TokenIndex {
-	texts:        Vec<Option<Box<str>>>,
+	/// The tokenizer's byte arena; only ids listed in `sorted` are read as
+	/// text.
+	tokens:       Arc<TokenBytes>,
 	/// Tokens whose text starts with a word character (continue a word).
 	cont_ids:     Vec<u32>,
 	/// Every other token, including specials and partial characters: each
 	/// ends the word.
 	boundary_ids: Vec<u32>,
-	/// `(text, id)` sorted by text bytes, for "starts with" ranges.
-	sorted:       Vec<(Box<str>, u32)>,
-	/// Exact text → ids, for "is a proper prefix of" lookups.
-	exact:        HashMap<Box<str>, Vec<u32>>,
+	/// Ids of the text tokens sorted by text bytes (ties by id), for "starts
+	/// with" and exact-text ranges.
+	sorted:       Vec<u32>,
 }
 
 impl TokenIndex {
-	/// Index `texts[id]` (`None` = the token can never spell a word).
-	pub fn new(texts: Vec<Option<Box<str>>>) -> Self {
+	/// Index ids `0..vocab` of `tokens`; `is_text(id)` holds for tokens that can
+	/// spell a word (valid UTF-8 on their own, not special).
+	pub fn new(tokens: Arc<TokenBytes>, vocab: usize, is_text: impl Fn(u32) -> bool) -> Self {
 		let mut cont_ids = Vec::new();
 		let mut boundary_ids = Vec::new();
 		let mut sorted = Vec::new();
-		let mut exact: HashMap<Box<str>, Vec<u32>> = HashMap::new();
-		for (id, text) in texts.iter().enumerate() {
-			let id = id as u32;
+		for id in 0..vocab as u32 {
+			let text = is_text(id)
+				.then(|| std::str::from_utf8(tokens.get(id)).ok())
+				.flatten();
 			match text {
 				Some(text) if text.chars().next().is_some_and(is_word_char) => cont_ids.push(id),
 				_ => boundary_ids.push(id),
 			}
-			if let Some(text) = text {
-				sorted.push((text.clone(), id));
-				exact.entry(text.clone()).or_default().push(id);
+			if text.is_some() {
+				sorted.push(id);
 			}
 		}
-		sorted.sort();
-		Self { texts, cont_ids, boundary_ids, sorted, exact }
+		// Stable over ascending ids, so equal texts stay in id order.
+		sorted.sort_by(|&a, &b| tokens.get(a).cmp(tokens.get(b)));
+		Self { tokens, cont_ids, boundary_ids, sorted }
 	}
 
+	/// Text of an id; empty for ids whose bytes are not valid UTF-8.
 	fn text(&self, id: u32) -> &str {
-		self.texts[id as usize].as_deref().unwrap_or_default()
+		std::str::from_utf8(self.tokens.get(id)).unwrap_or_default()
+	}
+
+	/// Position in `sorted` of the first text not below `r`.
+	fn lower_bound(&self, r: &str) -> usize {
+		self
+			.sorted
+			.partition_point(|&id| self.tokens.get(id) < r.as_bytes())
 	}
 
 	/// Tokens whose text starts with `r` (including `r` itself).
 	fn starting_with<'a>(&'a self, r: &'a str) -> impl Iterator<Item = u32> + 'a {
-		let lo = self
-			.sorted
-			.partition_point(|(text, _)| text.as_bytes() < r.as_bytes());
-		self.sorted[lo..]
+		self.sorted[self.lower_bound(r)..]
 			.iter()
-			.take_while(move |(text, _)| text.starts_with(r))
-			.map(|&(_, id)| id)
+			.take_while(move |&&id| self.tokens.get(id).starts_with(r.as_bytes()))
+			.copied()
 	}
 
 	/// Tokens whose text is a proper, non-empty prefix of `r`.
 	fn proper_prefixes_of<'a>(&'a self, r: &'a str) -> impl Iterator<Item = u32> + 'a {
-		r.char_indices()
-			.skip(1)
-			.filter_map(|(at, _)| self.exact.get(&r[..at]))
-			.flatten()
-			.copied()
+		r.char_indices().skip(1).flat_map(move |(at, _)| {
+			let prefix = &r.as_bytes()[..at];
+			self.sorted[self.lower_bound(&r[..at])..]
+				.iter()
+				.take_while(move |&&id| self.tokens.get(id) == prefix)
+				.copied()
+		})
 	}
 
 	/// Tokens consistent with the remaining target `r` whose word continues
@@ -328,6 +335,8 @@ fn top_k(row: &[f32], ids: &[u32], k: usize) -> Vec<(u32, f32)> {
 
 #[cfg(test)]
 mod tests {
+	use std::collections::HashMap;
+
 	use super::*;
 
 	/// A toy LM over a handful of token texts: `table[path]` lists
@@ -359,8 +368,12 @@ mod tests {
 		TEXTS.iter().position(|t| *t == text).expect("token") as u32
 	}
 
+	fn index_of(texts: &[&str]) -> TokenIndex {
+		TokenIndex::new(Arc::new(texts.iter().collect()), texts.len(), |_| true)
+	}
+
 	fn index() -> TokenIndex {
-		TokenIndex::new(TEXTS.iter().map(|t| Some(Box::from(*t))).collect())
+		index_of(TEXTS)
 	}
 
 	/// A token path and its next-token probabilities.
@@ -431,7 +444,7 @@ mod tests {
 		// " the." would be one token in real vocabularies; here "the" + boundary
 		// inside a covering token.
 		let texts = [" the.", " the", "re", "."];
-		let index = TokenIndex::new(texts.iter().map(|t| Some(Box::from(*t))).collect());
+		let index = index_of(&texts);
 		let mut lm = Toy {
 			vocab: texts.len(),
 			table: HashMap::from([

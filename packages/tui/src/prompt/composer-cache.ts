@@ -6,7 +6,8 @@
  * Settings-derived kinds (theme/composer preferences, status-bar inputs) are
  * also written under the empty project, so a folder that never ran omp still
  * paints with the user's theme and status bar: those are rarely
- * project-specific, and path/branch render live.
+ * project-specific, and path/branch render live. Status inputs naming a
+ * project-scoped default model stay out of that fallback.
  *
  * ```text
  * entries (project TEXT, kind TEXT, value TEXT JSON, PRIMARY KEY (project, kind))
@@ -94,6 +95,7 @@ function parseUiState(
 		showHardwareCursor,
 		maxInlineImages,
 		resizeScrollback,
+		completeScrollback,
 		imeSafeCursor,
 		autocompleteMaxVisible,
 		spellingTypoDetection,
@@ -109,6 +111,7 @@ function parseUiState(
 			resizeScrollback !== "append" &&
 			resizeScrollback !== "rebuild" &&
 			resizeScrollback !== "preserve") ||
+		(completeScrollback !== undefined && typeof completeScrollback !== "boolean") ||
 		typeof imeSafeCursor !== "boolean" ||
 		typeof autocompleteMaxVisible !== "number" ||
 		typeof spellingTypoDetection !== "boolean" ||
@@ -136,6 +139,7 @@ function parseUiState(
 			showHardwareCursor,
 			maxInlineImages,
 			resizeScrollback: resizeScrollback ?? "rebuild",
+			completeScrollback: completeScrollback ?? false,
 			imeSafeCursor,
 			autocompleteMaxVisible,
 			spellingTypoDetection,
@@ -229,12 +233,16 @@ export class ComposerCache {
 
 	/** Resolved theme and composer settings for the next prepaint. */
 	writeUi(cwd: string, preferences: ComposerPreferences, theme: ComposerThemePreferences): void {
-		this.#putShared(cwd, "ui", { preferences, theme });
+		this.#put([path.resolve(cwd), ANY_PROJECT], "ui", { preferences, theme });
 	}
 
-	/** Status-bar inputs for the next prepaint's startup status line. */
-	writeStatus(cwd: string, status: ComposerStatusCache): void {
-		this.#putShared(cwd, "status", status);
+	/**
+	 * Status-bar inputs for the next prepaint's startup status line. `shared: false`
+	 * keeps them out of the any-project fallback (a project-scoped default model).
+	 */
+	writeStatus(cwd: string, status: ComposerStatusCache, options: { shared?: boolean } = {}): void {
+		const project = path.resolve(cwd);
+		this.#put(options.shared === false ? [project] : [project, ANY_PROJECT], "status", status);
 	}
 
 	close(): void {
@@ -245,22 +253,18 @@ export class ComposerCache {
 	}
 
 	/**
-	 * Best-effort upsert of this project's row plus the any-project fallback row,
-	 * atomically: a failed write only costs the next launch its speculation.
+	 * Best-effort upsert of `kind` under every project key, atomically: a failed
+	 * write only costs the next launch its speculation.
 	 */
-	#putShared(cwd: string, kind: EntryKind, value: unknown): void {
-		const project = path.resolve(cwd);
+	#put(projects: readonly string[], kind: EntryKind, value: unknown): void {
 		const json = JSON.stringify(value);
-		const ownKey = `${project}\0${kind}`;
-		const anyKey = `${ANY_PROJECT}\0${kind}`;
-		if (this.#known.get(ownKey) === json && this.#known.get(anyKey) === json) return;
+		const keys = projects.map(project => `${project}\0${kind}`);
+		if (keys.every(key => this.#known.get(key) === json)) return;
 		try {
 			this.#db.transaction(() => {
-				this.#upsert.run(project, kind, json);
-				this.#upsert.run(ANY_PROJECT, kind, json);
+				for (const project of projects) this.#upsert.run(project, kind, json);
 			})();
-			this.#known.set(ownKey, json);
-			this.#known.set(anyKey, json);
+			for (const key of keys) this.#known.set(key, json);
 		} catch (error) {
 			logger.debug("composer cache write failed", { kind, error: String(error) });
 		}

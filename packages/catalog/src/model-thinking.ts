@@ -7,7 +7,7 @@
  * id parsing, no host matching, no compat detection per request.
  */
 import { Effort, THINKING_EFFORTS } from "./effort";
-import type { Api, Model, ModelSpec } from "./types";
+import type { Api, Model, ModelSpec, ThinkingConfig } from "./types";
 
 /**
  * Runtime helpers read baked metadata only, so they accept both pre-build
@@ -28,7 +28,23 @@ export function getSupportedEfforts<TApi extends Api>(model: ApiModel<TApi>): re
 }
 
 /**
+ * Neutral view of a model whose thinking ladder is unverified: `reasoning: false`
+ * and no ladder. Re-entering policy resolution starts from it (the ladder is
+ * derived output, not authored input), and requests without an effort send it so
+ * no reasoning or disable fields reach an upstream that may reject them.
+ */
+export function withoutUnverifiedThinking<T extends { reasoning: boolean; thinking?: ThinkingConfig }>(model: T): T {
+	if (!model.thinking?.unverified) return model;
+	const { thinking: _derived, ...rest } = model;
+	return { ...rest, reasoning: false } as T;
+}
+
+/**
  * Clamps a requested thinking level against explicit model metadata.
+ *
+ * An unserved level first follows `thinking.effortMap` when the map sends it to
+ * a served tier that reaches the wire unchanged (a gateway answering `medium`
+ * as `high`); otherwise it climbs down to the nearest lower tier.
  *
  * Non-reasoning models always resolve to `undefined`.
  */
@@ -46,6 +62,12 @@ export function clampThinkingLevelForModel<TApi extends Api>(
 	const levels = getSupportedEfforts(model);
 	if (levels.includes(requested)) {
 		return requested;
+	}
+
+	const effortMap = model.thinking?.effortMap;
+	const aliased = effortMap?.[requested] as Effort | undefined;
+	if (aliased !== undefined && levels.includes(aliased) && (effortMap![aliased] ?? aliased) === aliased) {
+		return aliased;
 	}
 
 	const requestedIndex = THINKING_EFFORTS.indexOf(requested);

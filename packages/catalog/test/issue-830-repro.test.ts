@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
-import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
+import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
 
 describe("deepseek built-in provider (issue #830)", () => {
 	test("registers DeepSeek as an API-key login provider", () => {

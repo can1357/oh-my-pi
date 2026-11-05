@@ -29,6 +29,13 @@ describe("chalk", () => {
 		expect(disabled.hex("#C5FFD6")("x")).toBe("x");
 	});
 
+	test("downsamples a hex style created at a higher level after the level drops", () => {
+		const chalk = new Chalk({ level: 3 });
+		expect(chalk.hex("#ff0000")("x")).toBe(`${ESC}38;2;255;0;0mx${ESC}39m`);
+		chalk.level = 1;
+		expect(chalk.hex("#ff0000")("x")).toBe(`${ESC}91mx${ESC}39m`);
+	});
+
 	test("joins arguments and shares mutable level across chains", () => {
 		const chalk = new Chalk({ level: 0 });
 		const red = chalk.red;

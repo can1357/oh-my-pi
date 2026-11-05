@@ -14,6 +14,9 @@ import type {
 	RequestDetails,
 	SessionSummary,
 	SessionTrace,
+	SpotlightAgentScope,
+	SpotlightDashboardStats,
+	SpotlightSessionContext,
 	TimeRange,
 	ToolDashboardStats,
 } from "./types";
@@ -45,12 +48,34 @@ async function readErrorMessage(res: Response, endpoint: string): Promise<string
 	return `HTTP error ${res.status} on ${endpoint}`;
 }
 
-async function fetchJson<T>(endpoint: string, options?: RequestInit): Promise<T> {
-	const res = await fetch(endpoint, options);
+/**
+ * Response validators keyed by the parsed body they describe. Revalidating a
+ * body sends its ETag; the entry dies with the body when callers drop it.
+ */
+const validators = new WeakMap<object, string>();
+
+/**
+ * Fetch `endpoint` as JSON, revalidating `previous` when it came from an
+ * ETag-bearing response: a 304 resolves to `previous` itself (same reference,
+ * no re-parse).
+ */
+async function fetchJson<T>(endpoint: string, options?: RequestInit, previous?: T): Promise<T> {
+	const etag = typeof previous === "object" && previous !== null ? validators.get(previous) : undefined;
+	let init = options;
+	if (etag) {
+		const headers = new Headers(options?.headers);
+		headers.set("If-None-Match", etag);
+		init = { ...options, headers };
+	}
+	const res = await fetch(endpoint, init);
+	if (res.status === 304 && etag) return previous as T;
 	if (!res.ok) {
 		throw new ApiError(res.status, endpoint, await readErrorMessage(res, endpoint));
 	}
-	return res.json() as Promise<T>;
+	const data = (await res.json()) as T;
+	const nextEtag = res.headers.get("ETag");
+	if (nextEtag && typeof data === "object" && data !== null) validators.set(data, nextEtag);
+	return data;
 }
 
 /**
@@ -97,6 +122,19 @@ export async function getRecentErrors(
 
 export async function getRequestDetails(id: number, signal?: AbortSignal): Promise<RequestDetails> {
 	return fetchJson<RequestDetails>(`${API_BASE}/request/${id}`, { signal });
+}
+
+/** Whether the page may close the dashboard (`omp stats` shown in place of a Tern block). */
+export async function getClosable(signal?: AbortSignal): Promise<boolean> {
+	const { closable } = await fetchJson<{ closable: boolean }>(`${API_BASE}/close`, { signal });
+	return closable;
+}
+
+/** Close the dashboard: its host takes the page away and stops serving it. */
+export async function closeDashboard(): Promise<void> {
+	const endpoint = `${API_BASE}/close`;
+	const res = await fetch(endpoint, { method: "POST", headers: ACTION_HEADERS });
+	if (!res.ok) throw new ApiError(res.status, endpoint, await readErrorMessage(res, endpoint));
 }
 
 /** Ask the server to start a background sync; progress arrives on the `/api/events` stream. */
@@ -149,6 +187,24 @@ export async function getGainDashboardStats(
 	return fetchJson<GainDashboardStats>(`${API_BASE}/stats/gain?${params}`, { signal });
 }
 
+export async function getSpotlightDashboardStats(
+	range: TimeRange = "24h",
+	agent: SpotlightAgentScope = "all",
+	signal?: AbortSignal,
+): Promise<SpotlightDashboardStats> {
+	return fetchJson<SpotlightDashboardStats>(
+		`${API_BASE}/stats/spotlight?range=${encodeURIComponent(range)}&agent=${encodeURIComponent(agent)}`,
+		{ signal },
+	);
+}
+
+/** One experiment session's context per request, with and without shaping. */
+export async function getSpotlightSessionContext(file: string, signal?: AbortSignal): Promise<SpotlightSessionContext> {
+	return fetchJson<SpotlightSessionContext>(`${API_BASE}/stats/spotlight/session?file=${encodeURIComponent(file)}`, {
+		signal,
+	});
+}
+
 export async function getToolDashboardStats(
 	range: TimeRange = "24h",
 	signal?: AbortSignal,
@@ -182,8 +238,21 @@ export async function getSessions(limit = 100, q?: string, signal?: AbortSignal)
 	return fetchJson<SessionSummary[]>(`${API_BASE}/sessions?${params}`, { signal });
 }
 
-export async function getSessionTrace(file: string, signal?: AbortSignal): Promise<SessionTrace> {
-	return fetchJson<SessionTrace>(`${API_BASE}/session/trace?file=${encodeURIComponent(file)}`, { signal });
+/**
+ * Pass the last trace for `file` as `previous` to revalidate it: an unchanged
+ * trace resolves to that same object without downloading or parsing the body.
+ */
+export async function getSessionTrace(
+	file: string,
+	signal?: AbortSignal,
+	previous?: SessionTrace,
+): Promise<SessionTrace> {
+	// `no-store`: validation is ours (above); the browser cache would only keep a second multi-MB copy.
+	return fetchJson<SessionTrace>(
+		`${API_BASE}/session/trace?file=${encodeURIComponent(file)}`,
+		{ signal, cache: "no-store" },
+		previous,
+	);
 }
 
 /** Fetch one full journal entry for the span drawer. Entries are opaque JSON. */

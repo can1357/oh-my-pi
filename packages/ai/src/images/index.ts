@@ -1,5 +1,7 @@
-import type { Api, Model } from "@oh-my-pi/pi-catalog/types";
+import { type Api, IMAGE_GENERATION_APIS, type ImageGenerationApi, type Model } from "@oh-my-pi/pi-catalog/types";
 import * as AIError from "../error";
+import { isFactoryDroidModel } from "../providers/factory-droid";
+import { generateFactoryDroidImage } from "./factory-droid";
 import { generateAntigravityImage } from "./google-antigravity";
 import { generateGoogleImage } from "./google-generative-ai";
 import { generateOpenAIImage } from "./openai-images";
@@ -7,6 +9,7 @@ import { generateHostedImage } from "./openai-hosted";
 import { generateOpenRouterImage } from "./openrouter-images";
 import type { ImageGenerationOptions, ImageGenerationRequest, ImageGenerationResult } from "./types";
 
+export * from "./factory-droid";
 export * from "./google-antigravity";
 export * from "./google-generative-ai";
 export * from "./openai-hosted";
@@ -14,25 +17,11 @@ export * from "./openai-images";
 export * from "./openrouter-images";
 export * from "./types";
 
-/** Catalog APIs {@link generateImage} serves; the hosted Responses pair needs an explicit carrier model. */
-export type ImageGenerationApi =
-	| "openai-images"
-	| "openrouter-images"
-	| "google-generative-ai"
-	| "google-gemini-cli"
-	| "openai-responses"
-	| "openai-codex-responses";
+export type { ImageGenerationApi } from "@oh-my-pi/pi-catalog/types";
 
 /** Whether a catalog API generates images through one of the pi-ai image clients. */
 export function isImageGenerationApi(api: Api): api is ImageGenerationApi {
-	return (
-		api === "openai-images" ||
-		api === "openrouter-images" ||
-		api === "google-generative-ai" ||
-		api === "google-gemini-cli" ||
-		api === "openai-responses" ||
-		api === "openai-codex-responses"
-	);
+	return (IMAGE_GENERATION_APIS as readonly Api[]).includes(api);
 }
 
 /** Generate (or edit, when `request.inputImages` is set) images through the transport selected by the model's `api`. */
@@ -41,6 +30,7 @@ export async function generateImage(
 	request: ImageGenerationRequest,
 	options: ImageGenerationOptions,
 ): Promise<ImageGenerationResult> {
+	if (isFactoryDroidModel(model)) return generateFactoryDroidImage(model, request, options);
 	switch (model.api) {
 		case "openai-images":
 			return generateOpenAIImage(model, request, options);

@@ -30,9 +30,7 @@ impl GitRepo {
 		if let Some(repo) = self.gix.get() {
 			return Ok(repo.to_thread_local());
 		}
-		let opened = open_options()
-			.open(self.root())
-			.map_err(|err| Error::backend("git open", err))?;
+		let opened = open_discovered(self)?;
 		// A concurrent open may have won the race; either handle is equivalent.
 		let repo = self.gix.get_or_init(move || opened);
 		Ok(repo.to_thread_local())
@@ -50,11 +48,22 @@ impl GitRepo {
 				"reftable repository cannot be opened in-process; use the CLI fallback",
 			));
 		}
-		Ok(open_options()
-			.open(self.root())
-			.map_err(|err| Error::backend("git open", err))?
-			.to_thread_local())
+		Ok(open_discovered(self)?.to_thread_local())
 	}
+}
+
+/// Open the discovered `.git` entry (directory, or gitfile for linked
+/// worktrees and separate git dirs).
+///
+/// Never pass the checkout root: gix treats any `*.git` path as the metadata
+/// directory itself instead of probing `<path>/.git`, so a checkout named
+/// `repo.git` would fail to open. The entry also keeps gix deriving the work
+/// tree from it, which the resolved `git_dir` alone cannot for separate git
+/// dirs.
+fn open_discovered(repo: &GitRepo) -> Result<gix::ThreadSafeRepository> {
+	open_options()
+		.open(&repo.info().git_entry_path)
+		.map_err(|err| Error::backend("git open", err))
 }
 
 /// Load the persisted worktree index straight from disk, reconstructing it from

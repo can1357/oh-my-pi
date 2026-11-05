@@ -11,11 +11,9 @@ import type { Api, CodexCompactionContext, FetchImpl, Model, ProviderSessionStat
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
 import { applyCodexResponsesLiteShape } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
-import {
-	createOpenAICodexCompatibilityMetadata,
-	openCodexCompactionEventStream,
-	type OpenAICodexCompactionBody,
-	type OpenAICodexCompatibilityMetadata,
+import type {
+	OpenAICodexCompactionBody,
+	OpenAICodexCompatibilityMetadata,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import {
 	getOpenAIPromptCacheKey,
@@ -24,6 +22,7 @@ import {
 	resolveOpenAIRequestSetup,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
+import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
 import { isBedrockOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import {
 	applyCodexResidencyHeader,
@@ -33,7 +32,7 @@ import {
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
-import { $env, isUnexpectedSocketCloseMessage, logger, ptree, stringifyJson } from "@oh-my-pi/pi-utils";
+import { $env, isUnexpectedSocketCloseMessage, logger, ptree, stringifyJson, toError } from "@oh-my-pi/pi-utils";
 import { appendAzureApiVersion, resolveAzureOpenAiBaseUrl } from "./azure-openai-endpoint";
 import { prepareBedrockCompactionRequest } from "./bedrock";
 
@@ -77,6 +76,8 @@ export interface CompactionV2Usage {
 export interface CompactionV2Request {
 	body: OpenAICodexCompactionBody;
 	input: unknown[];
+	/** Serialized user-written turns to keep next to the compaction item; defaults to `input`. */
+	retainedUserItems: unknown[];
 	retainedMessageBudget: number;
 	sessionId?: string;
 	promptCacheKey?: string;
@@ -129,7 +130,8 @@ export function shouldUseCompactionV2Streaming(
 	return getCompactionV2Endpoint(model) !== undefined;
 }
 
-function compactionV2Api(model: Model): Api | undefined {
+/** Effective compaction request adapter: the `remoteCompaction.api` override, else the model's own API. Always defined — `Model.api` is required. */
+function compactionV2Api(model: Model): Api {
 	return model.remoteCompaction?.api ?? model.api;
 }
 
@@ -169,6 +171,23 @@ function resolveCompactionV2Model(model: Model): string {
 	return mappedDeployment ?? requestModel;
 }
 
+/**
+ * Catalog-policy view of a remote compaction request (V1 and V2): the
+ * effective adapter (`remoteCompaction.api`) and the wire id the body sends
+ * (`remoteCompaction.model`). Under a model override the active lane's
+ * `requestModelId` and thinking classification describe a model that never
+ * reaches the wire, so they are dropped; `reasoning` stays because the
+ * compaction body derives its reasoning config from the active model.
+ */
+export function remoteCompactionPolicyModel(model: Model): CatalogPolicyInputs {
+	const api = compactionV2Api(model);
+	const overrideId = model.remoteCompaction?.model;
+	const base = { provider: model.provider, providerType: model.providerType, api, reasoning: model.reasoning };
+	return overrideId == null
+		? { ...base, id: model.id, requestModelId: model.requestModelId, thinking: model.thinking }
+		: { ...base, id: overrideId };
+}
+
 // ============================================================================
 // Request Building
 // ============================================================================
@@ -190,6 +209,7 @@ export function buildCompactionV2Request(
 		sessionId?: string;
 		promptCacheKey?: string;
 		retainedMessageBudget?: number;
+		retainedUserItems?: unknown[];
 	},
 ): CompactionV2Request {
 	const cacheOptions = { sessionId: options?.sessionId, promptCacheKey: options?.promptCacheKey };
@@ -223,12 +243,14 @@ export function buildCompactionV2RequestFromBody(
 		sessionId?: string;
 		promptCacheKey?: string;
 		retainedMessageBudget?: number;
+		retainedUserItems?: unknown[];
 	},
 ): CompactionV2Request {
 	const input = Array.isArray(body.input) ? body.input : [];
 	return {
 		body: { ...body, model: resolveCompactionV2Model(model), input },
 		input,
+		retainedUserItems: options?.retainedUserItems ?? input,
 		retainedMessageBudget: resolveCompactionV2RetainedMessageBudget(options?.retainedMessageBudget),
 		sessionId: options?.sessionId,
 		promptCacheKey: options?.promptCacheKey,
@@ -252,6 +274,7 @@ export async function requestCompactionV2Streaming(
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
 		preferWebsockets?: boolean;
+		codexAccessPrograms?: boolean;
 	},
 ): Promise<CompactionV2Response> {
 	let fetchImpl: FetchImpl = options?.fetch ?? globalThis.fetch;
@@ -269,18 +292,21 @@ export async function requestCompactionV2Streaming(
 
 	const retryWait = options?.retryWait ?? ((delayMs: number) => Bun.sleep(delayMs));
 	const isCodexResponses = compactionV2Api(model) === "openai-codex-responses" || model.provider === "openai-codex";
-	const codexMetadata =
-		isCodexResponses && !shouldUseCodexProviderTransport(model)
-			? createOpenAICodexCompatibilityMetadata({
-					sessionId: request.sessionId,
-					providerSessionState: options?.providerSessionState,
-					requestKind: "compaction",
-					compaction: createOpenAICodexCompactionRequestContext({
-						context: options?.codexCompaction,
-						implementation: "responses_compaction_v2",
-					}),
-				})
-			: undefined;
+	let codexMetadata: OpenAICodexCompatibilityMetadata | undefined;
+	if (isCodexResponses && !shouldUseCodexProviderTransport(model)) {
+		// Metadata generation is request work; importing compaction policy must not load the Codex transport.
+		const { createOpenAICodexCompatibilityMetadata } =
+			await import("@oh-my-pi/pi-ai/providers/openai-codex-responses");
+		codexMetadata = createOpenAICodexCompatibilityMetadata({
+			sessionId: request.sessionId,
+			providerSessionState: options?.providerSessionState,
+			requestKind: "compaction",
+			compaction: createOpenAICodexCompactionRequestContext({
+				context: options?.codexCompaction,
+				implementation: "responses_compaction_v2",
+			}),
+		});
+	}
 	let lastError: Error | undefined;
 
 	for (let attempt = 0; attempt <= V2_COMPACTION_MAX_RETRIES; attempt++) {
@@ -291,9 +317,10 @@ export async function requestCompactionV2Streaming(
 				providerSessionState: options?.providerSessionState,
 				codexCompaction: options?.codexCompaction,
 				preferWebsockets: options?.preferWebsockets,
+				codexAccessPrograms: options?.codexAccessPrograms,
 			});
 		} catch (err) {
-			const error = err instanceof Error ? err : new Error(String(err));
+			const error = toError(err);
 			if (signal?.aborted) throw error;
 
 			if (isRetryableCompactionError(error) && attempt < V2_COMPACTION_MAX_RETRIES) {
@@ -327,6 +354,7 @@ async function attemptCompactionV2Streaming(
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
 		preferWebsockets?: boolean;
+		codexAccessPrograms?: boolean;
 	},
 ): Promise<CompactionV2Response> {
 	// Faithful to Codex: append the compaction trigger as the final input item
@@ -343,6 +371,8 @@ async function attemptCompactionV2Streaming(
 	}
 
 	if (shouldUseCodexProviderTransport(model)) {
+		// The native transport is only needed when sending a Codex compaction request.
+		const { openCodexCompactionEventStream } = await import("@oh-my-pi/pi-ai/providers/openai-codex-responses");
 		const eventStream = await openCodexCompactionEventStream(model, body, {
 			apiKey,
 			signal,
@@ -350,6 +380,7 @@ async function attemptCompactionV2Streaming(
 			sessionId: request.sessionId,
 			providerSessionState: options.providerSessionState,
 			preferWebsockets: options.preferWebsockets,
+			codexAccessPrograms: options.codexAccessPrograms,
 			responsesLite: model.useResponsesLite,
 			codexCompaction: createOpenAICodexCompactionRequestContext({
 				context: options.codexCompaction,
@@ -407,8 +438,27 @@ function buildCompactionV2Headers(
 			: {
 					"content-type": "application/json",
 					...resolveOpenAIRequestSetup(
-						{ provider: model.provider, id: model.id, baseUrl: model.baseUrl, headers: model.headers },
-						{ apiKey, messages: [], sessionId: request.sessionId ?? routingSessionId, promptCacheSessionId },
+						{
+							// `on-api` scoped cache policy must see the request this
+							// compaction actually sends, not the active lane.
+							...remoteCompactionPolicyModel(model),
+							baseUrl: model.baseUrl,
+							headers: model.headers,
+							compat: {
+								sessionHeader:
+									model.compat && "sessionHeader" in model.compat ? model.compat.sessionHeader : undefined,
+							},
+						},
+						{
+							apiKey,
+							messages: [],
+							sessionId: request.sessionId ?? routingSessionId,
+							promptCacheSessionId,
+							// The family affinity key rides only an explicit
+							// prompt-cache identity; the sessionId-derived cache-id
+							// fallback never does.
+							promptCacheAffinityKey: request.promptCacheKey ? promptCacheSessionId : undefined,
+						},
 					).headers,
 				};
 	if (api === "openai-codex-responses" || model.provider === "openai-codex") {
@@ -536,7 +586,7 @@ function finishCompactionV2Collection(
 
 	const compactionItem = state.compactionItems[0];
 	const { replacementHistory, retainedImageCount } = buildCompactionV2ReplacementHistory(
-		request.input,
+		request.retainedUserItems,
 		compactionItem,
 		request.retainedMessageBudget,
 	);
@@ -665,15 +715,14 @@ function isRetryableCompactionError(error: Error): boolean {
 // Replacement History
 // ============================================================================
 
-/** Build Codex-style V2 replacement history from prompt input plus compaction output. */
+/** Build Codex-style V2 replacement history from retention candidates plus compaction output. */
 export function buildCompactionV2ReplacementHistory(
 	input: unknown[],
 	compactionItem: Record<string, unknown>,
 	retainedMessageBudget = V2_RETAINED_MESSAGE_TOKEN_BUDGET,
 ): { replacementHistory: Array<Record<string, unknown>>; retainedImageCount: number } {
 	const retained = input.filter(
-		(item): item is Record<string, unknown> =>
-			isRecord(item) && isRetainedForCompactionV2(item) && shouldKeepCompactionV2HistoryItem(item),
+		(item): item is Record<string, unknown> => isRecord(item) && isRetainedUserMessageForCompactionV2(item),
 	);
 	const replacementHistory = truncateRetainedMessagesForCompactionV2(
 		retained,
@@ -684,17 +733,11 @@ export function buildCompactionV2ReplacementHistory(
 	return { replacementHistory, retainedImageCount };
 }
 
-function isRetainedForCompactionV2(item: Record<string, unknown>): boolean {
-	if (item.type !== "message") return false;
-	const role = stringField(item, "role");
-	return role === "user" || role === "developer" || role === "system";
-}
-
-function shouldKeepCompactionV2HistoryItem(item: Record<string, unknown>): boolean {
-	if (item.type !== "message") return item.type === "compaction";
-	const role = stringField(item, "role");
-	if (role !== "user") return false;
-	return !isContextualUserMessage(item);
+function isRetainedUserMessageForCompactionV2(item: Record<string, unknown>): boolean {
+	// Responses input messages may omit `type`: omp serializes turns as
+	// `{ role, content }`, which the API reads as `type: "message"`.
+	const isMessage = item.type === "message" || (item.type === undefined && typeof item.role === "string");
+	return isMessage && item.role === "user" && !isContextualUserMessage(item);
 }
 
 function isContextualUserMessage(item: Record<string, unknown>): boolean {

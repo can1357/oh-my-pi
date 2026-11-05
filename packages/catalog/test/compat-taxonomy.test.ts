@@ -39,6 +39,33 @@ describe("classifyModel", () => {
 		});
 	});
 
+	test("DeepSeek V4 revisions ignore suffixes and reviewed Flash aliases resolve to V4.1", () => {
+		expect(classifyModel("opencode-zen", "deepseek-v4-flash-free")).toMatchObject({
+			class: "deepseek",
+			family: "flash",
+			revision: "4.0.0",
+		});
+		expect(classifyModel("openrouter", "deepseek/deepseek-v4-flash-0731")).toMatchObject({
+			class: "deepseek",
+			family: "flash",
+			revision: "4.0.0",
+		});
+		expect(classifyModel("cline-pass", "deepseek-v4.1-flash")).toMatchObject({
+			class: "deepseek",
+			family: "flash",
+			revision: "4.1.0",
+		});
+		for (const provider of ["deepseek", "opencode-go"]) {
+			expect(classifyModel(provider, "deepseek-flash")).toEqual({
+				class: "deepseek",
+				family: "flash",
+				revision: "4.1.0",
+			});
+		}
+		expect(classifyModel("custom", "deepseek-flash")).toEqual({ class: "deepseek", family: "flash" });
+		expect(classifyModel("deepseek", "deepseek-r1")).toEqual({ class: "deepseek", family: "r1" });
+	});
+
 	test("bounded matchers do not fire on substrings", () => {
 		expect(classifyModel("test", "anthropicology").class).toBe("unknown");
 		expect(classifyModel("test", "deepseeker").class).toBe("unknown");
@@ -70,6 +97,16 @@ describe("classifyModel", () => {
 			["kimi-coding", "K3-256K"],
 		] as const) {
 			expect(classifyModel(provider, model)).toEqual({ class: "kimi", family: "k3" });
+		}
+	});
+
+	test("K3.1 Pro retains Kimi K3 identity with its own revision", () => {
+		for (const [provider, model] of [
+			["", "k3.1-pro"],
+			["kimi-code", "k3.1-pro"],
+			["kimi-code", "k3.1-pro-highspeed"],
+		] as const) {
+			expect(classifyModel(provider, model)).toEqual({ class: "kimi", family: "k3", revision: "3.1.0" });
 		}
 	});
 
@@ -149,6 +186,17 @@ describe("classifyModel", () => {
 				revision: "4.6.0",
 			});
 		}
+	});
+
+	test("bare Meta-Llama wire ids classify as meta without a namespace segment", () => {
+		// SambaNova serves `Meta-Llama-*` with no `meta-llama/` prefix, which
+		// `bounded "llama"` never sees (prefix-anchored) and
+		// `namespace "meta-llama"` cannot match, so it used to land in class
+		// unknown and skip Meta cascade rules.
+		expect(classifyModel("sambanova", "Meta-Llama-3.3-70B-Instruct")).toEqual({
+			class: "meta",
+			family: "llama",
+		});
 	});
 });
 

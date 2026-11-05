@@ -50,6 +50,59 @@ describe("EpisodicGraph CRUD", () => {
 	});
 });
 
+describe("EpisodicGraph heuristic fact extraction", () => {
+	function triples(graph: EpisodicGraph, text: string): string[][] {
+		return graph.extractFacts(text, "mem_fact").map(fact => [fact.subject, fact.predicate, fact.object]);
+	}
+
+	it("keeps whole words and multiword objects instead of treating word prefixes as articles (#17511)", () => {
+		withGraph(graph => {
+			expect(triples(graph, "Drafting is active.")).toEqual([["Drafting", "is", "active"]]);
+			expect(triples(graph, "Isolation is historically required.")).toEqual([
+				["Isolation", "is", "historically required"],
+			]);
+			expect(triples(graph, "The runtime has an independent reviewer.")).toEqual([
+				["The runtime", "has", "independent reviewer"],
+			]);
+			expect(triples(graph, "Sam works at Example Corp now.")).toEqual([["Sam", "works_at", "Example Corp"]]);
+		});
+	});
+
+	it("preserves demonstratives at the start of objects without swallowing later clauses", () => {
+		withGraph(graph => {
+			expect(triples(graph, "Alice has that permission.")).toEqual([["Alice", "has", "that permission"]]);
+			expect(triples(graph, "Alice uses that tool.")).toEqual([["Alice", "uses", "that tool"]]);
+			expect(triples(graph, "Alice has that permission and can approve it.")).toEqual([
+				["Alice", "has", "that permission"],
+			]);
+		});
+	});
+
+	it("ends an object at a clause connector so the next clause still yields its own fact", () => {
+		withGraph(graph => {
+			expect(triples(graph, "Bob is active and Alice is idle.")).toEqual([
+				["Bob", "is", "active"],
+				["Alice", "is", "idle"],
+			]);
+		});
+	});
+
+	it("leaves the next clause's whole subject for its own fact even after an unlisted connector", () => {
+		withGraph(graph => {
+			expect(triples(graph, "Alice is active plus Bob Jones is idle.")).toEqual([
+				["Alice", "is", "active plus"],
+				["Bob Jones", "is", "idle"],
+			]);
+		});
+	});
+
+	it("abstains rather than storing a word fragment", () => {
+		withGraph(graph => {
+			expect(triples(graph, "Alice uses Python3 daily.")).toEqual([]);
+		});
+	});
+});
+
 describe("EpisodicGraph gist location extraction", () => {
 	it("captures capitalized proper-noun places and ignores lowercase prose", () => {
 		withGraph(graph => {
@@ -76,6 +129,13 @@ describe("EpisodicGraph non-Latin participants", () => {
 
 			graph.storeGist(greek, "mem_el");
 			expect(graph.findGistsByParticipant("Βασίλης")).toHaveLength(1);
+		});
+	});
+
+	it("does not read the trailing letter of a non-ASCII word as the pronoun I (issue #16723)", () => {
+		withGraph(graph => {
+			expect(graph.extractGist("tôi đã sửa rồi, đi tiếp đi", "mem_vi").participants).toEqual([]);
+			expect(graph.extractGist("Chúng tôi gặp nhau ở Hà Nội.", "mem_hn").participants).toEqual(["Chúng", "Hà Nội"]);
 		});
 	});
 });
@@ -153,6 +213,32 @@ describe("EpisodicGraph scoring and proactive links", () => {
 			expect(neighbors.map(item => item.memoryId)).toContain("gist_mem_2");
 			expect(graph.getStats().gists).toBe(2);
 			expect(graph.getStats().facts).toBe(first.facts.length + second.facts.length);
+		});
+	});
+
+	it("does not link memories that only share a time scope", () => {
+		withGraph(graph => {
+			graph.ingestMemory("Yesterday the database migration finished on staging.", "mem_db");
+			const unrelated = graph.ingestMemory("Today I bought fresh vegetables at the market.", "mem_food");
+			expect(unrelated.gist.timeScope).toBe("point_in_time");
+			expect(graph.getGist("gist_mem_db")?.timeScope).toBe("point_in_time");
+			expect(unrelated.edges.filter(item => item.target === "mem_db")).toEqual([]);
+
+			const related = graph.ingestMemory("Today the database migration finished on production.", "mem_db_prod");
+			const linked = related.edges.filter(item => item.target === "mem_db").map(item => item.edgeType);
+			expect(linked.sort()).toEqual(["ctx", "related_to"]);
+			expect(related.edges.filter(item => item.target === "mem_food")).toEqual([]);
+
+			graph.ingestMemory("Alice uses Python.", "mem_alice");
+			const entityOnly = graph.ingestMemory(
+				"Alice uses Python during long winter evenings while sketching harbor boats.",
+				"mem_alice_evenings",
+			);
+			const toAlice = entityOnly.edges.filter(item => item.target === "mem_alice");
+			const references = toAlice.find(item => item.edgeType === "references");
+			expect(references?.weight).toBeGreaterThanOrEqual(0.35);
+			expect(toAlice.some(item => item.edgeType === "related_to")).toBe(false);
+			expect(toAlice.find(item => item.edgeType === "ctx")?.weight).toBe(references?.weight);
 		});
 	});
 });

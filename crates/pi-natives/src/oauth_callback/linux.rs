@@ -87,21 +87,8 @@ fn has_only_normal_absolute_components(path: &Path) -> bool {
 }
 
 fn validate_context(context: &Context) -> anyhow::Result<()> {
-	if context.id.len() != 32
-		|| !context
-			.id
-			.bytes()
-			.all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-	{
-		bail!("invalid Linux OAuth callback transaction identifier");
-	}
-	let mut scheme = context.scheme.bytes();
-	if !scheme.next().is_some_and(|byte| byte.is_ascii_lowercase())
-		|| !scheme.all(|byte| {
-			byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'+' | b'.' | b'-')
-		}) {
-		bail!("invalid Linux OAuth callback scheme");
-	}
+	super::validate_transaction_id(&context.id)?;
+	super::validate_scheme(&context.scheme)?;
 	if !has_only_normal_absolute_components(&context.home) || context.home.parent().is_none() {
 		bail!("Linux OAuth callback HOME must be an absolute user directory");
 	}
@@ -136,15 +123,15 @@ fn desktop_names(context: &Context) -> Vec<String> {
 	context
 		.env
 		.get("XDG_CURRENT_DESKTOP")
-		.map(String::as_str)
-		.unwrap_or_default()
+		.map_or_default(String::as_str)
 		.split(':')
 		.filter_map(|raw| {
 			let name = raw.trim().to_ascii_lowercase();
 			if name.is_empty()
 				|| !name.bytes().all(|byte| {
 					byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
-				}) || !seen.insert(name.clone())
+				})
+				|| !seen.insert(name.clone())
 			{
 				None
 			} else {
@@ -185,10 +172,7 @@ fn parse_default_entry(content: &str, mime_type: &str) -> anyhow::Result<(bool, 
 	for raw_line in content.split('\n') {
 		let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
 		let trimmed = line.trim();
-		if let Some(section) = trimmed
-			.strip_prefix('[')
-			.and_then(|value| value.strip_suffix(']'))
-		{
+		if let Some(section) = trimmed.strip_circumfix('[', ']') {
 			in_defaults = section == DEFAULT_APPLICATIONS_SECTION;
 			default_section_present |= in_defaults;
 			continue;
@@ -222,7 +206,8 @@ fn read_preference(path: &Path, mime_type: &str) -> anyhow::Result<PreferenceSta
 			let mode = fs::metadata(path)
 				.with_context(|| format!("failed to stat {}", path.display()))?
 				.permissions()
-				.mode() & 0o777;
+				.mode()
+				& 0o777;
 			let (default_section_present, entry) = parse_default_entry(&content, mime_type)?;
 			Ok(PreferenceState { content, default_section_present, entry, exists: true, mode })
 		},
@@ -257,10 +242,7 @@ fn change_default(
 	for (index, raw_line) in lines.iter().enumerate() {
 		let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
 		let trimmed = line.trim();
-		if let Some(section) = trimmed
-			.strip_prefix('[')
-			.and_then(|value| value.strip_suffix(']'))
-		{
+		if let Some(section) = trimmed.strip_circumfix('[', ']') {
 			if in_defaults && section_end == lines.len() {
 				section_end = index;
 			}
@@ -327,10 +309,7 @@ fn default_section_ordinal_for_entry(content: &str, mime_type: &str) -> Option<u
 	for raw_line in content.split('\n') {
 		let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
 		let trimmed = line.trim();
-		if let Some(section) = trimmed
-			.strip_prefix('[')
-			.and_then(|value| value.strip_suffix(']'))
-		{
+		if let Some(section) = trimmed.strip_circumfix('[', ']') {
 			if section == DEFAULT_APPLICATIONS_SECTION {
 				current_ordinal = Some(next_ordinal);
 				next_ordinal += 1;

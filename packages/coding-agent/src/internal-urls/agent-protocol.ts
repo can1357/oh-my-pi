@@ -23,7 +23,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
 import { formatDuration, isEnoent, prompt } from "@oh-my-pi/pi-utils";
-import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, type AgentRegistryApi } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { executeSend, isIrcEnabled } from "../irc/messaging";
 import agentPromptDoc from "../prompts/internal-urls/agent.md" with { type: "text" };
@@ -37,6 +37,7 @@ import type {
 	InternalUrl,
 	ProtocolHandler,
 	ResolveContext,
+	SchemeHost,
 	SchemeSpec,
 	UrlCompletion,
 	WriteContext,
@@ -128,7 +129,7 @@ function lastAssistantText(messages: readonly AgentMessage[]): string | undefine
 }
 
 /** Whether `<id>`'s published output predates a turn the agent is streaming now. */
-function isSuperseded(registry: AgentRegistry, outputId: string): boolean {
+function isSuperseded(registry: AgentRegistryApi, outputId: string): boolean {
 	const ref = registry.get(outputId);
 	return ref !== undefined && ref.kind !== "advisor" && registry.isRunning(ref);
 }
@@ -149,8 +150,8 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		write: { via: "handler", payload: "verbatim", scope: "coordination", tier: () => "read" },
 	};
 
-	promptDoc(): string {
-		return agentPromptDoc.trim();
+	promptDoc(host: SchemeHost): string {
+		return prompt.render(agentPromptDoc, { subagent: host.subagent }).trim();
 	}
 
 	/**
@@ -187,10 +188,12 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		if (hasPathExtraction(url)) {
 			throw new Error("agent:// message target cannot have a JSON-path suffix.");
 		}
+		const progress = url.searchParams.has("progress");
+		if (progress && to === "all") throw new Error("agent://all broadcasts cannot be ?progress updates.");
 		if (!content.trim()) throw new Error("agent:// messages require non-empty content.");
 		const result = await executeSend(
 			{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
-			{ to, message: content },
+			{ to, message: content, progress },
 		);
 		return {
 			content: [
@@ -359,6 +362,9 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	 * pre-existing global scan untouched.
 	 */
 	async #outputDirs(context: ResolveContext | undefined): Promise<string[]> {
+		// A seance reads the consulted source's agent outputs in place, nothing else.
+		const seanceDir = context?.session?.seanceSourceArtifactsDir;
+		if (seanceDir) return [seanceDir];
 		const rootSessionFile = context?.sessionFile
 			? await ensurePersistedRoster(AgentRegistry.global(), context.sessionFile)
 			: undefined;

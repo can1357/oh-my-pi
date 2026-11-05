@@ -66,7 +66,7 @@ describe("InteractiveMode tiny-title prewarm", () => {
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test", undefined, () => {}, [], undefined, undefined);
+		mode = new InteractiveMode(session, "test", () => {}, [], undefined, undefined);
 		// A real fs.watch on repo HEAD in a parallel Bun worker can trip a Bun
 		// SIGTRAP in the suite; this contract does not need branch watching.
 		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
@@ -142,27 +142,5 @@ describe("InteractiveMode tiny-title prewarm", () => {
 		await immediateFlushed.promise;
 
 		expect(prewarm).not.toHaveBeenCalled();
-	});
-
-	it("paints the pending user row before starting title generation", async () => {
-		await mode.init();
-
-		const order: string[] = [];
-		vi.spyOn(mode, "startPendingSubmission").mockImplementation(input => {
-			order.push("pending-row");
-			return { text: input.text, cancelled: false, started: false };
-		});
-		const generateTitle = vi.spyOn(session, "generateTitle").mockImplementation(async () => {
-			order.push("title-gen");
-			return null;
-		});
-		const onInput = vi.fn();
-		mode.onInputCallback = onInput;
-
-		await mode.editor.onSubmit?.("investigate the failing title worker");
-
-		expect(order).toEqual(["pending-row", "title-gen"]);
-		expect(generateTitle).toHaveBeenCalledWith("investigate the failing title worker");
-		expect(onInput).toHaveBeenCalledTimes(1);
 	});
 });

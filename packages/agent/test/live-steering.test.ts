@@ -120,6 +120,12 @@ function liveSteeredTexts(transcript: AgentMessage[]): unknown[] {
 	return texts;
 }
 
+function userText(message: AgentMessage): string {
+	if (message.role !== "user") return "";
+	const { content } = message;
+	return typeof content === "string" ? content : content.map(part => (part.type === "text" ? part.text : "")).join("");
+}
+
 describe("agent loop live steering", () => {
 	it("records accepted steering right after the steered response and holds later input for the next boundary", async () => {
 		let claimedView: string[] | undefined;
@@ -238,12 +244,62 @@ describe("agent loop live steering", () => {
 		// Esc hands the steer back to the editor: the abort must neither requeue nor record it.
 		const { agent, steer, running } = await startLiveSteeredRun();
 
-		expect(agent.withdrawLiveSteering()).toEqual([steer]);
+		expect(agent.withdrawUndeliveredQueuedMessages()).toEqual({ steering: [steer], followUp: [] });
 		agent.abort();
 		await running;
 
 		expect(agent.peekSteeringQueue()).toEqual([]);
 		expect(agent.peekUndeliveredQueuedMessages()).toEqual([]);
 		expect(agent.state.messages).not.toContain(steer);
+	});
+
+	it("drops the prepared context of withdrawn live steering carried into the next turn", async () => {
+		// The steer was taken live by a response that ended normally, so the next turn carries it
+		// with its prepared context; Esc before that turn's model call must withdraw both.
+		const mock = createMockModel({ responses: [{ content: ["first"] }, { content: ["second"] }] });
+		let calls = 0;
+		const agent = new Agent({
+			initialState: { model: mock.model },
+			streamFn: async (model, context, options) => {
+				if (++calls === 1) {
+					const live = options?.liveSteering;
+					const signal = options?.signal;
+					if (!live || !signal) throw new Error("live steering was not offered");
+					await live.wait(signal);
+					(await live.claim(signal))?.accept();
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+		agent.prepareQueuedMessages = messages => ({
+			commit: () => messages.map(message => createUserMessage(`context for ${userText(message)}`)),
+		});
+		const held = Promise.withResolvers<void>();
+		let beforeCalls = 0;
+		agent.addBeforeModelCall(async (_context, signal) => {
+			if (++beforeCalls !== 2) return;
+			held.resolve();
+			await new Promise<void>(resolve => signal?.addEventListener("abort", () => resolve(), { once: true }));
+		});
+		const ended: AgentMessage[][] = [];
+		const started: AgentMessage[] = [];
+		agent.subscribe(event => {
+			if (event.type === "agent_end") ended.push(event.messages);
+			if (event.type === "message_start") started.push(event.message);
+		});
+		const running = agent.prompt("start");
+		const steer = createUserMessage("use tabs");
+		agent.steer(steer);
+		await held.promise;
+
+		expect(agent.withdrawUndeliveredQueuedMessages()).toEqual({ steering: [steer], followUp: [] });
+		agent.abort();
+		await running;
+
+		const userTexts = (messages: AgentMessage[]) => messages.filter(m => m.role === "user").map(userText);
+		expect(userTexts(agent.state.messages)).toEqual(["start"]);
+		expect(userTexts(started)).toEqual(["start"]);
+		expect(ended.flatMap(userTexts)).toEqual(["start"]);
+		expect(agent.peekSteeringQueue()).toEqual([]);
 	});
 });

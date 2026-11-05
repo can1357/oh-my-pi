@@ -1,0 +1,77 @@
+%YAML 1.2
+---
+# Stencil's own INI grammar: [sections], key = value / key: value pairs,
+# quoted strings, numbers and booleans in values, ; and # line comments.
+name: INI
+file_extensions:
+  - ini
+  - cfg
+  - conf
+  - inf
+  - reg
+  - editorconfig
+  - .editorconfig
+scope: source.ini
+
+contexts:
+  main:
+    - include: comments
+    - match: ^\s*(\[)([^\]\n]*)(\])
+      captures:
+        1: punctuation.definition.section.begin.ini
+        2: entity.name.section.ini
+        3: punctuation.definition.section.end.ini
+      push: line-end
+    - match: ^\s*([^=:;#\s][^=:\n]*?)\s*([=:])
+      captures:
+        1: variable.other.key.ini
+        2: keyword.operator.assignment.ini
+      push: value
+
+  comments:
+    - match: ^\s*([;#]).*$\n?
+      scope: comment.line.ini
+      captures:
+        1: punctuation.definition.comment.ini
+
+  line-end:
+    - match: \s+([;#]).*$\n?
+      scope: comment.line.ini
+      captures:
+        1: punctuation.definition.comment.ini
+      pop: true
+    - match: $\n?
+      pop: true
+
+  value:
+    - match: \s+[;#].*$\n?
+      scope: comment.line.ini
+      pop: true
+    - match: $\n?
+      pop: true
+    - match: '"'
+      scope: punctuation.definition.string.begin.ini
+      push:
+        - meta_scope: string.quoted.double.ini
+        - match: \\.
+          scope: constant.character.escape.ini
+        - match: '"'
+          scope: punctuation.definition.string.end.ini
+          pop: true
+        - match: $\n?
+          pop: true
+    - match: "'"
+      scope: punctuation.definition.string.begin.ini
+      push:
+        - meta_scope: string.quoted.single.ini
+        - match: "'"
+          scope: punctuation.definition.string.end.ini
+          pop: true
+        - match: $\n?
+          pop: true
+    - match: (?i)\b(true|false|yes|no|on|off)\b(?=\s*(?:[;#]|$))
+      scope: constant.language.boolean.ini
+    - match: '[-+]?\b\d+(?:\.\d+)?\b(?=\s*(?:[;#]|$))'
+      scope: constant.numeric.ini
+    - match: '[^\s"'';#][^;#\n]*?(?=\s*(?:\s[;#]|$))'
+      scope: string.unquoted.ini

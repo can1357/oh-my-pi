@@ -91,6 +91,7 @@ function makeSession(options: SessionOptions = {}): ToolSession {
 			"async.enabled": false,
 			"task.isolation.enabled": false,
 			"task.enableLsp": true,
+			"task.perCallModel": "on",
 		});
 	const artifactsDir = options.artifactsDir ?? null;
 	const asyncJobManager = new AsyncJobManager({});
@@ -333,6 +334,9 @@ describe("runEvalAgent", () => {
 		expect(firstOptions.parentActiveModelPattern).toBe("p/current");
 		expect(firstOptions.outputSchema).toBe(schema);
 		expect(firstOptions.outputSchemaOverridesAgent).toBe(true);
+		// task.structured is off (default); eval agents keep yield + schemas regardless.
+		expect(firstOptions.structured).toBe(true);
+		expect(secondOptions.structured).toBe(true);
 		expect(firstOptions.assignment).toBe("hello");
 		expect(firstOptions.description).toBe("My Agent");
 		// No per-call override: the agent's own frontmatter model applies.
@@ -341,28 +345,36 @@ describe("runEvalAgent", () => {
 		expect(secondOptions.outputSchemaOverridesAgent).toBeUndefined();
 	});
 
-	it("routes a per-call model on agent() above the selected agent's own model", async () => {
+	it("routes an agent() model above a pinned agent in eval-only mode", async () => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 
 		await runEvalAgentAndWait(
 			{ prompt: "work", agent: "reviewer", model: "p/requested:high" },
-			{ session: makeSession() },
+			{
+				session: makeSession({
+					settings: Settings.isolated({ "task.perCallModel": "eval", "task.isolation.enabled": false }),
+				}),
+			},
 		);
 
 		expect(runSpy.mock.calls[0]?.[0]?.modelOverride).toEqual(["p/requested:high"]);
 	});
 
-	it("rejects an ambiguous or blank per-call model on agent() before dispatch", async () => {
+	it.each([
+		// The gate wins over the selector check, so an invalid selector still reports the disabled gate.
+		{ mode: "off", model: "@smol", error: /task\.perCallModel: off/ },
+		{ mode: "on", model: "default", error: /invalid `model`/ },
+		// The argument schema accepts only a string, so a candidate array never reaches preflight.
+		{ mode: "on", model: ["p/preferred:high", "p/alternative"], error: /model must be a string/ },
+	])("rejects agent() model $model under $mode before dispatch", async ({ mode, model, error }) => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+		const settings = Settings.isolated({ "task.perCallModel": mode, "task.isolation.enabled": false });
 
-		await expect(runEvalAgent({ prompt: "work", model: "default" }, { session: makeSession() })).rejects.toThrow(
-			/"@default"/,
-		);
-		await expect(runEvalAgent({ prompt: "work", model: "   " }, { session: makeSession() })).rejects.toThrow(
-			/invalid `model`/,
-		);
+		await expect(
+			runEvalAgent({ prompt: "work", agent: "reviewer", model }, { session: makeSession({ settings }) }),
+		).rejects.toThrow(error);
 		expect(runSpy).not.toHaveBeenCalled();
 	});
 	it("returns host-parsed data for caller, agent, and inherited schemas", async () => {
@@ -1545,24 +1557,5 @@ describe("runEvalAgent isolation", () => {
 			([target]) => typeof target === "string" && target.includes("omp-eval-agent-"),
 		);
 		expect(removedArtifactsDir).toBe(false);
-	});
-});
-
-describe("agent model arrays", () => {
-	afterEach(async () => {
-		vi.restoreAllMocks();
-		AgentRegistry.resetGlobalForTests();
-		resetRegisteredArtifactDirsForTests();
-		await Promise.all([...jobManagers].map(manager => manager.dispose()));
-		jobManagers.clear();
-	});
-	it("routes an ordered model array without substituting the agent definition", async () => {
-		mockAgents();
-		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
-		await runEvalAgentAndWait(
-			{ prompt: "work", agent: "reviewer", model: ["p/preferred:high", "p/alternative"] },
-			{ session: makeSession() },
-		);
-		expect(runSpy.mock.calls[0]?.[0]?.modelOverride).toEqual(["p/preferred:high", "p/alternative"]);
 	});
 });

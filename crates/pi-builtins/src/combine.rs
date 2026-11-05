@@ -16,11 +16,10 @@ use std::{
 	sync::atomic::{AtomicBool, Ordering},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 use pi_vfs::File;
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Utility, format_usage, matches_parser};
 
 const ARG_FILE1: &str = "file1";
 const ARG_OP: &str = "op";
@@ -118,8 +117,11 @@ fn execute(file1: &OsStr, op: &str, file2: &OsStr, host: &mut Host) -> Result<()
 	let input1 = open_input(file1, host)?;
 	let input2 = open_input(file2, host)?;
 	let cancel = host.cancel_flag();
+	// One write per line on pipes, block-buffered into files; created before
+	// the readers, as it method-borrows `host`.
+	let mut out = host.stdout_writer();
 
-	match (input1, input2) {
+	let operated = match (input1, input2) {
 		(Some(input1), Some(input2)) => operate(
 			BufReader::new(input1),
 			file1,
@@ -127,7 +129,7 @@ fn execute(file1: &OsStr, op: &str, file2: &OsStr, host: &mut Host) -> Result<()
 			file2,
 			op,
 			&cancel,
-			&mut host.stdout,
+			&mut out,
 		),
 		(None, Some(input2)) => operate(
 			BufReader::new(&mut host.stdin),
@@ -136,7 +138,7 @@ fn execute(file1: &OsStr, op: &str, file2: &OsStr, host: &mut Host) -> Result<()
 			file2,
 			op,
 			&cancel,
-			&mut host.stdout,
+			&mut out,
 		),
 		(Some(input1), None) => operate(
 			BufReader::new(input1),
@@ -145,10 +147,14 @@ fn execute(file1: &OsStr, op: &str, file2: &OsStr, host: &mut Host) -> Result<()
 			file2,
 			op,
 			&cancel,
-			&mut host.stdout,
+			&mut out,
 		),
 		(None, None) => unreachable!("two stdin operands were rejected above"),
-	}
+	};
+	// Output before a failure still lands, ahead of the error message.
+	let flushed = out.flush().map_err(|err| Error::Msg(err.to_string()));
+	operated?;
+	flushed
 }
 
 fn operate(
@@ -261,13 +267,8 @@ fn input_failure(name: &OsStr, err: &std::io::Error) -> Error {
 	if pi_vfs::is_cancelled(err) {
 		Error::Cancelled
 	} else {
-		Error::Msg(format!("{}: {err}", name.to_string_lossy()))
+		Error::Msg(format!("{}: {err}", name.display()))
 	}
-}
-
-/// Creates the `combine` builtin registration.
-pub(crate) fn combine_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Combine, SE>()
 }
 
 #[cfg(test)]

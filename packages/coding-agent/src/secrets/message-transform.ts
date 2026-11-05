@@ -12,6 +12,7 @@ import { isRecord } from "@oh-my-pi/pi-utils";
 import type { SessionContext } from "../session/session-context";
 import type { JsonValue, SecretObfuscator } from "./obfuscator";
 import { collectJsonRegexSecretValues, mapJsonStrings } from "./placeholder-scan";
+import { SecretValueSet } from "./placeholder";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Display restore (inbound, persisted/provider → local display)
@@ -119,8 +120,14 @@ export function obfuscateToolArguments(
 	sharedRegexSecretValues?: ReadonlySet<string>,
 ): Record<string, unknown> {
 	if (!obfuscator.hasSecrets()) return args;
-	const regexSecretValues = sharedRegexSecretValues ?? collectJsonRegexSecretValues(obfuscator, args as JsonValue);
-	return mapJsonStrings(args as JsonValue, s => obfuscator.obfuscate(s, regexSecretValues)) as Record<string, unknown>;
+	// `batch()` joins an outer batch when one is already open.
+	return obfuscator.batch(() => {
+		const regexSecretValues = sharedRegexSecretValues ?? collectJsonRegexSecretValues(obfuscator, args as JsonValue);
+		return mapJsonStrings(args as JsonValue, s => obfuscator.obfuscate(s, regexSecretValues)) as Record<
+			string,
+			unknown
+		>;
+	});
 }
 
 /** Copy native replay containers only when a provider-visible plaintext field changes. */
@@ -535,7 +542,13 @@ function deobfuscateTextBlocks(
 /**
  * Re-obfuscate assistant content before it returns to a provider after session
  * restoration, removing friendly prefixes made unsafe by this batch. A changed
- * thinking block loses its byte-bound replay signature.
+ * thinking block loses its byte-bound replay signature, and so does a tool call
+ * whose arguments changed: the Gemini `thoughtSignature` is an encrypted
+ * attestation over the function call it rides on, so replaying obfuscated
+ * arguments under a signature issued for the raw ones pairs a valid signature
+ * with a payload it does not cover. `intent` and `rawBlock` are harness-side
+ * fields the signed part never carries, so they keep it.
+ * https://ai.google.dev/gemini-api/docs/thought-signatures
  */
 function obfuscateAssistantContentForReplay(
 	obfuscator: SecretObfuscator,
@@ -567,7 +580,9 @@ function obfuscateAssistantContentForReplay(
 			const rawBlock = block.rawBlock === undefined ? undefined : obfuscate(block.rawBlock);
 			if (args === block.arguments && intent === block.intent && rawBlock === block.rawBlock) return block;
 			changed = true;
-			return { ...block, arguments: args, intent, rawBlock };
+			return args === block.arguments
+				? { ...block, intent, rawBlock }
+				: { ...block, arguments: args, intent, rawBlock, thoughtSignature: undefined };
 		}
 		return block;
 	});
@@ -576,7 +591,7 @@ function obfuscateAssistantContentForReplay(
 
 /**
  * Harness file metadata riding on a natively-replayed compaction summary.
- * The provider converter emits it after the verbatim block, so it must pass
+ * The provider converter emits it beside the verbatim block's retained tail, so it must pass
  * the same outbound boundary as the summary text it was split from. The
  * verbatim block content itself stays untouched: it must match the opaque
  * provider state replayed beside it.
@@ -592,8 +607,26 @@ function anthropicCompactionFilesText(message: Message): string | undefined {
 	return typeof filesText === "string" && filesText.length > 0 ? filesText : undefined;
 }
 
-function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages: Message[]): Set<string> {
-	const values = new Set<string>();
+function obfuscateAnthropicCompactionFiles(
+	obfuscator: SecretObfuscator,
+	payload: AnthropicCompactionPayload,
+	sharedRegexSecretValues: SecretValueSet,
+): AnthropicCompactionPayload {
+	const filesText =
+		payload.filesText === undefined ? undefined : obfuscator.obfuscate(payload.filesText, sharedRegexSecretValues);
+	let retainedChanged = false;
+	const retainedFiles = payload.retainedFiles?.map(files => {
+		const text = obfuscator.obfuscate(files.text, sharedRegexSecretValues);
+		if (text === files.text) return files;
+		retainedChanged = true;
+		return { ...files, text };
+	});
+	if (filesText === payload.filesText && !retainedChanged) return payload;
+	return { ...payload, filesText, retainedFiles };
+}
+
+function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages: Message[]): SecretValueSet {
+	const values = new SecretValueSet();
 	const addText = (text: string | undefined): void => {
 		if (text === undefined) return;
 		for (const value of obfuscator.collectRegexSecretValuesForObfuscation(text)) {
@@ -606,6 +639,7 @@ function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages:
 		// join the shared set.
 		const compactionFiles = anthropicCompactionFilesText(message);
 		if (compactionFiles !== undefined) addText(compactionFiles);
+		for (const files of anthropicCompactionPayload(message)?.retainedFiles ?? []) addText(files.text);
 		if (message.role === "user" || message.role === "developer" || message.role === "assistant") {
 			collectNativeReplayRegexSecretValues(obfuscator, message, values);
 		}
@@ -651,16 +685,23 @@ function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages:
  */
 export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Message[]): Message[] {
 	if (!obfuscator.obfuscates()) return messages;
+	return obfuscator.batch(() => obfuscateMessageBatch(obfuscator, messages));
+}
+
+function obfuscateMessageBatch(obfuscator: SecretObfuscator, messages: Message[]): Message[] {
 	const sharedRegexSecretValues = collectMessageRegexSecretValues(obfuscator, messages);
 	let changed = false;
 	const result = messages.map((message): Message => {
 		let current = message;
 		const compactionPayload = anthropicCompactionPayload(current);
-		const compactionFiles = anthropicCompactionFilesText(current);
-		if (compactionPayload !== undefined && compactionFiles !== undefined) {
-			const filesText = obfuscator.obfuscate(compactionFiles, sharedRegexSecretValues);
-			if (filesText !== compactionFiles) {
-				current = { ...current, providerPayload: { ...compactionPayload, filesText } } as Message;
+		if (compactionPayload !== undefined) {
+			const providerPayload = obfuscateAnthropicCompactionFiles(
+				obfuscator,
+				compactionPayload,
+				sharedRegexSecretValues,
+			);
+			if (providerPayload !== compactionPayload) {
+				current = { ...current, providerPayload } as Message;
 				changed = true;
 			}
 		}

@@ -1,6 +1,8 @@
 import { describe, expect, it, mock } from "bun:test";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { type } from "@oh-my-pi/omptype";
 import { type FactoryDroidGeminiOptions, streamFactoryDroidGemini } from "../src/providers/factory-droid/gemini";
+import * as AIError from "../src/error";
 import { SKIP_THOUGHT_SIGNATURE } from "../src/providers/google-shared";
 import { withCredentialRedaction } from "../src/providers/transform-messages";
 import type { AssistantMessage, Context, Model, StopReason, ToolResultMessage } from "../src/types";
@@ -87,8 +89,7 @@ describe("Factory Droid gemini wire — history replay", () => {
 							{ type: "thinking", thinking: "unsigned reasoning" },
 							{ type: "thinking", thinking: "signed reasoning", thinkingSignature: "sig-think" },
 							{ type: "toolCall", id: "signed-call", name: "Read", arguments: {}, thoughtSignature: "sig-call" },
-							// A signature captured on a TEXT block is never replayed —
-							// the CLI never signs text, and it is not funneled into thinking.
+							// The reply's signature replays on the text it signed.
 							{ type: "text", text: "answer", textSignature: "text-sig" },
 							{ type: "thinking", thinking: "second unsigned" },
 						],
@@ -103,13 +104,35 @@ describe("Factory Droid gemini wire — history replay", () => {
 			expect(modelTurn?.parts).toEqual([
 				{ text: "signed reasoning", thoughtSignature: "sig-think" },
 				{ functionCall: { name: "Read", args: {} }, thoughtSignature: "sig-call" },
-				{ text: "answer" },
+				{ text: "answer", thoughtSignature: "text-sig" },
 			]);
 			expect(JSON.stringify(modelTurn)).not.toContain('thought":true');
-			expect(JSON.stringify(modelTurn)).not.toContain("text-sig");
 			expect(captured[0].body.systemInstruction).toEqual({ parts: [{ text: "first block\nsecond block" }] });
 		},
 	);
+
+	it("replays a text signature only to the model that signed it", async () => {
+		const { contents } = await run({
+			messages: [
+				{ role: "user", content: "hi", timestamp: 1 },
+				assistantMessage([{ type: "text", text: "other Gemini", textSignature: "other-model-sig" }], {
+					provider: "google-antigravity",
+					api: "google-gemini-cli",
+					model: "gemini-3.8-flash",
+				}),
+				{ role: "user", content: "next", timestamp: 2 },
+				assistantMessage(
+					[{ type: "text", text: "Responses reply", textSignature: JSON.stringify({ v: 1, id: "msg_1" }) }],
+					{ provider: "openai-codex", api: "openai-codex-responses", model: "gpt-5.5" },
+				),
+				{ role: "user", content: "again", timestamp: 3 },
+			],
+		});
+		expect(contents.filter(entry => entry.role === "model").map(entry => entry.parts)).toEqual([
+			[{ text: "other Gemini" }],
+			[{ text: "Responses reply" }],
+		]);
+	});
 
 	it("drops foreign wire signatures while retaining tool calls across two turns", async () => {
 		const captured: CapturedRequest[] = [];
@@ -198,6 +221,87 @@ describe("Factory Droid gemini wire — history replay", () => {
 		expect(thinking[1]).toMatchObject({ thinking: "second think", thinkingSignature: "sig-2" });
 	});
 
+	it("keeps an empty thought part's signature on a thinking block of its own", async () => {
+		const { result } = await run("hi", [
+			JSON.stringify({
+				candidates: [
+					{
+						content: {
+							parts: [
+								{ thought: true, text: "", thoughtSignature: "sig-opening" },
+								{ text: "visible answer" },
+								{ thought: true, text: "", thoughtSignature: "sig-after-text" },
+							],
+						},
+					},
+				],
+			}),
+			finishChunk("STOP"),
+		]);
+		expect(result.content).toMatchObject([
+			{ type: "thinking", thinking: "", thinkingSignature: "sig-opening" },
+			{ type: "text", text: "visible answer" },
+			{ type: "thinking", thinking: "", thinkingSignature: "sig-after-text" },
+		]);
+		expect(result.content[1]).not.toHaveProperty("textSignature");
+	});
+
+	it("keeps the newest signature of a thinking block signed more than once, as the other Google routes do", async () => {
+		// Live Factory and Antigravity thought parts arrive unsigned; Gemini validates
+		// only function-call signatures, so this pins the rule rather than a wire need.
+		const { result } = await run("hi", [
+			JSON.stringify({
+				candidates: [
+					{
+						content: {
+							parts: [
+								{ thought: true, text: "first part ", thoughtSignature: "sig-1" },
+								{ thought: true, text: "second part", thoughtSignature: "sig-2" },
+								{ text: "answer" },
+							],
+						},
+					},
+				],
+			}),
+			finishChunk("STOP"),
+		]);
+		expect(result.content[0]).toMatchObject({ thinking: "first part second part", thinkingSignature: "sig-2" });
+
+		const { contents } = await run({ messages: [{ role: "user", content: "hi", timestamp: 1 }, result] });
+		expect(contents.find(entry => entry.role === "model")?.parts[0]).toEqual({
+			text: "first part second part",
+			thoughtSignature: "sig-2",
+		});
+	});
+
+	it("stores and replays signed thinking exactly as received", async () => {
+		const summary = "```thinking\nWeigh the divisors.\n```\n";
+		const { result } = await run("is 7919 prime?", [
+			JSON.stringify({
+				candidates: [
+					{
+						content: {
+							parts: [
+								{ thought: true, text: summary, thoughtSignature: "sig-think" },
+								{ text: "7919 is prime." },
+							],
+						},
+					},
+				],
+			}),
+			finishChunk("STOP"),
+		]);
+		expect(result.content[0]).toMatchObject({ type: "thinking", thinking: summary, thinkingSignature: "sig-think" });
+
+		const { contents } = await run({
+			messages: [{ role: "user", content: "is 7919 prime?", timestamp: 1 }, result],
+		});
+		expect(contents.find(entry => entry.role === "model")?.parts[0]).toEqual({
+			text: summary,
+			thoughtSignature: "sig-think",
+		});
+	});
+
 	it("drops sentinel-signed thinking rather than exposing it as assistant text", async () => {
 		const { contents } = await run({
 			messages: [
@@ -210,24 +314,34 @@ describe("Factory Droid gemini wire — history replay", () => {
 		expect(contents.find(entry => entry.role === "model")).toBeUndefined();
 	});
 
-	it("keeps the first signature captured per thinking block", async () => {
-		const { result } = await run("hi", [
+	it("keeps the signature Gemini sends after a reply's last text chunk", async () => {
+		const { result } = await run("is 7917 prime?", [
+			JSON.stringify({
+				candidates: [{ content: { role: "model", parts: [{ text: "**Testing primality**", thought: true }] } }],
+			}),
+			JSON.stringify({ candidates: [{ content: { role: "model", parts: [{ text: "No, 7917 is" }] } }] }),
+			JSON.stringify({ candidates: [{ content: { role: "model", parts: [{ text: " not prime." }] } }] }),
 			JSON.stringify({
 				candidates: [
 					{
-						content: {
-							role: "model",
-							parts: [
-								{ thought: true, text: "first", thoughtSignature: "sig-1" },
-								{ thought: true, text: " second", thoughtSignature: "sig-2" },
-							],
-						},
+						content: { role: "model", parts: [{ text: "", thoughtSignature: "reply-sig" }] },
+						finishReason: "STOP",
 					},
 				],
 			}),
-			finishChunk("STOP"),
 		]);
-		expect(result.content).toEqual([{ type: "thinking", thinking: "first second", thinkingSignature: "sig-1" }]);
+		expect(result.content[1]).toEqual({ type: "text", text: "No, 7917 is not prime.", textSignature: "reply-sig" });
+
+		const { contents } = await run({
+			messages: [
+				{ role: "user", content: "is 7917 prime?", timestamp: 1 },
+				result,
+				{ role: "user", content: "and 7921?", timestamp: 2 },
+			],
+		});
+		expect(contents.find(entry => entry.role === "model")?.parts).toEqual([
+			{ text: "No, 7917 is not prime.", thoughtSignature: "reply-sig" },
+		]);
 	});
 
 	it("captures thoughtSignature on tool calls and replays the droid continuation shape", async () => {
@@ -289,6 +403,28 @@ describe("Factory Droid gemini wire — outbound normalization", () => {
 		expect(calls).toHaveLength(2);
 		expect(responses).toHaveLength(2);
 		expect(contents.filter(entry => entry.parts.some(part => part.functionResponse))).toHaveLength(1);
+	});
+
+	it("sends parallel results stored out of call order back in call order", async () => {
+		const { contents } = await run({
+			messages: [
+				{ role: "user", content: "read both", timestamp: 1 },
+				assistantMessage(
+					[
+						{ type: "toolCall", id: "call-a", name: "Read", arguments: { path: "/a" } },
+						{ type: "toolCall", id: "call-b", name: "Read", arguments: { path: "/b" } },
+					],
+					{ stopReason: "toolUse" },
+				),
+				toolResult("call-b", "b body"),
+				toolResult("call-a", "a body"),
+			],
+		});
+		const responses = contents.flatMap(entry => entry.parts.filter(part => part.functionResponse));
+		expect(responses.map(part => part.functionResponse)).toEqual([
+			{ name: "Read", response: { result: "a body" } },
+			{ name: "Read", response: { result: "b body" } },
+		]);
 	});
 
 	// Responses tool results carry `call_id|item_id` composites; pairing them
@@ -363,6 +499,53 @@ describe("Factory Droid gemini wire — finishReason mapping", () => {
 		if (errorMessage) expect(result.errorMessage).toContain(errorMessage);
 		expect(result.stopDetails).toEqual(stopDetails);
 		if (stopReason === "toolUse") expect(result.content[0]).toMatchObject({ type: "toolCall", name: "Read" });
+	});
+
+	const textChunk = JSON.stringify({ candidates: [{ content: { role: "model", parts: [{ text: "Hel" }] } }] });
+	it.each<{ name: string; chunks: string[] }>([
+		{ name: "text", chunks: [textChunk] },
+		{ name: "functionCall", chunks: [toolCallChunk] },
+	])("a $name stream that ends without a finishReason is a retryable incomplete stream", async ({ chunks }) => {
+		const { result } = await run("hi", chunks);
+		expect(result.stopReason).toBe("error");
+		expect(AIError.is(result.errorId, AIError.Flag.Transient)).toBe(true);
+		const id = AIError.classifyMessage({ errorId: result.errorId, errorMessage: result.errorMessage });
+		expect(AIError.retriable(id)).toBe(true);
+	});
+
+	it("an empty body that reaches EOF is a retryable incomplete stream", async () => {
+		const emptyBody = mock(async () => new Response("", { status: 200 })) as unknown as typeof fetch;
+		const { result } = await run("hi", [], { fetch: emptyBody });
+		expect(result.stopReason).toBe("error");
+		const id = AIError.classifyMessage({ errorId: result.errorId, errorMessage: result.errorMessage });
+		expect(AIError.retriable(id)).toBe(true);
+	});
+
+	it.each([
+		{ code: 400, status: "INVALID_ARGUMENT", retriable: false },
+		{ code: 503, status: "UNAVAILABLE", retriable: true },
+	])("an in-band $code error frame keeps its status and classification", async ({ code, status, retriable }) => {
+		const errorFrame = JSON.stringify({ error: { code, message: "upstream said no", status } });
+		const { result } = await run("hi", [textChunk, errorFrame]);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(code);
+		const id = AIError.classifyMessage({ errorId: result.errorId, errorMessage: result.errorMessage });
+		expect(AIError.retriable(id)).toBe(retriable);
+	});
+
+	it("keeps a promptFeedback block without a finishReason a non-retryable content filter", async () => {
+		const blocked = JSON.stringify({ promptFeedback: { blockReason: "PROHIBITED_CONTENT" } });
+		const { result } = await run("hi", [blocked]);
+		expect(result.stopReason).toBe("error");
+		expect(result.stopDetails).toEqual({ type: "content_filter", category: "PROHIBITED_CONTENT" });
+		const id = AIError.classifyMessage({ errorId: result.errorId, errorMessage: result.errorMessage });
+		expect(AIError.retriable(id)).toBe(false);
+	});
+
+	it("a STOP stream finishes cleanly", async () => {
+		const { result } = await run("hi", [textChunk, finishChunk("STOP")]);
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toMatchObject([{ type: "text", text: "Hel" }]);
 	});
 });
 
@@ -448,6 +631,277 @@ describe("Factory Droid gemini wire — request options", () => {
 		const generation = captured[0].body.generationConfig as Record<string, unknown>;
 		// Disabled thinking flips the flag off and never emits a thinkingLevel.
 		expect(generation.thinkingConfig).toEqual({ includeThoughts: false });
+	});
+});
+
+describe("Factory Droid gemini wire — native replay policy", () => {
+	const argonPolicy = { googleOmitSampling: true, googlePinMaxOutputTokens: true, googleNativeReplay: true };
+	const argon = () => ({ ...gemini(), id: "gemini-4-argon", maxTokens: 65536 });
+	/** A thought summary, then an unsigned call carrying Gemini's own id and a field omp does not model. */
+	const nativeChunks = [
+		JSON.stringify({
+			candidates: [
+				{ content: { role: "model", parts: [{ text: "Plan.", thought: true, thoughtSignature: "sig-t" }] } },
+			],
+		}),
+		JSON.stringify({
+			candidates: [
+				{
+					content: {
+						role: "model",
+						parts: [{ functionCall: { id: "fc-1", name: "Read", args: { path: "a" } }, futureField: 1 }],
+					},
+					finishReason: "STOP",
+				},
+			],
+		}),
+	];
+	const tools = [{ name: "Read", description: "Read", parameters: type({ path: "string" }) }];
+
+	it("sends no sampling parameters and pins the output cap to the model maximum", async () => {
+		const { captured } = await run(
+			"hi",
+			undefined,
+			{
+				requestPolicy: argonPolicy,
+				temperature: 0.2,
+				topP: 0.5,
+				topK: 8,
+				reasoning: Effort.Medium,
+				thinkingDialect: "level-medium",
+			},
+			argon(),
+		);
+		expect(captured[0].body.generationConfig).toEqual({
+			maxOutputTokens: 65536,
+			thinkingConfig: { includeThoughts: true, thinkingLevel: "MEDIUM" },
+		});
+	});
+
+	it("replays its own turn as the native content Gemini streamed, call ids included", async () => {
+		const first = await run(
+			{ messages: [{ role: "user", content: "go", timestamp: 1 }], tools },
+			nativeChunks,
+			{ requestPolicy: argonPolicy },
+			argon(),
+		);
+		const call = first.result.content.find(block => block.type === "toolCall");
+		if (call?.type !== "toolCall") throw new Error("expected a tool call");
+		const { contents } = await run(
+			{
+				messages: [{ role: "user", content: "go", timestamp: 1 }, first.result, toolResult(call.id, "body")],
+				tools,
+			},
+			undefined,
+			{ requestPolicy: argonPolicy },
+			argon(),
+		);
+		expect(contents[1]).toEqual({
+			role: "model",
+			parts: [
+				{ text: "Plan.", thought: true, thoughtSignature: "sig-t" },
+				{ functionCall: { id: "fc-1", name: "Read", args: { path: "a" } }, futureField: 1 },
+			],
+		});
+		expect(contents[2].parts[0].functionResponse).toEqual({ id: "fc-1", name: "Read", response: { result: "body" } });
+	});
+
+	it("rebuilds a rewritten turn and stamps its unsigned calls", async () => {
+		const first = await run(
+			{ messages: [{ role: "user", content: "go", timestamp: 1 }], tools },
+			nativeChunks,
+			{ requestPolicy: argonPolicy },
+			argon(),
+		);
+		const call = first.result.content.find(block => block.type === "toolCall");
+		if (call?.type !== "toolCall") throw new Error("expected a tool call");
+		const rewritten = { ...first.result, content: [{ ...call, arguments: { path: "b" } }] };
+		const { contents } = await run(
+			{
+				messages: [
+					{ role: "user", content: "go", timestamp: 1 },
+					rewritten,
+					toolResult(call.id, "body"),
+					{ role: "user", content: "next", timestamp: 3 },
+				],
+				tools,
+			},
+			undefined,
+			{ requestPolicy: argonPolicy },
+			argon(),
+		);
+		expect(contents[1]).toEqual({
+			role: "model",
+			parts: [{ functionCall: { name: "Read", args: { path: "b" } }, thoughtSignature: SKIP_THOUGHT_SIGNATURE }],
+		});
+		expect(contents[2].parts[0].functionResponse).not.toHaveProperty("id");
+	});
+
+	it("rebuilds a native turn that credential redaction rewrites, so the secret stays off the wire", async () => {
+		const token = "ghp_aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5bC7d";
+		const chunks = [
+			JSON.stringify({
+				candidates: [
+					{
+						content: {
+							role: "model",
+							parts: [
+								{ functionCall: { id: "fc-1", name: "Read", args: { path: token } }, thoughtSignature: "s" },
+							],
+						},
+						finishReason: "STOP",
+					},
+				],
+			}),
+		];
+		const first = await run(
+			{ messages: [{ role: "user", content: "go", timestamp: 1 }], tools },
+			chunks,
+			{ requestPolicy: argonPolicy },
+			argon(),
+		);
+		const call = first.result.content.find(block => block.type === "toolCall");
+		if (call?.type !== "toolCall") throw new Error("expected a tool call");
+		const { contents } = await withCredentialRedaction(true, () =>
+			run(
+				{
+					messages: [{ role: "user", content: "go", timestamp: 1 }, first.result, toolResult(call.id, "body")],
+					tools,
+				},
+				undefined,
+				{ requestPolicy: argonPolicy },
+				argon(),
+			),
+		);
+		const wire = JSON.stringify(contents);
+		expect(wire).not.toContain(token);
+		expect(contents[1].parts[0]).toEqual({
+			functionCall: { name: "Read", args: { path: "[github_token_redacted]" } },
+			thoughtSignature: SKIP_THOUGHT_SIGNATURE,
+		});
+		expect(contents[2].parts[0].functionResponse).not.toHaveProperty("id");
+	});
+
+	it("rebuilds a native turn whose unsigned thought redaction would rewrite", async () => {
+		// The rebuilt turn drops the unsigned thought, so only the native content could carry it out.
+		const token = "ghp_aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5bC7d";
+		const chunks = [
+			JSON.stringify({
+				candidates: [
+					{
+						content: { role: "model", parts: [{ text: `use ${token}`, thought: true }, { text: "done" }] },
+						finishReason: "STOP",
+					},
+				],
+			}),
+		];
+		const first = await run("go", chunks, { requestPolicy: argonPolicy }, argon());
+		const { contents } = await withCredentialRedaction(true, () =>
+			run(
+				{
+					messages: [
+						{ role: "user", content: "go", timestamp: 1 },
+						first.result,
+						{ role: "user", content: "next", timestamp: 3 },
+					],
+				},
+				undefined,
+				{ requestPolicy: argonPolicy },
+				argon(),
+			),
+		);
+		expect(JSON.stringify(contents)).not.toContain(token);
+		expect(contents[1]).toEqual({ role: "model", parts: [{ text: "done" }] });
+	});
+
+	/** Streams `parts` as one Argon turn, then replays it with each call's result; returns the second request. */
+	async function replayWithResults(parts: Array<Record<string, unknown>>): Promise<Contents> {
+		const chunks = [JSON.stringify({ candidates: [{ content: { role: "model", parts }, finishReason: "STOP" }] })];
+		const first = await run("go", chunks, { requestPolicy: argonPolicy }, argon());
+		const calls = first.result.content.filter(block => block.type === "toolCall");
+		const { contents } = await run(
+			{
+				messages: [
+					{ role: "user", content: "go", timestamp: 1 },
+					first.result,
+					...calls.map(call => toolResult(call.id, "body", call.name)),
+				],
+				tools,
+			},
+			undefined,
+			{ requestPolicy: argonPolicy },
+			argon(),
+		);
+		return contents;
+	}
+
+	it("rebuilds a native turn when normalization drops its malformed call beside a valid one", async () => {
+		const contents = await replayWithResults([
+			{ functionCall: { id: "fc-1", name: "Read", args: { path: "a" } }, thoughtSignature: "sig-1" },
+			{ functionCall: { id: "fc-bad", name: "", args: {} } },
+		]);
+		expect(JSON.stringify(contents)).not.toContain("fc-");
+		expect(contents[1]).toEqual({
+			role: "model",
+			parts: [{ functionCall: { name: "Read", args: { path: "a" } }, thoughtSignature: "sig-1" }],
+		});
+		expect(contents[2]).toEqual({
+			role: "user",
+			parts: [{ functionResponse: { name: "Read", response: { result: "body" } } }],
+		});
+	});
+
+	it("sends a native turn's parallel results in call order", async () => {
+		const chunks = [
+			JSON.stringify({
+				candidates: [
+					{
+						content: {
+							role: "model",
+							parts: [
+								{ functionCall: { id: "fc-1", name: "Read", args: { path: "a" } }, thoughtSignature: "s" },
+								{ functionCall: { id: "fc-2", name: "Read", args: { path: "b" } } },
+							],
+						},
+						finishReason: "STOP",
+					},
+				],
+			}),
+		];
+		const first = await run(
+			{ messages: [{ role: "user", content: "go", timestamp: 1 }], tools },
+			chunks,
+			{ requestPolicy: argonPolicy },
+			argon(),
+		);
+		const [a, b] = first.result.content.filter(block => block.type === "toolCall");
+		const { contents } = await run(
+			{
+				messages: [
+					{ role: "user", content: "go", timestamp: 1 },
+					first.result,
+					toolResult(b.id, "body b"),
+					toolResult(a.id, "body a"),
+				],
+				tools,
+			},
+			undefined,
+			{ requestPolicy: argonPolicy },
+			argon(),
+		);
+		expect(contents[1].parts.map(part => part.functionCall)).toEqual([
+			{ id: "fc-1", name: "Read", args: { path: "a" } },
+			{ id: "fc-2", name: "Read", args: { path: "b" } },
+		]);
+		expect(contents[2].parts.map(part => part.functionResponse)).toEqual([
+			{ id: "fc-1", name: "Read", response: { result: "body a" } },
+			{ id: "fc-2", name: "Read", response: { result: "body b" } },
+		]);
+	});
+
+	it("records no native content for models without the policy", async () => {
+		const { result } = await run({ messages: [{ role: "user", content: "go", timestamp: 1 }], tools }, nativeChunks);
+		expect(result.providerPayload).toBeUndefined();
 	});
 });
 
@@ -718,35 +1172,48 @@ describe("Factory Droid gemini wire — tool schema allowlist", () => {
 		});
 	});
 
-	it("truncates long tool names with a sha256 suffix", async () => {
-		const { captured } = await run({
-			messages: [{ role: "user", content: "hi", timestamp: 1 }],
-			tools: [
-				{
-					name: "x".repeat(120),
-					description: "long",
-					parameters: { type: "object", properties: { a: { type: "string" } } },
-				},
+	it("caps long tool names at 64 characters, hash suffix included, and keeps their calls in replayed history", async () => {
+		const name = "mcp__some_long_server_name__some_long_tool_name_that_exceeds_limits";
+		const tool = { name, description: "long", parameters: { type: "object", properties: { a: { type: "string" } } } };
+		const first = await run({ messages: [{ role: "user", content: "hi", timestamp: 1 }], tools: [tool] });
+		const wire = declarations(first.captured)[0].name;
+		expect(wire).toMatch(/^mcp__some_long_server_name__some_long_tool_name_that_ex_[0-9a-f]{8}$/);
+		expect(wire).toHaveLength(64);
+		const call = { type: "toolCall" as const, id: "call_long", name, arguments: { a: "x" }, thoughtSignature: "sig" };
+		const { captured, contents } = await run({
+			messages: [
+				{ role: "user", content: "hi", timestamp: 1 },
+				assistantMessage([call], { stopReason: "toolUse" }),
+				toolResult("call_long", "long result", name),
 			],
+			tools: [tool],
 		});
-		expect(declarations(captured)[0].name).toMatch(/^x{64}_[0-9a-f]{8}$/);
+		// Stable across requests, and the call and its result both survive replay.
+		expect(declarations(captured)[0].name).toBe(wire);
+		expect(contents[1].parts).toEqual([{ functionCall: { name: wire, args: { a: "x" } }, thoughtSignature: "sig" }]);
+		expect(contents[2].parts).toEqual([{ functionResponse: { name: wire, response: { result: "long result" } } }]);
 	});
 
 	const dotted = { description: "d", parameters: { type: "object", properties: {} } };
 
-	it("returns calls under the caller's tool name, not the sanitized wire name", async () => {
-		const call = JSON.stringify({
-			candidates: [{ content: { parts: [{ functionCall: { name: "my_tool", args: { a: "1" } } }] } }],
+	it.each([
+		["my.tool", "my_tool"],
+		[`mcp.${"t".repeat(69)}`, `mcp_${"t".repeat(51)}_`],
+	])("returns a call to %s under the caller's tool name, not the sanitized wire name", async (name, wirePrefix) => {
+		const first = await run({
+			messages: [{ role: "user", content: "hi", timestamp: 1 }],
+			tools: [{ name, ...dotted }],
 		});
-		const { result, captured } = await run(
-			{ messages: [{ role: "user", content: "hi", timestamp: 1 }], tools: [{ name: "my.tool", ...dotted }] },
+		const wire = String(declarations(first.captured)[0].name);
+		expect(wire.startsWith(wirePrefix)).toBe(true);
+		const call = JSON.stringify({
+			candidates: [{ content: { parts: [{ functionCall: { name: wire, args: { a: "1" } } }] } }],
+		});
+		const { result } = await run(
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }], tools: [{ name, ...dotted }] },
 			[call, finishChunk("STOP")],
 		);
-		expect(declarations(captured)[0].name).toBe("my_tool");
-		expect(result.content.find(block => block.type === "toolCall")).toMatchObject({
-			name: "my.tool",
-			arguments: { a: "1" },
-		});
+		expect(result.content.find(block => block.type === "toolCall")).toMatchObject({ name, arguments: { a: "1" } });
 	});
 
 	it("rejects two tools that encode to the same wire name before sending", async () => {

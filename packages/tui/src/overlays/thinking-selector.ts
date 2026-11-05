@@ -1,3 +1,4 @@
+import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../thinking";
 import { type SelectItem, SelectList, type SgrMouseEvent } from "../index";
 import { getSelectListTheme } from "../theme/theme";
@@ -46,10 +47,13 @@ export class ThinkingSelectorComponent extends OverlayPanel {
 			icon: "brain",
 			noun: "levels",
 			current: currentLevel ? [currentLevel] : [],
-			decorate: item =>
-				item.value === AUTO_THINKING
-					? {}
-					: { chips: [{ text: "", dot: `thinking${item.value.charAt(0).toUpperCase()}${item.value.slice(1)}` }] },
+			// How hard each level thinks, as a meter from off (empty) to the deepest effort (full); auto has none.
+			columns: [{ id: "depth", format: "bar" }],
+			decorate: item => {
+				if (item.value === AUTO_THINKING) return undefined;
+				const effort = THINKING_EFFORTS.indexOf(item.value as (typeof THINKING_EFFORTS)[number]);
+				return { facts: { depth: (effort + 1) / THINKING_EFFORTS.length } };
+			},
 		});
 	}
 

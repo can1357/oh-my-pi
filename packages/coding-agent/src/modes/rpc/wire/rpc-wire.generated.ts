@@ -16,6 +16,8 @@ export interface ThinkingContent {
 	thinking: string;
 	thinkingSignature?: string;
 	itemId?: string;
+	/** Prose the model addressed to the user, returned by the provider as thinking; present it as answer text. */
+	narration?: boolean;
 }
 
 export interface RedactedThinkingContent {
@@ -376,7 +378,7 @@ export type QueuedMessageQueue = "steering" | "followUp";
 
 export type CacheWarmingMode = "off" | "streaming" | "idle";
 
-/** `set_event_filter` projection: `delta` drops the accumulated snapshots from `message_update`. */
+/** `set_event_filter` projection: `delta` replaces the accumulated snapshots with the block a start/end event touches. */
 export type MessageUpdates = "full" | "delta";
 
 export type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned" | "blocked";
@@ -418,6 +420,8 @@ export interface ContextUsage {
 export interface QueuedMessagesState {
 	steering: string[];
 	followUp: string[];
+	/** Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them. */
+	liveSteered?: number;
 }
 
 export interface ToolDescriptor {
@@ -453,6 +457,30 @@ export interface GoalResult {
 	state: GoalModeState | null;
 }
 
+/** Where `/slow` lives: persisted config shared by every session, or this session's flex tier. */
+export type SlowModeScope = "session" | "global";
+
+/** Requests are served on the provider's low-priority (slow) lane. */
+export interface UsageLimitLowPriority {
+	stage: "low_priority";
+	/** Epoch seconds when the limit that was hit resets. */
+	resetsAtSec: number;
+	/** Percent of the low-priority allowance still available, when reported. */
+	allowanceLeftPercent?: number;
+}
+
+/** Requests run on a short wrap-up allowance past the limit. */
+export interface UsageLimitWrapUp {
+	stage: "wrap_up";
+	/** Whether paid extra usage serves requests once the allowance is spent. */
+	extraUsage: boolean;
+	/** Epoch seconds when the limit that was hit resets, if reported. */
+	resetsAtSec?: number;
+}
+
+/** Provider-neutral state of an account past its usage limit, discriminated by `stage`. */
+export type UsageLimitState = UsageLimitLowPriority | UsageLimitWrapUp;
+
 export interface SessionState {
 	sessionId: string;
 	model?: ModelInfo;
@@ -467,6 +495,14 @@ export interface SessionState {
 	autoCompactionEnabled?: boolean;
 	fastModeEnabled?: boolean;
 	fastModeActive?: boolean;
+	/** `/slow` applies to the active model. */
+	slowModeSupported?: boolean;
+	/** `/slow` is on for the active model; always `false` when `slowModeSupported` is `false`. */
+	slowModeEnabled?: boolean;
+	/** Where the active model's `/slow` lives; absent when unsupported. */
+	slowModeScope?: SlowModeScope;
+	/** Usage-limit stage of the active model's account; absent outside wrap-up and low priority. */
+	usageLimit?: UsageLimitState;
 	tokensPerSecond?: number | null;
 	messageCount?: number;
 	queuedMessageCount?: number;
@@ -496,9 +532,29 @@ export interface BashResult {
 	timedOut?: boolean;
 	artifactId?: string;
 	artifactElidedBytes?: number;
+	/** Bytes dropped from the middle of `output`, which keeps the head and tail. */
+	elidedBytes?: number;
+	/** Lines dropped from the middle of `output`. */
+	elidedLines?: number;
+	/** Bytes the per-line column cap cut from `output`, across all lines. */
+	columnDroppedBytes?: number;
+	/** Lines of `output` the per-line column cap cut; the artifact holds them whole. */
+	columnTruncatedLines?: number;
+	/** First and last lines the column cap cut, numbered as in the artifact; absent when the numbering cannot match it. */
+	columnTruncatedRange?: LineRange;
+	/** The per-line column cap in UTF-8 bytes, set when it cut a line. */
+	columnMax?: number;
 	artifactError?: Record<string, unknown>;
+	minimized?: Record<string, unknown>;
 	workingDir?: string;
 	images?: ImageContent[];
+	/** The embedded shell's final `ShellTrace` of the run; only when the caller asked for one. */
+	trace?: Record<string, unknown>;
+}
+
+export interface LineRange {
+	first: number;
+	last: number;
 }
 
 export interface FastModeResult {
@@ -513,6 +569,7 @@ export interface CompactionResult {
 	shortSummary?: string;
 	details?: unknown;
 	preserveData?: Record<string, unknown>;
+	providerReplayThroughEntryId?: string;
 }
 
 export interface ModelCycleResult {
@@ -539,10 +596,30 @@ export interface OpenSessionResult {
 
 export interface RemoveQueuedMessageResult {
 	removed: boolean;
+	/** The removed message's images, so the client can restore them with its text. */
+	images?: ImageContent[];
+	/** Only ever `true`: the images exceeded the transport limit and were omitted; the removal still happened. */
+	imagesDropped?: boolean;
 }
 
 export interface PromoteQueuedMessageResult {
 	promoted: boolean;
+}
+
+/** Queued user content withdrawn from the queue, as the editor would restore it. */
+export interface RestoredQueuedMessage {
+	text: string;
+	images?: ImageContent[];
+}
+
+/** User-authored queued input withdrawn before the abort, oldest first. */
+export interface AbortAndRestoreQueueResult {
+	steering: RestoredQueuedMessage[];
+	followUp: RestoredQueuedMessage[];
+	/** Only ever `true`: the full result exceeded the transport limit and every `images` was omitted. */
+	imagesDropped?: boolean;
+	/** Only ever `true`: even the text-only result exceeded the limit, so only an oldest-first prefix is listed. */
+	truncated?: boolean;
 }
 
 export interface BranchMessage {
@@ -553,6 +630,14 @@ export interface BranchMessage {
 export interface BranchResult {
 	text: string;
 	cancelled: boolean;
+}
+
+export interface NavigateTreeResult {
+	cancelled: boolean;
+	/** Only ever `true`: `abort_branch_summary` stopped the summary; nothing moved. */
+	aborted?: boolean;
+	/** The target was a user message: its text, for the editor; the leaf moved to its parent. */
+	editorText?: string;
 }
 
 export interface TokenUsage {
@@ -583,6 +668,8 @@ export interface SessionStats {
 	sessionFile?: string;
 	credits?: SessionCredits;
 	routedModels?: Record<string, number>;
+	/** Failed edits by the engine's `errorKind`. */
+	editRejections?: Record<string, number>;
 	contextUsage?: ContextUsage;
 }
 
@@ -652,11 +739,51 @@ export interface SubagentMessages {
 	messages: AgentMessage[];
 }
 
+/** Side-question turn lifecycle; `interrupted` marks a turn whose process died while it ran. */
+export type BtwStatus = "running" | "complete" | "cancelled" | "error" | "interrupted";
+
+/** One question and its answer within a side-question topic. */
+export interface BtwHistoryTurn {
+	question: string;
+	answer: string;
+	status: BtwStatus;
+	createdAt: number;
+	updatedAt: number;
+	/** Images attached to the question. */
+	images?: ImageContent[];
+	error?: string;
+}
+
+/** A side-question topic: its first turn's fields plus follow-ups; the latest turn is the last follow-up, else the record. */
+export interface BtwHistoryRecord {
+	question: string;
+	answer: string;
+	status: BtwStatus;
+	createdAt: number;
+	updatedAt: number;
+	id: string;
+	leafId: string | null;
+	/** Images attached to the question. */
+	images?: ImageContent[];
+	error?: string;
+	followUps?: BtwHistoryTurn[];
+}
+
 export interface LoginProvider {
 	id: string;
 	name: string;
 	available: boolean;
 	authenticated: boolean;
+}
+
+/** A stored credential `logout` can remove; `active` marks credentials the session may be using. */
+export interface LogoutAccount {
+	credentialId: number;
+	provider: string;
+	label: string;
+	detail: string;
+	type: "api_key" | "oauth";
+	active: boolean;
 }
 
 export interface HandoffResult {
@@ -680,6 +807,8 @@ export type NotifyType = "info" | "warning" | "error";
 
 export interface AgentStartEvent {
 	type: "agent_start";
+	/** Calls of an unpaired assistant tail a continued run executes before its first model request. */
+	resumedToolCallIds?: string[];
 }
 
 export interface AgentEndEvent {
@@ -778,6 +907,25 @@ export interface AutoCompactionEndEvent {
 	skipped?: boolean;
 }
 
+/** A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted. */
+export interface ManualCompactionStartEvent {
+	type: "manual_compaction_start";
+	/** The `/compact <mode>` subcommand, when one was given. */
+	mode?: string;
+}
+
+/** Outcome of the compaction announced by the matching `manual_compaction_start`. */
+export interface ManualCompactionEndEvent {
+	type: "manual_compaction_end";
+	/** The compaction was cancelled (abort, or a `session_before_compact` hook). */
+	aborted: boolean;
+	/** Present when the compaction committed. */
+	result?: CompactionResult;
+	/** There was nothing to compact; `errorMessage` says why. */
+	skipped?: boolean;
+	errorMessage?: string;
+}
+
 export interface AutoRetryStartEvent {
 	type: "auto_retry_start";
 	attempt: number;
@@ -847,6 +995,7 @@ export interface AdvisorYieldedEvent {
 	type: "advisor_yielded";
 }
 
+/** Rule injection: a TTSR rule matched the stream and its text was injected. Each rule carries at least `name`, `path`, and `content`. */
 export interface TtsrTriggeredEvent {
 	type: "ttsr_triggered";
 	rules: Record<string, unknown>[];
@@ -897,10 +1046,12 @@ export interface QueueUpdateEvent {
 	type: "queue_update";
 	steering: string[];
 	followUp: string[];
+	/** Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them. */
+	liveSteered?: number;
 }
 
 /** A session event, discriminated by `type`; `set_event_filter` selects which are sent. */
-export type RpcAgentEvent = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent;
+export type RpcAgentEvent = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | ManualCompactionStartEvent | ManualCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent;
 
 /** First frame after startup; transport fields are absent on servers without protocol v2. */
 export interface ReadyEvent {
@@ -921,6 +1072,8 @@ export interface PromptError {
 	provider?: string;
 	model?: string;
 	httpStatus?: number;
+	/** `cost_cap`: the session reached `session.maxCost` (`--max-cost`) and omp did not send the next request. */
+	code?: "cost_cap";
 }
 
 /** Terminal outcome of one accepted `prompt` / `abort_and_prompt`, keyed by request `id`. */
@@ -1034,6 +1187,41 @@ export interface LiveEndEvent {
 	error?: string;
 }
 
+/** State of one draft-only microphone capture. */
+export interface DictationStateEvent {
+	type: "dictation_state";
+	captureId: string;
+	state: "starting" | "recording" | "transcribing";
+}
+
+/** Full accumulated draft preview; replaces the previous preview for this capture. */
+export interface DictationTranscriptEvent {
+	type: "dictation_transcript";
+	captureId: string;
+	text: string;
+}
+
+/** Exactly one terminal frame per capture; text is the accumulated result. */
+export interface DictationEndEvent {
+	type: "dictation_end";
+	captureId: string;
+	text: string;
+	error?: string;
+}
+
+/** Text appended to the running side question's latest answer. */
+export interface BtwDeltaEvent {
+	type: "btw_delta";
+	recordId: string;
+	delta: string;
+}
+
+/** Full side-question record on every lifecycle change (started, complete, cancelled, error); the last one per id wins. */
+export interface BtwRecordEvent {
+	type: "btw_record";
+	record: BtwHistoryRecord;
+}
+
 /** Output of a builtin slash command. */
 export interface CommandOutputEvent {
 	type: "command_output";
@@ -1111,6 +1299,7 @@ export interface InputUiRequest {
 	title: string;
 	placeholder?: string;
 	timeout?: number;
+	secret?: boolean;
 }
 
 export interface EditorUiRequest {
@@ -1339,7 +1528,7 @@ export interface HostUriSchemeDefinition {
 }
 
 /** Unsolicited outbound frame (everything except responses and host tool/URI requests), discriminated by `type`. */
-export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent;
+export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | DictationStateEvent | DictationTranscriptEvent | DictationEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent;
 
 /** Any frame the server writes to stdout (after reassembling `rpc_chunk` sequences), discriminated by `type`. */
 export type RpcServerFrame = RpcResponse | RpcHostRequest | RpcNotification;
@@ -1392,9 +1581,19 @@ export interface NewSessionParams {
 
 export interface OpenSessionParams {
 	sessionDir: string;
+	provider?: string;
+	modelId?: string;
 }
 
 export interface SetFastModeParams {
+	enabled: boolean;
+}
+
+export interface SetSlowModeParams {
+	enabled: boolean;
+}
+
+export interface SetSlowModeResult {
 	enabled: boolean;
 }
 
@@ -1494,12 +1693,31 @@ export interface LiveStartResult {
 	voice: string;
 }
 
+export interface LiveConnectParams {
+	sdpOffer: string;
+	voice?: string;
+	instructions?: string;
+}
+
+export interface LiveConnectResult {
+	voice: string;
+	sdpAnswer: string;
+}
+
 export interface LiveMuteParams {
 	muted?: boolean;
 }
 
 export interface LiveMuteResult {
 	muted: boolean;
+}
+
+export interface DictationStartParams {
+	captureId: string;
+}
+
+export interface DictationStopResult {
+	text: string;
 }
 
 export interface SetModelParams {
@@ -1555,6 +1773,15 @@ export interface BashParams {
 	command: string;
 }
 
+export interface GetSessionLeaseParams {
+	sessionIds: string[];
+}
+
+export interface GetSessionLeaseResult {
+	held: string[];
+	unknown: string[];
+}
+
 export interface ExportHtmlParams {
 	outputPath?: string;
 }
@@ -1565,6 +1792,8 @@ export interface ExportHtmlResult {
 
 export interface SwitchSessionParams {
 	sessionPath: string;
+	provider?: string;
+	modelId?: string;
 }
 
 export interface BranchParams {
@@ -1573,6 +1802,19 @@ export interface BranchParams {
 
 export interface ForkParams {
 	entryId?: string;
+}
+
+export interface NavigateTreeParams {
+	entryId: string;
+	/** Summarize the abandoned branch at the target. */
+	summarize?: boolean;
+	/** Instructions for the summarizer. */
+	customInstructions?: string;
+}
+
+export interface SetLabelParams {
+	entryId: string;
+	label?: string;
 }
 
 export interface GetBranchMessagesResult {
@@ -1612,6 +1854,23 @@ export interface LoginResult {
 	providerId: string;
 }
 
+export interface GetLogoutAccountsParams {
+	providerId: string;
+}
+
+export interface GetLogoutAccountsResult {
+	accounts: LogoutAccount[];
+}
+
+export interface LogoutParams {
+	providerId: string;
+	credentialId: number;
+}
+
+export interface LogoutResult {
+	remainingSource?: string;
+}
+
 export interface PredictWordParams {
 	text: string;
 	cursor: number;
@@ -1628,6 +1887,27 @@ export interface PredictWordFeedbackParams {
 	accepted: boolean;
 }
 
+export interface BtwParams {
+	question: string;
+	recordId?: string;
+}
+
+export interface BtwResult {
+	record: BtwHistoryRecord;
+}
+
+export interface BtwCancelParams {
+	recordId?: string;
+}
+
+export interface BtwCancelResult {
+	cancelled: boolean;
+}
+
+export interface GetBtwHistoryResult {
+	records: BtwHistoryRecord[];
+}
+
 /** Every RPC command's parameters and successful response `data`. */
 export interface RpcWireCommands {
 	negotiate_protocol: { params: NegotiateProtocolParams; result: NegotiateProtocolResult };
@@ -1638,10 +1918,12 @@ export interface RpcWireCommands {
 	promote_queued_message: { params: PromoteQueuedMessageParams; result: PromoteQueuedMessageResult };
 	abort: { params: undefined; result: undefined };
 	abort_and_prompt: { params: AbortAndPromptParams; result: undefined };
+	abort_and_restore_queue: { params: undefined; result: AbortAndRestoreQueueResult };
 	new_session: { params: NewSessionParams; result: CancellationResult };
 	open_session: { params: OpenSessionParams; result: OpenSessionResult };
 	get_state: { params: undefined; result: SessionState };
 	set_fast_mode: { params: SetFastModeParams; result: FastModeResult };
+	set_slow_mode: { params: SetSlowModeParams; result: SetSlowModeResult };
 	goal: { params: GoalParams; result: GoalResult };
 	set_ask_dialog: { params: SetAskDialogParams; result: SetAskDialogResult };
 	get_available_commands: { params: undefined; result: GetAvailableCommandsResult };
@@ -1657,8 +1939,11 @@ export interface RpcWireCommands {
 	cancel_subagent: { params: CancelSubagentParams; result: CancelSubagentResult };
 	steer_subagent: { params: SteerSubagentParams; result: undefined };
 	live_start: { params: LiveStartParams; result: LiveStartResult };
+	live_connect: { params: LiveConnectParams; result: LiveConnectResult };
 	live_stop: { params: undefined; result: undefined };
 	live_mute: { params: LiveMuteParams; result: LiveMuteResult };
+	dictation_start: { params: DictationStartParams; result: undefined };
+	dictation_stop: { params: undefined; result: DictationStopResult };
 	set_model: { params: SetModelParams; result: ModelInfo };
 	cycle_model: { params: undefined; result: ModelCycleResult | null };
 	get_available_models: { params: undefined; result: GetAvailableModelsResult };
@@ -1676,10 +1961,14 @@ export interface RpcWireCommands {
 	bash: { params: BashParams; result: BashResult };
 	abort_bash: { params: undefined; result: undefined };
 	get_session_stats: { params: undefined; result: SessionStats };
+	get_session_lease: { params: GetSessionLeaseParams; result: GetSessionLeaseResult };
 	export_html: { params: ExportHtmlParams; result: ExportHtmlResult };
 	switch_session: { params: SwitchSessionParams; result: CancellationResult };
 	branch: { params: BranchParams; result: BranchResult };
 	fork: { params: ForkParams; result: CancellationResult };
+	navigate_tree: { params: NavigateTreeParams; result: NavigateTreeResult };
+	abort_branch_summary: { params: undefined; result: undefined };
+	set_label: { params: SetLabelParams; result: undefined };
 	get_branch_messages: { params: undefined; result: GetBranchMessagesResult };
 	get_last_assistant_text: { params: undefined; result: GetLastAssistantTextResult };
 	set_session_name: { params: SetSessionNameParams; result: undefined };
@@ -1688,6 +1977,11 @@ export interface RpcWireCommands {
 	get_messages_page: { params: GetMessagesPageParams; result: MessagesPage };
 	get_login_providers: { params: undefined; result: GetLoginProvidersResult };
 	login: { params: LoginParams; result: LoginResult };
+	get_logout_accounts: { params: GetLogoutAccountsParams; result: GetLogoutAccountsResult };
+	logout: { params: LogoutParams; result: LogoutResult };
 	predict_word: { params: PredictWordParams; result: PredictWordResult };
 	predict_word_feedback: { params: PredictWordFeedbackParams; result: undefined };
+	btw: { params: BtwParams; result: BtwResult };
+	btw_cancel: { params: BtwCancelParams; result: BtwCancelResult };
+	get_btw_history: { params: undefined; result: GetBtwHistoryResult };
 }

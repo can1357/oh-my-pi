@@ -69,6 +69,7 @@ describe("extension/hook loader process.exit guard (#3680)", () => {
 		return runProbe(`
 import { postmortem } from "@oh-my-pi/pi-utils";
 import { withHostGuard } from "@oh-my-pi/pi-coding-agent/extensibility/utils";
+postmortem.installProcessHandlers();
 
 postmortem.register("probe-cleanup", reason => {
 	process.stdout.write(\`cleanup:\${reason}\\n\`);
@@ -167,6 +168,54 @@ try {
 		expect(stderr).toBe("");
 	});
 
+	it("exits cleanly on Ctrl+D while deferred extension loading guards process.exit", async () => {
+		const { exitCode, stdout, stderr } = await runProbe(`
+import * as path from "node:path";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { withHostGuard } from "@oh-my-pi/pi-coding-agent/extensibility/utils";
+import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
+
+const dir = TempDir.createSync("@omp-deferred-quit-");
+await Settings.init({ inMemory: true, cwd: dir.path() });
+initTheme();
+const auth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
+const registry = new ModelRegistry(auth);
+const model = registry.find("anthropic", "claude-sonnet-4-5");
+if (!model) throw new Error("expected bundled model");
+const session = new AgentSession({
+	agent: new Agent({ initialState: { model, systemPrompt: ["test"], tools: [], messages: [] } }),
+	sessionManager: SessionManager.inMemory(dir.path()),
+	settings: Settings.isolated(),
+	modelRegistry: registry,
+});
+const mode = new InteractiveMode(session, "test");
+mode.ui.requestRender = () => {};
+mode.ui.terminal.drainInput = async () => {};
+postmortem.register("probe-cleanup", () => {
+	auth.close();
+	dir.removeSync();
+	process.stdout.write("cleanup:manual\\n");
+});
+void withHostGuard(async () => {
+	mode.handleCtrlD();
+	// A real child needs a live event-loop handle until shutdown reaches guarded quit.
+	await Bun.sleep(10_000);
+});
+`);
+
+		expect(exitCode).toBe(0);
+		expect(stdout).toContain("cleanup:manual\n");
+		expect(stderr).not.toContain("[Unhandled Rejection]");
+		expect(stderr).not.toContain("ExtensionExitError");
+	});
+
 	// Windows cannot deliver a catchable SIGINT via process.kill: libuv terminates the process outright.
 	it.skipIf(process.platform === "win32")(
 		"lets host SIGINT exit once while a guarded callback remains pending",
@@ -194,13 +243,9 @@ try {
 	it.skipIf(process.platform === "win32")(
 		"exits cleanly on host SIGHUP when postmortem initialized inside a guard window (#7393)",
 		async () => {
-			// Mirror the shipped bundle: postmortem's exit primitive is first resolved
-			// while withHostGuard has replaced process.reallyExit with a throwing stub.
-			// A preload swaps reallyExit before the entry's static postmortem import
-			// evaluates; the entry then restores it (as the guard's finally does) and
-			// self-SIGHUPs (the TUI terminal-disconnect path). A lazily resolved exit
-			// primitive must pick up the restored native reallyExit and exit 129
-			// instead of looping on ExtensionExitError.
+			// Mirror the shipped bundle: install handlers while the preload guards
+			// process.reallyExit, then restore it before the SIGHUP exit path resolves
+			// the native primitive.
 			const preload = writeModule(
 				"guard-init-preload.ts",
 				"globalThis.__ompNativeReallyExit = process.reallyExit;\n" +
@@ -209,6 +254,7 @@ try {
 			const { exitCode, stdout, stderr } = await runProbe(
 				`
 import { postmortem } from "@oh-my-pi/pi-utils";
+postmortem.installProcessHandlers();
 postmortem.register("probe", reason => process.stdout.write(\`cleanup:\${reason}\\n\`));
 process.reallyExit = globalThis.__ompNativeReallyExit;
 process.stdout.write("armed\\n");

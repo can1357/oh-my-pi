@@ -15,13 +15,20 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Judge, ToolCall } from "@oh-my-pi/pi-ai";
 import { logger, prompt, relativePathWithinRoot, withTimeout } from "@oh-my-pi/pi-utils";
-import type { Rule } from "../capability/rule";
+import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule } from "../capability/rule";
 import type { Settings } from "../config/settings";
-import { judgeRules, type TtsrManager, type TtsrMatchContext, type TtsrOutput } from "../export/ttsr";
+import {
+	judgeRules,
+	type TtsrCheckOptions,
+	type TtsrManager,
+	type TtsrMatchContext,
+	type TtsrOutput,
+} from "../export/ttsr";
 import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { type: "text" };
 import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" with { type: "text" };
 import ttsrWarningTemplate from "../prompts/system/ttsr-warning.md" with { type: "text" };
 import type { AgentSessionEvent } from "./agent-session-events";
+import { escapeHarnessTags } from "./harness-tags";
 import type { SessionManager } from "./session-manager";
 import { TtsrToolInspector } from "./ttsr-outputs";
 
@@ -34,6 +41,9 @@ type TtsrContinueSkipReason =
 
 /** How long a finishing run waits for in-flight judgments; later verdicts still arrive as asides. */
 const JUDGED_SETTLE_TIMEOUT_MS = 5_000;
+/** Mid-stream checks may defer conditions that can span lines; the stream's end settles them. */
+const PARTIAL_CHECK: TtsrCheckOptions = { final: false };
+const FINAL_CHECK: TtsrCheckOptions = { final: true };
 
 interface TtsrContinueOptions {
 	source: string;
@@ -67,6 +77,7 @@ export class TtsrCoordinator {
 	readonly #manager: TtsrManager | undefined;
 	readonly #inspector: TtsrToolInspector;
 	#pendingInjections: Rule[] = [];
+	#pendingExcerpts: Record<string, string> = {};
 	#perToolInjections = new Map<string, Rule[]>();
 	#deferredReservations = new Map<string, number>();
 	#nextDeferredDeliveryId = 0;
@@ -138,6 +149,7 @@ export class TtsrCoordinator {
 		let matchContext: TtsrMatchContext | undefined;
 		let streamingToolCall: ToolCall | undefined;
 		let delta: string | undefined;
+		let isFinal = false;
 		if (assistantEvent.type === "text_delta") {
 			matchContext = { source: "text" };
 			delta = assistantEvent.delta;
@@ -152,10 +164,20 @@ export class TtsrCoordinator {
 			streamingToolCall = assistantEvent.toolCall;
 			matchContext = this.#inspector.matchContext(streamingToolCall, assistantEvent.contentIndex);
 			delta = "";
+			isFinal = true;
+		} else if (
+			(assistantEvent.type === "text_end" || assistantEvent.type === "thinking_end") &&
+			// An empty block streamed nothing; a pending TTSR abort already discards this response.
+			assistantEvent.content.length > 0 &&
+			!this.#abortPending
+		) {
+			matchContext = { source: assistantEvent.type === "text_end" ? "text" : "thinking" };
+			delta = "";
+			isFinal = true;
 		}
 		if (!matchContext || delta === undefined) return false;
 		const targetMessageTimestamp = event.message.role === "assistant" ? event.message.timestamp : undefined;
-		const matches = this.#checkStream(delta, matchContext, streamingToolCall, assistantEvent.type === "toolcall_end");
+		const matches = this.#checkStream(delta, matchContext, streamingToolCall, isFinal);
 		if (matches.length > 0 && this.#handleMatches(matches, matchContext, targetMessageTimestamp)) return true;
 		return false;
 	}
@@ -187,11 +209,13 @@ export class TtsrCoordinator {
 		const toolCall = { type: "toolCall", id: toolCallId, name: tool.name, arguments: args } as ToolCall;
 		const matchContext = this.#inspector.matchContext(toolCall, 0);
 		let matches: Rule[];
+		let matched: Record<string, string>;
 		try {
-			matches = [
-				...this.#checkStream("", matchContext, toolCall, true),
-				...(await this.#checkAstStream(matchContext, toolCall)),
-			].filter((rule, index, all) => all.findIndex(candidate => candidate.name === rule.name) === index);
+			const regexMatches = this.#checkStream("", matchContext, toolCall, true);
+			matched = this.#matchedExcerpts(regexMatches, matchContext);
+			matches = [...regexMatches, ...(await this.#checkAstStream(matchContext, toolCall))].filter(
+				(rule, index, all) => all.findIndex(candidate => candidate.name === rule.name) === index,
+			);
 		} finally {
 			if (matchContext.streamKey) this.#manager.clearStream(matchContext.streamKey);
 		}
@@ -208,6 +232,8 @@ export class TtsrCoordinator {
 				prompt.render(ttsrInterruptTemplate, {
 					name: rule.name,
 					path: this.#displayRulePath(rule.path),
+					matched:
+						matched[rule.name] === undefined ? undefined : escapeHarnessTags(JSON.stringify(matched[rule.name])),
 					content: rule.content,
 				}),
 			)
@@ -299,6 +325,7 @@ export class TtsrCoordinator {
 					name: rule.name,
 					path: this.#displayRulePath(rule.path),
 					content: rule.content,
+					builtin: rule._source?.provider === BUILTIN_DEFAULTS_PROVIDER_ID,
 				}),
 			)
 			.join("\n\n");
@@ -327,20 +354,33 @@ export class TtsrCoordinator {
 		return `TTSR matched ${label}: ${rules.map(rule => rule.name).join(", ")}`;
 	}
 
-	#getInjectionContent(): { content: string; rules: Rule[] } | undefined {
+	#getInjectionContent(): { content: string; rules: Rule[]; matched: Record<string, string> } | undefined {
 		if (this.#pendingInjections.length === 0) return undefined;
 		const rules = this.#pendingInjections;
+		const matched = this.#pendingExcerpts;
 		const content = rules
 			.map(rule =>
 				prompt.render(ttsrInterruptTemplate, {
 					name: rule.name,
 					path: this.#displayRulePath(rule.path),
+					matched:
+						matched[rule.name] === undefined ? undefined : escapeHarnessTags(JSON.stringify(matched[rule.name])),
 					content: rule.content,
 				}),
 			)
 			.join("\n\n");
 		this.#pendingInjections = [];
-		return { content, rules };
+		this.#pendingExcerpts = {};
+		return { content, rules, matched };
+	}
+
+	#matchedExcerpts(rules: Rule[], context: TtsrMatchContext): Record<string, string> {
+		const matched: Record<string, string> = {};
+		for (const rule of rules) {
+			const excerpt = this.#manager?.matchExcerpt(rule.name, context);
+			if (excerpt) matched[rule.name] = excerpt;
+		}
+		return matched;
 	}
 
 	#displayRulePath(rulePath: string): string {
@@ -357,11 +397,13 @@ export class TtsrCoordinator {
 		return relative && !relative.startsWith("..") && !path.isAbsolute(relative) ? relative : null;
 	}
 
-	#addPendingInjections(rules: Rule[]): void {
+	#addPendingInjections(rules: Rule[], context: TtsrMatchContext): void {
 		const seen = new Set(this.#pendingInjections.map(rule => rule.name));
 		for (const rule of rules) {
 			if (seen.has(rule.name) || this.#deferredReservations.has(rule.name)) continue;
 			this.#pendingInjections.push(rule);
+			const excerpt = this.#manager?.matchExcerpt(rule.name, context);
+			if (excerpt !== undefined) this.#pendingExcerpts[rule.name] = excerpt;
 			seen.add(rule.name);
 		}
 	}
@@ -469,6 +511,7 @@ export class TtsrCoordinator {
 		if (this.#abortPending || this.#pendingInjections.length === 0) return;
 		if (message.stopReason === "aborted" || message.stopReason === "error") {
 			this.#pendingInjections = [];
+			this.#pendingExcerpts = {};
 			return;
 		}
 		const injection = this.#getInjectionContent();
@@ -481,7 +524,7 @@ export class TtsrCoordinator {
 				customType: "ttsr-injection",
 				content: injection.content,
 				display: false,
-				details: { rules: ruleNames, deliveryId },
+				details: { rules: ruleNames, matched: injection.matched, deliveryId },
 				attribution: "agent",
 				timestamp: Date.now(),
 			});
@@ -584,18 +627,23 @@ export class TtsrCoordinator {
 		isFinal = false,
 	): Rule[] {
 		if (!this.#manager) return [];
+		const options = isFinal ? FINAL_CHECK : PARTIAL_CHECK;
 		const entries = this.#inspector.entries(toolCall);
 		if (entries) {
 			const matches: Rule[] = [];
 			for (const entry of entries) {
 				matches.push(
-					...this.#manager.checkSnapshot(entry.digest, this.#inspector.perFileContext(matchContext, entry.path)),
+					...this.#manager.checkSnapshot(
+						entry.digest,
+						this.#inspector.perFileContext(matchContext, entry.path),
+						options,
+					),
 				);
 			}
 			return matches;
 		}
 		const digest = this.#inspector.digest(toolCall);
-		if (digest !== undefined) return this.#manager.checkSnapshot(digest, matchContext);
+		if (digest !== undefined) return this.#manager.checkSnapshot(digest, matchContext, options);
 		// Tools without matcher hooks accumulate raw argument deltas. Providers
 		// that emit toolcall_start -> toolcall_end with no intermediate deltas
 		// (Cursor exec synthesis, OpenAI lossy-proxy fallback) leave that buffer
@@ -605,7 +653,7 @@ export class TtsrCoordinator {
 			const snapshot = typeof finalArgs === "string" ? finalArgs : JSON.stringify(finalArgs);
 			return this.#manager.checkSnapshot(snapshot, matchContext);
 		}
-		return this.#manager.checkDelta(delta, matchContext);
+		return this.#manager.checkDelta(delta, matchContext, options);
 	}
 
 	async #checkAstStream(matchContext: TtsrMatchContext, toolCall: ToolCall | undefined): Promise<Rule[]> {
@@ -636,7 +684,7 @@ export class TtsrCoordinator {
 			this.#emitTriggerOnce(matchContext, matches);
 			return false;
 		}
-		this.#addPendingInjections(matches);
+		this.#addPendingInjections(matches, matchContext);
 		if (!shouldInterrupt) return false;
 
 		this.#abortPending = true;
@@ -664,6 +712,7 @@ export class TtsrCoordinator {
 				if (!this.#abortPending || this.#host.promptGeneration() !== generation || targetAssistantIndex === -1) {
 					this.#abortPending = false;
 					this.#pendingInjections = [];
+					this.#pendingExcerpts = {};
 					this.#perToolInjections.clear();
 					this.resolveResume();
 					return;
@@ -675,7 +724,7 @@ export class TtsrCoordinator {
 				}
 				const injection = this.#getInjectionContent();
 				if (injection) {
-					const details = { rules: injection.rules.map(rule => rule.name) };
+					const details = { rules: injection.rules.map(rule => rule.name), matched: injection.matched };
 					this.#host.agent.appendMessage({
 						role: "custom",
 						customType: "ttsr-injection",

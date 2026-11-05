@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, setSystemTime } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -21,7 +21,7 @@ import {
 } from "../src/discovery/factory-droid";
 import { Effort } from "../src/effort";
 import { resolveProviderModels } from "../src/model-manager";
-import { getBundledModel } from "../src/models";
+import { getBundledModel, getFactoryDroidCreditRate } from "../src/models";
 import { resolveModelCacheProviderId } from "../src/provider-models/cache-provider-id";
 import { factoryDroidModelManagerOptions } from "../src/provider-models/special";
 import type { FetchImpl, ModelSpec } from "../src/types";
@@ -56,6 +56,12 @@ const DEPRECATION_FLAG = registryModel(DEPRECATED).policy.entitlement.deprecatio
 interface FactoryEndpoints {
 	flags?: Record<string, boolean>;
 	modelPolicy?: Record<string, unknown>;
+	/** Other managed settings (image generation) beside the model policy. */
+	settings?: Record<string, unknown>;
+	/** Managed-settings HTTP status; the flags endpoint always succeeds. */
+	settingsStatus?: number;
+	/** Raw managed-settings body, replacing the JSON one. */
+	settingsBody?: string;
 	routing?: Record<string, unknown>;
 	responseHeaders?: Record<string, string>;
 	onRequest?: (url: string, init: RequestInit | undefined) => void;
@@ -70,8 +76,17 @@ function factoryEndpoints(endpoints: FactoryEndpoints = {}): FetchImpl {
 					flags: endpoints.flags ?? ALL_FLAGS_ON,
 					...(endpoints.routing ? { configs: { provider_routing: endpoints.routing } } : {}),
 				}
-			: { settings: endpoints.modelPolicy ? { modelPolicy: endpoints.modelPolicy } : {} };
-		return Response.json(body, { headers: endpoints.responseHeaders });
+			: {
+					settings: {
+						...(endpoints.modelPolicy ? { modelPolicy: endpoints.modelPolicy } : {}),
+						...endpoints.settings,
+					},
+				};
+		const status = String(url).includes("managed-settings") ? (endpoints.settingsStatus ?? 200) : 200;
+		if (String(url).includes("managed-settings") && endpoints.settingsBody !== undefined) {
+			return new Response(endpoints.settingsBody, { status, headers: endpoints.responseHeaders });
+		}
+		return Response.json(body, { status, headers: endpoints.responseHeaders });
 	};
 }
 
@@ -114,6 +129,7 @@ function syntheticModel(policy: Partial<FactoryDroidModelPolicy>): FactoryDroidR
 			policyAliases: [],
 			entitlement: { requiresExplicitOptIn: false },
 			defaultReasoningOff: false,
+			image: false,
 			...policy,
 		},
 	};
@@ -184,6 +200,83 @@ describe("Factory Droid model builder", () => {
 		const unknown = buildFactoryDroidModel(syntheticModel({ listPriceFrom: { provider: "nope", modelId: "x" } }));
 		expect(unknown.cost).toEqual(zeroCost);
 	});
+
+	describe("dated credit rates", () => {
+		const startsAt = Date.parse("2026-08-22T00:00:00Z");
+		const endsAt = Date.parse("2026-11-22T00:00:00Z");
+		const model = buildFactoryDroidModel(
+			syntheticModel({
+				creditRates: {
+					input: 2,
+					output: 5,
+					effectiveRates: [
+						{ effectiveFrom: startsAt, input: 1.6 },
+						{ effectiveFrom: endsAt, input: 2 },
+					],
+				},
+			}),
+		);
+
+		it("keeps the base rate on the model and applies the card due at each time", () => {
+			expect(model.factoryDroidCredits).toBe(2);
+			expect(getFactoryDroidCreditRate(model, startsAt - 1)).toEqual({ rate: 2, next: { rate: 1.6, at: startsAt } });
+			expect(getFactoryDroidCreditRate(model, startsAt)).toEqual({ rate: 1.6, next: { rate: 2, at: endsAt } });
+			expect(getFactoryDroidCreditRate(model, endsAt)).toEqual({ rate: 2 });
+		});
+
+		it("drops a discount cached while it was due once the next card takes over", async () => {
+			const entry = factoryDroidRegistry().find(model => model.policy.creditRates?.effectiveRates);
+			const rates = entry?.policy.creditRates;
+			const [discounted, restored] = rates?.effectiveRates ?? [];
+			if (!entry || !rates || !discounted || !restored) throw new Error("no registry model with dated credit rates");
+			const id = entry.spec.id;
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "factory-credit-cards-"));
+			const cacheDbPath = path.join(dir, "models.db");
+			const up = factoryEndpoints();
+			const down: FetchImpl = async () => new Response("down", { status: 503 });
+			const resolve = (fetch: FetchImpl, mode: "online" | "offline") =>
+				resolveProviderModels(
+					{ ...factoryDroidModelManagerOptions({ apiKey: "token", fetch }), cacheDbPath },
+					mode,
+				);
+			try {
+				setSystemTime(new Date(discounted.effectiveFrom));
+				const inside = (await resolve(up, "online")).models.find(model => model.id === id);
+				expect(inside && getFactoryDroidCreditRate(inside)?.rate).toBe(discounted.input);
+
+				setSystemTime(new Date(restored.effectiveFrom));
+				for (const [fetch, mode] of [
+					[down, "offline"],
+					[down, "online"],
+				] as const) {
+					const cached = (await resolve(fetch, mode)).models.find(model => model.id === id);
+					expect(cached && getFactoryDroidCreditRate(cached)?.rate).toBe(restored.input ?? rates.input);
+				}
+			} finally {
+				setSystemTime();
+				await fs.rm(dir, { recursive: true, force: true });
+			}
+		});
+	});
+
+	it("builds Haiku 5.5 with an Off rung and Anthropic's list price on the Standard pool", () => {
+		const model = buildFactoryDroidModel(registryModel("claude-haiku-5-5"));
+		expect(model.thinking).toMatchObject({
+			mode: "anthropic-adaptive",
+			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+			requiresEffort: false,
+			defaultLevel: Effort.Medium,
+		});
+		expect(model.cost).toEqual(getBundledModel("anthropic", "claude-haiku-5-5").cost);
+		expect(quotaTierFor("factory-droid", "claude-haiku-5-5")).toBe("standard");
+	});
+
+	it("builds Mistral Large 4 on the Core pool without borrowing the lower Mistral list price", () => {
+		const model = buildFactoryDroidModel(registryModel("mistral-large-4"));
+		expect(model.thinking).toMatchObject({ efforts: [Effort.High], requiresEffort: false });
+		expect(model.cost).toEqual(zeroCost);
+		expect(quotaTierFor("factory-droid", "mistral-large-4")).toBe("core");
+	});
 });
 
 describe("Factory Droid route policy scoping", () => {
@@ -223,6 +316,10 @@ describe("Factory Droid route policy scoping", () => {
 			resolveModelPolicy(messages, { upstream: "bedrock_anthropic" }).catalog.serverSideFallbackModels,
 		).toBeUndefined();
 		expect(serverSideFallbackModels(buildModel(fable))).toEqual([]);
+		// The shared reader resolves the chain per upstream, memoized apart from the bare model.
+		expect(serverSideFallbackModels(messages, { upstream: "anthropic" })).toEqual(["claude-opus-5"]);
+		expect(serverSideFallbackModels(messages, { upstream: "bedrock_anthropic" })).toEqual([]);
+		expect(serverSideFallbackModels(messages)).toEqual([]);
 		// Direct Anthropic keeps its own thinking contract.
 		const direct = resolveModelPolicy({ ...messages, provider: "anthropic" }, { upstream: "snowflake" }).compat;
 		expect(direct?.stripThinkingHistory).toBeUndefined();
@@ -242,12 +339,19 @@ describe("Factory Droid offline seed", () => {
 		expect(ids).toContain(PLAIN);
 	});
 
+	it("names Opus 5.5's refusal fallback offline, where every unblocked model is available", () => {
+		const models = factoryDroidModelManagerOptions().staticModels ?? [];
+		expect(models.find(model => model.id === "claude-opus-5-5")?.factoryDroidRefusalFallbacks).toEqual([
+			"claude-opus-5",
+		]);
+	});
+
 	it("keeps offline EU models on the EU host with EU rotations", () => {
 		const models = factoryDroidModelManagerOptions({ region: "eu" }).staticModels ?? [];
 		expect(models.some(model => model.id === "kimi-k3")).toBe(false);
 		const opus = models.find(model => model.id === "claude-opus-5");
 		expect(opus?.baseUrl).toBe("https://api.eu.factory.ai/api/llm/a");
-		expect(opus?.factoryDroidApiProviders).toEqual(["bedrock_anthropic"]);
+		expect(opus?.factoryDroidApiProviders).toEqual(["vertex_anthropic", "bedrock_anthropic"]);
 	});
 });
 
@@ -374,6 +478,71 @@ describe("Factory Droid discovery gates", () => {
 		expect(denied).toEqual(allowed.filter(id => !fastIds.includes(id)));
 	});
 
+	it("offers a refusal fallback only while the account can run the fallback model", async () => {
+		const open = await discover({ modelPolicy: { allowAllFactoryModels: true } });
+		const openIds = open?.map(model => model.id) ?? [];
+		const withFallback = open?.filter(model => model.factoryDroidRefusalFallbacks?.length) ?? [];
+		expect(withFallback.map(model => model.id)).toContain("claude-opus-5-5");
+		const fallbackIds = [...new Set(withFallback.flatMap(model => model.factoryDroidRefusalFallbacks ?? []))];
+		for (const id of fallbackIds) expect(openIds).toContain(id);
+
+		const blocked = await discover({ modelPolicy: { allowAllFactoryModels: true, blockedModelIds: fallbackIds } });
+		for (const { id } of withFallback) {
+			expect(blocked?.find(model => model.id === id)?.factoryDroidRefusalFallbacks).toEqual([]);
+		}
+	});
+
+	describe("image generation models", () => {
+		const imageIds = factoryDroidRegistry()
+			.filter(({ policy }) => policy.image)
+			.map(({ spec }) => spec.id);
+		const [firstImage, ...otherImages] = imageIds;
+
+		it("lists image models as image-kind specs while the org leaves image generation on", async () => {
+			expect(imageIds.length).toBeGreaterThan(1);
+			const models = (await discover({})) ?? [];
+			const listed = models.filter(model => imageIds.includes(model.id));
+			expect(listed.map(model => model.id).sort()).toEqual([...imageIds].sort());
+			for (const spec of listed) expect(buildModel(spec).kind).toBe("image");
+			// Chat models keep their kind.
+			expect(buildModel(models.find(model => model.id === PLAIN)!).kind).toBeUndefined();
+		});
+
+		it("hides every image model, and nothing else, when the org disables image generation", async () => {
+			const enabled = await discoverIds({ settings: { imageGenerationEnabled: true } });
+			const disabled = await discoverIds({ settings: { imageGenerationEnabled: false } });
+			expect(disabled).toEqual(enabled.filter(id => !imageIds.includes(id)));
+		});
+
+		it.each([
+			{ label: "narrows to the org image allowlist", allowed: () => [firstImage], show: () => [firstImage] },
+			{ label: "hides every image model for an empty allowlist", allowed: () => [], show: () => [] },
+		])("$label", async ({ allowed, show }) => {
+			const ids = await discoverIds({ settings: { imageGenerationAllowedModelIds: allowed() } });
+			expect(ids.filter(id => imageIds.includes(id))).toEqual(show());
+			expect(ids).toContain(PLAIN);
+		});
+
+		it("still applies the org model policy blocks to image models", async () => {
+			const ids = await discoverIds({ modelPolicy: { allowAllFactoryModels: true, blockedModelIds: [firstImage] } });
+			expect(ids).not.toContain(firstImage);
+			for (const id of otherImages) expect(ids).toContain(id);
+		});
+
+		it("keeps image models hidden until managed settings prove them enabled", async () => {
+			const offline = (factoryDroidModelManagerOptions().staticModels ?? []).map(model => model.id);
+			const unreadable = await discoverIds({ settingsStatus: 500 });
+			const unparsable = await discoverIds({ settingsBody: "{not json" });
+			expect(unparsable).toContain(PLAIN);
+			for (const id of imageIds) expect(unparsable).not.toContain(id);
+			for (const id of imageIds) {
+				expect(offline).not.toContain(id);
+				expect(unreadable).not.toContain(id);
+			}
+			expect(unreadable).toContain(PLAIN);
+		});
+	});
+
 	it.each([
 		{ label: "without a credential", apiKey: undefined },
 		{ label: "when the flags fetch fails", apiKey: "token" },
@@ -401,6 +570,110 @@ describe("Factory Droid discovery gates", () => {
 		const glm = models?.find(model => model.id === "glm-5.2");
 		expect(glm?.factoryDroidApiProviders).toEqual(["baseten"]);
 		expect(glm?.factoryDroidRoutingSource).toBeUndefined();
+	});
+
+	it("keeps live gpt-6.1-sol routing through Bedrock and Databricks", async () => {
+		const models = await discover({
+			routing: { version: 1, models: { "gpt-6.1-sol": ["bedrock_openai", "databricks", "openai"] } },
+		});
+		const sol = models?.find(model => model.id === "gpt-6.1-sol");
+		expect(sol?.factoryDroidApiProviders).toEqual(["bedrock_openai", "databricks", "openai"]);
+	});
+
+	it("lists GPT-6 Luna and DeepSeek V4.1 Flash without their retired flags", async () => {
+		const ids = await discoverIds({ flags: { gpt_6_luna: false, deepseek_v4_1_flash: false } });
+		expect(ids).toContain("gpt-6-luna");
+		expect(ids).toContain("deepseek-v4.1-flash");
+	});
+
+	it("lists models whose flags droid 1.1.0 retired with those flags off", async () => {
+		const ids = await discoverIds({
+			flags: {
+				claude_opus_5_5_fast: false,
+				gpt_6_1_sol: false,
+				minimax_m3: false,
+				gpt_6_fast_modes: false,
+				muse_spark_1_2: false,
+			},
+		});
+		const retired = [
+			"claude-opus-5-5-fast",
+			"gpt-6.1-sol",
+			"minimax-m3",
+			"gpt-6-sol-fast",
+			"gpt-6-luna-fast",
+			"muse-spark-1.2",
+		];
+		for (const id of retired) expect(ids).toContain(id);
+	});
+
+	it("gates droid 1.1.0's new models on their live flags and Ultra Fast on the high-cost opt-in", async () => {
+		const gated = ["gpt-6.1-terra", "nemotron-3.5-super", "muse-spark-open", "beam-1.0", "gpt-6-astra-ultrafast"];
+		const ultraFast = ["gpt-6-astra-ultrafast", "gpt-6.1-sol-ultrafast"];
+		const flagsOff = await discoverIds({ flags: {}, modelPolicy: { allowAllFactoryModels: true } });
+		for (const id of gated) expect(flagsOff).not.toContain(id);
+		const unconsented = await discoverIds({
+			modelPolicy: { allowAllFactoryModels: true, requireExplicitOptInModelIds: ultraFast },
+		});
+		for (const id of gated.filter(id => !ultraFast.includes(id))) expect(unconsented).toContain(id);
+		for (const id of ultraFast) expect(unconsented).not.toContain(id);
+		const consented = await discoverIds({ modelPolicy: { allowAllFactoryModels: true } });
+		for (const id of [...gated, ...ultraFast]) expect(consented).toContain(id);
+	});
+
+	it("serves Muse Spark 1.3 from Vertex, Global only, behind its flag, on its own effort ladder", async () => {
+		const muse = registryModel("muse-spark-1.3");
+		expect(buildFactoryDroidModel(muse).thinking).toMatchObject({
+			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			requiresEffort: true,
+			defaultLevel: Effort.High,
+		});
+		const global = (await discover())?.find(model => model.id === "muse-spark-1.3");
+		expect(global?.factoryDroidApiProviders).toEqual(["google"]);
+		expect(global?.input).toEqual(["text"]);
+		expect(await discoverIds({ flags: {}, modelPolicy: { allowAllFactoryModels: true } })).not.toContain(
+			"muse-spark-1.3",
+		);
+		for (const inferenceRegion of ["us", "eu"] as const) {
+			const regional = await discover({}, { inferenceRegion });
+			expect(regional?.map(model => model.id)).not.toContain("muse-spark-1.3");
+		}
+	});
+
+	it("falls back to the registry upstream when family defaults name none of the model's upstreams", async () => {
+		const models = await discover({
+			routing: { defaults: { factory: ["baseten", "fireworks"] }, models: { "beam-1.0": ["fireworks"] } },
+		});
+		const muse = models?.find(model => model.id === "muse-spark-1.3");
+		expect(muse?.factoryDroidApiProviders).toEqual(["google"]);
+		expect(muse?.factoryDroidRoutingSource).toBeUndefined();
+		const nemotron = models?.find(model => model.id === "nemotron-3.5-super");
+		expect(nemotron?.factoryDroidApiProviders).toEqual(["baseten"]);
+		expect(nemotron?.factoryDroidRoutingSource).toBe("configured_order");
+		// A model route the registry cannot serve still hides the model.
+		expect(models?.find(model => model.id === "beam-1.0")).toBeUndefined();
+	});
+
+	it("falls back to the registry upstream when a family default is explicitly empty", async () => {
+		const models = await discover({
+			modelPolicy: { allowAllFactoryModels: true },
+			routing: { defaults: { factory: [] }, models: { "glm-5.3": [] } },
+		});
+		const kimi = models?.find(model => model.id === "kimi-k3");
+		expect(kimi?.factoryDroidApiProviders?.[0]).toBe("fireworks");
+		expect(kimi?.factoryDroidRoutingSource).toBeUndefined();
+		// An explicitly empty model route still disables the model.
+		expect(models?.find(model => model.id === "glm-5.3")).toBeUndefined();
+	});
+
+	it("falls back to the region's registry upstreams when the family default serves none of them", async () => {
+		const models = await discover(
+			{ modelPolicy: { allowAllFactoryModels: true }, routing: { defaults: { anthropic: ["anthropic"] } } },
+			{ region: "eu" },
+		);
+		const sonnet = models?.find(model => model.id === "claude-sonnet-5");
+		expect(sonnet?.factoryDroidApiProviders).toEqual(["vertex_anthropic", "bedrock_anthropic"]);
+		expect(sonnet?.factoryDroidRoutingSource).toBeUndefined();
 	});
 
 	it("keeps global overrides restrictive without removing the EU Mistral route", async () => {
@@ -486,15 +759,22 @@ describe("Factory Droid EU region", () => {
 		expect(urls[0]).toBe("https://api.eu.factory.ai/api/feature-flags");
 		expect(urls[1]).toBe("https://api.eu.factory.ai/api/organization/managed-settings");
 
-		// Hidden for EU: Droid Core (fireworks/baseten-only), Gemini (google-only),
-		// grok (xai-only), and fable-5 (explicit empty EU override).
+		// Hidden for EU: Droid Core (fireworks/baseten-only), Gemini Pro (google
+		// outside the EU table, no override) and grok (xai-only).
 		expect(ids).not.toContain("kimi-k3");
 		expect(ids).not.toContain("gemini-3.1-pro-preview");
 		expect(ids).not.toContain("grok-4.5");
-		expect(ids).not.toContain("claude-fable-5");
-		// Available with region-resolved rotations and EU wire URLs.
+		// Available with region-resolved rotations and EU wire URLs; per-model
+		// overrides may name upstreams the EU table omits.
 		const opus5 = models!.find(model => model.id === "claude-opus-5")!;
-		expect(opus5.factoryDroidApiProviders).toEqual(["bedrock_anthropic"]);
+		expect(opus5.factoryDroidApiProviders).toEqual(["vertex_anthropic", "bedrock_anthropic"]);
+		// Once policy approves the opt-in Fable, the EU serves it on Vertex.
+		const approved = await discover({ modelPolicy: { allowAllFactoryModels: true } }, { region: "eu" });
+		expect(approved?.find(model => model.id === "claude-fable-5")?.factoryDroidApiProviders).toEqual([
+			"vertex_anthropic",
+		]);
+		const flash = models!.find(model => model.id === "gemini-3.8-flash")!;
+		expect(flash.factoryDroidApiProviders).toEqual(["google"]);
 		expect(opus5.baseUrl).toBe("https://api.eu.factory.ai/api/llm/a");
 		const sonnet = models!.find(model => model.id === "claude-sonnet-4-5-20250929")!;
 		expect(sonnet.factoryDroidApiProviders).toEqual(["vertex_anthropic", "bedrock_anthropic"]);

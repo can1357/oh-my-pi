@@ -1,14 +1,18 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { AuthStorage } from "@oh-my-pi/pi-ai";
+import { type Api, AuthStorage, type Model } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import {
 	createSerializedRebuilder,
 	gatewayRoutableModels,
+	gatewayRoutableProviders,
 	indexModelsByRequestId,
+	resolveGatewayModel,
 } from "../../src/cli/auth-gateway-cli";
 import { ModelRegistry } from "../../src/config/model-registry";
+import { Settings } from "../../src/config/settings";
 
 const authStores: AuthStorage[] = [];
 
@@ -51,8 +55,8 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 
 		// The gateway can now resolve it by qualified id and bare id — was
 		// "Unknown model" when the index was built from getBundledModels only.
-		expect(index.get("anthropic/claude-opus-5-repro")?.id).toBe("claude-opus-5-repro");
-		expect(index.get("claude-opus-5-repro")?.id).toBe("claude-opus-5-repro");
+		expect(resolveGatewayModel("anthropic/claude-opus-5-repro", index)?.id).toBe("claude-opus-5-repro");
+		expect(resolveGatewayModel("claude-opus-5-repro", index)?.id).toBe("claude-opus-5-repro");
 	});
 
 	test("gateway registry ignores local models.yml credential and routing overrides", async () => {
@@ -97,9 +101,8 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 		expect(gatewayModel.transport).toBeUndefined();
 		expect(await gatewayAuthStorage.keys.get("anthropic")).not.toBe("gateway-token");
 		expect(gatewayRegistry.getAll().find(model => model.provider === "openai")?.transport).toBeUndefined();
-		expect(indexModelsByRequestId(gatewayRegistry.getAll(), new Set(["anthropic"])).get(gatewayModel.id)).toBe(
-			gatewayModel,
-		);
+		const gatewayIndex = indexModelsByRequestId(gatewayRegistry.getAll(), new Set(["anthropic"]));
+		expect(resolveGatewayModel(gatewayModel.id, gatewayIndex)).toBe(gatewayModel);
 	});
 
 	test("scopes the catalog to providers with credentials", async () => {
@@ -112,8 +115,23 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 
 		const index = indexModelsByRequestId(all, new Set(["anthropic"]));
 
-		expect(index.get(`anthropic/${anthropicModel.id}`)).toBeDefined();
-		expect(index.get(`${foreignModel.provider}/${foreignModel.id}`)).toBeUndefined();
+		expect(resolveGatewayModel(`anthropic/${anthropicModel.id}`, index)).toBeDefined();
+		expect(resolveGatewayModel(`${foreignModel.provider}/${foreignModel.id}`, index)).toBeUndefined();
+	});
+
+	test("drops providers disabled in settings from the served catalog", async () => {
+		const storage = await createAuthStorage();
+		await storage.credentials.set("anthropic", { type: "api_key", key: "sk-test-anthropic" });
+		await storage.credentials.set("openrouter", { type: "api_key", key: "sk-test-openrouter" });
+		const settings = Settings.isolated({ disabledProviders: ["openrouter"] });
+		const registry = new ModelRegistry(storage, undefined, { ignoreLocalModelConfig: true, settings });
+
+		const routable = gatewayRoutableProviders(storage, settings);
+		const index = indexModelsByRequestId(gatewayRoutableModels(registry), routable);
+
+		expect([...routable].sort()).toEqual(["anthropic"]);
+		expect(index.models.some(model => model.provider === "openrouter")).toBe(false);
+		expect(index.models.some(model => model.provider === "anthropic")).toBe(true);
 	});
 
 	test("serves judge-kind models alongside chat and keeps unrouted kinds out", async () => {
@@ -126,10 +144,93 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 
 		const index = indexModelsByRequestId(routable, new Set(["typesafe", "local"]));
 
-		expect(index.get("typesafe/jev-latest")?.api).toBe("typesafe");
-		expect(index.get("jev-latest")?.provider).toBe("typesafe");
+		expect(resolveGatewayModel("typesafe/jev-latest", index)?.api).toBe("typesafe");
+		expect(resolveGatewayModel("jev-latest", index)?.provider).toBe("typesafe");
 		// Tiny on-device models have no gateway route and are not advertised.
-		expect([...index.values()].some(model => modelKind(model) === "tiny")).toBe(false);
+		expect(index.models.some(model => modelKind(model) === "tiny")).toBe(false);
+	});
+});
+
+describe("resolveGatewayModel", () => {
+	test("routes an OpenRouter variant selector the catalog does not list to its base model", async () => {
+		const storage = await createAuthStorage();
+		await storage.credentials.set("openrouter", { type: "api_key", key: "sk-test-openrouter" });
+		await storage.credentials.set("anthropic", { type: "api_key", key: "sk-test-anthropic" });
+		const settings = Settings.isolated({});
+		const registry = new ModelRegistry(storage, undefined, { ignoreLocalModelConfig: true, settings });
+		const index = indexModelsByRequestId(
+			gatewayRoutableModels(registry),
+			gatewayRoutableProviders(storage, settings),
+		);
+		const base = index.models.find(model => model.provider === "openrouter" && !model.id.includes(":"));
+		const anthropic = index.models.find(model => model.provider === "anthropic");
+		if (!base || !anthropic) throw new Error("expected bundled openrouter and anthropic models");
+
+		// Previously "Unknown model: openrouter/<id>:floor" — the suffix must survive to the wire id.
+		const floor = resolveGatewayModel(`openrouter/${base.id}:floor`, index);
+		expect(floor?.provider).toBe("openrouter");
+		expect(floor?.id).toBe(`${base.id}:floor`);
+		expect(floor?.api).toBe(base.api);
+		// Route suffixes are an OpenRouter concept; other providers stay exact-match.
+		expect(resolveGatewayModel(`anthropic/${anthropic.id}:floor`, index)).toBeUndefined();
+		expect(resolveGatewayModel("openrouter/no-such-vendor/no-such-model:floor", index)).toBeUndefined();
+	});
+
+	/** A served chat model, built through the catalog rules like discovery output. */
+	function servedModel(provider: string, id: string, api: Api): Model<Api> {
+		return buildModel({
+			id,
+			name: id,
+			api,
+			provider,
+			baseUrl: "https://example.test",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 8192,
+		});
+	}
+
+	// `cursor`, `snowflake` and `venice` are unranked by the built-in provider order; `anthropic` is native.
+	const anthropic = servedModel("anthropic", "claude-x", "anthropic-messages");
+	const cursor = servedModel("cursor", "claude-x", "cursor-agent");
+	const snowflake = servedModel("snowflake", "claude-x", "anthropic-messages");
+	const venice = servedModel("venice", "claude-x", "openai-completions");
+	const catalog = [cursor, venice, snowflake, anthropic];
+	const credentialed = new Set(catalog.map(model => model.provider));
+
+	test("a bare id resolves to the highest-priority provider whatever order the catalog lists it in", () => {
+		// A discovery refresh re-appends a provider's models at the catalog's end; a bare id
+		// used to follow that order and land on whichever mirror stayed in front.
+		for (const order of [catalog, [...catalog].reverse()]) {
+			const index = indexModelsByRequestId(order, credentialed);
+			expect(resolveGatewayModel("claude-x", index)).toBe(anthropic);
+			// The route's wire never outranks provider priority.
+			expect(resolveGatewayModel("claude-x", index, { api: "openai-completions" })).toBe(anthropic);
+		}
+	});
+
+	test("the configured provider order outranks the built-in one", () => {
+		const index = indexModelsByRequestId(catalog, credentialed, ["venice"]);
+		expect(resolveGatewayModel("claude-x", index)).toBe(venice);
+	});
+
+	test("among equally ranked providers a bare id prefers the route's wire, then provider id", () => {
+		const index = indexModelsByRequestId(catalog, credentialed);
+		const unranked = { accepts: (model: Model<Api>) => model !== anthropic };
+		expect(resolveGatewayModel("claude-x", index, unranked)).toBe(cursor);
+		expect(resolveGatewayModel("claude-x", index, { ...unranked, api: "anthropic-messages" })).toBe(snowflake);
+		expect(resolveGatewayModel("claude-x", index, { ...unranked, api: "openai-completions" })).toBe(venice);
+	});
+
+	test("a refused provider/id never resolves to another provider's bare id spelled the same way", () => {
+		const aggregated = servedModel("openrouter", "anthropic/claude-x", "openai-completions");
+		const index = indexModelsByRequestId([anthropic, aggregated], new Set(["anthropic", "openrouter"]));
+		expect(resolveGatewayModel("anthropic/claude-x", index)).toBe(anthropic);
+		expect(
+			resolveGatewayModel("anthropic/claude-x", index, { accepts: model => model !== anthropic }),
+		).toBeUndefined();
 	});
 });
 

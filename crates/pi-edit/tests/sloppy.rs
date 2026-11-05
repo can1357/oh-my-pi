@@ -101,6 +101,31 @@ async fn trailing_end_patch_closes_a_wrapped_insert_instead_of_being_inserted() 
 }
 
 #[tokio::test]
+async fn end_sentinels_close_put_bodies_but_stay_literal_in_find() {
+	for (before, input, expected) in [
+		// Models that close every body with `*** End …`: neither leaks into the
+		// file nor swallows the operations after it.
+		(
+			"one\ntwo\nthree\nfour\n",
+			"*** Edit File: a.txt\n*** Find\none\n*** Replace\nONE\n*** End Patch\n*** \
+			 Find\ntwo\n*** Replace\nTWO\n*** End\n*** Find\nthree\n*** Insert After\n3.5\n*** \
+			 End\n*** Find\nfour\n*** Replace\nFOUR\n*** End\n",
+			"ONE\nTWO\nthree\n3.5\nFOUR\n",
+		),
+		// A Find body is matched as written, so a literal sentinel line can be removed.
+		("a\n*** End\nb\n", "*** Edit File: a.txt\n*** Find\na\n*** End\n*** Replace\na\n", "a\nb\n"),
+	] {
+		let workspace = Workspace::new(EditMode::Sloppy);
+		workspace.write("a.txt", before);
+		workspace
+			.apply_json(&json!({ "input": input }), &DiskWriter::default())
+			.await
+			.expect("sentinel-closed payload");
+		assert_eq!(workspace.read("a.txt").unwrap(), expected, "{input:?}");
+	}
+}
+
+#[tokio::test]
 async fn after_requires_all_even_when_ambiguous_insertions_have_identical_outcomes() {
 	let workspace = Workspace::new(EditMode::Sloppy);
 	workspace.write("a.txt", "item\nitem\n");
@@ -287,7 +312,7 @@ async fn no_op_recovery_respects_utf8_boundaries_in_source_and_replacement() {
 			.apply_raw(&input, &writer)
 			.await
 			.expect_err("an unchanged edit reports a no-op instead of panicking");
-		assert!(matches!(error, EditError::Match(_)));
+		assert_eq!(error.kind(), "no_change", "{error}");
 		assert!(writer.requests.lock().is_empty());
 		assert_eq!(workspace.read("a.txt").unwrap(), before);
 	}
@@ -305,6 +330,26 @@ async fn overlapping_desired_matches_are_rejected_without_collapsing_source() {
 		.expect_err("overlapping matches are not adjacent duplicate blocks");
 	assert!(matches!(error, EditError::Match(_)));
 	assert!(error.to_string().contains("ambiguous"));
+	assert!(writer.requests.lock().is_empty());
+	assert_eq!(workspace.read("a.txt").unwrap(), before);
+}
+
+#[tokio::test]
+async fn a_staged_insertion_is_not_dropped_by_a_later_replace_on_the_same_find() {
+	let workspace = Workspace::new(EditMode::Sloppy);
+	let before = "old\nkeep\n";
+	workspace.write("a.txt", before);
+	let writer = DiskWriter::default();
+	let error = workspace
+		.apply_raw(
+			"*** Edit File: a.txt\n*** Find\nold\n*** Insert Before\nstaged\n*** Replace\nnew\n",
+			&writer,
+		)
+		.await
+		.expect_err("two operators on one *** Find cannot both apply");
+	assert!(matches!(error, EditError::Parse { .. }));
+	assert!(error.to_string().contains("*** Insert Before"), "{error}");
+	assert!(error.to_string().contains("*** Replace"), "{error}");
 	assert!(writer.requests.lock().is_empty());
 	assert_eq!(workspace.read("a.txt").unwrap(), before);
 }
@@ -335,6 +380,7 @@ fn escalates_the_third_identical_no_op_with_stop_guidance() {
 			notes:     &mut notes,
 			store:     &store,
 			canonical: &canonical,
+			streaming: false,
 		})
 		.expect_err("no-op must fail");
 		if attempt < 3 {
@@ -399,6 +445,61 @@ async fn returns_a_diff_for_an_applicable_section_and_an_error_for_a_miss() {
 	assert!(preview.is_empty());
 }
 
+#[tokio::test]
+async fn streaming_preview_keeps_finished_ops_while_the_next_find_streams() {
+	let workspace = Workspace::new(EditMode::Sloppy);
+	workspace.write("a.txt", "alpha\nbeta\ngamma\n");
+	let mut files = FileCache::new(workspace.config.policy.clone());
+	let engine = SloppyEngine { allow_fuzzy: true, fuzzy_threshold: 0.95 };
+	// The second Find is still streaming; its Replace has not arrived. The
+	// preview keeps showing the finished first op: the unfinished one is
+	// neither guessed into an edit of the similar `gamma` line nor allowed to
+	// fail the whole section.
+	let partial = ArgSnapshot {
+		input: Some(
+			"*** Edit File: a.txt\n*** Find\nalpha\n*** Replace\nALPHA\n*** Find\ngamma2\n".to_owned(),
+		),
+		..ArgSnapshot::default()
+	};
+	let preview = engine.preview(&partial, true, &mut files, &workspace.store);
+	assert_eq!(preview.len(), 1);
+	let diff = preview[0].diff.as_deref().expect("first op previews");
+	assert!(diff.contains("+1|ALPHA"), "{diff}");
+	assert!(!diff.contains("-3|gamma") && !diff.contains("gamma2"), "{diff}");
+}
+
+#[tokio::test]
+async fn streaming_preview_recovers_a_bare_find_in_a_closed_section() {
+	let workspace = Workspace::new(EditMode::Sloppy);
+	workspace.write("a.txt", "alpha one two three\n");
+	workspace.write("b.txt", "beta\n");
+	let mut files = FileCache::new(workspace.config.policy.clone());
+	let engine = SloppyEngine { allow_fuzzy: true, fuzzy_threshold: 0.95 };
+	// The `b.txt` header closes the a.txt section, so its bare Find is final
+	// and recovers exactly as it will on apply; only the last section may
+	// still be streaming.
+	let args = ArgSnapshot {
+		input: Some(
+			"*** Edit File: a.txt\n*** Find\nalpha one two threX\n*** Edit File: b.txt\n*** \
+			 Find\nbeta\n*** Replace\nBETA\n"
+				.to_owned(),
+		),
+		..ArgSnapshot::default()
+	};
+	let streaming = engine.preview(&args, true, &mut files, &workspace.store);
+	let finished = engine.preview(&args, false, &mut files, &workspace.store);
+	let a_txt = |preview: &[pi_edit::PreviewFile]| {
+		preview
+			.iter()
+			.find(|file| file.display == "a.txt")
+			.cloned()
+			.expect("a.txt previews")
+	};
+	let streamed = a_txt(&streaming);
+	assert_eq!(streamed.error, None, "{streamed:?}");
+	assert_eq!(streamed.diff, a_txt(&finished).diff);
+}
+
 #[test]
 fn inspect_exposes_matcher_paths_and_entries() {
 	let engine = SloppyEngine { allow_fuzzy: false, fuzzy_threshold: 0.95 };
@@ -441,11 +542,11 @@ async fn miss_with_cjk_content_returns_match_error_without_panicking() {
 
 #[tokio::test]
 async fn overlapping_selection_spans_report_a_miss_without_panicking() {
-	// Garbled ⟪…⟫ marker glyphs can resolve overlapping selection spans. Splicing
-	// a multibyte (CJK) replacement into the mutated `content[start..end]` rewrite
-	// buffer then re-indexes it on a mid-char edge and panicked the worker instead
-	// of reporting the miss. The unmappable selection must surface as a match
-	// error. (#12529)
+	// Garbled ⟪…⟫ marker glyphs can resolve overlapping selection spans.
+	// Splicing a multibyte (CJK) replacement into the mutated
+	// `content[start..end]` rewrite buffer then re-indexes it on a mid-char
+	// edge and panicked the worker instead of reporting the miss. The
+	// unmappable selection must surface as a match error. (#12529)
 	let workspace = Workspace::new(EditMode::Sloppy);
 	workspace.write("a.txt", "d");
 	let writer = DiskWriter::default();

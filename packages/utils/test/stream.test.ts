@@ -214,6 +214,27 @@ describe("parseJsonlLenient", () => {
 		const result = parseJsonlLenient<{ x: number }>('{"x":42}');
 		expect(result).toEqual([{ x: 42 }]);
 	});
+
+	it("notifies onMalformedRecord once per malformed line and ignores ASCII or Unicode whitespace-only lines", () => {
+		let malformed = 0;
+		const result = parseJsonlLenient<{ a: number }>('{"a":1}\n\n\u00a0\n  {bad 1}\n{"a":2}\n{bad 2}\n\u00a0', {
+			onMalformedRecord: () => {
+				malformed++;
+			},
+		});
+		expect(result).toEqual([{ a: 1 }, { a: 2 }]);
+		expect(malformed).toBe(2);
+
+		let unicodeOnlyMalformed = 0;
+		expect(
+			parseJsonlLenient("\u00a0", {
+				onMalformedRecord: () => {
+					unicodeOnlyMalformed++;
+				},
+			}),
+		).toEqual([]);
+		expect(unicodeOnlyMalformed).toBe(0);
+	});
 });
 
 describe("readSseJson", () => {
@@ -593,5 +614,30 @@ describe("readSseEvents", () => {
 		expect(events[1999].data).toBe("1999");
 		// Generous bound: the previous quadratic implementation needed >5s here.
 		expect(elapsed).toBeLessThan(2000);
+	});
+});
+
+describe("ConcatSink capacity", () => {
+	const LARGE = 4 * 1024 * 1024;
+
+	it("releases an oversized buffer once its bytes are consumed", () => {
+		const sink = new ConcatSink();
+		sink.append(new Uint8Array(LARGE).fill(0x61));
+		sink.consume(LARGE - 8);
+		const rest = sink.flush();
+		expect(rest?.length).toBe(8);
+		expect(rest!.buffer.byteLength).toBeLessThan(LARGE);
+	});
+
+	it("drops an oversized buffer on clear and reuses a right-sized one on reset", () => {
+		const sink = new ConcatSink();
+		sink.append(new Uint8Array(LARGE));
+		sink.clear();
+		sink.append(new Uint8Array(16));
+		expect(sink.flush()!.buffer.byteLength).toBeLessThan(LARGE);
+
+		sink.append(new Uint8Array(LARGE));
+		sink.reset(new Uint8Array(16));
+		expect(sink.flush()!.buffer.byteLength).toBeLessThan(LARGE);
 	});
 });

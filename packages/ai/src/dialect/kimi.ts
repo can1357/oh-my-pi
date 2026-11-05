@@ -2,7 +2,14 @@ import type { Message, ToolCall } from "../types";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { asRecord, normalizeKimiFunctionName, partialSuffixOverlapAny } from "./coercion";
 import dialectPrompt from "./kimi.md" with { type: "text" };
-import { assistantTranscriptParts, collectToolResultRun, messageContentText, stringifyJson } from "./rendering";
+import {
+	assistantTranscriptParts,
+	collectToolResultRun,
+	kimiCallId,
+	messageContentText,
+	stringifyJson,
+} from "./rendering";
+import { TerminatorWait } from "./terminator-wait";
 import type {
 	DialectDefinition,
 	DialectRenderOptions,
@@ -39,6 +46,7 @@ export class KimiInbandScanner implements InbandScanner {
 	#name = "";
 	#rawBlock = "";
 	#thinking = "";
+	readonly #closeWait = new TerminatorWait();
 	readonly #parseThinking: boolean;
 
 	constructor(options: InbandScannerOptions = {}) {
@@ -47,11 +55,15 @@ export class KimiInbandScanner implements InbandScanner {
 
 	feed(text: string): InbandScanEvent[] {
 		if (text.length === 0) return [];
-		this.#buffer += text;
-		return this.#consume(false);
+		if (this.#closeWait.absorb(text)) return [];
+		this.#buffer = this.#closeWait.release(this.#buffer) + text;
+		const events = this.#consume(false);
+		if (this.#state === "args") this.#closeWait.arm(KIMI_CALL_END, this.#buffer);
+		return events;
 	}
 
 	flush(): InbandScanEvent[] {
+		this.#buffer = this.#closeWait.release(this.#buffer);
 		return this.#consume(true);
 	}
 
@@ -311,11 +323,6 @@ function renderTranscript(messages: readonly Message[], _options?: DialectRender
 		i++;
 	}
 	return out;
-}
-
-function kimiCallId(name: string, id: string, index: number): string {
-	const trimmed = id.trim();
-	return trimmed.startsWith("functions.") ? trimmed : `functions.${name}:${index}`;
 }
 
 function kimiTurn(role: "assistant" | "system" | "user", name: string, body: string): string {

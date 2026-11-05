@@ -1,6 +1,10 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { TspKind } from "@oh-my-pi/pi-wire";
-import { describeWorkingRow } from "@oh-my-pi/pi-tui/components/loader";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { Container, Text } from "@oh-my-pi/pi-tui";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { describeWorkingRow, type WorkingRowSpec } from "@oh-my-pi/pi-tui/components/loader";
 import { SelectList } from "@oh-my-pi/pi-tui/components/select-list";
 import type { DescribeContext, NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
@@ -9,6 +13,7 @@ import { type ComposerNativeState, CustomEditor } from "@oh-my-pi/pi-tui/prompt/
 import { QueuedMessagesBand } from "@oh-my-pi/pi-tui/prompt/queued-messages";
 import { createStartupStatusLine } from "@oh-my-pi/pi-tui/status-line/startup";
 import { getEditorTheme, getSelectListTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
+import { TspHarness } from "./native/tsp-harness";
 import { VirtualTerminal } from "./virtual-terminal";
 
 const context = (kinds: readonly TspKind[] | "all"): DescribeContext => ({
@@ -111,6 +116,29 @@ describe("native composer", () => {
 		expect(editor.onEscape).toHaveBeenCalledTimes(1);
 	});
 
+	it("quotes the session title in italics as the placeholder; a viewed subagent's name wins", () => {
+		const placeholder = (state: ComposerNativeState) =>
+			nodes(composer(state).describe(cx)).find(n => n.k === "editor")?.p;
+		expect(placeholder({ running: false })).toMatchObject({ placeholder: "What are we cooking?" });
+		expect(placeholder({ running: false, title: "" })).toMatchObject({ placeholder: "What are we cooking?" });
+		expect(placeholder({ running: false, title: "Fix login" })).toMatchObject({
+			placeholder: [{ t: "“Fix login”", s: "em" }],
+		});
+		expect(placeholder({ running: false, title: "Fix login", viewing: ["Scout"] })).toMatchObject({
+			placeholder: "Message Scout",
+		});
+	});
+
+	it("sends a shown prediction as ghost text in place of the placeholder", () => {
+		const editor = composer({ running: false, title: "Fix login" });
+		editor.predictions = () => ["run the tests"];
+		const input = () => nodes(editor.describe(cx)).find(n => n.k === "editor")?.p;
+
+		expect(input()).toMatchObject({ ghost: "run the tests", placeholder: undefined });
+		editor.setText("run");
+		expect(input()).toMatchObject({ ghost: " the tests", placeholder: undefined });
+	});
+
 	it("names the viewed subagent over the draft and routes its links to the focus handler", () => {
 		expect(byRole(composer({ running: false }).describe(cx), "omp.composer.focus")).toBeUndefined();
 
@@ -174,6 +202,121 @@ describe("native composer", () => {
 		expect(submitted).toEqual(["hello"]);
 	});
 
+	it("rebuilds the microphone beside Send through every dictation state and hides it without a host", () => {
+		let dictation: ComposerNativeState["dictation"];
+		const editor = new CustomEditor(getEditorTheme());
+		editor.composerState = () => ({ running: false, dictation });
+		editor.onSubmit = vi.fn();
+		editor.onToggleDictation = vi.fn();
+		const hidden = editor.describe(cx);
+		expect(byRole(hidden, "omp.composer.dictation")).toBeUndefined();
+		editor.handleNativeEvent({ type: "action", key: "bar/dictation", act: "dictation.toggle", mods: [] });
+		expect(editor.onToggleDictation).not.toHaveBeenCalled();
+
+		for (const state of ["idle", "starting", "recording", "transcribing", "idle"] as const) {
+			dictation = state;
+			const root = editor.describe(cx);
+			const mic = byRole(root, "omp.composer.dictation")!;
+			const send = byRole(root, "omp.composer.send")!;
+			const bar = byRole(root, "omp.composer.bar")!;
+			const children = (bar.c ?? []).filter(isNode);
+			const holdsDraft = state === "recording" || state === "transcribing";
+			expect(children.indexOf(mic)).toBe(children.indexOf(send) - 1);
+			expect(nodes(root).find(n => n.k === "editor")?.p).toMatchObject({ sendable: !holdsDraft });
+			expect(send.p?.actions).toEqual(holdsDraft ? undefined : { click: "submit" });
+			expect(mic.p?.actions).toEqual(state === "transcribing" ? undefined : { click: "dictation.toggle" });
+
+			if (state === "starting" || state === "transcribing") {
+				expect(mic.p).toMatchObject({ tone: "pending" });
+				expect(nodes(mic).some(n => n.k === "spinner")).toBe(true);
+			} else {
+				expect(nodes(mic).find(n => n.k === "icon")?.p).toEqual({
+					name: state === "recording" ? "stop" : "mic",
+				});
+				if (state === "recording") {
+					expect(mic.p).toMatchObject({ tone: "error" });
+				}
+			}
+		}
+		dictation = undefined;
+		expect(byRole(editor.describe(cx), "omp.composer.dictation")).toBeUndefined();
+	});
+
+	it("routes microphone clicks without keyboard focus, cancels a slow start and keeps transcription as a draft", async () => {
+		let dictation: ComposerNativeState["dictation"] = "idle";
+		const editor = new CustomEditor(getEditorTheme());
+		const other = new CustomEditor(getEditorTheme());
+		const toggled: ComposerNativeState["dictation"][] = [];
+		const submitted: string[] = [];
+		editor.composerState = () => ({ running: false, dictation });
+		// Mirrors the host: idle starts, a pending start cancels, recording stops into transcription.
+		editor.onToggleDictation = () => {
+			toggled.push(dictation);
+			dictation = dictation === "idle" ? "starting" : dictation === "starting" ? "idle" : "transcribing";
+		};
+		editor.onSubmit = text => {
+			submitted.push(text);
+		};
+		other.onToggleDictation = () => {
+			throw new Error("dictation reached keyboard focus instead of its native owner");
+		};
+		editor.setText("existing draft");
+		const h = await TspHarness.start(tui => {
+			tui.addChild(editor);
+			tui.addChild(other);
+			tui.setFocus(other);
+		});
+		try {
+			const mic = h.find(n => n.p?.role === "omp.composer.dictation")!;
+			const send = h.find(n => n.p?.role === "omp.composer.send")!;
+			const input = h.find(n => n.k === "editor" && n.p?.text === "existing draft")!;
+			const clickMic = () => h.event({ ev: "action", sf: h.terminal.surface!, id: mic.id, act: "dictation.toggle" });
+			const assertSendBlocked = () => {
+				h.event({ ev: "action", sf: h.terminal.surface!, id: send.id, act: "submit" });
+				h.event({ ev: "send", sf: h.terminal.surface!, id: input.id, text: "must not replace draft" });
+				editor.handleInput("\r");
+				expect(submitted).toEqual([]);
+				expect(editor.getText()).toBe("existing draft");
+				expect(h.byId(input.id)?.p).toMatchObject({ sendable: false });
+			};
+
+			// A start still loading its model can be cancelled, and does not block sending.
+			clickMic();
+			await h.render();
+			expect(editor.composerState().dictation).toBe("starting");
+			expect(h.byId(input.id)?.p).toMatchObject({ sendable: true });
+			clickMic();
+			await h.render();
+			expect(toggled).toEqual(["idle", "starting"]);
+			expect(editor.composerState().dictation).toBe("idle");
+
+			clickMic();
+			dictation = "recording";
+			await h.render();
+			assertSendBlocked();
+			clickMic();
+			await h.render();
+			expect(toggled).toEqual(["idle", "starting", "idle", "recording"]);
+			expect(editor.composerState().dictation).toBe("transcribing");
+			clickMic();
+			expect(toggled).toHaveLength(4);
+			assertSendBlocked();
+
+			editor.setText("existing draft dictated words submit");
+			dictation = "idle";
+			await h.render();
+			expect(submitted).toEqual([]);
+			expect(editor.getText()).toBe("existing draft dictated words submit");
+			expect(h.byId(input.id)?.p).toMatchObject({ sendable: true });
+			h.event({ ev: "action", sf: h.terminal.surface!, id: send.id, act: "submit" });
+			expect(submitted).toEqual(["existing draft dictated words submit"]);
+			expect(editor.getText()).toBe("");
+			expect(h.errors).toEqual([]);
+		} finally {
+			h.stop();
+		}
+	});
+
 	it("keeps the effort chip at `off` with an empty glyph so a click can turn thinking back on", () => {
 		const chip = byRole(composer({ running: false, thinking: "off" }).describe(cx), "omp.composer.effort")!;
 		expect(chip.p).toMatchObject({ actions: { click: "thinking.cycle" } });
@@ -211,11 +354,75 @@ describe("native composer", () => {
 	it("omits the effort chip when the model has no thinking", () => {
 		expect(byRole(composer({ running: false }).describe(cx), "omp.composer.effort")).toBeUndefined();
 	});
+
+	it("docks the tok/s readout right after the effort chip, only while there is a reading", () => {
+		let rate: number | undefined = 31.8;
+		const editor = new CustomEditor(getEditorTheme());
+		editor.composerState = () => ({ running: false, thinking: "xhigh", rate });
+		const bar = () => byRole(editor.describe(cx), "omp.composer.bar")!;
+		const slots = (root: NativeNode) =>
+			(root.c ?? []).filter(isNode).map(n => (n.p !== undefined && "role" in n.p ? n.p.role : n.key));
+
+		const reading = bar();
+		expect(slots(reading)).toEqual(["omp.composer.effort", "omp.composer.rate", "gap", "omp.composer.send"]);
+		expect(byRole(reading, "omp.composer.rate")?.p).toEqual({
+			value: 31.8,
+			unit: "tok/s",
+			role: "omp.composer.rate",
+			title: "Generation rate",
+		});
+
+		// A rate tick re-describes the readout alone: the chips beside it keep their nodes.
+		rate = 32.4;
+		const ticked = bar();
+		expect(byRole(ticked, "omp.composer.rate")?.p).toMatchObject({ value: 32.4 });
+		expect(byRole(ticked, "omp.composer.effort")).toBe(byRole(reading, "omp.composer.effort"));
+
+		rate = undefined;
+		expect(slots(bar())).toEqual(["omp.composer.effort", "gap", "omp.composer.send"]);
+	});
+});
+
+describe("native composer thinking level in the model chip", () => {
+	function withFacts(state: ComposerNativeState): CustomEditor {
+		const editor = composer(state);
+		editor.composerFacts = createStartupStatusLine({
+			settings: { preset: "custom", leftSegments: [], rightSegments: [] },
+			gitEnabled: false,
+			autoThinking: false,
+			fastMode: false,
+			usingSubscription: false,
+			autoCompactEnabled: false,
+			compactionBoundaries: null,
+		});
+		return editor;
+	}
+
+	it("draws the level as the model chip's icon, cycling on click, and drops the effort chip", () => {
+		const root = withFacts({ running: false, thinking: "xhigh", thinkingInModel: true }).describe(cx);
+		expect(byRole(root, "omp.composer.effort")).toBeUndefined();
+		const model = byRole(root, "omp.composer.model")!;
+		expect((model.c ?? []).filter(isNode).map(n => n.k)).toEqual(["effort", "text", "icon"]);
+		expect(byRole(model, "omp.composer.model.effort")?.p).toMatchObject({
+			level: "xhigh",
+			// The level, then the cycle key as the effort chip's tooltip names it.
+			title: expect.stringMatching(/^Thinking effort: xhigh {2}\S/),
+			actions: { click: "thinking.cycle" },
+		});
+	});
+
+	it("keeps the model icon and the effort chip where the terminal lacks the effort kind", () => {
+		const legacy = context(["row", "text", "icon", "meter", "editor", "kbd"]);
+		const root = withFacts({ running: false, thinking: "xhigh", thinkingInModel: true }).describe(legacy);
+		expect(byRole(root, "omp.composer.model.effort")).toBeUndefined();
+		expect((byRole(root, "omp.composer.model")!.c ?? []).filter(isNode)[0]?.p).toMatchObject({ name: "model" });
+		expect(byRole(root, "omp.composer.effort")).toBeDefined();
+	});
 });
 
 describe("native working row", () => {
 	it("counts a retry down in a ring and offers Cancel; without meter support it spins", () => {
-		const spec = {
+		const spec: WorkingRowSpec = {
 			label: "Retrying · attempt 1 of 3",
 			startedAt: 1_000,
 			variant: { kind: "retry", attempt: 1, max: 3, delayMs: 4_000 } as const,
@@ -230,6 +437,18 @@ describe("native working row", () => {
 
 		const plain = describeWorkingRow(spec, context([]), 2_000);
 		expect((plain.c![0] as NativeNode).k).toBe("spinner");
+	});
+
+	it("leads with the spinner and the elapsed time, then the divider and the intent, without a tok/s readout", () => {
+		const row = describeWorkingRow({ label: "Diagnosing", startedAt: 0, interruptKey: "escape" }, cx, 10);
+		expect((row.c ?? []).filter(isNode).map(n => n.key)).toEqual([
+			"spinner",
+			"elapsed",
+			"sep",
+			"label",
+			"fill",
+			"stop",
+		]);
 	});
 
 	it("shows indeterminate progress while compacting and no stop control when Esc would not cancel", () => {
@@ -257,12 +476,24 @@ describe("native queued messages", () => {
 		const pills = (band.describe().c ?? []).filter(isNode);
 		expect(pills).toHaveLength(3);
 		const counts = pills.map(pill => byRole(pill, "omp.queue.count")?.p);
-		expect(counts).toEqual([{ text: "3", role: "omp.queue.count" }, undefined, undefined]);
+		expect(counts).toEqual([
+			{ text: "3 queued", title: "3 messages queued", role: "omp.queue.count" },
+			undefined,
+			undefined,
+		]);
 		band.handleNativeEvent({ type: "action", key: "x/edit", act: "queue.edit", mods: [] });
 		expect(onEdit).toHaveBeenCalledTimes(1);
 
 		const single = new QueuedMessagesBand([{ label: "Steering", messages: ["only"] }], "alt+up", onEdit);
 		expect(byRole(single.describe(), "omp.queue.count")).toBeUndefined();
+
+		// Two waiting: the first pill reads as the total ("2 queued"), never as a bare "2" position.
+		const pair = new QueuedMessagesBand([{ label: "Steering", messages: ["first", "second"] }], "alt+up", onEdit);
+		const pairCounts = (pair.describe().c ?? []).filter(isNode).map(pill => byRole(pill, "omp.queue.count")?.p);
+		expect(pairCounts).toEqual([
+			{ text: "2 queued", title: "2 messages queued", role: "omp.queue.count" },
+			undefined,
+		]);
 	});
 });
 
@@ -300,6 +531,43 @@ describe("native autocomplete list", () => {
 	});
 });
 
+describe("native composer startup typeahead", () => {
+	const field = (composer: Composer) => nodes(composer.editor.describe(cx)).find(n => n.k === "editor");
+
+	it("asks Tern to keep typing from a deferred-input start until startup releases the held input", () => {
+		setNativeRendering(true);
+		const composer = new Composer({
+			terminal: new VirtualTerminal(80, 24),
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+		});
+		composer.start({ deferInput: true });
+		try {
+			expect(field(composer)?.p).toMatchObject({ typeahead: true });
+			// An editor swapped in during startup (an extension's) keeps asking.
+			composer.setEditor(new CustomEditor(getEditorTheme()));
+			expect(field(composer)?.p).toMatchObject({ typeahead: true });
+			composer.releaseHeldInput();
+			expect(field(composer)?.p).toMatchObject({ typeahead: undefined });
+		} finally {
+			composer.stop();
+		}
+	});
+
+	it("never asks after an ordinary start", () => {
+		setNativeRendering(true);
+		const composer = new Composer({
+			terminal: new VirtualTerminal(80, 24),
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+		});
+		composer.start();
+		try {
+			expect(field(composer)?.p).toMatchObject({ typeahead: undefined });
+		} finally {
+			composer.stop();
+		}
+	});
+});
+
 describe("native composer without a status strip", () => {
 	it("docks no status bar; the composer carries model, effort, context and usage", () => {
 		setNativeRendering(true);
@@ -325,7 +593,7 @@ describe("native composer without a status strip", () => {
 		composer.start();
 		try {
 			composer.editor.composerState = () => ({ running: false, thinking: "high" });
-			const { dock } = composer.describeSurface();
+			const { dock } = composer.describeSurface(cx);
 			expect(dock).toEqual([composer.editor]);
 			const described = composer.editor.describe(cx);
 			expect(nodes(described).some(n => n.p !== undefined && "role" in n.p && n.p.role === "omp.status")).toBe(
@@ -351,7 +619,7 @@ describe("native composer without a status strip", () => {
 			const model = byRole(bar, "omp.composer.model")!;
 			expect(model.p).toMatchObject({ actions: { click: "status.model" } });
 			expect(nodes(model).map(n => n.k)).toEqual(["row", "icon", "text", "icon"]);
-			// Path and branch belong to Tern's pane header; the rest stays as a fact.
+			// The path belongs to Tern's pane header; the rest stays as a fact (git shows nothing without a repo).
 			const extras = byRole(bar, "omp.composer.extras")!;
 			expect((extras.c ?? []).filter(isNode).map(n => n.key)).toEqual(["hostname"]);
 			expect(byRole(bar, "omp.composer.usage")?.p).toMatchObject({ actions: { click: "status.cost" } });
@@ -376,5 +644,68 @@ describe("native composer without a status strip", () => {
 		editor.composerFacts = line;
 		editor.handleNativeEvent({ type: "action", key: "bar/model", act: "status.model", mods: [] });
 		expect(actions).toEqual(["status.model"]);
+	});
+});
+
+describe("native composer first frame", () => {
+	it("draws the cached thinking level before the session wires its own state", () => {
+		setNativeRendering(true);
+		const composer = new Composer({
+			terminal: new VirtualTerminal(80, 24),
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+			status: {
+				statusLine: {
+					settings: { preset: "custom", leftSegments: ["model"], rightSegments: [], compactThinkingLevel: true },
+					gitEnabled: false,
+					model: getBundledModel("anthropic", "claude-sonnet-4-5"),
+					thinkingLevel: ThinkingLevel.High,
+					autoThinking: false,
+					fastMode: false,
+					usingSubscription: false,
+					autoCompactEnabled: false,
+					compactionBoundaries: null,
+				},
+			},
+		});
+		try {
+			const effort = byRole(composer.editor.describe(cx), "omp.composer.model.effort");
+			expect(effort).toMatchObject({ k: "effort", p: { level: "high" } });
+		} finally {
+			composer.stop();
+		}
+	});
+});
+
+describe("native surface tail", () => {
+	it("flows deferred output after the transcript, not in the dock, and keeps its place moving in", () => {
+		setNativeRendering(true);
+		const composer = new Composer({
+			terminal: new VirtualTerminal(80, 24),
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+		});
+		composer.start();
+		try {
+			const transcript = new TranscriptContainer();
+			const answer = new Text("answer", 0, 0);
+			transcript.addChild(answer);
+			const deferred = new Container();
+			const run = new Text("$ git worktree list", 0, 0);
+			deferred.addChild(run);
+			const queued = new Container();
+			composer.setRuntimeChildren([transcript, deferred, queued], { nativeTail: [deferred] });
+
+			const live = composer.describeSurface(cx);
+			expect(live.main.slice(-2)).toEqual([answer, run]);
+			expect(live.dock).toEqual([queued]);
+
+			// The next prompt flushes it into the transcript: same block, same place.
+			deferred.removeChild(run);
+			transcript.addChild(run);
+			const flushed = composer.describeSurface(cx);
+			expect(flushed.main.slice(-2)).toEqual([answer, run]);
+			expect(flushed.main).toHaveLength(live.main.length);
+		} finally {
+			composer.stop();
+		}
 	});
 });

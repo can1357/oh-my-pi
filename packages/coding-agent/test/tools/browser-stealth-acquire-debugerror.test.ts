@@ -23,6 +23,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { FrameEvent } from "puppeteer-core/lib/puppeteer/api/Frame.js";
 import { CdpFrame } from "puppeteer-core/lib/puppeteer/cdp/Frame.js";
 import { FrameManager } from "puppeteer-core/lib/puppeteer/cdp/FrameManager.js";
 import { MAIN_WORLD, PUPPETEER_WORLD } from "puppeteer-core/lib/puppeteer/cdp/IsolatedWorlds.js";
@@ -48,7 +49,7 @@ class RejectingSession extends EventEmitter<Record<string, unknown>> {
 	}
 }
 
-function makeFrameManager(session: RejectingSession): FrameManager {
+function makeFrameManager(session: EventEmitter<Record<string, unknown>>): FrameManager {
 	const browser = { isNetworkEnabled: () => false, isIssuesEnabled: () => false, connected: true };
 	const page = { browser: () => browser, isClosed: () => false, emit() {}, once() {}, off() {} };
 	const timeoutSettings = new TimeoutSettings();
@@ -106,5 +107,63 @@ describe("stealth FrameManager world acquire — issue #5296", () => {
 		// The failure is still observable as an ordinary, recoverable evaluate
 		// error rather than a silent process death.
 		expect(results.every(r => r.status === "rejected")).toBe(true);
+	});
+});
+
+// A CDP session double for one tab: `Page.createIsolatedWorld` hands out the
+// current document's utility context, the context-less `globalThis` probe that
+// resolves the main world waits for the test to answer it, and an evaluation
+// answers with the id of the context it ran in.
+class ScriptedSession extends EventEmitter<Record<string, unknown>> {
+	utilityContextId = 0;
+	probe = Promise.withResolvers<(mainContextId: number) => void>();
+	id(): string {
+		return "S1";
+	}
+	target(): unknown {
+		return { _targetId: "T", type: () => "page" };
+	}
+	send(method: string, params: { contextId?: number } = {}): Promise<unknown> {
+		if (method === "Page.createIsolatedWorld") return Promise.resolve({ executionContextId: this.utilityContextId });
+		if (method === "Runtime.evaluate" && params.contextId === undefined) {
+			const answer = Promise.withResolvers<unknown>();
+			this.probe.resolve(mainContextId => answer.resolve({ result: { objectId: `1.${mainContextId}.1` } }));
+			return answer.promise;
+		}
+		if (method === "Runtime.evaluate")
+			return Promise.resolve({ result: { type: "number", value: params.contextId } });
+		return Promise.resolve({});
+	}
+}
+
+describe("stealth FrameManager world acquire across a superseding navigation", () => {
+	it("acquires the document that committed while the previous one was being probed", async () => {
+		const session = new ScriptedSession();
+		const frameManager = makeFrameManager(session);
+		const frame = new CdpFrame(frameManager, "F1", undefined, session as never);
+		frameManager._frameTree.addFrame(frame);
+		const navigate = (url: string): Promise<unknown> => {
+			const navigated = Promise.withResolvers<unknown>();
+			frame.once(FrameEvent.FrameNavigated, navigated.resolve);
+			session.emit("Page.frameNavigated", { frame: { id: "F1", parentId: undefined, url }, type: "Navigation" });
+			return navigated.promise;
+		};
+
+		await navigate("http://127.0.0.1/b");
+		session.utilityContextId = 11;
+		const evaluation = frame.worlds[MAIN_WORLD].evaluate("location.pathname");
+
+		// /b redirects to /c: the probe answer for /b and the commit of /c arrive
+		// back to back, before Puppeteer has handled either.
+		const answerB = await session.probe.promise;
+		session.probe = Promise.withResolvers();
+		session.utilityContextId = 21;
+		answerB(12);
+		const committedC = navigate("http://127.0.0.1/c");
+
+		const answerC = await session.probe.promise;
+		await committedC;
+		answerC(22);
+		expect(await evaluation).toBe(22);
 	});
 });

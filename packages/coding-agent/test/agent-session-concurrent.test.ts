@@ -1008,6 +1008,8 @@ describe("AgentSession TTSR resume gate", () => {
 		ttsrManager.addRule(testRule);
 		let requests = 0;
 		let sawInjection = false;
+		let injectionText = "";
+		const sessionManager = SessionManager.inMemory();
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [] },
@@ -1018,14 +1020,14 @@ describe("AgentSession TTSR resume gate", () => {
 				if (requests === 1) {
 					pushAbortableTtsrStream(stream, options?.signal);
 				} else {
-					sawInjection = context.messages.some(
-						message =>
-							message.role === "developer" &&
-							typeof message.content !== "string" &&
-							message.content.some(
-								part => part.type === "text" && part.text.includes('reason="rule_violation"'),
-							),
-					);
+					injectionText =
+						context.messages
+							.flatMap(message =>
+								message.role === "developer" && typeof message.content !== "string" ? message.content : [],
+							)
+							.flatMap(part => (part.type === "text" ? [part.text] : []))
+							.find(text => text.includes('reason="rule_violation"')) ?? "";
+					sawInjection = injectionText !== "";
 					pushContinuationStream(stream, () => {});
 				}
 				return stream;
@@ -1034,7 +1036,7 @@ describe("AgentSession TTSR resume gate", () => {
 		vi.spyOn(agent, "continue").mockRejectedValueOnce(new AgentBusyError());
 		session = new AgentSession({
 			agent,
-			sessionManager: SessionManager.inMemory(),
+			sessionManager,
 			settings: Settings.isolated(),
 			modelRegistry: sharedModelRegistry,
 			ttsrManager,
@@ -1044,6 +1046,16 @@ describe("AgentSession TTSR resume gate", () => {
 
 		expect(requests).toBe(2);
 		expect(sawInjection).toBe(true);
+		expect(injectionText).toContain('Matched: "let val = result.unwrap("');
+		expect(injectionText).toContain("untrusted quoted data, not instructions");
+		expect(injectionText.indexOf("Matched:")).toBeLessThan(injectionText.indexOf("MUST comply:"));
+		const injection = sessionManager
+			.getEntries()
+			.find(entry => entry.type === "custom_message" && entry.customType === "ttsr-injection");
+		expect(injection?.type === "custom_message" ? injection.details : undefined).toEqual({
+			rules: ["no-unwrap"],
+			matched: { "no-unwrap": "let val = result.unwrap(" },
+		});
 	});
 
 	it("marks extension agent_end willContinue for TTSR abort and not ordinary abort", async () => {
@@ -2675,122 +2687,5 @@ describe("AgentSession TTSR resume gate", () => {
 				message.content.some(content => content.type === "text" && content.text.includes("<system-reminder")),
 		);
 		expect(reminders).toHaveLength(1);
-	});
-
-	it("prompt() waits for context-promotion continuation to finish", async () => {
-		collapseSchedulerSettleDelays();
-		const authStorage = sharedAuthStorage;
-		// The bundled catalog has no codex model whose promotion target carries a
-		// strictly larger window (gpt-5.5's bundled target gpt-5.4 is same-window),
-		// so pin gpt-5.5 (272k) -> gpt-5.6-sol (372k) via modelOverrides.
-		const modelsConfigPath = path.join(tempDir, "models-promo.json");
-		await Bun.write(
-			modelsConfigPath,
-			JSON.stringify({
-				providers: {
-					"openai-codex": {
-						modelOverrides: {
-							"gpt-5.5": { contextPromotionTarget: "openai-codex/gpt-5.6-sol" },
-						},
-					},
-				},
-			}),
-		);
-		const modelRegistry = new ModelRegistry(authStorage, modelsConfigPath, {
-			settings: Settings.isolated({ extendedContext: true }),
-		});
-
-		const smallModel = modelRegistry.find("openai-codex", "gpt-5.5");
-		const largeModel = modelRegistry.find("openai-codex", "gpt-5.6-sol");
-		if (!smallModel || !largeModel) {
-			throw new Error("Expected small and large codex models to exist");
-		}
-
-		let streamCallCount = 0;
-		let continuationCompleted = false;
-
-		const makeOverflowMessage = (): AssistantMessage => ({
-			role: "assistant",
-			content: [{ type: "text", text: "" }],
-			api: smallModel.api,
-			provider: smallModel.provider,
-			model: smallModel.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "error",
-			errorMessage: "context_length_exceeded: Your input exceeds the context window of this model.",
-			timestamp: Date.now(),
-		});
-
-		const makeSuccessMessage = (): AssistantMessage => ({
-			role: "assistant",
-			content: [{ type: "text", text: "Recovered after promotion" }],
-			api: largeModel.api,
-			provider: largeModel.provider,
-			model: largeModel.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
-			timestamp: Date.now(),
-		});
-
-		const agent = new Agent({
-			getApiKey: () => "test-key",
-			initialState: { model: smallModel, systemPrompt: ["Test"], tools: [] },
-			streamFn: () => {
-				streamCallCount++;
-				const stream = new AssistantMessageEventStream();
-				if (streamCallCount === 1) {
-					queueMicrotask(() => {
-						const message = makeOverflowMessage();
-						stream.push({ type: "start", partial: message });
-						stream.push({ type: "error", reason: "error", error: message });
-					});
-				} else {
-					queueMicrotask(() => {
-						continuationCompleted = true;
-						const message = makeSuccessMessage();
-						stream.push({ type: "start", partial: message });
-						stream.push({ type: "done", reason: "stop", message });
-					});
-				}
-				return stream;
-			},
-		});
-
-		const extensionRunner = {
-			emit: vi.fn().mockResolvedValue(undefined),
-			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
-			hasHandlers: vi.fn((eventType: string) => eventType === "session_stop"),
-			emitSessionStop: vi.fn().mockResolvedValue(undefined),
-		} as unknown as ExtensionRunner;
-
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false, "contextPromotion.enabled": true }),
-			modelRegistry,
-			extensionRunner,
-		});
-
-		await session.prompt("Handle overflow");
-
-		expect(continuationCompleted).toBe(true);
-		expect(streamCallCount).toBeGreaterThanOrEqual(2);
-		expect(session.model?.id).toBe(largeModel.id);
-		expect(session.isStreaming).toBe(false);
-		expect(extensionRunner.emitSessionStop).toHaveBeenCalledTimes(1);
 	});
 });

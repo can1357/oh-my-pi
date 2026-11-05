@@ -131,7 +131,7 @@ describe("AI Providers Abort Tests", () => {
 	});
 
 	describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("Anthropic Provider Abort", () => {
-		const llm = getBundledModel("anthropic", "claude-opus-4-1-20250805");
+		const llm = getBundledModel("anthropic", "claude-opus-4-5-20251101");
 
 		it(
 			"should abort mid-stream",

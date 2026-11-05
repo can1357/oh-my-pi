@@ -51,7 +51,7 @@ type AnyFn = (...args: never[]) => unknown;
 /** Partial at every depth; function members keep their exact signature. */
 export type Deep<T> = T extends AnyFn ? T : T extends object ? { [K in keyof T]?: Deep<T[K]> } : T;
 
-export type ContextOverrides = Deep<InteractiveModeContext>;
+export type ContextOverrides = Omit<Deep<InteractiveModeContext>, "viewSession"> & { viewSession?: Deep<AgentSession> };
 export type SessionOverrides = Deep<AgentSession>;
 export type McpManagerOverrides = Deep<MCPManager>;
 
@@ -102,6 +102,8 @@ export function createSessionStub(
 		isCompacting: false,
 		isAborting: false,
 		isRetrying: false,
+		hasPostPromptWork: false,
+		queuedMessageCount: 0,
 		isTtsrAbortPending: false,
 		retryAttempt: 0,
 		messages: [],
@@ -113,6 +115,8 @@ export function createSessionStub(
 		effectiveExtensionRoots: { explicit: [], mode: "merge", configured: [], configuredLevel: "user" },
 		modelRegistry: {},
 		getToolByName: () => undefined,
+		hasSessionApproval: () => false,
+		getApprovalGrants: () => ({ present: () => new Set<string>() }),
 		hasBuiltInTool: () => true,
 		getLastAssistantMessage: () => undefined,
 		agent: {
@@ -128,6 +132,10 @@ export function createSessionStub(
 		setMCPPromptCommands: vi.fn(),
 		setActiveToolsByName: vi.fn(async () => {}),
 		runIdleCompaction: vi.fn(async () => {}),
+		waitForIdle: async () => {},
+		hasPendingAsyncWork: () => false,
+		getAsyncJobSnapshot: () => null,
+		settleAsyncWork: async () => {},
 		subscribe: vi.fn(() => () => {}),
 	} satisfies SessionOverrides;
 	if (overrides) layer(stub, overrides);
@@ -206,6 +214,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		setFocus: vi.fn(),
 		terminal: { setProgress: vi.fn() },
 		imageBudget: undefined,
+		overlayStack: [],
 	};
 	const mount = (content: Component | readonly Component[]): void => {
 		for (const item of Array.isArray(content) ? content : [content as Component]) chatContainer.addChild(item);
@@ -213,9 +222,11 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 	};
 	const ctx = {
 		ui,
+		composer: { setRunActive: vi.fn() },
 		chatContainer,
 		statusContainer: new Container(),
 		editorContainer: new Container(),
+		pendingShellContainer: new Container(),
 		pendingMessagesContainer: new Container(),
 		todoContainer: new Container(),
 		editor: { getText: () => "", setText: vi.fn(), onEscape: undefined },
@@ -245,6 +256,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		get assistantImagesVisible() {
 			return cfgTerminalShowImages.get(contextSettings);
 		},
+		tableChartsVisible: true,
 		hasDisplayableThinkingContent: false,
 		noteDisplayableThinkingContent: vi.fn(() => false),
 		proseOnlyThinking: true,
@@ -286,6 +298,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		renderInitialMessages: vi.fn(async () => {}),
 		updatePendingMessagesDisplay: vi.fn(),
 		updateEditorBorderColor: vi.fn(),
+		syncIdleMaintenanceView: vi.fn(),
 		ensureLoadingAnimation: vi.fn(),
 		setWorkingMessage: vi.fn(),
 		syncRetryHintRow: vi.fn(),

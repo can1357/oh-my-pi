@@ -1,6 +1,6 @@
 import { $env, type ServerSentEvent } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
-import { getEnvApiKey } from "../stream";
+import { getEnvApiKey } from "../env-api-key";
 import type {
 	AssistantMessage,
 	Context,
@@ -23,6 +23,7 @@ import {
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { mapToOpenAIResponsesToolChoice } from "../utils/tool-choice";
+import { isOpenAIResponsesProgressEvent } from "../utils/websocket";
 import {
 	applyOpenAIReasoningEffortFallback,
 	createOpenAIReasoningEffortFallbackKey,
@@ -36,7 +37,6 @@ import {
 	buildResponsesInput,
 	createInitialResponsesAssistantMessage,
 	getOpenAIPromptCacheKey,
-	isOpenAIResponsesProgressEvent,
 	parseAzureDeploymentNameMap,
 	processResponsesStream,
 } from "./openai-shared";

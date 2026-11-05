@@ -15,6 +15,8 @@ export interface MagicKeywordSpec {
 	readonly word: string;
 	/** HSL hue sweep `[from, to]` in degrees painted across the word; `to` may exceed 360 to wrap through red. */
 	readonly hue: readonly [number, number];
+	/** HSL lightness sweep `[from, to]` in percent painted alongside `hue`; omitted keeps the default lightness. */
+	readonly lightness?: readonly [number, number];
 }
 
 /** Characters that bind a magic keyword into an identifier or path segment. */
@@ -62,7 +64,7 @@ function matcherFor(word: string): RegExp {
  * until then nothing glows and no word is exempt from autocorrect.
  */
 export function setMagicKeywords(specs: readonly MagicKeywordSpec[]): void {
-	registry = specs.map(({ word, hue: [from, to] }) => ({
+	registry = specs.map(({ word, hue: [from, to], lightness }) => ({
 		word,
 		pattern: magicKeywordRegex(word, "g"),
 		highlight: createGradientHighlighter({
@@ -70,6 +72,7 @@ export function setMagicKeywords(specs: readonly MagicKeywordSpec[]): void {
 			highlight: magicKeywordRegex(word, "g"),
 			stops: 14,
 			hue: t => (from + t * (to - from)) % 360,
+			lightness: lightness && (t => lightness[0] + t * (lightness[1] - lightness[0])),
 		}),
 	}));
 }
@@ -131,6 +134,9 @@ export function magicKeywordRanges(text: string): { from: number; to: number }[]
 	return ranges.sort((a, b) => a.from - b.from);
 }
 
+/** Last {@link hasMagicKeyword} answer: the live editor asks once per layout segment with the same buffer. */
+let lastProbe: { text: string; registry: readonly RegisteredKeyword[]; found: boolean } | undefined;
+
 /**
  * Cheap test for "does this text contain any registered keyword as standalone
  * prose?". Short-circuits on a substring probe before paying for the
@@ -138,8 +144,14 @@ export function magicKeywordRanges(text: string): { from: number; to: number }[]
  * `String#includes` per word. Used by the live editor to gate the shimmer timer.
  */
 export function hasMagicKeyword(text: string): boolean {
+	if (lastProbe?.text === text && lastProbe.registry === registry) return lastProbe.found;
+	let found = false;
 	for (const keyword of registry) {
-		if (text.includes(keyword.word) && containsMagicKeyword(text, keyword.word)) return true;
+		if (text.includes(keyword.word) && containsMagicKeyword(text, keyword.word)) {
+			found = true;
+			break;
+		}
 	}
-	return false;
+	lastProbe = { text, registry, found };
+	return found;
 }

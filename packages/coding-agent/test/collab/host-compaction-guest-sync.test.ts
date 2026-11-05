@@ -82,6 +82,7 @@ function makeGuestHarness(model: Model, modelRegistry: ModelRegistry): GuestHarn
 		sessionManager: manager,
 		session,
 		statusContainer: { clear: () => {}, disposeChildren: () => {} },
+		pendingShellContainer: { clear: () => {} },
 		pendingMessagesContainer: { clear: () => {} },
 		compactionQueuedMessages: [],
 		streamingComponent: undefined,
@@ -103,11 +104,18 @@ function makeGuestHarness(model: Model, modelRegistry: ModelRegistry): GuestHarn
 		chatContainer: { clear: () => {}, disposeChildren: () => {} },
 		resetObserverRegistry: () => {},
 		syncRunningSubagentBadge: () => {},
+		setCollabGuest: (guest: InteractiveModeContext["collabGuest"]) => {
+			Object.assign(ctx, { collabGuest: guest });
+		},
 		renderInitialMessages: () => Promise.resolve(),
 		reloadTodos: () => Promise.resolve(),
 		showStatus: () => {},
 		showError: () => {},
-		eventController: { handleEvent: () => Promise.resolve(), takeDisplaceableComponents: () => [] },
+		eventController: {
+			dispatchSessionEvent: () => Promise.resolve(),
+			takeDisplaceableComponents: () => [],
+			resetTranscriptAnchors: () => {},
+		},
 		eventBus: undefined,
 		collabGuest: undefined,
 		handleResumeSession: () => Promise.resolve(),

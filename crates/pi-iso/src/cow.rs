@@ -61,7 +61,10 @@ pub fn clone_file(src: &Path, dst: &Path) -> io::Result<()> {
 	#[cfg(unix)]
 	check_same_device(src, dst, existing.as_ref())?;
 	match existing {
-		None => clone_new(src, dst),
+		None => {
+			clone_new(src, dst)?;
+			Ok(())
+		},
 		// Swap the file a symlinked `dst` names, as an in-place copy writes it.
 		Some(metadata) => clone_over(src, &fs::canonicalize(dst)?, &metadata),
 	}
@@ -83,6 +86,36 @@ pub fn is_unsupported(err: &io::Error) -> bool {
 	}
 }
 
+/// Clones `src`'s data into `dst`, two files the caller already holds open.
+///
+/// `dst` must be writable and empty (just created or truncated). This is the
+/// copy GNU `cp` issues on its open descriptors, without [`clone_file`]'s
+/// path lookups, probe file and rename.
+///
+/// # Errors
+///
+/// As [`clone_file`]. A failed clone leaves `dst` empty and, on Windows, not
+/// sparse, so the caller can copy the data into it instead.
+#[cfg(any(target_os = "linux", target_os = "android", windows))]
+pub fn clone_open(src: &File, dst: &File) -> io::Result<()> {
+	let cloned = imp::clone_into(src, dst);
+	#[cfg(windows)]
+	if cloned.is_err() {
+		// The block clone extends `dst` and makes it sparse before cloning.
+		let _ = dst.set_len(0);
+		let _ = imp::set_sparse(dst, false);
+	}
+	cloned
+}
+
+/// Whether an [`is_unsupported`] [`clone_open`] error is cross-device.
+///
+/// Distinguishes files on different devices from a source filesystem that
+/// cannot clone: only the latter holds for every later copy from it.
+pub fn is_cross_device(err: &io::Error) -> bool {
+	err.kind() == io::ErrorKind::CrossesDevices
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) use imp::{CLONE_NOFOLLOW, clonefile};
 
@@ -99,18 +132,15 @@ fn check_same_device(src: &Path, dst: &Path, existing: Option<&Metadata>) -> io:
 	let dst_dev = if let Some(metadata) = existing {
 		metadata.dev()
 	} else {
-		let parent = dst.parent().filter(|parent| !parent.as_os_str().is_empty());
+		let parent = dst.parent().filter(|parent| !parent.is_empty());
 		// Let the clone itself report a missing directory.
 		let Ok(metadata) = fs::metadata(parent.unwrap_or_else(|| Path::new("."))) else {
 			return Ok(());
 		};
 		metadata.dev()
 	};
-	if fs::metadata(src)?.dev() == dst_dev {
-		Ok(())
-	} else {
-		Err(unsupported("source and destination are on different devices"))
-	}
+	(fs::metadata(src)?.dev() == dst_dev)
+		.ok_or_else(|| unsupported("source and destination are on different devices"))
 }
 
 /// Replaces the regular file `dst` (described by `metadata`) with a clone of
@@ -182,20 +212,27 @@ fn clone_new(src: &Path, dst: &Path) -> io::Result<()> {
 	clonefile(src, dst, 0)
 }
 
-/// Creates `dst` as a clone of `src`, removing it again on failure.
+/// Creates the missing `dst` as a clone of `src`, removing it again on
+/// failure.
+///
+/// Returns `src` and `dst` still open, so the tree-cloning backends, which
+/// clone into fresh directories, read the source's metadata and apply it to
+/// the clone through the handles rather than by path, and skip
+/// [`clone_file`]'s existence probe and device check: a clone across devices
+/// fails with an [`is_unsupported`] error anyway.
 #[cfg(any(target_os = "linux", target_os = "android", windows))]
-fn clone_new(src: &Path, dst: &Path) -> io::Result<()> {
+pub(crate) fn clone_new(src: &Path, dst: &Path) -> io::Result<(File, File)> {
 	let src = File::open(src)?;
 	let dst_file = fs::OpenOptions::new()
 		.write(true)
 		.create_new(true)
 		.open(dst)?;
-	let cloned = imp::clone_into(&src, &dst_file);
-	if cloned.is_err() {
+	if let Err(err) = imp::clone_into(&src, &dst_file) {
 		drop(dst_file);
 		let _ = fs::remove_file(dst);
+		return Err(err);
 	}
-	cloned
+	Ok((src, dst_file))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", windows)))]
@@ -215,11 +252,8 @@ mod imp {
 	pub fn clone_into(src: &File, dst: &File) -> io::Result<()> {
 		// SAFETY: both descriptors are borrowed from live files for the call,
 		// and the kernel retains neither.
-		if unsafe { libc::ioctl(dst.as_raw_fd(), FICLONE, src.as_raw_fd()) } == 0 {
-			Ok(())
-		} else {
-			Err(io::Error::last_os_error())
-		}
+		(unsafe { libc::ioctl(dst.as_raw_fd(), FICLONE, src.as_raw_fd()) } == 0)
+			.ok_or_else(io::Error::last_os_error)
 	}
 
 	pub const fn is_unsupported_code(code: i32) -> bool {
@@ -241,11 +275,8 @@ mod imp {
 		let dst = CString::new(dst.as_os_str().as_bytes())?;
 		// SAFETY: both strings are NUL-terminated and outlive the call, which
 		// retains neither pointer.
-		if unsafe { libc::clonefile(src.as_ptr(), dst.as_ptr(), flags) } == 0 {
-			Ok(())
-		} else {
-			Err(io::Error::last_os_error())
-		}
+		(unsafe { libc::clonefile(src.as_ptr(), dst.as_ptr(), flags) } == 0)
+			.ok_or_else(io::Error::last_os_error)
 	}
 
 	pub const fn is_unsupported_code(code: i32) -> bool {
@@ -351,7 +382,7 @@ mod imp {
 		}
 	}
 
-	fn set_sparse(file: &File, sparse: bool) -> io::Result<()> {
+	pub fn set_sparse(file: &File, sparse: bool) -> io::Result<()> {
 		fsctl(file, FSCTL_SET_SPARSE, &FILE_SET_SPARSE_BUFFER { SetSparse: sparse }, &mut ())
 	}
 
@@ -387,11 +418,7 @@ mod imp {
 				std::ptr::null_mut(),
 			)
 		};
-		if ok == 0 {
-			Err(io::Error::last_os_error())
-		} else {
-			Ok(())
-		}
+		(ok != 0).ok_or_else(io::Error::last_os_error)
 	}
 
 	pub fn is_unsupported_code(code: i32) -> bool {

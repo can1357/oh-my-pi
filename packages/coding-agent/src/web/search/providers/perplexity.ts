@@ -21,7 +21,7 @@ import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-comple
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
-import { $env, asRecord, readSseJson } from "@oh-my-pi/pi-utils";
+import { $env, asRecord, readSseJson, tryParseJson } from "@oh-my-pi/pi-utils";
 import type { PerplexityRequest, PerplexitySearchResult } from "../../../web/search/types";
 import type { SearchCitation, SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
@@ -216,14 +216,6 @@ function mergeOAuthEventSnapshot(
 	return merged;
 }
 
-function parseJson(text: string): unknown | null {
-	try {
-		return JSON.parse(text);
-	} catch {
-		return null;
-	}
-}
-
 function textFromChunks(value: unknown): string | null {
 	if (!Array.isArray(value) || value.length === 0) return null;
 	let text = "";
@@ -257,7 +249,7 @@ function answerFromTextPayload(payload: Record<string, unknown>): string | null 
 }
 
 function parseOAuthTextPayload(text: string): Record<string, unknown> | null {
-	const parsed = parseJson(text);
+	const parsed = tryParseJson(text);
 	const direct = asRecord(parsed);
 	if (direct) return direct;
 	if (!Array.isArray(parsed)) return null;
@@ -267,7 +259,7 @@ function parseOAuthTextPayload(text: string): Record<string, unknown> | null {
 		const content = asRecord(step?.content);
 		const answer = content?.answer;
 		if (typeof answer !== "string" || answer.length === 0) continue;
-		const payload = asRecord(parseJson(answer));
+		const payload = asRecord(tryParseJson(answer));
 		if (payload) return payload;
 	}
 	return null;
@@ -280,7 +272,7 @@ function parseOAuthTextAnswer(text: string): string {
 		if (answer) return answer;
 	}
 
-	const parsed = parseJson(text);
+	const parsed = tryParseJson(text);
 	if (!Array.isArray(parsed)) return text;
 	for (const item of parsed) {
 		const step = asRecord(item);
@@ -469,7 +461,7 @@ function collectPerplexityMetadataFromRecord(
 
 function collectPerplexityMetadata(metadata: PerplexityApiStreamMetadata, data: string): void {
 	if (data === "[DONE]") return;
-	const record = asRecord(parseJson(data));
+	const record = asRecord(tryParseJson(data));
 	if (record) collectPerplexityMetadataFromRecord(metadata, record);
 }
 
@@ -577,9 +569,15 @@ function buildOAuthSources(event: PerplexityOAuthStreamEvent): SearchSource[] {
 	return sourcesFromTextPayload(event.text);
 }
 
-function buildOAuthAnswer(event: PerplexityOAuthStreamEvent): string {
+/** Where a snapshot's answer comes from, resolved without materializing the text. */
+type OAuthAnswerSource =
+	| { kind: "chunks"; chunks: unknown[] }
+	| { kind: "answer"; answer: string }
+	| { kind: "text"; text: string };
+
+function resolveOAuthAnswerSource(event: PerplexityOAuthStreamEvent): OAuthAnswerSource | null {
 	if (!event.blocks?.length) {
-		return typeof event.text === "string" ? parseOAuthTextAnswer(event.text) : "";
+		return typeof event.text === "string" ? { kind: "text", text: event.text } : null;
 	}
 
 	const markdownBlock = event.blocks.find(
@@ -587,10 +585,10 @@ function buildOAuthAnswer(event: PerplexityOAuthStreamEvent): string {
 	)?.markdown_block;
 	if (markdownBlock) {
 		if (Array.isArray(markdownBlock.chunks) && markdownBlock.chunks.length > 0) {
-			return markdownBlock.chunks.join("");
+			return { kind: "chunks", chunks: markdownBlock.chunks };
 		}
 		if (typeof markdownBlock.answer === "string" && markdownBlock.answer.length > 0) {
-			return markdownBlock.answer;
+			return { kind: "answer", answer: markdownBlock.answer };
 		}
 	}
 
@@ -599,16 +597,41 @@ function buildOAuthAnswer(event: PerplexityOAuthStreamEvent): string {
 	)?.markdown_block;
 	if (textBlock) {
 		if (Array.isArray(textBlock.chunks) && textBlock.chunks.length > 0) {
-			return textBlock.chunks.join("");
+			return { kind: "chunks", chunks: textBlock.chunks };
 		}
 		if (typeof textBlock.answer === "string" && textBlock.answer.length > 0) {
-			return textBlock.answer;
+			return { kind: "answer", answer: textBlock.answer };
 		}
 	}
 	if (typeof event.text === "string" && event.text.length > 0) {
-		return parseOAuthTextAnswer(event.text);
+		return { kind: "text", text: event.text };
 	}
-	return "";
+	return null;
+}
+
+/** Whether {@link materializeOAuthAnswer} would produce a non-empty answer, without building it. */
+function oauthAnswerIsNonEmpty(source: OAuthAnswerSource): boolean {
+	switch (source.kind) {
+		case "chunks":
+			// `join("")` renders null/undefined as "" and everything else via String().
+			return source.chunks.some(chunk => chunk != null && String(chunk) !== "");
+		case "answer":
+			return true;
+		case "text":
+			// parseOAuthTextAnswer falls back to the raw text, so only "" yields "".
+			return source.text.length > 0;
+	}
+}
+
+function materializeOAuthAnswer(source: OAuthAnswerSource): string {
+	switch (source.kind) {
+		case "chunks":
+			return source.chunks.join("");
+		case "answer":
+			return source.answer;
+		case "text":
+			return parseOAuthTextAnswer(source.text);
+	}
 }
 
 async function callPerplexityAsk(
@@ -732,11 +755,16 @@ async function callPerplexityAsk(
 		throw new SearchProviderError("perplexity", "Perplexity ask API returned no response body", 500);
 	}
 
-	let answer = "";
 	let model: string | undefined;
 	let finalRequestId: string | undefined;
 	const sourcesByUrl = new Map<string, SearchSource>();
 	let mergedEvent: PerplexityOAuthStreamEvent = { blocks: [] };
+	// Answer of the latest snapshot that had one; materialized once after the stream.
+	let answerSource: OAuthAnswerSource | null = null;
+	// buildOAuthSources reads only these snapshot fields; re-run it only when one changes.
+	let lastWebResults: unknown;
+	let lastSourcesList: unknown;
+	let lastText: unknown;
 
 	for await (const event of readSseJson<PerplexityOAuthStreamEvent>(response.body, params.signal)) {
 		if (event.error_code) {
@@ -746,12 +774,23 @@ async function callPerplexityAsk(
 
 		mergedEvent = mergeOAuthEventSnapshot(mergedEvent, event);
 
-		const eventAnswer = buildOAuthAnswer(mergedEvent);
-		if (eventAnswer.length > 0) {
-			answer = eventAnswer;
+		const snapshotAnswer = resolveOAuthAnswerSource(mergedEvent);
+		if (snapshotAnswer && oauthAnswerIsNonEmpty(snapshotAnswer)) {
+			answerSource = snapshotAnswer;
 		}
-		for (const source of buildOAuthSources(mergedEvent)) {
-			sourcesByUrl.set(oauthSourceKey(source.url), source);
+		const webResults = mergedEvent.blocks?.find(block => block.intended_usage === "web_results")?.web_result_block
+			?.web_results;
+		if (
+			webResults !== lastWebResults ||
+			mergedEvent.sources_list !== lastSourcesList ||
+			mergedEvent.text !== lastText
+		) {
+			lastWebResults = webResults;
+			lastSourcesList = mergedEvent.sources_list;
+			lastText = mergedEvent.text;
+			for (const source of buildOAuthSources(mergedEvent)) {
+				sourcesByUrl.set(oauthSourceKey(source.url), source);
+			}
 		}
 
 		const reportedModel = [mergedEvent.user_selected_model, mergedEvent.display_model].find(
@@ -763,6 +802,7 @@ async function callPerplexityAsk(
 			break;
 		}
 	}
+	const answer = answerSource ? materializeOAuthAnswer(answerSource) : "";
 
 	// Anonymous quota exhaustion answers HTTP 200 with a short signup-wall
 	// message ("Sign up and repeat your request.", localized by the upstream

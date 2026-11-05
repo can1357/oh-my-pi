@@ -76,7 +76,7 @@ describe("agent:// for agents without a published output", () => {
 		AgentRegistry.resetGlobalForTests();
 		InternalUrlRouter.resetForTests();
 		resetRegisteredArtifactDirsForTests();
-		tempDir = TempDir.createSync("omp-agent-live-");
+		tempDir = TempDir.createSync("@omp-agent-live-");
 		rootSessionFile = path.join(tempDir.path(), "session.jsonl");
 		artifactsDir = rootSessionFile.slice(0, -6);
 		await fs.mkdir(artifactsDir, { recursive: true });

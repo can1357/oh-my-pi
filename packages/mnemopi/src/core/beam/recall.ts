@@ -1,4 +1,17 @@
-import { normalizedRecallWeights, polyphonicRecallEnabled, temporalHalflifeHours } from "../../config";
+import { popLoopPhase, pushLoopPhase, withLoopPhase } from "@oh-my-pi/pi-utils";
+import {
+	importedWeight,
+	inferredWeight,
+	normalizedRecallWeights,
+	polyphonicRecallEnabled,
+	statedWeight,
+	temporalHalflifeHours,
+	tier1Weight,
+	tier2Weight,
+	tier3Weight,
+	toolWeight,
+	unknownWeight,
+} from "../../config";
 import { hasCjk, matchesWordForm } from "../../util/regex";
 import { embedQuery } from "../embeddings";
 import { mmrRerank } from "../mmr";
@@ -62,16 +75,33 @@ type RecallMmrItem = {
 	readonly [key: string]: unknown;
 };
 
-const VERACITY_WEIGHTS: Record<string, number> = {
-	stated: 1.0,
-	true: 1.0,
-	likely_true: 1.0,
-	unknown: 0.8,
-	inferred: 0.7,
-	imported: 0.6,
-	tool: 0.5,
-	false: 0,
-};
+/**
+ * Score multipliers for a candidate's stored `veracity` label and, for episodic
+ * rows, its degradation tier. Resolved once per {@link recall} from the
+ * `MNEMOPI_<LABEL>_WEIGHT` and `MNEMOPI_TIER<N>_WEIGHT` readers in `config.ts`,
+ * clamped at 0 like the hybrid weights so a negative value cannot rank a row
+ * below one labelled `false`; `true`, `likely_true` and `false` have no override.
+ */
+interface TrustWeights {
+	readonly veracity: Readonly<Record<string, number>> & { readonly unknown: number };
+	readonly tiers: readonly [tier1: number, tier2: number, tier3: number];
+}
+
+function resolveTrustWeights(): TrustWeights {
+	return {
+		veracity: {
+			stated: Math.max(0, statedWeight()),
+			true: 1.0,
+			likely_true: 1.0,
+			unknown: Math.max(0, unknownWeight()),
+			inferred: Math.max(0, inferredWeight()),
+			imported: Math.max(0, importedWeight()),
+			tool: Math.max(0, toolWeight()),
+			false: 0,
+		},
+		tiers: [Math.max(0, tier1Weight()), Math.max(0, tier2Weight()), Math.max(0, tier3Weight())],
+	};
+}
 
 /**
  * Default per-result content preview cap enforced by {@link recall}. Content
@@ -670,6 +700,7 @@ function scoreCandidate(
 	queryTokens: readonly string[],
 	queryGroups: readonly (readonly string[])[],
 	weights: readonly [number, number, number],
+	trust: TrustWeights,
 	options: RecallOptionsInternal,
 ): RecallResult | null {
 	const content = asString(candidate.row.content);
@@ -713,11 +744,11 @@ function scoreCandidate(
 		score *= 1 + temporalWeight * temporalScore;
 	}
 	const veracity = asString(candidate.row.veracity) || "unknown";
-	const veracityWeight = VERACITY_WEIGHTS[veracity] ?? VERACITY_WEIGHTS.unknown ?? 0.8;
+	const veracityWeight = trust.veracity[veracity] ?? trust.veracity.unknown;
 	const degradationTier = candidate.tierLabel === "episodic" ? asNumber(candidate.row.tier, 1) : undefined;
 	if (candidate.tierLabel === "episodic") {
-		const tierWeight = degradationTier === 1 ? 1 : degradationTier === 2 ? 0.85 : 0.7;
-		score *= tierWeight;
+		const [tier1, tier2, tier3] = trust.tiers;
+		score *= degradationTier === 1 ? tier1 : degradationTier === 2 ? tier2 : tier3;
 	}
 	score *= veracityWeight * currentContentAdjustment(searchableContent, options.currentSensitive === true);
 	const preview = clipRecallContent(content, options.contentPreviewChars ?? RECALL_CONTENT_PREVIEW_CHARS);
@@ -923,35 +954,38 @@ export async function recall(
 		const derived = query.length > 0 ? await embedQuery(query) : null;
 		temporalOptions.queryEmbedding = derived === null ? null : Array.from(derived);
 	}
-	let weights = normalizedRecallWeights(
-		options.vecWeight ?? beam.config.vecWeight,
-		options.ftsWeight ?? beam.config.ftsWeight,
-		options.importanceWeight ?? beam.config.importanceWeight,
-	);
-	if (options.useIntent === true) {
-		const intent = classifyIntent(query);
-		weights = adjustWeights(weights[0], weights[1], weights[2], intent);
-	}
-	const useSynonyms = options.useSynonyms !== false;
-	const tokens = expandedTokens(query, useSynonyms);
-	const tokenGroups = expandedTokenGroups(query, useSynonyms);
-	const candidates = collectMemoryCandidates(beam, query, topK, temporalOptions);
-	const scored: RecallResult[] = [];
-	for (const candidate of candidates) {
-		const result = scoreCandidate(candidate, tokens, tokenGroups, weights, temporalOptions);
-		if (result !== null) scored.push(result);
-	}
-	scored.sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
-	let finalResults = dedupCrossTierSummaryLinks(beam, dedupeResults(scored));
-	if (query.length > 0 && tokens.length >= 4 && finalResults.length > topK)
-		finalResults = diversifyByCoverage(finalResults, tokens, topK);
-	if (options.useMmr === true && finalResults.length > 1) {
-		finalResults = rerankRecallResults(finalResults, options.mmrLambda ?? 0.7, topK);
-	} else {
-		finalResults = finalResults.slice(0, topK);
-	}
-	if (temporalOptions.updateRecallCounts !== false) updateRecallCounts(beam, finalResults, temporalOptions);
-	return finalResults;
+	return withLoopPhase("mnemopi.recall", () => {
+		let weights = normalizedRecallWeights(
+			options.vecWeight ?? beam.config.vecWeight,
+			options.ftsWeight ?? beam.config.ftsWeight,
+			options.importanceWeight ?? beam.config.importanceWeight,
+		);
+		if (options.useIntent === true) {
+			const intent = classifyIntent(query);
+			weights = adjustWeights(weights[0], weights[1], weights[2], intent);
+		}
+		const useSynonyms = options.useSynonyms !== false;
+		const tokens = expandedTokens(query, useSynonyms);
+		const tokenGroups = expandedTokenGroups(query, useSynonyms);
+		const candidates = collectMemoryCandidates(beam, query, topK, temporalOptions);
+		const trust = resolveTrustWeights();
+		const scored: RecallResult[] = [];
+		for (const candidate of candidates) {
+			const result = scoreCandidate(candidate, tokens, tokenGroups, weights, trust, temporalOptions);
+			if (result !== null) scored.push(result);
+		}
+		scored.sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
+		let finalResults = dedupCrossTierSummaryLinks(beam, dedupeResults(scored));
+		if (query.length > 0 && tokens.length >= 4 && finalResults.length > topK)
+			finalResults = diversifyByCoverage(finalResults, tokens, topK);
+		if (options.useMmr === true && finalResults.length > 1) {
+			finalResults = rerankRecallResults(finalResults, options.mmrLambda ?? 0.7, topK);
+		} else {
+			finalResults = finalResults.slice(0, topK);
+		}
+		if (temporalOptions.updateRecallCounts !== false) updateRecallCounts(beam, finalResults, temporalOptions);
+		return finalResults;
+	});
 }
 
 function diversifyByCoverage(
@@ -1034,37 +1068,44 @@ export async function recallEnhanced(
 	let cache: QueryCache<RecallResult> | null = null;
 	let token = "";
 	let scope = "";
-	if (cacheEnabled) {
-		beam.caches.queryCache ??= new QueryCache<RecallResult>({
-			maxSize: ENHANCED_RECALL_CACHE_MAX_ENTRIES,
-			ttlSeconds: ENHANCED_RECALL_CACHE_TTL_SECONDS,
-		});
-		cache = beam.caches.queryCache;
-		// Explicit hooks invalidate on this beam's own writes; the token also catches writes
-		// no hook covers (sleep, graph ingest) and commits from other connections.
-		token = databaseWriteToken(beam);
-		if (beam.caches.queryCacheToken !== token) {
-			cache.invalidate();
-			beam.caches.queryCacheToken = token;
+	pushLoopPhase("mnemopi.recall");
+	try {
+		if (cacheEnabled) {
+			beam.caches.queryCache ??= new QueryCache<RecallResult>({
+				maxSize: ENHANCED_RECALL_CACHE_MAX_ENTRIES,
+				ttlSeconds: ENHANCED_RECALL_CACHE_TTL_SECONDS,
+			});
+			cache = beam.caches.queryCache;
+			// Explicit hooks invalidate on this beam's own writes; the token also catches writes
+			// no hook covers (sleep, graph ingest) and commits from other connections.
+			token = databaseWriteToken(beam);
+			if (beam.caches.queryCacheToken !== token) {
+				cache.invalidate();
+				beam.caches.queryCacheToken = token;
+			}
+			scope = enhancedRecallCacheScope(beam, topK, options, polyphonic);
+			const cached = cache.get(query, queryEmbedding, scope);
+			if (cached !== null) {
+				const results = structuredClone(cached) as RecallResult[];
+				if (countRecalls) countRecallsKeepingCache(beam, results, runOptions, token);
+				return results;
+			}
 		}
-		scope = enhancedRecallCacheScope(beam, topK, options, polyphonic);
-		const cached = cache.get(query, queryEmbedding, scope);
-		if (cached !== null) {
-			const results = structuredClone(cached) as RecallResult[];
-			if (countRecalls) countRecallsKeepingCache(beam, results, runOptions, token);
-			return results;
-		}
+	} finally {
+		popLoopPhase();
 	}
 
 	const results = polyphonic
 		? await polyphonicRecallEnhanced(beam, query, topK, runOptions)
 		: await linearRecallEnhanced(beam, query, topK, runOptions);
-	// A write committed while recall awaited may be missing from this ranking: skip the
-	// put and keep the stale token so the next lookup starts from an empty cache.
-	const cacheable = cache !== null && databaseWriteToken(beam) === token;
-	if (cacheable) cache?.put(query, structuredClone(results), queryEmbedding, scope);
-	if (countRecalls) countRecallsKeepingCache(beam, results, runOptions, cacheable ? token : null);
-	return results;
+	return withLoopPhase("mnemopi.recall", () => {
+		// A write committed while recall awaited may be missing from this ranking: skip the
+		// put and keep the stale token so the next lookup starts from an empty cache.
+		const cacheable = cache !== null && databaseWriteToken(beam) === token;
+		if (cacheable) cache?.put(query, structuredClone(results), queryEmbedding, scope);
+		if (countRecalls) countRecallsKeepingCache(beam, results, runOptions, cacheable ? token : null);
+		return results;
+	});
 }
 
 async function linearRecallEnhanced(
@@ -1084,14 +1125,16 @@ async function linearRecallEnhanced(
 		...enhancedOptions,
 		updateRecallCounts: false,
 	});
-	if (options.includeFacts === true) {
-		const facts = factRecall(beam, query, factRecallLimit(topK));
-		results.push(...facts);
-	}
-	results.sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
-	const finalResults = rerankRecallResults(results, options.mmrLambda ?? 0.7, topK);
-	if (enhancedOptions.updateRecallCounts !== false) updateRecallCounts(beam, finalResults, enhancedOptions);
-	return finalResults;
+	return withLoopPhase("mnemopi.recall", () => {
+		if (options.includeFacts === true) {
+			const facts = factRecall(beam, query, factRecallLimit(topK));
+			results.push(...facts);
+		}
+		results.sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
+		const finalResults = rerankRecallResults(results, options.mmrLambda ?? 0.7, topK);
+		if (enhancedOptions.updateRecallCounts !== false) updateRecallCounts(beam, finalResults, enhancedOptions);
+		return finalResults;
+	});
 }
 
 /**

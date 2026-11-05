@@ -95,8 +95,8 @@ fn word_ending_at(text: &str, end: usize, out: &mut String) -> Option<usize> {
 	let word = &text[start..end];
 	let bytes = word.as_bytes();
 	if bytes
-		.windows(2)
-		.any(|pair| pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase())
+		.array_windows()
+		.any(|[first, second]| first.is_ascii_lowercase() && second.is_ascii_uppercase())
 	{
 		return None;
 	}

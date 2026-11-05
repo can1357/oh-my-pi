@@ -65,9 +65,7 @@ function makeSession(opts: {
 	modelInput?: string[];
 }): Fake {
 	const contextWindow = opts.contextWindow ?? 200_000;
-	const model = opts.modelInput
-		? { id: "test-model", contextWindow, input: opts.modelInput }
-		: { id: "test-model", contextWindow };
+	const model = { id: "test-model", contextWindow, input: opts.modelInput ?? ["text"] };
 	let usage: ContextUsage | undefined = "usage" in opts ? opts.usage : { tokens: 1234, contextWindow, percent: 0.6 };
 	let calls = 0;
 	let revision = 0;
@@ -160,6 +158,26 @@ describe("StatusLineComponent context breakdown", () => {
 		comp.getCachedContextBreakdown();
 
 		expect(usageCalls()).toBe(2);
+	});
+
+	it("re-queries when streaming tool-call arguments grow in place", () => {
+		const payload = { text: "x" };
+		const args: Record<string, unknown> = { path: "a.ts", payload };
+		const tail = { role: "assistant", content: [{ type: "toolCall", name: "write", arguments: args }] };
+		const { session, usageCalls } = makeSession({ messages: [userMessage("hi"), tail] });
+		const comp = statusLines.track(new StatusLineComponent(session, statusLineHost));
+
+		comp.getCachedContextBreakdown();
+		const body = "streamed file body".repeat(8);
+		args.content = body;
+		comp.getCachedContextBreakdown();
+		args.content = `${body} and more`;
+		comp.getCachedContextBreakdown();
+		// A nested field growing in place changes the serialized size too.
+		payload.text = "x".repeat(40);
+		comp.getCachedContextBreakdown();
+
+		expect(usageCalls()).toBe(4);
 	});
 
 	it("re-queries when the message array is replaced (branch switch / rebuild)", () => {

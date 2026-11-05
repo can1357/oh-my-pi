@@ -15,6 +15,7 @@ import {
 	validateJsonSchemaValue,
 } from "@oh-my-pi/pi-ai/utils/schema";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { jtdToJsonSchema, normalizeSchema } from "./jtd-to-json-schema";
 
 /** A validator bound to a specific output schema. */
@@ -58,6 +59,13 @@ export interface BuildOutputValidatorResult {
 }
 
 /**
+ * Builds keyed by the declaration's content (JSON strings verbatim, objects by
+ * their serialization), so a reused schema object that was edited in place
+ * gets a fresh validator.
+ */
+const schemaResults = new LRUCache<string, BuildOutputValidatorResult>({ max: 32 });
+
+/**
  * Build the canonical validator for a JTD-or-JSON-Schema output declaration.
  *
  * Returns:
@@ -66,8 +74,31 @@ export interface BuildOutputValidatorResult {
  *   No validator, but distinguishable from "no schema provided".
  * - `{}` for an absent schema (`undefined`).
  * - `{ error, normalized? }` when the schema cannot be honored (invalid syntax, `false`, malformed JTD).
+ *
+ * Results are memoized per schema content and shared across calls: the
+ * validator holds no per-call state, and callers MUST NOT mutate the returned result.
  */
 export function buildOutputValidator(schema: unknown): BuildOutputValidatorResult {
+	let key: string | undefined;
+	if (typeof schema === "string") key = `s${schema}`;
+	else if (schema !== null && typeof schema === "object") {
+		try {
+			key = `o${JSON.stringify(schema)}`;
+		} catch {
+			// Unserializable (cyclic) declarations are rejected by the build itself.
+		}
+	}
+	if (key === undefined) return buildOutputValidatorUncached(schema);
+	let cached = schemaResults.get(key);
+	if (!cached) {
+		// Build from a private copy: the cached result must not alias an object the caller may edit later.
+		cached = buildOutputValidatorUncached(typeof schema === "string" ? schema : JSON.parse(key.slice(1)));
+		schemaResults.set(key, cached);
+	}
+	return cached;
+}
+
+function buildOutputValidatorUncached(schema: unknown): BuildOutputValidatorResult {
 	const { normalized, error: normalizeError } = normalizeSchema(schema);
 	if (normalizeError) return { error: normalizeError, normalized };
 	if (normalized === undefined) return {};

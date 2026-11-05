@@ -1,5 +1,5 @@
 import * as fs from "node:fs/promises";
-import type { Page } from "puppeteer-core";
+import type { CDPSession, Page } from "puppeteer-core";
 import { resolveToCwd } from "../path-utils";
 
 /** Resolve init-script file paths against the session cwd, preserving non-files as inline JavaScript. */
@@ -19,12 +19,20 @@ export async function resolveInitScriptSources(entries: readonly string[] | unde
 	);
 }
 
-/** Enable invalid-certificate navigation for the page through CDP. */
-export async function applyIgnoreHttpsErrors(page: Page): Promise<void> {
+/**
+ * Enable invalid-certificate navigation for the page through CDP.
+ *
+ * Chromium drops the override when the session that set it detaches, so the
+ * returned session must stay attached for as long as the tab honors
+ * `ignore_https_errors`; the tab worker detaches it on close.
+ */
+export async function applyIgnoreHttpsErrors(page: Page): Promise<CDPSession> {
 	const session = await page.createCDPSession();
 	try {
 		await session.send("Security.setIgnoreCertificateErrors", { ignore: true });
-	} finally {
+		return session;
+	} catch (error) {
 		await session.detach().catch(() => undefined);
+		throw error;
 	}
 }

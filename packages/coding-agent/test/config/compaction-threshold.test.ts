@@ -2,8 +2,24 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
-import { validateAgentCompactionThresholdOverrides } from "@oh-my-pi/pi-coding-agent/config/compaction-threshold";
+import { resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
+import type { Model } from "@oh-my-pi/pi-ai";
+import { getProjectAgentDir } from "@oh-my-pi/pi-utils";
+import {
+	matchModelCompactionThreshold,
+	parseCompactionPointInput,
+	validateAgentCompactionThresholdOverrides,
+} from "@oh-my-pi/pi-coding-agent/config/compaction-threshold";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgCompactionModelThresholds } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import {
+	describeModelCompactionPoint,
+	planModelCompactionPoint,
+	previewModelCompactionPoint,
+	resolveModelCompactionSettings,
+	setModelCompactionPoint,
+} from "@oh-my-pi/pi-coding-agent/session/model-compaction-threshold";
+import { compactionThresholdSettings, createSubagentSettings } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { cfgTaskAgentCompactionThresholdOverrides } from "@oh-my-pi/pi-coding-agent/task/settings";
 
 async function withConfigDirs(run: (dirs: { root: string; agentDir: string; cwd: string }) => Promise<void>) {
@@ -91,5 +107,264 @@ describe("task.agentCompactionThresholdOverrides", () => {
 			"task.agentCompactionThresholdOverrides.scout",
 		);
 		expect(cfgTaskAgentCompactionThresholdOverrides.get(settings)).toEqual({ scout: 90000 });
+	});
+});
+
+describe("compaction.modelThresholds", () => {
+	it("parses typed compaction points into persisted entries", () => {
+		expect(parseCompactionPointInput("90000")).toBe(90000);
+		expect(parseCompactionPointInput("90k")).toBe(90000);
+		expect(parseCompactionPointInput("2M")).toBe(2_000_000);
+		expect(parseCompactionPointInput("1b")).toBe(1_000_000_000);
+		expect(parseCompactionPointInput(" 12.5% ")).toBe("12.5%");
+		expect(parseCompactionPointInput("  ")).toBeNull();
+		expect(parseCompactionPointInput("f400k")).toBe("f400000");
+		expect(parseCompactionPointInput("F2M")).toBe("f2000000");
+		for (const input of ["abc", "0", "1.5m", "90 kb", "101%", "-5", "f0", "ff1", "f80%"]) {
+			expect(() => parseCompactionPointInput(input)).toThrow("Invalid compaction point");
+		}
+	});
+
+	it("prefers the exact model key, then the longest matching prefix", () => {
+		const raw = { "openrouter/*": 50000, "openrouter/anthropic/*": "60%", "openrouter/anthropic/opus": 90000 };
+		expect(matchModelCompactionThreshold(raw, { provider: "openrouter", id: "anthropic/opus" })?.key).toBe(
+			"openrouter/anthropic/opus",
+		);
+		expect(matchModelCompactionThreshold(raw, { provider: "openrouter", id: "anthropic/sonnet" })?.key).toBe(
+			"openrouter/anthropic/*",
+		);
+		expect(matchModelCompactionThreshold(raw, { provider: "openrouter", id: "google/gemini" })?.key).toBe(
+			"openrouter/*",
+		);
+		expect(matchModelCompactionThreshold(raw, { provider: "anthropic", id: "opus" })).toBeUndefined();
+		expect(() => cfgCompactionModelThresholds.set(Settings.isolated(), { opus: 1000 })).toThrow(
+			'compaction.modelThresholds key "opus"',
+		);
+	});
+
+	it("lets a per-agent override outrank model entries without hiding them from that agent's children", () => {
+		const deepseek = { provider: "deepseek", id: "v4" };
+		const root = Settings.isolated({
+			"compaction.thresholdPercent": 80,
+			"compaction.modelThresholds": { "deepseek/*": 90000 },
+		});
+		expect(resolveModelCompactionSettings(root, deepseek)).toMatchObject({ baseWindowTokens: 90000 });
+
+		const agent = createSubagentSettings(
+			root,
+			compactionThresholdSettings({ thresholdPercent: 50, thresholdTokens: -1 }),
+		);
+		expect(resolveModelCompactionSettings(agent, deepseek)).toMatchObject({
+			thresholdPercent: 50,
+			thresholdTokens: -1,
+		});
+
+		// An exact entry added while the agent runs (the /models hub) must not take over.
+		cfgCompactionModelThresholds.override(root, { "deepseek/*": 90000, "deepseek/v4": 120000 });
+		expect(resolveModelCompactionSettings(root, deepseek)).toMatchObject({ baseWindowTokens: 120000 });
+		expect(resolveModelCompactionSettings(agent, deepseek)).toMatchObject({
+			thresholdPercent: 50,
+			thresholdTokens: -1,
+		});
+
+		const grandchild = createSubagentSettings(agent);
+		expect(resolveModelCompactionSettings(grandchild, deepseek)).toMatchObject({ baseWindowTokens: 120000 });
+	});
+
+	it("scales the configured policy from a token entry instead of triggering at it", () => {
+		const terra = { provider: "openai", id: "gpt-5.6-terra" };
+		const window = 1_050_000;
+		const byDefault = Settings.isolated({ "compaction.modelThresholds": { "openai/gpt-5.6-terra": 400_000 } });
+		// Reserve policy: the base minus max(15%, 16384).
+		expect(resolveThresholdTokens(window, resolveModelCompactionSettings(byDefault, terra))).toBe(340_000);
+
+		const byPercent = Settings.isolated({
+			"compaction.thresholdPercent": 80,
+			"compaction.modelThresholds": { "openai/gpt-5.6-terra": 400_000 },
+		});
+		expect(resolveThresholdTokens(window, resolveModelCompactionSettings(byPercent, terra))).toBe(320_000);
+
+		// A global fixed trigger is not a scale; the model's base replaces it.
+		const byFixed = Settings.isolated({
+			"compaction.thresholdTokens": 40_000,
+			"compaction.modelThresholds": { "openai/gpt-5.6-terra": 400_000 },
+		});
+		expect(resolveThresholdTokens(window, resolveModelCompactionSettings(byFixed, terra))).toBe(340_000);
+
+		// A percentage entry still scales the real window.
+		const byModelPercent = Settings.isolated({ "compaction.modelThresholds": { "openai/gpt-5.6-terra": "50%" } });
+		expect(resolveThresholdTokens(window, resolveModelCompactionSettings(byModelPercent, terra))).toBe(525_000);
+
+		// An `f`-prefixed entry is the exact trigger, whatever the policy.
+		const byModelFixed = Settings.isolated({
+			"compaction.thresholdPercent": 80,
+			"compaction.modelThresholds": { "openai/gpt-5.6-terra": "f400000" },
+		});
+		expect(resolveThresholdTokens(window, resolveModelCompactionSettings(byModelFixed, terra))).toBe(400_000);
+		// Agent entries are always exact triggers, so the prefix is not part of their syntax.
+		expect(() => validateAgentCompactionThresholdOverrides({ task: "f90000" })).toThrow(
+			"task.agentCompactionThresholdOverrides.task",
+		);
+	});
+
+	it("refuses a hub edit that a project entry for the same model would shadow", async () => {
+		await withConfigDirs(async ({ agentDir, cwd }) => {
+			await Bun.write(
+				path.join(getProjectAgentDir(cwd), "settings.json"),
+				JSON.stringify({ compaction: { modelThresholds: { "deepseek/v4": 50000 } } }),
+			);
+			const settings = await Settings.loadReadOnly({ agentDir, cwd });
+			const deepseek = { provider: "deepseek", id: "v4" } as Model;
+			const other = { provider: "deepseek", id: "r2" } as Model;
+
+			expect(() => setModelCompactionPoint(settings, deepseek, "90k")).toThrow("project config");
+			expect(resolveModelCompactionSettings(settings, deepseek)).toMatchObject({ baseWindowTokens: 50000 });
+			expect(setModelCompactionPoint(settings, other, "90k")).toMatchObject({ kind: "saved", entry: 90000 });
+			expect(resolveModelCompactionSettings(settings, other)).toMatchObject({ baseWindowTokens: 90000 });
+		});
+	});
+
+	it("writes a point past the standard window only once confirmed, and rejects one past the largest window", () => {
+		const settings = Settings.isolated({ extendedContext: false });
+		const model = {
+			provider: "openai",
+			id: "gpt-5.6-terra",
+			contextWindow: 272_000,
+			cost: { longContext: { inputThreshold: 272_000 } },
+		} as Model;
+		const tiers = { standard: 272_000, extended: 1_050_000 };
+
+		// Opening the extended window needs a second Enter; the warning says when input reaches the premium tier.
+		expect(setModelCompactionPoint(settings, model, "400k", { tiers })).toMatchObject({
+			kind: "confirm",
+			extendedWindow: 1_050_000,
+			premiumFrom: 272_000,
+		});
+		expect(resolveModelCompactionSettings(settings, model).baseWindowTokens).toBeUndefined();
+		// The premium note follows the scaled trigger: a 300k base compacts at 255k, inside the standard tier.
+		const insideTier = setModelCompactionPoint(settings, model, "300k", { tiers });
+		expect(insideTier).toMatchObject({ kind: "confirm", extendedWindow: 1_050_000 });
+		expect(insideTier).not.toHaveProperty("premiumFrom");
+
+		// Saved: 400k minus the 60k reserve, on the extended window.
+		expect(setModelCompactionPoint(settings, model, "400k", { tiers, confirmed: true })).toMatchObject({
+			kind: "saved",
+			entry: 400_000,
+			trigger: { kind: "scaled", tokens: 340_000, share: 85, scaledFrom: 400_000, fromBase: true },
+		});
+		expect(resolveModelCompactionSettings(settings, model).baseWindowTokens).toBe(400_000);
+		expect(setModelCompactionPoint(settings, model, "200k", { tiers })).toMatchObject({
+			kind: "saved",
+			entry: 200_000,
+		});
+
+		expect(() => setModelCompactionPoint(settings, model, "1100k", { tiers, confirmed: true })).toThrow();
+		// Without tiers the current window is the ceiling.
+		expect(() => setModelCompactionPoint(settings, model, "300k")).toThrow();
+		expect(resolveModelCompactionSettings(settings, model).baseWindowTokens).toBe(200_000);
+	});
+
+	it("needs room above a fixed trigger: the standard window opens the extended one and the max is rejected", () => {
+		const settings = Settings.isolated({ extendedContext: false });
+		const model = { provider: "openai", id: "gpt-5.6-terra", contextWindow: 272_000, cost: {} } as Model;
+		const tiers = { standard: 272_000, extended: 1_050_000 };
+
+		// A base equal to the standard window fits it; a fixed trigger there needs the extended one.
+		expect(setModelCompactionPoint(settings, model, "272k", { tiers })).toMatchObject({
+			kind: "saved",
+			entry: 272_000,
+		});
+		expect(setModelCompactionPoint(settings, model, "f272k", { tiers })).toMatchObject({
+			kind: "confirm",
+			extendedWindow: 1_050_000,
+		});
+		expect(setModelCompactionPoint(settings, model, "f272k", { tiers, confirmed: true })).toMatchObject({
+			kind: "saved",
+			entry: "f272000",
+			trigger: { kind: "fixed", tokens: 272_000 },
+		});
+		expect(resolveModelCompactionSettings(settings, model)).toMatchObject({ thresholdTokens: 272_000 });
+		expect(() => setModelCompactionPoint(settings, model, "f1050k", { tiers, confirmed: true })).toThrow();
+	});
+
+	it("skips the warning when extended context is already on", () => {
+		const settings = Settings.isolated({ extendedContext: true });
+		const model = { provider: "openai", id: "gpt-5.6-terra", contextWindow: 1_050_000 } as Model;
+		expect(
+			setModelCompactionPoint(settings, model, "400k", { tiers: { standard: 272_000, extended: 1_050_000 } }),
+		).toMatchObject({ kind: "saved", entry: 400_000 });
+	});
+
+	it("plans where each kind of typed limit compacts, and nothing for input submit would reject", () => {
+		const settings = Settings.isolated({ extendedContext: false });
+		const model = { provider: "openai", id: "gpt-5.6-terra", contextWindow: 272_000 } as Model;
+		const tiers = { standard: 272_000, extended: 1_050_000 };
+		const plan = (input: string) => planModelCompactionPoint(settings, model, input, tiers);
+
+		expect(plan("400k")).toMatchObject({
+			window: 1_050_000,
+			trigger: { kind: "scaled", tokens: 340_000, scaledFrom: 400_000, fromBase: true },
+		});
+		// A base inside the standard window keeps the model on it.
+		expect(plan("200k")).toMatchObject({ window: 272_000, trigger: { tokens: 170_000, fromBase: true } });
+		expect(plan("f400k")).toMatchObject({ window: 1_050_000, trigger: { kind: "fixed", tokens: 400_000 } });
+		expect(plan("50%")).toMatchObject({ window: 272_000, trigger: { tokens: 136_000, share: 50, fromBase: false } });
+		expect(plan("")).toMatchObject({ reset: true, window: 272_000, trigger: { tokens: 231_200, fromBase: false } });
+		for (const rejected of ["abc", "1100k", "f1050k"]) {
+			expect(plan(rejected)).toBeUndefined();
+			expect(previewModelCompactionPoint(settings, model, rejected, tiers)).toBeUndefined();
+		}
+	});
+
+	it("reports fractional shares exactly", () => {
+		const settings = Settings.isolated({ extendedContext: false });
+		const model = { provider: "openai", id: "gpt-5.6-terra", contextWindow: 272_000 } as Model;
+		const tiers = { standard: 272_000, extended: 1_050_000 };
+		expect(planModelCompactionPoint(settings, model, "12.5%", tiers)?.trigger).toMatchObject({ share: 12.5 });
+		expect(planModelCompactionPoint(settings, model, "0.5%", tiers)?.trigger).toMatchObject({ share: 1 });
+		// The reserve policy's share is the exact ratio, not a rounded percentage: 100k − 16,384 of 100k.
+		expect(planModelCompactionPoint(settings, model, "100k", tiers)?.trigger).toMatchObject({ share: 83.616 });
+	});
+
+	it("shows a fixed trigger at or past the window as capped at the window less its reserve", () => {
+		// A provider capping the window below the configured trigger (Factory serves Kimi K3 with 196,608).
+		const capped = { provider: "factory-droid", id: "kimi-k3", contextWindow: 196_608 } as Model;
+		const global = Settings.isolated({ "compaction.thresholdTokens": 300_000 });
+		const point = describeModelCompactionPoint(global, capped);
+		expect(point).toMatchObject({ tokens: 167_117, source: "global" });
+		expect(point.basis).toContain("capped by window");
+		const wide = { provider: "anthropic", id: "claude-opus-5-5", contextWindow: 1_000_000 } as Model;
+		expect(describeModelCompactionPoint(global, wide)).toMatchObject({ tokens: 300_000, basis: "fixed" });
+		// One token below the window is still the user's exact trigger.
+		const justBelow = Settings.isolated({ "compaction.thresholdTokens": 196_607 });
+		expect(describeModelCompactionPoint(justBelow, capped)).toMatchObject({ tokens: 196_607, basis: "fixed" });
+
+		// A prefix entry the model falls back to; an entry below the window stays exact.
+		const prefixed = Settings.isolated({ "compaction.modelThresholds": { "factory-droid/*": "f300000" } });
+		expect(planModelCompactionPoint(prefixed, capped, "", undefined)?.trigger).toEqual({
+			kind: "fixed",
+			tokens: 167_117,
+			cappedFrom: 300_000,
+		});
+		expect(planModelCompactionPoint(prefixed, capped, "f190k", undefined)?.trigger).toEqual({
+			kind: "fixed",
+			tokens: 190_000,
+		});
+	});
+
+	it("plans and saves a reset as the prefix entry the model falls back to", () => {
+		const settings = Settings.isolated({ extendedContext: false });
+		cfgCompactionModelThresholds.set(settings, { "openai/*": "f100000", "openai/gpt-5.6-terra": 400_000 });
+		const model = { provider: "openai", id: "gpt-5.6-terra", contextWindow: 1_050_000 } as Model;
+		const tiers = { standard: 272_000, extended: 1_050_000 };
+		expect(planModelCompactionPoint(settings, model, "", tiers)).toMatchObject({
+			reset: true,
+			trigger: { kind: "fixed", tokens: 100_000 },
+		});
+		expect(setModelCompactionPoint(settings, model, "", { tiers })).toMatchObject({
+			kind: "saved",
+			entry: undefined,
+			trigger: { kind: "fixed", tokens: 100_000 },
+		});
 	});
 });

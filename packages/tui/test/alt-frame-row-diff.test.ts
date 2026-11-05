@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { type Component, TUI, type TuiPaint } from "@oh-my-pi/pi-tui";
+import { CURSOR_MARKER, type Component, type Focusable, TUI, type TuiPaint } from "@oh-my-pi/pi-tui";
 import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 import { VirtualRenderScheduler } from "./virtual-render-scheduler";
 import { VirtualTerminal } from "./virtual-terminal";
@@ -38,6 +38,33 @@ class Rows implements Component {
 	render(): string[] {
 		return this.lines;
 	}
+}
+
+class CursorRow implements Component, Focusable {
+	focused = false;
+	cursorCol = 2;
+	markerEnabled = true;
+
+	setUseTerminalCursor(_enabled: boolean): void {}
+
+	render(): string[] {
+		const text = "stable row";
+		const marker = this.focused && this.markerEnabled ? CURSOR_MARKER : "";
+		return [`${text.slice(0, this.cursorCol)}${marker}${text.slice(this.cursorCol)}`];
+	}
+}
+
+async function openCursorFullscreen(showHardwareCursor: boolean) {
+	const terminal = new RecordingTerminal(30, 1);
+	const scheduler = new VirtualRenderScheduler();
+	const tui = new TUI(terminal, showHardwareCursor, { renderScheduler: scheduler });
+	tui.start();
+	await scheduler.settle(terminal);
+	const overlay = new CursorRow();
+	tui.showOverlay(overlay, { fullscreen: true, width: "100%", maxHeight: "100%" });
+	await scheduler.settle(terminal);
+	const initialPaint = terminal.takeWrites();
+	return { terminal, scheduler, tui, overlay, initialPaint };
 }
 
 const OSC66 = "\x1b]66;";
@@ -126,6 +153,109 @@ describe("fullscreen overlay paints", () => {
 		tui.requestRender();
 		await scheduler.settle(terminal);
 		expect(terminal.takeWrites()).toBe("");
+		tui.stop();
+	});
+
+	it("positions a focused fullscreen cursor and moves it when only the marker changes", async () => {
+		const { terminal, scheduler, tui, overlay, initialPaint } = await openCursorFullscreen(true);
+		expect(initialPaint).toContain("\x1b[1;3H\x1b[?25h");
+		expect(terminal.getCursor()).toEqual({ row: 0, col: 2 });
+		expect(tui.getDebugPaint()).toMatchObject({ altScreen: true, cursor: { x: 2, y: 0, visible: true } });
+
+		overlay.cursorCol = 4;
+		tui.requestRender();
+		await scheduler.settle(terminal);
+		const movement = terminal.takeWrites();
+		expect(rewrittenRows(movement)).toEqual([]);
+		expect(movement).toContain("\x1b[1;5H\x1b[?25h");
+		expect(terminal.getCursor()).toEqual({ row: 0, col: 4 });
+		expect(tui.getDebugPaint()).toMatchObject({ altScreen: true, cursor: { x: 4, y: 0, visible: true } });
+
+		tui.requestRender();
+		await scheduler.settle(terminal);
+		expect(terminal.takeWrites()).toBe("");
+
+		overlay.markerEnabled = false;
+		tui.requestRender();
+		await scheduler.settle(terminal);
+		const cancelled = terminal.takeWrites();
+		expect(cancelled).toContain("\x1b[?25l");
+		expect(cancelled).not.toContain("\x1b[?25h");
+		expect(tui.getDebugPaint()).toMatchObject({ altScreen: true });
+		expect(tui.getDebugPaint()?.cursor).toBeUndefined();
+		tui.stop();
+	});
+
+	for (const closeBeforeStop of [false, true]) {
+		it(`preserves the normal transcript and shell handoff after ${closeBeforeStop ? "closing" : "stopping inside"} a fullscreen cursor overlay`, async () => {
+			const terminal = new RecordingTerminal(30, 8);
+			const scheduler = new VirtualRenderScheduler();
+			const tui = new TUI(terminal, true, { renderScheduler: scheduler });
+			let historyPending = true;
+			tui.setFrameProvider({
+				renderFrame: () => ({
+					...(historyPending ? { history: { id: 1, rows: ["committed first", "committed second"] } } : {}),
+					viewport: ["live first", `li${CURSOR_MARKER}ve second`],
+				}),
+				acknowledgeHistory: () => {
+					historyPending = false;
+				},
+			});
+			tui.start();
+			await scheduler.settle(terminal);
+			expect(terminal.getCursor()).toEqual({ row: 3, col: 2 });
+			const transcript = ["committed first", "committed second", "live first", "live second"];
+			expect(screen(terminal)).toEqual([...transcript, "", "", "", ""]);
+
+			const handle = tui.showOverlay(new CursorRow(), {
+				fullscreen: true,
+				anchor: "bottom-left",
+				width: "100%",
+				maxHeight: "100%",
+			});
+			await scheduler.settle(terminal);
+			expect(terminal.getCursor()).toEqual({ row: 7, col: 2 });
+			expect(screen(terminal)).toEqual(["", "", "", "", "", "", "", "stable row"]);
+
+			if (closeBeforeStop) {
+				handle.hide();
+				await scheduler.settle(terminal);
+				expect(terminal.getCursor()).toEqual({ row: 3, col: 2 });
+				expect(screen(terminal)).toEqual([...transcript, "", "", "", ""]);
+			}
+			tui.stop();
+			await terminal.flush();
+			expect(terminal.getCursor()).toEqual({ row: 4, col: 0 });
+			terminal.write("shell prompt");
+			await terminal.flush();
+			expect(screen(terminal)).toEqual([...transcript, "shell prompt", "", "", ""]);
+		});
+	}
+
+	it("keeps a fullscreen marker hidden when hardware cursor rendering is disabled", async () => {
+		const { tui, initialPaint } = await openCursorFullscreen(false);
+		expect(initialPaint).toContain("\x1b[1;3H\x1b[?25l");
+		expect(initialPaint).not.toContain("\x1b[?25h");
+		expect(tui.getDebugPaint()).toMatchObject({ altScreen: true, cursor: { x: 2, y: 0, visible: false } });
+		tui.stop();
+	});
+
+	it("does not expose markers from a non-focusable fullscreen overlay", async () => {
+		const terminal = new RecordingTerminal(30, 1);
+		const scheduler = new VirtualRenderScheduler();
+		const tui = new TUI(terminal, true, { renderScheduler: scheduler });
+		tui.start();
+		await scheduler.settle(terminal);
+		tui.showOverlay(new Rows([`sta${CURSOR_MARKER}ble row`]), {
+			fullscreen: true,
+			width: "100%",
+			maxHeight: "100%",
+		});
+		await scheduler.settle(terminal);
+		const paint = terminal.takeWrites();
+		expect(paint).not.toContain("\x1b[?25h");
+		expect(screen(terminal)).toEqual(["stable row"]);
+		expect(tui.getDebugPaint()?.cursor).toBeUndefined();
 		tui.stop();
 	});
 

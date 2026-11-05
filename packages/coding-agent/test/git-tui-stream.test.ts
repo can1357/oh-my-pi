@@ -1,7 +1,8 @@
-import { beforeAll, describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as natives from "@oh-my-pi/pi-natives";
 import { DiffSide, DiffStream } from "@oh-my-pi/pi-natives";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
@@ -11,11 +12,17 @@ import {
 	type DiffBuildOptions,
 	DiffPane,
 } from "@oh-my-pi/pi-tui/apps/git/diff-pane";
+import type { ChangedFile } from "@oh-my-pi/pi-tui/apps/git/state";
 import { GitModel } from "../src/cli/git-tui/state";
+import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 const RED_PNG = Buffer.from(
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+	"base64",
+);
+const GRAY_PNG = Buffer.from(
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
 	"base64",
 );
 const LFS_POINTER_VERSION = "version https://git-lfs.github.com/spec/v1";
@@ -83,6 +90,58 @@ describe("git TUI streamed document", () => {
 		});
 	});
 
+	test("applies only the selected adjacent change to the index and reverses it", async () => {
+		await withReviewRepo(async repo => {
+			const filePath = path.join(repo, "seed.txt");
+			const original = "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\n";
+			const modified = original.replace("line 5\nline 6", "changed 5\nchanged 6");
+			await Bun.write(filePath, original);
+			await $`git add seed.txt`.cwd(repo).quiet();
+			await $`git commit -m lines`.cwd(repo).quiet();
+			await Bun.write(filePath, modified);
+
+			const model = new GitModel(repo);
+			const doc = buildDiffDocument(original, modified, "seed.txt");
+			const row = doc.rows.findIndex(item => item.newRaw === "changed 5");
+			expect(row).toBeGreaterThanOrEqual(0);
+			const patch = buildLineSelectionPatch(doc, row, row, "apply");
+			if (!patch) throw new Error("selected row produced no patch");
+			await model.applyPatch(patch, { cached: true });
+			expect((await $`git show :seed.txt`.cwd(repo).quiet().text()).split("\n").slice(4, 6)).toEqual([
+				"changed 5",
+				"line 6",
+			]);
+			expect(await Bun.file(filePath).text()).toBe(modified);
+
+			const staged = buildDiffDocument(original, await $`git show :seed.txt`.cwd(repo).quiet().text(), "seed.txt");
+			const stagedRow = staged.rows.findIndex(item => item.newRaw === "changed 5");
+			const undo = buildLineSelectionPatch(staged, stagedRow, stagedRow, "revert");
+			if (!undo) throw new Error("staged row produced no reverse patch");
+			await model.applyPatch(undo, { cached: true });
+			expect(await $`git show :seed.txt`.cwd(repo).quiet().text()).toBe(original);
+			expect(await Bun.file(filePath).text()).toBe(modified);
+		});
+	});
+
+	test("applies a later hunk without staging an earlier hunk", async () => {
+		await withReviewRepo(async repo => {
+			const filePath = path.join(repo, "seed.txt");
+			const original = Array.from({ length: 60 }, (_, index) => `line ${index + 1}`).join("\n") + "\n";
+			const expected = original.replace("line 40\n", "changed 40\n");
+			const modified = expected.replace("line 5\n", "changed 5\n");
+			await Bun.write(filePath, original);
+			await $`git add seed.txt`.cwd(repo).quiet();
+			await $`git commit -m lines`.cwd(repo).quiet();
+			await Bun.write(filePath, modified);
+
+			const doc = buildDiffDocument(original, modified, "seed.txt");
+			expect(doc.hunks).toHaveLength(2);
+			await new GitModel(repo).applyPatch(doc.hunks[1].patch, { cached: true });
+			expect(await $`git show :seed.txt`.cwd(repo).quiet().text()).toBe(expected);
+			expect(await Bun.file(filePath).text()).toBe(modified);
+		});
+	});
+
 	test.each([
 		["replacement", "a\nb\nc\n", "a\nx\nc\n"],
 		["insert and delete", "a\nb\nc\nd\n", "a\nnew\nb\nd\n"],
@@ -137,6 +196,49 @@ describe("git TUI asset previews", () => {
 		});
 	});
 
+	test("records the path and revision each media side was read from", async () => {
+		await withReviewRepo(async repo => {
+			const logo = path.join(repo, "logo.png");
+			const gone = path.join(repo, "gone.png");
+			await Bun.write(logo, RED_PNG);
+			await Bun.write(gone, RED_PNG);
+			await $`git add logo.png gone.png`.cwd(repo).quiet();
+			await $`git commit -m add`.cwd(repo).quiet();
+			const added = (await $`git rev-parse HEAD`.cwd(repo).quiet().text()).trim();
+			await Bun.write(logo, GRAY_PNG);
+			await $`git commit -am gray`.cwd(repo).quiet();
+			const gray = (await $`git rev-parse HEAD`.cwd(repo).quiet().text()).trim();
+			// logo.png: staged (gray → red) and unstaged (red → raw bytes); gone.png deleted; fresh.png untracked.
+			await Bun.write(logo, RED_PNG);
+			await $`git add logo.png`.cwd(repo).quiet();
+			await Bun.write(logo, new Uint8Array([0xff, 0xfe, 0xfd, 0xfc]));
+			await fs.rm(gone);
+			await Bun.write(path.join(repo, "fresh.png"), RED_PNG);
+
+			const model = new GitModel(repo);
+			await model.refresh();
+			const refs = async (file: ChangedFile | undefined) => {
+				if (!file) throw new Error("changed file was not discovered");
+				const contents = await model.streamContents(file, () => {});
+				if (contents.kind !== "asset") throw new Error(`${file.path} was not loaded as an asset`);
+				return [contents.oldRef, contents.newRef];
+			};
+			const unstaged = (filePath: string) => model.unstaged.find(file => file.path === filePath);
+
+			expect(await refs(model.staged.find(file => file.path === "logo.png"))).toEqual([
+				{ path: logo, rev: "HEAD" },
+				{ path: logo, rev: ":0" },
+			]);
+			expect(await refs(unstaged("logo.png"))).toEqual([{ path: logo, rev: ":0" }, { path: logo }]);
+			expect(await refs(unstaged("gone.png"))).toEqual([{ path: gone, rev: ":0" }, undefined]);
+			expect(await refs(unstaged("fresh.png"))).toEqual([undefined, { path: path.join(repo, "fresh.png") }]);
+			expect(await refs({ path: "logo.png", kind: "modified", area: "commit" })).toEqual([
+				{ path: logo, rev: added },
+				{ path: logo, rev: gray },
+			]);
+		});
+	});
+
 	test("rasterizes SVG Git objects for terminal preview", async () => {
 		await withReviewRepo(async repo => {
 			const svg =
@@ -155,6 +257,42 @@ describe("git TUI asset previews", () => {
 			pane.setAsset(file.path, contents.old, contents.new);
 			expect(sanitizeText(pane.render(80, 12).join("\n"))).toContain("After · SVG");
 		});
+	});
+
+	test("encodes a SIXEL image preview once across renders", async () => {
+		const terminal = TERMINAL as unknown as { imageProtocol: ImageProtocol | null };
+		const originalProtocol = terminal.imageProtocol;
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		const encodeSixel = spyOn(natives, "encodeSixelAsync");
+		try {
+			const pane = new DiffPane();
+			pane.setAsset(
+				"image.png",
+				{ kind: "empty" },
+				{
+					kind: "image",
+					image: {
+						data: RED_PNG.toString("base64"),
+						mimeType: "image/png",
+						sourceMimeType: "image/png",
+						widthPx: 1,
+						heightPx: 1,
+						byteLength: RED_PNG.byteLength,
+						key: "red",
+					},
+				},
+			);
+			pane.render(80, 12);
+			await encodeSixel.mock.results[0]?.value;
+			pane.render(80, 12);
+			pane.render(80, 12);
+			// A fresh Image per render would start a new encode every frame and
+			// never show the one that landed.
+			expect(encodeSixel).toHaveBeenCalledTimes(1);
+		} finally {
+			encodeSixel.mockRestore();
+			terminal.imageProtocol = originalProtocol;
+		}
 	});
 
 	test("resolves staged Git LFS pointers from local object storage", async () => {

@@ -876,7 +876,7 @@ fn matches_key_inner(bytes: &[u8], key_id: &str, kitty_protocol_active: bool) ->
 
 	// Function keys (now allow modifiers via CSI forms too)
 	let f_code = match key.as_bytes() {
-		[b'f' | b'F', n @ b'1'..=b'9'] => Some(FUNC_F1 + (n - b'1') as i32),
+		[b'f' | b'F', n @ b'1'..=b'9'] => Some(FUNC_F1 - (n - b'1') as i32),
 		[b'f' | b'F', b'1', b'0'] => Some(FUNC_F10),
 		[b'f' | b'F', b'1', b'1'] => Some(FUNC_F11),
 		[b'f' | b'F', b'1', b'2'] => Some(FUNC_F12),
@@ -885,7 +885,7 @@ fn matches_key_inner(bytes: &[u8], key_id: &str, kitty_protocol_active: bool) ->
 
 	if let Some(cp) = f_code {
 		if modifier == 0 {
-			return matches_legacy_key(bytes, key);
+			return matches_legacy_key(bytes, key) || kitty_matches(cp, 0);
 		}
 		return kitty_matches(cp, modifier);
 	}
@@ -1169,7 +1169,7 @@ fn parse_esc_pair(code: u8, kitty_protocol_active: bool) -> Option<Cow<'static, 
 // =============================================================================
 
 fn parse_kitty_sequence_bytes(bytes: &[u8]) -> Option<ParsedKittySequence> {
-	if bytes.len() < 4 || bytes[0] != 0x1b || bytes[1] != b'[' {
+	if bytes.len() < 3 || bytes[0] != 0x1b || bytes[1] != b'[' {
 		return None;
 	}
 
@@ -1285,6 +1285,18 @@ fn parse_csi_u(bytes: &[u8]) -> Option<ParsedKittySequence> {
 }
 
 fn parse_csi_1_letter(bytes: &[u8]) -> Option<ParsedKittySequence> {
+	// Unmodified press: kitty omits the parameters (`CSI Q`); `CSI 1 Q` is
+	// equivalent.
+	if let [0x1b, b'[', letter] | [0x1b, b'[', b'1', letter] = *bytes {
+		return csi_letter_codepoint(letter).map(|codepoint| ParsedKittySequence {
+			codepoint,
+			shifted_key: None,
+			base_layout_key: None,
+			text_codepoint: None,
+			modifier: 0,
+			event_type: None,
+		});
+	}
 	if !bytes.starts_with(b"\x1b[1;") {
 		return None;
 	}
@@ -1306,7 +1318,20 @@ fn parse_csi_1_letter(bytes: &[u8]) -> Option<ParsedKittySequence> {
 		return None;
 	}
 
-	let codepoint = match bytes[idx] {
+	let codepoint = csi_letter_codepoint(bytes[idx])?;
+
+	Some(ParsedKittySequence {
+		codepoint,
+		shifted_key: None,
+		base_layout_key: None,
+		text_codepoint: None,
+		modifier: mod_value - 1,
+		event_type,
+	})
+}
+
+const fn csi_letter_codepoint(letter: u8) -> Option<i32> {
+	Some(match letter {
 		b'A' => ARROW_UP,
 		b'B' => ARROW_DOWN,
 		b'C' => ARROW_RIGHT,
@@ -1319,15 +1344,6 @@ fn parse_csi_1_letter(bytes: &[u8]) -> Option<ParsedKittySequence> {
 		b'R' => FUNC_F3,
 		b'S' => FUNC_F4,
 		_ => return None,
-	};
-
-	Some(ParsedKittySequence {
-		codepoint,
-		shifted_key: None,
-		base_layout_key: None,
-		text_codepoint: None,
-		modifier: mod_value - 1,
-		event_type,
 	})
 }
 
@@ -1600,6 +1616,29 @@ mod tests {
 		// not
 		assert_eq!(parse_key_inner(b"\x1b\x1bX", true).as_deref(), None);
 		assert_eq!(parse_key_inner(b"\x1b\x1bX", false).as_deref(), None);
+	}
+
+	#[test]
+	fn modified_function_keys_match_their_kitty_codepoints() {
+		assert!(matches_key_inner(b"\x1b[1;2Q", "shift+f2", true));
+		assert!(matches_key_inner(b"\x1b[20;5~", "ctrl+f9", true));
+		assert!(!matches_key_inner(b"\x1b[1;2Q", "shift+f3", true));
+		assert!(!matches_key_inner(b"\x1b[1;2:3Q", "shift+f2", true));
+		assert!(!matches_key_inner(b"\x1b[6;5~", "ctrl+f8", true));
+	}
+
+	#[test]
+	fn unmodified_csi_letter_function_keys_parse_and_match() {
+		// Kitty-protocol terminals (Ghostty, kitty) omit the parameters for an
+		// unmodified press.
+		for (bytes, key) in
+			[(&b"\x1b[P"[..], "f1"), (b"\x1b[Q", "f2"), (b"\x1b[S", "f4"), (b"\x1b[1Q", "f2")]
+		{
+			assert!(matches_key_inner(bytes, key, true), "{bytes:?} should match {key}");
+			assert_eq!(parse_key_inner(bytes, true).as_deref(), Some(key));
+		}
+		assert!(!matches_key_inner(b"\x1b[Q", "f1", true));
+		assert!(!matches_key_inner(b"\x1b[Q", "shift+f2", true));
 	}
 
 	#[test]

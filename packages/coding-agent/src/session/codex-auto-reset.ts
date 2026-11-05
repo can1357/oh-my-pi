@@ -10,12 +10,18 @@
  * (not just the session's active one):
  *
  * - `expiring-credit` (salvage; any trigger): the account's soonest available
- *   credit expires within `salvageHorizonMs` and the weekly window is at least
+ *   credit expires within `salvageHorizonMs` and either chat window is at least
  *   {@link SALVAGE_MIN_USED_FRACTION} used, so redeeming restores real quota.
+ *   As a last chance, credits expiring within {@link IMMINENT_RESET_EXPIRY_MS}
+ *   are attempted even with a zero/shorter horizon or zero/unknown usage.
+ *   This fallback ignores non-terminal deferrals, but keeps live credit
+ *   eligibility, terminal-attempt dedupe, and the account cooldown. It still
+ *   needs consent, except that a host with no prompt UI spends it while
+ *   auto-redeem is unset (see {@link headlessApprovedResetActions}).
  *   The `keepCredits` reserve is deliberately ignored here — reserving a
  *   credit that is about to expire preserves nothing. If the window resets
- *   naturally before the credit expires, the next sweep sees a mostly-free
- *   window and skips: the credit had nothing left to restore. The backend may
+ *   naturally before the credit expires, broader salvage skips the mostly-free
+ *   window until the last-chance horizon. The backend may
  *   refuse a partial-usage consume with `nothing_to_reset`; that outcome is
  *   NON-terminal — the episode is deferred (not buried), so the credit is
  *   retried as usage grows or a window exhausts before expiry.
@@ -28,9 +34,10 @@
  *   ~80% headroom (openai/codex#28525). The natural unblock is the LATEST
  *   reset among the exhausted windows (the account stays blocked until every
  *   one rolls over) and must be far enough away to justify the spend, with
- *   credits above the reserve. One candidate is redeemed — active account
- *   first, then the account whose credit dies soonest — and the redeem clears
- *   its credential blocks so the retry's re-rank picks it up.
+ *   credits above the reserve, on an account the session may use (its account
+ *   pool). One candidate is redeemed — active account first, then the account
+ *   whose credit dies soonest — and the redeem clears its credential blocks so
+ *   the retry's re-rank picks it up.
  *
  * TRIGGERS: `blocked` runs from the usage-limit branch of the retry pipeline
  * after sibling switch fails, on force-refreshed reports (the cached snapshot
@@ -70,9 +77,11 @@ export const WINDOW_EXHAUSTED_MIN_FRACTION = 0.999;
 export const MAX_PLAUSIBLE_WEEKLY_REMAINING_MS = 7 * 24 * 3_600_000 + 60 * 60_000;
 /** A 5h reset can never be more than one window length (5h) away; +1h slack for skew. */
 export const MAX_PLAUSIBLE_PRIMARY_REMAINING_MS = 5 * 3_600_000 + 60 * 60_000;
-/** Below this usage on BOTH chat windows a salvaged reset restores too little to bother (and risks a `nothing_to_reset` no-op). */
+/** Shared last-chance expiry horizon; bypasses salvage usage thresholds, non-terminal deferrals and, with no prompt UI, unset consent; never cooldown. */
+export const IMMINENT_RESET_EXPIRY_MS = 5 * 60_000;
+/** Below this usage on BOTH chat windows, non-imminent salvage restores too little to bother. */
 export const SALVAGE_MIN_USED_FRACTION = 0.25;
-/** Retry spacing after a non-terminal consume outcome (`nothing_to_reset`, transport failure). */
+/** Retry spacing after a non-terminal consume outcome, except during imminent-expiry salvage. */
 export const REDEEM_RETRY_DEFER_MS = 30 * 60_000;
 
 /** Report must be no older than the 5-min usage cache TTL plus slack. */
@@ -92,6 +101,38 @@ export function shouldPromptCodexAutoRedeem(mode: ResetAutoRedeemMode): boolean 
 	return mode === "unset";
 }
 
+/**
+ * Planned spends a host with no prompt UI may make while auto-redeem is unset:
+ * only a credit expiring within {@link IMMINENT_RESET_EXPIRY_MS} qualifies,
+ * whether a salvage or a restore spends it, since nobody can be asked before it
+ * is lost. The approved target names that credit, so redeem cannot pick a later one.
+ */
+export function headlessApprovedResetActions<T extends Pick<CodexResetAction, "expiresInMs" | "target" | "creditId">>(
+	actions: readonly T[],
+): readonly T[] {
+	const approved: T[] = [];
+	for (const action of actions) {
+		if (action.expiresInMs === undefined || action.expiresInMs > IMMINENT_RESET_EXPIRY_MS) continue;
+		approved.push(action.creditId ? { ...action, target: { ...action.target, creditId: action.creditId } } : action);
+	}
+	return approved;
+}
+
+/** Planner settings from a provider's `codexResets.*` or `claudeResets.*` group. */
+export function resetPlanSettings(cfg: {
+	autoRedeem: ResetAutoRedeemMode;
+	minBlockedMinutes: number;
+	keepCredits: number;
+	salvageHorizonHours: number;
+}): CodexResetPlanInput["settings"] {
+	return {
+		enabled: shouldEvaluateCodexAutoRedeem(cfg.autoRedeem),
+		minBlockedMinutes: Math.max(0, cfg.minBlockedMinutes),
+		keepCredits: Math.max(0, Math.trunc(cfg.keepCredits)),
+		salvageHorizonMs: Math.max(0, cfg.salvageHorizonHours) * 3_600_000,
+	};
+}
+
 /** What woke the planner. `sweep` may only salvage; `blocked` may also restore. */
 export type CodexResetTrigger = "blocked" | "sweep";
 
@@ -102,6 +143,7 @@ export type CodexResetSkipReason =
 	| "spark-model"
 	| "no-identity"
 	| "stale-report"
+	| "outside-account-pool"
 	| "not-limit-reached"
 	| "no-exhausted-window"
 	| "deferred"
@@ -129,11 +171,13 @@ export interface CodexResetPlanInput {
 		minBlockedMinutes: number;
 		/** `blocked-account`: never spend below this many remaining credits. */
 		keepCredits: number;
-		/** `expiring-credit`: salvage window; `<= 0` disables the rule. */
+		/** `expiring-credit`: broader salvage window; `<= 0` leaves only the five-minute fallback. */
 		salvageHorizonMs: number;
 	};
 	/** Active account (marks the preferred restore candidate); may be undefined. */
 	identity: OAuthAccountIdentity | undefined;
+	/** `blocked-account`: whether a stored credential may serve the blocked session; absent allows every account. */
+	permitsCredential?: (credentialId: number) => boolean;
 	/** Usage reports for ALL stored accounts (one per account for Codex). */
 	reports: UsageReport[] | null;
 	attemptedKeys: ReadonlySet<string>;
@@ -169,8 +213,10 @@ export interface CodexResetAction {
 	salvageWindow?: "5h" | "weekly";
 	/** `expiring-credit`: used fraction of {@link CodexResetAction.salvageWindow}. */
 	salvageUsedFraction?: number;
-	/** `expiring-credit`: ms until the credit expires. */
+	/** Remaining lifetime, at planning time, of the soonest available credit (the one a redeem spends). */
 	expiresInMs?: number;
+	/** Id of the credit {@link CodexResetAction.expiresInMs} describes, when the listing reports one. */
+	creditId?: string;
 	/** True when this is the session's active account. */
 	active: boolean;
 }
@@ -189,25 +235,26 @@ export interface CodexResetPlan {
 	skipped: CodexResetSkip[];
 }
 
-/** Soonest future expiry (epoch ms) among available credits, or undefined. */
-function soonestCreditExpiryMs(
+/** Soonest future-expiring available credit, or undefined. */
+function soonestAvailableCredit(
 	credits: readonly UsageResetCreditDetail[] | undefined,
 	nowMs: number,
-): number | undefined {
-	let soonest: number | undefined;
+): { id: string | undefined; expiresAtMs: number } | undefined {
+	let soonest: { id: string | undefined; expiresAtMs: number } | undefined;
 	for (const credit of credits ?? []) {
 		if ((credit.status ?? "available") !== "available") continue;
 		if (!credit.expiresAt) continue;
 		const expiry = Date.parse(credit.expiresAt);
 		if (Number.isNaN(expiry) || expiry <= nowMs) continue;
-		if (soonest === undefined || expiry < soonest) soonest = expiry;
+		if (soonest === undefined || expiry < soonest.expiresAtMs) soonest = { id: credit.id, expiresAtMs: expiry };
 	}
 	return soonest;
 }
 
 type CodexChatWindow = "5h" | "weekly";
 
-interface CodexChatWindowSnapshot {
+export interface CodexChatWindowSnapshot {
+	limit: UsageLimit;
 	window: CodexChatWindow;
 	usedFraction: number | undefined;
 	resetsAt: number | undefined;
@@ -223,6 +270,7 @@ interface AccountSnapshot {
 	windows: CodexChatWindowSnapshot[];
 	limitReached: boolean;
 	creditExpiresAtMs: number | undefined;
+	creditId: string | undefined;
 }
 
 function classifyChatWindow(limit: UsageLimit, fallback: CodexChatWindow): CodexChatWindow {
@@ -241,11 +289,42 @@ function classifyChatWindow(limit: UsageLimit, fallback: CodexChatWindow): Codex
 function snapshotChatWindow(limit: UsageLimit, fallback: CodexChatWindow): CodexChatWindowSnapshot {
 	const window = classifyChatWindow(limit, fallback);
 	return {
+		limit,
 		window,
 		usedFraction: limit.amount.usedFraction,
 		resetsAt: limit.window?.resetsAt,
 		plausibleMs: window === "weekly" ? MAX_PLAUSIBLE_WEEKLY_REMAINING_MS : MAX_PLAUSIBLE_PRIMARY_REMAINING_MS,
 	};
+}
+
+/** The 5h and weekly chat windows, selected by their stable limit ids. */
+function codexChatWindows(report: UsageReport): CodexChatWindowSnapshot[] {
+	const primary = report.limits.find(l => l.id === "openai-codex:primary");
+	const weekly = report.limits.find(l => l.id === "openai-codex:secondary");
+	const windows: CodexChatWindowSnapshot[] = [];
+	if (primary) windows.push(snapshotChatWindow(primary, "5h"));
+	if (weekly) windows.push(snapshotChatWindow(weekly, "weekly"));
+	return windows;
+}
+
+/** The fullest chat window with known usage: the one a salvage redeem restores. */
+function fullestChatWindow(windows: readonly CodexChatWindowSnapshot[]): CodexChatWindowSnapshot | undefined {
+	let fullest: CodexChatWindowSnapshot | undefined;
+	for (const window of windows) {
+		if (
+			window.usedFraction !== undefined &&
+			window.usedFraction >= 0 &&
+			(!fullest || window.usedFraction > (fullest.usedFraction ?? 0))
+		) {
+			fullest = window;
+		}
+	}
+	return fullest;
+}
+
+/** The chat window the `expiring-credit` rule measures for one Codex usage report. */
+export function fullestCodexChatWindow(report: UsageReport): CodexChatWindowSnapshot | undefined {
+	return fullestChatWindow(codexChatWindows(report));
 }
 
 function usedFractionForWindow(snapshot: AccountSnapshot, window: CodexChatWindow): number | undefined {
@@ -279,7 +358,6 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 		blockedRuleActive = false;
 		skipped.push({ accountKey: "*", rule: "blocked-account", reason: "spark-model" });
 	}
-	const salvageRuleActive = settings.salvageHorizonMs > 0;
 
 	const snapshots: AccountSnapshot[] = [];
 	for (const report of input.reports ?? []) {
@@ -314,13 +392,10 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 			skipped.push({ accountKey, rule: "account", reason: "no-credits" });
 			continue;
 		}
-		const primary = report.limits.find(l => l.id === "openai-codex:primary");
-		const weekly = report.limits.find(l => l.id === "openai-codex:secondary");
-		const windows: CodexChatWindowSnapshot[] = [];
-		if (primary) windows.push(snapshotChatWindow(primary, "5h"));
-		if (weekly) windows.push(snapshotChatWindow(weekly, "weekly"));
+		const windows = codexChatWindows(report);
 		const baseLabel = email ?? accountId ?? accountKey;
 		const label = orgId && orgId !== baseLabel ? `${baseLabel} (${orgId})` : baseLabel;
+		const soonestCredit = soonestAvailableCredit(report.resetCredits?.credits, nowMs);
 		snapshots.push({
 			accountKey,
 			target: {
@@ -335,7 +410,8 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 			availableCount: available,
 			windows,
 			limitReached: report.metadata?.limitReached === true,
-			creditExpiresAtMs: soonestCreditExpiryMs(report.resetCredits?.credits, nowMs),
+			creditExpiresAtMs: soonestCredit?.expiresAtMs,
+			creditId: soonestCredit?.id,
 		});
 	}
 
@@ -358,6 +434,11 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 		for (const snapshot of snapshots) {
 			const rule = "blocked-account" as const;
 			const skip = (reason: CodexResetSkipReason) => skipped.push({ accountKey: snapshot.accountKey, rule, reason });
+			// Restoring an account the session may not use cannot unblock it.
+			if (input.permitsCredential && !input.permitsCredential(snapshot.target.credentialId)) {
+				skip("outside-account-pool");
+				continue;
+			}
 			// Live evidence: the 429 that triggered this pass names the active
 			// account directly, outranking a possibly pre-block report snapshot.
 			const liveUnblockAtMs = snapshot.active ? input.activeBlockUnblockAtMs : undefined;
@@ -469,6 +550,7 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 				remainingMs: best.remainingMs,
 				expiresInMs:
 					best.snapshot.creditExpiresAtMs === undefined ? undefined : best.snapshot.creditExpiresAtMs - nowMs,
+				creditId: best.snapshot.creditId,
 				blockedWindows: best.blockedWindows,
 				active: best.snapshot.active,
 			};
@@ -477,61 +559,59 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 
 	// --- expiring-credit: salvage every credit that would otherwise die.
 	const salvages: CodexResetAction[] = [];
-	if (salvageRuleActive) {
-		for (const snapshot of snapshots) {
-			if (snapshot.accountKey === restore?.accountKey) continue; // restore already spends its soonest credit
-			const rule = "expiring-credit" as const;
-			const skip = (reason: CodexResetSkipReason) => skipped.push({ accountKey: snapshot.accountKey, rule, reason });
-			const expiresAtMs = snapshot.creditExpiresAtMs;
-			if (expiresAtMs === undefined || expiresAtMs - nowMs > settings.salvageHorizonMs) {
-				skip("no-expiring-credit");
-				continue;
-			}
-			// Value = the fullest chat window a redeem restores. A 5h-only
-			// exhausted account with a light week still gains real quota
-			// (openai/codex#28525); a reset on mostly-free windows restores
-			// ~nothing. If usage grows before the credit expires, a later sweep
-			// reconsiders.
-			let fullestWindow: CodexChatWindowSnapshot | undefined;
-			for (const window of snapshot.windows) {
-				if ((window.usedFraction ?? 0) > (fullestWindow?.usedFraction ?? 0)) fullestWindow = window;
-			}
-			const salvageUsedFraction = fullestWindow?.usedFraction ?? 0;
-			if (!fullestWindow || salvageUsedFraction < SALVAGE_MIN_USED_FRACTION) {
-				skip("window-mostly-free");
-				continue;
-			}
-			const salvageWindow = fullestWindow.window;
-			const attemptKey = salvageAttemptKey(snapshot.accountKey, expiresAtMs);
-			if (input.attemptedKeys.has(attemptKey)) {
-				skip("already-attempted");
-				continue;
-			}
-			const deferredUntil = input.deferredUntilByKey.get(attemptKey);
-			if (deferredUntil !== undefined && nowMs < deferredUntil) {
-				skip("deferred");
-				continue;
-			}
-			if (cooledDown(snapshot.accountKey)) {
-				skip("cooldown");
-				continue;
-			}
-			salvages.push({
-				reason: "expiring-credit",
-				target: snapshot.target,
-				accountKey: snapshot.accountKey,
-				attemptKey,
-				label: snapshot.label,
-				availableCount: snapshot.availableCount,
-				weeklyUsedFraction: usedFractionForWindow(snapshot, "weekly"),
-				salvageWindow,
-				salvageUsedFraction,
-				expiresInMs: expiresAtMs - nowMs,
-				active: snapshot.active,
-			});
+	for (const snapshot of snapshots) {
+		if (snapshot.accountKey === restore?.accountKey) continue; // restore already spends its soonest credit
+		const rule = "expiring-credit" as const;
+		const skip = (reason: CodexResetSkipReason) => skipped.push({ accountKey: snapshot.accountKey, rule, reason });
+		const expiresAtMs = snapshot.creditExpiresAtMs;
+		const imminent =
+			expiresAtMs !== undefined && expiresAtMs > nowMs && expiresAtMs - nowMs <= IMMINENT_RESET_EXPIRY_MS;
+		if (
+			expiresAtMs === undefined ||
+			(!imminent && !(settings.salvageHorizonMs > 0 && expiresAtMs - nowMs <= settings.salvageHorizonMs))
+		) {
+			skip("no-expiring-credit");
+			continue;
 		}
-		salvages.sort((a, b) => (a.expiresInMs ?? 0) - (b.expiresInMs ?? 0));
+		// Broader salvage needs meaningful usage in either chat window. In the
+		// last five minutes, live credit eligibility outranks zero/unknown usage:
+		// let the provider decide whether there is anything left to restore.
+		const fullestWindow = fullestChatWindow(snapshot.windows);
+		const salvageUsedFraction = fullestWindow?.usedFraction;
+		if (!imminent && (salvageUsedFraction === undefined || salvageUsedFraction < SALVAGE_MIN_USED_FRACTION)) {
+			skip("window-mostly-free");
+			continue;
+		}
+		const attemptKey = salvageAttemptKey(snapshot.accountKey, expiresAtMs);
+		if (input.attemptedKeys.has(attemptKey)) {
+			skip("already-attempted");
+			continue;
+		}
+		const deferredUntil = input.deferredUntilByKey.get(attemptKey);
+		if (!imminent && deferredUntil !== undefined && nowMs < deferredUntil) {
+			skip("deferred");
+			continue;
+		}
+		if (cooledDown(snapshot.accountKey)) {
+			skip("cooldown");
+			continue;
+		}
+		salvages.push({
+			reason: "expiring-credit",
+			target: snapshot.target,
+			accountKey: snapshot.accountKey,
+			attemptKey,
+			label: snapshot.label,
+			availableCount: snapshot.availableCount,
+			weeklyUsedFraction: usedFractionForWindow(snapshot, "weekly"),
+			salvageWindow: fullestWindow?.window,
+			salvageUsedFraction,
+			expiresInMs: expiresAtMs - nowMs,
+			creditId: snapshot.creditId,
+			active: snapshot.active,
+		});
 	}
+	salvages.sort((a, b) => (a.expiresInMs ?? 0) - (b.expiresInMs ?? 0));
 
 	const actions = restore ? [restore, ...salvages] : salvages;
 	return { actions, skipped };
@@ -600,7 +680,12 @@ export function overlayLiveResetCredits(
 				availableCount: status.availableCount,
 				credits: status.credits
 					.filter(credit => (credit.status ?? "available") === "available")
-					.map(credit => ({ grantedAt: credit.grantedAt, expiresAt: credit.expiresAt, status: credit.status })),
+					.map(credit => ({
+						id: credit.id,
+						grantedAt: credit.grantedAt,
+						expiresAt: credit.expiresAt,
+						status: credit.status,
+					})),
 			},
 		};
 	});
@@ -635,6 +720,7 @@ export function overlayLiveResetCredits(
 					credits: active.credits
 						.filter(credit => (credit.status ?? "available") === "available")
 						.map(credit => ({
+							id: credit.id,
 							grantedAt: credit.grantedAt,
 							expiresAt: credit.expiresAt,
 							status: credit.status,
@@ -665,6 +751,10 @@ export function isTerminalRedeemOutcome(code: string): boolean {
 export interface ResetRecoveryResult {
 	restored: boolean;
 	retryAfterMs?: number;
+	/** Credentials whose reset the pass spent or adopted from a peer. */
+	restoredCredentialIds?: number[];
+	/** The session's account pool excluded a restore candidate or dropped a planned restore. */
+	poolLimited?: boolean;
 }
 
 /**
@@ -682,7 +772,7 @@ export interface ResetRecoveryResult {
  *   catching attempt-key drift across a minute boundary.
  * - `inFlightByAccount`: serializes blocked passes per account — a second
  *   session for the same account adopts the in-flight promise instead of
- *   starting a second consume.
+ *   starting a second consume, unless that pass could not serve its account pool.
  * - `sweepInFlight` / `lastSweepAt` / `sweepPromise`: re-entrancy guard, floor,
  *   and settlement handle for the combined provider salvage sweep (a redeem refreshes usage,
  *   which would recurse into a sweep; the promise lets tests and diagnostics

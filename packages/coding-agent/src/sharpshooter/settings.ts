@@ -16,6 +16,12 @@ export const cfgSharpshooterModel = register({
 	},
 });
 
+export const cfgSharpshooterMinPromptLength = register({
+	id: "sharpshooter.minPromptLength",
+	type: "number",
+	default: 16,
+});
+
 export const cfgSharpshooterIntervalMinutes = register({
 	id: "sharpshooter.intervalMinutes",
 	type: "number",

@@ -26,7 +26,7 @@ import * as path from "node:path";
 import type { Server, Subprocess } from "bun";
 import { BENCHMARK_DEFINITIONS } from "./benchmarks";
 import { buildExperiments, experimentDetail, experimentOf } from "./experiments";
-import { harborRunnerArgs, type LaunchRequest } from "./launch-args";
+import { defaultJobName, harborRunnerArgs, type LaunchRequest } from "./launch-args";
 import { type LaunchRecord, type RunRole, type RunRow, RunStore } from "./store";
 
 /** PUT /api/experiments/:id body — goal and per-run role/note/label metadata. */
@@ -386,9 +386,7 @@ export class ManagerServer {
 		const dataset =
 			request.dataset ??
 			(benchmark === "harbor" ? "terminal-bench@2.0" : benchmark === "edit" ? "typescript-edit" : "squad-dev");
-		const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-		const modelSlug = request.model.replace(/[^a-zA-Z0-9]+/g, "-");
-		const jobName = request.jobName ?? `${modelSlug}-${stamp}`;
+		const jobName = request.jobName ?? defaultJobName(request.model);
 		if (this.#children.has(jobName) || this.#store.getRun(jobName)?.status === "running") {
 			throw new Error(`run ${jobName} is already running`);
 		}

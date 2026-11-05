@@ -1,7 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { renderDemotedThinking } from "@oh-my-pi/pi-ai/dialect";
-import { convertMessages } from "@oh-my-pi/pi-ai/providers/openai-completions";
-import type { AssistantMessage, Model, ModelSpec, ThinkingContent, ToolCall } from "@oh-my-pi/pi-ai/types";
+import { convertMessages, streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
+import type { AssistantMessage, FetchImpl, Model, ModelSpec, ThinkingContent, ToolCall } from "@oh-my-pi/pi-ai/types";
+import { removeDsmlToolMarkupLeak } from "@oh-my-pi/pi-ai/utils/dsml-leak";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -190,6 +191,27 @@ describe("DeepSeek reasoning_content tool-call replay", () => {
 			expect(assistant?.reasoning_content).toBe("");
 		});
 
+		it("replays sanitized doubled-pipe reasoning on a tool-call continuation", () => {
+			const model = deepseekModel({
+				provider: "opencode-go",
+				baseUrl: "https://opencode.ai/zen/go/v1",
+				id: "deepseek-v4-flash",
+			});
+			for (const field of ["reasoning_content", "reasoning", "reasoning_text"]) {
+				const msg = assistantToolCall(model, [
+					{ type: "thinking", thinking: "Inspect files.</｜｜DSML｜｜parameter>", thinkingSignature: field },
+					{ type: "toolCall", id: "call_with_thinking", name: "read", arguments: { path: "/tmp/test" } },
+				]);
+
+				expect(removeDsmlToolMarkupLeak(msg)).toBe(true);
+				const messages = convertMessages(model, { messages: [msg] }, model.compat);
+				const assistant = findOpenAICompletionAssistantWireMessage(messages);
+				expect(assistant?.reasoning_content).toBe("Inspect files.");
+				expect(JSON.stringify(assistant)).not.toContain("DSML");
+				expect(JSON.stringify(assistant)).toContain("call_with_thinking");
+			}
+		});
+
 		it("recovers reasoning_content from non-empty thinking block with signature", () => {
 			const model = deepseekModel({
 				provider: "opencode-go",
@@ -232,7 +254,7 @@ describe("DeepSeek reasoning_content tool-call replay", () => {
 			expect(assistant?.reasoning_content).toBe("I need to read the file first.");
 		});
 
-		it("normalizes OpenRouter reasoning deltas to DeepSeek reasoning_content on replay", () => {
+		it("replays sanitized OpenRouter fallback reasoning on DeepSeek tool-call turns", () => {
 			const model = getBundledModel("openrouter", "deepseek/deepseek-v4-pro") as Model<"openai-completions">;
 			const compat = model.compat;
 			expect(compat.requiresReasoningContentForToolCalls).toBe(true);
@@ -241,7 +263,7 @@ describe("DeepSeek reasoning_content tool-call replay", () => {
 			const msg = assistantToolCall(model, [
 				{
 					type: "thinking",
-					thinking: "I should inspect the requested file.",
+					thinking: "I should inspect the requested file.</｜｜DSML｜｜parameter>",
 					thinkingSignature: "reasoning",
 				} as ThinkingContent,
 				{
@@ -251,6 +273,7 @@ describe("DeepSeek reasoning_content tool-call replay", () => {
 					arguments: { path: "package.json" },
 				} as ToolCall,
 			]);
+			expect(removeDsmlToolMarkupLeak(msg)).toBe(true);
 			const messages = convertMessages(model, { messages: [msg] }, compat);
 			const assistant = findOpenAICompletionAssistantWireMessage(messages);
 			expect(assistant).toBeDefined();
@@ -581,6 +604,91 @@ describe("DeepSeek reasoning_content tool-call replay", () => {
 			const assistant = findOpenAICompletionAssistantWireMessage(messages);
 			expect(assistant).toBeDefined();
 			expect(assistant?.reasoning_content).toBe(".");
+		});
+	});
+	describe("Mistral-hosted DeepSeek replay", () => {
+		const model = deepseekModel({
+			provider: "mistral",
+			baseUrl: "https://api.mistral.ai/v1",
+			id: "deepseek-v4-1-flash-1017",
+		});
+
+		it("captures streamed thinking content parts and replays them without forbidden reasoning fields (#17375)", async () => {
+			const chunk = (delta: Record<string, unknown>, finish_reason?: string) =>
+				`data: ${JSON.stringify({
+					id: "chatcmpl-mistral",
+					object: "chat.completion.chunk",
+					created: 0,
+					model: model.id,
+					choices: [{ index: 0, delta, finish_reason }],
+				})}\n\n`;
+			const bodies: Array<{ messages: Array<Record<string, unknown>> }> = [];
+			const fetchMock: FetchImpl = Object.assign(
+				async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+					bodies.push(JSON.parse(String(init?.body)));
+					const sse = [
+						chunk({ content: [{ type: "thinking", thinking: [{ type: "text", text: "Check the file." }] }] }),
+						chunk(
+							{
+								tool_calls: [
+									{ index: 0, id: "abcdefghi", type: "function", function: { name: "read", arguments: "{}" } },
+								],
+							},
+							"tool_calls",
+						),
+						"data: [DONE]\n\n",
+					];
+					return new Response(sse.join(""), { headers: { "content-type": "text/event-stream" } });
+				},
+				{ preconnect: fetch.preconnect },
+			);
+			const options = { apiKey: "k", fetch: fetchMock, reasoning: Effort.High };
+			const user = { role: "user" as const, content: "go", timestamp: 0 };
+			const first = await streamOpenAICompletions(model, { messages: [user] }, options).result();
+			expect(first.content[0]).toMatchObject({ type: "thinking", thinking: "Check the file." });
+
+			const toolResult = {
+				role: "toolResult" as const,
+				toolCallId: "abcdefghi",
+				toolName: "read",
+				content: [{ type: "text" as const, text: "body" }],
+				isError: false,
+				timestamp: 1,
+			};
+			await streamOpenAICompletions(model, { messages: [user, first, toolResult] }, options).result();
+			const replay = bodies[1]?.messages.find(message => message.role === "assistant");
+			expect(replay?.content).toEqual([{ type: "thinking", thinking: [{ type: "text", text: "Check the file." }] }]);
+			expect(replay?.tool_calls).toHaveLength(1);
+			// Mistral answers 422 extra_forbidden for any of these on assistant turns.
+			expect(replay).not.toHaveProperty("thinking_blocks");
+			expect(replay).not.toHaveProperty("reasoning_content");
+			expect(replay).not.toHaveProperty("reasoning");
+			expect(replay).not.toHaveProperty("reasoning_text");
+		});
+
+		it("replays field-signed thinking as content parts without forbidden reasoning fields on later turns", () => {
+			const toolTurn = assistantToolCall(model, [
+				{ type: "thinking", thinking: "Check the file.", thinkingSignature: "reasoning_content" },
+				{ type: "toolCall", id: "call_mistral", name: "read", arguments: { path: "/tmp/test" } },
+			]);
+			const plainTurn: AssistantMessage = {
+				...assistantToolCall(model, [{ type: "text", text: "Done." }]),
+				stopReason: "stop",
+			};
+			const replay = convertMessages(model, { messages: [toolTurn, plainTurn] }, model.compat).filter(
+				message => message.role === "assistant",
+			);
+			expect(replay).toHaveLength(2);
+			expect(replay[0]?.content).toEqual([
+				{ type: "thinking", thinking: [{ type: "text", text: "Check the file." }] },
+			]);
+			expect(replay[0]?.tool_calls).toHaveLength(1);
+			expect(replay[1]?.content).toBe("Done.");
+			for (const turn of replay) {
+				expect(turn).not.toHaveProperty("reasoning_content");
+				expect(turn).not.toHaveProperty("reasoning");
+				expect(turn).not.toHaveProperty("reasoning_text");
+			}
 		});
 	});
 });

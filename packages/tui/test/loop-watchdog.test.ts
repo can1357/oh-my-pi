@@ -1,14 +1,20 @@
-import { afterEach, describe, expect, test, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import { LoopWatchdog } from "@oh-my-pi/pi-tui/loop-watchdog";
-import { currentLoopPhase, logger, popLoopPhase, pushLoopPhase, takeRecentLoopPhase } from "@oh-my-pi/pi-utils";
+import {
+	currentLoopPhase,
+	logger,
+	popLoopPhase,
+	pushLoopPhase,
+	resetLoopPhaseWindow,
+	takeLoopPhaseAttribution,
+} from "@oh-my-pi/pi-utils";
 
 /**
  * Contract: LoopWatchdog turns event-loop lag into exactly one
- * `logger.warn("ui.loop-blocked", { blockedMs, phase })` line per block. A tick
- * that fires more than `thresholdMs` past its `intervalMs` deadline is a block; it
- * is logged once on the rising edge (deduped while the loop stays blocked), tagged
- * with the current loop phase and the rounded overshoot, and a stopped watchdog
- * emits nothing even for a tick already armed before stop().
+ * `logger.warn("ui.loop-blocked", { blockedMs, cpuMs, phase, phaseMs? })` line
+ * per block. A tick more than `thresholdMs` past its deadline logs only on the
+ * rising edge. Its phase must outweigh unlabeled time after that deadline;
+ * only named phases include `phaseMs`. A stopped watchdog emits nothing.
  *
  * Time and the timer are injected so the test drives elapsed time deterministically
  * instead of sleeping. `schedule` captures the armed callback so the test fires
@@ -37,37 +43,39 @@ function harness(options: Partial<{ intervalMs: number; thresholdMs: number; sle
 	};
 }
 
+function drain(): void {
+	resetLoopPhaseWindow();
+	while (currentLoopPhase() !== undefined) popLoopPhase();
+}
+beforeEach(drain);
 afterEach(() => {
 	vi.restoreAllMocks();
-	// The phase stack is a process-global; drain anything these cases pushed.
-	while (currentLoopPhase() !== undefined) popLoopPhase();
-	// Drain the consume-on-read recent slot too, so a phase one case set cannot
-	// leak into another's attribution assertion.
-	takeRecentLoopPhase();
+	drain();
 });
 
 describe("LoopWatchdog", () => {
-	test("logs ui.loop-blocked once with the current phase and overshoot when a tick runs late", () => {
+	test("logs a named late-window phase with its duration and the rounded overshoot", () => {
 		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
-		const { wd, setNow, fireTick } = harness(); // intervalMs=250, thresholdMs=250
+		const { wd, setNow, fireTick } = harness();
 
+		wd.start(); // deadline 250
+		setNow(200);
 		pushLoopPhase("render");
-		wd.start(); // deadline armed at now(0)+250 = 250
-		setNow(560); // tick fires at 560 → blockedMs = 560 - 250 = 310 (> threshold)
+		setNow(560);
+		popLoopPhase();
 		fireTick();
 
 		expect(warnSpy).toHaveBeenCalledTimes(1);
-		const [event, ctx] = warnSpy.mock.calls[0] as [string, { blockedMs: number; phase: string }];
-		expect(event).toBe("ui.loop-blocked");
-		expect(ctx.phase).toBe("render");
-		expect(ctx.blockedMs).toBeGreaterThanOrEqual(250);
+		expect(warnSpy.mock.calls[0]).toEqual([
+			"ui.loop-blocked",
+			{ blockedMs: 310, cpuMs: expect.any(Number), phase: "render", phaseMs: 310 },
+		]);
 	});
 
 	test("stays silent when a tick fires on its deadline", () => {
 		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const { wd, setNow, fireTick } = harness();
 
-		pushLoopPhase("render");
 		wd.start(); // deadline at 250
 		setNow(250); // blockedMs = 0, not a block
 		fireTick();
@@ -79,11 +87,16 @@ describe("LoopWatchdog", () => {
 		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const { wd, setNow, fireTick } = harness();
 
-		pushLoopPhase("render");
 		wd.start(); // deadline at 250
-		setNow(600); // blockedMs = 350 → rising edge, logs once; re-armed deadline = 850
+		setNow(250);
+		pushLoopPhase("render");
+		setNow(600);
+		popLoopPhase();
 		fireTick();
+		setNow(850);
+		pushLoopPhase("render");
 		setNow(1200); // blockedMs = 350 again, but still blocked → no second log
+		popLoopPhase();
 		fireTick();
 
 		expect(warnSpy).toHaveBeenCalledTimes(1);
@@ -111,7 +124,6 @@ describe("LoopWatchdog", () => {
 		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const { wd, setNow, fireTick } = harness();
 
-		pushLoopPhase("render");
 		wd.start(); // deadline at 250
 		setNow(600); // first block logs once and re-arms a follow-up tick
 		fireTick();
@@ -124,21 +136,85 @@ describe("LoopWatchdog", () => {
 		expect(warnSpy).toHaveBeenCalledTimes(1); // stop() short-circuits the stale tick
 	});
 
+	test("stopping the running watchdog disarms phase attribution", () => {
+		const { wd, setNow } = harness();
+		wd.start();
+		wd.stop();
+		setNow(250);
+		pushLoopPhase("after-stop");
+		setNow(600);
+		popLoopPhase();
+		expect(takeLoopPhaseAttribution()).toBeUndefined();
+	});
+
 	test("attributes a synchronous block whose phase was already popped before the tick", () => {
 		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const { wd, setNow, fireTick } = harness();
 
 		wd.start(); // deadline 250
-		// A hot sync path pushes and pops its phase within one macrotask, so the
-		// stack is empty by the time the delayed tick runs — the recent slot must
-		// still surface the culprit instead of "unknown".
+		// The balanced span finishes before the delayed tick runs.
+		setNow(250);
 		pushLoopPhase("ui.select-filter");
+		setNow(600);
 		popLoopPhase();
-		setNow(600); // blockedMs = 350
 		fireTick();
 
 		expect(warnSpy).toHaveBeenCalledTimes(1);
-		expect((warnSpy.mock.calls[0]![1] as { phase: string }).phase).toBe("ui.select-filter");
+		expect(warnSpy.mock.calls[0]![1]).toEqual({
+			blockedMs: 350,
+			cpuMs: expect.any(Number),
+			phase: "ui.select-filter",
+			phaseMs: 350,
+		});
+	});
+
+	test("a restarted run's span finishing before its deadline leaves a later block unknown", () => {
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const { wd, setNow, fireTick } = harness();
+
+		wd.start();
+		wd.stop();
+		pushLoopPhase("ui.transcript-retire");
+		popLoopPhase();
+
+		wd.start(); // fresh deadline 250
+		pushLoopPhase("ui.select-filter");
+		setNow(240);
+		popLoopPhase();
+		setNow(600);
+		fireTick();
+
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(warnSpy.mock.calls[0]![1]).toEqual({
+			blockedMs: 350,
+			cpuMs: expect.any(Number),
+			phase: "unknown",
+		});
+	});
+
+	test("a restarted run attributes a fresh span covering the late window", () => {
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const { wd, setNow, fireTick } = harness();
+
+		wd.start();
+		wd.stop();
+		pushLoopPhase("ui.transcript-retire");
+		popLoopPhase();
+
+		wd.start(); // fresh deadline 250
+		setNow(250);
+		pushLoopPhase("ui.select-filter");
+		setNow(600);
+		popLoopPhase();
+		fireTick();
+
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(warnSpy.mock.calls[0]![1]).toEqual({
+			blockedMs: 350,
+			cpuMs: expect.any(Number),
+			phase: "ui.select-filter",
+			phaseMs: 350,
+		});
 	});
 
 	test("does not misattribute a finished phase to a later phase-less block", () => {
@@ -147,8 +223,9 @@ describe("LoopWatchdog", () => {
 
 		wd.start(); // deadline 250
 		pushLoopPhase("ui.select-filter");
+		setNow(240);
 		popLoopPhase();
-		setNow(250); // on-time tick consumes the recent phase, logs nothing; re-arm 500
+		setNow(250); // on-time tick consumes the window, logs nothing; re-arm 500
 		fireTick();
 		setNow(900); // block in the next interval with no phase active
 		fireTick();
@@ -161,16 +238,87 @@ describe("LoopWatchdog", () => {
 		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const { wd, setNow, fireTick } = harness();
 
-		pushLoopPhase("render");
 		wd.start(); // deadline 250
+		setNow(250);
+		pushLoopPhase("render");
 		setNow(600); // block #1 (350) → logs; re-arm 850
+		popLoopPhase();
 		fireTick();
 		setNow(850); // on-time → falling edge resets #wasBlocked; re-arm 1100
 		fireTick();
+		setNow(1100);
+		pushLoopPhase("render");
 		setNow(1450); // block #2 (350) → logs again
+		popLoopPhase();
 		fireTick();
 
 		expect(warnSpy).toHaveBeenCalledTimes(2);
+	});
+
+	test("consumes different phases on deduped and recovery ticks before a phase-less block", () => {
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const { wd, setNow, fireTick } = harness();
+
+		wd.start(); // deadline 250
+		setNow(250);
+		pushLoopPhase("A");
+		setNow(600);
+		popLoopPhase();
+		fireTick(); // A logs; next deadline 850
+
+		setNow(850);
+		pushLoopPhase("B");
+		setNow(1200);
+		popLoopPhase();
+		fireTick(); // B consumed without a warning; next deadline 1450
+
+		setNow(1450);
+		pushLoopPhase("C");
+		setNow(1500);
+		popLoopPhase();
+		fireTick(); // recovery consumes C; next deadline 1750
+
+		setNow(2100);
+		fireTick();
+
+		expect(warnSpy.mock.calls).toEqual([
+			["ui.loop-blocked", { blockedMs: 350, cpuMs: expect.any(Number), phase: "A", phaseMs: 350 }],
+			["ui.loop-blocked", { blockedMs: 350, cpuMs: expect.any(Number), phase: "unknown" }],
+		]);
+	});
+
+	test("omits phaseMs when a tiny late label is outweighed by unlabeled work", () => {
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const { wd, setNow, fireTick } = harness();
+
+		wd.start();
+		setNow(599);
+		pushLoopPhase("A");
+		setNow(600);
+		popLoopPhase();
+		fireTick();
+
+		expect(warnSpy.mock.calls).toEqual([
+			["ui.loop-blocked", { blockedMs: 350, cpuMs: expect.any(Number), phase: "unknown" }],
+		]);
+	});
+
+	test("stopping a watchdog that never started keeps a running watchdog's attribution", () => {
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const { wd, setNow, fireTick } = harness();
+		const idle = harness().wd;
+
+		wd.start(); // deadline 250
+		idle.stop();
+		setNow(250);
+		pushLoopPhase("A");
+		setNow(600);
+		popLoopPhase();
+		fireTick();
+
+		expect(warnSpy.mock.calls).toEqual([
+			["ui.loop-blocked", { blockedMs: 350, cpuMs: expect.any(Number), phase: "A", phaseMs: 350 }],
+		]);
 	});
 
 	test("a pre-stop tick no-ops after start() -> stop() -> start() and arms no parallel chain", () => {

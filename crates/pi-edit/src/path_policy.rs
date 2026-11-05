@@ -14,9 +14,9 @@ use std::{
 	collections::HashMap,
 	ffi::OsString,
 	path::{Component, Path, PathBuf, Prefix},
-	time::{Duration, Instant},
 };
 
+use pi_walker::{FileType, pattern::Glob};
 use regex::Regex;
 
 use crate::{
@@ -166,45 +166,6 @@ impl PathPolicy {
 		lexical_absolute(Path::new(&expanded), &self.cwd)
 	}
 
-	/// Locate a missing authored path by unique trailing-suffix match under
-	/// `cwd`.
-	pub fn recover_missing(&self, authored: &str) -> Option<Resolved> {
-		let normalized = authored.replace('\\', "/");
-		let normalized = normalized
-			.strip_prefix("./")
-			.unwrap_or(&normalized)
-			.trim_end_matches('/');
-		if normalized.is_empty() {
-			return None;
-		}
-		let escaped = escape_glob_metachars(normalized);
-		let glob = pi_walker::CompiledWalkGlob::new([format!("**/{escaped}")]).ok()?;
-		let started = Instant::now();
-		let request = pi_walker::WalkRequest::new(&self.cwd)
-			.hidden(true)
-			.gitignore(true)
-			.skip_git(true)
-			.skip_node_modules(false)
-			.emit_root(false)
-			.cache(false)
-			.limit(2)
-			.filter(pi_walker::WalkFilter::all().glob(glob));
-		let result = request
-			.collect_with_heartbeat(|| {
-				if started.elapsed() >= Duration::from_secs(5) {
-					Err("workspace suffix search timed out")
-				} else {
-					Ok(())
-				}
-			})
-			.ok()?;
-		if result.entries.len() != 1 {
-			return None;
-		}
-		let display = result.entries.into_iter().next()?.path;
-		Some(Resolved { absolute: self.cwd.join(&display), display })
-	}
-
 	/// Enforce plan-mode write restrictions: renames and deletes are refused;
 	/// other writes are allowed only for URL targets whose host answer in
 	/// `urls` is plan-writable and for plain paths under
@@ -305,7 +266,7 @@ enum Address<'a> {
 /// `write`'s refusal for a URI-shaped target it cannot address, reworded
 /// for edit; `suggestion` is the registered `scheme://` spelling.
 fn unknown_uri_target(display: &str, suggestion: Option<&str>) -> String {
-	let hint = suggestion.map_or_else(String::new, |url| format!(" Did you mean '{url}'?"));
+	let hint = suggestion.map_or_default(|url| format!(" Did you mean '{url}'?"));
 	format!(
 		"Unknown URI-like edit target '{display}'.{hint} Prefix the path with './' to edit it as a \
 		 filesystem path."
@@ -318,7 +279,7 @@ fn unknown_uri_target(display: &str, suggestion: Option<&str>) -> String {
 /// `#`; an untagged `#` is a malformed tag and leaves `target` untouched.
 pub fn unwrap_hashline_header_path(target: &str) -> &str {
 	let trimmed = target.trim_end();
-	let Some(inner) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) else {
+	let Some(inner) = trimmed.strip_circumfix('[', ']') else {
 		return target;
 	};
 	let path = match inner.rsplit_once('#') {
@@ -534,6 +495,35 @@ fn is_within(path: &Path, root: &Path) -> bool {
 	path == root || path.starts_with(root)
 }
 
+/// Trailing-suffix matcher for a missing authored path: the host walks
+/// `cwd` and recovers the path only when exactly one file or directory
+/// matches.
+#[derive(Debug, Clone)]
+pub struct RecoveryGlob(Glob);
+
+impl RecoveryGlob {
+	/// Matcher for `**/<authored>` with metacharacters taken literally;
+	/// `None` when `authored` names nothing (empty, `./`, `/`).
+	pub fn new(authored: &str) -> Option<Self> {
+		let normalized = authored.replace('\\', "/");
+		let normalized = normalized
+			.strip_prefix("./")
+			.unwrap_or(&normalized)
+			.trim_end_matches('/');
+		if normalized.is_empty() {
+			return None;
+		}
+		let escaped = escape_glob_metachars(normalized);
+		Glob::new(&format!("**/{escaped}")).ok().map(Self)
+	}
+
+	/// Whether the walk entry at `path` (cwd-relative, `/`-separated, final
+	/// component `name`) is a candidate recovery.
+	pub fn matches(&self, path: &[u8], name: &[u8], file_type: FileType) -> bool {
+		matches!(file_type, FileType::File | FileType::Dir) && self.0.is_match_base(path, name)
+	}
+}
+
 fn escape_glob_metachars(value: &str) -> String {
 	let mut out = String::with_capacity(value.len());
 	for c in value.chars() {
@@ -739,8 +729,8 @@ mod tests {
 			p.resolve("[sbx:/../src/main.rs#AB12]", &urls),
 			Err(EditError::UnresolvedUrl(url)) if url == "sbx://../src/main.rs"
 		));
-		// Registered scheme without the alias, and an unregistered scheme: refused
-		// like `write` refuses them.
+		// Registered scheme without the alias, and an unregistered scheme:
+		// refused like `write` refuses them.
 		for (authored, suggestion) in [("ro:/a.md", Some("'ro://a.md'")), ("bogus://a.md", None)] {
 			let Err(EditError::Apply(message)) = p.resolve(authored, &urls) else {
 				panic!("{authored} must be refused");
@@ -760,8 +750,8 @@ mod tests {
 		assert_eq!(strip_windows_verbatim(r"\\?\unc\server\share"), r"\\server\share");
 		assert_eq!(strip_windows_verbatim(r"\\server\share"), r"\\server\share");
 		assert_eq!(expand_path(r"\\?\UNC\server\share\a.rs", Path::new("")), r"\\server\share\a.rs");
-		// Verbatim forms without a plain spelling keep their prefix: stripped, they
-		// would become relative paths naming a different file.
+		// Verbatim forms without a plain spelling keep their prefix: stripped,
+		// they would become relative paths naming a different file.
 		for kept in [
 			r"\\?\GLOBALROOT\Device\HarddiskVolume1\a.rs",
 			r"\\?\Volume{0b1c2d3e-0000-0000-0000-100000000000}\a.rs",
@@ -898,16 +888,37 @@ mod tests {
 		);
 	}
 
+	fn recovery_matches(authored: &str, path: &str, file_type: FileType) -> bool {
+		let name = path.rsplit('/').next().unwrap();
+		RecoveryGlob::new(authored)
+			.unwrap()
+			.matches(path.as_bytes(), name.as_bytes(), file_type)
+	}
+
 	#[test]
-	fn recovers_one_suffix_but_not_ambiguous_suffixes() {
-		let tmp = tempfile::tempdir().unwrap();
-		let p = policy(tmp.path());
-		std::fs::create_dir_all(tmp.path().join("deep/src")).unwrap();
-		std::fs::write(tmp.path().join("deep/src/a.ts"), "").unwrap();
-		assert_eq!(p.recover_missing("src/a.ts").unwrap().display, "deep/src/a.ts");
-		std::fs::create_dir_all(tmp.path().join("other/src")).unwrap();
-		std::fs::write(tmp.path().join("other/src/a.ts"), "").unwrap();
-		assert!(p.recover_missing("src/a.ts").is_none());
+	fn recovery_glob_matches_whole_trailing_components() {
+		assert!(recovery_matches("src/a.ts", "deep/src/a.ts", FileType::File));
+		assert!(recovery_matches("./src/a.ts", "src/a.ts", FileType::File));
+		assert!(recovery_matches("src\\a.ts", "deep/src/a.ts", FileType::File));
+		assert!(recovery_matches("deep/src/", "x/deep/src", FileType::Dir));
+		assert!(!recovery_matches("src/a.ts", "deep/mysrc/a.ts", FileType::File));
+		assert!(!recovery_matches("src/a.ts", "deep/src/a.ts.bak", FileType::File));
+		assert!(!recovery_matches("src/a.ts", "deep/src/a.ts", FileType::Symlink));
+	}
+
+	#[test]
+	fn recovery_glob_takes_metacharacters_literally() {
+		assert!(recovery_matches("src/[id].ts", "app/src/[id].ts", FileType::File));
+		assert!(!recovery_matches("src/[id].ts", "app/src/i.ts", FileType::File));
+		assert!(recovery_matches("a*b?.ts", "x/a*b?.ts", FileType::File));
+		assert!(!recovery_matches("a*b.ts", "x/aXXb.ts", FileType::File));
+	}
+
+	#[test]
+	fn recovery_glob_refuses_empty_targets() {
+		for authored in ["", "./", "/", "\\"] {
+			assert!(RecoveryGlob::new(authored).is_none(), "{authored:?}");
+		}
 	}
 
 	#[test]
@@ -969,6 +980,44 @@ mod tests {
 				.unwrap()
 				.contains("detected marker: \"zz_generated.deepcopy.go\"")
 		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn refuses_fifo_reads_without_blocking() {
+		let tmp = tempfile::tempdir().unwrap();
+		let fifo = tmp.path().join("pipe");
+		assert!(
+			std::process::Command::new("mkfifo")
+				.arg(&fifo)
+				.status()
+				.unwrap()
+				.success()
+		);
+		let mut files = FileCache::new(policy(tmp.path()));
+		let (sender, receiver) = std::sync::mpsc::channel();
+		std::thread::spawn(move || {
+			let _ = sender.send(
+				files
+					.read("pipe")
+					.map(|_| ())
+					.map_err(|error| error.to_string()),
+			);
+		});
+		// A regression blocks the reader in open(2) forever; an O_RDWR open never
+		// blocks and counts as a writer, so it releases that reader before the
+		// test fails.
+		let result = receiver
+			.recv_timeout(std::time::Duration::from_secs(5))
+			.unwrap_or_else(|_| {
+				let _writer = std::fs::OpenOptions::new()
+					.read(true)
+					.write(true)
+					.open(&fifo);
+				panic!("reading a FIFO blocked instead of being refused")
+			});
+		let error = result.unwrap_err();
+		assert!(error.contains("it is a FIFO"), "unexpected error: {error}");
 	}
 
 	#[test]

@@ -31,6 +31,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AuthStorage } from "./auth-storage";
+import type { UsageLimitState } from "./usage-limit";
 
 /** Why an active slow-mode window ended. */
 export type AnthropicSlowModeEndReason =
@@ -110,6 +111,20 @@ export function formatSlowModeResetClock(resetsAtSec: number, now = Date.now()):
 		: at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+/** TUI status-line label for a usage-limit state. */
+export function formatUsageLimitLabel(status: UsageLimitState | undefined, now = Date.now()): string | undefined {
+	if (status?.stage === "low_priority") {
+		return `low priority until ${formatSlowModeResetClock(status.resetsAtSec, now)}${
+			status.allowanceLeftPercent === undefined ? "" : ` · ${status.allowanceLeftPercent}% left`
+		}`;
+	}
+	if (!status) return undefined;
+	if (status.extraUsage) return "limit reached · wrap-up, then extra usage";
+	return `limit reached · wrapping up${
+		status.resetsAtSec === undefined ? "" : ` · resets ${formatSlowModeResetClock(status.resetsAtSec, now)}`
+	}`;
+}
+
 const END_NOTICES: Record<AnthropicSlowModeEndReason, { level: NoticeLevel; message: string } | undefined> = {
 	reset: { level: "info", message: "Claude session limit reset — low priority ended." },
 	user: undefined,
@@ -131,8 +146,41 @@ const END_NOTICES: Record<AnthropicSlowModeEndReason, { level: NoticeLevel; mess
 	extra_usage: { level: "info", message: "Low priority ended: extra usage is now serving requests." },
 };
 
+/**
+ * One Claude account lane's slow-mode state. Implemented by
+ * {@link AnthropicSlowModeController}; on a worker thread, by a proxy of the
+ * main thread's controller (see {@link AnthropicSlowModeLanes.useLaneSource}).
+ */
+export interface AnthropicSlowModeLane {
+	/** Whether requests currently carry the slow header. */
+	isActive(now?: number): boolean;
+	/** Reset time (epoch seconds) of the active window, if any. */
+	activeResetsAtSec(now?: number): number | undefined;
+	/** Percent of the weekly slow-lane allowance still available, when reported. */
+	allowanceLeftPercent(): number | undefined;
+	/** Key of the open wrap-up window when the model should wrap up, else undefined. */
+	wrapUpHintKey(lowPriority: boolean, now?: number): number | undefined;
+	/** Structured usage-limit state, or `undefined` outside wrap-up and low priority. */
+	status(now?: number, lowPriority?: boolean): UsageLimitState | undefined;
+	/** Whether the slow lane can be entered now, and on which window. */
+	availability(now?: number): AnthropicSlowModeAvailability;
+	/** Enter the slow lane if {@link availability} allows it. */
+	accept(now?: number): AnthropicSlowModeAvailability;
+	/** End the active window. Returns false when nothing was active. */
+	stop(reason: AnthropicSlowModeEndReason, now?: number): boolean;
+	/** Test seam: drop all state. */
+	reset(): void;
+	/** Observe a successful response's slow-lane and wrap-up headers. */
+	observe(signal: AnthropicSlowModeSignal, options: AnthropicSlowModeHookOptions): void;
+	/** Decide whether a failed request retries on the slow lane, and after how long. */
+	onFailure(
+		failure: AnthropicSlowModeFailure,
+		options: AnthropicSlowModeHookOptions,
+	): Promise<AnthropicSlowModeRetry | undefined>;
+}
+
 /** Slow-mode state machine for one Claude account lane; see the module docs. */
-export class AnthropicSlowModeController {
+export class AnthropicSlowModeController implements AnthropicSlowModeLane {
 	#phase: Phase = { kind: "idle" };
 	/** Latest `treatment` offer seen on a session-limit 429, keyed by its reset. */
 	#offerResetsAtSec: number | undefined;
@@ -197,20 +245,24 @@ export class AnthropicSlowModeController {
 		return wrapUp.epoch;
 	}
 
-	/**
-	 * Compact status-line label, or `undefined` outside both stages. The
-	 * low-priority label shows only when `lowPriority` (this session's `/slow`).
-	 */
-	statusLabel(now = Date.now(), lowPriority = true): string | undefined {
+	/** Structured usage-limit state, or `undefined` outside wrap-up and low priority. */
+	status(now = Date.now(), lowPriority = true): UsageLimitState | undefined {
 		const resetsAtSec = lowPriority ? this.activeResetsAtSec(now) : undefined;
 		if (resetsAtSec !== undefined) {
-			const left = this.allowanceLeftPercent();
-			return `low priority until ${formatSlowModeResetClock(resetsAtSec, now)}${left === undefined ? "" : ` · ${left}% left`}`;
+			const allowanceLeftPercent = this.allowanceLeftPercent();
+			return {
+				stage: "low_priority",
+				resetsAtSec,
+				...(allowanceLeftPercent === undefined ? {} : { allowanceLeftPercent }),
+			};
 		}
 		const wrapUp = this.#currentWrapUp(now);
 		if (!wrapUp) return undefined;
-		if (wrapUp.extraUsage) return "limit reached · wrap-up, then extra usage";
-		return `limit reached · wrapping up${wrapUp.resetsAtSec === undefined ? "" : ` · resets ${formatSlowModeResetClock(wrapUp.resetsAtSec, now)}`}`;
+		return {
+			stage: "wrap_up",
+			...(wrapUp.resetsAtSec === undefined ? {} : { resetsAtSec: wrapUp.resetsAtSec }),
+			extraUsage: wrapUp.extraUsage,
+		};
 	}
 
 	/** Whether the slow lane can be entered now, and on which window. */
@@ -485,16 +537,26 @@ export class AnthropicSlowModeController {
  * subagents, and advisors on the same account share one lane.
  */
 export class AnthropicSlowModeLanes {
-	#lanes = new Map<string, AnthropicSlowModeController>();
+	#lanes = new Map<string, AnthropicSlowModeLane>();
+	#source: ((key: string) => AnthropicSlowModeLane) | undefined;
 
 	/** The lane for `key`, created on first use. */
-	lane(key: string): AnthropicSlowModeController {
+	lane(key: string): AnthropicSlowModeLane {
 		let lane = this.#lanes.get(key);
 		if (!lane) {
-			lane = new AnthropicSlowModeController();
+			lane = this.#source?.(key) ?? new AnthropicSlowModeController();
 			this.#lanes.set(key, lane);
 		}
 		return lane;
+	}
+
+	/**
+	 * Worker bootstrap only: obtain every lane from `source` (the main thread's
+	 * registry) so all threads share one state per account. Drops local lanes.
+	 */
+	useLaneSource(source: (key: string) => AnthropicSlowModeLane): void {
+		this.#source = source;
+		this.#lanes.clear();
 	}
 
 	/**

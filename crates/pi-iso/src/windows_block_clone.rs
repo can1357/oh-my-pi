@@ -1,6 +1,6 @@
 //! Windows block-clone based isolation.
 //!
-//! [`cow::clone_file`](crate::cow::clone_file) asks `ReFS` (including Dev
+//! [`cow`](crate::cow) asks `ReFS` (including Dev
 //! Drive) to share file extents copy-on-write between a source file and a
 //! destination file; other filesystems such as NTFS reject it, which surfaces
 //! as [`IsoError::unavailable`](crate::IsoError). The backend
@@ -79,44 +79,33 @@ impl IsolationBackend for WindowsBlockCloneBackend {
 #[cfg(windows)]
 mod imp {
 	use std::{
-		fs::{self, OpenOptions},
+		fs::{self, File, FileTimes, FileType, OpenOptions},
 		io,
-		os::windows::{
-			fs::{FileTypeExt, OpenOptionsExt},
-			io::AsRawHandle,
-		},
-		path::{Path, PathBuf},
+		os::windows::fs::{FileTimesExt, OpenOptionsExt},
+		path::Path,
 	};
 
-	use windows_sys::Win32::{
-		Foundation::FILETIME,
-		Storage::FileSystem::{
-			FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, SetFileTime,
-		},
+	use windows_sys::Win32::Storage::FileSystem::{
+		FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_WRITE_ATTRIBUTES,
 	};
 
-	use crate::{IsoError, IsoResult, cow};
+	use crate::{
+		IsoError, IsoResult, cow,
+		tree::{self, TreeCopy},
+	};
 
 	pub fn start(lower: &Path, merged: &Path) -> IsoResult<()> {
-		let lower = canonical_existing_dir(lower)?;
-		prepare_destination(merged)?;
-
-		let result = recursive_block_clone(&lower, merged);
-		if result.is_err() {
-			let _ = remove_path(merged);
-		}
-		result
+		clone_tree(lower, merged, &[])
 	}
 
 	pub fn clone_tree(lower: &Path, merged: &Path, skip: &[&std::ffi::OsStr]) -> IsoResult<()> {
-		let lower = canonical_existing_dir(lower)?;
-		prepare_destination(merged)?;
+		let lower = tree::canonical_existing_dir(lower, "block-clone source", IsoError::other)?;
+		tree::prepare_destination(merged, "block clone", remove_path)?;
 		let result = (|| {
 			fs::create_dir_all(merged)
 				.map_err(|err| IsoError::other(format!("create {}: {err}", merged.display())))?;
-			clone_dir_contents(&lower, merged, Some(skip))?;
-			copy_metadata_best_effort(&lower, merged);
-			Ok(())
+			tree::copy_dir_contents(&lower, merged, skip, &BlockClone)?;
+			BlockClone.finish_dir(&lower, merged)
 		})();
 		if result.is_err() {
 			let _ = remove_path(merged);
@@ -130,51 +119,28 @@ mod imp {
 		})
 	}
 
-	fn canonical_existing_dir(path: &Path) -> IsoResult<PathBuf> {
-		let resolved = if path.is_absolute() {
-			path.to_path_buf()
-		} else {
-			std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
-		};
-		let meta = fs::metadata(&resolved).map_err(|err| {
-			IsoError::other(format!("invalid block-clone source {}: {err}", resolved.display()))
-		})?;
-		if !meta.is_dir() {
-			return Err(IsoError::other(format!(
-				"block-clone source {} is not a directory",
-				resolved.display()
-			)));
-		}
-		Ok(fs::canonicalize(&resolved).unwrap_or(resolved))
-	}
-
-	fn prepare_destination(merged: &Path) -> IsoResult<()> {
-		if let Some(parent) = merged.parent() {
-			fs::create_dir_all(parent).map_err(|err| {
-				IsoError::other(format!("create parent of {}: {err}", merged.display()))
-			})?;
-		}
-		remove_path(merged).map_err(|err| {
-			IsoError::other(format!("unable to clear {} before block clone: {err}", merged.display()))
-		})?;
-		Ok(())
-	}
-
 	fn remove_path(path: &Path) -> io::Result<()> {
-		let meta = match fs::symlink_metadata(path) {
-			Ok(meta) => meta,
-			Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
-			Err(err) => return Err(err),
-		};
+		match fs::symlink_metadata(path) {
+			Ok(meta) => remove_entry(path, &meta),
+			Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+			Err(err) => Err(err),
+		}
+	}
+
+	/// Removes `path`, which `meta` describes. Children are described by their
+	/// directory entries, whose metadata comes from the directory listing
+	/// without opening each child.
+	fn remove_entry(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
 		let file_type = meta.file_type();
 		if file_type.is_dir() && !file_type.is_symlink() {
 			for entry in fs::read_dir(path)? {
-				remove_path(&entry?.path())?;
+				let entry = entry?;
+				remove_entry(&entry.path(), &entry.metadata()?)?;
 			}
-			clear_readonly(path, &meta);
+			clear_readonly(path, meta);
 			fs::remove_dir(path)
 		} else {
-			clear_readonly(path, &meta);
+			clear_readonly(path, meta);
 			fs::remove_file(path)
 		}
 	}
@@ -198,134 +164,83 @@ mod imp {
 		}
 	}
 
-	fn recursive_block_clone(lower: &Path, merged: &Path) -> IsoResult<()> {
-		fs::create_dir_all(merged)
-			.map_err(|err| IsoError::other(format!("create {}: {err}", merged.display())))?;
-		clone_dir_contents(lower, merged, None)?;
-		copy_metadata_best_effort(lower, merged);
-		Ok(())
-	}
+	struct BlockClone;
 
-	fn clone_dir_contents(
-		src: &Path,
-		dst: &Path,
-		skip: Option<&[&std::ffi::OsStr]>,
-	) -> IsoResult<()> {
-		let entries = fs::read_dir(src)
-			.map_err(|err| IsoError::other(format!("read_dir {}: {err}", src.display())))?;
-		for entry in entries {
-			let entry = entry
-				.map_err(|err| IsoError::other(format!("dir entry in {}: {err}", src.display())))?;
-			if skip.is_some_and(|names| names.contains(&entry.file_name().as_os_str())) {
-				continue;
-			}
-			let file_type = entry.file_type().map_err(|err| {
-				IsoError::other(format!("file_type {}: {err}", entry.path().display()))
-			})?;
-			let src_path = entry.path();
-			let dst_path = dst.join(entry.file_name());
+	impl TreeCopy for BlockClone {
+		fn symlink(&self, src: &Path, dst: &Path, file_type: FileType) -> IsoResult<()> {
+			tree::copy_symlink(src, dst, file_type)?;
+			copy_path_metadata_best_effort(src, dst);
+			Ok(())
+		}
 
-			if file_type.is_symlink() {
-				clone_symlink(&src_path, &dst_path)?;
-				copy_metadata_best_effort(&src_path, &dst_path);
-			} else if file_type.is_dir() {
-				fs::create_dir_all(&dst_path)
-					.map_err(|err| IsoError::other(format!("create {}: {err}", dst_path.display())))?;
-				clone_dir_contents(&src_path, &dst_path, None)?;
-				copy_metadata_best_effort(&src_path, &dst_path);
-			} else if file_type.is_file() {
-				clone_regular_file(&src_path, &dst_path)?;
-				copy_metadata_best_effort(&src_path, &dst_path);
-			} else {
+		fn file(&self, src: &Path, dst: &Path, file_type: FileType) -> IsoResult<()> {
+			if !file_type.is_file() {
 				return Err(IsoError::other(format!(
 					"unsupported filesystem entry for block clone: {}",
-					src_path.display()
+					src.display()
 				)));
 			}
+			clone_regular_file(src, dst)
+		}
+
+		fn finish_dir(&self, src: &Path, dst: &Path) -> IsoResult<()> {
+			copy_path_metadata_best_effort(src, dst);
+			Ok(())
+		}
+	}
+
+	/// Clones the regular file `src` into the fresh tree, then gives the clone
+	/// `src`'s timestamps and attributes through the handles the clone used.
+	fn clone_regular_file(src: &Path, dst: &Path) -> IsoResult<()> {
+		let (src_file, dst_file) = cow::clone_new(src, dst).map_err(|err| {
+			if cow::is_unsupported(&err) {
+				IsoError::unavailable(format!(
+					"Windows block clone unsupported for {} -> {}: {err}",
+					src.display(),
+					dst.display()
+				))
+			} else {
+				IsoError::other(format!("block clone {} -> {}: {err}", src.display(), dst.display()))
+			}
+		})?;
+		if let Ok(meta) = src_file.metadata() {
+			copy_metadata_best_effort(&dst_file, &meta);
 		}
 		Ok(())
 	}
 
-	fn clone_symlink(src: &Path, dst: &Path) -> IsoResult<()> {
-		let target = fs::read_link(src)
-			.map_err(|err| IsoError::other(format!("read_link {}: {err}", src.display())))?;
-		let file_type = fs::symlink_metadata(src)
-			.map_err(|err| IsoError::other(format!("symlink_metadata {}: {err}", src.display())))?
-			.file_type();
-		let res = if file_type.is_symlink_dir() {
-			std::os::windows::fs::symlink_dir(target, dst)
-		} else {
-			std::os::windows::fs::symlink_file(target, dst)
-		};
-		res.map_err(|err| IsoError::other(format!("symlink {}: {err}", dst.display())))
-	}
-
-	fn clone_regular_file(src: &Path, dst: &Path) -> IsoResult<()> {
-		let Err(err) = cow::clone_file(src, dst) else {
-			return Ok(());
-		};
-		if cow::is_unsupported(&err) {
-			Err(IsoError::unavailable(format!(
-				"Windows block clone unsupported for {} -> {}: {err}",
-				src.display(),
-				dst.display()
-			)))
-		} else {
-			Err(IsoError::other(format!("block clone {} -> {}: {err}", src.display(), dst.display())))
-		}
-	}
-
-	fn copy_metadata_best_effort(src: &Path, dst: &Path) {
+	/// Copies the timestamps and attributes of the directory or symlink `src`
+	/// onto `dst`, opening each entry itself rather than a link's target.
+	fn copy_path_metadata_best_effort(src: &Path, dst: &Path) {
 		let Ok(meta) = fs::symlink_metadata(src) else {
 			return;
 		};
-		set_times_best_effort(dst, &meta);
-		if !meta.file_type().is_symlink() {
-			let _ = fs::set_permissions(dst, meta.permissions());
-		}
-	}
-
-	fn set_times_best_effort(path: &Path, meta: &fs::Metadata) {
-		let created = meta.created().ok().and_then(system_time_to_filetime);
-		let accessed = meta.accessed().ok().and_then(system_time_to_filetime);
-		let modified = meta.modified().ok().and_then(system_time_to_filetime);
-		if created.is_none() && accessed.is_none() && modified.is_none() {
+		let Ok(dst) = OpenOptions::new()
+			.access_mode(FILE_WRITE_ATTRIBUTES)
+			.custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+			.open(dst)
+		else {
 			return;
-		}
-
-		let mut opts = OpenOptions::new();
-		opts.write(true);
-		opts.custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
-		let Ok(file) = opts.open(path) else { return };
-		// SAFETY: `file` owns the HANDLE for the duration of the call. The
-		// optional FILETIME pointers either reference stack locals that outlive
-		// the call or are null when the corresponding timestamp is unavailable.
-		let _ = unsafe {
-			SetFileTime(
-				file.as_raw_handle() as _,
-				created
-					.as_ref()
-					.map_or(std::ptr::null(), |ft| ft as *const FILETIME),
-				accessed
-					.as_ref()
-					.map_or(std::ptr::null(), |ft| ft as *const FILETIME),
-				modified
-					.as_ref()
-					.map_or(std::ptr::null(), |ft| ft as *const FILETIME),
-			)
 		};
+		copy_metadata_best_effort(&dst, &meta);
 	}
 
-	fn system_time_to_filetime(time: std::time::SystemTime) -> Option<FILETIME> {
-		let dur = time.duration_since(std::time::UNIX_EPOCH).ok()?;
-		// Windows FILETIME = 100-ns ticks since 1601-01-01.
-		const EPOCH_DIFF_100NS: u64 = 116_444_736_000_000_000;
-		let ticks = EPOCH_DIFF_100NS
-			.checked_add(dur.as_secs().checked_mul(10_000_000)?)?
-			.checked_add(u64::from(dur.subsec_nanos() / 100))?;
-		Some(FILETIME {
-			dwLowDateTime:  (ticks & 0xffff_ffff) as u32,
-			dwHighDateTime: (ticks >> 32) as u32,
-		})
+	/// Gives the open `dst` the timestamps and, unless `meta` describes a
+	/// symlink, the attributes in `meta`.
+	fn copy_metadata_best_effort(dst: &File, meta: &fs::Metadata) {
+		let mut times = FileTimes::new();
+		if let Ok(created) = meta.created() {
+			times = times.set_created(created);
+		}
+		if let Ok(accessed) = meta.accessed() {
+			times = times.set_accessed(accessed);
+		}
+		if let Ok(modified) = meta.modified() {
+			times = times.set_modified(modified);
+		}
+		let _ = dst.set_times(times);
+		if !meta.file_type().is_symlink() {
+			let _ = dst.set_permissions(meta.permissions());
+		}
 	}
 }

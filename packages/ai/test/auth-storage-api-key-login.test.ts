@@ -5,7 +5,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
-import * as aiStream from "@oh-my-pi/pi-ai/stream";
+import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
+import * as devinCliModule from "@oh-my-pi/pi-ai/registry/oauth/devin-cli";
 import { serializeAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 import { removeWithRetries } from "../../utils/src/temp";
 
@@ -44,10 +45,10 @@ describe("AuthStorage api-key login upsert", () => {
 	let dbPath = "";
 	let store: SqliteAuthCredentialStore | null = null;
 	let authStorage: AuthStorage | null = null;
-	let getEnvApiKeySpy: Mock<typeof aiStream.getEnvApiKey>;
+	let getEnvApiKeySpy: Mock<typeof envApiKey.getEnvApiKey>;
 
 	beforeEach(async () => {
-		getEnvApiKeySpy = vi.spyOn(aiStream, "getEnvApiKey").mockReturnValue(undefined);
+		getEnvApiKeySpy = vi.spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-auth-api-key-login-"));
 		dbPath = path.join(tempDir, "agent.db");
 		store = await SqliteAuthCredentialStore.open(dbPath);
@@ -113,6 +114,18 @@ describe("AuthStorage api-key login upsert", () => {
 		]);
 		const rotatedKeys = [await authStorage.keys.get("kagi"), await authStorage.keys.get("kagi")].sort();
 		expect(rotatedKeys).toEqual(["first-kagi-key", "second-kagi-key"]);
+	});
+
+	it("stores an API-key login under the rule's store-as provider, not the auth id", async () => {
+		if (!store || !authStorage || !dbPath) throw new Error("test setup failed");
+		vi.spyOn(devinCliModule, "loginDevinCliHook").mockResolvedValue("sk-ws-01-adopted");
+
+		await authStorage.oauth.login("devin-cli", { onAuth: () => {}, onPrompt: async () => "" });
+
+		expect(countCredentialRows(dbPath, "devin-cli")).toBe(0);
+		expect(store.listAuthCredentials("devin").map(entry => entry.credential)).toEqual([
+			{ type: "api_key", key: "sk-ws-01-adopted", source: "login" },
+		]);
 	});
 
 	it("replaces Token Plan Cookies by API-token identity without collapsing different tokens", async () => {

@@ -2,7 +2,7 @@
  * Local protocol between an interactive session and the `omp stream` process
  * in the same working directory.
  *
- * Transport: newline-delimited JSON over the Unix socket / named pipe at
+ * Transport: newline-delimited JSON over the native IPC endpoint at
  * {@link streamSocketEndpoint}. The streamer assigns each connected session a
  * wire pane id and forwards the session's frames as `StreamPaneFrame`s; the
  * session never learns about other panes or the stream server.
@@ -11,6 +11,7 @@
  * `paint-encoder.ts`); the streamer is a pure multiplexer. The same screen
  * frames are persisted by session recordings (`recording.ts`).
  */
+import { type } from "@oh-my-pi/omptype";
 import { STREAM_HISTORY_LIMIT, type StreamChatMessage, type StreamRow } from "@oh-my-pi/pi-wire";
 
 export const STREAM_LOCAL_PROTO = 1;
@@ -43,10 +44,8 @@ export type StreamStreamerFrame =
 	| { t: "chat"; msg: StreamChatMessage }
 	| { t: "bye"; reason: string };
 
-/** Encode one frame for the newline-delimited socket. */
-export function encodeStreamFrame(frame: StreamSessionFrame | StreamStreamerFrame): string {
-	return `${JSON.stringify(frame)}\n`;
-}
+/** Longest line the streamer accepts from a session; a peer exceeding it is dropped. */
+export const MAX_LOCAL_LINE_BYTES = 4 * 1024 * 1024;
 
 /**
  * Apply one screen frame to a materialized screen. Shared by the streamer's
@@ -92,48 +91,29 @@ function fitViewport(viewport: StreamRow[], rows: number): void {
 	while (viewport.length < rows) viewport.push("");
 }
 
+/** Non-negative integer terminal dimension. */
+const Dimension = type("number.integer >= 0");
+
+const SessionFrame = type({
+	t: "'hello'",
+	proto: "number.integer",
+	sessionId: "string",
+	title: "string",
+	cols: Dimension,
+	rows: Dimension,
+})
+	.or({ t: "'resize'", cols: Dimension, rows: Dimension })
+	.or({ t: "'history' | 'viewport'", rows: "string[]" })
+	.or({ t: "'patch'", rows: Dimension, ops: type(["number.integer", "string"]).array() })
+	.or({ t: "'reset'" })
+	.or({ t: "'paused'", paused: "boolean" });
+
 /** Structural validation of an untrusted session frame (socket peer or recording file). */
 export function isSessionFrame(value: unknown): value is StreamSessionFrame {
-	if (!value || typeof value !== "object" || !("t" in value) || typeof value.t !== "string") return false;
-	const frame = value as Record<string, unknown>;
-	switch (frame.t) {
-		case "hello":
-			return (
-				typeof frame.proto === "number" &&
-				Number.isInteger(frame.proto) &&
-				typeof frame.sessionId === "string" &&
-				typeof frame.title === "string" &&
-				isDimension(frame.cols) &&
-				isDimension(frame.rows)
-			);
-		case "resize":
-			return isDimension(frame.cols) && isDimension(frame.rows);
-		case "history":
-		case "viewport":
-			return Array.isArray(frame.rows) && frame.rows.every(row => typeof row === "string");
-		case "patch":
-			return (
-				isDimension(frame.rows) &&
-				Array.isArray(frame.ops) &&
-				frame.ops.every(
-					op =>
-						Array.isArray(op) &&
-						op.length === 2 &&
-						typeof op[0] === "number" &&
-						Number.isInteger(op[0]) &&
-						typeof op[1] === "string",
-				)
-			);
-		case "reset":
-			return true;
-		case "paused":
-			return typeof frame.paused === "boolean";
-		default:
-			return false;
-	}
+	return SessionFrame.allows(value);
 }
 
 /** Non-negative integer terminal dimension. */
 export function isDimension(value: unknown): value is number {
-	return typeof value === "number" && Number.isInteger(value) && value >= 0;
+	return Dimension.allows(value);
 }

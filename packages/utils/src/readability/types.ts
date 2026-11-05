@@ -14,6 +14,8 @@ export interface ReadabilityNode {
 	appendChild(node: ReadabilityNode): ReadabilityNode;
 	cloneNode(deep?: boolean): ReadabilityNode;
 	remove(): void;
+	/** Detach all children; used when present to move or reset children in one step. */
+	replaceChildren?(): void;
 }
 
 /** Minimal standards-shaped DOM element accepted by the readability extractor. */

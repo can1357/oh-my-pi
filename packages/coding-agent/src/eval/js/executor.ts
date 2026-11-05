@@ -7,7 +7,8 @@ import {
 } from "../../tools/output-meta";
 import { isEvalTimeoutControlEvent, withBridgeTimeoutPause } from "../bridge-timeout";
 import { DisplayOutputCollector } from "../executor-base";
-import { executeInVmContext, type JsDisplayOutput } from "./context-manager";
+import type { EvalDisplayOutput } from "../types";
+import { executeInVmContext } from "./context-manager";
 import { installJsPackages } from "./package-installer";
 import type { JsPackageEnvironmentMode } from "./package-installer";
 import type { JsStatusEvent } from "./shared/types";
@@ -26,6 +27,8 @@ export interface JsExecutorOptions {
 	idleTimeoutMs?: number;
 	onChunk?: (chunk: string) => Promise<void> | void;
 	onStatus?: (event: JsStatusEvent) => void;
+	/** Shows the user `out://` replies of the cell's bridged tool calls; absent, those calls are refused. */
+	onReply?: (text: string) => void;
 	signal?: AbortSignal;
 	sessionId: string;
 	/** Logical owner identifier; scopes retained-worker cleanup. */
@@ -58,7 +61,7 @@ export interface JsResult {
 	totalBytes: number;
 	outputLines: number;
 	outputBytes: number;
-	displayOutputs: JsDisplayOutput[];
+	displayOutputs: EvalDisplayOutput[];
 }
 
 function getExecutionTimeoutMs(options: Pick<JsExecutorOptions, "deadlineMs" | "timeoutMs">): number | undefined {
@@ -105,7 +108,7 @@ function formatPackageInstallTimeoutAnnotation(installDeadlineReached: boolean):
 }
 
 export async function executeJs(code: string, options: JsExecutorOptions): Promise<JsResult> {
-	const display = new DisplayOutputCollector<JsDisplayOutput>();
+	const display = new DisplayOutputCollector();
 	const displayOutputs = display.outputs;
 	const outputSink = new OutputSink({
 		artifactPath: options.artifactPath,
@@ -175,6 +178,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			timeoutMs: runtimeTimeoutMs ?? options.idleTimeoutMs,
 			runState: {
 				signal,
+				onReply: options.onReply,
 				onText: chunk => outputSink.push(chunk),
 				onDisplay: output => {
 					if (output.type === "status") {

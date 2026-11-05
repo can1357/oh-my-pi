@@ -57,7 +57,7 @@ const ATTRIBUTION_NOTE =
 const NO_CALLS = <EmptyState title="No tool calls in this range" />;
 
 export function ToolsRoute({ active, range }: ToolsRouteProps) {
-	const tools = useQuery(["tools", range], () => getToolDashboardStats(range), { enabled: active });
+	const tools = useQuery(["tools", range], ({ signal }) => getToolDashboardStats(range, signal), { enabled: active });
 	const [metric, setMetric] = useState<CallMetric>("calls");
 	const [hidden, toggleHidden] = useHiddenSeries();
 	const [pickedTool, setToolFilter] = useState<string | null>(null);

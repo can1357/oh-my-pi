@@ -175,6 +175,7 @@ export function streamGitLabDuo(
 									: undefined,
 								reasoning: anthropicReasoningEffort,
 								toolChoice: mapAnthropicToolChoice(options.toolChoice),
+								waitForTerminalDrain: options.waitForTerminalDrain,
 							},
 						)
 					: route.api === "openai-responses"
@@ -250,6 +251,7 @@ export function streamGitLabDuo(
 									// like the azure-openai-responses mapping does.
 									disableReasoning: options.disableReasoning || options.forceReasoningOff,
 									toolChoice: options.toolChoice,
+									waitForTerminalDrain: options.waitForTerminalDrain,
 								} satisfies OpenAICompletionsOptions,
 							);
 

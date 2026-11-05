@@ -11,11 +11,10 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use pi_vfs::{BlockingFs, File, OpenOptions, TempOptions};
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Utility, format_usage, matches_parser};
 
 const OPT_APPEND: &str = "append";
 const ARG_FILE: &str = "file";
@@ -61,7 +60,7 @@ impl Utility for Sponge {
 		match result {
 			Ok(()) => 0,
 			Err(err) => {
-			host.error(format_args!("{}: {err}", file.to_string_lossy()), 1);
+			host.error(format_args!("{}: {err}", file.display()), 1);
 				1
 			},
 		}
@@ -162,7 +161,7 @@ fn write_and_swap(
 /// default creation mode so a new target ends up with ordinary permissions.
 fn create_sibling_temp(fs: &BlockingFs, target: &Path) -> io::Result<(PathBuf, File)> {
 	let dir = pi_vfs::parent_path(target)
-		.filter(|p| !p.as_os_str().is_empty())
+		.filter(|p| !p.is_empty())
 		.unwrap_or_else(|| Path::new("."));
 	let base = pi_vfs::file_name(target);
 	let base = base.as_deref().unwrap_or(OsStr::new("sponge")).to_string_lossy();
@@ -171,11 +170,6 @@ fn create_sibling_temp(fs: &BlockingFs, target: &Path) -> io::Result<(PathBuf, F
 		.random_len(16)
 		.mode(0o666);
 	fs.create_temp(dir, &options)
-}
-
-/// Creates the `sponge` builtin registration.
-pub(crate) fn sponge_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Sponge, SE>()
 }
 
 #[cfg(test)]

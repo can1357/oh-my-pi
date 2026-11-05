@@ -174,7 +174,7 @@ fn is_anchor(text: &str) -> bool {
 	let hash = word
 		.bytes()
 		.fold(0x811c_9dc5u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193));
-	hash % ANCHOR_EVERY == 0
+	hash.is_multiple_of(ANCHOR_EVERY)
 }
 
 /// The context `before` a word: the last [`CONTEXT_UNITS`] UTF-16 units,
@@ -332,9 +332,8 @@ impl SmolLm {
 	) -> anyhow::Result<Self> {
 		let tokenizer = Tokenizer::load(&model_dir.join("tokenizer.json"))?;
 		let vocab = decoder.vocab_size();
-		let texts = (0..vocab as u32)
-			.map(|id| tokenizer.token_text(id).map(Box::from))
-			.collect();
+		let index =
+			TokenIndex::new(tokenizer.token_bytes(), vocab, |id| tokenizer.token_text(id).is_some());
 		let mut memory = Memory::default();
 		match std::fs::read(state_dir.join(STATE_FILE)) {
 			Ok(bytes) => {
@@ -355,7 +354,7 @@ impl SmolLm {
 		memory.dirty = true;
 		Ok(Self {
 			tokenizer,
-			index: TokenIndex::new(texts),
+			index,
 			session: Session::new(decoder),
 			bos,
 			memory,

@@ -1,8 +1,9 @@
 # One platform per shipped pi_natives addon. linux platforms inherit the zig
 # libc-aware platforms so cc toolchain resolution pins glibc 2.17 (the shipped
 # portability floor) or musl; the cpu_variant constraint selects -Ctarget-cpu
-# in //crates/pi-natives. darwin/win32 resolve against the host Xcode toolchain
-# and //bazel/toolchains/msvc respectively.
+# in //crates/pi-natives. darwin resolves against //bazel/toolchains/darwin on
+# linux hosts (the host Xcode toolchain on mac hosts), win32 against
+# //bazel/toolchains/msvc.
 
 package(default_visibility = ["//visibility:public"])
 

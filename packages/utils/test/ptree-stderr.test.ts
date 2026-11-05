@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { heapStats } from "bun:jsc";
 import { exec, NonZeroExitError, spawn } from "@oh-my-pi/pi-utils/ptree";
 
 const STDERR_LIMIT = NonZeroExitError.MAX_TRACE;
@@ -82,5 +83,18 @@ describe("ptree stderr capture", () => {
 		expect(error.stderr).toEndWith(STDERR_TAIL);
 		expect(error.message).toContain(STDERR_TAIL);
 		expect(child.peekStderr()).toBe(error.stderr);
+	});
+
+	it("does not retain drained stderr chunks while the process handle is alive", async () => {
+		const size = 32 * 1024 * 1024;
+		Bun.gc(true);
+		const before = heapStats().heapSize;
+		using child = spawn(stderrFixture(size));
+		const result = await child.wait();
+		Bun.gc(true);
+		const growth = heapStats().heapSize - before;
+
+		expect(result.stderr).toEndWith(STDERR_TAIL);
+		expect(growth).toBeLessThan(8 * 1024 * 1024);
 	});
 });

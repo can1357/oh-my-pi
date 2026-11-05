@@ -5,18 +5,11 @@ import type { Terminal, TerminalAppearance } from "../terminal";
 import { colorLuma } from "@oh-my-pi/pi-utils/color";
 import { getCustomThemesDir } from "@oh-my-pi/pi-utils/dirs";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { isTerminalBackgroundQueryTrusted } from "../terminal-multiplexer";
 import { setActiveSymbolTheme } from "./active-symbols";
 import { ansi256ToHex, resolveThemeColors, resolveVarRefs } from "./color";
-import {
-	type CreateThemeOptions,
-	createTheme,
-	getBuiltinThemes,
-	loadTheme,
-	loadThemeJson,
-	loadThemeJsonSync,
-	loadThemeSync,
-} from "./loader";
-import { isValidThemeBg, isValidThemeColor, type ThemeColor, type ThemeJson } from "./schema";
+import { type CreateThemeOptions, getBuiltinThemes, loadTheme, loadThemeJson, loadThemeSync } from "./loader";
+import { type ThemeColor, type ThemeJson } from "./schema";
 import type { SymbolPreset } from "./symbols";
 import type { Theme } from "./theme-class";
 
@@ -34,10 +27,12 @@ export {
 	createHighlightStream,
 	getEditorTheme,
 	getMarkdownTheme,
+	getMarkdownThemeWithLinkTargets,
 	getSelectListTheme,
 	getSettingsListTheme,
 	getSymbolTheme,
 	highlightCode,
+	isHighlightLanguage,
 	setMarkdownMermaidRendering,
 	warmHighlighter,
 } from "./tui-adapters";
@@ -48,16 +43,28 @@ var terminalReportedAppearance: "dark" | "light" | undefined;
 /** Appearance reported by the macOS fallback observer, or undefined if not yet available. */
 var macOSReportedAppearance: "dark" | "light" | undefined;
 
-function shouldUseMacOSAppearanceFallback(): boolean {
-	// Zellij currently breaks OSC 11 passthrough on macOS, so terminal-derived
-	// appearance cannot be trusted there. Fall back to host macOS appearance
-	// without letting it override valid terminal signals elsewhere.
-	return process.platform === "darwin" && !!Bun.env.ZELLIJ;
+const backgroundFallbackListeners = new Set<() => void>();
+
+/**
+ * Subscribe to native fallback appearance changes independently of theme changes.
+ * Consumers must re-check the effective background: COLORFGBG can override it.
+ */
+export function onTerminalBackgroundFallbackChange(callback: () => void): () => void {
+	backgroundFallbackListeners.add(callback);
+	return () => {
+		backgroundFallbackListeners.delete(callback);
+	};
 }
 
-function detectTerminalBackground(): "dark" | "light" {
+/**
+ * Detect appearance from trusted OSC 11 reports, then COLORFGBG, then native
+ * macOS appearance only on known-broken multiplexer background-query paths.
+ * Defaults to dark when none of those signals is available.
+ */
+export function detectTerminalBackground(): "dark" | "light" {
+	const backgroundQueryTrusted = isTerminalBackgroundQueryTrusted();
 	// Tier 1: terminal-reported appearance from OSC 11 luminance.
-	if (!shouldUseMacOSAppearanceFallback() && terminalReportedAppearance) {
+	if (backgroundQueryTrusted && terminalReportedAppearance) {
 		return terminalReportedAppearance;
 	}
 
@@ -72,7 +79,7 @@ function detectTerminalBackground(): "dark" | "light" {
 	}
 
 	// Tier 3: host macOS appearance for known-broken terminal paths only.
-	if (shouldUseMacOSAppearanceFallback()) {
+	if (!backgroundQueryTrusted) {
 		const macAppearance = macOSReportedAppearance ?? detectMacOSAppearance();
 		if (macAppearance) return macAppearance;
 	}
@@ -92,8 +99,6 @@ function getDefaultTheme(): string {
 /** Active theme; imports remain live across initialization, previews, and theme switches. */
 export var theme: Theme;
 var currentThemeName: string | undefined;
-/** Theme shown by `previewTheme` until the next non-preview assignment. */
-var previewThemeName: string | undefined;
 
 type ThemeBinding = (value: Theme) => void;
 var themeBindings: Set<ThemeBinding> | undefined;
@@ -108,10 +113,8 @@ export function bindTheme(binding: ThemeBinding): () => void {
 	};
 }
 
-/** `previewName` marks a theme-selector preview; any other assignment ends it. */
-function assignTheme(value: Theme, previewName?: string): void {
+function assignTheme(value: Theme): void {
 	theme = value;
-	previewThemeName = previewName;
 	setActiveSymbolTheme(value);
 	if (themeBindings) {
 		for (const binding of themeBindings) binding(value);
@@ -210,14 +213,14 @@ export async function initTheme(
 		assignTheme(await loadTheme(name, getCurrentThemeOptions()));
 		if (enableWatcher) {
 			await startThemeWatcher();
-			startSigwinchListener();
 		}
 	} catch (err) {
 		logger.debug("Theme loading failed, falling back to dark theme", { error: String(err) });
 		currentThemeName = "dark";
 		assignTheme(await loadTheme("dark", getCurrentThemeOptions()));
-		// Don't start watcher for fallback theme
+		// Skip file watching for the fallback theme, not appearance tracking.
 	}
+	if (enableWatcher) startSigwinchListener();
 }
 
 export async function setTheme(
@@ -235,6 +238,14 @@ export async function setTheme(
 		assignTheme(loadedTheme);
 		if (enableWatcher) {
 			await startThemeWatcher();
+			// startThemeWatcher() calls stopThemeWatcher(), which tears down
+			// the SIGWINCH handler and the macOS appearance observer that
+			// feeds the SIXEL background fallback. Restart it like initTheme()
+			// does so a runtime theme change does not silence fallback
+			// background repaints. Without this, `setTheme(name, true)` after
+			// startup would leave the SIXEL repaint path dead until the next
+			// process restart.
+			startSigwinchListener();
 		}
 		notifyThemeChange();
 		return { success: true };
@@ -267,8 +278,7 @@ export async function previewTheme(
 		if (requestId !== themeLoadRequestId) {
 			return { success: false, error: "Theme preview superseded by a newer request" };
 		}
-		// Previewing the active theme again (selector cancel) ends the preview.
-		assignTheme(loadedTheme, name === currentThemeName ? undefined : name);
+		assignTheme(loadedTheme);
 		notifyThemeChange(event);
 		return { success: true };
 	} catch (error) {
@@ -663,12 +673,26 @@ var macObserver: { stop(): void } | undefined;
 
 function startMacAppearanceObserver(): void {
 	stopMacAppearanceObserver();
-	if (!shouldUseMacOSAppearanceFallback()) return;
+	if (isTerminalBackgroundQueryTrusted()) return;
 	try {
 		macOSReportedAppearance = detectMacOSAppearance() ?? undefined;
 		macObserver = MacAppearanceObserver.start((err, appearance) => {
 			if (!err && (appearance === "dark" || appearance === "light")) {
+				const changed = appearance !== macOSReportedAppearance;
 				macOSReportedAppearance = appearance;
+				if (changed) {
+					// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may unsubscribe while reporting
+					for (const listener of [...backgroundFallbackListeners]) {
+						try {
+							listener();
+						} catch (err) {
+							// Debug-level: a listener failure must not break sibling
+							// listeners or the appearance observer. Visible only in
+							// local debug logs, never in normal runs.
+							logger.debug("macOS appearance fallback listener failed", { err });
+						}
+					}
+				}
 				reevaluateAutoThemeForAppearance("macOS fallback");
 			}
 		});
@@ -805,71 +829,6 @@ export async function getResolvedThemeColors(themeName?: string): Promise<Record
 		}
 	}
 	return cssColors;
-}
-
-/** One appearance variant of {@link NativeThemePalette}: token name → `#rrggbb`. */
-export type NativeThemeVariant = Record<string, string>;
-
-/** omp's resolved theme for a Tern Surface Protocol terminal (the `t` verb body minus `sf`). */
-export interface NativeThemePalette {
-	dark?: NativeThemeVariant;
-	light?: NativeThemeVariant;
-	name: { dark?: string; light?: string };
-}
-
-/**
- * Cheap identity of everything {@link getNativeThemePalette} depends on;
- * recompute the palette only when it changes.
- */
-export function getNativeThemePaletteKey(): string {
-	return `${themeEpoch}|${autoDetectedTheme}|${autoDarkTheme}|${autoLightTheme}|${currentThemeName}|${previewThemeName}|${currentColorBlindMode}`;
-}
-
-/** Every token of theme `name` as hex (terminal-default tokens omitted), plus its export colours. */
-function nativeThemeVariant(name: string): { light: boolean; colors: NativeThemeVariant } {
-	const themeJson = loadThemeJsonSync(name);
-	const built = createTheme(themeJson, getCurrentThemeOptions());
-	const raw = resolveThemeColors(themeJson.colors, themeJson.vars);
-	const colors: NativeThemeVariant = {};
-	for (const key in raw) {
-		// Terminal-default tokens stay unset; keys outside the schema are ignored like the theme does.
-		if (raw[key as keyof typeof raw] === "") continue;
-		if (isValidThemeColor(key)) colors[key] = built.getColorHex(key);
-		else if (isValidThemeBg(key)) colors[key] = built.getBgHex(key);
-	}
-	const exported = resolveThemeExportColors(themeJson);
-	for (const key of ["pageBg", "cardBg", "infoBg"] as const) {
-		const value = exported[key];
-		if (value) colors[key] = value;
-	}
-	return { light: isLightThemeJson(themeJson), colors };
-}
-
-/**
- * omp's theme for a native surface: with auto theme, the configured dark and
- * light themes; otherwise (or while the theme selector previews one) the
- * active theme under its own appearance only. Themes without a loadable
- * definition (in-memory instances) contribute nothing.
- */
-export function getNativeThemePalette(): NativeThemePalette {
-	const palette: NativeThemePalette = { name: {} };
-	const add = (name: string, as?: "dark" | "light"): void => {
-		try {
-			const variant = nativeThemeVariant(name);
-			const slot = as ?? (variant.light ? "light" : "dark");
-			palette[slot] = variant.colors;
-			palette.name[slot] = name;
-		} catch (error) {
-			logger.debug("Native theme palette: theme not loadable", { name, error: String(error) });
-		}
-	};
-	const single = previewThemeName ?? (autoDetectedTheme ? undefined : currentThemeName);
-	if (single !== undefined) add(single);
-	else {
-		add(autoDarkTheme, "dark");
-		add(autoLightTheme, "light");
-	}
-	return palette;
 }
 
 /**

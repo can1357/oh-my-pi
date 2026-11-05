@@ -1,11 +1,11 @@
-//! `jq` builtin: jq-compatible JSON processing via jaq 2.3.0.
+//! `jq` builtin: jq-compatible JSON processing via jaq 3.1.1.
 //!
-//! Ported from the jaq 2.3.0 CLI front end. The interpreter is provided by
+//! Ported from the jaq CLI front end. The interpreter is provided by
 //! `jaq-core`, `jaq-std`, and `jaq-json`.
 
 use core::fmt::{self, Display, Formatter};
 use std::{
-	cell::RefCell,
+	cell::{Cell, RefCell},
 	ffi::OsString,
 	io::{self, BufRead, Write},
 	path::{Path, PathBuf},
@@ -15,16 +15,18 @@ use std::{
 	},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use crate::openfile::OpenFile;
 use clap::{ArgMatches, Command, CommandFactory, FromArgMatches, Parser, error::ErrorKind};
-use jaq_core::{Ctx, RcIter, load};
 use jaq_json::Val;
 use pi_vfs::{BlockingFs, File, TempOptions};
 
-use crate::host::{Host, Utility, util};
+use crate::host::{Host, Utility};
 
 use cli::Cli;
-use filter::{FileReports, Filter};
+use filter::{FileReports, OnError};
+
+/// Version of the jaq CLI this front end follows; `--version` reports it.
+const JAQ_VERSION: &str = "3.1.1";
 
 mod cli {
 	//! Command-line argument parsing.
@@ -42,9 +44,8 @@ mod cli {
 		/// When the option `--slurp` is used additionally,
 		/// then the whole input is read into a single string.
 		pub raw_input:  bool,
-		/// When input is read from files,
-		/// jaq yields an array for each file, whereas
-		/// jq produces only a single array.
+		/// With several file operands, all of them are read into one array,
+		/// as in jq.
 		pub slurp:      bool,
 
 		// Output options
@@ -58,6 +59,8 @@ mod cli {
 		pub monochrome_output: bool,
 		pub tab:               bool,
 		pub indent:            usize,
+		/// Flush after each output, as with `jq --unbuffered`.
+		pub unbuffered:        bool,
 
 		// Compilation options
 		pub from_file:    bool,
@@ -133,6 +136,7 @@ mod cli {
 				"color-output" => self.short('C', args)?,
 				"monochrome-output" => self.short('M', args)?,
 				"tab" => self.tab = true,
+				"unbuffered" => self.unbuffered = true,
 				"indent" => self.indent = args.next().and_then(int).ok_or(Error::Int("--indent"))?,
 				"from-file" => self.short('f', args)?,
 				"library-path" => self.short('L', args)?,
@@ -264,142 +268,217 @@ mod cli {
 
 mod filter {
 	//! Filter parsing, compilation, and execution.
-	use core::{
-		cell::Cell,
-		fmt::{self, Display, Formatter},
-	};
+	use core::fmt::{self, Display, Formatter};
 	use std::{
-		io::{self, Write},
+		io,
 		path::{Path, PathBuf},
 	};
 
 	use jaq_core::{
-		Ctx, Error as CoreError, Exn, Native, RcIter, RunPtr, UpdatePtr, ValT, compile, load,
+		Ctx, DataT, Error as CoreError, Exn, RunPtr, ValT as _, Vars, box_iter::box_once, compile,
+		data, load, native,
+	};
+	use jaq_std::{
+		ValT as _,
+		input::{self, Inputs, RcIter},
 	};
 	use pi_vfs::BlockingFs;
 
-	use super::{Cli, Error, Val, read};
+	use super::{Error, Session, Val, output, read};
 
-	pub type Filter = jaq_core::Filter<Native<Val>>;
+	pub type Filter = jaq_core::Filter<Kind>;
 
-	thread_local! {
-		/// Exit code requested by `halt`/`halt_error` in the current invocation.
-		/// The overridden natives set this instead of `std::process::exit` and
-		/// abort the run with a sentinel error; the entry point checks it first.
-		static HALT: Cell<Option<i32>> = const { Cell::new(None) };
+	/// Data kind of the builtin's filters: jaq-json values, with natives
+	/// reaching the invocation through [`Data`].
+	pub struct Kind;
+
+	impl DataT for Kind {
+		type Data<'a> = &'a Data<'a>;
+		type V<'a> = Val;
 	}
 
-	/// Takes (and clears) the exit code requested by `halt`/`halt_error`.
-	pub fn take_halt() -> Option<i32> {
-		HALT.with(Cell::take)
+	/// What natives see while a filter runs.
+	pub struct Data<'a> {
+		lut:     &'a jaq_core::Lut<Kind>,
+		inputs:  Inputs<'a, Val>,
+		session: &'a Session,
 	}
 
-	/// Replacements for jaq-std natives that are unsound inside a long-lived host
-	/// process. Prepended before `jaq_std::funs()`: the compiler resolves native
-	/// calls by first match, so these shadow the crates.io implementations.
+	impl<'a> data::HasLut<'a, Kind> for &'a Data<'a> {
+		fn lut(&self) -> &'a jaq_core::Lut<Kind> {
+			self.lut
+		}
+	}
+
+	impl<'a> input::HasInputs<'a, Val> for &'a Data<'a> {
+		fn inputs(&self) -> Inputs<'a, Val> {
+			self.inputs
+		}
+	}
+
+	/// jq builtins that jaq lacks or defines differently, written in jq.
+	/// Appended to the prelude, so they shadow jaq's definitions.
+	const DEFS: &str = r#"
+def IN(s): any(s == .; .);
+def IN(src; s): any(src == s; .);
+def halt_error($exit_code): halt_error_empty($exit_code), halt($exit_code);
+def halt_error: halt_error(5);
+def tonumber: tonumber_;
+"#;
+
+	/// Natives that replace or extend jaq's. Listed first: the compiler binds a
+	/// call to the first native with a matching name and arity.
 	///
-	/// - `env`: reads the shell's exported environment, not the host process's.
-	/// - `halt`/`halt_error`: record the exit code and abort the run with a
-	///   sentinel error instead of `std::process::exit`, which would kill the
-	///   shell.
-	/// - `debug`/`stderr`: write to the ctx stderr stream directly instead of going
-	///   through the process-global `log` facade (whose single global logger may
-	///   belong to the host).
-	fn overrides() -> impl Iterator<Item = jaq_std::Filter<Native<Val>>> {
-		use jaq_core::box_iter::box_once;
-		use jaq_std::ValT as _;
+	/// - `env`, `debug_empty`, `stderr_empty`, `halt_error_empty`: read the
+	///   shell's exported environment and write to its stderr instead of the
+	///   host process's, as JSON (`debug`, `stderr` and `halt_error` are defined
+	///   on the latter three).
+	/// - `input_filename`, `input_line_number`: the position of the current
+	///   input, which jq's front end tracks and jaq's library cannot.
+	/// - `tonumber_`, behind `tonumber`: accepts exactly one number literal,
+	///   like jq; jaq's parses any JSON text, so `"1 2"` yields two numbers and
+	///   `"+1"` prints `+1`.
+	/// - `@csv`, `@tsv`: jaq 3 moved them out of its standard library.
+	fn natives() -> [native::Filter<RunPtr<Kind>>; 9] {
+		[
+			("env", native::v(0), |cv| box_once(Ok(cv.0.data().session.env.clone()))),
+			("debug_empty", native::v(0), |cv| {
+				effect(message(&cv.1).map(|json| {
+					let mut line = b"[\"DEBUG:\",".to_vec();
+					line.extend(json);
+					line.extend(b"]\n");
+					cv.0.data().session.write_stderr(&line);
+				}))
+			}),
+			("stderr_empty", native::v(0), |cv| {
+				let session = cv.0.data().session;
+				effect(match &cv.1 {
+					Val::TStr(s) | Val::BStr(s) => Ok(session.write_stderr(s)),
+					v => message(v).map(|json| session.write_stderr(&json)),
+				})
+			}),
+			// takes the exit code only to reject a bad one before printing
+			("halt_error_empty", native::v(1), |mut cv| {
+				let session = cv.0.data().session;
+				let code = cv.0.pop_var();
+				let code = match code.as_isize().map(i32::try_from) {
+					Some(Ok(_)) => Ok(()),
+					_ => Err(CoreError::typ(code, "integer")),
+				};
+				effect(code.and_then(|()| match &cv.1 {
+					Val::Null => Ok(()),
+					Val::TStr(s) | Val::BStr(s) => Ok(session.write_stderr(s)),
+					v => message(v).map(|mut json| {
+						json.push(b'\n');
+						session.write_stderr(&json);
+					}),
+				}))
+			}),
+			("input_filename", native::v(0), |cv| {
+				box_once(Ok(cv.0.data().session.input.filename.borrow().clone()))
+			}),
+			("input_line_number", native::v(0), |cv| {
+				box_once(Ok(Val::from(cv.0.data().session.input.lines.get())))
+			}),
+			("tonumber_", native::v(0), |cv| box_once(tonumber(cv.1).map_err(Exn::from))),
+			("@csv", native::v(0), |cv| box_once(table_row(&cv.1, true))),
+			("@tsv", native::v(0), |cv| box_once(table_row(&cv.1, false))),
+		]
+	}
 
-		fn halt_with<'a>(code: i32, sentinel: &'static str) -> jaq_core::ValXs<'a, Val> {
-			HALT.with(|h| h.set(Some(code)));
-			box_once(Err(Exn::from(CoreError::str(sentinel))))
+	/// No output, or the error that stopped a native's side effect.
+	fn effect<'a>(done: Result<(), CoreError<Val>>) -> jaq_core::ValXs<'a, Val> {
+		match done {
+			Ok(()) => Box::new(core::iter::empty()),
+			Err(e) => box_once(Err(Exn::from(e))),
 		}
+	}
 
-		fn debug_msg(v: &Val) {
-			// upstream format: env_logger renders `["DEBUG:", <args>]\n`
-			super::with_runtime(|runtime| {
-				let _ = writeln!(runtime.stderr, "[\"DEBUG:\", {v}]");
-			});
-		}
+	/// `v` as jq writes it in messages: compact JSON.
+	fn message(v: &Val) -> Result<Vec<u8>, CoreError<Val>> {
+		let mut buf = Vec::new();
+		output::Printer::compact().write(&mut buf, v).map_err(|e| match e {
+			output::WriteError::Key(key) => CoreError::typ(key, "object key"),
+			output::WriteError::Io(e) => CoreError::str(e),
+		})?;
+		Ok(buf)
+	}
 
-		fn stderr_msg(v: &Val) {
-			// like jq, print strings raw and everything else as JSON, no newline
-			if let Some(s) = v.as_str() {
-				super::with_runtime(|runtime| {
-					let _ = write!(runtime.stderr, "{s}");
-				});
-			} else {
-				super::with_runtime(|runtime| {
-					let _ = write!(runtime.stderr, "{v}");
-				});
+	/// jq's `tonumber`: numbers pass through; a string must hold exactly one
+	/// number literal, optionally signed with `+`.
+	fn tonumber(v: Val) -> Result<Val, CoreError<Val>> {
+		let num = match &v {
+			Val::Num(_) => return Ok(v),
+			Val::TStr(s) | Val::BStr(s) => {
+				let s: &[u8] = s;
+				let literal = match s.strip_prefix(b"+") {
+					Some(rest) if rest.first().is_some_and(u8::is_ascii_digit) => rest,
+					_ => s,
+				};
+				jaq_json::read::parse_single_num(literal)
+			},
+			_ => None,
+		};
+		num.map(Val::Num).ok_or_else(|| CoreError::typ(v, "number"))
+	}
+
+	/// jq's tabular formats accept only arrays of scalars; null is an empty field.
+	fn table_row<'a>(v: &Val, csv: bool) -> jaq_core::ValX<'a, Val> {
+		let format = if csv { "CSV" } else { "TSV" };
+		let fail = |message| CoreError::str(format_args!("cannot serialise {v} as {format}: {message}"));
+		let Val::Arr(row) = v else {
+			return Err(fail("expected an array").into());
+		};
+		let mut buf = Vec::new();
+		for (i, field) in row.iter().enumerate() {
+			if i != 0 {
+				buf.push(if csv { b',' } else { b'\t' });
+			}
+			match field {
+				Val::Null => {},
+				Val::Num(jaq_json::Num::Float(x)) if x.is_nan() => {},
+				Val::TStr(s) | Val::BStr(s) if csv => {
+					buf.push(b'"');
+					let mut start = 0;
+					for quote in memchr::memchr_iter(b'"', s) {
+						buf.extend_from_slice(&s[start..quote]);
+						buf.extend_from_slice(b"\"\"");
+						start = quote + 1;
+					}
+					buf.extend_from_slice(&s[start..]);
+					buf.push(b'"');
+				},
+				Val::TStr(s) | Val::BStr(s) => {
+					for byte in s.iter() {
+						match byte {
+							b'\t' => buf.extend_from_slice(b"\\t"),
+							b'\n' => buf.extend_from_slice(b"\\n"),
+							b'\r' => buf.extend_from_slice(b"\\r"),
+							b'\\' => buf.extend_from_slice(b"\\\\"),
+							byte => buf.push(*byte),
+						}
+					}
+				},
+				Val::Bool(_) | Val::Num(_) => {
+					output::Printer::compact().write(&mut buf, field).map_err(|e| match e {
+						output::WriteError::Key(key) => CoreError::typ(key, "object key"),
+						output::WriteError::Io(e) => CoreError::str(e),
+					})?;
+				},
+				Val::Arr(_) | Val::Obj(_) => return Err(fail("expected a scalar field").into()),
 			}
 		}
+		Ok(Val::utf8_str(buf))
+	}
 
-		let run_funs: [jaq_std::Filter<RunPtr<Val>>; 3] = [
-			("env", jaq_std::v(0), |_, _| {
-				let env = super::runtime_env().into_iter()
-					.map(|(k, v)| (k.into(), Val::from(v)));
-				box_once(Ok(Val::obj(env.collect())))
-			}),
-			("halt", jaq_std::v(0), |_, _| halt_with(0, "halt")),
-			("halt_error", jaq_std::v(1), |_, mut cv| {
-				match cv.0.pop_var().as_isize() {
-					Some(code) => {
-						// upstream prints the input to stdout: raw for strings
-						// (no trailing newline), JSON + newline otherwise
-						if let Some(s) = cv.1.as_str() {
-							super::with_runtime(|runtime| {
-								let _ = write!(runtime.stdout, "{s}");
-							});
-						} else {
-							super::with_runtime(|runtime| {
-								let _ = writeln!(runtime.stdout, "{}", cv.1);
-							});
-						}
-						halt_with(code as i32, "halt_error")
-					},
-					None => box_once(Err(Exn::from(CoreError::typ(cv.1, "integer")))),
-				}
-			}),
-		];
-
-		// `debug` and `stderr` are identity filters with an output effect; they
-		// need an update pointer so `debug |= f` keeps working.
-		let upd_funs: [jaq_std::Filter<(RunPtr<Val>, UpdatePtr<Val>)>; 2] = [
-			(
-				"debug",
-				jaq_std::v(0),
-				(
-					|_, cv| {
-						debug_msg(&cv.1);
-						box_once(Ok(cv.1))
-					},
-					|_, cv, f| {
-						debug_msg(&cv.1);
-						f(cv.1)
-					},
-				),
-			),
-			(
-				"stderr",
-				jaq_std::v(0),
-				(
-					|_, cv| {
-						stderr_msg(&cv.1);
-						box_once(Ok(cv.1))
-					},
-					|_, cv, f| {
-						stderr_msg(&cv.1);
-						f(cv.1)
-					},
-				),
-			),
-		];
-
-		let upd = |(name, arity, (run, update)): jaq_std::Filter<(RunPtr<Val>, UpdatePtr<Val>)>| {
-			(name, arity, Native::new(run).with_update(update))
-		};
-		let run_funs = run_funs.into_iter().map(jaq_std::run);
-		run_funs.chain(upd_funs.into_iter().map(upd))
+	/// A compiled filter and the values of the data files it imports.
+	#[derive(Default)]
+	pub struct Program {
+		pub vals:         Vec<Val>,
+		pub filter:       Filter,
+		/// Whether `input_line_number` appears in the program's source, the
+		/// only way it can be called; inputs count lines only then.
+		pub counts_lines: bool,
 	}
 
 	pub fn parse_compile(
@@ -408,7 +487,7 @@ mod filter {
 		code: &str,
 		vars: &[String],
 		paths: &[PathBuf],
-	) -> Result<(Vec<Val>, Filter), Vec<FileReports>> {
+	) -> Result<Program, Vec<FileReports>> {
 		use compile::Compiler;
 		use load::{Arena, File, Loader, import};
 
@@ -417,10 +496,16 @@ mod filter {
 
 		let vars: Vec<_> = vars.iter().map(|v| format!("${v}")).collect();
 		let arena = Arena::default();
-		let defs = jaq_std::defs().chain(jaq_json::defs());
+		let ours = load::parse(DEFS, |p| p.defs()).expect("builtin definitions parse");
+		let defs = jaq_core::defs()
+			.chain(jaq_std::defs())
+			.chain(jaq_json::defs())
+			.chain(ours);
+		let counts_lines = core::cell::Cell::new(code.contains("input_line_number"));
 		let read = |import: load::Import<&str, PathBuf>| -> Result<File<String, PathBuf>, String> {
 			let path = find_import(fs, &import, paths, "jq")?;
 			let code = fs.read_to_string(&path).map_err(|e| e.to_string())?;
+			counts_lines.update(|v| v || code.contains("input_line_number"));
 			Ok(File { code, path })
 		};
 		let loader = Loader::new(defs).with_read(read);
@@ -437,13 +522,20 @@ mod filter {
 		})
 		.map_err(load_errors)?;
 
-		// overrides first: native lookup is first-match-wins
-		let funs = overrides().chain(jaq_std::funs()).chain(jaq_json::funs());
+		let run = native::run::<Kind>;
+		let inputs = input::funs::<Kind>().into_vec().into_iter().map(run);
+		let funs = natives()
+			.into_iter()
+			.map(run)
+			.chain(jaq_core::funs())
+			.chain(jaq_std::funs())
+			.chain(jaq_json::funs())
+			.chain(inputs);
 		let compiler = Compiler::default()
 			.with_funs(funs)
 			.with_global_vars(vars.iter().map(|v| &**v));
 		let filter = compiler.compile(modules).map_err(compile_errors)?;
-		Ok((vals, filter))
+		Ok(Program { vals, filter, counts_lines: counts_lines.get() })
 	}
 
 	/// `jaq_core::load::Import::find`, resolving candidates through the
@@ -532,53 +624,93 @@ mod filter {
 	/// A plain string literal without interpolation or format.
 	fn term_str<'t, 's>(term: &'t load::parse::Term<&'s str>) -> Option<&'t &'s str> {
 		match term {
-			load::parse::Term::Str(None, parts) => match &parts[..] {
-				[load::lex::StrPart::Str(text)] => Some(text),
-				_ => None,
-			},
+			load::parse::Term::Str(None, parts) if let [load::lex::StrPart::Str(text)] = &parts[..] => Some(text),
 			_ => None,
 		}
 	}
 
-	/// Run a filter with given input values and run `f` for every value output.
+	/// What an error raised while filtering one input does to the rest.
+	#[derive(Clone, Copy)]
+	pub enum OnError {
+		/// Report it and go on with the next input, as jq does; the run fails
+		/// only when its last input did.
+		Continue,
+		/// Stop the run, so an in-place edit leaves its file untouched.
+		Stop,
+	}
+
+	/// Run a filter on every input (or once on `null`) and run `f` for every
+	/// value output; returns whether the last output was truthy.
 	///
 	/// This function cannot return an `Iterator` because it creates an `RcIter`.
-	/// This is most unfortunate. We should think about how to simplify this ...
 	pub(crate) fn run(
-		cli: &Cli,
+		null_input: bool,
 		filter: &Filter,
-		vars: Vec<Val>,
+		vars: &[Val],
+		session: &Session,
+		on_error: OnError,
 		iter: impl Iterator<Item = io::Result<Val>>,
-		mut f: impl FnMut(Val) -> io::Result<()>,
+		mut f: impl FnMut(Val) -> Result<(), Error>,
 	) -> Result<Option<bool>, Error> {
 		let mut last = None;
-		let iter = iter.map(|r| r.map_err(|e| e.to_string()));
+		// jaq's input stream carries errors as text; keep a read failure aside
+		// so it ends the run as an I/O error, as in jq, also when it reached the
+		// filter through `input` or a `try` there caught it
+		let read_error = core::cell::Cell::new(None);
+		let read_failed = || read_error.take().map(|e| Error::Io(None, e));
+		let iter = RcIter::new(iter.map(|r| {
+			r.map_err(|e| {
+				let message = e.to_string();
+				if e.kind() != io::ErrorKind::InvalidData {
+					read_error.set(Some(e));
+				}
+				message
+			})
+		}));
+		let null = RcIter::new(core::iter::once(Ok(Val::Null)));
 
-		let iter = Box::new(iter) as Box<dyn Iterator<Item = _>>;
-		let null = Box::new(core::iter::once(Ok(Val::Null))) as Box<dyn Iterator<Item = _>>;
+		let data = Data { lut: &filter.lut, inputs: &iter, session };
+		let ctx = Ctx::<Kind>::new(&data, Vars::new(vars.iter().cloned()));
+		let inputs: Inputs<'_, Val> = if null_input { &null } else { data.inputs };
 
-		let iter = RcIter::new(iter);
-		let null = RcIter::new(null);
-
-		let ctx = Ctx::new(vars, &iter);
-
-		for item in if cli.null_input { &null } else { &iter } {
+		// the last input's error is returned; earlier ones are reported as the
+		// next input arrives
+		let mut failed = None;
+		for item in inputs {
 			// host abort/timeout: stdin reads observe the cancel flag themselves,
 			// but file/slurped inputs and long-running filters do not
-			if super::runtime_cancelled() {
+			if session.cancelled() {
 				break;
 			}
-			let input = item.map_err(Error::Parse)?;
-			for output in filter.run((ctx.clone(), input)) {
-				if super::runtime_cancelled() {
+			if let Some(error) = failed.take() {
+				session.write_stderr(format!("{error}").as_bytes());
+				session.report_error();
+			}
+			let input = item.map_err(|e| read_failed().unwrap_or(Error::Parse(e)))?;
+			for output in filter.id.run((ctx.clone(), input)) {
+				if session.cancelled() {
 					return Ok(last);
 				}
-				let output = output.map_err(Error::Jaq)?;
-				last = Some(output.as_bool());
-				f(output)?;
+				// an error raised while printing, such as a non-string object key,
+				// fails the input like one raised by the filter
+				let printed = output.map_err(Error::from).and_then(|output| {
+					let truthy = output.as_bool();
+					f(output).map(|()| truthy)
+				});
+				match printed {
+					Ok(truthy) => last = Some(truthy),
+					Err(error) => match (read_failed(), on_error, error) {
+						(Some(read), ..) => return Err(read),
+						(None, OnError::Continue, error @ Error::Jaq(_)) => {
+							failed = Some(error);
+							break;
+						},
+						(None, _, error) => return Err(error),
+					},
+				}
 			}
 		}
-		Ok(last)
+		read_failed().or(failed).map_or(Ok(last), Err)
 	}
 
 	#[derive(Debug)]
@@ -587,13 +719,18 @@ mod filter {
 	impl Display for FileReports {
 		fn fmt(&self, f: &mut Formatter) -> fmt::Result {
 			let Self(file, reports) = self;
-			let idx = codesnake::LineIndex::new(&file.code);
-			reports.iter().try_for_each(|e| {
-				writeln!(f, "Error: {}", e.message)?;
-				let block = e.to_block(&idx);
-				writeln!(f, "{}[{}]", block.prologue(), file.path.display())?;
-				writeln!(f, "{}{}", block, block.epilogue())
-			})
+			for report in reports {
+				writeln!(f, "Error: {}", report.message)?;
+				for (range, text) in &report.labels {
+					let offset = range.start.min(file.code.len());
+					let prefix = &file.code.as_bytes()[..offset];
+					let line = memchr::memchr_iter(b'\n', prefix).count() + 1;
+					let start = memchr::memrchr(b'\n', prefix).map_or(0, |newline| newline + 1);
+					let column = String::from_utf8_lossy(&prefix[start..]).chars().count() + 1;
+					writeln!(f, "{}:{line}:{column}: {text}", file.path.display())?;
+				}
+			}
+			Ok(())
 		}
 	}
 
@@ -621,57 +758,35 @@ mod filter {
 		errs.collect()
 	}
 
-	type StringColors = Vec<(String, Option<Color>)>;
-
 	#[derive(Debug)]
 	struct Report {
 		message: String,
-		labels:  Vec<(core::ops::Range<usize>, StringColors, Color)>,
-	}
-
-	#[derive(Clone, Debug)]
-	enum Color {
-		Yellow,
-		Red,
-	}
-
-	impl Color {
-		fn apply(&self, d: impl Display) -> String {
-			use yansi::{Color, Paint};
-			let color = match self {
-				Self::Yellow => Color::Yellow,
-				Self::Red => Color::Red,
-			};
-			d.fg(color).to_string()
-		}
+		labels:  Vec<(core::ops::Range<usize>, String)>,
 	}
 
 	fn report_io(code: &str, (path, error): (&str, String)) -> Report {
 		let path_range = load::span(code, path);
 		Report {
 			message: format!("could not load file {}: {}", path, error),
-			labels:  [(path_range, [(error, None)].into(), Color::Red)].into(),
+			labels:  [(path_range, error)].into(),
 		}
 	}
 
 	fn report_lex(code: &str, (expected, found): load::lex::Error<&str>) -> Report {
 		// truncate found string to its first character
-		let found = &found[..found.char_indices().nth(1).map_or(found.len(), |(i, _)| i)];
+		let found = &found[..found.ceil_char_boundary(1)];
 
 		let found_range = load::span(code, found);
 		let found = match found {
-			"" => [("unexpected end of input".to_string(), None)].into(),
-			c => [("unexpected character ", None), (c, Some(Color::Red))]
-				.map(|(s, c)| (s.into(), c))
-				.into(),
+			"" => "unexpected end of input".to_string(),
+			c => format!("unexpected character {c}"),
 		};
-		let label = (found_range, found, Color::Red);
+		let label = (found_range, found);
 
 		let labels = match expected {
 			load::lex::Expect::Delim(open) => {
-				let text = [("unclosed delimiter ", None), (open, Some(Color::Yellow))]
-					.map(|(s, c)| (s.into(), c));
-				Vec::from([(load::span(code, open), text.into(), Color::Yellow), label])
+				let text = format!("unclosed delimiter {open}");
+				Vec::from([(load::span(code, open), text), label])
 			},
 			_ => Vec::from([label]),
 		};
@@ -687,11 +802,9 @@ mod filter {
 		} else {
 			"unexpected token"
 		};
-		let found = [(found.to_string(), None)].into();
-
 		Report {
 			message: format!("expected {}", expected.as_str()),
-			labels:  Vec::from([(found_range, found, Color::Red)]),
+			labels:  Vec::from([(found_range, found.to_string())]),
 		}
 	}
 
@@ -704,258 +817,515 @@ mod filter {
 			("foreach", Filter(arity)) => wnoa("2 or 3", arity),
 			(_, undefined) => format!("undefined {}", undefined.as_str()),
 		};
-		let found = [(message.clone(), None)].into();
-
-		Report { message, labels: Vec::from([(found_range, found, Color::Red)]) }
-	}
-
-	type CodeBlock = codesnake::Block<codesnake::CodeWidth<String>, String, Option<Color>>;
-
-	impl Report {
-		fn to_block(&self, idx: &codesnake::LineIndex) -> CodeBlock {
-			use codesnake::{Block, CodeWidth, Label};
-			let color_maybe = |(text, color): (_, Option<Color>)| match color {
-				None => text,
-				Some(color) => color.apply(text).to_string(),
-			};
-			let labels = self.labels.iter().cloned().map(|(range, text, color)| {
-				let text = text.into_iter().map(color_maybe).collect::<Vec<_>>();
-				Label::new(range)
-					.with_text(text.join(""))
-					.with_style(Some(color))
-			});
-			Block::new(idx, labels)
-				.unwrap()
-				.map_code(|c| {
-					let c = c.replace('\t', "    ");
-					let w = xutf::width_str(&c);
-					CodeWidth::new(c, core::cmp::max(w, 1))
-				})
-				.with_paint(|f, color, value| match color {
-					Some(color) => write!(f, "{}", color.apply(value)),
-					None => write!(f, "{value}"),
-				})
-		}
+		let labels = Vec::from([(found_range, message.clone())]);
+		Report { message, labels }
 	}
 
 }
 
 mod read {
 	use std::{
+		cell::{Cell, RefCell},
 		io::{self, BufRead, Read},
 		path::Path,
+		rc::Rc,
 	};
 
+	use jaq_json::read::{parse_many, read_many};
 	use pi_vfs::BlockingFs;
+	use self_cell::self_cell;
 
 	use super::{Cli, Val};
 
-	/// Load a file through the injected filesystem. Native files are memory
-	/// mapped when possible; everything else is read through the handle.
-	pub fn load_file(
-		fs: &BlockingFs,
-		path: &Path,
-	) -> io::Result<Box<dyn core::ops::Deref<Target = [u8]>>> {
-		let mut file = fs.open(path)?;
-		if let Some(native) = file.native()
-			// SAFETY: the mapping is read-only and dropped before any in-place
-			// replacement of the file; concurrent external truncation is the
-			// same hazard upstream jaq accepts.
-			&& let Ok(mmap) = unsafe { memmap2::Mmap::map(native) }
-		{
-			return Ok(Box::new(mmap));
-		}
+	/// Read a whole file through the injected filesystem into owned bytes.
+	///
+	/// Never memory-mapped: jq runs inside the host process, where a concurrent
+	/// truncation of a mapped file would SIGBUS the whole host.
+	pub fn load_file(fs: &BlockingFs, path: &Path) -> io::Result<Vec<u8>> {
 		let mut bytes = Vec::new();
-		file.read_to_end(&mut bytes)?;
-		Ok(Box::new(bytes))
+		fs.open(path)?.read_to_end(&mut bytes)?;
+		Ok(bytes)
 	}
 
 	pub fn invalid_data(e: impl std::error::Error + Send + Sync + 'static) -> std::io::Error {
 		io::Error::new(io::ErrorKind::InvalidData, e)
 	}
 
-	fn json_slice(slice: &[u8]) -> impl Iterator<Item = io::Result<Val>> + '_ {
-		let mut lexer = hifijson::SliceLexer::new(slice);
-		core::iter::from_fn(move || {
-			use hifijson::token::Lex;
-			Some(Val::parse(lexer.ws_token()?, &mut lexer).map_err(invalid_data))
-		})
-	}
-
-	fn json_read<'a>(read: impl BufRead + 'a) -> impl Iterator<Item = io::Result<Val>> + 'a {
-		let mut lexer = hifijson::IterLexer::new(read.bytes());
-		core::iter::from_fn(move || {
-			use hifijson::token::Lex;
-			let v = Val::parse(lexer.ws_token()?, &mut lexer);
-			Some(v.map_err(|e| core::mem::take(&mut lexer.error).unwrap_or_else(|| invalid_data(e))))
-		})
-	}
-
 	pub fn json_array(fs: &BlockingFs, path: &Path) -> io::Result<Val> {
-		json_slice(&load_file(fs, path)?).collect()
+		parse_many(json_bytes(&load_file(fs, path)?)).map(|r| r.map_err(invalid_data)).collect()
 	}
 
-	pub fn buffered<'a, R>(cli: &Cli, read: R) -> Box<dyn Iterator<Item = io::Result<Val>> + 'a>
-	where
-		R: BufRead + 'a,
-	{
-		if cli.raw_input {
-			Box::new(raw_input(cli.slurp, read).map(|r| r.map(Val::from)))
-		} else {
-			Box::new(collect_if(cli.slurp, json_read(read)))
+	/// Ignore one UTF-8 BOM at the start of each JSON input, never within a value.
+	fn json_bytes(bytes: &[u8]) -> &[u8] {
+		bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes)
+	}
+
+	/// Peek at most three bytes, including across short buffers, without copying the input.
+	fn json_reader(mut read: impl BufRead) -> io::Result<impl BufRead> {
+		let mut prefix = [0; 3];
+		let mut len = 0;
+		while len < prefix.len() {
+			let available = read.fill_buf()?;
+			let n = available.len().min(prefix.len() - len);
+			if n == 0 {
+				break;
+			}
+			prefix[len..len + n].copy_from_slice(&available[..n]);
+			read.consume(n);
+			len += n;
+			if prefix[..len] != b"\xef\xbb\xbf"[..len] {
+				break;
+			}
+		}
+		let keep = if prefix == *b"\xef\xbb\xbf" { 0 } else { len };
+		Ok(io::Cursor::new(prefix).take(keep as u64).chain(read))
+	}
+
+	pub type Vals<'a> = Box<dyn Iterator<Item = io::Result<Val>> + 'a>;
+
+	/// The contents of a file operand, as [`load_file`] returns them.
+	pub type Loaded = Vec<u8>;
+
+	/// Where the current input came from, for `input_filename` and
+	/// `input_line_number`. Updated by the input stream as it reads.
+	#[derive(Default)]
+	pub struct Position {
+		/// The file operand as given, `"<stdin>"`, or `null` before any input.
+		pub filename: RefCell<Val>,
+		/// Newline-terminated lines of that input read so far.
+		pub lines:    Rc<Cell<usize>>,
+	}
+
+	impl Position {
+		fn enter(&self, name: Val) {
+			self.filename.replace(name);
+			self.lines.set(0);
 		}
 	}
 
-	pub fn slice<'a>(cli: &Cli, slice: &'a [u8]) -> Box<dyn Iterator<Item = io::Result<Val>> + 'a> {
-		if cli.raw_input {
-			let read = io::BufReader::new(slice);
-			Box::new(raw_input(cli.slurp, read).map(|r| r.map(Val::from)))
-		} else {
-			Box::new(collect_if(cli.slurp, json_slice(slice)))
+	/// Input values read from stdin, which is only read once a value is asked
+	/// for. `count_lines` makes JSON input exact for `input_line_number`, at the
+	/// cost of copying every line first.
+	pub fn stdin<'a>(
+		cli: &Cli,
+		mut read: impl BufRead + 'a,
+		pos: &'a Position,
+		count_lines: bool,
+	) -> Vals<'a> {
+		let enter = move || pos.enter(Val::from(String::from("<stdin>")));
+		if cli.raw_input && cli.slurp {
+			return Box::new(core::iter::once_with(move || {
+				enter();
+				let mut buf = Vec::new();
+				read.read_to_end(&mut buf)?;
+				pos.lines.set(memchr::memchr_iter(b'\n', &buf).count());
+				Ok(Val::utf8_str(buf))
+			}));
+		}
+		let (raw, lines) = (cli.raw_input, Rc::clone(&pos.lines));
+		let stream = core::iter::once_with(move || {
+			enter();
+			values(raw, read, lines, count_lines)
+		});
+		collect_if(cli.slurp, stream.flatten())
+	}
+
+	/// Input values read from the file operands, which jq treats as one stream:
+	/// `input` reads across files and `-s` slurps all of them into one value.
+	/// `files` yields each operand when the stream reaches it, and its contents
+	/// are dropped once its values are read.
+	pub fn files<'a>(
+		cli: &Cli,
+		files: impl Iterator<Item = (Val, Loaded)> + 'a,
+		pos: &'a Position,
+		count_lines: bool,
+	) -> Vals<'a> {
+		if cli.raw_input && cli.slurp {
+			return Box::new(core::iter::once_with(move || {
+				let mut all = Vec::new();
+				for (name, bytes) in files {
+					pos.enter(name);
+					all.extend_from_slice(&bytes);
+					pos.lines.set(memchr::memchr_iter(b'\n', &bytes).count());
+				}
+				Ok(Val::utf8_str(all))
+			}));
+		}
+		let raw = cli.raw_input;
+		let stream = files.flat_map(move |(name, bytes)| {
+			pos.enter(name);
+			let lines = Rc::clone(&pos.lines);
+			FileVals::new(bytes, |bytes| {
+				if raw || count_lines {
+					values(raw, &bytes[..], lines, count_lines)
+				} else {
+					Box::new(parse_many(json_bytes(bytes)).map(|r| r.map_err(invalid_data)))
+				}
+			})
+		});
+		collect_if(cli.slurp, stream)
+	}
+
+	self_cell!(
+		/// A file operand's contents and the values being read from them.
+		struct FileVals {
+			owner: Loaded,
+
+			#[covariant]
+			dependent: Vals,
+		}
+	);
+
+	impl Iterator for FileVals {
+		type Item = io::Result<Val>;
+
+		fn next(&mut self) -> Option<Self::Item> {
+			self.with_dependent_mut(|_, values| values.next())
 		}
 	}
 
-	fn raw_input<'a, R>(slurp: bool, mut read: R) -> impl Iterator<Item = io::Result<String>> + 'a
-	where
-		R: BufRead + 'a,
-	{
-		if slurp {
-			let mut buf = String::new();
-			let s = read.read_to_string(&mut buf).map(|_| buf);
-			Box::new(std::iter::once(s))
+	/// Values of one input: JSON, or its lines when `raw` (`-R`).
+	fn values<'a>(
+		raw: bool,
+		read: impl BufRead + 'a,
+		lines: Rc<Cell<usize>>,
+		count_lines: bool,
+	) -> Vals<'a> {
+		if raw {
+			Box::new(RawLines { read, lines })
 		} else {
-			Box::new(read.lines()) as Box<dyn Iterator<Item = _>>
+			match json_reader(read) {
+				Ok(read) if count_lines => {
+					Box::new(read_many(LineFeed { read, line: Vec::new(), pos: 0, lines }))
+				},
+				Ok(read) => Box::new(read_many(read)),
+				Err(error) => Box::new(core::iter::once(Err(error))),
+			}
 		}
 	}
 
+	/// Lines of raw input, without their line terminator.
+	struct RawLines<R> {
+		read:  R,
+		lines: Rc<Cell<usize>>,
+	}
+
+	impl<R: BufRead> Iterator for RawLines<R> {
+		type Item = io::Result<Val>;
+
+		fn next(&mut self) -> Option<Self::Item> {
+			let mut line = Vec::new();
+			match self.read.read_until(b'\n', &mut line) {
+				Ok(0) => None,
+				Ok(_) => {
+					if line.pop_if(|byte| *byte == b'\n').is_some() {
+						line.pop_if(|byte| *byte == b'\r');
+						self.lines.update(|v| v + 1);
+					}
+					Some(Ok(Val::utf8_str(line)))
+				},
+				Err(e) => Some(Err(e)),
+			}
+		}
+	}
+
+	/// Feeds the JSON parser one whole line at a time, counting each line as it
+	/// is read. jq reads its input by lines, so `input_line_number` includes the
+	/// newline ending the line a value ends on, before the parser reaches it.
+	struct LineFeed<R> {
+		read:  R,
+		line:  Vec<u8>,
+		pos:   usize,
+		lines: Rc<Cell<usize>>,
+	}
+
+	impl<R: BufRead> Read for LineFeed<R> {
+		fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+			let available = self.fill_buf()?;
+			let n = available.len().min(buf.len());
+			buf[..n].copy_from_slice(&available[..n]);
+			self.consume(n);
+			Ok(n)
+		}
+	}
+
+	impl<R: BufRead> BufRead for LineFeed<R> {
+		fn fill_buf(&mut self) -> io::Result<&[u8]> {
+			if self.pos == self.line.len() {
+				self.line.clear();
+				self.pos = 0;
+				self.read.read_until(b'\n', &mut self.line)?;
+				if self.line.last() == Some(&b'\n') {
+					self.lines.update(|v| v + 1);
+				}
+			}
+			Ok(&self.line[self.pos..])
+		}
+
+		fn consume(&mut self, n: usize) {
+			self.pos += n;
+		}
+	}
+
+	/// `iter`, or with `slurp` one array of all its values, collected when it
+	/// is first asked for.
 	fn collect_if<'a, T: FromIterator<T> + 'a, E: 'a>(
 		slurp: bool,
 		iter: impl Iterator<Item = Result<T, E>> + 'a,
 	) -> Box<dyn Iterator<Item = Result<T, E>> + 'a> {
 		if slurp {
-			Box::new(core::iter::once(iter.collect()))
+			Box::new(core::iter::once_with(move || iter.collect()))
 		} else {
 			Box::new(iter)
 		}
 	}
 
+	#[cfg(test)]
+	mod tests {
+		use std::io::{BufReader, Cursor, Read};
+
+		#[test]
+		fn json_bom_can_span_input_buffers_without_losing_other_prefixes() {
+			for input in [
+				&b"\xef\xbb\xbf{\"ok\":true}"[..],
+				&b"123"[..],
+				&b"\xef"[..],
+				&b"\xef\xbb"[..],
+				&b"\xef\xbb\xbf\xef\xbb\xbf1"[..],
+			] {
+				let mut read = super::json_reader(BufReader::with_capacity(1, Cursor::new(input))).unwrap();
+				let mut output = Vec::new();
+				read.read_to_end(&mut output).unwrap();
+				assert_eq!(output, super::json_bytes(input));
+			}
+		}
+	}
 }
 
 mod output {
-	use core::fmt::{self, Display, Formatter};
 	use std::io::{self, Write};
 
-	use super::{Cli, Val};
+	use jaq_json::{Num, Val};
 
-	struct FormatterFn<F>(F);
+	use super::Cli;
 
-	impl<F: Fn(&mut Formatter) -> fmt::Result> Display for FormatterFn<F> {
-		fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-			self.0(f)
+	/// Why a value could not be written.
+	pub enum WriteError {
+		Io(io::Error),
+		/// An object key that is not a string, which JSON cannot express.
+		Key(Val),
+	}
+
+	impl From<io::Error> for WriteError {
+		fn from(e: io::Error) -> Self {
+			Self::Io(e)
 		}
 	}
 
-	struct PpOpts {
-		compact:   bool,
-		indent:    String,
+	const BOLD: &str = "1";
+	const GREEN: &str = "32";
+
+	/// Writes values as JSON the way jq does, so output stays parseable where
+	/// jaq's own printer extends JSON: invalid UTF-8 in strings is replaced,
+	/// NaN prints as `null`, infinities as the largest finite doubles, number
+	/// literals JSON cannot spell are rewritten, and a non-string object key is
+	/// an error.
+	pub struct Printer {
+		raw:       bool,
+		join:      bool,
+		flush:     bool,
+		indent:    Option<String>,
 		sort_keys: bool,
+		color:     bool,
 	}
 
-	impl PpOpts {
-		fn indent(&self, f: &mut Formatter, level: usize) -> fmt::Result {
-			if !self.compact {
-				write!(f, "{}", self.indent.repeat(level))?;
-			}
-			Ok(())
-		}
-
-		fn newline(&self, f: &mut Formatter) -> fmt::Result {
-			if !self.compact {
-				writeln!(f)?;
-			}
-			Ok(())
-		}
-	}
-
-	fn fmt_seq<T, I, F>(fmt: &mut Formatter, opts: &PpOpts, level: usize, xs: I, f: F) -> fmt::Result
-	where
-		I: IntoIterator<Item = T>,
-		F: Fn(&mut Formatter, T) -> fmt::Result,
-	{
-		opts.newline(fmt)?;
-		let mut iter = xs.into_iter().peekable();
-		while let Some(x) = iter.next() {
-			opts.indent(fmt, level + 1)?;
-			f(fmt, x)?;
-			if iter.peek().is_some() {
-				write!(fmt, ",")?;
-			}
-			opts.newline(fmt)?;
-		}
-		opts.indent(fmt, level)
-	}
-
-	fn fmt_val(f: &mut Formatter, opts: &PpOpts, level: usize, v: &Val) -> fmt::Result {
-		use yansi::Paint;
-		match v {
-			Val::Null | Val::Bool(_) | Val::Int(_) | Val::Float(_) | Val::Num(_) => v.fmt(f),
-			Val::Str(_) => write!(f, "{}", v.green()),
-			Val::Arr(a) => {
-				'['.bold().fmt(f)?;
-				if !a.is_empty() {
-					fmt_seq(f, opts, level, &**a, |f, x| fmt_val(f, opts, level + 1, x))?;
-				}
-				']'.bold().fmt(f)
-			},
-			Val::Obj(o) => {
-				'{'.bold().fmt(f)?;
-				let kv = |f: &mut Formatter, (k, val): (&std::rc::Rc<String>, &Val)| {
-					write!(f, "{}:", Val::Str(k.clone()).bold())?;
-					if !opts.compact {
-						write!(f, " ")?;
-					}
-					fmt_val(f, opts, level + 1, val)
-				};
-				if !o.is_empty() {
-					if opts.sort_keys {
-						let mut o: Vec<_> = o.iter().collect();
-						o.sort_by_key(|(k, _v)| *k);
-						fmt_seq(f, opts, level, o, kv)
-					} else {
-						fmt_seq(f, opts, level, &**o, kv)
-					}?
-				}
-				'}'.bold().fmt(f)
-			},
-		}
-	}
-
-	pub fn print(w: &mut (impl Write + ?Sized), cli: &Cli, val: &Val) -> io::Result<()> {
-		let f = |f: &mut Formatter| {
-			let opts = PpOpts {
-				compact:   cli.compact_output,
-				indent:    if cli.tab {
-					String::from("\t")
-				} else {
-					" ".repeat(cli.indent)
-				},
+	impl Printer {
+		pub fn new(cli: &Cli, color: bool) -> Self {
+			let indent = (!cli.compact_output).then(|| {
+				if cli.tab { String::from("\t") } else { " ".repeat(cli.indent) }
+			});
+			Self {
+				raw: cli.raw_output || cli.join_output,
+				join: cli.join_output,
+				// when running `jaq -jn '"prompt> " | (., input)'`, flushing is
+				// necessary to make "prompt> " appear first
+				flush: cli.join_output || cli.unbuffered,
+				indent,
 				sort_keys: cli.sort_keys,
-			};
-			fmt_val(f, &opts, 0, val)
-		};
-
-		match val {
-			Val::Str(s) if cli.raw_output || cli.join_output => write!(w, "{s}")?,
-			_ => write!(w, "{}", FormatterFn(f))?,
-		};
-
-		if cli.join_output {
-			// when running `jaq -jn '"prompt> " | (., input)'`,
-			// this flush is necessary to make "prompt> " appear first
-			w.flush()
-		} else {
-			writeln!(w)
+				color,
+			}
 		}
+
+		/// Compact and uncolored, for messages.
+		pub const fn compact() -> Self {
+			Self { raw: false, join: false, flush: false, indent: None, sort_keys: false, color: false }
+		}
+
+		/// Writes one output value and its separator with a single write,
+		/// rendering them into `buf` first; a value that cannot be rendered
+		/// writes nothing.
+		pub fn print(&self, buf: &mut Vec<u8>, w: &mut dyn Write, v: &Val) -> Result<(), WriteError> {
+			buf.clear();
+			match v {
+				Val::TStr(s) | Val::BStr(s) if self.raw => buf.extend_from_slice(s),
+				_ => self.write(buf, v)?,
+			}
+			if !self.join {
+				buf.push(b'\n');
+			}
+			w.write_all(buf)?;
+			if self.flush {
+				w.flush()?;
+			}
+			Ok(())
+		}
+
+		/// Writes `v` as JSON, failing on an object key that JSON cannot
+		/// express.
+		pub fn write<W: Write + ?Sized>(&self, w: &mut W, v: &Val) -> Result<(), WriteError> {
+			self.write_at(w, 0, v)
+		}
+
+		fn write_at<W: Write + ?Sized>(
+			&self,
+			w: &mut W,
+			level: usize,
+			v: &Val,
+		) -> Result<(), WriteError> {
+			match v {
+				Val::Null => w.write_all(b"null")?,
+				Val::Bool(b) => write!(w, "{b}")?,
+				Val::Num(Num::Float(x)) if x.is_nan() => w.write_all(b"null")?,
+				Val::Num(Num::Float(x)) if x.is_infinite() => {
+					let max = if x.is_sign_positive() { "" } else { "-" };
+					write!(w, "{max}1.7976931348623157e+308")?;
+				},
+				// jaq keeps a parsed literal as written, and its parser accepts
+				// spellings JSON does not (`+1.5`, `01.5`); drop the extra sign
+				// and zeros, keeping every digit of the value
+				Val::Num(Num::Dec(d)) if !is_json_number(d) => match respell(d) {
+					(sign, digits) if is_json_number(digits) => write!(w, "{sign}{digits}")?,
+					_ => self.write_at(w, level, &Val::Num(Num::from_dec_str(d)))?,
+				},
+				Val::Num(n) => write!(w, "{n}")?,
+				Val::TStr(s) | Val::BStr(s) => self.styled(w, GREEN, |w| write_str(w, s))?,
+				Val::Arr(a) => {
+					self.styled(w, BOLD, |w| Ok(w.write_all(b"[")?))?;
+					if !a.is_empty() {
+						self.seq(w, level, a.iter(), |w, x| self.write_at(w, level + 1, x))?;
+					}
+					self.styled(w, BOLD, |w| Ok(w.write_all(b"]")?))?;
+				},
+				Val::Obj(o) => {
+					self.styled(w, BOLD, |w| Ok(w.write_all(b"{")?))?;
+					let entry = |w: &mut W, (k, v): (&Val, &Val)| {
+						match k {
+							Val::TStr(k) | Val::BStr(k) => self.styled(w, BOLD, |w| write_str(w, k))?,
+							k => return Err(WriteError::Key(k.clone())),
+						}
+						w.write_all(if self.indent.is_some() { b": " } else { b":" })?;
+						self.write_at(w, level + 1, v)
+					};
+					if !o.is_empty() {
+						if self.sort_keys {
+							let mut o: Vec<_> = o.iter().collect();
+							o.sort_by_key(|(k, _v)| *k);
+							self.seq(w, level, o, entry)?;
+						} else {
+							self.seq(w, level, o.iter(), entry)?;
+						}
+					}
+					self.styled(w, BOLD, |w| Ok(w.write_all(b"}")?))?;
+				},
+			}
+			Ok(())
+		}
+
+		fn seq<W: Write + ?Sized, T>(
+			&self,
+			w: &mut W,
+			level: usize,
+			xs: impl IntoIterator<Item = T>,
+			mut f: impl FnMut(&mut W, T) -> Result<(), WriteError>,
+		) -> Result<(), WriteError> {
+			let newline = |w: &mut W, level: usize| -> io::Result<()> {
+				if let Some(indent) = &self.indent {
+					w.write_all(b"\n")?;
+					(0..level).try_for_each(|_| w.write_all(indent.as_bytes()))?;
+				}
+				Ok(())
+			};
+			for (i, x) in xs.into_iter().enumerate() {
+				if i > 0 {
+					w.write_all(b",")?;
+				}
+				newline(w, level + 1)?;
+				f(w, x)?;
+			}
+			Ok(newline(w, level)?)
+		}
+
+		fn styled<W: Write + ?Sized>(
+			&self,
+			w: &mut W,
+			style: &str,
+			f: impl FnOnce(&mut W) -> Result<(), WriteError>,
+		) -> Result<(), WriteError> {
+			if !self.color {
+				return f(w);
+			}
+			write!(w, "\x1b[{style}m")?;
+			f(w)?;
+			Ok(w.write_all(b"\x1b[0m")?)
+		}
+	}
+
+	/// Whether `s` spells a number the way JSON's grammar does.
+	fn is_json_number(s: &str) -> bool {
+		let digits = |s: &[u8]| s.iter().take_while(|c| c.is_ascii_digit()).count();
+		let s = s.strip_prefix('-').unwrap_or(s).as_bytes();
+		let int = digits(s);
+		if int == 0 || (int > 1 && s[0] == b'0') {
+			return false;
+		}
+		let mut rest = &s[int..];
+		if let Some(frac) = rest.strip_prefix(b".") {
+			let n = digits(frac);
+			if n == 0 {
+				return false;
+			}
+			rest = &frac[n..];
+		}
+		match rest {
+			[] => true,
+			[b'e' | b'E', exp @ ..] => {
+				let exp = exp.strip_prefix(b"+").or_else(|| exp.strip_prefix(b"-")).unwrap_or(exp);
+				!exp.is_empty() && digits(exp) == exp.len()
+			},
+			_ => false,
+		}
+	}
+
+	/// The sign and digits of the number literal `s`, without a leading `+` or
+	/// leading zeros.
+	fn respell(s: &str) -> (&str, &str) {
+		let (sign, s) = match s.strip_prefix('-') {
+			Some(rest) => ("-", rest),
+			None => ("", s.strip_prefix('+').unwrap_or(s)),
+		};
+		let digits = s.trim_start_matches('0');
+		// keep one zero before a fraction, an exponent, or the end
+		if digits.starts_with(|c: char| c.is_ascii_digit()) {
+			(sign, digits)
+		} else {
+			(sign, &s[s.len().saturating_sub(digits.len() + 1)..])
+		}
+	}
+
+	/// A JSON string with the bytes of `s`, invalid UTF-8 replaced like jq.
+	fn write_str<W: Write + ?Sized>(w: &mut W, s: &[u8]) -> Result<(), WriteError> {
+		jaq_json::write_utf8!(w, s, |part| write!(w, "{}", jaq_json::bstr(part)))?;
+		Ok(())
 	}
 
 	/// Runs `f` with standard output.
@@ -993,7 +1363,7 @@ impl FromArgMatches for Jq {
 
 fn command(name: &'static str) -> Command {
 	Command::new(name)
-		.version("2.3.0")
+		.version(JAQ_VERSION)
 		.about(include_str!("jq-help.txt"))
 		.help_template("{about}\n")
 }
@@ -1036,25 +1406,15 @@ impl Utility for Jq {
 	const USAGE_ERROR: u8 = 2;
 
 	fn run(self, host: &mut Host) -> i32 {
-		color::init();
-		color::set(false);
-		filter::take_halt();
-
 		let mut cli = self.cli;
 		resolve_cli_paths(&mut cli, host);
 		let stdout_is_terminal = host.stdout.is_terminal();
-		let _runtime = RuntimeGuard::install(host);
-		color::set(!cli.in_place && cli.color_if(|| stdout_is_terminal));
+		let color = !cli.in_place && cli.color_if(|| stdout_is_terminal);
 
 		let mut stdout = host.stdout_writer();
-		let result = real_main(&cli, host, &mut stdout);
-		if let Some(code) = filter::take_halt() {
-			return code;
-		}
-		match result {
+		match real_main(&cli, host, &mut stdout, color) {
 			Ok(exit) => exit,
 			Err(error) => {
-				color::set(cli.color_if(|| stdout_is_terminal));
 				let _ = write!(host.stderr, "{error}");
 				error.report()
 			},
@@ -1069,9 +1429,6 @@ fn resolve_cli_paths(cli: &mut Cli, host: &Host) {
 	if let Some(cli::Filter::FromFile(path)) = &mut cli.filter {
 		*path = host.resolve(&*path);
 	}
-	for path in &mut cli.files {
-		*path = host.resolve(&*path);
-	}
 	for path in cli.rawfile.iter_mut().chain(&mut cli.slurpfile).map(|(_, path)| path) {
 		*path = host.resolve(&*path).into_os_string();
 	}
@@ -1082,86 +1439,61 @@ fn resolve_cli_paths(cli: &mut Cli, host: &Host) {
 	}
 }
 
-struct Runtime {
-	stdout: OpenFile,
-	stderr: OpenFile,
-	env: Vec<(String, String)>,
-	cancel: Arc<AtomicBool>,
+/// Per-invocation state that natives read: the shell's exported environment
+/// and stderr, its cancellation flag, and the position of the current input.
+struct Session {
+	env:            Val,
+	stderr:         RefCell<OpenFile>,
+	cancel:         Arc<AtomicBool>,
+	reported_error: Option<Arc<AtomicBool>>,
+	input:          read::Position,
 }
 
-thread_local! {
-	static RUNTIME: RefCell<Option<Runtime>> = const { RefCell::new(None) };
-}
+impl Session {
+	fn new(host: &Host) -> Self {
+		let env = host
+			.env()
+			.map(|(key, value)| (Val::from(key.to_owned()), Val::from(value.to_owned())));
+		Self {
+			env:            Val::obj(env.collect()),
+			stderr:         RefCell::new(host.stderr_clone()),
+			cancel:         host.cancel_flag(),
+			reported_error: host.reported_error_flag(),
+			input:          read::Position::default(),
+		}
+	}
 
-struct RuntimeGuard;
+	fn cancelled(&self) -> bool {
+		self.cancel.load(Ordering::Relaxed)
+	}
 
-impl RuntimeGuard {
-	fn install(host: &Host) -> Self {
-		let runtime = Runtime {
-			stdout: host.stdout_clone(),
-			stderr: host.stderr_clone(),
-			env: host.env().map(|(key, value)| (key.to_owned(), value.to_owned())).collect(),
-			cancel: host.cancel_flag(),
-		};
-		RUNTIME.with(|slot| {
-			debug_assert!(slot.borrow().is_none());
-			*slot.borrow_mut() = Some(runtime);
-		});
-		Self
+	fn write_stderr(&self, bytes: &[u8]) {
+		let _ = self.stderr.borrow_mut().write_all(bytes);
+	}
+
+	/// Tells the shell an input's error was reported and the run went on, so
+	/// its exit status will not show it.
+	fn report_error(&self) {
+		if let Some(flag) = &self.reported_error {
+			flag.store(true, Ordering::Relaxed);
+		}
 	}
 }
 
-impl Drop for RuntimeGuard {
-	fn drop(&mut self) {
-		RUNTIME.with(|slot| *slot.borrow_mut() = None);
-	}
-}
-
-fn with_runtime<T>(f: impl FnOnce(&mut Runtime) -> T) -> T {
-	RUNTIME.with(|slot| {
-		let mut runtime = slot.borrow_mut();
-		f(runtime.as_mut().expect("jq runtime is installed"))
-	})
-}
-
-fn runtime_env() -> Vec<(String, String)> {
-	RUNTIME.with(|slot| slot.borrow().as_ref().expect("jq runtime is installed").env.clone())
-}
-
-fn runtime_cancelled() -> bool {
-	RUNTIME.with(|slot| {
-		slot.borrow()
-			.as_ref()
-			.expect("jq runtime is installed")
-			.cancel
-			.load(Ordering::Relaxed)
-	})
-}
-
-mod color {
-	use std::{cell::Cell, sync::Once};
-
-	thread_local! {
-		static COLOR: Cell<bool> = const { Cell::new(false) };
-	}
-
-	pub fn init() {
-		static ONCE: Once = Once::new();
-		ONCE.call_once(|| yansi::whenever(yansi::Condition(|| COLOR.with(Cell::get))));
-	}
-
-	pub fn set(on: bool) {
-		COLOR.with(|color| color.set(on));
-	}
-}
-
-fn real_main(cli: &Cli, host: &mut Host, stdout: &mut dyn Write) -> Result<i32, Error> {
+fn real_main(
+	cli: &Cli,
+	host: &mut Host,
+	stdout: &mut dyn Write,
+	color: bool,
+) -> Result<i32, Error> {
 	let fs = host.fs().clone();
+	let session = Session::new(host);
 	if let Some(test_files) = &cli.run_tests {
 		return Ok(match test_files.last() {
 			Some(file) => {
 				run_tests(
 					&fs,
+					&session,
 					io::BufReader::new(fs.open(file)?),
 					&mut host.stdout,
 					&mut host.stderr,
@@ -1169,6 +1501,7 @@ fn real_main(cli: &Cli, host: &mut Host, stdout: &mut dyn Write) -> Result<i32, 
 			},
 			None => run_tests(
 				&fs,
+				&session,
 				io::BufReader::new(&mut host.stdin),
 				&mut host.stdout,
 				&mut host.stderr,
@@ -1176,10 +1509,11 @@ fn real_main(cli: &Cli, host: &mut Host, stdout: &mut dyn Write) -> Result<i32, 
 		});
 	}
 
-	let (vars, mut ctx): (Vec<String>, Vec<Val>) = binds(cli, host)?.into_iter().unzip();
+	let (vars, mut ctx): (Vec<String>, Vec<Val>) =
+		binds(cli, &fs, &session.env)?.into_iter().unzip();
 
-	let (vals, filter) = match &cli.filter {
-		None => (Vec::new(), Filter::default()),
+	let program = match &cli.filter {
+		None => filter::Program::default(),
 		Some(filter) => {
 			let (path, code) = match filter {
 				cli::Filter::FromFile(path) => (path.into(), fs.read_to_string(path)?),
@@ -1189,58 +1523,80 @@ fn real_main(cli: &Cli, host: &mut Host, stdout: &mut dyn Write) -> Result<i32, 
 				.map_err(Error::Report)?
 		},
 	};
-	ctx.extend(vals);
+	ctx.extend(program.vals);
+	let counts_lines = program.counts_lines;
+
+	let printer = output::Printer::new(cli, color);
+	let run = |inputs: read::Vals<'_>, on_error, out: &mut dyn Write| {
+		let filter = &program.filter;
+		let mut buf = Vec::new();
+		let print = |v: Val| printer.print(&mut buf, out, &v).map_err(Error::from);
+		filter::run(cli.null_input, filter, &ctx, &session, on_error, inputs, print)
+	};
 
 	let last = if cli.files.is_empty() {
-		let inputs = read::buffered(cli, io::BufReader::new(&mut host.stdin));
-		output::with_stdout(stdout, |out| {
-			filter::run(cli, &filter, ctx, inputs, |v| output::print(out, cli, &v))
-		})?
-	} else {
+		let stdin = io::BufReader::new(&mut host.stdin);
+		let inputs = read::stdin(cli, stdin, &session.input, counts_lines);
+		output::with_stdout(stdout, |out| run(inputs, OnError::Continue, out))?
+	} else if cli.in_place {
 		let mut last = None;
-		for file in &cli.files {
+		for operand in &cli.files {
 			// Resolve the operand against the shell's cwd; all later path
 			// operations (open, metadata, in-place temp+rename) use the
 			// resolved path so nothing touches the host process cwd.
-			let path = file.as_path();
-			let file = read::load_file(&fs, path)
-				.map_err(|e| Error::Io(Some(path.display().to_string()), e))?;
-			let inputs = read::slice(cli, &file);
-			if cli.in_place {
-				// create a temporary file where output is written to,
-				// in the resolved target's directory so the final rename
-				// stays on the same filesystem
-				let location = pi_vfs::parent_path(path).unwrap_or(Path::new("."));
-				let (tmp_path, tmp) = fs.create_temp(location, &TempOptions::new().prefix("jaq"))?;
-				let mut out = io::BufWriter::new(tmp);
+			let path = host.resolve(operand);
+			let file = read::load_file(&fs, &path)
+				.map_err(|e| Error::Io(Some(operand.display().to_string()), e))?;
+			let file = (Val::from(operand.display().to_string()), file);
+			let inputs = read::files(cli, core::iter::once(file), &session.input, counts_lines);
 
-				let ran = filter::run(cli, &filter, ctx.clone(), inputs, |output| {
-					output::print(&mut out, cli, &output)
-				});
+			// create a temporary file where output is written to,
+			// in the resolved target's directory so the final rename
+			// stays on the same filesystem
+			let location = pi_vfs::parent_path(&path).unwrap_or(Path::new("."));
+			let (tmp_path, tmp) = fs.create_temp(location, &TempOptions::new().prefix("jaq"))?;
+			let mut out = io::BufWriter::new(tmp);
+			let ran = run(inputs, OnError::Stop, &mut out);
 
-				// replace the input file with the temporary file
-				std::mem::drop(file);
-				let replaced = match ran {
-					Ok(ran) => replace_with_temp(&fs, out, &tmp_path, path)
-						.map(|()| ran)
-						.map_err(Error::from),
-					Err(error) => {
-						// Release the handle before the file is removed.
-						let _ = out.into_parts().0.close();
-						Err(error)
-					},
-				};
-				if replaced.is_err() {
-					// The operation filesystem may be cancelled; cleanup must
-					// still run.
-					let _ = fs.for_cleanup().remove_file(&tmp_path);
-				}
-				last = replaced?;
-			} else {
-				last = output::with_stdout(stdout, |out| {
-					filter::run(cli, &filter, ctx.clone(), inputs, |v| output::print(out, cli, &v))
-				})?;
+			// replace the input file with the temporary file; `run` consumed
+			// `inputs`, so the file's contents are already released
+			let replaced = match ran {
+				Ok(ran) => replace_with_temp(&fs, out, &tmp_path, &path)
+					.map(|()| ran)
+					.map_err(Error::from),
+				Err(error) => {
+					// Release the handle before the file is removed.
+					let _ = out.into_parts().0.close();
+					Err(error)
+				},
+			};
+			if replaced.is_err() {
+				// The operation filesystem may be cancelled; cleanup must
+				// still run.
+				let _ = fs.for_cleanup().remove_file(&tmp_path);
 			}
+			last = replaced?;
+		}
+		last
+	} else {
+		// Like jq, open each operand when the input stream reaches it, and
+		// report one that cannot be read and go on with the others.
+		let unreadable = Cell::new(false);
+		let files = cli.files.iter().filter_map(|operand| {
+			let name = operand.display().to_string();
+			match read::load_file(&fs, &host.resolve(operand)) {
+				Ok(file) => Some((Val::from(name), file)),
+				Err(e) => {
+					session.write_stderr(Error::Io(Some(name), e).to_string().as_bytes());
+					unreadable.set(true);
+					None
+				},
+			}
+		});
+		let inputs = read::files(cli, files, &session.input, counts_lines);
+		let last = output::with_stdout(stdout, |out| run(inputs, OnError::Continue, out))?;
+		if unreadable.get() {
+			return Err(Error::Unreadable);
 		}
 		last
 	};
@@ -1274,22 +1630,16 @@ fn replace_with_temp(
 	fs.rename(tmp_path, path)
 }
 
-fn binds(cli: &Cli, host: &Host) -> Result<Vec<(String, Val)>, Error> {
-	let arg = cli.arg.iter().map(|(k, s)| {
-		let s = s.to_owned();
-		Ok((k.to_owned(), Val::Str(s.into())))
-	});
+fn binds(cli: &Cli, fs: &BlockingFs, env: &Val) -> Result<Vec<(String, Val)>, Error> {
+	let arg = cli.arg.iter().map(|(k, s)| Ok((k.to_owned(), Val::from(s.to_owned()))));
 	let argjson = cli.argjson.iter().map(|(k, s)| {
-		use hifijson::token::Lex;
-		let mut lexer = hifijson::SliceLexer::new(s.as_bytes());
 		let err = |e| Error::Parse(format!("{e} (for value passed to `--argjson {k}`)"));
-		Ok((k.to_owned(), lexer.exactly_one(Val::parse).map_err(err)?))
+		Ok((k.to_owned(), jaq_json::read::parse_single(s.as_bytes()).map_err(err)?))
 	});
-	let fs = host.fs();
 	let rawfile = cli.rawfile.iter().map(|(k, path)| {
 		let s = fs.read_to_string(Path::new(path))
 			.map_err(|e| Error::Io(Some(format!("{path:?}")), e));
-		Ok((k.to_owned(), Val::Str(s?.into())))
+		Ok((k.to_owned(), Val::from(s?)))
 	});
 	let slurpfile = cli.slurpfile.iter().map(|(k, path)| {
 		let a = read::json_array(fs, Path::new(path))
@@ -1305,16 +1655,13 @@ fn binds(cli: &Cli, host: &Host) -> Result<Vec<(String, Val)>, Error> {
 
 	var_val.push(("ARGS".to_string(), args(&positional, &var_val)));
 	// the shell's exported environment, not the host process environment
-	let env = host
-		.env()
-		.map(|(key, value)| (key.to_owned().into(), Val::from(value.to_owned())));
-	var_val.push(("ENV".to_string(), Val::obj(env.collect())));
+	var_val.push(("ENV".to_string(), env.clone()));
 
 	Ok(var_val)
 }
 
 fn args(positional: &[Val], named: &[(String, Val)]) -> Val {
-	let key = |k: &str| k.to_string().into();
+	let key = |k: &str| Val::from(k.to_string());
 	let positional = positional.iter().cloned();
 	let named = named.iter().map(|(var, val)| (key(var), val.clone()));
 	let obj = [(key("positional"), positional.collect()), (key("named"), Val::obj(named.collect()))];
@@ -1327,6 +1674,9 @@ enum Error {
 	Report(Vec<FileReports>),
 	Parse(String),
 	Jaq(jaq_core::Error<Val>),
+	/// Some file operand could not be read; each was reported when loading.
+	Unreadable,
+	Halt(i32),
 	FalseOrNull,
 	NoOutput,
 }
@@ -1334,7 +1684,7 @@ enum Error {
 impl Display for Error {
 	fn fmt(&self, f: &mut Formatter) -> fmt::Result {
 		match self {
-			Self::FalseOrNull | Self::NoOutput => Ok(()),
+			Self::FalseOrNull | Self::NoOutput | Self::Halt(_) | Self::Unreadable => Ok(()),
 			Self::Io(prefix, e) => {
 				write!(f, "Error: ")?;
 				if let Some(p) = prefix {
@@ -1354,10 +1704,11 @@ impl Error {
 	fn report(&self) -> i32 {
 		match self {
 			Self::FalseOrNull => 1,
-			Self::Io(..) => 2,
+			Self::Io(..) | Self::Unreadable => 2,
 			Self::Report(_) => 3,
 			Self::NoOutput => 4,
 			Self::Parse(_) | Self::Jaq(_) => 5,
+			Self::Halt(code) => *code,
 		}
 	}
 }
@@ -1368,41 +1719,75 @@ impl From<io::Error> for Error {
 	}
 }
 
-fn run_test(fs: &BlockingFs, test: load::test::Test<String>) -> Result<(Val, Val), Error> {
-	let (ctx, filter) = filter::parse_compile(fs, &PathBuf::new(), &test.filter, &[], &[])
+impl From<jaq_core::Exn<'_, Val>> for Error {
+	fn from(exn: jaq_core::Exn<'_, Val>) -> Self {
+		match exn.get_err() {
+			Ok(e) => Self::Jaq(e),
+			Err(exn) => Self::Halt(exn.get_halt().expect("only errors and halts escape a filter")),
+		}
+	}
+}
+
+impl From<output::WriteError> for Error {
+	fn from(e: output::WriteError) -> Self {
+		match e {
+			output::WriteError::Io(e) => Self::Io(None, e),
+			output::WriteError::Key(key) => Self::Jaq(jaq_core::Error::typ(key, "object key")),
+		}
+	}
+}
+
+/// One jq unit test (`--run-tests`): a filter, an input, and the expected
+/// outputs, one per line, ended by a blank line.
+struct Test {
+	filter: String,
+	input:  String,
+	output: Vec<String>,
+}
+
+fn parse_tests(mut lines: impl Iterator<Item = String>) -> impl Iterator<Item = Test> {
+	core::iter::from_fn(move || {
+		Some(Test {
+			filter: lines.find(|l| !(l.is_empty() || l.starts_with('#')))?,
+			input:  lines.next()?,
+			output: lines.by_ref().take_while(|l| !l.is_empty()).collect(),
+		})
+	})
+}
+
+fn run_test(fs: &BlockingFs, session: &Session, test: Test) -> Result<(Val, Val), Error> {
+	let program = filter::parse_compile(fs, &PathBuf::new(), &test.filter, &[], &[])
 		.map_err(Error::Report)?;
 
-	let inputs = RcIter::new(Box::new(core::iter::empty()));
-	let ctx = Ctx::new(ctx, &inputs);
-
-	let json = |s: String| {
-		use hifijson::token::Lex;
-		hifijson::SliceLexer::new(s.as_bytes())
-			.exactly_one(Val::parse)
-			.map_err(read::invalid_data)
-	};
-	let input = json(test.input)?;
-	let expect: Result<Val, _> = test.output.into_iter().map(json).collect();
-	let obtain: Result<Val, _> = filter.run((ctx, input)).collect();
-	Ok((expect?, obtain.map_err(Error::Jaq)?))
+	let json = |s: &str| jaq_json::read::parse_many(s.as_bytes()).collect::<Result<Val, _>>();
+	let input = jaq_json::read::parse_single(test.input.as_bytes())
+		.map_err(|e| Error::Parse(e.to_string()))?;
+	let expect = json(&test.output.join("\n")).map_err(|e| Error::Parse(e.to_string()))?;
+	let mut obtain = Vec::new();
+	let inputs = core::iter::once(Ok(input));
+	filter::run(false, &program.filter, &program.vals, session, OnError::Stop, inputs, |v| {
+		obtain.push(v);
+		Ok(())
+	})?;
+	Ok((expect, obtain.into_iter().collect()))
 }
 
 fn run_tests(
 	fs: &BlockingFs,
+	session: &Session,
 	read: impl BufRead,
 	stdout: &mut dyn Write,
 	stderr: &mut dyn Write,
 ) -> i32 {
-	let lines = read.lines().map(Result::unwrap);
-	let tests = load::test::Parser::new(lines);
+	let tests = parse_tests(read.lines().map_while(Result::ok));
 
 	let (mut passed, mut total) = (0, 0);
 	for test in tests {
-		if runtime_cancelled() {
+		if session.cancelled() {
 			break;
 		}
 		let _ = writeln!(stdout, "Testing {}", test.filter);
-		match run_test(fs, test) {
+		match run_test(fs, session, test) {
 			Err(e) => {
 				let _ = writeln!(stderr, "{e:?}");
 			},
@@ -1420,14 +1805,9 @@ fn run_tests(
 }
 
 
-/// Creates the `jq` builtin registration.
-pub(crate) fn jq_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Jq, SE>()
-}
-
 #[cfg(test)]
 mod tests {
-	use std::{collections::HashMap, io::Write, path::PathBuf};
+	use std::{collections::HashMap, io, io::Write, path::PathBuf};
 
 	use clap::Parser as _;
 
@@ -1464,6 +1844,32 @@ mod tests {
 	fn run_jq(args: &[&str], stdin: &str) -> (i32, String, String) {
 		let (code, capture) = run_util::<Jq>(args, stdin, ".");
 		(code, capture.out(), capture.err())
+	}
+
+	/// Records every write it receives, and fails each one when `fail` is set.
+	#[derive(Default)]
+	struct Writes {
+		calls: Vec<Vec<u8>>,
+		fail:  bool,
+	}
+
+	impl Write for Writes {
+		fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+			self.calls.push(buf.to_vec());
+			if self.fail { Err(io::Error::other("disk full")) } else { Ok(buf.len()) }
+		}
+
+		fn flush(&mut self) -> io::Result<()> {
+			Ok(())
+		}
+	}
+
+	/// Runs jq with `out` as its standard output; returns the exit status.
+	fn run_jq_into(out: &mut Writes, args: &[&str], stdin: &str) -> i32 {
+		let (mut host, _) = Host::for_test("jq", stdin, ".");
+		let argv = std::iter::once("jq").chain(args.iter().copied());
+		let cli = Jq::try_parse_from(argv).expect("valid arguments").cli;
+		super::real_main(&cli, &mut host, out, false).unwrap_or_else(|error| error.report())
 	}
 
 	#[test]
@@ -1567,6 +1973,194 @@ mod tests {
 	}
 
 	#[test]
+	fn indexing_null_yields_null_like_jq() {
+		for (filter, input, expected) in [
+			(".a.b", "{}", "null\n"),
+			(".[0]", "null", "null\n"),
+			(".a[0].b", "{}", "null\n"),
+			("getpath([\"a\",\"b\"])", "{}", "null\n"),
+			(".a.b // \"x\"", "{}", "\"x\"\n"),
+			("has(\"a\")", "null", "false\n"),
+		] {
+			let (code, out, err) = run_jq(&["-c", filter], input);
+			assert_eq!((code, out.as_str(), err.as_str()), (0, expected, ""), "{filter} on {input}");
+		}
+	}
+
+	#[test]
+	fn tabular_formats_render_scalar_fields() {
+		let input = r#"[null,true,false,0,-12,1.5,9007199254740993,"","text"]"#;
+		for (format, expected) in [
+			("@csv", ",true,false,0,-12,1.5,9007199254740993,\"\",\"text\"\n"),
+			("@tsv", "\ttrue\tfalse\t0\t-12\t1.5\t9007199254740993\t\ttext\n"),
+		] {
+			let (code, out, err) = run_jq(&["-r", format], input);
+			assert_eq!((code, out.as_str(), err.as_str()), (0, expected, ""), "{format}");
+		}
+	}
+
+	#[test]
+	fn csv_quotes_strings_and_doubles_inner_quotes() {
+		let input = r#"["a,\"b\"\r\n\\z","é"]"#;
+		let (code, out, err) = run_jq(&["-r", "@csv"], input);
+		assert_eq!((code, out.as_str(), err.as_str()), (0, "\"a,\"\"b\"\"\r\n\\z\",\"é\"\n", ""));
+	}
+
+	#[test]
+	fn tsv_escapes_only_tab_newline_carriage_return_and_backslash() {
+		let input = r#"["\t\n\r\\","literal\\t","a,\"b\"","é"]"#;
+		let (code, out, err) = run_jq(&["-r", "@tsv"], input);
+		let expected = "\\t\\n\\r\\\\\tliteral\\\\t\ta,\"b\"\té\n";
+		assert_eq!((code, out.as_str(), err.as_str()), (0, expected, ""));
+	}
+
+	#[test]
+	fn tabular_formats_accept_empty_rows() {
+		for format in ["@csv", "@tsv"] {
+			let (code, out, err) = run_jq(&["-r", format], "[]");
+			assert_eq!((code, out.as_str(), err.as_str()), (0, "\n", ""), "{format}");
+		}
+	}
+
+	#[test]
+	fn tabular_formats_render_nan_as_empty_and_clamp_infinity() {
+		for (format, expected) in [
+			("@csv", ",1.7976931348623157e+308,-1.7976931348623157e+308\n"),
+			("@tsv", "\t1.7976931348623157e+308\t-1.7976931348623157e+308\n"),
+		] {
+			let filter = format!("[nan, infinite, -infinite] | {format}");
+			let (code, out, err) = run_jq(&["-nr", &filter], "");
+			assert_eq!((code, out.as_str(), err.as_str()), (0, expected, ""), "{format}");
+		}
+	}
+
+	#[test]
+	fn tabular_formats_reject_nonarrays_and_nested_containers() {
+		for format in ["@csv", "@tsv"] {
+			for input in ["null", "true", "1", "\"text\"", "{}", "[[]]", "[{}]", "[1,[]]", "[1,{}]"] {
+				let (code, out, err) = run_jq(&["-r", format], input);
+				assert_eq!(code, 5, "{format} on {input}: {err}");
+				assert!(out.is_empty(), "{format} on {input}: {out:?}");
+				assert!(err.contains("cannot serialise"), "{format} on {input}: {err}");
+			}
+		}
+	}
+
+	#[test]
+	fn defines_jq_builtins_jaq_lacks() {
+		let (code, out, err) = run_jq(&["-c", "[.[] | IN(2, 3)], IN(.[]; 5)"], "[1,2]");
+		assert_eq!((code, out.as_str(), err.as_str()), (0, "[false,true]\nfalse\n", ""));
+
+		let (code, out, err) = run_jq(&["-r", "@csv, @tsv"], "[1,\"a\\\"b\\tc\",null,true]");
+		assert_eq!((code, err.as_str()), (0, ""));
+		assert_eq!(out, "1,\"a\"\"b\tc\",,true\n1\ta\"b\\tc\t\ttrue\n");
+
+		// jq counts the line a value ends on, its newline included
+		let input = "{\"a\":\n1}\n\n\n{\"b\":2}\n3";
+		let (code, out, err) = run_jq(&["-c", "[input_line_number, input_filename]"], input);
+		let expected = "[2,\"<stdin>\"]\n[5,\"<stdin>\"]\n[5,\"<stdin>\"]\n";
+		assert_eq!((code, out.as_str(), err.as_str()), (0, expected, ""));
+
+		let (code, out, _) = run_jq(&["-Rc", "[., input_line_number]"], "a\nb");
+		assert_eq!((code, out.as_str()), (0, "[\"a\",1]\n[\"b\",1]\n"));
+
+		// with `-n`, nothing is read until `input` asks
+		let (code, out, _) = run_jq(&["-nc", "[input_filename], [input, input_filename]"], "1 2");
+		assert_eq!((code, out.as_str()), (0, "[null]\n[1,\"<stdin>\"]\n"));
+	}
+
+	#[test]
+	fn file_operands_form_one_input_stream() {
+		let dir = tempfile::TempDir::new().expect("tempdir");
+		std::fs::write(dir.path().join("a.json"), "{\"a\":1}\n{\"a\":2}\n").expect("write a");
+		std::fs::write(dir.path().join("b.json"), "{\"b\":3}\n").expect("write b");
+		let jq = |args: &[&str]| {
+			let args = [args, &["a.json", "b.json"]].concat();
+			run_jq_in(dir.path().to_path_buf(), HashMap::new(), &args, "")
+		};
+
+		// `-s` slurps every file into one array
+		let (code, out, err) = jq(&["-c", "-s", "map(keys[0])"]);
+		assert_eq!((code, out.as_str(), err.as_str()), (0, "[\"a\",\"a\",\"b\"]\n", ""));
+
+		// `input` reads on into the next file
+		let (code, out, _) = jq(&["-nc", "[inputs | input_filename]"]);
+		assert_eq!((code, out.as_str()), (0, "[\"a.json\",\"a.json\",\"b.json\"]\n"));
+
+		let (code, out, _) = jq(&["-c", "[input_filename, input_line_number]"]);
+		assert_eq!((code, out.as_str()), (0, "[\"a.json\",1]\n[\"a.json\",2]\n[\"b.json\",1]\n"));
+
+		let (code, out, _) = jq(&["-nsc", "[input_filename, input_line_number]"]);
+		assert_eq!((code, out.as_str()), (0, "[null,0]\n"), "slurping waits for `input`");
+
+		let (code, out, _) = jq(&["-Rs", "."]);
+		let concatenated = "\"{\\\"a\\\":1}\\n{\\\"a\\\":2}\\n{\\\"b\\\":3}\\n\"\n";
+		assert_eq!((code, out.as_str()), (0, concatenated));
+	}
+
+	#[test]
+	fn unreadable_operand_is_reported_and_skipped() {
+		let dir = tempfile::TempDir::new().expect("tempdir");
+		std::fs::write(dir.path().join("in.json"), "1").expect("write input");
+		let (code, out, err) =
+			run_jq_in(dir.path().to_path_buf(), HashMap::new(), &[".", "nope.json", "in.json"], "");
+		assert_eq!(code, 2);
+		assert_eq!(out, "1\n", "readable operands are still processed");
+		assert!(err.starts_with("Error: nope.json: "), "stderr names the operand: {err:?}");
+
+		// operands are opened as the input stream reaches them
+		let (code, out, err) =
+			run_jq_in(dir.path().to_path_buf(), HashMap::new(), &["halt", "in.json", "nope.json"], "");
+		assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""));
+
+		// a data file jaq cannot parse
+		std::fs::write(dir.path().join("bad.json"), "1 xyz").expect("write bad input");
+		let args = ["-n", "--slurpfile", "n", "bad.json", "$n"];
+		let (code, _, err) = run_jq_in(dir.path().to_path_buf(), HashMap::new(), &args, "");
+		assert_eq!(code, 2);
+		assert!(err.starts_with("Error: "), "stderr: {err:?}");
+	}
+
+	#[test]
+	fn output_stays_json_where_jaq_extends_it() {
+		let (code, out, _) = run_jq(&["-nc", "[nan, infinite, -infinite]"], "");
+		assert_eq!(code, 0);
+		assert_eq!(out, "[null,1.7976931348623157e+308,-1.7976931348623157e+308]\n");
+
+		for filter in ["{(1): 2}", "[{(1): 2}]", "{a: 1, b: {(2): 3}}"] {
+			let (code, out, err) = run_jq(&["-nc", filter], "");
+			assert_eq!((code, out.as_str()), (5, ""), "nothing of {filter} is written");
+			assert!(err.contains("as object key\n"), "stderr: {err:?}");
+		}
+		let (code, _, err) = run_jq(&["-nc", "{(1): 2} | debug | empty"], "");
+		assert_eq!(code, 5);
+		assert!(err.starts_with("Error: cannot use 1 as object key\n"), "stderr: {err:?}");
+
+		// jaq keeps number literals as written, and reads some JSON cannot spell;
+		// those print respelled with every digit kept
+		let input = "[0.50,+1.5,1e2,+9007199254740993.0,+01e-999]";
+		let (code, out, _) = run_jq(&["-c", ". + [\"01.5\" | tonumber]"], input);
+		assert_eq!((code, out.as_str()), (0, "[0.50,1.5,1e2,9007199254740993.0,1e-999,1.5]\n"));
+
+		// byte strings print as JSON strings, and raw with `-r`
+		let (code, out, _) = run_jq(&["-n", "\"hi\" | tobytes"], "");
+		assert_eq!((code, out.as_str()), (0, "\"hi\"\n"));
+		let (code, out, _) = run_jq(&["-nr", "\"hi\" | tobytes"], "");
+		assert_eq!((code, out.as_str()), (0, "hi\n"));
+	}
+
+	#[test]
+	fn tonumber_parses_one_number_literal_like_jq() {
+		let input = "[\"021\",\"+17.1\",\"-3\",\"1.50\",5]";
+		let (code, out, _) = run_jq(&["-c", "map(tonumber)"], input);
+		assert_eq!((code, out.as_str()), (0, "[21,17.1,-3,1.50,5]\n"));
+
+		let input = "[\"1 2\",\" 1\",\"0x10\",\"\",null]";
+		let (code, out, _) = run_jq(&["-c", "map(try tonumber catch \"no\")"], input);
+		assert_eq!((code, out.as_str()), (0, "[\"no\",\"no\",\"no\",\"no\",\"no\"]\n"));
+	}
+
+	#[test]
 	fn relative_file_operand_resolves_against_scope_cwd() {
 		let dir = tempfile::TempDir::new().expect("tempdir");
 		std::fs::write(dir.path().join("in.json"), "{\"a\":[1,2]}").expect("write input");
@@ -1598,6 +2192,64 @@ mod tests {
 		assert_eq!(rewritten, "1\n");
 	}
 
+	/// Truncating an input file after jq loaded it must not fault the host
+	/// process; the loaded bytes stay readable.
+	#[test]
+	fn input_file_truncated_after_load_stays_readable() {
+		let dir = tempfile::TempDir::new().expect("tempdir");
+		let path = dir.path().join("in.json");
+		let json = format!("[{}]", vec!["1"; 8192].join(","));
+		std::fs::write(&path, &json).expect("write input");
+		let loaded = super::read::load_file(&pi_vfs::BlockingFs::native(), &path).expect("load");
+		std::fs::File::options()
+			.write(true)
+			.open(&path)
+			.and_then(|file| file.set_len(0))
+			.expect("truncate input");
+		assert_eq!(&loaded[..], json.as_bytes());
+	}
+
+	#[test]
+	fn in_place_edit_leaves_file_on_error() {
+		let dir = tempfile::TempDir::new().expect("tempdir");
+		std::fs::write(dir.path().join("in.json"), "1 \"a\" 2").expect("write input");
+		let (code, _, _) =
+			run_jq_in(dir.path().to_path_buf(), HashMap::new(), &["-i", ". + 1", "in.json"], "");
+		assert_eq!(code, 5);
+		let kept = std::fs::read_to_string(dir.path().join("in.json")).expect("read back");
+		assert_eq!(kept, "1 \"a\" 2");
+	}
+
+	#[test]
+	fn error_in_one_input_does_not_stop_the_rest() {
+		// like jq, report it and go on; the exit status follows the last input
+		let (code, out, err) = run_jq(&[". + 1"], "1 \"a\" 2");
+		assert_eq!((code, out.as_str()), (0, "2\n3\n"));
+		assert_eq!(err, "Error: cannot calculate \"a\" + 1\n");
+
+		let (code, out, err) = run_jq(&[". + 1"], "1 2 \"a\"");
+		assert_eq!((code, out.as_str()), (5, "2\n3\n"));
+		assert_eq!(err, "Error: cannot calculate \"a\" + 1\n");
+
+		// also when the error is raised while printing
+		let (code, out, err) = run_jq(&["-c", "{(.): 1}"], "\"a\" 1 \"b\"");
+		assert_eq!((code, out.as_str()), (0, "{\"a\":1}\n{\"b\":1}\n"));
+		assert_eq!(err, "Error: cannot use 1 as object key\n");
+
+		// a failed write still ends the run
+		let mut out = Writes { fail: true, ..Writes::default() };
+		assert_eq!(run_jq_into(&mut out, &["."], "1 2 3"), 2);
+		assert_eq!(out.calls, [b"1\n"]);
+	}
+
+	#[test]
+	fn printer_writes_each_value_at_once() {
+		let mut out = Writes::default();
+		assert_eq!(run_jq_into(&mut out, &["."], "{\"a\":[1,\"x\"]} 2"), 0);
+		let pretty: &[u8] = b"{\n  \"a\": [\n    1,\n    \"x\"\n  ]\n}\n";
+		assert_eq!(out.calls, [pretty, b"2\n"]);
+	}
+
 	#[test]
 	fn invalid_trailing_json_on_stdin_fails() {
 		let (code, out, err) = run_jq(&["-c", "."], "{\"a\":1} xyz");
@@ -1624,9 +2276,21 @@ mod tests {
 
 	#[test]
 	fn halt_error_prints_message_and_exit_code() {
-		let (code, out, _) = run_jq(&["-n", "\"bye\\n\" | halt_error(3)"], "");
-		assert_eq!(code, 3);
-		assert_eq!(out, "bye\n", "string message printed raw");
+		let (code, out, err) = run_jq(&["-n", "\"bye\\n\" | halt_error(3)"], "");
+		assert_eq!((code, out.as_str(), err.as_str()), (3, "", "bye\n"), "string printed raw");
+
+		let (code, _, err) = run_jq(&["-n", "{\"a\":1} | halt_error"], "");
+		assert_eq!((code, err.as_str()), (5, "{\"a\":1}\n"), "anything else as JSON");
+
+		let (code, _, err) = run_jq(&["-n", "null | halt_error(1)"], "");
+		assert_eq!((code, err.as_str()), (1, ""), "null prints nothing");
+
+		let (code, _, err) = run_jq(&["-n", "[nan, infinite] | halt_error(7)"], "");
+		assert_eq!((code, err.as_str()), (7, "[null,1.7976931348623157e+308]\n"), "still JSON");
+
+		let (code, _, err) = run_jq(&["-n", "\"msg\" | halt_error(\"x\")"], "");
+		assert_eq!(code, 5);
+		assert!(err.starts_with("Error: cannot use \"x\" as integer\n"), "nothing printed: {err:?}");
 	}
 
 	#[test]
@@ -1642,7 +2306,12 @@ mod tests {
 		let (code, out, err) = run_jq(&["-nc", "[1,2] | debug"], "");
 		assert_eq!(code, 0);
 		assert_eq!(out, "[1,2]\n");
-		assert_eq!(err, "[\"DEBUG:\", [1,2]]\n");
+		assert_eq!(err, "[\"DEBUG:\",[1,2]]\n");
+
+		let (code, out, err) = run_jq(&["-nc", "0 | debug(1, 2)"], "");
+		assert_eq!(code, 0);
+		assert_eq!(out, "0\n", "the input passes through once");
+		assert_eq!(err, "[\"DEBUG:\",1]\n[\"DEBUG:\",2]\n");
 	}
 
 	#[test]
@@ -1664,7 +2333,7 @@ mod tests {
 	fn version_flag_prints_and_exits_0() {
 		let (code, out, _) = run_jq(&["--version"], "");
 		assert_eq!(code, 0);
-		assert_eq!(out, "jaq 2.3.0\n");
+		assert_eq!(out, "jaq 3.1.1\n");
 	}
 
 	#[test]
@@ -1693,6 +2362,12 @@ mod tests {
 		let (code, out, _) = run_jq(&["-j", ".[]"], "[\"a\",\"b\"]");
 		assert_eq!(code, 0);
 		assert_eq!(out, "ab");
+	}
+
+	#[test]
+	fn unbuffered_flag_is_accepted() {
+		let (code, out, err) = run_jq(&["--unbuffered", "-c", ".[]"], "[1,{\"a\":2}]");
+		assert_eq!((code, out.as_str(), err.as_str()), (0, "1\n{\"a\":2}\n", ""));
 	}
 
 	#[test]

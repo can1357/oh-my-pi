@@ -67,6 +67,11 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		completion: "prompt_result",
 	},
 	{
+		name: "abort_and_restore_queue",
+		doc: "Withdraw queued user input, then abort the current run; returns the withdrawn input.",
+		result: "AbortAndRestoreQueueResult",
+	},
+	{
 		name: "new_session",
 		doc: "Start a new session.",
 		params: { "parentSession?": "string" },
@@ -74,8 +79,8 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 	},
 	{
 		name: "open_session",
-		doc: "Continue the newest non-empty session in a directory, or start a fresh one there.",
-		params: { sessionDir: "string" },
+		doc: "Continue the newest non-empty session in a directory, or start a fresh one there. Give provider and modelId together to override the saved model; otherwise an unavailable saved model fails the request.",
+		params: { sessionDir: "string", "provider?": "string", "modelId?": "string" },
 		result: "OpenSessionResult",
 	},
 
@@ -85,6 +90,13 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		doc: "Enable or disable fast mode for the session.",
 		params: { enabled: "boolean" },
 		result: "FastModeResult",
+	},
+	{
+		name: "set_slow_mode",
+		doc: "Turn `/slow` on or off for the active model; returns whether it is now on.",
+		params: { enabled: "boolean" },
+		result: { enabled: "boolean" },
+		unwrap: "enabled",
 	},
 	{
 		name: "goal",
@@ -179,6 +191,12 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		result: { voice: "string" },
 		unwrap: "voice",
 	},
+	{
+		name: "live_connect",
+		doc: "Start a live voice session whose audio runs on a caller-owned WebRTC peer: send its SDP offer, apply the returned answer.",
+		params: { sdpOffer: "string", "voice?": "string", "instructions?": "string" },
+		result: { voice: "string", sdpAnswer: "string" },
+	},
 	{ name: "live_stop", doc: "Stop the live voice session, if any." },
 	{
 		name: "live_mute",
@@ -186,6 +204,19 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		params: { "muted?": "boolean" },
 		result: { muted: "boolean" },
 		unwrap: "muted",
+	},
+	{
+		name: "dictation_start",
+		doc: "Start draft-only speech-to-text; resolves once the microphone is recording.",
+		params: { captureId: "string" },
+		timeoutMs: 600_000,
+	},
+	{
+		name: "dictation_stop",
+		doc: "Stop and flush draft-only dictation, returning the accumulated text.",
+		result: { text: "string" },
+		unwrap: "text",
+		timeoutMs: 600_000,
 	},
 
 	{
@@ -238,6 +269,12 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 
 	{ name: "get_session_stats", doc: "Session statistics.", result: "SessionStats" },
 	{
+		name: "get_session_lease",
+		doc: "Which of these sessions a running process (this one included) owns, probed without taking ownership. Ids in neither list are free; `unknown` could not be probed.",
+		params: { sessionIds: "string[]" },
+		result: { held: "string[]", unknown: "string[]" },
+	},
+	{
 		name: "export_html",
 		doc: "Export the session as HTML; returns the written path.",
 		params: { "outputPath?": "string" },
@@ -246,8 +283,8 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 	},
 	{
 		name: "switch_session",
-		doc: "Switch to another session file.",
-		params: { sessionPath: "string" },
+		doc: "Switch to another session file. Give provider and modelId together to override the saved model; otherwise an unavailable saved model fails the request and keeps the current session.",
+		params: { sessionPath: "string", "provider?": "string", "modelId?": "string" },
 		result: "CancellationResult",
 	},
 	{
@@ -261,6 +298,23 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		doc: "Fork into a new session file: history through `entryId`, or the whole session.",
 		params: { "entryId?": "string" },
 		result: "CancellationResult",
+	},
+	{
+		name: "navigate_tree",
+		doc: "Move the session's leaf to an entry in the same file, optionally summarizing the branch it leaves; refused while busy.",
+		params: {
+			entryId: "string",
+			"summarize?": doc("boolean", "Summarize the abandoned branch at the target."),
+			"customInstructions?": doc("string", "Instructions for the summarizer."),
+		},
+		result: "NavigateTreeResult",
+		timeoutMs: 600_000,
+	},
+	{ name: "abort_branch_summary", doc: "Stop a running `navigate_tree` branch summary; the navigation is cancelled." },
+	{
+		name: "set_label",
+		doc: "Set or clear (omit `label`) an entry's label.",
+		params: { entryId: "string", "label?": "string" },
 	},
 	{
 		name: "get_branch_messages",
@@ -310,6 +364,19 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		unwrap: "providerId",
 		timeoutMs: 600_000,
 	},
+	{
+		name: "get_logout_accounts",
+		doc: "List the stored credentials `logout` can remove for a provider, active first.",
+		params: { providerId: "string" },
+		result: { accounts: "LogoutAccount[]" },
+		unwrap: "accounts",
+	},
+	{
+		name: "logout",
+		doc: "Remove one stored credential; fails when it is no longer stored. `remainingSource` names auth that still applies.",
+		params: { providerId: "string", credentialId: "number.integer" },
+		result: { "remainingSource?": "string" },
+	},
 
 	{
 		name: "predict_word",
@@ -325,5 +392,25 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		name: "predict_word_feedback",
 		doc: "Report a shown suggestion as accepted or typed past.",
 		params: { text: "string", cursor: "number.integer", suggestion: "string", accepted: "boolean" },
+	},
+	{
+		name: "btw",
+		doc: "Ask a side question, or a follow-up in topic `recordId`; returns the record once it is running.",
+		params: { question: "string", "recordId?": "string" },
+		result: { record: "BtwHistoryRecord" },
+		unwrap: "record",
+	},
+	{
+		name: "btw_cancel",
+		doc: "Cancel the running side question (only topic `recordId` when given); false when none matches.",
+		params: { "recordId?": "string" },
+		result: { cancelled: "boolean" },
+		unwrap: "cancelled",
+	},
+	{
+		name: "get_btw_history",
+		doc: "List the session's side-question records, newest first.",
+		result: { records: "BtwHistoryRecord[]" },
+		unwrap: "records",
 	},
 ];

@@ -19,21 +19,23 @@
  * - `issue://owner/repo/123?comments=0` — single item, comments suppressed.
  * - `issue://owner/repo?state=closed&limit=20` — list options pass through to
  *   `gh`.
+ * - `pr://owner/repo/123/diff/2?at=<fetchedAt>` — that cached diff generation,
+ *   not whatever the live row is after a background refresh.
  */
 import issueDoc from "../prompts/internal-urls/issue.md" with { type: "text" };
-import { AgentRegistry } from "../registry/agent-registry";
 import {
 	formatRepoRef,
 	getOrFetchIssue,
 	getOrFetchPr,
 	getOrFetchPrDiff,
+	getPinnedPrDiff,
 	githubIssueJsonWithStateReasonFallback,
-	type PrDiffFile,
 	parsePositiveDecimalInt,
 	resolveDefaultRepoMemoized,
 } from "../tools/gh";
 import { type CacheStatus, formatFreshnessNote } from "../tools/github-cache";
 import { github } from "../utils/github";
+import { renderDiffFamilyResource, resolveCwd, splitInternalUrlSegments } from "./forge-diff";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, SchemeSpec } from "./types";
 
 type Scheme = "issue" | "pr";
@@ -56,6 +58,8 @@ interface ParsedPrDiff {
 	 */
 	mode: "list" | "all" | "slice";
 	index?: number;
+	/** Cache generation (`?at=`). When set, resolution must not read the live row. */
+	fetchedAt?: number;
 }
 
 interface ParsedList {
@@ -107,25 +111,7 @@ function parseListOptions(url: InternalUrl, scheme: Scheme, repo: string | undef
 
 function parseUrl(url: InternalUrl, scheme: Scheme): Parsed {
 	let host = url.rawHost || url.hostname;
-	const rawPath = url.rawPathname ?? url.pathname;
-	// Strip a single leading slash so we can detect empty internal segments
-	// (e.g. `pr://owner//77` → pathname `//77` → stripped `/77` → ["", "77"]).
-	const stripped = rawPath.startsWith("/") ? rawPath.slice(1) : rawPath;
-	let parts: string[] = [];
-	if (stripped !== "") {
-		for (const seg of stripped.split("/")) {
-			let decoded: string;
-			try {
-				decoded = decodeURIComponent(seg);
-			} catch {
-				throw new Error(`Invalid ${scheme}:// URL: empty or unsafe path segment`);
-			}
-			if (decoded === "" || decoded === "." || decoded === "..") {
-				throw new Error(`Invalid ${scheme}:// URL: empty or unsafe path segment`);
-			}
-			parts.push(seg);
-		}
-	}
+	let parts = splitInternalUrlSegments(url, scheme);
 
 	// Detect a leading `<host>/` prefix. A dotted first segment can only be a
 	// host, because GitHub owner names are alphanumeric-plus-hyphen, so dotted
@@ -219,39 +205,33 @@ function parseUrl(url: InternalUrl, scheme: Scheme): Parsed {
 	}
 
 	// diffParts has already been validated above; scheme is `pr`.
+	const fetchedAt = parsePinnedDiffGeneration(url);
 	if (diffParts.length === 1) {
-		return { kind: "pr-diff", repo, number: num, mode: "list" };
+		return { kind: "pr-diff", repo, number: num, mode: "list", fetchedAt };
 	}
 	const sub = diffParts[1] ?? "";
 	if (sub === "all") {
-		return { kind: "pr-diff", repo, number: num, mode: "all" };
+		return { kind: "pr-diff", repo, number: num, mode: "all", fetchedAt };
 	}
 	const idx = parsePositiveDecimalInt(sub);
 	if (idx === undefined) {
 		throw new Error(`Invalid pr:// diff sub-path '${sub}'. Use 'all' or a 1-indexed file number.`);
 	}
-	return { kind: "pr-diff", repo, number: num, mode: "slice", index: idx };
+	return { kind: "pr-diff", repo, number: num, mode: "slice", index: idx, fetchedAt };
 }
 
-/**
- * Resolve the working directory the protocol should use.
- *
- * Order:
- * 1. Caller-supplied `context.cwd` (the session that initiated `read`).
- * 2. First registered session via `AgentRegistry` (single-session fallback).
- * 3. `process.cwd()` (last resort).
- *
- * The earlier-fallback drives `gh repo view` and any `gh issue list` /
- * `gh pr list` for short-form URLs, so getting this right is what keeps
- * reads of `issue://N` from picking the wrong repo across concurrent sessions.
- */
-function resolveCwd(context: ResolveContext | undefined): string {
-	if (context?.cwd) return context.cwd;
-	for (const ref of AgentRegistry.global().list()) {
-		const cwd = ref.session?.sessionManager?.getCwd();
-		if (cwd) return cwd;
+function parsePinnedDiffGeneration(url: InternalUrl): number | undefined {
+	const raw = url.searchParams.get("at");
+	if (raw === null) return undefined;
+	const parsed = parsePositiveDecimalInt(raw);
+	if (parsed === undefined) {
+		throw new Error(`Invalid pr:// diff snapshot '${raw}'. Expected a positive integer cache generation.`);
 	}
-	return process.cwd();
+	return parsed;
+}
+
+function diffSnapshotQuery(fetchedAt: number | undefined): string {
+	return fetchedAt === undefined ? "" : `?at=${fetchedAt}`;
 }
 
 async function resolveListRepo(
@@ -410,10 +390,14 @@ function buildSingleResource({
 	};
 }
 
-function formatFileLine(idx: number, file: PrDiffFile, repo: string, prNumber: number): string {
-	const stats = file.changeType === "binary" ? "(binary)" : `+${file.additions} -${file.deletions}`;
-	const rename = file.oldPath ? `  (renamed from ${file.oldPath})` : "";
-	return `${idx}. ${file.path}  ${stats}  [${file.changeType}]${rename}\n   pr://${repo}/${prNumber}/diff/${idx}`;
+function loadPinnedPrDiff(repo: string, number: number, fetchedAt: number, settings: ResolveContext["settings"]) {
+	const pinned = getPinnedPrDiff({ repo, number, fetchedAt, settings });
+	if (!pinned) {
+		throw new Error(
+			`pr://${repo}/${number}/diff?at=${fetchedAt} is not available: the pinned snapshot expired, the GitHub cache is disabled, or it was saved under another GitHub account. Run /review again.`,
+		);
+	}
+	return pinned;
 }
 
 async function fetchAndRenderPrDiff(
@@ -433,70 +417,22 @@ async function fetchAndRenderPrDiff(
 			);
 		}
 	}
-	const lookup = await getOrFetchPrDiff({
-		cwd,
-		repo,
-		number: parsed.number,
-		signal: context?.signal,
-		settings: context?.settings,
+	const lookup =
+		parsed.fetchedAt === undefined
+			? await getOrFetchPrDiff({
+					cwd,
+					repo,
+					number: parsed.number,
+					signal: context?.signal,
+					settings: context?.settings,
+				})
+			: loadPinnedPrDiff(repo, parsed.number, parsed.fetchedAt, context?.settings);
+	return renderDiffFamilyResource(url, parsed.mode, parsed.index, lookup, {
+		baseUrl: `pr://${repo}/${parsed.number}`,
+		heading: `Pull Request Diff: ${repo}#${parsed.number}`,
+		noun: "PR",
+		query: diffSnapshotQuery(parsed.fetchedAt),
 	});
-	const files = lookup.payload.files;
-	const freshness = formatFreshnessNote(lookup.status, lookup.fetchedAt);
-
-	if (parsed.mode === "all") {
-		const content = lookup.payload.unified;
-		return {
-			url: url.href,
-			content,
-			contentType: "text/plain",
-			size: Buffer.byteLength(content, "utf-8"),
-			notes: [
-				freshness,
-				`Full diff for pr://${repo}/${parsed.number} (${files.length} file${files.length === 1 ? "" : "s"})`,
-			],
-		};
-	}
-
-	if (parsed.mode === "slice") {
-		const index = parsed.index ?? 0;
-		if (index < 1 || index > files.length) {
-			throw new Error(
-				`pr://${repo}/${parsed.number}/diff/${index} is out of range; PR has ${files.length} file${files.length === 1 ? "" : "s"}. Use pr://${repo}/${parsed.number}/diff to list available indices.`,
-			);
-		}
-		const file = files[index - 1];
-		if (!file) {
-			throw new Error(`pr://${repo}/${parsed.number}/diff/${index} resolved to a missing slice (parser bug).`);
-		}
-		const content = lookup.payload.unified.slice(file.startOffset, file.endOffset);
-		return {
-			url: url.href,
-			content,
-			contentType: "text/plain",
-			size: Buffer.byteLength(content, "utf-8"),
-			notes: [
-				freshness,
-				`Showing file ${index}/${files.length}: ${file.path}`,
-				`Read all: pr://${repo}/${parsed.number}/diff/all`,
-			],
-		};
-	}
-
-	// mode === "list"
-	const header = `# Pull Request Diff: ${repo}#${parsed.number} (${files.length} file${files.length === 1 ? "" : "s"})`;
-	const body =
-		files.length === 0
-			? "_No file changes._"
-			: files.map((f, i) => formatFileLine(i + 1, f, repo, parsed.number)).join("\n\n");
-	const footer = `\n\n---\nRead all: \`pr://${repo}/${parsed.number}/diff/all\`. Each file is also available as \`pr://${repo}/${parsed.number}/diff/<i>\`.`;
-	const content = `${header}\n\n${body}${footer}`;
-	return {
-		url: url.href,
-		content,
-		contentType: "text/markdown",
-		size: Buffer.byteLength(content, "utf-8"),
-		notes: [freshness, `File listing for pr://${repo}/${parsed.number}`],
-	};
 }
 
 /**

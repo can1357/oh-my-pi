@@ -18,8 +18,8 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 import { cfgReadSummarizeEnabled, cfgToolsOutputMaxColumns } from "@oh-my-pi/pi-coding-agent/tools/settings";
@@ -28,7 +28,7 @@ const HASHLINE_HEADER_LINE = /^\[([^#\r\n]+)#([0-9A-F]{4})\]$/m;
 const COLUMN_CAP = 64;
 const LONG_LINE_LEN = COLUMN_CAP * 3;
 
-function textOutput(result: AgentToolResult<ReadToolDetails>): string {
+function textOutput(result: AgentToolResult<unknown>): string {
 	return result.content
 		.filter(c => c.type === "text")
 		.map(c => c.text)
@@ -161,6 +161,122 @@ describe("read tool column truncation vs hashline snapshot", () => {
 
 		const after = await fs.readFile(filePath, "utf8");
 		expect(after).toBe(`intro\n${longLine}\nepilogue\n`);
+	});
+
+	it("rejects a PUT or CUT of a column-cut line until a raw read shows its tail", async () => {
+		const filePath = path.join(tmpDir, "tail.txt");
+		const longLine = `note: ${"abcdefghij".repeat(80)} END-OF-LINE-TAIL`;
+		const original = `first\n${longLine}\nlast\n`;
+		await fs.writeFile(filePath, original);
+
+		const session = createSession(tmpDir);
+		cfgToolsOutputMaxColumns.set(session.settings, 768);
+		const readTool = new ReadTool(session);
+		const readText = textOutput(await readTool.execute("read-cut", { path: filePath }));
+		const { header } = extractHeader(readText);
+		const shownLine = readText
+			.split("\n")
+			.find(line => line.startsWith("2:"))!
+			.slice(2);
+		expect(shownLine.endsWith("…")).toBe(true);
+
+		const editTool = new EditTool(session, "hashline");
+		for (const body of [
+			`PUT 2.=2:\n+${shownLine.slice(0, -1).replace("note:", "NOTE:")}\n`,
+			`PUT 2.=2:\n+${shownLine.replace("note:", "NOTE:")}\n`,
+			"CUT 2.=2\n",
+		]) {
+			const result = await editTool.execute("edit-cut", { input: `${header}\n${body}` });
+			expect(textOutput(result)).toContain("tail.txt:2:raw");
+			expect(await fs.readFile(filePath, "utf8")).toBe(original);
+		}
+
+		const raw = textOutput(await readTool.execute("read-raw", { path: `${filePath}:2-2:raw` }));
+		expect(raw).toContain(longLine);
+		await editTool.execute("edit-full", {
+			input: `${header}\nPUT 2.=2:\n+${longLine.replace("note:", "NOTE:")}\n`,
+		});
+		expect(await fs.readFile(filePath, "utf8")).toBe(original.replace("note:", "NOTE:"));
+	});
+
+	it("rejects a cut line in a multi-range read but allows edits to the other displayed range", async () => {
+		const filePath = path.join(tmpDir, "multi-cut.txt");
+		const longLine = `note: ${"abcdefghij".repeat(80)} END-OF-LINE-TAIL`;
+		const original = `first\n${longLine}\nthird\nfourth\n`;
+		await fs.writeFile(filePath, original);
+		const session = createSession(tmpDir);
+		cfgToolsOutputMaxColumns.set(session.settings, 768);
+		const readText = textOutput(
+			await new ReadTool(session).execute("read-multi-cut", { path: `${filePath}:2-2,4-4` }),
+		);
+		const { header } = extractHeader(readText);
+		const editTool = new EditTool(session, "hashline");
+		const cut = await editTool.execute("edit-multi-cut", {
+			input: `${header}\nCUT 2.=2\n`,
+		});
+		expect(textOutput(cut)).toContain("multi-cut.txt:2:raw");
+		expect(await fs.readFile(filePath, "utf8")).toBe(original);
+		await editTool.execute("edit-multi-full", {
+			input: `${header}\nPUT 4.=4:\n+FOURTH\n`,
+		});
+		expect(await fs.readFile(filePath, "utf8")).toBe(original.replace("fourth", "FOURTH"));
+	});
+
+	it("rejects a block PUT or CUT whose interior holds a column-cut line", async () => {
+		const filePath = path.join(tmpDir, "block.ts");
+		const longLine = `note: ${"abcdefghij".repeat(80)} END-OF-LINE-TAIL`;
+		const original = `function f() {\n\tconst x = "${longLine}";\n\treturn x;\n}\n`;
+		await fs.writeFile(filePath, original);
+		const session = createSession(tmpDir);
+		cfgToolsOutputMaxColumns.set(session.settings, 768);
+		const readText = textOutput(await new ReadTool(session).execute("read-block", { path: filePath }));
+		const { header } = extractHeader(readText);
+		const shownLine = readText
+			.split("\n")
+			.find(line => line.startsWith("2:"))!
+			.slice(2, -1);
+		const editTool = new EditTool(session, "hashline");
+		for (const body of [`PUT 1*:\n+function f() {\n+${shownLine}\n+\treturn x.trim();\n+}\n`, "CUT 1*\n"]) {
+			const result = await editTool.execute("edit-block", { input: `${header}\n${body}` });
+			expect(textOutput(result)).toContain("block.ts:2:raw");
+			expect(await fs.readFile(filePath, "utf8")).toBe(original);
+		}
+	});
+
+	it("marks a line seen when column capping is disabled", async () => {
+		const filePath = path.join(tmpDir, "uncapped.txt");
+		const longLine = `note: ${"abcdefghij".repeat(80)} END-OF-LINE-TAIL`;
+		await fs.writeFile(filePath, `${longLine}\n`);
+		const session = createSession(tmpDir);
+		cfgToolsOutputMaxColumns.set(session.settings, 0);
+		const readText = textOutput(await new ReadTool(session).execute("read-full", { path: filePath }));
+		const { header } = extractHeader(readText);
+		await new EditTool(session, "hashline").execute("edit-full", {
+			input: `${header}\nPUT 1.=1:\n+${longLine.replace("note:", "NOTE:")}\n`,
+		});
+		expect(await fs.readFile(filePath, "utf8")).toBe(`${longLine.replace("note:", "NOTE:")}\n`);
+	});
+
+	it("does not treat a clipped grep match as an editable full line", async () => {
+		const filePath = path.join(tmpDir, "grep-wide.txt");
+		const longLine = `note: ${"abcdefghij".repeat(80)} END-OF-LINE-TAIL`;
+		const original = `${longLine}\n`;
+		await fs.writeFile(filePath, original);
+		const session = createSession(tmpDir);
+		const grepText = textOutput(
+			await new GrepTool(session).execute("grep-cut", {
+				pattern: "note:",
+				path: filePath,
+			}),
+		);
+		expect(grepText).not.toContain("END-OF-LINE-TAIL");
+		const tag = getEditStore(session).headHash(filePath);
+		expect(tag).not.toBeNull();
+		const result = await new EditTool(session, "hashline").execute("edit-grep-cut", {
+			input: `[${filePath}#${tag}]\nPUT 1.=1:\n+NOTE: cut\n`,
+		});
+		expect(textOutput(result)).toContain("grep-wide.txt:1:raw");
+		expect(await fs.readFile(filePath, "utf8")).toBe(original);
 	});
 
 	it("keeps a genuine blank line editable without exposing the EOF sentinel", async () => {

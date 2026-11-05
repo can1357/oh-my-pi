@@ -271,8 +271,14 @@ export class RawSseDebugBuffer {
 	#totalEvents = 0;
 	#lastUpdatedAt: number | undefined;
 	#nextSequence = 1;
+	#revision = 0;
 	#listeners = new Set<() => void>();
 	#emitScheduled = false;
+
+	/** Bumped on every change to the captured window (append, eviction, clear); equal revisions mean equal snapshots. */
+	get revision(): number {
+		return this.#revision;
+	}
 
 	subscribe(listener: () => void): () => void {
 		this.#listeners.add(listener);
@@ -359,6 +365,7 @@ export class RawSseDebugBuffer {
 		this.#droppedChars = 0;
 		this.#totalEvents = 0;
 		this.#lastUpdatedAt = undefined;
+		this.#revision += 1;
 		this.#emit();
 	}
 
@@ -368,6 +375,7 @@ export class RawSseDebugBuffer {
 		this.#totalChars += chars;
 		this.#lastUpdatedAt = record.timestamp;
 		this.#enforceLimits();
+		this.#revision += 1;
 		this.#emit();
 	}
 

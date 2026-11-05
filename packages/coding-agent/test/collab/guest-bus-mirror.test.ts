@@ -46,6 +46,7 @@ function makeGuestContext(eventBus: EventBus): InteractiveModeContext {
 			},
 		},
 		statusContainer: { clear: () => {} },
+		pendingShellContainer: { clear: () => {} },
 		pendingMessagesContainer: { clear: () => {} },
 		compactionQueuedMessages: [],
 		streamingComponent: undefined,
@@ -73,8 +74,15 @@ function makeGuestContext(eventBus: EventBus): InteractiveModeContext {
 		showError: () => {},
 		updateEditorTopBorder: () => {},
 		updateEditorBorderColor: () => {},
-		eventController: { handleEvent: () => Promise.resolve(), takeDisplaceableComponents: () => [] },
+		eventController: {
+			dispatchSessionEvent: () => Promise.resolve(),
+			takeDisplaceableComponents: () => [],
+			resetTranscriptAnchors: () => {},
+		},
 		syncRunningSubagentBadge: () => {},
+		setCollabGuest: (guest: InteractiveModeContext["collabGuest"]) => {
+			Object.assign(ctx, { collabGuest: guest });
+		},
 		eventBus,
 		subagentEventBus: eventBus,
 	} as unknown as InteractiveModeContext;

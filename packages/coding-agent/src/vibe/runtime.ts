@@ -25,7 +25,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
-import type { AsyncJob, AsyncJobManager } from "../async/job-manager";
+import type { AsyncJob, AsyncJobManagerApi, AsyncJobRunResult } from "../async/job-manager";
+import { validateAgentAccountPools } from "../config/account-pools";
 import { resolveAgentModelSelection } from "../config/model-resolver";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
@@ -36,7 +37,7 @@ import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-r
 import { SessionManager, SessionPersistenceIndeterminateError } from "../session/session-manager";
 import { getBundledAgent } from "../task/agents";
 import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../task/executor";
-import { generateTaskName } from "../task/name-generator";
+import { generateTaskName, sanitizeAgentId } from "../task/name-generator";
 import { AgentOutputManager } from "../task/output-manager";
 import { type AgentDefinition } from "../task/types";
 import { type AgentProgress, oneLineLabel, type SingleResult } from "@oh-my-pi/pi-tui/tools/task";
@@ -56,7 +57,7 @@ import {
 } from "./lifecycle";
 import { type VibeCli } from "@oh-my-pi/pi-tui/tools/vibe";
 
-import { cfgTaskAgentModelOverrides, cfgTaskEnableLsp } from "../task/settings";
+import { cfgTaskAgentAccountPools, cfgTaskAgentModelOverrides, cfgTaskEnableLsp } from "../task/settings";
 /**
  * CLI flavor → bundled agent type. This IS the model-tier mapping: `sonic`
  * carries `model: "@smol"` (the configured fast/low-latency role) and `task`
@@ -101,7 +102,7 @@ export interface VibeParentSession {
 		Partial<
 			Pick<SessionManager, "appendModeChange" | "appendEntriesAtomically" | "recoverPersistenceFromCurrentState">
 		>;
-	asyncJobManager?: AsyncJobManager;
+	asyncJobManager?: AsyncJobManagerApi;
 	settings: ToolSession["settings"];
 	getActiveModelString?: () => string | undefined;
 	getModelString?: () => string | undefined;
@@ -120,8 +121,6 @@ interface ResolvedVibeWorker {
 	modelOverride?: string | string[];
 	/** Pre-expansion role alias behind {@link modelOverride}, when the worker agent named one. */
 	modelRole?: string;
-	/** {@link modelOverride} is the parent's live selector; its `:level` ranks below the agent's own level. */
-	modelInheritsLiveThinkingLevel?: boolean;
 }
 
 interface VibeTurn {
@@ -145,8 +144,6 @@ interface VibeRecord {
 	modelOverride?: string | string[];
 	/** Pre-expansion role alias behind {@link modelOverride}, when the worker agent named one. */
 	modelRole?: string;
-	/** {@link modelOverride} is the parent's live selector; its `:level` ranks below the agent's own level. */
-	modelInheritsLiveThinkingLevel?: boolean;
 	state: VibeSessionState;
 	createdAt: number;
 	lastActivityAt: number;
@@ -363,19 +360,14 @@ export class VibeSessionRegistry {
 		// Same contract as the task spawn path: the expansion discards the role
 		// alias (`@task`, `@smol`), so patterns and role identity come from one
 		// call — the child's inherited retry-fallback chain is keyed off the role.
-		const { patterns, role, inheritsLiveThinkingLevel } = resolveAgentModelSelection({
+		const { patterns, role } = resolveAgentModelSelection({
 			settingsOverride: agentModelOverrides[agentName],
 			agentModel: agent.model,
 			settings: session.settings,
 			activeModelPattern: session.getActiveModelString?.(),
 			fallbackModelPattern: session.getModelString?.(),
 		});
-		return {
-			agent,
-			modelOverride: patterns,
-			modelRole: role,
-			modelInheritsLiveThinkingLevel: inheritsLiveThinkingLevel,
-		};
+		return { agent, modelOverride: patterns, modelRole: role };
 	}
 
 	async #appendLifecycleEvent(
@@ -494,7 +486,7 @@ export class VibeSessionRegistry {
 		for (const record of pending) record.terminalPersisted = true;
 	}
 
-	#manager(session: ToolSession): AsyncJobManager {
+	#manager(session: ToolSession): AsyncJobManagerApi {
 		const manager = session.asyncJobManager;
 		if (!manager) {
 			throw new ToolError("Vibe sessions require async execution (no background job manager is available).");
@@ -767,10 +759,7 @@ export class VibeSessionRegistry {
 				existing.sessionFile === childSessionFile &&
 				(existing.status === "idle" || existing.status === "parked");
 			const blockedByCollision = Boolean(existing && !existingIsResumable);
-			const { agent, modelOverride, modelRole, modelInheritsLiveThinkingLevel } = this.#resolveWorker(
-				session,
-				spawn.cli,
-			);
+			const { agent, modelOverride, modelRole } = this.#resolveWorker(session, spawn.cli);
 			if (!existing) {
 				AgentRegistry.global().register({
 					id: spawn.id,
@@ -792,7 +781,6 @@ export class VibeSessionRegistry {
 				agent,
 				modelOverride,
 				modelRole,
-				modelInheritsLiveThinkingLevel,
 				state: "idle",
 				createdAt: spawn.createdAt,
 				lastActivityAt: candidate.lastActivityAt,
@@ -827,18 +815,14 @@ export class VibeSessionRegistry {
 			throw new ToolError("Vibe mode has exited; enter Vibe mode again before spawning a worker.");
 		}
 		const manager = this.#manager(session);
-		const { agent, modelOverride, modelRole, modelInheritsLiveThinkingLevel } = this.#resolveWorker(
-			session,
-			args.cli,
-		);
+		const { agent, modelOverride, modelRole } = this.#resolveWorker(session, args.cli);
 		if (!session.agentOutputManager) {
 			session.agentOutputManager = new AgentOutputManager(session.getArtifactsDir ?? (() => null));
 		}
 		const reservedIds = this.#persistedIds(session, scope);
 		for (const ref of AgentRegistry.global().list()) reservedIds.add(ref.id);
 		await session.agentOutputManager.reserve(reservedIds);
-		const requestedName = args.name?.replace(/[^A-Za-z0-9_-]+/g, "").slice(0, 48);
-		const id = await session.agentOutputManager.allocate(requestedName || generateTaskName());
+		const id = await session.agentOutputManager.allocate(sanitizeAgentId(args.name) || generateTaskName());
 		const parentSessionFile = scope.parentSessionFile;
 		const childSessionName = `${id}.jsonl`;
 		const childSessionFile = parentSessionFile
@@ -855,7 +839,6 @@ export class VibeSessionRegistry {
 			agent,
 			modelOverride,
 			modelRole,
-			modelInheritsLiveThinkingLevel,
 			state: "starting",
 			createdAt,
 			lastActivityAt: createdAt,
@@ -1034,7 +1017,7 @@ export class VibeSessionRegistry {
 	}
 
 	/** Detach one parent's process-local workers without tombstoning their persisted conversations. */
-	async suspendScope(scope: VibeOwnerScope, manager?: AsyncJobManager): Promise<number> {
+	async suspendScope(scope: VibeOwnerScope, manager?: AsyncJobManagerApi): Promise<number> {
 		const records = [...this.#records.values()].filter(record => matchesScope(record, scope));
 		const teardown = records.map(record => ({
 			record,
@@ -1157,7 +1140,7 @@ export class VibeSessionRegistry {
 
 	async #killRecord(
 		record: VibeRecord,
-		manager: AsyncJobManager | undefined,
+		manager: AsyncJobManagerApi | undefined,
 		session: VibeParentSession,
 		reason: VibeTombstoneReason,
 		persistTerminal = true,
@@ -1297,8 +1280,12 @@ export class VibeSessionRegistry {
 		await fs.mkdir(artifactsDir, { recursive: true });
 		if (!sessionArtifactsDir) registerArtifactsDir(artifactsDir);
 		const localProtocolOptions = sessionLocalProtocolOptions(session);
+		// Same exact-name pool task dispatch and persisted revival apply, so a
+		// worker is restricted from its first turn, not only after a revive.
+		const agentAccountPools = validateAgentAccountPools(cfgTaskAgentAccountPools.get(session.settings));
 		return {
 			cwd: session.cwd,
+			costGate: session.costGate,
 			agent: record.agent,
 			task: message,
 			assignment: message,
@@ -1309,7 +1296,6 @@ export class VibeSessionRegistry {
 			detached: true,
 			modelOverride: record.modelOverride,
 			modelRole: record.modelRole,
-			modelInheritsLiveThinkingLevel: record.modelInheritsLiveThinkingLevel,
 			parentActiveModelPattern: session.getActiveModelString?.(),
 			thinkingLevel: record.agent.thinkingLevel,
 			sessionFile,
@@ -1323,9 +1309,11 @@ export class VibeSessionRegistry {
 			authStorage: session.authStorage,
 			modelRegistry: session.modelRegistry,
 			settings: session.settings,
+			asyncJobManager: session.asyncJobManager,
 			inheritedSessionAgents: session.getSessionAgents?.(),
 			mcpManager: session.mcpManager ?? MCPManager.instance(),
-			contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
+			contextFiles: session.contextFiles,
+			noContextFiles: session.noContextFiles,
 			skills: [...(session.skills ?? [])],
 			workspaceTree: session.workspaceTree,
 			promptTemplates: session.promptTemplates,
@@ -1339,7 +1327,11 @@ export class VibeSessionRegistry {
 			parentMnemopiSessionState: session.getMnemopiSessionState?.(),
 			parentTelemetry: session.getTelemetry?.(),
 			parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
+			parentPromptCacheKey: session.getPromptCacheKey?.(),
 			parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
+			oauthAccountPools: Object.hasOwn(agentAccountPools, record.agent.name)
+				? agentAccountPools[record.agent.name]
+				: undefined,
 			keepAlive: true,
 		};
 	}
@@ -1347,7 +1339,7 @@ export class VibeSessionRegistry {
 	/** Register one background job that runs a single worker turn and self-delivers its result. */
 	#registerTurnJob(
 		session: ToolSession,
-		manager: AsyncJobManager,
+		manager: AsyncJobManagerApi,
 		record: VibeRecord,
 		message: string,
 		options: { first: boolean },
@@ -1431,7 +1423,7 @@ export class VibeSessionRegistry {
 	/** Post-turn bookkeeping shared by success and failure paths: clear the in-flight turn, flush the queue. */
 	async #finishTurn(
 		session: ToolSession,
-		manager: AsyncJobManager,
+		manager: AsyncJobManagerApi,
 		record: VibeRecord,
 		settledJobId: string,
 	): Promise<void> {
@@ -1480,13 +1472,13 @@ export class VibeSessionRegistry {
 	/** Format a settled turn into the self-delivering result text (activity trace + response). */
 	async #settleTurn(
 		session: ToolSession,
-		manager: AsyncJobManager,
+		manager: AsyncJobManagerApi,
 		record: VibeRecord,
 		turn: VibeTurn,
 		settledJobId: string,
 		turnIndex: number,
 		result: SingleResult,
-	): Promise<string> {
+	): Promise<AsyncJobRunResult> {
 		await this.#finishTurn(session, manager, record, settledJobId);
 		const failed = result.exitCode !== 0 || result.aborted === true;
 		const status = result.aborted ? "aborted" : failed ? "failed" : "completed";
@@ -1545,7 +1537,10 @@ export class VibeSessionRegistry {
 			].join("\n");
 		}
 		if (failed) throw new VibeTurnError(text);
-		return text;
+		// A vibe turn job's id is never the agent id, so the delivery names the
+		// agent's handles. A follow-up turn that ends in prose writes no
+		// `<id>.md`, leaving an earlier turn's output under `agent://<id>`.
+		return { text, agentOutputPublished: result.outputPath !== undefined };
 	}
 }
 
@@ -1569,7 +1564,7 @@ export function aggregateVibeWorkerTokensPerSecond(ownerId: string): number | nu
 	for (const id of ids) {
 		const workerSession = registry.get(id)?.session;
 		if (!workerSession?.isStreaming) continue;
-		const rate = calculateTokensPerSecond(workerSession.state.messages, true);
+		const rate = calculateTokensPerSecond(workerSession.messages, true);
 		if (rate !== null) {
 			total += rate;
 			any = true;

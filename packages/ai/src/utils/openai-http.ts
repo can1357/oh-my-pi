@@ -3,8 +3,8 @@
  * completions, responses, azure responses). Replaces the `openai` SDK client:
  *
  * - Retries: `fetchWithRetry` (Retry-After/quota-hint aware; 5xx/408/429 and
- *   transient network errors). Default 6 total attempts — parity with the
- *   SDK's former `maxRetries: 5`.
+ *   transient network errors; `x-should-retry: false` is terminal). Default 6
+ *   total attempts — parity with the SDK's former `maxRetries: 5`.
  * - SSE decode: `readSseJson` (spec-compliant framing, `[DONE]`-aware).
  *   `onSseEvent` observers now receive real wire frames instead of events
  *   re-synthesized from decoded SDK objects.
@@ -22,6 +22,7 @@ export { OpenAIHttpError };
 
 import type { FetchImpl } from "../types";
 import type { CapturedHttpErrorResponse } from "./http-inspector";
+import { getShouldRetryFromHeaders } from "./retry-after";
 
 /**
  * Total attempts (initial + retries). Parity with the removed SDK clients'
@@ -68,6 +69,8 @@ export interface OpenAIStreamRequestInit {
 	body: unknown;
 	signal: AbortSignal;
 	fetch?: FetchImpl;
+	/** Override the default transport attempt budget for this request. */
+	maxAttempts?: number;
 	/** Optional caller-specific gate composed with shared transport retry exclusions. */
 	shouldRetryResponse?: (response: Response, bodyText: string) => boolean | Promise<boolean>;
 	/**
@@ -96,24 +99,34 @@ export interface OpenAIStreamHandle<TEvent> {
  * watchdog timers and abort-reason bookkeeping.
  */
 export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): Promise<OpenAIStreamHandle<TEvent>> {
-	const response = await fetchWithRetry(init.url, {
-		method: "POST",
-		headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...init.headers },
-		body: JSON.stringify(init.body),
-		signal: init.signal,
-		fetch: init.fetch,
-		maxAttempts: DEFAULT_MAX_ATTEMPTS,
-		// A proxy concurrency-admission 429 (`rate_limit_type: max_parallel_requests`)
-		// surfaces immediately instead of being slept-and-retried here; session
-		// recovery owns its backoff/fallback (issue #8854).
-		shouldRetryResponse: async (response, bodyText) =>
-			!isConcurrencyAdmissionRejection(response, bodyText) &&
-			(init.shouldRetryResponse === undefined || (await init.shouldRetryResponse(response, bodyText))),
-		// Bun's native fetch enforces a hard ~300s pre-response timeout (issue #2422).
-		// Cold large-context streams legitimately exceed it; the caller's
-		// `firstEventTimeoutMs`/`AbortSignal` already govern stuck requests.
-		timeout: false,
-	});
+	let response: Response;
+	try {
+		response = await fetchWithRetry(init.url, {
+			method: "POST",
+			headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...init.headers },
+			body: JSON.stringify(init.body),
+			signal: init.signal,
+			fetch: init.fetch,
+			maxAttempts: init.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+			// A server/gateway `x-should-retry: false` verdict is terminal, as it was
+			// under the removed SDK client. A proxy concurrency-admission 429
+			// (`rate_limit_type: max_parallel_requests`) surfaces immediately instead of
+			// being slept-and-retried here; session recovery owns its backoff/fallback
+			// (issue #8854).
+			shouldRetryResponse: async (response, bodyText) =>
+				getShouldRetryFromHeaders(response.headers) !== false &&
+				!isConcurrencyAdmissionRejection(response, bodyText) &&
+				(init.shouldRetryResponse === undefined || (await init.shouldRetryResponse(response, bodyText))),
+			// Bun's native fetch enforces a hard ~300s pre-response timeout (issue #2422).
+			// Cold large-context streams legitimately exceed it; the caller's
+			// `firstEventTimeoutMs`/`AbortSignal` already govern stuck requests.
+			timeout: false,
+		});
+	} catch (error) {
+		// Transport rejection after the retry budget: name the host and the cause
+		// instead of surfacing the runtime's bare `getaddrinfo …` text.
+		throw AIError.networkFailureError(error, init.url);
+	}
 	if (!response.ok) {
 		throw await captureOpenAIHttpError(response);
 	}

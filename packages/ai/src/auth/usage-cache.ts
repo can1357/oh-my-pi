@@ -3,9 +3,11 @@ import type { AuthCredential, OAuthCredential } from "./types";
 import type { CredentialPool } from "./pool";
 import type { Provider } from "../types";
 import type { UsageCredential, UsageProvider, UsageReport } from "../usage";
+import { isRecord } from "../utils";
 
 const USAGE_CACHE_PREFIX = "usage_cache:";
 const USAGE_FORCE_REFRESH_CACHE_PREFIX = "force-refresh:";
+const USAGE_REPORT_KEY_PREFIX = "report:";
 /** Minimum interval between non-exhausted header snapshots; used by UsageService. */
 export const USAGE_HEADER_INGEST_INTERVAL_MS = 60_000;
 const USAGE_LAST_GOOD_RETENTION_MS = 24 * 60 * 60_000;
@@ -43,6 +45,24 @@ function parseUsageCacheEntry<T>(raw: string): UsageCacheEntry<T> | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+/** Cached reports drop the provider's upstream `raw` payload; only a fresh fetch carries it. */
+function withoutRawPayload(value: unknown): unknown {
+	if (value === null || typeof value !== "object" || !("raw" in value)) return value;
+	const { raw: _raw, ...rest } = value;
+	return rest;
+}
+
+/**
+ * End of a cached value's durable retention. A report is retained for 24h past
+ * its last successful fetch, so re-storing it as a failure fallback never
+ * extends that window; other values are retained for 24h from now.
+ */
+function retentionDeadline(value: unknown): number {
+	const fetchedAt = isRecord(value) ? value.fetchedAt : undefined;
+	const start = typeof fetchedAt === "number" && Number.isFinite(fetchedAt) && fetchedAt > 0 ? fetchedAt : Date.now();
+	return start + USAGE_LAST_GOOD_RETENTION_MS;
 }
 
 /** Convert a stored credential for usage providers; used by usage and health services. */
@@ -195,14 +215,19 @@ export class UsageCache {
 		return parseUsageCacheEntry<T>(raw);
 	}
 
+	/** Last successful report under `key` while inside its retention window; the failure-path fallback. */
+	lastGood(key: string): UsageReport | null {
+		const report = this.getStale<UsageReport | null>(key)?.value;
+		return report && Date.now() < retentionDeadline(report) ? report : null;
+	}
+
 	set<T>(key: string, entry: UsageCacheEntry<T>): void {
-		const payload = JSON.stringify({
-			value: entry.value,
-			expiresAt: entry.expiresAt,
-		});
-		const durableExpiresAt =
-			entry.value === null ? entry.expiresAt : Math.max(entry.expiresAt, Date.now() + USAGE_LAST_GOOD_RETENTION_MS);
-		this.#store.setCache(`${USAGE_CACHE_PREFIX}${key}`, payload, Math.floor(durableExpiresAt / 1000));
+		const value = withoutRawPayload(entry.value);
+		const deadline = value === null ? undefined : retentionDeadline(value);
+		// Failure cooldowns must not make a last-good report fresh beyond retention.
+		const expiresAt = deadline === undefined ? entry.expiresAt : Math.min(entry.expiresAt, deadline);
+		const payload = JSON.stringify({ value, expiresAt });
+		this.#store.setCache(`${USAGE_CACHE_PREFIX}${key}`, payload, Math.floor((deadline ?? expiresAt) / 1000));
 	}
 
 	deletePrefix(prefix: string): boolean {
@@ -272,7 +297,7 @@ export class UsageCache {
 		const baseUrl = this.#normalizeUsageBaseUrl(request.baseUrl) || "default";
 		const identity = usageCacheIdentity(request.credential);
 		const providerKey = this.#usageCacheProviderKey(request.provider);
-		const cacheKey = `report:${providerKey}:${baseUrl}:${identity}`;
+		const cacheKey = `${USAGE_REPORT_KEY_PREFIX}${providerKey}:${baseUrl}:${identity}`;
 		const cacheKeys = this.#usageReportCacheKeysByProvider.get(request.provider) ?? new Set<string>();
 		cacheKeys.add(cacheKey);
 		this.#usageReportCacheKeysByProvider.set(request.provider, cacheKeys);
@@ -334,7 +359,7 @@ export class UsageCache {
 		this.#epoch += 1;
 		this.#bumpRefreshEpoch(provider);
 		const expired = Date.now() - 1;
-		const prefix = `report:${this.#usageCacheProviderKey(provider)}:`;
+		const prefix = `${USAGE_REPORT_KEY_PREFIX}${this.#usageCacheProviderKey(provider)}:`;
 		if (this.deletePrefix(prefix)) return;
 		const cacheKeys = new Set(this.#usageReportCacheKeysByProvider.get(provider));
 		for (const entry of this.#pool.entries(provider)) {
@@ -361,7 +386,9 @@ export class UsageCache {
 	): Promise<void> {
 		this.#epoch += 1;
 		this.#bumpRefreshEpoch(provider);
-		const prefix = provider ? `report:${this.#usageCacheProviderKey(provider)}:` : "report:";
+		const prefix = provider
+			? `${USAGE_REPORT_KEY_PREFIX}${this.#usageCacheProviderKey(provider)}:`
+			: USAGE_REPORT_KEY_PREFIX;
 		if (!this.deletePrefix(prefix)) {
 			// Third-party stores may not support prefix deletion. Clear every active
 			// request key instead, including API-key and environment credentials.

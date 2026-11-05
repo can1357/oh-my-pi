@@ -1,3 +1,4 @@
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createEvalCustomTools, describeEvalTools } from "../task/eval-tools";
 import { invalidModelSelectorReason, resolveEffectiveSubagentPolicy } from "../task/structured-subagent";
@@ -22,12 +23,8 @@ export type EvalWorkpoolResult =
 	| WorkPoolPeekResult
 	| { dropped: string[] };
 
-function isUnknownRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
 function requireRecord(args: unknown): Record<string, unknown> {
-	if (!isUnknownRecord(args)) throw new ToolError("workpool() arguments must be an object");
+	if (!isRecord(args)) throw new ToolError("workpool() arguments must be an object");
 	return args;
 }
 
@@ -73,10 +70,12 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 		const requestedName = optionalString(record, "name");
 		const context = optionalString(record, "context");
 		const tools = optionalTools(record);
-		const modelProblem = invalidModelSelectorReason(record.model, "workpool()");
+		const modelProblem = invalidModelSelectorReason(record.model, "workpool()", {
+			settings: options.session.settings,
+			invocationKind: "eval",
+		});
 		if (modelProblem) throw new ToolError(modelProblem);
-		// The shared validator rejects non-string elements and empty selectors.
-		const model = record.model as string | string[] | undefined;
+		const model = typeof record.model === "string" ? record.model : undefined;
 		if (tools?.length && options.session.getPlanModeState?.()?.enabled === true) {
 			throw new ToolError("Eval-defined tools are unavailable in plan mode.");
 		}
@@ -85,7 +84,7 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 			invocationKind: "eval",
 			assignment: `Create workpool ${requestedName ?? agent ?? "worker"}`,
 			...(agent ? { agent } : {}),
-			...(model !== undefined ? { model } : {}),
+			...(model !== undefined ? { perCallModel: model } : {}),
 		});
 		const customTools = tools?.length
 			? createEvalCustomTools(options.session, await describeEvalTools(options.session, tools, options.signal))

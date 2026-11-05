@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
-import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
+import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 
 const originalYoloAutoApiKey = Bun.env.YOLO_AUTO_API_KEY;
@@ -34,7 +34,7 @@ describe("Yolo-Auto login wiring", () => {
 			}
 			fetchCalls.push({ url, init });
 			if (url === "https://yolo-auto.com/v1/models") {
-				return new Response(JSON.stringify({ data: [{ id: "deepseek-flash-v4" }] }), {
+				return new Response(JSON.stringify({ data: [{ id: "qwen3.8-27b" }] }), {
 					status: 200,
 					headers: { "Content-Type": "application/json" },
 				});

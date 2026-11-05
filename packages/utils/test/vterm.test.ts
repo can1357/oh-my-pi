@@ -194,4 +194,60 @@ describe("vterm xterm-compatible golden streams", () => {
 			cursorY: 3,
 		});
 	});
+
+	test("ignores private and intermediate CSI sequences without a handler", async () => {
+		const terminal = new Terminal({ cols: 8, rows: 3 });
+		// DECSC at the origin: a mis-dispatched `CSI < u` / `CSI > 1 u` would restore it.
+		await write(terminal, "\x1b7top\r\nmid");
+		// Kitty keyboard pop/push/query, modifyOtherKeys, XTSMGRAPHICS, DECSCUSR.
+		await write(terminal, "\x1b[<u\x1b[>1u\x1b[?u\x1b[>4;1m\x1b[?2;1;0S\x1b[0 q!");
+		expect(snapshot(terminal)).toEqual({
+			lines: ["top", "mid!", ""],
+			wraps: [false, false, false],
+			length: 3,
+			baseY: 0,
+			viewportY: 0,
+			cursorX: 4,
+			cursorY: 1,
+		});
+		const cell = terminal.buffer.active.getLine(1)!.getCell(3)!;
+		expect(cell.isBold()).toBe(0);
+		expect(cell.isUnderline()).toBe(0);
+		// The unprefixed identifiers keep their meaning.
+		await write(terminal, "\x1b[u\x1b[1m*");
+		expect(terminal.buffer.active.getLine(0)!.translateToString(true)).toBe("*op");
+		expect(terminal.buffer.active.getLine(0)!.getCell(0)!.isBold()).toBe(1);
+	});
+
+	test("keeps ASCII bases joined to combining marks and keycap sequences", async () => {
+		const terminal = new Terminal({ cols: 8, rows: 2 });
+		await write(terminal, "xa\u0301y1\uFE0F\u20E3z");
+		const line = terminal.buffer.active.getLine(0)!;
+		expect(line.getCell(0)!.getChars()).toBe("x");
+		expect(line.getCell(1)!.getChars()).toBe("a\u0301");
+		expect(line.getCell(2)!.getChars()).toBe("y");
+		expect(line.getCell(3)!.getChars()).toBe("1\uFE0F\u20E3");
+		expect(line.getCell(5)!.getChars()).toBe("z");
+		expect(terminal.buffer.active.cursorX).toBe(6);
+	});
+
+	test("attaches a combining mark from a later write to the previous cell", async () => {
+		const terminal = new Terminal({ cols: 6, rows: 2 });
+		await write(terminal, "aa");
+		await write(terminal, "\u0301b");
+		const line = terminal.buffer.active.getLine(0)!;
+		expect(line.getCell(0)!.getChars()).toBe("a");
+		expect(line.getCell(1)!.getChars()).toBe("a\u0301");
+		expect(line.getCell(2)!.getChars()).toBe("b");
+		expect(terminal.buffer.active.cursorX).toBe(3);
+	});
+
+	test("a retained line cannot alter live output after reflow", async () => {
+		const terminal = new Terminal({ cols: 4, rows: 2 });
+		await write(terminal, "\u00e9\u00e9\u00e9\u00e9");
+		const retained = terminal.buffer.active.getLine(0)!;
+		terminal.resize(5, 2);
+		Reflect.set(retained.cells[0]!, "chars", "X");
+		expect(terminal.buffer.active.getLine(0)!.translateToString(true)).toBe("\u00e9\u00e9\u00e9\u00e9");
+	});
 });

@@ -1,10 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import * as os from "node:os";
+import { DEFAULT_SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/spinner-clock";
 import {
 	buildTerminalTitleWithState,
 	disposeTerminalTitleState,
 	setTerminalTitle,
 	initTerminalTitleState,
+	popTerminalTitle,
 	setSessionTerminalTitle,
+	setTerminalSessionSource,
+	setTerminalTitleSpinnerInterval,
 	setTerminalTitleSpinnerStyle,
 	setTerminalTitleState,
 } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
@@ -155,6 +160,7 @@ describe("disposeTerminalTitleState", () => {
 		// test's teardown latched it off), a fresh session base, run state idle.
 		initTerminalTitleState();
 		setTerminalTitleSpinnerStyle("braille");
+		setTerminalTitleSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
 		setSessionTerminalTitle("my-project");
 		setTerminalTitleState("idle");
 		resetObserved(writes, windowsTitleMock);
@@ -186,7 +192,7 @@ describe("disposeTerminalTitleState", () => {
 		setTerminalTitleState("working");
 
 		// Control: BEFORE dispose the interval is live — advancing the clock across
-		// several 80ms tick periods DOES emit further OSC-title writes (proves the
+		// several tick periods DOES emit further OSC-title writes (proves the
 		// timer was actually running, so the post-dispose silence is meaningful and
 		// not a headless/TTY misconfiguration masking all writes).
 		resetObserved(writes, windowsTitleMock);
@@ -313,7 +319,7 @@ describe("disposeTerminalTitleState", () => {
 		setTerminalTitleState("working");
 		resetObserved(writes, windowsTitleMock);
 
-		vi.advanceTimersByTime(160);
+		vi.advanceTimersByTime(DEFAULT_SPINNER_INTERVAL_MS * 2);
 
 		const titles = observedTitles(writes, windowsTitleMock);
 		expect(titles.length).toBeGreaterThan(0);
@@ -354,5 +360,125 @@ describe("disposeTerminalTitleState", () => {
 		resetObserved(writes, windowsTitleMock);
 		vi.advanceTimersByTime(400);
 		expect(observedTitles(writes, windowsTitleMock).length).toBeGreaterThan(0);
+	});
+
+	it("ticks at the configured interval, re-arming a live spinner on change", () => {
+		setTerminalTitleState("working");
+		setTerminalTitleSpinnerInterval(1000);
+		resetObserved(writes, windowsTitleMock);
+
+		// Nothing before the new period elapses, even though the default period has passed several times.
+		vi.advanceTimersByTime(999);
+		expect(observedTitles(writes, windowsTitleMock)).toEqual([]);
+		vi.advanceTimersByTime(1);
+		expect(observedTitles(writes, windowsTitleMock)).toHaveLength(1);
+		vi.advanceTimersByTime(1000);
+		expect(observedTitles(writes, windowsTitleMock)).toHaveLength(2);
+	});
+
+	it("pins a static ':' working separator and schedules no timer at interval 0", () => {
+		setTerminalTitleSpinnerInterval(0);
+		resetObserved(writes, windowsTitleMock);
+		setTerminalTitleState("working");
+
+		expect(observedTitles(writes, windowsTitleMock)).toEqual(["π : my-project"]);
+		expect(vi.getTimerCount()).toBe(0);
+		resetObserved(writes, windowsTitleMock);
+		vi.advanceTimersByTime(DEFAULT_SPINNER_INTERVAL_MS * 10);
+		expect(observedTitles(writes, windowsTitleMock)).toEqual([]);
+
+		// Other states are unaffected by the static spinner.
+		setTerminalTitleState("idle");
+		expect(observedTitles(writes, windowsTitleMock)).toEqual(["π > my-project"]);
+	});
+
+	it("clears the title before popping the saved one on shutdown", () => {
+		// CONTRACT: a terminal without a title stack ignores the pop, so the clear
+		// is all that takes omp's title off the tab. A terminal with a stack must
+		// see the pop last, or the clear would wipe the title it restored.
+		disposeTerminalTitleState();
+		popTerminalTitle();
+		expect(writes).toEqual(["\x1b]0;\x07\x1b[23;2t"]);
+	});
+
+	it("restores the initial Windows console title on teardown and does not overwrite it on pop", () => {
+		const originalPlatform = process.platform;
+		const native = windowsTitleMock;
+		if (!native) throw new Error("Windows console title mock not initialized");
+		try {
+			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+			native.current = "original-shell-title";
+
+			initTerminalTitleState();
+			setSessionTerminalTitle("running-session");
+			expect(native.titles).toContain("π > running-session");
+
+			resetObserved(writes, native);
+			// The `InteractiveMode.shutdown()` order: dispose, then pop.
+			disposeTerminalTitleState();
+			expect(native.titles.at(-1)).toBe("original-shell-title");
+
+			// ConPTY applies OSC 0 as a console-title set: the clear would blank the restore.
+			popTerminalTitle();
+			expect(writes).toEqual([]);
+			expect(native.titles.at(-1)).toBe("original-shell-title");
+		} finally {
+			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+		}
+	});
+});
+
+// Tern names omp's directory in its composer bar from the OSC 7 omp writes, as
+// it does for a shell's prompt; other terminals must not hear it.
+describe("reporting the session to Tern", () => {
+	const OSC7 = /\x1b\]7;([^\x07]*)\x07/g;
+	let writes = "";
+	let stdoutSpy: { mockRestore(): void } | undefined;
+	let prevHeadless = false;
+	let ttyDescriptor: PropertyDescriptor | undefined;
+	let prevTermProgram: string | undefined;
+
+	beforeEach(() => {
+		prevHeadless = setTerminalHeadless(false);
+		ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+		prevTermProgram = Bun.env.TERM_PROGRAM;
+		Bun.env.TERM_PROGRAM = "tern";
+		writes = "";
+		stdoutSpy = spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+			writes += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk as Uint8Array);
+			return true;
+		});
+		initTerminalTitleState();
+	});
+
+	afterEach(() => {
+		disposeTerminalTitleState();
+		stdoutSpy?.mockRestore();
+		if (ttyDescriptor) Object.defineProperty(process.stdout, "isTTY", ttyDescriptor);
+		else Reflect.deleteProperty(process.stdout, "isTTY");
+		if (prevTermProgram === undefined) delete Bun.env.TERM_PROGRAM;
+		else Bun.env.TERM_PROGRAM = prevTermProgram;
+		setTerminalHeadless(prevHeadless);
+	});
+
+	it.skipIf(process.platform === "win32")("reports the directory with OSC 7 when it changes", () => {
+		let cwd = "/work/my project";
+		setTerminalSessionSource({ file: () => undefined, cwd: () => cwd });
+		// Retitling in the same directory says nothing new.
+		setSessionTerminalTitle("my-project");
+		cwd = "/work/other";
+		setSessionTerminalTitle("my-project");
+		expect([...writes.matchAll(OSC7)].map(match => match[1])).toEqual([
+			`file://${os.hostname()}/work/my%20project`,
+			`file://${os.hostname()}/work/other`,
+		]);
+	});
+
+	it("reports nothing to other terminals", () => {
+		Bun.env.TERM_PROGRAM = "ghostty";
+		setTerminalSessionSource({ file: () => undefined, cwd: () => "/work/other" });
+		setSessionTerminalTitle("my-project");
+		expect(writes).not.toContain("\x1b]7;");
 	});
 });

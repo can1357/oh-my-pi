@@ -44,7 +44,9 @@ const LOAD_STEPS = [50, 200, 1_000] as const;
 export function ErrorsRoute({ active, range, onRequestClick }: ErrorsRouteProps) {
 	const [step, setStep] = useState(0);
 	const limit = LOAD_STEPS[step];
-	const errors = useQuery(["errors", range, limit], () => getRecentErrors(range, limit), { enabled: active });
+	const errors = useQuery(["errors", range, limit], ({ signal }) => getRecentErrors(range, limit, signal), {
+		enabled: active,
+	});
 	const [selectedSignature, setSelectedSignature] = useState<string | null>(null);
 	const [selectedModel, setSelectedModel] = useState<string | null>(null);
 	const [search, setSearch] = useState("");

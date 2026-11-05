@@ -133,6 +133,14 @@ export function resolveThinkingLevelForModel(
 }
 
 /**
+ * Level applied to `model` when the user has not picked one for it (carried,
+ * global default, auto). Unverified thinking stays unset until the user picks.
+ */
+export function automaticThinkingLevel<T>(model: Model | undefined, fallback: T): T | undefined {
+	return model?.thinking?.unverified ? undefined : fallback;
+}
+
+/**
  * Sentinel selector for the coding-agent "auto" thinking mode. Kept entirely
  * inside the coding-agent layer: it is never an {@link Effort} or
  * {@link ThinkingLevel}, so provider mapping/clamping keeps seeing concrete
@@ -146,6 +154,37 @@ export type { ConfiguredThinkingLevel } from "./render/render-utils";
 /** Maps the session-level `auto` sentinel to `undefined`; concrete levels pass through. */
 export function concreteThinkingLevel(level: ConfiguredThinkingLevel | undefined): ThinkingLevel | undefined {
 	return level === AUTO_THINKING ? undefined : level;
+}
+
+/**
+ * Selector a new session on `model` starts with when neither the launch nor a
+ * restored session pins one: the default role's explicit selector, then the
+ * model's own default level (unless the configured default is `auto`), then the
+ * configured default. Shared by session startup and the next launch's prepaint.
+ */
+export function newSessionThinkingLevel(
+	model: Model | undefined,
+	roleLevel: ConfiguredThinkingLevel | undefined,
+	configuredDefault: ConfiguredThinkingLevel | undefined,
+): ConfiguredThinkingLevel | undefined {
+	if (roleLevel !== undefined) return roleLevel;
+	if (configuredDefault !== AUTO_THINKING && model?.thinking?.defaultLevel !== undefined) {
+		return model.thinking.defaultLevel;
+	}
+	return automaticThinkingLevel(model, configuredDefault);
+}
+
+/**
+ * Concrete level `selector` runs at on `model`: clamped to its ladder, or the
+ * provisional effort while `auto` awaits its first per-turn classification.
+ */
+export function resolveConfiguredThinkingLevel(
+	model: Model | undefined,
+	selector: ConfiguredThinkingLevel | undefined,
+): ResolvedThinkingLevel | undefined {
+	return selector === AUTO_THINKING
+		? resolveProvisionalAutoLevel(model)
+		: resolveThinkingLevelForModel(model, selector);
 }
 
 /**
@@ -304,23 +343,21 @@ export function resolveTaskEffortLevel(
 			break;
 	}
 	if (maxEffort === undefined) return resolved;
+	if (model) assertModelSupportsEffortCeiling(model, maxEffort);
 	const maxIndex = THINKING_EFFORTS.indexOf(maxEffort);
-	const ceiling = supported.findLast(candidate => THINKING_EFFORTS.indexOf(candidate) <= maxIndex);
-	if (ceiling === undefined) {
-		const modelName = model ? `${model.provider}/${model.id}` : "Selected model";
-		throw new RangeError(`${modelName} has no supported thinking effort at or below task.maxEffort=${maxEffort}`);
-	}
+	// Without a model the full canonical range always holds `maxEffort` itself.
+	const ceiling = supported.findLast(candidate => THINKING_EFFORTS.indexOf(candidate) <= maxIndex) ?? maxEffort;
 	return THINKING_EFFORTS.indexOf(resolved) > THINKING_EFFORTS.indexOf(ceiling) ? ceiling : resolved;
 }
 
 /**
  * Clamps a concrete thinking selector to a per-session effort ceiling (e.g. a
- * task spawn's `task.maxEffort`-capped effort hint). `off`/`inherit`/
- * `undefined` pass through, as do levels already at or below the ceiling.
- * Levels above it snap to the highest model-supported effort at or below the
- * ceiling. A model whose floor exceeds the ceiling has nothing valid to snap
- * to; the requested level is returned unchanged and the caller is responsible
- * for rejecting or skipping such models (see {@link modelSupportsEffortCeiling}).
+ * task spawn's `task.maxEffort`). Unset/`inherit`/`off` retain their existing
+ * meaning, as do levels already at or below the ceiling. Levels above it snap
+ * to the highest model-supported effort at or below the ceiling. A model whose
+ * floor exceeds the ceiling has nothing valid to snap to; the requested level
+ * is returned unchanged and the caller must reject or skip such models (see
+ * {@link modelSupportsEffortCeiling}).
  */
 export function clampThinkingLevelToCeiling(
 	model: Model | undefined,
@@ -359,6 +396,14 @@ export function modelSupportsEffortCeiling(model: Model, ceiling: Effort): boole
 	return supported.some(candidate => THINKING_EFFORTS.indexOf(candidate) <= maxIndex);
 }
 
+/** Throws when `model` has no supported effort at or below `task.maxEffort`, so a capped spawn fails instead of running at its floor. */
+export function assertModelSupportsEffortCeiling(model: Model, maxEffort: Effort): void {
+	if (modelSupportsEffortCeiling(model, maxEffort)) return;
+	throw new RangeError(
+		`${model.provider}/${model.id} has no supported thinking effort at or below task.maxEffort=${maxEffort}`,
+	);
+}
+
 /**
  * The provisional concrete level shown while `auto` is configured but before a
  * turn has been classified, and the fallback when classification fails. Prefers
@@ -374,7 +419,7 @@ export function modelSupportsEffortCeiling(model: Model, ceiling: Effort): boole
  * models.
  */
 export function resolveProvisionalAutoLevel(model: Model | undefined): Effort | undefined {
-	if (!model?.reasoning) return undefined;
+	if (!model?.reasoning || model.thinking?.unverified) return undefined;
 	const preferred = model.thinking?.defaultLevel ?? Effort.High;
 	return clampAutoThinkingEffort(model, preferred === Effort.Max ? Effort.XHigh : preferred, Effort.XHigh);
 }

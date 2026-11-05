@@ -263,4 +263,38 @@ describe("fetchMarketplace", () => {
 			cloneSpy.mockRestore();
 		}
 	});
+
+	it("removes a partial checkout when cloning fails", async () => {
+		const cloneSpy = spyOn(vcs, "clone").mockImplementation(async (_url, targetDir) => {
+			fs.writeFileSync(path.join(targetDir, "partial"), "unfinished");
+			throw new Error("clone failed");
+		});
+		try {
+			await expect(fetchMarketplace("owner/repo", tmpDir)).rejects.toThrow("clone failed");
+			expect(fs.readdirSync(tmpDir)).toEqual([]);
+		} finally {
+			cloneSpy.mockRestore();
+		}
+	});
+
+	it("keeps simultaneous clone checkouts isolated", async () => {
+		const cloneSpy = spyOn(vcs, "clone").mockImplementation(async (_url, targetDir) => {
+			fs.mkdirSync(path.join(targetDir, ".omp-plugin"));
+			fs.writeFileSync(
+				path.join(targetDir, ".omp-plugin", "marketplace.json"),
+				JSON.stringify({ name: "test-marketplace", owner: { name: "Test" }, plugins: [] }),
+			);
+		});
+		try {
+			const [first, second] = await Promise.all([
+				fetchMarketplace("owner/repo", tmpDir),
+				fetchMarketplace("owner/repo", tmpDir),
+			]);
+			expect(first.clonePath).not.toBe(second.clonePath);
+			expect(fs.existsSync(path.join(first.clonePath!, ".omp-plugin", "marketplace.json"))).toBe(true);
+			expect(fs.existsSync(path.join(second.clonePath!, ".omp-plugin", "marketplace.json"))).toBe(true);
+		} finally {
+			cloneSpy.mockRestore();
+		}
+	});
 });

@@ -38,7 +38,13 @@ export type {
 	RelayControlToGuest,
 	RelayControlToHost,
 } from "@oh-my-pi/pi-wire";
-export { COLLAB_PROMPT_MESSAGE_TYPE, COLLAB_PROTO } from "@oh-my-pi/pi-wire";
+export {
+	COLLAB_PROMPT_MESSAGE_TYPE,
+	COLLAB_PROTO,
+	packEnvelope,
+	rewriteEnvelopePeer,
+	unpackEnvelope,
+} from "@oh-my-pi/pi-wire";
 export { DEFAULT_RELAY_URL, ENVELOPE_HEADER_LENGTH, ROOM_ID_BYTES };
 
 export type CollabParticipant = Participant;
@@ -96,27 +102,56 @@ export type CollabFrame =
 	| { t: "error"; message: string };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Wire envelope: [4B uint32 BE peerId][sealed payload]
-// Host→relay: peerId 0 broadcasts to all guests; peerId N targets guest N.
-// Guest→relay: always 0; the relay rewrites it to the sender's id.
+// Pre-serialized frames: the host bounds replicated payloads by serializing
+// them, so the frames that carry them are assembled from that JSON instead of
+// stringifying the payload a second time.
 // ═══════════════════════════════════════════════════════════════════════════
 
-export function packEnvelope(peerId: number, sealed: Uint8Array): Uint8Array {
-	const out = new Uint8Array(ENVELOPE_HEADER_LENGTH + sealed.byteLength);
-	new DataView(out.buffer).setUint32(0, peerId, false);
-	out.set(sealed, ENVELOPE_HEADER_LENGTH);
-	return out;
+declare const encodedFrameBrand: unique symbol;
+
+/** A `CollabFrame`'s JSON form, produced only by the encoders below. */
+export type EncodedFrame = string & { readonly [encodedFrameBrand]: true };
+
+/**
+ * Field table for a `CollabFrame` variant: its tag under `t`, every other
+ * field mapped to its own name. Annotating an encoder's table with this makes
+ * renaming, adding, or removing a field of that variant a type error here.
+ */
+type FrameFields<T extends CollabFrame["t"]> = {
+	readonly [K in keyof Extract<CollabFrame, { t: T }>]-?: K extends "t" ? T : K;
+};
+
+const ENTRY_FIELDS: FrameFields<"entry"> = { t: "entry", entry: "entry" };
+const EVENT_FIELDS: FrameFields<"event"> = { t: "event", event: "event" };
+const SNAPSHOT_CHUNK_FIELDS: FrameFields<"snapshot-chunk"> = {
+	t: "snapshot-chunk",
+	entries: "entries",
+	final: "final",
+};
+
+const ENTRY_FRAME_HEAD = `{"t":"${ENTRY_FIELDS.t}","${ENTRY_FIELDS.entry}":`;
+const EVENT_FRAME_HEAD = `{"t":"${EVENT_FIELDS.t}","${EVENT_FIELDS.event}":`;
+const SNAPSHOT_CHUNK_HEAD = `{"t":"${SNAPSHOT_CHUNK_FIELDS.t}","${SNAPSHOT_CHUNK_FIELDS.entries}":[`;
+const SNAPSHOT_CHUNK_FINAL = `],"${SNAPSHOT_CHUNK_FIELDS.final}":`;
+
+/** The single construction point of {@link EncodedFrame}. */
+function encodedFrame(json: string): EncodedFrame {
+	return json as EncodedFrame;
 }
 
-export function unpackEnvelope(data: Uint8Array): { peerId: number; payload: Uint8Array } | null {
-	if (data.byteLength < ENVELOPE_HEADER_LENGTH) return null;
-	const peerId = new DataView(data.buffer, data.byteOffset, ENVELOPE_HEADER_LENGTH).getUint32(0, false);
-	return { peerId, payload: data.subarray(ENVELOPE_HEADER_LENGTH) };
+/** `{ t: "entry", entry }` from the entry's JSON. */
+export function encodeEntryFrame(entryJson: string): EncodedFrame {
+	return encodedFrame(`${ENTRY_FRAME_HEAD}${entryJson}}`);
 }
 
-/** Rewrite the peerId in place without copying the payload. */
-export function rewriteEnvelopePeer(data: Uint8Array, peerId: number): void {
-	new DataView(data.buffer, data.byteOffset, ENVELOPE_HEADER_LENGTH).setUint32(0, peerId, false);
+/** `{ t: "event", event }` from the event's JSON. */
+export function encodeEventFrame(eventJson: string): EncodedFrame {
+	return encodedFrame(`${EVENT_FRAME_HEAD}${eventJson}}`);
+}
+
+/** `{ t: "snapshot-chunk", entries, final }` from each entry's JSON. */
+export function encodeSnapshotChunk(entryJsons: readonly string[], final: boolean): EncodedFrame {
+	return encodedFrame(`${SNAPSHOT_CHUNK_HEAD}${entryJsons.join(",")}${SNAPSHOT_CHUNK_FINAL}${final}}`);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

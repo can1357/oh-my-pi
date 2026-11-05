@@ -2,6 +2,8 @@ import { type SelectItem, SelectList, type SgrMouseEvent } from "../index";
 import { getSelectListTheme } from "../theme/theme";
 import { OverlayPanel } from "../chrome/overlay-box";
 import { routeSelectListMouseWithTopBorder } from "../chrome/select-list-mouse-routing";
+import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
+import { SelectListSheet } from "../native/picker";
 
 const ACCOUNT_SELECTOR_MAX_VISIBLE = 10;
 
@@ -19,9 +21,18 @@ export interface SessionPinAccount {
 	label: string;
 }
 
+/** What tells two accounts of one provider apart besides their label: the organization, project or host. */
+function accountDetail(account: SessionPinAccount): string | undefined {
+	const parts = [account.orgName ?? account.orgId, account.projectId, account.enterpriseUrl].filter(
+		(part): part is string => typeof part === "string" && part.trim().length > 0 && !account.label.includes(part),
+	);
+	return parts.length > 0 ? parts.join(" · ") : undefined;
+}
+
 /** Account picker opened by `/session pin` for the current model provider. */
 export class SessionAccountSelectorComponent extends OverlayPanel {
 	#selectList: SelectList;
+	#sheet: SelectListSheet;
 
 	constructor(
 		providerName: string,
@@ -54,6 +65,31 @@ export class SessionAccountSelectorComponent extends OverlayPanel {
 		};
 		this.#selectList.onCancel = onCancel;
 		this.addChild(this.#selectList);
+		// Natively the active account carries the picker's current check, so the
+		// row's detail is what tells accounts apart instead of "active for this session".
+		this.#sheet = new SelectListSheet(this.#selectList, {
+			title: `${providerName} account`,
+			subtitle: "Pin the account this session sends its requests with",
+			icon: "key-round",
+			noun: "accounts",
+			current: accounts.filter(account => account.active).map(account => String(account.credentialId)),
+			confirm: "Pin",
+			decorate: item => {
+				const account = accountsByValue.get(item.value);
+				if (!account) return undefined;
+				const detail = accountDetail(account);
+				return { mark: { text: account.email ?? account.label, seed: account.label }, detail: detail ?? "" };
+			},
+		});
+	}
+
+	override describe(cx: DescribeContext): NativeNode | null {
+		return cx.supports("picker") ? this.#sheet.describe() : super.describe(cx);
+	}
+
+	/** Picker pointer events drive the list exactly as its keys do. */
+	handleNativeEvent(event: NativeUiEvent): void {
+		this.#sheet.handle(event);
 	}
 
 	/** Forward keyboard navigation and cancellation when the wrapper owns focus. */

@@ -97,4 +97,20 @@ describe("formatJavaScriptForDisplay", () => {
 			committed = nextCommitted;
 		}
 	});
+
+	it("tells blocks from object literals after class, function and switch bodies without semicolons", () => {
+		expect(formatJavaScriptForDisplay("class A{m(){return {a:1}}}const o={b:2}")).toBe(
+			["class A {", "    m() {", "        return { a: 1 }", "    }", "}", "const o = { b: 2 }"].join("\n"),
+		);
+		expect(formatJavaScriptForDisplay("function g(){switch(x){case 1:{y()}}}const z={k:[1,2]}")).toBe(
+			[
+				"function g() {",
+				"    switch (x) {",
+				"        case 1: { y() }",
+				"    }",
+				"}",
+				"const z = { k: [1, 2] }",
+			].join("\n"),
+		);
+	});
 });

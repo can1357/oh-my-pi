@@ -2,7 +2,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import type { SessionState, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import type { NativeNode, NativeUiEvent } from "../native/node";
 import type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } from "./schema";
-import type { ActiveRepoContext, StatusLineSession } from "./host";
+import type { ActiveRepoContext, PromptCacheStatus, StatusLineSession } from "./host";
 import type { LoopConditionConfig, LoopLimitRuntime } from "./loop";
 
 export type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle };
@@ -36,6 +36,7 @@ export interface CollabStatus {
 }
 
 export interface StatusLineSegmentOptions {
+	pi?: { showProfile?: boolean };
 	model?: { showThinkingLevel?: boolean };
 	path?: { abbreviate?: boolean; maxLength?: number; stripWorkPrefix?: boolean };
 	git?: { showBranch?: boolean; showStaged?: boolean; showUnstaged?: boolean; showUntracked?: boolean };
@@ -85,6 +86,8 @@ export interface SegmentContext {
 	sessionAccent?: boolean;
 	/** Stand-in session title for previews; `session_name` renders it when the session is unnamed. */
 	previewTitle?: string;
+	/** The viewed session is pinned; `session_name` prefixes the pin icon. */
+	isPinned?: boolean;
 	activeRepo: ActiveRepoContext | null;
 	width: number;
 	options: StatusLineSegmentOptions;
@@ -114,7 +117,7 @@ export interface SegmentContext {
 	} | null;
 	/** Modal editing state, or null when `tui.vimMode` is off. */
 	vim: {
-		mode: "insert" | "normal" | "visual" | "visual-line";
+		mode: "insert" | "normal" | "visual" | "visual-line" | "replace";
 		/** Half-typed operator/count (`"2d"`), empty when nothing is pending. */
 		pending: string;
 		/** Lines spanned by the active Visual selection; 0 outside Visual modes. */
@@ -202,8 +205,20 @@ export interface SegmentContext {
 			expiryHours?: number;
 			expired?: boolean;
 			unavailableReason?: string;
+			expiring?: StatusResetExpiry;
 		};
 	} | null;
+	/** What the next request finds in the prompt cache; read only when the `cache` segment is configured. */
+	promptCache?: PromptCacheStatus;
+}
+
+/** How close an account's saved resets are to expiring, when it is worth a warning. */
+export interface StatusResetExpiry {
+	/** `soon`: within 7 days; `imminent`: within 24 hours. */
+	tier: "soon" | "imminent";
+	count: number;
+	/** Expiry of the reset the warning is about (epoch ms); it can be later than the soonest banked one. */
+	expiresAtMs: number;
 }
 
 export interface RenderedSegment {
@@ -227,8 +242,8 @@ export interface SegmentView {
 
 /**
  * The status line's facts for the native composer. A TSP terminal shows no
- * status strip: the tab title carries the session, the pane header the path
- * and branch, and the composer the rest.
+ * status strip: the tab title carries the session, the pane header the path,
+ * and the composer the rest (the git branch among its facts).
  */
 export interface ComposerFacts {
 	/**
@@ -242,6 +257,8 @@ export interface ComposerFacts {
 	/**
 	 * `status` (role `omp.composer.extras`, `grow: 1`) of the other configured
 	 * segments as `seg`s; the bar's flexible space, so present even when empty.
+	 * The prompt cache's (role `omp.composer.cache`) sits on its right side, beside
+	 * the usage, with a hover card and a click opening `/session`.
 	 */
 	readonly extras: NativeNode;
 	/** `text` (role `omp.composer.usage`): the session cost (empty when there is none). */

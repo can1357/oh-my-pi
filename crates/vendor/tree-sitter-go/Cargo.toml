@@ -35,3 +35,11 @@ cc = "1.2"
 
 [dev-dependencies]
 tree-sitter = "0.25.8"
+
+# Vendored upstream code: keep the workspace's pedantic lint config off it and
+# make that non-inheritance explicit so cargo stops warning for this member.
+[lints.clippy]
+all = { level = "allow", priority = -1 }
+nursery = { level = "allow", priority = -1 }
+pedantic = { level = "allow", priority = -1 }
+cargo = { level = "allow", priority = -1 }

@@ -1,4 +1,5 @@
 import { type AwsCredentials, type SignedHeaders, signRequest } from "@oh-my-pi/pi-ai/providers/aws-sigv4";
+import { asStrictBytes } from "@oh-my-pi/pi-utils";
 import type { BlobDestinationId } from "./destinations";
 import type { BlobUploader, RemoteDeleteAction } from "./publication";
 import {
@@ -317,20 +318,15 @@ function createGcsUploader(config: DestinationRuntimeConfig): BlobUploader {
 	};
 }
 
-function strictBytes(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
-	if (bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
-		return bytes as Uint8Array<ArrayBuffer>;
-	}
-	const copy = new Uint8Array(bytes.byteLength);
-	copy.set(bytes);
-	return copy;
-}
-
 async function hmacSha256Base64(key: Uint8Array, value: string): Promise<string> {
-	const cryptoKey = await crypto.subtle.importKey("raw", strictBytes(key), { name: "HMAC", hash: "SHA-256" }, false, [
-		"sign",
-	]);
-	const signature = await crypto.subtle.sign("HMAC", cryptoKey, strictBytes(encoder.encode(value)));
+	const cryptoKey = await crypto.subtle.importKey(
+		"raw",
+		asStrictBytes(key),
+		{ name: "HMAC", hash: "SHA-256" },
+		false,
+		["sign"],
+	);
+	const signature = await crypto.subtle.sign("HMAC", cryptoKey, asStrictBytes(encoder.encode(value)));
 	return new Uint8Array(signature).toBase64();
 }
 
@@ -443,13 +439,6 @@ function optionalStringField(value: unknown, field: string): string | undefined 
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
 	const result = (value as Record<string, unknown>)[field];
 	return typeof result === "string" ? result : undefined;
-}
-
-async function sha1Hex(bytes: Uint8Array): Promise<string> {
-	const digest = new Uint8Array(await crypto.subtle.digest("SHA-1", strictBytes(bytes)));
-	let result = "";
-	for (const byte of digest) result += byte.toString(16).padStart(2, "0");
-	return result;
 }
 
 async function b2Json(
@@ -575,7 +564,7 @@ function createNativeB2Uploader(config: DestinationRuntimeConfig): BlobUploader 
 					headers: {
 						authorization: uploadTarget.authorizationToken,
 						"content-type": uploadRequest.mimeType,
-						"x-bz-content-sha1": await sha1Hex(uploadRequest.bytes),
+						"x-bz-content-sha1": new Bun.CryptoHasher("sha1").update(uploadRequest.bytes).digest("hex"),
 						"x-bz-file-name": encodePath(key),
 						...(cacheControl ? { "x-bz-info-b2-cache-control": encodeURIComponent(cacheControl) } : {}),
 					},

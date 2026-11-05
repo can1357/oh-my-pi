@@ -492,6 +492,35 @@ describe("StatusLineComponent VCS watcher and jj request lifecycle", () => {
 		component.dispose();
 	});
 
+	it("refetches working-tree counts on the first paint past the status TTL, without a polling tick", async () => {
+		let now = 1_000_000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		gitControls.statusSummary
+			.mockResolvedValueOnce({ staged: 1, unstaged: 0, untracked: 0 })
+			.mockResolvedValueOnce({ staged: 0, unstaged: 7, untracked: 0 });
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
+		component.updateSettings(gitSegment);
+
+		component.getTopBorder(80);
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(component.getTopBorder(80).content).toContain("+1");
+
+		// Inside the freshness window repaints reuse the cached counts.
+		now += 9_000;
+		component.getTopBorder(80);
+		expect(gitControls.statusSummary).toHaveBeenCalledTimes(1);
+
+		// Past it, the next paint refetches with no invalidate() in between.
+		now += 1_001;
+		component.getTopBorder(80);
+		expect(gitControls.statusSummary).toHaveBeenCalledTimes(2);
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(component.getTopBorder(80).content).toContain("*7");
+		component.dispose();
+	});
+
 	it("discovers a repository created after setup with bounded single-flight polling", async () => {
 		let now = 1_000_000;
 		const repositoryCreatedAt = now + 5_000;

@@ -1,23 +1,27 @@
 /**
  * Anthropic on-demand compaction (`compact-2026-09-04` beta).
  *
- * The request sends only the prefix to summarize, with the live conversation's
- * system prompt, tools and thinking settings. The returned signed block
- * replaces that prefix; the retained tail is replayed from session entries.
+ * The request sends only the prefix to summarize, as the live conversation
+ * sent it: same system prompt, tools, history bytes and thinking settings.
+ * The returned signed block replaces that prefix; the retained tail is
+ * replayed from session entries.
  */
 
 import type {
+	AnthropicCompactionFiles,
 	AnthropicCompactionPayload,
 	ApiKey,
+	Context,
 	Effort,
-	Message,
 	Model,
 	SimpleStreamOptions,
-	Tool,
 	Usage,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { supportsAnthropicCompaction } from "@oh-my-pi/pi-ai/providers/anthropic-compaction";
+import {
+	supportsAnthropicCompaction,
+	supportsBedrockConverseCompaction,
+} from "@oh-my-pi/pi-ai/providers/anthropic-compaction";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { type InstrumentedChatSpanOptions, instrumentedCompleteSimple } from "../telemetry";
 import type { AgentMessage } from "../types";
@@ -29,12 +33,18 @@ export const ANTHROPIC_COMPACTION_PRESERVE_KEY = "anthropicCompaction";
 export interface AnthropicCompactionPreserveData {
 	provider: string;
 	content: string;
+	/** Opaque signed tool-change records; replayed without normalization. */
+	toolChanges?: Record<string, unknown>[];
 	/** Signature attached to an on-demand block; replayed verbatim. */
 	signature?: string;
 	/** Legacy threshold block state; replay-only. */
 	encryptedContent?: string;
-	/** Harness file metadata (`<files>` section) replayed after the native block. */
+	/** Harness file metadata (`<files>` section) replayed after the retained tail. */
 	filesText?: string;
+	/** Earlier summaries' file metadata replayed inside the retained tail. */
+	retainedFiles?: AnthropicCompactionFiles[];
+	/** The retained tail replays unchanged (see `AnthropicCompactionPayload.exactTail`). */
+	exactTail?: true;
 	/** Model that wrote the summary. */
 	model?: string;
 	/** Prompt tokens the compaction request processed, for display. */
@@ -45,17 +55,27 @@ function isAnthropicMessagesModel(model: Model): model is Model<"anthropic-messa
 	return model.api === "anthropic-messages";
 }
 
+function isBedrockConverseModel(model: Model): model is Model<"bedrock-converse-stream"> {
+	return model.api === "bedrock-converse-stream";
+}
+
 /**
  * Whether a model compacts through the Anthropic compaction beta. Model
  * eligibility is catalog policy (`compat.supportsServerCompaction`, the
  * lineage the beta documents); endpoint eligibility is resolved the way the
  * provider routes requests, so a Foundry or `ANTHROPIC_BASE_URL` reroute of a
  * first-party model is excluded unless the route opted in with
- * `remoteCompaction.enabled`.
+ * `remoteCompaction.enabled`. Bedrock Converse models compact through a
+ * Bedrock Runtime side request; their ordinary turns stay on Converse.
  */
-export function shouldUseAnthropicNativeCompaction(model: Model): model is Model<"anthropic-messages"> {
-	return isAnthropicMessagesModel(model) && supportsAnthropicCompaction(model);
+export function shouldUseAnthropicNativeCompaction(
+	model: Model,
+): model is Model<"anthropic-messages" | "bedrock-converse-stream"> {
+	if (isAnthropicMessagesModel(model)) return supportsAnthropicCompaction(model);
+	return isBedrockConverseModel(model) && supportsBedrockConverseCompaction(model);
 }
+
+type AnthropicNativeCompactionModel = Model<"anthropic-messages" | "bedrock-converse-stream">;
 
 export function getPreservedAnthropicCompactionData(
 	preserveData: Record<string, unknown> | undefined,
@@ -64,6 +84,9 @@ export function getPreservedAnthropicCompactionData(
 	if (!isRecord(candidate)) return undefined;
 	if (typeof candidate.provider !== "string" || candidate.provider.length === 0) return undefined;
 	if (typeof candidate.content !== "string" || candidate.content.length === 0) return undefined;
+	const toolChanges = candidate.toolChanges;
+	// The signature covers `tool_changes`: a block missing or mangling them cannot replay.
+	if (toolChanges !== undefined && (!Array.isArray(toolChanges) || !toolChanges.every(isRecord))) return undefined;
 	return {
 		provider: candidate.provider,
 		content: candidate.content,
@@ -76,6 +99,16 @@ export function getPreservedAnthropicCompactionData(
 		...(typeof candidate.filesText === "string" && candidate.filesText.length > 0
 			? { filesText: candidate.filesText }
 			: {}),
+		...(Array.isArray(candidate.retainedFiles) && candidate.retainedFiles.length > 0
+			? {
+					retainedFiles: candidate.retainedFiles.filter(
+						(files): files is AnthropicCompactionFiles =>
+							isRecord(files) && typeof files.text === "string" && typeof files.after === "number",
+					),
+				}
+			: {}),
+		...(toolChanges !== undefined ? { toolChanges } : {}),
+		...(candidate.exactTail === true ? { exactTail: true as const } : {}),
 		...(typeof candidate.model === "string" ? { model: candidate.model } : {}),
 		...(typeof candidate.usedTokens === "number" ? { usedTokens: candidate.usedTokens } : {}),
 	};
@@ -109,6 +142,9 @@ export function getAnthropicCompactionPayload(
 		...(preserved.signature ? { signature: preserved.signature } : {}),
 		...(preserved.encryptedContent ? { encryptedContent: preserved.encryptedContent } : {}),
 		...(preserved.filesText ? { filesText: preserved.filesText } : {}),
+		...(preserved.toolChanges ? { toolChanges: preserved.toolChanges } : {}),
+		...(preserved.retainedFiles?.length ? { retainedFiles: preserved.retainedFiles } : {}),
+		...(preserved.exactTail ? { exactTail: true as const } : {}),
 	};
 }
 
@@ -167,10 +203,11 @@ export function buildAnthropicCompactionInstructions(
 }
 
 export interface AnthropicNativeCompactionRequest {
-	systemPrompt: string[];
-	messages: Message[];
-	tools?: Tool[];
+	/** The summarized prefix as the live turn would send it. */
+	context: Context;
 	instructions: string;
+	/** Replayed file metadata due before this time ends the request (see `AnthropicCompactionRequest.filesDueBefore`). */
+	filesDueBefore?: number;
 	maxTokens: number;
 	reasoning?: Effort;
 }
@@ -178,6 +215,7 @@ export interface AnthropicNativeCompactionRequest {
 export interface AnthropicNativeCompactionResponse {
 	content: string;
 	signature: string;
+	toolChanges?: Record<string, unknown>[];
 	usage: Usage;
 	model: string;
 }
@@ -206,20 +244,28 @@ export interface AnthropicNativeCompactionOptions
  * output limits; the configured method order can then choose a fallback.
  */
 export async function requestAnthropicNativeCompaction(
-	model: Model<"anthropic-messages">,
+	model: AnthropicNativeCompactionModel,
 	apiKey: ApiKey,
 	request: AnthropicNativeCompactionRequest,
 	signal: AbortSignal | undefined,
 	options: AnthropicNativeCompactionOptions,
 ): Promise<AnthropicNativeCompactionResponse> {
+	// Pure compaction policy checks must not load the provider; only an actual request needs it.
+	const reasoning = isAnthropicMessagesModel(model)
+		? (await import("@oh-my-pi/pi-ai/providers/anthropic")).resolveAnthropicCompactionEffort(
+				model,
+				request.context.messages,
+				request.reasoning,
+			)
+		: request.reasoning;
 	const response = await instrumentedCompleteSimple(
 		model,
-		{ systemPrompt: request.systemPrompt, messages: request.messages, tools: request.tools },
+		request.context,
 		{
 			apiKey,
 			signal,
 			maxTokens: request.maxTokens,
-			reasoning: request.reasoning,
+			reasoning,
 			initiatorOverride: options.initiatorOverride,
 			metadata: options.metadata,
 			fetch: options.fetch,
@@ -227,7 +273,7 @@ export async function requestAnthropicNativeCompaction(
 			promptCacheKey: options.promptCacheKey,
 			providerSessionState: options.providerSessionState,
 			maxInFlightRequests: options.maxInFlightRequests,
-			anthropicCompaction: { instructions: request.instructions },
+			anthropicCompaction: { instructions: request.instructions, filesDueBefore: request.filesDueBefore },
 		},
 		{
 			telemetry: options.telemetry,
@@ -261,6 +307,7 @@ export async function requestAnthropicNativeCompaction(
 	return {
 		content: payload.content,
 		signature: payload.signature,
+		...(payload.toolChanges ? { toolChanges: payload.toolChanges } : {}),
 		usage: response.usage,
 		model: response.model,
 	};

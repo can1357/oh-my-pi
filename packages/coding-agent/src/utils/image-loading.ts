@@ -10,10 +10,11 @@ import {
 import * as path from "node:path";
 import type { Context, ImageContent, Message, Model, ProviderPayload, TextContent } from "@oh-my-pi/pi-ai";
 import { rasterizeSvg } from "@oh-my-pi/pi-natives";
-import { isRecord, logger, readImageMetadata } from "@oh-my-pi/pi-utils";
+import { $which, isRecord, logger, readImageMetadata } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { resolveReadPath } from "../tools/path-utils";
 import { formatDimensionNote, type ImageResizeOptions, resizeImage } from "./image-resize";
+import { decodeStillImageJpeg, VideoError } from "./video";
 
 /** Largest edge rasterized from SVG before it enters the image pipeline. */
 const SVG_IMAGE_MAX_EDGE_PX = 2048;
@@ -173,8 +174,12 @@ export interface LoadedImageInput {
 
 interface LoadInMemoryImageInputOptions {
 	image: ImageContent;
+	/** Raw bytes of `image.data` when the caller already holds them; skips a base64 decode in resize. */
+	bytes?: Uint8Array;
 	resolvedPath: string;
 	textNotePrefix: string;
+	/** Original file type when the display image was rasterized before loading. */
+	sourceMimeType?: string;
 	autoResize: boolean;
 	maxBytes: number;
 	excludeWebP: boolean | undefined;
@@ -202,7 +207,12 @@ async function loadInMemoryImageInput(options: LoadInMemoryImageInputOptions): P
 	const shouldReencodeWebP = options.excludeWebP === true && options.image.mimeType === "image/webp";
 	if (options.autoResize || shouldReencodeWebP) {
 		try {
-			const resized = await resizeImage(options.image, { excludeWebP: options.excludeWebP });
+			const resized = await resizeImage(
+				options.bytes
+					? { bytes: options.bytes, mimeType: options.image.mimeType, data: options.image.data }
+					: options.image,
+				{ excludeWebP: options.excludeWebP },
+			);
 			outputData = resized.data;
 			outputMimeType = resized.mimeType;
 			outputBytes = resized.buffer.byteLength;
@@ -212,7 +222,11 @@ async function loadInMemoryImageInput(options: LoadInMemoryImageInputOptions): P
 		}
 	}
 
-	let textNote = `${options.textNotePrefix} [${outputMimeType}]`;
+	const sourceMimeType = options.sourceMimeType ?? options.image.mimeType;
+	let textNote = `${options.textNotePrefix} [${sourceMimeType}]`;
+	if (outputMimeType !== sourceMimeType) {
+		textNote += ` (displayed as ${outputMimeType})`;
+	}
 	if (dimensionNote) {
 		textNote += `\n${dimensionNote}`;
 	}
@@ -340,6 +354,7 @@ export async function loadImageInput(options: LoadImageInputOptions): Promise<Lo
 	const inputBuffer = await fs.readFile(resolvedPath);
 	return loadInMemoryImageInput({
 		image: { type: "image", data: inputBuffer.toBase64(), mimeType },
+		bytes: inputBuffer,
 		resolvedPath,
 		textNotePrefix: "Read image file",
 		autoResize: options.autoResize,
@@ -374,13 +389,48 @@ export async function loadSvgImageInput(options: LoadImageInputOptions): Promise
 	}
 
 	return loadInMemoryImageInput({
-		image: {
-			type: "image",
-			data: Buffer.from(png.buffer, png.byteOffset, png.byteLength).toString("base64"),
-			mimeType: "image/png",
-		},
+		image: { type: "image", data: png.toBase64(), mimeType: "image/png" },
+		bytes: png,
 		resolvedPath,
 		textNotePrefix: "Read SVG file",
+		sourceMimeType: "image/svg+xml",
+		autoResize: options.autoResize,
+		maxBytes,
+		excludeWebP: options.excludeWebP,
+	});
+}
+
+/** Decodes a local HEIC, HEIF or AVIF still image with ffmpeg into a vision-model image input. */
+export async function loadHeifImageInput(
+	options: LoadImageInputOptions,
+	signal?: AbortSignal,
+): Promise<LoadedImageInput> {
+	const resolvedPath = options.resolvedPath ?? resolveReadPath(options.path, options.cwd);
+	const sourceMimeType = options.detectedMimeType ?? "image/heif";
+	const maxBytes = options.maxBytes ?? MAX_IMAGE_INPUT_BYTES;
+	const stat = await Bun.file(resolvedPath).stat();
+	if (stat.size > maxBytes) {
+		throw new ImageInputTooLargeError(stat.size, maxBytes);
+	}
+
+	let jpeg: Uint8Array;
+	try {
+		jpeg = await decodeStillImageJpeg(resolvedPath, maxBytes, signal);
+	} catch (error) {
+		if (!(error instanceof VideoError) || signal?.aborted) throw error;
+		const format = sourceMimeType.slice("image/".length).toUpperCase();
+		const cause = $which("ffmpeg") ? error.message : "Decoding it needs ffmpeg 8.1 or newer, which is not on PATH.";
+		throw new Error(
+			`Could not decode ${format} image. Convert it to PNG or JPEG (e.g. \`sips -s format jpeg -Z 4096\` on macOS) and read that file.\n${cause}`,
+		);
+	}
+
+	return loadInMemoryImageInput({
+		image: { type: "image", data: jpeg.toBase64(), mimeType: "image/jpeg" },
+		bytes: jpeg,
+		resolvedPath,
+		textNotePrefix: "Read image file",
+		sourceMimeType,
 		autoResize: options.autoResize,
 		maxBytes,
 		excludeWebP: options.excludeWebP,
@@ -391,12 +441,13 @@ export async function loadSvgImageInput(options: LoadImageInputOptions): Promise
 export async function loadImageAttachmentInput(
 	options: LoadImageAttachmentInputOptions,
 ): Promise<LoadedImageInput | null> {
-	if (!SUPPORTED_INPUT_IMAGE_MIME_TYPES.has(options.image.mimeType)) {
+	const image = { ...options.image, mimeType: options.image.mimeType.toLowerCase() };
+	if (!SUPPORTED_INPUT_IMAGE_MIME_TYPES.has(image.mimeType)) {
 		return null;
 	}
 
 	return loadInMemoryImageInput({
-		image: options.image,
+		image,
 		resolvedPath: options.uri,
 		textNotePrefix: `Read image attachment ${options.label}`,
 		autoResize: options.autoResize,

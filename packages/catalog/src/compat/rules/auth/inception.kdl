@@ -1,0 +1,11 @@
+auth "inception" {
+	name "Inception"
+	login "api-key" {
+		auth-url "https://platform.inceptionlabs.ai/dashboard/api-keys"
+		instructions "Create or copy your key from the Inception dashboard"
+		prompt "Paste your Inception API key" placeholder="sk_..."
+		// Validate against inference, not /models: Inception's models endpoints
+		// are public and answer 200 for any key. Costs a few tokens.
+		validate "chat-completions" label="Inception" base-url="https://api.inceptionlabs.ai/v1" model="mercury-3" max-tokens-field="max_completion_tokens"
+	}
+}

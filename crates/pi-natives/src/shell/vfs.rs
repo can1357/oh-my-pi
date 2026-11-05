@@ -437,6 +437,12 @@ impl ShellFilesystem {
 	pub fn blocking(filesystem: Option<Self>) -> BlockingFs {
 		filesystem.map_or_else(BlockingFs::native, |filesystem| filesystem.into_fs().blocking())
 	}
+
+	/// Async facade for walker searches: `filesystem`'s provider, or the
+	/// native host filesystem when absent.
+	pub fn resolve(filesystem: Option<Self>) -> Fs {
+		filesystem.map_or_else(Fs::native, Self::into_fs)
+	}
 }
 
 impl ShellFsRequest {
@@ -795,7 +801,10 @@ impl FileSystem for JsFileSystem {
 			.request(ShellFsRequest::at(ShellFsOp::BackingPath, path)?)
 			.await?
 		{
-			Reply::Local(local) => self.native.backing_path(&local).await,
+			// A `Local` reply *is* the alias: the host handed back the real file
+			// this URL stands for. Asking the native filesystem what backs that
+			// file answers `None` (host paths alias nothing) and would lose it.
+			Reply::Local(local) => Ok(Some(local)),
 			Reply::Done(response) => Ok(response.path.map(PathBuf::from)),
 		}
 	}

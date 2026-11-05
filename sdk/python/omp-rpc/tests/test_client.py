@@ -477,20 +477,29 @@ FAKE_SERVER = textwrap.dedent(
             respond(request_id, "export_html", {"path": command.get("outputPath") or "/tmp/session.html"})
         elif command_type == "new_session":
             respond(request_id, "new_session", {"cancelled": False})
-        elif command_type == "switch_session":
-            respond(request_id, "switch_session", {"cancelled": False})
-        elif command_type == "open_session":
-            session_dir = command["sessionDir"]
-            respond(
-                request_id,
-                "open_session",
-                {
-                    "cancelled": False,
-                    "resumed": True,
-                    "sessionId": "resumed-session",
-                    "sessionFile": f"{session_dir}/resumed.jsonl",
-                },
-            )
+        elif command_type in {"open_session", "switch_session"}:
+            session_path = command["sessionDir" if command_type == "open_session" else "sessionPath"]
+            if session_path.startswith("/tmp/unavailable") and "provider" not in command:
+                respond(
+                    request_id, command_type, success=False,
+                    error="Could not restore model local/missing-model",
+                )
+                continue
+            if "provider" in command:
+                model_provider = command["provider"]
+                model_id = command["modelId"]
+            if command_type == "switch_session":
+                respond(request_id, command_type, {"cancelled": False})
+            else:
+                respond(
+                    request_id, command_type,
+                    {
+                        "cancelled": False,
+                        "resumed": True,
+                        "sessionId": "resumed-session",
+                        "sessionFile": f"{session_path}/resumed.jsonl",
+                    },
+                )
         elif command_type == "set_event_filter":
             event_filter = command["events"]
             respond(request_id, "set_event_filter", {"events": event_filter})
@@ -1487,6 +1496,34 @@ class RpcClientTests(unittest.TestCase):
                 session_file="/tmp/host-key/resumed.jsonl",
             ),
         )
+
+    def test_session_commands_preserve_restore_failure_and_bind_replacement_model(self) -> None:
+        for command in ("open_session", "switch_session"):
+            for code in (None, "model_unavailable"):
+                with self.subTest(command=command, code=code):
+                    server = FAKE_SERVER
+                    if code is not None:
+                        server = server.replace(
+                            'payload["error"] = error',
+                            f'payload["error"] = error; payload["code"] = {code!r}',
+                        )
+                    with self.make_client(server) as client:
+                        target = Path("/tmp/unavailable-session")
+                        before = client.get_state()
+                        change = client.open_session if command == "open_session" else client.switch_session
+                        with self.assertRaises(RpcCommandError) as ctx:
+                            change(target)
+                        self.assertEqual(ctx.exception.command, command)
+                        self.assertEqual(ctx.exception.error, "Could not restore model local/missing-model")
+                        self.assertEqual(ctx.exception.code, code)
+                        self.assertEqual(client.get_state(), before)
+
+                        result = change(target, provider="local", model_id="renamed-model")
+                        self.assertFalse(result.cancelled)
+                        state = client.get_state()
+                        self.assertIsNotNone(state.model)
+                        assert state.model is not None
+                        self.assertEqual((state.model.provider, state.model.id), ("local", "renamed-model"))
 
     def test_wait_for_settled_outlasts_prompt_yield_until_background_work_drains(
         self,

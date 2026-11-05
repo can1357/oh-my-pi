@@ -10,6 +10,7 @@ import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { md, node, span, text } from "../native/describe";
 import { type NativeChild, type NativeNode, type NativeUiEvent, rootToggleExpanded } from "../native/node";
 import { Memo } from "../native/memo";
+import { noticeRow } from "../chrome/transcript-notice";
 
 /** Divider labels per compaction method; unknown/legacy methods fall back to "compacted". */
 const COMPACTION_METHOD_LABELS: Record<string, string> = {
@@ -50,6 +51,10 @@ class DividerSummary implements Component {
 	}
 
 	invalidate(): void {
+		this.#cache = undefined;
+	}
+
+	releaseRenderCaches(): void {
 		this.#cache = undefined;
 	}
 
@@ -150,6 +155,10 @@ class SummaryMessageComponent implements Component {
 		if (this.#ignoreTight !== undefined) this.#disclosure.setIgnoreTight(this.#ignoreTight);
 	}
 
+	releaseRenderCaches(): void {
+		this.#disclosure.releaseRenderCaches();
+	}
+
 	dispose(): void {
 		if (this.#disposed) return;
 		this.#disposed = true;
@@ -229,7 +238,7 @@ function compactionNativeDetail(message: CompactionSummaryMessage): NativeChild[
 			? `Summary · ${frames} snapcompact frame${frames === 1 ? "" : "s"} attached`
 			: "Summary of the earlier conversation";
 	const detail: NativeChild[] = [text([span(caption, "dim")], { role: "omp.compaction.caption", key: "caption" })];
-	if (message.warning) detail.push(text([span(message.warning, "warning")], { wrap: "word", key: "warning" }));
+	if (message.warning) detail.push(noticeRow("warning", message.warning, { key: "warning" }));
 	detail.push(md(message.summary, { key: "summary" }));
 	return detail;
 }

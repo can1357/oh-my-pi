@@ -38,11 +38,31 @@ export interface QueuedMessagePreparation {
 	commit(): readonly AgentMessage[] | undefined;
 }
 
+/** Which agent queue a batch came from: steering amends the running task, follow-ups start the next one. */
+export type QueuedMessageQueue = "steering" | "followUp";
+
 /** Prepare an exclusively claimed batch. Undefined delivers unchanged; the signal also aborts when the claim is cancelled. */
 export type PrepareQueuedMessages = (
 	messages: readonly AgentMessage[],
 	signal: AbortSignal,
+	queue: QueuedMessageQueue,
 ) => QueuedMessagePreparation | undefined | Promise<QueuedMessagePreparation | undefined>;
+
+/**
+ * Synchronous arbiter over queued messages leaving a queue for delivery, for a
+ * queue whose messages someone else may withdraw concurrently (a session homed
+ * on another thread whose view pops them).
+ */
+export interface QueuedMessageGate {
+	/**
+	 * Called with the batch about to be removed from `queue` for delivery; returns
+	 * the candidates that must be dropped from the queue instead. The others are
+	 * claimed for delivery.
+	 */
+	claim(queue: QueuedMessageQueue, candidates: readonly AgentMessage[]): readonly AgentMessage[];
+	/** Called with claimed messages that left delivery undelivered (requeued, withdrawn, or cancelled). */
+	release(messages: readonly AgentMessage[]): void;
+}
 
 /** Called once an aside has been inserted into the agent's live context. */
 export const ASIDE_MESSAGE_COMMIT = Symbol("aside-message-commit");
@@ -63,6 +83,9 @@ export type CommittableAsideMessage = AgentMessage & {
  * (e.g. dropping late diagnostics a newer edit superseded).
  */
 export type AsideMessage = CommittableAsideMessage | (() => CommittableAsideMessage | null);
+
+/** Where the loop polls asides: after a tool batch (`"work"`) or after a turn without tool calls (`"stop"`). */
+export type AsideBoundary = "work" | "stop";
 
 export interface AgentTurnEndContext {
 	/** Assistant/user message that just completed this turn boundary. */
@@ -168,6 +191,9 @@ export interface SteeringQueueState {
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model;
 
+	/** Reports whether this loop has reached a safe process-pause boundary. */
+	onPauseChange?: (paused: boolean) => void;
+
 	/**
 	 * When to interrupt tool execution for steering messages.
 	 * - "immediate" = cut interruptible waits short and raise the cooperative
@@ -268,12 +294,15 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	getSteeringMessages?: (signal?: AbortSignal) => Promise<AgentMessage[]>;
 
+	/** Whether input is still owned by a queue and must be restored if a model call is aborted before it starts. */
+	isUndeliveredQueuedMessage?: (message: AgentMessage) => boolean;
+
 	/**
 	 * Peeks whether steering messages are queued, without consuming them.
 	 *
 	 * Polled while a tool batch runs (in "wait" mode, only when the batch holds an
 	 * interruptible tool) to decide whether to abort in-flight and skip
-	 * not-yet-started *interruptible* waits;
+	 * not-yet-started *interruptible* waits, unless they handle queued interrupts;
 	 * every other already-emitted call still executes and the message injects
 	 * at the batch boundary. The queue keeps
 	 * owning its messages until the loop reaches the next injection boundary and
@@ -328,6 +357,23 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * background.
 	 */
 	hasBackgroundCompletions?: () => boolean | Promise<boolean>;
+	/**
+	 * Peeks whether a passive aside (an extension or user message queued with
+	 * `deliverAs: "aside"`) is waiting for injection at the next boundary.
+	 *
+	 * Same rules as {@link hasBackgroundCompletions}: non-consuming, ends only
+	 * *interruptible* waits, never raises {@link ToolCallContext.steeringSignal}.
+	 * The host still injects the aside once at the boundary; ordinary running
+	 * tools finish first.
+	 */
+	hasQueuedAsides?: () => boolean | Promise<boolean>;
+	/**
+	 * Receives a tool's `onUpdate` frames that arrive after this run's event
+	 * stream ended: a call that returned while its background job keeps
+	 * reporting (`details.async`), whose run yielded before the job settled.
+	 * Without it those frames are dropped.
+	 */
+	onDetachedToolUpdate?: (event: Extract<AgentEvent, { type: "tool_execution_update" }>) => void;
 
 	/**
 	 * Returns follow-up messages to process after the agent would otherwise stop.
@@ -341,13 +387,18 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Returns non-interrupting "aside" messages to inject at a step boundary.
 	 *
 	 * Polled after each tool batch (before the next LLM call) AND at the yield
-	 * check. Unlike steering, these NEVER abort in-flight tools — they are passive
+	 * check. Unlike steering, these never abort foreground tools (only an
+	 * interruptible `wait` ends early, via the peek hooks) — they are passive
 	 * notifications (e.g. background-job completions, late LSP diagnostics) that
 	 * should reach the model between requests without waiting for the agent to
 	 * fully stop. Returned messages are appended to the context with normal
 	 * message events and keep the loop running so the model can react.
+	 *
+	 * `boundary` is `"work"` after a tool batch and `"stop"` when the model ended
+	 * its turn without tool calls; a provider may hold back messages that should
+	 * not extend a finished turn.
 	 */
-	getAsideMessages?: () => Promise<AsideMessage[]>;
+	getAsideMessages?: (boundary: AsideBoundary) => Promise<AsideMessage[]>;
 	/**
 	 * Hook fired right before the loop would exit.
 	 *
@@ -425,6 +476,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * then strips from arguments before executing tools.
 	 */
 	intentTracing?: boolean;
+	/** Schema description of the injected intent field; `PI_INTENT_DESC` overrides it. Default `concise intent`. */
+	intentDescription?: string;
 	/**
 	 * Strip tool descriptions (top-level + nested schema annotations) from the
 	 * provider-bound tool specs. Use when the full catalog is rendered into the
@@ -640,7 +693,8 @@ export interface ToolCallContext {
 	providerMetadata?: ToolCallProviderMetadata;
 	/**
 	 * Cooperative steering signal: aborted when a queued user/steering message
-	 * (or an interrupting peer IRC) is detected while this tool batch runs.
+	 * (or an interrupting peer IRC) is detected while this tool batch runs. Its
+	 * `reason` names the source: a {@link SteeringInterruptSource} or `"irc"`.
 	 * Unlike the hard abort signal it NEVER kills the tool — long-running
 	 * tools MAY observe it (via `ctx.toolCall.steeringSignal`) to finish early
 	 * or background themselves so the message injects promptly; ignoring it is
@@ -1054,7 +1108,7 @@ export type ToolApprovalDecision =
 			 *  prompt policies to the tool it dispatches into. */
 			policyKey?: string;
 	  };
-export type ToolApproval = ToolApprovalDecision | ((args: unknown) => ToolApprovalDecision);
+export type ToolApproval = ToolApprovalDecision | ((args: unknown, context?: AgentToolContext) => ToolApprovalDecision);
 
 /**
  * Context passed to tool execution.
@@ -1125,6 +1179,11 @@ export interface AgentTool<
 	/** Short one-line summary used for tool discovery indexes. */
 	summary?: string;
 	/**
+	 * Instructions a same-name extension replacement inherits in its description, because results it
+	 * obtains by delegating to this native tool through `ctx.invokeTool` follow this tool's contract.
+	 */
+	readonly delegationGuidance?: string;
+	/**
 	 * On-demand documentation topics (`topic → markdown`), readable as
 	 * `xd://<tool>/<topic>`. Lets a tool keep large sub-surfaces out of its
 	 * description and advertise only a one-line pointer per topic.
@@ -1143,7 +1202,7 @@ export interface AgentTool<
 	 * before ordinary dispatch commits its result.
 	 */
 	speculation?: ToolSpeculationPolicy;
-	/** If true, schema validation errors are non-fatal: raw args are passed to execute() instead of returning an error to the LLM. Malformed argument JSON still returns the parse error. */
+	/** If true, schema validation errors are non-fatal: raw args are passed to execute() instead of returning an error to the LLM, and unknown root keys a closed schema would drop stay on the args. Malformed argument JSON still returns the parse error. */
 	lenientArgValidation?: boolean;
 	/**
 	 * Whether the agent loop may abort this tool mid-execution — or skip it
@@ -1157,6 +1216,13 @@ export interface AgentTool<
 	 * batch boundary. Honored in both `interruptMode`s.
 	 */
 	interruptible?: boolean | ((args: Partial<Static<TParameters>>) => boolean);
+	/**
+	 * An interruptible tool can execute with an already-aborted
+	 * `TOOL_INTERRUPT_ABORT_REASON` signal to drain caller-owned wake events.
+	 * It must not block when that signal is aborted. External/user cancellation
+	 * still prevents execution. Omitted tools keep the usual pre-start skip.
+	 */
+	handlesToolInterrupt?: boolean;
 	/**
 	 * Controls how the INTENT_FIELD (`i`) is handled for this tool.
 	 * - `"require"` (default): `i` is injected and required in the parameter schema.
@@ -1202,6 +1268,19 @@ export interface AgentTool<
 	/** Lines appended after the standard approval prompt header. */
 	formatApprovalDetails?: (args: unknown) => string | string[] | undefined;
 
+	/**
+	 * Remembered-approval keys for `tools.approvalMode: always-ask-cached`: the files (or URL
+	 * targets) this call touches. When every key is already granted the call skips its prompt;
+	 * approving the call can record them. Omit it (or return `undefined`) and the call prompts by tier.
+	 */
+	approvalCacheTargets?: (args: unknown) => readonly string[] | undefined;
+
+	/**
+	 * Paths a call reads beyond its working directory, matched against restricted folders when it
+	 * reports no `approvalCacheTargets`. Unlike cache targets they never key a remembered grant.
+	 */
+	approvalRestrictionPaths?: (args: unknown) => readonly string[] | undefined;
+
 	/** The main execution callback for this tool. */
 	execute: AgentToolExecFn<TParameters, TDetails, TTheme>;
 
@@ -1229,7 +1308,14 @@ export interface AgentContext {
  */
 export type AgentEvent =
 	// Agent lifecycle
-	| { type: "agent_start" }
+	| {
+			type: "agent_start";
+			/**
+			 * Calls of the unpaired assistant tail a continued run executes before its
+			 * first model request. They run without a new assistant `message_end`.
+			 */
+			resumedToolCallIds?: string[];
+	  }
 	| {
 			type: "agent_end";
 			messages: AgentMessage[];

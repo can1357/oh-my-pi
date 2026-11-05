@@ -38,6 +38,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.acpHelp,
 	},
 	{
+		name: "auth",
+		load: () => import("./commands/auth").then(m => m.default),
+		help: commandHelp.authHelp,
+	},
+	{
 		name: "auth-broker",
 		load: () => import("./commands/auth-broker").then(m => m.default),
 		help: commandHelp.authBrokerHelp,
@@ -51,6 +56,11 @@ export const commands: CommandEntry[] = [
 		name: "agents",
 		load: () => import("./commands/agents").then(m => m.default),
 		help: commandHelp.agentsHelp,
+	},
+	{
+		name: "anonymize",
+		load: () => import("./commands/anonymize").then(m => m.default),
+		help: commandHelp.anonymizeHelp,
 	},
 	{
 		name: "bench",
@@ -202,6 +212,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.shareHelp,
 	},
 	{
+		name: "session",
+		load: () => import("./commands/session").then(m => m.default),
+		help: commandHelp.sessionHelp,
+	},
+	{
 		name: "setup",
 		load: () => import("./commands/setup").then(m => m.default),
 		help: commandHelp.setupHelp,
@@ -210,6 +225,23 @@ export const commands: CommandEntry[] = [
 		name: "shell",
 		load: () => import("./commands/shell").then(m => m.default),
 		help: commandHelp.shellHelp,
+	},
+	// `cli.ts` runs these before the command framework (raw argv passthrough);
+	// the entries list them in `omp --help` and the completions.
+	{
+		name: "zsh",
+		load: () => import("./commands/native-shell").then(m => m.Zsh),
+		help: commandHelp.nativeShellHelp("zsh"),
+	},
+	{
+		name: "bash",
+		load: () => import("./commands/native-shell").then(m => m.Bash),
+		help: commandHelp.nativeShellHelp("bash"),
+	},
+	{
+		name: "sh",
+		load: () => import("./commands/native-shell").then(m => m.Sh),
+		help: commandHelp.nativeShellHelp("sh"),
 	},
 	{
 		name: "read",

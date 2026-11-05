@@ -10,7 +10,6 @@
  */
 
 import cliTruncate from "cli-truncate";
-import * as diff from "diff";
 import { countTokens as gptCountTokens } from "gpt-tokenizer/model/gpt-4o";
 import { bench, do_not_optimize, run, summary } from "mitata";
 import sliceAnsi from "slice-ansi";
@@ -201,13 +200,11 @@ summary(() => {
 });
 
 // ============================================================================
-// 5. diffLines: Native vs jsdiff (diff npm package)
+// 5. diffLines: Native source-file workload
 // ============================================================================
 
 summary(() => {
 	bench("diffLines: source files (native)", () => do_not_optimize(diffLines(testCases.diffOld, testCases.diffNew)));
-	bench("diffLines: source files (diff npm)", () =>
-		do_not_optimize(diff.diffLines(testCases.diffOld, testCases.diffNew)));
 });
 
 // ============================================================================

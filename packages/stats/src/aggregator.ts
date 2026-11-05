@@ -41,6 +41,7 @@ import {
 	getToolTimeSeries,
 	type RangeWindow,
 } from "./rollup";
+import { spotlightRowCount } from "./spotlight-ingest";
 import type { SyncWorkerRequest, SyncWorkerResponse } from "./sync-worker";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so the compiled binary and npm bundle only need one
@@ -85,11 +86,14 @@ export async function withStatsSyncLock<T>(dbPath: string, fn: () => Promise<T>)
  * `current` is the number of files completed (skipped + parsed),
  * `total` is the size of the work set. `processed` is the running total
  * of inserted rows. Parsed files are reported only after their batch commits.
+ * `changes` is the running total of stored rows the sync inserted, updated or
+ * deleted (0 while every transcript is unchanged).
  */
 export interface SyncProgress {
 	current: number;
 	total: number;
 	processed: number;
+	changes: number;
 	sessionFile: string;
 }
 
@@ -297,6 +301,7 @@ async function syncAllSessionsLocked(
 
 	const files = opts?.files ?? (await orderForIngest(await listAllSessionFiles()));
 	let totalProcessed = 0;
+	let totalChanges = 0;
 	let filesProcessed = 0;
 	let completed = 0;
 	let cursor = 0;
@@ -314,6 +319,7 @@ async function syncAllSessionsLocked(
 			current: completed,
 			total: files.length,
 			processed: totalProcessed,
+			changes: totalChanges,
 			sessionFile,
 		});
 	};
@@ -325,6 +331,7 @@ async function syncAllSessionsLocked(
 		pending = [];
 		pendingRows = 0;
 		totalProcessed += applied.processed;
+		totalChanges += applied.changes;
 		filesProcessed += applied.files;
 		reconcile ||= applied.reconcile;
 		// Report only durable progress: callbacks may interrupt the sync.
@@ -358,9 +365,9 @@ async function syncAllSessionsLocked(
 			metadataEnd = index + batch.length;
 			metadata = Promise.all(
 				batch.map(async sessionFile => {
+					const stored = offsets.get(sessionFile);
 					try {
-						const fileStats = await fs.promises.stat(sessionFile);
-						return { fileStats, stored: offsets.get(sessionFile) };
+						return { fileStats: await fs.promises.stat(sessionFile), stored };
 					} catch {
 						return {};
 					}
@@ -411,11 +418,18 @@ async function syncAllSessionsLocked(
 			result.userStats.length +
 			result.userLinks.length +
 			result.toolCalls.length +
-			result.toolResults.length;
+			result.toolResults.length +
+			spotlightRowCount(result.spotlight);
 		if (pending.length >= SYNC_BATCH_FILES || pendingRows >= SYNC_BATCH_ROWS) flush();
 	};
 
-	const requestedWorkers = Math.max(1, Math.floor(opts?.workers ?? defaultWorkerCount()));
+	let requestedWorkers = Math.max(1, Math.floor(opts?.workers ?? defaultWorkerCount()));
+	// A few already-tracked transcripts (the watcher's usual work) need only
+	// kilobyte tail reads: parsing them inline beats starting a worker.
+	if (requestedWorkers > 1 && opts?.workers === undefined && files.length <= SYNC_INLINE_READS) {
+		const offsets = getFileOffsets([...files]);
+		if (files.every(file => offsets.get(file)?.parserState)) requestedWorkers = 1;
+	}
 	if (requestedWorkers === 1) {
 		for (let start = 0; start < files.length; start += SYNC_INLINE_READS) {
 			const results = await Promise.allSettled(
@@ -437,14 +451,20 @@ async function syncAllSessionsLocked(
 
 	const handles: WorkerHandle[] = [];
 
-	async function drain(handle: WorkerHandle): Promise<void> {
+	// Each lane spawns its worker on its first real parse, so unchanged transcripts cost no worker.
+	async function drain(): Promise<void> {
+		let handle: WorkerHandle | null = null;
 		try {
 			while (!failed) {
 				const idx = cursor++;
 				if (idx >= files.length) return;
-				const parsed = await prepareFile(idx, (file, fromOffset, parserState, replay) =>
-					dispatch(handle, { sessionFile: file, fromOffset, parserState, replay }),
-				);
+				const parsed = await prepareFile(idx, (file, fromOffset, parserState, replay) => {
+					if (!handle) {
+						handle = spawnWorker();
+						handles.push(handle);
+					}
+					return dispatch(handle, { sessionFile: file, fromOffset, parserState, replay });
+				});
 				if (!failed) acceptFile(files[idx], parsed);
 			}
 		} catch (error) {
@@ -454,9 +474,8 @@ async function syncAllSessionsLocked(
 	}
 
 	try {
-		for (let i = 0; i < poolSize; i++) handles.push(spawnWorker());
 		// Drain in-flight work before releasing the sync lock, even after a failed batch.
-		const results = await Promise.allSettled(handles.map(drain));
+		const results = await Promise.allSettled(Array.from({ length: poolSize }, drain));
 		for (const result of results) {
 			if (result.status === "rejected") throw result.reason;
 		}

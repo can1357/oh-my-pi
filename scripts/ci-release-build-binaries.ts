@@ -1,7 +1,6 @@
 #!/usr/bin/env bun
 
 import * as fs from "node:fs/promises";
-import { createRequire } from "node:module";
 import * as path from "node:path";
 import { COMPILED_EXTERNAL_DEPENDENCIES, compileCodingAgent } from "../packages/coding-agent/scripts/compile-binary";
 
@@ -16,16 +15,6 @@ interface BinaryTarget {
 const repoRoot = path.join(import.meta.dir, "..");
 const binariesDir = path.join(repoRoot, "packages", "coding-agent", "binaries");
 const entrypoint = path.join(repoRoot, "packages", "coding-agent", "src", "cli.ts");
-const transformersManifest: unknown = createRequire(import.meta.url)("@huggingface/transformers/package.json");
-if (
-	typeof transformersManifest !== "object" ||
-	transformersManifest === null ||
-	!("version" in transformersManifest) ||
-	typeof transformersManifest.version !== "string"
-) {
-	throw new Error("@huggingface/transformers package manifest has no string version");
-}
-const transformersVersion = transformersManifest.version;
 // Worker threads re-enter the binary's single CLI host entry.
 const isDryRun = process.argv.includes("--dry-run");
 const targets: BinaryTarget[] = [
@@ -110,10 +99,9 @@ function shouldAdhocSignDarwinBinary(target: BinaryTarget): boolean {
 	return target.platform === "darwin" && process.platform === "darwin";
 }
 
-async function runCommand(command: string[], cwd: string, env: NodeJS.ProcessEnv = Bun.env): Promise<void> {
+async function runCommand(command: string[], cwd: string): Promise<void> {
 	const proc = Bun.spawn(command, {
 		cwd,
-		env,
 		stdout: "inherit",
 		stderr: "inherit",
 	});
@@ -123,22 +111,8 @@ async function runCommand(command: string[], cwd: string, env: NodeJS.ProcessEnv
 	}
 }
 
-async function embedNative(target: BinaryTarget): Promise<void> {
-	if (isDryRun) {
-		console.log(`DRY RUN bun run gen:native [${target.platform}/${target.arch}]`);
-		return;
-	}
-
-	await runCommand(["bun", "run", "gen:native"], repoRoot, {
-		...Bun.env,
-		TARGET_PLATFORM: target.platform,
-		TARGET_ARCH: target.arch,
-	});
-}
-
 async function buildBinary(target: BinaryTarget): Promise<void> {
 	console.log(`Building ${target.outfile}...`);
-	await embedNative(target);
 	if (isDryRun) {
 		console.log(
 			`DRY RUN Bun.build target=${target.target} outfile=${target.outfile} external=${COMPILED_EXTERNAL_DEPENDENCIES.join(",")}`,
@@ -150,7 +124,7 @@ async function buildBinary(target: BinaryTarget): Promise<void> {
 		repoRoot,
 		entrypoint,
 		outfile: path.join(repoRoot, target.outfile),
-		transformersVersion,
+		native: target,
 		target: target.target,
 		minifyIdentifiers: true,
 		skipBuiltinCodesign: shouldAdhocSignDarwinBinary(target),
@@ -175,20 +149,18 @@ async function buildBinary(target: BinaryTarget): Promise<void> {
 async function generateBundle(): Promise<void> {
 	if (isDryRun) {
 		console.log("DRY RUN bun run gen:stats");
-		console.log("DRY RUN bun --cwd=packages/collab-web run gen:tool-views");
+		console.log("DRY RUN bun --cwd=packages/collab-web run gen:export-viewer --check");
 		return;
 	}
 	await runCommand(["bun", "run", "gen:stats"], repoRoot);
-	await runCommand(["bun", "--cwd=packages/collab-web", "run", "gen:tool-views"], repoRoot);
+	await runCommand(["bun", "--cwd=packages/collab-web", "run", "gen:export-viewer", "--check"], repoRoot);
 }
 
 async function resetArtifacts(): Promise<void> {
 	if (isDryRun) {
-		console.log("DRY RUN bun run gen:native:reset");
 		console.log("DRY RUN bun run gen:stats:reset");
 		return;
 	}
-	await runCommand(["bun", "run", "gen:native:reset"], repoRoot);
 	await runCommand(["bun", "run", "gen:stats:reset"], repoRoot);
 }
 

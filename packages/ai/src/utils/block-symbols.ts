@@ -96,6 +96,23 @@ export function isDemotedThinking(block: DemotedThinkingCarrier | null | undefin
 }
 
 /**
+ * Marks a thinking block that `transformMessages` carried natively from
+ * another host serving the same model (see `compat/reasoning-carry` in the
+ * catalog). Its host-bound signature and item id are gone, so encoders that
+ * replay reasoning from stored payloads (Responses) emit a plaintext item for
+ * it instead. Symbol-keyed so the marker never persists or reaches the wire.
+ */
+export const kCarriedReasoning = Symbol("provider.block.carriedReasoning");
+
+/** Carries the carried-reasoning marker without exposing a string-keyed property. */
+export type CarriedReasoningCarrier = object & { [kCarriedReasoning]?: boolean };
+
+/** True for thinking blocks carried natively from another host of the same model. */
+export function isCarriedReasoning(block: CarriedReasoningCarrier | null | undefined): boolean {
+	return block?.[kCarriedReasoning] === true;
+}
+
+/**
  * Marks an Anthropic wire message that was serialized from a source
  * `role: "user"` message.
  *

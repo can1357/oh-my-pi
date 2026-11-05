@@ -46,6 +46,17 @@ collapse {
 		efforts "minimal" "low" "medium" "high"
 		requires-effort #true
 	}
+	// Gemini 4 Argon ships as `-low`/`-medium`/`-high` thinking-level SKUs,
+	// matching the three levels Google documents for the model (no minimal).
+	variant-family "google-antigravity" "gemini-4-argon" name="Gemini 4 Argon" {
+		members "gemini-4-argon-low" "gemini-4-argon-medium" "gemini-4-argon-high"
+		route "low" "gemini-4-argon-low"
+		route "medium" "gemini-4-argon-medium"
+		route "high" "gemini-4-argon-high"
+		mode "google-level"
+		efforts "low" "medium" "high"
+		requires-effort #true
+	}
 	variant-family "google-antigravity" "gemini-3.5-flash" name="Gemini 3.5 Flash" {
 		members "gemini-3.5-flash-extra-low" "gemini-3.5-flash-low" "gemini-3-flash-agent"
 		route "off" "gemini-3.5-flash-extra-low"
@@ -87,6 +98,24 @@ collapse {
 		members "gpt-oss-120b-medium"
 		mode "budget"
 		efforts "minimal" "low" "medium" "high"
+	}
+	variant-family "google-antigravity" "claude-opus-5-5" name="Claude Opus 5.5" {
+		members "claude-opus-5-5-low" "claude-opus-5-5-medium" "claude-opus-5-5-high"
+		route "low" "claude-opus-5-5-low"
+		route "medium" "claude-opus-5-5-medium"
+		route "high" "claude-opus-5-5-high"
+		mode "budget"
+		efforts "low" "medium" "high"
+		requires-effort #true
+	}
+	variant-family "google-antigravity" "claude-sonnet-5-5" name="Claude Sonnet 5.5" {
+		members "claude-sonnet-5-5-low" "claude-sonnet-5-5-medium" "claude-sonnet-5-5-high"
+		route "low" "claude-sonnet-5-5-low"
+		route "medium" "claude-sonnet-5-5-medium"
+		route "high" "claude-sonnet-5-5-high"
+		mode "budget"
+		efforts "low" "medium" "high"
+		requires-effort #true
 	}
 	variant-family "google-antigravity" "claude-sonnet-4-6" name="Claude Sonnet 4.6" {
 		members "claude-sonnet-4-6" "claude-sonnet-4-6-thinking"

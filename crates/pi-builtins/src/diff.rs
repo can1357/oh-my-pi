@@ -1,4 +1,4 @@
-//! `diff` builtin: compare files line by line using the `similar` library.
+//! `diff` builtin: compare files line by line using shared Myers primitives.
 //!
 //! Ported from `pi-uu-diff` 0.8.0, extended toward GNU diff: normal output by
 //! default, unified (`-u`/`-U`) and context (`-c`/`-C`) formats, whitespace and
@@ -14,11 +14,10 @@ use std::{
 	time::SystemTime,
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{ArgAction, Parser};
-use similar::{Algorithm, DiffOp, DiffTag, capture_diff_slices};
+use pi_diff::{Run, diff_line_tokens};
 
-use crate::host::{Host, Utility, forward_slash_display, strip_errno, util};
+use crate::host::{Host, Utility, forward_slash_display, strip_errno};
 
 /// Parsed `diff` invocation.
 #[derive(Parser)]
@@ -261,13 +260,22 @@ fn diff_main(files: &[OsString], opts: Options<'_>, host: &mut Host) -> Result<i
 		}
 	}
 
+	// Every diff line goes through one stdout writer (one write per line on
+	// pipes, block-buffered for files) rather than one raw write per
+	// formatted piece.
+	let mut out = host.stdout_writer();
 	let differed = if let (Operand::Dir(res_a), Operand::Dir(res_b)) = (&op_a, &op_b) {
-		diff_dirs(&name_a, res_a, &name_b, res_b, opts, host)?
+		diff_dirs(&name_a, res_a, &name_b, res_b, opts, host, &mut out)
 	} else {
-		let (bytes_a, mtime_a) = read_operand(&op_a, &name_a, host)?;
-		let (bytes_b, mtime_b) = read_operand(&op_b, &name_b, host)?;
-		diff_pair(&name_a, &bytes_a, mtime_a, &name_b, &bytes_b, mtime_b, opts, None, host)?
+		read_operand(&op_a, &name_a, host).and_then(|(bytes_a, mtime_a)| {
+			let (bytes_b, mtime_b) = read_operand(&op_b, &name_b, host)?;
+			diff_pair(&name_a, &bytes_a, mtime_a, &name_b, &bytes_b, mtime_b, opts, None, &mut out)
+		})
 	};
+	// Output before a failure still lands, ahead of the error message.
+	let flushed = out.flush().map_err(|e| strip_errno(&e));
+	let differed = differed?;
+	flushed?;
 	Ok(i32::from(differed))
 }
 
@@ -394,24 +402,74 @@ fn normalize_lines<'a>(file: &FileLines<'a>, opts: Options<'_>) -> Vec<Cow<'a, s
 	norm
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LineChange {
+	Equal,
+	Delete,
+	Insert,
+	Replace,
+}
+
+struct LineEdit {
+	kind: LineChange,
+	old:  Range<usize>,
+	new:  Range<usize>,
+}
+
+/// Project token runs onto original line positions, joining adjacent removals
+/// and additions into one replacement for normal/context output and `-B`.
+fn line_edits(runs: &[Run]) -> Vec<LineEdit> {
+	let mut edits: Vec<LineEdit> = Vec::with_capacity(runs.len());
+	let (mut old, mut new) = (0, 0);
+	for run in runs {
+		let old_end = old + if run.added { 0 } else { run.count as usize };
+		let new_end = new + if run.removed { 0 } else { run.count as usize };
+		let kind = if run.added {
+			LineChange::Insert
+		} else if run.removed {
+			LineChange::Delete
+		} else {
+			LineChange::Equal
+		};
+		if let Some(last) = edits.last_mut().filter(|last| {
+			last.kind != LineChange::Equal && kind != LineChange::Equal
+		}) {
+			last.old.end = old_end;
+			last.new.end = new_end;
+			last.kind = if last.old.is_empty() {
+				LineChange::Insert
+			} else if last.new.is_empty() {
+				LineChange::Delete
+			} else {
+				LineChange::Replace
+			};
+		} else {
+			edits.push(LineEdit { kind, old: old..old_end, new: new..new_end });
+		}
+		old = old_end;
+		new = new_end;
+	}
+	edits
+}
+
 /// `-B`: a change is suppressed when every line it touches is blank.
 fn is_suppressed(
-	op: &DiffOp,
+	op: &LineEdit,
 	norm_a: &[Cow<'_, str>],
 	norm_b: &[Cow<'_, str>],
 	opts: Options<'_>,
 ) -> bool {
-	if !opts.ignore_blank_lines || op.tag() == DiffTag::Equal {
+	if !opts.ignore_blank_lines || op.kind == LineChange::Equal {
 		return false;
 	}
 	let blank = |line: &Cow<'_, str>| line.trim().is_empty();
-	norm_a[op.old_range()].iter().all(blank) && norm_b[op.new_range()].iter().all(blank)
+	norm_a[op.old.clone()].iter().all(blank) && norm_b[op.new.clone()].iter().all(blank)
 }
 
-/// Writes one line to the builtin's stdout, mapping I/O failures like the
-/// rest of this module.
-fn wline(host: &mut Host, line: std::fmt::Arguments<'_>) -> Result<(), String> {
-	writeln!(host.stdout, "{line}").map_err(|e| strip_errno(&e))
+/// Writes one line to the builtin's stdout writer, mapping I/O failures like
+/// the rest of this module.
+fn wline(out: &mut impl Write, line: std::fmt::Arguments<'_>) -> Result<(), String> {
+	writeln!(out, "{line}").map_err(|e| strip_errno(&e))
 }
 
 /// Diffs one pair of already-read inputs. `prefix` is the `diff -r A/x B/x`
@@ -426,21 +484,21 @@ fn diff_pair(
 	mtime_b: Option<SystemTime>,
 	opts: Options<'_>,
 	prefix: Option<&str>,
-	host: &mut Host,
+	out: &mut impl Write,
 ) -> Result<bool, String> {
 	let label_a = display_label(opts.labels.first(), name_a);
 	let label_b = display_label(opts.labels.get(1), name_b);
 	if bytes_a == bytes_b {
 		if opts.report_identical {
-			wline(host, format_args!("Files {label_a} and {label_b} are identical"))?;
+			wline(out, format_args!("Files {label_a} and {label_b} are identical"))?;
 		}
 		return Ok(false);
 	}
 	if is_binary(bytes_a) || is_binary(bytes_b) {
 		if opts.brief {
-			wline(host, format_args!("Files {label_a} and {label_b} differ"))?;
+			wline(out, format_args!("Files {label_a} and {label_b} differ"))?;
 		} else {
-			wline(host, format_args!("Binary files {label_a} and {label_b} differ"))?;
+			wline(out, format_args!("Binary files {label_a} and {label_b} differ"))?;
 		}
 		return Ok(true);
 	}
@@ -450,35 +508,35 @@ fn diff_pair(
 	let new = FileLines::split(&text_b);
 	let norm_a = normalize_lines(&old, opts);
 	let norm_b = normalize_lines(&new, opts);
-	let ops = capture_diff_slices(Algorithm::Myers, &norm_a, &norm_b);
+	let ops = line_edits(&diff_line_tokens(&norm_a, &norm_b));
 	let suppressed: Vec<bool> =
 		ops.iter().map(|op| is_suppressed(op, &norm_a, &norm_b, opts)).collect();
 	// Bytes differed, but every change is ignorable (-w/-b/-i/-B/CR): the
 	// files count as identical, exit 0.
-	if !ops.iter().zip(&suppressed).any(|(op, &sup)| op.tag() != DiffTag::Equal && !sup) {
+	if !ops.iter().zip(&suppressed).any(|(op, &sup)| op.kind != LineChange::Equal && !sup) {
 		if opts.report_identical {
-			wline(host, format_args!("Files {label_a} and {label_b} are identical"))?;
+			wline(out, format_args!("Files {label_a} and {label_b} are identical"))?;
 		}
 		return Ok(false);
 	}
 	if opts.brief {
-		wline(host, format_args!("Files {label_a} and {label_b} differ"))?;
+		wline(out, format_args!("Files {label_a} and {label_b} differ"))?;
 		return Ok(true);
 	}
 	if let Some(line) = prefix {
-		wline(host, format_args!("{line}"))?;
+		wline(out, format_args!("{line}"))?;
 	}
 	match opts.format {
-		Format::Normal => write_normal(host, &ops, &suppressed, &old, &new)?,
+		Format::Normal => write_normal(out, &ops, &suppressed, &old, &new)?,
 		Format::Unified(context) => {
-			wline(host, format_args!("--- {}", header(opts.labels.first(), name_a, mtime_a)))?;
-			wline(host, format_args!("+++ {}", header(opts.labels.get(1), name_b, mtime_b)))?;
-			write_unified(host, &ops, &suppressed, &old, &new, context)?;
+			wline(out, format_args!("--- {}", header(opts.labels.first(), name_a, mtime_a)))?;
+			wline(out, format_args!("+++ {}", header(opts.labels.get(1), name_b, mtime_b)))?;
+			write_unified(out, &ops, &suppressed, &old, &new, context)?;
 		},
 		Format::Context(context) => {
-			wline(host, format_args!("*** {}", header(opts.labels.first(), name_a, mtime_a)))?;
-			wline(host, format_args!("--- {}", header(opts.labels.get(1), name_b, mtime_b)))?;
-			write_context_format(host, &ops, &suppressed, &old, &new, context)?;
+			wline(out, format_args!("*** {}", header(opts.labels.first(), name_a, mtime_a)))?;
+			wline(out, format_args!("--- {}", header(opts.labels.get(1), name_b, mtime_b)))?;
+			write_context_format(out, &ops, &suppressed, &old, &new, context)?;
 		},
 	}
 	Ok(true)
@@ -509,15 +567,15 @@ fn timestamp(mtime: Option<SystemTime>) -> String {
 /// Writes `range` lines of `file` prefixed with `marker`, emitting the GNU
 /// `\ No newline at end of file` marker after the file's final line.
 fn write_marked(
-	host: &mut Host,
+	out: &mut impl Write,
 	marker: &str,
 	range: Range<usize>,
 	file: &FileLines<'_>,
 ) -> Result<(), String> {
 	for idx in range {
-		wline(host, format_args!("{marker}{}", file.lines[idx]))?;
+		wline(out, format_args!("{marker}{}", file.lines[idx]))?;
 		if idx + 1 == file.lines.len() && file.missing_newline {
-			wline(host, format_args!("\\ No newline at end of file"))?;
+			wline(out, format_args!("\\ No newline at end of file"))?;
 		}
 	}
 	Ok(())
@@ -534,38 +592,38 @@ fn normal_range(range: &Range<usize>) -> String {
 
 /// Default diff output: `3c3` / `<` / `---` / `>` change commands.
 fn write_normal(
-	host: &mut Host,
-	ops: &[DiffOp],
+	out: &mut impl Write,
+	ops: &[LineEdit],
 	suppressed: &[bool],
 	old: &FileLines<'_>,
 	new: &FileLines<'_>,
 ) -> Result<(), String> {
 	for (op, &sup) in ops.iter().zip(suppressed) {
-		if sup || op.tag() == DiffTag::Equal {
+		if sup || op.kind == LineChange::Equal {
 			continue;
 		}
-		let (old_range, new_range) = (op.old_range(), op.new_range());
-		match op.tag() {
-			DiffTag::Delete => {
+		let (old_range, new_range) = (op.old.clone(), op.new.clone());
+		match op.kind {
+			LineChange::Delete => {
 				// `5d4`: the trailing number is the new-file line *after which*
 				// the deleted lines would have appeared (0 for a leading delete).
-				wline(host, format_args!("{}d{}", normal_range(&old_range), new_range.start))?;
-				write_marked(host, "< ", old_range, old)?;
+				wline(out, format_args!("{}d{}", normal_range(&old_range), new_range.start))?;
+				write_marked(out, "< ", old_range, old)?;
 			},
-			DiffTag::Insert => {
-				wline(host, format_args!("{}a{}", old_range.start, normal_range(&new_range)))?;
-				write_marked(host, "> ", new_range, new)?;
+			LineChange::Insert => {
+				wline(out, format_args!("{}a{}", old_range.start, normal_range(&new_range)))?;
+				write_marked(out, "> ", new_range, new)?;
 			},
-			DiffTag::Replace => {
+			LineChange::Replace => {
 				wline(
-					host,
+					out,
 					format_args!("{}c{}", normal_range(&old_range), normal_range(&new_range)),
 				)?;
-				write_marked(host, "< ", old_range, old)?;
-				wline(host, format_args!("---"))?;
-				write_marked(host, "> ", new_range, new)?;
+				write_marked(out, "< ", old_range, old)?;
+				wline(out, format_args!("---"))?;
+				write_marked(out, "> ", new_range, new)?;
 			},
-			DiffTag::Equal => unreachable!(),
+			LineChange::Equal => unreachable!(),
 		}
 	}
 	Ok(())
@@ -574,14 +632,14 @@ fn write_normal(
 /// Groups changed ops into hunks: two changes share a hunk when the equal run
 /// between them is at most `2 * context` lines. Hunks whose every change is
 /// `-B`-suppressed are dropped.
-fn group_ops(ops: &[DiffOp], suppressed: &[bool], context: usize) -> Vec<(usize, usize)> {
+fn group_ops(ops: &[LineEdit], suppressed: &[bool], context: usize) -> Vec<(usize, usize)> {
 	let mut groups: Vec<(usize, usize)> = Vec::new();
 	for (idx, op) in ops.iter().enumerate() {
-		if op.tag() == DiffTag::Equal {
+		if op.kind == LineChange::Equal {
 			continue;
 		}
 		if let Some(last) = groups.last_mut() {
-			let gap = op.old_range().start - ops[last.1].old_range().end;
+			let gap = op.old.start - ops[last.1].old.end;
 			if gap <= 2 * context {
 				last.1 = idx;
 				continue;
@@ -593,15 +651,15 @@ fn group_ops(ops: &[DiffOp], suppressed: &[bool], context: usize) -> Vec<(usize,
 		ops[first..=last]
 			.iter()
 			.zip(&suppressed[first..=last])
-			.any(|(op, &sup)| op.tag() != DiffTag::Equal && !sup)
+			.any(|(op, &sup)| op.kind != LineChange::Equal && !sup)
 	});
 	groups
 }
 
 /// Equal-line context available before and after a hunk, clipped to `context`.
-fn group_padding(ops: &[DiffOp], first: usize, last: usize, context: usize) -> (usize, usize) {
-	let lead = if first > 0 { context.min(ops[first - 1].old_range().len()) } else { 0 };
-	let trail = ops.get(last + 1).map_or(0, |op| context.min(op.old_range().len()));
+fn group_padding(ops: &[LineEdit], first: usize, last: usize, context: usize) -> (usize, usize) {
+	let lead = if first > 0 { context.min(ops[first - 1].old.len()) } else { 0 };
+	let trail = ops.get(last + 1).map_or(0, |op| context.min(op.old.len()));
 	(lead, trail)
 }
 
@@ -616,8 +674,8 @@ fn unified_range(start: usize, count: usize) -> String {
 }
 
 fn write_unified(
-	host: &mut Host,
-	ops: &[DiffOp],
+	out: &mut impl Write,
+	ops: &[LineEdit],
 	suppressed: &[bool],
 	old: &FileLines<'_>,
 	new: &FileLines<'_>,
@@ -625,32 +683,32 @@ fn write_unified(
 ) -> Result<(), String> {
 	for (first, last) in group_ops(ops, suppressed, context) {
 		let (lead, trail) = group_padding(ops, first, last, context);
-		let old_start = ops[first].old_range().start - lead;
-		let new_start = ops[first].new_range().start - lead;
-		let old_count = ops[last].old_range().end + trail - old_start;
-		let new_count = ops[last].new_range().end + trail - new_start;
+		let old_start = ops[first].old.start - lead;
+		let new_start = ops[first].new.start - lead;
+		let old_count = ops[last].old.end + trail - old_start;
+		let new_count = ops[last].new.end + trail - new_start;
 		wline(
-			host,
+			out,
 			format_args!(
 				"@@ -{} +{} @@",
 				unified_range(old_start, old_count),
 				unified_range(new_start, new_count)
 			),
 		)?;
-		write_marked(host, " ", old_start..ops[first].old_range().start, old)?;
+		write_marked(out, " ", old_start..ops[first].old.start, old)?;
 		for op in &ops[first..=last] {
-			match op.tag() {
-				DiffTag::Equal => write_marked(host, " ", op.old_range(), old)?,
-				DiffTag::Delete => write_marked(host, "-", op.old_range(), old)?,
-				DiffTag::Insert => write_marked(host, "+", op.new_range(), new)?,
-				DiffTag::Replace => {
-					write_marked(host, "-", op.old_range(), old)?;
-					write_marked(host, "+", op.new_range(), new)?;
+			match op.kind {
+				LineChange::Equal => write_marked(out, " ", op.old.clone(), old)?,
+				LineChange::Delete => write_marked(out, "-", op.old.clone(), old)?,
+				LineChange::Insert => write_marked(out, "+", op.new.clone(), new)?,
+				LineChange::Replace => {
+					write_marked(out, "-", op.old.clone(), old)?;
+					write_marked(out, "+", op.new.clone(), new)?;
 				},
 			}
 		}
-		let tail = ops[last].old_range().end;
-		write_marked(host, " ", tail..tail + trail, old)?;
+		let tail = ops[last].old.end;
+		write_marked(out, " ", tail..tail + trail, old)?;
 	}
 	Ok(())
 }
@@ -665,8 +723,8 @@ fn context_range(start: usize, count: usize) -> String {
 }
 
 fn write_context_format(
-	host: &mut Host,
-	ops: &[DiffOp],
+	out: &mut impl Write,
+	ops: &[LineEdit],
 	suppressed: &[bool],
 	old: &FileLines<'_>,
 	new: &FileLines<'_>,
@@ -674,40 +732,40 @@ fn write_context_format(
 ) -> Result<(), String> {
 	for (first, last) in group_ops(ops, suppressed, context) {
 		let (lead, trail) = group_padding(ops, first, last, context);
-		let old_start = ops[first].old_range().start - lead;
-		let new_start = ops[first].new_range().start - lead;
-		let old_count = ops[last].old_range().end + trail - old_start;
-		let new_count = ops[last].new_range().end + trail - new_start;
+		let old_start = ops[first].old.start - lead;
+		let new_start = ops[first].new.start - lead;
+		let old_count = ops[last].old.end + trail - old_start;
+		let new_count = ops[last].new.end + trail - new_start;
 		let group = &ops[first..=last];
-		wline(host, format_args!("***************"))?;
-		wline(host, format_args!("*** {} ****", context_range(old_start, old_count)))?;
+		wline(out, format_args!("***************"))?;
+		wline(out, format_args!("*** {} ****", context_range(old_start, old_count)))?;
 		// GNU omits a side's body entirely when it has no changes.
-		if group.iter().any(|op| matches!(op.tag(), DiffTag::Delete | DiffTag::Replace)) {
-			write_marked(host, "  ", old_start..ops[first].old_range().start, old)?;
+		if group.iter().any(|op| matches!(op.kind, LineChange::Delete | LineChange::Replace)) {
+			write_marked(out, "  ", old_start..ops[first].old.start, old)?;
 			for op in group {
-				match op.tag() {
-					DiffTag::Equal => write_marked(host, "  ", op.old_range(), old)?,
-					DiffTag::Delete => write_marked(host, "- ", op.old_range(), old)?,
-					DiffTag::Replace => write_marked(host, "! ", op.old_range(), old)?,
-					DiffTag::Insert => {},
+				match op.kind {
+					LineChange::Equal => write_marked(out, "  ", op.old.clone(), old)?,
+					LineChange::Delete => write_marked(out, "- ", op.old.clone(), old)?,
+					LineChange::Replace => write_marked(out, "! ", op.old.clone(), old)?,
+					LineChange::Insert => {},
 				}
 			}
-			let tail = ops[last].old_range().end;
-			write_marked(host, "  ", tail..tail + trail, old)?;
+			let tail = ops[last].old.end;
+			write_marked(out, "  ", tail..tail + trail, old)?;
 		}
-		wline(host, format_args!("--- {} ----", context_range(new_start, new_count)))?;
-		if group.iter().any(|op| matches!(op.tag(), DiffTag::Insert | DiffTag::Replace)) {
-			write_marked(host, "  ", new_start..ops[first].new_range().start, new)?;
+		wline(out, format_args!("--- {} ----", context_range(new_start, new_count)))?;
+		if group.iter().any(|op| matches!(op.kind, LineChange::Insert | LineChange::Replace)) {
+			write_marked(out, "  ", new_start..ops[first].new.start, new)?;
 			for op in group {
-				match op.tag() {
-					DiffTag::Equal => write_marked(host, "  ", op.new_range(), new)?,
-					DiffTag::Insert => write_marked(host, "+ ", op.new_range(), new)?,
-					DiffTag::Replace => write_marked(host, "! ", op.new_range(), new)?,
-					DiffTag::Delete => {},
+				match op.kind {
+					LineChange::Equal => write_marked(out, "  ", op.new.clone(), new)?,
+					LineChange::Insert => write_marked(out, "+ ", op.new.clone(), new)?,
+					LineChange::Replace => write_marked(out, "! ", op.new.clone(), new)?,
+					LineChange::Delete => {},
 				}
 			}
-			let tail = ops[last].new_range().end;
-			write_marked(host, "  ", tail..tail + trail, new)?;
+			let tail = ops[last].new.end;
+			write_marked(out, "  ", tail..tail + trail, new)?;
 		}
 	}
 	Ok(())
@@ -739,6 +797,7 @@ fn diff_dirs(
 	res_b: &Path,
 	opts: Options<'_>,
 	host: &mut Host,
+	out: &mut impl Write,
 ) -> Result<bool, String> {
 	let mut names: BTreeSet<OsString> = BTreeSet::new();
 	for (dir_name, dir_res) in [(name_a, res_a), (name_b, res_b)] {
@@ -777,10 +836,11 @@ fn diff_dirs(
 						&child_res_b,
 						opts,
 						host,
+						out,
 					)?;
 				} else {
 					wline(
-						host,
+						out,
 						format_args!(
 							"Common subdirectories: {} and {}",
 							child_name_a.display(),
@@ -796,7 +856,7 @@ fn diff_dirs(
 					(&child_name_b, &child_name_a)
 				};
 				wline(
-					host,
+					out,
 					format_args!(
 						"File {} is a directory while file {} is a regular file",
 						dir.display(),
@@ -824,7 +884,7 @@ fn diff_dirs(
 					mb.modified().ok(),
 					opts,
 					Some(&prefix),
-					host,
+					out,
 				)?;
 			},
 			(Some(meta), None) | (None, Some(meta)) => {
@@ -856,12 +916,12 @@ fn diff_dirs(
 						mtb,
 						opts,
 						Some(&prefix),
-						host,
+						out,
 					)?;
 				} else {
 					let present_dir = if in_a { name_a } else { name_b };
 					wline(
-						host,
+						out,
 						format_args!(
 							"Only in {}: {}",
 							present_dir.display(),
@@ -888,11 +948,6 @@ fn is_binary(bytes: &[u8]) -> bool {
 fn child_display(dir: &Path, name: &OsStr) -> PathBuf {
 	let joined = pi_vfs::join_path(dir, Path::new(name));
 	forward_slash_display(&joined).unwrap_or(joined)
-}
-
-/// Creates the `diff` builtin registration.
-pub(crate) fn diff_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Diff, SE>()
 }
 
 #[cfg(test)]
@@ -1108,6 +1163,46 @@ mod tests {
 		);
 		let (code, stdout, _) = run_in(dir.path(), "", &["-B", "a.txt", "b.txt"]);
 		assert_eq!((code, stdout.as_str()), (1, "10c11\n< j\n---\n> J\n"));
+	}
+
+	#[test]
+	fn blank_replacements_stay_attached_to_nonblank_changes() {
+		let dir = tempfile::tempdir().unwrap();
+		write_pair(dir.path(), "α\n\nω\n", "α\nβ\nω\n");
+		assert_eq!(
+			run_in(dir.path(), "", &["-B", "a.txt", "b.txt"]),
+			(1, "2c2\n< \n---\n> β\n".to_string(), String::new())
+		);
+	}
+
+	#[test]
+	fn blank_hunk_suppression_respects_context_boundary() {
+		let dir = tempfile::tempdir().unwrap();
+		// Two equal lines join the blank change to the real change at -U1.
+		write_pair(dir.path(), "a\nb\nold\n", "\na\nb\nnew\n");
+		let (code, stdout, stderr) = run_in(dir.path(), "", &["-B", "-U1", "a.txt", "b.txt"]);
+		assert_eq!((code, stderr.as_str()), (1, ""));
+		assert!(stdout.ends_with("@@ -1,3 +1,4 @@\n+\n a\n b\n-old\n+new\n"), "{stdout}");
+
+		// One extra equal line separates the blank-only hunk, which is dropped.
+		write_pair(dir.path(), "a\nb\nc\nold\n", "\na\nb\nc\nnew\n");
+		let (code, stdout, stderr) = run_in(dir.path(), "", &["-B", "-U1", "a.txt", "b.txt"]);
+		assert_eq!((code, stderr.as_str()), (1, ""));
+		assert!(stdout.ends_with("@@ -3,2 +4,2 @@\n c\n-old\n+new\n"), "{stdout}");
+		assert_eq!(stdout.matches("@@ -").count(), 1);
+	}
+
+	#[test]
+	fn normalized_keys_render_original_unicode_and_eof() {
+		let dir = tempfile::tempdir().unwrap();
+		write_pair(dir.path(), " É \n古\n", "é\n新");
+		let (code, stdout, stderr) =
+			run_in(dir.path(), "", &["-iw", "-U1", "a.txt", "b.txt"]);
+		assert_eq!((code, stderr.as_str()), (1, ""));
+		assert!(
+			stdout.ends_with("@@ -1,2 +1,2 @@\n  É \n-古\n+新\n\\ No newline at end of file\n"),
+			"{stdout}"
+		);
 	}
 
 	// Defends: --strip-trailing-cr equates CRLF and LF inputs.

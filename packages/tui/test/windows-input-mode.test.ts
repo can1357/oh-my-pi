@@ -77,6 +77,20 @@ describe("Win32InputModeDecoder", () => {
 		expect(decodeOne("\x1b[81;16;64;1;9;1_")).toBe("@");
 	});
 
+	it("emits text a dead key composed onto Space, Enter and Tab", () => {
+		// US-International: `'` then Space types `'`; `"` then Space types `"`.
+		expect(decodeOne("\x1b[32;57;39;1;0;1_")).toBe("'");
+		expect(decodeOne("\x1b[32;57;34;1;0;1_")).toBe('"');
+		// `'` then Enter: the quote rides an Enter record, then Enter itself follows.
+		const decoder = new Win32InputModeDecoder();
+		expect(decoder.decode("\x1b[13;28;39;1;0;1_")).toEqual(["'"]);
+		expect(decoder.decode(ENTER)).toEqual(["\r"]);
+		expect(decodeOne("\x1b[9;15;39;1;0;1_")).toBe("'");
+		// Plain Space and Shift+Space stay a space.
+		expect(decodeOne("\x1b[32;57;32;1;0;1_")).toBe(" ");
+		expect(decodeOne("\x1b[32;57;32;1;16;1_")).toBe(" ");
+	});
+
 	it("joins surrogate halves delivered as separate records", () => {
 		const decoder = new Win32InputModeDecoder();
 		expect(decoder.decode("\x1b[231;0;55357;1;0;1_")).toEqual([]);
@@ -98,6 +112,32 @@ describe("Win32InputModeDecoder", () => {
 		expect(decoder.decodePaste(pasted)).toBe("a\r\rb😀");
 		// Record-shaped text without ESC is ordinary pasted content.
 		expect(decoder.decodePaste("see [13;28;13;1;0;1_ here")).toBe("see [13;28;13;1;0;1_ here");
+	});
+
+	it("reassembles escape sequences a VT host relays as one text record per byte", () => {
+		// Captured from ConPTY when the host terminal writes `ESC [ 1 ; 3 A` (Alt+Up).
+		const relay = (text: string) => [...text].map(ch => `\x1b[0;0;${ch.charCodeAt(0)};1;0;1_`);
+		const decoder = new Win32InputModeDecoder();
+		const keys = relay("\x1b[1;3A").flatMap(record => decoder.decode(record)!);
+		expect(keys).toEqual(["\x1b[1;3A"]);
+		expect(matchesKey(keys[0]!, "alt+up")).toBe(true);
+		expect(relay("\x1b\x1b[A").flatMap(record => decoder.decode(record)!)).toEqual(["\x1b\x1b[A"]);
+		expect(decoder.hasPendingSequence).toBe(false);
+
+		// A lone relayed ESC is held, then released as Escape; plain text is not held.
+		expect(decoder.decode(relay("\x1b")[0]!)).toEqual([]);
+		expect(decoder.flushPendingSequence()).toEqual(["\x1b"]);
+		expect(decoder.decode(relay("x")[0]!)).toEqual(["x"]);
+		// A real key record ends a held ESC instead of being swallowed into it.
+		decoder.decode(relay("\x1b")[0]!);
+		expect(decoder.decode(ENTER)).toEqual(["\x1b", "\r"]);
+
+		// Escape then Alt+d stays two keys; only `ESC ESC [` / `ESC ESC O` group as meta-CSI/SS3.
+		const split = relay("\x1b\x1bd").flatMap(record => decoder.decode(record)!);
+		expect(split).toEqual(["\x1b", "\x1bd"]);
+		expect(matchesKey(split[0]!, "escape")).toBe(true);
+		expect(matchesKey(split[1]!, "alt+d")).toBe(true);
+		expect(decoder.hasPendingSequence).toBe(false);
 	});
 });
 
@@ -152,6 +192,58 @@ describe("ProcessTerminal win32-input-mode fallback", () => {
 		harness.writes.length = 0;
 		harness.tui.stop();
 		expect(harness.writes.join("")).toContain("\x1b[?9001l");
+	});
+
+	it("enables win32-input-mode under WSL alongside modifyOtherKeys and decodes Enter chords", async () => {
+		// WSL output crosses the `wsl.exe` relay's console host, which folds Shift+Enter into
+		// `\r` and Ctrl+Enter into `\n` unless 9001 is on. Not every WSL pty has a console host
+		// behind it (tmux, VS Code Remote-WSL), so modifyOtherKeys stays requested too.
+		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: false });
+		const recorder = new InputRecorder();
+		harness.tui.addChild(recorder);
+		harness.tui.setFocus(recorder);
+		await harness.settle();
+		harness.writes.length = 0;
+
+		await harness.feed("\x1b[?61;4;6;7;14;21;22;23;24;28;32;42;52c");
+		const out = harness.writes.join("");
+		expect(out).toContain("\x1b[?9001h");
+		expect(out).toContain("\x1b[>4;2m");
+
+		await harness.feed(SHIFT_ENTER, ENTER_UP, CTRL_ENTER, "\x1b[27;2;13~");
+		expect(recorder.received).toHaveLength(3);
+		expect(matchesKey(recorder.received[0]!, "shift+enter")).toBe(true);
+		expect(matchesKey(recorder.received[1]!, "ctrl+enter")).toBe(true);
+		expect(matchesKey(recorder.received[2]!, "shift+enter")).toBe(true);
+	});
+
+	it("keeps relayed terminal replies out of the WSL composer while decoding keys", async () => {
+		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: false });
+		const recorder = new InputRecorder();
+		harness.tui.addChild(recorder);
+		harness.tui.setFocus(recorder);
+		await harness.settle();
+		await harness.feed("\x1b[?1;0c");
+
+		const reply = [..."\x1b[?1;0c"].map(char => `\x1b[0;0;${char.charCodeAt(0)};1;0;1_`);
+		await harness.feed(...reply, "\x1b[65;30;97;1;0;1_", "\x1b[8;14;8;1;0;1_", "\x1b[67;46;3;1;8;1_");
+
+		expect(recorder.received).toEqual(["a", "\x7f", "\x03"]);
+	});
+
+	it("delivers a key record that interrupts a partial direct terminal reply", async () => {
+		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: false });
+		const recorder = new InputRecorder();
+		harness.tui.addChild(recorder);
+		harness.tui.setFocus(recorder);
+		await harness.settle();
+		await harness.feed("\x1b[?1;0c");
+
+		// The OSC 11 reply stalls past the flush window, so its head is buffered as a fragment.
+		await harness.feed("\x1b]11;rgb:1111/2222");
+		await harness.feed("\x1b[65;30;97;1;0;1_", "\x1b[66;48;98;1;0;1_");
+
+		expect(recorder.received).toEqual(["a", "b"]);
 	});
 
 	it("prefers a late kitty reply and turns win32-input-mode back off", async () => {

@@ -1,0 +1,2580 @@
+%YAML 1.2
+# Vendored from zyxar/Sublime-CMakeLists@2560a080; MIT, copyright (c) 2012-2020 The Sublime CMake authors.
+---
+# Automatically generated file -- do not edit!
+contexts:
+  add_compile_options-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  add_custom_command-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bOUTPUT\b
+    scope: variable.parameter.OUTPUT.cmake
+  - match: \bCOMMAND\b
+    scope: variable.parameter.COMMAND.cmake
+  - match: \bARGS\b
+    scope: variable.parameter.ARGS.cmake
+  - match: \bMAIN_DEPENDENCY\b
+    scope: variable.parameter.MAIN_DEPENDENCY.cmake
+  - match: \bDEPENDS\b
+    scope: variable.parameter.DEPENDS.cmake
+  - match: \bBYPRODUCTS\b
+    scope: variable.parameter.BYPRODUCTS.cmake
+  - match: \bIMPLICIT_DEPENDS\b
+    scope: variable.parameter.IMPLICIT_DEPENDS.cmake
+  - match: \bWORKING_DIRECTORY\b
+    scope: variable.parameter.WORKING_DIRECTORY.cmake
+  - match: \bCOMMENT\b
+    scope: variable.parameter.COMMENT.cmake
+  - match: \bDEPFILE\b
+    scope: variable.parameter.DEPFILE.cmake
+  - match: \bVERBATIM\b
+    scope: variable.parameter.VERBATIM.cmake
+  - match: \bAPPEND\b
+    scope: variable.parameter.APPEND.cmake
+  - match: \bUSES_TERMINAL COMMAND_EXPAND_LISTS\b
+    scope: variable.parameter.USES_TERMINAL COMMAND_EXPAND_LISTS.cmake
+  - match: \bTARGET\b
+    scope: variable.parameter.TARGET.cmake
+  - match: \bPRE_BUILD\b
+    scope: variable.parameter.PRE_BUILD.cmake
+  - match: \bPRE_LINK\b
+    scope: variable.parameter.PRE_LINK.cmake
+  - match: \bPOST_BUILD\b
+    scope: variable.parameter.POST_BUILD.cmake
+  - include: scope:source.cmake#args-common
+  add_custom_target-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bALL\b
+    scope: variable.parameter.ALL.cmake
+  - match: \bCOMMAND\b
+    scope: variable.parameter.COMMAND.cmake
+  - match: \bDEPENDS\b
+    scope: variable.parameter.DEPENDS.cmake
+  - match: \bBYPRODUCTS\b
+    scope: variable.parameter.BYPRODUCTS.cmake
+  - match: \bWORKING_DIRECTORY\b
+    scope: variable.parameter.WORKING_DIRECTORY.cmake
+  - match: \bCOMMENT\b
+    scope: variable.parameter.COMMENT.cmake
+  - match: \bVERBATIM\b
+    scope: variable.parameter.VERBATIM.cmake
+  - match: \bUSES_TERMINAL\b
+    scope: variable.parameter.USES_TERMINAL.cmake
+  - match: \bCOMMAND_EXPAND_LISTS\b
+    scope: variable.parameter.COMMAND_EXPAND_LISTS.cmake
+  - match: \bSOURCES\b
+    scope: variable.parameter.SOURCES.cmake
+  - include: scope:source.cmake#args-common
+  add_definitions-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  add_dependencies-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  add_executable-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bWIN32\b
+    scope: variable.parameter.WIN32.cmake
+  - match: \bMACOSX_BUNDLE\b
+    scope: variable.parameter.MACOSX_BUNDLE.cmake
+  - match: \bEXCLUDE_FROM_ALL\b
+    scope: variable.parameter.EXCLUDE_FROM_ALL.cmake
+  - match: \bIMPORTED\b
+    scope: variable.parameter.IMPORTED.cmake
+  - match: \bGLOBAL\b
+    scope: variable.parameter.GLOBAL.cmake
+  - match: \bALIAS\b
+    scope: variable.parameter.ALIAS.cmake
+  - include: scope:source.cmake#args-common
+  add_library-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bSTATIC\b
+    scope: variable.parameter.STATIC.cmake
+  - match: \bSHARED\b
+    scope: variable.parameter.SHARED.cmake
+  - match: \bMODULE\b
+    scope: variable.parameter.MODULE.cmake
+  - match: \bEXCLUDE_FROM_ALL\b
+    scope: variable.parameter.EXCLUDE_FROM_ALL.cmake
+  - match: \bUNKNOWN\b
+    scope: variable.parameter.UNKNOWN.cmake
+  - match: \bIMPORTED\b
+    scope: variable.parameter.IMPORTED.cmake
+  - match: \bGLOBAL\b
+    scope: variable.parameter.GLOBAL.cmake
+  - match: \bOBJECT\b
+    scope: variable.parameter.OBJECT.cmake
+  - match: \bALIAS\b
+    scope: variable.parameter.ALIAS.cmake
+  - match: \bINTERFACE\b
+    scope: variable.parameter.INTERFACE.cmake
+  - include: scope:source.cmake#args-common
+  add_subdirectory-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bEXCLUDE_FROM_ALL\b
+    scope: variable.parameter.EXCLUDE_FROM_ALL.cmake
+  - include: scope:source.cmake#args-common
+  add_test-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bNAME\b
+    scope: variable.parameter.NAME.cmake
+  - match: \bCOMMAND\b
+    scope: variable.parameter.COMMAND.cmake
+  - match: \bCONFIGURATIONS\b
+    scope: variable.parameter.CONFIGURATIONS.cmake
+  - match: \bWORKING_DIRECTORY\b
+    scope: variable.parameter.WORKING_DIRECTORY.cmake
+  - include: scope:source.cmake#args-common
+  aux_source_directory-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  build_command-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bCONFIGURATION\b
+    scope: variable.parameter.CONFIGURATION.cmake
+  - match: \bTARGET\b
+    scope: variable.parameter.TARGET.cmake
+  - match: \bPROJECT_NAME\b
+    scope: variable.parameter.PROJECT_NAME.cmake
+  - include: scope:source.cmake#args-common
+  build_name-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  cmake_host_system_information-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bRESULT\b
+    scope: variable.parameter.RESULT.cmake
+  - match: \bQUERY\b
+    scope: variable.parameter.QUERY.cmake
+  - include: scope:source.cmake#args-common
+  cmake_minimum_required-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bVERSION\b
+    scope: variable.parameter.VERSION.cmake
+  - match: \bFATAL_ERROR\b
+    scope: variable.parameter.FATAL_ERROR.cmake
+  - include: scope:source.cmake#args-common
+  cmake_parse_arguments-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  cmake_policy-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bVERSION\b
+    scope: variable.parameter.VERSION.cmake
+  - match: \bGET\b
+    scope: variable.parameter.GET.cmake
+  - match: \bSET\b
+    scope: variable.parameter.SET.cmake
+  - match: \bNEW\b
+    scope: variable.parameter.NEW.cmake
+  - match: \bOLD\b
+    scope: variable.parameter.OLD.cmake
+  - match: \bPUSH\b
+    scope: variable.parameter.PUSH.cmake
+  - match: \bPOP\b
+    scope: variable.parameter.POP.cmake
+  - include: scope:source.cmake#args-common
+  configure_file-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bCOPYONLY\b
+    scope: variable.parameter.COPYONLY.cmake
+  - match: \bESCAPE_QUOTES\b
+    scope: variable.parameter.ESCAPE_QUOTES.cmake
+  - match: \b@ONLY\b
+    scope: variable.parameter.@ONLY.cmake
+  - match: \bNEWLINE_STYLE\b
+    scope: variable.parameter.NEWLINE_STYLE.cmake
+  - include: scope:source.cmake#args-common
+  create_test_sourcelist-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bEXTRA_INCLUDE\b
+    scope: variable.parameter.EXTRA_INCLUDE.cmake
+  - match: \bFUNCTION\b
+    scope: variable.parameter.FUNCTION.cmake
+  - include: scope:source.cmake#args-common
+  ctest_build-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bBUILD\b
+    scope: variable.parameter.BUILD.cmake
+  - match: \bAPPEND\b
+    scope: variable.parameter.APPEND.cmake
+  - match: \bCONFIGURATION\b
+    scope: variable.parameter.CONFIGURATION.cmake
+  - match: \bFLAGS\b
+    scope: variable.parameter.FLAGS.cmake
+  - match: \bPROJECT_NAME\b
+    scope: variable.parameter.PROJECT_NAME.cmake
+  - match: \bTARGET\b
+    scope: variable.parameter.TARGET.cmake
+  - match: \bNUMBER_ERRORS\b
+    scope: variable.parameter.NUMBER_ERRORS.cmake
+  - match: \bNUMBER_WARNINGS\b
+    scope: variable.parameter.NUMBER_WARNINGS.cmake
+  - match: \bRETURN_VALUE\b
+    scope: variable.parameter.RETURN_VALUE.cmake
+  - match: \bCAPTURE_CMAKE_ERROR\b
+    scope: variable.parameter.CAPTURE_CMAKE_ERROR.cmake
+  - include: scope:source.cmake#args-common
+  ctest_configure-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bBUILD\b
+    scope: variable.parameter.BUILD.cmake
+  - match: \bSOURCE\b
+    scope: variable.parameter.SOURCE.cmake
+  - match: \bAPPEND\b
+    scope: variable.parameter.APPEND.cmake
+  - match: \bOPTIONS\b
+    scope: variable.parameter.OPTIONS.cmake
+  - match: \bRETURN_VALUE\b
+    scope: variable.parameter.RETURN_VALUE.cmake
+  - match: \bQUIET\b
+    scope: variable.parameter.QUIET.cmake
+  - match: \bCAPTURE_CMAKE_ERROR\b
+    scope: variable.parameter.CAPTURE_CMAKE_ERROR.cmake
+  - include: scope:source.cmake#args-common
+  ctest_coverage-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bBUILD\b
+    scope: variable.parameter.BUILD.cmake
+  - match: \bAPPEND\b
+    scope: variable.parameter.APPEND.cmake
+  - match: \bLABELS\b
+    scope: variable.parameter.LABELS.cmake
+  - match: \bRETURN_VALUE\b
+    scope: variable.parameter.RETURN_VALUE.cmake
+  - match: \bCAPTURE_CMAKE_ERROR\b
+    scope: variable.parameter.CAPTURE_CMAKE_ERROR.cmake
+  - match: \bQUIET\b
+    scope: variable.parameter.QUIET.cmake
+  - include: scope:source.cmake#args-common
+  ctest_empty_binary_directory-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  ctest_memcheck-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bBUILD\b
+    scope: variable.parameter.BUILD.cmake
+  - match: \bAPPEND\b
+    scope: variable.parameter.APPEND.cmake
+  - match: \bSTART\b
+    scope: variable.parameter.START.cmake
+  - match: \bEND\b
+    scope: variable.parameter.END.cmake
+  - match: \bSTRIDE\b
+    scope: variable.parameter.STRIDE.cmake
+  - match: \bEXCLUDE\b
+    scope: variable.parameter.EXCLUDE.cmake
+  - match: \bINCLUDE\b
+    scope: variable.parameter.INCLUDE.cmake
+  - match: \bEXCLUDE_LABEL\b
+    scope: variable.parameter.EXCLUDE_LABEL.cmake
+  - match: \bINCLUDE_LABEL\b
+    scope: variable.parameter.INCLUDE_LABEL.cmake
+  - match: \bPARALLEL_LEVEL\b
+    scope: variable.parameter.PARALLEL_LEVEL.cmake
+  - match: \bTEST_LOAD\b
+    scope: variable.parameter.TEST_LOAD.cmake
+  - match: \bSCHEDULE_RANDOM\b
+    scope: variable.parameter.SCHEDULE_RANDOM.cmake
+  - match: \bSTOP_TIME\b
+    scope: variable.parameter.STOP_TIME.cmake
+  - match: \bRETURN_VALUE\b
+    scope: variable.parameter.RETURN_VALUE.cmake
+  - match: \bDEFECT_COUNT\b
+    scope: variable.parameter.DEFECT_COUNT.cmake
+  - match: \bQUIET\b
+    scope: variable.parameter.QUIET.cmake
+  - include: scope:source.cmake#args-common
+  ctest_read_custom_files-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  ctest_run_script-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bNEW_PROCESS\b
+    scope: variable.parameter.NEW_PROCESS.cmake
+  - match: \bRETURN_VALUE\b
+    scope: variable.parameter.RETURN_VALUE.cmake
+  - include: scope:source.cmake#args-common
+  ctest_sleep-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  ctest_start-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bTRACK\b
+    scope: variable.parameter.TRACK.cmake
+  - match: \bAPPEND\b
+    scope: variable.parameter.APPEND.cmake
+  - match: \bQUIET\b
+    scope: variable.parameter.QUIET.cmake
+  - include: scope:source.cmake#args-common
+  ctest_submit-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bPARTS\b
+    scope: variable.parameter.PARTS.cmake
+  - match: \bFILES\b
+    scope: variable.parameter.FILES.cmake
+  - match: \bRETRY_COUNT\b
+    scope: variable.parameter.RETRY_COUNT.cmake
+  - match: \bRETRY_DELAY\b
+    scope: variable.parameter.RETRY_DELAY.cmake
+  - match: \bRETURN_VALUE\b
+    scope: variable.parameter.RETURN_VALUE.cmake
+  - match: \bQUIET\b
+    scope: variable.parameter.QUIET.cmake
+  - match: \bCDASH_UPLOAD\b
+    scope: variable.parameter.CDASH_UPLOAD.cmake
+  - match: \bCDASH_UPLOAD_TYPE\b
+    scope: variable.parameter.CDASH_UPLOAD_TYPE.cmake
+  - include: scope:source.cmake#args-common
+  ctest_test-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bBUILD\b
+    scope: variable.parameter.BUILD.cmake
+  - match: \bAPPEND\b
+    scope: variable.parameter.APPEND.cmake
+  - match: \bSTART\b
+    scope: variable.parameter.START.cmake
+  - match: \bEND\b
+    scope: variable.parameter.END.cmake
+  - match: \bSTRIDE\b
+    scope: variable.parameter.STRIDE.cmake
+  - match: \bEXCLUDE\b
+    scope: variable.parameter.EXCLUDE.cmake
+  - match: \bINCLUDE\b
+    scope: variable.parameter.INCLUDE.cmake
+  - match: \bEXCLUDE_LABEL\b
+    scope: variable.parameter.EXCLUDE_LABEL.cmake
+  - match: \bINCLUDE_LABEL\b
+    scope: variable.parameter.INCLUDE_LABEL.cmake
+  - match: \bPARALLEL_LEVEL\b
+    scope: variable.parameter.PARALLEL_LEVEL.cmake
+  - match: \bTEST_LOAD\b
+    scope: variable.parameter.TEST_LOAD.cmake
+  - match: \bSCHEDULE_RANDOM\b
+    scope: variable.parameter.SCHEDULE_RANDOM.cmake
+  - match: \bSTOP_TIME\b
+    scope: variable.parameter.STOP_TIME.cmake
+  - match: \bRETURN_VALUE\b
+    scope: variable.parameter.RETURN_VALUE.cmake
+  - match: \bCAPTURE_CMAKE_ERROR\b
+    scope: variable.parameter.CAPTURE_CMAKE_ERROR.cmake
+  - match: \bQUIET\b
+    scope: variable.parameter.QUIET.cmake
+  - include: scope:source.cmake#args-common
+  ctest_update-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bSOURCE\b
+    scope: variable.parameter.SOURCE.cmake
+  - match: \bRETURN_VALUE\b
+    scope: variable.parameter.RETURN_VALUE.cmake
+  - match: \bQUIET\b
+    scope: variable.parameter.QUIET.cmake
+  - include: scope:source.cmake#args-common
+  ctest_upload-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bFILES\b
+    scope: variable.parameter.FILES.cmake
+  - match: \bQUIET\b
+    scope: variable.parameter.QUIET.cmake
+  - match: \bCAPTURE_CMAKE_ERROR\b
+    scope: variable.parameter.CAPTURE_CMAKE_ERROR.cmake
+  - include: scope:source.cmake#args-common
+  define_property-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bGLOBAL\b
+    scope: variable.parameter.GLOBAL.cmake
+  - match: \bDIRECTORY\b
+    scope: variable.parameter.DIRECTORY.cmake
+  - match: \bTARGET\b
+    scope: variable.parameter.TARGET.cmake
+  - match: \bSOURCE\b
+    scope: variable.parameter.SOURCE.cmake
+  - match: \bTEST\b
+    scope: variable.parameter.TEST.cmake
+  - match: \bVARIABLE\b
+    scope: variable.parameter.VARIABLE.cmake
+  - match: \bCACHED_VARIABLE\b
+    scope: variable.parameter.CACHED_VARIABLE.cmake
+  - match: \bPROPERTY\b
+    scope: variable.parameter.PROPERTY.cmake
+  - match: \bINHERITED\b
+    scope: variable.parameter.INHERITED.cmake
+  - match: \bBRIEF_DOCS\b
+    scope: variable.parameter.BRIEF_DOCS.cmake
+  - match: \bFULL_DOCS\b
+    scope: variable.parameter.FULL_DOCS.cmake
+  - include: scope:source.cmake#args-common
+  enable_language-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bOPTIONAL\b
+    scope: variable.parameter.OPTIONAL.cmake
+  - include: scope:source.cmake#args-common
+  enable_testing-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  exec_program-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bARGS\b
+    scope: variable.parameter.ARGS.cmake
+  - match: \bOUTPUT_VARIABLE\b
+    scope: variable.parameter.OUTPUT_VARIABLE.cmake
+  - match: \bRETURN_VALUE\b
+    scope: variable.parameter.RETURN_VALUE.cmake
+  - include: scope:source.cmake#args-common
+  execute_process-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bCOMMAND\b
+    scope: variable.parameter.COMMAND.cmake
+  - match: \bWORKING_DIRECTORY\b
+    scope: variable.parameter.WORKING_DIRECTORY.cmake
+  - match: \bTIMEOUT\b
+    scope: variable.parameter.TIMEOUT.cmake
+  - match: \bRESULT_VARIABLE\b
+    scope: variable.parameter.RESULT_VARIABLE.cmake
+  - match: \bOUTPUT_VARIABLE\b
+    scope: variable.parameter.OUTPUT_VARIABLE.cmake
+  - match: \bERROR_VARIABLE\b
+    scope: variable.parameter.ERROR_VARIABLE.cmake
+  - match: \bINPUT_FILE\b
+    scope: variable.parameter.INPUT_FILE.cmake
+  - match: \bOUTPUT_FILE\b
+    scope: variable.parameter.OUTPUT_FILE.cmake
+  - match: \bERROR_FILE\b
+    scope: variable.parameter.ERROR_FILE.cmake
+  - match: \bOUTPUT_QUIET\b
+    scope: variable.parameter.OUTPUT_QUIET.cmake
+  - match: \bERROR_QUIET\b
+    scope: variable.parameter.ERROR_QUIET.cmake
+  - match: \bOUTPUT_STRIP_TRAILING_WHITESPACE\b
+    scope: variable.parameter.OUTPUT_STRIP_TRAILING_WHITESPACE.cmake
+  - match: \bERROR_STRIP_TRAILING_WHITESPACE\b
+    scope: variable.parameter.ERROR_STRIP_TRAILING_WHITESPACE.cmake
+  - match: \bENCODING\b
+    scope: variable.parameter.ENCODING.cmake
+  - include: scope:source.cmake#args-common
+  export-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bEXPORT\b
+    scope: variable.parameter.EXPORT.cmake
+  - match: \bNAMESPACE\b
+    scope: variable.parameter.NAMESPACE.cmake
+  - match: \bFILE\b
+    scope: variable.parameter.FILE.cmake
+  - match: \bTARGETS\b
+    scope: variable.parameter.TARGETS.cmake
+  - match: \bAPPEND\b
+    scope: variable.parameter.APPEND.cmake
+  - match: \bEXPORT_LINK_INTERFACE_LIBRARIES\b
+    scope: variable.parameter.EXPORT_LINK_INTERFACE_LIBRARIES.cmake
+  - match: \bPACKAGE\b
+    scope: variable.parameter.PACKAGE.cmake
+  - match: \bANDROID_MK\b
+    scope: variable.parameter.ANDROID_MK.cmake
+  - include: scope:source.cmake#args-common
+  export_library_dependencies-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bAPPEND\b
+    scope: variable.parameter.APPEND.cmake
+  - include: scope:source.cmake#args-common
+  file-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bNO_SOURCE_PERMISSIONS\b
+    scope: variable.parameter.NO_SOURCE_PERMISSIONS.cmake
+  - match: \bUSE_SOURCE_PERMISSIONS\b
+    scope: variable.parameter.USE_SOURCE_PERMISSIONS.cmake
+  - match: \bPERMISSIONS\b
+    scope: variable.parameter.PERMISSIONS.cmake
+  - match: \bFILE_PERMISSIONS\b
+    scope: variable.parameter.FILE_PERMISSIONS.cmake
+  - match: \bDIRECTORY_PERMISSIONS\b
+    scope: variable.parameter.DIRECTORY_PERMISSIONS.cmake
+  - match: \bREGEX\b
+    scope: variable.parameter.REGEX.cmake
+  - match: \bTIMEOUT\b
+    scope: variable.parameter.TIMEOUT.cmake
+  - match: \bINPUT\b
+    scope: variable.parameter.INPUT.cmake
+  - match: \bOUTPUT\b
+    scope: variable.parameter.OUTPUT.cmake
+  - match: \bDESTINATION\b
+    scope: variable.parameter.DESTINATION.cmake
+  - match: \bVERBOSE\b
+    scope: variable.parameter.VERBOSE.cmake
+  - match: \bREAD\b
+    scope: variable.parameter.READ.cmake
+  - match: \bOFFSET\b
+    scope: variable.parameter.OFFSET.cmake
+  - match: \bLIMIT\b
+    scope: variable.parameter.LIMIT.cmake
+  - match: \bHEX\b
+    scope: variable.parameter.HEX.cmake
+  - match: \bSTRINGS\b
+    scope: variable.parameter.STRINGS.cmake
+  - match: \bLENGTH_MAXIMUM\b
+    scope: variable.parameter.LENGTH_MAXIMUM.cmake
+  - match: \bLENGTH_MINIMUM\b
+    scope: variable.parameter.LENGTH_MINIMUM.cmake
+  - match: \bLIMIT_COUNT\b
+    scope: variable.parameter.LIMIT_COUNT.cmake
+  - match: \bLIMIT_INPUT\b
+    scope: variable.parameter.LIMIT_INPUT.cmake
+  - match: \bLIMIT_OUTPUT\b
+    scope: variable.parameter.LIMIT_OUTPUT.cmake
+  - match: \bNEWLINE_CONSUME\b
+    scope: variable.parameter.NEWLINE_CONSUME.cmake
+  - match: \bNO_HEX_CONVERSION\b
+    scope: variable.parameter.NO_HEX_CONVERSION.cmake
+  - match: \bENCODING\b
+    scope: variable.parameter.ENCODING.cmake
+  - match: \bMD5\b
+    scope: variable.parameter.MD5.cmake
+  - match: \bSHA1\b
+    scope: variable.parameter.SHA1.cmake
+  - match: \bSHA224\b
+    scope: variable.parameter.SHA224.cmake
+  - match: \bSHA256\b
+    scope: variable.parameter.SHA256.cmake
+  - match: \bSHA384\b
+    scope: variable.parameter.SHA384.cmake
+  - match: \bSHA512\b
+    scope: variable.parameter.SHA512.cmake
+  - match: \bSHA3_224\b
+    scope: variable.parameter.SHA3_224.cmake
+  - match: \bSHA3_256\b
+    scope: variable.parameter.SHA3_256.cmake
+  - match: \bSHA3_384\b
+    scope: variable.parameter.SHA3_384.cmake
+  - match: \bSHA3_512\b
+    scope: variable.parameter.SHA3_512.cmake
+  - match: \bTIMESTAMP\b
+    scope: variable.parameter.TIMESTAMP.cmake
+  - match: \bUTC\b
+    scope: variable.parameter.UTC.cmake
+  - match: \bGET_RUNTIME_DEPENDENCIES\b
+    scope: variable.parameter.GET_RUNTIME_DEPENDENCIES.cmake
+  - match: \bRESOLVED_DEPENDENCIES_VAR\b
+    scope: variable.parameter.RESOLVED_DEPENDENCIES_VAR.cmake
+  - match: \bUNRESOLVED_DEPENDENCIES_VAR\b
+    scope: variable.parameter.UNRESOLVED_DEPENDENCIES_VAR.cmake
+  - match: \bCONFLICTING_DEPENDENCIES_PREFIX\b
+    scope: variable.parameter.CONFLICTING_DEPENDENCIES_PREFIX.cmake
+  - match: \bEXECUTABLES\b
+    scope: variable.parameter.EXECUTABLES.cmake
+  - match: \bLIBRARIES\b
+    scope: variable.parameter.LIBRARIES.cmake
+  - match: \bMODULES\b
+    scope: variable.parameter.MODULES.cmake
+  - match: \bDIRECTORIES\b
+    scope: variable.parameter.DIRECTORIES.cmake
+  - match: \bBUNDLE_EXECUTABLE\b
+    scope: variable.parameter.BUNDLE_EXECUTABLE.cmake
+  - match: \bPRE_INCLUDE_REGEXES\b
+    scope: variable.parameter.PRE_INCLUDE_REGEXES.cmake
+  - match: \bPRE_EXCLUDE_REGEXES\b
+    scope: variable.parameter.PRE_EXCLUDE_REGEXES.cmake
+  - match: \bPOST_INCLUDE_REGEXES\b
+    scope: variable.parameter.POST_INCLUDE_REGEXES.cmake
+  - match: \bPOST_EXCLUDE_REGEXES\b
+    scope: variable.parameter.POST_EXCLUDE_REGEXES.cmake
+  - match: \bPOST_INCLUDE_FILES\b
+    scope: variable.parameter.POST_INCLUDE_FILES.cmake
+  - match: \bPOST_EXCLUDE_FILES\b
+    scope: variable.parameter.POST_EXCLUDE_FILES.cmake
+  - match: \bWRITE\b
+    scope: variable.parameter.WRITE.cmake
+  - match: \bAPPEND\b
+    scope: variable.parameter.APPEND.cmake
+  - match: \bTOUCH\b
+    scope: variable.parameter.TOUCH.cmake
+  - match: \bTOUCH_NOCREATE\b
+    scope: variable.parameter.TOUCH_NOCREATE.cmake
+  - match: \bGENERATE\b
+    scope: variable.parameter.GENERATE.cmake
+  - match: \bCONDITION\b
+    scope: variable.parameter.CONDITION.cmake
+  - match: \bTARGET\b
+    scope: variable.parameter.TARGET.cmake
+  - match: \bCONFIGURE\b
+    scope: variable.parameter.CONFIGURE.cmake
+  - match: \bESCAPE_QUOTES\b
+    scope: variable.parameter.ESCAPE_QUOTES.cmake
+  - match: \b@ONLY\b
+    scope: variable.parameter.@ONLY.cmake
+  - match: \bNEWLINE_STYLE\b
+    scope: variable.parameter.NEWLINE_STYLE.cmake
+  - match: \bUNIX\b
+    scope: variable.parameter.UNIX.cmake
+  - match: \bDOS\b
+    scope: variable.parameter.DOS.cmake
+  - match: \bWIN32\b
+    scope: variable.parameter.WIN32.cmake
+  - match: \bLF\b
+    scope: variable.parameter.LF.cmake
+  - match: \bCRLF\b
+    scope: variable.parameter.CRLF.cmake
+  - match: \bCONTENT\b
+    scope: variable.parameter.CONTENT.cmake
+  - match: \bGLOB\b
+    scope: variable.parameter.GLOB.cmake
+  - match: \bGLOB_RECURSE\b
+    scope: variable.parameter.GLOB_RECURSE.cmake
+  - match: \bFOLLOW_SYMLINKS\b
+    scope: variable.parameter.FOLLOW_SYMLINKS.cmake
+  - match: \bLIST_DIRECTORIES\b
+    scope: variable.parameter.LIST_DIRECTORIES.cmake
+  - match: \bRELATIVE\b
+    scope: variable.parameter.RELATIVE.cmake
+  - match: \bCONFIGURE_DEPENDS\b
+    scope: variable.parameter.CONFIGURE_DEPENDS.cmake
+  - match: \bMAKE_DIRECTORY\b
+    scope: variable.parameter.MAKE_DIRECTORY.cmake
+  - match: \bREMOVE\b
+    scope: variable.parameter.REMOVE.cmake
+  - match: \bREMOVE_RECURSE\b
+    scope: variable.parameter.REMOVE_RECURSE.cmake
+  - match: \bRENAME\b
+    scope: variable.parameter.RENAME.cmake
+  - match: \bNO_REPLACE\b
+    scope: variable.parameter.NO_REPLACE.cmake
+  - match: \bCOPY_FILE\b
+    scope: variable.parameter.COPY_FILE.cmake
+  - match: \bONLY_IF_DIFFERENT\b
+    scope: variable.parameter.ONLY_IF_DIFFERENT.cmake
+  - match: \bRESULT\b
+    scope: variable.parameter.RESULT.cmake
+  - match: \bCOPY\b
+    scope: variable.parameter.COPY.cmake
+  - match: \bINSTALL\b
+    scope: variable.parameter.INSTALL.cmake
+  - match: \bFOLLOW_SYMLINK_CHAIN\b
+    scope: variable.parameter.FOLLOW_SYMLINK_CHAIN.cmake
+  - match: \bFILES_MATCHING\b
+    scope: variable.parameter.FILES_MATCHING.cmake
+  - match: \bPATTERN\b
+    scope: variable.parameter.PATTERN.cmake
+  - match: \bEXCLUDE\b
+    scope: variable.parameter.EXCLUDE.cmake
+  - match: \bSIZE\b
+    scope: variable.parameter.SIZE.cmake
+  - match: \bREAD_SYMLINK\b
+    scope: variable.parameter.READ_SYMLINK.cmake
+  - match: \bCREATE_LINK\b
+    scope: variable.parameter.CREATE_LINK.cmake
+  - match: \bCOPY_ON_ERROR\b
+    scope: variable.parameter.COPY_ON_ERROR.cmake
+  - match: \bSYMBOLIC\b
+    scope: variable.parameter.SYMBOLIC.cmake
+  - match: \bCHMOD\b
+    scope: variable.parameter.CHMOD.cmake
+  - match: \bCHMOD_RECURSE\b
+    scope: variable.parameter.CHMOD_RECURSE.cmake
+  - match: \bREAL_PATH\b
+    scope: variable.parameter.REAL_PATH.cmake
+  - match: \bBASE_DIRECTORY\b
+    scope: variable.parameter.BASE_DIRECTORY.cmake
+  - match: \bEXPAND_TILDE\b
+    scope: variable.parameter.EXPAND_TILDE.cmake
+  - match: \bRELATIVE_PATH\b
+    scope: variable.parameter.RELATIVE_PATH.cmake
+  - match: \bTO_CMAKE_PATH\b
+    scope: variable.parameter.TO_CMAKE_PATH.cmake
+  - match: \bTO_NATIVE_PATH\b
+    scope: variable.parameter.TO_NATIVE_PATH.cmake
+  - match: \bDOWNLOAD\b
+    scope: variable.parameter.DOWNLOAD.cmake
+  - match: \bUPLOAD\b
+    scope: variable.parameter.UPLOAD.cmake
+  - match: \bINACTIVITY_TIMEOUT\b
+    scope: variable.parameter.INACTIVITY_TIMEOUT.cmake
+  - match: \bLOG\b
+    scope: variable.parameter.LOG.cmake
+  - match: \bSHOW_PROGRESS\b
+    scope: variable.parameter.SHOW_PROGRESS.cmake
+  - match: \bSTATUS\b
+    scope: variable.parameter.STATUS.cmake
+  - match: \bUSERPWD\b
+    scope: variable.parameter.USERPWD.cmake
+  - match: \bHTTPHEADER\b
+    scope: variable.parameter.HTTPHEADER.cmake
+  - match: \bNETRC\b
+    scope: variable.parameter.NETRC.cmake
+  - match: \bIGNORED\b
+    scope: variable.parameter.IGNORED.cmake
+  - match: \bOPTIONAL\b
+    scope: variable.parameter.OPTIONAL.cmake
+  - match: \bREQUIRED\b
+    scope: variable.parameter.REQUIRED.cmake
+  - match: \bTLS_VERIFY\b
+    scope: variable.parameter.TLS_VERIFY.cmake
+  - match: \bTLS_CAINFO\b
+    scope: variable.parameter.TLS_CAINFO.cmake
+  - match: \bEXPECTED_HASH\b
+    scope: variable.parameter.EXPECTED_HASH.cmake
+  - match: \bEXPECTED_MD5\b
+    scope: variable.parameter.EXPECTED_MD5.cmake
+  - match: \bRANGE_START\b
+    scope: variable.parameter.RANGE_START.cmake
+  - match: \bRANGE_END\b
+    scope: variable.parameter.RANGE_END.cmake
+  - match: \bLOCK\b
+    scope: variable.parameter.LOCK.cmake
+  - match: \bDIRECTORY\b
+    scope: variable.parameter.DIRECTORY.cmake
+  - match: \bRELEASE\b
+    scope: variable.parameter.RELEASE.cmake
+  - match: \bGUARD\b
+    scope: variable.parameter.GUARD.cmake
+  - match: \bFUNCTION\b
+    scope: variable.parameter.FUNCTION.cmake
+  - match: \bFILE\b
+    scope: variable.parameter.FILE.cmake
+  - match: \bPROCESS\b
+    scope: variable.parameter.PROCESS.cmake
+  - match: \bRESULT_VARIABLE\b
+    scope: variable.parameter.RESULT_VARIABLE.cmake
+  - match: \bARCHIVE_CREATE\b
+    scope: variable.parameter.ARCHIVE_CREATE.cmake
+  - match: \bPATHS\b
+    scope: variable.parameter.PATHS.cmake
+  - match: \bFORMAT\b
+    scope: variable.parameter.FORMAT.cmake
+  - match: \bCOMPRESSION\b
+    scope: variable.parameter.COMPRESSION.cmake
+  - match: \bCOMPRESSION_LEVEL\b
+    scope: variable.parameter.COMPRESSION_LEVEL.cmake
+  - match: \bMTIME\b
+    scope: variable.parameter.MTIME.cmake
+  - match: \bARCHIVE_EXTRACT\b
+    scope: variable.parameter.ARCHIVE_EXTRACT.cmake
+  - match: \bPATTERNS\b
+    scope: variable.parameter.PATTERNS.cmake
+  - match: \bLIST_ONLY\b
+    scope: variable.parameter.LIST_ONLY.cmake
+  - include: scope:source.cmake#args-common
+  find_file-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bNAMES\b
+    scope: variable.parameter.NAMES.cmake
+  - match: \bHINTS\b
+    scope: variable.parameter.HINTS.cmake
+  - match: \bPATHS\b
+    scope: variable.parameter.PATHS.cmake
+  - match: \bPATH_SUFFIXES\b
+    scope: variable.parameter.PATH_SUFFIXES.cmake
+  - match: \bDOC\b
+    scope: variable.parameter.DOC.cmake
+  - match: \bNO_DEFAULT_PATH\b
+    scope: variable.parameter.NO_DEFAULT_PATH.cmake
+  - match: \bNO_CMAKE_ENVIRONMENT_PATH\b
+    scope: variable.parameter.NO_CMAKE_ENVIRONMENT_PATH.cmake
+  - match: \bNO_CMAKE_PATH\b
+    scope: variable.parameter.NO_CMAKE_PATH.cmake
+  - match: \bNO_SYSTEM_ENVIRONMENT_PATH\b
+    scope: variable.parameter.NO_SYSTEM_ENVIRONMENT_PATH.cmake
+  - match: \bNO_CMAKE_SYSTEM_PATH\b
+    scope: variable.parameter.NO_CMAKE_SYSTEM_PATH.cmake
+  - match: \bCMAKE_FIND_ROOT_PATH_BOTH\b
+    scope: variable.parameter.CMAKE_FIND_ROOT_PATH_BOTH.cmake
+  - match: \bONLY_CMAKE_FIND_ROOT_PATH\b
+    scope: variable.parameter.ONLY_CMAKE_FIND_ROOT_PATH.cmake
+  - match: \bNO_CMAKE_FIND_ROOT_PATH\b
+    scope: variable.parameter.NO_CMAKE_FIND_ROOT_PATH.cmake
+  - include: scope:source.cmake#args-common
+  find_library-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bNAMES\b
+    scope: variable.parameter.NAMES.cmake
+  - match: \bNAMES_PER_DIR\b
+    scope: variable.parameter.NAMES_PER_DIR.cmake
+  - match: \bHINTS\b
+    scope: variable.parameter.HINTS.cmake
+  - match: \bPATHS\b
+    scope: variable.parameter.PATHS.cmake
+  - match: \bPATH_SUFFIXES\b
+    scope: variable.parameter.PATH_SUFFIXES.cmake
+  - match: \bDOC\b
+    scope: variable.parameter.DOC.cmake
+  - match: \bNO_DEFAULT_PATH\b
+    scope: variable.parameter.NO_DEFAULT_PATH.cmake
+  - match: \bNO_CMAKE_ENVIRONMENT_PATH\b
+    scope: variable.parameter.NO_CMAKE_ENVIRONMENT_PATH.cmake
+  - match: \bNO_CMAKE_PATH\b
+    scope: variable.parameter.NO_CMAKE_PATH.cmake
+  - match: \bNO_SYSTEM_ENVIRONMENT_PATH\b
+    scope: variable.parameter.NO_SYSTEM_ENVIRONMENT_PATH.cmake
+  - match: \bNO_CMAKE_SYSTEM_PATH\b
+    scope: variable.parameter.NO_CMAKE_SYSTEM_PATH.cmake
+  - match: \bCMAKE_FIND_ROOT_PATH_BOTH\b
+    scope: variable.parameter.CMAKE_FIND_ROOT_PATH_BOTH.cmake
+  - match: \bONLY_CMAKE_FIND_ROOT_PATH\b
+    scope: variable.parameter.ONLY_CMAKE_FIND_ROOT_PATH.cmake
+  - match: \bNO_CMAKE_FIND_ROOT_PATH\b
+    scope: variable.parameter.NO_CMAKE_FIND_ROOT_PATH.cmake
+  - include: scope:source.cmake#args-common
+  find_package-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bEXACT\b
+    scope: variable.parameter.EXACT.cmake
+  - match: \bQUIET\b
+    scope: variable.parameter.QUIET.cmake
+  - match: \bREQUIRED\b
+    scope: variable.parameter.REQUIRED.cmake
+  - match: \bCOMPONENTS\b
+    scope: variable.parameter.COMPONENTS.cmake
+  - match: \bCONFIG\b
+    scope: variable.parameter.CONFIG.cmake
+  - match: \bNO_MODULE\b
+    scope: variable.parameter.NO_MODULE.cmake
+  - match: \bNO_POLICY_SCOPE\b
+    scope: variable.parameter.NO_POLICY_SCOPE.cmake
+  - match: \bNAMES\b
+    scope: variable.parameter.NAMES.cmake
+  - match: \bCONFIGS\b
+    scope: variable.parameter.CONFIGS.cmake
+  - match: \bHINTS\b
+    scope: variable.parameter.HINTS.cmake
+  - match: \bPATHS\b
+    scope: variable.parameter.PATHS.cmake
+  - match: \bPATH_SUFFIXES\b
+    scope: variable.parameter.PATH_SUFFIXES.cmake
+  - match: \bNO_DEFAULT_PATH\b
+    scope: variable.parameter.NO_DEFAULT_PATH.cmake
+  - match: \bNO_CMAKE_ENVIRONMENT_PATH\b
+    scope: variable.parameter.NO_CMAKE_ENVIRONMENT_PATH.cmake
+  - match: \bNO_CMAKE_PATH\b
+    scope: variable.parameter.NO_CMAKE_PATH.cmake
+  - match: \bNO_SYSTEM_ENVIRONMENT_PATH\b
+    scope: variable.parameter.NO_SYSTEM_ENVIRONMENT_PATH.cmake
+  - match: \bNO_CMAKE_PACKAGE_REGISTRY\b
+    scope: variable.parameter.NO_CMAKE_PACKAGE_REGISTRY.cmake
+  - match: \bNO_CMAKE_BUILDS_PATH\b
+    scope: variable.parameter.NO_CMAKE_BUILDS_PATH.cmake
+  - match: \bNO_CMAKE_SYSTEM_PATH\b
+    scope: variable.parameter.NO_CMAKE_SYSTEM_PATH.cmake
+  - match: \bNO_CMAKE_SYSTEM_PACKAGE_REGISTRY\b
+    scope: variable.parameter.NO_CMAKE_SYSTEM_PACKAGE_REGISTRY.cmake
+  - match: \bCMAKE_FIND_ROOT_PATH_BOTH\b
+    scope: variable.parameter.CMAKE_FIND_ROOT_PATH_BOTH.cmake
+  - match: \bONLY_CMAKE_FIND_ROOT_PATH\b
+    scope: variable.parameter.ONLY_CMAKE_FIND_ROOT_PATH.cmake
+  - match: \bNO_CMAKE_FIND_ROOT_PATH\b
+    scope: variable.parameter.NO_CMAKE_FIND_ROOT_PATH.cmake
+  - include: scope:source.cmake#args-common
+  find_path-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bNAMES\b
+    scope: variable.parameter.NAMES.cmake
+  - match: \bHINTS\b
+    scope: variable.parameter.HINTS.cmake
+  - match: \bPATHS\b
+    scope: variable.parameter.PATHS.cmake
+  - match: \bPATH_SUFFIXES\b
+    scope: variable.parameter.PATH_SUFFIXES.cmake
+  - match: \bDOC\b
+    scope: variable.parameter.DOC.cmake
+  - match: \bNO_DEFAULT_PATH\b
+    scope: variable.parameter.NO_DEFAULT_PATH.cmake
+  - match: \bNO_CMAKE_ENVIRONMENT_PATH\b
+    scope: variable.parameter.NO_CMAKE_ENVIRONMENT_PATH.cmake
+  - match: \bNO_CMAKE_PATH\b
+    scope: variable.parameter.NO_CMAKE_PATH.cmake
+  - match: \bNO_SYSTEM_ENVIRONMENT_PATH\b
+    scope: variable.parameter.NO_SYSTEM_ENVIRONMENT_PATH.cmake
+  - match: \bNO_CMAKE_SYSTEM_PATH\b
+    scope: variable.parameter.NO_CMAKE_SYSTEM_PATH.cmake
+  - match: \bCMAKE_FIND_ROOT_PATH_BOTH\b
+    scope: variable.parameter.CMAKE_FIND_ROOT_PATH_BOTH.cmake
+  - match: \bONLY_CMAKE_FIND_ROOT_PATH\b
+    scope: variable.parameter.ONLY_CMAKE_FIND_ROOT_PATH.cmake
+  - match: \bNO_CMAKE_FIND_ROOT_PATH\b
+    scope: variable.parameter.NO_CMAKE_FIND_ROOT_PATH.cmake
+  - include: scope:source.cmake#args-common
+  find_program-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bNAMES\b
+    scope: variable.parameter.NAMES.cmake
+  - match: \bHINTS\b
+    scope: variable.parameter.HINTS.cmake
+  - match: \bPATHS\b
+    scope: variable.parameter.PATHS.cmake
+  - match: \bPATH_SUFFIXES\b
+    scope: variable.parameter.PATH_SUFFIXES.cmake
+  - match: \bDOC\b
+    scope: variable.parameter.DOC.cmake
+  - match: \bNO_DEFAULT_PATH\b
+    scope: variable.parameter.NO_DEFAULT_PATH.cmake
+  - match: \bNO_CMAKE_ENVIRONMENT_PATH\b
+    scope: variable.parameter.NO_CMAKE_ENVIRONMENT_PATH.cmake
+  - match: \bNO_CMAKE_PATH\b
+    scope: variable.parameter.NO_CMAKE_PATH.cmake
+  - match: \bNO_SYSTEM_ENVIRONMENT_PATH\b
+    scope: variable.parameter.NO_SYSTEM_ENVIRONMENT_PATH.cmake
+  - match: \bNO_CMAKE_SYSTEM_PATH\b
+    scope: variable.parameter.NO_CMAKE_SYSTEM_PATH.cmake
+  - match: \bCMAKE_FIND_ROOT_PATH_BOTH\b
+    scope: variable.parameter.CMAKE_FIND_ROOT_PATH_BOTH.cmake
+  - match: \bONLY_CMAKE_FIND_ROOT_PATH\b
+    scope: variable.parameter.ONLY_CMAKE_FIND_ROOT_PATH.cmake
+  - match: \bNO_CMAKE_FIND_ROOT_PATH\b
+    scope: variable.parameter.NO_CMAKE_FIND_ROOT_PATH.cmake
+  - include: scope:source.cmake#args-common
+  fltk_wrap_ui-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  get_cmake_property-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  get_directory_property-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bDIRECTORY\b
+    scope: variable.parameter.DIRECTORY.cmake
+  - match: \bDEFINITION\b
+    scope: variable.parameter.DEFINITION.cmake
+  - include: scope:source.cmake#args-common
+  get_filename_component-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bDIRECTORY\b
+    scope: variable.parameter.DIRECTORY.cmake
+  - match: \bNAME\b
+    scope: variable.parameter.NAME.cmake
+  - match: \bEXT\b
+    scope: variable.parameter.EXT.cmake
+  - match: \bNAME_WE\b
+    scope: variable.parameter.NAME_WE.cmake
+  - match: \bPATH\b
+    scope: variable.parameter.PATH.cmake
+  - match: \bBASE_DIR\b
+    scope: variable.parameter.BASE_DIR.cmake
+  - match: \bCACHE\b
+    scope: variable.parameter.CACHE.cmake
+  - match: \bPROGRAM\b
+    scope: variable.parameter.PROGRAM.cmake
+  - match: \bPROGRAM_ARGS\b
+    scope: variable.parameter.PROGRAM_ARGS.cmake
+  - include: scope:source.cmake#args-common
+  get_property-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bGLOBAL\b
+    scope: variable.parameter.GLOBAL.cmake
+  - match: \bDIRECTORY\b
+    scope: variable.parameter.DIRECTORY.cmake
+  - match: \bTARGET\b
+    scope: variable.parameter.TARGET.cmake
+  - match: \bSOURCE\b
+    scope: variable.parameter.SOURCE.cmake
+  - match: \bINSTALL\b
+    scope: variable.parameter.INSTALL.cmake
+  - match: \bTEST\b
+    scope: variable.parameter.TEST.cmake
+  - match: \bCACHE\b
+    scope: variable.parameter.CACHE.cmake
+  - match: \bVARIABLE\b
+    scope: variable.parameter.VARIABLE.cmake
+  - match: \bPROPERTY\b
+    scope: variable.parameter.PROPERTY.cmake
+  - match: \bSET\b
+    scope: variable.parameter.SET.cmake
+  - match: \bDEFINED\b
+    scope: variable.parameter.DEFINED.cmake
+  - match: \bBRIEF_DOCS\b
+    scope: variable.parameter.BRIEF_DOCS.cmake
+  - match: \bFULL_DOCS\b
+    scope: variable.parameter.FULL_DOCS.cmake
+  - include: scope:source.cmake#args-common
+  get_source_file_property-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  get_target_property-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  get_test_property-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  include_directories-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bAFTER\b
+    scope: variable.parameter.AFTER.cmake
+  - match: \bBEFORE\b
+    scope: variable.parameter.BEFORE.cmake
+  - match: \bSYSTEM\b
+    scope: variable.parameter.SYSTEM.cmake
+  - include: scope:source.cmake#args-common
+  include_external_msproject-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bTYPE\b
+    scope: variable.parameter.TYPE.cmake
+  - match: \bGUID\b
+    scope: variable.parameter.GUID.cmake
+  - match: \bPLATFORM\b
+    scope: variable.parameter.PLATFORM.cmake
+  - include: scope:source.cmake#args-common
+  include_regular_expression-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  install-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bTARGETS\b
+    scope: variable.parameter.TARGETS.cmake
+  - match: \bEXPORT\b
+    scope: variable.parameter.EXPORT.cmake
+  - match: \bARCHIVE\b
+    scope: variable.parameter.ARCHIVE.cmake
+  - match: \bLIBRARY\b
+    scope: variable.parameter.LIBRARY.cmake
+  - match: \bRUNTIME\b
+    scope: variable.parameter.RUNTIME.cmake
+  - match: \bFRAMEWORK\b
+    scope: variable.parameter.FRAMEWORK.cmake
+  - match: \bBUNDLE\b
+    scope: variable.parameter.BUNDLE.cmake
+  - match: \bPRIVATE_HEADER\b
+    scope: variable.parameter.PRIVATE_HEADER.cmake
+  - match: \bPUBLIC_HEADER\b
+    scope: variable.parameter.PUBLIC_HEADER.cmake
+  - match: \bRESOURCE\b
+    scope: variable.parameter.RESOURCE.cmake
+  - match: \bDESTINATION\b
+    scope: variable.parameter.DESTINATION.cmake
+  - match: \bPERMISSIONS\b
+    scope: variable.parameter.PERMISSIONS.cmake
+  - match: \bCONFIGURATIONS\b
+    scope: variable.parameter.CONFIGURATIONS.cmake
+  - match: \bCOMPONENT\b
+    scope: variable.parameter.COMPONENT.cmake
+  - match: \bOPTIONAL\b
+    scope: variable.parameter.OPTIONAL.cmake
+  - match: \bEXCLUDE_FROM_ALL\b
+    scope: variable.parameter.EXCLUDE_FROM_ALL.cmake
+  - match: \bNAMELINK_ONLY\b
+    scope: variable.parameter.NAMELINK_ONLY.cmake
+  - match: \bNAMELINK_SKIP\b
+    scope: variable.parameter.NAMELINK_SKIP.cmake
+  - match: \bINCLUDES DESTINATION\b
+    scope: variable.parameter.INCLUDES DESTINATION.cmake
+  - match: \bDIRECTORY\b
+    scope: variable.parameter.DIRECTORY.cmake
+  - match: \bFILE\b
+    scope: variable.parameter.FILE.cmake
+  - match: \bFILES\b
+    scope: variable.parameter.FILES.cmake
+  - match: \bFILES_MATCHING\b
+    scope: variable.parameter.FILES_MATCHING.cmake
+  - match: \bPATTERN\b
+    scope: variable.parameter.PATTERN.cmake
+  - match: \bPROGRAMS\b
+    scope: variable.parameter.PROGRAMS.cmake
+  - include: scope:source.cmake#args-common
+  install_files-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bFILES\b
+    scope: variable.parameter.FILES.cmake
+  - include: scope:source.cmake#args-common
+  install_programs-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bFILES\b
+    scope: variable.parameter.FILES.cmake
+  - include: scope:source.cmake#args-common
+  install_targets-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bRUNTIME_DIRECTORY\b
+    scope: variable.parameter.RUNTIME_DIRECTORY.cmake
+  - include: scope:source.cmake#args-common
+  link_directories-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  link_libraries-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bdebug\b
+    scope: variable.parameter.debug.cmake
+  - match: \boptimized\b
+    scope: variable.parameter.optimized.cmake
+  - match: \bgeneral\b
+    scope: variable.parameter.general.cmake
+  - include: scope:source.cmake#args-common
+  list-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bLENGTH\b
+    scope: variable.parameter.LENGTH.cmake
+  - match: \bGET\b
+    scope: variable.parameter.GET.cmake
+  - match: \bAPPEND\b
+    scope: variable.parameter.APPEND.cmake
+  - match: \bFILTER\b
+    scope: variable.parameter.FILTER.cmake
+  - match: \bINCLUDE\b
+    scope: variable.parameter.INCLUDE.cmake
+  - match: \bEXCLUDE\b
+    scope: variable.parameter.EXCLUDE.cmake
+  - match: \bREGEX\b
+    scope: variable.parameter.REGEX.cmake
+  - match: \bFIND\b
+    scope: variable.parameter.FIND.cmake
+  - match: \bINSERT\b
+    scope: variable.parameter.INSERT.cmake
+  - match: \bREMOVE_ITEM\b
+    scope: variable.parameter.REMOVE_ITEM.cmake
+  - match: \bREMOVE_AT\b
+    scope: variable.parameter.REMOVE_AT.cmake
+  - match: \bREMOVE_DUPLICATES\b
+    scope: variable.parameter.REMOVE_DUPLICATES.cmake
+  - match: \bREVERSE\b
+    scope: variable.parameter.REVERSE.cmake
+  - match: \bSORT\b
+    scope: variable.parameter.SORT.cmake
+  - include: scope:source.cmake#args-common
+  load_cache-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bREAD_WITH_PREFIX\b
+    scope: variable.parameter.READ_WITH_PREFIX.cmake
+  - match: \bEXCLUDE\b
+    scope: variable.parameter.EXCLUDE.cmake
+  - match: \bINCLUDE_INTERNALS\b
+    scope: variable.parameter.INCLUDE_INTERNALS.cmake
+  - include: scope:source.cmake#args-common
+  load_command-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bCOMMAND_NAME\b
+    scope: variable.parameter.COMMAND_NAME.cmake
+  - include: scope:source.cmake#args-common
+  main:
+  - match: (?i)\badd_compile_options\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: add_compile_options-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.add_compile_options.cmake
+  - match: (?i)\badd_custom_command\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: add_custom_command-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.add_custom_command.cmake
+  - match: (?i)\badd_custom_target\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: add_custom_target-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.add_custom_target.cmake
+  - match: (?i)\badd_definitions\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: add_definitions-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.add_definitions.cmake
+  - match: (?i)\badd_dependencies\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: add_dependencies-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.add_dependencies.cmake
+  - match: (?i)\badd_executable\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: add_executable-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.add_executable.cmake
+  - match: (?i)\badd_library\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: add_library-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.add_library.cmake
+  - match: (?i)\badd_subdirectory\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: add_subdirectory-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.add_subdirectory.cmake
+  - match: (?i)\badd_test\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: add_test-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.add_test.cmake
+  - match: (?i)\baux_source_directory\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: aux_source_directory-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.aux_source_directory.cmake
+  - match: (?i)\bbuild_command\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: build_command-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.build_command.cmake
+  - match: (?i)\bbuild_name\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: build_name-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.build_name.cmake
+  - match: (?i)\bcmake_host_system_information\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: cmake_host_system_information-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.cmake_host_system_information.cmake
+  - match: (?i)\bcmake_minimum_required\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: cmake_minimum_required-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.cmake_minimum_required.cmake
+  - match: (?i)\bcmake_parse_arguments\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: cmake_parse_arguments-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.cmake_parse_arguments.cmake
+  - match: (?i)\bcmake_policy\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: cmake_policy-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.cmake_policy.cmake
+  - match: (?i)\bconfigure_file\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: configure_file-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.configure_file.cmake
+  - match: (?i)\bcreate_test_sourcelist\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: create_test_sourcelist-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.create_test_sourcelist.cmake
+  - match: (?i)\bctest_build\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: ctest_build-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.ctest_build.cmake
+  - match: (?i)\bctest_configure\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: ctest_configure-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.ctest_configure.cmake
+  - match: (?i)\bctest_coverage\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: ctest_coverage-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.ctest_coverage.cmake
+  - match: (?i)\bctest_empty_binary_directory\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: ctest_empty_binary_directory-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.ctest_empty_binary_directory.cmake
+  - match: (?i)\bctest_memcheck\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: ctest_memcheck-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.ctest_memcheck.cmake
+  - match: (?i)\bctest_read_custom_files\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: ctest_read_custom_files-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.ctest_read_custom_files.cmake
+  - match: (?i)\bctest_run_script\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: ctest_run_script-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.ctest_run_script.cmake
+  - match: (?i)\bctest_sleep\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: ctest_sleep-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.ctest_sleep.cmake
+  - match: (?i)\bctest_start\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: ctest_start-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.ctest_start.cmake
+  - match: (?i)\bctest_submit\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: ctest_submit-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.ctest_submit.cmake
+  - match: (?i)\bctest_test\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: ctest_test-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.ctest_test.cmake
+  - match: (?i)\bctest_update\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: ctest_update-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.ctest_update.cmake
+  - match: (?i)\bctest_upload\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: ctest_upload-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.ctest_upload.cmake
+  - match: (?i)\bdefine_property\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: define_property-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.define_property.cmake
+  - match: (?i)\benable_language\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: enable_language-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.enable_language.cmake
+  - match: (?i)\benable_testing\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: enable_testing-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.enable_testing.cmake
+  - match: (?i)\bexec_program\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: exec_program-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.exec_program.cmake
+  - match: (?i)\bexecute_process\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: execute_process-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.execute_process.cmake
+  - match: (?i)\bexport\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: export-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.export.cmake
+  - match: (?i)\bexport_library_dependencies\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: export_library_dependencies-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.export_library_dependencies.cmake
+  - match: (?i)\bfile\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: file-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.file.cmake
+  - match: (?i)\bfind_file\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: find_file-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.find_file.cmake
+  - match: (?i)\bfind_library\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: find_library-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.find_library.cmake
+  - match: (?i)\bfind_package\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: find_package-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.find_package.cmake
+  - match: (?i)\bfind_path\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: find_path-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.find_path.cmake
+  - match: (?i)\bfind_program\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: find_program-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.find_program.cmake
+  - match: (?i)\bfltk_wrap_ui\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: fltk_wrap_ui-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.fltk_wrap_ui.cmake
+  - match: (?i)\bget_cmake_property\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: get_cmake_property-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.get_cmake_property.cmake
+  - match: (?i)\bget_directory_property\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: get_directory_property-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.get_directory_property.cmake
+  - match: (?i)\bget_filename_component\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: get_filename_component-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.get_filename_component.cmake
+  - match: (?i)\bget_property\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: get_property-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.get_property.cmake
+  - match: (?i)\bget_source_file_property\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: get_source_file_property-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.get_source_file_property.cmake
+  - match: (?i)\bget_target_property\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: get_target_property-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.get_target_property.cmake
+  - match: (?i)\bget_test_property\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: get_test_property-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.get_test_property.cmake
+  - match: (?i)\binclude_directories\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: include_directories-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.include_directories.cmake
+  - match: (?i)\binclude_external_msproject\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: include_external_msproject-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.include_external_msproject.cmake
+  - match: (?i)\binclude_regular_expression\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: include_regular_expression-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.include_regular_expression.cmake
+  - match: (?i)\binstall\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: install-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.install.cmake
+  - match: (?i)\binstall_files\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: install_files-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.install_files.cmake
+  - match: (?i)\binstall_programs\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: install_programs-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.install_programs.cmake
+  - match: (?i)\binstall_targets\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: install_targets-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.install_targets.cmake
+  - match: (?i)\blink_directories\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: link_directories-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.link_directories.cmake
+  - match: (?i)\blink_libraries\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: link_libraries-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.link_libraries.cmake
+  - match: (?i)\blist\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: list-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.list.cmake
+  - match: (?i)\bload_cache\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: load_cache-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.load_cache.cmake
+  - match: (?i)\bload_command\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: load_command-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.load_command.cmake
+  - match: (?i)\bmake_directory\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: make_directory-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.make_directory.cmake
+  - match: (?i)\bmark_as_advanced\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: mark_as_advanced-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.mark_as_advanced.cmake
+  - match: (?i)\bmath\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: math-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.math.cmake
+  - match: (?i)\bmessage\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: message-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.message.cmake
+  - match: (?i)\boption\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: option-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.option.cmake
+  - match: (?i)\boutput_required_files\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: output_required_files-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.output_required_files.cmake
+  - match: (?i)\bproject\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: project-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.project.cmake
+  - match: (?i)\bqt_wrap_cpp\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: qt_wrap_cpp-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.qt_wrap_cpp.cmake
+  - match: (?i)\bqt_wrap_ui\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: qt_wrap_ui-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.qt_wrap_ui.cmake
+  - match: (?i)\bremove\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: remove-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.remove.cmake
+  - match: (?i)\bremove_definitions\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: remove_definitions-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.remove_definitions.cmake
+  - match: (?i)\breturn\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: return-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.return.cmake
+  - match: (?i)\bseparate_arguments\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: separate_arguments-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.separate_arguments.cmake
+  - match: (?i)\bset_directory_properties\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: set_directory_properties-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.set_directory_properties.cmake
+  - match: (?i)\bset_property\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: set_property-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.set_property.cmake
+  - match: (?i)\bset_source_files_properties\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: set_source_files_properties-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.set_source_files_properties.cmake
+  - match: (?i)\bset_target_properties\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: set_target_properties-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.set_target_properties.cmake
+  - match: (?i)\bset_tests_properties\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: set_tests_properties-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.set_tests_properties.cmake
+  - match: (?i)\bsite_name\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: site_name-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.site_name.cmake
+  - match: (?i)\bsource_group\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: source_group-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.source_group.cmake
+  - match: (?i)\bstring\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: string-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.string.cmake
+  - match: (?i)\bsubdir_depends\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: subdir_depends-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.subdir_depends.cmake
+  - match: (?i)\bsubdirs\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: subdirs-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.subdirs.cmake
+  - match: (?i)\btarget_compile_definitions\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: target_compile_definitions-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.target_compile_definitions.cmake
+  - match: (?i)\btarget_compile_features\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: target_compile_features-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.target_compile_features.cmake
+  - match: (?i)\btarget_compile_options\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: target_compile_options-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.target_compile_options.cmake
+  - match: (?i)\btarget_include_directories\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: target_include_directories-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.target_include_directories.cmake
+  - match: (?i)\btarget_link_directories\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: target_link_directories-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.target_link_directories.cmake
+  - match: (?i)\btarget_link_libraries\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: target_link_libraries-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.target_link_libraries.cmake
+  - match: (?i)\btarget_link_options\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: target_link_options-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.target_link_options.cmake
+  - match: (?i)\btarget_precompile_headers\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: target_precompile_headers-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.target_precompile_headers.cmake
+  - match: (?i)\btarget_sources\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: target_sources-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.target_sources.cmake
+  - match: (?i)\btry_compile\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: try_compile-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.try_compile.cmake
+  - match: (?i)\btry_run\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: try_run-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.try_run.cmake
+  - match: (?i)\bunset\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: unset-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.unset.cmake
+  - match: (?i)\buse_mangled_mesa\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: use_mangled_mesa-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.use_mangled_mesa.cmake
+  - match: (?i)\butility_source\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: utility_source-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.utility_source.cmake
+  - match: (?i)\bvariable_requires\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: variable_requires-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.variable_requires.cmake
+  - match: (?i)\bvariable_watch\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: variable_watch-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.variable_watch.cmake
+  - match: (?i)\bwrite_file\b
+    push:
+    - meta_scope: meta.function-call.cmake
+    - match: (?=\()
+      set:
+      - match: \(
+        scope: punctuation.section.parens.begin.cmake
+        set: write_file-args
+    - include: scope:source.cmake#args-illegal-boilerplate
+    scope: support.function.write_file.cmake
+  make_directory-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  mark_as_advanced-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bCLEAR\b
+    scope: variable.parameter.CLEAR.cmake
+  - match: \bFORCE\b
+    scope: variable.parameter.FORCE.cmake
+  - include: scope:source.cmake#args-common
+  math-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bEXPR\b
+    scope: variable.parameter.EXPR.cmake
+  - include: scope:source.cmake#args-common
+  message-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bSTATUS\b
+    scope: variable.parameter.STATUS.cmake
+  - match: \bWARNING\b
+    scope: variable.parameter.WARNING.cmake
+  - match: \bAUTHOR_WARNING\b
+    scope: variable.parameter.AUTHOR_WARNING.cmake
+  - match: \bSEND_ERROR\b
+    scope: variable.parameter.SEND_ERROR.cmake
+  - match: \bFATAL_ERROR\b
+    scope: variable.parameter.FATAL_ERROR.cmake
+  - match: \bDEPRECATION\b
+    scope: variable.parameter.DEPRECATION.cmake
+  - include: scope:source.cmake#args-common
+  option-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  output_required_files-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  project-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bLANGUAGES\b
+    scope: variable.parameter.LANGUAGES.cmake
+  - match: \bVERSION\b
+    scope: variable.parameter.VERSION.cmake
+  - include: scope:source.cmake#args-common
+  prototype:
+  - include: scope:source.cmake#prototype
+  qt_wrap_cpp-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  qt_wrap_ui-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  remove-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  remove_definitions-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  return-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  separate_arguments-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bUNIX_COMMAND\b
+    scope: variable.parameter.UNIX_COMMAND.cmake
+  - match: \bWINDOWS_COMMAND\b
+    scope: variable.parameter.WINDOWS_COMMAND.cmake
+  - include: scope:source.cmake#args-common
+  set_directory_properties-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bPROPERTIES\b
+    scope: variable.parameter.PROPERTIES.cmake
+  - include: scope:source.cmake#args-common
+  set_property-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bGLOBAL\b
+    scope: variable.parameter.GLOBAL.cmake
+  - match: \bDIRECTORY\b
+    scope: variable.parameter.DIRECTORY.cmake
+  - match: \bTARGET\b
+    scope: variable.parameter.TARGET.cmake
+  - match: \bSOURCE\b
+    scope: variable.parameter.SOURCE.cmake
+  - match: \bINSTALL\b
+    scope: variable.parameter.INSTALL.cmake
+  - match: \bTEST\b
+    scope: variable.parameter.TEST.cmake
+  - match: \bCACHE\b
+    scope: variable.parameter.CACHE.cmake
+  - match: \bAPPEND\b
+    scope: variable.parameter.APPEND.cmake
+  - match: \bAPPEND_STRING\b
+    scope: variable.parameter.APPEND_STRING.cmake
+  - match: \bPROPERTY\b
+    scope: variable.parameter.PROPERTY.cmake
+  - include: scope:source.cmake#args-common
+  set_source_files_properties-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bPROPERTIES\b
+    scope: variable.parameter.PROPERTIES.cmake
+  - include: scope:source.cmake#args-common
+  set_target_properties-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bPROPERTIES\b
+    scope: variable.parameter.PROPERTIES.cmake
+  - include: scope:source.cmake#args-common
+  set_tests_properties-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bPROPERTIES\b
+    scope: variable.parameter.PROPERTIES.cmake
+  - include: scope:source.cmake#args-common
+  site_name-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  source_group-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bFILES\b
+    scope: variable.parameter.FILES.cmake
+  - match: \bREGULAR_EXPRESSION\b
+    scope: variable.parameter.REGULAR_EXPRESSION.cmake
+  - match: \bTREE\b
+    scope: variable.parameter.TREE.cmake
+  - match: \bPREFIX\b
+    scope: variable.parameter.PREFIX.cmake
+  - include: scope:source.cmake#args-common
+  string-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bFIND\b
+    scope: variable.parameter.FIND.cmake
+  - match: \bREVERSE\b
+    scope: variable.parameter.REVERSE.cmake
+  - match: \bREPLACE\b
+    scope: variable.parameter.REPLACE.cmake
+  - match: \bREGEX\b
+    scope: variable.parameter.REGEX.cmake
+  - match: \bMATCH\b
+    scope: variable.parameter.MATCH.cmake
+  - match: \bMATCHALL\b
+    scope: variable.parameter.MATCHALL.cmake
+  - match: \bREPLACE\b
+    scope: variable.parameter.REPLACE.cmake
+  - match: \bAPPEND\b
+    scope: variable.parameter.APPEND.cmake
+  - match: \bCONCAT\b
+    scope: variable.parameter.CONCAT.cmake
+  - match: \bTOLOWER\b
+    scope: variable.parameter.TOLOWER.cmake
+  - match: \bTOUPPER\b
+    scope: variable.parameter.TOUPPER.cmake
+  - match: \bLENGTH\b
+    scope: variable.parameter.LENGTH.cmake
+  - match: \bSUBSTRING\b
+    scope: variable.parameter.SUBSTRING.cmake
+  - match: \bSTRIP\b
+    scope: variable.parameter.STRIP.cmake
+  - match: \bGENEX_STRIP\b
+    scope: variable.parameter.GENEX_STRIP.cmake
+  - match: \bCOMPARE\b
+    scope: variable.parameter.COMPARE.cmake
+  - match: \bLESS\b
+    scope: variable.parameter.LESS.cmake
+  - match: \bGREATER\b
+    scope: variable.parameter.GREATER.cmake
+  - match: \bEQUAL\b
+    scope: variable.parameter.EQUAL.cmake
+  - match: \bNOTEQUAL\b
+    scope: variable.parameter.NOTEQUAL.cmake
+  - match: \bLESS_EQUAL\b
+    scope: variable.parameter.LESS_EQUAL.cmake
+  - match: \bGREATER_EQUAL\b
+    scope: variable.parameter.GREATER_EQUAL.cmake
+  - match: \bMD5\b
+    scope: variable.parameter.MD5.cmake
+  - match: \bSHA1\b
+    scope: variable.parameter.SHA1.cmake
+  - match: \bSHA224\b
+    scope: variable.parameter.SHA224.cmake
+  - match: \bSHA256\b
+    scope: variable.parameter.SHA256.cmake
+  - match: \bSHA384\b
+    scope: variable.parameter.SHA384.cmake
+  - match: \bSHA512\b
+    scope: variable.parameter.SHA512.cmake
+  - match: \bSHA3_224\b
+    scope: variable.parameter.SHA3_224.cmake
+  - match: \bSHA3_256\b
+    scope: variable.parameter.SHA3_256.cmake
+  - match: \bSHA3_384\b
+    scope: variable.parameter.SHA3_384.cmake
+  - match: \bSHA3_512\b
+    scope: variable.parameter.SHA3_512.cmake
+  - match: \bASCII\b
+    scope: variable.parameter.ASCII.cmake
+  - match: \bCONFIGURE\b
+    scope: variable.parameter.CONFIGURE.cmake
+  - match: \b@ONLY\b
+    scope: variable.parameter.@ONLY.cmake
+  - match: \bESCAPE_QUOTES\b
+    scope: variable.parameter.ESCAPE_QUOTES.cmake
+  - match: \bRANDOM\b
+    scope: variable.parameter.RANDOM.cmake
+  - match: \bALPHABET\b
+    scope: variable.parameter.ALPHABET.cmake
+  - match: \bRANDOM_SEED\b
+    scope: variable.parameter.RANDOM_SEED.cmake
+  - match: \bTIMESTAMP\b
+    scope: variable.parameter.TIMESTAMP.cmake
+  - match: \bUTC\b
+    scope: variable.parameter.UTC.cmake
+  - match: \bMAKE_C_IDENTIFIER\b
+    scope: variable.parameter.MAKE_C_IDENTIFIER.cmake
+  - match: \bUUID\b
+    scope: variable.parameter.UUID.cmake
+  - match: \bNAMESPACE\b
+    scope: variable.parameter.NAMESPACE.cmake
+  - match: \bNAME\b
+    scope: variable.parameter.NAME.cmake
+  - match: \bTYPE\b
+    scope: variable.parameter.TYPE.cmake
+  - match: \bUPPER\b
+    scope: variable.parameter.UPPER.cmake
+  - include: scope:source.cmake#args-common
+  subdir_depends-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  subdirs-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bEXCLUDE_FROM_ALL\b
+    scope: variable.parameter.EXCLUDE_FROM_ALL.cmake
+  - match: \bPREORDER\b
+    scope: variable.parameter.PREORDER.cmake
+  - include: scope:source.cmake#args-common
+  target_compile_definitions-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bINTERFACE\b
+    scope: variable.parameter.INTERFACE.cmake
+  - match: \bPUBLIC\b
+    scope: variable.parameter.PUBLIC.cmake
+  - match: \bPRIVATE\b
+    scope: variable.parameter.PRIVATE.cmake
+  - include: scope:source.cmake#args-common
+  target_compile_features-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bINTERFACE\b
+    scope: variable.parameter.INTERFACE.cmake
+  - match: \bPUBLIC\b
+    scope: variable.parameter.PUBLIC.cmake
+  - match: \bPRIVATE\b
+    scope: variable.parameter.PRIVATE.cmake
+  - include: scope:source.cmake#args-common
+  target_compile_options-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bINTERFACE\b
+    scope: variable.parameter.INTERFACE.cmake
+  - match: \bPUBLIC\b
+    scope: variable.parameter.PUBLIC.cmake
+  - match: \bPRIVATE\b
+    scope: variable.parameter.PRIVATE.cmake
+  - match: \bBEFORE\b
+    scope: variable.parameter.BEFORE.cmake
+  - include: scope:source.cmake#args-common
+  target_include_directories-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bSYSTEM\b
+    scope: variable.parameter.SYSTEM.cmake
+  - match: \bBEFORE\b
+    scope: variable.parameter.BEFORE.cmake
+  - match: \bINTERFACE\b
+    scope: variable.parameter.INTERFACE.cmake
+  - match: \bPUBLIC\b
+    scope: variable.parameter.PUBLIC.cmake
+  - match: \bPRIVATE\b
+    scope: variable.parameter.PRIVATE.cmake
+  - include: scope:source.cmake#args-common
+  target_link_directories-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bBEFORE\b
+    scope: variable.parameter.BEFORE.cmake
+  - match: \bINTERFACE\b
+    scope: variable.parameter.INTERFACE.cmake
+  - match: \bPUBLIC\b
+    scope: variable.parameter.PUBLIC.cmake
+  - match: \bPRIVATE\b
+    scope: variable.parameter.PRIVATE.cmake
+  - include: scope:source.cmake#args-common
+  target_link_libraries-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bINTERFACE\b
+    scope: variable.parameter.INTERFACE.cmake
+  - match: \bPUBLIC\b
+    scope: variable.parameter.PUBLIC.cmake
+  - match: \bPRIVATE\b
+    scope: variable.parameter.PRIVATE.cmake
+  - match: \bLINK_PUBLIC\b
+    scope: variable.parameter.LINK_PUBLIC.cmake
+  - match: \bLINK_PRIVATE\b
+    scope: variable.parameter.LINK_PRIVATE.cmake
+  - match: \bLINK_INTERFACE_LIBRARIES\b
+    scope: variable.parameter.LINK_INTERFACE_LIBRARIES.cmake
+  - include: scope:source.cmake#args-common
+  target_link_options-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bBEFORE\b
+    scope: variable.parameter.BEFORE.cmake
+  - match: \bINTERFACE\b
+    scope: variable.parameter.INTERFACE.cmake
+  - match: \bPUBLIC\b
+    scope: variable.parameter.PUBLIC.cmake
+  - match: \bPRIVATE\b
+    scope: variable.parameter.PRIVATE.cmake
+  - include: scope:source.cmake#args-common
+  target_precompile_headers-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bINTERFACE\b
+    scope: variable.parameter.INTERFACE.cmake
+  - match: \bPUBLIC\b
+    scope: variable.parameter.PUBLIC.cmake
+  - match: \bPRIVATE\b
+    scope: variable.parameter.PRIVATE.cmake
+  - include: scope:source.cmake#args-common
+  target_sources-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bINTERFACE\b
+    scope: variable.parameter.INTERFACE.cmake
+  - match: \bPUBLIC\b
+    scope: variable.parameter.PUBLIC.cmake
+  - match: \bPRIVATE\b
+    scope: variable.parameter.PRIVATE.cmake
+  - include: scope:source.cmake#args-common
+  try_compile-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bCMAKE_FLAGS\b
+    scope: variable.parameter.CMAKE_FLAGS.cmake
+  - match: \bOUTPUT_VARIABLE\b
+    scope: variable.parameter.OUTPUT_VARIABLE.cmake
+  - match: \bSOURCES\b
+    scope: variable.parameter.SOURCES.cmake
+  - match: \bCOMPILE_DEFINITIONS\b
+    scope: variable.parameter.COMPILE_DEFINITIONS.cmake
+  - match: \bLINK_LIBRARIES\b
+    scope: variable.parameter.LINK_LIBRARIES.cmake
+  - match: \bCOPY_FILE\b
+    scope: variable.parameter.COPY_FILE.cmake
+  - match: \bCOPY_FILE_ERROR\b
+    scope: variable.parameter.COPY_FILE_ERROR.cmake
+  - match: \bC_STANDARD_REQUIRED\b
+    scope: variable.parameter.C_STANDARD_REQUIRED.cmake
+  - match: \bCXX_STANDARD_REQUIRED\b
+    scope: variable.parameter.CXX_STANDARD_REQUIRED.cmake
+  - match: \bCUDA_STANDARD_REQUIRED\b
+    scope: variable.parameter.CUDA_STANDARD_REQUIRED.cmake
+  - match: \bC_EXTENSIONS\b
+    scope: variable.parameter.C_EXTENSIONS.cmake
+  - match: \bCXX_EXTENSIONS\b
+    scope: variable.parameter.CXX_EXTENSIONS.cmake
+  - match: \bCUDA_EXTENSIONS\b
+    scope: variable.parameter.CUDA_EXTENSIONS.cmake
+  - include: scope:source.cmake#args-common
+  try_run-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bCMAKE_FLAGS\b
+    scope: variable.parameter.CMAKE_FLAGS.cmake
+  - match: \bCOMPILE_DEFINITIONS\b
+    scope: variable.parameter.COMPILE_DEFINITIONS.cmake
+  - match: \bCOMPILE_OUTPUT_VARIABLE\b
+    scope: variable.parameter.COMPILE_OUTPUT_VARIABLE.cmake
+  - match: \bLINK_LIBRARIES\b
+    scope: variable.parameter.LINK_LIBRARIES.cmake
+  - match: \bOUTPUT_VARIABLE\b
+    scope: variable.parameter.OUTPUT_VARIABLE.cmake
+  - match: \bRUN_OUTPUT_VARIABLE\b
+    scope: variable.parameter.RUN_OUTPUT_VARIABLE.cmake
+  - match: \bARGS\b
+    scope: variable.parameter.ARGS.cmake
+  - include: scope:source.cmake#args-common
+  unset-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bCACHE\b
+    scope: variable.parameter.CACHE.cmake
+  - match: \bPARENT_SCOPE\b
+    scope: variable.parameter.PARENT_SCOPE.cmake
+  - include: scope:source.cmake#args-common
+  use_mangled_mesa-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  utility_source-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  variable_requires-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  variable_watch-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - include: scope:source.cmake#args-common
+  write_file-args:
+  - meta_scope: meta.function-call.arguments.cmake
+  - match: \bAPPEND\b
+    scope: variable.parameter.APPEND.cmake
+  - include: scope:source.cmake#args-common
+hidden: true
+scope: commands.builtin.cmake

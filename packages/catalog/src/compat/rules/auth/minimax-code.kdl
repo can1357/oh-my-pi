@@ -4,6 +4,6 @@ auth "minimax-code" {
 		auth-url "https://platform.minimax.io/subscribe/token-plan"
 		instructions "Subscribe to Token Plan and copy your API key"
 		prompt "Paste your MiniMax Token Plan API key" placeholder="sk-..."
-		validate "chat-completions" label="MiniMax Token Plan" base-url="https://api.minimax.io/v1" model="MiniMax-M3"
+		validate "anthropic-messages" label="MiniMax Token Plan" base-url="https://api.minimax.io/anthropic" model="MiniMax-M3"
 	}
 }

@@ -1,19 +1,12 @@
-import { VERSION } from "@oh-my-pi/pi-utils";
+import { type } from "@oh-my-pi/omptype";
+import { logger, VERSION } from "@oh-my-pi/pi-utils";
 import { buildModel } from "./build";
 import { collapseBuiltVariants } from "./compat/collapse";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
 import { readModelCache, writeModelCache } from "./model-cache";
 import { type GeneratedProvider, getBundledModels } from "./models";
-import { isTimeBasedCost } from "./pricing";
-import {
-	type Api,
-	type Model,
-	type ModelCost,
-	modelKind,
-	type ModelSpec,
-	type Provider,
-	type TokenCost,
-} from "./types";
+import { TimeBasedCostShape } from "./pricing";
+import { type Api, type Model, modelKind, type ModelSpec, type Provider } from "./types";
 import { isRecord } from "./utils";
 
 const DEFAULT_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
@@ -57,6 +50,28 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	cacheTtlMs?: number;
 	/** When true, a successful dynamic fetch is the complete provider catalog and prunes static-only models. */
 	dynamicModelsAuthoritative?: boolean;
+	/**
+	 * When true, a provider's dynamic rows are the deployment's whole truth
+	 * for input modality: a live text-only row strips the bundled reference's
+	 * image support instead of OR-merging it back. Declared by providers whose
+	 * capability flags are authoritative and whose endpoints reject
+	 * unsupported content (`github-copilot`, `deepinfra`, `coralbricks`).
+	 */
+	dynamicInputAuthoritative?: boolean;
+	/** When true, live reasoning capability replaces the fallback, including an explicit false. */
+	dynamicReasoningAuthoritative?: boolean;
+	/**
+	 * When true, a live per-million price replaces the fallback even when it is
+	 * an explicit `0` (a free model or a dropped cache-write charge). Without it,
+	 * a zero discovery price is treated as unknown and the bundled rate is kept.
+	 */
+	dynamicCostAuthoritative?: boolean;
+	/**
+	 * When true, a static row's display name wins over the cached or live row
+	 * for the same id, so a model keeps one name before and after discovery.
+	 * Set from the provider's `keep-bundled-names` catalog entry.
+	 */
+	keepStaticNames?: boolean;
 	/**
 	 * When true, a fresh cache never satisfies an online-eligible refresh: the
 	 * dynamic fetch always runs (an explicit `"offline"` strategy is still
@@ -112,6 +127,8 @@ export interface ModelResolutionResult<TApi extends Api = Api> {
 	stale: boolean;
 	source: ModelResolutionSource;
 	updatedAt?: number;
+	/** Why the provider's endpoint fetcher threw this call; the models then come from cache, models.dev or bundled data. */
+	fetchError?: string;
 }
 
 /**
@@ -238,11 +255,13 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const staticModels = options.staticModels
 		? materializeStaticModels<TApi>(options.staticModels)
 		: (getBundledModels(options.providerId as GeneratedProvider) as Model<TApi>[]);
-	const additiveStaticModelIds =
+	const modelsDevAdditiveStaticModelIds =
 		options.modelsDev?.additiveOnly && staticModels.length > 0
 			? new Set(staticModels.map(model => model.id))
 			: undefined;
 	const cache = readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath);
+	const dynamicModelsAuthoritative = options.dynamicModelsAuthoritative ?? false;
+	const isAuthoritativeDynamicCache = dynamicModelsAuthoritative && (cache?.payloadAuthoritative ?? false);
 	const restoredCache = restoreCachedModelHeaders(
 		cache?.models ?? [],
 		staticModels,
@@ -254,9 +273,19 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	);
 	const usableCachedModels = restoredCache.models.filter(model => !restoredCache.unresolvedModelIds.has(model.id));
 	const cacheHasUnresolvedHeaders = restoredCache.unresolvedModelIds.size > 0;
-	const dynamicModelsAuthoritative = options.dynamicModelsAuthoritative ?? false;
+	const mergeAuthority: DynamicMergeAuthority = {
+		input: options.dynamicInputAuthoritative ?? false,
+		reasoning: options.dynamicReasoningAuthoritative ?? false,
+		cost: options.dynamicCostAuthoritative ?? false,
+		staticNames: options.keepStaticNames ? new Map(staticModels.map(model => [model.id, model.name])) : undefined,
+	};
 	const cacheDropIds = options.dropCachedModelIdsOnStaticMismatch;
-	const staticCatalogFingerprint = fingerprintStaticModels(staticModels, dynamicModelsAuthoritative);
+	// Additive mode is cache identity: a snapshot written while shared-catalog
+	// rows could replace bundled metadata must not match an additive resolver.
+	const staticCatalogFingerprint = fingerprintStaticModels(staticModels, {
+		authoritative: dynamicModelsAuthoritative,
+		additive: modelsDevAdditiveStaticModelIds !== undefined,
+	});
 	// Endpoint-migration policy is cache identity: adding an id must invalidate
 	// matching-static-catalog caches written by the prior resolver.
 	const staticFingerprint =
@@ -264,6 +293,13 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			? `${staticCatalogFingerprint}:drop:${Bun.hash(cacheDropIds.join("\0")).toString(36)}`
 			: staticCatalogFingerprint;
 	const cacheFingerprintMatches = cache?.staticFingerprint === staticFingerprint && staticFingerprint.length > 0;
+	// A matching cache was written against this static catalog under the same
+	// additive policy, so its same-id rows are live discovery merged over the
+	// bundled rows, never shared-catalog overrides (#17481). Strip them only on
+	// a mismatch: a static-catalog upgrade or a cache written before additive
+	// semantics were enabled.
+	const cacheAdditiveStaticModelIds =
+		isAuthoritativeDynamicCache || cacheFingerprintMatches ? undefined : modelsDevAdditiveStaticModelIds;
 	const cacheNeedsModelMigration =
 		!cacheFingerprintMatches &&
 		cacheDropIds !== undefined &&
@@ -285,8 +321,8 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	// Cold-start fast path: when a fresh, authoritative cache exists, the network
 	// fetch is skipped, AND the static catalog slice is byte-identical to what
 	// was merged in last time, the cache row IS the authoritative merge result.
-	// Additive caches still need same-id rows stripped because an older binary
-	// may have written the snapshot before additive semantics were enabled.
+	// A mismatched additive cache never reaches here; its same-id rows are
+	// stripped below.
 	if (
 		!shouldFetchFromNetwork &&
 		cache?.fresh &&
@@ -294,28 +330,23 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		cacheFingerprintMatches &&
 		!cacheHasUnresolvedHeaders
 	) {
-		const cacheContribution = additiveStaticModelIds
-			? restoredCache.models.filter(model => !additiveStaticModelIds.has(model.id))
-			: restoredCache.models;
-		const cachedModels = additiveStaticModelIds
-			? mergeCatalogMetrics(mergeDynamicModels(staticModels, cacheContribution), restoredCache.models)
-			: restoredCache.models;
-		const source: ModelResolutionSource = cacheContribution.length > 0 ? "cache" : "bundled";
+		const source: ModelResolutionSource = restoredCache.models.length > 0 ? "cache" : "bundled";
 		return {
-			models: collapseBuiltVariants(cachedModels),
+			models: collapseBuiltVariants(restoredCache.models),
 			stale: false,
 			source,
 			...(source === "cache" ? { updatedAt: cache.updatedAt } : {}),
 		};
 	}
 
-	const [fetchedModelsDevModels, fetchedDynamicModels] = shouldFetchFromNetwork
-		? await Promise.all([fetchModelsDev(options), dynamicFetcher ? fetchDynamicModels(dynamicFetcher) : null])
-		: [null, null];
+	const [fetchedModelsDevModels, dynamicFetch] = shouldFetchFromNetwork
+		? await Promise.all([fetchModelsDev(options), dynamicFetcher ? fetchDynamicModels(dynamicFetcher) : undefined])
+		: [null, undefined];
+	const fetchedDynamicModels = dynamicFetch?.models ?? null;
 	const modelsDevFetchSucceeded = fetchedModelsDevModels !== null;
 	const normalizedModelsDevModels = fetchedModelsDevModels?.models ?? [];
-	const modelsDevModels = additiveStaticModelIds
-		? normalizedModelsDevModels.filter(model => !additiveStaticModelIds.has(model.id))
+	const modelsDevModels = modelsDevAdditiveStaticModelIds
+		? normalizedModelsDevModels.filter(model => !modelsDevAdditiveStaticModelIds.has(model.id))
 		: normalizedModelsDevModels;
 	const shouldUseFreshCacheAsAuthoritative =
 		strategy === "online-if-uncached" && hasUsableFreshCache && hasAuthoritativeCache;
@@ -335,10 +366,8 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				cacheFingerprintMatches,
 				options.dropCachedModelIdsOnStaticMismatch,
 			);
-	// Additive shared-catalog rows may only introduce IDs. Apply that boundary
-	// to cache fallback too, including snapshots written by an older binary.
-	const cacheModels = additiveStaticModelIds
-		? preparedCacheModels.filter(model => !additiveStaticModelIds.has(model.id))
+	const cacheModels = cacheAdditiveStaticModelIds
+		? preparedCacheModels.filter(model => !cacheAdditiveStaticModelIds.has(model.id))
 		: preparedCacheModels;
 	const dynamicModels = fetchedDynamicModels?.models ?? [];
 	// A successful empty endpoint result stays authoritative for THIS cycle (so an
@@ -351,23 +380,34 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			dynamicModels.length > 0 &&
 			(dynamicModelsAuthoritative || !hasModelsDevFetcher || modelsDevFetchSucceeded)
 		: modelsDevFetchSucceeded;
-	const mergedWithCache = mergeDynamicModels(staticModels, cacheModels);
+	const mergedWithCache = mergeCachedModels(staticModels, cacheModels, {
+		authority: mergeAuthority,
+		matchesStatic: cacheFingerprintMatches,
+	});
 	const mergedWithModelsDev = mergeDynamicModels(
 		mergedWithCache,
 		modelsDevModels,
+		mergeAuthority,
 		fetchedModelsDevModels?.explicitKindModels,
 	);
 	const catalogMetricsSource = modelsDevFetchSucceeded ? normalizedModelsDevModels : preparedCacheModels;
-	const mergedWithCatalogMetrics = additiveStaticModelIds
+	const mergedWithCatalogMetrics = (
+		modelsDevFetchSucceeded ? modelsDevAdditiveStaticModelIds : cacheAdditiveStaticModelIds
+	)
 		? mergeCatalogMetrics(mergedWithModelsDev, catalogMetricsSource)
 		: mergedWithModelsDev;
 	const mergedModels = mergeDynamicModels(
 		mergedWithCatalogMetrics,
 		dynamicModels,
+		mergeAuthority,
 		fetchedDynamicModels?.explicitKindModels,
 	);
 	const models = collapseBuiltVariants(
-		authoritativeDynamicFetchSucceeded ? retainModelIds(mergedModels, dynamicModels) : mergedModels,
+		authoritativeDynamicFetchSucceeded
+			? retainModelIds(mergedModels, dynamicModels)
+			: !dynamicFetchSucceeded && isAuthoritativeDynamicCache && usableCachedModels.length > 0
+				? retainModelIds(mergedModels, usableCachedModels)
+				: mergedModels,
 	);
 	const resolutionAuthoritative = !hasRemoteFetcher || remoteResolutionComplete || shouldUseFreshCacheAsAuthoritative;
 	const remoteUpdatedAt = anyRemoteFetchSucceeded ? now() : undefined;
@@ -412,11 +452,21 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				cacheFingerprintMatches,
 				options.dropCachedModelIdsOnStaticMismatch,
 			);
-			const latestCacheModels = additiveStaticModelIds
-				? preparedLatestCacheModels.filter(model => !additiveStaticModelIds.has(model.id))
+			const latestCacheModels = cacheAdditiveStaticModelIds
+				? preparedLatestCacheModels.filter(model => !cacheAdditiveStaticModelIds.has(model.id))
 				: preparedLatestCacheModels;
+			const mergedFallbackModels = mergeDynamicModels(
+				mergeCachedModels(staticModels, latestCacheModels, {
+					authority: mergeAuthority,
+					matchesStatic: cacheFingerprintMatches,
+				}),
+				modelsDevModels,
+				mergeAuthority,
+			);
 			const fallbackSnapshotModels = collapseBuiltVariants(
-				mergeDynamicModels(mergeDynamicModels(staticModels, latestCacheModels), modelsDevModels),
+				isAuthoritativeDynamicCache && latestUsableCacheModels.length > 0
+					? retainModelIds(mergedFallbackModels, latestUsableCacheModels)
+					: mergedFallbackModels,
 			);
 			if (fallbackSnapshotModels.length > 0 || latestCache !== null || cache !== null) {
 				writeModelCache(
@@ -449,6 +499,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			: cacheContributed && cache
 				? { updatedAt: cache.updatedAt }
 				: {}),
+		...(dynamicFetch?.error !== undefined ? { fetchError: dynamicFetch.error } : {}),
 	};
 }
 
@@ -473,17 +524,15 @@ async function fetchModelsDev<TApi extends Api, TModelsDevPayload>(
 	}
 }
 
+/** The endpoint's catalog (`models: null` when it answered none), and why it threw, if it did. */
 async function fetchDynamicModels<TApi extends Api>(
 	fetcher: () => Promise<readonly ModelSpec<TApi>[] | null>,
-): Promise<DiscoveredModelSet<TApi> | null> {
+): Promise<{ models: DiscoveredModelSet<TApi> | null; error?: string }> {
 	try {
 		const models = await fetcher();
-		if (models === null) {
-			return null;
-		}
-		return buildDiscoveredModelSpecs<TApi>(models);
-	} catch {
-		return null;
+		return { models: models === null ? null : buildDiscoveredModelSpecs<TApi>(models) };
+	} catch (error) {
+		return { models: null, error: error instanceof Error ? error.message : String(error) };
 	}
 }
 
@@ -544,9 +593,22 @@ function mergeCatalogMetrics<TApi extends Api>(
 	return applyCatalogMetrics(models, new CatalogMetricsIndex(catalogModels));
 }
 
+/**
+ * Which dynamic-row fields replace the existing row outright instead of
+ * merging additively. Set per provider by `ModelManagerOptions`.
+ */
+interface DynamicMergeAuthority {
+	readonly input: boolean;
+	readonly reasoning: boolean;
+	readonly cost: boolean;
+	/** Static display names by id that override dynamic rows (`keepStaticNames`). */
+	readonly staticNames: ReadonlyMap<string, string> | undefined;
+}
+
 function mergeDynamicModels<TApi extends Api>(
 	baseModels: readonly Model<TApi>[],
 	dynamicModels: readonly Model<TApi>[],
+	authority: DynamicMergeAuthority,
 	explicitKindModels?: ReadonlySet<Model<TApi>>,
 ): Model<TApi>[] {
 	// Empty-side fast paths: `mergeDynamicModels(base, [])` is the common shape
@@ -567,8 +629,26 @@ function mergeDynamicModels<TApi extends Api>(
 		// A policy-derived kind on a chat row is not permission to replace an
 		// authored runner. Only a kind present before materialization can do so.
 		if (modelKind(existingModel) !== "chat" && !explicitKindModels?.has(dynamicModel)) continue;
-		merged.set(dynamicModel.id, mergeDynamicModel(existingModel, dynamicModel));
+		merged.set(dynamicModel.id, mergeDynamicModel(existingModel, dynamicModel, authority));
 	}
+	return Array.from(merged.values());
+}
+
+/**
+ * Lays cached rows over the static catalog. A snapshot written against this
+ * static catalog (`matchesStatic`) is already that catalog merged with live
+ * discovery, so its rows replace same-id static rows verbatim; re-merging would
+ * only rebuild them and churn the persisted payload. A snapshot from another
+ * static catalog re-merges so upgraded bundled metadata applies.
+ */
+function mergeCachedModels<TApi extends Api>(
+	staticModels: readonly Model<TApi>[],
+	cacheModels: readonly Model<TApi>[],
+	options: { authority: DynamicMergeAuthority; matchesStatic: boolean },
+): Model<TApi>[] {
+	if (!options.matchesStatic) return mergeDynamicModels(staticModels, cacheModels, options.authority);
+	const merged = new Map<string, Model<TApi>>(staticModels.map(model => [model.id, model]));
+	for (const cachedModel of cacheModels) merged.set(cachedModel.id, cachedModel);
 	return Array.from(merged.values());
 }
 
@@ -584,53 +664,54 @@ function retainModelIds<TApi extends Api>(
 const MODEL_CACHE_FINGERPRINT_VERSION = `merge-v5:${VERSION}`;
 
 /**
+ * Merge policy that is part of a cache's identity in
+ * {@link fingerprintStaticModels}: `authoritative` when dynamic discovery owns
+ * the catalog, `additive` when the shared catalog may only add ids. The flags
+ * compose; snapshots written under different policies never match.
+ */
+export interface StaticFingerprintPolicy {
+	authoritative?: boolean;
+	additive?: boolean;
+}
+
+/**
  * Return the versioned content identity for a static provider slice. Callers
  * may mutate or freeze their arrays, so every call observes current content
  * and never attaches a stale sidecar fingerprint to caller-owned data.
  */
 export function fingerprintStaticModels<TApi extends Api>(
 	models: readonly (ModelSpec<TApi> | Model<TApi>)[],
-	dynamicModelsAuthoritative = false,
+	policy: StaticFingerprintPolicy = {},
 ): string {
-	if (models.length === 0) return `${MODEL_CACHE_FINGERPRINT_VERSION}:empty`;
-	if (dynamicModelsAuthoritative)
-		return `${MODEL_CACHE_FINGERPRINT_VERSION}:authoritative:${fingerprintStaticModels(models)}`;
-	return `${MODEL_CACHE_FINGERPRINT_VERSION}:${Bun.hash(JSON.stringify(models)).toString(36)}`;
+	const policyKey = `${policy.authoritative ? ":authoritative" : ""}${policy.additive ? ":additive" : ""}`;
+	if (models.length === 0) return `${MODEL_CACHE_FINGERPRINT_VERSION}${policyKey}:empty`;
+	return `${MODEL_CACHE_FINGERPRINT_VERSION}${policyKey}:${Bun.hash(JSON.stringify(models)).toString(36)}`;
 }
 
-function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamicModel: Model<TApi>): Model<TApi> {
+function mergeDynamicModel<TApi extends Api>(
+	existingModel: Model<TApi>,
+	dynamicModel: Model<TApi>,
+	authority: DynamicMergeAuthority,
+): Model<TApi> {
 	// When discovery resolves the same model id to a different endpoint (e.g.
 	// a GitHub Copilot business/enterprise host), the bundled reference's
-	// capabilities are pinned to another endpoint and no longer apply. Copilot
-	// dynamic discovery also pre-applies the correct image fallback for omitted
-	// `supports.vision`, so its explicit `false` must not be OR-upgraded by the
-	// canonical bundled model.
-	// DeepInfra's discovery is authoritative (`dynamicModelsAuthoritative`) and
-	// its `vision`/`vlm` tags are the catalog's whole truth for modality. Every
-	// row shares the single DeepInfra endpoint, so `endpointChanged` never fires
-	// there: without this carve-out a model that dropped those tags would keep
-	// the bundled reference's image support and the agent would go on sending
+	// capabilities are pinned to another endpoint and no longer apply.
+	// `authority.input` carries the descriptor's declaration that a
+	// provider's discovery rows are the deployment's whole truth for input
+	// modality (Copilot's pre-applied `supports.vision` fallback, DeepInfra's
+	// `vision`/`vlm` tags, CoralBricks' authoritative `supports_image_input`
+	// flag): without it, a live row that dropped image support would keep the
+	// bundled reference's image support and the agent would go on sending
 	// images to a now text-only route.
 	const endpointChanged = existingModel.baseUrl !== dynamicModel.baseUrl;
-	const dynamicInputAuthoritative =
-		endpointChanged ||
-		(existingModel.provider === "github-copilot" && dynamicModel.provider === "github-copilot") ||
-		(existingModel.provider === "deepinfra" && dynamicModel.provider === "deepinfra");
+	const dynamicInputAuthoritative = endpointChanged || authority.input;
 	const supportsImage = dynamicInputAuthoritative
 		? dynamicModel.input.includes("image")
 		: existingModel.input.includes("image") || dynamicModel.input.includes("image");
-	// Synthetic's discovery is authoritative (`dynamicModelsAuthoritative`) and
-	// its per-model `reasoning_parameters.efforts` vocabulary is the route's
-	// whole truth: when the wire advertises only the `none` off-state the
-	// mapper emits `reasoning: false`, and OR-ing the bundled reference's
-	// stale `reasoning: true` back would re-arm an effort dial the route
-	// doesn't expose. Other providers keep the OR so a bundled reasoning flag
-	// survives a discovery row that simply omits the capability.
-	const dynamicReasoningAuthoritative =
-		existingModel.provider === "synthetic" && dynamicModel.provider === "synthetic";
-	const reasoning = dynamicReasoningAuthoritative
-		? dynamicModel.reasoning
-		: existingModel.reasoning || dynamicModel.reasoning;
+	// Providers with authoritative reasoning metadata must not regain a
+	// stale bundled dial after explicitly reporting no reasoning. Others
+	// retain the additive fallback for discovery that omits capabilities.
+	const reasoning = authority.reasoning ? dynamicModel.reasoning : existingModel.reasoning || dynamicModel.reasoning;
 	const longContextCost = dynamicModel.cost.longContext ?? existingModel.cost.longContext;
 	const timeBasedCost = dynamicModel.cost.timeBased ?? existingModel.cost.timeBased;
 	const existingHeaders = existingModel.resolveHeaders ?? existingModel.headers;
@@ -651,17 +732,28 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 	// the effort dial once the id is pinned to Responses (#12901).
 	const compat =
 		dynamicModel.compatConfig ?? (dynamicModel.api === existingModel.api ? existingModel.compatConfig : undefined);
+	// A live row that trusts only its own thinking (e.g. CoralBricks' advertised
+	// ladder) must not inherit the fallback's dial. Cached rows lose an
+	// explicit `thinking: undefined` to JSON, so the spread alone would.
+	const liveCompat = dynamicModel.compatConfig;
+	const trustsOwnThinking =
+		liveCompat !== undefined &&
+		"trustExplicitThinkingOnly" in liveCompat &&
+		liveCompat.trustExplicitThinkingOnly === true;
 	return buildModel({
 		...existingModel,
 		...dynamicModel,
-		name: preferDiscoveryName(dynamicModel.name, existingModel.name, dynamicModel.id),
+		name:
+			authority.staticNames?.get(dynamicModel.id) ??
+			preferDiscoveryName(dynamicModel.name, existingModel.name, dynamicModel.id),
 		reasoning,
+		...(trustsOwnThinking ? { thinking: dynamicModel.thinking } : {}),
 		input: supportsImage ? ["text", "image"] : ["text"],
 		cost: {
-			input: preferDiscoveryCost(dynamicModel.cost.input, existingModel.cost.input),
-			output: preferDiscoveryCost(dynamicModel.cost.output, existingModel.cost.output),
-			cacheRead: preferDiscoveryCost(dynamicModel.cost.cacheRead, existingModel.cost.cacheRead),
-			cacheWrite: preferDiscoveryCost(dynamicModel.cost.cacheWrite, existingModel.cost.cacheWrite),
+			input: preferDiscoveryCost(dynamicModel.cost.input, existingModel.cost.input, authority.cost),
+			output: preferDiscoveryCost(dynamicModel.cost.output, existingModel.cost.output, authority.cost),
+			cacheRead: preferDiscoveryCost(dynamicModel.cost.cacheRead, existingModel.cost.cacheRead, authority.cost),
+			cacheWrite: preferDiscoveryCost(dynamicModel.cost.cacheWrite, existingModel.cost.cacheWrite, authority.cost),
 			...(longContextCost ? { longContext: longContextCost } : {}),
 			...(timeBasedCost ? { timeBased: timeBasedCost } : {}),
 		},
@@ -678,8 +770,12 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 	} as ModelSpec<TApi>);
 }
 
-function preferDiscoveryCost(discoveryCost: number, fallbackCost: number): number {
-	if (Number.isFinite(discoveryCost) && discoveryCost > 0) {
+/**
+ * A zero discovery price usually means "not reported", so the fallback wins
+ * unless the provider declared its live prices authoritative (`zeroIsPrice`).
+ */
+function preferDiscoveryCost(discoveryCost: number, fallbackCost: number, zeroIsPrice: boolean): number {
+	if (Number.isFinite(discoveryCost) && (discoveryCost > 0 || (zeroIsPrice && discoveryCost === 0))) {
 		return discoveryCost;
 	}
 	return fallbackCost;
@@ -708,125 +804,59 @@ function preferDiscoveryLimit(discoveryLimit: number | null, fallbackLimit: numb
 	return discoveryLimit;
 }
 
-function buildDiscoveredModelSpecs<TApi extends Api>(value: unknown): DiscoveredModelSet<TApi> {
+/**
+ * Materializes a remote source's rows. A row `buildModel` rejects (an id newer
+ * than this build's rule tree that lands on an equal-rank overlap) is skipped
+ * with a warning instead of discarding the source's other rows.
+ *
+ * @throws the first build error when rows were present but none built, so the
+ * caller treats the source as failed (cache/static fallback) rather than as an
+ * intentionally empty catalog that an authoritative provider would prune to.
+ */
+function buildDiscoveredModelSpecs<TApi extends Api>(values: unknown): DiscoveredModelSet<TApi> {
 	const models: Model<TApi>[] = [];
 	const explicitKindModels = new Set<Model<TApi>>();
-	if (!Array.isArray(value)) {
+	if (!Array.isArray(values)) {
 		return { models, explicitKindModels };
 	}
-	for (const item of value) {
-		if (isModelLike(item)) {
-			const model = buildModel(item as ModelSpec<TApi>);
-			models.push(model);
-			if (item.kind !== undefined) explicitKindModels.add(model);
+	const failures: unknown[] = [];
+	for (const value of values) {
+		if (!ModelSpecShape.allows(value)) continue;
+		const item = value as ModelSpec<TApi>;
+		let model: Model<TApi>;
+		try {
+			model = buildModel(item);
+		} catch (error) {
+			failures.push(error);
+			logger.warn("model discovery skipped a model that failed to build", {
+				provider: item.provider,
+				model: item.id,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			continue;
 		}
+		models.push(model);
+		if (item.kind !== undefined) explicitKindModels.add(model);
 	}
+	if (models.length === 0 && failures.length > 0) throw failures[0];
 	return { models, explicitKindModels };
 }
 
-function isModelLike(value: unknown): value is ModelSpec<Api> {
-	if (!isRecord(value)) {
-		return false;
-	}
-	const v = value as {
-		id?: unknown;
-		name?: unknown;
-		api?: unknown;
-		provider?: unknown;
-		baseUrl?: unknown;
-		reasoning?: unknown;
-		input?: unknown;
-		cost?: unknown;
-		contextWindow?: unknown;
-		maxTokens?: unknown;
-	};
-	if (typeof v.id !== "string" || v.id.length === 0) {
-		return false;
-	}
-	if (typeof v.name !== "string" || v.name.length === 0) {
-		return false;
-	}
-	if (typeof v.api !== "string" || v.api.length === 0) {
-		return false;
-	}
-	if (typeof v.provider !== "string" || v.provider.length === 0) {
-		return false;
-	}
-	if (typeof v.baseUrl !== "string" || v.baseUrl.length === 0) {
-		return false;
-	}
-	if (typeof v.reasoning !== "boolean") {
-		return false;
-	}
-	if (!isModelInputArray(v.input)) {
-		return false;
-	}
-	if (!isModelCost(v.cost)) {
-		return false;
-	}
-	// Finite positive: NaN > 0 is false, +Infinity < Infinity is false.
-	const cw = v.contextWindow;
-	if (cw !== null && (typeof cw !== "number" || !(cw > 0 && cw < Infinity))) {
-		return false;
-	}
-	const mt = v.maxTokens;
-	if (mt !== null && (typeof mt !== "number" || !(mt > 0 && mt < Infinity))) {
-		return false;
-	}
-	return true;
-}
-
-function isModelInputArray(value: unknown): value is ("text" | "image")[] {
-	if (!Array.isArray(value) || value.length === 0) {
-		return false;
-	}
-	for (let i = 0; i < value.length; i++) {
-		const item = value[i];
-		if (item !== "text" && item !== "image") {
-			return false;
-		}
-	}
-	return true;
-}
-
-function isTokenCost(value: unknown): value is TokenCost {
-	if (!isRecord(value)) {
-		return false;
-	}
-	const c = value as {
-		input?: unknown;
-		output?: unknown;
-		cacheRead?: unknown;
-		cacheWrite?: unknown;
-	};
-	// Finite (NaN-safe): -Infinity < x < Infinity rejects NaN and both infinities.
-	// Preserves original behavior: 0 and negatives remain valid.
-	const ci = c.input;
-	if (typeof ci !== "number" || !(ci > -Infinity && ci < Infinity)) {
-		return false;
-	}
-	const co = c.output;
-	if (typeof co !== "number" || !(co > -Infinity && co < Infinity)) {
-		return false;
-	}
-	const cr = c.cacheRead;
-	if (typeof cr !== "number" || !(cr > -Infinity && cr < Infinity)) {
-		return false;
-	}
-	const cw = c.cacheWrite;
-	if (typeof cw !== "number" || !(cw > -Infinity && cw < Infinity)) {
-		return false;
-	}
-	return true;
-}
-
-function isModelCost(value: unknown): value is ModelCost {
-	if (!isTokenCost(value)) return false;
-	const cost = value as TokenCost & { longContext?: unknown; timeBased?: unknown };
-	if (cost.timeBased !== undefined && !isTimeBasedCost(cost.timeBased)) return false;
-	const longContext = cost.longContext;
-	if (longContext === undefined) return true;
-	if (!isTokenCost(longContext) || !isRecord(longContext)) return false;
-	const threshold = longContext.inputThreshold;
-	return typeof threshold === "number" && threshold > 0 && threshold < Infinity;
-}
+/** Finite rates; 0 and negatives stay valid. */
+const FiniteTokenCost = type({ input: "number", output: "number", cacheRead: "number", cacheWrite: "number" });
+/** Discovery output is built in memory, so optional fields may be present as `undefined`. */
+const ModelSpecShape = type({
+	id: "string > 0",
+	name: "string > 0",
+	api: "string > 0",
+	provider: "string > 0",
+	baseUrl: "string > 0",
+	reasoning: "boolean",
+	input: "('text' | 'image')[] > 0",
+	cost: FiniteTokenCost.and({
+		"timeBased?": TimeBasedCostShape.or("undefined"),
+		"longContext?": FiniteTokenCost.and({ inputThreshold: "number > 0" }).or("undefined"),
+	}),
+	contextWindow: "number > 0 | null",
+	maxTokens: "number > 0 | null",
+});

@@ -56,10 +56,17 @@ export function shouldLoadAwsSharedConfig(profile?: string): boolean {
 	return value === "1" || value === "true";
 }
 
+/** Shared credentials and config file locations, honoring their env overrides. */
+export function awsSharedFilePaths(): { credentialsPath: string; configPath: string } {
+	return {
+		credentialsPath: $env.AWS_SHARED_CREDENTIALS_FILE || path.join(os.homedir(), ".aws", "credentials"),
+		configPath: $env.AWS_CONFIG_FILE || path.join(os.homedir(), ".aws", "config"),
+	};
+}
+
 export function resolveAwsProfileRegion(profile?: string): string | undefined {
 	if (!shouldLoadAwsSharedConfig(profile)) return undefined;
-	const configPath = $env.AWS_CONFIG_FILE || path.join(os.homedir(), ".aws", "config");
-	return readAwsIniSync(configPath)?.[resolveAwsProfile(profile)]?.region;
+	return readAwsIniSync(awsSharedFilePaths().configPath)?.[resolveAwsProfile(profile)]?.region;
 }
 
 /** Region selected by the environment or active shared-config profile. */
@@ -74,8 +81,7 @@ export function resolveAwsRegion(explicitRegion?: string, profile?: string): str
 
 export function hasConfiguredAwsProfile(profile?: string): boolean {
 	const selectedProfile = resolveAwsProfile(profile);
-	const credentialsPath = $env.AWS_SHARED_CREDENTIALS_FILE || path.join(os.homedir(), ".aws", "credentials");
-	const configPath = $env.AWS_CONFIG_FILE || path.join(os.homedir(), ".aws", "config");
+	const { credentialsPath, configPath } = awsSharedFilePaths();
 	const credentialsIni = readAwsIniSync(credentialsPath);
 	const configIni = shouldLoadAwsSharedConfig(profile) ? readAwsIniSync(configPath) : undefined;
 	return profileHasCredentialSource(selectedProfile, credentialsIni, configIni, new Set());

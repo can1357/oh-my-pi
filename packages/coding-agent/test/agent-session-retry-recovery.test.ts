@@ -1,9 +1,9 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent, AgentBusyError } from "@oh-my-pi/pi-agent-core";
-import type { ApiKey, AssistantMessage, AssistantRetryRecovery, Usage } from "@oh-my-pi/pi-ai";
+import type { ApiKey, AssistantMessage, AssistantRetryRecovery, Model, Usage } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
-import * as aiStream from "@oh-my-pi/pi-ai/stream";
+import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -30,6 +30,8 @@ const RATE_LIMIT_ERROR =
 const SOCKET_CLOSE_MID_STREAM =
 	"The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()";
 const RETRIABLE_SERVER_ERROR = "503 service unavailable: overloaded_error";
+const CODEX_STEER_REJECTION =
+	"Codex error event: The experimental native turn lane cannot accept stateful WebSocket messages while a native turn is running. Start a new independent response.create turn instead. (code=unsupported_native_inflight_message)";
 
 function emptyUsage(): Usage {
 	return {
@@ -135,7 +137,7 @@ describe("AgentSession retry recovery", () => {
 
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-retry-recovery-");
-		vi.spyOn(aiStream, "getEnvApiKey").mockReturnValue(undefined);
+		vi.spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
 		await authStorage.credentials.remove("anthropic");
 		authStorage.keys.removeRuntime("anthropic");
 		modelRegistry.clearSuppressedSelectors();
@@ -418,6 +420,55 @@ describe("AgentSession retry recovery", () => {
 		});
 	});
 
+	it("does not issue another provider request when a retry races session abort", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const mock = createMockModel({
+			responses: [{ throw: RETRIABLE_SERVER_ERROR }, { content: ["resumed on request"], stopReason: "stop" }],
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			"retry.maxRetries": 4,
+			"retry.modelFallback": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		sessions.push(session);
+		mockSchedulerWaitWithClock();
+		const abortCompleted = Promise.withResolvers<void>();
+		const unsubscribeAbort = agent.subscribe(event => {
+			if (event.type === "agent_end") {
+				void session.abort().then(abortCompleted.resolve, abortCompleted.reject);
+			}
+		});
+
+		await session.prompt("Stop after the provider failure");
+		await abortCompleted.promise;
+		await session.waitForIdle();
+		expect(mock.calls).toHaveLength(1);
+		unsubscribeAbort();
+		await session.prompt("Resume explicitly after abort");
+		await session.waitForIdle();
+		expect(mock.calls).toHaveLength(2);
+		expect(agent.state.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			content: [{ type: "text", text: "resumed on request" }],
+		});
+	});
+
 	it("collapses exhausted retries into one terminal error naming the spent budget", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {
@@ -507,6 +558,10 @@ describe("AgentSession retry recovery", () => {
 	async function runFallbackChainRecovery(
 		responses: MockResponse[],
 		maxRetries = 2,
+		models: { primary: Model; fallback: Model } = {
+			primary: getBundledModel("anthropic", "claude-sonnet-4-5"),
+			fallback: getBundledModel("openai", "gpt-5.5"),
+		},
 	): Promise<{
 		primary: string;
 		fallback: string;
@@ -514,13 +569,12 @@ describe("AgentSession retry recovery", () => {
 		fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>>;
 		sessionManager: SessionManager;
 	}> {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		const fallbackModel = getBundledModel("openai", "gpt-5.5");
+		const { primary: model, fallback: fallbackModel } = models;
 		if (!model || !fallbackModel) {
-			throw new Error("Expected bundled Anthropic and OpenAI test models to exist");
+			throw new Error("Expected bundled primary and fallback test models to exist");
 		}
-		authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
-		authStorage.keys.setRuntime("openai", "openai-test-key");
+		authStorage.keys.setRuntime(model.provider, `${model.provider}-test-key`);
+		authStorage.keys.setRuntime(fallbackModel.provider, `${fallbackModel.provider}-test-key`);
 		const primary = `${model.provider}/${model.id}`;
 		const fallback = `${fallbackModel.provider}/${fallbackModel.id}`;
 
@@ -622,6 +676,46 @@ describe("AgentSession retry recovery", () => {
 		const errors = assistantEntries(sessionManager).filter(candidate => candidate.message.stopReason === "error");
 		expect(errors).toHaveLength(1);
 		expect(errors[0].message.retryRecovery).toMatchObject({ recovery: "model" });
+	});
+
+	const codexModels = {
+		primary: getBundledModel("openai-codex", "gpt-6-astra"),
+		fallback: getBundledModel("openai-codex", "gpt-6.1-sol"),
+	};
+	const steerRejectedAfterThinking: MockResponse = {
+		content: [{ type: "thinking", thinking: "planning the next tool call" }],
+		stopReason: "error",
+		errorMessage: CODEX_STEER_REJECTION,
+	};
+
+	it("retries a Codex steering rejection on the same model instead of consulting the fallback chain", async () => {
+		// Codex dropped the response because omp steered it mid-stream, after
+		// reasoning had streamed. The provider already stopped steering the
+		// session, so the primary replays cleanly; switching models fixes nothing.
+		const { primary, requestedModels, fallbackEvents, sessionManager } = await runFallbackChainRecovery(
+			[steerRejectedAfterThinking, { content: ["recovered on the same model"], stopReason: "stop" }],
+			2,
+			codexModels,
+		);
+
+		expect(requestedModels).toEqual([primary, primary]);
+		expect(fallbackEvents).toEqual([]);
+		successfulAssistantEntry(sessionManager, "recovered on the same model");
+		const errors = assistantEntries(sessionManager).filter(candidate => candidate.message.stopReason === "error");
+		expect(errors).toHaveLength(1);
+		expect(errors[0].message.retryRecovery).toMatchObject({ recovery: "plain" });
+	});
+
+	it("still consults the fallback chain for a Codex steering rejection when no same-model retry is left", async () => {
+		// With `retry.maxRetries: 0` the chain is the only recovery left.
+		const { primary, fallback, requestedModels, fallbackEvents } = await runFallbackChainRecovery(
+			[steerRejectedAfterThinking, { content: ["recovered on fallback"], stopReason: "stop" }],
+			0,
+			codexModels,
+		);
+
+		expect(requestedModels).toEqual([primary, fallback]);
+		expect(fallbackEvents).toHaveLength(1);
 	});
 
 	it("maps assistant error presentation for recovered, unrecovered, and silent abort turns", () => {

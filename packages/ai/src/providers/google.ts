@@ -1,5 +1,5 @@
 import * as AIError from "../error";
-import { getEnvApiKey } from "../stream";
+import { getEnvApiKey } from "../env-api-key";
 import type { Context, Model, StreamFunction } from "../types";
 import type { AssistantMessageEventStream } from "../utils/event-stream";
 import { applyInferenceHeaders } from "./inference-headers";
@@ -44,6 +44,7 @@ export const streamGoogle: StreamFunction<"google-generative-ai"> = (
 			};
 			applyInferenceHeaders(headers, {
 				provider: model.provider,
+				providerType: model.providerType,
 				protocol: "google",
 				sessionId: options?.sessionId ?? options?.promptCacheKey,
 			});

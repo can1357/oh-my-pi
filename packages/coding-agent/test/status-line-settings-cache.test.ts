@@ -208,14 +208,34 @@ describe("StatusLineComponent effective settings cache", () => {
 		expect(content).toContain("Cache Session");
 	});
 
-	it("surfaces active subagents even when custom segments omit subagents", () => {
+	it("reports badge changes but ignores reordered IDs when custom segments omit subagents", () => {
 		const component = makeComponent({ preset: "custom", leftSegments: [], rightSegments: [] });
 
-		component.setRunningSubagents(["sub-1", "sub-2"]);
+		expect(component.setRunningSubagents([])).toBe(false);
+		expect(component.setRunningSubagents(["sub-1", "sub-2"])).toBe(true);
 
-		const content = stripVTControlCharacters(component.getTopBorder(120).content);
+		const border = component.getTopBorder(120);
+		const content = stripVTControlCharacters(border.content);
 		expect(content).toContain(`${theme.icon.agents} 2`);
 		expect(content).not.toContain("agents");
+		expect(component.setRunningSubagents(["sub-2", "sub-1"])).toBe(false);
+		expect(component.getTopBorder(120)).toEqual(border);
+		expect(component.setRunningSubagents(["sub-2"])).toBe(true);
+		expect(stripVTControlCharacters(component.getTopBorder(120).content)).toContain(`${theme.icon.agents} 1`);
+	});
+
+	it("reports normalized tree-cost changes for repaint scheduling", () => {
+		const component = makeComponent({ preset: "custom", leftSegments: ["cost"], rightSegments: [] });
+		expect(component.setSubagentTreeCost(0)).toBe(false);
+		expect(component.setSubagentTreeCost(0.5)).toBe(true);
+		const border = component.getTopBorder(120);
+		expect(stripVTControlCharacters(border.content)).toContain("(+0.50)");
+
+		expect(component.setSubagentTreeCost(0.5)).toBe(false);
+		expect(component.getTopBorder(120)).toEqual(border);
+		expect(component.setSubagentTreeCost(-1)).toBe(true);
+		expect(stripVTControlCharacters(component.getTopBorder(120).content)).not.toContain("(+0.50)");
+		expect(component.setSubagentTreeCost(Number.NaN)).toBe(false);
 	});
 
 	it("keeps plan and hook state dynamic without settings invalidation", () => {
@@ -339,5 +359,29 @@ describe("StatusLineComponent hook statuses", () => {
 		component.setHookStatus("ponytail", "Ponytail");
 
 		expect(component.render(8)).toEqual(["Ponytail", "$0.04 (…"]);
+	});
+
+	it("keeps SGR styling from extension statuses", () => {
+		const component = makeComponent({ showHookStatus: true });
+		component.setHookStatus("demo", "\x1b[32mgreen\x1b[39m \x1b[31mred\x1b[39m");
+
+		expect(component.render(80)).toEqual(["\x1b[32mgreen\x1b[39m \x1b[31mred\x1b[39m\x1b[0m"]);
+	});
+
+	it("truncates styled statuses without bleeding style", () => {
+		const component = makeComponent({ showHookStatus: true });
+		component.setHookStatus("demo", "\x1b[32mgreen\x1b[39m \x1b[31mred\x1b[39m");
+
+		const [line] = component.render(6);
+		expect(visibleWidth(line)).toBeLessThanOrEqual(6);
+		expect(stripVTControlCharacters(line)).toBe("green…");
+		expect(line.endsWith("\x1b[0m…")).toBe(true);
+	});
+
+	it("strips OSC links from styled statuses under the bar", () => {
+		const component = makeComponent({ showHookStatus: true });
+		component.setHookStatus("link", "\x1b[1m\x1b]8;;https://example.com\x07docs\x1b]8;;\x07\x1b[22m");
+
+		expect(component.render(80)).toEqual(["\x1b[1mdocs\x1b[22m\x1b[0m"]);
 	});
 });

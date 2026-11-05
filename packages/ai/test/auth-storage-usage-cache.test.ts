@@ -11,11 +11,13 @@
  *      the failure backoff window — a repeat poll within the window is served
  *      from cache (no refetch); the entry expires and the next poll retries.
  */
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
 	type AuthCredential,
 	type AuthCredentialStore,
 	AuthStorage,
+	SqliteAuthCredentialStore,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
 import { usageCacheIdentity } from "@oh-my-pi/pi-ai/auth/usage-cache";
@@ -459,6 +461,53 @@ describe("AuthStorage usage cache: Claude saved resets", () => {
 			const second = requireAnthropicReport(await storage.usage.reports());
 			expect(second.fetchedAt).toBeGreaterThanOrEqual(first.fetchedAt);
 			expect(second.resetCredits).toMatchObject({ availableCount: 1, nextCreditId: "grant_1" });
+		} finally {
+			storage.close();
+		}
+	});
+});
+
+describe("AuthStorage usage cache: Claude rate limits", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("waits a minute before re-polling Claude usage after a 429", async () => {
+		let now = 1_800_000_000_000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		vi.spyOn(Math, "random").mockReturnValue(0.5);
+		let usageRequests = 0;
+		const usageFetch = (async (input: string | URL | Request) => {
+			const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+			if (url.search === "") usageRequests += 1;
+			if (usageRequests === 1) {
+				return Response.json(
+					{ error: { type: "rate_limit_error", message: "Rate limited. Please try again later." } },
+					{ status: 429, headers: { "retry-after": "0" } },
+				);
+			}
+			return Response.json({
+				five_hour: { utilization: 25, resets_at: "2099-09-23T00:00:00Z" },
+				cedar_ember: null,
+				juniper_tide: null,
+			});
+		}) as unknown as typeof fetch;
+		const storage = new AuthStorage(makeStore([oauthRow(1, "a@example.com")]), {
+			usageFetch,
+			usageProviderResolver: provider => (provider === "anthropic" ? claudeUsage.claudeUsageProvider : undefined),
+		});
+		try {
+			await storage.credentials.reload();
+			expect(anthropicReports(await storage.usage.reports())).toEqual([]);
+
+			now += 30_000;
+			expect(anthropicReports(await storage.usage.reports())).toEqual([]);
+			expect(usageRequests).toBe(1);
+
+			now += 31_000;
+			const recovered = requireAnthropicReport(await storage.usage.reports());
+			expect(requireLimit(recovered, "anthropic:5h").amount.used).toBe(25);
+			expect(usageRequests).toBe(2);
 		} finally {
 			storage.close();
 		}
@@ -1039,7 +1088,7 @@ describe("AuthStorage usage cache: header ingestion", () => {
 		expect(await storage.usage.reports()).toHaveLength(1);
 		expect(calls).toBe(1);
 
-		now.mockReturnValue(start + 12_501);
+		now.mockReturnValue(start + 75_001);
 		expect(await storage.usage.reports()).toHaveLength(1);
 		expect(calls).toBe(2);
 	});
@@ -1279,6 +1328,49 @@ describe("AuthStorage usage cache: terminal refresh failure", () => {
 			expect(rows[0]?.disabledCause).toBeNull();
 			expect(fetchSpy).toHaveBeenCalledTimes(1);
 			expect(fetchSpy.mock.calls[0]?.[0].credential.accessToken).toBe("oat-1");
+		} finally {
+			storage.close();
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("keeps a leased SQLite credential when the usage probe's refresh gets invalid_grant", async () => {
+		// The SQLite store serializes refreshes through durable leases; that path
+		// must apply the same advisory policy as lease-less stores.
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		await store.saveOAuth("anthropic", {
+			access: "oat-leased",
+			refresh: "refresh-leased",
+			expires: Date.now() + 30_000,
+			accountId: "account-leased",
+			email: "leased@example.com",
+		});
+		let refreshCalls = 0;
+		const storage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "anthropic" ? claudeUsage.claudeUsageProvider : undefined),
+			refreshOAuthCredential: async () => {
+				refreshCalls += 1;
+				throw new Error(
+					'anthropic token refresh failed: 400 {"error":"invalid_grant","error_description":"Refresh token not found or invalid"}',
+				);
+			},
+		});
+		await storage.credentials.reload();
+		const disabled: string[] = [];
+		storage.credentials.onDisabled(event => {
+			disabled.push(event.disabledCause);
+		});
+		const fetchSpy = vi
+			.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage")
+			.mockResolvedValue(makeReport("leased@example.com"));
+		try {
+			expect(anthropicReports(await storage.usage.reports())).toHaveLength(1);
+			expect(refreshCalls).toBe(1);
+			expect(fetchSpy.mock.calls[0]?.[0].credential.accessToken).toBe("oat-leased");
+			expect(disabled).toEqual([]);
+			expect(store.listAuthCredentials("anthropic").map(row => row.credential)).toMatchObject([
+				{ type: "oauth", refresh: "refresh-leased" },
+			]);
 		} finally {
 			storage.close();
 			vi.restoreAllMocks();

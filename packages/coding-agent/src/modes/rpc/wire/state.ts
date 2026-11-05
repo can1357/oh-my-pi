@@ -17,7 +17,7 @@ export const stateDefs = {
 	CacheWarmingMode: "'off' | 'streaming' | 'idle'",
 	MessageUpdates: doc(
 		"'full' | 'delta'",
-		"`set_event_filter` projection: `delta` drops the accumulated snapshots from `message_update`.",
+		"`set_event_filter` projection: `delta` replaces the accumulated snapshots with the block a start/end event touches.",
 	),
 	TodoStatus: "'pending' | 'in_progress' | 'completed' | 'abandoned' | 'blocked'",
 	GoalOp: "'get' | 'create' | 'resume' | 'pause' | 'drop'",
@@ -40,7 +40,17 @@ export const stateDefs = {
 	TodoPhase: { name: "string", tasks: "TodoItem[]" },
 	ContextUsage: { tokens: "number.integer", contextWindow: "number.integer", percent: "number" },
 	QueuedMessagesState: doc(
-		{ steering: "string[]", followUp: "string[]" },
+		{
+			steering: "string[]",
+			followUp: "string[]",
+			liveSteered: absentAs(
+				doc(
+					"number.integer",
+					"Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.",
+				),
+				0,
+			),
+		},
 		"Displayable queue-chip text for pending user-authored messages; accepted verbatim by `remove_queued_message`.",
 	),
 	ToolDescriptor: { name: "string", description: "string", "parameters?": "unknown", "examples?": "unknown[]" },
@@ -65,6 +75,33 @@ export const stateDefs = {
 		{ goal: "Goal | null", state: "GoalModeState | null" },
 		"Outcome of every `goal` op; both fields are null when the session has no goal.",
 	),
+	SlowModeScope: doc(
+		"'session' | 'global'",
+		"Where `/slow` lives: persisted config shared by every session, or this session's flex tier.",
+	),
+	UsageLimitLowPriority: doc(
+		{
+			stage: "'low_priority'",
+			resetsAtSec: doc("number", "Epoch seconds when the limit that was hit resets."),
+			"allowanceLeftPercent?": doc(
+				"number.integer",
+				"Percent of the low-priority allowance still available, when reported.",
+			),
+		},
+		"Requests are served on the provider's low-priority (slow) lane.",
+	),
+	UsageLimitWrapUp: doc(
+		{
+			stage: "'wrap_up'",
+			"resetsAtSec?": doc("number", "Epoch seconds when the limit that was hit resets, if reported."),
+			extraUsage: doc("boolean", "Whether paid extra usage serves requests once the allowance is spent."),
+		},
+		"Requests run on a short wrap-up allowance past the limit.",
+	),
+	UsageLimitState: doc(
+		"UsageLimitLowPriority | UsageLimitWrapUp",
+		"Provider-neutral state of an account past its usage limit, discriminated by `stage`.",
+	),
 	SessionState: {
 		"model?": "ModelInfo",
 		"thinkingLevel?": "ThinkingLevel",
@@ -79,6 +116,16 @@ export const stateDefs = {
 		autoCompactionEnabled: absentAs("boolean", false),
 		fastModeEnabled: absentAs("boolean", false),
 		fastModeActive: absentAs("boolean", false),
+		slowModeSupported: absentAs(doc("boolean", "`/slow` applies to the active model."), false),
+		slowModeEnabled: absentAs(
+			doc("boolean", "`/slow` is on for the active model; always `false` when `slowModeSupported` is `false`."),
+			false,
+		),
+		"slowModeScope?": doc("SlowModeScope", "Where the active model's `/slow` lives; absent when unsupported."),
+		"usageLimit?": doc(
+			"UsageLimitState",
+			"Usage-limit stage of the active model's account; absent outside wrap-up and low priority.",
+		),
 		tokensPerSecond: absentAs("number | null", null),
 		messageCount: absentAs("number.integer", 0),
 		queuedMessageCount: absentAs("number.integer", 0),
@@ -90,7 +137,7 @@ export const stateDefs = {
 			doc("boolean", "Idle with nothing queued or pending; same predicate as `session_settled`."),
 			false,
 		),
-		queuedMessages: absentAs("QueuedMessagesState", { steering: [], followUp: [] }),
+		queuedMessages: absentAs("QueuedMessagesState", { steering: [], followUp: [], liveSteered: 0 }),
 		todoPhases: absentAs("TodoPhase[]", []),
 		systemPrompt: absentAs(doc("string[]", "System prompt sections, for session dumps."), []),
 		dumpTools: absentAs("ToolDescriptor[]", []),
@@ -110,10 +157,34 @@ export const stateDefs = {
 		outputBytes: "number.integer",
 		"artifactId?": "string",
 		"artifactElidedBytes?": "number.integer",
+		"elidedBytes?": doc(
+			"number.integer",
+			"Bytes dropped from the middle of `output`, which keeps the head and tail.",
+		),
+		"elidedLines?": doc("number.integer", "Lines dropped from the middle of `output`."),
+		"columnDroppedBytes?": doc(
+			"number.integer",
+			"Bytes the per-line column cap cut from `output`, across all lines.",
+		),
+		"columnTruncatedLines?": doc(
+			"number.integer",
+			"Lines of `output` the per-line column cap cut; the artifact holds them whole.",
+		),
+		"columnTruncatedRange?": doc(
+			"LineRange",
+			"First and last lines the column cap cut, numbered as in the artifact; absent when the numbering cannot match it.",
+		),
+		"columnMax?": doc("number.integer", "The per-line column cap in UTF-8 bytes, set when it cut a line."),
 		"artifactError?": JSON_OBJECT,
+		"minimized?": JSON_OBJECT,
 		"workingDir?": "string",
 		"images?": "ImageContent[]",
+		"trace?": doc(
+			JSON_OBJECT,
+			"The embedded shell's final `ShellTrace` of the run; only when the caller asked for one.",
+		),
 	},
+	LineRange: { first: "number.integer", last: "number.integer" },
 	FastModeResult: { enabled: "boolean", active: "boolean" },
 	CompactionResult: {
 		summary: "string",
@@ -122,6 +193,7 @@ export const stateDefs = {
 		tokensBefore: "number.integer",
 		"details?": "unknown",
 		"preserveData?": JSON_OBJECT,
+		"providerReplayThroughEntryId?": "string",
 	},
 	ModelCycleResult: { model: "ModelInfo", "thinkingLevel?": "ThinkingLevel", isScoped: "boolean" },
 	ThinkingLevelCycleResult: { level: "Effort" },
@@ -130,10 +202,44 @@ export const stateDefs = {
 		{ cancelled: "boolean", resumed: "boolean", sessionId: "string", "sessionFile?": "string" },
 		"`open_session` outcome; `resumed` is false when a fresh session was started.",
 	),
-	RemoveQueuedMessageResult: { removed: "boolean" },
+	RemoveQueuedMessageResult: {
+		removed: "boolean",
+		"images?": doc("ImageContent[]", "The removed message's images, so the client can restore them with its text."),
+		"imagesDropped?": doc(
+			"boolean",
+			"Only ever `true`: the images exceeded the transport limit and were omitted; the removal still happened.",
+		),
+	},
 	PromoteQueuedMessageResult: { promoted: "boolean" },
+	RestoredQueuedMessage: doc(
+		{ text: "string", "images?": "ImageContent[]" },
+		"Queued user content withdrawn from the queue, as the editor would restore it.",
+	),
+	AbortAndRestoreQueueResult: doc(
+		{
+			steering: "RestoredQueuedMessage[]",
+			followUp: "RestoredQueuedMessage[]",
+			"imagesDropped?": doc(
+				"boolean",
+				"Only ever `true`: the full result exceeded the transport limit and every `images` was omitted.",
+			),
+			"truncated?": doc(
+				"boolean",
+				"Only ever `true`: even the text-only result exceeded the limit, so only an oldest-first prefix is listed.",
+			),
+		},
+		"User-authored queued input withdrawn before the abort, oldest first.",
+	),
 	BranchMessage: { entryId: "string", text: "string" },
 	BranchResult: { text: "string", cancelled: "boolean" },
+	NavigateTreeResult: {
+		cancelled: "boolean",
+		"aborted?": doc("boolean", "Only ever `true`: `abort_branch_summary` stopped the summary; nothing moved."),
+		"editorText?": doc(
+			"string",
+			"The target was a user message: its text, for the editor; the leaf moved to its parent.",
+		),
+	},
 	TokenUsage: {
 		input: "number.integer",
 		output: "number.integer",
@@ -156,6 +262,7 @@ export const stateDefs = {
 		cost: "number",
 		"credits?": "SessionCredits",
 		"routedModels?": "Record<string, number>",
+		"editRejections?": doc("Record<string, number>", "Failed edits by the engine's `errorKind`."),
 		"contextUsage?": "ContextUsage",
 	},
 	MessagesPage: {
@@ -203,7 +310,49 @@ export const stateDefs = {
 		},
 		"Incremental subagent transcript read.",
 	),
+	BtwStatus: doc(
+		"'running' | 'complete' | 'cancelled' | 'error' | 'interrupted'",
+		"Side-question turn lifecycle; `interrupted` marks a turn whose process died while it ran.",
+	),
+	BtwHistoryTurn: doc(
+		{
+			question: "string",
+			"images?": doc("ImageContent[]", "Images attached to the question."),
+			answer: "string",
+			status: "BtwStatus",
+			createdAt: "number.integer",
+			updatedAt: "number.integer",
+			"error?": "string",
+		},
+		"One question and its answer within a side-question topic.",
+	),
+	BtwHistoryRecord: doc(
+		{
+			question: "string",
+			"images?": doc("ImageContent[]", "Images attached to the question."),
+			answer: "string",
+			status: "BtwStatus",
+			createdAt: "number.integer",
+			updatedAt: "number.integer",
+			"error?": "string",
+			id: "string",
+			leafId: "string | null",
+			"followUps?": "BtwHistoryTurn[]",
+		},
+		"A side-question topic: its first turn's fields plus follow-ups; the latest turn is the last follow-up, else the record.",
+	),
 	LoginProvider: { id: "string", name: "string", available: "boolean", authenticated: "boolean" },
+	LogoutAccount: doc(
+		{
+			credentialId: "number.integer",
+			provider: "string",
+			label: "string",
+			detail: "string",
+			type: "'api_key' | 'oauth'",
+			active: "boolean",
+		},
+		"A stored credential `logout` can remove; `active` marks credentials the session may be using.",
+	),
 	HandoffResult: { "savedPath?": "string" },
 	PromptAck: doc(
 		{ "agentInvoked?": "boolean" },

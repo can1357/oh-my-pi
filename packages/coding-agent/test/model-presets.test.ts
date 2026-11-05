@@ -319,38 +319,18 @@ describe("model presets", () => {
 	});
 
 	it("refuses a preset with no default and no authed model before writing", async () => {
-		const dir = TempDir.createSync("@pi-model-presets-noauth-");
-		tempDirs.push(dir);
-		const noAuth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
-		const registry = new ModelRegistry(noAuth, path.join(dir.path(), "models.yml"));
-		try {
-			const settings = Settings.isolated();
-			settings.setModelRole("default", SONNET);
-			cfgModelPresets.setEntry(settings, "auto", { modelRoles: {} });
-			const agent = new Agent({
-				initialState: {
-					model: bundled(SONNET),
-					systemPrompt: ["Test"],
-					tools: [],
-					messages: [],
-					thinkingLevel: Effort.High,
-				},
-			});
-			const session = new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry: registry,
-			});
-			sessions.push(session);
+		const settings = Settings.isolated();
+		settings.setModelRole("default", SONNET);
+		cfgModelPresets.setEntry(settings, "auto", { modelRoles: {} });
+		const session = createSession(settings);
+		vi.spyOn(session, "getAvailableModels").mockReturnValue([bundled(OPUS)]);
+		vi.spyOn(modelRegistry, "hasConfiguredAuth").mockReturnValue(false);
 
-			const result = await applyModelPreset(settings, session, "auto");
+		const result = await applyModelPreset(settings, session, "auto");
 
-			expect(result.kind).toBe("unavailable");
-			expect(settings.getModelRole("default")).toBe(SONNET);
-		} finally {
-			noAuth.close();
-		}
+		expect(result.kind).toBe("unavailable");
+		expect(settings.getModelRole("default")).toBe(SONNET);
+		expect(session.model?.id).toBe("claude-sonnet-4-5");
 	});
 
 	it("reports when a higher layer still defines a just-saved preset name", async () => {

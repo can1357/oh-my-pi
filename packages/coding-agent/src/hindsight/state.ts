@@ -1,8 +1,10 @@
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, sanitizeText, truncate } from "@oh-my-pi/pi-utils";
+import type { MemoryWriteScope } from "../memory-backend/global-scope";
+import { findPersistedRecall, persistRecall } from "../memory-backend/recall-entry";
 import type { MemoryPromptPreparation } from "../memory-backend/types";
 import type { AgentSession } from "../session/agent-session";
-import { type BankScope, ensureBankExists } from "./bank";
-import type { HindsightApi, MemoryItemInput } from "./client";
+import { type BankScope, ensureBankExists, type HindsightBankSet } from "./bank";
+import type { HindsightClientApi, MemoryItemInput } from "./client";
 import type { HindsightConfig } from "./config";
 import {
 	composeRecallQuery,
@@ -18,7 +20,15 @@ import {
 	resolveSeedsForScope,
 	tryLoadMentalModelsBlock,
 } from "./mental-models";
-import { extractMessages } from "./transcript";
+import { countUserTurns, extractMessages } from "./transcript";
+
+/** `notice` source of Hindsight recall/retain failures; print mode writes these to stderr. */
+export const HINDSIGHT_NOTICE_SOURCE = "Hindsight";
+
+/** Error text for a failure notice: it can carry server response text, so strip terminal controls and bound it. */
+function noticeErrorText(errorText: string): string {
+	return truncate(sanitizeText(errorText).replace(/\s+/g, " ").trim(), 200);
+}
 
 const RETAIN_FLUSH_BATCH_SIZE = 16;
 const RETAIN_FLUSH_INTERVAL_MS = 5_000;
@@ -27,27 +37,51 @@ const MENTAL_MODEL_LOAD_TIMED_OUT = Symbol("mental-model-load-timed-out");
 interface PendingRetainItem {
 	content: string;
 	context?: string;
+	scope: MemoryWriteScope;
 	timestamp: Date;
+}
+
+interface RetainFailure {
+	count: number;
+	/** `undefined` when the scope has no project tags and every item went in one request. */
+	scope: MemoryWriteScope | undefined;
+	errorText: string;
 }
 
 interface RecallOutcome {
 	context: string | null;
 	ok: boolean;
 }
+/**
+ * What a subagent alias reads from its parent state: the routing it copies and the
+ * snippets the developer prompt shows. A subagent worker holds a remote implementation
+ * whose client and bank set are main's live ones.
+ */
+export interface HindsightSessionStateApi {
+	readonly client: HindsightClientApi;
+	readonly bankId: string;
+	readonly retainTags?: string[];
+	readonly recallTags?: string[];
+	readonly recallTagsMatch?: "any" | "all" | "any_strict" | "all_strict";
+	readonly config: HindsightConfig;
+	readonly banksSet: HindsightBankSet;
+	readonly lastRecallSnippet?: string;
+	readonly mentalModelsSnippet?: string;
+}
 
 export interface HindsightSessionStateOptions {
 	/** Session id used for retain-queue metadata. */
 	sessionId: string;
-	client: HindsightApi;
+	client: HindsightClientApi;
 	bankId: string;
-	/** Tags applied to every retain — non-empty in per-project-tagged mode. */
+	/** Tags on project-scoped retains (transcripts and tool writes) — non-empty in per-project-tagged mode. Global tool writes omit them. */
 	retainTags?: string[];
 	/** Tag filter applied to every recall/reflect — non-empty in per-project-tagged mode. */
 	recallTags?: string[];
 	recallTagsMatch?: "any" | "all" | "any_strict" | "all_strict";
 	config: HindsightConfig;
 	session: AgentSession;
-	banksSet: Set<string>;
+	banksSet: HindsightBankSet;
 	lastRetainedTurn?: number;
 	hasRecalledForFirstTurn?: boolean;
 	/**
@@ -56,7 +90,7 @@ export interface HindsightSessionStateOptions {
 	 * auto-retain — those run on the parent only — but the recall/retain/reflect
 	 * tools resolve via the alias so they persist to the same bank as the parent.
 	 */
-	aliasOf?: HindsightSessionState;
+	aliasOf?: HindsightSessionStateApi;
 }
 
 /**
@@ -82,11 +116,12 @@ export class HindsightRetainQueue {
 		return this.#items.length;
 	}
 
-	enqueue(content: string, context?: string): void {
+	enqueue(content: string, context?: string, scope: MemoryWriteScope = "project"): void {
 		if (this.#closed) {
 			throw new Error("Hindsight retain queue is closed.");
 		}
-		this.#items.push({ content, context, timestamp: new Date() });
+		if (scope === "global") this.#state.assertGlobalRetainAvailable();
+		this.#items.push({ content, context, scope, timestamp: new Date() });
 
 		if (this.#items.length >= RETAIN_FLUSH_BATCH_SIZE) {
 			void this.flush();
@@ -143,55 +178,88 @@ export class HindsightRetainQueue {
 			// Session went away before we could flush. We can't notify anyone, so
 			// log and drop — these are best-effort facts, not transactional writes.
 			logger.warn("Hindsight retain queue: session vanished, dropping batch", {
-				sessionId,
+				providerSessionId: sessionId,
 				items: items.length,
 			});
 			return;
 		}
 
-		try {
-			await ensureBankExists(state.client, state.bankId, state.config, state.banksSet);
-			const batch: MemoryItemInput[] = items.map(item => ({
-				content: item.content,
-				context: item.context ?? state.config.retainContext,
-				metadata: { session_id: sessionId },
-				tags: state.retainTags,
-				timestamp: item.timestamp,
-			}));
-			await state.client.retainBatch(state.bankId, batch, { async: true });
-			if (state.config.debug) {
-				logger.debug("Hindsight retain queue: batch flushed", {
-					sessionId,
-					bankId: state.bankId,
-					items: items.length,
-				});
-			}
-		} catch (err) {
-			const errorText = err instanceof Error ? err.message : String(err);
-			logger.warn("Hindsight retain queue: batch flush failed", {
-				sessionId,
-				bankId: state.bankId,
-				items: items.length,
-				error: errorText,
-			});
-			this.#notifyRetainFailure(items.length, errorText);
-		}
+		// Best-effort and self-catching, so it never rejects; once before the concurrent requests avoids duplicate PUTs.
+		await ensureBankExists(state.client, state.bankId, state.config, state.banksSet);
+		// Global items are retained untagged, which every project's `any`-match recall surfaces. They go in a
+		// separate request: Hindsight tags a request's generated document(s) with the union of item tags, so
+		// document-level reads and re-tags (a tag PATCH cascades to every unit) would treat global memories in a
+		// mixed request as project-scoped. The requests are independent and run concurrently.
+		const projectTags = state.retainTags && state.retainTags.length > 0 ? state.retainTags : undefined;
+		const groups = projectTags
+			? [
+					{ scope: "project" as const, tags: projectTags, items: items.filter(item => item.scope !== "global") },
+					{ scope: "global" as const, tags: undefined, items: items.filter(item => item.scope === "global") },
+				]
+			: [{ scope: undefined, tags: undefined, items }];
+		// Results keep group order, so a combined notice always lists project items before global ones.
+		const results = await Promise.all(
+			groups
+				.filter(group => group.items.length > 0)
+				.map(async (group): Promise<RetainFailure | undefined> => {
+					try {
+						const batch: MemoryItemInput[] = group.items.map(item => ({
+							content: item.content,
+							context: item.context ?? state.config.retainContext,
+							metadata: { session_id: sessionId },
+							tags: group.tags,
+							timestamp: item.timestamp,
+						}));
+						await state.client.retainBatch(state.bankId, batch, { async: true });
+						if (state.config.debug) {
+							logger.debug("Hindsight retain queue: batch flushed", {
+								providerSessionId: sessionId,
+								bankId: state.bankId,
+								items: group.items.length,
+								tags: group.tags,
+							});
+						}
+						return undefined;
+					} catch (err) {
+						const errorText = err instanceof Error ? err.message : String(err);
+						logger.warn("Hindsight retain queue: batch flush failed", {
+							providerSessionId: sessionId,
+							bankId: state.bankId,
+							items: group.items.length,
+							scope: group.scope,
+							error: errorText,
+						});
+						return { count: group.items.length, scope: group.scope, errorText };
+					}
+				}),
+		);
+		// One notice per flush, even when both the project and the global request failed.
+		const failures = results.filter(result => result !== undefined);
+		if (failures.length > 0) this.#notifyRetainFailures(failures);
 	}
 
-	#notifyRetainFailure(count: number, errorText: string): void {
-		const noun = count === 1 ? "memory" : "memories";
+	#notifyRetainFailures(failures: RetainFailure[]): void {
+		const what = failures
+			.map(({ count, scope }) => {
+				const noun = count === 1 ? "memory" : "memories";
+				return `${count} ${scope === "global" ? `global ${noun}` : noun}`;
+			})
+			.join(" and ");
+		const errorText = [...new Set(failures.map(failure => failure.errorText))].join("; ");
 		this.#state.session.emitNotice(
 			"warning",
-			`Memory retention failed for ${count} ${noun}: ${errorText}`,
-			"Hindsight",
+			`Memory retention failed for ${what}: ${noticeErrorText(errorText)}`,
+			HINDSIGHT_NOTICE_SOURCE,
 		);
 	}
 }
 
-/** Rolling hash of messages[0, count) for retention-cache validation (see #lastRetainedPrefixKey). */
-function retentionPrefixKey(messages: HindsightMessage[], count: number): string {
-	let key = "";
-	for (let i = 0; i < count; i++) {
+/**
+ * Rolling hash of messages[0, to) for retention-cache validation (see #lastRetainedPrefixKey),
+ * continued from `key` = the rolling hash of messages[0, from).
+ */
+function extendRetentionPrefixKey(key: string, messages: HindsightMessage[], from: number, to: number): string {
+	for (let i = from; i < to; i++) {
 		const m = messages[i];
 		if (m === undefined) break;
 		key = Bun.hash(`${key}\u0000${m.role}\u0000${m.content}\u0000${m.timestamp ?? ""}`).toString(36);
@@ -200,19 +268,19 @@ function retentionPrefixKey(messages: HindsightMessage[], count: number): string
 }
 
 /** Per-session Hindsight runtime state owned by its AgentSession. */
-export class HindsightSessionState {
+export class HindsightSessionState implements HindsightSessionStateApi {
 	/** Session id used for retain-queue metadata. */
 	sessionId: string;
-	client: HindsightApi;
+	client: HindsightClientApi;
 	bankId: string;
-	/** Tags applied to every retain — non-empty in per-project-tagged mode. */
+	/** Tags on project-scoped retains (transcripts and tool writes) — non-empty in per-project-tagged mode. Global tool writes omit them. */
 	retainTags?: string[];
 	/** Tag filter applied to every recall/reflect — non-empty in per-project-tagged mode. */
 	recallTags?: string[];
 	recallTagsMatch?: "any" | "all" | "any_strict" | "all_strict";
 	config: HindsightConfig;
 	session: AgentSession;
-	banksSet: Set<string>;
+	banksSet: HindsightBankSet;
 	lastRetainedTurn: number;
 	#lastRetainedMessageIndex: number = 0;
 	#cachedTranscript: string = "";
@@ -241,7 +309,7 @@ export class HindsightSessionState {
 	#mentalModelsLoadGeneration = 0;
 	unsubscribe?: () => void;
 	/** Alias states delegate persistence config to a primary parent state. */
-	aliasOf?: HindsightSessionState;
+	aliasOf?: HindsightSessionStateApi;
 	readonly retainQueue: HindsightRetainQueue;
 
 	constructor(options: HindsightSessionStateOptions) {
@@ -281,8 +349,29 @@ export class HindsightSessionState {
 		this.#lastRetainedPrefixKey = "";
 	}
 
-	enqueueRetain(content: string, context?: string): void {
-		this.retainQueue.enqueue(content, context);
+	/**
+	 * Whether `scope: "global"` is enabled (`hindsight.globalScope`, off by default) and has a destination every
+	 * project recalls: untagged memories in the shared bank. `per-project` scoping recalls only the project's own bank,
+	 * so a global write there would never surface. Reads this state's config, which a subagent alias copies from its
+	 * parent, so tool exposure and enforcement agree even after the live settings change.
+	 */
+	isGlobalRetainAvailable(): boolean {
+		return this.config.globalScope && this.config.scoping !== "per-project";
+	}
+
+	/** Throws, naming the reason, unless {@link isGlobalRetainAvailable}. */
+	assertGlobalRetainAvailable(): void {
+		if (!this.config.globalScope) {
+			throw new Error("Hindsight global scope is off; set hindsight.globalScope to true to enable it.");
+		}
+		if (this.config.scoping === "per-project") {
+			throw new Error("Hindsight global scope requires global or per-project-tagged scoping.");
+		}
+	}
+
+	/** Queues a tool-initiated retain; `scope: "global"` retains it untagged (see {@link assertGlobalRetainAvailable}). */
+	enqueueRetain(content: string, context?: string, scope: MemoryWriteScope = "project"): void {
+		this.retainQueue.enqueue(content, context, scope);
 	}
 
 	async flushRetainQueue(): Promise<void> {
@@ -290,6 +379,7 @@ export class HindsightSessionState {
 	}
 
 	async recallForContext(query: string, signal?: AbortSignal): Promise<RecallOutcome> {
+		const generation = this.#recallGeneration;
 		try {
 			const response = await this.client.recall(this.bankId, query, {
 				budget: this.config.recallBudget,
@@ -306,8 +396,17 @@ export class HindsightSessionState {
 			const block = `<memories>\n${this.config.recallPromptPreamble}\n\n${formatted}\n</memories>`;
 			return { context: block, ok: true };
 		} catch (err) {
-			if (this.config.debug) {
-				logger.debug("Hindsight: recall failed", { bankId: this.bankId, error: String(err) });
+			// A cancelled turn (Esc) is not a failure.
+			if (signal?.aborted) return { context: null, ok: false };
+			const errorText = err instanceof Error ? err.message : String(err);
+			logger.warn("Hindsight: recall failed", { bankId: this.bankId, error: errorText });
+			// A conversation reset or session switch since the request makes its failure stale.
+			if (this.#recallGeneration === generation) {
+				this.session.emitNotice(
+					"warning",
+					`Memory recall failed: ${noticeErrorText(errorText)}`,
+					HINDSIGHT_NOTICE_SOURCE,
+				);
 			}
 			return { context: null, ok: false };
 		}
@@ -330,16 +429,21 @@ export class HindsightSessionState {
 		let documentId: string;
 		let transcript: string;
 		let nextCachedTranscript: string | undefined;
+		let prefixKey = "";
+		let hashedThrough = 0;
 
 		if (retainFullWindow) {
 			documentId = this.sessionId;
 			const boundary = this.#lastRetainedMessageIndex;
-			if (boundary > messages.length || retentionPrefixKey(messages, boundary) !== this.#lastRetainedPrefixKey) {
+			if (boundary <= messages.length) prefixKey = extendRetentionPrefixKey("", messages, 0, boundary);
+			if (boundary > messages.length || prefixKey !== this.#lastRetainedPrefixKey) {
 				this.#lastRetainedMessageIndex = 0;
 				this.#cachedTranscript = "";
 				this.#lastRetainedPrefixKey = "";
+				prefixKey = "";
 			}
-			const newMessages = messages.slice(this.#lastRetainedMessageIndex);
+			hashedThrough = this.#lastRetainedMessageIndex;
+			const newMessages = messages.slice(hashedThrough);
 			const { transcript: newPart } = prepareRetentionTranscript(newMessages, true, { includeTimestamps: true });
 			if (!newPart) return;
 			nextCachedTranscript = this.#cachedTranscript ? `${this.#cachedTranscript}\n\n${newPart}` : newPart;
@@ -367,24 +471,26 @@ export class HindsightSessionState {
 		});
 		if (nextCachedTranscript !== undefined) {
 			this.#cachedTranscript = nextCachedTranscript;
+			// prefixKey hashes [0, hashedThrough) of this same snapshot; extend it instead of rehashing from 0.
+			this.#lastRetainedPrefixKey = extendRetentionPrefixKey(prefixKey, messages, hashedThrough, messages.length);
 			this.#lastRetainedMessageIndex = messages.length;
-			this.#lastRetainedPrefixKey = retentionPrefixKey(messages, messages.length);
 		}
 	}
 
 	async maybeRetainOnAgentEnd(): Promise<void> {
 		if (!this.config.autoRetain) return;
+		// Cheap gate first: most agent_end events are not retain turns, so skip text extraction.
+		const userTurns = countUserTurns(this.session.sessionManager);
+		if (userTurns - this.lastRetainedTurn < this.config.retainEveryNTurns) return;
 		const messages = extractMessages(this.session.sessionManager);
 		if (messages.length === 0) return;
-		const userTurns = messages.filter(m => m.role === "user").length;
-		if (userTurns - this.lastRetainedTurn < this.config.retainEveryNTurns) return;
 
 		try {
 			await this.retainSession(messages);
 			this.lastRetainedTurn = userTurns;
 			if (this.config.debug) {
 				logger.debug("Hindsight: auto-retain succeeded", {
-					sessionId: this.sessionId,
+					providerSessionId: this.sessionId,
 					bankId: this.bankId,
 					userTurns,
 					messages: messages.length,
@@ -392,7 +498,7 @@ export class HindsightSessionState {
 			}
 		} catch (err) {
 			logger.warn("Hindsight: auto-retain failed", {
-				sessionId: this.sessionId,
+				providerSessionId: this.sessionId,
 				bankId: this.bankId,
 				error: String(err),
 			});
@@ -415,7 +521,7 @@ export class HindsightSessionState {
 			this.lastRetainedTurn = messages.filter(m => m.role === "user").length;
 		} catch (err) {
 			logger.warn("Hindsight: forced retain failed", {
-				sessionId: this.sessionId,
+				providerSessionId: this.sessionId,
 				bankId: this.bankId,
 				error: String(err),
 			});
@@ -435,6 +541,15 @@ export class HindsightSessionState {
 		const latestPrompt = promptText.trim();
 		if (!latestPrompt) return undefined;
 		const generation = ++this.#recallGeneration;
+		// Reuse this transcript's recall so a resumed session sends the same prompt. Hindsight
+		// memories cannot be looked up by id, so changes since are not reported.
+		const persisted = findPersistedRecall(this.session.sessionManager, this.#recallScope());
+		if (persisted !== undefined) {
+			return {
+				context: persisted.text || undefined,
+				commit: () => this.#commitRecall(generation, persisted.text, false),
+			};
+		}
 
 		const history = extractMessages(this.session.sessionManager);
 		const queryMessages = [...history, { role: "user" as const, content: latestPrompt }];
@@ -445,22 +560,41 @@ export class HindsightSessionState {
 
 		return {
 			context: context ?? undefined,
-			commit: () => {
-				if (this.#recallGeneration !== generation) return false;
-				this.hasRecalledForFirstTurn = true;
-				if (context) this.lastRecallSnippet = context;
-				return true;
-			},
+			commit: () => this.#commitRecall(generation, context ?? "", true),
 		};
 	}
 
-	async recallForCompaction(messages: HindsightMessage[]): Promise<string | undefined> {
+	/** Adopts a first-turn recall unless a newer turn or reset superseded it; `""` means it found nothing. */
+	#commitRecall(generation: number, context: string, persist: boolean): boolean {
+		if (this.#recallGeneration !== generation) return false;
+		this.hasRecalledForFirstTurn = true;
+		if (context) this.lastRecallSnippet = context;
+		if (persist) persistRecall(this.session.sessionManager, this.#recallScope(), { text: context, memories: [] });
+		return true;
+	}
+
+	/**
+	 * Identifies the server, account, bank and tag filter a recall reads, so a persisted
+	 * recall is only reused for the same ones. The account is a hash of the API token.
+	 */
+	#recallScope(): string {
+		return JSON.stringify([
+			"hindsight",
+			this.config.hindsightApiUrl,
+			Bun.hash(this.config.hindsightApiToken ?? "").toString(16),
+			this.bankId,
+			this.recallTags ?? [],
+			this.recallTagsMatch ?? null,
+		]);
+	}
+
+	async recallForCompaction(messages: HindsightMessage[], signal?: AbortSignal): Promise<string | undefined> {
 		const lastUser = messages.findLast(m => m.role === "user");
 		if (!lastUser) return undefined;
 
 		const query = composeRecallQuery(lastUser.content, messages, this.config.recallContextTurns);
 		const truncated = truncateRecallQuery(query, lastUser.content, this.config.recallMaxQueryChars);
-		const { context } = await this.recallForContext(truncated);
+		const { context } = await this.recallForContext(truncated, signal);
 		return context ?? undefined;
 	}
 

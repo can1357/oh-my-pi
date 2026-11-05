@@ -2,13 +2,8 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-	assertOwnerPrivateDir,
-	controlDirGuardError,
-	controlPathFitsBudget,
-	resolveSshControlDir,
-	sshControlFallbackDir,
-} from "../src/ssh/connection-manager";
+import { controlPathFitsBudget, resolveSshControlDir, sshControlFallbackDir } from "../src/ssh/connection-manager";
+import { assertOwnerPrivateDir, ownerPrivateDirError } from "../src/utils/owner-private-dir";
 
 // Regression coverage for #9070: named-profile roots pushed the SSH ControlPath
 // past macOS's 104-byte sun_path once OpenSSH appends its mux temp suffix.
@@ -94,22 +89,22 @@ describe("resolveSshControlDir", () => {
 	});
 });
 
-describe("controlDirGuardError", () => {
+describe("ownerPrivateDirError", () => {
 	const ok = { isSymlink: false, isDir: true, uid: 501, mode: 0o700 };
 
 	it("accepts an owner-private directory", () => {
-		expect(controlDirGuardError(ok, 501)).toBeNull();
+		expect(ownerPrivateDirError(ok, 501)).toBeNull();
 	});
 
 	it("rejects a symlink, non-directory, foreign owner, and loose mode", () => {
-		expect(controlDirGuardError({ ...ok, isSymlink: true }, 501)).toBe("is a symlink");
-		expect(controlDirGuardError({ ...ok, isDir: false }, 501)).toBe("is not a directory");
-		expect(controlDirGuardError({ ...ok, uid: 999 }, 501)).toContain("not 501");
-		expect(controlDirGuardError({ ...ok, mode: 0o755 }, 501)).toContain("0700");
+		expect(ownerPrivateDirError({ ...ok, isSymlink: true }, 501)).toBe("is a symlink");
+		expect(ownerPrivateDirError({ ...ok, isDir: false }, 501)).toBe("is not a directory");
+		expect(ownerPrivateDirError({ ...ok, uid: 999 }, 501)).toContain("not 501");
+		expect(ownerPrivateDirError({ ...ok, mode: 0o755 }, 501)).toContain("0700");
 	});
 
 	it("skips the owner check when the process has no uid", () => {
-		expect(controlDirGuardError({ ...ok, uid: 999 }, undefined)).toBeNull();
+		expect(ownerPrivateDirError({ ...ok, uid: 999 }, undefined)).toBeNull();
 	});
 });
 
@@ -132,7 +127,7 @@ describe("assertOwnerPrivateDir", () => {
 		const dir = path.join(mkScratch(), "ctl");
 		fs.mkdirSync(dir, { mode: 0o755 });
 		fs.chmodSync(dir, 0o755);
-		expect(() => assertOwnerPrivateDir(dir)).not.toThrow();
+		expect(() => assertOwnerPrivateDir(dir, "SSH control directory")).not.toThrow();
 		expect(fs.statSync(dir).mode & 0o777).toBe(0o700);
 	});
 
@@ -145,12 +140,12 @@ describe("assertOwnerPrivateDir", () => {
 		// A symlink pointing at an otherwise-valid 0700 directory must still be
 		// rejected: O_NOFOLLOW refuses the link itself, so a later re-target cannot
 		// slip a foreign directory past the guard.
-		expect(() => assertOwnerPrivateDir(link)).toThrow("is a symlink");
+		expect(() => assertOwnerPrivateDir(link, "SSH control directory")).toThrow("is a symlink");
 	});
 
 	it("refuses a non-directory", () => {
 		const file = path.join(mkScratch(), "ctl");
 		fs.writeFileSync(file, "");
-		expect(() => assertOwnerPrivateDir(file)).toThrow("is not a directory");
+		expect(() => assertOwnerPrivateDir(file, "SSH control directory")).toThrow("is not a directory");
 	});
 });

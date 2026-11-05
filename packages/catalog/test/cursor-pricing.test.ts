@@ -127,6 +127,23 @@ describe("cursor API-equivalent pricing", () => {
 			cacheRead: 0.2,
 			cacheWrite: 5,
 		});
+		// DeepSeek V4.1 Flash 1017 bills one card for its bare id and every
+		// reasoning-effort wire id.
+		for (const id of [
+			"deepseek-v41-flash-1017",
+			"deepseek-v41-flash-1017-none",
+			"deepseek-v41-flash-1017-low",
+			"deepseek-v41-flash-1017-medium",
+			"deepseek-v41-flash-1017-high",
+			"deepseek-v41-flash-1017-max",
+		]) {
+			expect(buildModel(spec(id)).cost, id).toMatchObject({
+				input: 0.3,
+				output: 1.2,
+				cacheRead: 0.006,
+				cacheWrite: 0,
+			});
+		}
 	});
 
 	it("models the GPT-5.6 272K 2x-input long tier", () => {
@@ -141,10 +158,24 @@ describe("cursor API-equivalent pricing", () => {
 		});
 	});
 
+	it("models the Claude Haiku 5.5 100K 5x long tier on both lanes", () => {
+		for (const id of ["claude-haiku-5-5", "claude-haiku-5-5-1m"]) {
+			const haiku = buildModel(spec(id));
+			expect(haiku.cost).toMatchObject({ input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 });
+			expect(haiku.cost.longContext).toEqual({
+				inputThreshold: 100_000,
+				input: 0.5,
+				output: 2.5,
+				cacheRead: 0.05,
+				cacheWrite: 0.625,
+			});
+		}
+	});
+
 	it("prices every served catalog id; only docs-absent ids stay zero", () => {
-		// Snapshot of the Cursor roster on 2026-09-22. A newly served id
-		// without a cost-patch rule fails here instead of silently billing
-		// at zero.
+		// Snapshot of the Cursor roster on 2026-09-22, plus DeepSeek V4.1
+		// Flash 1017 (served from 2026-10-27). A newly served id without a
+		// cost-patch rule fails here instead of silently billing at zero.
 		const servedIds = [
 			"claude-4-sonnet",
 			"claude-4.5-opus-high",
@@ -207,6 +238,11 @@ describe("cursor API-equivalent pricing", () => {
 			"cursor-grok-4.5-fast",
 			"cursor-grok-4.6",
 			"cursor-grok-4.6-fast",
+			"deepseek-v41-flash-1017-high",
+			"deepseek-v41-flash-1017-low",
+			"deepseek-v41-flash-1017-max",
+			"deepseek-v41-flash-1017-medium",
+			"deepseek-v41-flash-1017-none",
 			"default",
 			"gemini-3-flash",
 			"gemini-3-pro",
@@ -215,6 +251,7 @@ describe("cursor API-equivalent pricing", () => {
 			"gemini-3.6-flash",
 			"gemini-3.7-flash",
 			"gemini-3.8-flash",
+			"gemini-4-argon",
 			"glm-5.2",
 			"gpt-5-mini",
 			"gpt-5.1",

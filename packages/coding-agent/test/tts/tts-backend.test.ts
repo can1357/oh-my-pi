@@ -79,8 +79,8 @@ describe("speech role candidate ordering", () => {
 });
 
 describe("tts speech chain execution", () => {
-	test("uses the default local model for WAV output", async () => {
-		const settings = Settings.isolated();
+	test("uses the default local model for WAV output at the configured speed", async () => {
+		const settings = Settings.isolated({ "tts.localSpeed": 1.5 });
 		const registry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"), { settings });
 		const localSynthesis = spyOn(ttsClient, "synthesize").mockResolvedValue({
 			pcm: new Float32Array([0, 0.25, -0.25]),
@@ -101,6 +101,7 @@ describe("tts speech chain execution", () => {
 		expect(result.details).toMatchObject({ backend: "local-inference", voiceId: "kokoro/af_heart", codec: "wav" });
 		expect(localSynthesis).toHaveBeenCalledWith("kokoro", "Hello locally", {
 			voice: "af_heart",
+			speed: 1.5,
 			signal: undefined,
 		});
 		expect(fs.existsSync(path.join(tempDir, "voice.wav"))).toBe(true);
@@ -135,6 +136,32 @@ describe("tts speech chain execution", () => {
 			JSON.stringify({ model: deepInfra.id, input: "Hello cloud", response_format: "mp3", voice: "sky" }),
 		);
 		expect(result.details).toMatchObject({ backend: "openai-speech", codec: "mp3" });
+	});
+
+	test("sends the requested language to xAI, which rejects payloads without one", async () => {
+		await authStorage.credentials.set("xai", [{ type: "api_key", key: "xai-test-key" }]);
+		const settings = Settings.isolated({
+			modelRoles: { speech: `${xai.provider}/${xai.id}` },
+			"retry.fallbackChains": { speech: [] },
+		});
+		const registry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"), { settings });
+		let requestedBody: unknown;
+		const fetchImpl: FetchImpl = async (_input, init) => {
+			if (typeof init?.body !== "string") throw new Error("Expected JSON request body");
+			requestedBody = JSON.parse(init.body);
+			return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+		};
+
+		const result = await ttsTool.execute(
+			"tts-xai-language",
+			{ text: "Bonjour", voice_id: "ara", language: "fr", output_path: "voice.mp3" },
+			undefined,
+			createContext(settings, registry, tempDir, fetchImpl),
+		);
+
+		expect(result.isError).not.toBe(true);
+		expect(requestedBody).toEqual({ text: "Bonjour", voice_id: "ara", language: "fr" });
+		expect(result.details).toMatchObject({ backend: "xai-tts", codec: "mp3" });
 	});
 
 	test("does not fall back when the explicit speech fallback chain is empty", async () => {
@@ -182,6 +209,7 @@ describe("tts speech chain execution", () => {
 		expect(result.details).toMatchObject({ backend: "local-inference", codec: "wav" });
 		expect(localSynthesis).toHaveBeenCalledWith("kokoro", "Fall back locally", {
 			voice: "af_heart",
+			speed: 1,
 			signal: undefined,
 		});
 		expect(fs.existsSync(path.join(tempDir, "voice.wav"))).toBe(true);
