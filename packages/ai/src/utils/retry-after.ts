@@ -81,9 +81,6 @@ export function longestProviderRetryHint(
 	return longestRetryHint(undefined, message, hintOptions(provider));
 }
 
-/** The marker a display-only retry hint is appended with; see {@link appendRetryAfterHint}. */
-const RETRY_AFTER_HINT = "retry-after-ms=";
-
 /**
  * `error`'s message text: an Error's `message`, anything else as JSON. The
  * failed response's retry wait is never written into it: it travels
@@ -286,21 +283,9 @@ export function transportRetry(policy: ProviderRetryPolicy | undefined, defaultM
  * The wait a response's headers state, read by the same pi-utils reader that
  * `fetchWithRetry` and `longestRetryHint` use, rounded up to whole
  * milliseconds. An explicit retry instruction, including a literal `0`, wins
- * over a rate-window reset.
+ * over a rate-window reset. It never reaches a person or a classifier as
+ * text: the wait travels structured, as `AssistantMessage.errorRetryAfterMs`.
  */
-export function appendRetryAfterHint(message: string, headers: HeadersLike): string {
-	if (message.includes(RETRY_AFTER_HINT)) {
-		return message;
-	}
-
-	const retryAfterMs = getRetryAfterMsFromHeaders(headers);
-	if (retryAfterMs === undefined) {
-		return message;
-	}
-
-	return `${message} ${RETRY_AFTER_HINT}${retryAfterMs}`;
-}
-
 export function getRetryAfterMsFromHeaders(headers: HeadersLike): number | undefined {
 	const waitMs = getRetryAfterMsFromSharedHeaders(headers);
 	return waitMs === undefined ? undefined : Math.ceil(waitMs);

@@ -1011,12 +1011,14 @@ const streamOpenAICompletionsOnce = (
 								gateFetch(replayBudget, options?.fetch ?? fetch),
 								model,
 								replayBudget,
+								options,
 							),
 							model.provider === "github-copilot",
 							resolveCopilotRequestIdentity(options?.headers),
 							copilotCacheKey,
 							copilotCacheSnapshot,
 							replayBudget,
+							options,
 						),
 						// Transient 408/429/5xx get Retry-After-aware transport retries.
 						// The first-event watchdog above aborts `requestSignal`, which

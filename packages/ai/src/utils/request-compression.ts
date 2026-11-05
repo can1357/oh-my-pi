@@ -9,7 +9,7 @@ import { $flag, findRetryRefusal, logger, longestRetryHint } from "@oh-my-pi/pi-
 import type { FetchImpl, Model } from "../types";
 import { type ReplayBudget, sleepUnderBudget } from "./replay-budget";
 import { retryWaitBounds } from "./retry-after";
-import { DEFAULT_MAX_RETRY_DELAY_MS } from "./retry-wait";
+import { DEFAULT_MAX_RETRY_DELAY_MS, type ProviderRetryPolicy } from "./retry-wait";
 
 const gzip = promisify(zlib.gzip);
 
@@ -138,8 +138,16 @@ async function suspectEncodingRejection(
  * A resend honors the rejection's longest stated wait without shortening it;
  * a wait above the retry-policy ceiling returns the readable rejection.
  * `replayBudget` also bounds the resend by this call's wall-clock deadline.
+ * `retryPolicy` is the call's own cap, ceiling and retry-wait hook; without
+ * it the resend falls back to the request's ambient policy, which only
+ * `stream()` and `streamSimple()` install.
  */
-export function wrapFetchForRequestCompression(base: FetchImpl, model: Model, replayBudget?: ReplayBudget): FetchImpl {
+export function wrapFetchForRequestCompression(
+	base: FetchImpl,
+	model: Model,
+	replayBudget?: ReplayBudget,
+	retryPolicy?: ProviderRetryPolicy,
+): FetchImpl {
 	const wrapped: FetchImpl = async (input, init) => {
 		const body = init?.body;
 		const url = requestUrl(input);
@@ -181,11 +189,11 @@ export function wrapFetchForRequestCompression(base: FetchImpl, model: Model, re
 		const refusal = `${origin} ${response.status}`;
 		if (suspect === "proxy" && encodingUnrelatedRefusals.has(refusal)) return response;
 		const serverWaitMs = longestRetryHint(response, await bodyText(response)) ?? 0;
-		if (retryWaitBounds(undefined, DEFAULT_MAX_RETRY_DELAY_MS).declines(serverWaitMs, response)) return response;
+		if (retryWaitBounds(retryPolicy, DEFAULT_MAX_RETRY_DELAY_MS).declines(serverWaitMs, response)) return response;
 
 		let plain: Response;
 		if (!replayBudget) {
-			if (serverWaitMs > 0) await sleepUnderBudget(undefined, undefined, serverWaitMs, init?.signal ?? undefined);
+			if (serverWaitMs > 0) await sleepUnderBudget(undefined, retryPolicy, serverWaitMs, init?.signal ?? undefined);
 			await response.body?.cancel().catch(() => {});
 			plain = await base(input, init);
 		} else {

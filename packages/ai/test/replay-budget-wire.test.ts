@@ -602,8 +602,10 @@ describe("a server retry-after against the budget", () => {
 		}
 	});
 
-	// The transport refuses a 90 s wait as over its own cap; the outer replay
-	// must not then retry after half a second and bury the hint under a later error.
+	// The transport refuses a 90 s wait as over its own 60 s cap; the outer
+	// replay must not then retry after half a second and bury the hint under a
+	// later error. The cap refused it, not the budget — a budget that never
+	// considered the replay must not be the one marked for it.
 	it("keeps a hint the transport refused as over its cap instead of replaying around it", async () => {
 		const route = askingToWait(503, OPENAI_UNAVAILABLE, { "retry-after-ms": "90000" });
 		try {
@@ -611,7 +613,8 @@ describe("a server retry-after against the budget", () => {
 
 			expect(route.requests()).toBe(1);
 			expect(result.errorRetryAfterMs).toBe(90_000);
-			expect(result.replayBudgetExhausted).toBe(true);
+			expect(result.errorDisplayMessage).toContain("so the provider did not retry");
+			expect(result.replayBudgetExhausted).toBeUndefined();
 		} finally {
 			route.stop();
 		}
@@ -1153,16 +1156,49 @@ describe.each(DATE_SPELLINGS_30S)("a retryable failure whose Retry-After date is
 });
 
 describe("the no-budget reading of conflicting hints", () => {
-	// Without a budget nothing changes: the retry loop still sleeps on the first
-	// header it recognizes, so the conflicting pair is retried after 1 ms.
-	it("still retries on the first recognized header", async () => {
+	// Without a budget nothing refuses the replay: the loop retries. What it
+	// sleeps is the one reading of the pair. `retry-after-ms: 1` beside
+	// `Retry-After: 30` is a server contradicting itself, and the longer is
+	// the safe read — coming back after 1 ms when the other header said 30 s
+	// just earns a second rejection. An earlier branch read the first
+	// recognized header instead; the two readings cannot both hold.
+	it("retries on the longer of two contradicting headers", async () => {
 		const route = scripted(n =>
 			n === 1 ? failure(503, { "retry-after-ms": "1", "retry-after": "30" }) : failure(400),
 		);
 		try {
-			const result = await laneNamed("openai-completions").call(route.url, {});
+			const waits: number[] = [];
+			const result = await laneNamed("openai-completions").call(route.url, {
+				providerRetryWait: async delayMs => {
+					waits.push(delayMs);
+				},
+			});
 
 			expect(route.requests()).toBe(2);
+			expect(waits).toEqual([30_000]);
+			expect(result.replayBudgetExhausted).toBeUndefined();
+		} finally {
+			route.stop();
+		}
+	});
+
+	// The same pair when the server did not contradict itself: `Retry-After`
+	// is the millisecond wait rounded up to whole seconds, as the auth gateway
+	// writes it, so the exact one is slept and 1 s is not.
+	it("retries on the exact wait when the two headers state one wait", async () => {
+		const route = scripted(n =>
+			n === 1 ? failure(503, { "retry-after-ms": "200", "retry-after": "1" }) : failure(400),
+		);
+		try {
+			const waits: number[] = [];
+			const result = await laneNamed("openai-completions").call(route.url, {
+				providerRetryWait: async delayMs => {
+					waits.push(delayMs);
+				},
+			});
+
+			expect(route.requests()).toBe(2);
+			expect(waits).toEqual([200]);
 			expect(result.replayBudgetExhausted).toBeUndefined();
 		} finally {
 			route.stop();

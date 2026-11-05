@@ -25,7 +25,12 @@ import { NO_AUTH_SENTINEL } from "../auth-retry";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
-import { DEFAULT_MAX_RETRY_DELAY_MS, providerRetryPolicy, waitForRetry } from "../utils/retry-wait";
+import {
+	DEFAULT_MAX_RETRY_DELAY_MS,
+	type ProviderRetryPolicy,
+	providerRetryPolicy,
+	waitForRetry,
+} from "../utils/retry-wait";
 import { getEnvApiKey } from "../env-api-key";
 import { OUTPUT_FALLBACK_BUFFER } from "../stream";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
@@ -924,6 +929,12 @@ export type AnthropicClientOptionsArgs = {
 	copilotCacheSnapshot?: string | null;
 	/** The call's replay budget: gates the client's transport handoff and the resends its fetch wrappers make. */
 	replayBudget?: ReplayBudget;
+	/**
+	 * The call's cap, ceiling and retry-wait hook. The client's wire retries
+	 * and the resends its fetch wrappers make keep to it, whether the call
+	 * came through `stream()` or straight to this provider.
+	 */
+	retryPolicy?: ProviderRetryPolicy;
 };
 
 export type AnthropicClientOptionsResult = {
@@ -933,6 +944,7 @@ export type AnthropicClientOptionsResult = {
 	baseURL?: string;
 	maxRetries: number;
 	maxRetryDelayMs?: number;
+	retryPolicy?: ProviderRetryPolicy;
 	defaultHeaders: Record<string, string>;
 	fetch?: FetchImpl;
 	fetchOptions?: AnthropicFetchOptions;
@@ -2292,6 +2304,7 @@ const streamAnthropicOnce = (
 					copilotCacheKey,
 					copilotCacheSnapshot: copilotCached ?? null,
 					replayBudget,
+					retryPolicy: providerRetryPolicy(options),
 					sessionId:
 						options?.sessionId ??
 						extractClaudeMetadataSessionId(options?.metadata?.user_id) ??
@@ -4155,6 +4168,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		copilotCacheKey,
 		copilotCacheSnapshot,
 		replayBudget,
+		retryPolicy,
 	} = args;
 	const compat = model.compat;
 	const disableStrictTools = disableStrictToolsOverride ?? compat.disableStrictTools;
@@ -4198,7 +4212,12 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 	// Compression sits beneath the cch rewriter, which must hash the uncompressed
 	// body. Catalog rules scope it to verified hosts (official API, Copilot), so
 	// proxies pass through.
-	const baseFetch = wrapFetchForRequestCompression(gateFetch(replayBudget, args.fetch ?? fetch), model, replayBudget);
+	const baseFetch = wrapFetchForRequestCompression(
+		gateFetch(replayBudget, args.fetch ?? fetch),
+		model,
+		replayBudget,
+		retryPolicy,
+	);
 	// Only OAuth requests inject the CC billing header; no API-key request can ever
 	// contain it, so there is no need to install the rewriter for those.
 	const cchFetch = oauthToken ? wrapFetchForCch(baseFetch) : baseFetch;
@@ -4240,6 +4259,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 			baseURL: baseUrl,
 			maxRetries: 5,
 			maxRetryDelayMs,
+			retryPolicy,
 			defaultHeaders,
 			fetch: wrapFetchForCopilotFallback(
 				cchFetch,
@@ -4248,6 +4268,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 				copilotCacheKey ?? getCopilotIntegrationCacheKey(apiKey, baseUrl),
 				copilotCacheSnapshot,
 				replayBudget,
+				retryPolicy,
 			),
 			fetchOptions,
 		};
@@ -4315,6 +4336,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 			baseURL: baseUrl,
 			maxRetries: 5,
 			maxRetryDelayMs,
+			retryPolicy,
 			defaultHeaders,
 			fetch: cchFetch,
 			fetchOptions,
@@ -4334,6 +4356,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 			baseURL: baseUrl,
 			maxRetries: 5,
 			maxRetryDelayMs,
+			retryPolicy,
 			defaultHeaders,
 			fetch: cchFetch,
 			fetchOptions,
@@ -4362,6 +4385,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		baseURL: baseUrl,
 		maxRetries: 5,
 		maxRetryDelayMs,
+		retryPolicy,
 		defaultHeaders,
 		fetch: cchFetch,
 		fetchOptions,

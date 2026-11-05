@@ -1202,14 +1202,26 @@ describe("preserved branch reader contracts", () => {
 		expect(waits).toEqual([expected]);
 	});
 
+	// A one-digit day is a date, not a malformed value. RFC 5322's `1*2DIGIT`
+	// day is the grammar this reader derives from, the body-text candidate
+	// finder already accepts one, and asctime spells one by definition — three
+	// readings of one input disagreed until this was settled. Every field is
+	// still range-checked, so leniency cannot invent a date.
 	it.each([
-		["a one-digit IMF day", "Sun, 6 Nov 1994 08:49:37 GMT"],
-		["a one-digit RFC 850 day", "Sunday, 6-Nov-94 08:49:37 GMT"],
+		["a one-digit IMF day", "Sat, 6 Nov 2094 08:49:37 GMT", Date.UTC(2094, 10, 6, 8, 49, 37)],
+		["a one-digit day without a weekday", "6 Nov 2094 08:49:37 GMT", Date.UTC(2094, 10, 6, 8, 49, 37)],
+		["a one-digit day with long names", "Saturday, 6 November 2094 08:49:37 GMT", Date.UTC(2094, 10, 6, 8, 49, 37)],
+	])("reads %s", (_label, value, expected) => {
+		expect(parseRetryDateMs(value, "gmt", Date.UTC(2026, 9, 31, 12, 0, 0))).toBe(expected);
+	});
+
+	it.each([
 		["an impossible numeric zone", "Sun, 06 Nov 1994 08:49:37 +2500"],
 		["an impossible ISO date", "1994-02-30T00:00:00Z"],
 		["an impossible HTTP date", "Sun, 31 Feb 2099 08:49:37 GMT"],
 		["an impossible HTTP hour", "Sun, 06 Nov 1994 24:00:00 GMT"],
 		["a contradictory weekday", "Mon, 06 Nov 1994 08:49:37 GMT"],
+		["a contradictory weekday on a one-digit day", "Mon, 6 Nov 2094 08:49:37 GMT"],
 	])("does not let %s hide the adjacent reset", (_label, retryAfter) => {
 		const headers = new Headers({ "retry-after": retryAfter, "x-ratelimit-reset": "3600" });
 		expect(extractRetryHint(headers)).toBe(3_600_000);

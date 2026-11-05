@@ -666,15 +666,30 @@ const LATIN_TIME_UNIT = (() => {
 const CJK_TIME_UNIT =
 	"(?:(?:\\p{Script=Han}|\\p{Script=Katakana}+)?秒|分|小?[时時]|[钟鐘][头頭]|天|日|[周週]|星期|[礼禮]拜|[个個ヶかカケ箇]?月|年)[钟鐘间間]?|(?:\\p{Script=Hangul}{2,4})?초|분|시간|일|주|개월|달|년";
 /**
+ * A unit that counts the parts of something rather than naming a status: the
+ * characters, lines, rows, items or fields a diagnostic reports. A truncation
+ * marker writes one of these beside its own count, and
+ * `… [truncated 429 chars]` is a length, not a Too Many Requests.
+ */
+const COUNT_UNIT = "chars?|characters?|lines?|rows?|cols?|columns?|items?|entr(?:y|ies)|elements?|words?|fields?";
+/**
  * A number in the role of a duration: a quantity followed by a unit of time
  * ({@link LATIN_TIME_UNIT}, {@link CJK_TIME_UNIT}), glued or spaced, or by a
- * size or token unit. The unit decides, whatever surrounds it. A Latin unit
- * must end the word, so `503 Service` is not `503 s`.
+ * size, token or count unit ({@link COUNT_UNIT}). The unit decides, whatever
+ * surrounds it. A Latin unit must end the word, so `503 Service` is not
+ * `503 s`.
  */
 const UNIT_NUMBER_PATTERN = new RegExp(
-	`(?<![\\w.])\\d+(?:\\.\\d+)?\\s*(?:(?:${LATIN_TIME_UNIT}|bytes?|[kmgt]i?b|tokens?)(?![\\p{L}\\p{N}_])|${CJK_TIME_UNIT})`,
+	`(?<![\\w.])\\d+(?:\\.\\d+)?\\s*(?:(?:${LATIN_TIME_UNIT}|bytes?|[kmgt]i?b|tokens?|${COUNT_UNIT})(?![\\p{L}\\p{N}_])|${CJK_TIME_UNIT})`,
 	"giu",
 );
+/**
+ * A place in the payload, which names its number before it: `at position 429`
+ * as `JSON.parse` reports a fault, `offset 503`, `index 429`, `line 503`,
+ * `column 401`. A position is counted from the payload's start; no count of
+ * its characters is a status.
+ */
+const COUNT_POSITION_PATTERN = /\b(?:position|offset|index|char|character|line|column|col|byte)\s+\d+/gi;
 /**
  * Digits glued into an ASCII identifier or a path: `x-request-503-trace`,
  * `/jobs/503/`, `gpt-503-preview`. ASCII only on purpose: CJK prose glues a
@@ -781,11 +796,13 @@ function isStatusPosition(text: string, offset: number): boolean {
  * a status nor a cause; or glued into an identifier or a path. Every reader
  * that takes a bare number as an HTTP status, an auth rejection, a capacity
  * refusal or a transient status reads this instead, so `read ECONNRESET after
- * 401 ns` stays a wire cut. A status comes first: a number in a status
- * position ({@link STATUS_POSITION_PATTERN}) — `HTTP 503`, `status=529`,
- * `error: 429` — keeps its digits before any unit or identifier reading is
- * tried, and so do `503 Service Unavailable`, `(429)` and a number a cause
- * field states (`reason=503`).
+ * 401 ns` stays a wire cut, and a count of the payload's own parts —
+ * `[truncated 429 chars]`, `at position 503` — is a length, not a status. A
+ * status comes first: a number in a status position
+ * ({@link STATUS_POSITION_PATTERN}) — `HTTP 503`, `status=529`, `error: 429`
+ * — keeps its digits before any unit or identifier reading is tried, and so
+ * do `503 Service Unavailable`, `(429)` and a number a cause field states
+ * (`reason=503`).
  */
 function withoutMetadataNumbers(text: string): string {
 	return text
@@ -799,6 +816,7 @@ function withoutMetadataNumbers(text: string): string {
 			return field.slice(0, at) + field.slice(at + value.length);
 		})
 		.replace(STREAM_NUMBER_PATTERN, field => field.replace(/\d+/g, ""))
+		.replace(COUNT_POSITION_PATTERN, place => place.replace(/\d+/g, ""))
 		.replace(UNIT_NUMBER_PATTERN, (quantity: string, offset: number, whole: string) =>
 			isStatusPosition(whole, offset) ? quantity : quantity.replace(/^[\d.]+/, ""),
 		)
@@ -975,10 +993,15 @@ const TRANSIENT_STATUS_NUMBERS = /\b(?:429|500|502|503|504)\b/g;
 /**
  * The shared transport pattern, with its bare status numbers read off the
  * metadata-free text ({@link withoutMetadataNumbers}) so `elapsed_ms=503` is
- * not a 503. The wording arms read the text as given: they name tokens such as
- * `HTTP2StreamReset` whose digits are not metadata.
+ * not a 503 and `[truncated 429 chars]` is not a 429. The wording arms read
+ * the text as given: they name tokens such as `HTTP2StreamReset` whose digits
+ * are not metadata.
+ *
+ * The one reading of "this text says the far side failed transiently". A
+ * second copy of it reads a bare status this sanitizer already ruled out, and
+ * then two layers disagree about whether the same failure may be replayed.
  */
-function isTransientErrorText(text: string): boolean {
+export function isTransientErrorText(text: string): boolean {
 	return (
 		isUnexpectedSocketCloseMessage(text) ||
 		isStreamReadErrorText(text) ||

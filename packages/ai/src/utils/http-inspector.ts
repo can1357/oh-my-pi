@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getLogsDir, isBunTestRuntime, isEnoent, isRecord, logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error/flags";
-import { appendRetryAfterHint, errorMessageText, getHeadersFromError } from "./retry-after.js";
+import { errorMessageText } from "./retry-after.js";
 
 export type RawHttpRequestDump = {
 	provider: string;
@@ -159,9 +159,11 @@ export function formatProviderErrorText(error: unknown, capturedErrorResponse?: 
 }
 
 /**
- * {@link formatProviderErrorText} as omp shows it: the response's retry hint,
- * then, for a 400-class rejection with a `rawRequestDump`, the path of the
- * dumped request. Display only: the path is local text.
+ * {@link formatProviderErrorText} as omp shows it: for a 400-class rejection
+ * with a `rawRequestDump`, the path of the dumped request. Display only: the
+ * path is local text. The response's retry wait is not written in — it
+ * travels structured, as `AssistantMessage.errorRetryAfterMs`, so no
+ * classifier can read its digits as a status.
  */
 export async function finalizeErrorDisplayMessage(
 	error: unknown,
@@ -169,8 +171,7 @@ export async function finalizeErrorDisplayMessage(
 	capturedErrorResponse?: CapturedHttpErrorResponse,
 ): Promise<string> {
 	const body = formatProviderErrorText(error, capturedErrorResponse);
-	const message = appendRetryAfterHint(body, capturedErrorResponse?.headers ?? getHeadersFromError(error));
-	return appendRawHttpRequestDumpFor400(message, error, rawRequestDump);
+	return appendRawHttpRequestDumpFor400(body, error, rawRequestDump);
 }
 
 const STATUS_PREFIX_PATTERN = /^\s*\d{3}\s+/;

@@ -10,7 +10,7 @@ import { $env, findRetryRefusal, logger, longestRetryHint } from "@oh-my-pi/pi-u
 import type { FetchImpl, Message } from "../types";
 import { type ReplayBudget, sleepUnderBudget } from "../utils/replay-budget";
 import { retryWaitBounds } from "../utils/retry-after";
-import { DEFAULT_MAX_RETRY_DELAY_MS } from "../utils/retry-wait";
+import { DEFAULT_MAX_RETRY_DELAY_MS, type ProviderRetryPolicy } from "../utils/retry-wait";
 /**
  * Infer whether the current request to Copilot is user-initiated or agent-initiated.
  * Accepts `unknown[]` because providers may pass pre-converted message shapes.
@@ -209,6 +209,13 @@ export function wrapFetchForCopilotFallback(
 	 * transport's check — it returns the denial as it came.
 	 */
 	replayBudget?: ReplayBudget,
+	/**
+	 * The call's own cap, ceiling and retry-wait hook
+	 * (`StreamOptions.maxRetryDelayMs`, `providerRetryWaitCeilingMs`,
+	 * `providerRetryWait`). Without it the resend falls back to the request's
+	 * ambient policy, which only `stream()` and `streamSimple()` install.
+	 */
+	retryPolicy?: ProviderRetryPolicy,
 ): FetchImpl {
 	const inner = base ?? fetch;
 	if (!enabled) return inner;
@@ -235,13 +242,14 @@ export function wrapFetchForCopilotFallback(
 			// surfaces with the note saying the server asked for longer than this
 			// layer may sleep. Before, the budget-less path resent at once and read
 			// the wait not at all.
-			if (retryWaitBounds(undefined, DEFAULT_MAX_RETRY_DELAY_MS).declines(serverWaitMs, response)) return undefined;
+			if (retryWaitBounds(retryPolicy, DEFAULT_MAX_RETRY_DELAY_MS).declines(serverWaitMs, response))
+				return undefined;
 			if (!replayBudget) {
 				try {
 					await response.arrayBuffer();
 				} catch {}
 				// Within the bound by the check above, so this sleeps the stated wait whole.
-				await sleepUnderBudget(undefined, undefined, serverWaitMs, init?.signal ?? undefined);
+				await sleepUnderBudget(undefined, retryPolicy, serverWaitMs, init?.signal ?? undefined);
 				return inner(input, { ...init, headers });
 			}
 			if (!(await replayBudget.replayAfterDelay(serverWaitMs, response, init?.signal ?? undefined, undefined))) {

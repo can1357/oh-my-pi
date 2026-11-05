@@ -51,10 +51,14 @@ const DATE_WEEKDAY = String.raw`(?:(?<weekday>[A-Za-z]{3,9})(?:,\s*|\s+))?`;
 const DATE_END = String.raw`(?:\s*(?<zone>${DATE_ZONE}))?(?:\s*\([^()]*\))*$`;
 /**
  * IMF-fixdate and RFC 850: day, month and year, joined by hyphens or by
- * whitespace (RFC 5322 folding whitespace may be more than one space).
+ * whitespace (RFC 5322 folding whitespace may be more than one space). The day
+ * is one or two digits: IMF-fixdate pads it, but RFC 5322's `1*2DIGIT` — which
+ * RFC 9110 section 5.6.7 asks recipients to accept — does not, and servers
+ * send `Thursday, 5 November 2026 13:27:03 GMT`. The day is range-checked
+ * against its month either way ({@link utcInstant}).
  */
 const DAY_MONTH_YEAR_PATTERN = new RegExp(
-	String.raw`^${DATE_WEEKDAY}(?<day>\d{2})(?:\s+|-)(?<month>[A-Za-z]{3,9})(?:\s+|-)(?<year>\d{4}|\d{2})\s+${DATE_TIME}${DATE_END}`,
+	String.raw`^${DATE_WEEKDAY}(?<day>\d{1,2})(?:\s+|-)(?<month>[A-Za-z]{3,9})(?:\s+|-)(?<year>\d{4}|\d{2})\s+${DATE_TIME}${DATE_END}`,
 	"i",
 );
 /** asctime (year after the time) and `Date#toString` (year before it). */

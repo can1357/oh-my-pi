@@ -16,19 +16,26 @@
  *   ("Request timed out.").
  * - Caller aborts throw an `Error` with message "Request was aborted.".
  * - Retries: connection errors and 408/409/429/5xx (or `x-should-retry: true`)
- *   are retried up to `maxRetries` times, honoring `retry-after-ms` /
- *   `retry-after`, otherwise exponential backoff (0.5s * 2^n, capped at 8s,
- *   with up to 25% jitter).
+ *   are retried up to `maxRetries` times. The server-stated wait is read by
+ *   the one shared reader ({@link getRetryAfterMsFromHeaders}) and bounded by
+ *   the one shared ceiling ({@link retryWaitBounds}), so this client's wire
+ *   retries cannot read or wait differently from the loop above them;
+ *   otherwise exponential backoff (0.5s * 2^n, capped at 8s, with up to 25%
+ *   jitter).
  */
-import { scheduler } from "node:timers/promises";
-import { parseRetryAfter } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeoutError } from "../error";
 
 export { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeoutError };
 
 import type { FetchImpl } from "../types";
-import { getShouldRetryFromHeaders } from "../utils/retry-after";
+import { getRetryAfterMsFromHeaders, getShouldRetryFromHeaders, retryWaitBounds } from "../utils/retry-after";
+import {
+	DEFAULT_MAX_RETRY_DELAY_MS,
+	markRetryWaitRefused,
+	type ProviderRetryPolicy,
+	sleepBeforeRetry,
+} from "../utils/retry-wait";
 import type { MessageCreateParams } from "./anthropic-wire";
 
 /** Default pre-response timeout, matching the SDK's 10-minute default. */
@@ -90,6 +97,13 @@ export interface AnthropicClientOptions {
 	 * the original error is surfaced. Non-positive values disable the cap. Defaults to 60000.
 	 */
 	maxRetryDelayMs?: number;
+	/**
+	 * The call's retry policy: its ceiling (`providerRetryWaitCeilingMs`) and
+	 * its retry-wait hook, which no other option on this client carries. A
+	 * call through `stream()` also leaves them in the ambient request policy,
+	 * so this is what a direct provider call needs.
+	 */
+	retryPolicy?: ProviderRetryPolicy;
 	/** Pre-response timeout in milliseconds. Defaults to 10 minutes. */
 	timeout?: number;
 	defaultHeaders?: Record<string, string>;
@@ -111,16 +125,17 @@ function shouldRetryResponse(response: Response): boolean {
 	return AIError.isTransientStatus(status) || status === 409;
 }
 
-/** Server-suggested delay (`retry-after-ms`, then `retry-after` read by the shared `parseRetryAfter`). */
-export function retryDelayFromHeaders(headers: Pick<Headers, "get"> | undefined): number | undefined {
-	if (!headers) return undefined;
-	const retryAfterMs = headers.get("retry-after-ms");
-	if (retryAfterMs) {
-		const ms = Number.parseFloat(retryAfterMs);
-		if (Number.isFinite(ms) && ms >= 0) return ms;
-	}
-	const retryAfter = headers.get("retry-after");
-	return retryAfter ? parseRetryAfter(retryAfter) : undefined;
+/**
+ * The retry policy this request's wire retries keep to: the call's own, with
+ * the per-request `maxRetryDelayMs` override on top, and whatever neither
+ * states filled in from the ambient request policy by `providerRetryPolicy`
+ * inside {@link retryWaitBounds} and {@link sleepBeforeRetry}.
+ */
+function requestRetryPolicy(
+	policy: ProviderRetryPolicy | undefined,
+	maxRetryDelayMs: number | undefined,
+): ProviderRetryPolicy {
+	return { ...policy, maxRetryDelayMs: maxRetryDelayMs ?? policy?.maxRetryDelayMs };
 }
 
 export function calculateAnthropicRetryDelayMs(attempt: number): number {
@@ -255,7 +270,8 @@ export class AnthropicHttpClient {
 		const callerSignal = options?.signal;
 		const timeoutMs = options?.timeout ?? opts.timeout ?? DEFAULT_TIMEOUT_MS;
 		const maxRetries = Math.max(0, options?.maxRetries ?? opts.maxRetries ?? DEFAULT_MAX_RETRIES);
-		const maxRetryDelayMs = options?.maxRetryDelayMs ?? opts.maxRetryDelayMs ?? 60_000;
+		const policy = requestRetryPolicy(opts.retryPolicy, options?.maxRetryDelayMs ?? opts.maxRetryDelayMs);
+		const waitBounds = retryWaitBounds(policy, DEFAULT_MAX_RETRY_DELAY_MS);
 		const url = `${this.baseURL}${path}`;
 		const headers = this.#buildHeaders(options?.headers);
 		const body = params === undefined ? undefined : JSON.stringify(params);
@@ -269,7 +285,7 @@ export class AnthropicHttpClient {
 			} catch (error) {
 				if (callerSignal?.aborted) throw createAbortError();
 				if (attempt < maxRetries) {
-					await this.#backoff(attempt, undefined, callerSignal);
+					await this.#backoff(policy, attempt, undefined, callerSignal);
 					continue;
 				}
 				if (error instanceof AIError.AnthropicConnectionTimeoutError) throw error;
@@ -279,16 +295,21 @@ export class AnthropicHttpClient {
 			if (response.ok) return response;
 
 			if (attempt < maxRetries && shouldRetryResponse(response)) {
-				// Bound the server-directed wait: an over-cap `retry-after` declines
-				// the retry and surfaces the original error (status/body/headers
-				// intact) so higher-level recovery can run. A non-positive cap disables enforcement.
+				// Bound the server-directed wait by the one ceiling every other
+				// retry in this call keeps to: a longer stated wait declines the
+				// retry and surfaces the original error (status/body/headers
+				// intact) so higher-level recovery can run, and the refusal is
+				// recorded on it so the failed message says which bound refused
+				// what. A non-positive cap disables enforcement.
 				// Checked before draining the body so `fromResponse` can still read it.
-				const headerDelayMs = retryDelayFromHeaders(response.headers);
-				if (headerDelayMs !== undefined && maxRetryDelayMs > 0 && headerDelayMs > maxRetryDelayMs) {
-					throw await AIError.AnthropicApiError.fromResponse(response, callerSignal);
+				const refusedWait = waitBounds.refusal(response.headers);
+				if (refusedWait !== undefined) {
+					const failure = await AIError.AnthropicApiError.fromResponse(response, callerSignal);
+					markRetryWaitRefused(failure, refusedWait);
+					throw failure;
 				}
 				await response.body?.cancel().catch(() => {});
-				await this.#backoff(attempt, response.headers, callerSignal);
+				await this.#backoff(policy, attempt, response.headers, callerSignal);
 				continue;
 			}
 
@@ -330,14 +351,22 @@ export class AnthropicHttpClient {
 		}
 	}
 
+	/**
+	 * Sleeps before the next wire attempt. The server-stated wait is the shared
+	 * reader's; a wait past the call's bound never reaches here, because the
+	 * loop refused it above. The client's own ladder is the fallback, and
+	 * {@link sleepBeforeRetry} shortens only that to the bound and sleeps it
+	 * through the call's retry-wait hook.
+	 */
 	async #backoff(
+		policy: ProviderRetryPolicy,
 		attempt: number,
 		responseHeaders: Headers | undefined,
 		signal: AbortSignal | undefined,
 	): Promise<void> {
-		const delayMs = retryDelayFromHeaders(responseHeaders) ?? calculateAnthropicRetryDelayMs(attempt);
+		const delayMs = getRetryAfterMsFromHeaders(responseHeaders) ?? calculateAnthropicRetryDelayMs(attempt);
 		try {
-			await scheduler.wait(delayMs, { signal });
+			await sleepBeforeRetry(policy, delayMs, signal);
 		} catch {
 			throw createAbortError();
 		}

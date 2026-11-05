@@ -1042,12 +1042,14 @@ const streamOpenAIResponsesOnce = (
 								gateFetch(replayBudget, options?.fetch ?? fetch),
 								model,
 								replayBudget,
+								options,
 							),
 							model.provider === "github-copilot",
 							resolveCopilotRequestIdentity(options?.headers),
 							copilotCacheKey,
 							copilotCacheSnapshot,
 							replayBudget,
+							options,
 						),
 						shouldRetryResponse: (response, bodyText) =>
 							!AIError.isRequestBodyReadTimeout(response.status, bodyText) ||
@@ -1369,6 +1371,7 @@ const streamOpenAIResponsesOnce = (
 								copilotCacheKey,
 								copilotCacheSnapshot,
 								replayBudget,
+								options,
 							),
 							url: `${resolvedBaseUrl}/responses/${resumeId}`,
 							headers,

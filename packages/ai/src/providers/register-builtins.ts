@@ -14,6 +14,7 @@ import {
 	getStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
+import { withProviderRetryPolicy } from "../utils/retry-wait";
 import type * as BedrockProvider from "./amazon-bedrock";
 import type * as CursorProvider from "./cursor";
 
@@ -205,6 +206,14 @@ function createProviderStreamError<TApi extends Api>(
  * `load` MUST call `import` with a string literal: `Bun.build` bundles only
  * literal specifiers, so a forwarded module name fails in compiled binaries.
  * A failed load or a throwing provider surfaces as the stream's `error` event.
+ *
+ * The provider runs under the call's retry policy
+ * ({@link withProviderRetryPolicy}), so every sleep beneath it — a provider's
+ * own retry ladder, its transport's `fetchWithRetry`, a resend seam that is
+ * handed no options of its own — keeps to the caller's cap, ceiling and
+ * retry-wait hook. `stream()` installs the same policy; a caller that reaches
+ * a provider directly would otherwise sleep a server-stated wait on the real
+ * clock with the hook it passed never consulted.
  */
 function createLazyProviderStream<TModule, TApi extends Api>(
 	load: () => Promise<TModule>,
@@ -219,8 +228,10 @@ function createLazyProviderStream<TModule, TApi extends Api>(
 			.then(mod => {
 				const abortTracker = createAbortSourceTracker(streamOptions.signal);
 				const providerOptions: OptionsForApi<TApi> = { ...streamOptions, signal: abortTracker.requestSignal };
-				const inner = pick(mod)(model, context, providerOptions);
-				forwardStream(outer, inner, model, streamOptions, abortTracker, limits);
+				const inner = withProviderRetryPolicy(providerOptions, () => pick(mod)(model, context, providerOptions));
+				withProviderRetryPolicy(providerOptions, () =>
+					forwardStream(outer, inner, model, streamOptions, abortTracker, limits),
+				);
 			})
 			.catch(error => {
 				const message = createProviderStreamError(model, error);

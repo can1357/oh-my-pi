@@ -23,6 +23,7 @@
 - `fetchWithRetry` and `extractRetryHint` read a `Retry-After` or `retry-after-ms` header sent twice (`9, 120`) at its longest value when every part is a bare delay; before, it read as no wait and the request was retried after 500 ms ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
 - A `Retry-After` that is neither digits nor a valid HTTP or ISO date (`0x0`, `-1`, `0,`, `0/1`, 30 February) states no wait instead of "retry now", and a date whose weekday contradicts its day is ignored rather than slept on ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
 - `extractRetryHint` reads `x-ratelimit-reset: 3600` as an hour from now rather than an instant in 1970, so a window reset that is past the caller's cap stops the retry loop instead of letting it run at its own backoff ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- A `Retry-After` date whose day of month is one digit (`Thursday, 5 November 2026 13:27:03 GMT`) is read, as RFC 5322's `1*2DIGIT` day and this reader's own body-text form already allow; before, it stated no wait and the server was retried on the caller's own backoff
 
 ### Added
 

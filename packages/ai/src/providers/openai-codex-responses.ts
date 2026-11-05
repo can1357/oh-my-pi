@@ -2043,6 +2043,7 @@ async function openCodexSseTransport(
 					gateFetch(requestContext.replayBudget, requestContext.wire.fetch),
 					model,
 					requestContext.replayBudget,
+					options,
 				),
 				requestContext.replayBudget,
 				replayOf,
