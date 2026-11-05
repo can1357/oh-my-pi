@@ -10,6 +10,7 @@
 import { describe, expect, it } from "bun:test";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import { type Context, type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -296,9 +297,12 @@ describe("createSettingsAwareStreamFn", () => {
 			expect(result.errorStatus).toBe(429);
 			// The session's retry reads this wait, notifies, and sleeps it itself.
 			expect(result.errorRetryAfterMs).toBe(15_000);
-			expect(result.errorMessage).toContain(
+			// The note is one of omp's own additions, so it rides on the shown text;
+			// `errorMessage` stays the provider's own words, which classifiers read.
+			expect(AIError.errorDisplayText(result)).toContain(
 				"(server asked to wait 15 s before retrying; the caller's 10 s providerRetryWaitCeilingMs refused it, so the provider did not retry)",
 			);
+			expect(result.errorMessage).not.toContain("providerRetryWaitCeilingMs");
 		});
 	});
 

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
+import { getHeadersFromError, getRetryAfterMsFromHeaders } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { PerplexityProvider, searchPerplexity } from "@oh-my-pi/pi-coding-agent/web/search/providers/perplexity";
 import { getAvailableAuthMethods } from "@oh-my-pi/pi-coding-agent/web/search/providers/perplexity-auth";
 
@@ -196,10 +197,22 @@ describe("Perplexity API-key request shape", () => {
 			return new Response("not mocked", { status: 500 });
 		};
 
-		// The hint is omp's display addition; the provider's own text stays out of the report's way.
-		await expect(
-			searchPerplexity({ query: "quic vs tcp", authStorage: apiKeyAuthStorage, fetch: fetchMock, explicit: true }),
-		).rejects.toThrow(/retry-after-ms=1500/);
+		// The wait is not written into the text any more — a status reader would
+		// take its digits — so it travels on the failure's headers, and the report
+		// carries the provider's own words.
+		const failure = await searchPerplexity({
+			query: "quic vs tcp",
+			authStorage: apiKeyAuthStorage,
+			fetch: fetchMock,
+			explicit: true,
+		}).then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		if (!(failure instanceof Error)) throw new Error("Expected the Perplexity failure to surface");
+		expect(failure.message).toContain("bad parameter");
+		expect(failure.message).not.toContain("retry-after-ms=");
+		expect(getRetryAfterMsFromHeaders(getHeadersFromError(failure))).toBe(1500);
 	});
 	it("rejects with the classified upstream error instead of a generic 401 when the only method fails", async () => {
 		delete process.env.OPENROUTER_API_KEY;
