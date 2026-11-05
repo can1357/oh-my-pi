@@ -2055,6 +2055,13 @@ impl Shell {
 			if target != SigTarget::Vpid(root.0) && !terminating {
 				for frame in &mut self.procs[i].frames {
 					if let Some(sc) = frame.scratch.as_mut() {
+						// A program `exec` put in the vproc's place IS the
+						// vproc: it owns its disposition (it may have reset
+						// what it inherited), so the shell's trap record must
+						// not hold the signal back. A program the shell only
+						// runs as a command is a separate process that bash
+						// does not signal at all here.
+						let replaced = sc.exec.as_ref().is_some_and(|e| e.exec_as.is_some());
 						match &mut sc.live {
 							// The shell side of the vproc: a trap (or an
 							// ignored signal) means the command keeps
@@ -2064,12 +2071,10 @@ impl Shell {
 									task.signal(sig);
 								}
 							},
-							// A real program the vproc stands for owns its
-							// own disposition: it may have reset what it
-							// inherited, so the shell's own trap record must
-							// not hold the signal back.
 							Live::Ext(ext) => {
-								let _ = ext.signal(sig);
+								if !alone || replaced {
+									let _ = ext.signal(sig);
+								}
 							},
 							_ => {},
 						}
@@ -2443,7 +2448,7 @@ impl Vproc {
 			out: VecDeque::new(),
 			blocked: None,
 			pending_traps: crate::bash::signal::SigSet::EMPTY,
-			trap_return: false,
+			held_traps: crate::bash::signal::SigSet::EMPTY,
 			stopped: false,
 			transient,
 			jobs: proc::JobTable::default(),

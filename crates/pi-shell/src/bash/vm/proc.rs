@@ -42,12 +42,13 @@ pub struct Vproc {
 	pub blocked:       Option<Blocked>,
 	/// Signal traps deferred until the foreground command completes.
 	pub pending_traps: SigSet,
-	/// A `return` left a trap action, so bash's `run_pending_traps` was
-	/// abandoned (its `sh_longjmp (return_catch, 1)`): the traps still
-	/// pending wait for the next command of the caller, and a vproc that
-	/// runs no further command never runs them. Cleared at that command;
-	/// never serialized (a restored vproc starts its next command).
-	pub trap_return:   bool,
+	/// Signals that were already pending when the trap action now running
+	/// started: bash's `run_pending_traps` runs them one after the other,
+	/// so they wait for it to end rather than interleaving with it, while
+	/// a signal that arrives WHILE the action runs interrupts it as bash's
+	/// `CHECK_WAIT_INTR` does. They go back into [`Self::pending_traps`]
+	/// when the last trap action ends. Never serialized.
+	pub held_traps:    SigSet,
 	/// Stopped by a virtual `STOP` (job control).
 	pub stopped:       bool,
 	/// Exit once its frames are done (subshell vprocs).
@@ -1514,7 +1515,9 @@ impl Live {
 // most 8 B to that, still under 2,048. The resumable `mapfile -C` counter
 // (`ExecState::resumed`, 368 → 376 B): the bench measured 1,832 B per idle
 // vproc with both.
-const _: () = assert!(size_of::<Vproc>() <= 664, "Vproc grew (idle vproc ≤ 2 KiB)");
+// The signals held while a trap action runs ([`Vproc::held_traps`], 8 B)
+// take it to 672, still far under 2,048.
+const _: () = assert!(size_of::<Vproc>() <= 672, "Vproc grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<Frame>() <= 256, "Frame grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<Scratch>() <= 216, "Scratch grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<ExecState>() <= 376, "ExecState grew (idle vproc ≤ 2 KiB)");

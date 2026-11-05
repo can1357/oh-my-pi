@@ -82,20 +82,25 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				None => unblock(k, cx, vp),
 			}
 		}
-		// bash `run_pending_traps` returns at once while a trap runs
-		// (`running_trap`), so one trap ends before the next one starts, and
-		// a vproc that has run out of frames is ending: its pending traps go
-		// with it. A `return` out of a trap action abandoned the loop
-		// ([`Vproc::trap_return`]): the rest waits for the caller's next
-		// command.
+		// bash `run_pending_traps` runs the signals pending when it starts
+		// one after the other, and returns at once while one of their
+		// actions runs (`running_trap`), so they never interleave: those
+		// are held ([`Vproc::held_traps`]) until the last action ends. A
+		// signal that arrives WHILE an action runs is not in that set and
+		// interrupts it, as it interrupts any other command. A vproc with
+		// no frames left is ending: its pending traps go with it.
 		let in_trap = vp
 			.frames
 			.iter()
 			.any(|f| matches!(f.kind, FrameKind::Script { what: ScriptKind::Trap { .. }, .. }));
+		if !in_trap && vp.held_traps != crate::bash::signal::SigSet::EMPTY {
+			for sig in vp.held_traps.iter() {
+				vp.pending_traps = vp.pending_traps.with(sig);
+			}
+			vp.held_traps = crate::bash::signal::SigSet::EMPTY;
+		}
 		if vp.pending_traps != crate::bash::signal::SigSet::EMPTY
 			&& !vp.waiting_foreground()
-			&& !in_trap
-			&& !vp.trap_return
 			&& !vp.frames.is_empty()
 		{
 			// bash `run_pending_traps`: in signal-number order.
@@ -115,6 +120,9 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 					}
 				}
 				if start_trap(k, vp, cx, TrapKey::Signal(sig)) {
+					// The rest of this run of the loop waits for the action.
+					vp.held_traps = vp.pending_traps;
+					vp.pending_traps = crate::bash::signal::SigSet::EMPTY;
 					continue;
 				}
 			}
@@ -163,12 +171,6 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 		let fi = vp.frames.len() - 1;
 		let starts = starts_command(unit, op);
 		let fresh = vp.frames[fi].scratch.is_none();
-		// The caller's next command is where bash runs the traps a `return`
-		// out of a trap action left pending: re-enter so they run first.
-		if fresh && starts && vp.trap_return {
-			vp.trap_return = false;
-			continue;
-		}
 		if fresh && starts {
 			note_command(vp, unit, op);
 		}
@@ -336,11 +338,16 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				});
 				if let Some(i) = target {
 					// bash: a `return` in a trap action longjmps out of
-					// `run_pending_traps` to the function's `return_catch`.
+					// `run_pending_traps` (`sh_longjmp (return_catch, 1)`). That
+					// loop had already cleared `catch_flag` and each signal's
+					// pending flag as it took it, so the actions it never
+					// reached do not run at all: only a new signal arms it
+					// again.
 					if vp.frames[i..].iter().any(|f| {
 						matches!(f.kind, FrameKind::Script { what: ScriptKind::Trap { .. }, .. })
 					}) {
-						vp.trap_return = true;
+						vp.pending_traps = crate::bash::signal::SigSet::EMPTY;
+						vp.held_traps = crate::bash::signal::SigSet::EMPTY;
 					}
 					if vp.frames[i].kind == FrameKind::NoFork || !return_trap(k, vp, cx, i) {
 						unwind(&mut k.root, cx.store, vp, i);
@@ -538,6 +545,7 @@ fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 	// A shell that exits runs its EXIT trap only: bash never runs the traps
 	// still pending when `exit` is reached (inside a trap or not).
 	vp.pending_traps = crate::bash::signal::SigSet::EMPTY;
+	vp.held_traps = crate::bash::signal::SigSet::EMPTY;
 	let in_exit_trap = vp.frames.iter().any(|f| {
 		matches!(f.kind, FrameKind::Script { what: ScriptKind::Trap { key: TrapKey::Exit, .. }, .. })
 	});

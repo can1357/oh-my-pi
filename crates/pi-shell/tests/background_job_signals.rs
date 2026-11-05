@@ -125,3 +125,42 @@ async fn only_plain_exit_names_signal_zero() {
 	])
 	.await;
 }
+
+/// A signal that arrives WHILE a trap action runs interrupts it, as it
+/// interrupts any other command (bash's `CHECK_WAIT_INTR`); only the
+/// signals already pending when the action started wait for it. A
+/// `return` out of an action drops those, so the action bash never
+/// reached leaves no trace.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_signal_during_a_trap_action_interrupts_it() {
+	assert_bash_outputs(&[
+		(
+			r#"d=$(mktemp -d); f(){ trap 'echo one-start; : > "$d/in-one"; sleep .3; echo one-end' USR1; trap 'echo term' TERM; sleep .4; echo after; }; f & p=$!; until [ -e "$d/in-one" ]; do kill -USR1 "$p" 2>/dev/null; sleep .02; done; kill -TERM "$p"; wait "$p"; echo status=$?; rm -rf "$d""#,
+			"one-start\nterm\none-end\nafter\nstatus=0\n",
+		),
+		(
+			r#"d=$(mktemp -d); g(){ trap 'echo one; return 23' USR1; trap 'echo term; : > "$d/term-ran"' TERM; : > "$d/ready"; sleep .3; }; f(){ g; echo caller=$?; echo next; }; f & p=$!; until [ -e "$d/ready" ]; do sleep .02; done; kill -USR1 "$p"; kill -TERM "$p"; wait "$p"; echo status=$?; [ -e "$d/term-ran" ] && echo unexpected-term-file; rm -rf "$d""#,
+			"one\ncaller=23\nnext\nstatus=0\n",
+		),
+	])
+	.await;
+}
+
+/// A foreground external the job runs is a process of its own: a signal
+/// the job's shell traps reaches the shell only, so the command runs on
+/// and the trap runs when it returns. Only a program `exec` put in the
+/// shell's place gets the signal itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trapped_signal_leaves_a_foreground_external_alone() {
+	assert_bash_outputs(&[
+		(
+			r#"d=$(mktemp -d); f(){ trap 'echo term' TERM; : > "$d/ready"; /bin/sleep .4; echo inner=$?; }; f & p=$!; until [ -e "$d/ready" ]; do sleep .02; done; kill -TERM "$p"; wait "$p"; echo status=$?; rm -rf "$d""#,
+			"term\ninner=0\nstatus=0\n",
+		),
+		(
+			r#"d=$(mktemp -d); f(){ trap 'echo term' TERM; : > "$d/ready"; /bin/sleep .4; echo inner=$?; }; f & until [ -e "$d/ready" ]; do sleep .02; done; kill -TERM %1; wait %1; echo status=$?; rm -rf "$d""#,
+			"term\ninner=0\nstatus=0\n",
+		),
+	])
+	.await;
+}
