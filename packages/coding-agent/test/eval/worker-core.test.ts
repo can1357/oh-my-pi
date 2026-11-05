@@ -93,6 +93,81 @@ function installFatalCapture(): {
 }
 
 describe("WorkerCore", () => {
+	it("keeps state and reports a late bridge rejection once without killing the worker", async () => {
+		const workerUrl = pathToFileURL(path.resolve(import.meta.dir, "../../src/eval/js/worker-core.ts")).href;
+		const probe = `
+import { WorkerCore } from ${JSON.stringify(workerUrl)};
+process.once("uncaughtException", () => process.exit(17));
+const messages = [];
+const listeners = new Set();
+const waiters = [];
+const transport = {
+	send(message) {
+		messages.push(message);
+		for (const waiter of [...waiters]) {
+			if (waiter.predicate(message)) {
+				waiters.splice(waiters.indexOf(waiter), 1);
+				waiter.resolve(message);
+			}
+		}
+	},
+	onMessage(handler) { listeners.add(handler); return () => listeners.delete(handler); },
+	close() {},
+};
+const send = message => { for (const listener of listeners) listener(message); };
+const waitFor = predicate => {
+	const { promise, resolve } = Promise.withResolvers();
+	waiters.push({ predicate, resolve });
+	return promise;
+};
+const snapshot = { cwd: process.cwd(), sessionId: "late-bridge" };
+const core = new WorkerCore(transport, { mode: "isolated" });
+send({ type: "init", snapshot });
+const call = waitFor(message => message.type === "tool-call");
+const first = waitFor(message => message.type === "result" && message.runId === "first");
+send({ type: "run", runId: "first", filename: "[first].js", snapshot,
+	code: 'var kept = 42; var floating = __omp_call_tool__("browser.waitForDownload", {}); throw new Error("Tab is busy");' });
+const pending = await call;
+await first;
+const warning = waitFor(message => message.type === "log" && message.msg.includes("finished eval cell"));
+send({ type: "tool-reply", id: pending.id, reply: { ok: false,
+	error: { name: "ToolError", message: "browser.waitForDownload() timed out" } } });
+await warning;
+for (const runId of ["second", "third"]) {
+	const result = waitFor(message => message.type === "result" && message.runId === runId);
+	send({ type: "run", runId, filename: "[" + runId + "].js", snapshot, code: "print(kept);" });
+	await result;
+}
+core.dispose();
+console.log(JSON.stringify(messages));
+`;
+		await using dir = await fs.mkdtempDisposable(path.join(os.tmpdir(), "omp-late-rejection-"));
+		const probePath = path.join(dir.path, "probe.ts");
+		await Bun.write(probePath, probe);
+		const proc = Bun.spawn([process.execPath, probePath], {
+			cwd: process.cwd(),
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		expect(exitCode, stderr).toBe(0);
+		const messages: WorkerOutbound[] = JSON.parse(stdout);
+		expect(messages.filter(message => message.type === "result")).toMatchObject([
+			{ runId: "first", ok: false },
+			{ runId: "second", ok: true },
+			{ runId: "third", ok: true },
+		]);
+		const text = messages.filter(message => message.type === "text");
+		expect(text.filter(message => message.chunk.includes("browser.waitForDownload"))).toMatchObject([
+			{ runId: "second", chunk: expect.stringContaining("Unhandled rejection") },
+		]);
+		expect(text.filter(message => message.chunk === "42\n")).toHaveLength(2);
+	});
+
 	it("delivers a completion handle id after its creating cell finishes", async () => {
 		const harness = createWorkerHarness();
 		const snapshot = { cwd: process.cwd(), sessionId: `late-handle-${crypto.randomUUID()}`, localRoots: {} };
