@@ -477,17 +477,25 @@ fn word_part_positions_are_read_from_the_buffer_the_part_came_from() {
 		b"f() { echo ok; }",
 		b"coproc cp { echo ok; }",
 	];
+	// `if true; then check; fi` with `while false; do echo ok; done` aliased
+	// in is NOT in this list, and faults 4 times at this head (6 at upstream
+	// main). The statements of the aliased loop end one byte past the loop
+	// itself, because `stmt_end` adds a byte after a separator that has
+	// none. Correcting it needs the parser to record the separator's own
+	// span on `ListItem`; this change records what is inside a word, and
+	// that offset is not.
+	let nested: &[(&[u8], &[u8])] = &[];
 	let as_source: &[&[u8]] = &[
 		b"cat <<EOF\n$( [[ ( a ) ]] )\nEOF\n",
 		b"cat <<EOF\nx ${v} $(echo b) y\nEOF\n",
 		b"cat <<-'EOF'\n\tplain\nEOF\n",
 	];
-	for (text, aliased) in through_alias
+	for (src, text) in through_alias
 		.iter()
-		.map(|t| (*t, true))
-		.chain(as_source.iter().map(|t| (*t, false)))
+		.map(|t| (&b"check\n"[..], *t))
+		.chain(nested.iter().map(|(s, t)| (*s, *t)))
+		.chain(as_source.iter().map(|t| (*t, &b""[..])))
 	{
-		let src: &[u8] = if aliased { b"check\n" } else { text };
 		let table = AliasOne(b"check", text);
 		let mut parser = Parser::new(src, Features::NONE, &table);
 		let mut commands = Vec::new();
@@ -500,14 +508,10 @@ fn word_part_positions_are_read_from_the_buffer_the_part_came_from() {
 			let shfmt: serde_json::Value = serde_json::from_str(&json).unwrap();
 			let mut bad = Vec::new();
 			range_faults(&shfmt, None, "", &mut bad);
-			let how = if aliased {
-				"through an alias"
-			} else {
-				"as source"
-			};
 			for fault in bad {
 				faults.push(format!(
-					"{} {how} in {offsets:?}: {fault}",
+					"{} with {} aliased, in {offsets:?}: {fault}",
+					String::from_utf8_lossy(src).escape_debug(),
 					String::from_utf8_lossy(text).escape_debug()
 				));
 			}

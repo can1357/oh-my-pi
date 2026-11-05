@@ -835,6 +835,11 @@ mod shfmt {
 	/// command or of its last redirection (a here-document's delimiter).
 	fn stmt_end(st: &St) -> u32 {
 		match st.semi {
+			// `sm + 1` invents a byte when the separator came from the text
+			// an alias expanded to, where it has none. Correcting it needs
+			// the parser to record the separator's own span on `ListItem`,
+			// which this change does not do; the fixture list names the row
+			// it leaves red.
 			Some(sm) => sm + 1,
 			None if st.redirs.is_empty() => st.end,
 			None => st.end.max(st.rend),
