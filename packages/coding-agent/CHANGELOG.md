@@ -31,6 +31,7 @@
 
 ### Changed
 
+- ovnfs turns on by itself when its binary is found (`ovnfs.path`, else `ovnfs` on PATH): agents get the separate-checkout guidance, and isolated subagents use ovnfs checkouts when `isolation.backend` is `auto`; set `ovnfs.enabled` to false to opt out
 - Text Verbosity now defaults to low and applies to Codex too, matching the official Codex client: shorter answers that finish sooner; set `textVerbosity` to `medium` for the old length
 - A cost cap set on the main thread now applies to running subagents immediately
 - RPC wire protocol and task streaming have lower serialization overhead
