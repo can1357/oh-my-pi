@@ -116,6 +116,7 @@ export class WorkerCore {
 	#runs = new Map<string, ActiveRun>();
 	#pendingTools = new Map<string, PendingTool>();
 	#recentCellFiles = new Set<string>();
+	#lateRejections: string[] = [];
 	#unsubscribe: () => void;
 	#uninstallRejectionGuard: () => void;
 	#options: WorkerCoreOptions;
@@ -190,11 +191,15 @@ export class WorkerCore {
 				}
 			}
 			if (recent) {
+				const payload = errorPayload(reason);
+				this.#lateRejections.push(
+					`Unhandled rejection from finished eval cell ${recent} (missing await?): ${payload.stack ?? `${payload.name ?? "Error"}: ${payload.message}`}\n`,
+				);
 				this.#transport.send({
 					type: "log",
 					level: "warn",
 					msg: "Unhandled rejection from a finished eval cell (missing await?)",
-					meta: { filename: recent, error: errorPayload(reason) },
+					meta: { filename: recent, error: payload },
 				});
 				return true;
 			}
@@ -359,6 +364,7 @@ export class WorkerCore {
 			onDisplay: output => this.#transport.send({ type: "display", runId, output }),
 			callTool: (name, args, identity) => this.#callTool(active, name, args, identity),
 		};
+		for (const notice of this.#lateRejections.splice(0)) hooks.onText(notice);
 		let result: RunResult;
 		try {
 			const runtime = this.#ensureRuntime(snapshot, runId);
@@ -465,7 +471,16 @@ export class WorkerCore {
 			this.#pendingTools.delete(id);
 			reject(error);
 		}
-		return await promise;
+		try {
+			return await promise;
+		} catch (error) {
+			// Bridge errors are constructed outside the cell, so retain its origin
+			// even when the call rejects after the run has finished.
+			this.#rememberCellFile(active.filename);
+			if (error instanceof Error)
+				error.stack = `${error.stack ?? error.message}\n    at ${name} (${active.filename})`;
+			throw error;
+		}
 	}
 
 	#deliverToolReply(id: string, reply: ToolReply): void {
