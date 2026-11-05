@@ -69,7 +69,20 @@ export async function parseCodexError(response: Response): Promise<CodexErrorInf
 				? { primary, secondary }
 				: undefined;
 
-		const code = String((err as { code?: string; type?: string }).code ?? (err as { type?: string }).type ?? "");
+		// A machine-readable error code is a string; a number in `code` is a status wearing the
+		// field's name. Taking it over a string `type` beside it lost the only code the body
+		// carried — a refusal arrived as "400", classified as a plain failure, and the same
+		// declined content went to every sibling credential. Every other reader of this envelope
+		// requires a string, and this one now does too; a bare numeric code still stringifies, so
+		// a body carrying nothing else is read exactly as before.
+		const rawCode: unknown = err.code;
+		const rawType: unknown = err.type;
+		const code =
+			typeof rawCode === "string"
+				? rawCode
+				: typeof rawType === "string"
+					? rawType
+					: String(rawCode ?? rawType ?? "");
 		errorCode = code || undefined;
 		const errResetsAt = typeof err.resets_at === "number" ? err.resets_at : undefined;
 		const minutesUntil = (resetsAt: number | undefined): number | undefined =>

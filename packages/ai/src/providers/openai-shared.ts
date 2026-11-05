@@ -4431,8 +4431,12 @@ export function throwOpenAIResponsesEventError(
 ): never {
 	const envelope = event as unknown as Record<string, unknown>;
 	if (event.type === "error") {
-		const selected = isRecord(envelope.error) ? envelope.error : envelope;
-		const error = (AIError.wrappedErrorEnvelope(selected) ?? selected) as Record<string, unknown>;
+		let error = isRecord(envelope.error) ? envelope.error : envelope;
+		for (let depth = 0; depth < 2; depth++) {
+			const inner = AIError.wrappedErrorEnvelope(error);
+			if (!inner) break;
+			error = inner as Record<string, unknown>;
+		}
 		const inBand = AIError.createInBandProviderError(event);
 		if (inBand) throw inBand;
 		throwOpenAIResponsesRefusal(error, provider);
@@ -4449,19 +4453,24 @@ export function throwOpenAIResponsesEventError(
 		: isRecord(statusDetails?.error)
 			? statusDetails.error
 			: undefined;
-	// A gateway may wrap the envelope in itself, and then the refusal code sits one level in;
-	// read it, or the turn carries `unknown: no message` and rotates every sibling credential.
-	// Only a real wrapper is descended into: an `error` field beside a code of its own is a
-	// diagnostic, and taking it would lose the code the outer already carries.
-	const error = selectedError
-		? ((AIError.wrappedErrorEnvelope(selectedError) ?? selectedError) as Record<string, unknown>)
-		: undefined;
+	// A gateway may wrap the envelope in itself, and then the refusal code sits a level in; read it,
+	// or the turn carries `unknown: no message` and rotates every sibling credential. Only a real
+	// wrapper is descended into: an `error` field beside a code of its own is a diagnostic, and
+	// taking it would lose the code the outer already carries. Two levels, which is the bound the
+	// shared in-band probe documents and applies — the two must not disagree about how deep a
+	// wrapper can be, or one of them recognises a refusal the other reports as a plain failure.
+	let error = selectedError as Record<string, unknown> | undefined;
+	for (let depth = 0; error && depth < 2; depth++) {
+		const inner = AIError.wrappedErrorEnvelope(error);
+		if (!inner) break;
+		error = inner as Record<string, unknown>;
+	}
 	const details = isRecord(response?.incomplete_details) ? response.incomplete_details : undefined;
 	const inBand = details ? undefined : AIError.createInBandProviderError({ ...response, error });
 	if (inBand) throw inBand;
 	if (error) throwOpenAIResponsesRefusal(error, provider);
 	const message = error
-		? `${error.code || "unknown"}: ${error.message || "no message"}`
+		? `${error.code || error.type || "unknown"}: ${error.message || "no message"}`
 		: details?.reason
 			? `incomplete: ${details.reason}`
 			: event.type !== "response.failed" &&
@@ -4472,9 +4481,18 @@ export function throwOpenAIResponsesEventError(
 	throw new AIError.ProviderResponseError(message, { provider, kind: "output" });
 }
 
-/** Throw a {@link AIError.ProviderRefusalError} when a Responses error object is a content-policy refusal. */
+/**
+ * Throw a {@link AIError.ProviderRefusalError} when a Responses error object is a content-policy
+ * refusal.
+ *
+ * The code may arrive as `type` with `code` null — OpenAI's own envelope does exactly that — so it
+ * is read the same way every other reader of this envelope reads it. Reading `code` alone was worse
+ * than merely missing the refusal: the in-band probe recognises a refusal by `code ?? type` and
+ * steps aside for this reporter, so a disagreement between the two sent the turn to the generic
+ * transient classifier and retried the declined content to the budget.
+ */
 function throwOpenAIResponsesRefusal(error: Record<string, unknown>, provider: string): void {
-	const code = typeof error.code === "string" ? error.code : undefined;
+	const code = typeof error.code === "string" ? error.code : typeof error.type === "string" ? error.type : undefined;
 	const message = typeof error.message === "string" ? error.message : undefined;
 	if (code !== undefined && AIError.isContentPolicyRefusal(code, message)) {
 		throw new AIError.ProviderRefusalError(code, message || "no message", { provider });
