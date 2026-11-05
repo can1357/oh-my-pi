@@ -49,7 +49,7 @@ export class SubagentSpawnSignal {
 		if (!call) {
 			call =
 				block.name === "task"
-					? { kind: "task", scanner: new BatchArgsScanner(), raw: "", spawns: 1 }
+					? { kind: "task", scanner: new BatchArgsScanner(), spawns: 1 }
 					: block.name === "eval"
 						? { kind: "eval", tail: "", spawns: 0 }
 						: { kind: "other", spawns: 0 };
@@ -65,8 +65,7 @@ export class SubagentSpawnSignal {
 
 	#feed(call: CallState, delta: string): void {
 		if (call.kind === "task") {
-			call.raw += delta;
-			call.scanner.feed(call.raw);
+			call.scanner.append(delta);
 			// Count an item once its `{` streams: its assignment text still gives the worker time to boot.
 			call.spawns = Math.max(1, call.scanner.itemsOpened);
 		} else if (call.kind === "eval" && call.spawns === 0) {
