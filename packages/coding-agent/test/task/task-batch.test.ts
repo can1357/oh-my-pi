@@ -1189,6 +1189,37 @@ describe("batch model placement", () => {
 		expect(run).not.toHaveBeenCalled();
 	});
 
+	// On the lenient raw path nothing has coerced scalars to their declared types, and `name`/`agent`
+	// were trimmed without a check — so a numeric one threw a `TypeError` out of the tool. The trigger
+	// is a pair: a sibling that fails the wire schema while still dispatching (no `solutionSpace`) is
+	// what sends the whole call down that path.
+	it.each([
+		["name", { name: 123 }],
+		["agent", { agent: 7 }],
+	] as const)("reports a non-string %s as a shape error on the lenient raw path", async (field, fill) => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(createSession({ settings: { "task.batch": true, "async.enabled": false } }));
+		const args = validateAgentToolArguments(tool as unknown as AgentTool, {
+			type: "toolCall",
+			id: "task-raw-scalars",
+			name: tool.name,
+			arguments: {
+				context: "Shared context",
+				tasks: [
+					{ task: "Do work", solutionSpace: "c", agent: "task", ...fill },
+					// No `solutionSpace`: fails the wire schema, still dispatches, so the call falls back to raw.
+					{ task: "Do other work", agent: "task", name: "Sibling" },
+				],
+			},
+		});
+		const result = await tool.execute("task-raw-scalars", args as TaskParams);
+		expect(result.isError).toBe(true);
+		expect(getFirstText(result)).toContain(`invalid \`${field}\``);
+		expect(getFirstText(result)).not.toContain("TypeError");
+		expect(run).not.toHaveBeenCalled();
+	});
+
 	// An internal caller bypasses the wire schema and may hold its real `model` anywhere an object can
 	// hold a property. Spreading own enumerable properties to drop a blank sibling deletes the rest,
 	// so the gate would never see the selector: the task would spawn on the agent's configured model

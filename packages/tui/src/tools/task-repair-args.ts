@@ -89,9 +89,9 @@ type TaskFieldKey = keyof TaskParams | keyof TaskItem | "taskFileSha256" | "sche
  * as an own enumerable property, and nothing observable fails in the meantime: every wire call and
  * every test keeps passing while the internal-caller case the helper exists for is quietly broken.
  * A comment asking the next person to keep a list in step is exactly what did not hold last time,
- * so the type does it: the `satisfies` makes an unknown name a compile error, and
- * `TASK_FIELD_KEYS_ARE_COMPLETE` makes a *missing* one a compile error too — the same device
- * `SEANCE_ITEM_KEY_SET` uses in `../../coding-agent/src/task/types.ts`.
+ * so the types do it: `satisfies` rejects an unknown name, and {@link TASK_FIELD_KEYS_ARE_COMPLETE}
+ * rejects a missing one. Both are checked — the first version of that second guard was a bare
+ * conditional type, which resolves silently and never fired.
  */
 export const TASK_FIELD_KEYS = [
 	"name",
@@ -112,11 +112,18 @@ export const TASK_FIELD_KEYS = [
 	"schema",
 ] as const satisfies readonly TaskFieldKey[];
 
-/** Fails to compile when a field is added to `TaskParams`/`TaskItem` and not to {@link TASK_FIELD_KEYS}. */
-export type TASK_FIELD_KEYS_ARE_COMPLETE =
-	Exclude<TaskFieldKey, (typeof TASK_FIELD_KEYS)[number]> extends never
-		? true
-		: ["missing from TASK_FIELD_KEYS", Exclude<TaskFieldKey, (typeof TASK_FIELD_KEYS)[number]>];
+/**
+ * Fails to compile when a field is added to `TaskParams`/`TaskItem` and not to
+ * {@link TASK_FIELD_KEYS}.
+ *
+ * The constraint is what does the work. A bare conditional type here resolves to its false branch
+ * and TypeScript reports nothing, so the guard reads as though it fires and never does; handing
+ * the leftover keys to a `T extends never` parameter is what turns a missing name into a `TS2344`.
+ */
+type AssertNoMissingTaskFieldKey<T extends never> = T;
+export type TASK_FIELD_KEYS_ARE_COMPLETE = AssertNoMissingTaskFieldKey<
+	Exclude<TaskFieldKey, (typeof TASK_FIELD_KEYS)[number]>
+>;
 
 /**
  * Copy a call or an item, applying `changes`, and keep every field it carries however the caller

@@ -248,6 +248,15 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string 
 	if (batchEnabled && params.tasks !== undefined && Object.hasOwn(params, "agent")) {
 		return "Top-level `agent` is not part of the batch shape. Set `tasks[].agent` instead.";
 	}
+	// Every other flat-form field sent at a batch call's top level is refused with its own message —
+	// `agent` above, `task`/`taskFile` in `validateSpawnParams`, `model`/`sourceSession` in the seance
+	// checks. `isolated` has to join them rather than be quietly ignored: it is the field that decides
+	// whether a child writes into the user's live checkout, and a call that asked for isolation and
+	// silently did not get it is worse than one that was told where to put the flag. Refusing also
+	// keeps the speculative launcher and dispatch in agreement, since both refuse.
+	if (batchEnabled && params.tasks !== undefined && Object.hasOwn(params, "isolated")) {
+		return "Top-level `isolated` is not part of the batch shape. Set `tasks[].isolated` instead.";
+	}
 	if (!batchEnabled) {
 		const disallowed = (["tasks", "context"] as const).filter(field => params[field] !== undefined);
 		if (disallowed.length > 0) {
@@ -323,7 +332,17 @@ function validateSpawnParams(
 		}
 		for (let i = 0; i < tasks.length; i++) {
 			const item = tasks[i];
-			const label = `Task ${i + 1}${item?.name ? ` (\`${item.name}\`)` : ""}`;
+			const label = `Task ${i + 1}${typeof item?.name === "string" && item.name ? ` (\`${item.name}\`)` : ""}`;
+			// `name` and `agent` are trimmed further down without a type check. That is safe for a
+			// validated call, but when a later item fails the wire schema the lenient path hands
+			// dispatch the raw arguments, where nothing has coerced a `name: 123` to a string — and
+			// `.trim` on it threw a `TypeError` out of the tool instead of reporting the shape.
+			for (const field of ["name", "agent"] as const) {
+				const value: unknown = item?.[field];
+				if (value !== undefined && typeof value !== "string") {
+					return `${label} has an invalid \`${field}\`: expected a string, got ${Bun.inspect(value)}.`;
+				}
+			}
 			const inputError = validateTaskInput(item, label, fileEnabled);
 			if (inputError) return inputError;
 			const effortError = validateEffort(item.effort, label);
@@ -333,6 +352,7 @@ function validateSpawnParams(
 		}
 		const seen = new Map<string, string>();
 		for (const item of tasks) {
+			// Non-string names were rejected above, so this trim is safe even on the lenient raw path.
 			const name = item.name?.trim();
 			if (!name) continue;
 			const key = name.toLowerCase();
@@ -475,14 +495,12 @@ function spawnParamsFor(params: TaskParams, item: ResolvedTaskItem, defaultAgent
 	if ("model" in item) spawn.model = item.model;
 	if (item.isolated !== undefined) {
 		spawn.isolated = item.isolated;
-	} else if ("isolated" in params && !(Array.isArray(params.tasks) && params.tasks.length > 0)) {
-		// Top-level `isolated` belongs to the flat form only, which is also the only branch
-		// `resolveSpawnItems` consults it from. Reading it on a batch call split the speculative
-		// launcher from dispatch: the launcher plans each streamed prefix from a call it rebuilds as
-		// `{ context, tasks }`, which has no top-level keys, so the spawn it derived lacked an
-		// `isolated` the finished call carried — the started child was discarded and re-run as `-2`.
-		// The flag can also stream after `tasks`, so no amount of scanning would let the launcher see
-		// it in time; not reading it on a batch call is what removes the divergence.
+	} else if ("isolated" in params) {
+		// Flat-form only in practice: `validateShapeParams` refuses a top-level `isolated` on a batch
+		// call, so a batch spawn never reads it here. That refusal is also what keeps the speculative
+		// launcher and dispatch in agreement — the launcher plans each streamed prefix from a call it
+		// rebuilds as `{ context, tasks }`, which carries no top-level keys at all, so a value read
+		// from one here would be a value the launcher's plan could never have.
 		spawn.isolated = params.isolated;
 	}
 	return spawn;

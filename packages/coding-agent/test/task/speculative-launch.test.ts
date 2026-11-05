@@ -382,13 +382,12 @@ describe("task speculative launch", () => {
 		expect([...startedIds].sort()).toEqual(["Alpha", "Beta"]);
 	});
 
-	// Regression: `TaskLaunchSession.update` does not plan from the call, it rebuilds one as
-	// `{ context, tasks }`, so every top-level key is invisible to it. `spawnParamsFor` used to read
-	// a top-level `isolated` on a batch call too, so the spawn the launcher derived lacked an
-	// `isolated` the finished call carried: the started child was discarded and re-run as `Alpha-2`.
-	// The flag is a flat-form concept now, which is the only branch `resolveSpawnItems` reads it from.
+	// `TaskLaunchSession.update` does not plan from the call, it rebuilds one as `{ context, tasks }`,
+	// so every top-level key is invisible to it: a value read from the top level on a batch call is
+	// one the launcher's plan could never have, and the started child was discarded and re-run as
+	// `Alpha-2`. The flag is refused on a batch call now, so both sides refuse and nothing launches.
 	it.each([[false], [true]] as const)(
-		"keeps a launched item when the batch call carries a top-level isolated %s",
+		"refuses a batch call carrying a top-level isolated %s, launching nothing",
 		async isolated => {
 			const call = {
 				context: "ctx",
@@ -399,18 +398,17 @@ describe("task speculative launch", () => {
 				],
 			};
 			const raw = JSON.stringify(call);
-			const { tool, manager, session } = await openSession();
+			const { tool, session } = await openSession();
 
 			session.update(toolCall, raw.slice(0, raw.indexOf('{"name":"Beta"') + 10));
-			await spawn("Alpha").started.promise;
-
 			session.finalize({ toolCall, args: call });
-			await spawn("Beta").started.promise;
 			const result = await tool.execute(toolCall.id, call as TaskParams);
 
-			expect(result.isError).toBeFalsy();
-			expect(result.details?.progress?.map(progress => progress.id)).toEqual(["Alpha", "Beta"]);
-			expect(duplicateJobs(manager, ["Alpha", "Beta"])).toEqual([]);
+			expect(result.isError).toBe(true);
+			expect(result.content.find(part => part.type === "text")?.text).toContain(
+				"Top-level `isolated` is not part of the batch shape",
+			);
+			expect([...startedIds]).toEqual([]);
 		},
 	);
 
