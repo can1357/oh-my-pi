@@ -13,6 +13,7 @@
 //!
 //! [`GitRepo::discover`]: git::GitRepo::discover
 //! [`JjWorkspace::discover`]: jj::JjWorkspace::discover
+#![feature(process_setsid)]
 
 pub mod error;
 pub mod git;
