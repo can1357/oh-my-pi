@@ -1,24 +1,24 @@
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
+import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { getSearchProvider } from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import { searchSofya } from "@oh-my-pi/pi-coding-agent/web/search/providers/sofya";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 const TEST_KEY = "sofya_live_test_key";
-const savedEnvKey = process.env.SOFYA_API_KEY;
 
 const keyedStorage = createInMemoryAuthStorage();
 keyedStorage.keys.setRuntime("sofya", TEST_KEY);
 const keylessStorage = createInMemoryAuthStorage();
 
 beforeEach(() => {
-	delete process.env.SOFYA_API_KEY;
+	// Hide any ambient SOFYA_API_KEY so the keyless storage really has no key.
+	vi.spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
 });
 
 afterEach(() => {
-	if (savedEnvKey === undefined) delete process.env.SOFYA_API_KEY;
-	else process.env.SOFYA_API_KEY = savedEnvKey;
+	vi.restoreAllMocks();
 });
 
 afterAll(() => {
@@ -133,6 +133,15 @@ describe("Sofya web search provider", () => {
 		});
 	});
 
+	it("sends at most 10 hosts per domain list", async () => {
+		const hosts = Array.from({ length: 12 }, (_, i) => `s${i}.example.com`);
+		const body = await bodyFor(
+			`bun ${hosts.map(h => `site:${h}`).join(" ")} ${hosts.map(h => `-site:x${h}`).join(" ")}`,
+		);
+		expect(body.include_domains).toEqual(hosts.slice(0, 10));
+		expect(body.exclude_domains).toEqual(hosts.slice(0, 10).map(h => `x${h}`));
+	});
+
 	it("closes an open date bound and prefers it over recency", async () => {
 		const today = new Date().toISOString().slice(0, 10);
 		expect((await bodyFor("bun after:2025-01-01", { recency: "week" })).freshness).toBe(`2025-01-01:${today}`);
@@ -164,6 +173,9 @@ describe("Sofya web search provider", () => {
 		await expect(
 			searchSofya({ ...makeParams("bun", keyedStorage), fetch: mockFetch([], { detail: "nope" }) }),
 		).rejects.toThrow("unexpected response shape");
+		await expect(searchSofya({ ...makeParams("bun", keyedStorage), fetch: mockFetch([], null) })).rejects.toThrow(
+			"unexpected response shape",
+		);
 	});
 
 	it("is auto-admitted only with a key", async () => {

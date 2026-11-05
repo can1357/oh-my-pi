@@ -27,6 +27,8 @@ const DEFAULT_NUM_RESULTS = 10;
 const MAX_NUM_RESULTS = 20;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_ERROR_BYTES = 8 * 1024;
+/** Sofya's `SearchRequest` takes at most 10 hosts in each of `include_domains` / `exclude_domains`. */
+const MAX_DOMAIN_FILTERS = 10;
 
 interface SofyaSearchBody {
 	query: string;
@@ -54,6 +56,9 @@ interface SofyaSearchResponse {
  * Sofya takes plain keywords, quoted phrases, and `-` exclusions; `site:` /
  * `-site:` hosts map to `include_domains` / `exclude_domains`, and date bounds
  * or `recency` to `freshness`. Everything else is left to the central post-filter.
+ * Past 10 hosts per list, only the first 10 are sent: an include list then searches
+ * a subset of the requested sites, and the post-filter drops hosts excluded past
+ * the cap, so every returned source still meets the query's constraints.
  */
 function buildSofyaBody(
 	parsed: StructuredQuery,
@@ -69,8 +74,8 @@ function buildSofyaBody(
 		throw new SearchProviderError("sofya", "Sofya needs search terms; date-only queries are not supported", 400);
 	}
 	const body: SofyaSearchBody = { query, search_depth: "snippets", max_results: maxResults };
-	const include = siteHosts(parsed.sites);
-	const exclude = siteHosts(parsed.excludedSites);
+	const include = siteHosts(parsed.sites).slice(0, MAX_DOMAIN_FILTERS);
+	const exclude = siteHosts(parsed.excludedSites).slice(0, MAX_DOMAIN_FILTERS);
 	if (include.length > 0) body.include_domains = include;
 	if (exclude.length > 0) body.exclude_domains = exclude;
 	if (parsed.after || parsed.before) {
@@ -134,7 +139,7 @@ export async function searchSofya(params: SearchParams): Promise<SearchResponse>
 		},
 	);
 
-	if (!Array.isArray(data.results)) {
+	if (typeof data !== "object" || data === null || !Array.isArray(data.results)) {
 		throw new SearchProviderError("sofya", "Sofya search API returned an unexpected response shape", 500);
 	}
 
