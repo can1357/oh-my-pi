@@ -2867,13 +2867,22 @@ fn write_jobs(root: &mut Root, store: &mut dyn StateStore, jobs: &JobTable, forc
 		&& ids.len() == jobs.list.len()
 		&& ids.iter().zip(&jobs.list).all(|(id, j)| *id == j.id);
 	if !same_ids {
+		// A deletion the store refuses keeps its id here: dropping it would
+		// leave the record for good, and a later snapshot would carry a job
+		// the shell removed (a restored shell found it again).
+		let mut refused = Vec::new();
 		for id in &ids {
 			if !jobs.list.iter().any(|j| j.id == *id) {
+				let before = root.has_fault();
 				root.write(store, Change::Del(Key::Job(*id)));
+				if !before && root.has_fault() {
+					refused.push(*id);
+				}
 			}
 		}
 		ids.clear();
 		ids.extend(jobs.list.iter().map(|j| j.id));
+		ids.extend(refused);
 	}
 	root.synced.job_ids = ids;
 	for job in &jobs.list {
@@ -3119,6 +3128,72 @@ mod tests {
 		let o = order(&ks);
 		assert_eq!(o[..5], keys(&["k1698", "k1699", "k1696", "k1697", "k1694"]));
 		assert_eq!(o[o.len() - 3..], keys(&["k1044", "k1049", "k1048"]));
+	}
+
+	/// Failure mode: a refused deletion of a job record was forgotten, so a
+	/// later successful sync left the store holding a job the shell had
+	/// removed and a restored shell found it again.
+	#[test]
+	fn a_refused_job_deletion_is_made_again_at_the_next_sync() {
+		struct RefusingDel<'a> {
+			inner:  &'a mut crate::bash::MemStore,
+			refuse: bool,
+		}
+		impl StateStore for RefusingDel<'_> {
+			fn get(&mut self, key: Key<'_>) -> Result<Option<&Record>, StoreError> {
+				self.inner.get(key)
+			}
+
+			fn scan(
+				&mut self,
+				table: Table,
+				f: &mut dyn FnMut(Key<'_>, &Record),
+			) -> Result<(), StoreError> {
+				self.inner.scan(table, f)
+			}
+
+			fn apply(&mut self, change: Change<'_>) -> Result<(), StoreError> {
+				if self.refuse && matches!(change, Change::Del(Key::Job(_))) {
+					self.refuse = false;
+					return Err(StoreError::Backend("refused once".into()));
+				}
+				self.inner.apply(change)
+			}
+
+			fn put_blob(&mut self, slot: BlobSlot, bytes: &[u8]) -> Result<(), StoreError> {
+				self.inner.put_blob(slot, bytes)
+			}
+
+			fn get_blob(&mut self, slot: BlobSlot) -> Result<Option<Vec<u8>>, StoreError> {
+				self.inner.get_blob(slot)
+			}
+
+			fn del_blob(&mut self, slot: BlobSlot) -> Result<(), StoreError> {
+				self.inner.del_blob(slot)
+			}
+
+			fn epoch(&self) -> u64 {
+				self.inner.epoch()
+			}
+		}
+		let (mut store, mut root, mut vp) = shell();
+		let id = JobId(7);
+		vp.jobs
+			.add(id, Vpid(42), BString::from("f"), false, BString::from("/"));
+		sync_root(&mut root, &mut store, &vp);
+		assert!(matches!(store.get(Key::Job(id)), Ok(Some(_))), "the job was written");
+		vp.jobs.remove(1);
+		{
+			let mut refusing = RefusingDel { inner: &mut store, refuse: true };
+			sync_root(&mut root, &mut refusing, &vp);
+		}
+		assert!(root.take_fault().is_some(), "the refused deletion is reported");
+		assert!(matches!(store.get(Key::Job(id)), Ok(Some(_))), "the record is still there");
+		sync_root(&mut root, &mut store, &vp);
+		assert!(
+			matches!(store.get(Key::Job(id)), Ok(None)),
+			"the next sync deletes the record the refused write left"
+		);
 	}
 
 	/// Failure mode: a refused write of the kept statuses left them marked

@@ -3080,6 +3080,18 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 					exec::reap_coproc(k, vp, cx, v);
 				} else if let Some(s) = k.proc_collect(cx.store, v) {
 					last = s;
+					// A child with no job of its own (a process substitution):
+					// its status is kept for a later `wait PID`, as a deleted
+					// job's is (bash `bgp_add`); zsh keeps none.
+					if vp.jobs.by_vpid(v).is_none()
+						&& vp.mode.dialect() != crate::bash::ids::Dialect::Zsh
+					{
+						vp.jobs.keep(crate::bash::vm::proc::KeptStatus {
+							vpid:   v,
+							os_pid: (shown != v.0).then_some(shown),
+							status: s,
+						});
+					}
 					forget_job(vp, v);
 					exec::reap_coproc(k, vp, cx, v);
 				} else if let (false, Some((_, JobState::Stopped(sig)))) = (force, job) {
@@ -3100,9 +3112,9 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 			}
 			if let Some((pid, status)) = kept {
 				last = status;
-				if pid != 0 {
-					waited = Some(pid);
-				}
+				// bash reports the LAST operand: an invalid one leaves no
+				// child to name, so `wait -p` writes no variable at all.
+				waited = (pid != 0).then_some(pid);
 			}
 			if let Some(pid) = waited {
 				waited_into(k, vp, cx, line, pid);

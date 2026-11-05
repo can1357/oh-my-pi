@@ -244,3 +244,26 @@ async fn a_wait_operand_reads_the_status_its_own_cleanup_kept() {
 	])
 	.await;
 }
+
+/// Failure modes the second review round found: an ordinary `wait` of a
+/// process substitution dropped the status it had just collected (and a
+/// second operand naming it then blocked for ever), and an invalid
+/// trailing operand left `wait -p` naming the child of an earlier one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_non_job_child_keeps_its_status_and_a_failed_operand_names_none() {
+	assert_bash_outputs(&[
+		(
+			r#"exec 3< <(/bin/sleep .03; exit 23); p=$!; /bin/sleep .1; wait "$p" 2>/dev/null; echo first=$?; wait "$p" 2>/dev/null; echo again=$?; exec 3<&-"#,
+			"first=23\nagain=23\n",
+		),
+		(
+			r#"exec 3< <(/bin/sleep .02; exit 23); p=$!; f(){ return 7; }; f & q=$!; wait "$p" "$q" "$p" 2>/dev/null; echo status=$?; exec 3<&-"#,
+			"status=23\n",
+		),
+		(
+			r#"f(){ return 23; }; f & p=$!; wait -p w "$p" 99999999 2>/dev/null; s=$?; [ "${w-unset}" = "$p" ] && w=same; echo "status=$s:w=${w-unset}""#,
+			"status=127:w=unset\n",
+		),
+	])
+	.await;
+}
