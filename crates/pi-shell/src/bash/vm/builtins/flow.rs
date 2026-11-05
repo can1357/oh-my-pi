@@ -130,6 +130,11 @@ pub fn source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	} else {
 		text.iter().copied().filter(|&c| c != 0).collect()
 	};
+	// bash's `source_file`: the file starts with no `set` of its own
+	// recorded, whether or not it was given arguments. So an enclosing
+	// file's `set` does not make this one keep its parameters, and a `set`
+	// in this one reaches the file around it when this one saved nothing.
+	ctx.vp.args_set = false;
 	let restore = source_args(ctx, rest, true)?;
 	// As for `eval`: the file sees the caller's `$?`.
 	push_script(ctx.vp, &text, 1, ScriptKind::Source);
@@ -237,8 +242,8 @@ pub fn zsh_source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 
 /// The arguments of `. file args` become the positional parameters while
 /// the file runs; what its end puts back. `bash`: outside any function a
-/// file that changes them keeps its own (bash `maybe_pop_dollar_vars`);
-/// zsh `bin_dot` always restores.
+/// file that replaces them with the `set` builtin keeps its own (bash
+/// `maybe_pop_dollar_vars`); zsh `bin_dot` always restores.
 fn source_args(
 	ctx: &mut Ctx<'_, '_>,
 	rest: &[BString],
@@ -249,13 +254,8 @@ fn source_args(
 		return Ok(None);
 	}
 	let args = state::positional(&ctx.k.root, ctx.cx.store, ctx.vp)?;
-	let installed = if bash && state::func_scope(&ctx.k.root, ctx.cx.store, ctx.vp)?.is_none() {
-		Some(rest.to_vec())
-	} else {
-		None
-	};
 	state::set_positional(&mut ctx.k.root, ctx.cx.store, ctx.vp, rest.to_vec());
-	Ok(Some(Box::new(crate::bash::vm::callstack::SourceSave { args, installed })))
+	Ok(Some(Box::new(crate::bash::vm::callstack::SourceSave { args, bash })))
 }
 
 /// A bad argument to `return`, `exit`, `break` or `continue` (reported).

@@ -91,6 +91,12 @@ pub struct Vproc {
 	/// `BASH_LINENO`, `BASH_ARGC`, `BASH_ARGV`), oldest first; a subshell
 	/// starts with its parent's.
 	pub calls:         Vec<super::callstack::Call>,
+	/// bash's `changed_dollar_vars & ARGS_SETBLTIN`: the `set` builtin
+	/// replaced the positional parameters outside any function since the
+	/// innermost `.` file started. A `.` file with arguments that ends with
+	/// it set, outside any function, keeps its own parameters instead of
+	/// putting the caller's back ([`super::callstack::truncate`]).
+	pub args_set:      bool,
 	/// The traps this vproc set itself: a subshell lists its parent's but
 	/// runs only its own (ERR, DEBUG and RETURN also under
 	/// `errtrace`/`functrace`; bash 5.3 keeps listing inherited signal

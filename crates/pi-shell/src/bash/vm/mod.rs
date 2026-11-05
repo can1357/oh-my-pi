@@ -1699,7 +1699,15 @@ impl Shell {
 		let vpid = Vpid(self.k.next_vpid);
 		self.k.next_vpid += 1;
 		let parent_lineage = self.procs[parent].lineage;
+		// A callout's subshell is a subshell of the caller, so it reads the
+		// caller's call-stack arrays (`FUNCNAME`, `BASH_SOURCE`,
+		// `BASH_LINENO`, `BASH_ARGC`, `BASH_ARGV`, and what `caller` reads
+		// from them), as `Vproc::fork` gives an ordinary `( … )` child.
+		let calls = callstack::inherited(&self.procs[parent]);
+		let args_set = self.procs[parent].args_set;
 		let mut vp = Vproc::new(vpid, Some(parent_vpid), fds, cwd, Some(overlay), true);
+		vp.calls = calls;
+		vp.args_set = args_set;
 		vp.lineage = lineage.unwrap_or(parent_lineage);
 		vp.status = status;
 		vp.scopes = scopes;
@@ -2652,6 +2660,7 @@ impl Vproc {
 			command: None,
 			spare: Vec::new(),
 			calls: Vec::new(),
+			args_set: false,
 			own_traps: proc::OwnTraps::EMPTY,
 			trap_frames: 0,
 			mode: ModeId::Bash,
@@ -2780,6 +2789,8 @@ impl Vproc {
 			vp.jobs = exec::inherited_jobs(self, true);
 		}
 		vp.calls = callstack::inherited(self);
+		// bash forks the whole shell, `changed_dollar_vars` included.
+		vp.args_set = self.args_set;
 		vp.trace_base = xtrace::level(self) - 1;
 		// Started from a context where `set -e` is ignored (the parent's op
 		// is a condition, or its frame runs in one): so is the child.

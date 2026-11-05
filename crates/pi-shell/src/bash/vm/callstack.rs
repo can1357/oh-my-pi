@@ -74,10 +74,11 @@ pub enum CallKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceSave {
 	/// The caller's positional parameters.
-	pub args:      Vec<BString>,
-	/// bash outside any function: the arguments the file got. A file that
-	/// changed them keeps its own (bash keeps a top-level `set --`).
-	pub installed: Option<Vec<BString>>,
+	pub args: Vec<BString>,
+	/// bash: outside any function the file keeps its own when the `set`
+	/// builtin replaced them while it ran ([`Vproc::args_set`]). zsh's
+	/// `bin_dot` always puts the caller's back.
+	pub bash: bool,
 }
 
 impl CallKind {
@@ -355,21 +356,30 @@ pub fn push_source(
 /// file whose RETURN trap runs in its caller's context), putting back the
 /// positional parameters a `.` file with arguments replaced. Called by
 /// `pop_frame`.
+///
+/// bash's `maybe_pop_dollar_vars`: the caller's parameters come back unless
+/// the shell is outside any function and the `set` builtin replaced them
+/// while the file ran ([`Vproc::args_set`], which the file's end clears
+/// either way). zsh's `bin_dot` always puts them back.
 pub fn truncate(root: &mut state::Root, store: &mut dyn StateStore, vp: &mut Vproc, frames: usize) {
 	while vp.calls.last().is_some_and(|c| c.depth as usize > frames) {
 		let Some(Call { kind: CallKind::Source { restore: Some(save), .. }, .. }) = vp.calls.pop()
 		else {
 			continue;
 		};
-		let SourceSave { args, installed } = *save;
-		if let Some(installed) = installed {
-			match state::positional_ref(root, store, vp) {
-				Ok(now) if now != installed.as_slice() => continue,
-				Ok(_) => {},
-				Err(err) => {
-					root.fail(err);
-					continue;
-				},
+		let SourceSave { args, bash } = *save;
+		if bash {
+			let kept = vp.args_set
+				&& match state::func_scope(root, store, vp) {
+					Ok(scope) => scope.is_none(),
+					Err(err) => {
+						root.fail(err);
+						false
+					},
+				};
+			vp.args_set = false;
+			if kept {
+				continue;
 			}
 		}
 		state::set_positional(root, store, vp, args);
