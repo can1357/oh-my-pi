@@ -1928,8 +1928,13 @@ fn prune_nonrelocatable_clone_dirs(root: &Path) -> Result<BTreeSet<PathBuf>> {
 /// Only a target that names nothing has no answer but the text, and there the
 /// text decides: a relative pointer whose target is missing is as broken in
 /// the source and is kept, while one naming a path outside the clone is not a
-/// repository that works where it now sits. A `.git` that cannot be read at
-/// all, or that holds no `gitdir:` line, is treated the same way.
+/// repository that works where it now sits.
+///
+/// A `.git` that is not a pointer at all is a different question, and gets
+/// the opposite answer. If it cannot be read, is not a regular file or a
+/// symlink, or holds nothing Git would accept as a gitfile, then this
+/// directory is not a nested checkout and emptying it would be this very
+/// change doing what it exists to prevent. It is kept.
 fn git_entry_points_outside(root: &Path, dir: &Path) -> bool {
 	let entry = dir.join(".git");
 	let Ok(meta) = fs::symlink_metadata(&entry) else {
@@ -1948,9 +1953,14 @@ fn git_entry_points_outside(root: &Path, dir: &Path) -> bool {
 	if !meta.is_symlink() && !meta.is_file() {
 		return false;
 	}
+	// A `.git` Git will not accept is not a pointer at all, and the directory
+	// around it is ordinary content. Emptying it would be this change doing
+	// the very thing it exists to prevent, so every "we cannot read a pointer
+	// here" answer below keeps the directory. Only a pointer whose *target*
+	// cannot be found is refused, further down.
 	let target = if meta.is_symlink() {
 		let Ok(link) = fs::read_link(&entry) else {
-			return true;
+			return false;
 		};
 		// A `.git` symlink may land on another gitfile, and Git reads that one
 		// too. Stopping at the link would read a chain ending outside the
@@ -1958,7 +1968,7 @@ fn git_entry_points_outside(root: &Path, dir: &Path) -> bool {
 		match fs::metadata(dir.join(&link)) {
 			Ok(pointed) if pointed.is_file() => {
 				let Some(gitdir) = read_gitfile(&dir.join(&link)) else {
-					return true;
+					return false;
 				};
 				gitdir
 			},
@@ -1966,7 +1976,7 @@ fn git_entry_points_outside(root: &Path, dir: &Path) -> bool {
 		}
 	} else {
 		let Some(gitdir) = read_gitfile(&entry) else {
-			return true;
+			return false;
 		};
 		gitdir
 	};
@@ -1989,41 +1999,33 @@ fn git_entry_points_outside(root: &Path, dir: &Path) -> bool {
 	!resolved.starts_with(root) || resolved.starts_with(root.join(".git"))
 }
 
-/// A gitfile's `gitdir:` value, read the way Git reads it.
+/// A gitfile's `gitdir:` value, or `None` when Git would not call this file a
+/// gitfile at all.
 ///
-/// Git wants the marker at the start of the file and one space after it, and
-/// the path is then *the rest of the file*: it stops at the first NUL, since
-/// it holds the value as a C string, drops the trailing line terminators, and
-/// keeps every other byte. A space on either side belongs to the path, and so
-/// does an embedded newline — both measured with `git rev-parse
-/// --absolute-git-dir`. Reading the value any other way names a different
-/// directory than the one Git opens, and the difference decides whether this
-/// copy reaches out of the clone.
+/// Git wants `gitdir: ` at the very start of the file, and the path is then
+/// *the rest of the file*: it drops the trailing line terminators and reads
+/// what is left as a C string, so it stops at the first NUL. Every other byte
+/// belongs to the path — a space on either side, and an embedded newline
+/// too. All of that is measured with `git rev-parse --absolute-git-dir`;
+/// reading the value any other way names a different directory than the one
+/// Git opens, and the difference decides whether this copy reaches out of the
+/// clone.
 ///
-/// Only finding the marker is left looser than Git's, which rejects the file
-/// unless it begins with `gitdir: ` exactly. A file Git rejects holds no
-/// repository wherever it sits, so refusing it here would empty a directory
-/// over a `.git` that was already inert in the source.
+/// The marker is matched as strictly as Git matches it, because the answer
+/// here is not symmetric. An empty `.git`, one whose marker lacks its space
+/// or follows a junk line, and one too large for Git to read, all open no
+/// repository — measured: `fatal: invalid gitfile format`. Calling such a
+/// file a pointer anyway risks emptying a directory that is not a checkout,
+/// which costs a user untracked files; declining to costs a clone some junk
+/// on disk. The cheap direction wins.
 fn read_gitfile(path: &Path) -> Option<PathBuf> {
 	let bytes = fs::read(path).ok()?;
-	let mut offset = 0;
-	let marker = loop {
-		let line_end = bytes[offset..]
-			.iter()
-			.position(|&byte| byte == b'\n')
-			.map_or(bytes.len(), |at| offset + at);
-		let line = &bytes[offset..line_end];
-		let indent = line.len() - line.trim_ascii_start().len();
-		if line[indent..].starts_with(b"gitdir:") {
-			break offset + indent + b"gitdir:".len();
-		}
-		if line_end >= bytes.len() {
-			return None;
-		}
-		offset = line_end + 1;
-	};
-	let value = &bytes[marker..];
-	let value = value.strip_prefix(b" ").unwrap_or(value);
+	// Git refuses a `.git` far larger than a path. Its own ceiling is higher
+	// than this one, and staying under it only ever keeps a directory.
+	if bytes.len() > 4 * 4096 {
+		return None;
+	}
+	let value = bytes.strip_prefix(b"gitdir: ".as_slice())?;
 	// Git's order, and it is observable: it drops the file's line terminator
 	// first and only then reads the value as a C string, so `meta\r\0tail\n`
 	// names `meta\r`. Cutting at the NUL first would name `meta`, a different
@@ -3285,8 +3287,29 @@ mod tests {
 		assert!(case("dangling-outside", &|dir| {
 			fs::write(dir.join(".git"), "gitdir: ../../../no-such-place\n").unwrap();
 		}));
-		assert!(case("no-marker", &|dir| {
-			fs::write(dir.join(".git"), "this names no repository\n").unwrap();
+		// Not pointers at all. Git opens no repository for any of these
+		// (measured: `fatal: invalid gitfile format`), so the directory is
+		// not a nested checkout and its contents are the user's.
+		for (name, contents) in [
+			("no-marker", &b"this names no repository\n"[..]),
+			("empty-gitfile", b""),
+			("marker-no-space", b"gitdir:../../outside\n"),
+			("marker-after-junk", b"junk\ngitdir: ../../outside\n"),
+			("marker-tab", b"gitdir:\t../../outside\n"),
+		] {
+			assert!(
+				!case(name, &|dir| {
+					fs::write(dir.join(".git"), contents).unwrap();
+					fs::write(dir.join("own.txt"), "ordinary content\n").unwrap();
+				}),
+				"{name} is not a gitfile Git accepts, so the directory stays"
+			);
+		}
+		// Too large for Git to read as a gitfile, pointer-shaped or not.
+		assert!(!case("oversize", &|dir| {
+			let mut contents = b"gitdir: ../../outside\n".to_vec();
+			contents.resize(4 * 4096 + 1, b'x');
+			fs::write(dir.join(".git"), contents).unwrap();
 		}));
 
 		#[cfg(unix)]

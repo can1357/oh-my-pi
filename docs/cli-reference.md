@@ -351,10 +351,20 @@ kept, and one leaving through a symlinked component is dropped, whichever way
 its text reads. When the target cannot be followed at all — it does not
 exist, or resolving it fails — the text decides instead: one that reads as
 naming a path inside the worktree is kept, since it is broken the same way in
-the source, and one that reads as leading out of it is dropped, as is a
-`.git` that cannot be read or holds no `gitdir:` line. Tracked files inside
-excluded directories are restored from Git; when keeping changes, their live
-source contents and staged state are preserved.
+the source, and one that reads as leading out of it is dropped.
+
+A `.git` that is not a pointer in the first place is kept, and that is
+deliberate. An unreadable one, one that is neither a file nor a symlink, and
+one holding nothing Git accepts as a gitfile — an empty file, a marker
+without its space or behind a junk line, a file too large for Git to read —
+all open no repository, so the directory around them is not a nested checkout
+and its contents belong to you. The two mistakes do not cost the same:
+keeping a directory that turned out to be a checkout costs a clone some junk
+on disk, while dropping one that turned out not to be costs you untracked
+files. Where the rule cannot tell, it takes the cheaper mistake.
+
+Tracked files inside excluded directories are restored from Git; when keeping
+changes, their live source contents and staged state are preserved.
 
 Clean clones also discard carried files that are untracked under the target
 commit's own ignore rules, after its tree and index have been written. Caches
