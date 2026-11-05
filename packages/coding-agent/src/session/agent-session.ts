@@ -1228,6 +1228,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#agentId: string | undefined;
 	/** Registry recording this agent blocked on the user while a {@link waitForUser} dialog is open. */
 	readonly #agentRegistry: AgentRegistryApi | undefined;
+	/** Lineage of the ref this session runs as ({@link AgentSession.#recordOwnAgentLineage}). */
+	#ownAgentLineage: number | undefined;
 	#agentKind: "main" | "sub" = "main";
 	#scoutAllowedBySpawnPolicy = true;
 	#providerSessionId: string | undefined;
@@ -3542,6 +3544,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
+	 * Lineage of the registry ref this session runs as, remembered the first
+	 * time the session observes it. A superseded session needs it: by then its
+	 * agent id resolves to the replacement, and the id alone cannot tell this
+	 * session's own work from its successor's. Returns undefined only for a
+	 * session that never held a ref for its id.
+	 */
+	#recordOwnAgentLineage(): number | undefined {
+		if (this.#ownAgentLineage !== undefined) return this.#ownAgentLineage;
+		if (!this.#agentId) return undefined;
+		const current = this.#agentRegistry?.get(this.#agentId);
+		if (current?.session === this) this.#ownAgentLineage = current.lineage;
+		return this.#ownAgentLineage;
+	}
+
+	/**
 	 * Cancel the async work of *this* agent's tree. Used by lifecycle
 	 * transitions (newSession, switchSession, conversation branching, reset,
 	 * dispose) so a conversation that ends takes its own background work with
@@ -3572,20 +3589,28 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		releaseJudgmentBatches(this.#agentId);
 		WorkPoolRegistry.global().releaseOwner(this.#agentId);
 		const manager = this.#asyncJobManager;
-		// The ref must be THIS session's. By the time a superseded session is
-		// disposed, its agent id belongs to the replacement, and scoping to that
-		// ref's lineage would cancel the replacement's tree — the very mistake
-		// of reconstructing ownership from a string id. Without our own ref
-		// there is no tree to name, so only our own rows are cancelled, as
-		// before: a superseded ref cancels nothing of its successor's.
-		const current = this.#agentRegistry?.get(this.#agentId);
-		const own = current?.session === this ? current : undefined;
-		const filter =
-			own === undefined
-				? { ownerId: this.#agentId }
-				: { ownerId: this.#agentId, includeDescendants: true, agentLineage: own.lineage };
-		manager?.cancelAll(filter, reason);
-		manager?.evictCompletedJobs(filter);
+		// Scope by the lineage of the ref THIS session runs as, never by the ref
+		// the agent id resolves to now. Once another session has claimed the id,
+		// that ref is the REPLACEMENT's, and BOTH id-keyed answers reach its
+		// work: scoping to its lineage takes its whole tree, and falling back to
+		// the bare owner id takes the rows it owns directly, because the two
+		// sessions spell the same owner id. The remembered lineage names this
+		// session's own jobs exactly, because a job records its owner chain when
+		// it registers. Having never held a ref, this session can own only rows
+		// nobody recorded a chain for, so it cancels by id alone — unless the id
+		// belongs to someone else by now, when every row under it is theirs.
+		const lineage = this.#recordOwnAgentLineage();
+		if (lineage === undefined) {
+			const current = this.#agentRegistry?.get(this.#agentId);
+			if (current === undefined || current.session === this) {
+				manager?.cancelAll({ ownerId: this.#agentId }, reason);
+				manager?.evictCompletedJobs({ ownerId: this.#agentId });
+			}
+		} else {
+			const filter = { ownerId: this.#agentId, includeDescendants: true, agentLineage: lineage };
+			manager?.cancelAll(filter, reason);
+			manager?.evictCompletedJobs(filter);
+		}
 		// Invalidate this owner's in-flight/drained deliveries against the new
 		// generation, then drop any async-result follow-up already queued, so a
 		// prior session's background result cannot inject into the next transcript.
@@ -4071,6 +4096,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * event/persistence pipeline during teardown.
 	 */
 	#handleAgentEvent = (event: AgentEvent): Promise<void> => {
+		// Cheapest reliable place to learn the ref this session runs as, while it
+		// still holds it: every session that can own a job runs turns, and once
+		// the lineage is recorded this costs nothing. See #cancelOwnAsyncJobs.
+		if (this.#ownAgentLineage === undefined) this.#recordOwnAgentLineage();
 		const processing = this.#dispatchAgentEvent(event);
 		this.#inFlightEventHandlers.add(processing);
 		void processing.finally(() => this.#inFlightEventHandlers.delete(processing)).catch(() => {});

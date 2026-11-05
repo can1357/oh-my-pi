@@ -66,7 +66,7 @@ afterEach(async () => {
 	await removeWithRetries(root);
 });
 
-it("disposing a superseded session leaves the replacement agent's tree running", async () => {
+it("disposing a superseded session leaves the replacement agent's own work and its tree running", async () => {
 	const cwd = path.join(root, "home", "work");
 	const authStorage = createInMemoryAuthStorage();
 	authStorage.keys.setRuntime("mock", "test-key");
@@ -124,26 +124,39 @@ it("disposing a superseded session leaves the replacement agent's tree running",
 	const replacementRef = registry.get("Shared");
 	expect(replacementRef?.lineage).not.toBe(oldRef?.lineage);
 
-	// The replacement's own child, and the work that child is running.
+	// Two kinds of work the replacement owns: a row under its OWN id — which the
+	// two sessions spell identically — and one under a child of it.
 	registry.register({ id: "Shared.Leaf", displayName: "Leaf", kind: "sub", parentId: "Shared", session: null });
-	const aborted = Promise.withResolvers<void>();
-	const leafWork = jobManager.register(
-		"bash",
-		"leaf work",
-		async ({ signal }) => {
-			signal.addEventListener("abort", () => aborted.resolve(), { once: true });
-			await aborted.promise;
-			return "stopped";
-		},
-		{ ownerId: "Shared.Leaf" },
-	);
+	// Each job gets its own gate, so one job settling cannot change the status
+	// the other reports.
+	const gates: Array<() => void> = [];
+	const hold = (ownerId: string, label: string) => {
+		const stop = Promise.withResolvers<void>();
+		gates.push(stop.resolve);
+		return jobManager.register(
+			"bash",
+			label,
+			async ({ signal }) => {
+				signal.addEventListener("abort", () => stop.resolve(), { once: true });
+				await stop.promise;
+				return "stopped";
+			},
+			{ ownerId },
+		);
+	};
+	const ownWork = hold("Shared", "replacement's own work");
+	const leafWork = hold("Shared.Leaf", "replacement's child's work");
 
 	try {
 		await superseded.session.dispose();
 
-		expect(jobManager.getJob(leafWork)?.status).toBe("running");
+		expect([jobManager.getJob(ownWork)?.status, jobManager.getJob(leafWork)?.status]).toEqual([
+			"running",
+			"running",
+		]);
 	} finally {
-		aborted.resolve();
+		for (const open of gates) open();
+		jobManager.cancel(ownWork);
 		jobManager.cancel(leafWork);
 		await replacementSession.session.dispose();
 		await jobManager.dispose({ timeoutMs: 500 });
