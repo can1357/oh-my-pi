@@ -456,8 +456,8 @@ export async function sendA2aMessage(params: unknown, deps: A2aDispatchDeps): Pr
 
 /** The bus receipt of a delivered task, when that delivery came back `failed`. */
 export function failedDeliveryReceipt(task: A2aTask): IrcDeliveryReceipt | undefined {
-	const delivery = asRecord(task.metadata)?.delivery;
-	return delivery !== undefined && delivery.outcome === "failed" ? (delivery as unknown as IrcDeliveryReceipt) : undefined;
+	const delivery = asRecord(asRecord(task.metadata)?.delivery);
+	return delivery?.outcome === "failed" ? (delivery as unknown as IrcDeliveryReceipt) : undefined;
 }
 
 /**

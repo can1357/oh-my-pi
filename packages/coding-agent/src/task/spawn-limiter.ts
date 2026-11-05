@@ -22,7 +22,9 @@ function sessionSemaphore(session: ToolSession): Semaphore | undefined {
 	// `settings` is required on ToolSession, but fakes cast a bare object; only a
 	// real settings scope (revision counter) carries a policy to enforce.
 	const settings: unknown = Reflect.get(session, "settings");
-	if (settings === undefined || typeof Reflect.get(settings, "revision") !== "number") return undefined;
+	if (settings === null || typeof settings !== "object" || typeof Reflect.get(settings, "revision") !== "number") {
+		return undefined;
+	}
 	const max = cfgTaskMaxConcurrency.get(settings as ToolSession["settings"]);
 	const existing = sessionSemaphores.get(session);
 	if (existing) {

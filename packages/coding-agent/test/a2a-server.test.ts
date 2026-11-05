@@ -685,43 +685,38 @@ describe("A2A streaming", () => {
 		}
 	});
 
-	it(
-		"closes a stream whose delivery failed with a final TASK_STATE_FAILED",
-		async () => {
-			const bus = new FakeBus();
-			bus.outcome = "failed";
-			bus.error = "agent beta has no live session";
-			const registry = new FakeRegistry([makeRef({ id: "beta", status: "running" })]);
-			const { handle } = startServer({ registry, bus });
-			const response = await fetch(handle.url, {
-				method: "POST",
-				headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
-				body: JSON.stringify({
-					jsonrpc: "2.0",
-					id: 24,
-					method: "SendStreamingMessage",
-					params: {
-						message: { messageId: "m-6", role: "ROLE_USER", parts: [{ text: "keep going" }] },
-						metadata: { to: "beta" },
-					},
-				}),
-			});
-			expect(response.status).toBe(200);
-			const sse = openSse(response);
-			try {
-				// The registry ref never changes: without a terminal frame the stream
-				// stays open and only the test's own timeout ends it.
-				await sse.toEnd();
-				expect(sse.text).toContain("TASK_STATE_FAILED");
-				expect(sse.text).toContain("agent beta has no live session");
-				expect(sse.text).toContain('"final":true');
-			} finally {
-				sse.cancel();
-			}
-		},
-		// A non-closing SSE stream is the failure under test: bound the wait.
-		2000,
-	);
+	it("closes a stream whose delivery failed with a final TASK_STATE_FAILED", async () => {
+		const bus = new FakeBus();
+		bus.outcome = "failed";
+		bus.error = "agent beta has no live session";
+		const registry = new FakeRegistry([makeRef({ id: "beta", status: "running" })]);
+		const { handle } = startServer({ registry, bus });
+		const response = await fetch(handle.url, {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+			body: JSON.stringify({
+				jsonrpc: "2.0",
+				id: 24,
+				method: "SendStreamingMessage",
+				params: {
+					message: { messageId: "m-6", role: "ROLE_USER", parts: [{ text: "keep going" }] },
+					metadata: { to: "beta" },
+				},
+			}),
+		});
+		expect(response.status).toBe(200);
+		const sse = openSse(response);
+		try {
+			// The registry ref never changes: without a terminal frame the stream
+			// stays open and only the test's own timeout ends it.
+			await sse.toEnd();
+			expect(sse.text).toContain("TASK_STATE_FAILED");
+			expect(sse.text).toContain("agent beta has no live session");
+			expect(sse.text).toContain('"final":true');
+		} finally {
+			sse.cancel();
+		}
+	}, 2000); // A non-closing SSE stream is the failure under test: bound the wait.
 });
 
 describe("spawnSubagent seam", () => {
@@ -833,7 +828,13 @@ describe("spawnSubagent seam", () => {
 			spawnSubagentViaExecutor(session, options, {
 				reserveId: async () => "Spawn-Limit",
 				run: async () => {
-					registry.register({ id: "Spawn-Limit", displayName: "Spawn Limit", kind: "sub", status: "running" });
+					registry.register({
+						id: "Spawn-Limit",
+						displayName: "Spawn Limit",
+						kind: "sub",
+						status: "running",
+						session: null,
+					});
 					return await running.promise;
 				},
 			});

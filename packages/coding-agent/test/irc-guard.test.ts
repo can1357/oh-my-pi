@@ -419,7 +419,10 @@ describe("IrcIngressGuard sender-window cap", () => {
 		// anything, so the cap must evict the oldest window rather than grow.
 		for (let index = 0; index < 300; index++) {
 			expect(
-				guard.check({ id: `m-${index}`, from: `sender-${index}`, to: "sink", body: `x${index}`, ts: index }, limits),
+				guard.check(
+					{ id: `m-${index}`, from: `sender-${index}`, to: "sink", body: `x${index}`, ts: index },
+					limits,
+				),
 			).toBeUndefined();
 		}
 		expect(guard.rateWindowCount).toBe(256);
@@ -431,7 +434,9 @@ describe("IrcIngressGuard sender-window cap", () => {
 			guard.check({ id: `m-${index}`, from: `sender-${index}`, to: "sink", body: `x${index}`, ts: 0 }, limits);
 		}
 		// Every window above is 600 ms old: a new sender's sweep frees them all.
-		expect(guard.check({ id: "late", from: "late-sender", to: "sink", body: "late", ts: 600 }, limits)).toBeUndefined();
+		expect(
+			guard.check({ id: "late", from: "late-sender", to: "sink", body: "late", ts: 600 }, limits),
+		).toBeUndefined();
 		expect(guard.rateWindowCount).toBe(1);
 	});
 });

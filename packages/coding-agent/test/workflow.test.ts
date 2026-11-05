@@ -515,9 +515,9 @@ describe("workflow tool", () => {
 		await acquireSessionSpawnPermit(session);
 		try {
 			const tool = new WorkflowTool(session);
-			await expect(
-				tool.execute("call-1", { script: `return (await agent("one")).result;` }),
-			).rejects.toThrow(/Concurrent subagent limit reached/);
+			await expect(tool.execute("call-1", { script: `return (await agent("one")).result;` })).rejects.toThrow(
+				/Concurrent subagent limit reached/,
+			);
 		} finally {
 			releaseSessionSpawnPermit(session);
 		}
