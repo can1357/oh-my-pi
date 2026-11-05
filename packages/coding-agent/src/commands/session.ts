@@ -69,8 +69,8 @@ function printSessionLeases(sessionIds: string[], json: boolean): void {
  * consults (this profile's sessions root and archive, `session.extraRoots`,
  * and every other profile's root and archive). This is the one command that
  * walks the sessions tree; lookups by id read only the index files. A root
- * that cannot be read is reported and the rest are still reindexed; the
- * command then exits 1.
+ * that cannot be reindexed (unreadable, or its snapshot unreadable) is
+ * reported and the rest are still reindexed; the command then exits 1.
  */
 async function reindexSessionRoots(root: string | undefined): Promise<void> {
 	if (root === undefined) await applySessionExtraRootsSetting(process.cwd());
@@ -86,7 +86,7 @@ async function reindexSessionRoots(root: string | undefined): Promise<void> {
 		}
 		for (const { bucket, error } of result.unreadable) {
 			process.stderr.write(
-				`${chalk.yellow(`warning: ${bucket} could not be read and was skipped; every session the walk could read is still indexed: ${error}`)}\n`,
+				`${chalk.yellow(`warning: ${bucket} could not be read; the index keeps what it recorded there before: ${error}`)}\n`,
 			);
 		}
 		process.stdout.write(`${result.indexed}\t${result.root}\n`);

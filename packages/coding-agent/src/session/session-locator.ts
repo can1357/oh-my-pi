@@ -574,11 +574,9 @@ export interface SessionLocatorRebuild {
 	/** Session files recorded in the snapshot. */
 	indexed: number;
 	/**
-	 * Paths the reindex could not read and skipped, with why (`bucket` holds
-	 * the path, `code` the errno code when there is one): buckets, directories
-	 * inside them, transcripts, and the previous snapshot. Every session the
-	 * walk could read is in the new snapshot regardless; for everything but the
-	 * previous snapshot, so is each line the previous snapshot held.
+	 * Buckets, directories inside them, and transcripts that could not be read,
+	 * with why (`bucket` holds the path, `code` the errno code when there is
+	 * one). The new snapshot keeps what the previous one recorded under each.
 	 */
 	unreadable: UnreadableEntry[];
 }
@@ -680,10 +678,11 @@ async function scanRootTranscripts(
  *
  * The walk runs unlocked; the read-merge-rename of the snapshot runs under
  * an exclusive per-root lock, so a reindex that finished meanwhile is merged
- * rather than overwritten. A snapshot that cannot be read is reported and
- * replaced from the walk: it is a cache of this root's own files, and keeping
- * it would cost the root every readable session the walk just found. The log
- * is never touched, so lines other processes append stay.
+ * rather than overwritten. A snapshot that exists but cannot be read is never
+ * replaced: the reindex throws instead. The walk deliberately skips a
+ * symlinked bucket, a dot-entry and a file at the root's top level, so a
+ * snapshot can hold rows this walk cannot derive, and publishing over it would
+ * destroy them. The log is never touched, so lines other processes append stay.
  * This is the one operation that walks the tree.
  */
 export async function rebuildSessionLocator(root: string): Promise<SessionLocatorRebuild> {
@@ -735,10 +734,11 @@ export async function rebuildSessionLocator(root: string): Promise<SessionLocato
 			try {
 				previous = await Bun.file(snapshot).text();
 			} catch (error) {
-				// The snapshot is this root's own files, read back: one that cannot
-				// be read is reported and rebuilt from the walk, never kept. Refusing
-				// would cost the root every readable session the walk just found.
-				if (!isEnoent(error)) result.unreadable.push(unreadableEntry(snapshot, error));
+				if (!isEnoent(error)) {
+					throw new Error(`${snapshot} cannot be read, so it was not replaced: ${String(error)}`, {
+						cause: error,
+					});
+				}
 			}
 			const kept = new Set<string>();
 			const lines: string[] = [`${REBUILT_MARKER}${new Date().toISOString()}\n`];

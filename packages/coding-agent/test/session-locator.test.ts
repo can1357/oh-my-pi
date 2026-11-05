@@ -750,39 +750,29 @@ describe("session index: lookups by id", () => {
 			expect((await resolveResumableSession(childId, cwdC))?.session.path).toBe(movedChild);
 		});
 
-		it.skipIf(unlessRoot)(
-			"reindexes a root whose artifact directory and snapshot are both unreadable, keeping every readable session",
-			async () => {
-				const parentId = "019a000d-0000-7000-8000-000000000001";
-				const childId = "019a000d-0000-7000-8000-000000000002";
-				const parent = path.join(getSessionsDir(), "--snap--", `2026-01-01T00-00-00-000Z_${parentId}.jsonl`);
-				const artifacts = parent.slice(0, -".jsonl".length);
-				writeTranscript(parent, parentId, "/s");
-				writeTranscript(path.join(artifacts, "Worker.jsonl"), childId, "/s");
-				await rebuildSessionLocator(getSessionsDir());
-				const snapshot = path.join(getSessionsDir(), ".session-index.base.tsv");
-				fs.chmodSync(snapshot, 0o000);
-				fs.chmodSync(artifacts, 0o000);
-				let rebuilt: SessionLocatorRebuild;
-				try {
-					rebuilt = await rebuildSessionLocator(getSessionsDir());
-				} finally {
-					fs.chmodSync(artifacts, 0o700);
-					fs.chmodSync(snapshot, 0o600);
-				}
-				// Both unreadable paths are reported; neither stops the walk, and the
-				// snapshot is republished from it rather than kept.
-				expect(rebuilt.unreadable.map(entry => entry.bucket)).toEqual([artifacts, snapshot]);
-				expect(rebuilt.indexed).toBe(1);
-				expect(fs.readFileSync(snapshot, "utf8")).toContain(parentId);
-				expect((await resolveResumableSession(parentId, cwdB))?.session.id).toBe(parentId);
-				// Nothing durable went with the snapshot: the transcript inside the
-				// directory is derived again from the tree once it can be read.
-				expect(await resolveResumableSession(childId, cwdB)).toBeUndefined();
-				await rebuildSessionLocator(getSessionsDir());
-				expect((await resolveResumableSession(childId, cwdB))?.session.id).toBe(childId);
-			},
-		);
+		it.skipIf(unlessRoot)("refuses to replace a snapshot it cannot read, and loses nothing it held", async () => {
+			const parentId = "019a000d-0000-7000-8000-000000000001";
+			const childId = "019a000d-0000-7000-8000-000000000002";
+			const parent = path.join(getSessionsDir(), "--snap--", `2026-01-01T00-00-00-000Z_${parentId}.jsonl`);
+			const artifacts = parent.slice(0, -".jsonl".length);
+			writeTranscript(parent, parentId, "/s");
+			writeTranscript(path.join(artifacts, "Worker.jsonl"), childId, "/s");
+			await rebuildSessionLocator(getSessionsDir());
+			const snapshot = path.join(getSessionsDir(), ".session-index.base.tsv");
+			const before = fs.readFileSync(snapshot, "utf8");
+			fs.chmodSync(snapshot, 0o000);
+			fs.chmodSync(artifacts, 0o000);
+			try {
+				await expect(rebuildSessionLocator(getSessionsDir())).rejects.toThrow(
+					"cannot be read, so it was not replaced",
+				);
+			} finally {
+				fs.chmodSync(artifacts, 0o700);
+				fs.chmodSync(snapshot, 0o600);
+			}
+			expect(fs.readFileSync(snapshot, "utf8")).toBe(before);
+			expect((await resolveResumableSession(childId, cwdB))?.session.id).toBe(childId);
+		});
 
 		it.skipIf(unlessRoot)("merges a reindex that published while another was still walking", async () => {
 			const childId = "019a000e-0000-7000-8000-000000000001";
