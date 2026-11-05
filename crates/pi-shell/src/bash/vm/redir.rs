@@ -1023,14 +1023,14 @@ fn zsh_open(
 	let abs = absolute(&vp.cwd, path);
 	let umask = state::umask(cx.store, vp).unwrap_or(0o022);
 	let mut tcx = Context::from_waker(&k.waker);
-	let res = match io(vp).redir.opening.as_mut() {
+	let res = match io(vp).redir.opening.as_mut().and_then(|p| p.ordinary()) {
 		Some(p) => p.poll(&mut tcx),
 		None => match cx.host.fs().open(BStr::new(&abs), flags, 0o666 & !umask) {
 			FsPoll::Ready(r) => Poll::Ready(r),
 			FsPoll::Pending(mut p) => {
 				let r = p.poll(&mut tcx);
 				if r.is_pending() {
-					io(vp).redir.opening = Some(p);
+					io(vp).redir.opening = Some(Box::new(PendingOpen::Open(p)));
 				}
 				r
 			},
@@ -1320,126 +1320,6 @@ impl File for Cat {
 	}
 }
 
-/// The error a `noclobber` reopen gives for a regular file
-/// ([`NoClobberReopen`]).
-#[derive(Debug, thiserror::Error)]
-#[error("cannot overwrite existing file")]
-struct NoClobberRefused;
-
-/// A mark a `noclobber` stage leaves on an error so a later stage knows
-/// which stage produced it. The error's own kind is kept, so it still
-/// reads as the operating system reported it.
-trait NoClobberMark: std::error::Error + Send + Sync + Sized + 'static {
-	fn new(err: std::io::Error) -> Self;
-	fn into_inner(self) -> std::io::Error;
-
-	/// Mark `err`.
-	fn wrap(err: std::io::Error) -> std::io::Error {
-		std::io::Error::new(err.kind(), Self::new(err))
-	}
-
-	/// Whether `err` carries this mark.
-	fn marks(err: &std::io::Error) -> bool {
-		err.get_ref()
-			.is_some_and(<dyn std::error::Error + Send + Sync>::is::<Self>)
-	}
-
-	/// The error this mark carried, or `err` unchanged when it has none.
-	fn unwrap(err: std::io::Error) -> std::io::Error {
-		if !Self::marks(&err) {
-			return err;
-		}
-		let kind = err.kind();
-		match err.into_inner() {
-			Some(inner) => match inner.downcast::<Self>() {
-				Ok(this) => this.into_inner(),
-				Err(other) => std::io::Error::new(kind, other),
-			},
-			None => kind.into(),
-		}
-	}
-}
-
-/// The error a `noclobber` reopen gives when the existing file cannot be
-/// opened at all: [`judge_unopenable`] then decides, and the mark tells
-/// [`open_into`] the reopen, not the exclusive create, produced it.
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-struct NoClobberUnopenable(std::io::Error);
-
-impl NoClobberMark for NoClobberUnopenable {
-	fn new(err: std::io::Error) -> Self {
-		Self(err)
-	}
-
-	fn into_inner(self) -> std::io::Error {
-		self.0
-	}
-}
-
-/// The error a `noclobber` redirection has settled on: no stage may act
-/// on it again. [`judge_unopenable`] can leave an `EEXIST` of the reopen's
-/// own in place, and unmarked that reads as the exclusive create's, so the
-/// recovery would start again and the open would repeat without end.
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-struct NoClobberSettled(std::io::Error);
-
-impl NoClobberMark for NoClobberSettled {
-	fn new(err: std::io::Error) -> Self {
-		Self(err)
-	}
-
-	fn into_inner(self) -> std::io::Error {
-		self.0
-	}
-}
-
-/// Whether `err` is `noclobber`'s own refusal.
-fn is_refusal(err: &std::io::Error) -> bool {
-	err.get_ref()
-		.is_some_and(<dyn std::error::Error + Send + Sync>::is::<NoClobberRefused>)
-}
-
-/// What a `noclobber` redirection does when the reopen could not open the
-/// existing file (`err`): bash's `noclobber_open` stats the path before it
-/// opens anything, so a regular file it may not write is refused, and so is
-/// a path whose metadata cannot be read at all — there bash adds `O_EXCL`
-/// and its create reports `EEXIST` (a dangling symlink). A path that is
-/// readable and not regular keeps the open's own error (`>dir` is `Is a
-/// directory` in Bash 5.2.21 and 5.3.0), marked as settled: that error can
-/// itself be an `EEXIST`, which unmarked would read as the exclusive
-/// create's and start the recovery again.
-fn judge_unopenable(st: std::io::Result<Stat>, err: std::io::Error) -> std::io::Error {
-	match st {
-		Ok(st) if st.kind != StatKind::File => NoClobberSettled::wrap(err),
-		_ => std::io::Error::new(std::io::ErrorKind::AlreadyExists, NoClobberRefused),
-	}
-}
-
-/// The pending look at the path [`judge_unopenable`] needs, kept in the
-/// redirection's progress like a pending open.
-struct NoClobberPath {
-	stat: Box<dyn FsPending<Stat>>,
-	err:  Option<std::io::Error>,
-}
-
-impl FsPending<Box<dyn File>> for NoClobberPath {
-	fn poll(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<Box<dyn File>>> {
-		self.stat.poll(cx).map(|st| {
-			let err = self
-				.err
-				.take()
-				.unwrap_or_else(|| std::io::ErrorKind::AlreadyExists.into());
-			Err(judge_unopenable(st, err))
-		})
-	}
-
-	fn reissuable(&self) -> bool {
-		self.stat.reissuable()
-	}
-}
-
 /// Whether `noclobber` must refuse an object that IS a file on a
 /// filesystem, given its own `fstat` answer `st`. bash fails closed when
 /// it cannot establish the object's kind: with `fstat` made to report
@@ -1461,57 +1341,170 @@ fn refuses_fs_object(st: std::io::Result<Stat>) -> bool {
 /// clobbered, which the object says itself ([`File::on_filesystem`]) and
 /// not through an errno: a provider can report `Unsupported` for a real
 /// file it could not stat.
+///
+/// This is the only place that asks the question, for a path this process
+/// opened ([`open_into`]) and for a descriptor the shell already holds
+/// ([`install_held`]) alike.
 fn must_not_clobber(file: &dyn File) -> bool {
 	file.on_filesystem() && refuses_fs_object(file.stat())
 }
 
-/// `noclobber`'s plain reopen of an existing file: a regular file is
-/// refused once opened ([`NoClobberRefused`]), anything else passes, and a
-/// file that cannot be opened at all is marked for [`judge_unopenable`].
-struct NoClobberReopen(Box<dyn FsPending<Box<dyn File>>>);
+/// What an open has settled on.
+///
+/// `noclobber`'s refusal is a value here, not an `io::Error` carrying a
+/// marker: no step has to recognise another step's error, and an `EEXIST`
+/// a step produced can never be read as the exclusive create's and send
+/// the open round again.
+enum Settled {
+	/// Install this object.
+	Opened(Box<dyn File>),
+	/// `noclobber` refuses to overwrite what is there.
+	Refused,
+	/// Report this error as the open's.
+	Failed(std::io::Error),
+}
 
-impl NoClobberReopen {
-	fn judge(r: std::io::Result<Box<dyn File>>) -> std::io::Result<Box<dyn File>> {
-		match r {
-			Ok(file) if must_not_clobber(file.as_ref()) => {
-				Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, NoClobberRefused))
-			},
-			Err(err) => Err(NoClobberUnopenable::wrap(err)),
-			r => r,
+/// A step of an open to start.
+enum OpenStep {
+	/// The open the redirection's `flags` ask for; under `noclobber` that
+	/// is the exclusive create.
+	Open,
+	/// `noclobber`'s plain reopen of the file the create found: neither
+	/// creating nor truncating, so what is there is opened as it is.
+	Reopen,
+	/// The look at the path that judges a file the reopen could not open
+	/// at all ([`judge_unopenable`]), carrying that open's error.
+	Judge(std::io::Error),
+}
+
+/// A step of an open in flight, kept in the redirection's progress
+/// ([`super::proc::RedirProgress::opening`]) while the engine waits.
+///
+/// The step is the state: nothing has to be recovered from an error.
+pub(crate) enum PendingOpen {
+	/// [`OpenStep::Open`].
+	Open(Box<dyn FsPending<Box<dyn File>>>),
+	/// [`OpenStep::Reopen`].
+	Reopen(Box<dyn FsPending<Box<dyn File>>>),
+	/// [`OpenStep::Judge`].
+	Judge { stat: Box<dyn FsPending<Stat>>, err: std::io::Error },
+}
+
+impl PendingOpen {
+	/// The open kept here when no `noclobber` step can follow it: zsh's
+	/// redirections never make the exclusive create ([`zsh_flags`]), so an
+	/// open of theirs is always this one.
+	fn ordinary(&mut self) -> Option<&mut dyn FsPending<Box<dyn File>>> {
+		match self {
+			Self::Open(p) => Some(p.as_mut()),
+			Self::Reopen(..) | Self::Judge { .. } => None,
 		}
 	}
 }
 
-impl FsPending<Box<dyn File>> for NoClobberReopen {
-	fn poll(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<Box<dyn File>>> {
-		self.0.poll(cx).map(Self::judge)
-	}
+/// What a step's answer leads to.
+enum Step {
+	/// Run this step; it comes strictly after the one that asked for it.
+	Next(OpenStep),
+	/// The open has settled.
+	Done(Settled),
+	/// The step is in flight and kept; the redirection waits.
+	Blocked,
+}
 
-	fn reissuable(&self) -> bool {
-		self.0.reissuable()
+/// What the open of a redirection settles on, or the step after it: under
+/// `noclobber` (`excl`) a create that met an existing file opens it as it
+/// is.
+fn after_open(excl: bool, r: std::io::Result<Box<dyn File>>) -> Step {
+	match r {
+		Ok(file) => Step::Done(Settled::Opened(file)),
+		Err(err) if excl && err.kind() == std::io::ErrorKind::AlreadyExists => {
+			Step::Next(OpenStep::Reopen)
+		},
+		Err(err) => Step::Done(Settled::Failed(err)),
 	}
 }
 
-/// Start the look at `abs` that decides a `noclobber` refusal for an
-/// existing file the reopen could not open ([`judge_unopenable`]); a
-/// pending one is kept in the redirection's progress.
-fn judge_path(
+/// What `noclobber`'s reopen settles on, or the step after it: the object
+/// opened decides ([`must_not_clobber`]), and a file that could not be
+/// opened at all is judged by the path's own kind.
+fn after_reopen(r: std::io::Result<Box<dyn File>>) -> Step {
+	match r {
+		Ok(file) if must_not_clobber(file.as_ref()) => Step::Done(Settled::Refused),
+		Ok(file) => Step::Done(Settled::Opened(file)),
+		Err(err) => Step::Next(OpenStep::Judge(err)),
+	}
+}
+
+/// What a `noclobber` redirection settles on when the reopen could not
+/// open the existing file (`err`): bash's `noclobber_open` stats the path
+/// before it opens anything, so a regular file it may not write is
+/// refused, and so is a path whose metadata cannot be read at all — there
+/// bash adds `O_EXCL` and its create reports `EEXIST` (a dangling
+/// symlink). A path that is readable and not regular keeps the open's own
+/// error (`>dir` is `Is a directory` in Bash 5.2.21 and 5.3.0).
+fn judge_unopenable(st: std::io::Result<Stat>, err: std::io::Error) -> Settled {
+	match st {
+		Ok(st) if st.kind != StatKind::File => Settled::Failed(err),
+		_ => Settled::Refused,
+	}
+}
+
+/// Poll the step in flight: `Ok` is what it settled on or the step after
+/// it, `Err` gives the step back, still in flight.
+fn poll_step(p: PendingOpen, tcx: &mut Context<'_>, excl: bool) -> Result<Step, PendingOpen> {
+	match p {
+		PendingOpen::Open(mut f) => match f.poll(tcx) {
+			Poll::Pending => Err(PendingOpen::Open(f)),
+			Poll::Ready(r) => Ok(after_open(excl, r)),
+		},
+		PendingOpen::Reopen(mut f) => match f.poll(tcx) {
+			Poll::Pending => Err(PendingOpen::Reopen(f)),
+			Poll::Ready(r) => Ok(after_reopen(r)),
+		},
+		PendingOpen::Judge { mut stat, err } => match stat.poll(tcx) {
+			Poll::Pending => Err(PendingOpen::Judge { stat, err }),
+			Poll::Ready(st) => Ok(Step::Done(judge_unopenable(st, err))),
+		},
+	}
+}
+
+/// Start `stage` for `abs` and poll it once; a pending one is kept in the
+/// redirection's progress.
+fn start_stage(
 	vp: &mut Vproc,
 	cx: &mut Cx<'_>,
 	tcx: &mut Context<'_>,
 	abs: &BString,
-	err: std::io::Error,
-) -> Poll<std::io::Result<Box<dyn File>>> {
-	match cx.host.fs().stat(BStr::new(abs), true) {
-		FsPoll::Ready(st) => Poll::Ready(Err(judge_unopenable(st, err))),
-		FsPoll::Pending(stat) => {
-			let mut p: Box<dyn FsPending<Box<dyn File>>> =
-				Box::new(NoClobberPath { stat, err: Some(err) });
-			let r = p.poll(tcx);
-			if r.is_pending() {
-				io(vp).redir.opening = Some(p);
-			}
-			r
+	flags: OpenFlags,
+	mode: u32,
+	stage: OpenStep,
+) -> Step {
+	let excl = flags.contains(OpenFlags::EXCL);
+	let started = match stage {
+		OpenStep::Open => match cx.host.fs().open(BStr::new(abs), flags, mode) {
+			FsPoll::Ready(r) => return after_open(excl, r),
+			FsPoll::Pending(p) => PendingOpen::Open(p),
+		},
+		OpenStep::Reopen => match cx.host.fs().open(BStr::new(abs), OpenFlags::WRITE, mode) {
+			FsPoll::Ready(r) => return after_reopen(r),
+			FsPoll::Pending(p) => PendingOpen::Reopen(p),
+		},
+		OpenStep::Judge(err) => match cx.host.fs().stat(BStr::new(abs), true) {
+			FsPoll::Ready(st) => return Step::Done(judge_unopenable(st, err)),
+			FsPoll::Pending(stat) => PendingOpen::Judge { stat, err },
+		},
+	};
+	keep(vp, poll_step(started, tcx, excl))
+}
+
+/// Keep a step that is still in flight in the redirection's progress.
+fn keep(vp: &mut Vproc, step: Result<Step, PendingOpen>) -> Step {
+	match step {
+		Ok(step) => step,
+		Err(p) => {
+			io(vp).redir.opening = Some(Box::new(p));
+			Step::Blocked
 		},
 	}
 }
@@ -1523,16 +1516,11 @@ fn judge_path(
 /// decides, as it does for everything else, and the object it returns
 /// stays the authority (a path whose kind changes after this look is
 /// still judged by what was opened).
-fn early_refusal(cx: &mut Cx<'_>, abs: &BString, flags: OpenFlags) -> Option<std::io::Error> {
-	if !flags.contains(OpenFlags::EXCL) {
-		return None;
-	}
-	match cx.host.fs().stat(BStr::new(abs), true) {
-		FsPoll::Ready(Ok(st)) if st.kind == StatKind::File => {
-			Some(std::io::Error::new(std::io::ErrorKind::AlreadyExists, NoClobberRefused))
-		},
-		_ => None,
-	}
+fn early_refusal(cx: &mut Cx<'_>, abs: &BString) -> bool {
+	matches!(
+		cx.host.fs().stat(BStr::new(abs), true),
+		FsPoll::Ready(Ok(st)) if st.kind == StatKind::File
+	)
 }
 
 /// Install the already-open object `h` on every fd of `fds`, for a
@@ -1553,9 +1541,7 @@ fn install_held(
 	flags: OpenFlags,
 	line: u32,
 ) -> Result<(), Halt> {
-	if flags.contains(OpenFlags::EXCL)
-		&& h.on_filesystem()
-		&& h.stat().is_some_and(refuses_fs_object)
+	if flags.contains(OpenFlags::EXCL) && h.with_file(|file| must_not_clobber(file)).unwrap_or(false)
 	{
 		return Err(fail(k, vp, cx, line, Diag::NoClobber { path: path.clone() }));
 	}
@@ -1563,36 +1549,6 @@ fn install_held(
 		set_fd(vp, fd, Some(h.clone()));
 	}
 	Ok(())
-}
-
-/// Start the open of `abs` with `flags`, or `noclobber`'s plain reopen of
-/// it (`reopen`); a pending one is kept in the redirection's progress.
-fn start_open(
-	vp: &mut Vproc,
-	cx: &mut Cx<'_>,
-	tcx: &mut Context<'_>,
-	abs: &BString,
-	flags: OpenFlags,
-	mode: u32,
-	reopen: bool,
-) -> Poll<std::io::Result<Box<dyn File>>> {
-	let now = if reopen { OpenFlags::WRITE } else { flags };
-	match cx.host.fs().open(BStr::new(abs), now, mode) {
-		FsPoll::Ready(r) if reopen => Poll::Ready(NoClobberReopen::judge(r)),
-		FsPoll::Ready(r) => Poll::Ready(r),
-		FsPoll::Pending(p) => {
-			let mut p: Box<dyn FsPending<Box<dyn File>>> = if reopen {
-				Box::new(NoClobberReopen(p))
-			} else {
-				p
-			};
-			let r = p.poll(tcx);
-			if r.is_pending() {
-				io(vp).redir.opening = Some(p);
-			}
-			r
-		},
-	}
 }
 
 /// Open `path` (pollable) and install it on every fd of `fds`. Under
@@ -1626,60 +1582,45 @@ fn open_into(
 	let abs = absolute(&vp.cwd, path);
 	// The vproc's own `umask` (a subshell's applies to its redirections).
 	let mode = 0o666 & !state::umask(cx.store, vp).unwrap_or(0o022);
+	let excl = flags.contains(OpenFlags::EXCL);
 	let mut tcx = Context::from_waker(&k.waker);
-	let mut res = match io(vp).redir.opening.as_mut() {
-		Some(p) => p.poll(&mut tcx),
-		None => match early_refusal(cx, &abs, flags) {
-			Some(err) => Poll::Ready(Err(err)),
-			None => start_open(vp, cx, &mut tcx, &abs, flags, mode, false),
-		},
+	// Resume the step in flight, or start the first one.
+	let mut step = if let Some(p) = io(vp).redir.opening.take() {
+		keep(vp, poll_step(*p, &mut tcx, excl))
+	} else if excl && early_refusal(cx, &abs) {
+		Step::Done(Settled::Refused)
+	} else {
+		start_stage(vp, cx, &mut tcx, &abs, flags, mode, OpenStep::Open)
 	};
-	// The exclusive create met an existing file: open it as it is. Only an
-	// unmarked `EEXIST` is the create's own. The reopen's failure is marked
-	// for the stage below ([`NoClobberUnopenable`]) and an error the stages
-	// have settled on is marked as settled ([`NoClobberSettled`]), however
-	// their kinds read: recovering from either of those again would repeat
-	// the open without end.
-	if let Poll::Ready(Err(err)) = &res
-		&& flags.contains(OpenFlags::EXCL)
-		&& err.kind() == std::io::ErrorKind::AlreadyExists
-		&& !is_refusal(err)
-		&& !NoClobberUnopenable::marks(err)
-		&& !NoClobberSettled::marks(err)
-	{
-		io(vp).redir.opening = None;
-		res = start_open(vp, cx, &mut tcx, &abs, flags, mode, true);
-	}
-	// That reopen could not open it either: the path's own kind decides
-	// ([`judge_unopenable`]).
-	if let Poll::Ready(Err(err)) = &res
-		&& NoClobberUnopenable::marks(err)
-	{
-		let Poll::Ready(Err(err)) = std::mem::replace(&mut res, Poll::Pending) else {
-			unreachable!("matched a ready error just above")
-		};
-		io(vp).redir.opening = None;
-		res = judge_path(vp, cx, &mut tcx, &abs, NoClobberUnopenable::unwrap(err));
-	}
-	if res.is_ready() {
-		io(vp).redir.opening = None;
-	}
-	match res {
-		Poll::Pending => Err(Halt::Flow(Flow::Block(WaitKey::Fs { op: FsOp::Open, path: abs }))),
-		Poll::Ready(Ok(file)) => {
+	// Each step either settles or names a LATER step
+	// (`Open` → `Reopen` → `Judge`), so this runs at most three times and
+	// no step can be entered twice: an `EEXIST` a step produced is its
+	// own answer and can never be taken for the exclusive create's.
+	let settled = loop {
+		match step {
+			Step::Blocked => {
+				return Err(Halt::Flow(Flow::Block(WaitKey::Fs { op: FsOp::Open, path: abs })));
+			},
+			Step::Done(settled) => break settled,
+			Step::Next(stage) => {
+				step = start_stage(vp, cx, &mut tcx, &abs, flags, mode, stage);
+			},
+		}
+	};
+	match settled {
+		Settled::Opened(file) => {
 			let h = FdRef::open(file, FdOrigin::Host);
 			for &fd in fds {
 				set_fd(vp, fd, Some(h.clone()));
 			}
 			Ok(())
 		},
-		Poll::Ready(Err(err)) => {
-			let d = if is_refusal(&err) {
-				Diag::NoClobber { path: path.clone() }
-			} else {
-				Diag::Io { path: path.clone(), err: NoClobberSettled::unwrap(err) }
-			};
-			k.diag(cx, vp, line, d);
+		Settled::Refused => {
+			k.diag(cx, vp, line, Diag::NoClobber { path: path.clone() });
+			Err(Halt::Failed)
+		},
+		Settled::Failed(err) => {
+			k.diag(cx, vp, line, Diag::Io { path: path.clone(), err });
 			Err(Halt::Failed)
 		},
 	}

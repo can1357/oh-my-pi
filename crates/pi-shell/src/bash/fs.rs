@@ -262,12 +262,19 @@ pub trait File: Send {
 	fn stat(&self) -> io::Result<Stat> {
 		Err(io::ErrorKind::Unsupported.into())
 	}
-	/// Whether this object is a file on a filesystem, so that asking the
-	/// filesystem about it is meaningful and a failure to answer means the
-	/// answer is unknown rather than absent. Engine memory — here-documents,
-	/// pipeline buffers, captures — is not, and says so here rather than
-	/// through the errno of [`Self::stat`], which a provider can also
-	/// report for a real file it could not stat.
+	/// Whether [`Self::stat`] is authoritative for this object: it is an
+	/// object the operating system keeps metadata for, so an answer is the
+	/// truth about it and a failure to answer means its kind is UNKNOWN,
+	/// not that it has none.
+	///
+	/// The name is about the metadata, not about where the bytes live: an
+	/// anonymous OS pipe, a socket and a terminal all answer `true`,
+	/// because `fstat` reports them as `Fifo`, `Socket` and `CharDev` and
+	/// that answer can be relied on. Only objects the host cannot stat at
+	/// all answer `false` — engine memory (here-documents, pipeline
+	/// buffers, captures) and a provider's objects — and they say it here
+	/// rather than through the errno of [`Self::stat`], which a provider
+	/// can also report for a real file it could not stat.
 	///
 	/// Deliberately without a default: a decision that protects a file from
 	/// being overwritten ([`crate::bash::vm::redir`]'s `noclobber`) reads

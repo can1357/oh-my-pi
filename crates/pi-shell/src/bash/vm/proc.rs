@@ -1352,8 +1352,10 @@ pub struct RedirProgress {
 	pub done:    usize,
 	/// Expanded target of the current redirection.
 	pub target:  Option<BString>,
-	/// Pending `open` of the current redirection.
-	pub opening: Option<Box<dyn FsPending<Box<dyn crate::bash::fs::File>>>>,
+	/// The step of the current redirection's `open` in flight
+	/// ([`super::redir::PendingOpen`]; boxed, to keep this structure's
+	/// size, which every idle vproc pays for).
+	pub opening: Option<Box<super::redir::PendingOpen>>,
 }
 
 /// A file probe or name lookup requested by a pollable builtin or `[[ ]]`.

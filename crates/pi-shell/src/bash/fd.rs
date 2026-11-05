@@ -372,15 +372,12 @@ impl FdRef {
 		self.0.state.lock().file_ref().map(File::stat)
 	}
 
-	/// Whether the underlying object is a file on a filesystem
-	/// ([`File::on_filesystem`]); `false` when closed, lost or engine memory.
-	pub fn on_filesystem(&self) -> bool {
-		self
-			.0
-			.state
-			.lock()
-			.file_ref()
-			.is_some_and(File::on_filesystem)
+	/// Ask the underlying object `ask`, under one lock; `None` when closed
+	/// or lost. A caller that needs two answers about the same object
+	/// (`noclobber` needs [`File::on_filesystem`] and [`File::stat`]) asks
+	/// them here, of one object, instead of locking twice.
+	pub fn with_file<T>(&self, ask: impl FnOnce(&dyn File) -> T) -> Option<T> {
+		self.0.state.lock().file_ref().map(ask)
 	}
 
 	/// OS handle an external can inherit directly.
@@ -457,7 +454,10 @@ impl File for TaggedOutput {
 	}
 
 	fn on_filesystem(&self) -> bool {
-		self.base.on_filesystem()
+		self
+			.base
+			.with_file(|file| file.on_filesystem())
+			.unwrap_or(false)
 	}
 
 	fn dup(&self) -> io::Result<Box<dyn File>> {
