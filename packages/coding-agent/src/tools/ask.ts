@@ -504,11 +504,11 @@ function plainField(text: string | undefined): ImageMarkedPart[] | undefined {
 /**
  * One answer field as marked text, numbered from `offset + 1` among the answer's images.
  *
- * `parts` is the provenance the prompt recorded: which runs of `text` are markers it inserted
- * itself. Only those are renumbered. A host that attaches images to an answer without recording
- * it (none in this repo does — see `docs/tools/ask.md`) gets one literal run: its text reaches
- * the model exactly as written, keeping that answer's own numbering, rather than having markers
- * guessed out of the person's words.
+ * `parts` is what the prompt reported: which runs of `text` carried the attachment tokens it
+ * inserted. Only those are renumbered, and no marker is ever found by its characters. A host
+ * that attaches images to an answer without recording it (none in this repo does — see
+ * `docs/tools/ask.md`) gets one literal run: its text reaches the model exactly as written,
+ * keeping that answer's own numbering.
  */
 function markAnswerField(
 	text: string | undefined,

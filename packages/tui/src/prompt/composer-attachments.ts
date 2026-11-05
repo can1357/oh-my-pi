@@ -245,12 +245,14 @@ export function formatVisionMarker(
 }
 
 /**
- * One run of a submitted composer field, as the composer built it: text exactly as the person
- * typed it, or a marker the composer itself inserted for one of that field's attachments.
+ * One run of a submitted composer field, as the composer built it: text as the person typed it,
+ * or a marker the composer itself inserted for one of that field's attachments.
  *
- * Provenance, not a parse. A consumer that renumbers markers across fields (several backgrounded
- * `ask` answers delivered in one message) renumbers marker parts only, so a typed
- * `user-[Image #1].png`, a quoted `"[Image #1]"` or a fenced block is rendered byte for byte.
+ * A consumer that renumbers markers across fields (several backgrounded `ask` answers delivered
+ * in one message) renumbers marker parts only, so a typed `user-[Image #1].png`, a quoted
+ * `"[Image #1]"` or a fenced block is rendered byte for byte. A marker part comes from the
+ * composer's own token characters, so text of the person's that reads exactly like a live token
+ * (`📷 #1`) becomes one too.
  */
 export type AttachmentTextPart = string | AttachmentMarkerPart;
 

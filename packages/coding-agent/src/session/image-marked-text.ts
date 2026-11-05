@@ -3,11 +3,12 @@
  *
  * An `ask` answer numbers the images a person pasted (`[Image #N]` in their text, and a source
  * notice per image). When several answers share one message, their numbers must be shifted so
- * each marker names one image of that message. A marker is only ever a marker because the prompt
- * that took the answer inserted it there: the composer records the runs it built the field from
- * ({@link AttachmentTextPart}) and they travel here. Nothing searches the person's own words, so
- * a typed `user-[Image #1].png`, a quoted `"[Image #1]"` or a fenced block is delivered byte for
- * byte, whatever the shift.
+ * each marker names one image of that message. A marker is a marker here only because the
+ * prompt that took the answer reported that run as one: the composer records the runs it built
+ * the field from ({@link AttachmentTextPart}) and they travel here. Nothing searches the
+ * person's own words, so a typed `user-[Image #1].png`, a quoted `"[Image #1]"` or a fenced
+ * block is delivered byte for byte, whatever the shift. What the composer itself reads as one
+ * of its live tokens (`📷 #N`) arrives here as a marker run.
  */
 import type { AttachmentTextPart } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import { formatVisionMarkerTail } from "@oh-my-pi/pi-tui/prompt/composer-attachments";

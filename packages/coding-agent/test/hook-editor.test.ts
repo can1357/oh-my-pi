@@ -370,8 +370,9 @@ describe("HookEditorComponent prompt-style mode", () => {
 
 	it("leaves a pasted file name that reads like an attachment token as text", () => {
 		// `user-📷 #1.png` is a real file the person pasted the name of. Only the piece the host
-		// marked as an attachment is this prompt's token; the characters beside it are never
-		// searched, so the name reaches the answer whole and the real image keeps its marker.
+		// marked as an attachment is this prompt's token, and this piece is long enough to collapse,
+		// so its body — the name included — reaches the answer whole while the real image keeps its
+		// marker. Written into the buffer instead, those same characters would be read as the token.
 		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
 		const onSubmit = vi.fn();
 		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {

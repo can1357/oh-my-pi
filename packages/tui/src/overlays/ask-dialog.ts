@@ -57,8 +57,8 @@ export interface ExtensionAskDialogResultItem {
 	customInputImages?: ImageContent[];
 	/**
 	 * `customInput` as the runs the prompt built it from, so a consumer renumbering markers
-	 * across answers moves only the markers the prompt inserted. A host that attaches images
-	 * without recording this leaves its answer's own numbering untouched.
+	 * across answers moves only the runs the prompt reported as markers. A host that attaches
+	 * images without recording this leaves its answer's own numbering untouched.
 	 */
 	customInputParts?: AttachmentTextPart[];
 	note?: string;

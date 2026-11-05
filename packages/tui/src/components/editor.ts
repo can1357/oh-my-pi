@@ -707,7 +707,9 @@ export interface EditorInlineReplacement {
 export interface ExpandedRun {
 	/** The expanded content: a paste's body, an atom's expansion, or typed text verbatim. */
 	text: string;
-	/** The registered atom label this run expanded from; absent for typed text and pastes. */
+	/** The registered atom label this run's characters matched; absent for a paste body and for
+	 *  text that matches no label. Text the person typed or pasted that reads exactly like a
+	 *  registered label matches it too, so this names the label, not who put the characters there. */
 	atom?: string;
 }
 
@@ -3421,9 +3423,10 @@ export class Editor implements Component, Focusable {
 	}
 
 	/**
-	 * The submitted buffer as runs, each saying whether the editor placed it. A host that must
-	 * tell its own insertions from identical text the person typed reads this instead of
-	 * re-scanning {@link getExpandedText}.
+	 * The submitted buffer as runs, each naming the registered atom label it matched. A host
+	 * reads this instead of re-scanning {@link getExpandedText} for its own labels; text the
+	 * person typed or pasted that reads exactly like a live label is reported as that label's
+	 * run, because that is what the editor expands it to.
 	 */
 	getExpandedRuns(): ExpandedRun[] {
 		return this.#expandRuns(this.#state.lines.join("\n"));

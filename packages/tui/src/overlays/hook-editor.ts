@@ -77,8 +77,9 @@ export function boundPromptTitle(prefix: string, question: string): string {
 
 /**
  * Called with the submitted text, the attachments it kept, and — whenever attachments survive —
- * the runs the text was built from, so the host can tell the markers this prompt inserted from
- * identical characters the person typed. `renderAttachmentText(parts)` is `value`.
+ * the runs the text was built from, so the host knows which runs carried this prompt's own
+ * attachment tokens. Characters the person wrote that read exactly like a live token carry it
+ * too. `renderAttachmentText(parts)` is `value`.
  */
 export type HookEditorSubmit = (value: string, images?: ImageContent[], parts?: AttachmentTextPart[]) => void;
 
@@ -104,8 +105,9 @@ export interface HookEditorOptions {
 	/**
 	 * The prefilled draft as the runs a previous submission of this prompt produced
 	 * ({@link HookEditorSubmit}). Re-editing restores each marker as the attachment token
-	 * that produced it, so the draft keeps its provenance instead of being re-derived from text.
-	 * Without it a prefill is entirely typed text, markers included.
+	 * that produced it, so the buffer carries the tokens instead of their rendered markers.
+	 * Without it a prefill is entirely typed text, markers included. Restored text that reads
+	 * exactly like one of those tokens is read as the token, as typing it is.
 	 */
 	parts?: readonly AttachmentTextPart[];
 	/**
@@ -144,8 +146,9 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 	#onPasteImagePath: HookEditorOptions["onPasteImagePath"];
 	#pasteHandler = new BracketedPasteHandler();
 	#pendingPastes: { settled: boolean; content: readonly PasteDelivery[] | undefined }[] = [];
-	/** Attachment token in the buffer → the marker it stands for; the provenance of every marker
-	 *  this prompt inserted. A person who types the same characters produces typed text. */
+	/** Attachment token in the buffer → the marker it stands for; every marker this prompt
+	 *  inserted. A run carries the token when its characters match, so the same characters
+	 *  written by the person carry it too. */
 	#markers = new Map<string, AttachmentMarkerPart>();
 	#submitQueued = false;
 	#disposed = false;
@@ -203,7 +206,7 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		}
 		if (parts?.length) {
 			// Re-editing a draft this prompt produced: restore each marker as the token that
-			// produced it, so its provenance survives the round trip.
+			// produced it, so the token itself, not its rendered marker, goes back in the buffer.
 			this.#editor.setText(parts.map(part => this.#token(part)).join(""));
 		} else if (prefill) {
 			this.#editor.setText(prefill);
@@ -390,8 +393,8 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 
 	/**
 	 * The buffer as runs: every attachment token this prompt placed becomes its marker, and
-	 * everything else is text exactly as the person wrote it — including characters that look
-	 * like a marker.
+	 * everything else is text exactly as the person wrote it — except characters of their own
+	 * that read exactly like a live token, which the editor reads as that token.
 	 */
 	#parts(): AttachmentTextPart[] {
 		const parts: AttachmentTextPart[] = [];
@@ -434,8 +437,9 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 	 * Reserve ordered clipboard delivery. Completion accepts one nonempty delivery, or releases
 	 * on undefined. A host that attached an image through {@link attachImage} delivers its token
 	 * as its own {@link PasteDelivery} piece rather than splicing it into the pasted text: the
-	 * token then enters the buffer as the atom it is, and the person's own characters — which
-	 * may read exactly like one — stay text.
+	 * token then enters the buffer as the atom it is, and the person's text is pasted as text. A
+	 * piece long enough to collapse keeps its body verbatim, characters that read like a token
+	 * included; a short piece's identical characters are read as the token, as typing them is.
 	 */
 	beginPaste(): (content: string | readonly PasteDelivery[] | undefined) => boolean {
 		if (this.#disposed) return () => false;
@@ -572,9 +576,11 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 
 	/**
 	 * The buffer as the person sees it: pastes expanded to their content, attachment tokens left
-	 * standing. The external editor therefore hands the tokens back as tokens, and an attachment
-	 * keeps its provenance across the round trip without a marker's characters ever being
-	 * matched. A token the person deletes there drops its attachment, as deleting it here does.
+	 * standing. The external editor therefore hands the tokens back as tokens, and an unchanged
+	 * return keeps every attachment without a marker's characters ever being matched. Characters
+	 * of the person's own that read exactly like a token are read as that token on the way back,
+	 * as typing them is. A token the person deletes there drops its attachment, as deleting it
+	 * here does.
 	 */
 	#tokenizedText(): string {
 		let out = "";

@@ -134,9 +134,10 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 	// Each backgrounded `ask` answer numbers its pasted images from 1. In one delivery
 	// the answers share one message, so render each answer again with its markers raised
 	// past the images of the answers before it: `[Image #N]` then names one image of the
-	// whole delivery. Only the markers the answer inserted move; file names, code spans
-	// and the person's own text stay as written. An answer too long to deliver whole is
-	// cut to the usual preview, and its saved file holds the renumbered full text.
+	// whole delivery. Only runs the answer reported as markers move; file names, code spans and
+	// the person's own text stay as written, unless they read exactly like one of the composer's
+	// live tokens. An answer too long to deliver whole is cut to the usual preview, and its saved
+	// file holds the renumbered full text.
 	const answerImages: ImageContent[] = [];
 	const otherImages: ImageContent[] = [];
 	const results = entries.map(entry => {
