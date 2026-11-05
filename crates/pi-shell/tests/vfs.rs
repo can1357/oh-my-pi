@@ -24,8 +24,8 @@ use pi_vfs::{
 
 #[derive(Debug)]
 struct DelayedFilesystem {
-	root:        PathBuf,
-	seekable:    bool,
+	root:          PathBuf,
+	seekable:      bool,
 	/// Every open of `virtual://existing` reports that the file exists,
 	/// the creating one and the plain one alike.
 	always_eexist: bool,
@@ -263,19 +263,15 @@ impl FileHandle for DelayedFile {
 
 /// `virtual://` served from `root` by a [`DelayedFilesystem`].
 fn provider(root: &Path, seekable: bool) -> Fs {
-	Fs::new(Arc::new(DelayedFilesystem {
-		root: root.to_path_buf(),
-		seekable,
-		always_eexist: false,
-	}))
+	Fs::new(Arc::new(DelayedFilesystem { root: root.to_path_buf(), seekable, always_eexist: false }))
 }
 
 /// `virtual://` served from `root` by a [`DelayedFilesystem`] whose every
 /// open of `virtual://existing` reports that the file exists.
 fn provider_refusing_every_open(root: &Path) -> Fs {
 	Fs::new(Arc::new(DelayedFilesystem {
-		root: root.to_path_buf(),
-		seekable: true,
+		root:          root.to_path_buf(),
+		seekable:      true,
 		always_eexist: true,
 	}))
 }

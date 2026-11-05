@@ -280,9 +280,8 @@ async fn noclobber_refuses_a_leased_file_without_waiting_for_the_lease() {
 	// process; nothing here acts on it.
 	// SAFETY: setting a signal disposition on this process.
 	unsafe { libc::signal(libc::SIGIO, libc::SIG_IGN) };
-	let victim =
-		std::ffi::CString::new(dir.path().join("f").into_os_string().into_encoded_bytes())
-			.expect("path");
+	let victim = std::ffi::CString::new(dir.path().join("f").into_os_string().into_encoded_bytes())
+		.expect("path");
 	// SAFETY: `victim` is a NUL-terminated string that outlives the call.
 	let held = unsafe { libc::open(victim.as_ptr(), libc::O_RDONLY) };
 	assert!(held >= 0, "open the file to lease it");
