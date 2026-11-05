@@ -1,4 +1,7 @@
 Wait only when blocked with nothing else to do.
-Blocks on background jobs/services you started, or on the reply to a message you sent this run; returns on the first result, a message sent to you, or a steering interrupt; a safety cap returns a still-running snapshot.
-Nothing you started running and no reply owed? Returns at once.
+Blocks on background jobs/services you started, or on the answer to a question you sent this run.
+Nothing you started running and no answer owed? Returns at once.
+- MUST wait only on your own jobs/services, or rarely the answer to a question that blocks you.
+- NEVER wait for another agent's progress or for messages nobody owes you.
+- Result in, other jobs still running? SHOULD act on it before waiting again.
 Results and messages auto-deliver. NEVER poll while work remains.

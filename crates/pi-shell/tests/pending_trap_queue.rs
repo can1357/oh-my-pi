@@ -24,6 +24,7 @@
 use pi_shell::{Shell, ShellRunOptions, cancel::CancelToken};
 
 mod obash_support;
+mod pty_support;
 
 /// Runs each script in a fresh shell and asserts Bash's output and exit
 /// status 0, reporting every row that differs. The channel carries the
@@ -389,4 +390,27 @@ fn a_chld_function_trap_still_runs_for_completed_background_jobs() {
 		assert_eq!(output.stdout, b"chld=1\nchld=2\nchld=3\nend=3\n", "{mode}: {output:?}");
 		assert!(output.stderr.is_empty(), "{mode}: {output:?}");
 	}
+}
+
+/// zsh's idle alarm enters the same pending queue as an ordinary signal.
+/// A function trap has no text record, but must run instead of the default.
+#[test]
+fn a_zsh_alarm_function_trap_keeps_the_interactive_shell_alive() {
+	let mut shell = pty_support::Spawn::zsh()
+		.args(["-f", "-i"])
+		.env("PS1", "ready> ")
+		.spawn()
+		.unwrap();
+	shell.read_until("ready> ", pty_support::TIMEOUT).unwrap();
+	shell
+		.write("TRAPALRM() { TMOUT=0; print -r -- alarm-fired; }; TMOUT=1\r")
+		.unwrap();
+	shell
+		.read_until("alarm-fired\r\n", pty_support::TIMEOUT)
+		.unwrap();
+	shell.write("print -r -- shell-alive; exit\r").unwrap();
+	shell
+		.read_until("shell-alive\r\n", pty_support::TIMEOUT)
+		.unwrap();
+	assert!(shell.wait(pty_support::TIMEOUT).unwrap().success());
 }
