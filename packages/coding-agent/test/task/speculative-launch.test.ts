@@ -459,13 +459,14 @@ describe("task speculative launch", () => {
 		// resolution, worktree and executor work that make the start itself slow. So authorization is
 		// the earliest observable proof that a launch was planned, and it is reached in microtasks.
 		//
-		// A bounded wall-clock cap was tried here first and measurement rejected it. It had ample
-		// margin on an idle box — a review arm measured 48 reverted starts reaching the executor in
-		// ≤19.71 ms against a 400 ms cap — but injecting a 650 ms authorization delay loses the race
-		// while the launch still happens at 651–661 ms. A cap that is ample on a quiet machine and
-		// short on a busy one is the same defect with a timing dependency, and a no-start snapshot
-		// taken after a cap cannot prove settling. The predecessor of that cap, a 50-microtask drain,
-		// was shorter still and reported "nothing started" under the revert.
+		// A bounded wall-clock cap was tried here first and measurement rejected it — though not for the
+		// reason "load" suggests. Its margin was ample even under load: a review arm measured 48 reverted
+		// starts at load average 315 reaching the executor in ≤19.71 ms, and 80 more with a 31.82 ms
+		// maximum, against a 400 ms cap. What defeats it is a slow authorization path, not a busy box —
+		// injecting a 650 ms delay into authorization loses the race while the launch still happens at
+		// 651–661 ms. So the hazard is any await ahead of the start growing past the cap, and a no-start
+		// snapshot taken after a cap cannot prove settling. The predecessor of that cap, a 50-microtask
+		// drain, was shorter still and reported "nothing started" under the same revert.
 		const authorize = vi.spyOn(sink, "authorizeLaunch");
 		const { tool, session } = await openSession();
 

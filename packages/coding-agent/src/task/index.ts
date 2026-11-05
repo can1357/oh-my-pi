@@ -579,8 +579,11 @@ function isBlankString(value: unknown): boolean {
  * for the field it is — and fail (2) unconditionally: both are declared `string`, in every variant,
  * so validation rewrites an array to its JSON text whatever is advertised. They are excluded for the
  * same reason as `sourceSession`, and more strongly, since `sourceSession` fails (2) only where it is
- * declared. The criterion **forbids** their membership; adding either reproduces the
- * started-then-discarded run, measured.
+ * declared. The criterion **forbids** their membership. Adding `taskFile` reproduces the
+ * started-then-discarded run, measured; adding `task` does not reach the executor — without a real
+ * `taskFile` it is not among the conditional keys, and with one the launch refuses immediately
+ * because `taskFile` is present — so the violation of (2) is the reason to exclude it, not an
+ * observed start. An earlier revision of this comment claimed both were measured to start.
  */
 const ARRAY_BLANKABLE_KEYS: Partial<Record<BlankableKey, true>> = { model: true };
 
