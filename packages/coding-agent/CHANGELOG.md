@@ -10,6 +10,8 @@
 - After upgrading, a `gc.lock` a killed older `omp gc` left behind is named and kept instead of removed; move it aside once by hand ([#17488](https://github.com/can1357/oh-my-pi/pull/17488) by [@sjawhar](https://github.com/sjawhar))
 - An `omp gc` killed while it moved a copy aside can leave the whole file at `.<name>.<16 hex digits>.leaving`; compare it with what stands at the ordinary name, then remove it ([#17488](https://github.com/can1357/oh-my-pi/pull/17488) by [@sjawhar](https://github.com/sjawhar))
 - `omp gc --compress` compresses nothing on macOS and says why: a compressed copy takes its original's name only once the kernel shows no other process holds either file open, and omp cannot get that proof there ([#17639](https://github.com/can1357/oh-my-pi/pull/17639) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --compress` removes only the scratch directory and copies it made and holds; one a killed run left is listed for you to look at and remove by hand, under `compress.leftoverScratch` in `--json`, which replaces the `leftoverScratchDirs` count ([#17639](https://github.com/can1357/oh-my-pi/pull/17639) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --archive` no longer removes aged `.<transcript>.<id>.tmp` session-writer temps, so one a killed writer left stays until you remove it, and `wouldDeleteTemps`, `deletedTemps` and `tempBytes` are gone from `omp gc --json` ([#17488](https://github.com/can1357/oh-my-pi/pull/17488) by [@sjawhar](https://github.com/sjawhar))
 
 ### Added
 
