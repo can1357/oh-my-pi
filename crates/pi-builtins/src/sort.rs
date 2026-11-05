@@ -652,7 +652,7 @@ impl ChunkCost {
 			derived_per_byte += COLLATION_KEY_BYTES_PER_BYTE;
 			per_record += size_of::<usize>() + COLLATION_KEY_FIXED_BYTES;
 		}
-		if settings.stable || settings.unique {
+		if settings.sorts_stably() {
 			// rayon's stable sort copies the lines into a scratch vector.
 			per_record += size_of::<Line>();
 		}
@@ -1472,7 +1472,9 @@ mod tests {
 	}
 
 	/// The settings of a sort that compares collation keys, or None where ICU
-	/// has no collator for the locale.
+	/// has no collator for the locale. Only ICU, used where there is no
+	/// `strcoll_l`, makes such keys.
+	#[cfg(not(unix))]
 	fn collating_settings() -> Option<GlobalSettings> {
 		let locale = super::super::Locale::try_from_str("en").expect("locale");
 		let collator =
@@ -1487,7 +1489,7 @@ mod tests {
 			)
 			.expect("the whole line"),
 		];
-		settings.collator = Some(std::sync::Arc::new(collator));
+		settings.collator = Some(super::super::Collation::Icu(std::sync::Arc::new(collator)));
 		settings.init_precomputed();
 		assert!(settings.precomputed.fast_locale_collation);
 		Some(settings)
@@ -1497,6 +1499,7 @@ mod tests {
 	// collation keys allocated while the next chunk of short records grew
 	// its own vectors. Both held memory at once, but the budget counts the
 	// larger of the two.
+	#[cfg(not(unix))]
 	#[test]
 	fn a_chunk_after_collated_long_records_does_not_keep_their_keys() {
 		const BUDGET: usize = 1 << 20;
@@ -1603,27 +1606,34 @@ mod custom_str_cmp {
 
 use std::cmp::Ordering;
 
-fn filter_char(c: u8, ignore_non_printing: bool, ignore_non_dictionary: bool) -> bool {
-	if ignore_non_dictionary && !(c.is_ascii_alphanumeric() || c.is_ascii_whitespace()) {
+use crate::locale::SortCtype;
+
+/// Whether `-d` (`dictionary`) and `-i` (`printable`) keep `c`, by GNU's
+/// tables for the locale.
+fn filter_char(c: u8, ctype: &SortCtype, ignore_non_printing: bool, ignore_non_dictionary: bool) -> bool {
+	if ignore_non_dictionary && !ctype.dictionary[usize::from(c)] {
 		return false;
 	}
-	if ignore_non_printing && (c.is_ascii_control() || !c.is_ascii()) {
+	if ignore_non_printing && !ctype.printable[usize::from(c)] {
 		return false;
 	}
 	true
 }
 
-fn cmp_chars(a: u8, b: u8, ignore_case: bool) -> Ordering {
+fn cmp_chars(a: u8, b: u8, ctype: &SortCtype, ignore_case: bool) -> Ordering {
 	if ignore_case {
-		a.to_ascii_uppercase().cmp(&b.to_ascii_uppercase())
+		ctype.fold[usize::from(a)].cmp(&ctype.fold[usize::from(b)])
 	} else {
 		a.cmp(&b)
 	}
 }
 
+/// GNU `keycompare` without collation: the bytes `-d` and `-i` keep, folded
+/// by `-f` with the locale's `toupper`, compared as unsigned bytes.
 pub fn custom_str_cmp(
 	a: &[u8],
 	b: &[u8],
+	ctype: &SortCtype,
 	ignore_non_printing: bool,
 	ignore_non_dictionary: bool,
 	ignore_case: bool,
@@ -1635,10 +1645,10 @@ pub fn custom_str_cmp(
 	}
 	let mut a_chars = a
 		.iter()
-		.filter(|&&c| filter_char(c, ignore_non_printing, ignore_non_dictionary));
+		.filter(|&&c| filter_char(c, ctype, ignore_non_printing, ignore_non_dictionary));
 	let mut b_chars = b
 		.iter()
-		.filter(|&&c| filter_char(c, ignore_non_printing, ignore_non_dictionary));
+		.filter(|&&c| filter_char(c, ctype, ignore_non_printing, ignore_non_dictionary));
 	loop {
 		let a_char = a_chars.next();
 		let b_char = b_chars.next();
@@ -1647,13 +1657,31 @@ pub fn custom_str_cmp(
 			(Some(_), None) => return Ordering::Greater,
 			(None, Some(_)) => return Ordering::Less,
 			(Some(a_char), Some(b_char)) => {
-				let ordering = cmp_chars(*a_char, *b_char, ignore_case);
+				let ordering = cmp_chars(*a_char, *b_char, ctype, ignore_case);
 				if ordering != Ordering::Equal {
 					return ordering;
 				}
 			},
 		}
 	}
+}
+
+/// GNU `keycompare`'s copy of a key for locale collation: `key` with the
+/// bytes `-d` and `-i` drop removed and the rest folded by `-f` with the
+/// locale's `toupper`, written to `out`.
+pub fn filtered_key(out: &mut Vec<u8>, key: &[u8], ctype: &SortCtype, settings: &super::KeySettings) {
+	out.clear();
+	out.extend(
+		key.iter()
+			.filter(|&&c| filter_char(c, ctype, settings.ignore_non_printing, settings.dictionary_order))
+			.map(|&c| if settings.ignore_case { ctype.fold[usize::from(c)] } else { c }),
+	);
+}
+
+thread_local! {
+	/// The two keys [`filtered_key`] writes for one comparison, kept so that
+	/// comparisons reuse their memory.
+	pub static FILTERED_KEYS: std::cell::RefCell<(Vec<u8>, Vec<u8>)> = const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
 }
 
 }
@@ -2955,18 +2983,21 @@ pub struct NumInfo {
 	sign:     Sign,
 }
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub struct NumInfoParseSettings {
+pub struct NumInfoParseSettings<'a> {
 	pub accept_si_units:     bool,
 	pub thousands_separator: Option<u8>,
 	pub decimal_pt:          Option<u8>,
+	/// GNU's `blanks[]`, which a number may follow (`numcompare`).
+	pub blank:               &'a [bool; 256],
 }
 
-impl Default for NumInfoParseSettings {
+impl Default for NumInfoParseSettings<'static> {
 	fn default() -> Self {
 		Self {
 			accept_si_units:     false,
 			thousands_separator: None,
 			decimal_pt:          Some(b'.'),
+			blank:               &crate::locale::C_SORT_CTYPE.blank,
 		}
 	}
 }
@@ -2981,7 +3012,7 @@ impl NumInfo {
 	/// idx is the char after the last zero. If the input is not a number (which
 	/// has to be treated as zero), the returned empty range will be 0..0.
 	#[allow(clippy::cognitive_complexity)]
-	pub fn parse(num: &[u8], parse_settings: &NumInfoParseSettings) -> (Self, Range<usize>) {
+	pub fn parse(num: &[u8], parse_settings: &NumInfoParseSettings<'_>) -> (Self, Range<usize>) {
 		let mut exponent = -1;
 		let mut had_decimal_pt = false;
 		let mut had_digit = false;
@@ -2991,7 +3022,7 @@ impl NumInfo {
 		let mut first_char = true;
 
 		for (idx, &char) in num.iter().enumerate() {
-			if first_char && char.is_ascii_whitespace() {
+			if first_char && parse_settings.blank[usize::from(char)] {
 				continue;
 			}
 
@@ -3076,7 +3107,7 @@ impl NumInfo {
 	fn is_invalid_char(
 		c: u8,
 		had_decimal_pt: &mut bool,
-		parse_settings: &NumInfoParseSettings,
+		parse_settings: &NumInfoParseSettings<'_>,
 	) -> bool {
 		if Some(c) == parse_settings.decimal_pt {
 			if *had_decimal_pt {
@@ -3441,22 +3472,30 @@ use std::{
 	num::IntErrorKind,
 	ops::Range,
 	path::{Path, PathBuf},
-	sync::{Arc, LazyLock, atomic::{AtomicBool, Ordering as AtomicOrdering}},
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering as AtomicOrdering},
+	},
 };
+#[cfg(not(unix))]
+use std::sync::LazyLock;
 
 use bigdecimal::BigDecimal;
 use crate::openfile::OpenFile;
 use chunks::LineData;
 use clap::{Arg, ArgAction, ArgMatches, Command, CommandFactory, FromArgMatches, builder::ValueParser};
-use custom_str_cmp::custom_str_cmp;
+use custom_str_cmp::{FILTERED_KEYS, custom_str_cmp, filtered_key};
 use ext_sort::ext_sort;
 use foldhash::{HashMap, SharedSeed, fast::FoldHasher};
+#[cfg(not(unix))]
 use icu_collator::{
 	CollatorBorrowed,
 	options::{AlternateHandling, CollatorOptions, Strength},
 };
+#[cfg(not(unix))]
 use icu_locale_core::Locale;
 use numeric_str_cmp::{NumInfo, NumInfoParseSettings, human_numeric_str_cmp, numeric_str_cmp};
+#[cfg(not(unix))]
 use parking_lot::Mutex;
 use pi_vfs::{BlockingFs, File, OpenOptions};
 use rand::{RngExt as _, rng};
@@ -3466,7 +3505,6 @@ use thiserror::Error;
 use uucore::{
 	display::Quotable,
 	extendedbigdecimal::ExtendedBigDecimal,
-	i18n::datetime::get_locale_months,
 	line_ending::LineEnding,
 	parser::{
 		num_parser::{ExtendedParser, ExtendedParserError},
@@ -3476,17 +3514,21 @@ use uucore::{
 	posix::{MODERN, TRADITIONAL},
 	version_cmp::version_cmp,
 };
+#[cfg(not(unix))]
+use uucore::i18n::datetime::get_locale_months;
 
 #[cfg(unix)]
-use crate::locale::locale_loadable;
+use crate::locale::{ShellLocale, shell_locale_initialises};
 use crate::{
 	host::{Host, Utility, format_usage, rayon_global_pool_available},
-	locale::{numeric_symbols, parse_locale_name, shell_locale},
+	locale::{numeric_symbols, shell_locale},
 	sort::{
 		buffer_hint::automatic_buffer_size,
 		tmp_dir::{TmpDirWrapper, TmpFile},
 	},
 };
+#[cfg(not(unix))]
+use crate::locale::parse_locale_name;
 
 type SortResult<T> = Result<T, SortError>;
 
@@ -3694,12 +3736,6 @@ enum SortMode {
 	Default,
 }
 
-/// Return the length of the byte slice while ignoring embedded NULs (used for
-/// debug underline alignment).
-fn count_non_null_bytes(bytes: &[u8]) -> usize {
-	bytes.iter().filter(|&&c| c != b'\0').count()
-}
-
 pub struct Output {
 	file:   Option<(OsString, File)>,
 	stdout: Option<OpenFile>,
@@ -3815,11 +3851,15 @@ pub struct GlobalSettings {
 	compress:                Option<Compressor>,
 	merge_batch_size:        usize,
 	numeric_locale:          NumericLocaleSettings,
-	/// ICU collator for the shell's LC_COLLATE; `None` compares text by bytes.
-	collator:                Option<Arc<CollatorBorrowed<'static>>>,
+	/// The collation of the shell's LC_COLLATE; `None` compares text by bytes.
+	collator:                Option<Collation>,
 	parallelism:             Parallelism,
 	precomputed:             Precomputed,
 	cancel:                  Arc<AtomicBool>,
+	/// The shell's month names for `-M`; `None` matches the C names.
+	month_names:             Option<Arc<crate::locale::MonthNames>>,
+	/// GNU sort's byte tables and display widths for the shell's `LC_CTYPE`.
+	ctype:                   Arc<crate::locale::SortCtype>,
 }
 
 /// The pool `sort_by` runs on.
@@ -3849,11 +3889,12 @@ impl Default for NumericLocaleSettings {
 }
 
 impl NumericLocaleSettings {
-	fn num_info_settings(self, accept_si_units: bool) -> NumInfoParseSettings {
+	fn num_info_settings(self, accept_si_units: bool, blank: &[bool; 256]) -> NumInfoParseSettings<'_> {
 		NumInfoParseSettings {
 			accept_si_units,
 			thousands_separator: self.thousands_sep,
 			decimal_pt: self.decimal_pt,
+			blank,
 		}
 	}
 }
@@ -3876,6 +3917,8 @@ struct Precomputed {
 	fast_ascii_insensitive:          bool,
 	tokenize_blank_thousands_sep:    bool,
 	tokenize_allow_unit_after_blank: bool,
+	/// [`GlobalSettings::ctype`].
+	ctype:                           Arc<crate::locale::SortCtype>,
 }
 
 impl GlobalSettings {
@@ -3906,6 +3949,13 @@ impl GlobalSettings {
 		usize::try_from(size).map_err(|_| {
 			ParseSizeError::SizeTooBig(format!("Buffer size {size} does not fit in address space"))
 		})
+	}
+
+	/// Whether a chunk sorts stably. `strcoll` can find different lines equal
+	/// (`Й` and `И` with a combining breve in fr_FR), which GNU's merge sort
+	/// leaves in input order.
+	const fn sorts_stably(&self) -> bool {
+		self.stable || self.unique || self.collator.is_some()
 	}
 
 	/// Precompute some data needed for sorting.
@@ -3951,11 +4001,17 @@ impl GlobalSettings {
 		self.precomputed.tokenize_allow_unit_after_blank =
 			self.precomputed.tokenize_blank_thousands_sep && uses_human_numeric;
 
+		// The fast path compares precomputed collation keys, which ICU makes;
+		// libc collation compares each pair, as GNU `sort` does.
 		let locale_collation = self.collator.is_some();
+		#[cfg(not(unix))]
+		let icu = matches!(self.collator, Some(Collation::Icu(_)));
+		#[cfg(unix)]
+		let icu = false;
 		self.precomputed.fast_lexicographic = !locale_collation && self.can_use_fast_lexicographic();
-		self.precomputed.fast_locale_collation =
-			locale_collation && self.can_use_fast_lexicographic();
+		self.precomputed.fast_locale_collation = icu && self.can_use_fast_lexicographic();
 		self.precomputed.fast_ascii_insensitive = self.can_use_fast_ascii_insensitive();
+		self.precomputed.ctype = Arc::clone(&self.ctype);
 	}
 
 	/// Returns true when the fast lexicographic path can be used safely.
@@ -3982,6 +4038,8 @@ impl GlobalSettings {
 	/// Returns true when the ASCII case-insensitive fast path is valid.
 	fn can_use_fast_ascii_insensitive(&self) -> bool {
 		self.mode == SortMode::Default
+			&& self.ctype.folds_ascii()
+			&& self.collator.is_none()
 			&& self.ignore_case
 			&& !self.dictionary_order
 			&& !self.ignore_non_printing
@@ -4026,6 +4084,8 @@ impl Default for GlobalSettings {
 			collator:                None,
 			parallelism:             Parallelism::Global,
 			cancel:                  Arc::new(AtomicBool::new(false)),
+			month_names:             None,
+			ctype:                   crate::locale::c_sort_ctype_shared(),
 			precomputed:             Precomputed::default(),
 		}
 	}
@@ -4194,10 +4254,20 @@ impl<'a> Line<'a> {
 		token_buffer: &mut Vec<Field>,
 		settings: &GlobalSettings,
 	) -> Self {
+		#[cfg(not(unix))]
 		if settings.precomputed.fast_locale_collation
-			&& let Some(collator) = &settings.collator
+			&& let Some(Collation::Icu(collator)) = &settings.collator
 		{
-			let Ok(()) = collator.write_sort_key_utf8_to(line, &mut line_data.collation_key_buffer);
+			// GNU collates the NUL-separated pieces in turn, which ICU would
+			// join ([`crate::locale::memcoll_pieces`]). ICU writes no zero
+			// byte inside a key, so the pieces' keys joined by one compare as
+			// the pieces do.
+			for (n, piece) in line.split(|&byte| byte == 0).enumerate() {
+				if n > 0 {
+					line_data.collation_key_buffer.push(0);
+				}
+				let Ok(()) = collator.write_sort_key_utf8_to(piece, &mut line_data.collation_key_buffer);
+			}
 			line_data
 				.collation_key_ends
 				.push(line_data.collation_key_buffer.len());
@@ -4226,7 +4296,7 @@ impl<'a> Line<'a> {
 			line_data.line_num_floats.push(line_num_float);
 		}
 		for (selector, selection) in settings.selectors.iter().map(|selector| {
-			(selector, selector.get_selection(line, tokens, settings.numeric_locale))
+			(selector, selector.get_selection(line, tokens, settings.numeric_locale, &settings.ctype))
 		}) {
 			match selection {
 				Selection::AsBigDecimal(parsed_float) => line_data.parsed_floats.push(parsed_float),
@@ -4278,13 +4348,13 @@ impl<'a> Line<'a> {
 		let mut fields = vec![];
 		let tokens = tokenize(self.line, settings.separator, &mut fields, &settings.precomputed);
 		for selector in &settings.selectors {
-			let mut selection = selector.get_range(self.line, Some(tokens));
+			let mut selection = selector.get_range(self.line, Some(tokens), &settings.ctype.blank);
 			match selector.settings.mode {
 				SortMode::Numeric | SortMode::HumanNumeric => {
 					// find out which range is used for numeric comparisons
 					let mut parse_settings = settings
 						.numeric_locale
-						.num_info_settings(selector.settings.mode == SortMode::HumanNumeric);
+						.num_info_settings(selector.settings.mode == SortMode::HumanNumeric, &settings.ctype.blank);
 					// Debug annotations should ignore thousands separators to match GNU output.
 					parse_settings.thousands_separator = None;
 					let (_, num_range) = NumInfo::parse(&self.line[selection.clone()], &parse_settings);
@@ -4295,14 +4365,13 @@ impl<'a> Line<'a> {
 					selection.end = selection.start + num_range.len();
 
 					if num_range == (0..0) {
-						// This was not a valid number.
-						// Report no match at the first non-whitespace character.
-						let leading_whitespace = self.line[selection.clone()]
-							.iter()
-							.position(|c| !c.is_ascii_whitespace())
-							.unwrap_or(0);
-						selection.start += leading_whitespace;
-						selection.end += leading_whitespace;
+						// This was not a valid number: GNU reports no match
+						// after the key's leading blanks.
+						let key = &self.line[initial_selection.clone()];
+						let blanks =
+							key.iter().position(|c| !settings.ctype.blank[usize::from(*c)]).unwrap_or(key.len());
+						selection.start = initial_selection.start + blanks;
+						selection.end = selection.start;
 					} else {
 						// include a trailing si unit
 						if selector.settings.mode == SortMode::HumanNumeric
@@ -4322,50 +4391,40 @@ impl<'a> Line<'a> {
 					}
 				},
 				SortMode::GeneralNumeric => {
+					// GNU skips its blanks, then lets strtold skip any other
+					// space before the number, which the key then includes.
 					let initial_selection = &self.line[selection.clone()];
+					let blanks = initial_selection
+						.iter()
+						.position(|c| !settings.ctype.blank[usize::from(*c)])
+						.unwrap_or(initial_selection.len());
 					let decimal_pt = settings.numeric_locale.decimal_pt.unwrap_or(DECIMAL_PT);
-					let leading = get_leading_gen(initial_selection, decimal_pt);
-
-					// Shorten selection to leading.
-					selection.start += leading.start;
-					selection.end = selection.start + leading.len();
+					let leading = get_leading_gen(initial_selection, decimal_pt, &settings.ctype.space);
+					let start = selection.start;
+					selection.start = start + blanks;
+					selection.end = if leading.is_empty() { selection.start } else { start + leading.end };
 				},
 				SortMode::Month => {
 					let initial_selection = &self.line[selection.clone()];
-					let first_non_blank = initial_selection
-						.iter()
-						.position(|c| !c.is_ascii_whitespace())
-						.unwrap_or(initial_selection.len());
-
-					let (parsed, match_len) = month_parse(initial_selection);
-
-					if parsed == Month::Unknown {
-						// We failed to parse a month, which is equivalent to matching nothing.
-						// Add the "no match for key" marker to the first non-whitespace character.
-						selection.start += first_non_blank;
-						selection.end = selection.start;
-					} else {
-						// We parsed a month. Use the actual match byte length.
-						selection.start += first_non_blank;
-						selection.end = selection.start + match_len;
-					}
+					let (_, skipped, match_len) = month_parse(initial_selection, settings.month_names.as_deref());
+					// The key starts after the leading blanks; a failed parse matches
+					// nothing, which marks "no match for key" there.
+					selection.start += skipped;
+					selection.end = selection.start + match_len;
 				},
 				_ => {},
 			}
 
-			// Don't let embedded NUL bytes influence column alignment in the
-			// debug underline output, since they are often filtered out (e.g.
-			// via `tr -d '\0'`) before inspection.
-			let select = &line[..selection.start];
-			let indent = count_non_null_bytes(select);
+			// GNU `debug_key`: display columns in the shell's locale, a tab
+			// one column, an embedded NUL none; a key of no width matches
+			// nothing.
+			let indent = settings.ctype.width(&self.line[..selection.start]);
 			write!(writer, "{}", " ".repeat(indent))?;
-
-			if selection.is_empty() {
+			let width = settings.ctype.width(&self.line[selection]);
+			if width == 0 {
 				writeln!(writer, "^ no match for key")?;
 			} else {
-				let select = &line[selection];
-				let underline_len = count_non_null_bytes(select);
-				writeln!(writer, "{}", "_".repeat(underline_len))?;
+				writeln!(writer, "{}", "_".repeat(width))?;
 			}
 		}
 
@@ -4383,10 +4442,11 @@ impl<'a> Line<'a> {
 					.is_none_or(|selector| selector != &FieldSelector::default()))
 		{
 			// A last resort comparator is in use, underline the whole line.
-			if self.line.is_empty() {
+			let width = settings.ctype.width(self.line);
+			if width == 0 {
 				writeln!(writer, "^ no match for key")?;
 			} else {
-				writeln!(writer, "{}", "_".repeat(self.line.len()))?;
+				writeln!(writer, "{}", "_".repeat(width))?;
 			}
 		}
 		Ok(())
@@ -4462,6 +4522,7 @@ fn tokenize<'t>(
 		tokenize_default(
 			line,
 			&mut sink,
+			&precomputed.ctype.blank,
 			precomputed.tokenize_blank_thousands_sep,
 			precomputed.tokenize_allow_unit_after_blank,
 		);
@@ -4470,12 +4531,13 @@ fn tokenize<'t>(
 	Tokens { numbers: &precomputed.key_fields, fields: token_buffer, count }
 }
 
-/// By default fields are separated by the first whitespace after
-/// non-whitespace. Whitespace is included in fields at the start.
+/// By default fields are separated by the first blank (GNU's `blanks[]`)
+/// after a non-blank. Blanks are included in fields at the start.
 /// The fields go to `sink` in order, until it wants no more.
 fn tokenize_default(
 	line: &[u8],
 	sink: &mut FieldSink<'_>,
+	blank: &[bool; 256],
 	blank_thousands_sep: bool,
 	allow_unit_after_blank: bool,
 ) {
@@ -4483,7 +4545,7 @@ fn tokenize_default(
 	// pretend that there was whitespace in front of the line
 	let mut previous_was_whitespace = true;
 	for (idx, char) in line.iter().enumerate() {
-		let is_whitespace = char.is_ascii_whitespace();
+		let is_whitespace = blank[usize::from(*char)];
 		let treat_as_separator = if is_whitespace {
 			if blank_thousands_sep && *char == b' ' {
 				!is_blank_thousands_sep(line, idx, allow_unit_after_blank)
@@ -4781,15 +4843,16 @@ impl FieldSelector {
 		line: &'a [u8],
 		tokens: Option<Tokens<'_>>,
 		numeric_locale: NumericLocaleSettings,
+		ctype: &crate::locale::SortCtype,
 	) -> Selection<'a> {
 		// `get_range` expects `None` when this key does not need tokens.
 		let tokens = tokens.filter(|_| self.needs_tokens);
-		let mut range_str = &line[self.get_range(line, tokens)];
+		let mut range_str = &line[self.get_range(line, tokens, &ctype.blank)];
 		if self.settings.mode == SortMode::Numeric || self.settings.mode == SortMode::HumanNumeric {
 			// Parse NumInfo for this number.
 			let (info, num_range) = NumInfo::parse(
 				range_str,
-				&numeric_locale.num_info_settings(self.settings.mode == SortMode::HumanNumeric),
+				&numeric_locale.num_info_settings(self.settings.mode == SortMode::HumanNumeric, &ctype.blank),
 			);
 			// Shorten the range to what we need to pass to numeric_str_cmp later.
 			range_str = &range_str[num_range];
@@ -4799,7 +4862,7 @@ impl FieldSelector {
 			// numeric sorting.
 			let decimal_pt = numeric_locale.decimal_pt.unwrap_or(DECIMAL_PT);
 			Selection::AsBigDecimal(general_bd_parse(
-				&range_str[get_leading_gen(range_str, decimal_pt)],
+				&range_str[get_leading_gen(range_str, decimal_pt, &ctype.space)],
 				decimal_pt,
 			))
 		} else {
@@ -4809,8 +4872,9 @@ impl FieldSelector {
 	}
 
 	/// Look up the range in the line that corresponds to this selector.
-	/// If `needs_fields` returned false, tokens must be None.
-	fn get_range(&self, line: &[u8], tokens: Option<Tokens<'_>>) -> Range<usize> {
+	/// If `needs_fields` returned false, tokens must be None. `blank` is what
+	/// `b` skips (GNU's `blanks[]`).
+	fn get_range(&self, line: &[u8], tokens: Option<Tokens<'_>>, blank: &[bool; 256]) -> Range<usize> {
 		enum Resolution {
 			// The start index of the resolved character, inclusive
 			StartOfChar(usize),
@@ -4828,6 +4892,7 @@ impl FieldSelector {
 			line: &[u8],
 			tokens: Option<Tokens<'_>>,
 			position: &KeyPosition,
+			blank: &[bool; 256],
 		) -> Resolution {
 			if matches!(tokens, Some(tokens) if tokens.count < position.field) {
 				Resolution::TooHigh
@@ -4850,9 +4915,8 @@ impl FieldSelector {
 				if position.ignore_blanks {
 					idx += line[idx..]
 						.iter()
-						.enumerate()
-						.find(|(_, c)| !c.is_ascii_whitespace())
-						.map_or(line[idx..].len(), |(idx, _)| idx);
+						.position(|c| !blank[usize::from(*c)])
+						.unwrap_or(line[idx..].len());
 				}
 				// apply the character index
 				idx += line[idx..]
@@ -4868,9 +4932,9 @@ impl FieldSelector {
 			}
 		}
 
-		match resolve_index(line, tokens, &self.from) {
+		match resolve_index(line, tokens, &self.from, blank) {
 			Resolution::StartOfChar(from) => {
-				let to = self.to.as_ref().map(|to| resolve_index(line, tokens, to));
+				let to = self.to.as_ref().map(|to| resolve_index(line, tokens, to, blank));
 
 				let mut range = match to {
 					Some(Resolution::StartOfChar(mut to)) => {
@@ -4907,15 +4971,66 @@ impl FieldSelector {
 /// Collators built so far, by locale. Building one resolves the locale's
 /// tailoring through ICU's fallback chain, which repeated calls skip. `None`
 /// records a locale ICU could not build a collator for.
+#[cfg(not(unix))]
 static COLLATORS: LazyLock<Mutex<HashMap<Locale, Option<Arc<CollatorBorrowed<'static>>>>>> =
 	LazyLock::new(Default::default);
 
-/// The collator for the shell's LC_COLLATE, or `None` to compare text by
-/// bytes: the locale must be UTF-8 (uucore's rule) and loadable by the system
-/// (GNU falls back to byte order otherwise).
-fn shell_collator(host: &Host) -> Option<Arc<CollatorBorrowed<'static>>> {
-	let (locale, utf8) = parse_locale_name(shell_locale(host, "LC_COLLATE")?)?;
-	if !utf8 || locale_failed_to_set(host) {
+/// How text keys collate.
+#[derive(Clone, Debug)]
+pub(crate) enum Collation {
+	/// ICU, for a UTF-8 `LC_COLLATE` where there is no `strcoll_l` (uucore's
+	/// rule).
+	#[cfg(not(unix))]
+	Icu(Arc<CollatorBorrowed<'static>>),
+	/// `strcoll` in the locale, as GNU `sort` collates.
+	#[cfg(unix)]
+	Libc(Arc<crate::locale::LibcCollator>),
+}
+
+impl Collation {
+	/// Compares two keys as the locale orders them, in NUL-separated pieces
+	/// as GNU's `memcoll0` does ([`crate::locale::memcoll_pieces`]). Under
+	/// ICU, which finds equal strings `strcoll` tells apart, the bytes decide
+	/// between keys it finds equal, so only identical keys are equal.
+	fn compare(&self, a: &[u8], b: &[u8]) -> Ordering {
+		match self {
+			#[cfg(not(unix))]
+			Self::Icu(collator) => {
+				crate::locale::memcoll_pieces(a, b, |a, b| collator.compare_utf8(a, b)).then_with(|| a.cmp(b))
+			},
+			#[cfg(unix)]
+			Self::Libc(collator) => collator.compare(a, b),
+		}
+	}
+}
+
+/// The collation for the shell's LC_COLLATE, or `None` to compare text by
+/// bytes: C/POSIX, or a locale the system cannot load (GNU falls back to
+/// byte order then). On Unix it is libc's `strcoll` for that locale, as GNU
+/// `sort` compares, UTF-8 or not: ICU's tables order and equate text
+/// differently (it ignores controls, soft hyphens and zero-width joiners
+/// that glibc orders, and equates canonically equivalent spellings), and no
+/// tie-break can recover glibc's order from them. Elsewhere it is ICU for a
+/// UTF-8 locale, as uucore does.
+fn shell_collator(host: &Host, cancel: &AtomicBool) -> Option<Collation> {
+	let name = shell_locale(host, "LC_COLLATE")?;
+	if matches!(name, "C" | "POSIX") || locale_failed_to_set(host) {
+		return None;
+	}
+	#[cfg(unix)]
+	return crate::locale::libc_collator(host, name, cancel).map(Collation::Libc);
+	#[cfg(not(unix))]
+	{
+		let _ = cancel;
+		icu_collator(name)
+	}
+}
+
+/// ICU's collation for a UTF-8 locale name, or `None` for another charset.
+#[cfg(not(unix))]
+fn icu_collator(name: &str) -> Option<Collation> {
+	let (locale, utf8) = parse_locale_name(name)?;
+	if !utf8 {
 		return None;
 	}
 	COLLATORS
@@ -4932,6 +5047,7 @@ fn shell_collator(host: &Host) -> Option<Arc<CollatorBorrowed<'static>>> {
 				.map(Arc::new)
 		})
 		.clone()
+		.map(Collation::Icu)
 }
 
 /// Decimal point and thousands separator for the shell's LC_NUMERIC.
@@ -5356,10 +5472,12 @@ fn locale_failed_to_set(host: &Host) -> bool {
 	host.var("LC_ALL") == Some("missing")
 }
 
+/// Whether a GNU `sort`'s own `setlocale(LC_ALL, "")` would have failed and
+/// left it in the C locale. A locale libc could not be asked about is not
+/// that: it is reported where it is read, and the names stand.
 #[cfg(unix)]
 fn locale_failed_to_set(host: &Host) -> bool {
-	shell_locale(host, "LC_COLLATE")
-		.is_some_and(|locale| !locale_loadable(locale, nix::libc::LC_COLLATE_MASK))
+	matches!(shell_locale_initialises(host), ShellLocale::C)
 }
 
 fn key_zero_width(selector: &FieldSelector) -> bool {
@@ -6026,13 +6144,35 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 		settings.parallelism = invocation_parallelism(requested);
 	}
 
-	settings.collator = shell_collator(host);
+	settings.collator = shell_collator(host, &settings.cancel);
 	if settings.debug {
 		let global_flags = GlobalOptionFlags::from_matches(matches);
 		emit_debug_warnings(host, &settings, &global_flags, legacy_warnings);
 	}
 
+	// GNU sort's byte classes for the shell's LC_CTYPE: what `-b` skips and
+	// what separates fields without `-t`, what `-d`, `-i` and `-f` keep and
+	// fold, what a number may follow, and the columns `--debug` underlines.
+	// A whole-line sort with none of those reads no locale for them.
+	let uses_ctype = settings.debug
+		|| settings.selectors.iter().any(|selector| {
+			let key = &selector.settings;
+			key.mode != SortMode::Default
+				|| key.ignore_blanks
+				|| key.ignore_case
+				|| key.dictionary_order
+				|| key.ignore_non_printing
+				|| selector.from.ignore_blanks
+				|| selector.to.as_ref().is_some_and(|to| to.ignore_blanks)
+				|| (selector.needs_tokens && settings.separator.is_none())
+		});
+	if uses_ctype {
+		settings.ctype = crate::locale::shell_sort_ctype(host, &settings.cancel);
+	}
 	settings.init_precomputed();
+	if settings.selectors.iter().any(|selector| selector.settings.mode == SortMode::Month) {
+		settings.month_names = locale_month_names(host, &settings.cancel);
+	}
 
 	exec(&fs, &stdin_operand, &mut files, &settings, output, &mut tmp_dir, host.stderr_clone())
 }
@@ -6318,7 +6458,7 @@ fn sort_by<'a>(unsorted: &mut Vec<Line<'a>>, settings: &GlobalSettings, line_dat
 		}
 		compare_by(a, b, settings, line_data, line_data)
 	};
-	let stable = settings.stable || settings.unique;
+	let stable = settings.sorts_stably();
 	// WASI has no threads (rayon's pool hits an unreachable trap there), and
 	// Windows leaves the global pool unavailable when pi-natives could not
 	// safely configure it under commit pressure; both sort sequentially.
@@ -6406,10 +6546,11 @@ fn compare_by<'a>(
 		};
 	}
 
-		if global_settings.precomputed.fast_locale_collation {
+	if global_settings.precomputed.fast_locale_collation {
 		let a_key = a_line_data.collation_key(a.index);
 		let b_key = b_line_data.collation_key(b.index);
-		let cmp = a_key.cmp(b_key);
+		// Lines ICU finds equal are told apart by bytes, as `Collation::compare` does.
+		let cmp = a_key.cmp(b_key).then_with(|| a.line.cmp(b.line));
 		return if global_settings.reverse {
 			cmp.reverse()
 		} else {
@@ -6471,6 +6612,7 @@ fn compare_by<'a>(
 				if custom_str_cmp(
 					a_str,
 					b_str,
+					&global_settings.ctype,
 					settings.ignore_non_printing,
 					settings.dictionary_order,
 					settings.ignore_case,
@@ -6478,8 +6620,27 @@ fn compare_by<'a>(
 				{
 					Ordering::Equal
 				} else {
-					// Only if they are not equal compare by the hash
-					random_shuffle(a_str, b_str, &global_settings.salt.unwrap())
+					// GNU hashes the key as `-f`, `-d` and `-i` leave it and, in a
+					// collating locale, as `strxfrm` transforms it, so keys the
+					// options or the locale make equal hash equal and sort together
+					// (and `-u` keeps one).
+					FILTERED_KEYS.with_borrow_mut(|(a_key, b_key)| {
+						let filtered = settings.ignore_case || settings.dictionary_order || settings.ignore_non_printing;
+						let (a_key, b_key): (&[u8], &[u8]) = if filtered {
+							filtered_key(a_key, a_str, &global_settings.ctype, settings);
+							filtered_key(b_key, b_str, &global_settings.ctype, settings);
+							(a_key, b_key)
+						} else {
+							(a_str, b_str)
+						};
+						let salt = &global_settings.salt.unwrap();
+						#[cfg(unix)]
+						if let Some(Collation::Libc(collator)) = &global_settings.collator {
+							let (a_key, b_key) = (collator.transform(a_key), collator.transform(b_key));
+							return if a_key == b_key { Ordering::Equal } else { random_shuffle(&a_key, &b_key, salt) };
+						}
+						random_shuffle(a_key, b_key, salt)
+					})
 				}
 			},
 			SortMode::Numeric => {
@@ -6506,21 +6667,30 @@ fn compare_by<'a>(
 				parsed_float_index += 1;
 				general_numeric_compare(a_float, b_float)
 			},
-			SortMode::Month => month_compare(a_str, b_str),
+			SortMode::Month => month_compare(a_str, b_str, global_settings.month_names.as_deref()),
 			SortMode::Version => version_cmp(a_str, b_str),
 			SortMode::Default => {
-				// Locale collation only applies when no custom filtering flags
-				// alter the compared byte sequences.
 				if settings.ignore_case || settings.dictionary_order || settings.ignore_non_printing {
-					custom_str_cmp(
-						a_str,
-						b_str,
-						settings.ignore_non_printing,
-						settings.dictionary_order,
-						settings.ignore_case,
-					)
+					match &global_settings.collator {
+						// GNU keycompare under locale collation: copies of the
+						// keys with `-d` and `-i` bytes dropped and `-f` folded,
+						// then collated.
+						Some(collator) => FILTERED_KEYS.with_borrow_mut(|(a_key, b_key)| {
+							filtered_key(a_key, a_str, &global_settings.ctype, settings);
+							filtered_key(b_key, b_str, &global_settings.ctype, settings);
+							collator.compare(a_key, b_key)
+						}),
+						None => custom_str_cmp(
+							a_str,
+							b_str,
+							&global_settings.ctype,
+							settings.ignore_non_printing,
+							settings.dictionary_order,
+							settings.ignore_case,
+						),
+					}
 				} else if let Some(collator) = &global_settings.collator {
-					collator.compare_utf8(a_str, b_str)
+					collator.compare(a_str, b_str)
 				} else {
 					a_str.cmp(b_str)
 				}
@@ -6531,12 +6701,17 @@ fn compare_by<'a>(
 		}
 	}
 
-	// Call "last resort compare" if all selectors returned Equal
+	// When the keys tie, GNU's last resort compares the whole lines, in the
+	// locale (`xmemcoll0`) when it collates, else by bytes; `-s`, `-u` and
+	// `-R` leave the tie. Lines the collation finds equal stay in input
+	// order, as in GNU's merge sort (the sort is stable then, see `sort_by`).
 	let cmp = if global_settings.mode == SortMode::Random
 		|| global_settings.stable
 		|| global_settings.unique
 	{
 		Ordering::Equal
+	} else if let Some(collator) = &global_settings.collator {
+		collator.compare(a.line, b.line)
 	} else {
 		a.line.cmp(b.line)
 	};
@@ -6573,11 +6748,11 @@ fn ascii_case_insensitive_cmp(a: &[u8], b: &[u8]) -> Ordering {
 // numeric/FP sort *should* recognize positive signs and scientific notation, so
 // we strip those lines only after the end of the following numeric string.
 // For example, 5e10KFD would be 5e10 or 5x10^10 and +10000HFKJFK would become
-// 10000.
+// 10000. `space` is what strtold skips first (`isspace` in the locale).
 #[allow(clippy::cognitive_complexity)]
-fn get_leading_gen(inp: &[u8], decimal_pt: u8) -> Range<usize> {
-	let trimmed = inp.trim_ascii_start();
-	let leading_whitespace_len = inp.len() - trimmed.len();
+fn get_leading_gen(inp: &[u8], decimal_pt: u8, space: &[bool; 256]) -> Range<usize> {
+	let leading_whitespace_len = inp.iter().position(|c| !space[usize::from(*c)]).unwrap_or(inp.len());
+	let trimmed = &inp[leading_whitespace_len..];
 
 	// check for inf, -inf and nan
 	const ALLOWED_PREFIXES: &[&[u8]] = &[b"inf", b"-inf", b"nan"];
@@ -6782,88 +6957,86 @@ enum Month {
 	December,
 }
 
-/// Cached locale month lookup table.
-/// Each entry is (uppercased_name, month_value).
-type MonthTable = Vec<(Vec<u8>, Month)>;
-
-fn get_locale_month_table() -> Option<&'static MonthTable> {
-	static TABLE: LazyLock<Option<MonthTable>> = LazyLock::new(|| {
-		let months = get_locale_months()?;
-		let all_months = [
-			Month::January,
-			Month::February,
-			Month::March,
-			Month::April,
-			Month::May,
-			Month::June,
-			Month::July,
-			Month::August,
-			Month::September,
-			Month::October,
-			Month::November,
-			Month::December,
-		];
-		let table: Vec<(Vec<u8>, Month)> = months
-			.iter()
-			.zip(all_months.iter())
-			.map(|(name, &month)| (name.clone(), month))
-			.collect();
-		Some(table)
-	});
-
-	TABLE.as_ref()
+/// The month names a `-M` sort matches: the shell's, as GNU `sort` reads them
+/// after `setlocale(LC_ALL, "")` ([`crate::locale::shell_month_names`], read
+/// with `newlocale` under this command's cancellation, cached only when the
+/// lookup succeeded), or `None` for the C names.
+pub(crate) fn locale_month_names(host: &Host, cancel: &AtomicBool) -> Option<Arc<crate::locale::MonthNames>> {
+	#[cfg(unix)]
+	return crate::locale::shell_month_names(host, cancel);
+	#[cfg(not(unix))]
+	{
+		let _ = (host, cancel);
+		get_locale_months().map(|names| Arc::new(crate::locale::MonthNames::c_locale(names)))
+	}
 }
 
-/// Parse the beginning string into a Month, returning [`Month::Unknown`] on
-/// errors. Also returns the byte length consumed from the input (after leading
-/// blanks).
+/// Parses the beginning of `line` as a month. Returns the month
+/// ([`Month::Unknown`] when none matches), the leading blank bytes skipped,
+/// and the length of the name matched after them (0 when none matched).
 ///
-/// The stored locale month names have blanks stripped and are uppercased.
-/// Comparison against input is case-insensitive but NOT blank-insensitive:
-/// the input must match the stored name exactly (after leading blank trimming).
-fn month_parse(line: &[u8]) -> (Month, usize) {
-	let line = line.trim_ascii_start();
-
-	// Try locale-specific month names, keeping the longest match.
-	// This handles cases where one name is a prefix of another
-	// (e.g., Japanese "1" vs "10", "11", "12").
-	if let Some(table) = get_locale_month_table() {
-		let mut best = None;
-		for (name, month) in table {
-			if line.len() >= name.len()
-				&& line[..name.len()].eq_ignore_ascii_case(name)
-				&& best.as_ref().is_none_or(|&(len, _)| name.len() > len)
-			{
-				best = Some((name.len(), *month));
-			}
-		}
-		if let Some((len, month)) = best {
-			return (month, len);
-		}
+/// With locale names, as GNU `sort` does (`getmonth`): blanks are the
+/// locale's and newline, every input byte is folded with the locale's
+/// `toupper` before it is compared with the folded name, the longest matching
+/// name wins (one can be a prefix of another, as Japanese `1` and `10`), and a
+/// name the locale does not have is unknown — the English names are the C
+/// locale's, not a fallback. Without them, the C names: three English
+/// letters, any case, after spaces, tabs and newlines (a carriage return or
+/// form feed is not a blank there).
+fn month_parse(line: &[u8], names: Option<&crate::locale::MonthNames>) -> (Month, usize, usize) {
+	const MONTHS: [Month; 12] = [
+		Month::January,
+		Month::February,
+		Month::March,
+		Month::April,
+		Month::May,
+		Month::June,
+		Month::July,
+		Month::August,
+		Month::September,
+		Month::October,
+		Month::November,
+		Month::December,
+	];
+	if let Some(names) = names {
+		let skipped = line.iter().position(|byte| !names.blank[usize::from(*byte)]).unwrap_or(line.len());
+		let rest = &line[skipped..];
+		let best = names
+			.names
+			.iter()
+			.zip(MONTHS)
+			.filter(|(name, _)| {
+				rest.len() >= name.len()
+					&& rest[..name.len()].iter().zip(name.iter()).all(|(byte, folded)| names.fold[usize::from(*byte)] == *folded)
+			})
+			.max_by_key(|(name, _)| name.len());
+		return match best {
+			Some((name, month)) => (month, skipped, name.len()),
+			None => (Month::Unknown, skipped, 0),
+		};
 	}
-
-	// Fall back to English 3-letter abbreviations
-	match line.get(..3).map(<[u8]>::to_ascii_uppercase).as_deref() {
-		Some(b"JAN") => (Month::January, 3),
-		Some(b"FEB") => (Month::February, 3),
-		Some(b"MAR") => (Month::March, 3),
-		Some(b"APR") => (Month::April, 3),
-		Some(b"MAY") => (Month::May, 3),
-		Some(b"JUN") => (Month::June, 3),
-		Some(b"JUL") => (Month::July, 3),
-		Some(b"AUG") => (Month::August, 3),
-		Some(b"SEP") => (Month::September, 3),
-		Some(b"OCT") => (Month::October, 3),
-		Some(b"NOV") => (Month::November, 3),
-		Some(b"DEC") => (Month::December, 3),
-		_ => (Month::Unknown, 0),
-	}
+	let skipped = line.iter().position(|byte| !matches!(byte, b' ' | b'\t' | b'\n')).unwrap_or(line.len());
+	let english = match line[skipped..].get(..3).map(<[u8]>::to_ascii_uppercase).as_deref() {
+		Some(b"JAN") => Month::January,
+		Some(b"FEB") => Month::February,
+		Some(b"MAR") => Month::March,
+		Some(b"APR") => Month::April,
+		Some(b"MAY") => Month::May,
+		Some(b"JUN") => Month::June,
+		Some(b"JUL") => Month::July,
+		Some(b"AUG") => Month::August,
+		Some(b"SEP") => Month::September,
+		Some(b"OCT") => Month::October,
+		Some(b"NOV") => Month::November,
+		Some(b"DEC") => Month::December,
+		_ => return (Month::Unknown, skipped, 0),
+	};
+	(english, skipped, 3)
 }
 
-fn month_compare(a: &[u8], b: &[u8]) -> Ordering {
-	let ma = month_parse(a).0;
-	let mb = month_parse(b).0;
-
+fn month_compare(a: &[u8], b: &[u8], names: Option<&crate::locale::MonthNames>) -> Ordering {
+	let ma = month_parse(a, names).0;
+	let mb = month_parse(b, names).0;
 	ma.cmp(&mb)
 }
 
@@ -6980,8 +7153,401 @@ mod tests {
 		let a = b"JaN";
 		let b = b"OCt";
 
-		assert_eq!(Ordering::Less, month_compare(a, b));
+		assert_eq!(Ordering::Less, month_compare(a, b, None));
 	}
+
+	/// With locale month names, a name the locale does not have is unknown,
+	/// as in GNU `sort`: under French names `Jan` is not January, so `sort -uM`
+	/// keeps both `Jan` and `janv.` (it removed `janv.` while English was a
+	/// fallback). Input bytes fold with the locale's `toupper`, so in an
+	/// ISO-8859-1 locale `déc.` (`0xe9`) matches `DÉC.` (`0xc9`), and blanks are
+	/// the locale's.
+	#[test]
+	fn month_names_match_as_the_locale_folds_them() {
+		let french: [Vec<u8>; 12] = [
+			"janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc.",
+		]
+		.map(|name| name.chars().map(|c| u8::try_from(u32::from(c)).unwrap()).collect());
+		let mut names = crate::locale::MonthNames::c_locale(&french);
+		// ISO-8859-1 case pairs, as `toupper` gives them there.
+		for lower in 0xe0..=0xfeu8 {
+			if lower != 0xf7 {
+				names.fold[usize::from(lower)] = lower - 0x20;
+			}
+		}
+		names.names = french.clone().map(|name| name.iter().map(|b| names.fold[usize::from(*b)]).collect());
+		assert!(month_parse(b"Jan", Some(&names)).0 == Month::Unknown);
+		assert!(month_compare(b"Jan", b"janv.", Some(&names)) == Ordering::Less);
+		assert!(month_parse(b"janv.", Some(&names)).0 == Month::January);
+		assert!(month_parse(b"  d\xe9c.", Some(&names)) == (Month::December, 2, 4));
+		assert!(month_parse(b"D\xc9C.", Some(&names)).0 == Month::December);
+		assert!(month_compare(b"D\xc9C.", b"F\xc9VR.", Some(&names)) == Ordering::Greater);
+		// GNU's blanks are `isblank` and newline, which a `-z` record can start
+		// with (`printf 'Jan\0\nJan\0' | sort -zuM` keeps one record).
+		assert!(month_parse(b"\njanv.", Some(&names)) == (Month::January, 1, 5));
+		// Without locale names, the C names: English, any case, after spaces,
+		// tabs and newlines; a carriage return or form feed is no blank, so
+		// such a line holds no month (GNU `sort -uM` keeps `Jan` and `\rJan`).
+		assert!(month_parse(b" jan", None) == (Month::January, 1, 3));
+		assert!(month_parse(b"\t\nJan", None) == (Month::January, 2, 3));
+		assert!(month_parse(b"\rJan", None).0 == Month::Unknown);
+		assert!(month_parse(b"\x0cJan", None).0 == Month::Unknown);
+	}
+
+	/// GNU's byte tables in the C locale, captured from GNU `sort` 9.4: blanks
+	/// are space, tab and newline, so a carriage return or form feed is no
+	/// blank for `-b`, for fields without `-t`, or before an `-n` number;
+	/// strtold skips any `isspace` before a `-g` number; `-d` keeps only
+	/// alphanumerics and blanks.
+	#[test]
+	fn byte_classes_follow_gnu_tables_in_c() {
+		let cases: [(&[&str], &str, &str); 6] = [
+			(&["-buM"], "Jan\n\rJan\n", "\rJan\nJan\n"),
+			(&["-k3"], "p\rz z\np y a\n", "p\rz z\np y a\n"),
+			(&["-n"], "\r2\n1\n", "\r2\n1\n"),
+			(&["-g"], "\x0b2\n1\n", "1\n\x0b2\n"),
+			(&["-du"], "ab\na\rb\n", "ab\n"),
+			(&["-b", "-k1,1"], "\rb\na\n", "\rb\na\n"),
+		];
+		for (args, input, expected) in cases {
+			let (code, out, err) = sort_in_locale("LC_ALL", "C", args, input);
+			assert_eq!((code, err.as_str()), (0, ""), "{args:?}");
+			assert_eq!(out, expected, "{args:?}");
+		}
+	}
+
+	/// `--debug` underlines display columns as GNU's `debug_width` counts
+	/// them, captured from GNU `sort` 9.4: in C a control character or NUL
+	/// takes none and any other byte one; in C.UTF-8 `é` takes one, `日` two,
+	/// a combining accent none, and a byte that starts no character one; a
+	/// tab one; and a key of no width is "no match". Under `-g` the key
+	/// starts after the blanks and keeps the other spaces strtold skipped.
+	#[test]
+	fn debug_underlines_display_columns() {
+		let cases: [(&str, &[&str], &str, &str); 10] = [
+			("C", &["--debug", "-k2,2"], "a\x01b c\n", "a\x01b c\n  __\n____\n"),
+			("C", &["--debug", "-k1,1"], "a\0b c\n", "a\0b c\n__\n____\n"),
+			("C", &["--debug", "-g"], " \r5\n", " \r5\n _\n__\n"),
+			("C", &["--debug", "-n"], " \r5\n", " \r5\n ^ no match for key\n__\n"),
+			("C", &["--debug", "-k1,1"], "d\u{e9}c. x\n", "d\u{e9}c. x\n_____\n_______\n"),
+			("C.UTF-8", &["--debug", "-k1,1"], "d\u{e9}c. x\n", "d\u{e9}c. x\n____\n______\n"),
+			("C.UTF-8", &["--debug", "-k2,2"], "\u{65e5}\u{672c} x\n", "\u{65e5}\u{672c} x\n    __\n______\n"),
+			("C.UTF-8", &["--debug", "-k2,2"], "e\u{301} x\n", "e\u{301} x\n __\n___\n"),
+			("C.UTF-8", &["--debug", "-k2,2"], "a\tb\n", "a>b\n __\n___\n"),
+			("C", &["--debug", "-k2,2"], "a\x01\n", "a\x01\n ^ no match for key\n_\n"),
+		];
+		for (locale, args, input, expected) in cases {
+			if !locale_installed(locale) {
+				continue;
+			}
+			let (code, out, _) = sort_in_locale("LC_ALL", locale, args, input);
+			assert_eq!(code, 0, "{locale} {args:?}");
+			assert_eq!(out, expected, "{locale} {args:?} {input:?}");
+		}
+		// Bytes that start no UTF-8 character take a column each; an
+		// incomplete character at the end of a key takes one for all its
+		// bytes (GNU `sort` 9.4: `e3 81` under one underscore).
+		let raw: [(&[u8], &[&str], &[u8]); 2] = [
+			(b"\xff\xfe x\n", &["--debug", "-k2,2"], b"\xff\xfe x\n  __\n____\n"),
+			(b"\xe3\x81\n", &["--debug"], b"\xe3\x81\n_\n"),
+		];
+		for (input, args, expected) in raw {
+			if !locale_installed("C.UTF-8") {
+				break;
+			}
+			let (mut host, capture) = Host::for_test("sort", input.to_vec(), "/");
+			host.set_test_var("LC_ALL", "C.UTF-8");
+			let argv = std::iter::once("sort").chain(args.iter().copied());
+			let parsed = <Sort as clap::Parser>::try_parse_from(argv).expect("parse");
+			assert_eq!(parsed.run(&mut host), 0);
+			assert_eq!(capture.stdout(), expected.to_vec(), "{args:?} {input:?}");
+		}
+	}
+
+	/// Under locale collation `-f`, `-d` and `-i` filter and fold the keys,
+	/// then collate them, as GNU `keycompare` does: in `en_US.UTF-8`, `é`
+	/// sorts before `z` and `a` before `B`, which byte order reverses.
+	// The expected orders are glibc's `strcoll`, which the collation is on
+	// Unix; musl's compares bytes and macOS's code points.
+	#[cfg(any(not(unix), target_env = "gnu"))]
+	#[test]
+	fn filtered_keys_are_collated_in_the_locale() {
+		if !locale_installed("en_US.UTF-8") {
+			eprintln!("skipping: en_US.UTF-8 not installed");
+			return;
+		}
+		for (args, input, expected) in [
+			(&["-f"][..], "z\n\u{e9}\n", "\u{e9}\nz\n"),
+			(&["-d"][..], "B\na\n", "a\nB\n"),
+			(&["-i"][..], "B\na\n", "a\nB\n"),
+			(&["-f", "-k1,1"][..], "z\n\u{e9}\n", "\u{e9}\nz\n"),
+		] {
+			let (code, out, err) = sort_in_locale("LC_ALL", "en_US.UTF-8", args, input);
+			assert_eq!((code, err.as_str()), (0, ""), "{args:?}");
+			assert_eq!(out, expected, "{args:?}");
+		}
+		let (_, out, _) = sort_in_locale("LC_ALL", "C", &["-f"], "z\n\u{e9}\n");
+		assert_eq!(out, "z\n\u{e9}\n");
+	}
+
+	/// Under locale collation an embedded NUL separates pieces that collate
+	/// in turn, as GNU's `memcoll0` does, through the precomputed keys of a
+	/// plain sort, a filtered key and a field key alike. ICU ignores U+0000,
+	/// so `a\0b` and `ab` collated equal and `-u` dropped `ab`. Each case is
+	/// GNU `sort` 9.4's output in `en_US.UTF-8` (and `fr_FR.UTF-8`, the same).
+	#[cfg(any(not(unix), target_env = "gnu"))]
+	#[test]
+	fn nul_pieces_collate_in_turn_in_the_locale() {
+		if !locale_installed("en_US.UTF-8") {
+			eprintln!("skipping: en_US.UTF-8 not installed");
+			return;
+		}
+		for (args, input, expected) in [
+			(&["-u"][..], "a\0b\nab\n", "a\0b\nab\n"),
+			(&["-u"][..], "ab\na\0b\n", "a\0b\nab\n"),
+			(&[][..], "ab\na\0b\n", "a\0b\nab\n"),
+			(&["-fu"][..], "a\0b\nab\n", "a\0b\nab\n"),
+			(&["-k1,1f", "-u"][..], "a\0b\nab\n", "a\0b\nab\n"),
+			(&["-fs"][..], "ab\na\0b\n", "a\0b\nab\n"),
+			(&["-cfu"][..], "a\0b\nab\n", ""),
+			(&[][..], "a\0\na\n", "a\na\0\n"),
+			(&["-u"][..], "a\na\0\n", "a\na\0\n"),
+		] {
+			let (code, out, err) = sort_in_locale("LC_ALL", "en_US.UTF-8", args, input);
+			assert_eq!((code, err.as_str()), (0, ""), "{args:?} {input:?}");
+			assert_eq!(out, expected, "{args:?} {input:?}");
+		}
+	}
+
+	/// When the keys tie, GNU's last resort compares the whole lines in the
+	/// locale, not by bytes, unless `-s` or `-u` is given; `-r` reverses it.
+	/// Each case is GNU `sort` 9.4's output in `en_US.UTF-8` (and
+	/// `fr_FR.UTF-8`, the same); bytes would put `A` before `a`, and `x z`
+	/// before `x é`.
+	#[cfg(any(not(unix), target_env = "gnu"))]
+	#[test]
+	fn tied_keys_fall_back_to_the_locale_order_of_the_lines() {
+		if !locale_installed("en_US.UTF-8") {
+			eprintln!("skipping: en_US.UTF-8 not installed");
+			return;
+		}
+		for (args, input, expected) in [
+			(&["-f"][..], "a\nA\n", "a\nA\n"),
+			(&["-f"][..], "A\na\n", "a\nA\n"),
+			(&["-cf"][..], "a\nA\n", ""),
+			(&["-sf"][..], "A\na\n", "A\na\n"),
+			(&["-rf"][..], "a\nA\n", "A\na\n"),
+			(&["-k1,1d"][..], "x z\nx \u{e9}\n", "x \u{e9}\nx z\n"),
+			(&["-k1,1f"][..], "x z\nx \u{e9}\n", "x \u{e9}\nx z\n"),
+			(&["-k1,1i"][..], "x z\nx \u{e9}\n", "x \u{e9}\nx z\n"),
+			(&["-k1,1"][..], "x z\nx \u{e9}\n", "x \u{e9}\nx z\n"),
+			(&["-s", "-k1,1"][..], "x z\nx \u{e9}\n", "x z\nx \u{e9}\n"),
+		] {
+			let (code, out, err) = sort_in_locale("LC_ALL", "en_US.UTF-8", args, input);
+			assert_eq!((code, err.as_str()), (0, ""), "{args:?} {input:?}");
+			assert_eq!(out, expected, "{args:?} {input:?}");
+		}
+	}
+
+	/// Text ICU's collation equates or orders differently from glibc's
+	/// `strcoll` sorts as `strcoll` does: control characters, soft hyphens,
+	/// zero-width spaces and joiners and variation selectors that ICU ignores
+	/// (GNU puts `a<U+200C>b` before `ab` and keeps both), and canonically
+	/// equivalent spellings (`É` and `E` with a combining accent). ICU made
+	/// them equal, so `sort -fu` dropped one, and a byte tie-break put `ab`
+	/// first. Each case is GNU `sort` 9.4's output in `en_US.UTF-8` (the same
+	/// in `fr_FR.UTF-8`).
+	#[cfg(target_env = "gnu")]
+	#[test]
+	fn keys_strcoll_tells_apart_sort_as_strcoll_orders_them() {
+		if !locale_installed("en_US.UTF-8") {
+			eprintln!("skipping: en_US.UTF-8 not installed");
+			return;
+		}
+		let decomposed = "E\u{301}\n\u{c9}\n";
+		let mut cases = vec![
+			(&["-fu"][..], "a\u{1}b\nab\n".to_owned(), "a\u{1}b\nab\n".to_owned(), 0),
+			(&["-fu"][..], "ab\na\u{1}b\n".into(), "a\u{1}b\nab\n".into(), 0),
+			(&["-u"][..], "a\u{1}b\nab\n".into(), "a\u{1}b\nab\n".into(), 0),
+			(&[][..], "ab\na\u{1}b\n".into(), "a\u{1}b\nab\n".into(), 0),
+			(&["-k1,1f", "-u"][..], "a\u{1}b\nab\n".into(), "a\u{1}b\nab\n".into(), 0),
+			(&["-cfu"][..], "a\u{1}b\nab\n".into(), String::new(), 0),
+			(&["-fu"][..], "\u{c9}\nE\u{301}\n".into(), decomposed.into(), 0),
+			(&["-fu"][..], decomposed.into(), decomposed.into(), 0),
+			(&["-u"][..], "\u{c9}\nE\u{301}\n".into(), decomposed.into(), 0),
+			(&[][..], "\u{c9}\nE\u{301}\n".into(), decomposed.into(), 0),
+		];
+		for ignored in ['\u{200c}', '\u{ad}', '\u{200b}', '\u{200d}', '\u{fe0f}'] {
+			let first = format!("a{ignored}b\nab\n");
+			let second = format!("ab\na{ignored}b\n");
+			cases.extend([
+				(&[][..], second.clone(), first.clone(), 0),
+				(&[][..], first.clone(), first.clone(), 0),
+				(&["-u"][..], second.clone(), first.clone(), 0),
+				(&["-fu"][..], second.clone(), first.clone(), 0),
+				(&["-c"][..], first.clone(), String::new(), 0),
+				(&["-C"][..], second, String::new(), 1),
+			]);
+		}
+		for (args, input, expected, expected_code) in cases {
+			let (code, out, _) = sort_in_locale("LC_ALL", "en_US.UTF-8", args, &input);
+			assert_eq!(code, expected_code, "{args:?} {input:?}");
+			assert_eq!(out, expected, "{args:?} {input:?}");
+		}
+	}
+
+	/// Lines glibc's `strcoll` finds equal (`Й` and `И` with a combining
+	/// breve) are equal: GNU `sort` 9.4 keeps them in input order with and
+	/// without `-r` or `-s`, `-u` and `-Ru` keep the first, and `-cu` fails,
+	/// in `fr_FR.UTF-8` and `en_US.UTF-8`. Ordered by bytes they were kept
+	/// twice under `-u` and reordered.
+	#[cfg(target_env = "gnu")]
+	#[test]
+	fn lines_strcoll_equates_stay_in_input_order() {
+		let composed = "\u{419}\n";
+		let decomposed = "\u{418}\u{306}\n";
+		for locale in ["fr_FR.UTF-8", "en_US.UTF-8"] {
+			if !locale_installed(locale) {
+				eprintln!("skipping: {locale} not installed");
+				continue;
+			}
+			for (first, second) in [(composed, decomposed), (decomposed, composed)] {
+				let input = format!("{first}{second}");
+				for args in [&[][..], &["-r"], &["-s"], &["-c"]] {
+					let expected = if args == ["-c"] { String::new() } else { input.clone() };
+					assert_eq!(sort_in_locale("LC_ALL", locale, args, &input).1, expected, "{locale} {args:?} {input:?}");
+				}
+				for args in [&["-u"][..], &["-Ru"], &["-Rfu"]] {
+					assert_eq!(sort_in_locale("LC_ALL", locale, args, &input).1, first, "{locale} {args:?} {input:?}");
+				}
+				assert_eq!(sort_in_locale("LC_ALL", locale, &["-cu"], &input).0, 1, "{locale} -cu {input:?}");
+			}
+			// Equal lines among lines the sort must move: on input that is one
+			// sorted run an unstable sort moves nothing.
+			let first_letter = "\u{410}\n";
+			let many: Vec<&str> = (0..300u32)
+				.map(|n| match (n % 3, n.count_ones() % 2) {
+					(0, _) => first_letter,
+					(_, 0) => composed,
+					_ => decomposed,
+				})
+				.collect();
+			let (firsts, equals): (Vec<&str>, Vec<&str>) = many.iter().copied().partition(|line| *line == first_letter);
+			let input = many.concat();
+			let forward = [firsts.as_slice(), equals.as_slice()].concat().concat();
+			let reversed = [equals.as_slice(), firsts.as_slice()].concat().concat();
+			for (args, expected) in [(&[][..], forward), (&["-r"][..], reversed)] {
+				assert!(
+					sort_in_locale("LC_ALL", locale, args, &input).1 == expected,
+					"{locale} {args:?}: equal lines reordered"
+				);
+			}
+		}
+	}
+
+	/// `-R` with `-f`, `-d` or `-i` hashes the key as they leave it, as GNU
+	/// does, so keys they make equal sort together and `-u` keeps one of each:
+	/// GNU `sort` 9.4 prints two lines for `-Rfu` on `a A b B a A` and one for
+	/// `-Rdu` on `a-b ab a-b`, in C and UTF-8 locales. Hashing the raw line
+	/// left equal keys apart, so `-u` kept several (also on `main`).
+	#[test]
+	fn random_sort_groups_the_keys_its_options_make_equal() {
+		let locales: &[&str] = if locale_installed("en_US.UTF-8") { &["C", "en_US.UTF-8"] } else { &["C"] };
+		for &locale in locales {
+			for _ in 0..20 {
+				let (code, out, _) = sort_in_locale("LC_ALL", locale, &["-Rfu"], "a\nA\nb\nB\na\nA\n");
+				assert_eq!(code, 0);
+				let mut folded: Vec<String> = out.lines().map(str::to_ascii_lowercase).collect();
+				folded.sort();
+				assert_eq!(folded, ["a", "b"], "{locale}: -Rfu printed {out:?}");
+				let (_, out, _) = sort_in_locale("LC_ALL", locale, &["-Rdu"], "a-b\nab\na-b\n");
+				assert_eq!(out.lines().count(), 1, "{locale}: -Rdu printed {out:?}");
+				let (_, out, _) = sort_in_locale("LC_ALL", locale, &["-Ru"], "a\nA\nb\nB\na\nA\n");
+				assert_eq!(out.lines().count(), 4, "{locale}: -Ru printed {out:?}");
+			}
+		}
+	}
+
+	/// A non-UTF-8 `LC_COLLATE` collates with libc's `strcoll`, as GNU `sort`
+	/// does, where the builtin compared bytes: in a generated
+	/// `en_US.ISO-8859-1`, `é` (0xE9) sorts before `z`, and `-f` folds it to
+	/// `É` first (GNU `sort` 9.4 prints `é`, then `z`, for both). An embedded
+	/// NUL splits a key into pieces collated in turn. libc finds generated
+	/// locales only through a `LOCPATH` the process was started with, so the
+	/// check runs in a copy of this test binary started with one.
+	#[cfg(all(target_os = "linux", target_env = "gnu"))]
+	#[test]
+	fn a_non_utf8_locale_collates_with_libc() {
+		const LOCALES: &str = "OMP_SORT_TEST_LATIN1_LOCALES";
+		if std::env::var_os(LOCALES).is_some() {
+			let run = |args: &[&str], input: &[u8]| {
+				let (mut host, capture) = Host::for_test("sort", input.to_vec(), "/");
+				host.set_test_var("LC_ALL", "en_US.ISO-8859-1");
+				let argv = std::iter::once("sort").chain(args.iter().copied());
+				let parsed = <Sort as clap::Parser>::try_parse_from(argv).expect("parse");
+				assert_eq!(parsed.run(&mut host), 0, "{args:?}");
+				capture.stdout()
+			};
+			assert_eq!(run(&[], b"z\n\xe9\n"), b"\xe9\nz\n");
+			assert_eq!(run(&["-f"], b"z\n\xe9\n"), b"\xe9\nz\n");
+			assert_eq!(run(&["-k1,1"], b"z x\n\xe9 y\n"), b"\xe9 y\nz x\n");
+			// "a\0z" against "a\0b": the first pieces collate equal, so the second decide.
+			assert_eq!(run(&[], b"a\0z\na\0b\n"), b"a\0b\na\0z\n");
+			// "a\0b" against "ab": "a" collates before "ab", so both stay under -u.
+			assert_eq!(run(&["-fu"], b"a\0b\nab\n"), b"a\0b\nab\n");
+			// Tied keys: the whole lines collate, lowercase first, é before z.
+			assert_eq!(run(&["-f"], b"A\na\n"), b"a\nA\n");
+			assert_eq!(run(&["-k1,1d"], b"x z\nx \xe9\n"), b"x \xe9\nx z\n");
+			return;
+		}
+		let dir = tempfile::tempdir().unwrap();
+		let locale = dir.path().join("en_US.ISO-8859-1");
+		let _ = std::process::Command::new("localedef")
+			.args(["-c", "-i", "en_US", "-f", "ISO-8859-1"])
+			.arg(&locale)
+			.output();
+		if !locale.join("LC_COLLATE").exists() {
+			eprintln!("skipping: localedef could not generate en_US.ISO-8859-1");
+			return;
+		}
+		let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+			.args(["--exact", "sort::tests::a_non_utf8_locale_collates_with_libc"])
+			.env("LOCPATH", dir.path())
+			.env(LOCALES, dir.path())
+			.output()
+			.expect("the test binary runs");
+		let stdout = String::from_utf8_lossy(&output.stdout);
+		assert!(output.status.success() && stdout.contains(" 1 passed;"), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
+	}
+
+	/// `-d`, `-i` and `-f` keep and fold by the locale's tables, so in a
+	/// single-byte locale `é` is alphanumeric and printable, and folds to `É`.
+	#[test]
+	fn dictionary_printable_and_fold_follow_the_locale() {
+		let mut latin1 = crate::locale::SortCtype::default();
+		for byte in 0xa0..=0xffu8 {
+			latin1.printable[usize::from(byte)] = true;
+		}
+		for lower in 0xe0..=0xfeu8 {
+			if lower != 0xf7 {
+				latin1.fold[usize::from(lower)] = lower - 0x20;
+				latin1.dictionary[usize::from(lower)] = true;
+				latin1.dictionary[usize::from(lower - 0x20)] = true;
+			}
+		}
+		let c = crate::locale::SortCtype::default();
+		// -f: é and É are one letter in ISO-8859-1, two bytes apart in C.
+		assert_eq!(custom_str_cmp(b"\xe9", b"\xc9", &latin1, false, false, true), Ordering::Equal);
+		assert_eq!(custom_str_cmp(b"\xe9", b"\xc9", &c, false, false, true), Ordering::Greater);
+		// -d keeps é there and drops it in C.
+		assert_eq!(custom_str_cmp(b"a\xe9", b"a", &latin1, false, true, false), Ordering::Greater);
+		assert_eq!(custom_str_cmp(b"a\xe9", b"a", &c, false, true, false), Ordering::Equal);
+		// -i keeps a printable 0xa0 there and drops it in C.
+		assert_eq!(custom_str_cmp(b"a\xa0", b"a", &latin1, true, false, false), Ordering::Greater);
+		assert_eq!(custom_str_cmp(b"a\xa0", b"a", &c, true, false, false), Ordering::Equal);
+		assert!(!latin1.folds_ascii() && c.folds_ascii());
+	}
+
 	#[test]
 	fn test_version_compare() {
 		let a = b"1.2.3-alpha2";
@@ -7053,8 +7619,8 @@ mod tests {
 					let kept = tokenize(line, separator, &mut kept_buffer, &settings.precomputed);
 					let every = tokenize(line, separator, &mut every_buffer, &every_field);
 					assert_eq!(
-						selector.get_range(line, Some(kept)),
-						selector.get_range(line, Some(every)),
+						selector.get_range(line, Some(kept), &crate::locale::C_SORT_CTYPE.blank),
+						selector.get_range(line, Some(every), &crate::locale::C_SORT_CTYPE.blank),
 						"key {key} with separator {separator:?} on {:?}",
 						String::from_utf8_lossy(line),
 					);
@@ -7199,7 +7765,7 @@ mod tests {
 	/// locale (as GNU does) for one that is not installed.
 	#[cfg(unix)]
 	fn locale_installed(locale: &str) -> bool {
-		locale_loadable(locale, nix::libc::LC_ALL_MASK)
+		crate::locale::locale_loadable(locale, crate::locale::ALL_CATEGORIES_MASK)
 	}
 
 	/// Windows sort reads ICU's data for any locale name: nothing to install.
@@ -7211,6 +7777,7 @@ mod tests {
 	// Failure mode: collation used uucore's single collator, built from the
 	// omp process's locale, so `LC_ALL=sv_SE.UTF-8 sort` ordered text by the
 	// process locale (or by bytes) and `--debug` named the process locale.
+	#[cfg(any(not(unix), target_env = "gnu"))]
 	#[test]
 	fn collation_follows_the_shell_locale() {
 		// Swedish puts å and ä after z, å first; English keeps them beside a;
@@ -7234,6 +7801,7 @@ mod tests {
 
 	// Failure mode: shifted collation at tertiary strength treated distinct
 	// punctuation-bearing paths as equal, so `sort -u` discarded records.
+	#[cfg(any(not(unix), target_env = "gnu"))]
 	#[test]
 	fn locale_unique_preserves_punctuation_unless_the_key_ignores_it() {
 		if !locale_installed("en_US.UTF-8") {

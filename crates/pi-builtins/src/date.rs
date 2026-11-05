@@ -1325,10 +1325,22 @@ impl Utility for Date {
 		}
 	}
 }
-/// The default output format of the shell's `LC_TIME` locale.
+/// The default output format of the shell's `LC_TIME` locale, read through
+/// [`crate::locale::libc_locale_load`] so that locale data that never
+/// arrives holds up neither this command's cancellation nor another
+/// command's locale.
 fn default_format(host: &Host) -> String {
-	let locale = shell_locale(host, "LC_TIME").unwrap_or("C");
-	locale_default_format(locale).unwrap_or_else(|| "%a %b %e %X %Z %Y".to_string())
+	let locale = shell_locale(host, "LC_TIME").unwrap_or("C").to_owned();
+	let name = locale.clone();
+	let format = match crate::locale::libc_locale_load(&host.cancel_flag(), move || locale_default_format(&name)) {
+		Ok(format) => format,
+		Err(crate::locale::NoAnswer::Cancelled) => None,
+		Err(crate::locale::NoAnswer::Unasked(why)) => {
+			host.warn(format!("warning: cannot read the locale \"{locale}\": {why}"));
+			None
+		},
+	};
+	format.unwrap_or_else(|| "%a %b %e %X %Z %Y".to_string())
 }
 
 #[cfg(any(

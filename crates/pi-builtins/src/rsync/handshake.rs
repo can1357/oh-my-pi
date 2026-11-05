@@ -152,8 +152,14 @@ pub(crate) fn setup_protocol(
 				check_sub_protocol(&mut protocol, s.client_info);
 			}
 			if !roles.read_batch {
-				w.write_int(protocol as i32).map_err(RsyncError::from_stream)?;
-				w.flush().map_err(RsyncError::from_stream)?;
+				// Upstream's write_int only queues the version: it goes out
+				// during the read that follows, which handles a closed input
+				// before a failed write. A peer that already ended is so
+				// reported as the connection closing, never as a write error.
+				let sent = w.write_int(protocol as i32).and_then(|()| w.flush());
+				if let Err(err) = sent {
+					return Err(RsyncError::from_stream(r.read_int().err().unwrap_or(err)));
+				}
 			}
 			let remote = r.read_int().map_err(RsyncError::from_stream)?;
 			let remote = u32::try_from(remote).unwrap_or(0);

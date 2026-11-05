@@ -219,10 +219,17 @@ impl DestTrees {
 				log.rsyserr(LogCode::Error, &err, &[b"mkdir ", full_path(ctx, &raw).as_slice(), b" failed"].concat());
 				return Err(RsyncError::bare(RERR_FILEIO).at("main.c", 821));
 			}
-			if let Some(ndx) = first
-				&& flists.entry(ndx).is_some_and(|e| &*e.basename == b".")
-			{
-				flists.update(ndx, |e| e.flags |= FLAG_DIR_CREATED);
+			// main.c: when `flist->files[flist->low]` is ".", `flist->files[0]` is
+			// marked created. `low` counts sorted entries, but under --iconv
+			// `files` keeps the order the names arrived in, so a name the
+			// conversion emptied (inactive, so sorted first) moves `low` onto
+			// another arrival and nothing is marked: `./` is then not itemized as
+			// new, as rsync 3.5.1 does not itemize it.
+			if let Some(low) = first {
+				let start = flists.segment_start(0).unwrap_or(0);
+				if flists.entry(flists.from_wire(low)).is_some_and(|e| &*e.basename == b".") {
+					flists.update(flists.from_wire(start), |e| e.flags |= FLAG_DIR_CREATED);
+				}
 			}
 			if say_created {
 				let mut text = b"created directory ".to_vec();

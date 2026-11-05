@@ -185,7 +185,14 @@ impl Connection {
 	/// reader and writer are already gone. For a child kept past a cancelled
 	/// [`Self::finish`].
 	pub(crate) fn from_child(child: ChildGuard) -> Self {
-		Self { reader: Box::new(io::empty()), writer: Box::new(io::sink()), probe: None, child: Some(child), ctl: ConnCtl::default() }
+		Self {
+			reader: Box::new(io::empty()),
+			writer: Box::new(io::sink()),
+			probe: None,
+			writable: None,
+			child: Some(child),
+			ctl: ConnCtl::default(),
+		}
 	}
 
 	/// The child's exit code if it has already exited (signals count as 0),

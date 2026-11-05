@@ -430,7 +430,10 @@ fn receiver_flags_paths_outside_the_announced_dir() {
 	let mut fr = FlistReceiver::new(&rctx, None);
 	let err = fr.recv_extra(&mut input, &flists, 0).unwrap_err();
 	assert_eq!(err.code, RERR_UNSUPPORTED);
-	assert_eq!(err.message.as_deref(), Some("ABORTING due to invalid path from sender: c/x"));
+	// The abort line is printed where it is found, with the name's bytes; the
+	// error carries only the trailer, so it is not printed a second time.
+	assert_eq!(err.message, None);
+	assert_eq!(err.site, Some(("flist.c", 3230)));
 }
 
 #[test]
@@ -454,11 +457,11 @@ fn iconv_names_round_trip() {
 	o.need_unsorted_flist = true;
 	let mut sctx = ctx_for(o.clone(), p, false, true, tmp.path());
 	// Local names are UTF-8 on both sides here; the wire spelling is UTF-8 too.
-	sctx.iconv = Some(Arc::new(crate::rsync::iconv::Iconv::with_locale(b"UTF-8", false, None).unwrap()));
+	sctx.iconv = Some(Arc::new(crate::rsync::iconv::Iconv::with_locale(b"UTF-8", false, None, &std::sync::atomic::AtomicBool::new(false)).unwrap()));
 	let operand = format!("{}/", src.display());
 	let (bytes, sent) = scan(&sctx, &[operand.as_str()], None);
 	let mut rctx = ctx_for(o, p, false, false, tmp.path());
-	rctx.iconv = Some(Arc::new(crate::rsync::iconv::Iconv::with_locale(b"UTF-8", true, None).unwrap()));
+	rctx.iconv = Some(Arc::new(crate::rsync::iconv::Iconv::with_locale(b"UTF-8", true, None, &std::sync::atomic::AtomicBool::new(false)).unwrap()));
 	let (got, _) = receive(&rctx, bytes);
 	assert_eq!(names(&sent), names(&got));
 	// Both sides agree on the index the peer uses for every name.

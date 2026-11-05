@@ -51,6 +51,9 @@ use crate::rsync::wire::{Proto, clone_io_error, is_retryable, put, wire_error};
 const SELECT_TIMEOUT: u64 = 60;
 /// How often a blocked read looks at the cancellation flag.
 const CANCEL_POLL: Duration = Duration::from_millis(100);
+/// How long a read whose write failed waits for the peer's end of input,
+/// which a peer that exits closes a moment after its own input.
+const PEER_END_GRACE: Duration = Duration::from_secs(1);
 /// How long an idle pass watches pending output for progress before it counts
 /// the connection as not writable (upstream's zero-timeout poll).
 const IDLE_POLL: Duration = Duration::from_millis(1);
@@ -2065,6 +2068,32 @@ impl MuxReader {
 		Ok(more)
 	}
 
+	/// The error for a read whose output pass failed with `err`. Upstream's
+	/// perform_io handles waiting input before output, so a peer that has
+	/// ended shows as the end of input, not as the write that failed after it.
+	/// Its ends close one after the other, so the end of input is waited for,
+	/// up to [`PEER_END_GRACE`]; a peer that keeps its output open and sends
+	/// nothing is reported by the failed write after that.
+	fn peer_end_or(&self, err: io::Error) -> io::Error {
+		let sh = &*self.shared;
+		let deadline = Instant::now() + PEER_END_GRACE;
+		let mut st = sh.lock();
+		if st.request_read() {
+			sh.cond.notify_all();
+		}
+		while st.request.is_some() && !st.closed && !sh.cancel.load(Ordering::Relaxed) {
+			let now = Instant::now();
+			if now >= deadline {
+				break;
+			}
+			st = sh.wait_for(st, (deadline - now).min(CANCEL_POLL));
+		}
+		if st.eof && st.read_err.is_none() && !st.more_possible() {
+			return st.end_error(&sh.counters);
+		}
+		err
+	}
+
 	fn read_data(&mut self, buf: &mut [u8], mut idle: Option<IdleWork<'_>>) -> io::Result<usize> {
 		let sh = Arc::clone(&self.shared);
 		if sh.cancel.load(Ordering::Relaxed) {
@@ -2131,7 +2160,9 @@ impl MuxReader {
 				// perform_io: one output pass, then the input that is waiting.
 				let ready = st.input_waiting() || st.inner_done();
 				drop(st);
-				self.run_refill(ready)?;
+				if let Err(err) = self.run_refill(ready) {
+					return Err(self.peer_end_or(err));
+				}
 				st = sh.lock();
 				refilled = true;
 				drained = !ready;

@@ -544,6 +544,11 @@ pub(crate) struct RecvChecks {
 	/// With an implied-filter list: is this directory only an implied parent of a
 	/// requested name? Such entries are forced to non-content directories.
 	pub implied_parent: Option<Box<dyn FnMut(&[u8]) -> bool + Send>>,
+	/// `--iconv`: the received name in the local charset, or empty when the
+	/// conversion fails (the closure reports that on the logger it is given,
+	/// the decoder's), as upstream converts it in recv_file_entry before any
+	/// other check sees it.
+	pub convert_name: Option<Box<dyn FnMut(&[u8], Option<&Logger>) -> Vec<u8> + Send>>,
 }
 
 /// What a hard-link follower may copy from its leader in the same list.
@@ -750,9 +755,13 @@ impl FlistDecoder {
 			name.truncate(nul);
 		}
 		self.last_name.clone_from(&name);
+		if let Some(convert) = &mut self.checks.convert_name {
+			name = convert(&name, self.logger.as_ref());
+		}
 
 		// Absolute names (without --relative) and ".." elements abort the transfer; the
-		// accepted name continues cleaned ("//" and "./" collapsed).
+		// accepted name continues cleaned ("//" and "./" collapsed). An empty name (a
+		// failed conversion) is left as it is.
 		name = paths::check_received_name(&name, self.opts.relative_paths)?;
 		let (dir, base) = paths::split_name_rooted(&name);
 		let dirname: Arc<[u8]> = if dir.is_empty() { Arc::default() } else { self.intern_dir(dir) };
