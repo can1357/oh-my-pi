@@ -460,7 +460,7 @@ fn assignment_statement(
 			if state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
 				.unwrap_or(false)
 			{
-				return Some(exec::fatal(vp, cx));
+				return Some(exec::fatal(k, vp, cx));
 			}
 			return Some(Flow::Discard(1));
 		}
@@ -907,7 +907,7 @@ fn expand(
 				if state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
 					.unwrap_or(false)
 				{
-					return Some(exec::fatal(vp, cx));
+					return Some(exec::fatal(k, vp, cx));
 				}
 				return Some(Flow::Discard(1));
 			}
@@ -1006,8 +1006,14 @@ fn expand(
 				if state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
 					.unwrap_or(false)
 				{
+					// A special builtin ends the shell with the fatal
+					// status; any other command ends it with the discard
+					// one, and never runs.
 					if IntrinsicId::from_name(&st(vp).argv[0]).is_some_and(is_special) {
-						return Some(exec::fatal(vp, cx));
+						return Some(exec::fatal(k, vp, cx));
+					}
+					if !matches!(st(vp).target, Some(Target::Function(_))) {
+						return Some(exec::discard_jump(k, vp, cx));
 					}
 					let s = st(vp);
 					s.status = 1;
@@ -1067,13 +1073,18 @@ fn expand(
 			if let Err(d) =
 				assign_now(k, vp, cx, &name, index.as_ref().map(|i| i.as_slice()), append, value)
 			{
+				// An arithmetic error in the subscript abandons the line
+				// wherever it lands (bash's `DISCARD`), a failed assignment
+				// ends a posix shell (its `FORCE_EOF`).
+				let arith = matches!(d, Diag::ArithSubscript { .. });
 				k.diag(cx, vp, line, d);
 				// bash abandons the rest of the command line after a failed
 				// assignment statement; a posix shell exits.
-				if state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
-					.unwrap_or(false)
+				if !arith
+					&& state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
+						.unwrap_or(false)
 				{
-					return Some(exec::fatal(vp, cx));
+					return Some(exec::fatal(k, vp, cx));
 				}
 				return Some(Flow::Discard(1));
 			}

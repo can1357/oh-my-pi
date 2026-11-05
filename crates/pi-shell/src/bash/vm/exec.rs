@@ -436,7 +436,7 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			// (`subshell_environment`): it ends where a fatal error lands,
 			// with its EXIT trap.
 			Flow::Discard(status) if super::nested::in_subshell(cx.store, vp) => {
-				let status = jump_status(cx, vp, Some(status));
+				let status = jump_status(k, cx, vp, Some(status));
 				exit_shell(k, vp, cx, status);
 			},
 			Flow::Discard(status) => {
@@ -2082,12 +2082,20 @@ fn stopped(
 /// `set -u`, a posix shell's assignment error): the shell exits with the
 /// status of the place the jump lands ([`jump_status`]), unlike `exit n`
 /// whose status is `n` wherever it runs.
-pub fn fatal(vp: &mut Vproc, cx: &mut Cx<'_>) -> Flow {
+pub fn fatal(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Flow {
 	if vp.mode.dialect() == Dialect::Zsh {
 		// zsh: 127 from a `-c` string, 1 elsewhere (`zsh_exit` decides the rest).
 		return Flow::Exit(if shell_command(cx, vp) { 127 } else { 1 });
 	}
-	Flow::Exit(jump_status(cx, vp, None))
+	Flow::Exit(jump_status(k, cx, vp, None))
+}
+
+/// A command bash discards where it must not go on (a posix shell's
+/// assignment error before a command that is not a special builtin):
+/// the discard landing of [`jump_status`], never the "carry on with the
+/// next command" of a plain [`Flow::Discard`].
+pub fn discard_jump(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Flow {
+	Flow::Exit(jump_status(k, cx, vp, Some(1)))
 }
 
 /// Whether `vp` runs a `-c` string as the shell itself (a nested shell,
@@ -2143,10 +2151,15 @@ fn catch(cx: &mut Cx<'_>, vp: &Vproc) -> Catch {
 				};
 			},
 			TrapKey::Return => {},
-			// `run_pending_traps` puts the status back around a signal
-			// trap; an ERR or DEBUG trap leaves the failure status.
-			TrapKey::Signal(_) => inner_trap = Some(status),
-			TrapKey::Err | TrapKey::Debug => inner_trap = Some(1),
+			// The innermost one decides. `run_pending_traps` puts the
+			// status back around a signal trap, and `run_debug_trap`
+			// around a DEBUG trap; an ERR trap leaves the failure status
+			// its nested evaluation set.
+			TrapKey::Signal(_) | TrapKey::Debug if inner_trap.is_none() => {
+				inner_trap = Some(status);
+			},
+			TrapKey::Err if inner_trap.is_none() => inner_trap = Some(1),
+			TrapKey::Signal(_) | TrapKey::Err | TrapKey::Debug => {},
 		}
 	}
 	if !super::nested::in_subshell(cx.store, vp) {
@@ -2161,8 +2174,16 @@ fn catch(cx: &mut Cx<'_>, vp: &Vproc) -> Catch {
 /// decides. A forked command that has not dispatched its program yet runs
 /// the EXIT trap it inherited, as bash's child does before it resets its
 /// traps ([`forked_dispatch`]).
-fn jump_status(cx: &mut Cx<'_>, vp: &mut Vproc, discarded: Option<i32>) -> i32 {
+fn jump_status(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, discarded: Option<i32>) -> i32 {
 	match catch(cx, vp) {
+		// With `errexit` on, the jump out of the EXIT trap's action is bash's
+		// `ERREXIT`, which `run_exit_trap` answers with the failure status
+		// rather than the status it saved.
+		Catch::ExitTrap(_)
+			if state::option(&mut k.root, cx.store, vp, OptId::Errexit).unwrap_or(false) =>
+		{
+			1
+		},
 		Catch::ExitTrap(saved) => saved,
 		// The nested trap's status, which the EXIT trap's own catch would
 		// have replaced with the status it saved.
@@ -2278,7 +2299,7 @@ pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, sto
 		},
 		Stop::Fail(d) | Stop::Fatal(d) => {
 			k.diag(cx, vp, line, d);
-			fatal(vp, cx)
+			fatal(k, vp, cx)
 		},
 		Stop::Store(err) => {
 			k.fail(err);
@@ -3827,7 +3848,7 @@ fn for_next(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 		k.diag(cx, vp, line, d);
 		// An assignment error ends a posix shell (a fatal error).
 		if state::option(&mut k.root, cx.store, vp, OptId::Posix).unwrap_or(false) {
-			return fatal(vp, cx);
+			return fatal(k, vp, cx);
 		}
 		if let Some(rec) = top_frame(vp).loops.last_mut() {
 			rec.status = 1;

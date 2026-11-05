@@ -235,3 +235,48 @@ async fn an_exec_of_a_text_file_runs_no_exit_trap() {
 	])
 	.await;
 }
+
+/// Round-2 review rows, each the output and status of Bash 5.2.21 and 5.3.0
+/// for the same `-c` string: the innermost trap nested in the EXIT trap's
+/// action decides (a DEBUG trap takes its own saved status, an ERR trap the
+/// failure status), `errexit` makes the EXIT trap's own jump exit 1, a posix
+/// arithmetic-subscript assignment error stays a discard (1, not the fatal
+/// 127), and a posix temporary-environment assignment error ends the shell
+/// before the command runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn round_two_rows() {
+	check(&[
+		// The innermost nested trap decides (a signal trap whose action sets
+		// an ERR trap).
+		(
+			r##"trap 'trap '"'"': ${x?BOOM}'"'"' ERR; false' USR1; trap 'kill -USR1 $$' EXIT; exit 7"##,
+			"",
+			1,
+		),
+		// A DEBUG trap inside the EXIT trap's action.
+		(
+			r##"trap 'trap '"'"': ${unset_review?BOOM}'"'"' DEBUG; :; echo BAD' EXIT; exit 7"##,
+			"",
+			0,
+		),
+		// `errexit` while the fatal error lands in the EXIT trap.
+		(r##"trap 'set -e; : ${x?BOOM}' EXIT; exit 7"##, "", 1),
+		(r##"( trap 'set -e; : ${x?BOOM}' EXIT; exit 7 ); echo "S:$?""##, "S:1\n", 0),
+		(r##"trap 'set -e; : ${x?BOOM}' EXIT; exit 0"##, "", 1),
+		(r##"set -e; trap ': ${x?BOOM}' EXIT; exit 7"##, "", 1),
+		// A posix arithmetic-subscript assignment error is a discard.
+		(r##"set -o posix; declare -a A; A[bad!]=x; echo BAD"##, "", 1),
+		(r##"set -o posix; declare -a A; A[bad!]=x & wait $!; echo "S:$?""##, "S:1\n", 0),
+		// A posix temporary-environment assignment error, by what it runs.
+		(r##"set -o posix; readonly R; R=x /usr/bin/true; echo BAD"##, "", 1),
+		(r##"set -o posix; readonly R; R=x :; echo BAD"##, "", 127),
+		(r##"( set -o posix; readonly R; R=x /usr/bin/true; echo BAD ); echo "S:$?""##, "S:1\n", 0),
+		(
+			r##"( trap 'echo S:T' EXIT; set -o posix; readonly R; R=x /usr/bin/true; echo BAD; exit 4 ); echo "S:$?""##,
+			"S:T\nS:1\n",
+			0,
+		),
+		(r##"set -o posix; readonly R; R=x /usr/bin/true & wait $!; echo "S:$?""##, "S:1\n", 0),
+	])
+	.await;
+}
