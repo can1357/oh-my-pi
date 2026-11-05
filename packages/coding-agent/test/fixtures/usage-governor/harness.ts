@@ -297,14 +297,43 @@ export class GovernorProof {
 		return fs.existsSync(this.ledgerPath);
 	}
 
+	/** Capture the files SQLite needs before cleanup removes the fixture. */
+	ledgerDiagnostics(): unknown {
+		return [this.agentDir, this.ledgerPath, `${this.ledgerPath}-wal`, `${this.ledgerPath}-shm`].map(file => {
+			try {
+				const stat = fs.statSync(file);
+				const access = (mode: number) => {
+					try {
+						fs.accessSync(file, mode);
+						return true;
+					} catch {
+						return false;
+					}
+				};
+				return {
+					path: file,
+					exists: true,
+					mode: (stat.mode & 0o7777).toString(8),
+					uid: stat.uid,
+					gid: stat.gid,
+					readable: access(fs.constants.R_OK),
+					writable: access(fs.constants.W_OK),
+				};
+			} catch (error) {
+				return { path: file, exists: false, error: String(error) };
+			}
+		});
+	}
+
 	/**
 	 * Read the ledger through a read-only handle. Never writes. A ledger file whose schema is still
 	 * being created reads as empty: the child creates the file before its schema transaction commits.
 	 */
 	readLedger(): LedgerSnapshot {
 		if (!this.ledgerExists()) return EMPTY_LEDGER;
-		const db = new Database(this.ledgerPath, { readonly: true });
+		let db: Database | undefined;
 		try {
+			db = new Database(this.ledgerPath, { readonly: true });
 			const tables = new Set(
 				db
 					.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -350,8 +379,21 @@ export class GovernorProof {
 					interactive: row.interactive,
 				}));
 			return { waits, reservations };
+		} catch (error) {
+			const details =
+				error instanceof Error
+					? Object.fromEntries(
+							Object.getOwnPropertyNames(error).map(key => [
+								key,
+								(error as unknown as Record<string, unknown>)[key],
+							]),
+						)
+					: error;
+			throw new Error(`ledger read failed: ${JSON.stringify({ error: details, files: this.ledgerDiagnostics() })}`, {
+				cause: error,
+			});
 		} finally {
-			db.close();
+			db?.close();
 		}
 	}
 

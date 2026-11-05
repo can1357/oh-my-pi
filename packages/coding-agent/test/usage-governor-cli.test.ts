@@ -453,14 +453,20 @@ describe("usage governor CLI proof: scenarios", () => {
 		const specs = [account("govplan", "a", { usedFraction: 0.95, resetInMs: 30_000 })];
 		const proof = await GovernorProof.create(specs, { enabled: true });
 		const probe = proof.spawnOmp(["-p", "abort during wait"]);
+		const stderr = new Response(probe.stderr).text();
+		const lifecycle: unknown[] = [{ event: "spawn", pid: probe.pid, exitCode: probe.exitCode, killed: probe.killed }];
+		let failed = false;
 		try {
 			const waiting = await awaitCondition(
 				() => proof.readLedger().waits.some(wait => wait.endedAtMs === null),
 				30_000,
 			);
 			expect(waiting).toBe(true);
+			lifecycle.push({ event: "wait observed", pid: probe.pid, exitCode: probe.exitCode, killed: probe.killed });
 			probe.kill("SIGINT");
+			lifecycle.push({ event: "SIGINT sent", pid: probe.pid, exitCode: probe.exitCode, killed: probe.killed });
 			expect(await probe.exited).not.toBe(0);
+			lifecycle.push({ event: "exited", pid: probe.pid, exitCode: probe.exitCode, killed: probe.killed });
 
 			expect(proof.chats().length).toBe(0);
 			const ledger = proof.readLedger();
@@ -468,9 +474,20 @@ describe("usage governor CLI proof: scenarios", () => {
 			expect(ledger.waits.some(wait => wait.outcome === "aborted")).toBe(true);
 			expect(ledger.waits.filter(wait => wait.endedAtMs === null)).toEqual([]);
 			assertConfined(proof);
+		} catch (error) {
+			failed = true;
+			lifecycle.push({
+				event: "failure",
+				pid: probe.pid,
+				exitCode: probe.exitCode,
+				killed: probe.killed,
+				files: proof.ledgerDiagnostics(),
+			});
+			throw error;
 		} finally {
 			probe.kill();
 			await probe.exited;
+			if (failed) console.error("abort probe diagnostics:", JSON.stringify({ lifecycle, stderr: await stderr }));
 			proof.close();
 		}
 	}, 120_000);
