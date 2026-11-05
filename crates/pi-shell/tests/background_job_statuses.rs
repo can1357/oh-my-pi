@@ -267,3 +267,48 @@ async fn a_non_job_child_keeps_its_status_and_a_failed_operand_names_none() {
 	])
 	.await;
 }
+
+/// A malformed numeric operand stops the operand loop, not the waits
+/// already requested; later operands are not waited for, and `-p` names
+/// no child even when an earlier operand completed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_malformed_pid_waits_for_earlier_operands_only() {
+	assert_bash_outputs(&[
+		(
+			r#"d=$(mktemp -d); cd "$d"; f(){ /bin/sleep .15; echo child > child; return 23; }; f & p=$!; wait -p w "$p" 1x 2>/dev/null; s=$?; echo status=$s:w=${w-unset}; if [ -f child ]; then echo file=yes; else echo file=no; fi; wait "$p"; echo again=$?; cd /; /bin/rm -r "$d""#,
+			"status=1:w=unset\nfile=yes\nagain=23\n",
+		),
+		(
+			r#"d=$(mktemp -d); cd "$d"; f(){ /bin/sleep .1; echo child > before; return 23; }; g(){ /bin/sleep .6; echo child > after; return 29; }; f & p=$!; g & q=$!; wait -p w "$p" 1x "$q" 2>/dev/null; s=$?; echo status=$s:w=${w-unset}; if [ -f before ]; then echo before=yes; else echo before=no; fi; if [ -f after ]; then echo after=yes; else echo after=no; fi; wait "$p"; echo p=$?; wait "$q"; echo q=$?; cd /; /bin/rm -r "$d""#,
+			"status=1:w=unset\nbefore=yes\nafter=no\np=23\nq=29\n",
+		),
+		(
+			r#"d=$(mktemp -d); cd "$d"; f(){ /bin/sleep .15; echo child > child; return 23; }; f & p=$!; wait -p w 1x "$p" 2>/dev/null; s=$?; echo status=$s:w=${w-unset}; if [ -f child ]; then echo file=yes; else echo file=no; fi; wait "$p"; echo again=$?; cd /; /bin/rm -r "$d""#,
+			"status=1:w=unset\nfile=no\nagain=23\n",
+		),
+	])
+	.await;
+}
+
+/// `$!` already names an input process substitution before its first
+/// scheduler turn: ordinary, duplicate and `-n` operands must find it.
+/// Bash 5.2.21 gives 127 for these `-n` operands; Bash 5.3 keeps their
+/// statuses and supplies the child's pid through `-p`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_immediate_wait_finds_a_process_substitution() {
+	assert_bash_outputs(&[
+		(
+			r#": < <(/bin/sleep .05; exit 23); p=$!; wait "$p" 2>/dev/null; echo first=$?; wait "$p" 2>/dev/null; echo second=$?"#,
+			"first=23\nsecond=23\n",
+		),
+		(
+			r#": < <(/bin/sleep .05; exit 23); p=$!; wait -n -p w "$p" 2>/dev/null; s=$?; [ "${w-unset}" = "$p" ] && w=same; echo status=$s:w=${w-unset}; wait "$p" 2>/dev/null; echo again=$?"#,
+			"status=23:w=same\nagain=23\n",
+		),
+		(
+			r#"exec 3< <(/bin/sleep .02; exit 23); p=$!; wait "$p" "$p" 2>/dev/null; echo status=$?; wait -n -p w "$p" 2>/dev/null; s=$?; [ "${w-unset}" = "$p" ] && w=same; echo status=$s:w=${w-unset}; exec 3<&-"#,
+			"status=23\nstatus=23:w=same\n",
+		),
+	])
+	.await;
+}
