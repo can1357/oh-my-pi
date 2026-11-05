@@ -31,6 +31,7 @@
 - `CompactTranscriptBlock` (`chrome/transcript-container`): consecutive blocks whose `isTranscriptBlockCompact()` returns true draw without blank rows between them in the terminal (scrollback included) and as one gapless entry on a native (TSP) surface. Tool cards, read groups and `PresentedBlock` report it while a presenter draws them compact, and `FramedMessageComponent` forwards it from an extension renderer's component ([#17997](https://github.com/can1357/oh-my-pi/pull/17997) by [@materemias](https://github.com/materemias))
 
 ### Fixed
+- The `find` card marks a search its 20 s budget cut short (`timed out, V/P passages verified`), so its hits are not read as a complete result ([#18161](https://github.com/can1357/oh-my-pi/pull/18161) by [@will-bogusz](https://github.com/will-bogusz))
 - Tern's classic renderer draws inline images (table charts included) as Kitty Unicode placeholders, so text that replaces an image's cells removes the image instead of leaving a stale copy over the table while an answer streams or the pane resizes
 - The native composer's first frame shows the cached thinking level on the model chip (or effort chip) instead of the plain model icon until the session attaches
 - Clicking the popup of an enum setting with many values (Edit Mode, Session Tree Filter, Advisor Sync Backlog) on a native settings page opens its menu instead of doing nothing
@@ -48,6 +49,7 @@
 - LSP results render under one header that carries the request and the counts (`LSP: references src/a.ts:42 (validateToken) 6 references · 4 files`) instead of a card repeating the request above a `Response` section; each reference previews its source line (`42:14│ export function validateToken(…)`), reference previews and definition snippets are highlighted in the file's language, and an error's message hangs under the header ([#18106](https://github.com/can1357/oh-my-pi/pull/18106) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Grep and AST Grep headers put the search scope right after the pattern (`Grep: useState in packages/tui/src 5 matches · 3 files`), their errors show the tool title and pattern above the message instead of `Error: …`, and collapsed AST Grep results drop the `meta:` capture rows ([#18105](https://github.com/can1357/oh-my-pi/pull/18105) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - AST Edit's header names the search scope after the pattern, its error card keeps the same subject, and the `proposed` state and replacement counts move to the card's bottom border (`proposed · 3 replacements · 2 files · searched 214`) ([#18105](https://github.com/can1357/oh-my-pi/pull/18105) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Centered sheets and dialogs on narrow native terminals fill the pane only once their content reaches half the screen height, instead of stretching a few lines into a mostly empty full-height sheet
 
 ## [18.16.0] - 2026-11-02
 
