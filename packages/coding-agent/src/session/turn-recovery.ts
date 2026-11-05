@@ -411,7 +411,12 @@ export class TurnRecovery {
 	 * `#refusalRetryCount`.
 	 */
 	#refusalExemptAttempts = 0;
-	/** Identifies the current retry saga, so a pending error outlives its own saga unmarked. */
+	/**
+	 * Identifies the retry saga a pending error belongs to, so an abandoned saga's entries stay
+	 * unmarked forever instead of being claimed by whatever closes next. Moved on in exactly one
+	 * place, `abortRetry()` without `sagaContinues`, because that is the only way a saga ends
+	 * with entries still pending: every other end clears them.
+	 */
 	#retrySagaEpoch = 0;
 	/** Per-model account walk allowance, snapshotted once and cleared when the retry saga ends. */
 	readonly #accountPolicyRotationsRemaining = new Map<string, number>();
@@ -904,10 +909,17 @@ export class TurnRecovery {
 		return parsed ? formatRetryFallbackBaseSelector(parsed) : selector;
 	}
 
-	/** Resolve the pending retry promise; the saga is over, and so is its refusal walk. */
+	/**
+	 * Resolve the pending retry promise; the saga is over, and so is its refusal walk.
+	 *
+	 * This does NOT move the saga epoch on. Every caller that ends a saga for good also clears
+	 * `#pendingRetryErrors`, so there is nothing left to mis-attribute; the callers that reach
+	 * here mid-saga (an overflow compaction that rebuilds the context and retries, a fallback
+	 * hop that opens a fresh promise) leave the saga's own entries in place and must leave them
+	 * markable. Only `abortRetry()` can end a saga with its entries still pending, and only it
+	 * knows whether the turn is coming back, so the epoch moves there.
+	 */
 	resolveRetry(): void {
-		// A new saga starts here: entries an abandoned one left behind belong to no live saga.
-		this.#retrySagaEpoch++;
 		this.#refusalWalkTried.clear();
 		this.#refusalRetryCount = 0;
 		this.#refusalExemptAttempts = 0;
@@ -3371,10 +3383,18 @@ export class TurnRecovery {
 
 	/**
 	 * Cancel in-progress retry.
+	 *
+	 * `sagaContinues` is a statement about the work, not about the wait. Every abort cancels the
+	 * same sleep; only the caller knows whether the turn it interrupted is coming back. A manual
+	 * compaction aborts its own turn in order to resume it, and the errors that turn already
+	 * recorded are still its own — the continuation closes the saga and marks them. Every other
+	 * abort abandons them: the saga moves on so the next one to close cannot mark another turn's
+	 * errors, which nothing superseded and which a superseded marker would stop rendering.
 	 */
-	abortRetry(): void {
+	abortRetry(options?: { sagaContinues?: boolean }): void {
 		this.#retryAbortController?.abort();
 		// Note: _retryAttempt is reset in the catch block of _autoRetry
+		if (options?.sagaContinues !== true) this.#retrySagaEpoch++;
 		this.resolveRetry();
 	}
 

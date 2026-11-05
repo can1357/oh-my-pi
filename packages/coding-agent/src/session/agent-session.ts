@@ -2979,6 +2979,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			setModelTemporary: (model, thinkingLevel, options) =>
 				this.#models.setModelTemporary(model, thinkingLevel, options, "automatic"),
 			abort: options => this.abort(options),
+			abortRetry: () => this.abortRetry(),
 			abortHandoff: () => this.abortHandoff(),
 		};
 		this.#maintenance = new SessionMaintenance(maintenanceHost);
@@ -11647,7 +11648,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#abortAutolearnCapture();
 			for (const controller of this.#usagePreflightAbortControllers) controller.abort();
 			for (const controller of this.#imageDescriptionAbortControllers) controller.abort(options?.reason);
-			this.abortRetry();
+			// `/compact` aborts the active turn in order to resume it, so the errors that turn
+			// already retried past belong to the continuation that will close its saga, not to
+			// whatever prompt comes next. Every other abort abandons them.
+			const sagaContinues = options?.preserveCompaction === true;
+			this.#recovery.abortRetry({ sagaContinues });
 			this.#promptGeneration++;
 			// Cancel any awaited pre-dispatch setup (e.g. Hindsight auto-recall) so the
 			// admitted submission unwinds now instead of at the recall timeout (#12668).
@@ -11682,7 +11687,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// agent_end is awaited: a message_end stalled in an extension hook would
 			// otherwise hold /new and every abort for the full handler timeout.
 			await this.#drainAgentEndMaintenance();
-			this.abortRetry();
+			this.#recovery.abortRetry({ sagaContinues });
 			await this.#cancelPostPromptTasks();
 			// `/compact` disconnects the agent subscription until its finally block.
 			// Do not let abort-and-replace callers start a new prompt before that cleanup

@@ -515,6 +515,8 @@ export interface SessionMaintenanceHost {
 		reason?: string;
 		preserveCompaction?: boolean;
 	}): Promise<void>;
+	/** Abandons the retry saga a `preserveCompaction` abort deliberately left open. */
+	abortRetry(): void;
 	abortHandoff(): void;
 }
 
@@ -1262,6 +1264,11 @@ export class SessionMaintenance {
 					(interruptedActiveTurn || inheritedResume) &&
 					options?.suppressContinuation !== true &&
 					cfgCompactionAutoContinue.get(this.#host.settings) !== false;
+				// `preserveCompaction` told the abort the saga was coming back, so its pending
+				// retry errors are still markable. Nothing is coming back on this branch: close
+				// the saga for real, or the next prompt's success marks this turn's errors
+				// recovered and the transcript stops rendering them.
+				if (!resumeInterruptedTurn) this.#host.abortRetry();
 				interruptedTurnGeneration = this.#host.promptGeneration();
 				manualCompactionStarted = true;
 				await this.#emitLifecycleEvent(

@@ -369,6 +369,40 @@ describe("openai-codex error parsing", () => {
 		expect(info.rateLimits?.primary?.used_percent).toBe(99);
 	});
 
+	it("reads the quota code out of a doubly wrapped envelope", async () => {
+		// Some gateways wrap the envelope in itself. The inner object is the real error, and
+		// without it the plan window reads as an unexplained 429 the client retries into.
+		const resetAt = Math.floor(Date.now() / 1000) + 600;
+		const response = new Response(
+			JSON.stringify({ error: { error: { code: "usage_limit_reached", plan_type: "Pro", resets_at: resetAt } } }),
+			{ status: 429 },
+		);
+
+		const info = await parseCodexError(response);
+		expect(info.code).toBe("usage_limit_reached");
+		expect(info.friendlyMessage).toContain("(pro plan)");
+	});
+
+	// An `error` field beside a code of its own is a diagnostic, not the envelope. Descending
+	// into it loses the code, so the plan window and its reset go with it and a spent quota is
+	// retried as a transient failure.
+	it.each([
+		{ name: "an empty array", diagnostic: [] as unknown },
+		{ name: "an object carrying no code", diagnostic: { trace_id: "abc", detail: "diagnostic only" } },
+	])("keeps the outer quota code when the `error` field beside it is $name", async ({ diagnostic }) => {
+		const resetAt = Math.floor(Date.now() / 1000) + 600;
+		const response = new Response(
+			JSON.stringify({
+				error: { code: "usage_limit_reached", plan_type: "Pro", resets_at: resetAt, error: diagnostic },
+			}),
+			{ status: 429 },
+		);
+
+		const info = await parseCodexError(response);
+		expect(info.code).toBe("usage_limit_reached");
+		expect(info.friendlyMessage).toContain("(pro plan)");
+	});
+
 	it("CodexApiError carries status/headers/code for structural retry classification", async () => {
 		const response = new Response(JSON.stringify({ error: { code: "rate_limit_exceeded", message: "slow down" } }), {
 			status: 429,

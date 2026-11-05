@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
-import type { Api, Context, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
+import type { Api, AssistantMessage, Context, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 // The refusal exactly as an OpenAI Responses route sends it: HTTP 200, then
@@ -63,6 +64,32 @@ async function runAgainstPool(respond: () => Response) {
 	return { result: await stream.result(), bearers };
 }
 
+const quotaModel: Model<"openai-completions"> = buildModel({
+	api: "openai-completions",
+	name: "Quota Test",
+	id: "quota-test",
+	provider: "probe",
+	baseUrl: "http://127.0.0.1:9/v1",
+	contextWindow: 128_000,
+	maxTokens: 1024,
+	input: ["text"],
+	reasoning: false,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+} satisfies ModelSpec<"openai-completions">);
+
+/**
+ * One in-band Chat Completions error frame: HTTP 200, the error inside the stream. That route
+ * has no raw-body fallback, so a parser that descends into the wrong object has nothing left to
+ * report — the code, the classification and the explanation all go with it.
+ */
+async function runInBandError(error: Record<string, unknown>): Promise<AssistantMessage> {
+	const fetch = (async () =>
+		new Response(`data: ${JSON.stringify({ error })}\n\ndata: [DONE]\n\n`, {
+			headers: { "content-type": "text/event-stream" },
+		})) as FetchImpl;
+	return await streamSimple(quotaModel, context, { fetch, apiKey: "test" }).result();
+}
+
 describe("error envelopes a gateway doubly wrapped", () => {
 	// A gateway may wrap the envelope in itself, and the inner object is then the real error.
 	it("reads the refusal code out of the inner envelope instead of rotating every credential", async () => {
@@ -73,23 +100,26 @@ describe("error envelopes a gateway doubly wrapped", () => {
 		expect(bearers).toEqual(["Bearer credential-A"]);
 		expect(result.stopDetails).toEqual({ type: "refusal", category: "cyber_policy", explanation: REFUSAL_MESSAGE });
 	});
+});
 
-	// An `error` field beside a valid outer code is a diagnostic, not the envelope. Taking it
-	// loses the outer code: a refusal read that way stops being a refusal and rotates every
-	// sibling credential, which is the account walk this pull request exists to prevent.
+describe("an `error` field beside a code of its own", () => {
+	// It is a diagnostic, not the envelope, and reading it as one throws away the outer code and
+	// message. A refusal survives that by a second route (its code is also read off the plain
+	// provider error), so a refusal cannot witness the precedence; a spent quota can. Read the
+	// wrong way it stops classifying as a usage limit and is retried as an unexplained transient.
 	it.each([
 		{ name: "an empty array", diagnostic: [] as unknown },
 		{ name: "an object carrying no code", diagnostic: { trace_id: "abc", detail: "diagnostic only" } },
-	])("keeps the outer refusal code when the inner value is $name", async ({ diagnostic }) => {
-		const { result, bearers } = await runAgainstPool(() =>
-			Response.json(
-				{ error: { code: "cyber_policy", message: REFUSAL_MESSAGE, error: diagnostic } },
-				{ status: 403 },
-			),
-		);
+	])("keeps the quota code and its explanation when the field is $name", async ({ diagnostic }) => {
+		const result = await runInBandError({
+			code: "429",
+			type: "TOO_MANY_REQUESTS",
+			message: "Your account quota is exhausted",
+			error: diagnostic,
+		});
 
-		expect(bearers).toEqual(["Bearer credential-A"]);
-		expect(result.stopDetails).toEqual({ type: "refusal", category: "cyber_policy", explanation: REFUSAL_MESSAGE });
+		expect(result.errorMessage).toBe("429 Your account quota is exhausted");
+		expect(AIError.isUsageLimit(result)).toBe(true);
 	});
 });
 
