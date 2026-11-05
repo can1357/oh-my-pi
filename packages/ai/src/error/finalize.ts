@@ -181,3 +181,25 @@ export function applyFinalizeResult(
 	if (result.retryAfterMs === undefined) delete output.errorRetryAfterMs;
 	else output.errorRetryAfterMs = result.retryAfterMs;
 }
+
+/**
+ * Records on an already-finalized message that a wait was refused after it was
+ * built.
+ *
+ * A layer above the provider — turn recovery's credential rotation — decides
+ * whether to replay only once it holds the failed turn's message, so the
+ * refusal cannot travel through {@link finalize}. The message is the only
+ * thing a reader sees, so the bound that stopped the rotation is written onto
+ * it here instead, as {@link applyFinalizeResult} would have. Nothing is
+ * appended twice, and the classification the message already carries is left
+ * alone: a refusal is not a reason.
+ */
+export function applyRefusedRetryWait(output: AssistantMessage, failure: unknown): void {
+	const refused = retryWaitRefusal(failure);
+	if (refused === undefined || output.errorRetryWaitRefusal !== undefined) return;
+	output.errorRetryWaitRefusal = refused;
+	const shown = output.errorDisplayMessage ?? output.errorMessage;
+	if (shown !== undefined && !hasRefusedRetryWaitNote(shown)) {
+		output.errorDisplayMessage = `${shown} ${refusedRetryWaitNote(refused)}`;
+	}
+}

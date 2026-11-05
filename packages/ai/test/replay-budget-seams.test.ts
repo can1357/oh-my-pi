@@ -13,6 +13,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import { clearCopilotIntegrationCache } from "@oh-my-pi/pi-ai/providers/github-copilot-headers";
 import {
 	clearGitLabDuoDirectAccessCache,
@@ -328,7 +329,8 @@ describe("a call whose entry point fetches a token before it delegates", () => {
 describe("a correction the server asked to delay by 30 s, against a 2 s budget", () => {
 	interface CorrectionTarget {
 		kind: string;
-		rejection: () => Response;
+		/** The rejection, naming `retryAfterSeconds` (30 s unless a row needs another). */
+		rejection: (retryAfterSeconds?: number) => Response;
 		call: (
 			url: string,
 			replayBudgetMs: number | undefined,
@@ -341,7 +343,7 @@ describe("a correction the server asked to delay by 30 s, against a 2 s budget",
 	const targets: CorrectionTarget[] = [
 		{
 			kind: "compression",
-			rejection: () =>
+			rejection: (retryAfterSeconds = 30) =>
 				Response.json(
 					{
 						type: "error",
@@ -351,7 +353,7 @@ describe("a correction the server asked to delay by 30 s, against a 2 s budget",
 							details: { error_code: "request_body_encoding_invalid" },
 						},
 					},
-					{ status: 400, headers: { "retry-after": "30" } },
+					{ status: 400, headers: { "retry-after": String(retryAfterSeconds) } },
 				),
 			call: (url, replayBudgetMs, retryOptions) =>
 				streamAnthropic(
@@ -380,8 +382,11 @@ describe("a correction the server asked to delay by 30 s, against a 2 s budget",
 		},
 		{
 			kind: "copilot identity",
-			rejection: () =>
-				Response.json({ error: { message: "Access denied" } }, { status: 403, headers: { "retry-after": "30" } }),
+			rejection: (retryAfterSeconds = 30) =>
+				Response.json(
+					{ error: { message: "Access denied" } },
+					{ status: 403, headers: { "retry-after": String(retryAfterSeconds) } },
+				),
 			call: (url, replayBudgetMs, retryOptions) =>
 				streamOpenAICompletions(
 					buildModel({
@@ -468,6 +473,54 @@ describe("a correction the server asked to delay by 30 s, against a 2 s budget",
 				server.stop();
 			}
 		});
+
+		// The wait is longer than the default 60 s cap and shorter than the cap
+		// this call set, so it separates "the call's cap" from "the built-in
+		// one": a seam that keeps the hook but loses the numbers refuses this
+		// resend and sends once.
+		it("admits a wait its own cap allows and the default would refuse", async () => {
+			const server = route(n => (n === 1 ? target.rejection(70) : failure(400, "bad request")));
+			try {
+				const hookWaits: number[] = [];
+				vi.spyOn(scheduler, "wait").mockImplementation(async () => {});
+				await target.call(server.url, 120_000, {
+					maxRetryDelayMs: 120_000,
+					providerRetryWaitCeilingMs: 90_000,
+					providerRetryWait: async ms => {
+						hookWaits.push(ms);
+					},
+				});
+
+				expect(server.sends.length).toBeGreaterThanOrEqual(2);
+				expect(hookWaits).toEqual([70_000]);
+			} finally {
+				server.stop();
+			}
+		});
+
+		// A refused wait must reach the person. The seam can only mark the
+		// `Response` it refused; what a reader sees is the error that response
+		// is decoded into, so the mark has to travel across that conversion or
+		// the refusal is silent.
+		it.each([undefined, 120_000])("says which bound refused the resend (budget: %s)", async replayBudgetMs => {
+			const server = route(n => (n === 1 ? target.rejection() : failure(400, "bad request")));
+			try {
+				const result = await target.call(server.url, replayBudgetMs, {
+					providerRetryWaitCeilingMs: 10_000,
+					providerRetryWait: async () => {},
+				});
+
+				expect(server.sends).toHaveLength(1);
+				expect(result.errorRetryWaitRefusal).toEqual({
+					waitMs: 30_000,
+					limitMs: 10_000,
+					option: "providerRetryWaitCeilingMs",
+				});
+				expect(errorDisplayText(result)).toContain("so the provider did not retry");
+			} finally {
+				server.stop();
+			}
+		});
 	});
 });
 
@@ -485,7 +538,10 @@ describe("a retry with another credential, against a failure that names a 30 s w
 		maxTokens: 8_192,
 	});
 
-	async function call(replayBudgetMs: number | undefined): Promise<{ sends: Send[]; result: AssistantMessage }> {
+	async function call(
+		replayBudgetMs: number | undefined,
+		retryOptions?: Partial<Pick<StreamOptions, "providerRetryWaitCeilingMs" | "providerRetryWait">>,
+	): Promise<{ sends: Send[]; result: AssistantMessage }> {
 		const server = route(n =>
 			failure(n === 1 ? 401 : 400, n === 1 ? "invalid API key. Please retry in 30s" : "bad request", {
 				"retry-after": "30",
@@ -495,6 +551,7 @@ describe("a retry with another credential, against a failure that names a 30 s w
 			const result = await streamSimple({ ...model, baseUrl: server.url }, context, {
 				apiKey: async ctx => (ctx.error === undefined ? "first-key" : "second-key"),
 				...(replayBudgetMs === undefined ? {} : { replayBudgetMs }),
+				...retryOptions,
 			}).result();
 			return { sends: [...server.sends], result };
 		} finally {
@@ -516,6 +573,25 @@ describe("a retry with another credential, against a failure that names a 30 s w
 		expect(sends).toHaveLength(2);
 		expect(sends.map(send => send.headers.get("authorization"))).toEqual(["Bearer first-key", "Bearer second-key"]);
 		expect(result.replayBudgetExhausted).toBeUndefined();
+	});
+
+	// Rotation stops on the caller's ceiling. The refusal is recorded on the
+	// error the resolver was handed, but what a reader sees is the buffered
+	// terminal message, so the mark has to reach that message — otherwise the
+	// turn reports only the original 401 and never the bound that stopped it.
+	it("says which bound stopped the rotation", async () => {
+		const { sends, result } = await call(120_000, {
+			providerRetryWaitCeilingMs: 10_000,
+			providerRetryWait: async () => {},
+		});
+
+		expect(sends).toHaveLength(1);
+		expect(result.errorRetryWaitRefusal).toEqual({
+			waitMs: 30_000,
+			limitMs: 10_000,
+			option: "providerRetryWaitCeilingMs",
+		});
+		expect(errorDisplayText(result)).toContain("so the provider did not retry");
 	});
 
 	// The stock resolver rotates through stored credentials and may sleep out a

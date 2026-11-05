@@ -23,7 +23,7 @@ export { OpenAIHttpError };
 import type { FetchImpl } from "../types";
 import type { CapturedHttpErrorResponse } from "./http-inspector";
 import { getShouldRetryFromHeaders, transportRetry } from "./retry-after";
-import { DEFAULT_MAX_RETRY_DELAY_MS, type ProviderRetryPolicy } from "./retry-wait";
+import { carryRetryWaitRefusal, DEFAULT_MAX_RETRY_DELAY_MS, type ProviderRetryPolicy } from "./retry-wait";
 
 /**
  * Total attempts (initial + retries). Parity with the removed SDK clients'
@@ -192,7 +192,12 @@ async function* decodeStream<TEvent>(
 	}
 }
 
-/** Decode a non-2xx response into an {@link OpenAIHttpError} without consuming it twice. */
+/**
+ * Decode a non-2xx response into an {@link OpenAIHttpError} without consuming
+ * it twice. A refusal a seam recorded on the response travels with it
+ * ({@link carryRetryWaitRefusal}): only the error reaches `AIError.finalize`,
+ * and the failed message must still say which bound refused the wait.
+ */
 export async function captureOpenAIHttpError(response: Response): Promise<AIError.OpenAIHttpError> {
 	let bodyText: string | undefined;
 	let bodyJson: unknown;
@@ -218,5 +223,7 @@ export async function captureOpenAIHttpError(response: Response): Promise<AIErro
 	const message = detail
 		? `${response.status} ${detail.length > MAX_DETAIL_CHARS ? detail.slice(0, MAX_DETAIL_CHARS) : detail}`
 		: `${response.status} status code (no body)`;
-	return new AIError.OpenAIHttpError(message, captured, code);
+	const failure = new AIError.OpenAIHttpError(message, captured, code);
+	carryRetryWaitRefusal(response, failure);
+	return failure;
 }

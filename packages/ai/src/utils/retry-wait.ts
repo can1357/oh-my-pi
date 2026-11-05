@@ -91,6 +91,21 @@ export function retryWaitRefusal(failure: unknown): RefusedRetryWait | undefined
 	return failure !== null && typeof failure === "object" ? refusedRetryWaits.get(failure) : undefined;
 }
 
+/**
+ * Carries a refusal recorded on `from` over to `to`.
+ *
+ * A seam that reads a stated wait has only the `Response` to record the
+ * refusal on; the object that reaches `AIError.finalize` is the error that
+ * response is later decoded into. The refusal belongs to the attempt, not to
+ * whichever object happened to carry it, so every decoding of a refused
+ * response into an error passes it along — otherwise the wait is refused and
+ * the person is never told which bound refused it.
+ */
+export function carryRetryWaitRefusal(from: unknown, to: unknown): void {
+	const refused = retryWaitRefusal(from);
+	if (refused !== undefined) markRetryWaitRefused(to, refused);
+}
+
 /** Whether untrusted relay data is a complete, internally consistent refused retry wait. */
 export function isRefusedRetryWait(value: unknown): value is RefusedRetryWait {
 	if (value === null || typeof value !== "object") return false;

@@ -1,4 +1,5 @@
 import type { CapturedHttpErrorResponse } from "../utils/http-inspector";
+import { carryRetryWaitRefusal } from "../utils/retry-wait";
 import { AbortError } from "./abort";
 import { networkFailureMessage } from "./network-cause";
 
@@ -104,7 +105,9 @@ export class AnthropicApiError extends ProviderHttpError {
 		if (!reader) {
 			if (signal?.aborted) throw new AbortError("Request was aborted.");
 			const detail = "status code (no body)";
-			return new AnthropicApiError(response.status, `${response.status} ${detail}`, response.headers);
+			const bodyless = new AnthropicApiError(response.status, `${response.status} ${detail}`, response.headers);
+			carryRetryWaitRefusal(response, bodyless);
+			return bodyless;
 		}
 
 		let aborted = false;
@@ -197,7 +200,11 @@ export class AnthropicApiError extends ProviderHttpError {
 				}
 			}
 		} catch {}
-		return new AnthropicApiError(response.status, `${response.status} ${detail}`, response.headers, { code });
+		const failure = new AnthropicApiError(response.status, `${response.status} ${detail}`, response.headers, {
+			code,
+		});
+		carryRetryWaitRefusal(response, failure);
+		return failure;
 	}
 }
 

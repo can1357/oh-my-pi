@@ -1385,6 +1385,12 @@ function streamSimpleRequest<TApi extends Api>(
 		const emitFailure = (failure: AuthRetryFailure): void => {
 			emitBufferedEvents(outer, failure.bufferedEvents);
 			if (failure.terminalEvent) {
+				// A wait this layer refused is recorded on `failure.error`, the
+				// carrier the refusal check was handed, but this message was
+				// finalized on the attempt before that decision. Write the bound
+				// onto the message itself; otherwise rotation stops on the caller's
+				// ceiling and the turn reports only the original failure.
+				AIError.applyRefusedRetryWait(failure.terminalEvent.error, failure.error);
 				outer.push(failure.terminalEvent);
 			} else {
 				outer.fail(failure.error);
