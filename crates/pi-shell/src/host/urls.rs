@@ -22,7 +22,8 @@ use std::{
 use bstr::{BStr, BString, ByteSlice};
 
 use crate::bash::{
-	ChildRedirs, CmdTag, EnvView, Lineage, PgroupSpec, Rlimit, SigSet, SpawnSpec, StdioSpec, Vpid,
+	ChildRedirs, CmdTag, EnvView, Lineage, OsHandle, PgroupSpec, Rlimit, SigSet, SpawnSpec,
+	StdioSpec, Vpid,
 };
 
 /// What a spawn hands the OS in place of the URLs it names; before
@@ -50,6 +51,7 @@ pub(super) struct Rest {
 	rlimits:     Vec<(Rlimit, Option<u64>, Option<u64>)>,
 	lineage:     Lineage,
 	redirs:      Option<ChildRedirs>,
+	ctty:        Option<OsHandle>,
 }
 
 impl Rest {
@@ -68,6 +70,7 @@ impl Rest {
 			rlimits,
 			lineage,
 			redirs,
+			ctty,
 		} = self;
 		launch(SpawnSpec {
 			path: names.path.as_bstr(),
@@ -84,6 +87,7 @@ impl Rest {
 			rlimits: &rlimits,
 			lineage,
 			redirs,
+			ctty,
 		})
 	}
 }
@@ -114,6 +118,7 @@ pub(super) fn split(spec: SpawnSpec<'_>) -> (Names, Rest) {
 		rlimits,
 		lineage,
 		redirs,
+		ctty,
 	} = spec;
 	let names = Names {
 		path: BString::from(path.as_bytes()),
@@ -132,6 +137,7 @@ pub(super) fn split(spec: SpawnSpec<'_>) -> (Names, Rest) {
 		rlimits: rlimits.to_vec(),
 		lineage,
 		redirs,
+		ctty,
 	};
 	(names, rest)
 }
@@ -246,8 +252,9 @@ fn unresolved(path: &Path, err: &io::Error) -> io::Error {
 /// attached-value spelling (`--index=skill://example-skill/data`) translate.
 /// Anything the filesystem does not route to a backing file is left exactly
 /// as it was written, so `https://…`, `s3://…`, and ordinary words reach the
-/// child untouched. A bare scheme root (`local://`) is far likelier a search
-/// pattern or message text than a directory, so it stays literal too.
+/// child untouched. A bare scheme root (`local://`), or one followed by words
+/// (`skill:// external command`), is far likelier a search pattern or message
+/// text than a path, so it stays literal too.
 async fn host_arg(fs: &pi_vfs::Fs, arg: &BStr) -> io::Result<Option<BString>> {
 	let Ok(text) = arg.to_str() else {
 		return Ok(None);
@@ -256,7 +263,7 @@ async fn host_arg(fs: &pi_vfs::Fs, arg: &BStr) -> io::Result<Option<BString>> {
 		return Ok(None);
 	}
 	if pi_vfs::is_virtual_path(Path::new(text)) {
-		if is_url_root(text) {
+		if names_nothing(text) {
 			return Ok(None);
 		}
 		return Ok(host_path(fs, Path::new(text))
@@ -269,7 +276,7 @@ async fn host_arg(fs: &pi_vfs::Fs, arg: &BStr) -> io::Result<Option<BString>> {
 	// Only an option name may carry an attached URL. A URL of its own that
 	// happens to embed one in a query string (`https://host/cb?next=local://x`)
 	// is one opaque string to the program receiving it.
-	if name.contains("://") || is_url_root(value) {
+	if name.contains("://") || names_nothing(value) {
 		return Ok(None);
 	}
 	let Some(host) = host_path(fs, Path::new(value)).await? else {
@@ -281,8 +288,11 @@ async fn host_arg(fs: &pi_vfs::Fs, arg: &BStr) -> io::Result<Option<BString>> {
 	Ok(Some(rewritten))
 }
 
-/// Whether `text` is a URL naming nothing below its scheme (`local://`).
-fn is_url_root(text: &str) -> bool {
-	pi_vfs::url_scheme(Path::new(text))
-		.is_some_and(|scheme| text[scheme.len() + 3..].trim_matches('/').is_empty())
+/// Whether `text` is a URL naming nothing below its scheme: a bare root
+/// (`local://`) or a root followed by whitespace (`skill:// some words`).
+fn names_nothing(text: &str) -> bool {
+	pi_vfs::url_scheme(Path::new(text)).is_some_and(|scheme| {
+		let rest = text[scheme.len() + 3..].trim_start_matches('/');
+		rest.trim_end_matches('/').is_empty() || rest.starts_with(char::is_whitespace)
+	})
 }

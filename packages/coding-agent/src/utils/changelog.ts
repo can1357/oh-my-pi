@@ -438,16 +438,19 @@ export function selectStartupChangelog(
 /**
  * Resolve and persist the automatic startup changelog decision.
  *
+ * `lastVersion` is the marker as this launch read it ({@link readLastChangelogVersion});
+ * `agentDir` locates the marker this call advances.
  * Hidden mode advances the marker only for an upgrade, so downgrades do not
  * erase knowledge of a newer version the user has already seen.
  */
 export async function resolveStartupChangelogForDisplay(options: {
 	mode: SettingValueOf<typeof cfgStartupChangelogMode>;
 	currentVersion: string;
+	lastVersion: string | undefined;
 	changelogPath?: string;
 	agentDir?: string;
 }): Promise<StartupChangelogSelection | undefined> {
-	const lastVersion = await readLastChangelogVersion(options.agentDir);
+	const { lastVersion } = options;
 	const parsedLastVersion = parseChangelogVersion(lastVersion);
 	if (!parsedLastVersion) {
 		await writeLastChangelogVersion(options.currentVersion, options.agentDir);

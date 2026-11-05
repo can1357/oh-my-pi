@@ -16,7 +16,10 @@
 //!   in-process worktree layers).
 //! - The API pi-natives uses: [`Shell`], [`execute_shell`],
 //!   [`execute_shell_streams`], [`minimizer`], [`taps`], [`cancel`],
-//!   [`process`].
+//!   [`proctree`].
+//! - [`process`]: the engine as a process shell (`obash`, `omp zsh|bash|sh`):
+//!   the command line to an exit status over the process's own terminal,
+//!   signals and descriptors.
 //! - [`testkit`]: a deterministic test host for the engine suites and the fault
 //!   injector of the `obash` binary (`src/bin/obash`: the engine as a
 //!   standalone shell, for differential tests and benchmarks against bash).
@@ -43,6 +46,7 @@ pub mod minimizer;
 pub mod output_decode;
 mod paths;
 pub mod process;
+pub mod proctree;
 pub mod shell;
 pub mod taps;
 

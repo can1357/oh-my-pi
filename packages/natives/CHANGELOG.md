@@ -2,13 +2,45 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Replaced visualization-only `parseShell()` with engine-owned `RunTrace.present()` and `ShellVisualization` APIs.
+
+### Added
+
+- `RunTrace` exposes real command states, assignments, producer-attributed output and bounded replay, with native Raw/Pseudo presentation and persisted-trace restoration.
+- `obash --trace=PATH` writes that model as JSON at exit; `UnitCompiled` events now carry the unit's node table (`nodes: [{kind, lo, hi, line, col}]`) instead of `node_count`
+
 ### Changed
 
+- Native builds now reuse the shared diff implementation, and macOS display discovery no longer needs a separate capture library
+- Shell spawn benchmarks report median and p99 latency without an additional benchmark framework
+
 - Made the bash tool's shell faster on string appends (`s+=x`), sourcing files full of function definitions (each body compiles on first call), quoted `"$var"`/`"$1"` arguments and file redirections
+- Made the bash tool's shell faster on `while read` loops over files (no per-line `lseek`), output sent to `/dev/null`, `(( ))` arithmetic, recursive functions, plain assignments and every simple command
+- Made starting external commands from the bash tool's shell cheaper on Linux (the child no longer resets every signal disposition before `exec`, and the parent reuses its spawn setup and makes about half as many system calls per command)
+- Made the bash tool's shell parse scripts and define functions about a fifth faster, with a function's `declare -f` text now produced on first use
+- Made the bash tool's shell start with about half as many system calls on Linux
+- The work-profile flamegraph is now a static SVG (hover titles, no click-to-zoom or search)
+- The bash tool's built-in `jq` reports errors as plain text with `line:column` positions instead of colored source snippets
+- Sixel image output uses a built-in encoder; images with more than 256 colors may get a slightly different palette
 
 ### Fixed
 
+- Fixed the bash tool's `$!` inside a command substitution, a `( )` subshell or a pipeline stage: it now names the parent's last background job, as in Bash ([#18107](https://github.com/can1357/oh-my-pi/pull/18107) by [@sjawhar](https://github.com/sjawhar))
+- Fixed Windows `rsync` treating a one-letter daemon host such as `h::module` as a local drive path ([#18048](https://github.com/can1357/oh-my-pi/pull/18048) by [@jchanghong023](https://github.com/jchanghong023))
+- Removed embedded-shell compiler warnings and fixed history saves hanging when a stale lock cannot be removed
+- Fixed native addon startup on glibc 2.17–2.28 by falling back to fork for external shell commands when `posix_spawn_file_actions_addchdir_np` is unavailable ([#18046](https://github.com/can1357/oh-my-pi/pull/18046) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed Windows `rmdir` accepting trailing-dot or trailing-space operands that can remove a different directory ([#18047](https://github.com/can1357/oh-my-pi/pull/18047) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed `timeout`, `nohup`, `git` and command-running utilities inside shell functions skipping their operands or running the function's arguments instead ([#18030](https://github.com/can1357/oh-my-pi/pull/18030) by [@sjawhar](https://github.com/sjawhar))
+- Fixed native Windows shell commands not finding installed executables through PATH and PATHEXT, and absolute Windows paths being prefixed with the shell cwd ([#18041](https://github.com/can1357/oh-my-pi/pull/18041) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed minimized `git stash pop` and `git status` counting the closing status line, and a stash "Dropped" confirmation, as extra untracked files. A file whose name looks like those notices is still listed ([#18159](https://github.com/can1357/oh-my-pi/pull/18159) by [@eggpeat](https://github.com/eggpeat))
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
+- Fixed GTK3 Open and Save file dialogs on Linux: `ax()` and element input no longer fail there with `has 0 matching AT-SPI frames`, and Wayland window lists include them ([#18011](https://github.com/can1357/oh-my-pi/pull/18011) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `capabilities()` on Wayland desktops whose xdg-desktop-portal has no RemoteDesktop backend, such as sway, reporting `input: true`: it now reports `input: false` and `inputPermission: "unavailable"`, and typing and key presses fail at once naming the missing portal ([#18012](https://github.com/can1357/oh-my-pi/pull/18012) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `.bzl` files resolving to Python instead of Starlark in `ast-grep`, `astGrep`, `astEdit`, code summaries, and block operations ([#18145](https://github.com/can1357/oh-my-pi/pull/18145) by [@eggpeat](https://github.com/eggpeat))
+- Fixed minimized `rustfmt --check` output counting each diff location as a separate file and saying files were reformatted: it now reports how many files need formatting ([#18147](https://github.com/can1357/oh-my-pi/pull/18147) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed minimized `git diff`, `git show` and `diff -r` output leaving binary files, pure renames and mode-only changes out of its file list and count: binary files now show as `Bin`, as in `git diff --stat` ([#18148](https://github.com/can1357/oh-my-pi/pull/18148) by [@will-bogusz](https://github.com/will-bogusz))
 ### Fixed
 
 - Fixed `el.type` and `el.press(keys)` on Wayland moving focus inside the element's app (GNOME showed "… is ready") before refusing the call: they are now refused before anything reaches the app ([#17915](https://github.com/can1357/oh-my-pi/pull/17915) by [@will-bogusz](https://github.com/will-bogusz))

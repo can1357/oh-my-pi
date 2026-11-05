@@ -43,7 +43,7 @@ export function FetchBack({ stats, stale }: FetchBackProps) {
 	for (const cell of stats.fetchBack) cells.set(`${cell.tool}/${cell.group}`, cell);
 	const measured = new Set(stats.fetchBack.filter(cell => cell.results > 0).map(cell => cell.tool));
 	const { listed, rest } = foldTools(toolsBySaving(stats).filter(tool => measured.has(tool)));
-	// Only reads are gated, and only once the gate runs: the legend names the group where it has results.
+	// Only reads were gated, and only while pi's former edit gate ran: the legend names the group where it has results.
 	const legend = CUT_GROUPS.filter(
 		group => group !== "gated" || stats.fetchBack.some(cell => cell.group === "gated" && cell.results > 0),
 	);
@@ -102,9 +102,9 @@ export function FetchBack({ stats, stale }: FetchBackProps) {
 		<Card
 			index={3}
 			title="Does the agent come back for it?"
-			description="Share of results the agent fetched more of within 12 calls: cut with Spotlight's scores, cut without them, held out at random, kept whole by the edit gate, and left unchanged"
+			description="Share of results the agent fetched more of within 12 calls: cut with Spotlight's scores, cut without them, held out at random, kept whole by pi's former edit gate, and left unchanged"
 			stale={stale}
-			footer={`${FETCH_BACK_RULE} Held-out results are the true counterfactual: drawn at random from the would-be cuts and shown whole; until they accumulate, unchanged results stand in, re-weighted to the cuts' size mix. Score-free cuts skip Spotlight by a second coin and take the no-score fallback rules: if they come back as often as scored cuts, the scores add nothing. Gated reads are reads the agent was likely to edit that the edit gate kept whole (see Edit-aware gate). Small print: score-free · held out · unchanged. Whiskers are 90% session bootstrap intervals, from 3 sessions.`}
+			footer={`${FETCH_BACK_RULE} Held-out results are the true counterfactual: drawn at random from the would-be cuts and shown whole; until they accumulate, unchanged results stand in, re-weighted to the cuts' size mix. Score-free cuts skip Spotlight by a second coin and take the no-score fallback rules: if they come back as often as scored cuts, the scores add nothing. Gated reads are reads pi's former edit gate (removed) kept whole, listed only where the range has any. Small print: score-free · held out · unchanged. Whiskers are 90% session bootstrap intervals, from 3 sessions.`}
 		>
 			{rows.length === 0 ? (
 				<div className="empty">No evaluated results in this range.</div>

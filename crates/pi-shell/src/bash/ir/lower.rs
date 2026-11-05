@@ -3,9 +3,9 @@
 use bstr::BString;
 
 use super::{
-	AssignOp, AssignVal, CaseIr, Cmd, ComsubForm, CondIr, ElemIr, FuncIr, NodeInfo, Op, OpIr,
-	Opcode, ParamIr, ParamRef, Part, RedirFdIr, RedirIr, RedirTargetIr, ReplaceIr, SpawnIr,
-	SpawnKind, StageIr, SubIr, Unit, Word, WordKind,
+	AssignOp, AssignVal, CaseIr, Cmd, ComsubForm, CondIr, ElemIr, FuncDefinition, FuncIr, NodeInfo,
+	Op, OpIr, Opcode, ParamIr, ParamRef, Part, RedirFdIr, RedirIr, RedirTargetIr, ReplaceIr,
+	SpawnIr, SpawnKind, StageIr, SubIr, Unit, Word, WordKind,
 };
 use crate::bash::{
 	event::{NodeKind, RedirKind},
@@ -81,7 +81,11 @@ fn lower_command(
 	}
 	l.list(&cc.list)?;
 	l.emit(Opcode::End, 0, 0, 0);
-	l.unit.seal_from(l.source_hash);
+	if deferred && cc.source_replay {
+		l.unit.seal_source_from(l.source_hash);
+	} else {
+		l.unit.seal_from(l.source_hash);
+	}
 	Ok(l.unit)
 }
 
@@ -250,14 +254,59 @@ pub fn syntax_unit(e: &syn::ParseError, src: &[u8], mode: ModeId, feat: syn::Fea
 /// compiled; `None` unless `src` is exactly one function definition (bash
 /// `SEVAL_FUNCDEF | SEVAL_ONECMD`: `() { …; }; cmd` is rejected).
 pub fn function_from_source(src: &[u8], mode: ModeId, features: syn::Features) -> Option<FuncIr> {
-	let mut parser = syn::Parser::new(src, features, syn::NO_ALIASES);
+	lone_function(syn::Parser::new(src, features, syn::NO_ALIASES), src, mode, features)
+}
+
+/// A function definition with `src`'s first line numbered `line`, retaining
+/// its parsed body until first call. An autoloaded file wrapped in a
+/// definition on line 0 keeps the file's line numbers.
+pub fn function_from_source_at(
+	src: &[u8],
+	mode: ModeId,
+	features: syn::Features,
+	line: u32,
+) -> Option<FuncIr> {
+	let mut parser =
+		syn::Parser::new(src, features, syn::NO_ALIASES).with_pos(syn::Pos { offset: 0, line });
 	let cc = parser.next_command()?.ok()?;
 	if parser.next_command().is_some() {
 		return None;
 	}
-	let mut unit = lower(&cc, src, mode, features).ok()?;
+	function_from_parsed(&cc, src, mode, features)
+}
+
+/// A validated single-command function definition, retaining its parsed body
+/// until first call. Autoload uses the command from its syntax-checking pass.
+pub(crate) fn function_from_parsed(
+	cc: &syn::CompleteCommand,
+	src: &[u8],
+	mode: ModeId,
+	features: syn::Features,
+) -> Option<FuncIr> {
+	lone_definition(lower_deferred(cc, src, mode, features).ok()?)
+}
+
+/// The function `parser` reads from `src` when it is the lone command.
+fn lone_function(
+	mut parser: syn::Parser<'_>,
+	src: &[u8],
+	mode: ModeId,
+	features: syn::Features,
+) -> Option<FuncIr> {
+	let cc = parser.next_command()?.ok()?;
+	if parser.next_command().is_some() {
+		return None;
+	}
+	lone_definition(lower(&cc, src, mode, features).ok()?)
+}
+
+/// Extract the function when the unit does nothing but define it.
+fn lone_definition(mut unit: Unit) -> Option<FuncIr> {
 	// A lone definition lowers to `FuncDef`, `End`.
-	let lone = matches!(unit.ops.as_slice(), [def, end] if def.code == Opcode::FuncDef && end.code == Opcode::End);
+	// zsh's list markers (`Nop`s) aside.
+	let mut ops = unit.ops.iter().filter(|op| op.code != Opcode::Nop);
+	let lone = matches!((ops.next(), ops.next(), ops.next()), (Some(def), Some(end), None)
+		if def.code == Opcode::FuncDef && end.code == Opcode::End);
 	if lone && unit.funcs.len() == 1 {
 		unit.funcs.pop()
 	} else {
@@ -266,7 +315,7 @@ pub fn function_from_source(src: &[u8], mode: ModeId, features: syn::Features) -
 }
 
 /// Lower an already-parsed function without changing its persistent identity.
-pub(crate) fn materialize(unit: &Unit) -> Option<Unit> {
+pub(crate) fn materialize(unit: &Unit, observed: bool) -> Option<Unit> {
 	let bytes = unit.deferred.as_ref()?;
 	if bytes.is_empty() {
 		let features = syn::Features::from_bits(unit.features);
@@ -276,6 +325,11 @@ pub(crate) fn materialize(unit: &Unit) -> Option<Unit> {
 		let compiled = lower(&cc, &unit.source, unit.mode, features).ok()?;
 		let mut body = take_body(compiled, unit.root?)?;
 		body.id = unit.id;
+		if observed && body.trace_syntax.get().is_none() {
+			let _ = body.trace_syntax.set(std::sync::Arc::new(
+				crate::bash::trace::syntax::UnitSyntax::list(cc).with_context(unit.mode, unit.features),
+			));
+		}
 		return Some(body);
 	}
 	let (base, cmd): (u32, syn::Command) = postcard::from_bytes(bytes).ok()?;
@@ -290,6 +344,15 @@ pub(crate) fn materialize(unit: &Unit) -> Option<Unit> {
 	for word in &mut lower.unit.words {
 		word.classify();
 	}
+	if observed && lower.unit.trace_syntax.get().is_none() {
+		let syntax = crate::bash::trace::syntax::UnitSyntax::new(
+			base,
+			crate::bash::trace::syntax::SyntaxTree::Command(std::sync::Arc::new(cmd)),
+		)
+		.with_context(unit.mode, unit.features)
+		.with_aliases(&unit.aliases);
+		let _ = lower.unit.trace_syntax.set(std::sync::Arc::new(syntax));
+	}
 	Some(lower.unit)
 }
 
@@ -298,7 +361,7 @@ fn take_body(unit: Unit, root: u32) -> Option<Unit> {
 		return Some(unit);
 	}
 	for function in unit.funcs {
-		if let Some(body) = take_body(*function.body, root) {
+		if let Some(body) = take_body(std::sync::Arc::unwrap_or_clone(function.body), root) {
 			return Some(body);
 		}
 	}
@@ -406,7 +469,12 @@ impl Lower {
 			self.emit(Opcode::SetStatus, 0, 0, 0);
 			return Ok(());
 		}
+		let zsh = self.unit.mode.dialect() == crate::bash::ids::Dialect::Zsh;
 		for item in &list.items {
+			// zsh `execlist` runs the DEBUG trap before (`DEBUG_BEFORE_CMD`)
+			// or after each list: a `Nop` with `b` 1 marks its start (`a` the
+			// end marker, where a skipped list goes), one with `b` 2 its end.
+			let start = zsh.then(|| self.emit(Opcode::Nop, 0, Op::LIST_START, item.and_or.id.0));
 			if matches!(item.sep, syn::Sep::Amp | syn::Sep::Disown) {
 				let spawn = self.unit.spawns.len() as u32;
 				self.unit.spawns.push(SpawnIr {
@@ -428,6 +496,10 @@ impl Lower {
 				s.end = end;
 			} else {
 				self.and_or(&item.and_or)?;
+			}
+			if let Some(start) = start {
+				let end = self.emit(Opcode::Nop, 0, Op::LIST_END, item.and_or.id.0);
+				self.patch_a(start, end);
 			}
 		}
 		Ok(())
@@ -661,16 +733,16 @@ impl Lower {
 				// neither runs the ERR trap nor exits under `set -e`.
 				self.cond += 1;
 				if !f.init.src.trim_ascii().is_empty() {
-					let a = self.arith(&f.init.src);
-					self.emit(Opcode::Arith, a, 0, id);
+					let (a, b) = self.arith(&f.init.src);
+					self.emit(Opcode::Arith, a, b, id);
 				}
 				let enter = self.emit(Opcode::LoopEnter, 0, 0, id);
 				let cond = self.here();
 				if f.cond.src.trim_ascii().is_empty() {
 					self.emit(Opcode::SetStatus, 0, 0, id);
 				} else {
-					let a = self.arith(&f.cond.src);
-					self.emit(Opcode::Arith, a, 0, id);
+					let (a, b) = self.arith(&f.cond.src);
+					self.emit(Opcode::Arith, a, b, id);
 				}
 				let br = self.emit(Opcode::BrFail, 0, construct::WHILE, id);
 				self.cond -= 1;
@@ -678,9 +750,9 @@ impl Lower {
 				let step = self.emit(Opcode::LoopNote, 0, 0, id);
 				self.patch_b(enter, step);
 				if !f.step.src.trim_ascii().is_empty() {
-					let a = self.arith(&f.step.src);
+					let (a, b) = self.arith(&f.step.src);
 					self.cond += 1;
-					self.emit(Opcode::Arith, a, 0, id);
+					self.emit(Opcode::Arith, a, b, id);
 					self.cond -= 1;
 				}
 				self.emit(Opcode::Jmp, cond, 0, id);
@@ -733,8 +805,8 @@ impl Lower {
 			syn::CommandKind::Arith(a) => {
 				self.node(cmd.id, NodeKind::Arith, cmd.span);
 				self.emit(Opcode::Enter, 0, 0, id);
-				let i = self.arith(&a.src);
-				self.emit(Opcode::Arith, i, 0, id);
+				let (i, b) = self.arith(&a.src);
+				self.emit(Opcode::Arith, i, b, id);
 				self.emit(Opcode::Leave, 0, 0, id);
 			},
 			syn::CommandKind::Cond(e) => {
@@ -776,26 +848,40 @@ impl Lower {
 				self.node(cmd.id, NodeKind::FuncDef, cmd.span);
 				let body = self.func_body(cmd.id.0, &a.body)?;
 				self.unit.funcs.push(FuncIr {
-					name:   BString::from(ANON),
-					source: BString::default(),
-					body:   Box::new(body),
+					name:       BString::from(ANON),
+					definition: None,
+					body:       std::sync::Arc::new(body),
 				});
 				let func = self.unit.funcs.len() as u32 - 1;
 				let args = self.word_list(&a.args)?;
-				self.emit(Opcode::CallAnon, func, args, id);
+				let at = self.emit(Opcode::CallAnon, func, args, id);
+				if a.traced {
+					self.unit.ops[at as usize].flags |= Op::TRACED;
+				}
 			},
 			syn::CommandKind::FuncDef(f) => {
 				self.node(cmd.id, NodeKind::FuncDef, cmd.span);
 				let func = self.funcdef(cmd, f)?;
-				self.emit(Opcode::FuncDef, func, 0, id);
+				let traced = if f.traced { Op::TRACED } else { 0 };
+				// zsh `execfuncdef`: names with expansions (`function f$$`)
+				// are expanded when the definition runs; `b` is their word
+				// list plus one, and that one op defines every name.
+				if let Some(words) = zsh_funcdef_words(cmd, f, self.unit.mode) {
+					let list = self.word_list(&words)?;
+					let pc = self.emit(Opcode::FuncDef, func, list + 1, id);
+					self.unit.ops[pc as usize].flags |= traced;
+					return Ok(());
+				}
+				let pc = self.emit(Opcode::FuncDef, func, 0, id);
+				self.unit.ops[pc as usize].flags |= traced;
 				// zsh `f g () { … }`: every name gets the body.
 				for name in &f.extra_names {
 					let mut more = self.unit.funcs[func as usize].clone();
 					more.name = func_name(name, self.unit.mode);
-					more.source = func_source(cmd, name, self.unit.mode);
 					self.unit.funcs.push(more);
 					let at = self.unit.funcs.len() as u32 - 1;
-					self.emit(Opcode::FuncDef, at, 0, id);
+					let pc = self.emit(Opcode::FuncDef, at, 0, id);
+					self.unit.ops[pc as usize].flags |= traced;
 				}
 			},
 			syn::CommandKind::Coproc(c) => {
@@ -869,11 +955,25 @@ impl Lower {
 
 	fn funcdef(&mut self, cmd: &syn::Command, f: &syn::FuncDef) -> Idx {
 		let body = self.func_body(cmd.id.0, &f.body)?;
-		let source = func_source(cmd, &f.name, self.unit.mode);
+		let definition = if self.source_replay
+			&& !cmd
+				.redirs
+				.iter()
+				.chain(&f.body.redirs)
+				.any(|r| matches!(r.target, syn::RedirTarget::HereDoc(_)))
+		{
+			FuncDefinition::Source(cmd.span.rebase(self.base))
+		} else {
+			FuncDefinition::Parsed(
+				postcard::to_stdvec(cmd)
+					.expect("validated function definition serializes")
+					.into(),
+			)
+		};
 		self.unit.funcs.push(FuncIr {
-			name: func_name(&f.name, self.unit.mode),
-			source,
-			body: Box::new(body),
+			name:       func_name(&f.name, self.unit.mode),
+			definition: Some(definition),
+			body:       std::sync::Arc::new(body),
 		});
 		Ok(self.unit.funcs.len() as u32 - 1)
 	}
@@ -946,9 +1046,13 @@ impl Lower {
 		self.unit.conds.len() as u32 - 1
 	}
 
-	fn arith(&mut self, text: &[u8]) -> u32 {
+	/// The `ariths` index of `text` and the `Arith` operand `b` it takes.
+	fn arith(&mut self, text: &[u8]) -> (u32, u32) {
+		let literal = !text
+			.iter()
+			.any(|c| matches!(c, b'$' | b'`' | b'\\' | b'"' | b'\''));
 		self.unit.ariths.push(BString::from(text));
-		self.unit.ariths.len() as u32 - 1
+		(self.unit.ariths.len() as u32 - 1, if literal { Op::LITERAL } else { 0 })
 	}
 
 	fn simple(&mut self, s: &syn::Simple, redirs: Option<u32>) -> Idx {
@@ -970,7 +1074,10 @@ impl Lower {
 		}
 		let words = self.command_words(&s.words)?;
 		let idx = self.unit.cmds.len() as u32;
-		self.unit.cmds.push(Cmd { assigns, words, redirs });
+		self
+			.unit
+			.cmds
+			.push(Cmd { assigns, words, redirs, typeset: s.typeset });
 		Ok(idx)
 	}
 
@@ -1047,9 +1154,17 @@ impl Lower {
 			[syn::WordPart::Lit(n)] => {
 				matches!(n.as_slice(), b"declare" | b"typeset" | b"export" | b"readonly" | b"local")
 			},
+			// `private`: the reserved word zsh/param/private adds.
 			[syn::WordPart::Zsh(n)] => matches!(
 				n.as_slice(),
-				b"declare" | b"export" | b"float" | b"integer" | b"local" | b"readonly" | b"typeset"
+				b"declare"
+					| b"export"
+					| b"float"
+					| b"integer"
+					| b"local"
+					| b"private"
+					| b"readonly"
+					| b"typeset"
 			),
 			_ => false,
 		});
@@ -1336,8 +1451,9 @@ impl Lower {
 
 /// The name a definition gives function `name` as written: zsh substitutes
 /// the names (`execfuncdef`), so `function 'a b' () …` defines `a b`; the
-/// quoting is removed here, a name with an expansion (`$`, `` ` ``) stays
-/// as written. bash takes the word as written.
+/// quoting is removed here (`$'…'` decoded, NULs kept), a name with an
+/// expansion (`$`, `` ` ``) stays as written. bash takes the word as
+/// written.
 fn func_name(name: &[u8], mode: ModeId) -> BString {
 	if mode.dialect() != crate::bash::ids::Dialect::Zsh
 		|| !name.iter().any(|c| matches!(c, b'\'' | b'"' | b'\\'))
@@ -1375,11 +1491,96 @@ fn func_name(name: &[u8], mode: ModeId) -> BString {
 					i += 1;
 				}
 			},
+			b'$' if name.get(i) == Some(&b'\'') => {
+				let start = i + 1;
+				let mut end = start;
+				while let Some(&d) = name.get(end) {
+					match d {
+						b'\'' => break,
+						b'\\' => end += 2,
+						_ => end += 1,
+					}
+				}
+				let end = end.min(name.len());
+				out.extend_from_slice(&syn::ansi_decode_all(&name[start..end]));
+				i = end + 1;
+			},
 			b'$' | b'`' => return BString::from(name),
 			_ => out.push(c),
 		}
 	}
 	BString::from(out)
+}
+
+/// The names of zsh definition `f` as words to expand when it runs, when
+/// one of them has an expansion or a pattern (zsh `execfuncdef`'s `htok`
+/// beyond quoting); `None` keeps the names as written.
+fn zsh_funcdef_words(cmd: &syn::Command, f: &syn::FuncDef, mode: ModeId) -> Option<Vec<syn::Word>> {
+	use syn::zsh::tok;
+	if mode.dialect() != crate::bash::ids::Dialect::Zsh {
+		return None;
+	}
+	let toks = std::iter::once(&f.name)
+		.chain(&f.extra_names)
+		.map(|n| syn::zsh::parse_subst_string(&tok::metafy(n)).ok())
+		.collect::<Option<Vec<_>>>()?;
+	let expands = |t: &Vec<u8>| {
+		t.iter().any(|&c| {
+			matches!(
+				c,
+				tok::POUND
+					| tok::STRING
+					| tok::HAT
+					| tok::STAR
+					| tok::INPAR
+					| tok::QSTRING
+					| tok::EQUALS
+					| tok::BAR
+					| tok::INBRACE
+					| tok::INBRACK
+					| tok::TICK
+					| tok::INANG
+					| tok::QUEST
+					| tok::TILDE
+					| tok::QTICK
+			)
+		})
+	};
+	if !toks.iter().any(expands) {
+		return None;
+	}
+	Some(
+		toks
+			.into_iter()
+			.map(|t| syn::Word {
+				id:    syn::NodeId(0),
+				span:  cmd.span,
+				parts: vec![syn::WordPart::Zsh(t)],
+			})
+			.collect(),
+	)
+}
+
+/// Materialize validated function input for a record's first text reader.
+pub(super) fn definition_text(name: &[u8], definition: &FuncDefinition, body: &Unit) -> BString {
+	let command = match definition {
+		FuncDefinition::Parsed(bytes) => {
+			postcard::from_bytes(bytes).expect("validated function definition decodes")
+		},
+		FuncDefinition::Source(span) => {
+			let source = span.slice(&body.source);
+			let features = syn::Features::from_bits(body.features);
+			let command = syn::Parser::new(source, features, syn::NO_ALIASES)
+				.next_command()
+				.expect("validated function source contains a command")
+				.expect("validated function source replays");
+			let mut items = command.list.items.into_iter();
+			let item = items.next().expect("validated function definition");
+			let mut stages = item.and_or.first.stages.into_iter();
+			stages.next().expect("validated function stage").cmd
+		},
+	};
+	func_source(&command, name, body.mode)
 }
 
 /// The canonical text of function `name` defined by `cmd`: zsh's function
@@ -1436,7 +1637,8 @@ fn zsh_envstring(t: &[u8]) -> bool {
 	let mut end = if t.first().is_some_and(u8::is_ascii_digit) {
 		t.iter().take_while(|c| c.is_ascii_digit()).count()
 	} else {
-		let mut e = syn::zsh::ident_end(t, 0);
+		// The lexer already decided this word is an assignment.
+		let mut e = syn::zsh::ident_end(t, 0, true);
 		if e < t.len() {
 			syn::zsh::skipparens(syn::zsh::tok::INBRACK, syn::zsh::tok::OUTBRACK, t, &mut e);
 		}
@@ -1612,7 +1814,9 @@ pub fn ansi_c_with(raw: &[u8], code_point: &mut dyn FnMut(u32, &mut Vec<u8>)) ->
 
 #[cfg(test)]
 mod tests {
-	use super::{ansi_c, assignment_like, lower, lower_deferred, materialize};
+	use super::{
+		ansi_c, assignment_like, function_from_source_at, lower, lower_deferred, materialize,
+	};
 	use crate::bash::{ids::ModeId, syntax as syn};
 
 	#[test]
@@ -1638,13 +1842,31 @@ mod tests {
 			assert_eq!(body.deferred.as_ref().unwrap().is_empty(), cc.aliases.is_empty());
 			let bytes = postcard::to_stdvec(body).unwrap();
 			let saved = postcard::from_bytes(&bytes).unwrap();
-			let compiled = materialize(&saved).unwrap();
+			let compiled = materialize(&saved, false).unwrap();
 			assert_eq!(compiled.id, body.id);
 			assert_eq!(compiled.ops, eager.funcs[0].body.ops);
 			assert_eq!(compiled.words, eager.funcs[0].body.words);
 			assert_eq!(compiled.source, eager.funcs[0].body.source);
 			assert_eq!(compiled.root, eager.funcs[0].body.root);
 		}
+	}
+
+	#[test]
+	fn autoload_defers_nested_functions_and_keeps_file_lines() {
+		let src = b"loaded () {\nhelper () { echo nested; }\necho ready\n}\n";
+		let function = function_from_source_at(src, ModeId::Zsh, syn::Features::ZSH, 0).unwrap();
+		assert!(function.body.ops.is_empty());
+		let bytes = postcard::to_stdvec(&function.body).unwrap();
+		let saved = postcard::from_bytes(&bytes).unwrap();
+		let compiled = materialize(&saved, false).unwrap();
+		assert_eq!(compiled.id, function.body.id);
+		assert_eq!(compiled.funcs.len(), 1);
+		let helper = &compiled.funcs[0];
+		assert_eq!(helper.name, "helper");
+		assert!(helper.body.ops.is_empty());
+		assert!(helper.body.deferred.is_some());
+		let helper_body = materialize(&helper.body, false).unwrap();
+		assert!(helper_body.nodes.iter().any(|n| n.line == 1));
 	}
 
 	// Goldens: bash 5.3 `printf '%q' $'…'` and upstream nquote3/nquote4.

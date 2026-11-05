@@ -98,7 +98,7 @@ export function currentDb(): Database | null {
 
 const BACKFILL_COMPLETE = "complete";
 const BACKFILL_PENDING = "pending";
-const USER_MESSAGES_BACKFILL_KEY = "user_messages_v9";
+const USER_MESSAGES_BACKFILL_KEY = "user_messages_v10";
 const USER_MESSAGE_LINKS_REPAIR_KEY = "user_message_links_v1";
 // v2: the parser also records the served service tier per message, so a full
 // re-parse fills `service_tier` and re-derives ultrafast premium counts that the
@@ -345,7 +345,6 @@ export async function initDb(): Promise<Database> {
 			heat TEXT,
 			kept TEXT,
 			gated INTEGER NOT NULL DEFAULT 0,
-			edit_likely INTEGER,
 			PRIMARY KEY (session_file, tool_call_id)
 		) WITHOUT ROWID;
 		CREATE INDEX IF NOT EXISTS idx_spotlight_results_call ON spotlight_results(tool_call_id);
@@ -407,13 +406,16 @@ export async function initDb(): Promise<Database> {
 		["score_free", "INTEGER NOT NULL DEFAULT 0"],
 		["heat", "TEXT"],
 		["kept", "TEXT"],
-		// No read was gated or marked before these existed: the default is exact, and the null mark means "classify".
+		// No read was gated before this existed: the default is exact.
 		["gated", "INTEGER NOT NULL DEFAULT 0"],
-		["edit_likely", "INTEGER"],
 	] as const) {
 		if (!spotlightResultColumns.some(existing => existing.name === column)) {
 			db.run(`ALTER TABLE spotlight_results ADD COLUMN ${column} ${type}`);
 		}
+	}
+	// pi's read mark went with its former edit gate.
+	if (spotlightResultColumns.some(column => column.name === "edit_likely")) {
+		db.run("ALTER TABLE spotlight_results DROP COLUMN edit_likely");
 	}
 	const spotlightCallColumns = db.query<{ name: string }, []>("PRAGMA table_info(spotlight_calls)").all();
 	if (!spotlightCallColumns.some(column => column.name === "edits")) {
@@ -1380,6 +1382,8 @@ export async function getDailyActivity(days = 371): Promise<DailyActivityPoint[]
  * - v9: stored judge prose (`prose` / `prose_hash`) for the frustration
  *   judge, so every session re-parses once to populate it. Verdicts live in
  *   `frustration_verdicts`, keyed by prose hash, which this reset never touches.
+ * - v10: excluded agent-attributed user-role messages, which diluted user
+ *   frustration rates and could be judged as user complaints.
  *
  * Existing `messages` rows are unaffected - `INSERT OR IGNORE` keeps them.
  */
@@ -2004,12 +2008,11 @@ export function upsertSpotlightShapes(rows: Iterable<SpotlightShapeRow>): number
 			"heat",
 			"kept",
 			"gated",
-			"edit_likely",
 		],
 		identity: ["tool_call_id"],
 		upsert: `ON CONFLICT(session_file, tool_call_id) DO UPDATE SET
 			${["tool", "in_chars", "out_chars", "in_tokens", "out_tokens", "steps", "hidden_lines"].map(fromDetails).join(",\n")},
-			${["original_url", "path", "start_line", "lines", "hidden", "artifacts", "sp_calls", "sp_failures", "sp_ms", "sp_cost", "shape_ms", "plain_chars", "plain_tokens", "capped_tokens", "heat", "kept", "edit_likely"].map(coalesce).join(",\n")},
+			${["original_url", "path", "start_line", "lines", "hidden", "artifacts", "sp_calls", "sp_failures", "sp_ms", "sp_cost", "shape_ms", "plain_chars", "plain_tokens", "capped_tokens", "heat", "kept"].map(coalesce).join(",\n")},
 			has_details = MAX(spotlight_results.has_details, excluded.has_details),
 			holdout = MAX(spotlight_results.holdout, excluded.holdout),
 			score_free = MAX(spotlight_results.score_free, excluded.score_free),
@@ -2052,7 +2055,6 @@ export function upsertSpotlightShapes(rows: Iterable<SpotlightShapeRow>): number
 					o?.heat ?? null,
 					o ? JSON.stringify(o.kept) : null,
 					r.gated ? 1 : 0,
-					r.editLikely === null ? null : r.editLikely ? 1 : 0,
 				],
 			);
 		}
