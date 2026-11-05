@@ -14,6 +14,7 @@ import {
 	type FileFacts,
 	globArgsForStep,
 	type PathKind,
+	stepCommandNames,
 	type StepFilesystem,
 } from "./bash-step";
 import { extractFlatShellCommandSegments } from "./shell-tokenize";
@@ -196,6 +197,8 @@ export interface InterceptionResult {
 	message?: string;
 	/** Suggested tool to use instead */
 	suggestedTool?: string;
+	/** Names whose standard implementations the matched built-in tool's capability assumes. */
+	commandNames?: string[];
 }
 
 /**
@@ -368,6 +371,7 @@ export function checkBashInterception(
 					block: true,
 					message: `Blocked: ${rule.message}${sameStep}\n\nOriginal command: ${originalCommand}`,
 					suggestedTool: rule.tool,
+					commandNames: stepCommandNames(rule.tool, candidate.step),
 				};
 			}
 		}

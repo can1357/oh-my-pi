@@ -318,6 +318,52 @@ export function releaseShellSessions(agentSessionKey: string | undefined): void 
 	}
 }
 
+/** Resolve names in the same idle shell the next foreground call would use, without running them. */
+export async function bashCommandsAreStandard(
+	names: readonly string[],
+	options: Pick<BashExecutorOptions, "sessionKey" | "gitGuard" | "cwd">,
+): Promise<boolean> {
+	const settings = await Settings.init();
+	const { shell, env, prefix } = settings.getShellConfig();
+	// A wrapper can change command identity; the embedded shell cannot inspect its state.
+	if (prefix) return false;
+	const snapshotPath = isBashShell(shell) ? await getOrCreateSnapshot(shell, env) : null;
+	const sessionEnv = options.gitGuard ? { ...env, PI_GIT_GUARD: "1" } : env;
+	const minimizer = buildMinimizerOptions(cfgShellMinimizer.get(settings));
+	const key = buildSessionKey(shell, prefix, snapshotPath, sessionEnv, options.sessionKey, minimizer);
+	if (brokenShellSessions.has(key) || shellSessionsInUse.has(key)) return false;
+	let session = shellSessions.get(key);
+	if (!session) {
+		session = new Shell({ sessionEnv, snapshotPath: snapshotPath ?? undefined, minimizer });
+		shellSessions.set(key, session);
+	}
+	shellSessionsInUse.add(key);
+	try {
+		let output = "";
+		// The subshell keeps variables/options/last argument intact. Its final exit restores
+		// the old status, expanded by eval before `type` runs, without creating a variable.
+		const query = `builtin type -t -- ${quotePosixArgv(names)}; builtin exit `;
+		const result = await session.run(
+			{ command: `(builtin eval ${quotePosixArgv([query])}"$?")`, cwd: options.cwd, timeoutMs: 1_000 },
+			(error, chunk) => {
+				if (!error) output += chunk;
+			},
+		);
+		const types = output.trimEnd().split("\n");
+		return (
+			!result.cancelled &&
+			!result.timedOut &&
+			types.length === names.length &&
+			types.every(kind => kind === "file" || kind === "builtin")
+		);
+	} catch {
+		// Unknown resolution is not proof that a dedicated tool can perform the command.
+		return false;
+	} finally {
+		shellSessionsInUse.delete(key);
+	}
+}
+
 function resolveShellCwd(cwd: string | undefined): string | undefined {
 	// Preserve the caller's logical cwd string. Brush uses this value to update `PWD` and its
 	// internal working directory, so realpathing here collapses symlinks before the shell sees them.

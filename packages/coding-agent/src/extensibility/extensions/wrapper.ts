@@ -24,6 +24,7 @@ import {
 	truncateForPrompt,
 } from "../../tools/approval";
 import { getApprovalGrants } from "../../tools/approval-cache";
+import { BashTool } from "../../tools/bash";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
@@ -359,6 +360,15 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		if (resolved.policy === "deny") {
 			cancelPreflight();
 			throw denyError(resolved, this.tool.name);
+		}
+		// Routing can need an async query of the persistent shell, but must still precede a prompt.
+		if (this.tool instanceof BashTool) {
+			try {
+				await this.tool.checkInterception(effectiveParams, context);
+			} catch (error) {
+				cancelPreflight();
+				throw error;
+			}
 		}
 		const pendingSafetyChecks = computerSafetyChecks(context);
 		// Outer approvals only cover the original input. `xd://` approval skips

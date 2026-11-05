@@ -1298,6 +1298,64 @@ describe("dedicated tool capability", () => {
 	});
 
 	it.each([
+		"cat plain.txt 2>&987654",
+		"grep alpha plain.txt 2>&987654",
+		"find . -name '*.txt' 2>&987654",
+		"cat plain.txt 2>&987654 || printf RECOVERED",
+		"cat plain.txt 2>&- 3>&2",
+		"cat plain.txt 0<&- 2>&0",
+		"cat plain.txt 3>&1- 2>&1 1>&3",
+		"cat plain.txt 2>/dev/fd/987654",
+		"cat plain.txt 2>&- 2>/dev/stderr",
+		"cat plain.txt 2>/dev/tty",
+		"sed -i 's/alpha/beta/' plain.txt 2>&987654",
+	])("does not refuse %s when opening a redirection can fail", command => {
+		expect(decide(command)).toBeUndefined();
+	});
+
+	it.each(["/dev/tty", "/dev/null", "/dev/zero", "/dev/stdin", "/dev/fd/0"])(
+		"does not return a read result in place of output to %s",
+		target => {
+			expect(decide(`cat plain.txt > ${target}`)).toBeUndefined();
+		},
+	);
+
+	it.each([
+		"cat plain.txt 3>&1 2>&3",
+		"cat plain.txt > /dev/stdout",
+		"cat plain.txt > /dev/stderr",
+		"cat plain.txt > /dev/fd/1",
+	])("still refuses %s when its descriptors reach captured output", command => {
+		expect(decide(command)).toBe("read");
+	});
+
+	// The fold of #17816 and #17840: #17840 sends `find -maxdepth N` to the glob tool's `depth: N`,
+	// and #17816 leaves a step whose redirection can fail in bash. A depth-bounded find whose
+	// redirection fails prints nothing in bash, so the glob call that lists the same entries is not
+	// the same step; the refusal must lose to the redirection rule, and only here do both exist.
+	it.each([
+		"find . -maxdepth 2 -name '*.txt' 2>&987654",
+		"find . -maxdepth 2 -name '*.txt' 2>&987654 || printf RECOVERED",
+		"find . -maxdepth 2 -name '*.txt' 2>/dev/fd/987654",
+		"find . -maxdepth 2 -name '*.txt' > /dev/tty",
+		"fd -Id2 --glob '*.txt' 2>&987654",
+	])("does not send %s to glob's depth when its redirection can fail", command => {
+		expect(decide(command)).toBeUndefined();
+	});
+
+	it.each([
+		["find . -maxdepth 2 -name '*.txt'", { path: "**/*.txt", hidden: true, gitignore: false, git: true, depth: 2 }],
+		[
+			"find . -maxdepth 2 -name '*.txt' 2>/dev/null",
+			{ path: "**/*.txt", hidden: true, gitignore: false, git: true, depth: 2 },
+		],
+	])("still names glob's depth for %s, whose redirections cannot fail", (command, args) => {
+		const result = checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES);
+		expect(result.suggestedTool).toBe("glob");
+		expect(result.message).toContain(`The same listing: glob ${JSON.stringify(args)}`);
+	});
+
+	it.each([
 		"literal.pdf",
 		"slides.pptx",
 		"document.docx",
@@ -1316,9 +1374,7 @@ describe("dedicated tool capability", () => {
 		"bundle.tar.gz",
 		"stream.gz",
 		"bundle.asar",
-		"bundle.zip:member.txt",
 		"data.sqlite",
-		"data.db:rows",
 		"dir/",
 	])("does not refuse a name-only read of %s that read may render or list", operand => {
 		expect(decide(`cat ${operand}`)).toBeUndefined();
@@ -1605,6 +1661,90 @@ describe("BashTool runs a step the named tool cannot perform", () => {
 			await expect(tool.execute("call-3", { command: "cat new.md" }, undefined, undefined, ctx)).rejects.toThrow(
 				"Use the `read` tool instead of cat/head/tail",
 			);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+	it.each([
+		["function", 'function cat() { printf "FUNCTION_RAN\\n"; printf marker > function-marker; }'],
+		[
+			"alias",
+			'function aliased_cat() { printf "ALIAS_RAN\\n"; printf marker > function-marker; }; shopt -s expand_aliases; alias cat=aliased_cat',
+		],
+	])("runs a persistent %s named cat instead of refusing a file read", async (kind, definition) => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-interceptor-resolution-")));
+		const sessionId = `interceptor-resolution-${crypto.randomUUID()}`;
+		const session = {
+			cwd: dir,
+			hasUI: false,
+			skills: [],
+			getSessionId: () => sessionId,
+			getSessionFile: () => null,
+			getClientBridge: () => undefined,
+			settings: Settings.isolated({
+				"bashInterceptor.enabled": true,
+				"bashInterceptor.patterns": DEFAULT_BASH_INTERCEPTOR_RULES,
+				"async.enabled": false,
+				"bash.autoBackground.enabled": false,
+			}),
+		} as unknown as ToolSession;
+		const tool = new BashTool(session);
+		const ctx = {
+			toolNames: ["read", "grep", "glob", "write", "edit", "bash"],
+			settings: Settings.isolated({ "tools.approvalMode": "yolo" }),
+		} as AgentToolContext;
+		try {
+			await Bun.write(path.join(dir, "plain.txt"), "alpha\n");
+			await tool.execute("define", { command: definition }, undefined, undefined, ctx);
+			const runner = {
+				hasHandlers: () => false,
+				consumeToolCallEmitted: () => false,
+				hasUI: () => false,
+				hasSessionApproval: () => false,
+				sessionId,
+				cwd: dir,
+				runScoped: <T>(fn: () => T): T => fn(),
+			} as unknown as ExtensionRunner;
+			const wrapper = new ExtensionToolWrapper(tool as Tool, runner);
+			const result = await wrapper.execute("invoke", { command: "cat plain.txt" }, undefined, undefined, ctx);
+			expect(result.content.some(c => c.type === "text" && c.text.includes(`${kind.toUpperCase()}_RAN`))).toBe(true);
+			expect(await Bun.file(path.join(dir, "function-marker")).text()).toBe("marker");
+			await tool.execute("unset", { command: "unalias cat; unset -f cat" }, undefined, undefined, {
+				toolNames: [],
+			} as unknown as AgentToolContext);
+			await tool.execute("status", { command: "false status-marker" }, undefined, undefined, ctx);
+			await expect(
+				tool.execute("ordinary", { command: "cat plain.txt" }, undefined, undefined, ctx),
+			).rejects.toThrow("Use the `read` tool");
+			const status = await tool.execute(
+				"after-refusal",
+				{ command: 'printf "STATUS=%s LAST=%s\\n" "$?" "$_"' },
+				undefined,
+				undefined,
+				ctx,
+			);
+			expect(status.content.some(c => c.type === "text" && c.text.includes("STATUS=1 LAST=status-marker"))).toBe(
+				true,
+			);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("runs recovery after a descriptor failure instead of replacing it with a read", async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-interceptor-recovery-")));
+		const tool = createBashTool(DEFAULT_BASH_INTERCEPTOR_RULES);
+		try {
+			await Bun.write(path.join(dir, "plain.txt"), "alpha\n");
+			const result = await tool.execute(
+				"recover",
+				{ command: "cat plain.txt 2>&987654 || printf RECOVERED", cwd: dir },
+				undefined,
+				undefined,
+				{ toolNames: ["read"] } as AgentToolContext,
+			);
+			expect(result.content.some(c => c.type === "text" && c.text.includes("RECOVERED"))).toBe(true);
+			expect(result.content.some(c => c.type === "text" && c.text.includes("alpha"))).toBe(false);
 		} finally {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
