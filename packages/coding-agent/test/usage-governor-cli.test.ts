@@ -16,7 +16,7 @@ import { sandboxCommand } from "./fixtures/usage-governor/confinement";
 import type { FakeAccountSpec, FakeRecord } from "./fixtures/usage-governor/fake-provider";
 import { WINDOW_MS } from "./fixtures/usage-governor/fake-provider";
 import {
-	awaitCondition,
+	awaitLedgerCondition,
 	CHILD_PROBE,
 	forbiddenNames,
 	GovernorProof,
@@ -97,6 +97,49 @@ function assertConfined(proof: GovernorProof): void {
 
 /** Real-HOME baseline, taken when this file loads: before any scenario runs. */
 const INITIAL_REAL_HOME: StatSnapshot[] = statRealHome();
+
+describe("usage governor CLI proof: ledger polling", () => {
+	test("retries a transient SQLite open error until the condition is observed", async () => {
+		const error = Object.assign(new Error("unable to open database file"), {
+			name: "SQLiteError",
+			code: "SQLITE_CANTOPEN",
+		});
+		let calls = 0;
+		expect(
+			await awaitLedgerCondition(
+				() => {
+					if (++calls === 1) throw error;
+					return true;
+				},
+				1000,
+				1,
+			),
+		).toBe(true);
+		expect(calls).toBe(2);
+	});
+
+	test("fails closed on a persistent open error and propagates other errors", async () => {
+		const openError = Object.assign(new Error("unable to open database file"), {
+			name: "SQLiteError",
+			code: "SQLITE_CANTOPEN",
+		});
+		const otherError = Object.assign(new Error("corrupt database"), {
+			name: "SQLiteError",
+			code: "SQLITE_CORRUPT",
+		});
+		await expect(
+			awaitLedgerCondition(() => {
+				throw openError;
+			}, 0),
+		).rejects.toBe(openError);
+		await expect(
+			awaitLedgerCondition(() => {
+				throw otherError;
+			}, 1000),
+		).rejects.toBe(otherError);
+		expect(await awaitLedgerCondition(() => false, 0)).toBe(false);
+	});
+});
 
 describe("usage governor CLI proof: confinement", () => {
 	test("the child environment is an allowlist with no inherited credentials or profile state", async () => {
@@ -384,7 +427,7 @@ describe("usage governor CLI proof: scenarios", () => {
 		const proof = await GovernorProof.create(specs, { enabled: true });
 		const probe = proof.spawnOmp(["-p", "banked reset probe"]);
 		try {
-			const engaged = await awaitCondition(() => proof.readLedger().waits.length > 0, 30_000);
+			const engaged = await awaitLedgerCondition(() => proof.readLedger().waits.length > 0, 30_000);
 			expect(engaged).toBe(true);
 
 			const status = governorOf(await proof.usageJson());
@@ -454,7 +497,7 @@ describe("usage governor CLI proof: scenarios", () => {
 		const proof = await GovernorProof.create(specs, { enabled: true });
 		const probe = proof.spawnOmp(["-p", "abort during wait"]);
 		try {
-			const waiting = await awaitCondition(
+			const waiting = await awaitLedgerCondition(
 				() => proof.readLedger().waits.some(wait => wait.endedAtMs === null),
 				30_000,
 			);
