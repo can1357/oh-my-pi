@@ -23,6 +23,7 @@ import {
 import {
 	A2A_HOST,
 	AGENT_CARD_PATH,
+	type A2aBus,
 	type A2aServerHandle,
 	createA2aServer,
 	resolveA2aToken,
@@ -31,6 +32,7 @@ import {
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SpawnSubagentOptions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import {
 	AgentRegistry,
 	type AgentRegistryApi,
@@ -148,10 +150,11 @@ interface SentIrc {
 class FakeBus {
 	readonly sent: SentIrc[] = [];
 	outcome: IrcDeliveryReceipt["outcome"] = "woken";
+	error: string | undefined;
 
 	async send(msg: Omit<IrcMessage, "id" | "ts">): Promise<IrcDeliveryReceipt> {
 		this.sent.push({ from: msg.from, to: msg.to, body: msg.body });
-		return { to: msg.to, outcome: this.outcome };
+		return { to: msg.to, outcome: this.outcome, ...(this.error !== undefined ? { error: this.error } : {}) };
 	}
 }
 
@@ -368,6 +371,48 @@ describe("A2A JSON-RPC methods", () => {
 		expect(calls).toEqual([{ agent: "task", prompt: "implement the fix", context: "repo context" }]);
 	});
 
+	it("SendMessage with metadata.spawn prefers a spawn over the addressed delivery", async () => {
+		const spawned = makeRef({ id: "Spawn-2", displayName: "Spawn Two", status: "running" });
+		const calls: SpawnSubagentOptions[] = [];
+		const { handle, bus } = startServer({
+			refs: [makeRef({ id: "beta", displayName: "Beta" })],
+			spawn: async options => {
+				calls.push(options);
+				return spawned;
+			},
+		});
+		const { status, json } = await rpc(handle, {
+			jsonrpc: "2.0",
+			id: 18,
+			method: "SendMessage",
+			params: {
+				message: { messageId: "m-2b", role: "ROLE_USER", parts: [{ text: "implement the fix" }] },
+				metadata: { to: "beta", spawn: true, agent: "task" },
+			},
+		});
+		expect(status).toBe(200);
+		const task = taskResult(json);
+		expect(task.id).toBe("Spawn-2");
+		expect(task.metadata).toMatchObject({ agentId: "Spawn-2", spawned: true });
+		expect(calls).toEqual([{ agent: "task", prompt: "implement the fix" }]);
+		// Spawn wins: the addressed agent received nothing.
+		expect(bus.sent).toEqual([]);
+	});
+
+	it("rejects a non-boolean metadata.spawn with -32602", async () => {
+		const { handle } = startServer({ refs: [makeRef({ id: "beta" })] });
+		const { json } = await rpc(handle, {
+			jsonrpc: "2.0",
+			id: 19,
+			method: "SendMessage",
+			params: {
+				message: { messageId: "m-2c", role: "ROLE_USER", parts: [{ text: "go" }] },
+				metadata: { to: "beta", spawn: "yes" },
+			},
+		});
+		expect(errorResult(json).code).toBe(RPC_ERRORS.INVALID_PARAMS);
+	});
+
 	it("answers unknown methods, including the SubscribeToTask v1 cut, with -32601", async () => {
 		const { handle } = startServer({});
 		for (const method of ["SubscribeToTask", "NoSuchMethod"]) {
@@ -452,6 +497,77 @@ describe("A2A JSON-RPC methods", () => {
 			params: { message: { parts: [] } },
 		});
 		expect(errorResult(json).code).toBe(RPC_ERRORS.INVALID_PARAMS);
+	});
+});
+
+describe("A2A delivery ingress", () => {
+	function startWithBus(registry: FakeRegistry, bus: A2aBus): A2aServerHandle {
+		const handle = createA2aServer({
+			token: TOKEN,
+			port: 0,
+			registry: registry.asApi(),
+			bus,
+			card: () => buildAgentCard({ url: `http://${A2A_HOST}:7391/`, version: "18.16.0", skills: [] }),
+		});
+		handles.push(handle);
+		return handle;
+	}
+
+	it("marks bridge deliveries external: a repeated or bursty request is not agent-guarded", async () => {
+		// A real bus with its guard on and a healthy recipient: the bridge's
+		// deliveries must not be refused by the agent-loop rate/dedup policy.
+		const session = { deliverIrcMessage: async () => "injected" as const };
+		const registry = new FakeRegistry([
+			makeRef({ id: "beta", displayName: "Beta", status: "idle", session: session as never }),
+		]);
+		const bus = new IrcBus(registry.asApi(), undefined, { settings: Settings.isolated({}) });
+		const handle = startWithBus(registry, bus);
+		// 160 chars = 40 tokens: more than one 30-token window, so a shared agent
+		// budget would refuse every request after the first.
+		const body = "please continue ".repeat(10);
+		for (const messageId of ["m-1", "m-2", "m-3"]) {
+			const { status, json } = await rpc(handle, {
+				jsonrpc: "2.0",
+				id: messageId,
+				method: "SendMessage",
+				params: {
+					message: { messageId, role: "ROLE_USER", parts: [{ text: body }] },
+					metadata: { to: "beta" },
+				},
+			});
+			expect(status).toBe(200);
+			expect(taskResult(json).metadata?.delivery).toMatchObject({ to: "beta", outcome: "injected" });
+		}
+
+		// The same body twice from the shared "a2a" sender id without the external
+		// mark is exactly what the guard would have cut; proving the exemption runs
+		// on the A2A path, not in the guard's absence.
+		const direct = await bus.send({ from: "a2a", to: "beta", body: "identical agent send" });
+		const repeat = await bus.send({ from: "a2a", to: "beta", body: "identical agent send" });
+		expect(direct.outcome).toBe("injected");
+		expect(repeat.outcome).toBe("failed");
+		expect(repeat.error).toStartWith("duplicate");
+	});
+
+	it("answers a failed delivery with a JSON-RPC error, not a success receipt", async () => {
+		const bus = new FakeBus();
+		bus.outcome = "failed";
+		bus.error = "rate limited: a2a may send 30 tokens per 500 ms";
+		const { handle } = startServer({ refs: [makeRef({ id: "beta", displayName: "Beta" })], bus });
+		const { status, json } = await rpc(handle, {
+			jsonrpc: "2.0",
+			id: 23,
+			method: "SendMessage",
+			params: {
+				message: { messageId: "m-5", role: "ROLE_USER", parts: [{ text: "please check" }] },
+				metadata: { to: "beta" },
+			},
+		});
+		expect(status).toBe(200);
+		const error = errorResult(json);
+		expect(error.code).toBe(RPC_ERRORS.DELIVERY_FAILED);
+		expect(error.message).toContain("rate limited");
+		expect(asObject(json, "response").result).toBeUndefined();
 	});
 });
 
@@ -567,6 +683,44 @@ describe("A2A streaming", () => {
 			sse.cancel();
 		}
 	});
+
+	it(
+		"closes a stream whose delivery failed with a final TASK_STATE_FAILED",
+		async () => {
+			const bus = new FakeBus();
+			bus.outcome = "failed";
+			bus.error = "agent beta has no live session";
+			const registry = new FakeRegistry([makeRef({ id: "beta", status: "running" })]);
+			const { handle } = startServer({ registry, bus });
+			const response = await fetch(handle.url, {
+				method: "POST",
+				headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+				body: JSON.stringify({
+					jsonrpc: "2.0",
+					id: 24,
+					method: "SendStreamingMessage",
+					params: {
+						message: { messageId: "m-6", role: "ROLE_USER", parts: [{ text: "keep going" }] },
+						metadata: { to: "beta" },
+					},
+				}),
+			});
+			expect(response.status).toBe(200);
+			const sse = openSse(response);
+			try {
+				// The registry ref never changes: without a terminal frame the stream
+				// stays open and only the test's own timeout ends it.
+				await sse.toEnd();
+				expect(sse.text).toContain("TASK_STATE_FAILED");
+				expect(sse.text).toContain("agent beta has no live session");
+				expect(sse.text).toContain('"final":true');
+			} finally {
+				sse.cancel();
+			}
+		},
+		// A non-closing SSE stream is the failure under test: bound the wait.
+		2000,
+	);
 });
 
 describe("spawnSubagent seam", () => {

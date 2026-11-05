@@ -34,6 +34,14 @@ export interface IrcMessage {
 	 */
 	progress?: boolean;
 	/**
+	 * A delivery from outside the agent tree — the A2A bridge. Each such message
+	 * is one authenticated client request identified by its A2A `messageId`, so
+	 * the agent-loop ingress policy does not apply: identical text is a new
+	 * request, not a repetition loop, and the bridge's loopback-plus-bearer
+	 * boundary is its own throttle. Set by `a2a/rpc.ts`; agents never set it.
+	 */
+	external?: boolean;
+	/**
 	 * Senders this message passed through, oldest first, ending with the agent
 	 * that sent it: the bus appends the sender's own id on every send, and an
 	 * automatic wake relay hands the received chain on (a manual reply starts a

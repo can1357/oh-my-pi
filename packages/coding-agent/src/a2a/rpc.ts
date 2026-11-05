@@ -68,6 +68,13 @@ export const RPC_ERRORS = {
 	 * request was rejected — clients must not read this as a bridge failure.
 	 */
 	AGENT_REJECTED: -32010,
+	/**
+	 * The message reached the bridge but not the addressed agent: the IRC bus
+	 * receipt came back `failed` (unknown recipient, dropped queued work, a
+	 * guard refusal). HTTP 200 with a JSON-RPC error, so a client cannot mistake
+	 * a refused delivery for an accepted one.
+	 */
+	DELIVERY_FAILED: -32011,
 } as const;
 
 export type JsonRpcId = string | number | null;
@@ -262,6 +269,8 @@ export interface ParsedSendMessage {
 	agent?: string;
 	/** omp extension: shared background for a spawn. */
 	context?: string;
+	/** omp extension: force a spawn even when `to` is given (spawn wins). */
+	spawn?: boolean;
 }
 
 /** Validate a `SendMessage` request and flatten its text parts. */
@@ -302,12 +311,17 @@ export function parseSendMessageParams(params: unknown): ParsedSendMessage {
 	const to = readString("to");
 	const agent = readString("agent");
 	const context = readString("context");
+	const spawnRaw = metadata?.spawn ?? messageMetadata?.spawn;
+	if (spawnRaw !== undefined && typeof spawnRaw !== "boolean") {
+		throw invalidParams("metadata.spawn must be a boolean");
+	}
 	return {
 		messageId,
 		text,
 		...(to !== undefined ? { to } : {}),
 		...(agent !== undefined ? { agent } : {}),
 		...(context !== undefined ? { context } : {}),
+		...(spawnRaw === true ? { spawn: true } : {}),
 	};
 }
 
@@ -394,7 +408,7 @@ function isSpawnRejection(error: unknown): error is Error {
  */
 export async function sendA2aMessage(params: unknown, deps: A2aDispatchDeps): Promise<A2aTask> {
 	const request = parseSendMessageParams(params);
-	if (request.to !== undefined) {
+	if (request.to !== undefined && request.spawn !== true) {
 		const target = resolveAddressedRef(deps.registry, request.to);
 		if (!target) {
 			throw new RpcError(RPC_ERRORS.TASK_NOT_FOUND, `Task not found: ${request.to}`, { httpStatus: 404 });
@@ -403,6 +417,7 @@ export async function sendA2aMessage(params: unknown, deps: A2aDispatchDeps): Pr
 			from: deps.senderId ?? A2A_SENDER_ID,
 			to: target.id,
 			body: request.text,
+			external: true,
 		});
 		const current = deps.registry.get(target.id) ?? target;
 		return taskFromAgentRef(current, { delivery: receipt, requestedTo: request.to });
@@ -439,11 +454,54 @@ export async function sendA2aMessage(params: unknown, deps: A2aDispatchDeps): Pr
 	return taskFromAgentRef(ref, { spawned: true });
 }
 
+/** The bus receipt of a delivered task, when that delivery came back `failed`. */
+export function failedDeliveryReceipt(task: A2aTask): IrcDeliveryReceipt | undefined {
+	const delivery = asRecord(task.metadata)?.delivery;
+	return delivery !== undefined && delivery.outcome === "failed" ? (delivery as unknown as IrcDeliveryReceipt) : undefined;
+}
+
+/**
+ * Turn a failed-delivery task into a terminal `TASK_STATE_FAILED` snapshot: the
+ * streaming transport frames it and closes instead of waiting forever on a
+ * status that will never change. `undefined` when the delivery succeeded.
+ */
+export function failedDeliveryTask(task: A2aTask): A2aTask | undefined {
+	const receipt = failedDeliveryReceipt(task);
+	if (!receipt) return undefined;
+	const at = new Date().toISOString();
+	const error = receipt.error ?? `Delivery to ${task.id} failed`;
+	return {
+		...task,
+		status: {
+			state: TASK_STATE.FAILED,
+			timestamp: at,
+			message: { messageId: `${task.id}:delivery-failed:${at}`, role: "ROLE_AGENT", parts: [{ text: error }] },
+		},
+	};
+}
+
+/**
+ * Refuse a task whose delivery failed as a JSON-RPC error. Without this a
+ * client reads HTTP 200 plus a task as success and never learns the addressed
+ * agent never saw the message.
+ */
+export function assertTaskDelivered(task: A2aTask): void {
+	const receipt = failedDeliveryReceipt(task);
+	if (!receipt) return;
+	throw new RpcError(RPC_ERRORS.DELIVERY_FAILED, receipt.error ?? `Delivery to ${task.id} failed`, {
+		httpStatus: 200,
+		data: [{ reason: "DELIVERY_FAILED" }],
+	});
+}
+
 /** Dispatch one non-streaming A2A method; unknown methods (and the SubscribeToTask cut) throw -32601. */
 export async function dispatchA2aMethod(method: string, params: unknown, deps: A2aDispatchDeps): Promise<unknown> {
 	switch (method) {
-		case "SendMessage":
-			return { task: await attachOutputArtifact(await sendA2aMessage(params, deps), deps.readOutput) };
+		case "SendMessage": {
+			const task = await sendA2aMessage(params, deps);
+			assertTaskDelivered(task);
+			return { task: await attachOutputArtifact(task, deps.readOutput) };
+		}
 		case "GetTask": {
 			const id = parseTaskIdParams(params);
 			const ref = resolveAddressedRef(deps.registry, id);

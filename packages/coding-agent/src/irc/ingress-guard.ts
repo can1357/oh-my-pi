@@ -110,7 +110,9 @@ export class IrcIngressGuard {
 		// leans on the upstream invariant that only the main agent broadcasts
 		// (`irc/messaging.ts`: "Only the main agent can broadcast"); if subagents
 		// ever regain broadcast, charge its legs again.
-		if (message.broadcast || message.wakeRelay) return undefined;
+		// Bridge deliveries are external client requests, not agent-loop traffic:
+		// they have no shared sender budget to spend.
+		if (message.broadcast || message.wakeRelay || message.external) return undefined;
 		let window = this.#rates.get(message.from);
 		if (!window) {
 			// Agent ids are unique per spawn, so a long-lived process would keep one
@@ -171,7 +173,9 @@ export class IrcIngressGuard {
 		// Progress notes and automated wake relays are meant to repeat: an agent
 		// may send the same interim line twice, and two wake turns can end with
 		// identical output. Neither is the repetition loop dedup exists to stop.
-		if (windowMs <= 0 || message.progress || message.wakeRelay) return undefined;
+		// An external bridge request is identified by its own A2A `messageId`, so
+		// the same text twice is two requests, not a loop.
+		if (windowMs <= 0 || message.progress || message.wakeRelay || message.external) return undefined;
 		while (this.#dedupHead < this.#dedupOrder.length) {
 			const entry = this.#dedupOrder[this.#dedupHead]!;
 			if (now - entry.ts < windowMs) break;

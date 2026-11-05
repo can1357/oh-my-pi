@@ -38,6 +38,7 @@ import {
 	TASK_STATE,
 	TERMINAL_TASK_STATES,
 	dispatchA2aMethod,
+	failedDeliveryTask,
 	sendA2aMessage,
 	taskFromAgentRef,
 } from "./rpc";
@@ -203,6 +204,16 @@ function streamTaskResponse(
 			controller = streamController;
 			frame({ task });
 			if (TERMINAL_TASK_STATES.has(task.status.state)) {
+				// The initial task is already terminal (a refused delivery, a
+				// completed run): the stream still ends with the final status
+				// update a spec client waits for before closing.
+				const update: TaskStatusUpdateEvent = {
+					taskId: task.id,
+					contextId: task.contextId ?? "",
+					status: task.status,
+					final: true,
+				};
+				frame({ statusUpdate: update });
 				stop();
 				return;
 			}
@@ -281,7 +292,10 @@ export function createA2aServer(options: A2aServerOptions): A2aServerHandle {
 			try {
 				if (rpc.method === "SendStreamingMessage") {
 					const task = await sendA2aMessage(rpc.params, dispatchDeps);
-					return streamTaskResponse(rpc.id, task, options, activeStreams);
+					// A refused delivery is terminal: frame the initial task and a
+					// final TASK_STATE_FAILED, then close. The task's own registry
+					// state may never change, so waiting on it would hang the stream.
+					return streamTaskResponse(rpc.id, failedDeliveryTask(task) ?? task, options, activeStreams);
 				}
 				const result = await dispatchA2aMethod(rpc.method, rpc.params, dispatchDeps);
 				return jsonResponse(rpcSuccess(rpc.id, result));

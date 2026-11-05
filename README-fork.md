@@ -322,11 +322,21 @@ extension in the request metadata:
 - `metadata.to` names an existing agent. The message goes through the IRC bus,
   so an idle agent is woken, a parked or killed one is revived from its
   transcript, and the delivery receipt (`injected`/`woken`/`revived`/`failed`)
-  lands in `result.task.metadata.delivery`.
+  lands in `result.task.metadata.delivery`. A `failed` receipt is a JSON-RPC
+  error `-32011` (`DELIVERY_FAILED`), never a success task: a client cannot
+  mistake a refused delivery for an accepted one. On
+  `SendStreamingMessage` the stream instead ends with a final
+  `TASK_STATE_FAILED` update carrying the receipt's error.
+- Bridge deliveries are marked `external` on the bus: each is one
+  authenticated request identified by its A2A `messageId`, so the agent-loop
+  ingress guards (body-hash duplicate, per-sender rate) do not apply. The
+  loopback-only, bearer-authenticated bridge is their throttle.
 - No `metadata.to` spawns a new agent through `pi.spawnSubagent` with ordinary
   subagent rights (`metadata.agent` selects the agent definition, defaulting to
   the session's configured default; `metadata.context` is shared background
   like a `task` batch context). The response's task id **is** the new agent id.
+  `metadata.spawn: true` forces a spawn even when `metadata.to` is present —
+  spawn wins over delivery (a wire test pins that preference).
 - `metadata.to: "main"` is an alias for the main agent's id.
 - A spawn whose child session has not registered yet answers `TASK_STATE_SUBMITTED`
   with `metadata.pending: true` (id reserved, run starting). Poll `GetTask` for
