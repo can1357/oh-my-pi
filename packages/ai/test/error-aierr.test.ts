@@ -236,3 +236,45 @@ describe("aierr flag helpers", () => {
 		expect(AIError.isTransientStreamParseError("Unexpected token in JSON")).toBe(false);
 	});
 });
+
+describe("OpenAIHttpError.parseEnvelope — where the error actually is", () => {
+	// What a user reads when a provider declines or fails is whatever this returns. The positions
+	// below are the ones real hosts use; each was found by driving the product after an earlier
+	// enumeration had been called complete.
+	const body = (value: unknown) => AIError.OpenAIHttpError.parseEnvelope(value, JSON.stringify(value));
+
+	it("reads the message out of a wrapper whose inner object carries only a message", () => {
+		// No code anywhere, so the only thing worth surfacing is the sentence. Reporting the raw
+		// JSON body instead shows the user a blob and hides the provider's own explanation.
+		expect(body({ error: { error: { message: "the real explanation" } } })).toEqual({
+			detail: "the real explanation",
+			code: undefined,
+		});
+	});
+
+	it("prefers the root's own code to a diagnostic object beside it", () => {
+		expect(body({ code: "cyber_policy", message: "declined", error: { code: "invalid_api_key" } })).toEqual({
+			detail: "declined",
+			code: "cyber_policy",
+		});
+	});
+
+	it("finds a Responses-shaped failure delivered as a non-2xx body", () => {
+		const envelope = { code: "cyber_policy", message: "declined" };
+		expect(body({ response: { status: "failed", error: envelope } })).toEqual({
+			detail: "declined",
+			code: "cyber_policy",
+		});
+		expect(body({ response: { status: "failed", status_details: { error: envelope } } })).toEqual({
+			detail: "declined",
+			code: "cyber_policy",
+		});
+	});
+
+	it("invents no code for a response-shaped body that carries no error", () => {
+		// The `response` branch above must not turn a completed response into a failure with a
+		// borrowed code; only an `error` object inside it counts.
+		expect(body({ response: { status: "completed", output: [] } }).code).toBeUndefined();
+		expect(body({ id: "resp_1", output: [] }).code).toBeUndefined();
+	});
+});

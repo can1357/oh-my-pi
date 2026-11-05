@@ -180,7 +180,11 @@ type RefusalCarrier =
 	| "sse-wrapped-three-deep"
 	| "http403-wrapped-three-deep"
 	| "http403-flat-root"
-	| "sse-in-status-details";
+	| "sse-in-status-details"
+	| "http403-root-code-beside-a-diagnostic"
+	| "sse-flat-root-chunk"
+	| "http403-in-response-error"
+	| "http403-in-status-details";
 
 /** A transient cause a gateway may attach beside a refusal; it must never replace it. */
 const INNER_DIAGNOSTIC = { code: "server_error", message: "upstream diagnostic", status: 503 };
@@ -206,6 +210,24 @@ function refusalOn(api: Api, carrier: RefusalCarrier): Response {
 	// in-band probe has always accepted that shape; three readers of a non-2xx body discarded it,
 	// so the same refusal read correctly in band and spent every credential over HTTP.
 	if (carrier === "http403-flat-root") return Response.json(error, { status: 403 });
+	// The Responses-shaped failure, delivered as a NON-2xx body rather than in band. Readers that
+	// knew these two positions in band did not know them over HTTP, so the same bytes were a
+	// refusal on one wire and a walk through every stored credential on the other.
+	if (carrier === "http403-in-response-error") {
+		return Response.json({ response: { status: "failed", error } }, { status: 403 });
+	}
+	if (carrier === "http403-in-status-details") {
+		return Response.json({ response: { status: "failed", status_details: { error } } }, { status: 403 });
+	}
+	// And the same root envelope with a DIAGNOSTIC object beside it. The rule one level down —
+	// an `error` field beside a code of its own is a diagnostic — governs the root too; reading
+	// the diagnostic instead discarded the refusal and spent every credential.
+	if (carrier === "http403-root-code-beside-a-diagnostic") {
+		return Response.json(
+			{ ...error, error: { code: "invalid_api_key", message: "diagnostic account error" } },
+			{ status: 403 },
+		);
+	}
 	// A gateway fronting a gateway: the middle level carries nothing of its own, so a reader that
 	// refuses to walk through it never reaches the code at the bottom.
 	if (carrier === "http403-wrapped-three-deep") {
@@ -241,6 +263,15 @@ function refusalOn(api: Api, carrier: RefusalCarrier): Response {
 	// position one Responses-family reader consulted and the Codex one did not. Chat Completions
 	// has no such field, so for that API the carrier is the ordinary in-band chunk.
 	if (api !== "openai-completions") return failedResponse(streamed, carrier === "sse-in-status-details");
+	// `sse-flat-root-chunk` puts the code at the ROOT of the chunk with no `error` object at all,
+	// which is what cost this wire its code: its reporter returned a generic error before ever
+	// asking whether the frame was a refusal.
+	if (carrier === "sse-flat-root-chunk") {
+		return new Response(`data: ${JSON.stringify({ type: "error", ...error })}\n\ndata: [DONE]\n\n`, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+	}
 	// Chat Completions streams a failure as an in-band `error` chunk.
 	return new Response(`data: ${JSON.stringify({ error: streamed })}\n\ndata: [DONE]\n\n`, {
 		status: 200,
@@ -264,6 +295,10 @@ describe("content-policy refusals on every OpenAI-wire API and carrier", () => {
 		"http403-wrapped-three-deep",
 		"http403-flat-root",
 		"sse-in-status-details",
+		"http403-root-code-beside-a-diagnostic",
+		"sse-flat-root-chunk",
+		"http403-in-response-error",
+		"http403-in-status-details",
 	];
 	it.each(apis.flatMap(api => carriers.map(carrier => ({ api, carrier }))))(
 		"$api $carrier: one attempt, no rotation, the refusal's stopDetails kept",

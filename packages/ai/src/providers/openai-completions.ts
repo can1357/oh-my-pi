@@ -823,13 +823,16 @@ function createOpenAICompletionsStreamError(chunk: unknown, provider: string): E
 
 	const parsed = AIError.OpenAIHttpError.parseEnvelope(chunk, undefined);
 	const detail = parsed.detail ?? "Provider returned an in-band OpenAI completions stream error";
-	if (!structuredError) {
-		return new AIError.ProviderResponseError(detail, { provider, kind: "runtime" });
-	}
-	// A refusal code streamed in-band is the provider declining the content,
-	// exactly as the same code in a non-2xx body or a Responses `response.failed`.
+	// A refusal code streamed in-band is the provider declining the content, exactly as the same
+	// code in a non-2xx body or a Responses `response.failed`. This runs BEFORE the unstructured
+	// branch below: a frame carrying its code at the root rather than inside an `error` object is
+	// still a refusal, and returning a generic error first lost the code, the exit status and the
+	// refusal retry allowance on this wire alone while the other three reported it correctly.
 	if (parsed.code !== undefined && AIError.isContentPolicyRefusal(parsed.code, parsed.detail)) {
 		return new AIError.ProviderRefusalError(parsed.code, parsed.detail || "no message", { provider });
+	}
+	if (!structuredError) {
+		return new AIError.ProviderResponseError(detail, { provider, kind: "runtime" });
 	}
 
 	const typeValue = Reflect.get(error, "type");

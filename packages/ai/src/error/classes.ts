@@ -127,24 +127,48 @@ export function wrappedErrorEnvelope(error: object, depth = 0): object | undefin
 /**
  * Which object a reader should take an error out of, given a parsed response body.
  *
- * The `error` member resolved to its innermost envelope, or **the body itself** when it carries no
- * `error` object but does carry a machine code of its own — the flat `{ code, message }` shape
- * compat hosts return, which the shared in-band probe has always accepted and which three readers
- * of a non-2xx body discarded, so the same refusal was a refusal in band and three spent
- * credentials over HTTP. `undefined` when the body carries no error at all.
+ * This is the single answer for a whole body, as {@link wrappedErrorEnvelope} is for one value,
+ * and it exists because every round of fixing this class found the error in one more position
+ * than the previous round had enumerated. The positions, in precedence order:
  *
- * The root only counts when it carries a `code` or `type` **string**: an ordinary success body has
- * neither, so this cannot mistake one for a failure.
+ * 1. **the body root**, when it carries a `code` or `type` string of its own — the flat shape
+ *    compat hosts return. An `error` field beside such a code is a diagnostic, not the envelope,
+ *    exactly as one level down; reading the diagnostic discarded the refusal and spent every
+ *    stored credential;
+ * 2. **`error`**, resolved to its innermost envelope;
+ * 3. **`response.error`** and **`response.status_details.error`** — the Responses-shaped failure,
+ *    which arrives in band on one wire and as a non-2xx body on another. Readers that knew those
+ *    positions in band did not know them over HTTP, so the same bytes were a refusal one way and
+ *    a rotation through every credential the other.
+ *
+ * A code counts only when it is a **string**: a number there is a status wearing the field's name,
+ * and an ordinary success body carries neither, so this cannot mistake one for a failure.
+ * `undefined` when the body carries no error at all.
  */
 export function responseErrorEnvelope(bodyJson: unknown): object | undefined {
 	if (typeof bodyJson !== "object" || bodyJson === null || Array.isArray(bodyJson)) return undefined;
+	const rootCode = Reflect.get(bodyJson, "code");
+	const rootType = Reflect.get(bodyJson, "type");
+	if (typeof rootCode === "string" || typeof rootType === "string") return bodyJson;
 	const error: unknown = Reflect.get(bodyJson, "error");
 	if (typeof error === "object" && error !== null && !Array.isArray(error)) {
 		return wrappedErrorEnvelope(error) ?? error;
 	}
-	const rootCode = Reflect.get(bodyJson, "code");
-	const rootType = Reflect.get(bodyJson, "type");
-	return typeof rootCode === "string" || typeof rootType === "string" ? bodyJson : undefined;
+	const response: unknown = Reflect.get(bodyJson, "response");
+	if (typeof response !== "object" || response === null || Array.isArray(response)) return undefined;
+	const responseError: unknown = Reflect.get(response, "error");
+	if (typeof responseError === "object" && responseError !== null && !Array.isArray(responseError)) {
+		return wrappedErrorEnvelope(responseError) ?? responseError;
+	}
+	const statusDetails: unknown = Reflect.get(response, "status_details");
+	if (typeof statusDetails !== "object" || statusDetails === null || Array.isArray(statusDetails)) {
+		return undefined;
+	}
+	const detailsError: unknown = Reflect.get(statusDetails, "error");
+	if (typeof detailsError === "object" && detailsError !== null && !Array.isArray(detailsError)) {
+		return wrappedErrorEnvelope(detailsError) ?? detailsError;
+	}
+	return undefined;
 }
 
 /** Non-2xx response from the Anthropic API. */
