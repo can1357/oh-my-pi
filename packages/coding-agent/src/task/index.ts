@@ -227,11 +227,16 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		asyncGuidance: options.asyncGuidance,
 	});
 }
-function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
+function createTaskModeError(text: string, mayHaveLaunched: boolean): AgentToolResult<TaskToolDetails> {
 	return {
 		content: [{ type: "text", text }],
 		isError: true,
-		details: { projectAgentsDir: null, results: [], totalDurationMs: 0 },
+		details: {
+			projectAgentsDir: null,
+			results: [],
+			totalDurationMs: 0,
+			...(!mayHaveLaunched ? { dispatchOutcome: "rejected-before-dispatch" as const } : {}),
+		},
 	};
 }
 
@@ -821,6 +826,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	};
 	/** Streamed calls' speculative launches, keyed by tool-call id until dispatch adopts or discards them. */
 	readonly #launchSessions = new Map<string, TaskLaunchSession>();
+	// Keep only call IDs, not closed sessions: a discarded speculative run may
+	// already have dispatched, and reused IDs must remain conservative.
+	readonly #speculativeCallIds = new Set<string>();
 	readonly #launcher: TaskLauncher = {
 		spawns: args => {
 			const plan = planSpawns(
@@ -846,6 +854,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				if (!cfgTaskSpeculativeLaunch.get(this.session.settings) || !this.#isBatchEnabled()) return undefined;
 				if (!context.coordinator.authorizeLaunch) return undefined;
 				const id = context.parentToolCallId;
+				this.#speculativeCallIds.add(id);
 				const session = new TaskLaunchSession({
 					sink: context.coordinator,
 					tool: this,
@@ -1126,6 +1135,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
 	): Promise<AgentToolResult<TaskToolDetails>> {
+		const mayHaveLaunched = launchSession !== undefined || this.#speculativeCallIds.has(toolCallId);
 		// Schema defaults fill `agent` for model calls, but internal callers
 		// and stale transcripts can bypass arktype. `spawnParamsFor` resolves each
 		// item's agent type against the session's actual default agent.
@@ -1140,26 +1150,30 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			this.session.settings,
 		);
 		if (typeof plan === "string") {
-			return createTaskModeError(plan);
+			return createTaskModeError(plan, mayHaveLaunched);
 		}
 		const { params } = plan;
 		const spawnItems: ResolvedTaskItem[] = [];
 		try {
 			for (const item of plan.items) spawnItems.push(await resolveTaskFile(this.session, item));
 		} catch (error) {
-			return createTaskModeError(error instanceof Error ? error.message : String(error));
+			return createTaskModeError(error instanceof Error ? error.message : String(error), mayHaveLaunched);
 		}
 		const normalizedSpawnParams = spawnItems.map(item => spawnParamsFor(params, item, defaultAgent));
 		const evalToolNames = spawnItems.flatMap(item => item.tools ?? []);
 		if (evalToolNames.length > 0) {
 			if (this.session.getPlanModeState?.()?.enabled === true) {
-				return createTaskModeError("Task execution failed: Eval-defined tools are unavailable in plan mode.");
+				return createTaskModeError(
+					"Task execution failed: Eval-defined tools are unavailable in plan mode.",
+					mayHaveLaunched,
+				);
 			}
 			try {
 				await describeEvalTools(this.session, evalToolNames, signal);
 			} catch (error) {
 				return createTaskModeError(
 					`Task execution failed: ${error instanceof Error ? error.message : String(error)}`,
+					mayHaveLaunched,
 				);
 			}
 		}
@@ -1180,7 +1194,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			.filter((failure): failure is { index: number; error: string } => failure !== undefined);
 		if (preflightFailures.length > 0) {
 			if (!batchEnabled) {
-				return createTaskModeError(`Task execution failed: ${preflightFailures[0]!.error}`);
+				return createTaskModeError(`Task execution failed: ${preflightFailures[0]!.error}`, mayHaveLaunched);
 			}
 			return createTaskModeError(
 				preflightFailures
@@ -1189,6 +1203,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						return `Task ${item.name?.trim() || `#${index + 1}`} failed preflight: ${error}`;
 					})
 					.join("\n"),
+				mayHaveLaunched,
 			);
 		}
 		const policies = preflights.map(preflight => preflight.policy!);

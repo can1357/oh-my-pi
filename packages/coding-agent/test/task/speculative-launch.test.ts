@@ -209,7 +209,7 @@ describe("task speculative launch", () => {
 	});
 
 	it("aborts launched agents when the finished call is invalid", async () => {
-		const { session } = await openSession();
+		const { tool, session } = await openSession();
 		session.update(toolCall, alphaClosed);
 		await spawn("Alpha").started.promise;
 
@@ -226,6 +226,20 @@ describe("task speculative launch", () => {
 
 		await spawn("Alpha").aborted.promise;
 		expect([...startedIds]).toEqual(["Alpha"]);
+		const result = await tool.execute(toolCall.id, {
+			context: "ctx",
+			tasks: [
+				{ name: "Alpha", task: "Do A." },
+				{ name: "alpha", task: "dup" },
+			],
+		});
+		expect(result.isError).toBe(true);
+		expect(result.details?.dispatchOutcome).toBeUndefined();
+		const later = await tool.execute("independent-call", {
+			context: "ctx",
+			tasks: [{ name: "Missing", agent: "missing", task: "Work." }],
+		});
+		expect(later.details?.dispatchOutcome).toBe("rejected-before-dispatch");
 	});
 
 	it("aborts launched agents when finished items differ from what launched", async () => {
