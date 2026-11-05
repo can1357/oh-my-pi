@@ -317,6 +317,26 @@ describe("service-tier capacity refusals", () => {
 		expect(sent.map(entry => entry.model)).toEqual(["gpt-6.1-sol", "gpt-6.1-sol"]);
 	});
 
+	it("responses: an onPayload hook cannot restate the refused route after a repair", async () => {
+		// The hook is handed the model row, whose id is still the tier one, so a
+		// hook that echoes it back would undo the recovery on every rebuilt
+		// request — and the one-shot guard is already spent by then.
+		const { fetch, sent } = recordingFetch(entry => {
+			if (entry.model.endsWith("-flex")) return tierUnavailable();
+			if (sent.length === 2) return strictToolsRejection();
+			return responsesOk();
+		});
+		const message = await collect(
+			streamOpenAIResponses(
+				responsesModel("gpt-6.1-sol-flex"),
+				{ ...context, tools: [echoTool] },
+				{ apiKey: "k", fetch, onPayload: payload => ({ ...(payload as object), model: "gpt-6.1-sol-flex" }) },
+			),
+		);
+		expect(message.stopReason).toBe("stop");
+		expect(sent.map(entry => entry.model)).toEqual(["gpt-6.1-sol-flex", "gpt-6.1-sol", "gpt-6.1-sol"]);
+	});
+
 	it("factory-droid: its OpenAI-wire tier routes recover on the standard peer too", async () => {
 		// Factory delegates `gpt-*-ultrafast` to the Responses streamer, so the
 		// recovery reaches a real public adapter with a catalog-declared tier
@@ -333,6 +353,6 @@ describe("service-tier capacity refusals", () => {
 		}).result();
 		expect(message.stopReason).toBe("stop");
 		expect(sent.map(entry => entry.model)).toEqual(["gpt-6.1-sol-ultrafast", "gpt-6.1-sol"]);
-		expect(sent[1].serviceTier).toBeUndefined();
+		expect(sent[1]?.serviceTier).toBeUndefined();
 	});
 });

@@ -898,6 +898,11 @@ const streamOpenAIResponsesOnce = (
 				const replacementPayload = await options?.onPayload?.(requestParams, model);
 				const payload =
 					replacementPayload !== undefined ? (replacementPayload as OpenAIResponsesSamplingParams) : requestParams;
+				// A hook may hand back a body that restates the refused route — it is
+				// handed the model row, whose id is still the tier one. Re-aim before
+				// the effort key is derived from the payload's own wire id, so the
+				// hook cannot undo a recovery it knows nothing about.
+				reaimForServiceTierCapacity(payload);
 				applyReasoningEffortFallbackForRequest(payload);
 				return payload;
 			};
@@ -1227,7 +1232,6 @@ const streamOpenAIResponsesOnce = (
 							currentParams.store = !zdrRejection;
 							reaimForServiceTierCapacity(currentParams);
 							const retryParams = await applyPayloadReplacement(currentParams);
-							reaimForServiceTierCapacity(retryParams);
 							chained = { params: retryParams };
 							activeRawRequestDump.body = retryParams;
 							activeParams = currentParams;
