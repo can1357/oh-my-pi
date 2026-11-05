@@ -227,11 +227,19 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		asyncGuidance: options.asyncGuidance,
 	});
 }
-function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
+function createTaskModeError(
+	text: string,
+	dispatchOutcome: TaskToolDetails["dispatchOutcome"],
+): AgentToolResult<TaskToolDetails> {
 	return {
 		content: [{ type: "text", text }],
 		isError: true,
-		details: { projectAgentsDir: null, results: [], totalDurationMs: 0 },
+		details: {
+			projectAgentsDir: null,
+			results: [],
+			totalDurationMs: 0,
+			...(dispatchOutcome ? { dispatchOutcome } : {}),
+		},
 	};
 }
 
@@ -821,6 +829,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	};
 	/** Streamed calls' speculative launches, keyed by tool-call id until dispatch adopts or discards them. */
 	readonly #launchSessions = new Map<string, TaskLaunchSession>();
+	readonly #activeLaunchSessions = new Map<string, Set<TaskLaunchSession>>();
+	// IDs can be reused or dispatched concurrently, including after a discarded
+	// session. Never consume this evidence. Saturate instead of evicting it:
+	// after the cap, absence of an ID is no longer proof that it never launched.
+	readonly #speculativeCallIds = new Set<string>();
+	#speculativeHistorySaturated = false;
 	readonly #launcher: TaskLauncher = {
 		spawns: args => {
 			const plan = planSpawns(
@@ -852,9 +866,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					launcher: this.#launcher,
 					onClose: () => {
 						if (this.#launchSessions.get(id) === session) this.#launchSessions.delete(id);
+						const active = this.#activeLaunchSessions.get(id);
+						active?.delete(session);
+						if (active?.size === 0) this.#activeLaunchSessions.delete(id);
 					},
 				});
 				this.#launchSessions.set(id, session);
+				const active = this.#activeLaunchSessions.get(id) ?? new Set<TaskLaunchSession>();
+				active.add(session);
+				this.#activeLaunchSessions.set(id, active);
 				return session;
 			},
 		},
@@ -1053,6 +1073,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			cfgAsyncEnabled.get(this.session.settings) && this.session.asyncJobManager !== undefined && !blocking;
 		const agentId = await this.#outputManager().allocate(spawn.name?.trim() || generateTaskName());
 		if (signal.aborted) return undefined;
+		if (this.#speculativeCallIds.size < 1024) this.#speculativeCallIds.add(toolCallId);
+		else if (!this.#speculativeCallIds.has(toolCallId)) this.#speculativeHistorySaturated = true;
 		return this.#launch({ toolCallId, params: spawn, index, agentId, detached });
 	}
 
@@ -1126,6 +1148,18 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
 	): Promise<AgentToolResult<TaskToolDetails>> {
+		const reject = (text: string): AgentToolResult<TaskToolDetails> => {
+			// Stop pending starts before inspecting launch evidence, including starts
+			// still awaiting authorization or preflight.
+			launchSession?.discard("task call rejected before dispatch");
+			const dispatchOutcome =
+				this.#speculativeHistorySaturated ||
+				this.#speculativeCallIds.has(toolCallId) ||
+				this.#activeLaunchSessions.has(toolCallId)
+					? undefined
+					: "rejected-before-dispatch";
+			return createTaskModeError(text, dispatchOutcome);
+		};
 		// Schema defaults fill `agent` for model calls, but internal callers
 		// and stale transcripts can bypass arktype. `spawnParamsFor` resolves each
 		// item's agent type against the session's actual default agent.
@@ -1140,27 +1174,25 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			this.session.settings,
 		);
 		if (typeof plan === "string") {
-			return createTaskModeError(plan);
+			return reject(plan);
 		}
 		const { params } = plan;
 		const spawnItems: ResolvedTaskItem[] = [];
 		try {
 			for (const item of plan.items) spawnItems.push(await resolveTaskFile(this.session, item));
 		} catch (error) {
-			return createTaskModeError(error instanceof Error ? error.message : String(error));
+			return reject(error instanceof Error ? error.message : String(error));
 		}
 		const normalizedSpawnParams = spawnItems.map(item => spawnParamsFor(params, item, defaultAgent));
 		const evalToolNames = spawnItems.flatMap(item => item.tools ?? []);
 		if (evalToolNames.length > 0) {
 			if (this.session.getPlanModeState?.()?.enabled === true) {
-				return createTaskModeError("Task execution failed: Eval-defined tools are unavailable in plan mode.");
+				return reject("Task execution failed: Eval-defined tools are unavailable in plan mode.");
 			}
 			try {
 				await describeEvalTools(this.session, evalToolNames, signal);
 			} catch (error) {
-				return createTaskModeError(
-					`Task execution failed: ${error instanceof Error ? error.message : String(error)}`,
-				);
+				return reject(`Task execution failed: ${error instanceof Error ? error.message : String(error)}`);
 			}
 		}
 		const resolvedAgents = normalizedSpawnParams.map(spawn => spawn.agent ?? defaultAgent);
@@ -1180,9 +1212,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			.filter((failure): failure is { index: number; error: string } => failure !== undefined);
 		if (preflightFailures.length > 0) {
 			if (!batchEnabled) {
-				return createTaskModeError(`Task execution failed: ${preflightFailures[0]!.error}`);
+				return reject(`Task execution failed: ${preflightFailures[0]!.error}`);
 			}
-			return createTaskModeError(
+			return reject(
 				preflightFailures
 					.map(({ index, error }) => {
 						const item = spawnItems[index]!;

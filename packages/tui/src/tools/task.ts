@@ -2576,6 +2576,8 @@ export interface TaskToolDetails {
 	projectAgentsDir: string | null;
 	results: SingleResult[];
 	totalDurationMs: number;
+	/** Present only when the entire call was rejected before any child could be dispatched. Absence is not evidence of dispatch or non-dispatch. */
+	dispatchOutcome?: "rejected-before-dispatch";
 	/** Aggregated usage across all subagents. */
 	usage?: Usage;
 	outputPaths?: string[];
