@@ -68,7 +68,7 @@ export interface MCPServer {
 		prompt?: string;
 	};
 	/** Transport type */
-	transport?: "stdio" | "sse" | "http";
+	transport?: "stdio" | "sse" | "http" | "streamable-http";
 	/** Source metadata (added by loader) */
 	_source: SourceMeta;
 }
@@ -120,7 +120,10 @@ export const mcpCapability = defineCapability<MCPServer>({
 		if (server.transport === "stdio" && !server.command) {
 			return "stdio transport requires command field";
 		}
-		if ((server.transport === "http" || server.transport === "sse") && !server.url) {
+		if (
+			(server.transport === "http" || server.transport === "streamable-http" || server.transport === "sse") &&
+			!server.url
+		) {
 			return "http/sse transport requires url field";
 		}
 

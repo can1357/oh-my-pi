@@ -29,6 +29,19 @@ export const cfgBrowserCdpUrl = register({
 	},
 });
 
+export const cfgBrowserChromeMcp = register({
+	id: "browser.chromeMcp",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Grep & Browser",
+		label: "Chrome MCP Bridge",
+		description:
+			"At session start, register the local chrome-mcp bridge (127.0.0.1:12306) as the `chrome` MCP server when it is running. The user's real Chrome then becomes the primary browser; the built-in browser prelude stays as an isolated Chrome for Testing fallback. A missing bridge is silently skipped.",
+	},
+});
+
 export const cfgBrowserRelay = register({
 	id: "browser.relay",
 	type: "boolean",

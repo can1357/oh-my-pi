@@ -7,6 +7,7 @@
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
 import { mcpCapability } from "../capability/mcp";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
+import { CHROME_MCP_SERVER_NAME, discoverChromeMcp } from "./auto-chrome-mcp";
 import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
 import { readMCPConfigFile } from "./config-writer";
@@ -20,6 +21,16 @@ export interface LoadMCPConfigsOptions {
 	filterExa?: boolean;
 	/** Whether to filter out browser MCP servers when the built-in browser capability is enabled (default: false) */
 	filterBrowser?: boolean;
+	/**
+	 * Register a live chrome-mcp bridge as the `chrome` server (default: false).
+	 * The probe is local-only and silently skipped when the bridge is not running.
+	 */
+	chromeMcp?: boolean;
+	/**
+	 * @internal Probe endpoint override for tests; loopback only.
+	 * Defaults to the local bridge endpoint.
+	 */
+	chromeMcpUrl?: string;
 	/** Session-local extension roots for post-startup rediscovery (explicit + mode + configured). */
 	extensionRoots?: EffectiveExtensionRoots;
 }
@@ -67,6 +78,17 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 		const config: MCPServerConfig = {
 			...shared,
 			type: "http" as const,
+			url: server.url ?? "",
+		};
+		if (server.headers) config.headers = server.headers;
+		if (server.headerPolicy) config.headerPolicy = server.headerPolicy;
+		return config;
+	}
+
+	if (transport === "streamable-http") {
+		const config: MCPServerConfig = {
+			...shared,
+			type: "streamable-http" as const,
 			url: server.url ?? "",
 		};
 		if (server.headers) config.headers = server.headers;
@@ -179,6 +201,21 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 		sources = browserResult.sources;
 	}
 
+	// Auto-discovered after every filter: chrome-mcp is the base browser, not a
+	// user-configured browser-automation server the filter is meant to shadow.
+	// An existing `chrome` entry owns the name — never probe for or overwrite it —
+	// and the user-level disabled list still wins. The probe is bounded and
+	// local-only; a missing bridge registers nothing.
+	if (options?.chromeMcp && !(CHROME_MCP_SERVER_NAME in configs) && !disabledServers.has(CHROME_MCP_SERVER_NAME)) {
+		const discovered = await discoverChromeMcp(
+			options.chromeMcpUrl === undefined ? {} : { url: options.chromeMcpUrl },
+		);
+		if (discovered) {
+			configs[discovered.name] = discovered.config;
+			sources[discovered.name] = discovered.source;
+		}
+	}
+
 	return { configs, exaApiKeys, sources };
 }
 
@@ -196,7 +233,7 @@ export function isExaMCPServer(name: string, config: MCPServerConfig): boolean {
 	}
 
 	// Check by URL for HTTP/SSE servers
-	if (config.type === "http" || config.type === "sse") {
+	if (config.type === "http" || config.type === "streamable-http" || config.type === "sse") {
 		const httpConfig = config as { url?: string };
 		if (httpConfig.url && EXA_MCP_URL_PATTERN.test(httpConfig.url)) {
 			return true;
@@ -219,7 +256,7 @@ export function isExaMCPServer(name: string, config: MCPServerConfig): boolean {
  */
 export function extractExaApiKey(config: MCPServerConfig): string | undefined {
 	// Check URL for HTTP/SSE servers
-	if (config.type === "http" || config.type === "sse") {
+	if (config.type === "http" || config.type === "streamable-http" || config.type === "sse") {
 		const httpConfig = config as { url?: string };
 		if (httpConfig.url) {
 			const match = EXA_API_KEY_PATTERN.exec(httpConfig.url);
@@ -258,7 +295,7 @@ const NATIVE_EXA_MCP_TOOLS: Record<string, true> = { web_search_exa: true };
  */
 function getRequestedExaMcpTools(config: MCPServerConfig): string[] | null {
 	const raw = (() => {
-		if (config.type === "http" || config.type === "sse") {
+		if (config.type === "http" || config.type === "streamable-http" || config.type === "sse") {
 			const httpConfig = config as { url?: string };
 			if (!httpConfig.url) return undefined;
 			try {
@@ -355,7 +392,7 @@ export function validateServerConfig(name: string, config: MCPServerConfig): str
 		if (!stdioConfig.command) {
 			errors.push(`Server "${name}": stdio server requires "command" field`);
 		}
-	} else if (serverType === "http" || serverType === "sse") {
+	} else if (serverType === "http" || serverType === "streamable-http" || serverType === "sse") {
 		const httpConfig = config as { url?: string };
 		if (!httpConfig.url) {
 			errors.push(`Server "${name}": ${serverType} server requires "url" field`);
@@ -413,7 +450,7 @@ export function isBrowserMCPServer(name: string, config: MCPServerConfig): boole
 	}
 
 	// Check by URL for HTTP/SSE servers
-	if (config.type === "http" || config.type === "sse") {
+	if (config.type === "http" || config.type === "streamable-http" || config.type === "sse") {
 		const httpConfig = config as { url?: string };
 		if (httpConfig.url && BROWSER_MCP_URL_PATTERN.test(httpConfig.url)) {
 			return true;

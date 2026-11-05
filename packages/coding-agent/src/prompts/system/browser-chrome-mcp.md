@@ -1,0 +1,1 @@
+The user's real Chrome is the primary browser: prefer the `chrome_*` tools from the `chrome` MCP server (chrome-mcp) for browsing, navigation, and page interaction. The built-in `browser` prelude drives an isolated Chrome for Testing instance; use it only as a fallback for headless automation or when the `chrome_*` tools cannot perform the task.

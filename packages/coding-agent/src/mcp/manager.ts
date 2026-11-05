@@ -60,7 +60,7 @@ import type {
 	MCPToolDefinition,
 	MCPTransport,
 } from "./types";
-import { MCPNotificationMethods } from "./types";
+import { MCPNotificationMethods, isRemoteMCPConfig } from "./types";
 
 export type McpCatalogChangeEvent = { serverName: string; kind: "resources" | "prompts" };
 export type MCPConfigLoader = (cwd: string, options?: LoadMCPConfigsOptions) => Promise<LoadMCPConfigsResult>;
@@ -222,6 +222,8 @@ export interface MCPDiscoverOptions {
 	filterExa?: boolean;
 	/** Whether to filter out browser MCP servers when the built-in browser capability is enabled (default: false) */
 	filterBrowser?: boolean;
+	/** Register a live chrome-mcp bridge as the `chrome` server (default: false). */
+	chromeMcp?: boolean;
 	/** Session-local extension roots for post-startup rediscovery (explicit + mode + configured). */
 	extensionRoots?: EffectiveExtensionRoots;
 	/** Called when MCP server connection state changes. */
@@ -708,6 +710,7 @@ export class MCPManager implements MCPManagerApi {
 				enableProjectConfig: options?.enableProjectConfig,
 				filterExa: options?.filterExa,
 				filterBrowser: options?.filterBrowser,
+				chromeMcp: options?.chromeMcp,
 				extensionRoots: options?.extensionRoots,
 			});
 		} catch (error) {
@@ -938,7 +941,7 @@ export class MCPManager implements MCPManagerApi {
 					) {
 						connection.transport.onAuthError = async () => {
 							const refreshed = await this.#resolveAuthConfig(config, { forceRefresh: true });
-							if (refreshed.type === "http" || refreshed.type === "sse") {
+							if (isRemoteMCPConfig(refreshed)) {
 								return refreshed.headers ?? null;
 							}
 							return null;
@@ -1679,7 +1682,7 @@ export class MCPManager implements MCPManagerApi {
 			// Stdio stops at the ladder (see MCPReconnectPolicy). A server that
 			// never connected is not lost — a startup timeout or a typo'd URL
 			// stays a one-shot failure.
-			if ((config.type === "http" || config.type === "sse") && !this.#lostRemoteServers.has(name)) {
+			if (isRemoteMCPConfig(config) && !this.#lostRemoteServers.has(name)) {
 				this.#lostRemoteServers.set(name, { timer: undefined, delayMs: this.reconnectPolicy.retryBaseMs });
 			}
 			void this.#discardConnection(name, oldConnection).catch(() => {});
@@ -1776,7 +1779,7 @@ export class MCPManager implements MCPManagerApi {
 		if (isAuthRefreshableMCPTransport(connection.transport) && lookupMcpOAuthCredential(this.#authStorage, config)) {
 			connection.transport.onAuthError = async () => {
 				const refreshed = await this.#resolveAuthConfig(config, { forceRefresh: true });
-				if (refreshed.type === "http" || refreshed.type === "sse") {
+				if (isRemoteMCPConfig(refreshed)) {
 					return refreshed.headers ?? null;
 				}
 				return null;
@@ -2120,7 +2123,7 @@ export class MCPManager implements MCPManagerApi {
 				// Stop waiting on abort; a refresh already running finishes so a rotated token is stored, not lost.
 				const refreshResult = await untilAborted(signal, () =>
 					refreshStoredManagedMcpOAuthCredential(authStorage, credentialId, {
-						serverUrl: config.type === "http" || config.type === "sse" ? config.url : undefined,
+						serverUrl: isRemoteMCPConfig(config) ? config.url : undefined,
 						auth,
 						forceRefresh: opts?.forceRefresh,
 						keepCredentialOnRefreshFailure: true,
@@ -2138,7 +2141,7 @@ export class MCPManager implements MCPManagerApi {
 				credential = refreshResult.credential;
 
 				if (credential) {
-					if (resolved.type === "http" || resolved.type === "sse") {
+					if (isRemoteMCPConfig(resolved)) {
 						// Client-generated authorization wins over any configured header
 						// with the same case-insensitive name (Agent Plugins §7.2.1).
 						const headers = { ...resolved.headers };
@@ -2160,7 +2163,7 @@ export class MCPManager implements MCPManagerApi {
 			}
 		}
 
-		if (resolved.type !== "http" && resolved.type !== "sse") {
+		if (!isRemoteMCPConfig(resolved)) {
 			// Literal env values (Agent Plugins §§4.1/9.2) are opaque package data:
 			// no env-name lookup, no `!command` execution, no dropping empty values.
 			if (resolved.env && resolved.envPolicy !== "literal") {

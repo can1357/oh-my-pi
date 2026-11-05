@@ -224,6 +224,43 @@
         }
       ]
     },
+    "streamableHttpServer": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/serverBase"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "url"],
+          "properties": {
+            "enabled": {},
+            "timeout": {},
+            "requestIdFormat": {},
+            "instructions": {},
+            "auth": {},
+            "oauth": {},
+            "type": {
+              "type": "string",
+              "enum": ["streamable-http"],
+              "description": "Stateless Streamable HTTP transport (MCP 2026-07-28). Sends per-request `_meta` envelopes with `Mcp-Method`/`Mcp-Name` headers; endpoints that refuse the modern revision fall back to the 2025 handshake."
+            },
+            "url": {
+              "type": "string",
+              "minLength": 1,
+              "description": "MCP endpoint URL."
+            },
+            "headers": {
+              "$ref": "#/$defs/stringMap",
+              "description": "HTTP headers sent with MCP requests."
+            }
+          },
+          "not": {
+            "required": ["command"]
+          }
+        }
+      ]
+    },
     "sseServer": {
       "allOf": [
         {
@@ -271,6 +308,9 @@
         },
         {
           "$ref": "#/$defs/sseServer"
+        },
+        {
+          "$ref": "#/$defs/streamableHttpServer"
         }
       ]
     }

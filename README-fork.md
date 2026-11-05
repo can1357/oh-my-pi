@@ -63,6 +63,56 @@ What it guarantees:
 The production `omp` on `PATH` (`~/.bun/bin/omp`) is untouched: use `omp` for
 the installed agent and `omp-fork` for this checkout.
 
+## Chrome MCP bridge (base browser)
+
+The fork treats the user's real Chrome as the primary browser through the
+local `mcp-chrome-bridge`: at session start it probes
+`http://127.0.0.1:12306/mcp` (2 s deadline, loopback only) and, when the
+bridge answers, registers it as the `chrome` MCP server with its 81 `chrome_*`
+/ page tools. A missing bridge is skipped silently — no error, no prompt
+notice — and the built-in `browser` prelude stays available as an isolated
+Chrome for Testing fallback. Turn the probe off with the `browser.chromeMcp`
+setting (default on).
+
+Requirements:
+
+- The bridge runtime at `~/.local/share/mcp-chrome-bridge` (deployed from
+  `~/Documents/mcp-chrome-2026`, see the anglicized fork notes). Start it once
+  per login when Chrome does not spawn the native host itself:
+
+  ```bash
+  ~/.local/share/mcp-chrome-bridge/dist/run_host.sh
+  ```
+
+- The `chrome-mcp` extension must be loaded unpacked in the user's Chrome
+  (`chrome://extensions`, Developer mode, Load unpacked from
+  `~/Documents/chrome-mcp-server-2.8.2-chrome`) and be the English build — the
+  bridge serves `tools/list` from its vendored shared catalog, not from the
+  extension. Restart Chrome after swapping extension files; Chrome keeps the
+  old extension in memory.
+
+Regression pair (run after changing the extension or bridge build). Expect 81
+English tools, `serverInfo.version` 2.8.5, and no CJK descriptions:
+
+```bash
+SID=$(curl -sS -X POST http://127.0.0.1:12306/mcp \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -H 'Origin: http://127.0.0.1:12306' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"p","version":"1"}}}' \
+  -D - -o /dev/null | grep -i mcp-session-id | tr -d '\r' | awk '{print $2}')
+curl -sS -X POST http://127.0.0.1:12306/mcp -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' -H 'Origin: http://127.0.0.1:12306' \
+  -H "Mcp-Session-Id: $SID" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+  | grep -c '"name":"'
+```
+
+The bridge exposes the 2025-06-18 revision at `/mcp` and the stateless
+2026-07-28 revision at `/mcp-new`; the `streamable-http` transport negotiates
+the era itself (falling back to `initialize` when the endpoint refuses
+`server/discover`), so a config can point at either revision. Full setup
+history and gotchas: `~/Documents/llmops/agents-memory/browser-mcp-chrome.md`.
+
 ## Rebase ritual
 
 1. Sync the mirror (fast-forward only) and push it:
