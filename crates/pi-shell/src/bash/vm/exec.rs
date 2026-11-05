@@ -57,8 +57,11 @@ pub enum Flow {
 	},
 	/// `exit n` (also a fatal expansion error).
 	Exit(i32),
-	/// An expansion or arithmetic error: abandon the current top-level command.
+	/// An expansion error: abandon the current top-level command.
 	Discard(i32),
+	/// An arithmetic error in a word (`: $((7/0))`): abandoned the same
+	/// way, but `errexit` does not raise bash's `ERREXIT` in its place.
+	DiscardArith(i32),
 }
 
 /// Run vproc `vp` for up to `slice` ops; stops early when it parks, a
@@ -299,7 +302,10 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 		// An `exit N` in the cancel trap is `exit_shell`'s (the EXIT trap, then
 		// status N, as bash).
 		let cancel_transfer = cancellation.is_some()
-			&& matches!(flow, Flow::Return(_) | Flow::Abort(_) | Flow::Discard(_));
+			&& matches!(
+				flow,
+				Flow::Return(_) | Flow::Abort(_) | Flow::Discard(_) | Flow::DiscardArith(_)
+			);
 		let failing = !ignore_errexit && vp.status != 0 && matches!(flow, Flow::Next | Flow::Jump(_));
 		let failed_command = failing
 			&& match op.code {
@@ -429,7 +435,9 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			Flow::Break { n, cont } => break_loops(k, vp, cx, n, cont, op),
 			Flow::Exit(status) if unit.mode.dialect() == Dialect::Zsh => zsh_exit(k, vp, cx, status),
 			Flow::Exit(status) => exit_shell(k, vp, cx, status),
-			Flow::Discard(status) if unit.mode.dialect() == Dialect::Zsh => {
+			Flow::Discard(status) | Flow::DiscardArith(status)
+				if unit.mode.dialect() == Dialect::Zsh =>
+			{
 				zsh_discard(k, vp, cx, status);
 			},
 			// bash's `parse_and_execute` hands the jump on in a subshell
@@ -439,14 +447,19 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				let status = jump_status(k, cx, vp, Jump::Discard(status));
 				exit_shell(k, vp, cx, status);
 			},
+			Flow::DiscardArith(status) if super::nested::in_subshell(cx.store, vp) => {
+				let status = jump_status(k, cx, vp, Jump::Arith(status));
+				exit_shell(k, vp, cx, status);
+			},
 			// With `errexit` on the jump is bash's `ERREXIT`, which no
 			// `parse_and_execute` carries on from: the shell ends with the
-			// failure status wherever the jump lands.
-			Flow::Discard(status) if errexit_on(k, cx, vp) => {
+			// failure status wherever the jump lands. An arithmetic error
+			// is not one of these ([`Jump::Arith`]).
+			Flow::Discard(status) if errexit_jump(k, cx, vp) => {
 				let status = jump_status(k, cx, vp, Jump::Discard(status));
 				exit_shell(k, vp, cx, status);
 			},
-			Flow::Discard(status) => {
+			Flow::Discard(status) | Flow::DiscardArith(status) => {
 				vp.status = status;
 				// bash's `parse_and_execute` (the script, `-c`, `eval`, `.`,
 				// a trap action) catches the jump: the innermost script goes
@@ -2093,13 +2106,17 @@ enum Jump {
 	/// bash's `FORCE_EOF`: `${x?}`, `set -u`, a posix shell's assignment
 	/// error. No `parse_and_execute` catches it.
 	Fatal,
-	/// bash's `DISCARD` out of a place that cannot carry on (a subshell):
-	/// a bad substitution or an arithmetic error in a word.
+	/// bash's `DISCARD` of an expansion that cannot carry on (a bad
+	/// substitution). `errexit` raises `ERREXIT` in its place.
 	Discard(i32),
+	/// An arithmetic error in a word (`: $((7/0))`). It lands like a
+	/// `Discard`, and `eval` and `.` catch it the same way, but `errexit`
+	/// never raises `ERREXIT` in its place.
+	Arith(i32),
 	/// An arithmetic error in an assignment (`A[bad!]=x`, `declare -i I;
 	/// I=bad!`). It leaves every `eval`, `.` and function like a fatal
-	/// error, but it keeps the status of the place it lands, and
-	/// `errexit` never raises `ERREXIT` in its place.
+	/// error, no child's own catch answers it, and `errexit` never raises
+	/// `ERREXIT` in its place.
 	Assign(i32),
 }
 
@@ -2190,7 +2207,10 @@ fn catch(cx: &mut Cx<'_>, vp: &Vproc) -> Catch {
 	if !super::nested::in_subshell(cx.store, vp) {
 		return Catch::Shell;
 	}
-	vp.fork_landing.map_or(Catch::Own, Catch::Fork)
+	// Only a lone simple command the shell forked before it expanded
+	// anything has no catch of its own; every other child keeps its
+	// landing for [`Jump::Assign`] alone.
+	vp.fork_landing.filter(|landing| landing.simple).map_or(Catch::Own, Catch::Fork)
 }
 
 /// The status `vp` exits with after a jump of kind `jump`: where the jump
@@ -2200,13 +2220,29 @@ fn catch(cx: &mut Cx<'_>, vp: &Vproc) -> Catch {
 fn jump_status(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, jump: Jump) -> i32 {
 	let discarded = match jump {
 		Jump::Fatal => None,
-		Jump::Discard(status) | Jump::Assign(status) => Some(status),
+		Jump::Discard(status) | Jump::Arith(status) | Jump::Assign(status) => Some(status),
 	};
+	// An arithmetic error in an assignment is the one jump no child's own
+	// catch answers: it takes the status of the place its parent's jump
+	// would have landed, a subshell and a command substitution included.
+	let assign = matches!(jump, Jump::Assign(_));
 	let landed = match catch(cx, vp) {
 		Catch::ExitTrap(saved) => saved,
 		// The nested trap's status, which the EXIT trap's own catch would
-		// have replaced with the status it saved.
+		// have replaced with the status it saved. An assignment's jump
+		// leaves the nested action as a fatal error does.
+		Catch::TrapInExitTrap(status) if assign => status,
 		Catch::TrapInExitTrap(status) => discarded.unwrap_or(status),
+		// An assignment's jump leaves a child of any kind with the status
+		// of the place its parent's jump would have landed; only a trap
+		// action the child runs itself (above) answers it.
+		_ if assign && vp.fork_landing.is_some() => {
+			let landing = vp.fork_landing.expect("checked");
+			if landing.simple && landing.exit_trap {
+				vp.own_traps = vp.own_traps.with(TrapKey::Exit);
+			}
+			i32::from(landing.assign)
+		},
 		// `run_one_command`: 127 for `FORCE_EOF`, 1 for `DISCARD`.
 		Catch::Shell if discarded.is_some() => 1,
 		Catch::Shell => {
@@ -2231,55 +2267,93 @@ fn jump_status(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, jump: Jump) -> i
 	// `FORCE_EOF` or `DISCARD`, and every catch answers that with the
 	// failure status: `run_exit_trap` and `run_one_command` both return
 	// `last_command_exit_value`, and a child the shell forked before it
-	// expanded anything carries it too. An arithmetic error in an
-	// assignment is not one of these ([`Jump::Assign`]).
-	if matches!(jump, Jump::Fatal | Jump::Discard(_)) && errexit_on(k, cx, vp) {
+	// expanded anything carries it too. An arithmetic error is not one of
+	// these ([`Jump::Arith`], [`Jump::Assign`]).
+	if matches!(jump, Jump::Fatal | Jump::Discard(_)) && errexit_jump(k, cx, vp) {
 		return 1;
 	}
 	landed
 }
 
+/// Whether `errexit` raises bash's `ERREXIT` for a jump out of where `vp`
+/// is now. bash's `builtin_ignoring_errexit`: an `eval` or a `.` whose own
+/// status is ignored (a condition, `&&`, `||`, `!`) turns `errexit` off
+/// for everything it runs, which a function's ignored status does not do.
+fn errexit_jump(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
+	let ignored = vp.frames.iter().any(|frame| {
+		frame.ignore_errexit
+			&& matches!(
+				frame.kind,
+				FrameKind::Script { what: ScriptKind::Eval | ScriptKind::Source, .. }
+			)
+	});
+	!ignored && errexit_on(k, cx, vp)
+}
+
 /// A forked lone simple command ([`Vproc::fork_landing`]) dispatches its
 /// builtin or function: bash resets the child's traps first, and a builtin
-/// gets a `top_level` of its own (`execute_subshell_builtin_or_function`).
-/// Not for the commands a function it calls runs in turn.
+/// gets a `top_level` of its own (`execute_subshell_builtin_or_function`),
+/// so it stops being the command the shell forked before it expanded
+/// anything. Where an assignment's arithmetic error lands is not its to
+/// answer, so that part of the landing stays. Not for the commands a
+/// function it calls runs in turn.
 pub const fn forked_dispatch(vp: &mut Vproc, builtin: bool) {
 	if vp.frames.len() != 1 {
 		return;
 	}
-	if builtin {
-		vp.fork_landing = None;
-	} else if let Some(landing) = &mut vp.fork_landing {
-		landing.exit_trap = false;
+	if let Some(landing) = &mut vp.fork_landing {
+		if builtin {
+			landing.simple = false;
+		} else {
+			landing.exit_trap = false;
+		}
 	}
 }
 
-/// The landing of a lone simple command `vp` forks now (a pipeline stage
-/// or job, [`Vproc::fork_landing`]).
-fn fork_landing(cx: &mut Cx<'_>, vp: &Vproc) -> Landing {
-	match catch(cx, vp) {
-		Catch::ExitTrap(saved) => {
-			// A status is a byte, as bash's is; the mask makes this exact.
-			let saved = u8::try_from(saved & 0xff).unwrap_or(0);
-			Landing { fatal: saved, discard: Some(saved), exit_trap: false }
+/// The landing a child `vp` forks now keeps ([`Vproc::fork_landing`]).
+/// `simple` is a lone simple command the shell forks before it expands
+/// anything (a pipeline stage or a job), which has no catch of its own;
+/// every other child keeps only where an assignment's arithmetic error
+/// lands, which its own catch does not answer.
+fn fork_landing(cx: &mut Cx<'_>, vp: &Vproc, simple: bool) -> Landing {
+	// A status is a byte, as bash's is; the mask makes this exact.
+	let byte = |status: i32| u8::try_from(status & 0xff).unwrap_or(0);
+	let landing = match catch(cx, vp) {
+		Catch::ExitTrap(saved) => Landing {
+			fatal:     byte(saved),
+			discard:   Some(byte(saved)),
+			assign:    byte(saved),
+			exit_trap: false,
+			simple:    true,
 		},
 		// The child of such a trap lands on that trap's status.
-		Catch::TrapInExitTrap(status) => {
-			let status = u8::try_from(status & 0xff).unwrap_or(0);
-			Landing { fatal: status, discard: Some(status), exit_trap: false }
+		Catch::TrapInExitTrap(status) => Landing {
+			fatal:     byte(status),
+			discard:   Some(byte(status)),
+			assign:    byte(status),
+			exit_trap: false,
+			simple:    true,
 		},
 		Catch::Shell => Landing {
 			fatal:     if shell_command(cx, vp) { 127 } else { 1 },
 			discard:   Some(1),
+			assign:    1,
 			exit_trap: true,
+			simple:    true,
 		},
 		// `vp` runs a function: bash reset its traps before.
 		Catch::Fork(landing) => Landing { exit_trap: false, ..landing },
-		// A subshell runs only the EXIT trap it set itself.
-		Catch::Own => {
-			Landing { fatal: 1, discard: None, exit_trap: vp.own_traps.has(TrapKey::Exit) }
+		// A subshell runs only the EXIT trap it set itself, and hands on
+		// the assignment landing it was given.
+		Catch::Own => Landing {
+			fatal:     1,
+			discard:   None,
+			assign:    vp.fork_landing.map_or(1, |landing| landing.assign),
+			exit_trap: vp.own_traps.has(TrapKey::Exit),
+			simple:    true,
 		},
-	}
+	};
+	Landing { simple, ..landing }
 }
 
 /// Whether the pipeline stage or job body at `entry` is one simple command
@@ -2337,7 +2411,13 @@ pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, sto
 		// A non-interactive posix shell exits on an expansion error (bash's
 		// `posixly_correct && !interactive_shell`), as on a fatal one.
 		Stop::Fail(d) if !posix_exits(k, cx, vp) => {
+			// An arithmetic error is abandoned the same way, but `errexit`
+			// does not raise `ERREXIT` in its place.
+			let arith = matches!(d, Diag::Arith { .. } | Diag::ArithSubscript { .. });
 			k.diag(cx, vp, line, d);
+			if arith {
+				return Flow::DiscardArith(1);
+			}
 			Flow::Discard(1)
 		},
 		Stop::Fail(d) | Stop::Fatal(d) => {
@@ -2470,6 +2550,9 @@ pub fn start_sub(
 				child.trace_base += 1;
 				child
 			};
+			// Its own catch answers every jump but an assignment's
+			// arithmetic error, which lands where the parent's would.
+			child.fork_landing = Some(fork_landing(cx, vp, false));
 			// With `-e` already off in the parent the child sees it off and
 			// `SHELLOPTS` is already right: nothing to reset.
 			if !inherit && state::option(&mut k.root, cx.store, vp, OptId::Errexit).unwrap_or(true) {
@@ -2753,7 +2836,8 @@ pub fn start_procsub(
 			fds.set(sibling, None);
 		}
 	}
-	let child = vp.child(k, cx.store, Arc::clone(unit), entry, fds);
+	let mut child = vp.child(k, cx.store, Arc::clone(unit), entry, fds);
+	child.fork_landing = Some(fork_landing(cx, vp, false));
 	let vpid = child.vpid;
 	// Not a job: its externals stay in the shell's group, without the
 	// terminal.
@@ -4149,11 +4233,12 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					fds.set(0, Some(null.clone()));
 				}
 				let mut child = vp.child(k, cx.store, Arc::clone(unit), info.stages[0].entry, fds);
+				child.fork_landing = Some(fork_landing(cx, vp, false));
 				if info.kind == SpawnKind::Background {
 					let level = stage_level(unit, info.stages[0].entry, true);
 					super::set_subshell_depth(&mut child, super::subshell_depth(vp) + level);
 					if unit.mode.dialect() == Dialect::Bash && forks_simple(unit, info.stages[0].entry) {
-						child.fork_landing = Some(fork_landing(cx, vp));
+						child.fork_landing = Some(fork_landing(cx, vp, true));
 					}
 					// A job of its own: its processes get their own group.
 					super::jobctl::own_job(k, child.vpid);
@@ -4241,9 +4326,8 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					let mut child = vp.child(k, cx.store, Arc::clone(unit), stage.entry, fds);
 					let level = stage_level(unit, stage.entry, false);
 					super::set_subshell_depth(&mut child, super::subshell_depth(vp) + level);
-					if unit.mode.dialect() == Dialect::Bash && forks_simple(unit, stage.entry) {
-						child.fork_landing = Some(fork_landing(cx, vp));
-					}
+					let simple = unit.mode.dialect() == Dialect::Bash && forks_simple(unit, stage.entry);
+					child.fork_landing = Some(fork_landing(cx, vp, simple));
 					// bash keeps the job list for a `jobs` builtin run as a pipeline
 					// stage (`jobs -p | xargs kill`).
 					if !vp.jobs.is_empty() && runs_jobs(unit, stage.entry) {
@@ -4397,7 +4481,8 @@ fn start_coproc(
 	let mut fds = vp.fds.clone();
 	fds.set(0, Some(FdRef::mem(in_r)));
 	fds.set(1, Some(FdRef::mem(out_w)));
-	let child = vp.child(k, cx.store, Arc::clone(unit), entry, fds);
+	let mut child = vp.child(k, cx.store, Arc::clone(unit), entry, fds);
+	child.fork_landing = Some(fork_landing(cx, vp, false));
 	// A job of its own under job control (never in the foreground).
 	super::jobctl::own_job(k, child.vpid);
 	let vpid = child.vpid;

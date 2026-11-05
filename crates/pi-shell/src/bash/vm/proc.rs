@@ -351,9 +351,17 @@ pub struct Landing {
 	/// After a discarded command (bash's `DISCARD`: an arithmetic error,
 	/// a bad substitution); `None`: the command's own status.
 	pub discard:   Option<u8>,
+	/// After an arithmetic error in an assignment, which no child's own
+	/// catch answers: every child keeps this one, a subshell included.
+	pub assign:    u8,
 	/// The shell landed in runs the EXIT trap the child inherited: bash
 	/// resets a forked child's traps only once its words are expanded.
 	pub exit_trap: bool,
+	/// The child is a lone simple command the shell forked before it
+	/// expanded anything, so it has no catch of its own at all. A
+	/// subshell, a command substitution and a pipeline stage that is not
+	/// one simple command have their own, and keep only `assign`.
+	pub simple:    bool,
 }
 
 /// `getopts` progress between calls (bash's `sh_optind`, `sh_curopt` and

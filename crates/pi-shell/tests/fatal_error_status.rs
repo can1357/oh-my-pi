@@ -370,3 +370,85 @@ async fn round_three_rows() {
 	])
 	.await;
 }
+
+/// Round-4 review rows, each the output and status of Bash 5.2.21 and 5.3.0
+/// for the same `-c` string. `errexit` raises bash's `ERREXIT` in place of a
+/// fatal error or a discarded expansion, but not inside an `eval` or a `.`
+/// whose own status is ignored (`builtin_ignoring_errexit`), and never for
+/// an arithmetic error: in a word it is a discard `eval` and `.` catch, and
+/// in an assignment it is a jump no `eval`, `.`, function, subshell or
+/// command substitution answers, which keeps the status of the place it
+/// lands.
+#[tokio::test(flavor = "multi_thread")]
+async fn round_four_rows() {
+	check(&[
+		// `eval` and `.` whose status is ignored turn `errexit` off.
+		(
+			r##"set -e; if eval ': ${u?BOOM}'; then echo YES; else echo NO:$?; fi; echo AFTER:$?"##,
+			"",
+			127,
+		),
+		(
+			r##"set -e; if eval ': ${x.y}'; then echo YES; else echo NO:$?; fi; echo AFTER:$?"##,
+			"NO:1\nAFTER:0\n",
+			0,
+		),
+		(
+			r##"set -e; if eval ': $((7/0))'; then echo YES; else echo NO:$?; fi; echo AFTER:$?"##,
+			"NO:1\nAFTER:0\n",
+			0,
+		),
+		(r##"set -e; eval ': ${u?BOOM}' || echo OR:$?; echo AFTER:$?"##, "", 127),
+		// A function's ignored status does not, nor does the condition
+		// itself.
+		(r##"set -e; if : ${u?BOOM}; then echo YES; fi; echo AFTER:$?"##, "", 1),
+		(r##"set -e; f(){ : ${u?BOOM}; }; if f; then echo YES; fi; echo AFTER:$?"##, "", 1),
+		(r##"set -e; f(){ : ${u?BOOM}; }; f || echo OR:$?; echo AFTER:$?"##, "", 1),
+		(
+			r##"set -e; if (: ${u?BOOM}); then echo YES; else echo NO:$?; fi; echo AFTER:$?"##,
+			"NO:1\nAFTER:0\n",
+			0,
+		),
+		// An arithmetic error in a word: a discard `errexit` does not
+		// replace.
+		(r##"trap 'set -e; : $((7/0)); echo AFTER:$?' EXIT; exit 7"##, "", 7),
+		(r##"trap ': $((7/0)); echo AFTER' EXIT; exit 3"##, "", 3),
+		(r##"trap 'trap '"'"': $((7/0))'"'"' DEBUG; :' EXIT; exit 7"##, "", 7),
+		(r##"set -e; : $((7/0)) || echo OR:$?; echo AFTER:$?"##, "", 1),
+		(r##": $((7/0)); echo AFTER:$?"##, "", 1),
+		(r##"f(){ : $((7/0)); }; f; echo AFTER:$?"##, "", 1),
+		(r##"eval ': $((7/0))'; echo AFTER:$?"##, "AFTER:1\n", 0),
+		(r##"( : $((7/0)); echo IN ); echo AFTER:$?"##, "AFTER:1\n", 0),
+		(r##": $((7/0)) & wait $!; echo W:$?"##, "W:1\n", 0),
+		// A discarded expansion that `errexit` does replace.
+		(r##"trap 'set -e; : ${x.y} | /usr/bin/cat; echo P:${PIPESTATUS[0]}' EXIT; exit 7"##, "P:1\n", 7),
+		(r##"trap 'trap '"'"': ${x.y}'"'"' DEBUG; :' EXIT; exit 7"##, "", 7),
+		// An arithmetic error in an assignment: no catch of a subshell, a
+		// command substitution or a trap nested in the EXIT trap's action.
+		(r##"trap '( declare -i I; I=bad!; echo INNER ); echo AFTER:$?' EXIT; exit 7"##, "AFTER:7\n", 7),
+		(
+			r##"trap 'v=$( declare -i I; I=bad!; echo IN ); echo "[$v] AFTER:$?"' EXIT; exit 7"##,
+			"[] AFTER:7\n",
+			7,
+		),
+		(r##"trap 'trap '"'"'declare -i I; I=bad!'"'"' DEBUG; :' EXIT; exit 7"##, "", 0),
+		(r##"( declare -i I; I=bad!; echo IN ); echo AFTER:$?"##, "AFTER:1\n", 0),
+		(r##"x=$( declare -i I; I=bad!; echo IN ); echo "[$x] AFTER:$?""##, "[] AFTER:1\n", 0),
+		(r##"trap 'declare -i I; I=bad!; echo AFTER' EXIT; exit 3"##, "", 3),
+		(r##"trap 'set -e; declare -i I; I=bad!; echo AFTER' EXIT; exit 7"##, "", 7),
+		(
+			r##"trap 'f(){ declare -i I; I=bad!; echo INNER; }; f | /usr/bin/cat; echo P:${PIPESTATUS[*]}' EXIT; exit 7"##,
+			"P:7 0\n",
+			7,
+		),
+		(r##"set -e; f(){ declare -i I; I=bad!; }; if f; then echo YES; fi; echo AFTER:$?"##, "", 1),
+		// A posix temporary-environment assignment error in a subshell of
+		// the EXIT trap's action still ends that subshell with 1.
+		(
+			r##"trap '( set -o posix; readonly R; R=x /usr/bin/true; echo INNER ); echo AFTER:$?' EXIT; exit 7"##,
+			"AFTER:1\n",
+			7,
+		),
+	])
+	.await;
+}
