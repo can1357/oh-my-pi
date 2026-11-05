@@ -623,6 +623,16 @@ console.log(JSON.stringify({ id: TERMINAL_ID, imageProtocol: TERMINAL.imageProto
 	});
 });
 
+describe("tern terminal capabilities", () => {
+	it("recognizes TERM_PROGRAM=tern and selects Kitty graphics", () => {
+		// Tern sets TERM_PROGRAM=tern with a plain xterm TERM. Missing that
+		// mapping falls through to the true-color profile, which has no images.
+		const env = { TERM_PROGRAM: "tern", TERM: "xterm-256color", COLORTERM: "truecolor" };
+		expect(detectTerminalId(env)).toBe("tern");
+		expect(resolveImageProtocol("tern", env, true)).toBe(ImageProtocol.Kitty);
+	});
+});
+
 describe("tmux image protocol selection", () => {
 	it("probes unknown tmux clients instead of sending Kitty graphics", () => {
 		const env = {
