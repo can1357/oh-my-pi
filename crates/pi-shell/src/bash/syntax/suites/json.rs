@@ -316,6 +316,15 @@ fn token_range(v: &serde_json::Value) -> Option<(u64, u64)> {
 	Some((pos, end))
 }
 
+/// A bare position field (`Lparen`, `DoPos`, `Esac`, …): an offset that
+/// carries no range of its own, and must lie inside the node that holds it.
+fn bare_offset(v: &serde_json::Value) -> Option<u64> {
+	if v.get("Pos").is_some() || v.get("End").is_some() {
+		return None;
+	}
+	v.get("Offset")?.as_u64()
+}
+
 fn range_faults(
 	v: &serde_json::Value,
 	parent: Option<((u64, u64), String)>,
@@ -337,6 +346,12 @@ fn range_faults(
 				here = Some(((pos, end), path.to_string()));
 			}
 			for (k, child) in map {
+				if let Some(o) = bare_offset(child)
+					&& let Some(((pos, end), _)) = &here
+					&& (o < *pos || o > *end)
+				{
+					bad.push(format!("{path}.{k} at {o} outside [{pos},{end}]"));
+				}
 				range_faults(child, here.clone(), &format!("{path}.{k}"), bad);
 			}
 		},
@@ -350,19 +365,45 @@ fn range_faults(
 }
 
 #[test]
-fn an_alias_expanded_conditional_exports_ranges_that_contain_their_children() {
+fn alias_expanded_compounds_export_ranges_that_contain_their_children() {
+	// Every compound command form, including the conditional forms the alias
+	// defect was first seen in. A compound's keyword and operator positions
+	// are the parser's to record: the text an alias expands to has no bytes
+	// in the source, so neither arithmetic on the command's end nor a scan
+	// of the source finds them.
+	//
+	// Word forms are left out, and so is a here-document body: the export
+	// locates the positions inside a word by scanning the source, which is
+	// the wrong buffer for alias text and for a here-document's inner
+	// command substitution at main as well. That is a separate defect with
+	// its own change.
+	let mut faults = Vec::new();
 	for text in [
 		&b"[[ ( ! a ) && b ]]"[..] as &'static [u8],
 		&b"[[ ! ! a && -n b || ( c ) ]]"[..],
 		&b"[[ a && ( b || c ) ]]"[..],
 		&b"[[ -n a ]]"[..],
+		&b"( echo ok )"[..],
+		&b"{ echo ok; }"[..],
+		&b"( ( echo ok ) )"[..],
+		&b"{ { echo ok; }; }"[..],
+		&b"while false; do echo ok; done"[..],
+		&b"until true; do echo ok; done"[..],
+		&b"for i in a b; do echo ok; done"[..],
+		&b"select i in a b; do echo ok; done"[..],
+		&b"for (( i = 0; i < 2; i++ )); do echo ok; done"[..],
+		&b"case x in a) echo a ;; *) echo b ;; esac"[..],
+		&b"(( 1 + 1 ))"[..],
+		&b"if true; then echo a; elif false; then echo b; else echo c; fi"[..],
+		&b"while false; do echo ok; done >/dev/null"[..],
+		&b"( echo ok ) >/dev/null"[..],
 	] {
 		let src = b"check\n";
 		let table = AliasOne(b"check", text);
 		let mut parser = Parser::new(src, Features::NONE, &table);
 		let mut commands = Vec::new();
 		while let Some(cmd) = parser.next_command() {
-			commands.push(cmd.expect("the aliased conditional parses"));
+			commands.push(cmd.expect("the aliased text parses"));
 		}
 		let program = Program { commands };
 		for offsets in [Offsets::Bytes, Offsets::Utf16] {
@@ -370,12 +411,13 @@ fn an_alias_expanded_conditional_exports_ranges_that_contain_their_children() {
 			let shfmt: serde_json::Value = serde_json::from_str(&json).unwrap();
 			let mut bad = Vec::new();
 			range_faults(&shfmt, None, "", &mut bad);
-			assert!(
-				bad.is_empty(),
-				"{} range faults for {} in {offsets:?}: {bad:?}\n{json}",
-				bad.len(),
-				String::from_utf8_lossy(text)
-			);
+			for fault in bad {
+				faults.push(format!(
+					"{} in {offsets:?}: {fault}",
+					String::from_utf8_lossy(text)
+				));
+			}
 		}
 	}
+	assert!(faults.is_empty(), "{} range faults:\n{}", faults.len(), faults.join("\n"));
 }
