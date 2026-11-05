@@ -4261,6 +4261,221 @@ describe("AgentSession retry delay cap", () => {
 		});
 	});
 
+	it("caps Antigravity thinking-only mid-stream transport failures at one retry", async () => {
+		const model = getBundledModel("google-antigravity", "gemini-4-argon");
+		if (!model) {
+			throw new Error("Expected bundled Antigravity Gemini 4 Argon test model to exist");
+		}
+		await expectThinkingStreamCloseRetryCap({
+			model,
+			errorMessage: "Cloud Code Assist stream closed before completion",
+			prompt: "Trigger Antigravity mid-stream drop after reasoning",
+		});
+	});
+
+	it("caps Antigravity's user-facing reset sentence at one retry", async () => {
+		const model = getBundledModel("google-antigravity", "gemini-4-argon");
+		if (!model) {
+			throw new Error("Expected bundled Antigravity Gemini 4 Argon test model to exist");
+		}
+		await expectThinkingStreamCloseRetryCap({
+			model,
+			errorMessage:
+				"Connection to daily-cloudcode-pa.googleapis.com was reset by the network or proxy while the response was streaming. Check the proxy/VPN and retry.",
+			prompt: "Trigger Antigravity reset sentence after reasoning",
+		});
+	});
+
+	it("keeps the normal retry budget for Antigravity turns that emitted a tool call", async () => {
+		const model = getBundledModel("google-antigravity", "gemini-4-argon");
+		if (!model) {
+			throw new Error("Expected bundled Antigravity Gemini 4 Argon test model to exist");
+		}
+		authStorage.keys.setRuntime(model.provider, "antigravity-test-key");
+		let calls = 0;
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: requestedModel => {
+				calls++;
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const usage: AssistantMessage["usage"] = {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					};
+					const thinking: ThinkingContent = { type: "thinking", thinking: "reasoning" };
+					const toolCall: ToolCall = {
+						type: "toolCall",
+						id: `call-${calls}`,
+						name: "read",
+						arguments: { path: "/x" },
+					};
+					const message: AssistantMessage = {
+						role: "assistant",
+						content: [thinking, toolCall],
+						api: requestedModel.api,
+						provider: requestedModel.provider,
+						model: requestedModel.id,
+						usage,
+						stopReason: "error",
+						errorMessage: "Cloud Code Assist stream closed before completion",
+						errorId: AIError.create(AIError.Flag.Transient),
+						timestamp: Date.now(),
+					};
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "thinking_start", contentIndex: 0, partial: message });
+					stream.push({ type: "thinking_delta", contentIndex: 0, delta: thinking.thinking, partial: message });
+					stream.push({ type: "thinking_end", contentIndex: 0, content: thinking.thinking, partial: message });
+					stream.push({ type: "toolcall_start", contentIndex: 1, partial: message });
+					stream.push({ type: "toolcall_end", contentIndex: 1, toolCall, partial: message });
+					stream.push({ type: "error", reason: "error", error: message });
+				});
+				return stream;
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 3,
+			"retry.modelFallback": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		mockSchedulerWaitWithClock();
+		await session.prompt("Trigger Antigravity drop with a tool call streamed");
+		await session.waitForIdle();
+
+		// The thinking-only cap must not shorten the budget a tool-call turn gets:
+		// its replay safety is proven by the synthetic unexecuted results instead.
+		// One initial attempt plus the full `retry.maxRetries: 3` budget.
+		expect(calls).toBe(4);
+		expect(session.isRetrying).toBe(false);
+	});
+
+	it("hands Antigravity's bounded thinking close to the fallback chain after one replay", async () => {
+		const primaryModel = getBundledModel("google-antigravity", "gemini-4-argon");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled antigravity/openai test models to exist");
+		}
+		authStorage.keys.setRuntime(primaryModel.provider, "antigravity-test-key");
+		authStorage.keys.setRuntime(fallbackModel.provider, "openai-test-key");
+
+		let primaryCalls = 0;
+		let fallbackCalls = 0;
+		const usage: AssistantMessage["usage"] = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: requestedModel => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					if (requestedModel.provider === fallbackModel.provider) {
+						fallbackCalls++;
+						const text: TextContent = { type: "text", text: "Recovered on the fallback" };
+						const message: AssistantMessage = {
+							role: "assistant",
+							content: [text],
+							api: requestedModel.api,
+							provider: requestedModel.provider,
+							model: requestedModel.id,
+							usage,
+							stopReason: "stop",
+							timestamp: Date.now(),
+						};
+						stream.push({ type: "start", partial: message });
+						stream.push({ type: "text_start", contentIndex: 0, partial: message });
+						stream.push({ type: "text_delta", contentIndex: 0, delta: text.text, partial: message });
+						stream.push({ type: "text_end", contentIndex: 0, content: text.text, partial: message });
+						stream.push({ type: "done", reason: "stop", message });
+						return;
+					}
+					primaryCalls++;
+					const thinking: ThinkingContent = { type: "thinking", thinking: "" };
+					const message: AssistantMessage = {
+						role: "assistant",
+						content: [thinking],
+						api: requestedModel.api,
+						provider: requestedModel.provider,
+						model: requestedModel.id,
+						usage,
+						stopReason: "error",
+						errorMessage: "Cloud Code Assist stream closed before completion",
+						errorId: AIError.create(AIError.Flag.Transient),
+						timestamp: Date.now(),
+					};
+					const delta = `reasoning attempt ${primaryCalls}`;
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "thinking_start", contentIndex: 0, partial: message });
+					thinking.thinking = delta;
+					stream.push({ type: "thinking_delta", contentIndex: 0, delta, partial: message });
+					stream.push({ type: "thinking_end", contentIndex: 0, content: thinking.thinking, partial: message });
+					stream.push({ type: "error", reason: "error", error: message });
+				});
+				return stream;
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 10,
+			"retry.modelFallback": true,
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		mockSchedulerWaitWithClock();
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("Trigger Antigravity drop with a fallback configured");
+		await session.waitForIdle();
+
+		// One same-model replay, then the configured chain — never a third primary call.
+		expect(primaryCalls).toBe(2);
+		expect(fallbackCalls).toBe(1);
+		expect(session.model?.id).toBe(fallbackModel.id);
+		expect(lastAssistant(session).stopReason).toBe("stop");
+		expect(retryStartEvents.length).toBeGreaterThanOrEqual(1);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(session.isRetrying).toBe(false);
+	});
+
 	it("defaults 502 auto-retry to ten capped backoff attempts", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {

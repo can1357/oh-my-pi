@@ -19,6 +19,11 @@ export interface FinalizeOptions {
 	abortTracker?: AbortSourceTracker;
 	/** Raw request, dumped into the message for 400-class failures. */
 	rawRequestDump?: RawHttpRequestDump;
+	/**
+	 * URL of the attempt that failed. Lets the network-failure formatter name
+	 * the host even when the runtime rejection carried no host of its own.
+	 */
+	requestUrl?: string;
 	/** Captured non-2xx response body, used for status fallback and message detail. */
 	capturedErrorResponse?: CapturedHttpErrorResponse;
 }

@@ -121,6 +121,16 @@ const HTTP2_STREAM_RESET_ERROR_RE =
 // eligible for preserved-turn continuation on resolved tool turns.
 const PREMATURE_STREAM_CLOSE_ERROR_RE =
 	/(?:stream closed before a (?:finish_reason|terminal response event)|Codex stream ended before terminal completion event|Cursor stream ended before turnEnded)/i;
+/**
+ * Persisted forms of an Antigravity mid-stream transport drop: the provider's
+ * normalized body-read failure and its empty-SSE twin (`Cloud Code Assist
+ * stream…`), plus the user-facing sentences `finalize` writes for a reset or a
+ * TLS-handshake failure. The runtime's own `ECONNRESET` / `EPROTO` wording
+ * survives only on the error's `cause`, so retry deferral and the
+ * thinking-only cap must key on both layers.
+ */
+const ANTIGRAVITY_TRANSPORT_DROP_RE =
+	/cloud code assist stream (?:closed before completion|ended without a finish reason)|\bEPROTO\b|\bECONNRESET\b|\bECONNABORTED\b|\bEPIPE\b|ERR_STREAM_PREMATURE_CLOSE|tls handshake failed|tls connection failed|was reset by the network or proxy|connection reset by peer|other side closed|use of closed network connection/i;
 
 /**
  * Bare abort sentinels with no provider reason: our own `"Request was aborted"`
@@ -1763,7 +1773,45 @@ export class TurnRecovery {
 			(message.provider === "github-copilot" &&
 				message.model === "grok-4.6" &&
 				message.api === "openai-responses" &&
-				/OpenAI responses stream closed before a terminal response event was received/i.test(errorMessage))
+				/OpenAI responses stream closed before a terminal response event was received/i.test(errorMessage)) ||
+			this.#isAntigravityThinkingStreamClose(message)
+		);
+	}
+
+	/**
+	 * Antigravity's expensive-reasoning close: the Cloud Code Assist stream died
+	 * after the model had already produced thinking, while nothing visible (text,
+	 * image, tool call) or side-effecting had been committed. The provider
+	 * normalizes a raw body-read rejection to `incomplete-stream` ("closed before
+	 * completion") and reports an SSE that stops early as "ended without a finish
+	 * reason", while an idle watchdog surfaces as "stream stalled"; all are the
+	 * same transport fault and none says anything about model health. Asking the
+	 * same model to redo the whole reasoning pass once is enough evidence; a
+	 * second identical failure goes to the configured fallback chain or ends the
+	 * saga instead of burning the ten-retry budget on the same long context.
+	 *
+	 * Deliberately narrower than {@link #hasReplayUnsafeOutput}: only turns with
+	 * no committed output and no tool call qualify, so the existing replay-safe
+	 * contract for thinking-only turns and the committed-text continuation path
+	 * are unchanged.
+	 */
+	#isAntigravityThinkingStreamClose(message: AssistantMessage): boolean {
+		if (message.provider !== "google-antigravity" || message.stopReason !== "error") return false;
+		for (const block of message.content) {
+			if (block.type === "toolCall" || block.type === "image" || block.type === "anthropicServerTool") return false;
+			if (block.type === "text" && hasNonWhitespace(block.text)) return false;
+		}
+		const id = this.#classifyRetryMessage(message);
+		// A completed thought-only turn is a semantic answer: the provider reports
+		// it as EmptyResponse and session recovery asks for the missing text, not a
+		// transport replay.
+		if (!AIError.retriable(id) || AIError.is(id, AIError.Flag.EmptyResponse)) return false;
+		const errorMessage = message.errorMessage ?? "";
+		return (
+			STREAM_STALL_ERROR_RE.test(errorMessage) ||
+			isUnexpectedSocketCloseMessage(errorMessage) ||
+			AIError.isStreamEnvelopeTruncationText(errorMessage) ||
+			ANTIGRAVITY_TRANSPORT_DROP_RE.test(errorMessage)
 		);
 	}
 	/**
@@ -1781,7 +1829,18 @@ export class TurnRecovery {
 		if (this.#retryAttempt !== 1 || retryBudgetExhausted) return false;
 		if (message.stopReason !== "error" || !AIError.retriable(id)) return false;
 		if (this.#host.streamingEditAbortTriggered()) return false;
-		if (!isUnexpectedSocketCloseMessage(message.errorMessage ?? "")) return false;
+		// A normalized Antigravity body-read failure ("closed before completion")
+		// is the same first-attempt mid-stream drop even though the runtime's
+		// socket-close wording is now only on its `cause`: defer the fallback
+		// chain so the one allowed same-model replay happens first.
+		const errorMessage = message.errorMessage ?? "";
+		if (
+			!isUnexpectedSocketCloseMessage(errorMessage) &&
+			!ANTIGRAVITY_TRANSPORT_DROP_RE.test(errorMessage) &&
+			!this.#isAntigravityThinkingStreamClose(message)
+		) {
+			return false;
+		}
 		return message.content.some(
 			block =>
 				(block.type === "thinking" && block.thinking.trim().length > 0) ||

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { extractRetryHint, fetchWithRetry, isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils/fetch-retry";
+import {
+	extractRetryHint,
+	fetchWithRetry,
+	isRetryableError,
+	isUnexpectedSocketCloseMessage,
+} from "@oh-my-pi/pi-utils/fetch-retry";
 
 /** Await a rejection and narrow it to `Error` without asserting a shape. */
 async function rejectionOf(promise: Promise<unknown>): Promise<Error> {
@@ -24,6 +29,26 @@ describe("isUnexpectedSocketCloseMessage", () => {
 	});
 });
 
+describe("isRetryableError transport predicates", () => {
+	it.each([
+		["EPROTO TLS-handshake", "EPROTO: The TLS handshake failed. Does the server speak TLS on this port?"],
+		["ECONNRESET", "read ECONNRESET"],
+		["EPIPE", "EPIPE: broken pipe, write"],
+		["premature close", "ERR_STREAM_PREMATURE_CLOSE: premature close"],
+	])("keeps %s retryable", (_label, message) => {
+		expect(isRetryableError(new Error(message))).toBe(true);
+	});
+
+	it("keeps a terminal 4xx and a validation failure non-retryable", () => {
+		// A terminal status gates the transport wording off.
+		expect(isRetryableError(Object.assign(new Error("EPROTO: The TLS handshake failed."), { status: 400 }))).toBe(
+			false,
+		);
+		// Validation-shaped messages short-circuit regardless of transport words.
+		expect(isRetryableError(new Error("Invalid schema for tool read"))).toBe(false);
+	});
+});
+
 describe("fetchWithRetry", () => {
 	it("routes requests through the `fetch` override when provided", async () => {
 		const calls: Array<{ input: string | URL | Request; init: RequestInit | undefined }> = [];
@@ -43,6 +68,30 @@ describe("fetchWithRetry", () => {
 		expect(calls).toHaveLength(1);
 		expect(calls[0]?.input).toBe("https://example.invalid/x");
 		expect(calls[0]?.init).toMatchObject({ method: "POST", body: "hi" });
+	});
+
+	it.each([
+		["EPROTO", "EPROTO: The TLS handshake failed. Does the server speak TLS on this port?"],
+		["ECONNRESET", "read ECONNRESET"],
+		["EPIPE", "EPIPE: broken pipe, write"],
+	])("retries a transient %s fetch rejection", async (code, message) => {
+		let attempt = 0;
+		const failure = Object.assign(new Error(message), { code });
+		const customFetch = async () => {
+			attempt += 1;
+			if (attempt === 1) throw failure;
+			return new Response("ok", { status: 200 });
+		};
+
+		const response = await fetchWithRetry("https://example.invalid/stream", {
+			fetch: customFetch,
+			defaultDelayMs: 1,
+			maxAttempts: 2,
+		});
+
+		expect(response.status).toBe(200);
+		expect(await response.text()).toBe("ok");
+		expect(attempt).toBe(2);
 	});
 
 	it("retries through the override on transient failures", async () => {
