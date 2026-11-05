@@ -4863,39 +4863,18 @@ fn not_found_hook(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) ->
 	Some(Flow::Block(WaitKey::Proc(vpid)))
 }
 
-/// The `#!` interpreter of `text` as bash's `getinterp` reads it (a
-/// trailing CR shown as `^M`).
-///
-/// bash samples the file into a fixed buffer and reads the interpreter out
-/// of that, so it never names more than [`crate::bash::SAMPLE`] bytes of
-/// the file, whatever the `#!` line's real length is.
-fn interpreter(text: &[u8]) -> BString {
-	let line = text
-		.get(2..crate::bash::SAMPLE.min(text.len()))
-		.unwrap_or_default()
-		.split(|&c| c == b'\n')
-		.next()
-		.unwrap_or_default();
-	let start = line
-		.iter()
-		.position(|c| !matches!(c, b' ' | b'\t'))
-		.unwrap_or(line.len());
-	let rest = &line[start..];
-	let end = rest
-		.iter()
-		.position(|c| matches!(c, b' ' | b'\t'))
-		.unwrap_or(rest.len());
-	let mut interp = BString::from(&rest[..end]);
-	if interp.last() == Some(&b'\r') {
-		interp.pop();
-		// Measured on Bash 5.3.0: a trailing CR after a name shows as
-		// `^M`, but a `#!` line that is ONLY a CR names the empty
-		// interpreter.
-		if !interp.is_empty() {
-			interp.extend_from_slice(b"^M");
-		}
+/// What the shell prints for the `#!` interpreter of `text`, the refused
+/// program's bytes: [`crate::bash::shebang`] over the sample bash would
+/// have read, with a dropped carriage return written back as `^M`.
+/// `None` when bash would not call this a script at all.
+fn interpreter(text: &[u8]) -> Option<BString> {
+	let sample = &text[..crate::bash::SAMPLE.min(text.len())];
+	let (head, cr) = crate::bash::shebang(sample)?;
+	let mut interp = BString::from(head);
+	if cr {
+		interp.extend_from_slice(b"^M");
 	}
-	interp
+	Some(interp)
 }
 
 /// bash's `shell_execve` after the OS refused to run `path` with `code`
@@ -4950,9 +4929,9 @@ fn refused(
 				Ok(ProbeResult::Bytes(Ok(text))) => text,
 				Ok(_) => BString::default(),
 			};
-			if text.starts_with(b"#!") {
+			if let Some(interp) = interpreter(&text) {
 				status = 126;
-				Diag::BadInterpreter { name, interp: interpreter(&text), err }
+				Diag::BadInterpreter { name, interp, err }
 			} else if enoent {
 				Diag::RequiredFileMissing { name }
 			} else {

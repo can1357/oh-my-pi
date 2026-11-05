@@ -123,6 +123,34 @@ fn interpreter_is_only_a_carriage_return(dir: &std::path::Path) {
 	write(&dir.join("s"), "#!\r", 0o755);
 }
 
+/// A `#!` line that is only a carriage return, but WITH a newline after
+/// it. Bash 5.3.0 names `^M` here: the byte it drops is the newline, not
+/// the CR, so unlike [`interpreter_is_only_a_carriage_return`] the CR is
+/// part of the name.
+fn carriage_return_interpreter_with_a_newline(dir: &std::path::Path) {
+	write(&dir.join("s"), "#!\r\necho hi\n", 0o755);
+}
+
+/// An interpreter with a NUL in it. Bash prints the name with `%s`, so
+/// the NUL ends it and everything after it is not named.
+fn interpreter_with_a_nul(dir: &std::path::Path) {
+	write(&dir.join("s"), "#!/does/not/exist\u{0}suffix\necho hi\n", 0o755);
+}
+
+/// A `#!` line with no newline at all. bash writes its NUL terminator
+/// over the last byte it read, so the last byte of the file is never part
+/// of the name: it reports `/does/not/exis`.
+fn interpreter_missing_a_newline(dir: &std::path::Path) {
+	write(&dir.join("s"), "#!/does/not/exist", 0o755);
+}
+
+/// A file of exactly `#!` and nothing else. The terminator lands on the
+/// `!`, so bash does not see a `#!` line at all and reports the plain
+/// refusal instead of a bad interpreter.
+fn only_a_hash_bang(dir: &std::path::Path) {
+	write(&dir.join("s"), "#!", 0o755);
+}
+
 /// `#!` and nothing but blanks, and no newline at all: bash names an
 /// EMPTY interpreter here rather than treating the file as one without a
 /// `#!` line.
@@ -244,6 +272,38 @@ const IMMEDIATE: &[Row] = &[
 		script: "./s",
 		status: 126,
 		wants:  &["./s: : bad interpreter: No such file or directory", "!^M"],
+	},
+	Row {
+		name:   "carriage-return-interpreter-with-a-newline",
+		setup:  carriage_return_interpreter_with_a_newline,
+		fifo:   false,
+		script: "./s",
+		status: 126,
+		wants:  &["./s: ^M: bad interpreter: No such file or directory"],
+	},
+	Row {
+		name:   "interpreter-with-a-nul",
+		setup:  interpreter_with_a_nul,
+		fifo:   false,
+		script: "./s",
+		status: 126,
+		wants:  &["./s: /does/not/exist: bad interpreter: No such file or directory", "!suffix"],
+	},
+	Row {
+		name:   "interpreter-missing-a-newline",
+		setup:  interpreter_missing_a_newline,
+		fifo:   false,
+		script: "./s",
+		status: 126,
+		wants:  &["./s: /does/not/exis: bad interpreter: No such file or directory"],
+	},
+	Row {
+		name:   "only-a-hash-bang",
+		setup:  only_a_hash_bang,
+		fifo:   false,
+		script: "./s",
+		status: 126,
+		wants:  &["!bad interpreter"],
 	},
 	Row {
 		name:   "long-interpreter",
@@ -382,6 +442,42 @@ const DEFERRED: &[Row] = &[
 		script: "/bin/cat f >out & p=$!; ./s >f & q=$!; wait $q; echo status=$?; wait $p",
 		status: 0,
 		wants:  &["./s: : bad interpreter: No such file or directory", "status=126", "!^M"],
+	},
+	Row {
+		name:   "deferred-carriage-return-interpreter-with-a-newline",
+		setup:  carriage_return_interpreter_with_a_newline,
+		fifo:   true,
+		script: "/bin/cat f >out & p=$!; ./s >f & q=$!; wait $q; echo status=$?; wait $p",
+		status: 0,
+		wants:  &["./s: ^M: bad interpreter: No such file or directory", "status=126"],
+	},
+	Row {
+		name:   "deferred-interpreter-with-a-nul",
+		setup:  interpreter_with_a_nul,
+		fifo:   true,
+		script: "/bin/cat f >out & p=$!; ./s >f & q=$!; wait $q; echo status=$?; wait $p",
+		status: 0,
+		wants:  &[
+			"./s: /does/not/exist: bad interpreter: No such file or directory",
+			"status=126",
+			"!suffix",
+		],
+	},
+	Row {
+		name:   "deferred-interpreter-missing-a-newline",
+		setup:  interpreter_missing_a_newline,
+		fifo:   true,
+		script: "/bin/cat f >out & p=$!; ./s >f & q=$!; wait $q; echo status=$?; wait $p",
+		status: 0,
+		wants:  &["./s: /does/not/exis: bad interpreter: No such file or directory", "status=126"],
+	},
+	Row {
+		name:   "deferred-only-a-hash-bang",
+		setup:  only_a_hash_bang,
+		fifo:   true,
+		script: "/bin/cat f >out & p=$!; ./s >f & q=$!; wait $q; echo status=$?; wait $p",
+		status: 0,
+		wants:  &["status=126", "!bad interpreter"],
 	},
 	Row {
 		name:   "deferred-long-interpreter",

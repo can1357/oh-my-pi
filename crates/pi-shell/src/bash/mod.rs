@@ -79,7 +79,7 @@ pub use crate::bash::{
 		ChildRedir, ChildRedirs, CpuTimes, Deadline, EnvView, ExitStatus, ExtProc, Host, Invocation,
 		Lineage, Login, Logins, OsHandle, PgroupSpec, PipeMirror, PipeTap, ProcEvent, ResolveCtx,
 		Resolved, Rlimit, SAMPLE, SpawnFuture, SpawnSpec, StdFd, StdioSpec, SystemTimeLike, Task,
-		Timer, TtyInfo, UserInfo, Verdict, Via,
+		Timer, TtyInfo, UserInfo, Verdict, Via, shebang,
 	},
 	ids::{
 		AstNodeId, CallId, CmdTag, Dialect, IntrinsicId, JobId, ModeId, NativeRef, Platform, RunId,

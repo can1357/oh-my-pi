@@ -1010,38 +1010,6 @@ fn child_say(parts: &[&[u8]], status: i32) -> ! {
 	unsafe { libc::_exit(status) }
 }
 
-/// The `#!` interpreter in `sample` as bash's `getinterp` reads it: what
-/// follows `#!` up to the first blank or the end of the line, with leading
-/// blanks dropped. `None` when `sample` does not begin with `#!`; an empty
-/// slice when it does and nothing follows, which bash reports as an empty
-/// interpreter rather than as a file without one.
-///
-/// The second element is true when a trailing carriage return was dropped:
-/// bash prints that as `^M`, and the caller writes those two bytes instead
-/// of the control byte. This mirrors `interpreter` in `bash/vm/command.rs`,
-/// which the engine uses when it reports the same refusal itself.
-fn shebang(sample: &[u8]) -> Option<(&[u8], bool)> {
-	let rest = sample.strip_prefix(b"#!")?;
-	let rest = rest.split(|b| *b == b'\n').next().unwrap_or(rest);
-	let start = rest
-		.iter()
-		.position(|b| !matches!(b, b' ' | b'\t'))
-		.unwrap_or(rest.len());
-	let rest = &rest[start..];
-	let end = rest
-		.iter()
-		.position(|b| matches!(b, b' ' | b'\t'))
-		.unwrap_or(rest.len());
-	let interp = &rest[..end];
-	match interp.split_last() {
-		// Measured on Bash 5.3.0: a trailing CR after a name shows as `^M`,
-		// but a `#!` line that is ONLY a CR names the empty interpreter.
-		Some((b'\r', head)) if !head.is_empty() => Some((head, true)),
-		Some((b'\r', _)) => Some((b"", false)),
-		_ => Some((interp, false)),
-	}
-}
-
 /// bash's `shell_execve` report, made in the forked child of
 /// [`fork_redirs`] after `execve` failed: it LOOKS at the program, because
 /// the errno alone does not say why the kernel refused it. The branches
@@ -1096,7 +1064,7 @@ unsafe fn exec_refused(
 		unsafe { libc::close(fd) };
 		usize::try_from(n).unwrap_or(0)
 	};
-	if let Some((interp, cr)) = shebang(&buf[..read]) {
+	if let Some((interp, cr)) = crate::bash::shebang(&buf[..read]) {
 		// bash's `sys_error`: no line number before this one, and 126
 		// whatever the kernel's errno was.
 		let tail: &[u8] = if cr { b"^M" } else { b"" };

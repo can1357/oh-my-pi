@@ -383,12 +383,49 @@ pub struct SpawnSpec<'a> {
 	pub ctty:        Option<OsHandle>,
 }
 
-/// How many bytes of a refused program bash can name an interpreter out
-/// of: it samples the file into a fixed buffer and reads the `#!` line
-/// from that, so an interpreter longer than this is cut here, exactly as
-/// Bash 5.3.0 cuts it. Measured against Bash 5.3.0 on `#!/` plus 124 to
-/// 129 `x` bytes: it names 127 bytes of the file and no more.
-pub const SAMPLE: usize = 127;
+/// How many bytes of a refused program bash reads to find its `#!` line:
+/// `shell_execve` samples the file into a fixed buffer and names an
+/// interpreter out of that and nothing more.
+pub const SAMPLE: usize = 128;
+
+/// bash's `getinterp` over `sample`, the first [`SAMPLE`] bytes of a
+/// refused program: its `#!` interpreter, and whether a trailing carriage
+/// return was dropped (bash shows that one as `^M`). `None` when there is
+/// no usable `#!` line, which is bash's "not a script" answer.
+///
+/// The subtlety is bash's own: before reading the line it writes its NUL
+/// terminator over **the last byte it read** (`sample[sample_len - 1] =
+/// '\0'`), so one byte of the file is always lost. Measured on Bash
+/// 5.3.0, that is why a file of exactly `#!` names nothing at all, `#!\r`
+/// names the EMPTY interpreter while `#!\r\n` names `^M`, and an
+/// unterminated `#!/does/not/exist` is named `/does/not/exis`.
+///
+/// Allocation-free and panic-free on every input, because the forked
+/// child in `crates/pi-shell/src/sys/spawn/unix.rs` runs it after `fork`.
+pub fn shebang(sample: &[u8]) -> Option<(&[u8], bool)> {
+	let s = sample.get(..sample.len().checked_sub(1)?)?;
+	let rest = s.strip_prefix(b"#!")?;
+	let line = rest.split(|b| *b == b'\n').next().unwrap_or(rest);
+	let start = line
+		.iter()
+		.position(|b| !matches!(b, b' ' | b'\t'))
+		.unwrap_or(line.len());
+	let rest = &line[start..];
+	let end = rest
+		.iter()
+		.position(|b| matches!(b, b' ' | b'\t'))
+		.unwrap_or(rest.len());
+	let interp = &rest[..end];
+	// bash prints the name with `%s`, so an embedded NUL ends it.
+	let interp = match interp.iter().position(|b| *b == 0) {
+		Some(nul) => &interp[..nul],
+		None => interp,
+	};
+	match interp.split_last() {
+		Some((b'\r', head)) => Some((head, true)),
+		_ => Some((interp, false)),
+	}
+}
 
 /// The redirections a spawned process applies itself ([`SpawnSpec::redirs`]).
 ///
