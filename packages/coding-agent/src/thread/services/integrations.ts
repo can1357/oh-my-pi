@@ -3,7 +3,7 @@
  *
  * - **MCP** (`"mcp-manager"`): a main `MCPManager` crosses by reference; the worker gets a
  *   {@link RemoteMCPManager}. Tools come back as plain views ({@link toWorkerCustomTool}), re-sent
- *   only when main's tool set changed since the worker's last read, whose
+ *   only when main's tool views changed since the worker's last read for that view, whose
  *   `execute` runs the main-side MCP tool (streaming `onUpdate` and abort signals cross), tool and
  *   notification subscriptions are held on main per worker and dropped when it exits, and the
  *   worker's `MCPManager.instance()/load()/available()` answer from main's process global. A worker
@@ -28,7 +28,7 @@ import type { CustomTool } from "../../extensibility/custom-tools/types";
 import { importExtensionModule } from "../../extensibility/extensions/loader";
 import type { ExtensionFactory, PreparedExtension } from "../../extensibility/extensions/types";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
-import { MCPManager, type MCPManagerApi, type MCPManagerGlobal } from "../../mcp/manager";
+import { MCPManager, type MCPManagerApi, type MCPManagerGlobal, type MCPToolScope } from "../../mcp/manager";
 import type { ExecutorOptions } from "../../task/executor";
 import { isMainThread } from "../identity";
 import type { MainThreadLink, WorkerThreadLink } from "../protocol";
@@ -305,32 +305,19 @@ function settleQuietly(result: unknown): void {
 	}
 }
 
-/**
- * On a manager: its tool array last served to a worker and that array's version. `MCPManager`
- * replaces the array on every tool-set change and never mutates a published one, so array
- * identity is the change signal.
- */
-const kServedTools = Symbol("thread.integrations.servedTools");
-
-interface ServingMCPManager extends MCPManager {
-	[kServedTools]?: { readonly tools: readonly unknown[]; readonly version: number };
-}
-
-/** The manager's tools as worker views, omitted when `knownVersion` is still current. */
-function toolsReply(manager: ServingMCPManager, knownVersion: number): McpToolsReply {
-	const tools = manager.getTools();
-	let current = manager[kServedTools];
-	if (current?.tools !== tools) {
-		current = { tools, version: (current?.version ?? 0) + 1 };
-		manager[kServedTools] = current;
-	}
-	if (current.version === knownVersion) return { version: current.version };
-	return { version: current.version, tools: tools.map(tool => toWorkerCustomTool(tool)) };
+/** `scope`'s tools as worker views, omitted when `knownVersion` is still current. */
+function toolsReply(manager: MCPManager, knownVersion: number, scope: MCPToolScope | undefined): McpToolsReply {
+	const version = manager.toolViewsRevision;
+	if (version === knownVersion) return { version };
+	return { version, tools: manager.getTools(scope).map(tool => toWorkerCustomTool(tool)) };
 }
 
 function serveMcpManager(state: PeerIntegrationState): RpcServe<MCPManager, McpManagerProtocol> {
 	return {
 		tools: toolsReply,
+		openToolScope: (manager, scope, seed) => manager.openToolScope(scope, seed),
+		trackToolCall: (manager, scope, toolCallId) =>
+			trackWorkerSubscription(state.subscriptions, manager.trackToolCall(scope, toolCallId)),
 		onToolsChanged: (manager, listener) =>
 			trackWorkerSubscription(
 				state.subscriptions,

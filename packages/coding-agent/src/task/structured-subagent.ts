@@ -824,6 +824,7 @@ function buildExecutorOptions(
 		asyncJobManager: session.asyncJobManager,
 		inheritedSessionAgents: session.getSessionAgents?.(),
 		mcpManager: enableMCP ? (session.mcpManager ?? MCPManager.instance()) : undefined,
+		mcpToolScope: session.mcpToolScope,
 		enableMCP,
 		customTools: request.customTools,
 		workPoolYieldItems: request.workPoolYieldItems,
