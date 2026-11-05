@@ -28,6 +28,7 @@
 - Fixed the Anthropic wire client's own retries being bounded only by `maxRetryDelayMs`: a call's `providerRetryWaitCeilingMs` and `providerRetryWait` now reach them too, so one 429 stating a wait past the ceiling surfaces at once instead of being slept once per wire attempt ([#17569](https://github.com/can1357/oh-my-pi/pull/17569) by [@sjawhar](https://github.com/sjawhar))
 - Fixed a call that reaches a provider directly, rather than through `stream()`, sleeping a server-stated wait on the real clock with the `maxRetryDelayMs`, `providerRetryWaitCeilingMs` and `providerRetryWait` it passed never consulted; the compressed-body resend and the GitHub Copilot identity resend were two such sleeps, with and without a `replayBudgetMs` ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
 - Fixed a credential rotation under `replayBudgetMs` waiting out a sibling credential's block past the budget ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `replayBudgetMs` not bounding the Anthropic wire client's own resends: the client retried a 429 or a transport error without the budget being asked, so a call that set the budget still sent a second request past its deadline ([#18195](https://github.com/can1357/oh-my-pi/pull/18195) by [@sjawhar](https://github.com/sjawhar))
 
 ### Breaking Changes
 
