@@ -21,6 +21,8 @@ import {
 	stopService,
 } from "../launch/services";
 import type { ProcReadDetails } from "@oh-my-pi/pi-tui/tools/proc-render";
+import { unsavedAgentWork } from "../registry/agent-lifecycle";
+import { CapabilityAction, capabilityTokens, requireCapabilityToken } from "../safety/capability-tokens";
 import procPromptDoc from "../prompts/internal-urls/proc.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import type {
@@ -297,6 +299,29 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			throw new Error(
 				`${id} is an in-process ${job ? "job" : "agent"}; stdin and persist/session/detached modes are services-only. Start long-lived work as a named service when it needs stdin or lifetime controls. To cancel, ${killCall(id)}.`,
 			);
+		// Killing a bash job or a service keeps its output (job row, log file), so
+		// it stays a plain call. Killing an *agent* that still owes output destroys
+		// work with no other copy: that one needs a one-shot token in `content`.
+		const forceToken = content.trim();
+		/** The agent whose release this kill authorizes; undefined when the kill keeps every output. */
+		let gatedAgentId: string | undefined;
+		if (action === "kill") {
+			const killAgentId = job?.agentId ?? (agent ? id : undefined);
+			const killRef = killAgentId === undefined ? undefined : session.agentRegistry?.get(killAgentId);
+			const unsaved = killRef === undefined ? undefined : unsavedAgentWork(killRef);
+			if (killAgentId !== undefined && unsaved !== undefined) {
+				// The capability is the agent release this kill would perform, so the
+				// token the refusal hands out is the one the lifecycle consumes below.
+				requireCapabilityToken({
+					action: CapabilityAction.agentRelease,
+					target: killAgentId,
+					force: forceToken.length > 0 ? forceToken : undefined,
+					consequence: `cancelling ${id} destroys work that has no other copy: ${unsaved}`,
+					retry: token => `write ${JSON.stringify({ path: `proc://${id}/kill`, content: token })}`,
+				});
+				gatedAgentId = killAgentId;
+			}
+		}
 		if (action === "mode") {
 			if (!service) throw new Error(`Service not found: ${id}`);
 			if (content !== "persist" && content !== "session" && content !== "detached")
@@ -323,11 +348,28 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			};
 		}
 		if ((job || agent) && session.asyncJobManager) {
-			const result = await executeCancel(session, session.asyncJobManager, ownerId, [job?.id ?? id]);
+			const result = await executeCancel(
+				session,
+				session.asyncJobManager,
+				ownerId,
+				[job?.id ?? id],
+				forceToken.length > 0 ? forceToken : undefined,
+			);
+			// A kill dispatched straight to the job manager never reaches the
+			// lifecycle's consume; burn the token here so it stays one-shot.
+			if (gatedAgentId !== undefined)
+				capabilityTokens.consume(forceToken, CapabilityAction.agentRelease, gatedAgentId);
 			return { content: result.content, details: { proc: result.details } };
 		}
 		if (agent) {
-			const outcome = await cancelAgentRegistration(session, ownerId, id);
+			const outcome = await cancelAgentRegistration(
+				session,
+				ownerId,
+				id,
+				forceToken.length > 0 ? forceToken : undefined,
+			);
+			if (gatedAgentId !== undefined)
+				capabilityTokens.consume(forceToken, CapabilityAction.agentRelease, gatedAgentId);
 			return {
 				content: [{ type: "text", text: outcome.message }],
 				details: { proc: { op: "cancel", jobs: [], cancelled: [{ id, status: outcome.status }] } },
