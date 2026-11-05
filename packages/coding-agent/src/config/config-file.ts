@@ -49,8 +49,7 @@ function migrateJsonToYml(jsonPath: string, ymlPath: string) {
 		}
 		// The migrated config can carry inline API keys: publish it with
 		// owner-only permissions and never leave a half-written file behind.
-		// A user config path: follow a symlink so a shared profile keeps its link.
-		writeFileAtomicallySync(ymlPath, stringifyYamlConfig(parsed), 0o600, true);
+		writeFileAtomicallySync(ymlPath, stringifyYamlConfig(parsed));
 		migratedPaths.add(key);
 	} catch (error) {
 		logger.warn("migrateJsonToYml: migration failed", { error: String(error) });

@@ -6,7 +6,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import { writeConfigFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
+import { writeFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 
 export interface SSHHostConfig {
 	host: string;
@@ -51,7 +51,7 @@ export async function writeSSHConfigFile(filePath: string, config: SSHConfigFile
 	const dir = path.dirname(filePath);
 	await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
 
-	await writeConfigFileAtomically(filePath, JSON.stringify(config, null, 2));
+	await writeFileAtomically(filePath, JSON.stringify(config, null, 2));
 }
 
 /**

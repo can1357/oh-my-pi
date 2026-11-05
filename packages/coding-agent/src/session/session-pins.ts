@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getAgentDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
-import { replaceFileAtomically, resolveConfigWriteTarget } from "@oh-my-pi/pi-utils/atomic-file";
+import { replaceFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 import type { SessionInfo } from "./session-listing";
 
 const PINS_FILENAME = "session-pins.json";
@@ -40,8 +40,7 @@ export async function loadPinnedSessionIds(agentDir: string = getAgentDir()): Pr
  * each other's update (load-load-write-write), and a crash mid-write leaves
  * the previous pins file intact instead of a truncated one that degrades to
  * an empty set. The replace preserves the destination across Windows
- * EPERM/EEXIST rename failures (`replaceConfigFileAtomically`, which also
- * publishes the path this already resolved, so a shared profile keeps its link).
+ * EPERM/EEXIST rename failures (`replaceFileAtomically`).
  */
 async function updateSessionPin(
 	sessionId: string,
@@ -50,21 +49,15 @@ async function updateSessionPin(
 ): Promise<boolean> {
 	const filePath = pinsPath(agentDir);
 	await fs.mkdir(agentDir, { recursive: true });
-	// Resolve BEFORE locking, and lock what the write will land on. The lock is
-	// named after the path it is given, so two profiles whose pins files link at
-	// one target would otherwise hold two different locks while writing one
-	// file, and one profile's pin would be lost — in exactly the arrangement
-	// this following exists to support.
-	const target = await resolveConfigWriteTarget(filePath);
-	return withFileLock(target, async () => {
+	return withFileLock(filePath, async () => {
 		const pinned = await loadPinnedSessionIds(agentDir);
 		const wasPinned = pinned.has(sessionId);
 		if (next(wasPinned)) pinned.add(sessionId);
 		else pinned.delete(sessionId);
-		const tmpPath = `${target}.${process.pid}.${randomUUID()}.tmp`;
+		const tmpPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
 		try {
 			await fs.writeFile(tmpPath, JSON.stringify([...pinned], null, "\t"), { encoding: "utf-8", mode: 0o600 });
-			await replaceFileAtomically(tmpPath, target);
+			await replaceFileAtomically(tmpPath, filePath);
 		} catch (error) {
 			await fs.rm(tmpPath, { force: true }).catch(() => {});
 			throw error;

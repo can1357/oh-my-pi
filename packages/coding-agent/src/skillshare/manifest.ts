@@ -10,7 +10,7 @@ import * as path from "node:path";
 import { OmpErrors, type } from "@oh-my-pi/omptype";
 import { getAgentDir, hasFsCode, isEnoent } from "@oh-my-pi/pi-utils";
 import { resolveOrDefaultProjectRegistryPath } from "../discovery/helpers";
-import { replaceConfigFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
+import { replaceFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 
 export const SKILLS_MANIFEST_FILE = "skills.json";
 export const SKILLS_LOCK_FILE = "skills.lock.json";
@@ -186,7 +186,7 @@ async function writeJsonAtomic(file: string, value: unknown): Promise<void> {
 	const tempPath = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
 	try {
 		await Bun.write(tempPath, `${JSON.stringify(value, null, 2)}\n`);
-		await replaceConfigFileAtomically(tempPath, file);
+		await replaceFileAtomically(tempPath, file);
 	} catch (error) {
 		await fs.rm(tempPath, { force: true });
 		throw error;
