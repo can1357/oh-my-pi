@@ -2037,6 +2037,156 @@ describe("AgentSession auto-prewalk", () => {
 			},
 		);
 
+		it.each(["model", "persisted model", "effort", "manual arm", "no pick"] as const)(
+			"a rejected transcript switch does not revive a consumed auto arm after %s",
+			async pick => {
+				stubJudge([DIRECT, DIRECT]);
+				const f = createFixture([done("planning"), done("next")], { auto: "on", persist: true });
+				let coordinator: PrewalkCoordinator | undefined;
+				const advance = PrewalkCoordinator.prototype.advanceAtTurnEnd;
+				const capture = vi.spyOn(PrewalkCoordinator.prototype, "advanceAtTurnEnd").mockImplementation(function (
+					this: PrewalkCoordinator,
+					...args
+				) {
+					coordinator = this;
+					return advance.apply(this, args);
+				});
+				await f.session.prompt("plan without editing");
+				capture.mockRestore();
+				expect(coordinator).toBeDefined();
+				const active = coordinator!;
+				const plan = active.applyAuto({
+					route: "prewalk",
+					probabilities: { prewalk: 0.9, primary: 0.07, direct: 0.03 },
+					confidence: 0.9,
+					arm: true,
+				});
+				expect(plan).toBeDefined();
+				f.session.agent.appendMessage(plan!);
+				const targetManager = SessionManager.create(tempDir.path(), tempDir.path());
+				targetManager.appendMessage({ role: "user", content: "rejected transcript", timestamp: Date.now() });
+				let targetFile: string;
+				try {
+					await targetManager.ensureOnDisk();
+					targetFile = targetManager.getSessionFile()!;
+				} finally {
+					await targetManager.close();
+				}
+				const loaded = Promise.withResolvers<void>();
+				const reject = Promise.withResolvers<void>();
+				const manager = f.session.sessionManager;
+				const load = manager.setSessionFile.bind(manager);
+				const setFile = vi.spyOn(manager, "setSessionFile").mockImplementation(async file => {
+					await load(file);
+					loaded.resolve();
+					await reject.promise;
+					throw new Error("rejected transcript");
+				});
+				const models: Array<string | undefined> = [];
+				f.session.subscribe(event => {
+					if (event.type === "model_changed") models.push(f.session.model?.id);
+				});
+				const entered = Promise.withResolvers<void>();
+				const release = Promise.withResolvers<void>();
+				let held = false;
+				const refresh = f.modelRegistry.refreshSelectedModelMetadata.bind(f.modelRegistry);
+				vi.spyOn(f.modelRegistry, "refreshSelectedModelMetadata").mockImplementation(async model => {
+					if (!held && model.id === f.target.id) {
+						held = true;
+						entered.resolve();
+						await release.promise;
+					}
+					return refresh(model);
+				});
+				// Drive the real session coordinator while idle so switchSession can abort without waiting on this gate.
+				const turn = active.advanceAtTurnEnd(f.session.agent.state.messages, {
+					message: createAssistantMessage("implementing"),
+					toolResults: ["todo", "write"].map(toolName => ({
+						role: "toolResult" as const,
+						toolCallId: toolName,
+						toolName,
+						content: [{ type: "text" as const, text: "ok" }],
+						isError: false,
+						timestamp: Date.now(),
+					})),
+					additionalMessages: [],
+					willContinue: false,
+				});
+				let rejected: Promise<unknown> | undefined;
+				const opus = modelOrThrow("claude-opus-4-6");
+				try {
+					await Promise.race([
+						entered.promise,
+						turn.then(() => {
+							throw new Error("Automatic handoff finished before entering the metadata gate");
+						}),
+					]);
+					const switching = f.session.switchSession(targetFile, { preserveLocalCwd: true });
+					// Observe rejection without invoking Bun's blocking rejects matcher while we still own its gate.
+					rejected = switching.then(
+						() => undefined,
+						(error: unknown) => error,
+					);
+					await Promise.race([
+						loaded.promise,
+						rejected.then(() => {
+							throw new Error("Transcript switch finished before entering the load gate");
+						}),
+					]);
+					if (pick === "model") await f.session.setModelTemporary(opus, Effort.Max);
+					if (pick === "persisted model") {
+						expect(
+							await f.session.setModel(opus, "default", { persist: true, thinkingLevel: Effort.Max }),
+						).toEqual({
+							switched: true,
+						});
+					}
+					if (pick === "model" || pick === "persisted model") {
+						expect(f.session.model?.id).toBe(opus.id);
+						expect(f.session.configuredThinkingLevel()).toBe(pick === "model" ? Effort.Max : Effort.High);
+					}
+					if (pick === "effort") f.session.setThinkingLevel(Effort.Medium, true);
+					if (pick === "manual arm") expect(f.session.armPrewalk(opus, Effort.Medium)).toBe(true);
+					reject.resolve();
+					expect(await rejected).toMatchObject({ message: "rejected transcript" });
+				} finally {
+					reject.resolve();
+					release.resolve();
+					try {
+						await Promise.allSettled([turn, rejected]);
+					} finally {
+						setFile.mockRestore();
+					}
+				}
+				await turn;
+
+				const uninterrupted = pick === "no pick";
+				expect(f.session.model?.id).toBe(uninterrupted ? f.target.id : f.primary.id);
+				expect(f.session.configuredThinkingLevel()).toBe(uninterrupted ? Effort.Low : Effort.High);
+				expect(f.session.getPrewalkState()?.target.id).toBe(pick === "manual arm" ? opus.id : undefined);
+				expect(manager.getSessionLocalModelChange()?.role).toBe(uninterrupted ? "prewalk" : undefined);
+				expect(
+					f.session.agent
+						.peekSteeringQueue()
+						.some(message => message.role === "custom" && message.customType === "prewalk-checklist"),
+				).toBe(uninterrupted);
+				expect(f.notices.some(notice => notice.startsWith("Prewalk: switched"))).toBe(uninterrupted);
+				expect(models).toEqual(
+					uninterrupted
+						? [f.target.id]
+						: pick === "model" || pick === "persisted model"
+							? [opus.id, f.primary.id]
+							: [],
+				);
+
+				await f.session.prompt("explain without editing");
+				expect(f.requested.length).toBeGreaterThanOrEqual(2);
+				expect(f.requested.every(model => model === f.primary.id)).toBe(true);
+				expect(f.session.model?.id).toBe(f.primary.id);
+				expect(f.session.configuredThinkingLevel()).toBe(Effort.High);
+			},
+		);
+
 		it("preserves an explicit pick and replacement manual arm when an obsolete auto handoff resumes after persistence", async () => {
 			const f = createFixture([], { auto: "on" });
 			const entered = Promise.withResolvers<void>();

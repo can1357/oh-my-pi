@@ -194,6 +194,7 @@ export class PrewalkCoordinator {
 	/** A later model/effort selection owns the active model, even if its identity is unchanged. */
 	releaseHandoffAndAutoArm(): void {
 		if (this.#autoArm && this.#autoArm === this.#prewalk) {
+			this.#host.invalidateAutomaticSelection();
 			this.#scrubPlanNudge(undefined, true);
 			this.#clearPrewalkState();
 		}
@@ -455,7 +456,6 @@ export class PrewalkCoordinator {
 	/** Arms a prewalk immediately for an explicit slash-command request, replacing an automatic arm. */
 	arm(target: Model, thinkingLevel?: ConfiguredThinkingLevel): boolean {
 		if (this.#autoArm && this.#autoArm === this.#prewalk) {
-			this.#host.invalidateAutomaticSelection();
 			this.releaseHandoffAndAutoArm();
 		}
 		const active = this.#prewalk;

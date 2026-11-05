@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed a rejected transcript switch reviving an automatic prewalk target after an explicit model or thinking selection consumed its arm, while preserving pending handoffs when no selection intervenes ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
 - Fixed outgoing model selections publishing into a new session while its journal header is being persisted, without canceling selections when the journal reset fails ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
 - Fixed superseded session-only and role selections confirming an obsolete model in `/switch`, model pickers, or plan approval, including selections on worker sessions ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
 - Fixed published global model saves being lost across reloads or session switches while keeping project saves bound to their original session scope ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))

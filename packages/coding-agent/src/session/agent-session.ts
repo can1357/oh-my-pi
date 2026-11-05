@@ -12716,9 +12716,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 		}
 		this.agent.setModel(model);
-		onPublished?.();
-		// Explicit publication owns the session before reconciliation or subscriber callbacks can yield.
+		// Consume the old auto arm before capturing this publication's selection epoch.
 		if (selection === "explicit") this.#prewalk.releaseHandoffAndAutoArm();
+		onPublished?.();
 		// Model mutations driven through ModelControls (explicit /model, prewalk
 		// hand-offs, retry-fallback, model cycling) funnel through this method,
 		// so this is the single point that notifies subscribers (ACP config

@@ -262,7 +262,7 @@ export class ModelControls {
 		this.#publicationScope.preparation = {};
 	}
 
-	/** A /prewalk takeover cancels pending automatic selections, even across a switch that later rolls back. */
+	/** Consuming an auto arm cancels its pending selection, even across a switch that later rolls back. */
 	invalidateAutomaticSelection(): void {
 		this.#selectionGeneration++;
 		this.#automaticInvalidation++;
