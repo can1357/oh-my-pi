@@ -301,8 +301,48 @@ describe("runGcCommand blob sweep", () => {
 		await fs.mkdir(path.dirname(file), { recursive: true });
 		await fs.symlink(path.join(root, "missing", "transcript.jsonl"), file);
 
-		await expect(runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } })).rejects.toThrow(file);
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs).toMatchObject({ deleted: 0, wouldDelete: 0 });
+		expect(result.blobs?.errors.join("\n")).toContain(file);
+		expect(collectGcErrors(result).join("\n")).toContain("no blob was deleted");
 		expect(await Bun.file(blob).text()).toBe("KEEP ON INCOMPLETE SCAN");
+	});
+
+	// #18224: `gc.blobs` is on by default, so an unqualified preview walked the
+	// live tree, hit the dangling link and left the command on a stack trace
+	// with nothing on stdout.
+	test("an unqualified preview reports a dangling live transcript as data instead of ending the command", async () => {
+		const blob = await writeBlob(root, hashFor("default-preview-orphan"), "KEEP UNDER DEFAULTS");
+		await agePath(blob);
+		const file = path.join(getSessionsDir(root), "project", "dangling.jsonl");
+		await fs.mkdir(path.dirname(file), { recursive: true });
+		await fs.symlink(path.join(root, "gone", "transcript.jsonl"), file);
+
+		const result = await runGcCommand({ flags: { agentDir: root, json: true } });
+
+		expect(result.blobs).toMatchObject({ candidates: 1, wouldDelete: 0, deleted: 0 });
+		expect(result.blobs?.errors.join("\n")).toContain(file);
+		expect(collectGcErrors(result).join("\n")).toContain("no blob was deleted");
+		expect(await Bun.file(blob).text()).toBe("KEEP UNDER DEFAULTS");
+	});
+
+	test("a session directory the walk cannot list refuses the sweep instead of ending the command", async () => {
+		const blob = await writeBlob(root, hashFor("unlistable-orphan"), "KEEP UNDER EACCES");
+		await agePath(blob);
+		const locked = path.join(getSessionsDir(root), "locked");
+		await fs.mkdir(locked, { recursive: true });
+		await fs.chmod(locked, 0o000);
+		let result: GcResult;
+		try {
+			result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+		} finally {
+			await fs.chmod(locked, 0o700);
+		}
+
+		expect(result.blobs).toMatchObject({ wouldDelete: 0, deleted: 0 });
+		expect(result.blobs?.errors.join("\n")).toContain(locked);
+		expect(await Bun.file(blob).text()).toBe("KEEP UNDER EACCES");
 	});
 
 	test("round56 a dangling hidden transcript behind a live directory link stops blob deletion", async () => {
@@ -316,7 +356,10 @@ describe("runGcCommand blob sweep", () => {
 		const child = path.join(tree, ".nested", "child.jsonl");
 		await fs.symlink(path.join(root, "missing-child.jsonl"), child);
 
-		await expect(runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } })).rejects.toThrow(child);
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs).toMatchObject({ deleted: 0, wouldDelete: 0 });
+		expect(result.blobs?.errors.join("\n")).toContain(child);
 		expect(await Bun.file(blob).text()).toBe("KEEP OFFLOADED CHILD IMAGE");
 	});
 
@@ -372,9 +415,10 @@ describe("runGcCommand blob sweep", () => {
 				return result;
 			});
 
-			await expect(runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } })).rejects.toThrow(
-				"symbolic link",
-			);
+			const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+			expect(result.blobs?.errors.join("\n")).toContain("symbolic link");
+			expect(result.blobs).toMatchObject({ deleted: 0, wouldDelete: 0 });
 			expect(bytesRead).toBe(0);
 		});
 	}
@@ -677,7 +721,10 @@ describe("runGcCommand blob sweep", () => {
 		const bytes = gzipSync(`blob:sha256:${hash}\n${"{}\n".repeat(12 * 1024)}`);
 		await Bun.write(archive, bytes.subarray(0, -4));
 
-		await expect(runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } })).rejects.toThrow();
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs).toMatchObject({ deleted: 0, wouldDelete: 0 });
+		expect(result.blobs?.errors.join("\n")).toContain(archive);
 
 		expect(await Bun.file(referenced).exists()).toBe(true);
 		expect(await Bun.file(orphan).exists()).toBe(true);
@@ -748,13 +795,15 @@ describe("runGcCommand blob sweep", () => {
 				return await read(buffer, offset, length, position);
 			};
 		});
+		let result: GcResult;
 		try {
-			await expect(runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } })).rejects.toThrow(
-				"journal read failed",
-			);
+			result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
 		} finally {
 			readSpy.mockRestore();
 		}
+
+		expect(result.blobs).toMatchObject({ deleted: 0, wouldDelete: 0 });
+		expect(result.blobs?.errors.join("\n")).toContain("journal read failed");
 
 		expect(await Bun.file(orphan).exists()).toBe(true);
 		expect(await Bun.file(path.join(root, "gc.lock")).exists()).toBe(false);
@@ -1039,9 +1088,9 @@ describe("runGcCommand history checkpoint", () => {
 		await fs.mkdir(path.dirname(dbPath), { recursive: true });
 		await Bun.write(dbPath, "NOT A DATABASE, ".repeat(64));
 
-		await expect(runGcCommand({ flags: { agentDir: root, wal: true, apply: true } })).rejects.toThrow(
-			"file is not a database",
-		);
+		const result = await runGcCommand({ flags: { agentDir: root, wal: true, apply: true } });
+
+		expect(collectGcErrors(result).join("\n")).toContain("file is not a database");
 
 		expect(await Bun.file(path.join(root, "gc.lock")).exists()).toBe(false);
 	});
@@ -1052,7 +1101,9 @@ describe("runGcCommand history checkpoint", () => {
 		const dbPath = getHistoryDbPath(root);
 		await fs.mkdir(dbPath, { recursive: true });
 
-		await expect(runGcCommand({ flags: { agentDir: root, wal: true, apply: true } })).rejects.toThrow(
+		const result = await runGcCommand({ flags: { agentDir: root, wal: true, apply: true } });
+
+		expect(collectGcErrors(result).join("\n")).toContain(
 			`${dbPath} is a directory, not a regular file, so it was not read`,
 		);
 
@@ -1073,9 +1124,9 @@ describe("runGcCommand history checkpoint", () => {
 			reader.query("SELECT * FROM history").all();
 			writer.run("INSERT INTO history (prompt) VALUES ('after-reader')");
 
-			await expect(runGcCommand({ flags: { agentDir: root, wal: true, apply: true } })).rejects.toThrow(
-				`WAL checkpoint failed for ${dbPath}: busy=1`,
-			);
+			const result = await runGcCommand({ flags: { agentDir: root, wal: true, apply: true } });
+
+			expect(collectGcErrors(result).join("\n")).toContain(`WAL checkpoint failed for ${dbPath}: busy=1`);
 
 			expect(await Bun.file(path.join(root, "gc.lock")).exists()).toBe(false);
 		} finally {
@@ -3359,9 +3410,10 @@ test("round54 command failure retains a simultaneous lock release error", async 
 		if (String(file) === lock) throw Object.assign(new Error("EIO: round54 release"), { code: "EIO" });
 		return await unlink(file);
 	});
-	const run = runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
-	await expect(run).rejects.toThrow("EIO: round54 blob listing");
-	await expect(run).rejects.toThrow("EIO: round54 release");
+	const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+	const reported = collectGcErrors(result).join("\n");
+	expect(reported).toContain("EIO: round54 blob listing");
+	expect(reported).toContain("EIO: round54 release");
 	expect(await Bun.file(lock).exists()).toBe(true);
 });
 
@@ -3376,9 +3428,9 @@ test("round54 failed dangling pointer lookup surfaces instead of silently keepin
 		if (String(args[0]) === target) throw Object.assign(new Error("EIO: round54 pointer target"), { code: "EIO" });
 		return await Reflect.apply(stat, fs, args);
 	}) as typeof fs.stat);
-	await expect(runGcCommand({ flags: { agentDir: root, stale: true, apply: true } })).rejects.toThrow(
-		"EIO: round54 pointer target",
-	);
+	const result = await runGcCommand({ flags: { agentDir: root, stale: true, apply: true } });
+
+	expect(collectGcErrors(result).join("\n")).toContain("EIO: round54 pointer target");
 	expect(await Bun.file(marker).text()).toBe(target);
 	expect(await Bun.file(target).text()).toBe("ORIGINAL");
 });

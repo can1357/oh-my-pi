@@ -4288,8 +4288,11 @@ test(
 
 			expect(outcome).not.toBe("hung");
 			expect(await pipe.left()).toBe(PIPE_PAYLOAD);
-			expect(outcome).toBeInstanceOf(regularFile.NotARegularFile);
-			expect(outcome).toMatchObject({ file: link, kind: "a FIFO" });
+			// The refusal is data the sweep reports, not a throw that ends the command.
+			expect(outcome).toMatchObject({ blobs: { deleted: 0, wouldDelete: 0 } });
+			const refusal = (outcome as GcResult).blobs?.errors.join("\n") ?? "";
+			expect(refusal).toContain(link);
+			expect(refusal).toContain("a FIFO");
 		} finally {
 			await pipe.close();
 		}

@@ -367,6 +367,12 @@ export interface GcResult {
 	 * held. Also in the errors {@link collectGcErrors} gathers.
 	 */
 	lockNotReleased?: string[];
+	/**
+	 * A phase that threw instead of returning a result: its name and what it
+	 * said. The run goes on without it, and the note is among the errors
+	 * {@link collectGcErrors} gathers, so the command still exits non-zero.
+	 */
+	phaseFailures?: string[];
 }
 
 interface BlobCandidate {
@@ -603,6 +609,7 @@ export function collectGcErrors(result: GcResult): string[] {
 		...(result.reclaim?.errors ?? []).map(error => `reclaim: ${error}`),
 		...(result.compress?.errors ?? []).map(error => `compress: ${error}`),
 		...(result.lockNotReleased ?? []).map(note => `lock: ${note}`),
+		...(result.phaseFailures ?? []).map(note => `phase failed: ${note}`),
 	];
 }
 
@@ -714,18 +721,39 @@ const BLOB_REFERENCE_GLOBS = ["**/*.jsonl", "**/*.jsonl.gz", "**/*.jsonl.*.bak",
 	pattern => new Glob(pattern),
 );
 
-/** Live names follow directory aliases by content, but each real directory is walked only once. */
-async function collectLiveBlobReferenceFiles(root: string): Promise<string[]> {
+/** Transcript names a walk found, and names it could not look at or list. */
+interface BlobReferenceNames {
+	files: string[];
+	unreadable: string[];
+}
+
+/**
+ * Live names follow directory aliases by content, but each real directory is
+ * walked only once. A name this cannot resolve, list or look at is reported
+ * rather than thrown: it may hide a transcript, and a sweep that cannot see
+ * every transcript deletes nothing — see {@link collectReferencedBlobHashes}.
+ */
+async function collectLiveBlobReferenceFiles(root: string): Promise<BlobReferenceNames> {
 	const files: string[] = [];
+	const unreadable: string[] = [];
 	const directories = new Set<string>();
 	const walk = async (dir: string): Promise<void> => {
 		const real = await fs.realpath(dir).catch((error: unknown) => {
-			if (codeOf(error) === "ENOENT" || codeOf(error) === "ENOTDIR") return undefined;
-			throw error;
+			const code = codeOf(error);
+			if (code !== "ENOENT" && code !== "ENOTDIR")
+				unreadable.push(`${dir} could not be resolved (${errorMessage(error)})`);
+			return undefined;
 		});
 		if (real === undefined || directories.has(real)) return;
 		directories.add(real);
-		for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+		const entries = await fs.readdir(dir, { withFileTypes: true }).catch((error: unknown) => {
+			const code = codeOf(error);
+			if (code !== "ENOENT" && code !== "ENOTDIR")
+				unreadable.push(`${dir} could not be listed (${errorMessage(error)})`);
+			return undefined;
+		});
+		if (!entries) return;
+		for (const entry of entries) {
 			const file = path.join(dir, entry.name);
 			if (entry.isDirectory()) await walk(file);
 			else if (BLOB_REFERENCE_GLOBS.some(glob => glob.match(entry.name))) files.push(file);
@@ -734,21 +762,29 @@ async function collectLiveBlobReferenceFiles(root: string): Promise<string[]> {
 				// Only transcript-pattern names are passed on to the strict reader.
 				const target = await fs.stat(file).catch((error: unknown) => {
 					const code = codeOf(error);
-					if (code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP") return undefined;
-					throw error;
+					if (code !== "ENOENT" && code !== "ENOTDIR" && code !== "ELOOP")
+						unreadable.push(`${file} could not be checked (${errorMessage(error)})`);
+					return undefined;
 				});
 				if (target?.isDirectory()) await walk(file);
 			}
 		}
 	};
 	await walk(root);
-	return files;
+	return { files, unreadable };
 }
 
+/**
+ * Every transcript name a sweep must read before it may delete, and every
+ * name it could not. A sweep with one unreadable name deletes nothing: all
+ * roots share one blob store, so a transcript nobody could read may
+ * reference any blob in it.
+ */
 async function collectReferencedBlobHashes(
 	sessionRoots: { root: string; noFollow: boolean }[],
 	exactSessionFiles: string[],
-): Promise<Set<string>> {
+): Promise<{ hashes: Set<string>; unreadable: string[] }> {
+	const unreadable: string[] = [];
 	const files = new Map<string, { file: string; noFollow: boolean }>();
 	const decoder = new TextDecoder();
 	for (const { root, noFollow } of sessionRoots) {
@@ -758,7 +794,9 @@ async function collectReferencedBlobHashes(
 			// hidden ones, and read only transcript patterns. Every root shares
 			// one blob store: an unreadable transcript could reference any blob,
 			// so the entire sweep stops before deleting anything.
-			for (const file of await collectLiveBlobReferenceFiles(root)) {
+			const live = await collectLiveBlobReferenceFiles(root);
+			unreadable.push(...live.unreadable);
+			for (const file of live.files) {
 				files.set(normalizePathForComparison(file), { file, noFollow });
 			}
 			continue;
@@ -769,7 +807,8 @@ async function collectReferencedBlobHashes(
 				names = await Array.fromAsync(glob.scan({ cwd: root, followSymlinks: true, dot: true }));
 			} catch (error) {
 				if (codeOf(error) === "ENOENT") continue;
-				throw error;
+				unreadable.push(`${root} could not be listed (${errorMessage(error)})`);
+				continue;
 			}
 			for (const name of names) {
 				const file = path.join(root, name);
@@ -787,19 +826,27 @@ async function collectReferencedBlobHashes(
 
 	const hashes = new Set<string>();
 	for (const { file, noFollow } of files.values()) {
-		// Keep raw-text matching: recoverable malformed records can still own blobs.
-		await scanSessionLinesIfPresent(
-			file,
-			line => {
-				for (const match of decoder.decode(line).matchAll(BLOB_REF_RE)) {
-					const hash = match[1]?.toLowerCase();
-					if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
-				}
-			},
-			noFollow,
-		);
+		try {
+			// Keep raw-text matching: recoverable malformed records can still own blobs.
+			await scanSessionLinesIfPresent(
+				file,
+				line => {
+					for (const match of decoder.decode(line).matchAll(BLOB_REF_RE)) {
+						const hash = match[1]?.toLowerCase();
+						if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
+					}
+				},
+				noFollow,
+			);
+		} catch (error) {
+			// A name that is no regular file — a dangling or looping link, a
+			// FIFO, a device — says its own reason; anything else is named here.
+			unreadable.push(
+				error instanceof NotARegularFile ? error.message : `${file} could not be read (${errorMessage(error)})`,
+			);
+		}
 	}
-	return hashes;
+	return { hashes, unreadable };
 }
 
 /**
@@ -950,6 +997,13 @@ async function restoreReusedBlob(moved: string, canonical: string, result: BlobG
 	}
 }
 
+/**
+ * No name this phase reads can end the command: a transcript, a pointer or a
+ * directory it could not read is an error in {@link BlobGcResult.errors}, and
+ * one of them refuses the whole sweep — every root shares one blob store, so
+ * a transcript nobody read may reference any blob in it. A refused sweep
+ * reports what it found and deletes nothing.
+ */
 async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string): Promise<BlobGcResult> {
 	const blobDir = getBlobsDir(options.agentDir);
 	const sessionsRoot = getSessionsDir(options.agentDir);
@@ -958,28 +1012,61 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 		{ root: archiveSessionsRoot, noFollow: true },
 		{ root: getReclaimedSessionsDir(options.agentDir), noFollow: true },
 	];
+	const unreadable: string[] = [];
 	const exactSessionFiles = new Map<string, string>();
-	for (const file of await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))) {
-		if (!(await statIfPresent(file))?.isFile()) continue;
-		exactSessionFiles.set(normalizePathForComparison(file), file);
+	// A pointer that cannot be read may name a transcript holding the only
+	// reference to a blob, so it refuses the sweep like a transcript does.
+	try {
+		for (const file of await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))) {
+			if (!(await statIfPresent(file))?.isFile()) continue;
+			exactSessionFiles.set(normalizePathForComparison(file), file);
+		}
+	} catch (error) {
+		unreadable.push(
+			`the session markers in ${getCustomSessionFilesDir(options.agentDir)} could not be read (${errorMessage(error)})`,
+		);
 	}
-	for (const file of await collectBreadcrumbSessionFiles(getTerminalSessionsDir(options.agentDir))) {
-		exactSessionFiles.set(normalizePathForComparison(file), file);
+	try {
+		for (const file of await collectBreadcrumbSessionFiles(getTerminalSessionsDir(options.agentDir))) {
+			exactSessionFiles.set(normalizePathForComparison(file), file);
+		}
+	} catch (error) {
+		unreadable.push(
+			`the terminal breadcrumbs in ${getTerminalSessionsDir(options.agentDir)} could not be read (${errorMessage(error)})`,
+		);
 	}
 	const referenced = await collectReferencedBlobHashes(defaultRoots, [...exactSessionFiles.values()]);
-	const { candidates, staging } = await collectBlobCandidates(blobDir);
+	unreadable.push(...referenced.unreadable);
 	const result: BlobGcResult = {
-		referenced: referenced.size,
-		candidates: candidates.length,
+		referenced: referenced.hashes.size,
+		candidates: 0,
 		wouldDelete: 0,
 		deleted: 0,
 		bytes: 0,
 		errors: [],
 	};
+	let scan: BlobScan;
+	try {
+		scan = await collectBlobCandidates(blobDir);
+	} catch (error) {
+		// Nothing to delete can be named, so there is nothing to refuse.
+		result.errors.push(`${blobDir} could not be read (${errorMessage(error)}), so no blob was looked at`);
+		return result;
+	}
+	const { candidates, staging } = scan;
+	result.candidates = candidates.length;
+	if (unreadable.length > 0) {
+		result.errors.push(...unreadable);
+		result.errors.push(
+			`no blob was deleted: ${unreadable.length} name${unreadable.length === 1 ? "" : "s"} could not be read, ` +
+				"and any transcript among them may hold the only reference to a blob",
+		);
+		return result;
+	}
 
 	const deleteBeforeMs = Date.now() - GC_WRITE_GRACE_MS;
 	for (const candidate of candidates) {
-		if (referenced.has(candidate.hash)) continue;
+		if (referenced.hashes.has(candidate.hash)) continue;
 		if (candidate.mtimeMs > deleteBeforeMs) continue;
 		if (options.apply && !(await deleteBlobCandidate(candidate, deleteBeforeMs, result))) continue;
 		result.wouldDelete += candidate.paths.length;
@@ -3788,6 +3875,7 @@ export function renderText(result: GcResult): string {
 		lines.push(`wal: ${state}, ${formatBytes(result.wal.walBytes)} across ${result.wal.databases.length} dbs`);
 	}
 	for (const note of result.lockNotReleased ?? []) lines.push(`gc lock left behind: ${note}`);
+	for (const note of result.phaseFailures ?? []) lines.push(`gc phase failed, the rest of the run went on: ${note}`);
 	return `${lines.join("\n")}\n`;
 }
 
@@ -4546,16 +4634,37 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	const archiveRoot = getArchivedSessionsDir(options.agentDir);
 	// A preview writes nothing, the lock included: it reads the lock instead
 	// of taking it — see {@link withoutGcLock}.
+	const phaseFailures: string[] = [];
+	// No phase ends the command. A phase that throws instead of returning is
+	// named here, the rest of the run goes on, and the result — JSON on
+	// stdout, a non-zero exit from {@link collectGcErrors} — still reaches
+	// whoever asked. A preview that printed a stack trace and nothing else
+	// was the defect this guards (#18224).
+	const phase = async <T>(name: string, run: () => Promise<T>): Promise<T | undefined> => {
+		try {
+			return await run();
+		} catch (error) {
+			phaseFailures.push(`${name}: ${errorMessage(error)}`);
+			return undefined;
+		}
+	};
 	const run = async (lockPath: string): Promise<GcResult> => {
 		const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath };
 		const { solo } = options;
-		if (solo) return { ...next, ...(await SOLO_OPERATIONS[solo.flag].run(options, solo.target)) };
+		if (solo) {
+			try {
+				return { ...next, ...(await SOLO_OPERATIONS[solo.flag].run(options, solo.target)) };
+			} catch (error) {
+				phaseFailures.push(`${solo.flag}: ${errorMessage(error)}`);
+				return next;
+			}
+		}
 		// Pruned collab replicas release their blobs to this run's sweep.
-		if (options.runStale) next.stale = await runStaleGc(options);
-		if (options.runBlobs) next.blobs = await runBlobGc(options, archiveRoot);
-		if (options.runArchive) next.archive = await runArchiveGc(options, archiveRoot);
-		if (options.runCompress) next.compress = await runCompressGc(options, archiveRoot);
-		if (options.runWal) next.wal = await runWalGc(options);
+		if (options.runStale) next.stale = await phase("stale", () => runStaleGc(options));
+		if (options.runBlobs) next.blobs = await phase("blobs", () => runBlobGc(options, archiveRoot));
+		if (options.runArchive) next.archive = await phase("archive", () => runArchiveGc(options, archiveRoot));
+		if (options.runCompress) next.compress = await phase("compress", () => runCompressGc(options, archiveRoot));
+		if (options.runWal) next.wal = await phase("wal", () => runWalGc(options));
 		return next;
 	};
 	const lockNotReleased: string[] = [];
@@ -4563,6 +4672,7 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 		? await withGcLock(options.agentDir, run, { onReleaseFailure: note => lockNotReleased.push(note) })
 		: await withoutGcLock(options.agentDir, run);
 	if (lockNotReleased.length > 0) result.lockNotReleased = lockNotReleased;
+	if (phaseFailures.length > 0) result.phaseFailures = phaseFailures;
 
 	const output = options.json ? `${JSON.stringify(result, null, 2)}\n` : renderText(result);
 	process.stdout.write(output);
