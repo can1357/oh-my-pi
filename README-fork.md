@@ -1,0 +1,133 @@
+# Fork maintenance
+
+This checkout is a fork of [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi)
+that carries agent-messaging work on top of upstream. This file documents the
+branch model, the profile isolation that keeps fork runs away from the
+production `omp` install, and the rebase ritual that keeps feature branches on
+top of upstream.
+
+## Branch model
+
+| Branch                     | Holds                                                        | Pushed?           |
+| -------------------------- | ------------------------------------------------------------ | ----------------- |
+| `main`                     | A pure mirror of `upstream/main`; no fork commits, ever.     | Yes — mirror only |
+| `integrate/agents-upgrade` | The fork's integration base: upstream plus landed fork work. | No                |
+| `feat/*`                   | Short-lived feature branches on the integration branch.      | No — local only   |
+
+Do not commit on `main`. Keep fork work on `feat/*` and land it on
+`integrate/agents-upgrade`; rebase the feature branches whenever the integration
+branch moves.
+
+## Profile isolation
+
+Fork runs and fork test runs must use `$HOME/.omp-fork` as the agent directory
+and must never touch the production profile in `~/.omp`:
+
+```bash
+PI_CODING_AGENT_DIR=$HOME/.omp-fork bun test packages/coding-agent/test/<file>
+```
+
+- Set `PI_CODING_AGENT_DIR`, never `OMP_PROFILE`. A named profile derives its
+  agent dir under `~/.omp/profiles/<name>` and ignores `PI_CODING_AGENT_DIR`
+  (`packages/utils/src/dirs.ts`, `resolveActiveAgentDirOverride`), so a profile
+  variable silently defeats the isolation.
+- `bun test` is not hermetic on its own: run without the variable it writes
+  session, collab, worktree, and security scratch data into the production
+  profile.
+- Never run `bun run setup` in this checkout. Its `coding-agent link` and
+  `link omp` steps overwrite the production `~/.bun/bin/omp` link and the global
+  `~/.bun/install/global/node_modules` tree. Run `bun run build:native` when the
+  native addon is missing; `bun run build` builds the packages.
+- `bun install` rewrites `bun.lock` (catalog version normalization). Revert it
+  with `git checkout -- bun.lock`; never commit that diff.
+
+## The `omp-fork` launcher
+
+`scripts/omp-fork.sh` runs this checkout's CLI against the isolated profile:
+
+```bash
+install -m 755 scripts/omp-fork.sh ~/.local/bin/omp-fork
+omp-fork --version              # omp/18.16.0, reads and writes only ~/.omp-fork
+omp-fork config path            # /Users/<you>/.omp-fork
+```
+
+What it guarantees:
+
+- exports `PI_CODING_AGENT_DIR=$HOME/.omp-fork` before `exec bun
+  <fork>/packages/coding-agent/src/cli.ts "$@"`;
+- refuses to run when `OMP_PROFILE` or `PI_PROFILE` is set (exit 64), because a
+  named profile would bypass `PI_CODING_AGENT_DIR`;
+- resolves the checkout from `$HOME/Documents/oh-my-pi` by default and honors
+  `OMP_FORK_ROOT`; a missing checkout exits 66 with the expected path.
+
+The production `omp` on `PATH` (`~/.bun/bin/omp`) is untouched: use `omp` for
+the installed agent and `omp-fork` for this checkout.
+
+## Rebase ritual
+
+1. Sync the mirror (fast-forward only) and push it:
+
+   ```bash
+   git switch main
+   git fetch upstream main
+   git merge --ff-only upstream/main
+   git push origin main            # mirror commits only
+   ```
+
+2. Bring upstream into the integration branch. Merge — do not rebase the
+   integration branch itself, since feature branches are rebased onto it:
+
+   ```bash
+   git switch integrate/agents-upgrade
+   git merge main
+   ```
+
+3. Move every feature branch onto the integration branch:
+
+   ```bash
+   scripts/rebase-forks.sh
+   ```
+
+   The script rebases each local branch matching `feat/*` (override with
+   `OMP_FORK_BRANCHES`, or the base with `OMP_FORK_BASE`), skips branches already
+   on the base, and skips branches checked out in another worktree. It refuses to
+   start with uncommitted tracked changes or an unfinished rebase.
+
+4. Resolve conflicts. On the first conflict the script stops, lists the
+   conflicted files, and exits 1:
+
+   ```bash
+   git status                      # conflicted paths
+   # edit the files, then:
+   git add <files> && git rebase --continue
+   # or abandon this branch's rebase:
+   git rebase --abort
+   ```
+
+   Re-run `scripts/rebase-forks.sh` afterwards to continue with the remaining
+   branches.
+
+5. Re-run the fork's covering tests with the isolated profile before committing:
+
+   ```bash
+   PI_CODING_AGENT_DIR=$HOME/.omp-fork bun test \
+     packages/coding-agent/test/irc-bus.baseline.test.ts \
+     packages/coding-agent/test/tools/irc.test.ts \
+     packages/coding-agent/test/session/irc-bridge-relay.test.ts \
+     packages/coding-agent/test/task/executor-irc-wake-yield-reset.test.ts
+   ```
+
+## Baseline tests
+
+`packages/coding-agent/test/irc-bus.baseline.test.ts` pins the upstream mailbox
+contract the fork's messaging work builds on. It is a tripwire, not a copy of
+the IRC suite: its header names the upstream tests that already cover the
+headline scenarios (waiter resolution, parked revival, busy aside, unknown-id
+failure, mailbox cap) and asserts only the gaps — failed sends leave no mailbox
+residue, a waiter on a parked recipient still revives it, bus-level delivery to
+a streaming recipient queues an interrupt instead of prompting, and the mailbox
+cap bounds unread counts while `wait` drains survivors oldest-first.
+
+The full `bun test` run has pre-existing upstream failures (environmental
+browser-tab and cross-platform cases, plus parallel-run flakes). Treat only
+failures outside that recorded baseline as regressions.
