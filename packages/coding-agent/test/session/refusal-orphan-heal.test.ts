@@ -163,23 +163,23 @@ describe("isOrphanedSyntheticResult", () => {
 	it("flags a placeholder whose refused assistant turn was never stored", () => {
 		const branch = chain([userMessage("carry on")]);
 
-		expect(isOrphanedSyntheticResult(branch, syntheticResult("call-1"))).toBe(true);
+		expect(isOrphanedSyntheticResult(() => branch, syntheticResult("call-1"))).toBe(true);
 	});
 
 	it("keeps a placeholder whose assistant turn is stored — the pairing is what decides", () => {
 		const branch = chain([userMessage("carry on"), assistantWithCall("call-1", "toolUse")]);
 
-		expect(isOrphanedSyntheticResult(branch, syntheticResult("call-1"))).toBe(false);
+		expect(isOrphanedSyntheticResult(() => branch, syntheticResult("call-1"))).toBe(false);
 	});
 
 	it("keeps a real tool result whatever the branch holds: only placeholders are candidates", () => {
-		expect(isOrphanedSyntheticResult(chain([userMessage("carry on")]), realToolResult("call-1"))).toBe(false);
+		expect(isOrphanedSyntheticResult(() => chain([userMessage("carry on")]), realToolResult("call-1"))).toBe(false);
 	});
 
 	it("flags a placeholder for a different call than the stored turn made", () => {
 		const branch = chain([userMessage("carry on"), assistantWithCall("call-1", "toolUse")]);
 
-		expect(isOrphanedSyntheticResult(branch, syntheticResult("call-2"))).toBe(true);
+		expect(isOrphanedSyntheticResult(() => branch, syntheticResult("call-2"))).toBe(true);
 	});
 });
 
@@ -344,5 +344,37 @@ describe("the agent loop's placeholder and the request builder's predicate agree
 
 	it("does not recognise a real tool result", () => {
 		expect(isSyntheticNotExecutedToolResult(realToolResult("call-1") as ToolResultMessage)).toBe(false);
+	});
+
+	it("separates an interrupted call that never started from one that did", () => {
+		// `createSkippedToolResult` in the agent loop emits these two shapes for a
+		// mid-batch interrupt. The started one must NOT match: its tool ran and
+		// may have done partial work, so its result is real output and dropping
+		// it would lose history. The not-started one is a placeholder like any
+		// other. The predicate keys on the shape, so this is the boundary.
+		const notStarted = {
+			...(realToolResult("call-1") as ToolResultMessage),
+			details: { __synthetic: true, source: "interrupt_skipped", executed: false },
+		};
+		const started = {
+			...(realToolResult("call-2") as ToolResultMessage),
+			details: { __interrupted: true, source: "interrupt_skipped", execution: "started" },
+		};
+
+		expect(isSyntheticNotExecutedToolResult(notStarted)).toBe(true);
+		expect(isSyntheticNotExecutedToolResult(started)).toBe(false);
+	});
+
+	it("costs no branch lookup for a message that cannot be a placeholder", () => {
+		// Every user turn goes through this predicate on the persistence path.
+		let lookups = 0;
+		const branch = () => {
+			lookups++;
+			return chain([userMessage("carry on")]);
+		};
+
+		expect(isOrphanedSyntheticResult(branch, userMessage("next prompt"))).toBe(false);
+		expect(isOrphanedSyntheticResult(branch, realToolResult("call-1"))).toBe(false);
+		expect(lookups).toBe(0);
 	});
 });

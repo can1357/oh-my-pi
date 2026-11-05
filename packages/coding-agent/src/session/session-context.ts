@@ -250,11 +250,16 @@ export function isTranscriptEntry(entry: SessionEntry): entry is TranscriptEntry
  * only the newest assistant turn on the branch can own this call — an older
  * one would mean the result arrived out of its turn, which is itself an
  * orphan. An empty branch has nothing to pair with either.
+ *
+ * `branch` is a thunk, not an array: only a synthetic result can be orphaned,
+ * and every other message on the persistence path (every user turn, above all)
+ * must not pay a branch lookup to be told so.
  */
-export function isOrphanedSyntheticResult(branch: readonly SessionEntry[], message: AgentMessage): boolean {
+export function isOrphanedSyntheticResult(branch: () => readonly SessionEntry[], message: AgentMessage): boolean {
 	if (!isSyntheticToolResultMessage(message)) return false;
-	for (let index = branch.length - 1; index >= 0; index--) {
-		const entry = branch[index];
+	const entries = branch();
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
 		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
 		return !entry.message.content.some(block => block.type === "toolCall" && block.id === message.toolCallId);
 	}

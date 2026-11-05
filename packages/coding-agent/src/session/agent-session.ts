@@ -4283,7 +4283,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// history, which is what the drop exists to prevent), so its result goes
 		// with it. `buildSessionContext` applies the same predicate on load,
 		// which is what heals a session already carrying one.
-		if (isOrphanedSyntheticResult(this.sessionManager.getBranchView(), message)) {
+		if (isOrphanedSyntheticResult(() => this.sessionManager.getBranchView(), message)) {
 			logger.debug("Dropping synthetic tool result whose assistant turn was not stored", {
 				toolCallId: message.role === "toolResult" ? message.toolCallId : undefined,
 			});
