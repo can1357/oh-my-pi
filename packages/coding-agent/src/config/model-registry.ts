@@ -3087,26 +3087,42 @@ export class ModelRegistry {
 			if (configuredDiscoveryProviders.has(descriptor.providerId)) return false;
 			return providerFilter ? providerFilter.has(descriptor.providerId) : true;
 		});
-		// Captured before any credential await: a request leaves only through a
-		// fetch guarded by this identity, so a key resolved under one
-		// configuration never reaches another configuration's endpoint.
-		const identityAtStart = new Map<string, string>();
-		for (const { providerId } of [...standardProviderDescriptors, ...enabledSpecialProviderDescriptors]) {
-			identityAtStart.set(providerId, this.#providerConfigIdentity(providerId));
-		}
-		// The epoch travels WITH its descriptor rather than in a lookup table beside
-		// it. A table has to answer for a provider it may not hold, and the only
-		// answers available are an assertion or a re-read after the await — and a
-		// re-read reports "unchanged" for exactly the change this guard exists to
-		// catch. Pairing them makes the missing case unrepresentable.
+		// Captured before any credential await, and carried WITH the thing it
+		// describes rather than in a lookup table beside it. A table has to answer
+		// for a provider it may not hold, and the only answers available are an
+		// assertion or a re-read after the await — and a re-read reports
+		// "unchanged" for exactly the change these guards exist to catch. Pairing
+		// makes the missing case unrepresentable.
+		//
+		// The epoch guards the request: a discovery request leaves only through a
+		// fetch guarded by it, so a key resolved under one configuration never
+		// reaches another configuration's endpoint. The identity guards
+		// publication, applied by the caller once the roster comes back.
 		const standardAtStart = standardProviderDescriptors.map(descriptor => ({
 			descriptor,
 			epoch: this.#configEpoch(descriptor.providerId),
+			configIdentity: this.#providerConfigIdentity(descriptor.providerId),
 		}));
 		const specialAtStart = enabledSpecialProviderDescriptors.map(descriptor => ({
 			descriptor,
 			epoch: this.#configEpoch(descriptor.providerId),
+			configIdentity: this.#providerConfigIdentity(descriptor.providerId),
 		}));
+		// Catalog-only providers have no endpoint manager and no credential to
+		// resolve, so nothing of theirs happens before the awaits below — but their
+		// identity is still captured here, with the others. Selecting them needs
+		// only state that is already settled, and capturing it after the awaits is
+		// what left their publication check reading a configuration that had
+		// already moved.
+		const bundledProviderIds: Record<string, true> = Object.create(null);
+		for (const providerId of getBundledProviders()) bundledProviderIds[providerId] = true;
+		const catalogOnlyAtStart = MODELS_DEV_CATALOG_PROVIDER_IDS.filter(providerId => {
+			if (BUILT_IN_MODEL_MANAGER_PROVIDER_IDS[providerId] === true) return false;
+			if (bundledProviderIds[providerId] !== true) return false;
+			if (disabledProviders.has(providerId) || configuredDiscoveryProviders.has(providerId)) return false;
+			if (providerFilter && !providerFilter.has(providerId)) return false;
+			return !this.#runtimeModelManagers.has(providerId);
+		}).map(providerId => ({ providerId, configIdentity: this.#providerConfigIdentity(providerId) }));
 		const isUnchanged = (providerId: string, epoch: number) => this.#configEpoch(providerId) === epoch;
 		const standardProviderKeys = await Promise.all(
 			standardProviderDescriptors.map(descriptor => {
@@ -3135,9 +3151,9 @@ export class ModelRegistry {
 				),
 			),
 		);
-		const options: ModelManagerOptions<Api>[] = [];
+		const options: Array<{ options: ModelManagerOptions<Api>; configIdentity: string }> = [];
 		for (let i = 0; i < standardAtStart.length; i++) {
-			const { descriptor, epoch } = standardAtStart[i];
+			const { descriptor, epoch, configIdentity } = standardAtStart[i];
 			// The configuration moved while the key resolved: the next pass discovers it.
 			if (!isUnchanged(descriptor.providerId, epoch)) continue;
 			const apiKey = standardProviderKeys[i];
@@ -3174,38 +3190,42 @@ export class ModelRegistry {
 				const modelsDev = managerOptions.modelsDev
 					? { ...managerOptions.modelsDev, additiveOnly: true }
 					: modelsDevCatalogFallback(descriptor.providerId, this.#fetch);
-				options.push(modelsDev ? { ...managerOptions, modelsDev } : managerOptions);
+				options.push({
+					options: modelsDev ? { ...managerOptions, modelsDev } : managerOptions,
+					configIdentity,
+				});
 			}
 		}
 
 		for (let i = 0; i < specialAtStart.length; i++) {
-			const { descriptor, epoch } = specialAtStart[i];
+			const { descriptor, epoch, configIdentity } = specialAtStart[i];
 			if (!isUnchanged(descriptor.providerId, epoch)) continue;
 			const key = descriptor.resolveKey(specialKeys[i]);
 			if (!isAuthenticated(key)) {
 				continue;
 			}
-			options.push(descriptor.createOptions(key, specialKeys[i], this.#guardedFetch(descriptor.providerId, epoch)));
+			options.push({
+				options: descriptor.createOptions(key, specialKeys[i], this.#guardedFetch(descriptor.providerId, epoch)),
+				configIdentity,
+			});
 		}
 
 		// Catalog-only providers have no endpoint manager. Give their bundled
-		// slices the same shared remote layer without requiring credentials.
-		const bundledProviderIds: Record<string, true> = Object.create(null);
-		for (const providerId of getBundledProviders()) bundledProviderIds[providerId] = true;
-		for (const providerId of MODELS_DEV_CATALOG_PROVIDER_IDS) {
-			if (BUILT_IN_MODEL_MANAGER_PROVIDER_IDS[providerId] === true) continue;
-			if (bundledProviderIds[providerId] !== true) continue;
-			if (disabledProviders.has(providerId) || configuredDiscoveryProviders.has(providerId)) continue;
-			if (providerFilter && !providerFilter.has(providerId)) continue;
-			if (this.#runtimeModelManagers.has(providerId)) continue;
+		// slices the same shared remote layer without requiring credentials. The
+		// selection happened before the awaits, with its identity; this loop only
+		// builds what was selected.
+		for (const { providerId, configIdentity } of catalogOnlyAtStart) {
 			const modelsDev = modelsDevCatalogFallback(providerId, this.#fetch);
 			if (!modelsDev) continue;
 			options.push({
-				providerId,
-				cacheProviderId: resolveModelCacheProviderId(providerId, {
-					baseUrl: this.#descriptorBaseUrl(providerId),
-				}),
-				modelsDev,
+				options: {
+					providerId,
+					cacheProviderId: resolveModelCacheProviderId(providerId, {
+						baseUrl: this.#descriptorBaseUrl(providerId),
+					}),
+					modelsDev,
+				},
+				configIdentity,
 			});
 		}
 
@@ -3217,9 +3237,8 @@ export class ModelRegistry {
 		// caller applies it at publication, so a discovery started under another
 		// configuration never answers for this one.
 		const managers: Array<{ options: ModelManagerOptions<Api>; isCurrent: () => boolean }> = options.map(
-			managerOptions => {
+			({ options: managerOptions, configIdentity }) => {
 				const { providerId } = managerOptions;
-				const identity = identityAtStart.get(providerId) ?? this.#providerConfigIdentity(providerId);
 				return {
 					options: {
 						...managerOptions,
@@ -3228,7 +3247,7 @@ export class ModelRegistry {
 							this.#configuredBaseUrl(providerId),
 						),
 					},
-					isCurrent: () => this.#providerConfigIdentity(providerId) === identity,
+					isCurrent: () => this.#providerConfigIdentity(providerId) === configIdentity,
 				};
 			},
 		);
