@@ -468,3 +468,146 @@ async fn a_callout_operand_keeps_its_own_arguments_and_the_callers_locals() {
 	)])
 	.await;
 }
+
+/// A write to the positional parameters that a callout's launch makes must not
+/// outlive the operand. The launch vector is the operand command's own `$@`,
+/// so whatever runs in the caller's frame after the operand returns — an EXIT
+/// trap the operand installed, the rest of the caller — reads the caller's
+/// parameters again, as it does in an ordinary `( … )` subshell of the same
+/// caller. Measured on Bash 5.2.21 and 5.3.0 (`explore/gen8.py` rows c1-c4),
+/// which agree on every row.
+#[tokio::test]
+async fn a_callouts_launch_vector_does_not_outlive_its_operand() {
+	const EXIT_TRAP: &str =
+		"report() { trap 'echo \"  EXIT=[$*] n=$# F=${FUNCNAME[0]:-none}\"' EXIT; }";
+	const EXIT_TRAP_FILE: &str =
+		"report() { trap 'echo \"  EXIT=[$*] n=$# F=${FUNCNAME[0]:-none}\" > out' EXIT; }";
+	assert_callout_matches_subshell(&[
+		// `timeout` builds its subshell with `run_subshell_in`.
+		(
+			&[],
+			&format!("set -- s1 s2\n{EXIT_TRAP}\nf() {{ timeout 5 report OWN ARG; }}\nf F1 F2"),
+			&[],
+			&format!("set -- s1 s2\n{EXIT_TRAP}\nf() {{ ( report OWN ARG ); }}\nf F1 F2"),
+			"  EXIT=[F1 F2] n=2 F=f\n",
+		),
+		// `extdebug` pushes an argument base as well, and changes nothing here.
+		(
+			&[],
+			&format!(
+				"set -- s1 s2\nshopt -s extdebug\n{EXIT_TRAP}\nf() {{ timeout 5 report OWN ARG; }}\nf \
+				 F1 F2"
+			),
+			&[],
+			&format!(
+				"set -- s1 s2\nshopt -s extdebug\n{EXIT_TRAP}\nf() {{ ( report OWN ARG ); }}\nf F1 F2"
+			),
+			"  EXIT=[F1 F2] n=2 F=f\n",
+		),
+		// Outside any function the shell's own parameters are what remain.
+		(
+			&[],
+			&format!("set -- s1 s2\n{EXIT_TRAP}\ntimeout 5 report OWN ARG"),
+			&[],
+			&format!("set -- s1 s2\n{EXIT_TRAP}\n( report OWN ARG )"),
+			"  EXIT=[s1 s2] n=2 F=none\n",
+		),
+		// `nohup` builds its subshell with `exec_subshell_in` instead, and
+		// detaches the operand's output, so the trap writes to a file.
+		(
+			&[],
+			&format!(
+				"set -- s1 s2\n{EXIT_TRAP_FILE}\nf() {{ nohup report OWN ARG >/dev/null 2>&1; }}\nf \
+				 F1 F2\ncat out"
+			),
+			&[],
+			&format!(
+				"set -- s1 s2\n{EXIT_TRAP_FILE}\nf() {{ ( report OWN ARG ); }}\nf F1 F2\ncat out"
+			),
+			"  EXIT=[F1 F2] n=2 F=f\n",
+		),
+	])
+	.await;
+}
+
+/// The operand's own run is what the launch vector belongs to, so a RETURN
+/// trap of the operand — which runs inside it — still reads the operand's own
+/// arguments. Measured on Bash 5.2.21 and 5.3.0 (`explore/gen8.py` rows
+/// c5-c7).
+#[tokio::test]
+async fn a_callout_operands_return_trap_still_reads_its_own_arguments() {
+	const RETURN_TRAP: &str = "report() { trap 'trap - RETURN; echo \"  RETURN=[$*] n=$# \
+	                           F=${FUNCNAME[0]:-none}\"' RETURN; :; }";
+	const RETURN_TRAP_FILE: &str = "report() { trap 'trap - RETURN; echo \"  RETURN=[$*] n=$# \
+	                                F=${FUNCNAME[0]:-none}\" > out' RETURN; :; }";
+	assert_callout_matches_subshell(&[
+		(
+			&[],
+			&format!("set -- s1 s2\n{RETURN_TRAP}\nf() {{ timeout 5 report OWN ARG; }}\nf F1 F2"),
+			&[],
+			&format!("set -- s1 s2\n{RETURN_TRAP}\nf() {{ ( report OWN ARG ); }}\nf F1 F2"),
+			"  RETURN=[OWN ARG] n=2 F=report\n",
+		),
+		(
+			&[],
+			&format!(
+				"set -- s1 s2\nshopt -s extdebug\n{RETURN_TRAP}\nf() {{ timeout 5 report OWN ARG; \
+				 }}\nf F1 F2"
+			),
+			&[],
+			&format!(
+				"set -- s1 s2\nshopt -s extdebug\n{RETURN_TRAP}\nf() {{ ( report OWN ARG ); }}\nf F1 \
+				 F2"
+			),
+			"  RETURN=[OWN ARG] n=2 F=report\n",
+		),
+		(
+			&[],
+			&format!(
+				"set -- s1 s2\n{RETURN_TRAP_FILE}\nf() {{ nohup report OWN ARG >/dev/null 2>&1; }}\nf \
+				 F1 F2\ncat out"
+			),
+			&[],
+			&format!(
+				"set -- s1 s2\n{RETURN_TRAP_FILE}\nf() {{ ( report OWN ARG ); }}\nf F1 F2\ncat out"
+			),
+			"  RETURN=[OWN ARG] n=2 F=report\n",
+		),
+	])
+	.await;
+}
+
+/// An `exit` from inside the operand runs the EXIT trap above the operand's
+/// own frames, so that trap reads the operand's arguments, not the caller's:
+/// the launch vector ends with the operand's run, not before its traps.
+/// Measured on Bash 5.2.21 and 5.3.0 (`explore/gen8.py` rows c8-c9).
+///
+/// The engine's own `( … )` subshell cannot be the control here: it unwinds
+/// the function's frames before it starts its EXIT trap, so it prints
+/// `EXIT=[F1 F2] F=[f]` where both Bash versions print the operand's. That is
+/// a defect of the ordinary subshell's exit path, present at main and
+/// untouched by this change; these rows pin the callout against Bash.
+#[tokio::test]
+async fn an_exit_inside_a_callout_operand_keeps_the_operands_arguments() {
+	const EXIT_TRAP: &str =
+		"report() { trap 'echo \"  EXIT=[$*] F=[${FUNCNAME[*]}]\"' EXIT; exit 4; }";
+	assert_rows(&[
+		(
+			&[],
+			&format!(
+				"set -- s1 s2\n{EXIT_TRAP}\nf() {{ timeout 5 report OWN ARG; echo \"  rc=$?\"; }}\nf \
+				 F1 F2"
+			),
+			"  EXIT=[OWN ARG] F=[report f]\n  rc=4\n",
+		),
+		(
+			&[],
+			&format!(
+				"set -- s1 s2\nshopt -s extdebug\n{EXIT_TRAP}\nf() {{ timeout 5 report OWN ARG; echo \
+				 \"  rc=$?\"; }}\nf F1 F2"
+			),
+			"  EXIT=[OWN ARG] F=[report f]\n  rc=4\n",
+		),
+	])
+	.await;
+}
