@@ -13,6 +13,12 @@
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { retryWaitHeaders } from "@oh-my-pi/pi-ai/utils/retry-after";
+import {
+	carryRetryWaitRefusal,
+	hasRefusedRetryWaitNote,
+	markRetryWaitRefused,
+	refusedRetryWaitNote,
+} from "@oh-my-pi/pi-ai/utils/retry-wait";
 
 export class CompactionCancelledError extends Error {
 	override readonly name = "CompactionCancelledError" as const;
@@ -35,6 +41,10 @@ export class NativeCompactionError extends Error {
 
 	constructor(cause: unknown) {
 		super(cause instanceof Error ? cause.message : String(cause), { cause });
+		// The wrapper is what reaches a reader, so a refused wait the cause was
+		// marked with travels onto it; otherwise compaction stops on the caller's
+		// bound and the turn says only that the provider refused.
+		carryRetryWaitRefusal(cause, this);
 	}
 }
 
@@ -48,9 +58,20 @@ export class NativeCompactionError extends Error {
  */
 export function failedResponseError(text: string, response: AssistantMessage): Error {
 	const headers = retryWaitHeaders(response.errorRetryAfterMs);
-	return response.errorStatus === undefined
-		? Object.assign(new Error(text), { headers })
-		: new AIError.ProviderHttpError(text, response.errorStatus, { headers });
+	const refused = response.errorRetryWaitRefusal;
+	// Two conversions stand between this message and a person — this one and
+	// `NativeCompactionError`, which keeps only the text and the cause — so the
+	// refusal is written into the text as well as marked on the error. Without
+	// the words, a compaction refused for exceeding the caller's bound reads as
+	// a bare provider failure.
+	const shown =
+		refused !== undefined && !hasRefusedRetryWaitNote(text) ? `${text} ${refusedRetryWaitNote(refused)}` : text;
+	const error =
+		response.errorStatus === undefined
+			? Object.assign(new Error(shown), { headers })
+			: new AIError.ProviderHttpError(shown, response.errorStatus, { headers });
+	if (refused !== undefined) markRetryWaitRefused(error, refused);
+	return error;
 }
 
 /**

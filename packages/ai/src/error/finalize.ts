@@ -183,6 +183,25 @@ export function applyFinalizeResult(
 }
 
 /**
+ * Records a refused wait on a message, structured and in words.
+ *
+ * The two must travel together: a structured field no display renders tells
+ * nobody anything, and a note with no field cannot be read by a caller. Every
+ * producer of a refusal that does not go through {@link finalize} — a relay
+ * decoding one off the wire, a layer that decided after the message was built
+ * — records it here, so none of them can ship half of it. Nothing is appended
+ * twice, and the classification the message already carries is left alone: a
+ * refusal is not a reason.
+ */
+export function recordRefusedRetryWait(output: AssistantMessage, refused: RefusedRetryWait): void {
+	if (output.errorRetryWaitRefusal === undefined) output.errorRetryWaitRefusal = refused;
+	const shown = output.errorDisplayMessage ?? output.errorMessage;
+	if (shown !== undefined && !hasRefusedRetryWaitNote(shown)) {
+		output.errorDisplayMessage = `${shown} ${refusedRetryWaitNote(refused)}`;
+	}
+}
+
+/**
  * Records on an already-finalized message that a wait was refused after it was
  * built.
  *
@@ -190,16 +209,10 @@ export function applyFinalizeResult(
  * whether to replay only once it holds the failed turn's message, so the
  * refusal cannot travel through {@link finalize}. The message is the only
  * thing a reader sees, so the bound that stopped the rotation is written onto
- * it here instead, as {@link applyFinalizeResult} would have. Nothing is
- * appended twice, and the classification the message already carries is left
- * alone: a refusal is not a reason.
+ * it here instead, as {@link applyFinalizeResult} would have.
  */
 export function applyRefusedRetryWait(output: AssistantMessage, failure: unknown): void {
 	const refused = retryWaitRefusal(failure);
 	if (refused === undefined || output.errorRetryWaitRefusal !== undefined) return;
-	output.errorRetryWaitRefusal = refused;
-	const shown = output.errorDisplayMessage ?? output.errorMessage;
-	if (shown !== undefined && !hasRefusedRetryWaitNote(shown)) {
-		output.errorDisplayMessage = `${shown} ${refusedRetryWaitNote(refused)}`;
-	}
+	recordRefusedRetryWait(output, refused);
 }

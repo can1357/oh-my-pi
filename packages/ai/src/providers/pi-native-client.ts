@@ -252,7 +252,9 @@ export function streamPiNative<TApi extends Api>(
 			});
 			let sawTerminal = false;
 			for await (const frame of watchedSource) {
-				const event = isGatewayFailureFrame(frame) ? gatewayFailureEvent(model as Model<Api>, frame) : frame;
+				const event = isGatewayFailureFrame(frame)
+					? gatewayFailureEvent(model as Model<Api>, frame)
+					: sanitizeRelayedRefusal(frame);
 				if (event.type === "done" || event.type === "error") sawTerminal = true;
 				stream.push(event);
 				// `stream.push` resolves `.result()` on `done`/`error`; subsequent
@@ -315,13 +317,34 @@ function isGatewayFailureFrame(frame: PiNativeWireEvent): frame is GatewayFailur
 	return frame.type === "error" && frame.error === undefined;
 }
 
+/**
+ * A relayed event with any refusal it carries validated.
+ *
+ * A gateway's event is untrusted JSON. `errorRetryWaitRefusal` is read by
+ * recovery to decide not to retry (`oneshot-retry`), so a malformed one —
+ * `false`, a string, a wait shorter than its own limit — would suppress a
+ * retry that should have happened. The payload-less envelope below validates
+ * its own copy; a full event's nested message needs the same gate, because it
+ * reaches the same reader.
+ */
+function sanitizeRelayedRefusal(frame: AssistantMessageEvent): AssistantMessageEvent {
+	if (frame.type !== "error") return frame;
+	const refusal: unknown = frame.error.errorRetryWaitRefusal;
+	if (refusal !== undefined && !isRefusedRetryWait(refusal)) delete frame.error.errorRetryWaitRefusal;
+	return frame;
+}
+
 /** Canonical `error` event for a {@link GatewayFailureFrame}, attributed to the requested model. */
 function gatewayFailureEvent(model: Model<Api>, frame: GatewayFailureFrame): AssistantMessageEvent {
 	const error = makeSyntheticAssistant(model);
 	error.stopReason = "error";
 	error.errorMessage = frame.errorMessage || "auth-gateway stream failed";
 	if (isRetryWaitMs(frame.errorRetryAfterMs)) error.errorRetryAfterMs = frame.errorRetryAfterMs;
-	if (isRefusedRetryWait(frame.errorRetryWaitRefusal)) error.errorRetryWaitRefusal = frame.errorRetryWaitRefusal;
+	// Structured and in words together: a field no display renders tells the
+	// person nothing about why the provider stopped.
+	if (isRefusedRetryWait(frame.errorRetryWaitRefusal)) {
+		AIError.recordRefusedRetryWait(error, frame.errorRetryWaitRefusal);
+	}
 	return { type: "error", reason: "error", error };
 }
 

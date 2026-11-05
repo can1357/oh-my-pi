@@ -455,7 +455,10 @@ describe("branch summarization", () => {
 			}),
 		});
 
-		expect(result.error).toContain("raw-http-request=/tmp/1.json");
+		// The dump path is one of omp's own additions, so it rides on the shown
+		// text; `error` stays the provider's own words, which decisions read.
+		expect(result.errorDisplayMessage).toContain("raw-http-request=/tmp/1.json");
+		expect(result.error).toBe("HTTP 400\nunknown model");
 	});
 
 	test("returns an error for a summary that hit the output limit, without another call", async () => {

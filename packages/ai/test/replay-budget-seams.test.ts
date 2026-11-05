@@ -516,7 +516,10 @@ describe("a correction the server asked to delay by 30 s, against a 2 s budget",
 					limitMs: 10_000,
 					option: "providerRetryWaitCeilingMs",
 				});
-				expect(errorDisplayText(result)).toContain("so the provider did not retry");
+				// The words must name the wait and the bound, not merely end in the
+				// marker: a note that identifies neither tells the person nothing.
+				expect(errorDisplayText(result)).toContain("server asked to wait 30 s before retrying");
+				expect(errorDisplayText(result)).toContain("10 s providerRetryWaitCeilingMs refused it");
 			} finally {
 				server.stop();
 			}
@@ -591,7 +594,10 @@ describe("a retry with another credential, against a failure that names a 30 s w
 			limitMs: 10_000,
 			option: "providerRetryWaitCeilingMs",
 		});
-		expect(errorDisplayText(result)).toContain("so the provider did not retry");
+		// The words must name the wait and the bound, not merely end in the
+		// marker: a note that identifies neither tells the person nothing.
+		expect(errorDisplayText(result)).toContain("server asked to wait 30 s before retrying");
+		expect(errorDisplayText(result)).toContain("10 s providerRetryWaitCeilingMs refused it");
 	});
 
 	// The stock resolver rotates through stored credentials and may sleep out a
