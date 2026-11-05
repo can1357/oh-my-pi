@@ -1,0 +1,68 @@
+import type { UsageProvider, UsageReport } from "@oh-my-pi/pi-ai";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+
+/**
+ * Loaded with `-e` into the child `omp`. Registers two loopback providers whose base URLs,
+ * OAuth rows and usage come from the fake in the test process:
+ *
+ * - `govplan` stands in for a provider the `default` role may use.
+ * - `govplan-g` stands in for a provider only the `task` role may use.
+ *
+ * The fake's base URL arrives as `GOVPLAN_FAKE_URL`. Login and refresh are refused: the seeded
+ * OAuth rows never expire, so any refresh is a defect the scenarios would expose.
+ */
+export default function govplanExtension(pi: ExtensionAPI): void {
+	const fake = process.env.GOVPLAN_FAKE_URL;
+	if (!fake) throw new Error("GOVPLAN_FAKE_URL is required by the govplan fixture");
+
+	for (const provider of ["govplan", "govplan-g"] as const) {
+		const usage: UsageProvider = {
+			id: provider,
+			async fetchUsage(params, context): Promise<UsageReport | null> {
+				const response = await context.fetch(`${fake}/${provider}/usage`, {
+					headers: { Authorization: `Bearer ${params.credential.accessToken ?? ""}` },
+					signal: params.signal,
+				});
+				if (!response.ok) throw new Error(`govplan usage endpoint answered ${response.status}`);
+				return (await response.json()) as UsageReport;
+			},
+		};
+		pi.registerProvider(provider, {
+			baseUrl: `${fake}/${provider}/v1`,
+			api: "openai-completions",
+			usage,
+			oauth: {
+				name: `Govplan fixture (${provider})`,
+				async login() {
+					throw new Error("the govplan fixture has no interactive login");
+				},
+				async refreshToken() {
+					throw new Error("the govplan fixture never refreshes: seeded rows do not expire");
+				},
+				getApiKey(credentials) {
+					return credentials.access;
+				},
+			},
+			models: [
+				{
+					id: "m",
+					name: "Govplan m",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 131072,
+					maxTokens: 1024,
+				},
+				{
+					id: "m2",
+					name: "Govplan m2",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 131072,
+					maxTokens: 1024,
+				},
+			],
+		});
+	}
+}

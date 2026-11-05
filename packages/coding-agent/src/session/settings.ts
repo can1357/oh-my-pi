@@ -952,6 +952,7 @@ export const cfgUsageGovernorEnabled = register({
 });
 
 function validateUsageGovernorLeadPct(raw: unknown): void {
+	if (raw === undefined || raw === null) return;
 	if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0 || raw > 100) {
 		throw new Error(`usageGovernor.leadPct must be a number from 0 to 100, got ${JSON.stringify(raw)}`);
 	}
