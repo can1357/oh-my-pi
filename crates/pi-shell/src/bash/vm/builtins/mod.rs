@@ -32,38 +32,38 @@ pub mod trap;
 mod vars;
 pub mod zsh_args;
 mod zsh_dir;
-mod zsh_kill;
 pub mod zsh_jobs;
+mod zsh_kill;
+mod zsh_mod_attr;
+mod zsh_mod_cap;
+mod zsh_mod_clone;
+pub mod zsh_mod_curses;
 mod zsh_mod_datetime;
+pub mod zsh_mod_example;
+mod zsh_mod_files;
+pub mod zsh_mod_langinfo;
+pub mod zsh_mod_mapfile;
 pub mod zsh_mod_mathfunc;
 pub mod zsh_mod_nearcolor;
+pub mod zsh_mod_newuser;
 pub mod zsh_mod_pcre;
-pub mod zsh_mod_regex;
 mod zsh_mod_private;
+pub mod zsh_mod_regex;
+mod zsh_mod_rlimits;
+pub mod zsh_mod_sched;
+mod zsh_mod_socket;
+mod zsh_mod_stat;
+pub mod zsh_mod_system;
+pub mod zsh_mod_tcp;
 pub mod zsh_mod_termcap;
 pub mod zsh_mod_terminfo;
 mod zsh_mod_util;
-mod zsh_mod_cap;
-pub mod zsh_mod_example;
-pub mod zsh_mod_newuser;
-mod zsh_mod_rlimits;
-pub mod zsh_mod_sched;
 pub mod zsh_mod_watch;
-pub mod zsh_mod_zprof;
-mod zsh_mod_clone;
-pub mod zsh_mod_curses;
-pub mod zsh_mod_zpty;
-mod zsh_mod_zutil;
-mod zsh_mod_attr;
-mod zsh_mod_files;
-pub mod zsh_mod_mapfile;
-mod zsh_mod_stat;
-pub mod zsh_mod_langinfo;
-mod zsh_mod_socket;
-pub mod zsh_mod_system;
-pub mod zsh_mod_tcp;
-mod zsh_mod_zselect;
 pub mod zsh_mod_zftp;
+pub mod zsh_mod_zprof;
+pub mod zsh_mod_zpty;
+mod zsh_mod_zselect;
+mod zsh_mod_zutil;
 pub mod zsh_module;
 pub mod zsh_names;
 pub mod zsh_print;
@@ -82,7 +82,7 @@ pub use self::{
 	trap::hard_ignore,
 	vars::{
 		Lhs, assign, assign_loop_var, assign_special_prefix, declare_line, define_function,
-		parse_compound, prefix_value, set_value,
+		emit_assignment, emit_assignment_at, parse_compound, prefix_value, set_value,
 	},
 	zsh_vars::assign_zsh_loop_var,
 };

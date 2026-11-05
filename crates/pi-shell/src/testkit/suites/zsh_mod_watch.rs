@@ -51,7 +51,8 @@ fn zsh_mod_watch_defaults_and_tied_parameters() {
 	assert_eq!(err, "");
 	assert_eq!(
 		out,
-		"%n has %a %l from %m. 60 array-special scalar-special scalar integer\na:b\nx y\n+b:log\n+p:WATCH\n+p:watch\n"
+		"%n has %a %l from %m. 60 array-special scalar-special scalar integer\na:b\nx \
+		 y\n+b:log\n+p:WATCH\n+p:watch\n"
 	);
 	assert_eq!(st, 0);
 }
@@ -61,8 +62,8 @@ fn zsh_mod_watch_log_reports_every_session_in_login_order() {
 	let (out, err, st) =
 		zsh_on(host(sessions()), "zmodload zsh/watch; watch=(all); log; echo $?; log");
 	assert_eq!(err, "");
-	let once = "can has logged on console from .\nbob has logged on pts/3 from 10.0.0.7.\nalice has \
-	            logged on s001 from box.\n";
+	let once = "can has logged on console from .\nbob has logged on pts/3 from 10.0.0.7.\nalice \
+	            has logged on s001 from box.\n";
 	assert_eq!(out, format!("{once}0\n{once}"));
 	assert_eq!(st, 0);
 }

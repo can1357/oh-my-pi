@@ -115,16 +115,16 @@ fn builtins_autoload_their_module() {
 	let (out, ..) = zsh("zmodload -e zsh/zutil; echo $?; zstyle; zmodload; zmodload -lF zsh/zutil");
 	assert_eq!(
 		out,
-		"1\nzsh/complete\nzsh/main\nzsh/zle\nzsh/zutil\n-b:zformat\n-b:zparseopts\n-b:zregexparse\n\
-		 +b:zstyle\n"
+		"1\nzsh/complete\nzsh/main\nzsh/zle\nzsh/zutil\n-b:zformat\n-b:zparseopts\n-b:zregexparse\\
+		 n+b:zstyle\n"
 	);
 	assert_eq!(
 		zsh("zmodload -ub zstyle; zstyle :a b c"),
 		(String::new(), "zsh:1: command not found: zstyle\n".into(), 127)
 	);
 	let (out, ..) = zsh(
-		"zmodload -Fa zsh/datetime b:strftime; zmodload -FaL zsh/datetime; zmodload -lF zsh/datetime \
-		 2>/dev/null; echo $?; type strftime",
+		"zmodload -Fa zsh/datetime b:strftime; zmodload -FaL zsh/datetime; zmodload -lF \
+		 zsh/datetime 2>/dev/null; echo $?; type strftime",
 	);
 	assert_eq!(out, "zmodload -aF zsh/datetime b:strftime\n1\nstrftime is a shell builtin\n");
 }
@@ -153,9 +153,10 @@ fn autoload_listings() {
 	let (out, ..) = zsh("zmodload -Ld; zmodload -d zsh/foo zsh/bar; zmodload -d zsh/foo");
 	assert_eq!(
 		out,
-		"zmodload -d zsh/compctl zsh/complete zsh/zle\nzmodload -d zsh/complete zsh/zle\nzmodload -d \
-		 zsh/complist zsh/complete zsh/zle\nzmodload -d zsh/computil zsh/complete zsh/zle\nzmodload \
-		 -d zsh/zleparameter zsh/zle\nzmodload -d zsh/zutil zsh/complete\nzsh/foo: zsh/bar\n"
+		"zmodload -d zsh/compctl zsh/complete zsh/zle\nzmodload -d zsh/complete zsh/zle\nzmodload \
+		 -d zsh/complist zsh/complete zsh/zle\nzmodload -d zsh/computil zsh/complete \
+		 zsh/zle\nzmodload -d zsh/zleparameter zsh/zle\nzmodload -d zsh/zutil \
+		 zsh/complete\nzsh/foo: zsh/bar\n"
 	);
 }
 
@@ -167,8 +168,8 @@ fn module_aliases() {
 	);
 	assert_eq!(
 		out,
-		"zsh/myalias -> zsh/datetime\nzmodload -A zsh/myalias=zsh/datetime\nzsh/datetime\nzsh/main\n\
-		 alias:zsh/datetime\n"
+		"zsh/myalias -> zsh/datetime\nzmodload -A \
+		 zsh/myalias=zsh/datetime\nzsh/datetime\nzsh/main\nalias:zsh/datetime\n"
 	);
 }
 
@@ -180,9 +181,9 @@ fn builtins_parameter_in_builtintab_order() {
 	assert_eq!(
 		out,
 		"compfiles zle comptags compdescribe compctl compadd comparguments zstyle comptry bindkey \
-		 compset compvalues compgroups compquote vared compcall\ncompfiles zle comptags compdescribe \
-		 compctl compadd comparguments zstyle comptry bindkey compset strftime compvalues compgroups \
-		 compquote vared compcall\ndefined undefined\n"
+		 compset compvalues compgroups compquote vared compcall\ncompfiles zle comptags \
+		 compdescribe compctl compadd comparguments zstyle comptry bindkey compset strftime \
+		 compvalues compgroups compquote vared compcall\ndefined undefined\n"
 	);
 }
 
@@ -191,10 +192,10 @@ fn modules_parameter_in_zsh_order() {
 	let (out, ..) = zsh("print -r -- ${(kv)modules}");
 	assert_eq!(
 		out,
-		"zsh/parameter loaded zsh/main loaded zsh/rlimits autoloaded zsh/computil autoloaded zsh/zle \
-		 autoloaded zsh/sched autoloaded zsh/zutil autoloaded zsh/compctl autoloaded zsh/complete \
-		 autoloaded zsh/termcap autoloaded zsh/terminfo autoloaded zsh/watch autoloaded \
-		 zsh/param/private autoloaded zsh/zleparameter autoloaded\n"
+		"zsh/parameter loaded zsh/main loaded zsh/rlimits autoloaded zsh/computil autoloaded \
+		 zsh/zle autoloaded zsh/sched autoloaded zsh/zutil autoloaded zsh/compctl autoloaded \
+		 zsh/complete autoloaded zsh/termcap autoloaded zsh/terminfo autoloaded zsh/watch \
+		 autoloaded zsh/param/private autoloaded zsh/zleparameter autoloaded\n"
 	);
 	let (out, ..) = zsh("zmodload zsh/datetime; print -r -- ${(k)modules}");
 	assert_eq!(
@@ -212,9 +213,9 @@ fn modules_parameter_in_zsh_order() {
 fn local_hides_hidden_module_special() {
 	assert_eq!(
 		zsh(
-			"zmodload zsh/datetime; fn() { local EPOCHSECONDS=scruts; print $EPOCHSECONDS ${(t)EPOCHSECONDS}; g; \
-			 }; g() { print in g $EPOCHSECONDS; }; fn; [[ $EPOCHSECONDS = <-> ]] && print number; print \
-			 ${(t)EPOCHSECONDS}"
+			"zmodload zsh/datetime; fn() { local EPOCHSECONDS=scruts; print $EPOCHSECONDS \
+			 ${(t)EPOCHSECONDS}; g; }; g() { print in g $EPOCHSECONDS; }; fn; [[ $EPOCHSECONDS = <-> \
+			 ]] && print number; print ${(t)EPOCHSECONDS}"
 		),
 		(
 			"scruts scalar-local\nin g scruts\nnumber\ninteger-readonly-hide-hideval-special\n".into(),
@@ -232,13 +233,13 @@ fn local_hides_hidden_module_special() {
 fn typeset_h_on_module_special() {
 	assert_eq!(
 		zsh(
-			"zmodload zsh/datetime; typeset +h EPOCHSECONDS; print ${(t)EPOCHSECONDS}; typeset -h EPOCHSECONDS; \
-			 print ${(t)EPOCHSECONDS}; typeset +h EPOCHSECONDS; zmodload -u zsh/datetime; zmodload zsh/datetime; \
-			 print ${(t)EPOCHSECONDS}"
+			"zmodload zsh/datetime; typeset +h EPOCHSECONDS; print ${(t)EPOCHSECONDS}; typeset -h \
+			 EPOCHSECONDS; print ${(t)EPOCHSECONDS}; typeset +h EPOCHSECONDS; zmodload -u \
+			 zsh/datetime; zmodload zsh/datetime; print ${(t)EPOCHSECONDS}"
 		),
 		(
-			"integer-readonly-hideval-special\ninteger-readonly-hide-hideval-special\n\
-			 integer-readonly-hide-hideval-special\n"
+			"integer-readonly-hideval-special\ninteger-readonly-hide-hideval-special\\
+			 ninteger-readonly-hide-hideval-special\n"
 				.into(),
 			String::new(),
 			0
@@ -247,8 +248,8 @@ fn typeset_h_on_module_special() {
 	// An un-hidden read-only special made local stays read-only (zsh's
 	// exit status after the abandoned command line differs: not compared).
 	let (out, err, _) = zsh(
-		"zmodload zsh/datetime; () { typeset +h EPOCHSECONDS; fn() { local EPOCHSECONDS=scruts; print not here; \
-		 }; fn; print after }",
+		"zmodload zsh/datetime; () { typeset +h EPOCHSECONDS; fn() { local EPOCHSECONDS=scruts; \
+		 print not here; }; fn; print after }",
 	);
 	assert_eq!((out.as_str(), err.as_str()), ("", "fn: read-only variable: EPOCHSECONDS\n"));
 	let (out, err, _) = zsh("f(){ local PPID=3; print no; }; f; echo $?");
@@ -259,30 +260,32 @@ fn typeset_h_on_module_special() {
 fn module_param_blocked_by_existing_param() {
 	assert_eq!(
 		zsh(
-			"fn() { local EPOCHSECONDS=scrimf; zmodload zsh/datetime; echo st=$?; }; fn; zmodload -lF zsh/datetime; \
-			 zmodload -F zsh/datetime p:EPOCHSECONDS; zmodload -Fe zsh/datetime +p:EPOCHSECONDS; echo $?"
+			"fn() { local EPOCHSECONDS=scrimf; zmodload zsh/datetime; echo st=$?; }; fn; zmodload \
+			 -lF zsh/datetime; zmodload -F zsh/datetime p:EPOCHSECONDS; zmodload -Fe zsh/datetime \
+			 +p:EPOCHSECONDS; echo $?"
 		),
 		(
 			"st=2\n+b:strftime\n-p:EPOCHSECONDS\n+p:EPOCHREALTIME\n+p:epochtime\n0\n".into(),
-			"fn: Can't add module parameter `EPOCHSECONDS': local parameter exists\nfn:zsh/datetime: error when \
-			 adding parameter `EPOCHSECONDS'\n"
+			"fn: Can't add module parameter `EPOCHSECONDS': local parameter exists\nfn:zsh/datetime: \
+			 error when adding parameter `EPOCHSECONDS'\n"
 				.into(),
 			0
 		)
 	);
 	assert_eq!(
 		zsh(
-			"zmodload zsh/datetime; fn() { local EPOCHSECONDS=scrooble; zmodload -u zsh/datetime; print \
-			 $EPOCHSECONDS; }; fn; print ${+EPOCHSECONDS}; EPOCHSECONDS=(a b); print -l $EPOCHSECONDS; zmodload \
-			 zsh/datetime; echo st=$?; zmodload -lF zsh/datetime; unset EPOCHSECONDS; zmodload -F zsh/datetime \
-			 p:EPOCHSECONDS; echo st=$?; print ${(t)EPOCHSECONDS}"
+			"zmodload zsh/datetime; fn() { local EPOCHSECONDS=scrooble; zmodload -u zsh/datetime; \
+			 print $EPOCHSECONDS; }; fn; print ${+EPOCHSECONDS}; EPOCHSECONDS=(a b); print -l \
+			 $EPOCHSECONDS; zmodload zsh/datetime; echo st=$?; zmodload -lF zsh/datetime; unset \
+			 EPOCHSECONDS; zmodload -F zsh/datetime p:EPOCHSECONDS; echo st=$?; print \
+			 ${(t)EPOCHSECONDS}"
 		),
 		(
-			"scrooble\n0\na\nb\nst=2\n+b:strftime\n-p:EPOCHSECONDS\n+p:EPOCHREALTIME\n+p:epochtime\nst=0\n\
-			 integer-readonly-hide-hideval-special\n"
+			"scrooble\n0\na\nb\nst=2\n+b:strftime\n-p:EPOCHSECONDS\n+p:EPOCHREALTIME\n+p:epochtime\\
+			 nst=0\ninteger-readonly-hide-hideval-special\n"
 				.into(),
-			"zsh:1: Can't add module parameter `EPOCHSECONDS': parameter already exists\nzsh:zsh/datetime:1: error \
-			 when adding parameter `EPOCHSECONDS'\n"
+			"zsh:1: Can't add module parameter `EPOCHSECONDS': parameter already \
+			 exists\nzsh:zsh/datetime:1: error when adding parameter `EPOCHSECONDS'\n"
 				.into(),
 			0
 		)
@@ -305,8 +308,8 @@ fn failed_autoload_of_unknown_features() {
 		),
 		(
 			"fail is a shell builtin\nfail: builtin\n".into(),
-			"zsh:1: module `zsh/parameter' has no such feature: `b:fail': autoload cancelled\nzsh:1: autoloading \
-			 module zsh/parameter failed to define builtin: fail\n"
+			"zsh:1: module `zsh/parameter' has no such feature: `b:fail': autoload cancelled\nzsh:1: \
+			 autoloading module zsh/parameter failed to define builtin: fail\n"
 				.into(),
 			1
 		)
@@ -315,8 +318,8 @@ fn failed_autoload_of_unknown_features() {
 		zsh("zmodload -aF zsh/parameter p:fail; print $fail; print not here"),
 		(
 			String::new(),
-			"zsh:1: module `zsh/parameter' has no such feature: `p:fail': autoload cancelled\nzsh:1: autoloading \
-			 module zsh/parameter failed to define parameter: fail\n"
+			"zsh:1: module `zsh/parameter' has no such feature: `p:fail': autoload cancelled\nzsh:1: \
+			 autoloading module zsh/parameter failed to define parameter: fail\n"
 				.into(),
 			1
 		)
@@ -328,8 +331,9 @@ fn unset_module_parameters() {
 	// zsh/parameter's specials stay `PM_UNSET` until assigned or re-added.
 	assert_eq!(
 		zsh(
-			"zmodload zsh/parameter; unset options; echo $+options \"[${(t)options}]\"; options[xtrace]=off; echo \
-			 $+options; zmodload -u zsh/parameter; zmodload zsh/parameter; echo $+options"
+			"zmodload zsh/parameter; unset options; echo $+options \"[${(t)options}]\"; \
+			 options[xtrace]=off; echo $+options; zmodload -u zsh/parameter; zmodload zsh/parameter; \
+			 echo $+options"
 		),
 		("0 []\n1\n1\n".into(), String::new(), 0)
 	);
@@ -340,7 +344,10 @@ fn unset_module_parameters() {
 		("st=0 0\n".into(), "zsh:1: read-only variable: builtins\n".into(), 1)
 	);
 	assert_eq!(
-		zsh("zmodload zsh/parameter; zmodload -u zsh/parameter; echo ${+options}; zmodload -e zsh/parameter; echo $?"),
+		zsh(
+			"zmodload zsh/parameter; zmodload -u zsh/parameter; echo ${+options}; zmodload -e \
+			 zsh/parameter; echo $?"
+		),
 		("1\n0\n".into(), String::new(), 0)
 	);
 }

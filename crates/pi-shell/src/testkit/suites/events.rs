@@ -40,7 +40,7 @@ fn events_spans_are_within_announced_units() {
 			units.push((
 				d["unit"].as_str().unwrap().to_owned(),
 				d["source"].as_str().unwrap().len(),
-				d["node_count"].as_u64().unwrap(),
+				d["nodes"].as_array().unwrap().len() as u64,
 			));
 			continue;
 		}

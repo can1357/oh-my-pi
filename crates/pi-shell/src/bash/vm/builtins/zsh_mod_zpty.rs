@@ -525,8 +525,14 @@ fn newptycmd(
 	// zsh sets an interactive shell's window size on the pty
 	// (`zterm_lines`, `zterm_columns`).
 	let size = if interactive {
-		let lines = ctx.scalar(b"LINES")?.and_then(|v| parse_u16(&v)).unwrap_or(24);
-		let cols = ctx.scalar(b"COLUMNS")?.and_then(|v| parse_u16(&v)).unwrap_or(80);
+		let lines = ctx
+			.scalar(b"LINES")?
+			.and_then(|v| parse_u16(&v))
+			.unwrap_or(24);
+		let cols = ctx
+			.scalar(b"COLUMNS")?
+			.and_then(|v| parse_u16(&v))
+			.unwrap_or(80);
 		Some(TtyInfo { rows: lines, cols })
 	} else {
 		None
@@ -621,7 +627,12 @@ fn newptycmd(
 
 /// A decimal `u16` (`$LINES`, `$COLUMNS`).
 fn parse_u16(v: &[u8]) -> Option<u16> {
-	std::str::from_utf8(v).ok()?.trim().parse().ok().filter(|&n| n > 0)
+	std::str::from_utf8(v)
+		.ok()?
+		.trim()
+		.parse()
+		.ok()
+		.filter(|&n| n > 0)
 }
 
 /// zsh `parse_string` of the command text: the first syntax error, if

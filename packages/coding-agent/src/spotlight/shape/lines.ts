@@ -17,6 +17,11 @@ export function norm(line: string): string {
 	return line.replace(/^(?:[\w./-]+:)?\s*\d+[\t:|-]\s?/, "").trim();
 }
 
+/** Key of normalised line `next` right after `prev` in one text: the order seen lines collapse in ({@link norm}). */
+export function pairKey(prev: string, next: string): string {
+	return `${prev}\n${next}`;
+}
+
 /** Words too generic in intents to say anything about a line. */
 const STOP = new Set(
 	"find check read inspect whether where what which with from that this into have does show lines line file files code output the and for are see used uses use need needs most least recent latest first last many much each every about some other only when been will would could should there their them they than then also just like more less decide decides contain contains name names cover covers mention mentions touch touches happen happens cause causes make makes work works mean means added adding exact exactly introduced introduce count counts number".split(

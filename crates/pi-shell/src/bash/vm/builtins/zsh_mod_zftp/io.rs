@@ -293,11 +293,34 @@ fn expired(
 
 /// The deadline `secs` seconds from now (0: none).
 fn after(cx: &Cx<'_>, secs: u32) -> Option<u64> {
-	(secs > 0).then(|| cx.host.now_ns().saturating_add(u64::from(secs) * 1_000_000_000))
+	(secs > 0).then(|| {
+		cx.host
+			.now_ns()
+			.saturating_add(u64::from(secs) * 1_000_000_000)
+	})
 }
 
 fn unsupported() -> io::Error {
 	io::ErrorKind::Unsupported.into()
+}
+
+// `EBADF` and `EIO`. Windows OS error numbers are not C's, so there the
+// error carries the `strerror` text, which `FsErr` reports.
+#[cfg(unix)]
+fn ebadf() -> io::Error {
+	io::Error::from_raw_os_error(libc::EBADF)
+}
+#[cfg(not(unix))]
+fn ebadf() -> io::Error {
+	io::Error::other("Bad file descriptor")
+}
+#[cfg(unix)]
+fn eio() -> io::Error {
+	io::Error::from_raw_os_error(libc::EIO)
+}
+#[cfg(not(unix))]
+fn eio() -> io::Error {
+	io::Error::other("Input/output error")
 }
 
 fn inet(a: &SockAddr) -> Option<SocketAddr> {
@@ -311,10 +334,9 @@ fn inet(a: &SockAddr) -> Option<SocketAddr> {
 /// free fd from 10 (zsh `zfmovefd`), close-on-exec.
 fn install(cx: &mut Cx<'_>, vp: &mut Vproc, file: Box<dyn File>) -> SockInfo {
 	let (local, peer) = match (file.os_handle(), cx.host.sockets()) {
-		(Some(h), Some(s)) => (
-			s.local_addr(h).ok().as_ref().and_then(inet),
-			s.peer_addr(h).ok().as_ref().and_then(inet),
-		),
+		(Some(h), Some(s)) => {
+			(s.local_addr(h).ok().as_ref().and_then(inet), s.peer_addr(h).ok().as_ref().and_then(inet))
+		},
 		_ => (None, None),
 	};
 	let fd = vp.fds.lowest_free(10);
@@ -362,7 +384,9 @@ pub fn perform(
 			Ok(Some(Record::Func { .. }))
 		)),
 		ZftpOp::Clock => ZftpAns::Num(cx.host.now_ns()),
-		ZftpOp::Tty(fd) => ZftpAns::Flag(vp.fds.get(*fd).and_then(FdRef::kind) == Some(FileKind::Tty)),
+		ZftpOp::Tty(fd) => {
+			ZftpAns::Flag(vp.fds.get(*fd).and_then(FdRef::kind) == Some(FileKind::Tty))
+		},
 		ZftpOp::Echo(on) => {
 			if let (Some(h), Some(term)) =
 				(vp.fds.get(0).and_then(FdRef::os_handle), cx.host.terminal())
@@ -374,9 +398,11 @@ pub fn perform(
 			ZftpAns::Done
 		},
 		ZftpOp::Sockets => ZftpAns::Flag(cx.host.sockets().is_some()),
-		ZftpOp::Service(name) => {
-			ZftpAns::Port(cx.host.sockets().and_then(|s| s.service_port(BStr::new(name))))
-		},
+		ZftpOp::Service(name) => ZftpAns::Port(
+			cx.host
+				.sockets()
+				.and_then(|s| s.service_port(BStr::new(name))),
+		),
 		ZftpOp::ServicePort(port) => {
 			ZftpAns::Flag(cx.host.sockets().is_some_and(|s| s.service_by_port(*port)))
 		},
@@ -558,7 +584,7 @@ pub fn perform(
 		ZftpOp::Poll { fd } => {
 			let h = vp.fds.handle(*fd);
 			if !h.is_open() {
-				let e = io::Error::from_raw_os_error(libc::EBADF);
+				let e = ebadf();
 				return Ok(ZftpAns::Polled(Err(Fail::of(&e))));
 			}
 			ZftpAns::Polled(Ok(h.poll_read(tcx, &mut []).is_ready()))
@@ -812,7 +838,7 @@ impl Xfer {
 							.out
 							.msgs
 							.push((false, "block too large to handle".into()));
-						self.got(spec, -1, Some(io::Error::from_raw_os_error(libc::EIO)));
+						self.got(spec, -1, Some(eio()));
 						continue;
 					}
 					self.at = XferAt::Body { size, got: 0, flags: hdr[0] };
@@ -849,7 +875,7 @@ impl Xfer {
 						match r {
 							Ok(0) => {
 								self.out.msgs.push((false, "short data block".into()));
-								self.got(spec, -1, Some(io::Error::from_raw_os_error(libc::EIO)));
+								self.got(spec, -1, Some(eio()));
 							},
 							Ok(n) => self.at = XferAt::Body { size, got: got + n, flags },
 							Err(None) => {
@@ -1019,6 +1045,7 @@ impl Xfer {
 	}
 }
 
+/// `EPIPE` maps to `BrokenPipe` on every platform.
 fn is_epipe(e: &io::Error) -> bool {
-	e.kind() == io::ErrorKind::BrokenPipe || e.raw_os_error() == Some(libc::EPIPE)
+	e.kind() == io::ErrorKind::BrokenPipe
 }

@@ -86,8 +86,8 @@ ztcp localhost $PORT; echo $?",
 	assert_eq!(
 		out,
 		format!(
-			"L 0.0.0.0 {port} 0.0.0.0 0\nL 0.0.0.0 {port} 0.0.0.0 0\nO 0.0.0.0 0 localhost \
-			 {port}\nI 0.0.0.0 0 localhost\n0.0.0.0 -< 0.0.0.0\n0.0.0.0 -> localhost\n0.0.0.0 <- \
+			"L 0.0.0.0 {port} 0.0.0.0 0\nL 0.0.0.0 {port} 0.0.0.0 0\nO 0.0.0.0 0 localhost {port}\nI \
+			 0.0.0.0 0 localhost\n0.0.0.0 -< 0.0.0.0\n0.0.0.0 -> localhost\n0.0.0.0 <- \
 			 localhost\nhi\nback\n127.0.0.1:{shown}\n2\n0\n1\n1\n"
 		)
 	);

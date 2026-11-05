@@ -24,8 +24,8 @@ use crate::bash::{
 	store::{Key, KeyBuf, MiscKey, Record, Table},
 	syntax::zsh::tok::{metafy, unmetafy},
 	vm::{
-		locale, state,
 		builtins::zsh_prompt::{Cap, TermCaps},
+		locale, state,
 		zle::{
 			comp::{
 				self, Comp, K, compcore, compresult, tricky,
@@ -33,9 +33,8 @@ use crate::bash::{
 			},
 			display,
 			exec::{Await, Got, WResult, Zw, then},
-			undo, utils,
+			undo, utils, wflags,
 			widgets::{misc, yank::Paste},
-			wflags,
 		},
 		zsh::{arith, zpattern},
 	},
@@ -202,12 +201,10 @@ fn getcols(zw: &mut Zw<'_, '_>, caps: &TermCaps) -> Listcols {
 		.getsparam(b"ZLS_COLORS")
 		.or_else(|| zw.getsparam(b"ZLS_COLOURS"));
 	match s {
-		None => {
-			colors::getcols_unset(
-				caps.tcstr[Cap::StandoutBeg as usize].as_deref(),
-				caps.tcstr[Cap::StandoutEnd as usize].as_deref(),
-			)
-		},
+		None => colors::getcols_unset(
+			caps.tcstr[Cap::StandoutBeg as usize].as_deref(),
+			caps.tcstr[Cap::StandoutEnd as usize].as_deref(),
+		),
 		Some(s) => {
 			let mut opts = zw.params(|ex| zpattern::opts(ex)).unwrap_or_default();
 			opts.extended_glob = true;
@@ -376,7 +373,13 @@ pub fn complistmatches(zw: &mut Zw<'_, '_>, dat: Chdata, k: K<i32>) -> WResult {
 			.map(|s| BString::from(metafy(&s)))
 	};
 	if zw.zle.comp.list.mselect >= 0 || zw.zle.comp.list.mlbeg >= 0 || listprompt.is_some() {
-		let mlistp = listprompt.map(|p| if p.is_empty() { BString::from(DEF_LISTPROMPT) } else { p });
+		let mlistp = listprompt.map(|p| {
+			if p.is_empty() {
+				BString::from(DEF_LISTPROMPT)
+			} else {
+				p
+			}
+		});
 		display::trashzle(zw);
 		zw.zle.display.showinglist = 0;
 		zw.zle.display.listshown = 0;
@@ -875,9 +878,13 @@ pub fn domenuselect(zw: &mut Zw<'_, '_>, dat: Option<Chdata>, k: K<i32>) -> WRes
 			};
 		}
 	}
-	let mstatus = zw
-		.getsparam(b"MENUPROMPT")
-		.map(|s| if s.is_empty() { BString::from(DEF_MENUPROMPT) } else { BString::from(metafy(&s)) });
+	let mstatus = zw.getsparam(b"MENUPROMPT").map(|s| {
+		if s.is_empty() {
+			BString::from(DEF_MENUPROMPT)
+		} else {
+			BString::from(metafy(&s))
+		}
+	});
 	{
 		let l = &mut zw.zle.comp.list;
 		l.mhasstat = i32::from(mstatus.as_ref().is_some_and(|s| !s.is_empty()));

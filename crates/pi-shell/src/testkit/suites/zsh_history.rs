@@ -65,7 +65,8 @@ fn bang_events_words_and_modifiers() {
 	assert_eq!(out, "a b c\na b c\nc a\nX b c\necho\necho\n");
 	assert_eq!(
 		err,
-		"echo a b c\necho c a\necho X b c\necho echo \nzsh: substitution failed\necho echo \necho echo \n"
+		"echo a b c\necho c a\necho X b c\necho echo \nzsh: substitution failed\necho echo \necho \
+		 echo \n"
 	);
 	assert_eq!(st, 0);
 }
@@ -86,8 +87,8 @@ fn bang_errors_abandon_the_event() {
 	assert_eq!(out, "a b\n1\n    1  echo a b\n    2  echo $?\n");
 	assert_eq!(
 		err,
-		"zsh: event not found: foo\nzsh: no such word in event\nzsh: illegal modifier: z\nzsh: \
-		 no such event: zz\n"
+		"zsh: event not found: foo\nzsh: no such word in event\nzsh: illegal modifier: z\nzsh: no \
+		 such event: zz\n"
 	);
 }
 

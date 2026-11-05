@@ -18,7 +18,9 @@
 //!   the segmented engine path, but the whole-buffer minimizer still treats the
 //!   combined chain as opaque. Each segment's text is the verbatim source span
 //!   of its pipeline, redirections included, so quoting and redirect spelling
-//!   survive exactly as written.
+//!   survive exactly as written. Source offsets and lengths retain that same
+//!   pipeline span in original-command bytes; execution wrappers are the
+//!   caller's responsibility.
 //! - **Other compound commands are opaque.** `a || b`, background jobs, and
 //!   compound shell syntax such as subshells or function definitions are left
 //!   unchanged. Here-documents, command/process substitutions and arithmetic
@@ -40,6 +42,12 @@ use crate::bash::syntax::{
 pub struct ChainSegment {
 	/// The segment's pipeline verbatim from the source, redirections included.
 	pub command:                   String,
+	/// First byte of the pipeline in the original command, before any run
+	/// wrapper.
+	pub source_at:                 u32,
+	/// Byte length of the pipeline in the original command, excluding run
+	/// wrappers.
+	pub source_len:                u32,
 	/// Leading command word of the segment's first stage, as written.
 	pub program:                   String,
 	/// The segment follows `&&`: it runs only when the previous one succeeded.
@@ -155,6 +163,8 @@ fn classify_chain(items: &[&ListItem], src: &str) -> Option<CommandPlan> {
 			let suppress_errexit = rest.peek().is_some_and(|(op, _)| *op == AndOrOp::And);
 			segments.push(ChainSegment {
 				command,
+				source_at: pipeline.span.lo,
+				source_len: pipeline.span.hi - pipeline.span.lo,
 				program,
 				run_if_previous_succeeded,
 				suppress_errexit,
@@ -389,12 +399,16 @@ mod tests {
 			Some(vec![
 				ChainSegment {
 					command:                   "git diff --stat".to_string(),
+					source_at:                 0,
+					source_len:                15,
 					program:                   "git".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          true,
 				},
 				ChainSegment {
 					command:                   "git diff --name-only".to_string(),
+					source_at:                 19,
+					source_len:                20,
 					program:                   "git".to_string(),
 					run_if_previous_succeeded: true,
 					suppress_errexit:          false,
@@ -411,12 +425,16 @@ mod tests {
 			Some(vec![
 				ChainSegment {
 					command:                   "git status".to_string(),
+					source_at:                 0,
+					source_len:                10,
 					program:                   "git".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
 				},
 				ChainSegment {
 					command:                   "bun test".to_string(),
+					source_at:                 13,
+					source_len:                8,
 					program:                   "bun".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
@@ -433,18 +451,24 @@ mod tests {
 			Some(vec![
 				ChainSegment {
 					command:                   "false".to_string(),
+					source_at:                 0,
+					source_len:                5,
 					program:                   "false".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          true,
 				},
 				ChainSegment {
 					command:                   "echo no".to_string(),
+					source_at:                 9,
+					source_len:                7,
 					program:                   "echo".to_string(),
 					run_if_previous_succeeded: true,
 					suppress_errexit:          false,
 				},
 				ChainSegment {
 					command:                   "echo yes".to_string(),
+					source_at:                 19,
+					source_len:                8,
 					program:                   "echo".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
@@ -478,6 +502,26 @@ mod tests {
 		assert_eq!(segments[0].program, "echo");
 		assert_eq!(segments[1].command, "FOO=\"x y\" printf '%s\\n' z");
 		assert_eq!(segments[1].program, "printf");
+	}
+
+	#[test]
+	fn repeated_segments_keep_distinct_original_byte_spans() {
+		let command = "  echo 'é' && echo 'é';\n echo 'é'";
+		let segments = chain_of(analyze(command)).expect("expected Chain");
+		assert_eq!(segments.len(), 3);
+		assert_eq!(
+			segments
+				.iter()
+				.map(|segment| (segment.source_at, segment.source_len))
+				.collect::<Vec<_>>(),
+			vec![(2, 9), (15, 9), (27, 9)],
+		);
+		for segment in segments {
+			assert_eq!(segment.command, "echo 'é'");
+			let start = segment.source_at as usize;
+			let end = start + segment.source_len as usize;
+			assert_eq!(&command[start..end], segment.command);
+		}
 	}
 
 	#[test]

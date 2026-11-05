@@ -26,9 +26,9 @@ use super::{
 	params::{self, PmFlags, opt},
 };
 use crate::bash::{
+	fs::PwQuery,
 	store::{Key, KeyBuf, MiscKey, Record},
 	syntax::zsh::tok::{metafy, tail},
-	fs::PwQuery,
 	vm::{
 		expand::{Expander, Stop, X},
 		fsprobe::FsReq,
@@ -258,9 +258,11 @@ fn user_db(ex: &mut Expander<'_, '_>, q: PwQuery) -> X<Option<Vec<(BString, BStr
 	let atom = ex.log.get(ex.cursor).cloned();
 	ex.cursor += usize::from(atom.is_some());
 	match atom {
-		Some(Atom::List(v)) => {
-			Ok(Some(v.chunks_exact(2).map(|p| (p[0].clone(), p[1].clone())).collect()))
-		},
+		Some(Atom::List(v)) => Ok(Some(
+			v.chunks_exact(2)
+				.map(|p| (p[0].clone(), p[1].clone()))
+				.collect(),
+		)),
 		Some(_) => Ok(None),
 		None => Err(Stop::Probe(Probe::Fs { seq: 0, req: Box::new(FsReq::UserDb(q)) })),
 	}
