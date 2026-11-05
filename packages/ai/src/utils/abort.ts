@@ -5,6 +5,8 @@ export interface AbortSourceTracker {
 	requestSignal: AbortSignal;
 	abortLocally(reason: Error): Error;
 	getLocalAbortReason(): Error | undefined;
+	/** The reason the caller passed to `abort()`, read from the caller's own signal, never the racy merged one. */
+	getCallerAbortReason(): string | undefined;
 	wasCallerAbort(): boolean;
 }
 
@@ -39,6 +41,9 @@ export function createAbortSourceTracker(callerSignal?: AbortSignal): AbortSourc
 			// abort, so timeout/idle-watchdog errors don't masquerade as the user's cancel.
 			if (!localAbortReason || callerSignal?.aborted) return undefined;
 			return requestSignal.reason === localAbortReason ? localAbortReason : undefined;
+		},
+		getCallerAbortReason() {
+			return AIError.callerAbortReason(callerSignal);
 		},
 		wasCallerAbort() {
 			// If the caller signal aborted, treat it as a caller abort regardless of which

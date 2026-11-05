@@ -154,10 +154,7 @@ impl QueryState {
 		self.before.push_str(before);
 		self.version = model.version;
 		self.context = context_before(before, before.len(), &mut self.u, &mut self.v);
-		let mut at = before.len().saturating_sub(model.params.cache_window);
-		while !before.is_char_boundary(at) {
-			at += 1;
-		}
+		let at = before.ceil_char_boundary(before.len().saturating_sub(model.params.cache_window));
 		self.window_at = at;
 		if model.params.cache_weight > 0.0 {
 			lowercase_aligned(&before[at..], &mut self.window);
@@ -508,10 +505,7 @@ impl QueryState {
 			if idx == 0 {
 				break;
 			}
-			limit = idx + key.len() - 1;
-			while !window.is_char_boundary(limit) {
-				limit -= 1;
-			}
+			limit = window.floor_char_boundary(idx + key.len() - 1);
 		}
 		self.window = window;
 		mass

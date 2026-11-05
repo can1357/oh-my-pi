@@ -1,10 +1,15 @@
 import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { $which } from "@oh-my-pi/pi-utils";
+import { $which, logger } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 
-const STATS_PROBE_TIMEOUT_MS = 500;
+/**
+ * Upper bound on the identity probe. A live dashboard ingests on its main thread
+ * (serially on macOS), which stalls its responses for over a second on large
+ * histories; giving up sooner mistakes a busy dashboard for a hung listener.
+ */
+const STATS_PROBE_TIMEOUT_MS = 3_000;
 const PROCESS_EXIT_POLL_MS = 50;
 const PROCESS_EXIT_POLLS = 10;
 const STATS_RUNTIME_IMAGES: Record<string, true> = { bun: true, node: true, omp: true, "omp-stats": true };
@@ -26,15 +31,29 @@ export const STATS_DASHBOARD_SECURITY_VERSION = "3";
 /** IPv4 loopback address shared by the dashboard server and reuse probe. */
 export const STATS_DASHBOARD_HOSTNAME = "127.0.0.1";
 
-type StatsDashboardProbe = "reusable" | "replaceable" | "occupied" | "unreachable";
+/**
+ * What answers on the dashboard port:
+ * - `reusable`: a current dashboard bound to the requested host.
+ * - `replaceable`: an older dashboard this version may upgrade.
+ * - `occupied`: any other HTTP answer.
+ * - `unresponsive`: accepted the connection but did not answer in time (busy or hung).
+ * - `unreachable`: the connection failed, typically because nothing listens there.
+ */
+type StatsDashboardProbe = "reusable" | "replaceable" | "occupied" | "unresponsive" | "unreachable";
+
+/**
+ * How {@link startServer} proceeds with the requested port: bind it, reuse the
+ * dashboard already serving it, or fall back to an ephemeral port because the
+ * holder is neither reusable nor safe to stop.
+ */
+export type StatsPortClaim = "bind" | "reuse" | "fallback";
 
 async function probeStatsDashboard(port: number, hostname: string): Promise<StatsDashboardProbe> {
 	const probeHostname = hostname === "0.0.0.0" ? STATS_DASHBOARD_HOSTNAME : hostname === "::" ? "::1" : hostname;
 	const urlHostname = probeHostname.includes(":") ? `[${probeHostname}]` : probeHostname;
+	const signal = AbortSignal.timeout(STATS_PROBE_TIMEOUT_MS);
 	try {
-		const response = await fetch(`http://${urlHostname}:${port}/api/stats/models`, {
-			signal: AbortSignal.timeout(STATS_PROBE_TIMEOUT_MS),
-		});
+		const response = await fetch(`http://${urlHostname}:${port}/api/stats/models`, { signal });
 		const dashboardVersionHeader = response.headers.get(STATS_DASHBOARD_HEADER);
 		const dashboardVersion = dashboardVersionHeader === null ? Number.NaN : Number(dashboardVersionHeader);
 		// Never replace a newer dashboard: an older CLI must not downgrade it.
@@ -52,7 +71,7 @@ async function probeStatsDashboard(port: number, hostname: string): Promise<Stat
 		if (reusable) return "reusable";
 		return replaceable ? "replaceable" : "occupied";
 	} catch {
-		return "unreachable";
+		return signal.aborted ? "unresponsive" : "unreachable";
 	}
 }
 
@@ -227,13 +246,16 @@ async function terminatePortHolder(holder: PortHolder): Promise<void> {
 	await Bun.sleep(PROCESS_EXIT_POLL_MS);
 }
 
-async function reclaimStatsPort(port: number, hasDashboardIdentity = false): Promise<"retry"> {
+/**
+ * Stop the stats dashboard answering `probe` on `port` so it can be rebound.
+ * Holders that cannot be positively identified as an omp stats dashboard, or
+ * that refuse to stop, are left running and yield `"fallback"`.
+ */
+async function reclaimStatsPort(port: number, probe: "replaceable" | "occupied"): Promise<StatsPortClaim> {
 	const holder = await findPortHolder(port);
-	if (!holder) {
-		throw new Error(`Port ${port} is in use, but the listening process could not be identified.`);
-	}
-	if (holder.pid === process.pid) {
-		throw new Error(`Port ${port} is held by the current process (${holder.image}, PID ${holder.pid}).`);
+	if (!holder || holder.pid === process.pid) {
+		logger.debug("Stats dashboard port holder not reclaimable", { port, holder });
+		return "fallback";
 	}
 
 	const normalizedImage = holder.image
@@ -247,33 +269,48 @@ async function reclaimStatsPort(port: number, hasDashboardIdentity = false): Pro
 		/\/packages\/stats\/src\/index\.ts(?:["'\s]|$)/.test(normalizedCommand) ||
 		(normalizedImage === "omp" && /(?:^|\s)stats(?:\s|$)/.test(normalizedCommand)) ||
 		/(?:^|\/)omp(?:\.exe)?["'\s]+stats(?:["'\s]|$)/.test(normalizedCommand);
+	const hasDashboardIdentity = probe === "replaceable";
 	if (!STATS_RUNTIME_IMAGES[normalizedImage] || (!hasStatsIdentity && !hasDashboardIdentity)) {
-		throw new Error(
-			`Port ${port} is in use by ${holder.image} (PID ${holder.pid}), which is not identifiable as an omp stats dashboard; refusing to stop it.`,
-		);
+		logger.debug("Stats dashboard port held by an unidentified process", { port, holder });
+		return "fallback";
 	}
 
-	await terminatePortHolder(holder);
-	return "retry";
+	try {
+		await terminatePortHolder(holder);
+	} catch (error) {
+		logger.warn("Failed to stop stale stats dashboard", { port, pid: holder.pid, error: String(error) });
+		return "fallback";
+	}
+	return "bind";
+}
+
+async function claimStatsPort(port: number, hostname: string, ifUnreachable: StatsPortClaim): Promise<StatsPortClaim> {
+	const probe = await probeStatsDashboard(port, hostname);
+	switch (probe) {
+		case "reusable":
+			return "reuse";
+		case "replaceable":
+		case "occupied":
+			return reclaimStatsPort(port, probe);
+		case "unresponsive":
+			// Busy or hung: a dashboard stalled mid-ingest must never be stopped.
+			return "fallback";
+		case "unreachable":
+			return ifUnreachable;
+	}
 }
 
 /**
- * Reuse a secure dashboard or reclaim an insecure HTTP dashboard before binding.
+ * Reuse a current dashboard, or upgrade an older one, before binding.
  * The preflight is needed on platforms that permit wildcard and loopback-specific
  * listeners to coexist on one port.
  */
-export async function prepareStatsPort(port: number, hostname = STATS_DASHBOARD_HOSTNAME): Promise<"retry" | "reuse"> {
-	if (port === 0) return "retry";
-	const probe = await probeStatsDashboard(port, hostname);
-	if (probe === "reusable") return "reuse";
-	if (probe === "replaceable") return reclaimStatsPort(port, true);
-	if (probe === "occupied") return reclaimStatsPort(port);
-	return "retry";
+export async function prepareStatsPort(port: number, hostname = STATS_DASHBOARD_HOSTNAME): Promise<StatsPortClaim> {
+	if (port === 0) return "bind";
+	return claimStatsPort(port, hostname, "bind");
 }
 
 /** Reuse or reclaim a listener found after the server bind reports EADDRINUSE. */
-export async function recoverStatsPort(port: number, hostname = STATS_DASHBOARD_HOSTNAME): Promise<"retry" | "reuse"> {
-	const probe = await probeStatsDashboard(port, hostname);
-	if (probe === "reusable") return "reuse";
-	return reclaimStatsPort(port, probe === "replaceable");
+export async function recoverStatsPort(port: number, hostname = STATS_DASHBOARD_HOSTNAME): Promise<StatsPortClaim> {
+	return claimStatsPort(port, hostname, "fallback");
 }

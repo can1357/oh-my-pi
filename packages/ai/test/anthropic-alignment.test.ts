@@ -9,17 +9,15 @@ import { NO_AUTH_SENTINEL } from "@oh-my-pi/pi-ai/auth-retry";
 import {
 	applyClaudeToolPrefix,
 	buildAnthropicClientOptions,
-	buildAnthropicHeaders,
 	claudeCodeSystemInstruction,
 	claudeToolPrefix,
 	deriveClaudeDeviceId,
 	generateClaudeCloakingUserId,
 	isClaudeCloakingUserId,
-	mapStainlessArch,
-	mapStainlessOs,
 	streamAnthropic,
 	stripClaudeToolPrefix,
 } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { buildAnthropicHeaders, mapStainlessArch, mapStainlessOs } from "@oh-my-pi/pi-ai/providers/anthropic-headers";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import { getClaudeCodeVersion } from "@oh-my-pi/pi-ai/providers/claude-code-fingerprint";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";

@@ -2,18 +2,14 @@
 //!
 //! Ported from uutils coreutils 0.8.0.
 
-use brush_core::{ShellExtensions, builtins::Registration};
-
-use crate::host::util;
-
 #[cfg(not(any(unix, windows)))]
 use crate::host::{self, Host, Utility, matches_parser};
 
 #[cfg(any(unix, windows))]
-use imp::Stat;
+pub(crate) use imp::Stat;
 
 #[cfg(not(any(unix, windows)))]
-struct Stat {
+pub(crate) struct Stat {
 	matches: clap::ArgMatches,
 }
 
@@ -39,17 +35,13 @@ fn app() -> clap::Command {
 		.override_usage(host::format_usage("stat [OPTION]... FILE..."))
 }
 
-/// Creates the `stat` builtin registration.
-pub(crate) fn stat_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Stat, SE>()
-}
-
 #[cfg(any(unix, windows))]
 mod imp {
 	use std::{
 		borrow::Cow,
 		cell::OnceCell,
 		ffi::{OsStr, OsString},
+		fmt::NumBuffer,
 		io::{self, Write},
 		path::Path,
 		time::SystemTime,
@@ -699,12 +691,9 @@ for details about the options it supports.";
 		precision: Precision,
 		padding_char: Padding,
 	) {
-		let num = num.to_string();
-		let arg = if flags.group {
-			group_num(&num)
-		} else {
-			Cow::Borrowed(num.as_str())
-		};
+		let mut buf = NumBuffer::new();
+		let num = num.format_into(&mut buf);
+		let arg = if flags.group { group_num(num) } else { Cow::Borrowed(num) };
 		let prefix = if flags.sign {
 			"+"
 		} else if flags.space {
@@ -775,12 +764,9 @@ for details about the options it supports.";
 		precision: Precision,
 		padding_char: Padding,
 	) {
-		let num = num.to_string();
-		let s = if flags.group {
-			group_num(&num)
-		} else {
-			Cow::Borrowed(num.as_str())
-		};
+		let mut buf = NumBuffer::new();
+		let num = num.format_into(&mut buf);
+		let s = if flags.group { group_num(num) } else { Cow::Borrowed(num) };
 		let s = match precision {
 			Precision::NotSpecified => s,
 			Precision::NoNumber => s,
@@ -1080,8 +1066,7 @@ for details about the options it supports.";
 		fn new(matches: &ArgMatches, host: &mut Host) -> Result<Self, StatError> {
 			let files: Vec<OsString> = matches
 				.get_many::<OsString>(options::FILES)
-				.map(|v| v.map(OsString::from).collect())
-				.unwrap_or_default();
+				.map_or_default(|v| v.map(OsString::from).collect());
 			if files.is_empty() {
 				return Err(StatError::MissingOperand);
 			}
@@ -1299,11 +1284,8 @@ for details about the options it supports.";
 						'u' => unsigned(meta.uid().map(u64::from)),
 						// user name of owner
 						#[cfg(unix)]
-						'U' => match meta.uid() {
-							Some(uid) => OutputType::Str(
-								entries::uid2usr(uid).unwrap_or_else(|_| "UNKNOWN".to_owned()),
-							),
-							None => OutputType::Unknown,
+						'U' if let Some(uid) = meta.uid() => {
+							OutputType::Str(entries::uid2usr(uid).unwrap_or_else(|_| "UNKNOWN".to_owned()))
 						},
 						// no user database on Windows
 						#[cfg(windows)]
@@ -1836,8 +1818,7 @@ for details about the options it supports.";
 	fn bsd_shell_exec(matches: &ArgMatches, host: &mut Host) -> i32 {
 		let files: Vec<OsString> = matches
 			.get_many::<OsString>(options::FILES)
-			.map(|v| v.cloned().collect())
-			.unwrap_or_default();
+			.map_or_default(|v| v.cloned().collect());
 		if files.is_empty() {
 			host.error(StatError::MissingOperand, 1);
 			return 1;

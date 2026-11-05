@@ -23,6 +23,8 @@ use std::{
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(unix)]
+use crate::file::POLL_SLICE;
 use crate::{
 	dir::{EntryBinding, ReadDir},
 	error::{
@@ -311,11 +313,6 @@ impl FifoEnd {
 #[cfg(unix)]
 const FIFO_RELEASE_ATTEMPTS: usize = 10;
 
-#[cfg(unix)]
-fn poll_slice() -> std::time::Duration {
-	std::time::Duration::from_millis(u64::from(crate::file::POLL_SLICE_MS.unsigned_abs()))
-}
-
 /// One end of a FIFO being opened on a helper thread, so that the wait for
 /// the other end observes a token and, for async callers, holds no runtime
 /// worker. The helper runs the ordinary blocking open, so the open returns
@@ -388,7 +385,7 @@ impl FifoOpening {
 	fn wait(mut self, token: &CancellationToken) -> io::Result<File> {
 		use std::sync::mpsc::RecvTimeoutError;
 		loop {
-			match self.opened.recv_timeout(poll_slice()) {
+			match self.opened.recv_timeout(POLL_SLICE) {
 				Ok(result) => {
 					self.settled = true;
 					return result;
@@ -450,7 +447,7 @@ impl Drop for FifoOpening {
 		match native::open(&self.path, &self.end.release_options()) {
 			Ok(_release) => {
 				// The helper's open returns as soon as it sees the release.
-				let _ = self.opened.recv_timeout(poll_slice());
+				let _ = self.opened.recv_timeout(POLL_SLICE);
 				return;
 			},
 			Err(err) if err.raw_os_error() == Some(libc::ENXIO) => {},
@@ -497,7 +494,7 @@ fn release_attempt(
 	{
 		return true;
 	}
-	!matches!(opened.recv_timeout(poll_slice()), Err(RecvTimeoutError::Timeout))
+	!matches!(opened.recv_timeout(POLL_SLICE), Err(RecvTimeoutError::Timeout))
 }
 
 #[cfg(unix)]
@@ -574,7 +571,7 @@ fn create_dir_exact(path: &Path, mode: u32) -> io::Result<()> {
 /// [`create_dir_exact`] for each missing directory up to `path`, walked as
 /// `std::fs::create_dir_all` walks them.
 fn create_dir_all_exact(path: &Path, mode: u32) -> io::Result<()> {
-	if path.as_os_str().is_empty() {
+	if path.is_empty() {
 		return Ok(());
 	}
 	match create_dir_exact(path, mode) {

@@ -7,10 +7,9 @@
 
 use std::io::Write;
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Utility, format_usage, matches_parser};
 
 const OPT_LIST: &str = "list";
 const OPT_SEARCH: &str = "search";
@@ -116,8 +115,7 @@ impl Utility for Errno {
 		let args: Vec<String> = self
 			.matches
 			.get_many::<String>(ARG_QUERY)
-			.map(|values| values.cloned().collect())
-			.unwrap_or_default();
+			.map_or_default(|values| values.cloned().collect());
 
 		if self.matches.get_flag(OPT_LIST) {
 			return list_all(host);
@@ -240,11 +238,6 @@ fn search(host: &mut Host, words: &[String]) -> i32 {
 		}
 	}
 	0
-}
-
-/// Creates the `errno` builtin registration.
-pub(crate) fn errno_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Errno, SE>()
 }
 
 #[cfg(test)]

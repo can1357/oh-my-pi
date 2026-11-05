@@ -14,6 +14,9 @@ import type {
 	RequestDetails,
 	SessionSummary,
 	SessionTrace,
+	SpotlightAgentScope,
+	SpotlightDashboardStats,
+	SpotlightSessionContext,
 	TimeRange,
 	ToolDashboardStats,
 } from "./types";
@@ -121,6 +124,19 @@ export async function getRequestDetails(id: number, signal?: AbortSignal): Promi
 	return fetchJson<RequestDetails>(`${API_BASE}/request/${id}`, { signal });
 }
 
+/** Whether the page may close the dashboard (`omp stats` shown in place of a Tern block). */
+export async function getClosable(signal?: AbortSignal): Promise<boolean> {
+	const { closable } = await fetchJson<{ closable: boolean }>(`${API_BASE}/close`, { signal });
+	return closable;
+}
+
+/** Close the dashboard: its host takes the page away and stops serving it. */
+export async function closeDashboard(): Promise<void> {
+	const endpoint = `${API_BASE}/close`;
+	const res = await fetch(endpoint, { method: "POST", headers: ACTION_HEADERS });
+	if (!res.ok) throw new ApiError(res.status, endpoint, await readErrorMessage(res, endpoint));
+}
+
 /** Ask the server to start a background sync; progress arrives on the `/api/events` stream. */
 export async function requestSync(): Promise<LiveStatus> {
 	return fetchJson<LiveStatus>(`${API_BASE}/sync`, { method: "POST" });
@@ -169,6 +185,24 @@ export async function getGainDashboardStats(
 	const params = new URLSearchParams({ range });
 	if (project) params.set("project", project);
 	return fetchJson<GainDashboardStats>(`${API_BASE}/stats/gain?${params}`, { signal });
+}
+
+export async function getSpotlightDashboardStats(
+	range: TimeRange = "24h",
+	agent: SpotlightAgentScope = "all",
+	signal?: AbortSignal,
+): Promise<SpotlightDashboardStats> {
+	return fetchJson<SpotlightDashboardStats>(
+		`${API_BASE}/stats/spotlight?range=${encodeURIComponent(range)}&agent=${encodeURIComponent(agent)}`,
+		{ signal },
+	);
+}
+
+/** One experiment session's context per request, with and without shaping. */
+export async function getSpotlightSessionContext(file: string, signal?: AbortSignal): Promise<SpotlightSessionContext> {
+	return fetchJson<SpotlightSessionContext>(`${API_BASE}/stats/spotlight/session?file=${encodeURIComponent(file)}`, {
+		signal,
+	});
 }
 
 export async function getToolDashboardStats(

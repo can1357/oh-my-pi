@@ -1,20 +1,20 @@
 import { truncateHeadBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import type { CDPSession, Frame, NewDocumentScriptEvaluation, Page, Realm, WebMCPTool } from "puppeteer-core";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { untilAborted } from "@oh-my-pi/pi-utils";
+import type { Protocol } from "devtools-protocol";
+import type { CDPSession, Frame, Page } from "puppeteer-core";
 
-declare module "puppeteer-core" {
-	interface Frame {
-		/** Puppeteer's page-main JavaScript realm, retained by omp's pinned runtime patch. */
-		mainRealm(): Realm;
-	}
-}
-
-/** Global property under which `installWebMcpPageHook` stores its page bridge. */
-export const WEBMCP_BRIDGE_KEY = "__ompWebMcpBridge_v1";
 const MAX_RESULT_BYTES = 64 * 1024;
 const MAX_SUMMARY_BYTES = 4 * 1024;
 const MAX_SUMMARY_DESCRIPTION_BYTES = 160;
 const MAX_SUMMARY_TOOLS = 16;
 const MAX_EVENTS = 256;
+
+const NO_WEBMCP_DOMAIN =
+	"This browser has no native WebMCP: its DevTools protocol lacks the WebMCP domain (Chrome 147 lists page tools, Chrome 149 and newer also invoke them).";
+const NO_WEBMCP_INVOKE = "This Chrome lists WebMCP tools but cannot invoke them; invoking needs Chrome 149 or newer.";
+const WEBMCP_NOT_EXPOSED =
+	"Chrome does not expose WebMCP to this page. It needs a secure context (https or localhost) and either the site's WebMCP origin trial or Chrome started with --enable-features=WebMCP (chrome://flags/#enable-webmcp-testing).";
 
 /** Filters for WebMCP tool discovery. */
 export interface WebMcpListOptions {
@@ -60,13 +60,13 @@ export interface WebMcpToolRecord {
 
 /** WebMCP discovery result. */
 export interface WebMcpListResult {
-	/** Whether native CDP or the page-side registration mirror is available. */
+	/** Whether Chrome exposes native WebMCP to the page. */
 	status: "ready" | "unavailable";
 	/** Matching page-provided tools. */
 	tools: WebMcpToolRecord[];
 	/** Whether the bounded summary omitted or shortened metadata. */
 	truncated: boolean;
-	/** Explanation when no native or mirrored catalog is available. */
+	/** Why Chrome offers the page no WebMCP, and what turns it on. */
 	reason?: string;
 	/** Marks every page-provided field as untrusted content. */
 	untrusted: true;
@@ -129,121 +129,14 @@ export interface WebMcpEventsResult {
 	untrusted: true;
 }
 
-/** One tool registration mirrored by the page hook. */
-export interface WebMcpHookToolRecord {
-	/** Page-defined tool name. */
-	name: string;
-	/** Page-defined description, `""` when absent. */
-	description: string;
-	/** JSON clone of the page-defined input schema. */
-	inputSchema?: unknown;
-	/** JSON clone of the page-defined annotations. */
-	annotations?: unknown;
-}
-
-/** Page-hook state of one frame, as returned by `webMcpSnapshotInPage`. */
-export interface WebMcpHookSnapshot {
-	/** Whether the page exposed a native `modelContext` before the hook installed. */
-	nativeAvailable: boolean;
-	/** Mirrored tool registrations, sorted by name. */
-	tools: WebMcpHookToolRecord[];
-	/** `location.origin` of the frame. */
-	origin: string;
-}
-
-/** Page-hook invocation outcome, as returned by `webMcpInvokeInPage`. */
-export interface WebMcpHookInvokeEnvelope {
-	/** Whether the page tool completed without throwing. */
-	ok: boolean;
-	/** JSON encoding of the tool result (`null` for `undefined`) when `ok`. */
-	encoded?: string;
-	/** Error text when not `ok`. */
-	error?: string;
-}
-
-/** Outcome of executing one native (non page-hook) WebMCP tool. */
-export type WebMcpNativeToolResult = { ok: true; output: unknown } | { ok: false; error: string };
-
-/** One frame whose page hook can be snapshotted and invoked. */
-export interface WebMcpFrameTarget {
-	/** Stable frame identifier reported as `frameId`. */
-	readonly id: string;
-	/** Read the frame's page-hook state. */
-	snapshot(): Promise<WebMcpHookSnapshot>;
-	/** Invoke a mirrored page tool with JSON-cloned params. */
-	invoke(name: string, params: unknown): Promise<WebMcpHookInvokeEnvelope>;
-}
-
-/** One tool reported by a native WebMCP implementation (Chromium CDP). */
-export interface WebMcpNativeToolEntry {
-	/** Page-defined tool name. */
-	readonly name: string;
-	/** Page-defined tool description. */
-	readonly description: string;
-	/** Page-defined JSON Schema. */
-	readonly inputSchema?: unknown;
-	/** Page-defined tool annotations. */
-	readonly annotations?: unknown;
-	/** Identifier of the owning frame. */
-	readonly frameId: string;
-	/** Origin of the owning frame. */
-	readonly origin: string;
-	/** Execute the tool with JSON-cloned params. */
-	execute(params: object): Promise<WebMcpNativeToolResult>;
-}
-
-/** Where a controller finds frames (and, for Chromium, native CDP tools). */
-export interface WebMcpHost {
-	/** Frames whose page hook should be polled. */
-	frames(): Promise<WebMcpFrameTarget[]>;
-	/** Natively registered tools; consulted only once native support is known. */
-	nativeTools(): readonly WebMcpNativeToolEntry[];
-	/** Remove the preload and uninstall the page hook from every frame. */
-	dispose(): Promise<void>;
-}
-
-/** Construction options for `WebMcpController`. */
-export interface WebMcpControllerOptions {
-	/** Whether native WebMCP was detected at install time. */
-	nativeSupported: boolean;
-	/** `reason` reported while no native support or page registrations exist; defaults to the Chromium wording. */
-	unavailableReason?: string;
-}
-
 interface IdentifiedFrame extends Frame {
 	_id: string;
 }
 
-type CatalogEntry = WebMcpToolRecord &
-	({ target: WebMcpFrameTarget; nativeTool?: undefined } | { target?: undefined; nativeTool: WebMcpNativeToolEntry });
-
-interface PageModelContextTool {
-	name: string;
-	description?: string;
-	inputSchema?: unknown;
-	annotations?: unknown;
-	execute?: (params: unknown, options?: { signal: AbortSignal }) => unknown | Promise<unknown>;
-	handler?: (params: unknown, options?: { signal: AbortSignal }) => unknown | Promise<unknown>;
-}
-
-interface PageModelContext {
-	registerTool?: (tool: PageModelContextTool, options?: { signal?: AbortSignal }) => unknown | Promise<unknown>;
-	unregisterTool?: (name: string) => unknown | Promise<unknown>;
-	provideContext?: (context: unknown) => unknown | Promise<unknown>;
-	getTools?: () => unknown | Promise<unknown>;
-	executeTool?: (tool: PageModelContextTool, params?: unknown) => unknown | Promise<unknown>;
-	addEventListener?: EventTarget["addEventListener"];
-	removeEventListener?: EventTarget["removeEventListener"];
-	dispatchEvent?: EventTarget["dispatchEvent"];
-	ontoolchange?: ((event: Event) => void) | null;
-}
-
-interface PageWebMcpBridge {
-	nativeAvailable: boolean;
-	snapshot(): WebMcpHookToolRecord[];
-	invoke(name: string, params: unknown): Promise<unknown>;
-	uninstall(): void;
-}
+type CatalogEntry = WebMcpToolRecord & {
+	/** CDP session of the frame that registered the tool. */
+	session: CDPSession;
+};
 
 function frameId(frame: Frame): string {
 	const id = (frame as IdentifiedFrame)._id;
@@ -267,6 +160,14 @@ function untrustedBoundary(value: string): string {
 function errorText(error: unknown): string {
 	if (error instanceof Error) return error.message;
 	return String(error);
+}
+
+/**
+ * Whether `method` failed because the browser does not implement it. Chrome's method-not-found message names the
+ * method; other failures of the same command can also say "wasn't found" about a frame or tool.
+ */
+function isMissingCommand(error: unknown, method: string): boolean {
+	return error instanceof Error && error.message.includes(`'${method}' wasn't found`);
 }
 
 function boundedResult(value: unknown): WebMcpInvokeSuccess {
@@ -296,340 +197,130 @@ function boundedResult(value: unknown): WebMcpInvokeSuccess {
 }
 
 /**
- * Page function (self-contained; serialisable via `.toString()`): mirror `navigator/document.modelContext`
- * registrations into a bridge stored at `globalThis[key]`, polyfilling `modelContext` when absent. Idempotent.
- * The platform's `modelContext` getter is never called here: it creates the document's context, and Chromium kills
- * a renderer whose frame creates one twice, as this hook would in an iframe's initial empty document and again in
- * the document the iframe then loads. The platform's `ModelContext.prototype` methods are patched instead, which
- * reaches every reference to the context, however early the page took it; a context the page put on
- * navigator/document itself is patched directly.
+ * The tools registered in the root frame of one CDP session, or `undefined` when the browser has no WebMCP domain.
+ * `WebMCP.enable` replays the root frame's tools as `toolsAdded` before it answers, also on a session where the
+ * domain is already enabled, so each call reads the current registrations, back/forward cache restores included.
  */
-export function installWebMcpPageHook(key: string): void {
-	const realm = globalThis as typeof globalThis & Record<string, unknown>;
-	if (realm[key]) return;
-
-	const pageGlobals = globalThis as unknown as {
-		navigator: { modelContext?: PageModelContext };
-		document: { modelContext?: PageModelContext };
-		ModelContext?: { prototype: PageModelContext };
+async function rootFrameTools(
+	session: CDPSession,
+	signal: AbortSignal | undefined,
+): Promise<Protocol.WebMCP.Tool[] | undefined> {
+	const tools: Protocol.WebMCP.Tool[] = [];
+	const onAdded = (event: Protocol.WebMCP.ToolsAddedEvent): void => {
+		tools.push(...event.tools);
 	};
-	const nav = pageGlobals.navigator;
-	const doc = pageGlobals.document;
-	// Chromium's getter is a native accessor on an interface prototype; anything else the page defined itself and
-	// is read now.
-	let platform = false;
-	let pageContext: PageModelContext | undefined;
-	for (const instance of [doc, nav]) {
-		let descriptor = Object.getOwnPropertyDescriptor(instance, "modelContext");
-		for (let owner = Object.getPrototypeOf(instance); !descriptor && owner; owner = Object.getPrototypeOf(owner)) {
-			descriptor = Object.getOwnPropertyDescriptor(owner, "modelContext");
-		}
-		if (
-			descriptor?.get &&
-			/^function get modelContext\(\) \{\s*\[native code\]\s*\}$/.test(
-				Function.prototype.toString.call(descriptor.get),
-			)
-		) {
-			platform = true;
-		} else {
-			// Read as `document.modelContext ?? navigator.modelContext`: a null one falls through.
-			pageContext ??= instance.modelContext;
-		}
-	}
-	const platformPrototype = platform ? pageGlobals.ModelContext?.prototype : undefined;
-	const nativeAvailable = platform || pageContext !== undefined;
-	const tools = new Map<string, PageModelContextTool>();
-	const patches: {
-		target: PageModelContext;
-		name: "registerTool" | "unregisterTool";
-		original?: PropertyDescriptor;
-		value: unknown;
-	}[] = [];
-	const changeTarget = new EventTarget();
-	let polyfillContext: PageModelContext | undefined;
-
-	const cloneMetadata = (value: unknown): unknown => {
-		if (value === undefined) return undefined;
-		try {
-			return JSON.parse(JSON.stringify(value)) as unknown;
-		} catch {
-			return undefined;
-		}
-	};
-	const notify = (): void => {
-		const event = new Event("toolchange");
-		changeTarget.dispatchEvent(event);
-		polyfillContext?.ontoolchange?.(event);
-	};
-	const remember = (tool: PageModelContextTool, signal?: AbortSignal): void => {
-		if (typeof tool?.name !== "string" || !/^[A-Za-z0-9_.-]{1,128}$/.test(tool.name)) {
-			throw new TypeError("WebMCP tool name must contain 1-128 ASCII letters, digits, '_', '-', or '.'");
-		}
-		if (typeof (tool.execute ?? tool.handler) !== "function") {
-			throw new TypeError(`WebMCP tool ${JSON.stringify(tool.name)} requires an execute function`);
-		}
-		tools.set(tool.name, tool);
-		if (signal) {
-			signal.addEventListener(
-				"abort",
-				() => {
-					if (tools.get(tool.name) === tool) {
-						tools.delete(tool.name);
-						notify();
-					}
-				},
-				{ once: true },
-			);
-		}
-		notify();
-	};
-	const forget = (name: string): void => {
-		if (tools.delete(name)) notify();
-	};
-
-	// Wrap the methods every registration goes through: the page's own context, called on that context as before,
-	// or the platform prototype, called on whichever context the page used.
-	const patch = (target: PageModelContext, receiver?: PageModelContext): void => {
-		const register = target.registerTool;
-		const unregister = target.unregisterTool;
-		const wrappers = {
-			async registerTool(this: unknown, tool: PageModelContextTool, options?: { signal?: AbortSignal }) {
-				if (register) await register.call(receiver ?? this, tool, options);
-				remember(tool, options?.signal);
-			},
-			async unregisterTool(this: unknown, name: string) {
-				if (unregister) await unregister.call(receiver ?? this, name);
-				forget(name);
-			},
-		};
-		for (const name of unregister ? (["registerTool", "unregisterTool"] as const) : (["registerTool"] as const)) {
-			// A native context the page exposes itself already resolves to the prototype's wrapper.
-			if (patches.some(patched => patched.value === target[name])) continue;
-			const original = Object.getOwnPropertyDescriptor(target, name);
-			// An own method keeps its attributes; an inherited one is shadowed.
-			const descriptor =
-				original && "value" in original
-					? { value: wrappers[name] }
-					: { configurable: true, writable: true, value: wrappers[name] };
-			try {
-				Object.defineProperty(target, name, descriptor);
-				patches.push({ target, name, original, value: wrappers[name] });
-			} catch {
-				// Native CDP discovery remains authoritative when this object is not patchable.
-			}
-		}
-	};
-
-	if (platformPrototype) patch(platformPrototype);
-	if (pageContext) patch(pageContext, pageContext);
-	// A page whose own modelContext is null reports the API but still gets the polyfill.
-	if (!platform && !pageContext) {
-		polyfillContext = {
-			registerTool: async (tool: PageModelContextTool, options?: { signal?: AbortSignal }) =>
-				remember(tool, options?.signal),
-			unregisterTool: async (name: string) => forget(name),
-			async provideContext(context: unknown): Promise<void> {
-				const record = context && typeof context === "object" ? (context as Record<string, unknown>) : undefined;
-				const provided = Array.isArray(context) ? context : record?.tools;
-				if (!Array.isArray(provided)) throw new TypeError("provideContext() expects an array or { tools: [...] }");
-				for (const tool of provided) remember(tool as PageModelContextTool);
-			},
-			async getTools(): Promise<WebMcpHookToolRecord[]> {
-				return bridge.snapshot();
-			},
-			async executeTool(tool: PageModelContextTool, params?: unknown): Promise<unknown> {
-				return await bridge.invoke(tool.name, params ?? {});
-			},
-			addEventListener: changeTarget.addEventListener.bind(changeTarget),
-			removeEventListener: changeTarget.removeEventListener.bind(changeTarget),
-			dispatchEvent: changeTarget.dispatchEvent.bind(changeTarget),
-			ontoolchange: null,
-		};
-		for (const owner of [nav, doc]) {
-			try {
-				Object.defineProperty(owner, "modelContext", {
-					configurable: true,
-					enumerable: false,
-					value: polyfillContext,
-				});
-			} catch {
-				// A hostile or unusual page can make the host object non-configurable.
-			}
-		}
-	}
-
-	const bridge: PageWebMcpBridge = {
-		nativeAvailable,
-		snapshot(): WebMcpHookToolRecord[] {
-			return [...tools.values()]
-				.map(tool => ({
-					name: tool.name,
-					description: typeof tool.description === "string" ? tool.description : "",
-					inputSchema: cloneMetadata(tool.inputSchema),
-					annotations: cloneMetadata(tool.annotations),
-				}))
-				.sort((left, right) => left.name.localeCompare(right.name));
-		},
-		async invoke(name: string, params: unknown): Promise<unknown> {
-			const tool = tools.get(name);
-			if (!tool) throw new Error(`No page-side WebMCP tool named ${JSON.stringify(name)}`);
-			const execute = tool.execute ?? tool.handler;
-			if (!execute) throw new Error(`WebMCP tool ${JSON.stringify(name)} has no execute function`);
-			const controller = new AbortController();
-			return await execute(params, { signal: controller.signal });
-		},
-		uninstall(): void {
-			for (const { target, name, original, value } of patches) {
-				try {
-					// Leave a method the page replaced after ours, and any attribute it changed.
-					if (Object.getOwnPropertyDescriptor(target, name)?.value !== value) continue;
-					if (!original) delete target[name];
-					else Object.defineProperty(target, name, "value" in original ? { value: original.value } : original);
-				} catch {
-					// Best-effort cleanup for attached user tabs.
-				}
-			}
-			if (polyfillContext) {
-				for (const owner of [nav, doc]) {
-					try {
-						if (owner.modelContext === polyfillContext) delete owner.modelContext;
-					} catch {
-						// Best-effort cleanup for attached user tabs.
-					}
-				}
-			}
-			delete realm[key];
-		},
-	};
-	Object.defineProperty(realm, key, { configurable: true, enumerable: false, value: bridge });
-}
-
-/** Page function (self-contained): read the bridge at `globalThis[key]` into a `WebMcpHookSnapshot`. */
-export function webMcpSnapshotInPage(key: string): WebMcpHookSnapshot {
-	const realm = globalThis as typeof globalThis & Record<string, unknown>;
-	const bridge = realm[key] as PageWebMcpBridge | undefined;
-	const pageLocation = globalThis as unknown as { location: { origin: string } };
-	return {
-		nativeAvailable: bridge?.nativeAvailable ?? false,
-		tools: bridge?.snapshot() ?? [],
-		origin: pageLocation.location.origin,
-	};
-}
-
-/** Page function (self-contained): invoke mirrored tool `name` through the bridge at `globalThis[key]`. */
-export async function webMcpInvokeInPage(
-	key: string,
-	name: string,
-	params: unknown,
-): Promise<WebMcpHookInvokeEnvelope> {
-	const realm = globalThis as typeof globalThis & Record<string, unknown>;
-	const bridge = realm[key] as PageWebMcpBridge | undefined;
-	if (!bridge) return { ok: false, error: "WebMCP page hook is unavailable" };
+	session.on("WebMCP.toolsAdded", onAdded);
 	try {
-		const result = await bridge.invoke(name, params);
-		const encoded = JSON.stringify(result === undefined ? null : result);
-		return { ok: true, encoded };
+		await untilAborted(signal, () => session.send("WebMCP.enable"));
+		return tools;
 	} catch (error) {
-		return { ok: false, error: error instanceof Error ? error.message : String(error) };
+		if (isMissingCommand(error, "WebMCP.enable")) return undefined;
+		throw error;
+	} finally {
+		session.off("WebMCP.toolsAdded", onAdded);
 	}
 }
 
-/** Page function (self-contained): restore wrapped page APIs and delete the bridge at `globalThis[key]`. */
-export function uninstallWebMcpPageHook(key: string): void {
-	const realm = globalThis as typeof globalThis & Record<string, unknown>;
-	(realm[key] as PageWebMcpBridge | undefined)?.uninstall();
-}
-
-class ChromiumWebMcpFrame implements WebMcpFrameTarget {
-	readonly #frame: Frame;
-
-	constructor(frame: Frame) {
-		this.#frame = frame;
-	}
-
-	get id(): string {
-		return frameId(this.#frame);
-	}
-
-	async snapshot(): Promise<WebMcpHookSnapshot> {
-		return await this.#frame.mainRealm().evaluate(webMcpSnapshotInPage, WEBMCP_BRIDGE_KEY);
-	}
-
-	async invoke(name: string, params: unknown): Promise<WebMcpHookInvokeEnvelope> {
-		return await this.#frame.mainRealm().evaluate(webMcpInvokeInPage, WEBMCP_BRIDGE_KEY, name, params);
-	}
-}
-
-class ChromiumWebMcpHost implements WebMcpHost {
-	readonly #page: Page;
-	readonly #preload: NewDocumentScriptEvaluation;
-
-	constructor(page: Page, preload: NewDocumentScriptEvaluation) {
-		this.#page = page;
-		this.#preload = preload;
-	}
-
-	async frames(): Promise<WebMcpFrameTarget[]> {
-		return this.#page.frames().map(frame => new ChromiumWebMcpFrame(frame));
-	}
-
-	nativeTools(): readonly WebMcpNativeToolEntry[] {
-		return this.#page.webmcp.tools().map(tool => nativeToolEntry(tool));
-	}
-
-	async dispose(): Promise<void> {
-		await this.#page.removeScriptToEvaluateOnNewDocument(this.#preload.identifier).catch(() => undefined);
-		for (const frame of this.#page.frames()) {
-			await frame
-				.mainRealm()
-				.evaluate(uninstallWebMcpPageHook, WEBMCP_BRIDGE_KEY)
-				.catch(() => undefined);
-		}
-	}
-}
-
-function nativeToolEntry(tool: WebMCPTool): WebMcpNativeToolEntry {
-	return {
-		name: tool.name,
-		description: tool.description,
-		inputSchema: tool.inputSchema,
-		annotations: tool.annotations,
-		frameId: frameId(tool.frame),
-		origin: originForUrl(tool.frame.url()),
-		async execute(params: object): Promise<WebMcpNativeToolResult> {
-			const result = await tool.execute(params);
-			if (result.status !== "Completed") {
-				return {
-					ok: false,
-					error: result.errorText ?? result.exception?.description ?? `WebMCP invocation ${result.status}`,
-				};
-			}
-			return { ok: true, output: result.output };
-		},
+/** Invoke one tool through Chrome's WebMCP domain and wait for its response; aborting cancels the invocation. */
+async function invokeNative(
+	entry: CatalogEntry,
+	input: object,
+	signal: AbortSignal | undefined,
+): Promise<Protocol.WebMCP.ToolRespondedEvent> {
+	signal?.throwIfAborted();
+	const { session } = entry;
+	const early = new Map<string, Protocol.WebMCP.ToolRespondedEvent>();
+	const { promise, resolve } = Promise.withResolvers<Protocol.WebMCP.ToolRespondedEvent>();
+	let invocationId: string | undefined;
+	const onResponded = (event: Protocol.WebMCP.ToolRespondedEvent): void => {
+		if (invocationId === undefined) early.set(event.invocationId, event);
+		else if (event.invocationId === invocationId) resolve(event);
 	};
+	session.on("WebMCP.toolResponded", onResponded);
+	try {
+		({ invocationId } = await session.send("WebMCP.invokeTool", {
+			frameId: entry.frameId,
+			toolName: entry.name,
+			input,
+		}));
+		const id = invocationId;
+		try {
+			// An abort while the invocation was being started still cancels it once its id is known.
+			signal?.throwIfAborted();
+			return early.get(id) ?? (await untilAborted(signal, promise));
+		} catch (error) {
+			if (signal?.aborted) {
+				await session.send("WebMCP.cancelInvocation", { invocationId: id }).catch(() => undefined);
+			}
+			throw error;
+		}
+	} finally {
+		session.off("WebMCP.toolResponded", onResponded);
+	}
 }
 
-/** Per-tab WebMCP discovery, invocation, and catalog-event controller. */
+/**
+ * Per-tab WebMCP discovery, invocation, and catalog-event controller over Chrome's native WebMCP DevTools domain.
+ * Construction only listens to the WebMCP events Puppeteer enables on the tab's session when it attaches; nothing
+ * reaches the page until a call, which enables the domain on every CDP session serving the tab's frames.
+ */
 export class WebMcpController {
-	readonly #host: WebMcpHost;
-	readonly #unavailableReason: string;
-	#nativeSupported: boolean;
+	readonly #page: Page;
+	/** Tools announced on watched sessions, for frames `WebMCP.enable` does not replay. */
+	readonly #announced = new Map<string, { tool: Protocol.WebMCP.Tool; session: CDPSession }>();
+	/** Watched sessions and how to stop listening to each. */
+	readonly #watched = new Map<CDPSession, () => void>();
 	#catalog = new Map<string, CatalogEntry>();
 	#events: WebMcpCatalogEvent[] = [];
 	#sequence = 0;
 	#droppedThrough = 0;
 
-	constructor(host: WebMcpHost, options: WebMcpControllerOptions) {
-		this.#host = host;
-		this.#nativeSupported = options.nativeSupported;
-		this.#unavailableReason =
-			options.unavailableReason ??
-			"Chrome WebMCP CDP is unavailable and no page-side tool registrations were observed.";
+	constructor(page: Page) {
+		this.#page = page;
+		this.#watch(page.mainFrame().client);
+	}
+
+	/** Follow one session's tool announcements; Chrome replays only a session's root frame on `WebMCP.enable`. */
+	#watch(session: CDPSession): void {
+		if (this.#watched.has(session)) return;
+		const onAdded = (event: Protocol.WebMCP.ToolsAddedEvent): void => {
+			for (const tool of event.tools) this.#announced.set(`${tool.frameId}\u0000${tool.name}`, { tool, session });
+		};
+		const onRemoved = (event: Protocol.WebMCP.ToolsRemovedEvent): void => {
+			for (const tool of event.tools) {
+				const key = `${tool.frameId}\u0000${tool.name}`;
+				if (this.#announced.get(key)?.session === session) this.#announced.delete(key);
+			}
+		};
+		const forgetFrame = (frameId: string): void => {
+			for (const [key, announced] of this.#announced) {
+				if (announced.session === session && announced.tool.frameId === frameId) this.#announced.delete(key);
+			}
+		};
+		// Chrome announces no removal when a frame loads another document; that document's tools follow this event.
+		const onNavigated = (event: Protocol.Page.FrameNavigatedEvent): void => {
+			if (event.type === "Navigation") forgetFrame(event.frame.id);
+		};
+		// Nor when a frame goes away, as a same-process iframe does when its parent navigates.
+		const onDetached = (event: Protocol.Page.FrameDetachedEvent): void => forgetFrame(event.frameId);
+		session.on("WebMCP.toolsAdded", onAdded);
+		session.on("WebMCP.toolsRemoved", onRemoved);
+		session.on("Page.frameNavigated", onNavigated);
+		session.on("Page.frameDetached", onDetached);
+		this.#watched.set(session, () => {
+			session.off("WebMCP.toolsAdded", onAdded);
+			session.off("WebMCP.toolsRemoved", onRemoved);
+			session.off("Page.frameNavigated", onNavigated);
+			session.off("Page.frameDetached", onDetached);
+		});
 	}
 
 	/** Discover page-provided tools, omitting schemas unless an exact name is requested. */
-	async list(options: WebMcpListOptions = {}): Promise<WebMcpListResult> {
-		await this.#refreshCatalog();
+	async list(options: WebMcpListOptions = {}, signal?: AbortSignal): Promise<WebMcpListResult> {
+		const unavailable = await this.#refreshCatalog(signal);
+		const availability = unavailable
+			? { status: "unavailable" as const, reason: unavailable }
+			: { status: "ready" as const };
 		let entries = [...this.#catalog.values()];
 		if (options.name !== undefined) entries = entries.filter(tool => tool.name === options.name);
 		if (options.frame !== undefined) entries = entries.filter(tool => tool.frameId === options.frame);
@@ -637,10 +328,9 @@ export class WebMcpController {
 
 		if (options.name !== undefined) {
 			return {
-				status: this.#status(),
+				...availability,
 				tools: entries.map(entry => this.#publicRecord(entry, true)),
 				truncated: false,
-				...this.#reason(),
 				untrusted: true,
 			};
 		}
@@ -672,17 +362,22 @@ export class WebMcpController {
 		}
 		if (tools.length < entries.length) truncated = true;
 		return {
-			status: this.#status(),
+			...availability,
 			tools,
 			truncated,
-			...this.#reason(),
 			untrusted: true,
 		};
 	}
 
-	/** Invoke one page-provided tool and return a bounded JSON-cloneable result. */
-	async invoke(name: string, params: unknown, options: WebMcpInvokeOptions = {}): Promise<WebMcpInvokeResult> {
-		await this.#refreshCatalog();
+	/** Invoke one page-provided tool and return a bounded JSON-cloneable result; aborting cancels the invocation. */
+	async invoke(
+		name: string,
+		params: unknown,
+		options: WebMcpInvokeOptions = {},
+		signal?: AbortSignal,
+	): Promise<WebMcpInvokeResult> {
+		const unavailable = await this.#refreshCatalog(signal);
+		if (unavailable) throw new ToolError(unavailable);
 		const matches = [...this.#catalog.values()].filter(
 			tool => tool.name === name && (options.frame === undefined || tool.frameId === options.frame),
 		);
@@ -704,33 +399,25 @@ export class WebMcpController {
 				untrusted: true,
 			};
 		}
-		const tool = matches[0]!;
 		try {
-			if (tool.nativeTool) {
-				const result = await tool.nativeTool.execute(this.#cloneInput(params));
-				if (!result.ok) return { ok: false, error: untrustedBoundary(result.error), untrusted: true };
-				return boundedResult(result.output);
+			const response = await invokeNative(matches[0]!, this.#cloneInput(params), signal);
+			if (response.status !== "Completed") {
+				// Chrome reports a thrown page error with an empty `errorText` and the exception beside it.
+				const error =
+					response.errorText || response.exception?.description || `WebMCP invocation ${response.status}`;
+				return { ok: false, error: untrustedBoundary(error), untrusted: true };
 			}
-			const response = await tool.target.invoke(name, this.#cloneInput(params));
-			if (!response.ok) {
-				return {
-					ok: false,
-					error: untrustedBoundary(response.error ?? "WebMCP invocation failed"),
-					untrusted: true,
-				};
-			}
-			if (response.encoded === undefined) {
-				return { ok: false, error: untrustedBoundary("WebMCP result was not JSON-serializable"), untrusted: true };
-			}
-			return boundedResult(JSON.parse(response.encoded) as unknown);
+			return boundedResult(response.output);
 		} catch (error) {
+			if (signal?.aborted) throw error;
+			if (isMissingCommand(error, "WebMCP.invokeTool")) throw new ToolError(NO_WEBMCP_INVOKE);
 			return { ok: false, error: untrustedBoundary(errorText(error)), untrusted: true };
 		}
 	}
 
 	/** Poll catalog transitions observed since a prior cursor. */
-	async events(options: WebMcpEventsOptions = {}): Promise<WebMcpEventsResult> {
-		await this.#refreshCatalog();
+	async events(options: WebMcpEventsOptions = {}, signal?: AbortSignal): Promise<WebMcpEventsResult> {
+		await this.#refreshCatalog(signal);
 		const since = typeof options.since === "number" && Number.isFinite(options.since) ? options.since : 0;
 		const events = this.#events.filter(event => event.sequence > since);
 		const truncated = since < this.#droppedThrough;
@@ -742,20 +429,14 @@ export class WebMcpController {
 		return result;
 	}
 
-	/** Remove the preload and restore any page API method wrapped by this controller. */
+	/** Stop following the tab's WebMCP announcements. */
 	async dispose(): Promise<void> {
-		await this.#host.dispose();
+		for (const stop of this.#watched.values()) stop();
+		this.#watched.clear();
+		this.#announced.clear();
 		this.#catalog.clear();
 		this.#events = [];
 		this.#droppedThrough = 0;
-	}
-
-	#status(): "ready" | "unavailable" {
-		return this.#nativeSupported || this.#catalog.size > 0 ? "ready" : "unavailable";
-	}
-
-	#reason(): { reason: string } | Record<string, never> {
-		return this.#status() === "unavailable" ? { reason: this.#unavailableReason } : {};
 	}
 
 	#publicRecord(entry: CatalogEntry, full: boolean): WebMcpToolRecord {
@@ -784,45 +465,55 @@ export class WebMcpController {
 		return clone;
 	}
 
-	async #refreshCatalog(): Promise<void> {
-		const next = new Map<string, CatalogEntry>();
-		for (const target of await this.#host.frames()) {
-			try {
-				const snapshot = await target.snapshot();
-				this.#nativeSupported ||= snapshot.nativeAvailable;
-				const id = target.id;
-				for (const tool of snapshot.tools) {
-					const entry: CatalogEntry = {
-						name: tool.name,
-						description: tool.description,
-						frameId: id,
-						origin: snapshot.origin,
-						inputSchema: tool.inputSchema,
-						annotations: tool.annotations,
-						untrusted: true,
-						target,
-					};
-					next.set(`${id}\u0000${tool.name}`, entry);
-				}
-			} catch {
-				// Detached or cross-process frames remain discoverable through native CDP events.
-			}
+	/** Re-read the native catalog, record its transitions, and return why the page can have no tools, if it can't. */
+	async #refreshCatalog(signal: AbortSignal | undefined): Promise<string | undefined> {
+		const page = this.#page;
+		const frames = page.frames();
+		const framesById = new Map(frames.map(frame => [frameId(frame), frame]));
+		const mainSession = page.mainFrame().client;
+		// Cross-origin iframes run in their own process and register their tools on their own session.
+		const sessions = [...new Set([mainSession, ...frames.map(frame => frame.client)])];
+		for (const session of sessions) this.#watch(session);
+		// A session that serves no frame now (a removed or process-swapped iframe) is let go with its tools.
+		const live = new Set(sessions);
+		for (const [session, stop] of this.#watched) {
+			if (live.has(session)) continue;
+			stop();
+			this.#watched.delete(session);
+			for (const [key, announced] of this.#announced) if (announced.session === session) this.#announced.delete(key);
+		}
+		const reads = await Promise.allSettled(sessions.map(session => rootFrameTools(session, signal)));
+		signal?.throwIfAborted();
+		const main = reads[0]!;
+		if (main.status === "rejected") throw main.reason;
+		if (main.value === undefined) {
+			this.#catalog.clear();
+			return NO_WEBMCP_DOMAIN;
 		}
 
-		if (this.#nativeSupported) {
-			for (const tool of this.#host.nativeTools()) {
-				const entry: CatalogEntry = {
-					name: tool.name,
-					description: tool.description,
-					frameId: tool.frameId,
-					origin: tool.origin,
-					inputSchema: tool.inputSchema,
-					annotations: tool.annotations,
-					untrusted: true,
-					nativeTool: tool,
-				};
-				next.set(`${tool.frameId}\u0000${tool.name}`, entry);
-			}
+		const next = new Map<string, CatalogEntry>();
+		const add = (tool: Protocol.WebMCP.Tool, session: CDPSession): void => {
+			const frame = framesById.get(tool.frameId);
+			next.set(`${tool.frameId}\u0000${tool.name}`, {
+				name: tool.name,
+				description: tool.description,
+				frameId: tool.frameId,
+				origin: frame ? originForUrl(frame.url()) : "null",
+				inputSchema: tool.inputSchema,
+				annotations: tool.annotations,
+				untrusted: true,
+				session,
+			});
+		};
+		sessions.forEach((session, index) => {
+			const read = reads[index]!;
+			if (read.status === "rejected") return;
+			for (const tool of read.value ?? []) add(tool, session);
+		});
+		for (const { tool, session } of this.#announced.values()) {
+			const frame = framesById.get(tool.frameId);
+			const parent = frame?.parentFrame();
+			if (parent && parent.client === session && frame?.client === session) add(tool, session);
 		}
 
 		for (const [key, entry] of next) {
@@ -835,6 +526,13 @@ export class WebMcpController {
 			if (!next.has(key)) this.#recordEvent("unregistered", entry);
 		}
 		this.#catalog = next;
+		if (next.size > 0) return undefined;
+		// omp's Puppeteer evaluates in its isolated world, where `in` sees the platform API without creating the
+		// page's context or reading anything the page defined.
+		const exposed = await untilAborted(signal, () =>
+			page.mainFrame().evaluate(() => "modelContext" in document || "modelContext" in navigator),
+		);
+		return exposed ? undefined : WEBMCP_NOT_EXPOSED;
 	}
 
 	#entryFingerprint(entry: CatalogEntry): string {
@@ -864,33 +562,4 @@ export class WebMcpController {
 			this.#droppedThrough = removed.at(-1)?.sequence ?? this.#droppedThrough;
 		}
 	}
-}
-
-/** Install the WebMCP preload before navigation and probe native CDP support. */
-export async function installWebMcp(page: Page): Promise<WebMcpController> {
-	const preload = await page.evaluateOnNewDocument(installWebMcpPageHook, WEBMCP_BRIDGE_KEY);
-	for (const frame of page.frames()) {
-		await frame
-			.mainRealm()
-			.evaluate(installWebMcpPageHook, WEBMCP_BRIDGE_KEY)
-			.catch(() => undefined);
-	}
-
-	let nativeSupported = false;
-	let session: CDPSession | undefined;
-	try {
-		session = await page.createCDPSession();
-		await Promise.race([
-			session.send("WebMCP.enable"),
-			Bun.sleep(1_000).then(() => {
-				throw new Error("WebMCP CDP probe timed out");
-			}),
-		]);
-		nativeSupported = true;
-	} catch {
-		nativeSupported = false;
-	} finally {
-		await session?.detach().catch(() => undefined);
-	}
-	return new WebMcpController(new ChromiumWebMcpHost(page, preload), { nativeSupported });
 }

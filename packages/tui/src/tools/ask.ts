@@ -1,4 +1,5 @@
 import type { NativeToolHead, NativeToolView, ToolRenderer, ToolRenderResult } from "./renderer";
+import { formatCount } from "@oh-my-pi/pi-utils";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { compact, md, node, row, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
@@ -8,6 +9,7 @@ import { noteText, resultText } from "./native-view";
 
 import {
 	type Component,
+	lexDocument,
 	Markdown,
 	type MarkdownTheme,
 	renderInlineMarkdown,
@@ -25,7 +27,7 @@ import { outputBlockContentWidth, renderStatusLine } from "../render";
 import { framedToolCard } from "../render/tool-card";
 import { wrapPrefixedLine } from "../render/hanging-wrap";
 
-import { formatErrorMessage, formatMeta, formatTitle, sanitizeCarriageReturns } from "../render/render-utils";
+import { formatErrorMessage, formatStatusIcon, formatTitle, sanitizeCarriageReturns } from "../render/render-utils";
 
 /** Result for a single question */
 export interface QuestionResult {
@@ -176,10 +178,11 @@ function normalizeRenderQuestions(raw: unknown): NonNullable<AskRenderArgs["ques
 /** Render a custom free-text answer as a status line plus indented continuation rows. */
 function renderCustomInputLines(uiTheme: Theme, customInput: string): string[] {
 	const lines = customInput.split("\n");
-	const out: string[] = [
-		` ${uiTheme.styledSymbol("status.success", "success")} ${uiTheme.fg("toolOutput", lines[0] ?? "")}`,
-	];
-	for (let i = 1; i < lines.length; i++) out.push(`   ${uiTheme.fg("toolOutput", lines[i])}`);
+	const icon = formatStatusIcon("success", uiTheme);
+	// Continuation rows line up under the answer text, past the glyph's own width.
+	const indent = " ".repeat(visibleWidth(icon) + 2);
+	const out: string[] = [` ${icon} ${uiTheme.fg("toolOutput", lines[0] ?? "")}`];
+	for (let i = 1; i < lines.length; i++) out.push(`${indent}${uiTheme.fg("toolOutput", lines[i])}`);
 	return out;
 }
 
@@ -233,6 +236,58 @@ function renderQuestionOptionLines(
 	return out;
 }
 
+/** Flags of a question form: `multi` and its option count. */
+function questionFlags(multi: boolean | undefined, optionCount: number): string[] {
+	const flags: string[] = [];
+	if (multi) flags.push("multi");
+	if (optionCount > 0) flags.push(formatCount("option", optionCount));
+	return flags;
+}
+
+/** Dim `multi · 3 options` footer flags, or undefined when there are none. */
+function formatQuestionFlags(uiTheme: Theme, multi: boolean | undefined, optionCount: number): string | undefined {
+	const flags = questionFlags(multi, optionCount);
+	return flags.length > 0 ? uiTheme.fg("dim", flags.join(uiTheme.sep.dot)) : undefined;
+}
+
+/** A question's dim `(id · multi · 3 options)` tag in a multi-question card. */
+interface QuestionTag {
+	text: string;
+	/** The question ends in a plain paragraph, so the tag may continue its last row. */
+	afterText: boolean;
+}
+
+function questionTag(uiTheme: Theme, question: string, id: string, flags: readonly string[]): QuestionTag {
+	const lastBlock = lexDocument(question).findLast(token => token.type !== "space");
+	// Ids are model-supplied: a newline or tab would split or hole the row.
+	const label = replaceTabs(id.replace(/\n+/g, " "));
+	return {
+		text: uiTheme.fg("dim", `(${[label, ...flags].join(uiTheme.sep.dot)})`),
+		afterText: lastBlock?.type === "paragraph",
+	};
+}
+
+/**
+ * Append a `tag` after the last row of a rendered question, or give it a row of
+ * its own when it does not fit there or would trail a list item, code fence or
+ * table instead of the question's text.
+ */
+function appendQuestionTag(lines: readonly string[], tag: QuestionTag, contentWidth: number): string[] {
+	// Markdown pads each row to the full width; the tag follows the text, not the padding.
+	const last = lines.at(-1)?.trimEnd() ?? "";
+	const fits = last.trim() !== "" && visibleWidth(last) + 1 + visibleWidth(tag.text) <= contentWidth;
+	// A tag wider than the row wraps under its own one-column indent.
+	if (!tag.afterText || !fits) return [...lines, ...wrapPrefixedLine(" ", " ", tag.text, contentWidth)];
+	return [...lines.slice(0, -1), `${last} ${tag.text}`];
+}
+
+/** Header subject: the lone question's id on one row, or the question count. */
+function askSubject(questions: readonly { id: string }[]): string {
+	return questions.length === 1
+		? replaceTabs(questions[0].id.replace(/\n+/g, " "))
+		: formatCount("question", questions.length);
+}
+
 /**
  * Resolve selected labels to option indices against the RAW persisted labels.
  * Sanitizing can merge distinct options (`Retry\rnow`/`Retry now`) into one
@@ -282,7 +337,7 @@ function renderAnswerOptionLines(
 
 	// Nothing was chosen (and no custom answer) → a lone cancelled marker.
 	if (selected.size === 0 && customInput === undefined && note === undefined) {
-		return [` ${uiTheme.styledSymbol("status.warning", "warning")} ${uiTheme.fg("warning", "Cancelled")}`];
+		return [` ${formatStatusIcon("warning", uiTheme)} ${uiTheme.fg("warning", "Cancelled")}`];
 	}
 
 	const out: string[] = [];
@@ -460,26 +515,29 @@ export const askToolRenderer = {
 		const md = (text: string, width: number) =>
 			new Markdown(text, 1, 0, mdTheme, accentStyle).render(Math.max(1, outputBlockContentWidth(width) + 1));
 
-		// Multi-part questions: one divider-labelled section per question.
 		// Call args are untrusted (partially streamed or model-mangled) and a
 		// throw here takes down the whole TUI render loop — normalize first.
 		const questions = normalizeRenderQuestions(args.questions);
 		if (questions && questions.length > 0) {
-			const header = `${label} ${uiTheme.fg("muted", `${questions.length} questions`)}`;
+			const header = `${label}: ${uiTheme.fg("muted", askSubject(questions))}`;
+			// One question: its id is the header subject and its flags the footer.
+			// Several: each question is tagged with its id and flags, divided by plain separators.
+			const lone = questions.length === 1 ? questions[0] : undefined;
+			const footerMeta = lone ? formatQuestionFlags(uiTheme, lone.multi, lone.options.length) : undefined;
+			const tags = lone
+				? undefined
+				: questions.map(q => questionTag(uiTheme, q.question, q.id, questionFlags(q.multi, q.options.length)));
 			return framedToolCard(uiTheme, ({ width, contentWidth }) => {
-				const sections = questions.map(q => {
-					const meta: string[] = [];
-					if (q.multi) meta.push("multi");
-					if (q.options?.length) meta.push(`options:${q.options.length}`);
-					const metaStr = meta.length > 0 ? uiTheme.fg("dim", ` · ${meta.join(" · ")}`) : "";
-					// md() returns a shared cached array (module-level Markdown LRU) — copy before appending.
+				const sections = questions.map((q, index) => {
 					const mdLines = md(q.question, width);
-					const lines = q.options?.length
-						? [...mdLines, ...renderQuestionOptionLines(uiTheme, mdTheme, q.options, q.multi, contentWidth)]
-						: mdLines;
-					return { label: `${uiTheme.fg("dim", `[${q.id}]`)}${metaStr}`, content: lines };
+					// md() returns a shared cached array (module-level Markdown LRU) — copy before appending.
+					const content = [
+						...(tags ? appendQuestionTag(mdLines, tags[index]!, contentWidth) : mdLines),
+						...renderQuestionOptionLines(uiTheme, mdTheme, q.options, q.multi, contentWidth),
+					];
+					return { content, separator: index > 0 };
 				});
-				return { header, sections, phase: "pending", borderColor: "borderMuted" };
+				return { header, sections, footerMeta, phase: "pending", borderColor: "borderMuted" };
 			});
 		}
 
@@ -495,21 +553,19 @@ export const askToolRenderer = {
 		}
 
 		const question = sanitizeCarriageReturns(args.question);
-		const meta: string[] = [];
-		if (args.multi) meta.push("multi");
-		const questionOptions = normalizeRenderOptions(args.options);
-		if (questionOptions?.length) meta.push(`options:${questionOptions.length}`);
-		const header = `${label}${formatMeta(meta, uiTheme)}`;
+		const questionOptions = normalizeRenderOptions(args.options) ?? [];
 		const multi = args.multi;
+		const footerMeta = formatQuestionFlags(uiTheme, multi, questionOptions.length);
 		return framedToolCard(uiTheme, ({ width, contentWidth }) => {
 			// md() returns a shared cached array (module-level Markdown LRU) — copy before appending.
-			const mdLines = md(question, width);
-			const bodyLines = questionOptions?.length
-				? [...mdLines, ...renderQuestionOptionLines(uiTheme, mdTheme, questionOptions, multi, contentWidth)]
-				: mdLines;
+			const bodyLines = [
+				...md(question, width),
+				...renderQuestionOptionLines(uiTheme, mdTheme, questionOptions, multi, contentWidth),
+			];
 			return {
-				header,
+				header: label,
 				sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
+				footerMeta,
 				phase: "pending",
 				borderColor: "borderMuted",
 			};
@@ -520,6 +576,7 @@ export const askToolRenderer = {
 		result: { content: Array<{ type: string; text?: string }>; details?: AskToolDetails },
 		_options: RenderResultOptions,
 		uiTheme: Theme,
+		args?: AskRenderArgs,
 	): Component {
 		const rawDetails = result.details;
 		const mdTheme = getMarkdownTheme();
@@ -527,10 +584,13 @@ export const askToolRenderer = {
 		const md = (text: string, width: number) =>
 			new Markdown(text, 1, 0, mdTheme, accentStyle).render(Math.max(1, outputBlockContentWidth(width) + 1));
 
+		const argQuestions = normalizeRenderQuestions(args?.questions);
+		const argSubject = argQuestions?.length ? askSubject(argQuestions) : undefined;
+
 		if (!rawDetails) {
 			const txt = result.content[0];
 			const fallback = txt?.type === "text" && txt.text ? sanitizeCarriageReturns(txt.text) : "";
-			const header = renderStatusLine({ icon: "warning", title: "Ask" }, uiTheme);
+			const header = renderStatusLine({ icon: "warning", title: "Ask", description: argSubject }, uiTheme);
 			const body = fallback ? `\n${uiTheme.fg("dim", fallback)}` : "";
 			return new Text(`${header}${body}`, 0, 0);
 		}
@@ -538,7 +598,10 @@ export const askToolRenderer = {
 
 		// Chat redirect: user chose "Chat about this" instead of answering.
 		if (details.chatRedirect) {
-			const header = renderStatusLine({ icon: "info", title: "Ask", meta: ["chat redirect"] }, uiTheme);
+			const header = renderStatusLine(
+				{ icon: "info", title: "Ask", description: argSubject, meta: ["chat redirect"] },
+				uiTheme,
+			);
 			const questions = details.questions ?? [];
 			return framedToolCard(uiTheme, ({ width }) => ({
 				header,
@@ -548,7 +611,7 @@ export const askToolRenderer = {
 			}));
 		}
 
-		// Multi-part results: one divider-labelled section per question.
+		// Multi-part results: one separator-divided section per question, each tagged with its id.
 		if (details.results && details.results.length > 0) {
 			const results = details.results;
 			const hasAnySelection = results.some(
@@ -557,11 +620,15 @@ export const askToolRenderer = {
 					r.note !== undefined ||
 					(r.selectedOptions && r.selectedOptions.length > 0),
 			);
+			const tags =
+				results.length === 1
+					? undefined
+					: results.map(r => questionTag(uiTheme, r.question, r.id, r.multi ? ["multi"] : []));
 			const header = renderStatusLine(
 				{
 					icon: hasAnySelection ? "success" : "warning",
 					title: "Ask",
-					meta: [`${results.length} questions`],
+					description: askSubject(results),
 				},
 				uiTheme,
 			);
@@ -570,9 +637,10 @@ export const askToolRenderer = {
 				const sections = results.map((r, index) => {
 					// Sanitizing preserves order and length, so raw indices align with `r`.
 					const raw = rawResults[index];
+					const mdLines = md(r.question, width);
 					// md() returns a shared cached array (module-level Markdown LRU) — copy before appending.
 					const lines = [
-						...md(r.question, width),
+						...(tags ? appendQuestionTag(mdLines, tags[index]!, contentWidth) : mdLines),
 						...renderAnswerOptionLines(
 							uiTheme,
 							mdTheme,
@@ -586,7 +654,7 @@ export const askToolRenderer = {
 							selectedIndicesFor(raw?.options, raw?.selectedOptions),
 						),
 					];
-					return { label: uiTheme.fg("dim", `[${r.id}]`), content: lines };
+					return { content: lines, separator: index > 0 };
 				});
 				return {
 					header,
@@ -611,8 +679,8 @@ export const askToolRenderer = {
 			(details.selectedOptions && details.selectedOptions.length > 0);
 		const header = renderStatusLine(
 			hasSelection
-				? { iconOverride: uiTheme.styledSymbol("tool.ask", "accent"), title: "Ask" }
-				: { icon: "warning", title: "Ask" },
+				? { iconOverride: uiTheme.styledSymbol("tool.ask", "accent"), title: "Ask", description: argSubject }
+				: { icon: "warning", title: "Ask", description: argSubject },
 			uiTheme,
 		);
 		const dOptions = details.options;

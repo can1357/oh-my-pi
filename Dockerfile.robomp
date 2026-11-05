@@ -45,9 +45,9 @@ ENV PI_ROOT=/work/pi
 
 WORKDIR /app
 
-# robomp is an MIT product; OMP's dual-license payload remains available from
-# the inherited base image under /usr/share/doc/omp.
-COPY LICENSE THIRD-PARTY-NOTICES.txt /usr/share/doc/robomp/
+# robomp is an MIT product; its notices cover the dashboard bundle. The native
+# addon's payload remains available from the base image under /usr/share/doc/omp.
+COPY LICENSE python/robomp/THIRD-PARTY-NOTICES.txt /usr/share/doc/robomp/
 
 # robomp itself. Drop the Vite-built dashboard into the package tree before
 # `pip install` so it lands in the installed wheel (`static/**/*` is declared

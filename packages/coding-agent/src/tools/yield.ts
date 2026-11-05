@@ -18,7 +18,7 @@ import {
 	sanitizeSchemaForStrictMode,
 	tryEnforceStrictSchema,
 } from "@oh-my-pi/pi-ai/utils/schema";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import yieldDescription from "../prompts/tools/yield.md" with { type: "text" };
 import yieldDataErrorConflictMessage from "../prompts/tools/yield-data-error-conflict.md" with { type: "text" };
 import { subprocessToolRegistry } from "../task/subprocess-tool-registry";
@@ -157,10 +157,6 @@ function parseJsonEncodedValue(value: string): { parsed: true; value: unknown } 
 	} catch {
 		return { parsed: false };
 	}
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**
@@ -309,7 +305,7 @@ function resolveWorkPoolYieldItem(items: readonly WorkPoolYieldItem[], value: un
  * @throws naming every unsupported field and the allowed ones, so the model can resubmit.
  */
 function assertSupportedRootFields(parameters: TSchema, args: Record<string, unknown>): void {
-	const declared = isPlainRecord(parameters) && isPlainRecord(parameters.properties) ? parameters.properties : {};
+	const declared = isRecord(parameters) && isRecord(parameters.properties) ? parameters.properties : {};
 	const unsupported: string[] = [];
 	for (const key in args) {
 		if (args[key] != null && !Object.hasOwn(declared, key)) unsupported.push(key);
@@ -517,7 +513,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		_onUpdate?: AgentToolUpdateCallback<YieldDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<YieldDetails>> {
-		if (!isPlainRecord(params)) throw new Error("yield arguments must be an object");
+		if (!isRecord(params)) throw new Error("yield arguments must be an object");
 		const raw = params;
 		const workPoolItems = this.#workPoolItems();
 		assertSupportedRootFields(

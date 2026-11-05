@@ -155,10 +155,7 @@ fn os_from_bytes(bytes: Vec<u8>) -> OsString {
 	}
 	#[cfg(not(unix))]
 	{
-		match String::from_utf8(bytes) {
-			Ok(text) => text.into(),
-			Err(err) => String::from_utf8_lossy(err.as_bytes()).into_owned().into(),
-		}
+		String::from_utf8_lossy_owned(bytes).into()
 	}
 }
 
@@ -253,7 +250,7 @@ pub fn join_path(base: &Path, rel: &Path) -> PathBuf {
 	if rel.has_root() || matches!(rel.components().next(), Some(Component::Prefix(_))) {
 		return rel.to_path_buf();
 	}
-	if rel.as_os_str().is_empty() {
+	if rel.is_empty() {
 		// `Path::join("")` appends a separator; keep that directory spelling.
 		let mut out = OsString::from(base.as_os_str());
 		if !base.as_os_str().as_encoded_bytes().ends_with(b"/") {
@@ -306,7 +303,7 @@ fn join_drive_relative(base: &Path, rel: &Path) -> Option<PathBuf> {
 		PathBuf::from(root)
 	};
 	let rest = components.as_path();
-	if !rest.as_os_str().is_empty() {
+	if !rest.is_empty() {
 		out.push(rest);
 	}
 	Some(out)
@@ -488,7 +485,7 @@ pub fn normalize_lexically(path: &Path) -> PathBuf {
 			},
 		}
 	}
-	if out.as_os_str().is_empty() {
+	if out.is_empty() {
 		out.push(".");
 	}
 	out
@@ -522,9 +519,7 @@ pub(crate) fn parts(path: &Path) -> Vec<Part> {
 	for component in path.components() {
 		match component {
 			Component::Prefix(_) | Component::RootDir => {
-				root
-					.get_or_insert_with(PathBuf::new)
-					.push(component.as_os_str());
+				root.get_or_insert_default().push(component.as_os_str());
 				continue;
 			},
 			_ => {},
