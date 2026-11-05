@@ -761,3 +761,57 @@ async fn a_nested_callout_does_not_expose_the_outer_launch_vector() {
 	])
 	.await;
 }
+
+/// A builtin that is the operand itself reads the caller's parameters, not
+/// the words the callout was launched with: `getopts` parses `-a value`,
+/// and `shift` shifts what the caller has. The operand's words are one
+/// command of the subshell, exactly as in the `( … )` the callout stands
+/// for. Measured on Bash 5.2.21 and 5.3.0, which agree on every row.
+#[tokio::test]
+async fn a_direct_builtin_operand_reads_the_callers_parameters() {
+	assert_callout_matches_subshell(&[
+		// `getopts a opt` on `-a value` succeeds; on the launch words
+		// (`getopts a opt`) it finds no option and returns 1.
+		(
+			&[],
+			"set -- -a value\ntimeout 5 getopts a opt\nprintf 'rc=%s\\n' \"$?\"",
+			&[],
+			"set -- -a value\n( getopts a opt )\nprintf 'rc=%s\\n' \"$?\"",
+			"rc=0\n",
+		),
+		(
+			&[],
+			"set -- -a value\nenv getopts a opt\nprintf 'rc=%s\\n' \"$?\"",
+			&[],
+			"set -- -a value\n( getopts a opt )\nprintf 'rc=%s\\n' \"$?\"",
+			"rc=0\n",
+		),
+		// `shift 2` with one parameter fails; the launch words are two, so
+		// reading those made it succeed.
+		(
+			&[],
+			"set -- p1\ntimeout 5 shift 2\nprintf 'rc=%s n=%s\\n' \"$?\" \"$#\"",
+			&[],
+			"set -- p1\n( shift 2 )\nprintf 'rc=%s n=%s\\n' \"$?\" \"$#\"",
+			"rc=1 n=1\n",
+		),
+		// Bare `shift` with no parameter at all fails the same way.
+		(
+			&[],
+			"set --\ntimeout 5 shift\nprintf 'rc=%s n=%s\\n' \"$?\" \"$#\"",
+			&[],
+			"set --\n( shift )\nprintf 'rc=%s n=%s\\n' \"$?\" \"$#\"",
+			"rc=1 n=0\n",
+		),
+		// A shift the operand can make shifts the caller's parameters, and
+		// the subshell keeps it to itself.
+		(
+			&[],
+			"set -- p1 p2\ntimeout 5 shift\nprintf 'rc=%s n=%s\\n' \"$?\" \"$#\"",
+			&[],
+			"set -- p1 p2\n( shift )\nprintf 'rc=%s n=%s\\n' \"$?\" \"$#\"",
+			"rc=0 n=2\n",
+		),
+	])
+	.await;
+}

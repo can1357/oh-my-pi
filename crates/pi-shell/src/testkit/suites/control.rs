@@ -86,6 +86,28 @@ fn subshell_runs_do_not_leak_into_the_root() {
 	assert_eq!(r.host.stdout.bytes(), b"sub env p1\nroot\n");
 }
 
+/// [`Script::args`] are the script's own positional parameters: the script
+/// reads them, and its `set --` and `shift` write and read what it wrote.
+/// A public consumer that submits a new-subshell script with arguments
+/// depends on that (can1357/oh-my-pi#18172).
+#[test]
+fn a_new_subshell_script_writes_its_own_positional_parameters() {
+	let mut r = rig();
+	let replaced = Script {
+		vproc: crate::bash::VprocSel::NewSubshell,
+		args: Some(vec!["LAUNCH1".into(), "LAUNCH2".into()]),
+		..Script::command(&b"set -- REPLACED; echo \"top=[$*]\""[..])
+	};
+	r.run(replaced, Fault::None);
+	let shifted = Script {
+		vproc: crate::bash::VprocSel::NewSubshell,
+		args: Some(vec!["LAUNCH1".into(), "LAUNCH2".into()]),
+		..Script::command(&b"shift; echo \"shift=[$*]\""[..])
+	};
+	r.run(shifted, Fault::None);
+	assert_eq!(r.host.stdout.bytes(), b"top=[REPLACED]\nshift=[LAUNCH2]\n");
+}
+
 #[test]
 fn restore_rejects_corrupt_and_foreign_frames_and_can_drop_them() {
 	let engine = Engine::new(EngineConfig::default());
