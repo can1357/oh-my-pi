@@ -162,6 +162,21 @@ async function toolRegistered(manager: MCPManager, name: string): Promise<void> 
 	}
 }
 
+/** Resolve once `name` reports connected, however late the reconnect lands. */
+async function connectionEstablished(manager: MCPManager, name: string): Promise<void> {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	const check = () => {
+		if (manager.getConnectionStatus(name) === "connected") resolve();
+	};
+	const unsubscribe = manager.addConnectionStatusListener(check);
+	check();
+	try {
+		await promise;
+	} finally {
+		unsubscribe();
+	}
+}
+
 describe("MCP server that is not connected", () => {
 	let tempDir: string;
 	let session: AuthStorage;
@@ -381,13 +396,18 @@ describe("MCP server that is not connected", () => {
 	});
 
 	/**
-	 * B1. A lazy server serves the catalog cached from its last successful
+	 * R2-a. A lazy server serves the catalog cached from its last successful
 	 * connect, so its tools stay mounted even after a first-use connect
-	 * fails. Telling the model those tools "are not mounted" contradicts
-	 * what it can see and steers it away from the per-call reconnect the
-	 * deferred tool exists to perform.
+	 * fails. Round 1 dropped such a server from the note altogether, which
+	 * also dropped the only diagnosis available when that cache is stale:
+	 * here the server renamed `ping` to `search`, and the model asking for
+	 * `mcp__dormant_search` is told nothing. It is named again — in a clause
+	 * that is true of it, "still serving the tools cached from an earlier
+	 * connect". The sentence round 1 was right to call false of it, that its
+	 * tools are not mounted, is reserved for servers with no tools: `broken`
+	 * is here so both groups render in one note.
 	 */
-	it("does not report a lazy server whose cached tools are still mounted", async () => {
+	it("reports a lazy server whose cached tools are still mounted without calling them absent", async () => {
 		const lazyServer = startLoginRequiredServer();
 		const lazyConfig: MCPHttpServerConfig = { type: "http", url: lazyServer.url, timeout: 2_000, lazy: true };
 		const cache = new MCPToolCache(memoryStorage());
@@ -395,7 +415,14 @@ describe("MCP server that is not connected", () => {
 		const lazyManager = new MCPManager(tempDir, cache, undefined, SINGLE_ATTEMPT);
 		lazyManager.setAuthStorage(session);
 		try {
-			await lazyManager.connectServers({ dormant: lazyConfig }, {});
+			await lazyManager.connectServers(
+				{
+					dormant: lazyConfig,
+					broken: { type: "stdio", command: process.execPath, args: ["-e", "process.exit(3)"], timeout: 2_000 },
+				},
+				{},
+			);
+			await lazyManager.waitForStartup(GUARD_MS);
 			expect(lazyManager.getTools().map(tool => tool.name)).toContain("mcp__dormant_ping");
 
 			// First use fails, so the server is down — but its tools did not go away.
@@ -403,7 +430,16 @@ describe("MCP server that is not connected", () => {
 			expect(lazyManager.getConnectionStatus("dormant")).toBe("disconnected");
 			expect(lazyManager.getTools().map(tool => tool.name)).toContain("mcp__dormant_ping");
 
-			expect(lazyManager.explainMissingTool("mcp__dormant_search")).toBeUndefined();
+			const note = lazyManager.explainMissingTool("mcp__dormant_search");
+			expect(note).toContain("dormant");
+			expect(note).toContain("401");
+			expect(note).toContain("still serving the tools cached from an earlier connect");
+			expect(note).toContain("/mcp reconnect <server>");
+			// The "not mounted" sentence is spent on the server that really has
+			// no tools, and never reaches the one whose cached tools the model
+			// can see listed.
+			expect(note).toContain("so its tools are not mounted: broken");
+			expect(note).not.toMatch(/tools are not mounted:[^.]*dormant/);
 		} finally {
 			await lazyManager.disconnectAll();
 			lazyServer.stop();
@@ -412,11 +448,13 @@ describe("MCP server that is not connected", () => {
 	}, 30_000);
 
 	/**
-	 * B1, same shape from the other end: a server that connected and then
+	 * R2-a, same shape from the other end: a server that connected and then
 	 * died keeps its tools registered on purpose, so a call routes through
-	 * the tool-level reconnect. The note must not claim they are gone.
+	 * the tool-level reconnect. It is reported, because the model cannot see
+	 * why `mcp__alive_search` is missing otherwise, and reported as what it
+	 * is: serving a cached list, not stripped of its tools.
 	 */
-	it("does not report a server that died mid-session with its tools still mounted", async () => {
+	it("reports a server that died mid-session as still serving its mounted tools", async () => {
 		const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-dies-"));
 		const dying = new MCPManager(workDir, null, undefined, SINGLE_ATTEMPT);
 		const { promise: failed, resolve: onFailed } = Promise.withResolvers<void>();
@@ -442,7 +480,10 @@ describe("MCP server that is not connected", () => {
 			expect(dying.getConnectionStatus("alive")).toBe("disconnected");
 			expect(dying.getTools().map(tool => tool.name)).toContain("mcp__alive_ping");
 
-			expect(dying.explainMissingTool("mcp__alive_search")).toBeUndefined();
+			const note = dying.explainMissingTool("mcp__alive_search");
+			expect(note).toContain("alive");
+			expect(note).toContain("still serving the tools cached from an earlier connect");
+			expect(note).not.toContain("tools are not mounted");
 		} finally {
 			unsubscribe();
 			await dying.disconnectAll();
@@ -566,6 +607,129 @@ describe("MCP server that is not connected", () => {
 		} finally {
 			await offline.disconnectAll();
 			await session.credentials.poll();
+		}
+	}, 30_000);
+
+	/**
+	 * R2-b, the recovery #18014 exists for, in the configuration #9793 adds.
+	 * `#reconnectWithStoredLogin` is the manager's only cross-process
+	 * credential poll, so a login another process stored is invisible until
+	 * it runs. Round 1 skipped it for any server with tools mounted, which
+	 * is every lazy server with a warm cache: the eager control above
+	 * ("reconnects with a login another session stored, with no restart")
+	 * recovered and this one could not, for the same 401 and the same
+	 * `agent.db`. The deferred tool's per-call reconnect is not a substitute
+	 * — it never polls — and a tool the cache does not list has no deferred
+	 * wrapper to call at all.
+	 */
+	it("reconnects a lazy server serving cached tools when another session stores its login", async () => {
+		const lazyServer = startLoginRequiredServer();
+		const lazyConfig: MCPHttpServerConfig = { type: "http", url: lazyServer.url, timeout: 2_000, lazy: true };
+		const cache = new MCPToolCache(memoryStorage());
+		await cache.set("dormant", lazyConfig, [PING_DEF]);
+		const lazyManager = new MCPManager(tempDir, cache, undefined, SINGLE_ATTEMPT);
+		lazyManager.setAuthStorage(session);
+		try {
+			await lazyManager.connectServers({ dormant: lazyConfig }, {});
+			expect(lazyManager.getTools().map(tool => tool.name)).toContain("mcp__dormant_ping");
+
+			// First use fails with 401: down, with its cached catalog still mounted.
+			await lazyManager.reconnectServer("dormant", { manual: true });
+			expect(lazyManager.getConnectionStatus("dormant")).toBe("disconnected");
+			expect(lazyServer.state.authorizedPosts).toBe(0);
+
+			// Another omp process on this machine signs the server in.
+			await otherSession.credentials.set(mcpOAuthCredentialId(lazyServer.url), {
+				type: "oauth",
+				access: GOOD_TOKEN,
+				refresh: "unused-refresh",
+				expires: Date.now() + 3_600_000,
+			});
+
+			// The model asks for a tool this cache never had; the miss is what
+			// drives the login check.
+			lazyManager.explainMissingTool("mcp__dormant_search");
+			// The recovery is a credential poll plus a real loopback handshake,
+			// which no fake clock can drive; the bound only keeps a regression
+			// reporting the connection state instead of the hook timeout.
+			await Promise.race([connectionEstablished(lazyManager, "dormant"), Bun.sleep(5_000)]);
+			expect(lazyManager.getConnectionStatus("dormant")).toBe("connected");
+			expect(lazyServer.state.authorizedPosts).toBeGreaterThan(0);
+		} finally {
+			await lazyManager.disconnectAll();
+			lazyServer.stop();
+			await otherSession.credentials.remove(mcpOAuthCredentialId(lazyServer.url));
+			await session.credentials.poll();
+		}
+	}, 30_000);
+
+	/**
+	 * R2-c. The failure record describes the attempt that produced it, so a
+	 * writer landing while that attempt is in flight cannot inherit its
+	 * error: the record is bound to the config the attempt used, not to
+	 * whatever `#serverConfigs` holds when the failure finally lands.
+	 */
+	it("does not pin a mid-connect failure on the config that replaced it", async () => {
+		const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-swap-"));
+		const swapped = new MCPManager(workDir, null, undefined, SINGLE_ATTEMPT);
+		try {
+			const attempted: MCPStdioServerConfig = {
+				type: "stdio",
+				command: process.execPath,
+				args: ["-e", "setTimeout(() => process.exit(3), 400)"],
+				timeout: 5_000,
+			};
+			const connecting = swapped.connectServers({ swap: attempted }, {});
+			// A real subprocess decides when the attempt ends, so the writer's
+			// arrival inside that window is a real delay, not a clock to fake:
+			// the config is replaced well before the child exits.
+			await Bun.sleep(150);
+			const replacement: MCPStdioServerConfig = {
+				...attempted,
+				args: ["-e", "setTimeout(() => process.exit(7), 400)"],
+			};
+			swapped.updateServerConfig("swap", replacement);
+			await connecting;
+			await swapped.waitForStartup(GUARD_MS);
+			expect(swapped.getServerConfig("swap")).toBe(replacement);
+
+			// Nothing has tried the replacement, so it has no error to report.
+			expect(swapped.explainMissingTool("mcp__swap_ping")).toBeUndefined();
+		} finally {
+			await swapped.disconnectAll();
+			await removeWithRetries(workDir);
+		}
+	}, 30_000);
+
+	/**
+	 * R2-c, the other half: the startup barrier reports what happened to the
+	 * server it waited on. Binding the record to the live config made the
+	 * barrier lose the attempt's own error to the generic fallback as soon
+	 * as anything replaced the definition, so headless `omp -p` printed
+	 * "Connection closed before tools became available" for a server that
+	 * had said exactly why it failed.
+	 */
+	it("keeps the failed attempt's error on the startup barrier after the config is replaced", async () => {
+		const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-bar-"));
+		const barrier = new MCPManager(workDir, null, undefined, SINGLE_ATTEMPT);
+		try {
+			const config: MCPStdioServerConfig = {
+				type: "stdio",
+				command: process.execPath,
+				args: ["-e", "process.exit(3)"],
+				timeout: 2_000,
+			};
+			await barrier.connectServers({ gone: config }, {});
+			const before = await barrier.waitForStartup(GUARD_MS);
+			expect(before.failed[0]?.error).toContain("MCP subprocess closed stdout before responding");
+
+			barrier.updateServerConfig("gone", { ...config });
+			const after = await barrier.waitForStartup(GUARD_MS);
+			expect(after.failed[0]?.error).toContain("MCP subprocess closed stdout before responding");
+			expect(after.failed[0]?.error).not.toContain("Connection closed before tools became available");
+		} finally {
+			await barrier.disconnectAll();
+			await removeWithRetries(workDir);
 		}
 	}, 30_000);
 });

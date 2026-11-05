@@ -101,17 +101,29 @@ export function formatMCPConnectionStatusMessage(snapshot: McpConnectionStatusSn
  * answers HTTP 401) leaves no trace in the session: its tools are simply
  * absent, and "No such tool" reads like a typo.
  *
+ * Two groups, because one sentence cannot be true of both. A server in
+ * `unmounted` has no tools in the registry, so "their tools are not mounted"
+ * is what the model can see. A server in `servingCachedTools` is down while
+ * the catalog cached from its last connect is still mounted — a `lazy`
+ * server before its first use, or a server lost mid-session — so that
+ * sentence would contradict the tool list; what is true of it, and what
+ * explains the miss, is that the cache predates the failure and a tool the
+ * server has added or renamed since is not in it.
+ *
  * `awaitingLogin` names the listed servers that failed while no OAuth login
  * for them was stored and that the caller is checking for one now; only they
  * get the sentence saying omp reconnects a server once a login turns up.
  */
 export function formatMCPUnavailableServersNote(
-	failures: readonly McpConnectionFailure[],
+	unmounted: readonly McpConnectionFailure[],
+	servingCachedTools: readonly McpConnectionFailure[],
 	awaitingLogin: readonly string[],
 ): string {
 	return prompt.render(unavailableServersTemplate, {
-		single: failures.length === 1,
-		servers: failures.map(formatFailedServer).join("; "),
+		single: unmounted.length === 1,
+		servers: unmounted.map(formatFailedServer).join("; "),
+		cachedSingle: servingCachedTools.length === 1,
+		cachedServers: servingCachedTools.map(formatFailedServer).join("; "),
 		awaitingLogin: formatServerList(awaitingLogin),
 	});
 }

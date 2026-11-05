@@ -41,7 +41,11 @@ import {
 	refreshStoredManagedMcpOAuthCredential,
 } from "./oauth-credentials";
 import type { MCPStoredOAuthCredential } from "./oauth-flow";
-import { formatMCPUnavailableServersNote, type McpConnectionStatusEvent } from "./startup-events";
+import {
+	formatMCPUnavailableServersNote,
+	type McpConnectionFailure,
+	type McpConnectionStatusEvent,
+} from "./startup-events";
 import { resolveMCPStartupTimeoutMs } from "./timeout";
 
 import { MCP_TOOL_NAME_PREFIX, type MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
@@ -93,7 +97,8 @@ function createMcpStartupFailure(serverName: string, error: string, source?: Sou
 
 /**
  * The error that ended a server's last connect attempt, bound to the config
- * that attempt belonged to.
+ * that attempt used — captured when the attempt starts, not read back when
+ * the failure lands, so a writer arriving in between cannot inherit it.
  *
  * The binding is by object identity rather than by clearing the record at
  * every place that writes {@link MCPManager.#serverConfigs} — the lazy and
@@ -103,6 +108,12 @@ function createMcpStartupFailure(serverName: string, error: string, source?: Sou
  * delete and `disconnectAll`'s clear. A record that carries its own proof of
  * currency stays correct for a writer added later, which a list of clearing
  * sites does not.
+ *
+ * Currency matters to the readers that act on the live definition —
+ * {@link MCPManager.explainMissingTool} and `#reconnectWithStoredLogin`, both
+ * through `#liveFailure`. {@link MCPManager.waitForStartup} reads the record
+ * directly: the barrier reports what happened to the attempt it waited on,
+ * which a later edit does not change.
  *
  * `config` is `undefined` for a name the manager holds no config for: a
  * config that fails validation is never stored, and neither is the
@@ -475,8 +486,16 @@ export class MCPManager implements MCPManagerApi {
 	 *   was the server refusing credentials; a `failed` event raised without
 	 *   one (a config that failed validation, the crash-storm breaker)
 	 *   refused nothing.
+	 * @param attemptConfig - The definition the attempt actually used. A
+	 *   writer can land between an attempt starting and its failure landing
+	 *   (`updateServerConfig` from `/mcp reauth`, an incremental
+	 *   `connectServers` from `/mcp enable` or a project-config reload), and
+	 *   reading `#serverConfigs` here would hand the old attempt's error to
+	 *   whatever replaced it. Omitted where no attempt was made — a config
+	 *   that failed validation, `.mcp.json` itself, the crash-storm breaker
+	 *   — and the stored definition (often none) stands in.
 	 */
-	#emitConnectionStatus(event: McpConnectionStatusEvent, cause?: unknown): void {
+	#emitConnectionStatus(event: McpConnectionStatusEvent, cause?: unknown, attemptConfig?: MCPServerConfig): void {
 		// Every server this manager holds a config for, not only the startup
 		// barrier's members: a `lazy` server is dropped from `#startupServers`
 		// on purpose — dormant is not a failure — but once something asks it to
@@ -488,7 +507,7 @@ export class MCPManager implements MCPManagerApi {
 			event.type === "failed" &&
 			(this.#startupServers.has(event.serverName) || this.#serverConfigs.has(event.serverName))
 		) {
-			const config = this.#serverConfigs.get(event.serverName);
+			const config = attemptConfig ?? this.#serverConfigs.get(event.serverName);
 			this.#startupFailures.set(event.serverName, {
 				error: event.error,
 				config,
@@ -910,9 +929,9 @@ export class MCPManager implements MCPManagerApi {
 		onStatus?: (event: McpConnectionStatusEvent) => void,
 		startupTimeoutMs?: number,
 	): Promise<MCPLoadResult> {
-		const notify = (event: McpConnectionStatusEvent, cause?: unknown) => {
+		const notify = (event: McpConnectionStatusEvent, cause?: unknown, attemptConfig?: MCPServerConfig) => {
 			onStatus?.(event);
-			this.#emitConnectionStatus(event, cause);
+			this.#emitConnectionStatus(event, cause, attemptConfig);
 		};
 		type ConnectionTask = {
 			name: string;
@@ -1111,7 +1130,7 @@ export class MCPManager implements MCPManagerApi {
 						return;
 					this.#pendingToolLoads.delete(name);
 					const message = error instanceof Error ? error.message : String(error);
-					notify(createMcpStartupFailure(name, message, sources[name]), error);
+					notify(createMcpStartupFailure(name, message, sources[name]), error, config);
 					if (allowBackgroundLogging && !reportedErrors.has(name)) {
 						logger.error("MCP tool load failed", { path: `mcp:${name}`, error: message });
 					}
@@ -1433,7 +1452,13 @@ export class MCPManager implements MCPManagerApi {
 			} else {
 				status.failed.push({
 					name,
-					error: this.#liveFailure(name)?.error ?? "Connection closed before tools became available",
+					// The last attempt's error, whether or not its definition is
+					// still the current one: the barrier reports what happened to
+					// the server it waited on, and a definition replaced since
+					// does not make that attempt's error any less what it was.
+					// `explainMissingTool` is the reader that needs currency,
+					// because it recommends action on the live config.
+					error: this.#startupFailures.get(name)?.error ?? "Connection closed before tools became available",
 				});
 			}
 		}
@@ -1466,23 +1491,27 @@ export class MCPManager implements MCPManagerApi {
 	 * whose last connect failed and that are not connecting again, with the
 	 * error of each. `undefined` for any other name, or when no server is down.
 	 *
-	 * A server whose tools are still mounted is left out: it is not why this
-	 * tool is missing, and the note's opening sentence — that the listed
-	 * servers' tools are not mounted — would contradict what the model can
-	 * see. Two shapes reach here that way, and they are the same shape: a
-	 * `lazy` server serving the catalog cached from its last connect, and a
-	 * server lost mid-session whose tools stay registered on purpose. Both
-	 * route a call through the tool's own per-call reconnect, which is the
-	 * recovery the model should be left to take.
+	 * A down server whose tools are still mounted — a `lazy` server serving
+	 * the catalog cached from its last connect, a server lost mid-session
+	 * whose tools stay registered on purpose — is reported in its own group.
+	 * Saying its tools "are not mounted" would contradict the tool list the
+	 * model can see, but dropping it hides the only answer available when
+	 * that cache is stale: a tool the server has added or renamed since has
+	 * no entry in the cache, so there is no deferred wrapper to route a call
+	 * through and nothing else to explain the miss.
 	 *
 	 * The model calls this path only when it wants a tool of a server that is
 	 * down, so it is also where a remote server that failed for want of a
-	 * login is brought back once another session stored one: that check runs
-	 * in the background and never delays the answer.
+	 * login is brought back once another session stored one — mounted tools
+	 * or not, since {@link MCPManager.#reconnectWithStoredLogin} is the only
+	 * place this process polls the shared credential store, and the per-call
+	 * reconnect of a deferred tool never does. That check runs in the
+	 * background and never delays the answer.
 	 */
 	explainMissingTool(toolName: string): string | undefined {
 		if (!toolName.startsWith(MCP_TOOL_NAME_PREFIX)) return undefined;
-		const failures: Array<{ serverName: string; error: string; sourcePath?: string }> = [];
+		const unmounted: McpConnectionFailure[] = [];
+		const servingCachedTools: McpConnectionFailure[] = [];
 		const awaitingLogin: string[] = [];
 		// #liveFailure may drop the entry it is asked about; deleting the key
 		// the iterator is standing on leaves the rest of the walk intact.
@@ -1490,13 +1519,20 @@ export class MCPManager implements MCPManagerApi {
 			const failure = this.#liveFailure(serverName);
 			if (!failure) continue;
 			if (this.getConnectionStatus(serverName) !== "disconnected") continue;
-			if (this.#tools.some(tool => tool.mcpServerName === serverName)) continue;
-			failures.push({ serverName, error: failure.error, sourcePath: this.#sources.get(serverName)?.path });
+			const reported: McpConnectionFailure = {
+				serverName,
+				error: failure.error,
+				sourcePath: this.#sources.get(serverName)?.path,
+			};
+			if (this.#tools.some(tool => tool.mcpServerName === serverName)) servingCachedTools.push(reported);
+			else unmounted.push(reported);
 			if (!failure.awaitingLogin) continue;
 			awaitingLogin.push(serverName);
 			void this.#reconnectWithStoredLogin(serverName);
 		}
-		return failures.length > 0 ? formatMCPUnavailableServersNote(failures, awaitingLogin) : undefined;
+		return unmounted.length + servingCachedTools.length > 0
+			? formatMCPUnavailableServersNote(unmounted, servingCachedTools, awaitingLogin)
+			: undefined;
 	}
 
 	/**
@@ -1971,7 +2007,7 @@ export class MCPManager implements MCPManagerApi {
 					logger.debug("MCP scheduled reconnect attempt failed", { path: `mcp:${name}`, error: msg });
 				} else {
 					logger.error("MCP reconnect failed after retries", { path: `mcp:${name}`, error: msg });
-					this.#emitConnectionStatus({ type: "failed", serverName: name, error: msg }, error);
+					this.#emitConnectionStatus({ type: "failed", serverName: name, error: msg }, error, config);
 					// Don't remove stale tools — keep them in the registry so they
 					// remain selected. Calls will fail with MCP errors, which
 					// triggers the tool-level reconnect, or the user can run
