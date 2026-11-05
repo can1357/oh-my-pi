@@ -274,9 +274,10 @@ const SHELL_METACHARACTER = /[$`|&;<>(){}*?!~#\n]/;
  * escapes, so a program path containing spaces stays one word.
  *
  * `safe` is false when the word contains unquoted shell syntax this does not
- * understand — a substitution, a pipeline, a glob. The scan desynchronises
- * from the real shell there, and the text after it is as likely to be a secret
- * as a program name, so callers must print `…` rather than the word.
+ * understand — a substitution, a pipeline, a glob — and when the word ends
+ * while a quote is still open. The scan desynchronises from the real shell in
+ * both cases, and the text after it is as likely to be a secret as a program
+ * name, so callers must print `…` rather than the word.
  */
 function firstShellWord(command: string): { word: string; rest: string; safe: boolean } {
 	let word = "";
@@ -286,6 +287,18 @@ function firstShellWord(command: string): { word: string; rest: string; safe: bo
 	for (; index < command.length; index++) {
 		const char = command[index];
 		if (quote !== undefined) {
+			// Inside single quotes nothing is special, not even a backslash. Inside
+			// double quotes a backslash escapes only these four, and `\"` must NOT be
+			// read as the closing quote: treating it as one desynchronises the scan
+			// and prints the rest of the assignment's value as the program name.
+			if (quote === '"' && char === "\\" && index + 1 < command.length) {
+				const next = command[index + 1];
+				if (next === '"' || next === "\\" || next === "$" || next === "`") {
+					word += next;
+					index++;
+					continue;
+				}
+			}
 			// A substitution inside double quotes still runs.
 			if (quote === '"' && (char === "$" || char === "`")) safe = false;
 			if (char === quote) quote = undefined;
@@ -304,6 +317,9 @@ function firstShellWord(command: string): { word: string; rest: string; safe: bo
 		if (SHELL_METACHARACTER.test(char)) safe = false;
 		word += char;
 	}
+	// The command ran out inside a quote: the real shell would not have ended the
+	// word here, so nothing we collected is reliably the program. Fail closed.
+	if (quote !== undefined) safe = false;
 	return { word, rest: command.slice(index).trim(), safe };
 }
 

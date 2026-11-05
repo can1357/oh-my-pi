@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { Effort } from "@oh-my-pi/pi-ai";
+import { CredentialSourceError } from "@oh-my-pi/pi-ai/error";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import type { ModelRegistry } from "../../src/config/model-registry";
@@ -98,6 +99,8 @@ interface SessionOptions {
 	available?: Model<Api>[];
 	cwd?: string;
 	apiKey?: string | null;
+	/** Thrown by the request-path resolver when the availability probe finds no key. */
+	sourceFailure?: Error;
 	activeModel?: string;
 	roles?: Partial<Record<"smol" | "default" | "slow", string>>;
 }
@@ -114,6 +117,10 @@ function makeSession(opts: SessionOptions = {}): ToolSession {
 		getAvailable: () => available,
 		find: (provider: string, id: string) => available.find(model => model.provider === provider && model.id === id),
 		getApiKey: async () => (opts.apiKey === undefined ? "test-key" : opts.apiKey),
+		getApiKeyWithCredentialForProvider: async () => {
+			if (opts.sourceFailure) throw opts.sourceFailure;
+			return undefined;
+		},
 		resolver: () => async () => (opts.apiKey === undefined ? "test-key" : opts.apiKey),
 	} as unknown as ModelRegistry;
 	return {
@@ -935,6 +942,18 @@ describe("runEvalCompletion", () => {
 		await expect(runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session })).rejects.toBeInstanceOf(
 			ToolError,
 		);
+	});
+
+	it("reports the credential source that failed, not a generic missing key", async () => {
+		// `getApiKey` is the quiet availability probe and cannot say why; without
+		// asking the request path, `completion()` told the user to configure
+		// credentials when what was broken was their mint command.
+		const session = makeSession({
+			apiKey: null,
+			sourceFailure: new CredentialSourceError("p", "the command `mint-token.sh` exited with status 1"),
+		});
+		const error = await rejectionOf(runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session }));
+		expect(String((error as Error).message)).toContain("the command `mint-token.sh` exited with status 1");
 	});
 
 	it("maps error and aborted stop reasons to ToolError", async () => {

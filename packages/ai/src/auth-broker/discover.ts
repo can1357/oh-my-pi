@@ -397,22 +397,30 @@ export async function resolveAuthBrokerConfig(
 	const envToken = process.env.OMP_AUTH_BROKER_TOKEN;
 
 	let url = envUrl && envUrl.length > 0 ? envUrl : undefined;
-	let configToken: string | undefined;
-	if (!url || !envToken) {
+	const envBearer = envToken && envToken.length > 0 ? envToken : undefined;
+	let tokenConfig: string | undefined;
+	if (!url || !envBearer) {
 		const fromConfig = await readConfigYaml(agentDir);
 		if (!url && fromConfig.url) {
 			const resolved = await resolveConfig(fromConfig.url);
 			if (resolved && resolved.length > 0) url = resolved;
 		}
-		if (fromConfig.token) {
-			const resolved = await resolveCredential(fromConfig.token);
-			if (resolved && resolved.length > 0) configToken = resolved;
-		}
+		tokenConfig = fromConfig.token;
 	}
+	// No broker is configured, so the local store is used and no bearer is needed:
+	// a leftover `auth.broker.token` must not run, let alone fail the process.
 	if (!url) return null;
 
-	const token =
-		(envToken && envToken.length > 0 ? envToken : undefined) ?? configToken ?? (await readTokenFile()) ?? undefined;
+	// Precedence is environment, then config, then the token file. A source is
+	// resolved only when it is the one that would be used — a configured
+	// `!command` the environment token outranks is never executed, so it cannot
+	// refuse on behalf of a credential nothing was going to read.
+	let token = envBearer;
+	if (token === undefined && tokenConfig !== undefined) {
+		const resolved = await resolveCredential(tokenConfig);
+		if (resolved && resolved.length > 0) token = resolved;
+	}
+	token ??= (await readTokenFile()) ?? undefined;
 	if (!token) {
 		throw new AIError.MissingApiKeyError(
 			undefined,

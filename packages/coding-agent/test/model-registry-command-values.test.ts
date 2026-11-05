@@ -1203,6 +1203,30 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}
 		});
 
+		test("the label stops at a quote it cannot close, and at an escaped quote inside one", async () => {
+			// `\"` inside double quotes is a literal quote, not the closing one. Reading
+			// it as the close desynchronised the scan and printed the rest of the
+			// assignment's value as the program name, into the message and ~/.omp/logs.
+			const escaped = await requestRefusal(providerWithApiKey('!LABEL="x\\" sk-live-escaped-not-a-real-key" false'));
+			expect(escaped.message).toBe(
+				"No API key for provider custom-proxy: the command `LABEL=… false` exited with status 1",
+			);
+			expect(escaped.message).not.toContain("sk-live-escaped-not-a-real-key");
+			// A word that ends while a quote is still open is not a word the shell would
+			// have ended either: fail closed rather than print the remaining text.
+			for (const open of ['"', "'"]) {
+				const unterminated = await requestRefusal(
+					providerWithApiKey(`!${open}false sk-live-unterminated-not-a-real-key`),
+				);
+				// The shell reports its own syntax error here, so the status is the
+				// shell's and not worth pinning; the label is the contract.
+				expect(unterminated.message).toStartWith(
+					"No API key for provider custom-proxy: the command `…` exited with status",
+				);
+				expect(unterminated.message).not.toContain("sk-live-unterminated-not-a-real-key");
+			}
+		});
+
 		test("a 401 whose re-resolution yields nothing reports the source, not the rejection", async () => {
 			const tokenFile = path.join(tempDir, "remint-token.txt");
 			fs.writeFileSync(tokenFile, "stale-key");
@@ -1294,6 +1318,61 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			setAgentDir(agentDir);
 			try {
 				expect(await resolveAuthBrokerConfig()).toEqual({ url: "http://127.0.0.1:9", token: "broker-token" });
+			} finally {
+				setAgentDir(previousAgentDir);
+				for (const [key, value] of Object.entries(previousEnv)) {
+					if (value === undefined) delete process.env[key];
+					else process.env[key] = value;
+				}
+			}
+		});
+
+		// A configured `auth.broker.token` that nothing was going to read must not run,
+		// and must not fail the process: making the token a credential source turned a
+		// leftover entry into a hard error for users whose broker comes from the
+		// environment, and for users with no broker at all.
+		test("a configured broker token the environment outranks is never run", async () => {
+			const agentDir = scopeWithTimeout(
+				"broker-env-wins",
+				30,
+				`auth:\n  broker:\n    url: http://127.0.0.1:9\n    token: ${JSON.stringify("!false")}\n`,
+			);
+			const previousAgentDir = getAgentDir();
+			const previousEnv = Object.fromEntries(
+				["PI_CODING_AGENT_DIR", "OMP_AUTH_BROKER_URL", "OMP_AUTH_BROKER_TOKEN"].map(key => [key, process.env[key]]),
+			);
+			delete process.env.OMP_AUTH_BROKER_URL;
+			process.env.OMP_AUTH_BROKER_TOKEN = "environment-broker-token";
+			setAgentDir(agentDir);
+			try {
+				expect(await resolveAuthBrokerConfig()).toEqual({
+					url: "http://127.0.0.1:9",
+					token: "environment-broker-token",
+				});
+			} finally {
+				setAgentDir(previousAgentDir);
+				for (const [key, value] of Object.entries(previousEnv)) {
+					if (value === undefined) delete process.env[key];
+					else process.env[key] = value;
+				}
+			}
+		});
+
+		test("a leftover broker token with no broker URL leaves the local store alone", async () => {
+			const agentDir = scopeWithTimeout(
+				"broker-no-url",
+				30,
+				`auth:\n  broker:\n    token: ${JSON.stringify("!false")}\n`,
+			);
+			const previousAgentDir = getAgentDir();
+			const previousEnv = Object.fromEntries(
+				["PI_CODING_AGENT_DIR", "OMP_AUTH_BROKER_URL", "OMP_AUTH_BROKER_TOKEN"].map(key => [key, process.env[key]]),
+			);
+			delete process.env.OMP_AUTH_BROKER_URL;
+			delete process.env.OMP_AUTH_BROKER_TOKEN;
+			setAgentDir(agentDir);
+			try {
+				expect(await resolveAuthBrokerConfig()).toBeNull();
 			} finally {
 				setAgentDir(previousAgentDir);
 				for (const [key, value] of Object.entries(previousEnv)) {
