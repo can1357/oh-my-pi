@@ -1762,9 +1762,12 @@ export class ModelRegistry {
 				? {
 						...state,
 						baseUrl: normalizeModelCacheEndpoint(state.baseUrl),
-						// A set written as an array: route resolution only ever asks
-						// `.includes` (`resolveProviderBaseUrl`), so the order two models
-						// were listed in models.yml must not read as a change.
+						// A set written as an array, canonicalised here whatever it came
+						// from: a models.yml override is already sorted where it is
+						// derived, but a runtime override arrives from `registerProvider`
+						// in whatever order its caller built it. Route resolution only
+						// ever asks `.includes` (`resolveProviderBaseUrl`), so the order
+						// two APIs appear in must not read as a change.
 						baseUrlApis: state.baseUrlApis && [...state.baseUrlApis].sort(),
 					}
 				: null;
@@ -2286,7 +2289,15 @@ export class ModelRegistry {
 			if (providerConfig.api && (providerConfig.models?.length ?? 0) === 0) {
 				baseUrlApis.add(providerConfig.api);
 			}
-			const baseUrlScope = baseUrlApis.size > 0 ? [...baseUrlApis] : undefined;
+			// Sorted because this is a Set written as an array: the order two models
+			// happen to be listed in carries nothing, and the override is compared
+			// whole by `Bun.deepEquals` when a reload decides which runtime
+			// discoveries it may preserve. An insertion-ordered array makes a pure
+			// reordering look like a settings change there and throws the
+			// discovery away. `#providerConfigIdentity` canonicalises it again
+			// rather than trusting this, because a runtime override arrives from
+			// `registerProvider` and never passes through here.
+			const baseUrlScope = baseUrlApis.size > 0 ? [...baseUrlApis].sort() : undefined;
 			// Always set overrides when baseUrl/headers/apiKey/authHeader/compat/disableStrictTools/guardrail*/transport are present
 			if (
 				providerConfig.baseUrl ||

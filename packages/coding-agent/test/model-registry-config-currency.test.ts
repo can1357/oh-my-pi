@@ -176,9 +176,7 @@ describe("a configured discovery keeps the configuration it started under", () =
 		fs.writeFileSync(modelsPath, routing("anthropic", "openai", forwards));
 		// `order` is a sequence the provider follows, so reversing it is a
 		// different request even though the same providers appear in it.
-		await reloadDuringDiscovery(() =>
-			writeWithNewMtime(modelsPath, routing("anthropic", "openai", backwards)),
-		);
+		await reloadDuringDiscovery(() => writeWithNewMtime(modelsPath, routing("anthropic", "openai", backwards)));
 		expect(sent).toEqual([]);
 		expect(registry.find("probe", "listed-model")).toBeUndefined();
 	});
@@ -186,8 +184,7 @@ describe("a configured discovery keeps the configuration it started under", () =
 	// And for the header record, where the two directions are the two kinds of
 	// reordering: two different field names, and two spellings of one name.
 	test("reordering two differently named headers does not refuse the discovery", async () => {
-		const headers = (first: string, second: string) =>
-			probeConfig(`    headers:\n      ${first}\n      ${second}\n`);
+		const headers = (first: string, second: string) => probeConfig(`    headers:\n      ${first}\n      ${second}\n`);
 		fs.writeFileSync(modelsPath, headers("x-one: first", "x-two: second"));
 		await reloadDuringDiscovery(() => writeWithNewMtime(modelsPath, headers("x-two: second", "x-one: first")));
 		expect(sent).toEqual([MODELS_URL]);
@@ -195,15 +192,12 @@ describe("a configured discovery keeps the configuration it started under", () =
 	});
 
 	test("reordering two spellings of one header name still refuses the discovery", async () => {
-		const headers = (first: string, second: string) =>
-			probeConfig(`    headers:\n      ${first}\n      ${second}\n`);
+		const headers = (first: string, second: string) => probeConfig(`    headers:\n      ${first}\n      ${second}\n`);
 		// HTTP field names are case-insensitive and two declarations of one name
 		// are combined in declaration order, so this swap changes the value that
 		// is sent from `first, second` to `second, first`.
 		fs.writeFileSync(modelsPath, headers("x-route: first", "X-Route: second"));
-		await reloadDuringDiscovery(() =>
-			writeWithNewMtime(modelsPath, headers("X-Route: second", "x-route: first")),
-		);
+		await reloadDuringDiscovery(() => writeWithNewMtime(modelsPath, headers("X-Route: second", "x-route: first")));
 		expect(sent).toEqual([]);
 		expect(registry.find("probe", "listed-model")).toBeUndefined();
 	});
