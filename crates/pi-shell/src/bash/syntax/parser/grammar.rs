@@ -918,6 +918,7 @@ impl Parser<'_> {
 		let t = self.read_token()?;
 		self.last_cond_text = Some(Self::token_text(&t));
 		self.cond_tok_lo = t.lo;
+		self.cond_tok_hi = t.hi;
 		self.cond_eof = t.kind == T::Eof;
 		if !self.cond_eof {
 			// The command's span runs through `]]`.
@@ -1058,9 +1059,10 @@ impl Parser<'_> {
 					));
 				}
 				let rparen = self.cond_tok_lo;
+				let rparen_hi = self.cond_tok_hi;
 				let next = self.cond_skip_newlines()?;
 				*tok = next.kind;
-				Ok(CondExpr::Group { lparen: t.lo, rparen, expr: Box::new(inner) })
+				Ok(CondExpr::Group { lparen: t.lo, rparen, rparen_hi, expr: Box::new(inner) })
 			},
 			_ => {
 				let text = Self::token_text(&t);

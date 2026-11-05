@@ -1601,9 +1601,10 @@ impl Ctx<'_> {
 			if self.lx.tok != T::Outpar {
 				return self.yyerr();
 			}
-			let rparen = self.tok_span().lo;
+			let span = self.tok_span();
+			let (rparen, rparen_hi) = (span.lo, span.hi);
 			self.zshlex();
-			return r.map(|e| CondExpr::Group { lparen, rparen, expr: Box::new(e) });
+			return r.map(|e| CondExpr::Group { lparen, rparen, rparen_hi, expr: Box::new(e) });
 		}
 		let s1 = self.tokstr().map(|s| (s.to_vec(), self.tok_span()));
 		let dble = s1

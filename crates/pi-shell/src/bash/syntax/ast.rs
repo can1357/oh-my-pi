@@ -390,11 +390,18 @@ pub enum CondExpr {
 	/// `( expr )`, with the offsets of both parentheses.
 	Group {
 		/// Offset of `(`.
-		lparen: u32,
+		lparen:    u32,
 		/// Offset of `)`.
-		rparen: u32,
+		rparen:    u32,
+		/// Offset after the `)`, as the parser read it. In source text that
+		/// is `rparen + 1`; in text an alias expanded it is `rparen`, since
+		/// that text has no bytes in the source and every token in it
+		/// reports the one position of the aliased word. A consumer must
+		/// not add the byte itself: a range that invents it leaves its
+		/// parent's.
+		rparen_hi: u32,
 		/// What they enclose.
-		expr:   Box<Self>,
+		expr:      Box<Self>,
 	},
 }
 

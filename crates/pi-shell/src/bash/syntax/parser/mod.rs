@@ -258,6 +258,8 @@ pub struct Parser<'s> {
 	/// Offset of the last token read inside `[[ … ]]`: the position the
 	/// caller's `tok` kind was read at.
 	cond_tok_lo:    u32,
+	/// Offset after that token, as the cursor reported it.
+	cond_tok_hi:    u32,
 	/// The zsh grammar under [`Features::ZSH`]: every call goes to it
 	/// (boxed: a bash parser stays as small as it was).
 	zsh:            Option<Box<crate::bash::syntax::zsh::ZshParser<'s>>>,
@@ -357,6 +359,7 @@ impl<'s> Parser<'s> {
 			cond_line: 0,
 			cond_eof: false,
 			cond_tok_lo: 0,
+			cond_tok_hi: 0,
 			virt_comment: false,
 			discard_line: false,
 			zsh: feat

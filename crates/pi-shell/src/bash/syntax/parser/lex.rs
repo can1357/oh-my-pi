@@ -525,7 +525,7 @@ impl<'s> Parser<'s> {
 				self.lx.alexpnext = false;
 				self.lx.assignok = false;
 				self.lx.cmdbltin = false;
-				return Ok(Tok::new(T::Newline, nlo, nlo + 1, line));
+				return Ok(Tok::new(T::Newline, nlo, self.off(), line));
 			}
 			if self.lx.regexp {
 				if let Some(t) = self.read_word_token(lo, line)? {
@@ -546,7 +546,7 @@ impl<'s> Parser<'s> {
 			if c == b'-' && matches!(self.lx.last, T::LtAnd | T::GtAnd) {
 				self.bump();
 				self.lx.cmdbltin = false;
-				return Ok(Tok::new(T::Dash, lo, lo + 1, line));
+				return Ok(Tok::new(T::Dash, lo, self.off(), line));
 			}
 			if let Some(t) = self.read_word_token(lo, line)? {
 				return Ok(t);
@@ -672,7 +672,7 @@ impl<'s> Parser<'s> {
 			b'(' => T::LParen,
 			_ => T::RParen,
 		};
-		Ok(Some(Tok::new(kind, lo, lo + 1, line)))
+		Ok(Some(Tok::new(kind, lo, self.off(), line)))
 	}
 
 	/// `((` after `(` was consumed (`parse_dparen`): an arithmetic `for`, an
@@ -717,7 +717,7 @@ impl<'s> Parser<'s> {
 			if self.reset(m) && !self.lx.casepat && !self.lx.condcmd {
 				self.open_compound(T::LParen, line);
 			}
-			return Ok(Some(Tok::new(T::LParen, lo, lo + 1, line)));
+			return Ok(Some(Tok::new(T::LParen, lo, self.off(), line)));
 		}
 		Ok(None)
 	}

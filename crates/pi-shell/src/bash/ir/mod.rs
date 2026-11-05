@@ -100,7 +100,7 @@ use crate::bash::{
 /// gives each conditional operator the offset it was read at, version 17
 /// records every `!` of a run and every `&&`/`||` of a chain rather than
 /// deriving them, and version 18 is 17 merged with main's 15.
-pub const IR_VERSION: u32 = 18;
+pub const IR_VERSION: u32 = 19;
 
 /// Opcodes.
 #[derive(

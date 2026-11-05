@@ -1706,10 +1706,10 @@ mod shfmt {
 					}
 					v
 				},
-				CondExpr::Group { lparen, rparen, expr } => V::Obj(vec![
+				CondExpr::Group { lparen, rparen, rparen_hi, expr } => V::Obj(vec![
 					("Type", s(b"ParenTest")),
 					("Pos", p(*lparen)),
-					("End", p(rparen + 1)),
+					("End", p(*rparen_hi)),
 					("Lparen", p(*lparen)),
 					("Rparen", p(*rparen)),
 					("X", self.test(expr)),
@@ -1749,7 +1749,7 @@ mod shfmt {
 				CondExpr::Unary { op_lo, arg, .. } => (*op_lo, arg.span.hi),
 				CondExpr::Binary { lhs, rhs, .. } => (lhs.span.lo, rhs.span.hi),
 				CondExpr::Not { lo, expr, .. } => (*lo, Self::test_span(expr).1),
-				CondExpr::Group { lparen, rparen, .. } => (*lparen, rparen + 1),
+				CondExpr::Group { lparen, rparen_hi, .. } => (*lparen, *rparen_hi),
 				CondExpr::And(terms, _) | CondExpr::Or(terms, _) => {
 					let first = terms.first().expect("logical chain has operands");
 					let last = terms.last().expect("logical chain has operands");
