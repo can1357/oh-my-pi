@@ -98,6 +98,7 @@ class PeerAuthState {
 	readonly leases = new Map<number, HeldLease>();
 	readonly subscriptions = new Set<() => void>();
 	readonly mirrorHost = Promise.withResolvers<MirrorHost>();
+	readonly lifetime = new AbortController();
 	#nextLease = 1;
 
 	constructor() {
@@ -112,6 +113,7 @@ class PeerAuthState {
 	}
 
 	release(): void {
+		this.lifetime.abort();
 		for (const held of this.leases.values())
 			held.storage.sessions.unrestrict(held.provider, held.sessionId, held.lease);
 		this.leases.clear();
@@ -331,7 +333,8 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 		},
 		"governor.configure": (storage, config) => storage.governor.configure(config),
 		"governor.admit": async (storage, request, signal) => {
-			const grant = await storage.governor.admit(request, signal);
+			const lifetime = state.lifetime.signal;
+			const grant = await storage.governor.admit(request, signal ? AbortSignal.any([signal, lifetime]) : lifetime);
 			// A plain copy: the wire carries the grant's data, never the ledger's object.
 			return grant ? { id: grant.id, waitedMs: grant.waitedMs } : undefined;
 		},

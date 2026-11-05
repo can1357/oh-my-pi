@@ -251,7 +251,15 @@ export class UsageLedger {
 					credential_id, model_id, role, source, session_id, interactive)
 				 VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				);
+				const reserved = new Map<string, Set<number>>();
 				for (const window of request.windows) {
+					let generations = reserved.get(window.quotaKey);
+					if (!generations) {
+						generations = new Set();
+						reserved.set(window.quotaKey, generations);
+					}
+					if (generations.has(window.generation)) continue;
+					generations.add(window.generation);
 					insert.run(
 						request.grantId,
 						window.quotaKey,
@@ -267,7 +275,10 @@ export class UsageLedger {
 						request.interactive ? 1 : 0,
 					);
 				}
-				return { kind: "admitted", reserved: request.windows.length };
+				return {
+					kind: "admitted",
+					reserved: [...reserved.values()].reduce((count, generations) => count + generations.size, 0),
+				};
 			})
 			.immediate();
 	}
@@ -324,8 +335,29 @@ export class UsageLedger {
 	 * Runs inside the caller's transaction when writing.
 	 */
 	#evaluate(windows: readonly LedgerWindow[], nowMs: number, lead: number, write: boolean): EvaluatedLedgerWindow[] {
+		if (write) {
+			const observations = new Map<string, Map<number, LedgerWindow>>();
+			for (const window of windows) {
+				if (window.usedFraction === undefined) continue;
+				let generations = observations.get(window.quotaKey);
+				if (!generations) {
+					generations = new Map();
+					observations.set(window.quotaKey, generations);
+				}
+				const previous = generations.get(window.generation);
+				if (
+					!previous ||
+					window.fetchedAt > previous.fetchedAt ||
+					(window.fetchedAt === previous.fetchedAt && window.usedFraction > (previous.usedFraction ?? -Infinity))
+				) {
+					generations.set(window.generation, window);
+				}
+			}
+			for (const generations of observations.values()) {
+				for (const window of generations.values()) this.#observe(window);
+			}
+		}
 		return windows.map(window => {
-			if (write) this.#observe(window);
 			const pending = this.#countPending(window.quotaKey, window.fetchedAt);
 			const costPerRequest = this.#calibrate(window, write);
 			const decision = evaluateWindow({
@@ -406,7 +438,7 @@ export class UsageLedger {
 		if (observation) {
 			const counted = this.#db
 				.query<{ n: number }, [string, number, number, number]>(
-					`SELECT COUNT(*) AS n FROM reservations
+					`SELECT COUNT(DISTINCT grant_id) AS n FROM reservations
 					 WHERE quota_key = ? AND generation = ? AND created_at_ms > ? AND created_at_ms <= ?`,
 				)
 				.get(window.quotaKey, window.generation, observation.first_observed_at_ms, observation.last_observed_at_ms);
@@ -431,7 +463,7 @@ export class UsageLedger {
 	#countPending(quotaKey: string, fetchedAt: number): number {
 		const row = this.#db
 			.query<{ n: number }, [string, number]>(
-				"SELECT COUNT(*) AS n FROM reservations WHERE quota_key = ? AND created_at_ms >= ?",
+				"SELECT COUNT(DISTINCT grant_id) AS n FROM reservations WHERE quota_key = ? AND created_at_ms >= ?",
 			)
 			.get(quotaKey, fetchedAt);
 		return row?.n ?? 0;
@@ -440,7 +472,7 @@ export class UsageLedger {
 	#countInFlight(quotaKey: string, fetchedAt: number): number {
 		const rows = this.#db
 			.query<{ pid: number; n: number }, [string, number]>(
-				`SELECT pid, COUNT(*) AS n FROM reservations
+				`SELECT pid, COUNT(DISTINCT grant_id) AS n FROM reservations
 				 WHERE quota_key = ? AND created_at_ms >= ? AND settled_at_ms IS NULL GROUP BY pid`,
 			)
 			.all(quotaKey, fetchedAt);

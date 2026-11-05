@@ -180,6 +180,50 @@ function admittedBy(runs: ChildEvent[][]): number {
 	return runs.reduce((total, events) => total + (events.find(event => event.kind === "done")?.admitted ?? 0), 0);
 }
 
+describe("duplicate quota constraints", () => {
+	test("both constraints bind correctly and reserve once per quota and generation in either order", () => {
+		const nowMs = t2 + 1;
+		const reset = nowMs + 100_000;
+		const common = { resetsAt: reset, generation: governorGeneration(reset), usedFraction: 0.7 };
+		const paced = window({ ...common, label: "paced", durationMs: 100_000 });
+		const reserveOnly = window({ ...common, label: "reserve-only", durationMs: undefined });
+		for (const [index, windows] of [
+			[paced, reserveOnly],
+			[reserveOnly, paced],
+		].entries()) {
+			const file = path.join(tempDir, `duplicate-${index}.db`);
+			const ledger = UsageLedger.open(file);
+			const request = {
+				grantId: crypto.randomUUID(),
+				nowMs,
+				lead: LEAD,
+				windows,
+				provider: PROVIDER,
+				credentialId: 1,
+				source: "turn" as const,
+				interactive: false,
+				pid: process.pid,
+			};
+			try {
+				const result = ledger.admit(request);
+				expect(result.kind).toBe("wait");
+				if (result.kind !== "wait") throw new Error("Expected the paced constraint to bind");
+				expect(result.bindingLabel).toBe("paced");
+				expect(result.reason).toBe("over-allowance");
+				expect(result.admissibleAtMs).toBeCloseTo(nowMs + 100_000 * ((0.7 / HEADROOM - LEAD) / (1 - LEAD)), 2);
+				expect(reservationsCreatedAtOrAfter(file, t2)).toBe(0);
+				expect(ledger.admit({ ...request, nowMs: result.admissibleAtMs })).toEqual({
+					kind: "admitted",
+					reserved: 1,
+				});
+				expect(reservationsCreatedAtOrAfter(file, t2)).toBe(1);
+			} finally {
+				ledger.close();
+			}
+		}
+	});
+});
+
 describe("concurrent admission against one ledger file", () => {
 	installFetchTripwire();
 	test("three processes admit no more reservations than the calibrated allowance permits", async () => {

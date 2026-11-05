@@ -120,18 +120,7 @@ export function applicableWindows(input: {
 			generation: governorGeneration(resetsAt),
 		});
 	}
-	return dedupeByQuota(windows);
-}
-
-/** One window per quota key; the most restrictive (exhausted, then highest used fraction) wins. */
-function dedupeByQuota(windows: ApplicableWindow[]): ApplicableWindow[] {
-	const byKey = new Map<string, ApplicableWindow>();
-	const score = (window: ApplicableWindow): number => (window.exhausted ? 2 : 0) + (window.usedFraction ?? 0);
-	for (const window of windows) {
-		const kept = byKey.get(window.quotaKey);
-		if (kept === undefined || score(window) > score(kept)) byKey.set(window.quotaKey, window);
-	}
-	return [...byKey.values()];
+	return windows;
 }
 
 function windowDuration(

@@ -181,15 +181,30 @@ describe("quota identity and sharedGroup", () => {
 		accountIdentity: "acct:A",
 	};
 
-	test("applicableWindows keeps one window per quota, the most restrictive of the copies", () => {
-		const report: UsageReport = {
-			provider: "p",
-			fetchedAt: NOW,
-			limits: [limit("primary", 0.1, "grp-1"), limit("primary-copy", 0.7, "grp-1")],
-		};
-		const windows = applicableWindows({ ...context, report });
-		expect(windows).toHaveLength(1);
-		expect(windows[0]?.usedFraction).toBe(0.7);
+	test("same-quota copies retain both constraints and the paced copy binds in either order", () => {
+		const paced = limit("primary", 0.7, "grp-1");
+		const reserveOnly = limit("primary-copy", 0.7, "grp-1");
+		reserveOnly.window = { ...reserveOnly.window!, durationMs: undefined };
+		for (const limits of [
+			[paced, reserveOnly],
+			[reserveOnly, paced],
+		]) {
+			const report: UsageReport = { provider: "p", fetchedAt: NOW, limits };
+			const windows = applicableWindows({ ...context, report });
+			expect(windows).toHaveLength(2);
+			expect(windows[0]?.quotaKey).toBe(windows[1]?.quotaKey);
+			expect(windows.map(window => window.usedFraction)).toEqual([0.7, 0.7]);
+			const decisions = windows.map(window => evaluateWindow(input(window)));
+			const verdict = admissionVerdict(decisions, NOW);
+			const pacedIndex = windows.findIndex(window => window.durationMs === DURATION);
+			const reserveOnlyIndex = windows.findIndex(window => window.durationMs === undefined);
+			expect(pacedIndex).not.toBe(-1);
+			expect(reserveOnlyIndex).not.toBe(-1);
+			expect(decisions[reserveOnlyIndex]?.state).toBe("open");
+			expect(decisions[pacedIndex]?.state).toBe("paced");
+			expect(verdict.bindingIndex).toBe(pacedIndex);
+			expect(verdict.admissibleAtMs).toBeCloseTo(NOW + DURATION * ((0.7 / 0.9 - 0.25) / 0.75), 2);
+		}
 	});
 
 	test("control: copies without a shared group are separate quotas and both gate", () => {

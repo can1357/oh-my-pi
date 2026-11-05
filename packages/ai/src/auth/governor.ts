@@ -95,8 +95,6 @@ export class CredentialGovernor implements GovernorApi {
 	#degradedReason: string | undefined;
 	#degradedUntilMs = 0;
 	#closed = false;
-	/** Write-free handle used by status and ranking while no admission has opened the writable ledger. */
-	#readLedger: UsageLedger | undefined;
 
 	constructor(options: CredentialGovernorOptions) {
 		this.#dbPath = options.dbPath;
@@ -130,8 +128,6 @@ export class CredentialGovernor implements GovernorApi {
 		this.#closed = true;
 		this.#ledger?.close();
 		this.#ledger = undefined;
-		this.#readLedger?.close();
-		this.#readLedger = undefined;
 		this.#listeners.clear();
 	}
 
@@ -369,11 +365,14 @@ export class CredentialGovernor implements GovernorApi {
 	/** Evaluate windows against the ledger, or against the cache alone when the ledger is unavailable. */
 	#inspect(windows: LedgerWindow[], now: number): EvaluatedLedgerWindow[] {
 		const ledger = this.#ledgerForRead();
+		const readOnly = ledger !== undefined && ledger !== this.#ledger;
 		if (ledger) {
 			try {
 				return ledger.inspect(windows, now, this.#config.lead);
 			} catch (error) {
 				this.#readFailed(ledger, error, now);
+			} finally {
+				if (readOnly) ledger.close();
 			}
 		}
 		return windows.map(window => ({
@@ -398,11 +397,14 @@ export class CredentialGovernor implements GovernorApi {
 	#recentWaits(limit: number): UsageGovernorWaitRecord[] {
 		const ledger = this.#ledgerForRead();
 		if (!ledger) return [];
+		const readOnly = ledger !== this.#ledger;
 		try {
 			return ledger.recentWaits(limit);
 		} catch (error) {
 			this.#readFailed(ledger, error, this.#now());
 			return [];
+		} finally {
+			if (readOnly) ledger.close();
 		}
 	}
 
@@ -413,8 +415,6 @@ export class CredentialGovernor implements GovernorApi {
 		if (this.#dbPath === undefined) return undefined;
 		try {
 			this.#ledger = UsageLedger.open(this.#dbPath);
-			this.#readLedger?.close();
-			this.#readLedger = undefined;
 			return this.#ledger;
 		} catch (error) {
 			this.#degrade(error, now);
@@ -426,28 +426,24 @@ export class CredentialGovernor implements GovernorApi {
 	#ledgerForRead(): UsageLedger | undefined {
 		if (this.#closed) return undefined;
 		if (this.#ledger) return this.#ledger;
-		if (this.#readLedger) return this.#readLedger;
 		if (!this.#config.enabled || this.#dbPath === undefined || !fs.existsSync(this.#dbPath)) return undefined;
 		try {
-			this.#readLedger = UsageLedger.openReadOnly(this.#dbPath);
+			return UsageLedger.openReadOnly(this.#dbPath);
 		} catch (error) {
 			logger.debug("usage governor ledger is not readable yet; evaluating from the cache alone", {
 				error: String(error),
 			});
 			return undefined;
 		}
-		return this.#readLedger;
 	}
 
-	/** A failed read drops the write-free handle; only the writable ledger's failures degrade admission. */
+	/** Only a failure of the writable ledger degrades admission. */
 	#readFailed(ledger: UsageLedger, error: unknown, now: number): void {
-		if (ledger !== this.#readLedger) {
+		if (ledger === this.#ledger) {
 			this.#degrade(error, now);
 			return;
 		}
 		logger.debug("usage governor ledger read failed; evaluating from the cache alone", { error: String(error) });
-		this.#readLedger.close();
-		this.#readLedger = undefined;
 	}
 
 	#degrade(error: unknown, now: number): void {
