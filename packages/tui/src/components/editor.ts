@@ -137,6 +137,16 @@ function sanitizeLoadedText(text: string): string {
 	return replaceTabs(text.replace(/\r\n?/g, "\n")).replace(/[\x00-\x09\x0b-\x1f]/g, "");
 }
 
+/**
+ * Regex source matching every spelling of paste `id`'s collapsed marker: the bare `[Paste #1]`
+ * and the two the editor inserts (`, +12 lines`, `, 345 chars`). One definition, because the
+ * expansion pass and the id the editor hands out must agree on exactly which characters stand
+ * for a stored paste.
+ */
+function pasteMarkerSource(id: number): string {
+	return `\\[Paste #${id}(?:, (?:\\+\\d+ lines|\\d+ chars))?\\]`;
+}
+
 const segmenter = getSegmenter();
 
 /**
@@ -3328,9 +3338,7 @@ export class Editor implements Component, Focusable {
 	 *  body, so nothing is lost by not looking there. */
 	#expandRuns(text: string): ExpandedRun[] {
 		const sources: string[] = [];
-		for (const pasteId of this.#pastes.keys()) {
-			sources.push(`\\[Paste #${pasteId}(?:, (?:\\+\\d+ lines|\\d+ chars))?\\]`);
-		}
+		for (const pasteId of this.#pastes.keys()) sources.push(pasteMarkerSource(pasteId));
 		for (const label of [...this.#atoms.keys()].sort((a, b) => b.length - a.length)) {
 			sources.push(RegExp.escape(label));
 		}
@@ -3954,9 +3962,17 @@ export class Editor implements Component, Focusable {
 	}
 
 	/** Store `content` in the paste buffer and insert a collapsed `[Paste #N]` marker that expands
-	 *  back to `content` on submit. `lineCount` is the content's line count. */
+	 *  back to `content` on submit. `lineCount` is the content's line count.
+	 *
+	 *  The id skips any number the buffer already reads as a paste marker. A person who typed or
+	 *  pasted `[Paste #1]` themselves owns those characters: taking that number would make their
+	 *  own text expand into this paste's body, which is how a literal marker in one piece of a
+	 *  delivery came back as another piece's content. */
 	#storePasteMarker(content: string, lineCount: number): void {
-		this.#pasteCounter++;
+		const buffer = this.getText();
+		do {
+			this.#pasteCounter++;
+		} while (new RegExp(pasteMarkerSource(this.#pasteCounter)).test(buffer));
 		const pasteId = this.#pasteCounter;
 		this.#pastes.set(pasteId, content);
 

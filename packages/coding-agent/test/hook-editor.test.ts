@@ -419,6 +419,22 @@ describe("HookEditorComponent prompt-style mode", () => {
 		expect(onSubmit).toHaveBeenCalledWith(body, [image], [`${pasted} `, { kind: "image", n: 1, tail: "" }]);
 	});
 
+	it("keeps a literal `[Paste #1]` in one piece when a later piece collapses", () => {
+		// The pieces of one delivery collapse separately. The first piece names `[Paste #1]` in
+		// the person's own JSON; the second is large enough to be stored, and must take a number
+		// their text does not already use, or their name field comes back as the body.
+		const onSubmit = vi.fn();
+		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
+			promptStyle: true,
+		});
+		const head = '{"name":"[Paste #1]","body":"';
+		component.beginPaste()([{ text: head }, { text: `${largePasteText()}"}` }]);
+
+		component.handleInput("\r");
+
+		expect(onSubmit).toHaveBeenCalledWith(`${head}${largePasteText()}"}`);
+	});
+
 	it("keeps a typed marker in the same field as an attachment out of the submitted runs", () => {
 		// The answer owns one real image; everything else that reads like a marker is the
 		// person's own text and must stay a literal run, so a renumbering consumer cannot move it.
