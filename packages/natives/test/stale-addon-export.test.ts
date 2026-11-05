@@ -27,6 +27,7 @@ import {
 	missingNativeExport,
 	missingNativeExportMessage,
 	nativeAddonStatus,
+	reportStaleWorkspaceAddon,
 	staleWorkspaceAddonNotice,
 } from "../native/loader-state.js";
 
@@ -93,6 +94,24 @@ describe("native exports missing from a stale addon", () => {
 		expect(() => new Stub!("echo hi")).not.toThrow("is not a constructor");
 	});
 
+	// `FileLock.tryAcquire`, `IpcServer.listen` and `Process.fromPid` are
+	// entered through a static, so a constructor-only stand-in would still
+	// have read `FileLock.tryAcquire is not a function`.
+	it("answers a static entrypoint with the same diagnostic as the constructor", () => {
+		const Stub = missingNativeClass("FileLock", status()) as unknown as { tryAcquire: () => void };
+		expect(() => Stub.tryAcquire()).toThrow("FileLock.tryAcquire");
+		expect(() => Stub.tryAcquire()).toThrow("bun run build:native");
+	});
+
+	// A thrown read from `prototype`/`name` would break `instanceof`, stack
+	// formatting and every inspector before the caller sees the message above.
+	it("keeps the function intrinsics readable so the stand-in can still be inspected", () => {
+		const Stub = missingNativeClass("IpcServer", status())!;
+		expect(typeof Stub).toBe("function");
+		expect(typeof Stub.prototype).toBe("object");
+		expect({} instanceof Stub).toBe(false);
+	});
+
 	it("keeps a class absence a plain undefined on a current addon", () => {
 		expect(missingNativeClass("MacOSFrontApp", status({ version: "18.2.6", stale: false }))).toBeUndefined();
 	});
@@ -115,5 +134,36 @@ describe("stale workspace addon notice", () => {
 		const notice = staleWorkspaceAddonNotice(status({ version: null }));
 		expect(notice).toContain("an addon without a release stamp");
 		expect(notice).not.toContain("@oh-my-pi/pi-natives@null");
+	});
+
+	// `loadNative()` is not a startup-only call: `native/clipboard.js` and the
+	// other lazy entrypoints call it on every invocation, so an unlatched
+	// notice would repaint under a running TUI on every clipboard copy.
+	it("emits at most once per process", () => {
+		const written: string[] = [];
+		const state = { reported: false };
+		const deps = { write: (text: string) => written.push(text), state };
+		expect(reportStaleWorkspaceAddon({ isWorkspaceLoad: true }, status(), deps)).toBe(true);
+		expect(reportStaleWorkspaceAddon({ isWorkspaceLoad: true }, status(), deps)).toBe(false);
+		expect(written).toHaveLength(1);
+		expect(written[0]).toContain(addonPath);
+	});
+
+	// `validateLoadedBindings` also returns successfully for a pre-sentinel
+	// addon on an installed load; that addon reports no release, so it is
+	// `stale`, and telling its user to run a repository build would be wrong.
+	it("stays silent outside a workspace load", () => {
+		const written: string[] = [];
+		const deps = { write: (text: string) => written.push(text), state: { reported: false } };
+		expect(reportStaleWorkspaceAddon({ isWorkspaceLoad: false }, status({ version: null }), deps)).toBe(false);
+		expect(written).toHaveLength(0);
+	});
+
+	it("stays silent for a current addon", () => {
+		const written: string[] = [];
+		const deps = { write: (text: string) => written.push(text), state: { reported: false } };
+		const current = status({ version: "18.2.6", stale: false });
+		expect(reportStaleWorkspaceAddon({ isWorkspaceLoad: true }, current, deps)).toBe(false);
+		expect(written).toHaveLength(0);
 	});
 });
