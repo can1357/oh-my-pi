@@ -223,46 +223,37 @@ function canonicalJson(value: unknown): string {
 }
 
 /**
- * A header record reduced to what reaches the wire: the declarations in the
- * order they were written, each as its HTTP field name and its value, with a
- * declaration named exactly `Authorization` left out.
+ * Every declared header, in declaration order, with its name and value exactly
+ * as written. Nothing is dropped, lowercased or sorted: any difference refuses
+ * the discovery.
  *
- * Two declarations are the same here if and only if they send the same bytes.
- * Three measured consequences, each of which an earlier shape of this
- * function got wrong in one direction or the other:
+ * This is deliberately dumber than the wire. Three rounds of trying to be
+ * exact each bought one case and sold another — canonical JSON, folded names,
+ * dropping a declaration named `Authorization` — in both directions, false
+ * acceptances and false refusals alternating. The last of those was unsound
+ * because the overwrite that justified it is conditional: discovery spreads
+ * its bearer as `apiKey ? { ...configured, Authorization: … } : configured`
+ * (`model-discovery.ts`), so on a keyless provider (`auth: none`, the
+ * documented local-vLLM shape) the configured `Authorization` IS the
+ * credential and goes on the wire.
  *
- *  - **Case is not kept.** `X-Route: v` and `x-route: v` build the same
- *    request, so one must not refuse a discovery that is still current.
- *  - **Declaration order is kept, between fields as well as within one.**
- *    `resolveConfigHeaders` resolves values sequentially, awaiting each
- *    before starting the next, and a value may be a `!command`
- *    (docs/models.md), so a later command can observe an earlier one's
- *    effect: reversing two declarations can change the bytes sent. That
- *    makes any reorder a configuration change. It is coarser than the wire
- *    for two purely static headers, which costs one extra discovery; the
- *    alternative is a rule with two kinds in it, which would have to decide
- *    per value whether order matters, and would err toward sending a header
- *    resolved under a configuration that no longer exists.
- *  - **Except for `authorization`**, the one field a generated header can
- *    collide with: discovery assembles its bearer as
- *    `{ ...configured, Authorization: … }`, so the exact spelling decides
- *    whether a configured declaration is replaced by the generated value,
- *    kept beside it and combined with it, or — when no bearer is generated at
- *    all, as for a keyless provider — sent exactly as written. A declaration
- *    whose value is a `!command` also still runs when it is overwritten, and a
- *    later header can see what it did. The spelling is part of the request
- *    there, and nowhere else.
+ * Two consequences, both accepted rather than fixed:
  *
- * The resolved headers would answer all of this directly, and are not
- * available: resolution is async and executes a process per `!command`, while
- * this runs synchronously on every epoch read, including once per provider
- * after every configuration mutation.
+ *  - Renaming a header to another case, or reordering two static ones, sends
+ *    the same bytes and still refuses. That costs one extra discovery, and it
+ *    is the error direction worth having: the alternative sends a header
+ *    resolved under a configuration that is gone.
+ *  - The `keyless` flag a few fields below would make this wire-exact. It is
+ *    deliberately not used: it would be a fourth conditional on a mechanism
+ *    that has failed on its first three, and all it buys is that extra
+ *    discovery.
+ *
+ * The resolved headers would be exact and are unavailable anyway: resolution
+ * is async and runs a process per `!command`, while this runs synchronously on
+ * every epoch read, once per provider after every configuration mutation.
  */
 function canonicalHeaderIdentity(headers: Record<string, string>): Array<[string, string]> {
-	return Object.entries(headers).map(([name, value]): [string, string] => {
-		const field = name.toLowerCase();
-		return [field === "authorization" ? name : field, value];
-	});
+	return Object.entries(headers);
 }
 
 /**

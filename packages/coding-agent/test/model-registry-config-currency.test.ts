@@ -216,11 +216,52 @@ describe("a configured discovery keeps the configuration it started under", () =
 		);
 	});
 
-	test("renaming a header to another case does not refuse the discovery", async () => {
+	test("renaming a header to another case refuses the discovery, at a cost that is chosen", async () => {
+		// The two requests are byte-identical, so this refusal is not required by
+		// the wire. It is accepted: the identity keeps every declaration exactly
+		// as written, and one extra discovery is the error direction worth
+		// having. Three rounds of trying to be exact each bought one case and
+		// sold another.
 		fs.writeFileSync(modelsPath, headerConfig("X-Route: same-route"));
 		await reloadDuringDiscovery(() => writeWithNewMtime(modelsPath, headerConfig("x-route: same-route")));
-		expect(sent).toEqual([MODELS_URL]);
-		expect(registry.find("probe", "listed-model")).toBeDefined();
+		expect(sent).toEqual([]);
+		expect(registry.find("probe", "listed-model")).toBeUndefined();
+	});
+
+	// A keyless provider (`auth: none`, the documented local-vLLM shape)
+	// generates no bearer, so discovery's
+	// `apiKey ? { ...configured, Authorization: … } : configured` leaves the
+	// configured declaration exactly as written and it IS the credential the
+	// server receives. Every other Authorization case here configures an
+	// `apiKey`, which overwrites that property, so none of them can observe
+	// this: an identity that dropped the declaration as inert sent a value the
+	// operator had replaced away and no test went red.
+	const keyless = (...lines: string[]) =>
+		`providers:\n  probe:\n    baseUrl: ${ENDPOINT}\n    api: openai-completions\n` +
+		`    auth: none\n    headers:\n${lines.map(line => `      ${line}\n`).join("")}` +
+		`    discovery:\n      type: openai-models-list\n`;
+
+	test("a keyless provider's configured Authorization is what reaches the wire", async () => {
+		held.release();
+		expect(await headersSentUnder(keyless("Authorization: Bearer wire-one"))).toContain(
+			"authorization: Bearer wire-one",
+		);
+		expect(await headersSentUnder(keyless("Authorization: Bearer wire-two"))).toContain(
+			"authorization: Bearer wire-two",
+		);
+	});
+
+	test("replacing a keyless provider's Authorization while its discovery runs refuses it", async () => {
+		// No `apiKey` to suspend, so the discovery is held on a header command
+		// declared ahead of the credential.
+		const hold = `x-hold: "${held.command}"`;
+		writeWithNewMtime(modelsPath, keyless(hold, "Authorization: Bearer wire-one"));
+		await reloadDuringDiscovery(() =>
+			writeWithNewMtime(modelsPath, keyless(hold, "Authorization: Bearer wire-two")),
+		);
+		expect(wire.flat()).not.toContain("authorization: Bearer wire-one");
+		expect(sent).toEqual([]);
+		expect(registry.find("probe", "listed-model")).toBeUndefined();
 	});
 
 	test("reordering two spellings of one header name refuses the discovery", async () => {
@@ -285,13 +326,6 @@ describe("a configured discovery keeps the configuration it started under", () =
 		expect(sent).toEqual([]);
 		expect(registry.find("probe", "listed-model")).toBeUndefined();
 	});
-
-	test("changing the value of an exact Authorization declaration refuses the discovery", async () => {
-		fs.writeFileSync(modelsPath, auth("Authorization", "Bearer manual-config"));
-		await reloadDuringDiscovery(() => writeWithNewMtime(modelsPath, auth("Authorization", "Bearer something-else")));
-		expect(sent).toEqual([]);
-		expect(registry.find("probe", "listed-model")).toBeUndefined();
-	});
 });
 
 interface HeldCommand {
@@ -317,10 +351,19 @@ function heldCommand(dir: string, output: string): HeldCommand {
 	};
 }
 
-/** Rewrite a file with a modification time the registry's reload check cannot miss. */
+/**
+ * Rewrite a file with a strictly newer modification time that is never in the
+ * future. The registry both compares this mtime with the last one it loaded
+ * (`#reloadStaticModels`) and compares it with a cache row's wall-clock
+ * timestamp (`#isDiscoveryCacheOlderThanModelsConfig`), so a stamp ahead of
+ * the clock makes every row written afterwards look stale. Adding two seconds
+ * to the file's own previous mtime compounds: four rewrites in one test left
+ * the file eight seconds ahead. These stamps start an hour back and step
+ * forward, so they stay distinct, ordered and behind the clock.
+ */
+let mtimeTick = 0;
 function writeWithNewMtime(file: string, content: string) {
-	const previous = fs.existsSync(file) ? fs.statSync(file).mtimeMs : 0;
 	fs.writeFileSync(file, content);
-	const next = new Date(Math.max(Date.now(), previous + 2000));
-	fs.utimesSync(file, next, next);
+	const stamp = new Date(Date.now() - 3_600_000 + ++mtimeTick * 1000);
+	fs.utimesSync(file, stamp, stamp);
 }
