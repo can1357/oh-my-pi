@@ -7,6 +7,8 @@ import { buildResult, htmlToBasicMarkdown, loadPage, type RenderResult, type Spe
 /** Builders name output files `.html`; a dirhtml page ends in a directory whose name may contain dots. */
 const OUTPUT_EXTENSION = /\.html?$/i;
 const SOURCE_EXTENSION = /\.[^.]+$/;
+/** Directories a docs root lives in (`docs/`, `doc/source/`, …); the root page's index sits directly under them. */
+const DOCS_ROOT_DIR = /^(?:docs?|documentation|source|src|content)$/i;
 
 export const handleReadTheDocs: SpecialHandler = async (
 	url: string,
@@ -176,7 +178,9 @@ function decodePathSegment(segment: string): string {
 
 /** A page at docs/a/b builds from a/b.md, a/b/index.rst, …, under any docs root in the repository. */
 function sourceFileBuildsPage(source: DocPath, page: DocPath): boolean {
-	if (page.segments.length === 0) return source.index;
+	if (page.segments.length === 0) {
+		return source.index && source.segments.every(segment => DOCS_ROOT_DIR.test(segment));
+	}
 	const offset = source.segments.length - page.segments.length;
 	return offset >= 0 && page.segments.every((segment, i) => source.segments[offset + i] === segment);
 }

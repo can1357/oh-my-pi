@@ -105,9 +105,9 @@ describe("handleReadTheDocs versioned source guard", () => {
 		expect(result?.content).toContain("INDEX RST SOURCE");
 	});
 
-	it("ignores an Edit link to a non-index file on the docs root page", async () => {
+	it("ignores an Edit link to a subsection's index on the docs root page", async () => {
 		const loadPage = stubLoadPage(
-			pageHtml("https://github.com/other/project/blob/main/docs/supported-services.md"),
+			pageHtml("https://github.com/other/project/blob/main/docs/subsection/index.rst"),
 			"UNRELATED REPOSITORY FILE",
 		);
 
