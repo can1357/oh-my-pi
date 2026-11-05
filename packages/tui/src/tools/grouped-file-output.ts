@@ -477,7 +477,7 @@ export function groupLineIndicesByBlank(rawLines: readonly string[]): number[][]
 // =============================================================================
 
 /** A code-frame row split after its rule: the gutter (match marker, line number, rule) and the source line. */
-interface CodeFrameRow {
+export interface CodeFrameRow {
 	gutter: string;
 	source: string;
 }
@@ -488,7 +488,7 @@ interface CodeFrameRow {
  * string or comment keeps its colors. Without a language the sources take
  * `color` too.
  */
-function renderCodeFrameRun(
+export function renderCodeFrameRun(
 	rows: readonly CodeFrameRow[],
 	lang: string | undefined,
 	color: ThemeColor,

@@ -109,7 +109,9 @@ describe("extension shortcuts", () => {
 		expect(second!.getShortcutConflict("ctrl+shift+p")).toEqual({ kind: "reserved" });
 		// The default app.ask.hide chord outranks ext-0's registration of it.
 		expect(second!.getShortcutConflict("alt+h")).toEqual({ kind: "keybinding", keybindings: ["app.ask.hide"] });
-		expect(second!.getShortcutConflict("alt+y")).toBeUndefined();
+		// An editing key: a shortcut on it would take yank-pop away from the editor.
+		expect(second!.getShortcutConflict("alt+y")).toEqual({ kind: "keybinding", keybindings: ["tui.editor.yankPop"] });
+		expect(second!.getShortcutConflict("alt+u")).toBeUndefined();
 		// The reserved chord is dropped from binding whatever its spelling; the rest bind as registered.
 		expect([...runner.getShortcuts().keys()]).toEqual(["alt+ctrl+x", "alt+h"]);
 	});
@@ -131,9 +133,32 @@ describe("extension shortcuts", () => {
 		expect(second!.getShortcutConflict("alt+x")).toEqual({ kind: "extension", extensionPath: "ext-0" });
 	});
 
+	it("binds only the last registration of a chord in any spelling, and reports that one", async () => {
+		const {
+			runner,
+			apis: [first, , third],
+		} = await loadRunner(
+			undefined,
+			pi => pi.registerShortcut("alt+ctrl+x", { handler: noop }),
+			pi => {
+				pi.registerShortcut("ctrl+alt+x", { handler: noop });
+				pi.registerShortcut("?", { handler: noop });
+			},
+			pi => pi.registerShortcut("shift+?", { handler: noop }),
+		);
+		// One editor handler per chord, so the reported holder is the one that fires.
+		const bound = [...runner.getShortcuts()].map(([key, shortcut]) => [key, shortcut.extensionPath]);
+		expect(bound).toEqual([
+			["ctrl+alt+x", "ext-1"],
+			["shift+?", "ext-2"],
+		]);
+		expect(third!.getShortcutConflict("alt+ctrl+x")).toEqual({ kind: "extension", extensionPath: "ext-1" });
+		expect(first!.getShortcutConflict("?")).toEqual({ kind: "extension", extensionPath: "ext-2" });
+	});
+
 	it("answers from its own session's keymap, never another session's remap", async () => {
 		// An interactive session loads the user's remap, which also becomes the process-global keymap.
-		const remapped = KeybindingsManager.inMemory({ "app.ask.hide": "alt+y" });
+		const remapped = KeybindingsManager.inMemory({ "app.ask.hide": "alt+u" });
 		setKeybindings(remapped);
 		const interactive = (await loadRunner(remapped, pi => pi.registerShortcut("alt+h", { handler: noop }), noop))
 			.apis[1]!;
@@ -141,10 +166,10 @@ describe("extension shortcuts", () => {
 		const headless = (await loadRunner(undefined, pi => pi.registerShortcut("alt+h", { handler: noop }), noop))
 			.apis[1]!;
 
-		expect(interactive.getShortcutConflict("alt+y")).toEqual({ kind: "keybinding", keybindings: ["app.ask.hide"] });
+		expect(interactive.getShortcutConflict("alt+u")).toEqual({ kind: "keybinding", keybindings: ["app.ask.hide"] });
 		expect(interactive.getShortcutConflict("alt+h")).toEqual({ kind: "extension", extensionPath: "ext-0" });
 		expect(headless.getShortcutConflict("alt+h")).toEqual({ kind: "keybinding", keybindings: ["app.ask.hide"] });
-		expect(headless.getShortcutConflict("alt+y")).toBeUndefined();
+		expect(headless.getShortcutConflict("alt+u")).toBeUndefined();
 	});
 
 	it("drops a fallback chord from its default action once a remap claims it", async () => {
