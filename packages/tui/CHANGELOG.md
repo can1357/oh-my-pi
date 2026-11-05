@@ -31,6 +31,7 @@
 - `CompactTranscriptBlock` (`chrome/transcript-container`): consecutive blocks whose `isTranscriptBlockCompact()` returns true draw without blank rows between them in the terminal (scrollback included) and as one gapless entry on a native (TSP) surface. Tool cards, read groups and `PresentedBlock` report it while a presenter draws them compact, and `FramedMessageComponent` forwards it from an extension renderer's component ([#17997](https://github.com/can1357/oh-my-pi/pull/17997) by [@materemias](https://github.com/materemias))
 
 ### Fixed
+- Fixed Markdown task lists dropping their checkboxes, so done (`- [x]`) and open (`- [ ]`) items looked the same in the transcript ([#16557](https://github.com/can1357/oh-my-pi/pull/16557) by [@mottopanikeiku](https://github.com/mottopanikeiku))
 - Tern's classic renderer draws inline images (table charts included) as Kitty Unicode placeholders, so text that replaces an image's cells removes the image instead of leaving a stale copy over the table while an answer streams or the pane resizes
 - The native composer's first frame shows the cached thinking level on the model chip (or effort chip) instead of the plain model icon until the session attaches
 - Clicking the popup of an enum setting with many values (Edit Mode, Session Tree Filter, Advisor Sync Backlog) on a native settings page opens its menu instead of doing nothing
