@@ -371,7 +371,12 @@ async function* normalizeCloudCodeBodyErrors<T>(
 			error instanceof AIError.StreamTimeoutError ||
 			error instanceof AIError.ProviderResponseError ||
 			error instanceof AIError.ProviderHttpError ||
-			(error instanceof Error && error.name === "AbortError")
+			(error instanceof Error && error.name === "AbortError") ||
+			// A complete but malformed SSE `data:` frame is a parser rejection,
+			// not a body-read drop: wrapping it as `incomplete-stream` would make
+			// the malformed response replay as a transient transport failure.
+			error instanceof SyntaxError ||
+			(error instanceof Error && error.name === "SyntaxError")
 		) {
 			throw error;
 		}
@@ -1113,7 +1118,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 									"retry your request",
 									parsedCredentials.email,
 								)
-							: isGoogleRegionRefusal(errorText)
+							: response.status === 400 && isGoogleRegionRefusal(errorText)
 								? formatGoogleRegionRefusalMessage()
 								: errorText;
 						throw new AIError.GeminiCliApiError(
@@ -1156,7 +1161,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 								const retryErrorText = await currentResponse.text();
 								throw new AIError.GeminiCliApiError(
 									`Cloud Code Assist API error (${currentResponse.status}): ${
-										isGoogleRegionRefusal(retryErrorText)
+										currentResponse.status === 400 && isGoogleRegionRefusal(retryErrorText)
 											? formatGoogleRegionRefusalMessage()
 											: retryErrorText
 									}`,

@@ -32,7 +32,7 @@ afterEach(() => {
 	else process.env.PI_AI_ANTIGRAVITY_VERSION = savedAntigravityVersion;
 });
 
-function endpointFromInput(input: Parameters<FetchImpl>[0]): string {
+function endpointFromInput(input: string | URL | Request): string {
 	const url = input instanceof Request ? input.url : input.toString();
 	return url.startsWith(ANTIGRAVITY_SANDBOX_ENDPOINT) ? ANTIGRAVITY_SANDBOX_ENDPOINT : ANTIGRAVITY_DAILY_ENDPOINT;
 }
@@ -125,7 +125,7 @@ describe("Antigravity mid-stream transport failures", () => {
 
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toBe(
-			"Connection to daily-cloudcode-pa.googleapis.com was reset by the network or proxy while the response was streaming. Check the proxy/VPN and retry.",
+			"Connection to daily-cloudcode-pa.googleapis.com was reset by the network or proxy. Check the proxy/VPN and retry.",
 		);
 		expect(AIError.is(result.errorId ?? 0, AIError.Flag.Transient)).toBe(true);
 		expect(requested).toEqual([ANTIGRAVITY_DAILY_ENDPOINT]);
@@ -172,6 +172,53 @@ describe("Antigravity mid-stream transport failures", () => {
 		// a reader suspended in an in-flight read otherwise keeps the proxied
 		// socket open.
 		expect(bodyCancelled).toBe(true);
+	});
+
+	it("does not wrap a complete but malformed SSE frame as a transport drop", async () => {
+		let calls = 0;
+		const fetchMock: FetchImpl = async input => {
+			calls += 1;
+			const endpoint = endpointFromInput(input);
+			return sse(
+				new Response("data: definitely-not-json\n\n", {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+				endpoint,
+			);
+		};
+
+		const result = await streamGoogleGeminiCli(antigravityModel, context, {
+			apiKey: API_KEY,
+			antigravityEndpointMode: "auto",
+			fetch: fetchMock,
+		}).result();
+
+		expect(calls).toBe(1);
+		expect(result.stopReason).toBe("error");
+		// The parser's SyntaxError keeps its own semantics instead of being
+		// replayed as a transient incomplete stream.
+		expect(result.errorMessage).not.toContain("closed before completion");
+		expect(AIError.is(result.errorId ?? 0, AIError.Flag.Transient)).toBe(false);
+	});
+
+	it("does not diagnose a non-400 response as a region refusal", async () => {
+		const fetchMock: FetchImpl = async () =>
+			new Response("User location is not supported for the API use.", {
+				status: 403,
+				headers: { "content-type": "text/plain" },
+			});
+
+		const result = await streamGoogleGeminiCli(antigravityModel, context, {
+			apiKey: API_KEY,
+			antigravityEndpointMode: "auto",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(403);
+		expect(result.errorMessage).not.toContain("PI_PROXY_GOOGLE_ANTIGRAVITY");
+		expect(result.errorMessage).not.toContain("egress region");
 	});
 
 	it("turns a region refusal into one actionable terminal error", async () => {

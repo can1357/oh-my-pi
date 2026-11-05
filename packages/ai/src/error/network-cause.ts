@@ -74,12 +74,13 @@ function kindOf(code: string | undefined, message: string | undefined): NetworkF
 	if (code !== undefined && TLS_CODE_PATTERN.test(code)) return "tls";
 	if (message !== undefined && TLS_TEXT_PATTERN.test(message)) return "tls";
 	if (message !== undefined && TLS_HANDSHAKE_TEXT_PATTERN.test(message)) return "tls";
-	if (code !== undefined && REFUSED_CODE_PATTERN.test(code)) return "refused";
-	if (message !== undefined && REFUSED_TEXT_PATTERN.test(message)) return "refused";
-	// Reset before offline/unreachable: a proxy can also surface a reset as
-	// "unable to connect" once its tunnel is already dead.
+	// Reset before refused/offline/unreachable: an explicit reset errno is
+	// decisive even when the wrapping text says "Unable to connect", and a proxy
+	// can surface a reset as a connect failure once its tunnel is already dead.
 	if (code !== undefined && RESET_CODE_PATTERN.test(code)) return "reset";
 	if (message !== undefined && RESET_TEXT_PATTERN.test(message)) return "reset";
+	if (code !== undefined && REFUSED_CODE_PATTERN.test(code)) return "refused";
+	if (message !== undefined && REFUSED_TEXT_PATTERN.test(message)) return "refused";
 	// Offline before unreachable: `getaddrinfo ETIMEOUT` matches both text patterns.
 	if (code !== undefined && OFFLINE_CODE_PATTERN.test(code)) return "offline";
 	if (message !== undefined && OFFLINE_TEXT_PATTERN.test(message)) return "offline";
@@ -218,7 +219,7 @@ export function networkFailureMessage(err: unknown, requestUrl?: string): string
 				? `TLS connection failed for ${host} during handshake. Check the proxy/VPN and whether the configured proxy speaks HTTP(S) rather than SOCKS.`
 				: `TLS certificate verification failed for ${host}${detail}. If you're behind a TLS-inspecting proxy, its CA may need to be trusted.`;
 		case "reset":
-			return `Connection to ${host} was reset by the network or proxy while the response was streaming. Check the proxy/VPN and retry.`;
+			return `Connection to ${host} was reset by the network or proxy. Check the proxy/VPN and retry.`;
 	}
 }
 

@@ -162,7 +162,7 @@ describe("classifyNetworkCause", () => {
 			expect(AIError.classifyNetworkCause(err)?.kind).toBe("reset");
 			const message = AIError.networkFailureMessage(err, "https://daily-cloudcode-pa.googleapis.com/v1internal");
 			expect(message).toBe(
-				"Connection to daily-cloudcode-pa.googleapis.com was reset by the network or proxy while the response was streaming. Check the proxy/VPN and retry.",
+				"Connection to daily-cloudcode-pa.googleapis.com was reset by the network or proxy. Check the proxy/VPN and retry.",
 			);
 			expect(message).not.toContain("verbose");
 			expect(AIError.isProviderRetryableError(new Error(message as string))).toBe(true);
@@ -175,6 +175,15 @@ describe("classifyNetworkCause", () => {
 		const wrapped = new TypeError("fetch failed", { cause: new AggregateError([inner]) });
 
 		expect(AIError.classifyNetworkCause(wrapped)?.kind).toBe("reset");
+	});
+
+	it("gives an explicit reset errno precedence over generic refusal text", () => {
+		const err = Object.assign(new Error("Unable to connect: read ECONNRESET"), { code: "ECONNRESET" });
+
+		expect(AIError.classifyNetworkCause(err)?.kind).toBe("reset");
+		expect(AIError.networkFailureMessage(err, "https://daily-cloudcode-pa.googleapis.com")).toContain(
+			"was reset by the network or proxy",
+		);
 	});
 
 	it("formats a rejected stream as the network sentence instead of the request dump", async () => {
@@ -192,7 +201,7 @@ describe("classifyNetworkCause", () => {
 		});
 
 		expect(message).toBe(
-			"Connection to daily-cloudcode-pa.googleapis.com was reset by the network or proxy while the response was streaming. Check the proxy/VPN and retry.",
+			"Connection to daily-cloudcode-pa.googleapis.com was reset by the network or proxy. Check the proxy/VPN and retry.",
 		);
 		expect(message).not.toContain("raw-http-request");
 	});

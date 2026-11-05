@@ -1834,11 +1834,13 @@ export class TurnRecovery {
 		// socket-close wording is now only on its `cause`: defer the fallback
 		// chain so the one allowed same-model replay happens first.
 		const errorMessage = message.errorMessage ?? "";
-		if (
-			!isUnexpectedSocketCloseMessage(errorMessage) &&
-			!ANTIGRAVITY_TRANSPORT_DROP_RE.test(errorMessage) &&
-			!this.#isAntigravityThinkingStreamClose(message)
-		) {
+		// The Antigravity-specific matcher must never change other providers'
+		// fallback ordering: their first-attempt drops keep the generic
+		// `isUnexpectedSocketCloseMessage()` path only.
+		const antigravityDrop =
+			message.provider === "google-antigravity" &&
+			(ANTIGRAVITY_TRANSPORT_DROP_RE.test(errorMessage) || this.#isAntigravityThinkingStreamClose(message));
+		if (!isUnexpectedSocketCloseMessage(errorMessage) && !antigravityDrop) {
 			return false;
 		}
 		return message.content.some(

@@ -4281,7 +4281,7 @@ describe("AgentSession retry delay cap", () => {
 		await expectThinkingStreamCloseRetryCap({
 			model,
 			errorMessage:
-				"Connection to daily-cloudcode-pa.googleapis.com was reset by the network or proxy while the response was streaming. Check the proxy/VPN and retry.",
+				"Connection to daily-cloudcode-pa.googleapis.com was reset by the network or proxy. Check the proxy/VPN and retry.",
 			prompt: "Trigger Antigravity reset sentence after reasoning",
 		});
 	});
@@ -4362,6 +4362,101 @@ describe("AgentSession retry delay cap", () => {
 		// One initial attempt plus the full `retry.maxRetries: 3` budget.
 		expect(calls).toBe(4);
 		expect(session.isRetrying).toBe(false);
+	});
+
+	it("does not defer another provider's fallback for an Antigravity-only drop message", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled anthropic/openai test models to exist");
+		}
+		authStorage.keys.setRuntime(primaryModel.provider, "anthropic-test-key");
+		authStorage.keys.setRuntime(fallbackModel.provider, "openai-test-key");
+
+		let primaryCalls = 0;
+		let fallbackCalls = 0;
+		const usage: AssistantMessage["usage"] = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: requestedModel => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					if (requestedModel.provider === fallbackModel.provider) {
+						fallbackCalls++;
+						const text: TextContent = { type: "text", text: "Recovered on the fallback" };
+						const message: AssistantMessage = {
+							role: "assistant",
+							content: [text],
+							api: requestedModel.api,
+							provider: requestedModel.provider,
+							model: requestedModel.id,
+							usage,
+							stopReason: "stop",
+							timestamp: Date.now(),
+						};
+						stream.push({ type: "start", partial: message });
+						stream.push({ type: "text_start", contentIndex: 0, partial: message });
+						stream.push({ type: "text_delta", contentIndex: 0, delta: text.text, partial: message });
+						stream.push({ type: "text_end", contentIndex: 0, content: text.text, partial: message });
+						stream.push({ type: "done", reason: "stop", message });
+						return;
+					}
+					primaryCalls++;
+					const thinking: ThinkingContent = { type: "thinking", thinking: "partial reasoning" };
+					const message: AssistantMessage = {
+						role: "assistant",
+						content: [thinking],
+						api: requestedModel.api,
+						provider: requestedModel.provider,
+						model: requestedModel.id,
+						usage,
+						stopReason: "error",
+						errorMessage: "Cloud Code Assist stream closed before completion",
+						errorId: AIError.create(AIError.Flag.Transient),
+						timestamp: Date.now(),
+					};
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "thinking_start", contentIndex: 0, partial: message });
+					stream.push({ type: "thinking_delta", contentIndex: 0, delta: thinking.thinking, partial: message });
+					stream.push({ type: "thinking_end", contentIndex: 0, content: thinking.thinking, partial: message });
+					stream.push({ type: "error", reason: "error", error: message });
+				});
+				return stream;
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 10,
+			"retry.modelFallback": true,
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		mockSchedulerWaitWithClock();
+		await session.prompt("Trigger a non-Antigravity drop with an Antigravity-shaped message");
+		await session.waitForIdle();
+
+		// The Antigravity matcher is gated on google-antigravity: another
+		// provider's first failure consults the chain immediately.
+		expect(primaryCalls).toBe(1);
+		expect(fallbackCalls).toBe(1);
+		expect(session.model?.id).toBe(fallbackModel.id);
 	});
 
 	it("hands Antigravity's bounded thinking close to the fallback chain after one replay", async () => {
