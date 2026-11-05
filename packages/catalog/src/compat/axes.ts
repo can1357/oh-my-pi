@@ -126,6 +126,9 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"responses-tool-choice-auto": wire("responsesToolChoiceAuto", ["request"]),
 	"routing-session-lock": wire("routingSessionLock", ["request"]),
 	"google-thinking": wire("googleThinking", ["request"], "scalar", ["level", "level-medium"]),
+	"google-omit-sampling": wire("googleOmitSampling", ["request"]),
+	"google-pin-max-output-tokens": wire("googlePinMaxOutputTokens", ["request"]),
+	"google-native-replay": wire("googleNativeReplay", ["request"]),
 	// ── wire: OpenAI-compatible surfaces (chat completions + Responses) ──
 	"allows-synthetic-reasoning-content-for-tool-calls": wire("allowsSyntheticReasoningContentForToolCalls", OAI),
 	"always-send-max-tokens": wire("alwaysSendMaxTokens", OAI),

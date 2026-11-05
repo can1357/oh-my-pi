@@ -145,7 +145,7 @@ import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { PythonResult } from "../eval/py/executor";
 import { EVAL_STATE_CONTEXT_TYPE, formatEvalStateContext, isEvalStateContext } from "../eval/state";
 import { WorkPoolRegistry } from "../task/workpool";
-import { type BashPtyOptions, type BashResult, releaseShellSessions } from "../exec/bash-executor";
+import { type BashResult, releaseShellSessions } from "../exec/bash-executor";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool } from "../extensibility/custom-tools/types";
@@ -348,7 +348,7 @@ import {
 	type AsyncResultEntry,
 	buildAsyncResultBatchMessage,
 } from "./async-job-delivery";
-import { BashRunner, type BashRunnerHost } from "./bash-runner";
+import { type BashExecuteOptions, BashRunner, type BashRunnerHost } from "./bash-runner";
 import {
 	checkpointStartedAtFromEntry,
 	completedRewindFromEntry,
@@ -384,7 +384,7 @@ import {
 import { COST_GATE_NOTICE_SOURCE, type CostCapRefusal, CostGate, type CostGateApi } from "./cost-gate";
 import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
 import { isDateCwdReminderControl } from "./date-cwd-reminder";
-import { EvalRunner, type EvalRunnerHost } from "./eval-runner";
+import { EvalRunner, type EvalRunnerHost, type PythonExecuteOptions } from "./eval-runner";
 import {
 	collectPendingToolCalls,
 	createInterruptedToolResults,
@@ -709,6 +709,7 @@ const noOpUIContext: ExtensionUIContext = {
 	notify: () => {},
 	onTerminalInput: () => () => {},
 	rerenderMessage: () => {},
+	refreshTranscript: () => {},
 	getLinkClicksAvailable: () => false,
 	setStatus: () => {},
 	setWorkingMessage: () => {},
@@ -12928,12 +12929,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * @param onChunk Optional streaming callback for output
 	 * @param options.excludeFromContext If true, command output won't be sent to LLM (!! prefix)
 	 * @param options.useUserShell If true, allow caller to request configured user-shell routing
+	 * @param options.onRecorded Receives the `bashExecution` message the run is recorded as, once it is persisted or queued; a throw is logged
 	 */
-	executeBash(
-		command: string,
-		onChunk?: (chunk: string) => void,
-		options?: { excludeFromContext?: boolean; useUserShell?: boolean; pty?: BashPtyOptions },
-	): Promise<BashResult> {
+	executeBash(command: string, onChunk?: (chunk: string) => void, options?: BashExecuteOptions): Promise<BashResult> {
 		return this.#bash.executeBash(command, onChunk, options);
 	}
 
@@ -12967,11 +12965,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * @param code The Python code to execute
 	 * @param onChunk Optional streaming callback for output
 	 * @param options.excludeFromContext If true, execution won't be sent to LLM ($$ prefix)
+	 * @param options.onRecorded Receives the `pythonExecution` message the cell is recorded as, once it is persisted or queued; a throw is logged
 	 */
 	executePython(
 		code: string,
 		onChunk?: (chunk: string) => void,
-		options?: { excludeFromContext?: boolean },
+		options?: PythonExecuteOptions,
 	): Promise<PythonResult> {
 		return this.#eval.executePython(code, onChunk, options);
 	}

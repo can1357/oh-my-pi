@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import type { TspText } from "@oh-my-pi/pi-wire";
 import { ReadToolGroupComponent } from "../src/chat/read-tool-group";
+import { setTranscriptPresenters } from "../src/chat/transcript-presentation";
 import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
 import { getThemeByName, initTheme, type Theme } from "../src/theme";
 import { globToolRenderer } from "../src/tools/glob";
@@ -78,6 +79,12 @@ describe("grep native view", () => {
 		expect(files(small)).toHaveLength(2);
 		expect(files(full)).toHaveLength(3);
 		expect(small.inline).toBe(true);
+	});
+
+	it("names the scope before the counts, as the terminal card does", () => {
+		const scoped = { ...result, details: { ...result.details, scopePath: "src" } };
+		const view = grepToolRenderer.describeResult(scoped, collapsed, { pattern: "hit" });
+		expect((view.tool?.meta ?? []).map(plain)).toEqual(["in src", "4 matches · 3 files"]);
 	});
 
 	it("keeps non-adjacent match lines in one block numbered by their real lines", () => {
@@ -183,6 +190,200 @@ describe("read group tool node", () => {
 		expect(codeProps(open.c).map(p => p.text)).toEqual(["1\n2\n3\n4\n5"]);
 	});
 
+	it("sends a mixed group's full reads in whole once their subset is expanded", () => {
+		// Regression guard: expanding the `full` subset beside a compact read keeping its previews clamped.
+		setTranscriptPresenters([block => (block.type === "toolCall" && block.id === "b" ? "compact" : undefined)]);
+		try {
+			const group = new ReadToolGroupComponent({ showContentPreview: true });
+			for (const id of ["a", "b"]) {
+				group.updateArgs({ path: `src/${id}.ts` }, id);
+				group.updateResult(
+					{
+						content: [{ type: "text", text: "x" }],
+						details: { displayContent: { text: "1\n2\n3\n4\n5", startLine: 1 } },
+					},
+					false,
+					id,
+				);
+			}
+			const full = (node: NativeNode) => (node.c ?? []).filter(isNode).find(n => n.key === "full");
+			const before = full(group.describe(toolCx));
+			expect(codeProps(before?.c).map(p => p.text)).toEqual(["1\n2\n3"]);
+
+			group.handleNativeEvent({ type: "toggle", key: "full", collapsed: false });
+			const open = full(group.describe(toolCx));
+			expect(open?.p).toMatchObject({ collapsed: false });
+			expect(codeProps(open?.c).map(p => p.text)).toEqual(["1\n2\n3\n4\n5"]);
+		} finally {
+			setTranscriptPresenters([]);
+		}
+	});
+
+	it("reports a read's late-result presentation change on refresh, measured against what it last drew", () => {
+		// Regression guard: the group resolving the new answer when the result landed, so the
+		// refresh saw no change and a retired compact row stayed in terminal scrollback.
+		setTranscriptPresenters([
+			block =>
+				block.type !== "toolCall"
+					? undefined
+					: JSON.stringify(block.result?.content ?? []).includes("LATE")
+						? "hidden"
+						: { compact: { label: "ROW" } },
+		]);
+		try {
+			const group = new ReadToolGroupComponent();
+			group.updateArgs({ path: "src/a.ts" }, "a");
+			expect(group.render(80).join("\n")).toContain("ROW");
+
+			group.updateResult({ content: [{ type: "text", text: "LATE" }] }, false, "a");
+			expect(group.refreshTranscriptPresentation(new Set(["a"]))).toBe(true);
+			expect(group.render(80).join("\n")).not.toContain("ROW");
+		} finally {
+			setTranscriptPresenters([]);
+		}
+	});
+
+	/** A group of reads `ids`, each previewing five lines. */
+	function previewGroup(ids: readonly string[], showContentPreview = true): ReadToolGroupComponent {
+		const group = new ReadToolGroupComponent({ showContentPreview });
+		for (const id of ids) {
+			group.updateArgs({ path: `src/${id}.ts` }, id);
+			group.updateResult(
+				{
+					content: [{ type: "text", text: "x" }],
+					details: { displayContent: { text: "1\n2\n3\n4\n5", startLine: 1 } },
+				},
+				false,
+				id,
+			);
+		}
+		return group;
+	}
+
+	it("opens one compact read in whole, leaving its siblings clamped, and keeps it open across refreshes", () => {
+		// Regression guard: an opened read's preview staying clamped by group-wide state, and a later
+		// presenter refresh folding it back to its compact row.
+		setTranscriptPresenters([block => (block.type === "toolCall" && block.id !== "c" ? "compact" : undefined)]);
+		try {
+			const group = previewGroup(["a", "b", "c"]);
+			group.describe(toolCx);
+			group.handleNativeEvent({ type: "toggle", key: "ca", collapsed: false });
+			const texts = () =>
+				codeProps((group.describe(toolCx).c ?? []).filter(isNode).find(n => n.key === "full")?.c).map(p => p.text);
+			expect(texts()).toEqual(["1\n2\n3\n4\n5", "1\n2\n3"]);
+
+			group.refreshTranscriptPresentation();
+			expect(texts()).toEqual(["1\n2\n3\n4\n5", "1\n2\n3"]);
+		} finally {
+			setTranscriptPresenters([]);
+		}
+	});
+
+	it("routes a lone compact read's toggle to that read, not to the hidden one beside it", () => {
+		// Regression guard: the lone visible child losing its key, its toggle read as the group's
+		// Ctrl+O and revealing the hidden read.
+		setTranscriptPresenters([
+			block => (block.type !== "toolCall" ? undefined : block.id === "a" ? "hidden" : "compact"),
+		]);
+		try {
+			const group = previewGroup(["a", "b"]);
+			const root = group.describe(toolCx);
+			const child = (root.c ?? []).filter(isNode).find(n => n.key === "cb");
+			expect(child).toBeDefined();
+			group.handleNativeEvent({ type: "toggle", key: "cb", collapsed: false });
+			expect(JSON.stringify(group.describe(toolCx))).not.toContain("src/a.ts");
+		} finally {
+			setTranscriptPresenters([]);
+		}
+	});
+
+	it("draws only the reads a refresh left full, even when the group had not drawn yet", () => {
+		// Regression guard: an undrawn group's refresh reporting no change and skipping the rebuild,
+		// so its first draw still listed the read a presenter now hides.
+		const group = previewGroup(["a", "b"], false);
+		setTranscriptPresenters([block => (block.type === "toolCall" && block.id === "a" ? "hidden" : undefined)]);
+		try {
+			group.refreshTranscriptPresentation();
+			const drawn = Bun.stripANSI(group.render(100).join("\n"));
+			expect(drawn).not.toContain("a.ts");
+			expect(drawn).toContain("b.ts");
+		} finally {
+			setTranscriptPresenters([]);
+		}
+	});
+
+	it("keeps a preview the user opened on a terminal without the tool kind full across refreshes", () => {
+		// Regression guard: the fallback card's `p<id>` toggle opening only the preview, so a later
+		// presenter refresh compacted the read the user had just opened.
+		let compact = false;
+		setTranscriptPresenters([block => (block.type === "toolCall" && compact ? "compact" : undefined)]);
+		try {
+			const group = previewGroup(["a"]);
+			group.describe();
+			group.handleNativeEvent({ type: "toggle", key: "pa", collapsed: false });
+			compact = true;
+			group.refreshTranscriptPresentation(new Set(["a"]));
+			const root = group.describe();
+			expect(collect([root], n => n.key === "ca")).toEqual([]);
+			const previews = collect([root], n => role(n) === "omp.tool.read.preview");
+			expect(previews.map(preview => preview.p)).toEqual([expect.objectContaining({ collapsed: false })]);
+		} finally {
+			setTranscriptPresenters([]);
+		}
+	});
+
+	it("keeps a Markdown read the user opened full across refreshes", () => {
+		// Regression guard: the Markdown preview card's toggle arriving unkeyed and being dropped, so a
+		// later presenter refresh compacted the read the user had just opened.
+		let compact = false;
+		setTranscriptPresenters([block => (block.type === "toolCall" && compact ? "compact" : undefined)]);
+		try {
+			const group = new ReadToolGroupComponent({ showContentPreview: true });
+			group.updateArgs({ path: "src/a.md" }, "a");
+			group.updateResult(
+				{
+					content: [{ type: "text", text: "# A\n\none\n\ntwo\n\nthree" }],
+					details: { contentType: "text/markdown" },
+				},
+				false,
+				"a",
+			);
+			const card = collect([group.describe(toolCx)], n => n.k === "card")[0];
+			expect(card?.key).toBe("ma");
+			group.handleNativeEvent({ type: "toggle", key: `${card?.key}`, collapsed: false });
+			compact = true;
+			group.refreshTranscriptPresentation(new Set(["a"]));
+			const root = group.describe(toolCx);
+			expect(collect([root], n => n.key === "ca")).toEqual([]);
+			expect(collect([root], n => n.k === "card")[0]?.p).toMatchObject({ collapsed: false });
+		} finally {
+			setTranscriptPresenters([]);
+		}
+	});
+
+	it("opens a read joining a group whose full reads the user opened", () => {
+		// Regression guard: a late parallel read clamped beside the unclamped reads of an open card.
+		setTranscriptPresenters([block => (block.type === "toolCall" && block.id === "a" ? "compact" : undefined)]);
+		try {
+			const group = previewGroup(["a", "b"]);
+			group.describe(toolCx);
+			group.handleNativeEvent({ type: "toggle", key: "full", collapsed: false });
+			group.updateArgs({ path: "src/c.ts" }, "c");
+			group.updateResult(
+				{
+					content: [{ type: "text", text: "x" }],
+					details: { displayContent: { text: "1\n2\n3\n4\n5", startLine: 1 } },
+				},
+				false,
+				"c",
+			);
+			const full = (group.describe(toolCx).c ?? []).filter(isNode).find(n => n.key === "full");
+			expect(codeProps(full?.c).map(p => p.text)).toEqual(["1\n2\n3\n4\n5", "1\n2\n3\n4\n5"]);
+		} finally {
+			setTranscriptPresenters([]);
+		}
+	});
+
 	it("clamps Markdown previews after parsing full documents for each grouped read", () => {
 		const group = new ReadToolGroupComponent({ showContentPreview: true });
 		const table = "# Overview\n\n\n| A | B |\n|---|---|\n| one | two |";
@@ -244,6 +445,31 @@ describe("glob native view", () => {
 describe("lsp native view", () => {
 	const args = { action: "diagnostics" as const, file: "src/frame.rs" };
 
+	it("previews each reference's source line, and lists one past the context limit by position", () => {
+		const text = [
+			"Found 3 reference(s):",
+			"  src/a.ts:3:7",
+			"    3: const claims = validate(token);",
+			"  src/a.ts:3:20",
+			"    3: const claims = validate(token);",
+			"  ... 1 additional reference(s) shown without context",
+			"  src/a.ts:9:1",
+		].join("\n");
+		const view = lspToolRenderer.describeResult({ content: [{ type: "text", text }] }, collapsed, {
+			action: "references",
+		});
+		// Two references on one line share its source row.
+		expect(codeProps(view?.body)).toEqual([
+			expect.objectContaining({
+				text: "const claims = validate(token);",
+				start: 3,
+				marks: [{ line: 3, tone: "accent" }],
+			}),
+		]);
+		const texts = collect(view?.body, n => n.k === "text").map(n => (n.k === "text" ? plain(n.p?.spans) : ""));
+		expect(texts).toContain("9:1");
+	});
+
 	it("shows a server failure as an error row, never as no issues", () => {
 		const view = lspToolRenderer.describeResult(
 			{
@@ -274,6 +500,28 @@ describe("lsp native view", () => {
 		expect(meta).toContain("1 unverified file");
 		expect(meta).not.toContain("No issues");
 		expect(collect(view?.body, n => role(n) === "omp.tool.diagnostic")).toHaveLength(1);
+	});
+
+	it("shows a partial server failure as a warning, never as no issues", () => {
+		const view = lspToolRenderer.describeResult(
+			{
+				content: [{ type: "text", text: "OK\n⚠ src/frame.rs: some servers failed (rust-analyzer)" }],
+				details: { action: "diagnostics", success: true },
+			},
+			collapsed,
+			args,
+		);
+		expect(view?.tone).toBe("warning");
+		expect((view?.tool?.meta ?? []).map(plain).join(" ")).not.toContain("No issues");
+		expect(collect(view?.body, n => role(n) === "omp.tool.diagnostic")).toHaveLength(1);
+
+		const clean = lspToolRenderer.describeResult(
+			{ content: [{ type: "text", text: "OK" }], details: { action: "diagnostics", success: true } },
+			collapsed,
+			args,
+		);
+		expect(clean?.tone).toBeUndefined();
+		expect((clean?.tool?.meta ?? []).map(plain)).toEqual(["No issues"]);
 	});
 
 	it("parses grouped diagnostics into file:line:col rows and frames them", () => {

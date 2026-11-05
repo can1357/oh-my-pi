@@ -891,7 +891,7 @@ describe("CollabController", () => {
 		state.transitionWaited = waiting.resolve;
 		controller.autoStart();
 		await waiting.promise;
-		ctx.collabGuest = new CollabGuestLink(ctx);
+		Object.assign(ctx, { collabGuest: new CollabGuestLink(ctx) });
 		state.transition = undefined;
 		gate.resolve();
 		await controller.idle();

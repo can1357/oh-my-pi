@@ -477,7 +477,7 @@ export function groupLineIndicesByBlank(rawLines: readonly string[]): number[][]
 // =============================================================================
 
 /** A code-frame row split after its rule: the gutter (match marker, line number, rule) and the source line. */
-interface CodeFrameRow {
+export interface CodeFrameRow {
 	gutter: string;
 	source: string;
 }
@@ -488,7 +488,7 @@ interface CodeFrameRow {
  * string or comment keeps its colors. Without a language the sources take
  * `color` too.
  */
-function renderCodeFrameRun(
+export function renderCodeFrameRun(
 	rows: readonly CodeFrameRow[],
 	lang: string | undefined,
 	color: ThemeColor,
@@ -593,6 +593,24 @@ export function createCodeFrameStyler(
 		});
 		return styled[index];
 	};
+}
+
+// =============================================================================
+// Search card headers (TUI renderers)
+// =============================================================================
+
+/**
+ * Search header subject, `pattern in scope`, with `in` dim so the pattern and
+ * the scope read as two parts of one subject. Counts follow it as status meta.
+ */
+export function formatScopedSubject(
+	subject: string | undefined,
+	scope: string | undefined,
+	theme: Theme,
+): string | undefined {
+	if (!scope) return subject;
+	const keyword = theme.fg("dim", "in");
+	return subject ? `${subject} ${keyword} ${scope}` : `${keyword} ${scope}`;
 }
 
 // =============================================================================
