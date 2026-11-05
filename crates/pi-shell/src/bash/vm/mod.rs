@@ -2093,7 +2093,15 @@ impl Shell {
 				}
 			}
 			if let Some(ignored) = trap {
-				if !ignored {
+				// A program `exec` put in the vproc's place took the shell's
+				// place too: bash's trap went with the shell it replaced, so
+				// the program gets the signal (above) and no action runs here.
+				let replaced = self.procs[i].frames.iter().any(|f| {
+					f.scratch
+						.as_ref()
+						.is_some_and(|sc| sc.exec.as_ref().is_some_and(|e| e.exec_as.is_some()))
+				});
+				if !ignored && !replaced {
 					let process = &mut self.procs[i];
 					process.pending_traps = process.pending_traps.with(sig);
 					if !process.waiting_foreground() {
@@ -2432,7 +2440,6 @@ impl Vproc {
 			out: VecDeque::new(),
 			blocked: None,
 			pending_traps: crate::bash::signal::SigSet::EMPTY,
-			held_traps: crate::bash::signal::SigSet::EMPTY,
 			stopped: false,
 			transient,
 			jobs: proc::JobTable::default(),

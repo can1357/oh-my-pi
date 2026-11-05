@@ -82,33 +82,15 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				None => unblock(k, cx, vp),
 			}
 		}
-		// bash `run_pending_traps` runs the signals pending when it starts
-		// one after the other, and returns at once while one of their
-		// actions runs (`running_trap`), so they never interleave: those
-		// are held ([`Vproc::held_traps`]) until the last action ends. A
-		// signal that arrives WHILE an action runs is not in that set and
-		// interrupts it, as it interrupts any other command. A vproc with
-		// no frames left is ending: its pending traps go with it.
-		let in_trap = vp
-			.frames
-			.iter()
-			.any(|f| matches!(f.kind, FrameKind::Script { what: ScriptKind::Trap { .. }, .. }));
-		if !in_trap && vp.held_traps != crate::bash::signal::SigSet::EMPTY {
-			for sig in vp.held_traps.iter() {
-				vp.pending_traps = vp.pending_traps.with(sig);
-			}
-			vp.held_traps = crate::bash::signal::SigSet::EMPTY;
-		}
-		if vp.pending_traps != crate::bash::signal::SigSet::EMPTY
-			&& !vp.waiting_foreground()
-			&& !vp.frames.is_empty()
-		{
-			// bash `run_pending_traps`: in signal-number order.
-			let platform = k.engine.config().platform;
-			let pending = vp
-				.pending_traps
-				.iter()
-				.min_by_key(|sig| sig.number(platform));
+		if vp.pending_traps != crate::bash::signal::SigSet::EMPTY && !vp.waiting_foreground() {
+			let pending = vp.pending_traps.iter().find(|sig| {
+				!vp.frames.iter().any(|frame| {
+					matches!(frame.kind, FrameKind::Script {
+						what: ScriptKind::Trap { key: TrapKey::Signal(active), .. },
+						..
+					} if active == *sig)
+				})
+			});
 			if let Some(sig) = pending {
 				vp.pending_traps = vp.pending_traps.without(sig);
 				// One run per finished child (bash `run_sigchld_trap`): the next
@@ -120,25 +102,7 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 					}
 				}
 				if start_trap(k, vp, cx, TrapKey::Signal(sig)) {
-					// The rest of this run of the loop waits for the action;
-					// a nested action holds what its caller held too.
-					for held in vp.pending_traps.iter() {
-						vp.held_traps = vp.held_traps.with(held);
-					}
-					vp.pending_traps = crate::bash::signal::SigSet::EMPTY;
 					continue;
-				}
-				// No action ran: the signal is not lost. Either its trap is
-				// gone, and it takes the disposition it has now, or the
-				// action could not start yet and it waits with the held set.
-				match trap_gone(k, vp, cx, sig) {
-					true if sig.default_action() == crate::bash::signal::DefaultAction::Terminate => {
-						let status = sig.exit_status(platform);
-						exit_shell(k, vp, cx, status);
-						continue;
-					},
-					true => {},
-					false => vp.held_traps = vp.held_traps.with(sig),
 				}
 			}
 		}
@@ -352,18 +316,6 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 					)
 				});
 				if let Some(i) = target {
-					// bash: a `return` in a trap action longjmps out of
-					// `run_pending_traps` (`sh_longjmp (return_catch, 1)`). That
-					// loop had already cleared `catch_flag` and each signal's
-					// pending flag as it took it, so the actions it never
-					// reached do not run at all: only a new signal arms it
-					// again.
-					if vp.frames[i..].iter().any(|f| {
-						matches!(f.kind, FrameKind::Script { what: ScriptKind::Trap { .. }, .. })
-					}) {
-						vp.pending_traps = crate::bash::signal::SigSet::EMPTY;
-						vp.held_traps = crate::bash::signal::SigSet::EMPTY;
-					}
 					if vp.frames[i].kind == FrameKind::NoFork || !return_trap(k, vp, cx, i) {
 						unwind(&mut k.root, cx.store, vp, i);
 					}
@@ -557,10 +509,6 @@ fn errexit_on(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 /// `exit` inside a function runs the root's trap first, above the
 /// function's frames: bash's trap sees its `FUNCNAME` and locals.
 fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
-	// A shell that exits runs its EXIT trap only: bash never runs the traps
-	// still pending when `exit` is reached (inside a trap or not).
-	vp.pending_traps = crate::bash::signal::SigSet::EMPTY;
-	vp.held_traps = crate::bash::signal::SigSet::EMPTY;
 	let in_exit_trap = vp.frames.iter().any(|f| {
 		matches!(f.kind, FrameKind::Script { what: ScriptKind::Trap { key: TrapKey::Exit, .. }, .. })
 	});
@@ -602,30 +550,6 @@ fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 
 fn top_frame(vp: &mut Vproc) -> &mut Frame {
 	vp.frames.last_mut().expect("ops run in a frame")
-}
-
-/// How deep a signal's action may nest in itself (bash's `evalnest_max`
-/// default, which bounds the same recursion).
-const TRAP_NEST_MAX: u32 = 128;
-
-/// Whether `sig` has no action of its own any more (the vproc's trap was
-/// removed or set to ignore while it was pending): it then takes the
-/// disposition it has now, as bash's `run_pending_traps` does when it
-/// finds `DEFAULT_SIG` in `trap_list` and resends the signal to itself.
-fn trap_gone(
-	k: &mut Kernel,
-	vp: &Vproc,
-	cx: &mut Cx<'_>,
-	sig: crate::bash::signal::Signal,
-) -> bool {
-	match state::record(cx.store, vp, Key::Trap(TrapKey::Signal(sig))) {
-		Ok(Some(Record::Trap { action, .. })) => action.is_empty(),
-		Ok(_) => true,
-		Err(err) => {
-			k.fail(err);
-			false
-		},
-	}
 }
 
 /// Start the next run or finish the current one; `false` when idle.
@@ -3562,21 +3486,14 @@ pub fn start_trap(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, key: TrapKey)
 			}
 		}
 	}
-	// A pseudo-trap does not run inside its own action, and a function
-	// called from the DEBUG trap loses the RETURN trap (bash's
-	// `execute_function`). A signal's action does nest in itself: bash's
-	// `run_pending_traps` refuses that only for `SIGWINCH`, and bounds the
-	// depth with `evalnest_max` instead.
-	let nests = matches!(key, TrapKey::Signal(sig) if sig != crate::bash::signal::Signal::Winch);
+	// No trap runs inside its own action; a function called from the
+	// DEBUG trap loses the RETURN trap (bash's `execute_function`).
 	if vp.trap_frames != 0
-		&& (nests && vp.trap_frames >= TRAP_NEST_MAX
-			|| !nests
-				&& vp.frames.iter().any(|f| {
-					matches!(f.kind,
+		&& vp.frames.iter().any(|f| {
+			matches!(f.kind,
 		FrameKind::Script { what: ScriptKind::Trap { key: active, .. }, .. }
 			if active == key || (key == TrapKey::Return && active == TrapKey::Debug))
-				}))
-	{
+		}) {
 		return false;
 	}
 	let (action, trap_mode) = match state::record(cx.store, vp, Key::Trap(key)) {
