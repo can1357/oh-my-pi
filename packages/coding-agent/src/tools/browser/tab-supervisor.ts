@@ -1896,6 +1896,7 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 		safeDir,
 		uploadDir,
 		page,
+		viewport: opts.viewport,
 		dialogs: opts.dialogs,
 		allowedDomains: opts.allowedDomains,
 		initScripts: opts.initScripts,

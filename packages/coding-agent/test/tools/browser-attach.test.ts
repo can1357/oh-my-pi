@@ -617,7 +617,7 @@ describe("pickElectronTarget", () => {
 	);
 
 	test.skipIf(!CHROMIUM_AVAILABLE)(
-		"reports a connected browser's own viewport on open and observe",
+		"reports a connected browser's own viewport on open and observe, and applies one an open asks for",
 		async () => {
 			const exe = await ensureChromiumExecutable();
 			if (!exe) throw new Error("Expected a Chromium executable");
@@ -644,12 +644,16 @@ describe("pickElectronTarget", () => {
 			const name = `connected-viewport-${crypto.randomUUID()}`;
 			try {
 				await waitForCdp(`http://127.0.0.1:${port}`, 15_000);
-				const opened = await invoke({
-					action: "open",
-					name,
-					url: "data:text/html,<title>Viewport</title>",
-					app: { cdp_url: `http://127.0.0.1:${port}` },
-				});
+				const app = { cdp_url: `http://127.0.0.1:${port}` };
+				const viewport = { width: 390, height: 844, scale: 1 };
+				// An open that fails after adopting the page (a file where the downloads folder goes) leaves no size
+				// behind. No `url` after it: Chrome drops a leftover size when the page navigates.
+				const notAFolder = path.join(root, "not-a-folder");
+				await Bun.write(notAFolder, "");
+				expect(
+					await rejectionOf(invoke({ action: "open", name, app, viewport, downloads: notAFolder })),
+				).toBeInstanceOf(Error);
+				const opened = await invoke({ action: "open", name, app });
 				const result = await invoke({
 					action: "run",
 					name,
@@ -666,8 +670,19 @@ describe("pickElectronTarget", () => {
 				// The window's chrome eats into --window-size differently per OS, so pin only the forced
 				// pixel ratio; it differs from DEFAULT_VIEWPORT's 1.25, which main reported here.
 				expect(window).toMatchObject({ deviceScaleFactor: 2 });
+				expect(window).not.toMatchObject({ width: viewport.width, height: viewport.height });
 				expect(observed).toEqual(window);
 				expect(opened.details).toMatchObject({ viewport: window });
+				await invoke({ action: "close", name });
+				const sized = await invoke({ action: "open", name, app, viewport });
+				const asked = { width: 390, height: 844, deviceScaleFactor: 1 };
+				expect(sized.details).toMatchObject({ viewport: asked });
+				const page = await invoke({
+					action: "run",
+					name,
+					code: "return await tab.evaluate(() => ({ width: innerWidth, height: innerHeight, deviceScaleFactor: devicePixelRatio }));",
+				});
+				expect(page.details).toMatchObject({ value: asked });
 			} finally {
 				await invoke({ action: "close", name }).catch(() => {});
 				child.kill();
