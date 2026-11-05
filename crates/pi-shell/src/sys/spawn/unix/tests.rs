@@ -71,11 +71,17 @@ fn the_unlisted_descriptor_check_reaches_above_both_lowered_limits() {
 /// limits to 64, close the host's descriptors (`bounded_only`: through the
 /// bounded check alone, else through `close_descriptors_except`), and exit
 /// 0 when 600 is closed, 1 when it is not, 2 or 3 when the setup failed.
+///
+/// The bound is taken again in the child, from the limits as lowered and
+/// the ceiling the parent read, because that is the host this guards:
+/// one whose limits were already this low when the spawn read them. Only
+/// the reading of the ceiling, which opens a file, stays in the parent.
 fn closer_reaches_600(bounded_only: bool) -> i32 {
 	let file = std::fs::File::open("/dev/null").unwrap();
 	let source = std::os::fd::AsRawFd::as_raw_fd(&file);
 	// Before the fork, as the spawn path reads it.
 	let mut plan = super::ClosePlan::new();
+	let ceiling = super::kernel_descriptor_ceiling();
 	// SAFETY: the forked child calls only async-signal-safe functions
 	// (fcntl, getrlimit, setrlimit, close, close_range, _exit) and the
 	// closing under test, which is written for a forked child, then exits.
@@ -97,6 +103,7 @@ fn closer_reaches_600(bounded_only: bool) -> i32 {
 			if high < 600 || libc::setrlimit(libc::RLIMIT_NOFILE, &raw const lim) != 0 {
 				libc::_exit(2);
 			}
+			plan.bound = super::sweep_bound(ceiling, Some(64), Some(64));
 			let keep = [0, 1, 2];
 			if bounded_only {
 				for fd in 0..plan.bound {
