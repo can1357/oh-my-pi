@@ -30,7 +30,7 @@
 
 ### Fixed
 
-- `read` of an SEC EDGAR filing document or filing folder (`sec.gov/Archives/edgar/data/<cik>/<accession>/…`) returns that document instead of the company's profile and recent filings list
+- `read` of an SEC EDGAR filing document or filing folder (`sec.gov/Archives/edgar/data/<cik>/<accession>/…`) returns that document instead of the company's profile and recent filings list ([#18150](https://github.com/can1357/oh-my-pi/pull/18150) by [@will-bogusz](https://github.com/will-bogusz))
 - Thin tool images are padded to the vision model's minimum height or width instead of causing a 400 on the next turn ([#18081](https://github.com/can1357/oh-my-pi/issues/18081))
 - JSON query truncation notices now report the 50KB read budget instead of the bytes shown ([#18022](https://github.com/can1357/oh-my-pi/pull/18022) by [@eggpeat](https://github.com/eggpeat))
 - Extension links stay clickable and extension-drawn replies and custom messages keep their renderers on every launch, not only the first after an edit; `ctx.ui.getLinkClicksAvailable()` no longer turns false on later launches ([#18116](https://github.com/can1357/oh-my-pi/pull/18116) by [@materemias](https://github.com/materemias))
