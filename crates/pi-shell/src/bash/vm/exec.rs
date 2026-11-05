@@ -687,17 +687,6 @@ fn run_boundary(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 	let Some(run) = vp.runs.front_mut() else {
 		return false;
 	};
-	// A host callout's launch vector ends with the operand's run: what runs
-	// in the caller's frame from here — this vproc's EXIT trap, anything the
-	// caller does with the subshell afterwards — reads the caller's
-	// parameters again (`Shell::submit_from`). An `exit` from inside the
-	// operand has already started the trap above the operand's own frames,
-	// where the operand's parameters are what Bash shows, so this is the
-	// last thing the run does either way.
-	if run.started && std::mem::take(&mut run.args_scope) {
-		state::drop_scope(&mut k.root, cx.store, vp);
-	}
-	let run = vp.runs.front_mut().expect("present");
 	if run.started && !run.exit_trap_started {
 		run.exit_trap_started = true;
 		if start_trap(k, vp, cx, TrapKey::Exit) {

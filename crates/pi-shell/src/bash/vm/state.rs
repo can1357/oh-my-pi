@@ -15,7 +15,7 @@ use bstr::{BStr, BString};
 use hashbrown::DefaultHashBuilder;
 use serde::{Deserialize, Serialize};
 
-use super::proc::{GetoptsState, JobTable, LastBg, Vproc};
+use super::proc::{FrameKind, GetoptsState, JobTable, LastBg, ScriptKind, Vproc};
 pub use crate::bash::store::Var;
 use crate::bash::{
 	host::Rlimit,
@@ -2398,6 +2398,44 @@ pub fn positional(
 /// # Errors
 /// [`StoreError`] when the store cannot be read.
 pub fn positional_ref<'a>(
+	root: &Root,
+	store: &'a mut dyn StateStore,
+	vp: &'a Vproc,
+) -> Result<&'a [BString], StoreError> {
+	// A host callout runs its operand as one command of a synthetic script
+	// (`command -- "$@"`, `exec -a … -- "$@"`), so the launch vector is that
+	// command's own words and not shell state: it is what the run's own
+	// script frame expands, and nothing deeper — an `eval` body, a function,
+	// a sourced file, a trap — ever sees it. An operand that replaces or
+	// shifts the parameters itself therefore writes the subshell's own,
+	// which are the caller's, and whatever runs after the operand reads
+	// those, as in the `( … )` subshell the callout stands for.
+	if let Some(args) = launch_vector(vp) {
+		return Ok(args);
+	}
+	positional_scoped(root, store, vp)
+}
+
+/// The launch vector of the host callout whose operand is the command the
+/// run's own script frame is expanding ([`positional_ref`]).
+fn launch_vector(vp: &Vproc) -> Option<&[BString]> {
+	if !matches!(
+		vp.frames.last().map(|f| &f.kind),
+		Some(FrameKind::Script { what: ScriptKind::Run, .. })
+	) {
+		return None;
+	}
+	vp.runs.front()?.args.as_deref()
+}
+
+/// The positional parameters `vp` holds as state: its innermost function
+/// scope's, else the subshell's, else the root's. What a `.` file saves and
+/// what bash's `list_rest_of_args` reads, neither of which sees a callout's
+/// launch vector.
+///
+/// # Errors
+/// [`StoreError`] when the store cannot be read.
+pub fn positional_scoped<'a>(
 	root: &Root,
 	store: &'a mut dyn StateStore,
 	vp: &'a Vproc,

@@ -799,21 +799,19 @@ pub struct Run {
 	/// [`crate::bash::store::LossyKind`] bits reported outside any
 	/// mode-switching call during this run (`Diag::ModeLossy` once per kind).
 	pub lossy:             u8,
-	/// Root scripts: positional parameters, cwd and exported variables to
-	/// install when the script starts.
+	/// Positional parameters to install when the script starts (a root
+	/// script: a shell invocation's own arguments), or, for the subshell a
+	/// host callout starts, the launch vector of the one command that
+	/// subshell runs — which the run's own script frame expands as `"$@"`
+	/// and nothing deeper ever sees
+	/// ([`state::positional_ref`](super::state::positional_ref)).
 	pub args:              Option<Vec<BString>>,
+	/// The working directory and exported variables a root script installs
+	/// when it starts.
 	pub cwd:               Option<BString>,
 	pub env:               Vec<(BString, BString)>,
 	pub started:           bool,
 	pub exit_trap_started: bool,
-	/// A host callout's launch vector sits in a scope of the subshell's own,
-	/// pushed above the caller's scopes it copied
-	/// ([`super::ShellApi::run_subshell_in`]): the operand is a command with
-	/// its own `$@`, so what runs in the caller's frame once the operand is
-	/// done — an EXIT trap the operand installed, the rest of the caller —
-	/// reads the caller's parameters again. Dropped when the run's commands
-	/// end, before its EXIT trap.
-	pub args_scope:        bool,
 }
 
 /// What kind of activation a frame is.

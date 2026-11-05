@@ -1612,7 +1612,6 @@ impl Shell {
 			env: Vec::new(),
 			started: false,
 			exit_trap_started: false,
-			args_scope: false,
 		};
 		let stdio = match script.vproc {
 			VprocSel::Root => {
@@ -1722,19 +1721,15 @@ impl Shell {
 		vp.lineage = lineage.unwrap_or(parent_lineage);
 		vp.status = status;
 		vp.scopes = scopes;
-		if let Some(args) = script.args {
-			// The operand is a command of this subshell with its own `$@`, so
-			// its launch vector goes in a scope of the subshell's own, above
-			// the caller's scopes it copied, and ends with the operand's run
-			// (`exec::run_boundary`). Writing it into the caller's innermost
-			// parameter scope instead would outlive the operand: an EXIT trap
-			// the operand installs runs in the caller's frame afterwards and
-			// reads the caller's parameters there, as it does in an ordinary
-			// `( … )` subshell.
-			vp.scopes
-				.push(state::Scope { positional: Some(args), ..state::Scope::default() });
-			run.args_scope = true;
-		}
+		// The operand is one command of this subshell, and the launch vector
+		// is that command's own words: the run carries it, the run's own
+		// script frame expands it as `"$@"`, and no state of the subshell
+		// holds it (`state::positional_ref`). Installing it as the
+		// subshell's parameters instead outlived the operand — an EXIT trap
+		// the operand set read it afterwards — and hid the caller's
+		// parameters from the operand's own `set --` and `shift`, which in
+		// an ordinary `( … )` subshell write and read the caller's.
+		run.args = script.args;
 		vp.mode = mode;
 		vp.runs.push_back(run);
 		self.k.spawned.push(Box::new(vp));
