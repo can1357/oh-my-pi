@@ -8,6 +8,7 @@
 - Fixed the bash tool reading the wrong here-document body when double parentheses open nested subshells, and omitting syntax diagnostics for malformed arithmetic expansions ([#17817](https://github.com/can1357/oh-my-pi/pull/17817) by [@sjawhar](https://github.com/sjawhar)).
 - Fixed the bash tool crashing on grouped conditional functions in here-documents and accepting unbalanced parameter parentheses in regular-expression groups ([#17817](https://github.com/can1357/oh-my-pi/pull/17817) by [@sjawhar](https://github.com/sjawhar)).
 - Fixed the bash tool continuing after an invalid arithmetic array subscript (`a[1+]`) where Bash abandons the command string, and misreading `${v:(}` substring offsets inside arithmetic ([#17817](https://github.com/can1357/oh-my-pi/pull/17817) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed the bash tool running the `ERR` trap for an arithmetic `for` header that fails to evaluate, showing the `EXIT` trap the abandoned command's scope and redirection, and reporting a command substitution's syntax error as 127 from a script file where Bash reports 2 ([#17817](https://github.com/can1357/oh-my-pi/pull/17817) by [@sjawhar](https://github.com/sjawhar)).
 
 ### Breaking Changes
 
