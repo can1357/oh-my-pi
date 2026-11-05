@@ -53,7 +53,15 @@ export class OpenAIHttpError extends ProviderHttpError {
 			const envelope = bodyJson as { error?: unknown; message?: unknown };
 			const error = envelope.error;
 			if (typeof error === "object" && error !== null) {
-				const { message, code, type } = error as { message?: unknown; code?: unknown; type?: unknown };
+				// Some gateways wrap the envelope in itself (`{ error: { error: { code, message } } }`);
+				// read the inner one, or its code is lost and a refusal looks like a plain failure.
+				const nested = Reflect.get(error, "error");
+				const source = (typeof nested === "object" && nested !== null ? nested : error) as {
+					message?: unknown;
+					code?: unknown;
+					type?: unknown;
+				};
+				const { message, code, type } = source;
 				return {
 					detail: typeof message === "string" && message.length > 0 ? message : bodyText,
 					code: typeof code === "string" ? code : typeof type === "string" ? type : undefined,

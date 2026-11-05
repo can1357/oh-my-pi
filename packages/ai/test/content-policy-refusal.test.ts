@@ -91,11 +91,13 @@ describe("provider content-policy refusals", () => {
 	});
 });
 
-type RefusalCarrier = "sse" | "http403" | "http400";
+type RefusalCarrier = "sse" | "http403" | "http400" | "http403-gateway-wrapped";
 
 /** The same `cyber_policy` refusal on the given carrier, in the wire format `api` streams. */
 function refusalOn(api: Api, carrier: RefusalCarrier): Response {
 	const error = { code: "cyber_policy", message: REFUSAL_MESSAGE };
+	// Some gateways wrap the error envelope in itself; the refusal code sits one level deeper.
+	if (carrier === "http403-gateway-wrapped") return Response.json({ error: { error } }, { status: 403 });
 	if (carrier !== "sse") return Response.json({ error }, { status: carrier === "http403" ? 403 : 400 });
 	if (api !== "openai-completions") return failedResponse("cyber_policy", REFUSAL_MESSAGE);
 	// Chat Completions streams a failure as an in-band `error` chunk.
@@ -110,7 +112,7 @@ function refusalOn(api: Api, carrier: RefusalCarrier): Response {
 
 describe("content-policy refusals on every OpenAI-wire API and carrier", () => {
 	const apis = ["openai-completions", "openai-responses", "azure-openai-responses", "openai-codex-responses"] as const;
-	const carriers: RefusalCarrier[] = ["sse", "http403", "http400"];
+	const carriers: RefusalCarrier[] = ["sse", "http403", "http400", "http403-gateway-wrapped"];
 	it.each(apis.flatMap(api => carriers.map(carrier => ({ api, carrier }))))(
 		"$api $carrier: one attempt, no rotation, the refusal's stopDetails kept",
 		async ({ api, carrier }) => {

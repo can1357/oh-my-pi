@@ -46,7 +46,11 @@ export async function parseCodexError(response: Response): Promise<CodexErrorInf
 
 	try {
 		const parsed = JSON.parse(raw) as { error?: Record<string, unknown> };
-		const err = parsed?.error ?? {};
+		// A gateway may wrap the envelope in itself (`{ error: { error: { code, message } } }`);
+		// the inner one carries the code, and without it a refusal reads as a plain failure.
+		const outer = parsed?.error ?? {};
+		const inner = outer.error;
+		const err = (typeof inner === "object" && inner !== null ? inner : outer) as Record<string, unknown>;
 
 		const headers = response.headers;
 		const primary = {

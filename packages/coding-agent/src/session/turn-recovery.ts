@@ -358,6 +358,12 @@ type PendingRetryError = {
 	recovery: AssistantRetryRecoveryKind;
 	attempt: number;
 	note: string;
+	/**
+	 * The prompt whose saga recorded this error. A cancelled in-flight retry leaves its
+	 * entries behind, and the next prompt's saga must not mark another prompt's errors
+	 * superseded — nothing superseded them, and a superseded error is not rendered.
+	 */
+	generation: number;
 };
 
 /** How a retry saga's pending error entries are annotated when it closes. */
@@ -1019,18 +1025,24 @@ export class TurnRecovery {
 			recovery,
 			attempt: this.#retryAttempt,
 			note,
+			generation: this.#host.promptGeneration(),
 		});
 	}
 
 	async #markPendingRetryErrors(completion: RetryErrorCompletion): Promise<RetryErrorUpdate[]> {
 		if (this.#pendingRetryErrors.length === 0) return [];
+		// Only this prompt's errors: a cancelled in-flight retry leaves the previous prompt's
+		// entries in the list, and this saga superseded none of them.
+		const generation = this.#host.promptGeneration();
+		const pendingHere = this.#pendingRetryErrors.filter(pending => pending.generation === generation);
+		if (pendingHere.length === 0) return [];
 		const branch = this.#host.sessionManager.getBranchView();
 		const branchById = new Map<string, SessionEntry>();
 		for (const entry of branch) {
 			branchById.set(entry.id, entry);
 		}
 		const retryErrors: RetryErrorUpdate[] = [];
-		for (const pending of this.#pendingRetryErrors) {
+		for (const pending of pendingHere) {
 			let entry = branchById.get(pending.entryId);
 			if (entry?.type !== "message" || entry.message.role !== "assistant") {
 				entry = branch.findLast(
