@@ -35,6 +35,7 @@ import {
 	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
 	MAX_WEB_SEARCH_TIMEOUT_SECONDS,
 	SearchProviderError,
+	type SearchFailureDetail,
 	type SearchResponse,
 	type SearchResultDetails,
 } from "./types";
@@ -114,6 +115,29 @@ function formatForLLM(response: SearchResponse, notes: readonly string[] = []): 
 /** Longest failure reason a fallback note quotes, the cap source snippets get; provider errors can carry whole response bodies. */
 const MAX_FALLBACK_REASON_CHARS = 240;
 
+/** One failure's reason, flattened and capped as the fallback note and `details.failures` quote it. */
+function failureReason(failure: SearchProviderFailure): string {
+	const reason = formatSearchProviderFailure(failure.error, failure.provider)
+		.replace(/\s+/g, " ")
+		.trim()
+		.replace(/\.$/, "");
+	return truncate(reason, MAX_FALLBACK_REASON_CHARS);
+}
+
+/** Structured failure list for tool details, so transcripts record which providers failed; no key when none did. */
+function failureDetails(failures: readonly SearchProviderFailure[]): Pick<SearchResultDetails, "failures"> {
+	if (failures.length === 0) return {};
+	const entries = failures.map((failure): SearchFailureDetail => ({
+		provider: failure.provider.id,
+		label: failure.provider.label,
+		reason: failureReason(failure),
+		...(failure.error instanceof SearchProviderError && failure.error.status !== undefined
+			? { status: failure.error.status }
+			: {}),
+	}));
+	return { failures: entries };
+}
+
 /**
  * Note naming the candidates that failed before `served` answered. Without it a
  * fallback engine's results read as the preferred provider's, e.g. web pages
@@ -121,13 +145,7 @@ const MAX_FALLBACK_REASON_CHARS = 240;
  */
 function fallbackNotes(failures: readonly SearchProviderFailure[], served: { label: string }): string[] {
 	if (failures.length === 0) return [];
-	const failed = failures.map(failure => {
-		const reason = formatSearchProviderFailure(failure.error, failure.provider)
-			.replace(/\s+/g, " ")
-			.trim()
-			.replace(/\.$/, "");
-		return `${failure.provider.label} failed (${truncate(reason, MAX_FALLBACK_REASON_CHARS)})`;
-	});
+	const failed = failures.map(failure => `${failure.provider.label} failed (${failureReason(failure)})`);
 	return [`answered by ${served.label} after ${failed.join(" and ")}`];
 }
 
@@ -317,7 +335,7 @@ async function executeSearch(
 
 			return {
 				content: [{ type: "text" as const, text }],
-				details: { response: finalResponse },
+				details: { response: finalResponse, ...failureDetails(failures) },
 			};
 		} catch (error) {
 			// Surface user-initiated cancellation immediately so the session sees
@@ -353,6 +371,7 @@ async function executeSearch(
 		details: {
 			response: { provider: failedResponseProvider, sources: [] },
 			error: message,
+			...failureDetails(failures),
 		},
 	};
 }
