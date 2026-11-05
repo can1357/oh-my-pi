@@ -576,10 +576,13 @@ function isBlankString(value: unknown): boolean {
  * `outputSchema: []` and handed back the agent's own schema.
  *
  * `task` and `taskFile` satisfy (1) — `validateTaskInput` answers a populated array with the message
- * for the field it is — and fail (2) unconditionally: both are declared `string`, in every variant,
- * so validation rewrites an array to its JSON text whatever is advertised. They are excluded for the
- * same reason as `sourceSession`, and more strongly, since `sourceSession` fails (2) only where it is
- * declared. The criterion **forbids** their membership. Adding `taskFile` reproduces the
+ * for the field it is — and fail (2) wherever they exist at all. `task` is declared `string` in
+ * every variant; `taskFile` is declared `string` only where `task.file` is on, and elsewhere the
+ * key is deleted outright. Either way an array never reaches dispatch as an array: validation
+ * rewrites it to its JSON text, or the key is gone. So they are excluded for the same reason as
+ * `sourceSession`, and more broadly, since `sourceSession` fails (2) only where it is declared and
+ * these two fail it in every configuration that declares them at all. The criterion **forbids**
+ * their membership. Adding `taskFile` reproduces the
  * started-then-discarded run, measured; adding `task` does not reach the executor — without a real
  * `taskFile` it is not among the conditional keys, and with one the launch refuses immediately
  * because `taskFile` is present — so the violation of (2) is the reason to exclude it, not an

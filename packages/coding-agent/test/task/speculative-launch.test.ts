@@ -438,9 +438,11 @@ describe("task speculative launch", () => {
 	// putting `taskFile` in left the entire branch suite green. A set whose forbidden members no test
 	// can distinguish is a set no test is guarding.
 	//
-	// Each row runs in the configuration where its key is declared — seance advertised for
-	// `sourceSession`, `task.file` on with a real `task` sibling for `taskFile` — because that is the
-	// only place validation rewrites the array and therefore the only place the defect exists.
+	// Every row runs with both configurations enabled — seance advertised *and* `task.file` on — and
+	// each key needs its own: `sourceSession` is declared only where seance is advertised, `taskFile`
+	// only where `task.file` is on. Outside those, validation deletes the key rather than rewriting
+	// it, the two planners then agree, and there is no defect to catch; both were measured to be
+	// load-bearing for their own row.
 	it.each([
 		["sourceSession", "an empty array", [] as unknown],
 		["sourceSession", "an array of blanks", ["", "  "]],
@@ -490,10 +492,13 @@ describe("task speculative launch", () => {
 		});
 		const result = await tool.execute(toolCall.id, validated as TaskParams);
 
-		// Dispatch refuses the call. `startedIds` is deliberately not re-asserted here: under the
-		// revert the started run has already been discarded by the time `execute` returns, so that
-		// assertion cannot fail in the configuration this test names, and the barrier above is what
-		// actually catches the defect.
+		// Dispatch refuses the call. `startedIds` is deliberately not re-asserted here, and the reason
+		// is not that the run was discarded — nothing removes an id from that set. It is that
+		// `startedIds` is written by the `runSubprocess` mock, which the launch chain does not await:
+		// `launcher.start` resolves before the executor runs, so no `startedIds` line in this test can
+		// red under the revert without a wait, and a wait is the thing this test exists to avoid.
+		// `authorize` is the observable. The line above it is kept only as a cheap guard against a
+		// launcher that reaches the executor synchronously.
 		expect(result.isError).toBe(true);
 	});
 });

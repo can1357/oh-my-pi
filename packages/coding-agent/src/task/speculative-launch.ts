@@ -256,6 +256,11 @@ export class TaskLaunchSession implements ToolSpeculationStreamSession {
 	 * exists to remove: a bounded cap is indistinguishable from a pass whenever an await upstream of
 	 * the start grows past it, and a microtask drain is the same mistake in smaller units. The queue
 	 * is already resolved when nothing was scheduled, so the passing path costs nothing.
+	 *
+	 * It is honest about settling and says nothing about vacuity: it also resolves immediately when
+	 * a streamed prefix never closed an item, so a caller whose fixture stops short would pass having
+	 * proved nothing. What makes an assertion behind it meaningful is the mutation control around it
+	 * — the rows that use this red when the behaviour is reverted — not the barrier on its own.
 	 */
 	drained(): Promise<void> {
 		return this.#queue;
