@@ -26,29 +26,73 @@ const MAX_SYMLINK_HOPS = 40;
 const MAX_BASENAME_BYTES = 255;
 
 /**
- * A staging path beside `destination`, with a basename short enough to create.
+ * The longest path the kernel accepts, in bytes. Linux's `PATH_MAX` is 4096
+ * **including the terminating NUL**, so 4095 is what a path may actually be: a
+ * reviewer measured a 4046-byte destination publishing through a 4095-byte
+ * staging path while 4047 failed at 4096. A destination well inside the limit
+ * can still leave no room for a name derived from it.
+ */
+const MAX_PATH_BYTES = 4095;
+
+/**
+ * A staging path beside `destination`, short enough to create in both of the
+ * ways a path can be too long.
  *
- * The suffix carries the pid and a uuid so two processes publishing one file
- * never share a staging path, and the destination's own name is kept in front
- * of it only as far as it fits — because a staging name is derived from a name
- * the user chose, and a 245-byte basename is legal while that name plus a
- * 45-byte suffix is not. Since the config write resolves before it stages, the
- * name in front is the LINK'S TARGET, which a user may well have made long: a
- * reviewer reproduced `ENAMETOOLONG` on all three registries through the real
- * CLI with a 245-byte target that reads back perfectly well.
+ * A staging name is derived from a name the user chose, so it has to survive
+ * whatever they chose. Two reviewers found both limits here, each through the
+ * real CLI, because the config write resolves the link BEFORE it stages and the
+ * name it derives from is therefore the link's target:
  *
- * Truncation is by bytes and never splits a character, so the result is a valid
- * name on every filesystem the limit comes from. Uniqueness does not depend on
- * the kept prefix: the uuid carries it, and the open is exclusive regardless.
+ * - `NAME_MAX`: a 245-byte basename is legal, and that name plus the suffix is
+ *   not. Measured boundary on the host where it was found: 207 bytes, the
+ *   suffix being 49 there.
+ * - `PATH_MAX`: a 4047-byte destination with a 13-byte basename is legal and
+ *   reads back, and appending the suffix produces a 4096-byte path the kernel
+ *   refuses. The basename is nowhere near its own limit; the directory is.
+ *
+ * So the budget is whichever of the two is tighter, and the destination's own
+ * name is kept in front of the suffix only as far as that budget allows.
+ * Truncation is by bytes and never splits a character, so the result is valid on
+ * every filesystem the limits come from. **Uniqueness never depends on the kept
+ * prefix** — the uuid carries it and the open is exclusive regardless — which is
+ * what lets the prefix shrink to nothing when the directory is very deep. When
+ * even that does not fit, the write fails here naming the limit rather than
+ * somewhere further down with a bare kernel error.
  */
 function stagingPathFor(destination: string, extension: string): string {
-	const suffix = `.${process.pid}.${crypto.randomUUID()}.${extension}`;
 	const dir = path.dirname(destination);
 	const name = path.basename(destination);
-	const room = MAX_BASENAME_BYTES - Buffer.byteLength(suffix, "utf8");
-	let kept = name;
-	while (Buffer.byteLength(kept, "utf8") > room) kept = kept.slice(0, -1);
-	return path.join(dir, `${kept}${suffix}`);
+	// `path.join` adds the separator, so the directory costs its own length plus
+	// one. A relative destination is measured as given: the kernel resolves it
+	// against a cwd this cannot see, so reserving for that would be a guess.
+	const pathRoom = MAX_PATH_BYTES - (Buffer.byteLength(dir, "utf8") + 1);
+	const room = Math.min(MAX_BASENAME_BYTES, pathRoom);
+	// Longest first: the readable form, then a compact one that drops the pid and
+	// shortens the uuid for a directory with almost no room left.
+	const compact = crypto.randomUUID().replaceAll("-", "").slice(0, 12);
+	for (const suffix of [`.${process.pid}.${crypto.randomUUID()}.${extension}`, `.${compact}.${extension}`]) {
+		const suffixBytes = Buffer.byteLength(suffix, "utf8");
+		if (suffixBytes > room) continue;
+		// By CODE POINT, not by `slice(0, -1)`: slicing drops one UTF-16 unit, so
+		// cutting an astral character in half leaves a lone surrogate that encodes
+		// as U+FFFD — a reviewer found a kept prefix ending in a replacement
+		// character that way. Taking whole code points cannot produce one.
+		let kept = "";
+		let keptBytes = 0;
+		for (const character of name) {
+			const characterBytes = Buffer.byteLength(character, "utf8");
+			if (keptBytes + characterBytes > room - suffixBytes) break;
+			kept += character;
+			keptBytes += characterBytes;
+		}
+		return path.join(dir, `${kept}${suffix}`);
+	}
+	const error: NodeJS.ErrnoException = new Error(
+		`ENAMETOOLONG: no room beside '${destination}' for a staging file (directory is ${Buffer.byteLength(dir, "utf8")} bytes of the ${MAX_PATH_BYTES}-byte path limit)`,
+	);
+	error.code = "ENAMETOOLONG";
+	error.path = destination;
+	throw error;
 }
 
 function symlinkLoopError(filePath: string): NodeJS.ErrnoException {
@@ -228,11 +272,16 @@ async function resolveConfigWriteTarget(filePath: string): Promise<string> {
 		// through it fails EISDIR or ENOTDIR. Splitting it into dirname and
 		// basename would throw that requirement away and write the file somewhere
 		// that spelling never named, so it is handed on whole and the write fails.
-		// Where it fails is the `rename`, not the staging `open`: the staged
-		// sibling of `<dir>/` is a valid path INSIDE that directory, so it is
-		// created and then removed by the caller's `finally` when publication
-		// reports `ENOTEMPTY`/`EBUSY`. A reviewer measured that; an earlier version
-		// of this comment claimed the `open` refused it, which was wrong.
+		// It fails at the `rename`, never at the staging `open`, and exactly where
+		// the temp lands depends on the spelling, because `stagingPathFor` runs the
+		// destination through `path.dirname`/`path.basename`: `<dir>/` normalises,
+		// so the temp is a sibling OF THE DIRECTORY and the rename reports ENOTDIR,
+		// while `<dir>/.` keeps its trailing component, so the temp is created
+		// INSIDE the directory and the rename reports EBUSY. Either way the
+		// caller's `finally` removes it and nothing is left behind. Measured on
+		// both spellings by a reviewer; two earlier versions of this comment got
+		// this wrong, first claiming the `open` refused it and then describing only
+		// the inside-the-directory case.
 		if (namesADirectory(joined)) return joined;
 		let next: string;
 		try {

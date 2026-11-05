@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -220,9 +220,12 @@ describe("a config write follows a symlinked destination", () => {
 
 	test("publishes onto a link whose target has a legal but very long name", async () => {
 		// Resolving before staging puts the TARGET's basename in the staging name,
-		// so a target the filesystem accepts at 245 bytes became a 290-byte staging
-		// name and every registry write failed ENAMETOOLONG. A reviewer reproduced
-		// that through `omp plugin marketplace add` on all three registries. The
+		// so this target — 245 bytes, which the filesystem accepts — produced a
+		// staging name of 245 plus the suffix (294 bytes with this host's 7-digit
+		// pids, 290 with 3-digit ones) and every registry write failed
+		// ENAMETOOLONG. Two reviewers reproduced that through
+		// `omp plugin marketplace add` and `omp plugin install` on all three
+		// registries, and one measured the boundary at a 207-byte basename. The
 		// name a user chose is legal; the name we derive from it must be too.
 		const shared = path.join(root, "shared-long");
 		await fs.mkdir(shared);
@@ -237,6 +240,83 @@ describe("a config write follows a symlinked destination", () => {
 		expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
 		expect(await fs.readFile(target, "utf8")).toBe("new");
 		expect(await fs.readdir(shared)).toEqual([longName]);
+	});
+
+	test("truncates the staging name by whole characters, not by UTF-16 units", async () => {
+		// `slice(0, -1)` drops one UTF-16 unit, so cutting an astral character in
+		// half leaves a lone surrogate that encodes as U+FFFD. A reviewer found a
+		// kept prefix ending in a replacement character exactly that way. The write
+		// still published, which is why this asserts the derived NAME and not only
+		// the result: `fs.promises.open` is the seam every staged file passes
+		// through, so recording its path catches the malformed name itself.
+		const shared = path.join(root, "shared-astral");
+		await fs.mkdir(shared);
+		const target = path.join(shared, `xxx${"😀".repeat(60)}.json`);
+		const link = path.join(root, "marketplaces.json");
+		await fs.writeFile(target, "old");
+		await fs.symlink(target, link);
+
+		const opened: string[] = [];
+		// The module under test calls `fs.promises.open` from `node:fs`, which is a
+		// different object from the `node:fs/promises` namespace this file imports —
+		// spying on the wrong one records nothing, and the length assertion below is
+		// what caught that.
+		const realOpen = fsSync.promises.open;
+		const spy = spyOn(fsSync.promises, "open").mockImplementation(
+			(...args: Parameters<typeof fsSync.promises.open>) => {
+				opened.push(String(args[0]));
+				return realOpen(...args);
+			},
+		);
+		try {
+			await writeConfigFileAtomically(link, "new", 0o644);
+		} finally {
+			spy.mockRestore();
+		}
+
+		expect(await fs.readFile(target, "utf8")).toBe("new");
+		expect(opened.length).toBeGreaterThan(0);
+		expect(opened.filter(opened => opened.includes("\uFFFD"))).toEqual([]);
+	});
+
+	test("publishes onto a link whose target sits in a very deep but legal directory", async () => {
+		// The other length limit, and the one a short basename hides: a reviewer
+		// measured a 4047-byte resolved destination with a 13-byte basename —
+		// legal, creatable, readable — whose staging name reached 4096 bytes and
+		// was refused. The basename is nowhere near NAME_MAX there; the DIRECTORY
+		// is nearly all of PATH_MAX, so the budget has to come from both.
+		const leaf = "registry.json";
+		// Stack 200-byte components, then one sized exactly, so the destination
+		// lands in the window where it is itself legal (under 4096) but has less
+		// than a suffix's worth of room left. Below 4047 the defect does not
+		// reproduce at all, which is how a first attempt at this test passed
+		// against the broken code.
+		let deep = path.join(root, "deep");
+		await fs.mkdir(deep);
+		const component = "d".repeat(200);
+		while (Buffer.byteLength(path.join(deep, component, leaf), "utf8") < 4060) {
+			deep = path.join(deep, component);
+			await fs.mkdir(deep);
+		}
+		const shortfall = 4060 - Buffer.byteLength(path.join(deep, leaf), "utf8") - 1;
+		if (shortfall > 0) {
+			deep = path.join(deep, "d".repeat(shortfall));
+			await fs.mkdir(deep);
+		}
+		const target = path.join(deep, leaf);
+		const link = path.join(root, "marketplaces.json");
+		await fs.writeFile(target, "old");
+		await fs.symlink(target, link);
+		// The window that matters: legal as a path, too long once a 49-byte
+		// suffix is appended to it.
+		expect(Buffer.byteLength(target, "utf8")).toBeGreaterThan(4047);
+		expect(Buffer.byteLength(target, "utf8")).toBeLessThan(4096);
+
+		await writeConfigFileAtomically(link, "new", 0o644);
+
+		expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+		expect(await fs.readFile(target, "utf8")).toBe("new");
+		expect(await fs.readdir(deep)).toEqual(["registry.json"]);
 	});
 
 	// A link from one accepted root to another where the two sit on DIFFERENT
