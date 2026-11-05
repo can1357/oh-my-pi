@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { glob } from "@oh-my-pi/pi-natives";
@@ -1747,6 +1748,16 @@ export async function reconcileFileFromDisk(
 /** What a sync does with an open document whose file can no longer be read as text. */
 export type UnreadableOpenFile = "throw" | "close";
 
+/** What stat says identifies a file's bytes (change time, modification time, size); undefined when stat fails. */
+async function diskStamp(filePath: string): Promise<string | undefined> {
+	try {
+		const stats = await fs.stat(filePath, { bigint: true });
+		return `${stats.ctimeNs}:${stats.mtimeNs}:${stats.size}`;
+	} catch {
+		return undefined;
+	}
+}
+
 /**
  * Push disk text for an open document whose overlay diverged from it; `true` when a
  * `didChange` went out. Does not count as a use of the document, so a sync of every
@@ -1783,6 +1794,12 @@ async function syncOpenFileFromDisk(
 			return;
 		}
 
+		// A file whose stat is unchanged since a sync that left the server holding its text needs
+		// no read: the sweep over every open document then costs one stat each.
+		const stamp = await diskStamp(filePath);
+		throwIfAborted(signal);
+		if (stamp !== undefined && info.disk?.stamp === stamp && info.disk.hash === info.syncedHash) return;
+
 		let content: string;
 		try {
 			content = await readTextFromDisk(filePath);
@@ -1798,6 +1815,8 @@ async function syncOpenFileFromDisk(
 		// synced its overlay in the meantime, making this disk snapshot stale.
 		if (pendingDiskWrites.has(uri)) return;
 		const signature = documentSignature(content);
+		// Stat before read: a change in between leaves an older stamp, which only forces a later re-read.
+		if (stamp !== undefined) info.disk = { stamp, hash: signature };
 		if (signature === info.syncedHash) return;
 
 		// Drop cached diagnostics computed against the stale document before the

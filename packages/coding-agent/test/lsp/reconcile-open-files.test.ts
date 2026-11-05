@@ -65,6 +65,26 @@ describe("reconcileOpenFilesFromDisk", () => {
 		}
 	});
 
+	test("re-syncs an unchanged file when the server's text diverged from it since the last sync", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-reconcile-open-"));
+		try {
+			const file = path.join(dir, "c.ts");
+			await fs.writeFile(file, "export const y = 2;\n");
+			const uri = fileToUri(file);
+			const { client, frames } = fakeClient(new Map([[uri, { version: 1, languageId: "typescript" }]]));
+			expect(await reconcileOpenFilesFromDisk(client)).toBe(1);
+
+			// An OMP change synced other text to the server; the file on disk did not change.
+			const info = client.openFiles.get(uri);
+			if (!info) throw new Error("Expected the document to stay open");
+			info.syncedHash = 0;
+			expect(await reconcileOpenFilesFromDisk(client)).toBe(1);
+			expect(frames.filter(frame => frame.includes("didChange")).length).toBe(2);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
 	test("leaves documents that match disk untouched", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-reconcile-open-"));
 		try {
