@@ -72,19 +72,23 @@ function reply(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
 }
 
 const CUSTOM_API_SOURCE = "chat-span-credential-organization-test";
-const CUSTOM_API = "chat-span-credential-organization-api" as Api;
+const CUSTOM_API = "chat-span-credential-organization-api";
 
-// The boundary test needs the real `completeSimple` path, which means a
-// provider it can register — and a registered API is a runtime name the `Api`
-// union cannot spell, so this one model is cast where the others are built.
-const FAIL_MODEL = {
+// The boundary test needs the real `completeSimple` path, so it needs a
+// provider it can register — a runtime API name, built like every other
+// fixture here rather than cast, so a missing model field still reds `tsc`.
+const FAIL_MODEL: Model<Api> = buildModel({
 	id: "test-model",
 	name: "Test Model",
-	api: CUSTOM_API,
+	api: CUSTOM_API as Api,
 	provider: "test-provider",
+	baseUrl: "https://test-provider.invalid",
+	reasoning: false,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	contextWindow: 1000,
 	maxTokens: 100,
-} as Model<Api>;
+});
 
 let exporter: InMemorySpanExporter;
 let provider: BasicTracerProvider;
