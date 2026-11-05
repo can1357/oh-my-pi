@@ -1765,6 +1765,37 @@ describe("AskDialogComponent", () => {
 		});
 	});
 
+	it("reopens a cancelled Other prompt with its draft, leaving the submitted answer unchanged (#18211)", async () => {
+		const onPrompt = vi
+			.fn()
+			.mockResolvedValueOnce("first")
+			.mockResolvedValueOnce({ draft: { text: "first, then more" } })
+			.mockResolvedValueOnce({ draft: { text: "  " } })
+			.mockResolvedValueOnce(undefined);
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[{ id: "q1", question: "Choose multiple?", options: [{ label: "Option A" }], multi: true }],
+			{ onSubmit, onCancel: vi.fn(), onPrompt },
+		);
+		const openOther = async () => {
+			component.handleInput(ENTER);
+			await Promise.resolve();
+			await Promise.resolve();
+		};
+
+		component.handleInput(DOWN); // Other
+		await openOther();
+		component.handleInput(SHIFT_TAB);
+		await openOther(); // cancelled with a draft
+		await openOther(); // cancelled after blanking it
+		await openOther();
+
+		expect(onPrompt.mock.calls.map(call => call[1])).toEqual([undefined, "first", "first, then more", "first"]);
+		component.handleInput(TAB);
+		component.handleInput(ENTER);
+		expect(onSubmit.mock.calls[0][0].results[0].customInput).toBe("first");
+	});
+
 	it("drops custom-answer images when the custom answer is cleared", async () => {
 		const image: ImageContent = { type: "image", data: "image-data", mimeType: "image/png" };
 		const onImagePrompt = vi
