@@ -1,4 +1,5 @@
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { JsRuntime, type RuntimeCallIdentity, type RuntimeHooks, shadowSnapshotDigest } from "./shared/runtime";
 import type {
 	RunErrorPayload,
@@ -117,6 +118,7 @@ export class WorkerCore {
 	#pendingTools = new Map<string, PendingTool>();
 	#recentCellFiles = new Set<string>();
 	#lateRejections: string[] = [];
+	#omittedLateRejections = 0;
 	#unsubscribe: () => void;
 	#uninstallRejectionGuard: () => void;
 	#options: WorkerCoreOptions;
@@ -192,9 +194,13 @@ export class WorkerCore {
 			}
 			if (recent) {
 				const payload = errorPayload(reason);
-				this.#lateRejections.push(
-					`Unhandled rejection from finished eval cell ${recent} (missing await?): ${payload.stack ?? `${payload.name ?? "Error"}: ${payload.message}`}\n`,
-				);
+				if (this.#lateRejections.length < 10) {
+					this.#lateRejections.push(
+						`Unhandled rejection from finished eval cell ${recent} (missing await?): ${payload.stack ?? `${payload.name ?? "Error"}: ${payload.message}`}\n`,
+					);
+				} else {
+					this.#omittedLateRejections++;
+				}
 				this.#transport.send({
 					type: "log",
 					level: "warn",
@@ -365,6 +371,10 @@ export class WorkerCore {
 			callTool: (name, args, identity) => this.#callTool(active, name, args, identity),
 		};
 		for (const notice of this.#lateRejections.splice(0)) hooks.onText(notice);
+		if (this.#omittedLateRejections > 0) {
+			hooks.onText(`… and ${this.#omittedLateRejections} more late rejections from finished eval cells.\n`);
+			this.#omittedLateRejections = 0;
+		}
 		let result: RunResult;
 		try {
 			const runtime = this.#ensureRuntime(snapshot, runId);
@@ -477,8 +487,23 @@ export class WorkerCore {
 			// Bridge errors are constructed outside the cell, so retain its origin
 			// even when the call rejects after the run has finished.
 			this.#rememberCellFile(active.filename);
-			if (error instanceof Error)
-				error.stack = `${error.stack ?? error.message}\n    at ${name} (${active.filename})`;
+			if (error instanceof Error) {
+				let call = name;
+				if (name === "__prelude__" && isRecord(args) && typeof args.name === "string") {
+					call = args.name;
+					if (isRecord(args.parameters)) {
+						const chain = args.parameters.chain;
+						if (Array.isArray(chain)) {
+							for (const step of chain) {
+								if (isRecord(step) && typeof step.method === "string") call += `.${step.method}`;
+							}
+						} else if (typeof args.parameters.action === "string") {
+							call += `.${args.parameters.action}`;
+						}
+					}
+				}
+				error.stack = `${error.stack ?? error.message}\n    at ${call} (${active.filename})`;
+			}
 			throw error;
 		}
 	}
