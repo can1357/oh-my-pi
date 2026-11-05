@@ -115,27 +115,17 @@ function formatForLLM(response: SearchResponse, notes: readonly string[] = []): 
 /** Longest failure reason a fallback note quotes, the cap source snippets get; provider errors can carry whole response bodies. */
 const MAX_FALLBACK_REASON_CHARS = 240;
 
-/** One failure's reason, flattened and capped as the fallback note and `details.failures` quote it. */
-function failureReason(failure: SearchProviderFailure): string {
-	const reason = formatSearchProviderFailure(failure.error, failure.provider)
-		.replace(/\s+/g, " ")
-		.trim()
-		.replace(/\.$/, "");
-	return truncate(reason, MAX_FALLBACK_REASON_CHARS);
-}
-
-/** Structured failure list for tool details, so transcripts record which providers failed; no key when none did. */
-function failureDetails(failures: readonly SearchProviderFailure[]): Pick<SearchResultDetails, "failures"> {
-	if (failures.length === 0) return {};
-	const entries = failures.map((failure): SearchFailureDetail => ({
-		provider: failure.provider.id,
-		label: failure.provider.label,
-		reason: failureReason(failure),
-		...(failure.error instanceof SearchProviderError && failure.error.status !== undefined
-			? { status: failure.error.status }
-			: {}),
-	}));
-	return { failures: entries };
+/** Failed candidates as tool details record them and the fallback note quotes them: reason flattened and capped. */
+function failureDetails(failures: readonly SearchProviderFailure[]): SearchFailureDetail[] {
+	return failures.map(({ provider, error }): SearchFailureDetail => {
+		const reason = formatSearchProviderFailure(error, provider).replace(/\s+/g, " ").trim().replace(/\.$/, "");
+		return {
+			provider: provider.id,
+			label: provider.label,
+			reason: truncate(reason, MAX_FALLBACK_REASON_CHARS),
+			...(error instanceof SearchProviderError && error.status !== undefined ? { status: error.status } : {}),
+		};
+	});
 }
 
 /**
@@ -143,10 +133,9 @@ function failureDetails(failures: readonly SearchProviderFailure[]): Pick<Search
  * fallback engine's results read as the preferred provider's, e.g. web pages
  * standing in for an X search.
  */
-function fallbackNotes(failures: readonly SearchProviderFailure[], served: { label: string }): string[] {
-	if (failures.length === 0) return [];
-	const failed = failures.map(failure => `${failure.provider.label} failed (${failureReason(failure)})`);
-	return [`answered by ${served.label} after ${failed.join(" and ")}`];
+function fallbackNotes(failed: readonly SearchFailureDetail[], served: { label: string }): string[] {
+	if (failed.length === 0) return [];
+	return [`answered by ${served.label} after ${failed.map(f => `${f.label} failed (${f.reason})`).join(" and ")}`];
 }
 
 function hasRenderableSearchContent(response: SearchResponse): boolean {
@@ -331,11 +320,12 @@ async function executeSearch(
 				throw new SearchProviderError(provider.id, `${provider.label} returned no renderable search content.`, 204);
 			}
 
-			const text = formatForLLM(finalResponse, [...fallbackNotes(failures, provider), ...constraintNotes]);
+			const failed = failureDetails(failures);
+			const text = formatForLLM(finalResponse, [...fallbackNotes(failed, provider), ...constraintNotes]);
 
 			return {
 				content: [{ type: "text" as const, text }],
-				details: { response: finalResponse, ...failureDetails(failures) },
+				details: failed.length > 0 ? { response: finalResponse, failures: failed } : { response: finalResponse },
 			};
 		} catch (error) {
 			// Surface user-initiated cancellation immediately so the session sees
@@ -371,7 +361,7 @@ async function executeSearch(
 		details: {
 			response: { provider: failedResponseProvider, sources: [] },
 			error: message,
-			...failureDetails(failures),
+			failures: failureDetails(failures),
 		},
 	};
 }
