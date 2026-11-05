@@ -106,6 +106,133 @@ describe("classifyNetworkCause", () => {
 		}
 	});
 
+	it("classifies a TLS handshake failure as tls/handshake with proxy guidance", () => {
+		const err = Object.assign(
+			new Error("EPROTO: The TLS handshake failed. Does the server speak TLS on this port?"),
+			{ code: "EPROTO" },
+		);
+
+		expect(AIError.classifyNetworkCause(err)).toEqual({
+			kind: "tls",
+			tlsPhase: "handshake",
+			code: "EPROTO",
+			detail: undefined,
+			host: undefined,
+		});
+		const message = AIError.networkFailureMessage(
+			err,
+			"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent",
+		);
+		expect(message).toBe(
+			"TLS connection failed for daily-cloudcode-pa.googleapis.com during handshake. Check the proxy/VPN and whether the configured proxy speaks HTTP(S) rather than SOCKS.",
+		);
+		// A handshake failure must not be rewritten as a certificate verdict, and the
+		// runtime's own advice (`pass verbose: true`) must not survive into the UI.
+		expect(message).not.toMatch(/certificate/i);
+		expect(message).not.toContain("verbose");
+		expect(AIError.isProviderRetryableError(new Error(message as string))).toBe(true);
+		expect(AIError.is(AIError.classify(new Error(message as string)), AIError.Flag.Transient)).toBe(true);
+	});
+
+	it("keeps a bare EPROTO transient without claiming a handshake or certificate verdict", () => {
+		const err = Object.assign(new Error("EPROTO"), { code: "EPROTO" });
+
+		// No TLS evidence: no invented network sentence, but still retryable.
+		expect(AIError.classifyNetworkCause(err)).toBeUndefined();
+		expect(AIError.networkFailureMessage(err, "https://daily-cloudcode-pa.googleapis.com/v1")).toBeUndefined();
+		const id = AIError.classify(err);
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.retriable(id)).toBe(true);
+	});
+
+	it("classifies a mid-stream reset as reset and names the host", () => {
+		const errors = [
+			Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
+			Object.assign(new Error("EPIPE: broken pipe, write"), { code: "EPIPE" }),
+			Object.assign(new Error("premature close"), { code: "ERR_STREAM_PREMATURE_CLOSE" }),
+			new Error("read: connection reset by peer"),
+			new Error("read tcp 127.0.0.1:9426->127.0.0.1:10808: use of closed network connection"),
+			new Error("other side closed"),
+			new Error(
+				"The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()",
+			),
+		];
+
+		for (const err of errors) {
+			expect(AIError.classifyNetworkCause(err)?.kind).toBe("reset");
+			const message = AIError.networkFailureMessage(err, "https://daily-cloudcode-pa.googleapis.com/v1internal");
+			expect(message).toBe(
+				"Connection to daily-cloudcode-pa.googleapis.com was reset by the network or proxy. Check the proxy/VPN and retry.",
+			);
+			expect(message).not.toContain("verbose");
+			expect(AIError.isProviderRetryableError(new Error(message as string))).toBe(true);
+			expect(AIError.is(AIError.classify(new Error(message as string)), AIError.Flag.Transient)).toBe(true);
+		}
+	});
+
+	it("descends into an AggregateError for a reset", () => {
+		const inner = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
+		const wrapped = new TypeError("fetch failed", { cause: new AggregateError([inner]) });
+
+		expect(AIError.classifyNetworkCause(wrapped)?.kind).toBe("reset");
+	});
+
+	it("gives an explicit reset errno precedence over generic refusal text", () => {
+		const err = Object.assign(new Error("Unable to connect: read ECONNRESET"), { code: "ECONNRESET" });
+
+		expect(AIError.classifyNetworkCause(err)?.kind).toBe("reset");
+		expect(AIError.networkFailureMessage(err, "https://daily-cloudcode-pa.googleapis.com")).toContain(
+			"was reset by the network or proxy",
+		);
+	});
+
+	it("formats a rejected stream as the network sentence instead of the request dump", async () => {
+		const err = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
+		const message = await AIError.formatMessage(err, {
+			provider: "google-antigravity",
+			requestUrl: "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
+			rawRequestDump: {
+				provider: "google-antigravity",
+				api: "google-gemini-cli",
+				model: "gemini-4-argon",
+				method: "POST",
+				body: { request: { contents: [{ role: "user", parts: [{ text: "x".repeat(2048) }] }] } },
+			},
+		});
+
+		expect(message).toBe(
+			"Connection to daily-cloudcode-pa.googleapis.com was reset by the network or proxy. Check the proxy/VPN and retry.",
+		);
+		expect(message).not.toContain("raw-http-request");
+	});
+
+	it("keeps the original transport family when a provider wraps it as an incomplete stream", () => {
+		const cause = Object.assign(
+			new Error("EPROTO: The TLS handshake failed. Does the server speak TLS on this port?"),
+			{ code: "EPROTO" },
+		);
+		const wrapped = new AIError.ProviderResponseError("Cloud Code Assist stream closed before completion", {
+			provider: "google-antigravity",
+			kind: "incomplete-stream",
+			cause,
+		});
+
+		expect(AIError.networkFailureMessage(wrapped, "https://daily-cloudcode-pa.googleapis.com")).toBe(
+			"TLS connection failed for daily-cloudcode-pa.googleapis.com during handshake. Check the proxy/VPN and whether the configured proxy speaks HTTP(S) rather than SOCKS.",
+		);
+		const id = AIError.classify(wrapped);
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.retriable(id)).toBe(true);
+	});
+
+	it("does not read a Google region refusal as a local network failure", () => {
+		const body =
+			'{"error":{"code":400,"message":"User location is not supported for the API use.","status":"FAILED_PRECONDITION"}}';
+		expect(AIError.classifyNetworkCause(new Error(body))).toBeUndefined();
+		const err = new AIError.GeminiCliApiError(body, 400);
+		expect(AIError.isProviderRetryableError(err)).toBe(false);
+	});
+
 	it("leaves non-network errors alone", () => {
 		for (const err of [new Error("Overloaded"), new TypeError("fetch failed")]) {
 			expect(AIError.classifyNetworkCause(err)).toBeUndefined();
@@ -143,6 +270,7 @@ describe("network failure classification flags", () => {
 			tls: Object.assign(new Error("unable to verify the first certificate"), {
 				code: "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
 			}),
+			reset: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
 		};
 
 		for (const [kind, cause] of Object.entries(causes) as [AIError.NetworkFailureKind, unknown][]) {

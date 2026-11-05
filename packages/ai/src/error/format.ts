@@ -6,7 +6,8 @@ import {
 	rewriteCopilotError,
 } from "../utils/http-inspector";
 import { formatErrorMessageWithRetryAfter } from "../utils/retry-after";
-import { LLAMA_CPP_TOOL_CALL_PARSE_PATTERN } from "./flags";
+import { LLAMA_CPP_TOOL_CALL_PARSE_PATTERN, status } from "./flags";
+import { networkFailureMessage } from "./network-cause";
 
 function rewriteOllamaToolCallJsonError(message: string): string {
 	if (!LLAMA_CPP_TOOL_CALL_PARSE_PATTERN.test(message)) return message;
@@ -21,6 +22,8 @@ export interface FormatMessageOptions {
 	capturedErrorResponse?: CapturedHttpErrorResponse;
 	/** Provider id; gates provider-specific user-facing rewrites. */
 	provider?: string;
+	/** URL of the failed attempt, for the network-failure sentence's host. */
+	requestUrl?: string;
 }
 
 /**
@@ -33,6 +36,14 @@ export interface FormatMessageOptions {
  * otherwise the lightweight {@link formatErrorMessageWithRetryAfter} is used.
  */
 export async function formatMessage(error: unknown, opts: FormatMessageOptions = {}): Promise<string> {
+	// A rejected socket has no HTTP status: name the host, phase and proxy
+	// direction before the raw runtime text (or a 400-class request dump) can
+	// become the user-facing message.
+	const httpStatus = status(error) ?? opts.capturedErrorResponse?.status;
+	if (httpStatus === undefined) {
+		const networkMessage = networkFailureMessage(error, opts.requestUrl);
+		if (networkMessage !== undefined) return networkMessage;
+	}
 	let message = opts.rawRequestDump
 		? await finalizeErrorMessage(error, opts.rawRequestDump, opts.capturedErrorResponse)
 		: formatErrorMessageWithRetryAfter(error);

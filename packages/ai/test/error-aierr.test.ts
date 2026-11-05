@@ -236,3 +236,41 @@ describe("aierr flag helpers", () => {
 		expect(AIError.isTransientStreamParseError("Unexpected token in JSON")).toBe(false);
 	});
 });
+
+describe("AIError.classifyMessage — persisted stream transport wording", () => {
+	it("reclassifies persisted transport failures as transient and retryable", () => {
+		const messages = [
+			"EPROTO: The TLS handshake failed. Does the server speak TLS on this port?",
+			"read ECONNRESET",
+			"connection reset by peer",
+			"connection lost mid-reply (read ECONNRESET)",
+			"Cloud Code Assist stream closed before completion",
+			"Cloud Code Assist stream ended without a finish reason (connection dropped or response truncated)",
+			"Provider stream stalled while waiting for the next event",
+		];
+		for (const errorMessage of messages) {
+			const id = AIError.classifyMessage({ errorMessage });
+			expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+			expect(AIError.retriable(id)).toBe(true);
+		}
+	});
+
+	it("keeps a terminal 400 that wraps transport wording terminal", () => {
+		const id = AIError.classifyMessage({
+			errorMessage: "Cloud Code Assist stream closed before completion",
+			errorStatus: 400,
+		});
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(false);
+		expect(AIError.retriable(id)).toBe(false);
+	});
+
+	it("does not treat a region refusal as a transient transport error", () => {
+		const id = AIError.classifyMessage({
+			errorMessage:
+				'Cloud Code Assist API error (400): {"error":{"code":400,"message":"User location is not supported for the API use.","status":"FAILED_PRECONDITION"}}',
+			errorStatus: 400,
+		});
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(false);
+		expect(AIError.retriable(id)).toBe(false);
+	});
+});

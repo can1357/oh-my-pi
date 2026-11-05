@@ -11,11 +11,16 @@
  */
 
 /** Transport-level failure families that get their own user-visible wording. */
-export type NetworkFailureKind = "offline" | "unreachable" | "refused" | "tls";
+export type NetworkFailureKind = "offline" | "unreachable" | "refused" | "tls" | "reset";
+
+/** Which half of the TLS chain failed, when the evidence names one. */
+export type TlsFailurePhase = "handshake" | "certificate";
 
 /** What {@link classifyNetworkCause} reports about a rejected `fetch`: the failure family plus the bits its sentence needs. */
 export interface NetworkFailure {
 	kind: NetworkFailureKind;
+	/** `tls` only: handshake failure versus certificate verification. */
+	tlsPhase?: TlsFailurePhase;
 	/** Runtime error code when the chain exposed one (`ETIMEOUT`, `FailedToOpenSocket`, …). */
 	code: string | undefined;
 	/** Short parenthetical detail for the user-visible message. */
@@ -36,10 +41,22 @@ const UNREACHABLE_CODE_PATTERN = /^(?:ENOTFOUND|FailedToOpenSocket)$/i;
 const UNREACHABLE_TEXT_PATTERN = /\b(?:ENOTFOUND|FailedToOpenSocket|getaddrinfo)\b/i;
 const REFUSED_CODE_PATTERN = /^(?:ECONNREFUSED|ConnectionRefused)$/i;
 const REFUSED_TEXT_PATTERN = /\bECONNREFUSED\b|\bConnectionRefused\b|\bUnable to connect\b/i;
+const RESET_CODE_PATTERN = /^(?:ECONNRESET|ECONNABORTED|EPIPE|ERR_STREAM_PREMATURE_CLOSE)$/i;
+const RESET_TEXT_PATTERN =
+	/\bECONNRESET\b|\bECONNABORTED\b|\bEPIPE\b|ERR_STREAM_PREMATURE_CLOSE|\bconnection reset by peer\b|\bwas reset by the network or proxy\b|\bsocket connection (?:was )?closed unexpectedly\b|\bsocket hang up\b|\bother side closed\b|\buse of closed network connection\b|\b(?:read|write) ECONNRESET\b|\bconnection lost mid-reply\b/i;
 const TLS_CODE_PATTERN =
 	/^(?:CERT_|SELF_SIGNED|UNABLE_TO_GET_ISSUER_CERT|UNABLE_TO_VERIFY|DEPTH_ZERO_SELF_SIGNED_CERT|ERR_TLS_CERT)/i;
 const TLS_TEXT_PATTERN =
 	/unable to verify|certificate verif(?:y|ication)|self[- ]signed certificate|\bCERT_[A-Z_]+\b|\bSELF_SIGNED[A-Z_]*\b|\bUNABLE_TO_GET_ISSUER_CERT[A-Z_]*\b|\bUNABLE_TO_VERIFY_LEAF_SIGNATURE\b/i;
+// A TLS handshake failure is a different sentence from certificate
+// verification: the proxy/VPN answered, but not with a usable TLS endpoint
+// (Bun's `EPROTO: The TLS handshake failed. Does the server speak TLS on this
+// port?` is the shape seen when a SOCKS-only proxy port is configured as HTTP).
+// It is only classified as TLS when the text carries that evidence — a bare
+// `EPROTO` stays an unclassified transient transport failure instead of
+// claiming a certificate conclusion.
+const TLS_HANDSHAKE_TEXT_PATTERN =
+	/tls handshake failed|ssl handshake|does the server speak tls on this port|\btls connection failed\b|wrong version number|\bssl routines\b|\bssl3_get\b|ssl3_read_bytes|\btlsv1(?:[._]|\b)|\btls record\b|bad record mac/i;
 const GETADDRINFO_HOST_PATTERN = /\bgetaddrinfo\s+[A-Z_]+\s+([^\s,)]+)/i;
 const CONNECT_HOST_PATTERN = /\b(?:connect|connection to)\s+[A-Z_]+\s+([^\s,)]+?)(?::\d+)?(?=[\s,)]|$)/i;
 const BARE_HOST_PATTERN = /\b((?:[a-z0-9-]+\.)+[a-z]{2,})\b/i;
@@ -56,6 +73,12 @@ function kindOf(code: string | undefined, message: string | undefined): NetworkF
 	// TLS first: a certificate failure usually also reads as a failed connect.
 	if (code !== undefined && TLS_CODE_PATTERN.test(code)) return "tls";
 	if (message !== undefined && TLS_TEXT_PATTERN.test(message)) return "tls";
+	if (message !== undefined && TLS_HANDSHAKE_TEXT_PATTERN.test(message)) return "tls";
+	// Reset before refused/offline/unreachable: an explicit reset errno is
+	// decisive even when the wrapping text says "Unable to connect", and a proxy
+	// can surface a reset as a connect failure once its tunnel is already dead.
+	if (code !== undefined && RESET_CODE_PATTERN.test(code)) return "reset";
+	if (message !== undefined && RESET_TEXT_PATTERN.test(message)) return "reset";
 	if (code !== undefined && REFUSED_CODE_PATTERN.test(code)) return "refused";
 	if (message !== undefined && REFUSED_TEXT_PATTERN.test(message)) return "refused";
 	// Offline before unreachable: `getaddrinfo ETIMEOUT` matches both text patterns.
@@ -63,6 +86,19 @@ function kindOf(code: string | undefined, message: string | undefined): NetworkF
 	if (message !== undefined && OFFLINE_TEXT_PATTERN.test(message)) return "offline";
 	if (code !== undefined && UNREACHABLE_CODE_PATTERN.test(code)) return "unreachable";
 	if (message !== undefined && UNREACHABLE_TEXT_PATTERN.test(message)) return "unreachable";
+	return undefined;
+}
+
+/**
+ * Which TLS failure the evidence names. `EPROTO` alone says the TLS layer
+ * rejected the peer, not whether a certificate was evaluated, so it only
+ * refines the phrasing when handshake text is present; otherwise `undefined`
+ * falls back to the certificate wording the existing code used.
+ */
+function tlsPhaseOf(code: string | undefined, message: string | undefined): TlsFailurePhase | undefined {
+	if (message !== undefined && TLS_HANDSHAKE_TEXT_PATTERN.test(message)) return "handshake";
+	if (message !== undefined && TLS_TEXT_PATTERN.test(message)) return "certificate";
+	if (code !== undefined && TLS_CODE_PATTERN.test(code)) return "certificate";
 	return undefined;
 }
 
@@ -77,9 +113,17 @@ function hostFromTexts(texts: readonly string[]): string | undefined {
 	return undefined;
 }
 
-function detailOf(kind: NetworkFailureKind, code: string | undefined, message: string | undefined): string | undefined {
-	// The refused template already carries its own wording.
-	if (kind === "refused") return undefined;
+function detailOf(
+	kind: NetworkFailureKind,
+	code: string | undefined,
+	message: string | undefined,
+	tlsPhase: TlsFailurePhase | undefined,
+): string | undefined {
+	// The refused and reset templates already carry their own wording.
+	if (kind === "refused" || kind === "reset") return undefined;
+	// The handshake sentence is fixed by the failure itself; a parenthetical
+	// certificate/errno detail would read as a verification failure.
+	if (kind === "tls" && tlsPhase === "handshake") return undefined;
 	if (kind === "tls" && code !== undefined) return code;
 	const pattern = kind === "tls" ? TLS_TEXT_PATTERN : GETADDRINFO_DETAIL_PATTERN;
 	const matched = message === undefined ? undefined : pattern.exec(message)?.[0];
@@ -124,7 +168,14 @@ export function classifyNetworkCause(err: unknown): NetworkFailure | undefined {
 
 		const kind = kindOf(code, message);
 		if (kind !== undefined) {
-			return { kind, code, detail: detailOf(kind, code, message), host: hostFromTexts(texts) };
+			const tlsPhase = kind === "tls" ? tlsPhaseOf(code, message) : undefined;
+			return {
+				kind,
+				...(tlsPhase === undefined ? {} : { tlsPhase }),
+				code,
+				detail: detailOf(kind, code, message, tlsPhase),
+				host: hostFromTexts(texts),
+			};
 		}
 
 		if (!isObject || depth >= MAX_CAUSE_DEPTH) continue;
@@ -164,7 +215,11 @@ export function networkFailureMessage(err: unknown, requestUrl?: string): string
 		case "refused":
 			return `Couldn't connect to ${host} (connection refused). Check that the server is running and reachable.`;
 		case "tls":
-			return `TLS certificate verification failed for ${host}${detail}. If you're behind a TLS-inspecting proxy, its CA may need to be trusted.`;
+			return failure.tlsPhase === "handshake"
+				? `TLS connection failed for ${host} during handshake. Check the proxy/VPN and whether the configured proxy speaks HTTP(S) rather than SOCKS.`
+				: `TLS certificate verification failed for ${host}${detail}. If you're behind a TLS-inspecting proxy, its CA may need to be trusted.`;
+		case "reset":
+			return `Connection to ${host} was reset by the network or proxy. Check the proxy/VPN and retry.`;
 	}
 }
 

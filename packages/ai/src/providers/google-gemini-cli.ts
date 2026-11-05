@@ -14,7 +14,7 @@ import {
 	getAntigravityModelWireProfile,
 	getGeminiCliHeaders,
 } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
-import { extractHttpStatusFromError, fetchWithRetry, readSseJson } from "@oh-my-pi/pi-utils";
+import { extractHttpStatusFromError, fetchWithRetry, logger, readSseJson } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { oauthAccountKey } from "../auth/types";
 import type {
@@ -32,9 +32,19 @@ import type {
 } from "../types";
 import { normalizeSystemPrompts } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { extractGoogleValidationUrl, formatGoogleValidationRequiredMessage } from "../utils/google-validation";
+import {
+	extractGoogleValidationUrl,
+	formatGoogleRegionRefusalMessage,
+	formatGoogleValidationRequiredMessage,
+	isGoogleRegionRefusal,
+} from "../utils/google-validation";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
-import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
+import {
+	armPreResponseTimeout,
+	getStreamFirstEventTimeoutMs,
+	getStreamIdleTimeoutMs,
+	iterateWithIdleTimeout,
+} from "../utils/idle-iterator";
 // Refresh is the sole responsibility of AuthStorage (broker-aware, single-flighted);
 // the stream provider trusts the access token threaded through `options.apiKey`.
 import { normalizeSchemaForCCA } from "../utils/schema";
@@ -329,10 +339,92 @@ const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
 const DEFAULT_FIRST_EVENT_TIMEOUT_MS = 300_000;
 const FIRST_EVENT_TIMEOUT_ERROR = "Cloud Code Assist stream timed out while waiting for the first event";
+const STREAM_IDLE_TIMEOUT_ERROR = "Cloud Code Assist stream stalled while waiting for the next event";
+/**
+ * User-facing wording for a body that died mid-SSE. The original rejection
+ * (`ECONNRESET`, `EPROTO`, an aborted body iterator) is kept as `cause` so the
+ * classifier and the network-cause formatter still see it, while the header of
+ * the message says which stream ended.
+ */
+const STREAM_CLOSED_BEFORE_COMPLETION = "Cloud Code Assist stream closed before completion";
+/**
+ * Normalize a raw Cloud Code Assist body-read failure. Bun's fetch rejects the
+ * SSE reader with bare runtime errors (`ECONNRESET`, `EPROTO`, an aborted body
+ * iterator) that would otherwise reach `finalize` unclassified, carry wording
+ * like "pass `verbose: true`", and hide the fact that the stream was already
+ * mid-reply. Preserve aborts, watchdogs and errors that are already classified;
+ * wrap every other reader rejection as an `incomplete-stream` with the original
+ * error as `cause`, so the network-cause classifier and the session retry layer
+ * still see the underlying transport family.
+ */
+async function* normalizeCloudCodeBodyErrors<T>(
+	source: AsyncIterable<T>,
+	provider: string,
+	signal: AbortSignal | undefined,
+): AsyncGenerator<T> {
+	try {
+		for await (const item of source) yield item;
+	} catch (error) {
+		if (
+			signal?.aborted ||
+			error instanceof AIError.AbortError ||
+			error instanceof AIError.StreamTimeoutError ||
+			error instanceof AIError.ProviderResponseError ||
+			error instanceof AIError.ProviderHttpError ||
+			(error instanceof Error && error.name === "AbortError") ||
+			// A complete but malformed SSE `data:` frame is a parser rejection,
+			// not a body-read drop: wrapping it as `incomplete-stream` would make
+			// the malformed response replay as a transient transport failure.
+			error instanceof SyntaxError ||
+			(error instanceof Error && error.name === "SyntaxError")
+		) {
+			throw error;
+		}
+		throw new AIError.ProviderResponseError(STREAM_CLOSED_BEFORE_COMPLETION, {
+			provider,
+			kind: "incomplete-stream",
+			cause: error,
+		});
+	}
+}
+
 const RATE_LIMIT_BUDGET_MS = 5 * 60 * 1000;
 const CLAUDE_THINKING_BETA_HEADER = "interleaved-thinking-2025-05-14";
 const GOOGLE_GEMINI_REFRESH_SKEW_MS = 60_000;
 const ANTIGRAVITY_REFRESH_SKEW_MS = 60_000;
+
+type CloudCodeAttemptPhase = "pre_response" | "first_event" | "streaming" | "finish_validation";
+
+/** Host of an attempt URL for diagnostics; never the full URL/token. */
+function endpointHostOf(url: string): string {
+	try {
+		return new URL(url).host;
+	} catch {
+		return url;
+	}
+}
+
+/** Non-sensitive failure family for attempt logs and incident reports. */
+function transportFailureFamily(error: unknown, phase: CloudCodeAttemptPhase): string {
+	if (error instanceof AIError.StreamTimeoutError) return "idle_timeout";
+	if (error instanceof Error && isGoogleRegionRefusal(error.message)) return "region_refused";
+	// Walk the cause chain first: an `incomplete-stream` wrapper gets the more
+	// specific family its underlying rejection names.
+	const network = AIError.classifyNetworkCause(error);
+	if (network !== undefined) {
+		if (network.kind === "tls") return network.tlsPhase === "handshake" ? "tls_handshake" : "tls_certificate";
+		if (network.kind === "reset") return "connection_reset";
+		return network.kind;
+	}
+	if (error instanceof AIError.ProviderResponseError) {
+		return error.kind === "incomplete-stream" ? "incomplete_stream" : error.kind;
+	}
+	const id = AIError.classify(error);
+	if (AIError.is(id, AIError.Flag.Timeout)) return "timeout";
+	if (AIError.is(id, AIError.Flag.Transient)) return "transient";
+	if (AIError.is(id, AIError.Flag.Abort)) return "aborted";
+	return phase;
+}
 
 const optionalCredentialString = type("unknown").pipe(raw => {
 	const out = type("string")(raw);
@@ -513,6 +605,10 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			timestamp: Date.now(),
 		};
 		let rawRequestDump: RawHttpRequestDump | undefined;
+		// Attempt diagnostics live outside the try so the catch can name the host
+		// that failed; both are reset per endpoint attempt.
+		let attemptUrl: string | undefined;
+		let attemptPhase: CloudCodeAttemptPhase = "pre_response";
 
 		try {
 			const apiKeyRaw = options?.apiKey;
@@ -639,6 +735,11 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					undefined,
 					model.compat.streamFirstEventTimeoutMs ?? DEFAULT_FIRST_EVENT_TIMEOUT_MS,
 				);
+			// Steady-state silence after the first event. The provider owns this
+			// watchdog so a half-open proxied connection is bounded by the same
+			// policy as the shared wrapper, and so the timeout surfaces as a
+			// StreamTimeoutError instead of the transport's raw rejection.
+			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs();
 			const callerSignal = options?.signal;
 			const toolNames = new Set(context.tools?.map(t => t.name) ?? []);
 			const isFlashLeakModel = model.compat.flashStreamLeakWorkaround;
@@ -653,6 +754,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					if (!firstTokenTime) firstTokenTime = performance.now();
 					stream.push({ type: "start", partial: output });
 					started = true;
+					attemptPhase = "streaming";
 				}
 			};
 
@@ -785,17 +887,28 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				const chunks = iterateWithIdleTimeout(
 					// Attach the observer only when a diagnostic listener exists: any
 					// observer turns on per-line raw capture in `readSseJson`.
-					readSseJson<CloudCodeAssistResponseChunk>(
-						activeResponse.body,
+					normalizeCloudCodeBodyErrors(
+						readSseJson<CloudCodeAssistResponseChunk>(
+							activeResponse.body,
+							responseSignal,
+							onSseEvent
+								? event => onSseEvent({ event: event.event, data: event.data, raw: [...event.raw] }, model)
+								: undefined,
+						),
+						model.provider,
 						responseSignal,
-						onSseEvent
-							? event => onSseEvent({ event: event.event, data: event.data, raw: [...event.raw] }, model)
-							: undefined,
 					),
 					{
+						idleTimeoutMs,
 						firstItemTimeoutMs: firstEventTimeoutMs,
-						errorMessage: FIRST_EVENT_TIMEOUT_ERROR,
+						errorMessage: STREAM_IDLE_TIMEOUT_ERROR,
 						firstItemErrorMessage: FIRST_EVENT_TIMEOUT_ERROR,
+						// Closing the generator alone leaves the underlying body reader
+						// suspended in an in-flight `read()`; aborting the response signal
+						// cancels that reader immediately so the proxied socket is torn
+						// down instead of lingering until the peer gives up.
+						onIdle: () =>
+							responseAbortController.abort(new AIError.StreamTimeoutError(STREAM_IDLE_TIMEOUT_ERROR)),
 						onFirstItemTimeout: () =>
 							responseAbortController.abort(new AIError.StreamTimeoutError(FIRST_EVENT_TIMEOUT_ERROR)),
 						abortSignal: options?.signal,
@@ -954,6 +1067,18 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			for (let i = 0; i < endpoints.length; i++) {
 				const endpoint = endpoints[i];
 				const isLastEndpoint = i === endpoints.length - 1;
+				const endpointUrl = `${endpoint}/v1internal:streamGenerateContent?alt=sse`;
+				const endpointHost = endpointHostOf(endpoint);
+				const attemptStartedAt = performance.now();
+				attemptUrl = endpointUrl;
+				attemptPhase = "pre_response";
+				logger.debug("cloud code assist attempt", {
+					provider: model.provider,
+					model: model.id,
+					endpoint: endpointHost,
+					attempt: i + 1,
+					attempts: endpoints.length,
+				});
 				try {
 					started = false;
 					resetOutput();
@@ -964,7 +1089,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					const watchdog = armPreResponseTimeout(callerSignal, firstEventTimeoutMs);
 					let response: Response;
 					try {
-						response = await fetchWithRetry(() => `${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
+						response = await fetchWithRetry(() => endpointUrl, {
 							method: "POST",
 							headers: requestHeaders,
 							body: requestBodyJson,
@@ -993,7 +1118,9 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 									"retry your request",
 									parsedCredentials.email,
 								)
-							: errorText;
+							: response.status === 400 && isGoogleRegionRefusal(errorText)
+								? formatGoogleRegionRefusalMessage()
+								: errorText;
 						throw new AIError.GeminiCliApiError(
 							`Cloud Code Assist API error (${response.status}): ${errorMessage}`,
 							response.status,
@@ -1001,7 +1128,9 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						);
 					}
 
-					const requestUrl = response.url;
+					attemptPhase = "first_event";
+					const responseUrl = response.url || endpointUrl;
+					attemptUrl = responseUrl;
 					let currentResponse = response;
 
 					for (let emptyAttempt = 0; emptyAttempt <= MAX_EMPTY_STREAM_RETRIES; emptyAttempt++) {
@@ -1017,11 +1146,11 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 								throw new AIError.AbortError("Request was aborted");
 							}
 
-							if (!requestUrl) {
+							if (!responseUrl) {
 								throw new AIError.ConfigurationError("Missing request URL");
 							}
 
-							currentResponse = await (options?.fetch ?? fetch)(requestUrl, {
+							currentResponse = await (options?.fetch ?? fetch)(responseUrl, {
 								method: "POST",
 								headers: requestHeaders,
 								body: requestBodyJson,
@@ -1031,7 +1160,11 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							if (!currentResponse.ok) {
 								const retryErrorText = await currentResponse.text();
 								throw new AIError.GeminiCliApiError(
-									`Cloud Code Assist API error (${currentResponse.status}): ${retryErrorText}`,
+									`Cloud Code Assist API error (${currentResponse.status}): ${
+										currentResponse.status === 400 && isGoogleRegionRefusal(retryErrorText)
+											? formatGoogleRegionRefusalMessage()
+											: retryErrorText
+									}`,
 									currentResponse.status,
 									{ headers: currentResponse.headers },
 								);
@@ -1088,6 +1221,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						throw new AIError.AbortError("Request was aborted");
 					}
 
+					attemptPhase = "finish_validation";
 					if (!sawFinishReason) {
 						throw new AIError.ProviderResponseError(
 							"Cloud Code Assist stream ended without a finish reason (connection dropped or response truncated)",
@@ -1111,16 +1245,28 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					break;
 				} catch (error) {
 					const status = extractHttpStatusFromError(error);
-					if (
+					const willFailover =
 						!isLastEndpoint &&
 						!started &&
 						(AIError.isTransientStatus(status) ||
 							(status === undefined &&
 								!(error instanceof AIError.ProviderResponseError && error.kind === "output") &&
-								AIError.retriable(AIError.classify(error))))
-					) {
-						continue;
+								AIError.retriable(AIError.classify(error))));
+					if (!(error instanceof AIError.AbortError) && !(error instanceof Error && error.name === "AbortError")) {
+						logger.warn("cloud code assist attempt failed", {
+							provider: model.provider,
+							model: model.id,
+							endpoint: endpointHost,
+							phase: attemptPhase,
+							elapsedMs: Math.round(performance.now() - attemptStartedAt),
+							family: transportFailureFamily(error, attemptPhase),
+							status,
+							attempt: i + 1,
+							attempts: endpoints.length,
+							endpointFailover: willFailover,
+						});
 					}
+					if (willFailover) continue;
 					throw error;
 				}
 			}
@@ -1137,7 +1283,14 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
-			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal, rawRequestDump });
+			const result = await AIError.finalize(error, {
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				signal: options?.signal,
+				rawRequestDump,
+				requestUrl: attemptUrl,
+			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
