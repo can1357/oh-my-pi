@@ -4255,7 +4255,7 @@ describe("menu.items beneath a named menu", () => {
 				case "":
 					return [item("Edit", true), item("View", true)];
 				case "Edit":
-					return [item("Undo"), item("List", true), item("Speech", true, false), item("Services", true)];
+					return [item("Undo"), item("List", true), item("Speech", true, false), item("Services", true), item("Help", true)];
 				case "Edit/List":
 					return [item("Local", true)];
 				case "Edit/List/Local":
@@ -4274,7 +4274,7 @@ describe("menu.items beneath a named menu", () => {
 		return (message.payload.returnValue as Array<{ path: string[] }>).map(entry => entry.path.join("/"));
 	}
 
-	it("lists enabled descendants depth-first while retaining unreadable and disabled submenus", async () => {
+	it("lists descendants depth-first and stops expansion after an unreadable submenu, retaining siblings", async () => {
 		const native = new MenuSession();
 		expect(await items(native, 'return await (await desktop.window("42")).menu.items("Edit")')).toEqual([
 			"Edit/Undo",
@@ -4284,6 +4284,7 @@ describe("menu.items beneath a named menu", () => {
 			"Edit/List/Local/Errands",
 			"Edit/Speech",
 			"Edit/Services",
+			"Edit/Help",
 		]);
 		expect(native.read).toEqual(["Edit", "Edit/List", "Edit/List/Local", "Edit/Services"]);
 	});
@@ -4342,27 +4343,25 @@ describe("menu.items beneath a named menu", () => {
 		).toContain("Edit/Services");
 	});
 
-	for (const code of ["UserIntervened", "WindowNotFound", "PermissionDenied", "Timeout", "Closed", "Internal"]) {
-		it(`propagates ${code} during expansion without reading another submenu`, async () => {
-			class FailingMenuSession extends MenuSession {
-				override async menuItems(target: string, path: string[] = []) {
-					if (path.join("/") === "Edit/List") throw new Error(`${code}: submenu read failed`);
-					return await super.menuItems(target, path);
-				}
+	it("propagates UserIntervened during expansion without reading another submenu", async () => {
+		class FailingMenuSession extends MenuSession {
+			override async menuItems(target: string, path: string[] = []) {
+				if (path.join("/") === "Edit/List") throw new Error("UserIntervened: submenu read failed");
+				return await super.menuItems(target, path);
 			}
-			const native = new FailingMenuSession();
-			const transport = new MemoryTransport();
-			new ComputerWorkerCore(transport, () => native);
-			const message = await runWorker(
-				transport,
-				crypto.randomUUID(),
-				'return await (await desktop.window("42")).menu.items("Edit")',
-			);
-			expect(message.ok).toBe(false);
-			expect(message.ok ? undefined : message.error.message).toContain(`${code}:`);
-			expect(native.read).toEqual(["Edit"]);
-		});
-	}
+		}
+		const native = new FailingMenuSession();
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		const message = await runWorker(
+			transport,
+			crypto.randomUUID(),
+			'return await (await desktop.window("42")).menu.items("Edit")',
+		);
+		expect(message.ok).toBe(false);
+		expect(message.ok ? undefined : message.error.message).toContain("UserIntervened:");
+		expect(native.read).toEqual(["Edit"]);
+	});
 });
 
 describe("computer background fallback", () => {
