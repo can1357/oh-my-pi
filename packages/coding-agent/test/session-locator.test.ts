@@ -347,6 +347,24 @@ describe("session index: lookups by id", () => {
 		expect(fs.readdirSync(getSessionsDir()).filter(name => name.endsWith(".tmp"))).toEqual([]);
 	});
 
+	it("reports a transcript it read without finding an id, rather than counting it as walked", async () => {
+		const bucket = path.join(getSessionsDir(), "--no-id--");
+		const good = path.join(bucket, "2026-01-02T03-04-05-000Z_019a0019-0000-7000-8000-000000000001.jsonl");
+		writeTranscript(good, "019a0019-0000-7000-8000-000000000001", "/p");
+		// Readable and well-formed, but no session header and a name that
+		// records no id: a rebuild derives nothing from it, and only this
+		// report would ever say so.
+		const silent = path.join(bucket, "Worker.jsonl");
+		fs.writeFileSync(silent, `${JSON.stringify({ type: "message", id: "m1" })}\n`);
+
+		const rebuilt = await rebuildSessionLocator(getSessionsDir());
+		expect(rebuilt.indexed).toBe(1);
+		expect(rebuilt.unreadable.map(entry => entry.bucket)).toEqual([silent]);
+		expect(
+			(await resolveResumableSession("019a0019-0000-7000-8000-000000000001", cwdB))?.session.path,
+		).toBe(good);
+	});
+
 	it("`omp session reindex` rebuilds every root and prints what it indexed", async () => {
 		const legacyId = "019a0000-2222-7222-8333-444455556666";
 		const legacy = path.join(getSessionsDir(), "--legacy--", `2026-01-02T03-04-05-000Z_${legacyId}.jsonl`);
