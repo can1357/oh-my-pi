@@ -67,6 +67,11 @@ pub trait Env {
 	fn is_assoc(&mut self, name: &[u8]) -> bool;
 	/// The compiled-expression cache to use.
 	fn cache(&self) -> &Cache;
+	/// The compiled form of `text` (leading blanks removed): [`Cache::get`]
+	/// of [`Env::cache`], unless the environment keeps a nearer memo.
+	fn compiled(&mut self, text: &[u8]) -> Arc<Expr> {
+		self.cache().get(text)
+	}
 	/// Report a diagnostic that does not stop evaluation (bash prints it
 	/// and goes on: `` `a[]': not a valid identifier ``), with the prefix
 	/// of the running command.
@@ -202,6 +207,46 @@ impl Gens {
 			self.old = std::mem::take(&mut self.young);
 		}
 		self.young.insert(text, expr);
+	}
+}
+
+/// Slots of a [`Recent`] memo.
+const RECENT_SLOTS: usize = 256;
+
+/// The expressions one shell evaluated last, direct-mapped by a hash of
+/// their text: a loop's arithmetic finds its compiled form here without
+/// the shared [`Cache`]'s lock and map.
+pub struct Recent([Option<(BString, Arc<Expr>)>; RECENT_SLOTS]);
+
+impl Default for Recent {
+	fn default() -> Self {
+		Self([const { None }; RECENT_SLOTS])
+	}
+}
+
+impl Recent {
+	/// The compiled form of `text`: from here, else from `shared` (and kept
+	/// here).
+	pub fn get(&mut self, text: &[u8], shared: &Cache) -> Arc<Expr> {
+		// Eight bytes per step: the text of a loop's expression is hashed
+		// on every evaluation.
+		let (words, tail) = text.as_chunks::<8>();
+		let mix = |h: u64, w: u64| (h.rotate_left(5) ^ w).wrapping_mul(0x517c_c1b7_2722_0a95);
+		let mut last = [0; 8];
+		last[..tail.len()].copy_from_slice(tail);
+		let h = words
+			.iter()
+			.fold(text.len() as u64, |h, w| mix(h, u64::from_le_bytes(*w)));
+		let h = mix(h, u64::from_le_bytes(last));
+		let slot = &mut self.0[(h >> (u64::BITS - RECENT_SLOTS.ilog2())) as usize];
+		if let Some((t, e)) = slot
+			&& t.as_slice() == text
+		{
+			return Arc::clone(e);
+		}
+		let expr = shared.get(text);
+		*slot = Some((BString::from(text), Arc::clone(&expr)));
+		expr
 	}
 }
 
@@ -357,7 +402,7 @@ fn eval_depth(text: &[u8], env: &mut dyn Env, depth: u32) -> Result<i64, Error> 
 	if let Some(v) = decimal_value(text, depth) {
 		return Ok(v);
 	}
-	let expr = env.cache().get(text);
+	let expr = env.compiled(text);
 	Walk { expr: &expr, env, depth, noeval: 0 }.eval(&expr.root)
 }
 

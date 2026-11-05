@@ -459,22 +459,22 @@ test("gc --restore leaves a .jsonl.gz outside the archive where its owner put it
 	expect(await Bun.file(path.join(root, "backups", "mine.jsonl")).exists()).toBe(false);
 });
 
-test("a symlinked transcript is reported and kept without reading the file it points at", async () => {
-	const store = path.join(root, "offload");
-	await fs.mkdir(store, { recursive: true });
-	const target = path.join(store, "offloaded.jsonl");
-	const original = await fs.readFile(sessionFile);
-	await fs.rename(sessionFile, target);
-	await fs.symlink(target, sessionFile);
+for (const relative of [false, true]) {
+	test(`round56 archive reads a ${relative ? "relative" : "absolute"} live transcript link by content`, async () => {
+		const target = path.join(root, "offloaded.jsonl");
+		const original = await fs.readFile(sessionFile);
+		await fs.rename(sessionFile, target);
+		await fs.symlink(relative ? path.relative(path.dirname(sessionFile), target) : target, sessionFile);
+		expect(await new FileSessionStorage().readText(sessionFile)).toBe(original.toString());
 
-	const result = await archiveEverything();
+		const result = await archiveOnly();
 
-	expect(result.archive?.archived).toBe(0);
-	expect(result.archive?.errors.join("\n")).toContain(`${sessionFile} is a symbolic link`);
-	expect(await Bun.file(archiveFile).exists()).toBe(false);
-	expect((await fs.lstat(sessionFile)).isSymbolicLink()).toBe(true);
-	expect(await fs.readFile(target)).toEqual(original);
-});
+		expect(result.archive).toMatchObject({ archived: 1, errors: [] });
+		expect(Bun.gunzipSync(await fs.readFile(archiveFile))).toEqual(new Uint8Array(original));
+		expect((await fs.lstat(sessionFile)).isSymbolicLink()).toBe(true);
+		expect(await fs.readFile(target)).toEqual(original);
+	});
+}
 
 test("a file a transcript was symlinked to is not deleted when it is shared", async () => {
 	const keep = path.join(root, "notes", "keep.jsonl");
@@ -513,20 +513,34 @@ test("gc --archive refuses an archive destination holding a different session", 
 	expect(await Bun.file(sessionFile).exists()).toBe(true);
 });
 
-test("gc --archive reports a linked nested transcript and keeps the whole session", async () => {
+test("round56 archive reads a linked nested transcript by content and keeps its original", async () => {
 	const artifacts = sessionFile.slice(0, -".jsonl".length);
-	const nestedStore = path.join(root, "offload-nested");
-	await fs.mkdir(nestedStore, { recursive: true });
-	const nestedTarget = path.join(nestedStore, "sub.jsonl");
-	await Bun.write(nestedTarget, sessionBody(sessionId("sub-1"), "nested", root));
+	const nestedTarget = path.join(root, "offloaded-sub.jsonl");
+	const body = sessionBody(sessionId("sub-1"), "nested", root);
+	await Bun.write(nestedTarget, body);
+	await fs.utimes(nestedTarget, new Date(0), new Date(0));
 	await fs.mkdir(artifacts, { recursive: true });
-	await fs.symlink(nestedTarget, path.join(artifacts, "sub.jsonl"));
+	const link = path.join(artifacts, "sub.jsonl");
+	await fs.symlink(nestedTarget, link);
 
-	const result = await archiveOnly();
-	expect(result.archive?.archived).toBe(0);
-	expect(result.archive?.errors.join("\n")).toContain(`${path.join(artifacts, "sub.jsonl")} is a symbolic link`);
-	expect(await Bun.file(nestedTarget).text()).toContain("sub-1");
-	expect(await Bun.file(sessionFile).text()).toContain(PROMPT);
+	expect((await archiveOnly()).archive).toMatchObject({ archived: 1, errors: [] });
+	expect(await Bun.file(path.join(archiveFile.slice(0, -9), "sub.jsonl")).text()).toBe(body);
+	expect((await runGcCommand({ flags: reclaimApply() })).reclaim?.reclaimed).toBe(0);
+	expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+	expect(await Bun.file(nestedTarget).text()).toBe(body);
+});
+
+test("round56 archive reads a linked artifact root by content and reclaim keeps the original tree", async () => {
+	const artifacts = sessionFile.slice(0, -6);
+	const target = path.join(root, "offloaded-artifacts");
+	await Bun.write(path.join(target, "tool.log"), "OFFLOADED ARTIFACT");
+	await fs.symlink(target, artifacts);
+
+	expect((await archiveOnly()).archive).toMatchObject({ archived: 1, errors: [] });
+	expect(await Bun.file(path.join(archiveFile.slice(0, -9), "tool.log")).text()).toBe("OFFLOADED ARTIFACT");
+	expect((await runGcCommand({ flags: reclaimApply() })).reclaim?.reclaimed).toBe(0);
+	expect((await fs.lstat(artifacts)).isSymbolicLink()).toBe(true);
+	expect(await Bun.file(path.join(target, "tool.log")).text()).toBe("OFFLOADED ARTIFACT");
 });
 
 test("restoring an archived session waits for a maintenance run instead of failing", async () => {
@@ -8119,7 +8133,7 @@ for (const writer of ["with input waiting", "with nobody writing"] as const) {
 					if (pipe) expect(await pipe.left()).toBe(PIPE_PAYLOAD);
 					expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
 					if (command.startsWith("archive")) {
-						expect(outcome).toContain(`${link} is a symbolic link`);
+						expect(outcome).toContain(`${link} is a FIFO`);
 						expect(outcome).toContain('"wouldArchive":0');
 						expect(await Bun.file(sessionFile).exists()).toBe(true);
 					}

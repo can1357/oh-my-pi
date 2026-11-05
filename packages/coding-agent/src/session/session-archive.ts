@@ -909,9 +909,14 @@ export async function handleBeginsWith(whole: fs.FileHandle, prefix: fs.FileHand
  * there after an earlier look — throws {@link NotARegularFile} with nothing
  * read, so it is neither waited on nor drained. Nothing at the name throws
  * `ENOENT`, as a read by name would.
+ * Archive-owned names refuse links by default; live callers explicitly read
+ * through links by content with `noFollow: false`.
  */
-export async function* bytesOfRegularFile(file: string): AsyncGenerator<Uint8Array> {
-	const handle = await openRegularFile(file, { noFollow: true });
+export async function* bytesOfRegularFile(
+	file: string,
+	options: { noFollow: boolean } = { noFollow: true },
+): AsyncGenerator<Uint8Array> {
+	const handle = await openRegularFile(file, options);
 	if (!handle) throw absentFile(file);
 	try {
 		yield* bytesOfHandle(handle);

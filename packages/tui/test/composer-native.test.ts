@@ -1,5 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { TspKind } from "@oh-my-pi/pi-wire";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Container, Text } from "@oh-my-pi/pi-tui";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { describeWorkingRow, type WorkingRowSpec } from "@oh-my-pi/pi-tui/components/loader";
@@ -642,6 +644,35 @@ describe("native composer without a status strip", () => {
 		editor.composerFacts = line;
 		editor.handleNativeEvent({ type: "action", key: "bar/model", act: "status.model", mods: [] });
 		expect(actions).toEqual(["status.model"]);
+	});
+});
+
+describe("native composer first frame", () => {
+	it("draws the cached thinking level before the session wires its own state", () => {
+		setNativeRendering(true);
+		const composer = new Composer({
+			terminal: new VirtualTerminal(80, 24),
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+			status: {
+				statusLine: {
+					settings: { preset: "custom", leftSegments: ["model"], rightSegments: [], compactThinkingLevel: true },
+					gitEnabled: false,
+					model: getBundledModel("anthropic", "claude-sonnet-4-5"),
+					thinkingLevel: ThinkingLevel.High,
+					autoThinking: false,
+					fastMode: false,
+					usingSubscription: false,
+					autoCompactEnabled: false,
+					compactionBoundaries: null,
+				},
+			},
+		});
+		try {
+			const effort = byRole(composer.editor.describe(cx), "omp.composer.model.effort");
+			expect(effort).toMatchObject({ k: "effort", p: { level: "high" } });
+		} finally {
+			composer.stop();
+		}
 	});
 });
 

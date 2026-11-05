@@ -15,7 +15,7 @@ import { collectGcErrors, type GcResult, runGcCommand } from "@oh-my-pi/pi-codin
 import * as gcCompress from "@oh-my-pi/pi-coding-agent/cli/gc-compress";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
-import { BlobStore, blobStagingPath } from "@oh-my-pi/pi-coding-agent/session/blob-store";
+import { BlobStore, blobStagingPath, resolveImageData } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import * as libc from "@oh-my-pi/pi-coding-agent/session/libc";
 import * as openFileHolders from "@oh-my-pi/pi-coding-agent/session/open-file-holders";
 import * as regularFile from "@oh-my-pi/pi-coding-agent/session/regular-file";
@@ -222,6 +222,162 @@ describe("runGcCommand blob sweep", () => {
 		expect(await Bun.file(orphan).exists()).toBe(false);
 		expect(await Bun.file(referenced).exists()).toBe(true);
 	});
+
+	test("round56 blob sweep reads a live transcript link by content", async () => {
+		const hash = hashFor("linked-reference");
+		const blob = await writeBlob(root, hash, "REFERENCED");
+		await agePath(blob);
+		const file = await writeSession(root, "project", "linked", "complete", { blobRef: `blob:sha256:${hash}` });
+		const target = path.join(root, "offloaded.jsonl");
+		await fs.rename(file, target);
+		await fs.symlink(path.relative(path.dirname(file), target), file);
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true, json: true } });
+
+		expect(result.blobs).toMatchObject({ referenced: 1, deleted: 0, errors: [] });
+		expect(await Bun.file(blob).text()).toBe("REFERENCED");
+	});
+
+	test("round56 an offline linked transcript cannot lose its persisted image blob", async () => {
+		const store = new BlobStore(getBlobsDir(root));
+		const png = Buffer.from(
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6sjIAAAAASUVORK5CYII=",
+			"base64",
+		);
+		const blob = await store.put(png);
+		await agePath(blob.path);
+		const file = await writeSession(root, "project", "offline", "complete");
+		await fs.appendFile(
+			file,
+			`${JSON.stringify({
+				type: "message",
+				message: { role: "user", content: [{ type: "image", mimeType: "image/png", data: blob.ref }] },
+			})}\n`,
+		);
+		const target = path.join(root, "offloaded.jsonl");
+		await fs.rename(file, target);
+		await fs.symlink(target, file);
+		expect(await resolveImageData(store, blob.ref)).toBe(png.toString("base64"));
+		await fs.rename(target, `${target}.offline`);
+
+		const child = Bun.spawn(
+			[
+				process.execPath,
+				path.resolve(import.meta.dir, "../src/cli.ts"),
+				"gc",
+				"--agent-dir",
+				root,
+				"--blobs",
+				"--apply",
+				"--json",
+			],
+			{ stdout: "pipe", stderr: "pipe" },
+		);
+		const [, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+
+		expect(exitCode).toBe(1);
+		expect(stderr).toContain(file);
+		expect(stderr).toContain("symbolic link");
+		expect(stderr).toContain(target);
+		expect(stderr).toContain("restore");
+		expect(stderr).toContain("remove");
+		expect(stderr).toContain("rerun");
+		expect(await fs.readFile(blob.path)).toEqual(png);
+		await fs.rename(`${target}.offline`, target);
+		expect(await new FileSessionStorage().readText(file)).toContain(blob.ref);
+		expect(await resolveImageData(store, blob.ref)).toBe(png.toString("base64"));
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true, json: true } });
+		expect(result.blobs).toMatchObject({ referenced: 1, deleted: 0, errors: [] });
+	});
+
+	test("round56 blob sweep reports a dangling nested live transcript instead of deleting any blob", async () => {
+		const blob = await writeBlob(root, hashFor("unknown-reference"), "KEEP ON INCOMPLETE SCAN");
+		await agePath(blob);
+		const file = path.join(getSessionsDir(root), "project", "parent", "nested", "child.jsonl");
+		await fs.mkdir(path.dirname(file), { recursive: true });
+		await fs.symlink(path.join(root, "missing", "transcript.jsonl"), file);
+
+		await expect(runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } })).rejects.toThrow(file);
+		expect(await Bun.file(blob).text()).toBe("KEEP ON INCOMPLETE SCAN");
+	});
+
+	test("round56 a dangling hidden transcript behind a live directory link stops blob deletion", async () => {
+		const blob = await writeBlob(root, hashFor("offloaded-nested-reference"), "KEEP OFFLOADED CHILD IMAGE");
+		await agePath(blob);
+		const tree = path.join(getSessionsDir(root), "project", "parent");
+		const offloaded = path.join(root, "offloaded-tree");
+		await fs.mkdir(path.join(offloaded, ".nested"), { recursive: true });
+		await fs.mkdir(path.dirname(tree), { recursive: true });
+		await fs.symlink(offloaded, tree);
+		const child = path.join(tree, ".nested", "child.jsonl");
+		await fs.symlink(path.join(root, "missing-child.jsonl"), child);
+
+		await expect(runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } })).rejects.toThrow(child);
+		expect(await Bun.file(blob).text()).toBe("KEEP OFFLOADED CHILD IMAGE");
+	});
+
+	test("round56 a dangling non-transcript artifact does not stop blob collection", async () => {
+		const blob = await writeBlob(root, hashFor("unreferenced-with-artifact"), "ORPHAN");
+		await agePath(blob);
+		const hash = hashFor("referenced-with-artifact");
+		const referenced = await writeBlob(root, hash, "REFERENCED");
+		await agePath(referenced);
+		await writeSession(root, "project", "session", "complete", { blobRef: `blob:sha256:${hash}` });
+		const tree = path.join(getSessionsDir(root), "project", "session");
+		const offloaded = path.join(root, "offloaded-artifacts");
+		await fs.mkdir(path.join(offloaded, ".nested"), { recursive: true });
+		await fs.symlink(offloaded, tree);
+		const artifact = path.join(tree, ".nested", "tool.log");
+		await fs.symlink(path.join(root, "missing.log"), artifact);
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs).toMatchObject({ referenced: 1, deleted: 1, errors: [] });
+		expect(await Bun.file(blob).exists()).toBe(false);
+		expect(await Bun.file(referenced).text()).toBe("REFERENCED");
+		expect((await fs.lstat(artifact)).isSymbolicLink()).toBe(true);
+	});
+
+	test("round56 a live directory symlink cycle finishes blob collection without losing referenced content", async () => {
+		const orphan = await writeBlob(root, hashFor("cycle-orphan"), "ORPHAN");
+		await agePath(orphan);
+		const hash = hashFor("cycle-reference");
+		const referenced = await writeBlob(root, hash, "REFERENCED THROUGH CYCLE");
+		await agePath(referenced);
+		await writeSession(root, "project", "cycle-session", "complete", { blobRef: `blob:sha256:${hash}` });
+		await fs.symlink(getSessionsDir(root), path.join(getSessionsDir(root), "project", "cycle"));
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs).toMatchObject({ referenced: 1, deleted: 1, errors: [] });
+		expect(await Bun.file(orphan).exists()).toBe(false);
+		expect(await Bun.file(referenced).text()).toBe("REFERENCED THROUGH CYCLE");
+	});
+
+	for (const owned of ["sessions", "reclaimed"] as const) {
+		test(`round56 blob scan never reads foreign bytes through an archive/${owned} transcript link`, async () => {
+			const foreign = path.join(root, "foreign.gz");
+			await Bun.write(foreign, gzipSync(Buffer.from("{}\n")));
+			const file = path.join(root, "archive", owned, "project", "session.jsonl.gz");
+			await fs.mkdir(path.dirname(file), { recursive: true });
+			await fs.symlink(foreign, file);
+			let bytesRead = 0;
+			readsThrough(new Set([file]), read => async (...args) => {
+				const result = await read(...args);
+				bytesRead += result.bytesRead;
+				return result;
+			});
+
+			await expect(runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } })).rejects.toThrow(
+				"symbolic link",
+			);
+			expect(bytesRead).toBe(0);
+		});
+	}
 
 	test("--apply keeps fresh unreferenced blobs out of sweep candidates", async () => {
 		const blob = await writeBlob(root, hashFor("fresh-orphan"), "fresh");

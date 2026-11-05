@@ -2,16 +2,16 @@
  * The one way `omp gc` opens a file in a session tree: the live sessions, an
  * archive, a staging ledger or a quarantine.
  *
- * Anything can stand at a name in those trees, directly or through a link:
- * a FIFO, a socket, a device. Reading one is never safe. A FIFO with no
- * writer, or a device nobody drives, waits for ever; one that is being
- * written to hands over bytes that were meant for someone else, and once
- * read they are gone from it, with no copy anywhere. So no name is read
- * through: every open is non-blocking, and the descriptor's own `fstat` —
- * not a look at the name, which can change after it — decides whether what
- * was opened is a regular file. Anything else is refused by throwing
- * {@link NotARegularFile}, which the caller reports or deliberately turns
- * into an answer; nothing is skipped without a decision at the call.
+ * A name in the live session tree is read the way every session reader reads
+ * it: through a symbolic link, by content. A name gc owns (archive/sessions,
+ * archive/reclaimed, records, locks and staging) is opened O_NOFOLLOW and a
+ * link there is refused as a link. A dangling live link is reported, never
+ * read as absent: absence would let blob GC delete a still-referenced blob.
+ *
+ * Either kind of name can stand for a FIFO, a socket or a device. Every open
+ * is non-blocking, and the descriptor's own fstat decides whether it holds
+ * a regular file before any byte is read. Anything else throws
+ * {@link NotARegularFile}, so it is neither waited on nor drained.
  *
  * `gc-cli.ts` and `session-archive.ts` are kept from reading any other way —
  * `Bun.file`, `fs.open`, `fs.readFile`, a session reader that opens by name —
@@ -19,6 +19,7 @@
  */
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs/promises";
+import * as nodeFs from "node:fs";
 import { constants as fsConstants, type Stats } from "node:fs";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
@@ -44,7 +45,7 @@ export class NotARegularFile extends Error {
 		readonly kind: string,
 	) {
 		super(
-			kind === "a directory" || kind === "a symbolic link"
+			kind === "a directory" || kind.startsWith("a symbolic link")
 				? `${file} is ${kind}, not a regular file, so it was not read`
 				: `${file} is ${kind}, not a regular file, so it was not read: reading ${kind} takes what is written to it ` +
 						`away from whoever it was written for, and no copy of it would be kept`,
@@ -57,6 +58,52 @@ export class NotARegularFile extends Error {
 export function notRegularAsAbsent(error: unknown): undefined {
 	if (error instanceof NotARegularFile) return undefined;
 	throw error;
+}
+
+function danglingLink(file: string, target: string): NotARegularFile {
+	const error = new NotARegularFile(file, `a symbolic link to ${JSON.stringify(target)} which leads to nothing`);
+	error.message += "; restore the target or remove the link, then rerun `omp gc`";
+	return error;
+}
+
+/** A live name is absent only when the name itself is gone, not when its link target is gone. */
+export async function liveEntryIfPresent(file: string): Promise<Stats | undefined> {
+	let named: Stats;
+	try {
+		named = await fs.lstat(file);
+	} catch (error) {
+		if (isEnoent(error) || (error as NodeJS.ErrnoException).code === "ENOTDIR") return undefined;
+		throw error;
+	}
+	if (!named.isSymbolicLink()) return named;
+	try {
+		return await fs.stat(file);
+	} catch (error) {
+		if (isEnoent(error) || (error as NodeJS.ErrnoException).code === "ENOTDIR") {
+			throw danglingLink(file, await fs.readlink(file));
+		}
+		throw error;
+	}
+}
+
+/** Synchronous live-name lookup for the session-listing storage boundary. */
+export function liveEntryIfPresentSync(file: string): Stats | undefined {
+	let named: Stats;
+	try {
+		named = nodeFs.lstatSync(file);
+	} catch (error) {
+		if (isEnoent(error) || (error as NodeJS.ErrnoException).code === "ENOTDIR") return undefined;
+		throw error;
+	}
+	if (!named.isSymbolicLink()) return named;
+	try {
+		return nodeFs.statSync(file);
+	} catch (error) {
+		if (isEnoent(error) || (error as NodeJS.ErrnoException).code === "ENOTDIR") {
+			throw danglingLink(file, nodeFs.readlinkSync(file));
+		}
+		throw error;
+	}
 }
 
 /**
@@ -87,7 +134,10 @@ export async function openRegularFile(
 	try {
 		handle = await fs.open(file, flags);
 	} catch (error) {
-		if (isEnoent(error)) return undefined;
+		if (isEnoent(error) || (error as NodeJS.ErrnoException).code === "ENOTDIR") {
+			if (!options.noFollow) await liveEntryIfPresent(file);
+			return undefined;
+		}
 		if (options.noFollow && (error as NodeJS.ErrnoException).code === "ELOOP") {
 			throw new NotARegularFile(file, "a symbolic link");
 		}
