@@ -111,12 +111,18 @@ function insideAProjectConfigDir(filePath: string): boolean {
 	} catch {
 		// Not on disk yet; the lexical spelling is all there is to judge.
 	}
-	let searched = dir;
+	let searched: string | undefined;
 	for (const root of [getConfigRootDir(), getBaseConfigRoot(), getAgentDir()]) {
-		const below = relativePathWithinRoot(root, dir);
-		if (below !== null && below.length < searched.length) searched = below;
+		// A directory that IS a root is inside it, with nothing below. Reading the
+		// null that `relativePathWithinRoot` returns for equality as "not inside"
+		// left the absolute path to be searched, and its own `.omp` then looked
+		// like a project's — so a link sitting directly in the config root, which
+		// is where the default profile keeps every one of these files, was never
+		// followed.
+		const below = path.resolve(root) === dir ? "" : relativePathWithinRoot(root, dir);
+		if (below !== null && (searched === undefined || below.length < searched.length)) searched = below;
 	}
-	const segments = [...searched.split(path.sep), path.basename(resolved)];
+	const segments = [...(searched ?? dir).split(path.sep), path.basename(resolved)];
 	return projectConfigDirNames().some(name => containsSequence(segments, name));
 }
 

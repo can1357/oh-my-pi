@@ -27,7 +27,11 @@ let originalAgentDir: string;
 
 beforeEach(async () => {
 	originalAgentDir = getAgentDir();
-	root = await fs.mkdtemp(path.join(os.tmpdir(), "atomic-file-"));
+	// The temp root is named like omp's real one. Without that, the root's own
+	// `.omp` never appears in a path under test and a rule that mistook it for a
+	// project's directory passed every test while breaking the default profile.
+	root = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "atomic-file-")), ".omp");
+	await fs.mkdir(root);
 	outside = await fs.mkdtemp(path.join(os.tmpdir(), "atomic-outside-"));
 	project = path.join(root, "checkout", ".omp");
 	await fs.mkdir(project, { recursive: true });
@@ -49,6 +53,19 @@ async function linkTo(target: string, link: string, contents = "old"): Promise<v
 }
 
 describe("a config write follows a symlinked destination", () => {
+	test("follows a link that sits directly in the config root", async () => {
+		// Where the default profile keeps every one of these files, and the one
+		// place containment has to treat "is the root" as "is inside it".
+		const target = path.join(root, "shared.json");
+		const link = path.join(root, "marketplaces.json");
+		await linkTo(target, link);
+
+		await writeConfigFileAtomically(link, "new", 0o644);
+
+		expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+		expect(await fs.readFile(target, "utf8")).toBe("new");
+	});
+
 	test("replaces the link's target and leaves the link in place", async () => {
 		const target = path.join(root, "marketplaces.json");
 		const link = path.join(root, "profile-marketplaces.json");
