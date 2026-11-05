@@ -33,6 +33,28 @@ export const RBRACKET = 0x5d;
 const U = 0x75;
 
 /**
+ * A strict-mode parse failure, carrying the offset the parser stopped at.
+ *
+ * The offset rides on the error object instead of inside its message on
+ * purpose. These messages travel: a failed tool call's text reaches the
+ * HTTP-status classifiers in `packages/ai/src/error/flags.ts`, which match a
+ * bare `\b(?:401|403|429|500|502|503|504)\b` anywhere in an error's text. A
+ * message reading `… at position 429` therefore turns a malformed tool call
+ * into a retryable provider failure, and `… at position 403` into an
+ * authentication failure. `name` stays `SyntaxError` so existing
+ * `instanceof SyntaxError` and name checks are unaffected.
+ */
+export class JsonSyntaxError extends SyntaxError {
+	readonly position: number;
+
+	constructor(message: string, position: number) {
+		super(message);
+		this.name = "SyntaxError";
+		this.position = position;
+	}
+}
+
+/**
  * Minimum remaining string length for bulk-skipping ordinary characters in
  * {@link JsonLexer.string} with two engine `indexOf` scans (nearest quote or
  * backslash) instead of one `charCodeAt` per character. Below this the
@@ -350,7 +372,7 @@ export class JsonLexer {
 			i++;
 			runStart = i;
 		}
-		if (this.mode === "strict") throw new SyntaxError("Unterminated string");
+		if (this.mode === "strict") throw new JsonSyntaxError("Unterminated string", i);
 		out += s.slice(runStart, n);
 		this.pos = i;
 		return { value: out, stableLen: unstableFrom < 0 ? out.length : unstableFrom, complete: false };
@@ -386,7 +408,9 @@ export class JsonLexer {
 		const token = s.slice(start, i);
 		const value = Number(token);
 		if (Number.isFinite(value)) return value;
-		if (this.mode === "strict") throw new SyntaxError(`Invalid number: ${token}`);
+		// The token itself is digits, and this text reaches the HTTP-status
+		// classifiers; the offset on the error locates it without them.
+		if (this.mode === "strict") throw new JsonSyntaxError("Invalid number", start);
 		return undefined;
 	}
 
@@ -447,11 +471,13 @@ export class JsonLexer {
 				cc === LBRACKET ||
 				(cc === COLON && s.charCodeAt(i + 1) !== SLASH && s.charCodeAt(i + 1) !== BACKSLASH)
 			) {
-				return this.#unexpected(start);
+				// The offending character, not the bareword's start: the start of a
+				// long bareword anchors a diagnostic excerpt nowhere near the fault.
+				return this.#unexpected(i);
 			}
 			i++;
 		}
-		if (i >= s.length) return this.#unexpected(start);
+		if (i >= s.length) return this.#unexpected(i);
 		let end = i;
 		while (end > start && isWhitespace(s.charCodeAt(end - 1))) end--;
 		const word = s.slice(start, end);
@@ -461,7 +487,7 @@ export class JsonLexer {
 	}
 
 	#unexpected(at: number): undefined {
-		if (this.mode === "strict") throw new SyntaxError(`Unexpected token at position ${at}`);
+		if (this.mode === "strict") throw new JsonSyntaxError("Unexpected token", at);
 		return undefined;
 	}
 }

@@ -6,6 +6,7 @@ import {
 	isNumberStart,
 	isWhitespace,
 	JsonLexer,
+	JsonSyntaxError,
 	LBRACE,
 	LBRACKET,
 	QUOTE,
@@ -154,13 +155,13 @@ class RelaxedJson {
 		lex.ws();
 		if (lex.atEnd) {
 			if (this.#partial) return undefined;
-			throw new SyntaxError("Unexpected end of JSON input");
+			throw new JsonSyntaxError("Unexpected end of JSON input", lex.pos);
 		}
 		const value = this.#value(false);
 		if (value === INCOMPLETE) return undefined;
 		lex.ws();
 		if (!this.#partial && !lex.atEnd) {
-			throw new SyntaxError(`Unexpected trailing characters at position ${lex.pos}`);
+			throw new JsonSyntaxError("Unexpected trailing characters", lex.pos);
 		}
 		return value;
 	}
@@ -184,7 +185,7 @@ class RelaxedJson {
 			return INCOMPLETE;
 		}
 		if (allowBareword) return lex.bareword();
-		throw new SyntaxError(`Unexpected token at position ${lex.pos}`);
+		throw new JsonSyntaxError("Unexpected token", lex.pos);
 	}
 
 	#object(): Record<string, unknown> {
@@ -195,7 +196,7 @@ class RelaxedJson {
 			lex.ws();
 			if (lex.atEnd) {
 				if (this.#partial) return out;
-				throw new SyntaxError("Unterminated object");
+				throw new JsonSyntaxError("Unterminated object", lex.pos);
 			}
 			const c = lex.peek();
 			if (c === RBRACE) {
@@ -214,12 +215,12 @@ class RelaxedJson {
 			} else if (this.#partial) {
 				return out;
 			} else {
-				throw new SyntaxError("Expected ':' in object");
+				throw new JsonSyntaxError("Expected ':' in object", lex.pos);
 			}
 			lex.ws();
 			if (lex.atEnd) {
 				if (this.#partial) return out;
-				throw new SyntaxError("Expected value after ':'");
+				throw new JsonSyntaxError("Expected value after ':'", lex.pos);
 			}
 			const value = this.#value(true);
 			if (value === INCOMPLETE) return out;
@@ -235,7 +236,7 @@ class RelaxedJson {
 				return out;
 			}
 			if (this.#partial) return out;
-			throw new SyntaxError("Expected ',' or '}' in object");
+			throw new JsonSyntaxError("Expected ',' or '}' in object", lex.pos);
 		}
 	}
 
@@ -247,7 +248,7 @@ class RelaxedJson {
 			lex.ws();
 			if (lex.atEnd) {
 				if (this.#partial) return out;
-				throw new SyntaxError("Unterminated array");
+				throw new JsonSyntaxError("Unterminated array", lex.pos);
 			}
 			const c = lex.peek();
 			if (c === RBRACKET) {
@@ -272,7 +273,7 @@ class RelaxedJson {
 				return out;
 			}
 			if (this.#partial) return out;
-			throw new SyntaxError("Expected ',' or ']' in array");
+			throw new JsonSyntaxError("Expected ',' or ']' in array", lex.pos);
 		}
 	}
 
@@ -281,7 +282,7 @@ class RelaxedJson {
 		const c = lex.peek();
 		if (c === QUOTE || c === SQUOTE) return lex.string(c).value;
 		const key = lex.unquotedKey();
-		if (key.length === 0 && !this.#partial) throw new SyntaxError("Expected object key");
+		if (key.length === 0 && !this.#partial) throw new JsonSyntaxError("Expected object key", lex.pos);
 		return key;
 	}
 }
