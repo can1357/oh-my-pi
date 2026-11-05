@@ -4,26 +4,21 @@
 
 ### Breaking Changes
 
-- Replaced visualization-only `parseShell()` with engine-owned `RunTrace.present()` and `ShellVisualization` APIs.
+- Replaced the visualization-only `parseShell()` API with the engine-owned `RunTrace.present()` and `ShellVisualization` APIs.
 
 ### Added
 
-- `RunTrace` exposes real command states, assignments, producer-attributed output and bounded replay, with native Raw/Pseudo presentation and persisted-trace restoration.
-- `obash --trace=PATH` writes that model as JSON at exit; `UnitCompiled` events now carry the unit's node table (`nodes: [{kind, lo, hi, line, col}]`) instead of `node_count`
+- Added `RunTrace` support for command states, variable assignments, producer-attributed output, bounded replay, native Raw/Pseudo presentation, and restoration of persisted traces.
+- Added `obash --trace=PATH` to write execution traces as JSON at exit; `UnitCompiled` events now include source node tables.
+- Replaced the embedded shell interpreter used by `Shell` and `executeShell` with pi-shell's Bash engine, providing Bash 5.3 semantics, including aliases containing pipelines, subshells, and command separators.
+- Added broad native shell performance improvements, including faster script parsing, function handling, assignments, argument expansion, redirections, arithmetic, loops, and external command startup.
+- Sixel image output now uses a built-in encoder.
+- Shell spawn benchmarks now report median and p99 latency.
 
 ### Changed
 
-- Native builds now reuse the shared diff implementation, and macOS display discovery no longer needs a separate capture library
-- Shell spawn benchmarks report median and p99 latency without an additional benchmark framework
-
-- Made the bash tool's shell faster on string appends (`s+=x`), sourcing files full of function definitions (each body compiles on first call), quoted `"$var"`/`"$1"` arguments and file redirections
-- Made the bash tool's shell faster on `while read` loops over files (no per-line `lseek`), output sent to `/dev/null`, `(( ))` arithmetic, recursive functions, plain assignments and every simple command
-- Made starting external commands from the bash tool's shell cheaper on Linux (the child no longer resets every signal disposition before `exec`, and the parent reuses its spawn setup and makes about half as many system calls per command)
-- Made the bash tool's shell parse scripts and define functions about a fifth faster, with a function's `declare -f` text now produced on first use
-- Made the bash tool's shell start with about half as many system calls on Linux
-- The work-profile flamegraph is now a static SVG (hover titles, no click-to-zoom or search)
-- The bash tool's built-in `jq` reports errors as plain text with `line:column` positions instead of colored source snippets
-- Sixel image output uses a built-in encoder; images with more than 256 colors may get a slightly different palette
+- The built-in `jq` used by the bash tool now reports errors as plain text with `line:column` locations.
+- Work-profile flamegraphs are now static SVGs with hoverable titles.
 
 ### Fixed
 
@@ -78,16 +73,27 @@
 ### Fixed
 
 - Fixed X11 background `el.type` and `el.press` bringing the element's window to the front and taking your keyboard; an element that does not already hold a GTK 3 window's focus now runs in takeover instead ([#17921](https://github.com/can1357/oh-my-pi/pull/17921) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Bash-compatible `$!` behavior inside command substitutions, subshells, and pipeline stages.
+- Fixed Windows `rsync` handling of one-letter daemon hosts, and improved compatibility with rsync 3.5.1 log-file error and syslog behavior.
+- Fixed Windows `rmdir` accepting trailing-dot or trailing-space operands that could target a different directory.
+- Fixed shell functions incorrectly passing operands to `timeout`, `nohup`, `git`, and other command-running utilities.
+- Fixed native Windows commands failing to resolve executables through `PATH` and `PATHEXT`, and incorrectly prefixing absolute paths with the shell working directory.
+- Fixed severe performance degradation when inserting into or looking up large associative arrays.
+- Fixed native addon startup on older glibc versions that lack `posix_spawn_file_actions_addchdir_np`.
+- Fixed history saves hanging when a stale lock could not be removed.
+- Fixed GTK3 Open and Save dialogs on Linux, including accessibility lookups and Wayland window discovery.
+- Improved Wayland capability reporting when the desktop portal lacks RemoteDesktop support; unsupported input operations now fail immediately with a clear explanation.
+- Fixed Wayland and X11 input operations that could incorrectly report success, alter application focus, or affect the wrong window. This includes background typing, key presses, shortcuts, drags, takeover input, and focus handling across Qt, GTK, Tk, Firefox, Chromium, VS Code, LibreOffice, iPhone Mirroring, and Screen Sharing.
+- Fixed Wayland double- and triple-click counts in Qt applications.
+- Fixed Linux accessibility actions such as `press()`, `perform()`, and `menu.select()`, including behavior in non-English locales and correct handling of toggle and radio buttons.
+- Fixed `computer.focusedWindow()` and desktop/display inspection on GNOME and KDE Wayland so they identify the actual focused application window.
+- Fixed Wayland input timeouts when the RemoteDesktop permission dialog is unanswered, and improved cancellation behavior for X11 takeover input.
 
 ## [18.16.0] - 2026-11-02
 
 ### Added
 
 - Added `macOSFrontApp()`, which reads the app macOS has in front and can put it back in front for a while (`keepInFront`) without stopping for the user's typing ([#16284](https://github.com/can1357/oh-my-pi/pull/16284) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Changed
-
-- Replaced the embedded shell interpreter behind `Shell` and `executeShell` with pi's own bash engine, now part of `pi-shell`: bash 5.3 semantics, including alias bodies with pipes, subshells and separators
 
 ### Fixed
 

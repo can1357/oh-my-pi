@@ -14,10 +14,18 @@
 
 - Fixed newly published Azure models missing after catalog refresh ([#18173](https://github.com/can1357/oh-my-pi/issues/18173), [#18174](https://github.com/can1357/oh-my-pi/pull/18174) by [@dunkpi](https://github.com/dunkpi))
 - Factory Droid no longer hides a model when live routing's family default leaves it no upstream (an empty default, one naming none of its upstreams, or none serving the account's region); like Droid, it uses the model's registry upstream. An empty per-model route still hides the model ([#17862](https://github.com/can1357/oh-my-pi/pull/17862) by [@will-bogusz](https://github.com/will-bogusz))
+- Added compatibility support for Responses hosts that reject specific tool names, including configurable tool-name prefixing for affected integrations.
+- Added message-thread capability detection for Claude 4.5 and newer models on the first-party Anthropic provider.
+- Added opt-in Responses WebSocket support through OMP settings or SDK preferences; it remains disabled by default.
+- Added Factory Droid support for Gemini 4 Argon and Muse Spark 1.3 for eligible accounts and supported regions.
 
 ### Changed
 
-- Factory Droid reports client version 1.1.0, and Claude requests routed to Azure Foundry stream tool input eagerly like the Anthropic and Vertex routes ([#17885](https://github.com/can1357/oh-my-pi/pull/17885) by [@will-bogusz](https://github.com/will-bogusz))
+- Updated Factory Droid's client version reporting and improved streaming of tool input for Claude requests routed through Azure Foundry.
+
+### Fixed
+
+- Fixed Factory Droid model visibility when live-routing defaults do not provide an applicable upstream, while preserving explicit per-model routes that intentionally hide a model.
 
 ## [18.16.0] - 2026-11-02
 
