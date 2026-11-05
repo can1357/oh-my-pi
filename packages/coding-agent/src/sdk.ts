@@ -427,7 +427,13 @@ import {
 	cfgSnapcompactToolResults,
 	cfgWorkspaceAdditionalDirectories,
 } from "./session/context-settings";
-import { cfgTaskBatch, cfgTaskDisabledAgents, cfgTaskEager, cfgTaskMaxConcurrency } from "./task/settings";
+import {
+	cfgTaskBatch,
+	cfgTaskDisabledAgents,
+	cfgTaskEager,
+	cfgTaskMaxConcurrency,
+	ovnfsCommand,
+} from "./task/settings";
 
 /** Agent-level tool-call switches, snapshotted by the agent loop per prompt run. */
 const cfgToolCallSwitches = combine({
@@ -972,18 +978,18 @@ export interface CreateAgentSessionOptions {
 	 */
 	autoTitle?: boolean;
 	/**
-	 * Defer `confirm` reserve-policy fallback until AgentSession prompt-time UI is configured.
-	 * ACP uses this while capabilities are negotiated without enabling UI-only tools.
-	 */
-	deferUsageReserveConfirmation?: boolean;
-
-	/**
 	 * Hold background skill-description compression until
 	 * {@link AgentSession.startSkillDescriptionCompression}: resolving its model composes the
 	 * whole model catalog. The interactive TUI sets this and starts it after the first frame.
 	 * Default: false, which starts it once the session (and so its cost gate) exists.
 	 */
 	deferSkillDescriptionCompression?: boolean;
+	/**
+	 * Defer `confirm` reserve-policy fallback until AgentSession prompt-time UI is configured.
+	 * ACP uses this while capabilities are negotiated without enabling UI-only tools.
+	 */
+	deferUsageReserveConfirmation?: boolean;
+
 	/**
 	 * Opt-in OpenTelemetry instrumentation forwarded to the underlying Agent.
 	 * Passing `{}` enables the loop's GenAI-semantic-convention spans. See
@@ -4413,6 +4419,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				delegationBias: sessionDelegationBias(toolSession),
 				taskIrcEnabled: !restrictToolNames && isIrcEnabled(settings, options.taskDepth ?? 0),
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
+				ovnfs: ovnfsCommand(settings),
 				writeTransportOnly:
 					toolSession.deviceOnlyWrite === true && toolSession.pendingFullWriteDescription !== true,
 				secretsEnabled: obfuscator?.obfuscates() === true,

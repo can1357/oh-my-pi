@@ -159,6 +159,41 @@ export const cfgTaskIsolationApply = register({
 	},
 });
 
+export const cfgOvnfsEnabled = register({
+	id: "ovnfs.enabled",
+	protocolDefault: ["rpc", "acp"],
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tasks",
+		group: "Isolation",
+		label: "ovnfs (experimental)",
+		description:
+			"Use ovnfs checkouts (copy-on-write views of a folder, ready in about a second at any size) whenever a separate copy is needed: the system prompt tells agents to open checkouts instead of git worktrees or copies, and isolated subagents (when allowed) run in checkouts instead of native clones",
+	},
+});
+
+export const cfgOvnfsPath = register({
+	id: "ovnfs.path",
+	type: "string",
+	default: undefined,
+	ui: {
+		tab: "tasks",
+		group: "Isolation",
+		label: "ovnfs Binary",
+		description: "ovnfs executable for `ovnfs.enabled`; unset uses `ovnfs` on PATH",
+	},
+});
+
+/**
+ * The ovnfs command agents and isolated subagents use, or `undefined` when
+ * `ovnfs.enabled` is off. Read by the system prompt (checkout guidance) and the
+ * task runner (ovnfs-backed isolation).
+ */
+export function ovnfsCommand(settings: Settings): string | undefined {
+	return cfgOvnfsEnabled.get(settings) ? cfgOvnfsPath.get(settings)?.trim() || "ovnfs" : undefined;
+}
+
 export const cfgTaskIsolationMerge = register({
 	id: "task.isolation.merge",
 	protocolDefault: ["rpc", "acp"],
