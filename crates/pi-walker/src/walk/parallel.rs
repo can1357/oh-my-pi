@@ -910,7 +910,9 @@ impl<K: Sink> Ctx<K> {
 				}
 			});
 			let path: &[u8] = if let Some(bytes) = kept {
-				// SAFETY: the arena outlives the walk.
+				// SAFETY: the arena outlives the walk, and `bytes` was pushed in
+				// this iteration and is released only below, after the last read
+				// of `path`.
 				unsafe { bytes.get() }
 			} else {
 				volatile.clear();
@@ -925,7 +927,12 @@ impl<K: Sink> Ctx<K> {
 				&& ignorer.ignored(frame.map(|frame| &**frame), path, is_dir, ign)
 			{
 				if let Some(bytes) = kept {
-					arena.release(bytes);
+					// SAFETY: `bytes` came from this `arena`'s push earlier in
+					// this iteration and has not been given back. `path`
+					// borrowed from it is read for the last time in the
+					// `ignored` call above, no tail of it has been made yet,
+					// and the `continue` ends the iteration.
+					unsafe { arena.release(bytes) };
 				}
 				continue;
 			}
@@ -967,7 +974,14 @@ impl<K: Sink> Ctx<K> {
 				// holds the paths it returns and those of the directories it
 				// enters, not one path per entry it has seen.
 				if !stored && let Some(bytes) = kept {
-					arena.release(bytes);
+					// SAFETY: `bytes` came from this `arena`'s push earlier in
+					// this iteration and has not been given back. Nothing kept
+					// the path — `!stored` excludes the `Stored`/`Item` arms,
+					// which are also the only place a `tail` of it is made, and
+					// `!queued` excludes the child job — so neither `bytes`, a
+					// handle overlapping it, nor the `path` borrowed from it is
+					// read after the `continue` below.
+					unsafe { arena.release(bytes) };
 				}
 				continue;
 			};
