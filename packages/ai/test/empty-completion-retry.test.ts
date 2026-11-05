@@ -850,6 +850,44 @@ describe("withReplaySafeStreamRetry", () => {
 	});
 
 	describe("replayBudgetMs", () => {
+		it.each(["empty", "provider error"])(
+			"admits a %s replay after clamping its own backoff to both bounds",
+			async kind => {
+				let now = 0;
+				const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+				let attempts = 0;
+				const waits: number[] = [];
+				try {
+					const stream = withReplaySafeStreamRetry(
+						{},
+						CTX,
+						{
+							replayBudgetMs: 100,
+							providerRetryWaitCeilingMs: 50,
+							providerRetryWait: async ms => {
+								waits.push(ms);
+								now += ms;
+							},
+						},
+						() => {
+							attempts++;
+							if (attempts > 1) return contentAttempt();
+							return kind === "empty" ? emptyAttempt() : statedWaitErrorAttempt(0);
+						},
+						{ retryEmptyCompletion: true, retryProviderErrors: true, maxProviderErrorRetries: 1 },
+					);
+					const result = await stream.result();
+					expect(attempts).toBe(2);
+					expect(waits).toEqual([50]);
+					expect(now).toBe(50);
+					expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+					expect(result.replayBudgetExhausted).toBeUndefined();
+				} finally {
+					clock.mockRestore();
+				}
+			},
+		);
+
 		function socketCut(): AssistantMessageEventStream {
 			const message = assistant();
 			message.stopReason = "error";
@@ -1034,6 +1072,41 @@ describe("withReplaySafeStreamRetry", () => {
 		});
 
 		it.each([
+			["response-header wait", "503 The server is overloaded", 90_000],
+			["body wait", "503 The server is overloaded. Please retry in 90s", undefined],
+		])(
+			"records a policy refusal for a 90 s %s above the default 60 s ceiling without claiming budget exhaustion",
+			async (_name, text, structured) => {
+				let attempts = 0;
+				const waits: number[] = [];
+				const stream = withReplaySafeStreamRetry(
+					{},
+					CTX,
+					{ replayBudgetMs: 2_000, providerRetryWait: async ms => void waits.push(ms) },
+					() => {
+						attempts++;
+						const message = assistant();
+						message.stopReason = "error";
+						message.errorStatus = 503;
+						message.errorMessage = text;
+						if (structured !== undefined) message.errorRetryAfterMs = structured;
+						return streamFromEvents([{ type: "error", reason: "error", error: message }]);
+					},
+					{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+				);
+				const result = await stream.result();
+				expect(attempts).toBe(1);
+				expect(waits).toEqual([]);
+				expect(result.errorRetryWaitRefusal).toEqual({
+					waitMs: 90_000,
+					limitMs: 60_000,
+					option: "maxRetryDelayMs",
+				});
+				expect(result.replayBudgetExhausted).toBeUndefined();
+			},
+		);
+
+		it.each([
 			["its structured response-header wait", "503 The server is overloaded", 90_000],
 			["a wait its body names", "503 The server is overloaded. Please retry in 90s", undefined],
 		])(
@@ -1044,7 +1117,7 @@ describe("withReplaySafeStreamRetry", () => {
 				const stream = withReplaySafeStreamRetry(
 					{},
 					CTX,
-					{ providerRetryWait: async ms => void waits.push(ms), replayBudgetMs: 2_000 },
+					{ providerRetryWait: async ms => void waits.push(ms), replayBudgetMs: 2_000, maxRetryDelayMs: 100_000 },
 					() => {
 						attempts++;
 						const overloaded = assistant();

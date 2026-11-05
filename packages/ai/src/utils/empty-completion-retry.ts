@@ -239,31 +239,26 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 			// as session retry reads it: the response headers' wait
 			// (`errorRetryAfterMs`) with the message's relative waits beside it, else
 			// the message's text. A wait past the caller's bounds surfaces the failure.
-			const statedWaitMs = retryProviderError
+			const bounds = retryWaitBounds(options, DEFAULT_MAX_RETRY_DELAY_MS);
+			let statedWaitMs = retryProviderError
 				? providerRetryWaitMs(
 						failedMessage?.provider,
 						failedMessage?.errorMessage,
 						failedMessage?.errorRetryAfterMs,
 					)
 				: undefined;
-			let delayMs = retryEmpty
-				? EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** emptyRetries
-				: retryProviderError &&
-					  !retryWaitBounds(options, DEFAULT_MAX_RETRY_DELAY_MS).declines(statedWaitMs, failedMessage)
-					? Math.max(statedWaitMs ?? 0, EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** providerErrorRetries)
-					: undefined;
-			if (retryProviderError && budget && delayMs !== undefined) {
-				// Under a budget the server's own wait governs: replaying a hinted
-				// failure sooner than asked is a guaranteed failure, and the later
-				// error would replace the one carrying the hint. The wait is the
-				// longest the failed message states: its structured response-header
-				// wait, or any its text names.
-				const serverWaitMs = Math.max(
-					longestServerWaitMs(failedMessage?.errorMessage) ?? 0,
-					failedMessage?.errorRetryAfterMs ?? 0,
-				);
-				if (serverWaitMs > delayMs) delayMs = serverWaitMs;
+			if (retryProviderError && budget) {
+				statedWaitMs = Math.max(statedWaitMs ?? 0, longestServerWaitMs(failedMessage?.errorMessage) ?? 0);
 			}
+			const ownDelayMs = Math.min(
+				EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** (retryEmpty ? emptyRetries : providerErrorRetries),
+				bounds.maxDelayMs,
+			);
+			let delayMs = retryEmpty
+				? ownDelayMs
+				: retryProviderError && !bounds.declines(statedWaitMs, failedMessage)
+					? Math.max(statedWaitMs ?? 0, ownDelayMs)
+					: undefined;
 			// `delayMs` is set only for a message the policy would replay.
 			const replaced = completedMessage ?? failedMessage;
 			if (delayMs !== undefined && budget && !budget.admits(delayMs)) {

@@ -8,7 +8,7 @@ import {
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { $env, findRetryRefusal, logger, longestRetryHint } from "@oh-my-pi/pi-utils";
 import type { FetchImpl, Message } from "../types";
-import type { ReplayBudget } from "../utils/replay-budget";
+import { type ReplayBudget, sleepUnderBudget } from "../utils/replay-budget";
 import { retryWaitBounds } from "../utils/retry-after";
 import { DEFAULT_MAX_RETRY_DELAY_MS } from "../utils/retry-wait";
 /**
@@ -229,15 +229,22 @@ export function wrapFetchForCopilotFallback(
 		 * when the budget refused it.
 		 */
 		const resendAfterDenial = async (headers: Headers): Promise<Response | undefined> => {
+			const serverWaitMs = longestRetryHint(response, await response.clone().text()) ?? 0;
+			// The server's wait binds this resend whether or not a replay budget is
+			// present. `response` carries the refusal, so a wait past the bound
+			// surfaces with the note saying the server asked for longer than this
+			// layer may sleep. Before, the budget-less path resent at once and read
+			// the wait not at all.
+			if (retryWaitBounds(undefined, DEFAULT_MAX_RETRY_DELAY_MS).declines(serverWaitMs, response)) return undefined;
 			if (!replayBudget) {
 				try {
 					await response.arrayBuffer();
 				} catch {}
+				// Within the bound by the check above, so this sleeps the stated wait whole.
+				await sleepUnderBudget(undefined, undefined, serverWaitMs, init?.signal ?? undefined);
 				return inner(input, { ...init, headers });
 			}
-			const serverWaitMs = longestRetryHint(response, await response.clone().text()) ?? 0;
-			if (retryWaitBounds(undefined, DEFAULT_MAX_RETRY_DELAY_MS).declines(serverWaitMs)) return undefined;
-			if (!(await replayBudget.replayAfterDelay(serverWaitMs, undefined, init?.signal ?? undefined, undefined))) {
+			if (!(await replayBudget.replayAfterDelay(serverWaitMs, response, init?.signal ?? undefined, undefined))) {
 				return undefined;
 			}
 			let retry: Response;

@@ -1463,7 +1463,9 @@ function streamSimpleRequest<TApi extends Api>(
 					// failure's message includes the server's named wait) and, for a
 					// thrown failure, its response headers.
 					const serverWaitMs = longestServerWaitMs(failure.error) ?? 0;
-					if (!(await replayBudget.replayAfterDelay(serverWaitMs, undefined, signal, requestOptions))) {
+					// `failure.error` is the carrier, so a wait this layer refuses is
+					// marked on the failure that stands rather than refused silently.
+					if (!(await replayBudget.replayAfterDelay(serverWaitMs, failure.error, signal, requestOptions))) {
 						break;
 					}
 					arm = replayBudget.arm(undefined);

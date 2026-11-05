@@ -36,6 +36,7 @@ import type {
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { inheritReplayBudget, withReplayBudget } from "../utils/replay-budget";
+import { hasRefusedRetryWaitNote, refusedRetryWaitNote } from "../utils/retry-wait";
 import { toolNamesByWire } from "../utils/tool-names";
 import { type AnthropicOptions, shouldStripThinkingHistory } from "./anthropic";
 import { createProviderErrorMessage } from "./error-message";
@@ -341,9 +342,13 @@ function factoryDroidOrgIdFromToken(accessToken: string): string | undefined {
 const REGION_UNAVAILABLE_PATTERN = /not available in this region/i;
 
 /** Explain region rejections without persisting an exclusion from the catalog. */
-function asRegionUnavailableError(model: Model<Api>, errorMessage: string | undefined): string | undefined {
-	if (errorMessage == null || !REGION_UNAVAILABLE_PATTERN.test(errorMessage)) return undefined;
-	return `${model.id} is not served from your network's region. Choose another model.`;
+function asRegionUnavailableError(model: Model<Api>, message: AssistantMessage): string | undefined {
+	if (message.errorMessage == null || !REGION_UNAVAILABLE_PATTERN.test(message.errorMessage)) return undefined;
+	const explanation = `${model.id} is not served from your network's region. Choose another model.`;
+	const refused = message.errorRetryWaitRefusal;
+	return refused && !hasRefusedRetryWaitNote(explanation)
+		? `${explanation} ${refusedRetryWaitNote(refused)}`
+		: explanation;
 }
 
 /** Caller options every wire forwards unchanged, plus the resolved bearer and identity headers. */
@@ -800,7 +805,7 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 					);
 				}
 				if (event.type === "error") {
-					const regionMessage = asRegionUnavailableError(model, event.error.errorMessage);
+					const regionMessage = asRegionUnavailableError(model, event.error);
 					if (regionMessage != null) {
 						stream.push({ ...event, error: { ...event.error, errorDisplayMessage: regionMessage } });
 						continue;
@@ -810,7 +815,7 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 			}
 		} catch (error) {
 			const message: AssistantMessage = createProviderErrorMessage(model, error);
-			const regionMessage = asRegionUnavailableError(model, message.errorMessage);
+			const regionMessage = asRegionUnavailableError(model, message);
 			// omp's explanation is display text; `errorMessage` keeps the provider's rejection.
 			if (regionMessage != null) message.errorDisplayMessage = regionMessage;
 			stream.push({ type: "error", reason: "error", error: message });

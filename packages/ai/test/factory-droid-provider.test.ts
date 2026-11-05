@@ -388,6 +388,41 @@ describe("Factory Droid completions wire (Droid Core)", () => {
 });
 
 describe("Factory Droid error handling", () => {
+	it("keeps the refused-wait note beside the regional explanation", async () => {
+		let sent = 0;
+		const waits: number[] = [];
+		const result = await streamFactoryDroid(
+			kimiK3(),
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				replayBudgetMs: 10_000,
+				providerRetryWaitCeilingMs: 10,
+				providerRetryWait: async ms => void waits.push(ms),
+				fetch: async () => {
+					sent++;
+					return new Response(JSON.stringify({ detail: "Provider not available in this region" }), {
+						status: 429,
+						headers: { "Retry-After": "1" },
+					});
+				},
+			},
+		).result();
+		expect(sent).toBe(1);
+		expect(waits).toEqual([]);
+		expect(result.errorRetryWaitRefusal).toEqual({
+			waitMs: 1_000,
+			limitMs: 10,
+			option: "providerRetryWaitCeilingMs",
+		});
+		const shown = errorDisplayText(result) ?? "";
+		expect(shown).toContain("kimi-k3 is not served from your network's region");
+		expect(shown).toContain("server asked to wait 1 s");
+		// Exactly one refusal note: the regional explanation must not add a second.
+		expect(shown.split("so the provider did not retry)")).toHaveLength(2);
+		expect(result.errorMessage).not.toContain("server asked to wait");
+	});
+
 	it("names the model in the shown text when the proxy rejects the route regionally", async () => {
 		const result = await streamFactoryDroid(
 			kimiK3(),

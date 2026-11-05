@@ -16,10 +16,14 @@ import {
 
 /** Stamped on a fetch already built by {@link transportFetch}. */
 const TRANSPORT_FETCH = Symbol("omp.transportFetch");
-/** Stamped on a transport built over a caller-supplied `fetch`, which the request's count cannot see into. */
-const CALLER_BASE = Symbol("omp.transportCallerBase");
 
-type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: true; [CALLER_BASE]?: boolean };
+interface TransportSetup extends TransportHooks {
+	readonly model: Model<Api>;
+	readonly base: FetchImpl;
+	readonly callerBase: boolean;
+}
+
+type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: TransportSetup };
 
 /**
  * The two hooks a built transport calls around a dispatch. They are named
@@ -64,18 +68,35 @@ export interface TransportHooks {
  * that counter readable (`wireAttemptsOf`) and offers the uncounted path
  * beside it (`uncountedFetchOf`).
  *
- * Idempotent: the built fetch is stamped and returned as-is on later passes.
- * `streamSimple` re-enters `stream`, and `streamSimpleRequest` re-enters itself
- * on auth retries, so without the stamp each entry point would add another
- * layer (three PI_REQ_DEBUG dumps for one request).
+ * Re-entry with the same model and hooks returns the built fetch unchanged.
+ * New hooks rebuild over its underlying base, never over another transport,
+ * so `streamSimple` and authentication retries retain one debug layer without
+ * retaining a different call's budget or mutating its hooks.
  */
 export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefined, hooks?: TransportHooks): FetchImpl {
 	const given = fetchImpl as TransportFetch | undefined;
-	if (given?.[TRANSPORT_FETCH]) return given;
+	const previous = given?.[TRANSPORT_FETCH];
+	const replayBudget = hooks && Object.hasOwn(hooks, "replayBudget") ? hooks.replayBudget : previous?.replayBudget;
+	const beforeDispatch =
+		hooks && Object.hasOwn(hooks, "beforeDispatch") ? hooks.beforeDispatch : previous?.beforeDispatch;
+	if (
+		previous?.model === model &&
+		previous.replayBudget === replayBudget &&
+		previous.beforeDispatch === beforeDispatch
+	)
+		return given!;
 	const base =
-		given ?? (model.provider === "anthropic" && model.api === "anthropic-messages" ? coworkFetch : globalThis.fetch);
-	const checkpoint = hooks?.replayBudget?.checkpoint;
-	const beforeDispatch = hooks?.beforeDispatch;
+		previous?.base ??
+		given ??
+		(model.provider === "anthropic" && model.api === "anthropic-messages" ? coworkFetch : globalThis.fetch);
+	const checkpoint = replayBudget?.checkpoint;
+	const setup: TransportSetup = {
+		model,
+		base,
+		replayBudget,
+		beforeDispatch,
+		callerBase: previous?.callerBase ?? (given !== undefined && wireAttemptsOf(given) === undefined),
+	};
 	const proxyUrl = getProxyForProvider(model.provider);
 
 	const through =
@@ -101,10 +122,17 @@ export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefin
 		};
 	const fetch: TransportFetch = through(base);
 	if (base.preconnect) fetch.preconnect = base.preconnect;
-	fetch[TRANSPORT_FETCH] = true;
-	const counted = given !== undefined && wireAttemptsOf(given) !== undefined;
-	fetch[CALLER_BASE] = given !== undefined && !counted;
-	if (counted) withUncountedSibling(inheritWireAttempts(fetch, base), through(uncountedFetchOf(base)));
+	fetch[TRANSPORT_FETCH] = setup;
+	if (wireAttemptsOf(base)) {
+		withUncountedSibling(inheritWireAttempts(fetch, base), through(uncountedFetchOf(base)));
+	} else if (previous && given) {
+		const attempts = wireAttemptsOf(given);
+		if (attempts) {
+			const counted = countWireAttempts(attempts, fetch, setup.callerBase) as TransportFetch;
+			counted[TRANSPORT_FETCH] = setup;
+			return counted;
+		}
+	}
 	return fetch;
 }
 
@@ -128,15 +156,14 @@ export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefin
 export function withRequestTransport<T extends { fetch?: FetchImpl }>(model: Model<Api>, options: T): T {
 	const budgeted = withReplayBudget(options);
 	const given = budgeted.fetch as TransportFetch | undefined;
-	if (given?.[TRANSPORT_FETCH] && wireAttemptsOf(given)) return budgeted;
 	const transport = transportFetch(model, given, { replayBudget: ReplayBudget.forCall(budgeted) }) as TransportFetch;
-	if (wireAttemptsOf(transport)) return { ...budgeted, fetch: transport };
+	if (wireAttemptsOf(transport)) return transport === given ? budgeted : { ...budgeted, fetch: transport };
 	const counted = countWireAttempts(
 		createWireAttempts(),
 		transport,
-		transport[CALLER_BASE] === true,
+		transport[TRANSPORT_FETCH]?.callerBase === true,
 	) as TransportFetch;
-	counted[TRANSPORT_FETCH] = true;
+	counted[TRANSPORT_FETCH] = transport[TRANSPORT_FETCH];
 	return { ...budgeted, fetch: counted };
 }
 

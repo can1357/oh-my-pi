@@ -345,19 +345,17 @@ export class ReplayBudget {
 		policy: ProviderRetryPolicy | undefined,
 	): Promise<boolean> {
 		const statedMs = longestServerWaitMs(failure);
-		// `declines` records the refusal on `failure`, so the surfaced message
-		// says the server asked for a wait this layer would not take.
-		if (statedMs !== undefined && retryWaitBounds(policy, DEFAULT_MAX_RETRY_DELAY_MS).declines(statedMs, failure)) {
-			return false;
-		}
-		return this.replayAfterDelay(Math.max(ownDelayMs, statedMs ?? 0), failure, signal, policy);
+		const bounds = retryWaitBounds(policy, DEFAULT_MAX_RETRY_DELAY_MS);
+		if (statedMs !== undefined && bounds.declines(statedMs, failure)) return false;
+		const ownMs = Math.min(ownDelayMs, bounds.maxDelayMs);
+		return this.replayAfterDelay(Math.max(ownMs, statedMs ?? 0), failure, signal, policy);
 	}
 
 	/**
-	 * {@link replayAfter} for a caller that already knows the wait: admits a
-	 * replay of `replaced` after `delayMs`, sleeps it under both bounds
-	 * ({@link sleepUnderBudget}), and arms the replay. `false` when any step
-	 * refuses.
+	 * {@link replayAfter} for a caller that already knows the server-stated
+	 * wait: refuses and records a wait above the policy ceiling, otherwise
+	 * admits, waits and arms a replay of `replaced`. A caller's own backoff
+	 * belongs in {@link replayAfter}, where it can be clamped before admission.
 	 */
 	async replayAfterDelay(
 		delayMs: number,
@@ -365,6 +363,7 @@ export class ReplayBudget {
 		signal: AbortSignal | undefined,
 		policy: ProviderRetryPolicy | undefined,
 	): Promise<boolean> {
+		if (retryWaitBounds(policy, DEFAULT_MAX_RETRY_DELAY_MS).declines(delayMs, replaced)) return false;
 		if (!this.admits(delayMs)) return false;
 		if (delayMs > 0 && !(await sleepUnderBudget(this, policy, delayMs, signal))) return false;
 		this.arm(replaced);
@@ -463,7 +462,8 @@ function abortError(signal: AbortSignal | undefined): Error {
 }
 
 /**
- * The one place a provider retry loop turns a server-stated wait into a sleep.
+ * Sleeps a caller's own backoff, or a server-stated wait its entry point has
+ * already checked against the policy ceiling. Only the own backoff is clamped.
  *
  * Two bounds apply, and both must, because each leaves the other's dimension
  * unbounded. {@link ReplayBudget} is a wall-clock deadline over **all** the

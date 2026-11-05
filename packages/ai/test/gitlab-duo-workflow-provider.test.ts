@@ -1268,70 +1268,84 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 
 	// A fresh workflow after a failed run replays the turn: a spent replay budget
 	// keeps the failed run's error, marked, and creates no second workflow.
-	it("does not restart on a fresh workflow once the replay budget is spent", async () => {
-		let createCount = 0;
-		const fetchImpl: FetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
-			const url = String(input);
-			if (url.includes("/api/graphql")) {
-				return Response.json({
-					data: {
-						aiChatAvailableModels: {
-							defaultModel: { name: "Claude", ref: "claude_sonnet_4_6_vertex" },
-							selectableModels: [],
-							pinnedModel: null,
+	it.each([0, 10_000])(
+		"does not restart when a fresh workflow exceeds its budget or stated-wait ceiling (budget %d)",
+		async replayBudgetMs => {
+			let createCount = 0;
+			const fetchImpl: FetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
+				const url = String(input);
+				if (url.includes("/api/graphql")) {
+					return Response.json({
+						data: {
+							aiChatAvailableModels: {
+								defaultModel: { name: "Claude", ref: "claude_sonnet_4_6_vertex" },
+								selectableModels: [],
+								pinnedModel: null,
+							},
 						},
-					},
-				});
-			}
-			if (url.includes("/api/v4/ai/duo_workflows/direct_access")) {
-				return Response.json({ gitlab_rails: { token: "rails-token" } });
-			}
-			if (url.includes("/api/v4/ai/duo_workflows/workflows/")) return Response.json({});
-			if (url.includes("/api/v4/ai/duo_workflows/workflows") && init?.method === "POST") {
-				createCount++;
-				return Response.json({ id: `workflow-${createCount}` });
-			}
-			return new Response("{}", { status: 404 });
-		};
-		const sockets: GitLabDuoWorkflowWebSocketLike[] = [];
-		const webSocketFactory: GitLabDuoWorkflowWebSocketFactory = () => {
-			const socket: GitLabDuoWorkflowWebSocketLike = {
-				onopen: null,
-				onmessage: null,
-				onerror: null,
-				onclose: null,
-				send() {},
-				close() {},
+					});
+				}
+				if (url.includes("/api/v4/ai/duo_workflows/direct_access")) {
+					return Response.json({ gitlab_rails: { token: "rails-token" } });
+				}
+				if (url.includes("/api/v4/ai/duo_workflows/workflows/")) return Response.json({});
+				if (url.includes("/api/v4/ai/duo_workflows/workflows") && init?.method === "POST") {
+					createCount++;
+					return Response.json({ id: `workflow-${createCount}` });
+				}
+				return new Response("{}", { status: 404 });
 			};
-			sockets.push(socket);
-			queueMicrotask(() => {
-				socket.onopen?.(new Event("open"));
-				socket.onmessage?.(
-					new MessageEvent("message", {
-						data: JSON.stringify({
-							status: "FAILED",
-							error: "There was an error processing your request in the Duo Agent Platform, please contact support if the issue persists.",
+			const sockets: GitLabDuoWorkflowWebSocketLike[] = [];
+			const webSocketFactory: GitLabDuoWorkflowWebSocketFactory = () => {
+				const socket: GitLabDuoWorkflowWebSocketLike = {
+					onopen: null,
+					onmessage: null,
+					onerror: null,
+					onclose: null,
+					send() {},
+					close() {},
+				};
+				sockets.push(socket);
+				queueMicrotask(() => {
+					socket.onopen?.(new Event("open"));
+					socket.onmessage?.(
+						new MessageEvent("message", {
+							data: JSON.stringify({
+								status: "FAILED",
+								error: "There was an error processing your request in the Duo Agent Platform, please contact support if the issue persists. Please retry in 1s.",
+							}),
 						}),
-					}),
-				);
-			});
-			return socket;
-		};
+					);
+				});
+				return socket;
+			};
 
-		const result = await streamGitLabDuoWorkflow(model, context, {
-			apiKey: "[REDACTED]",
-			rootNamespaceId: "gid://gitlab/Group/1",
-			fetch: fetchImpl,
-			webSocketFactory,
-			replayBudgetMs: 0,
-		}).result();
+			const result = await streamGitLabDuoWorkflow(model, context, {
+				apiKey: "not-a-secret-test-key",
+				rootNamespaceId: "gid://gitlab/Group/1",
+				fetch: fetchImpl,
+				webSocketFactory,
+				replayBudgetMs,
+				providerRetryWaitCeilingMs: replayBudgetMs > 0 ? 10 : undefined,
+			}).result();
 
-		expect(sockets).toHaveLength(1);
-		expect(createCount).toBe(1);
-		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toContain("There was an error processing your request");
-		expect(result.replayBudgetExhausted).toBe(true);
-	});
+			expect(sockets).toHaveLength(1);
+			expect(createCount).toBe(1);
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toContain("There was an error processing your request");
+			if (replayBudgetMs === 0) {
+				expect(result.replayBudgetExhausted).toBe(true);
+			} else {
+				expect(result.errorRetryWaitRefusal).toEqual({
+					waitMs: 1_000,
+					limitMs: 10,
+					option: "providerRetryWaitCeilingMs",
+				});
+				expect(result.errorDisplayMessage).toContain("server asked to wait 1 s");
+				expect(result.errorMessage).not.toContain("server asked to wait");
+			}
+		},
+	);
 
 	// The step-limit restart creates a fresh workflow that replays the turn like
 	// any other restart: a spent replay budget keeps the failed run, marked, and

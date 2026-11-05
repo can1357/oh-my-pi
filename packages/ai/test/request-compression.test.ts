@@ -5,6 +5,7 @@ import {
 	resetRequestCompressionForTesting,
 	wrapFetchForRequestCompression,
 } from "@oh-my-pi/pi-ai/utils/request-compression";
+import { retryWaitRefusal, withProviderRetryPolicy } from "@oh-my-pi/pi-ai/utils/retry-wait";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Api } from "@oh-my-pi/pi-catalog/types";
 
@@ -72,6 +73,34 @@ const copilotRejection = () =>
 afterEach(() => resetRequestCompressionForTesting());
 
 describe("wrapFetchForRequestCompression", () => {
+	it.each([true, false])(
+		"refuses a compressed-body resend rather than shortening Retry-After (budget: %s)",
+		async budgeted => {
+			const rejection = new Response(anthropicRejection().body, { status: 400, headers: { "Retry-After": "1" } });
+			const { calls, fetch } = captureFetch([rejection, new Response("{}")]);
+			const waits: number[] = [];
+			const response = await withProviderRetryPolicy(
+				{ providerRetryWaitCeilingMs: 10, providerRetryWait: async ms => void waits.push(ms) },
+				() =>
+					wrapFetchForRequestCompression(
+						fetch,
+						anthropic,
+						budgeted ? ReplayBudget.from(10_000) : undefined,
+					)(ANTHROPIC_URL, post()),
+			);
+			expect(calls).toHaveLength(1);
+			expect(calls[0].headers["Content-Encoding"]).toBe("gzip");
+			expect(response.status).toBe(400);
+			expect(await response.text()).toContain("Request body is not valid gzip.");
+			expect(waits).toEqual([]);
+			expect(retryWaitRefusal(response)).toEqual({
+				waitMs: 1_000,
+				limitMs: 10,
+				option: "providerRetryWaitCeilingMs",
+			});
+		},
+	);
+
 	// The uncompressed resend is a second request inside one call: a caller's
 	// replay budget that it ignored would be spent without anyone above knowing.
 	it("returns the rejection instead of resending when the call's replay budget is spent", async () => {

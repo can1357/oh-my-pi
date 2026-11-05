@@ -11,6 +11,7 @@ import {
 	restoreReplaced,
 	withReplayBudget,
 } from "@oh-my-pi/pi-ai/utils/replay-budget";
+import { retryWaitRefusal } from "@oh-my-pi/pi-ai/utils/retry-wait";
 import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { RetryRefusedError } from "@oh-my-pi/pi-utils";
@@ -416,6 +417,49 @@ describe("the failure a refused call answers with", () => {
 });
 
 describe("the wait before a replay", () => {
+	it("admits its own 500 ms backoff after clamping it to a 50 ms ceiling inside a 100 ms budget", async () => {
+		const clock = fakeClock();
+		const budget = budgetOf(100);
+		const failure = new Error("503 overloaded");
+		const waits: number[] = [];
+		expect(
+			await budget.replayAfter(failure, 500, undefined, {
+				providerRetryWaitCeilingMs: 50,
+				providerRetryWait: async ms => {
+					waits.push(ms);
+					clock.advance(ms);
+				},
+			}),
+		).toBe(true);
+		expect(waits).toEqual([50]);
+		expect(budget.admits(0)).toBe(true);
+	});
+
+	it.each(["replayAfter", "replayAfterDelay"] as const)(
+		"%s refuses and records a stated wait above the ceiling",
+		async entry => {
+			fakeClock();
+			const budget = budgetOf(10_000);
+			const failure = new Error("503 overloaded; please retry in 1s");
+			const waits: number[] = [];
+			const policy = {
+				providerRetryWaitCeilingMs: 10,
+				providerRetryWait: async (ms: number) => void waits.push(ms),
+			};
+			const admitted =
+				entry === "replayAfter"
+					? await budget.replayAfter(failure, 0, undefined, policy)
+					: await budget.replayAfterDelay(1_000, failure, undefined, policy);
+			expect(admitted).toBe(false);
+			expect(waits).toEqual([]);
+			expect(retryWaitRefusal(failure)).toEqual({
+				waitMs: 1_000,
+				limitMs: 10,
+				option: "providerRetryWaitCeilingMs",
+			});
+		},
+	);
+
 	/** How `pending` settles within `ms`: a regression that never settles fails here, not at the runner's timeout. */
 	function settlesWithin<T>(pending: Promise<T>, ms: number): Promise<{ value: T } | "rejected" | "pending"> {
 		return Promise.race([

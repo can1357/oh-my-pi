@@ -25,6 +25,7 @@ import type {
 import { normalizeSystemPrompts } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { ReplayBudget, restoreReplaced } from "../utils/replay-budget";
+import { retryWaitRefusal } from "../utils/retry-wait";
 import { toolWireSchema } from "../utils/schema/wire";
 import chatmlHistoryNote from "./gitlab-duo-workflow-chatml-note.md" with { type: "text" };
 import { redactSensitiveCredentials } from "./transform-messages";
@@ -1409,9 +1410,29 @@ async function runGitLabDuoWorkflow(
 	// The dead workflow is stopped either way.
 	const restartAsFreshWorkflow = async (): Promise<boolean> => {
 		await stopGitLabDuoWorkflow(fetchImpl, baseUrl, apiKey, workflowId);
-		if (replayBudget && !(await replayBudget.replayAfter(state.output.errorMessage, 0, options.signal, options))) {
-			replayBudget.stamp(state.output);
-			return false;
+		if (replayBudget) {
+			const failure = new AIError.ProviderResponseError(
+				state.output.errorMessage ?? GITLAB_DUO_WORKFLOW_STALL_ERROR_MESSAGE,
+				{
+					provider: "gitlab-duo-agent",
+					kind: "output",
+				},
+			);
+			if (!(await replayBudget.replayAfter(failure, 0, options.signal, options))) {
+				if (retryWaitRefusal(failure)) {
+					AIError.applyFinalizeResult(
+						state.output,
+						await AIError.finalize(failure, {
+							provider: model.provider,
+							api: model.api,
+							model: model.id,
+							signal: options.signal,
+						}),
+					);
+				}
+				replayBudget.stamp(state.output);
+				return false;
+			}
 		}
 		try {
 			workflowId = await createGitLabDuoWorkflow(

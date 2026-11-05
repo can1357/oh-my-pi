@@ -1,4 +1,4 @@
-import { scheduler } from "node:timers/promises";
+import * as timers from "node:timers/promises";
 
 // "reset after 1h2m3s" / "10m15s" / "39s"
 const QUOTA_RESET_PATTERN = /reset after (?:(\d+)h)?(?:(\d+)m)?(\d+(?:\.\d+)?)s/i;
@@ -19,7 +19,7 @@ const WILL_RESET_IN_PATTERN =
 const RESET_IN_HR_MIN_PATTERN = /resets?\s+in\s+~?\s*(\d+(?:\.\d+)?)\s*hr\s*(\d+(?:\.\d+)?)\s*min\b/i;
 // "Your limit will reset at 2026-09-01 09:44:51" / "reset at 2026-09-01T09:44:51Z"
 const WILL_RESET_AT_PATTERN =
-	/(?:will\s+)?reset at\s+([0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:?[0-9]{2})?)/i;
+	/(?:will\s+)?reset at\s+([0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}(?:[.,][0-9]+)?(?:Z|[+-][0-9]{2}:?[0-9]{2})?)/i;
 // Both grammars carry a timezone-naive wall clock. The default reading is UTC;
 // a provider-specific offset (Z.AI/Zhipu Beijing time) is applied only through
 // `RetryHintOptions.naiveResetTimezoneOffset`, never inferred from the language.
@@ -36,7 +36,7 @@ const RETRY_AFTER_BODY_PATTERN = /retry-after\s*[:=]\s*([^\s,;]+)/i;
 // longer number is never taken for a year or a time; the reader then checks it
 // field by field.
 const RETRY_AFTER_DATE_BODY_PATTERN =
-	/retry-after\s*[:=]\s*((?:[A-Za-z]{3,9},?\s+)?(?:\d{1,2}(?:\s+|-)[A-Za-z]{3,9}(?:\s+|-)\d{2,4}\s+\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?|[A-Za-z]{3,9}\s+\d{1,2}(?:,?\s+\d{4})?\s+\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:\s+\d{4})?|\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(?:\s*(?:(?:GMT|UTC|UT)(?:[+-]\d{2}:?\d{2})?|Z|[ECMP][SD]T|[+-]\d{2}:?\d{2}))?(?:\s*\([^()]*\))*)(?![\w:])/i;
+	/retry-after\s*[:=]\s*((?:[A-Za-z]{3,9},?\s+)?(?:\d{1,2}(?:\s+|-)[A-Za-z]{3,9}(?:\s+|-)\d{2,4}\s+\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?|[A-Za-z]{3,9}\s+\d{1,2}(?:,?\s+\d{4})?\s+\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:\s+\d{4})?|\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?)(?:\s*(?:(?:GMT|UTC|UT)(?:[+-]\d{2}:?\d{2})?|Z|[ECMP][SD]T|[+-]\d{2}:?\d{2}))?(?:\s*\([^()]*\))*)(?![\w:])/i;
 // The shapes a Retry-After date takes. RFC 9110 section 5.6.7 names three
 // (IMF-fixdate, RFC 850, asctime) and asks recipients to be robust: a date
 // forwarded from an RFC 5322 message may omit the weekday or the seconds, name
@@ -54,7 +54,7 @@ const DATE_END = String.raw`(?:\s*(?<zone>${DATE_ZONE}))?(?:\s*\([^()]*\))*$`;
  * whitespace (RFC 5322 folding whitespace may be more than one space).
  */
 const DAY_MONTH_YEAR_PATTERN = new RegExp(
-	String.raw`^${DATE_WEEKDAY}(?<day>\d{1,2})(?:\s+|-)(?<month>[A-Za-z]{3,9})(?:\s+|-)(?<year>\d{4}|\d{2})\s+${DATE_TIME}${DATE_END}`,
+	String.raw`^${DATE_WEEKDAY}(?<day>\d{2})(?:\s+|-)(?<month>[A-Za-z]{3,9})(?:\s+|-)(?<year>\d{4}|\d{2})\s+${DATE_TIME}${DATE_END}`,
 	"i",
 );
 /** asctime (year after the time) and `Date#toString` (year before it). */
@@ -64,7 +64,7 @@ const MONTH_DAY_PATTERN = new RegExp(
 );
 // An RFC 3339 timestamp, with `T` or a space, its zone optional.
 const RFC3339_PATTERN =
-	/^(?<year>\d{4})-(?<month>\d{2})-(?<day>\d{2})[Tt ](?<hour>\d{2}):(?<minute>\d{2})(?::(?<second>\d{2})(?:\.(?<fraction>\d+))?)?(?:\s*(?<zone>[Zz]|[+-]\d{2}:?\d{2}|GMT|UTC))?$/;
+	/^(?<year>\d{4}|\+\d{6})-(?<month>\d{2})-(?<day>\d{2})[Tt ](?<hour>\d{2}):(?<minute>\d{2})(?::(?<second>\d{2})(?:[.,](?<fraction>\d+))?)?(?:\s*(?<zone>[Zz]|[+-]\d{2}:?\d{2}|GMT|UTC))?$/;
 const MONTH_NAMES = [
 	"jan",
 	"feb",
@@ -188,13 +188,10 @@ export function extractRetryHint(
 	const headers = source instanceof Headers ? source : (source?.headers ?? undefined);
 	const { explicit, reset } = readRetryHeaderHints(headers);
 	const headerHint = explicit ?? reset;
-	if (headerHint !== undefined) return headerHint;
-	// A rejection that arrives inside a stream the server already accepted has
-	// no response of its own, so its caller hands over the accepted stream's
-	// parsed wait. It competes with the body's signals, as a header would.
-	const statedMs = options?.headerRetryAfterMs;
-	if (!body) return statedMs;
-	return bodyRetryHint(body, options, false);
+	// A header outranks body dates, but relative body waits can still be longer.
+	// Keep the first occurrence of each phrase, as for body-only failures.
+	if (!body) return headerHint ?? options?.headerRetryAfterMs;
+	return bodyRetryHint(body, options, false, headerHint);
 }
 
 /**
@@ -223,21 +220,16 @@ export function longestRetryHint(
 
 /**
  * The wait a `retry-after-ms` (`unit` `"ms"`) or `Retry-After` (`unit` `"s"`:
- * delta seconds, or an HTTP-date) header value states, split by
- * {@link retryAfterEntries} so a duplicated header line is read part by part
- * and anything else is read whole. An explicit `0` and an elapsed date are
- * `0`: the server asked for an immediate retry. A value that is neither a
- * delay nor a date states no wait. Every reader of these two headers
+ * delta seconds, or an HTTP-date) header value states. Duplicated lines are
+ * parsed as complete entries by {@link readRetryAfterHeaderMs}. An explicit
+ * `0` and an elapsed date mean retry now. A value that is neither a delay nor
+ * a date states no wait. Every reader of these two headers
  * ({@link extractRetryHint}, {@link longestRetryHint}, pi-ai's
  * `getRetryAfterMsFromHeaders`) reads a value through this, so the transport's
  * sleep and the failed message's wait agree.
  */
 export function parseRetryAfterHeaderMs(raw: string | null | undefined, unit: "ms" | "s"): number | undefined {
-	if (!raw) return undefined;
-	const unitMs = unit === "ms" ? 1 : 1000;
-	const entries = retryAfterEntries(raw, unitMs);
-	// `retry-after-ms` is only ever a count of milliseconds; `Retry-After` may be a date.
-	return longestWait(entries.map(entry => (unit === "ms" ? bareDelay(entry) : retryAfterValueMs(entry))));
+	return raw ? readRetryAfterHeaderMs(raw, unit === "ms" ? 1 : 1000, Date.now()) : undefined;
 }
 
 /** A wait past 10^12 ms (31.7 years) is an epoch timestamp, as {@link resetCounterMs} reads one, not a delay. */
@@ -257,10 +249,11 @@ function bareDelay(value: string): number | undefined {
 	return /^\d+(?:\.\d+)?$/.test(value) ? Number(value) : undefined;
 }
 
-/** One `Retry-After` value: a bare delay in seconds, or an HTTP-date read as GMT when it names no zone. */
-function retryAfterValueMs(value: string, nowMs = Date.now()): number | undefined {
-	const seconds = bareDelay(value);
-	if (seconds !== undefined) return seconds * 1000;
+/** One header value: a bare delay in its unit, or a date for `Retry-After` only. */
+function retryAfterValueMs(value: string, unitMs: number, nowMs: number): number | undefined {
+	const delay = bareDelay(value);
+	if (delay !== undefined) return delay * unitMs;
+	if (unitMs === 1) return undefined;
 	const dateMs = parseRetryDateMs(value, "gmt", nowMs);
 	return dateMs === undefined ? undefined : Math.max(0, dateMs - nowMs);
 }
@@ -391,52 +384,53 @@ export function headerValue(headers: RetryHeaders, name: string): string | undef
 }
 
 /**
- * The wait, in ms, a `Retry-After` header value names: delta seconds or a date
- * ({@link parseRetryDateMs}). A date already past and a negative delta name
- * `0`; `undefined` when the value states no wait.
- *
- * A duplicated header line arrives joined by a comma, so the value is split on
- * commas — but only when every part is a bare delay of at most 31.7 years.
- * Two joined lines then contradict each other and the conservative read is the
- * longer. One part failing that test leaves the value whole, which is what
- * keeps a date's own comma with its date (`Fri, 06 Nov 2026 ...`), reads an
- * ISO date-time's decimal comma as a decimal point, and leaves a malformed
- * value malformed. Splitting unconditionally and taking the longest part is
- * what turned `Retry-After: 0,` into "retry now" — three requests in a few
- * milliseconds at a server that had just rate-limited the client.
- *
- * The one reading of the header: every retry parser uses it, with or without a
- * replay budget, and only bounds the result its own way (a cap, a floor), so
- * two readers of the same header never disagree about what it says.
+ * The wait, in ms, a `Retry-After` header names: unsigned delta seconds or a
+ * date ({@link parseRetryDateMs}). An elapsed date is `0`; an unparseable
+ * value states no wait. Duplicated lines must consist entirely of complete
+ * values. Weekday commas and decimal-comma fractions belong to their dates,
+ * and an empty or malformed entry invalidates the list (`0,` is not zero).
  */
 export function parseRetryAfter(value: string, nowMs = Date.now()): number | undefined {
-	return longestWait(retryAfterEntries(value, 1000).map(entry => retryAfterValueMs(entry, nowMs)));
+	return readRetryAfterHeaderMs(value, 1000, nowMs);
 }
 
-/**
- * The values a `Retry-After` or `retry-after-ms` header carries: its
- * comma-separated parts when every one of them is a bare delay that is no
- * larger than an epoch timestamp in `unitMs`, else the whole value alone.
- */
-function retryAfterEntries(raw: string, unitMs: number): string[] {
+/** Read one whole value first, then complete comma-joined entries using the same grammar. */
+function readRetryAfterHeaderMs(raw: string, unitMs: number, nowMs: number): number | undefined {
 	const whole = raw.trim();
-	if (whole === "") return [];
-	const parts = whole.split(",").map(part => part.trim());
-	const joined =
-		parts.length > 1 &&
-		parts.every(part => {
-			const delay = bareDelay(part);
-			return delay !== undefined && delay * unitMs <= EPOCH_SIZED_MS;
-		});
-	return joined ? parts : [whole];
-}
+	if (whole === "") return undefined;
+	const single = retryAfterValueMs(whole, unitMs, nowMs);
+	if (single !== undefined) return single;
 
-function longestWait(waits: readonly (number | undefined)[]): number | undefined {
 	let longest: number | undefined;
-	for (const wait of waits) {
-		if (wait !== undefined && (longest === undefined || wait > longest)) longest = wait;
+	let start = 0;
+	let end = whole.indexOf(",");
+	while (end >= 0) {
+		const entry = whole.slice(start, end).trim();
+		const delay = bareDelay(entry);
+		// Epoch-sized comma numbers are not a list of relative waits.
+		if (delay !== undefined && delay * unitMs > EPOCH_SIZED_MS) return undefined;
+		const wait = delay === undefined ? retryAfterValueMs(entry, unitMs, nowMs) : delay * unitMs;
+		const comma = whole.indexOf(",", end + 1);
+		const nextEnd = comma < 0 ? whole.length : comma;
+		if (wait !== undefined) {
+			// A date prefix without a zone can already parse before its decimal
+			// comma. Prefer the extended date if the next part completes one.
+			if (delay === undefined && end < whole.length) {
+				const extended = whole.slice(start, nextEnd).trim();
+				if (retryAfterValueMs(extended, unitMs, nowMs) !== undefined) {
+					end = nextEnd;
+					continue;
+				}
+			}
+			if (longest === undefined || wait > longest) longest = wait;
+			if (end === whole.length) return longest;
+			start = end + 1;
+		} else if (end === whole.length) {
+			return undefined;
+		}
+		end = nextEnd;
 	}
-	return longest;
+	return undefined;
 }
 
 /**
@@ -453,10 +447,11 @@ export type ZonelessDate = "gmt" | "reject";
  * robustness it asks for: the RFC 5322 date-time they derive from (optional
  * weekday and seconds, UT, the US zone names, a numeric offset, a trailing
  * comment), month and weekday names short or long, JavaScript's `Date#toString`
- * shape, and an RFC 3339 timestamp. Every field is range-checked: the day must
- * exist in its month, and second 60 is accepted only as a leap second at 23:59,
- * read as the instant after 23:59:59. A date with no zone is read by
- * `zoneless` ({@link ZonelessDate}): GMT from a header, nothing from a body. A
+ * shape, and ISO timestamps with a dot or comma fraction. Every field is
+ * range-checked: the day must exist in its month, a weekday must match the
+ * stated calendar date, and second 60 is accepted only at 23:59 UTC, read as
+ * the instant after 23:59:59. A date with no zone follows `zoneless`
+ * ({@link ZonelessDate}): GMT from a header, nothing from a body. A
  * two-digit year is the latest year with those digits that is not more than
  * fifty years after `nowMs`.
  *
@@ -470,47 +465,18 @@ export function parseRetryDateMs(value: string, zoneless: ZonelessDate, nowMs = 
 		const month = monthIndex(groups.month!);
 		const year = groups.year!.length === 4 ? Number(groups.year) : twoDigitYear(groups, month, nowMs);
 		if (year === undefined) return undefined;
-		return checkedInstant(utcInstant(year, month, groups, groups.zone), groups, zoneless);
+		return utcInstant(year, month, groups, zoneless);
 	}
 	groups = MONTH_DAY_PATTERN.exec(text)?.groups;
 	if (groups) {
-		const { yearBefore, yearAfter, zone } = groups;
+		const { yearBefore, yearAfter } = groups;
 		// Exactly one year: before the time (`Date#toString`) or after it (asctime).
 		if ((yearBefore === undefined) === (yearAfter === undefined)) return undefined;
-		const ms = utcInstant(Number(yearBefore ?? yearAfter), monthIndex(groups.month!), groups, zone);
-		return checkedInstant(ms, groups, zoneless);
+		return utcInstant(Number(yearBefore ?? yearAfter), monthIndex(groups.month!), groups, zoneless);
 	}
 	groups = RFC3339_PATTERN.exec(text)?.groups;
 	if (!groups) return undefined;
-	return checkedInstant(
-		utcInstant(Number(groups.year), Number(groups.month) - 1, groups, groups.zone),
-		groups,
-		zoneless,
-	);
-}
-
-/**
- * The instant, once the fields around it agree with it. A date with no zone is
- * a wait only from a header ({@link ZonelessDate}). A named day of the week
- * must be the day the date falls on: RFC 9110 section 5.6.7 has a recipient
- * ignore a `Retry-After` it cannot parse, and a date that contradicts itself —
- * `Sun, 06 Nov 2026`, where the sixth is a Friday — is a corrupt value, not a
- * wait to sleep on. Honouring the date half of it would sleep on a number the
- * server never meant; ignoring it leaves the caller its own backoff.
- */
-function checkedInstant(
-	ms: number | undefined,
-	groups: Record<string, string | undefined>,
-	zoneless: ZonelessDate,
-): number | undefined {
-	if (ms === undefined || (groups.zone === undefined && zoneless === "reject")) return undefined;
-	const { weekday } = groups;
-	if (weekday === undefined) return ms;
-	const named = WEEKDAY_NAMES.indexOf(weekday.toLowerCase());
-	if (named < 0) return undefined;
-	// A leap second is written on the day before the minute it rolls into.
-	const stated = Number(groups.second ?? 0) === 60 ? ms - 1000 : ms;
-	return new Date(stated).getUTCDay() === named % 7 ? ms : undefined;
+	return utcInstant(Number(groups.year), Number(groups.month) - 1, groups, zoneless);
 }
 
 function monthIndex(name: string): number {
@@ -566,20 +532,30 @@ function utcInstant(
 	year: number,
 	month: number,
 	fields: Record<string, string | undefined>,
-	zone: string | undefined,
+	zoneless: ZonelessDate,
 ): number | undefined {
 	const day = Number(fields.day);
 	const hour = Number(fields.hour);
 	const minute = Number(fields.minute);
 	const second = Number(fields.second ?? 0);
-	const offsetMinutes = zoneOffsetMinutes(zone);
+	if (fields.zone === undefined && zoneless === "reject") return undefined;
+	const offsetMinutes = zoneOffsetMinutes(fields.zone);
 	if (offsetMinutes === undefined || month < 0 || month > 11 || year < 0) return undefined;
 	if (day < 1 || day > daysInMonth(year, month)) return undefined;
-	if (hour > 23 || minute > 59 || second > (hour === 23 && minute === 59 ? 60 : 59)) return undefined;
+	if (hour > 23 || minute > 59 || second > 60) return undefined;
 	const ms = fields.fraction === undefined ? 0 : Number(fields.fraction.slice(0, 3).padEnd(3, "0"));
 	// `Date.UTC` reads years 0-99 as 1900-1999; a 400-year shift is exact.
 	const shift = year < 100 ? MS_PER_400_YEARS : 0;
-	return Date.UTC(year + (shift ? 400 : 0), month, day, hour, minute, second, ms) - shift - offsetMinutes * 60_000;
+	const wallMs = Date.UTC(year + (shift ? 400 : 0), month, day, hour, minute, Math.min(second, 59), ms) - shift;
+	if (!Number.isFinite(wallMs)) return undefined;
+	if (fields.weekday !== undefined) {
+		const named = WEEKDAY_NAMES.indexOf(fields.weekday.toLowerCase());
+		if (named < 0 || new Date(wallMs).getUTCDay() !== named % 7) return undefined;
+	}
+	const instant = wallMs - offsetMinutes * 60_000;
+	if (second !== 60) return instant;
+	const utc = new Date(instant);
+	return utc.getUTCHours() === 23 && utc.getUTCMinutes() === 59 ? instant + 1000 : undefined;
 }
 
 function daysInMonth(year: number, month: number): number {
@@ -620,6 +596,7 @@ function bodyRetryHint(
 	body: string,
 	options: RetryHintOptions | undefined,
 	everyOccurrence: boolean,
+	headerHint?: number,
 ): number | undefined {
 	// A body can carry several timing signals at once: the account-reset
 	// window plus header timing folded into the message text (already the
@@ -647,7 +624,7 @@ function bodyRetryHint(
 	// response of its own, so its caller hands the accepted stream's parsed wait
 	// over here, where it competes with the body's signals as a header would —
 	// and where a stated `0` becomes "retry now" instead of being lost.
-	considerClamped(options?.headerRetryAfterMs);
+	considerClamped(headerHint ?? options?.headerRetryAfterMs);
 
 	for (const quotaMatch of occurrences(QUOTA_RESET_PATTERN, body, everyOccurrence)) {
 		const hours = quotaMatch[1] ? Number.parseInt(quotaMatch[1], 10) : 0;
@@ -668,9 +645,10 @@ function bodyRetryHint(
 			const normalized = match[1].replace(" ", "T");
 			const hasOffset = /(?:Z|[+-][0-9]{2}:?[0-9]{2})$/i.test(normalized);
 			const configuredOffset = options?.naiveResetTimezoneOffset;
-			if (options?.excludeDates || (!hasOffset && configuredOffset === undefined)) continue;
-			const parsed = Date.parse(hasOffset ? normalized : `${normalized}${configuredOffset}`);
-			if (!Number.isNaN(parsed) && parsed > Date.now()) consider(parsed - Date.now());
+			if (options?.excludeDates || headerHint !== undefined || (!hasOffset && configuredOffset === undefined))
+				continue;
+			const parsed = parseRetryDateMs(hasOffset ? normalized : `${normalized}${configuredOffset}`, "reject");
+			if (parsed !== undefined && parsed > Date.now()) consider(parsed - Date.now());
 		}
 	}
 	// OpenCode Go compound remainder ("Resets in 2hr 15min"): the generic
@@ -721,11 +699,12 @@ function bodyRetryHint(
 		if (Number.isFinite(seconds)) {
 			considerClamped(seconds * 1000);
 		} else {
-			const dateMs = options?.excludeDates ? undefined : parseRetryDateMs(token, "reject");
+			const dateMs =
+				options?.excludeDates || headerHint !== undefined ? undefined : parseRetryDateMs(token, "reject");
 			if (dateMs !== undefined) considerClamped(dateMs - Date.now());
 		}
 	}
-	if (!options?.excludeDates) {
+	if (!options?.excludeDates && headerHint === undefined) {
 		for (const dateMatch of occurrences(RETRY_AFTER_DATE_BODY_PATTERN, body, everyOccurrence)) {
 			const dateMs = parseRetryDateMs(dateMatch[1]!, "reject");
 			if (dateMs !== undefined) considerClamped(dateMs - Date.now());
@@ -1019,7 +998,7 @@ async function waitForRetry(
 ): Promise<void> {
 	try {
 		if (retryWait) await retryWait(delayMs, signal);
-		else await scheduler.wait(delayMs, { signal });
+		else await timers.scheduler.wait(delayMs, { signal });
 	} catch (error) {
 		if (signal?.aborted) throw new Error("Request was aborted");
 		throw error;
