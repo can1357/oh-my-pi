@@ -29,7 +29,7 @@ const model: Model<"openai-responses"> = buildModel({
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 } satisfies ModelSpec<"openai-responses">);
 
-function failedResponse(code: string, message: string): Response {
+function failedResponse(error: Record<string, unknown>): Response {
 	const response = { id: "resp_refused", status: "in_progress" };
 	const frames = [
 		`event: response.created\ndata: ${JSON.stringify({ type: "response.created", sequence_number: 0, response })}`,
@@ -37,7 +37,7 @@ function failedResponse(code: string, message: string): Response {
 		`event: response.failed\ndata: ${JSON.stringify({
 			type: "response.failed",
 			sequence_number: 2,
-			response: { ...response, status: "failed", error: { code, message } },
+			response: { ...response, status: "failed", error },
 		})}`,
 		"data: [DONE]",
 	];
@@ -125,7 +125,9 @@ describe("an `error` field beside a code of its own", () => {
 
 describe("provider content-policy refusals", () => {
 	it("attempts a cyber_policy refusal once and surfaces the provider's code and message as a refusal", async () => {
-		const { result, bearers } = await runAgainstPool(() => failedResponse("cyber_policy", REFUSAL_MESSAGE));
+		const { result, bearers } = await runAgainstPool(() =>
+			failedResponse({ code: "cyber_policy", message: REFUSAL_MESSAGE }),
+		);
 
 		expect(bearers).toEqual(["Bearer credential-A"]);
 		expect(result.stopReason).toBe("error");
@@ -133,10 +135,22 @@ describe("provider content-policy refusals", () => {
 		expect(result.errorMessage).toBe(`Refusal (cyber_policy): ${REFUSAL_MESSAGE}`);
 	});
 
+	it("does not retry an in-band refusal whose own message reads like a throttle", async () => {
+		// In band there is no status field to contradict the text, so a refusal that asks the
+		// caller to try again used to be read as throttle wording and the same declined content
+		// was sent again. It is still a refusal, and it is still one request.
+		const worded = "This content was flagged for possible cybersecurity risk. Please retry in a moment.";
+		const { result, bearers } = await runAgainstPool(() => failedResponse({ code: "cyber_policy", message: worded }));
+
+		expect(bearers).toEqual(["Bearer credential-A"]);
+		expect(result.stopDetails).toEqual({ type: "refusal", category: "cyber_policy", explanation: worded });
+		expect(result.errorMessage).toBe(`Refusal (cyber_policy): ${worded}`);
+	});
+
 	it.each([
 		{
 			name: "an account-eligibility denial naming Trusted Access for Cyber",
-			respond: () => failedResponse("cyber_policy", TRUSTED_ACCESS_MESSAGE),
+			respond: () => failedResponse({ code: "cyber_policy", message: TRUSTED_ACCESS_MESSAGE }),
 		},
 		{
 			name: "an HTTP 403 access denial",
@@ -151,28 +165,53 @@ describe("provider content-policy refusals", () => {
 	});
 });
 
-type RefusalCarrier = "sse" | "http403" | "http400" | "http403-gateway-wrapped";
+type RefusalCarrier =
+	| "sse"
+	| "http403"
+	| "http400"
+	| "http403-gateway-wrapped"
+	| "sse-gateway-wrapped"
+	| "sse-diagnostic-beside-the-code";
+
+/** A transient cause a gateway may attach beside a refusal; it must never replace it. */
+const INNER_DIAGNOSTIC = { code: "server_error", message: "upstream diagnostic", status: 503 };
 
 /** The same `cyber_policy` refusal on the given carrier, in the wire format `api` streams. */
 function refusalOn(api: Api, carrier: RefusalCarrier): Response {
 	const error = { code: "cyber_policy", message: REFUSAL_MESSAGE };
 	// Some gateways wrap the error envelope in itself; the refusal code sits one level deeper.
 	if (carrier === "http403-gateway-wrapped") return Response.json({ error: { error } }, { status: 403 });
-	if (carrier !== "sse") return Response.json({ error }, { status: carrier === "http403" ? 403 : 400 });
-	if (api !== "openai-completions") return failedResponse("cyber_policy", REFUSAL_MESSAGE);
+	if (!carrier.startsWith("sse")) return Response.json({ error }, { status: carrier === "http403" ? 403 : 400 });
+	// The same two shapes, in band: an HTTP 200 whose stream carries the failure. Each API reads
+	// that frame with its own code, and a refusal arriving this way used to lose its code — to the
+	// wrapper on one side and to the diagnostic on the other. Chat Completions carries the
+	// provider's `type` beside the code; a gateway that wraps the envelope wraps that whole object
+	// rather than adding a sibling type of its own.
+	const inner = api === "openai-completions" ? { ...error, type: "invalid_request_error" } : error;
+	const streamed =
+		carrier === "sse-gateway-wrapped"
+			? { error: inner }
+			: carrier === "sse-diagnostic-beside-the-code"
+				? { ...inner, error: INNER_DIAGNOSTIC }
+				: inner;
+	if (api !== "openai-completions") return failedResponse(streamed);
 	// Chat Completions streams a failure as an in-band `error` chunk.
-	return new Response(
-		`data: ${JSON.stringify({ error: { ...error, type: "invalid_request_error" } })}\n\ndata: [DONE]\n\n`,
-		{
-			status: 200,
-			headers: { "content-type": "text/event-stream" },
-		},
-	);
+	return new Response(`data: ${JSON.stringify({ error: streamed })}\n\ndata: [DONE]\n\n`, {
+		status: 200,
+		headers: { "content-type": "text/event-stream" },
+	});
 }
 
 describe("content-policy refusals on every OpenAI-wire API and carrier", () => {
 	const apis = ["openai-completions", "openai-responses", "azure-openai-responses", "openai-codex-responses"] as const;
-	const carriers: RefusalCarrier[] = ["sse", "http403", "http400", "http403-gateway-wrapped"];
+	const carriers: RefusalCarrier[] = [
+		"sse",
+		"http403",
+		"http400",
+		"http403-gateway-wrapped",
+		"sse-gateway-wrapped",
+		"sse-diagnostic-beside-the-code",
+	];
 	it.each(apis.flatMap(api => carriers.map(carrier => ({ api, carrier }))))(
 		"$api $carrier: one attempt, no rotation, the refusal's stopDetails kept",
 		async ({ api, carrier }) => {

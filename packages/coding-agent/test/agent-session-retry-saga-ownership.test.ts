@@ -40,11 +40,33 @@ interface SagaHarness {
 	session: AgentSession;
 	/** Resolves when the `hold` step is dispatched: the turn is in flight and not coming back. */
 	held: Promise<void>;
+	/** Resolves when the manual compaction pass reaches its hook. */
+	compactionEntered: Promise<void>;
+	/** Lets a held compaction hook finish. */
+	releaseCompaction: () => void;
 	errorEntries(): ErrorEntry[];
 	dispose(): Promise<void>;
 }
 
-async function createHarness(steps: Step[], overrides: Record<string, unknown> = {}): Promise<SagaHarness> {
+/** What the compaction hook does when the manual pass reaches it. */
+type CompactionOutcome = "commits" | "throws" | "cancels";
+
+/** How a test drives the manual compaction pass. */
+interface SagaHarnessOptions {
+	/** What the hook does when the pass reaches it; `commits` by default. */
+	compaction?: CompactionOutcome;
+	/** Park inside the hook until `releaseCompaction()`, so a prompt can arrive mid-compaction. */
+	holdCompaction?: boolean;
+}
+
+async function createHarness(
+	steps: Step[],
+	overrides: Record<string, unknown> = {},
+	options: SagaHarnessOptions = {},
+): Promise<SagaHarness> {
+	const compactionGate = Promise.withResolvers<void>();
+	const compactionEntered = Promise.withResolvers<void>();
+	if (!options.holdCompaction) compactionGate.resolve();
 	const temp = TempDir.createSync("@pi-retry-saga-");
 	const auth = await AuthStorage.create(temp.join("auth.db"));
 	auth.keys.setRuntime("anthropic", "test-key");
@@ -94,6 +116,10 @@ async function createHarness(steps: Step[], overrides: Record<string, unknown> =
 		emitBeforeAgentStart: async () => undefined,
 		emit: async (event: { type: string; preparation?: { firstKeptEntryId: string; tokensBefore: number } }) => {
 			if (event.type !== "session_before_compact" || !event.preparation) return undefined;
+			compactionEntered.resolve();
+			await compactionGate.promise;
+			if (options.compaction === "throws") throw new Error("compaction hook failed");
+			if (options.compaction === "cancels") return { cancel: true };
 			return {
 				compaction: {
 					summary: "Compacted old history",
@@ -115,6 +141,8 @@ async function createHarness(steps: Step[], overrides: Record<string, unknown> =
 	return {
 		session,
 		held: hold.promise,
+		compactionEntered: compactionEntered.promise,
+		releaseCompaction: compactionGate.resolve,
 		errorEntries: () =>
 			sessionManager.getBranchView().flatMap(entry => {
 				if (entry.type !== "message") return [];
@@ -233,6 +261,80 @@ describe("retry saga ownership across an interruption", () => {
 		await harness.session.waitForIdle();
 
 		const errors = harness.errorEntries();
+		expect(errors[0]?.errorMessage).toContain("503");
+		expect(errors[0]?.recovery).toBeUndefined();
+		expect(errors[0]?.presentation.kind).toBe("full");
+	});
+
+	// The decision to resume is taken at the end of the compaction, not at its start: the abort
+	// runs first and is told the saga is coming back, and only later does the pass learn whether
+	// it committed anything. A hook that throws and a hook that cancels both end with nothing
+	// resuming the interrupted turn, so both must abandon the saga the abort preserved.
+	it.each([
+		{ name: "a compaction whose hook throws", outcome: "throws" as const },
+		{ name: "a compaction its hook cancels", outcome: "cancels" as const },
+	])("leaves them to nobody after $name", async ({ outcome }) => {
+		const harness = await createHarness(
+			[ANSWER, TRANSIENT, "hold", ANSWER],
+			{ "compaction.enabled": true, "compaction.autoContinue": true },
+			{ compaction: outcome },
+		);
+		active = harness;
+		await primeContext(harness);
+
+		const turn = harness.session.prompt("Continue the work");
+		await Promise.race([
+			harness.held,
+			turn.then(() => {
+				throw new Error("The turn ended before the compaction barrier");
+			}),
+		]);
+		await harness.session.compact().catch(() => undefined);
+		await turn;
+		await harness.session.waitForIdle();
+
+		// The interrupted turn is not resumed, so this is the fourth and last scripted step.
+		await harness.session.prompt("A new, unrelated task");
+		await harness.session.waitForIdle();
+
+		const errors = harness.errorEntries();
+		expect(errors).toHaveLength(1);
+		expect(errors[0]?.errorMessage).toContain("503");
+		expect(errors[0]?.recovery).toBeUndefined();
+		expect(errors[0]?.presentation.kind).toBe("full");
+	});
+
+	it("leaves them to nobody when a prompt arriving mid-compaction takes the session", async () => {
+		// `/compact` while the user is already typing the next thing. The compaction commits and
+		// would resume the interrupted turn, but a prompt parked on its barrier is the newer
+		// intent, so the resume is withheld for it and then dropped when that prompt starts its
+		// own turn. The saga the abort preserved for a resume that never happened goes with it.
+		const harness = await createHarness(
+			[ANSWER, TRANSIENT, "hold", ANSWER],
+			{ "compaction.enabled": true, "compaction.autoContinue": true },
+			{ holdCompaction: true },
+		);
+		active = harness;
+		await primeContext(harness);
+
+		const turn = harness.session.prompt("Continue the work");
+		await Promise.race([
+			harness.held,
+			turn.then(() => {
+				throw new Error("The turn ended before the compaction barrier");
+			}),
+		]);
+		const compacting = harness.session.compact();
+		await harness.compactionEntered;
+		const parked = harness.session.prompt("The user's next intent");
+		harness.releaseCompaction();
+		await compacting;
+		await turn;
+		await parked;
+		await harness.session.waitForIdle();
+
+		const errors = harness.errorEntries();
+		expect(errors).toHaveLength(1);
 		expect(errors[0]?.errorMessage).toContain("503");
 		expect(errors[0]?.recovery).toBeUndefined();
 		expect(errors[0]?.presentation.kind).toBe("full");

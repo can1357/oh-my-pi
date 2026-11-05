@@ -40,8 +40,8 @@
  * text pattern is not required to match, so the retry decision is stated rather
  * than hoped for.
  */
-import { ProviderHttpError } from "./classes";
-import { attach, create, Flag } from "./flags";
+import { ProviderHttpError, wrappedErrorEnvelope } from "./classes";
+import { attach, create, Flag, isContentPolicyRefusal } from "./flags";
 import { isOpaqueStatusBody } from "./rate-limit";
 import { ProviderResponseError } from "./provider";
 
@@ -189,14 +189,17 @@ function readInBandSignal(frame: unknown): InBandSignal | undefined {
 	if (typeof frame !== "object" || frame === null || Array.isArray(frame)) return undefined;
 	const root = frame as Record<string, unknown>;
 	const nested = root.error ?? (root.response as Record<string, unknown> | undefined)?.error;
-	// Azure-compatible gates double-wrap (`{ error: { error: { code, message } } }`).
-	// Walk at most two levels so a deep payload cannot extend the parse.
+	// Azure-compatible gates double-wrap (`{ error: { error: { code, message } } }`), so descend —
+	// but only into a value that really is a wrapper. An `error` field beside a code of its own is
+	// a diagnostic, and taking it discards the code this whole signal is read from: an outer
+	// refusal became its inner transient cause and the turn was retried as if the provider were
+	// merely busy. Still at most two levels, so a deep payload cannot extend the parse.
 	let error: Record<string, unknown> | undefined;
 	if (typeof nested === "object" && nested !== null) {
 		error = nested as Record<string, unknown>;
 		for (let depth = 0; depth < 2; depth++) {
-			const inner = error.error;
-			if (typeof inner !== "object" || inner === null) break;
+			const inner = wrappedErrorEnvelope(error);
+			if (!inner) break;
 			error = inner as Record<string, unknown>;
 		}
 	}
@@ -223,6 +226,13 @@ function readInBandSignal(frame: unknown): InBandSignal | undefined {
 		readInBandDetail(error?.message) ??
 		readInBandDetail(root.message) ??
 		(typeof nested === "string" ? readInBandDetail(nested) : undefined);
+	// A content-policy refusal is never a shed-and-retry failure, whatever its message happens to
+	// say. Without this, a refusal whose own text asks the caller to try again read as throttle
+	// wording and the same declined content was sent again — and in band there is no status field
+	// to contradict it. The caller's refusal branch, which runs after this probe, reports it as
+	// the refusal it is. An account-eligibility denial is not a content refusal by
+	// `isContentPolicyRefusal`, so it still sheds and rotates exactly as before.
+	if (isContentPolicyRefusal(code, detail)) return undefined;
 	const holder = error ?? root;
 	// Reported statuses come from fields only: the error member's `status`, its
 	// numeric `code`, then the same on the root (the flat `{ code: 429 }` /

@@ -1264,11 +1264,6 @@ export class SessionMaintenance {
 					(interruptedActiveTurn || inheritedResume) &&
 					options?.suppressContinuation !== true &&
 					cfgCompactionAutoContinue.get(this.#host.settings) !== false;
-				// `preserveCompaction` told the abort the saga was coming back, so its pending
-				// retry errors are still markable. Nothing is coming back on this branch: close
-				// the saga for real, or the next prompt's success marks this turn's errors
-				// recovered and the transcript stops rendering them.
-				if (!resumeInterruptedTurn) this.#host.abortRetry();
 				interruptedTurnGeneration = this.#host.promptGeneration();
 				manualCompactionStarted = true;
 				await this.#emitLifecycleEvent(
@@ -1679,16 +1674,25 @@ export class SessionMaintenance {
 				// An inherited resume was earned by the pass that committed it; this
 				// pass's own outcome (hook cancel, summarizer failure) only decides the
 				// turn it interrupted itself, so the inherited one stays owed.
-				if ((compactionCommitted || rejectedAsNoOp || inheritedResume) && resumeInterruptedTurn) {
-					if (this.#promptsAwaitingCleanup > 0) {
-						// A prompt parked on the barrier just resolved is the user's next
-						// intent and takes the session instead (its continuation is a
-						// microtask away). It reports back via `release`: a turn drops the
-						// resume, a locally handled command hands it back.
-						this.#deferredResumeGeneration = interruptedTurnGeneration;
-					} else {
-						this.#scheduleInterruptedTurnResume(interruptedTurnGeneration);
-					}
+				//
+				// This is where the decision becomes final, which is why the retry saga is
+				// settled here and nowhere earlier: the abort ran with `preserveCompaction`,
+				// which told it the saga was coming back, and a hook that cancelled, a
+				// summarizer that threw or an abort all reach this line with
+				// `resumeInterruptedTurn` still true from entry. If nothing is coming back,
+				// the saga ends now, or the next prompt's success marks the interrupted
+				// turn's errors recovered and the transcript stops rendering them.
+				if (!((compactionCommitted || rejectedAsNoOp || inheritedResume) && resumeInterruptedTurn)) {
+					if (manualCompactionStarted) this.#host.abortRetry();
+				} else if (this.#promptsAwaitingCleanup > 0) {
+					// A prompt parked on the barrier just resolved is the user's next
+					// intent and takes the session instead (its continuation is a
+					// microtask away). It reports back via `release`: a turn drops the
+					// resume, a locally handled command hands it back. The saga stays
+					// preserved with it, and is abandoned wherever the resume is dropped.
+					this.#deferredResumeGeneration = interruptedTurnGeneration;
+				} else {
+					this.#scheduleInterruptedTurnResume(interruptedTurnGeneration);
 				}
 			}
 		}
@@ -2157,7 +2161,7 @@ export class SessionMaintenance {
 			released = true;
 			this.#promptsAwaitingCleanup--;
 			if (startedTurn) {
-				this.#deferredResumeGeneration = undefined;
+				this.#dropWithheldResume();
 				return;
 			}
 			if (this.#promptsAwaitingCleanup > 0 || this.#deferredResumeGeneration === undefined) return;
@@ -2168,12 +2172,24 @@ export class SessionMaintenance {
 	}
 
 	/**
+	 * A turn of its own took the session, so a resume still withheld for a parked prompt is moot —
+	 * and so is the retry saga the compaction's abort preserved for that resume. Ending it here is
+	 * what stops the turn now running from marking the interrupted turn's errors as its own.
+	 * A no-op when nothing was withheld, which is every ordinary turn.
+	 */
+	#dropWithheldResume(): void {
+		if (this.#deferredResumeGeneration === undefined) return;
+		this.#deferredResumeGeneration = undefined;
+		this.#host.abortRetry();
+	}
+
+	/**
 	 * A turn started, by whatever path (a released prompt, an extension's
 	 * `sendMessage({ triggerTurn })`, the queued-message drain). It owns the
 	 * session now, so a resume still withheld for a parked prompt is moot.
 	 */
 	noteTurnStarted(): void {
-		this.#deferredResumeGeneration = undefined;
+		this.#dropWithheldResume();
 	}
 
 	/** Cancel only automatic maintenance while preserving a manual compaction. */

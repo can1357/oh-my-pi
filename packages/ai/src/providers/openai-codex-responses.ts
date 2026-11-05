@@ -4604,8 +4604,38 @@ const innerFailureEventSchema = type({
 	}),
 });
 
+/**
+ * Replace a doubly wrapped error envelope (`{ error: { error: { code, message } } }`) with the
+ * envelope it wraps, in both the top-level and the `response.error` position. The schema below
+ * accepts a wrapper and reads nothing out of it, so a refusal carried that way arrives with no
+ * code at all and the failure reads as a plain one. Only a real wrapper is descended into: an
+ * `error` field beside a code of its own is a diagnostic, and taking it would discard the code the
+ * outer already carries. Returns `raw` itself when nothing is wrapped, so the ordinary event
+ * allocates nothing.
+ */
+function unwrapCodexFailureEnvelope(raw: unknown): unknown {
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return raw;
+	const event = raw as Record<string, unknown>;
+	const error =
+		typeof event.error === "object" && event.error !== null
+			? (AIError.wrappedErrorEnvelope(event.error) ?? event.error)
+			: event.error;
+	const response = event.response;
+	let unwrappedResponse = response;
+	if (typeof response === "object" && response !== null && !Array.isArray(response)) {
+		const record = response as Record<string, unknown>;
+		const responseError =
+			typeof record.error === "object" && record.error !== null
+				? (AIError.wrappedErrorEnvelope(record.error) ?? record.error)
+				: record.error;
+		if (responseError !== record.error) unwrappedResponse = { ...record, error: responseError };
+	}
+	if (error === event.error && unwrappedResponse === response) return raw;
+	return { ...event, error, response: unwrappedResponse };
+}
+
 const codexFailureEventSchema = type("unknown").pipe(raw => {
-	const out = innerFailureEventSchema(raw);
+	const out = innerFailureEventSchema(unwrapCodexFailureEnvelope(raw));
 	return out instanceof type.errors
 		? {
 				type: undefined,

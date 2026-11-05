@@ -4431,7 +4431,8 @@ export function throwOpenAIResponsesEventError(
 ): never {
 	const envelope = event as unknown as Record<string, unknown>;
 	if (event.type === "error") {
-		const error = isRecord(envelope.error) ? envelope.error : envelope;
+		const selected = isRecord(envelope.error) ? envelope.error : envelope;
+		const error = (AIError.wrappedErrorEnvelope(selected) ?? selected) as Record<string, unknown>;
 		const inBand = AIError.createInBandProviderError(event);
 		if (inBand) throw inBand;
 		throwOpenAIResponsesRefusal(error, provider);
@@ -4443,11 +4444,18 @@ export function throwOpenAIResponsesEventError(
 	const response = isRecord(envelope.response) ? envelope.response : undefined;
 	if (event.type === "response.failed") populateResponsesUsageFromResponse(output, event.response?.usage);
 	const statusDetails = isRecord(response?.status_details) ? response.status_details : undefined;
-	const error = isRecord(response?.error)
+	const selectedError = isRecord(response?.error)
 		? response.error
 		: isRecord(statusDetails?.error)
 			? statusDetails.error
 			: undefined;
+	// A gateway may wrap the envelope in itself, and then the refusal code sits one level in;
+	// read it, or the turn carries `unknown: no message` and rotates every sibling credential.
+	// Only a real wrapper is descended into: an `error` field beside a code of its own is a
+	// diagnostic, and taking it would lose the code the outer already carries.
+	const error = selectedError
+		? ((AIError.wrappedErrorEnvelope(selectedError) ?? selectedError) as Record<string, unknown>)
+		: undefined;
 	const details = isRecord(response?.incomplete_details) ? response.incomplete_details : undefined;
 	const inBand = details ? undefined : AIError.createInBandProviderError({ ...response, error });
 	if (inBand) throw inBand;
