@@ -878,11 +878,10 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         data = await _json_body(request)
         repo = _require_str(data.get("repo"), "repo")
         pr_number = _require_int(data.get("pr_number"), "pr_number")
-        # head_ref is NOT validated here: it is webhook-supplied and only
-        # consumed by the same-repo branch fallback inside git_fetch_pr_head,
-        # which validates it when the fallback is eligible. Validating up front
-        # would 400 valid Unicode branch names whose primary refs/pull/<n>/head
-        # fetch never needs the fallback.
+        if pr_number <= 0:
+            raise HTTPException(400, "invalid 'pr_number'")
+        # head_ref is only validated by the same-repo branch fallback:
+        # the primary refs/pull/<n>/head fetch does not consume it.
         head_ref = _require_str(data["head_ref"], "head_ref") if data.get("head_ref") is not None else None
         head_sha = _require_str(data["head_sha"], "head_sha") if data.get("head_sha") is not None else None
         same_repo = data.get("same_repo", False)

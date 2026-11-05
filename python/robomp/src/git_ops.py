@@ -666,20 +666,22 @@ def fetch_ref(
     )
 
 
-_SAFE_REF_BODY_RE = re.compile(r"[A-Za-z0-9._/-]+")
+_UNSAFE_REF_BODY_RE = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]")
 
 
 def validate_fetch_ref(ref: str) -> str:
-    """Reject unsafe fetch refspecs and option-shaped branch names."""
+    """Accept Git-valid branch names minus refspec/option-injectable characters."""
     body = ref.removeprefix("refs/heads/")
     if (
         not body
-        or ref.startswith("-")
-        or body.startswith("/")
+        or body.startswith(("-", "/"))
         or body.endswith(("/", ".", ".lock"))
         or "//" in body
         or ".." in body
-        or not _SAFE_REF_BODY_RE.fullmatch(body)
+        or "@{" in body
+        or body == "@"
+        or any(part.startswith(".") or part.endswith(".lock") for part in body.split("/"))
+        or _UNSAFE_REF_BODY_RE.search(body)
     ):
         raise ValueError("invalid ref")
     return ref

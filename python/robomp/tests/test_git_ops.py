@@ -208,24 +208,31 @@ def pr_fetch(monkeypatch: pytest.MonkeyPatch) -> tuple[Mock, Mock]:
     return run, backfill
 
 
-def test_fetch_pr_head_prefers_pull_ref(tmp_path: Path, pr_fetch: tuple[Mock, Mock]) -> None:
+@pytest.mark.parametrize("head_ref", ["feature/x", "feature+probe", "a@b", "funk-branch-é"])
+@pytest.mark.parametrize("same_repo", [False, True])
+def test_fetch_pr_head_prefers_pull_ref(
+    tmp_path: Path, pr_fetch: tuple[Mock, Mock], head_ref: str, same_repo: bool
+) -> None:
     run, backfill = pr_fetch
-    git_ops.fetch_pr_head(tmp_path, 7, token=None, head_ref="feature/x", head_sha="abc123", same_repo=True)
+    git_ops.fetch_pr_head(tmp_path, 7, token=None, head_ref=head_ref, head_sha="abc123", same_repo=same_repo)
     assert [call.args[0] for call in run.call_args_list] == [["fetch", "--no-tags", "origin", "pull/7/head"]]
     backfill.assert_called_once()
 
 
-def test_fetch_pr_head_falls_back_to_same_repo_branch(tmp_path: Path, pr_fetch: tuple[Mock, Mock]) -> None:
+@pytest.mark.parametrize("head_ref", ["feature/x", "feature+probe", "a@b", "funk-branch-é"])
+def test_fetch_pr_head_falls_back_to_same_repo_branch(
+    tmp_path: Path, pr_fetch: tuple[Mock, Mock], head_ref: str
+) -> None:
     run, backfill = pr_fetch
     run.side_effect = [
         subprocess.CompletedProcess([], 128, "", "fatal: couldn't find remote ref pull/7/head"),
         subprocess.CompletedProcess([], 0, "", ""),
         subprocess.CompletedProcess([], 0, "abc123\n", ""),
     ]
-    git_ops.fetch_pr_head(tmp_path, 7, token=None, head_ref="feature/x", head_sha="abc123", same_repo=True)
+    git_ops.fetch_pr_head(tmp_path, 7, token=None, head_ref=head_ref, head_sha="abc123", same_repo=True)
     assert [call.args[0] for call in run.call_args_list] == [
         ["fetch", "--no-tags", "origin", "pull/7/head"],
-        ["fetch", "--no-tags", "origin", "--", "refs/heads/feature/x"],
+        ["fetch", "--no-tags", "origin", "--", f"refs/heads/{head_ref}"],
         ["rev-parse", "FETCH_HEAD"],
     ]
     backfill.assert_called_once()
@@ -277,7 +284,15 @@ def test_fetch_pr_head_combines_fetch_failures(tmp_path: Path, pr_fetch: tuple[M
     backfill.assert_not_called()
 
 
-@pytest.mark.parametrize("head_ref", ["--dry-run", "main:refs/heads/evil", "a..b", "a//b", "a b"])
+@pytest.mark.parametrize(
+    "head_ref",
+    [
+        "--dry-run", "main:refs/heads/evil", "a..b", "a//b", "a b",
+        "a~b", "a^b", "a?b", "a*b", "a[b", "a\\b", "a\x00b", "a\x1fb", "a\x7fb",
+        "a@{b", "@", "/main", "main/", "main.", "main.lock", ".hidden/main", "a.lock/main",
+        "refs/heads/-evil",
+    ],
+)
 def test_fetch_pr_head_rejects_unsafe_ref_before_branch_fetch(
     tmp_path: Path, pr_fetch: tuple[Mock, Mock], head_ref: str
 ) -> None:
