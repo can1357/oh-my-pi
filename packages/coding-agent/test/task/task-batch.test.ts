@@ -1212,11 +1212,11 @@ describe("batch model placement", () => {
 	// `every(isBlankString)` keeps a malformed selector so the gate refuses it; the looser
 	// `!some(isRealString)` called it blank and dropped it, and the task then spawned with the gate
 	// never consulted.
-	it.each([
-		["a numeric entry", [123] as unknown],
-		["an object entry", [{ provider: "openai" }]],
-		["a nested array", [["openai/gpt-5.4"]]],
-	] as const)("refuses an internal call whose model array holds %s", async (_label, model) => {
+	// One malformed array is enough: a numeric, object and nested-array entry all take the same
+	// non-blank-element branch of `isBlankArray` and assert the same refusal, so the extra rows covered
+	// no distinct route. The blank-array and populated-string cases above are the other two branches.
+	it("refuses an internal call whose model array holds a non-string entry", async () => {
+		const model: unknown = [123];
 		mockDiscovery();
 		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
 		const tool = await TaskTool.create(

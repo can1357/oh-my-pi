@@ -30,10 +30,10 @@
 
 ### Fixed
 
-- Subagents on models that fill in every task-tool field can dispatch tasks again while `task.perCallModel` is `off`: an empty `model`, `sourceSession` or `outputSchema` now counts as left out instead of refusing the call, as does an empty `task` or `taskFile` sent beside a real value of the other
-- A subagent started early while a batch `task` call is still streaming is no longer cancelled and run a second time under a `-2` name because a later item in the same call left a field blank
-- A batch `task` call that sets `isolated` at the top level is refused and told to set `tasks[].isolated`, instead of silently starting its subagents unisolated and then running them a second time
-- A `task` call whose `name` or `agent` is not a string reports the shape instead of failing with a `TypeError`
+- Subagents on models that fill in every task-tool field can dispatch tasks again while `task.perCallModel` is `off`: an empty `model`, `sourceSession` or `outputSchema` now counts as left out instead of refusing the call, as does an empty `task` or `taskFile` sent beside a real value of the other ([#18149](https://github.com/can1357/oh-my-pi/pull/18149) by [@sjawhar](https://github.com/sjawhar))
+- A subagent started early while a batch `task` call is still streaming is no longer cancelled and run a second time under a `-2` name because a later item in the same call left a field blank ([#18149](https://github.com/can1357/oh-my-pi/pull/18149) by [@sjawhar](https://github.com/sjawhar))
+- A batch `task` call that sets `isolated` at the top level is refused and told to set `tasks[].isolated`, instead of silently starting its subagents unisolated and then running them a second time ([#18149](https://github.com/can1357/oh-my-pi/pull/18149) by [@sjawhar](https://github.com/sjawhar))
+- A `task` call whose `name` or `agent` is not a string reports the shape instead of failing with a `TypeError` ([#18149](https://github.com/can1357/oh-my-pi/pull/18149) by [@sjawhar](https://github.com/sjawhar))
 - Extension links stay clickable and extension-drawn replies and custom messages keep their renderers on every launch, not only the first after an edit; `ctx.ui.getLinkClicksAvailable()` no longer turns false on later launches ([#18116](https://github.com/can1357/oh-my-pi/pull/18116) by [@materemias](https://github.com/materemias))
 - An AST Grep capture spanning several lines shows on one `meta:` row of the result card instead of one row per line, so collapsed results no longer show its later lines and a blank line inside it no longer splits the match from its file ([#18105](https://github.com/can1357/oh-my-pi/pull/18105) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Extension shortcuts on a reserved chord spelled with a different modifier order (e.g. `ctrl+shift+p`) are now ignored like the reserved spelling ([#17961](https://github.com/can1357/oh-my-pi/pull/17961) by [@materemias](https://github.com/materemias))
