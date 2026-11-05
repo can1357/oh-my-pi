@@ -170,12 +170,19 @@ interface AwaitRegistry {
 export function holdOwnedJobs(registry: AwaitRegistry, manager: OwnedJobSource, ownerId: string): () => void {
 	const holds = new Map<string, () => void>();
 	const unsubscribers: Array<() => void> = [];
+	// Once this is released, nothing it left behind may take a hold again: a
+	// listener this call could not remove (a worker's proxy may keep one its
+	// failed subscription never handed back) would otherwise create holds for
+	// a call that has ended.
+	let ended = false;
 	const release = (): void => {
+		ended = true;
 		for (const unsubscribe of unsubscribers.splice(0)) unsubscribe();
 		for (const releaseHold of holds.values()) releaseHold();
 		holds.clear();
 	};
 	const sync = (): void => {
+		if (ended) return;
 		const running = new Set<string>();
 		for (const job of manager.getRunningJobs({ ownerId })) {
 			if (manager.isDeliverySuppressed(job.id)) continue;
