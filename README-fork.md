@@ -113,6 +113,45 @@ the era itself (falling back to `initialize` when the endpoint refuses
 `server/discover`), so a config can point at either revision. Full setup
 history and gotchas: `~/Documents/llmops/agents-memory/browser-mcp-chrome.md`.
 
+## IRC ingress guard
+
+Peer messaging (`write agent://<id>`) is guarded on the send path of the
+process-global `IrcBus` (`packages/coding-agent/src/irc/bus.ts`, policy in
+`irc/ingress-guard.ts`). Workers are covered without extra state: their
+`RemoteIrcBus.send` proxies to the main bus, so one guard covers the process.
+
+What is refused (always as a `failed` receipt naming the reason, never a throw):
+
+| Guard        | Rule                                                                     |
+| ------------ | ------------------------------------------------------------------------ |
+| Rate         | 30 tokens per sender per 500 ms; a message costs `characters / 4` (min 1) |
+| Duplicate    | same (sender, recipient, sha256(body)) within 30 s                        |
+| Hop chain    | more than 28 senders in `IrcMessage.hops` (the bus appends the sender)     |
+
+Progress notes (`?progress`) and automated wake relays are exempt from the
+duplicate check — both are meant to repeat — and `wait`, broadcast expansion,
+and the internal display relay (`#relayToMainUi`) are untouched. A busy
+recipient's incoming queues (`#interrupts`, `#asides` in
+`session/irc-bridge.ts`) are capped at 50 pending records, dropping the oldest
+exactly like the 100-message mailbox bound, which stays as it was.
+
+Settings (`irc.*`, next to `mcp.*`/`browser.*` in the settings panel under
+Tasks → Subagents):
+
+- `irc.ingressGuard` (default on) — master switch.
+- `irc.rateLimitTokens` (default 30) — tokens per sender per 500 ms; `0` off.
+- `irc.dedupWindowMs` (default 30000) — duplicate window; `0` off.
+- `irc.maxHops` (default 28) — longest accepted chain; `0` off. Only
+  automatic wake relays carry a chain forward: an ordinary `write
+  agent://<id>` reply starts a fresh one (`hops = [sender]`), because the
+  reply tool never sees the inbound message's chain. The ceiling therefore
+  binds automated ping-pong chains, not hand-written forwards.
+
+The policy is read from the acting agent's session settings, falling back to
+the main session's, so a worker-proxied send follows the main policy. Covering
+tests: `test/irc-guard.test.ts` and the pinning suites listed under "Rebase
+ritual".
+
 ## Rebase ritual
 
 1. Sync the mirror (fast-forward only) and push it:

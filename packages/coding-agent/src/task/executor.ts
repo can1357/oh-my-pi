@@ -3095,6 +3095,8 @@ export interface IrcWakeTurnMonitorOptions {
 interface WakeSource {
 	from: string;
 	messageId?: string;
+	/** The waker's hop chain; the relay extends it so an agent loop hits `irc.maxHops`. */
+	hops?: string[];
 }
 
 function wakeSources(records: AgentMessage[], selfId: string): WakeSource[] {
@@ -3117,7 +3119,12 @@ function wakeSources(records: AgentMessage[], selfId: string): WakeSource[] {
 		)
 			continue;
 		const messageId = details ? Reflect.get(details, "id") : undefined;
-		sources.push({ from, messageId: typeof messageId === "string" ? messageId : undefined });
+		const hops = details ? Reflect.get(details, "hops") : undefined;
+		sources.push({
+			from,
+			messageId: typeof messageId === "string" ? messageId : undefined,
+			hops: Array.isArray(hops) && hops.every(hop => typeof hop === "string") ? hops : undefined,
+		});
 	}
 	return sources;
 }
@@ -3171,6 +3178,7 @@ async function relayWakeTurnOutput(args: {
 			body,
 			replyTo: source.messageId,
 			wakeRelay: true,
+			...(source.hops ? { hops: source.hops } : {}),
 		});
 		if (receipt.outcome === "failed") {
 			logger.warn("IRC wake-turn relay failed", { from: args.id, to: source.from, error: receipt.error });

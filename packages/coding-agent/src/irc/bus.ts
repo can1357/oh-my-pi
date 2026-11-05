@@ -11,9 +11,12 @@
 
 import { type IrcDeliveryReceipt, type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
+import type { Settings } from "../config/settings";
 import { type AgentLifecycleApi, AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { CustomMessage } from "../session/messages";
+import { IrcIngressGuard, type IrcIngressLimits } from "./ingress-guard";
+import { cfgIrcDedupWindowMs, cfgIrcIngressGuard, cfgIrcMaxHops, cfgIrcRateLimitTokens } from "./settings";
 
 interface IrcWaiter {
 	filter: IrcWaitFilter;
@@ -53,9 +56,26 @@ interface SendMark {
 /** Mailbox cap per agent; oldest messages are dropped beyond it. */
 const MAILBOX_CAP = 100;
 
+/**
+ * A settings scope as the registry reads it: a revision counter plus its
+ * per-handle value cache. Concrete sessions expose the scope they were created
+ * with; cross-thread session handles deliberately hide it.
+ */
+function isSettingsScope(value: unknown): value is Settings {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		typeof Reflect.get(value, "revision") === "number" &&
+		Array.isArray(Reflect.get(value, "valueCache"))
+	);
+}
+
 /** Public surface of the process-global IRC bus, implemented locally on main and by a proxy in workers. */
 export interface IrcBusApi {
-	/** Fire-and-forget delivery; the receipt reports how the message reached the recipient. */
+	/**
+	 * Fire-and-forget delivery; the receipt reports how the message reached the
+	 * recipient, or why the ingress guard refused it (rate, duplicate, hop limit).
+	 */
 	send(msg: Omit<IrcMessage, "id" | "ts">): Promise<IrcDeliveryReceipt>;
 	/** Whether `from` successfully sent `to` anything, progress included, at or after `sinceTs`. */
 	sentSince(from: string, to: string, sinceTs: number): boolean;
@@ -110,6 +130,11 @@ export class IrcBus implements IrcBusApi {
 
 	readonly #registry: AgentRegistryApi;
 	readonly #lifecycle: () => AgentLifecycleApi;
+	/** Ingress policy scope; unset reads the acting (or main) agent's session settings. */
+	readonly #guardSettings: Settings | undefined;
+	readonly #ingress = new IrcIngressGuard();
+	/** Limits memoized per settings revision; see {@link IrcBus.#ingressLimits}. */
+	#limits: { settings: Settings; revision: number; limits: IrcIngressLimits | undefined } | undefined;
 	readonly #mailboxes = new Map<string, IrcMessage[]>();
 	readonly #waiters = new Map<string, IrcWaiter[]>();
 	/** The latest successful non-progress send per `from` → `to`; see {@link sentSince}. */
@@ -123,8 +148,13 @@ export class IrcBus implements IrcBusApi {
 	/** Last {@link SendMark.seq} handed out, taken when a send starts. */
 	#sendSeq = 0;
 
-	constructor(registry: AgentRegistryApi = AgentRegistry.global(), lifecycle?: AgentLifecycleApi) {
+	constructor(
+		registry: AgentRegistryApi = AgentRegistry.global(),
+		lifecycle?: AgentLifecycleApi,
+		options: { /** Settings scope the ingress guard reads; omit to resolve it per send. */ settings?: Settings } = {},
+	) {
 		this.#registry = registry;
+		this.#guardSettings = options.settings;
 		// Lazy: the lifecycle global self-constructs against the global registry,
 		// so only touch it when a parked recipient actually needs reviving.
 		this.#lifecycle = () => lifecycle ?? AgentLifecycleManager.global();
@@ -141,9 +171,31 @@ export class IrcBus implements IrcBusApi {
 	 * context, so buffering it too would double-deliver via a later
 	 * `wait`/`inbox` and inflate unread counts. Only a failed live hand-off
 	 * is buffered for the recipient to drain later.
+	 *
+	 * Ingress: before any delivery work, the guard refuses a send that
+	 * exhausts the sender's rate budget, repeats a body already sent to the
+	 * same recipient, or extends the hop chain too far — as a `failed`
+	 * receipt naming the reason, never a throw.
 	 */
 	async send(msg: Omit<IrcMessage, "id" | "ts">): Promise<IrcDeliveryReceipt> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
+		// Every send extends the provenance chain: the sender is the newest hop.
+		message.hops = [...(msg.hops ?? []), message.from];
+		// Guard before any delivery work: a refusal is a receipt, never a throw,
+		// so the fire-and-forget contract of `send` holds on the hot path.
+		const limits = this.#ingressLimits(message);
+		if (limits) {
+			const refusal = this.#ingress.check(message, limits);
+			if (refusal) {
+				logger.debug("IrcBus: ingress refused a send", {
+					from: message.from,
+					to: message.to,
+					reason: refusal.reason,
+					hops: message.hops.length,
+				});
+				return { to: message.to, outcome: "failed", error: refusal.error };
+			}
+		}
 		// Taken before delivery: a reply sent while this message is still being
 		// delivered must still order after it.
 		const mark: SendMark = { ts: message.ts, seq: ++this.#sendSeq };
@@ -158,6 +210,45 @@ export class IrcBus implements IrcBusApi {
 			}
 		}
 		return receipt;
+	}
+
+	/**
+	 * Ingress limits for one send, or `undefined` when the guard is off.
+	 *
+	 * The policy scope is the acting agent's own session settings — a session
+	 * holds the settings it was created with — falling back to the main
+	 * session's, so a send proxied out of a worker thread (whose ref carries no
+	 * local settings) is still guarded by the process's main policy. With no
+	 * settings anywhere (a faithfully faked session in a unit test) the guard
+	 * stays off rather than guessing a policy. Limits are memoized per settings
+	 * revision, so the hot path costs one revision compare.
+	 */
+	#ingressLimits(message: IrcMessage): IrcIngressLimits | undefined {
+		const settings =
+			this.#guardSettings ?? this.#sessionSettings(message.from) ?? this.#sessionSettings(MAIN_AGENT_ID);
+		if (!settings) return undefined;
+		const cached = this.#limits;
+		if (cached && cached.settings === settings && cached.revision === settings.revision) return cached.limits;
+		const limits = cfgIrcIngressGuard.get(settings)
+			? {
+					rateLimitTokens: cfgIrcRateLimitTokens.get(settings),
+					dedupWindowMs: cfgIrcDedupWindowMs.get(settings),
+					maxHops: cfgIrcMaxHops.get(settings),
+				}
+			: undefined;
+		this.#limits = { settings, revision: settings.revision, limits };
+		return limits;
+	}
+
+	/**
+	 * The settings scope of the agent `id`, when its session carries one: the
+	 * policy an agent's own sends run under. A worker-proxied ref has none.
+	 */
+	#sessionSettings(id: string): Settings | undefined {
+		const session = this.#registry.get(id)?.session;
+		if (!session) return undefined;
+		const settings = Reflect.get(session, "settings");
+		return isSettingsScope(settings) ? settings : undefined;
 	}
 
 	#record(table: Map<string, Map<string, SendMark>>, from: string, to: string, mark: SendMark): void {
