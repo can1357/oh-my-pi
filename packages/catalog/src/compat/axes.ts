@@ -126,6 +126,9 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"responses-tool-choice-auto": wire("responsesToolChoiceAuto", ["request"]),
 	"routing-session-lock": wire("routingSessionLock", ["request"]),
 	"google-thinking": wire("googleThinking", ["request"], "scalar", ["level", "level-medium"]),
+	"google-omit-sampling": wire("googleOmitSampling", ["request"]),
+	"google-pin-max-output-tokens": wire("googlePinMaxOutputTokens", ["request"]),
+	"google-native-replay": wire("googleNativeReplay", ["request"]),
 	// ── wire: OpenAI-compatible surfaces (chat completions + Responses) ──
 	"allows-synthetic-reasoning-content-for-tool-calls": wire("allowsSyntheticReasoningContentForToolCalls", OAI),
 	"always-send-max-tokens": wire("alwaysSendMaxTokens", OAI),
@@ -207,6 +210,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-reasoning-params": wire("supportsReasoningParams", OAI),
 	"supports-reasoning-summary": wire("supportsReasoningSummary", ["openai-responses"]),
 	"store-responses": wire("storeResponses", ["openai-responses"]),
+	"tool-name-prefix": wire("toolNamePrefix", ["openai-responses"], "scalar", ["_"]),
 	"supports-store": wire("supportsStore", ["openai"]),
 	"supports-strict-mode": wire("supportsStrictMode", OAI),
 	"supports-tool-choice": wire("supportsToolChoice", OAI),
