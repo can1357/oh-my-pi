@@ -771,7 +771,7 @@ export async function rebuildSessionLocator(root: string): Promise<SessionLocato
 		// exhaustion, EIO, a header past the loader's ceiling), and a rebuild that
 		// silently drops those publishes an incomplete snapshot reporting success.
 		const headers = await Promise.all(
-			batch.map(file =>
+			batch.map((file): Promise<{ id: string | undefined; error?: unknown }> =>
 				sessionIdOfFile(file).then(
 					id => ({ id }),
 					(error: unknown) => ({ id: undefined, error }),

@@ -789,15 +789,15 @@ describe("session index: lookups by id", () => {
 			const walked = Promise.withResolvers<void>();
 			const resume = Promise.withResolvers<void>();
 			let paused = false;
-			const realpathSpy = spyOn(fs.promises, "realpath").mockImplementation(async (target, options) => {
-				const result = await realpath(target, options);
+			const realpathSpy = spyOn(fs.promises, "realpath").mockImplementation((async (target: fs.PathLike) => {
+				const result = await realpath(target);
 				if (!paused && String(target) === getSessionsDir()) {
 					paused = true;
 					walked.resolve();
 					await resume.promise;
 				}
 				return result;
-			});
+			}) as typeof fs.promises.realpath);
 			// A second session the first reindex never saw: if its publish
 			// overwrote rather than merged, this row would be gone.
 			const laterId = "019a000e-0000-7000-8000-000000000002";
