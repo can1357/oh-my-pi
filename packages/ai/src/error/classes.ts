@@ -53,9 +53,7 @@ export class OpenAIHttpError extends ProviderHttpError {
 		if (typeof bodyJson === "object" && bodyJson !== null) {
 			const envelope = bodyJson as { error?: unknown; message?: unknown };
 			// One authority for which object the error is, the flat root included: a body with no
-			// `error` member but a `code` of its own is the shape compat hosts return, and dropping
-			// its code made the same refusal rotate every credential over HTTP while reading
-			// correctly in band.
+			// `error` member but a `code` of its own is the shape compat hosts return.
 			const source = responseErrorEnvelope(bodyJson) as
 				| { message?: unknown; code?: unknown; type?: unknown }
 				| undefined;
@@ -90,11 +88,9 @@ const MAX_WRAPPED_ENVELOPE_DEPTH = 8;
  * when `error` is already an ordinary envelope.
  *
  * This is the single answer to "which object is the error", and every reader of an OpenAI-wire
- * error asks it rather than walking itself. Four review rounds of this pull request were spent on
- * two readers of one envelope disagreeing — about whether an `error` field beside a code is the
- * envelope, and about how deep a wrapper may be — and a disagreement is worse than either answer:
- * one reader recognised a refusal that the other reported as a plain failure, and the turn fell
- * between them into the generic transient classifier.
+ * error asks it rather than walking itself: two readers disagreeing about this is worse than
+ * either answer, because one recognises a refusal the other reports as a plain failure and the
+ * turn falls between them into the generic transient classifier.
  *
  * The rules, in one place:
  * - an inner value only wins when the outer carries no `code` or `type` **string** of its own. A
@@ -131,24 +127,19 @@ const HTTP_STATUS_CODE_PATTERN = /^\d{3}$/;
 /**
  * Which object a reader should take an error out of, given a parsed response body.
  *
- * This is the single answer for a whole body, as {@link wrappedErrorEnvelope} is for one value,
- * and it exists because every round of fixing this class found the error in one more position
- * than the previous round had enumerated. **A new position is a row in this list, never a new
- * reader.** In precedence order:
+ * This is the single answer for a whole body, as {@link wrappedErrorEnvelope} is for one value.
+ * **A new position is a row in this list, never a new reader.** In precedence order:
  *
  * 1. **the body root's own `code` string.** A code at the root is the flat shape compat hosts
  *    return, and an `error` field beside it is a diagnostic rather than the envelope — the same
- *    rule that governs every level below. Reading the diagnostic instead discarded the refusal
- *    and spent every stored credential;
+ *    rule that governs every level below;
  * 2. **`error`**, resolved to its innermost envelope;
  * 3. **`response.error`** and **`response.status_details.error`** — the Responses-shaped failure,
  *    which arrives in band on one wire and as a non-2xx body on another;
  * 4. **the body root's own `type` string**, last. `type` at the root is usually a DISCRIMINATOR
- *    naming the frame (`"error"`, `"response.failed"`), not a machine code, so it must lose to
- *    any real envelope inside the body: ranking it first read
- *    `{ type: "error", error: { code: "cyber_policy" } }` as the code `"error"` and sent the
- *    declined content to every credential. It still wins when nothing else matched, which is the
- *    host that writes its code in `type`.
+ *    naming the frame (`"error"`, `"response.failed"`), not a machine code, so it loses to any
+ *    real envelope inside the body. It still wins when nothing else matched, which is the host
+ *    that writes its code in `type`.
  *
  * A code counts only when it is a **string**: a number there is a status wearing the field's name.
  * `undefined` when the body carries no error at all.
@@ -157,9 +148,7 @@ export function responseErrorEnvelope(bodyJson: unknown): object | undefined {
 	if (typeof bodyJson !== "object" || bodyJson === null || Array.isArray(bodyJson)) return undefined;
 	// The root's own machine code outranks an `error` object beside it, which is a diagnostic.
 	// A THREE-DIGIT STRING is not a machine code: it is an HTTP status wearing the field's name,
-	// the same way a number in `code` is, and letting one win hid a real envelope beneath it —
-	// a quota refusal under `{ code: "429", message: "Too Many Requests", error: { … } }` was
-	// read as a plain 429 and retried to the budget instead of ending in one request.
+	// the same way a number in `code` is, and letting one win hides the real envelope beneath it.
 	const rootCode = Reflect.get(bodyJson, "code");
 	if (typeof rootCode === "string" && !HTTP_STATUS_CODE_PATTERN.test(rootCode)) return bodyJson;
 	// A root `type` is ambiguous in a way no ordering of positions can settle: a wire body writes
@@ -167,9 +156,8 @@ export function responseErrorEnvelope(bodyJson: unknown): object | undefined {
 	// identical. `{ type: "error", error: { code: "cyber_policy" } }` must read the inner object;
 	// `{ type: "cyber_policy", error: { code: "server_error" } }` must read the root. Only whether
 	// the string is a code this system knows separates them, so the vocabulary decides. A root
-	// `type` outside it falls through to the nested positions below and is read as a frame name —
-	// the one residual, and the reason that teaching the vocabulary a new code also teaches the
-	// resolver to find it.
+	// `type` outside it is read as a frame name and falls through to the nested positions below,
+	// so teaching the vocabulary a new code is also what teaches the resolver to find it there.
 	if (isKnownRefusalCode(Reflect.get(bodyJson, "type"))) return bodyJson;
 	const error: unknown = Reflect.get(bodyJson, "error");
 	if (typeof error === "object" && error !== null && !Array.isArray(error)) {

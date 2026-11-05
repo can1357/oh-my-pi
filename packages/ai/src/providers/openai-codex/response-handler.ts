@@ -46,13 +46,10 @@ export async function parseCodexError(response: Response): Promise<CodexErrorInf
 
 	try {
 		const parsed = JSON.parse(raw) as { error?: Record<string, unknown> };
-		// A gateway may wrap the envelope in itself (`{ error: { error: { code, message } } }`);
-		// the inner one carries the code, and without it a refusal reads as a plain failure.
-		// Only when the outer has no code or type: an `error` field beside a valid outer code is
-		// a diagnostic, and taking it would lose the plan and reset the outer carries.
-		// One authority for which object the error is, the flat root included: a body with no
-		// `error` member but a `code` of its own is the shape compat hosts return, and taking `{}`
-		// instead sent the same declined content to every stored credential.
+		// `responseErrorEnvelope` is the single answer to which object the error is: the root's own
+		// code string (the flat shape compat hosts return), then `error` resolved to its innermost
+		// envelope, then the `response.*` positions. An `error` field beside a valid outer code is
+		// a diagnostic, not the envelope.
 		const err = (responseErrorEnvelope(parsed) ?? {}) as Record<string, unknown>;
 
 		const headers = response.headers;
@@ -72,11 +69,8 @@ export async function parseCodexError(response: Response): Promise<CodexErrorInf
 				: undefined;
 
 		// A machine-readable error code is a string; a number in `code` is a status wearing the
-		// field's name. Taking it over a string `type` beside it lost the only code the body
-		// carried — a refusal arrived as "400", classified as a plain failure, and the same
-		// declined content went to every sibling credential. Every other reader of this envelope
-		// requires a string, and this one now does too; a bare numeric code still stringifies, so
-		// a body carrying nothing else is read exactly as before.
+		// field's name, so a string `type` beside it wins. A bare numeric code with nothing else
+		// still stringifies.
 		const rawCode: unknown = err.code;
 		const rawType: unknown = err.type;
 		const code =

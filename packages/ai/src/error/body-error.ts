@@ -190,11 +190,10 @@ function readInBandSignal(frame: unknown): InBandSignal | undefined {
 	const root = frame as Record<string, unknown>;
 	// `responseErrorEnvelope` is the single answer to which object the error is, for the whole
 	// body: the root's own code, then `error` resolved to its innermost envelope, then the two
-	// `response.*` positions, then a root `type`. This probe used to select for itself, and the
-	// disagreement that produced is the one defect this pull request kept finding: the probe
-	// recognises a refusal and steps aside for the provider's reporter, and the reporter — asking
-	// a different question of the same bytes — reports a plain failure. Asking the same function
-	// is what makes stepping aside safe.
+	// `response.*` positions, then a root `type`. This probe recognises a refusal in order to step
+	// aside for the provider's own reporter, so it must ask that same function: a probe that
+	// selects for itself and a reporter asking a different question of the same bytes disagree,
+	// and the turn falls between them.
 	const selected = responseErrorEnvelope(root);
 	const error = selected === root ? undefined : (selected as Record<string, unknown> | undefined);
 	// What qualifies the frame as a failure at all, kept separate from which object the error is:
@@ -242,11 +241,11 @@ function readInBandSignal(frame: unknown): InBandSignal | undefined {
 		readInBandDetail(root.message) ??
 		(typeof nested === "string" ? readInBandDetail(nested) : undefined);
 	// A content-policy refusal is never a shed-and-retry failure, whatever its message happens to
-	// say. Without this, a refusal whose own text asks the caller to try again read as throttle
-	// wording and the same declined content was sent again — and in band there is no status field
-	// to contradict it. The caller's refusal branch, which runs after this probe, reports it as
-	// the refusal it is. An account-eligibility denial is not a content refusal by
-	// `isContentPolicyRefusal`, so it still sheds and rotates exactly as before.
+	// say: in band there is no status field to contradict the text, so a refusal whose own wording
+	// asks the caller to try again would match the throttle wording and be sent again. The
+	// caller's refusal branch, which runs after this probe, reports it as the refusal it is. An
+	// account-eligibility denial is not a content refusal by `isContentPolicyRefusal`, so it still
+	// sheds and rotates.
 	if (isContentPolicyRefusal(code, detail)) return undefined;
 	const holder = error ?? root;
 	// Reported statuses come from fields only: the error member's `status`, its

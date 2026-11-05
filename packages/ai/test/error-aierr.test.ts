@@ -280,10 +280,9 @@ describe("OpenAIHttpError.parseEnvelope — where the error actually is", () => 
 });
 
 describe("which refusals never rotate credentials", () => {
-	// Two questions that used to share one table and now do not. THIS one is "may a sibling
-	// credential see something different": for an organization's own classifier the answer is no,
-	// for both codes, so rotating spends siblings on a decided verdict. Whether a resend is worth
-	// trying is the other question, and the session tests answer it.
+	// "May a sibling credential see something different": for an organization's own classifier the
+	// answer is no, for every code in the table, so rotating spends siblings on a decided verdict.
+	// Whether a resend is worth trying is the other question, and the session tests answer it.
 	it("covers the organization-classifier codes and nothing else", () => {
 		expect(AIError.isContentPolicyRefusal("cyber_policy", "declined")).toBe(true);
 		expect(AIError.isContentPolicyRefusal("reasoning_extraction", "declined")).toBe(true);
@@ -299,9 +298,9 @@ describe("which refusals never rotate credentials", () => {
 
 describe("a refusal code in free text, and only where a code can appear", () => {
 	// The last-resort path for a provider that surfaces nothing structured. Matching the bare
-	// token anywhere made any text that merely MENTIONS the code a refusal — a log line about
-	// this classifier, a user message quoting one, a report discussing one — which is a guarantee
-	// that decays the first time such a message exists.
+	// token anywhere makes any text that merely MENTIONS the code a refusal — a log line about
+	// this classifier, a user message quoting one, a report discussing one — so the token must sit
+	// where a code sits: at the start, after `code=`/`type=`, or inside brackets or quotes.
 	const blocked = (message: string) =>
 		AIError.is(
 			AIError.classify(new AIError.ProviderResponseError(message, { provider: "p", kind: "runtime" })),

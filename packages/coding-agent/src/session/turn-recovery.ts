@@ -3094,14 +3094,15 @@ export class TurnRecovery {
 			}
 		}
 
-		// A content-policy refusal whose verdict is not stable for a given input
-		// (an OpenAI `cyber_policy` refusal: the same request is sometimes
-		// refused and sometimes answered) that no fallback model took is retried
-		// on the same model up to `retry.refusalRetries` times, outside the
-		// transient-error budget. It never rotates credentials — the content, not
-		// the account, was refused — and when the allowance is spent the refusal
-		// itself is the final error, never a "retry budget exhausted" rewrite.
-		// Other classifier refusals keep the walk-only policy above.
+		// A refusal whose category the classifier's verdict is unstable for — an
+		// OpenAI `cyber_policy` or an Anthropic `reasoning_extraction`: the same
+		// request is sometimes refused and sometimes answered — that no fallback
+		// model took is retried on the same model up to `retry.refusalRetries`
+		// times, outside the transient-error budget. It never rotates credentials
+		// — the content, not the account, was refused — and when the allowance is
+		// spent the refusal itself is the final error, never a "retry budget
+		// exhausted" rewrite.
+		// A refusal carrying any other category keeps the walk-only policy above.
 		const unstableRefusal = unstableRefusalCandidate && !switchedCredential && !switchedModel;
 		const refusalRetry = unstableRefusal && this.#refusalRetryCount < retrySettings.refusalRetries;
 		if (refusalRetry) this.#refusalRetryCount++;
