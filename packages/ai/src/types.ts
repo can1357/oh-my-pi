@@ -1304,6 +1304,15 @@ export interface AssistantMessage {
 	model: string;
 	/** Stored credential row that produced this turn; absent for external or unknown keys. */
 	credentialId?: number;
+	/**
+	 * Organization the stored credential that produced this turn is scoped to
+	 * (Anthropic's organization uuid, the ChatGPT workspace id, …), taken from
+	 * the credential rather than from a response header, so it is present on a
+	 * session's first request and on providers that report no organization
+	 * header. Absent when the serving key carries no organization: an API-key
+	 * login, a `models.yml` `apiKey`, an env var, `--api-key`.
+	 */
+	organizationId?: string;
 	contextSnapshot?: ContextSnapshot;
 	retryRecovery?: AssistantRetryRecovery;
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one

@@ -1224,6 +1224,7 @@ function streamSimpleRequest<TApi extends Api>(
 			credentialId?: number,
 			oauthIdentity?: OAuthRequestIdentity,
 		): Promise<AuthRetryFailure | undefined> => {
+			const organizationId = oauthIdentity?.orgId;
 			const bufferedEvents: AssistantMessageEvent[] = [];
 			let emittedReplayUnsafeEvent = false;
 			const flushBuffered = (): void => {
@@ -1239,6 +1240,14 @@ function streamSimpleRequest<TApi extends Api>(
 						if ("partial" in event) event.partial.credentialId = credentialId;
 						else if (event.type === "done") event.message.credentialId = credentialId;
 						else event.error.credentialId = credentialId;
+					}
+					// The organization belongs to the credential, not the response, so it
+					// survives a provider that sends no organization header and is already
+					// known on the first request. Rotation re-enters with the new attempt's
+					// identity, so the value always names the account that actually served.
+					if (organizationId !== undefined) {
+						if ("partial" in event) event.partial.organizationId = organizationId;
+						else if (event.type === "done") event.message.organizationId = organizationId;
 					}
 					if (!emittedReplayUnsafeEvent && event.type === "start") {
 						bufferedEvents.push(event);
@@ -1269,6 +1278,7 @@ function streamSimpleRequest<TApi extends Api>(
 				if (!outer.done) {
 					const result = await inner.result();
 					if (credentialId !== undefined) result.credentialId = credentialId;
+					if (organizationId !== undefined) result.organizationId = organizationId;
 					outer.end(result);
 				}
 			} catch (error) {
