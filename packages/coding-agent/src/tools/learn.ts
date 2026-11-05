@@ -168,7 +168,7 @@ export class LearnTool implements AgentTool<LearnSchema> {
 			}
 			const verb = params.skill.action === "create" ? "Created" : "Updated";
 			try {
-				await this.session.refreshSkills?.();
+				await this.session.refreshSkills?.(sanitizeSkillName(params.skill.name));
 			} catch (err) {
 				const reason = err instanceof Error ? err.message : String(err);
 				throw new Error(
