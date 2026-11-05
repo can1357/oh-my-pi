@@ -2177,6 +2177,44 @@ describe("ModelRegistry", () => {
 			});
 		});
 
+		test("a same-id models.yml price rescales a multiplier tier and a free card carries none", () => {
+			// Same provider and id as a bundled row, so this goes through
+			// `applyModelPatch`, not `finalizeCustomModel`.
+			writeRawModelsJson({
+				openai: {
+					modelOverrides: {
+						"gpt-6.1-sol": { cost: { input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25 } },
+						"gpt-6-sol": { cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+					},
+				},
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const half = registry.find("openai", "gpt-6.1-sol");
+			if (!half) throw new Error("Expected the bundled GPT-6.1 Sol row");
+			// The tier is a multiple of the card in force, not the list card: the
+			// list tier (4/15) against a declared 1/5 overcharged by 4x.
+			expect(half.cost.longContext).toMatchObject({
+				inputThreshold: 272_000,
+				input: 2,
+				output: 7.5,
+			});
+			const usage = {
+				input: 20_000,
+				output: 10_000,
+				cacheRead: 260_000,
+				cacheWrite: 0,
+				totalTokens: 290_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			};
+			expect(calculateUsageCost(half.cost, usage).input).toBeCloseTo((2 * 20_000) / 1e6, 10);
+			// A row declared free stays free past the threshold; it used to bill
+			// the catalog's long tier over a zero card.
+			const free = registry.find("openai", "gpt-6-sol");
+			if (!free) throw new Error("Expected the bundled GPT-6 Sol row");
+			expect(free.cost.longContext).toBeUndefined();
+			expect(calculateUsageCost(free.cost, usage).total).toBe(0);
+		});
+
 		test("a models.yml row with its own price keeps the catalog's multiplier long-context tier, scaled to that price", () => {
 			// A gateway serving GPT-6.1 Sol at half the list card, as a user declares it: no tier of its own.
 			writeRawModelsJson({

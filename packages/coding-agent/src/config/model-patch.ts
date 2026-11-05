@@ -1,5 +1,5 @@
 import type { Api, Model, ModelSpec, RemoteCompactionConfig, ThinkingConfig } from "@oh-my-pi/pi-ai/types";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { buildModel, ruleScaledLongContextTier } from "@oh-my-pi/pi-catalog/build";
 import { isVertexExpressOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
@@ -312,14 +312,29 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	}
 	if (patch.premiumMultiplier !== undefined) result.premiumMultiplier = patch.premiumMultiplier;
 	if (patch.cost) {
-		const longContext = patch.cost.longContext ?? base.cost.longContext;
-		result.cost = {
+		const card = {
 			input: patch.cost.input ?? base.cost.input,
 			output: patch.cost.output ?? base.cost.output,
 			cacheRead: patch.cost.cacheRead ?? base.cost.cacheRead,
 			cacheWrite: patch.cost.cacheWrite ?? base.cost.cacheWrite,
-			...(longContext ? { longContext } : {}),
 		};
+		// A configured price replaces the catalog's card, so a tier that is a
+		// FUNCTION of that card has to be recomputed from it: keeping the list
+		// tier billed a row declared at half price, or free, at the list rates.
+		// Order: the patch's own tier, then the rule's multiplier form re-derived
+		// from the configured card (the same rule `finalizeCustomModel` applies
+		// to a new custom model, so a `models.yml` row and a same-id patch of the
+		// bundled row price alike), then the row's existing tier. That last step
+		// keeps an absolute tier a provider publishes as its own figure (the
+		// first-party `gpt-5.6` card, Cursor's and Devin's discovered tiers),
+		// which a partial override of one leg must not silently delete.
+		// A card declared entirely free carries no tier at all: a free row that
+		// still charged the list tier past the threshold was the worst of these.
+		const free = card.input === 0 && card.output === 0 && card.cacheRead === 0 && card.cacheWrite === 0;
+		const longContext = free
+			? undefined
+			: (patch.cost.longContext ?? ruleScaledLongContextTier(toModelSpec(result), card) ?? base.cost.longContext);
+		result.cost = longContext ? { ...card, longContext } : card;
 	}
 	let compat: ModelSpec<Api>["compat"];
 	if (transport === "merge") {

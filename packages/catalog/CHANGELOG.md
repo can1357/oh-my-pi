@@ -20,7 +20,7 @@
 
 ### Fixed
 
-- GPT-6.1 Sol prompts over 272K input tokens now cost OpenAI's long-context rates (2x input and cache, 1.5x output) on per-token hosts, and with extended context off its window on those hosts stops at 272K so compaction runs first; Codex subscriptions and GitHub Copilot are unchanged
+- GPT-6.1 Sol prompts over 272K input tokens now cost OpenAI's long-context rates (2x input and cache, 1.5x output) on every per-token host, including the hosts that spell it differently (Venice's `openai-gpt-61-sol` and its Ultrafast row, and the `gpt-sol-latest` rolling alias on OpenRouter, Kilo and NanoGPT); each row's tier scales from its own card, and with extended context off a catalog row's window stops at 272K so compaction runs first. Codex subscriptions, GitHub Copilot and credit hosts with a zero card are unchanged
 
 ## [18.16.0] - 2026-11-02
 

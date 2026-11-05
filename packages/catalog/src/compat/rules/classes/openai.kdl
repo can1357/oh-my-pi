@@ -75,8 +75,22 @@ class "openai" {
 	// (OpenRouter publishes the same >272K override for every Sol row,
 	// `-pro` and `:batch` included) and custom gateways serving the id carry
 	// it too; the multiplier form scales from each row's own base card.
-	// Subscription and credit hosts opt out in their provider files.
-	models "*gpt-6.1-sol*" {
+	// Subscription and credit hosts opt out in their provider files, and a
+	// credit host's zero card yields no tier (`build.ts`).
+	//
+	// Three spellings, because hosts do not agree on one. `*gpt-6.1-sol*` is
+	// OpenAI's own and the namespaced reseller ids built from it
+	// (`openai/…`, `global.openai.…`, `-pro`, `:batch`, `-fast`). Venice
+	// drops the dot (`openai-gpt-61-sol`, `-ultrafast`), which also defeats a
+	// revision selector: the taxonomy reads `61` as major 61, not 6.1.
+	// `gpt-sol-latest` is the rolling alias OpenRouter, Kilo and NanoGPT
+	// publish; OpenRouter reports `alias_target.slug: openai/gpt-6.1-sol` for
+	// it, and all three price it at Sol 6.1's card (cache read 0.1, against
+	// GPT-6 Sol's 0.2). The multiplier form is what makes one rule right for
+	// all of them: each row's tier scales from its own base card, so Venice
+	// Ultrafast's 12/60/0.6/15 yields its published 24/90/1.2/30. None of the
+	// three matches `gpt-6-sol`, `gpt-56-sol` or `gpt-5.6-sol`.
+	models "*gpt-6.1-sol*" "*gpt-61-sol*" "*gpt-sol-latest*" {
 		long-context-cost {
 			input-threshold 272000
 			multiplier 2.0

@@ -391,6 +391,48 @@ describe("generated model policies", () => {
 				),
 				0.5,
 			],
+			// Venice drops the dot from the revision, so `*gpt-6.1-sol*` misses it
+			// and a revision selector reads `61` as major 61.
+			[
+				"venice dotless",
+				buildGenerated(
+					createSpec({
+						id: "openai-gpt-61-sol",
+						api: "openai-completions",
+						provider: "venice" as Provider,
+						cost: card,
+					}),
+				),
+				1,
+			],
+			// Venice Ultrafast is the same model at 6x the card; the multiplier form
+			// must scale from its own rates to reach its published 24/90/1.2/30.
+			[
+				"venice ultrafast",
+				buildGenerated(
+					createSpec({
+						id: "openai-gpt-61-sol-ultrafast",
+						api: "openai-completions",
+						provider: "venice" as Provider,
+						cost: { input: 12, output: 60, cacheRead: 0.6, cacheWrite: 15 },
+					}),
+				),
+				6,
+			],
+			// The rolling alias OpenRouter, Kilo and NanoGPT publish; OpenRouter
+			// reports `alias_target.slug: openai/gpt-6.1-sol` for it.
+			[
+				"rolling alias",
+				buildGenerated(
+					createSpec({
+						id: "~openai/gpt-sol-latest",
+						api: "openai-completions",
+						provider: "openrouter",
+						cost: card,
+					}),
+				),
+				1,
+			],
 		];
 		for (const [label, model, scale] of billed) {
 			expect(model.cost.longContext, label).toMatchObject({ inputThreshold: 272_000 });
@@ -407,7 +449,10 @@ describe("generated model policies", () => {
 			expect(over.output, label).toBeCloseTo((15 * scale * 10_000) / 1e6, 10);
 		}
 
-		// Subscription Codex carries no surcharge, and Copilot's long tier is its own `-1m` sibling.
+		// Subscription Codex carries no surcharge, Copilot's long tier is its own
+		// `-1m` sibling, and the three globs must not reach an older Sol
+		// generation: Venice spells 5.6 Sol `openai-gpt-56-sol` and GPT-6 Sol
+		// `openai-gpt-6-sol`, both of which `*gpt-61-sol*` must miss.
 		const exempt: [label: string, model: Model<Api>][] = [
 			[
 				"openai-codex",
@@ -417,6 +462,28 @@ describe("generated model policies", () => {
 				"github-copilot",
 				buildGenerated(
 					createSpec({ id: "gpt-6.1-sol", api: "openai-responses", provider: "github-copilot", cost: card }),
+				),
+			],
+			[
+				"venice gpt-6 sol",
+				buildGenerated(
+					createSpec({
+						id: "openai-gpt-6-sol",
+						api: "openai-completions",
+						provider: "venice" as Provider,
+						cost: card,
+					}),
+				),
+			],
+			[
+				"venice gpt-5.6 sol dotless",
+				buildGenerated(
+					createSpec({
+						id: "openai-gpt-56-sol",
+						api: "openai-completions",
+						provider: "venice" as Provider,
+						cost: card,
+					}),
 				),
 			],
 		];

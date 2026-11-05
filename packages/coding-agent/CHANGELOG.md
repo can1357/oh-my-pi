@@ -30,7 +30,7 @@
 
 ### Fixed
 
-- A `models.yml` model that sets its own `cost` keeps the catalog's long-context price tier when that tier is a multiple of the base price, scaled to your price, so requests to a gateway you declare are costed like the same model on a built-in provider; the tier used to be dropped
+- A `models.yml` price you set on a model keeps the catalog's long-context price tier scaled to your price, whether you declare a new model or set a `cost`/`modelOverrides` on a built-in one, so a gateway you declare is costed like the same model on a built-in provider; your price used to either drop the tier or be charged the list tier's own rates, and a model you declared free was still billed that tier past the threshold
 - Thin tool images are padded to the vision model's minimum height or width instead of causing a 400 on the next turn ([#18081](https://github.com/can1357/oh-my-pi/issues/18081))
 - JSON query truncation notices now report the 50KB read budget instead of the bytes shown ([#18022](https://github.com/can1357/oh-my-pi/pull/18022) by [@eggpeat](https://github.com/eggpeat))
 - Extension links stay clickable and extension-drawn replies and custom messages keep their renderers on every launch, not only the first after an edit; `ctx.ui.getLinkClicksAvailable()` no longer turns false on later launches ([#18116](https://github.com/can1357/oh-my-pi/pull/18116) by [@materemias](https://github.com/materemias))
