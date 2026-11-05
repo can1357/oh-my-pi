@@ -367,10 +367,12 @@ impl Pumps {
 	/// Also advances retained [`orphan`] work. Called by
 	/// `ExtProc::poll_wait` before it polls the tracker.
 	pub fn poll(&mut self, cx: &mut Context<'_>, tracker: &Tracker) {
-		let cancelled = tracker.pumps_cancelled(cx.waker());
-		self
-			.tasks
-			.retain_mut(|t| t.poll(cx, cancelled).is_pending());
+		if !self.tasks.is_empty() {
+			let cancelled = tracker.pumps_cancelled(cx.waker());
+			self
+				.tasks
+				.retain_mut(|t| t.poll(cx, cancelled).is_pending());
+		}
 		for feed in &self.feeds {
 			feed.poll(cx);
 		}

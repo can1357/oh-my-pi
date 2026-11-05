@@ -149,13 +149,10 @@ impl ShellApi<'_, '_> {
 
 	/// Run `script` in a new subshell of the calling vproc (for callouts
 	/// such as `xargs` or `find -exec`); `script.vproc` only selects the
-	/// stdio. The run reports `Done` like any other.
-	pub fn run_subshell(&mut self, mut script: Script) -> RunId {
-		if matches!(script.vproc, VprocSel::Root) {
-			script.vproc = VprocSel::NewSubshell;
-		}
-		let store: &mut dyn StateStore = &mut *self.cx.store;
-		self.shell.submit_from(self.vp, script, Some(store), None)
+	/// stdio. The run reports `Done` like any other. A `Subshell` event on
+	/// the calling command links the child before its `RunStart`.
+	pub fn run_subshell(&mut self, script: Script) -> RunId {
+		self.submit_subshell(script, None)
 	}
 
 	/// [`Self::run_subshell`] with its own [`Lineage`], as `timeout` or
@@ -166,10 +163,7 @@ impl ShellApi<'_, '_> {
 	/// of a tree it runs in) reaches the tree too, as a signal to a process
 	/// reaches what it `exec`s or forwards to. A detached lineage stays
 	/// detached in every descendant, whatever `lineage` says.
-	pub fn run_subshell_in(&mut self, mut script: Script, mut lineage: Lineage) -> RunId {
-		if matches!(script.vproc, VprocSel::Root) {
-			script.vproc = VprocSel::NewSubshell;
-		}
+	pub fn run_subshell_in(&mut self, script: Script, mut lineage: Lineage) -> RunId {
 		let caller = self.vproc();
 		lineage.detached |= caller.lineage.detached;
 		if lineage.label != 0 {
@@ -178,10 +172,35 @@ impl ShellApi<'_, '_> {
 				self.shell.k.callout_labels.push(link);
 			}
 		}
+		self.submit_subshell(script, Some(lineage))
+	}
+
+	fn submit_subshell(&mut self, mut script: Script, lineage: Option<Lineage>) -> RunId {
+		if matches!(script.vproc, VprocSel::Root) {
+			script.vproc = VprocSel::NewSubshell;
+		}
 		let store: &mut dyn StateStore = &mut *self.cx.store;
+		let run = self
+			.shell
+			.submit_from(self.vp, script, Some(store), lineage);
+		let child = self
+			.shell
+			.k
+			.spawned
+			.last()
+			.expect("submitted subshell")
+			.vpid;
+		let vp = &self.shell.procs[self.vp];
+		let node = vp
+			.frames
+			.last()
+			.and_then(|frame| frame.unit.as_ref()?.ops.get(frame.pc as usize))
+			.map_or(0, |op| op.node);
 		self
 			.shell
-			.submit_from(self.vp, script, Some(store), Some(lineage))
+			.k
+			.emit_op(self.cx, vp, node, EventData::Subshell { child });
+		run
 	}
 
 	/// [`Self::run_subshell_in`] for a callout that stands for the command

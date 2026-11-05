@@ -31,7 +31,7 @@ use parking_lot::Mutex;
 
 use crate::{
 	bash::{
-		Budget, CallOutcome, Cx, Deadline, Event, ExitStatus, ExtProc, File, FileKind, Fs,
+		Budget, CallOutcome, Cx, Deadline, Event, EventSink, ExitStatus, ExtProc, File, FileKind, Fs,
 		IntrinsicId, Invocation, ModeId, NativeRef, OsHandle, PipeTap, ResolveCtx, Resolved, Shell,
 		ShellApi, Signal, SpawnFuture, SpawnSpec, StateStore, StdFd, Step, SystemTimeLike, Task,
 		Timer, ToolRef, TtyInfo, UserInfo, Verdict, fs::SeekFrom,
@@ -236,6 +236,14 @@ impl ExtProc for CountedExt {
 		self.ext.poll_wait(cx)
 	}
 
+	fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<crate::bash::ProcEvent> {
+		self.ext.poll_event(cx)
+	}
+
+	fn pgid(&self) -> Option<u32> {
+		self.ext.pgid()
+	}
+
 	fn signal(&mut self, sig: Signal) -> io::Result<()> {
 		self.ext.signal(sig)
 	}
@@ -275,6 +283,8 @@ pub struct FakeHost {
 	natives:     Vec<Native>,
 	/// Every event, as JSON, in emission order.
 	pub events:  Vec<serde_json::Value>,
+	/// Gets every event too ([`FakeHost::with_event_sink`]).
+	sink:        Option<Arc<dyn EventSink>>,
 	verdict:     Option<VerdictFn>,
 	clock:       Arc<AtomicU64>,
 	/// Armed timers (virtual time; see [`FakeHost::fire_next_timer`]).
@@ -291,6 +301,9 @@ pub struct FakeHost {
 	pipe_tap:    Option<Arc<dyn PipeTap>>,
 	/// [`Host::child_opens`](crate::bash::Host::child_opens) answers this.
 	child_opens: bool,
+	/// The login database [`Host::logins`](crate::bash::Host::logins)
+	/// reports (`None`: none, `Unsupported`).
+	pub logins:  Option<crate::bash::Logins>,
 }
 
 impl Default for FakeHost {
@@ -310,6 +323,7 @@ impl FakeHost {
 			tools:       Vec::new(),
 			natives:     Vec::new(),
 			events:      Vec::new(),
+			sink:        None,
 			verdict:     None,
 			clock:       Arc::new(AtomicU64::new(0)),
 			timers:      Arc::new(Mutex::new(Vec::new())),
@@ -321,6 +335,7 @@ impl FakeHost {
 			census:      Arc::new(Census::default()),
 			pipe_tap:    None,
 			child_opens: false,
+			logins:      None,
 		}
 	}
 
@@ -337,6 +352,14 @@ impl FakeHost {
 	/// ([`Host::pipe_tap`](crate::bash::Host::pipe_tap)).
 	pub fn with_pipe_tap(mut self, tap: Arc<dyn PipeTap>) -> Self {
 		self.pipe_tap = Some(tap);
+		self
+	}
+
+	/// Forward every event to `sink` as well (a
+	/// [`RunTrace`](crate::bash::trace::RunTrace)); the test sets the
+	/// shell's mask to the sink's.
+	pub fn with_event_sink(mut self, sink: Arc<dyn EventSink>) -> Self {
+		self.sink = Some(sink);
 		self
 	}
 
@@ -561,7 +584,7 @@ impl Drop for FakeTimer {
 }
 
 impl crate::bash::Host for FakeHost {
-	fn resolve(&mut self, name: &BStr, mode: ModeId, why: ResolveCtx<'_>) -> Resolved {
+	fn resolve(&mut self, name: &BStr, mode: ModeId, why: ResolveCtx) -> Resolved {
 		if let Some(i) = self.tools.iter().position(|(n, _)| n.as_bstr() == name) {
 			return Resolved::Tool(ToolRef(i as u64));
 		}
@@ -680,10 +703,20 @@ impl crate::bash::Host for FakeHost {
 		(0, "UTC".into())
 	}
 
+	fn logins(&self) -> io::Result<crate::bash::Logins> {
+		self
+			.logins
+			.clone()
+			.ok_or_else(|| io::ErrorKind::Unsupported.into())
+	}
+
 	fn event(&mut self, ev: &Event<'_>) -> Verdict {
 		self
 			.events
 			.push(serde_json::to_value(ev).expect("events serialize"));
+		if let Some(sink) = &self.sink {
+			sink.event(ev);
+		}
 		self.verdict.as_mut().map_or(Verdict::Continue, |f| f(ev))
 	}
 }
