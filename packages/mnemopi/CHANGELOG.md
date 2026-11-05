@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Development installs now share fastembed's ONNX runtime instead of installing a second native runtime
+
+## [18.14.2] - 2026-10-31
+
+### Fixed
+
+- Fixed heuristic episodic facts storing word fragments (`Drafting is active.` → `ctive`), truncated multiword objects, or nothing for `has an …` sentences ([#17511](https://github.com/can1357/oh-my-pi/issues/17511))
+
 ## [18.13.3] - 2026-10-28
 
 ### Changed

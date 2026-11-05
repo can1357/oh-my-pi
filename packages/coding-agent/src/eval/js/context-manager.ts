@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { logger, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
 import {
 	createWorkerHandle,
 	createWorkerSubprocess,
@@ -12,7 +12,13 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { safeSend as safeSendIpc } from "../../utils/ipc";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
 import { getEnabledEvalPreludes } from "../preludes";
-import { attachSessionOwner, EvalKernelNotRunningError, type SessionOwners } from "../executor-base";
+import {
+	abortReasonError,
+	attachSessionOwner,
+	EvalKernelNotRunningError,
+	formatKernelRestartNotice,
+	type SessionOwners,
+} from "../executor-base";
 import { shouldDetachKernel } from "../py/spawn-options";
 import { updateEvalState } from "../state";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
@@ -39,6 +45,8 @@ export interface VmRunState {
 	signal?: AbortSignal;
 	onText?: (chunk: string) => void;
 	onDisplay?: (output: EvalDisplayOutput) => void;
+	/** Shows the user `out://` replies of the run's bridged tool calls; absent, those calls are refused. */
+	onReply?: (text: string) => void;
 }
 
 /** Isolated runtime transport used by the context manager and startup regression fixtures. */
@@ -112,6 +120,8 @@ interface StartingJsSession extends SessionOwners {
 const sessions = new Map<string, JsSession>();
 const startingSessions = new Map<string, StartingJsSession>();
 const resettingSessions = new Map<string, Promise<void>>();
+// Owners of session keys whose worker died outside reset/disposal; the next cell announces the loss.
+const lostSessions = new Map<string, Set<string>>();
 // Worker startup (module-graph import + WorkerCore construction) is infrastructure
 // cost, not user compute. Floor it independently of Bun's 5s default per-test timeout
 // so a slow cold-start under load isn't aborted mid-init — terminating a still-
@@ -198,6 +208,9 @@ export async function executeInVmContext(options: {
 		options.timeoutMs,
 		options.ownerId,
 	);
+	if (!options.reset && lostSessions.delete(sessionKey)) {
+		options.runState.onText?.(`${formatKernelRestartNotice("JS worker")}\n`);
+	}
 	const result = await runOnce(session, options);
 	if (session.state === "alive" && path.isAbsolute(options.filename)) {
 		updateEvalState(options.session, {
@@ -208,10 +221,6 @@ export async function executeInVmContext(options: {
 		});
 	}
 	return result;
-}
-
-function isUnknownRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 /** Describe or invoke tools defined in a retained JavaScript kernel. */
@@ -246,7 +255,7 @@ export async function invokeJsTool(
 		if (pending.settled) return;
 		pending.aborted = true;
 		pending.settled = true;
-		const error = reasonToError(options.signal?.reason, "Tool invocation aborted");
+		const error = abortReasonError(options.signal?.reason, "Tool invocation aborted");
 		for (const controller of pending.toolCalls.values()) controller.abort(error);
 		reject(error);
 	};
@@ -263,7 +272,7 @@ export async function invokeJsTool(
 		session.pending.delete(runId);
 	}
 
-	if (!isUnknownRecord(envelope) || envelope.ok !== true) {
+	if (!isRecord(envelope) || envelope.ok !== true) {
 		return { ok: false, error: "JavaScript tool request returned an invalid response" };
 	}
 	if (request.op === "call") {
@@ -274,9 +283,9 @@ export async function invokeJsTool(
 	const rawTools = Array.isArray(envelope.tools) ? envelope.tools : [];
 	const tools: EvalToolDescriptor[] = [];
 	for (const rawTool of rawTools) {
-		if (!isUnknownRecord(rawTool)) continue;
+		if (!isRecord(rawTool)) continue;
 		const { name, description, parameters } = rawTool;
-		if (typeof name !== "string" || typeof description !== "string" || !isUnknownRecord(parameters)) continue;
+		if (typeof name !== "string" || typeof description !== "string" || !isRecord(parameters)) continue;
 		tools.push({ name, description, parameters, language: "js" });
 	}
 	const missing = Array.isArray(envelope.missing)
@@ -382,6 +391,7 @@ export async function runIfSnapshotMatches(options: {
 }
 
 export async function resetVmContext(sessionKey: string): Promise<void> {
+	lostSessions.delete(sessionKey);
 	const session = sessions.get(sessionKey) ?? (await startingSessions.get(sessionKey)?.promise.catch(() => undefined));
 	if (!session) return;
 	sessions.delete(sessionKey);
@@ -398,6 +408,8 @@ export async function disposeAllVmContexts(): Promise<void> {
 		if (!all.includes(result.value)) all.push(result.value);
 	}
 	sessions.clear();
+	// After the await: a worker that died while startups settled marked its key lost.
+	lostSessions.clear();
 	await Promise.all(all.map(session => killSession(session, new ToolError("JS context disposed"), { force: false })));
 }
 
@@ -424,6 +436,9 @@ export async function disposeVmContextsByOwner(ownerId: string): Promise<void> {
 			continue;
 		}
 		starting.ownerIds.delete(ownerId);
+	}
+	for (const [sessionKey, ownerIds] of lostSessions) {
+		if (ownerIds.delete(ownerId) && ownerIds.size === 0) lostSessions.delete(sessionKey);
 	}
 	for (const session of toKill) {
 		if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
@@ -517,7 +532,7 @@ async function runOnce(
 
 	const onAbort = (): void => {
 		const reason = options.runState.signal?.reason;
-		const abortError = reasonToError(reason, "Execution aborted");
+		const abortError = abortReasonError(reason, "Execution aborted");
 		// Stop delegated work at once — this is what kills spawned subagents —
 		// and refuse further bridge calls so the drain below stays bounded to
 		// phases that had already started.
@@ -814,6 +829,7 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 			signal: ctrl.signal,
 			identity: msg.identity,
 			shadowCell: pending.shadowCell,
+			onReply: pending.runState.onReply,
 			emitStatus: (event: JsStatusEvent) => {
 				trackDeferPhase(pending, event);
 				pending.runState.onDisplay?.({ type: "status", event });
@@ -864,6 +880,7 @@ function settlePending(session: JsSession, msg: Extract<WorkerOutbound, { type: 
 async function killSessionFor(session: JsSession, error: Error, options: { force: boolean }): Promise<void> {
 	if (sessions.get(session.sessionKey) === session) {
 		sessions.delete(session.sessionKey);
+		lostSessions.set(session.sessionKey, new Set(session.ownerIds));
 	}
 	await killSession(session, error, options);
 }
@@ -912,12 +929,6 @@ function safeSend(session: JsSession, msg: WorkerInbound): void {
 	} catch (err) {
 		logger.debug("js worker send failed", { error: err instanceof Error ? err.message : String(err) });
 	}
-}
-
-function reasonToError(reason: unknown, fallback: string): Error {
-	if (reason instanceof Error) return reason;
-	if (typeof reason === "string") return new ToolAbortError(reason);
-	return new ToolAbortError(fallback);
 }
 
 function errorFromPayload(payload: RunErrorPayload): Error {

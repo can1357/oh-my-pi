@@ -1,6 +1,6 @@
 //! Type-checker and linter output filters.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt::NumBuffer};
 
 use crate::minimizer::{MinimizerCtx, MinimizerOutput, primitives};
 
@@ -521,9 +521,9 @@ pub fn group_diagnostics(input: &str) -> String {
 
 	let mut out = String::new();
 	let diag_count: usize = files.iter().map(|(_, entries)| entries.len()).sum();
-	out.push_str(&diag_count.to_string());
+	out.push_str(diag_count.format_into(&mut NumBuffer::new()));
 	out.push_str(" diagnostics in ");
-	out.push_str(&files.len().to_string());
+	out.push_str(files.len().format_into(&mut NumBuffer::new()));
 	out.push_str(" files\n");
 
 	let code_summary = format_code_summary(&code_counts);
@@ -536,7 +536,7 @@ pub fn group_diagnostics(input: &str) -> String {
 	for (file, entries) in files {
 		out.push_str(&file);
 		out.push_str(" (");
-		out.push_str(&entries.len().to_string());
+		out.push_str(entries.len().format_into(&mut NumBuffer::new()));
 		out.push_str(" diagnostics)\n");
 		for entry in entries.iter().take(12) {
 			out.push_str("  ");
@@ -545,7 +545,7 @@ pub fn group_diagnostics(input: &str) -> String {
 		}
 		if entries.len() > 12 {
 			out.push_str("  […");
-			out.push_str(&(entries.len() - 12).to_string());
+			out.push_str((entries.len() - 12).format_into(&mut NumBuffer::new()));
 			out.push_str(" diagnostics elided…]\n");
 		}
 	}
@@ -556,7 +556,7 @@ pub fn group_diagnostics(input: &str) -> String {
 	}
 	if ungrouped.len() > 40 {
 		out.push_str("[…");
-		out.push_str(&(ungrouped.len() - 40).to_string());
+		out.push_str((ungrouped.len() - 40).format_into(&mut NumBuffer::new()));
 		out.push_str(" ungrouped lines elided…]\n");
 	}
 	out

@@ -3,7 +3,7 @@ import type { CompactionSettings } from "@oh-my-pi/pi-agent-core/compaction";
 import { effectiveReserveTokens, resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Tool as AiTool, Model } from "@oh-my-pi/pi-ai";
 import { renderToolExamples } from "@oh-my-pi/pi-ai/dialect";
-import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { stripSchemaDescriptions, toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 
 interface ContextSkill {
 	readonly name: string;
@@ -128,6 +128,11 @@ export interface NonMessageTokenSource {
 		readonly state?: {
 			readonly tools?: readonly ContextTool[];
 		};
+		/**
+		 * Whether requests to `model` ship description-stripped tool specs because
+		 * the catalog rides in the system prompt (`Agent.prunesToolDescriptions`).
+		 */
+		prunesToolDescriptions?(model: Model | undefined): boolean;
 	};
 	readonly skills?: readonly ContextSkill[];
 	/** Provider-facing, session-frozen descriptions when available. */
@@ -166,7 +171,10 @@ type ToolSchemaSource = readonly ContextTool[];
 
 interface ToolSchemaTokenCache {
 	revision: number;
-	byTokenizer: WeakMap<Tokenizer, { revision: number; sourceRevision: number; tokens: number }>;
+	byTokenizer: WeakMap<
+		Tokenizer,
+		{ revision: number; sourceRevision: number; pruneDescriptions: boolean; tokens: number }
+	>;
 }
 
 /**
@@ -216,12 +224,24 @@ export interface ToolSchemaFragments {
 	readonly schemaError?: string;
 }
 
+/** How {@link toolSchemaFragments} renders one tool definition. */
+export interface ToolSchemaFragmentOptions {
+	/** Also return `display`: the same fragments with the schema JSON indented by this many spaces. */
+	displayIndent?: number;
+	/**
+	 * Mirror `normalizeTools({ pruneDescriptions: true })`: the wire spec is the
+	 * name plus the description-stripped schema, with no description or examples.
+	 */
+	pruneDescriptions?: boolean;
+}
+
 /**
  * Provider-visible text of one tool definition. `displayIndent` additionally
  * returns `display`, the same fragments with the schema JSON indented, from
  * the same schema conversion.
  */
-export function toolSchemaFragments(tool: ContextTool, displayIndent?: number): ToolSchemaFragments {
+export function toolSchemaFragments(tool: ContextTool, options: ToolSchemaFragmentOptions = {}): ToolSchemaFragments {
+	const { displayIndent, pruneDescriptions = false } = options;
 	// Extension-supplied tools may carry a non-string name/description or a
 	// parameters value whose wire schema stringifies to `undefined` (e.g. a
 	// callable schema that escaped normalization). A non-string fragment is
@@ -234,7 +254,7 @@ export function toolSchemaFragments(tool: ContextTool, displayIndent?: number): 
 		display?.push(shown);
 	};
 	if (typeof name === "string") push(name);
-	if (typeof description === "string") push(description);
+	if (!pruneDescriptions && typeof description === "string") push(description);
 	try {
 		const wireTool: AiTool = {
 			name,
@@ -242,12 +262,14 @@ export function toolSchemaFragments(tool: ContextTool, displayIndent?: number): 
 			parameters: parameters as AiTool["parameters"],
 			examples: tool.examples,
 		};
-		const wireSchema = toolWireSchema(wireTool) ?? {};
+		const fullSchema = toolWireSchema(wireTool) ?? {};
+		const wireSchema = pruneDescriptions ? stripSchemaDescriptions(fullSchema) : fullSchema;
 		const wireJson = JSON.stringify(wireSchema);
 		if (typeof wireJson === "string")
 			push(wireJson, display ? JSON.stringify(wireSchema, null, displayIndent) : wireJson);
-		// The agent loop appends rendered examples to the wire description.
-		const examplesBlock = renderToolExamples(wireTool);
+		// The agent loop appends rendered examples to the wire description,
+		// which pruning empties.
+		const examplesBlock = pruneDescriptions ? undefined : renderToolExamples(wireTool);
 		if (examplesBlock) push(examplesBlock);
 	} catch (error) {
 		// Schema may contain functions or cycles.
@@ -256,23 +278,41 @@ export function toolSchemaFragments(tool: ContextTool, displayIndent?: number): 
 	return { fragments, display };
 }
 
+/** Inputs that select which tool-schema estimate applies, beyond the roster and tokenizer. */
+export interface ToolSchemaEstimateOptions {
+	/** Caller settings/source revision; a change invalidates the cached estimate. */
+	sourceRevision?: number;
+	/** Count the description-stripped specs sent when the catalog rides in the system prompt. */
+	pruneDescriptions?: boolean;
+}
+
 /**
  * Estimate provider-visible tool-schema tokens.
  *
  * Results are cached by roster-array identity, tokenizer identity, the
- * caller-supplied settings/source revision, and the roster's explicit dynamic
- * metadata revision. Callers whose descriptions or schemas are live getters
- * must either advance `sourceRevision` or call
+ * caller-supplied settings/source revision, the prune mode, and the roster's
+ * explicit dynamic metadata revision. Callers whose descriptions or schemas are
+ * live getters must either advance `sourceRevision` or call
  * {@link invalidateToolSchemaMetadata} when those inputs change.
  */
-export function estimateToolSchemaTokens(tools: ToolSchemaSource, tokenizer: Tokenizer, sourceRevision = 0): number {
+export function estimateToolSchemaTokens(
+	tools: ToolSchemaSource,
+	tokenizer: Tokenizer,
+	options: ToolSchemaEstimateOptions = {},
+): number {
+	const { sourceRevision = 0, pruneDescriptions = false } = options;
 	const cache = toolSchemaTokenCache(tools);
 	const cached = cache.byTokenizer.get(tokenizer);
-	if (cached?.revision === cache.revision && cached.sourceRevision === sourceRevision) return cached.tokens;
+	if (
+		cached?.revision === cache.revision &&
+		cached.sourceRevision === sourceRevision &&
+		cached.pruneDescriptions === pruneDescriptions
+	)
+		return cached.tokens;
 
-	const fragments = tools.flatMap(tool => toolSchemaFragments(tool).fragments);
+	const fragments = tools.flatMap(tool => toolSchemaFragments(tool, { pruneDescriptions }).fragments);
 	const tokens = tokenizer.countTokens(fragments);
-	cache.byTokenizer.set(tokenizer, { revision: cache.revision, sourceRevision, tokens });
+	cache.byTokenizer.set(tokenizer, { revision: cache.revision, sourceRevision, pruneDescriptions, tokens });
 	return tokens;
 }
 
@@ -281,9 +321,9 @@ export function estimateContextToolSchemaTokens(
 	tools: ToolSchemaSource,
 	tokenizer: Tokenizer,
 	model: Model | undefined,
-	sourceRevision = 0,
+	options: ToolSchemaEstimateOptions = {},
 ): number {
-	return model?.toolSchemasInContext === false ? 0 : estimateToolSchemaTokens(tools, tokenizer, sourceRevision);
+	return model?.toolSchemasInContext === false ? 0 : estimateToolSchemaTokens(tools, tokenizer, options);
 }
 
 /**
@@ -293,15 +333,17 @@ export function estimateContextToolSchemaTokens(
  *
  * Exposed so callers like `StatusLineComponent` can cache the non-message
  * total separately from the growing message total. A model switch can change
- * which tool schemas occupy context without changing the roster.
+ * which tool schemas occupy context without changing the roster; a prune-mode
+ * change (`Agent.prunesToolDescriptions`) changes how much of each spec ships.
  */
 // The per-turn threshold and compaction paths call these helpers repeatedly.
-// Cache by prompt, roster, skills, tokenizer, revision, and model schema policy;
-// setSystemPrompt/setTools replace their arrays rather than mutating them.
+// Cache by prompt, roster, skills, tokenizer, revision, model schema policy, and
+// prune mode; setSystemPrompt/setTools replace their arrays rather than mutating them.
 interface NonMessageTokenCache {
 	systemPromptRef: readonly string[];
 	toolsRef: ToolSchemaSource;
 	toolSchemasInContext: boolean;
+	pruneToolDescriptions: boolean;
 	toolsRevision: number;
 	sourceRevision: number;
 	skillful: boolean;
@@ -335,6 +377,7 @@ function nonMessageTokenCacheEntry(
 	const systemPromptRef = session.systemPrompt ?? EMPTY_STRING_PARTS;
 	const toolsRef = session.agent?.state?.tools ?? EMPTY_TOOLS;
 	const toolSchemasInContext = session.model?.toolSchemasInContext !== false;
+	const pruneToolDescriptions = session.agent?.prunesToolDescriptions?.(session.model) === true;
 	const toolsRevision = getToolSchemaMetadataRevision(toolsRef);
 	const skillsRef = session.renderedSkills ?? session.skills ?? EMPTY_SKILLS;
 	let entry = cachedSession[NON_MESSAGE_TOKEN_CACHE];
@@ -343,6 +386,7 @@ function nonMessageTokenCacheEntry(
 		entry.systemPromptRef === systemPromptRef &&
 		entry.toolsRef === toolsRef &&
 		entry.toolSchemasInContext === toolSchemasInContext &&
+		entry.pruneToolDescriptions === pruneToolDescriptions &&
 		entry.toolsRevision === toolsRevision &&
 		entry.sourceRevision === sourceRevision &&
 		entry.skillsRef === skillsRef &&
@@ -354,6 +398,7 @@ function nonMessageTokenCacheEntry(
 		systemPromptRef,
 		toolsRef,
 		toolSchemasInContext,
+		pruneToolDescriptions,
 		toolsRevision,
 		sourceRevision,
 		skillful: true,
@@ -377,7 +422,10 @@ export function computeNonMessageTokens(
 	const tools = session.agent?.state?.tools ?? EMPTY_TOOLS;
 	const tokens =
 		tokenizer.countTokens(Array.from(systemPromptParts, part => part ?? "")) +
-		estimateContextToolSchemaTokens(tools, tokenizer, session.model, sourceRevision);
+		estimateContextToolSchemaTokens(tools, tokenizer, session.model, {
+			sourceRevision,
+			pruneDescriptions: entry.pruneToolDescriptions,
+		});
 	entry.tokens = tokens;
 	return tokens;
 }
@@ -409,7 +457,10 @@ export function computeNonMessageBreakdown(
 					renderedSkills(session.renderedSkills ?? session.skills ?? EMPTY_SKILLS, tools),
 					tokenizer,
 				);
-	const toolsTokens = estimateContextToolSchemaTokens(tools, tokenizer, session.model, sourceRevision);
+	const toolsTokens = estimateContextToolSchemaTokens(tools, tokenizer, session.model, {
+		sourceRevision,
+		pruneDescriptions: entry.pruneToolDescriptions,
+	});
 	const systemPromptParts = session.systemPrompt ?? EMPTY_STRING_PARTS;
 	const systemContextTokens = tokenizer.countTokens(Array.from(systemPromptParts.slice(1), part => part ?? ""));
 	const systemPromptTokens = Math.max(0, tokenizer.countTokens(systemPromptParts[0] ?? "") - skillsTokens);

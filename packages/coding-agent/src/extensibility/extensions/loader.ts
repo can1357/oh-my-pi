@@ -25,8 +25,7 @@ import { loadCapability } from "../../discovery";
 import { getExtensionNameFromPath } from "../../discovery/helpers";
 import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
-// Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
-import * as PiCodingAgent from "../../index";
+import { getCodingAgentApi } from "../host-api";
 import type { SendUserMessageOptions } from "../../session/agent-session";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
@@ -40,6 +39,7 @@ import { getAllPluginExtensionPaths } from "../plugins/loader";
 
 import { resolvePath, withHostGuard } from "../utils";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
+import { notifyTranscriptPresentersChanged } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import type {
 	AssistantTextRenderer,
 	AssistantThinkingRenderer,
@@ -53,9 +53,11 @@ import type {
 	PreparedExtension,
 	ProviderConfig,
 	RegisteredCommand,
+	ShortcutConflict,
 	SourceInfo,
 	ToolDefinition,
 	ToolInfo,
+	TranscriptPresenter,
 } from "./types";
 
 installLegacyPiSpecifierShim();
@@ -129,6 +131,10 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	unregisterProvider(name: string): void {
 		const remaining = this.pendingProviderRegistrations.filter(registration => registration.name !== name);
 		this.pendingProviderRegistrations.splice(0, this.pendingProviderRegistrations.length, ...remaining);
+	}
+
+	getShortcutConflict(): ShortcutConflict | undefined {
+		throw new ExtensionRuntimeNotInitializedError();
 	}
 
 	sendMessage(): void {
@@ -209,8 +215,11 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		sourceId: string;
 	}> = [];
 
+	get pi() {
+		return getCodingAgentApi();
+	}
+
 	constructor(
-		public readonly pi: typeof PiCodingAgent,
 		private readonly extension: Extension,
 		private readonly runtime: IExtensionRuntime,
 		private readonly cwd: string,
@@ -277,6 +286,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		this.extension.shortcuts.set(shortcut, { shortcut, extensionPath: this.extension.path, ...options });
 	}
 
+	getShortcutConflict(shortcut: KeyId): ShortcutConflict | undefined {
+		return this.runtime.getShortcutConflict(shortcut, this.extension.path);
+	}
+
 	registerFlag(
 		name: string,
 		options: { description?: string; type: "boolean" | "string"; default?: boolean | string },
@@ -302,6 +315,25 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			);
 		}
 		this.extension.assistantTextRenderers.push(renderer);
+	}
+
+	registerTranscriptPresenter(presenter: TranscriptPresenter): () => void {
+		if (typeof presenter !== "function") {
+			throw new TypeError(
+				`registerTranscriptPresenter expects a function, got ${typeof presenter} (extension ${this.extension.path})`,
+			);
+		}
+		const presenters = this.extension.transcriptPresenters;
+		presenters.push(presenter);
+		notifyTranscriptPresentersChanged();
+		let registered = true;
+		return () => {
+			if (!registered) return;
+			registered = false;
+			const index = presenters.indexOf(presenter);
+			if (index >= 0) presenters.splice(index, 1);
+			notifyTranscriptPresentersChanged();
+		};
 	}
 
 	registerLinkScheme(scheme: string): void {
@@ -425,6 +457,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		toolRegistrationListeners: new Set(),
 		assistantThinkingRenderers: [],
 		assistantTextRenderers: [],
+		transcriptPresenters: [],
 		linkSchemes: [],
 		fileWriteFallbackHandlers: [],
 		fileDeleteFallbackHandlers: [],
@@ -460,7 +493,8 @@ async function runExtensionFactory(
 	}
 }
 
-async function importExtensionModule(extensionPath: string, cwd: string): Promise<PreparedExtension> {
+/** Import one extension module and resolve its factory without binding it to a session. */
+export async function importExtensionModule(extensionPath: string, cwd: string): Promise<PreparedExtension> {
 	const resolvedPath = resolvePath(extensionPath, cwd);
 	try {
 		const module = (await withHostGuard(() => loadLegacyPiModule(resolvedPath))) as LoadedExtensionModule;
@@ -495,7 +529,7 @@ async function bindExtension(
 	}
 	try {
 		const extension = createExtension(extensionPath, imported.resolvedPath);
-		const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
+		const api = new ConcreteExtensionAPI(extension, runtime, cwd, eventBus);
 		await withHostGuard(() => runExtensionFactory(factory, api, runtime));
 
 		return { extension, error: null };
@@ -516,7 +550,7 @@ export async function loadExtensionFromFactory(
 	name = "<inline>",
 ): Promise<Extension> {
 	const extension = createExtension(name, name);
-	const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
+	const api = new ConcreteExtensionAPI(extension, runtime, cwd, eventBus);
 	await runExtensionFactory(factory, api, runtime);
 	return extension;
 }

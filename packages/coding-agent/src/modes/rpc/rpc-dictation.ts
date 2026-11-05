@@ -1,3 +1,4 @@
+import { toError } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../../session/agent-session";
 import { STTController, type SttCallbacks, type SttTarget } from "../../stt";
 import type { RpcDictationFrame } from "./rpc-types";
@@ -123,7 +124,7 @@ export class RpcDictationBridge {
 				throw new Error(capture.error || "Failed to start dictation");
 			}
 		} catch (cause) {
-			const error = cause instanceof Error ? cause : new Error(String(cause));
+			const error = toError(cause);
 			if (!capture.stopping && !capture.ended) {
 				capture.error ??= error.message;
 				this.#finish(capture);

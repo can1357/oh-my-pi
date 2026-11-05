@@ -44,6 +44,7 @@ interface FakeAcpBuiltinSession {
 	fetchUsageReports?: () => Promise<unknown>;
 	getAsyncJobSnapshot: (opts?: { recentLimit?: number }) => { running: unknown[]; recent: unknown[] } | null;
 	getAsyncJobTree: () => AsyncJobTree | null;
+	requestJobCaptions: () => void;
 	cancelAsyncJob: (id: string) => boolean;
 	formatSessionAsText: () => string;
 	dumpLlmRequestToTmpDir: () => Promise<string | undefined>;
@@ -65,7 +66,7 @@ interface FakeAcpBuiltinSession {
 	setSlashCommands(commands: unknown[]): void;
 	refreshSkillsAndCommands(): Promise<void>;
 	getTodoPhases(): Array<{ name: string; tasks: Array<{ content: string; status: string }> }>;
-	setTodoPhases(phases: Array<{ name: string; tasks: Array<{ content: string; status: string }> }>): void;
+	commitTodoPhases(phases: Array<{ name: string; tasks: Array<{ content: string; status: string }> }>): void;
 	refreshBaseSystemPrompt(): Promise<void>;
 	getHindsightSessionState(): undefined;
 	applyMemoryBackend(): Promise<void>;
@@ -160,8 +161,9 @@ function createRuntime() {
 		getTodoPhases() {
 			return this._todoPhases;
 		},
-		setTodoPhases(phases) {
+		commitTodoPhases(phases) {
 			this._todoPhases = phases;
+			fakeSessionManager.appendCustomEntry("user_todo_edit", { phases });
 		},
 		async refreshBaseSystemPrompt() {},
 		// Headless `/move` and `/wt` rebind memory for the destination project.
@@ -169,6 +171,7 @@ function createRuntime() {
 		async applyMemoryBackend() {},
 		getAsyncJobSnapshot: () => null,
 		getAsyncJobTree: () => null,
+		requestJobCaptions: () => {},
 		cancelAsyncJob: () => false,
 		formatSessionAsText: () => "",
 		dumpLlmRequestToTmpDir: async () => undefined,

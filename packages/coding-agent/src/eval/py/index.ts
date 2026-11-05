@@ -65,6 +65,7 @@ export default {
 			reset: opts.reset,
 			onChunk: opts.onChunk,
 			onStatus: opts.onStatus,
+			onReply: opts.onReply,
 			toolSession: opts.session,
 		};
 		const result = await executePython(code, executorOptions);
