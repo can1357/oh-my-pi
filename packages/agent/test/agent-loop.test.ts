@@ -7012,12 +7012,15 @@ describe("agentLoop passive additionalContext", () => {
 		const toolResult = messages[2] as ToolResultMessage;
 		expect(toolResult.toolCallId).toBe("tc-late-1");
 		expect(toolResult.isError).toBe(true);
-		expect(toolResult.content).toEqual([{ type: "text", text: "Tool execution was aborted." }]);
-		// The cause is local metadata, not model-visible text: `content` is
-		// replayed on every later request, and interpolating whatever string
-		// ended the turn put a provider refusal there (INFRA-1191).
+		// The deadline is omp's own reason, not the provider's, so the model is
+		// still told it. Only provider text is withheld from `content`.
+		const text = toolResult.content
+			.filter((c): c is { type: "text"; text: string } => c.type === "text")
+			.map(c => c.text)
+			.join("\n");
+		expect(text).toContain("Deadline exceeded");
 		const details = toolResult.details as SyntheticToolResultDetails;
-		expect(details.upstreamError).toBe("Deadline exceeded");
+		expect(details.upstreamError).toBeUndefined();
 		expect(events.map(event => event.type)).toContain("agent_end");
 	});
 

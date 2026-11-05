@@ -2272,7 +2272,8 @@ export class Agent {
 				for (const block of errorMsg.content) {
 					if (block.type !== "toolCall") continue;
 					if (bufferedCursorToolCallIds.has(block.id)) continue;
-					const toolResult = createSyntheticToolResultMessage(block, "error", errorMessage);
+					// The provider's text, so `details` only — never the model's view.
+					const toolResult = createSyntheticToolResultMessage(block, "error", { upstreamError: errorMessage });
 					this.#emit({
 						type: "tool_execution_start",
 						toolCallId: block.id,

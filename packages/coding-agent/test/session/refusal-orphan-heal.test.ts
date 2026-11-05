@@ -12,8 +12,8 @@ import { describe, expect, it } from "bun:test";
 import path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { createSyntheticToolResultMessage, isSyntheticToolResultMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Message, Model } from "@oh-my-pi/pi-ai";
-import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import type { AssistantMessage, Message, Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { isSyntheticNotExecutedToolResult, transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { buildSessionContext, isOrphanedSyntheticResult } from "../../src/session/session-context";
 import type { SessionEntry } from "../../src/session/session-entries";
@@ -96,7 +96,7 @@ function syntheticResult(toolCallId: string): AgentMessage {
 	return createSyntheticToolResultMessage(
 		{ type: "toolCall", id: toolCallId, name: "bash", arguments: { command: "ls" } },
 		"error",
-		REFUSAL_MARKER,
+		{ upstreamError: REFUSAL_MARKER },
 	) as AgentMessage;
 }
 
@@ -122,15 +122,15 @@ async function loadFixture(file: string): Promise<SessionEntry[]> {
 }
 
 describe("synthetic tool result content", () => {
-	it("states only that the tool did not run, and keeps the provider's words out of the model's view", () => {
-		const result = createSyntheticToolResultMessage(
+	it("keeps the provider's words out of the model's view, and omp's own words in it", () => {
+		const refused = createSyntheticToolResultMessage(
 			{ type: "toolCall", id: "call-1", name: "bash", arguments: {} },
 			"error",
-			REFUSAL_MARKER,
+			{ upstreamError: REFUSAL_MARKER },
 		);
 
-		expect(JSON.stringify(result.content)).not.toContain(REFUSAL_MARKER);
-		expect(result.content).toEqual([
+		expect(JSON.stringify(refused.content)).not.toContain(REFUSAL_MARKER);
+		expect(refused.content).toEqual([
 			{
 				type: "text",
 				text: "Tool call was not executed because the provider stream ended with an error before the tool could run.",
@@ -138,7 +138,24 @@ describe("synthetic tool result content", () => {
 		]);
 		// Local metadata keeps it: the UI, telemetry and ACP still report what
 		// the provider said, and no request carries `details`.
-		expect(result.details.upstreamError).toBe(REFUSAL_MARKER);
+		expect(refused.details.upstreamError).toBe(REFUSAL_MARKER);
+	});
+
+	it("tells the model omp's own reason, which is what it must act on", () => {
+		// A steering rule cancelled the call. Withholding this would leave the
+		// model unable to tell a cancellation from a crash; only provider text
+		// is the hazard, and it is a separate argument.
+		const cancelled = createSyntheticToolResultMessage(
+			{ type: "toolCall", id: "call-1", name: "bash", arguments: {} },
+			"aborted",
+			{ localReason: "TTSR matched rule: no-unwrap", upstreamError: REFUSAL_MARKER },
+		);
+
+		expect(cancelled.content).toEqual([
+			{ type: "text", text: "Tool execution was aborted: TTSR matched rule: no-unwrap" },
+		]);
+		expect(JSON.stringify(cancelled.content)).not.toContain(REFUSAL_MARKER);
+		expect(cancelled.details.upstreamError).toBe(REFUSAL_MARKER);
 	});
 });
 
@@ -261,5 +278,71 @@ describe("stored stuck sessions heal when they are loaded", () => {
 		const request = transformMessages([...messages] as Message[], anthropicModel());
 
 		expect(JSON.stringify(request)).not.toContain(REFUSAL_MARKER);
+	});
+});
+
+// A long-lived process that never reloads does not rebuild its context, so the
+// load-time repair above never reaches the orphan it is already holding — it
+// would keep sending the refusal until someone restarted it. The request
+// builder is the one place both paths pass through.
+describe("a legacy orphan already in memory never reaches a request", () => {
+	// Text stored by the OLD code: the provider's refusal interpolated into the
+	// placeholder's content, which is what a running process is still holding.
+	const legacyOrphan = {
+		role: "toolResult",
+		toolCallId: "legacy-orphan-1",
+		toolName: "bash",
+		content: [
+			{
+				type: "text",
+				text: `Tool call was not executed because the provider stream ended with an error before the tool could run: ${REFUSAL_MARKER}`,
+			},
+		],
+		details: { __synthetic: true, source: "assistant_stop_error", executed: false, upstreamError: REFUSAL_MARKER },
+		isError: true,
+		timestamp: 4,
+	} as AgentMessage;
+
+	it("drops it instead of replaying it as a stale-tool-result note", () => {
+		const request = transformMessages(
+			[userMessage("carry on"), legacyOrphan, userMessage("next prompt")] as Message[],
+			anthropicModel(),
+		);
+
+		expect(JSON.stringify(request)).not.toContain(REFUSAL_MARKER);
+		expect(request.map(message => message.role)).toEqual(["user", "user"]);
+	});
+
+	it("still preserves a REAL orphaned tool result's output", () => {
+		// Only the not-executed placeholder is dropped. A real result orphaned by
+		// compaction carries tool output the model may still need, and keeps its
+		// existing stale-tool-result treatment.
+		const request = transformMessages(
+			[userMessage("carry on"), realToolResult("compacted-away-1"), userMessage("next prompt")] as Message[],
+			anthropicModel(),
+		);
+
+		expect(JSON.stringify(request)).toContain("a.ts b.ts");
+		expect(request.map(message => message.role)).toEqual(["user", "user", "user"]);
+	});
+});
+
+describe("the agent loop's placeholder and the request builder's predicate agree", () => {
+	// The predicate lives in pi-ai, which sits below pi-agent-core and cannot
+	// import its type. Without this, the two drift apart silently and the drop
+	// above quietly stops matching anything.
+	it("every synthetic placeholder the loop makes is recognised at the wire boundary", () => {
+		for (const reason of ["aborted", "error", "skipped", "length"] as const) {
+			const placeholder = createSyntheticToolResultMessage(
+				{ type: "toolCall", id: `call-${reason}`, name: "bash", arguments: {} },
+				reason,
+				{ localReason: "local", upstreamError: REFUSAL_MARKER },
+			);
+			expect(isSyntheticNotExecutedToolResult(placeholder)).toBe(true);
+		}
+	});
+
+	it("does not recognise a real tool result", () => {
+		expect(isSyntheticNotExecutedToolResult(realToolResult("call-1") as ToolResultMessage)).toBe(false);
 	});
 });
