@@ -1274,6 +1274,21 @@ async def test_git_fetch_endpoints_reject_attacker_origin(
     assert resp.status_code == 400, resp.text
 
 
+@pytest.mark.parametrize("head_ref", ["-evil", "main:refs/heads/evil", "a..b", "a//b"])
+async def test_git_fetch_pr_head_rejects_unsafe_head_ref(proxy_settings: Settings, head_ref: str) -> None:
+    app = _build_app(proxy_settings)
+    endpoint = "/gh/v1/git/fetch_pr_head"
+    body = json.dumps({"repo": "octo/widget", "pr_number": 7, "head_ref": head_ref, "same_repo": True}).encode()
+    async with await _async_client(app) as client:
+        resp = await client.post(
+            endpoint,
+            content=body,
+            headers={**_signed("POST", endpoint, body), "Content-Type": "application/json"},
+        )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"] == "invalid ref"
+
+
 async def test_git_fetch_rejects_ext_remote_helper(proxy_settings: Settings, upstream_repo: Path) -> None:
     pool_dir = _stage_pool(proxy_settings, upstream_repo)
     _git(["-C", str(pool_dir), "remote", "set-url", "origin", "ext::sh -c env"], pool_dir)
