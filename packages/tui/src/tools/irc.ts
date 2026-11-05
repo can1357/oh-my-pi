@@ -33,6 +33,13 @@ export interface IrcMessage {
 	 * so the recipient's `wait` keeps waiting for the actual reply.
 	 */
 	progress?: boolean;
+	/**
+	 * Senders this message passed through, oldest first, ending with the agent
+	 * that sent it: the bus appends the sender's own id on every send, and a
+	 * relay hands the received chain on. A chain longer than the ingress guard's
+	 * `irc.maxHops` is refused, so agent loops cannot grow without bound.
+	 */
+	hops?: string[];
 }
 
 /** Delivery outcome for one peer recipient. */

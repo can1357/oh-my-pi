@@ -1622,12 +1622,12 @@ describe("persisted subagent revival", () => {
 			return { ref, handle };
 		}
 
-		const wakeRecord = (from: string): CustomMessage => ({
+		const wakeRecord = (from: string, hops?: string[]): CustomMessage => ({
 			role: "custom",
 			customType: "irc:incoming",
 			content: "send me the full table",
 			display: true,
-			details: { id: "irc-42", from, message: "send me the full table" },
+			details: { id: "irc-42", from, message: "send me the full table", ...(hops ? { hops } : {}) },
 			attribution: "agent",
 			timestamp: Date.now(),
 		});
@@ -1817,7 +1817,9 @@ describe("persisted subagent revival", () => {
 				} as unknown as AgentSession,
 			});
 			const bus = IrcBus.global();
-			const finish = observer?.([wakeRecord("Main")]);
+			// The waker's chain rides along, so the relay extends it instead of
+			// starting a fresh one (`irc.maxHops` is what stops an agent loop).
+			const finish = observer?.([wakeRecord("Main", ["Upstream"])]);
 			await bus.send({ from: ref.id, to: "Main", body: "on it" });
 			handle.setLastAssistantStop({
 				stopReason: "error",
@@ -1834,6 +1836,7 @@ describe("persisted subagent revival", () => {
 			expect(notice?.wakeRelay).toBe(true);
 			expect(notice?.body).toContain("402 usage balance exhausted");
 			expect(notice?.body.toLowerCase()).toContain("earlier in this turn");
+			expect(notice?.hops).toEqual(["Upstream", ref.id]);
 			AgentLifecycleManager.resetGlobalForTests();
 			AgentRegistry.resetGlobalForTests();
 			IrcBus.resetGlobalForTests();

@@ -1,5 +1,5 @@
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { isRecord, prompt } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import parentIrcSteerTemplate from "../prompts/steering/parent-irc.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
@@ -18,6 +18,23 @@ export interface IrcBridgeHost {
 	planModeEnabled(): boolean;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	wakeForIrc(records: AgentMessage[]): void;
+}
+
+/**
+ * Pending-record cap per incoming queue ({@link IrcBridge} interrupts and
+ * asides). A busy recipient whose turn never reaches a step boundary cannot
+ * grow either queue without bound: past the cap the oldest records are dropped
+ * (the same drop-oldest bound the bus mailbox applies) so the newest traffic —
+ * the part still worth reading — survives.
+ */
+const IRC_QUEUE_CAP = 50;
+
+/** Enforce {@link IRC_QUEUE_CAP} on a queue in place, dropping its oldest records. */
+function capQueue(queue: AgentMessage[], label: "interrupts" | "asides"): void {
+	const overflow = queue.length - IRC_QUEUE_CAP;
+	if (overflow <= 0) return;
+	queue.splice(0, overflow);
+	logger.debug("IrcBridge: pending queue full, dropped oldest records", { queue: label, dropped: overflow });
 }
 
 /** Owns incoming IRC queues and the session's non-interrupting aside queue. */
@@ -154,12 +171,15 @@ export class IrcBridge {
 		this.#interrupts = [...snapshot.interrupts, ...this.#interrupts];
 		this.#asides = [...snapshot.asides, ...this.#asides];
 		this.#deferredWakes = [...snapshot.deferredWakes, ...this.#deferredWakes];
+		capQueue(this.#interrupts, "interrupts");
+		capQueue(this.#asides, "asides");
 	}
 
 	/** Queues records for the next step-boundary aside injection: IRC wakes deferred by a
 	 *  session transition, and extension `deliverAs: "aside"` sends. */
 	queueAside(records: AgentMessage[]): void {
 		this.#asides.push(...records);
+		capQueue(this.#asides, "asides");
 	}
 
 	/** Parks wake-intended records while a pooled contract owns the worker. Unlike
@@ -207,6 +227,7 @@ export class IrcBridge {
 				const replyTo = Reflect.get(details, "replyTo");
 				const broadcast = Reflect.get(details, "broadcast") === true;
 				const progress = Reflect.get(details, "progress") === true;
+				const hops = Reflect.get(details, "hops");
 				if (typeof id !== "string" || typeof from !== "string" || typeof body !== "string") {
 					queue.remaining.push(record);
 					continue;
@@ -220,6 +241,7 @@ export class IrcBridge {
 					...(typeof replyTo === "string" ? { replyTo } : {}),
 					...(broadcast ? { broadcast: true } : {}),
 					...(progress ? { progress: true } : {}),
+					...(Array.isArray(hops) && hops.every(hop => typeof hop === "string") ? { hops } : {}),
 				});
 			}
 		}
@@ -293,6 +315,7 @@ export class IrcBridge {
 				...(msg.wakeRelay ? { wakeRelay: true } : {}),
 				...(msg.broadcast ? { broadcast: true } : {}),
 				...(msg.progress ? { progress: true } : {}),
+				...(msg.hops?.length ? { hops: msg.hops } : {}),
 				...(fromParent ? { fromParent: true } : {}),
 			},
 			attribution: "agent",
@@ -314,6 +337,7 @@ export class IrcBridge {
 			} else {
 				if (quiet) this.#quietRecords.add(record);
 				this.#interrupts.push(record);
+				capQueue(this.#interrupts, "interrupts");
 			}
 			return "injected";
 		}
