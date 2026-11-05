@@ -58,6 +58,28 @@ function containsSequence(segments: readonly string[], wanted: readonly string[]
 }
 
 /**
+ * Where a link sits, as the filesystem sees it: its directory canonicalized and
+ * its own name appended.
+ *
+ * NOT `path.resolve` first. That collapses a `..` before anything physical
+ * happens, so an entry spelled `…/alias/../name`, where `alias` is a link into
+ * a checkout or out of omp's directories, loses the very component that decides
+ * how it must be treated. `path.dirname` leaves the `..` in place for the
+ * kernel to resolve, which is the whole point.
+ */
+function locationOf(filePath: string): { dir: string; name: string } {
+	const absolute = path.isAbsolute(filePath) ? filePath : `${process.cwd()}${path.sep}${filePath}`;
+	let dir = path.dirname(absolute);
+	try {
+		dir = fs.realpathSync.native(dir);
+	} catch {
+		// Not on disk yet; the lexical spelling of its parent is all there is.
+		dir = path.resolve(dir);
+	}
+	return { dir, name: path.basename(absolute) };
+}
+
+/**
  * Whether `candidate` stays inside a directory omp itself keeps: the config
  * root, the profile-independent root, or the agent directory. The physical
  * location decides, so an alias or a `..` cannot spell a way out of it.
@@ -69,13 +91,7 @@ function containsSequence(segments: readonly string[], wanted: readonly string[]
  * rather than an open-ended question about territory omp does not own.
  */
 function insideOmpRoots(candidate: string): boolean {
-	const resolved = path.resolve(candidate);
-	let dir = path.dirname(resolved);
-	try {
-		dir = fs.realpathSync.native(dir);
-	} catch {
-		// Not on disk yet; judge the lexical spelling of its parent.
-	}
+	const { dir } = locationOf(candidate);
 	return [getConfigRootDir(), getBaseConfigRoot(), getAgentDir()].some(root => pathIsWithin(root, dir));
 }
 
@@ -99,17 +115,10 @@ function insideOmpRoots(candidate: string): boolean {
  * deepest of them that contains the link.
  */
 function insideAProjectConfigDir(filePath: string): boolean {
-	const resolved = path.resolve(filePath);
-	// The DIRECTORY the link sits in, canonicalized — never the link itself.
-	// Containment of the whole path would be answered for the link's TARGET, so
-	// a project link pointing at a file in omp's own root would lose its
-	// project marker and be followed.
-	let dir = path.dirname(resolved);
-	try {
-		dir = fs.realpathSync.native(dir);
-	} catch {
-		// Not on disk yet; the lexical spelling is all there is to judge.
-	}
+	// The DIRECTORY the link sits in — never the link itself. Canonicalizing the
+	// whole path would answer for the link's TARGET, so a project link pointing
+	// at a file in omp's own root would lose its project marker and be followed.
+	const { dir, name } = locationOf(filePath);
 	let searched: string | undefined;
 	for (const root of [getConfigRootDir(), getBaseConfigRoot(), getAgentDir()]) {
 		// `pathIsWithin` canonicalizes both sides and counts a directory that IS
@@ -122,8 +131,8 @@ function insideAProjectConfigDir(filePath: string): boolean {
 		const below = relativePathWithinRoot(root, dir) ?? "";
 		if (searched === undefined || below.length < searched.length) searched = below;
 	}
-	const segments = [...(searched ?? dir).split(path.sep), path.basename(resolved)];
-	return projectConfigDirNames().some(name => containsSequence(segments, name));
+	const segments = [...(searched ?? dir).split(path.sep), name];
+	return projectConfigDirNames().some(configName => containsSequence(segments, configName));
 }
 
 /**

@@ -369,3 +369,39 @@ describe("a config write follows a link only while it stays inside omp's directo
 		expect(await fs.readFile(inside, "utf8")).toBe("new");
 	});
 });
+
+describe("a `..` in the path given to the writer is resolved by the filesystem", () => {
+	// `path.resolve` collapses `alias/..` before anything physical happens, which
+	// discards the component that says where the entry really is.
+	test("walks into a project's config directory, and refuses the link there", async () => {
+		const sub = path.join(project, "sub");
+		await fs.mkdir(sub, { recursive: true });
+		await fs.symlink(sub, path.join(root, "alias"));
+		const victim = path.join(root, "victim-dotdot");
+		const link = path.join(project, "entry.json");
+		await linkTo(victim, link, "untouched");
+
+		// Built by hand: `path.join` would collapse the `..` and the spelling under
+		// test would never reach the writer.
+		const spelled = `${root}${path.sep}alias${path.sep}..${path.sep}entry.json`;
+		await writeConfigFileAtomically(spelled, "new", 0o644);
+
+		expect(await fs.readFile(victim, "utf8")).toBe("untouched");
+		expect((await fs.lstat(link)).isSymbolicLink()).toBe(false);
+	});
+
+	test("walks out of omp's directories, and refuses the link there", async () => {
+		const sub = path.join(outside, "sub");
+		await fs.mkdir(sub, { recursive: true });
+		await fs.symlink(sub, path.join(root, "alias-out"));
+		const victim = path.join(root, "victim-out");
+		const link = path.join(outside, "entry.json");
+		await linkTo(victim, link, "untouched");
+
+		const spelled = `${root}${path.sep}alias-out${path.sep}..${path.sep}entry.json`;
+		await writeConfigFileAtomically(spelled, "new", 0o644);
+
+		expect(await fs.readFile(victim, "utf8")).toBe("untouched");
+		expect((await fs.lstat(link)).isSymbolicLink()).toBe(false);
+	});
+});
