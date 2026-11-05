@@ -341,9 +341,10 @@ cache — a `.git` directory, a `.git` naming a path inside the checkout, or a
 vendored clone's own submodule, whose `gitdir:` lands inside that clone —
 since package managers keep such clones inside those caches. Which of the two
 a pointer is gets decided by following it the way Git follows it — through a
-`.git` symlink onto a further `gitdir:` file, with the value read byte for
-byte, so a space on either side of it and anything after a NUL are treated as
-Git treats them — and the directory is kept only when the pointer lands
+`.git` symlink onto a further `gitdir:` file, with the value taken as Git
+takes it, the rest of the file from the marker, so a space on either side of
+it, a newline inside it and anything after a NUL all count as Git counts
+them — and the directory is kept only when the pointer lands
 inside the new worktree and outside the worktree's own `.git`. A pointer
 reaching its own metadata through a symlink inside the checkout is therefore
 kept, and one leaving through a symlinked component is dropped, whichever way

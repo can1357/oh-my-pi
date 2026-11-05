@@ -1938,6 +1938,16 @@ fn git_entry_points_outside(root: &Path, dir: &Path) -> bool {
 	if meta.is_dir() {
 		return false;
 	}
+	// Only a directory, a symlink or a regular file can be a repository or a
+	// pointer to one. Anything else — a FIFO above all, which `fs::read`
+	// would block on until someone opened the other end — is not a pointer,
+	// so the directory holding it is ordinary content that travels. A
+	// reflink clone refuses such a `.git` outright (`unsupported file type in
+	// reflink source`) and falls back to a plain checkout, but the walk must
+	// not depend on a backend's file-type check to avoid hanging.
+	if !meta.is_symlink() && !meta.is_file() {
+		return false;
+	}
 	let target = if meta.is_symlink() {
 		let Ok(link) = fs::read_link(&entry) else {
 			return true;
@@ -1981,30 +1991,54 @@ fn git_entry_points_outside(root: &Path, dir: &Path) -> bool {
 
 /// A gitfile's `gitdir:` value, read the way Git reads it.
 ///
-/// Git requires the marker at the start of the file and one space after it,
-/// stops at the first NUL because it holds the value as a C string, drops the
-/// line terminator, and keeps every other byte — a space on either side of
-/// the value is part of the path it opens, measured with `git rev-parse
-/// --absolute-git-dir`. Finding the marker is left looser than Git's, since a
-/// file Git rejects outright holds no repository either way, but the value is
-/// read exactly: trimming a space or keeping a NUL tail would name a
-/// different directory than the one Git opens, and the difference decides
-/// whether this copy reaches out of the clone.
+/// Git wants the marker at the start of the file and one space after it, and
+/// the path is then *the rest of the file*: it stops at the first NUL, since
+/// it holds the value as a C string, drops the trailing line terminators, and
+/// keeps every other byte. A space on either side belongs to the path, and so
+/// does an embedded newline — both measured with `git rev-parse
+/// --absolute-git-dir`. Reading the value any other way names a different
+/// directory than the one Git opens, and the difference decides whether this
+/// copy reaches out of the clone.
+///
+/// Only finding the marker is left looser than Git's, which rejects the file
+/// unless it begins with `gitdir: ` exactly. A file Git rejects holds no
+/// repository wherever it sits, so refusing it here would empty a directory
+/// over a `.git` that was already inert in the source.
 fn read_gitfile(path: &Path) -> Option<PathBuf> {
 	let bytes = fs::read(path).ok()?;
-	let value = bytes
-		.split(|&byte| byte == b'\n')
-		.find_map(|line| line.trim_ascii_start().strip_prefix(b"gitdir:".as_slice()))?;
-	let value = value.strip_prefix(b" ").unwrap_or(value);
-	let value = match value.iter().position(|&byte| byte == 0) {
-		Some(nul) => &value[..nul],
-		None => value,
+	let mut offset = 0;
+	let marker = loop {
+		let line_end = bytes[offset..]
+			.iter()
+			.position(|&byte| byte == b'\n')
+			.map_or(bytes.len(), |at| offset + at);
+		let line = &bytes[offset..line_end];
+		let indent = line.len() - line.trim_ascii_start().len();
+		if line[indent..].starts_with(b"gitdir:") {
+			break offset + indent + b"gitdir:".len();
+		}
+		if line_end >= bytes.len() {
+			return None;
+		}
+		offset = line_end + 1;
 	};
+	let value = &bytes[marker..];
+	let value = value.strip_prefix(b" ").unwrap_or(value);
+	// Git's order, and it is observable: it drops the file's line terminator
+	// first and only then reads the value as a C string, so `meta\r\0tail\n`
+	// names `meta\r`. Cutting at the NUL first would name `meta`, a different
+	// directory, which is how this reaches out of the clone or empties a
+	// checkout that Git opens.
 	let end = value
 		.iter()
 		.rposition(|&byte| byte != b'\r' && byte != b'\n')
 		.map_or(0, |last| last + 1);
-	os_path_from_bytes(&value[..end])
+	let value = &value[..end];
+	let value = match value.iter().position(|&byte| byte == 0) {
+		Some(nul) => &value[..nul],
+		None => value,
+	};
+	os_path_from_bytes(value)
 }
 
 /// A gitfile's `gitdir:` value as a path, keeping the platform's own bytes.
@@ -3298,11 +3332,49 @@ mod tests {
 				symlink(&outside, dir.join("hop")).unwrap();
 				fs::write(dir.join(".git"), b"gitdir: hop\0/../meta\n").unwrap();
 			}));
+			// A newline inside the value belongs to the path too: Git takes
+			// the rest of the file, so stopping at the first line would judge
+			// a different directory in either direction.
+			assert!(case("embedded-newline-out", &|dir| {
+				symlink(&outside, dir.join("meta\nmore")).unwrap();
+				fs::create_dir_all(dir.join("meta")).unwrap();
+				fs::write(dir.join(".git"), "gitdir: meta\nmore\n").unwrap();
+			}));
+			assert!(!case("embedded-newline-in", &|dir| {
+				fs::create_dir_all(dir.join("meta\nmore")).unwrap();
+				symlink(&outside, dir.join("meta")).unwrap();
+				fs::write(dir.join(".git"), "gitdir: meta\nmore\n").unwrap();
+			}));
+			// Git drops the terminator before reading the value as a C
+			// string, so this names `meta\r`, not `meta`. Measured with `git
+			// rev-parse --absolute-git-dir` under `cat -A`: `meta^M$`.
+			assert!(case("cr-before-nul-out", &|dir| {
+				symlink(&outside, dir.join("meta\r")).unwrap();
+				fs::create_dir_all(dir.join("meta")).unwrap();
+				fs::write(dir.join(".git"), b"gitdir: meta\r\0tail\n").unwrap();
+			}));
+			assert!(!case("cr-before-nul-in", &|dir| {
+				fs::create_dir_all(dir.join("meta\r")).unwrap();
+				symlink(&outside, dir.join("meta")).unwrap();
+				fs::write(dir.join(".git"), b"gitdir: meta\r\0tail\n").unwrap();
+			}));
 			// And a non-UTF-8 metadata path is a path, not an unreadable file.
 			use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
 			assert!(!case("byte-path", &|dir| {
 				fs::create_dir_all(dir.join(OsStr::from_bytes(b"meta-\xff"))).unwrap();
 				fs::write(dir.join(".git"), b"gitdir: meta-\xff\n").unwrap();
+			}));
+			// A `.git` that is neither a repository nor a pointer to one. It
+			// must not be read at all: opening a FIFO blocks until someone
+			// writes to the other end, and a reviewer measured the walk
+			// hanging on exactly this.
+			assert!(!case("fifo", &|dir| {
+				let made = std::process::Command::new("mkfifo")
+					.arg(dir.join(".git"))
+					.status()
+					.expect("mkfifo runs");
+				assert!(made.success(), "mkfifo failed");
+				fs::write(dir.join("own.txt"), "ordinary content\n").unwrap();
 			}));
 		}
 	}
