@@ -36,13 +36,17 @@ function overloadedThenOk(): { requests: () => number; fetch: FetchImpl } {
 	return { requests: () => requests, fetch: fetchImpl };
 }
 
-/** A client wired as the provider wires one: gated fetch, budget, and a retry-wait hook that really sleeps. */
+/**
+ * A client holding the budget and a plain transport: the budget is expected to
+ * gate what the client sends through, rather than the caller having to hand it
+ * a fetch it already gated.
+ */
 function clientUnder(budget: ReplayBudget | undefined, base: FetchImpl): AnthropicMessagesClient {
 	const options: AnthropicClientOptions = {
 		apiKey: "sk-test",
 		maxRetries: 2,
 		replayBudget: budget,
-		fetch: budget ? budget.gateFetch(base) : base,
+		fetch: base,
 		retryPolicy: { providerRetryWait: async (_delayMs, signal) => await scheduler.wait(20, { signal }) },
 	};
 	return new AnthropicMessagesClient(options);
@@ -113,4 +117,43 @@ it("sends the client's own resend of a connection failure while the budget admit
 
 	expect(requests).toBe(2);
 	expect(outcome.status).toBe(200);
+});
+
+it("gates a fetch the caller already gated exactly once", async () => {
+	// The provider hands the client a fetch built over its own gate. Gating it
+	// again must neither double-release the arm nor let the resend through.
+	const budget = new ReplayBudget(1);
+	const route = overloadedThenOk();
+	const client = new AnthropicMessagesClient({
+		apiKey: "sk-test",
+		maxRetries: 2,
+		replayBudget: budget,
+		fetch: budget.gateFetch(route.fetch),
+		retryPolicy: { providerRetryWait: async (_delayMs, signal) => await scheduler.wait(20, { signal }) },
+	});
+
+	const outcome = await settle(client);
+
+	expect(route.requests()).toBe(1);
+	expect(AIError.status(outcome.error)).toBe(429);
+});
+
+it("answers a replay armed above the client and refused at handoff with the failure it replaced", async () => {
+	// A rung above the client armed the replay and the deadline passed before
+	// the request reached the transport. The client is the layer that sends it,
+	// so it must answer with the failure the replay would have replaced, not
+	// with the handoff sentinel.
+	const budget = new ReplayBudget(0);
+	const replaced = new Error("the stream the replay would have replaced");
+	budget.arm(replaced);
+	let requests = 0;
+	const fetchImpl: FetchImpl = (async () => {
+		requests += 1;
+		return new Response("{}", { status: 200 });
+	}) as FetchImpl;
+
+	const outcome = await settle(clientUnder(budget, fetchImpl));
+
+	expect(requests).toBe(0);
+	expect(outcome.error).toBe(replaced);
 });
