@@ -75,6 +75,19 @@ export interface A2aServerHandle {
 	stop(): void;
 }
 
+/**
+ * Read a completed run's published output for the task artifact. A missing
+ * file or a read error is not a bridge failure: the task stays text-free and
+ * the metadata path still names the file for same-host consumers.
+ */
+async function readPublishedOutput(outputPath: string): Promise<string | undefined> {
+	try {
+		return await fs.readFile(outputPath, "utf8");
+	} catch {
+		return undefined;
+	}
+}
+
 function jsonResponse(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body), {
 		status,
@@ -231,6 +244,7 @@ export function createA2aServer(options: A2aServerOptions): A2aServerHandle {
 		registry: options.registry,
 		send: (message: Omit<IrcMessage, "id" | "ts">) => options.bus.send(message),
 		spawn: options.spawn,
+		readOutput: readPublishedOutput,
 		senderId: A2A_SENDER_ID,
 	};
 

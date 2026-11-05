@@ -500,7 +500,8 @@ export async function resolveEffectiveSubagentPolicy(
 
 	const discovery = await discoverAgentsShared(request.session.cwd, request.session.effectiveExtensionRoots?.());
 	const sessionAgents = request.session.getSessionAgents?.() ?? [];
-	const agents = [...discovery.agents, ...sessionAgents];
+	const a2aAgents = request.session.getA2aBridge?.()?.definitions() ?? [];
+	const agents = [...discovery.agents, ...sessionAgents, ...a2aAgents];
 	const agent = getAgent(agents, agentName);
 	if (!agent) {
 		const available = agents.map(candidate => candidate.name).join(", ") || "none";
@@ -509,6 +510,22 @@ export async function resolveEffectiveSubagentPolicy(
 			"preflight",
 			`Unknown agent "${agentName}". Available: ${available}. Searched: ${searched}`,
 		);
+	}
+	// A remote A2A agent has no local session to run: only the task tool routes
+	// `a2a:` spawns (to the remote endpoint); eval would launch an empty shell.
+	if (a2aAgents.includes(agent)) {
+		if (request.invocationKind !== "task") {
+			throw new StructuredSubagentError(
+				"preflight",
+				`Agent "${agentName}" is a remote A2A agent and can only be spawned by the task tool.`,
+			);
+		}
+		if (request.isolation?.requested === true) {
+			throw new StructuredSubagentError(
+				"preflight",
+				`Agent "${agentName}" runs on a remote A2A endpoint; isolated execution does not apply.`,
+			);
+		}
 	}
 	const disabledAgents = cfgTaskDisabledAgents.get(request.session.settings);
 	if (disabledAgents.includes(agentName)) {
