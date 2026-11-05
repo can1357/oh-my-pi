@@ -1432,15 +1432,22 @@ impl FsPending<Box<dyn File>> for NoClobberPath {
 	}
 }
 
-/// Whether the object `st` describes IS a regular file, the only object
-/// `noclobber` protects. [`File::kind`] says how the engine must DRIVE an
-/// object — a provider's regular file that cannot be seeked is driven as a
-/// device, a here-document as a seekable regular object — so it cannot
-/// answer this question. An object with no host metadata is no file on any
-/// filesystem and is written, as bash writes to everything its own stat
-/// does not call a regular file.
-fn is_regular_object(st: std::io::Result<Stat>) -> bool {
-	st.is_ok_and(|st| st.kind == StatKind::File)
+/// Whether `noclobber` must refuse the object `st` describes.
+///
+/// [`File::kind`] says how the engine must DRIVE an object — a provider's
+/// regular file that cannot be seeked is driven as a device, a
+/// here-document as a seekable regular object — so it cannot answer this
+/// question; the object's own metadata does. An object with no filesystem
+/// metadata at all answers `Unsupported` ([`File::stat`]'s contract): it
+/// is no file on any filesystem (a here-document, a pipeline buffer) and
+/// cannot be clobbered. Any OTHER failure means the object's kind could
+/// not be established, and bash fails closed there: with `fstat` made to
+/// report `EIO`, Bash 5.2.21 and 5.3.0 both refuse `>/dev/null`.
+fn must_not_clobber(st: std::io::Result<Stat>) -> bool {
+	match st {
+		Ok(st) => st.kind == StatKind::File,
+		Err(err) => err.kind() != std::io::ErrorKind::Unsupported,
+	}
 }
 
 /// `noclobber`'s plain reopen of an existing file: a regular file is
@@ -1451,7 +1458,7 @@ struct NoClobberReopen(Box<dyn FsPending<Box<dyn File>>>);
 impl NoClobberReopen {
 	fn judge(r: std::io::Result<Box<dyn File>>) -> std::io::Result<Box<dyn File>> {
 		match r {
-			Ok(file) if is_regular_object(file.stat()) => {
+			Ok(file) if must_not_clobber(file.stat()) => {
 				Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, NoClobberRefused))
 			},
 			Err(err) => Err(NoClobberUnopenable::wrap(err)),
@@ -1518,8 +1525,9 @@ fn early_refusal(cx: &mut Cx<'_>, abs: &BString, flags: OpenFlags) -> Option<std
 /// (`/dev/fd/N`, `/dev/stdout`, a session's `/dev/tty`). Under `noclobber`
 /// (`flags` holds [`OpenFlags::EXCL`]) the object behind the alias is
 /// judged exactly as an opened path is, by what it IS
-/// ([`is_regular_object`]): a regular file is refused, and a FIFO, a
-/// device or a here-document is written.
+/// ([`must_not_clobber`]): a regular file, or an object whose kind cannot
+/// be established, is refused; a FIFO, a device or a here-document is
+/// written.
 fn install_held(
 	k: &mut Kernel,
 	vp: &mut Vproc,
@@ -1530,7 +1538,7 @@ fn install_held(
 	flags: OpenFlags,
 	line: u32,
 ) -> Result<(), Halt> {
-	if flags.contains(OpenFlags::EXCL) && h.stat().is_some_and(is_regular_object) {
+	if flags.contains(OpenFlags::EXCL) && h.stat().is_some_and(must_not_clobber) {
 		return Err(fail(k, vp, cx, line, Diag::NoClobber { path: path.clone() }));
 	}
 	for &fd in fds {

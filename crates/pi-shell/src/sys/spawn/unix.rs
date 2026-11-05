@@ -1126,8 +1126,12 @@ fn fork_redirs(
 							fd = libc::open(path.as_ptr(), plain);
 
 							if fd >= 0 {
-								if libc::fstat(fd, &raw mut st) == 0
-									&& st.st_mode & libc::S_IFMT == libc::S_IFREG
+								// The object opened decides, and bash fails closed
+								// when it cannot establish what the object is: an
+								// `fstat` that reports an error is a refusal, not
+								// permission to write.
+								if libc::fstat(fd, &raw mut st) != 0
+									|| st.st_mode & libc::S_IFMT == libc::S_IFREG
 								{
 									libc::close(fd);
 									child_fail_with(diag, b"cannot overwrite existing file", 1);

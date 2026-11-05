@@ -638,11 +638,18 @@ async fn engine_file(
 		Ok(native) => return Box::new(StdFile::new(native)),
 		Err(file) => file,
 	};
-	let stat = file.metadata_async().await.ok().map(|m| stat_of(&m, path));
+	// The failure is kept, not discarded: a decision about the object
+	// (`noclobber`) must tell "this object has no filesystem metadata" —
+	// which the trait spells `Unsupported` — from "asking for it failed".
+	let stat = file
+		.metadata_async()
+		.await
+		.map_err(|err| err.kind())
+		.map(|m| stat_of(&m, path));
 	let mut kind = match stat.map(|st| st.kind) {
-		Some(StatKind::File) => FileKind::Regular,
-		Some(StatKind::Fifo) => FileKind::Pipe,
-		Some(StatKind::Socket) => FileKind::Socket,
+		Ok(StatKind::File) => FileKind::Regular,
+		Ok(StatKind::Fifo) => FileKind::Pipe,
+		Ok(StatKind::Socket) => FileKind::Socket,
 		_ => FileKind::Device,
 	};
 	let pos = if kind == FileKind::Regular {
@@ -672,8 +679,9 @@ struct Description {
 	rt:     Handle,
 	kind:   FileKind,
 	/// What the provider said the object is when it was opened, as `fstat`
-	/// answers it; `None` when the provider gave no metadata.
-	stat:   Option<Stat>,
+	/// answers it, or how asking failed — `Unsupported` where the provider
+	/// has no metadata for the object at all.
+	stat:   Result<Stat, io::ErrorKind>,
 	/// Opened for reading.
 	read:   bool,
 	/// Opened for writing (or appending).
@@ -941,10 +949,7 @@ impl File for VfsFile {
 	}
 
 	fn stat(&self) -> io::Result<Stat> {
-		self
-			.desc
-			.stat
-			.ok_or_else(|| io::ErrorKind::Unsupported.into())
+		self.desc.stat.map_err(io::Error::from)
 	}
 
 	fn os_handle(&self) -> Option<OsHandle> {
