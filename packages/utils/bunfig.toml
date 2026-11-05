@@ -1,4 +1,5 @@
-# `bun test` reads bunfig.toml only from its working directory, so each package loads the
-# shared preload that marks each test's start for testLifetime().
+# `bun test` reads bunfig.toml only from its working directory, so each package names both
+# shared preloads: the one that keeps the invoking user's omp environment out of its tests,
+# and the one that marks each test's start for testLifetime().
 [test]
-preload = ["./test/helpers/test-preload.ts"]
+preload = ["../../scripts/test-hermetic-env.ts", "./test/helpers/test-preload.ts"]

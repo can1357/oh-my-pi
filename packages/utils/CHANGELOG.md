@@ -14,6 +14,10 @@
 
 - `acp` runtime validators (`zNewSessionResponse`, `zSessionNotification`, …) now report each failing field's path and reason in `error.issues` instead of a single `Invalid <label>`; `ValidationError` issue paths are typed `PropertyKey[]` ([#17699](https://github.com/can1357/oh-my-pi/pull/17699))
 
+### Fixed
+
+- Fixed the repository's tests running with your shell's `PI_*`/`OMP_*` variables, your own `.env` files and your `~/.omp/agent` setup: every workspace's `bun test` now starts from a cleaned environment and an empty agent dir of its own, and so do the children and workers it starts
+
 ## [18.15.0] - 2026-11-01
 
 ### Added

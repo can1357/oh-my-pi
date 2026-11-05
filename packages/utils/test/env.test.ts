@@ -270,7 +270,8 @@ describe("filterChildShellEnv", () => {
 		].join("\n");
 		const proc = Bun.spawn([process.execPath, "--no-install", "--eval", script], {
 			cwd,
-			env: { ...process.env, NODE_ENV: undefined, OMP_DOTENV_REPRO_MARKER: undefined },
+			// This child is Bun's own dotenv autoload under test; the test preload turns it off for children.
+			env: { ...process.env, NODE_ENV: undefined, OMP_DOTENV_REPRO_MARKER: undefined, BUN_OPTIONS: undefined },
 			stdout: "pipe",
 			stderr: "pipe",
 		});

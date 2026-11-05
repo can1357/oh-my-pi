@@ -286,11 +286,25 @@ export function parseEnvFile(filePath: string): Record<string, string> {
 	return result;
 }
 
+// Under `bun test`, the hermetic-env preload (`scripts/test-hermetic-env.ts`) names the invoking
+// user's home in `PI_TEST_INVOKING_HOME` and the directory the run started in in
+// `PI_TEST_INVOKING_CWD`. A test process that still runs with that home and has not chosen its own
+// config or agent dir would otherwise read the user's own dotenv files, and one still in that
+// directory would read its `.env` (Bun loads it before the preload; the names left absent are the
+// ones the preload removed), so it reads none of them. A test that points HOME, PI_CONFIG_DIR,
+// PI_CODING_AGENT_DIR or its cwd at a fixture still gets that fixture's files.
+const invokingHome = Bun.env.PI_TEST_INVOKING_HOME;
+const invokingCwd = Bun.env.PI_TEST_INVOKING_CWD;
+const atInvokingHome = invokingHome !== undefined && path.resolve(os.homedir()) === path.resolve(invokingHome);
+const atUserConfigRoot = atInvokingHome && !Bun.env.PI_CONFIG_DIR;
+const atUserAgentDir = atUserConfigRoot && !Bun.env.PI_CODING_AGENT_DIR;
+const atInvokingCwd = invokingCwd !== undefined && path.resolve(getProjectDir()) === path.resolve(invokingCwd);
+
 // Eagerly parse the user's $HOME/.env and the current project's .env (from cwd)
-const homeEnv = parseEnvFile(path.join(os.homedir(), ".env"));
-const piEnv = parseEnvFile(path.join(getConfigRootDir(), ".env"));
-const agentEnv = parseEnvFile(path.join(getAgentDir(), ".env"));
-const projectEnv = parseEnvFile(path.join(getProjectDir(), ".env"));
+const homeEnv = atInvokingHome ? {} : parseEnvFile(path.join(os.homedir(), ".env"));
+const piEnv = atUserConfigRoot ? {} : parseEnvFile(path.join(getConfigRootDir(), ".env"));
+const agentEnv = atUserAgentDir ? {} : parseEnvFile(path.join(getAgentDir(), ".env"));
+const projectEnv = atInvokingCwd ? {} : parseEnvFile(path.join(getProjectDir(), ".env"));
 
 for (const key of Object.keys(Bun.env)) {
 	const value = Bun.env[key];

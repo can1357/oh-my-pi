@@ -60,7 +60,6 @@ describe("live routing config files", () => {
 
 	beforeEach(() => {
 		state = beginSettingsTest();
-		delete process.env.PI_CONFIG_FILES;
 		tempDir = TempDir.createSync("@pi-live-routing-");
 	});
 

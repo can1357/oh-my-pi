@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -21,7 +21,6 @@ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
 /**
@@ -724,13 +723,6 @@ describe("task.agentSoftRequestBudget", () => {
 	});
 
 	it("lets a higher settings layer clear a lower layer's entry with null", async () => {
-		const life = testLifetime();
-		// Ambient overlays would join the layers under test.
-		const previousConfigFiles = process.env.PI_CONFIG_FILES;
-		onTestFinished(() => {
-			if (previousConfigFiles === undefined) delete process.env.PI_CONFIG_FILES;
-			else process.env.PI_CONFIG_FILES = previousConfigFiles;
-		});
 		using tempDir = TempDir.createSync("@pi-agent-budget-");
 		const agentDir = path.join(tempDir.path(), "agent");
 		const overlay = path.join(tempDir.path(), "overlay.yml");
@@ -740,8 +732,6 @@ describe("task.agentSoftRequestBudget", () => {
 		);
 		await Bun.write(overlay, JSON.stringify({ task: { agentSoftRequestBudget: { scout: null } } }));
 
-		life.assertLive();
-		delete process.env.PI_CONFIG_FILES;
 		const settings = await Settings.loadReadOnly({ agentDir, cwd: tempDir.path(), configFiles: [overlay] });
 		const agentBudgets = cfgTaskAgentSoftRequestBudget.get(settings);
 		expect(resolveSoftRequestBudget("scout", 200, agentBudgets)).toBe(100);
