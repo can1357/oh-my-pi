@@ -158,7 +158,7 @@ export class TodoWrites {
 	 */
 	keepLiveListAfterToolResult(): void {
 		const live = this.#host.todo.phases;
-		if (Bun.deepEquals(getLatestTodoPhasesFromEntries(this.#host.sessionManager.getBranch()), live)) return;
+		if (Bun.deepEquals(getLatestTodoPhasesFromEntries(this.#host.sessionManager.getBranchView()), live)) return;
 		this.#host.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: live });
 	}
 

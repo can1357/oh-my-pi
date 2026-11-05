@@ -74,8 +74,9 @@ const todoSchema = type({
 export type TodoParams = TodoSchema;
 type TodoSchema = typeof todoSchema.infer;
 
-// Lenient arg validation lets undeclared keys reach `execute`; backends must not see them.
-const toBackendParams = todoSchema.onDeepUndeclaredKey("delete");
+// Lenient arg validation lets undeclared keys reach `execute`. Validating with this variant drops
+// them, inside `list` entries too, so the native op and a backend's `apply` get the same params.
+const todoParams = todoSchema.onDeepUndeclaredKey("delete");
 
 /** A single todo op entry (the params object itself). */
 type TodoOpEntryValue = TodoParams;
@@ -255,7 +256,7 @@ export function createTodoHudStateData(
 	return { ...snapshot, visibility };
 }
 
-export function getLatestTodoPhasesFromEntries(entries: SessionEntry[]): TodoPhase[] {
+export function getLatestTodoPhasesFromEntries(entries: readonly SessionEntry[]): TodoPhase[] {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const phases = canonicalTodoPhases(entries[i]);
 		if (phases) return clonePhases(phases);
@@ -503,12 +504,12 @@ function inferTodoOp(args: Record<string, unknown>, hasExistingPhases: boolean):
  * for a normal model retry.
  */
 function resolveTodoParams(raw: unknown, hasExistingPhases: boolean): TodoOpEntryValue | string {
-	const direct = todoSchema(raw);
+	const direct = todoParams(raw);
 	if (!(direct instanceof type.errors)) return direct;
 	if (isRecord(raw) && raw.op === undefined) {
 		const inferred = inferTodoOp(raw, hasExistingPhases);
 		if (inferred) {
-			const repaired = todoSchema({ ...raw, op: inferred });
+			const repaired = todoParams({ ...raw, op: inferred });
 			if (!(repaired instanceof type.errors)) return repaired;
 		}
 	}
@@ -799,7 +800,7 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 		const completedTasks = readOnly || failed ? [] : getCompletionTransitions(previousPhases, updated);
 		if (active && !readOnly && !failed) {
 			try {
-				await active.apply(op, toBackendParams.assert(entry), clonePhases(updated), signal);
+				await active.apply(op, entry, clonePhases(updated), signal);
 			} catch (error) {
 				return {
 					content: [

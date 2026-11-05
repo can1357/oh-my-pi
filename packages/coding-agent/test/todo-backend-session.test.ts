@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { type AgentToolResult, validateAgentToolArguments } from "@oh-my-pi/pi-agent-core";
 import { findScopedSettings, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -247,6 +247,29 @@ describe("todo backends in a real session", () => {
 		if (!call?.params) throw new Error("expected one apply call");
 		expect(Object.keys(call.params).sort()).toEqual(["list", "op"]);
 		expect(call.params.list).toEqual([{ phase: "Work", items: ["a"] }]);
+	});
+
+	test("apply gets the arguments the native op accepted, and none it rejected", async () => {
+		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
+		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
+		const tool = session.getToolByName("todo");
+		if (!tool) throw new Error("todo tool is not active");
+		const modelCall = (args: Record<string, unknown>) =>
+			tool.execute(
+				"call",
+				validateAgentToolArguments(tool, { type: "toolCall", id: "call", name: "todo", arguments: args }),
+			);
+		await todo(session, { op: "init", list: [{ phase: "Work", items: ["a", "b"] }] });
+
+		const accepted = await modelCall({ op: "done", task: "a", reason: null });
+		const rejected = await modelCall({ op: "done", task: "b", list: [{ phase: "x", items: [] }] });
+
+		expect(accepted.isError).toBeUndefined();
+		expect(text(rejected)).toStartWith("Invalid todo arguments:");
+		expect(recorder.calls.filter(call => call.method === "apply").map(call => call.params)).toEqual([
+			{ op: "init", list: [{ phase: "Work", items: ["a", "b"] }] },
+			{ op: "done", task: "a" },
+		]);
 	});
 
 	test("subagent and /tan sessions do not use the backend", async () => {

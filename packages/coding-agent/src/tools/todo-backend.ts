@@ -21,12 +21,8 @@ export function todoBackendText(value: unknown): string {
 }
 
 /**
- * The `todo` tool's params; only keys declared by the tool schema.
- * Public extension-facing name for the tool's `TodoParams`.
- *
- * The tool validates leniently: when the model's arguments do not match the schema, they still
- * reach the tool, and `apply` sees them once omp applied them without errors. Values are not
- * re-checked against these types.
+ * The `todo` tool's params, as validated by the tool: the same value the native op applied, with
+ * keys the tool schema does not declare removed. Public extension-facing name for `TodoParams`.
  */
 export type TodoBackendParams = TodoParams;
 
