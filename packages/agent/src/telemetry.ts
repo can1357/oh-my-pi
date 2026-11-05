@@ -1206,11 +1206,6 @@ export async function finishChatSpan(
  * (e.g. the provider stream threw mid-iteration). Mirrors `finishChatSpan`'s
  * span-end side effects and pushes a failed `ChatRecord` to the collector so
  * the run summary still reflects the failed step.
- *
- * `organizationId` is the account the attempt resolved, observed through
- * `SimpleStreamOptions.onRequestOrganization` before the request was sent: a
- * request that failed before response headers has no message to read it from,
- * and that turn is the same spend as a successful one.
  */
 export function failChatSpan(
 	telemetry: AgentTelemetry | undefined,
@@ -1220,8 +1215,6 @@ export function failChatSpan(
 		readonly errorType?: string;
 		readonly responseHeaders?: Readonly<Record<string, string>>;
 		readonly baseUrl?: string;
-		/** Organization of the credential the failed attempt resolved, when it had one. */
-		readonly organizationId?: string;
 	},
 ): void {
 	if (!span) return;
@@ -1234,9 +1227,6 @@ export function failChatSpan(
 	} else {
 		span.setAttribute(GenAIAttr.ErrorType, options.errorType ?? "Error");
 		span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
-	}
-	if (options.organizationId !== undefined) {
-		span.setAttribute(OmpGenAIAttr.AuthOrganizationId, options.organizationId);
 	}
 	telemetry?.collector.failChat(span, {
 		errorType: options.errorType ?? (err instanceof Error ? err.name || "Error" : "Error"),
@@ -1895,17 +1885,6 @@ export async function instrumentedCompleteSimple<TApi extends Api>(
 		return userOnResponse?.(response, modelInfo);
 	};
 
-	// Same shape for the organization the attempt resolved: a failure before
-	// response headers has no message carrying it, so this is the only source
-	// the failed span has. Needs no per-attempt clear of its own — every
-	// request `streamSimple` starts resets the observer first.
-	let capturedOrganizationId: string | undefined;
-	const userOnRequestOrganization = options.onRequestOrganization;
-	const captureOnRequestOrganization: NonNullable<SimpleStreamOptions["onRequestOrganization"]> = organizationId => {
-		capturedOrganizationId = organizationId;
-		userOnRequestOrganization?.(organizationId);
-	};
-
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
 			const complete = span.completeImpl ?? completeSimple;
@@ -1918,11 +1897,7 @@ export async function instrumentedCompleteSimple<TApi extends Api>(
 				// Clear first so a previous attempt's `retry-after` can never be
 				// reused for a later failure that arrived without headers.
 				capturedHeaders = undefined;
-				return complete(model, ctx, {
-					...options,
-					onResponse: captureOnResponse,
-					onRequestOrganization: captureOnRequestOrganization,
-				});
+				return complete(model, ctx, { ...options, onResponse: captureOnResponse });
 			};
 			const message = span.retry
 				? await retryTransientCompletion(runOnce, {
@@ -1948,7 +1923,6 @@ export async function instrumentedCompleteSimple<TApi extends Api>(
 			errorObject: err,
 			responseHeaders: capturedHeaders,
 			baseUrl: model.baseUrl,
-			organizationId: capturedOrganizationId,
 		});
 		throw err;
 	}

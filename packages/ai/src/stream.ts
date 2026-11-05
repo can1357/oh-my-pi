@@ -1208,20 +1208,6 @@ function forwardBedrockUserAgent(
 	return modelUserAgent === undefined ? callerHeaders : { ...callerHeaders, "User-Agent": modelUserAgent };
 }
 
-/**
- * Report the organization an attempt resolved to the caller's observer. The
- * observer is diagnostic: a throw from it must not fail the request it watches,
- * so it is logged and the request continues, as the other stream observers do.
- */
-function notifyRequestOrganization(options: SimpleStreamOptions, organizationId: string | undefined): void {
-	if (!options.onRequestOrganization) return;
-	try {
-		options.onRequestOrganization(organizationId);
-	} catch (error) {
-		logger.warn("onRequestOrganization observer threw; ignoring", { error });
-	}
-}
-
 function streamSimpleRequest<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
@@ -1236,13 +1222,6 @@ function streamSimpleRequest<TApi extends Api>(
 	if (apiKeyResolver) {
 		const outer = new AssistantMessageEventStream();
 		const signal = requestOptions?.signal;
-		// Every request starts by clearing the observer. A request that resolves
-		// no credential at all — a thrown resolver, a missing key — reports
-		// nothing of its own, and without this reset the observer would still be
-		// holding the previous request's account: `completeSimple` re-issues a
-		// whole request on a thinking-loop result, and the oneshot retry layer
-		// re-issues one per attempt.
-		notifyRequestOrganization(requestOptions, undefined);
 		// One inner attempt against a resolved key, or against the Bedrock AWS
 		// credential chain when its optional resolver has no stored bearer key.
 		// Retryable auth failures are buffered until replay is safe.
@@ -1252,11 +1231,6 @@ function streamSimpleRequest<TApi extends Api>(
 			oauthIdentity?: OAuthRequestIdentity,
 		): Promise<AuthRetryFailure | undefined> => {
 			const organizationId = oauthIdentity?.orgId;
-			// Before the socket opens, so a caller can attribute a request that
-			// fails before response headers, where no message ever exists. Each
-			// rotation re-enters here, so the last call names the account that
-			// actually served.
-			notifyRequestOrganization(requestOptions, organizationId);
 			const bufferedEvents: AssistantMessageEvent[] = [];
 			let emittedReplayUnsafeEvent = false;
 			const flushBuffered = (): void => {

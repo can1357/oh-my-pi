@@ -11,7 +11,6 @@
 - Added the `devin-windsurf` login, which exchanges a Windsurf Enterprise sign-in for the seat's raw API key and stores it as a `devin` API key ([#13288](https://github.com/can1357/oh-my-pi/pull/13288) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 - Factory Droid Gemini 4 Argon requests match droid's: no sampling parameters, the output cap at the model maximum, and its earlier turns replayed exactly as Gemini streamed them ([#17861](https://github.com/can1357/oh-my-pi/pull/17861) by [@will-bogusz](https://github.com/will-bogusz))
 - `AssistantMessage.organizationId` names the organization of the stored credential that served the turn, taken from the credential itself, so it is there on a session's first request and on providers that send no organization header; a rotation to a sibling account re-stamps it
-- Added `SimpleStreamOptions.onRequestOrganization`, an observer called with each attempt's resolved organization before the request is sent, so a caller that passes one can attribute a request that failed before response headers, where there is no message to read it from; the last call names the account that actually served, and a request that resolved no credential reports `undefined` rather than the previous request's account
 
 ### Fixed
 
