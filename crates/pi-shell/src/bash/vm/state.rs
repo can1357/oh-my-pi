@@ -347,6 +347,11 @@ pub struct Root {
 	fault:             Option<StoreError>,
 	/// The root vproc's in-place fields as last written ([`sync_root`]).
 	synced:            Synced,
+	/// Deletions the store refused, to make again at the next
+	/// [`sync_root`]: a record the engine dropped must not stay in the
+	/// store, or a snapshot carries a job or a child the shell no longer
+	/// has (a restored shell found both).
+	retry_dels:        Vec<KeyBuf>,
 }
 
 /// The root vproc's fields the interpreter updates in place (`vp.status = …`
@@ -557,8 +562,20 @@ impl Root {
 	/// ([`Self::fail`]).
 	pub fn write(&mut self, store: &mut dyn StateStore, change: Change<'_>) {
 		self.note(&change);
+		let key = match &change {
+			Change::Del(key) => Some(key.to_buf()),
+			_ => None,
+		};
 		if let Err(err) = store.apply(change) {
 			self.fail(err);
+			// What the store holds is no longer what this cache claims, and
+			// a refused deletion leaves a record nothing else deletes.
+			self.synced.dirty = true;
+			if let Some(key) = key
+				&& !self.retry_dels.contains(&key)
+			{
+				self.retry_dels.push(key);
+			}
 		}
 	}
 
@@ -2867,22 +2884,15 @@ fn write_jobs(root: &mut Root, store: &mut dyn StateStore, jobs: &JobTable, forc
 		&& ids.len() == jobs.list.len()
 		&& ids.iter().zip(&jobs.list).all(|(id, j)| *id == j.id);
 	if !same_ids {
-		// A deletion the store refuses keeps its id here: dropping it would
-		// leave the record for good, and a later snapshot would carry a job
-		// the shell removed (a restored shell found it again).
-		let mut refused = Vec::new();
+		// A deletion the store refuses is queued on the root and made again
+		// at the next sync, so the id need not stay here.
 		for id in &ids {
 			if !jobs.list.iter().any(|j| j.id == *id) {
-				let before = root.has_fault();
 				root.write(store, Change::Del(Key::Job(*id)));
-				if !before && root.has_fault() {
-					refused.push(*id);
-				}
 			}
 		}
 		ids.clear();
 		ids.extend(jobs.list.iter().map(|j| j.id));
-		ids.extend(refused);
 	}
 	root.synced.job_ids = ids;
 	for job in &jobs.list {
@@ -2920,8 +2930,12 @@ fn write_jobs(root: &mut Root, store: &mut dyn StateStore, jobs: &JobTable, forc
 pub fn sync_root(root: &mut Root, store: &mut dyn StateStore, vp: &Vproc) {
 	debug_assert!(vp.overlay.is_none(), "only the root vproc's fields are in the store");
 	// A write refused since the last sync left this cache claiming records
-	// the store never took: write them all again.
+	// the store never took: write them all again, and make every deletion
+	// the store refused again first (`write` queues them).
 	let all = std::mem::take(&mut root.synced.dirty);
+	for key in std::mem::take(&mut root.retry_dels) {
+		root.write(store, Change::Del(key.as_key()));
+	}
 	if all || vp.status != root.synced.status {
 		root.synced.status = vp.status;
 		root.set_misc(store, MiscKey::Status, decimal(vp.status));
@@ -3137,7 +3151,7 @@ mod tests {
 	fn a_refused_job_deletion_is_made_again_at_the_next_sync() {
 		struct RefusingDel<'a> {
 			inner:  &'a mut crate::bash::MemStore,
-			refuse: bool,
+			refuse: u32,
 		}
 		impl StateStore for RefusingDel<'_> {
 			fn get(&mut self, key: Key<'_>) -> Result<Option<&Record>, StoreError> {
@@ -3153,9 +3167,9 @@ mod tests {
 			}
 
 			fn apply(&mut self, change: Change<'_>) -> Result<(), StoreError> {
-				if self.refuse && matches!(change, Change::Del(Key::Job(_))) {
-					self.refuse = false;
-					return Err(StoreError::Backend("refused once".into()));
+				if self.refuse > 0 && matches!(change, Change::Del(Key::Job(_) | Key::Proc(_))) {
+					self.refuse -= 1;
+					return Err(StoreError::Backend("refused".into()));
 				}
 				self.inner.apply(change)
 			}
@@ -3177,23 +3191,40 @@ mod tests {
 			}
 		}
 		let (mut store, mut root, mut vp) = shell();
-		let id = JobId(7);
+		let (one, two) = (JobId(7), JobId(8));
 		vp.jobs
-			.add(id, Vpid(42), BString::from("f"), false, BString::from("/"));
+			.add(one, Vpid(42), BString::from("f"), false, BString::from("/"));
+		vp.jobs
+			.add(two, Vpid(43), BString::from("g"), false, BString::from("/"));
 		sync_root(&mut root, &mut store, &vp);
-		assert!(matches!(store.get(Key::Job(id)), Ok(Some(_))), "the job was written");
+		assert!(matches!(store.get(Key::Job(one)), Ok(Some(_))), "the jobs were written");
+		assert!(matches!(store.get(Key::Job(two)), Ok(Some(_))), "the jobs were written");
 		vp.jobs.remove(1);
+		vp.jobs.remove(2);
+		// A proc record deleted outside the sync (a disowned child that
+		// ended) is refused too: every refused deletion is made again.
+		let proc = Vpid(44);
+		let rec = Record::Proc { parent: Some(Vpid(1)), status: None };
+		root.write(&mut store, Change::Put(Key::Proc(proc), rec));
 		{
-			let mut refusing = RefusingDel { inner: &mut store, refuse: true };
+			// The deletion outside the sync, its retry inside it, and both
+			// job deletions of that same sync.
+			let mut refusing = RefusingDel { inner: &mut store, refuse: 4 };
+			root.write(&mut refusing, Change::Del(Key::Proc(proc)));
 			sync_root(&mut root, &mut refusing, &vp);
 		}
-		assert!(root.take_fault().is_some(), "the refused deletion is reported");
-		assert!(matches!(store.get(Key::Job(id)), Ok(Some(_))), "the record is still there");
+		assert!(root.take_fault().is_some(), "the refused deletions are reported");
+		assert!(matches!(store.get(Key::Job(one)), Ok(Some(_))), "the records are still there");
+		assert!(matches!(store.get(Key::Job(two)), Ok(Some(_))), "the records are still there");
+		assert!(matches!(store.get(Key::Proc(proc)), Ok(Some(_))), "the records are still there");
 		sync_root(&mut root, &mut store, &vp);
-		assert!(
-			matches!(store.get(Key::Job(id)), Ok(None)),
-			"the next sync deletes the record the refused write left"
-		);
+		for (what, present) in [
+			("the first job", matches!(store.get(Key::Job(one)), Ok(Some(_)))),
+			("the second job", matches!(store.get(Key::Job(two)), Ok(Some(_)))),
+			("the disowned child", matches!(store.get(Key::Proc(proc)), Ok(Some(_)))),
+		] {
+			assert!(!present, "the next sync deletes {what} the refused writes left");
+		}
 	}
 
 	/// Failure mode: a refused write of the kept statuses left them marked
