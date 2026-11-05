@@ -821,6 +821,10 @@ async function scanRootTranscripts(
  */
 export async function rebuildSessionLocator(root: string): Promise<SessionLocatorRebuild> {
 	const resolvedRoot = path.resolve(root);
+	// Which roots a lookup would consult, read once: pruning a carried row asks
+	// `candidatePaths` over these, so a row whose file now lives under another
+	// configured root is kept rather than deleted.
+	const rootsForPrune = sessionLocatorRoots();
 	const result: SessionLocatorRebuild = { root: resolvedRoot, indexed: 0, unreadable: [] };
 	const files = await scanRootTranscripts(resolvedRoot, result.unreadable);
 	if (files === undefined) return result;
@@ -906,25 +910,27 @@ export async function rebuildSessionLocator(root: string): Promise<SessionLocato
 				const tab = line.indexOf("\t");
 				if (tab > 0 && SESSION_ID_RE.test(line.slice(0, tab)) && line.length > tab + 1) carried.push(line);
 			}
-			// A row names a place; a lookup rebases that same relative path under
-			// every root it consults, so "absent from the root that recorded it"
-			// is NOT "gone". A tree moved to a configured extra root is found
-			// through exactly this row, and dropping it here would be the only
-			// record of where that session went. Keep the row unless every root
-			// a lookup would try says ENOENT.
-			const lookupRoots = sessionLocatorRoots();
-			const searched = lookupRoots.includes(resolvedRoot) ? lookupRoots : [resolvedRoot, ...lookupRoots];
+			// A row names a place, and a lookup does not look only where the row
+			// was written: {@link candidatePaths} rebases the same relative path
+			// under every root it consults and also tries `<path>.gz`, because
+			// `omp gc` compresses in place. So "absent from the root that
+			// recorded it" is not "gone" — a tree moved to a configured extra
+			// root, and an archived session, are both found through exactly this
+			// row. Ask the lookup's own generator rather than restating it here:
+			// restating it is how this pruning deleted a relocated session and
+			// then an archived one, twice, at two different callsites.
+			const searched = [resolvedRoot, ...rootsForPrune.filter(root => root !== resolvedRoot)];
 			const live = await Promise.all(
 				carried.map(async line => {
-					const stored = decodeStoredPath(line.slice(line.indexOf("\t") + 1));
-					if (stored === undefined || path.isAbsolute(stored)) return true;
-					const relative = stored.split("/").join(path.sep);
-					for (const base of searched) {
+					const tab = line.indexOf("\t");
+					const stored = decodeStoredPath(line.slice(tab + 1));
+					const row: IndexRow = { id: line.slice(0, tab), stored, root: resolvedRoot };
+					for (const candidate of candidatePaths(row, searched)) {
 						try {
-							await fs.promises.lstat(path.join(base, relative));
+							await fs.promises.lstat(candidate);
 							return true;
 						} catch (error) {
-							// Only a definite absence here lets the next root decide;
+							// Only a definite absence lets the next candidate decide;
 							// anything else means this process cannot tell, so keep it.
 							if (!isEnoent(error)) return true;
 						}

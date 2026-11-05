@@ -392,6 +392,26 @@ describe("session index: lookups by id", () => {
 		},
 	);
 
+	it("keeps a row whose file gc compressed in place", async () => {
+		// A lookup tries `<path>` and `<path>.gz`, because `omp gc` compresses in
+		// place. Pruning must try what the lookup tries: an archived session's
+		// row still names the uncompressed path, and deleting it on ENOENT
+		// loses the archive.
+		const sessions = getSessionsDir();
+		const id = "019a001e-0000-7000-8000-000000000001";
+		const name = `2026-01-02T03-04-05-000Z_${id}.jsonl`;
+		const file = path.join(sessions, "--compressed--", name);
+		writeFinishedTranscript(file, id, "/p");
+		await rebuildSessionLocator(sessions);
+
+		// Compress in place, as gc does, leaving the row pointing at the old name.
+		fs.writeFileSync(`${file}.gz`, Bun.gzipSync(fs.readFileSync(file)));
+		fs.rmSync(file);
+		await rebuildSessionLocator(sessions);
+		const rows = fs.readFileSync(path.join(sessions, SESSION_LOCATOR_BASE_FILE), "utf8");
+		expect(rows).toContain(id);
+	});
+
 	it("keeps a row whose file moved to a configured extra root", async () => {
 		// A row names a place, and a lookup rebases that relative path under
 		// every root it consults: a tree moved to an extra root is found through

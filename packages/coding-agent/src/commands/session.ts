@@ -73,7 +73,11 @@ function printSessionLeases(sessionIds: string[], json: boolean): void {
  * reported and the rest are still reindexed; the command then exits 1.
  */
 async function reindexSessionRoots(root: string | undefined): Promise<void> {
-	if (root === undefined) await applySessionExtraRootsSetting(process.cwd());
+	// The persisted setting is applied either way. With an explicit root only
+	// that root is rebuilt, but a rebuild must still know every root a lookup
+	// would consult: a row whose file now lives in a configured extra root is
+	// the only record of where that session went, and pruning it would lose it.
+	await applySessionExtraRootsSetting(process.cwd());
 	const roots = root === undefined ? sessionLocatorRoots() : [path.resolve(root)];
 	for (const target of roots) {
 		let result: SessionLocatorRebuild;
