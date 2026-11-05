@@ -218,6 +218,27 @@ describe("a config write follows a symlinked destination", () => {
 		expect(await fs.readdir(shared)).toEqual(["registry.json"]);
 	});
 
+	test("publishes onto a link whose target has a legal but very long name", async () => {
+		// Resolving before staging puts the TARGET's basename in the staging name,
+		// so a target the filesystem accepts at 245 bytes became a 290-byte staging
+		// name and every registry write failed ENAMETOOLONG. A reviewer reproduced
+		// that through `omp plugin marketplace add` on all three registries. The
+		// name a user chose is legal; the name we derive from it must be too.
+		const shared = path.join(root, "shared-long");
+		await fs.mkdir(shared);
+		const longName = `${"r".repeat(240)}.json`;
+		const target = path.join(shared, longName);
+		const link = path.join(root, "marketplaces.json");
+		await fs.writeFile(target, "old");
+		await fs.symlink(target, link);
+
+		await writeConfigFileAtomically(link, "new", 0o644);
+
+		expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+		expect(await fs.readFile(target, "utf8")).toBe("new");
+		expect(await fs.readdir(shared)).toEqual([longName]);
+	});
+
 	// A link from one accepted root to another where the two sit on DIFFERENT
 	// filesystems: the config root under a temp `HOME`, the agent directory on
 	// tmpfs. `PI_CODING_AGENT_DIR` exists precisely to relocate the agent

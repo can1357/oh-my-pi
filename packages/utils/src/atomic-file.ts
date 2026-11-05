@@ -19,6 +19,38 @@ import { toError } from "./type-guards";
  */
 const MAX_SYMLINK_HOPS = 40;
 
+/**
+ * The longest basename POSIX filesystems accept, in BYTES: ext4, xfs and tmpfs
+ * all stop at 255, and the limit counts bytes rather than code points.
+ */
+const MAX_BASENAME_BYTES = 255;
+
+/**
+ * A staging path beside `destination`, with a basename short enough to create.
+ *
+ * The suffix carries the pid and a uuid so two processes publishing one file
+ * never share a staging path, and the destination's own name is kept in front
+ * of it only as far as it fits — because a staging name is derived from a name
+ * the user chose, and a 245-byte basename is legal while that name plus a
+ * 45-byte suffix is not. Since the config write resolves before it stages, the
+ * name in front is the LINK'S TARGET, which a user may well have made long: a
+ * reviewer reproduced `ENAMETOOLONG` on all three registries through the real
+ * CLI with a 245-byte target that reads back perfectly well.
+ *
+ * Truncation is by bytes and never splits a character, so the result is a valid
+ * name on every filesystem the limit comes from. Uniqueness does not depend on
+ * the kept prefix: the uuid carries it, and the open is exclusive regardless.
+ */
+function stagingPathFor(destination: string, extension: string): string {
+	const suffix = `.${process.pid}.${crypto.randomUUID()}.${extension}`;
+	const dir = path.dirname(destination);
+	const name = path.basename(destination);
+	const room = MAX_BASENAME_BYTES - Buffer.byteLength(suffix, "utf8");
+	let kept = name;
+	while (Buffer.byteLength(kept, "utf8") > room) kept = kept.slice(0, -1);
+	return path.join(dir, `${kept}${suffix}`);
+}
+
 function symlinkLoopError(filePath: string): NodeJS.ErrnoException {
 	const error: NodeJS.ErrnoException = new Error(`ELOOP: too many symbolic links encountered, open '${filePath}'`);
 	error.code = "ELOOP";
@@ -194,8 +226,13 @@ async function resolveConfigWriteTarget(filePath: string): Promise<string> {
 			: `${await fs.promises.realpath(path.dirname(current))}${path.sep}${link}`;
 		// A link text ending `/` or `/.` names a DIRECTORY, and an ordinary write
 		// through it fails EISDIR or ENOTDIR. Splitting it into dirname and
-		// basename would throw that requirement away and write the file anyway, so
-		// the spelling is handed on whole and the staging `open` refuses it.
+		// basename would throw that requirement away and write the file somewhere
+		// that spelling never named, so it is handed on whole and the write fails.
+		// Where it fails is the `rename`, not the staging `open`: the staged
+		// sibling of `<dir>/` is a valid path INSIDE that directory, so it is
+		// created and then removed by the caller's `finally` when publication
+		// reports `ENOTEMPTY`/`EBUSY`. A reviewer measured that; an earlier version
+		// of this comment claimed the `open` refused it, which was wrong.
 		if (namesADirectory(joined)) return joined;
 		let next: string;
 		try {
@@ -287,7 +324,7 @@ async function replaceAfterWindowsRenameFailure(
 	targetPath: string,
 	renameError: unknown,
 ): Promise<void> {
-	const backupPath = `${targetPath}.${process.pid}.${crypto.randomUUID()}.bak`;
+	const backupPath = stagingPathFor(targetPath, "bak");
 	try {
 		await fs.promises.rename(targetPath, backupPath);
 	} catch (error) {
@@ -353,7 +390,7 @@ async function stageAndPublish(
 	content: string | NodeJS.ArrayBufferView,
 	mode: number | undefined,
 ): Promise<void> {
-	const tempPath = `${destination}.${process.pid}.${crypto.randomUUID()}.tmp`;
+	const tempPath = stagingPathFor(destination, "tmp");
 	let removeTemp = false;
 	try {
 		// `0o666` with no explicit mode leaves the result to the user's umask,
@@ -388,7 +425,7 @@ async function stageAndPublish(
  */
 export function writeFileAtomicallySync(filePath: string, content: string, mode: number = 0o600): void {
 	const destination = filePath;
-	const tempPath = `${destination}.${process.pid}.${crypto.randomUUID()}.tmp`;
+	const tempPath = stagingPathFor(destination, "tmp");
 	let fd: number | undefined;
 	try {
 		fd = fs.openSync(tempPath, "wx", mode);
@@ -422,7 +459,7 @@ export function writeFileAtomicallySync(filePath: string, content: string, mode:
  * it never replaces a link in the first place.
  */
 export async function moveFileAcrossDevices(source: string, destination: string): Promise<void> {
-	const staging = `${destination}.${process.pid}.${crypto.randomUUID()}.move`;
+	const staging = stagingPathFor(destination, "move");
 	try {
 		for (;;) {
 			const before = fs.statSync(source, { bigint: true });
@@ -460,7 +497,7 @@ export async function moveFileAcrossDevices(source: string, destination: string)
  * source that cannot be removed is logged rather than failing the move.
  */
 export async function replaceFileAcrossDevices(source: string, destination: string): Promise<void> {
-	const staging = `${destination}.${process.pid}.${crypto.randomUUID()}.move`;
+	const staging = stagingPathFor(destination, "move");
 	try {
 		await fs.promises.copyFile(source, staging);
 		// The copy carries the source's mode, which may be read-only — and a
