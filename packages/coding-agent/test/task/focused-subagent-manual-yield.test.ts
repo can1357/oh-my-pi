@@ -20,6 +20,7 @@ import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { installEnvRestores, installMockRestores, testLifetime } from "../../../utils/test/helpers/mock-restores";
+import { localSession } from "../helpers/local-session";
 
 const AGENT_ID = "FocusedYield";
 const PARENT_ID = "Main";
@@ -176,7 +177,7 @@ async function spawnKeptAliveChild(options?: { handler?: MockHandler; structured
 		close();
 		throw new Error("kept-alive subagent has no live session");
 	}
-	return { session, artifact, deliveries, firstDelivery: firstDelivery.promise, close, mock };
+	return { session: localSession(session), artifact, deliveries, firstDelivery: firstDelivery.promise, close, mock };
 }
 
 it("a focused manual prompt's yield rewrites the artifact and notifies the parent", async () => {

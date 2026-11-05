@@ -23,6 +23,7 @@ import { runSubagentFollowUpTurn, runSubprocess } from "@oh-my-pi/pi-coding-agen
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { installEnvRestores, installMockRestores, testLifetime } from "../../../utils/test/helpers/mock-restores";
+import { localSession } from "../helpers/local-session";
 
 const AGENT_ID = "Reporter";
 const PARENT_ID = "Main";
@@ -187,8 +188,9 @@ async function startRun(options: {
 
 /** Lets the subagent's current turn, its relays and the parent's deliveries settle. */
 async function settle(): Promise<void> {
-	const session = AgentRegistry.global().get(AGENT_ID)?.session;
-	if (session) {
+	const handle = AgentRegistry.global().get(AGENT_ID)?.session;
+	if (handle) {
+		const session = localSession(handle);
 		await session.waitForIdle();
 		await session.waitForIrcReplies();
 	}

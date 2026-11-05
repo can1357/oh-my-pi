@@ -296,7 +296,11 @@ describe("browser open — an abandoned browser acquisition does not hold up the
 			process.kill(pid, "SIGKILL");
 			events.push("kill-end");
 		});
-		const browser = { connected: true, disconnect: () => undefined } as unknown as Browser;
+		const browser = {
+			connected: true,
+			disconnect: () => undefined,
+			wsEndpoint: () => "ws://127.0.0.1/devtools/browser/test",
+		} as unknown as Browser;
 
 		const owner = new AbortController();
 		const first = rejectionOf(registry.acquireBrowser(kind, { cwd, signal: owner.signal }));
@@ -321,10 +325,10 @@ describe("browser open — failed spawned-app acquisition reaps its owned proces
 			key: "spawned:/tmp/chrome-headless-shell",
 			kind: { kind: "spawned", path: "/tmp/chrome-headless-shell" },
 			refCount: 0,
+			wsEndpoint: "ws://127.0.0.1/devtools/browser/test",
 			browser: {
 				connected: true,
 				disconnect: disconnectSpy,
-				wsEndpoint: () => "ws://127.0.0.1/devtools/browser/test",
 				targets: () => [],
 				pages: async () => [],
 				waitForTarget: async () => {

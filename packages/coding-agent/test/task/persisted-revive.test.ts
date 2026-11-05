@@ -1,15 +1,26 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
+import * as connectionPrewarm from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { createMockModel, type MockResponse, type MockResponseSource } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { resolveThresholdTokens, shouldCompact } from "@oh-my-pi/pi-agent-core/compaction";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
-import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
+import type { EffectiveExtensionRoots, SourceMeta } from "@oh-my-pi/pi-coding-agent/capability/types";
+import { loadCapability } from "@oh-my-pi/pi-coding-agent/capability";
+import { contextFileCapability } from "@oh-my-pi/pi-coding-agent/capability/context-file";
+import { instructionCapability } from "@oh-my-pi/pi-coding-agent/capability/instruction";
+import { promptCapability } from "@oh-my-pi/pi-coding-agent/capability/prompt";
+import { ruleCapability } from "@oh-my-pi/pi-coding-agent/capability/rule";
+import { skillCapability } from "@oh-my-pi/pi-coding-agent/capability/skill";
+import { slashCommandCapability } from "@oh-my-pi/pi-coding-agent/capability/slash-command";
+import { systemPromptCapability } from "@oh-my-pi/pi-coding-agent/capability/system-prompt";
+import { discoverCustomCommands } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/loader";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -51,7 +62,9 @@ import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { localSession } from "../helpers/local-session";
+import { restoreEnvValue } from "../helpers/settings-test-state";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
 import { cfgAdvisorEnabled } from "@oh-my-pi/pi-coding-agent/advisor/settings";
@@ -60,6 +73,56 @@ import { installMockRestores } from "../../../utils/test/helpers/mock-restores";
 installMockRestores();
 
 const tempDirs: TempDir[] = [];
+// Revivals here run the real createAgentSession, which discovers commands, skills, rules and
+// context from every user-level root and opens the model's API connection ahead of the first
+// request. Point `HOME`, `os.homedir()` (Bun keeps returning the launch-time home when only the
+// variable changes, and discovery asks for it directly) and the agent directory at an empty one,
+// clear the variables that move a user-level root out of the home, and keep the prewarm off the
+// network, so each test measures only the fixture it builds.
+const isolatedHome = TempDir.createSync("@pi-revive-home-");
+/**
+ * Variables that put a user-level discovery root outside the home: Claude's config directory
+ * (which also switches that source on), the Windows profile home under WSL (found from the WSL
+ * markers and `USERPROFILE`; with only the markers set, a host probe fills the profile in), and
+ * Copilot's home and extra instruction directories.
+ */
+const ALTERNATE_ROOT_ENV_KEYS = [
+	"CLAUDE_CONFIG_DIR",
+	"WSL_DISTRO_NAME",
+	"WSL_INTEROP",
+	"USERPROFILE",
+	"COPILOT_HOME",
+	"COPILOT_CUSTOM_INSTRUCTIONS_DIRS",
+] as const;
+/** Every variable a test here changes: the home, the ones `setAgentDir()` rewrites, and the roots above. */
+const ISOLATED_ENV_KEYS = ["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE", ...ALTERNATE_ROOT_ENV_KEYS];
+let savedEnv: Record<string, string | undefined> = {};
+
+beforeEach(() => {
+	savedEnv = Object.fromEntries(ISOLATED_ENV_KEYS.map(key => [key, process.env[key]]));
+	for (const key of ALTERNATE_ROOT_ENV_KEYS) restoreEnvValue(key, undefined);
+	restoreEnvValue("HOME", isolatedHome.path());
+	vi.spyOn(os, "homedir").mockReturnValue(isolatedHome.path());
+	setAgentDir(path.join(isolatedHome.path(), ".omp", "agent"));
+	vi.spyOn(connectionPrewarm, "prewarmModelConnection").mockResolvedValue(undefined);
+});
+
+afterEach(async () => {
+	// The mocks go back first, `os.homedir()` among them: a directory cache rebuilt while it still
+	// answers with the temporary home would keep those paths after the fixture is removed.
+	vi.restoreAllMocks();
+	for (const key of ISOLATED_ENV_KEYS) restoreEnvValue(key, savedEnv[key]);
+	__resetDirsFromEnvForTests();
+	MCPManager.resetForTests();
+	await Promise.all(tempDirs.splice(0).map(dir => dir.remove()));
+	// Last, so that a put-back this file got wrong is reported with every other cleanup already
+	// done: an assertion that throws skips the statements after it.
+	expect(getAgentDir()).not.toStartWith(isolatedHome.path());
+});
+
+afterAll(() => {
+	isolatedHome.removeSync();
+});
 
 function makeTempDir(prefix: string): string {
 	const dir = TempDir.createSync(prefix);
@@ -81,6 +144,7 @@ function createRef(sessionFile: string): AgentRef {
 		status: "parked",
 		session: null,
 		sessionFile,
+		generation: 0,
 		createdAt: 0,
 		lastActivity: 0,
 	};
@@ -262,10 +326,73 @@ function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptio
 	});
 }
 
-afterEach(async () => {
-	vi.restoreAllMocks();
-	MCPManager.resetForTests();
-	await Promise.all(tempDirs.splice(0).map(dir => dir.remove()));
+describe("user-level roots a variable moves out of the home", () => {
+	const outside = TempDir.createSync("@pi-revive-alternate-roots-");
+	const planted: Record<(typeof ALTERNATE_ROOT_ENV_KEYS)[number], string | undefined> = {
+		CLAUDE_CONFIG_DIR: path.join(outside.path(), "claude"),
+		WSL_DISTRO_NAME: "Fixture",
+		WSL_INTEROP: undefined,
+		USERPROFILE: path.join(outside.path(), "windows-home"),
+		COPILOT_HOME: path.join(outside.path(), "copilot"),
+		COPILOT_CUSTOM_INSTRUCTIONS_DIRS: path.join(outside.path(), "copilot-extra"),
+	};
+	const skill = "---\nname: planted\ndescription: planted\n---\nplanted\n";
+	/** Every file planted in those roots that discovery finds once the variables point at them. */
+	const plantedFiles: Record<string, string> = {
+		[path.join(outside.path(), "claude", "commands", "planted", "index.ts")]: "export default () => {};\n",
+		[path.join(outside.path(), "claude", "CLAUDE.md")]: "planted\n",
+		[path.join(outside.path(), "claude", "skills", "planted", "SKILL.md")]: skill,
+		[path.join(outside.path(), "windows-home", ".agents", "AGENTS.md")]: "planted\n",
+		[path.join(outside.path(), "windows-home", ".agents", "skills", "planted", "SKILL.md")]: skill,
+		[path.join(outside.path(), "windows-home", ".agents", "commands", "planted.md")]: "planted\n",
+		[path.join(outside.path(), "copilot-extra", "AGENTS.md")]: "planted\n",
+	};
+	let inherited: Record<string, string | undefined> = {};
+	let setBeforeIsolation = false;
+
+	// The variables must be in place before the file's per-test isolation runs, as a variable
+	// inherited from the shell is; a test body or an inner `beforeEach` runs after it.
+	beforeAll(() => {
+		inherited = Object.fromEntries(ALTERNATE_ROOT_ENV_KEYS.map(key => [key, process.env[key]]));
+		for (const key of ALTERNATE_ROOT_ENV_KEYS) restoreEnvValue(key, planted[key]);
+		setBeforeIsolation = true;
+	});
+
+	afterAll(() => {
+		for (const key of ALTERNATE_ROOT_ENV_KEYS) restoreEnvValue(key, inherited[key]);
+		outside.removeSync();
+	});
+
+	/** Paths under the planted roots that command discovery and every file-based capability return. */
+	async function discoverPlanted(cwd: string): Promise<string[]> {
+		const discovered = (await discoverCustomCommands({ cwd })).paths.map(command => command.path);
+		for (const capability of [
+			contextFileCapability,
+			systemPromptCapability,
+			skillCapability,
+			ruleCapability,
+			instructionCapability,
+			promptCapability,
+			slashCommandCapability,
+		]) {
+			const result = await loadCapability<{ _source: SourceMeta }>(capability.id, { cwd });
+			discovered.push(...result.all.map(item => item._source.path));
+		}
+		return [...new Set(discovered.filter(found => found.startsWith(outside.path())))].sort();
+	}
+
+	it("discovers no command, skill, rule or context file in them", async () => {
+		expect(setBeforeIsolation).toBe(true);
+		await Promise.all(Object.entries(plantedFiles).map(([file, content]) => Bun.write(file, content)));
+		const cwd = makeTempDir("@pi-revive-alternate-roots-cwd-");
+
+		expect(await discoverPlanted(cwd)).toEqual([]);
+
+		// Control: with the same variables set again in this process, discovery finds every planted
+		// file, so the empty result above comes from the isolation and not from a blind probe.
+		for (const key of ALTERNATE_ROOT_ENV_KEYS) restoreEnvValue(key, planted[key]);
+		expect(await discoverPlanted(cwd)).toEqual(Object.keys(plantedFiles).sort());
+	});
 });
 
 describe("persisted subagent revival", () => {
@@ -292,6 +419,8 @@ describe("persisted subagent revival", () => {
 		expect(emit).toHaveBeenCalledWith({ type: "session_start" });
 	});
 
+	// This revival and the restricted one below run the real createAgentSession and extension
+	// discovery: a few seconds of work, which contention on a busy machine has stretched past 60 s.
 	it("loads only extensions allowed by the live owner's root policy", async () => {
 		const cwd = makeTempDir("@pi-revive-owner-roots-");
 		const sessionFile = await createPersistedSession(cwd, false, "default");
@@ -339,7 +468,7 @@ describe("persisted subagent revival", () => {
 		};
 		let revived: AgentSession | undefined;
 		try {
-			revived = await reviver(ref);
+			revived = localSession(await reviver(ref));
 			const read = revived.getToolByName("read");
 			if (!read) throw new Error("Missing revived read tool");
 			await expect(read.execute("denied", { path: blockedPath })).rejects.toThrow("Owner policy denied the read");
@@ -348,7 +477,7 @@ describe("persisted subagent revival", () => {
 			await revived?.dispose();
 			authStorage.close();
 		}
-	});
+	}, 120_000);
 
 	it("rebinds owner policy hooks for restricted revival without widening its tools", async () => {
 		const cwd = makeTempDir("@pi-revive-restricted-policy-");
@@ -394,7 +523,7 @@ describe("persisted subagent revival", () => {
 
 		let revived: AgentSession | undefined;
 		try {
-			revived = await reviver(ref);
+			revived = localSession(await reviver(ref));
 			const read = revived.getToolByName("read");
 			if (!read) throw new Error("Missing restricted read tool");
 			await expect(read.execute("denied", { path: blockedPath })).rejects.toThrow(
@@ -408,7 +537,7 @@ describe("persisted subagent revival", () => {
 			await revived?.dispose();
 			authStorage.close();
 		}
-	});
+	}, 120_000);
 
 	it("anchors wake-turn artifacts to the revived ref's own dir, not the root session's (#11563)", async () => {
 		AgentRegistry.resetGlobalForTests();
@@ -2031,7 +2160,7 @@ describe("cold revival replays the system prompt the last request sent", () => {
 		const ref = { ...createRef(path.join(cwd, "prompt-blocks.jsonl")), id: "prompt-blocks" };
 		const reviver = await createFactory(cwd)(ref);
 		if (!reviver) throw new Error("Expected a persisted reviver");
-		const session = await reviver(ref);
+		const session = localSession(await reviver(ref));
 		await session.prompt("follow-up");
 		await session.waitForIdle();
 		if (!revived) throw new Error("Expected the revive to create a session");
@@ -2082,7 +2211,7 @@ describe("cold revival replays the system prompt the last request sent", () => {
 			warm = createRecordingSession(options!.sessionManager!, buildPrompt, [{ content: ["next"] }]);
 			return { session: warm.session } as CreateAgentSessionResult;
 		});
-		const live = await lifecycle.ensureLive("prompt-blocks");
+		const live = localSession(await lifecycle.ensureLive("prompt-blocks"));
 		if (!warm || live !== warm.session) throw new Error("Expected a warm revive through the lifecycle");
 		// The next work-pool batch installs its yield contract, which rebuilds the base prompt.
 		batch = 2;
@@ -2116,7 +2245,7 @@ describe("cold revival replays the system prompt the last request sent", () => {
 			]);
 			return { session: warm.session } as CreateAgentSessionResult;
 		});
-		const live = await lifecycle.ensureLive("prompt-blocks");
+		const live = localSession(await lifecycle.ensureLive("prompt-blocks"));
 		if (!warm || live !== warm.session) throw new Error("Expected a warm revive through the lifecycle");
 		expect(live.getEnabledToolNames()).toEqual(spawnedTools);
 		await live.prompt("next");
@@ -2161,7 +2290,7 @@ describe("cold revival replays the system prompt the last request sent", () => {
 			);
 			return { session: warm.session } as CreateAgentSessionResult;
 		});
-		const live = await lifecycle.ensureLive("prompt-blocks");
+		const live = localSession(await lifecycle.ensureLive("prompt-blocks"));
 		if (!warm || live !== warm.session) throw new Error("Expected a warm revive through the lifecycle");
 		await live.prompt("next");
 		await live.waitForIdle();

@@ -75,6 +75,9 @@ function makeHarness() {
 		syncComposerShape: vi.fn(),
 		syncExtensionLinks: vi.fn(),
 		showStatus: vi.fn(),
+		closeLinkBrowser: vi.fn(),
+		rerenderInLinkBrowser: vi.fn(),
+		rebuildTranscriptScrollback: vi.fn(),
 	} as unknown as InteractiveModeContext;
 
 	const controller = new ExtensionUiController(ctx);

@@ -223,6 +223,33 @@ export interface TspMarkdownProps {
 	/** Literal runs drawn as these spans wherever they occur in prose (a sent prompt's chip tokens). */
 	marks?: readonly TspSpan[];
 }
+/** One marked line of a {@link TspCodeProps.marks}. */
+export interface TspCodeMark {
+	line: number;
+	tone?: TspTone;
+	heat?: number;
+	/**
+	 * Scores in [0, 1] washing the row on the `heat` ramp in place of `heat`'s wash: one flat, several a gradient across
+	 * the row, an evenly spaced stop per score from left to right. `heat` still sizes the line's overview bar.
+	 */
+	wash?: readonly number[];
+}
+/** A run of lines a {@link TspCodeProps} draws as one row until it is opened. */
+export interface TspCodeFold {
+	/** First and last folded line, in the gutter's numbering. */
+	from: number;
+	to: number;
+	/** The folded row's text, in the code's face (default `… [lines {from}-{to}]`, `… [line {from}]` for one line). */
+	label?: string;
+	/** What the fold hides, after a sparkline of its lines' mark `heat`. */
+	note?: TspText;
+	/** `error` tints the row; any tone colors the note. */
+	tone?: TspTone;
+	/** Drawn open; a click on the folded row (or on an open fold's head) toggles it in place. */
+	open?: boolean;
+	/** A card shown while the pointer rests on the folded row, as the common {@link TspCommonProps.hovercard}. */
+	hovercard?: TspPropNode;
+}
 export interface TspCodeProps {
 	text?: string;
 	/** The language of text that is no file's (`bash`, `json`); wins over `path`. */
@@ -239,10 +266,23 @@ export interface TspCodeProps {
 	 */
 	nums?: readonly number[];
 	numbers?: boolean;
-	marks?: readonly { line: number; tone: TspTone }[];
+	/**
+	 * Marked lines (`line` is the drawn line number). `heat` in [0, 1] washes the row in a heat ramp, `wash` runs that
+	 * ramp across it; `tone` draws a bar, and any tone but `accent` also tints an unwashed row. A mark without `heat`
+	 * or `wash` has tone `accent` by default; one with only those draws no bar.
+	 */
+	marks?: readonly TspCodeMark[];
 	wrap?: boolean;
 	/** Clamp to the first `lines` drawn lines under a "N more lines" button; gives way inside an open disclosure. */
 	preview?: TspPreview;
+	/** Runs of lines drawn folded: sorted, not overlapping; marks inside apply once a fold is open. */
+	folds?: readonly TspCodeFold[];
+	/**
+	 * An overview strip above the lines: one bar per line (its height the mark's `heat`, its color the mark's tone),
+	 * a band under it over the lines outside folds, and a bracket over the lines in view. A click or drag on it
+	 * scrolls the code there.
+	 */
+	overview?: boolean;
 }
 export interface TspDiffHunk {
 	oldStart: number;

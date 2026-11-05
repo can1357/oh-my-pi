@@ -28,7 +28,7 @@ import { expandRoleAlias, getModelMatchPreferences, resolveModelFromString } fro
 import type { Settings } from "../config/settings";
 import { type LocalProtocolOptions, resolveLocalRoot } from "../internal-urls";
 import { cfgImagesBlockImages } from "../modes/settings";
-import type { CostGate } from "../session/cost-gate";
+import type { CostGateApi } from "../session/cost-gate";
 import { cfgImagesDescribeForTextModels } from "../session/settings";
 import describeUserPrompt from "../prompts/tools/image-attachment-describe.md" with { type: "text" };
 import describeSystemPrompt from "../prompts/tools/image-attachment-describe-system.md" with { type: "text" };
@@ -73,7 +73,7 @@ export interface DescribeAttachedImagesDeps {
 	/** Test seam: overrides the underlying completeSimple call. */
 	completeImpl?: typeof completeSimple;
 	/** The session tree's cost gate: at the cap images are not described, and each description's cost is added. */
-	costGate?: CostGate;
+	costGate?: CostGateApi;
 }
 
 /** Map an image MIME type to a file extension for the saved artifact. */

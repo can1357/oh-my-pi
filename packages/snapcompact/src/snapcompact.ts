@@ -2280,16 +2280,21 @@ export function textWithoutThinking(text: string): string {
 const PREVIOUS_SUMMARY_HEAD = "[Summary of earlier history]";
 
 /**
- * `archive`'s kept source as a reader that excludes reasoning may unfold it.
- * An archive persisted without {@link Archive.text} keeps only its edges, and
- * the tail's lines before its first scope label continue a section cut off in
- * the dropped middle, whose scope is unknown; they are left out.
+ * Length of the opening of a text-less archive's tail that a reader excluding
+ * reasoning leaves out: an archive persisted without {@link Archive.text} keeps
+ * only its edges, and the tail's lines before its first scope label continue a
+ * section cut off in the dropped middle, whose scope is unknown.
  */
-function sourceForReaderWithoutThinking(archive: Archive): string {
-	if (archive.text) return archive.text;
+function unscopedTailLength(archive: Archive): number {
 	const tail = archive.textTail ?? "";
 	const labelled = tail.search(SECTION_START);
-	return [archive.textHead, labelled < 0 ? "" : tail.slice(labelled)]
+	return labelled < 0 ? tail.length : labelled;
+}
+
+/** `archive`'s kept source as a reader that excludes reasoning may unfold it. */
+function sourceForReaderWithoutThinking(archive: Archive): string {
+	if (archive.text) return archive.text;
+	return [archive.textHead, (archive.textTail ?? "").slice(unscopedTailLength(archive))]
 		.filter((part): part is string => typeof part === "string" && part.length > 0)
 		.join(NEWLINE_GLYPH);
 }
@@ -2535,7 +2540,16 @@ export async function compact<TMessage = Message>(
 		archiveText = archiveText.length > 0 ? `${head} [Recent conversation] ${archiveText}` : head;
 	}
 
-	let truncatedChars = previousArchive?.truncatedChars ?? 0;
+	// An archive persisted without `text` (written before the text-first layout)
+	// holds its middle only as frames, which cannot be re-rendered: the new
+	// archive drops them, and for a reader without reasoning its tail's unscoped
+	// opening too, so count both as dropped history instead of dropping silently.
+	let truncatedChars =
+		(previousArchive?.truncatedChars ?? 0) +
+		(previousArchive && previousArchive.text === undefined
+			? previousArchive.frames.reduce((sum, frame) => sum + frame.chars, 0) +
+				(excludeThinking ? unscopedTailLength(previousArchive) : 0)
+			: 0);
 
 	// Re-compacting a snapcompacted history unfolds the prior archive's source
 	// text and treats it as one coherent transcript: the previous kept source

@@ -7,6 +7,12 @@ use std::{
 
 fn main() {
 	generate_minimizer_builtin_filters();
+	if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+		// Dependencies used by the embedded host also bring framework link
+		// directives. Do not load those images in obash if LTO removed every
+		// reference to them.
+		println!("cargo:rustc-link-arg-bin=obash=-Wl,-dead_strip_dylibs");
+	}
 }
 
 fn generate_minimizer_builtin_filters() {
