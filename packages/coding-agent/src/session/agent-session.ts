@@ -11451,6 +11451,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			: this.#titleGenerationAbortController.signal;
 		// A capped session sends no further model requests, titles included.
 		if (titleSignal.aborted || this.#costGate.check()) return null;
+		const { sessionManager } = this;
+		// Bill the session the title was asked for; a late attempt after a switch is dropped by the ledger.
+		const ledgerSessionId = sessionManager.getSessionId();
 		// The title request carries user text, so it follows this session's own credential
 		// redaction policy like its conversation requests (see `settingsAwareStreamFn`).
 		const title = await withCredentialRedaction(cfgSecretsEnabled.get(this.settings), () =>
@@ -11464,6 +11467,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				customSystemPrompt ?? this.#titleSystemPrompt,
 				titleSignal,
 				parentSessionId,
+				usage =>
+					sessionManager.appendModelUsage(
+						{ purpose: "title", ...usage },
+						{ sessionId: ledgerSessionId, parentId: sessionManager.getLeafId() },
+					),
 			),
 		);
 		if (await this.#sessionGenerationChanged(sessionGeneration)) return null;

@@ -5,7 +5,7 @@ import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import taskLabelSystemPrompt from "../prompts/system/task-label.md" with { type: "text" };
-import { generateSessionTitle } from "../utils/title-generator";
+import { generateSessionTitle, type TitleUsage } from "../utils/title-generator";
 
 const TASK_LABEL_SYSTEM_PROMPT = prompt.render(taskLabelSystemPrompt);
 
@@ -20,13 +20,17 @@ export function labelEchoesHandle(handle: string | undefined, label: string): bo
 	return /^\d+$/.test(suffix) && prefix.localeCompare(label, undefined, { sensitivity: "accent" }) === 0;
 }
 
-/** Compresses a delegated assignment into a one-sentence UI label via the tiny title model — fired by the executor spawn path because the task wire schema no longer carries a `description`; null on empty input or failure. */
+/**
+ * Compresses a delegated assignment into a one-sentence UI label via the tiny title model — fired by the executor spawn path because the task wire schema no longer carries a `description`; null on empty input or failure.
+ * `onUsage` receives every billed label request for the caller's session ledger.
+ */
 export async function generateTaskLabel(
 	assignment: string,
 	registry: ModelRegistry,
 	settings: Settings,
 	sessionId?: string,
 	signal?: AbortSignal,
+	onUsage?: (usage: TitleUsage) => void,
 ): Promise<string | null> {
 	const text = assignment.trim();
 	if (!text) return null;
@@ -40,6 +44,8 @@ export async function generateTaskLabel(
 			undefined,
 			TASK_LABEL_SYSTEM_PROMPT,
 			signal,
+			undefined,
+			onUsage,
 		);
 		if (!label || labelEchoesHandle(sessionId, label)) return null;
 		return label;

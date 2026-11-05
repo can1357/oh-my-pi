@@ -33,6 +33,7 @@ import { isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
 import { tinyTitleClient } from "../tiny/title-client";
 
 import { cfgRetryModelFallback } from "../session/settings";
+import type { ModelUsageEntry } from "../session/session-entries";
 import { DEFAULT_SPINNER_INTERVAL_MS, SPINNER_INTERVAL_STATIC } from "@oh-my-pi/pi-tui/spinner-clock";
 
 const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
@@ -153,6 +154,13 @@ const LEADING_THINKING_FENCE_RE = /^\s*```(?:thinking|reasoning)\b[\s\S]*?```\s*
 const LEADING_PROSE_THINKING_PREAMBLE_RE =
 	/^[ \t]*(?:(?:here(?:['’]s| is)[ \t]+(?:a|the|my)[ \t]+)|my[ \t]+)?(?:thinking|thought|reasoning)[ \t]+process[ \t]*:?[ \t]*(?:\r?\n|$)/i;
 
+/**
+ * Usage of one billed online title request. Callers stamp a `purpose` and
+ * journal it via `SessionManager.appendModelUsage` so session totals and
+ * `omp stats` count title spend.
+ */
+export type TitleUsage = Pick<ModelUsageEntry, "api" | "provider" | "model" | "usage" | "stopReason" | "errorMessage">;
+
 function getTitleModels(registry: ModelRegistry, settings: Settings, currentModel?: Model<Api>): Model<Api>[] {
 	const availableModels = roleCandidatePool("tiny", settings, registry);
 	if (availableModels.length === 0) return [];
@@ -194,6 +202,8 @@ function getTitleModels(registry: ModelRegistry, settings: Settings, currentMode
  * @param signal Session-lifecycle cancellation for background title requests
  * @param credentialSourceSessionId Optional foreground session whose selected
  *   OAuth credential should seed an isolated title-request session.
+ * @param onUsage Receives every billed online attempt, failed and fallback ones
+ *   included; local-inference titles bill nothing and never call it.
  */
 export async function generateSessionTitle(
 	firstMessage: string,
@@ -205,6 +215,7 @@ export async function generateSessionTitle(
 	customSystemPrompt?: string,
 	signal?: AbortSignal,
 	credentialSourceSessionId?: string,
+	onUsage?: (usage: TitleUsage) => void,
 ): Promise<string | null> {
 	// Defer titling for greetings / acknowledgements / empty input. The default
 	// tiny title model can't reliably decline trivial input, so this happens
@@ -233,6 +244,7 @@ export async function generateSessionTitle(
 			signal,
 			titleSystemPrompt,
 			credentialSourceSessionId,
+			onUsage,
 		);
 	}
 
@@ -283,6 +295,7 @@ export async function generateTitleOnline(
 	signal?: AbortSignal,
 	customSystemPrompt?: string,
 	credentialSourceSessionId?: string,
+	onUsage?: (usage: TitleUsage) => void,
 ): Promise<string | null> {
 	const models = getTitleModels(registry, settings, currentModel);
 	if (models.length === 0) {
@@ -298,6 +311,7 @@ export async function generateTitleOnline(
 		signal,
 		customSystemPrompt,
 		credentialSourceSessionId,
+		onUsage,
 	);
 }
 
@@ -310,6 +324,7 @@ async function generateTitleOnlineWithModels(
 	signal?: AbortSignal,
 	customSystemPrompt?: string,
 	credentialSourceSessionId?: string,
+	onUsage?: (usage: TitleUsage) => void,
 ): Promise<string | null> {
 	const titleSystemPrompt = customSystemPrompt?.trim() || undefined;
 	// The model is always asked to wrap the title in `<title>...</title>` and
@@ -396,6 +411,14 @@ async function generateTitleOnlineWithModels(
 					),
 				{ signal, provider: model.provider },
 			);
+			onUsage?.({
+				api: response.api,
+				provider: response.provider,
+				model: response.model,
+				usage: response.usage,
+				stopReason: response.stopReason,
+				errorMessage: response.errorMessage,
+			});
 
 			if (response.stopReason === "aborted" || signal?.aborted) {
 				logger.debug("title-generator: aborted", {

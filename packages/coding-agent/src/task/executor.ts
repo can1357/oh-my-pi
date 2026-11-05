@@ -1697,10 +1697,27 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	// a UI label (e.g. the eval bridge's `label`), compress the assignment into a
 	// tiny-model one-sentence label off the spawn's critical path. Best-effort —
 	// a late label still lands via the finalize-time reads of `progress.description`;
-	// failures just leave the label unset.
+	// failures just leave the label unset. The label request starts before the
+	// subagent session exists, so its usage joins that session's ledger once the
+	// run binds one (see `setActiveSession`).
+	const labelLedger = Promise.withResolvers<AgentSession>();
 	const labelSource = assignment?.trim();
 	if (!args.description && args.modelRegistry && args.settings && labelSource) {
-		generateTaskLabel(labelSource, args.modelRegistry, args.settings, id, abortSignal)
+		generateTaskLabel(labelSource, args.modelRegistry, args.settings, id, abortSignal, usage => {
+			labelLedger.promise
+				.then(({ sessionManager }) =>
+					sessionManager.appendModelUsage(
+						{ purpose: "task-label", ...usage },
+						{ sessionId: sessionManager.getSessionId(), parentId: sessionManager.getLeafId() },
+					),
+				)
+				.catch(err => {
+					logger.debug("Subagent label usage journaling failed", {
+						id,
+						error: err instanceof Error ? err.message : String(err),
+					});
+				});
+		})
 			.then(label => {
 				if (!label || abortSignal.aborted || progress.description) return;
 				progress.description = label;
@@ -2380,6 +2397,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		resolveAbortReasonText,
 		setActiveSession: session => {
 			activeSession = session;
+			if (session) labelLedger.resolve(session);
 			publishAdvisorState(session);
 			if (session && completionProbe && !completionProbeStarted) {
 				completionProbeStarted = true;
