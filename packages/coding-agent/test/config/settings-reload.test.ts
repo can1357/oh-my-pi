@@ -9,7 +9,11 @@ import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } f
 
 import { cfgEditModelVariants } from "@oh-my-pi/pi-coding-agent/edit/settings";
 import { cfgCompactionEnabled } from "@oh-my-pi/pi-coding-agent/session/context-settings";
-import { cfgProvidersMaxInFlightRequests, cfgTemperature } from "@oh-my-pi/pi-coding-agent/session/settings";
+import {
+	cfgProvidersMaxInFlightRequests,
+	cfgRetryFallbackChains,
+	cfgTemperature,
+} from "@oh-my-pi/pi-coding-agent/session/settings";
 
 describe("Settings layer refresh", () => {
 	let state: SettingsTestState | undefined;
@@ -52,6 +56,69 @@ describe("Settings layer refresh", () => {
 		await writeConfig({ providers: { maxInFlightRequests: { openai: 0 } } });
 		await expect(settings.reloadFromDisk()).rejects.toThrow("Provider request limits must be positive numbers");
 		expect(cfgProvidersMaxInFlightRequests.get(settings)).toEqual({ openai: 2 });
+	});
+
+	it("rejects malformed fallback reloads atomically and accepts a later repair", async () => {
+		const chains = { advisor: ["openai/backup:high"], review_openai: [] };
+		await writeConfig({ retry: { fallbackChains: chains }, temperature: 0.1 });
+		const settings = await Settings.init({ cwd: startProject, agentDir });
+
+		await writeConfig({ retry: { fallbackChains: { advisor: [17] } }, temperature: 0.9 });
+		await expect(settings.reloadFromDisk()).rejects.toThrow("retry.fallbackChains");
+		expect(cfgRetryFallbackChains.get(settings)).toEqual(chains);
+		expect(cfgTemperature.get(settings)).toBe(0.1);
+
+		await writeConfig({ retry: { fallbackChains: { advisor: [] } }, temperature: 0.2 });
+		await settings.reloadFromDisk();
+		expect(cfgRetryFallbackChains.get(settings)).toEqual({ advisor: [] });
+		expect(cfgTemperature.get(settings)).toBe(0.2);
+	});
+
+	it("rejects a malformed persisted chain hidden by a runtime override and retains the last good chain", async () => {
+		await writeConfig({ retry: { fallbackChains: { advisor: ["openai/good"] } } });
+		const settings = await Settings.init({ cwd: startProject, agentDir });
+		cfgRetryFallbackChains.override(settings, { advisor: ["openai/override"] });
+
+		await writeConfig({ retry: { fallbackChains: { advisor: [17] } } });
+		await expect(settings.reloadFromDisk()).rejects.toThrow("retry.fallbackChains");
+		cfgRetryFallbackChains.clearOverride(settings);
+		expect(cfgRetryFallbackChains.get(settings)).toEqual({ advisor: ["openai/good"] });
+	});
+
+	it("rejects a malformed persisted chain on initial load even when a runtime override masks it", async () => {
+		await writeConfig({ retry: { fallbackChains: { advisor: [17] } } });
+		await expect(
+			Settings.init({
+				cwd: startProject,
+				agentDir,
+				overrides: { "retry.fallbackChains": { advisor: ["openai/override"] } },
+			}),
+		).rejects.toThrow("retry.fallbackChains");
+	});
+
+	it("rejects a malformed persisted chain on initial read-only load even when a project layer masks it", async () => {
+		await writeConfig({ retry: { fallbackChains: { advisor: [17] } } });
+		writeProjectSettings(startProject, { retry: { fallbackChains: { advisor: [] } } });
+		await expect(Settings.loadReadOnly({ cwd: startProject, agentDir })).rejects.toThrow("retry.fallbackChains");
+	});
+
+	it("keeps a masked last-good chain when a save merges malformed external edits", async () => {
+		await writeConfig({ retry: { fallbackChains: { advisor: ["openai/good"] } } });
+		const settings = await Settings.init({ cwd: startProject, agentDir });
+		cfgRetryFallbackChains.override(settings, { advisor: ["openai/override"] });
+		await writeConfig({ retry: { fallbackChains: { advisor: [17] } } });
+
+		cfgTemperature.set(settings, 0.5);
+		await settings.flush();
+		cfgRetryFallbackChains.clearOverride(settings);
+		expect(cfgRetryFallbackChains.get(settings)).toEqual({ advisor: ["openai/good"] });
+	});
+
+	it("accepts partial higher-layer fallback records and empty chains", async () => {
+		await writeConfig({ retry: { fallbackChains: { advisor: ["openai/good"], review_openai: ["openai/review"] } } });
+		writeProjectSettings(startProject, { retry: { fallbackChains: { advisor: [] } } });
+		const settings = await Settings.loadReadOnly({ cwd: startProject, agentDir });
+		expect(cfgRetryFallbackChains.get(settings)).toEqual({ advisor: [], review_openai: ["openai/review"] });
 	});
 
 	it("reloads the persisted layers behind an overlay only when asked, keeping its own overrides", async () => {

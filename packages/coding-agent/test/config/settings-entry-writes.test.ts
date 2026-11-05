@@ -125,19 +125,6 @@ describe("Settings entry-level writes", () => {
 		},
 	);
 
-	it("writes an entry into a record malformed as a list, keeping the entries an overlay supplies", async () => {
-		const settings = await load(
-			{ retry: { fallbackChains: [] } },
-			{ retry: { fallbackChains: { smol: ["overlay/cheap"] } } },
-		);
-
-		cfgRetryFallbackChains.setEntry(settings, "slow", ["user/slow"]);
-		await settings.flush();
-
-		expect(cfgRetryFallbackChains.get(settings)).toEqual({ smol: ["overlay/cheap"], slow: ["user/slow"] });
-		expect(await readConfig()).toEqual({ retry: { fallbackChains: { slow: ["user/slow"] } } });
-	});
-
 	it("changes the persisted agent list by the toggled item only while an overlay supplies the list", async () => {
 		const settings = await load({ task: { disabledAgents: ["reviewer"] } }, { task: { disabledAgents: ["scout"] } });
 

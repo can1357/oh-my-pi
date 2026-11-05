@@ -112,6 +112,8 @@ interface DefinitionBase {
 	 * before every write, so a typo fails loudly instead of silently reading as the default.
 	 */
 	validate?: (raw: unknown) => void;
+	/** Also validate each configured layer independently, before a higher layer can mask it. */
+	validateLayers?: true;
 	/**
 	 * Canonicalizes a value on its way in — text parsed by {@link Setting.parse} and every
 	 * `set`/`override` — e.g. flooring request limits. May throw like `validate`.

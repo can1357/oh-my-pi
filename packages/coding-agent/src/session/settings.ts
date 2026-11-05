@@ -28,6 +28,7 @@ import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
+import { validateRetryFallbackChainsSetting } from "../config/retry-fallback-validation";
 
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
@@ -889,6 +890,8 @@ export const cfgRetryFallbackChains = register({
 	id: "retry.fallbackChains",
 	type: "record",
 	default: EMPTY_STRING_ARRAYS_RECORD,
+	validate: validateRetryFallbackChainsSetting,
+	validateLayers: true,
 	ui: {
 		tab: "model",
 		group: "Retry & Fallback",

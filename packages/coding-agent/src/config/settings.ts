@@ -1667,7 +1667,7 @@ export class Settings {
 				adopted.push(refresh);
 			}
 			const settled = this.#settlePins(layers);
-			if (!keepLastGood) this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(layers)), this.#cwd);
+			if (!keepLastGood) this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(layers)), this.#cwd, layers);
 
 			const previous = this.#snapshot();
 			for (const refresh of adopted) refresh.commit();
@@ -1714,7 +1714,7 @@ export class Settings {
 		const committed = { ...layers };
 		this.#settlePins(committed);
 		try {
-			this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(committed)), this.#cwd);
+			this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(committed)), this.#cwd, committed);
 			return true;
 		} catch (error) {
 			logger.warn("Settings: keeping last good config; on-disk change is invalid", {
@@ -1765,7 +1765,7 @@ export class Settings {
 					this.#savedRuntimeModelRoleOverrides.size === 0 ? this.#overrides : this.#buildOriginalOverrides(),
 			};
 			const settledPins = this.#settlePins(candidate);
-			this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(candidate)), normalized);
+			this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(candidate)), normalized, candidate);
 
 			const previous = this.#snapshot();
 			this.#cwd = normalized;
@@ -4203,11 +4203,22 @@ export class Settings {
 	}
 
 	/**
-	 * Checks every value configured in `merged` (path-scoped entries resolved for `cwd`) against its
-	 * definition: `validate` throws, unknown `items` warn. Defaults to the live layers.
+	 * Checks every effective configured value, plus each raw layer for definitions that opt in.
+	 * Path-scoped entries resolve for `cwd`; defaults to the live layers.
 	 */
-	#validateAll(merged: RawSettings = this.#mergedView(), cwd: string = this.#cwd): void {
-		for (const setting of allSettings()) setting.checkConfigured(this, configuredValue(merged, setting, cwd));
+	#validateAll(
+		merged: RawSettings = this.#mergedView(),
+		cwd: string = this.#cwd,
+		layers: OwnLayers = this.#ownLayers(),
+	): void {
+		for (const setting of allSettings()) {
+			if (setting.definition.validateLayers) {
+				for (const layer of Object.values(layers)) {
+					setting.definition.validate?.(configuredValue(layer, setting, cwd));
+				}
+			}
+			setting.checkConfigured(this, configuredValue(merged, setting, cwd));
+		}
 	}
 
 	/**

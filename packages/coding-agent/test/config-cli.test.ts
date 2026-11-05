@@ -206,6 +206,32 @@ describe("config CLI schema coverage", () => {
 		expect(parsed.type).toBe("enum");
 		expect(parsed.value).toBe("max");
 	});
+	it.each([
+		["non-array chain", { advisor: "openai/backup" }],
+		["null chain", { advisor: null }],
+		["non-string selector", { advisor: [17] }],
+		["chat role alias", { advisor: ["@task"] }],
+		["empty selector", { advisor: [""] }],
+		["missing model id", { advisor: ["openai/"] }],
+		["missing provider", { advisor: ["/backup"] }],
+		["invalid model key", { "openai/": [] }],
+		["empty role key", { "": [] }],
+	] as const)("rejects a fallback %s without changing config.yml", async (_name, chains) => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const configFile = Bun.file(testAgentDir.join("config.yml"));
+		const original = "# Keep this comment.\nretry:\n  fallbackChains:\n    advisor: [openai/backup]\n";
+		await Bun.write(configFile, original);
+
+		const result = await runCliProcess(["config", "set", "retry.fallbackChains", JSON.stringify(chains), "--json"], {
+			PI_CODING_AGENT_DIR: testAgentDir.path(),
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(result.error).toContain("retry.fallbackChains");
+		expect(result.output).toBe("");
+		expect(await configFile.text()).toBe(original);
+	});
+
 	it("fully flushes JSON larger than a pipe buffer", async () => {
 		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
 		const { exitCode, output, error } = await runCliProcess(["config", "list", "--json"], {
