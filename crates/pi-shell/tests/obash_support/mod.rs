@@ -35,17 +35,25 @@ const SYSTEM_DIRS: &[&str] = &["/usr/bin", "/bin"];
 const SYSTEM_DIRS: &[&str] = &[];
 
 /// The `PATH` the test process gets, instead of the caller's: the
-/// directories the programs in [`REQUIRED`] were found in, in the order
-/// they were found, and nothing else.
+/// directories the programs in [`REQUIRED`] were found in, **in search
+/// order**, and nothing else.
 ///
 /// A fixed `/usr/bin:/bin` is hermetic and wrong on a host that does not
 /// follow the filesystem hierarchy standard. This repository ships
 /// `nix/dev-shell.nix`, so NixOS is one: `cat` is in the Nix store and the
 /// FIFO test's `cat < f` failed with the program installed. Resolving each
 /// program keeps both properties — the search starts at [`SYSTEM_DIRS`],
-/// so an FHS host answers exactly as a fixed list would and the caller
-/// cannot redirect anything; a host that keeps its tools elsewhere
-/// contributes only the directories those tools are in.
+/// so an FHS host answers as a fixed list would and the caller cannot
+/// redirect anything; a host that keeps its tools elsewhere contributes
+/// only the directories those tools are in.
+///
+/// Two properties this has to keep, both of which a first version broke.
+/// The result is the searched directories FILTERED, never reordered: if
+/// `cat` is found in the second directory and `sh` in the first, the
+/// `PATH` is still first-then-second, so the shell runs the same `sh` the
+/// caller's own `PATH` would have. And a directory counts only if this
+/// account can actually execute the program in it, so an unreadable or
+/// not-executable-by-us file does not shadow a usable one further along.
 ///
 /// What is read from the caller is therefore which directories to search
 /// AFTER the system ones, never a startup file, a shell option or a
@@ -59,26 +67,38 @@ pub static TEST_PATH: LazyLock<OsString> = LazyLock::new(|| {
 		.map(PathBuf::from)
 		.chain(std::env::split_paths(&caller).filter(|dir| dir.is_absolute()))
 		.collect();
-	let mut found: Vec<PathBuf> = Vec::new();
+	let mut needed = vec![false; searched.len()];
 	for program in REQUIRED {
-		if let Some(dir) = searched.iter().find(|dir| is_program(&dir.join(program)))
-			&& !found.contains(dir)
-		{
-			found.push(dir.clone());
+		if let Some(at) = searched.iter().position(|dir| is_program(&dir.join(program))) {
+			needed[at] = true;
 		}
 	}
-	std::env::join_paths(found).expect("a directory holding one of these programs separates PATH")
+	let kept = searched.iter().zip(&needed).filter(|&(_, &used)| used).map(|(dir, _)| dir);
+	std::env::join_paths(kept).expect("a directory holding one of these programs separates PATH")
 });
 
-/// Whether `path` is a file this account can execute, following links:
+/// Whether `path` is a program THIS ACCOUNT can execute, following links:
 /// a Nix store entry reached through a profile is a symlink.
+///
+/// The question is asked of the kernel rather than of the mode bits,
+/// because `mode & 0o111` is the union of the owner, group and other bits
+/// and not this account's permission: a file we own with mode `0001` is
+/// executable by everyone except us, and treating it as a program hides a
+/// usable one later on the search path.
 fn is_program(path: &Path) -> bool {
 	#[cfg(unix)]
 	{
-		use std::os::unix::fs::PermissionsExt as _;
+		use std::os::unix::ffi::OsStrExt as _;
 
-		std::fs::metadata(path)
-			.is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+		if !std::fs::metadata(path).is_ok_and(|meta| meta.is_file()) {
+			return false;
+		}
+		let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+			return false;
+		};
+		// SAFETY: `c_path` is a NUL-terminated string that outlives the
+		// call; `access` only reads it.
+		unsafe { libc::access(c_path.as_ptr(), libc::X_OK) == 0 }
 	}
 	#[cfg(not(unix))]
 	{
@@ -116,7 +136,13 @@ static ACCOUNT_NAME: LazyLock<Option<OsString>> = LazyLock::new(|| {
 				std::ptr::from_mut(&mut found),
 			)
 		};
-		if rc == libc::ERANGE && buf.len() < 1 << 16 {
+		// A real record can be larger than any round number worth
+		// guessing: a 70 kB GECOS field is legal, the host accepts it, and
+		// a 64 kB ceiling turned it into "no account name at all" — the
+		// state the `USER` line exists to prevent, arrived at silently.
+		// Grow until the call stops asking for room; the bound only stops
+		// an unbounded loop if the library ever asks forever.
+		if rc == libc::ERANGE && buf.len() < 1 << 26 {
 			buf.resize(buf.len() * 2, 0);
 			continue;
 		}
