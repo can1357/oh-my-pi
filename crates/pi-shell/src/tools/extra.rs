@@ -36,7 +36,7 @@ use bstr::{BString, ByteSlice};
 use pi_builtins::extras::{CommandRunner, CommandStatus, EnvChange, Fd, ShellCommand};
 use tokio_util::sync::CancellationToken;
 
-use super::{Child, ToolConfig, Turn};
+use super::{Child, ToolConfig, Turn, quote, quote_words};
 use crate::{
 	bash::{
 		CallOutcome, IntrinsicId, Lineage, ModeId, RunId, RunStdio, Script, ShellApi, ToolCall,
@@ -234,21 +234,24 @@ fn script(mut command: ShellCommand, program: &Program, env_names: &[BString]) -
 	}
 	let mut args: Vec<BString> = command.args().iter().map(|arg| os_bytes(arg)).collect();
 	match program {
-		Program::Builtin => source.extend_from_slice(b"command -- \"$@\""),
+		Program::Builtin => source.extend_from_slice(b"command --"),
 		Program::Path(path) => {
 			let argv0 = command
 				.presented_argv0()
 				.map_or_else(|| args[0].clone(), os_bytes);
 			source.extend_from_slice(b"exec -a ");
 			quote(&mut source, &argv0);
-			source.extend_from_slice(b" -- \"$@\"");
+			source.extend_from_slice(b" --");
 			args[0] = os_bytes(path.as_os_str());
 		},
 	}
+	// The operand's words go into the synthetic source quoted, so the
+	// subshell's positional parameters stay the caller's ([`quote_words`]).
+	source.push(b' ');
+	quote_words(&mut source, &args);
 	let mut script = Script::command(source);
 	script.foreign_env = foreign_env;
 	script.unexport_env = unexport_env;
-	script.args = Some(args);
 	// The working directory is logical, as after `cd`: `-execdir` hands over
 	// `<root>/./sub`, and the command's `$PWD` is `<root>/sub`.
 	script.cwd = command
@@ -283,19 +286,6 @@ fn is_name(name: &str) -> bool {
 		.next()
 		.is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
 		&& bytes.all(|c| c.is_ascii_alphanumeric() || c == b'_')
-}
-
-/// Append `word` single-quoted.
-fn quote(out: &mut Vec<u8>, word: &[u8]) {
-	out.push(b'\'');
-	for &c in word {
-		if c == b'\'' {
-			out.extend_from_slice(b"'\\''");
-		} else {
-			out.push(c);
-		}
-	}
-	out.push(b'\'');
 }
 
 /// The utility's [`CommandRunner`]: looks each command up, then sends it to

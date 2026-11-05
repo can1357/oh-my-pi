@@ -469,13 +469,13 @@ async fn a_callout_operand_keeps_its_own_arguments_and_the_callers_locals() {
 	.await;
 }
 
-/// A write to the positional parameters that a callout's launch makes must not
-/// outlive the operand. The launch vector is the operand command's own `$@`,
-/// so whatever runs in the caller's frame after the operand returns — an EXIT
-/// trap the operand installed, the rest of the caller — reads the caller's
-/// parameters again, as it does in an ordinary `( … )` subshell of the same
-/// caller. Measured on Bash 5.2.21 and 5.3.0 (`explore/gen8.py` rows c1-c4),
-/// which agree on every row.
+/// Launching a callout must not write the operand's words over the
+/// caller's positional parameters. The words are one command of the
+/// subshell, so whatever runs in the caller's frame after the operand
+/// returns — an EXIT trap the operand installed, the rest of the caller —
+/// reads the caller's parameters, as it does in an ordinary `( … )`
+/// subshell of the same caller. Measured on Bash 5.2.21 and 5.3.0
+/// (`explore/gen8.py` rows c1-c4), which agree on every row.
 #[tokio::test]
 async fn a_callouts_launch_vector_does_not_outlive_its_operand() {
 	const EXIT_TRAP: &str =
@@ -530,8 +530,8 @@ async fn a_callouts_launch_vector_does_not_outlive_its_operand() {
 	.await;
 }
 
-/// The operand's own run is what the launch vector belongs to, so a RETURN
-/// trap of the operand — which runs inside it — still reads the operand's own
+/// The operand's own run is where its words belong, so a RETURN trap of
+/// the operand — which runs inside it — still reads the operand's own
 /// arguments. Measured on Bash 5.2.21 and 5.3.0 (`explore/gen8.py` rows
 /// c5-c7).
 #[tokio::test]
@@ -612,12 +612,13 @@ async fn an_exit_inside_a_callout_operand_keeps_the_operands_arguments() {
 	.await;
 }
 
-/// The launch vector is the operand command's own words, so the operand's own
-/// write to the positional parameters is a write to the subshell's — which
-/// are the caller's — and is what everything after the operand reads. A
-/// builtin operand is the case that shows it: `eval` runs shell code in the
-/// subshell itself, where `set --` and `shift` reach the parameters, unlike a
-/// function operand, whose own scope they reach instead.
+/// The operand's words are one command of the subshell, so the operand's
+/// own write to the positional parameters is a write to the subshell's —
+/// which are the caller's — and is what everything after the operand
+/// reads. A builtin operand is the case that shows it: `eval` runs shell
+/// code in the subshell itself, where `set --` and `shift` reach the
+/// parameters, unlike a function operand, whose own scope they reach
+/// instead.
 ///
 /// Measured on Bash 5.2.21 and 5.3.0 (`explore/gen10.py` rows r1, r2, r3, r5,
 /// r6, r10, r11), which agree on every row.

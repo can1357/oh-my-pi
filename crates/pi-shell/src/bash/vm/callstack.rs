@@ -182,7 +182,7 @@ pub fn array(
 			// was pushed, the arrays show the positional parameters.
 			let base = (!in_function(vp)
 				&& !vp.calls.iter().any(|c| matches!(c.kind, CallKind::Args(_))))
-			.then(|| state::positional_scoped(&k.root, store, vp).map(<[BString]>::to_vec))
+			.then(|| state::positional_ref(&k.root, store, vp).map(<[BString]>::to_vec))
 			.transpose()?;
 			argcv(vp, name, base.as_deref())
 		},
@@ -294,7 +294,7 @@ pub fn read_base(k: &Kernel, store: &mut dyn StateStore, vp: &mut Vproc) -> Resu
 	if in_function(vp) || vp.calls.iter().any(|c| matches!(c.kind, CallKind::Args(_))) {
 		return Ok(());
 	}
-	let base = state::positional_scoped(&k.root, store, vp)?.to_vec();
+	let base = state::positional_ref(&k.root, store, vp)?.to_vec();
 	init_argv(vp, || base);
 	Ok(())
 }
@@ -339,7 +339,7 @@ pub fn push_function(
 	vp.args_set = false;
 	let argv = if state::option(&mut k.root, store, vp, OptId::Extdebug)? {
 		// The caller's parameters: the frame is pushed, its scope not yet.
-		let base = state::positional_scoped(&k.root, store, vp)?.to_vec();
+		let base = state::positional_ref(&k.root, store, vp)?.to_vec();
 		init_argv(vp, || base);
 		Some(args.to_vec())
 	} else {
@@ -371,7 +371,7 @@ pub fn push_source(
 	let argv = if args.is_empty() {
 		Some(vec![file.clone()])
 	} else if state::option(&mut k.root, store, vp, OptId::Extdebug)? {
-		let base = state::positional_scoped(&k.root, store, vp)?.to_vec();
+		let base = state::positional_ref(&k.root, store, vp)?.to_vec();
 		init_argv(vp, || base);
 		Some(args.to_vec())
 	} else {
@@ -446,28 +446,6 @@ pub fn end_source(vp: &mut Vproc, frames: usize) {
 	{
 		*ended = true;
 	}
-}
-
-/// Push bash's `init_bash_argv` base for a host callout about to replace
-/// `vp`'s positional parameters with its operand's: the subshell inherits
-/// the push, so the operand reads the caller's arguments on `BASH_ARGV`
-/// rather than the command the callout runs its operand from. Only under
-/// `extdebug`, which is the only state in which bash pushes a base when a
-/// level is entered.
-///
-/// # Errors
-///
-/// A store failure reading `extdebug` or the positional parameters.
-pub fn push_callout_base(
-	k: &mut Kernel,
-	store: &mut dyn StateStore,
-	vp: &mut Vproc,
-) -> Result<(), StoreError> {
-	if state::option(&mut k.root, store, vp, OptId::Extdebug)? {
-		let base = state::positional_scoped(&k.root, store, vp)?.to_vec();
-		init_argv(vp, || base);
-	}
-	Ok(())
 }
 
 /// The calls a subshell of `vp` starts with: all of them, none tied to its

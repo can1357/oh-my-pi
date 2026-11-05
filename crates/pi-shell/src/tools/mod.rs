@@ -331,8 +331,8 @@ struct Child {
 }
 
 impl Child {
-	/// Run `argv` (`"$@"`, so functions, builtins and externals run as
-	/// anywhere) in a subshell of the caller under a fresh label;
+	/// Run `argv` (as its own words, so functions, builtins and externals
+	/// run as anywhere) in a subshell of the caller under a fresh label;
 	/// `redirect` is appended to the command (`>&2`).
 	fn start(
 		&mut self,
@@ -344,8 +344,10 @@ impl Child {
 		redirect: &str,
 	) {
 		self.label = turn.labels.fresh(api.lineage().label);
-		let mut script = Script::command(format!("\"$@\"{redirect}").into_bytes());
-		script.args = Some(argv);
+		let mut source = Vec::new();
+		quote_words(&mut source, &argv);
+		source.extend_from_slice(redirect.as_bytes());
+		let mut script = Script::command(source);
 		// The command's environment, per-command assignments included.
 		script.env = call
 			.env
@@ -374,6 +376,35 @@ impl Child {
 	/// The run, while its `Done` is still to come.
 	fn pending(&self) -> Option<RunId> {
 		self.run.filter(|_| self.status.is_none())
+	}
+}
+
+/// Append `word` single-quoted.
+fn quote(out: &mut Vec<u8>, word: &[u8]) {
+	out.push(b'\'');
+	for &c in word {
+		if c == b'\'' {
+			out.extend_from_slice(b"'\\''");
+		} else {
+			out.push(c);
+		}
+	}
+	out.push(b'\'');
+}
+
+/// Append `argv` as the words of one command, each single-quoted.
+///
+/// A callout runs its operand as one command of a synthetic script, and the
+/// operand's words go into that script quoted rather than through `"$@"`
+/// and [`Script::args`]. So the subshell's positional parameters stay the
+/// caller's, as in the `( … )` subshell the callout stands for, and the
+/// operand's own `getopts`, `shift` and `set --` read and write those.
+fn quote_words(out: &mut Vec<u8>, argv: &[BString]) {
+	for (i, word) in argv.iter().enumerate() {
+		if i > 0 {
+			out.push(b' ');
+		}
+		quote(out, word);
 	}
 }
 

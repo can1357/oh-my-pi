@@ -799,15 +799,9 @@ pub struct Run {
 	/// [`crate::bash::store::LossyKind`] bits reported outside any
 	/// mode-switching call during this run (`Diag::ModeLossy` once per kind).
 	pub lossy:             u8,
-	/// Positional parameters to install when the script starts (a root
-	/// script: a shell invocation's own arguments), or, for the subshell a
-	/// host callout starts, the launch vector of the one command that
-	/// subshell runs — which the run's own script frame expands as `"$@"`
-	/// and nothing deeper ever sees
-	/// ([`state::positional_ref`](super::state::positional_ref)).
+	/// Root scripts: positional parameters, cwd and exported variables to
+	/// install when the script starts.
 	pub args:              Option<Vec<BString>>,
-	/// The working directory and exported variables a root script installs
-	/// when it starts.
 	pub cwd:               Option<BString>,
 	pub env:               Vec<(BString, BString)>,
 	pub started:           bool,
