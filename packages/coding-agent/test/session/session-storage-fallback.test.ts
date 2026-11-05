@@ -111,7 +111,7 @@ describe("sql → file fallback", () => {
 		// further. The session is a placeholder until it does.
 		const reserved = ledgerLines(ledger);
 		expect(reserved).toHaveLength(1);
-		expect(String(reserved[0]?.session_id).trim()).toBe("(unresolved)");
+		expect(String(reserved[0]?.session_id)).toContain("(unresolved)");
 		expect(reserved[0]).toMatchObject({ reason: "dsn-missing", dsn_path: dsnFile });
 		expect(typeof reserved[0]?.ts).toBe("string");
 		expect(typeof reserved[0]?.host).toBe("string");
@@ -222,14 +222,58 @@ describe("sql → file fallback", () => {
 		// placeholder: a refused launch names no session.
 		const lines = ledgerLines(ledger);
 		expect(lines).toHaveLength(1);
-		expect(String(lines[0]?.session_id).trim()).toBe("(unresolved)");
+		expect(String(lines[0]?.session_id)).toContain("(unresolved)");
+	});
+
+	it("two launches that would write the same line still each name their own", async () => {
+		// Same millisecond, same host, same connection file: before the
+		// placeholder carried a nonce these two lines were byte-identical, and
+		// each refinement found whichever the scan hit first.
+		const { env, ledger } = brokenSqlEnv();
+		await resolveSessionStorage({ settings: Settings.isolated(), env, resumableFileSession: async () => true });
+		const first = ledgerLines(ledger)[0];
+
+		// A second launch in this ledger, as another process would write it.
+		resetSqlWriteLatchForTest();
+		await resolveSessionStorage({ settings: Settings.isolated(), env, resumableFileSession: async () => true });
+		const both = ledgerLines(ledger);
+		expect(both).toHaveLength(2);
+		expect(String(both[0]?.session_id)).not.toBe(String(both[1]?.session_id));
+		expect(String(both[0]?.session_id)).toContain("(unresolved)");
+		expect(String(both[1]?.session_id)).toContain("(unresolved)");
+
+		// Only the second launch's own line takes its session.
+		await commitSessionStorageFallback("01a1a000-0000-7000-8000-00000000bbbb");
+		const after = ledgerLines(ledger);
+		expect(after).toHaveLength(2);
+		expect(String(after[0]?.session_id)).toBe(String(first?.session_id));
+		expect(String(after[1]?.session_id).trim()).toBe("01a1a000-0000-7000-8000-00000000bbbb");
+	});
+
+	it("a ledger rotated after the fallback was decided leaves the new file untouched", async () => {
+		const { env, ledger } = brokenSqlEnv();
+		await resolveSessionStorage({ settings: Settings.isolated(), env, resumableFileSession: async () => true });
+
+		// The one maintenance action an append-only log invites, between the
+		// decision and the refinement.
+		fs.renameSync(ledger, `${ledger}.1`);
+		const replacement = `${JSON.stringify({ ts: "x", session_id: "keep-me", reason: "dsn-missing", dsn_path: "/p", host: "h" })}\n`;
+		fs.writeFileSync(ledger, replacement);
+
+		await commitSessionStorageFallback("01a1a000-0000-7000-8000-00000000cccc");
+
+		// The replacement is byte-for-byte what it was: the refinement wrote
+		// into the file it had scanned, which rotation moved aside.
+		expect(fs.readFileSync(ledger, "utf8")).toBe(replacement);
+		const rotated = fs.readFileSync(`${ledger}.1`, "utf8");
+		expect(JSON.parse(rotated.trim())).toBeTruthy();
 	});
 
 	it("a line another process appended between the decision and the refinement is left alone", async () => {
 		const { env, ledger } = brokenSqlEnv();
 		await resolveSessionStorage({ settings: Settings.isolated(), env, resumableFileSession: async () => true });
 		const ours = ledgerLines(ledger)[0];
-		expect(String(ours?.session_id).trim()).toBe("(unresolved)");
+		expect(String(ours?.session_id)).toContain("(unresolved)");
 
 		// Another process appends while this launch is still starting. Nothing
 		// may record a byte offset before this: `O_APPEND` chose where our own
@@ -264,7 +308,7 @@ describe("sql → file fallback", () => {
 			// Either the id round-trips, or the placeholder stayed; never a
 			// half-written value.
 			const recorded = String(parsed.session_id).trimEnd();
-			expect(recorded === id || recorded === "(unresolved)").toBe(true);
+			expect(recorded === id || recorded.startsWith("(unresolved)")).toBe(true);
 		}
 	});
 

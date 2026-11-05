@@ -101,6 +101,22 @@ const SESSION_ID_WIDTH = 36;
 export const UNRESOLVED_SESSION = "(unresolved)";
 
 /**
+ * This process's placeholder: {@link UNRESOLVED_SESSION} plus a nonce, so that
+ * two launches falling back in the same millisecond with the same connection
+ * file on the same host do not write byte-identical lines. The refinement
+ * finds its line by exact match, and identical lines made it findable only by
+ * luck — measured, 24 such launches left 9 lines named and 15 still holding a
+ * placeholder, every one of them valid JSON and counted, but attributed to
+ * the wrong launch. A reader trims the padding and sees it is unresolved.
+ *
+ * Per reserve, not per process: two fallbacks in one process would collide
+ * just as two processes do.
+ */
+function unresolvedPlaceholder(): string {
+	return `${UNRESOLVED_SESSION} ${Bun.randomUUIDv7().slice(-12)}`;
+}
+
+/**
  * `id` as the exact {@link SESSION_ID_WIDTH} **bytes** a ledger line's
  * `session_id` field holds, or `undefined` when it cannot be represented in
  * them. JSON-escaped first: an id carrying a quote would otherwise end the
@@ -178,6 +194,19 @@ export function pendingSessionStorageFallback(): { reason: SessionStorageFallbac
 
 const SESSION_ID_MARKER = '"session_id":"';
 
+/** The whole of an open file, read through the descriptor rather than the path. */
+function readAllSync(handle: number): Buffer {
+	const size = fsSync.fstatSync(handle).size;
+	const buffer = Buffer.allocUnsafe(size);
+	let read = 0;
+	while (read < size) {
+		const n = fsSync.readSync(handle, buffer, read, size - read, read);
+		if (n <= 0) break;
+		read += n;
+	}
+	return read === size ? buffer : buffer.subarray(0, read);
+}
+
 /**
  * Byte offset of the `session_id` value in the ledger's copy of `line`, found
  * when the refinement runs rather than when the line was written. `O_APPEND`
@@ -213,9 +242,13 @@ export function commitSessionStorageFallbackSync(sessionId: string): void {
 	if (padded === undefined) return;
 	let handle: number | undefined;
 	try {
-		const offset = locateSessionIdField(fsSync.readFileSync(pending.ledgerFile), pending.line);
-		if (offset === undefined) return;
+		// One descriptor for both the scan and the write: a rotation between them
+		// replaces the directory entry, not this open file, so the write still
+		// lands in the bytes that were scanned instead of at a stale offset in
+		// whatever now holds the name.
 		handle = fsSync.openSync(pending.ledgerFile, "r+");
+		const offset = locateSessionIdField(readAllSync(handle), pending.line);
+		if (offset === undefined) return;
 		fsSync.writeSync(handle, Buffer.from(padded, "utf8"), 0, SESSION_ID_WIDTH, offset);
 	} catch {
 		// A signal handler has nowhere to report to; the line is already counted.
@@ -243,7 +276,9 @@ export async function commitSessionStorageFallback(sessionId: string): Promise<v
 	const line = pending.line;
 	let handle: fs.FileHandle | undefined;
 	try {
-		const offset = locateSessionIdField(await fs.readFile(ledgerFile), line);
+		// One descriptor for both the scan and the write: see the sync twin.
+		handle = await fs.open(ledgerFile, "r+");
+		const offset = locateSessionIdField(await handle.readFile(), line);
 		if (offset === undefined) {
 			logger.warn("Fallback ledger line not found for refinement; it keeps its placeholder", {
 				ledger: ledgerFile,
@@ -251,7 +286,6 @@ export async function commitSessionStorageFallback(sessionId: string): Promise<v
 			});
 			return;
 		}
-		handle = await fs.open(ledgerFile, "r+");
 		await handle.write(Buffer.from(padded, "utf8"), 0, SESSION_ID_WIDTH, offset);
 	} catch (err) {
 		logger.warn("Could not name the session in the fallback ledger line; the fallback stays counted", {
@@ -294,7 +328,7 @@ export async function reserveSessionStorageFallback(
 	dsnPath: string,
 	ledgerFile: string,
 ): Promise<void> {
-	const line = ledgerLine(fallbackEvent(UNRESOLVED_SESSION, reason, dsnPath));
+	const line = ledgerLine(fallbackEvent(unresolvedPlaceholder(), reason, dsnPath));
 	let handle: fs.FileHandle | undefined;
 	try {
 		await fs.mkdir(path.dirname(ledgerFile), { recursive: true });
