@@ -171,6 +171,8 @@ interface PendingFallback {
 	reason: SessionStorageFallbackReason;
 	dsnPath: string;
 	ledgerFile: string;
+	/** The placeholder bytes the write expects to find at the offset, as a check before it writes. */
+	placeholder: string;
 	/**
 	 * The exact line written, so the refinement can find it again. A byte
 	 * offset recorded at write time is wrong the moment another process
@@ -193,6 +195,25 @@ export function pendingSessionStorageFallback(): { reason: SessionStorageFallbac
 }
 
 const SESSION_ID_MARKER = '"session_id":"';
+
+/**
+ * Whether the bytes at `offset` are still the placeholder this process wrote.
+ * Locating the line is not enough on its own: a truncation in place leaves the
+ * same open file, so the scan can succeed against a stale snapshot and the
+ * write then lands past a shortened end, filling the gap with NULs. Checking
+ * what is actually there immediately before writing is the only step that
+ * covers replacement and truncation together.
+ */
+function placeholderStillThere(
+	read: (buffer: Buffer, offset: number) => number,
+	placeholder: string,
+	offset: number,
+): boolean {
+	const expected = paddedSessionId(placeholder);
+	if (expected === undefined) return false;
+	const buffer = Buffer.allocUnsafe(SESSION_ID_WIDTH);
+	return read(buffer, offset) === SESSION_ID_WIDTH && buffer.toString("utf8") === expected;
+}
 
 /** The whole of an open file, read through the descriptor rather than the path. */
 function readAllSync(handle: number): Buffer {
@@ -247,9 +268,16 @@ export function commitSessionStorageFallbackSync(sessionId: string): void {
 		// lands in the bytes that were scanned instead of at a stale offset in
 		// whatever now holds the name.
 		handle = fsSync.openSync(pending.ledgerFile, "r+");
-		const offset = locateSessionIdField(readAllSync(handle), pending.line);
+		const fd = handle;
+		const offset = locateSessionIdField(readAllSync(fd), pending.line);
 		if (offset === undefined) return;
-		fsSync.writeSync(handle, Buffer.from(padded, "utf8"), 0, SESSION_ID_WIDTH, offset);
+		const stillThere = placeholderStillThere(
+			(buffer, at) => fsSync.readSync(fd, buffer, 0, buffer.length, at),
+			pending.placeholder,
+			offset,
+		);
+		if (!stillThere) return;
+		fsSync.writeSync(fd, Buffer.from(padded, "utf8"), 0, SESSION_ID_WIDTH, offset);
 	} catch {
 		// A signal handler has nowhere to report to; the line is already counted.
 	} finally {
@@ -274,19 +302,28 @@ export async function commitSessionStorageFallback(sessionId: string): Promise<v
 		return;
 	}
 	const line = pending.line;
+	const placeholder = pending.placeholder;
 	let handle: fs.FileHandle | undefined;
 	try {
 		// One descriptor for both the scan and the write: see the sync twin.
 		handle = await fs.open(ledgerFile, "r+");
-		const offset = locateSessionIdField(await handle.readFile(), line);
-		if (offset === undefined) {
-			logger.warn("Fallback ledger line not found for refinement; it keeps its placeholder", {
+		const open = handle;
+		const offset = locateSessionIdField(await open.readFile(), line);
+		const stillThere =
+			offset !== undefined &&
+			placeholderStillThere(
+				(buffer, at) => fsSync.readSync(open.fd, buffer, 0, buffer.length, at),
+				placeholder,
+				offset,
+			);
+		if (offset === undefined || !stillThere) {
+			logger.warn("The fallback's ledger line is no longer where it was written; it keeps its placeholder", {
 				ledger: ledgerFile,
 				session: sessionId,
 			});
 			return;
 		}
-		await handle.write(Buffer.from(padded, "utf8"), 0, SESSION_ID_WIDTH, offset);
+		await open.write(Buffer.from(padded, "utf8"), 0, SESSION_ID_WIDTH, offset);
 	} catch (err) {
 		logger.warn("Could not name the session in the fallback ledger line; the fallback stays counted", {
 			ledger: ledgerFile,
@@ -328,7 +365,8 @@ export async function reserveSessionStorageFallback(
 	dsnPath: string,
 	ledgerFile: string,
 ): Promise<void> {
-	const line = ledgerLine(fallbackEvent(unresolvedPlaceholder(), reason, dsnPath));
+	const placeholder = unresolvedPlaceholder();
+	const line = ledgerLine(fallbackEvent(placeholder, reason, dsnPath));
 	let handle: fs.FileHandle | undefined;
 	try {
 		await fs.mkdir(path.dirname(ledgerFile), { recursive: true });
@@ -341,7 +379,7 @@ export async function reserveSessionStorageFallback(
 			throw new Error(`short write: ${written.bytesWritten} of ${Buffer.byteLength(line, "utf8")} bytes`);
 		}
 		await handle.sync();
-		pending = { reason, dsnPath, ledgerFile, line };
+		pending = { reason, dsnPath, ledgerFile, line, placeholder };
 	} catch (err) {
 		throw new SessionStorageFallbackLedgerError(ledgerFile, err);
 	} finally {

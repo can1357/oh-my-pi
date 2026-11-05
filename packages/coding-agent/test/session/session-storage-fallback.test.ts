@@ -250,6 +250,20 @@ describe("sql → file fallback", () => {
 		expect(String(after[1]?.session_id).trim()).toBe("01a1a000-0000-7000-8000-00000000bbbb");
 	});
 
+	it("a ledger truncated in place after the fallback was decided is not written past its end", async () => {
+		const { env, ledger } = brokenSqlEnv();
+		await resolveSessionStorage({ settings: Settings.isolated(), env, resumableFileSession: async () => true });
+
+		// Truncation, not rename: the same inode, so one descriptor still points
+		// at it and only checking the bytes before writing can catch this.
+		fs.truncateSync(ledger, 0);
+
+		await commitSessionStorageFallback("01a1a000-0000-7000-8000-00000000dddd");
+
+		// Empty, not a hole of NUL bytes with an id stranded past it.
+		expect(fs.readFileSync(ledger, "utf8")).toBe("");
+	});
+
 	it("a ledger rotated after the fallback was decided leaves the new file untouched", async () => {
 		const { env, ledger } = brokenSqlEnv();
 		await resolveSessionStorage({ settings: Settings.isolated(), env, resumableFileSession: async () => true });

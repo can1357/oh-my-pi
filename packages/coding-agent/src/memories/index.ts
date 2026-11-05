@@ -23,6 +23,7 @@ import {
 	type SessionStorage,
 	type SessionStorageStat,
 } from "../session/session-storage";
+import { enoent } from "../session/session-storage-errors";
 import {
 	claimStage1Jobs,
 	clearMemoryData as clearMemoryDataInDb,
@@ -682,10 +683,15 @@ export async function collectThreads(session: AgentSession, currentThreadId?: st
 	const threads: MemoryThread[] = [];
 	// Every `*.jsonl` name the directory holds, as the `readdir` this replaced
 	// returned: a glob listing would hide a dot-named one.
-	const names = storage
-		.listEntriesSync(sessionDir)
-		.map(entry => entry.name)
-		.filter(name => name.endsWith(".jsonl"));
+	const entries = storage.listEntriesSync(sessionDir);
+	// `listEntriesSync` answers an empty list for a missing directory, where the
+	// `readdir` this replaced rejected with ENOENT. A key-indexed storage has no
+	// directories and an empty prefix is simply no threads, so only file storage
+	// restores the rejection — and only when the directory really is absent.
+	if (entries.length === 0 && storage instanceof FileSessionStorage && !storage.existsSync(sessionDir)) {
+		throw enoent(sessionDir);
+	}
+	const names = entries.map(entry => entry.name).filter(name => name.endsWith(".jsonl"));
 	for (const fullPath of names.map(name => path.join(sessionDir, name))) {
 		let stat: SessionStorageStat;
 		try {

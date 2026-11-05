@@ -143,7 +143,16 @@ export async function createReportBundle(options: ReportBundleOptions): Promise<
 		}
 
 		const artifactsDir = options.sessionFile.slice(0, -6);
-		for (const transcript of listTranscriptTree(storage, artifactsDir)) {
+		// Tolerant, as the local walk this supplements always was: an artifacts
+		// directory that cannot be listed (EACCES, EIO) costs the bundle its
+		// transcripts, never the bundle itself.
+		let transcripts: string[] = [];
+		try {
+			transcripts = listTranscriptTree(storage, artifactsDir);
+		} catch (err) {
+			logger.debug("report bundle: transcript listing failed", { err: String(err) });
+		}
+		for (const transcript of transcripts) {
 			const content = await readTranscript(storage, transcript);
 			if (content === undefined) continue;
 			const archivePath = `artifacts/${path.relative(artifactsDir, transcript).split(path.sep).join("/")}`;
