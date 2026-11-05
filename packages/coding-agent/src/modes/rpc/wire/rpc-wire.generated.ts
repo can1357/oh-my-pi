@@ -484,6 +484,8 @@ export type UsageLimitState = UsageLimitLowPriority | UsageLimitWrapUp;
 export interface SessionState {
 	sessionId: string;
 	model?: ModelInfo;
+	/** `bash` accepts `excludeFromContext`; require exactly true before sending excluded commands. */
+	supportsBashExcludeFromContext?: boolean;
 	thinkingLevel?: ThinkingLevel;
 	isStreaming?: boolean;
 	isCompacting?: boolean;
@@ -1771,6 +1773,7 @@ export interface SetAutoRetryParams {
 
 export interface BashParams {
 	command: string;
+	excludeFromContext?: boolean;
 }
 
 export interface GetSessionLeaseParams {

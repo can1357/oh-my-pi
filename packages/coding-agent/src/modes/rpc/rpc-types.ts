@@ -122,7 +122,7 @@ export type RpcCommand =
 	| { id?: string; type: "abort_retry" }
 
 	// Bash
-	| { id?: string; type: "bash"; command: string }
+	| { id?: string; type: "bash"; command: string; excludeFromContext?: boolean }
 	| { id?: string; type: "abort_bash" }
 
 	// Session
@@ -172,6 +172,8 @@ export type RpcCommand =
 
 export interface RpcSessionState {
 	model?: Model;
+	/** `bash` accepts `excludeFromContext`; require exactly `true` before sending excluded commands. */
+	supportsBashExcludeFromContext?: boolean;
 	thinkingLevel: ThinkingLevel | undefined;
 	isStreaming: boolean;
 	isCompacting: boolean;

@@ -2500,19 +2500,21 @@ func (v *UsageLimitState) decodeFrom(raw map[string]json.RawMessage) error {
 }
 
 type SessionState struct {
-	SessionID             string         `json:"sessionId"`
-	Model                 *ModelInfo     `json:"model,omitempty"`
-	ThinkingLevel         *ThinkingLevel `json:"thinkingLevel,omitempty"`
-	IsStreaming           bool           `json:"isStreaming"`
-	IsCompacting          bool           `json:"isCompacting"`
-	SteeringMode          QueueMode      `json:"steeringMode"`
-	FollowUpMode          QueueMode      `json:"followUpMode"`
-	InterruptMode         InterruptMode  `json:"interruptMode"`
-	SessionFile           *string        `json:"sessionFile,omitempty"`
-	SessionName           *string        `json:"sessionName,omitempty"`
-	AutoCompactionEnabled bool           `json:"autoCompactionEnabled"`
-	FastModeEnabled       bool           `json:"fastModeEnabled"`
-	FastModeActive        bool           `json:"fastModeActive"`
+	SessionID string     `json:"sessionId"`
+	Model     *ModelInfo `json:"model,omitempty"`
+	// `bash` accepts `excludeFromContext`; require exactly true before sending excluded commands.
+	SupportsBashExcludeFromContext *bool          `json:"supportsBashExcludeFromContext,omitempty"`
+	ThinkingLevel                  *ThinkingLevel `json:"thinkingLevel,omitempty"`
+	IsStreaming                    bool           `json:"isStreaming"`
+	IsCompacting                   bool           `json:"isCompacting"`
+	SteeringMode                   QueueMode      `json:"steeringMode"`
+	FollowUpMode                   QueueMode      `json:"followUpMode"`
+	InterruptMode                  InterruptMode  `json:"interruptMode"`
+	SessionFile                    *string        `json:"sessionFile,omitempty"`
+	SessionName                    *string        `json:"sessionName,omitempty"`
+	AutoCompactionEnabled          bool           `json:"autoCompactionEnabled"`
+	FastModeEnabled                bool           `json:"fastModeEnabled"`
+	FastModeActive                 bool           `json:"fastModeActive"`
 	// `/slow` applies to the active model.
 	SlowModeSupported bool `json:"slowModeSupported"`
 	// `/slow` is on for the active model; always `false` when `slowModeSupported` is `false`.
@@ -2547,6 +2549,7 @@ func (v *SessionState) decodeFrom(raw map[string]json.RawMessage) error {
 	d := fieldDecoder{raw: raw, owner: "SessionState"}
 	d.required("sessionId", &out.SessionID)
 	d.optional("model", &out.Model)
+	d.optional("supportsBashExcludeFromContext", &out.SupportsBashExcludeFromContext)
 	d.optional("thinkingLevel", &out.ThinkingLevel)
 	d.defaulted("isStreaming", &out.IsStreaming, `false`)
 	d.defaulted("isCompacting", &out.IsCompacting, `false`)
@@ -8223,10 +8226,11 @@ func (c Commands) AbortRetry(ctx context.Context) error {
 
 // BashCommand holds the parameters of "bash".
 type BashCommand struct {
-	Command string `json:"command"`
+	Command            string `json:"command"`
+	ExcludeFromContext *bool  `json:"excludeFromContext,omitempty"`
 }
 
-// Bash sends "bash": Run a shell command.
+// Bash sends "bash": Run a shell command. Before excluding output, require get_state.supportsBashExcludeFromContext to be true.
 func (c Commands) Bash(ctx context.Context, p BashCommand) (BashResult, error) {
 	var out BashResult
 	err := c.call(ctx, "bash", p, 0, &out)

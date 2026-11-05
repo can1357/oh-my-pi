@@ -541,7 +541,7 @@
 			},
 			{
 				"name": "bash",
-				"doc": "Run a shell command.",
+				"doc": "Run a shell command. Before excluding output, require get_state.supportsBashExcludeFromContext to be true.",
 				"params": "BashParams",
 				"result": "BashResult",
 				"nullable": false,
@@ -2614,6 +2614,10 @@
 				},
 				"model": {
 					"$ref": "#/$defs/ModelInfo"
+				},
+				"supportsBashExcludeFromContext": {
+					"type": "boolean",
+					"description": "`bash` accepts `excludeFromContext`; require exactly true before sending excluded commands."
 				},
 				"thinkingLevel": {
 					"$ref": "#/$defs/ThinkingLevel"
@@ -6794,6 +6798,9 @@
 			"properties": {
 				"command": {
 					"type": "string"
+				},
+				"excludeFromContext": {
+					"type": "boolean"
 				}
 			},
 			"required": [
