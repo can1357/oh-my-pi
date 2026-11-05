@@ -563,19 +563,29 @@ impl Root {
 	pub fn write(&mut self, store: &mut dyn StateStore, change: Change<'_>) {
 		self.note(&change);
 		let key = match &change {
-			Change::Del(key) => Some(key.to_buf()),
+			Change::Del(key) | Change::Put(key, _) => Some(key.to_buf()),
 			_ => None,
 		};
+		let deleting = matches!(change, Change::Del(_));
 		if let Err(err) = store.apply(change) {
 			self.fail(err);
 			// What the store holds is no longer what this cache claims, and
 			// a refused deletion leaves a record nothing else deletes.
 			self.synced.dirty = true;
-			if let Some(key) = key
+			if deleting
+				&& let Some(key) = key
 				&& !self.retry_dels.contains(&key)
 			{
 				self.retry_dels.push(key);
 			}
+		} else if !deleting
+			&& let Some(key) = key
+			&& !self.retry_dels.is_empty()
+		{
+			// A write that succeeded supersedes the deletion of the same key
+			// that an earlier one refused: replaying that deletion would take
+			// the newer value with it.
+			self.retry_dels.retain(|queued| *queued != key);
 		}
 	}
 
@@ -3294,6 +3304,65 @@ mod tests {
 			matches!(store.get(Key::Misc(MiscKey::BgPids)), Ok(Some(_))),
 			"the next sync writes the kept statuses the refused write lost"
 		);
+	}
+
+	/// Failure mode: the deletion a store refused was made again even after
+	/// a later write had put the key back, so a value the shell had just
+	/// written vanished from the store and from a shell restored from it.
+	#[test]
+	fn a_write_after_a_refused_deletion_keeps_the_record() {
+		let (mut store, mut root, vp) = shell();
+		let key = Key::Var(BStr::new("x"));
+		root.write(&mut store, Change::Put(key, Record::Var(Var::scalar("old", Attrs::NONE))));
+		{
+			struct RefuseDel<'a>(&'a mut crate::bash::MemStore);
+			impl StateStore for RefuseDel<'_> {
+				fn get(&mut self, key: Key<'_>) -> Result<Option<&Record>, StoreError> {
+					self.0.get(key)
+				}
+
+				fn scan(
+					&mut self,
+					table: Table,
+					f: &mut dyn FnMut(Key<'_>, &Record),
+				) -> Result<(), StoreError> {
+					self.0.scan(table, f)
+				}
+
+				fn apply(&mut self, change: Change<'_>) -> Result<(), StoreError> {
+					if matches!(change, Change::Del(_)) {
+						return Err(StoreError::Backend("refused".into()));
+					}
+					self.0.apply(change)
+				}
+
+				fn put_blob(&mut self, slot: BlobSlot, bytes: &[u8]) -> Result<(), StoreError> {
+					self.0.put_blob(slot, bytes)
+				}
+
+				fn get_blob(&mut self, slot: BlobSlot) -> Result<Option<Vec<u8>>, StoreError> {
+					self.0.get_blob(slot)
+				}
+
+				fn del_blob(&mut self, slot: BlobSlot) -> Result<(), StoreError> {
+					self.0.del_blob(slot)
+				}
+
+				fn epoch(&self) -> u64 {
+					self.0.epoch()
+				}
+			}
+			let mut refusing = RefuseDel(&mut store);
+			root.write(&mut refusing, Change::Del(key));
+		}
+		assert!(root.take_fault().is_some(), "the refused deletion is reported");
+		root.write(&mut store, Change::Put(key, Record::Var(Var::scalar("new", Attrs::NONE))));
+		sync_root(&mut root, &mut store, &vp);
+		let kept = match store.get(key) {
+			Ok(Some(Record::Var(var))) => var.as_scalar().map(<[u8]>::to_vec),
+			_ => None,
+		};
+		assert_eq!(kept.as_deref(), Some(&b"new"[..]), "the write after the refused deletion stands");
 	}
 
 	fn shell() -> (crate::bash::MemStore, Root, Vproc) {
