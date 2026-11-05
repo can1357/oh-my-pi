@@ -672,7 +672,7 @@ def _run_rpc_blocking(
         custom_tools=host_tools.build(bindings),
         request_timeout=settings.request_timeout_seconds,
         startup_timeout=60.0,
-        max_event_history=50_000,
+        max_event_history=settings.max_event_history,
         extra_args=extra_args,
         user=inputs.slot_uid,
         group=inputs.slot_uid if inputs.slot_uid is not None else None,
