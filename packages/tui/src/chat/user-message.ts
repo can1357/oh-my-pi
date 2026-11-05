@@ -9,6 +9,7 @@ import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { ensureThemeSync, getMarkdownTheme, theme } from "../theme";
 import {
 	attachmentSgr,
+	collapsedRunsText,
 	collapseImageMarkers,
 	COMPOSER_TOKEN_REGEX,
 	composerTokenRegex,
@@ -155,7 +156,7 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 		// Display-only collapse: the stored/wire text carries bracketed `[Image #N, WxH]` markers,
 		// but the transcript shows the same compact `<icon> #N` chip the composer used. Runs before
 		// Markdown layout so wrapping and bubble padding are computed on the visible text.
-		text = collapseImageMarkers(text, Number.POSITIVE_INFINITY, () => {});
+		text = collapsedRunsText(collapseImageMarkers(text, Number.POSITIVE_INFINITY));
 		const mentionLabels: string[] = [];
 		MODEL_MENTION_TAG_RE.lastIndex = 0;
 		text = text.replace(MODEL_MENTION_TAG_RE, (_tag, _agent: string, name: string) => {

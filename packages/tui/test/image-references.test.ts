@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	chipLabel,
+	collapsedRunsText,
 	collapseImageMarkers,
 	collapseModelMentions,
 	collapseSkillTokens,
@@ -134,83 +135,78 @@ describe("collapseModelMentions", () => {
 	const labelFor = (selector: string) =>
 		selector === "a/x" ? { label: modelMentionChipLabel("X One"), selector } : undefined;
 
-	it("collapses known whitespace-delimited selectors and registers their canonical expansion", () => {
-		const registered: Array<[string, string]> = [];
-		const out = collapseModelMentions("ask ^a/x now", labelFor, (label, expansion) =>
-			registered.push([label, expansion]),
-		);
-		expect(out).toBe(`ask ${modelMentionChipLabel("X One")} now`);
-		expect(registered).toEqual([[modelMentionChipLabel("X One"), "^a/x"]]);
+	it("reports a known whitespace-delimited selector as a chip run with its canonical expansion", () => {
+		expect(collapseModelMentions("ask ^a/x now", labelFor)).toEqual([
+			"ask ",
+			{ atom: modelMentionChipLabel("X One"), expansion: "^a/x" },
+			" now",
+		]);
 	});
 
 	it("keeps unknown and punctuation-attached selectors literal", () => {
-		expect(collapseModelMentions("^nope/z and ^a/x,", labelFor, () => {})).toBe("^nope/z and ^a/x,");
+		expect(collapseModelMentions("^nope/z and ^a/x,", labelFor)).toEqual(["^nope/z and ^a/x,"]);
 	});
 
 	it("allows slash prompts but not local-execution drafts", () => {
-		expect(collapseModelMentions("/plan ask ^a/x now", labelFor, () => {})).toBe(
+		expect(collapsedRunsText(collapseModelMentions("/plan ask ^a/x now", labelFor))).toBe(
 			`/plan ask ${modelMentionChipLabel("X One")} now`,
 		);
-		expect(collapseModelMentions("!echo ^a/x", labelFor, () => {})).toBe("!echo ^a/x");
-		expect(collapseModelMentions("$ echo ^a/x", labelFor, () => {})).toBe("$ echo ^a/x");
+		expect(collapseModelMentions("!echo ^a/x", labelFor)).toEqual(["!echo ^a/x"]);
+		expect(collapseModelMentions("$ echo ^a/x", labelFor)).toEqual(["$ echo ^a/x"]);
 	});
 });
 
 describe("collapseSkillTokens", () => {
 	const known = (name: string) => name === "reviewer";
 
-	it("collapses known skill tokens into chips and registers the canonical token as expansion", () => {
-		const registered: Array<[string, string]> = [];
-		const out = collapseSkillTokens("fix it /skill:reviewer now", known, (label, expansion) =>
-			registered.push([label, expansion]),
-		);
-		expect(out).toBe(`fix it ${skillChipLabel("reviewer")} now`);
-		expect(registered).toEqual([[skillChipLabel("reviewer"), "/skill:reviewer"]]);
+	it("reports a known skill token as a chip run carrying the canonical token", () => {
+		expect(collapseSkillTokens("fix it /skill:reviewer now", known)).toEqual([
+			"fix it ",
+			{ atom: skillChipLabel("reviewer"), expansion: "/skill:reviewer" },
+			" now",
+		]);
 	});
 
 	it("leaves unknown skills and glued tokens as literal text", () => {
-		expect(collapseSkillTokens("/skill:nope and x/skill:reviewer", known, () => {})).toBe(
+		expect(collapseSkillTokens("/skill:nope and x/skill:reviewer", known)).toEqual([
 			"/skill:nope and x/skill:reviewer",
-		);
+		]);
 	});
 
 	it("does not collapse inside a bash or foreign slash-command draft", () => {
-		expect(collapseSkillTokens("!echo /skill:reviewer", known, () => {})).toBe("!echo /skill:reviewer");
-		expect(collapseSkillTokens("/compact /skill:reviewer", known, () => {})).toBe("/compact /skill:reviewer");
+		expect(collapseSkillTokens("!echo /skill:reviewer", known)).toEqual(["!echo /skill:reviewer"]);
+		expect(collapseSkillTokens("/compact /skill:reviewer", known)).toEqual(["/compact /skill:reviewer"]);
 	});
 
 	it("collapses and renders a collision-namespaced skill as one chip", () => {
-		const registered: Array<[string, string]> = [];
-		const out = collapseSkillTokens(
-			"fix it /skill:superpowers/tdd now",
-			name => name === "superpowers/tdd",
-			(label, expansion) => registered.push([label, expansion]),
-		);
-		expect(out).toBe(`fix it ${skillChipLabel("superpowers/tdd")} now`);
-		expect(registered).toEqual([[skillChipLabel("superpowers/tdd"), "/skill:superpowers/tdd"]]);
-		expect(capture(out).skills).toEqual(["superpowers/tdd"]);
+		const runs = collapseSkillTokens("fix it /skill:superpowers/tdd now", name => name === "superpowers/tdd");
+		expect(runs).toEqual([
+			"fix it ",
+			{ atom: skillChipLabel("superpowers/tdd"), expansion: "/skill:superpowers/tdd" },
+			" now",
+		]);
+		expect(capture(collapsedRunsText(runs)).skills).toEqual(["superpowers/tdd"]);
 	});
 });
 
 describe("collapseImageMarkers", () => {
-	it("collapses bracketed markers into chip tokens and registers their expansions", () => {
-		const registered: Array<[string, string]> = [];
-		const out = collapseImageMarkers("see [Image #1, 800x600] end", 1, (label, expansion) =>
-			registered.push([label, expansion]),
-		);
-		expect(out).toBe(`see ${chipLabel("image", 1)} end`);
-		expect(registered).toEqual([[chipLabel("image", 1), "[Image #1, 800x600]"]]);
+	it("reports a bracketed marker as a chip run carrying the marker it stands for", () => {
+		expect(collapseImageMarkers("see [Image #1, 800x600] end", 1)).toEqual([
+			"see ",
+			{ atom: chipLabel("image", 1), expansion: "[Image #1, 800x600]" },
+			" end",
+		]);
 	});
 
 	it("strips a legacy trailing attachment URI while collapsing", () => {
-		const out = collapseImageMarkers("[Image #1] attachment://1 tail", 1, () => {});
-		expect(out).toBe(`${chipLabel("image", 1)} tail`);
+		expect(collapsedRunsText(collapseImageMarkers("[Image #1] attachment://1 tail", 1))).toBe(
+			`${chipLabel("image", 1)} tail`,
+		);
 	});
 
 	it("leaves markers beyond the pending image count as plain text", () => {
 		// Prose about an earlier message's image must not become a live chip.
-		const out = collapseImageMarkers("[Image #2] is from before", 1, () => {});
-		expect(out).toBe("[Image #2] is from before");
+		expect(collapseImageMarkers("[Image #2] is from before", 1)).toEqual(["[Image #2] is from before"]);
 	});
 });
 

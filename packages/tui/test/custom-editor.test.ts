@@ -313,19 +313,24 @@ describe("CustomEditor bracketed path paste", () => {
 			if (key === "chip.image") return "🔶";
 			return symbol(key);
 		});
-		let draft = "";
 		try {
 			const image: ImageContent = { type: "image", data: "aW1hZ2U=", mimeType: "image/png" };
 			editor.setDraft("[Image #1]", [image]);
 			for (let n = 1; n <= 10; n++) editor.insertTextAttachment(`blob ${n}`);
-			draft = `${chipLabel("image", 1)} ${chipLabel("paste", 10)}`;
-			editor.setText(draft);
+			// A host that rebuilds the draft says where its chips are; their glyphs may have
+			// changed since, and the records keep them chips anyway.
+			editor.setRuns([
+				{ atom: chipLabel("image", 1), expansion: "[Image #1]" },
+				" ",
+				{ atom: chipLabel("paste", 10), expansion: "blob 10" },
+			]);
 			expect(editor.composerChips().map(chip => `${chip.kind}#${chip.n}`)).toEqual(["image#1", "paste#10"]);
 		} finally {
 			spy.mockRestore();
 		}
 
-		editor.setText(`${draft} edited`);
+		editor.moveToMessageEnd();
+		editor.insertText(" edited");
 		expect(editor.composerChips().map(chip => `${chip.kind}#${chip.n}`)).toEqual(["image#1", "paste#10"]);
 		expect(editor.getExpandedText()).toBe("[Image #1] blob 10 edited");
 	});

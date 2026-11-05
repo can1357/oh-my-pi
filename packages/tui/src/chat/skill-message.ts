@@ -10,7 +10,13 @@ import { getMarkdownTheme, theme } from "../theme";
 import type { CustomMessage, SkillPromptDetails } from "./messages";
 import { fileHyperlink } from "../render";
 import { tryFileUri } from "../render/hyperlink";
-import { collapseSkillTokens, skillChipLabel, skillChipStyle, skillToken } from "../prompt/composer-attachments";
+import {
+	collapsedRunsText,
+	collapseSkillTokens,
+	skillChipLabel,
+	skillChipStyle,
+	skillToken,
+} from "../prompt/composer-attachments";
 import { type UserBubbleOptions, UserMessageComponent, userBubbleColor } from "./user-message";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { card, md, node, span } from "../native/describe";
@@ -77,11 +83,7 @@ export class SkillMessageComponent extends Container {
 			const name = details?.name?.trim() || "unknown";
 			const token = skillToken(name);
 			const prompt = details?.prompt ?? (details?.args ? `${token} ${details.args}` : token);
-			const display = collapseSkillTokens(
-				prompt,
-				candidate => candidate === name,
-				() => {},
-			);
+			const display = collapsedRunsText(collapseSkillTokens(prompt, candidate => candidate === name));
 			const label = skillChipLabel(name);
 			const leading = display.startsWith(label) && /^\s*$/.test(display.charAt(label.length));
 			const draft = leading ? display.slice(label.length).trim() : display;
@@ -150,11 +152,7 @@ export class SkillMessageComponent extends Container {
 		const prompt = details?.prompt ?? (details?.args ? `${token} ${details.args}` : token);
 		// Display-only collapse: only the invoked skill becomes a chip; a second `/skill:` token the
 		// dispatcher ignored stays literal so the transcript never claims a skill that never loaded.
-		const display = collapseSkillTokens(
-			prompt,
-			candidate => candidate === name,
-			() => {},
-		);
+		const display = collapsedRunsText(collapseSkillTokens(prompt, candidate => candidate === name));
 		const label = skillChipLabel(name);
 		const leading = display.startsWith(label) && /^\s*$/.test(display.charAt(label.length));
 		const bubble: UserBubbleOptions = {

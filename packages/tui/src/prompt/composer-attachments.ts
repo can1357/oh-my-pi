@@ -1,3 +1,4 @@
+import type { EditorRun } from "../components/external-edit";
 import { allowsModelMentions, allowsSkillTokens, SKILL_TOKEN_RE } from "./skill-tokens";
 import { MODEL_MENTION_RE, modelMentionToken } from "./model-mention-syntax";
 import { SYMBOL_PRESETS } from "../theme/symbols";
@@ -60,42 +61,79 @@ function glyphSource(icon: string): string {
 const SKILL_CHIP_SOURCE = `(?:${SKILL_ICONS.map(glyphSource).join("|")}) (${SKILL_NAME_SOURCE})(?![\\w-])`;
 
 /**
- * Replaces `/skill:<name>` tokens for known skills with compact chip labels and
- * registers each label's token as its atomic editor expansion. Leaves the text
- * untouched when skill tokens are not invocations in this draft (see
- * {@link allowsSkillTokens}).
+ * Split `text` on `pattern`, turning each match the mapper claims into the chip token it
+ * returns and leaving everything else as the person's characters. Runs, not a rewritten string:
+ * the editor records where each chip went, so nothing has to find it again later.
  */
-export function collapseSkillTokens(
+function chipRuns(
 	text: string,
-	isKnown: (name: string) => boolean,
-	register: (label: string, expansion: string) => void,
-): string {
-	if (!text.includes("/skill:") || !allowsSkillTokens(text)) return text;
-	SKILL_TOKEN_RE.lastIndex = 0;
-	return text.replace(SKILL_TOKEN_RE, (match, delimiter: string, name: string) => {
-		if (!isKnown(name)) return match;
-		const label = skillChipLabel(name);
-		register(label, skillToken(name));
-		return `${delimiter}${label}`;
+	pattern: RegExp,
+	chipFor: (match: RegExpMatchArray) => { keep: string; atom: string; expansion: string } | undefined,
+): EditorRun[] {
+	const runs: EditorRun[] = [];
+	let last = 0;
+	for (const match of text.matchAll(pattern)) {
+		const chip = chipFor(match);
+		if (chip === undefined || match.index === undefined) continue;
+		const literal = text.slice(last, match.index) + chip.keep;
+		if (literal) runs.push(literal);
+		runs.push({ atom: chip.atom, expansion: chip.expansion });
+		last = match.index + match[0].length;
+	}
+	if (last === 0) return [text];
+	if (last < text.length) runs.push(text.slice(last));
+	return runs;
+}
+
+/** Apply `collapse` to the literal runs of `runs` only, so one chip never forms inside another. */
+export function collapseWithin(runs: readonly EditorRun[], collapse: (text: string) => EditorRun[]): EditorRun[] {
+	const out: EditorRun[] = [];
+	for (const run of runs) {
+		if (typeof run !== "string") {
+			out.push(run);
+			continue;
+		}
+		for (const produced of collapse(run)) if (produced !== "") out.push(produced);
+	}
+	return out;
+}
+
+/** The text `runs` read as: each chip as its label, each literal run as itself. For surfaces
+ *  that show what the composer showed but own no editor to record the chips in. */
+export function collapsedRunsText(runs: readonly EditorRun[]): string {
+	let out = "";
+	for (const run of runs) out += typeof run === "string" ? run : run.atom;
+	return out;
+}
+
+/**
+ * Replaces `/skill:<name>` tokens for known skills with compact chip labels, each run saying
+ * whether it is a chip or the person's text. Leaves the text untouched when skill tokens are not
+ * invocations in this draft (see {@link allowsSkillTokens}).
+ */
+export function collapseSkillTokens(text: string, isKnown: (name: string) => boolean): EditorRun[] {
+	if (!text.includes("/skill:") || !allowsSkillTokens(text)) return [text];
+	return chipRuns(text, new RegExp(SKILL_TOKEN_RE.source, "g"), match => {
+		const [, delimiter = "", name = ""] = match;
+		if (!isKnown(name)) return undefined;
+		return { keep: delimiter, atom: skillChipLabel(name), expansion: skillToken(name) };
 	});
 }
 
 /**
- * Replaces mentionable model selectors with their display chips and registers
- * each chip's canonical `^selector` as its atomic editor expansion.
+ * Replaces mentionable model selectors with their display chips, each chip's canonical
+ * `^selector` carried as its expansion.
  */
 export function collapseModelMentions(
 	text: string,
 	chipFor: (selector: string) => { label: string; selector: string } | undefined,
-	register: (label: string, expansion: string) => void,
-): string {
-	if (!text.includes("^") || !allowsModelMentions(text)) return text;
-	MODEL_MENTION_RE.lastIndex = 0;
-	return text.replace(MODEL_MENTION_RE, (match, delimiter: string, selector: string) => {
+): EditorRun[] {
+	if (!text.includes("^") || !allowsModelMentions(text)) return [text];
+	return chipRuns(text, new RegExp(MODEL_MENTION_RE.source, "g"), match => {
+		const [, delimiter = "", selector = ""] = match;
 		const chip = chipFor(selector);
-		if (chip === undefined) return match;
-		register(chip.label, modelMentionToken(chip.selector));
-		return `${delimiter}${chip.label}`;
+		if (chip === undefined) return undefined;
+		return { keep: delimiter, atom: chip.label, expansion: modelMentionToken(chip.selector) };
 	});
 }
 
@@ -326,22 +364,21 @@ export function shiftImageMarkers(text: string, offset: number, imageCount?: num
 }
 
 /**
- * Replaces valid expanded image markers with compact tokens and registers each
- * token's original marker as its atomic editor expansion.
+ * Replaces valid expanded image markers with compact chip tokens, each run saying whether it is
+ * a chip this composer owns or the person's own characters — a marker they wrote out themselves
+ * stays text.
  */
-export function collapseImageMarkers(
-	text: string,
-	imageCount: number,
-	register: (label: string, expansion: string) => void,
-): string {
-	if (imageCount === 0) return text;
-	return text.replace(VISION_MARKER_REGEX, (match, kind: string, idx: string, tail: string) => {
+export function collapseImageMarkers(text: string, imageCount: number): EditorRun[] {
+	if (imageCount === 0) return [text];
+	return chipRuns(text, new RegExp(VISION_MARKER_REGEX.source, "g"), match => {
+		const [, kind = "", idx = "", tail = ""] = match;
 		const n = Number(idx);
-		if (n > imageCount) return match;
-		const chipKind = kind === "Video" ? "video" : "image";
-		const label = chipLabel(chipKind, n);
-		register(label, `[${kind} #${n}${tail}]`);
-		return label;
+		if (n > imageCount) return undefined;
+		return {
+			keep: "",
+			atom: chipLabel(kind === "Video" ? "video" : "image", n),
+			expansion: `[${kind} #${n}${tail}]`,
+		};
 	});
 }
 

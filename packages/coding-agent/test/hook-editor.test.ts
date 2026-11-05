@@ -1,7 +1,7 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { afterEach, beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
-import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
+import { HookEditorComponent, type PasteCompletion } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import type { DescribeContext } from "@oh-my-pi/pi-tui/native/node";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
@@ -331,8 +331,8 @@ describe("HookEditorComponent prompt-style mode", () => {
 				return Promise.resolve(text);
 			},
 		});
-		const token = component.attachImage(image, { width: 3, height: 3 });
-		component.pasteText(`shot ${token} of user-[Image #1, 3x3].png`);
+		const token = component.attachImage(image, { width: 3, height: 3 })!;
+		component.beginPaste()([{ text: "shot " }, { attachment: token }, { text: " of user-[Image #1, 3x3].png" }]);
 
 		component.handleNativeEvent({ type: "action", key: "actions/external", act: "external", mods: [] });
 		return Promise.resolve().then(() => {
@@ -419,6 +419,69 @@ describe("HookEditorComponent prompt-style mode", () => {
 		expect(onSubmit).toHaveBeenCalledWith(body, [image], [`${pasted} `, { kind: "image", n: 1, tail: "" }]);
 	});
 
+	it("keeps a pasted file name that reads like its own token through an unchanged external editor", async () => {
+		// Round-10 F1: the round trip used to hand back flattened text, and the buffer's atom
+		// table then claimed the file name's characters. The editor now maps the return by what
+		// changed, so only the token it handed out comes back as a token.
+		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
+		const onSubmit = vi.fn();
+		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
+			promptStyle: true,
+			acceptImages: true,
+			externalEditor: text => Promise.resolve(text),
+		});
+		const token = component.attachImage(image, { width: 3, height: 3 })!;
+		const typed = ` beside user-${token}.png\n${largePasteText()}`;
+		component.beginPaste()([{ text: "actual " }, { attachment: token }, { text: typed }]);
+
+		component.handleNativeEvent({ type: "action", key: "actions/external", act: "external", mods: [] });
+		await Promise.resolve();
+		component.handleInput("\r");
+
+		expect(onSubmit).toHaveBeenCalledWith(
+			`actual [Image #1, 3x3]${typed}`,
+			[image],
+			["actual ", { kind: "image", n: 1, tail: ", 3x3" }, typed],
+		);
+	});
+
+	it("refuses an external edit that writes the attachment token's characters by hand", async () => {
+		// Two identical tokens, one of them nobody attached: there is no honest way to say which
+		// stands for the image, so the answer is left exactly as it was and the person is told.
+		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
+		const onSubmit = vi.fn();
+		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
+			promptStyle: true,
+			acceptImages: true,
+			externalEditor: text => Promise.resolve(`${text} and a second ${text.trim()}`),
+		});
+		const token = component.attachImage(image)!;
+		component.beginPaste()([{ attachment: token }]);
+
+		component.handleNativeEvent({ type: "action", key: "actions/external", act: "external", mods: [] });
+		await Promise.resolve();
+		const rendered = Bun.stripANSI(component.render(100).join("\n"));
+		expect(rendered).toContain("were not applied");
+		component.handleInput("\r");
+
+		expect(onSubmit).toHaveBeenCalledWith("[Image #1]", [image], [{ kind: "image", n: 1, tail: "" }]);
+	});
+
+	it("keeps a literal `[Paste #1]` in one piece when a later piece becomes paste #1", () => {
+		// Round-10 F3: the pieces of one delivery collapse separately, so an earlier piece naming
+		// `[Paste #1]` used to be replaced by whatever the later piece stored under that id.
+		const onSubmit = vi.fn();
+		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
+			promptStyle: true,
+		});
+		const head = '{"name":"[Paste #1]","body":"';
+		component.beginPaste()([{ text: head }, { text: `${largePasteText()}"}` }]);
+
+		component.handleInput("\r");
+
+		expect(onSubmit).toHaveBeenCalledWith(`${head}${largePasteText()}"}`);
+	});
+
 	it("keeps a typed marker in the same field as an attachment out of the submitted runs", () => {
 		// The answer owns one real image; everything else that reads like a marker is the
 		// person's own text and must stay a literal run, so a renumbering consumer cannot move it.
@@ -429,7 +492,8 @@ describe("HookEditorComponent prompt-style mode", () => {
 			acceptImages: true,
 		});
 
-		component.pasteText(`shot ${component.attachImage(image, { width: 8, height: 4 })} of user-[Image #1].png`);
+		const token = component.attachImage(image, { width: 8, height: 4 })!;
+		component.beginPaste()([{ text: "shot " }, { attachment: token }, { text: " of user-[Image #1].png" }]);
 		component.handleInput("\r");
 
 		expect(onSubmit).toHaveBeenCalledWith(
@@ -443,7 +507,7 @@ describe("HookEditorComponent prompt-style mode", () => {
 		// Windows Terminal owns Ctrl+V and pastes an image-only clipboard as an empty paste.
 		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
 		const onSubmit = vi.fn();
-		let finishPaste: ((text: string | undefined) => boolean) | undefined;
+		let finishPaste: PasteCompletion | undefined;
 		const component: HookEditorComponent = new HookEditorComponent(createTui(), "Prompt", "see ", onSubmit, vi.fn(), {
 			promptStyle: true,
 			acceptImages: true,
@@ -456,7 +520,7 @@ describe("HookEditorComponent prompt-style mode", () => {
 
 		component.handleInput("\x1b[200~\x1b[201~\r");
 		expect(onSubmit).not.toHaveBeenCalled();
-		finishPaste?.(component.attachImage(image));
+		finishPaste?.([{ attachment: component.attachImage(image)! }]);
 
 		expect(onSubmit).toHaveBeenCalledWith("see [Image #1]", [image], ["see ", { kind: "image", n: 1, tail: "" }]);
 	});

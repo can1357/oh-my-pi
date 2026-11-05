@@ -32,6 +32,7 @@ import {
 	truncateToWidth,
 	wrapTextWithAnsi,
 } from "../index";
+import { type EditorRun, mapExternalEdit } from "../components/external-edit";
 import { BracketedPasteHandler } from "../bracketed-paste";
 import { getEditorTheme, theme } from "../theme/theme";
 import { matchesAppExternalEditor, matchesAppFollowUp, matchesAppInterrupt } from "../keybinding-matchers";
@@ -59,6 +60,13 @@ const PART = "omp.hook-editor";
 const MAX_PROMPT_TITLE_ROWS = 3;
 /** Border (2) + padX (2) columns consumed by the panel chrome. */
 const PROMPT_TITLE_CHROME_COLUMNS = 4;
+
+/**
+ * Completes one reserved paste: the pieces to deliver — the person's text and the attachment
+ * tokens the prompt itself handed out — or `undefined` to release the wait with nothing.
+ * Returns whether anything was delivered.
+ */
+export type PasteCompletion = (content: string | readonly PasteDelivery[] | undefined) => boolean;
 
 /**
  * `prefix` and `question` flattened onto one line, wrapped to the terminal's width and cut to
@@ -151,6 +159,12 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 	#disposed = false;
 	/** Head, field and action bar; every part but the editor (which describes itself) is fixed, so it is built once. */
 	#nativeRoot: NativeNode;
+	#nativeHead: NativeNode;
+	#nativeBar: NativeNode;
+	/** The same sheet with a refusal row, rebuilt only when that row's text changes. */
+	#nativeNoticeRoot: NativeNode | undefined;
+	/** Terminal row carrying the refusal; empty while there is nothing to refuse. */
+	#noticeRow = new Text("", 0, 0);
 	/** Focus state mirrored to the nested editor during rendering. */
 	focused = false;
 
@@ -202,9 +216,16 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 			throw new Error("HookEditorComponent: prefilled images need the runs that name them (options.parts)");
 		}
 		if (parts?.length) {
-			// Re-editing a draft this prompt produced: restore each marker as the token that
-			// produced it, so its provenance survives the round trip.
-			this.#editor.setText(parts.map(part => this.#token(part)).join(""));
+			// Re-editing a draft this prompt produced: each marker goes back as the token that
+			// produced it, and each literal run as the person's characters. The editor records
+			// where the tokens are, so nothing has to be recognised in the text afterwards.
+			this.#editor.setRuns(
+				parts.map((part): EditorRun => {
+					if (typeof part === "string") return part;
+					const label = this.#token(part);
+					return { atom: label, expansion: renderAttachmentText([part]) };
+				}),
+			);
 		} else if (prefill) {
 			this.#editor.setText(prefill);
 		}
@@ -301,10 +322,9 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 			}),
 		);
 
-		this.#nativeRoot = col(
-			[node("col", { role: `${PART}.head`, gap: "xs" }, head, "head"), this.#editor, actionBar(buttons)],
-			{ role: ROLE },
-		);
+		this.#nativeHead = node("col", { role: `${PART}.head`, gap: "xs" }, head, "head");
+		this.#nativeBar = actionBar(buttons);
+		this.#nativeRoot = col([this.#nativeHead, this.#editor, this.#nativeBar], { role: ROLE });
 	}
 
 	/**
@@ -313,7 +333,37 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 	 */
 	override describe(_cx: DescribeContext): NativeNode {
 		this.#field.focused = this.focused;
-		return this.#nativeRoot;
+		return this.#nativeNoticeRoot ?? this.#nativeRoot;
+	}
+
+	/**
+	 * Say why an edit was not applied, and keep saying it until the person changes something. A
+	 * refusal that showed nothing would read as a prompt that silently ignored their work.
+	 */
+	#setNotice(message: string | undefined): void {
+		if (message === undefined) this.removeChild(this.#noticeRow);
+		else {
+			this.#noticeRow.setText(theme.fg("error", `! ${message}`));
+			if (!this.children.includes(this.#noticeRow)) this.addChild(this.#noticeRow);
+		}
+		this.#nativeNoticeRoot =
+			message === undefined
+				? undefined
+				: col(
+						[
+							this.#nativeHead,
+							this.#editor,
+							node(
+								"text",
+								{ spans: [span(message)], role: `${PART}.notice`, tone: "error", wrap: "word" },
+								undefined,
+								"notice",
+							),
+							this.#nativeBar,
+						],
+						{ role: ROLE },
+					);
+		this.#tui.requestRender(true);
 	}
 
 	/** The action bar's buttons run what their keys run. */
@@ -434,10 +484,10 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 	 * Reserve ordered clipboard delivery. Completion accepts one nonempty delivery, or releases
 	 * on undefined. A host that attached an image through {@link attachImage} delivers its token
 	 * as its own {@link PasteDelivery} piece rather than splicing it into the pasted text: the
-	 * token then enters the buffer as the atom it is, and the person's own characters — which
-	 * may read exactly like one — stay text.
+	 * editor then records that piece as a token of its own, and the person's own characters —
+	 * which may read exactly like one — stay text.
 	 */
-	beginPaste(): (content: string | readonly PasteDelivery[] | undefined) => boolean {
+	beginPaste(): PasteCompletion {
 		if (this.#disposed) return () => false;
 		const pending: { settled: boolean; content: readonly PasteDelivery[] | undefined } = {
 			settled: false,
@@ -457,9 +507,10 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 				if (!paste.settled) break;
 				for (const piece of paste.content ?? []) {
 					if ("text" in piece) this.#editor.pasteText(piece.text);
-					// Already registered by `attachImage`; inserting the label alone keeps the
-					// paste's own spacing, where `insertAtom` would add a space of its own.
-					else this.#editor.insertText(piece.attachment);
+					// Already registered by `attachImage`: the editor records this one as a token
+					// of its own, and keeps the paste's spacing, where `insertAtom` would add a
+					// space the person never typed.
+					else this.#editor.insertRegisteredAtom(piece.attachment);
 				}
 				delivered++;
 			}
@@ -571,33 +622,31 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 	}
 
 	/**
-	 * The buffer as the person sees it: pastes expanded to their content, attachment tokens left
-	 * standing. The external editor therefore hands the tokens back as tokens, and an attachment
-	 * keeps its provenance across the round trip without a marker's characters ever being
-	 * matched. A token the person deletes there drops its attachment, as deleting it here does.
+	 * Hand the external editor the buffer as the person sees it — pastes written out in full,
+	 * attachment tokens left standing — and take back only what can be attributed.
+	 *
+	 * The editor knows where its tokens sat in what it handed out, so the return is mapped by
+	 * the difference between the two texts, never by looking for a token's characters in the
+	 * returned text. An edit that leaves a token's place in doubt — its characters changed,
+	 * moved, copied, or written out by hand — is refused with the reason, and the answer stays
+	 * exactly as it was. Guessing there is what turns a file name into somebody's image.
 	 */
-	#tokenizedText(): string {
-		let out = "";
-		for (const run of this.#editor.getExpandedRuns()) out += run.atom ?? run.text;
-		return out;
-	}
-
 	async #openExternalEditor(): Promise<void> {
 		const externalEditor = this.#externalEditor;
 		if (!externalEditor) return;
 
-		const currentText = this.#tokenizedText();
+		const payload = this.#editor.externalEditPayload();
 		try {
 			this.#tui.stop();
-			const result = await externalEditor(currentText);
-			if (!this.#disposed && result !== null) {
-				this.#editor.setText(result);
-				// The editor was handed every paste already expanded, so the returned text holds
-				// the bodies themselves. Dropping the payloads keeps the buffer and the registry
-				// in step: a `[Paste #N]` the person typed, or one their own pasted text carried,
-				// is now literal and is never expanded a second time.
-				this.#editor.clearPastes();
+			const result = await externalEditor(payload.text);
+			if (this.#disposed || result === null) return;
+			const mapping = mapExternalEdit(payload, result);
+			if (!mapping.ok) {
+				this.#setNotice(`Your editor's changes were not applied: ${mapping.reason}. The answer is unchanged.`);
+				return;
 			}
+			this.#setNotice(undefined);
+			this.#editor.applyExternalEdit(mapping.runs);
 		} finally {
 			this.#tui.start();
 			this.#tui.requestRender(true);
