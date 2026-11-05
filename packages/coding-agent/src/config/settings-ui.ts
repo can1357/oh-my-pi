@@ -1,5 +1,6 @@
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
+import { displayTemplate } from "@oh-my-pi/pi-tui/overlays/display-catalog";
 import { SETTING_TABS, type SettingsDisplayEntry, type SettingsHost } from "@oh-my-pi/pi-tui/overlays/settings-defs";
 import { isSettingsInitialized, Settings, settings } from "./settings";
 import { orderedSettings } from "./all-settings";
@@ -48,9 +49,10 @@ const CONDITIONS: Record<string, () => boolean> = {
 /** Description suffix telling the panel user that an environment variable is in play. */
 function envNote(setting: AnySetting): string {
 	if (!setting.envName || setting.envValue() === undefined) return "";
+	const values = { env: setting.envName };
 	return setting.envFallback
-		? ` Unset, it falls back to $${setting.envName}.`
-		: ` $${setting.envName} overrides this setting while it is set.`;
+		? displayTemplate("chrome.envNote.fallback", ` Unset, it falls back to $${setting.envName}.`, values)
+		: displayTemplate("chrome.envNote.override", ` $${setting.envName} overrides this setting while it is set.`, values);
 }
 
 /**

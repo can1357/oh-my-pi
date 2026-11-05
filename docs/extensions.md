@@ -325,6 +325,32 @@ export default function (pi: ExtensionAPI) {
 - `get(scope)` reads the effective value; `listen(scope, cb)` observes changes. Writes go through the settings store, so change listeners and live effects fire.
 - `lookup` returns `undefined` for an unknown id.
 
+### Settings display catalog (display-only)
+
+`pi.pi.setDisplayCatalog({ locale, strings })` renames what the settings overlay draws. English is the canonical form: with no catalog installed every string renders exactly as omp ships it, and paths, stored values, section ids and section ordering never change. A catalog therefore cannot alter behaviour, only text — an unknown key leaves its English string in place, which makes partial translations safe.
+
+```ts
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+
+export default function (pi: ExtensionAPI) {
+	pi.pi.setDisplayCatalog({
+		locale: "ru",
+		strings: {
+			"tab.appearance.label": "Оформление",
+			"group.appearance.Theme": "Тема",
+			"setting.theme.dark.label": "Тёмная тема",
+			"chrome.on": "Вкл",
+		},
+	});
+}
+```
+
+- Keys: `tab.<id>.label` / `tab.<id>.lead`, `group.<tab>.<group>`, `setting.<path>.label` / `.description` / `.warning`, `setting.<path>.option.<value>.label` / `.description`, `chrome.<name>`.
+- `group.<tab>.<group>` is keyed by the canonical group name (`Theme`, `Status Line`, …); the translation changes the heading and the sidebar label, not the section id derived from it.
+- `setDisplayCatalog(undefined)` restores English. Values in `strings` are used verbatim; `chrome.envNote.override` and `chrome.envNote.fallback` are templates whose `{env}` placeholder is filled with the environment variable name.
+- `pi.pi.getDisplayCatalog()` returns the active catalog; `pi.pi.displayText` / `pi.pi.displayTemplate` are the same lookups the overlay uses, if an extension needs to match its own text.
+- The Plugins tab renders its own English UI and is unaffected.
+
 ### Message delivery semantics
 
 `pi.sendMessage(message, options)` supports:
