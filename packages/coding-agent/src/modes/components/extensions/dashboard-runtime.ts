@@ -14,6 +14,7 @@ import { loadAllExtensions, toggleProvider, toggleUserSource } from "./state-man
 
 import { cfgDisabledExtensions } from "../../../extensibility/settings";
 import { cfgMcpEnableProjectConfig } from "../../../mcp/settings";
+import { cfgBrowserChromeMcp } from "../../../tools/browser/settings";
 
 /** Bind the dashboard's display-only contract to the live application. */
 export function createExtensionDashboardRuntime(options: {
@@ -57,6 +58,7 @@ export function createExtensionDashboardRuntime(options: {
 					enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
 					filterExa: true,
 					filterBrowser: browserMcpFilterEnabled?.() ?? false,
+					chromeMcp: cfgBrowserChromeMcp.get(settings),
 				},
 				onStatus: event => eventBus?.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, event),
 			}),

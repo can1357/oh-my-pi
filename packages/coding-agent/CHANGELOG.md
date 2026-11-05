@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added a `browser.chromeMcp` setting (default on): at session start omp probes the local chrome-mcp bridge at `127.0.0.1:12306` and, when it is running, registers the user's real Chrome as the `chrome` MCP server; the built-in browser prelude stays as an isolated Chrome for Testing fallback and a missing bridge is skipped silently
 - Added a `streamable-http` MCP transport for the stateless 2026-07-28 protocol revision: `streamable-http` servers negotiate `server/discover` before the handshake, send the protocol revision in a per-request `_meta` envelope with `Mcp-Method`/`Mcp-Name` headers, and silently fall back to the existing 2025 handshake when the endpoint refuses the modern era ([#14172](https://github.com/can1357/oh-my-pi/pull/14172) by [@spgsroot](https://github.com/spgsroot))
 - Added a `skills.manualSkills` glob patterns to keep skills available manually while hiding them from the model catalog, without editing their `SKILL.md` files ([#18114](https://github.com/can1357/oh-my-pi/pull/18114) by [@Shadorain](https://github.com/Shadorain))
 - Added Keenable as a web search engine (`web/keenable`). It uses `KEENABLE_API_KEY` or a stored `keenable` credential when present; an explicit selection without a key uses Keenable's keyless public endpoint ([#17953](https://github.com/can1357/oh-my-pi/pull/17953) by [@KGKallasmaa](https://github.com/KGKallasmaa))

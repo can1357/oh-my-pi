@@ -7,6 +7,7 @@
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
 import { mcpCapability } from "../capability/mcp";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
+import { CHROME_MCP_SERVER_NAME, discoverChromeMcp } from "./auto-chrome-mcp";
 import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
 import { readMCPConfigFile } from "./config-writer";
@@ -20,6 +21,13 @@ export interface LoadMCPConfigsOptions {
 	filterExa?: boolean;
 	/** Whether to filter out browser MCP servers when the built-in browser capability is enabled (default: false) */
 	filterBrowser?: boolean;
+	/**
+	 * Register a live chrome-mcp bridge as the `chrome` server (default: false).
+	 * The probe is local-only and silently skipped when the bridge is not running.
+	 */
+	chromeMcp?: boolean;
+	/** Probe endpoint override; loopback only. Defaults to the local bridge endpoint. */
+	chromeMcpUrl?: string;
 	/** Session-local extension roots for post-startup rediscovery (explicit + mode + configured). */
 	extensionRoots?: EffectiveExtensionRoots;
 }
@@ -188,6 +196,19 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 		const browserResult = filterBrowserMCPServers(configs, sources);
 		configs = browserResult.configs;
 		sources = browserResult.sources;
+	}
+
+	// Auto-discovered after every filter: chrome-mcp is the base browser, not a
+	// user-configured browser-automation server the filter is meant to shadow.
+	// The probe is bounded and local-only; a missing bridge registers nothing.
+	if (options?.chromeMcp && !disabledServers.has(CHROME_MCP_SERVER_NAME)) {
+		const discovered = await discoverChromeMcp(
+			options.chromeMcpUrl === undefined ? {} : { url: options.chromeMcpUrl },
+		);
+		if (discovered) {
+			configs[discovered.name] = discovered.config;
+			sources[discovered.name] = discovered.source;
+		}
 	}
 
 	return { configs, exaApiKeys, sources };

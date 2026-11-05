@@ -1,6 +1,8 @@
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { EvalPreludeDefinition } from "../../eval/preludes";
+import { CHROME_MCP_SERVER_NAME } from "../../mcp/auto-chrome-mcp";
 import { redactUrlForLog } from "../../mcp/json-rpc";
+import chromeMcpGuidance from "../../prompts/system/browser-chrome-mcp.md" with { type: "text" };
 import relayGuidance from "../../prompts/system/browser-relay.md" with { type: "text" };
 import browserDescription from "../../prompts/tools/browser.md" with { type: "text" };
 import type { ToolSession } from "../../sdk";
@@ -22,14 +24,25 @@ export function createBrowserPreludeDefinition(
 	return {
 		name: "browser",
 		documentation: browserDescription,
-		guidance: fallback
-			? prompt.render(relayGuidance, {
-					// The block reaches the model provider: never echo userinfo or token params.
-					cdpUrl: fallback.kind === "connected" ? redactUrlForLog(fallback.cdpUrl) : undefined,
-					tern: fallback.kind === "tern",
-					cmux: fallback.kind === "cmux",
-				})
-			: undefined,
+		get guidance(): string | undefined {
+			const blocks: string[] = [];
+			if (fallback) {
+				blocks.push(
+					prompt.render(relayGuidance, {
+						// The block reaches the model provider: never echo userinfo or token params.
+						cdpUrl: fallback.kind === "connected" ? redactUrlForLog(fallback.cdpUrl) : undefined,
+						tern: fallback.kind === "tern",
+						cmux: fallback.kind === "cmux",
+					}),
+				);
+			}
+			// Read live: the prelude is created before deferred MCP discovery connects
+			// the chrome server, and a reconnect/disable must flip the notice with it.
+			if (session.mcpManager?.getConnectedServers().includes(CHROME_MCP_SERVER_NAME)) {
+				blocks.push(prompt.render(chromeMcpGuidance));
+			}
+			return blocks.length > 0 ? blocks.join("\n\n") : undefined;
+		},
 		javascript: browserJavascript,
 		python: browserPython,
 		exports: ["browser"],

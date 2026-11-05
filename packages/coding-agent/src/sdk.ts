@@ -364,7 +364,7 @@ import {
 } from "./tools/settings";
 import { cfgToolsFormat } from "./session/context-settings";
 import { cfgAutolearnEnabled } from "./autolearn/settings";
-import { cfgBrowserEnabled } from "./tools/browser/settings";
+import { cfgBrowserChromeMcp, cfgBrowserEnabled } from "./tools/browser/settings";
 import {
 	cfgDefaultThinkingLevel,
 	cfgExternalThinking,
@@ -2853,6 +2853,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			filterExa: true,
 			// Filter browser MCP only when Eval can expose the built-in browser prelude.
 			filterBrowser: initialBrowserPreludeAvailable,
+			// The local chrome-mcp bridge, when running, becomes the base browser; the
+			// prelude above stays the isolated-Chrome fallback.
+			chromeMcp: cfgBrowserChromeMcp.get(settings),
 			extensionRoots: buildSessionExtensionRoots(),
 		};
 		if (enableMCP && !mcpManager && isMainThread()) {

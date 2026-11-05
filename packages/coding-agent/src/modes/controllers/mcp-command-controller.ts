@@ -84,6 +84,7 @@ import type { InteractiveModeContext } from "../types";
 import { groupBySource, parseRemoveArgs, readScopeFlag, showCommandMessage } from "./command-controller-shared";
 
 import { cfgMcpEnableProjectConfig } from "../../mcp/settings";
+import { cfgBrowserChromeMcp } from "../../tools/browser/settings";
 
 const MCP_MANUAL_INPUT_PROVIDER_ID = "mcp";
 const MCP_MANUAL_LOGIN_TIP = "Headless? Paste the redirect URL or code with /login <value>.";
@@ -1807,6 +1808,7 @@ export class MCPCommandController {
 		}
 
 		const { configs, sources } = await loadAllMCPConfigs(getProjectDir(), {
+			chromeMcp: cfgBrowserChromeMcp.get(this.ctx.settings),
 			extensionRoots: this.ctx.session.effectiveExtensionRoots,
 		});
 		const config = configs[name];
@@ -1866,6 +1868,7 @@ export class MCPCommandController {
 			enableProjectConfig: cfgMcpEnableProjectConfig.get(this.ctx.settings),
 			filterExa: true,
 			filterBrowser: this.ctx.session.getEvalPreludes().some(definition => definition.name === "browser"),
+			chromeMcp: cfgBrowserChromeMcp.get(this.ctx.settings),
 			extensionRoots: this.ctx.session.effectiveExtensionRoots,
 		});
 		await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());

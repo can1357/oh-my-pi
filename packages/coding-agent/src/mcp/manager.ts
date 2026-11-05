@@ -222,6 +222,8 @@ export interface MCPDiscoverOptions {
 	filterExa?: boolean;
 	/** Whether to filter out browser MCP servers when the built-in browser capability is enabled (default: false) */
 	filterBrowser?: boolean;
+	/** Register a live chrome-mcp bridge as the `chrome` server (default: false). */
+	chromeMcp?: boolean;
 	/** Session-local extension roots for post-startup rediscovery (explicit + mode + configured). */
 	extensionRoots?: EffectiveExtensionRoots;
 	/** Called when MCP server connection state changes. */
@@ -708,6 +710,7 @@ export class MCPManager implements MCPManagerApi {
 				enableProjectConfig: options?.enableProjectConfig,
 				filterExa: options?.filterExa,
 				filterBrowser: options?.filterBrowser,
+				chromeMcp: options?.chromeMcp,
 				extensionRoots: options?.extensionRoots,
 			});
 		} catch (error) {
