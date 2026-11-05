@@ -976,11 +976,12 @@ impl<K: Sink> Ctx<K> {
 				if !stored && let Some(bytes) = kept {
 					// SAFETY: `bytes` came from this `arena`'s push earlier in
 					// this iteration and has not been given back. Nothing kept
-					// the path — `!stored` excludes the `Stored`/`Item` arms,
-					// which are also the only place a `tail` of it is made, and
-					// `!queued` excludes the child job — so neither `bytes`, a
-					// handle overlapping it, nor the `path` borrowed from it is
-					// read after the `continue` below.
+					// the path: `!stored` excludes the `Stored`/`Item` arm and
+					// the `tail` of `bytes` taken there, and this branch is the
+					// one `queued` is false on, so the child job and the `tail`
+					// taken for it are both below the `continue`. Neither
+					// `bytes`, a handle overlapping it, nor the `path` borrowed
+					// from it is read after that.
 					unsafe { arena.release(bytes) };
 				}
 				continue;

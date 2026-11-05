@@ -135,9 +135,12 @@ impl Arena {
 	///
 	/// # Safety
 	/// - `bytes` must be a handle **this** arena produced and has not already
-	///   given back. The call reads one past its end to compare it with the
-	///   arena's end, so a handle from a dropped or different arena is out-of-
-	///   bounds pointer arithmetic even though nothing is dereferenced.
+	///   given back. The call forms a pointer one past the handle's end to
+	///   compare it with the arena's end, and that is valid only inside the
+	///   allocation the handle came from: a handle whose arena is gone makes it
+	///   dangling. An already-released handle is just as wrong — a push of the
+	///   same length puts live bytes where it points, and releasing it again
+	///   rewinds over them.
 	/// - `bytes` must not be read again, and no slice obtained from it with
 	///   [`Bytes::get`] may still be live: a later `push` writes over the space
 	///   this gives back.
