@@ -419,6 +419,41 @@ fn alias_expanded_compounds_export_ranges_that_contain_their_children() {
 			}
 		}
 	}
+	// The same texts reached through an alias that stands inside a compound
+	// of the source, so each exported node has a real enclosing node with
+	// real bytes around it: a position the export scans for can land on a
+	// token of the enclosing command rather than of its own.
+	for (src, text) in [
+		(&b"case x in x) check;; esac\n"[..], &b"case x in x) esac"[..]),
+		(&b"case x in x) check;& esac\n"[..], &b"case x in a) echo a ;; *) esac"[..]),
+		(&b"for i in a; do check; done\n"[..], &b"case x in x) esac"[..]),
+		(&b"{ check; }\n"[..], &b"( echo ok )"[..]),
+		// `if true; then check; fi` with a loop aliased into it belongs to
+		// the sibling change: the statements inside the loop take their span
+		// from a word token, which invents a byte in alias text at upstream
+		// main as well (6 faults there, 4 here).
+	] {
+		let table = AliasOne(b"check", text);
+		let mut parser = Parser::new(src, Features::NONE, &table);
+		let mut commands = Vec::new();
+		while let Some(cmd) = parser.next_command() {
+			commands.push(cmd.expect("the source parses"));
+		}
+		let program = Program { commands };
+		for offsets in [Offsets::Bytes, Offsets::Utf16] {
+			let json = to_json(src, &program, JsonDialect::Shfmt, offsets);
+			let shfmt: serde_json::Value = serde_json::from_str(&json).unwrap();
+			let mut bad = Vec::new();
+			range_faults(&shfmt, None, "", &mut bad);
+			for fault in bad {
+				faults.push(format!(
+					"{} with {} aliased, in {offsets:?}: {fault}",
+					String::from_utf8_lossy(src).escape_debug(),
+					String::from_utf8_lossy(text)
+				));
+			}
+		}
+	}
 	assert!(faults.is_empty(), "{} range faults:\n{}", faults.len(), faults.join("\n"));
 }
 
