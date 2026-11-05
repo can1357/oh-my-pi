@@ -10,6 +10,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/lsp/client";
 import type { LspClient } from "@oh-my-pi/pi-coding-agent/lsp/types";
 import { fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/utils";
+import { rejectionOf } from "../helpers/rejection";
 
 /** Minimal client double: open files, a diagnostics map, and a frame sink. */
 function fakeClient(openFiles: Map<string, { version: number; languageId: string; lastUsedAt?: number }>): {
@@ -91,6 +92,26 @@ describe("reconcileOpenFilesFromDisk", () => {
 			const { client, frames } = fakeClient(new Map([[uri, { version: 1, languageId: "python" }]]));
 
 			expect(await reconcileOpenFilesFromDisk(client)).toBe(0);
+			expect(frames.filter(frame => frame.includes("textDocument/didClose") && frame.includes(uri)).length).toBe(1);
+			expect(client.openFiles.has(uri)).toBe(false);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("throws on an open document that is no longer readable unless told to close it", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-reconcile-open-"));
+		try {
+			// A `git checkout` replaced the open file with a directory.
+			const file = path.join(dir, "consumer.py");
+			await fs.mkdir(file);
+			const uri = fileToUri(file);
+			const { client, frames } = fakeClient(new Map([[uri, { version: 1, languageId: "python" }]]));
+
+			expect(await rejectionOf(reconcileOpenFilesFromDisk(client))).toBeInstanceOf(Error);
+			expect(client.openFiles.has(uri)).toBe(true);
+
+			expect(await reconcileOpenFilesFromDisk(client, undefined, undefined, "close")).toBe(0);
 			expect(frames.filter(frame => frame.includes("textDocument/didClose") && frame.includes(uri)).length).toBe(1);
 			expect(client.openFiles.has(uri)).toBe(false);
 		} finally {

@@ -4127,8 +4127,11 @@ describe("lsp regressions", () => {
 			const projectLoad = vi.spyOn(lspClient, "waitForProjectLoaded").mockResolvedValue(undefined);
 			const tool = new LspTool(makeLspSession(tempDir.path()));
 
-			// Opens the consumer, then the definition file.
+			// Opens the consumer, then an unrelated file, then the definition file.
+			const otherPath = path.join(tempDir.path(), "other.py");
+			await Bun.write(otherPath, "x = 1\n");
 			await tool.execute("open-consumer", { action: "references", file: consumerPath, line: 2, symbol: "target" });
+			await tool.execute("open-other", { action: "references", file: otherPath, line: 1, symbol: "x" });
 			await tool.execute("open-definition", {
 				action: "references",
 				file: definitionPath,
@@ -4142,7 +4145,10 @@ describe("lsp regressions", () => {
 			expect(symbols).toContain("consumer.py:4");
 			expect(symbols).not.toContain("consumer.py:2");
 
-			// This one lands while the query waits for the project to load.
+			// This one lands while the query waits for the project to load, and the
+			// unrelated open file is no longer readable: the query still answers.
+			await fsp.rm(otherPath);
+			await fsp.mkdir(otherPath);
 			projectLoad.mockImplementation(async () => {
 				await Bun.write(consumerPath, `\n\n\n\n${consumer}`);
 			});

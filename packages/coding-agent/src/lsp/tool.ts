@@ -1085,7 +1085,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						signal,
 					);
 					// Results point into every open document, so sync those edited outside OMP first.
-					await reconcileOpenFilesFromDisk(workspaceClient, signal);
+					await reconcileOpenFilesFromDisk(workspaceClient, signal, undefined, "close");
 					const workspaceResult = (await sendRequest(
 						workspaceClient,
 						"workspace/symbol",
@@ -1283,9 +1283,11 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			// edited outside OMP still holds its stale overlay: references and
 			// definitions then point at old lines, and a rename or code action
 			// writes its edits onto them. Sync them all after the waits, right
-			// before the request.
+			// before the request. An action that writes edits fails on an open file
+			// it cannot read; a read-only query closes that file and goes on.
 			if (CROSS_FILE_ACTIONS.has(action)) {
-				await reconcileOpenFilesFromDisk(client, signal);
+				const writesEdits = action === "rename" || (action === "code_actions" && apply === true);
+				await reconcileOpenFilesFromDisk(client, signal, undefined, writesEdits ? "throw" : "close");
 			}
 
 			switch (action) {
