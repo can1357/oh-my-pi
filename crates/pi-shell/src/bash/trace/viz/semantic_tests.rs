@@ -190,7 +190,7 @@ fn pseudo_preserves_control_fallback_and_function_parameters() {
 	);
 	let output = text(&f.present(&[], &Options::default()).rows);
 	for expected in
-		["def f(arg1):", "for x in", "is_file(", "else:", "match ", " and false or print"]
+		["def f(arg1):", "for x in", "is_file(", "else:", "match ", "\n  and false\n  or print"]
 	{
 		assert!(output.contains(expected), "missing {expected}: {output}");
 	}

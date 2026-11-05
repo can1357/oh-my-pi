@@ -852,11 +852,14 @@ impl<S: VizSource> Printer<'_, S> {
 				})
 			});
 		if all_simple {
-			let mut segments = Vec::new();
+			// One row per pipeline: `and`/`or` lead each continuation row, so a
+			// chain reads down the page and every command keeps its own status.
+			let mut lead = Vec::new();
 			if background {
-				segments.push(self.segment(c, a.id, a.span, "spawn ", "kw", false));
+				lead.push(self.segment(c, a.id, a.span, "spawn ", "kw", false));
 			}
-			segments.extend(self.pipeline(&a.first, c));
+			lead.extend(self.pipeline(&a.first, c));
+			let mut rows = vec![(&a.first, depth, lead)];
 			for (index, (op, p)) in a.rest.iter().enumerate() {
 				if self.options.layers.idioms
 					&& index + 1 == a.rest.len()
@@ -875,22 +878,20 @@ impl<S: VizSource> Printer<'_, S> {
 					let cmd = &p.stages[0].cmd;
 					let mut s = self.segment(c, cmd.id, cmd.span, " may fail", "badge", true);
 					s.expanded = Some(format!("|| {}", c.text(cmd.span)));
-					segments.push(s);
+					if let Some((_, _, segments)) = rows.last_mut() {
+						segments.push(s);
+					}
 				} else {
-					segments.push(self.segment(
-						c,
-						a.id,
-						a.span,
-						if *op == AndOrOp::And { " and " } else { " or " },
-						"op",
-						false,
-					));
+					let connector = if *op == AndOrOp::And { "and " } else { "or " };
+					let mut segments = vec![self.segment(c, a.id, a.span, connector, "op", false)];
 					segments.extend(self.pipeline(p, c));
+					rows.push((p, depth + 1, segments));
 				}
 			}
-			let owner = &a.first.stages[0].cmd;
-			self.emit(c, owner, depth, "stmt", segments, None);
-			self.documents(a, c, depth);
+			for (p, depth, segments) in rows {
+				self.emit(c, &p.stages[0].cmd, depth, "stmt", segments, None);
+				self.documents(p, c, depth);
+			}
 		} else {
 			for (pi, p) in std::iter::once(&a.first)
 				.chain(a.rest.iter().map(|(_, p)| p))
@@ -2163,12 +2164,10 @@ impl<S: VizSource> Printer<'_, S> {
 		cache.nested.get(&key).is_some_and(Option::is_some)
 	}
 
-	fn documents(&mut self, a: &AndOr, c: &Context<'_>, depth: u32) {
-		for p in std::iter::once(&a.first).chain(a.rest.iter().map(|(_, p)| p)) {
-			for stage in &p.stages {
-				if let CommandKind::Simple(s) = &stage.cmd.kind {
-					self.command_documents(&stage.cmd, s, c, depth);
-				}
+	fn documents(&mut self, p: &Pipeline, c: &Context<'_>, depth: u32) {
+		for stage in &p.stages {
+			if let CommandKind::Simple(s) = &stage.cmd.kind {
+				self.command_documents(&stage.cmd, s, c, depth);
 			}
 		}
 	}
