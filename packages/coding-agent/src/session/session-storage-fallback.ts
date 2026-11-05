@@ -91,96 +91,132 @@ export function fallbackLedgerPath(settings: Settings, env: NodeJS.ProcessEnv): 
 }
 
 /**
+ * Width the `session_id` field is padded to, so the line can be written before
+ * the session is known and refined in place afterwards without changing its
+ * length. A session id is a 36-character UUID; a reader trims the padding.
+ */
+const SESSION_ID_WIDTH = 36;
+
+/** What a ledger line records until the launch has opened a session. */
+export const UNRESOLVED_SESSION = "(unresolved)";
+
+/** `id` in the fixed-width form a ledger line holds, or `undefined` when it does not fit. */
+function paddedSessionId(id: string): string | undefined {
+	return id.length > SESSION_ID_WIDTH ? undefined : id.padEnd(SESSION_ID_WIDTH, " ");
+}
+
+/**
  * The event's JSON line, never longer than {@link MAX_LEDGER_LINE_BYTES}
- * including its newline. Both caller-sized fields are trimmed, longest first,
- * rather than the event dropped: a truncated path still names which connection
- * file failed, and a line that is present is what an operator counts.
+ * including its newline. `session_id` is fixed-width, so only `dsn_path` is
+ * trimmed: a truncated path still names which connection file failed, and a
+ * line that is present is what an operator counts.
  */
 export function ledgerLine(event: SessionStorageFallbackEvent): string {
-	let trimmed = event;
+	let trimmed = {
+		...event,
+		session_id: paddedSessionId(event.session_id) ?? UNRESOLVED_SESSION.padEnd(SESSION_ID_WIDTH, " "),
+	};
 	for (let i = 0; i < 64; i++) {
 		const line = `${JSON.stringify(trimmed)}\n`;
 		const overflow = Buffer.byteLength(line, "utf8") - MAX_LEDGER_LINE_BYTES;
 		if (overflow <= 0) return line;
-		const longest = trimmed.dsn_path.length >= trimmed.session_id.length ? "dsn_path" : "session_id";
-		const value = trimmed[longest];
 		// One ellipsis costs three bytes, so cut the overflow plus that.
-		const kept = Math.max(0, value.length - overflow - 3);
-		if (kept === value.length) break;
-		trimmed = { ...trimmed, [longest]: kept === 0 ? "…" : `${value.slice(0, kept)}…` };
+		const kept = Math.max(0, trimmed.dsn_path.length - overflow - 3);
+		if (kept === trimmed.dsn_path.length) break;
+		trimmed = { ...trimmed, dsn_path: kept === 0 ? "…" : `${trimmed.dsn_path.slice(0, kept)}…` };
 	}
-	// Both fields are down to an ellipsis and the line is still too long: only a
+	// The path is down to an ellipsis and the line is still too long: only a
 	// pathological `reason` or `host` can do that, so report the event's shape.
-	return `${JSON.stringify({ ...trimmed, session_id: "…", dsn_path: "…", host: "…" })}\n`;
+	return `${JSON.stringify({ ...trimmed, dsn_path: "…", host: "…" })}\n`;
 }
 
 /**
- * A fallback that was decided but whose ledger line is not written yet: the
- * launch knows the session it actually opened, and the resolver does not.
- * Every way a launch can land somewhere other than where a resolve-time probe
- * predicted — a continuation redirect, `continueRecent`'s own choice of
- * transcript, another process holding the lease — is a way a resolve-time line
- * would name the wrong session, so the line is written once, by the launch.
+ * A fallback whose real ledger line is already on disk, naming no session yet.
+ *
+ * The line is written at the moment the fallback is decided, because that is
+ * the moment the "a fallback that cannot be recorded is not taken" invariant
+ * depends on it, and only writing the real thing proves it: appending an empty
+ * string proves the path opens, not that a line fits — a ledger at a size
+ * limit passes that check and then fails the write it certified. `session_id`
+ * is fixed-width padding, overwritten in place once the launch has opened its
+ * session. If that refinement never happens, the count still exists, which is
+ * what the ledger is for.
  */
 interface PendingFallback {
 	reason: SessionStorageFallbackReason;
 	dsnPath: string;
 	ledgerFile: string;
+	/** Byte offset of the `session_id` value inside the written line. */
+	idOffset: number;
 }
 
 let pending: PendingFallback | undefined;
 let committed = false;
 
-/** What a ledger line records when the launch ended before it opened a session. */
-export const UNRESOLVED_SESSION = "(unresolved)";
-
 /**
  * The fallback this process decided, if any, so the launch can tell the user
- * at the terminal. Reading it does not write the ledger line.
+ * at the terminal. Reading it does not touch the ledger.
  */
 export function pendingSessionStorageFallback(): { reason: SessionStorageFallbackReason; dsnPath: string } | undefined {
 	return pending ? { reason: pending.reason, dsnPath: pending.dsnPath } : undefined;
 }
 
 /**
- * {@link commitSessionStorageFallback} for a signal handler, which cannot
- * await: a default SIGTERM runs no `exit` handler and would otherwise leave
- * the fallback uncounted.
- */
-
-/**
- * Append the decided fallback's one ledger line, naming `sessionId` — the
- * session the launch actually opened, or {@link UNRESOLVED_SESSION} when the
- * launch ended before it opened one. Does nothing when no fallback was
- * decided, and never writes twice.
+ * Name the session in the line already on disk: the one the launch **opened**.
+ * When the launch later moves off that session file — another process holds
+ * its ownership lease, so the first write continues into a fresh session — the
+ * recorded id is the opened one, not the one that went on. That is a known
+ * limit and deliberate: committing after the move would lose the line entirely
+ * when a crash precedes the first write, and a missing line defeats the
+ * mechanism where a stale id only makes one investigation harder.
  *
- * A failure here is logged, not thrown: {@link reserveSessionStorageFallback}
- * already proved the ledger writable, so a failure now is a disk that changed
- * under a running session, and halting it would lose more than the line does.
+ * Does nothing when no fallback was decided, and never writes twice. A failure
+ * is logged, not thrown: the count is already recorded.
  */
 export function commitSessionStorageFallbackSync(sessionId: string): void {
 	if (!pending || committed) return;
 	committed = true;
-	const event = fallbackEvent(sessionId, pending.reason, pending.dsnPath);
+	const padded = paddedSessionId(sessionId);
+	if (padded === undefined) return;
+	let handle: number | undefined;
 	try {
-		fsSync.appendFileSync(pending.ledgerFile, ledgerLine(event), "utf8");
+		handle = fsSync.openSync(pending.ledgerFile, "r+");
+		fsSync.writeSync(handle, Buffer.from(padded, "utf8"), 0, SESSION_ID_WIDTH, pending.idOffset);
 	} catch {
-		// A signal handler has nowhere to report to; the normal path logs.
+		// A signal handler has nowhere to report to; the line is already counted.
+	} finally {
+		if (handle !== undefined) {
+			try {
+				fsSync.closeSync(handle);
+			} catch {}
+		}
 	}
 }
 
 export async function commitSessionStorageFallback(sessionId: string): Promise<void> {
 	if (!pending || committed) return;
+	const ledgerFile = pending.ledgerFile;
+	const padded = paddedSessionId(sessionId);
 	committed = true;
-	const event = fallbackEvent(sessionId, pending.reason, pending.dsnPath);
+	if (padded === undefined) {
+		logger.warn("Session id too long for the fallback ledger line; it keeps its placeholder", {
+			ledger: ledgerFile,
+			session: sessionId,
+		});
+		return;
+	}
+	let handle: fs.FileHandle | undefined;
 	try {
-		await fs.appendFile(pending.ledgerFile, ledgerLine(event), "utf8");
+		handle = await fs.open(ledgerFile, "r+");
+		await handle.write(Buffer.from(padded, "utf8"), 0, SESSION_ID_WIDTH, pending.idOffset);
 	} catch (err) {
-		logger.warn("Could not append to the session-storage fallback ledger", {
-			ledger: pending.ledgerFile,
+		logger.warn("Could not name the session in the fallback ledger line; the fallback stays counted", {
+			ledger: ledgerFile,
 			session: sessionId,
 			error: toError(err).message,
 		});
+	} finally {
+		await handle?.close().catch(() => undefined);
 	}
 }
 
@@ -197,31 +233,49 @@ export class SessionStorageFallbackLedgerError extends Error {
 }
 
 /**
- * Warn, prove the ledger can be appended to, and hold the fallback until the
- * launch knows which session it opened ({@link commitSessionStorageFallback}).
- * The warning carries which session storage failed, which connection file and
- * why, because "fell back to file storage" alone tells an operator nothing
- * about what to fix.
+ * Warn and write the fallback's ledger line, naming no session yet.
  *
- * A ledger that cannot be written throws {@link SessionStorageFallbackLedgerError}
+ * A ledger that cannot take the line throws {@link SessionStorageFallbackLedgerError}
  * and the fallback does not happen. The count is the control: a fallback
  * nobody can count is the silent fleet degradation this exists to prevent, so
  * an unwritable ledger refuses the launch rather than quietly widening the
- * blast radius. Writability is proven here, before anything is decided, by
- * creating the file; the line itself lands later.
+ * blast radius — and only writing the real line proves the ledger can take it.
+ * {@link commitSessionStorageFallback} fills the session in afterwards.
+ *
+ * The warning carries which connection file failed and why, because "fell back
+ * to file storage" alone tells an operator nothing about what to fix.
  */
 export async function reserveSessionStorageFallback(
 	reason: SessionStorageFallbackReason,
 	dsnPath: string,
 	ledgerFile: string,
 ): Promise<void> {
+	const line = ledgerLine(fallbackEvent(UNRESOLVED_SESSION, reason, dsnPath));
+	const marker = `"session_id":"`;
+	const idOffsetInLine = line.indexOf(marker);
+	let handle: fs.FileHandle | undefined;
 	try {
 		await fs.mkdir(path.dirname(ledgerFile), { recursive: true });
-		await fs.appendFile(ledgerFile, "", "utf8");
+		handle = await fs.open(ledgerFile, "a+");
+		// O_APPEND: the write lands whole at the end whatever another process
+		// is doing, and its returned position is where this line starts.
+		const before = (await handle.stat()).size;
+		const written = await handle.write(line, null, "utf8");
+		if (written.bytesWritten !== Buffer.byteLength(line, "utf8")) {
+			throw new Error(`short write: ${written.bytesWritten} of ${Buffer.byteLength(line, "utf8")} bytes`);
+		}
+		await handle.sync();
+		pending = {
+			reason,
+			dsnPath,
+			ledgerFile,
+			idOffset: before + Buffer.byteLength(line.slice(0, idOffsetInLine + marker.length), "utf8"),
+		};
 	} catch (err) {
 		throw new SessionStorageFallbackLedgerError(ledgerFile, err);
+	} finally {
+		await handle?.close().catch(() => undefined);
 	}
-	pending = { reason, dsnPath, ledgerFile };
 	logger.warn(
 		`session.storage is sql, but the session database is unusable (${reason}); ` +
 			`continuing on file storage for this resumed session`,

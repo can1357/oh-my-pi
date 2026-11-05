@@ -105,27 +105,29 @@ describe("sql → file fallback", () => {
 		});
 
 		expect(storage).toBeInstanceOf(FileSessionStorage);
-		// Deciding writes no line: the launch has not opened a session yet, and a
-		// line written now could name one the launch never continues.
-		expect(ledgerLines(ledger)).toHaveLength(0);
+		// The real line is on disk already: writing it is what proves the ledger
+		// can take one, and the count exists even if the launch never gets
+		// further. The session is a placeholder until it does.
+		const reserved = ledgerLines(ledger);
+		expect(reserved).toHaveLength(1);
+		expect(String(reserved[0]?.session_id).trim()).toBe("(unresolved)");
+		expect(reserved[0]).toMatchObject({ reason: "dsn-missing", dsn_path: dsnFile });
+		expect(typeof reserved[0]?.ts).toBe("string");
+		expect(typeof reserved[0]?.host).toBe("string");
 		expect(pendingSessionStorageFallback()).toMatchObject({ reason: "dsn-missing", dsnPath: dsnFile });
 
-		// The launch commits it, naming the session it actually opened — which
-		// need not be any session a resolve-time probe could have predicted.
+		// The launch names the session it opened, in place: still one line.
 		await commitSessionStorageFallback("01a1a000-0000-7000-8000-0000000000ff");
 		const lines = ledgerLines(ledger);
 		expect(lines).toHaveLength(1);
-		expect(lines[0]).toMatchObject({
-			session_id: "01a1a000-0000-7000-8000-0000000000ff",
-			reason: "dsn-missing",
-			dsn_path: dsnFile,
-		});
-		expect(typeof lines[0]?.ts).toBe("string");
-		expect(typeof lines[0]?.host).toBe("string");
+		expect(String(lines[0]?.session_id).trim()).toBe("01a1a000-0000-7000-8000-0000000000ff");
+		expect(lines[0]).toMatchObject({ reason: "dsn-missing", dsn_path: dsnFile });
 
 		// Once, never twice.
 		await commitSessionStorageFallback("01a1a000-0000-7000-8000-0000000000ee");
-		expect(ledgerLines(ledger)).toHaveLength(1);
+		const after = ledgerLines(ledger);
+		expect(after).toHaveLength(1);
+		expect(String(after[0]?.session_id).trim()).toBe("01a1a000-0000-7000-8000-0000000000ff");
 	});
 
 	it("a new session refuses to start and writes no ledger line", async () => {
@@ -195,13 +197,14 @@ describe("sql → file fallback", () => {
 
 	it("a write committed while the ledger line is being appended also stops the fallback", async () => {
 		const { env, ledger } = brokenSqlEnv();
-		// The ledger directory does not exist yet, so recording awaits a mkdir
-		// and an append; land the write in that window.
-		const realAppend = fsp.appendFile;
-		const spy = vi.spyOn(fsp, "appendFile").mockImplementation(async (...args: Parameters<typeof fsp.appendFile>) => {
+		// The latch flips while the ledger line is being written: `mkdir` is the
+		// reserve's first await, so a write landing there is inside exactly the
+		// window the post-reserve latch read exists for.
+		const realMkdir = fsp.mkdir;
+		const spy = vi.spyOn(fsp, "mkdir").mockImplementation((async (...args: Parameters<typeof fsp.mkdir>) => {
 			noteSqlWriteCommitted();
-			return realAppend(...args);
-		});
+			return await realMkdir(...args);
+		}) as typeof fsp.mkdir);
 		try {
 			const error = await rejection(
 				resolveSessionStorage({
@@ -214,8 +217,11 @@ describe("sql → file fallback", () => {
 		} finally {
 			spy.mockRestore();
 		}
-		// Nothing was recorded: the fallback never happened.
-		expect(ledgerLines(ledger)).toHaveLength(0);
+		// The line was already on disk when the write landed, and it keeps its
+		// placeholder: a refused launch names no session.
+		const lines = ledgerLines(ledger);
+		expect(lines).toHaveLength(1);
+		expect(String(lines[0]?.session_id).trim()).toBe("(unresolved)");
 	});
 
 	it("a ledger line stays inside one page however large its caller-sized fields are", () => {
@@ -228,6 +234,30 @@ describe("sql → file fallback", () => {
 			expect(Buffer.byteLength(line, "utf8")).toBeLessThanOrEqual(4096);
 			expect(line.indexOf("\n")).toBe(line.length - 1);
 			expect(JSON.parse(line.trim())).toMatchObject({ reason: "db-unreachable" });
+			// Fixed-width, so the in-place refinement never changes the length.
+			expect(String(JSON.parse(line.trim()).session_id)).toHaveLength(36);
+		}
+	});
+
+	it("a ledger that cannot take the real line refuses the fallback, not an empty probe write", async () => {
+		const { env, ledger } = brokenSqlEnv();
+		fs.mkdirSync(path.dirname(ledger), { recursive: true });
+		// A ledger whose directory is read-only: the file cannot be created, so
+		// the real write fails where opening a path might not have.
+		fs.writeFileSync(ledger, "");
+		fs.chmodSync(ledger, 0o400);
+		try {
+			const error = await rejection(
+				resolveSessionStorage({
+					settings: Settings.isolated(),
+					env,
+					resumableFileSession: async () => true,
+				}),
+			);
+			expect(error.message).toContain(ledger);
+			expect(ledgerLines(ledger)).toHaveLength(0);
+		} finally {
+			fs.chmodSync(ledger, 0o600);
 		}
 	});
 
