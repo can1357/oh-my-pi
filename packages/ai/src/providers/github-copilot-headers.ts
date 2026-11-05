@@ -252,7 +252,7 @@ export function wrapFetchForCopilotFallback(
 				await sleepUnderBudget(undefined, retryPolicy, serverWaitMs, init?.signal ?? undefined);
 				return inner(input, { ...init, headers });
 			}
-			if (!(await replayBudget.replayAfterDelay(serverWaitMs, response, init?.signal ?? undefined, undefined))) {
+			if (!(await replayBudget.replayAfterDelay(serverWaitMs, response, init?.signal ?? undefined, retryPolicy))) {
 				return undefined;
 			}
 			let retry: Response;

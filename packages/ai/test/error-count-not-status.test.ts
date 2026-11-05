@@ -30,8 +30,7 @@ const NEUTRAL_COUNT = 777;
 
 describe("a count is not a status", () => {
 	it.each([
-		["a character count that reads 429", "tool arguments cut: 429 chars omitted"],
-		["a character count that reads 503", "tool arguments cut: 503 chars omitted"],
+		["a character count", "tool arguments cut: 429 chars omitted"],
 		["a spelled-out character count", "tool arguments cut: 429 characters omitted"],
 		["a line count", "tool arguments cut: 503 lines omitted"],
 		["an item count", "tool arguments cut: 429 items omitted"],
@@ -41,10 +40,12 @@ describe("a count is not a status", () => {
 		expect(isProviderRetryableError(new Error(text))).toBe(false);
 	});
 
-	// A diagnostic can carry transient wording of its own ("truncated" names a
-	// cut stream elsewhere), so the contract here is narrower and exact: the
-	// count does not change the verdict. A row that only asserted `false`
-	// would pass or fail on the wording and prove nothing about the digits.
+	// A diagnostic carries transient wording of its own: `truncated` is read as
+	// a cut stream, so `isProviderRetryableError(new Error("truncated"))` is
+	// already `true` at this head with no count in the text at all. The
+	// contract here is therefore narrower and exact — the count does not change
+	// the verdict. A row that only asserted `false` would pass or fail on the
+	// wording and prove nothing about the digits.
 	it.each([401, 403, 429, 500, 502, 503, 504])("classifies a diagnostic the same with a count of %i", count => {
 		const withStatusLikeCount = new Error(truncationDiagnostic(count));
 		const withNeutralCount = new Error(truncationDiagnostic(NEUTRAL_COUNT));

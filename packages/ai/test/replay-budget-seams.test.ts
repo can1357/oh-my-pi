@@ -23,7 +23,7 @@ import { __resetVertexTokenCache } from "@oh-my-pi/pi-ai/providers/google-auth";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { stream, streamSimple } from "@oh-my-pi/pi-ai/stream";
-import type { AssistantMessage, Context } from "@oh-my-pi/pi-ai/types";
+import type { AssistantMessage, Context, StreamOptions } from "@oh-my-pi/pi-ai/types";
 import { resetRequestCompressionForTesting } from "@oh-my-pi/pi-ai/utils/request-compression";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
@@ -329,7 +329,13 @@ describe("a correction the server asked to delay by 30 s, against a 2 s budget",
 	interface CorrectionTarget {
 		kind: string;
 		rejection: () => Response;
-		call: (url: string, replayBudgetMs: number | undefined) => Promise<AssistantMessage>;
+		call: (
+			url: string,
+			replayBudgetMs: number | undefined,
+			retryOptions?: Partial<
+				Pick<StreamOptions, "maxRetryDelayMs" | "providerRetryWaitCeilingMs" | "providerRetryWait">
+			>,
+		) => Promise<AssistantMessage>;
 		attempts: (sends: Send[]) => Array<string | null>;
 	}
 	const targets: CorrectionTarget[] = [
@@ -347,7 +353,7 @@ describe("a correction the server asked to delay by 30 s, against a 2 s budget",
 					},
 					{ status: 400, headers: { "retry-after": "30" } },
 				),
-			call: (url: string, replayBudgetMs: number | undefined) =>
+			call: (url, replayBudgetMs, retryOptions) =>
 				streamAnthropic(
 					buildModel({
 						id: "claude-sonnet-4-5",
@@ -366,6 +372,7 @@ describe("a correction the server asked to delay by 30 s, against a 2 s budget",
 						apiKey: "test-key",
 						...(replayBudgetMs === undefined ? {} : { replayBudgetMs }),
 						providerRetryWait: async () => {},
+						...retryOptions,
 						fetch: (_input, init) => fetch(url, init),
 					},
 				).result(),
@@ -375,7 +382,7 @@ describe("a correction the server asked to delay by 30 s, against a 2 s budget",
 			kind: "copilot identity",
 			rejection: () =>
 				Response.json({ error: { message: "Access denied" } }, { status: 403, headers: { "retry-after": "30" } }),
-			call: (url: string, replayBudgetMs: number | undefined) =>
+			call: (url, replayBudgetMs, retryOptions) =>
 				streamOpenAICompletions(
 					buildModel({
 						id: "gpt-4o",
@@ -394,6 +401,7 @@ describe("a correction the server asked to delay by 30 s, against a 2 s budget",
 						apiKey: "ghu_test",
 						...(replayBudgetMs === undefined ? {} : { replayBudgetMs }),
 						providerRetryWait: async () => {},
+						...retryOptions,
 						fetch: (_input, init) => fetch(url, init),
 					},
 				).result(),
@@ -424,6 +432,37 @@ describe("a correction the server asked to delay by 30 s, against a 2 s budget",
 
 				expect(server.sends.length).toBeGreaterThanOrEqual(2);
 				expect(new Set(target.attempts([...server.sends])).size).toBeGreaterThan(1);
+				expect(result.replayBudgetExhausted).toBeUndefined();
+			} finally {
+				server.stop();
+			}
+		});
+
+		// The budget is not the only bound this resend answers to. A budget wide
+		// enough to admit the wait must still sleep it through the call's own
+		// retry-wait hook and under the call's own ceiling — a seam that takes
+		// the policy for its refusal check and then drops it for the admission
+		// sleeps on the real clock under the default cap, and refuses a wait the
+		// caller explicitly permitted.
+		it("sleeps a budgeted resend through the call's own hook and ceiling", async () => {
+			const server = route(n => (n === 1 ? target.rejection() : failure(400, "bad request")));
+			try {
+				const hookWaits: number[] = [];
+				const clockWaits: number[] = [];
+				vi.spyOn(scheduler, "wait").mockImplementation(async (ms?: number) => {
+					clockWaits.push(ms ?? 0);
+				});
+				const result = await target.call(server.url, 120_000, {
+					maxRetryDelayMs: 120_000,
+					providerRetryWaitCeilingMs: 90_000,
+					providerRetryWait: async ms => {
+						hookWaits.push(ms);
+					},
+				});
+
+				expect(server.sends.length).toBeGreaterThanOrEqual(2);
+				expect(hookWaits).toEqual([30_000]);
+				expect(clockWaits).toEqual([]);
 				expect(result.replayBudgetExhausted).toBeUndefined();
 			} finally {
 				server.stop();

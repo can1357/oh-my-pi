@@ -197,7 +197,7 @@ export function wrapFetchForRequestCompression(
 			await response.body?.cancel().catch(() => {});
 			plain = await base(input, init);
 		} else {
-			if (!(await replayBudget.replayAfterDelay(serverWaitMs, response, init?.signal ?? undefined, undefined))) {
+			if (!(await replayBudget.replayAfterDelay(serverWaitMs, response, init?.signal ?? undefined, retryPolicy))) {
 				return response;
 			}
 			// Under a budget the rejection stays readable until the resend clears
