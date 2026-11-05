@@ -4929,6 +4929,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			transformAssistantMessagePreservesToolCalls: true,
 			resolveFallbackTool: resolveDeviceTool,
 			suggestFallbackToolNames: suggestDeviceToolNames,
+			explainMissingTool: name => toolSession.mcpManager?.explainMissingTool(name),
 			intentTracing: cfgToolsIntentTracing.get(settings),
 			intentDescription: spotlightExperiment ? SPOTLIGHT_INTENT_DESCRIPTION : undefined,
 			pruneToolDescriptions: resolveInlineToolDescriptors(),

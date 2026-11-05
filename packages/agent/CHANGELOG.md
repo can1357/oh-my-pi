@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `explainMissingTool` to `AgentOptions` and `AgentLoopConfig`: the host's reason a called tool name resolves to no tool, appended to the "Tool … not found" error ([#18014](https://github.com/can1357/oh-my-pi/pull/18014) by [@sjawhar](https://github.com/sjawhar))
 - Added `wireToolsFingerprint()`, a hash of the tool specs a request sends ([#17496](https://github.com/can1357/oh-my-pi/pull/17496) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `Agent.queuedMessageGate`, a synchronous `QueuedMessageGate` consulted before every queued-message delivery batch (it can drop candidates) and told when claimed messages go back undelivered
 ### Fixed

@@ -208,6 +208,8 @@ Current runtime behavior is connection-event driven:
 - Initial connection timeouts trigger a reconnect attempt; print-mode readiness includes these attempts.
 - Tool calls that see retriable connection errors also attempt one reconnect + retry; calls already dispatched under the boundaries above are not replayed after connection loss.
 - Reconnect is also explicit via `/mcp reconnect <name>` or broader `/mcp reload`.
+- A remote server whose connect failed while no OAuth login for it resolved is recorded. When the model next asks for an `mcp__…` tool, the manager polls the credential store (another process sharing `agent.db` may have stored a login, e.g. `/mcp reauth` in another session) and reconnects that server once if a login now resolves. Nothing is retried without a stored login, and no timer runs.
+- A server that is down does not vanish: when the model asks for an `mcp__…` tool that is not mounted, the `xd://` "No such tool" error and the agent loop's "Tool … not found" error both name each configured server that is not connected, its last error and `/mcp reauth` / `/mcp reconnect` (`MCPManager.explainMissingTool`).
 
 Operationally:
 
@@ -245,6 +247,7 @@ Top-level sessions own managers they create. `AgentSession.dispose()` disconnect
 | Discovery throws (capability/config load path)                          | Loader returns empty tools + synthetic `.mcp.json` error                                                                  | Best-effort session startup     |
 | Invalid server config                                                   | Server skipped with validation error entry                                                                                | Best-effort per server          |
 | Connect timeout/init failure                                            | Server error recorded; others continue                                                                                    | Best-effort per server          |
+| Remote server failed at startup with no stored OAuth login (HTTP 401)   | Error recorded; an `mcp__…` miss names it; a login stored later reconnects it on the next such miss                       | Best-effort per server          |
 | `tools/list` still pending at startup with cache hit                    | Deferred tools returned immediately                                                                                       | Best-effort fast startup        |
 | `tools/list` still pending at startup without cache                     | No tools at startup; background continuation registers them via `#onToolsChanged` when ready                              | Best-effort late registration   |
 | Late background tool-load failure                                       | Logged after startup gate                                                                                                 | Best-effort logging             |
