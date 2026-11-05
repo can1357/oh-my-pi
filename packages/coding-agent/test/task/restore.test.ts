@@ -121,7 +121,7 @@ describe("restoreSession (omp --restore)", () => {
 		const session = {
 			sessionManager: { getSessionFile: () => mainFile },
 			asyncJobManager: manager,
-			settings: Settings.isolated(),
+			settings: Settings.isolated({ "task.tokenBudget": 4321 }),
 			restoreInterruptedTurn: restoreTurn,
 		} as unknown as AgentSession;
 
@@ -135,6 +135,8 @@ describe("restoreSession (omp --restore)", () => {
 			restore: true,
 			message: "Cut task",
 			softRequestBudget: 100,
+			// The token guard rides the same restore path as the request budget.
+			tokenBudget: 4321,
 		});
 		await manager.getJob("Cut")!.promise;
 		await manager.drainDeliveries({ filter: { ownerId: MAIN_AGENT_ID } });

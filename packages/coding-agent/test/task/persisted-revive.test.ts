@@ -608,6 +608,27 @@ describe("persisted subagent revival", () => {
 		expect(capturedBudget).toBe(100);
 	});
 
+	it("forwards the configured token budget to the revived agent's wake monitor", async () => {
+		const cwd = makeTempDir("@pi-revive-token-budget-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, { agent: "scout" });
+		let capturedBudget: number | undefined;
+		vi.spyOn(executorModule, "attachIrcWakeTurnMonitor").mockImplementation((_session, options) => {
+			capturedBudget = options.tokenBudget;
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
+			async () => ({ session: createRevivedSession([]).session }) as CreateAgentSessionResult,
+		);
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd, undefined, {
+			settings: Settings.isolated({ "task.tokenBudget": 64000 }),
+		})(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedBudget).toBe(64000);
+	});
+
 	it("restores the live account pool for the persisted agent name, so a revived agent stays restricted", async () => {
 		const cwd = makeTempDir("@pi-revive-account-pool-");
 		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, { agent: "scout" });

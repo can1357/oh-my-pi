@@ -115,6 +115,7 @@ import { existingSubagentWorkerPool, subagentWorkerPool } from "../thread/subage
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
 import { isCompletionProbeEnabled, startCompletionProbe } from "./completion-probe";
+import { HANDBACK_TOOL_NAME, resetHandbackTurnState } from "./handback";
 import { appendToolResult, createTaskWidgetInputs, TOOLS_SOURCE_LABEL } from "./widget-inputs";
 import { TextTap } from "../job-widgets/text-tap";
 import { TOOLS_SOURCE_ID } from "../job-widgets/types";
@@ -154,6 +155,7 @@ import {
 	cfgTaskSoftRequestBudgetNotice,
 	cfgTaskSoftRequestBudget,
 	cfgTaskAgentSoftRequestBudget,
+	cfgTaskTokenBudget,
 	cfgTaskAgentIdleTtlMs,
 	cfgTaskMaxRuntimeMs,
 	cfgTaskMaxRecursionDepth,
@@ -233,12 +235,42 @@ export function softRequestBudgetFor(
 	};
 }
 
+/**
+ * Every per-agent budget a subagent run, wake, revival or workpool turn needs
+ * from `settings` — the request budget plus `task.tokenBudget` (0 = off). One
+ * helper keeps the three budget paths from drifting: a revived agent keeps both
+ * guards only because each caller spreads this.
+ */
+export function subagentBudgetFor(
+	agentName: string,
+	settings: Settings,
+): { softRequestBudget: number; softRequestBudgetNotice: boolean; tokenBudget: number } {
+	return {
+		...softRequestBudgetFor(agentName, settings),
+		tokenBudget: Math.max(0, Math.trunc(Number(cfgTaskTokenBudget.get(settings)) || 0)),
+	};
+}
+
 /** Extra requests allowed after a budget stop for the forced yield to land before the run is hard-aborted. */
 export const BUDGET_STOP_GRACE_REQUESTS = 5;
 
 /** Steering notice injected when a subagent crosses its soft request budget. */
 export function buildBudgetNotice(requests: number, budget: number): string {
 	return `[budget notice] You have used ${requests} requests in this run (soft budget: ${budget}). Wrap up now: finish the current step and deliver your final report. At ${Math.ceil(budget * 1.5)} requests the run is force-stopped and you will be asked to report whatever you have.`;
+}
+
+/**
+ * Context aside injected when a subagent crosses half of `task.tokenBudget`:
+ * the same `<total_tokens>` shape the model plans by, with `budget - used`
+ * floored at 0 so an over-budget turn never reports negative headroom.
+ */
+export function buildTokenBudgetNotice(used: number, budget: number): string {
+	return `<total_tokens>${Math.max(0, budget - used)} tokens left of ${budget}</total_tokens>`;
+}
+
+/** Wrap-up steering notice injected when a subagent crosses 90% of `task.tokenBudget`. */
+export function buildTokenBudgetWrapUpNotice(used: number, budget: number): string {
+	return `[budget notice] You have used ${used} tokens in this run (soft token budget: ${budget}). This is past 90% of the budget: wrap up now, finish the current step, and deliver your final report with the remaining ${Math.max(0, budget - used)} tokens.`;
 }
 
 /** Flatten whitespace and clip salvage text for the cancelled-child summary line. */
@@ -826,8 +858,12 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 					exitCode = outcome.exitCode;
 				} else {
 					try {
+						// A schema-less run's string payload is its report verbatim
+						// (a `handback` final report and a prose yield both land
+						// here); only schema-bearing runs keep the JSON encoding
+						// that their validator and sidecar expect.
 						rawOutput =
-							assembled.rawText && typeof completeData === "string"
+							typeof completeData === "string" && (assembled.rawText || !includeStructuredOutput)
 								? completeData
 								: (JSON.stringify(completeData, null, 2) ?? "null");
 					} catch (err) {
@@ -1280,6 +1316,8 @@ interface RunMonitorArgs {
 	softRequestBudget: number;
 	/** Whether crossing the soft budget injects a wrap-up steering notice. */
 	softRequestBudgetNotice: boolean;
+	/** Soft context-token budget for this run (`task.tokenBudget`); 0 disables the guard. */
+	tokenBudget: number;
 	/** Wall-clock cap in ms; 0 disables the timer. */
 	maxRuntimeMs: number;
 	/** Whether to periodically ask the agent for a completion estimate; see {@link isCompletionProbeEnabled}. */
@@ -1383,6 +1421,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		onProgress,
 		softRequestBudget,
 		softRequestBudgetNotice,
+		tokenBudget,
 		maxRuntimeMs,
 		completionProbe,
 	} = args;
@@ -1454,6 +1493,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	};
 	let hasUsage = false;
 	let budgetSteerSent = false;
+	// One `<total_tokens>` aside at 50% and one wrap-up steer at 90% per run;
+	// a run that jumps straight past 90% sends only the wrap-up.
+	let tokenBudgetNoticeSent = false;
+	let tokenBudgetWrapUpSent = false;
 	let budgetLimitExceeded = false;
 	let budgetStopRequested = false;
 	let budgetStopAbortPromise: Promise<void> | undefined;
@@ -1852,6 +1895,40 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			});
 	};
 
+	/**
+	 * Soft context-token budget: one `<total_tokens>` aside once half the
+	 * budget is spent, then one wrap-up steer past 90%. Checked after usage
+	 * accumulation, so the counts are the run's cumulative tokens.
+	 */
+	const evaluateTokenBudget = () => {
+		if (tokenBudget <= 0 || abortSent || tokenBudgetWrapUpSent) return;
+		const used = progress.tokens;
+		const steerSession = activeSession;
+		if (!steerSession) return;
+		// Build the notice now (the count at crossing time), but send behind an
+		// async boundary: a synchronously-throwing send must never take down
+		// event processing (which escalates to terminate).
+		const send = (notice: string, deliverAs: "aside" | "steer") => {
+			void Promise.resolve()
+				.then(() => steerSession.sendUserMessage(notice, { deliverAs, attribution: "agent" }))
+				.catch(err => {
+					logger.warn("Subagent token budget notice failed", {
+						error: err instanceof Error ? err.message : String(err),
+					});
+				});
+		};
+		if (used >= tokenBudget * 0.9) {
+			tokenBudgetWrapUpSent = true;
+			tokenBudgetNoticeSent = true;
+			send(buildTokenBudgetWrapUpNotice(used, tokenBudget), "steer");
+			return;
+		}
+		if (!tokenBudgetNoticeSent && used >= tokenBudget * 0.5) {
+			tokenBudgetNoticeSent = true;
+			send(buildTokenBudgetNotice(used, tokenBudget), "aside");
+		}
+	};
+
 	const processEvent = (event: AgentEvent) => {
 		if (resolved) return;
 		const now = Date.now();
@@ -1989,7 +2066,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 							isError: event.isError,
 						});
 						if (data !== undefined) {
-							recordExtractedToolData(event.toolName, data);
+							// `handback` delegates to `yield`: record its terminal payload
+							// as the run's yield item so acceptance and finalization take
+							// the same path as a real `yield` call.
+							recordExtractedToolData(event.toolName === HANDBACK_TOOL_NAME ? "yield" : event.toolName, data);
 						}
 					}
 
@@ -2183,6 +2263,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					}
 					// Accumulate tokens for progress display
 					progress.tokens += getUsageTokens(messageUsage);
+					evaluateTokenBudget();
 					// Track latest per-turn context size so the UI can show
 					// "current context", not just cumulative billing volume.
 					if (role === "assistant") {
@@ -3083,6 +3164,8 @@ export interface IrcWakeTurnMonitorOptions {
 	completionProbe?: boolean;
 	softRequestBudget?: number;
 	softRequestBudgetNotice?: boolean;
+	/** Soft context-token budget for the turned run (`task.tokenBudget`); 0 disables the guard. */
+	tokenBudget?: number;
 	/** `false` = the session has no `yield` tool; see {@link ExecutorOptions.structured}. */
 	structured?: boolean;
 	outputSchema?: unknown;
@@ -3285,11 +3368,13 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 	const maxRuntimeMs = options.maxRuntimeMs ?? 0;
 	const softRequestBudget = options.softRequestBudget ?? 0;
 	const softRequestBudgetNotice = options.softRequestBudgetNotice ?? softRequestBudget > 0;
+	const tokenBudget = options.tokenBudget ?? 0;
 	session.setIrcWakeTurnObserver(records => {
 		// Autonomous IRC wake turns reuse the session's YieldTool just like
 		// runSubagentFollowUpTurn; clear the prior run's incremental-section flag
 		// and retry counters so this wake turn's guards see only its own state.
 		resetYieldTurnState(session.getToolByName("yield"));
+		resetHandbackTurnState(session.getToolByName(HANDBACK_TOOL_NAME));
 		const ircTask =
 			records
 				.map(record => {
@@ -3376,6 +3461,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			sessionFile,
 			softRequestBudget,
 			softRequestBudgetNotice,
+			tokenBudget,
 			maxRuntimeMs,
 			// A peer's message gets a short answer, too short to probe; the owner's message is an
 			// assignment the owner waits on.
@@ -3752,6 +3838,8 @@ export interface FollowUpTurnOptions {
 	completionProbe?: boolean;
 	softRequestBudget?: number;
 	softRequestBudgetNotice?: boolean;
+	/** Soft context-token budget for the followed-up run (`task.tokenBudget`); 0 disables the guard. */
+	tokenBudget?: number;
 	/** Workpool items accepted by the child yield tool during this turn. */
 	workPoolYieldItems?: WorkPoolYieldItem[];
 }
@@ -3869,12 +3957,15 @@ async function driveFollowUpTurn(
 	}
 	// A kept-alive session reuses its YieldTool across turns; clear the prior
 	// run's incremental-section flag and retry counters so this turn's guards
-	// evaluate against its own state, not stale accumulators.
+	// evaluate against its own state, not stale accumulators. `handback`'s
+	// one-delivery latch is per run too.
 	resetYieldTurnState(session.getToolByName("yield"));
+	resetHandbackTurnState(session.getToolByName(HANDBACK_TOOL_NAME));
 	const ref = AgentRegistry.global().get(id);
 	const sessionFile = ref?.sessionFile ?? undefined;
 	const softRequestBudget = options.softRequestBudget ?? 0;
 	const softRequestBudgetNotice = options.softRequestBudgetNotice ?? softRequestBudget > 0;
+	const tokenBudget = options.tokenBudget ?? 0;
 
 	const monitor = createSubagentRunMonitor({
 		index,
@@ -3892,6 +3983,7 @@ async function driveFollowUpTurn(
 		sessionFile,
 		softRequestBudget,
 		softRequestBudgetNotice,
+		tokenBudget,
 		maxRuntimeMs: options.maxRuntimeMs ?? 0,
 		completionProbe: options.completionProbe ?? false,
 	});
@@ -3940,6 +4032,7 @@ async function driveFollowUpTurn(
 						await session.waitForIdle();
 					}
 					resetYieldTurnState(session.getToolByName("yield"));
+					resetHandbackTurnState(session.getToolByName(HANDBACK_TOOL_NAME));
 					await session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
 					attemptUnsubscribe = monitor.attach(session);
 				},
@@ -4472,7 +4565,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	// TTL before an adopted idle subagent is parked by the lifecycle manager.
 	// <= 0 disables parking (the session stays live until process teardown).
 	const agentIdleTtlMs = Math.trunc(Number(cfgTaskAgentIdleTtlMs.get(settings)) || 0);
-	const { softRequestBudget, softRequestBudgetNotice } = softRequestBudgetFor(agent.name, settings);
+	const { softRequestBudget, softRequestBudgetNotice, tokenBudget } = subagentBudgetFor(agent.name, settings);
 	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
 	const restrictToolNames = options.restrictToolNames === true || preparedSession !== undefined;
@@ -4554,6 +4647,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		sessionFile: subtaskSessionFile,
 		softRequestBudget,
 		softRequestBudgetNotice,
+		tokenBudget,
 		maxRuntimeMs,
 		completionProbe,
 	});
@@ -4583,6 +4677,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		maxRuntimeMs,
 		softRequestBudget,
 		softRequestBudgetNotice,
+		tokenBudget,
 		structured,
 		outputSchema,
 		outputSchemaMode: options.outputSchemaMode,

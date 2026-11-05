@@ -38,6 +38,7 @@ import type { UsageStatistics } from "../session/session-entries";
 import type { SessionManager } from "../session/session-manager";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
 import { TaskTool } from "../task";
+import { HandbackTool } from "../task/handback";
 import type { AgentOutputManager } from "../task/output-manager";
 import { type AgentDefinition, canSpawnAtDepth } from "../task/types";
 import { type StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
@@ -621,6 +622,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 export const HIDDEN_TOOLS: Record<HiddenToolName, ToolFactory> = {
 	think: () => new ThinkTool(),
 	yield: s => new YieldTool(s),
+	handback: HandbackTool.createIf,
 	goal: s => new GoalTool(s),
 };
 
@@ -653,6 +655,10 @@ export interface BuiltinToolPlan {
 export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: string[]): Promise<BuiltinToolPlan> {
 	const restrictToolNames = session.restrictToolNames === true;
 	const includeYield = session.requireYieldTool === true;
+	// `handback` wraps `yield` for subagents with no output schema (it delivers
+	// a plain-text report); with a schema, `yield` already is the structured
+	// exit, and a root session has no delegated report to hand back.
+	const includeHandback = includeYield && session.outputSchema === undefined && (session.taskDepth ?? 0) > 0;
 	const enableLsp = session.enableLsp ?? true;
 	const requestedTools = restrictToolNames
 		? normalizeToolNames(toolNames ?? [])
@@ -775,6 +781,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 			return goalState === undefined || goalState.enabled === true || goalState.goal.status === "dropped";
 		}
 		if (name === "lsp") return enableLsp && cfgLspEnabled.get(session.settings);
+		if (name === "handback") return includeHandback;
 		// Without an edit tool, bash is the remaining way to modify existing files.
 		if (name === "edit") return !editDisabled;
 		if (name === "bash") return editDisabled || cfgBashEnabled.get(session.settings);
@@ -831,6 +838,9 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 	if (includeYield && requestedTools && !requestedTools.includes("yield")) {
 		requestedTools.push("yield");
 	}
+	if (includeHandback && requestedTools && !requestedTools.includes("handback")) {
+		requestedTools.push("handback");
+	}
 
 	const names = requestedTools?.filter(
 		name => (name in BUILTIN_TOOLS || name in HIDDEN_TOOLS) && isToolAllowed(name),
@@ -838,6 +848,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		...Object.keys(BUILTIN_TOOLS).filter(isToolAllowed),
 		...(externalThinkingActive ? ["think"] : []),
 		...(includeYield ? ["yield"] : []),
+		...(includeHandback ? ["handback"] : []),
 		...(goalModeActive ? ["goal"] : []),
 	];
 	return { requestedTools, names, isAllowed: isToolAllowed };

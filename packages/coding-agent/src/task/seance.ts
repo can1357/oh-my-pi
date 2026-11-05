@@ -299,7 +299,9 @@ export async function restoreSeanceSession(context: {
 	modelRegistry: ModelRegistry;
 }): Promise<RestoredSeanceSession | undefined> {
 	const { init, cwd, modelRegistry } = context;
-	const readOnlyTools = new Set([...(getBundledAgent(SEANCE_AGENT_NAME)?.tools ?? []), "yield"]);
+	// `handback` is the schema-less consult's plain-text exit (a read-only
+	// wrapper over `yield`), so it survives the restricted revival like `yield`.
+	const readOnlyTools = new Set([...(getBundledAgent(SEANCE_AGENT_NAME)?.tools ?? []), "yield", "handback"]);
 	if (
 		!init ||
 		typeof init !== "object" ||

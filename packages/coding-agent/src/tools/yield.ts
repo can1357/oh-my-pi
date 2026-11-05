@@ -21,7 +21,7 @@ import {
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import yieldDescription from "../prompts/tools/yield.md" with { type: "text" };
 import yieldDataErrorConflictMessage from "../prompts/tools/yield-data-error-conflict.md" with { type: "text" };
-import { subprocessToolRegistry } from "../task/subprocess-tool-registry";
+import { subprocessToolRegistry, type SubprocessToolEvent } from "../task/subprocess-tool-registry";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { ToolSession } from ".";
 import { buildOutputValidator, formatAllValidationIssues } from "./output-schema-validator";
@@ -792,35 +792,47 @@ export function resetYieldTurnState(tool: AgentTool | undefined): void {
 	if (tool && canResetTurnState(tool)) tool.resetTurnState();
 }
 
+/**
+ * Extracted terminal payload of a `yield`-shaped tool result.
+ *
+ * `handback` delegates to `yield`, so both register the same extraction: the
+ * monitor maps a handback result onto the run's yield items and finalization
+ * treats it exactly like a yield.
+ */
+export function extractYieldToolData(event: SubprocessToolEvent): YieldDetails | undefined {
+	const details = event.result?.details;
+	if (!details || typeof details !== "object") return undefined;
+	const record = details as Record<string, unknown>;
+	const status = record.status;
+	if (status !== "success" && status !== "aborted") return undefined;
+	return {
+		data: record.data,
+		status,
+		error: typeof record.error === "string" ? record.error : undefined,
+		type: isYieldType(record.type) ? record.type : undefined,
+		useLastTurn: record.useLastTurn === true ? true : undefined,
+		complete: record.complete === true ? true : undefined,
+		schemaOverridden: record.schemaOverridden === true ? true : undefined,
+	};
+}
+
+/** Whether a `yield`-shaped tool result ends the run (an incremental section does not). */
+export function yieldToolShouldTerminate(event: SubprocessToolEvent): boolean {
+	if (event.isError) return false;
+	const details = event.result?.details;
+	if (!details || typeof details !== "object") return true;
+	const record = details as Record<string, unknown>;
+	if (record.complete === true) return true;
+	return !(
+		record.status === "success" &&
+		Array.isArray(record.type) &&
+		record.type.length > 0 &&
+		record.type.every(item => typeof item === "string")
+	);
+}
+
 // Register subprocess tool handler for extraction + termination.
 subprocessToolRegistry.register<YieldDetails>("yield", {
-	extractData: event => {
-		const details = event.result?.details;
-		if (!details || typeof details !== "object") return undefined;
-		const record = details as Record<string, unknown>;
-		const status = record.status;
-		if (status !== "success" && status !== "aborted") return undefined;
-		return {
-			data: record.data,
-			status,
-			error: typeof record.error === "string" ? record.error : undefined,
-			type: isYieldType(record.type) ? record.type : undefined,
-			useLastTurn: record.useLastTurn === true ? true : undefined,
-			complete: record.complete === true ? true : undefined,
-			schemaOverridden: record.schemaOverridden === true ? true : undefined,
-		};
-	},
-	shouldTerminate: event => {
-		if (event.isError) return false;
-		const details = event.result?.details;
-		if (!details || typeof details !== "object") return true;
-		const record = details as Record<string, unknown>;
-		if (record.complete === true) return true;
-		return !(
-			record.status === "success" &&
-			Array.isArray(record.type) &&
-			record.type.length > 0 &&
-			record.type.every(item => typeof item === "string")
-		);
-	},
+	extractData: extractYieldToolData,
+	shouldTerminate: yieldToolShouldTerminate,
 });

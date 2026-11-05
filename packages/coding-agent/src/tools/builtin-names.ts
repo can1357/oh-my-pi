@@ -33,7 +33,7 @@ export const BUILTIN_TOOL_NAMES = [
 
 export type BuiltinToolName = (typeof BUILTIN_TOOL_NAMES)[number];
 
-export const HIDDEN_TOOL_NAMES = ["yield", "goal", "think"] as const;
+export const HIDDEN_TOOL_NAMES = ["yield", "handback", "goal", "think"] as const;
 
 export type HiddenToolName = (typeof HIDDEN_TOOL_NAMES)[number];
 

@@ -4460,6 +4460,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		) {
 			explicitlyRequestedToolNames.push("yield");
 		}
+		// `handback` is the schema-less subagent's plain-text exit. `createTools`
+		// registers it only for those sessions, so mirror its presence instead of
+		// re-deriving the condition: an agent frontmatter `tools:` list (which
+		// omits it, like `yield`) must not strand it in the registry.
+		if (
+			explicitlyRequestedToolNames &&
+			builtInToolNames.includes("handback") &&
+			!explicitlyRequestedToolNames.includes("handback")
+		) {
+			explicitlyRequestedToolNames.push("handback");
+		}
 		// Session-managed builtins may be force-included by createTools. Keep the
 		// active set consistent with that registry decision, using built-in
 		// provenance so same-named extension tools are never force-activated.
