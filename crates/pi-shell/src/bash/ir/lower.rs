@@ -1659,6 +1659,37 @@ mod tests {
 		}
 	}
 
+	#[test]
+	fn the_serialized_conditional_layout_belongs_to_one_ir_version() {
+		// An alias-expanded deferred body keeps its pre-expansion syntax as
+		// these exact bytes, and another build accepts them when the frames
+		// header's IR version matches. Two layouts under one version
+		// therefore pass that check and decode as something else, which
+		// restore still reports as success. Whenever this golden changes,
+		// raise `IR_VERSION` in the same commit: the version is asserted
+		// with the bytes so the two cannot drift apart.
+		struct Aliases;
+		impl syn::AliasLookup for Aliases {
+			fn alias(&self, name: &[u8]) -> Option<&[u8]> {
+				(name == b"emit").then_some(b"echo frozen")
+			}
+		}
+		let src = b"f() { emit; [[ ! a && -n b || ( c ) ]]; }\n".as_slice();
+		let mut parser = syn::Parser::new(src, syn::Features::NONE, &Aliases);
+		let cc = parser.next_command().unwrap().unwrap();
+		let lazy = lower_deferred(&cc, src, ModeId::Bash, syn::Features::NONE).unwrap();
+		let deferred = lazy.funcs[0].body.deferred.as_ref().unwrap();
+		#[rustfmt::skip]
+		const WIRE: [u8; 103] = [
+			0, 3, 4, 41, 1, 2, 4, 10, 10, 5, 10, 10, 0, 0, 1, 6, 10, 10, 0, 0, 2, 7, 10, 10, 1, 0,
+			4, 101, 99, 104, 111, 8, 10, 10, 1, 0, 6, 102, 114, 111, 122, 101, 110, 0, 0, 0, 0, 9,
+			12, 38, 10, 12, 38, 0, 0, 1, 11, 12, 38, 10, 5, 2, 4, 2, 3, 1, 15, 2, 12, 17, 18, 1, 0,
+			1, 97, 0, 2, 45, 110, 22, 13, 25, 26, 1, 0, 1, 98, 6, 30, 34, 2, 14, 32, 33, 1, 0, 1,
+			99, 0, 0, 0, 0, 0,
+		];
+		assert_eq!((crate::bash::ir::IR_VERSION, deferred.as_slice()), (16, WIRE.as_slice()));
+	}
+
 	// Goldens: bash 5.3 `printf '%q' $'…'` and upstream nquote3/nquote4.
 	#[test]
 	fn ansi_c_decodes_bash_escapes() {
