@@ -66,7 +66,7 @@ Mnemopi:
 4. If the backend is `hindsight`:
    - it fetches `session.getHindsightSessionState()` and throws if the backend was not started;
    - if any item has `scope: "global"`, it calls `state.assertGlobalRetainAvailable()` first, which throws `Hindsight global scope is off; set hindsight.globalScope to true to enable it.` while `hindsight.globalScope` is off and `Hindsight global scope requires global or per-project-tagged scoping.` under `per-project` scoping; either way nothing in the batch is queued;
-   - the complete call is handed to `HindsightSessionState.enqueueRetain(toolCallId, items)`; each event gets a stable `omp-retain-<sha256(sessionId:toolCallId:itemIndex)[:32]>` id, independent of its content;
+   - the complete call is handed to `HindsightSessionState.enqueueRetain(toolCallId, items)`; each event gets an `omp-retain-<sha256([sessionId, toolCallId, itemIndex, scope, context, content])[:32]>` id over its persisted fields, so a retried call keeps its ids while a reused tool call id with different content gets new ones;
    - the queue writes private temporary files, syncs their contents, atomically publishes them, and syncs the directory (except on Windows, which does not support directory fsync) before acknowledgement;
    - a drainer atomically claims files with a PID/timestamp name; another process can reclaim a claim older than `hindsight.retainTimeoutMs`. A cross-process lock serializes claims, capacity checks and file transitions, not HTTP requests;
    - delivery uses each event id as `document_id` with `update_mode: "replace"`. Replaying a call may send again after an ambiguous response, but replaces the same logical document. Global scope and distinct project tag sets always use separate requests, since the server unions a request's tags;
@@ -94,13 +94,13 @@ Mnemopi:
 ## Side Effects
 
 - Filesystem
-   - Hindsight: sanitized JSON events under `<agentDir>/hindsight-outbox/` (directory 0700, files 0600); permanent failures move to `quarantine/`. The bearer token is never stored.
+   - Hindsight: sanitized JSON events under `<agentDir>/hindsight-outbox/` (directory 0700, files 0600); refused, malformed and expired events move to `quarantine/`, which deletes them 30 days later. The bearer token is never stored.
    - Mnemopi: writes to local SQLite under `mnemopi.dbPath`, defaulting beneath the agent memories directory (`mnemopi/mnemopi.db`) with one database file per scoped bank when needed.
 - Network
    - Hindsight: `POST /v1/default/banks/{bank_id}/memories` via `retainBatch(...)`, plus optional `PUT /v1/default/banks/{bank_id}` via `ensureBankExists(...)` before the first write per bank per session state (the set is created with the primary session state and shared with subagent aliases).
    - Mnemopi: none unless configured embedding or LLM providers make calls during extraction.
 - Session state
-   - Hindsight: records original timestamp, destination, exact tags or global scope, content/context, and session/tool-call/source provenance before acknowledging. Subagents use their own event identities and the parent's destination.
+   - Hindsight: records original timestamp, destination, exact tags or global scope, content/context, and `metadata.session_id` (the only metadata sent, as with the in-memory queue) before acknowledging. Subagents use their own event identities and the parent's destination.
    - Mnemopi: writes through the session's scoped `Mnemopi` instance, includes `session_id`, `cwd`, and optional `context`, and shares scoped resources with subagents.
 - User-visible prompts / interactive UI
    - Hindsight async flush failures emit `session.emitNotice("warning", ...)`; the model is not told.
@@ -114,7 +114,7 @@ Mnemopi:
 
 - Input schema requires `items.length >= 1`; item strings have no schema-level minimum length.
 - Tool availability requires `memory.backend` to be `"hindsight"` or `"mnemopi"`; default `memory.backend` is `"off"`.
-- Hindsight outbox defaults: `hindsight.outboxEnabled = true`, `hindsight.outboxMaxEvents = 1000` (positive integer; includes pending, in-flight and quarantined events across destinations). Full or unwritable storage fails the tool visibly; nothing is evicted or silently downgraded to volatile storage.
+- Hindsight outbox defaults: `hindsight.outboxEnabled = true`, `hindsight.outboxMaxEvents = 1000` (positive integer; counts pending and in-flight events across destinations, not quarantined ones). Full or unwritable storage fails the tool visibly; nothing is evicted or silently downgraded to volatile storage.
 - Hindsight queue flush threshold / maximum drain batch: 16 events.
 - Hindsight queue debounce: `RETAIN_FLUSH_INTERVAL_MS = 5_000`.
 - Hindsight queue writes use `retainBatch(..., { async: true })`; the client request timeout defaults to `hindsight.retainTimeoutMs = 60_000`, but it does not wait for server-side consolidation.
@@ -134,7 +134,7 @@ Mnemopi:
 - Throws `Mnemopi backend is not initialised for this session.` when `memory.backend == "mnemopi"` but no state exists.
 - Throws `Hindsight backend is not initialised for this session.` when `memory.backend == "hindsight"` but no state exists.
 - Hindsight queue enqueue on disposed state throws `Hindsight retain queue is closed.`
-- Hindsight connection errors, timeouts, HTTP 408/429 and 5xx keep the event for retry with exponential backoff (5 seconds to 30 minutes, ±20% jitter). Primary startup immediately retries the same destination. Other 4xx, malformed events and events older than seven days are kept in `hindsight-outbox/quarantine/` with a warning; review them manually rather than blindly replaying them.
+- Hindsight HTTP 400, 413 and 422 responses refuse the request body: the event moves to `hindsight-outbox/quarantine/` with a warning, after a refused multi-item request is resent item by item so that only the refused items move. Every other failure (connection errors, timeouts, 401/403/404, 408, 429, 5xx) keeps the event for retry with exponential backoff (5 seconds to 30 minutes, ±20% jitter); primary startup immediately retries the same destination. Malformed events and events older than seven days, for any destination, are quarantined too. Quarantined events are deleted 30 days after quarantine; review them manually rather than blindly replaying them.
 - Hindsight bank/mission creation failures are logged at debug level and swallowed in `ensureBankExists(...)`; the later write still runs.
 - Mnemopi explicit `rememberScoped(...)` failures stop the batch and throw `Mnemopi did not store item <n> of <total>: <reason>. ...`, identifying earlier stored ids and unattempted items. Background auto-retain instead uses `rememberInScope(...)`, which logs and swallows storage failures.
 

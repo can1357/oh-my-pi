@@ -145,7 +145,6 @@ export class HindsightRetainQueue {
 				items,
 				this.#state.config.retainContext,
 				this.#state.retainTags,
-				this.#state.session.sessionManager.getCwd(),
 			);
 		} else {
 			this.#items.push(...items.map(item => ({ ...item, scope: item.scope ?? "project", timestamp: new Date() })));

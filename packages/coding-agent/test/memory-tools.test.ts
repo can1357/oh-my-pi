@@ -389,7 +389,7 @@ describe("retain.execute", () => {
 		]);
 	});
 
-	it("retains items queued directly without a scope as project-scoped", async () => {
+	it("retains items queued through the two-argument enqueue as project-scoped", async () => {
 		const settings = Settings.isolated({ "memory.backend": "hindsight" });
 		const client = new HindsightApi({ baseUrl: "http://localhost:8888" });
 		const retainBatchSpy = vi.spyOn(HindsightApi.prototype, "retainBatch").mockResolvedValue({} as never);

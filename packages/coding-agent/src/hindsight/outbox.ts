@@ -1,5 +1,4 @@
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import { isEnoent, logger, sanitizeText, withFileLock } from "@oh-my-pi/pi-utils";
 import type { MemoryWriteScope } from "../memory-backend/global-scope";
@@ -8,8 +7,12 @@ import { writeFileAtomically } from "../utils/atomic-file";
 import { HindsightError, type HindsightClientApi } from "./client";
 
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+/** How long a quarantined event stays available for review; quarantine never counts toward `maxEvents`. */
+const QUARANTINE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const BATCH_SIZE = 16;
 const EVENT_FILE = /^(omp-retain-[a-f0-9]{32})(?:\.inflight\.(\d+)\.(\d+))?\.json$/;
+/** Statuses that refuse the request body itself. Auth, missing-bank, rate-limit and server failures retry until expiry. */
+const REJECTED_PAYLOAD_STATUSES = new Set([400, 413, 422]);
 
 export interface RetainInput {
 	content: string;
@@ -48,9 +51,19 @@ interface ClaimedEvent {
 	event: OutboxEvent;
 }
 
-/** Stable across tool retries, but not across distinct calls with identical content. */
-export function retainEventId(sessionId: string, toolCallId: string, index: number): string {
-	return `omp-retain-${new Bun.CryptoHasher("sha256").update(`${sessionId}:${toolCallId}:${index}`).digest("hex").slice(0, 32)}`;
+/**
+ * Stable across retries of one call's item. Tool call ids are not guaranteed unique, so the
+ * persisted scope, context and content are part of the identity: a reused id with different
+ * content becomes its own document instead of being dropped or replacing an earlier memory.
+ */
+function retainEventId(
+	sessionId: string,
+	toolCallId: string,
+	index: number,
+	item: Pick<OutboxEvent, "scope" | "context" | "content">,
+): string {
+	const identity = JSON.stringify([sessionId, toolCallId, index, item.scope, item.context, item.content]);
+	return `omp-retain-${new Bun.CryptoHasher("sha256").update(identity).digest("hex").slice(0, 32)}`;
 }
 
 /** No credentials, query parameters or fragments are persisted as routing metadata. */
@@ -100,44 +113,34 @@ export class HindsightOutbox {
 		items: RetainInput[],
 		context: string,
 		tags: string[] | undefined,
-		cwd: string,
 	): Promise<void> {
 		if (!sessionId || !toolCallId) throw new Error("Hindsight retain requires a session and tool call identity.");
 		await this.#prepare();
 		await withFileLock(path.join(this.#dir, "queue"), async () => {
 			const files = (await fs.readdir(this.#dir)).filter(file => EVENT_FILE.test(file));
 			const existing = new Set(files.map(file => EVENT_FILE.exec(file)![1]));
-			const quarantine = await fs.readdir(path.join(this.#dir, "quarantine")).catch(error => {
-				if (isEnoent(error)) return [] as string[];
-				throw error;
+			const events = items.map((item, index): OutboxEvent => {
+				const scope = item.scope ?? "project";
+				const itemContext = this.#clean(item.context ?? context);
+				const content = this.#clean(item.content);
+				return {
+					version: 1,
+					eventId: retainEventId(sessionId, toolCallId, index, { scope, context: itemContext, content }),
+					destination: this.#destination,
+					scope,
+					tags: scope === "global" ? [] : (tags ?? []).map(tag => this.#clean(tag)),
+					timestamp: new Date().toISOString(),
+					content,
+					context: itemContext,
+					metadata: { session_id: this.#clean(sessionId) },
+					attempts: 0,
+					nextAttemptAt: 0,
+				};
 			});
-			const events = items.map((item, index): OutboxEvent => ({
-				version: 1,
-				eventId: retainEventId(sessionId, toolCallId, index),
-				destination: this.#destination,
-				scope: item.scope ?? "project",
-				tags: item.scope === "global" ? [] : (tags ?? []).map(tag => this.#clean(tag)),
-				timestamp: new Date().toISOString(),
-				content: this.#clean(item.content),
-				context: this.#clean(item.context ?? context),
-				metadata: {
-					session_id: this.#clean(sessionId),
-					tool_call_id: this.#clean(toolCallId),
-					cwd: this.#clean(cwd),
-					host: this.#clean(os.hostname()),
-					source: "omp-retain-tool",
-				},
-				attempts: 0,
-				nextAttemptAt: 0,
-			}));
-			if (events.some(event => quarantine.includes(`${event.eventId}.json`))) {
-				throw new Error("Hindsight event is quarantined; review hindsight-outbox/quarantine before replaying it.");
-			}
 			const fresh = events.filter(event => !existing.has(event.eventId));
-			if (files.length + quarantine.length + fresh.length > this.#options.maxEvents) {
-				throw new Error(
-					`Hindsight outbox full (${files.length + quarantine.length} events); memory NOT queued. Nothing was evicted.`,
-				);
+			// Only deliverable events hold capacity; quarantine is bounded by its own TTL.
+			if (files.length + fresh.length > this.#options.maxEvents) {
+				throw new Error(`Hindsight outbox full (${files.length} events); memory NOT queued. Nothing was evicted.`);
 			}
 			let saved = 0;
 			try {
@@ -156,21 +159,39 @@ export class HindsightOutbox {
 		});
 	}
 
-	async #quarantine(file: string): Promise<void> {
+	/**
+	 * Moves files to quarantine for review, then deletes quarantined events past the review
+	 * period, so quarantine stays bounded by what was quarantined within it. Callers hold the queue lock.
+	 */
+	async #quarantine(files: string[]): Promise<void> {
+		if (files.length === 0) return;
 		const dir = path.join(this.#dir, "quarantine");
 		await fs.mkdir(dir, { recursive: true, mode: 0o700 });
 		await fs.chmod(dir, 0o700);
-		const id = EVENT_FILE.exec(file)![1];
-		await fs.rename(path.join(this.#dir, file), path.join(dir, `${id}.json`));
+		const now = new Date();
+		for (const file of files) {
+			const target = path.join(dir, `${EVENT_FILE.exec(file)![1]}.json`);
+			await fs.rename(path.join(this.#dir, file), target);
+			// The review period starts at quarantine, not at the event's last write.
+			await fs.utimes(target, now, now);
+		}
+		for (const file of await fs.readdir(dir)) {
+			const filePath = path.join(dir, file);
+			try {
+				if ((await fs.stat(filePath)).mtimeMs < now.getTime() - QUARANTINE_TTL_MS) await fs.unlink(filePath);
+			} catch (error) {
+				if (!isEnoent(error)) throw error;
+			}
+		}
 	}
 
 	async #claim(force: boolean): Promise<ClaimedEvent[]> {
 		return withFileLock(path.join(this.#dir, "queue"), async () => {
 			const claimed: ClaimedEvent[] = [];
+			const unusable: string[] = [];
 			const now = Date.now();
 			this.depth = 0;
 			this.nextAttemptAt = undefined;
-			let quarantined = 0;
 			for (const file of (await fs.readdir(this.#dir)).sort()) {
 				const match = EVENT_FILE.exec(file);
 				if (!match) continue;
@@ -190,28 +211,28 @@ export class HindsightOutbox {
 					)
 						throw new Error("Invalid event");
 				} catch {
-					await this.#quarantine(file);
-					quarantined++;
+					unusable.push(file);
 					continue;
 				}
-				if (
-					event.destination.apiUrl !== this.#destination.apiUrl ||
-					event.destination.bankId !== this.#destination.bankId
-				)
-					continue;
+				const ours =
+					event.destination.apiUrl === this.#destination.apiUrl &&
+					event.destination.bankId === this.#destination.bankId;
 				if (match[3] && now - Number(match[3]) <= this.#options.retainTimeoutMs) {
-					this.depth++;
-					this.nextAttemptAt = Math.min(
-						this.nextAttemptAt ?? Infinity,
-						Number(match[3]) + this.#options.retainTimeoutMs + 1,
-					);
+					if (ours) {
+						this.depth++;
+						this.nextAttemptAt = Math.min(
+							this.nextAttemptAt ?? Infinity,
+							Number(match[3]) + this.#options.retainTimeoutMs + 1,
+						);
+					}
 					continue;
 				}
+				// Expiry ignores the destination: events no session drains anymore must not hold capacity forever.
 				if (now - Date.parse(event.timestamp) > MAX_AGE_MS) {
-					await this.#quarantine(file);
-					quarantined++;
+					unusable.push(file);
 					continue;
 				}
+				if (!ours) continue;
 				this.depth++;
 				if ((!force && event.nextAttemptAt > now) || claimed.length >= BATCH_SIZE) {
 					this.nextAttemptAt = Math.min(this.nextAttemptAt ?? Infinity, Math.max(now, event.nextAttemptAt));
@@ -221,9 +242,10 @@ export class HindsightOutbox {
 				await fs.rename(path.join(this.#dir, file), path.join(this.#dir, claim));
 				claimed.push({ file: claim, event });
 			}
-			if (quarantined)
+			await this.#quarantine(unusable);
+			if (unusable.length)
 				this.#options.notice(
-					`Hindsight outbox: ${quarantined} events kept in quarantine (invalid or older than 7 days); review hindsight-outbox/quarantine.`,
+					`Hindsight outbox: ${unusable.length} events moved to quarantine (invalid or older than 7 days); review hindsight-outbox/quarantine within 30 days.`,
 				);
 			return claimed;
 		});
@@ -245,75 +267,91 @@ export class HindsightOutbox {
 			group.push(claim);
 			groups.set(key, group);
 		}
-		let failed = 0;
-		let quarantined = 0;
+		const outcome = { failed: 0, rejected: 0 };
 		await Promise.all(
 			[...groups.values()].map(async group => {
-				let error: unknown;
-				try {
-					await this.#options.client.retainBatch(
-						this.#destination.bankId,
-						group.map(({ event }) => ({
-							content: event.content,
-							context: event.context,
-							timestamp: event.timestamp,
-							metadata: event.metadata,
-							tags: event.tags.length ? event.tags : undefined,
-							documentId: event.eventId,
-							updateMode: "replace",
-						})),
-						{ async: true },
-					);
-				} catch (caught) {
-					error = caught;
+				const result = await this.#send(group);
+				if (group.length === 1 || result !== "rejected") {
+					await this.#settle(group, result, outcome);
+					return;
 				}
-				await withFileLock(path.join(this.#dir, "queue"), async () => {
-					const permanent =
-						error instanceof HindsightError &&
-						error.statusCode !== undefined &&
-						error.statusCode >= 400 &&
-						error.statusCode < 500 &&
-						![408, 429].includes(error.statusCode);
-					for (const { file, event } of group) {
-						const filePath = path.join(this.#dir, file);
-						// A stale claim may have been reclaimed while this process was suspended.
-						try {
-							await fs.stat(filePath);
-						} catch (caught) {
-							if (isEnoent(caught)) continue;
-							throw caught;
-						}
-						if (!error) {
-							await fs.unlink(filePath);
-							this.depth--;
-						} else if (permanent) {
-							await this.#quarantine(file);
-							quarantined++;
-							this.depth--;
-						} else {
-							event.attempts++;
-							const delay =
-								Math.min(30 * 60 * 1000, 5_000 * 2 ** Math.min(event.attempts - 1, 10)) *
-								(0.8 + Math.random() * 0.4);
-							event.nextAttemptAt = Date.now() + Math.round(delay);
-							// Update the claimed file before publishing pending: a crash never exposes two copies.
-							await writeFileAtomically(filePath, JSON.stringify(event));
-							await fs.rename(filePath, path.join(this.#dir, `${event.eventId}.json`));
-							this.nextAttemptAt = Math.min(this.nextAttemptAt ?? Infinity, event.nextAttemptAt);
-							failed++;
-						}
-					}
-					await this.#syncDirectory();
-				});
+				// One refused item fails the whole request; resend singly so only refused items are quarantined.
+				for (const claim of group) await this.#settle([claim], await this.#send([claim]), outcome);
 			}),
 		);
-		if (failed)
+		if (outcome.failed)
 			this.#options.notice(`Memory retention failed; ${this.depth} events kept in the Hindsight outbox for retry.`);
-		if (quarantined)
+		if (outcome.rejected)
 			this.#options.notice(
-				`Hindsight outbox: ${quarantined} events kept in quarantine after HTTP rejection; review hindsight-outbox/quarantine.`,
+				`Hindsight outbox: ${outcome.rejected} events moved to quarantine after the server rejected them; review hindsight-outbox/quarantine within 30 days.`,
 			);
-		if (claimed.length && !failed && !quarantined)
+		if (claimed.length && !outcome.failed && !outcome.rejected)
 			logger.debug("Hindsight outbox drained", { count: claimed.length });
+	}
+
+	/** `rejected` means the server refused the request body itself; every other failure is retried. */
+	async #send(group: ClaimedEvent[]): Promise<"accepted" | "rejected" | "retry"> {
+		try {
+			await this.#options.client.retainBatch(
+				this.#destination.bankId,
+				group.map(({ event }) => ({
+					content: event.content,
+					context: event.context,
+					timestamp: event.timestamp,
+					metadata: event.metadata,
+					tags: event.tags.length ? event.tags : undefined,
+					documentId: event.eventId,
+					updateMode: "replace",
+				})),
+				{ async: true },
+			);
+			return "accepted";
+		} catch (error) {
+			return error instanceof HindsightError &&
+				error.statusCode !== undefined &&
+				REJECTED_PAYLOAD_STATUSES.has(error.statusCode)
+				? "rejected"
+				: "retry";
+		}
+	}
+
+	async #settle(
+		group: ClaimedEvent[],
+		result: "accepted" | "rejected" | "retry",
+		outcome: { failed: number; rejected: number },
+	): Promise<void> {
+		await withFileLock(path.join(this.#dir, "queue"), async () => {
+			const rejected: string[] = [];
+			for (const { file, event } of group) {
+				const filePath = path.join(this.#dir, file);
+				// A stale claim may have been reclaimed while this process was suspended.
+				try {
+					await fs.stat(filePath);
+				} catch (caught) {
+					if (isEnoent(caught)) continue;
+					throw caught;
+				}
+				if (result === "accepted") {
+					await fs.unlink(filePath);
+					this.depth--;
+				} else if (result === "rejected") {
+					rejected.push(file);
+					this.depth--;
+				} else {
+					event.attempts++;
+					const delay =
+						Math.min(30 * 60 * 1000, 5_000 * 2 ** Math.min(event.attempts - 1, 10)) * (0.8 + Math.random() * 0.4);
+					event.nextAttemptAt = Date.now() + Math.round(delay);
+					// Update the claimed file before publishing pending: a crash never exposes two copies.
+					await writeFileAtomically(filePath, JSON.stringify(event));
+					await fs.rename(filePath, path.join(this.#dir, `${event.eventId}.json`));
+					this.nextAttemptAt = Math.min(this.nextAttemptAt ?? Infinity, event.nextAttemptAt);
+					outcome.failed++;
+				}
+			}
+			await this.#quarantine(rejected);
+			outcome.rejected += rejected.length;
+			await this.#syncDirectory();
+		});
 	}
 }

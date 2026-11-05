@@ -76,7 +76,7 @@ export class LearnTool implements AgentTool<LearnSchema> {
 		return new LearnTool(session);
 	}
 
-	async execute(_id: string, params: LearnParams): Promise<AgentToolResult> {
+	async execute(toolCallId: string, params: LearnParams): Promise<AgentToolResult> {
 		// 1) Persist or queue the lesson to long-term memory (mirrors MemoryRetainTool).
 		const backend = cfgMemoryBackend.get(this.session.settings);
 		if (params.scope === "global" && backend !== "mnemopi" && backend !== "hindsight") {
@@ -131,7 +131,9 @@ export class LearnTool implements AgentTool<LearnSchema> {
 				throw new Error("Hindsight backend is not initialised for this session.");
 			}
 			// Throws before queueing while global scope is off or has no destination, so no skill is written either.
-			await state.enqueueRetain(_id, [{ content: params.memory, context: params.context, scope: params.scope }]);
+			await state.enqueueRetain(toolCallId, [
+				{ content: params.memory, context: params.context, scope: params.scope },
+			]);
 			memoryMessage = `Lesson queued for retention (${state.config.outboxEnabled ? "durable" : "in memory only; not durable"})`;
 		}
 

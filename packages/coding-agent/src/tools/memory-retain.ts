@@ -61,7 +61,7 @@ export class MemoryRetainTool implements AgentTool<MemoryRetainSchema, MemoryRet
 		return new MemoryRetainTool(session);
 	}
 
-	async execute(_id: string, params: MemoryRetainParams): Promise<AgentToolResult<MemoryRetainDetails>> {
+	async execute(toolCallId: string, params: MemoryRetainParams): Promise<AgentToolResult<MemoryRetainDetails>> {
 		const backend = cfgMemoryBackend.get(this.session.settings);
 		if (backend === "mnemopi") {
 			const state = this.session.getMnemopiSessionState?.();
@@ -133,9 +133,9 @@ export class MemoryRetainTool implements AgentTool<MemoryRetainSchema, MemoryRet
 			state.assertGlobalRetainAvailable();
 		}
 
-		// Acknowledge only after the complete call is persisted. Its identity
-		// survives retries; identical content from a different call is a new event.
-		await state.enqueueRetain(_id, params.items);
+		// Acknowledge only after the complete call is persisted. A retry of the same
+		// call deduplicates; another call, or a reused call id with new content, is a new event.
+		await state.enqueueRetain(toolCallId, params.items);
 
 		const count = params.items.length;
 		const noun = count === 1 ? "memory" : "memories";

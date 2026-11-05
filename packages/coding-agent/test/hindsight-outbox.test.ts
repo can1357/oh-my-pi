@@ -6,7 +6,7 @@ import { Settings } from "../src/config/settings";
 import { hindsightBackend } from "../src/hindsight/backend";
 import { HindsightApi } from "../src/hindsight/client";
 import { loadHindsightConfig } from "../src/hindsight/config";
-import { type OutboxEvent, retainEventId } from "../src/hindsight/outbox";
+import type { OutboxEvent } from "../src/hindsight/outbox";
 import { HindsightSessionState } from "../src/hindsight/state";
 import type { AgentSession, AgentSessionEventListener } from "../src/session/agent-session";
 import type { ToolSession } from "../src/tools";
@@ -21,7 +21,8 @@ interface WireItem {
 }
 let temp: TempDir;
 let requests: WireItem[][];
-let status: number;
+let accepted: WireItem[];
+let status: number | ((items: WireItem[]) => number);
 let delay: Promise<void> | undefined;
 let onRequest: (() => void) | undefined;
 let server: Bun.Server<undefined>;
@@ -30,6 +31,7 @@ const states: HindsightSessionState[] = [];
 beforeEach(() => {
 	temp = TempDir.createSync("@hindsight-outbox-test-");
 	requests = [];
+	accepted = [];
 	status = 202;
 	delay = undefined;
 	onRequest = undefined;
@@ -43,7 +45,9 @@ beforeEach(() => {
 			requests.push(body.items);
 			onRequest?.();
 			if (delay) await delay;
-			return Response.json({ operation_id: "accepted" }, { status });
+			const code = typeof status === "function" ? status(body.items) : status;
+			if (code < 300) accepted.push(...body.items);
+			return Response.json({ operation_id: "accepted" }, { status: code });
 		},
 	});
 });
@@ -118,9 +122,8 @@ describe("Hindsight durable tool delivery", () => {
 		expect(requests).toHaveLength(0);
 		const [event] = await events();
 		expect(result.content[0]).toMatchObject({ text: expect.stringContaining("durable") });
-		expect(event.eventId).toBe(retainEventId("session-a", "call-1", 0));
-		expect(JSON.stringify(event)).not.toContain("test-sensitive-bearer");
 		expect(event.content).not.toContain("\u001b");
+		expect(JSON.stringify(event)).not.toContain("test-sensitive-bearer");
 		if (process.platform !== "win32") {
 			expect((await fs.stat(path.join(temp.path(), "hindsight-outbox"))).mode & 0o777).toBe(0o700);
 			expect((await fs.stat(path.join(temp.path(), "hindsight-outbox", `${event.eventId}.json`))).mode & 0o777).toBe(
@@ -154,7 +157,7 @@ describe("Hindsight durable tool delivery", () => {
 		expect(await events()).toHaveLength(0);
 	});
 
-	it("deduplicates retried tool identities, but not distinct calls with identical content", async () => {
+	it("deduplicates a retried tool call, but not a distinct call or a reused call id with new content", async () => {
 		const { tool, state } = fixture();
 		const args = { items: [{ content: "same fact" }] };
 		await tool.execute("call-duplicate", args);
@@ -165,8 +168,13 @@ describe("Hindsight durable tool delivery", () => {
 		await state.flushRetainQueue();
 		expect(new Set(requests.flat().map(item => item.document_id)).size).toBe(1);
 		await tool.execute("call-distinct", args);
+		// Provider tool call ids are not guaranteed unique: a reused id with new content is neither
+		// dropped while the first call is pending nor replaces a delivered memory.
+		await tool.execute("call-distinct", { items: [{ content: "pending fact" }] });
+		await tool.execute("call-duplicate", { items: [{ content: "different fact" }] });
+		expect(await events()).toHaveLength(3);
 		await state.flushRetainQueue();
-		expect(new Set(requests.flat().map(item => item.document_id)).size).toBe(2);
+		expect(new Set(requests.flat().map(item => item.document_id)).size).toBe(4);
 		expect(requests.flat().every(item => item.update_mode === "replace")).toBe(true);
 	});
 
@@ -198,46 +206,76 @@ describe("Hindsight durable tool delivery", () => {
 		expect(await events()).toHaveLength(2);
 	});
 
-	it("quarantines permanent HTTP failures instead of losing or repeatedly sending them", async () => {
-		status = 400;
+	it("quarantines only the item a rejected batch was refused for, and never resends it", async () => {
+		status = items => (items.some(item => item.content === "invalid server input") ? 422 : 202);
 		const { tool, state, notices } = fixture();
-		await tool.execute("bad", { items: [{ content: "invalid server input" }] });
+		await tool.execute("mixed", { items: [{ content: "valid memory" }, { content: "invalid server input" }] });
+		const refused = (await events()).find(event => event.content === "invalid server input")!;
 		await state.flushRetainQueue();
 		expect(await events()).toHaveLength(0);
+		expect(accepted.map(item => item.content)).toEqual(["valid memory"]);
 		expect(await fs.readdir(path.join(temp.path(), "hindsight-outbox/quarantine"))).toEqual([
-			`${retainEventId("session-a", "bad", 0)}.json`,
+			`${refused.eventId}.json`,
 		]);
 		expect(notices.join(" ")).toContain("quarantine");
+		const sent = requests.length;
 		await state.flushRetainQueue();
-		expect(requests).toHaveLength(1);
+		expect(requests).toHaveLength(sent);
 	});
 
-	it.each([408, 429])("keeps HTTP %s retryable and respects persisted backoff", async code => {
-		status = code;
+	it("keeps an auth failure for retry and delivers it once the server accepts it", async () => {
+		status = 401;
 		const { tool, state } = fixture();
-		await tool.execute("retry", { items: [{ content: "retry later" }] });
+		await tool.execute("auth-outage", { items: [{ content: "kept through an expired token" }] });
 		await state.flushRetainQueue();
 		const [event] = await events();
 		expect(event.nextAttemptAt).toBeGreaterThan(Date.now());
 		await state.flushRetainQueue();
 		expect(requests).toHaveLength(1);
+		status = 202;
+		await state.retainQueue.flush(true);
+		expect(requests).toHaveLength(2);
+		expect(requests[1][0].document_id).toBe(event.eventId);
+		expect(await events()).toHaveLength(0);
+	});
+
+	it("keeps quarantine out of the event cap and deletes quarantined events after 30 days", async () => {
+		status = 400;
+		const { tool, state } = fixture({ "hindsight.outboxMaxEvents": 1 });
+		const quarantine = path.join(temp.path(), "hindsight-outbox/quarantine");
+		await tool.execute("first-refused", { items: [{ content: "first refused" }] });
+		await state.flushRetainQueue();
+		const [expired] = await fs.readdir(quarantine);
+		const longAgo = new Date(Date.now() - 31 * 86_400_000);
+		await fs.utimes(path.join(quarantine, expired), longAgo, longAgo);
+		await tool.execute("second-refused", { items: [{ content: "second refused" }] });
+		const [second] = await events();
+		await state.flushRetainQueue();
+		expect(await fs.readdir(quarantine)).toEqual([`${second.eventId}.json`]);
 	});
 
 	it("retries a transient failure in the same process without another tool call", async () => {
 		status = 503;
-		const { tool, state } = fixture();
-		await tool.execute("automatic-retry", { items: [{ content: "deliver after recovery" }] });
-		await state.flushRetainQueue();
-		const [event] = await events();
-		const retried = Promise.withResolvers<void>();
-		onRequest = retried.resolve;
-		status = 202;
-		await retried.promise;
-		await state.flushRetainQueue();
-		expect(requests).toHaveLength(2);
-		expect(requests[1][0].document_id).toBe(event.eventId);
-		expect(await events()).toHaveLength(0);
-	}, 10_000);
+		// Fake timers drive the persisted backoff instead of waiting out 4-6 s of real time.
+		vi.useFakeTimers();
+		try {
+			const { tool, state } = fixture();
+			await tool.execute("automatic-retry", { items: [{ content: "deliver after recovery" }] });
+			await state.flushRetainQueue();
+			const [event] = await events();
+			const retried = Promise.withResolvers<void>();
+			onRequest = retried.resolve;
+			status = 202;
+			vi.advanceTimersByTime(event.nextAttemptAt - Date.now());
+			await retried.promise;
+			await state.flushRetainQueue();
+			expect(requests).toHaveLength(2);
+			expect(requests[1][0].document_id).toBe(event.eventId);
+			expect(await events()).toHaveLength(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 
 	it("claims once across concurrent drainers while a request is in flight", async () => {
 		const pending = Promise.withResolvers<void>();
@@ -317,16 +355,18 @@ describe("Hindsight durable tool delivery", () => {
 		expect(await events()).toHaveLength(0);
 	}, 10_000);
 
-	it("leaves another destination untouched and quarantines events older than seven days", async () => {
+	it("leaves another destination's pending events alone, but expires them after seven days", async () => {
 		const first = fixture();
 		await first.tool.execute("old", { items: [{ content: "old event" }] });
 		const [event] = await events();
-		await fixture({ "hindsight.apiUrl": "http://127.0.0.1:1" }, "wrong-destination").state.flushRetainQueue();
+		const other = fixture({ "hindsight.apiUrl": "http://127.0.0.1:1" }, "wrong-destination");
+		await other.state.flushRetainQueue();
 		expect(requests).toHaveLength(0);
 		expect(await events()).toHaveLength(1);
 		event.timestamp = new Date(Date.now() - 8 * 86400000).toISOString();
 		await Bun.write(path.join(temp.path(), "hindsight-outbox", `${event.eventId}.json`), JSON.stringify(event));
-		await first.state.flushRetainQueue();
+		// No session may drain this destination again; the expired event must still leave the cap.
+		await other.state.flushRetainQueue();
 		expect(await events()).toHaveLength(0);
 		expect(requests).toHaveLength(0);
 	});

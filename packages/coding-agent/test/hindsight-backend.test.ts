@@ -1187,9 +1187,39 @@ describe("hindsightBackend retain queue flush on session teardown", () => {
 	});
 
 	// Companion contract test: documents the failure mode the dispose-order
-	// fix prevents. If the session pointer is cleared first, the queue's
-	// identity guard drops the spliced batch (and `retainBatch` is NOT
+	// fix prevents. If the session pointer is cleared first, the in-memory
+	// queue's identity guard drops the spliced batch (and `retainBatch` is NOT
 	// called). This is exactly what was happening before the fix.
+	it("drops the spliced batch when the session pointer is cleared before flush (anti-regression)", async () => {
+		const retainBatchSpy = vi.spyOn(HindsightApi.prototype, "retainBatch").mockResolvedValue({} as never);
+		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
+
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+			"hindsight.outboxEnabled": false,
+		});
+		const session = makeFakeSession({ sessionId: "s-buggy-order", settings });
+
+		await hindsightBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+		const state = session.getHindsightSessionState();
+		await state!.enqueueRetain("call-dropped", [{ content: "dropped fact" }]);
+
+		// Buggy order — clear THEN flush. The queue's identity check fails.
+		session.setHindsightSessionState(undefined);
+		await state!.flushRetainQueue();
+
+		expect(retainBatchSpy).not.toHaveBeenCalled();
+	});
+
+	// The durable outbox does not depend on the session pointer: events written
+	// before it clears are still delivered.
 	it("delivers durable events even after the session pointer is cleared", async () => {
 		const retainBatchSpy = vi.spyOn(HindsightApi.prototype, "retainBatch").mockResolvedValue({} as never);
 		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
