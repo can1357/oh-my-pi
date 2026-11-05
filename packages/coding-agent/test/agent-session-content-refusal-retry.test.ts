@@ -362,8 +362,10 @@ describe("AgentSession content-policy refusal retries", () => {
 
 			expect(exitCode).toBe(PRINT_MODE_REFUSAL_EXIT_CODE);
 			expect(stderr.join("").split("\n")).toContain(ANTHROPIC_REFUSAL_LINE);
-			// An Anthropic refusal walks fallback chains only; with no chain it is one request,
-			// never a same-model retry — `retry.refusalRetries` is for `cyber_policy` alone.
+			// An Anthropic `cyber` refusal walks fallback chains only; with no chain it is one
+			// request, never a same-model retry. The allowance is for the categories whose verdict
+			// is unstable for the same input — `cyber_policy` and `reasoning_extraction` — and
+			// this is not one of them, which is what this row pins.
 			expect(harness.requests()).toBe(1);
 			expect(harness.session.getLastAssistantMessage()).toMatchObject({
 				stopReason: "error",

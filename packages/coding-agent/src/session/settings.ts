@@ -739,6 +739,16 @@ export const cfgRetryMaxRetries = register({
 	},
 });
 
+/**
+ * The default is an UPPER BOUND, not a tuned figure, and the first retry does nearly all of the
+ * work. Two facts set that: the classifier's heat is cumulative and belongs to the request — block
+ * count and conversation position raise it (`packages/ai/src/dialect/demotion.ts`) — so a retry
+ * replaying identical bytes carries identical heat and there is no cooling; but the verdict at a
+ * given heat is probabilistic, which a forced-refusal run demonstrates by clearing on the second
+ * of two identical requests. So retries re-roll at an unchanged rate rather than improving their
+ * odds, and at the observed refusal rate one retry already clears the overwhelming majority.
+ * Raising this buys progressively less; it does not buy a different classifier.
+ */
 export const cfgRetryRefusalRetries = register({
 	id: "retry.refusalRetries",
 	type: "number",
@@ -748,7 +758,7 @@ export const cfgRetryRefusalRetries = register({
 		group: "Retry & Fallback",
 		label: "Refusal Retries",
 		description:
-			"Same-model retries after a provider refuses the request's content with a refusal code whose verdict is not stable for a given input (an OpenAI cyber_policy refusal), once no fallback model took it. Neither these retries nor the refusal's fallback hops spend Retry Attempts; never rotates credentials. 0 surfaces the first refusal.",
+			"Same-model retries after a provider refuses the request's content with a refusal code whose verdict is not stable for a given input (an OpenAI cyber_policy refusal, or a reasoning_extraction refusal of a legitimate reasoning replay), once no fallback model took it. The turn continues when a retry clears. Neither these retries nor the refusal's fallback hops spend Retry Attempts; never rotates credentials. 0 surfaces the first refusal and ends the turn.",
 		options: [
 			{ value: "0", label: "No retry" },
 			{ value: "1", label: "1 retry" },
