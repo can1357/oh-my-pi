@@ -414,6 +414,80 @@ artifact and message text, interrupted states, connect/auth errors,
 `/a2a add` registration, task-tool spawn, and the two-instance loop against
 `test/a2a-server.test.ts`'s server).
 
+## Workflow VM with journal resume
+
+`src/workflow/` adds a deterministic JavaScript orchestrator over the task
+executor. The `workflow` tool takes `{ script, args?, resumeFrom? }`; the script
+is an async function body executed in a fresh `node:vm` context:
+
+```js
+phase("gather");
+const found = await parallel(["auth", "billing", "search"], topic => agent(`find ${topic} entry points`), {
+	concurrency: 2,
+});
+log("scanned", found.length, "areas");
+return found.map(f => f.result);
+```
+
+| Helper                                        | Contract                                                                 |
+| --------------------------------------------- | ------------------------------------------------------------------------ |
+| `agent(prompt, opts?)`                        | Spawns one inline `task` subagent (agent/context in `opts`) and resolves `{ result, tokens, cached? }` |
+| `parallel(items, fn, { concurrency })`        | Bounded worker pool, results in item order; concurrency defaults to `4` |
+| `pipeline(items, ...stages)`                  | Each item flows through stages in order; items overlap                  |
+| `phase(name)` / `log(...)` / `clock()`        | Progress markers, run log, deterministic 1-based counter                |
+| `args`                                        | The call's `args` string (default `""`)                                 |
+
+### Determinism rules
+
+The context is the enforcement point, not a lint pass:
+
+- `require`, `process`, `Date`, `Date.now`, `Math.random`, and
+  `Temporal.Now` throw a `ReferenceError` naming the rule and pointing at
+  `clock()`/`args`;
+- `import` and `import()` are rejected before execution (static import is a
+  syntax error, dynamic import is caught with `@babel/parser`);
+- `codeGeneration` is disabled, so `eval` and `new Function` throw `EvalError`;
+- `ShadowRealm` is removed because `ShadowRealm.evaluate()` would create an
+  unguarded realm.
+
+`parallel`/`pipeline` support one level of fan-out; nesting them is rejected.
+Only primitives, JSON strings, and null-prototype frozen bridge functions
+cross the VM boundary, and the bridges are deleted from the global object
+before user code runs.
+
+### Journal and `resumeFrom`
+
+Every `agent()` call appends synchronously to
+`<session dir>/workflow/<session>/journal.jsonl` (fallback:
+`<agent dir>/workflow/<session id>/journal.jsonl`):
+
+```jsonc
+{"runId":"wf-…","index":0,"promptHash":"…","agent":"default","result":null,"tokens":0,"status":"started"}
+{"runId":"wf-…","index":0,"promptHash":"…","agent":"default","result":"…","tokens":812,"status":"completed"}
+```
+
+`status` is `started`, `completed`, `failed`, or `cached`; a killed run keeps
+its completed prefix, and a truncated final line is ignored on read.
+
+`resumeFrom: "<runId>"` matches the prior run by call index **and** prompt
+hash (prompt + agent + context). The matching completed/cached prefix is
+replayed with `cached: true` and recorded as `cached` lines under a new run id;
+execution starts at the first divergence and continues to the end, even if a
+later hash matches. Runs can be resumed repeatedly (a resumed run's own
+`cached` lines are valid replay sources).
+
+Covering test (also the kill-resume smoke: a child bun process runs the real
+tool with a fake executor, hangs on the second call, is SIGKILLed, then the
+parent resumes and asserts the first call is not re-executed):
+
+```bash
+PI_CODING_AGENT_DIR=$HOME/.omp-fork bun test packages/coding-agent/test/workflow.test.ts
+```
+
+The tool class is exported as `WorkflowTool` (`WorkflowTool.create(session)`);
+this wave does not add it to `BUILTIN_TOOL_NAMES`, so mounting is explicit and
+the default tool inventory is unchanged.
+
 ## Rebase ritual
 
 1. Sync the mirror (fast-forward only) and push it:
