@@ -6,12 +6,14 @@ import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { resolveAgentModelSelection } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import { cfgEditMode } from "@oh-my-pi/pi-coding-agent/edit/settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { createAuthStorageSettingsSync } from "@oh-my-pi/pi-coding-agent/session/auth-broker-config";
 import { getRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
 import { cfgRetryUsageReservePct, cfgTopK } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { cfgTaskAgentModelOverrides } from "@oh-my-pi/pi-coding-agent/task/settings";
+import { readUserApprovalPolicies, userApprovalPolicy } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -249,6 +251,45 @@ describe("live routing config files", () => {
 		await replacement.promise;
 		await recovered.promise;
 		expect(selection(settings).patterns).toEqual(["anthropic/third"]);
+	});
+
+	it("keeps a value this build cannot read at its last good value while the rest of the edit applies", async () => {
+		// A newer omp wrote an `edit.mode` this build lacks. Reading it would fall back to the
+		// default and switch every running session's edit tool, rewriting its cached tool prefix.
+		delete process.env.PI_EDIT_VARIANT;
+		const file = tempDir.join("routing.yml");
+		await Bun.write(file, YAML.stringify({ ...routing("first"), edit: { mode: "replace" } }));
+		await start(file);
+		expect(cfgEditMode.get(settings)).toBe("replace");
+
+		await Bun.write(file, YAML.stringify({ ...routing("second"), edit: { mode: "from-a-newer-omp" } }));
+		await waitFor(() => settings.getModelRole("smol") === "anthropic/second");
+		expect(cfgEditMode.get(settings)).toBe("replace");
+
+		await Bun.write(file, YAML.stringify({ ...routing("third"), edit: { mode: "patch" } }));
+		await waitFor(() => settings.getModelRole("smol") === "anthropic/third");
+		expect(cfgEditMode.get(settings)).toBe("patch");
+	});
+
+	it("does not keep the last good tools.approval when a live edit makes it unreadable", async () => {
+		// Keep-last-good exists so a value this build cannot read does not move a running session to
+		// the default. For `tools.approval` the default is permissive, so keeping the old record would
+		// leave the session running unasked the very calls the broken edit was written to restrain,
+		// and only until the next launch, when a fresh load asks.
+		const agentDir = tempDir.join("agent");
+		const global = path.join(agentDir, "config.yml");
+		const file = tempDir.join("routing.yml");
+		await Bun.write(global, YAML.stringify({ topK: 1, tools: { approval: { read: "allow" } } }));
+		await Bun.write(file, YAML.stringify(routing("first")));
+		await start(file, agentDir);
+		expect(userApprovalPolicy(readUserApprovalPolicies(settings), "bash")).toBeUndefined();
+
+		await Bun.write(global, YAML.stringify({ topK: 2, tools: { approval: "deny-bash" } }));
+		await waitFor(() => cfgTopK.get(settings) === 2);
+		expect(userApprovalPolicy(readUserApprovalPolicies(settings), "bash")).toMatchObject({
+			policy: "prompt",
+			unreadable: true,
+		});
 	});
 
 	it("keeps last good routing on malformed target replacement and preserves runtime overrides on recovery", async () => {

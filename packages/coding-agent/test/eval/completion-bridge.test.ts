@@ -9,6 +9,7 @@ import type { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../../src/eval/bridge-timeout";
 import {
+	type CompletionAttempt,
 	EVAL_HANDLE_CONCURRENCY,
 	getCompletionHandle,
 	releaseCompletionHandles,
@@ -16,7 +17,7 @@ import {
 	type EvalCompletionBridgeOptions,
 	type EvalCompletionResult,
 } from "../../src/eval/completion-bridge";
-import { runEvalWait } from "../../src/eval/handle-bridge";
+import { type EvalHandleSnapshot, runEvalCancel, runEvalStatus, runEvalWait } from "../../src/eval/handle-bridge";
 import { IdleTimeout } from "../../src/eval/idle-timeout";
 import { disposeAllVmContexts } from "../../src/eval/js/context-manager";
 import { executeJs } from "../../src/eval/js/executor";
@@ -43,6 +44,19 @@ async function runEvalCompletionAndWait(
 	if (entry.error) throw new ToolError(entry.error);
 	if (!entry.result) throw new Error(`Completion handle ${handle.id} returned no result`);
 	return entry.result;
+}
+
+/** Waits for a completion, then reads its attempt log through `__status__`. */
+async function waitWithAttempts(
+	args: unknown,
+	session: ToolSession,
+): Promise<{ snapshot?: EvalHandleSnapshot; attempts?: CompletionAttempt[] }> {
+	const { id } = await runEvalCompletion(args, { session });
+	const waited = await runEvalWait({ items: [{ kind: "completion", id }] }, { session });
+	return {
+		snapshot: waited.items[0],
+		attempts: runEvalStatus({ item: { kind: "completion", id } }, { session }).attempts,
+	};
 }
 
 function makeModel(provider: string, id: string, extra: Partial<Model<Api>> = {}): Model<Api> {
@@ -150,10 +164,11 @@ async function runPythonCompletionsInSubprocess(tempDir: TempDir): Promise<Pytho
 	const settingsPath = path.resolve(import.meta.dir, "../../src/config/settings.ts");
 	const code = [
 		"import json",
-		'plain = completion("hi", model="smol").wait()',
+		'plain_handle = completion("hi", model="smol")',
+		"plain = plain_handle.wait()",
 		// `await` resolves on a worker thread; it must keep the cell's run context.
 		'structured = await completion("hi", schema={"type": "object"})',
-		'print(json.dumps({"plain": plain, "structured": structured}))',
+		'print(json.dumps({"plain": plain, "attempts": plain_handle.attempts, "structured": structured}))',
 	].join("\n");
 	await Bun.write(
 		scriptPath,
@@ -406,11 +421,12 @@ describe("runEvalCompletion", () => {
 			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "b down" }))
 			.mockResolvedValueOnce(assistant({ text: "c answer" }));
 
-		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+		const { attempts } = await waitWithAttempts({ prompt: "q", model: "slow" }, session);
 
 		const nested = spy.mock.calls[2]?.[2] as { reasoning?: unknown; disableReasoning?: unknown };
 		expect(nested.reasoning).toBeUndefined();
 		expect(nested.disableReasoning).toBe(true);
+		expect(attempts?.map(attempt => attempt.effort)).toEqual([Effort.High, "off", "off"]);
 	});
 
 	it("inherits disabled reasoning for a bare fallback after an explicit :off primary", async () => {
@@ -433,7 +449,7 @@ describe("runEvalCompletion", () => {
 		expect(fallbackOpts.disableReasoning).toBe(true);
 	});
 
-	it("skips keyless fallbacks without spending retry budget", async () => {
+	it("skips keyless fallbacks without spending retry budget and logs every attempt", async () => {
 		const b = makeModel("p", "b");
 		const c = makeModel("p", "c");
 		const session = makeSession({ available: [SMOL, b, c] });
@@ -447,11 +463,17 @@ describe("runEvalCompletion", () => {
 			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "smol down" }))
 			.mockResolvedValueOnce(assistant({ text: "c answer" }));
 
-		const result = await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+		const { snapshot, attempts } = await waitWithAttempts({ prompt: "q", model: "smol" }, session);
 
 		// b never reaches completeSimple: the keyless preflight skips it.
 		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol", "c"]);
-		expect(result.text).toBe("c answer");
+		expect(snapshot).toMatchObject({ status: "completed", text: "c answer" });
+		expect(snapshot).not.toHaveProperty("attempts");
+		expect(attempts).toEqual([
+			{ model: "p/smol", effort: null, outcome: "failed", error: "smol down" },
+			{ model: "p/b", effort: null, outcome: "no-credentials" },
+			{ model: "p/c", effort: null, outcome: "succeeded" },
+		]);
 	});
 
 	it("walks shared descendants once per inherited effort", async () => {
@@ -934,6 +956,45 @@ describe("runEvalCompletion", () => {
 		).rejects.toBeInstanceOf(ToolError);
 	});
 
+	it("marks the answering attempt failed when its output is unusable", async () => {
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "not json" }));
+		const { attempts } = await waitWithAttempts(
+			{ prompt: "q", model: "smol", schema: { type: "object" } },
+			makeSession(),
+		);
+		expect(attempts).toEqual([
+			{
+				model: "p/smol",
+				effort: null,
+				outcome: "failed",
+				error: "completion() did not return a structured response matching the schema.",
+			},
+		]);
+	});
+
+	it("reports a running attempt live and marks it cancelled on cancel", async () => {
+		const started = Promise.withResolvers<void>();
+		vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, _context, options) => {
+			started.resolve();
+			const signal = options?.signal;
+			if (!signal) throw new Error("completion request did not receive an abort signal");
+			const aborted = Promise.withResolvers<never>();
+			signal.addEventListener("abort", () => aborted.reject(signal.reason), { once: true });
+			return await aborted.promise;
+		});
+		const session = makeSession();
+		const item = {
+			kind: "completion" as const,
+			id: (await runEvalCompletion({ prompt: "q", model: "smol" }, { session })).id,
+		};
+		await started.promise;
+		expect(runEvalStatus({ item }, { session }).attempts?.map(attempt => attempt.outcome)).toEqual(["running"]);
+
+		runEvalCancel({ item }, { session });
+		await runEvalWait({ items: [item] }, { session });
+		expect(runEvalStatus({ item }, { session }).attempts?.map(attempt => attempt.outcome)).toEqual(["cancelled"]);
+	});
+
 	it("bounds in-flight handles and admits queued ones as earlier requests settle", async () => {
 		const total = EVAL_HANDLE_CONCURRENCY + 8;
 		const gate = Promise.withResolvers<void>();
@@ -1027,7 +1088,7 @@ describe("completion() through eval runtimes", () => {
 			[
 				'const handles = [completion("hi", { model: "smol" }), completion("hi", { schema: { type: "object" } })];',
 				"const [plain, structured] = await wait(handles);",
-				"return JSON.stringify({ plain, structured });",
+				"return JSON.stringify({ plain, structured, attempts: await handles[0].attempts() });",
 			].join("\n"),
 			{ cwd: tempDir.path(), sessionId, session: makeSession({ cwd: tempDir.path() }), sessionFile },
 		);
@@ -1036,6 +1097,7 @@ describe("completion() through eval runtimes", () => {
 		expect(JSON.parse(result.output.trim())).toEqual({
 			plain: "hello from smol",
 			structured: { ok: true, n: 3 },
+			attempts: [{ model: "p/smol", effort: null, outcome: "succeeded" }],
 		});
 	});
 
@@ -1096,6 +1158,7 @@ describe("completion() through eval runtimes", () => {
 			expect(JSON.parse(result.output.trim())).toEqual({
 				plain: "hello from python",
 				structured: { ok: true },
+				attempts: [{ model: "p/smol", effort: null, outcome: "succeeded" }],
 			});
 		} finally {
 			tempDir.removeSync();

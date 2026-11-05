@@ -1,5 +1,5 @@
+import { type } from "@oh-my-pi/omptype";
 import type { Usage } from "@oh-my-pi/pi-ai";
-import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ThemeColor } from "../theme/theme";
 import type { ConfiguredThinkingLevel } from "../render/render-utils";
 import type { ToolRenderer } from "./renderer";
@@ -28,6 +28,7 @@ import {
 	formatFeedModelBadge,
 	formatMoreItems,
 	formatNumber,
+	formatStatusIcon,
 	isFeedModelBadgeEnabled,
 	pluralize,
 	previewLine,
@@ -351,7 +352,7 @@ function renderOutputSection(
 	if (warning) {
 		lines.push(`${continuePrefix}${theme.fg("dim", "Output")}`);
 		lines.push(
-			`${continuePrefix}  ${theme.fg("warning", theme.status.warning)} ${theme.fg(
+			`${continuePrefix}  ${formatStatusIcon("warning", theme)} ${theme.fg(
 				"dim",
 				clipCollapsed(sanitizeText(warning), 80, expanded),
 			)}`,
@@ -958,9 +959,7 @@ function renderReviewResult(
 	// Verdict line
 	const verdictColor = summary.overall_correctness === "correct" ? "success" : "error";
 	const isCorrect = summary.overall_correctness === "correct";
-	const verdictIcon = isCorrect
-		? theme.styledSymbol("status.done", "accent")
-		: theme.fg(verdictColor, theme.status.error);
+	const verdictIcon = formatStatusIcon(isCorrect ? "success" : "error", theme);
 	lines.push(
 		`${continuePrefix} Patch is ${theme.fg(verdictColor, summary.overall_correctness)} ${verdictIcon} ${theme.fg(
 			"dim",
@@ -1059,13 +1058,15 @@ function renderAgentResult(
 	const mergeFailed = !aborted && result.exitCode === 0 && !!result.error;
 	const success = !aborted && result.exitCode === 0 && !result.error;
 	const needsWarning = Boolean(missingCompleteWarning) && success;
-	const icon = aborted
-		? theme.status.aborted
-		: needsWarning
-			? theme.status.warning
+	// A merge failure is a warning: the agent's work succeeded, only folding it back did not.
+	const iconStatus: ToolUIStatus = aborted
+		? "aborted"
+		: needsWarning || mergeFailed
+			? "warning"
 			: success
-				? theme.styledSymbol("status.done", "text")
-				: theme.status.error;
+				? "success"
+				: "error";
+	const icon = formatStatusIcon(iconStatus, theme);
 	const iconColor = needsWarning ? "warning" : success ? "success" : mergeFailed ? "warning" : "error";
 	const statusText = aborted
 		? "aborted"
@@ -1109,7 +1110,7 @@ function renderAgentResult(
 			? fullDescription
 			: undefined;
 	const titlePart = description ? `${theme.bold(displayId)}: ${description}` : displayId;
-	let statusLine = `${indent}${theme.fg(iconColor, icon)} ${modelLead}${theme.fg(
+	let statusLine = `${indent}${icon} ${modelLead}${theme.fg(
 		success && !needsWarning ? "text" : "accent",
 		titlePart,
 	)}${badges}`;
@@ -1138,7 +1139,7 @@ function renderAgentResult(
 
 	if (aborted && result.abortReason) {
 		lines.push(
-			`${continuePrefix}${theme.fg("error", theme.status.aborted)} ${theme.fg(
+			`${continuePrefix}${formatStatusIcon("aborted", theme)} ${theme.fg(
 				"dim",
 				clipCollapsed(flattenLine(sanitizeText(result.abortReason)), 80, expanded),
 			)}`,
@@ -1230,7 +1231,7 @@ function renderAgentResult(
 
 	if (hasCustomRendering && missingCompleteWarning) {
 		lines.push(
-			`${continuePrefix}${theme.fg("warning", theme.status.warning)} ${theme.fg(
+			`${continuePrefix}${formatStatusIcon("warning", theme)} ${theme.fg(
 				"dim",
 				clipCollapsed(sanitizeText(missingCompleteWarning), 80, expanded),
 			)}`,
@@ -1370,16 +1371,10 @@ export function renderResult(
 	if (!details) {
 		const text = result.content.find(c => c.type === "text")?.text || "";
 		const errored = result.isError === true;
-		const header = errored
-			? renderStatusLine({ icon: "error", title: "Task", description: agentLabel }, theme)
-			: renderStatusLine(
-					{
-						iconOverride: theme.styledSymbol("status.done", "accent"),
-						title: "Task",
-						description: agentLabel,
-					},
-					theme,
-				);
+		const header = renderStatusLine(
+			{ icon: errored ? "error" : "success", title: "Task", description: agentLabel },
+			theme,
+		);
 		return framedToolCard(theme, ({ width }) => ({
 			header,
 			sections: [
@@ -1424,16 +1419,11 @@ export function renderResult(
 	const metaLabel = countLabel ?? agentLabel;
 	const header = renderStatusLine(
 		{
-			icon: icon === "success" || icon === "running" ? undefined : icon,
 			// While agents are in flight the header shows the dispatch glyph, not a
 			// spinner: async spawns return immediately, so "running" means
 			// "delegated to peers", not "this call is blocking the turn".
-			iconOverride:
-				icon === "running"
-					? theme.styledSymbol("tool.task", "accent")
-					: icon === "success"
-						? theme.styledSymbol("status.done", "accent")
-						: undefined,
+			icon: icon === "running" ? undefined : icon,
+			iconOverride: icon === "running" ? theme.styledSymbol("tool.task", "accent") : undefined,
 			title: "Task",
 			meta: metaLabel ? [metaLabel] : undefined,
 		},
@@ -2643,55 +2633,22 @@ export interface FindingDetails {
 	line_end: number;
 }
 
-function normalizeFindingPriority(value: unknown): FindingPriority | undefined {
-	if (isFindingPriority(value)) return value;
-	if (value === 0) return "P0";
-	if (value === 1) return "P1";
-	if (value === 2) return "P2";
-	if (value === 3) return "P3";
-	return undefined;
-}
+const FindingDetailsShape = type({
+	"+": "delete",
+	title: "string",
+	body: "string",
+	// Older reports wrote the severity as its ordinal.
+	priority: type("'P0' | 'P1' | 'P2' | 'P3'").or(type("0 | 1 | 2 | 3").pipe(ordinal => PRIORITY_LABELS[ordinal])),
+	confidence: "0 <= number <= 1",
+	file_path: "string > 0",
+	line_start: "number",
+	line_end: "number",
+});
 
 /** Validates and normalizes a persisted review finding. */
 export function parseFindingDetails(value: unknown): FindingDetails | undefined {
-	if (!isRecord(value)) return undefined;
-
-	const title = typeof value.title === "string" ? value.title : undefined;
-	const body = typeof value.body === "string" ? value.body : undefined;
-	const priority = normalizeFindingPriority(value.priority);
-	const confidence =
-		typeof value.confidence === "number" &&
-		Number.isFinite(value.confidence) &&
-		value.confidence >= 0 &&
-		value.confidence <= 1
-			? value.confidence
-			: undefined;
-	const filePath = typeof value.file_path === "string" && value.file_path.length > 0 ? value.file_path : undefined;
-	const lineStart =
-		typeof value.line_start === "number" && Number.isFinite(value.line_start) ? value.line_start : undefined;
-	const lineEnd = typeof value.line_end === "number" && Number.isFinite(value.line_end) ? value.line_end : undefined;
-
-	if (
-		title === undefined ||
-		body === undefined ||
-		priority === undefined ||
-		confidence === undefined ||
-		filePath === undefined ||
-		lineStart === undefined ||
-		lineEnd === undefined
-	) {
-		return undefined;
-	}
-
-	return {
-		title,
-		body,
-		priority,
-		confidence,
-		file_path: filePath,
-		line_start: lineStart,
-		line_end: lineEnd,
-	};
+	const details = FindingDetailsShape(value);
+	return details instanceof type.errors ? undefined : details;
 }
 /** SubmitReviewDetails - used for rendering review results from yield tool */
 export interface SubmitReviewDetails {

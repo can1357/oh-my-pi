@@ -12,7 +12,7 @@
  * specific Bun decode error (`isWorkerIpcDeserializeError`), keep the session
  * alive, and fault every active advanced-IPC worker so its owning client rejects
  * in-flight requests and recycles. This test spawns a real parent process (which
- * installs the postmortem handler on import) whose worker emits a bad frame and
+ * installs the postmortem handlers as the CLI does) whose worker emits a bad frame and
  * then STAYS ALIVE — proving the malformed frame itself faults the worker's error
  * channel rather than a coincidental clean exit — and pins that the parent
  * survives.
@@ -32,11 +32,12 @@ describe("issue #9158 — malformed worker IPC frame must not terminate the pare
 		// channel without ever reaching Bun's deserializer.
 		const childScript =
 			'const body = Buffer.from([2, 4, 0, 0, 0, 0xde, 0xad, 0xbe, 0xef]); let frame = body; if (process.platform === "win32") { const header = Buffer.alloc(16); header.writeUInt32LE(1, 0); header.writeUInt32LE(body.length, 8); frame = Buffer.concat([header, body]); } require("node:fs").writeSync(3, frame); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);';
-		// Runs in a spawned `bun -e` parent: importing worker-client pulls in the
-		// postmortem module, which installs the global uncaughtException handler
-		// under test.
+		// Runs in a spawned `bun -e` parent that installs the postmortem
+		// uncaughtException handler under test, as the CLI does at startup.
 		const wrapperScript = `
+			import { postmortem } from "@oh-my-pi/pi-utils";
 			import { createWorkerSubprocess } from "@oh-my-pi/pi-coding-agent/subprocess/worker-client";
+			postmortem.installProcessHandlers();
 			const worker = createWorkerSubprocess({
 				spawnCommand: { cmd: [process.execPath, "-e", ${JSON.stringify(childScript)}] },
 				env: {},
@@ -70,7 +71,9 @@ describe("issue #9158 — malformed worker IPC frame must not terminate the pare
 		// so a genuine bug is never silently swallowed as a worker IPC frame.
 		const repoRoot = path.resolve(import.meta.dir, "..");
 		const wrapperScript = `
+			import { postmortem } from "@oh-my-pi/pi-utils";
 			import "@oh-my-pi/pi-coding-agent/subprocess/worker-client";
+			postmortem.installProcessHandlers();
 			process.stdout.write("BEFORE_THROW");
 			queueMicrotask(() => { throw new TypeError("Unable to deserialize data."); });
 		`;

@@ -18,6 +18,7 @@ import * as settingsStream from "@oh-my-pi/pi-coding-agent/session/settings-stre
 import type { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discovery from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { localSession } from "../helpers/local-session";
 
 describe("task sibling prompt-cache routing", () => {
 	const sessions: AgentSession[] = [];
@@ -339,10 +340,11 @@ describe("task sibling prompt-cache routing", () => {
 					);
 				}
 				if (provider === "openai" || provider === "openai-codex") {
-					const child = AgentRegistry.global()
+					const childHandle = AgentRegistry.global()
 						.list()
 						.find(candidate => candidate.session && candidate.session !== parent)?.session;
-					if (!child) throw new Error("Expected a live Task child");
+					if (!childHandle) throw new Error("Expected a live Task child");
+					const child = localSession(childHandle);
 					const originalKey = child.agent.sessionId;
 					const originalFile = child.sessionManager.getSessionFile();
 					if (!originalFile) throw new Error("Expected a persisted Task child");
@@ -382,10 +384,10 @@ describe("task sibling prompt-cache routing", () => {
 						.list()
 						.find(candidate => candidate.session && candidate.session !== parent);
 					if (!ref?.session || !ref.sessionFile) throw new Error("Expected a revivable Task child");
-					await ref.session.sessionManager.setTaskPromptCacheKey("persisted:task");
+					await localSession(ref.session).sessionManager.setTaskPromptCacheKey("persisted:task");
 					const lifecycle = AgentLifecycleManager.global();
 					await lifecycle.park(ref.id);
-					const restored = await lifecycle.ensureLive(ref.id);
+					const restored = localSession(await lifecycle.ensureLive(ref.id));
 					await restored.prompt("Continue the review.");
 					expect(requests.findLast(request => request.sessionId === restored.agent.sessionId)?.wireKey).toBe(
 						"persisted:task",
@@ -399,7 +401,7 @@ describe("task sibling prompt-cache routing", () => {
 						if (record.type === "session") delete record.taskPromptCacheKey;
 					}
 					await Bun.write(ref.sessionFile, `${records.map(record => JSON.stringify(record)).join("\n")}\n`);
-					const withoutCandidate = await lifecycle.ensureLive(ref.id);
+					const withoutCandidate = localSession(await lifecycle.ensureLive(ref.id));
 					await withoutCandidate.prompt("Continue without inherited affinity.");
 					expect(
 						requests.findLast(request => request.sessionId === withoutCandidate.agent.sessionId)?.wireKey,
@@ -1265,7 +1267,7 @@ describe("task sibling prompt-cache routing", () => {
 			if (!ref) throw new Error("Expected a registered Task child");
 			const lifecycle = AgentLifecycleManager.global();
 			await lifecycle.park(ref.id);
-			const revived = await lifecycle.ensureLive(ref.id);
+			const revived = localSession(await lifecycle.ensureLive(ref.id));
 
 			// The revival rebuilt the manager from disk: still no header copy,
 			// so only a captured-and-restored candidate can carry the family.

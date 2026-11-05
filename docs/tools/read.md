@@ -348,7 +348,7 @@ Notes: ...
 - Local text open-ended default line limit: `read.defaultLimit` (default `300`), clamped to `[1, DEFAULT_MAX_LINES]`.
 - Single bounded non-raw text ranges add `1` leading and `3` trailing context lines on constrained sides. Raw and multi-range reads are exact.
 - File streaming chunk size: `8 * 1024` bytes (`READ_CHUNK_SIZE`).
-- Local streamed byte budget for line reads: `max(DEFAULT_MAX_BYTES, maxLinesToCollect * 512)`.
+- Local streamed byte budget for line reads: `max(DEFAULT_MAX_BYTES, maxLinesToCollect * 512)`. Numbered reads charge a line cut to `tools.outputMaxColumns` the UTF-8 bytes of its cut display, not its source size; `:raw` reads and a cap of `0` charge source bytes. Past the 4 MiB buffering cap a line longer than `3 * outputMaxColumns + 6` bytes (always cut) is kept only as the head its display needs, however much page budget remains, and such a window never builds the whole-file hashline snapshot or registers a conflict block from those heads. A multi-range read whose budget stops a range early appends `[Range A-B stopped before line N at the … read budget. Use :N-B to continue]`.
 - Structural summaries only run when file size `<= 2 MiB` and line count `<= 20_000`.
 - Profile summaries run only for whole-file reads of recognized reports at most `32 MiB`; line selectors and `:raw` read the file.
 - Image input max: `20 MiB`.

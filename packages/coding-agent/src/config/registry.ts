@@ -464,8 +464,9 @@ export function combine<R extends Record<string, Derived<unknown>>, T>(
 }
 
 /**
- * Handle for one registered setting. Reads resolve, in precedence order: the definition's
- * environment variable, runtime override, `--config` overlay, project, global, then the default.
+ * Handle for one registered setting. Reads resolve, in precedence order: runtime override (CLI
+ * flags, session-only writes, SDK overrides), the definition's environment variable, `--config`
+ * overlay, project, global, then the default.
  * A value the setting rejects ({@link accepts}) reads as unset in the config file holding it, with a warning.
  */
 export class Setting<T, Id extends string = string> extends Derived<T> {
@@ -538,11 +539,15 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		return this.#envParsed;
 	}
 
-	/** Env value that currently takes effect in `scope`: a fallback env yields to a configured layer. */
+	/**
+	 * Env value that currently takes effect in `scope`: a runtime override (a CLI flag, a session-only
+	 * write) outranks it, and a fallback env also yields to every configured layer.
+	 */
 	#effectiveEnv(scope: ScopeLike): T | undefined {
 		const value = this.envValue();
-		if (value === undefined || !this.envFallback) return value;
+		if (value === undefined) return undefined;
 		const settings = settingsOf(scope);
+		if (!this.envFallback) return settings.hasRuntimeOverride(this) ? undefined : value;
 		if (this.envFallback === true) return settings.isConfigured(this) ? undefined : value;
 		const configured = settings.rawValue(this);
 		return configured === undefined || (typeof configured === "string" && configured.trim() === "")
@@ -650,6 +655,15 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		if (value === undefined) return false;
 		if (value === null) return this.definition.type === "record" && this.definition.permissiveDefault === true;
 		return !this.accepts(value);
+	}
+
+	/**
+	 * Whether this setting's unset state is permissive ({@link RecordDefinition.permissiveDefault}), so
+	 * a value it cannot read must never fall back to the default or to an older readable value:
+	 * `tools.approval` is the one such setting, where no policy means a call runs unasked.
+	 */
+	get permissiveDefault(): boolean {
+		return this.definition.type === "record" && this.definition.permissiveDefault === true;
 	}
 
 	/**
