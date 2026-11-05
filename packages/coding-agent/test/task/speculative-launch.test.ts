@@ -23,6 +23,7 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { createSpeculativeToolExecutionConfig } from "@oh-my-pi/pi-coding-agent/speculation/host";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+import { loadBundledAgents } from "@oh-my-pi/pi-coding-agent/task/agents";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { BatchArgsScanner, type TaskLaunchSession } from "@oh-my-pi/pi-coding-agent/task/speculative-launch";
@@ -423,21 +424,32 @@ describe("task speculative launch", () => {
 		expect(duplicateJobs(manager, ["Alpha", "Beta"])).toEqual([]);
 	});
 
-	// Regression, and the reason `ARRAY_BLANKABLE_KEYS` carries a second condition. A key is only
-	// array-blankable if its declared wire type admits an array, so the raw streamed arguments and the
-	// validated ones carry the same value. `sourceSession` is declared `string` alone, so validation
-	// rewrites `[]` to the string `"[]"`: while it was a member, the launcher dropped the raw array
-	// and started the child, dispatch kept `"[]"` and refused the whole call, and the started run was
-	// discarded after doing work. Both review arms reproduced that independently. Nothing may start.
+	// Regression, and the reason `ARRAY_BLANKABLE_KEYS` carries a second condition: a key is
+	// array-blankable only if its declared wire type admits an array, so the raw streamed arguments and
+	// the validated ones carry the same value. `sourceSession` is declared `string` wherever the
+	// bundled seance agent is advertised, so validation rewrites `[]` to the string `"[]"`. While it
+	// was a member, the launcher dropped the raw array and started the child, dispatch kept `"[]"` and
+	// refused the whole call, and the started run was discarded after doing work.
+	//
+	// Two things this test has to get right, both of which an earlier version got wrong and both review
+	// arms caught. It must run with **seance advertised**, because that is the only configuration where
+	// `sourceSession` is declared and therefore where the rewrite — and the defect — happens at all.
+	// And it must give the launcher a turn before finalizing: `update` only queues the launch, so
+	// asserting on `startedIds` on the next line passes however the code behaves.
 	it.each([
 		["an empty array", [] as unknown],
 		["an array of blanks", ["", "  "]],
-		["OMITTED-CONTROL", undefined],
 	] as const)("starts nothing for a streamed call whose sourceSession is %s", async (_label, sourceSession) => {
+		const seance = loadBundledAgents().find(agent => agent.name === "seance");
+		if (!seance) throw new Error("Expected the bundled seance agent");
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent, seance],
+			projectAgentsDir: null,
+		});
 		const call = {
 			context: "ctx",
 			tasks: [
-				{ name: "Alpha", agent: "task", solutionSpace: "one way", task: "Do A.", ...(sourceSession === undefined ? {} : { sourceSession }) },
+				{ name: "Alpha", agent: "task", solutionSpace: "one way", task: "Do A.", sourceSession },
 				{ name: "Beta", agent: "task", solutionSpace: "one way", task: "Do B." },
 			],
 		};
@@ -445,8 +457,21 @@ describe("task speculative launch", () => {
 		const { tool, session } = await openSession();
 
 		session.update(toolCall, raw.slice(0, raw.indexOf('{"name":"Beta"') + 10));
-		await Promise.race([spawn("Alpha").started.promise, Bun.sleep(400)]);
-		console.error("AFTER-UPDATE started=", JSON.stringify([...startedIds]));
+		// Give a queued launch a real chance to reach the mocked executor, because `Alpha` starting is
+		// the defect and its absence is what this asserts. The wait is a cap, not a settle: the race
+		// resolves the moment `Alpha` starts, so the passing path pays it only when nothing starts.
+		//
+		// A microtask drain was tried here first and is not enough — measured: with the fix reverted,
+		// 50 drained microtasks still reported "idle" while a real wait reports "started", because the
+		// launch path awaits more than microtasks before it reaches the executor. That made this very
+		// test green for the wrong reason, which is the defect it exists to catch, one layer up.
+		const started = await Promise.race([
+			spawn("Alpha").started.promise.then(() => "started" as const),
+			Bun.sleep(400).then(() => "idle" as const),
+		]);
+		expect(started).toBe("idle");
+		expect([...startedIds]).toEqual([]);
+
 		session.finalize({ toolCall, args: call });
 		const validated = validateAgentToolArguments(tool as unknown as AgentTool, {
 			type: "toolCall",
@@ -454,10 +479,11 @@ describe("task speculative launch", () => {
 			name: tool.name,
 			arguments: call,
 		});
-		console.error("VALIDATED=", JSON.stringify(validated));
 		const result = await tool.execute(toolCall.id, validated as TaskParams);
 
-		console.error("PROBE isError=", result.isError, "started=", JSON.stringify([...startedIds]), "text=", JSON.stringify(String(result.output ?? result.content ?? "").slice(0,300)));
+		// Dispatch refuses the call, which is why nothing may have been started to throw away.
+		expect(result.isError).toBe(true);
+		expect([...startedIds]).toEqual([]);
 	});
 });
 

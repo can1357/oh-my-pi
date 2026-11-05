@@ -575,8 +575,12 @@ function isBlankString(value: unknown): boolean {
  * forwarded rather than refused. Treating an array as filler there dropped a caller's
  * `outputSchema: []` and handed back the agent's own schema.
  *
- * `task` and `taskFile` satisfy (1) and are deliberately left out: the conditional pair's behaviour
- * is unchanged by this pass, and the criterion permits membership without requiring it.
+ * `task` and `taskFile` satisfy (1) — `validateTaskInput` answers a populated array with the message
+ * for the field it is — and fail (2) unconditionally: both are declared `string`, in every variant,
+ * so validation rewrites an array to its JSON text whatever is advertised. They are excluded for the
+ * same reason as `sourceSession`, and more strongly, since `sourceSession` fails (2) only where it is
+ * declared. The criterion **forbids** their membership; adding either reproduces the
+ * started-then-discarded run, measured.
  */
 const ARRAY_BLANKABLE_KEYS: Partial<Record<BlankableKey, true>> = { model: true };
 
@@ -624,8 +628,8 @@ function isRealString(value: unknown): boolean {
  *
  * `null` is left alone: an `outputSchema: null` is a real signal — presence, not truthiness, makes
  * the caller's schema win, so it is how an internal caller says "no schema, and ignore the agent's
- * own". An array that names nothing is dropped, but only for `model` and `sourceSession`; see
- * {@link ARRAY_BLANKABLE_KEYS} for why `outputSchema` is not one of them.
+ * own". An array that names nothing is dropped, but only for `model`; see
+ * {@link ARRAY_BLANKABLE_KEYS} for the two conditions a key has to meet and why no other key does.
  *
  * The copy keeps every contract-bearing field however the caller stores it. A spread takes own
  * enumerable properties only, and an internal caller bypassing the wire schema may hand us an
