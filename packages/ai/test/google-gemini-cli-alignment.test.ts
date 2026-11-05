@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
+import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import {
 	buildRequest,
 	parseGeminiCliCredentials,
@@ -669,7 +671,7 @@ describe("Google Gemini CLI alignment", () => {
 		expect(events.filter(e => e.type === "toolcall_start")).toHaveLength(1);
 	});
 
-	it("surfaces account verification failures from model requests", async () => {
+	it("shows account verification failures from model requests without putting local text in errorMessage", async () => {
 		const fetchMock: FetchImpl = async () => new Response(validationRequiredBody, { status: 403 });
 		const model = createModel("google-antigravity");
 
@@ -681,9 +683,26 @@ describe("Google Gemini CLI alignment", () => {
 		const result = await stream.result();
 		expect(result.stopReason).toBe("error");
 		expect(result.errorStatus).toBe(403);
-		expect(result.errorMessage).toBe(
+		expect(result.errorMessage).toBe(`Cloud Code Assist API error (403): ${validationRequiredBody}`);
+		expect(errorDisplayText(result)).toContain(
 			`Cloud Code Assist API error (403): Account verification required for dev@example.com. Visit ${VALIDATION_URL} to continue, then retry your request.`,
 		);
+	});
+
+	it("keeps a decision phrase in the stored account email out of the error decisions read", async () => {
+		const fetchMock: FetchImpl = async () => new Response(validationRequiredBody, { status: 403 });
+		const model = createModel("google-antigravity");
+		const email = "retry-after-ms=3600000@example.test";
+
+		const stream = streamGoogleGeminiCli(model, createContext(), {
+			apiKey: JSON.stringify({ token: "token", projectId: "proj-123", email }),
+			fetch: fetchMock,
+		});
+
+		const result = await stream.result();
+		expect(result.errorMessage).not.toContain(email);
+		expect(extractProviderRetryHint(result.provider, result.errorMessage, result.errorRetryAfterMs)).toBeUndefined();
+		expect(errorDisplayText(result)).toContain(email);
 	});
 
 	describe("retry guardrails", () => {
@@ -708,6 +727,78 @@ describe("Google Gemini CLI alignment", () => {
 			expect(fetchCalls).toBe(1);
 			expect(result.stopReason).toBe("error");
 			expect(result.errorMessage).toContain("Cloud Code Assist API error (503)");
+		});
+
+		interface TransportRetryResult {
+			requests: number;
+			waits: number[];
+			stopReason: string;
+		}
+
+		async function runTransportRetry(
+			firstResponse: () => Response,
+			bounds: { maxRetryDelayMs: number; providerRetryWaitCeilingMs?: number },
+		): Promise<TransportRetryResult> {
+			let requests = 0;
+			const waits: number[] = [];
+			const fetch: FetchImpl = async () => {
+				requests += 1;
+				return requests === 1 ? firstResponse() : new Response('{"error":{"message":"terminal"}}', { status: 400 });
+			};
+			const result = await streamGoogleGeminiCli(createModel("google-gemini-cli"), createContext(), {
+				apiKey: JSON.stringify({ token: "fixture-cli-token", projectId: "fixture-project" }),
+				...bounds,
+				providerRetryWait: async delayMs => void waits.push(delayMs),
+				fetch,
+			}).result();
+			return { requests, waits, stopReason: result.stopReason };
+		}
+
+		it.each([
+			[
+				"uses the public retry hook for a short Retry-After",
+				() => new Response('{"error":{"message":"busy"}}', { status: 503, headers: { "retry-after": "0.05" } }),
+				{ maxRetryDelayMs: 5 * 60_000 },
+				{ requests: 2, waits: [50] },
+			],
+			[
+				"refuses a Retry-After over maxRetryDelayMs",
+				() => new Response('{"error":{"message":"busy"}}', { status: 503, headers: { "retry-after": "2" } }),
+				{ maxRetryDelayMs: 1_000 },
+				{ requests: 1, waits: [] },
+			],
+			[
+				"refuses a Retry-After over providerRetryWaitCeilingMs",
+				() => new Response('{"error":{"message":"busy"}}', { status: 503, headers: { "retry-after": "2" } }),
+				{ maxRetryDelayMs: 5 * 60_000, providerRetryWaitCeilingMs: 1_000 },
+				{ requests: 1, waits: [] },
+			],
+			[
+				"refuses a body-only retry wait",
+				() =>
+					new Response('{"error":{"message":"Please retry in 15s"}}', {
+						status: 503,
+						headers: { "content-type": "application/json" },
+					}),
+				{ maxRetryDelayMs: 5 * 60_000, providerRetryWaitCeilingMs: 10_000 },
+				{ requests: 1, waits: [] },
+			],
+			[
+				"refuses x-ratelimit-reset-after over providerRetryWaitCeilingMs",
+				() =>
+					new Response('{"error":{"message":"busy"}}', {
+						status: 503,
+						headers: { "x-ratelimit-reset-after": "90" },
+					}),
+				{ maxRetryDelayMs: 5 * 60_000, providerRetryWaitCeilingMs: 10_000 },
+				{ requests: 1, waits: [] },
+			],
+		] as const)("%s", async (_label, firstResponse, bounds, expected) => {
+			const { requests, waits, stopReason } = await runTransportRetry(firstResponse, bounds);
+
+			expect(requests).toBe(expected.requests);
+			expect(waits).toEqual([...expected.waits]);
+			expect(stopReason).toBe("error");
 		});
 	});
 

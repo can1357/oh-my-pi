@@ -77,6 +77,27 @@ describe("retryTransientCompletion", () => {
 		expect(final.stopReason).toBe("stop");
 	});
 
+	it("surfaces a lower layer's refused server wait without replacing it with one-shot backoff", async () => {
+		let calls = 0;
+		const refused = message({
+			stopReason: "error",
+			errorStatus: 503,
+			errorMessage: "busy",
+			errorRetryWaitRefusal: {
+				waitMs: 15_000,
+				limitMs: 10_000,
+				option: "providerRetryWaitCeilingMs",
+			},
+		});
+		const final = await retryTransientCompletion(() => {
+			calls += 1;
+			return Promise.resolve(refused);
+		}, fast);
+
+		expect(calls).toBe(1);
+		expect(final.errorRetryWaitRefusal).toEqual(refused.errorRetryWaitRefusal);
+	});
+
 	it("re-issues a status-only 503 error-stop", async () => {
 		let calls = 0;
 		const final = await retryTransientCompletion(() => {

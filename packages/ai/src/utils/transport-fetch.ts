@@ -22,11 +22,33 @@ const CALLER_BASE = Symbol("omp.transportCallerBase");
 type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: true; [CALLER_BASE]?: boolean };
 
 /**
+ * The two hooks a built transport calls around a dispatch. They are named
+ * rather than positional because they sit at different moments and a caller
+ * passing one in the other's place would be silently wrong.
+ */
+export interface TransportHooks {
+	/**
+	 * The call's replay budget. Its `checkpoint` runs at the last moment before
+	 * the bytes leave — after every preparation hook and the debug session — so
+	 * a replay the budget has refused is never handed to the transport.
+	 */
+	replayBudget?: ReplayBudget;
+	/**
+	 * Runs before the dispatch is prepared at all, so an account a rate limit
+	 * has blocked is switched before the headers and the dispatch origin are
+	 * taken from it.
+	 */
+	beforeDispatch?: () => void;
+}
+
+/**
  * The one fetch every inference request goes through. Per call it applies, in
  * order: the inference User-Agent default, `NODE_EXTRA_CA_CERTS`, the
  * per-provider proxy, and `PI_REQ_DEBUG` request/response recording — then
- * calls `fetchImpl` (or the model's default fetch) exactly once. Providers
- * never layer transport concerns themselves.
+ * calls `fetchImpl` (or the model's default fetch) exactly once.
+ *
+ * `beforeDispatch` runs for every HTTP attempt, including retries, before
+ * dispatch bookkeeping; a thrown refusal prevents that attempt.
  *
  * With a `replayBudget`, its checkpoint runs immediately before that one
  * call — after the debug recording and every other step — so an armed replay
@@ -47,21 +69,21 @@ type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: true; [CALLER_BASE]?: bo
  * on auth retries, so without the stamp each entry point would add another
  * layer (three PI_REQ_DEBUG dumps for one request).
  */
-export function transportFetch(
-	model: Model<Api>,
-	fetchImpl: FetchImpl | undefined,
-	replayBudget?: ReplayBudget,
-): FetchImpl {
+export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefined, hooks?: TransportHooks): FetchImpl {
 	const given = fetchImpl as TransportFetch | undefined;
 	if (given?.[TRANSPORT_FETCH]) return given;
 	const base =
 		given ?? (model.provider === "anthropic" && model.api === "anthropic-messages" ? coworkFetch : globalThis.fetch);
-	const checkpoint = replayBudget?.checkpoint;
+	const checkpoint = hooks?.replayBudget?.checkpoint;
+	const beforeDispatch = hooks?.beforeDispatch;
 	const proxyUrl = getProxyForProvider(model.provider);
 
 	const through =
 		(target: FetchImpl): FetchImpl =>
 		async (input, init) => {
+			// Before anything is prepared: a blocked account is switched here, so the
+			// headers and the dispatch origin below belong to the account that sends.
+			beforeDispatch?.();
 			if ((init?.method ?? (input instanceof Request ? input.method : "GET")) === "POST") {
 				recordDispatchOrigin(model, input);
 			}
@@ -107,7 +129,7 @@ export function withRequestTransport<T extends { fetch?: FetchImpl }>(model: Mod
 	const budgeted = withReplayBudget(options);
 	const given = budgeted.fetch as TransportFetch | undefined;
 	if (given?.[TRANSPORT_FETCH] && wireAttemptsOf(given)) return budgeted;
-	const transport = transportFetch(model, given, ReplayBudget.forCall(budgeted)) as TransportFetch;
+	const transport = transportFetch(model, given, { replayBudget: ReplayBudget.forCall(budgeted) }) as TransportFetch;
 	if (wireAttemptsOf(transport)) return { ...budgeted, fetch: transport };
 	const counted = countWireAttempts(
 		createWireAttempts(),

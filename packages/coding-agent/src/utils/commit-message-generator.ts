@@ -3,6 +3,7 @@
  * Follows the same pattern as title-generator.ts.
  */
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
@@ -127,7 +128,7 @@ export async function generateCommitMessage(
 			if (response.stopReason === "error") {
 				logger.debug("commit-msg-generator: error", {
 					model: candidate.model.id,
-					error: response.errorMessage,
+					error: errorDisplayText(response),
 					retryAfterMs: response.errorRetryAfterMs,
 				});
 				continue;

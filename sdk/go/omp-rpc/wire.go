@@ -628,8 +628,11 @@ type AssistantMessage struct {
 	ResponseID       *string            `json:"responseId,omitempty"`
 	UpstreamProvider *string            `json:"upstreamProvider,omitempty"`
 	UpstreamModel    *string            `json:"upstreamModel,omitempty"`
-	ErrorMessage     *string            `json:"errorMessage,omitempty"`
-	// The failed response's retry wait in milliseconds, from its headers. `errorMessage` never carries it.
+	// The failure's own text: what the provider sent, or omp's text for a failure it detected itself. Retry and classification decisions read this.
+	ErrorMessage *string `json:"errorMessage,omitempty"`
+	// `errorMessage` as omp shows it, when that differs: with the rejected request's dump path, a provider-specific explanation or the response's retry hint added. Display only; it can name local paths.
+	ErrorDisplayMessage *string `json:"errorDisplayMessage,omitempty"`
+	// The delay, in milliseconds, the failed response's headers asked for before a retry. Retry decisions read this with `errorMessage`.
 	ErrorRetryAfterMs *float64                   `json:"errorRetryAfterMs,omitempty"`
 	ErrorStatus       *int64                     `json:"errorStatus,omitempty"`
 	ErrorID           *float64                   `json:"errorId,omitempty"`
@@ -661,6 +664,7 @@ func (v *AssistantMessage) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("upstreamProvider", &out.UpstreamProvider)
 	d.optional("upstreamModel", &out.UpstreamModel)
 	d.optional("errorMessage", &out.ErrorMessage)
+	d.optional("errorDisplayMessage", &out.ErrorDisplayMessage)
 	d.optional("errorRetryAfterMs", &out.ErrorRetryAfterMs)
 	d.optional("errorStatus", &out.ErrorStatus)
 	d.optional("errorId", &out.ErrorID)
@@ -2585,20 +2589,35 @@ func (v *SessionState) decodeFrom(raw map[string]json.RawMessage) error {
 }
 
 type BashResult struct {
-	Output              string                     `json:"output"`
-	Cancelled           bool                       `json:"cancelled"`
-	Truncated           bool                       `json:"truncated"`
-	TotalLines          int64                      `json:"totalLines"`
-	TotalBytes          int64                      `json:"totalBytes"`
-	OutputLines         int64                      `json:"outputLines"`
-	OutputBytes         int64                      `json:"outputBytes"`
-	ExitCode            *int64                     `json:"exitCode,omitempty"`
-	TimedOut            *bool                      `json:"timedOut,omitempty"`
-	ArtifactID          *string                    `json:"artifactId,omitempty"`
-	ArtifactElidedBytes *int64                     `json:"artifactElidedBytes,omitempty"`
-	ArtifactError       map[string]json.RawMessage `json:"artifactError,omitempty"`
-	WorkingDir          *string                    `json:"workingDir,omitempty"`
-	Images              []ImageContent             `json:"images,omitempty"`
+	Output              string  `json:"output"`
+	Cancelled           bool    `json:"cancelled"`
+	Truncated           bool    `json:"truncated"`
+	TotalLines          int64   `json:"totalLines"`
+	TotalBytes          int64   `json:"totalBytes"`
+	OutputLines         int64   `json:"outputLines"`
+	OutputBytes         int64   `json:"outputBytes"`
+	ExitCode            *int64  `json:"exitCode,omitempty"`
+	TimedOut            *bool   `json:"timedOut,omitempty"`
+	ArtifactID          *string `json:"artifactId,omitempty"`
+	ArtifactElidedBytes *int64  `json:"artifactElidedBytes,omitempty"`
+	// Bytes dropped from the middle of `output`, which keeps the head and tail.
+	ElidedBytes *int64 `json:"elidedBytes,omitempty"`
+	// Lines dropped from the middle of `output`.
+	ElidedLines *int64 `json:"elidedLines,omitempty"`
+	// Bytes the per-line column cap cut from `output`, across all lines.
+	ColumnDroppedBytes *int64 `json:"columnDroppedBytes,omitempty"`
+	// Lines of `output` the per-line column cap cut; the artifact holds them whole.
+	ColumnTruncatedLines *int64 `json:"columnTruncatedLines,omitempty"`
+	// First and last lines the column cap cut, numbered as in the artifact; absent when the numbering cannot match it.
+	ColumnTruncatedRange *LineRange `json:"columnTruncatedRange,omitempty"`
+	// The per-line column cap in UTF-8 bytes, set when it cut a line.
+	ColumnMax     *int64                     `json:"columnMax,omitempty"`
+	ArtifactError map[string]json.RawMessage `json:"artifactError,omitempty"`
+	Minimized     map[string]json.RawMessage `json:"minimized,omitempty"`
+	WorkingDir    *string                    `json:"workingDir,omitempty"`
+	Images        []ImageContent             `json:"images,omitempty"`
+	// The embedded shell's final `ShellTrace` of the run; only when the caller asked for one.
+	Trace map[string]json.RawMessage `json:"trace,omitempty"`
 }
 
 func (v *BashResult) UnmarshalJSON(data []byte) error {
@@ -2619,9 +2638,38 @@ func (v *BashResult) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("timedOut", &out.TimedOut)
 	d.optional("artifactId", &out.ArtifactID)
 	d.optional("artifactElidedBytes", &out.ArtifactElidedBytes)
+	d.optional("elidedBytes", &out.ElidedBytes)
+	d.optional("elidedLines", &out.ElidedLines)
+	d.optional("columnDroppedBytes", &out.ColumnDroppedBytes)
+	d.optional("columnTruncatedLines", &out.ColumnTruncatedLines)
+	d.optional("columnTruncatedRange", &out.ColumnTruncatedRange)
+	d.optional("columnMax", &out.ColumnMax)
 	d.optional("artifactError", &out.ArtifactError)
+	d.optional("minimized", &out.Minimized)
 	d.optional("workingDir", &out.WorkingDir)
 	d.optional("images", &out.Images)
+	d.optional("trace", &out.Trace)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type LineRange struct {
+	First int64 `json:"first"`
+	Last  int64 `json:"last"`
+}
+
+func (v *LineRange) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "LineRange", v.decodeFrom)
+}
+
+func (v *LineRange) decodeFrom(raw map[string]json.RawMessage) error {
+	var out LineRange
+	d := fieldDecoder{raw: raw, owner: "LineRange"}
+	d.required("first", &out.First)
+	d.required("last", &out.Last)
 	if d.err != nil {
 		return d.err
 	}

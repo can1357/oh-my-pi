@@ -11,6 +11,7 @@ import {
 	type Model,
 	retryTransientCompletion,
 } from "@oh-my-pi/pi-ai";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import {
 	getAgentDbPath,
@@ -922,7 +923,7 @@ async function runStage1Job(options: {
 		);
 
 		if (response.stopReason === "error") {
-			return { kind: "failed", reason: response.errorMessage || "stage1 model error" };
+			return { kind: "failed", reason: errorDisplayText(response) || "stage1 model error" };
 		}
 		const text = response.content
 			.filter((c): c is { type: "text"; text: string } => c.type === "text")

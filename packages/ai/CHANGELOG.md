@@ -12,16 +12,83 @@
 
 ### Fixed
 
-- A wire failure a runtime reports only as an errno on `err.code` (`ECONNRESET`, `EPIPE`, `ECONNABORTED`, undici's `UND_ERR_SOCKET`) while leaving the message generic is now classified as a retryable connection failure instead of going unrecognised, unless a 4xx rejection other than 408 or 429 sits anywhere in its cause chain, however deep ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
-- A 4xx rejection other than 408 or 429 anywhere in an error's cause chain now keeps the whole error from retrying, however deep it sits and whether a structured field or a cause's own text (a string cause, `{ errorMessage }`) states it; before, a transport phrase on an outer link could mark the error retryable when the status sat past the third link or only in a cause's text ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
-- A number whose role is metadata is no longer read as an HTTP status, an auth rejection, a transient status or a capacity refusal. A status comes first: a number a status introducer names (`HTTP 401`, `HTTP/1.1 503`, `status: 429`, `error: 503`) is a status whatever word follows it (`HTTP 401 时请重新登录`, `HTTP 401 PS:`), as are `status=529`, `503 Service Unavailable` and `(429)`. Otherwise a duration is any quantity followed by a unit of time: a second with any SI prefix, by name or symbol (`picoseconds`, `nano-second`, `fs`, `psec`, `nanos`), minutes through years, and Chinese, Japanese and Korean units, including any prefix glued to `秒` (`納秒`, `ミリ秒`) and the SI loanwords Korean writes before `초` (`피코초`); the value of a time-named field (`elapsed: 503`, `retry-after-ms=529`) is one too. A host is metadata with or without a port (`[::1]`, `2001:db8::503`, `127.1:401`), and so are a size or token count, a stream number, a number inside a URL, one glued into an identifier, and the value of a field whose key names neither a status nor a cause (`request_id=529`, `host=localhost`). A field whose key states a reason in any of its words (`reason_code`, `terminationReasonCode`, `signal_number`, `exit_code`) is a reason whatever its value. undici's bare `terminated` is a cut stream when followed only by metadata or undici's own cause (`terminated (Body Timeout Error)`); a reason after it keeps it off the connection lane, whatever its digits (`terminated; signal=9`, `reason_code=9`, `SIGKILL-9`, `(content policy violation)`) ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
-- Credential blocks, usage-limit marks and retries now wait as long as the failed response's headers say (`AssistantMessage.errorRetryAfterMs`), not a shorter wait quoted in the error's text: a body's 200 ms no longer hides a header's 9 s. `Retry-After: 0` means retry now even beside a window reset, and a header sent twice is read at its longest value ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
-- No credential block lasts more than seven days after it was written, whoever states the deadline: a message, a header or a usage report's reset (`MAX_HINTED_BLOCK_MS`); a `NaN` wait gets the default block. Before, any finite number was stored: a far-epoch `x-ratelimit-reset`, a 309-digit `retry-after-ms=` or a usage report's reset a century out blocked a credential for good. A block an older version or an older broker stored past that, in the local store, a broker snapshot or the legacy Codex `shared` mirror, ends a week after its write and is stored as that deadline, so a later write cannot restart the week; an older broker's row is repaired the same way ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
-- OpenAI Completions, OpenAI Responses, Azure and Codex no longer retry a 429 on a short backoff when its headers ask for longer than `maxRetryDelayMs` (60 s by default, 5 minutes on Codex), such as a rate window that resets in an hour: the 429 surfaces at once with that wait, so the caller can wait it out, rotate or fall back. A failure inside an accepted stream, an auth-gateway error response and a pi-native failure frame now keep the server's stated wait too ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- A connection failure reported only as an errno (`ECONNRESET`, `EPIPE`, `UND_ERR_SOCKET`) is now retried ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- A 4xx rejection other than 408 or 429 anywhere in an error's cause chain now stops the retry ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- A duration, host, port or id in an error message is no longer read as an HTTP status ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- Retries, credential blocks and usage-limit marks now wait as long as the response headers ask, not a shorter wait quoted in the error text ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- No credential block lasts more than seven days, including one an older version stored ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- OpenAI Completions, OpenAI Responses, Azure and Codex return a 429 at once when its stated wait exceeds `maxRetryDelayMs`, instead of retrying it sooner ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the pre-output retries of OpenAI Completions, Azure OpenAI Responses, OpenAI Responses, Codex, Cursor and Anthropic retrying sooner than the server asked: each now waits at least the stated wait, and surfaces the failure at once, saying so, when that wait is longer than `maxRetryDelayMs` or the new `providerRetryWaitCeilingMs` stream option. No provider sleeps a server-stated wait past those bounds, the transport's own retries included: a wait stated only in the body (`Please retry in 15s`) or in `x-ratelimit-reset-after` is refused like a header's, and Kimi Code, Synthetic, GitLab Duo, Ollama, Amazon Bedrock and Gemini CLI now keep to the bounds and sleep through `providerRetryWait` too. A refused Cursor request whose Connect error has no details keeps its HTTP status, so a 503 stays retryable ([#17569](https://github.com/can1357/oh-my-pi/pull/17569) by [@sjawhar](https://github.com/sjawhar))
 - Fixed Codex conversation replay failing with an unknown `internal_chat_message_metadata_passthrough.content_token_count` parameter by omitting backend-internal response metadata from replayed input ([#17590](https://github.com/can1357/oh-my-pi/pull/17590) by [@briankeefe](https://github.com/briankeefe)).
 - Fixed status checks reading the server's retry wait as an HTTP status: the wait is no longer appended to error text and travels as `AssistantMessage.errorRetryAfterMs`; `appendRetryAfterHint` and `formatErrorMessageWithRetryAfter` are removed ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
 - Fixed `Retry-After` readers (error text, the Anthropic client, the Claude usage poll) each parsing the header differently; they share `parseRetryAfter`, so `30abc` or a date's leading digits no longer read as seconds ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
 - Fixed a credential rotation under `replayBudgetMs` waiting out a sibling credential's block past the budget ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
+
+### Breaking Changes
+
+- `AssistantMessage.errorMessage` no longer includes omp's request-dump path (`raw-http-request=…`), the response's `retry-after-ms` hint or omp's provider explanations (GitHub Copilot, ClinePass, Ollama, the Anthropic replay-unsigned-thinking hint, Bedrock's `[thinking-diag]`, Cursor's end-stream diagnostic, Factory Droid's region explanation, Google Gemini CLI's account-verification explanation) or the Ollama endpoint URL; it is the provider's own text. Read the new `errorDisplayMessage` (or `errorDisplayText(message)`) for what omp shows, and the new `errorRetryAfterMs` for the delay the response's headers asked for. `errorClassificationMessage` is removed: `errorMessage` now holds that text ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
+- `finalize()` returns the provider's text as `message`, with `displayMessage` and `retryAfterMs` beside it; providers store all three with `applyFinalizeResult()`. `formatMessage` is renamed `formatDisplayMessage` and `finalizeErrorMessage` `finalizeErrorDisplayMessage`; `formatErrorMessageWithRetryAfter` and `stripRawHttpRequestDiagnostics` are removed ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
+
+### Added
+
+- Added opt-in standard Responses WebSockets for catalog-supported models, with incremental turns and session-scoped HTTP/SSE fallback; OMP enables them through settings ([#17354](https://github.com/can1357/oh-my-pi/pull/17354) by [@TatsukiMeng](https://github.com/TatsukiMeng))
+- `AuthStorage` can be constructed over an `AuthStorageBackend` (its namespaces plus `setAccountPolicies`/`replaceStore`/`close`) instead of a credential store, so another thread's instance can serve every call
+- Anthropic sessions on the official API now use message threads (`message-threads-2026-08-12`, as Claude Code does): after the first turn each request sends only the new messages, cutting time to first token in long conversations; a refused or expired thread replays the full conversation automatically. `statefulResponses: false` or `PI_ANTHROPIC_MESSAGE_THREADS=0` turns it off, `PI_ANTHROPIC_MESSAGE_THREADS=1` opts other endpoints in
+- Added `isCreditBalanceTooLow` and `calculateCreditBalanceBackoffMs` for Anthropic's empty-prepaid-balance rejection, and `parseHttpErrorBody` and `httpErrorReason` for reading a provider's `<status> <JSON body>` error ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
+- Added `errorDisplayText`, `editErrorText`, `clearErrorText` and `errorRetryHeaders` for the split error fields, an optional header retry delay on `extractProviderRetryHint`, `parseRateLimitReason`, `matchesUsageLimitText`, `isUsageLimitOutcome`, `is402BillingCapBody` and `isConcurrencyCapExclusion`, and `retryAfterMs` on `RotateCredentialOptions` ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
+
+### Changed
+
+- Switching into or out of the Codex `ultrafast` service tier now opens a fresh WebSocket routed to the new tier instead of reusing the old one ([#17809](https://github.com/can1357/oh-my-pi/pull/17809) by [@xiangnan0811](https://github.com/xiangnan0811)).
+- Added the `devin-cli` login, which adopts the Devin CLI's `credentials.toml` seat key as a `devin` API key ([#13637](https://github.com/can1357/oh-my-pi/pull/13637) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
+- Added the `devin-windsurf` login, which exchanges a Windsurf Enterprise sign-in for the seat's raw API key and stores it as a `devin` API key ([#13288](https://github.com/can1357/oh-my-pi/pull/13288) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
+- Factory Droid Gemini 4 Argon requests match droid's: no sampling parameters, the output cap at the model maximum, and its earlier turns replayed exactly as Gemini streamed them ([#17861](https://github.com/can1357/oh-my-pi/pull/17861) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed account switching stopping after rate-limited accounts when model discovery had not seen every stored account; other eligible accounts are now tried before blocked fallbacks
+- OAuth broker validation now checks optional residency, inference-region, and selected-organization metadata in uploaded credentials and remote snapshots
+- Fixed Muse Code subscription sessions failing every turn with `403 client_attestation_denied` when tools like `bash` or `web_search` were available; Muse Code requests now use tool names Meta accepts and calls still run under their own names ([#17435](https://github.com/can1357/oh-my-pi/issues/17435), [#17515](https://github.com/can1357/oh-my-pi/pull/17515) by [@harshav167](https://github.com/harshav167), continued in [#18053](https://github.com/can1357/oh-my-pi/pull/18053) by [@abilliontokens](https://github.com/abilliontokens))
+- Fixed xAI speech requests failing with `422 missing field language`: `xai-tts` now sends `language`, which xAI's `/v1/tts` requires, defaulting to `auto` (automatic detection) when the caller passes none, as the auth gateway's `/v1/audio/speech` does ([#17992](https://github.com/can1357/oh-my-pi/pull/17992) by [@Mirceone](https://github.com/Mirceone))
+- Fixed Codex WebSocket turns sending a delta `input` after a pooled socket reconnected (closed, idle eviction, token refresh, or prewarm routing-hint change) or when `onPayload` deleted `previous_response_id` (including when it also rewrote the input), and skipped late prewarm while a socket is busy or holding accepted steering ([#17809](https://github.com/can1357/oh-my-pi/pull/17809) by [@xiangnan0811](https://github.com/xiangnan0811)).
+- API-key logins now honor the auth rule's `store-as` provider instead of storing the key under the auth id ([#13637](https://github.com/can1357/oh-my-pi/pull/13637) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
+
+### Changed
+
+- Switching into or out of the Codex `ultrafast` service tier now opens a fresh WebSocket routed to the new tier instead of reusing the old one ([#17809](https://github.com/can1357/oh-my-pi/pull/17809) by [@xiangnan0811](https://github.com/xiangnan0811)).
+- Factory Droid requests now identify as droid 1.1.0: they no longer carry SDK telemetry (`X-Stainless-*`), a placeholder `x-api-key` or Claude Code's `x-app` and browser-access headers, and login asks whoami for its extended response ([#17885](https://github.com/can1357/oh-my-pi/pull/17885) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed Gemini and Vertex `MALFORMED_RESPONSE` finishes showing as "Unhandled stop reason" and dropping that turn's token usage; RPC prompt errors now report them as retryable
+- Fixed `rerank()` rejecting Cohere-style answers that carry no `model` field; the result then reports the requested model id ([#17975](https://github.com/can1357/oh-my-pi/pull/17975) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- Fixed `rerank()` requests leaving out the model's configured headers, including `models.yml` `headers`, so a rerank endpoint that needs its own header or `Authorization` rejected every call ([#17974](https://github.com/can1357/oh-my-pi/pull/17974) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- The OpenAI-wire transport and provider-level retry loops (OpenAI Responses, Anthropic) no longer replay a response marked `x-should-retry: false`, so a retrying gateway's terminal 5xx is no longer multiplied by in-provider retries ([#17920](https://github.com/can1357/oh-my-pi/issues/17920))
+- Fixed local text deciding how a provider error is handled: a HOME or logs directory whose name holds a phrase such as `retry-after-ms=3600000`, `prompt is too long` or `usage_limit_reached` reached classification, retry timing and credential rotation through omp's request-dump line. Decisions now read only the provider's text and the response's header delay ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.16.0] - 2026-11-02
+
+### Added
+
+- `/login mistral` signs in through the browser like the Mistral Vibe CLI and stores the minted API key, whose usage counts against the plan's Vibe Code quota instead of pay-as-you-go API credits; `MISTRAL_API_KEY` still works ([#13875](https://github.com/can1357/oh-my-pi/pull/13875) by [@Gauthier-Huguenin](https://github.com/Gauthier-Huguenin), continued in [#17672](https://github.com/can1357/oh-my-pi/pull/17672) by [@abilliontokens](https://github.com/abilliontokens))
+- Added `dropsForeignReasoningPayload(turn, model)`, which tells whether `transformMessages` certainly strips a turn's thinking signatures and redacted thinking on the way to `model`, and, for Factory Droid's Gemini wire, `isFactoryDroidGeminiWire(model)` and `keepsFactoryGeminiReasoning(turn)` ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
+- Factory Droid Beam 1.0 requests accept tool-call turns that arrive without reasoning ([#17766](https://github.com/can1357/oh-my-pi/pull/17766) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Changed
+
+- Deprecated `formatError` on the embeddings, images, rerank, speech, transcriptions, video, pi-native and SystemOne server modules (now aliases of `codedErrorResponse` / `noStoreErrorResponse` in `auth-gateway/http`) and `asStrict` in `providers/aws-sigv4` (now `asStrictBytes` from `@oh-my-pi/pi-utils`)
+
+### Fixed
+
+- Fixed Factory Droid Fable requests offering Opus 5 as the refusal fallback when your organization's model policy excludes Opus 5; Claude requests now offer only fallback models your account can use, and a request served by another organization's login than the one your model list came from offers none ([#17772](https://github.com/can1357/oh-my-pi/pull/17772) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.15.0] - 2026-11-01
+
+### Fixed
+
+- Fixed Codex conversation replay failing with an unknown `internal_chat_message_metadata_passthrough.content_token_count` parameter by omitting backend-internal response metadata from replayed input ([#17590](https://github.com/can1357/oh-my-pi/pull/17590), [#17597](https://github.com/can1357/oh-my-pi/pull/17597) by [@briankeefe](https://github.com/briankeefe)).
+- Fixed `service_tier: "ultrafast"` being dropped for OpenAI-family models on custom providers even when the model's `serviceTiers` lists it ([#17577](https://github.com/can1357/oh-my-pi/pull/17577) by [@jakehemmerle](https://github.com/jakehemmerle))
+- Fixed Google Vertex requests with Workforce Identity Federation ADC failing token refresh against the wrong endpoint ([#17447](https://github.com/can1357/oh-my-pi/issues/17447)).
+- Fixed Anthropic (and other rotating-token) OAuth accounts being signed out automatically when a background usage poll's token refresh got `invalid_grant`, including refreshes a client delegates to an auth broker; usage polling no longer disables credentials, so only a real request's refresh can do that ([#17468](https://github.com/can1357/oh-my-pi/issues/17468))
 
 ## [18.14.2] - 2026-10-31
 
@@ -2277,35 +2344,4 @@
 
 - Fixed streaming UI glitches and resolved an issue where invalid empty tool call IDs were persisted in the chat history.
 
-## [16.2.10] - 2026-06-30
-
-### Added
-
-- Added streaming support for keyed parameter argument deltas in XML-family in-band tool call scanners (Anthropic, DeepSeek, XML, Minimax)
-
-### Changed
-
-- Improved native tool-call passthrough in `wrapInbandToolStream` to accurately mirror live streaming IDs, arguments, and partial JSON states from the underlying provider
-
-### Fixed
-
-- Fixed a bug where tool calls with empty or missing IDs were not detected as malformed, causing API validation failures (e.g., 400 errors with Anthropic) on subsequent requests
-- Raised Gemini header runaway threshold to prevent premature interruption of complex reasoning loops
-- Fixed leaked ` ```thinking ` fences with nested language-tagged Markdown code blocks so inner fences remain inside structured thinking instead of leaking as visible reply text.
-
-## [16.2.9] - 2026-06-30
-
-### Added
-
-- Added `OAuthCallbackFlowOptions.allowPortFallback` to allow disabling random-port fallback, enabling strict port enforcement and early configuration errors for OAuth flows with static redirect URIs.
-
-### Changed
-
-- Improved `OAuthCallbackFlow` port conflict error messages to include the busy port, configured redirect URI, and actionable remediation steps.
-
-### Fixed
-
-- Fixed an issue where malformed tool-call JSON from local Ollama or llama.cpp models was incorrectly retried as generic 500 errors, now surfacing a clear recovery message.
-- Fixed a race condition in OAuth callback flows where abort signals triggered before the callback listener was registered were ignored.
-
-Older entries are archived in [packages/ai/CHANGELOG.md@7dc0d0325754](https://github.com/can1357/oh-my-pi/blob/7dc0d0325754955b01c15b64b220b2cf27e670db/packages/ai/CHANGELOG.md).
+Older entries are archived in [packages/ai/CHANGELOG.md@9e9150960c24](https://github.com/can1357/oh-my-pi/blob/9e9150960c248708f8cc4bfdae0c8f2aaf3480b0/packages/ai/CHANGELOG.md).

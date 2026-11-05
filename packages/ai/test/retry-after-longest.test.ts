@@ -10,7 +10,9 @@
  * - `longestProviderRetryHint` reads every occurrence, and only turn recovery's
  *   held-retry check uses it, where it can only decline a hold.
  */
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
+import { withRetryAfterHeaders } from "@oh-my-pi/pi-ai/auth-gateway/http";
+import { extractRetryHint, longestRetryHint } from "@oh-my-pi/pi-utils";
 import {
 	extractProviderRetryHint,
 	getFailureRetryAfterMs,
@@ -21,6 +23,7 @@ import {
 	providerFailureWaitMs,
 	providerRetryWaitMs,
 } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { type RefusedRetryWait, refusedRetryWaitNote } from "@oh-my-pi/pi-ai/utils/retry-wait";
 
 const MAX_VALUE_DIGITS = BigInt(Number.MAX_VALUE).toString();
 
@@ -170,7 +173,7 @@ describe("wire restatement guards", () => {
 	});
 
 	it("keeps the transport default when the cap is NaN", () => {
-		expect(retryWaitBounds(Number.NaN, 60_000).maxDelayMs).toBe(60_000);
+		expect(retryWaitBounds({ maxRetryDelayMs: Number.NaN }, 60_000).maxDelayMs).toBe(60_000);
 	});
 });
 
@@ -201,6 +204,20 @@ describe("the header's wait beside any body text", () => {
 	});
 });
 
+describe("a refused wait's note", () => {
+	it.each([
+		["the caller's ceiling", { option: "providerRetryWaitCeilingMs", limitMs: 10_000, waitMs: 15_000 }],
+		["maxRetryDelayMs", { option: "maxRetryDelayMs", limitMs: 600_000, waitMs: 900_000 }],
+	] as [string, RefusedRetryWait][])("names no wait the session's readers take, refused by %s", (_label, refused) => {
+		// Turn recovery reads a wait out of the failed message's text. The note
+		// restates the wait and names the bound; neither number may become one,
+		// or the session would sleep the bound instead of the server's wait.
+		const message = `429 Too many requests ${refusedRetryWaitNote(refused)}`;
+		expect(providerRetryWaitMs("anthropic", message, undefined)).toBeUndefined();
+		expect(longestProviderRetryHint("anthropic", message)).toBeUndefined();
+	});
+});
+
 describe("providerFailureWaitMs", () => {
 	it("reads a thrown failure's own header wait beside its message's relative wait, the longer winning", () => {
 		const error = Object.assign(new Error("429 rate limited, try again in 2s"), { headers: { "retry-after": "9" } });
@@ -216,30 +233,132 @@ describe("providerFailureWaitMs", () => {
 	});
 });
 
+/** What each of the three header readers takes from `headers`: `fetchWithRetry`'s, the held-retry check's, and the failed message's. */
+function threeReaders(headers: Record<string, string>): (number | undefined)[] {
+	return [
+		extractRetryHint(new Headers(headers)),
+		longestRetryHint(new Headers(headers)),
+		getRetryAfterMsFromHeaders(headers),
+	];
+}
+
+const DECIMAL_COMMA_ISO = "2026-10-21T09:27:00,900+02:00";
+
+function withFixedNow<T>(now: string, read: () => T): T {
+	const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse(now));
+	try {
+		return read();
+	} finally {
+		clock.mockRestore();
+	}
+}
+
 describe("an explicit zero wait beside a window reset", () => {
 	it("is read as retry now, not as the window's end", () => {
 		// `fetchWithRetry` reads `Retry-After: 0` as an immediate retry; the
 		// failed message and the transport's decline must read the same.
 		const headers = { "retry-after": "0", "x-ratelimit-reset": "7200" };
 		expect(getRetryAfterMsFromHeaders(headers)).toBe(0);
+		expect(extractRetryHint(new Headers(headers))).toBe(0);
 		expect(getRetryAfterMsFromHeaders({ "retry-after-ms": "0", "x-ratelimit-reset-ms": "7200000" })).toBe(0);
 		expect(retryWaitBounds(undefined, 60_000).declines(headers)).toBe(false);
 	});
+
+	it.each([
+		["a radix prefix", "0x0"],
+		["a sign", "-0"],
+		["an exponent", "0e0"],
+		["a blank value", " "],
+		["a trailing empty part", "0,"],
+		["two numbers and a slash", "0/1"],
+	])("is not stated by %s (%j), so the window reset stands", (_label, value) => {
+		// RFC 9110 §10.2.3: delay-seconds is digits, and a date is an HTTP-date
+		// or an ISO date-time. Each row breaks one of those rules a reader once
+		// let through: `Number()` reads the first three as zero, and the date
+		// parser read `0,` and `0/1` as 1 Jan 2000, an elapsed date. Either way
+		// the value read as "retry now" and hid a one-hour reset.
+		for (const name of ["retry-after", "retry-after-ms"]) {
+			const headers = { [name]: value, "x-ratelimit-reset": "3600" };
+			expect(threeReaders(headers)).toEqual([3_600_000, 3_600_000, 3_600_000]);
+			expect(retryWaitBounds(undefined, 60_000).declines(headers)).toBe(true);
+		}
+	});
 });
 
-describe("a Retry-After joined from duplicate header lines", () => {
-	it.each([
-		["retry-after", "9, 120", 120_000],
-		["retry-after", "120, 9", 120_000],
-		["retry-after-ms", "100, 9000", 9_000],
-	] as [string, string, number][])("%s: %s reads the longest part", (name, value, expected) => {
-		expect(getRetryAfterMsFromHeaders({ [name]: value })).toBe(expected);
+describe("retry-after-ms beside Retry-After", () => {
+	it("reads the auth gateway's exact retry-after-ms, not its Retry-After rounded up to whole seconds", () => {
+		// The gateway restates a 200 ms wait as `retry-after-ms: 200` and
+		// `Retry-After: 1`. The two state one wait; the longer of them is 1 s.
+		const headers = Object.fromEntries(withRetryAfterHeaders(new Response(null, { status: 429 }), 200).headers);
+		expect(threeReaders(headers)).toEqual([200, 200, 200]);
+		expect(getFailureRetryAfterMs(new Error("socket closed"), { streamResponseHeaders: headers })).toBe(200);
 	});
 
-	it("still reads an HTTP-date, whose own comma is not a separator", () => {
-		const date = new Date(Date.now() + 90_000).toUTCString();
-		const waitMs = getRetryAfterMsFromHeaders({ "retry-after": date });
-		expect(waitMs).toBeGreaterThan(85_000);
-		expect(waitMs).toBeLessThanOrEqual(90_000);
+	it("reads Retry-After when retry-after-ms states no wait", () => {
+		const headers = { "retry-after-ms": "0x0", "retry-after": "9" };
+		expect(threeReaders(headers)).toEqual([9_000, 9_000, 9_000]);
+		expect(getFailureRetryAfterMs(new Error("socket closed"), { streamResponseHeaders: headers })).toBe(9_000);
+	});
+});
+
+describe("Retry-After comma values", () => {
+	it("reads an ISO date-time's decimal comma as its 900 ms fraction in all three readers", () => {
+		// An ISO date-time is not a joined delay list. Its decimal comma is read
+		// as a decimal point: 900 ms, not the UTC+02:00 offset (two hours).
+		const waits = withFixedNow("2026-10-21T07:27:00.000Z", () => threeReaders({ "retry-after": DECIMAL_COMMA_ISO }));
+		expect(waits).toEqual([900, 900, 900]);
+	});
+
+	it("reads an HTTP-date, which holds a comma of its own, in all three readers", () => {
+		const date = new Date(Math.ceil((Date.now() + 60_000) / 1_000) * 1_000).toUTCString();
+		for (const ms of threeReaders({ "retry-after": date })) {
+			expect(ms).toBeGreaterThan(55_000);
+			expect(ms).toBeLessThanOrEqual(61_000);
+		}
+	});
+
+	it.each([
+		["two joined delay-seconds", "retry-after", "9, 120", 120_000],
+		["a decimal delay-seconds part", "retry-after", "9.125, 9", 9_125],
+		["two joined retry-after-ms values", "retry-after-ms", "100, 9000", 9_000],
+	] as [string, string, string, number][])("%s reads the longest part", (_label, name, value, expected) => {
+		// Two joined header lines contradict each other; conservatively wait for the longer one.
+		expect(threeReaders({ [name]: value })).toEqual([expected, expected, expected]);
+	});
+
+	it.each([
+		["Retry-After", "1761038820, 900"],
+		["retry-after-ms", "1761038820000, 900"],
+	])("does not split %s %j, whose epoch-sized part is no delay, and reads no wait", (name, value) => {
+		// A bare epoch with a decimal comma has all-digit parts. Split, it read
+		// as 55.8 years, which `errorRetryAfterMs` carried into a seven-day
+		// credential block. Main reads it as no wait, and so does this reader.
+		expect(threeReaders({ [name]: value })).toEqual([undefined, undefined, undefined]);
+	});
+
+	it("does not partly split a comma value when one part is not delay-seconds", () => {
+		expect(threeReaders({ "retry-after": "9, 120ms" })).toEqual([undefined, undefined, undefined]);
+	});
+});
+
+describe("a window reset is read in one unit by all three readers", () => {
+	it("reads x-ratelimit-reset: 9 as 9 s", () => {
+		expect(threeReaders({ "x-ratelimit-reset": "9" })).toEqual([9_000, 9_000, 9_000]);
+	});
+
+	it("reads an epoch-millisecond x-ratelimit-reset nine seconds out as about 9 s", () => {
+		const epochMs = String(Date.now() + 9_000);
+		for (const ms of threeReaders({ "x-ratelimit-reset": epochMs })) {
+			expect(ms).toBeGreaterThan(8_000);
+			expect(ms).toBeLessThanOrEqual(9_000);
+		}
+	});
+
+	it("reads an epoch-second x-ratelimit-reset as the time left to it", () => {
+		const epochSeconds = String(Math.ceil((Date.now() + 9_000) / 1_000));
+		for (const ms of threeReaders({ "x-ratelimit-reset": epochSeconds })) {
+			expect(ms).toBeGreaterThan(7_000);
+			expect(ms).toBeLessThanOrEqual(10_000);
+		}
 	});
 });

@@ -138,6 +138,7 @@ function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): 
 	const addOutputMeta = (meta: OutputMeta | undefined): void => {
 		if (!meta) return;
 		add(meta.source?.value);
+		add(meta.minimized?.filter);
 		if (!meta.diagnostics) return;
 		add(meta.diagnostics.summary);
 		for (const message of meta.diagnostics.messages) add(message);
@@ -153,6 +154,7 @@ function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): 
 				return;
 			case "assistant":
 				add(message.errorMessage);
+				add(message.errorDisplayMessage);
 				for (const block of message.content) {
 					if (block.type === "text") add(block.text);
 					else if (block.type === "thinking") add(block.thinking);
@@ -367,7 +369,7 @@ function redactShareContent(
 	);
 }
 
-/** Redact freeform strings in tool output metadata (source path/URL, diagnostics); numeric truncation info is preserved. */
+/** Redact freeform strings in tool output metadata (source path/URL, diagnostics, minimizer filter); numeric truncation info is preserved. */
 function redactShareOutputMeta(
 	o: SecretObfuscator,
 	meta: OutputMeta | undefined,
@@ -385,6 +387,9 @@ function redactShareOutputMeta(
 					messages: meta.diagnostics.messages.map(message => o.obfuscate(message, sharedRegexSecretValues)),
 				}
 			: meta.diagnostics,
+		minimized: meta.minimized
+			? { ...meta.minimized, filter: o.obfuscate(meta.minimized.filter, sharedRegexSecretValues) }
+			: meta.minimized,
 	};
 }
 
@@ -414,18 +419,28 @@ function redactShareMessage(
 				details: undefined,
 				content: redactShareContent(o, message.content, sharedRegexSecretValues) as (TextContent | ImageContent)[],
 			};
-		case "assistant":
+		case "assistant": {
+			// Sessions written before omp kept its display text apart from the
+			// provider's carried the provider's text as `errorClassificationMessage`.
+			// The viewer never reads it and a spread copied it unredacted: drop it.
+			const { errorClassificationMessage: _legacyErrorText, ...current } = message as AssistantMessage & {
+				errorClassificationMessage?: unknown;
+			};
 			// Drop opaque provider-replay state (encrypted reasoning / native history) the viewer
 			// never reads and we cannot redact field-by-field: `providerPayload`, any
 			// `redactedThinking` blocks, and native Anthropic server-tool blocks
 			// (`server_tool_use` input / `web_search_tool_result` encrypted_content).
 			return {
-				...message,
+				...current,
 				providerPayload: undefined,
 				errorMessage:
 					message.errorMessage === undefined
 						? undefined
 						: o.obfuscate(message.errorMessage, sharedRegexSecretValues),
+				errorDisplayMessage:
+					message.errorDisplayMessage === undefined
+						? undefined
+						: o.obfuscate(message.errorDisplayMessage, sharedRegexSecretValues),
 				content: message.content.flatMap((block): AssistantMessage["content"] => {
 					if (block.type === "redactedThinking" || block.type === "anthropicServerTool") return [];
 					if (block.type === "text") return [{ ...block, text: o.obfuscate(block.text, sharedRegexSecretValues) }];
@@ -449,6 +464,7 @@ function redactShareMessage(
 					return [block];
 				}),
 			};
+		}
 		case "bashExecution":
 			return {
 				...message,

@@ -1,513 +1,502 @@
-(function () {
-	"use strict";
+    (function() {
+      'use strict';
 
-	const marked = new globalThis.ompMarkdown.Marked();
-	const THEME_STORAGE_KEY = "omp-export-theme";
-	const themeSelect = document.getElementById("theme-select");
-	let themePreference = "auto";
-	try {
-		const stored = localStorage.getItem(THEME_STORAGE_KEY);
-		if (stored === "light" || stored === "dark" || stored === "auto") themePreference = stored;
-	} catch {}
+      const marked = new globalThis.ompMarkdown.Marked();
+      const THEME_STORAGE_KEY = 'omp-export-theme';
+      const themeSelect = document.getElementById('theme-select');
+      let themePreference = 'auto';
+      try {
+        const stored = localStorage.getItem(THEME_STORAGE_KEY);
+        if (stored === 'light' || stored === 'dark' || stored === 'auto') themePreference = stored;
+      } catch {}
 
-	function applyThemePreference(next) {
-		themePreference = next;
-		if (next === "light" || next === "dark") document.documentElement.dataset.theme = next;
-		else delete document.documentElement.dataset.theme;
-		if (themeSelect) themeSelect.value = next;
-		try {
-			localStorage.setItem(THEME_STORAGE_KEY, next);
-		} catch {}
-	}
+      function applyThemePreference(next) {
+        themePreference = next;
+        if (next === 'light' || next === 'dark') document.documentElement.dataset.theme = next;
+        else delete document.documentElement.dataset.theme;
+        if (themeSelect) themeSelect.value = next;
+        try {
+          localStorage.setItem(THEME_STORAGE_KEY, next);
+        } catch {}
+      }
 
-	applyThemePreference(themePreference);
-	if (themeSelect) themeSelect.addEventListener("change", () => applyThemePreference(themeSelect.value));
+      applyThemePreference(themePreference);
+      if (themeSelect) themeSelect.addEventListener('change', () => applyThemePreference(themeSelect.value));
 
-	// ============================================================
-	// BOOT
-	// ============================================================
-	//
-	// Two boot paths share this template:
-	//  - Static export: session JSON rides base64-embedded in #session-data.
-	//  - Share viewer: share-loader.js sets `window.__OMP_SESSION_DATA__` to
-	//    a promise resolving to the session JSON (fetched + decrypted).
-	// The entire app lives in bootSession(); its body keeps the original
-	// one-level indentation to avoid a whole-file reindent.
-	function bootSession(data) {
-		const { systemPrompt, tools, subSessions, trace } = data;
-		let { header, entries } = data;
-		let activeSessionKey = "";
-		let sessionContext = { entries, prefix: "", idPrefix: "entry-" };
+      // ============================================================
+      // BOOT
+      // ============================================================
+      //
+      // Two boot paths share this template:
+      //  - Static export: session JSON rides base64-embedded in #session-data.
+      //  - Share viewer: share-loader.js sets `window.__OMP_SESSION_DATA__` to
+      //    a promise resolving to the session JSON (fetched + decrypted).
+      // The entire app lives in bootSession(); its body keeps the original
+      // one-level indentation to avoid a whole-file reindent.
+      function bootSession(data) {
+      const { systemPrompt, tools, subSessions, trace } = data;
+      let { header, entries } = data;
+      let activeSessionKey = '';
+      let sessionContext = { entries, prefix: '', idPrefix: 'entry-' };
 
-		// ============================================================
-		// URL PARAMETER HANDLING
-		// ============================================================
+      // ============================================================
+      // URL PARAMETER HANDLING
+      // ============================================================
 
-		// Parse URL parameters for deep linking: leafId and targetId
-		// Check for injected params (when loaded in iframe via srcdoc) or use window.location
-		const injectedParams = document.querySelector('meta[name="pi-url-params"]');
-		const searchString = injectedParams ? injectedParams.content : window.location.search.substring(1);
-		const urlParams = new URLSearchParams(searchString);
-		const urlLeafId = urlParams.get("leafId");
-		const urlTargetId = urlParams.get("targetId");
-		// Use URL leafId if provided, otherwise fall back to session default
-		let leafId = urlLeafId || data.leafId;
+      // Parse URL parameters for deep linking: leafId and targetId
+      // Check for injected params (when loaded in iframe via srcdoc) or use window.location
+      const injectedParams = document.querySelector('meta[name="pi-url-params"]');
+      const searchString = injectedParams ? injectedParams.content : window.location.search.substring(1);
+      const urlParams = new URLSearchParams(searchString);
+      const urlLeafId = urlParams.get('leafId');
+      const urlTargetId = urlParams.get('targetId');
+      // Use URL leafId if provided, otherwise fall back to session default
+      let leafId = urlLeafId || data.leafId;
 
-		// ============================================================
-		// DATA STRUCTURES
-		// ============================================================
+      // ============================================================
+      // DATA STRUCTURES
+      // ============================================================
 
-		// Entry lookup by ID
-		const byId = new Map();
-		const toolCallMap = new Map();
-		const labelMap = new Map();
+      // Entry lookup by ID
+      const byId = new Map();
+      const toolCallMap = new Map();
+      const labelMap = new Map();
 
-		function indexSession() {
-			byId.clear();
-			toolCallMap.clear();
-			labelMap.clear();
-			for (const entry of entries) {
-				byId.set(entry.id, entry);
-				if (entry.type === "label" && entry.targetId && entry.label) {
-					labelMap.set(entry.targetId, entry.label);
-				}
-				if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-				const content = entry.message.content;
-				if (!Array.isArray(content)) continue;
-				for (let blockIndex = 0; blockIndex < content.length; blockIndex++) {
-					const block = content[blockIndex];
-					if (block.type === "toolCall") {
-						toolCallMap.set(block.id, {
-							name: block.name,
-							arguments: block.arguments,
-							entryId: entry.id,
-							blockIndex,
-						});
-					}
-				}
-			}
-		}
-		indexSession();
+      function indexSession() {
+        byId.clear();
+        toolCallMap.clear();
+        labelMap.clear();
+        for (const entry of entries) {
+          byId.set(entry.id, entry);
+          if (entry.type === 'label' && entry.targetId && entry.label) {
+            labelMap.set(entry.targetId, entry.label);
+          }
+          if (entry.type !== 'message' || entry.message.role !== 'assistant') continue;
+          const content = entry.message.content;
+          if (!Array.isArray(content)) continue;
+          for (let blockIndex = 0; blockIndex < content.length; blockIndex++) {
+            const block = content[blockIndex];
+            if (block.type === 'toolCall') {
+              toolCallMap.set(block.id, {
+                name: block.name,
+                arguments: block.arguments,
+                entryId: entry.id,
+                blockIndex,
+              });
+            }
+          }
+        }
+      }
+      indexSession();
 
-		// ============================================================
-		// TREE DATA PREPARATION (no DOM, pure data)
-		// ============================================================
+      // ============================================================
+      // TREE DATA PREPARATION (no DOM, pure data)
+      // ============================================================
 
-		/**
-		 * Build tree structure from flat entries.
-		 * Returns array of root nodes, each with { entry, children, label }.
-		 */
-		function buildTree() {
-			const nodeMap = new Map();
-			const roots = [];
+      /**
+       * Build tree structure from flat entries.
+       * Returns array of root nodes, each with { entry, children, label }.
+       */
+      function buildTree() {
+        const nodeMap = new Map();
+        const roots = [];
 
-			// Create nodes
-			for (const entry of entries) {
-				nodeMap.set(entry.id, {
-					entry,
-					children: [],
-					label: labelMap.get(entry.id),
-				});
-			}
+        // Create nodes
+        for (const entry of entries) {
+          nodeMap.set(entry.id, { 
+            entry, 
+            children: [],
+            label: labelMap.get(entry.id)
+          });
+        }
 
-			// Build parent-child relationships
-			for (const entry of entries) {
-				const node = nodeMap.get(entry.id);
-				if (entry.parentId === null || entry.parentId === undefined || entry.parentId === entry.id) {
-					roots.push(node);
-				} else {
-					const parent = nodeMap.get(entry.parentId);
-					if (parent) {
-						parent.children.push(node);
-					} else {
-						roots.push(node);
-					}
-				}
-			}
+        // Build parent-child relationships
+        for (const entry of entries) {
+          const node = nodeMap.get(entry.id);
+          if (entry.parentId === null || entry.parentId === undefined || entry.parentId === entry.id) {
+            roots.push(node);
+          } else {
+            const parent = nodeMap.get(entry.parentId);
+            if (parent) {
+              parent.children.push(node);
+            } else {
+              roots.push(node);
+            }
+          }
+        }
 
-			// Sort children by timestamp. Use an explicit stack so valid, deep
-			// conversation chains do not exhaust the browser call stack.
-			const sortStack = [...roots];
-			while (sortStack.length > 0) {
-				const node = sortStack.pop();
-				node.children.sort((a, b) => new Date(a.entry.timestamp).getTime() - new Date(b.entry.timestamp).getTime());
-				for (let i = node.children.length - 1; i >= 0; i--) {
-					sortStack.push(node.children[i]);
-				}
-			}
+        // Sort children by timestamp. Use an explicit stack so valid, deep
+        // conversation chains do not exhaust the browser call stack.
+        const sortStack = [...roots];
+        while (sortStack.length > 0) {
+          const node = sortStack.pop();
+          node.children.sort((a, b) =>
+            new Date(a.entry.timestamp).getTime() - new Date(b.entry.timestamp).getTime()
+          );
+          for (let i = node.children.length - 1; i >= 0; i--) {
+            sortStack.push(node.children[i]);
+          }
+        }
 
-			return roots;
-		}
+        return roots;
+      }
 
-		/**
-		 * Build set of entry IDs on path from root to target.
-		 */
-		function buildActivePathIds(targetId) {
-			const ids = new Set();
-			let current = byId.get(targetId);
-			while (current) {
-				ids.add(current.id);
-				// Stop if no parent or self-referencing (root)
-				if (!current.parentId || current.parentId === current.id) {
-					break;
-				}
-				current = byId.get(current.parentId);
-			}
-			return ids;
-		}
+      /**
+       * Build set of entry IDs on path from root to target.
+       */
+      function buildActivePathIds(targetId) {
+        const ids = new Set();
+        let current = byId.get(targetId);
+        while (current) {
+          ids.add(current.id);
+          // Stop if no parent or self-referencing (root)
+          if (!current.parentId || current.parentId === current.id) {
+            break;
+          }
+          current = byId.get(current.parentId);
+        }
+        return ids;
+      }
 
-		/**
-		 * Get array of entries from root to target (the conversation path).
-		 */
-		function getPath(targetId) {
-			const path = [];
-			let current = byId.get(targetId);
-			while (current) {
-				path.unshift(current);
-				// Stop if no parent or self-referencing (root)
-				if (!current.parentId || current.parentId === current.id) {
-					break;
-				}
-				current = byId.get(current.parentId);
-			}
-			return path;
-		}
+      /**
+       * Get array of entries from root to target (the conversation path).
+       */
+      function getPath(targetId) {
+        const path = [];
+        let current = byId.get(targetId);
+        while (current) {
+          path.unshift(current);
+          // Stop if no parent or self-referencing (root)
+          if (!current.parentId || current.parentId === current.id) {
+            break;
+          }
+          current = byId.get(current.parentId);
+        }
+        return path;
+      }
 
-		/**
-		 * Flatten tree into list with indentation and connector info.
-		 * Returns array of { node, indent, showConnector, isLast, gutters, isVirtualRootChild, multipleRoots }.
-		 * Matches tree-selector.ts logic exactly.
-		 */
-		function flattenTree(roots, activePathIds) {
-			const result = [];
-			const multipleRoots = roots.length > 1;
+      /**
+       * Flatten tree into list with indentation and connector info.
+       * Returns array of { node, indent, showConnector, isLast, gutters, isVirtualRootChild, multipleRoots }.
+       * Matches tree-selector.ts logic exactly.
+       */
+      function flattenTree(roots, activePathIds) {
+        const result = [];
+        const multipleRoots = roots.length > 1;
 
-			// Mark which subtrees contain the active leaf. Use iterative post-order
-			// traversal so valid, deep conversation chains do not exhaust the
-			// browser call stack.
-			const containsActive = new Map();
-			const allNodes = [];
-			const activeStack = [...roots];
-			while (activeStack.length > 0) {
-				const node = activeStack.pop();
-				allNodes.push(node);
-				for (let i = node.children.length - 1; i >= 0; i--) {
-					activeStack.push(node.children[i]);
-				}
-			}
-			for (let i = allNodes.length - 1; i >= 0; i--) {
-				const node = allNodes[i];
-				let has = activePathIds.has(node.entry.id);
-				for (const child of node.children) {
-					if (containsActive.get(child)) has = true;
-				}
-				containsActive.set(node, has);
-			}
+        // Mark which subtrees contain the active leaf. Use iterative post-order
+        // traversal so valid, deep conversation chains do not exhaust the
+        // browser call stack.
+        const containsActive = new Map();
+        const allNodes = [];
+        const activeStack = [...roots];
+        while (activeStack.length > 0) {
+          const node = activeStack.pop();
+          allNodes.push(node);
+          for (let i = node.children.length - 1; i >= 0; i--) {
+            activeStack.push(node.children[i]);
+          }
+        }
+        for (let i = allNodes.length - 1; i >= 0; i--) {
+          const node = allNodes[i];
+          let has = activePathIds.has(node.entry.id);
+          for (const child of node.children) {
+            if (containsActive.get(child)) has = true;
+          }
+          containsActive.set(node, has);
+        }
 
-			// Stack: [node, indent, showConnector, isLast, gutters, isVirtualRootChild]
-			const stack = [];
+        // Stack: [node, indent, showConnector, isLast, gutters, isVirtualRootChild]
+        const stack = [];
 
-			// Add roots (prioritize branch containing active leaf)
-			const orderedRoots = [...roots].sort((a, b) => Number(containsActive.get(b)) - Number(containsActive.get(a)));
-			for (let i = orderedRoots.length - 1; i >= 0; i--) {
-				const isLast = i === orderedRoots.length - 1;
-				stack.push([orderedRoots[i], multipleRoots ? 1 : 0, multipleRoots, isLast, [], multipleRoots]);
-			}
+        // Add roots (prioritize branch containing active leaf)
+        const orderedRoots = [...roots].sort((a, b) => 
+          Number(containsActive.get(b)) - Number(containsActive.get(a))
+        );
+        for (let i = orderedRoots.length - 1; i >= 0; i--) {
+          const isLast = i === orderedRoots.length - 1;
+          stack.push([orderedRoots[i], multipleRoots ? 1 : 0, multipleRoots, isLast, [], multipleRoots]);
+        }
 
-			while (stack.length > 0) {
-				const [node, indent, showConnector, isLast, gutters, isVirtualRootChild] = stack.pop();
+        while (stack.length > 0) {
+          const [node, indent, showConnector, isLast, gutters, isVirtualRootChild] = stack.pop();
 
-				result.push({ node, indent, showConnector, isLast, gutters, isVirtualRootChild, multipleRoots });
+          result.push({ node, indent, showConnector, isLast, gutters, isVirtualRootChild, multipleRoots });
 
-				const children = node.children;
-				const multipleChildren = children.length > 1;
+          const children = node.children;
+          const multipleChildren = children.length > 1;
 
-				// Order children (active branch first)
-				const orderedChildren = [...children].sort(
-					(a, b) => Number(containsActive.get(b)) - Number(containsActive.get(a)),
-				);
+          // Order children (active branch first)
+          const orderedChildren = [...children].sort((a, b) => 
+            Number(containsActive.get(b)) - Number(containsActive.get(a))
+          );
 
-				// Real branch points add visual depth, and a virtual root's direct
-				// children (the session roots) nest one level under the shared
-				// column-0 root. Linear continuations otherwise stay aligned.
-				const childIndent = multipleChildren || isVirtualRootChild ? indent + 1 : indent;
+          // Real branch points add visual depth, and a virtual root's direct
+          // children (the session roots) nest one level under the shared
+          // column-0 root. Linear continuations otherwise stay aligned.
+          const childIndent = multipleChildren || isVirtualRootChild ? indent + 1 : indent;
 
-				// Build gutters for children
-				const connectorDisplayed = showConnector && !isVirtualRootChild;
-				const currentDisplayIndent = multipleRoots ? Math.max(0, indent - 1) : indent;
-				const connectorPosition = Math.max(0, currentDisplayIndent - 1);
-				const childGutters = connectorDisplayed
-					? [...gutters, { position: connectorPosition, show: !isLast }]
-					: gutters;
+          // Build gutters for children
+          const connectorDisplayed = showConnector && !isVirtualRootChild;
+          const currentDisplayIndent = multipleRoots ? Math.max(0, indent - 1) : indent;
+          const connectorPosition = Math.max(0, currentDisplayIndent - 1);
+          const childGutters = connectorDisplayed
+            ? [...gutters, { position: connectorPosition, show: !isLast }]
+            : gutters;
 
-				// Add children in reverse order for stack
-				for (let i = orderedChildren.length - 1; i >= 0; i--) {
-					const childIsLast = i === orderedChildren.length - 1;
-					stack.push([orderedChildren[i], childIndent, multipleChildren, childIsLast, childGutters, false]);
-				}
-			}
+          // Add children in reverse order for stack
+          for (let i = orderedChildren.length - 1; i >= 0; i--) {
+            const childIsLast = i === orderedChildren.length - 1;
+            stack.push([orderedChildren[i], childIndent, multipleChildren, childIsLast, childGutters, false]);
+          }
+        }
 
-			return result;
-		}
+        return result;
+      }
 
-		/**
-		 * Build ASCII prefix string for tree node.
-		 */
-		function buildTreePrefix(flatNode) {
-			const { indent, showConnector, isLast, gutters, isVirtualRootChild, multipleRoots } = flatNode;
-			const displayIndent = multipleRoots ? Math.max(0, indent - 1) : indent;
-			const connector = showConnector && !isVirtualRootChild ? (isLast ? "└─ " : "├─ ") : "";
-			const connectorPosition = connector ? displayIndent - 1 : -1;
+      /**
+       * Build ASCII prefix string for tree node.
+       */
+      function buildTreePrefix(flatNode) {
+        const { indent, showConnector, isLast, gutters, isVirtualRootChild, multipleRoots } = flatNode;
+        const displayIndent = multipleRoots ? Math.max(0, indent - 1) : indent;
+        const connector = showConnector && !isVirtualRootChild ? (isLast ? '└─ ' : '├─ ') : '';
+        const connectorPosition = connector ? displayIndent - 1 : -1;
 
-			const totalChars = displayIndent * 3;
-			const prefixChars = [];
-			for (let i = 0; i < totalChars; i++) {
-				const level = Math.floor(i / 3);
-				const posInLevel = i % 3;
+        const totalChars = displayIndent * 3;
+        const prefixChars = [];
+        for (let i = 0; i < totalChars; i++) {
+          const level = Math.floor(i / 3);
+          const posInLevel = i % 3;
 
-				const gutter = gutters.find(g => g.position === level);
-				if (gutter) {
-					// Standard tree semantics: `│` only while more siblings continue
-					// below (`show`), space below a `└─`.
-					prefixChars.push(posInLevel === 0 && gutter.show ? "│" : " ");
-				} else if (connector && level === connectorPosition) {
-					if (posInLevel === 0) {
-						prefixChars.push(isLast ? "└" : "├");
-					} else if (posInLevel === 1) {
-						prefixChars.push("─");
-					} else {
-						prefixChars.push(" ");
-					}
-				} else {
-					prefixChars.push(" ");
-				}
-			}
-			return prefixChars.join("");
-		}
+          const gutter = gutters.find(g => g.position === level);
+          if (gutter) {
+            // Standard tree semantics: `│` only while more siblings continue
+            // below (`show`), space below a `└─`.
+            prefixChars.push(posInLevel === 0 && gutter.show ? '│' : ' ');
+          } else if (connector && level === connectorPosition) {
+            if (posInLevel === 0) {
+              prefixChars.push(isLast ? '└' : '├');
+            } else if (posInLevel === 1) {
+              prefixChars.push('─');
+            } else {
+              prefixChars.push(' ');
+            }
+          } else {
+            prefixChars.push(' ');
+          }
+        }
+        return prefixChars.join('');
+      }
 
-		// ============================================================
-		// FILTERING (pure data)
-		// ============================================================
+      // ============================================================
+      // FILTERING (pure data)
+      // ============================================================
 
-		let filterMode = "default";
-		let searchQuery = "";
+      let filterMode = 'default';
+      let searchQuery = '';
 
-		function hasTextContent(content) {
-			if (typeof content === "string") return Boolean(canonicalizeMessage(content));
-			if (Array.isArray(content)) {
-				for (const c of content) {
-					if (c.type === "text" && c.text) {
-						if (canonicalizeMessage(c.text)) return true;
-					}
-				}
-			}
-			return false;
-		}
+      function hasTextContent(content) {
+        if (typeof content === 'string') return Boolean(canonicalizeMessage(content));
+        if (Array.isArray(content)) {
+          for (const c of content) {
+            if (c.type === 'text' && c.text) {
+              if (canonicalizeMessage(c.text)) return true;
+            }
+          }
+        }
+        return false;
+      }
 
-		function extractContent(content) {
-			if (typeof content === "string") return content;
-			if (Array.isArray(content)) {
-				return content
-					.filter(c => c.type === "text" && c.text)
-					.map(c => c.text)
-					.join("");
-			}
-			return "";
-		}
+      function extractContent(content) {
+        if (typeof content === 'string') return content;
+        if (Array.isArray(content)) {
+          return content
+            .filter(c => c.type === 'text' && c.text)
+            .map(c => c.text)
+            .join('');
+        }
+        return '';
+      }
 
-		function getSearchableText(entry, label) {
-			const parts = [];
-			if (label) parts.push(label);
+      function getSearchableText(entry, label) {
+        const parts = [];
+        if (label) parts.push(label);
 
-			switch (entry.type) {
-				case "message": {
-					const msg = entry.message;
-					parts.push(msg.role);
-					if (msg.content) parts.push(extractContent(msg.content));
-					if (msg.role === "bashExecution" && msg.command) parts.push(msg.command);
-					if (msg.role === "jsExecution" && msg.code) parts.push(msg.code);
-					break;
-				}
-				case "custom_message":
-					parts.push(entry.customType);
-					parts.push(typeof entry.content === "string" ? entry.content : extractContent(entry.content));
-					break;
-				case "compaction":
-					parts.push("compaction");
-					break;
-				case "branch_summary":
-					parts.push("branch summary", entry.summary);
-					break;
-				case "model_change":
-					parts.push("model", entry.model);
-					break;
-				case "thinking_level_change":
-					parts.push("thinking", entry.thinkingLevel);
-					break;
-				case "mode_change":
-					parts.push("mode", entry.mode);
-					break;
-			}
+        switch (entry.type) {
+          case 'message': {
+            const msg = entry.message;
+            parts.push(msg.role);
+            if (msg.content) parts.push(extractContent(msg.content));
+            if (msg.role === 'bashExecution' && msg.command) parts.push(msg.command);
+            if (msg.role === 'jsExecution' && msg.code) parts.push(msg.code);
+            break;
+          }
+          case 'custom_message':
+            parts.push(entry.customType);
+            parts.push(typeof entry.content === 'string' ? entry.content : extractContent(entry.content));
+            break;
+          case 'compaction':
+            parts.push('compaction');
+            break;
+          case 'branch_summary':
+            parts.push('branch summary', entry.summary);
+            break;
+          case 'model_change':
+            parts.push('model', entry.model);
+            break;
+          case 'thinking_level_change':
+            parts.push('thinking', entry.thinkingLevel);
+            break;
+          case 'mode_change':
+            parts.push('mode', entry.mode);
+            break;
+        }
 
-			return parts.join(" ").toLowerCase();
-		}
+        return parts.join(' ').toLowerCase();
+      }
 
-		/**
-		 * Filter flat nodes based on current filterMode and searchQuery.
-		 */
-		function filterNodes(flatNodes, currentLeafId) {
-			const searchTokens = searchQuery.toLowerCase().split(/\s+/).filter(Boolean);
+      /**
+       * Filter flat nodes based on current filterMode and searchQuery.
+       */
+      function filterNodes(flatNodes, currentLeafId) {
+        const searchTokens = searchQuery.toLowerCase().split(/\s+/).filter(Boolean);
 
-			return flatNodes.filter(flatNode => {
-				const entry = flatNode.node.entry;
-				const label = flatNode.node.label;
-				const isCurrentLeaf = entry.id === currentLeafId;
+        return flatNodes.filter(flatNode => {
+          const entry = flatNode.node.entry;
+          const label = flatNode.node.label;
+          const isCurrentLeaf = entry.id === currentLeafId;
 
-				// Always show current leaf
-				if (isCurrentLeaf) return true;
+          // Always show current leaf
+          if (isCurrentLeaf) return true;
 
-				// Hide assistant messages with only tool calls (no text) unless error/aborted
-				if (entry.type === "message" && entry.message.role === "assistant") {
-					const msg = entry.message;
-					const hasText = hasTextContent(msg.content);
-					const isErrorOrAborted = msg.stopReason && msg.stopReason !== "stop" && msg.stopReason !== "toolUse";
-					if (!hasText && !isErrorOrAborted) return false;
-				}
+          // Hide assistant messages with only tool calls (no text) unless error/aborted
+          if (entry.type === 'message' && entry.message.role === 'assistant') {
+            const msg = entry.message;
+            const hasText = hasTextContent(msg.content);
+            const isErrorOrAborted = msg.stopReason && msg.stopReason !== 'stop' && msg.stopReason !== 'toolUse';
+            if (!hasText && !isErrorOrAborted) return false;
+          }
 
-				// Apply filter mode
-				const isSettingsEntry = [
-					"label",
-					"custom",
-					"model_change",
-					"thinking_level_change",
-					"mode_change",
-					"ttsr_injection",
-					"session_init",
-					"credential_pin",
-				].includes(entry.type);
-				let passesFilter = true;
+          // Apply filter mode
+          const isSettingsEntry = ['label', 'custom', 'model_change', 'thinking_level_change', 'mode_change', 'ttsr_injection', 'session_init', 'credential_pin'].includes(entry.type);
+          let passesFilter = true;
 
-				switch (filterMode) {
-					case "user-only":
-						passesFilter = entry.type === "message" && entry.message.role === "user";
-						break;
-					case "no-tools":
-						passesFilter = !isSettingsEntry && !(entry.type === "message" && entry.message.role === "toolResult");
-						break;
-					case "labeled-only":
-						passesFilter = label !== undefined;
-						break;
-					case "all":
-						passesFilter = true;
-						break;
-					default: // 'default'
-						passesFilter = !isSettingsEntry;
-						break;
-				}
+          switch (filterMode) {
+            case 'user-only':
+              passesFilter = entry.type === 'message' && entry.message.role === 'user';
+              break;
+            case 'no-tools':
+              passesFilter = !isSettingsEntry && !(entry.type === 'message' && entry.message.role === 'toolResult');
+              break;
+            case 'labeled-only':
+              passesFilter = label !== undefined;
+              break;
+            case 'all':
+              passesFilter = true;
+              break;
+            default: // 'default'
+              passesFilter = !isSettingsEntry;
+              break;
+          }
 
-				if (!passesFilter) return false;
+          if (!passesFilter) return false;
 
-				// Apply search filter
-				if (searchTokens.length > 0) {
-					const nodeText = getSearchableText(entry, label);
-					if (!searchTokens.every(t => nodeText.includes(t))) return false;
-				}
+          // Apply search filter
+          if (searchTokens.length > 0) {
+            const nodeText = getSearchableText(entry, label);
+            if (!searchTokens.every(t => nodeText.includes(t))) return false;
+          }
 
-				return true;
-			});
-		}
+          return true;
+        });
+      }
 
-		// ============================================================
-		// TREE DISPLAY TEXT (pure data -> string)
-		// ============================================================
+      // ============================================================
+      // TREE DISPLAY TEXT (pure data -> string)
+      // ============================================================
 
-		function shortenPath(p) {
-			if (typeof p !== "string") return "";
-			if (p.startsWith("/Users/")) {
-				const parts = p.split("/");
-				if (parts.length > 2) return "~" + p.slice(("/Users/" + parts[2]).length);
-			}
-			if (p.startsWith("/home/")) {
-				const parts = p.split("/");
-				if (parts.length > 2) return "~" + p.slice(("/home/" + parts[2]).length);
-			}
-			return p;
-		}
+      function shortenPath(p) {
+        if (typeof p !== 'string') return '';
+        if (p.startsWith('/Users/')) {
+          const parts = p.split('/');
+          if (parts.length > 2) return '~' + p.slice(('/Users/' + parts[2]).length);
+        }
+        if (p.startsWith('/home/')) {
+          const parts = p.split('/');
+          if (parts.length > 2) return '~' + p.slice(('/home/' + parts[2]).length);
+        }
+        return p;
+      }
 
-		function formatToolCall(name, args) {
-			switch (name) {
-				case "read": {
-					const path = shortenPath(String(args.path || args.file_path || ""));
-					const offset = args.offset;
-					const limit = args.limit;
-					let display = path;
-					if (offset !== undefined || limit !== undefined) {
-						const start = offset ?? 1;
-						const end = limit !== undefined ? start + limit - 1 : "";
-						display += `:${start}${end ? `-${end}` : ""}`;
-					}
-					return `[read: ${display}]`;
-				}
-				case "write":
-					return `[write: ${shortenPath(String(args.path || args.file_path || ""))}]`;
-				case "edit":
-					return `[edit: ${shortenPath(String(args.path || args.file_path || ""))}]`;
-				case "bash": {
-					const rawCmd = String(args.command || "");
-					const cmd = rawCmd
-						.replace(/[\n\t]/g, " ")
-						.trim()
-						.slice(0, 50);
-					return `[bash: ${cmd}${rawCmd.length > 50 ? "..." : ""}]`;
-				}
-				case "search":
-				case "grep":
-					return `[grep: /${args.pattern || ""}/ in ${shortenPath(String((args.paths || [args.path || "."]).join(", ")))}]`;
-				case "find":
-				case "glob":
-					return `[glob: ${shortenPath(String((args.paths || [args.pattern || "."]).join(", ")))}]`;
-				case "ls":
-					return `[ls: ${shortenPath(String(args.path || "."))}]`;
-				default: {
-					const argsStr = JSON.stringify(args).slice(0, 40);
-					return `[${name}: ${argsStr}${JSON.stringify(args).length > 40 ? "..." : ""}]`;
-				}
-			}
-		}
+      function formatToolCall(name, args) {
+        switch (name) {
+          case 'read': {
+            const path = shortenPath(String(args.path || args.file_path || ''));
+            const offset = args.offset;
+            const limit = args.limit;
+            let display = path;
+            if (offset !== undefined || limit !== undefined) {
+              const start = offset ?? 1;
+              const end = limit !== undefined ? start + limit - 1 : '';
+              display += `:${start}${end ? `-${end}` : ''}`;
+            }
+            return `[read: ${display}]`;
+          }
+          case 'write':
+            return `[write: ${shortenPath(String(args.path || args.file_path || ''))}]`;
+          case 'edit':
+            return `[edit: ${shortenPath(String(args.path || args.file_path || ''))}]`;
+          case 'bash': {
+            const rawCmd = String(args.command || '');
+            const cmd = rawCmd.replace(/[\n\t]/g, ' ').trim().slice(0, 50);
+            return `[bash: ${cmd}${rawCmd.length > 50 ? '...' : ''}]`;
+          }
+          case 'search':
+          case 'grep':
+            return `[grep: /${args.pattern || ''}/ in ${shortenPath(String((args.paths || [args.path || '.']).join(', ')))}]`;
+          case 'find':
+          case 'glob':
+            return `[glob: ${shortenPath(String((args.paths || [args.pattern || '.']).join(', ')))}]`;
+          case 'ls':
+            return `[ls: ${shortenPath(String(args.path || '.'))}]`;
+          default: {
+            const argsStr = JSON.stringify(args).slice(0, 40);
+            return `[${name}: ${argsStr}${JSON.stringify(args).length > 40 ? '...' : ''}]`;
+          }
+        }
+      }
 
-		function escapeHtml(text) {
-			const div = document.createElement("div");
-			div.textContent = text;
-			return div.innerHTML;
-		}
+      function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+      }
 
-		function canonicalizeMessage(text) {
-			if (!text) return "";
-			const trimmed = text.trim();
-			for (let i = 0; i < trimmed.length; i++) {
-				const code = trimmed.charCodeAt(i);
-				if (code !== 0x2e && code !== 0x2026 && code !== 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) {
-					return trimmed;
-				}
-			}
-			return "";
-		}
+      function canonicalizeMessage(text) {
+        if (!text) return '';
+        const trimmed = text.trim();
+        for (let i = 0; i < trimmed.length; i++) {
+          const code = trimmed.charCodeAt(i);
+          if (code !== 0x2e && code !== 0x2026 && code !== 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) {
+            return trimmed;
+          }
+        }
+        return '';
+      }
 
-		/**
-		 * Truncate string to maxLen chars, append "..." if truncated.
-		 */
-		function truncate(s, maxLen = 100) {
-			if (s.length <= maxLen) return s;
-			return s.slice(0, maxLen) + "...";
-		}
+      /**
+       * Truncate string to maxLen chars, append "..." if truncated.
+       */
+      function truncate(s, maxLen = 100) {
+        if (s.length <= maxLen) return s;
+        return s.slice(0, maxLen) + '...';
+      }
 
-		function normalizeTreeText(s) {
-			return s.replace(/[\n\t]/g, " ").trim();
-		}
+      function normalizeTreeText(s) {
+        return s.replace(/[\n\t]/g, ' ').trim();
+      }
 
-		/**
-		 * Port of pi-utils `formatDuration`, for the retry wait below.
-		 */
 		function formatDuration(ms) {
 			const SEC = 1000;
 			const MIN = 60 * SEC;
@@ -534,420 +523,390 @@
 			return hours > 0 ? `${days}d${hours}h` : `${days}d`;
 		}
 
-		/**
-		 * Port of pi-utils `withRetryWait`: `text` with the server's retry wait,
-		 * rendered from a failed turn's `errorRetryAfterMs`. Without that field no
-		 * wait is shown, whatever the error text says. A display that cuts the
-		 * error cuts it first, then adds the wait.
-		 */
 		function withRetryWait(text, retryAfterMs) {
 			if (typeof retryAfterMs !== "number" || !Number.isFinite(retryAfterMs) || retryAfterMs <= 0) return text;
 			return `${text} (retry after ${formatDuration(retryAfterMs)})`;
 		}
 
-		/**
-		 * Get display text for tree node (returns HTML string).
-		 */
-		function getTreeNodeDisplayHtml(entry, label) {
-			const labelHtml = label ? `<span class="tree-label">[${escapeHtml(label)}]</span> ` : "";
+      /**
+       * Get display text for tree node (returns HTML string).
+       */
+      function getTreeNodeDisplayHtml(entry, label) {
+        const labelHtml = label ? `<span class="tree-label">[${escapeHtml(label)}]</span> ` : '';
 
-			switch (entry.type) {
-				case "message": {
-					const msg = entry.message;
-					if (msg.role === "user") {
-						const content = truncate(normalizeTreeText(extractContent(msg.content)));
-						return labelHtml + `<span class="tree-role-user">user:</span> ${escapeHtml(content)}`;
-					}
-					if (msg.role === "developer") {
-						const content = truncate(normalizeTreeText(extractContent(msg.content)));
-						return labelHtml + `<span class="tree-role-developer">developer:</span> ${escapeHtml(content)}`;
-					}
-					if (msg.role === "assistant") {
-						const textContent = truncate(normalizeTreeText(extractContent(msg.content)));
-						if (textContent) {
-							return (
-								labelHtml + `<span class="tree-role-assistant">assistant:</span> ${escapeHtml(textContent)}`
-							);
-						}
-						if (msg.stopReason === "aborted") {
-							return (
-								labelHtml +
-								`<span class="tree-role-assistant">assistant:</span> <span class="tree-muted">(aborted)</span>`
-							);
-						}
-						if (msg.errorMessage) {
-							return (
-								labelHtml +
-								`<span class="tree-role-assistant">assistant:</span> <span class="tree-error">${escapeHtml(withRetryWait(truncate(msg.errorMessage), msg.errorRetryAfterMs))}</span>`
-							);
-						}
-						return (
-							labelHtml +
-							`<span class="tree-role-assistant">assistant:</span> <span class="tree-muted">(no text)</span>`
-						);
-					}
-					if (msg.role === "toolResult") {
-						const toolCall = msg.toolCallId ? toolCallMap.get(msg.toolCallId) : null;
-						if (toolCall) {
-							return (
-								labelHtml +
-								`<span class="tree-role-tool">${escapeHtml(formatToolCall(toolCall.name, toolCall.arguments))}</span>`
-							);
-						}
-						return labelHtml + `<span class="tree-role-tool">[${msg.toolName || "tool"}]</span>`;
-					}
-					if (msg.role === "bashExecution") {
-						const cmd = truncate(normalizeTreeText(msg.command || ""));
-						return labelHtml + `<span class="tree-role-tool">[bash]:</span> ${escapeHtml(cmd)}`;
-					}
-					if (msg.role === "jsExecution") {
-						const code = truncate(normalizeTreeText(msg.code || ""));
-						return labelHtml + `<span class="tree-role-tool">[js]:</span> ${escapeHtml(code)}`;
-					}
-					return labelHtml + `<span class="tree-muted">[${msg.role}]</span>`;
-				}
-				case "compaction":
-					return (
-						labelHtml +
-						`<span class="tree-compaction">[compaction: ${Math.round(entry.tokensBefore / 1000)}k tokens]</span>`
-					);
-				case "branch_summary": {
-					const summary = truncate(normalizeTreeText(entry.summary || ""));
-					return labelHtml + `<span class="tree-branch-summary">[branch summary]:</span> ${escapeHtml(summary)}`;
-				}
-				case "custom_message": {
-					const content = typeof entry.content === "string" ? entry.content : extractContent(entry.content);
-					return (
-						labelHtml +
-						`<span class="tree-custom">[${escapeHtml(entry.customType)}]:</span> ${escapeHtml(truncate(normalizeTreeText(content)))}`
-					);
-				}
-				case "model_change":
-					return labelHtml + `<span class="tree-muted">[model: ${escapeHtml(entry.model)}]</span>`;
-				case "thinking_level_change":
-					return labelHtml + `<span class="tree-muted">[thinking: ${entry.thinkingLevel}]</span>`;
-				case "mode_change":
-					return labelHtml + `<span class="tree-muted">[mode: ${escapeHtml(entry.mode)}]</span>`;
-				default:
-					return labelHtml + `<span class="tree-muted">[${entry.type}]</span>`;
-			}
-		}
+        switch (entry.type) {
+          case 'message': {
+            const msg = entry.message;
+            if (msg.role === 'user') {
+              const content = truncate(normalizeTreeText(extractContent(msg.content)));
+              return labelHtml + `<span class="tree-role-user">user:</span> ${escapeHtml(content)}`;
+            }
+            if (msg.role === 'developer') {
+              const content = truncate(normalizeTreeText(extractContent(msg.content)));
+              return labelHtml + `<span class="tree-role-developer">developer:</span> ${escapeHtml(content)}`;
+            }
+            if (msg.role === 'assistant') {
+              const textContent = truncate(normalizeTreeText(extractContent(msg.content)));
+              if (textContent) {
+                return labelHtml + `<span class="tree-role-assistant">assistant:</span> ${escapeHtml(textContent)}`;
+              }
+              if (msg.stopReason === 'aborted') {
+                return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-muted">(aborted)</span>`;
+              }
+              if (msg.errorMessage) {
+                return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-error">${escapeHtml(withRetryWait(truncate(msg.errorDisplayMessage ?? msg.errorMessage), msg.errorRetryAfterMs))}</span>`;
+              }
+              return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-muted">(no text)</span>`;
+            }
+            if (msg.role === 'toolResult') {
+              const toolCall = msg.toolCallId ? toolCallMap.get(msg.toolCallId) : null;
+              if (toolCall) {
+                return labelHtml + `<span class="tree-role-tool">${escapeHtml(formatToolCall(toolCall.name, toolCall.arguments))}</span>`;
+              }
+              return labelHtml + `<span class="tree-role-tool">[${msg.toolName || 'tool'}]</span>`;
+            }
+            if (msg.role === 'bashExecution') {
+              const cmd = truncate(normalizeTreeText(msg.command || ''));
+              return labelHtml + `<span class="tree-role-tool">[bash]:</span> ${escapeHtml(cmd)}`;
+            }
+            if (msg.role === 'jsExecution') {
+              const code = truncate(normalizeTreeText(msg.code || ''));
+              return labelHtml + `<span class="tree-role-tool">[js]:</span> ${escapeHtml(code)}`;
+            }
+            return labelHtml + `<span class="tree-muted">[${msg.role}]</span>`;
+          }
+          case 'compaction':
+            return labelHtml + `<span class="tree-compaction">[compaction: ${Math.round(entry.tokensBefore/1000)}k tokens]</span>`;
+          case 'branch_summary': {
+            const summary = truncate(normalizeTreeText(entry.summary || ''));
+            return labelHtml + `<span class="tree-branch-summary">[branch summary]:</span> ${escapeHtml(summary)}`;
+          }
+          case 'custom_message': {
+            const content = typeof entry.content === 'string' ? entry.content : extractContent(entry.content);
+            return labelHtml + `<span class="tree-custom">[${escapeHtml(entry.customType)}]:</span> ${escapeHtml(truncate(normalizeTreeText(content)))}`;
+          }
+          case 'model_change':
+            return labelHtml + `<span class="tree-muted">[model: ${escapeHtml(entry.model)}]</span>`;
+          case 'thinking_level_change':
+            return labelHtml + `<span class="tree-muted">[thinking: ${entry.thinkingLevel}]</span>`;
+          case 'mode_change':
+            return labelHtml + `<span class="tree-muted">[mode: ${escapeHtml(entry.mode)}]</span>`;
+          default:
+            return labelHtml + `<span class="tree-muted">[${entry.type}]</span>`;
+        }
+      }
 
-		/**
-		 * Split an OMP interleaved assistant into sidebar text/tool rows.
-		 * Pi stores those continuations as separate entries; OMP keeps one
-		 * content array. Do not mutate session entries or parentIds.
-		 */
-		function buildInterleavedAssistantRows(flatNode, toolResultNodes, includeTools) {
-			const entry = flatNode.node.entry;
-			if (entry.type !== "message" || entry.message.role !== "assistant") return null;
+      /**
+       * Split an OMP interleaved assistant into sidebar text/tool rows.
+       * Pi stores those continuations as separate entries; OMP keeps one
+       * content array. Do not mutate session entries or parentIds.
+       */
+      function buildInterleavedAssistantRows(flatNode, toolResultNodes, includeTools) {
+        const entry = flatNode.node.entry;
+        if (entry.type !== 'message' || entry.message.role !== 'assistant') return null;
 
-			const content = entry.message.content;
-			if (!Array.isArray(content)) return null;
+        const content = entry.message.content;
+        if (!Array.isArray(content)) return null;
 
-			let sawToolCall = false;
-			let hasTextAfterToolCall = false;
-			for (const block of content) {
-				if (block.type === "toolCall") {
-					sawToolCall = true;
-				} else if (sawToolCall && block.type === "text" && block.text && canonicalizeMessage(block.text)) {
-					hasTextAfterToolCall = true;
-					break;
-				}
-			}
-			if (!hasTextAfterToolCall) return null;
+        let sawToolCall = false;
+        let hasTextAfterToolCall = false;
+        for (const block of content) {
+          if (block.type === 'toolCall') {
+            sawToolCall = true;
+          } else if (sawToolCall && block.type === 'text' && block.text && canonicalizeMessage(block.text)) {
+            hasTextAfterToolCall = true;
+            break;
+          }
+        }
+        if (!hasTextAfterToolCall) return null;
 
-			const rows = [];
-			let text = "";
-			let textBlockIndex = null;
-			let navigationId = entry.id;
-			let isFirstAssistantRow = true;
-			const flushText = () => {
-				const normalized = canonicalizeMessage(text);
-				text = "";
-				if (!normalized) return;
-				rows.push({
-					flatNode,
-					assistantText: normalized,
-					anchorId: assistantBlockDomId(entry.id, textBlockIndex, sessionContext),
-					navigationId,
-					showLabel: isFirstAssistantRow,
-					timelineId: entry.id,
-				});
-				textBlockIndex = null;
-				isFirstAssistantRow = false;
-			};
+        const rows = [];
+        let text = '';
+        let textBlockIndex = null;
+        let navigationId = entry.id;
+        let isFirstAssistantRow = true;
+        const flushText = () => {
+          const normalized = canonicalizeMessage(text);
+          text = '';
+          if (!normalized) return;
+          rows.push({
+            flatNode,
+            assistantText: normalized,
+            anchorId: assistantBlockDomId(entry.id, textBlockIndex, sessionContext),
+            navigationId,
+            showLabel: isFirstAssistantRow,
+            timelineId: entry.id,
+          });
+          textBlockIndex = null;
+          isFirstAssistantRow = false;
+        };
 
-			for (let blockIndex = 0; blockIndex < content.length; blockIndex++) {
-				const block = content[blockIndex];
-				if (block.type === "text" && block.text) {
-					if (textBlockIndex === null && canonicalizeMessage(block.text)) textBlockIndex = blockIndex;
-					text += block.text;
-				} else if (block.type === "toolCall") {
-					flushText();
-					if (!includeTools) {
-						navigationId = entry.id;
-						continue;
-					}
-					const anchorId = assistantBlockDomId(entry.id, blockIndex, sessionContext);
-					const resultNode = toolResultNodes.get(block.id);
-					if (resultNode) {
-						navigationId = resultNode.node.entry.id;
-						rows.push({
-							flatNode: resultNode,
-							anchorId,
-							navigationId,
-							timelineId: entry.id,
-						});
-					} else {
-						navigationId = entry.id;
-						rows.push({
-							flatNode,
-							assistantToolCall: block,
-							anchorId,
-							navigationId,
-							timelineId: entry.id,
-						});
-					}
-				}
-			}
-			flushText();
+        for (let blockIndex = 0; blockIndex < content.length; blockIndex++) {
+          const block = content[blockIndex];
+          if (block.type === 'text' && block.text) {
+            if (textBlockIndex === null && canonicalizeMessage(block.text)) textBlockIndex = blockIndex;
+            text += block.text;
+          } else if (block.type === 'toolCall') {
+            flushText();
+            if (!includeTools) {
+              navigationId = entry.id;
+              continue;
+            }
+            const anchorId = assistantBlockDomId(entry.id, blockIndex, sessionContext);
+            const resultNode = toolResultNodes.get(block.id);
+            if (resultNode) {
+              navigationId = resultNode.node.entry.id;
+              rows.push({
+                flatNode: resultNode,
+                anchorId,
+                navigationId,
+                timelineId: entry.id,
+              });
+            } else {
+              navigationId = entry.id;
+              rows.push({
+                flatNode,
+                assistantToolCall: block,
+                anchorId,
+                navigationId,
+                timelineId: entry.id,
+              });
+            }
+          }
+        }
+        flushText();
 
-			return rows;
-		}
+        return rows;
+      }
 
-		function projectSidebarRows(filteredNodes, includeTools = true) {
-			const toolResultNodes = new Map();
-			if (includeTools) {
-				for (const flatNode of filteredNodes) {
-					const entry = flatNode.node.entry;
-					if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolCallId) {
-						toolResultNodes.set(entry.message.toolCallId, flatNode);
-					}
-				}
-			}
+      function projectSidebarRows(filteredNodes, includeTools = true) {
+        const toolResultNodes = new Map();
+        if (includeTools) {
+          for (const flatNode of filteredNodes) {
+            const entry = flatNode.node.entry;
+            if (entry.type === 'message' && entry.message.role === 'toolResult' && entry.message.toolCallId) {
+              toolResultNodes.set(entry.message.toolCallId, flatNode);
+            }
+          }
+        }
 
-			const projectedByAssistantId = new Map();
-			const claimedToolResultIds = new Set();
-			for (const flatNode of filteredNodes) {
-				const rows = buildInterleavedAssistantRows(flatNode, toolResultNodes, includeTools);
-				if (!rows) continue;
-				projectedByAssistantId.set(flatNode.node.entry.id, rows);
-				for (const row of rows) {
-					const entry = row.flatNode.node.entry;
-					if (entry.type === "message" && entry.message.role === "toolResult") {
-						claimedToolResultIds.add(entry.id);
-					}
-				}
-			}
+        const projectedByAssistantId = new Map();
+        const claimedToolResultIds = new Set();
+        for (const flatNode of filteredNodes) {
+          const rows = buildInterleavedAssistantRows(flatNode, toolResultNodes, includeTools);
+          if (!rows) continue;
+          projectedByAssistantId.set(flatNode.node.entry.id, rows);
+          for (const row of rows) {
+            const entry = row.flatNode.node.entry;
+            if (entry.type === 'message' && entry.message.role === 'toolResult') {
+              claimedToolResultIds.add(entry.id);
+            }
+          }
+        }
 
-			const rows = [];
-			for (const flatNode of filteredNodes) {
-				const entry = flatNode.node.entry;
-				if (!includeTools && entry.type === "message" && entry.message.role === "toolResult") continue;
-				const projected = projectedByAssistantId.get(entry.id);
-				if (projected) {
-					rows.push(...projected);
-				} else if (!claimedToolResultIds.has(entry.id)) {
-					let anchorId;
-					if (entry.type === "message" && entry.message.role === "toolResult") {
-						const toolCall = toolCallMap.get(entry.message.toolCallId);
-						if (toolCall) anchorId = assistantBlockDomId(toolCall.entryId, toolCall.blockIndex, sessionContext);
-					}
-					rows.push({ flatNode, anchorId, navigationId: entry.id });
-				}
-			}
-			return rows;
-		}
+        const rows = [];
+        for (const flatNode of filteredNodes) {
+          const entry = flatNode.node.entry;
+          if (!includeTools && entry.type === 'message' && entry.message.role === 'toolResult') continue;
+          const projected = projectedByAssistantId.get(entry.id);
+          if (projected) {
+            rows.push(...projected);
+          } else if (!claimedToolResultIds.has(entry.id)) {
+            let anchorId;
+            if (entry.type === 'message' && entry.message.role === 'toolResult') {
+              const toolCall = toolCallMap.get(entry.message.toolCallId);
+              if (toolCall) anchorId = assistantBlockDomId(toolCall.entryId, toolCall.blockIndex, sessionContext);
+            }
+            rows.push({ flatNode, anchorId, navigationId: entry.id });
+          }
+        }
+        return rows;
+      }
 
-		// ============================================================
-		// TREE RENDERING (DOM manipulation)
-		// ============================================================
+      // ============================================================
+      // TREE RENDERING (DOM manipulation)
+      // ============================================================
 
-		let currentLeafId = leafId;
-		let currentTargetId = urlTargetId || leafId;
-		let currentTargetAnchorId = null;
-		let treeRendered = false;
+      let currentLeafId = leafId;
+      let currentTargetId = urlTargetId || leafId;
+      let currentTargetAnchorId = null;
+      let treeRendered = false;
 
-		function renderTree() {
-			const tree = buildTree();
-			const activePathIds = buildActivePathIds(currentLeafId);
-			const flatNodes = flattenTree(tree, activePathIds);
-			const filtered = filterNodes(flatNodes, currentLeafId);
-			const allSidebarRows = projectSidebarRows(flatNodes);
-			const sidebarRows = projectSidebarRows(filtered, filterMode !== "no-tools");
-			const container = document.getElementById("tree-container");
-			const activeRowIndex = currentTargetAnchorId
-				? sidebarRows.findIndex(row => row.anchorId === currentTargetAnchorId)
-				: -1;
-			const activeTimelineId = activeRowIndex >= 0 ? sidebarRows[activeRowIndex].timelineId : undefined;
-			// Block-anchor selection uses the projected-row prefix, not parentId
-			// ancestry — tool-result chains can be reversed relative to content.
-			const isSidebarRowOnPath = (row, rowIndex) => {
-				if (activeRowIndex >= 0) {
-					if (rowIndex > activeRowIndex) return false;
-					if (activeTimelineId && row.timelineId === activeTimelineId) return true;
-				}
-				const entry = row.flatNode.node.entry;
-				return activePathIds.has(row.navigationId || entry.id);
-			};
+      function renderTree() {
+        const tree = buildTree();
+        const activePathIds = buildActivePathIds(currentLeafId);
+        const flatNodes = flattenTree(tree, activePathIds);
+        const filtered = filterNodes(flatNodes, currentLeafId);
+        const allSidebarRows = projectSidebarRows(flatNodes);
+        const sidebarRows = projectSidebarRows(filtered, filterMode !== 'no-tools');
+        const container = document.getElementById('tree-container');
+        const activeRowIndex = currentTargetAnchorId
+          ? sidebarRows.findIndex(row => row.anchorId === currentTargetAnchorId)
+          : -1;
+        const activeTimelineId = activeRowIndex >= 0 ? sidebarRows[activeRowIndex].timelineId : undefined;
+        // Block-anchor selection uses the projected-row prefix, not parentId
+        // ancestry — tool-result chains can be reversed relative to content.
+        const isSidebarRowOnPath = (row, rowIndex) => {
+          if (activeRowIndex >= 0) {
+            if (rowIndex > activeRowIndex) return false;
+            if (activeTimelineId && row.timelineId === activeTimelineId) return true;
+          }
+          const entry = row.flatNode.node.entry;
+          return activePathIds.has(row.navigationId || entry.id);
+        };
 
-			// Full render only on first call or when filter/search changes
-			if (!treeRendered) {
-				container.innerHTML = "";
+        // Full render only on first call or when filter/search changes
+        if (!treeRendered) {
+          container.innerHTML = '';
 
-				for (let rowIndex = 0; rowIndex < sidebarRows.length; rowIndex++) {
-					const row = sidebarRows[rowIndex];
-					const flatNode = row.flatNode;
-					const entry = flatNode.node.entry;
-					const pathId = row.navigationId || entry.id;
-					const isOnPath = isSidebarRowOnPath(row, rowIndex);
-					const isTarget = currentTargetAnchorId
-						? row.anchorId === currentTargetAnchorId
-						: entry.id === currentTargetId;
+          for (let rowIndex = 0; rowIndex < sidebarRows.length; rowIndex++) {
+            const row = sidebarRows[rowIndex];
+            const flatNode = row.flatNode;
+            const entry = flatNode.node.entry;
+            const pathId = row.navigationId || entry.id;
+            const isOnPath = isSidebarRowOnPath(row, rowIndex);
+            const isTarget = currentTargetAnchorId
+              ? row.anchorId === currentTargetAnchorId
+              : entry.id === currentTargetId;
 
-					const div = document.createElement("div");
-					div.className = "tree-node";
-					if (isOnPath) div.classList.add("in-path");
-					if (isTarget) div.classList.add("active");
-					div.dataset.id = entry.id;
-					div.dataset.pathId = pathId;
-					if (row.anchorId) div.dataset.anchorId = row.anchorId;
+            const div = document.createElement('div');
+            div.className = 'tree-node';
+            if (isOnPath) div.classList.add('in-path');
+            if (isTarget) div.classList.add('active');
+            div.dataset.id = entry.id;
+            div.dataset.pathId = pathId;
+            if (row.anchorId) div.dataset.anchorId = row.anchorId;
 
-					const prefix = buildTreePrefix(flatNode);
-					const prefixSpan = document.createElement("span");
-					prefixSpan.className = "tree-prefix";
-					prefixSpan.textContent = prefix;
+            const prefix = buildTreePrefix(flatNode);
+            const prefixSpan = document.createElement('span');
+            prefixSpan.className = 'tree-prefix';
+            prefixSpan.textContent = prefix;
 
-					const marker = document.createElement("span");
-					marker.className = "tree-marker";
-					marker.textContent = isOnPath ? "•" : " ";
+            const marker = document.createElement('span');
+            marker.className = 'tree-marker';
+            marker.textContent = isOnPath ? '•' : ' ';
 
-					const content = document.createElement("span");
-					content.className = "tree-content";
-					if (row.assistantText !== undefined) {
-						const label = row.showLabel ? flatNode.node.label : undefined;
-						const labelHtml = label ? `<span class="tree-label">[${escapeHtml(label)}]</span> ` : "";
-						content.innerHTML =
-							labelHtml +
-							`<span class="tree-role-assistant">assistant:</span> ${escapeHtml(truncate(normalizeTreeText(row.assistantText)))}`;
-					} else if (row.assistantToolCall) {
-						const call = row.assistantToolCall;
-						content.innerHTML = `<span class="tree-role-tool">${escapeHtml(formatToolCall(call.name, call.arguments || {}))}</span>`;
-					} else {
-						content.innerHTML = getTreeNodeDisplayHtml(entry, flatNode.node.label);
-					}
+            const content = document.createElement('span');
+            content.className = 'tree-content';
+            if (row.assistantText !== undefined) {
+              const label = row.showLabel ? flatNode.node.label : undefined;
+              const labelHtml = label ? `<span class="tree-label">[${escapeHtml(label)}]</span> ` : '';
+              content.innerHTML = labelHtml + `<span class="tree-role-assistant">assistant:</span> ${escapeHtml(truncate(normalizeTreeText(row.assistantText)))}`;
+            } else if (row.assistantToolCall) {
+              const call = row.assistantToolCall;
+              content.innerHTML = `<span class="tree-role-tool">${escapeHtml(formatToolCall(call.name, call.arguments || {}))}</span>`;
+            } else {
+              content.innerHTML = getTreeNodeDisplayHtml(entry, flatNode.node.label);
+            }
 
-					div.appendChild(prefixSpan);
-					div.appendChild(marker);
-					div.appendChild(content);
-					div.addEventListener("click", () =>
-						navigateTo(row.navigationId || entry.id, "target", null, row.anchorId),
-					);
+            div.appendChild(prefixSpan);
+            div.appendChild(marker);
+            div.appendChild(content);
+            div.addEventListener('click', () => navigateTo(row.navigationId || entry.id, 'target', null, row.anchorId));
 
-					container.appendChild(div);
-				}
+            container.appendChild(div);
+          }
 
-				treeRendered = true;
-			} else {
-				// Just update markers and classes
-				const nodes = container.querySelectorAll(".tree-node");
-				for (let rowIndex = 0; rowIndex < nodes.length; rowIndex++) {
-					const node = nodes[rowIndex];
-					const row = sidebarRows[rowIndex];
-					if (!row) continue;
-					const id = node.dataset.id;
-					const isOnPath = isSidebarRowOnPath(row, rowIndex);
-					const isTarget = currentTargetAnchorId
-						? node.dataset.anchorId === currentTargetAnchorId
-						: id === currentTargetId;
+          treeRendered = true;
+        } else {
+          // Just update markers and classes
+          const nodes = container.querySelectorAll('.tree-node');
+          for (let rowIndex = 0; rowIndex < nodes.length; rowIndex++) {
+            const node = nodes[rowIndex];
+            const row = sidebarRows[rowIndex];
+            if (!row) continue;
+            const id = node.dataset.id;
+            const isOnPath = isSidebarRowOnPath(row, rowIndex);
+            const isTarget = currentTargetAnchorId
+              ? node.dataset.anchorId === currentTargetAnchorId
+              : id === currentTargetId;
 
-					node.classList.toggle("in-path", isOnPath);
-					node.classList.toggle("active", isTarget);
+            node.classList.toggle('in-path', isOnPath);
+            node.classList.toggle('active', isTarget);
 
-					const marker = node.querySelector(".tree-marker");
-					if (marker) {
-						marker.textContent = isOnPath ? "•" : " ";
-					}
-				}
-			}
+            const marker = node.querySelector('.tree-marker');
+            if (marker) {
+              marker.textContent = isOnPath ? '•' : ' ';
+            }
+          }
+        }
 
-			document.getElementById("tree-status").textContent = `${sidebarRows.length} / ${allSidebarRows.length} rows`;
+        document.getElementById('tree-status').textContent = `${sidebarRows.length} / ${allSidebarRows.length} rows`;
 
-			// Scroll active node into view after layout
-			setTimeout(() => {
-				const activeNode = container.querySelector(".tree-node.active");
-				if (activeNode) {
-					activeNode.scrollIntoView({ block: "nearest" });
-				}
-			}, 0);
-		}
+        // Scroll active node into view after layout
+        setTimeout(() => {
+          const activeNode = container.querySelector('.tree-node.active');
+          if (activeNode) {
+            activeNode.scrollIntoView({ block: 'nearest' });
+          }
+        }, 0);
+      }
 
-		function forceTreeRerender() {
-			treeRendered = false;
-			renderTree();
-		}
+      function forceTreeRerender() {
+        treeRendered = false;
+        renderTree();
+      }
 
-		// ============================================================
-		// MESSAGE RENDERING
-		// ============================================================
+      // ============================================================
+      // MESSAGE RENDERING
+      // ============================================================
 
-		function formatTokens(count) {
-			if (count < 1000) return count.toString();
-			if (count < 10000) return (count / 1000).toFixed(1) + "k";
-			if (count < 1000000) return Math.round(count / 1000) + "k";
-			return (count / 1000000).toFixed(1) + "M";
-		}
+      function formatTokens(count) {
+        if (count < 1000) return count.toString();
+        if (count < 10000) return (count / 1000).toFixed(1) + 'k';
+        if (count < 1000000) return Math.round(count / 1000) + 'k';
+        return (count / 1000000).toFixed(1) + 'M';
+      }
 
-		function formatTimestamp(ts) {
-			if (!ts) return "";
-			const date = new Date(ts);
-			return date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-		}
+      function formatTimestamp(ts) {
+        if (!ts) return '';
+        const date = new Date(ts);
+        return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      }
 
-		function replaceTabs(text) {
-			return text.replace(/\t/g, "   ");
-		}
+      function replaceTabs(text) {
+        return text.replace(/\t/g, '   ');
+      }
 
-		function assistantBlockDomId(entryId, blockIndex, sctx) {
-			return `${sctx.idPrefix}${entryId}-block-${blockIndex}`;
-		}
+      function assistantBlockDomId(entryId, blockIndex, sctx) {
+        return `${sctx.idPrefix}${entryId}-block-${blockIndex}`;
+      }
 
-		function findToolResult(toolCallId, entryList) {
-			for (const entry of entryList) {
-				if (entry.type === "message" && entry.message.role === "toolResult") {
-					if (entry.message.toolCallId === toolCallId) {
-						return entry.message;
-					}
-				}
-			}
-			return null;
-		}
+      function findToolResult(toolCallId, entryList) {
+        for (const entry of entryList) {
+          if (entry.type === 'message' && entry.message.role === 'toolResult') {
+            if (entry.message.toolCallId === toolCallId) {
+              return entry.message;
+            }
+          }
+        }
+        return null;
+      }
 
-		function formatExpandableOutput(text, maxLines, lang) {
-			text = replaceTabs(text);
-			const lines = text.split("\n");
-			const displayLines = lines.slice(0, maxLines);
-			const remaining = lines.length - maxLines;
+      function formatExpandableOutput(text, maxLines, lang) {
+        text = replaceTabs(text);
+        const lines = text.split('\n');
+        const displayLines = lines.slice(0, maxLines);
+        const remaining = lines.length - maxLines;
 
-			if (lang) {
-				let highlighted;
-				try {
-					highlighted = hljs.highlight(text, { language: lang }).value;
-				} catch {
-					highlighted = escapeHtml(text);
-				}
+        if (lang) {
+          let highlighted;
+          try {
+            highlighted = hljs.highlight(text, { language: lang }).value;
+          } catch {
+            highlighted = escapeHtml(text);
+          }
 
-				if (remaining > 0) {
-					const previewCode = displayLines.join("\n");
-					let previewHighlighted;
-					try {
-						previewHighlighted = hljs.highlight(previewCode, { language: lang }).value;
-					} catch {
-						previewHighlighted = escapeHtml(previewCode);
-					}
+          if (remaining > 0) {
+            const previewCode = displayLines.join('\n');
+            let previewHighlighted;
+            try {
+              previewHighlighted = hljs.highlight(previewCode, { language: lang }).value;
+            } catch {
+              previewHighlighted = escapeHtml(previewCode);
+            }
 
-					return `<div class="tool-output expandable" onclick="this.classList.toggle('expanded')">
+            return `<div class="tool-output expandable" onclick="this.classList.toggle('expanded')">
               <div class="output-preview"><pre><code class="hljs">${previewHighlighted}</code></pre>
               <div class="expand-hint">... (${remaining} more lines)</div></div>
               <div class="output-full"><pre><code class="hljs">${highlighted}</code></pre></div></div>`;
@@ -1294,66 +1253,67 @@
                   <div class="thinking-text">${escapeHtml(thinking)}</div>
                   <div class="thinking-collapsed">Thinking ...</div>
                 </div>`;
-						} else if (block.type === "image") {
-							html += `<div class="message-images" id="${blockId}"><img src="data:${block.mimeType};base64,${block.data}" class="message-image" /></div>`;
-						} else if (block.type === "toolCall") {
-							html += renderToolCall(block, sctx, blockId);
-						}
-					}
+              } else if (block.type === 'image') {
+                html += `<div class="message-images" id="${blockId}"><img src="data:${block.mimeType};base64,${block.data}" class="message-image" /></div>`;
+              } else if (block.type === 'toolCall') {
+                html += renderToolCall(block, sctx, blockId);
+              }
+            }
 
-					if (msg.stopReason === "aborted") {
-						html += '<div class="error-text">Aborted</div>';
-					} else if (msg.stopReason === "error") {
-						html += `<div class="error-text">Error: ${escapeHtml(withRetryWait(msg.errorMessage || "Unknown error", msg.errorRetryAfterMs))}</div>`;
-					}
+            if (msg.stopReason === 'aborted') {
+              html += '<div class="error-text">Aborted</div>';
+            } else if (msg.stopReason === 'error') {
+              html += `<div class="error-text">Error: ${escapeHtml(withRetryWait((msg.errorDisplayMessage ?? msg.errorMessage) || 'Unknown error', msg.errorRetryAfterMs))}</div>`;
+            }
 
-					html += "</div>";
-					return html;
-				}
+            html += '</div>';
+            return html;
+          }
 
-				if (msg.role === "bashExecution") {
-					const isError = msg.cancelled || (msg.exitCode !== 0 && msg.exitCode !== null);
-					let html = `<div class="tool-execution ${isError ? "error" : "success"}" id="${entryId}">${tsHtml}`;
-					html += `<div class="tool-command">$ ${escapeHtml(msg.command)}</div>`;
-					if (msg.output) html += formatExpandableOutput(msg.output, 10);
-					if (msg.cancelled) {
-						html += '<div style="color: var(--warning)">(cancelled)</div>';
-					} else if (msg.exitCode !== 0 && msg.exitCode !== null) {
-						html += `<div style="color: var(--error)">(exit ${msg.exitCode})</div>`;
-					}
-					html += "</div>";
-					return html;
-				}
+          if (msg.role === 'bashExecution') {
+            const isError = msg.cancelled || (msg.exitCode !== 0 && msg.exitCode !== null);
+            let html = `<div class="tool-execution ${isError ? 'error' : 'success'}" id="${entryId}">${tsHtml}`;
+            html += `<div class="tool-command">$ ${escapeHtml(msg.command)}</div>`;
+            if (msg.output) html += formatExpandableOutput(msg.output, 10);
+            if (msg.cancelled) {
+              html += '<div style="color: var(--warning)">(cancelled)</div>';
+            } else if (msg.exitCode !== 0 && msg.exitCode !== null) {
+              html += `<div style="color: var(--error)">(exit ${msg.exitCode})</div>`;
+            }
+            html += '</div>';
+            return html;
+          }
 
-				if (msg.role === "jsExecution") {
-					const isError = msg.cancelled || (msg.exitCode !== 0 && msg.exitCode !== null);
-					let html = `<div class="tool-execution ${isError ? "error" : "success"}" id="${entryId}">${tsHtml}`;
-					html += `<div class="tool-command">$ ${escapeHtml(msg.code)}</div>`;
-					if (msg.output) html += formatExpandableOutput(msg.output, 10);
-					if (msg.cancelled) {
-						html += '<div style="color: var(--warning)">(cancelled)</div>';
-					} else if (msg.exitCode !== 0 && msg.exitCode !== null) {
-						html += `<div style="color: var(--error)">(exit ${msg.exitCode})</div>`;
-					}
-					html += "</div>";
-					return html;
-				}
+          if (msg.role === 'jsExecution') {
+            const isError = msg.cancelled || (msg.exitCode !== 0 && msg.exitCode !== null);
+            let html = `<div class="tool-execution ${isError ? 'error' : 'success'}" id="${entryId}">${tsHtml}`;
+            html += `<div class="tool-command">$ ${escapeHtml(msg.code)}</div>`;
+            if (msg.output) html += formatExpandableOutput(msg.output, 10);
+            if (msg.cancelled) {
+              html += '<div style="color: var(--warning)">(cancelled)</div>';
+            } else if (msg.exitCode !== 0 && msg.exitCode !== null) {
+              html += `<div style="color: var(--error)">(exit ${msg.exitCode})</div>`;
+            }
+            html += '</div>';
+            return html;
+          }
 
-				if (msg.role === "toolResult") return "";
-			}
+          if (msg.role === 'toolResult') return '';
+        }
 
-			if (entry.type === "model_change") {
-				const html = `<div class="model-change" id="${entryId}">${tsHtml}Switched to model: <span class="model-name">${escapeHtml(entry.model)}</span></div>`;
-				return html;
-			}
+        if (entry.type === 'model_change') {
+          const html = `<div class="model-change" id="${entryId}">${tsHtml}Switched to model: <span class="model-name">${escapeHtml(entry.model)}</span></div>`;
+          return html;
+        }
 
-			if (entry.type === "thinking_level_change") {
-				const html = `<div class="thinking-change" id="${entryId}">${tsHtml}Thinking level: <span class="thinking-level">${escapeHtml(entry.thinkingLevel)}</span></div>`;
-				return html;
-			}
+        if (entry.type === 'thinking_level_change') {
+          const html = `<div class="thinking-change" id="${entryId}">${tsHtml}Thinking level: <span class="thinking-level">${escapeHtml(entry.thinkingLevel)}</span></div>`;
+          return html;
+        }
 
-			if (entry.type === "compaction") {
-				return `<div class="compaction" id="${entryId}" onclick="this.classList.toggle('expanded')">
+
+        if (entry.type === 'compaction') {
+          return `<div class="compaction" id="${entryId}" onclick="this.classList.toggle('expanded')">
             <div class="compaction-label">[compaction]</div>
             <div class="compaction-collapsed">Compacted from ${entry.tokensBefore.toLocaleString()} tokens</div>
             <div class="compaction-content"><strong>Compacted from ${entry.tokensBefore.toLocaleString()} tokens</strong>\n\n${escapeHtml(entry.summary)}</div>

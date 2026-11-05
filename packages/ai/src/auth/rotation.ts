@@ -1,7 +1,7 @@
 import { scheduler } from "node:timers/promises";
 import * as AIError from "../error";
 import { isUsageLimitOutcome } from "../error/rate-limit";
-import { providerFailureWaitMs } from "../utils/retry-after";
+import { getHeadersFromError, getRetryAfterMsFromHeaders, providerFailureWaitMs } from "../utils/retry-after";
 import type { CredentialRankingContext, CredentialRankingStrategy } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
 import { raceSignal } from "./abort";
@@ -415,14 +415,18 @@ export class RateLimits implements LimitsApi {
 		const error = options?.error;
 		const status = AIError.status(error);
 		const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+		// A failed turn's text carries only the provider's words: header timing
+		// arrives as `retryAfterMs` or on the thrown error's headers.
+		const headerRetryAfterMs = options?.retryAfterMs ?? getRetryAfterMsFromHeaders(getHeadersFromError(error));
 		const exactCursorModelPolicy = AIError.isCursorPlanAccountPolicyError(error, provider);
 		const accountPolicy = exactCursorModelPolicy || AIError.isAccountPolicyError(error);
-		if (!accountPolicy && (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message))) {
+		if (!accountPolicy && (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message, headerRetryAfterMs))) {
 			// Thread the provider-specified reset window (e.g. Devin "Your limit
-			// will reset in 13 minutes") into the block duration so the credential
-			// is not reselected and hammered while the cap remains active. The
-			// header's wait comes from the response object, never from the text.
-			const retryAfterMs = providerFailureWaitMs(provider, error, { message, retryAfterMs: options?.retryAfterMs });
+			// will reset in 13 minutes", or the response's retry headers) into the
+			// block duration so the credential is not reselected and hammered
+			// while the cap remains active. Read the header wait from the response,
+			// never from text, and combine it with relative waits the text states.
+			const retryAfterMs = providerFailureWaitMs(provider, error, { message, retryAfterMs: headerRetryAfterMs });
 			const mark = await this.markReached(provider, sessionId, {
 				retryAfterMs,
 				providerTimed: retryAfterMs !== undefined,

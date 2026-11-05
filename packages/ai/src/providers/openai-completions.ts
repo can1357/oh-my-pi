@@ -700,6 +700,11 @@ export interface OpenAICompletionsOptions extends StreamOptions {
 	openrouterVariant?: string;
 	/** Opt-in GPT-5.6+ prompt-cache policy. Unsupported explicit mode fails locally. */
 	promptCache?: OpenAIPromptCacheOptions;
+	/**
+	 * Send no `X-Stainless-Timeout` for the first-event budget. For adapter
+	 * wrappers whose native client strips the SDK telemetry headers.
+	 */
+	omitStainlessTimeoutHeader?: boolean;
 }
 
 type AppliedToolStrictMode = "mixed" | "all_strict" | "none";
@@ -989,7 +994,7 @@ const streamOpenAICompletionsOnce = (
 				}
 				try {
 					const headersWithTimeout = { ...headers };
-					if (requestTimeoutMs !== undefined) {
+					if (requestTimeoutMs !== undefined && !options?.omitStainlessTimeoutHeader) {
 						headersWithTimeout["X-Stainless-Timeout"] = Math.floor(requestTimeoutMs / 1000).toString();
 					}
 					if (correctionOf !== undefined && !admitsReplay(replayBudget, 0)) throw correctionOf;
@@ -1000,7 +1005,7 @@ const streamOpenAICompletionsOnce = (
 						signal: requestSignal,
 						maxAttempts: options?.maxHttpAttempts,
 						retryGate: replayBudget?.admits,
-						maxRetryDelayMs: options?.maxRetryDelayMs,
+						retryPolicy: options,
 						fetch: wrapFetchForCopilotFallback(
 							wrapFetchForRequestCompression(
 								gateFetch(replayBudget, options?.fetch ?? fetch),
@@ -1057,10 +1062,7 @@ const streamOpenAICompletionsOnce = (
 					if (attemptedReasoningEffortFallbacks.has(retryMarker)) throw error;
 					// A correction re-sends a rejected request: a replay. Under a budget it
 					// waits the server's named wait when that fits and is refused when not.
-					if (
-						replayBudget &&
-						!(await replayBudget.replayAfter(error, 0, options?.signal, options?.providerRetryWait))
-					) {
+					if (replayBudget && !(await replayBudget.replayAfter(error, 0, options?.signal, options))) {
 						throw error;
 					}
 					attemptedReasoningEffortFallbacks.add(retryMarker);
@@ -1081,10 +1083,7 @@ const streamOpenAICompletionsOnce = (
 					!disableStrictTools &&
 					isCompiledGrammarTooLargeStrictError(error, capturedErrorResponse)
 				) {
-					if (
-						replayBudget &&
-						!(await replayBudget.replayAfter(error, 0, options?.signal, options?.providerRetryWait))
-					) {
+					if (replayBudget && !(await replayBudget.replayAfter(error, 0, options?.signal, options))) {
 						throw error;
 					}
 					disableStrictToolsForScope(providerSessionState, strictToolsScope);
@@ -1100,10 +1099,7 @@ const streamOpenAICompletionsOnce = (
 					) {
 						throw error;
 					}
-					if (
-						replayBudget &&
-						!(await replayBudget.replayAfter(error, 0, options?.signal, options?.providerRetryWait))
-					) {
+					if (replayBudget && !(await replayBudget.replayAfter(error, 0, options?.signal, options))) {
 						throw error;
 					}
 					// Remember the rejection for the rest of the session so every
@@ -1906,7 +1902,7 @@ const streamOpenAICompletionsOnce = (
 				});
 			}
 
-			output.errorMessage = undefined;
+			AIError.clearErrorText(output);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "done", reason: output.stopReason, message: output });
@@ -1928,18 +1924,15 @@ const streamOpenAICompletionsOnce = (
 				capturedErrorResponse,
 				streamResponseHeaders: responseHeaders,
 			});
-			output.stopReason = result.stopReason;
-			output.errorStatus = result.status;
-			output.errorId = result.id;
-			output.errorMessage = result.message;
-			output.errorRetryAfterMs = result.retryAfterMs;
+			AIError.applyFinalizeResult(output, result);
 			replayBudget?.stamp(output);
+			output.errorRetryWaitRefusal = result.retryWaitRefusal;
 			// Some providers via OpenRouter include extra details here.
 			const rawMetadata = readOpenRouterRawMetadata(capturedErrorResponse);
-			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
+			if (rawMetadata) AIError.editErrorText(output, text => `${text}\n${rawMetadata}`);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
-			stream.push({ type: "error", reason: output.stopReason, error: output });
+			stream.push({ type: "error", reason: result.stopReason, error: output });
 			stream.end();
 		}
 	})();

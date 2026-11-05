@@ -17,7 +17,18 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgProvidersMuseCodeStoreResponses } from "@oh-my-pi/pi-coding-agent/session/settings";
-import { createSettingsAwareStreamFn } from "@oh-my-pi/pi-coding-agent/session/settings-stream-fn";
+import {
+	createSettingsAwareStreamFn,
+	PROVIDER_RETRY_WAIT_CEILING_MS,
+	resolveWebsocketPreference,
+} from "@oh-my-pi/pi-coding-agent/session/settings-stream-fn";
+
+/** Settings whose global (persisted) layer holds `storeResponses`; a runtime override would outrank the env var. */
+function persistedStore(value: boolean | undefined): Settings {
+	const settings = Settings.isolated();
+	if (value !== undefined) cfgProvidersMuseCodeStoreResponses.set(settings, value);
+	return settings;
+}
 
 function captureBase(): { fn: StreamFn; calls: Array<{ options?: SimpleStreamOptions }> } {
 	const calls: Array<{ options?: SimpleStreamOptions }> = [];
@@ -86,6 +97,29 @@ function replayedReasoningContext(producer: Model): Context {
 }
 
 describe("createSettingsAwareStreamFn", () => {
+	it("keeps the WebSocket setting exclusive to Codex", () => {
+		for (const setting of ["auto", "on", "off"] as const) {
+			const settings = Settings.isolated({ "providers.openaiWebsockets": setting });
+			expect(resolveWebsocketPreference(settings, stubCodexModel)).toBe(
+				setting === "on" ? true : setting === "off" ? false : undefined,
+			);
+			for (const api of ["openrouter", "anthropic-messages"] as const) {
+				expect(resolveWebsocketPreference(settings, { api } as Model)).toBeUndefined();
+			}
+			expect(resolveWebsocketPreference(settings, stubResponsesModel)).toBe(false);
+			expect(resolveWebsocketPreference(settings, undefined)).toBeUndefined();
+		}
+	});
+
+	it("treats standard Responses settings, model and request false as independent vetoes", () => {
+		const enabled = Settings.isolated({ "providers.openaiResponsesWebsockets": true });
+		const disabled = Settings.isolated({ "providers.openaiResponsesWebsockets": false });
+		expect(resolveWebsocketPreference(disabled, { ...stubResponsesModel, preferWebsockets: true }, true)).toBe(false);
+		expect(resolveWebsocketPreference(enabled, { ...stubResponsesModel, preferWebsockets: false }, true)).toBe(false);
+		expect(resolveWebsocketPreference(enabled, { ...stubResponsesModel, preferWebsockets: true }, false)).toBe(false);
+		expect(resolveWebsocketPreference(enabled, stubResponsesModel)).toBe(true);
+	});
+
 	it("applies provider settings to the forwarded options when caller omits them", () => {
 		const settings = Settings.isolated({
 			"providers.openrouterVariant": "floor",
@@ -172,6 +206,100 @@ describe("createSettingsAwareStreamFn", () => {
 
 		expect(calls[0]?.options?.maxRetryDelayMs).toBe(300_000);
 		expect(calls[1]?.options?.maxRetryDelayMs).toBe(5_000);
+	});
+
+	describe("the provider-retry wait ceiling (PROVIDER_RETRY_WAIT_CEILING_MS)", () => {
+		const museApiKey = JSON.stringify({ oauthAccessToken: "meta-access", apiKey: "LLM|key" });
+		const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 0 }] };
+
+		function rateLimited(retryAfterSeconds: string): Response {
+			return new Response(JSON.stringify({ error: { type: "rate_limit_error", message: "Too many requests" } }), {
+				status: 429,
+				headers: { "content-type": "application/json", "retry-after": retryAfterSeconds },
+			});
+		}
+
+		/** A Responses stream with one text item, so the turn completes on that request. */
+		function completed(): Response {
+			const message = {
+				id: "msg_1",
+				type: "message",
+				status: "completed",
+				role: "assistant",
+				content: [{ type: "output_text", text: "ok", annotations: [] }],
+			};
+			const frames = [
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: { ...message, status: "in_progress", content: [] },
+				},
+				{ type: "response.output_text.delta", output_index: 0, item_id: "msg_1", content_index: 0, delta: "ok" },
+				{ type: "response.output_item.done", output_index: 0, item: message },
+				{
+					type: "response.completed",
+					response: {
+						id: "resp_1",
+						status: "completed",
+						output: [message],
+						usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+					},
+				},
+			];
+			const body = frames.map(frame => `event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`).join("");
+			return new Response(body, { headers: { "content-type": "text/event-stream" } });
+		}
+
+		/** A session turn on muse-code (OpenAI Responses) whose first request is a 429 stating `retryAfterSeconds`. */
+		async function sessionTurn(retryAfterSeconds: string) {
+			const model = getBundledModel("muse-code", "muse-spark-1.3");
+			if (!model) throw new Error("Expected bundled muse-code model");
+			let requests = 0;
+			const fetch = (async () => {
+				requests++;
+				return requests === 1 ? rateLimited(retryAfterSeconds) : completed();
+			}) as FetchImpl;
+			const sleeps: number[] = [];
+			const stream = await createSettingsAwareStreamFn(Settings.isolated({}))(model, context, {
+				apiKey: museApiKey,
+				fetch,
+				providerRetryWait: async delayMs => void sleeps.push(delayMs),
+			});
+			return { result: await stream.result(), requests, sleeps };
+		}
+
+		it("is set on every request, and a caller's own ceiling wins over it", () => {
+			const { fn: base, calls } = captureBase();
+			const wrapped = createSettingsAwareStreamFn(Settings.isolated({}), base);
+
+			wrapped(stubModel, stubContext, undefined);
+			wrapped(stubModel, stubContext, { providerRetryWaitCeilingMs: 30_000 });
+
+			expect(calls[0]?.options?.providerRetryWaitCeilingMs).toBe(PROVIDER_RETRY_WAIT_CEILING_MS);
+			expect(calls[1]?.options?.providerRetryWaitCeilingMs).toBe(30_000);
+		});
+
+		it("leaves a stated 8 s to the provider, which sleeps it and retries", async () => {
+			const { result, requests, sleeps } = await sessionTurn("8");
+
+			expect(requests).toBe(2);
+			expect(sleeps).toEqual([8_000]);
+			expect(result.stopReason).toBe("stop");
+		});
+
+		it("refuses a stated 15 s inside the 5-minute retry.maxDelayMs: one request, and the error says why", async () => {
+			const { result, requests, sleeps } = await sessionTurn("15");
+
+			expect(requests).toBe(1);
+			expect(sleeps).toEqual([]);
+			expect(result.stopReason).toBe("error");
+			expect(result.errorStatus).toBe(429);
+			// The session's retry reads this wait, notifies, and sleeps it itself.
+			expect(result.errorRetryAfterMs).toBe(15_000);
+			expect(result.errorMessage).toContain(
+				"(server asked to wait 15 s before retrying; the caller's 10 s providerRetryWaitCeilingMs refused it, so the provider did not retry)",
+			);
+		});
 	});
 
 	it("treats the default openrouterVariant as absent so the base call carries no variant", () => {
@@ -333,9 +461,12 @@ describe("createSettingsAwareStreamFn", () => {
 			base,
 		);
 		elsewhere(copilot, context, { apiKey: "k", providerSessionState: new Map() });
+		// Explicit transport preference cannot change native-history accounting.
+		queued(copilot, context, { apiKey: "k", providerSessionState: new Map(), preferWebsockets: true });
 
 		expect(calls[0]?.options?.maxTokens).toBeLessThan(9_000);
 		expect(calls[1]?.options?.maxTokens).toBeUndefined();
+		expect(calls[2]?.options?.maxTokens).toBeLessThan(9_000);
 	});
 
 	describe("providers.anthropic.serverSideFallback (opt-in)", () => {
@@ -500,16 +631,11 @@ describe("createSettingsAwareStreamFn", () => {
 		};
 
 		it.each([
-			["stays off by default", {}, undefined, false],
-			["stores when the setting is on", { "providers.muse-code.storeResponses": true }, undefined, true],
-			[
-				"lets PI_MUSE_STORE_RESPONSES=1 override the setting",
-				{ "providers.muse-code.storeResponses": false },
-				"1",
-				true,
-			],
-		] as const)("%s", async (_label, values, env, expected) => {
-			expect(await wireStore(env, viaSession(Settings.isolated(values), museModel))).toBe(expected);
+			["stays off by default", undefined, undefined, false],
+			["stores when the setting is on", true, undefined, true],
+			["lets PI_MUSE_STORE_RESPONSES=1 override the setting", false, "1", true],
+		] as const)("%s", async (_label, stored, env, expected) => {
+			expect(await wireStore(env, viaSession(persistedStore(stored), museModel))).toBe(expected);
 		});
 
 		it("does not opt other storing hosts into retention", async () => {

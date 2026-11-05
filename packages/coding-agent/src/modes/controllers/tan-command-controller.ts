@@ -205,6 +205,7 @@ export class TanCommandController {
 							systemPrompt: clone.systemPrompt ?? systemPrompt,
 							task: trimmedWork,
 							tools: clone.getEnabledToolNames(),
+							mountedTools: clone.getMountedXdevToolNames(),
 						});
 						const abortClone = () => {
 							void clone?.abort();

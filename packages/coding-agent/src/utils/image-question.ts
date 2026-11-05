@@ -1,4 +1,5 @@
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import {
 	type Api,
@@ -176,7 +177,7 @@ export async function askImageQuestion(
 
 	if (response.stopReason === "error") {
 		// The failed turn rides as the cause, so the server's wait stays structured (`retryAfterMsOf`).
-		throw Object.assign(new ToolError(response.errorMessage ?? "Image question request failed."), {
+		throw Object.assign(new ToolError(errorDisplayText(response) ?? "Image question request failed."), {
 			cause: assistantTurnError(response),
 		});
 	}

@@ -25,7 +25,7 @@ function prop(node: NativeNode | TspPropNode | NativeChild | undefined, name: st
 }
 
 const decode: JobWidgetView = {
-	title: "verb-bench · decode",
+	title: "loadtest · decode",
 	headline: { text: "186 tok/s", label: "decode", trend: { text: "▲ 15%", tone: "success" } },
 	blocks: [
 		{
@@ -106,7 +106,7 @@ describe("InteractiveMode HUD pills", () => {
 		expect(spark?.p).toMatchObject({ kind: "spark", min: 0, max: 220 });
 		expect(prop(spark, "series")).toHaveLength(16);
 		expect(prop(segment, "title")).toBe(
-			"2 jobs running  /jobs\nbg_1  eval · per model — trials 7/9 trials\nbg_2  verb-bench · decode — decode 186 tok/s ▲ 15%",
+			"2 jobs running  /jobs\nbg_1  eval · per model — trials 7/9 trials\nbg_2  loadtest · decode — decode 186 tok/s ▲ 15%",
 		);
 		const card = prop(segment, "hovercard") as TspPropNode;
 		expect(card).toMatchObject({ k: "col", p: { role: "omp.jobs.hovercard" } });

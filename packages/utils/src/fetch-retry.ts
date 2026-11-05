@@ -91,22 +91,23 @@ const MONTH_NAMES = [
 	"november",
 	"december",
 ];
-const WEEKDAY_NAMES = new Set([
+/** Short then long, Sunday first, so an index mod 7 is a `Date#getUTCDay`. */
+const WEEKDAY_NAMES = [
+	"sun",
 	"mon",
 	"tue",
 	"wed",
 	"thu",
 	"fri",
 	"sat",
-	"sun",
+	"sunday",
 	"monday",
 	"tuesday",
 	"wednesday",
 	"thursday",
 	"friday",
 	"saturday",
-	"sunday",
-]);
+];
 /** RFC 5322 section 4.3 named zones, in minutes east of UTC. */
 const NAMED_ZONE_MINUTES: Readonly<Record<string, number>> = {
 	gmt: 0,
@@ -146,6 +147,12 @@ export interface RetryHintOptions {
 	 * header's wait: an explicit header outranks any date a body states.
 	 */
 	excludeDates?: boolean;
+	/**
+	 * Delay the error response's headers asked for, already parsed (the max
+	 * across them — see getRetryAfterMsFromHeaders in pi-ai). It competes with
+	 * the body's signals like a `retry-after-ms` in the body.
+	 */
+	headerRetryAfterMs?: number;
 }
 
 /**
@@ -179,38 +186,14 @@ export function extractRetryHint(
 	options?: RetryHintOptions,
 ): number | undefined {
 	const headers = source instanceof Headers ? source : (source?.headers ?? undefined);
-	if (headers) {
-		const retryAfterMs = parseRetryAfterHeaderMs(headers.get("retry-after-ms"), "ms");
-		if (retryAfterMs !== undefined) return retryAfterMs;
-		const retryAfter = parseRetryAfterHeaderMs(headers.get("retry-after"), "s");
-		if (retryAfter !== undefined) return retryAfter;
-		const rateLimitResetMs = headers.get("x-ratelimit-reset-ms");
-		if (rateLimitResetMs) {
-			const value = Number(rateLimitResetMs);
-			if (Number.isFinite(value) && value > 0) {
-				// > 1e12 → epoch ms; > 1e9 → epoch s; otherwise a delta in ms.
-				const targetMs = value > 1e12 ? value : value > 1e9 ? value * 1000 : undefined;
-				if (targetMs === undefined) return value;
-				const delta = targetMs - Date.now();
-				if (delta > 0) return delta;
-			}
-		}
-		const rateLimitReset = headers.get("x-ratelimit-reset");
-		if (rateLimitReset) {
-			const resetSeconds = Number.parseInt(rateLimitReset, 10);
-			if (!Number.isNaN(resetSeconds)) {
-				const delta = resetSeconds * 1000 - Date.now();
-				if (delta > 0) return delta;
-			}
-		}
-		const rateLimitResetAfter = headers.get("x-ratelimit-reset-after");
-		if (rateLimitResetAfter) {
-			const seconds = Number(rateLimitResetAfter);
-			if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
-		}
-	}
-
-	if (!body) return undefined;
+	const { explicit, reset } = readRetryHeaderHints(headers);
+	const headerHint = explicit ?? reset;
+	if (headerHint !== undefined) return headerHint;
+	// A rejection that arrives inside a stream the server already accepted has
+	// no response of its own, so its caller hands over the accepted stream's
+	// parsed wait. It competes with the body's signals, as a header would.
+	const statedMs = options?.headerRetryAfterMs;
+	if (!body) return statedMs;
 	return bodyRetryHint(body, options, false);
 }
 
@@ -232,33 +215,54 @@ export function longestRetryHint(
 	options?: RetryHintOptions,
 ): number | undefined {
 	const headers = source instanceof Headers ? source : (source?.headers ?? undefined);
-	const hints = headers ? headerRetryHints(headers) : [];
+	const { explicit, reset } = readRetryHeaderHints(headers);
 	const fromBody = body ? bodyRetryHint(body, options, true) : undefined;
-	if (fromBody !== undefined) hints.push(fromBody);
+	const hints = [explicit, reset, options?.headerRetryAfterMs, fromBody].filter(ms => ms !== undefined);
 	return hints.length === 0 ? undefined : Math.max(...hints);
 }
 
 /**
  * The wait a `retry-after-ms` (`unit` `"ms"`) or `Retry-After` (`unit` `"s"`:
- * delta seconds, or an HTTP-date) header value states. Duplicate header lines
- * arrive joined by a comma (`9, 120`): each part is read on its own, and the
- * whole value too, since an HTTP-date holds a comma of its own; the longest
- * wins. An explicit `0`, a negative `Retry-After` and an elapsed date are `0`:
- * the server asked for an immediate retry. A negative `retry-after-ms` names no
- * wait. Every reader of these two headers ({@link extractRetryHint},
- * {@link longestRetryHint}, pi-ai's `getRetryAfterMsFromHeaders`) reads a value
- * through this, so the transport's sleep and the failed message's wait agree.
+ * delta seconds, or an HTTP-date) header value states, split by
+ * {@link retryAfterEntries} so a duplicated header line is read part by part
+ * and anything else is read whole. An explicit `0` and an elapsed date are
+ * `0`: the server asked for an immediate retry. A value that is neither a
+ * delay nor a date states no wait. Every reader of these two headers
+ * ({@link extractRetryHint}, {@link longestRetryHint}, pi-ai's
+ * `getRetryAfterMsFromHeaders`) reads a value through this, so the transport's
+ * sleep and the failed message's wait agree.
  */
 export function parseRetryAfterHeaderMs(raw: string | null | undefined, unit: "ms" | "s"): number | undefined {
-	return longestHeaderWait(raw, unit === "ms" ? value => nonNegative(Number(value)) : retryAfterValueMs);
+	if (!raw) return undefined;
+	const unitMs = unit === "ms" ? 1 : 1000;
+	const entries = retryAfterEntries(raw, unitMs);
+	// `retry-after-ms` is only ever a count of milliseconds; `Retry-After` may be a date.
+	return longestWait(entries.map(entry => (unit === "ms" ? bareDelay(entry) : retryAfterValueMs(entry))));
 }
 
-/** One `Retry-After` value: delta seconds (negative is `0`), or an HTTP-date read as GMT when it names no zone. */
-function retryAfterValueMs(value: string): number | undefined {
-	const seconds = Number(value);
-	if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
-	const dateMs = parseRetryDateMs(value, "gmt");
-	return dateMs === undefined ? undefined : Math.max(0, dateMs - Date.now());
+/** A wait past 10^12 ms (31.7 years) is an epoch timestamp, as {@link resetCounterMs} reads one, not a delay. */
+const EPOCH_SIZED_MS = 1e12;
+
+/**
+ * The delay a bare numeric header value names, in its own unit, or `undefined`
+ * when the value is not one. RFC 9110 section 10.2.3 spells `delay-seconds` as
+ * `1*DIGIT`; this widens it only to the fractional form providers actually
+ * send (`30.5`). `Number()` is not that grammar — it reads `0x0` as `0`, `-5`
+ * as `-5`, `1e3` as `1000` and `Infinity` as a wait — so a server's typo or a
+ * truncated value would become "retry immediately" instead of being ignored.
+ * RFC 9110 has a recipient ignore a value it cannot parse, which leaves the
+ * caller its own backoff; that is the safe direction.
+ */
+function bareDelay(value: string): number | undefined {
+	return /^\d+(?:\.\d+)?$/.test(value) ? Number(value) : undefined;
+}
+
+/** One `Retry-After` value: a bare delay in seconds, or an HTTP-date read as GMT when it names no zone. */
+function retryAfterValueMs(value: string, nowMs = Date.now()): number | undefined {
+	const seconds = bareDelay(value);
+	if (seconds !== undefined) return seconds * 1000;
+	const dateMs = parseRetryDateMs(value, "gmt", nowMs);
+	return dateMs === undefined ? undefined : Math.max(0, dateMs - nowMs);
 }
 
 /** The longest wait `parse` reads from a header value and from each of its comma-joined parts. */
@@ -276,66 +280,163 @@ function longestHeaderWait(
 	return longest;
 }
 
-/** The longest wait each retry header names, each comma-separated value read on its own. */
-function headerRetryHints(headers: Headers): number[] {
-	const resetAfterMs = (value: string): number | undefined => {
-		const seconds = nonNegative(Number(value));
-		return seconds === undefined ? undefined : seconds * 1000;
-	};
-	return [
-		parseRetryAfterHeaderMs(headers.get("retry-after-ms"), "ms"),
-		parseRetryAfterHeaderMs(headers.get("retry-after"), "s"),
-		longestHeaderWait(headers.get("x-ratelimit-reset-ms"), value => resetCounterMs(Number(value), 1)),
-		longestHeaderWait(headers.get("x-ratelimit-reset"), value => resetCounterMs(Number(value), 1000)),
-		longestHeaderWait(headers.get("x-ratelimit-reset-after"), resetAfterMs),
+/**
+ * The two waits a response's retry headers state, each the longest across the
+ * values a duplicated header joins with commas.
+ *
+ * `explicit` is what the server told the client to do. Two headers can state
+ * it, and which one to believe depends on whether they agree:
+ *
+ *  - When `Retry-After` is `retry-after-ms` rounded up to whole seconds, they
+ *    are one wait written twice — the auth gateway writes exactly that pair —
+ *    and the millisecond one is the exact one. Taking the longer there slept
+ *    1 s for a stated 200 ms.
+ *  - When they are not, the server contradicted itself, and the longer is the
+ *    safe read: coming back after 100 ms when the other header said 9 s just
+ *    earns a second rejection.
+ *
+ * `reset` is when the rate window reopens, a fallback for a server that did
+ * not say how long to wait. Each counter is read by {@link resetCounterMs},
+ * which tells a Unix epoch from a delta by size — the reading `3600` needs to
+ * mean "an hour from now" rather than "a moment in 1970".
+ *
+ * One reading for both {@link extractRetryHint} and {@link longestRetryHint}:
+ * a second copy of it in either drifts from this one, and then the wait the
+ * transport sleeps and the wait the failed message reports disagree.
+ */
+function readRetryHeaderHints(headers: RetryHeaders): {
+	explicit: number | undefined;
+	reset: number | undefined;
+} {
+	if (!headers) return { explicit: undefined, reset: undefined };
+	const resets = [
+		longestHeaderWait(headerValue(headers, "x-ratelimit-reset-ms"), value => resetCounterMs(Number(value), 1)),
+		longestHeaderWait(headerValue(headers, "x-ratelimit-reset"), value => resetCounterMs(Number(value), 1000)),
+		longestHeaderWait(headerValue(headers, "x-ratelimit-reset-after"), value => {
+			const seconds = nonNegative(Number(value));
+			return seconds === undefined || seconds === 0 ? undefined : seconds * 1000;
+		}),
 	].filter(ms => ms !== undefined);
+	return {
+		explicit: explicitWaitMs(headers),
+		reset: resets.length === 0 ? undefined : Math.max(...resets),
+	};
+}
+
+/** The wait `retry-after-ms` and `Retry-After` state between them; see {@link readRetryHeaderHints}. */
+function explicitWaitMs(headers: RetryHeaders): number | undefined {
+	const exactMs = parseRetryAfterHeaderMs(headerValue(headers, "retry-after-ms"), "ms");
+	const secondsMs = parseRetryAfterHeaderMs(headerValue(headers, "retry-after"), "s");
+	if (exactMs === undefined || secondsMs === undefined) return exactMs ?? secondsMs;
+	// The same wait written twice: the second header is the first rounded up to whole seconds.
+	if (Math.ceil(exactMs / 1000) * 1000 === secondsMs) return exactMs;
+	return Math.max(exactMs, secondsMs);
+}
+
+/** What a retry header set may be: a `Headers`, anything that reads through `get`, or a plain object. */
+export type RetryHeaders = Pick<Headers, "get"> | Record<string, string | undefined> | null | undefined;
+
+/**
+ * The wait a response's retry headers state: an explicit retry instruction,
+ * else the rate window's reset. The reset is a fallback only — a server that
+ * said how long to wait has already answered the question.
+ */
+export function getRetryAfterMsFromHeaders(headers: RetryHeaders): number | undefined {
+	const { explicit, reset } = readRetryHeaderHints(headers);
+	return explicit ?? reset;
+}
+
+/**
+ * The wait a response's *explicit* retry headers state, with no reset-window
+ * fallback: `retry-after-ms`, or `Retry-After` when `retry-after-ms` states
+ * none.
+ *
+ * A caller reading the headers of a stream the server already accepted wants
+ * this, not {@link getRetryAfterMsFromHeaders}: those headers carry the rate
+ * window of a request that succeeded, so their reset counter says when the
+ * window reopens, not that anything should be waited for. Taking the reset
+ * there turns an accepted stream's routine bookkeeping into a retry wait.
+ */
+export function getExplicitRetryAfterMsFromHeaders(headers: RetryHeaders): number | undefined {
+	return readRetryHeaderHints(headers).explicit;
+}
+
+/**
+ * Whether `headers` reads its values through `get`. A call-shape test, not
+ * `instanceof Headers`: a Headers-like object from another realm, or a
+ * provider's own wrapper, must still be read through its `get` instead of
+ * silently taking the plain-object path. A plain object whose `get` key holds
+ * a string is read as the plain object it is.
+ */
+function hasHeaderGetter(
+	headers: Pick<Headers, "get"> | Record<string, string | undefined>,
+): headers is Pick<Headers, "get"> {
+	return typeof headers.get === "function";
+}
+
+/**
+ * `name`'s value in `headers`, read through `get` or, on a plain object, by a
+ * case-insensitive key. The one accessor every retry-header reader uses, here
+ * and in pi-ai, so a provider's header wrapper and a plain record are read the
+ * same way.
+ */
+export function headerValue(headers: RetryHeaders, name: string): string | undefined {
+	if (!headers) return undefined;
+	if (hasHeaderGetter(headers)) return headers.get(name) ?? undefined;
+	const target = name.toLowerCase();
+	for (const [key, value] of Object.entries(headers)) {
+		if (key.toLowerCase() === target && typeof value === "string") return value;
+	}
+	return undefined;
 }
 
 /**
  * The wait, in ms, a `Retry-After` header value names: delta seconds or a date
- * ({@link parseRetryDateMs}), the longest across the values a duplicated
- * header joins with commas (the comma after a date's weekday stays with its
- * date). A date already past and a negative delta name `0`; `undefined` when
- * no value is a wait.
+ * ({@link parseRetryDateMs}). A date already past and a negative delta name
+ * `0`; `undefined` when the value states no wait.
+ *
+ * A duplicated header line arrives joined by a comma, so the value is split on
+ * commas — but only when every part is a bare delay of at most 31.7 years.
+ * Two joined lines then contradict each other and the conservative read is the
+ * longer. One part failing that test leaves the value whole, which is what
+ * keeps a date's own comma with its date (`Fri, 06 Nov 2026 ...`), reads an
+ * ISO date-time's decimal comma as a decimal point, and leaves a malformed
+ * value malformed. Splitting unconditionally and taking the longest part is
+ * what turned `Retry-After: 0,` into "retry now" — three requests in a few
+ * milliseconds at a server that had just rate-limited the client.
  *
  * The one reading of the header: every retry parser uses it, with or without a
  * replay budget, and only bounds the result its own way (a cap, a floor), so
  * two readers of the same header never disagree about what it says.
  */
 export function parseRetryAfter(value: string, nowMs = Date.now()): number | undefined {
-	let longest: number | undefined;
-	for (const entry of retryAfterEntries(value, nowMs)) {
-		const seconds = Number(entry);
-		let ms: number | undefined;
-		if (Number.isFinite(seconds)) {
-			ms = Math.max(0, seconds * 1000);
-		} else {
-			const dateMs = parseRetryDateMs(entry, "gmt", nowMs);
-			ms = dateMs === undefined ? undefined : Math.max(0, dateMs - nowMs);
-		}
-		if (ms !== undefined && (longest === undefined || ms > longest)) longest = ms;
-	}
-	return longest;
+	return longestWait(retryAfterEntries(value, 1000).map(entry => retryAfterValueMs(entry, nowMs)));
 }
 
-/** The values a Retry-After header carries: the whole value when it is one, else its comma-separated parts. */
-function retryAfterEntries(value: string, nowMs: number): string[] {
-	const whole = value.trim();
+/**
+ * The values a `Retry-After` or `retry-after-ms` header carries: its
+ * comma-separated parts when every one of them is a bare delay that is no
+ * larger than an epoch timestamp in `unitMs`, else the whole value alone.
+ */
+function retryAfterEntries(raw: string, unitMs: number): string[] {
+	const whole = raw.trim();
 	if (whole === "") return [];
-	if (Number.isFinite(Number(whole)) || parseRetryDateMs(whole, "gmt", nowMs) !== undefined) return [whole];
 	const parts = whole.split(",").map(part => part.trim());
-	const entries: string[] = [];
-	for (let index = 0; index < parts.length; index++) {
-		const part = parts[index]!;
-		if (part === "") continue;
-		// A bare word is a weekday whose date follows its comma.
-		if (/^[A-Za-z]+$/.test(part) && index + 1 < parts.length) {
-			entries.push(`${part}, ${parts[++index]}`);
-			continue;
-		}
-		entries.push(part);
+	const joined =
+		parts.length > 1 &&
+		parts.every(part => {
+			const delay = bareDelay(part);
+			return delay !== undefined && delay * unitMs <= EPOCH_SIZED_MS;
+		});
+	return joined ? parts : [whole];
+}
+
+function longestWait(waits: readonly (number | undefined)[]): number | undefined {
+	let longest: number | undefined;
+	for (const wait of waits) {
+		if (wait !== undefined && (longest === undefined || wait > longest)) longest = wait;
 	}
-	return entries;
+	return longest;
 }
 
 /**
@@ -366,26 +467,50 @@ export function parseRetryDateMs(value: string, zoneless: ZonelessDate, nowMs = 
 	const text = value.trim();
 	let groups = DAY_MONTH_YEAR_PATTERN.exec(text)?.groups;
 	if (groups) {
-		if (!isWeekday(groups.weekday) || (groups.zone === undefined && zoneless === "reject")) return undefined;
 		const month = monthIndex(groups.month!);
 		const year = groups.year!.length === 4 ? Number(groups.year) : twoDigitYear(groups, month, nowMs);
-		return year === undefined ? undefined : utcInstant(year, month, groups, groups.zone);
+		if (year === undefined) return undefined;
+		return checkedInstant(utcInstant(year, month, groups, groups.zone), groups, zoneless);
 	}
 	groups = MONTH_DAY_PATTERN.exec(text)?.groups;
 	if (groups) {
-		if (!isWeekday(groups.weekday) || (groups.zone === undefined && zoneless === "reject")) return undefined;
 		const { yearBefore, yearAfter, zone } = groups;
 		// Exactly one year: before the time (`Date#toString`) or after it (asctime).
 		if ((yearBefore === undefined) === (yearAfter === undefined)) return undefined;
-		return utcInstant(Number(yearBefore ?? yearAfter), monthIndex(groups.month!), groups, zone);
+		const ms = utcInstant(Number(yearBefore ?? yearAfter), monthIndex(groups.month!), groups, zone);
+		return checkedInstant(ms, groups, zoneless);
 	}
 	groups = RFC3339_PATTERN.exec(text)?.groups;
-	if (!groups || (groups.zone === undefined && zoneless === "reject")) return undefined;
-	return utcInstant(Number(groups.year), Number(groups.month) - 1, groups, groups.zone);
+	if (!groups) return undefined;
+	return checkedInstant(
+		utcInstant(Number(groups.year), Number(groups.month) - 1, groups, groups.zone),
+		groups,
+		zoneless,
+	);
 }
 
-function isWeekday(name: string | undefined): boolean {
-	return name === undefined || WEEKDAY_NAMES.has(name.toLowerCase());
+/**
+ * The instant, once the fields around it agree with it. A date with no zone is
+ * a wait only from a header ({@link ZonelessDate}). A named day of the week
+ * must be the day the date falls on: RFC 9110 section 5.6.7 has a recipient
+ * ignore a `Retry-After` it cannot parse, and a date that contradicts itself —
+ * `Sun, 06 Nov 2026`, where the sixth is a Friday — is a corrupt value, not a
+ * wait to sleep on. Honouring the date half of it would sleep on a number the
+ * server never meant; ignoring it leaves the caller its own backoff.
+ */
+function checkedInstant(
+	ms: number | undefined,
+	groups: Record<string, string | undefined>,
+	zoneless: ZonelessDate,
+): number | undefined {
+	if (ms === undefined || (groups.zone === undefined && zoneless === "reject")) return undefined;
+	const { weekday } = groups;
+	if (weekday === undefined) return ms;
+	const named = WEEKDAY_NAMES.indexOf(weekday.toLowerCase());
+	if (named < 0) return undefined;
+	// A leap second is written on the day before the minute it rolls into.
+	const stated = Number(groups.second ?? 0) === 60 ? ms - 1000 : ms;
+	return new Date(stated).getUTCDay() === named % 7 ? ms : undefined;
 }
 
 function monthIndex(name: string): number {
@@ -518,6 +643,11 @@ function bodyRetryHint(
 		if (ms > 0) consider(ms);
 		else retryNow = true;
 	};
+	// A rejection that arrives inside a stream the server already accepted has no
+	// response of its own, so its caller hands the accepted stream's parsed wait
+	// over here, where it competes with the body's signals as a header would —
+	// and where a stated `0` becomes "retry now" instead of being lost.
+	considerClamped(options?.headerRetryAfterMs);
 
 	for (const quotaMatch of occurrences(QUOTA_RESET_PATTERN, body, everyOccurrence)) {
 		const hours = quotaMatch[1] ? Number.parseInt(quotaMatch[1], 10) : 0;
@@ -727,6 +857,22 @@ export interface FetchWithRetryOptions extends RequestInit {
 	 * number sets a custom ceiling in ms. Bare browser/Node fetch ignores it.
 	 */
 	timeout?: number | false;
+	/**
+	 * Sleeps every retry delay in place of the built-in timer, with the request's
+	 * `signal`: the caller's own retry-wait hook (a provider's
+	 * `providerRetryWait`), so transport retries are scheduled like every other
+	 * retry the caller makes. An abort during it still surfaces as
+	 * `"Request was aborted"`.
+	 */
+	retryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
+	/**
+	 * Called with the wait a retryable response states (a header or its body,
+	 * as {@link extractRetryHint} reads it) when that wait is longer than
+	 * `maxDelayMs`, just before the response is returned unretried, so the
+	 * caller can say the wait was refused. Not called for a response returned
+	 * for any other reason.
+	 */
+	onRefusedWait?: (waitMs: number) => void;
 }
 
 const DEFAULT_MAX_DELAY_MS = 60_000;
@@ -754,6 +900,8 @@ export async function fetchWithRetry(
 		retryGate,
 		fetch: fetchImpl = fetch,
 		timeout = false,
+		retryWait,
+		onRefusedWait,
 		...baseInit
 	} = options;
 	const signal = baseInit.signal as AbortSignal | undefined;
@@ -815,7 +963,7 @@ export async function fetchWithRetry(
 				if (!retryGate(networkDelayMs)) throw wrapped;
 				pending = { error: wrapped };
 			}
-			await waitForRetry(networkDelayMs, signal);
+			await waitForRetry(networkDelayMs, signal, retryWait);
 			continue;
 		}
 		releasePending();
@@ -829,7 +977,10 @@ export async function fetchWithRetry(
 		// Under a gate the longest wait the server named counts, so a header that
 		// says zero cannot beat a body that says thirty seconds.
 		const hint = retryGate ? longestRetryHint(response, retryBody) : extractRetryHint(response, retryBody);
-		if (hint !== undefined && hint > maxDelayMs) return response;
+		if (hint !== undefined && hint > maxDelayMs) {
+			onRefusedWait?.(hint);
+			return response;
+		}
 
 		const delayMs = Math.min(hint ?? resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), maxDelayMs);
 		if (retryGate) {
@@ -840,7 +991,7 @@ export async function fetchWithRetry(
 			response.body?.cancel().catch(() => {});
 		}
 		try {
-			await waitForRetry(delayMs, signal);
+			await waitForRetry(delayMs, signal, retryWait);
 		} catch (error) {
 			releasePending();
 			throw error;
@@ -861,9 +1012,14 @@ function mergeInit(base: RequestInit, overlay: RequestInit, timeout: number | fa
 	return merged;
 }
 
-async function waitForRetry(delayMs: number, signal: AbortSignal | undefined): Promise<void> {
+async function waitForRetry(
+	delayMs: number,
+	signal: AbortSignal | undefined,
+	retryWait: FetchWithRetryOptions["retryWait"],
+): Promise<void> {
 	try {
-		await scheduler.wait(delayMs, { signal });
+		if (retryWait) await retryWait(delayMs, signal);
+		else await scheduler.wait(delayMs, { signal });
 	} catch (error) {
 		if (signal?.aborted) throw new Error("Request was aborted");
 		throw error;

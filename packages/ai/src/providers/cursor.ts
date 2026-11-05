@@ -227,9 +227,10 @@ import {
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { connectProxiedSocket, getProxyForUrl, wrapFetchForProxy } from "../utils/proxy";
-import { admitsReplay, ReplayBudget, restoreReplaced } from "../utils/replay-budget";
+import { admitsReplay, ReplayBudget, restoreReplaced, sleepUnderBudget } from "../utils/replay-budget";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
-import { waitForRetry } from "../utils/retry-wait";
+import { providerFailureWaitMs, retryWaitBounds } from "../utils/retry-after";
+import { DEFAULT_MAX_RETRY_DELAY_MS } from "../utils/retry-wait";
 import { sanitizeSchemaForCursor, toolWireSchema } from "../utils/schema";
 import { createWireAttempts, providerReplaysFrom, type WireAttempts, wireAttemptsOf } from "../utils/wire-attempts";
 import { formatConnectEndStreamError, hasRetryableCursorErrorDetail } from "./connect-error-detail";
@@ -625,11 +626,17 @@ class ConnectEndStreamError extends AIError.ProviderResponseError {
 	 * accepted response's headers reach `finalize` separately.
 	 */
 	readonly headers: Headers | undefined;
+	/**
+	 * The refusing response's HTTP status, so a 503 stays retryable and a 429
+	 * keeps its class; never a 2xx, and absent for an end-stream frame.
+	 */
+	readonly status: number | undefined;
 
-	constructor(classificationMessage: string, diagnosticMessage: string, headers?: Headers) {
+	constructor(classificationMessage: string, diagnosticMessage: string, headers?: Headers, status?: number) {
 		super(classificationMessage, { kind: "envelope" });
 		this.diagnosticMessage = diagnosticMessage;
 		this.headers = headers;
+		this.status = status;
 	}
 }
 
@@ -781,20 +788,28 @@ function classifyCursorStructuredError(structured: CursorStructuredError, header
 	return new AIError.ProviderHttpError(fullMessage, 400, { code: name, headers });
 }
 
+/** A refusing (non-2xx) Cursor response: its status and headers. A 2xx is never one. */
+interface CursorRefusal {
+	status: number;
+	headers: Headers;
+}
+
 /**
- * Classify a Connect error object (`{ code, message, details }`). `headers` are
- * the refusing (non-2xx) response's when the object is that response's body;
- * the error carries them so `finalize` reads the wait they name.
+ * Classify a Connect error object (`{ code, message, details }`). `refusal` is
+ * the refusing (non-2xx) response when the object is that response's body: the
+ * error carries its headers, so `finalize` reads the wait they name, and,
+ * without a structured Cursor detail to classify by, its HTTP status.
  */
-function classifyConnectError(error: Record<string, unknown>, headers?: Headers): Error {
+function classifyConnectError(error: Record<string, unknown>, refusal?: CursorRefusal): Error {
 	const structured = decodeCursorStructuredError(error);
-	if (structured) return classifyCursorStructuredError(structured, headers);
+	if (structured) return classifyCursorStructuredError(structured, refusal?.headers);
 	const code = typeof error.code === "string" ? error.code : "unknown";
 	const message = typeof error.message === "string" ? error.message : "Unknown error";
 	const endStreamError = new ConnectEndStreamError(
 		`Connect error ${code}: ${message}`,
 		formatConnectEndStreamError(error),
-		headers,
+		refusal?.headers,
+		refusal?.status,
 	);
 	// Without a decodable binary detail, Cursor's retry verdict survives only in
 	// the detail's debug JSON; the classification text drops it, so carry it as
@@ -803,6 +818,28 @@ function classifyConnectError(error: Record<string, unknown>, headers?: Headers)
 		AIError.attach(endStreamError, AIError.create(AIError.Flag.Transient));
 	}
 	return endStreamError;
+}
+
+/**
+ * The error a refusing (non-2xx) response of Cursor's `rpc` states. A body that
+ * is a Connect error JSON (`{ code, message, details }`, or the same under
+ * `error`) is classified with the response's status and headers
+ * ({@link classifyConnectError}); any other body leaves the bare status.
+ */
+function cursorRefusalError(rpc: string, refusal: CursorRefusal, body: string): Error {
+	let json: unknown;
+	try {
+		json = JSON.parse(body);
+	} catch {
+		json = undefined;
+	}
+	const error = isRecord(json) && isRecord(json.error) ? json.error : json;
+	if (isRecord(error) && (typeof error.code === "string" || typeof error.message === "string")) {
+		return classifyConnectError(error, refusal);
+	}
+	return new AIError.ProviderHttpError(`Cursor ${rpc} failed with HTTP ${refusal.status}`, refusal.status, {
+		headers: refusal.headers,
+	});
 }
 
 function parseConnectEndStream(data: Uint8Array): Error | null {
@@ -835,19 +872,41 @@ interface CursorRunTransport extends CursorMessageWriter {
 	onError(listener: (error: unknown) => void): void;
 }
 
+/** Bytes of a refused Run response's body read before failing with what has arrived. */
+const CURSOR_REFUSAL_BODY_LIMIT = 64 * 1024;
+
 function wrapHttp2RunTransport(request: http2.ClientHttp2Stream): CursorRunTransport {
-	// A non-2xx Run response is a refusal, as the HTTP/1 transport treats it:
-	// fail with its status and headers (so `finalize` reads the wait they name)
-	// instead of decoding its body as Connect frames.
+	// A non-2xx Run response is a refusal, as the HTTP/1 transport treats it: its
+	// body is a Connect error JSON, not Connect frames. Keep it from the frame
+	// decoder and from a clean end, read it, and fail with the status, the
+	// headers (so `finalize` reads the wait they name) and what the body states.
+	let refusal: (CursorRefusal & { body: Buffer[]; bytes: number }) | undefined;
+	let refused = false;
+	const errorListeners: Array<(error: unknown) => void> = [];
+	const fail = (error: unknown): void => {
+		for (const listener of errorListeners) listener(error);
+	};
+	const refuse = (): void => {
+		if (!refusal || refused) return;
+		refused = true;
+		const error = cursorRefusalError("Run", refusal, Buffer.concat(refusal.body).toString("utf8"));
+		request.close();
+		fail(error);
+	};
 	request.on("response", headers => {
 		const status = Number(headers[":status"]);
 		if (status >= 200 && status < 300) return;
-		request.destroy(
-			new AIError.ProviderHttpError(`Cursor Run failed with HTTP ${status}`, status, {
-				headers: cursorResponseHeaders(headers),
-			}),
-		);
+		refusal = { status, headers: cursorResponseHeaders(headers), body: [], bytes: 0 };
 	});
+	request.on("data", (chunk: Buffer) => {
+		if (!refusal) return;
+		refusal.body.push(chunk);
+		refusal.bytes += chunk.length;
+		if (refusal.bytes >= CURSOR_REFUSAL_BODY_LIMIT) refuse();
+	});
+	request.on("end", refuse);
+	// A refused stream that resets before its body ends still fails as the refusal.
+	request.on("error", error => (refusal ? refuse() : fail(error)));
 	return {
 		get closed() {
 			return request.closed;
@@ -865,16 +924,22 @@ function wrapHttp2RunTransport(request: http2.ClientHttp2Stream): CursorRunTrans
 			request.on("response", listener);
 		},
 		onData(listener) {
-			request.on("data", listener);
+			request.on("data", (chunk: Buffer) => {
+				if (!refusal) listener(chunk);
+			});
 		},
 		onTrailers(listener) {
-			request.on("trailers", listener);
+			request.on("trailers", trailers => {
+				if (!refusal) listener(trailers);
+			});
 		},
 		onEnd(listener) {
-			request.on("end", listener);
+			request.on("end", () => {
+				if (!refusal) listener();
+			});
 		},
 		onError(listener) {
-			request.on("error", listener);
+			errorListeners.push(listener);
 		},
 	};
 }
@@ -955,12 +1020,8 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 			await response.body?.cancel();
 			return;
 		}
-		const error = await response.json().catch(() => undefined);
-		throw isRecord(error)
-			? classifyConnectError(error, response.headers)
-			: new AIError.ProviderHttpError(`Cursor BidiAppend failed with HTTP ${response.status}`, response.status, {
-					headers: response.headers,
-				});
+		const refusal = { status: response.status, headers: response.headers };
+		throw cursorRefusalError("BidiAppend", refusal, await response.text().catch(() => ""));
 	};
 
 	const pumpAppends = (): void => {
@@ -991,9 +1052,8 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 			});
 			responseListener(responseHeaders);
 			if (!response.ok) {
-				throw new AIError.ProviderHttpError(`Cursor RunSSE failed with HTTP ${response.status}`, response.status, {
-					headers: response.headers,
-				});
+				const refusal = { status: response.status, headers: response.headers };
+				throw cursorRefusalError("RunSSE", refusal, await response.text().catch(() => ""));
 			}
 			if (!response.body) {
 				throw new AIError.ProviderResponseError("Cursor RunSSE returned no response body", {
@@ -2084,7 +2144,7 @@ function streamCursorWithWireMode(
 				conversationId !== undefined &&
 				activeBlobStore !== undefined &&
 				originalRequestId !== undefined &&
-				(!replayBudget || (await replayBudget.replayAfter(error, 0, options?.signal, options?.providerRetryWait)))
+				(!replayBudget || (await replayBudget.replayAfter(error, 0, options?.signal, options)))
 			) {
 				clearInterval(heartbeatTimer ?? undefined);
 				heartbeatTimer = null;
@@ -2135,7 +2195,7 @@ function streamCursorWithWireMode(
 				!sawProgressOrSideEffect &&
 				!options?.signal?.aborted &&
 				isCursorModelNotFound(error) &&
-				(!replayBudget || (await replayBudget.replayAfter(error, 0, options?.signal, options?.providerRetryWait)))
+				(!replayBudget || (await replayBudget.replayAfter(error, 0, options?.signal, options)))
 					? serializedFallbackWireModelId
 					: undefined;
 			if (fallbackWireModelId !== undefined) {
@@ -2192,10 +2252,12 @@ function streamCursorWithWireMode(
 			const repeatedCheckpoint = checkpointHash !== undefined && checkpointHash === retryContext?.checkpointHash;
 			const noProgressResumes = repeatedCheckpoint ? (retryContext?.noProgressResumes ?? 0) + 1 : 0;
 			const uncappedDelayMs = CURSOR_RETRY_BASE_DELAY_MS * 2 ** retryAttempt;
-			const maxRetryDelayMs = options?.maxRetryDelayMs ?? 60_000;
+			const maxRetryDelayMs = options?.maxRetryDelayMs ?? DEFAULT_MAX_RETRY_DELAY_MS;
 			const ownDelayMs = maxRetryDelayMs > 0 ? Math.min(uncappedDelayMs, maxRetryDelayMs) : uncappedDelayMs;
+			const waitBounds = retryWaitBounds(options, DEFAULT_MAX_RETRY_DELAY_MS);
+			const backoffDelayMs = Math.min(ownDelayMs, waitBounds.maxDelayMs);
 			// Under a budget the server's own wait counts too.
-			const delayMs = replayBudget ? replayBudget.delayFor(error, ownDelayMs) : ownDelayMs;
+			const delayMs = replayBudget ? replayBudget.delayFor(error, backoffDelayMs) : backoffDelayMs;
 			const canRetryFromCheckpoint =
 				replaySafe &&
 				!options?.signal?.aborted &&
@@ -2203,15 +2265,24 @@ function streamCursorWithWireMode(
 				noProgressResumes <= 2 &&
 				(AIError.isProviderRetryableError(error) ||
 					(error instanceof AIError.ProviderResponseError && error.kind === "incomplete-stream"));
+			// The wait this attempt stated, its accepted response's headers included;
+			// a stated wait past the caller's bounds surfaces the failure instead.
+			const statedWaitMs = canRetryFromCheckpoint
+				? providerFailureWaitMs(model.provider, error, { streamResponseHeaders })
+				: undefined;
+			const retryDelayMs =
+				canRetryFromCheckpoint && !waitBounds.declines(Math.max(statedWaitMs ?? 0, delayMs), error)
+					? Math.max(statedWaitMs ?? 0, delayMs)
+					: undefined;
 			if (
-				canRetryFromCheckpoint &&
+				retryDelayMs !== undefined &&
 				openBlockState !== undefined &&
 				usageState !== undefined &&
 				baseConversationId !== undefined &&
 				conversationId !== undefined &&
 				activeBlobStore !== undefined &&
 				originalRequestId !== undefined &&
-				admitsReplay(replayBudget, delayMs)
+				admitsReplay(replayBudget, retryDelayMs)
 			) {
 				const retryOriginalRequestId = originalRequestId;
 				const retryBlockState = openBlockState;
@@ -2229,20 +2300,13 @@ function streamCursorWithWireMode(
 				logger.debug("cursor stream retrying", {
 					attempt: retryAttempt + 1,
 					checkpoint: checkpointHash,
-					delayMs,
+					delayMs: retryDelayMs,
 				});
 				let retryDelayCompleted = false;
 				try {
-					if (replayBudget) {
-						// Raced against the deadline: a wait that cannot finish inside it
-						// refuses the retry, which then surfaces the failure in hand.
-						retryDelayCompleted =
-							(await replayBudget.wait(delayMs, options?.signal, options?.providerRetryWait)) &&
-							!options?.signal?.aborted;
-					} else {
-						await waitForRetry(options?.providerRetryWait, delayMs, options?.signal);
-						retryDelayCompleted = !options?.signal?.aborted;
-					}
+					retryDelayCompleted =
+						(await sleepUnderBudget(replayBudget, options, retryDelayMs, options?.signal)) &&
+						!options?.signal?.aborted;
 				} catch (waitError) {
 					error = waitError;
 				}
@@ -2340,20 +2404,18 @@ function streamCursorWithWireMode(
 				// stable id would never reach the rotated one; keep Cursor's verdict.
 				rotatedRejection = knownConversation;
 			}
-			output.stopReason = result.stopReason;
-			output.errorStatus = result.status;
+			// A Connect end-stream error's diagnostic is shown, never classified.
+			AIError.applyFinalizeResult(
+				output,
+				result,
+				error instanceof ConnectEndStreamError ? error.diagnosticMessage : undefined,
+			);
 			// The rejection is non-retriable on the poisoned id, but the fresh id
 			// is a different request. Mark this one attempt transient so the
 			// caller's retry loop actually rebuilds on the rotated id; if that id
 			// rejects too, `canRotate` is false and the original status surfaces.
-			output.errorId = rotatedRejection ? AIError.create(AIError.Flag.Transient) : result.id;
-			if (error instanceof ConnectEndStreamError) {
-				output.errorClassificationMessage = result.message;
-				output.errorMessage = error.diagnosticMessage;
-			} else {
-				output.errorMessage = result.message;
-			}
-			output.errorRetryAfterMs = result.retryAfterMs;
+			if (rotatedRejection) output.errorId = AIError.create(AIError.Flag.Transient);
+			output.errorRetryWaitRefusal = result.retryWaitRefusal;
 			// Every request this turn sent beyond the first — a checkpoint resume, a
 			// drop to HTTP/1, a replay on the discovered wire model. Cursor resumes
 			// from a fresh checkpoint even after visible progress, so the content
@@ -2362,7 +2424,7 @@ function streamCursorWithWireMode(
 			replayBudget?.stamp(output);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
-			stream.push({ type: "error", reason: output.stopReason, error: output });
+			stream.push({ type: "error", reason: result.stopReason, error: output });
 			stream.end();
 		} finally {
 			const log = await debugResponseLogPromise;

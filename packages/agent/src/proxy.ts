@@ -21,6 +21,7 @@ import {
 	setStreamingPartialJson,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { getFailureRetryAfterMs, isRetryWaitMs } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { isRefusedRetryWait } from "@oh-my-pi/pi-ai/utils/retry-wait";
 import { parseToolCallArguments } from "@oh-my-pi/pi-ai/utils/tool-call-arguments";
 import { parseStreamingJsonThrottled, readSseJson } from "@oh-my-pi/pi-utils";
 
@@ -88,6 +89,8 @@ const TERMINAL_FIELD_CHECKS: Record<string, (value: unknown) => boolean> = {
 	providerReplays: value => Number.isSafeInteger(value) && (value as number) >= 0,
 	errorRetryAfterMs: isRetryWaitMs,
 	errorMessage: value => typeof value === "string",
+	errorDisplayMessage: value => typeof value === "string",
+	errorRetryWaitRefusal: isRefusedRetryWait,
 };
 
 /**
@@ -214,6 +217,9 @@ export function streamProxy(model: Model, context: Context, options: ProxyStream
 						// The server runs the call, so it is the one that can keep its
 						// replays inside the caller's budget.
 						replayBudgetMs: options.replayBudgetMs,
+						// The server runs the provider and every retry sleep: these bound them.
+						maxRetryDelayMs: options.maxRetryDelayMs,
+						providerRetryWaitCeilingMs: options.providerRetryWaitCeilingMs,
 					},
 				}),
 				signal: options.signal,
@@ -331,7 +337,8 @@ function processProxyEvent(
 				totalTokens: 0,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			};
-			// A new turn starts with none of the last one's outcome fields.
+			// A new turn starts with none of the last one's outcome fields,
+			// including its provider text, shown text, retry wait and refusal.
 			for (const key of Object.keys(partial)) {
 				if (!(CLIENT_OWNED_FIELDS as readonly string[]).includes(key)) {
 					delete (partial as unknown as Record<string, unknown>)[key];

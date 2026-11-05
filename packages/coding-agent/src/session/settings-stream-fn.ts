@@ -29,6 +29,7 @@ import {
 	cfgProvidersMuseCodeStoreResponses,
 	cfgProvidersOpenaiCodexDaybreak,
 	cfgProvidersOpenaiLiveSteering,
+	cfgProvidersOpenaiResponsesWebsockets,
 	cfgProvidersOpenaiWebsockets,
 	cfgProvidersOpenrouterVariant,
 	cfgProvidersStreamFirstEventTimeoutSeconds,
@@ -38,10 +39,42 @@ import {
 	validateProviderMaxInFlightRequests,
 } from "./settings";
 
-/** Map `providers.openaiWebsockets` to the provider `preferWebsockets` hint (`auto` → model default). */
-export function resolveOpenAIWebsocketPreference(settings: Settings): boolean | undefined {
+/**
+ * The longest server-stated wait omp lets a provider's own retry sleep
+ * (`StreamOptions.providerRetryWaitCeilingMs`). A longer stated wait surfaces
+ * as the failure, and the session's retry (`TurnRecovery`, bounded by
+ * `retry.maxDelayMs`) waits it instead.
+ *
+ * Why 10 seconds: about 10 s is the limit for keeping a person's attention on
+ * a wait; past it they need to see how long it will take and how to interrupt
+ * it (J. Nielsen, "Response Times: The 3 Important Limits", 1993, after
+ * R. B. Miller, 1968). A provider sleeping inside a request shows neither: the
+ * session sees only a request in flight. The session's retry shows a countdown
+ * and the interrupt key, and can rotate credentials or fall back. A shorter
+ * wait stays inside the provider, because surfacing it would spend one of
+ * `retry.maxRetries` and show a retry notice for a pause too short to act on.
+ *
+ * Without this ceiling the bound inside a provider is `retry.maxDelayMs`
+ * (`maxRetryDelayMs`), 5 minutes by default.
+ */
+export const PROVIDER_RETRY_WAIT_CEILING_MS = 10_000;
+
+/** Apply each API's setting once; standard Responses preferences can only narrow it. */
+export function resolveWebsocketPreference(
+	settings: Settings,
+	model: Model | undefined,
+	requestPreference?: boolean,
+): boolean | undefined {
+	if (model?.api === "openai-responses") {
+		return (
+			cfgProvidersOpenaiResponsesWebsockets.get(settings) &&
+			model.preferWebsockets !== false &&
+			requestPreference !== false
+		);
+	}
+	if (model?.api !== "openai-codex-responses") return requestPreference;
 	const setting = cfgProvidersOpenaiWebsockets.get(settings);
-	return setting === "on" ? true : setting === "off" ? false : undefined;
+	return requestPreference ?? (setting === "on" ? true : setting === "off" ? false : undefined);
 }
 
 function timeoutSecondsToMs(value: number): number | undefined {
@@ -68,9 +101,9 @@ export interface SettingsStreamSlowModeContext {
  * Build a {@link StreamFn} that reads provider routing/guard settings from
  * `settings` per call and forwards to `base` (defaults to `streamSimple`).
  *
- * Caller-supplied `streamOptions` always win — the helper only fills holes.
- * The one exception is the output cap, which is lowered when prompt plus cap
- * would exceed the model's context window (see
+ * Caller-supplied `streamOptions` normally win. Standard Responses WS requires
+ * its opt-in setting and honors either explicit false; the output cap is lowered
+ * when prompt plus cap would exceed the model's context window (see
  * {@link fitOutputTokensToContextWindow}); every request this session drives,
  * including side turns like `/btw`, goes through here.
  */
@@ -161,6 +194,7 @@ export function createSettingsAwareStreamFn(
 		const merged: SimpleStreamOptions = {
 			...streamOptions,
 			maxTokens,
+			preferWebsockets: resolveWebsocketPreference(settings, model, streamOptions?.preferWebsockets),
 			openrouterVariant: streamOptions?.openrouterVariant ?? openrouterVariant,
 			antigravityEndpointMode: streamOptions?.antigravityEndpointMode ?? antigravityEndpointMode,
 			textVerbosity: streamOptions?.textVerbosity ?? textVerbosity,
@@ -168,6 +202,7 @@ export function createSettingsAwareStreamFn(
 			streamFirstEventTimeoutMs: streamOptions?.streamFirstEventTimeoutMs ?? streamFirstEventTimeoutMs,
 			streamIdleTimeoutMs: streamOptions?.streamIdleTimeoutMs ?? streamIdleTimeoutMs,
 			maxRetryDelayMs: streamOptions?.maxRetryDelayMs ?? cfgRetryMaxDelayMs.get(settings),
+			providerRetryWaitCeilingMs: streamOptions?.providerRetryWaitCeilingMs ?? PROVIDER_RETRY_WAIT_CEILING_MS,
 			maxInFlightRequests,
 			loopGuard: {
 				enabled: cfgModelLoopGuardEnabled.get(settings),

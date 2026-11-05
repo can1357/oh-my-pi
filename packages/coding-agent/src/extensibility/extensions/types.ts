@@ -15,6 +15,7 @@ import {
 	type MessageRenderer,
 	type AssistantThinkingRenderer,
 	type AssistantTextRenderer,
+	type TranscriptPresenter,
 } from "@oh-my-pi/pi-tui/chat/extension-types";
 export {
 	type ExtensionUiComponent,
@@ -26,6 +27,9 @@ export {
 	type AssistantThinkingRenderer,
 	type AssistantTextRenderContext,
 	type AssistantTextRenderer,
+	type TranscriptBlock,
+	type TranscriptPresentation,
+	type TranscriptPresenter,
 } from "@oh-my-pi/pi-tui/chat/extension-types";
 import type { type as ArkType } from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
@@ -68,6 +72,7 @@ import type {
 	AutocompleteProvider,
 	Component,
 	EditorTheme,
+	Keybinding,
 	KeyId,
 	OverlayHandle,
 	OverlayOptions,
@@ -146,7 +151,7 @@ import type {
 import type { SlashCommandInfo } from "../slash-commands";
 import type { TerminalLaunchRequest, TerminalLaunchResult } from "../../subprocess/terminal-launch";
 
-export type { OverlayHandle, OverlayOptions } from "@oh-my-pi/pi-tui";
+export type { Keybinding, OverlayHandle, OverlayOptions } from "@oh-my-pi/pi-tui";
 export type { AppKeybinding, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 export type { ExecOptions, ExecResult } from "../../exec/exec";
 export type { AgentToolResult, AgentToolUpdateCallback };
@@ -362,6 +367,15 @@ export interface ExtensionUIContext {
 	 * and only while `extensionRenderers.assistantText` is on; a no-op elsewhere.
 	 */
 	rerenderMessage(timestamp: number): void;
+
+	/**
+	 * Ask the transcript presenters again for the blocks with these ids (`TranscriptBlock.id`)
+	 * and redraw those whose display changed. omp re-asks on its own only when a block's data
+	 * changes; call this when the presenter's own state changes (an `agent_end` handler marking a
+	 * run's calls done, say). A changed block with rows already in terminal scrollback replays the
+	 * transcript once. Interactive mode only; a no-op elsewhere.
+	 */
+	refreshTranscript(ids: readonly string[]): void;
 
 	/**
 	 * True while a link whose scheme an extension registered can be picked to raise `link_activate`:
@@ -1788,6 +1802,20 @@ export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family exte
 		: ServiceTier;
 
 /**
+ * What holds a keyboard chord, as reported by {@link ExtensionAPI.getShortcutConflict}.
+ *
+ * - `reserved`: omp keeps the chord; a shortcut on it is never bound.
+ * - `keybinding`: these keymap actions are bound to it in the main editor: `app.*` actions, which
+ *   usually take the key first where they apply, and `tui.editor.*` / `tui.input.*` editing keys,
+ *   which a shortcut on the chord would take over.
+ * - `extension`: another extension's shortcut is on it; only one of them runs.
+ */
+export type ShortcutConflict =
+	| { kind: "reserved" }
+	| { kind: "keybinding"; keybindings: Keybinding[] }
+	| { kind: "extension"; extensionPath: string };
+
+/**
  * ExtensionAPI passed to extension factory functions.
  *
  * Methods retain their extension binding when destructured or passed as callbacks.
@@ -1977,6 +2005,19 @@ export interface ExtensionAPI {
 		},
 	): void;
 
+	/**
+	 * What already holds `shortcut`, or `undefined` when it is free. Chords compare as the TUI matches
+	 * them (`alt+ctrl+x` is `ctrl+alt+x`; `?` also covers `shift+?`); this extension's own
+	 * registrations don't count. The first of `reserved`, `keybinding`, `extension` is reported.
+	 * Keybindings come from this session's TUI keymap (user remaps included), or omp's defaults
+	 * without a TUI.
+	 *
+	 * Throws while extensions are loading, so call it from a handler, not the factory. Shortcuts are
+	 * bound before `session_start`, so a chord validated there applies once the factory registers it
+	 * on the next start.
+	 */
+	getShortcutConflict(shortcut: KeyId): ShortcutConflict | undefined;
+
 	/** Register a CLI flag. */
 	registerFlag(
 		name: string,
@@ -2011,6 +2052,24 @@ export interface ExtensionAPI {
 	 * only while the `extensionRenderers.assistantText` setting is on.
 	 */
 	registerAssistantTextRenderer(renderer: AssistantTextRenderer): void;
+
+	/**
+	 * Choose how the main session's transcript blocks are drawn (see {@link TranscriptBlock}).
+	 * Presenters are asked in extension load order, the first answer other than `undefined` wins;
+	 * a suspended extension's presenter is skipped. One that throws or answers anything but a
+	 * {@link TranscriptPresentation} (a Promise included) is reported once and draws the block in
+	 * full. Never mutate the block's `args` or `result`: they are omp's live objects. omp may ask
+	 * again at any time (a transcript rebuild, a data change) and keeps no earlier answer: answer
+	 * from the block and the extension's own state only, keyed by block id rather than by run. A
+	 * block the user expanded is always drawn in full, and `display.hideToolActivity` still hides
+	 * tool activity. A focused subagent, a collab guest and the transcript overlays draw stock
+	 * cards. Display only: the session, exports and model context are unchanged. Returns a
+	 * disposer that removes the presenter. Presenters run synchronously while the transcript draws,
+	 * so keep them cheap. Interactive mode only, and only while the
+	 * `extensionRenderers.transcriptPresenters` setting is on; elsewhere the presenter is registered
+	 * but never asked.
+	 */
+	registerTranscriptPresenter(presenter: TranscriptPresenter): () => void;
 
 	/**
 	 * Claim a link scheme (e.g. `"cc-stretch"` for `cc-stretch:…` links). In a plain terminal,
@@ -2235,7 +2294,7 @@ export interface ProviderModelConfig {
 	contextWindow: number;
 	/** Maximum output tokens. */
 	maxTokens: number;
-	/** Whether Codex requests should prefer WebSocket transport. */
+	/** WebSocket preference within catalog policy; explicit false disables transport selection. */
 	preferWebsockets?: boolean;
 	/** Custom headers for this model. */
 	headers?: Record<string, string>;
@@ -2330,6 +2389,8 @@ export interface ExtensionRuntimeState {
 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void;
 	/** Remove a queued or initialized provider registration. */
 	unregisterProvider(name: string, sourceId: string): void;
+	/** What holds `shortcut` for the extension at `extensionPath`; answered by the runner once it exists. */
+	getShortcutConflict(shortcut: KeyId, extensionPath: string): ShortcutConflict | undefined;
 }
 
 /** Action implementations for ExtensionAPI methods. */
@@ -2366,6 +2427,8 @@ export interface ExtensionContextActions {
 	getPendingPlanReview?: () => PlanReviewRequestedEvent | undefined;
 	openPlanReview?: () => Promise<boolean>;
 	sessionModes?: ExtensionSessionModes;
+	/** The host's effective keymap, user remaps included; omitted outside the TUI, where omp's default keymap applies. */
+	keybindings?: KeybindingsManager;
 	getContextUsage: () => ContextUsage | undefined;
 	compact: (instructionsOrOptions?: string | CompactOptions) => Promise<void>;
 	getSystemPrompt: () => string[];
@@ -2404,6 +2467,8 @@ export interface Extension {
 	toolRegistrationListeners?: Set<ToolRegistrationListener>;
 	assistantThinkingRenderers: AssistantThinkingRenderer[];
 	assistantTextRenderers: AssistantTextRenderer[];
+	/** Presenters registered with `registerTranscriptPresenter`, in registration order. */
+	transcriptPresenters: TranscriptPresenter[];
 	/** Link schemes claimed with `registerLinkScheme`, lowercase. */
 	linkSchemes: string[];
 	fileWriteFallbackHandlers: FileWriteFallbackHandler[];

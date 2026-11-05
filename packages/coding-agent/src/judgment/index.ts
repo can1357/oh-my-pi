@@ -59,7 +59,7 @@ import { cfgJudgmentAttemptTimeoutMs } from "../config/model-settings";
 import { formatModelStringWithRouting, resolveRoleChain, type RoleChainCandidate } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
 import type { Settings } from "../config/settings";
-import type { CostGate } from "../session/cost-gate";
+import type { CostGateApi } from "../session/cost-gate";
 import type { SessionManager } from "../session/session-manager";
 import { getTinyLocalModelSpec } from "../tiny/models";
 import localPromptTemplate from "../prompts/system/judgment-local.md" with { type: "text" };
@@ -82,6 +82,8 @@ export interface JudgmentUsage {
 	errorMessage?: string;
 	/** The server's retry wait (ms) the failed attempt stated; `errorMessage` never carries it. */
 	errorRetryAfterMs?: number;
+	/** `errorMessage` as omp showed it, when that differs. Display only. */
+	errorDisplayMessage?: string;
 }
 
 export interface JudgeDeps {
@@ -103,7 +105,7 @@ export interface JudgeDeps {
 	/** Answer cache for native judgments; omitted runs every question against the provider. */
 	cache?: JudgmentCache;
 	/** The session tree's cost gate: refuses each candidate attempt at the cap and adds billed attempts' cost. */
-	costGate?: CostGate;
+	costGate?: CostGateApi;
 }
 
 /**
@@ -515,7 +517,7 @@ export class ChainJudge implements Judge {
 					timeouts.set(timeoutKey, Date.now() + CANDIDATE_TIMEOUT_COOLDOWN_MS);
 					timedOutBefore = true;
 				}
-				lastFailure = error instanceof Error ? error.message : String(error);
+				lastFailure = AIError.thrownErrorDisplayText(error);
 				logger.warn("judgment candidate failed", {
 					candidate: identity,
 					status: AIError.status(error),
@@ -630,6 +632,7 @@ export class ChainJudge implements Judge {
 					stopReason: attempt.stopReason,
 					errorMessage: attempt.errorMessage,
 					errorRetryAfterMs: attempt.errorRetryAfterMs,
+					errorDisplayMessage: attempt.errorDisplayMessage,
 					startedAt: attempt.timestamp,
 				}),
 		});
@@ -765,6 +768,7 @@ function nativeJudge(
 						stopReason: isAbortOrTimeout(error) ? "aborted" : "error",
 						errorMessage: error instanceof Error ? error.message : String(error),
 						errorRetryAfterMs: retryAfterMsOf(error),
+						errorDisplayMessage: AIError.thrownErrorDisplayText(error),
 					});
 					throw error;
 				}

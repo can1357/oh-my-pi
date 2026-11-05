@@ -81,6 +81,7 @@ export function logProviderTurnError(msg: AssistantMessage): void {
 		model: msg.model,
 		errorMessage: msg.errorMessage,
 		retryAfterMs: msg.errorRetryAfterMs,
+		errorDisplayMessage: msg.errorDisplayMessage,
 		errorStatus: msg.errorStatus,
 		errorId: msg.errorId,
 	});

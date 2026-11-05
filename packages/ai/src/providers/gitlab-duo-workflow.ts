@@ -1082,7 +1082,7 @@ async function runGitLabDuoWorkflow(
 			state.goalOverflowMessage ?? state.output.errorMessage ?? GITLAB_DUO_WORKFLOW_STALL_ERROR_MESSAGE,
 			{ provider: "gitlab-duo-agent", kind: "output" },
 		);
-		if (await replayBudget.replayAfter(stall, 0, options.signal, options.providerRetryWait)) {
+		if (await replayBudget.replayAfter(stall, 0, options.signal, options)) {
 			replacedRun = { result: "stalled", errorMessage: state.output.errorMessage };
 			return true;
 		}
@@ -1409,10 +1409,7 @@ async function runGitLabDuoWorkflow(
 	// The dead workflow is stopped either way.
 	const restartAsFreshWorkflow = async (): Promise<boolean> => {
 		await stopGitLabDuoWorkflow(fetchImpl, baseUrl, apiKey, workflowId);
-		if (
-			replayBudget &&
-			!(await replayBudget.replayAfter(state.output.errorMessage, 0, options.signal, options.providerRetryWait))
-		) {
+		if (replayBudget && !(await replayBudget.replayAfter(state.output.errorMessage, 0, options.signal, options))) {
 			replayBudget.stamp(state.output);
 			return false;
 		}
@@ -1541,7 +1538,7 @@ async function runGitLabDuoWorkflow(
 				traceGitLabDuoWorkflow("websocket.generic_error_retry", { workflowId, retry: genericErrorRetries });
 				if (await restartAsFreshWorkflow()) {
 					// Clear the stashed message: it only surfaces if the retry also fails.
-					state.output.errorMessage = undefined;
+					AIError.clearErrorText(state.output);
 					continue;
 				}
 			}

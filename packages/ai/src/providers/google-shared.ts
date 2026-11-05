@@ -2,7 +2,6 @@
  * Shared utilities for Google Generative AI and Google Cloud Code Assist providers.
  */
 
-import { scheduler } from "node:timers/promises";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { findRetryRefusal, readSseJson, type SseEventObserver } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
@@ -29,7 +28,8 @@ import { normalizeSystemPrompts, normalizeToolCallId } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs } from "../utils/idle-iterator";
-import { admitsReplay, gateFetch, ReplayBudget, restoreReplaced } from "../utils/replay-budget";
+import { admitsReplay, gateFetch, ReplayBudget, restoreReplaced, sleepUnderBudget } from "../utils/replay-budget";
+import { providerRetryPolicy, statedRetryWaitLimit } from "../utils/retry-wait";
 import { normalizeSchemaForCCA, normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
 import type {
 	Content,
@@ -467,6 +467,7 @@ export function mapStopReason(reason: FinishReason): StopReason {
 		case "OTHER":
 		case "LANGUAGE":
 		case "MALFORMED_FUNCTION_CALL":
+		case "MALFORMED_RESPONSE":
 		case "UNEXPECTED_TOOL_CALL":
 		case "NO_IMAGE":
 			return "error";
@@ -527,7 +528,7 @@ function resetGoogleStreamOutputForRetry(output: AssistantMessage): void {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 	output.stopReason = "stop";
-	output.errorMessage = undefined;
+	AIError.clearErrorText(output);
 	output.timestamp = Date.now();
 }
 
@@ -798,6 +799,7 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 	const textBlocks = new GoogleTextBlocks(output, stream, "healed");
 	let firstTokenSeen = false;
 	let sawFinishReason = false;
+	let finishErrorId: number | undefined;
 
 	for await (const chunk of googleStream) {
 		if (chunk.error) throw googleStreamChunkError(chunk.error, model.provider);
@@ -850,6 +852,9 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 				output.stopReason = mapped;
 				if (mapped === "error") {
 					output.errorMessage = `Generation failed with finish reason: ${candidate.finishReason}`;
+					// A backend fault, not a verdict on the request: the same request can succeed.
+					finishErrorId =
+						candidate.finishReason === "MALFORMED_RESPONSE" ? AIError.create(AIError.Flag.Transient) : undefined;
 				}
 			}
 		}
@@ -874,10 +879,11 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 	}
 
 	if (output.stopReason === "aborted" || output.stopReason === "error") {
-		throw new AIError.ProviderResponseError(output.errorMessage ?? "An unknown error occurred", {
+		const error = new AIError.ProviderResponseError(output.errorMessage ?? "An unknown error occurred", {
 			provider: model.provider,
 			kind: "output",
 		});
+		throw finishErrorId === undefined ? error : AIError.attach(error, finishErrorId);
 	}
 }
 
@@ -1132,10 +1138,7 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 				} catch (error) {
 					if (findRetryRefusal(error)) throw restoreReplaced(error);
 					if (error instanceof AIError.GoogleApiError && error.status === 404) {
-						if (
-							replayBudget &&
-							!(await replayBudget.replayAfter(error, 0, options?.signal, options?.providerRetryWait))
-						) {
+						if (replayBudget && !(await replayBudget.replayAfter(error, 0, options?.signal, options))) {
 							throw error;
 						}
 						return openStreamAt(plan.fallbackUrl);
@@ -1176,7 +1179,10 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 				) {
 					break;
 				}
-				const emptyRetryDelayMs = EMPTY_STREAM_BASE_DELAY_MS * 2 ** emptyAttempt;
+				const emptyRetryDelayMs = Math.min(
+					EMPTY_STREAM_BASE_DELAY_MS * 2 ** emptyAttempt,
+					statedRetryWaitLimit(providerRetryPolicy(options)).limitMs,
+				);
 				const emptyFailure = new AIError.ProviderResponseError(
 					`Google API returned an empty response (finishReason STOP with no content) after ${emptyAttempt + 1} attempts`,
 					{ provider: model.provider, kind: "empty-body" },
@@ -1184,20 +1190,15 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 				if (emptyAttempt >= MAX_EMPTY_STREAM_RETRIES || !admitsReplay(replayBudget, emptyRetryDelayMs)) {
 					throw emptyFailure;
 				}
-				if (replayBudget) {
-					// Raced against the deadline: a wait that cannot finish inside it
-					// refuses the replay. The replay's request is checked again at handoff.
-					if (!(await replayBudget.wait(emptyRetryDelayMs, options?.signal, options?.providerRetryWait))) {
+				try {
+					if (!(await sleepUnderBudget(replayBudget, options, emptyRetryDelayMs, options?.signal))) {
 						throw emptyFailure;
 					}
-					replayBudget.arm(emptyFailure);
-				} else {
-					try {
-						await scheduler.wait(emptyRetryDelayMs, { signal: options?.signal });
-					} catch {
-						throw new AIError.AbortError();
-					}
+				} catch (error) {
+					if (options?.signal?.aborted) throw new AIError.AbortError();
+					throw error;
 				}
+				replayBudget?.arm(emptyFailure);
 				resetGoogleStreamOutputForRetry(output);
 				body = await openStream();
 			}
@@ -1213,15 +1214,12 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 				rawRequestDump,
 				streamResponseHeaders,
 			});
-			output.stopReason = result.stopReason;
-			output.errorStatus = result.status;
-			output.errorId = result.id;
-			output.errorMessage = result.message;
-			output.errorRetryAfterMs = result.retryAfterMs;
+			AIError.applyFinalizeResult(output, result);
 			replayBudget?.stamp(output);
+			output.errorRetryWaitRefusal = result.retryWaitRefusal;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
-			stream.push({ type: "error", reason: output.stopReason, error: output });
+			stream.push({ type: "error", reason: result.stopReason, error: output });
 			stream.end();
 		}
 	})();

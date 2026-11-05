@@ -292,7 +292,7 @@ describe("arm ownership", () => {
 				writes++;
 				return new Response("ok");
 			},
-			budget,
+			{ replayBudget: budget },
 		);
 		const wrapper = budget.gateFetch(async (input, init) => {
 			clock.advance(200);
@@ -469,7 +469,11 @@ describe("the wait before a replay", () => {
 		const clock = fakeClock();
 		const budget = budgetOf(1_000);
 		const replaced = new Error("503");
-		expect(await budget.replayAfterDelay(100, replaced, undefined, async ms => void clock.advance(ms))).toBe(true);
+		expect(
+			await budget.replayAfterDelay(100, replaced, undefined, {
+				providerRetryWait: async ms => void clock.advance(ms),
+			}),
+		).toBe(true);
 		clock.advance(2_000);
 		expect(() => budget.checkpoint()).toThrow(RetryRefusedError);
 	});
@@ -477,7 +481,11 @@ describe("the wait before a replay", () => {
 	it("replayAfterDelay refuses a named wait that would end past the budget, without waiting", async () => {
 		const budget = budgetOf(1_000);
 		const waits: number[] = [];
-		expect(await budget.replayAfterDelay(30_000, undefined, undefined, async ms => void waits.push(ms))).toBe(false);
+		expect(
+			await budget.replayAfterDelay(30_000, undefined, undefined, {
+				providerRetryWait: async ms => void waits.push(ms),
+			}),
+		).toBe(false);
 		expect(waits).toEqual([]);
 		expect(budget.admits(0)).toBe(false);
 	});

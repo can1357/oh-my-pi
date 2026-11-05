@@ -617,7 +617,8 @@ describe("Google empty-response retry (Cloud Code Assist path)", () => {
 
 		expect(requestedEndpoints).toEqual([ANTIGRAVITY_DAILY_ENDPOINT]);
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toContain("Account verification required");
+		expect(result.errorMessage).not.toContain("Account verification required");
+		expect(AIError.errorDisplayText(result)).toContain("Account verification required");
 	});
 
 	it("does not fail over after partial output has started", async () => {

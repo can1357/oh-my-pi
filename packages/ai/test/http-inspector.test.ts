@@ -5,7 +5,7 @@ import * as path from "node:path";
 import {
 	buildHttp400DumpPayload,
 	type CapturedHttpErrorResponse,
-	finalizeErrorMessage,
+	finalizeErrorDisplayMessage,
 	pruneHttpRequestDumps,
 	type RawHttpRequestDump,
 	rewriteClinePassError,
@@ -175,15 +175,19 @@ describe("rewriteClinePassError", () => {
 	});
 });
 
-describe("finalizeErrorMessage", () => {
+describe("finalizeErrorDisplayMessage", () => {
 	it("prints a provider body the thrown message already carries once while keeping the type/param suffix", async () => {
-		const message = await finalizeErrorMessage(new Error(`403 ${MUSE_DENIAL_BODY}`), undefined, MUSE_DENIAL_RESPONSE);
+		const message = await finalizeErrorDisplayMessage(
+			new Error(`403 ${MUSE_DENIAL_BODY}`),
+			undefined,
+			MUSE_DENIAL_RESPONSE,
+		);
 
 		expect(occurrences(message, MUSE_DENIAL_BODY)).toBe(1);
 		expect(message.endsWith(MUSE_DENIAL_SUFFIX)).toBe(true);
 	});
 	it("keeps the type/param suffix the thrown message already carries instead of repeating it", async () => {
-		const message = await finalizeErrorMessage(
+		const message = await finalizeErrorDisplayMessage(
 			new Error(`403 ${MUSE_DENIAL_BODY}${MUSE_DENIAL_SUFFIX}`),
 			undefined,
 			MUSE_DENIAL_RESPONSE,
@@ -194,7 +198,7 @@ describe("finalizeErrorMessage", () => {
 
 	it("restores the full captured body over a truncated copy instead of appending a second copy", async () => {
 		const truncated = MUSE_DENIAL_BODY.slice(0, 60);
-		const message = await finalizeErrorMessage(new Error(`403 ${truncated}`), undefined, MUSE_DENIAL_RESPONSE);
+		const message = await finalizeErrorDisplayMessage(new Error(`403 ${truncated}`), undefined, MUSE_DENIAL_RESPONSE);
 
 		expect(message).toBe(`403 ${MUSE_DENIAL_BODY}${MUSE_DENIAL_SUFFIX}`);
 		expect(occurrences(message, MUSE_DENIAL_BODY)).toBe(1);
@@ -209,7 +213,7 @@ describe("finalizeErrorMessage", () => {
 			bodyJson: payload,
 			headers: new Headers({ "retry-after-ms": "1000" }),
 		};
-		const message = await finalizeErrorMessage(new Error(`429 ${core.slice(0, 4096)}`), undefined, captured);
+		const message = await finalizeErrorDisplayMessage(new Error(`429 ${core.slice(0, 4096)}`), undefined, captured);
 
 		// The header's wait travels structured (`errorRetryAfterMs`), never in the text.
 		expect(message).toBe(`429 ${core} (type=rate_limit)`);
@@ -218,7 +222,7 @@ describe("finalizeErrorMessage", () => {
 	it("replaces a bodyless status line with the captured payload and writes no retry wait", async () => {
 		const headers = new Headers({ "retry-after-ms": "250" });
 		const captured: CapturedHttpErrorResponse = { ...MUSE_DENIAL_RESPONSE, headers };
-		const message = await finalizeErrorMessage(new Error("403 status code (no body)"), undefined, captured);
+		const message = await finalizeErrorDisplayMessage(new Error("403 status code (no body)"), undefined, captured);
 
 		expect(message).toBe(`403 status code: ${MUSE_DENIAL_BODY}${MUSE_DENIAL_SUFFIX}`);
 	});
@@ -227,7 +231,7 @@ describe("finalizeErrorMessage", () => {
 		const core = "403 forbidden by upstream policy";
 		const payload = { error: { message: core, type: "permission_error" } };
 		const captured: CapturedHttpErrorResponse = { status: 403, bodyText: JSON.stringify(payload), bodyJson: payload };
-		const message = await finalizeErrorMessage(new Error("403 403"), undefined, captured);
+		const message = await finalizeErrorDisplayMessage(new Error("403 403"), undefined, captured);
 
 		expect(message).toBe(`403 ${core} (type=permission_error)`);
 	});
@@ -235,7 +239,7 @@ describe("finalizeErrorMessage", () => {
 	it("joins a provider body the thrown message does not carry", async () => {
 		const payload = { message: "upstream exploded" };
 		const captured: CapturedHttpErrorResponse = { status: 500, bodyText: JSON.stringify(payload), bodyJson: payload };
-		const message = await finalizeErrorMessage(new Error("500 boom"), undefined, captured);
+		const message = await finalizeErrorDisplayMessage(new Error("500 boom"), undefined, captured);
 
 		expect(message).toBe("500 boom\nupstream exploded");
 	});

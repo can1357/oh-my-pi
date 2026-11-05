@@ -73,6 +73,23 @@ function contentAttempt(): AssistantMessageEventStream {
 	] as unknown as AssistantMessageEvent[]);
 }
 
+/**
+ * A pre-output 429 whose response headers stated a wait: `AIError.finalize`
+ * sets it as `errorRetryAfterMs`. The message text names no wait, so the loop
+ * must read the structured field, not a hint appended to the text.
+ */
+function statedWaitErrorAttempt(retryAfterMs: number): AssistantMessageEventStream {
+	const message = assistant();
+	message.stopReason = "error";
+	message.errorStatus = 429;
+	message.errorMessage = "429 Too many requests";
+	message.errorRetryAfterMs = retryAfterMs;
+	return streamFromEvents([
+		{ type: "start", partial: message },
+		{ type: "error", reason: "error", error: message },
+	]);
+}
+
 async function drain(stream: AssistantMessageEventStream): Promise<AssistantMessageEvent[]> {
 	const events: AssistantMessageEvent[] = [];
 	for await (const event of stream) events.push(event);
@@ -372,6 +389,138 @@ describe("withReplaySafeStreamRetry", () => {
 		expect(attempts).toBe(2);
 		expect(events.filter(event => event.type === "start")).toHaveLength(1);
 		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+	});
+
+	it("surfaces a provider error whose stated wait exceeds maxRetryDelayMs without retrying", async () => {
+		let attempts = 0;
+		const waits: number[] = [];
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ maxRetryDelayMs: 1, providerRetryWait: async (ms: number) => void waits.push(ms) },
+			() => {
+				attempts++;
+				return attempts > 1 ? contentAttempt() : statedWaitErrorAttempt(9_000);
+			},
+			{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+		);
+
+		const events = await drain(stream);
+		const result = await stream.result();
+
+		expect(attempts).toBe(1);
+		expect(waits).toEqual([]);
+		expect(events.at(-1)?.type).toBe("error");
+		expect(result.stopReason).toBe("error");
+		expect(result.errorRetryAfterMs).toBe(9_000);
+	});
+
+	it("waits a provider error's stated wait when it outlasts the backoff within maxRetryDelayMs", async () => {
+		let attempts = 0;
+		const waits: number[] = [];
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ maxRetryDelayMs: 1_000, providerRetryWait: async (ms: number) => void waits.push(ms) },
+			() => {
+				attempts++;
+				return attempts > 1 ? contentAttempt() : statedWaitErrorAttempt(800);
+			},
+			{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+		);
+
+		const result = await stream.result();
+
+		expect(attempts).toBe(2);
+		expect(waits).toEqual([800]);
+		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+	});
+
+	describe("the providerRetryWaitCeilingMs opt-in", () => {
+		const FIVE_MINUTES_MS = 5 * 60 * 1_000;
+		const REFUSAL_NOTE =
+			"(server asked to wait 15 s before retrying; the caller's 10 s providerRetryWaitCeilingMs refused it, so the provider did not retry)";
+
+		/** One failed attempt stating 15 s under `capMs` (5 minutes by default), then content. */
+		async function run(ceilingMs: number | undefined, capMs = FIVE_MINUTES_MS) {
+			let attempts = 0;
+			const waits: number[] = [];
+			const stream = withReplaySafeStreamRetry(
+				{},
+				CTX,
+				{
+					maxRetryDelayMs: capMs,
+					providerRetryWaitCeilingMs: ceilingMs,
+					providerRetryWait: async (ms: number) => void waits.push(ms),
+				},
+				() => {
+					attempts++;
+					return attempts > 1 ? contentAttempt() : statedWaitErrorAttempt(15_000);
+				},
+				{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+			);
+			const result = await stream.result();
+			return { attempts, waits, result };
+		}
+
+		it("unset: sleeps a stated 15 s, as before", async () => {
+			const { attempts, waits, result } = await run(undefined);
+
+			expect(attempts).toBe(2);
+			expect(waits).toEqual([15_000]);
+			expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+		});
+
+		it("set to 20 s and not exceeded: sleeps a stated 15 s", async () => {
+			const { attempts, waits } = await run(20_000);
+
+			expect(attempts).toBe(2);
+			expect(waits).toEqual([15_000]);
+		});
+
+		it("set to 10 s and exceeded: surfaces a stated 15 s after one attempt, saying so, with its wait and classification kept", async () => {
+			const { attempts, waits, result } = await run(10_000);
+
+			expect(attempts).toBe(1);
+			expect(waits).toEqual([]);
+			expect(result.stopReason).toBe("error");
+			expect(result.errorDisplayMessage).toBe(`429 Too many requests ${REFUSAL_NOTE}`);
+			expect(result.errorMessage).toBe("429 Too many requests");
+			expect(result.errorRetryAfterMs).toBe(15_000);
+			expect(result.errorStatus).toBe(429);
+		});
+
+		it("set to 20 s above a 10 s maxRetryDelayMs: the smaller cap still refuses a stated 15 s, and the note names it", async () => {
+			const { attempts, waits, result } = await run(20_000, 10_000);
+
+			expect(attempts).toBe(1);
+			expect(waits).toEqual([]);
+			expect(result.errorMessage).toBe("429 Too many requests");
+			expect(result.errorDisplayMessage).toBe(
+				"429 Too many requests (server asked to wait 15 s before retrying; the 10 s maxRetryDelayMs refused it, so the provider did not retry)",
+			);
+		});
+
+		it("set to 600 ms: its own 1 s backoff sleeps 600 ms, so the loop's sleep stays inside the ceiling", async () => {
+			// The ceiling bounds the sleep, not one source of it: the loop's own
+			// backoff is shortened to it, where a server's longer wait is refused.
+			let attempts = 0;
+			const waits: number[] = [];
+			const stream = withReplaySafeStreamRetry(
+				{},
+				CTX,
+				{ providerRetryWaitCeilingMs: 600, providerRetryWait: async (ms: number) => void waits.push(ms) },
+				() => {
+					attempts++;
+					return attempts <= MAX_EMPTY_COMPLETION_RETRIES ? emptyAttempt() : contentAttempt();
+				},
+				{ retryEmptyCompletion: true },
+			);
+			await stream.result();
+
+			expect(attempts).toBe(MAX_EMPTY_COMPLETION_RETRIES + 1);
+			expect(waits).toEqual([500, 600]);
+		});
 	});
 
 	interface CountedAttemptOptions {

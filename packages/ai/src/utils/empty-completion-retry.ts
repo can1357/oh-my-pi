@@ -11,13 +11,21 @@
  *
  * Empty-completion retries remain opt-in because a normal empty stop can be a
  * valid provider result. Transient-error retries use the shared provider error
- * classifier and are separately bounded by the caller's policy.
+ * classifier, are separately bounded by the caller's policy, and wait at least
+ * as long as the provider stated (a stated wait past `maxRetryDelayMs`, or a
+ * set `providerRetryWaitCeilingMs`, surfaces the failure instead).
  */
 import * as AIError from "../error";
 import type { AssistantMessage, AssistantMessageEvent, Context, FetchImpl } from "../types";
 import { AssistantMessageEventStream } from "./event-stream";
-import { longestServerWaitMs, ReplayBudget, type ReplayArm } from "./replay-budget";
-import { waitForRetry } from "./retry-wait";
+import { longestServerWaitMs, ReplayBudget, type ReplayArm, sleepUnderBudget } from "./replay-budget";
+import { providerRetryWaitMs, retryWaitBounds } from "./retry-after";
+import {
+	DEFAULT_MAX_RETRY_DELAY_MS,
+	hasRefusedRetryWaitNote,
+	refusedRetryWaitNote,
+	retryWaitRefusal,
+} from "./retry-wait";
 import { withWireCount } from "./wire-attempts";
 
 export const MAX_EMPTY_COMPLETION_RETRIES = 2;
@@ -65,12 +73,14 @@ interface StreamRetryOptions {
 	acceptEmptyResponse?: boolean;
 	replayBudgetMs?: number;
 	fetch?: FetchImpl;
+	maxRetryDelayMs?: number;
+	providerRetryWaitCeilingMs?: number;
 }
 
 /** Controls which replay-safe provider results may issue a fresh request. */
 export interface ReplaySafeStreamRetryPolicy {
 	/** Retry benign terminal stops that contain no visible output. */
-	retryEmptyCompletion?: boolean;
+	retryEmptyCompletion?: boolean | (() => boolean);
 	/** Retry transient provider errors before output is committed. */
 	retryProviderErrors?: boolean;
 	/** Maximum transient provider-error retries; empty completions keep their shared fixed budget. */
@@ -199,7 +209,9 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 			// here would spend it again.
 			const attemptExhaustedBudget = (completedMessage ?? failedMessage)?.replayBudgetExhausted === true;
 			const retryEmpty =
-				policy.retryEmptyCompletion === true &&
+				(typeof policy.retryEmptyCompletion === "function"
+					? policy.retryEmptyCompletion()
+					: policy.retryEmptyCompletion === true) &&
 				options?.acceptEmptyResponse !== true &&
 				!committed &&
 				completedMessage !== undefined &&
@@ -216,16 +228,29 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				!committed &&
 				failedMessage?.stopReason === "error" &&
 				failedMessage.errorMessage !== undefined &&
+				failedMessage.errorRetryWaitRefusal === undefined &&
 				providerErrorRetries < (policy.maxProviderErrorRetries ?? 0) &&
 				AIError.isProviderRetryableError(
 					new FinalizedProviderStreamError(failedMessage.errorMessage, failedMessage.errorStatus),
 				) &&
 				!attemptExhaustedBudget;
 
+			// A provider error waits at least the wait its failed attempt stated, read
+			// as session retry reads it: the response headers' wait
+			// (`errorRetryAfterMs`) with the message's relative waits beside it, else
+			// the message's text. A wait past the caller's bounds surfaces the failure.
+			const statedWaitMs = retryProviderError
+				? providerRetryWaitMs(
+						failedMessage?.provider,
+						failedMessage?.errorMessage,
+						failedMessage?.errorRetryAfterMs,
+					)
+				: undefined;
 			let delayMs = retryEmpty
 				? EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** emptyRetries
-				: retryProviderError
-					? EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** providerErrorRetries
+				: retryProviderError &&
+					  !retryWaitBounds(options, DEFAULT_MAX_RETRY_DELAY_MS).declines(statedWaitMs, failedMessage)
+					? Math.max(statedWaitMs ?? 0, EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** providerErrorRetries)
 					: undefined;
 			if (retryProviderError && budget && delayMs !== undefined) {
 				// Under a budget the server's own wait governs: replaying a hinted
@@ -249,8 +274,7 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 			if (delayMs !== undefined && !signal?.aborted) {
 				let admitted = true;
 				try {
-					if (budget) admitted = await budget.wait(delayMs, signal, options?.providerRetryWait);
-					else await waitForRetry(options?.providerRetryWait, delayMs, signal);
+					admitted = await sleepUnderBudget(budget, options, delayMs, signal);
 				} catch (waitError) {
 					flush();
 					if (signal?.aborted) {
@@ -277,7 +301,7 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 
 			flush();
 			if (terminal) {
-				forwardTerminal(terminal);
+				forwardTerminal(retryProviderError && delayMs === undefined ? withRefusalNote(terminal) : terminal);
 			} else if (!outer.done) {
 				try {
 					outer.end(await inner.result());
@@ -289,6 +313,32 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 		}
 	})();
 	return outer;
+}
+
+/**
+ * `event`, when this wrapper refused the wait its failed message states
+ * (`RetryWaitBounds.declines`), with the refusal said in the text a person
+ * reads, unless the layer below already said it.
+ *
+ * The note goes to `errorDisplayMessage` only, never to `errorMessage`: the
+ * provider's own text is what every classifier, retry decision and credential
+ * block reads, and appending to it is how a wait's digits once reached a
+ * classifier. A copy: the message belongs to the layer below.
+ */
+function withRefusalNote(event: AssistantMessageEvent): AssistantMessageEvent {
+	if (event.type !== "error") return event;
+	const refused = retryWaitRefusal(event.error);
+	const message = event.error.errorMessage;
+	if (refused === undefined || message === undefined) return event;
+	const shown = event.error.errorDisplayMessage ?? message;
+	return {
+		...event,
+		error: {
+			...event.error,
+			errorRetryWaitRefusal: refused,
+			errorDisplayMessage: hasRefusedRetryWaitNote(shown) ? shown : `${shown} ${refusedRetryWaitNote(refused)}`,
+		},
+	};
 }
 
 function terminalReplays(event: AssistantMessageEvent): number | undefined {

@@ -225,7 +225,7 @@ describe("task progress rendering", () => {
 		expect(row).toContain(`openai/gpt-5 ${theme.icon.advisor} BadgeWorker: Inspect rendering`);
 		expect(row).not.toContain(":high");
 		expect(row).toContain(`${theme.thinking.high.split(" ")[0]} openai/gpt-5`);
-		expect(row.indexOf(theme.status.done)).toBeLessThan(row.indexOf("openai/gpt-5"));
+		expect(row.indexOf(theme.status.running)).toBeLessThan(row.indexOf("openai/gpt-5"));
 		expect(row).toContain(`${theme.format.bracketLeft}scout${theme.format.bracketRight}`);
 		expect(row.indexOf("3 req")).toBeGreaterThan(row.indexOf("BadgeWorker"));
 		expect(row).toContain("$0.25");
@@ -357,7 +357,8 @@ describe("task progress rendering", () => {
 					"HiddenBadge",
 				),
 			);
-			expect(row).toContain(`${theme.status.done} HiddenBadge`);
+			const glyph = details.progress ? theme.status.running : theme.status.success;
+			expect(row).toContain(`${glyph} HiddenBadge`);
 			expect(row).not.toContain("openai/gpt-5");
 			expect(row).not.toContain(theme.icon.advisor);
 		}
@@ -430,12 +431,13 @@ describe("task progress rendering", () => {
 					"LegacyWorker",
 				),
 			);
-			expect(row).toContain(`${theme.status.done} custom/model:high LegacyWorker`);
+			const glyph = details.progress ? theme.status.running : theme.status.success;
+			expect(row).toContain(`${glyph} custom/model:high LegacyWorker`);
 			expect(row).not.toContain(theme.thinking.high.split(" ")[0]);
 		}
 	});
 
-	it("renders running task rows static with the agent dot", async () => {
+	it("renders running task rows with a static running glyph", async () => {
 		const theme = (await getThemeByName("dark"))!;
 		expect(theme).toBeDefined();
 		const options: RenderResultOptions = { expanded: false, isPartial: true, spinnerFrame: 0 };
@@ -457,9 +459,8 @@ describe("task progress rendering", () => {
 		const rawRow1 = renderRow(700);
 		const strippedRow = Bun.stripANSI(rawRow0);
 
-		expect(strippedRow).toContain(`${theme.status.done} CountPackages: List workspace packages`);
+		expect(strippedRow).toContain(`${theme.status.running} CountPackages: List workspace packages`);
 		expect(strippedRow).not.toContain(theme.symbol("tool.task"));
-		expect(strippedRow).not.toContain(theme.status.running);
 		expect(strippedRow).not.toContain(theme.getSpinnerFrames("status")[0]);
 		expect(rawRow0).toBe(rawRow1);
 	});
@@ -545,7 +546,7 @@ describe("task progress rendering", () => {
 		expect(header).not.toContain("scout, sonic");
 	});
 
-	it("keeps the agent dot when shimmer is disabled", async () => {
+	it("keeps the static running glyph when shimmer is disabled", async () => {
 		const theme = (await getThemeByName("dark"))!;
 		setShimmerMode("disabled");
 		const options: RenderResultOptions = { expanded: false, isPartial: true, spinnerFrame: 0 };
@@ -561,12 +562,11 @@ describe("task progress rendering", () => {
 			),
 		);
 
-		expect(strippedRow).toContain(`${theme.status.done} KeySettingsHotPaths`);
-		expect(strippedRow).not.toContain(theme.status.running);
+		expect(strippedRow).toContain(`${theme.status.running} KeySettingsHotPaths`);
 		expect(strippedRow).not.toContain(theme.getSpinnerFrames("status")[0]);
 	});
 
-	it("renders pending task rows with the agent dot, not the pending glyph", async () => {
+	it("renders pending task rows with the pending glyph", async () => {
 		const theme = (await getThemeByName("dark"))!;
 		const options: RenderResultOptions = { expanded: false, isPartial: true, spinnerFrame: 0 };
 		const progress = runningProgress({
@@ -591,12 +591,11 @@ describe("task progress rendering", () => {
 		const rawRow1 = renderRow(700);
 		const strippedRow = Bun.stripANSI(rawRow0);
 
-		expect(strippedRow).toContain(`${theme.status.done} BestGpt: Combine winners for gpt`);
-		expect(strippedRow).not.toContain(theme.status.pending);
+		expect(strippedRow).toContain(`${theme.status.pending} BestGpt: Combine winners for gpt`);
 		expect(rawRow0).toBe(rawRow1);
 	});
 
-	it("settles completed rows to the foreground color with the same dot", async () => {
+	it("settles completed rows to the success glyph and the foreground color", async () => {
 		const theme = (await getThemeByName("dark"))!;
 		const options: RenderResultOptions = { expanded: false, isPartial: true, spinnerFrame: 0 };
 		const progress = runningProgress({
@@ -615,10 +614,9 @@ describe("task progress rendering", () => {
 		);
 
 		const stripped = Bun.stripANSI(row);
-		expect(stripped).toContain(`${theme.status.done} DonePkg: List workspace packages`);
+		expect(stripped).toContain(`${theme.status.success} DonePkg: List workspace packages`);
 		expect(stripped).not.toContain(theme.symbol("tool.task"));
-		// Same dot as live rows; completion reads as the label settling from
-		// accent to the plain foreground color.
+		// Completion swaps the glyph and settles the label from accent to the plain foreground color.
 		const titlePart = `${theme.bold("DonePkg")}: List workspace packages`;
 		expect(row).toContain(theme.fg("text", titlePart));
 		expect(row).not.toContain(theme.fg("accent", titlePart));
@@ -882,6 +880,133 @@ describe("task progress rendering", () => {
 		});
 		expect(failed).toContain("429 rate_limit_error (retry after 30.0s)");
 	});
+
+	// The `400 <JSON body>` an Anthropic rejection arrives as. Retry events carry
+	// this provider text; the task's display error adds omp's request-dump line,
+	// whose path holds a newline, so it wraps.
+	const creditBalanceProviderError =
+		'400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."},"request_id":"req_011CgbLuqzvWZWRDTHtaVVMj"}';
+	const creditBalanceDisplayError = `${creditBalanceProviderError}\nraw-http-request=/tmp/omp\nlogs/http-400-requests/1.json`;
+
+	it("names what a waiting subagent waits for, not the provider's JSON envelope", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const progress = runningProgress({
+			retryState: {
+				attempt: 3,
+				maxAttempts: 10,
+				delayMs: 30_000,
+				errorMessage: creditBalanceProviderError,
+				startedAtMs: Date.now(),
+			},
+		});
+		const row = Bun.stripANSI(
+			findRow(
+				taskToolRenderer.renderResult(
+					{ content: [], details: detailsFor(progress) },
+					{ expanded: false, isPartial: true },
+					theme,
+				),
+				"retrying 3/10",
+			),
+		);
+
+		expect(row).toMatch(/retrying 3\/10 in [\d.]+s: 400 Your credit balance is too low/);
+		expect(row).not.toContain('{"type"');
+	});
+
+	it("names the provider's reason when a subagent's retries ran out", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const progress = runningProgress({
+			status: "failed",
+			retryFailure: {
+				attempt: 10,
+				errorMessage: creditBalanceProviderError,
+			},
+		});
+		const row = Bun.stripANSI(
+			findRow(
+				taskToolRenderer.renderResult(
+					{ content: [], details: detailsFor(progress) },
+					{ expanded: false, isPartial: true },
+					theme,
+				),
+				"auto-retry gave up",
+			),
+		);
+
+		expect(row).toContain("auto-retry gave up after 10 attempts: 400 Your credit balance is too low");
+	});
+
+	it("names the provider reason after a subagent's retries run out", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const text = Bun.stripANSI(
+			taskToolRenderer
+				.renderResult(
+					{
+						content: [],
+						details: {
+							projectAgentsDir: null,
+							totalDurationMs: 0,
+							results: [
+								finishedResult({
+									exitCode: 1,
+									error: creditBalanceDisplayError,
+									retryFailure: {
+										attempt: 10,
+										errorMessage: creditBalanceProviderError,
+									},
+								}),
+							],
+						},
+					},
+					{ expanded: false, isPartial: false },
+					theme,
+				)
+				.render(120)
+				.join("\n"),
+		);
+
+		expect(text).toContain("auto-retry gave up after 10 attempts: 400 Your credit balance is too low");
+		expect(text).not.toContain("invalid_request_error");
+	});
+
+	it("keeps the full diagnostic, with its request-dump path, in an expanded retry failure", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const text = Bun.stripANSI(
+			taskToolRenderer
+				.renderResult(
+					{
+						content: [],
+						details: {
+							projectAgentsDir: null,
+							totalDurationMs: 0,
+							results: [
+								finishedResult({
+									exitCode: 1,
+									error: creditBalanceDisplayError,
+									errorRetryAfterMs: 30_000,
+									retryFailure: {
+										attempt: 10,
+										errorMessage: creditBalanceProviderError,
+										retryAfterMs: 30_000,
+									},
+								}),
+							],
+						},
+					},
+					{ expanded: true, isPartial: false },
+					theme,
+				)
+				.render(400)
+				.join("\n"),
+		);
+
+		expect(text).toContain(
+			"auto-retry gave up after 10 attempts: 400 Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits. (retry after 30.0s)",
+		);
+		expect(text).toContain("raw-http-request=/tmp/omp");
+		expect(text).toContain("http-400-requests/1.json");
+	});
 });
 
 describe("task result detail-less state", () => {
@@ -896,7 +1021,7 @@ describe("task result detail-less state", () => {
 		setShimmerMode("classic");
 	});
 
-	it("renders a validation failure with the error glyph, not a success bullet", async () => {
+	it("renders a validation failure with the error glyph, not the success glyph", async () => {
 		const theme = (await getThemeByName("dark"))!;
 		// The task-brief section renders markdown, which reads the active theme.
 		setThemeInstance(theme);
@@ -912,15 +1037,15 @@ describe("task result detail-less state", () => {
 		);
 		const stripped = Bun.stripANSI(component.render(120).join("\n"));
 
-		// A failed task must surface the error glyph and never the "done" bullet.
+		// A failed task must surface the error glyph and never the success glyph.
 		expect(stripped).toContain(theme.status.error);
-		expect(stripped).not.toContain(theme.status.done);
+		expect(stripped).not.toContain(theme.status.success);
 		expect(stripped).toContain("Task");
 		expect(stripped).toContain("scout");
 		expect(stripped).toContain("Validation failed");
 	});
 
-	it("renders a detail-less success with the accent bullet, not an error glyph", async () => {
+	it("renders a detail-less success with the success glyph, not an error glyph", async () => {
 		const theme = (await getThemeByName("dark"))!;
 		setThemeInstance(theme);
 		const options: RenderResultOptions = { expanded: false, isPartial: false };
@@ -930,7 +1055,7 @@ describe("task result detail-less state", () => {
 		});
 		const stripped = Bun.stripANSI(component.render(120).join("\n"));
 
-		expect(stripped).toContain(theme.status.done);
+		expect(stripped).toContain(theme.status.success);
 		expect(stripped).not.toContain(theme.status.error);
 	});
 });

@@ -24,6 +24,7 @@ import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { gateOptionalFetch, ReplayBudget, restoreReplaced } from "../utils/replay-budget";
 import { sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { mapToOpenAIResponsesToolChoice } from "../utils/tool-choice";
+import { isOpenAIResponsesProgressEvent } from "../utils/websocket";
 import {
 	applyOpenAIReasoningEffortFallback,
 	createOpenAIReasoningEffortFallbackKey,
@@ -37,7 +38,6 @@ import {
 	buildResponsesInput,
 	createInitialResponsesAssistantMessage,
 	getOpenAIPromptCacheKey,
-	isOpenAIResponsesProgressEvent,
 	parseAzureDeploymentNameMap,
 	processResponsesStream,
 } from "./openai-shared";
@@ -180,7 +180,7 @@ const streamAzureOpenAIResponsesOnce = (
 						signal: requestSignal,
 						fetch: gateOptionalFetch(replayBudget, options?.fetch),
 						retryGate: replayBudget?.admits,
-						maxRetryDelayMs: options?.maxRetryDelayMs,
+						retryPolicy: options,
 						// Transient 408/429/5xx get Retry-After-aware transport retries;
 						// the first-event watchdog aborts `requestSignal`, so retries
 						// cannot extend the caller's deadline.
@@ -201,10 +201,7 @@ const streamAzureOpenAIResponsesOnce = (
 					if (attemptedReasoningEffortFallbacks.has(retryMarker)) throw error;
 					// A correction is a replay: under a budget it waits the server's
 					// named wait when that fits, and is refused when it does not.
-					if (
-						replayBudget &&
-						!(await replayBudget.replayAfter(error, 0, options?.signal, options?.providerRetryWait))
-					) {
+					if (replayBudget && !(await replayBudget.replayAfter(error, 0, options?.signal, options))) {
 						throw error;
 					}
 					attemptedReasoningEffortFallbacks.add(retryMarker);
@@ -270,15 +267,12 @@ const streamAzureOpenAIResponsesOnce = (
 				rawRequestDump,
 				streamResponseHeaders,
 			});
-			output.stopReason = result.stopReason;
-			output.errorStatus = result.status;
-			output.errorId = result.id;
-			output.errorMessage = result.message;
-			output.errorRetryAfterMs = result.retryAfterMs;
+			AIError.applyFinalizeResult(output, result);
 			replayBudget?.stamp(output);
+			output.errorRetryWaitRefusal = result.retryWaitRefusal;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
-			stream.push({ type: "error", reason: output.stopReason, error: output });
+			stream.push({ type: "error", reason: result.stopReason, error: output });
 			stream.end();
 		}
 	})();

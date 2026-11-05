@@ -935,8 +935,11 @@ pub struct AssistantMessage {
 	pub response_id: Option<String>,
 	pub upstream_provider: Option<String>,
 	pub upstream_model: Option<String>,
+	/// The failure's own text: what the provider sent, or omp's text for a failure it detected itself. Retry and classification decisions read this.
 	pub error_message: Option<String>,
-	/// The failed response's retry wait in milliseconds, from its headers. `errorMessage` never carries it.
+	/// `errorMessage` as omp shows it, when that differs: with the rejected request's dump path, a provider-specific explanation or the response's retry hint added. Display only; it can name local paths.
+	pub error_display_message: Option<String>,
+	/// The delay, in milliseconds, the failed response's headers asked for before a retry. Retry decisions read this with `errorMessage`.
 	pub error_retry_after_ms: Option<f64>,
 	pub error_status: Option<i64>,
 	pub error_id: Option<f64>,
@@ -987,6 +990,9 @@ impl Serialize for AssistantMessage {
 		if let Some(value) = &self.error_message {
 			map.serialize_entry("errorMessage", value)?;
 		}
+		if let Some(value) = &self.error_display_message {
+			map.serialize_entry("errorDisplayMessage", value)?;
+		}
 		if let Some(value) = &self.error_retry_after_ms {
 			map.serialize_entry("errorRetryAfterMs", value)?;
 		}
@@ -1022,6 +1028,7 @@ impl Serialize for AssistantMessage {
 				"upstreamProvider" if self.upstream_provider.is_some() => continue,
 				"upstreamModel" if self.upstream_model.is_some() => continue,
 				"errorMessage" if self.error_message.is_some() => continue,
+				"errorDisplayMessage" if self.error_display_message.is_some() => continue,
 				"errorRetryAfterMs" if self.error_retry_after_ms.is_some() => continue,
 				"errorStatus" if self.error_status.is_some() => continue,
 				"errorId" if self.error_id.is_some() => continue,
@@ -1053,6 +1060,7 @@ impl<'de> Deserialize<'de> for AssistantMessage {
 			upstream_provider: take(&mut extra, "upstreamProvider"),
 			upstream_model: take(&mut extra, "upstreamModel"),
 			error_message: take(&mut extra, "errorMessage"),
+			error_display_message: take(&mut extra, "errorDisplayMessage"),
 			error_retry_after_ms: take(&mut extra, "errorRetryAfterMs"),
 			error_status: take(&mut extra, "errorStatus"),
 			error_id: take(&mut extra, "errorId"),
@@ -3140,12 +3148,41 @@ pub struct BashResult {
 	pub artifact_id: Option<String>,
 	#[serde(rename = "artifactElidedBytes", default, skip_serializing_if = "Option::is_none")]
 	pub artifact_elided_bytes: Option<i64>,
+	/// Bytes dropped from the middle of `output`, which keeps the head and tail.
+	#[serde(rename = "elidedBytes", default, skip_serializing_if = "Option::is_none")]
+	pub elided_bytes: Option<i64>,
+	/// Lines dropped from the middle of `output`.
+	#[serde(rename = "elidedLines", default, skip_serializing_if = "Option::is_none")]
+	pub elided_lines: Option<i64>,
+	/// Bytes the per-line column cap cut from `output`, across all lines.
+	#[serde(rename = "columnDroppedBytes", default, skip_serializing_if = "Option::is_none")]
+	pub column_dropped_bytes: Option<i64>,
+	/// Lines of `output` the per-line column cap cut; the artifact holds them whole.
+	#[serde(rename = "columnTruncatedLines", default, skip_serializing_if = "Option::is_none")]
+	pub column_truncated_lines: Option<i64>,
+	/// First and last lines the column cap cut, numbered as in the artifact; absent when the numbering cannot match it.
+	#[serde(rename = "columnTruncatedRange", default, skip_serializing_if = "Option::is_none")]
+	pub column_truncated_range: Option<LineRange>,
+	/// The per-line column cap in UTF-8 bytes, set when it cut a line.
+	#[serde(rename = "columnMax", default, skip_serializing_if = "Option::is_none")]
+	pub column_max: Option<i64>,
 	#[serde(rename = "artifactError", default, skip_serializing_if = "Option::is_none")]
 	pub artifact_error: Option<Map<String, Value>>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub minimized: Option<Map<String, Value>>,
 	#[serde(rename = "workingDir", default, skip_serializing_if = "Option::is_none")]
 	pub working_dir: Option<String>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub images: Option<Vec<ImageContent>>,
+	/// The embedded shell's final `ShellTrace` of the run; only when the caller asked for one.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub trace: Option<Map<String, Value>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LineRange {
+	pub first: i64,
+	pub last: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

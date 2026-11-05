@@ -1,8 +1,15 @@
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { findRetryRefusal, longestRetryHint, RetryRefusedError } from "@oh-my-pi/pi-utils";
 import type { AssistantMessage } from "../types";
-import { getHeadersFromError } from "./retry-after";
-import { type RetryWaitHook, waitForRetry } from "./retry-wait";
+import { getHeadersFromError, retryWaitBounds } from "./retry-after";
+import {
+	DEFAULT_MAX_RETRY_DELAY_MS,
+	type ProviderRetryPolicy,
+	providerRetryPolicy,
+	type RetryWaitHook,
+	statedRetryWaitLimit,
+	waitForRetry,
+} from "./retry-wait";
 
 /**
  * A replay admitted by a {@link ReplayBudget} whose own request has not yet
@@ -318,32 +325,48 @@ export class ReplayBudget {
 	}
 
 	/**
-	 * Decides, waits for and arms a replay of `failure` in one step: the wait
-	 * is {@link delayFor}, raced by {@link wait}. `false` when any step refuses.
-	 * For a rung with no work between its decision and its resend.
+	 * Decides, waits for and arms a replay of `failure` in one step, under both
+	 * bounds: this budget's count and `policy`'s per-sleep ceiling. `false` when
+	 * any step refuses. For a rung with no work between its decision and its
+	 * resend.
+	 *
+	 * A wait the server stated that is past the policy's bound is refused
+	 * outright rather than clamped down to it: the bound says how long this
+	 * layer may sleep unattended, not how long the server's window is, and
+	 * replaying at the clamped wait would land inside a window the server said
+	 * is closed. Refusing hands the failure up, where the session's retry can
+	 * notify and the error can say the server asked for that wait. Only the
+	 * caller's own backoff is clamped.
 	 */
 	async replayAfter(
 		failure: unknown,
 		ownDelayMs: number,
 		signal: AbortSignal | undefined,
-		hook: RetryWaitHook | undefined,
+		policy: ProviderRetryPolicy | undefined,
 	): Promise<boolean> {
-		return this.replayAfterDelay(this.delayFor(failure, ownDelayMs), failure, signal, hook);
+		const statedMs = longestServerWaitMs(failure);
+		// `declines` records the refusal on `failure`, so the surfaced message
+		// says the server asked for a wait this layer would not take.
+		if (statedMs !== undefined && retryWaitBounds(policy, DEFAULT_MAX_RETRY_DELAY_MS).declines(statedMs, failure)) {
+			return false;
+		}
+		return this.replayAfterDelay(Math.max(ownDelayMs, statedMs ?? 0), failure, signal, policy);
 	}
 
 	/**
 	 * {@link replayAfter} for a caller that already knows the wait: admits a
-	 * replay of `replaced` after `delayMs`, waits it out raced against the
-	 * deadline and `signal`, and arms the replay. `false` when any step refuses.
+	 * replay of `replaced` after `delayMs`, sleeps it under both bounds
+	 * ({@link sleepUnderBudget}), and arms the replay. `false` when any step
+	 * refuses.
 	 */
 	async replayAfterDelay(
 		delayMs: number,
 		replaced: unknown,
 		signal: AbortSignal | undefined,
-		hook: RetryWaitHook | undefined,
+		policy: ProviderRetryPolicy | undefined,
 	): Promise<boolean> {
 		if (!this.admits(delayMs)) return false;
-		if (delayMs > 0 && !(await this.wait(delayMs, signal, hook))) return false;
+		if (delayMs > 0 && !(await sleepUnderBudget(this, policy, delayMs, signal))) return false;
 		this.arm(replaced);
 		return true;
 	}
@@ -437,4 +460,36 @@ function toHeaders(headers: Headers | Record<string, string | undefined>): Heade
 function abortError(signal: AbortSignal | undefined): Error {
 	const reason: unknown = signal?.reason;
 	return reason instanceof Error ? reason : new DOMException("The operation was aborted.", "AbortError");
+}
+
+/**
+ * The one place a provider retry loop turns a server-stated wait into a sleep.
+ *
+ * Two bounds apply, and both must, because each leaves the other's dimension
+ * unbounded. {@link ReplayBudget} is a wall-clock deadline over **all** the
+ * replays one streaming call makes; the retry policy
+ * ({@link statedRetryWaitLimit}) bounds **each single sleep**. A deadline
+ * alone still lets one unattended sleep run the whole of it out in silence; a
+ * per-sleep ceiling alone bounds each sleep but not their number, so a loop
+ * sleeps the bounded wait once per iteration for as long as it iterates.
+ * Measured on upstream main, where neither bound reached the session layer,
+ * one `Retry-After: 30` cost 32.5 minutes of commanded wait on the responses
+ * path and 60 minutes on the Anthropic path.
+ *
+ * Returns whether the replay is admitted; `true` when there is no budget, so
+ * a caller that passes none keeps the plain bounded sleep.
+ */
+export async function sleepUnderBudget(
+	budget: ReplayBudget | undefined,
+	policy: ProviderRetryPolicy | undefined,
+	delayMs: number,
+	signal?: AbortSignal,
+): Promise<boolean> {
+	const effective = providerRetryPolicy(policy);
+	const boundedMs = Math.min(delayMs, statedRetryWaitLimit(effective).limitMs);
+	if (!budget) {
+		await waitForRetry(effective.providerRetryWait, boundedMs, signal);
+		return true;
+	}
+	return budget.wait(boundedMs, signal, effective.providerRetryWait);
 }

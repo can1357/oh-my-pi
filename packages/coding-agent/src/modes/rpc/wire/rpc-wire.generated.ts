@@ -125,8 +125,11 @@ export interface AssistantMessage {
 	responseId?: string;
 	upstreamProvider?: string;
 	upstreamModel?: string;
+	/** The failure's own text: what the provider sent, or omp's text for a failure it detected itself. Retry and classification decisions read this. */
 	errorMessage?: string;
-	/** The failed response's retry wait in milliseconds, from its headers. `errorMessage` never carries it. */
+	/** `errorMessage` as omp shows it, when that differs: with the rejected request's dump path, a provider-specific explanation or the response's retry hint added. Display only; it can name local paths. */
+	errorDisplayMessage?: string;
+	/** The delay, in milliseconds, the failed response's headers asked for before a retry. Retry decisions read this with `errorMessage`. */
 	errorRetryAfterMs?: number;
 	errorStatus?: number;
 	errorId?: number;
@@ -534,9 +537,29 @@ export interface BashResult {
 	timedOut?: boolean;
 	artifactId?: string;
 	artifactElidedBytes?: number;
+	/** Bytes dropped from the middle of `output`, which keeps the head and tail. */
+	elidedBytes?: number;
+	/** Lines dropped from the middle of `output`. */
+	elidedLines?: number;
+	/** Bytes the per-line column cap cut from `output`, across all lines. */
+	columnDroppedBytes?: number;
+	/** Lines of `output` the per-line column cap cut; the artifact holds them whole. */
+	columnTruncatedLines?: number;
+	/** First and last lines the column cap cut, numbered as in the artifact; absent when the numbering cannot match it. */
+	columnTruncatedRange?: LineRange;
+	/** The per-line column cap in UTF-8 bytes, set when it cut a line. */
+	columnMax?: number;
 	artifactError?: Record<string, unknown>;
+	minimized?: Record<string, unknown>;
 	workingDir?: string;
 	images?: ImageContent[];
+	/** The embedded shell's final `ShellTrace` of the run; only when the caller asked for one. */
+	trace?: Record<string, unknown>;
+}
+
+export interface LineRange {
+	first: number;
+	last: number;
 }
 
 export interface FastModeResult {

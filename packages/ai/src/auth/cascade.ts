@@ -5,6 +5,7 @@ import { getEnvApiKey, getEnvApiKeyName } from "../env-api-key";
 import * as AIError from "../error";
 import { isUsageLimitOutcome } from "../error/rate-limit";
 import { AUTHENTICATED_SENTINEL } from "../registry/types";
+import { getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
 import type { SessionAffinity } from "./affinity";
 import type { CredentialPool } from "./pool";
 import type { CredentialSelector, OAuthResolutionResult } from "./select";
@@ -519,7 +520,10 @@ export class KeyCascade implements KeysApi {
 					// Preserve no-sibling quota backoff instead of re-resolving an
 					// already-blocked fallback. Hard-auth declines still re-resolve
 					// because a peer may have refreshed the failed bearer.
-					if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
+					const headerRetryAfterMs = getRetryAfterMsFromHeaders(getHeadersFromError(error));
+					if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message, headerRetryAfterMs)) {
+						return undefined;
+					}
 				}
 				const resolved = await resolve({ signal });
 				return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;

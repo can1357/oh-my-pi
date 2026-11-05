@@ -19,12 +19,23 @@
 import { withRetryWait } from "@oh-my-pi/pi-utils";
 import { getHeadersFromError, getRetryAfterMsFromHeaders, retryWaitHeaders } from "./retry-after";
 
-/** A failed assistant turn's error as a person reads it: its message and the server's wait. */
-export function assistantErrorText(
-	message: { readonly errorMessage?: string; readonly errorRetryAfterMs?: number },
-	fallback = "Error",
-): string {
-	return withRetryWait(message.errorMessage || fallback, message.errorRetryAfterMs);
+/** What a renderer needs off a failed turn: the two error texts and the server's wait. */
+interface DisplayableFailure {
+	readonly errorMessage?: string;
+	/** What omp shows, when it differs from the provider's own text. Never classified. */
+	readonly errorDisplayMessage?: string;
+	readonly errorRetryAfterMs?: number;
+}
+
+/**
+ * A failed assistant turn's error as a person reads it: the shown text and the
+ * server's wait. `errorDisplayMessage` is preferred because it is the text omp
+ * built for a person — a request-dump path, a provider's remediation, a
+ * refusal note — and `errorMessage` is the provider's own, which is what every
+ * decision reads. A renderer wants the first; a classifier must never see it.
+ */
+export function assistantErrorText(message: DisplayableFailure, fallback = "Error"): string {
+	return withRetryWait(message.errorDisplayMessage || message.errorMessage || fallback, message.errorRetryAfterMs);
 }
 
 /** The wait an `Error` carries in its structured headers (`retryWaitHeaders`), if any. */
@@ -32,23 +43,41 @@ export function retryAfterMsOf(error: unknown): number | undefined {
 	return getRetryAfterMsFromHeaders(getHeadersFromError(error));
 }
 
-/** `error`'s message as a person reads it, with the wait its headers carry. */
+/**
+ * `error`'s message as a person reads it, with the wait its headers carry. A
+ * display text a thrown error carries (`thrownErrorDisplayText`) is shown in
+ * place of its own message; nothing here reclassifies from either.
+ */
 export function errorText(error: unknown): string {
-	const text = error instanceof Error ? error.message : String(error);
+	const text = thrownErrorDisplayText(error) ?? (error instanceof Error ? error.message : String(error));
 	return withRetryWait(text, retryAfterMsOf(error));
 }
 
+/** The display text a thrown error carries, when a layer attached one for a person to read. */
+export function thrownErrorDisplayText(error: unknown): string | undefined {
+	if (!error || typeof error !== "object" || !("errorDisplayMessage" in error)) return undefined;
+	const shown = error.errorDisplayMessage;
+	return typeof shown === "string" && shown !== "" ? shown : undefined;
+}
+
 /**
- * An `Error` for a failed assistant turn: `message` is the turn's error text, and
- * the server's wait rides along as a `retry-after-ms` header (`retryWaitHeaders`),
- * never in the text.
+ * An `Error` for a failed assistant turn. Its `message` is the **provider's own**
+ * text, so every layer above that classifies, retries or blocks a credential
+ * reads what the provider said. The server's wait rides along as a
+ * `retry-after-ms` header (`retryWaitHeaders`), never in the text, and the text
+ * omp shows rides along as `errorDisplayMessage` — separate, so a dump path that
+ * names HOME can never reach a decision.
  */
 export function assistantTurnError(
-	message: { readonly errorMessage?: string; readonly errorRetryAfterMs?: number },
+	message: DisplayableFailure,
 	text: string = message.errorMessage || "Request failed",
 	options?: ErrorOptions,
 ): Error {
 	const error = new Error(text, options);
 	const headers = retryWaitHeaders(message.errorRetryAfterMs);
-	return headers ? Object.assign(error, { headers }) : error;
+	if (headers) Object.assign(error, { headers });
+	if (message.errorDisplayMessage !== undefined) {
+		Object.assign(error, { errorDisplayMessage: message.errorDisplayMessage });
+	}
+	return error;
 }

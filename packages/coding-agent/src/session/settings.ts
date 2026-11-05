@@ -1,3 +1,4 @@
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { combine, effect, register, type SettingValueOf } from "../config/registry";
 import {
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
@@ -167,10 +168,6 @@ export const cfgPrewalkAutoTarget = register({
 	},
 });
 
-function isLimitRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function isPositiveLimit(limit: unknown): limit is number {
 	return typeof limit === "number" && Number.isFinite(limit) && limit > 0;
 }
@@ -178,7 +175,7 @@ function isPositiveLimit(limit: unknown): limit is number {
 /** Per-provider request limits floored to whole numbers ≥ 1; non-positive or non-numeric entries are dropped. */
 export function normalizeProviderMaxInFlightRequests(value: unknown): Record<string, number> {
 	const normalized: Record<string, number> = {};
-	if (!isLimitRecord(value)) return normalized;
+	if (!isRecord(value)) return normalized;
 	for (const provider in value) {
 		const limit = value[provider];
 		if (isPositiveLimit(limit)) normalized[provider] = Math.max(1, Math.floor(limit));
@@ -192,7 +189,7 @@ export function normalizeProviderMaxInFlightRequests(value: unknown): Record<str
  * @throws Error naming every provider whose limit is not a positive number.
  */
 export function validateProviderMaxInFlightRequests(value: unknown): Record<string, number> {
-	if (isLimitRecord(value)) {
+	if (isRecord(value)) {
 		const invalidProviders: string[] = [];
 		for (const provider in value) if (!isPositiveLimit(value[provider])) invalidProviders.push(provider);
 		if (invalidProviders.length > 0) {
@@ -1161,13 +1158,25 @@ export const cfgProvidersOpenaiWebsockets = register({
 	ui: {
 		tab: "providers",
 		group: "Protocol",
-		label: "OpenAI WebSockets",
-		description: "Websocket policy for OpenAI Codex models (auto uses model defaults, on forces, off disables)",
+		label: "OpenAI Codex WebSockets",
+		description: "WebSocket policy for OpenAI Codex models only",
 		options: [
-			{ value: "auto", label: "Auto", description: "Use model/provider default websocket behavior" },
-			{ value: "off", label: "Off", description: "Disable websockets for OpenAI Codex models" },
+			{ value: "auto", label: "Auto", description: "Use Codex model defaults" },
+			{ value: "off", label: "Off", description: "Disable WebSockets for OpenAI Codex models" },
 			{ value: "on", label: "On", description: "Force websockets for OpenAI Codex models" },
 		],
+	},
+});
+
+export const cfgProvidersOpenaiResponsesWebsockets = register({
+	id: "providers.openaiResponsesWebsockets",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "providers",
+		group: "Protocol",
+		label: "OpenAI Responses WebSockets",
+		description: "Opt in for catalog-supported standard Responses models; model or request false disables it",
 	},
 });
 

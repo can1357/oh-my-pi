@@ -1,4 +1,5 @@
 import { extractRetryHint } from "@oh-my-pi/pi-utils/fetch-retry";
+import { parseHttpErrorBody } from "./http-body";
 
 /**
  * Rate limit reason classification and backoff calculation utilities.
@@ -153,12 +154,69 @@ function parseJsonBody(errorMessage: string): Record<string, unknown> | undefine
 	}
 }
 
+// Anthropic answers `invalid_request_error` "Your credit balance is too low to
+// access the Anthropic API. …" while the account's prepaid balance is empty,
+// either as the HTTP 400 body or, after a 200, as an in-stream `error` event
+// (rendered `Anthropic stream error (<type>): <message>`). Observed clearing
+// on its own within minutes once the balance was topped up again, so a later
+// replay of the same request can succeed. Every fact below is required: the
+// 400 whose whole body is the error envelope (or the stream event), the error
+// type, and the leading sentence. A malformed request, an unsupported
+// parameter or a too-long prompt is also a 400 `invalid_request_error`, and
+// those replay identically.
+const CREDIT_BALANCE_TOO_LOW_PREFIX = "Your credit balance is too low";
+const CREDIT_BALANCE_STREAM_ERROR_PREFIX = `Anthropic stream error (invalid_request_error): ${CREDIT_BALANCE_TOO_LOW_PREFIX}`;
+// At least 30 s between retries, so the default ten retries (retry.maxRetries)
+// wait at least 5 minutes. The 30 s floor is a heuristic from two observed
+// outages, not a measured maximum outage. Up to 7.5 s of jitter on top keeps
+// sessions that failed together from retrying at the same instant.
+export const CREDIT_BALANCE_BACKOFF_MS = 30 * 1000;
+const CREDIT_BALANCE_JITTER_MS = 7.5 * 1000;
+
+/**
+ * Whether an error is Anthropic's empty-prepaid-balance rejection, which lifts
+ * once the balance is refilled. `message` is the provider's own text
+ * (`errorMessage`): any text after the envelope is part of the body, so such a
+ * body does not match.
+ */
+export function isCreditBalanceTooLow(status: number | undefined, message: string | undefined): boolean {
+	if (!message) return false;
+	if (message.startsWith(CREDIT_BALANCE_STREAM_ERROR_PREFIX)) return true;
+	const response = parseHttpErrorBody(message, status);
+	if (response?.status !== 400) return false;
+	const error = asRecord(response.body.error);
+	return (
+		response.body.type === "error" &&
+		error?.type === "invalid_request_error" &&
+		typeof error.message === "string" &&
+		error.message.startsWith(CREDIT_BALANCE_TOO_LOW_PREFIX)
+	);
+}
+
+/**
+ * Wait before retrying an {@link isCreditBalanceTooLow} rejection. The 30 s
+ * minimum keeps the default budget at five minutes; jitter above it spreads
+ * simultaneous failures. When a configured cap permits the minimum but not
+ * the jitter, use the cap. When the cap is below the minimum, return the
+ * minimum so turn recovery reports the existing fail-fast cap error.
+ */
+export function calculateCreditBalanceBackoffMs(minimumMs = CREDIT_BALANCE_BACKOFF_MS, maxDelayMs = 0): number {
+	if (maxDelayMs > 0 && maxDelayMs < minimumMs) return minimumMs;
+	const maximumMs =
+		maxDelayMs > 0
+			? Math.min(minimumMs + CREDIT_BALANCE_JITTER_MS, maxDelayMs)
+			: minimumMs + CREDIT_BALANCE_JITTER_MS;
+	return minimumMs + Math.floor(Math.random() * (maximumMs - minimumMs));
+}
+
 /**
  * Classify structured Google RESOURCE_EXHAUSTED bodies before consulting text.
  * Cloud Code Assist prefixes the JSON with its HTTP error label, so accept an
- * embedded top-level object as well as a raw JSON body.
+ * embedded top-level object as well as a raw JSON body. `headerRetryAfterMs`
+ * is the delay the response's headers asked for (`errorRetryAfterMs`); it
+ * competes with the body's RetryInfo when sizing the window.
  */
-function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | undefined {
+function parseGoogleRpcRateLimitReason(errorMessage: string, headerRetryAfterMs?: number): RateLimitReason | undefined {
 	const body = parseJsonBody(errorMessage);
 	const error = asRecord(body?.error);
 	if (typeof error?.status !== "string" || error.status.trim().toUpperCase() !== "RESOURCE_EXHAUSTED") {
@@ -234,7 +292,7 @@ function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | 
 		}
 	}
 	if (sawShortWindowViolation || sawGenericRateLimitInfo) {
-		const retryDelayMs = extractRetryHint(undefined, errorMessage);
+		const retryDelayMs = extractRetryHint(undefined, errorMessage, { headerRetryAfterMs });
 		return retryDelayMs !== undefined && retryDelayMs >= LONG_RATE_LIMIT_DELAY_MS
 			? "QUOTA_EXHAUSTED"
 			: "RATE_LIMIT_EXCEEDED";
@@ -244,7 +302,7 @@ function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | 
 	for (const value of error.details) {
 		const detail = asRecord(value);
 		if (detail?.["@type"] !== GOOGLE_RPC_RETRY_INFO_TYPE) continue;
-		const retryDelayMs = extractRetryHint(undefined, errorMessage);
+		const retryDelayMs = extractRetryHint(undefined, errorMessage, { headerRetryAfterMs });
 		if (retryDelayMs !== undefined) {
 			return retryDelayMs >= LONG_RATE_LIMIT_DELAY_MS ? "QUOTA_EXHAUSTED" : "RATE_LIMIT_EXCEEDED";
 		}
@@ -267,9 +325,10 @@ function isQuotaExhaustedReason(reason: RateLimitReason): boolean {
  *
  * Bare "resource exhausted" / "resource_exhausted" maps to MODEL_CAPACITY (transient, short wait).
  * Explicit details such as "quota exceeded" retain their normal classification.
+ * `headerRetryAfterMs` is the failed response's header delay (`errorRetryAfterMs`).
  */
-export function parseRateLimitReason(errorMessage: string): RateLimitReason {
-	const structuredReason = parseGoogleRpcRateLimitReason(errorMessage);
+export function parseRateLimitReason(errorMessage: string, headerRetryAfterMs?: number): RateLimitReason {
+	const structuredReason = parseGoogleRpcRateLimitReason(errorMessage, headerRetryAfterMs);
 	if (structuredReason !== undefined) return structuredReason;
 	const lowerWithStatus = errorMessage.toLowerCase();
 	const lower = lowerWithStatus.replace(RESOURCE_EXHAUSTED_PATTERN, "");
@@ -415,11 +474,47 @@ export function isUsageLimitStatus(status: number | undefined): boolean {
 const STATUS_402_QUOTA_PATTERN =
 	/\b(?:payment(?:\s+is)?[-_.\s]*required|deactivated_workspace|insufficient.?(?:balance|account.?funds))\b/i;
 
-export function is402BillingCapBody(message: string | undefined): boolean {
+export function is402BillingCapBody(message: string | undefined, headerRetryAfterMs?: number): boolean {
 	if (message === undefined || isOpaqueStatusBody(message)) return true;
 	if (STATUS_402_QUOTA_PATTERN.test(message)) return true;
-	const reason = parseRateLimitReason(message);
+	const reason = parseRateLimitReason(message, headerRetryAfterMs);
 	return isQuotaExhaustedReason(reason) || reason === "CONCURRENT_LIMIT";
+}
+
+// Billing-cap wording: the account is out of money the user must add, as
+// opposed to a quota window that reopens on a clock. LithosAI answers
+// `402 the organization is out of credit, add more to continue
+// (type=insufficient_quota …)`; the rest are the same state on other
+// providers (DeepSeek "Insufficient Balance", OpenRouter credits, spend
+// ceilings, ChatGPT-style "out of credits").
+const OUT_OF_CREDIT_PATTERN = /\bout of credit|\badd (?:more )?credit|\btop ?up\b/i;
+
+/**
+ * Whether a usage-limit failure is a *billing* cap rather than a window that
+ * reopens on a clock: an out-of-credit balance (402), a spent prepaid
+ * balance, a credits wall, or a spend ceiling. Topping the account up clears
+ * it; waiting never does, so the retry loop must surface the error instead of
+ * sleeping the QUOTA_EXHAUSTED heuristic (30 min) — a `retry.maxDelayMs` at
+ * or above that heuristic would otherwise hold the session through the whole
+ * sleep while the user has no way to retry by hand.
+ *
+ * A DashScope/Bailian per-minute token throttle and a concurrency cap wear
+ * quota wording but are transient slots, so both stay out.
+ */
+export function isBillingCapUsageLimit(status: number | undefined, message: string | undefined): boolean {
+	if (message === undefined) return false;
+	if (isConcurrencyCapExclusion(status, message)) return false;
+	if (isDashScopeTokenLimitText(message)) return false;
+	if (status === 402) return is402BillingCapBody(message);
+	return (
+		OUT_OF_CREDIT_PATTERN.test(message) ||
+		INSUFFICIENT_BALANCE_PATTERN.test(message) ||
+		CREDITS_EXHAUSTED_PATTERN.test(message) ||
+		PREPAID_BALANCE_EXHAUSTED_PATTERN.test(message) ||
+		SPEND_LIMIT_PATTERN.test(message) ||
+		ANTHROPIC_CREDITS_REQUIRED_PATTERN.test(message) ||
+		/\binsufficient_quota\b/i.test(message)
+	);
 }
 
 /**
@@ -442,11 +537,15 @@ export function is402BillingCapBody(message: string | undefined): boolean {
  *     "Please retry in 5s") stay in the provider's own backoff / failure
  *     layer so transient or non-quota responses don't burn sibling credentials.
  */
-export function isUsageLimitOutcome(status: number | undefined, message: string | undefined): boolean {
-	const structuredReason = message ? parseGoogleRpcRateLimitReason(message) : undefined;
+export function isUsageLimitOutcome(
+	status: number | undefined,
+	message: string | undefined,
+	headerRetryAfterMs?: number,
+): boolean {
+	const structuredReason = message ? parseGoogleRpcRateLimitReason(message, headerRetryAfterMs) : undefined;
 	if (structuredReason !== undefined) return isQuotaExhaustedReason(structuredReason);
-	if (isConcurrencyCapExclusion(status, message)) return false;
-	if (message && matchesUsageLimitText(message)) return true;
+	if (isConcurrencyCapExclusion(status, message, headerRetryAfterMs)) return false;
+	if (message && matchesUsageLimitText(message, headerRetryAfterMs)) return true;
 	// A 403 is normally an auth failure, but several providers deliver an
 	// account-scoped cap with it (Devin/Codeium Connect `permission_denied`,
 	// GitHub Copilot). Devin's end-of-stream Connect trailer carries no HTTP
@@ -454,10 +553,10 @@ export function isUsageLimitOutcome(status: number | undefined, message: string 
 	// accept an undefined status too — but only when the body names a cap that
 	// resets, never on a bare 403, which stays an auth failure.
 	if ((status === 403 || status === undefined) && message && isAccountScopedCapText(message)) return true;
-	if (status === 402 && is402BillingCapBody(message)) return true;
+	if (status === 402 && is402BillingCapBody(message, headerRetryAfterMs)) return true;
 	if (!isUsageLimitStatus(status)) return false;
 	if (!message || isOpaqueStatusBody(message)) return true;
-	const reason = parseRateLimitReason(message);
+	const reason = parseRateLimitReason(message, headerRetryAfterMs);
 	return isQuotaExhaustedReason(reason);
 }
 /**
@@ -494,15 +593,18 @@ export function isOpaqueStatusBody(message: string): boolean {
  * flag accessor). `flags.ts` consumes this to populate `Flag.UsageLimit`, and
  * {@link isUsageLimitOutcome} uses it for the account-rotation decision.
  */
-export function matchesUsageLimitText(errorMessage: string): boolean {
-	const structuredReason = parseGoogleRpcRateLimitReason(errorMessage);
+export function matchesUsageLimitText(errorMessage: string, headerRetryAfterMs?: number): boolean {
+	const structuredReason = parseGoogleRpcRateLimitReason(errorMessage, headerRetryAfterMs);
 	if (structuredReason !== undefined) return isQuotaExhaustedReason(structuredReason);
 	if (isDashScopeTokenLimitText(errorMessage)) return false;
 	// Rolling TPM/RPM windows self-heal, so they never rotate a credential. The
 	// reason re-check is the precedence guard: an account-scoped cap that merely
 	// quotes a TPM number resolves to QUOTA_EXHAUSTED earlier in that ladder and
 	// keeps its usage-limit verdict.
-	if (TPM_RPM_THROTTLE_PATTERN.test(errorMessage) && parseRateLimitReason(errorMessage) === "RATE_LIMIT_EXCEEDED") {
+	if (
+		TPM_RPM_THROTTLE_PATTERN.test(errorMessage) &&
+		parseRateLimitReason(errorMessage, headerRetryAfterMs) === "RATE_LIMIT_EXCEEDED"
+	) {
 		return false;
 	}
 	return (
@@ -533,7 +635,16 @@ export function isAccountScopedCapText(message: string): boolean {
  * A concurrency cap on a non-billing status is shed-and-backoff, not
  * credential-rotatable. This mirrors the exclusion in {@link isUsageLimitOutcome}
  * for the 403 auth-retry entry points. A 402 remains an account-billing cap.
+ * `headerRetryAfterMs` is the failed response's header delay.
  */
-export function isConcurrencyCapExclusion(status: number | undefined, message: string | undefined): boolean {
-	return message !== undefined && parseRateLimitReason(message) === "CONCURRENT_LIMIT" && status !== 402;
+export function isConcurrencyCapExclusion(
+	status: number | undefined,
+	message: string | undefined,
+	headerRetryAfterMs?: number,
+): boolean {
+	return (
+		message !== undefined &&
+		parseRateLimitReason(message, headerRetryAfterMs) === "CONCURRENT_LIMIT" &&
+		status !== 402
+	);
 }

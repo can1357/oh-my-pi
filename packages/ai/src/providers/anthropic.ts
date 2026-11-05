@@ -25,7 +25,7 @@ import { NO_AUTH_SENTINEL } from "../auth-retry";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
-import { waitForRetry } from "../utils/retry-wait";
+import { DEFAULT_MAX_RETRY_DELAY_MS, providerRetryPolicy, waitForRetry } from "../utils/retry-wait";
 import { getEnvApiKey } from "../env-api-key";
 import { OUTPUT_FALLBACK_BUFFER } from "../stream";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
@@ -90,7 +90,7 @@ import {
 import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { withErrorEventHeaders } from "../utils/error-event-headers";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
+import { finalizeErrorDisplayMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import {
 	getStreamFirstEventTimeoutMs,
 	getStreamIdleTimeoutMs,
@@ -103,8 +103,20 @@ import {
 	parseAnthropicSlowModeHeaders,
 } from "./anthropic-slow-mode";
 import { notifyProviderResponse } from "../utils/provider-response";
-import { admitsReplay, gateFetch, longestServerWaitMs, ReplayBudget, restoreReplaced } from "../utils/replay-budget";
-import { getFailureRetryAfterMs, getHeadersFromError } from "../utils/retry-after";
+import {
+	admitsReplay,
+	gateFetch,
+	longestServerWaitMs,
+	ReplayBudget,
+	restoreReplaced,
+	sleepUnderBudget,
+} from "../utils/replay-budget";
+import {
+	getFailureRetryAfterMs,
+	getHeadersFromError,
+	providerFailureWaitMs,
+	retryWaitBounds,
+} from "../utils/retry-after";
 import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
 import { spillToDescription } from "../utils/schema/spill";
 import { createSdkStreamRequestOptions } from "../utils/sdk-stream-timeout";
@@ -200,7 +212,14 @@ import {
 	resolveAnthropicCustomHeadersForBaseUrl,
 	mergeHeaders,
 	normalizeExtraBetas,
+	messageThreadsBeta,
 } from "./anthropic-headers";
+import {
+	type AnthropicThreadChains,
+	AnthropicThreadTurn,
+	anthropicThreadChain,
+	wantsAnthropicThreads,
+} from "./anthropic-threads";
 import {
 	ANTHROPIC_OPAQUE_CLIENT_ANCHOR_KEY,
 	anthropicProviderSessionStateKey,
@@ -388,6 +407,12 @@ type AnthropicProviderSessionState = ProviderSessionState & {
 	 * them again on every later request; only newly dropped blocks warn.
 	 */
 	reportedPrefixDroppedThinking: Set<string>;
+	/**
+	 * Message-thread chains per routing session. Account-scoped: a thread
+	 * belongs to the credential that created it. Released per session and
+	 * cleared on session close.
+	 */
+	threads: AnthropicThreadChains;
 };
 
 function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
@@ -401,6 +426,10 @@ function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
 		cacheControlOptionsUnsupported: false,
 		prefixDroppedThinkingBlocks: new Set(),
 		reportedPrefixDroppedThinking: new Set(),
+		threads: new Map(),
+		releaseSession: sessionId => {
+			state.threads.delete(sessionId);
+		},
 		close: () => {
 			state.strictToolsDisabled = false;
 			state.fastModeDisabled = false;
@@ -410,6 +439,7 @@ function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
 			state.cacheControlOptionsUnsupported = false;
 			state.prefixDroppedThinkingBlocks.clear();
 			state.reportedPrefixDroppedThinking.clear();
+			state.threads.clear();
 		},
 	};
 	return state;
@@ -506,6 +536,7 @@ function getAnthropicProviderSessionState(
 		existing.reportedPrefixDroppedThinking ??= new Set();
 		existing.cacheControlUnsupported ??= false;
 		existing.cacheControlOptionsUnsupported ??= false;
+		existing.threads ??= new Map();
 	} else {
 		store.set(key, state);
 	}
@@ -654,6 +685,19 @@ function getUmansWebSearchHeader(
 	if (!modelMatchesHost(model, "umans")) return undefined;
 	const provider = getUmansWebSearchProvider(headers);
 	return provider ? { [UMANS_WEBSEARCH_PROVIDER_HEADER]: provider } : undefined;
+}
+
+/**
+ * Whether a request to `model` sends the tool `name` for the host to run itself, never dispatching the call to the
+ * client: the same decision `encodeAnthropicToolName` makes on the wire.
+ */
+export function anthropicHostRunsTool(
+	model: Model<"anthropic-messages">,
+	name: string,
+	headers?: Record<string, string>,
+): boolean {
+	const gatewayWebSearch = getUmansWebSearchHeader(model, mergeHeaders(model.headers, headers)) !== undefined;
+	return shouldUseUmansGatewayWebSearch(name, gatewayWebSearch);
 }
 
 function shouldUseUmansGatewayWebSearch(name: string, enabled: boolean): boolean {
@@ -820,6 +864,12 @@ export interface AnthropicOptions extends StreamOptions {
 	/** Force OAuth bearer auth mode for proxy tokens that don't match Anthropic token prefixes. */
 	isOAuth?: boolean;
 	/**
+	 * Send no Claude Code app headers (`x-app: cli`,
+	 * `anthropic-dangerous-direct-browser-access`) on an API-key request. For
+	 * adapter wrappers that present another client's identity.
+	 */
+	omitClaudeCodeAppHeaders?: boolean;
+	/**
 	 * Pre-built Anthropic Messages client. When provided, skips internal client
 	 * construction entirely. Accepts any structurally compatible client,
 	 * including SDK clients such as `AnthropicVertex`.
@@ -846,6 +896,8 @@ export type AnthropicClientOptionsArgs = {
 	headers?: Record<string, string>;
 	dynamicHeaders?: Record<string, string>;
 	isOAuth?: boolean;
+	/** See {@link AnthropicOptions.omitClaudeCodeAppHeaders}. */
+	omitClaudeCodeAppHeaders?: boolean;
 	hasTools?: boolean;
 	/** Whether a tool in ANTHROPIC_BUFFERED_INPUT_TOOLS is present; suppresses the request-wide fine-grained streaming beta. */
 	hasBufferedInputTools?: boolean;
@@ -1801,13 +1853,20 @@ function applyReportedInputTransformations(
  * `compat.replayUnsignedThinking` override). The default is native replay for
  * the 3p reasoning majority (#2005); this hint turns the misconfigured-proxy
  * case into a one-line fix instead of a silent retry loop (#4297).
+ *
+ * The check reads `message`, the provider's text; the hint is prepended to
+ * `display`, the text omp shows for it.
  */
-export function maybeAddReplayUnsignedThinkingHint(model: Model<"anthropic-messages">, message: string): string {
-	if (!isInvalidThinkingSignatureError(message) || isThinkingPrefixBindingError(message)) return message;
-	if (model.compat.officialEndpoint) return message;
-	if (model.compatConfig?.replayUnsignedThinking !== undefined) return message;
+export function maybeAddReplayUnsignedThinkingHint(
+	model: Model<"anthropic-messages">,
+	message: string,
+	display: string = message,
+): string {
+	if (!isInvalidThinkingSignatureError(message) || isThinkingPrefixBindingError(message)) return display;
+	if (model.compat.officialEndpoint) return display;
+	if (model.compatConfig?.replayUnsignedThinking !== undefined) return display;
 	const hint = `Provider "${model.provider}" looks like an Anthropic-compatible signing proxy: it rejected a replayed unsigned thinking block. Set \`compat.replayUnsignedThinking: false\` under \`providers.${model.provider}\` in your models.yml and retry. See https://github.com/can1357/oh-my-pi/issues/4297.`;
-	return `${hint}\n\n${message}`;
+	return `${hint}\n\n${display}`;
 }
 
 /**
@@ -2222,6 +2281,7 @@ const streamAnthropicOnce = (
 					headers: options?.headers,
 					dynamicHeaders: copilotDynamicHeaders?.headers,
 					isOAuth: options?.isOAuth,
+					omitClaudeCodeAppHeaders: options?.omitClaudeCodeAppHeaders,
 					hasTools: !!context.tools?.length,
 					hasBufferedInputTools:
 						context.tools?.some(tool => ANTHROPIC_BUFFERED_INPUT_TOOLS.has(tool.name)) ?? false,
@@ -2244,6 +2304,23 @@ const streamAnthropicOnce = (
 				return created;
 			};
 			let { client, isOAuthToken } = resolveClient();
+			// Message threads: only for this provider's own client against a
+			// session. Per-call context messages are rebuilt next request, so a
+			// thread could never continue past them; such requests go without one
+			// and leave the session's thread as it was.
+			const threadSessionId = options?.sessionId;
+			const threadTurn =
+				!transport &&
+				!options?.client &&
+				providerSessionState &&
+				threadSessionId &&
+				!context.messages.some(message => isPerCallContextMessage(message)) &&
+				wantsAnthropicThreads(model, options?.statefulResponses, baseUrl)
+					? new AnthropicThreadTurn(anthropicThreadChain(providerSessionState.threads, threadSessionId), {
+							resendSystemAndTools: isOAuthToken,
+						})
+					: undefined;
+			let replayResponse: AnthropicResponseReplay | undefined;
 			const preparedContext = await prepareAnthropicImageContext(context, model);
 			const prepareParams = async (): Promise<MessageCreateParamsStreaming> => {
 				if (transport) rawRequestDump = undefined;
@@ -2290,6 +2367,7 @@ const streamAnthropicOnce = (
 				// The last build wins: a retry may rebuild with different controls.
 				if (built.requestControls) output.requestControls = built.requestControls;
 				else delete output.requestControls;
+				replayResponse = built.replayResponse;
 				if (disableStrictTools) {
 					dropAnthropicStrictTools(nextParams);
 				}
@@ -2463,7 +2541,7 @@ const streamAnthropicOnce = (
 				output.model = sourceModel.id;
 				output.responseId = undefined;
 				output.upstreamModel = undefined;
-				output.errorMessage = undefined;
+				AIError.clearErrorText(output);
 				output.stopDetails = undefined;
 				output.inputTransformations = undefined;
 				output.providerPayload = undefined;
@@ -2649,15 +2727,35 @@ const streamAnthropicOnce = (
 					if (!admitsReplay(replayBudget, 0)) throw replayOf;
 					replayOf = undefined;
 				}
+				const sentBetaHeader =
+					getHeaderCaseInsensitive(perRequestHeaders ?? {}, "anthropic-beta") ??
+					getHeaderCaseInsensitive(clientDefaultHeaders ?? {}, "anthropic-beta") ??
+					requestExtraBetas.join(",");
+				// `params` stays the full body every retry rung and the refusal credit
+				// read; only the wire sees the thread shape, with its beta.
+				const threadRequest = threadTurn?.plan(params, sentBetaHeader);
+				const wireParams = threadRequest?.body ?? params;
+				if (threadTurn && rawRequestDump) rawRequestDump.body = wireParams;
+				const requestHeaders = threadRequest
+					? {
+							...perRequestHeaders,
+							...mergeAnthropicBetaHeader(
+								perRequestHeaders?.["anthropic-beta"] !== undefined
+									? perRequestHeaders
+									: (clientDefaultHeaders ?? {}),
+								messageThreadsBeta,
+							),
+						}
+					: perRequestHeaders;
 				const requestOptions = {
 					...createSdkStreamRequestOptions(requestSignal, requestTimeoutMs),
 					maxRetries: 0,
-					...(perRequestHeaders ? { headers: perRequestHeaders } : {}),
+					...(requestHeaders ? { headers: requestHeaders } : {}),
 				};
 				const anthropicRequest: unknown =
 					isOAuthToken && client.beta
-						? client.beta.messages.create({ ...params, stream: true }, requestOptions)
-						: client.messages.create({ ...params, stream: true }, requestOptions);
+						? client.beta.messages.create({ ...wireParams, stream: true }, requestOptions)
+						: client.messages.create({ ...wireParams, stream: true }, requestOptions);
 				let streamedReplayUnsafeContent = false;
 
 				try {
@@ -3134,10 +3232,6 @@ const streamAnthropicOnce = (
 								// Only a refusal carries a credit token. Refusal turns are never
 								// written to the session, so the frozen body stays in memory.
 								if (stopDetails?.type === "refusal" && stopDetails.fallback_credit_token) {
-									const sentBetaHeader =
-										getHeaderCaseInsensitive(perRequestHeaders ?? {}, "anthropic-beta") ??
-										getHeaderCaseInsensitive(clientDefaultHeaders ?? {}, "anthropic-beta") ??
-										requestExtraBetas.join(",");
 									output.fallbackCreditHandle = {
 										token: stopDetails.fallback_credit_token,
 										prefillClaim: stopDetails.fallback_has_prefill_claim,
@@ -3254,19 +3348,35 @@ const streamAnthropicOnce = (
 					const streamFailure = preserveTransportStatus ? streamError : (localAbortReason ?? streamError);
 					if (transport) throw streamFailure;
 					replayOf = streamFailure;
+					const threadRecovery = firstTokenTime === undefined ? threadTurn?.recover(streamFailure) : undefined;
+					if (threadRecovery) {
+						if (replayBudget && !(await replayBudget.replayAfter(streamFailure, 0, options?.signal, options))) {
+							throw streamFailure;
+						}
+						logger.warn(
+							threadRecovery === "replay"
+								? "anthropic: thread continue refused, replaying the full conversation"
+								: "anthropic: thread refused, resending without thread",
+							{
+								model: model.id,
+								error: streamFailure instanceof Error ? streamFailure.message : String(streamFailure),
+							},
+						);
+						resetStreamOutputState();
+						continue;
+					}
 					if (
 						!disableStrictTools &&
 						firstTokenTime === undefined &&
 						hasStrictAnthropicTools(params) &&
 						AIError.isGrammarError(streamFailure) &&
-						(!replayBudget ||
-							(await replayBudget.replayAfter(streamFailure, 0, options?.signal, options?.providerRetryWait)))
+						(!replayBudget || (await replayBudget.replayAfter(streamFailure, 0, options?.signal, options)))
 					) {
 						// Log-only: the retried turn must not carry an errorMessage on
 						// success (consumers treat its presence as failure).
 						logger.warn("anthropic: strict tools rejected, retrying without strict tools", {
 							model: model.id,
-							error: await finalizeErrorMessage(streamFailure, rawRequestDump),
+							error: await finalizeErrorDisplayMessage(streamFailure, rawRequestDump),
 						});
 						if (providerSessionState) {
 							providerSessionState.strictToolsDisabled = true;
@@ -3291,9 +3401,9 @@ const streamAnthropicOnce = (
 								(!replayBudget ||
 									(await replayBudget.replayAfter(
 										streamFailure,
-										500,
+										Math.min(500, retryWaitBounds(options, DEFAULT_MAX_RETRY_DELAY_MS).maxDelayMs),
 										options?.signal,
-										options?.providerRetryWait,
+										options,
 									)))
 							) {
 								fallbackCreditTransientRetries++;
@@ -3304,7 +3414,7 @@ const streamAnthropicOnce = (
 										attempt: fallbackCreditTransientRetries,
 									},
 								);
-								if (!replayBudget) await waitForRetry(options?.providerRetryWait, 500, options?.signal);
+								if (!replayBudget) await sleepUnderBudget(undefined, options, 500, options?.signal);
 								resetStreamOutputState();
 								continue;
 							}
@@ -3312,8 +3422,7 @@ const streamAnthropicOnce = (
 						}
 						if (
 							fallbackCreditShape === "continuation" &&
-							(!replayBudget ||
-								(await replayBudget.replayAfter(streamFailure, 0, options?.signal, options?.providerRetryWait)))
+							(!replayBudget || (await replayBudget.replayAfter(streamFailure, 0, options?.signal, options)))
 						) {
 							logger.warn(
 								"anthropic: fallback credit continuation shape rejected, retrying with unchanged body",
@@ -3333,8 +3442,7 @@ const streamAnthropicOnce = (
 						}
 						if (
 							errMessage.includes("fallback_credit_token") &&
-							(!replayBudget ||
-								(await replayBudget.replayAfter(streamFailure, 0, options?.signal, options?.providerRetryWait)))
+							(!replayBudget || (await replayBudget.replayAfter(streamFailure, 0, options?.signal, options)))
 						) {
 							forfeitFallbackCredit(streamFailure);
 							logger.warn(
@@ -3357,8 +3465,7 @@ const streamAnthropicOnce = (
 						clientArgs &&
 						firstTokenTime === undefined &&
 						adoptRequiredClaudeCodeVersion(streamFailure) &&
-						(!replayBudget ||
-							(await replayBudget.replayAfter(streamFailure, 0, options?.signal, options?.providerRetryWait)))
+						(!replayBudget || (await replayBudget.replayAfter(streamFailure, 0, options?.signal, options)))
 					) {
 						logger.warn("anthropic: Claude Code version rejected as too old, retrying with required version", {
 							model: model.id,
@@ -3372,7 +3479,7 @@ const streamAnthropicOnce = (
 						output.model = sourceModel.id;
 						output.responseId = undefined;
 						output.upstreamModel = undefined;
-						output.errorMessage = undefined;
+						AIError.clearErrorText(output);
 						output.providerPayload = undefined;
 						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
 						output.stopReason = "stop";
@@ -3385,8 +3492,7 @@ const streamAnthropicOnce = (
 						firstTokenTime === undefined &&
 						!streamedReplayUnsafeContent &&
 						isThinkingPrefixBindingError(streamFailureMessage) &&
-						(!replayBudget ||
-							(await replayBudget.replayAfter(streamFailure, 0, options?.signal, options?.providerRetryWait)))
+						(!replayBudget || (await replayBudget.replayAfter(streamFailure, 0, options?.signal, options)))
 					) {
 						logger.warn("anthropic: thinking prefix changed, stripping bound thinking and retrying", {
 							provider: model.provider,
@@ -3402,7 +3508,7 @@ const streamAnthropicOnce = (
 						output.model = sourceModel.id;
 						output.responseId = undefined;
 						output.upstreamModel = undefined;
-						output.errorMessage = undefined;
+						AIError.clearErrorText(output);
 						output.inputTransformations = undefined;
 						output.providerPayload = undefined;
 						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
@@ -3425,8 +3531,7 @@ const streamAnthropicOnce = (
 						const keys = latestAssistantTurnThinkingKeys(params);
 						if (
 							keys.length > 0 &&
-							(!replayBudget ||
-								(await replayBudget.replayAfter(streamFailure, 0, options?.signal, options?.providerRetryWait)))
+							(!replayBudget || (await replayBudget.replayAfter(streamFailure, 0, options?.signal, options)))
 						) {
 							logger.warn(
 								"anthropic: latest assistant turn's thinking rejected as modified, dropping it and retrying",
@@ -3449,7 +3554,7 @@ const streamAnthropicOnce = (
 							output.model = sourceModel.id;
 							output.responseId = undefined;
 							output.upstreamModel = undefined;
-							output.errorMessage = undefined;
+							AIError.clearErrorText(output);
 							output.inputTransformations = undefined;
 							output.providerPayload = undefined;
 							output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
@@ -3464,8 +3569,7 @@ const streamAnthropicOnce = (
 						!streamedReplayUnsafeContent &&
 						!isThinkingPrefixBindingError(streamFailureMessage) &&
 						isInvalidThinkingSignatureError(streamFailureMessage) &&
-						(!replayBudget ||
-							(await replayBudget.replayAfter(streamFailure, 0, options?.signal, options?.providerRetryWait)))
+						(!replayBudget || (await replayBudget.replayAfter(streamFailure, 0, options?.signal, options)))
 					) {
 						logger.warn(
 							"anthropic: signing proxy detected (thinking signature rejected), demoting unsigned thinking and retrying",
@@ -3486,7 +3590,7 @@ const streamAnthropicOnce = (
 						output.model = sourceModel.id;
 						output.responseId = undefined;
 						output.upstreamModel = undefined;
-						output.errorMessage = undefined;
+						AIError.clearErrorText(output);
 						output.providerPayload = undefined;
 						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
 						output.stopReason = "stop";
@@ -3499,8 +3603,7 @@ const streamAnthropicOnce = (
 						!streamedReplayUnsafeContent &&
 						!isThinkingPrefixBindingError(streamFailureMessage) &&
 						isInvalidThinkingSignatureError(streamFailureMessage) &&
-						(!replayBudget ||
-							(await replayBudget.replayAfter(streamFailure, 0, options?.signal, options?.providerRetryWait)))
+						(!replayBudget || (await replayBudget.replayAfter(streamFailure, 0, options?.signal, options)))
 					) {
 						// The unsigned-demotion retry only rewrites UNSIGNED blocks;
 						// when every replayed block carries a signature the signer no
@@ -3529,7 +3632,7 @@ const streamAnthropicOnce = (
 						output.content.length = 0;
 						output.model = sourceModel.id;
 						output.responseId = undefined;
-						output.errorMessage = undefined;
+						AIError.clearErrorText(output);
 						output.inputTransformations = undefined;
 						output.providerPayload = undefined;
 						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
@@ -3542,8 +3645,7 @@ const streamAnthropicOnce = (
 						wantsAnthropicFastMode(model, options) &&
 						firstTokenTime === undefined &&
 						AIError.isFastModeUnsupported(streamFailure) &&
-						(!replayBudget ||
-							(await replayBudget.replayAfter(streamFailure, 0, options?.signal, options?.providerRetryWait)))
+						(!replayBudget || (await replayBudget.replayAfter(streamFailure, 0, options?.signal, options)))
 					) {
 						logger.debug("anthropic: fast mode unsupported, retrying without speed", {
 							model: model.id,
@@ -3559,7 +3661,7 @@ const streamAnthropicOnce = (
 						output.model = sourceModel.id;
 						output.responseId = undefined;
 						output.upstreamModel = undefined;
-						output.errorMessage = undefined;
+						AIError.clearErrorText(output);
 						output.providerPayload = undefined;
 						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
 						output.stopReason = "stop";
@@ -3579,8 +3681,7 @@ const streamAnthropicOnce = (
 						firstTokenTime === undefined &&
 						AIError.isCacheControlUnsupported(streamFailure) &&
 						requestCarriesCacheControlOptions() &&
-						(!replayBudget ||
-							(await replayBudget.replayAfter(streamFailure, 0, options?.signal, options?.providerRetryWait)))
+						(!replayBudget || (await replayBudget.replayAfter(streamFailure, 0, options?.signal, options)))
 					) {
 						logger.warn(
 							"anthropic: endpoint rejected cache_control, retrying with breakpoints but no ttl/scope",
@@ -3601,7 +3702,7 @@ const streamAnthropicOnce = (
 						output.content.length = 0;
 						output.model = sourceModel.id;
 						output.responseId = undefined;
-						output.errorMessage = undefined;
+						AIError.clearErrorText(output);
 						output.providerPayload = undefined;
 						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
 						output.stopReason = "stop";
@@ -3633,7 +3734,8 @@ const streamAnthropicOnce = (
 									streamFailure,
 									slowRetry.delayMs,
 									options?.signal,
-									options?.providerRetryWait,
+									// The opt-in slow lane waits for its server-scheduled slot.
+									{ ...providerRetryPolicy(options), maxRetryDelayMs: 0, providerRetryWaitCeilingMs: 0 },
 								)))
 						) {
 							if (slowRetry.capacityWait) {
@@ -3647,7 +3749,14 @@ const streamAnthropicOnce = (
 								attempt: slowWaitAttempts,
 							});
 							if (!replayBudget && slowRetry.delayMs > 0) {
-								await waitForRetry(options?.providerRetryWait, slowRetry.delayMs, options?.signal);
+								// The slow lane the caller opted into waits for a slot on the
+								// server's own schedule, inside its stated max-wait budget: a
+								// shorter sleep only resends into a busy slot, so it is not bounded.
+								await waitForRetry(
+									providerRetryPolicy(options).providerRetryWait,
+									slowRetry.delayMs,
+									options?.signal,
+								);
 							}
 							resetStreamOutputState();
 							continue;
@@ -3657,8 +3766,7 @@ const streamAnthropicOnce = (
 						!dropCacheControl &&
 						firstTokenTime === undefined &&
 						AIError.isCacheControlUnsupported(streamFailure) &&
-						(!replayBudget ||
-							(await replayBudget.replayAfter(streamFailure, 0, options?.signal, options?.providerRetryWait)))
+						(!replayBudget || (await replayBudget.replayAfter(streamFailure, 0, options?.signal, options)))
 					) {
 						logger.warn("anthropic: endpoint rejected cache_control, retrying without prompt-cache breakpoints", {
 							provider: model.provider,
@@ -3676,11 +3784,21 @@ const streamAnthropicOnce = (
 						output.content.length = 0;
 						output.model = sourceModel.id;
 						output.responseId = undefined;
-						output.errorMessage = undefined;
+						AIError.clearErrorText(output);
 						output.providerPayload = undefined;
 						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
 						output.stopReason = "stop";
 						firstTokenTime = undefined;
+						continue;
+					}
+					// Undocumented thread rejections arrive as plain 400s; resend once
+					// without the thread before surfacing it.
+					if (firstTokenTime === undefined && threadTurn?.dropAfterUnexplained400(streamFailure)) {
+						logger.warn("anthropic: 400 on a thread request, resending without thread", {
+							model: model.id,
+							error: streamFailureMessage,
+						});
+						resetStreamOutputState();
 						continue;
 					}
 					const isTransientEnvelopeFailure =
@@ -3703,51 +3821,40 @@ const streamAnthropicOnce = (
 					}
 					providerRetryAttempt++;
 					const backoffDelayMs = calculateAnthropicRetryDelayMs(providerRetryAttempt - 1);
-					// Honor the server's retry hint (`retry-after-ms`/`retry-after`) on
-					// 429/529-style failures and on an accepted stream that failed after
-					// naming one: retrying sooner than the server asked is a guaranteed
-					// failure that just burns the retry budget. The same reader as the
-					// failed message's `errorRetryAfterMs`, so this cap and every layer
-					// above judge one wait. Under a replay budget the longest wait the
-					// headers or the message name also counts, so a header that says zero
-					// cannot beat a body that says thirty seconds.
+					// Honor the server's stated wait in headers or text, including an
+					// accepted response that failed after naming one. Under a replay
+					// budget its longest named wait also counts.
 					const statedDelayMs = getFailureRetryAfterMs(streamFailure, { streamResponseHeaders });
 					const longestDelayMs = replayBudget ? longestServerWaitMs(streamFailure) : undefined;
 					const headerDelayMs =
 						longestDelayMs === undefined || (statedDelayMs !== undefined && statedDelayMs > longestDelayMs)
 							? statedDelayMs
 							: longestDelayMs;
-					// Bound the server-directed wait so a multi-hour `retry-after` cannot
-					// park the provider stream before higher-level recovery runs. A non-positive cap
-					// disables the bound; an over-cap hint surfaces the original error immediately.
-					const maxRetryDelayMs = options?.maxRetryDelayMs ?? 60_000;
-					if (headerDelayMs !== undefined && maxRetryDelayMs > 0 && headerDelayMs > maxRetryDelayMs) {
+					const statedWaitMs = providerFailureWaitMs(sourceModel.provider, streamFailure, {
+						streamResponseHeaders,
+					});
+					const retryBounds = retryWaitBounds(options, DEFAULT_MAX_RETRY_DELAY_MS);
+					if (retryBounds.declines(Math.max(headerDelayMs ?? 0, statedWaitMs ?? 0), streamFailure)) {
 						throw streamFailure;
 					}
-					const delayMs = headerDelayMs !== undefined ? Math.max(headerDelayMs, backoffDelayMs) : backoffDelayMs;
-					// Neither wait is shortened to fit the caller's budget: retrying
-					// sooner than the server asked is a guaranteed failure, so a wait
-					// that would end past the budget ends the call now instead. The
-					// wait is raced against the deadline, and the request it leads to
-					// is checked again at handoff.
+					const delayMs = Math.max(
+						headerDelayMs ?? 0,
+						statedWaitMs ?? 0,
+						Math.min(backoffDelayMs, retryBounds.maxDelayMs),
+					);
+					// A stated wait is refused, not shortened. The bounded backoff is
+					// raced against the replay deadline and checked again at handoff.
 					if (replayBudget) {
-						if (
-							!(await replayBudget.replayAfter(
-								streamFailure,
-								delayMs,
-								options?.signal,
-								options?.providerRetryWait,
-							))
-						) {
+						if (!(await replayBudget.replayAfter(streamFailure, delayMs, options?.signal, options))) {
 							throw streamFailure;
 						}
 					} else {
-						await waitForRetry(options?.providerRetryWait, delayMs, options?.signal);
+						await sleepUnderBudget(undefined, options, delayMs, options?.signal);
 					}
 					output.content.length = 0;
 					output.model = sourceModel.id;
 					output.responseId = undefined;
-					output.errorMessage = undefined;
+					AIError.clearErrorText(output);
 					output.stopDetails = undefined;
 					output.providerPayload = undefined;
 					output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
@@ -3769,6 +3876,21 @@ const streamAnthropicOnce = (
 			// response (an empty completion it retries) and the requests already
 			// spent on it are still requests the model saw.
 			output.providerReplays = reportedProviderReplays();
+			if (threadTurn) {
+				// The server keeps a finished turn from the requested model. A paused or
+				// truncated turn, or one a fallback model wrote, starts a new thread next.
+				const continuable =
+					(output.stopReason === "stop" || output.stopReason === "toolUse") &&
+					output.stopDetails?.type !== "pause_turn" &&
+					output.model === sourceModel.id &&
+					!retained.some(block => block.type === "fallback");
+				const messageId = output.responseId;
+				const message =
+					continuable && messageId
+						? replayResponse?.(retained === output.content ? output : { ...output, content: retained })
+						: undefined;
+				threadTurn.settle(messageId && message ? { messageId, message } : undefined);
+			}
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			if (dropFastMode && model.compat.firstPartyProvider && options?.serviceTier === "priority") {
@@ -3823,18 +3945,21 @@ const streamAnthropicOnce = (
 				rawRequestDump,
 				streamResponseHeaders,
 			});
-			output.stopReason = result.stopReason;
-			output.errorStatus = result.status;
-			output.errorId = result.id;
-			output.errorMessage = transport ? result.message : maybeAddReplayUnsignedThinkingHint(model, result.message);
-			output.errorRetryAfterMs = result.retryAfterMs;
+			// The replay remediation is omp's text: shown, never classified.
+			const shown = result.displayMessage ?? result.message;
+			AIError.applyFinalizeResult(
+				output,
+				result,
+				transport ? shown : maybeAddReplayUnsignedThinkingHint(model, result.message, shown),
+			);
+			output.errorRetryWaitRefusal = result.retryWaitRefusal;
 			output.providerReplays = reportedProviderReplays();
 			replayBudget?.stamp(output);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({
 				type: "error",
-				reason: output.stopReason,
+				reason: result.stopReason,
 				error: retained === output.content ? output : { ...output, content: retained },
 			});
 			stream.end();
@@ -3933,6 +4058,7 @@ function withoutDisabledExperimentalBetas(model: Model<"anthropic-messages">): M
 			supportsContextManagement: false,
 			supportsThinkingBindingControls: false,
 			supportsServerCompaction: false,
+			supportsMessageThreads: false,
 			disableStrictTools: true,
 			supportsEagerToolInputStreaming: false,
 			supportsMidConversationToolChanges: false,
@@ -4021,6 +4147,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		hasBufferedInputTools = false,
 		thinkingEnabled = false,
 		isOAuth,
+		omitClaudeCodeAppHeaders,
 		maxRetryDelayMs,
 		sessionId,
 		disableStrictTools: disableStrictToolsOverride,
@@ -4156,6 +4283,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		apiKey,
 		baseUrl,
 		isOAuth: oauthToken,
+		omitClaudeCodeAppHeaders,
 		extraBetas: betaFeatures,
 		stream,
 		modelHeaders: requestModelHeaders,
@@ -5041,6 +5169,19 @@ function anthropicToolChangeBlocks(
 	}));
 }
 
+/**
+ * Serializes a response the way the next request's history will, so a message
+ * thread can tell whether that request extends this one.
+ */
+type AnthropicResponseReplay = (message: AssistantMessage) => MessageParam | undefined;
+
+/** A built request body plus what its turn needs after the response. */
+type AnthropicBuiltParams = {
+	params: MessageCreateParamsStreaming;
+	requestControls: AnthropicRequestControls | undefined;
+	replayResponse: AnthropicResponseReplay;
+};
+
 type AnthropicParamBuildOptions = {
 	disableStrictTools: boolean;
 	useUmansGatewayWebSearch: boolean;
@@ -5164,7 +5305,7 @@ function buildParams(
 	isOAuthToken: boolean,
 	options: AnthropicOptions | undefined,
 	buildOptions: AnthropicParamBuildOptions,
-): { params: MessageCreateParamsStreaming; requestControls: AnthropicRequestControls | undefined } {
+): AnthropicBuiltParams {
 	const {
 		disableStrictTools,
 		useUmansGatewayWebSearch,
@@ -5412,20 +5553,21 @@ function buildParams(
 	if (thinking?.type === "between_tools" && (effortPlan.topLevel === "xhigh" || effortPlan.topLevel === "max")) {
 		thinking = undefined;
 	}
+	const conversion: AnthropicConversionOptions = {
+		serverSideFallbackEnabled: !!fallbacks?.length,
+		replayCompaction: compactionSupported,
+		replayLegacyCompaction: compactionReplay?.legacy,
+		dropAllThinking: dropAllThinking || stripThinkingHistory,
+		thinkingEnabled: thinking?.type === "adaptive" || thinking?.type === "enabled",
+		droppedThinkingBlocks,
+		credentialId: options?.credentialId,
+		compactionRequest,
+	};
 	const wireMessages = convertAnthropicMessages(
 		insertAnthropicControlMarkers(context.messages, [...toolPlan.inserts, ...effortPlan.inserts]),
 		effectiveModel,
 		isOAuthToken,
-		{
-			serverSideFallbackEnabled: !!fallbacks?.length,
-			replayCompaction: compactionSupported,
-			replayLegacyCompaction: compactionReplay?.legacy,
-			dropAllThinking: dropAllThinking || stripThinkingHistory,
-			thinkingEnabled: thinking?.type === "adaptive" || thinking?.type === "enabled",
-			droppedThinkingBlocks,
-			credentialId: options?.credentialId,
-			compactionRequest,
-		},
+		conversion,
 	);
 
 	// Anchor the stable tools+system head so it stays cached across turns; the
@@ -5565,7 +5707,14 @@ function buildParams(
 	ensureMaxTokensForThinking(params, maxOutputTokens);
 	applyPromptCaching(params, cacheControl);
 
-	return { params, requestControls };
+	return {
+		params,
+		requestControls,
+		replayResponse: message =>
+			convertAnthropicMessages([message], effectiveModel, isOAuthToken, conversion).find(
+				param => param.role === "assistant",
+			),
+	};
 }
 
 /** Project a Bedrock Converse model onto Anthropic Messages so the shared encoder resolves canonical wire compat. */
@@ -5745,6 +5894,19 @@ function collapseFallbackSegments(content: AssistantMessage["content"]): Assista
 	return collapsed;
 }
 
+/** History serialization choices {@link convertAnthropicMessages} applies to a request. */
+type AnthropicConversionOptions = {
+	serverSideFallbackEnabled?: boolean;
+	replayCompaction?: boolean;
+	replayLegacyCompaction?: boolean;
+	dropAllThinking?: boolean;
+	thinkingEnabled?: boolean;
+	droppedThinkingBlocks?: ReadonlySet<string>;
+	credentialId?: number;
+	/** On-demand compaction request: it ends inside the conversation, so it gets nothing live requests lack there. */
+	compactionRequest?: AnthropicCompactionRequest;
+};
+
 /**
  * Serialize omp {@link Message}s to Anthropic wire messages.
  *
@@ -5770,17 +5932,7 @@ export function convertAnthropicMessages(
 	messages: Message[],
 	model: Model<"anthropic-messages">,
 	isOAuthToken: boolean,
-	opts?: {
-		serverSideFallbackEnabled?: boolean;
-		replayCompaction?: boolean;
-		replayLegacyCompaction?: boolean;
-		dropAllThinking?: boolean;
-		thinkingEnabled?: boolean;
-		droppedThinkingBlocks?: ReadonlySet<string>;
-		credentialId?: number;
-		/** On-demand compaction request: it ends inside the conversation, so it gets nothing live requests lack there. */
-		compactionRequest?: AnthropicCompactionRequest;
-	},
+	opts?: AnthropicConversionOptions,
 ): AnthropicMessageParam[] {
 	// Indices of params emitted from agent-owned `developer` messages. After the
 	// main pass, the ones whose placement satisfies Anthropic's mid-conversation

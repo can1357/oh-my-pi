@@ -27,6 +27,8 @@ import {
 	getOpenAIStreamIdleTimeoutMs,
 } from "../utils/idle-iterator";
 import { gateOptionalFetch, ReplayBudget, restoreReplaced } from "../utils/replay-budget";
+import { transportRetry } from "../utils/retry-after";
+import { DEFAULT_MAX_RETRY_DELAY_MS } from "../utils/retry-wait";
 import { sanitizeSchemaForOllama, toolWireSchema } from "../utils/schema";
 import {
 	getStreamMarkupHealingPattern,
@@ -474,6 +476,8 @@ const streamOllamaOnce = (
 		// The chat response's headers once it is accepted (2xx), for `finalize`:
 		// an NDJSON error record or a cut stream keeps the response's `Retry-After`.
 		let streamResponseHeaders: Headers | undefined;
+		// The rejected endpoint is local configuration: shown, never in `errorMessage`, which decisions read.
+		let rejectedEndpoint: { error: unknown; status: number; url: string } | undefined;
 		let activeThinkingIndex: number | undefined;
 		let activeTextIndex: number | undefined;
 		const activeToolIndices = new Set<number>();
@@ -602,6 +606,7 @@ const streamOllamaOnce = (
 			// never aborts the actively streaming body — an absolute
 			// `AbortSignal.timeout` would (issue #2422).
 			const watchdog = armPreResponseTimeout(options.signal, firstEventTimeoutMs);
+			const retry = transportRetry(options, DEFAULT_MAX_RETRY_DELAY_MS);
 			let response: Response;
 			try {
 				response = await fetchWithRetry(`${baseUrl}/api/chat`, {
@@ -615,6 +620,7 @@ const streamOllamaOnce = (
 					body: JSON.stringify(body),
 					signal: watchdog.signal,
 					defaultDelayMs: OLLAMA_RETRY_DELAYS_MS,
+					...retry.fetchOptions,
 					shouldRetryResponse: shouldRetryOllamaResponse,
 					retryGate: replayBudget?.admits,
 					fetch: gateOptionalFetch(replayBudget, options.fetch),
@@ -625,9 +631,12 @@ const streamOllamaOnce = (
 			}
 			if (!response.ok) {
 				capturedErrorResponse = await captureHttpErrorResponse(response);
-				throw new AIError.OllamaApiError(`HTTP ${response.status} from ${baseUrl}/api/chat`, response.status, {
+				const httpError = new AIError.OllamaApiError(`HTTP ${response.status}`, response.status, {
 					headers: response.headers,
 				});
+				retry.markRefusal(httpError);
+				rejectedEndpoint = { error: httpError, status: response.status, url: `${baseUrl}/api/chat` };
+				throw httpError;
 			}
 			streamResponseHeaders = response.headers;
 			if (!response.body) {
@@ -783,7 +792,8 @@ const streamOllamaOnce = (
 					clearStreamingPartialJson(block);
 				}
 			}
-			const result = await AIError.finalize(restoreReplaced(error, replayBudget), {
+			const answered = restoreReplaced(error, replayBudget);
+			const result = await AIError.finalize(answered, {
 				api: model.api,
 				provider: model.provider,
 				signal: options.signal,
@@ -791,17 +801,27 @@ const streamOllamaOnce = (
 				capturedErrorResponse,
 				streamResponseHeaders,
 			});
-			output.stopReason = result.stopReason;
-			output.errorStatus = result.status;
-			output.errorId = result.id;
-			output.errorMessage = result.message;
-			output.errorRetryAfterMs = result.retryAfterMs;
+			if (rejectedEndpoint !== undefined && rejectedEndpoint.error === answered) {
+				const { status, url } = rejectedEndpoint;
+				const shown = result.displayMessage ?? result.message;
+				const prefix = `HTTP ${status}`;
+				AIError.applyFinalizeResult(
+					output,
+					result,
+					shown.startsWith(prefix)
+						? `${prefix} from ${url}${shown.slice(prefix.length)}`
+						: `${shown}\n(${prefix} from ${url})`,
+				);
+			} else {
+				AIError.applyFinalizeResult(output, result);
+			}
 			replayBudget?.stamp(output);
+			output.errorRetryWaitRefusal = result.retryWaitRefusal;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) {
 				output.ttft = firstTokenTime - startTime;
 			}
-			stream.push({ type: "error", reason: output.stopReason, error: output });
+			stream.push({ type: "error", reason: result.stopReason, error: output });
 			stream.end();
 		}
 	})();

@@ -333,9 +333,10 @@ function mapAssistantMessageUpdate(
 			break;
 		case "error": {
 			sessionUpdate = "agent_message_chunk";
-			// An empty error text sends nothing; a missing one reads "Unknown error".
+			// An empty shown error sends nothing; a missing one reads "Unknown error".
 			const error = event.assistantMessageEvent.error;
-			text = error.errorMessage === "" ? "" : assistantErrorText(error, "Unknown error");
+			text =
+				(error.errorDisplayMessage ?? error.errorMessage) === "" ? "" : assistantErrorText(error, "Unknown error");
 			// The surfaced error is the message's visible text: keeps the
 			// message_end / agent_end fallbacks from emitting again.
 			if (text.length > 0 && progress) {

@@ -1,4 +1,5 @@
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
+import { getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
 import { isAccountPolicyError, isClinePassSurfaceGateMessage, isOAuthExpiry, isUsageLimit } from "./flags";
 import { OAuthError } from "./oauth";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./rate-limit";
@@ -18,8 +19,7 @@ const INVALIDATED_OAUTH_TOKEN_PATTERN = /\binvalidated oauth token\b/i;
 /** Whether an upstream response explicitly says the supplied OAuth bearer was invalidated. */
 export function isInvalidatedOAuthTokenError(error: unknown): boolean {
 	if (typeof error === "object" && error !== null && "errorMessage" in error) {
-		const errorMessage =
-			"errorClassificationMessage" in error ? error.errorClassificationMessage : error.errorMessage;
+		const errorMessage = error.errorMessage;
 		if (typeof errorMessage === "string" && INVALIDATED_OAUTH_TOKEN_PATTERN.test(errorMessage)) return true;
 	}
 	const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
@@ -43,6 +43,9 @@ export function isAuthRetryableError(error: unknown): boolean {
 	if (isInvalidatedOAuthTokenError(error)) return true;
 	let httpStatus = extractHttpStatusFromError(error);
 	let message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+	// A failed turn keeps its response's retry headers as `errorRetryAfterMs`;
+	// a thrown error keeps the headers themselves.
+	let headerRetryAfterMs = getRetryAfterMsFromHeaders(getHeadersFromError(error));
 	if (typeof error === "object" && error !== null) {
 		if (httpStatus === undefined && "errorStatus" in error && typeof error.errorStatus === "number") {
 			httpStatus = error.errorStatus;
@@ -50,13 +53,16 @@ export function isAuthRetryableError(error: unknown): boolean {
 		if (message === undefined && "errorMessage" in error && typeof error.errorMessage === "string") {
 			message = error.errorMessage;
 		}
+		if ("errorRetryAfterMs" in error && typeof error.errorRetryAfterMs === "number") {
+			headerRetryAfterMs = error.errorRetryAfterMs;
+		}
 	}
 	const embeddedStatus = message ? extractHttpStatusFromError({ message }) : undefined;
 	const status = httpStatus ?? embeddedStatus;
-	if (isConcurrencyCapExclusion(status, message)) return false;
+	if (isConcurrencyCapExclusion(status, message, headerRetryAfterMs)) return false;
 	// A Cline surface-gate 403 is per-model client policy, not a credential
 	// problem: sibling keys fail identically, so rotation only burns them.
 	if (isClinePassSurfaceGateMessage(message)) return false;
 	if (status === 401 || status === 403) return true;
-	return isUsageLimitOutcome(status, message);
+	return isUsageLimitOutcome(status, message, headerRetryAfterMs);
 }

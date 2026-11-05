@@ -6,6 +6,52 @@
 
 - Fixed an Antigravity version lookup that a streaming call's replay budget (`StreamOptions.replayBudgetMs`) refused counting as a failed lookup and holding back every caller's version lookups for ten minutes ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
 
+### Added
+
+- Added the `tool-name-prefix` compat axis for Responses hosts that reject requests declaring certain exact tool names; Muse Code sets it to `_` ([#17435](https://github.com/can1357/oh-my-pi/issues/17435), [#17515](https://github.com/can1357/oh-my-pi/pull/17515) by [@harshav167](https://github.com/harshav167), continued in [#18053](https://github.com/can1357/oh-my-pi/pull/18053) by [@abilliontokens](https://github.com/abilliontokens))
+- Added the `supports-message-threads` compat axis (`supportsMessageThreads`), enabled for Claude 4.5 and newer on the first-party Anthropic provider
+- Added a standard Responses WebSocket capability rule for explicit opt-in through OMP settings or SDK preferences, disabled by default ([#17354](https://github.com/can1357/oh-my-pi/pull/17354) by [@TatsukiMeng](https://github.com/TatsukiMeng))
+- Added Factory Droid Gemini 4 Argon, listed on Global inference once the account's feature flag enables it ([#17861](https://github.com/can1357/oh-my-pi/pull/17861) by [@will-bogusz](https://github.com/will-bogusz))
+- Added Muse Spark 1.3 to Factory Droid for accounts with Factory's `muse_spark_1_3` flag, on the Global region only: requests go over Responses to Factory's Vertex upstream with low to xhigh effort, and later turns omit the earlier turns' encrypted reasoning as Droid does ([#17862](https://github.com/can1357/oh-my-pi/pull/17862) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Factory Droid no longer hides a model when live routing's family default leaves it no upstream (an empty default, one naming none of its upstreams, or none serving the account's region); like Droid, it uses the model's registry upstream. An empty per-model route still hides the model ([#17862](https://github.com/can1357/oh-my-pi/pull/17862) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Changed
+
+- Factory Droid reports client version 1.1.0, and Claude requests routed to Azure Foundry stream tool input eagerly like the Anthropic and Vertex routes ([#17885](https://github.com/can1357/oh-my-pi/pull/17885) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.16.0] - 2026-11-02
+
+### Added
+
+- `/login mistral` now offers the Mistral Vibe browser sign-in beside `MISTRAL_API_KEY` ([#13875](https://github.com/can1357/oh-my-pi/pull/13875) by [@Gauthier-Huguenin](https://github.com/Gauthier-Huguenin), continued in [#17672](https://github.com/can1357/oh-my-pi/pull/17672) by [@abilliontokens](https://github.com/abilliontokens))
+- Added `revisionAtLeast` to `compat/revision` and exported `withOpenAICompatibleDiscoveryTimeout` from `discovery/openai-compatible`
+- Added the Factory Droid models droid 1.1.0 serves: GPT-6.1 Terra, GPT-6 Sol and Luna Fast Mode, GPT-6 Astra and GPT-6.1 Sol Ultra Fast (after the organization's high-cost opt-in), Nemotron 3.5 Super, Muse Spark Open, Muse Spark 1.2 and Beam 1.0, each listed once the account may use it ([#17766](https://github.com/can1357/oh-my-pi/pull/17766) by [@will-bogusz](https://github.com/will-bogusz))
+- Added Factory Droid's dated credit rates: the credit rate follows Factory's promotions, discounted from a promotion's start and back to the base rate at its end, using the same dated rate cards as dollar prices (currently GPT-5.6 Sol and Gemini 3.7/3.8 Flash) ([#16309](https://github.com/can1357/oh-my-pi/pull/16309) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Changed
+
+- Factory Droid lists Opus 5.5 Fast, GPT-6.1 Sol and MiniMax M3 without the feature flags Factory retired, and no longer routes GPT-5.5 to Snowflake ([#17766](https://github.com/can1357/oh-my-pi/pull/17766) by [@will-bogusz](https://github.com/will-bogusz))
+- Factory Droid Opus 5.5 now falls back to Opus 5 when Anthropic refuses a request, as droid does, while your account can use Opus 5 ([#17772](https://github.com/can1357/oh-my-pi/pull/17772) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- GPT-3.5 and GPT-4 (Turbo) resolve the `cl100k` tokenizer, so their context estimates count in cl100k_base rather than the o200k_base default for models without one ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
+- Added Scaleway Generative APIs as a built-in provider with 12 serverless chat models (glm-5.3 default), API-key login, and live model discovery ([#16687](https://github.com/can1357/oh-my-pi/pull/16687) by [@reda-maizate](https://github.com/reda-maizate))
+
+## [18.15.0] - 2026-11-01
+
+### Added
+
+- Added Modular Cloud (`modular`) as a provider: `/login modular` with an API key, models and prices from the models.dev `modular` entry, and per-model reasoning controls for MiniMax M3.1 Flash, MiniMax M3, and Gemma 4 31B ([#17334](https://github.com/can1357/oh-my-pi/pull/17334) by [@tommyjtl](https://github.com/tommyjtl))
+- SambaNova Cloud follow-up turns now reuse the provider's prefix cache, so multi-turn conversations stop re-processing earlier context ([#17555](https://github.com/can1357/oh-my-pi/pull/17555) by [@rjuez00](https://github.com/rjuez00))
+
+### Fixed
+
+- Fixed newly discovered OpenAI-compatible models ignoring provider-reported context and output token limits ([#17561](https://github.com/can1357/oh-my-pi/pull/17561) by [@wolfiesch](https://github.com/wolfiesch))
+
 ## [18.14.2] - 2026-10-31
 
 ### Breaking Changes

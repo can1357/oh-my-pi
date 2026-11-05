@@ -361,7 +361,7 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 			// rehydration reads; without this the in-memory update is lost on the
 			// next resume/rewind/fork and stale todos trigger a false reminder.
 			const phases = committedTodoPhases(result);
-			if (phases) options.session.persistTodoPhases?.(phases);
+			if (phases) options.session.commitTodoPhases?.(phases);
 		}
 		const replies = reply === undefined ? toolResultReplies(result.details) : [reply];
 		if (replies.length > 0) {

@@ -8,6 +8,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isUsageLimitOutcome } from "@oh-my-pi/pi-ai/error/rate-limit";
 import type { AuthApiKeyOptions, AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
+import { getHeadersFromError, getRetryAfterMsFromHeaders } from "@oh-my-pi/pi-ai/utils/retry-after";
 
 /** Model slice accepted by the model-form `resolver(model, sessionId)` overload. */
 export type ApiKeyResolverModel = Pick<Model<Api>, "provider" | "baseUrl" | "id">;
@@ -106,7 +107,9 @@ export function createApiKeyResolver(
 				// No sibling for an account-quota failure: stop so the outer
 				// whole-turn retry layer can honor the recorded backoff. A hard
 				// auth decline can instead mean a peer refreshed the bearer.
-				if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
+				const headerRetryAfterMs = getRetryAfterMsFromHeaders(getHeadersFromError(error));
+				if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message, headerRetryAfterMs))
+					return undefined;
 			}
 			const resolved = await resolveKey(undefined);
 			return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;

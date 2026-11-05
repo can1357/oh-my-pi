@@ -169,7 +169,7 @@ describe("isContextOverflow - 400/413 no-body (Cerebras, Mistral, proxy wrappers
 	});
 
 	// Regression: api.synthetic.new wraps upstream HF 400-no-body in a JSON envelope.
-	// finalizeErrorMessage transforms the response to "400 status code: {JSON}" where
+	// formatProviderErrorText transforms the response to "400 status code: {JSON}" where
 	// the JSON value contains the inner "400 status code (no body)" text.
 	it('detects wrapped proxy envelope: \'400 status code: {"error":"... 400 status code (no body)"}\'', () => {
 		const errorMessage = '400 status code: {"error":"Error from inference backend: 400 status code (no body)"}';

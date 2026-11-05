@@ -82,11 +82,18 @@ function sse(frames: readonly unknown[]): Response {
 	});
 }
 
-/** The proxy server's terminal frame for an upstream failure, its wait given as `errorRetryAfterMs`. */
-function failedTurn(errorRetryAfterMs: unknown): Response {
+/** The proxy server's terminal frame for an upstream failure and its structured retry outcome fields. */
+function failedTurn(errorRetryAfterMs: unknown, errorRetryWaitRefusal?: unknown): Response {
 	return sse([
 		{ type: "start" },
-		{ type: "error", reason: "error", errorMessage: BODY_TEXT, errorRetryAfterMs, usage },
+		{
+			type: "error",
+			reason: "error",
+			errorMessage: BODY_TEXT,
+			errorRetryAfterMs,
+			errorRetryWaitRefusal,
+			usage,
+		},
 	]);
 }
 
@@ -114,6 +121,21 @@ describe("streamProxy — the failed attempt's header retry wait", () => {
 		expect(message.errorMessage).toBe(BODY_TEXT);
 		expect(message.errorRetryAfterMs).toBe(9000);
 		expect(providerRetryWaitMs("anthropic", message.errorMessage, message.errorRetryAfterMs)).toBe(9000);
+	});
+
+	it("carries a complete refused retry wait and drops malformed relay data", async () => {
+		const refusal = {
+			waitMs: 15_000,
+			limitMs: 10_000,
+			option: "providerRetryWaitCeilingMs",
+		} as const;
+		const valid = await runProxy(startProxy(() => failedTurn(undefined, refusal)));
+		const malformed = await runProxy(
+			startProxy(() => failedTurn(undefined, { ...refusal, waitMs: refusal.limitMs })),
+		);
+
+		expect(valid.errorRetryWaitRefusal).toEqual(refusal);
+		expect(malformed.errorRetryWaitRefusal).toBeUndefined();
 	});
 
 	it("lets a one-shot retry capped below the proxied wait refuse to retry", async () => {
@@ -280,7 +302,7 @@ describe("streamProxy — every outcome field on the terminal frame", () => {
 					errorStatus: 429,
 					errorId,
 					providerReplays: 0,
-					errorClassificationMessage: "read ECONNRESET",
+					errorDisplayMessage: "read ECONNRESET (request dump: /tmp/omp-dump.json)",
 					disabledFeatures: ["priority"],
 					duration: 12.5,
 					usage,
@@ -293,7 +315,11 @@ describe("streamProxy — every outcome field on the terminal frame", () => {
 		expect(message.errorStatus).toBe(429);
 		expect(message.errorId).toBe(errorId);
 		expect(message.providerReplays).toBe(0);
-		expect(message.errorClassificationMessage).toBe("read ECONNRESET");
+		// Both error texts cross the proxy, still apart: the provider's own and
+		// the one omp shows. A proxy that collapsed them would send a local dump
+		// path to a classifier on the other side.
+		expect(message.errorMessage).toBe("read ECONNRESET");
+		expect(message.errorDisplayMessage).toBe("read ECONNRESET (request dump: /tmp/omp-dump.json)");
 		expect(message.disabledFeatures).toEqual(["priority"]);
 		expect(message.duration).toBe(12.5);
 		// A consumer: the upstream's 429 keeps this cut off the connection lane.
@@ -368,5 +394,34 @@ describe("streamProxy — every outcome field on the terminal frame", () => {
 		expect(message.provider).toBe(model.provider);
 		expect(message.api).toBe(model.api);
 		expect(message.timestamp).not.toBe(1);
+	});
+});
+
+describe("streamProxy — the caller's retry bounds", () => {
+	it("sends maxRetryDelayMs and providerRetryWaitCeilingMs, so the server's provider retries keep to them", async () => {
+		// The server runs the provider, and so every retry sleep: without the
+		// bounds on the wire it slept up to its own default, silently.
+		const sent: unknown[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(req) {
+				sent.push(await req.json());
+				return sse([{ type: "start" }, { type: "done", reason: "stop", usage }]);
+			},
+		});
+		try {
+			await streamProxy(model, context, {
+				authToken: "proxy-token",
+				proxyUrl: `http://127.0.0.1:${server.port}`,
+				maxRetryDelayMs: 300_000,
+				providerRetryWaitCeilingMs: 10_000,
+			}).result();
+		} finally {
+			server.stop(true);
+		}
+
+		expect(sent).toHaveLength(1);
+		expect(sent[0]).toMatchObject({ options: { maxRetryDelayMs: 300_000, providerRetryWaitCeilingMs: 10_000 } });
 	});
 });

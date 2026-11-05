@@ -4,7 +4,6 @@
  * Uses the Cloud Code Assist API endpoint to access Gemini and Claude models.
  */
 import { randomBytes, randomUUID } from "node:crypto";
-import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { isReviewedTierVariantWireId } from "@oh-my-pi/pi-catalog/compat/collapse";
@@ -35,10 +34,19 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { extractGoogleValidationUrl, formatGoogleValidationRequiredMessage } from "../utils/google-validation";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
-import { admitsReplay, gateFetch, gateOptionalFetch, ReplayBudget, restoreReplaced } from "../utils/replay-budget";
+import {
+	admitsReplay,
+	gateFetch,
+	gateOptionalFetch,
+	ReplayBudget,
+	restoreReplaced,
+	sleepUnderBudget,
+} from "../utils/replay-budget";
 // Refresh is the sole responsibility of AuthStorage (broker-aware, single-flighted);
 // the stream provider trusts the access token threaded through `options.apiKey`.
 import { normalizeSchemaForCCA } from "../utils/schema";
+import { transportRetry } from "../utils/retry-after";
+import { providerRetryPolicy, statedRetryWaitLimit } from "../utils/retry-wait";
 import { StreamMarkupHealing, type StreamMarkupHealingEvent } from "../utils/stream-markup-healing";
 import { prepareAnthropicImageContext } from "./anthropic-images";
 import forcedToolDirective from "./google-antigravity-forced-tool.md" with { type: "text" };
@@ -521,6 +529,9 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 		// empty-stream refetch), so a later attempt that fails before its response
 		// never reads an earlier response's headers.
 		let streamResponseHeaders: Headers | undefined;
+		// omp's account-verification explanation for a rejection: display text only,
+		// so the stored email never reaches `errorMessage`, which decisions read.
+		let validationDisplay: { error: unknown; providerText: string; explanation: string } | undefined;
 
 		try {
 			const apiKeyRaw = options?.apiKey;
@@ -675,7 +686,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 				};
 				output.stopReason = "stop";
-				output.errorMessage = undefined;
+				AIError.clearErrorText(output);
 				output.timestamp = Date.now();
 				sawFinishReason = false;
 			};
@@ -963,8 +974,11 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			// waits the failing endpoint's longest named wait, only if that fits the
 			// budget, raced against the deadline, and its request is checked again at
 			// handoff. Called only under a budget; without one the switch is immediate.
-			const switchesEndpoint = (budget: ReplayBudget, failure: unknown): Promise<boolean> =>
-				budget.replayAfter(failure, 0, options?.signal, options?.providerRetryWait);
+			const providerRetry = providerRetryPolicy(options);
+			const endpointRetryPolicy = {
+				...providerRetry,
+				maxRetryDelayMs: providerRetry.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
+			};
 			for (let i = 0; i < endpoints.length; i++) {
 				const endpoint = endpoints[i];
 				const isLastEndpoint = i === endpoints.length - 1;
@@ -977,6 +991,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					// headers arrive so it never aborts the actively streaming body —
 					// an absolute `AbortSignal.timeout` would (issue #2422).
 					const watchdog = armPreResponseTimeout(callerSignal, firstEventTimeoutMs);
+					const retry = transportRetry(options, RATE_LIMIT_BUDGET_MS);
 					let response: Response;
 					try {
 						response = await fetchWithRetry(() => `${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
@@ -986,9 +1001,9 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							signal: watchdog.signal,
 							maxAttempts: isLastEndpoint ? MAX_RETRIES + 1 : 1,
 							defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
-							maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
 							fetch: gateOptionalFetch(replayBudget, options?.fetch),
 							retryGate: replayBudget?.admits,
+							...retry.fetchOptions,
 							timeout: false,
 						});
 					} finally {
@@ -1000,20 +1015,30 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						if (transientElsewhere && !replayBudget) continue;
 						const errorText = await response.text();
 						const validationUrl = extractGoogleValidationUrl(errorText);
-						const errorMessage = validationUrl
-							? formatGoogleValidationRequiredMessage(
-									validationUrl,
-									"retry your request",
-									parsedCredentials.email,
-								)
-							: errorText;
-						const failure = new AIError.GeminiCliApiError(
-							`Cloud Code Assist API error (${response.status}): ${errorMessage}`,
+						const apiError = new AIError.GeminiCliApiError(
+							`Cloud Code Assist API error (${response.status}): ${errorText}`,
 							response.status,
 							{ headers: response.headers },
 						);
-						if (transientElsewhere && replayBudget && (await switchesEndpoint(replayBudget, failure))) continue;
-						throw failure;
+						if (validationUrl) {
+							validationDisplay = {
+								error: apiError,
+								providerText: errorText,
+								explanation: formatGoogleValidationRequiredMessage(
+									validationUrl,
+									"retry your request",
+									parsedCredentials.email,
+								),
+							};
+						}
+						retry.markRefusal(apiError);
+						if (
+							transientElsewhere &&
+							replayBudget &&
+							(await replayBudget.replayAfter(apiError, 0, options?.signal, endpointRetryPolicy))
+						)
+							continue;
+						throw apiError;
 					}
 
 					streamResponseHeaders = response.headers;
@@ -1026,25 +1051,24 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						}
 
 						if (emptyAttempt > 0) {
-							const backoffMs = EMPTY_STREAM_BASE_DELAY_MS * 2 ** (emptyAttempt - 1);
+							const backoffMs = Math.min(
+								EMPTY_STREAM_BASE_DELAY_MS * 2 ** (emptyAttempt - 1),
+								statedRetryWaitLimit(endpointRetryPolicy).limitMs,
+							);
 							if (!admitsReplay(replayBudget, backoffMs)) break;
-							if (replayBudget) {
-								// Raced against the deadline; the replay's request is checked
-								// again at handoff and, refused there, ends as the empty response.
-								if (!(await replayBudget.wait(backoffMs, options?.signal, options?.providerRetryWait))) break;
-								replayBudget.arm(
-									new AIError.ProviderResponseError("Cloud Code Assist API returned an empty response", {
-										provider: model.provider,
-										kind: "empty-body",
-									}),
-								);
-							} else {
-								try {
-									await scheduler.wait(backoffMs, { signal: options?.signal });
-								} catch {
-									throw new AIError.AbortError("Request was aborted");
-								}
+							try {
+								if (!(await sleepUnderBudget(replayBudget, endpointRetryPolicy, backoffMs, options?.signal)))
+									break;
+							} catch (error) {
+								if (options?.signal?.aborted) throw new AIError.AbortError("Request was aborted");
+								throw error;
 							}
+							replayBudget?.arm(
+								new AIError.ProviderResponseError("Cloud Code Assist API returned an empty response", {
+									provider: model.provider,
+									kind: "empty-body",
+								}),
+							);
 
 							if (!requestUrl) {
 								throw new AIError.ConfigurationError("Missing request URL");
@@ -1151,7 +1175,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							(status === undefined &&
 								!(error instanceof AIError.ProviderResponseError && error.kind === "output") &&
 								AIError.retriable(AIError.classify(error)))) &&
-						(!replayBudget || (await switchesEndpoint(replayBudget, error)))
+						(!replayBudget || (await replayBudget.replayAfter(error, 0, options?.signal, endpointRetryPolicy)))
 					) {
 						continue;
 					}
@@ -1171,21 +1195,26 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
-			const result = await AIError.finalize(restoreReplaced(error, replayBudget), {
+			const answered = restoreReplaced(error, replayBudget);
+			const result = await AIError.finalize(answered, {
 				api: model.api,
 				signal: options?.signal,
 				rawRequestDump,
 				streamResponseHeaders,
 			});
-			output.stopReason = result.stopReason;
-			output.errorStatus = result.status;
-			output.errorId = result.id;
-			output.errorMessage = result.message;
-			output.errorRetryAfterMs = result.retryAfterMs;
+			AIError.applyFinalizeResult(output, result);
+			if (validationDisplay !== undefined && validationDisplay.error === answered) {
+				const { providerText, explanation } = validationDisplay;
+				const shown = AIError.errorDisplayText(output) ?? "";
+				output.errorDisplayMessage = shown.includes(providerText)
+					? shown.replace(providerText, () => explanation)
+					: `${shown}\n${explanation}`;
+			}
 			replayBudget?.stamp(output);
+			output.errorRetryWaitRefusal = result.retryWaitRefusal;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
-			stream.push({ type: "error", reason: output.stopReason, error: output });
+			stream.push({ type: "error", reason: result.stopReason, error: output });
 			stream.end();
 		}
 	})();

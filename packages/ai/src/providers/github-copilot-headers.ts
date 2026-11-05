@@ -9,6 +9,8 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { $env, findRetryRefusal, logger, longestRetryHint } from "@oh-my-pi/pi-utils";
 import type { FetchImpl, Message } from "../types";
 import type { ReplayBudget } from "../utils/replay-budget";
+import { retryWaitBounds } from "../utils/retry-after";
+import { DEFAULT_MAX_RETRY_DELAY_MS } from "../utils/retry-wait";
 /**
  * Infer whether the current request to Copilot is user-initiated or agent-initiated.
  * Accepts `unknown[]` because providers may pass pre-converted message shapes.
@@ -234,6 +236,7 @@ export function wrapFetchForCopilotFallback(
 				return inner(input, { ...init, headers });
 			}
 			const serverWaitMs = longestRetryHint(response, await response.clone().text()) ?? 0;
+			if (retryWaitBounds(undefined, DEFAULT_MAX_RETRY_DELAY_MS).declines(serverWaitMs)) return undefined;
 			if (!(await replayBudget.replayAfterDelay(serverWaitMs, undefined, init?.signal ?? undefined, undefined))) {
 				return undefined;
 			}

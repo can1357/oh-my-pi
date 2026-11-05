@@ -38,6 +38,8 @@ import {
 	type TspNode,
 	type TspOp,
 } from "@oh-my-pi/pi-wire";
+import { onMotionEffectsChange } from "../motion-effects";
+import { onSpinnerIntervalChange } from "../spinner-clock";
 import type { Terminal } from "../terminal";
 import { getCurrentThemeName, isLightTheme, setNativeSymbolPreset } from "../theme/theme";
 import type { Component, OverlayOptions, RenderScheduler, RenderTimer } from "../tui";
@@ -47,8 +49,9 @@ import { node } from "./describe";
 import { encodeTspJson, encodeTspMessage, type TspHello, TspReader, splitTspMessage } from "./encode";
 import type { DescribeContext, NativeChild, NativeNode, NativeSurface, NativeUiEvent } from "./node";
 import { NARROW_SHEET_COLS } from "./overlay";
+import { resetQuietMotion } from "./quiet";
 import { nativeComponentId, Reconciler } from "./reconcile";
-import { setNativeButtons, setNativeRendering } from "./state";
+import { setNativeButtons, setNativePacing, setNativeRendering } from "./state";
 
 /** A visible TUI overlay, bottom to top. */
 export interface NativeOverlay {
@@ -200,9 +203,9 @@ function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
  * once the real `hello` lists them, so the optimistic start never emits a node
  * an older terminal cannot draw (`media`: files Tern loads by path; `json`:
  * raw JSON values Tern draws as its own tree; `button`: omp's buttons, which
- * older builds get as role-styled rows).
+ * older builds get as role-styled rows; `shell`: the bash tool's live trace).
  */
-const UNASSUMED_KINDS: Partial<Record<TspKind, true>> = { media: true, json: true, button: true };
+const UNASSUMED_KINDS: Partial<Record<TspKind, true>> = { media: true, json: true, button: true, shell: true };
 
 /**
  * The reply a v1 terminal is assumed to give before its real `hello` arrives
@@ -315,6 +318,7 @@ export class NativeBackend {
 	#askHeld = true;
 	/** Bumped when the connection resets or stops, so blob cache writes finishing later are dropped. */
 	#blobEpoch = 0;
+	#unbindMotion: (() => void) | undefined;
 
 	constructor(host: NativeHost, hello: TspHello, options: NativeBackendOptions = {}) {
 		this.#host = host;
@@ -355,9 +359,26 @@ export class NativeBackend {
 		if (this.#live) return;
 		this.#live = true;
 		this.#useNerdSymbols(true);
+		this.#watchMotion();
 		this.#open(this.#inline);
 		setNativeRendering(true);
 		this.render();
+	}
+
+	/** The terminal clocks spinners and span effects itself, so a motion change re-describes every component. */
+	#watchMotion(): void {
+		this.#unbindMotion?.();
+		const changed = () => {
+			resetQuietMotion();
+			this.#host.invalidate();
+			this.#host.requestRender();
+		};
+		const unbindSpinner = onSpinnerIntervalChange(changed);
+		const unbindEffects = onMotionEffectsChange(changed);
+		this.#unbindMotion = () => {
+			unbindSpinner();
+			unbindEffects();
+		};
 	}
 
 	/**
@@ -382,6 +403,9 @@ export class NativeBackend {
 		this.#inline.doc?.close();
 		setNativeRendering(false);
 		setNativeButtons(false);
+		setNativePacing(false);
+		this.#unbindMotion?.();
+		this.#unbindMotion = undefined;
 		this.#useNerdSymbols(false);
 		this.#clearStallTimer();
 		// Replies no longer reach the backend: forget the queries outright.
@@ -401,6 +425,7 @@ export class NativeBackend {
 		this.#live = true;
 		this.#useNerdSymbols(true);
 		this.#resetBlobs();
+		this.#watchMotion();
 		const surface = this.#inline;
 		surface.reconciler.detachLive();
 		surface.unacked = [];
@@ -543,6 +568,7 @@ export class NativeBackend {
 		this.#cx = new NativeContext(hello, hello.cols ?? this.#cx.cols);
 		// A changed vocabulary re-describes every component (`confirm`).
 		setNativeButtons(this.#cx.supports("button"));
+		setNativePacing(this.#cx.feature("pace"));
 		this.#sawResize = false;
 	}
 

@@ -7,6 +7,7 @@ import {
 } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
+import { serverSideFallbackModels } from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
 import type { RequestPolicy } from "@oh-my-pi/pi-catalog/compat/types";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
@@ -35,12 +36,12 @@ import type {
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { inheritReplayBudget, withReplayBudget } from "../utils/replay-budget";
+import { toolNamesByWire } from "../utils/tool-names";
 import { type AnthropicOptions, shouldStripThinkingHistory } from "./anthropic";
-import { mapStainlessArch, mapStainlessOs } from "./anthropic-headers";
 import { createProviderErrorMessage } from "./error-message";
 import droidIdentity from "./factory-droid/droid-identity.md" with { type: "text" };
 import { streamFactoryDroidGemini } from "./factory-droid/gemini";
-import { factoryDroidToolNamesByWire, encodeFactoryDroidCompletionsToolName } from "./factory-droid/tool-names";
+import { encodeFactoryDroidCompletionsToolName } from "./factory-droid/tool-names";
 import { streamAnthropic, streamOpenAICompletions, streamOpenAIResponses } from "./register-builtins";
 
 /**
@@ -50,7 +51,7 @@ import { streamAnthropic, streamOpenAICompletions, streamOpenAIResponses } from 
  * | family | path | models |
  * |---|---|---|
  * | `openai-completions` | `/api/llm/o/v1/chat/completions` | Kimi, GLM, DeepSeek, Qwen, Inkling, MiniMax M3, Mistral, Nemotron |
- * | `openai-responses` | `/api/llm/o/v1/responses` | GPT + Grok |
+ * | `openai-responses` | `/api/llm/o/v1/responses` | GPT, Grok, Muse Spark 1.3 (via Vertex) |
  * | `anthropic-messages` | `/api/llm/a/v1/messages` | Claude |
  * | `google-generate` | `/api/llm/g/v1/generate` | Gemini (native generateContent SSE) |
  *
@@ -60,9 +61,9 @@ import { streamAnthropic, streamOpenAICompletions, streamOpenAIResponses } from 
  *   factory-droid` (WorkOS device code, refreshed through the auth store).
  *   Factory API keys are control-plane only and get 403 here.
  * - Identity headers: `factory-cli/<version>` user agent, `X-Client-Version`,
- *   `X-Factory-Client: cli`, `X-Factory-Org-Id`, the X-Stainless runtime
- *   fingerprint, and v4-shaped `x-session-id` /
- *   `x-assistant-message-id` used for usage attribution.
+ *   `X-Factory-Client: cli`, `X-Factory-Org-Id`, and v4-shaped
+ *   `x-session-id` / `x-assistant-message-id` used for usage attribution. No
+ *   SDK telemetry (`X-Stainless-*`), `x-api-key` or Claude Code app headers.
  * - System identity: one Droid identity sentence precedes the caller's system
  *   prompt without changing its contents. A historical plugin-without-prefix
  *   403 is not evidence that the same gate remains active today.
@@ -73,13 +74,6 @@ import { streamAnthropic, streamOpenAICompletions, streamOpenAIResponses } from 
 
 /** Droid identity sentence prepended to the system channel. */
 const DROID_SYSTEM_PREFIX = droidIdentity.trim();
-
-/**
- * Node build the CLI's packaged runtime reports. The Stainless fingerprint is
- * a client-identity signal, so it is pinned to droid's own runtime rather than
- * leaking whichever Node/Bun build happens to host OMP.
- */
-const FACTORY_DROID_RUNTIME_VERSION = "v26.3.0";
 
 /**
  * The CLI's chat-completions request builder pins `temperature: 1` on every
@@ -222,8 +216,8 @@ function resolveRoute(
 	if (wire === "google-generate") {
 		route = { policy: resolveModelPolicy(model, { upstream }).request };
 	} else {
-		const resolved = resolveModelPolicy({ ...model, api: wire }, { upstream });
-		const fallbackModels = resolved.catalog.serverSideFallbackModels;
+		const spec = { ...model, api: wire };
+		const resolved = resolveModelPolicy(spec, { upstream });
 		route = {
 			policy: resolved.request,
 			inner: buildModel({
@@ -233,9 +227,7 @@ function resolveRoute(
 				compat: resolved.compat,
 				thinking: resolved.thinking,
 			} as ModelSpec<SharedWire>),
-			serverSideFallbackModels: Array.isArray(fallbackModels)
-				? fallbackModels.filter((entry): entry is string => typeof entry === "string")
-				: undefined,
+			serverSideFallbackModels: serverSideFallbackModels(spec, { upstream }),
 		};
 	}
 	routes.set(key, route);
@@ -268,10 +260,9 @@ function selectEffort(
  *   `registry_default` when it did not.
  * - completions/responses add `Accept` and, where the route's policy names
  *   one, the `OpenAI-Platform` org hint.
- * - every SDK-backed wire adds its SDK's X-Stainless fingerprint; the timeout
- *   entry is transport-owned on the OpenAI wires, while droid's Anthropic
- *   client pins 600s and needs the `x-api-key` placeholder its SDK requires.
- * - google adds nothing beyond the shared identity set.
+ * - no wire sends the SDK's `X-Stainless-*` telemetry or an `x-api-key`:
+ *   droid strips them from its Anthropic and OpenAI clients because the proxy
+ *   reads none of them, and the shared transports are told not to add theirs.
  */
 function buildIdentityHeaders(input: {
 	upstream: string;
@@ -293,21 +284,6 @@ function buildIdentityHeaders(input: {
 	if (input.wire === "openai-completions" || input.wire === "openai-responses") {
 		headers.Accept = "application/json";
 		if (input.openaiPlatformHeader) headers["OpenAI-Platform"] = input.openaiPlatformHeader;
-	}
-	if (input.wire !== "google-generate") {
-		headers["X-Stainless-Lang"] = "js";
-		headers["X-Stainless-Package-Version"] = input.wire === "anthropic-messages" ? "0.70.1" : "6.25.0";
-		headers["X-Stainless-Runtime"] = "node";
-		headers["X-Stainless-Runtime-Version"] = FACTORY_DROID_RUNTIME_VERSION;
-		headers["X-Stainless-Arch"] = mapStainlessArch(process.arch);
-		headers["X-Stainless-OS"] = mapStainlessOs(process.platform);
-		headers["X-Stainless-Retry-Count"] = "0";
-		if (input.wire === "anthropic-messages") {
-			// droid constructs its Anthropic client with a 600s request timeout;
-			// the SDK renders that as the seconds-valued telemetry header.
-			headers["X-Stainless-Timeout"] = "600";
-			headers["x-api-key"] = "placeholder";
-		}
 	}
 	return headers;
 }
@@ -333,7 +309,11 @@ function buildCompletionsReasoningBody(
 		case "none":
 			return {};
 		case "effort":
-			return { ...effortField(disabled ? "none" : effort), ...history };
+			return {
+				...effortField(disabled ? "none" : effort),
+				...history,
+				...(policy.completionsAllowMissingThinking ? { allow_missing_thinking: true } : {}),
+			};
 		case "forced-on":
 			// The route cannot turn thinking off; off maps to its lowest rung.
 			return { ...effortField(disabled ? "low" : effort), ...history };
@@ -381,6 +361,7 @@ type ForwardedOptions = Pick<
 	| "acceptEmptyResponse"
 	| "maxRetryDelayMs"
 	| "replayBudgetMs"
+	| "providerRetryWaitCeilingMs"
 	| "streamIdleTimeoutMs"
 	| "streamFirstEventTimeoutMs"
 	| "maxTokens"
@@ -394,6 +375,8 @@ interface Attempt {
 	/** Registry base model whose wire identity may serve this fast tier. */
 	baseVariant?: string;
 	baseUrl: string;
+	/** Organization the request is served for. */
+	orgId: string | undefined;
 	effort: Effort | undefined;
 	disabled: boolean;
 	sessionUuid: string;
@@ -409,6 +392,7 @@ function streamGoogleWire(a: Attempt): AssistantMessageEventStream {
 		...a.forwarded,
 		baseUrl: a.baseUrl,
 		thinkingDialect: a.route.policy.googleThinking,
+		requestPolicy: a.route.policy,
 		temperature: a.options?.temperature,
 		topP: a.options?.topP,
 		topK: a.options?.topK,
@@ -431,7 +415,13 @@ function streamMessagesWire(a: Attempt, inner: Model<"anthropic-messages">): Ass
 			: !adaptive && (effort === "xhigh" || effort === "max")
 				? "high"
 				: effort;
-	const fallbackModels = a.route.serverSideFallbackModels;
+	// Discovery narrows the route's fallbacks to models its account can run; a
+	// model built without discovery keeps the route's full list, and a request
+	// served for another organization than discovery saw gets none.
+	const discoveredFor = a.model.factoryDroidOrgId;
+	const available =
+		discoveredFor !== undefined && discoveredFor !== a.orgId ? [] : a.model.factoryDroidRefusalFallbacks;
+	const fallbackModels = a.route.serverSideFallbackModels?.filter(model => available?.includes(model) ?? true);
 	const refusalFallbacks =
 		options?.disableServerSideFallback || !fallbackModels?.length
 			? undefined
@@ -475,6 +465,8 @@ function streamMessagesWire(a: Attempt, inner: Model<"anthropic-messages">): Ass
 		// The non-OAuth client keeps Factory's system channel intact and sends
 		// its WorkOS bearer token in Authorization.
 		isOAuth: false,
+		// droid's Anthropic SDK client sends neither Claude Code header.
+		omitClaudeCodeAppHeaders: true,
 		anthropicPrefixMismatchBehavior: options?.anthropicPrefixMismatchBehavior,
 		anthropicCompaction: options?.anthropicCompaction,
 		userProfileId: options?.userProfileId,
@@ -533,6 +525,7 @@ function streamResponsesWire(a: Attempt, inner: Model<"openai-responses">): Assi
 	return streamOpenAIResponses(inner, tools ? { ...a.context, tools } : a.context, {
 		...a.forwarded,
 		sessionId: sessionUuid,
+		omitStainlessTimeoutHeader: true,
 		reasoning: effort,
 		// Hosts without reasoning-summary support (xai-routed models) get the
 		// shared resolver's explicit null instead of the "auto" default.
@@ -589,7 +582,7 @@ function streamCompletionsWire(a: Attempt, inner: Model<"openai-completions">): 
 	const policyMaxLength = resolveCatalogPolicy(inner).toolCallNameMaxLength;
 	const maxLength = typeof policyMaxLength === "number" ? policyMaxLength : 64;
 	const encode = (name: string) => encodeFactoryDroidCompletionsToolName(name, maxLength);
-	const toolNamesByWire = factoryDroidToolNamesByWire(a.context.tools, encode);
+	const wireNames = toolNamesByWire(a.context.tools, encode);
 	// The selected dialect owns every reasoning field, so the shared encoder gets none.
 	const extraBody = buildCompletionsReasoningBody(a.route.policy, a.effort, a.disabled);
 	const source = streamOpenAICompletions(
@@ -598,6 +591,7 @@ function streamCompletionsWire(a: Attempt, inner: Model<"openai-completions">): 
 		{
 			...a.forwarded,
 			sessionId: a.sessionUuid,
+			omitStainlessTimeoutHeader: true,
 			temperature: options?.temperature ?? FACTORY_DROID_COMPLETIONS_TEMPERATURE,
 			topP: options?.topP,
 			topK: options?.topK,
@@ -622,7 +616,7 @@ function streamCompletionsWire(a: Attempt, inner: Model<"openai-completions">): 
 		},
 	);
 	const decodeCall = (block: ToolCall) => {
-		block.name = toolNamesByWire.get(block.name) ?? block.name;
+		block.name = wireNames.get(block.name) ?? block.name;
 	};
 	const decode = (message: AssistantMessage) => {
 		for (const block of message.content) if (block.type === "toolCall") decodeCall(block);
@@ -749,6 +743,7 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 				model: scope.model,
 				route,
 				baseVariant: registry?.entitlement.baseVariant,
+				orgId: scope.orgId,
 				baseUrl: scope.baseUrl,
 				...selectEffort(scope.model, registry, options),
 				sessionUuid,
@@ -772,6 +767,7 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 					acceptEmptyResponse: options?.acceptEmptyResponse,
 					maxRetryDelayMs: options?.maxRetryDelayMs,
 					replayBudgetMs: options?.replayBudgetMs,
+					providerRetryWaitCeilingMs: options?.providerRetryWaitCeilingMs,
 					streamIdleTimeoutMs: options?.streamIdleTimeoutMs,
 					streamFirstEventTimeoutMs: options?.streamFirstEventTimeoutMs,
 					maxTokens: options?.maxTokens ?? scope.model.maxTokens ?? undefined,
@@ -806,16 +802,17 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 				if (event.type === "error") {
 					const regionMessage = asRegionUnavailableError(model, event.error.errorMessage);
 					if (regionMessage != null) {
-						stream.push({ ...event, error: { ...event.error, errorMessage: regionMessage } });
+						stream.push({ ...event, error: { ...event.error, errorDisplayMessage: regionMessage } });
 						continue;
 					}
 				}
 				stream.push(event);
 			}
 		} catch (error) {
-			const message = createProviderErrorMessage(model, error);
+			const message: AssistantMessage = createProviderErrorMessage(model, error);
 			const regionMessage = asRegionUnavailableError(model, message.errorMessage);
-			if (regionMessage != null) message.errorMessage = regionMessage;
+			// omp's explanation is display text; `errorMessage` keeps the provider's rejection.
+			if (regionMessage != null) message.errorDisplayMessage = regionMessage;
 			stream.push({ type: "error", reason: "error", error: message });
 			stream.end();
 		}

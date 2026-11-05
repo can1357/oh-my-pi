@@ -580,10 +580,20 @@ describe("a later attempt never inherits an earlier attempt's accepted headers",
 	}, 30_000);
 
 	it("openai-responses: the transient-stream retry's 400 does not read the cut attempt's headers", async () => {
-		const { message, streamRequests } = await runAgainst(provider("openai-responses"), [
-			{ status: 200, headers: { "retry-after": "9" }, body: encoder.encode('data: {"type":"response.'), cut: true },
-			rejectedReply({ error: { message: "rejected", type: "invalid_request_error" } }),
-		]);
+		// The loop honours the cut attempt's 9 s wait before it retries, so the cap must allow it, as above.
+		const { message, streamRequests } = await runAgainst(
+			provider("openai-responses"),
+			[
+				{
+					status: 200,
+					headers: { "retry-after": "9" },
+					body: encoder.encode('data: {"type":"response.'),
+					cut: true,
+				},
+				rejectedReply({ error: { message: "rejected", type: "invalid_request_error" } }),
+			],
+			{ maxRetryDelayMs: 0 },
+		);
 
 		expect(streamRequests).toBe(2);
 		expect(message.errorStatus).toBe(400);
@@ -591,18 +601,23 @@ describe("a later attempt never inherits an earlier attempt's accepted headers",
 	}, 30_000);
 
 	it("openai-codex-responses: the provider-error retry's 400 does not read the first attempt's headers", async () => {
-		const { message, streamRequests } = await runAgainst(provider("openai-codex-responses (SSE)"), [
-			{
-				status: 200,
-				headers: { "retry-after": "9" },
-				body: sseFrames(
-					[{ type: "error", error: { code: "server_error", type: "server_error", message: "try again" } }],
-					true,
-				),
-				cut: false,
-			},
-			rejectedReply({ error: { message: "rejected", type: "invalid_request_error" } }),
-		]);
+		// The loop honours the first attempt's 9 s wait before it retries, so the cap must allow it, as above.
+		const { message, streamRequests } = await runAgainst(
+			provider("openai-codex-responses (SSE)"),
+			[
+				{
+					status: 200,
+					headers: { "retry-after": "9" },
+					body: sseFrames(
+						[{ type: "error", error: { code: "server_error", type: "server_error", message: "try again" } }],
+						true,
+					),
+					cut: false,
+				},
+				rejectedReply({ error: { message: "rejected", type: "invalid_request_error" } }),
+			],
+			{ maxRetryDelayMs: 0 },
+		);
 
 		expect(streamRequests).toBe(2);
 		expect(message.errorStatus).toBe(400);
@@ -837,16 +852,43 @@ describe("transport retries of a refusal keep to the caller's maxRetryDelayMs", 
 			expect(message.errorRetryAfterMs).toBe(0);
 		}, 30_000);
 
-		it(`${name}: a 429 whose duplicate Retry-After lines arrive joined ("9, 120") is read as 120 s and surfaced under a 60 s cap`, async () => {
+		it(`${name}: a 429 whose Retry-After is an ISO date-time with a decimal comma 1 s out is retried under a 60 s cap`, async () => {
+			// Split on the comma, `…T09:27:00` read as GMT was the zone offset, two hours, and the 429 surfaced.
+			const isoComma = `${new Date(Date.now() + 1_000 + 2 * 3_600_000).toISOString().slice(0, 19)},900+02:00`;
 			const { message, streamRequests } = await runAgainst(
 				provider(name),
-				[rateLimited({ "retry-after": "9, 120" })],
+				[rateLimited({ "retry-after": isoComma })],
+				{ maxRetryDelayMs: 60_000 },
+			);
+
+			expect(streamRequests).toBeGreaterThan(1);
+			expect(message.errorRetryAfterMs ?? 0).toBeLessThanOrEqual(2_000);
+		}, 30_000);
+
+		it(`${name}: a 429 saying Retry-After: 0x0 beside a two-hour window reset surfaces after one request under a 60 s cap`, async () => {
+			// `0x0` is no delay-seconds: the reset is the wait, and the transport and the field agree on it.
+			const { message, streamRequests } = await runAgainst(
+				provider(name),
+				[rateLimited({ "retry-after": "0x0", "x-ratelimit-reset": "7200" })],
 				{ maxRetryDelayMs: 60_000 },
 			);
 
 			expect(streamRequests).toBe(1);
 			expect(message.errorStatus).toBe(429);
-			expect(message.errorRetryAfterMs).toBe(120_000);
+			expect(message.errorRetryAfterMs).toBe(7_200_000);
+		}, 30_000);
+
+		it(`${name}: a 429 whose retry-after-ms holds two joined lines is read at the longer, past the cap, after one request`, async () => {
+			// `100, 9000` is two header lines joined by a comma. Read whole, it
+			// stated no wait and the transport retried on its own backoff.
+			const { message, streamRequests } = await runAgainst(
+				provider(name),
+				[rateLimited({ "retry-after-ms": "100, 9000" })],
+				{ maxRetryDelayMs: 1_000 },
+			);
+
+			expect(streamRequests).toBe(1);
+			expect(message.errorRetryAfterMs).toBe(HEADER_WAIT_MS);
 		}, 30_000);
 	}
 });
@@ -876,7 +918,7 @@ describe("Codex structured protocol headers keep precedence over the HTTP respon
 
 describe("retryWaitBounds", () => {
 	it("bounds every sleep by the caller's cap and declines a longer stated wait, given headers or a wait", () => {
-		const bounds = retryWaitBounds(1_000, 60_000);
+		const bounds = retryWaitBounds({ maxRetryDelayMs: 1_000 }, 60_000);
 
 		expect(bounds.maxDelayMs).toBe(1_000);
 		expect(bounds.declines(new Headers({ "retry-after": "9" }))).toBe(true);
@@ -889,9 +931,21 @@ describe("retryWaitBounds", () => {
 		expect(bounds.declines(undefined)).toBe(false);
 	});
 
+	it("reads retry-after-ms before the coarser Retry-After, as the failed message's field does", () => {
+		// The auth gateway writes both for one wait: the exact milliseconds and
+		// the same wait rounded up to whole seconds. 200 ms is within a 500 ms cap.
+		expect(
+			retryWaitBounds({ maxRetryDelayMs: 500 }, 60_000).declines(
+				new Headers({ "retry-after-ms": "200", "retry-after": "1" }),
+			),
+		).toBe(false);
+	});
+
 	it("reads the longest header wait, as the failed message's field does", () => {
 		expect(
-			retryWaitBounds(1_000, 60_000).declines(new Headers({ "retry-after-ms": "100", "retry-after": "9" })),
+			retryWaitBounds({ maxRetryDelayMs: 1_000 }, 60_000).declines(
+				new Headers({ "retry-after-ms": "100", "retry-after": "9" }),
+			),
 		).toBe(true);
 	});
 
@@ -905,7 +959,7 @@ describe("retryWaitBounds", () => {
 
 	it("bounds nothing when the caller's cap is not positive", () => {
 		for (const cap of [0, -1]) {
-			const bounds = retryWaitBounds(cap, 60_000);
+			const bounds = retryWaitBounds({ maxRetryDelayMs: cap }, 60_000);
 
 			expect(bounds.maxDelayMs).toBe(Number.POSITIVE_INFINITY);
 			expect(bounds.declines(new Headers({ "retry-after": "3600" }))).toBe(false);

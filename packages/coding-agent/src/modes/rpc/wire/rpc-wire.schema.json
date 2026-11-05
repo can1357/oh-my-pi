@@ -1284,11 +1284,16 @@
 					"type": "string"
 				},
 				"errorMessage": {
-					"type": "string"
+					"type": "string",
+					"description": "The failure's own text: what the provider sent, or omp's text for a failure it detected itself. Retry and classification decisions read this."
+				},
+				"errorDisplayMessage": {
+					"type": "string",
+					"description": "`errorMessage` as omp shows it, when that differs: with the rejected request's dump path, a provider-specific explanation or the response's retry hint added. Display only; it can name local paths."
 				},
 				"errorRetryAfterMs": {
 					"type": "number",
-					"description": "The failed response's retry wait in milliseconds, from its headers. `errorMessage` never carries it."
+					"description": "The delay, in milliseconds, the failed response's headers asked for before a retry. Retry decisions read this with `errorMessage`."
 				},
 				"errorStatus": {
 					"type": "integer"
@@ -2794,7 +2799,36 @@
 				"artifactElidedBytes": {
 					"type": "integer"
 				},
+				"elidedBytes": {
+					"type": "integer",
+					"description": "Bytes dropped from the middle of `output`, which keeps the head and tail."
+				},
+				"elidedLines": {
+					"type": "integer",
+					"description": "Lines dropped from the middle of `output`."
+				},
+				"columnDroppedBytes": {
+					"type": "integer",
+					"description": "Bytes the per-line column cap cut from `output`, across all lines."
+				},
+				"columnTruncatedLines": {
+					"type": "integer",
+					"description": "Lines of `output` the per-line column cap cut; the artifact holds them whole."
+				},
+				"columnTruncatedRange": {
+					"$ref": "#/$defs/LineRange",
+					"description": "First and last lines the column cap cut, numbered as in the artifact; absent when the numbering cannot match it."
+				},
+				"columnMax": {
+					"type": "integer",
+					"description": "The per-line column cap in UTF-8 bytes, set when it cut a line."
+				},
 				"artifactError": {
+					"type": "object",
+					"properties": {},
+					"additionalProperties": {}
+				},
+				"minimized": {
 					"type": "object",
 					"properties": {},
 					"additionalProperties": {}
@@ -2807,6 +2841,12 @@
 					"items": {
 						"$ref": "#/$defs/ImageContent"
 					}
+				},
+				"trace": {
+					"type": "object",
+					"properties": {},
+					"additionalProperties": {},
+					"description": "The embedded shell's final `ShellTrace` of the run; only when the caller asked for one."
 				}
 			},
 			"required": [
@@ -2817,6 +2857,21 @@
 				"totalBytes",
 				"outputLines",
 				"outputBytes"
+			]
+		},
+		"LineRange": {
+			"type": "object",
+			"properties": {
+				"first": {
+					"type": "integer"
+				},
+				"last": {
+					"type": "integer"
+				}
+			},
+			"required": [
+				"first",
+				"last"
 			]
 		},
 		"FastModeResult": {

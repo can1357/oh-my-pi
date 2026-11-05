@@ -6,11 +6,25 @@
 
 - Added `errorRetryAfterMs` to the collab `AssistantMessage` and the wait fields to the `auto_retry_start` (`retryAfterMs`) and `auto_retry_end` (`finalRetryAfterMs`) events ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
 
+- `AssistantMessage.errorDisplayMessage`: a failed turn's error text as omp shows it (with the request-dump path or endpoint), beside the provider's own `errorMessage` ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
+
+### Added
+
+- Added the `ShellTrace` model (`shell-trace.ts`: a shell run's compiled units, per-node state and reflowed layout, byte-offset based) and the TSP `shell` kind with `TspShellProps`
+
+## [18.16.0] - 2026-11-02
+
+### Added
+
+- Added the collab envelope helpers `packEnvelope`, `unpackEnvelope` and `rewriteEnvelopePeer`
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
 
 - Added `nums` to `code` props (`TspCodeProps`): each line's number, so one block can show non-contiguous lines with `…` gap rows where the numbers jump.
+- Added an optional `heat` value in [0, 1] to `code` line marks (`TspCodeMark`), so a line can be shaded by a score. A mark's `tone` is now optional.
+- Added `code` folds (`TspCodeFold`: runs of lines drawn as one row that opens in place, with an optional label, note, tone and hover card), per-line score gradients (`TspCodeMark.wash`: scores washing the row from left to right) and an overview strip (`TspCodeProps.overview`).
 - Added the TSP `button` kind (`TspButtonProps`: label, icon, keycaps, `default`/`primary`/`quiet`/`danger` variants, `sm`/`md` sizes, pressed, disabled with a reason, busy) and `tabs` `variant: "segmented"`.
 
 ## [18.14.0] - 2026-10-29

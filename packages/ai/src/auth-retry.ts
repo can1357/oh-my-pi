@@ -2,6 +2,7 @@ import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
 import type { LimitsApi, OAuthAccess, OAuthApi, OAuthRequestIdentity } from "./auth/types";
 import * as AIError from "./error";
 import { isAuthRetryableError, isInvalidatedOAuthTokenError } from "./error/auth-classify";
+import { getHeadersFromError, getRetryAfterMsFromHeaders } from "./utils/retry-after";
 import { isAccountPolicyError, isUsageLimit } from "./error/flags";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
 
@@ -194,8 +195,9 @@ function isDirectCredentialRotationError(error: unknown): boolean {
 	const isForbidden =
 		status === 403 ||
 		(status === undefined && message !== undefined && extractHttpStatusFromError({ message }) === 403);
-	if (isForbidden && !isConcurrencyCapExclusion(status, message)) return true;
-	return isUsageLimitOutcome(status, message);
+	const headerRetryAfterMs = getRetryAfterMsFromHeaders(getHeadersFromError(error));
+	if (isForbidden && !isConcurrencyCapExclusion(status, message, headerRetryAfterMs)) return true;
+	return isUsageLimitOutcome(status, message, headerRetryAfterMs);
 }
 
 /** Resolve a single retry step, swallowing resolver failures into `undefined`. */

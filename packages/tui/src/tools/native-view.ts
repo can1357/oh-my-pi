@@ -28,6 +28,13 @@ export function fileHref(filePath: string | undefined): string | undefined {
 	return filePath && path.isAbsolute(filePath) ? tryFileUri(filePath) : undefined;
 }
 
+/** Link for a head target that is a web URL (`www.` gains `https://`), else undefined. */
+export function urlHref(target: string | undefined): string | undefined {
+	if (!target) return undefined;
+	const candidate = /^www\./i.test(target) ? `https://${target}` : target;
+	return /^https?:\/\/\S+$/i.test(candidate) ? candidate : undefined;
+}
+
 /** Diff stats as one head `meta` string, `+8 −1` (U+2212 minus), or undefined when nothing changed. */
 export function diffStatsMeta(added: number, removed: number): string | undefined {
 	const parts: string[] = [];
@@ -58,6 +65,10 @@ export function fileDiffSection(
  * it), the path with a dim directory and a strong name (cut in the middle),
  * a quiet `range` suffix (`:13-36`), then an optional count `chip` and a
  * muted `detail`.
+ *
+ * A URL is one target, not a directory and a name: its last `/` does not
+ * separate a dim parent from a strong basename, and the whole visible text
+ * carries the link so a click anywhere on the URL opens it.
  */
 export function fileRow(
 	filePath: string,
@@ -74,10 +85,12 @@ export function fileRow(
 	} = {},
 ): NativeNode {
 	const isDir = filePath.endsWith("/");
-	const cut = pathNameStart(filePath);
+	const url = urlHref(filePath);
+	const cut = url === undefined ? pathNameStart(filePath) : 0;
+	const href = p.href ?? url;
 	const spans: TspSpan[] = [];
 	if (cut > 0) spans.push(span(filePath.slice(0, cut), "dim"));
-	spans.push(span(filePath.slice(cut) || "…", "strong", p.href ? { href: p.href } : undefined));
+	spans.push(span(filePath.slice(cut) || "…", "strong", href ? { href } : undefined));
 	if (p.range) spans.push(span(p.range, "muted"));
 	const children: NativeChild[] = [
 		p.lead ?? node("icon", { name: p.icon ?? (isDir ? "folder" : "file"), tone: p.tone }),

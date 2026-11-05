@@ -187,6 +187,20 @@ describe("Perplexity API-key request shape", () => {
 		).rejects.toThrow();
 		expect(urls).toEqual([API_URL]);
 	});
+	it("reports a failed request's shown text, with the response's retry hint", async () => {
+		delete process.env.OPENROUTER_API_KEY;
+		const fetchMock: FetchImpl = async input => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+			if (url === API_URL)
+				return new Response("bad parameter", { status: 400, headers: { "retry-after-ms": "1500" } });
+			return new Response("not mocked", { status: 500 });
+		};
+
+		// The hint is omp's display addition; the provider's own text stays out of the report's way.
+		await expect(
+			searchPerplexity({ query: "quic vs tcp", authStorage: apiKeyAuthStorage, fetch: fetchMock, explicit: true }),
+		).rejects.toThrow(/retry-after-ms=1500/);
+	});
 	it("rejects with the classified upstream error instead of a generic 401 when the only method fails", async () => {
 		delete process.env.OPENROUTER_API_KEY;
 		const fetchMock: FetchImpl = async input => {

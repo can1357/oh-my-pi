@@ -223,6 +223,28 @@ describe("streamProxy — server disconnect without terminal event", () => {
 		}
 	});
 
+	it("keeps the server's display text and header retry delay apart from the provider's text", async () => {
+		const terminal: ProxyAssistantMessageEvent = {
+			type: "error",
+			reason: "error",
+			errorMessage: "429 rate_limit_error: slow down",
+			errorDisplayMessage: "429 rate_limit_error: slow down retry-after-ms=60000",
+			errorRetryAfterMs: 60_000,
+			usage: { ...baseUsage },
+		};
+		const fetchMock: FetchImpl = async () =>
+			new Response(buildSseBody([{ type: "start" }, terminal]), { status: 200 });
+		const result = await streamProxy(mockModel, mockContext, {
+			proxyUrl: "http://localhost:0",
+			authToken: "test",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.errorMessage).toBe("429 rate_limit_error: slow down");
+		expect(result.errorDisplayMessage).toBe("429 rate_limit_error: slow down retry-after-ms=60000");
+		expect(result.errorRetryAfterMs).toBe(60_000);
+	});
+
 	it("restores terminal blocks that have no proxy stream events", async () => {
 		const finalizedContent: AssistantMessage["content"] = [
 			{ type: "thinking", thinking: "Search first.", thinkingSignature: "sig-1" },

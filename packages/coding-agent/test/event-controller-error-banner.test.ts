@@ -238,6 +238,35 @@ describe("EventController error banner", () => {
 		expect(showPinnedError).toHaveBeenCalledWith("Retry failed after 3 attempts: Service unavailable");
 	});
 
+	it("pins and re-pins omp's display text while matching the retry end on the provider's text", async () => {
+		const errorMessage = "400 invalid_request_error: bad block";
+		const errorDisplayMessage = `${errorMessage}\nraw-http-request=/home/u/.omp/logs/http-400-requests/1.json`;
+		const message = makeAssistantMessage({
+			stopReason: "error",
+			errorId: AIError.create(AIError.Flag.Transient),
+			errorMessage,
+			errorDisplayMessage,
+		});
+		const { controller, showPinnedError, showError } = createFixture(message);
+
+		await controller.handleEvent({ type: "message_end", message } as Extract<
+			AgentSessionEvent,
+			{ type: "message_end" }
+		>);
+		expect(showPinnedError).toHaveBeenCalledWith(errorDisplayMessage);
+		showPinnedError.mockClear();
+
+		await controller.handleEvent({
+			type: "auto_retry_end",
+			success: false,
+			attempt: 3,
+			finalError: errorMessage,
+		} as Extract<AgentSessionEvent, { type: "auto_retry_end" }>);
+
+		expect(showError).not.toHaveBeenCalled();
+		expect(showPinnedError).toHaveBeenCalledWith(`Retry failed after 3 attempts: ${errorDisplayMessage}`);
+	});
+
 	it("surfaces a local continuation failure instead of the stale pinned provider error", async () => {
 		const providerError = "Service unavailable";
 		const message = makeAssistantMessage({

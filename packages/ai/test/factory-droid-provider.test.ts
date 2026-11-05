@@ -1,4 +1,5 @@
 import { describe, expect, it, mock } from "bun:test";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { buildFactoryDroidModel } from "@oh-my-pi/pi-catalog/discovery";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -256,6 +257,30 @@ describe("Factory Droid completions wire (Droid Core)", () => {
 		expect(request.body.parallel_tool_calls).toBeUndefined();
 	});
 
+	it.each([
+		["/o/v1/chat/completions", kimiK3, completionsChunks("OK", "kimi-k3")],
+		["/o/v1/responses", gptTerra, responsesChunks("OK")],
+		["/a/v1/messages", sonnet5, anthropicChunks("OK")],
+	] as const)(
+		"sends %s without SDK telemetry, an API key or Claude Code app headers",
+		async (_path, model, chunks) => {
+			const captured: CapturedRequest[] = [];
+			const result = await streamFactoryDroid(
+				model(),
+				{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+				// A first-event budget is what makes the shared OpenAI transports add their timeout header.
+				{ apiKey: WORKOS_TOKEN, fetch: captureFetch(captured, [...chunks]), streamFirstEventTimeoutMs: 60_000 },
+			).result();
+
+			expect(result.stopReason).toBe("stop");
+			const sent = Object.keys(captured[0].headers).map(name => name.toLowerCase());
+			expect(sent.filter(name => name.startsWith("x-stainless-"))).toEqual([]);
+			expect(sent).not.toContain("x-api-key");
+			expect(sent).not.toContain("x-app");
+			expect(sent).not.toContain("anthropic-dangerous-direct-browser-access");
+		},
+	);
+
 	it("forwards payload replacement, response metadata and raw SSE observation through the wrapper", async () => {
 		const captured: CapturedRequest[] = [];
 		const observed = { status: 0, chunks: [] as string[] };
@@ -363,7 +388,7 @@ describe("Factory Droid completions wire (Droid Core)", () => {
 });
 
 describe("Factory Droid error handling", () => {
-	it("names the model when the proxy rejects the route regionally", async () => {
+	it("names the model in the shown text when the proxy rejects the route regionally", async () => {
 		const result = await streamFactoryDroid(
 			kimiK3(),
 			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
@@ -375,6 +400,9 @@ describe("Factory Droid error handling", () => {
 		).result();
 		expect(result.stopReason).toBe("error");
 		expect(result.errorStatus).toBe(400);
-		expect(result.errorMessage).toMatch(/kimi-k3.*region/);
+		expect(errorDisplayText(result)).toBe("kimi-k3 is not served from your network's region. Choose another model.");
+		// Decisions read `errorMessage`: the provider's rejection, never omp's text naming the local model id.
+		expect(result.errorMessage).toContain("Provider not available in this region");
+		expect(result.errorMessage).not.toContain("kimi-k3");
 	});
 });

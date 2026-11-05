@@ -2,9 +2,37 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `wireToolsFingerprint()`, a hash of the tool specs a request sends ([#17496](https://github.com/can1357/oh-my-pi/pull/17496) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `Agent.queuedMessageGate`, a synchronous `QueuedMessageGate` consulted before every queued-message delivery batch (it can drop candidates) and told when claimed messages go back undelivered
+- Added `errorDisplayMessage` and `errorRetryAfterMs` to the proxy `error` event, copied onto the failed turn so a proxied failure keeps omp's shown text and the response's header retry delay apart from the provider's `errorMessage` ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
+
 ### Fixed
 
-- `streamProxy` now keeps every outcome field a terminal `done` / `error` frame carries (`ProxyTerminalFields`): `errorStatus`, `errorId`, `providerReplays`, `errorRetryAfterMs` and any other `AssistantMessage` field except the client's own, where before it kept only the error text, usage and content. A replay count, a status and the header retry wait therefore reach recovery through a proxy; a non-2xx proxy response's own `Retry-After` / `retry-after-ms` headers set the wait too, and the error a failed compaction step throws carries it, so the compaction retry waits for it ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- Fixed steering and follow-up queue notifications observing a batch before its preparation claim was installed and missing the transition to delivery, leaving pending-message snapshots stale after asynchronous preparation.
+
+## [18.16.0] - 2026-11-02
+
+### Changed
+
+- Deprecated `createFileOps`, `computeFileLists`, `formatFileOperations`, `upsertFileOperations`, `isUrlSchemePath` and `FileOperations` in `@oh-my-pi/pi-agent-core/compaction`; they now re-export `@oh-my-pi/snapcompact`, which callers should import directly
+
+### Fixed
+
+- Context estimates for a model without a known tokenizer family (Gemini, Grok and the like), and token counts made without a model (compress metrics, the legacy `estimateTokens` export), count text in o200k_base instead of guessing 4 bytes per token, which undercounted what those providers bill by 11–48% on code-heavy sessions and let compaction fire late after a switch to them ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
+- Context estimates no longer charge a reader another model's thinking signatures or redacted thinking, which the request strips: a Claude session switched to Grok or Gemini, including Gemini through Factory, counted them as text ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Removed
+
+- Removed `PI_TOKENIZER_ACCURATE`: every model is now counted with a native tokenizer ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.15.0] - 2026-11-01
+
+### Fixed
+
+- `streamProxy` now carries a failure's status, replay count and stated retry wait, so retries and compaction behind a proxy wait as the server asked ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- `streamProxy` now sends the caller's `maxRetryDelayMs` and `providerRetryWaitCeilingMs`, so the server's provider retries keep to them ([#17569](https://github.com/can1357/oh-my-pi/pull/17569) by [@sjawhar](https://github.com/sjawhar))
 - Fixed OpenAI remote compaction (`/responses/compact`) replaying backend-only `internal_chat_message_metadata_passthrough` metadata that Codex rejects as an unknown parameter ([#17590](https://github.com/can1357/oh-my-pi/pull/17590) by [@briankeefe](https://github.com/briankeefe))
 - `streamProxy` now forwards `replayBudgetMs`, so the server that runs a proxied call keeps its replays inside the caller's budget ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
 - A failed turn built from a thrown error keeps its structured retry wait as `errorRetryAfterMs` ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))

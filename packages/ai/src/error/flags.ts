@@ -10,6 +10,7 @@ import {
 import {
 	is402BillingCapBody,
 	isAccountScopedCapText,
+	isCreditBalanceTooLow,
 	isDashScopeTokenLimitText,
 	isOpaqueStatusBody,
 	isUsageLimitStatus,
@@ -17,6 +18,7 @@ import {
 	parseRateLimitReason,
 	type RateLimitReason,
 } from "./rate-limit";
+import { getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
 
 export const Flag = {
 	Class: 0x1000,
@@ -1201,6 +1203,7 @@ function classifyText(
 	api?: Api,
 	provider?: string,
 	modelId?: string,
+	headerRetryAfterMs?: number,
 ): number {
 	let kinds = 0;
 	if (errorMessage) {
@@ -1227,8 +1230,8 @@ function classifyText(
 		const isOpaque = isOpaqueStatusBody(cleanMessage);
 
 		const isLimitStatus = isUsageLimitStatus(statusClean);
-		const reason = parseRateLimitReason(cleanMessage);
-		const is402BillingCap = statusClean === 402 && is402BillingCapBody(cleanMessage);
+		const reason = parseRateLimitReason(cleanMessage, headerRetryAfterMs);
+		const is402BillingCap = statusClean === 402 && is402BillingCapBody(cleanMessage, headerRetryAfterMs);
 		// Concurrency caps (e.g. Vertex "Online prediction concurrent requests
 		// quota exceeded") are shed-and-backoff, not credential-rotatable —
 		// exclude them even when the quota-worded phrasing matches the generic
@@ -1240,7 +1243,7 @@ function classifyText(
 		if (
 			!concurrencyExcluded &&
 			(is402BillingCap ||
-				matchesUsageLimitText(cleanMessage) ||
+				matchesUsageLimitText(cleanMessage, headerRetryAfterMs) ||
 				((statusClean === 403 || statusClean === undefined) && isAccountScopedCapText(cleanMessage)) ||
 				(isLimitStatus && (isOpaque || reason === "QUOTA_EXHAUSTED")))
 		) {
@@ -1303,6 +1306,9 @@ function classifyText(
 		// Same shape for Aliyun's multimodal gateway: a flaky 400 on valid inline
 		// images — replay succeeds (see the pattern's rationale).
 		if (statusClean === 400 && ALIYUN_MM_GATEWAY_PATTERN.test(cleanMessage)) kinds |= Flag.Transient;
+		// Anthropic's empty-prepaid-balance rejection lifts once the balance is
+		// refilled (see isCreditBalanceTooLow for why the match stays narrow).
+		if (isCreditBalanceTooLow(statusClean, cleanMessage)) kinds |= Flag.Transient;
 		if (matchesStrictToolsRejection(cleanMessage, statusClean)) kinds |= Flag.Grammar;
 		if (matchesFastModeUnsupported(cleanMessage, statusClean)) kinds |= Flag.FastModeUnsupported;
 		if (matchesCacheControlRejection(cleanMessage, statusClean)) kinds |= Flag.CacheControlUnsupported;
@@ -1436,12 +1442,14 @@ export function classify(error: unknown, api?: Api): number {
 		} else if (link instanceof ProviderHttpError) {
 			let linkKinds = 0;
 			const { status: codeStatus, code } = link;
+			// The response's retry headers size a quota window like the body's own hints.
+			const linkRetryAfterMs = getRetryAfterMsFromHeaders(getHeadersFromError(link));
 			if (
 				code === "usage_limit_reached" ||
 				(code === "insufficient_quota" && !isDashScopeTokenLimitText(link.message)) ||
 				(codeStatus === 402 &&
-					(is402BillingCapBody(link.message) ||
-						(code !== undefined && !isOpaqueStatusBody(code) && is402BillingCapBody(code))))
+					(is402BillingCapBody(link.message, linkRetryAfterMs) ||
+						(code !== undefined && !isOpaqueStatusBody(code) && is402BillingCapBody(code, linkRetryAfterMs))))
 			) {
 				linkKinds |= Flag.UsageLimit;
 			}
@@ -1457,7 +1465,7 @@ export function classify(error: unknown, api?: Api): number {
 			}
 			if (
 				(codeStatus === 401 || codeStatus === 403) &&
-				!(codeStatus === 403 && parseRateLimitReason(link.message) === "CONCURRENT_LIMIT")
+				!(codeStatus === 403 && parseRateLimitReason(link.message, linkRetryAfterMs) === "CONCURRENT_LIMIT")
 			) {
 				linkKinds |= Flag.AuthFailed;
 			} else if (codeStatus === 429) {
@@ -1619,20 +1627,25 @@ export function isGitHubCopilotPolicyDenial(
 	return errorMessage !== undefined && GITHUB_COPILOT_POLICY_DENIAL_PATTERN.test(errorMessage);
 }
 
+/**
+ * Classify a failed turn from its stored fields. Reads `errorMessage`, the
+ * failure's own text; omp's display text (`errorDisplayMessage`) never feeds
+ * classification.
+ */
 export function classifyMessage(message: {
 	api?: Api;
 	provider?: string;
 	model?: string;
 	errorId?: number;
 	errorMessage?: string;
-	errorClassificationMessage?: string;
 	errorStatus?: number;
+	errorRetryAfterMs?: number;
 }): number {
 	const existingId = message.errorId;
 	const currentStatus = message.errorStatus ?? statusFromId(existingId);
 	const existingOverflowOnly =
 		existingId !== undefined && is(existingId, Flag.ContextOverflow) && !is(existingId, Flag.PayloadRejected);
-	const classificationMessage = message.errorClassificationMessage ?? message.errorMessage;
+	const classificationMessage = message.errorMessage;
 	const textId = classifyText(
 		classificationMessage,
 		currentStatus,
@@ -1640,6 +1653,7 @@ export function classifyMessage(message: {
 		message.api,
 		message.provider,
 		message.model,
+		message.errorRetryAfterMs,
 	);
 
 	let kinds = ((existingId ?? 0) | textId) & KIND_MASK;

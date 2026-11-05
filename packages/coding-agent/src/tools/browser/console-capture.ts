@@ -1,3 +1,4 @@
+import { toError } from "@oh-my-pi/pi-utils";
 import type { Protocol } from "devtools-protocol";
 import type { CDPSession, ConsoleMessage, HTTPRequest, Page } from "puppeteer-core";
 
@@ -259,7 +260,7 @@ export class PageConsoleCapture {
 		};
 		this.#pageErrorHandler = error => {
 			if (this.#cdp) return;
-			const normalized = error instanceof Error ? error : new Error(String(error));
+			const normalized = toError(error);
 			this.#push({
 				seq: this.#allocateSequence(),
 				ts: Date.now(),

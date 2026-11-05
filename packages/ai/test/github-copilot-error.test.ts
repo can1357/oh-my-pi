@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isGitHubCopilotPolicyDenial } from "@oh-my-pi/pi-ai/error";
-import { formatMessage } from "@oh-my-pi/pi-ai/error/format";
+import { formatDisplayMessage as formatMessage } from "@oh-my-pi/pi-ai/error/format";
 import { rewriteCopilotError } from "@oh-my-pi/pi-ai/utils/http-inspector";
 import { getFailureRetryAfterMs } from "@oh-my-pi/pi-ai/utils/retry-after";
 

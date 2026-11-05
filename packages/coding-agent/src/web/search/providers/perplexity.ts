@@ -22,7 +22,7 @@ import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-comple
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
-import { $env, asRecord, readSseJson } from "@oh-my-pi/pi-utils";
+import { $env, asRecord, readSseJson, tryParseJson } from "@oh-my-pi/pi-utils";
 import type { PerplexityRequest, PerplexitySearchResult } from "../../../web/search/types";
 import type { SearchCitation, SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
@@ -217,14 +217,6 @@ function mergeOAuthEventSnapshot(
 	return merged;
 }
 
-function parseJson(text: string): unknown | null {
-	try {
-		return JSON.parse(text);
-	} catch {
-		return null;
-	}
-}
-
 function textFromChunks(value: unknown): string | null {
 	if (!Array.isArray(value) || value.length === 0) return null;
 	let text = "";
@@ -258,7 +250,7 @@ function answerFromTextPayload(payload: Record<string, unknown>): string | null 
 }
 
 function parseOAuthTextPayload(text: string): Record<string, unknown> | null {
-	const parsed = parseJson(text);
+	const parsed = tryParseJson(text);
 	const direct = asRecord(parsed);
 	if (direct) return direct;
 	if (!Array.isArray(parsed)) return null;
@@ -268,7 +260,7 @@ function parseOAuthTextPayload(text: string): Record<string, unknown> | null {
 		const content = asRecord(step?.content);
 		const answer = content?.answer;
 		if (typeof answer !== "string" || answer.length === 0) continue;
-		const payload = asRecord(parseJson(answer));
+		const payload = asRecord(tryParseJson(answer));
 		if (payload) return payload;
 	}
 	return null;
@@ -281,7 +273,7 @@ function parseOAuthTextAnswer(text: string): string {
 		if (answer) return answer;
 	}
 
-	const parsed = parseJson(text);
+	const parsed = tryParseJson(text);
 	if (!Array.isArray(parsed)) return text;
 	for (const item of parsed) {
 		const step = asRecord(item);
@@ -470,7 +462,7 @@ function collectPerplexityMetadataFromRecord(
 
 function collectPerplexityMetadata(metadata: PerplexityApiStreamMetadata, data: string): void {
 	if (data === "[DONE]") return;
-	const record = asRecord(parseJson(data));
+	const record = asRecord(tryParseJson(data));
 	if (record) collectPerplexityMetadataFromRecord(metadata, record);
 }
 
@@ -489,9 +481,11 @@ async function drainAssistantStream(stream: AssistantMessageEventStream): Promis
 function throwPerplexityStreamError(message: AssistantMessage): never {
 	const status = message.errorStatus ?? 500;
 	const details = message.errorMessage ?? "Perplexity API stream failed";
+	// Classification reads the provider's text; the report shows omp's text with its request-dump path.
+	const shown = message.errorDisplayMessage ?? details;
 	const error =
 		classifyProviderHttpError("perplexity", status, details) ??
-		new SearchProviderError("perplexity", `Perplexity API error (${status}): ${details}`, status);
+		new SearchProviderError("perplexity", `Perplexity API error (${status}): ${shown}`, status);
 	// The failed turn rides as the cause, so the server's wait stays structured (`retryAfterMsOf`).
 	throw Object.assign(error, { cause: assistantTurnError(message, details) });
 }

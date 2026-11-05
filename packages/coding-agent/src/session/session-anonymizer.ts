@@ -335,8 +335,15 @@ const FIELD_RULES: Record<string, Rule> = {
 		"body",
 	]),
 	...fields("label", ["title", "previousTitle", "label", "injectedRules", "intent", "emoji", "nf"]),
-	...fields("error", ["errorMessage", "explanation", "errorClassificationMessage", "upstreamError"]),
-	...fields("tool", ["toolName", "tools", "declared", "deferred", "active"]),
+	// `errorClassificationMessage` is a field older sessions persisted (Cursor).
+	...fields("error", [
+		"errorMessage",
+		"errorDisplayMessage",
+		"explanation",
+		"errorClassificationMessage",
+		"upstreamError",
+	]),
+	...fields("tool", ["toolName", "tools", "mountedTools", "declared", "deferred", "active"]),
 	name: "name",
 	customType: "customType",
 	inputTransformations: "transforms",

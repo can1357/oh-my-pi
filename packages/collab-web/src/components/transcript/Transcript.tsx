@@ -156,8 +156,13 @@ function AssistantBody({
 			{failed && (
 				<div className="tr-stop">
 					<span className={`tr-chip ${stop === "error" ? "tr-chip--err" : "tr-chip--warn"}`}>{stop}</span>
-					{message.errorMessage !== undefined && message.errorMessage.length > 0 && (
-						<span className="tr-stop-msg">{withRetryWait(message.errorMessage, message.errorRetryAfterMs)}</span>
+					{(message.errorDisplayMessage ?? message.errorMessage ?? "").length > 0 && (
+						<span className="tr-stop-msg">
+							{withRetryWait(
+								message.errorDisplayMessage ?? message.errorMessage ?? "",
+								message.errorRetryAfterMs,
+							)}
+						</span>
 					)}
 				</div>
 			)}

@@ -1,3 +1,4 @@
+import { scheduler } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
 	extractRetryHint,
@@ -142,6 +143,46 @@ describe("fetchWithRetry", () => {
 			name: "Error",
 			message: "Request was aborted",
 		});
+	});
+
+	it("sleeps every retry through the caller's retryWait, with the stated wait and the request's signal", async () => {
+		const controller = new AbortController();
+		const waits: Array<{ delayMs: number; signal: AbortSignal | undefined }> = [];
+		let attempt = 0;
+		const response = await fetchWithRetry("https://example.invalid/retry-wait", {
+			fetch: async () => {
+				attempt += 1;
+				if (attempt === 1) return new Response("slow down", { status: 429, headers: { "retry-after": "0.05" } });
+				if (attempt === 2) throw new TypeError("connection reset");
+				return new Response("ok");
+			},
+			signal: controller.signal,
+			defaultDelayMs: 1_000,
+			retryWait: async (delayMs, signal) => {
+				waits.push({ delayMs, signal });
+			},
+		});
+
+		expect(await response.text()).toBe("ok");
+		expect(waits).toEqual([
+			{ delayMs: 50, signal: controller.signal },
+			{ delayMs: 1_000, signal: controller.signal },
+		]);
+	});
+
+	it("normalizes an abort during the caller's retryWait", async () => {
+		const controller = new AbortController();
+		const request = fetchWithRetry("https://example.invalid/retry-wait-abort", {
+			fetch: async () => new Response("retry", { status: 503 }),
+			signal: controller.signal,
+			maxAttempts: 2,
+			retryWait: async () => {
+				controller.abort();
+				throw new Error("cancelled");
+			},
+		});
+
+		await expect(request).rejects.toMatchObject({ name: "Error", message: "Request was aborted" });
 	});
 
 	it("keeps the rejected fetch error reachable as the wrapped error's cause", async () => {
@@ -706,8 +747,22 @@ describe("longestRetryHint", () => {
 
 describe("extractRetryHint, unchanged", () => {
 	// The retry loop with no gate keeps its first-match reading: these pin it.
-	it("still returns the first recognized header", () => {
-		expect(extractRetryHint(new Headers({ "retry-after-ms": "1", "retry-after": "30" }))).toBe(1);
+	it("prefers the exact retry-after-ms when Retry-After is it rounded up", () => {
+		// The auth gateway states one wait twice. #17396 pinned this at 200 ms over
+		// a `Retry-After: 1` beside it, and that is what the exact header is for.
+		expect(extractRetryHint(new Headers({ "retry-after-ms": "200", "retry-after": "1" }))).toBe(200);
+	});
+
+	it("takes the longer when the two explicit headers contradict each other", () => {
+		// Three heads disagreed on this input class and the fold had to settle it.
+		// #17643 pinned first-match (`retry-after-ms: 1` beside `Retry-After: 30`
+		// read as 1 ms) as legacy behaviour it did not want to disturb; #17569
+		// asserted the longest wins (`100` beside `9` read as 9 s). First-match
+		// loses: 1 ms is not 30 s rounded, so the server contradicted itself, and
+		// coming back in a millisecond earns a second rejection at once. Honouring
+		// the shorter is only safe when the two provably state one wait.
+		expect(extractRetryHint(new Headers({ "retry-after-ms": "1", "retry-after": "30" }))).toBe(30_000);
+		expect(extractRetryHint(new Headers({ "retry-after-ms": "100", "retry-after": "9" }))).toBe(9_000);
 	});
 
 	it("still reads only the first occurrence of a phrase", () => {
@@ -938,4 +993,100 @@ describe("extractRetryHint", () => {
 			expect(longestRetryHint(headers)).toBe(expected);
 		},
 	);
+});
+
+// Carried from #17396, whose last three commits landed after #17643 merged it.
+// Each of these fails on #17643's own reader, so the fold is the first head
+// that holds the whole family's contract at once.
+describe("a header value that states no wait", () => {
+	it.each([
+		["0x0", "a number that is no delay-seconds"],
+		["0,", "a trailing comma, which splitting on every comma read as a bare 0"],
+	])("returns a 429 at once when Retry-After: %s (%s) sits beside a one-hour window reset", async value => {
+		let calls = 0;
+		const response = await fetchWithRetry("https://example.invalid/no-wait-stated", {
+			fetch: async () => {
+				calls++;
+				return new Response("rate limited", {
+					status: 429,
+					headers: { "retry-after": value, "x-ratelimit-reset": "3600" },
+				});
+			},
+			maxAttempts: 3,
+		});
+
+		// The value states no wait, so the one-hour reset is the wait: past the cap.
+		// Read as a bare 0, each of these was "retry now": 3 requests in a few ms.
+		expect(calls).toBe(1);
+		expect(response.status).toBe(429);
+	});
+
+	it("reads no wait from a legacy retry-after in a body that is no date", () => {
+		// `Date.parse("0-1Z")` is 1 Jan 2000, an elapsed date: the body read as
+		// "retry now", which a caller takes over its own heuristic wait.
+		const body = "rate limited; retry-after: 0-1Z";
+		expect(extractRetryHint(undefined, body)).toBeUndefined();
+		expect(longestRetryHint(undefined, body)).toBeUndefined();
+	});
+});
+
+describe("a reset counter and an exact wait", () => {
+	it("retries a 429 whose epoch-millisecond x-ratelimit-reset is 1 s out", async () => {
+		let calls = 0;
+		const response = await fetchWithRetry("https://example.invalid/epoch-ms-reset", {
+			fetch: async () => {
+				calls++;
+				return calls === 1
+					? new Response("rate limited", {
+							status: 429,
+							headers: { "x-ratelimit-reset": String(Date.now() + 1_000) },
+						})
+					: new Response("ok");
+			},
+			maxAttempts: 3,
+		});
+
+		// Read as epoch seconds, the value was 1.8e15 ms out and the 429 came back.
+		expect(calls).toBe(2);
+		expect(response.status).toBe(200);
+	});
+
+	it("retries a 429 whose Retry-After is an ISO date-time with a decimal comma 1 s out, instead of reading the zone offset as the wait", async () => {
+		const isoCommaPlus2 = (waitMs: number): string =>
+			`${new Date(Date.now() + waitMs + 2 * 3_600_000).toISOString().slice(0, 19)},900+02:00`;
+		let calls = 0;
+		const response = await fetchWithRetry("https://example.invalid/iso-comma", {
+			fetch: async () => {
+				calls++;
+				return calls === 1
+					? new Response("rate limited", { status: 429, headers: { "retry-after": isoCommaPlus2(1_000) } })
+					: new Response("ok");
+			},
+			maxAttempts: 3,
+		});
+
+		// Treating the decimal comma as a list separator read the timestamp's
+		// UTC+02:00 offset as a two-hour wait, so the default cap suppressed the retry.
+		expect(calls).toBe(2);
+		expect(response.status).toBe(200);
+	});
+
+	it("sleeps the exact retry-after-ms, not the Retry-After beside it rounded up to whole seconds", async () => {
+		// The auth gateway states a wait both ways: `retry-after-ms: 200` and
+		// `Retry-After: 1`. Taking the longer of the two slept 1 s for 200 ms.
+		const wait = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		let calls = 0;
+		const response = await fetchWithRetry("https://example.invalid/gateway-wait", {
+			fetch: async () => {
+				calls++;
+				return calls === 1
+					? new Response("rate limited", { status: 429, headers: { "retry-after-ms": "200", "retry-after": "1" } })
+					: new Response("ok");
+			},
+			maxAttempts: 3,
+		});
+
+		expect(response.status).toBe(200);
+		expect(wait.mock.calls.map(([delayMs]) => delayMs)).toEqual([200]);
+	});
 });

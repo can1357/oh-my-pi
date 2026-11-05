@@ -1,10 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { classify, Flag, is, isUsageLimit, retriable } from "@oh-my-pi/pi-ai/error/flags";
+import { httpErrorReason } from "@oh-my-pi/pi-ai/error/http-body";
 import {
 	calculateRateLimitBackoffMs,
 	is402BillingCapBody,
+	isBillingCapUsageLimit,
 	isConcurrencyCapExclusion,
+	isCreditBalanceTooLow,
 	isOpaqueStatusBody,
 	isUsageLimitOutcome,
 	isUsageLimitStatus,
@@ -461,6 +464,15 @@ describe("parseRateLimitReason", () => {
 		expect(isUsageLimitOutcome(429, longBody)).toBe(true);
 	});
 
+	// The response's retry headers reach classification as a number
+	// (`errorRetryAfterMs`), not as text in the provider's body.
+	it("sizes the RetryInfo window with the response's header delay when it is longer", () => {
+		const shortBody = googleRpcRetryInfo429("25s", "Resource has been exhausted (e.g. check quota).");
+		expect(parseRateLimitReason(shortBody, 3_600_000)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, shortBody, 3_600_000)).toBe(true);
+		expect(parseRateLimitReason(shortBody, 1_000)).toBe("RATE_LIMIT_EXCEEDED");
+	});
+
 	it("preserves structured Google 429 details through streamGoogle error extraction and classification", async () => {
 		const googleModel: Model<"google-generative-ai"> = buildModel({
 			id: "gemini-3-flash",
@@ -773,6 +785,34 @@ describe("isUsageLimit", () => {
 			isUsageLimit(Object.assign(new Error('{"detail":{"code":"deactivated_workspace"}}'), { status: 402 })),
 		).toBe(true);
 		expect(isUsageLimit({ status: 402 })).toBe(true);
+	});
+});
+
+describe("isBillingCapUsageLimit", () => {
+	const lithos =
+		"402 the organization is out of credit, add more to continue (type=insufficient_quota param=insufficient_quota)";
+
+	it("recognises an out-of-credit balance on any status", () => {
+		expect(isBillingCapUsageLimit(402, lithos)).toBe(true);
+		expect(isBillingCapUsageLimit(undefined, lithos)).toBe(true);
+		expect(isBillingCapUsageLimit(429, "Insufficient balance in account")).toBe(true);
+		expect(isBillingCapUsageLimit(429, "OpenRouter: Insufficient credits")).toBe(true);
+		expect(isBillingCapUsageLimit(403, "Your monthly spend limit has been reached")).toBe(true);
+	});
+
+	it("keeps a DashScope token throttle out of the billing lane", () => {
+		expect(
+			isBillingCapUsageLimit(
+				429,
+				"429 You exceeded your current quota, please check your plan and billing details. For details, see: https://help.aliyun.com/zh/model-studio/error-code#token-limit\nYou exceeded your current quota, please check your plan and billing details. For details, see: https://help.aliyun.com/zh/model-studio/error-code#token-limit (type=insufficient_quota param=insufficient_quota)",
+			),
+		).toBe(false);
+	});
+
+	it("keeps transient throttles and non-billing bodies out", () => {
+		expect(isBillingCapUsageLimit(429, "Rate limit exceeded, too many requests")).toBe(false);
+		expect(isBillingCapUsageLimit(402, "A subscription is required for this endpoint")).toBe(false);
+		expect(isBillingCapUsageLimit(undefined, "503 service unavailable")).toBe(false);
 	});
 });
 
@@ -1094,6 +1134,53 @@ describe("calculateRateLimitBackoffMs", () => {
 
 	it("returns a short backoff for CONCURRENT_LIMIT", () => {
 		expect(calculateRateLimitBackoffMs("CONCURRENT_LIMIT")).toBe(5_000);
+	});
+});
+
+describe("isCreditBalanceTooLow", () => {
+	const message = "Your credit balance is too low to access the Anthropic API.";
+	const envelope = JSON.stringify({ type: "error", error: { type: "invalid_request_error", message } });
+
+	it("requires the whole 400 body to be the Anthropic error envelope", () => {
+		expect(isCreditBalanceTooLow(400, envelope)).toBe(true);
+		expect(isCreditBalanceTooLow(undefined, `400 ${envelope}`)).toBe(true);
+		expect(isCreditBalanceTooLow(400, `Invalid tool schema. Offending schema: ${envelope}`)).toBe(false);
+		expect(isCreditBalanceTooLow(400, JSON.stringify({ error: { type: "invalid_request_error", message } }))).toBe(
+			false,
+		);
+		expect(isCreditBalanceTooLow(400, message)).toBe(false);
+	});
+
+	// The classifier reads the provider's own text. Lines after the envelope are
+	// part of that body even when they look like the suffixes omp appends for
+	// display, so they are never removed to make the body parse.
+	it("keeps text after the envelope as part of the provider body", () => {
+		for (const suffix of [
+			"\nraw-http-request=Invalid tool schema; the preceding object is the rejected example",
+			"\nraw-http-request-save-failed=Invalid tool schema",
+			" retry-after-ms=1",
+		]) {
+			expect(isCreditBalanceTooLow(400, `400 ${envelope}${suffix}`)).toBe(false);
+			expect(is(classify(new ProviderHttpError(`400 ${envelope}${suffix}`, 400)), Flag.Transient)).toBe(false);
+		}
+	});
+
+	it("keeps an explicit status authoritative over a conflicting message prefix", () => {
+		expect(isCreditBalanceTooLow(403, `400 ${envelope}`)).toBe(false);
+	});
+});
+
+describe("httpErrorReason", () => {
+	const message = "Your credit balance is too low to access the Anthropic API.";
+	const body = `400 ${JSON.stringify({ type: "error", error: { type: "invalid_request_error", message } })}`;
+
+	it("shows the provider's error.message for a JSON error body", () => {
+		expect(httpErrorReason(body)).toBe(`400 ${message}`);
+	});
+
+	it("shows the whole text when the provider body is not one JSON object", () => {
+		const explained = `${body}\nraw-http-request=Invalid tool schema; the preceding object is the rejected example`;
+		expect(httpErrorReason(explained)).toBe(explained);
 	});
 });
 

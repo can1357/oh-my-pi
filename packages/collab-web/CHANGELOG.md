@@ -6,6 +6,12 @@
 
 - The transcript and the retry notice show the server's retry wait from the structured `errorRetryAfterMs`, `retryAfterMs` and `finalRetryAfterMs` fields; an error with no structured wait shows none ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
 
+## [18.15.0] - 2026-11-01
+
+### Changed
+
+- `job` tool results name each background job by the purpose the model gave for it, falling back to its command ([#17649](https://github.com/can1357/oh-my-pi/pull/17649) by [@wolfiesch](https://github.com/wolfiesch))
+
 ## [18.13.3] - 2026-10-28
 
 ### Changed

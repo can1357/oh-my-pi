@@ -23,6 +23,7 @@ import {
 	retryAfterMsOf,
 	type Tool,
 } from "@oh-my-pi/pi-ai";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit/utils";
@@ -99,6 +100,16 @@ export interface EvalCompletionHandleResult {
 	id: string;
 }
 
+/** One fallback candidate tried by a completion handle, in try order. */
+export interface CompletionAttempt {
+	/** `provider/id[@upstream]`. */
+	model: string;
+	/** Reasoning effort sent; `"off"` disables reasoning, `null` leaves the provider default. */
+	effort: Effort | "off" | null;
+	outcome: "running" | "no-credentials" | "succeeded" | "failed" | "cancelled";
+	error?: string;
+}
+
 /** Process-local state retained for one eval completion handle. */
 export interface CompletionHandleEntry {
 	ownerId: string;
@@ -109,6 +120,7 @@ export interface CompletionHandleEntry {
 	error?: string;
 	/** The server's retry wait (ms) the failure stated; `error` never carries it. */
 	errorRetryAfterMs?: number;
+	attempts: CompletionAttempt[];
 	evictionTimer?: NodeJS.Timeout;
 }
 
@@ -339,6 +351,7 @@ async function executeCompletion(
 	candidates: CompletionCandidate[],
 	session: ToolSession,
 	signal: AbortSignal,
+	attempts: CompletionAttempt[],
 ): Promise<EvalCompletionResult> {
 	const registry = session.modelRegistry;
 	if (!registry) throw new ToolError("completion() has no model registry.");
@@ -364,17 +377,25 @@ async function executeCompletion(
 	let lastError: unknown;
 	let retriesUsed = 0;
 	let completed = false;
+	let attempt: CompletionAttempt | undefined;
 	for (const [index, candidate] of candidates.entries()) {
 		if (index > 0 && retriesUsed >= maxRetries) break;
 		model = candidate.model;
 		// The session's cost cap covers completions a cell makes, attempt by attempt.
 		const refusal = session.costGate?.check();
 		if (refusal) throw new ToolError(refusal.message);
+		attempt = {
+			model: formatModelStringWithRouting(model),
+			effort: candidate.disableReasoning ? "off" : (candidate.reasoning ?? null),
+			outcome: "running",
+		};
+		attempts.push(attempt);
 		try {
 			// Forward the session id so session-sticky OAuth credentials
 			// resolve (see #5325); without it a usable fallback looks keyless.
 			const apiKey = await registry.getApiKey(model, session.getSessionId?.() ?? undefined, { signal });
 			if (!apiKey) {
+				attempt.outcome = "no-credentials";
 				lastError = new ToolError(
 					`completion() has no API key for ${formatModelString(model)}. Configure credentials for this provider or choose another tier.`,
 				);
@@ -399,54 +420,66 @@ async function executeCompletion(
 			);
 			session.costGate?.record(response.usage.cost.total);
 		} catch (error) {
+			failAttempt(attempt, error, signal);
 			lastError = error;
 			if (signal.aborted || index === candidates.length - 1) throw error;
 			continue;
 		}
 		if (response.stopReason === "aborted") {
+			attempt.outcome = "cancelled";
 			throw new ToolError("completion() request aborted.");
 		}
 		if (response.stopReason === "error") {
 			// The failed turn rides as the cause, so the server's wait stays structured (`retryAfterMsOf`).
-			lastError = Object.assign(new ToolError(response.errorMessage ?? "completion() request failed."), {
+			lastError = Object.assign(new ToolError(errorDisplayText(response) ?? "completion() request failed."), {
 				cause: assistantTurnError(response),
 			});
+			failAttempt(attempt, lastError, signal);
 			if (!signal.aborted && index < candidates.length - 1) continue;
 			throw lastError;
 		}
 		completed = true;
 		break;
 	}
-	if (!completed || !response || !model) {
+	if (!completed || !response || !model || !attempt) {
 		if (lastError instanceof Error) throw lastError;
 		throw new ToolError("completion() request failed.");
 	}
 
 	let resultText: string;
-	if (schema) {
-		const call = extractToolCall(response, STRUCTURED_TOOL_NAME);
-		let value: unknown;
-		if (call) {
-			value = call.arguments;
-		} else {
-			const text = extractTextContent(response);
-			if (!text) throw new ToolError("completion() returned no structured response.");
-			try {
-				value = parseJsonPayload(text);
-			} catch {
-				throw new ToolError("completion() did not return a structured response matching the schema.");
-			}
-		}
-		resultText = JSON.stringify(value);
-	} else {
-		resultText = extractTextContent(response);
-		if (!resultText) throw new ToolError("completion() returned no text output.");
+	try {
+		resultText = responseText(response, schema);
+	} catch (error) {
+		failAttempt(attempt, error, signal);
+		throw error;
 	}
-
+	attempt.outcome = "succeeded";
 	return {
 		text: resultText,
 		details: { model: formatModelString(model), tier: finalTier, structured: Boolean(schema) },
 	};
+}
+
+function failAttempt(attempt: CompletionAttempt, error: unknown, signal: AbortSignal): void {
+	attempt.outcome = signal.aborted ? "cancelled" : "failed";
+	attempt.error = error instanceof Error ? error.message : String(error);
+}
+
+function responseText(response: AssistantMessage, schema: Record<string, unknown> | undefined): string {
+	if (!schema) {
+		const text = extractTextContent(response);
+		if (!text) throw new ToolError("completion() returned no text output.");
+		return text;
+	}
+	const call = extractToolCall(response, STRUCTURED_TOOL_NAME);
+	if (call) return JSON.stringify(call.arguments);
+	const text = extractTextContent(response);
+	if (!text) throw new ToolError("completion() returned no structured response.");
+	try {
+		return JSON.stringify(parseJsonPayload(text));
+	} catch {
+		throw new ToolError("completion() did not return a structured response matching the schema.");
+	}
 }
 
 /** Start a stateless completion and return its process-local handle immediately. */
@@ -467,8 +500,8 @@ export async function runEvalCompletion(
 		);
 	}
 
-	return retainCompletionHandle("cmp", options, signal =>
-		executeCompletion(prompt, finalTier, system, schema, candidates, options.session, signal),
+	return retainCompletionHandle("cmp", options, (signal, attempts) =>
+		executeCompletion(prompt, finalTier, system, schema, candidates, options.session, signal, attempts),
 	);
 }
 
@@ -481,7 +514,7 @@ export async function runEvalCompletion(
 export function retainCompletionHandle(
 	prefix: string,
 	options: EvalCompletionBridgeOptions,
-	execute: (signal: AbortSignal) => Promise<EvalCompletionResult>,
+	execute: (signal: AbortSignal, attempts: CompletionAttempt[]) => Promise<EvalCompletionResult>,
 ): EvalCompletionHandleResult {
 	const id = `${prefix}-${Snowflake.next()}`;
 	const ownerId = options.session.getAgentId?.() ?? MAIN_AGENT_ID;
@@ -492,12 +525,13 @@ export function retainCompletionHandle(
 		controller,
 		promise: Promise.resolve(),
 		settled: false,
+		attempts: [],
 	};
 	completionHandles.set(id, entry);
 	const run = async (): Promise<EvalCompletionResult> => {
 		await evalRequestSlots.acquire(signal);
 		try {
-			return await execute(signal);
+			return await execute(signal, entry.attempts);
 		} finally {
 			evalRequestSlots.release();
 		}

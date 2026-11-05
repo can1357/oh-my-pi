@@ -7,9 +7,10 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { httpErrorReason } from "@oh-my-pi/pi-ai/error/http-body";
 import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
 import { assistantErrorText, errorText } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
-import { $flag, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
+import { $flag, formatDuration, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import { HINDSIGHT_NOTICE_SOURCE } from "../hindsight/state";
 import type { MCPManager } from "../mcp/manager";
 import { resolveMCPTimeoutMs } from "../mcp/timeout";
@@ -372,6 +373,13 @@ async function runPrintModeCore(
 			// say when it crossed its cost thresholds, and a memory failure must not pass
 			// as an answer that used memories.
 			writeStderrLine(event.source === COST_GATE_NOTICE_SOURCE ? event.message : `Warning: ${event.message}`);
+		} else if (event.type === "auto_retry_start") {
+			// Text mode shows only `Working...` while a turn runs; a turn stuck retrying
+			// (offline, an outage) must say why instead of looking like a slow answer,
+			// and how long it waits, as the terminal's retry line does.
+			writeStderrLine(
+				`Retrying (${event.attempt}/${event.maxAttempts}) in ${formatDuration(event.delayMs)}: ${singleLine(httpErrorReason(event.errorMessage))}`,
+			);
 		}
 	});
 

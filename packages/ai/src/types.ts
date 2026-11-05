@@ -56,7 +56,7 @@ import type { OpenAICompletionsOptions } from "./providers/openai-completions";
 import type { OpenAIResponsesOptions } from "./providers/openai-responses";
 import type { kStreamingPartialJson } from "./utils/block-symbols";
 import type { AssistantMessageEventStream } from "./utils/event-stream";
-
+import type { RefusedRetryWait } from "./utils/retry-wait";
 export type { StopDetails } from "./providers/anthropic-wire";
 export type { AssistantMessageEventStream } from "./utils/event-stream";
 
@@ -240,8 +240,10 @@ export function resolveModelServiceTier(
  * `service_tier_for_request`); an empty or missing list counts as "not
  * reported" — accounts whose `/models` lists no tiers keep `/fast` — so the
  * provider-level answer stands. `flex` and `default` are never gated.
- * First-party OpenAI takes `ultrafast` as-is. A bare provider string cannot
- * carry the list, so it answers for the provider alone.
+ * First-party OpenAI takes `ultrafast` as-is. An OpenAI-family relay on the
+ * Responses/Completions APIs gets `ultrafast` only when its discovered
+ * `service_tiers` lists it. A bare provider string cannot carry the list, so
+ * it answers for the provider alone.
  */
 export function shouldSendServiceTier(
 	serviceTier: ServiceTier | null | undefined,
@@ -260,7 +262,11 @@ export function shouldSendServiceTier(
 		if (advertised !== undefined && advertised.length > 0) return advertised.includes(serviceTier);
 	}
 	if (serviceTier === "ultrafast") {
-		return provider === "openai" || (typeof target === "string" && provider === "openai-codex");
+		if (typeof target === "string") return provider === "openai" || provider === "openai-codex";
+		if (provider === "openai") return true;
+		return (
+			target !== undefined && isOpenAIServiceTierModel(target) && target.serviceTiers?.includes(serviceTier) === true
+		);
 	}
 	if (provider === "openai" || provider === "openai-codex") return true;
 	if (provider === "openrouter") {
@@ -633,9 +639,10 @@ export interface StreamOptions {
 	 */
 	promptCache?: OpenAIPromptCacheOptions;
 	/**
-	 * Disable OpenAI Responses server-side turn chaining for this request.
-	 * Diagnostic callers that compare independent requests can set this to
-	 * `false` so `previous_response_id` cannot explain a result.
+	 * Server-side turn chaining: OpenAI Responses `previous_response_id` and
+	 * Anthropic message threads. `false` sends every request in full (diagnostic
+	 * callers comparing independent requests); `true` chains even where the
+	 * provider would not by default. Unset follows the provider default.
 	 */
 	statefulResponses?: boolean;
 	/**
@@ -698,11 +705,15 @@ export interface StreamOptions {
 	 * are not covered.
 	 */
 	maxInFlightRequests?: Record<string, number>;
+	/** Called after the provider slot is acquired, before each model dispatch; throwing refuses that attempt. */
+	beforeDispatch?: () => void;
 	/** @internal Keep the in-flight permit until a provider's bounded terminal drain finishes. */
 	waitForTerminalDrain?: boolean;
 	/**
 	 * Optional callback for inspecting or replacing provider payloads before sending.
 	 * Return undefined to keep the payload unchanged.
+	 * A pre-send standard Responses WS fallback rebuilds the HTTP candidate and
+	 * invokes this hook again. WS connection-local delta shaping follows it.
 	 */
 	onPayload?: (
 		payload: unknown,
@@ -711,6 +722,9 @@ export interface StreamOptions {
 	) => unknown | undefined | Promise<unknown | undefined>;
 	/**
 	 * Optional callback for provider response metadata after headers are received.
+	 * Standard Responses WS reports each physical handshake once with
+	 * metadata.transport="websocket" and metadata.phase="handshake", not each
+	 * generation. Its headers are not per-generation cache/request metadata.
 	 */
 	onResponse?: (response: ProviderResponseMetadata, model?: Model<Api>, signal?: AbortSignal) => void | Promise<void>;
 	/**
@@ -764,6 +778,29 @@ export interface StreamOptions {
 	 */
 	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
 	/**
+	 * Ceiling on a server-stated wait a provider sleeps before retrying on its
+	 * own: in the pre-output retry loops that read the stated wait, and in the
+	 * transport's retry of a 429 or 5xx. Retries of transport errors with no
+	 * stated wait (Codex's WebSocket and whitespace-loop retries) and
+	 * Anthropic's opted-in slow lane are not bounded by it. A server-stated
+	 * wait longer than it, wherever the response states it (a header,
+	 * `x-ratelimit-reset-after`, the body's `Please retry in 15s`), surfaces
+	 * the failure at once; the provider's own longer backoff is shortened to
+	 * it. The surfaced message ends with a note that the server asked for that
+	 * wait and the caller's ceiling refused it; `errorRetryAfterMs` and the
+	 * error's classification are unchanged. For a caller that recovers on its
+	 * own (waits visibly, rotates credentials, falls back) instead of letting a
+	 * provider sleep silently. When `maxRetryDelayMs` is also positive, the
+	 * smaller of the two bounds the sleep. A provider a wrapper calls with
+	 * rebuilt options keeps to the bound of the request that `stream` or
+	 * `streamSimple` started.
+	 *
+	 * Unset or non-positive (the default): a provider sleeps a stated wait up to
+	 * `maxRetryDelayMs`, as before. `providerRetryWait` plays no part in it.
+	 * omp sets 10 s; coding-agent `PROVIDER_RETRY_WAIT_CEILING_MS` says why.
+	 */
+	providerRetryWaitCeilingMs?: number;
+	/**
 	 * Accept a normal provider stop with no visible text or tool call as a
 	 * successful completion. Passive callers and zero-output cache refreshes use
 	 * this because silence is their expected result; interactive agent turns
@@ -776,6 +813,8 @@ export interface StreamOptions {
 	 * implementation when set. Defaults to `globalThis.fetch`. Providers that
 	 * do not use `fetch` (Bedrock's AWS SDK transport, Cursor's HTTP/2
 	 * channel) silently ignore the override.
+	 * Standard Responses defaults to HTTP/SSE when set unless a request or model
+	 * explicitly selects WebSockets. WebSocket connections do not use this hook.
 	 */
 	fetch?: FetchImpl;
 	/** Current session working directory for providers that need workspace-scoped discovery. */
@@ -889,7 +928,7 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	kimiApiFormat?: "openai" | "anthropic";
 	/** API format for Synthetic provider: "openai" or "anthropic" (default: "openai") */
 	syntheticApiFormat?: "openai" | "anthropic";
-	/** Hint that websocket transport should be preferred when supported by the provider implementation. */
+	/** Standard Responses is opt-in and catalog-gated; either model/request false vetoes true. Codex keeps its independent policy. */
 	preferWebsockets?: boolean;
 	/**
 	 * OpenRouter routing-variant suffix automatically appended to model IDs when
@@ -1226,11 +1265,25 @@ export interface CursorHistoryPayload {
 	records: string[];
 }
 
+/**
+ * The `candidates[0].content` a Gemini model streamed for one turn, every part
+ * (thought text, signatures, call ids) merged in arrival order. Written and read
+ * by the Factory Droid Gemini transport, which replays it unchanged to the same
+ * model while the turn's content still matches `digest`.
+ */
+export interface GeminiNativeContentPayload {
+	type: "geminiNativeContent";
+	/** Digest of the turn's text, thinking and tool calls when recorded; a rewritten turn rebuilds instead. */
+	digest: string;
+	content: { role?: string; parts: Record<string, unknown>[]; [key: string]: unknown };
+}
+
 export type ProviderPayload =
 	| OpenAIResponsesHistoryPayload
 	| AnthropicMessagePayload
 	| AnthropicCompactionPayload
-	| CursorHistoryPayload;
+	| CursorHistoryPayload
+	| GeminiNativeContentPayload;
 
 /** Provider-reported rewrite applied to request content before inference. */
 export interface ProviderInputTransformation {
@@ -1373,9 +1426,20 @@ export interface AssistantMessage {
 	elidedOutputTokens?: number;
 	stopReason: StopReason;
 	stopDetails?: StopDetails | null;
+	/**
+	 * The failure's own text: what the provider sent, or omp's text for a
+	 * failure it detected itself. Every decision about the error reads this
+	 * (classification, retry, retry timing, credential handling). It never
+	 * carries what omp adds for display; see {@link errorDisplayMessage}.
+	 */
 	errorMessage?: string;
-	/** Stable recovery-classification text when errorMessage includes display-only diagnostics. */
-	errorClassificationMessage?: string;
+	/**
+	 * `errorMessage` as omp shows it, when that differs: the rejected request's
+	 * dump path, a provider-specific explanation, the response's retry hint or
+	 * a local diagnostic added. Display only: the dump path is local text (it
+	 * names HOME), so no decision may read it. Read through `errorDisplayText`.
+	 */
+	errorDisplayMessage?: string;
 	/** True only when an exact request-body-read timeout failed on a full Responses replay, not a previous-response delta. */
 	requestBodyReadTimeoutFullReplay?: boolean;
 	/** Per-tool abort messages used when an aborted assistant turn needs different placeholder results per tool call. */
@@ -1420,6 +1484,13 @@ export interface AssistantMessage {
 	 * digits for a status.
 	 */
 	errorRetryAfterMs?: number;
+	/**
+	 * A lower retry layer rejected the server-stated wait under the recorded
+	 * bound. Outer retry layers must surface this failure instead of rebuilding
+	 * a backoff from `errorMessage`; this structured value is never inferred
+	 * from the message text.
+	 */
+	errorRetryWaitRefusal?: RefusedRetryWait;
 	/**
 	 * Request attempts a layer below the caller made beyond the first, before
 	 * this message was produced; `0` when the request went out exactly once.

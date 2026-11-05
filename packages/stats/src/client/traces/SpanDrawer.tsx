@@ -5,6 +5,7 @@
  */
 
 import { withRetryWait } from "@oh-my-pi/pi-utils/format";
+import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { Check, Copy, X } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { getSessionEntryDetail } from "../api";
@@ -42,8 +43,9 @@ interface EntryDetailView {
 		provider?: string;
 		stopReason?: string;
 		errorMessage?: string;
-		/** The server's retry wait (ms) the failed turn stated; rendered beside `errorMessage` here. */
+		/** The server's retry wait (ms), rendered beside the shown error text here. */
 		errorRetryAfterMs?: number;
+		errorDisplayMessage?: string;
 		duration?: number;
 		ttft?: number;
 		toolName?: string;
@@ -115,7 +117,7 @@ export function SpanDrawer({
 			})
 			.catch(err => {
 				if (controller.signal.aborted) return;
-				setError(err instanceof Error ? err : new Error(String(err)));
+				setError(toError(err));
 			})
 			.finally(() => {
 				if (!controller.signal.aborted) setLoading(false);
@@ -233,7 +235,9 @@ export function SpanDrawer({
 				{msg?.errorMessage && (
 					<div className="stack" style={{ gap: 6 }}>
 						<div className="section-label tone-bad">Error message</div>
-						<pre className="code-block traces-pre">{withRetryWait(msg.errorMessage, msg.errorRetryAfterMs)}</pre>
+						<pre className="code-block traces-pre">
+							{withRetryWait(msg.errorDisplayMessage ?? msg.errorMessage, msg.errorRetryAfterMs)}
+						</pre>
 					</div>
 				)}
 

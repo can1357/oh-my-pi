@@ -6,6 +6,7 @@
  */
 
 import type { Api, ApiKey, AssistantMessage, Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { prompt } from "@oh-my-pi/pi-utils";
@@ -24,16 +25,12 @@ import {
 import branchSummaryPrompt from "./prompts/branch-summary.md" with { type: "text" };
 import branchSummaryPreamble from "./prompts/branch-summary-preamble.md" with { type: "text" };
 import {
-	computeFileLists,
-	createFileOps,
 	extractFileOpsFromMessage,
-	type FileOperations,
 	incompleteOutputError,
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversationForSummary,
 	stripReadSelector,
 	truncateToolResultForSummary,
-	upsertFileOperations,
 } from "./utils";
 
 // ============================================================================
@@ -46,6 +43,8 @@ export interface BranchSummaryResult {
 	modifiedFiles?: string[];
 	aborted?: boolean;
 	error?: string;
+	/** Display-only failure text; `error` remains the provider's raw text. */
+	errorDisplayMessage?: string;
 	/** The server's retry wait (ms) the failed summarization response stated; `error` never carries it. */
 	errorRetryAfterMs?: number;
 }
@@ -56,13 +55,11 @@ export interface BranchSummaryDetails {
 	modifiedFiles: string[];
 }
 
-export type { FileOperations } from "./utils";
-
 export interface BranchPreparation {
 	/** Messages extracted for summarization, in chronological order */
 	messages: AgentMessage[];
 	/** File operations extracted from tool calls */
-	fileOps: FileOperations;
+	fileOps: snapcompact.FileOperations;
 	/** Total estimated tokens in messages */
 	totalTokens: number;
 }
@@ -254,7 +251,7 @@ export function prepareBranchEntries(
 	tokenBudget: number = 0,
 ): BranchPreparation {
 	const messages: AgentMessage[] = [];
-	const fileOps = createFileOps();
+	const fileOps = snapcompact.createFileOps();
 	let totalTokens = 0;
 
 	// First pass: collect file ops from ALL entries (even if they don't fit in token budget)
@@ -387,7 +384,11 @@ export async function generateBranchSummary(
 		return { aborted: true };
 	}
 	if (response.stopReason === "error") {
-		return { error: response.errorMessage || "Summarization failed", errorRetryAfterMs: response.errorRetryAfterMs };
+		return {
+			error: response.errorMessage || "Summarization failed",
+			errorDisplayMessage: AIError.errorDisplayText(response),
+			errorRetryAfterMs: response.errorRetryAfterMs,
+		};
 	}
 	if (response.stopReason === "length") {
 		return { error: incompleteOutputError("Summarization failed") };
@@ -402,8 +403,8 @@ export async function generateBranchSummary(
 	summary = BRANCH_SUMMARY_PREAMBLE + summary;
 
 	// Compute file lists and append to summary
-	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
-	summary = upsertFileOperations(summary, readFiles, modifiedFiles, fileOps.read);
+	const { readFiles, modifiedFiles } = snapcompact.computeFileLists(fileOps);
+	summary = snapcompact.upsertFileOperations(summary, readFiles, modifiedFiles, fileOps.read);
 
 	return {
 		summary: summary || "No summary generated",
