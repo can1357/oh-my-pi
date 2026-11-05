@@ -261,7 +261,7 @@ fn source_args(
 	if rest.is_empty() {
 		return Ok(None);
 	}
-	let args = state::positional_scoped(&ctx.k.root, ctx.cx.store, ctx.vp)?.to_vec();
+	let args = state::positional_ref(&ctx.k.root, ctx.cx.store, ctx.vp)?.to_vec();
 	state::set_positional(&mut ctx.k.root, ctx.cx.store, ctx.vp, rest.to_vec());
 	Ok(Some(Box::new(crate::bash::vm::callstack::SourceSave { args, bash })))
 }

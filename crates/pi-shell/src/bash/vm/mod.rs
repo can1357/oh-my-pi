@@ -1703,16 +1703,6 @@ impl Shell {
 		// caller's call-stack arrays (`FUNCNAME`, `BASH_SOURCE`,
 		// `BASH_LINENO`, `BASH_ARGC`, `BASH_ARGV`, and what `caller` reads
 		// from them), as `Vproc::fork` gives an ordinary `( … )` child.
-		// A callout that replaces the parameters pushes the caller's
-		// argument base first, or the child's own lazy push would record
-		// the command the callout runs its operand from as the shell's
-		// arguments.
-		if script.args.is_some()
-			&& let Some(store) = store
-			&& let Err(err) = callstack::push_callout_base(&mut self.k, store, &mut self.procs[parent])
-		{
-			self.k.root.fail(err);
-		}
 		let calls = callstack::inherited(&self.procs[parent]);
 		let args_set = self.procs[parent].args_set;
 		let argv_init = self.procs[parent].argv_init;
@@ -1723,15 +1713,21 @@ impl Shell {
 		vp.lineage = lineage.unwrap_or(parent_lineage);
 		vp.status = status;
 		vp.scopes = scopes;
-		// The operand is one command of this subshell, and the launch vector
-		// is that command's own words: the run carries it, the run's own
-		// script frame expands it as `"$@"`, and no state of the subshell
-		// holds it (`state::positional_ref`). Installing it as the
-		// subshell's parameters instead outlived the operand — an EXIT trap
-		// the operand set read it afterwards — and hid the caller's
-		// parameters from the operand's own `set --` and `shift`, which in
-		// an ordinary `( … )` subshell write and read the caller's.
-		run.args = script.args;
+		// The script's own positional parameters ([`Script::args`]). A host
+		// callout does not use them: its operand's words are quoted into
+		// the synthetic source it runs (`tools::quote_words`), so the
+		// subshell keeps the caller's parameters, as the `( … )` subshell
+		// it stands for does, and the operand's own `getopts`, `shift` and
+		// `set --` read and write those.
+		if let Some(args) = script.args {
+			// A copied function scope takes precedence over the overlay: install
+			// the script's arguments at that level, as `set --` does.
+			if let Some(store) = store {
+				state::set_positional(&mut self.k.root, store, &mut vp, args);
+			} else if let Some(overlay) = &mut vp.overlay {
+				overlay.positional = Some(args);
+			}
+		}
 		vp.mode = mode;
 		vp.runs.push_back(run);
 		self.k.spawned.push(Box::new(vp));

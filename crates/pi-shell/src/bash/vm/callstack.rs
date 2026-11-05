@@ -185,7 +185,7 @@ pub fn array(
 			// bash's `get_bashargcv`: read at the top level before any base
 			// was pushed, the arrays show the positional parameters.
 			let base = (!in_function(vp) && !vp.argv_init)
-				.then(|| state::positional_scoped(&k.root, store, vp).map(<[BString]>::to_vec))
+				.then(|| state::positional_ref(&k.root, store, vp).map(<[BString]>::to_vec))
 				.transpose()?;
 			argcv(vp, name, base.as_deref())
 		},
@@ -338,7 +338,7 @@ pub fn read_base(k: &Kernel, store: &mut dyn StateStore, vp: &mut Vproc) -> Resu
 /// A store failure reading the positional parameters.
 pub fn init_argv(k: &Kernel, store: &mut dyn StateStore, vp: &mut Vproc) -> Result<(), StoreError> {
 	if !vp.argv_init {
-		let args = state::positional_scoped(&k.root, store, vp)?.to_vec();
+		let args = state::positional_ref(&k.root, store, vp)?.to_vec();
 		vp.calls
 			.insert(0, Call { kind: CallKind::Args(args), depth: 0, pop_args: false });
 		vp.argv_init = true;
@@ -532,27 +532,6 @@ pub fn end_source(vp: &mut Vproc, frames: usize) {
 	{
 		*ended = true;
 	}
-}
-
-/// Push bash's `init_bash_argv` base for a host callout about to replace
-/// `vp`'s positional parameters with its operand's: the subshell inherits
-/// the push, so the operand reads the caller's arguments on `BASH_ARGV`
-/// rather than the command the callout runs its operand from. Only under
-/// `extdebug`, which is the only state in which bash pushes a base when a
-/// level is entered.
-///
-/// # Errors
-///
-/// A store failure reading `extdebug` or the positional parameters.
-pub fn push_callout_base(
-	k: &mut Kernel,
-	store: &mut dyn StateStore,
-	vp: &mut Vproc,
-) -> Result<(), StoreError> {
-	if state::option(&mut k.root, store, vp, OptId::Extdebug)? {
-		init_argv(k, store, vp)?;
-	}
-	Ok(())
 }
 
 /// The calls a subshell of `vp` starts with: all of them, none tied to its
