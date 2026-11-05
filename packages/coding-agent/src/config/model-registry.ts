@@ -392,6 +392,11 @@ export class ModelRegistry {
 	// inherit them), and per `contextWindowKey` as composition finalized them.
 	#policyWindowTiers = new WeakMap<Model<Api>, ContextWindowTiers>();
 	#windowTiers = new Map<string, ContextWindowTiers>();
+	// The window the long-context threshold clamp replaced, per `contextWindowKey`.
+	// A derived value cannot be un-derived: once the clamp writes the threshold,
+	// the row no longer carries what it displaced, so an override that removes the
+	// tier has nothing to restore from unless the clamp left it here.
+	#preClampWindows = new Map<string, number>();
 	// A catalog row refitted to the other tier by `fitContextWindow`; a row has only one other tier.
 	#refittedRows = new WeakMap<Model<Api>, Model<Api>>();
 	#lastDiscoveryWarnings: Map<string, string> = new Map();
@@ -3108,7 +3113,7 @@ export class ModelRegistry {
 				(override?.contextWindow === undefined ? customWindows.get(contextWindowKey(model)) : undefined);
 			if (override?.contextWindow === undefined && maximum === undefined) {
 				this.#recordWindowTiers(model, this.#policyWindowTiers.get(model));
-				return overridden;
+				return this.#releaseThresholdClamp(model, overridden, extendedContext);
 			}
 			return this.#applyConfiguredExtendedWindow(overridden, maximum, model, {
 				pinned: override?.contextWindow !== undefined,
@@ -3116,6 +3121,32 @@ export class ModelRegistry {
 				compactionPoints,
 			});
 		});
+	}
+
+	/**
+	 * Releases the long-context threshold clamp when a `modelOverrides` price
+	 * removed the tier that justified it.
+	 *
+	 * `#applyHardcodedModelPolicies` lowers a tiered row's window to the tier's
+	 * threshold, and it runs BEFORE `#applyModelOverrides`, so an override that
+	 * prices the row free (or otherwise leaves it with no tier) would keep a
+	 * window clamped to a premium threshold its resolved card no longer has —
+	 * compacting early for a surcharge that is not charged. The window it
+	 * restores is the one the clamp recorded as it replaced it
+	 * (`#preClampWindows`), not a rebuild: the clamped row says only the
+	 * threshold, so `buildModel` on it can return nothing else. Only the clamp is
+	 * undone, and only when the row still carries exactly it: a window the user
+	 * pinned, a configured maximum and the extended-context resolutions are all
+	 * handled by `#applyConfiguredExtendedWindow` instead.
+	 */
+	#releaseThresholdClamp(baseline: Model<Api>, overridden: Model<Api>, extendedContext: boolean): Model<Api> {
+		if (extendedContext) return overridden;
+		const threshold = baseline.cost.longContext?.inputThreshold;
+		if (threshold === undefined || overridden.cost.longContext !== undefined) return overridden;
+		if (overridden.contextWindow !== threshold) return overridden;
+		const restored = this.#preClampWindows.get(contextWindowKey(overridden));
+		if (restored === undefined || restored <= threshold) return overridden;
+		return applyModelOverride(overridden, { contextWindow: restored });
 	}
 
 	#recordWindowTiers(model: Model<Api>, tiers: ContextWindowTiers | undefined): void {
@@ -3310,6 +3341,11 @@ export class ModelRegistry {
 		if (!extendedContext && model.longContextWindowUncapped !== true) {
 			const threshold = model.cost.longContext?.inputThreshold;
 			if (threshold !== undefined && model.contextWindow !== null && model.contextWindow > threshold) {
+				// Carry the window being replaced: a later `modelOverrides` price can
+				// remove the tier that justifies this clamp, and by then the clamped
+				// value is all the row says, so nothing downstream can re-derive what
+				// it displaced. `#releaseThresholdClamp` reads it back.
+				this.#preClampWindows.set(contextWindowKey(model), model.contextWindow);
 				model = applyModelOverride(model, { contextWindow: threshold });
 			}
 		}

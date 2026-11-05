@@ -129,11 +129,14 @@ provider "github-copilot" {
 		long-context-cost {
 		}
 	}
-	// GPT-6.1 Sol: Copilot's long tier comes from `billing.token_prices` as a
-	// `-1m` sibling (see above), never from the lineage's >272K multiplier
-	// band (classes/openai.kdl). Both rows opt out so the base row is not
-	// billed the band and the `-1m` row is not charged 2x twice.
-	models "gpt-6.1-sol" "gpt-6.1-sol-1m" {
+	// residue: GPT-6.1 Sol. Copilot's long tier comes from `billing.token_prices`
+	// as a `-1m` sibling (see above), never from the lineage's >272K multiplier
+	// band (classes/openai.kdl), and the `-1m` row's card already IS the long
+	// tier, so the band would charge 2x twice. A glob rather than the two census
+	// ids because every Sol 6.1 row this host surfaces needs the same opt-out:
+	// the `-1m` sibling is synthesized at discovery, so the id set is not fixed
+	// at build time and an exact list silently misses whatever discovery adds.
+	models "gpt-6.1-sol*" priority=10 {
 		long-context-cost {}
 	}
 }

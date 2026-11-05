@@ -115,10 +115,7 @@ provider "openai-codex" {
 	// https://x.com/thsottiaux/status/2109430343346581527). Codex reports an
 	// 872K maximum while OpenAI documents 922K max input (1.05M total); the
 	// curated maximum applies only with extended context on, and a higher live
-	// maximum still wins. Subscription usage carries no long-context surcharge
-	// (https://developers.openai.com/api/docs/models/gpt-6.1-sol), so these
-	// rows opt out of the lineage's >272K tier (classes/openai.kdl), which
-	// would otherwise also cap the 500K window at 272K.
+	// maximum still wins.
 	models "gpt-6.1-sol" "gpt-6.1-sol-wm" {
 		cost-patch {
 			input 2.0
@@ -130,6 +127,17 @@ provider "openai-codex" {
 			context-window 500000
 		}
 		max-context-window 922000
+	}
+	// residue: the opt-out is a glob while the prices above are exact ids, and
+	// deliberately so. Subscription usage carries no long-context surcharge
+	// (https://developers.openai.com/api/docs/models/gpt-6.1-sol), so EVERY Sol
+	// 6.1 id this host surfaces must opt out of the lineage's >272K tier
+	// (classes/openai.kdl), which would otherwise bill a subscription for it and
+	// cap the 500K window at 272K. Exact ids covered only the two rows the
+	// census had: a dated variant, a speed-tier row or anything else discovery
+	// adds would silently inherit the surcharge. The prices stay exact because
+	// they are those two rows' own figures, not the model's.
+	models "gpt-6.1-sol*" priority=10 {
 		long-context-cost {}
 	}
 	// Codex Ultrafast ships on GPT-6 Astra and GPT-6.1 Sol. This table uses

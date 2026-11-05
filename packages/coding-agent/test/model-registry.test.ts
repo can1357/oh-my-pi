@@ -3065,6 +3065,34 @@ describe("ModelRegistry", () => {
 			expect(registry.find("xai-oauth", "grok-4.20-0309-reasoning")?.contextWindow).toBe(1_000_000);
 		});
 
+		test("a price override that removes the long-context tier releases the threshold clamp", async () => {
+			// The clamp runs in #applyHardcodedModelPolicies, before #applyModelOverrides
+			// reaches the configured price, so a row priced free would otherwise keep a
+			// window clamped to a premium threshold its resolved card no longer has.
+			writeRawModelsJson({
+				openai: {
+					modelOverrides: {
+						"gpt-6.1-sol": { cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+						"gpt-6-sol": { cost: { input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25 } },
+					},
+				},
+			});
+			await Settings.init({ inMemory: true, overrides: { extendedContext: false } });
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			// Declared free: no tier, so no surcharge to compact ahead of, so the
+			// clamp is released and the row keeps its full window.
+			const free = registry.find("openai", "gpt-6.1-sol");
+			expect(free?.cost.longContext).toBeUndefined();
+			expect(free?.contextWindow).toBe(1_050_000);
+			// Declared at half price: the tier rescales and survives, so the clamp
+			// that matches it stays.
+			const half = registry.find("openai", "gpt-6-sol");
+			expect(half?.cost.longContext).toMatchObject({ inputThreshold: 272_000 });
+			expect(half?.contextWindow).toBe(272_000);
+			// An untouched tiered row is unaffected either way.
+			expect(registry.find("openrouter", "openai/gpt-6.1-sol")?.contextWindow).toBe(272_000);
+		});
+
 		test("reapplyModelPolicies re-clamps and restores premium windows on toggle", async () => {
 			await Settings.init({ inMemory: true });
 			cfgExtendedContext.set(settings, true);

@@ -90,6 +90,19 @@ class "openai" {
 	// all of them: each row's tier scales from its own base card, so Venice
 	// Ultrafast's 12/60/0.6/15 yields its published 24/90/1.2/30. None of the
 	// three matches `gpt-6-sol`, `gpt-56-sol` or `gpt-5.6-sol`.
+	//
+	// residue: taxonomy ranks cannot isolate this set. Revision ranks are out
+	// because Venice's `openai-gpt-61-sol` parses as major 61, and a `=6.1`
+	// rank would also take `gpt-6.1-terra`, which is a different card. There is
+	// no family rank for Sol. So the member set is spelled as id globs, and the
+	// multiplier form keeps that honest: each row scales from its own card.
+	// `*gpt-sol-latest*` is the weakest of the three and is scheduled for
+	// replacement — it names a ROLLING alias, so when a host repoints it to the
+	// next Sol this rule would price that model with 6.1's band and the
+	// registry would keep clamping, with nothing to flag the drift. It wants a
+	// taxonomy `override` pinning the alias to revision 6.1.0 with an
+	// `expires-at-ms` (taxonomy/openai.kdl uses that pattern for OpenAI's
+	// Daybreak aliases) so the pin lapses loudly instead of silently aging.
 	models "*gpt-6.1-sol*" "*gpt-61-sol*" "*gpt-sol-latest*" {
 		long-context-cost {
 			input-threshold 272000
