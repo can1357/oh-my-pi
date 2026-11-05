@@ -340,11 +340,16 @@ checkout carrying its own metadata is kept and carried like any other ignored
 cache — a `.git` directory, a `.git` naming a path inside the checkout, or a
 vendored clone's own submodule, whose `gitdir:` lands inside that clone —
 since package managers keep such clones inside those caches. Which of the two
-a pointer is gets decided by following it the way Git follows it — through a
-`.git` symlink onto a further `gitdir:` file, with the value taken as Git
-takes it, the rest of the file from the marker, so a space on either side of
-it, a newline inside it and anything after a NUL all count as Git counts
-them — and the directory is kept only when the pointer lands
+a pointer is gets decided by following it — through a `.git` symlink onto a
+further `gitdir:` file, and through the value as `gix` reads it, which is the
+same parser omp uses afterwards to run `status` and `clean` in the new
+worktree. Judging by one parser and acting with another would answer about a
+different repository than the one that gets opened, so `gix` decides. The
+cost is small and deliberate: a value ending in a space is `meta` to `gix`
+and `meta ` to `git rev-parse`, so for that one shape the two can name
+different directories. A value holding a NUL names a path nothing can open
+at all, so it counts as reaching nowhere. The directory is kept only when
+the pointer lands
 inside the new worktree and outside the worktree's own `.git`. A pointer
 reaching its own metadata through a symlink inside the checkout is therefore
 kept, and one leaving through a symlinked component is dropped, whichever way

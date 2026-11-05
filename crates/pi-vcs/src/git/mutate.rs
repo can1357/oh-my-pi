@@ -1954,24 +1954,25 @@ fn git_entry_points_outside(root: &Path, dir: &Path) -> bool {
 	if !meta.is_symlink() && !meta.is_file() {
 		return false;
 	}
-	// A `.git` Git will not accept is not a pointer at all, and the directory
-	// around it is ordinary content. Emptying it would be this change doing
-	// the very thing it exists to prevent, so every "we cannot read a pointer
-	// here" answer below keeps the directory. Only a pointer whose *target*
-	// cannot be found is refused, further down.
+	// The two ways of failing to read a pointer here do not get the same
+	// answer, because they are not the same risk. A `.git` that holds nothing
+	// gix accepts is not a pointer: the directory around it is ordinary
+	// content, and emptying it would be this change doing the very thing it
+	// exists to prevent. A `.git` we cannot read at all may still be a live
+	// pointer into another repository, so keeping that one is the leak
+	// direction, and it goes.
 	let target = if meta.is_symlink() {
 		let Ok(link) = fs::read_link(&entry) else {
-			return false;
+			return true;
 		};
-		// A `.git` symlink may land on another gitfile, and Git reads that one
-		// too. Stopping at the link would read a chain ending outside the
+		// A `.git` symlink may land on another gitfile, and gix reads that
+		// one too. Stopping at the link would read a chain ending outside the
 		// clone as ending inside it.
 		match fs::metadata(dir.join(&link)) {
-			Ok(pointed) if pointed.is_file() => {
-				let Some(gitdir) = read_gitfile(&dir.join(&link)) else {
-					return false;
-				};
-				gitdir
+			Ok(pointed) if pointed.is_file() => match read_gitfile(&dir.join(&link)) {
+				GitFile::Pointer(gitdir) => gitdir,
+				GitFile::NotAPointer => return false,
+				GitFile::Unreadable => return true,
 			},
 			// A directory can be the repository, and a target that is not
 			// there yet is still a pointer naming where it should be.
@@ -1984,10 +1985,11 @@ fn git_entry_points_outside(root: &Path, dir: &Path) -> bool {
 			Ok(_) => return false,
 		}
 	} else {
-		let Some(gitdir) = read_gitfile(&entry) else {
-			return false;
-		};
-		gitdir
+		match read_gitfile(&entry) {
+			GitFile::Pointer(gitdir) => gitdir,
+			GitFile::NotAPointer => return false,
+			GitFile::Unreadable => return true,
+		}
 	};
 	// Where the pointer really lands decides whenever the kernel can say,
 	// because a `..` run crosses symlinks in both directions and the text
@@ -2008,78 +2010,72 @@ fn git_entry_points_outside(root: &Path, dir: &Path) -> bool {
 	!resolved.starts_with(root) || resolved.starts_with(root.join(".git"))
 }
 
-/// A gitfile's `gitdir:` value, or `None` when Git would not call this file a
-/// gitfile at all.
+/// What a nested `.git` file turns out to be.
+enum GitFile {
+	/// A pointer, with the path it names.
+	Pointer(PathBuf),
+	/// Readable, but nothing gix will open a repository through.
+	NotAPointer,
+	/// We could not read it, so we cannot tell. It may still be live.
+	Unreadable,
+}
+
+/// Read a nested `.git` file the way the rest of omp will read it.
 ///
-/// Git wants `gitdir: ` at the very start of the file, and the path is then
-/// *the rest of the file*: it drops the trailing line terminators and reads
-/// what is left as a C string, so it stops at the first NUL. Every other byte
-/// belongs to the path — a space on either side, and an embedded newline
-/// too. All of that is measured with `git rev-parse --absolute-git-dir`;
-/// reading the value any other way names a different directory than the one
-/// Git opens, and the difference decides whether this copy reaches out of the
-/// clone.
+/// The parse is `gix`'s, not a copy of it. Four review rounds here found the
+/// same class of defect — a hand-written reimplementation disagreeing with
+/// the real one in a corner nobody had measured yet — each time in the bytes
+/// of the value or the size of the file. Calling the parser omp already
+/// ships ends that class instead of moving it.
 ///
-/// The marker is matched as strictly as Git matches it, because the answer
-/// here is not symmetric. An empty `.git`, one whose marker lacks its space
-/// or follows a junk line, and one past Git's own one-megabyte ceiling, all
-/// open no repository — measured: `fatal: invalid gitfile format` and `too
-/// large to be a .git file`. Calling such a file a pointer anyway risks
-/// emptying a directory that is not a checkout, which costs a user untracked
-/// files; declining to costs a clone some junk on disk. The cheap direction
-/// wins. The ceiling is Git's exact one for the same reason in reverse: a
-/// lower guess would carry a pointer Git happily follows out of the clone.
-fn read_gitfile(path: &Path) -> Option<PathBuf> {
-	// Git's own ceiling, measured against 2.43.0: 1 048 576 bytes opens, one
-	// byte more gives `too large to be a .git file`. Guessing a smaller cap
-	// would carry every pointer between the two, which is how another
-	// session's `HEAD` reaches the clone. Reading is bounded by the same
-	// number, so a sparse or endless `.git` cannot pull gigabytes in before
-	// the check sees its size.
+/// `gix` is also the right oracle rather than the `git` binary, because
+/// `gix` is what opens these repositories afterwards: this clone's own
+/// `status` and `clean` run through it. A decision taken against a different
+/// parser than the one that acts on it answers about the wrong object. The
+/// visible cost is small and deliberate: a value ending in a space is `meta`
+/// to gix and `meta ` to `git rev-parse`, so the two can name different
+/// directories. `docs/cli-reference.md` says so.
+fn read_gitfile(path: &Path) -> GitFile {
+	// A `.git` far larger than a path is not one. Reading is bounded by the
+	// same number, so a sparse or endless file cannot pull gigabytes into
+	// memory before its size is noticed.
 	const CEILING: u64 = 1 << 20;
-	let mut bytes = Vec::new();
-	fs::File::open(path)
-		.ok()?
-		.take(CEILING + 1)
-		.read_to_end(&mut bytes)
-		.ok()?;
-	if bytes.len() as u64 > CEILING {
-		return None;
-	}
-	let value = bytes.strip_prefix(b"gitdir: ".as_slice())?;
-	// Git's order, and it is observable: it drops the file's line terminator
-	// first and only then reads the value as a C string, so `meta\r\0tail\n`
-	// names `meta\r`. Cutting at the NUL first would name `meta`, a different
-	// directory, which is how this reaches out of the clone or empties a
-	// checkout that Git opens.
-	let end = value
-		.iter()
-		.rposition(|&byte| byte != b'\r' && byte != b'\n')
-		.map_or(0, |last| last + 1);
-	let value = &value[..end];
-	let value = match value.iter().position(|&byte| byte == 0) {
-		Some(nul) => &value[..nul],
-		None => value,
+	let Ok(file) = fs::File::open(path) else {
+		return GitFile::Unreadable;
 	};
-	os_path_from_bytes(value)
+	let mut bytes = Vec::new();
+	if file.take(CEILING + 1).read_to_end(&mut bytes).is_err() {
+		return GitFile::Unreadable;
+	}
+	if bytes.len() as u64 > CEILING {
+		return GitFile::NotAPointer;
+	}
+	let Ok(target) = gix::discover::parse::gitdir(&bytes) else {
+		return GitFile::NotAPointer;
+	};
+	// gix keeps a NUL and everything after it, and no syscall will ever open
+	// a path holding one, so such a pointer can reach nothing for anybody.
+	// That makes it inert rather than live: keeping the directory costs
+	// disk, emptying it costs the user files. This is the one place the
+	// answer differs from `git rev-parse`, which stops at the NUL and may
+	// well open something.
+	if os_path_contains_nul(&target) {
+		return GitFile::NotAPointer;
+	}
+	GitFile::Pointer(target)
 }
 
-/// A gitfile's `gitdir:` value as a path, keeping the platform's own bytes.
+/// Whether a path holds an interior NUL, which no `open(2)` can accept.
 #[cfg(unix)]
-#[allow(
-	clippy::unnecessary_wraps,
-	reason = "the Windows counterpart can fail, and both answer one call site"
-)]
-fn os_path_from_bytes(bytes: &[u8]) -> Option<PathBuf> {
+fn os_path_contains_nul(path: &Path) -> bool {
 	use std::os::unix::ffi::OsStrExt;
-	Some(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+	path.as_os_str().as_bytes().contains(&0)
 }
 
-/// Windows paths are UTF-16, so bytes that are not valid UTF-8 name no path
-/// the platform could open in the first place.
 #[cfg(not(unix))]
-fn os_path_from_bytes(bytes: &[u8]) -> Option<PathBuf> {
-	Some(PathBuf::from(std::str::from_utf8(bytes).ok()?))
+fn os_path_contains_nul(path: &Path) -> bool {
+	use std::os::windows::ffi::OsStrExt;
+	path.as_os_str().encode_wide().any(|unit| unit == 0)
 }
 
 /// `target` resolved against `base` without touching the filesystem: `.` is
@@ -3326,19 +3322,25 @@ mod tests {
 				"{name} is not a gitfile Git accepts, so the directory stays"
 			);
 		}
-		// Git's ceiling is exactly one megabyte: 1 048 576 bytes it reads,
-		// 1 048 577 it refuses with `too large to be a .git file`. A padded
-		// pointer below the line is one Git follows, so it must be judged,
-		// not waved through as a non-pointer.
+		// The ceiling is on the file, not the path: padded with newlines the
+		// value is still `../../outside`, so just under the limit this is a
+		// pointer and must be judged, and just over it is not a file we will
+		// read at all.
 		assert!(case("padded-under-the-ceiling", &|dir| {
-			let mut contents = b"gitdir: ../../outside\0".to_vec();
-			contents.resize(1 << 20, b'x');
+			let mut contents = b"gitdir: ../../outside".to_vec();
+			contents.resize(1 << 20, b'\n');
 			fs::write(dir.join(".git"), contents).unwrap();
 		}));
 		assert!(!case("oversize", &|dir| {
-			let mut contents = b"gitdir: ../../outside\0".to_vec();
-			contents.resize((1 << 20) + 1, b'x');
+			let mut contents = b"gitdir: ../../outside".to_vec();
+			contents.resize((1 << 20) + 1, b'\n');
 			fs::write(dir.join(".git"), contents).unwrap();
+		}));
+		// A NUL in the value names a path no `open(2)` accepts, so the
+		// pointer reaches nothing for anybody and the directory stays.
+		assert!(!case("nul-in-value", &|dir| {
+			fs::write(dir.join(".git"), b"gitdir: ../../outside\0tail\n").unwrap();
+			fs::write(dir.join("own.txt"), "ordinary content\n").unwrap();
 		}));
 
 		#[cfg(unix)]
@@ -3368,25 +3370,24 @@ mod tests {
 				fs::write(dir.join("pointer"), "gitdir: meta\n").unwrap();
 				symlink("pointer", dir.join(".git")).unwrap();
 			}));
-			// The value is the bytes Git opens: a space on either side belongs
-			// to the path, and nothing after a NUL does.
-			assert!(case("trailing-space-out", &|dir| {
+			// gix trims trailing whitespace from the value, so this names
+			// `meta` and stays. `git rev-parse` keeps the space and would
+			// open the symlink out; omp opens these through gix, so gix
+			// decides. This is the whole of the deliberate divergence.
+			assert!(!case("trailing-space-in", &|dir| {
 				symlink(&outside, dir.join("meta ")).unwrap();
 				fs::create_dir_all(dir.join("meta")).unwrap();
 				fs::write(dir.join(".git"), "gitdir: meta \n").unwrap();
 			}));
+			// A space before the value is part of the path for gix too.
 			assert!(case("leading-space-out", &|dir| {
 				symlink(&outside, dir.join(" meta")).unwrap();
 				fs::create_dir_all(dir.join("meta")).unwrap();
 				fs::write(dir.join(".git"), "gitdir:  meta\n").unwrap();
 			}));
-			assert!(case("nul-out", &|dir| {
-				symlink(&outside, dir.join("hop")).unwrap();
-				fs::write(dir.join(".git"), b"gitdir: hop\0/../meta\n").unwrap();
-			}));
-			// A newline inside the value belongs to the path too: Git takes
-			// the rest of the file, so stopping at the first line would judge
-			// a different directory in either direction.
+			// A newline inside the value belongs to the path: gix takes the
+			// rest of the file, so stopping at the first line would judge a
+			// different directory in either direction.
 			assert!(case("embedded-newline-out", &|dir| {
 				symlink(&outside, dir.join("meta\nmore")).unwrap();
 				fs::create_dir_all(dir.join("meta")).unwrap();
@@ -3397,17 +3398,15 @@ mod tests {
 				symlink(&outside, dir.join("meta")).unwrap();
 				fs::write(dir.join(".git"), "gitdir: meta\nmore\n").unwrap();
 			}));
-			// Git drops the terminator before reading the value as a C
-			// string, so this names `meta\r`, not `meta`. Measured with `git
-			// rev-parse --absolute-git-dir` under `cat -A`: `meta^M$`.
-			assert!(case("cr-before-nul-out", &|dir| {
+			// gix keeps the NUL, so the value names a path nothing can open
+			// and the pointer is inert whichever side its prefix would land.
+			assert!(!case("nul-out", &|dir| {
+				symlink(&outside, dir.join("hop")).unwrap();
+				fs::write(dir.join(".git"), b"gitdir: hop\0/../meta\n").unwrap();
+			}));
+			assert!(!case("cr-before-nul", &|dir| {
 				symlink(&outside, dir.join("meta\r")).unwrap();
 				fs::create_dir_all(dir.join("meta")).unwrap();
-				fs::write(dir.join(".git"), b"gitdir: meta\r\0tail\n").unwrap();
-			}));
-			assert!(!case("cr-before-nul-in", &|dir| {
-				fs::create_dir_all(dir.join("meta\r")).unwrap();
-				symlink(&outside, dir.join("meta")).unwrap();
 				fs::write(dir.join(".git"), b"gitdir: meta\r\0tail\n").unwrap();
 			}));
 			// And a non-UTF-8 metadata path is a path, not an unreadable file.
