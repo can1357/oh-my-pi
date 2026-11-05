@@ -29,7 +29,12 @@ import type { Settings } from "../config/settings";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
 import { formatTitleUserMessage } from "../tiny/message-preproc";
-import { isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
+import { isAttachmentOnlyTitleInput, isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
+import { readSessionInfo, type SessionInfo } from "../session/session-listing";
+import { buildSessionMetadata } from "../session/session-metadata";
+import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import { cfgSecretsEnabled } from "../secrets/settings";
+import * as titleCard from "./title-card";
 import { tinyTitleClient } from "../tiny/title-client";
 
 import { cfgRetryModelFallback } from "../session/settings";
@@ -301,6 +306,78 @@ export async function generateTitleOnline(
 	);
 }
 
+export interface GeneratePickerSessionTitleOptions {
+	registry?: ModelRegistry;
+	settings: Settings;
+	signal?: AbortSignal;
+	currentModel?: Model<Api>;
+	credentialSourceSessionId?: string;
+	generate?: (text: string, customSystemPrompt?: string, signal?: AbortSignal) => Promise<string | null>;
+}
+
+/**
+ * Generate a suggested title for a picker session from its 4 KB transcript
+ * prefix (scanning the file on demand when `session` is an index-only row),
+ * keeping or naming its `<icon> <CODE>: ` card like in-session `/rename`.
+ */
+export async function generatePickerSessionTitle(
+	session: Pick<SessionInfo, "id" | "path" | "title" | "firstMessage" | "allMessagesText">,
+	options: GeneratePickerSessionTitleOptions,
+): Promise<string | null> {
+	let { firstMessage, allMessagesText } = session;
+	if (!firstMessage && !allMessagesText && session.path) {
+		const scanned = await readSessionInfo(session.path);
+		if (options.signal?.aborted) return null;
+		if (scanned) {
+			firstMessage = scanned.firstMessage;
+			allMessagesText = scanned.allMessagesText;
+		}
+	}
+	const first = firstMessage && firstMessage !== "(no messages)" ? firstMessage.trim() : "";
+	const all = allMessagesText && allMessagesText !== "(no messages)" ? allMessagesText.trim() : "";
+	const candidates: string[] = [];
+	if (first && !isLowSignalTitleInput(first) && !isAttachmentOnlyTitleInput(first)) {
+		candidates.push(first);
+	}
+	if (all && all !== first && !isLowSignalTitleInput(all)) {
+		candidates.push(all);
+	}
+	if (candidates.length === 0) return null;
+
+	const runGenerate =
+		options.generate ??
+		(async (text: string, customSystemPrompt?: string, signal?: AbortSignal) => {
+			if (!options.registry) return null;
+			const titleSessionId = Bun.randomUUIDv7();
+			return withCredentialRedaction(cfgSecretsEnabled.get(options.settings), () =>
+				generateSessionTitle(
+					text,
+					options.registry!,
+					options.settings,
+					titleSessionId,
+					options.currentModel,
+					provider => buildSessionMetadata(titleSessionId, provider, options.registry!.authStorage),
+					customSystemPrompt,
+					signal,
+					options.credentialSourceSessionId,
+				),
+			);
+		});
+
+	let named: string | null = null;
+	for (const text of candidates) {
+		if (options.signal?.aborted) return null;
+		const title = await runGenerate(text, undefined, options.signal);
+		if (title) {
+			named = title;
+			break;
+		}
+	}
+	if (!named || options.signal?.aborted) return null;
+
+	return titleCard.cardSessionTitle(named, session.title, options.settings, runGenerate, options.signal);
+}
+
 async function generateTitleOnlineWithModels(
 	firstMessage: string,
 	models: Model<Api>[],
@@ -340,11 +417,11 @@ async function generateTitleOnlineWithModels(
 
 		try {
 			if (credentialSourceSessionId && sessionId && credentialSourceSessionId !== sessionId) {
-				const foregroundCredential = registry.authStorage.oauth
-					.accounts(model.provider, credentialSourceSessionId)
-					.find(account => account.active);
+				const foregroundCredential = registry.authStorage?.oauth
+					?.accounts(model.provider, credentialSourceSessionId)
+					?.find(account => account.active);
 				if (foregroundCredential) {
-					registry.authStorage.sessions.pin(model.provider, sessionId, foregroundCredential.credentialId);
+					registry.authStorage?.sessions?.pin(model.provider, sessionId, foregroundCredential.credentialId);
 				}
 			}
 			const apiKey = await registry.getApiKey(model, sessionId);

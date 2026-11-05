@@ -1,3 +1,6 @@
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
@@ -9,6 +12,7 @@ import { tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import { DEFAULT_SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/spinner-clock";
 import {
 	disposeTerminalTitleState,
+	generatePickerSessionTitle,
 	generateSessionTitle,
 	initTerminalTitleState,
 	setExtensionTerminalTitle,
@@ -18,6 +22,7 @@ import {
 	setTerminalTitleSpinnerStyle,
 	setTerminalTitleState,
 } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
+import * as titleCard from "@oh-my-pi/pi-coding-agent/utils/title-card";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { isWsl, logger, setTerminalHeadless } from "@oh-my-pi/pi-utils";
 import { mockWindowsConsoleTitle, type WindowsConsoleTitleMock } from "./terminal-title-test-utils";
@@ -1210,5 +1215,232 @@ describe("terminal title runtime", () => {
 			setTerminalTitlePullRequest(undefined);
 		}
 		expectWorkingSeparator(emittedTitles().at(-1), "Renamed");
+	});
+});
+
+describe("generatePickerSessionTitle", () => {
+	it("generates a title from firstMessage, preserving an existing card when session.title already has one", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const settings = createSettings(model);
+		const registry = createRegistry(model);
+		const generated = await generatePickerSessionTitle(
+			{
+				id: "s1",
+				path: "/fake/s1.jsonl",
+				title: "🧪 FLAKY: Old test title",
+				firstMessage: "Fix flaky test runner race condition",
+				allMessagesText: "Fix flaky test runner race condition",
+			},
+			{
+				registry,
+				settings,
+				generate: async text => `Refactored ${text}`,
+			},
+		);
+		expect(generated).toBe("🧪 FLAKY: Refactored Fix flaky test runner race condition");
+	});
+
+	it("generates a new card via titleCardPrompt when session.title has no card and title.icons is not boring, and leaves the title plain when boring", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const registry = createRegistry(model);
+
+		// With default/emoji icons (not boring)
+		const emojiSettings = Settings.isolated({
+			modelRoles: { tiny: `${model.provider}/${model.id}` },
+			"title.icons": "emoji",
+		});
+		const promptCalls: (string | undefined)[] = [];
+		const emojiGenerated = await generatePickerSessionTitle(
+			{
+				id: "s2",
+				path: "/fake/s2.jsonl",
+				title: undefined,
+				firstMessage: "Investigate memory leak",
+				allMessagesText: "Investigate memory leak",
+			},
+			{
+				registry,
+				settings: emojiSettings,
+				generate: async (text, customPrompt) => {
+					promptCalls.push(customPrompt);
+					if (customPrompt) {
+						return "🔍 LEAK";
+					}
+					return "Investigate memory leak in cache";
+				},
+			},
+		);
+		expect(promptCalls.length).toBe(2);
+		expect(promptCalls[1]).toBeDefined();
+		expect(emojiGenerated).toBe("🔍 LEAK: Investigate memory leak in cache");
+
+		// With boring icons
+		const boringSettings = Settings.isolated({
+			modelRoles: { tiny: `${model.provider}/${model.id}` },
+			"title.icons": "boring",
+		});
+		const boringCalls: (string | undefined)[] = [];
+		const boringGenerated = await generatePickerSessionTitle(
+			{
+				id: "s3",
+				path: "/fake/s3.jsonl",
+				title: undefined,
+				firstMessage: "Investigate memory leak",
+				allMessagesText: "Investigate memory leak",
+			},
+			{
+				registry,
+				settings: boringSettings,
+				generate: async (text, customPrompt) => {
+					boringCalls.push(customPrompt);
+					return "Investigate memory leak in cache";
+				},
+			},
+		);
+		expect(boringCalls.length).toBe(1);
+		expect(boringGenerated).toBe("Investigate memory leak in cache");
+	});
+
+	it("falls back to allMessagesText when firstMessage is low-signal or attachment-only", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const settings = Settings.isolated({
+			modelRoles: { tiny: `${model.provider}/${model.id}` },
+			"title.icons": "boring",
+		});
+		const registry = createRegistry(model);
+
+		// Low-signal firstMessage
+		const lowSignalInputs: string[] = [];
+		const resLowSignal = await generatePickerSessionTitle(
+			{
+				id: "s4",
+				path: "/fake/s4.jsonl",
+				title: undefined,
+				firstMessage: "hi",
+				allMessagesText: "Please help me implement redis clustering",
+			},
+			{
+				registry,
+				settings,
+				generate: async text => {
+					lowSignalInputs.push(text);
+					return "Redis clustering implementation";
+				},
+			},
+		);
+		expect(lowSignalInputs).toEqual(["Please help me implement redis clustering"]);
+		expect(resLowSignal).toBe("Redis clustering implementation");
+
+		// Attachment-only firstMessage
+		const attachmentInputs: string[] = [];
+		const resAttachment = await generatePickerSessionTitle(
+			{
+				id: "s5",
+				path: "/fake/s5.jsonl",
+				title: undefined,
+				firstMessage: "fix [Image #1]",
+				allMessagesText: "fix [Image #1]\nThe submit button overlaps the modal boundary",
+			},
+			{
+				registry,
+				settings,
+				generate: async text => {
+					attachmentInputs.push(text);
+					return "Fix modal submit button overlap";
+				},
+			},
+		);
+		expect(attachmentInputs).toEqual(["fix [Image #1]\nThe submit button overlaps the modal boundary"]);
+		expect(resAttachment).toBe("Fix modal submit button overlap");
+	});
+
+	it("reads session.path on demand via readSessionInfo when both firstMessage and allMessagesText are empty on an index-only row", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const settings = Settings.isolated({
+			modelRoles: { tiny: `${model.provider}/${model.id}` },
+			"title.icons": "boring",
+		});
+		const registry = createRegistry(model);
+
+		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-picker-title-test-"));
+		const sessionFile = path.join(tmpDir, "session.jsonl");
+
+		try {
+			const headerLine = JSON.stringify({
+				type: "session",
+				id: "test-index-session",
+				timestamp: new Date().toISOString(),
+			});
+			const messageLine = JSON.stringify({
+				type: "message",
+				message: {
+					role: "user",
+					content: [{ type: "text", text: "Optimize AST parse traversal" }],
+				},
+			});
+			await fs.writeFile(sessionFile, `${headerLine}\n${messageLine}\n`);
+
+			const generatedInputs: string[] = [];
+			const title = await generatePickerSessionTitle(
+				{
+					id: "test-index-session",
+					path: sessionFile,
+					title: undefined,
+					firstMessage: "",
+					allMessagesText: "",
+				},
+				{
+					registry,
+					settings,
+					generate: async text => {
+						generatedInputs.push(text);
+						return "Optimize AST traversal";
+					},
+				},
+			);
+
+			expect(generatedInputs).toEqual(["Optimize AST parse traversal"]);
+			expect(title).toBe("Optimize AST traversal");
+		} finally {
+			await fs.rm(tmpDir, { recursive: true, force: true });
+		}
+	});
+
+	it("uses the default runGenerate path when options.generate is omitted", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const settings = Settings.isolated({
+			modelRoles: { tiny: `${model.provider}/${model.id}` },
+			"title.icons": "boring",
+		});
+		const registry = createRegistry(model);
+
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Generated Title</title>" }],
+		} as never);
+		const cardSpy = vi.spyOn(titleCard, "cardSessionTitle");
+
+		const result = await generatePickerSessionTitle(
+			{
+				id: "s-default",
+				path: "/fake/s-default.jsonl",
+				title: undefined,
+				firstMessage: "Implement caching layer for Redis",
+				allMessagesText: "Implement caching layer for Redis",
+			},
+			{
+				registry,
+				settings,
+			},
+		);
+
+		expect(completeSimpleMock).toHaveBeenCalled();
+		const callOptions = completeSimpleMock.mock.calls[0]?.[2];
+		expect(callOptions?.sessionId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+		expect(JSON.parse(callOptions?.metadata?.user_id as string)).toEqual({
+			session_id: callOptions?.sessionId,
+		});
+		expect(cardSpy).toHaveBeenCalledWith("Generated Title", undefined, settings, expect.any(Function), undefined);
+		expect(result).toBe("Generated Title");
 	});
 });

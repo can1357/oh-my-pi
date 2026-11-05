@@ -26,6 +26,7 @@ import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "./capability";
+import { generatePickerSessionTitle } from "./utils/title-generator";
 import {
 	type Args,
 	reportInvalidFlagValues,
@@ -217,7 +218,12 @@ type SessionPicker = (
 ) => Promise<SessionInfo | null>;
 
 /** Resume/import-only graph boundary; ordinary launches never construct a picker. */
-async function loadSessionPicker(init?: { foreign?: boolean }): Promise<SessionPicker> {
+async function loadSessionPicker(init?: {
+	foreign?: boolean;
+	modelRegistry?: ModelRegistry;
+	settings?: Settings;
+}): Promise<SessionPicker> {
+	const { modelRegistry, settings } = init ?? {};
 	const [{ selectSession }, { HistoryStorage }, { loadPinnedSessionIds, setSessionPinned }, { FileSessionStorage }] =
 		await Promise.all([
 			import("@oh-my-pi/pi-tui/apps/session-picker"),
@@ -247,6 +253,16 @@ async function loadSessionPicker(init?: { foreign?: boolean }): Promise<SessionP
 						renameSession: (session: SessionInfo, title: string) =>
 							SessionManager.renameSessionTitle(session.path, title, { cwd: session.cwd }),
 						setSessionPinned: (session: SessionInfo, pinned: boolean) => setSessionPinned(session.id, pinned),
+						...(modelRegistry && settings
+							? {
+									generateSessionTitle: (session: SessionInfo, signal: AbortSignal) =>
+										generatePickerSessionTitle(session, {
+											registry: modelRegistry,
+											settings,
+											signal,
+										}),
+								}
+							: {}),
 					}),
 			loadAllSessions: () => SessionManager.listAllForPicker(storage),
 		});
@@ -2268,7 +2284,8 @@ export async function runRootCommand(
 				}
 			}
 			pauseStartupWatchdog();
-			const selectSessionImpl = deps.selectSession ?? (await loadSessionPicker());
+			const selectSessionImpl =
+				deps.selectSession ?? (await loadSessionPicker({ modelRegistry, settings: settingsInstance }));
 			const picked = await logger.time("selectSession", selectSessionImpl, folder.sessions, {
 				completeSessions: folder.complete,
 				allSessions: preloadedAllSessions,

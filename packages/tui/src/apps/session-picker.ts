@@ -14,6 +14,7 @@ export interface SessionPickerHost<T extends SessionSelectorEntry = SessionSelec
 	deleteSession?(session: T): Promise<boolean>;
 	/** Rename the session and resolve with the title as stored, or null when it did not happen. */
 	renameSession?(session: T, title: string): Promise<string | null>;
+	generateSessionTitle?(session: T, signal: AbortSignal): Promise<string | null>;
 	setSessionPinned?(session: T, pinned: boolean): Promise<void>;
 	loadAllSessions?(): Promise<SessionListing<T>>;
 }
@@ -29,6 +30,7 @@ export interface SessionPickerOptions<T extends SessionSelectorEntry = SessionSe
 	allowDelete?: boolean;
 	/** Rename the selected session; resolve with the title as stored, or null when it did not happen. */
 	onRename?: (session: T, title: string) => Promise<string | null>;
+	onGenerateTitle?: (session: T, signal: AbortSignal) => Promise<string | null>;
 	allowGlobalScope?: boolean;
 	historySearch?: boolean;
 	pinnedIds?: ReadonlySet<string>;
@@ -72,6 +74,7 @@ export async function selectSession<T extends SessionSelectorEntry>(
 				{
 					onDelete: options.allowDelete === false ? undefined : host.deleteSession,
 					onRename: options.onRename ?? host.renameSession,
+					onGenerateTitle: options.onGenerateTitle ?? host.generateSessionTitle,
 					onSetPinned: host.setSessionPinned,
 					historyMatcher,
 					completeSessions: options.completeSessions,

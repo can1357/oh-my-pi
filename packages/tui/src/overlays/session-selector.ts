@@ -34,6 +34,7 @@ import { theme } from "../theme/theme";
 import { contentRowWidth } from "../chrome/selector-helpers";
 import { matchesAppInterrupt, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
 import { getKeybindings } from "../keybindings";
+import { sanitizeDisplayLine } from "./extensions/display-text";
 /** Session lifecycle status presented by the picker. */
 export type SessionSelectorStatus = "complete" | "interrupted" | "aborted" | "error" | "pending" | "unknown";
 
@@ -1460,6 +1461,11 @@ export interface SessionSelectorOptions<T extends SessionSelectorEntry = Session
 	 * did not happen.
 	 */
 	onRename?: (session: T, title: string) => Promise<string | null>;
+	/**
+	 * Generate a suggested title for the selected session from its transcript;
+	 * resolve with the suggestion or null when none could be generated.
+	 */
+	onGenerateTitle?: (session: T, signal: AbortSignal) => Promise<string | null>;
 	/** Persist the selected session's pin state (pin keys / the picker's Pin action). */
 	onSetPinned?: (session: T, pinned: boolean) => Promise<void>;
 	historyMatcher?: SessionHistoryMatcher;
@@ -1528,6 +1534,9 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	#messageContainer: Container;
 	#onDelete?: (session: T) => Promise<boolean>;
 	#onRename?: (session: T, title: string) => Promise<string | null>;
+	#onGenerateTitle?: (session: T, signal: AbortSignal) => Promise<string | null>;
+	#renameGenerateTitle?: () => void;
+	#renameAbort: AbortController | null = null;
 	#onSetPinned?: (session: T, pinned: boolean) => Promise<void>;
 	#onRequestRender?: () => void;
 	readonly #loadAllSessions?: () => Promise<SessionListing<T>>;
@@ -1608,6 +1617,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		this.#messageContainer = new Container();
 		this.#onDelete = options.onDelete;
 		this.#onRename = options.onRename;
+		this.#onGenerateTitle = options.onGenerateTitle;
 		this.#onSetPinned = options.onSetPinned;
 		this.#loadAllSessions = options.loadAllSessions;
 		this.#folderSessions = sessions;
@@ -1802,6 +1812,8 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	 */
 	override dispose(): void {
 		this.#closed = true;
+		this.#renameAbort?.abort();
+		this.#renameAbort = null;
 		this.#sessionList.dispose();
 		clearTimeout(this.#previewTimer);
 		super.dispose();
@@ -1893,6 +1905,12 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	/** Close the rename dialog without changes, restoring the session list. */
 	#closeRenameDialog(): void {
 		if (!this.#renameDialog) return;
+		this.#renameAbort?.abort();
+		this.#renameAbort = null;
+		this.#renameGenerateTitle = undefined;
+		if (this.#message?.kind === "loading") {
+			this.#clearError();
+		}
 		this.#renameDialog = null;
 		this.#renameField = null;
 		// Restore the SessionList into the content slot so the picker is back
@@ -1925,6 +1943,8 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 				return;
 			}
 			this.#clearError();
+			this.#renameAbort?.abort();
+			this.#renameAbort = null;
 			pending = true;
 			try {
 				const stored = await rename(session, title);
@@ -1947,7 +1967,6 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		};
 		const field = new TextFormField({
 			theme: formTheme,
-			label: "Rename session",
 			initialValue: session.title ?? "",
 			empty: "cancel",
 			onSubmit: value => {
@@ -1957,9 +1976,51 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 				// A cancel while the rename is still in flight must not tear
 				// the editor down underneath it; the submit closes it.
 				if (pending) return;
+				this.#clearError();
 				this.#closeRenameDialog();
 			},
 		});
+		let generating = false;
+		this.#renameGenerateTitle = this.#onGenerateTitle
+			? () => {
+					const generateTitle = this.#onGenerateTitle;
+					if (!generateTitle || pending || generating) return;
+					const startValue = field.getValue();
+					generating = true;
+					this.#renameAbort?.abort();
+					const abort = new AbortController();
+					this.#renameAbort = abort;
+					this.#messageContainer.clear();
+					this.#messageContainer.addChild(new Text(theme.fg("muted", "Generating title…"), 0, 0));
+					this.#messageContainer.addChild(new Spacer(1));
+					this.#message = { kind: "loading", text: "Generating title…" };
+					this.#onRequestRender?.();
+					void generateTitle(session, abort.signal)
+						.then(generated => {
+							if (abort.signal.aborted || this.#renameDialog !== owner) return;
+							this.#clearError();
+							const clean = generated ? sanitizeDisplayLine(generated) : "";
+							if (clean) {
+								if (field.getValue() === startValue) {
+									field.setValue(clean);
+								}
+							} else {
+								this.#showError("Could not generate a title for this session.");
+							}
+						})
+						.catch(err => {
+							if (abort.signal.aborted || this.#renameDialog !== owner) return;
+							this.#showError(err instanceof Error ? err.message : String(err));
+						})
+						.finally(() => {
+							if (this.#renameAbort === abort) this.#renameAbort = null;
+							generating = false;
+							if (!abort.signal.aborted && this.#renameDialog === owner) {
+								this.#onRequestRender?.();
+							}
+						});
+				}
+			: undefined;
 		field.focused = true;
 		owner.addChild(field);
 		this.#renameDialog = owner;
@@ -2021,9 +2082,17 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 
 	/** Blank · keybinding hint · bottom border. Rendered by {@link render}. */
 	#footerLines(width: number): string[] {
+		const cancel = interruptKey();
+		if (this.#renameDialog) {
+			const [generateKey] = this.#onGenerateTitle ? getKeybindings().getKeys("app.session.generateTitle") : [];
+			const hint = theme.fg(
+				"muted",
+				`[${formatKeyHint("enter")} save · ${generateKey ? `${formatKeyHint(generateKey)} auto-title · ` : ""}${cancel} cancel]`,
+			);
+			return [row("", width), row(hint, width), row("", width), bottomBorder(width)];
+		}
 		const scopeHint = this.#scope === "all" ? "current folder" : "all projects";
 		// Keys mirror SessionList#handleInput; cancel is `app.interrupt` (raw Escape when unbound).
-		const cancel = interruptKey();
 		const pin = this.#pinAction();
 		const pinKey = pin && getKeybindings().getKeys(pin.binding)[0];
 		const hint = theme.fg(
@@ -2085,15 +2154,24 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 			children.push(this.#sessionList.searchInput, list);
 		}
 		const hints: (NativeHint | undefined)[] = [];
-		if (this.#onDelete) hints.push({ keys: ["delete", "backspace"], label: "delete" });
-		if (this.#onRename) hints.push({ keys: ["f2"], label: "rename" });
-		const pin = this.#pinAction();
-		if (pin) hints.push(actionHint(pin.binding, pin.label));
-		hints.push({ keys: ["enter"], label: "select" });
-		if (this.#sessionList.onToggleScope) {
-			hints.push({ keys: ["tab"], label: this.#scope === "all" ? "current folder" : "all projects" });
+		if (this.#renameDialog) {
+			hints.push({ keys: ["enter"], label: "save" });
+			if (this.#onGenerateTitle) {
+				const [generateKey] = getKeybindings().getKeys("app.session.generateTitle");
+				if (generateKey) hints.push({ keys: [generateKey], label: "auto-title" });
+			}
+			hints.push({ keys: [boundKeys("app.interrupt", ["escape"])[0] ?? "escape"], label: "cancel" });
+		} else {
+			if (this.#onDelete) hints.push({ keys: ["delete", "backspace"], label: "delete" });
+			if (this.#onRename) hints.push({ keys: ["f2"], label: "rename" });
+			const pin = this.#pinAction();
+			if (pin) hints.push(actionHint(pin.binding, pin.label));
+			hints.push({ keys: ["enter"], label: "select" });
+			if (this.#sessionList.onToggleScope) {
+				hints.push({ keys: ["tab"], label: this.#scope === "all" ? "current folder" : "all projects" });
+			}
+			hints.push({ keys: [boundKeys("app.interrupt", ["escape"])[0] ?? "escape"], label: "cancel" });
 		}
-		hints.push({ keys: [boundKeys("app.interrupt", ["escape"])[0] ?? "escape"], label: "cancel" });
 		const result = overlayCard("omp.overlay.sessions", tabs ? this.#title : this.title, [
 			...children,
 			hintsRow(hints),
@@ -2289,6 +2367,10 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		if (this.#confirmationDialog) {
 			this.#confirmationDialog.handleInput(keyData);
 		} else if (this.#renameDialog) {
+			if (this.#renameGenerateTitle && getKeybindings().matches(keyData, "app.session.generateTitle")) {
+				this.#renameGenerateTitle();
+				return;
+			}
 			this.#renameField?.handleInput(keyData);
 		} else {
 			this.#sessionList.handleInput(keyData);
