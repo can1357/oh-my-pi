@@ -243,12 +243,16 @@ const CONTENT_FILTER_PATTERN = /\b(?:incomplete:\s*)?content_filter\b/i;
  */
 const ACCOUNT_POLICY_PATTERN = /trusted access for cyber/i;
 /**
- * Provider error codes for a content-policy refusal: the provider flagged the
- * request's content. A sibling credential sees the same content, so these never
- * rotate; the verdict is not stable for a given input, so callers may retry the
- * same request a bounded number of times.
+ * A refusal code appearing in free text, and only where a CODE can appear — not anywhere in prose.
+ *
+ * This is the last-resort path for a provider that surfaces nothing structured, so it reads the
+ * message. Matching the bare token anywhere made any text that merely mentions the code a
+ * refusal: a log line about this classifier, a user message quoting a refusal, a report
+ * discussing one. So the token must sit where a code sits — at the start, after `code=`/`type=`,
+ * or inside brackets or quotes — and prose that merely contains the word does not qualify.
  */
-const CONTENT_POLICY_REFUSAL_PATTERN = /\b(?:cyber_policy|reasoning_extraction)\b/i;
+const CONTENT_POLICY_REFUSAL_PATTERN =
+	/(?:^|[("'[]|\b(?:code|type)\s*[=:]\s*"?)(?:cyber_policy|reasoning_extraction)\b/i;
 
 /**
  * Whether a provider error `code` plus `message` is a content-policy refusal

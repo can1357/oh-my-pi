@@ -296,3 +296,32 @@ describe("which refusals never rotate credentials", () => {
 		expect(AIError.isContentPolicyRefusal("cyber_policy", "Your account needs Trusted Access for Cyber")).toBe(false);
 	});
 });
+
+describe("a refusal code in free text, and only where a code can appear", () => {
+	// The last-resort path for a provider that surfaces nothing structured. Matching the bare
+	// token anywhere made any text that merely MENTIONS the code a refusal — a log line about
+	// this classifier, a user message quoting one, a report discussing one — which is a guarantee
+	// that decays the first time such a message exists.
+	const blocked = (message: string) =>
+		AIError.is(
+			AIError.classify(new AIError.ProviderResponseError(message, { provider: "p", kind: "runtime" })),
+			AIError.Flag.ContentBlocked,
+		);
+
+	it.each([
+		"cyber_policy: This content was flagged for possible cybersecurity risk",
+		"reasoning_extraction: the request replays prior reasoning",
+		'{"code":"cyber_policy","message":"declined"}',
+		"400 request id 42 (type=cyber_policy param=detail)",
+	])("classifies a code in a code position: %s", message => {
+		expect(blocked(message)).toBe(true);
+	});
+
+	it.each([
+		"the reasoning_extraction classifier refused an unrelated request earlier",
+		"see the findings file for notes on cyber_policy handling",
+		"upstream timed out while we were discussing reasoning_extraction with support",
+	])("does not classify prose that merely mentions the code: %s", message => {
+		expect(blocked(message)).toBe(false);
+	});
+});
