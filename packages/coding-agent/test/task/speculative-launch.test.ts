@@ -45,11 +45,11 @@ const sink: SpeculativeOperationSink = {
 	close: () => {},
 };
 
-function createSession(manager: AsyncJobManager): ToolSession {
+function createSession(manager: AsyncJobManager, extraSettings: Record<string, unknown> = {}): ToolSession {
 	return {
 		cwd: "/tmp",
 		hasUI: false,
-		settings: Settings.isolated({ "async.enabled": true, "task.batch": true }),
+		settings: Settings.isolated({ "async.enabled": true, "task.batch": true, ...extraSettings }),
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		getAgentId: () => null,
@@ -133,10 +133,12 @@ describe("task speculative launch", () => {
 		return events;
 	};
 
-	async function openSession(): Promise<{ tool: TaskTool; manager: AsyncJobManager; session: TaskLaunchSession }> {
+	async function openSession(
+		extraSettings: Record<string, unknown> = {},
+	): Promise<{ tool: TaskTool; manager: AsyncJobManager; session: TaskLaunchSession }> {
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
 		managers.push(manager);
-		const tool = await TaskTool.create(createSession(manager));
+		const tool = await TaskTool.create(createSession(manager, extraSettings));
 		const session = await tool.speculation.stream?.open({ coordinator: sink, parentToolCallId: toolCall.id });
 		if (!session) throw new Error("expected a task launch session");
 		return { tool, manager, session: session as TaskLaunchSession };
@@ -424,22 +426,27 @@ describe("task speculative launch", () => {
 		expect(duplicateJobs(manager, ["Alpha", "Beta"])).toEqual([]);
 	});
 
-	// Regression, and the reason `ARRAY_BLANKABLE_KEYS` carries a second condition: a key is
-	// array-blankable only if its declared wire type admits an array, so the raw streamed arguments and
-	// the validated ones carry the same value. `sourceSession` is declared `string` wherever the
-	// bundled seance agent is advertised, so validation rewrites `[]` to the string `"[]"`. While it
-	// was a member, the launcher dropped the raw array and started the child, dispatch kept `"[]"` and
-	// refused the whole call, and the started run was discarded after doing work.
+	// Regression for the whole of `ARRAY_BLANKABLE_KEYS`, not one member of it. A key is
+	// array-blankable only if (a) a populated array there yields an actionable refusal and (b) its
+	// declared wire type admits an array, so the raw streamed arguments and the validated ones carry
+	// the same value. `sourceSession` and `taskFile` both fail (b): validation rewrites their arrays
+	// to JSON text, so the launcher drops the raw array and starts the child while dispatch keeps the
+	// string and refuses the whole call — the run is started, does work, and is discarded.
 	//
-	// Two things this test has to get right, both of which an earlier version got wrong and both review
-	// arms caught. It must run with **seance advertised**, because that is the only configuration where
-	// `sourceSession` is declared and therefore where the rewrite — and the defect — happens at all.
-	// And it must give the launcher a turn before finalizing: `update` only queues the launch, so
-	// asserting on `startedIds` on the next line passes however the code behaves.
+	// Both keys are covered because fixing one and leaving the other was the actual history here:
+	// `sourceSession` was removed from the set in round 10, and a review round then measured that
+	// putting `taskFile` in left the entire branch suite green. A set whose forbidden members no test
+	// can distinguish is a set no test is guarding.
+	//
+	// Each row runs in the configuration where its key is declared — seance advertised for
+	// `sourceSession`, `task.file` on with a real `task` sibling for `taskFile` — because that is the
+	// only place validation rewrites the array and therefore the only place the defect exists.
 	it.each([
-		["an empty array", [] as unknown],
-		["an array of blanks", ["", "  "]],
-	] as const)("starts nothing for a streamed call whose sourceSession is %s", async (_label, sourceSession) => {
+		["sourceSession", "an empty array", [] as unknown],
+		["sourceSession", "an array of blanks", ["", "  "]],
+		["taskFile", "an empty array", []],
+		["taskFile", "an array of blanks", ["", "  "]],
+	] as const)("starts nothing for a streamed call whose %s is %s", async (key, _label, value) => {
 		const seance = loadBundledAgents().find(agent => agent.name === "seance");
 		if (!seance) throw new Error("Expected the bundled seance agent");
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
@@ -449,29 +456,28 @@ describe("task speculative launch", () => {
 		const call = {
 			context: "ctx",
 			tasks: [
-				{ name: "Alpha", agent: "task", solutionSpace: "one way", task: "Do A.", sourceSession },
+				{ name: "Alpha", agent: "task", solutionSpace: "one way", task: "Do A.", [key]: value },
 				{ name: "Beta", agent: "task", solutionSpace: "one way", task: "Do B." },
 			],
 		};
 		const raw = JSON.stringify(call);
-		// Wait on an event, not a duration. The defect is that a launch gets *scheduled*, and
-		// `#schedule` awaits `sink.authorizeLaunch` at the head of the launch chain — before the agent
-		// resolution, worktree and executor work that make the start itself slow. So authorization is
-		// the earliest observable proof that a launch was planned, and it is reached in microtasks.
+		// Wait on an event, not a duration. `#launch` asks `sink.authorizeLaunch` before its first
+		// await, so the spy is the earliest observable proof that a launch was scheduled — and it
+		// records the asking, so delaying the answer cannot hide it.
 		//
-		// A bounded wall-clock cap was tried here first and measurement rejected it — though not for the
-		// reason "load" suggests. Its margin was ample even under load: a review arm measured 48 reverted
-		// starts at load average 315 reaching the executor in ≤19.71 ms, and 80 more with a 31.82 ms
-		// maximum, against a 400 ms cap. What defeats it is a slow authorization path, not a busy box —
-		// injecting a 650 ms delay into authorization loses the race while the launch still happens at
-		// 651–661 ms. So the hazard is any await ahead of the start growing past the cap, and a no-start
-		// snapshot taken after a cap cannot prove settling. The predecessor of that cap, a 50-microtask
-		// drain, was shorter still and reported "nothing started" under the same revert.
+		// `drained()` is what makes that honest. Two timing-based barriers were tried here and both
+		// were green for the wrong reason: a 400 ms cap, which a 650 ms authorization delay defeats
+		// while the launch still happens at 651–661 ms; and before it a 50-microtask drain, shorter
+		// still. A cap cannot prove settling whatever its margin, because the margin is a proxy for
+		// every await upstream of the start. The drain that replaced the cap was honest only while
+		// `#launch` happened to reach authorization with no macrotask in front of it — a review arm
+		// measured that inserting one `await Bun.sleep(0)` there turns both rows green. Awaiting the
+		// session's own launch queue binds this to the thing it measures rather than to that accident.
 		const authorize = vi.spyOn(sink, "authorizeLaunch");
-		const { tool, session } = await openSession();
+		const { tool, session } = await openSession({ "task.file": true });
 
 		session.update(toolCall, raw.slice(0, raw.indexOf('{"name":"Beta"') + 10));
-		for (let turn = 0; turn < 100; turn++) await Promise.resolve();
+		await session.drained();
 		expect(authorize).not.toHaveBeenCalled();
 		expect([...startedIds]).toEqual([]);
 
@@ -484,9 +490,11 @@ describe("task speculative launch", () => {
 		});
 		const result = await tool.execute(toolCall.id, validated as TaskParams);
 
-		// Dispatch refuses the call, which is why nothing may have been started to throw away.
+		// Dispatch refuses the call. `startedIds` is deliberately not re-asserted here: under the
+		// revert the started run has already been discarded by the time `execute` returns, so that
+		// assertion cannot fail in the configuration this test names, and the barrier above is what
+		// actually catches the defect.
 		expect(result.isError).toBe(true);
-		expect([...startedIds]).toEqual([]);
 	});
 });
 

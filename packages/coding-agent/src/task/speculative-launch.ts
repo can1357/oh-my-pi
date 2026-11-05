@@ -250,6 +250,18 @@ export class TaskLaunchSession implements ToolSpeculationStreamSession {
 	}
 
 	/**
+	 * Settles once every launch queued so far has finished its launch step. Nothing in production
+	 * needs it — `adopt` awaits the same queue — but a test that asserts *no* launch was scheduled
+	 * has no event of its own to wait for, and waiting on time instead is the defect this seam
+	 * exists to remove: a bounded cap is indistinguishable from a pass whenever an await upstream of
+	 * the start grows past it, and a microtask drain is the same mistake in smaller units. The queue
+	 * is already resolved when nothing was scheduled, so the passing path costs nothing.
+	 */
+	drained(): Promise<void> {
+		return this.#queue;
+	}
+
+	/**
 	 * Hand every launched run whose spawn params equal `spawns[index]` to the
 	 * dispatching call and abort the rest. Closes the session.
 	 */
