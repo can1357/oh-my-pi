@@ -79,12 +79,19 @@ export function repairDoubleEncodedJsonString(value: string): string {
 	return typeof decoded === "string" && decoded !== value ? decoded : value;
 }
 
+/** `schema` is the stale alias whose presence is still refused; `taskFileSha256` is attached by the file loader. */
+type TaskFieldKey = keyof TaskParams | keyof TaskItem | "taskFileSha256" | "schema";
+
 /**
- * Every field a task call or a `tasks[]` item can carry that something downstream reads: the
- * properties the task schema declares, plus the stale `schema` alias whose presence is still
- * refused and the `taskFileSha256` the file loader attaches. Keep it in step with
- * `createTaskSchema` — a field missing here survives a copy only while the caller happens to
- * store it as an own enumerable property.
+ * Every field a task call or a `tasks[]` item can carry that something downstream reads.
+ *
+ * A field missing here survives {@link copyTaskFields} only while the caller happens to store it
+ * as an own enumerable property, and nothing observable fails in the meantime: every wire call and
+ * every test keeps passing while the internal-caller case the helper exists for is quietly broken.
+ * A comment asking the next person to keep a list in step is exactly what did not hold last time,
+ * so the type does it: the `satisfies` makes an unknown name a compile error, and
+ * `TASK_FIELD_KEYS_ARE_COMPLETE` makes a *missing* one a compile error too — the same device
+ * `SEANCE_ITEM_KEY_SET` uses in `../../coding-agent/src/task/types.ts`.
  */
 export const TASK_FIELD_KEYS = [
 	"name",
@@ -103,7 +110,13 @@ export const TASK_FIELD_KEYS = [
 	"context",
 	"tasks",
 	"schema",
-] as const;
+] as const satisfies readonly TaskFieldKey[];
+
+/** Fails to compile when a field is added to `TaskParams`/`TaskItem` and not to {@link TASK_FIELD_KEYS}. */
+export type TASK_FIELD_KEYS_ARE_COMPLETE =
+	Exclude<TaskFieldKey, (typeof TASK_FIELD_KEYS)[number]> extends never
+		? true
+		: ["missing from TASK_FIELD_KEYS", Exclude<TaskFieldKey, (typeof TASK_FIELD_KEYS)[number]>];
 
 /**
  * Copy a call or an item, applying `changes`, and keep every field it carries however the caller

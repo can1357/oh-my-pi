@@ -475,7 +475,14 @@ function spawnParamsFor(params: TaskParams, item: ResolvedTaskItem, defaultAgent
 	if ("model" in item) spawn.model = item.model;
 	if (item.isolated !== undefined) {
 		spawn.isolated = item.isolated;
-	} else if ("isolated" in params) {
+	} else if ("isolated" in params && !(Array.isArray(params.tasks) && params.tasks.length > 0)) {
+		// Top-level `isolated` belongs to the flat form only, which is also the only branch
+		// `resolveSpawnItems` consults it from. Reading it on a batch call split the speculative
+		// launcher from dispatch: the launcher plans each streamed prefix from a call it rebuilds as
+		// `{ context, tasks }`, which has no top-level keys, so the spawn it derived lacked an
+		// `isolated` the finished call carried — the started child was discarded and re-run as `-2`.
+		// The flag can also stream after `tasks`, so no amount of scanning would let the launcher see
+		// it in time; not reading it on a batch call is what removes the divergence.
 		spawn.isolated = params.isolated;
 	}
 	return spawn;
@@ -554,8 +561,11 @@ function withoutBlankFields<T extends TaskItem | TaskParams>(item: T): T {
  * spawn carries `outputSchema` by presence, so an `outputSchema: null` surviving on this side
  * alone makes the two plans unequal: the started child is cancelled and dispatch runs a
  * replacement, two executor runs for one item and a `-2` suffix on the id the caller is shown.
- * Running the same validation dispatch's arguments went through makes the two agree by
- * construction rather than by a list of rewrites kept in step.
+ * Running the same validation dispatch's arguments went through makes the two agree for the
+ * finished call, rather than by a list of rewrites kept in step. It says nothing about the
+ * streamed prefixes: `TaskLaunchSession.update` does not plan from the call at all, it rebuilds
+ * one as `{ context, tasks }`, so anything a spawn reads from a top-level key is invisible there.
+ * `spawnParamsFor` reads exactly one, and only on the flat form for that reason.
  *
  * Known residual, measured and not closed by this. Validation is whole-call and all-or-nothing,
  * and its lenient path falls back to the raw arguments when the call fails the schema. The
@@ -583,7 +593,8 @@ function asDispatched(tool: TaskTool, args: unknown): unknown {
 			arguments: args as Record<string, unknown>,
 		});
 	} catch {
-		// Arguments validation rejects are ones dispatch rejects too; let the shape checks say so.
+		// A call this rejects is one dispatch rejects too — and dispatch never reaches `execute` for
+		// it, so no shape check will run. Planning from the raw arguments costs nothing it will keep.
 		return args;
 	}
 }

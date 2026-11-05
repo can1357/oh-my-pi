@@ -382,6 +382,38 @@ describe("task speculative launch", () => {
 		expect([...startedIds].sort()).toEqual(["Alpha", "Beta"]);
 	});
 
+	// Regression: `TaskLaunchSession.update` does not plan from the call, it rebuilds one as
+	// `{ context, tasks }`, so every top-level key is invisible to it. `spawnParamsFor` used to read
+	// a top-level `isolated` on a batch call too, so the spawn the launcher derived lacked an
+	// `isolated` the finished call carried: the started child was discarded and re-run as `Alpha-2`.
+	// The flag is a flat-form concept now, which is the only branch `resolveSpawnItems` reads it from.
+	it.each([[false], [true]] as const)(
+		"keeps a launched item when the batch call carries a top-level isolated %s",
+		async isolated => {
+			const call = {
+				context: "ctx",
+				isolated,
+				tasks: [
+					{ name: "Alpha", agent: "task", solutionSpace: "one way", task: "Do A." },
+					{ name: "Beta", agent: "task", solutionSpace: "one way", task: "Do B." },
+				],
+			};
+			const raw = JSON.stringify(call);
+			const { tool, manager, session } = await openSession();
+
+			session.update(toolCall, raw.slice(0, raw.indexOf('{"name":"Beta"') + 10));
+			await spawn("Alpha").started.promise;
+
+			session.finalize({ toolCall, args: call });
+			await spawn("Beta").started.promise;
+			const result = await tool.execute(toolCall.id, call as TaskParams);
+
+			expect(result.isError).toBeFalsy();
+			expect(result.details?.progress?.map(progress => progress.id)).toEqual(["Alpha", "Beta"]);
+			expect(duplicateJobs(manager, ["Alpha", "Beta"])).toEqual([]);
+		},
+	);
+
 	// KNOWN RESIDUAL, pinned so a fix flips this test rather than going unnoticed.
 	//
 	// Validation is whole-call and all-or-nothing, and its lenient path falls back to the raw
