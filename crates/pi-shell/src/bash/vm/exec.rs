@@ -318,7 +318,19 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				},
 				Opcode::CallAnon => !vp.frames.get(fi).is_some_and(|frame| frame.err_reported),
 				Opcode::Redir => matches!(flow, Flow::Jump(_)),
-				Opcode::Leave | Opcode::Arith | Opcode::CondTest => {
+				// bash runs no ERR trap for a loop, `if`, `case` or group:
+				// only for a command, a `[[ ]]` and a `(( ))`. `judged`
+				// below gates `set -e` on the same node kinds, and the two
+				// must agree — a loop whose body left a non-zero status
+				// would otherwise report an error bash never reports.
+				Opcode::Leave => {
+					!vp.frames.get(fi).is_some_and(|frame| frame.err_reported)
+						&& unit
+							.nodes
+							.get(op.node as usize)
+							.is_some_and(|n| matches!(n.kind, NodeKind::Cond | NodeKind::Arith))
+				},
+				Opcode::Arith | Opcode::CondTest => {
 					!vp.frames.get(fi).is_some_and(|frame| frame.err_reported)
 				},
 				_ => false,
@@ -2082,6 +2094,15 @@ fn posix_exits(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 /// and source to the run's input loop. A `-c` string is one command, and a
 /// child without its own run frame ends instead of returning to its caller.
 fn discard_all(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
+	// Inside the EXIT trap the shell is already exiting with a status it
+	// saved: bash abandons the trap's command without touching it, so a
+	// subscript error in cleanup must not become the shell's status and
+	// must not destroy an explicit `exit N`. Only the trap's own frame is
+	// discarded, and its end restores the saved status.
+	if let Some(i) = exit_trap_frame(vp) {
+		discard_script(k, vp, cx, Some(i));
+		return;
+	}
 	vp.status = status;
 	let run = vp
 		.frames
@@ -2098,6 +2119,20 @@ fn discard_all(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		}
 	}
 	exit_shell(k, vp, cx, status);
+}
+
+/// The innermost running EXIT trap's frame, if this shell is in one.
+///
+/// A shell already running its own EXIT trap is already exiting with a
+/// status it saved, and bash leaves that status alone when the trap's own
+/// command fails. Measured against Bash 5.2.21 and against main:
+/// `( trap '((a[1+]))' EXIT; exit 7 )` gives 7 in both, and gives 1 here
+/// if a child is excluded from this guard — so the rule is the vproc's own
+/// trap, whether or not it has a parent.
+fn exit_trap_frame(vp: &Vproc) -> Option<usize> {
+	vp.frames.iter().rposition(|f| {
+		matches!(f.kind, FrameKind::Script { what: ScriptKind::Trap { key: TrapKey::Exit, .. }, .. })
+	})
 }
 
 /// Whether this run is a `-c` string rather than a script, a file or an
@@ -2856,12 +2891,10 @@ fn arith_failed(
 		.find(|(_, next)| next.node == op.node && next.code == Opcode::LoopExit)
 		.map(|(pc, _)| pc as u32)
 		.expect("arithmetic loop exit");
-	// The header's expressions are not commands: bash runs no ERR trap for
-	// one that fails, and the loop's `Leave` is the only op between here
-	// and the next command start that would. `err_reported` is cleared
-	// when a command starts, so this suppresses that `Leave` and nothing
-	// after it.
-	top_frame(vp).err_reported = true;
+	// The header's expressions are not commands, and bash runs no ERR trap
+	// for one that fails. Nothing is suppressed here: the loop's `Leave`
+	// is an `ArithFor` node, and the ERR arm above reports only `Cond` and
+	// `Arith` nodes, so an enclosing loop's `Leave` stays silent too.
 	if let Some(rec) = top_frame(vp)
 		.loops
 		.last_mut()
@@ -3195,7 +3228,9 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 			}
 			// A `-c` string exits with the failing command substitution's
 			// 127; every other origin reports the parser's own status.
-			if op.flags & Op::COMSUB != 0 && run_is_command(cx, vp) {
+			// A fatal error inside this shell's own EXIT trap leaves the
+			// status it was exiting with alone.
+			if op.flags & Op::COMSUB != 0 && run_is_command(cx, vp) && exit_trap_frame(vp).is_none() {
 				Flow::Abort(127)
 			} else {
 				Flow::Abort(op.b as i32)

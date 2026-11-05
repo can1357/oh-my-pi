@@ -777,15 +777,19 @@ pub struct Comsub {
 pub enum ComsubKind {
 	/// `$(…)`
 	Dollar,
-	/// A `$((` that became `$( (…) )` but whose body must be parsed when
-	/// expanded, so a syntax error is reported only if the word is used.
-	DollarDeferred,
 	/// `` `…` ``
 	Backtick,
 	/// `${ …;}`: runs in the current shell, captures stdout.
 	NoFork,
 	/// `${| …;}`: runs in the current shell, value is `$REPLY`.
 	ValueSub,
+	/// A `$((` that became `$( (…) )` but whose body must be parsed when
+	/// expanded, so a syntax error is reported only if the word is used.
+	///
+	/// Appended rather than inserted: a kind is serialised by variant
+	/// index, so inserting one renumbers every kind after it and a reader
+	/// of older data decodes each as the one before.
+	DollarDeferred,
 }
 
 /// A process substitution.

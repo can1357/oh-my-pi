@@ -95,7 +95,9 @@ use crate::bash::{
 };
 
 /// IR version; part of the frames header.
-pub const IR_VERSION: u32 = 15;
+///
+/// 16: [`ComsubForm::ForkReparse`] and the `Abort` flag [`Op::COMSUB`].
+pub const IR_VERSION: u32 = 16;
 
 /// Opcodes.
 #[derive(
@@ -609,17 +611,21 @@ pub enum Part {
 }
 
 /// Form of a command substitution.
+///
+/// A unit is serialised by variant index, so a new form is appended here
+/// rather than inserted: inserting one renumbers every form after it, and
+/// a reader would decode `NoFork` as the new form and `Value` as `NoFork`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ComsubForm {
 	/// `$(…)` and `` `…` ``: a subshell.
 	Fork,
-	/// An arithmetic fallback whose source is parsed in its subshell even
-	/// without aliases or a line-number shift.
-	ForkReparse,
 	/// `${ …;}`: in the current shell, capturing stdout.
 	NoFork,
 	/// `${| …;}`: in the current shell, value is `$REPLY`.
 	Value,
+	/// An arithmetic fallback whose source is parsed in its subshell even
+	/// without aliases or a line-number shift.
+	ForkReparse,
 }
 
 /// A parameter expansion.
@@ -1063,6 +1069,41 @@ mod tests {
 			.iter()
 			.map(|&w| (u.words[w as usize].fixed, u.words[w as usize].noglob))
 			.collect()
+	}
+
+	/// A persisted unit carries each of these as a variant index, so the
+	/// variants that existed before this branch added one must keep the
+	/// index they had. A variant inserted among them rather than appended
+	/// makes a restored unit read every later variant as the one before
+	/// it, silently and with no version to reject it.
+	#[test]
+	fn serialized_enums_keep_their_variant_tags() {
+		fn tag<T: serde::Serialize>(v: &T) -> Vec<u8> {
+			postcard::to_allocvec(v).expect("encode")
+		}
+		for (form, want) in [
+			(ComsubForm::Fork, 0u8),
+			(ComsubForm::NoFork, 1),
+			(ComsubForm::Value, 2),
+			(ComsubForm::ForkReparse, 3),
+		] {
+			assert_eq!(tag(&form), vec![want], "{form:?}");
+			let back: ComsubForm = postcard::from_bytes(&tag(&form)).expect("decode");
+			assert_eq!(back, form);
+		}
+		use crate::bash::syntax::ComsubKind;
+		for (kind, want) in [
+			(ComsubKind::Dollar, 0u8),
+			(ComsubKind::Backtick, 1),
+			(ComsubKind::NoFork, 2),
+			(ComsubKind::ValueSub, 3),
+			(ComsubKind::DollarDeferred, 4),
+		] {
+			assert_eq!(tag(&kind), vec![want], "{kind:?}");
+		}
+		// `Transfer` lives in a private module, so its tags are not
+		// reachable from here; `vm::proc::Transfer::ArithSubscript` is
+		// appended for the same reason and its order is held by review.
 	}
 
 	#[test]
