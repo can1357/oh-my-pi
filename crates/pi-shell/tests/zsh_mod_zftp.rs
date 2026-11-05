@@ -455,15 +455,16 @@ zsh:zftp ls:24: not connected.
 "
 	);
 	assert_eq!(st, 0);
-	assert_eq!(server.logs(1), [
-		"SESSION USER alice | PASS * | SYST | PWD | PASV | NLST | PASV | LIST | TYPE I | PASV | RETR \
-		 hello.txt | TYPE A | PASV | RETR crlf.txt | TYPE I | PASV | RETR crlf.txt | PASV | RETR \
-		 nosuch | CWD sub | PWD | CDUP | PWD | CWD nodir | MODE B | MODE S | SIZE hello.txt | MDTM \
-		 hello.txt | SIZE nosuch | SIZE crlf.txt | MDTM crlf.txt | NOOP | SITE CHMOD 644 x | MKD d \
-		 | RMD d | DELE crlf.txt | DELE nosuch | RNFR hello.txt | RNTO h2.txt | RNFR nosuch | PASV \
-		 | STOR up.txt | PASV | RETR up.txt | PASV | APPE up.txt | PASV | RETR up.txt | PASV | REST \
-		 6 | RETR h2.txt | HELP | NOOP | QUIT"
-	]);
+	assert_eq!(server.logs(1), ["SESSION USER alice | PASS * | SYST | PWD | PASV | NLST | PASV | \
+	                             LIST | TYPE I | PASV | RETR hello.txt | TYPE A | PASV | RETR \
+	                             crlf.txt | TYPE I | PASV | RETR crlf.txt | PASV | RETR nosuch | \
+	                             CWD sub | PWD | CDUP | PWD | CWD nodir | MODE B | MODE S | SIZE \
+	                             hello.txt | MDTM hello.txt | SIZE nosuch | SIZE crlf.txt | MDTM \
+	                             crlf.txt | NOOP | SITE CHMOD 644 x | MKD d | RMD d | DELE \
+	                             crlf.txt | DELE nosuch | RNFR hello.txt | RNTO h2.txt | RNFR \
+	                             nosuch | PASV | STOR up.txt | PASV | RETR up.txt | PASV | APPE \
+	                             up.txt | PASV | RETR up.txt | PASV | REST 6 | RETR h2.txt | \
+	                             HELP | NOOP | QUIT"]);
 }
 
 #[test]
@@ -550,8 +551,8 @@ zsh:zftp ls:19: not connected.
 	);
 	assert_eq!(st, 0);
 	assert_eq!(server.logs(2), [
-		"SESSION USER bob | PASS * | SYST | PWD | PORT * | NLST | TYPE I | SIZE hello.txt | PORT * | \
-		 RETR hello.txt | PORT * | RETR nosuch | PORT * | STOR new.txt | HELP | NOOP | BYE",
+		"SESSION USER bob | PASS * | SYST | PWD | PORT * | NLST | TYPE I | SIZE hello.txt | PORT * \
+		 | RETR hello.txt | PORT * | RETR nosuch | PORT * | STOR new.txt | HELP | NOOP | BYE",
 		"SESSION USER carol | PASS * | PASV | NLST | QUIT",
 	]);
 }
@@ -610,10 +611,9 @@ zsh:zftp open:13: Can't find port for service `nosuchservice'
 "
 	);
 	assert_eq!(st, 0);
-	assert_eq!(server.logs(1), [
-		"SESSION USER dave | PASS * | SYST | PWD | MODE B | PASV | RETR hello.txt | PASV | STOR b.txt \
-		 | MODE S | PASV | RETR b.txt | SLEEP"
-	]);
+	assert_eq!(server.logs(1), ["SESSION USER dave | PASS * | SYST | PWD | MODE B | PASV | RETR \
+	                             hello.txt | PASV | STOR b.txt | MODE S | PASV | RETR b.txt | \
+	                             SLEEP"]);
 }
 
 /// zsh `zexit` runs zsh/zftp's exit hook (`zftp_cleanup`) after the

@@ -64,7 +64,13 @@ fn save_tags(ctx: &mut Ctx<'_, '_>, t: &Tags) {
 /// zsh `arrcontains`: whether `a` holds `s`; with `colon`, each side
 /// compares up to its first `:`.
 fn arrcontains(a: &[BString], s: &[u8], colon: bool) -> bool {
-	a.iter().any(|e| if colon { upto_colon(e) == upto_colon(s) } else { e.as_slice() == s })
+	a.iter().any(|e| {
+		if colon {
+			upto_colon(e) == upto_colon(s)
+		} else {
+			e.as_slice() == s
+		}
+	})
 }
 
 /// `s` up to its first `:`.
@@ -277,10 +283,10 @@ pub fn comptry(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 						b += 1;
 					}
 					for pat in blist {
-						let Some(prog) = px(ctx, &mut failed, |ex| {
-							zpattern::try_compile(ex, &pat, PatFlags::NONE)
-						})?
-						.flatten() else {
+						let Some(prog) =
+							px(ctx, &mut failed, |ex| zpattern::try_compile(ex, &pat, PatFlags::NONE))?
+								.flatten()
+						else {
 							continue;
 						};
 						for a in &all {

@@ -27,18 +27,10 @@ const QUIET: Duration = Duration::from_millis(600);
 
 /// The rc file: vi mode and the finishing widget (X02's `comptest`
 /// `zle-finish`).
-const RC: &str = "bindkey -v\n\
-	zle-finish() {\n\
-	  local b=$BUFFER c=$CURSOR\n\
-	  BUFFER=\n\
-	  zle -I\n\
-	  print -r -- \"BUFFER: ${${b//$'\\t'/\\\\t}//$'\\n'/\\\\n}\"\n\
-	  print -r -- \"CURSOR: $c\"\n\
-	  zle accept-line\n\
-	}\n\
-	zle -N zle-finish\n\
-	bindkey '^X' zle-finish\n\
-	bindkey -a '^X' zle-finish\n";
+const RC: &str = "bindkey -v\nzle-finish() {\nlocal b=$BUFFER c=$CURSOR\nBUFFER=\nzle -I\nprint \
+                  -r -- \"BUFFER: ${${b//$'\\t'/\\\\t}//$'\\n'/\\\\n}\"\nprint -r -- \"CURSOR: \
+                  $c\"\nzle accept-line\n}\nzle -N zle-finish\nbindkey '^X' zle-finish\nbindkey \
+                  -a '^X' zle-finish\n";
 
 /// One `zletest`.
 struct Case {
@@ -108,16 +100,14 @@ fn spawn(real: bool) -> Spawn {
 /// The shell-function text objects of zsh's `Functions/Zle`
 /// (`select-quoted`, `select-bracketed`, `surround`), bound as their
 /// documentation says; sourced by the cases that use them.
-const TEXTOBJECTS: &str = "fpath=(/usr/share/zsh/5.9/functions /usr/share/zsh/functions/Zle $fpath)\n\
-	autoload -U select-bracketed select-quoted surround\n\
-	zle -N select-bracketed; zle -N select-quoted\n\
-	zle -N delete-surround surround; zle -N add-surround surround; zle -N change-surround surround\n\
-	for m in visual viopp; do\n\
-	  for c in {a,i}{\\',\\\",\\`}; do bindkey -M $m $c select-quoted; done\n\
-	  for c in {a,i}${(s..)^:-'()[]{}<>bB'}; do bindkey -M $m $c select-bracketed; done\n\
-	done\n\
-	bindkey -a cs change-surround; bindkey -a ds delete-surround; bindkey -a ys add-surround\n\
-	bindkey -M visual S add-surround\n";
+const TEXTOBJECTS: &str =
+	"fpath=(/usr/share/zsh/5.9/functions /usr/share/zsh/functions/Zle $fpath)\nautoload -U \
+	 select-bracketed select-quoted surround\nzle -N select-bracketed; zle -N select-quoted\nzle \
+	 -N delete-surround surround; zle -N add-surround surround; zle -N change-surround \
+	 surround\nfor m in visual viopp; do\nfor c in {a,i}{\\',\\\",\\`}; do bindkey -M $m $c \
+	 select-quoted; done\nfor c in {a,i}${(s..)^:-'()[]{}<>bB'}; do bindkey -M $m $c \
+	 select-bracketed; done\ndone\nbindkey -a cs change-surround; bindkey -a ds delete-surround; \
+	 bindkey -a ys add-surround\nbindkey -M visual S add-surround\n";
 
 /// The screens of one case: with the line edited, with the result.
 type Shots = Vec<(String, String)>;
@@ -629,7 +619,8 @@ fn x02_text_objects() {
 		case("delete all word with numeric argument", "- word word\x1b4|2daw", "-", 0),
 		case(
 			"all word with existing selection and cursor before mark",
-			"----    word    ----word\x1bo    \x1bo----\x1bodone\x1bhvhawmaawmbawmcawmdawmeawmfawmgv`ara`brb`crc$r$`drd`ere`frf`grg",
+			"----    word    ----word\x1bo    \
+			 \x1bo----\x1bodone\x1bhvhawmaawmbawmcawmdawmeawmfawmgv`ara`brb`crc$r$`drd`ere`frf`grg",
 			"g---f   worde   ----dord\nc  $\nb---\naone",
 			0,
 		),
@@ -707,7 +698,8 @@ fn display_of_vi_editing() {
 		wait_case("operator waiting for its motion", "", "one two\x1b0d", "w"),
 		diff_case(
 			"zle-keymap-select on mode changes",
-			"zle-keymap-select() { RPS1=\"<$KEYMAP:$1>\"; zle reset-prompt }; zle -N zle-keymap-select",
+			"zle-keymap-select() { RPS1=\"<$KEYMAP:$1>\"; zle reset-prompt }; zle -N \
+			 zle-keymap-select",
 			"abc\x1bhi",
 		),
 		diff_case(

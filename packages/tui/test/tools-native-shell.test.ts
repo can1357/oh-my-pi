@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
-import type { TspKind, TspSpan } from "@oh-my-pi/pi-wire";
+import type { ShellTrace, ShellVizPresentation, TspKind, TspSpan } from "@oh-my-pi/pi-wire";
 import { AssistantMessageComponent } from "../src/chat/assistant-message";
 import { BashExecutionComponent } from "../src/chat/bash-execution";
 import { ReadToolGroupComponent } from "../src/chat/read-tool-group";
@@ -82,6 +82,8 @@ describe("bash native run box", () => {
 		);
 		expect(view.tool).toMatchObject({ target: "Building the project", targetKind: "text", command: 'CI="1" make' });
 		expect(view.preview).toBe("children");
+		// The head sits outside; the segmented run box is the only frame.
+		expect(view.inline).toBe(true);
 		const [box, ...rest] = nodes(view.body);
 		expect(rest).toEqual([]);
 		expect(role(box)).toBe("omp.run");
@@ -93,6 +95,54 @@ describe("bash native run box", () => {
 		expect(props(output)).toMatchObject({ text: "built", follow: true, preview: { lines: 10 } });
 		// The measured wall time wins over the component's clock once settled.
 		expect(foot(box)).toMatchObject({ state: "Done", tone: "success", time: { age: 1500, stopped: 1500 } });
+	});
+
+	it("draws a visualized command as the box's command pane over the ordinary output segment", () => {
+		const trace: ShellTrace = { v: 1, seq: 3, status: 0, t_ns: 2_000_000, script: "echo built", units: [] };
+		const presentation = (cursor?: number): ShellVizPresentation => ({
+			preferences: {
+				view: "pseudo",
+				layers: { color: true, inline: true, idioms: true, effects: true, unwrap: false },
+				split: false,
+				cursor,
+				playing: false,
+				speed: 1,
+				expandedNodes: [],
+			},
+			rows: [{ id: "r0", depth: 0, segments: [{ text: 'print("built")' }], effects: [] }],
+			original: [],
+			output: cursor === undefined ? "built\n" : "bu",
+			executing: false,
+			watches: [],
+			timeline: { length: 4, cursor: cursor ?? 4, elapsedNs: 2_000_000, durationNs: 2_000_000 },
+		});
+		const describe = (cursor?: number) =>
+			nodes(
+				bashToolRenderer.describeResult(
+					{ content: [{ type: "text", text: "built" }], details: { trace } },
+					{ ...done, shell: true, shellTrace: trace, shellPresentation: presentation(cursor) },
+					{ command: "echo built" },
+				).body,
+			)[0];
+		const live = describe();
+		expect(sections(live)).toEqual(["shell:omp.tool.bash.command", "ansi:omp.tool.bash.output", "row:omp.run.foot"]);
+		const [pane, output] = nodes(live?.c);
+		expect(props(pane).inspector).toBeUndefined();
+		// The same folded command preview as the plain command's code.
+		expect(props(pane).preview).toEqual({ lines: 6 });
+		expect(props(output).text).toBe("built");
+		// A held replay cursor shows the output retained up to it, once, in the same segment.
+		const replay = describe(2);
+		expect(collect(replay?.c, "ansi").map(n => props(n).text)).toEqual(["bu"]);
+		// Nothing printed yet: command pane and foot only.
+		const quiet = nodes(
+			bashToolRenderer.describeResult(
+				{ content: [{ type: "text", text: "" }], details: { trace } },
+				{ ...done, shell: true, shellTrace: trace, shellPresentation: presentation() },
+				{ command: "echo built" },
+			).body,
+		)[0];
+		expect(sections(quiet)).toEqual(["shell:omp.tool.bash.command", "row:omp.run.foot"]);
 	});
 
 	it("has no target without an intent and no foot before the command starts", () => {

@@ -29,7 +29,7 @@ use crate::bash::{
 	diag::Diag,
 	fs::{Stat, StatKind},
 	ids::{Dialect, IntrinsicId},
-	pattern::zsh::{Pattern, PatFlags, remnulargs, tokenize},
+	pattern::zsh::{PatFlags, Pattern, remnulargs, tokenize},
 	store::{Key, KeyBuf, MiscKey, Record, Table},
 	syntax::zsh::{
 		LEXFLAGS_ZLE, LexTok as T, ZleLex, ZleWords, parsestr,
@@ -264,7 +264,9 @@ pub fn compcall(ctx: &mut Ctx<'_, '_>, ops: &Ops, _args: &[BString]) -> R {
 /// zsh `get_user_var(nam)`: the words of `(…)` or the value of array,
 /// association or scalar `nam`.
 fn get_user_var(ctx: &mut Ctx<'_, '_>, nam: &[u8]) -> Result<Option<Vec<BString>>, Need> {
-	Ok(zx(ctx, |ex| compcore::get_user_var(ex, Some(nam)))?.ok().flatten())
+	Ok(zx(ctx, |ex| compcore::get_user_var(ex, Some(nam)))?
+		.ok()
+		.flatten())
 }
 
 // ---- read -c / -l
@@ -682,7 +684,9 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 
 	/// zsh `get_user_var`.
 	fn get_user_var(&mut self, nam: &[u8]) -> G<Option<Vec<BString>>> {
-		Ok(zx(self.ctx, |ex| compcore::get_user_var(ex, Some(nam)))?.ok().flatten())
+		Ok(zx(self.ctx, |ex| compcore::get_user_var(ex, Some(nam)))?
+			.ok()
+			.flatten())
 	}
 
 	/// The next shell function call of the run: its `$reply`, or a stop
@@ -921,7 +925,9 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 				let add = fname.len() > 4096
 					|| !hashexeconly
 					|| (self.access(&p, 4)?
-						&& self.stat(&p)?.is_some_and(|st| st.kind == StatKind::File && st.mode & 0o111 != 0));
+						&& self
+							.stat(&p)?
+							.is_some_and(|st| st.kind == StatKind::File && st.mode & 0o111 != 0));
 				if add {
 					self.ctx.store_record(
 						KeyBuf::CmdHash(fname),
@@ -943,7 +949,13 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			})
 		};
 		let m = |s: &[u8]| BString::from(metafy(s));
-		let dis = |d: &[BString], n: &[u8]| if d.iter().any(|x| x == n) { DISABLED } else { 0 };
+		let dis = |d: &[BString], n: &[u8]| {
+			if d.iter().any(|x| x == n) {
+				DISABLED
+			} else {
+				0
+			}
+		};
 		let ctx = &mut *self.ctx;
 		Ok(match ht {
 			Ht::Cmdnam => vstate::scan(&ctx.k.root, ctx.cx.store, ctx.vp, Table::CmdHash)
@@ -1002,7 +1014,10 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 					.collect();
 				use strum::IntoEnumIterator;
 				for i in IntrinsicId::iter().filter(|i| i.available_in(Dialect::Zsh)) {
-					if zsh_module::builtin_state(ctx.cx.store, ctx.vp, i).map_err(Need::from)?.is_some() {
+					if zsh_module::builtin_state(ctx.cx.store, ctx.vp, i)
+						.map_err(Need::from)?
+						.is_some()
+					{
 						let n: &str = i.into();
 						out.push((m(n.as_bytes()), Hn { flags: dis(&d, n.as_bytes()), ..Hn::default() }));
 					}
@@ -1036,14 +1051,12 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 				}
 				out
 			},
-			Ht::Nameddir => {
-				match self.ex(nameddir::load)? {
-					Ok(t) => t
-						.entries()
-						.map(|e| (m(e.name), Hn { flags: u32::from(e.flags), ..Hn::default() }))
-						.collect(),
-					Err(_) => Vec::new(),
-				}
+			Ht::Nameddir => match self.ex(nameddir::load)? {
+				Ok(t) => t
+					.entries()
+					.map(|e| (m(e.name), Hn { flags: u32::from(e.flags), ..Hn::default() }))
+					.collect(),
+				Err(_) => Vec::new(),
 			},
 			Ht::Option => {
 				use strum::VariantNames;
@@ -1057,7 +1070,12 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 				.vp
 				.zle
 				.as_ref()
-				.map(|z| z.widgets.iter().map(|(n, _)| (m(n), Hn::default())).collect())
+				.map(|z| {
+					z.widgets
+						.iter()
+						.map(|(n, _)| (m(n), Hn::default()))
+						.collect()
+				})
 				.unwrap_or_default(),
 		})
 	}
@@ -1145,7 +1163,14 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 		let gm: Vec<_> = state(self.ctx)?
 			.gmatch
 			.iter()
-			.map(|s| (s.clone(), compmatch::parse_cmatcher(None, s, &mut |_| {}).ok().flatten()))
+			.map(|s| {
+				(
+					s.clone(),
+					compmatch::parse_cmatcher(None, s, &mut |_| {})
+						.ok()
+						.flatten(),
+				)
+			})
 			.collect();
 		for (_, m) in &gm {
 			if let Some(m) = m {
@@ -2096,7 +2121,11 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 				return Ok(());
 			}
 		}
-		let matcher = n.mstr.as_ref().and_then(|m| compmatch::parse_cmatcher(None, m, &mut |_| {}).ok().flatten());
+		let matcher = n.mstr.as_ref().and_then(|m| {
+			compmatch::parse_cmatcher(None, m, &mut |_| {})
+				.ok()
+				.flatten()
+		});
 		let saved_mstack = self.c.core.mstack.clone();
 		if let Some(m) = &matcher {
 			self.c.core.mstack = Some(Arc::new(super::super::types::Cmlist {
@@ -2487,7 +2516,11 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 							} else {
 								// Commands reachable through `.` in `$path`.
 								let pp = self.prpre.clone();
-								if self.path()?.iter().any(|p| p.is_empty() || p.as_slice() == b".") {
+								if self
+									.path()?
+									.iter()
+									.any(|p| p.is_empty() || p.as_slice() == b".")
+								{
 									self.prpre = Some(BString::from("./"));
 									self.gen_matches_files(true, true, false)?;
 									self.prpre = pp;
@@ -2597,8 +2630,15 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 				.vp
 				.jobs
 				.iter()
-				.filter(|j| !matches!(j.state, crate::bash::store::JobState::Done(_)) && !j.text.is_empty())
-				.map(|j| (BString::from(metafy(&j.text)), matches!(j.state, crate::bash::store::JobState::Stopped(_))))
+				.filter(|j| {
+					!matches!(j.state, crate::bash::store::JobState::Done(_)) && !j.text.is_empty()
+				})
+				.map(|j| {
+					(
+						BString::from(metafy(&j.text)),
+						matches!(j.state, crate::bash::store::JobState::Stopped(_)),
+					)
+				})
 				.collect();
 			for (j, stopped) in jobs {
 				if n.mask & cc::JOBS != 0
@@ -2646,7 +2686,10 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			&& cc == DUMMY
 		{
 			// The keys of the association being subscripted.
-			let keys = self.ex(|ex| params::getparam(ex, &unmetafy(&kp)))?.ok().flatten();
+			let keys = self
+				.ex(|ex| params::getparam(ex, &unmetafy(&kp)))?
+				.ok()
+				.flatten();
 			if let Some(p) = keys
 				&& let PValue::Hash(kv) = p.value
 			{
@@ -3136,7 +3179,11 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			if (aw == i32::try_from(cc::FILES).unwrap_or(0) || aw == -5) && opt(&self.psuf).is_empty()
 			{
 				// The fignore check.
-				let fignore = self.ex(|ex| params::getaparam(ex, b"fignore"))?.ok().flatten().unwrap_or_default();
+				let fignore = self
+					.ex(|ex| params::getaparam(ex, b"fignore"))?
+					.ok()
+					.flatten()
+					.unwrap_or_default();
 				for f in fignore {
 					let f = metafy(&f);
 					if f.len() < s.len() && s.ends_with(&f) {

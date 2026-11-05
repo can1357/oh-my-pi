@@ -21,6 +21,7 @@ use crate::bash::{
 	event::WaitKey,
 	fs::{Access, FileKind, FsOp, FsPoll, OpenFlags, Stat, StatKind},
 	host::Deadline,
+	ids::Platform,
 };
 
 /// The cached answer to `p`.
@@ -163,14 +164,27 @@ pub fn perform(
 		Probe::Path { name, path } => {
 			let io = sc.io();
 			if io.search.is_none() {
+				let extensions = executable_extensions(k, cx, vp);
 				io.search = Some(PathSearch {
-					cands:         candidates(path, name, &vp.cwd),
+					cands:         candidates(
+						path,
+						name,
+						&vp.cwd,
+						k.engine.config().platform,
+						&extensions,
+					),
 					idx:           0,
 					checking_exec: false,
 					nonexec:       None,
 				});
 			}
 			match path_search(&mut tcx, cx, sc) {
+				// Windows reports the probed path: `shown_candidate` splits PATH
+				// on `:` and its `idx` stops addressing one entry once every
+				// entry expands to a name plus its PATHEXT candidates.
+				Search::Found(found) if k.engine.config().platform == Platform::Windows => {
+					ProbeResult::Path(Some(found))
+				},
 				// bash shows `dir/name` as built (`./e` for an empty entry).
 				Search::Found(_) => {
 					let idx = sc
@@ -454,27 +468,73 @@ fn read_file(
 pub const fn standard_path(platform: crate::bash::ids::Platform) -> &'static str {
 	match platform {
 		crate::bash::ids::Platform::MacOs => "/usr/bin:/bin:/usr/sbin:/sbin",
-		crate::bash::ids::Platform::Linux | crate::bash::ids::Platform::Windows => "/bin:/usr/bin",
+		crate::bash::ids::Platform::Linux => "/bin:/usr/bin",
+		crate::bash::ids::Platform::Windows => "/bin;/usr/bin",
 	}
 }
 
-/// `dir/name` for every `$PATH` entry (empty entries mean the cwd).
-pub fn candidates(path: &[u8], name: &[u8], cwd: &[u8]) -> Vec<BString> {
-	path
-		.split(|&c| c == b':')
-		.map(|dir| {
-			let mut p = if dir.is_empty() {
-				BString::from(cwd)
-			} else {
-				absolute(cwd, dir)
-			};
-			if !p.ends_with(b"/") {
-				p.push(b'/');
-			}
-			p.extend_from_slice(name);
-			p
-		})
-		.collect()
+/// The `$PATH` list separator on `platform`.
+pub const fn path_separator(platform: Platform) -> u8 {
+	if matches!(platform, Platform::Windows) {
+		b';'
+	} else {
+		b':'
+	}
+}
+
+/// `dir/name` for every `$PATH` entry; on Windows each is followed by the
+/// `extensions` (`PATHEXT`) spellings unless `name` already ends in one.
+pub fn candidates(
+	path: &[u8],
+	name: &[u8],
+	cwd: &[u8],
+	platform: Platform,
+	extensions: &[String],
+) -> Vec<BString> {
+	let has_extension = extensions.iter().any(|ext| {
+		name.len() >= ext.len() && name[name.len() - ext.len()..].eq_ignore_ascii_case(ext.as_bytes())
+	});
+	let suffixes = if has_extension { &[] } else { extensions };
+	let windows = platform == Platform::Windows;
+	let mut out = Vec::new();
+	for dir in path.split(|&c| c == path_separator(platform)) {
+		let mut base = if dir.is_empty() {
+			BString::from(cwd)
+		} else {
+			absolute_on(cwd, dir, platform)
+		};
+		if !(base.ends_with(b"/") || windows && base.ends_with(b"\\")) {
+			base.push(b'/');
+		}
+		base.extend_from_slice(name);
+		// The bare name first, then its PATHEXT spellings.
+		let at = out.len();
+		out.push(base);
+		for ext in suffixes {
+			let base = &out[at];
+			let mut p = BString::from(Vec::with_capacity(base.len() + ext.len()));
+			p.extend_from_slice(base);
+			p.extend_from_slice(ext.as_bytes());
+			out.push(p);
+		}
+	}
+	out
+}
+
+/// The shell's `PATHEXT` suffixes, normalized as the exec check reads them
+/// ([`Pathext`](crate::sys::pathext::Pathext)); empty off Windows.
+pub fn executable_extensions(k: &Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> Vec<String> {
+	if k.engine.config().platform != Platform::Windows {
+		return Vec::new();
+	}
+	let var = super::state::lookup(&k.root, cx.store, vp, b"PATHEXT")
+		.ok()
+		.flatten();
+	let raw = var
+		.as_ref()
+		.and_then(|v| v.as_scalar())
+		.map(String::from_utf8_lossy);
+	crate::sys::pathext::Pathext::parse(raw.as_deref().map(std::ffi::OsStr::new)).into_extensions()
 }
 
 /// The `idx`th `$PATH` candidate as bash prints it (`type -p`,
@@ -494,7 +554,24 @@ pub use crate::bash::fs::url_root_len;
 /// `name` made absolute against `cwd`: a name starting with `/` or a URL
 /// path ([`url_root_len`]) is already absolute.
 pub fn absolute(cwd: &[u8], name: &[u8]) -> BString {
+	absolute_on(
+		cwd,
+		name,
+		if cfg!(windows) {
+			Platform::Windows
+		} else {
+			Platform::Linux
+		},
+	)
+}
+
+/// [`absolute`] for the configured shell platform: the Windows drive and UNC
+/// rule stays testable on any host instead of compiling only on Windows.
+pub fn absolute_on(cwd: &[u8], name: &[u8], platform: Platform) -> BString {
 	if name.first() == Some(&b'/') || url_root_len(name).is_some() {
+		return name.into();
+	}
+	if platform == Platform::Windows && is_windows_absolute(name) {
 		return name.into();
 	}
 	let mut p = BString::from(cwd);
@@ -503,6 +580,12 @@ pub fn absolute(cwd: &[u8], name: &[u8]) -> BString {
 	}
 	p.extend_from_slice(name);
 	p
+}
+
+/// A Windows drive (`C:\x`, `C:/x`) or UNC (`\\srv\share`) path.
+const fn is_windows_absolute(name: &[u8]) -> bool {
+	matches!(name, [b'\\' | b'/', b'\\' | b'/', ..])
+		|| matches!(name, [drive, b':', b'\\' | b'/', ..] if drive.is_ascii_alphabetic())
 }
 
 pub enum Search {
@@ -594,12 +677,54 @@ mod tests {
 
 	#[test]
 	fn path_candidates_resolve_empty_and_relative_entries_against_cwd() {
-		let c = candidates(b"/bin::rel", b"ls", b"/home/u");
+		let c = candidates(b"/bin::rel", b"ls", b"/home/u", Platform::Linux, &[]);
 		assert_eq!(c, vec![
 			BString::from("/bin/ls"),
 			BString::from("/home/u/ls"),
 			BString::from("/home/u/rel/ls")
 		]);
+	}
+
+	#[test]
+	fn windows_path_search_tries_the_bare_name_then_pathext_spellings() {
+		let exts = [".exe".to_owned(), ".cmd".to_owned()];
+		let win = |path: &[u8], name: &[u8]| -> Vec<String> {
+			candidates(path, name, br"C:\project", Platform::Windows, &exts)
+				.into_iter()
+				.map(|p| String::from_utf8_lossy(&p).into_owned())
+				.collect()
+		};
+		assert_eq!(win(br"C:\Tools;;rel", b"tool"), [
+			r"C:\Tools/tool",
+			r"C:\Tools/tool.exe",
+			r"C:\Tools/tool.cmd",
+			r"C:\project/tool",
+			r"C:\project/tool.exe",
+			r"C:\project/tool.cmd",
+			r"C:\project/rel/tool",
+			r"C:\project/rel/tool.exe",
+			r"C:\project/rel/tool.cmd",
+		]);
+		// A name already carrying a PATHEXT suffix is not re-suffixed; any other
+		// dot is.
+		assert_eq!(win(b"", b"tool.EXE"), [r"C:\project/tool.EXE"]);
+		assert_eq!(win(b"", b"my.tool"), [
+			r"C:\project/my.tool",
+			r"C:\project/my.tool.exe",
+			r"C:\project/my.tool.cmd"
+		]);
+	}
+
+	#[test]
+	fn windows_absolute_paths_are_not_prefixed_with_the_shell_cwd() {
+		assert_eq!(
+			absolute_on(br"C:\project", br"D:\Tools\app.exe", Platform::Windows),
+			br"D:\Tools\app.exe".as_slice()
+		);
+		assert_eq!(
+			absolute_on(br"C:\project", br"\\server\share\app.exe", Platform::Windows),
+			br"\\server\share\app.exe".as_slice()
+		);
 	}
 
 	#[test]

@@ -10,6 +10,10 @@
  * thread started; main keeps the ones it loaded too and, when any remain,
  * refuses that worker (see `SubagentWorker`). Compiled binaries load embedded
  * modules that cannot change, so their paths never stat and never count.
+ * Native addons (`.node`) never count either: the dynamic loader maps one image
+ * per path per process, so a worker's `require` of an addon reuses the image
+ * main already loaded even when the file on disk was replaced. That includes
+ * the addon a compiled binary extracts to the natives dir after it started.
  */
 import * as fs from "node:fs";
 
@@ -23,10 +27,11 @@ export class SubagentCodeChangedError extends Error {
 	}
 }
 
-/** Files of the modules this thread loaded that were modified after `sinceMs` (epoch ms). */
+/** Files of the JS modules this thread loaded that were modified after `sinceMs` (epoch ms). */
 export function loadedModulesChangedSince(sinceMs: number): string[] {
 	const changed: string[] = [];
 	for (const modulePath in require.cache) {
+		if (modulePath.endsWith(".node")) continue;
 		let mtimeMs: number;
 		try {
 			mtimeMs = fs.statSync(modulePath).mtimeMs;

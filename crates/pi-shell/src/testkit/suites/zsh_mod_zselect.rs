@@ -24,18 +24,18 @@ fn zsh(src: &str) -> (String, String, i32) {
 fn zsh_mod_zselect_argument_errors() {
 	let (out, err, st) = zsh(
 		"zmodload zsh/zselect; zselect -t 0; echo $?; zselect -t; zselect -t x; zselect -t 1x; \
-		 zselect x; zselect 1x; zselect -a; zselect -a 1a; zselect -A 9; zselect -z; zselect -r \
-		 9; echo $?",
+		 zselect x; zselect 1x; zselect -a; zselect -a 1a; zselect -A 9; zselect -z; zselect -r 9; \
+		 echo $?",
 	);
 	assert_eq!(out, "1\n1\n");
 	assert_eq!(
 		err,
 		"zsh:zselect:1: argument expected after -t\nzsh:zselect:1: number expected after \
-		 -t\nzsh:zselect:1: garbage after -t argument: x\nzsh:zselect:1: expecting file \
-		 descriptor: x\nzsh:zselect:1: garbage after file descriptor: x\nzsh:zselect:1: argument \
-		 expected after -a\nzsh:zselect:1: invalid array name: 1a\nzsh:zselect:1: invalid array \
-		 name: 9\nzsh:zselect:1: expecting file descriptor: z\nzsh:zselect:1: error on select: \
-		 bad file descriptor\n"
+		 -t\nzsh:zselect:1: garbage after -t argument: x\nzsh:zselect:1: expecting file descriptor: \
+		 x\nzsh:zselect:1: garbage after file descriptor: x\nzsh:zselect:1: argument expected after \
+		 -a\nzsh:zselect:1: invalid array name: 1a\nzsh:zselect:1: invalid array name: \
+		 9\nzsh:zselect:1: expecting file descriptor: z\nzsh:zselect:1: error on select: bad file \
+		 descriptor\n"
 	);
 	assert_eq!(st, 0);
 }
@@ -43,8 +43,8 @@ fn zsh_mod_zselect_argument_errors() {
 #[test]
 fn zsh_mod_zselect_reports_readable_pipes() {
 	let (out, err, st) = zsh(
-		"zmodload zsh/zselect; echo hi | zselect -r 0; echo $? $reply; echo hi | zselect -a out \
-		 -A h -r 0; echo $? ${(kv)h} ${#out}; echo hi | zselect -a out -r 0; echo $out",
+		"zmodload zsh/zselect; echo hi | zselect -r 0; echo $? $reply; echo hi | zselect -a out -A \
+		 h -r 0; echo $? ${(kv)h} ${#out}; echo hi | zselect -a out -r 0; echo $out",
 	);
 	assert_eq!(out, "0 -r 0\n0 0 r 0\n-r 0\n");
 	assert_eq!(err, "");

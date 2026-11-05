@@ -246,7 +246,9 @@ async function loadImpl<T>(
 			}
 
 			const extensionId = capability.toExtensionId?.(itemWithSource);
-			const isDisabled = extensionId !== undefined && disabledExtensionIds.has(extensionId);
+			const isDisabled =
+				(extensionId !== undefined && disabledExtensionIds.has(extensionId)) ||
+				(options.includeDisabled === true && options.isSourceDisabled?.(itemWithSource._source) === true);
 			if (isDisabled && !options.includeDisabled) {
 				continue;
 			}
