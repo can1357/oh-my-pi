@@ -56,42 +56,60 @@ async function linkTo(target: string, link: string, contents = "old"): Promise<v
  * `root` through a link whose own body is short, and return the link and the
  * physical directory holding it.
  *
- * The depth is physical 200-byte directory components; the shortening is a chain
- * of directory symlinks, each body about 205 bytes. A single link straight to
- * the deep path would have a ~4000-byte body, and **XFS caps a symlink body at
- * 1024 bytes** where tmpfs and ext4 allow up to `PATH_MAX` — so that fixture
- * passes wherever `TMPDIR` is tmpfs and dies in `symlink()` wherever it is XFS,
- * before the code under test is reached at all. A reviewer running on XFS found
- * exactly that. Short hops measure the writer instead of the filesystem's
- * symlink storage.
+ * Depth is physical 200-byte directory components. The shortening is a chain of
+ * directory symlinks, and it has to thread between two limits at once:
+ *
+ * - A single link straight to the deep path would carry a ~4000-byte body, and
+ *   **XFS stores a symlink body inline with a 1024-byte cap** where tmpfs and
+ *   ext4 allow up to `PATH_MAX`. That fixture passes wherever `TMPDIR` is tmpfs
+ *   and dies in `symlink()` wherever it is XFS, before the code under test is
+ *   reached at all. A reviewer running on XFS found exactly that.
+ * - One hop per component keeps every body short but makes the chain ~20 links
+ *   deep, and resolving the last one then exceeds the kernel's symlink limit:
+ *   `ELOOP` on `h21`, from the product correctly refusing it. That one showed up
+ *   only under the full suite, because the number of components needed depends
+ *   on how long `TMPDIR` makes `root` — standalone it passed every time.
+ *
+ * So each hop advances SEVERAL components at once: four 200-byte names is an
+ * ~804-byte body, inside the XFS cap with margin, and ~5 hops for a 4000-byte
+ * depth, far inside the kernel's limit. A fixture that is sensitive to the
+ * length of its own temp root is how both of those arrived; keeping each hop's
+ * body and the chain's depth well away from their limits is what makes it
+ * insensitive.
  */
 async function deepTargetViaShortHops(leaf: string, targetBytes: number): Promise<{ link: string; directory: string }> {
 	const component = "d".repeat(200);
+	const componentsPerHop = 4;
 	let physical = path.join(root, "deep");
 	await fs.mkdir(physical, { recursive: true });
 	let hop = path.join(root, "h0");
 	await fs.symlink("deep", hop);
-	let index = 0;
+	let hopIndex = 0;
+	let pending: string[] = [];
+	const publishHop = async () => {
+		if (pending.length === 0) return;
+		hopIndex += 1;
+		const next = path.join(root, `h${hopIndex}`);
+		await fs.symlink(path.join(`h${hopIndex - 1}`, ...pending), next);
+		hop = next;
+		pending = [];
+	};
 	for (;;) {
 		const next = path.join(physical, component);
 		if (Buffer.byteLength(path.join(next, leaf), "utf8") > targetBytes) break;
 		await fs.mkdir(next);
 		physical = next;
-		index += 1;
-		const nextHop = path.join(root, `h${index}`);
-		await fs.symlink(path.join(`h${index - 1}`, component), nextHop);
-		hop = nextHop;
+		pending.push(component);
+		if (pending.length === componentsPerHop) await publishHop();
 	}
 	const shortfall = targetBytes - Buffer.byteLength(path.join(physical, leaf), "utf8") - 1;
 	if (shortfall > 0) {
 		const tail = "d".repeat(shortfall);
 		await fs.mkdir(path.join(physical, tail));
 		physical = path.join(physical, tail);
-		index += 1;
-		const nextHop = path.join(root, `h${index}`);
-		await fs.symlink(path.join(`h${index - 1}`, tail), nextHop);
-		hop = nextHop;
+		pending.push(tail);
 	}
+	await publishHop();
 	await fs.writeFile(path.join(physical, leaf), "old");
 	const link = path.join(root, "marketplaces.json");
 	// Short body: through the hop chain, not the physical path.
@@ -381,10 +399,20 @@ describe("a config write follows a symlinked destination", () => {
 					`await writeConfigFileAtomically(${JSON.stringify(link)}, "new", 0o644);\n`,
 			);
 			const child = Bun.spawnSync([process.execPath, "run", script], {
+				// Every root the resolver reads, pointed inside the fixture. Passing
+				// only the ones this case asserts on leaves the rest inherited, and a
+				// runner whose `$XDG_CACHE_HOME/omp` or `$PI_CONFIG_DIR` exists would
+				// then have the child resolve a real user directory — harmless here,
+				// where the write targets the fixture either way, but a test has no
+				// business touching a developer's own directories at all.
 				env: {
 					...process.env,
 					HOME: home,
+					XDG_CONFIG_HOME: path.join(home, "xdg-config"),
 					XDG_DATA_HOME: xdgData,
+					XDG_STATE_HOME: path.join(home, "xdg-state"),
+					XDG_CACHE_HOME: path.join(home, "xdg-cache"),
+					PI_CONFIG_DIR: ".omp",
 					PI_CODING_AGENT_DIR: path.join(home, ".omp", "agent"),
 				},
 				stderr: "pipe",
@@ -456,7 +484,18 @@ describe("a config write follows a symlinked destination", () => {
 						`await writeConfigFileAtomically(${JSON.stringify(link)}, "new", 0o644);\n`,
 				);
 				const child = Bun.spawnSync([process.execPath, "run", script], {
-					env: { ...process.env, HOME: home, PI_CODING_AGENT_DIR: elsewhere },
+					// Same containment as the XDG case below: every root inside the
+					// fixture, so nothing the child resolves can be a real directory.
+					env: {
+						...process.env,
+						HOME: home,
+						XDG_CONFIG_HOME: path.join(home, "xdg-config"),
+						XDG_DATA_HOME: path.join(home, "xdg-data"),
+						XDG_STATE_HOME: path.join(home, "xdg-state"),
+						XDG_CACHE_HOME: path.join(home, "xdg-cache"),
+						PI_CONFIG_DIR: ".omp",
+						PI_CODING_AGENT_DIR: elsewhere,
+					},
 					stderr: "pipe",
 				});
 

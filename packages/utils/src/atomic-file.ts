@@ -226,6 +226,18 @@ function locationOf(filePath: string): { dir: string; name: string } {
  * outside every accepted root, and the pull request's own reproduction printed
  * `symlink? no` under XDG where it printed `yes` without.
  *
+ * `getBaseDataRoot()` is on this list for the same reason `getBaseConfigRoot()`
+ * is — it is a directory omp keeps, profile-independent — and NOT because a
+ * writer resolves through it in every layout. A reviewer measured the case that
+ * distinguishes them: `resolveBase()` consults `XDG_DATA_HOME` regardless of
+ * profile, while the profile-dependent `dataRoot` does not, so relocating the
+ * agent directory with `PI_CODING_AGENT_DIR` leaves `dataRoot` at the config
+ * root while `baseDataRoot` is still `$XDG_DATA_HOME/omp`. A link into it is
+ * then followed although no opted-in writer resolves there. That is accepted:
+ * the target is still a directory omp keeps, the link is the user's own, and
+ * the write lands on the file it names — but the first sentence above is the
+ * reason for the profile data root, not for this one.
+ *
  * State and cache are deliberately NOT here. No writer that opted in resolves
  * through them, so adding them would widen the boundary with nothing to point
  * at — which is the same test that put data in.
