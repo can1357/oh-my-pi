@@ -27,11 +27,7 @@ use std::{
 	time::{Duration, Instant},
 };
 
-use core_graphics::{
-	event::{CGEvent, EventField},
-	sys::CGEventRef,
-};
-use foreign_types::ForeignType;
+use objc2_core_graphics::{CGEvent, CGEventField, CGEventType};
 
 use super::release::{self, Input, Record, Route, Transition};
 use crate::desktop::{control, error::CoreResult, native_helper::HelperDirectory};
@@ -58,10 +54,7 @@ const STOP_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
-	fn CGEventGetType(event: CGEventRef) -> u32;
-	fn CGEventSetType(event: CGEventRef, kind: u32);
-	fn CGEventCreateCopy(event: CGEventRef) -> CGEventRef;
-	fn CGEventCreateData(allocator: *const c_void, event: CGEventRef) -> *const c_void;
+	fn CGEventCreateData(allocator: *const c_void, event: *mut CGEvent) -> *const c_void;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -257,13 +250,14 @@ impl Ledger {
 		event: &CGEvent,
 		deliver: impl FnOnce() -> CoreResult<()>,
 	) -> CoreResult<()> {
-		// SAFETY: `event` is live; the raw type also covers event types the
-		// core-graphics enum cannot express.
-		let kind = unsafe { CGEventGetType(event.as_ptr()) };
-		let code = u16::try_from(event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE))
-			.unwrap_or(u16::MAX);
-		let button = event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER);
-		let flags = event.get_flags().bits();
+		let kind = CGEvent::r#type(Some(event)).0;
+		let code = u16::try_from(CGEvent::integer_value_field(
+			Some(event),
+			CGEventField::KeyboardEventKeycode,
+		))
+		.unwrap_or(u16::MAX);
+		let button = CGEvent::integer_value_field(Some(event), CGEventField::MouseEventButtonNumber);
+		let flags = CGEvent::flags(Some(event)).bits();
 		match release::transition(kind, code, flags, button, |input| {
 			self.find(route, input).is_some()
 		}) {
@@ -394,25 +388,18 @@ impl Ledger {
 /// The serialized event that releases what `event` (of type `kind`) holds,
 /// at the same place and with the same routing fields.
 fn released(event: &CGEvent, kind: u32) -> Option<Vec<u8>> {
-	// SAFETY: `event` is live; the copy is a new create-rule event owned below.
-	let copy = unsafe { CGEventCreateCopy(event.as_ptr()) };
-	if copy.is_null() {
-		return None;
-	}
-	// SAFETY: `copy` is a non-null create-rule CGEvent whose ownership moves
-	// here.
-	let copy = unsafe { CGEvent::from_ptr(copy) };
+	let copy = CGEvent::new_copy(Some(event))?;
 	let release = release::release_type(kind);
 	if release != kind {
-		// SAFETY: `copy` is live and `release` is a key-up or button-up type.
-		unsafe { CGEventSetType(copy.as_ptr(), release) };
+		CGEvent::set_type(Some(&copy), CGEventType(release));
 		if kind != release::KEY_DOWN {
 			// A button release carries no pressure.
-			copy.set_double_value_field(EventField::MOUSE_EVENT_PRESSURE, 0.0);
+			CGEvent::set_double_value_field(Some(&copy), CGEventField::MouseEventPressure, 0.0);
 		}
 	}
 	// SAFETY: `copy` is live; the data is a create-rule CFData released below.
-	let data = unsafe { CGEventCreateData(ptr::null(), copy.as_ptr()) };
+	let data =
+		unsafe { CGEventCreateData(ptr::null(), std::ptr::from_ref::<CGEvent>(&copy).cast_mut()) };
 	if data.is_null() {
 		return None;
 	}
@@ -488,10 +475,8 @@ mod tests {
 		panic::catch_unwind,
 	};
 
-	use core_graphics::{
-		event::{CGEventFlags, CGEventType, CGMouseButton},
-		geometry::CGPoint,
-	};
+	use objc2_core_foundation::{CFRetained, CGPoint};
+	use objc2_core_graphics::{CGEventFlags, CGMouseButton};
 
 	use super::*;
 	use crate::desktop::{
@@ -711,29 +696,29 @@ mod tests {
 		})
 	}
 
-	fn key(code: u16, down: bool, flags: CGEventFlags) -> CGEvent {
+	fn key(code: u16, down: bool, flags: CGEventFlags) -> CFRetained<CGEvent> {
 		let source = input::source().expect("event source");
-		let event = CGEvent::new_keyboard_event(source, code, down).expect("key event");
-		event.set_flags(flags);
+		let event = CGEvent::new_keyboard_event(Some(&source), code, down).expect("key event");
+		CGEvent::set_flags(Some(&event), flags);
 		event
 	}
 
-	fn shift(down: bool) -> CGEvent {
+	fn shift(down: bool) -> CFRetained<CGEvent> {
 		let flags = if down {
-			CGEventFlags::CGEventFlagShift
+			CGEventFlags::MaskShift
 		} else {
-			CGEventFlags::CGEventFlagNull
+			CGEventFlags::empty()
 		};
 		key(56, down, flags)
 	}
 
-	fn mouse(kind: CGEventType, x: f64) -> CGEvent {
+	fn mouse(kind: CGEventType, x: f64) -> CFRetained<CGEvent> {
 		let source = input::source().expect("event source");
-		CGEvent::new_mouse_event(source, kind, CGPoint::new(x, 7.0), CGMouseButton::Left)
+		CGEvent::new_mouse_event(Some(&source), kind, CGPoint::new(x, 7.0), CGMouseButton::Left)
 			.expect("mouse event")
 	}
 
-	fn reborn(open: &release::Open) -> CGEvent {
+	fn reborn(open: &release::Open) -> CFRetained<CGEvent> {
 		#[link(name = "CoreGraphics", kind = "framework")]
 		unsafe extern "C" {
 			fn CGEventCreateFromData(allocator: *const c_void, data: *const c_void) -> *mut c_void;
@@ -753,7 +738,7 @@ mod tests {
 			let event = CGEventCreateFromData(ptr::null(), data);
 			CFRelease(data);
 			assert!(!event.is_null(), "release event deserializes");
-			CGEvent::from_ptr(event.cast())
+			CFRetained::from_raw(std::ptr::NonNull::new(event.cast()).expect("non-null event"))
 		}
 	}
 
@@ -763,7 +748,7 @@ mod tests {
 		let result = catch_unwind(|| {
 			scope_with(peer, Presses::Process, || {
 				post(route, &shift(true), || Ok(())).expect("Shift down");
-				let a = |down| key(0, down, CGEventFlags::CGEventFlagShift);
+				let a = |down| key(0, down, CGEventFlags::MaskShift);
 				post(Route::Hid, &a(true), || Ok(())).expect("A down");
 				post(Route::Hid, &a(false), || Ok(())).expect("A up");
 				panic!("native code panicked while Shift was held");
@@ -780,8 +765,11 @@ mod tests {
 		);
 		// The helper posts a Shift release built from the press.
 		let release = reborn(&open[0]);
-		assert_eq!(release.get_type() as u32, CGEventType::FlagsChanged as u32);
-		assert_eq!(release.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE), 56);
+		assert_eq!(CGEvent::r#type(Some(&release)).0, CGEventType::FlagsChanged.0);
+		assert_eq!(
+			CGEvent::integer_value_field(Some(&release), CGEventField::KeyboardEventKeycode),
+			56
+		);
 
 		// Negative control: a request that releases what it pressed leaves
 		// nothing open.
@@ -798,7 +786,7 @@ mod tests {
 		let mut seen = Vec::new();
 		scope_with(peer, Presses::Process, || {
 			for down in [true, false] {
-				post(route, &key(12, down, CGEventFlags::CGEventFlagNull), || {
+				post(route, &key(12, down, CGEventFlags::empty()), || {
 					seen.push(told().len());
 					Ok(())
 				})
@@ -823,7 +811,7 @@ mod tests {
 					for record in told() {
 						release::apply(&mut open, record);
 					}
-					release_at.push(reborn(&open[0]).location().x);
+					release_at.push(CGEvent::location(Some(&reborn(&open[0]))).x);
 					Ok(())
 				})
 				.expect("moved");
@@ -834,8 +822,8 @@ mod tests {
 		let open = left_open();
 		assert_eq!(open.len(), 1);
 		let release = reborn(&open[0]);
-		assert_eq!(release.get_type() as u32, CGEventType::LeftMouseUp as u32);
-		assert_eq!(release.location().x, 9.0);
+		assert_eq!(CGEvent::r#type(Some(&release)).0, CGEventType::LeftMouseUp.0);
+		assert_eq!(CGEvent::location(Some(&release)).x, 9.0);
 	}
 
 	#[test]
@@ -921,7 +909,7 @@ mod tests {
 		scope_with(peer, Presses::Process, || {
 			post(route, &shift(true), || Ok(())).expect("Shift down");
 			scope_with(peer, Presses::Process, || {
-				let a = key(0, true, CGEventFlags::CGEventFlagShift);
+				let a = key(0, true, CGEventFlags::MaskShift);
 				post(route, &a, || Ok(())).expect("A down");
 			});
 			assert!(REQUEST.with_borrow(Option::is_some));
@@ -1111,7 +1099,7 @@ mod tests {
 
 	#[test]
 	fn release_events_keep_their_routing_fields_but_not_their_target_process() {
-		type GetWindowLocation = unsafe extern "C" fn(CGEventRef) -> CGPoint;
+		type GetWindowLocation = unsafe extern "C" fn(*mut CGEvent) -> CGPoint;
 		let fields = [(3, 1), (7, 3), (51, 77), (52, 5), (58, 99), (91, 77), (92, 77)];
 		let event = mouse(CGEventType::RightMouseDown, 3.0);
 		skylight::set_fields(&event, &fields).expect("SkyLight fields");
@@ -1121,24 +1109,40 @@ mod tests {
 			id:    0,
 			route: Route::Dual(4242),
 			input: Input::Button(1),
-			event: released(&event, CGEventType::RightMouseDown as u32).expect("serialized"),
+			event: released(&event, CGEventType::RightMouseDown.0).expect("serialized"),
 		});
-		assert_eq!(release.get_type() as u32, CGEventType::RightMouseUp as u32);
+		assert_eq!(CGEvent::r#type(Some(&release)).0, CGEventType::RightMouseUp.0);
 		for (field, value) in fields {
-			assert_eq!(release.get_integer_value_field(field), value, "field {field}");
+			assert_eq!(
+				CGEvent::integer_value_field(Some(&release), CGEventField(field)),
+				value,
+				"field {field}"
+			);
 		}
 		let window_location: GetWindowLocation =
 			route::symbol(c"CGEventGetWindowLocation").expect("window location getter");
 		// SAFETY: a live event and the getter's exact signature.
-		let local = unsafe { window_location(release.as_ptr()) };
+		let local = unsafe { window_location(std::ptr::from_ref::<CGEvent>(&release).cast_mut()) };
 		assert_eq!((local.x, local.y), (11.0, 13.0));
 		// Serialization drops the target process, which the helper stamps
 		// again from the press's route before posting.
-		assert_eq!(release.get_integer_value_field(route::TARGET_PID_FIELD), 0);
+		assert_eq!(
+			CGEvent::integer_value_field(Some(&release), CGEventField(route::TARGET_PID_FIELD)),
+			0
+		);
 		let routes = route::routes().expect("SkyLight routes");
 		// SAFETY: `release` is live.
-		unsafe { routes.set_field(release.as_ptr().cast(), route::TARGET_PID_FIELD, 4242) };
-		assert_eq!(release.get_integer_value_field(route::TARGET_PID_FIELD), 4242);
+		unsafe {
+			routes.set_field(
+				std::ptr::from_ref::<CGEvent>(&release).cast_mut().cast(),
+				route::TARGET_PID_FIELD,
+				4242,
+			)
+		};
+		assert_eq!(
+			CGEvent::integer_value_field(Some(&release), CGEventField(route::TARGET_PID_FIELD)),
+			4242
+		);
 	}
 
 	#[test]

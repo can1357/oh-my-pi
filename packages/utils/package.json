@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-utils",
-	"version": "18.14.0",
+	"version": "18.16.0",
 	"description": "Shared utilities for pi packages",
 	"keywords": [
 		"cli",
@@ -44,13 +44,14 @@
 	},
 	"scripts": {
 		"check": "oxlint . && oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run check:types",
-		"check:types": "tsgo -p tsconfig.json --noEmit",
+		"check:types": "bun check --no-script -p tsconfig.json",
 		"lint": "oxlint .",
 		"test": "bun test --parallel",
 		"fix": "oxlint --fix --fix-suggestions . && bun run fmt",
 		"fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts'"
 	},
 	"dependencies": {
+		"@oh-my-pi/omptype": "catalog:",
 		"@oh-my-pi/pi-natives": "catalog:"
 	},
 	"devDependencies": {

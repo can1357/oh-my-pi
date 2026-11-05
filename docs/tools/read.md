@@ -299,6 +299,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
    5. handle JSON directly, feeds via feed parser, plain text directly
    6. for HTML and non-raw mode, try declared markdown alternates, content negotiation, feed alternates, HTML-to-text renderers, extracted linked documents, then `llms.txt`
    7. fall back to raw body text/html
+- The native HTML renderer's front matter keeps the title, canonical, base, `description`, `author` and `article:published_time`/`article:modified_time` lines. `pruneFrontMatter()` folds every other `<meta>` line into one `meta_omitted` line naming the tags (25 at most, then `+N more`) and pointing to `:raw` for their values; it runs on the returned copy only, after the reader and fallback checks have judged the whole rendering.
 - Non-raw whole-URL output is wrapped with a small header; line selectors address body lines, not these header rows. Raw URL artifacts and search materialization use the same unwrapped body coordinates:
 
 ```text
@@ -347,7 +348,7 @@ Notes: ...
 - Local text open-ended default line limit: `read.defaultLimit` (default `300`), clamped to `[1, DEFAULT_MAX_LINES]`.
 - Single bounded non-raw text ranges add `1` leading and `3` trailing context lines on constrained sides. Raw and multi-range reads are exact.
 - File streaming chunk size: `8 * 1024` bytes (`READ_CHUNK_SIZE`).
-- Local streamed byte budget for line reads: `max(DEFAULT_MAX_BYTES, maxLinesToCollect * 512)`.
+- Local streamed byte budget for line reads: `max(DEFAULT_MAX_BYTES, maxLinesToCollect * 512)`. Numbered reads charge a line cut to `tools.outputMaxColumns` the UTF-8 bytes of its cut display, not its source size; `:raw` reads and a cap of `0` charge source bytes. Past the 4 MiB buffering cap a line longer than `3 * outputMaxColumns + 6` bytes (always cut) is kept only as the head its display needs, however much page budget remains, and such a window never builds the whole-file hashline snapshot or registers a conflict block from those heads. A multi-range read whose budget stops a range early appends `[Range A-B stopped before line N at the … read budget. Use :N-B to continue]`.
 - Structural summaries only run when file size `<= 2 MiB` and line count `<= 20_000`.
 - Profile summaries run only for whole-file reads of recognized reports at most `32 MiB`; line selectors and `:raw` read the file.
 - Image input max: `20 MiB`.

@@ -1,3 +1,4 @@
+import { isRecord } from "@oh-my-pi/pi-utils";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { EvalKernelNotRunningError } from "../eval/executor-base";
@@ -16,10 +17,6 @@ import { cfgEvalToolsEnabled } from "../eval/settings";
 interface EvalToolQueryResult {
 	tools: EvalToolDescriptor[];
 	missing: string[];
-}
-
-function isUnknownRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 async function queryPythonTools(
@@ -144,19 +141,40 @@ function errorResult(
 	};
 }
 
-/** Materialize kernel-defined descriptors as custom tools for a child session. */
+/**
+ * Materialize kernel-defined descriptors as custom tools for a child session.
+ *
+ * A child keeps these tools in its revive capture for as long as it can be revived,
+ * so they hold `session`, whose kernel they call, only weakly: holding it strongly
+ * kept the whole spawning session in memory after it parked. Its kernel is gone by
+ * then anyway; a call after that reports the tool unavailable.
+ */
 export function createEvalCustomTools(session: ToolSession, descriptors: EvalToolDescriptor[]): CustomTool[] {
 	if (descriptors.length > 0 && !evalToolsEnabled(session)) {
 		throw new ToolError("Eval-defined tools are disabled; set eval.tools.enabled=true to expose them to subagents.");
 	}
-	return descriptors.map(descriptor => ({
+	const owner = new WeakRef(session);
+	return descriptors.map(descriptor => evalCustomTool(owner, descriptor));
+}
+
+/** One kernel-defined tool. Module-level so its closure holds nothing but `owner` and `descriptor`. */
+function evalCustomTool(owner: WeakRef<ToolSession>, descriptor: EvalToolDescriptor): CustomTool {
+	return {
 		name: descriptor.name,
 		label: descriptor.name,
 		description: descriptor.description,
 		parameters: descriptor.parameters,
 		loadMode: "essential",
 		async execute(_toolCallId, rawParams, _onUpdate, _ctx, signal) {
-			const params = isUnknownRecord(rawParams) ? rawParams : {};
+			const session = owner.deref();
+			if (!session) {
+				return errorResult(
+					descriptor.name,
+					descriptor.language,
+					`The session whose ${descriptor.language} kernel defined "${descriptor.name}" has ended.`,
+				);
+			}
+			const params = isRecord(rawParams) ? rawParams : {};
 			const args = stripHarnessIntent(params, descriptor.parameters);
 			let result: EvalToolInvokeResult;
 			try {
@@ -186,5 +204,5 @@ export function createEvalCustomTools(session: ToolSession, descriptors: EvalToo
 				details: { evalTool: descriptor.name, language: descriptor.language },
 			};
 		},
-	}));
+	};
 }

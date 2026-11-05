@@ -22,7 +22,9 @@ The roster includes Factory's `generate_image` models (`gpt-image-2.5-sunburst`,
 
 Organization identity and residency travel with the credential serving each request, including account rotation, and each account/residency scope has its own model cache. Residency chooses the API host; the independent inference region (`global`, `us`, or `eu`) constrains upstream eligibility.
 
-`/usage` and `omp usage` report Standard Credits and Droid Core quota windows when the account uses token-rate-limit billing. Accounts whose billing response explicitly disables that mode remain visible with a note that no quota windows are exposed; OMP does not invent a remaining balance. The model browser shows each model's base credit rate; dollar figures are upstream list-price references, not Factory billing, and neither includes temporary promotions. Models without a dollar reference display their credit rate rather than `free`. Extra balance alone does not establish that overage billing is enabled.
+Claude requests on Anthropic's own upstream offer Factory's server-side refusal fallback (Opus 5 for Fable and Opus 5.5) only when discovery found the fallback model in the account's roster. A request served by another organization's credential than discovery saw offers none; a Factory model OMP did not discover (one defined in `models.yml`) offers every fallback its rules name, as before discovery tracked them.
+
+`/usage` and `omp usage` report Standard Credits and Droid Core quota windows when the account uses token-rate-limit billing. Accounts whose billing response explicitly disables that mode remain visible with a note that no quota windows are exposed; OMP does not invent a remaining balance. The model browser shows each model's credit rate in force now, including Factory's dated credit promotions, and the model details name the next scheduled rate and its date; dollar figures are upstream list-price references, not Factory billing, and include no promotions. Models without a dollar reference display their credit rate rather than `free`. Extra balance alone does not establish that overage billing is enabled.
 
 If account rotation would narrow the selected model's context window, OMP stops before sending that retry rather than guessing whether the existing conversation fits. Refresh discovery with `omp models refresh factory-droid` and select the region-appropriate model before retrying.
 
@@ -145,6 +147,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `siliconflow-cn`                 | `SILICONFLOW_CN_API_KEY`                                                            |
 | `fireworks`                      | `FIREWORKS_API_KEY`                                                                 |
 | `together`                       | `TOGETHER_API_KEY`                                                                  |
+| `modular`                        | `MODULAR_API_KEY`                                                                   |
 | `typesafe`                       | `TYPESAFE_API_KEY`                                                                  |
 | `coreweave`                      | `COREWEAVE_API_KEY`, then `WANDB_API_KEY`                                           |
 | `nvidia`                         | `NVIDIA_API_KEY`                                                                    |
@@ -178,6 +181,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `alibaba-coding-plan`            | `ALIBABA_CODING_PLAN_API_KEY`                                                       |
 | `sakana`                         | `SAKANA_API_KEY`, then `FUGU_API_KEY`                                               |
 | `sambanova`                      | `SAMBANOVA_API_KEY`                                                                 |
+| `scaleway`                       | `SCW_SECRET_KEY`, then `SCW_API_KEY`                                                |
 | `aimlapi`                        | `AIMLAPI_API_KEY`                                                                   |
 | `gitlab-duo`, `gitlab-duo-agent` | `GITLAB_TOKEN`                                                                      |
 | `opencode-zen`, `opencode-go`    | `OPENCODE_API_KEY`                                                                  |
@@ -218,6 +222,8 @@ SingularityAPI sells two unrelated products behind one brand, so OMP models them
 `singularityapi-dev` is the pay-as-you-go universal inference gateway (300+ models: DeepSeek, Kimi, GLM, frontier flagships). Create a key at `https://app.singularityapi.dev` (or run `/login singularityapi-dev`) and set `SINGULARITYAPI_DEV_API_KEY`; the roster, limits, and tariffs are discovered live from `https://api.singularityapi.dev/v1/models`.
 
 `singularityapi-tech` is the reserved DeepSeek lanes gateway. Usage bills against a booked reservation slot rather than prepaid credit, so a valid key with no active slot answers 403 until you book one at `https://app.singularityapi.tech`. Create an `sk-...` key there (or run `/login singularityapi-tech`), set `SINGULARITYAPI_TECH_API_KEY`, and the lane roster is discovered live from `https://api.singularityapi.tech/v1/models`.
+
+For Mistral, set `MISTRAL_API_KEY` to a key created on the Mistral console, or run `/login mistral` to sign in through the browser the way the Mistral Vibe CLI does. The browser sign-in mints a regular API key tied to your Mistral plan: its usage counts against the plan's Vibe Code quota instead of pay-as-you-go API credits. OMP stores it as a plain API key; there is nothing to refresh.
 
 `aistupidlevel` is the AI Stupid Level Smart Router, an OpenAI-compatible endpoint at `https://aistupidlevel.info/v1` that calls Claude, GPT, Gemini, DeepSeek, Kimi, and GLM models with your own provider keys, so each provider bills you directly. Create a router key at `https://aistupidlevel.info/router/keys`, add your provider keys in the same dashboard, then set `AISTUPIDLEVEL_API_KEY` or run `/login aistupidlevel`. The default model, `aistupidlevel/auto-coding`, is a routing mode: the router sends each request to the model with the best measured score on AI Stupid Level's coding benchmark (among statistically tied leaders, the cheapest by default). The other routing modes (`auto-reasoning`, `auto-tooling`, `auto-value`, `auto-cheapest`, and the rest listed at `https://aistupidlevel.info/router/docs#strategies`) choose by other measurements, and the other model ids `/v1/models` lists pin that one model. Every model is text only, with a 262,144-token context and a 64,000-token output cap, the smallest across the router's models. Thinking levels `minimal` through `max` are sent as `reasoning_effort`, which the router maps to the nearest level the chosen model supports; `off` sends `none`. Models carry no per-token price: each request costs what the chosen model's provider charges your key.
 

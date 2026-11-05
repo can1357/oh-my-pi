@@ -114,7 +114,6 @@ Types: `OpenAICompat` / `ResolvedOpenAISharedCompat` in `packages/catalog/src/ty
 | `streamFirstEventTimeoutMs`       | `0` for local backends                                                                                                                                                                           | First-event watchdog hint (`0` = unbounded prefill/model-load time)                                     |
 | `streamIdleTimeoutMs`             | GLM/Alibaba coding plans 600 s; selected MiMo/Kimi/DeepSeek and local backends 300 s; some deployments use `0`                                                                                   | Fallback idle budget; request options and timeout env vars take precedence                              |
 | `streamRevision`                  | Kimi `"possible"`; otherwise unset unless declared                                                                                                                                               | Declares whether already-streamed content may be revised; consumers can avoid committing it prematurely |
-| `thinkingLoopGuard`               | Gemini/DeepSeek/xAI class rules                                                                                                                                                                  | Selects the shared reasoning-loop guard family                                                          |
 
 ### Chat-completions-only flags (`ResolvedOpenAICompat`)
 
