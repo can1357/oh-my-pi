@@ -360,3 +360,64 @@ fn clone_target_cleanup_keeps_nested_repositories_and_unlinks_only_symlinks() {
 	assert_eq!(snapshot(&outside), outside_before, "cleanup followed a symlink outside the clone");
 	assert_eq!(snapshot(&source), source_before);
 }
+
+/// A submodule is a nested checkout whose directory is part of the committed
+/// tree: Git materializes it empty and uninitialized in a new worktree. If the
+/// clone's refusal removed the directory instead of emptying it, every
+/// worktree of a repository with a submodule would open reporting it deleted.
+#[test]
+fn clone_leaves_a_submodule_uninitialized_without_reporting_it_deleted() {
+	let (temp, source, repo) = fixture();
+	if !clone_works_on(temp.path()) {
+		eprintln!("SKIP: no working clone backend on this filesystem");
+		return;
+	}
+	let upstream = temp.path().join("submodule-origin");
+	fs::create_dir(&upstream).unwrap();
+	git(&upstream, &["init", "-q", "-b", "main"]);
+	for (key, value) in
+		[("user.name", "Test"), ("user.email", "test@example.com"), ("commit.gpgsign", "false")]
+	{
+		git(&upstream, &["config", key, value]);
+	}
+	write(&upstream, "inner.txt", "submodule content\n");
+	git(&upstream, &["add", "."]);
+	git(&upstream, &["commit", "-qm", "submodule base"]);
+	git(&source, &[
+		"-c",
+		"protocol.file.allow=always",
+		"submodule",
+		"add",
+		"-q",
+		upstream.to_str().unwrap(),
+		"sub",
+	]);
+	git(&source, &["commit", "-qm", "add submodule"]);
+	let target_commit = git(&source, &["rev-parse", "HEAD"]);
+
+	let target = temp.path().join("target");
+	let result = repo
+		.worktree_add(&target, &target_commit, WorktreeAddOptions {
+			detach:       true,
+			clone:        WorktreeClone::Auto,
+			keep_changes: false,
+		})
+		.unwrap();
+	assert!(result.cloned_with.is_some(), "{:?}", result.clone_error);
+	assert!(target.join("sub").is_dir(), "Git materializes a gitlink as a directory");
+	assert_eq!(
+		fs::read_dir(target.join("sub")).unwrap().count(),
+		0,
+		"the submodule's working tree must not be carried"
+	);
+	assert_eq!(
+		git(&target, &["status", "--porcelain"]),
+		"",
+		"an uninitialized submodule must not read as a deletion"
+	);
+	assert_eq!(
+		fs::read_to_string(source.join("sub/inner.txt")).unwrap(),
+		"submodule content\n",
+		"the source's submodule must be left alone"
+	);
+}

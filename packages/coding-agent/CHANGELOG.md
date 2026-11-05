@@ -31,6 +31,7 @@
 
 ### Fixed
 
+- A worktree created by `git worktree add` in bash, `github pr_checkout` or `omp worktree add` no longer carries checkouts whose `.git` points back into the source repository — a `.worktrees/` of linked worktrees, an absorbed submodule — which arrived sharing another session's `HEAD` and index, or with a `git status` that failed with `not a git repository`, and compounded with each worktree cut from a worktree; a submodule is now left uninitialized as plain `git worktree add` leaves it, and self-contained nested clones and ignored build caches still carry over
 - Agents using `computer` from Eval now `zoom` for a legible close-up instead of cropping the saved screenshot file, which is downscaled to the capture size on large or Retina windows ([#18158](https://github.com/can1357/oh-my-pi/pull/18158) by [@will-bogusz](https://github.com/will-bogusz))
 - Python eval `@tool` definitions with type annotations now register on Python 3.9 instead of failing with `module 'types' has no attribute 'UnionType'` ([#18143](https://github.com/can1357/oh-my-pi/pull/18143) by [@Winston-Hsiao](https://github.com/Winston-Hsiao))
 - `read` of an SEC EDGAR filing document or filing folder (`sec.gov/Archives/edgar/data/<cik>/<accession>/…`) returns that document instead of the company's profile and recent filings list ([#18150](https://github.com/can1357/oh-my-pi/pull/18150) by [@will-bogusz](https://github.com/will-bogusz))

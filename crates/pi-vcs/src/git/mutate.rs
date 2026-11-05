@@ -1838,13 +1838,41 @@ fn collect_clone_reconciliation_paths(
 /// Drop source-bound environments from a fresh clone, never following
 /// symlinks or walking Git metadata. Return the removed directory paths so
 /// target-tracked entries can be checked out even when both indexes agree.
+///
+/// A directory whose `.git` *resolves outside it* is another repository's
+/// checkout reached through a pointer — a linked worktree or an absorbed
+/// submodule, whose `gitdir:` file or symlink names the source repository's
+/// administrative files. The copy keeps resolving to them: a copied linked
+/// worktree shares another session's `HEAD` and index, and a copied submodule
+/// makes `git status` fail with `not a git repository` for the whole worktree.
+/// Its contents go at any depth: a backend is free to clone a whole subtree in
+/// one operation (APFS `clonefile`), so the copy cannot be prevented, only
+/// undone. The directory itself stays, emptied, because that is what Git
+/// materializes for a gitlink — an absent one reports the submodule as
+/// deleted — and an empty directory is invisible to Git everywhere else.
+///
+/// A checkout that stands on its own is not pointed at this and keeps
+/// travelling, because package managers keep such clones inside the very
+/// ignored caches this clone exists to carry (Composer's `vendor/`,
+/// Terraform's `.terraform/modules/`, an editable `pip install git+…`), and
+/// emptying one would leave the manifest claiming an install that is gone.
+/// That covers a plain `.git` directory and equally a `.git` pointing within
+/// its own directory, which relocates intact.
 fn prune_nonrelocatable_clone_dirs(root: &Path) -> Result<BTreeSet<PathBuf>> {
 	let mut excluded = BTreeSet::new();
 	let mut pending = vec![root.to_path_buf()];
 	while let Some(dir) = pending.pop() {
-		let marked = dir.join("pyvenv.cfg").is_file() || dir.join("CMakeCache.txt").is_file();
+		// The worktree's own `.git` is the registration this clone just got,
+		// not a nested checkout, so the root is never marked by it.
+		let nested_checkout = dir != root && git_entry_points_outside(root, &dir);
+		let marked = nested_checkout
+			|| dir.join("pyvenv.cfg").is_file()
+			|| dir.join("CMakeCache.txt").is_file();
 		if marked && dir != root {
 			remove_existing(&dir)?;
+			if nested_checkout {
+				fs::create_dir_all(&dir)?;
+			}
 			excluded.insert(
 				dir.strip_prefix(root)
 					.expect("cloned directory is under root")
@@ -1868,6 +1896,134 @@ fn prune_nonrelocatable_clone_dirs(root: &Path) -> Result<BTreeSet<PathBuf>> {
 		}
 	}
 	Ok(excluded)
+}
+
+/// Whether `dir`'s own `.git` entry names a repository that will not be in the
+/// clone: one outside the worktree `root`, or one inside `root`'s own `.git`.
+///
+/// A `.git` directory is the repository, so it travels with the copy. A
+/// symlink or a `gitdir:` file travels only if what it names travels too. The
+/// test is therefore where the pointer lands, not what kind of file it is:
+///
+/// - outside `root` — a linked worktree's absolute `gitdir`, or a symlink into
+///   a repository elsewhere. The copy is a second view of someone else's.
+/// - under `root/.git` — an absorbed submodule of the source itself, whose
+///   `../.git/modules/<name>` named the source's administrative files. The new
+///   worktree's `.git` is a registration file, so that path does not exist and
+///   the copy cannot work.
+/// - anywhere else inside `root` — the metadata is in the clone. A `.git`
+///   pointing within its own directory, and a submodule of a vendored clone
+///   whose `../../.git/modules/<name>` lands inside that clone, both relocate
+///   intact and are kept.
+///
+/// Where the target lands is settled against the filesystem whenever it can
+/// be, because reading the path as text alone is wrong in both directions: a
+/// `..` run can cross a symlink inside the checkout and come back in, so text
+/// places outside a repository that is in the clone, and an intermediate
+/// component can be a symlink leading out, so text places inside a checkout
+/// that still shares another repository's `HEAD` and index. Resolving the
+/// target only reads it; the walk's refusal to follow symlinks governs what it
+/// descends into and deletes, not what it may look at.
+///
+/// Only a target that names nothing has no answer but the text, and there the
+/// text decides: a relative pointer whose target is missing is as broken in
+/// the source and is kept, while one naming a path outside the clone is not a
+/// repository that works where it now sits. A `.git` that cannot be read at
+/// all, or that holds no `gitdir:` line, is treated the same way.
+fn git_entry_points_outside(root: &Path, dir: &Path) -> bool {
+	let entry = dir.join(".git");
+	let Ok(meta) = fs::symlink_metadata(&entry) else {
+		return false;
+	};
+	if meta.is_dir() {
+		return false;
+	}
+	let target = if meta.is_symlink() {
+		let Ok(target) = fs::read_link(&entry) else {
+			return true;
+		};
+		target
+	} else {
+		let Ok(bytes) = fs::read(&entry) else {
+			return true;
+		};
+		let Some(gitdir) = bytes
+			.split(|&byte| byte == b'\n')
+			.find_map(|line| line.trim_ascii().strip_prefix(b"gitdir:".as_slice()))
+		else {
+			return true;
+		};
+		// The path is bytes on Unix, and Git opens it as bytes: decoding it as
+		// UTF-8 would call a working checkout unreadable and empty it.
+		let Some(target) = os_path_from_bytes(gitdir.trim_ascii()) else {
+			return true;
+		};
+		target
+	};
+	// Where the pointer really lands decides whenever the kernel can say,
+	// because a `..` run crosses symlinks in both directions and the text
+	// alone is wrong both ways: a target reading inside can leave through a
+	// symlinked component, and one reading outside can come back in. Asking
+	// only reads; the walk's refusal to follow symlinks is about what it
+	// descends into and deletes, not about what it may look at.
+	if let (Ok(real_root), Ok(real_target)) =
+		(fs::canonicalize(root), fs::canonicalize(dir.join(&target)))
+	{
+		return !real_target.starts_with(&real_root)
+			|| real_target.starts_with(real_root.join(".git"));
+	}
+	// Only a target naming nothing has no answer but the text.
+	let Some(resolved) = resolve_lexically(dir, &target) else {
+		return true;
+	};
+	!resolved.starts_with(root) || resolved.starts_with(root.join(".git"))
+}
+
+/// A gitfile's `gitdir:` value as a path, keeping the platform's own bytes.
+#[cfg(unix)]
+#[allow(
+	clippy::unnecessary_wraps,
+	reason = "the Windows counterpart can fail, and both answer one call site"
+)]
+fn os_path_from_bytes(bytes: &[u8]) -> Option<PathBuf> {
+	use std::os::unix::ffi::OsStrExt;
+	Some(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+}
+
+/// Windows paths are UTF-16, so bytes that are not valid UTF-8 name no path
+/// the platform could open in the first place.
+#[cfg(not(unix))]
+fn os_path_from_bytes(bytes: &[u8]) -> Option<PathBuf> {
+	Some(PathBuf::from(std::str::from_utf8(bytes).ok()?))
+}
+
+/// `target` resolved against `base` without touching the filesystem: `.` is
+/// dropped and `..` pops a component. `None` when an absolute target or one
+/// that pops past the filesystem root makes the result meaningless; an
+/// absolute target is returned as itself, since that is what Git would read.
+fn resolve_lexically(base: &Path, target: &Path) -> Option<PathBuf> {
+	use std::path::Component;
+
+	let mut resolved: Vec<Component<'_>> = if target.is_absolute() {
+		Vec::new()
+	} else {
+		base.components().collect()
+	};
+	for component in target.components() {
+		match component {
+			Component::CurDir => {},
+			Component::ParentDir => match resolved.last() {
+				Some(Component::Normal(_)) => {
+					resolved.pop();
+				},
+				// Popping past a root or a bare relative base leaves nowhere
+				// the clone could hold the repository.
+				_ => return None,
+			},
+			keep => resolved.push(keep),
+		}
+	}
+	Some(resolved.iter().collect())
 }
 
 /// Carry one live source path without following symlinks, including a
@@ -3048,6 +3204,187 @@ mod tests {
 		}
 		assert_eq!(git(&linked, &["rev-parse", "HEAD"]), git(temp.path(), &["rev-parse", "HEAD"]));
 		assert_eq!(git(&linked, &["status", "--porcelain"]), "");
+		let _ = repo.worktree_remove(&linked, true);
+	}
+
+	/// A worktree carries the committed tree plus the source's ignored build
+	/// caches, and never a checkout whose `.git` points back into the source's
+	/// administrative files — a linked worktree or an absorbed submodule —
+	/// which arrives sharing another session's `HEAD` or resolving to nothing
+	/// at all. A self-contained nested clone (`.git` is a directory) shares
+	/// nothing and keeps travelling: package managers put such clones inside
+	/// the ignored caches this feature exists to carry.
+	#[test]
+	fn clone_first_worktree_refuses_nested_checkouts_and_keeps_ignored_caches() {
+		let (temp, repo) = fixture();
+		let source = temp.path();
+		fs::write(source.join(".gitignore"), "target/\nnode_modules/\n").unwrap();
+		git(source, &["add", ".gitignore"]);
+		git(source, &["commit", "-qm", "ignore caches"]);
+		// The build caches the clone exists for: ignored, untracked, must ride.
+		fs::create_dir_all(source.join("target/debug")).unwrap();
+		fs::write(source.join("target/debug/artifact.o"), "cache\n").unwrap();
+		fs::create_dir_all(source.join("node_modules/pkg")).unwrap();
+		fs::write(source.join("node_modules/pkg/index.js"), "dep\n").unwrap();
+		// A linked worktree of the source at depth 2 (`.git` is a file), the
+		// reported shape, and one at depth 4.
+		git(source, &["worktree", "add", "-q", "--detach", ".worktrees/nested", "HEAD"]);
+		fs::create_dir_all(source.join("vendor/deep")).unwrap();
+		git(source, &["worktree", "add", "-q", "--detach", "vendor/deep/checkout", "HEAD"]);
+		// A self-contained repository inside the ignored cache, whose `.git` is
+		// a directory: a package manager's vendored source clone (Composer,
+		// Terraform, an editable `pip install git+…`), which must still ride.
+		let vendored = source.join("node_modules/vendored-src");
+		fs::create_dir_all(&vendored).unwrap();
+		git(&vendored, &["init", "-q", "-b", "main"]);
+		fs::write(vendored.join("own.txt"), "theirs\n").unwrap();
+		// Its own submodule, whose `gitdir:` lands inside the vendored clone
+		// rather than in this repository: `pip install -e git+…` initializes
+		// submodules recursively, so this is what such a cache holds. It
+		// relocates with the copy and must survive.
+		let vendored_sub = vendored.join("deps/inner");
+		fs::create_dir_all(vendored_sub.join("../../.git/modules/inner")).unwrap();
+		fs::write(vendored_sub.join("../../.git/modules/inner/HEAD"), "ref: refs/heads/main\n")
+			.unwrap();
+		fs::create_dir_all(&vendored_sub).unwrap();
+		fs::write(vendored_sub.join(".git"), "gitdir: ../../.git/modules/inner\n").unwrap();
+		fs::write(vendored_sub.join("inner.txt"), "nested dep\n").unwrap();
+		// A checkout keeping its metadata beside it, under a name of its own.
+		let selfcontained = source.join("node_modules/pointer-inside");
+		fs::create_dir_all(selfcontained.join("repository-metadata")).unwrap();
+		fs::write(selfcontained.join(".git"), "gitdir: repository-metadata\n").unwrap();
+		fs::write(selfcontained.join("own.txt"), "mine\n").unwrap();
+		// Three shapes only a symlink or a non-UTF-8 path can make. Following
+		// the pointer and reading it as text disagree about the first two, and
+		// the third is a working checkout whose path is not UTF-8.
+		#[cfg(unix)]
+		let outside_metadata = {
+			let outside = source.join("../outside-nested-probe");
+			let _ = fs::remove_dir_all(&outside);
+			fs::create_dir_all(outside.join("metadata")).unwrap();
+			fs::write(outside.join("metadata/HEAD"), "ref: refs/heads/main\n").unwrap();
+			outside
+		};
+		#[cfg(unix)]
+		{
+			// Its own metadata, reached through a symlink inside itself: the
+			// text lands outside the worktree, the kernel inside. The whole
+			// directory relocates and the pointer still resolves, so it stays.
+			let jumped = source.join("node_modules/jump-inside");
+			fs::create_dir_all(jumped.join("a/b/c/d")).unwrap();
+			fs::create_dir_all(jumped.join("repository-metadata")).unwrap();
+			fs::write(jumped.join("repository-metadata/HEAD"), "ref: refs/heads/main\n").unwrap();
+			std::os::unix::fs::symlink("a/b/c/d", jumped.join("jump")).unwrap();
+			fs::write(jumped.join(".git"), "gitdir: jump/../../../../repository-metadata\n").unwrap();
+			fs::write(jumped.join("own.txt"), "jumped\n").unwrap();
+			// The mirror image: the text lands inside the worktree, but an
+			// intermediate component leads out, so the copy would be a second
+			// view of a repository the clone does not own. It goes.
+			let escaping = source.join("node_modules/escape-inside");
+			fs::create_dir_all(&escaping).unwrap();
+			std::os::unix::fs::symlink(&outside_metadata, escaping.join("out")).unwrap();
+			fs::write(escaping.join(".git"), "gitdir: out/metadata\n").unwrap();
+			fs::write(escaping.join("own.txt"), "escaping\n").unwrap();
+			// A working checkout whose metadata directory is named by bytes
+			// that are not UTF-8, which Git opens and this walk must not call
+			// unreadable.
+			use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+			let bytes = source.join("node_modules/byte-path");
+			let metadata = bytes.join(OsStr::from_bytes(b"metadata-\xff"));
+			fs::create_dir_all(&metadata).unwrap();
+			fs::write(metadata.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+			fs::write(bytes.join(".git"), b"gitdir: metadata-\xff\n").unwrap();
+			fs::write(bytes.join("own.txt"), "bytes\n").unwrap();
+		}
+		git(source, &["branch", "nested-probe"]);
+
+		let linked = source.join("../linked-nested-probe");
+		let _ = fs::remove_dir_all(&linked);
+		let clone_works = clone_works_on(source);
+		let result = repo
+			.worktree_add(&linked, "nested-probe", WorktreeAddOptions {
+				detach:       false,
+				clone:        WorktreeClone::Auto,
+				keep_changes: false,
+			})
+			.unwrap();
+		if clone_works {
+			assert!(
+				result.cloned_with.is_some(),
+				"the clone path must run where the filesystem can clone, or this proves nothing about \
+				 it: {:?}",
+				result.clone_error
+			);
+		}
+
+		for nested in [".worktrees/nested", "vendor/deep/checkout"] {
+			let carried = linked.join(nested);
+			assert!(
+				!carried.join(".git").exists(),
+				"a worktree must not carry the nested checkout {nested}"
+			);
+			// Only an empty directory may remain, so a gitlink keeps the shape
+			// Git gives it; nothing of the other checkout comes with it.
+			let left = fs::read_dir(&carried).map_or(0, Iterator::count);
+			assert_eq!(left, 0, "{nested} kept {left} entries of another checkout");
+		}
+		assert_eq!(
+			linked.join("node_modules/vendored-src/.git").is_dir(),
+			result.cloned_with.is_some(),
+			"a self-contained nested clone rides along like any other ignored cache"
+		);
+		// The feature the clone exists for stays: only checkouts are refused.
+		assert_eq!(
+			linked.join("target/debug/artifact.o").exists(),
+			result.cloned_with.is_some(),
+			"ignored build caches ride along with a clone"
+		);
+		assert_eq!(
+			linked.join("node_modules/pkg/index.js").exists(),
+			result.cloned_with.is_some(),
+			"ignored build caches ride along with a clone"
+		);
+		assert_eq!(fs::read_to_string(linked.join("a")).unwrap(), "one\n");
+		assert_eq!(git(&linked, &["status", "--porcelain"]), "");
+		// The source keeps every nested checkout it had.
+		for nested in [".worktrees/nested", "vendor/deep/checkout", "node_modules/vendored-src"] {
+			assert!(source.join(nested).join(".git").exists(), "source lost {nested}");
+		}
+		for carried in
+			["node_modules/vendored-src/deps/inner/inner.txt", "node_modules/pointer-inside/own.txt"]
+		{
+			assert_eq!(
+				linked.join(carried).exists(),
+				result.cloned_with.is_some(),
+				"{carried} resolves inside the clone and must relocate with it"
+			);
+		}
+		#[cfg(unix)]
+		{
+			for carried in [
+				"node_modules/jump-inside/own.txt",
+				"node_modules/jump-inside/repository-metadata/HEAD",
+				"node_modules/byte-path/own.txt",
+			] {
+				assert_eq!(
+					linked.join(carried).exists(),
+					result.cloned_with.is_some(),
+					"{carried} resolves inside the clone and must relocate with it"
+				);
+			}
+			// Following the pointer, not reading it, is what decides: this one
+			// reads as naming a path inside the worktree and leads out.
+			let escaped = linked.join("node_modules/escape-inside");
+			assert!(
+				!escaped.join("own.txt").exists(),
+				"a pointer that leads out through a symlinked component is not carried"
+			);
+			assert!(source.join("node_modules/escape-inside/own.txt").exists(), "the source keeps it");
+			assert!(
+				outside_metadata.join("metadata/HEAD").exists(),
+				"the repository it pointed at is untouched"
+			);
+		}
 		let _ = repo.worktree_remove(&linked, true);
 	}
 

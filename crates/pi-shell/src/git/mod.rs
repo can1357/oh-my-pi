@@ -18,8 +18,12 @@
 //! instead copy-on-write clones the source checkout (APFS `clonefile`, Linux
 //! reflinks, Windows block cloning), registers the worktree metadata, and
 //! rewrites only the paths that differ from the target commit, so ignored build
-//! caches come along for free. Without a working clone backend it falls back to
-//! an in-process checkout.
+//! caches come along for free. What never comes along is a checkout whose
+//! `.git` points back into the source repository — a linked worktree, an
+//! absorbed submodule — which is emptied from the copy at any depth; a nested
+//! clone that stands on its own rides along like any other cache. Without a
+//! working clone backend it falls back to an in-process checkout, which
+//! carries no untracked content at all.
 //!
 //! Arguments are parsed the way git's parse-options does: bundled short flags
 //! (`-qd`, `-qbname`), unique long-option abbreviations, `--no-` negations,
