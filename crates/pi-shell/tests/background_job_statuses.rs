@@ -518,6 +518,180 @@ fn refused_disown_markers_do_not_leak_proc_records_through_restore() {
 	);
 }
 
+/// A refused older marker must not resurrect a child after its newer
+/// deletion, including when the deletion is retried by externalize.
+#[test]
+fn proc_retry_fault_reproduction_stays_deleted_after_each_restore() {
+	use pi_shell::{
+		bash::{
+			Budget, Cx, Engine, EngineConfig, ExtError, MemStore, RestoreOpts, Script, StateStore,
+			Step, StoreError, Vpid,
+			store::{BlobSlot, Change, Key, KeyBuf, Record, Table},
+		},
+		testkit::{FakeHost, fault::skeleton_init},
+	};
+	#[derive(Default)]
+	struct Refuse {
+		inner:          MemStore,
+		armed:          bool,
+		saw_delete:     bool,
+		deletions_left: usize,
+		log:            Vec<String>,
+	}
+	impl StateStore for Refuse {
+		fn get(&mut self, key: Key<'_>) -> Result<Option<&Record>, StoreError> {
+			self.inner.get(key)
+		}
+
+		fn scan(
+			&mut self,
+			table: Table,
+			f: &mut dyn FnMut(Key<'_>, &Record),
+		) -> Result<(), StoreError> {
+			self.inner.scan(table, f)
+		}
+
+		fn apply(&mut self, change: Change<'_>) -> Result<(), StoreError> {
+			if self.armed {
+				let marker = matches!(
+					&change,
+					Change::Put(Key::Proc(_), Record::Proc { parent: Some(Vpid(0)), status: None })
+				);
+				let deletion = matches!(&change, Change::Del(Key::Proc(_)));
+				if deletion {
+					self.saw_delete = true;
+				}
+				if (marker && !self.saw_delete) || (deletion && self.deletions_left > 0) {
+					if deletion {
+						self.deletions_left -= 1;
+					}
+					self.log.push(format!("REFUSED {change:?}"));
+					return Err(StoreError::Backend("proc change refused".into()));
+				}
+				if marker || deletion {
+					self.log.push(format!("ACCEPTED {change:?}"));
+				}
+			}
+			self.inner.apply(change)
+		}
+
+		fn put_blob(&mut self, slot: BlobSlot, bytes: &[u8]) -> Result<(), StoreError> {
+			self.inner.put_blob(slot, bytes)
+		}
+
+		fn get_blob(&mut self, slot: BlobSlot) -> Result<Option<Vec<u8>>, StoreError> {
+			self.inner.get_blob(slot)
+		}
+
+		fn del_blob(&mut self, slot: BlobSlot) -> Result<(), StoreError> {
+			self.inner.del_blob(slot)
+		}
+
+		fn epoch(&self) -> u64 {
+			self.inner.epoch()
+		}
+	}
+	fn records(store: &mut dyn StateStore, table: Table) -> Vec<(KeyBuf, Record)> {
+		let mut records = Vec::new();
+		store
+			.scan(table, &mut |k, r| records.push((k.to_buf(), r.clone())))
+			.unwrap();
+		records.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+		records
+	}
+	let mut failures = Vec::new();
+	for (name, armed, deletions_left, external_refusal) in [
+		("healthy backend", false, 0, false),
+		("arm reproduction", true, 3, false),
+		("repeated refusals through externalize", true, usize::MAX, true),
+	] {
+		let engine = Engine::new(EngineConfig::default());
+		let mut host = FakeHost::new();
+		let mut store = Refuse::default();
+		let mut shell = pi_shell::bash::Shell::create(
+			&engine,
+			&mut Cx { host: &mut host, store: &mut store },
+			skeleton_init(&[]),
+		)
+		.unwrap();
+		store.armed = armed;
+		store.deletions_left = deletions_left;
+		shell.submit(Script::command(b"f(){ :; }; f & disown".as_slice()));
+		let mut idle = false;
+		for _ in 0..10_000 {
+			match shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget::default()) {
+				Step::Idle => {
+					idle = true;
+					break;
+				},
+				Step::Yield | Step::Done { .. } => {},
+				Step::Blocked => {
+					host.fire_next_timer();
+				},
+				other => panic!("{name}: unexpected {other:?}"),
+			}
+		}
+		assert!(idle, "{name}: children must finish");
+		if armed {
+			assert!(store.saw_delete, "{name}: the child deletion must reach the backend");
+		}
+		if external_refusal {
+			let before = store.log.len();
+			let result = shell.externalize(&mut Cx { host: &mut host, store: &mut store });
+			println!("{name}: refused externalize={result:?}");
+			if result.is_ok() || store.log.len() == before {
+				failures.push(format!("{name}: externalize lost the pending refused deletion"));
+			}
+		}
+		println!("{name}: {}", store.log.join("\n"));
+		store.armed = false;
+		if armed && !external_refusal {
+			// The final refused step's fault is reported once, even when
+			// this call's retry succeeds on the now-healthy backend.
+			let recovery = shell.externalize(&mut Cx { host: &mut host, store: &mut store });
+			println!("{name}: retained refusal={recovery:?}");
+			if !matches!(recovery, Err(ExtError::Store(_))) {
+				failures.push(format!("{name}: the final refusal was not reported"));
+			}
+		}
+		for snapshot in 1..=2 {
+			let external = shell
+				.externalize(&mut Cx { host: &mut host, store: &mut store })
+				.unwrap();
+			assert!(external.lost.is_empty());
+			let second = shell
+				.externalize(&mut Cx { host: &mut host, store: &mut store })
+				.unwrap();
+			assert!(second.lost.is_empty());
+			println!("{name} snapshot {snapshot}: second_externalize={second:?}");
+			let image = store.inner.to_bytes();
+			drop(shell);
+			store.inner = MemStore::from_bytes(&image).unwrap();
+			let (restored, report) = pi_shell::bash::Shell::restore(
+				&engine,
+				&mut Cx { host: &mut host, store: &mut store },
+				RestoreOpts::default(),
+			)
+			.unwrap();
+			shell = restored;
+			let procs = records(&mut store, Table::Proc);
+			let jobs = records(&mut store, Table::Job);
+			println!(
+				"{name} snapshot {snapshot}: externalize={external:?} restore={report:?} \
+				 procs={procs:?} jobs={jobs:?}"
+			);
+			assert_eq!((report.vprocs, report.runs), (1, 0));
+			assert!(report.lost.is_empty() && report.abandoned.is_empty());
+			if !procs.is_empty() || !jobs.is_empty() {
+				failures.push(format!(
+					"{name} snapshot {snapshot}: shell owns no children, procs={procs:?} jobs={jobs:?}"
+				));
+			}
+		}
+	}
+	assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[test]
 fn wait_operand_order_survives_snapshot_restore() {
 	use std::sync::Arc;

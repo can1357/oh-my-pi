@@ -3573,6 +3573,347 @@ mod tests {
 		assert_eq!(kept.as_deref(), Some(&b"new"[..]), "the write after the refused deletion stands");
 	}
 
+	/// A retry must preserve the latest proc ownership decision, not the
+	/// order in which refused writes later happen to reach the backend.
+	#[test]
+	fn proc_retry_interleavings_restore_only_the_latest_owned_record() {
+		use crate::{
+			bash::{Budget, Cx, Engine, EngineConfig, MemStore, RestoreOpts, Shell, Step},
+			testkit::{FakeHost, fault::skeleton_init},
+		};
+
+		#[derive(Clone, Copy, Debug)]
+		enum Op {
+			Marker,
+			Owned,
+			Delete,
+			Sync,
+		}
+		struct Refusing {
+			inner:  MemStore,
+			refuse: bool,
+		}
+		impl StateStore for Refusing {
+			fn get(&mut self, key: Key<'_>) -> Result<Option<&Record>, StoreError> {
+				self.inner.get(key)
+			}
+
+			fn scan(
+				&mut self,
+				table: Table,
+				f: &mut dyn FnMut(Key<'_>, &Record),
+			) -> Result<(), StoreError> {
+				self.inner.scan(table, f)
+			}
+
+			fn apply(&mut self, change: Change<'_>) -> Result<(), StoreError> {
+				if self.refuse
+					&& matches!(change, Change::Put(Key::Proc(_), _) | Change::Del(Key::Proc(_)))
+				{
+					return Err(StoreError::Backend("proc change refused".into()));
+				}
+				self.inner.apply(change)
+			}
+
+			fn put_blob(&mut self, slot: BlobSlot, bytes: &[u8]) -> Result<(), StoreError> {
+				self.inner.put_blob(slot, bytes)
+			}
+
+			fn get_blob(&mut self, slot: BlobSlot) -> Result<Option<Vec<u8>>, StoreError> {
+				self.inner.get_blob(slot)
+			}
+
+			fn del_blob(&mut self, slot: BlobSlot) -> Result<(), StoreError> {
+				self.inner.del_blob(slot)
+			}
+
+			fn epoch(&self) -> u64 {
+				self.inner.epoch()
+			}
+		}
+		use Op::{Delete as D, Marker as M, Owned as O, Sync as S};
+		let rows: &[(&str, &[(Op, bool)], bool)] = &[
+			("older marker then refused deletion", &[(M, true), (D, true), (S, true)], false),
+			("marker then accepted deletion", &[(M, true), (D, false)], false),
+			("deletion then refused marker then deletion", &[(D, true), (M, true), (D, true)], false),
+			("write then deletion in one sync", &[(O, true), (D, true)], false),
+			("deletion then write in one sync", &[(D, true), (O, true)], true),
+			("old marker then refused owned record", &[(M, true), (O, true)], true),
+			("old marker then accepted owned record", &[(M, true), (O, false)], true),
+			("accepted marker then refused owned record", &[(M, false), (O, true)], true),
+			("accepted marker then refused deletion", &[(M, false), (D, true)], false),
+			(
+				"repeated deletion refusals",
+				&[(M, true), (D, true), (S, true), (S, true), (S, true)],
+				false,
+			),
+			("repeated write refusals", &[(D, true), (O, true), (S, true), (S, true)], true),
+			(
+				"alternating intent across syncs",
+				&[(M, true), (S, true), (D, true), (S, true), (O, true)],
+				true,
+			),
+		];
+		let mut failures = Vec::new();
+		for &(name, ops, owned) in rows {
+			let engine = Engine::new(EngineConfig::default());
+			let mut host = FakeHost::new();
+			let mut store = Refusing { inner: MemStore::new(), refuse: false };
+			let mut shell = Shell::create(
+				&engine,
+				&mut Cx { host: &mut host, store: &mut store },
+				skeleton_init(&[]),
+			)
+			.unwrap();
+			let vpid = Vpid(42);
+			let parent = Some(shell.procs[0].vpid);
+			let record = Record::Proc { parent, status: Some(23) };
+			for &(op, refuse) in ops {
+				store.refuse = refuse;
+				match op {
+					M => shell.k.root.write(
+						&mut store,
+						Change::Put(Key::Proc(vpid), Record::Proc {
+							parent: Some(super::super::DISOWNED),
+							status: None,
+						}),
+					),
+					O => shell
+						.k
+						.root
+						.write(&mut store, Change::Put(Key::Proc(vpid), record.clone())),
+					D => shell.k.root.write(&mut store, Change::Del(Key::Proc(vpid))),
+					S => shell.k.sync_root(&mut store, &shell.procs[0]),
+				}
+				if !matches!(op, S) && shell.k.root.disowned(&mut store, vpid) != matches!(op, M) {
+					failures.push(format!("{name}: ownership after {op:?}"));
+				}
+				shell.k.root.take_fault();
+			}
+			store.refuse = false;
+			shell.control().request_suspend();
+			assert!(matches!(
+				shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget::default()),
+				Step::SuspendReady
+			));
+			let external = shell
+				.externalize(&mut Cx { host: &mut host, store: &mut store })
+				.unwrap();
+			assert!(external.lost.is_empty());
+			let image = store.inner.to_bytes();
+			drop(shell);
+			let mut restored = MemStore::from_bytes(&image).unwrap();
+			let (_, report) = Shell::restore(
+				&engine,
+				&mut Cx { host: &mut host, store: &mut restored },
+				RestoreOpts::default(),
+			)
+			.unwrap();
+			let mut records = Vec::new();
+			restored
+				.scan(Table::Proc, &mut |key, rec| records.push((key.to_buf(), rec.clone())))
+				.unwrap();
+			println!("{name}: externalize={external:?} restore={report:?} records={records:?}");
+			assert_eq!((report.vprocs, report.runs), (1, 0));
+			assert!(report.lost.is_empty() && report.abandoned.is_empty());
+			let want = if owned {
+				vec![(KeyBuf::Proc(vpid), record)]
+			} else {
+				Vec::new()
+			};
+			if records != want {
+				failures.push(format!("{name}: wanted {want:?}, restored {records:?}"));
+			}
+		}
+		assert!(failures.is_empty(), "{}", failures.join("\n"));
+	}
+
+	/// Every length-four word over two-key writes/deletions, refusal modes,
+	/// replay and snapshot/restore must converge to the shell's desired records.
+	#[test]
+	fn proc_retry_exhaustive_two_key_sequences_preserve_owned_records() {
+		use crate::{
+			bash::{
+				Cx, Engine, EngineConfig, ExtError, MemStore, RestoreOpts, Shell, store::BlobSlot,
+			},
+			testkit::{FakeHost, fault::skeleton_init},
+		};
+		struct Refusing {
+			inner:   MemStore,
+			mask:    u8,
+			refused: usize,
+		}
+		impl StateStore for Refusing {
+			fn get(&mut self, key: Key<'_>) -> Result<Option<&Record>, StoreError> {
+				self.inner.get(key)
+			}
+
+			fn scan(
+				&mut self,
+				table: Table,
+				f: &mut dyn FnMut(Key<'_>, &Record),
+			) -> Result<(), StoreError> {
+				self.inner.scan(table, f)
+			}
+
+			fn apply(&mut self, change: Change<'_>) -> Result<(), StoreError> {
+				let bit = match change {
+					Change::Put(Key::Proc(_), _) => 1,
+					Change::Del(Key::Proc(_)) => 2,
+					_ => 0,
+				};
+				if self.mask & bit != 0 {
+					self.refused += 1;
+					return Err(StoreError::Backend("proc intent refused".into()));
+				}
+				self.inner.apply(change)
+			}
+
+			fn put_blob(&mut self, slot: BlobSlot, bytes: &[u8]) -> Result<(), StoreError> {
+				self.inner.put_blob(slot, bytes)
+			}
+
+			fn get_blob(&mut self, slot: BlobSlot) -> Result<Option<Vec<u8>>, StoreError> {
+				self.inner.get_blob(slot)
+			}
+
+			fn del_blob(&mut self, slot: BlobSlot) -> Result<(), StoreError> {
+				self.inner.del_blob(slot)
+			}
+
+			fn epoch(&self) -> u64 {
+				self.inner.epoch()
+			}
+		}
+		fn records(store: &mut dyn StateStore) -> Vec<(KeyBuf, Record)> {
+			let mut got = Vec::new();
+			store
+				.scan(Table::Proc, &mut |k, r| got.push((k.to_buf(), r.clone())))
+				.unwrap();
+			got.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+			got
+		}
+		fn snapshot(
+			engine: &std::sync::Arc<Engine>,
+			shell: &mut Shell,
+			host: &mut FakeHost,
+			store: &mut Refusing,
+			want: &[Option<Record>; 2],
+			reports: &mut std::collections::BTreeSet<String>,
+		) -> Result<bool, String> {
+			let before = store.refused;
+			let external = match shell.externalize(&mut Cx { host, store }) {
+				Ok(report) => report,
+				Err(ExtError::Store(_)) if store.refused > before => return Ok(false),
+				Err(err) => return Err(format!("unexpected snapshot failure {err:?}")),
+			};
+			if !external.lost.is_empty() {
+				return Err(format!("snapshot lost {:?}", external.lost));
+			}
+			let expected: Vec<_> = want
+				.iter()
+				.enumerate()
+				.filter_map(|(i, rec)| rec.clone().map(|r| (KeyBuf::Proc(Vpid(42 + i as u32)), r)))
+				.collect();
+			let before_restore = records(store);
+			store.inner = MemStore::from_bytes(&store.inner.to_bytes()).unwrap();
+			let (restored, report) =
+				Shell::restore(engine, &mut Cx { host, store }, RestoreOpts::default()).unwrap();
+			*shell = restored;
+			let after_restore = records(store);
+			reports.insert(format!("externalize={external:?} restore={report:?}"));
+			if (report.vprocs, report.runs) != (1, 0)
+				|| !report.lost.is_empty()
+				|| !report.abandoned.is_empty()
+			{
+				return Err(format!("unexpected restore {report:?}"));
+			}
+			if before_restore != expected || after_restore != expected {
+				return Err(format!(
+					"wanted {expected:?}, snapshot {before_restore:?}, restored {after_restore:?}"
+				));
+			}
+			Ok(true)
+		}
+		const ALPHABET: u32 = 18;
+		const CASES: u32 = ALPHABET.pow(4);
+		let engine = Engine::new(EngineConfig::default());
+		let mut reports = std::collections::BTreeSet::new();
+		let mut failures = Vec::new();
+		let mut failed_cases = 0;
+		let mut restores = 0;
+		for word in 0..CASES {
+			let mut host = FakeHost::new();
+			let mut store = Refusing { inner: MemStore::new(), mask: 0, refused: 0 };
+			let mut shell = Shell::create(
+				&engine,
+				&mut Cx { host: &mut host, store: &mut store },
+				skeleton_init(&[]),
+			)
+			.unwrap();
+			let parent = Some(shell.procs[0].vpid);
+			let mut want = [None, None];
+			let mut encoded = word;
+			let mut error = None;
+			for _ in 0..4 {
+				let op = encoded % ALPHABET;
+				encoded /= ALPHABET;
+				if op < 12 {
+					let i = (op / 6) as usize;
+					let vpid = Vpid(42 + i as u32);
+					store.mask = if op % 2 == 0 { 0 } else { 3 };
+					want[i] = match (op / 2) % 3 {
+						0 => Some(Record::Proc { parent: Some(Vpid(0)), status: None }),
+						1 => Some(Record::Proc { parent, status: Some(23 + i as i32) }),
+						_ => None,
+					};
+					let change = match &want[i] {
+						Some(rec) => Change::Put(Key::Proc(vpid), rec.clone()),
+						None => Change::Del(Key::Proc(vpid)),
+					};
+					shell.k.root.write(&mut store, change);
+				} else if op < 16 {
+					store.mask = (op - 12) as u8;
+					shell.k.sync_root(&mut store, &shell.procs[0]);
+				} else {
+					store.mask = if op == 16 { 0 } else { 3 };
+					match snapshot(&engine, &mut shell, &mut host, &mut store, &want, &mut reports) {
+						Ok(true) => restores += 1,
+						Ok(false) => {},
+						Err(err) => {
+							error = Some(err);
+							break;
+						},
+					}
+				}
+				shell.k.root.take_fault();
+			}
+			if error.is_none() {
+				store.mask = 0;
+				shell.k.root.take_fault();
+				match snapshot(&engine, &mut shell, &mut host, &mut store, &want, &mut reports) {
+					Ok(true) => restores += 1,
+					Ok(false) => unreachable!("healthy store cannot refuse"),
+					Err(err) => error = Some(err),
+				}
+			}
+			if let Some(err) = error {
+				failed_cases += 1;
+				if failures.len() < 20 {
+					failures
+						.push(format!("word {word} (base 18, first operation least significant): {err}"));
+				}
+			}
+		}
+		println!(
+			"exhaustive_cases={CASES} failed_cases={failed_cases} successful_restores={restores}"
+		);
+		for report in reports {
+			println!("{report}");
+		}
+		assert_eq!(failed_cases, 0, "{}", failures.join("\n"));
+	}
+
 	fn shell() -> (crate::bash::MemStore, Root, Vproc) {
 		let mut store = crate::bash::MemStore::new();
 		let root = Root::load(&mut store).unwrap();
