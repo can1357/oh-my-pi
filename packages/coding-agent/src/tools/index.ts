@@ -10,6 +10,7 @@ import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
 import { EditTool } from "../edit";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
+import type { ClobberCreatedFiles } from "./clobber-backup";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
 import type {
 	BeforeSubagentSpawnEvent,
@@ -545,8 +546,8 @@ export interface ToolSession {
 	/** Native snapshots, clipboard registers, and no-op guard shared by edit calls. */
 	editStore?: EditStore;
 
-	/** Absolute paths this session created, so copy-before-clobber knows what it may replace freely. */
-	clobberCreatedPaths?: Set<string>;
+	/** What this session wrote, so copy-before-clobber knows which files it may replace freely. */
+	clobberCreatedPaths?: ClobberCreatedFiles;
 
 	/** Per-session log of unresolved git merge conflict regions surfaced by
 	 *  `read`. Each entry gets a stable id N referenced by `write conflict://N`

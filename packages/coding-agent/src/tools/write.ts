@@ -57,7 +57,7 @@ import { routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-br
 import { formatApprovalArguments, truncateForPrompt } from "./approval";
 import { approvalTargetKey } from "./approval-targets";
 import { assertEditableFile } from "./auto-generated-guard";
-import { backupBeforeClobber, clobberBackupNote, recordCreatedPath } from "./clobber-backup";
+import { backupBeforeClobber, clobberBackupNote, noteOwnWrite } from "./clobber-backup";
 
 import { isReadTruncationNotice } from "@oh-my-pi/pi-tui/tools/hashline-format";
 import { hasColumnTruncationClause, isColumnTruncationNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
@@ -785,7 +785,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					await fs.rm(tmpPath, { force: true }).catch(() => {});
 					throw new ToolError(error instanceof Error ? error.message : String(error));
 				}
-				if (!exists) recordCreatedPath(this.session, finalPath);
+				await noteOwnWrite(this.session, finalPath, !exists);
 
 				const outputPath = `${archiveDisplay}:${resolvedArchivePath.archiveSubPath}`;
 				const writeLine = `Successfully wrote ${contentBytes} bytes to ${outputPath}`;
@@ -1147,7 +1147,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			);
 			// Copy aside whatever this write is about to replace, when losing it
 			// would be unrecoverable. Taken before the ACP-bridge branch below so
-			// an editor-routed write is insured on the same terms.
+			// an editor-routed write is insured on the same terms, and after the
+			// abort check so a cancelled call leaves no orphan copy behind.
+			signal?.throwIfAborted();
 			const clobberNote = clobberBackupNote(await backupBeforeClobber(this.session, absolutePath), displayPath);
 
 			// An ACP editor saves with its buffer's own line endings and encoding, so a write routed to
@@ -1190,7 +1192,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				if (clobberNote) {
 					resultText += `\n${clobberNote}`;
 				}
-				if (!existing) recordCreatedPath(this.session, absolutePath);
+				await noteOwnWrite(this.session, absolutePath, !existing);
 				return {
 					content: [{ type: "text", text: resultText }],
 					details: { resolvedPath: absolutePath, madeExecutable: madeExecutable || undefined },
@@ -1214,7 +1216,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			if (stripped) {
 				resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
 			}
-			if (!existing) recordCreatedPath(this.session, absolutePath);
+			await noteOwnWrite(this.session, absolutePath, !existing);
 			// A non-final batch entry returns before the batch's formatter runs: claim nothing yet.
 			const conventionNote =
 				batchRequest?.flush === false ? undefined : textFileConventionNote(applied, finalContent);

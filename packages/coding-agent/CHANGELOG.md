@@ -28,7 +28,7 @@
 - `unwrapHashlineHeaderPath` is exported from `@oh-my-pi/pi-coding-agent`, turning a `[path#TAG]` write/edit target into its plain path ([#17961](https://github.com/can1357/oh-my-pi/pull/17961) by [@materemias](https://github.com/materemias))
 - The `devin-cli` login imports Devin CLI credentials into a stored `devin` account, so the provider no longer requires `DEVIN_API_KEY` ([#13637](https://github.com/can1357/oh-my-pi/pull/13637) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 - The `devin-windsurf` login lets Windsurf Enterprise users authenticate the `devin` provider with their existing Windsurf account ([#13288](https://github.com/can1357/oh-my-pi/pull/13288) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
-- A `write` or `edit` that replaces a file this session did not create, or that writes anywhere under another session's directory, now copies the old content to `~/.omp/agent/clobbered/<date>/` first and says where it went; nothing is blocked, refused, or held for approval. Copies are swept after 14 days, back under a 2 GiB budget, and a file over 64 MiB is reported instead of copied ([#18231](https://github.com/can1357/oh-my-pi/pull/18231) by [@sjawhar](https://github.com/sjawhar))
+- A `write` or `edit` that replaces or deletes a file this session did not create, or that writes anywhere under another session's directory, now copies the old content to `~/.omp/agent/clobbered/<date>/` first and says where it went; nothing is blocked, refused, or held for approval. Copies older than 14 days are swept, completed days are swept back under a 2 GiB budget, and a file over 64 MiB is reported instead of copied ([#18231](https://github.com/can1357/oh-my-pi/pull/18231) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 

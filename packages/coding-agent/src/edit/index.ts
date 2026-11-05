@@ -35,7 +35,7 @@ import type { ToolSession } from "../tools";
 import { routeWriteThroughBridge } from "../tools/acp-bridge";
 import { approvalTargetKey } from "../tools/approval-targets";
 import { strictestApproval, truncateForPrompt } from "../tools/approval";
-import { backupBeforeClobber, clobberBackupNote, forgetCreatedPath, recordCreatedPath } from "../tools/clobber-backup";
+import { backupBeforeClobber, clobberBackupNote, forgetOwnWrite, noteOwnWrite } from "../tools/clobber-backup";
 import {
 	deleteFileWithFallback,
 	hasFileWriteFallback,
@@ -715,8 +715,16 @@ export class EditTool implements AgentTool<TInput> {
 	}
 
 	async #write(request: EditWriteRequest, signal?: AbortSignal, clobberNotes?: string[]): Promise<EditWriteResponse> {
+		// Before the op switch, so no branch can act first: a delete, an
+		// ACP-routed update and a local update all destroy what is at
+		// `request.path`, and a create has nothing there to lose. The move
+		// branch below insures its destination separately.
+		if (request.op !== "create" && request.op !== "move") {
+			await this.#insureClobber(request.path, request.displayPath, clobberNotes);
+		}
 		if (request.op === "delete") {
 			await deleteFileWithFallback(request.path, Bun.file(request.path));
+			forgetOwnWrite(this.session, request.path);
 			if (this.session.enableLsp ?? true) {
 				await notifyWorkspaceWatchedFiles(
 					this.session.cwd,
@@ -751,11 +759,20 @@ export class EditTool implements AgentTool<TInput> {
 				path.relative(this.session.cwd, request.moveTo) || request.moveTo,
 				clobberNotes,
 			);
+			// A plain rename carries the source's bytes to the destination and
+			// loses nothing; a move that also rewrites the file destroys them, and
+			// the source is about to be unlinked.
+			const sourceBytes = await Bun.file(request.path)
+				.bytes()
+				.catch(() => undefined);
+			if (sourceBytes !== undefined && Buffer.compare(sourceBytes, Buffer.from(request.content, "utf8")) !== 0) {
+				await this.#insureClobber(request.path, request.displayPath, clobberNotes);
+			}
 			await writeFileWithFallback(request.moveTo, request.content);
 			if (mode !== undefined) await chmodMovedFile(request.moveTo, mode);
 			await deleteFileWithFallback(request.path, Bun.file(request.path));
-			if (!destinationExisted) recordCreatedPath(this.session, request.moveTo);
-			forgetCreatedPath(this.session, request.path);
+			await noteOwnWrite(this.session, request.moveTo, !destinationExisted);
+			forgetOwnWrite(this.session, request.path);
 			if (this.session.enableLsp ?? true) {
 				await notifyWorkspaceWatchedFiles(
 					this.session.cwd,
@@ -799,7 +816,6 @@ export class EditTool implements AgentTool<TInput> {
 		} else if (request.op === "create") {
 			await mkdirAllowingFallback(path.dirname(request.path));
 		}
-		await this.#insureClobber(request.path, request.displayPath, clobberNotes);
 
 		// `begin()` claims this mutation's version; only bump when the writethrough
 		// never began a deferred fetch for the path (LSP off, unflushed batch).
@@ -816,7 +832,7 @@ export class EditTool implements AgentTool<TInput> {
 				return this.#deferredDiagnostics.begin(request.path);
 			},
 		);
-		if (request.op === "create") recordCreatedPath(this.session, request.path);
+		await noteOwnWrite(this.session, request.path, request.op === "create");
 
 		if (preWriteBytes !== undefined) {
 			// Fail when a content-changing write left disk at the pre-image. Compare

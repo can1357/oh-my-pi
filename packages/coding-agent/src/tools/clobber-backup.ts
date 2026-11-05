@@ -1,28 +1,33 @@
 /**
  * Copy-before-clobber: keep the bytes a session is about to destroy.
  *
- * Two writes end badly often enough to be worth insuring against:
+ * Two mutations end badly often enough to be worth insuring against:
  *
- * 1. A session replaces a whole file it did not create. Whatever was in it is
- *    gone the instant the write lands — there is no undo, and for a file no
- *    version control tracks there is nothing to go back to.
+ * 1. A session replaces or deletes a whole file it did not create. Whatever was
+ *    in it is gone the instant the write lands — there is no undo, and for a
+ *    file no version control tracks there is nothing to go back to.
  * 2. A session writes under ANOTHER session's directory. A live transcript or a
  *    sibling's artifact has no other copy anywhere.
  *
  * Before either, the caller copies the old content aside and tells the model
  * where it went. Nothing is blocked, refused, or held for approval: a write
  * that would have happened still happens, byte for byte, and a backup that
- * cannot be taken degrades to a note saying so. The only cost on the ordinary
- * path — a session rewriting a file it just created — is one `stat` the callers
- * already had in hand.
+ * cannot be taken degrades to a note saying so. Nothing here throws.
+ *
+ * What it costs on the ordinary path — a session rewriting a file it created —
+ * is one `stat`, one `realpath` and a map lookup. The `realpath` is what makes
+ * the sessions-root test agree with itself when `~/.omp` or the target is
+ * reached through a symlink; a lexical test would miss those and under-insure.
  *
  * Bounds (see {@link RETENTION_DAYS}, {@link STORE_BUDGET_BYTES},
  * {@link MAX_BACKUP_BYTES}): copies live under `~/.omp/agent/clobbered/<date>/`
- * for two weeks, the store is swept back under its byte budget once per process
- * per day, and a single file past the per-file cap is reported rather than
- * copied.
+ * for two weeks, and completed days are swept back under a byte budget once per
+ * process per day. The budget does NOT bound the current day — a process that
+ * rewrites large files all day keeps every copy until tomorrow's sweep — and a
+ * single file past the per-file cap is reported rather than copied.
  */
 import * as fs from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import * as path from "node:path";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { getClobberBackupsDir, getSessionsDir, pathIsWithin } from "@oh-my-pi/pi-utils/dirs";
@@ -32,92 +37,178 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 /** Day directories older than this are swept. Two weeks outlives a weekend plus the week it takes to notice. */
 const RETENTION_DAYS = 14;
 
-/** Total bytes the store may hold after a sweep. Oldest days go first; the current day is never swept. */
+/** Bytes the COMPLETED days may hold after a sweep. Oldest go first; the current day is never swept. */
 const STORE_BUDGET_BYTES = 2 * 1024 * 1024 * 1024;
 
 /** Largest file copied aside. Past this the loss is reported instead, so one huge write cannot fill the disk. */
 const MAX_BACKUP_BYTES = 64 * 1024 * 1024;
 
 const DAY_DIR_RE = /^\d{4}-\d{2}-\d{2}$/;
+const INDEX_NAME = "index.jsonl";
 
 /** Why the old content was worth keeping. */
 export type ClobberReason = "not-created-here" | "foreign-session-dir";
 
-/** What happened to the bytes a write was about to replace. */
+/** What happened to the bytes a mutation was about to destroy. */
 export type ClobberBackup =
 	| { kind: "saved"; reason: ClobberReason; from: string; to: string; bytes: number }
 	| { kind: "too-large"; reason: ClobberReason; from: string; bytes: number }
 	| { kind: "failed"; reason: ClobberReason; from: string; error: string };
 
+/** What a path looked like when this session last wrote it. The inode catches a delete and recreate. */
+interface WrittenFile {
+	size: number;
+	mtimeMs: number;
+	ino: number;
+}
+
 /**
- * Owner of the per-session set of paths this session brought into existence.
- * Lives on the {@link ToolSession} the way the edit store does, so a subagent
- * keeps its own and inherits nothing: a file created by someone else is a file
- * this session did not create.
+ * The files this session brought into existence, and the identity of the
+ * session that did. A `ToolSession` outlives the logical session it serves
+ * (the SDK re-points `getSessionFile`), so the key is re-checked on every use
+ * and a change throws the whole set away rather than letting one session
+ * inherit another's exemptions.
  */
+export interface ClobberCreatedFiles {
+	key: string;
+	byPath: Map<string, WrittenFile>;
+}
+
+/** Owner of the per-session created-file record. Lives on the `ToolSession` the way the edit store does. */
 export interface ClobberBackupOwner {
-	/** Absolute paths created by this session; replacing one destroys only its own work. */
-	clobberCreatedPaths?: Set<string>;
+	clobberCreatedPaths?: ClobberCreatedFiles;
 }
 
 /** The session facts a backup decision needs. A structural subset of `ToolSession`. */
 export interface ClobberBackupSession extends ClobberBackupOwner {
 	cwd: string;
 	getSessionFile?: () => string | null;
-	getArtifactsDir?: () => string | null;
+	getSessionId?: () => string | null;
+}
+
+/** Identity of the logical session behind a `ToolSession` right now. */
+function sessionKey(session: ClobberBackupSession): string {
+	return `${session.getSessionFile?.() ?? ""}\u0000${session.getSessionId?.() ?? ""}`;
+}
+
+/** The session's created-file record, emptied when the session it belongs to has changed. */
+function createdFiles(session: ClobberBackupSession): ClobberCreatedFiles {
+	const key = sessionKey(session);
+	const existing = session.clobberCreatedPaths;
+	if (existing?.key === key) return existing;
+	const fresh: ClobberCreatedFiles = { key, byPath: new Map<string, WrittenFile>() };
+	session.clobberCreatedPaths = fresh;
+	return fresh;
 }
 
 /**
- * Remember that this session created `absolutePath`, so a later rewrite of it
- * is not insured against. Call it only once the file is actually on disk.
+ * Realpath memo. Every comparison below runs on resolved paths so one spelling
+ * of `~/.omp` cannot be called foreign to another; the memo keeps the sessions
+ * root and the session's own transcript off the syscall path after first use.
+ * Bounded because a long session touches many files and this is not a cache
+ * anyone reads twice.
  */
-export function recordCreatedPath(session: ClobberBackupOwner, absolutePath: string): void {
-	(session.clobberCreatedPaths ??= new Set<string>()).add(path.resolve(absolutePath));
-}
+const realPathMemo = new Map<string, string>();
+const REAL_PATH_MEMO_MAX = 64;
 
-/** Forget a path this session created, for a caller that then moved or deleted it. */
-export function forgetCreatedPath(session: ClobberBackupOwner, absolutePath: string): void {
-	session.clobberCreatedPaths?.delete(path.resolve(absolutePath));
+/** `target` with every symlink resolved, or its lexically resolved form when it cannot be. */
+function realPath(target: string, memoize: boolean): string {
+	const resolved = path.resolve(target);
+	if (memoize) {
+		const hit = realPathMemo.get(resolved);
+		if (hit !== undefined) return hit;
+	}
+	let real: string;
+	try {
+		real = realpathSync.native(resolved);
+	} catch {
+		real = resolved;
+	}
+	if (memoize) {
+		if (realPathMemo.size >= REAL_PATH_MEMO_MAX) realPathMemo.clear();
+		realPathMemo.set(resolved, real);
+	}
+	return real;
 }
 
 /**
- * True when `target` sits under the sessions root but outside everything this
- * session owns there — another session's transcript, its artifacts, or another
- * project's bucket. A session's own transcript file and its own artifacts
- * directory (the transcript path without `.jsonl`) are its own.
+ * True when `realTarget` sits under the sessions root but outside everything
+ * this session owns there — another session's transcript, its artifacts, or
+ * another project's bucket. A session owns its own transcript file and the
+ * directory of the same name without `.jsonl`, and nothing else.
  *
- * A subagent owns only its own file and artifacts: writing into its parent's
- * directory is writing into another session's directory, which is exactly the
- * case worth insuring.
+ * Deliberately not `getArtifactsDir()`: a subagent adopts its parent's artifact
+ * manager, so that getter returns the PARENT's directory and would exempt
+ * exactly the writes this trigger exists to insure.
+ *
+ * A session with no transcript (print mode, SDK embedding, a bare tool session)
+ * owns nothing under the root, so every write there is insured. That is the
+ * safe direction: it copies more, never less.
  */
-function isForeignSessionDirectory(session: ClobberBackupSession, target: string): boolean {
+function isForeignSessionDirectory(session: ClobberBackupSession, realTarget: string): boolean {
 	let sessionsRoot: string;
 	try {
-		sessionsRoot = getSessionsDir();
+		sessionsRoot = realPath(getSessionsDir(), true);
 	} catch {
 		return false;
 	}
-	if (!pathIsWithin(sessionsRoot, target)) return false;
-	const sessionFile = session.getSessionFile?.() ?? undefined;
+	if (!pathIsWithin(sessionsRoot, realTarget)) return false;
+	const sessionFile = session.getSessionFile?.();
 	if (sessionFile) {
-		const own = path.resolve(sessionFile);
-		if (own === target) return false;
+		const own = realPath(sessionFile, true);
+		if (own === realTarget) return false;
 		const ownArtifacts = own.endsWith(".jsonl") ? own.slice(0, -".jsonl".length) : own;
-		if (pathIsWithin(ownArtifacts, target)) return false;
+		if (pathIsWithin(ownArtifacts, realTarget)) return false;
 	}
-	const artifactsDir = session.getArtifactsDir?.() ?? undefined;
-	if (artifactsDir && pathIsWithin(artifactsDir, target)) return false;
 	return true;
 }
 
-/** The reason this write needs insuring, or `undefined` when it destroys nothing but this session's own work. */
-function clobberReason(session: ClobberBackupSession, target: string): ClobberReason | undefined {
-	if (isForeignSessionDirectory(session, target)) return "foreign-session-dir";
-	if (session.clobberCreatedPaths?.has(target)) return undefined;
+/** The reason this mutation needs insuring, or `undefined` when it destroys only this session's own work. */
+function clobberReason(
+	session: ClobberBackupSession,
+	realTarget: string,
+	stat: { size: number; mtimeMs: number; ino: number },
+): ClobberReason | undefined {
+	if (isForeignSessionDirectory(session, realTarget)) return "foreign-session-dir";
+	const written = createdFiles(session).byPath.get(realTarget);
+	// Same path is not enough: another writer may have replaced the content, or
+	// the file itself, since this session wrote it.
+	if (written && written.size === stat.size && written.mtimeMs === stat.mtimeMs && written.ino === stat.ino) {
+		return undefined;
+	}
 	return "not-created-here";
 }
 
-/** `<HHMMSS><ms>-<rand>-<name>`: sorts by time inside its day, keeps the original extension readable. */
+/**
+ * Remember what `absolutePath` looks like now, so a later rewrite of a file
+ * this session authored is not insured against. Call it after the bytes are on
+ * disk. `created` says the mutation brought the file into existence; without it
+ * this only refreshes a record the session already holds, so a file someone
+ * else made never becomes "ours" by being written to.
+ */
+export async function noteOwnWrite(
+	session: ClobberBackupSession,
+	absolutePath: string,
+	created: boolean,
+): Promise<void> {
+	try {
+		const target = realPath(absolutePath, false);
+		const files = createdFiles(session);
+		if (!created && !files.byPath.has(target)) return;
+		const stat = await fs.stat(target).catch(() => undefined);
+		if (!stat?.isFile()) return;
+		files.byPath.set(target, { size: stat.size, mtimeMs: stat.mtimeMs, ino: Number(stat.ino) });
+	} catch (error) {
+		logger.debug("Could not record a written path", { path: absolutePath, error: String(error) });
+	}
+}
+
+/** Forget a path this session created, for a caller that then deleted or moved it away. */
+export function forgetOwnWrite(session: ClobberBackupSession, absolutePath: string): void {
+	session.clobberCreatedPaths?.byPath.delete(realPath(absolutePath, false));
+}
+
+/** `<HHMMSSmmm>-<rand>-<name>`: sorts by time inside its day, keeps the original extension readable. */
 function backupFileName(now: Date, originalName: string): string {
 	const stamp =
 		`${now.getHours()}`.padStart(2, "0") +
@@ -125,8 +216,8 @@ function backupFileName(now: Date, originalName: string): string {
 		`${now.getSeconds()}`.padStart(2, "0") +
 		`${now.getMilliseconds()}`.padStart(3, "0");
 	const unique = Bun.randomUUIDv7("hex").slice(-8);
-	// A path has no separators in its basename; the cap keeps a pathological
-	// name from pushing the whole entry past NAME_MAX.
+	// A basename has no separators; the cap keeps a pathological name from
+	// pushing the whole entry past NAME_MAX.
 	return `${stamp}-${unique}-${originalName.slice(-120)}`;
 }
 
@@ -135,7 +226,7 @@ function dayKey(now: Date): string {
 	return `${now.getFullYear()}-${`${now.getMonth() + 1}`.padStart(2, "0")}-${`${now.getDate()}`.padStart(2, "0")}`;
 }
 
-/** Day directory of the store, newest last. Unreadable store: empty. */
+/** Day directories of the store, oldest first. Unreadable store: empty. */
 async function listDayDirs(root: string): Promise<string[]> {
 	try {
 		const entries = await fs.readdir(root, { withFileTypes: true });
@@ -149,53 +240,60 @@ async function listDayDirs(root: string): Promise<string[]> {
 	}
 }
 
-/** Bytes a day directory holds, counting only its own files (the store is one level deep plus its index). */
-async function dayDirBytes(dayDir: string): Promise<number> {
+/**
+ * Bytes a day holds, read from its index rather than by stat-ing every entry:
+ * one file read per day instead of one syscall per backup, which is what keeps
+ * the sweep off the critical path of a tool call in a store with many entries.
+ * A day whose index is missing or corrupt reports 0 and is therefore never the
+ * reason the budget sweep fires.
+ */
+async function dayBytesFromIndex(dayDir: string): Promise<number> {
 	let total = 0;
 	try {
-		for (const entry of await fs.readdir(dayDir, { withFileTypes: true })) {
-			if (!entry.isFile()) continue;
-			total += (await fs.stat(path.join(dayDir, entry.name)).catch(() => undefined))?.size ?? 0;
+		const text = await Bun.file(path.join(dayDir, INDEX_NAME)).text();
+		for (const line of text.split("\n")) {
+			if (!line) continue;
+			const entry: unknown = JSON.parse(line);
+			const bytes = entry && typeof entry === "object" && "bytes" in entry ? entry.bytes : undefined;
+			if (typeof bytes === "number") total += bytes;
 		}
 	} catch (error) {
-		if (!isEnoent(error)) logger.debug("Clobber backup day unreadable", { dayDir, error: String(error) });
+		if (!isEnoent(error)) logger.debug("Clobber backup index unreadable", { dayDir, error: String(error) });
 	}
 	return total;
 }
 
-/** The day whose sweep this process already ran; one sweep per process per day is enough. */
-let sweptDay: string | undefined;
+/** Stores already swept today, keyed by store root: one sweep per store per process per day. */
+const sweptStores = new Map<string, string>();
 
 /**
  * Drop day directories past {@link RETENTION_DAYS}, then the oldest remaining
- * ones until the store fits {@link STORE_BUDGET_BYTES}. Today is never dropped:
- * the backup that triggered the sweep is in it. Best-effort throughout — a
- * store that cannot be swept still takes backups.
+ * ones until the completed days fit {@link STORE_BUDGET_BYTES}. Today is never
+ * dropped: the backup that triggered the sweep is in it, and so is everything
+ * the live processes write before midnight. Best-effort throughout — a store
+ * that cannot be swept still takes backups.
  */
 async function sweepStore(root: string, today: string): Promise<void> {
-	const cutoff = new Date(Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000);
-	const cutoffKey = dayKey(cutoff);
-	const days = await listDayDirs(root);
+	const cutoffKey = dayKey(new Date(Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000));
 	const kept: string[] = [];
-	for (const day of days) {
+	for (const day of await listDayDirs(root)) {
 		if (day < cutoffKey && day !== today) {
 			await fs.rm(path.join(root, day), { recursive: true, force: true }).catch(error => {
-				logger.debug("Clobber backup sweep failed", { day, error: String(error) });
+				logger.debug("Clobber backup age sweep failed", { day, error: String(error) });
 			});
 			continue;
 		}
-		kept.push(day);
+		if (day !== today) kept.push(day);
 	}
 	let total = 0;
 	const sizes = new Map<string, number>();
 	for (const day of kept) {
-		const bytes = await dayDirBytes(path.join(root, day));
+		const bytes = await dayBytesFromIndex(path.join(root, day));
 		sizes.set(day, bytes);
 		total += bytes;
 	}
 	for (const day of kept) {
 		if (total <= STORE_BUDGET_BYTES) break;
-		if (day === today) continue;
 		await fs.rm(path.join(root, day), { recursive: true, force: true }).catch(error => {
 			logger.debug("Clobber backup budget sweep failed", { day, error: String(error) });
 		});
@@ -204,53 +302,66 @@ async function sweepStore(root: string, today: string): Promise<void> {
 }
 
 /**
- * Copy aside whatever `absolutePath` holds, when replacing it would destroy
- * something this session cannot put back. Returns `undefined` when there is
- * nothing to insure: the path is absent, is not a regular file, is empty, or
- * holds only this session's own work outside any other session's directory.
+ * Copy aside whatever `absolutePath` holds, when replacing or removing it would
+ * destroy something this session cannot put back. Returns `undefined` when
+ * there is nothing to insure: the path is absent, is not a regular file, is
+ * empty, or holds only this session's own work outside any other session's
+ * directory.
  *
- * Never throws and never blocks the write that follows.
+ * Never throws, and never stops the mutation that follows.
  */
 export async function backupBeforeClobber(
 	session: ClobberBackupSession,
 	absolutePath: string,
 ): Promise<ClobberBackup | undefined> {
-	const target = path.resolve(absolutePath);
-	const reason = clobberReason(session, target);
-	if (reason === undefined) return undefined;
-
-	const stat = await fs.stat(target).catch(() => undefined);
-	// Absent (this write creates it), a directory or a device: no bytes to lose.
-	if (!stat?.isFile() || stat.size === 0) return undefined;
-	if (stat.size > MAX_BACKUP_BYTES) return { kind: "too-large", reason, from: target, bytes: stat.size };
-
-	const now = new Date();
-	const day = dayKey(now);
-	const root = getClobberBackupsDir();
-	const dayDir = path.join(root, day);
-	const destination = path.join(dayDir, backupFileName(now, path.basename(target)));
+	let reason: ClobberReason | undefined;
+	let target = path.resolve(absolutePath);
+	let size = 0;
 	try {
+		// The stat comes first: an absent path (the common `create`) answers the
+		// whole question without resolving anything.
+		const stat = await fs.stat(target).catch(error => {
+			if (isEnoent(error)) return undefined;
+			throw error;
+		});
+		if (!stat?.isFile() || stat.size === 0) return undefined;
+		size = stat.size;
+		target = realPath(target, false);
+		reason = clobberReason(session, target, {
+			size: stat.size,
+			mtimeMs: stat.mtimeMs,
+			ino: Number(stat.ino),
+		});
+		if (reason === undefined) return undefined;
+		if (size > MAX_BACKUP_BYTES) return { kind: "too-large", reason, from: target, bytes: size };
+
+		const now = new Date();
+		const day = dayKey(now);
+		const root = getClobberBackupsDir();
+		const dayDir = path.join(root, day);
+		const destination = path.join(dayDir, backupFileName(now, path.basename(target)));
 		await fs.mkdir(dayDir, { recursive: true });
 		// A reflink where the filesystem has one, a plain copy everywhere else —
 		// never a hard link, which the in-place truncate below would follow.
 		await fs.copyFile(target, destination, fs.constants.COPYFILE_FICLONE);
-		// The name alone cannot say where the bytes came from; the day's index can.
+		// The name alone cannot say where the bytes came from; the day's index can,
+		// and the sweep reads it instead of stat-ing every entry.
 		await fs.appendFile(
-			path.join(dayDir, "index.jsonl"),
-			`${JSON.stringify({ at: now.toISOString(), reason, from: target, to: destination, bytes: stat.size })}\n`,
+			path.join(dayDir, INDEX_NAME),
+			`${JSON.stringify({ at: now.toISOString(), reason, from: target, to: destination, bytes: size })}\n`,
 		);
+		if (sweptStores.get(root) !== day) {
+			sweptStores.set(root, day);
+			await sweepStore(root, day);
+		}
+		return { kind: "saved", reason, from: target, to: destination, bytes: size };
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
-		logger.warn("Could not copy a file aside before it was overwritten", { from: target, error: message });
-		return { kind: "failed", reason, from: target, error: message };
+		logger.warn("Could not copy a file aside before it was replaced", { from: target, error: message });
+		// Before the reason is known there is nothing to report: the caller cannot
+		// say whether anything was at risk, and inventing a note would be a guess.
+		return reason === undefined ? undefined : { kind: "failed", reason, from: target, error: message };
 	}
-	if (sweptDay !== day) {
-		sweptDay = day;
-		await sweepStore(root, day).catch(error => {
-			logger.debug("Clobber backup sweep failed", { error: String(error) });
-		});
-	}
-	return { kind: "saved", reason, from: target, to: destination, bytes: stat.size };
 }
 
 function reasonPhrase(reason: ClobberReason): string {
@@ -260,9 +371,9 @@ function reasonPhrase(reason: ClobberReason): string {
 }
 
 /**
- * One line telling the model what happened to the content it just replaced, or
- * `undefined` when nothing was at risk. Appended to the tool result, so the
- * session that caused the loss is the one told where to find the copy.
+ * One line telling the model what happened to the content it is about to
+ * replace, or `undefined` when nothing was at risk. Appended to the tool
+ * result, so the session that caused the loss is the one told where the copy is.
  */
 export function clobberBackupNote(backup: ClobberBackup | undefined, displayPath: string): string | undefined {
 	if (!backup) return undefined;
@@ -271,13 +382,8 @@ export function clobberBackupNote(backup: ClobberBackup | undefined, displayPath
 		case "saved":
 			return `[Backup] ${displayPath}: ${why}, so its previous ${backup.bytes} bytes were copied to ${shortenPath(backup.to)}`;
 		case "too-large":
-			return `[Backup] ${displayPath}: ${why}, but its previous ${backup.bytes} bytes were over the ${MAX_BACKUP_BYTES}-byte backup limit and are gone`;
+			return `[Backup] ${displayPath}: ${why}, but its previous ${backup.bytes} bytes were over the ${MAX_BACKUP_BYTES}-byte backup limit, so they are not recoverable from here`;
 		case "failed":
-			return `[Backup] ${displayPath}: ${why}, but its previous content could not be copied aside (${backup.error}) and is gone`;
+			return `[Backup] ${displayPath}: ${why}, but its previous content could not be copied aside (${backup.error}), so it is not recoverable from here`;
 	}
-}
-
-/** Reset the once-per-process-per-day sweep marker. Tests only. */
-export function resetClobberSweepForTests(): void {
-	sweptDay = undefined;
 }

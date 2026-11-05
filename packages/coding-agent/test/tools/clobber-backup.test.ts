@@ -5,9 +5,9 @@ import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { resetClobberSweepForTests } from "@oh-my-pi/pi-coding-agent/tools/clobber-backup";
+import { backupBeforeClobber } from "@oh-my-pi/pi-coding-agent/tools/clobber-backup";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
-import { getClobberBackupsDir, getSessionsDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { getAgentDir, getClobberBackupsDir, getSessionsDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { readArchiveEntries, writeArchive } from "@oh-my-pi/pi-utils/ar";
 
 /** The old content of the file each clobber test destroys; distinctive enough to find anywhere on disk. */
@@ -47,23 +47,23 @@ async function backupFiles(): Promise<string[]> {
 
 let tempDir: string;
 let agentDir: string;
-let originalAgentDir: string | undefined;
+let originalAgentDir: string;
 
 beforeEach(async () => {
 	resetSettingsForTest();
-	resetClobberSweepForTests();
 	tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-clobber-work-"));
 	agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-clobber-agent-"));
-	originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+	// Captured as a resolved path, not an env var: only `setAgentDir` rebuilds the
+	// resolver, so clearing the variable would leave later test files pointing at
+	// the directory this one deletes.
+	originalAgentDir = getAgentDir();
 	setAgentDir(agentDir);
 	await Settings.init({ inMemory: true, cwd: tempDir });
 });
 
 afterEach(async () => {
 	resetSettingsForTest();
-	resetClobberSweepForTests();
-	if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-	else setAgentDir(originalAgentDir);
+	setAgentDir(originalAgentDir);
 	await removeWithRetries(tempDir);
 	await removeWithRetries(agentDir);
 });
@@ -145,6 +145,64 @@ describe("copy-before-clobber: a file this session did not create", () => {
 		expect(resultText(result)).toContain("this session did not create it");
 		const member = (await readArchiveEntries({ path: archive, format: "tar" })).get("notes.md");
 		expect(await new Response(member).text()).toBe("gone\n");
+	});
+
+	test("deleting a file this session did not create keeps its bytes", async () => {
+		const target = path.join(tempDir, "register.md");
+		await fs.writeFile(target, DOOMED);
+
+		const result = await new EditTool(makeSession(tempDir), "patch").execute("edit-delete", {
+			path: "register.md",
+			edits: [{ op: "delete" }],
+		});
+
+		expect(result.isError).toBeFalsy();
+		expect(await Bun.file(target).exists()).toBe(false);
+		const backups = await backupFiles();
+		expect(backups).toHaveLength(1);
+		expect(await Bun.file(backups[0]!).text()).toBe(DOOMED);
+		expect(resultText(result)).toContain("this session did not create it");
+	});
+
+	test("a file this session created and another writer then replaced is no longer its own", async () => {
+		const session = makeSession(tempDir);
+		const tool = new WriteTool(session);
+		await tool.execute("create", { path: "scratch.md", content: "mine\n" });
+		// A different process replaces the content behind this session's back.
+		await fs.writeFile(path.join(tempDir, "scratch.md"), DOOMED);
+
+		const result = await tool.execute("rewrite", { path: "scratch.md", content: "gone\n" });
+
+		const backups = await backupFiles();
+		expect(backups).toHaveLength(1);
+		expect(await Bun.file(backups[0]!).text()).toBe(DOOMED);
+		expect(resultText(result)).toContain("this session did not create it");
+	});
+
+	test("a file over the size limit is reported rather than copied", async () => {
+		const target = path.join(tempDir, "huge.bin");
+		await fs.writeFile(target, "x");
+		await fs.truncate(target, 65 * 1024 * 1024);
+
+		const backup = await backupBeforeClobber(makeSession(tempDir), target);
+
+		expect(backup).toMatchObject({ kind: "too-large", reason: "not-created-here", bytes: 65 * 1024 * 1024 });
+		expect(await backupFiles()).toHaveLength(0);
+	});
+
+	test("an unwritable backup store reports the loss instead of failing the write", async () => {
+		await fs.writeFile(path.join(tempDir, "register.md"), DOOMED);
+		// A regular file where the store's directory belongs: every mkdir under it fails.
+		await fs.writeFile(getClobberBackupsDir(), "not a directory\n");
+
+		const result = await new WriteTool(makeSession(tempDir)).execute("clobber", {
+			path: "register.md",
+			content: "gone\n",
+		});
+
+		expect(await Bun.file(path.join(tempDir, "register.md")).text()).toBe("gone\n");
+		expect(resultText(result)).toContain("could not be copied aside");
+		expect(resultText(result)).toContain("not recoverable from here");
 	});
 });
 
