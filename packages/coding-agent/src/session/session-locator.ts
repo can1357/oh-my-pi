@@ -16,6 +16,13 @@
  *   files under the root (staged and renamed into place). It adds what the log
  *   lacks, such as sessions an older omp wrote; it removes nothing.
  *
+ * The index is a cache derived from the session files: nothing about a
+ * session's existence lives only in it. A line that could not be written is
+ * logged and dropped, never queued, because `omp session reindex` rebuilds a
+ * root from that root's own tree, skipping with a count whatever it cannot
+ * read — so an unreadable artifact directory never costs the index a session
+ * that is readable beside it.
+ *
  * A lookup reads both files of every root and checks each candidate: the
  * relative path under its own root first, then under every other root (so a
  * tree moved wholesale, or bucket by bucket, to a root on the list is still
@@ -168,7 +175,7 @@ export function recordSessionLocation(
 		appendIndexLine(indexFile, `\n${id}\t${encodeStoredPath(owner?.relative ?? absolute)}\n`, owner === undefined);
 		return true;
 	} catch (error) {
-		logger.warn("Session index append failed; will retry on the next write", {
+		logger.warn("Session index append failed; `omp session reindex` rebuilds it", {
 			indexFile,
 			id,
 			error: String(error),
@@ -176,180 +183,6 @@ export function recordSessionLocation(
 		return false;
 	}
 }
-
-/** A tree record that could not finish (an index or file it could not read or write), kept to try again. */
-interface PendingTreeRecord {
-	file: string;
-	roots: readonly string[] | undefined;
-	previousFile: string | undefined;
-	options: { artifactsOnly?: boolean };
-}
-
-/**
- * Pending tree records, kept on disk beside each root's index so a later
- * process finishes what an exited one could not. One record per line:
- * `<file>\t<previous file or empty>\t<1 for artifacts only, else 0>[\t<root>…]`,
- * paths percent-encoded like index lines. Rewritten whole (staged, renamed)
- * under its own per-root lock; it holds only unfinished records, so it stays tiny.
- */
-const PENDING_FILE = ".session-index.pending.tsv";
-const pendingTreeRecords = new Map<string, PendingTreeRecord>();
-/** Records this process knows are on disk, so finishing one also removes its line. */
-const persistedPendingFiles = new Set<string>();
-/** Least time between retries of the pending tree records, and between reads of the pending files. */
-const TREE_RETRY_INTERVAL_MS = 30_000;
-/** When this process last retried its pending records; only a run that had records to retry sets it. */
-let lastTreeRetry = 0;
-/** When this process last read the roots' pending files. */
-let lastPendingLoad = 0;
-let treeRetry: Promise<void> | undefined;
-
-function pendingRootFor(record: PendingTreeRecord): string {
-	return owningRoot(path.resolve(record.file), record.roots ?? sessionLocatorRoots())?.root ?? getSessionsDir();
-}
-
-function serializePending(record: PendingTreeRecord): string {
-	return [
-		encodeStoredPath(record.file),
-		encodeStoredPath(record.previousFile ?? ""),
-		record.options.artifactsOnly ? "1" : "0",
-		...(record.roots ?? []).map(encodeStoredPath),
-	].join("\t");
-}
-
-async function readPendingFile(target: string): Promise<Map<string, PendingTreeRecord>> {
-	const records = new Map<string, PendingTreeRecord>();
-	let text: string;
-	try {
-		text = await Bun.file(target).text();
-	} catch (error) {
-		if (isEnoent(error) || isEnotdir(error)) return records;
-		throw error;
-	}
-	for (const line of text.split("\n")) {
-		const [file, previous, flag, ...roots] = line.split("\t");
-		if (!file || flag === undefined) continue;
-		const decoded = decodeStoredPath(file);
-		records.set(decoded, {
-			file: decoded,
-			previousFile: previous ? decodeStoredPath(previous) : undefined,
-			options: { artifactsOnly: flag === "1" },
-			roots: roots.length > 0 ? roots.map(decodeStoredPath) : undefined,
-		});
-	}
-	return records;
-}
-
-/** Add (`record`) or remove (`undefined`) `file`'s line in its root's pending file. False when it could not be written. */
-async function updatePendingFile(root: string, file: string, record: PendingTreeRecord | undefined): Promise<boolean> {
-	const target = path.join(root, PENDING_FILE);
-	try {
-		await withFileLock(
-			path.join(await fs.promises.realpath(root), PENDING_FILE),
-			async () => {
-				const records = await readPendingFile(target);
-				if (record) records.set(file, record);
-				else if (!records.delete(file)) return;
-				if (records.size === 0) {
-					await fs.promises.rm(target, { force: true });
-					return;
-				}
-				const staged = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
-				try {
-					await fs.promises.writeFile(staged, `${[...records.values()].map(serializePending).join("\n")}\n`, {
-						mode: 0o600,
-					});
-					await fs.promises.rename(staged, target);
-				} catch (error) {
-					await fs.promises.rm(staged, { force: true });
-					throw error;
-				}
-			},
-			{ retries: 600, retryDelayMs: 100 },
-		);
-		return true;
-	} catch (error) {
-		logger.warn("Session index pending file could not be updated", { target, error: String(error) });
-		return false;
-	}
-}
-
-/** Pick up the records other (perhaps exited) processes left in each root's pending file. */
-async function loadPersistedPendingTrees(roots: readonly string[]): Promise<void> {
-	for (const root of roots) {
-		let records: Map<string, PendingTreeRecord>;
-		try {
-			records = await readPendingFile(path.join(root, PENDING_FILE));
-		} catch (error) {
-			logger.debug("Session index pending file unreadable", { root, error: String(error) });
-			continue;
-		}
-		for (const [file, record] of records) {
-			persistedPendingFiles.add(file);
-			if (!pendingTreeRecords.has(file)) pendingTreeRecords.set(file, record);
-		}
-	}
-}
-
-/**
- * Try again every tree record that could not finish: this process's, and the
- * ones earlier processes left on disk (read at most once per
- * {@link TREE_RETRY_INTERVAL_MS}). Records are retried at most once per
- * interval too, an interval that starts only when there was something to
- * retry, so ordinary writes and lookups never hold back the first retry of a
- * fresh failure. Returns the run in progress, if any.
- */
-function startPendingTreeRetry(roots?: readonly string[]): Promise<void> | undefined {
-	if (treeRetry) return treeRetry;
-	const now = Date.now();
-	const loadDue = now - lastPendingLoad >= TREE_RETRY_INTERVAL_MS;
-	const retryDue = pendingTreeRecords.size > 0 && now - lastTreeRetry >= TREE_RETRY_INTERVAL_MS;
-	if (!loadDue && !retryDue) return undefined;
-	treeRetry = (async () => {
-		if (loadDue) {
-			lastPendingLoad = Date.now();
-			await loadPersistedPendingTrees(roots ?? sessionLocatorRoots());
-		}
-		if (pendingTreeRecords.size === 0 || Date.now() - lastTreeRetry < TREE_RETRY_INTERVAL_MS) return;
-		lastTreeRetry = Date.now();
-		// Deleting a finished entry, or re-setting an unfinished one, during the walk is safe for a Map.
-		for (const pending of pendingTreeRecords.values()) {
-			await recordSessionTree(pending.file, pending.roots, pending.previousFile, pending.options);
-		}
-	})()
-		.catch(error => logger.debug("Session tree retry failed", { error: String(error) }))
-		.finally(() => {
-			treeRetry = undefined;
-		});
-	return treeRetry;
-}
-
-/**
- * Try the pending tree records again in the background. `SessionManager`
- * calls this on each durable write, so a session moved while its index could
- * not be written or read is recorded once it can be, by this process or by
- * any later one. Cheap when nothing is pending.
- */
-export function retryPendingSessionTrees(): void {
-	void startPendingTreeRetry();
-}
-
-/**
- * Test-only: await the tree retry a write or lookup started, and reset the
- * in-memory queue and its interval (as a fresh process starts) between
- * tests. Not part of the supported API.
- */
-export const __sessionTreeRetryForTests = {
-	async settled(): Promise<void> {
-		await treeRetry;
-	},
-	clear(): void {
-		pendingTreeRecords.clear();
-		persistedPendingFiles.clear();
-		lastTreeRetry = 0;
-		lastPendingLoad = 0;
-	},
-};
 
 /**
  * Record `file` (a session transcript) and every transcript nested in its
@@ -361,11 +194,11 @@ export const __sessionTreeRetryForTests = {
  * under a directory it cannot enter. `artifactsOnly` leaves `file` itself out
  * (a fork's journal holds its own id). Reads only that one session's tree.
  *
- * Returns whether everything was recorded. When something could not be read
- * or written (a transcript, a directory, an index file, the log), the record
- * is kept, in memory and in its root's pending file, and tried again by
- * {@link retryPendingSessionTrees} and before every lookup, in this process
- * or any later one, until it finishes or `file` no longer exists there.
+ * Returns whether everything was recorded. The index is a cache derived from
+ * the session files, so a record that could not be written is logged and
+ * dropped, never queued: `SessionManager` records the session's own file
+ * again on its next durable write, and `omp session reindex` rebuilds a root
+ * from that root's own tree.
  */
 export async function recordSessionTree(
 	file: string,
@@ -374,13 +207,11 @@ export async function recordSessionTree(
 	options: { artifactsOnly?: boolean } = {},
 ): Promise<boolean> {
 	const complete = await recordSessionTreeOnce(file, roots ?? sessionLocatorRoots(), previousFile, options);
-	const record: PendingTreeRecord = { file, roots, previousFile, options };
-	if (complete) {
-		pendingTreeRecords.delete(file);
-		if (persistedPendingFiles.delete(file)) await updatePendingFile(pendingRootFor(record), file, undefined);
-	} else {
-		pendingTreeRecords.set(file, record);
-		if (await updatePendingFile(pendingRootFor(record), file, record)) persistedPendingFiles.add(file);
+	if (!complete) {
+		logger.warn("Session index did not record a whole session tree; `omp session reindex` rebuilds it", {
+			file,
+			previousFile,
+		});
 	}
 	return complete;
 }
@@ -682,9 +513,6 @@ export async function locateSessions(idPrefix: string, options: LocateSessionsOp
 	const needle = idPrefix.toLowerCase();
 	if (!SESSION_ID_RE.test(needle)) return [];
 	const roots = options.roots ?? sessionLocatorRoots();
-	// A move an exited process could not finish recording is finished first, so
-	// the lookup sees it (at most once per retry interval; nothing when none is pending).
-	await startPendingTreeRetry(roots);
 	const matchFileName = options.matchFileName === true;
 	const rowsByRoot = await Promise.all(
 		roots.flatMap(root => [
@@ -746,9 +574,11 @@ export interface SessionLocatorRebuild {
 	/** Session files recorded in the snapshot. */
 	indexed: number;
 	/**
-	 * Buckets, directories inside them, and transcripts that could not be read,
-	 * with why (`bucket` holds the path, `code` the errno code when there is
-	 * one). The new snapshot keeps what the previous one recorded under each.
+	 * Paths the reindex could not read and skipped, with why (`bucket` holds
+	 * the path, `code` the errno code when there is one): buckets, directories
+	 * inside them, transcripts, and the previous snapshot. Every session the
+	 * walk could read is in the new snapshot regardless; for everything but the
+	 * previous snapshot, so is each line the previous snapshot held.
 	 */
 	unreadable: UnreadableEntry[];
 }
@@ -850,9 +680,10 @@ async function scanRootTranscripts(
  *
  * The walk runs unlocked; the read-merge-rename of the snapshot runs under
  * an exclusive per-root lock, so a reindex that finished meanwhile is merged
- * rather than overwritten. A snapshot that exists but cannot be read is never
- * replaced: the reindex throws instead, since publishing would drop what only
- * it knew. The log is never touched, so lines other processes append stay.
+ * rather than overwritten. A snapshot that cannot be read is reported and
+ * replaced from the walk: it is a cache of this root's own files, and keeping
+ * it would cost the root every readable session the walk just found. The log
+ * is never touched, so lines other processes append stay.
  * This is the one operation that walks the tree.
  */
 export async function rebuildSessionLocator(root: string): Promise<SessionLocatorRebuild> {
@@ -904,11 +735,10 @@ export async function rebuildSessionLocator(root: string): Promise<SessionLocato
 			try {
 				previous = await Bun.file(snapshot).text();
 			} catch (error) {
-				if (!isEnoent(error)) {
-					throw new Error(`${snapshot} cannot be read, so it was not replaced: ${String(error)}`, {
-						cause: error,
-					});
-				}
+				// The snapshot is this root's own files, read back: one that cannot
+				// be read is reported and rebuilt from the walk, never kept. Refusing
+				// would cost the root every readable session the walk just found.
+				if (!isEnoent(error)) result.unreadable.push(unreadableEntry(snapshot, error));
 			}
 			const kept = new Set<string>();
 			const lines: string[] = [`${REBUILT_MARKER}${new Date().toISOString()}\n`];

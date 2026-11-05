@@ -12,7 +12,6 @@ import {
 	resolveResumeTarget,
 } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import {
-	__sessionTreeRetryForTests,
 	archiveRootFor,
 	configureSessionExtraRoots,
 	locateSessions,
@@ -142,7 +141,6 @@ describe("session index: lookups by id", () => {
 		agentDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-locator-"));
 		setAgentDir(agentDir);
 		configureSessionExtraRoots([]);
-		__sessionTreeRetryForTests.clear();
 		cwdA = path.join(agentDir, "project-a");
 		cwdB = path.join(agentDir, "project-b");
 		fs.mkdirSync(cwdA, { recursive: true });
@@ -150,8 +148,6 @@ describe("session index: lookups by id", () => {
 	});
 
 	afterEach(async () => {
-		// A retry a write started runs in the background: let it finish against this test's tree, not the next one's.
-		await __sessionTreeRetryForTests.settled();
 		configureSessionExtraRoots(undefined);
 		closeSessionIndex();
 		setAgentDir(originalAgentDir ?? path.join(getConfigRootDir(), "agent"));
@@ -200,6 +196,37 @@ describe("session index: lookups by id", () => {
 		}
 		expect(probe.listed).toEqual([]);
 	});
+
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"resolves without listing any directory after a move its index could not record",
+		async () => {
+			// The move is committed on disk and its index lines are not. Recovery
+			// is `omp session reindex`, so the lookup still only reads index files.
+			const parent = await persistedSession(cwdA);
+			const child = await subagentSession(parent, cwdA, "Deep");
+			const childId = child.getSessionId();
+			await child.close();
+			const log = path.join(getSessionsDir(), SESSION_LOCATOR_FILE);
+			fs.chmodSync(log, 0o400);
+			try {
+				await parent.moveTo(cwdB);
+			} finally {
+				fs.chmodSync(log, 0o600);
+			}
+			await parent.close();
+
+			const cwdC = path.join(agentDir, "project-c");
+			fs.mkdirSync(cwdC);
+			const localDir = computeDefaultSessionDir(cwdC, new FileSessionStorage());
+			const probe = countListings(path.resolve(getSessionsDir()), localDir);
+			try {
+				await resolveResumableSession(childId, cwdC);
+			} finally {
+				probe.restore();
+			}
+			expect(probe.listed).toEqual([]);
+		},
+	);
 
 	it("finds a session gc archived, and its subagents, and refuses to open the archive in place", async () => {
 		const parent = await persistedSession(cwdA);
@@ -723,29 +750,39 @@ describe("session index: lookups by id", () => {
 			expect((await resolveResumableSession(childId, cwdC))?.session.path).toBe(movedChild);
 		});
 
-		it.skipIf(unlessRoot)("refuses to replace a snapshot it cannot read, and loses nothing it held", async () => {
-			const parentId = "019a000d-0000-7000-8000-000000000001";
-			const childId = "019a000d-0000-7000-8000-000000000002";
-			const parent = path.join(getSessionsDir(), "--snap--", `2026-01-01T00-00-00-000Z_${parentId}.jsonl`);
-			const artifacts = parent.slice(0, -".jsonl".length);
-			writeTranscript(parent, parentId, "/s");
-			writeTranscript(path.join(artifacts, "Worker.jsonl"), childId, "/s");
-			await rebuildSessionLocator(getSessionsDir());
-			const snapshot = path.join(getSessionsDir(), ".session-index.base.tsv");
-			const before = fs.readFileSync(snapshot, "utf8");
-			fs.chmodSync(snapshot, 0o000);
-			fs.chmodSync(artifacts, 0o000);
-			try {
-				await expect(rebuildSessionLocator(getSessionsDir())).rejects.toThrow(
-					"cannot be read, so it was not replaced",
-				);
-			} finally {
-				fs.chmodSync(artifacts, 0o700);
-				fs.chmodSync(snapshot, 0o600);
-			}
-			expect(fs.readFileSync(snapshot, "utf8")).toBe(before);
-			expect((await resolveResumableSession(childId, cwdB))?.session.id).toBe(childId);
-		});
+		it.skipIf(unlessRoot)(
+			"reindexes a root whose artifact directory and snapshot are both unreadable, keeping every readable session",
+			async () => {
+				const parentId = "019a000d-0000-7000-8000-000000000001";
+				const childId = "019a000d-0000-7000-8000-000000000002";
+				const parent = path.join(getSessionsDir(), "--snap--", `2026-01-01T00-00-00-000Z_${parentId}.jsonl`);
+				const artifacts = parent.slice(0, -".jsonl".length);
+				writeTranscript(parent, parentId, "/s");
+				writeTranscript(path.join(artifacts, "Worker.jsonl"), childId, "/s");
+				await rebuildSessionLocator(getSessionsDir());
+				const snapshot = path.join(getSessionsDir(), ".session-index.base.tsv");
+				fs.chmodSync(snapshot, 0o000);
+				fs.chmodSync(artifacts, 0o000);
+				let rebuilt: SessionLocatorRebuild;
+				try {
+					rebuilt = await rebuildSessionLocator(getSessionsDir());
+				} finally {
+					fs.chmodSync(artifacts, 0o700);
+					fs.chmodSync(snapshot, 0o600);
+				}
+				// Both unreadable paths are reported; neither stops the walk, and the
+				// snapshot is republished from it rather than kept.
+				expect(rebuilt.unreadable.map(entry => entry.bucket)).toEqual([artifacts, snapshot]);
+				expect(rebuilt.indexed).toBe(1);
+				expect(fs.readFileSync(snapshot, "utf8")).toContain(parentId);
+				expect((await resolveResumableSession(parentId, cwdB))?.session.id).toBe(parentId);
+				// Nothing durable went with the snapshot: the transcript inside the
+				// directory is derived again from the tree once it can be read.
+				expect(await resolveResumableSession(childId, cwdB)).toBeUndefined();
+				await rebuildSessionLocator(getSessionsDir());
+				expect((await resolveResumableSession(childId, cwdB))?.session.id).toBe(childId);
+			},
+		);
 
 		it.skipIf(unlessRoot)("merges a reindex that published while another was still walking", async () => {
 			const childId = "019a000e-0000-7000-8000-000000000001";
@@ -906,84 +943,16 @@ describe("session index: lookups by id", () => {
 				const movedChild = path.join(parent.getSessionFile()!.slice(0, -".jsonl".length), "Worker.jsonl");
 				parent.appendMessage({ role: "user", content: "after the log recovered", timestamp: 3 });
 				await parent.flush();
-				await __sessionTreeRetryForTests.settled();
 				await parent.close();
 				const cwdC = path.join(agentDir, "project-c");
 				fs.mkdirSync(cwdC);
 				expect((await resolveResumableSession(parent.getSessionId(), cwdC))?.session.path).toBe(
 					parent.getSessionFile()!,
 				);
-				expect((await resolveResumableSession(childId, cwdC))?.session.path).toBe(movedChild);
-			},
-		);
-
-		it.skipIf(unlessRoot)(
-			"finishes recording a move in a later process when the moving one exits before it could",
-			async () => {
-				const parent = await persistedSession(cwdA);
-				const childId = "019a0016-0000-7000-8000-000000000001";
-				const artifacts = parent.getSessionFile()!.slice(0, -".jsonl".length);
-				writeTranscript(path.join(artifacts, "Worker.jsonl"), childId, cwdA);
+				// The subagent transcript the move carried is not written again, and
+				// nothing queues it: a reindex of its root is what derives it afresh.
+				expect(await resolveResumableSession(childId, cwdC)).toBeUndefined();
 				await rebuildSessionLocator(getSessionsDir());
-				const log = path.join(getSessionsDir(), SESSION_LOCATOR_FILE);
-				fs.chmodSync(log, 0o400);
-				try {
-					await parent.moveTo(cwdB);
-				} finally {
-					fs.chmodSync(log, 0o600);
-				}
-				const movedChild = path.join(parent.getSessionFile()!.slice(0, -".jsonl".length), "Worker.jsonl");
-				await parent.close();
-				// The moving process exits here with the move unrecorded: forget everything it held in memory.
-				__sessionTreeRetryForTests.clear();
-				const cwdC = path.join(agentDir, "project-c");
-				fs.mkdirSync(cwdC);
-				const lookup = path.join(agentDir, "lookup.ts");
-				fs.writeFileSync(
-					lookup,
-					[
-						`import { resolveResumableSession } from ${JSON.stringify(path.join(import.meta.dir, "../src/session/session-listing.ts"))};`,
-						`const match = await resolveResumableSession(${JSON.stringify(childId)}, ${JSON.stringify(cwdC)});`,
-						"process.stdout.write(match?.session.path ?? 'not found');",
-					].join("\n"),
-				);
-				// A different process, which never saw the move, looks the subagent up by id.
-				const result = Bun.spawnSync([process.execPath, lookup], {
-					cwd: cwdC,
-					env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
-				});
-				expect(result.exitCode, result.stderr.toString()).toBe(0);
-				expect(result.stdout.toString()).toBe(movedChild);
-			},
-			120_000,
-		);
-
-		it.skipIf(unlessRoot)(
-			"records a moved subagent whose only record was in a snapshot it could not read, at the next write",
-			async () => {
-				const parent = await persistedSession(cwdA);
-				const childId = "019a0014-0000-7000-8000-000000000001";
-				const artifacts = parent.getSessionFile()!.slice(0, -".jsonl".length);
-				const child = path.join(artifacts, "Worker.jsonl");
-				writeTranscript(child, childId, cwdA);
-				await rebuildSessionLocator(getSessionsDir());
-				const snapshot = path.join(getSessionsDir(), ".session-index.base.tsv");
-				fs.chmodSync(child, 0o000);
-				fs.chmodSync(snapshot, 0o000);
-				let movedChild = "";
-				try {
-					await parent.moveTo(cwdB);
-					movedChild = path.join(parent.getSessionFile()!.slice(0, -".jsonl".length), "Worker.jsonl");
-				} finally {
-					fs.chmodSync(snapshot, 0o600);
-					fs.chmodSync(movedChild && fs.existsSync(movedChild) ? movedChild : child, 0o600);
-				}
-				parent.appendMessage({ role: "user", content: "after access returned", timestamp: 3 });
-				await parent.flush();
-				await __sessionTreeRetryForTests.settled();
-				await parent.close();
-				const cwdC = path.join(agentDir, "project-c");
-				fs.mkdirSync(cwdC);
 				expect((await resolveResumableSession(childId, cwdC))?.session.path).toBe(movedChild);
 			},
 		);
@@ -1178,7 +1147,6 @@ describe("session index: profiles", () => {
 	});
 
 	afterEach(async () => {
-		await __sessionTreeRetryForTests.settled();
 		configureSessionExtraRoots(undefined);
 		closeSessionIndex();
 		setProfile(undefined);
