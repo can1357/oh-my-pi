@@ -139,6 +139,7 @@ import {
 } from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { type RestoreOutcome, restoreSession } from "./task/restore";
+import { resumeRestartedSubagents } from "./task/restart-resume";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { cfgTelemetryOtlpExportEnabled } from "./telemetry-settings";
 import { registerLocalInferenceApi } from "./tiny/local-inference-api";
@@ -831,6 +832,35 @@ async function runInteractiveMode(
 			);
 		} catch (error: unknown) {
 			mode.showError(error instanceof Error ? error.message : "Unknown error occurred");
+		}
+	}
+
+	// `/restart` recorded the subagents its teardown stopped in this session's file;
+	// each goes on with its task as a background job of its parent.
+	if (resuming) {
+		try {
+			const { resumed, notResumed, unreadRecords } = await resumeRestartedSubagents(session, {
+				eventBus,
+				subagentEventBus,
+			});
+			if (resumed.length > 0) {
+				const agents = resumed.length === 1 ? "1 subagent" : `${resumed.length} subagents`;
+				mode.showStatus(`Restarted: ${agents} going on with their tasks (${resumed.join(", ")}).`);
+			}
+			if (notResumed.length > 0) {
+				mode.showWarning(
+					`Not resumed after the restart: ${notResumed.map(entry => `${entry.id} (${entry.reason})`).join("; ")}. Their transcripts stay at history://<id>.`,
+				);
+			}
+			if (unreadRecords.length > 0) {
+				mode.showWarning(
+					`Could not read the restart's record ${unreadRecords.map(entry => `${entry.file} (${entry.reason})`).join("; ")}; it is kept and read again at the next start.`,
+				);
+			}
+		} catch (error: unknown) {
+			mode.showError(
+				`Could not resume the subagents the restart stopped: ${error instanceof Error ? error.message : String(error)}`,
+			);
 		}
 	}
 

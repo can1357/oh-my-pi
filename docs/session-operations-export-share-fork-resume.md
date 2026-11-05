@@ -36,7 +36,7 @@ This document describes operator-visible behavior for session export, sharing, c
 | `/resume [id\|@claude\|@codex]`           | Interactive slash command    | Yes (active in-memory state replaced)         | Switches to a selected/matched session, or imports a selected foreign session                                                                                                | None                                                                                |
 | `--resume`                                | CLI startup picker           | Yes after session creation                    | Opens selected existing session file (picker opens in current-folder scope; the global list is preloaded only for the empty-everything early exit and instant Tab switching) | None                                                                                |
 | `--resume <id\|path>`                     | CLI startup                  | Yes after session creation                    | Opens existing session; a missing recorded cwd may be re-rooted into the current directory                                                                                   | None                                                                                |
-| `/restart`                                | Interactive slash command    | Yes (process relaunches)                      | Keeps configuration flags; resumes a materialized session, otherwise starts fresh                                                                                            | None                                                                                |
+| `/restart`                                | Interactive slash command    | Yes (process relaunches)                      | Keeps configuration flags; resumes a materialized session, otherwise starts fresh; running subagents go on after the relaunch                                                 | None                                                                                |
 | `--continue`                              | CLI startup                  | Yes after session creation                    | Opens terminal breadcrumb or most-recent session; creates new one if none exists                                                                                             | None                                                                                |
 
 ## Export and dump
@@ -531,6 +531,60 @@ flags but strips original prompts/`@file` positionals and one-shot session
 selectors (`--session`, `--resume`, `--continue`, `--fork`, and foreign imports).
 It adds `--resume <current-id>` only when the session actually exists on disk;
 an in-memory or never-materialized session restarts fresh.
+
+`/restart` keeps the session's subagents (`task/restart-resume.ts`). A subagent
+runs inside the omp process, so the teardown stops every one that is mid-task;
+idle and parked ones are revived on demand from their transcripts either way.
+Before the teardown, `/restart` writes a record of each running subagent: its
+parent, the tool calls it is in, its own background jobs other than subagents
+(they end with the process), and the queued messages and job results it had not
+read. The record goes to `restart-subagents-<id>.json` beside the subagent
+transcripts, kept whole (a session entry would cut long text), and one
+`restart_subagents` entry in the session file names it and the subagents. When
+either cannot be written the restart is cancelled. A subagent the previous
+restart's resume has not finished is recorded again with what it still carries,
+even while it is reviving. The teardown then stops the subagents as a shutdown
+does: their transcripts stay, nothing is tombstoned.
+
+Once the relaunched process has resumed the session, it consumes the entry
+(`restart_subagents_resumed`) and gives every recorded subagent one more
+monitored turn as a background job of its parent, under the subagent's id,
+parents before their children. The lifecycle reviver rebuilds the subagent from
+its transcript, so the transcript stays one contiguous file. The subagent gets one
+note: the process restarted, the tool calls that were stopped (their results hold
+the output they produced before they stopped), the background jobs that ended,
+the subagents of its own that go on or could not, the messages and results it had
+not read, and the tools of its spawn that the new process does not have (a tool
+defined in the parent's eval kernel or by a closure). Its result reaches its
+parent as the job's ordinary `async-result`, so a lane receives its arms' results
+and the root receives the lanes'. A parent subagent that finished before the
+restart, or is still reviving, is made live before its child's result is
+delivered and is kept from idle parking until the delivery lands; when the
+parent cannot be revived, the root receives the result instead, with the reason.
+A record is resumed only by the session that wrote it (a fork copies the entry
+and ignores it), and a record a startup did not consume is resumed by the next
+one. The TUI names the subagents that go on and the ones that do not, with the
+reason: an isolated run (never revived), a subagent that finished before the
+teardown stopped it, one whose transcript or record file is missing or cannot be
+read (the others still go on), or one whose job could not start.
+
+A job result that finished but had not reached its owner yet, and a message
+delivered to an idle subagent that no turn had taken yet (queued steering or
+follow-ups, an IRC message parked under a hold), would die with the old process
+too. `/restart` records an idle subagent that holds such a result or message, and
+the relaunch gives it a turn whose note carries them; a result owed to the root
+is delivered to the root again. A record file that cannot be read is not
+consumed: the TUI reports it, and the next start reads it again. When a recorded
+subagent does not go on, for any reason, or its resumed turn ends before the
+restart note reaches its conversation (its revival failed, for one), the root
+receives the messages and results it carried and had not read, with the reason.
+
+A subagent counts as finished only when its transcript ends in a final answer or
+an accepted `yield`; one whose last turn failed (a provider retry was waiting to
+repeat it), was cut at its length limit or was stopped goes on.
+
+`/exit` and a crash are not covered: `/exit` records nothing, and a crash leaves
+transcripts that `omp --restore` already resumes.
 
 POSIX uses process-image replacement when available. Windows or a failed exec
 falls back to spawning the replacement with inherited terminal streams.
