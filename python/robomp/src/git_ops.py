@@ -707,9 +707,7 @@ def fetch_pr_head(
     Raises ``GitCommandError`` when fetching, SHA verification, or backfill fails.
     """
     if pr_number <= 0:
-        raise ValueError(f"invalid PR number: {pr_number!r}")
-    if head_ref is not None:
-        validate_fetch_ref(head_ref)
+        raise ValueError(f"invalid pr_number={pr_number!r}")
     remote = remote_url or "origin"
     extra_env = _explicit_remote_env(remote_url, cwd=repo_dir)
     ref = f"refs/pull/{pr_number}/head" if remote_url else f"pull/{pr_number}/head"
@@ -727,8 +725,18 @@ def fetch_pr_head(
             ["git", *args],
         )
     except GitCommandError as exc:
-        if "couldn't find remote ref" not in exc.stderr or not same_repo or not head_ref:
+        # The fallback fetches a branch named by the (webhook-supplied) PR
+        # payload, so it is only eligible when we can verify the result:
+        # same-repo PR, present head ref, present head SHA. Anything else
+        # keeps the original failure.
+        if (
+            "couldn't find remote ref" not in exc.stderr
+            or not same_repo
+            or not head_ref
+            or not head_sha
+        ):
             raise
+        validate_fetch_ref(head_ref)
         log.warning("PR head ref unavailable; fetching same-repo branch", extra={"pr": pr_number, "head_ref": head_ref})
         args = ["fetch", "--no-tags", remote, "--", f"refs/heads/{head_ref}"]
         try:
@@ -760,7 +768,7 @@ def fetch_pr_head(
             safe_directory=safe_directory,
         )
         _check(probe, ["git", *probe_args])
-        if head_sha is not None and probe.stdout.strip() != head_sha:
+        if probe.stdout.strip() != head_sha:
             raise GitCommandError(
                 ["git", *probe_args],
                 1,
