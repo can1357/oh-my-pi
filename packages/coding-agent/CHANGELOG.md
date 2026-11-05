@@ -30,7 +30,7 @@
 
 ### Fixed
 
-- Subagents on models that fill in every task-tool field can dispatch tasks again while `task.perCallModel` is `off`: an empty `model`, `sourceSession`, `taskFile` or `outputSchema` now counts as left out instead of refusing the call, as does an empty `task` sent beside a real `taskFile`
+- Subagents on models that fill in every task-tool field can dispatch tasks again while `task.perCallModel` is `off`: an empty `model`, `sourceSession` or `outputSchema` now counts as left out instead of refusing the call, as does an empty `task` or `taskFile` sent beside a real value of the other
 - Extension links stay clickable and extension-drawn replies and custom messages keep their renderers on every launch, not only the first after an edit; `ctx.ui.getLinkClicksAvailable()` no longer turns false on later launches ([#18116](https://github.com/can1357/oh-my-pi/pull/18116) by [@materemias](https://github.com/materemias))
 - An AST Grep capture spanning several lines shows on one `meta:` row of the result card instead of one row per line, so collapsed results no longer show its later lines and a blank line inside it no longer splits the match from its file ([#18105](https://github.com/can1357/oh-my-pi/pull/18105) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Extension shortcuts on a reserved chord spelled with a different modifier order (e.g. `ctrl+shift+p`) are now ignored like the reserved spelling ([#17961](https://github.com/can1357/oh-my-pi/pull/17961) by [@materemias](https://github.com/materemias))

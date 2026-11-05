@@ -18,11 +18,12 @@ import { taskSubprocessRenderer } from "@oh-my-pi/pi-tui/tools/subprocess";
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type {
-	AgentTool,
-	AgentToolResult,
-	AgentToolUpdateCallback,
-	ToolSpeculationPolicy,
+import {
+	type AgentTool,
+	type AgentToolResult,
+	type AgentToolUpdateCallback,
+	type ToolSpeculationPolicy,
+	validateAgentToolArguments,
 } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env, isRecord, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
@@ -493,6 +494,30 @@ const BLANKABLE_KEYS = ["model", "sourceSession", "outputSchema"] as const;
 /** A field this pass may drop: the three unconditional ones, plus the conditional `task`/`taskFile` pair. */
 type BlankableKey = (typeof BLANKABLE_KEYS)[number] | "task" | "taskFile";
 
+/**
+ * Every field a call or an item can carry that something downstream reads: the properties
+ * `createTaskSchema` in ./types declares, plus the stale `schema` alias whose presence is still
+ * refused. Keep it in step with that builder — a field missing here survives only while the
+ * caller stores it as an own enumerable property.
+ */
+const CONTRACT_KEYS = [
+	"name",
+	"agent",
+	"task",
+	"taskFile",
+	"solutionSpace",
+	"effort",
+	"outputSchema",
+	"schemaMode",
+	"tools",
+	"model",
+	"sourceSession",
+	"isolated",
+	"context",
+	"tasks",
+	"schema",
+] as const;
+
 /** An empty or whitespace-only string: the shape a model sends for a field it has nothing to put in. */
 function isBlankString(value: unknown): boolean {
 	return typeof value === "string" && value.trim() === "";
@@ -509,12 +534,12 @@ function isRealString(value: unknown): boolean {
  * per-call gate, the seance checks and the output-schema preflight would otherwise refuse a call
  * that names nothing at all.
  *
- * `task` and `taskFile` are the conditional pair, and each is dropped only beside a real value of
- * the other. That is what the defect is: a model that chose one of the two fills the other in
- * with nothing, and the "exactly one of" rule then sees both as provided. Dropping either one
- * unconditionally would be the same error pointed the other way — an item that names no work at
- * all must keep its own refusal ("needs non-empty `task` instructions", "`taskFile` must be an
- * absolute path"), not be told to choose between two fields it already chose between.
+ * `task` and `taskFile` are the conditional pair. That is what the defect is: a model that chose
+ * one of the two fills the other in with nothing, and the "exactly one of" rule then sees both as
+ * provided. So each is dropped beside a real value of the other — and, when both are blank, only
+ * `taskFile` is, because an item that names no work at all must keep its own refusal ("needs
+ * non-empty `task` instructions") rather than be told to choose between two fields it already
+ * chose between. A blank `taskFile` alone is untouched and keeps the absolute-path refusal.
  *
  * Only an empty string counts. `null` is left alone: an `outputSchema: null` is a real signal —
  * presence, not truthiness, makes the caller's schema win, so it is how an internal caller says
@@ -522,20 +547,27 @@ function isRealString(value: unknown): boolean {
  * turns an array into its string form, so `[]` reaches dispatch as `"[]"`, a real selector the
  * gate must still refuse.
  *
- * The copy materializes every enumerable key, inherited ones included, rather than spreading own
- * properties: an internal caller may hand us an object whose real `model` is a prototype getter,
- * and a spread would silently drop that selector on the way to the gate.
+ * The copy keeps every contract-bearing field however the caller stores it. A spread takes own
+ * enumerable properties only, and an internal caller bypassing the wire schema may hand us an
+ * object whose real `model` lives on a class prototype or a non-enumerable own property: one
+ * blank sibling would then delete that selector on the way to the gate, and the spawn would run
+ * on the agent's configured model while the approval prompt still named the requested one.
  */
 function withoutBlankFields<T extends TaskItem | TaskParams>(item: T): T {
 	const keys: BlankableKey[] = [...BLANKABLE_KEYS];
 	if (isRealString(item.taskFile)) keys.push("task");
-	if (isRealString(item.task)) keys.push("taskFile");
+	if (isRealString(item.task) || isBlankString(item.task)) keys.push("taskFile");
 	let out = item;
 	for (const key of keys) {
 		if (!isBlankString(item[key])) continue;
 		if (out === item) {
-			const copy: Record<string, unknown> = {};
-			for (const name in item) copy[name] = (item as Record<string, unknown>)[name];
+			const source = item as unknown as Record<string, unknown>;
+			const copy: Record<string, unknown> = { ...item };
+			// Own enumerable keys came across with the spread; the rest are read by name, because
+			// enumerability is the caller's storage choice and says nothing about what the field means.
+			for (const name of CONTRACT_KEYS) {
+				if (!Object.hasOwn(copy, name) && name in source) copy[name] = source[name];
+			}
 			out = copy as T;
 		}
 		delete out[key];
@@ -894,17 +926,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			// Returning `undefined` here means "this call is invalid": at finalize the launch session
 			// discards every run it already started, and dispatch then runs them all again — including
 			// an earlier, ordinary item that had already started and done work. A call carrying a
-			// placeholder is valid, so it must never take that branch. Both paths run `planSpawns`, so
-			// both drop the same placeholders.
-			//
-			// The launcher does plan from the raw streamed arguments while dispatch plans from the
-			// validated ones, and shared validation discards an optional field holding `null`. Measured
-			// end to end, that does not make the two plans differ — a streamed item carrying
-			// `outputSchema: null` is still adopted, and `speculative-launch.test.ts` pins it. Anything
-			// that does make them differ is reconciled by `#matches`/`adopt`, which is the launcher's
-			// own mechanism for it; this hook must not pre-empt that by calling the call invalid.
+			// placeholder is valid, so it must never take that branch.
 			const plan = planSpawns(
-				args,
+				this.#asDispatched(args),
 				this.#isBatchEnabled(),
 				cfgTaskFile.get(this.session.settings),
 				this.#defaultAgent(),
@@ -915,6 +939,38 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		},
 		start: (toolCallId, spawn, index, signal) => this.#startSpeculative(toolCallId, spawn, index, signal),
 	};
+
+	/**
+	 * The arguments dispatch will plan from. The speculative launcher sees the raw streamed call
+	 * while dispatch sees the validated one, and validation rewrites a call in ways that change a
+	 * spawn: it discards an optional field holding `null`, coerces a value to its declared type,
+	 * and deletes keys the schema does not declare. Planning from anything else leaves this side's
+	 * spawn differing from dispatch's by a key, so reconciliation cancels the started child and
+	 * dispatch runs a replacement — two executor runs for one item, and the caller is shown the
+	 * replacement's `-2` id. Validating here is the same work dispatch's arguments already went
+	 * through, so the two agree by construction rather than by a list of rewrites kept in step.
+	 *
+	 * Only the launcher normalizes. Internal callers never reach this hook, so `planSpawns` keeps
+	 * their `null`s meaningful — an `outputSchema: null` from one of them really does mean "no
+	 * schema, and ignore the agent's own".
+	 */
+	#asDispatched(args: unknown): unknown {
+		// `AgentTool`'s `renderCall` takes an `unknown` theme where this tool takes `Theme`, which makes
+		// the interface unassignable in TS though every caller passes this very tool. Test callers of
+		// `validateAgentToolArguments` cast the same way.
+		const self = this as unknown as AgentTool;
+		try {
+			return validateAgentToolArguments(self, {
+				type: "toolCall",
+				id: "task-speculation",
+				name: this.name,
+				arguments: args as Record<string, unknown>,
+			});
+		} catch {
+			// Arguments validation rejects are ones dispatch rejects too; let the shape checks say so.
+			return args;
+		}
+	}
 
 	/**
 	 * Batch calls start each subagent as soon as its `tasks[]` item streams in;

@@ -234,11 +234,19 @@ describe("task speculative launch", () => {
 		expect([...startedIds]).toEqual(["Alpha"]);
 	});
 
+	// A duplicate is invisible in `runSubprocess` call counts read at the moment `tool.execute`
+	// returns: for an async batch it returns once the jobs are registered, before any *replacement*
+	// run has reached the mocked executor. Both signals these tests use are settled by then — a
+	// discarded child's replacement is announced in `progress` and registered as a job under
+	// `<name>-2` — so they catch it without waiting on wall-clock time.
+	function duplicateJobs(manager: AsyncJobManager, names: readonly string[]): string[] {
+		return names.filter(name => manager.getJob(`${name}-2`) !== undefined);
+	}
+
 	// A placeholder (`model: ""`, `outputSchema: null`, and the other fields a model fills in with
-	// nothing) is dropped on both paths, so the spawn the launcher derives equals the one dispatch
-	// derives and the started child is adopted. Dispatch receives the *validated* arguments, which
-	// differ from the raw streamed ones — validation discards `outputSchema: null` — so this is the
-	// case where the two plans would disagree if the dropping were not shared.
+	// nothing) must leave the launcher and dispatch deriving the same spawn, so the started child is
+	// adopted. Dispatch receives the *validated* arguments, which differ from the raw streamed ones —
+	// validation discards `outputSchema: null` — which is exactly when the two would disagree.
 	it("adopts a speculatively launched item whose fields are only placeholders, running it once", async () => {
 		const placeholders = {
 			context: "ctx",
@@ -247,7 +255,7 @@ describe("task speculative launch", () => {
 			],
 		};
 		const raw = JSON.stringify(placeholders);
-		const { tool, session } = await openSession();
+		const { tool, manager, session } = await openSession();
 
 		session.update(toolCall, raw.slice(0, raw.indexOf("}]") + 1));
 		await spawn("Alpha").started.promise;
@@ -262,8 +270,9 @@ describe("task speculative launch", () => {
 		const result = await tool.execute(toolCall.id, validated as TaskParams);
 
 		expect(result.isError).toBeFalsy();
-		// One run, not two: the speculative child was adopted rather than cancelled and replaced.
-		expect(executorModule.runSubprocess).toHaveBeenCalledTimes(1);
+		// The adopted child, not a replacement: a discarded Alpha would be reported as `Alpha-2`.
+		expect(result.details?.progress?.map(progress => progress.id)).toEqual(["Alpha"]);
+		expect(duplicateJobs(manager, ["Alpha"])).toEqual([]);
 		expect([...startedIds]).toEqual(["Alpha"]);
 	});
 
@@ -280,7 +289,7 @@ describe("task speculative launch", () => {
 			],
 		};
 		const raw = JSON.stringify(mixed);
-		const { tool, session } = await openSession();
+		const { tool, manager, session } = await openSession();
 
 		session.update(toolCall, raw.slice(0, raw.indexOf('{"name":"Beta"') + 10));
 		await spawn("Alpha").started.promise;
@@ -297,16 +306,15 @@ describe("task speculative launch", () => {
 		const result = await tool.execute(toolCall.id, validated as TaskParams);
 
 		expect(result.isError).toBeFalsy();
-		// Two runs for two items. A discarded Alpha would show as a third call and an `Alpha-2` id.
-		expect(executorModule.runSubprocess).toHaveBeenCalledTimes(2);
+		expect(result.details?.progress?.map(progress => progress.id)).toEqual(["Alpha", "Beta"]);
+		expect(duplicateJobs(manager, ["Alpha", "Beta"])).toEqual([]);
 		expect([...startedIds].sort()).toEqual(["Alpha", "Beta"]);
 	});
 
 	// Shared validation discards an optional field holding `null`, and the spawn carries
-	// `outputSchema` by presence, so a streamed `outputSchema: null` is the obvious candidate for the
-	// launcher and dispatch deriving different spawns. Measured end to end it does not: the item is
-	// adopted and runs once. This pins that, so a future change to either path that does split them
-	// shows up here as a duplicate run rather than in production.
+	// `outputSchema` by presence, so a streamed `outputSchema: null` made the launcher's plan one key
+	// larger than dispatch's: the started child was cancelled and dispatch ran `Alpha-2`. The launcher
+	// now plans from the validated arguments, so the two agree and the child is adopted.
 	it("matches dispatch for an item whose outputSchema is null, running it once", async () => {
 		const withNull = {
 			context: "ctx",
@@ -316,7 +324,7 @@ describe("task speculative launch", () => {
 			],
 		};
 		const raw = JSON.stringify(withNull);
-		const { tool, session } = await openSession();
+		const { tool, manager, session } = await openSession();
 
 		session.update(toolCall, raw.slice(0, raw.indexOf('{"name":"Beta"') + 10));
 		await spawn("Alpha").started.promise;
@@ -332,7 +340,45 @@ describe("task speculative launch", () => {
 		const result = await tool.execute(toolCall.id, validated as TaskParams);
 
 		expect(result.isError).toBeFalsy();
-		expect(executorModule.runSubprocess).toHaveBeenCalledTimes(2);
+		expect(result.details?.progress?.map(progress => progress.id)).toEqual(["Alpha", "Beta"]);
+		expect(duplicateJobs(manager, ["Alpha", "Beta"])).toEqual([]);
+		expect([...startedIds].sort()).toEqual(["Alpha", "Beta"]);
+	});
+
+	// The same split, reached through the other rewrites validation performs: a value coerced to its
+	// declared type, and a key the schema does not declare being deleted. One normalization at the
+	// launcher covers the class, so none of them cancels an adopted child.
+	it.each([
+		["a coerced value", { isolated: "true" }],
+		["an undeclared key", { bogusKey: "x" }],
+		["a null tools list", { tools: null }],
+	] as const)("matches dispatch for an item validation rewrites through %s", async (_label, fill) => {
+		const call = {
+			context: "ctx",
+			tasks: [
+				{ name: "Alpha", agent: "task", solutionSpace: "one way", task: "Do A.", ...fill },
+				{ name: "Beta", agent: "task", solutionSpace: "one way", task: "Do B." },
+			],
+		};
+		const raw = JSON.stringify(call);
+		const { tool, manager, session } = await openSession();
+
+		session.update(toolCall, raw.slice(0, raw.indexOf('{"name":"Beta"') + 10));
+		await spawn("Alpha").started.promise;
+
+		session.finalize({ toolCall, args: call });
+		await spawn("Beta").started.promise;
+		const validated = validateAgentToolArguments(tool as unknown as AgentTool, {
+			type: "toolCall",
+			id: toolCall.id,
+			name: tool.name,
+			arguments: call,
+		});
+		const result = await tool.execute(toolCall.id, validated as TaskParams);
+
+		expect(result.isError).toBeFalsy();
+		expect(result.details?.progress?.map(progress => progress.id)).toEqual(["Alpha", "Beta"]);
+		expect(duplicateJobs(manager, ["Alpha", "Beta"])).toEqual([]);
 		expect([...startedIds].sort()).toEqual(["Alpha", "Beta"]);
 	});
 });

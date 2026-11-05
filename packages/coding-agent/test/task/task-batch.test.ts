@@ -1090,6 +1090,28 @@ describe("batch model placement", () => {
 		expect(run).not.toHaveBeenCalled();
 	});
 
+	// Both halves blank is what a model sends when it has not decided yet. Leaving both in place
+	// would hand it the "exactly one of" message — the very message this change exists to stop — so
+	// `taskFile` goes and the specific `task` refusal survives, as it does without `task.file`.
+	it.each([
+		["with task.file on", { "task.file": true }],
+		["with task.file off", {}],
+	] as const)("keeps the `task` refusal when both halves are blank (%s)", async (_label, extra) => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": true, "async.enabled": false, ...extra } }),
+		);
+		const result = await tool.execute("task-both-blank", {
+			context: "Shared context",
+			tasks: [{ task: "", taskFile: "", solutionSpace: "one fixed answer", name: "Pong", agent: "task" }],
+		} as never);
+		expect(result.isError).toBe(true);
+		expect(getFirstText(result)).toMatch(/non-empty|missing `task`/i);
+		expect(getFirstText(result)).not.toMatch(/exactly one of/i);
+		expect(run).not.toHaveBeenCalled();
+	});
+
 	// Only a string counts as a placeholder. An empty ARRAY must still be refused: the speculative
 	// launcher plans from the raw streamed arguments and dispatch from the validated ones, shared
 	// validation turns `[]` into its string form on the way, and dropping it made the two disagree —
