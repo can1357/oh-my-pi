@@ -20,7 +20,7 @@
 - Fixed Codex WebSocket turns sending a delta `input` after a pooled socket reconnected (closed, idle eviction, token refresh, or prewarm routing-hint change) or when `onPayload` deleted `previous_response_id` (including when it also rewrote the input), and skipped late prewarm while a socket is busy or holding accepted steering ([#17809](https://github.com/can1357/oh-my-pi/pull/17809) by [@xiangnan0811](https://github.com/xiangnan0811)).
 - API-key logins now honor the auth rule's `store-as` provider instead of storing the key under the auth id ([#13637](https://github.com/can1357/oh-my-pi/pull/13637) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 - Fixed `openai-responses` and Codex continuations after an output-limit cut inside a tool call: the missing call is rebuilt on native replay, so its result stays paired instead of ending the request with an orphan assistant note ([#17847](https://github.com/can1357/oh-my-pi/issues/17847))
-- Fixed the same continuations on models that require reasoning before a tool call and on Muse Code: the rebuilt call now replays after the reasoning item those models expect and under Muse Code's prefixed tool name ([#17847](https://github.com/can1357/oh-my-pi/issues/17847))
+- Fixed the same continuations on models that require reasoning before a tool call and on Muse Code: the rebuilt call now replays after the reasoning item those models expect and under Muse Code's prefixed tool name ([#17847](https://github.com/can1357/oh-my-pi/issues/17847), [#18189](https://github.com/can1357/oh-my-pi/pull/18189) by [@mttzzz](https://github.com/mttzzz))
 
 ### Changed
 
