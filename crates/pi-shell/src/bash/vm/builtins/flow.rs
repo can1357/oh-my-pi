@@ -772,11 +772,21 @@ fn wait_any(ctx: &mut Ctx<'_, '_>, args: &[BString], into: Option<BString>) -> R
 			}
 			let kept = ctx.vp.jobs.kept_status(pid).or_else(|| {
 				let v = ctx.vp.vpid_of(pid);
-				if ctx.k.started(ctx.cx.store, ctx.vp.vpid, v) {
-					ctx.k.proc_collect(ctx.cx.store, v)
-				} else {
-					None
+				if !ctx.k.started(ctx.cx.store, ctx.vp.vpid, v) {
+					return None;
 				}
+				// bash `check_nonjobs` adds the status it reports to `bgpids`,
+				// as deleting a job does: a later `wait PID` still reads it,
+				// though the child's record itself is collected here.
+				let status = ctx.k.proc_collect(ctx.cx.store, v)?;
+				if ctx.vp.mode.dialect() != crate::bash::ids::Dialect::Zsh {
+					ctx.vp.jobs.keep(crate::bash::vm::proc::KeptStatus {
+						vpid: v,
+						os_pid: (v.0 != pid).then_some(pid),
+						status,
+					});
+				}
+				Some(status)
 			});
 			if let Some(status) = kept {
 				let wait = Wait {

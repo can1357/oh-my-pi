@@ -365,6 +365,12 @@ struct Synced {
 	getopts:    GetoptsState,
 	rlimits:    Vec<(Rlimit, Option<u64>, Option<u64>)>,
 	kept:       Vec<super::proc::KeptStatus>,
+	/// A write of one of these records failed, so what the store holds is
+	/// unknown: the next [`sync_root`] writes every field again instead of
+	/// trusting this cache. Without it a refused write left the field
+	/// marked written, and a later successful `externalize` reported no
+	/// loss while the record stayed missing.
+	dirty:      bool,
 }
 
 /// Root scopes the [`Root`] bitmasks track: `0..SCOPE_BITS`. Deeper ones
@@ -2855,10 +2861,11 @@ fn decode_ended(words: &[BString], bang_seen: u32) -> Option<Box<super::proc::En
 /// compared with its store record (the store holds what was written last,
 /// so the engine keeps no copy of the table), jobs gone from the table are
 /// deleted.
-fn write_jobs(root: &mut Root, store: &mut dyn StateStore, jobs: &JobTable) {
+fn write_jobs(root: &mut Root, store: &mut dyn StateStore, jobs: &JobTable, force: bool) {
 	let mut ids = std::mem::take(&mut root.synced.job_ids);
-	let same_ids =
-		ids.len() == jobs.list.len() && ids.iter().zip(&jobs.list).all(|(id, j)| *id == j.id);
+	let same_ids = !force
+		&& ids.len() == jobs.list.len()
+		&& ids.iter().zip(&jobs.list).all(|(id, j)| *id == j.id);
 	if !same_ids {
 		for id in &ids {
 			if !jobs.list.iter().any(|j| j.id == *id) {
@@ -2889,7 +2896,7 @@ fn write_jobs(root: &mut Root, store: &mut dyn StateStore, jobs: &JobTable) {
 		(MiscKey::ChldOwed, Some(jobs.chld).filter(|&n| n > 0), Some(chld).filter(|&n| n > 0)),
 		(MiscKey::BangSeen, Some(jobs.bang_seen()).filter(|&n| n > 0), Some(seen).filter(|&n| n > 0)),
 	] {
-		if new != was {
+		if force || new != was {
 			root.set_record(store, KeyBuf::Misc(key), new.map(|n| Record::Misc(decimal(n))));
 		}
 	}
@@ -2903,16 +2910,19 @@ fn write_jobs(root: &mut Root, store: &mut dyn StateStore, jobs: &JobTable) {
 /// contract's granularity for these fields.
 pub fn sync_root(root: &mut Root, store: &mut dyn StateStore, vp: &Vproc) {
 	debug_assert!(vp.overlay.is_none(), "only the root vproc's fields are in the store");
-	if vp.status != root.synced.status {
+	// A write refused since the last sync left this cache claiming records
+	// the store never took: write them all again.
+	let all = std::mem::take(&mut root.synced.dirty);
+	if all || vp.status != root.synced.status {
 		root.synced.status = vp.status;
 		root.set_misc(store, MiscKey::Status, decimal(vp.status));
 	}
-	if vp.pipestatus != root.synced.pipestatus {
+	if all || vp.pipestatus != root.synced.pipestatus {
 		root.synced.pipestatus.clone_from(&vp.pipestatus);
 		let words = vp.pipestatus.iter().map(|s| decimal(*s)).collect();
 		root.set_record(store, KeyBuf::Misc(MiscKey::PipeStatus), Some(Record::Words(words)));
 	}
-	if vp.last_bg != root.synced.last_bg {
+	if all || vp.last_bg != root.synced.last_bg {
 		root.synced.last_bg = vp.last_bg;
 		let rec = vp.last_bg.vpid().map(|v| {
 			Record::Misc(match vp.last_bg.os() {
@@ -2925,11 +2935,14 @@ pub fn sync_root(root: &mut Root, store: &mut dyn StateStore, vp: &Vproc) {
 	// Jobs are compared with their records: only an empty table that was
 	// written empty is skipped without a read.
 	let marks = (vp.jobs.current, vp.jobs.previous, vp.jobs.chld, vp.jobs.bang_seen());
-	if !vp.jobs.list.is_empty() || !root.synced.job_ids.is_empty() || marks != root.synced.job_marks
+	if all
+		|| !vp.jobs.list.is_empty()
+		|| !root.synced.job_ids.is_empty()
+		|| marks != root.synced.job_marks
 	{
-		write_jobs(root, store, &vp.jobs);
+		write_jobs(root, store, &vp.jobs, all);
 	}
-	if vp.getopts != root.synced.getopts {
+	if all || vp.getopts != root.synced.getopts {
 		root.synced.getopts.clone_from(&vp.getopts);
 		let rec = (vp.getopts != GetoptsState::default())
 			.then(|| Record::Words(encode_getopts(&vp.getopts)));
@@ -2940,16 +2953,19 @@ pub fn sync_root(root: &mut Root, store: &mut dyn StateStore, vp: &Vproc) {
 		.ended
 		.as_ref()
 		.map_or(&[][..], |e| e.kept.as_slice());
-	if kept != root.synced.kept.as_slice() {
+	if all || kept != root.synced.kept.as_slice() {
 		root.synced.kept = kept.to_vec();
 		let rec = (!kept.is_empty()).then(|| Record::Words(encode_kept(kept)));
 		root.set_record(store, KeyBuf::Misc(MiscKey::BgPids), rec);
 	}
-	if vp.rlimits != root.synced.rlimits {
+	if all || vp.rlimits != root.synced.rlimits {
 		root.synced.rlimits.clone_from(&vp.rlimits);
 		let rec = (!vp.rlimits.is_empty()).then(|| Record::Words(encode_rlimits(&vp.rlimits)));
 		root.set_record(store, KeyBuf::Misc(MiscKey::Rlimits), rec);
 	}
+	// A refused write during this sync: the cache above is a claim about a
+	// store that did not take it.
+	root.synced.dirty = root.has_fault();
 }
 
 /// Load the root vproc's in-place fields from the store ([`sync_root`]'s
@@ -3029,6 +3045,7 @@ pub fn load_root(
 			.ended
 			.as_ref()
 			.map_or_else(Vec::new, |e| e.kept.clone()),
+		dirty:      false,
 	};
 	Ok(())
 }
@@ -3040,7 +3057,7 @@ mod tests {
 		fd::FdTable,
 		ids::{JobId, ModeId, UnitId},
 		signal::Signal,
-		store::{Job, JobState},
+		store::{BlobSlot, Job, JobState},
 	};
 
 	fn order(keys: &[String]) -> Vec<String> {
@@ -3102,6 +3119,75 @@ mod tests {
 		let o = order(&ks);
 		assert_eq!(o[..5], keys(&["k1698", "k1699", "k1696", "k1697", "k1694"]));
 		assert_eq!(o[o.len() - 3..], keys(&["k1044", "k1049", "k1048"]));
+	}
+
+	/// Failure mode: a refused write of the kept statuses left them marked
+	/// written, so the next sync wrote nothing and a shell restored from
+	/// the store had no kept status at all, while `externalize` reported
+	/// no loss.
+	#[test]
+	fn a_refused_write_is_made_again_at_the_next_sync() {
+		struct Refusing<'a> {
+			inner:  &'a mut crate::bash::MemStore,
+			refuse: bool,
+		}
+		impl StateStore for Refusing<'_> {
+			fn get(&mut self, key: Key<'_>) -> Result<Option<&Record>, StoreError> {
+				self.inner.get(key)
+			}
+
+			fn scan(
+				&mut self,
+				table: Table,
+				f: &mut dyn FnMut(Key<'_>, &Record),
+			) -> Result<(), StoreError> {
+				self.inner.scan(table, f)
+			}
+
+			fn apply(&mut self, change: Change<'_>) -> Result<(), StoreError> {
+				if self.refuse && matches!(change, Change::Put(Key::Misc(MiscKey::BgPids), _)) {
+					self.refuse = false;
+					return Err(StoreError::Backend("refused once".into()));
+				}
+				self.inner.apply(change)
+			}
+
+			fn put_blob(&mut self, slot: BlobSlot, bytes: &[u8]) -> Result<(), StoreError> {
+				self.inner.put_blob(slot, bytes)
+			}
+
+			fn get_blob(&mut self, slot: BlobSlot) -> Result<Option<Vec<u8>>, StoreError> {
+				self.inner.get_blob(slot)
+			}
+
+			fn del_blob(&mut self, slot: BlobSlot) -> Result<(), StoreError> {
+				self.inner.del_blob(slot)
+			}
+
+			fn epoch(&self) -> u64 {
+				self.inner.epoch()
+			}
+		}
+		let (mut store, mut root, mut vp) = shell();
+		vp.jobs.keep(crate::bash::vm::proc::KeptStatus {
+			vpid:   Vpid(42),
+			os_pid: None,
+			status: 23,
+		});
+		{
+			let mut refusing = Refusing { inner: &mut store, refuse: true };
+			sync_root(&mut root, &mut refusing, &vp);
+		}
+		assert!(root.take_fault().is_some(), "the refused write is reported");
+		assert!(
+			matches!(store.get(Key::Misc(MiscKey::BgPids)), Ok(None)),
+			"the store never took the record"
+		);
+		sync_root(&mut root, &mut store, &vp);
+		assert!(
+			matches!(store.get(Key::Misc(MiscKey::BgPids)), Ok(Some(_))),
+			"the next sync writes the kept statuses the refused write lost"
+		);
 	}
 
 	fn shell() -> (crate::bash::MemStore, Root, Vproc) {

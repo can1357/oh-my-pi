@@ -221,3 +221,26 @@ async fn zsh_disown_keeps_no_status() {
 	)])
 	.await;
 }
+
+/// Failure modes the first review round found: one `wait` cleaned up a
+/// later operand's job and then blocked on a child the shell no longer
+/// had (it never returned), and `wait -n` of a process substitution
+/// reported its status without keeping it for a later `wait PID`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wait_operand_reads_the_status_its_own_cleanup_kept() {
+	assert_bash_outputs(&[
+		(
+			r#"f(){ return 3; }; g(){ return 7; }; f & a=$!; g & b=$!; wait "$a"; wait "$b" "$a"; echo status=$?"#,
+			"status=3\n",
+		),
+		(
+			r#"f(){ return 3; }; g(){ return 7; }; f & a=$!; g & b=$!; wait "$a"; wait "$a" "$b"; echo status=$?"#,
+			"status=7\n",
+		),
+		(
+			r#"exec 3< <(/bin/sleep .03; exit 23); a=$!; /bin/sleep .1; wait -n -p value "$a"; echo first=$?; wait "$a" 2>/dev/null; echo again=$?; exec 3<&-"#,
+			"first=23\nagain=23\n",
+		),
+	])
+	.await;
+}

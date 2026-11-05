@@ -3085,6 +3085,13 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 				} else if let (false, Some((_, JobState::Stopped(sig)))) = (force, job) {
 					// bash with job control: a stop ends the wait for that job.
 					last = sig.exit_status(platform);
+				} else if let Some(s) = vp.jobs.kept_status(v.0) {
+					// bash `wait_for_single_pid` falls back to `bgp_search`: an
+					// operand whose job left the table answers from its kept
+					// status. An earlier operand of this same `wait` can remove
+					// it (`cleanup_dead_jobs` above), and without this the wait
+					// blocks on a child the shell no longer has.
+					last = s;
 				} else {
 					return Some(Flow::Block(WaitKey::Proc(v)));
 				}
@@ -3188,7 +3195,18 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 					k.delete_job(cx.store, vp, number, keep);
 				},
 				None => {
-					k.proc_collect(cx.store, v);
+					// A child with no job of its own (a process substitution):
+					// bash keeps its status for a later `wait PID` as it does
+					// for a job it deletes (`bgp_add`).
+					if let Some(s) = k.proc_collect(cx.store, v)
+						&& vp.mode.dialect() != crate::bash::ids::Dialect::Zsh
+					{
+						vp.jobs.keep(crate::bash::vm::proc::KeptStatus {
+							vpid:   v,
+							os_pid: (shown != v.0).then_some(shown),
+							status: s,
+						});
+					}
 				},
 			}
 			st(vp).wait_for.clear();
