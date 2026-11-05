@@ -641,11 +641,17 @@ async fn engine_file(
 	// The failure is kept, not discarded: a decision about the object
 	// (`noclobber`) must tell "this object has no filesystem metadata" —
 	// which the trait spells `Unsupported` — from "asking for it failed".
+	// A provider that answers `Unknown` has not said what the object is;
+	// [`stat_kind`] would read that as a character device, which is an
+	// answer the provider did not give, so the look counts as failed.
 	let stat = file
 		.metadata_async()
 		.await
 		.map_err(|err| err.kind())
-		.map(|m| stat_of(&m, path));
+		.and_then(|m| match m.file_type().kind() {
+			VfsKind::Unknown => Err(io::ErrorKind::InvalidData),
+			_ => Ok(stat_of(&m, path)),
+		});
 	let mut kind = match stat.map(|st| st.kind) {
 		Ok(StatKind::File) => FileKind::Regular,
 		Ok(StatKind::Fifo) => FileKind::Pipe,

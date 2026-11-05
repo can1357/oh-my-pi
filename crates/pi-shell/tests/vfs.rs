@@ -24,16 +24,19 @@ use pi_vfs::{
 
 #[derive(Debug)]
 struct DelayedFilesystem {
-	root:           PathBuf,
-	seekable:       bool,
+	root:                  PathBuf,
+	seekable:              bool,
 	/// Every open of `virtual://existing` reports that the file exists,
 	/// the creating one and the plain one alike.
-	always_eexist:  bool,
+	always_eexist:         bool,
 	/// Asking an OPENED file for its metadata fails with this error, while
 	/// the path's own metadata still answers. The object's kind cannot be
 	/// established, which is not the same as the object having no metadata
 	/// at all — and a provider can report `ENOTSUP` for either.
-	metadata_errno: Option<i32>,
+	metadata_errno:        Option<i32>,
+	/// An OPENED file's metadata answers, but says `Unknown` for what the
+	/// object is: the provider has made no claim about its kind.
+	metadata_kind_unknown: bool,
 }
 
 impl DelayedFilesystem {
@@ -105,6 +108,7 @@ impl FileSystem for DelayedFilesystem {
 			file,
 			seekable: self.seekable,
 			metadata_errno: self.metadata_errno,
+			metadata_kind_unknown: self.metadata_kind_unknown,
 		}))
 	}
 
@@ -230,9 +234,10 @@ impl FileSystem for DelayedFilesystem {
 
 #[derive(Debug)]
 struct DelayedFile {
-	file:           File,
-	seekable:       bool,
-	metadata_errno: Option<i32>,
+	file:                  File,
+	seekable:              bool,
+	metadata_errno:        Option<i32>,
+	metadata_kind_unknown: bool,
 }
 
 #[async_trait]
@@ -260,7 +265,17 @@ impl FileHandle for DelayedFile {
 		if let Some(errno) = self.metadata_errno {
 			return Err(io::Error::from_raw_os_error(errno));
 		}
-		self.file.metadata_async().await
+		let real = self.file.metadata_async().await?;
+		if self.metadata_kind_unknown {
+			// The provider answers, but says nothing about what the object
+			// is: `Unknown` is not a claim that it is a device.
+			return Ok(pi_vfs::Metadata::new(
+				pi_vfs::FileType::from_kind(pi_vfs::FileKind::Unknown),
+				real.len(),
+				real.permissions(),
+			));
+		}
+		Ok(real)
 	}
 
 	async fn flush(&self) -> io::Result<()> {
@@ -281,6 +296,7 @@ fn provider(root: &Path, seekable: bool) -> Fs {
 		seekable,
 		always_eexist: false,
 		metadata_errno: None,
+		metadata_kind_unknown: false,
 	}))
 }
 
@@ -288,10 +304,11 @@ fn provider(root: &Path, seekable: bool) -> Fs {
 /// open of `virtual://existing` reports that the file exists.
 fn provider_refusing_every_open(root: &Path) -> Fs {
 	Fs::new(Arc::new(DelayedFilesystem {
-		root:           root.to_path_buf(),
-		seekable:       true,
-		always_eexist:  true,
-		metadata_errno: None,
+		root:                  root.to_path_buf(),
+		seekable:              true,
+		always_eexist:         true,
+		metadata_errno:        None,
+		metadata_kind_unknown: false,
 	}))
 }
 
@@ -299,10 +316,24 @@ fn provider_refusing_every_open(root: &Path) -> Fs {
 /// answer what an OPENED file is, though the path's own metadata answers.
 fn provider_whose_open_file_has_no_answer(root: &Path, errno: i32) -> Fs {
 	Fs::new(Arc::new(DelayedFilesystem {
-		root:           root.to_path_buf(),
-		seekable:       true,
-		always_eexist:  false,
-		metadata_errno: Some(errno),
+		root:                  root.to_path_buf(),
+		seekable:              true,
+		always_eexist:         false,
+		metadata_errno:        Some(errno),
+		metadata_kind_unknown: false,
+	}))
+}
+
+/// `virtual://` served from `root` by a [`DelayedFilesystem`] whose OPENED
+/// files answer with a kind of `Unknown`, though the path's own metadata
+/// answers properly.
+fn provider_whose_open_file_says_unknown(root: &Path) -> Fs {
+	Fs::new(Arc::new(DelayedFilesystem {
+		root:                  root.to_path_buf(),
+		seekable:              true,
+		always_eexist:         false,
+		metadata_errno:        None,
+		metadata_kind_unknown: true,
 	}))
 }
 
@@ -1140,6 +1171,40 @@ async fn noclobber_refuses_an_object_whose_kind_it_cannot_establish() {
 					"{row}"
 				);
 			}
+		}
+	}
+}
+
+/// A provider that answers `Unknown` has said nothing about what the
+/// object is. It must not be read as a claim that the object is a device:
+/// `noclobber` refuses an object whose kind the provider did not give,
+/// exactly as it refuses one whose metadata request failed.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn noclobber_refuses_a_provider_object_of_an_unknown_kind() {
+	for alias in [false, true] {
+		for op in [">", "&>", ">&"] {
+			let directory = tempfile::tempdir().expect("isolated provider filesystem");
+			fs::write(directory.path().join("f"), b"ORIGINAL").expect("regular provider file");
+			let script = if alias {
+				format!("exec 3<>virtual://f; set -C; printf BAD {op}/dev/fd/3; echo s=$?")
+			} else {
+				format!("set -C; printf BAD {op}virtual://f; echo s=$?")
+			};
+			let run = tokio::time::timeout(
+				Duration::from_secs(20),
+				run_script(provider_whose_open_file_says_unknown(directory.path()), None, &script),
+			)
+			.await
+			.expect("the run finishes");
+			let row = format!("alias={alias} `{op}`");
+			assert_eq!(run.stdout, "s=1\n", "{row}: {}", run.stderr);
+			assert!(run.stderr.contains("cannot overwrite existing file"), "{row}: {}", run.stderr);
+			assert_eq!(
+				fs::read_to_string(directory.path().join("f")).expect("kept"),
+				"ORIGINAL",
+				"{row}"
+			);
 		}
 	}
 }
