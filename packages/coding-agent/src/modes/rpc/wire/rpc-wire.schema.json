@@ -4739,6 +4739,10 @@
 				},
 				"detached": {
 					"type": "boolean"
+				},
+				"refusalReason": {
+					"const": "concurrency_limit",
+					"description": "Why a spawn was refused before reaching the executor (`task.concurrencyPolicy = \"refuse\"`)."
 				}
 			},
 			"required": [

@@ -1341,6 +1341,8 @@ class SubagentProgressPayload:
     assignment: str | None = None
     session_file: str | None = None
     detached: bool | None = None
+    refusal_reason: Literal["concurrency_limit"] | None = None
+    """Why a spawn was refused before reaching the executor (`task.concurrencyPolicy = "refuse"`)."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -2793,6 +2795,7 @@ def parse_subagent_progress_payload(value: object, path: str = "SubagentProgress
         assignment=optional(payload, "assignment", decode_str, path),
         session_file=optional(payload, "sessionFile", decode_str, path),
         detached=optional(payload, "detached", decode_bool, path),
+        refusal_reason=optional(payload, "refusalReason", cast('Decoder[Literal["concurrency_limit"]]', literal(frozenset({"concurrency_limit"}))), path),
     )
 
 

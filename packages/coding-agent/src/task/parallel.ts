@@ -148,6 +148,27 @@ export class Semaphore {
 	}
 
 	/**
+	 * Take a slot when one is free, without ever queueing. `false` means the
+	 * caller would have to wait. This is the seam the `"refuse"` spawn policy
+	 * builds on: a full semaphore becomes an error instead of a parked spawn.
+	 */
+	tryAcquire(): boolean {
+		if (this.#current >= this.#max) return false;
+		this.#current++;
+		return true;
+	}
+
+	/** Slots currently held by running work. */
+	get running(): number {
+		return this.#current;
+	}
+
+	/** Callers parked in the queue, waiting for a slot. */
+	get waiting(): number {
+		return this.#queue.length;
+	}
+
+	/**
 	 * Resolves when a slot is available. Pass an `AbortSignal` so callers that
 	 * stop waiting (parent task cancelled, wall-clock budget elapsed) also stop
 	 * occupying a queue slot — otherwise a later `release()` would resolve the
@@ -158,10 +179,7 @@ export class Semaphore {
 		if (signal?.aborted) {
 			throw semaphoreAbortReason(signal);
 		}
-		if (this.#current < this.#max) {
-			this.#current++;
-			return;
-		}
+		if (this.tryAcquire()) return;
 		const { promise, resolve, reject } = Promise.withResolvers<void>();
 		const queue = this.#queue;
 		let waiter: () => void = resolve;

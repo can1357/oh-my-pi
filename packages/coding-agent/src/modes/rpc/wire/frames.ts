@@ -78,6 +78,10 @@ export const frameDefs = {
 		progress: doc(JSON_OBJECT, "Raw `AgentProgress` record."),
 		"sessionFile?": "string",
 		"detached?": "boolean",
+		"refusalReason?": doc(
+			"'concurrency_limit'",
+			'Why a spawn was refused before reaching the executor (`task.concurrencyPolicy = "refuse"`).',
+		),
 	},
 	SubagentEventPayload: { id: "string", event: "RpcAgentEvent" },
 	SubagentLifecycleEvent: doc(

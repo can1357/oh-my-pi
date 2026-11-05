@@ -395,6 +395,37 @@ export const cfgTaskMaxConcurrency = register({
 	},
 });
 
+/**
+ * What a spawn does when every `task.maxConcurrency` slot is taken. `"queue"`
+ * keeps the historic behavior: the spawn waits in the session semaphore FIFO
+ * and starts when a slot frees. `"refuse"` fails it on the spot with a
+ * model-visible error naming the running count, the parked count, and the
+ * limit — predictable latency for callers that would rather re-plan than
+ * block on a slot they cannot observe.
+ */
+export const cfgTaskConcurrencyPolicy = register({
+	id: "task.concurrencyPolicy",
+	protocolDefault: ["rpc", "acp"],
+	type: "enum",
+	values: ["queue", "refuse"] as const,
+	default: "queue",
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Concurrency Policy",
+		description:
+			"What a spawn does when `task.maxConcurrency` subagents already run: `queue` waits for a free slot, `refuse` fails the spawn with the running count instead of waiting",
+		options: [
+			{ value: "queue", label: "Queue", description: "Wait for a free slot (default)" },
+			{
+				value: "refuse",
+				label: "Refuse",
+				description: "Fail the spawn with a model-visible error naming the limit; never queue",
+			},
+		],
+	},
+});
+
 function validateWorkerThreads(value: unknown): void {
 	if (value === undefined || (typeof value === "number" && Number.isSafeInteger(value) && value >= 0)) return;
 	throw new Error(

@@ -4978,6 +4978,8 @@ type SubagentProgressPayload struct {
 	Assignment       *string                    `json:"assignment,omitempty"`
 	SessionFile      *string                    `json:"sessionFile,omitempty"`
 	Detached         *bool                      `json:"detached,omitempty"`
+	// Why a spawn was refused before reaching the executor (`task.concurrencyPolicy = "refuse"`).
+	RefusalReason *SubagentProgressPayloadRefusalReason `json:"refusalReason,omitempty"`
 }
 
 func (v *SubagentProgressPayload) UnmarshalJSON(data []byte) error {
@@ -4996,11 +4998,31 @@ func (v *SubagentProgressPayload) decodeFrom(raw map[string]json.RawMessage) err
 	d.optional("assignment", &out.Assignment)
 	d.optional("sessionFile", &out.SessionFile)
 	d.optional("detached", &out.Detached)
+	d.optional("refusalReason", &out.RefusalReason)
 	if d.err != nil {
 		return d.err
 	}
 	*v = out
 	return nil
+}
+
+type SubagentProgressPayloadRefusalReason string
+
+const (
+	SubagentProgressPayloadRefusalReasonConcurrencyLimit SubagentProgressPayloadRefusalReason = "concurrency_limit"
+)
+
+func (v *SubagentProgressPayloadRefusalReason) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SubagentProgressPayloadRefusalReason")
+	if err != nil {
+		return err
+	}
+	switch value := SubagentProgressPayloadRefusalReason(s); value {
+	case SubagentProgressPayloadRefusalReasonConcurrencyLimit:
+		*v = value
+		return nil
+	}
+	return unknownValue("SubagentProgressPayloadRefusalReason", s)
 }
 
 type SubagentEventPayload struct {

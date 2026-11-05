@@ -4221,6 +4221,9 @@ pub struct SubagentProgressPayload {
 	pub session_file: Option<String>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub detached: Option<bool>,
+	/// Why a spawn was refused before reaching the executor (`task.concurrencyPolicy = "refuse"`).
+	#[serde(rename = "refusalReason", default, skip_serializing_if = "Option::is_none")]
+	pub refusal_reason: Option<LitConcurrencyLimit>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -5938,6 +5941,27 @@ impl<'de> Deserialize<'de> for LitCostCap {
 			Ok(Self)
 		} else {
 			Err(D::Error::custom(format!("expected \"cost_cap\", got {value}")))
+		}
+	}
+}
+
+/// The constant `"concurrency_limit"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct LitConcurrencyLimit;
+
+impl Serialize for LitConcurrencyLimit {
+	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		serializer.serialize_str("concurrency_limit")
+	}
+}
+
+impl<'de> Deserialize<'de> for LitConcurrencyLimit {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let value = Value::deserialize(deserializer)?;
+		if value.as_str() == Some("concurrency_limit") {
+			Ok(Self)
+		} else {
+			Err(D::Error::custom(format!("expected \"concurrency_limit\", got {value}")))
 		}
 	}
 }

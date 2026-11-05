@@ -26,6 +26,36 @@ export interface SpawnPermit {
 	release(): void;
 }
 
+/** Why a spawn was refused before it reached the executor. */
+export type SpawnRefusalReason = "concurrency_limit";
+
+/**
+ * Raised by a permit under `task.concurrencyPolicy = "refuse"` instead of
+ * parking the spawn in the semaphore queue. The message is model-facing: it
+ * names the running count, the parked count when any, and the configured
+ * limit, and tells the caller not to retry. Carries the same numbers as
+ * fields so telemetry never has to parse the text.
+ */
+export class SpawnRefusedError extends Error {
+	readonly reason: SpawnRefusalReason = "concurrency_limit";
+	readonly running: number;
+	readonly waiting: number;
+	readonly limit: number;
+
+	constructor(args: { running: number; waiting: number; limit: number }) {
+		const queued = args.waiting > 0 ? `, ${args.waiting} waiting` : "";
+		super(
+			`Concurrent subagent limit reached (${args.running} running${queued}; ` +
+				`task.maxConcurrency=${args.limit}). Do not retry; wait for running tasks or ask the user to ` +
+				"raise task.maxConcurrency.",
+		);
+		this.name = "SpawnRefusedError";
+		this.running = args.running;
+		this.waiting = args.waiting;
+		this.limit = args.limit;
+	}
+}
+
 /** Everything the run body needs from its `SpawnRun`. */
 export interface SpawnRunBody {
 	signal: AbortSignal;
