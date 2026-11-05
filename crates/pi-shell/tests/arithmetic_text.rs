@@ -142,6 +142,29 @@ async fn arithmetic_for_errors_end_the_loop_not_the_command_list() {
 	.await;
 }
 
+/// An arithmetic `for` header's expressions are not commands: a clause that
+/// fails to evaluate ends the loop with status 1 and runs no `ERR` trap,
+/// while a command failing in the body still runs one.
+#[tokio::test]
+async fn an_arithmetic_for_header_error_runs_no_err_trap() {
+	for header in ["for ((1+;0;))", "for ((i=0;1+;))", "for ((i=0;i<1;1+))"] {
+		run(
+			&format!("trap 'echo ERR:$?' ERR\n{header}; do :; done\necho after=$?\n"),
+			"after=1\n",
+			true,
+			0,
+		)
+		.await;
+	}
+	run(
+		"trap 'echo ERR:$?' ERR\nfor ((i=0;i<1;i++)); do false; done\necho after=$?\n",
+		"ERR:1\nafter=1\n",
+		false,
+		0,
+	)
+	.await;
+}
+
 #[tokio::test]
 async fn malformed_arithmetic_fallback_reports_its_substitution_error() {
 	run(

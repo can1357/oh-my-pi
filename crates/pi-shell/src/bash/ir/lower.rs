@@ -245,10 +245,16 @@ pub fn syntax_unit(e: &syn::ParseError, src: &[u8], mode: ModeId, feat: syn::Fea
 			.ops
 			.push(Op { code: Opcode::End, flags: 0, ev: 0, a: 0, b: 0, node: 0 });
 	} else {
-		let status = if e.command_substitution { 127 } else { 2 };
+		// Bash's status for this is 2, except in a `-c` string, where the
+		// failing command substitution's 127 is what the shell exits with.
+		// Which of the two applies is a run-time fact, so the op carries
+		// where the error came from and `Abort` reads the run's origin.
+		if e.command_substitution {
+			flags |= Op::COMSUB;
+		}
 		unit
 			.ops
-			.push(Op { code: Opcode::Abort, flags, ev: 0, a, b: status, node: e.line });
+			.push(Op { code: Opcode::Abort, flags, ev: 0, a, b: 2, node: e.line });
 	}
 	unit.seal();
 	unit

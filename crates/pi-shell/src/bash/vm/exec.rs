@@ -2088,16 +2088,25 @@ fn discard_all(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		.iter()
 		.position(|f| matches!(f.kind, FrameKind::Script { what: ScriptKind::Run, .. }));
 	if let Some(i) = run {
-		let command = matches!(
-			state::record(cx.store, vp, Key::Misc(MiscKey::RunOrigin)),
-			Ok(Some(Record::Misc(origin))) if origin.as_slice() == b"c"
-		);
-		if !command {
-			discard_script(k, vp, cx, Some(i));
+		// `top_level_cleanup` runs before the shell exits, not after it:
+		// the function scopes and redirections the failing command was
+		// under are gone by the time the EXIT trap runs, so the trap sees
+		// the global scope and the run's own descriptors.
+		discard_script(k, vp, cx, Some(i));
+		if !run_is_command(cx, vp) {
 			return;
 		}
 	}
 	exit_shell(k, vp, cx, status);
+}
+
+/// Whether this run is a `-c` string rather than a script, a file or an
+/// interactive session: one command, so abandoning it ends the shell.
+pub fn run_is_command(cx: &mut Cx<'_>, vp: &Vproc) -> bool {
+	matches!(
+		state::record(cx.store, vp, Key::Misc(MiscKey::RunOrigin)),
+		Ok(Some(Record::Misc(origin))) if origin.as_slice() == b"c"
+	)
 }
 
 /// Abandon the current command in `script`, restoring its expansion and
@@ -2847,6 +2856,12 @@ fn arith_failed(
 		.find(|(_, next)| next.node == op.node && next.code == Opcode::LoopExit)
 		.map(|(pc, _)| pc as u32)
 		.expect("arithmetic loop exit");
+	// The header's expressions are not commands: bash runs no ERR trap for
+	// one that fails, and the loop's `Leave` is the only op between here
+	// and the next command start that would. `err_reported` is cleared
+	// when a command starts, so this suppresses that `Leave` and nothing
+	// after it.
+	top_frame(vp).err_reported = true;
 	if let Some(rec) = top_frame(vp)
 		.loops
 		.last_mut()
@@ -3178,7 +3193,13 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 					.unwrap_or_default();
 				k.diag(cx, vp, op.node, wrap(Diag::SyntaxContext { text }));
 			}
-			Flow::Abort(op.b as i32)
+			// A `-c` string exits with the failing command substitution's
+			// 127; every other origin reports the parser's own status.
+			if op.flags & Op::COMSUB != 0 && run_is_command(cx, vp) {
+				Flow::Abort(127)
+			} else {
+				Flow::Abort(op.b as i32)
+			}
 		},
 		Opcode::End => Flow::EndUnit,
 		Opcode::Repeat => repeat(k, vp, cx, unit, op, line),

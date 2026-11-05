@@ -4684,10 +4684,7 @@ fn finish(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Flow {
 			Flow::DiscardAll(n)
 		},
 		Some(Transfer::DiscardAll(n) | Transfer::ArithSubscript(n)) => {
-			let command = matches!(
-				state::record(cx.store, vp, Key::Misc(MiscKey::RunOrigin)),
-				Ok(Some(Record::Misc(origin))) if origin.as_slice() == b"c"
-			);
+			let command = exec::run_is_command(cx, vp);
 			let in_run = vp
 				.frames
 				.iter()

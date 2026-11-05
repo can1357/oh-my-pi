@@ -205,6 +205,13 @@ impl Op {
 	/// Flag on `Exec`: the whole body of a `$( )` is `< file`, which
 	/// outputs the file (bash's `$(< file)`).
 	pub const CAT: u8 = 1 << 4;
+	/// Flag on `Abort`: the syntax error came from a command substitution,
+	/// whose 127 is the status a `-c` string exits with (bash's
+	/// `parse_and_execute`); from any other input the status stays `b`.
+	/// Shares its bit with the `ForIn`-only [`Self::SELECT`]. A unit
+	/// compiled before this flag existed simply uses `b`, which is the
+	/// status every origin but `-c` wants.
+	pub const COMSUB: u8 = 1 << 3;
 	/// Flag: inside a condition (`if`/`while` test, left of `&&`/`||`, `!`).
 	pub const COND: u8 = 1;
 	/// Flag on `Abort`: `strs[a + 1]` is the offending source line.

@@ -293,3 +293,67 @@ async fn getopts_special_variable_assignments_propagate_indexed_subscript_errors
 		run(id, script, "before\n", true, 1).await;
 	}
 }
+
+/// Bash's `top_level_cleanup` runs before the shell exits, so the EXIT trap
+/// of a `-c` string sees the global scope and the run's own descriptors,
+/// not the frame the failing command was under.
+#[tokio::test]
+async fn the_exit_trap_runs_after_the_discarded_command_is_unwound() {
+	run(
+		"exit-trap-scope",
+		"a=(zero one)\nx=global\ntrap 'echo \
+		 EXIT:x=$x:func=${FUNCNAME[*]}:status=$?' EXIT\nf(){ local x=local; (( a[1+] )); echo \
+		 BAD; }\nf\necho AFTER\n",
+		"EXIT:x=global:func=:status=1\n",
+		true,
+		1,
+	)
+	.await;
+}
+
+/// The same unwinding closes the failing command's redirections: the EXIT
+/// trap's output goes to the shell's stdout, not to the file the function
+/// call was redirected into.
+#[test]
+fn the_exit_trap_does_not_inherit_the_discarded_command_s_redirection() {
+	let dir = tempfile::tempdir().expect("tempdir");
+	let out = obash_support::output(
+		obash_support::obash()
+			.args(["-c", "trap 'echo EXIT:$?' EXIT\nf(){ (( a[1+] )); }\nf >redirected\necho BAD\n"])
+			.current_dir(dir.path()),
+	);
+	assert_eq!(String::from_utf8_lossy(&out.stdout), "EXIT:1\n");
+	assert_eq!(out.status.code(), Some(1));
+	assert_eq!(
+		std::fs::read_to_string(dir.path().join("redirected")).unwrap_or_default(),
+		"",
+		"the EXIT trap wrote through the discarded command's redirection"
+	);
+}
+
+/// A syntax error inside a command substitution exits a `-c` string with
+/// the substitution's 127 (bash's `parse_and_execute`), and a script file
+/// with the parser's own 2. The status is the run's, not the unit's.
+#[test]
+fn a_command_substitution_syntax_error_reports_the_status_of_its_origin() {
+	let script = "echo \"$(for ((i=0;0;i+(;))); do :; done\n)\"\necho next\n";
+	let dir = tempfile::tempdir().expect("tempdir");
+	let path = dir.path().join("main.bash");
+	std::fs::write(&path, script).expect("script fixture");
+	let from_file =
+		obash_support::output(obash_support::obash().arg(&path).current_dir(dir.path()));
+	assert_eq!(String::from_utf8_lossy(&from_file.stdout), "");
+	assert!(!from_file.stderr.is_empty());
+	assert_eq!(from_file.status.code(), Some(2), "a script file reports the parser's status");
+
+	let from_command = obash_support::output(
+		obash_support::obash().args(["-c", script]).current_dir(dir.path()),
+	);
+	assert_eq!(String::from_utf8_lossy(&from_command.stdout), "");
+	assert!(!from_command.stderr.is_empty());
+	assert_eq!(
+		from_command.status.code(),
+		Some(127),
+		"a -c string reports the command substitution's status"
+	);
+}
