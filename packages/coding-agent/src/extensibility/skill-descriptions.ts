@@ -408,7 +408,8 @@ export class SkillDescriptionCatalog {
 	 * cost gate exists, and off a startup path (resolving the compression model composes the catalog).
 	 * `verbatim` renders every description exactly as authored: no preview truncation, no store access,
 	 * and no compression work (`skills.compressDescriptions: false`). A function is read on every call,
-	 * so a setting changed in a live session applies to the next prompt build.
+	 * so a setting changed in a live session applies to the next prompt build and to compressions still
+	 * queued.
 	 */
 	constructor(
 		options: {
@@ -493,7 +494,9 @@ export class SkillDescriptionCatalog {
 
 	#schedule(store: SkillDescriptionStore, misses: ReadonlyMap<string, Skill>): void {
 		const compressor = this.#compress;
-		if (!compressor || store.isClosing) return;
+		if (!compressor || store.isClosing || this.verbatim) return;
+		// Read again by every queued job: switching to verbatim drops the requests not sent yet.
+		const wanted = (): boolean => !this.verbatim;
 		// One resolution serves the whole batch: each composes the available model catalog, and a
 		// miss that model already answered unusably needs nothing more. Deferred until the current
 		// synchronous prompt rendering has finished.
@@ -502,7 +505,9 @@ export class SkillDescriptionCatalog {
 			const job = `${store.path}:${key}`;
 			if (inFlight.has(job)) continue;
 			batchModel ??= Promise.resolve().then(() => compressor.modelKey());
-			const pending = compressSkill(store, compressor, batchModel, key, skill).finally(() => inFlight.delete(job));
+			const pending = compressSkill(store, compressor, batchModel, key, skill, wanted).finally(() =>
+				inFlight.delete(job),
+			);
 			inFlight.set(job, pending);
 		}
 	}
@@ -511,6 +516,8 @@ export class SkillDescriptionCatalog {
 /**
  * Compress one skill's description into `store`. `batchModel` filters out skills that model
  * already answered unusably (and everything when no model is available) before taking a slot.
+ * `wanted` is checked before taking a slot and again once one is free, so a job queued before the
+ * catalog switched to verbatim sends nothing.
  */
 async function compressSkill(
 	store: SkillDescriptionStore,
@@ -518,13 +525,20 @@ async function compressSkill(
 	batchModel: Promise<string | undefined>,
 	key: string,
 	skill: Skill,
+	wanted: () => boolean,
 ): Promise<void> {
 	try {
 		const candidate = await batchModel;
-		if (candidate === undefined || store.isClosing || store.get(unusableKey(key, candidate)) !== undefined) return;
+		if (
+			candidate === undefined ||
+			!wanted() ||
+			store.isClosing ||
+			store.get(unusableKey(key, candidate)) !== undefined
+		)
+			return;
 		await compressionSlots.acquire();
 		try {
-			if (store.isClosing) return;
+			if (store.isClosing || !wanted()) return;
 			// Unusable answers are remembered per model: that model is not asked again, a newly selected one is.
 			// Re-resolved because the role can change while this job waits behind running requests.
 			const model = compressor.modelKey();

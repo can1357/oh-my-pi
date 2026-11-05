@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { AuthStorage } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { removeSyncWithRetries, Snowflake, TempDir } from "@oh-my-pi/pi-utils";
+import { $ } from "bun";
 import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
 import { cfgSkillsCompressDescriptions } from "../src/extensibility/settings";
@@ -117,6 +118,15 @@ describe("skills.compressDescriptions in a session", () => {
 		await session.newSession();
 		expect(promptLine(session)).toBe(`- ${original.name}: ${original.description}`);
 	});
+
+	// Failure mode: an SDK session disposed while a prompt rebuild is under way opens its own description
+	// database after its disposer ran, and nothing ever closes that handle.
+	it("opens no description store once the session is disposed", async () => {
+		const fixture = path.join(import.meta.dir, "fixtures/skill-description-store-dispose.ts");
+		const result = await $`${process.execPath} ${fixture}`.quiet().nothrow();
+		if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+		expect(JSON.parse(result.stdout.toString())).toEqual({ opened: false });
+	});
 });
 
 describe("verbatim SkillDescriptionCatalog", () => {
@@ -157,6 +167,37 @@ describe("verbatim SkillDescriptionCatalog", () => {
 		catalog.render([changed]);
 		await catalog.waitForPending();
 		expect(calls).toBe(2);
+	});
+
+	// Failure mode: compressions queued before the switch still go out, and are billed, after opting out.
+	it("sends no compression still waiting for a slot once switched to verbatim", async () => {
+		using temp = TempDir.createSync("omp-skill-description-verbatim-");
+		using store = SkillDescriptionStore.open(temp.join("skills.db"));
+		const skills = Array.from({ length: 8 }, (_, index) => ({ ...original, name: `${original.name}-${index}` }));
+		const firstSent = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let sent = 0;
+		const compress = {
+			modelKey: () => "test/fast",
+			compress: async () => {
+				sent++;
+				firstSent.resolve();
+				await release.promise;
+				return "Use for interactive browser tasks.";
+			},
+		};
+		let verbatim = false;
+		const catalog = new SkillDescriptionCatalog({ store, compress, verbatim: () => verbatim });
+		catalog.render(skills);
+		await firstSent.promise;
+		// The requests already sent hold every compression slot; the rest wait for one.
+		const sentBeforeSwitch = sent;
+		expect(sentBeforeSwitch).toBeLessThan(skills.length);
+
+		verbatim = true;
+		release.resolve();
+		await catalog.waitForPending();
+		expect(sent).toBe(sentBeforeSwitch);
 	});
 
 	// Failure mode: a session that renders verbatim still creates skill-descriptions.db.

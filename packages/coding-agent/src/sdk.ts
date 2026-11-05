@@ -4185,11 +4185,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// `skills.compressDescriptions` is off) and closes with the session.
 		const keepsOwnSkillDescriptionStore = path.resolve(agentDir) !== path.resolve(getAgentDir());
 		let ownedSkillDescriptionStore: SkillDescriptionStore | undefined;
+		// Set by the session's disposer: a prompt rebuild that is still running then must not open a
+		// store that nothing would close.
+		let skillDescriptionStoreReleased = false;
 		const skillDescriptions = new SkillDescriptionCatalog({
 			// Read on every prompt build: `cfgSystemPromptInputs` rebuilds the prompt when it changes, so
-			// a change made in a live session applies to the next prompt.
+			// a change made in a live session applies to the next prompt and to compressions still queued.
 			verbatim: () => !cfgSkillsCompressDescriptions.get(settings),
 			store: () => {
+				if (skillDescriptionStoreReleased) return undefined;
 				if (!keepsOwnSkillDescriptionStore) return sharedSkillDescriptionStore();
 				ownedSkillDescriptionStore = openSessionSkillDescriptionStore(agentDir);
 				return ownedSkillDescriptionStore ?? sharedSkillDescriptionStore();
@@ -5238,6 +5242,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		session.registerSessionChangeCallback(() => toolSession.editStore?.clear());
 		// Let in-flight compressions land before releasing the session's own store, if one was opened.
 		session.addDisposer(() => {
+			skillDescriptionStoreReleased = true;
 			const owned = ownedSkillDescriptionStore;
 			if (owned) void skillDescriptions.waitForPending().finally(() => owned.close());
 		});
