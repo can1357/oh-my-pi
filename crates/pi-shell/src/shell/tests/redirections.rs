@@ -255,3 +255,64 @@ async fn noclobber_refuses_an_existing_file_it_cannot_open() {
 	])
 	.await;
 }
+
+/// Bash refuses an existing regular file under `noclobber` without opening
+/// it, so nothing the file holds can delay the refusal. A write lease
+/// another process holds makes an open of that file wait for the lease to
+/// break (45 s by default), which the process a background command's own
+/// opens run in used to do: the command then reached its limit instead of
+/// being refused.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn noclobber_refuses_a_leased_file_without_waiting_for_the_lease() {
+	let dir = tempfile::tempdir().expect("temp dir");
+	std::fs::write(dir.path().join("f"), b"ORIGINAL").expect("victim");
+	let gate = std::ffi::CString::new(
+		dir.path()
+			.join("gate")
+			.into_os_string()
+			.into_encoded_bytes(),
+	)
+	.expect("path");
+	// SAFETY: `gate` is a NUL-terminated string that outlives the call.
+	assert_eq!(unsafe { libc::mkfifo(gate.as_ptr(), 0o600) }, 0, "mkfifo gate");
+	// A lease break arrives as `SIGIO`, whose default action would end this
+	// process; nothing here acts on it.
+	// SAFETY: setting a signal disposition on this process.
+	unsafe { libc::signal(libc::SIGIO, libc::SIG_IGN) };
+	let victim =
+		std::ffi::CString::new(dir.path().join("f").into_os_string().into_encoded_bytes())
+			.expect("path");
+	// SAFETY: `victim` is a NUL-terminated string that outlives the call.
+	let held = unsafe { libc::open(victim.as_ptr(), libc::O_RDONLY) };
+	assert!(held >= 0, "open the file to lease it");
+	// SAFETY: `held` is an open descriptor this process owns.
+	let taken = unsafe { libc::fcntl(held, libc::F_SETLEASE, libc::F_WRLCK) };
+	if taken != 0 {
+		// This filesystem grants no lease, so there is nothing to wait on
+		// and nothing for this row to measure.
+		// SAFETY: `held` is open and used nowhere else.
+		unsafe { libc::close(held) };
+		return;
+	}
+	let (tx, rx) = flume::unbounded::<String>();
+	let result = Shell::new(None)
+		.run(
+			ShellRunOptions {
+				command: r#"set -C; /bin/echo BAD >gate >f & p=$!; /bin/cat gate >/dev/null & wait "$p"; echo s=$?; wait"#
+					.to_owned(),
+				cwd:     Some(dir.path().to_string_lossy().into_owned()),
+				..Default::default()
+			},
+			Some(tx),
+			CancelToken::new(Some(10_000)),
+		)
+		.await
+		.expect("run");
+	// SAFETY: `held` is open and used nowhere else.
+	unsafe { libc::close(held) };
+	let output = strip_prefixes(&rx.drain().collect::<String>());
+	assert!(!result.timed_out, "the refusal waited for the lease: {output:?}");
+	assert_eq!(output, "f: cannot overwrite existing file\ns=1\n");
+	assert_eq!(std::fs::read_to_string(dir.path().join("f")).expect("kept"), "ORIGINAL");
+}

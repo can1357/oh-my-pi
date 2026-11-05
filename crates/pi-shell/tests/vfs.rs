@@ -24,8 +24,11 @@ use pi_vfs::{
 
 #[derive(Debug)]
 struct DelayedFilesystem {
-	root:     PathBuf,
-	seekable: bool,
+	root:        PathBuf,
+	seekable:    bool,
+	/// Every open of `virtual://existing` reports that the file exists,
+	/// the creating one and the plain one alike.
+	always_eexist: bool,
 }
 
 impl DelayedFilesystem {
@@ -88,6 +91,9 @@ impl FileSystem for DelayedFilesystem {
 		delay().await;
 		if path.to_str() == Some("virtual://stalled") {
 			return Ok(File::from_handle(StalledFile));
+		}
+		if self.always_eexist && path.to_str() == Some("virtual://existing") {
+			return Err(io::Error::from(io::ErrorKind::AlreadyExists));
 		}
 		let file = Fs::native().open_with(self.path(path)?, options).await?;
 		Ok(File::from_handle(DelayedFile { file, seekable: self.seekable }))
@@ -257,7 +263,21 @@ impl FileHandle for DelayedFile {
 
 /// `virtual://` served from `root` by a [`DelayedFilesystem`].
 fn provider(root: &Path, seekable: bool) -> Fs {
-	Fs::new(Arc::new(DelayedFilesystem { root: root.to_path_buf(), seekable }))
+	Fs::new(Arc::new(DelayedFilesystem {
+		root: root.to_path_buf(),
+		seekable,
+		always_eexist: false,
+	}))
+}
+
+/// `virtual://` served from `root` by a [`DelayedFilesystem`] whose every
+/// open of `virtual://existing` reports that the file exists.
+fn provider_refusing_every_open(root: &Path) -> Fs {
+	Fs::new(Arc::new(DelayedFilesystem {
+		root: root.to_path_buf(),
+		seekable: true,
+		always_eexist: true,
+	}))
 }
 
 /// Options running `script` over `filesystem`, from the host directory `cwd`
@@ -927,5 +947,68 @@ async fn noclobber_judges_a_provider_file_by_what_it_opens() {
 		);
 		assert_eq!(fs::read_to_string(&got).expect("reader output"), "x\n", "`{op}`");
 		assert_eq!(fs::read_to_string(directory.path().join("f")).expect("kept"), "KEEP", "`{op}`");
+	}
+}
+
+/// A provider's regular file that cannot be seeked is driven as a device,
+/// because that is how the engine must read and write it; `noclobber` asks
+/// what the object IS, so it is still refused and its bytes are kept.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn noclobber_refuses_a_provider_file_it_cannot_seek() {
+	for op in [">", "&>", ">&"] {
+		let directory = tempfile::tempdir().expect("isolated provider filesystem");
+		fs::write(directory.path().join("f"), b"ORIGINAL").expect("regular provider file");
+		let script = format!("set -C; echo BAD {op}virtual://f; echo s=$?");
+		let run = tokio::time::timeout(
+			Duration::from_secs(20),
+			run_script(provider(directory.path(), false), None, &script),
+		)
+		.await
+		.expect("the run finishes");
+		assert_eq!(run.stdout, "s=1\n", "`{op}`: {}", run.stderr);
+		assert!(
+			run.stderr
+				.contains("virtual://f: cannot overwrite existing file"),
+			"`{op}`: {}",
+			run.stderr
+		);
+		assert_eq!(
+			fs::read_to_string(directory.path().join("f")).expect("kept"),
+			"ORIGINAL",
+			"`{op}`"
+		);
+	}
+}
+
+/// `noclobber`'s reopen of a file the exclusive create met may itself
+/// report that the file exists. That answer is the reopen's, not a second
+/// exclusive create to recover from: the redirection must settle on the
+/// path's own kind instead of opening again without end.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn noclobber_settles_when_the_reopen_also_reports_the_file_exists() {
+	for op in [">", "&>", ">&"] {
+		let directory = tempfile::tempdir().expect("isolated provider filesystem");
+		fs::write(directory.path().join("existing"), b"ORIGINAL").expect("regular provider file");
+		let script = format!("set -C; echo BAD {op}virtual://existing; echo s=$?");
+		let run = tokio::time::timeout(
+			Duration::from_secs(20),
+			run_script(provider_refusing_every_open(directory.path()), None, &script),
+		)
+		.await
+		.expect("the run finishes");
+		assert_eq!(run.stdout, "s=1\n", "`{op}`: {}", run.stderr);
+		assert!(
+			run.stderr
+				.contains("virtual://existing: cannot overwrite existing file"),
+			"`{op}`: {}",
+			run.stderr
+		);
+		assert_eq!(
+			fs::read_to_string(directory.path().join("existing")).expect("kept"),
+			"ORIGINAL",
+			"`{op}`"
+		);
 	}
 }
