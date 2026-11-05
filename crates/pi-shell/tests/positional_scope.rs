@@ -611,3 +611,153 @@ async fn an_exit_inside_a_callout_operand_keeps_the_operands_arguments() {
 	])
 	.await;
 }
+
+/// The launch vector is the operand command's own words, so the operand's own
+/// write to the positional parameters is a write to the subshell's — which
+/// are the caller's — and is what everything after the operand reads. A
+/// builtin operand is the case that shows it: `eval` runs shell code in the
+/// subshell itself, where `set --` and `shift` reach the parameters, unlike a
+/// function operand, whose own scope they reach instead.
+///
+/// Measured on Bash 5.2.21 and 5.3.0 (`explore/gen10.py` rows r1, r2, r3, r5,
+/// r6, r10, r11), which agree on every row.
+#[tokio::test]
+async fn a_callout_operands_own_parameter_writes_outlive_it() {
+	// One single-quoted word for the `eval` operand, as the shell needs it.
+	fn operand(body: &str) -> String {
+		format!("'{}'", body.replace('\'', "'\\''"))
+	}
+	let trap = "trap 'printf \"  EXIT=[%s] n=%s F=[%s]\\n\" \"$*\" \"$#\" \"${FUNCNAME[*]}\"' EXIT";
+	let set = operand(&format!("set -- o1 o2; {trap}"));
+	let shift = operand(&format!("shift; {trap}"));
+	let source = operand(&format!(". ./lib L1; {trap}"));
+	let call = operand(&format!("set -- o1 o2; leaf L; {trap}"));
+	assert_callout_matches_subshell(&[
+		// `set --` in the operand: its values are what the EXIT trap reads.
+		(
+			&[],
+			&format!("set -- c1 c2\nf() {{ timeout 5 eval {set}; }}\nf F1 F2"),
+			&[],
+			&format!("set -- c1 c2\nf() {{ ( eval {set} ); }}\nf F1 F2"),
+			"  EXIT=[o1 o2] n=2 F=[f]\n",
+		),
+		// The same outside any function, and through `nohup`'s builder.
+		(
+			&[],
+			&format!("set -- c1 c2\ntimeout 5 eval {set}"),
+			&[],
+			&format!("set -- c1 c2\n( eval {set} )"),
+			"  EXIT=[o1 o2] n=2 F=[]\n",
+		),
+		(
+			&[],
+			&format!("set -- c1 c2\nf() {{ nohup eval {set} 2>/dev/null; }}\nf F1 F2"),
+			&[],
+			&format!("set -- c1 c2\nf() {{ ( eval {set} ); }}\nf F1 F2"),
+			"  EXIT=[o1 o2] n=2 F=[f]\n",
+		),
+		// `shift` shifts the caller's parameters, not the launch vector.
+		(
+			&[],
+			&format!("set -- c1 c2\nf() {{ timeout 5 eval {shift}; }}\nf F1 F2 F3"),
+			&[],
+			&format!("set -- c1 c2\nf() {{ ( eval {shift} ); }}\nf F1 F2 F3"),
+			"  EXIT=[F2 F3] n=2 F=[f]\n",
+		),
+		// A `.` inside the operand saves and restores the caller's, so the
+		// trap reads the caller's whether or not the file replaced them.
+		(
+			&[("lib", "printf '  LIB=[%s]\\n' \"$*\"\n")],
+			&format!("set -- c1 c2\nf() {{ timeout 5 eval {source}; }}\nf F1 F2"),
+			&[("lib", "printf '  LIB=[%s]\\n' \"$*\"\n")],
+			&format!("set -- c1 c2\nf() {{ ( eval {source} ); }}\nf F1 F2"),
+			"  LIB=[L1]\n  EXIT=[F1 F2] n=2 F=[f]\n",
+		),
+		(
+			&[("lib", "set -- S1 S2\n")],
+			&format!("set -- c1 c2\nf() {{ timeout 5 eval {source}; }}\nf F1 F2"),
+			&[("lib", "set -- S1 S2\n")],
+			&format!("set -- c1 c2\nf() {{ ( eval {source} ); }}\nf F1 F2"),
+			"  EXIT=[F1 F2] n=2 F=[f]\n",
+		),
+		// A function the operand calls gets its own arguments and leaves the
+		// operand's write standing.
+		(
+			&[],
+			&format!(
+				"set -- c1 c2\nleaf() {{ printf '  LEAF=[%s]\\n' \"$*\"; }}\nf() {{ timeout 5 eval \
+				 {call}; }}\nf F1 F2"
+			),
+			&[],
+			&format!(
+				"set -- c1 c2\nleaf() {{ printf '  LEAF=[%s]\\n' \"$*\"; }}\nf() {{ ( eval {call} ); \
+				 }}\nf F1 F2"
+			),
+			"  LEAF=[L]\n  EXIT=[o1 o2] n=2 F=[f]\n",
+		),
+		// `extdebug` changes none of it.
+		(
+			&[],
+			&format!("set -- c1 c2\nshopt -s extdebug\nf() {{ timeout 5 eval {set}; }}\nf F1 F2"),
+			&[],
+			&format!("set -- c1 c2\nshopt -s extdebug\nf() {{ ( eval {set} ); }}\nf F1 F2"),
+			"  EXIT=[o1 o2] n=2 F=[f]\n",
+		),
+	])
+	.await;
+}
+
+/// A cleanup trap an operand installs removes the operand's own names, not
+/// the caller's: the same defect where it costs a user data. Measured on Bash
+/// 5.2.21 and 5.3.0 (`explore/gen9.py` row r7).
+#[tokio::test]
+async fn a_cleanup_trap_in_a_callout_operand_removes_the_operands_names() {
+	let body = "set -- operand-owned; trap 'rm -f -- \"$@\"' EXIT".replace('\'', "'\\''");
+	let report = "printf '  caller=%s operand=%s\\n' \"$(test -e caller-owned && echo yes || echo \
+	              no)\" \"$(test -e operand-owned && echo yes || echo no)\"";
+	assert_rows(&[(
+		&[],
+		&format!(
+			": > caller-owned\n: > operand-owned\nset -- caller-owned\nf() {{ timeout 5 eval \
+			 '{body}'; }}\nf caller-owned\n{report}"
+		),
+		"  caller=yes operand=no\n",
+	)])
+	.await;
+}
+
+/// A callout inside a callout's operand is a subshell of a subshell: the
+/// inner operand's EXIT trap reads the parameters of the function that ran the
+/// outer callout, never the outer callout's own command line. Measured on
+/// Bash 5.2.21 and 5.3.0 (`explore/gen9.py` rows r8, r9) with each wrapper
+/// replaced by a `( … )` of the same caller.
+#[tokio::test]
+async fn a_nested_callout_does_not_expose_the_outer_launch_vector() {
+	const LEAF: &str = "leaf() { local l=leaf; trap 'printf \"  EXIT=[%s]:%s:[%s]\\n\" \"$*\" \
+	                    \"$l\" \"${FUNCNAME[*]}\"' EXIT; printf '  LEAF=[%s]:%s:[%s]\\n' \"$*\" \
+	                    \"$l\" \"${FUNCNAME[*]}\"; }";
+	const TAIL: &str =
+		"f() { local l=outer; mid M1 M2; printf '  OUTER=[%s]:%s\\n' \"$*\" \"$l\"; }\nf F1 F2";
+	let want = "  LEAF=[OWN ARG]:leaf:[leaf mid f]\n  EXIT=[M1 M2]:mid:[mid f]\n  MID=[M1 \
+	            M2]:mid\n  OUTER=[F1 F2]:outer\n";
+	let mid = |inner: &str| {
+		format!("mid() {{ local l=mid; {inner}; printf '  MID=[%s]:%s\\n' \"$*\" \"$l\"; }}\n{TAIL}")
+	};
+	assert_callout_matches_subshell(&[
+		(
+			&[],
+			&format!("set -- ROOT ONE\n{LEAF}\n{}", mid("timeout 5 timeout 5 leaf OWN ARG")),
+			&[],
+			&format!("set -- ROOT ONE\n{LEAF}\n{}", mid("( ( leaf OWN ARG ) )")),
+			want,
+		),
+		(
+			&[],
+			&format!("set -- ROOT ONE\n{LEAF}\n{}", mid("nohup timeout 5 leaf OWN ARG 2>/dev/null")),
+			&[],
+			&format!("set -- ROOT ONE\n{LEAF}\n{}", mid("( ( leaf OWN ARG ) )")),
+			want,
+		),
+	])
+	.await;
+}
