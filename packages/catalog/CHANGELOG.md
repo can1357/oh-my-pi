@@ -20,7 +20,7 @@
 
 ### Changed
 
-- Update OpenCode Zen and OpenCode Go requests to OpenCode's new inference endpoints
+- Update OpenCode Zen and OpenCode Go requests to OpenCode's new inference endpoints ([#18101](https://github.com/can1357/oh-my-pi/pull/18101) by [@mikucat0309](https://github.com/mikucat0309))
 
 ## [18.16.0] - 2026-11-02
 
