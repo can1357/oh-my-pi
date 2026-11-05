@@ -24,11 +24,16 @@ use pi_vfs::{
 
 #[derive(Debug)]
 struct DelayedFilesystem {
-	root:          PathBuf,
-	seekable:      bool,
+	root:           PathBuf,
+	seekable:       bool,
 	/// Every open of `virtual://existing` reports that the file exists,
 	/// the creating one and the plain one alike.
-	always_eexist: bool,
+	always_eexist:  bool,
+	/// Asking an OPENED file for its metadata fails with a real error,
+	/// while the path's own metadata still answers. The object's kind
+	/// cannot be established, which is not the same as the object having
+	/// no metadata at all.
+	metadata_fails: bool,
 }
 
 impl DelayedFilesystem {
@@ -96,7 +101,11 @@ impl FileSystem for DelayedFilesystem {
 			return Err(io::Error::from(io::ErrorKind::AlreadyExists));
 		}
 		let file = Fs::native().open_with(self.path(path)?, options).await?;
-		Ok(File::from_handle(DelayedFile { file, seekable: self.seekable }))
+		Ok(File::from_handle(DelayedFile {
+			file,
+			seekable: self.seekable,
+			metadata_fails: self.metadata_fails,
+		}))
 	}
 
 	async fn metadata(&self, path: &Path) -> io::Result<Metadata> {
@@ -221,8 +230,9 @@ impl FileSystem for DelayedFilesystem {
 
 #[derive(Debug)]
 struct DelayedFile {
-	file:     File,
-	seekable: bool,
+	file:           File,
+	seekable:       bool,
+	metadata_fails: bool,
 }
 
 #[async_trait]
@@ -247,6 +257,9 @@ impl FileHandle for DelayedFile {
 
 	async fn metadata(&self) -> io::Result<Metadata> {
 		delay().await;
+		if self.metadata_fails {
+			return Err(io::Error::from_raw_os_error(libc::EIO));
+		}
 		self.file.metadata_async().await
 	}
 
@@ -263,16 +276,33 @@ impl FileHandle for DelayedFile {
 
 /// `virtual://` served from `root` by a [`DelayedFilesystem`].
 fn provider(root: &Path, seekable: bool) -> Fs {
-	Fs::new(Arc::new(DelayedFilesystem { root: root.to_path_buf(), seekable, always_eexist: false }))
+	Fs::new(Arc::new(DelayedFilesystem {
+		root: root.to_path_buf(),
+		seekable,
+		always_eexist: false,
+		metadata_fails: false,
+	}))
 }
 
 /// `virtual://` served from `root` by a [`DelayedFilesystem`] whose every
 /// open of `virtual://existing` reports that the file exists.
 fn provider_refusing_every_open(root: &Path) -> Fs {
 	Fs::new(Arc::new(DelayedFilesystem {
-		root:          root.to_path_buf(),
-		seekable:      true,
-		always_eexist: true,
+		root:           root.to_path_buf(),
+		seekable:       true,
+		always_eexist:  true,
+		metadata_fails: false,
+	}))
+}
+
+/// `virtual://` served from `root` by a [`DelayedFilesystem`] that cannot
+/// answer what an OPENED file is, though the path's own metadata answers.
+fn provider_whose_open_file_has_no_answer(root: &Path) -> Fs {
+	Fs::new(Arc::new(DelayedFilesystem {
+		root:           root.to_path_buf(),
+		seekable:       true,
+		always_eexist:  false,
+		metadata_fails: true,
 	}))
 }
 
@@ -1067,5 +1097,44 @@ async fn noclobber_settles_when_a_nonregular_reopen_reports_the_file_exists() {
 			directory.path().join("existing").is_dir(),
 			"`{op}`: the directory is still a directory"
 		);
+	}
+}
+
+/// `noclobber` fails closed when it cannot establish what the object it
+/// opened is. Bash does: with the target's `fstat` made to report `EIO`,
+/// Bash 5.2.21 and 5.3.0 both refuse `>/dev/null`, which they otherwise
+/// write. An object that HAS no filesystem metadata is a different thing
+/// and is still written (the here-document rows of
+/// `shell::tests::redirections`).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn noclobber_refuses_an_object_whose_kind_it_cannot_establish() {
+	for alias in [false, true] {
+		for op in [">", "&>", ">&"] {
+			let directory = tempfile::tempdir().expect("isolated provider filesystem");
+			fs::write(directory.path().join("f"), b"ORIGINAL").expect("regular provider file");
+			let script = if alias {
+				format!("exec 3<>virtual://f; set -C; printf BAD {op}/dev/fd/3; echo s=$?")
+			} else {
+				format!("set -C; printf BAD {op}virtual://f; echo s=$?")
+			};
+			let run = tokio::time::timeout(
+				Duration::from_secs(20),
+				run_script(provider_whose_open_file_has_no_answer(directory.path()), None, &script),
+			)
+			.await
+			.expect("the run finishes");
+			assert_eq!(run.stdout, "s=1\n", "alias={alias} `{op}`: {}", run.stderr);
+			assert!(
+				run.stderr.contains("cannot overwrite existing file"),
+				"alias={alias} `{op}`: {}",
+				run.stderr
+			);
+			assert_eq!(
+				fs::read_to_string(directory.path().join("f")).expect("kept"),
+				"ORIGINAL",
+				"alias={alias} `{op}`"
+			);
+		}
 	}
 }
