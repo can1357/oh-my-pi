@@ -462,10 +462,8 @@ export class NativeJudge implements Judge {
 		request: JudgmentRequest<Q>,
 		options: NativeJudgeCallOptions | undefined,
 	): Promise<JudgmentResult<Q>> {
-		const body = JSON.stringify({
-			...this.#wire.encode(request, this.model, options?.imageAssets),
-			...this.#extraBody,
-		});
+		const encoded = this.#wire.encode(request, this.model, options?.imageAssets);
+		const body = JSON.stringify(this.#extraBody ? { ...encoded, ...this.#extraBody } : encoded);
 		const hasImages = (request.images?.length ?? 0) > 0 || Object.keys(options?.imageAssets ?? {}).length > 0;
 		const requestHeaders = hasImages ? this.#wire.imageHeaders : undefined;
 		const signal = options?.signal;

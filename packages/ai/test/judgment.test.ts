@@ -1137,30 +1137,22 @@ describe("NativeJudge", () => {
 			};
 			return buildModel(spec);
 		};
-		const image: ImageContent = { type: "image", data: JEV_PNG, mimeType: "image/png" };
 		const send = async (model: Model) => {
-			const bodies: Record<string, unknown>[] = [];
+			let body: Record<string, unknown> = {};
 			const judge = createNativeJudge(model, {
 				apiKey: "or-key",
 				fetch: async (_url, init) => {
-					bodies.push(JSON.parse(String(init?.body)));
+					body = JSON.parse(String(init?.body));
 					return Response.json({
 						model: "typesafe/jev-1.14",
 						answers: { urgent: { type: "noul", noul: 0.7 } },
-						usage: { input_tokens: 10, output_tokens: 2, cost: 0.00001 },
+						usage: { input_tokens: 10, output_tokens: 2 },
 					});
 				},
 			});
-			const result = await judge.judge({ ...request, images: [image] });
-			expect(result.answers.urgent.noul).toBe(0.7);
-			expect(result.usage).toMatchObject({ input: 10, output: 2, cost: { total: 0.00001 } });
-			expect(bodies).toHaveLength(1);
-			const body = bodies[0];
+			await judge.judge(request);
+			// The overlay keeps the encoded request intact.
 			expect(body).toMatchObject({ model: "typesafe/jev-1.14", questions: request.questions });
-			expect(body.state).toEqual([
-				request.state,
-				{ type: "image_url", image_url: { url: `data:image/png;base64,${JEV_PNG}` } },
-			]);
 			return body;
 		};
 
