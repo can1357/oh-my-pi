@@ -485,54 +485,62 @@ interface SpawnPlan {
 }
 
 /**
- * Optional fields whose empty string can only be filler: a selector, a source session, a task
- * file path and a caller output schema all need a real value to mean anything.
+ * Optional fields whose empty string can only be filler: a selector, a source session and a
+ * caller output schema all need a real value to mean anything.
  */
-const BLANKABLE_KEYS = ["model", "sourceSession", "taskFile", "outputSchema"] as const;
+const BLANKABLE_KEYS = ["model", "sourceSession", "outputSchema"] as const;
+
+/** A field this pass may drop: the three unconditional ones, plus the conditional `task`/`taskFile` pair. */
+type BlankableKey = (typeof BLANKABLE_KEYS)[number] | "task" | "taskFile";
 
 /** An empty or whitespace-only string: the shape a model sends for a field it has nothing to put in. */
 function isBlankString(value: unknown): boolean {
 	return typeof value === "string" && value.trim() === "";
 }
 
+/** A string that names something: the other half of a `task`/`taskFile` pair that was really chosen. */
+function isRealString(value: unknown): boolean {
+	return typeof value === "string" && value.trim() !== "";
+}
+
 /**
  * Drop one of those fields when it holds an empty or whitespace-only string: it means the field
  * was left out. Models that fill every declared property send these placeholders, and the
- * per-call gate, the seance checks and the `task`/`taskFile` choice would otherwise refuse a call
+ * per-call gate, the seance checks and the output-schema preflight would otherwise refuse a call
  * that names nothing at all.
  *
- * `task` is the fifth, and the only conditional one: it is dropped only beside a real `taskFile`,
- * which is the mirror image of the blank `taskFile` beside a real `task`. A blank `task` with no
- * task file names no work at all, and must keep reporting exactly that instead of degrading into
- * the "exactly one of" message.
+ * `task` and `taskFile` are the conditional pair, and each is dropped only beside a real value of
+ * the other. That is what the defect is: a model that chose one of the two fills the other in
+ * with nothing, and the "exactly one of" rule then sees both as provided. Dropping either one
+ * unconditionally would be the same error pointed the other way — an item that names no work at
+ * all must keep its own refusal ("needs non-empty `task` instructions", "`taskFile` must be an
+ * absolute path"), not be told to choose between two fields it already chose between.
  *
- * Only a string counts. An empty array is left alone deliberately: shared validation turns an
- * array into its string form, so `[]` arrives at dispatch as `"[]"` — a real selector the gate
- * must still refuse — while the speculative launcher sees the raw `[]`, and dropping it here made
- * the two disagree.
+ * Only an empty string counts. `null` is left alone: an `outputSchema: null` is a real signal —
+ * presence, not truthiness, makes the caller's schema win, so it is how an internal caller says
+ * "no schema, and ignore the agent's own". An empty ARRAY is left alone too: shared validation
+ * turns an array into its string form, so `[]` reaches dispatch as `"[]"`, a real selector the
+ * gate must still refuse.
+ *
+ * The copy materializes every enumerable key, inherited ones included, rather than spreading own
+ * properties: an internal caller may hand us an object whose real `model` is a prototype getter,
+ * and a spread would silently drop that selector on the way to the gate.
  */
 function withoutBlankFields<T extends TaskItem | TaskParams>(item: T): T {
+	const keys: BlankableKey[] = [...BLANKABLE_KEYS];
+	if (isRealString(item.taskFile)) keys.push("task");
+	if (isRealString(item.task)) keys.push("taskFile");
 	let out = item;
-	const keys =
-		isBlankString(item.task) && typeof item.taskFile === "string" && item.taskFile.trim() !== ""
-			? [...BLANKABLE_KEYS, "task" as const]
-			: BLANKABLE_KEYS;
 	for (const key of keys) {
 		if (!isBlankString(item[key])) continue;
-		if (out === item) out = { ...item };
+		if (out === item) {
+			const copy: Record<string, unknown> = {};
+			for (const name in item) copy[name] = (item as Record<string, unknown>)[name];
+			out = copy as T;
+		}
 		delete out[key];
 	}
 	return out;
-}
-
-/** Whether a call, or any of its items, carries one of those placeholders. */
-function carriesBlankField(params: unknown): boolean {
-	if (!isRecord(params)) return false;
-	const blank = (value: Record<string, unknown>): boolean =>
-		BLANKABLE_KEYS.some(key => isBlankString(value[key])) || isBlankString(value.task);
-	if (blank(params)) return true;
-	const tasks: unknown = params.tasks;
-	return Array.isArray(tasks) && tasks.some(task => isRecord(task) && blank(task));
 }
 
 /**
@@ -883,13 +891,18 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	readonly #launchSessions = new Map<string, TaskLaunchSession>();
 	readonly #launcher: TaskLauncher = {
 		spawns: args => {
-			// Speculation plans from the raw streamed arguments while dispatch plans from the validated
-			// ones, and the two agree only while nothing between them rewrites the call. A placeholder
-			// is exactly such a call: shared validation also drops an `outputSchema: null` and rewrites
-			// some schema objects, so the spawn the launcher derived differs from the one dispatch
-			// derives, reconciliation cancels the started child, and dispatch runs a second one — two
-			// executor runs for one item. Leave a call carrying a placeholder to dispatch alone.
-			if (carriesBlankField(args)) return undefined;
+			// Returning `undefined` here means "this call is invalid": at finalize the launch session
+			// discards every run it already started, and dispatch then runs them all again — including
+			// an earlier, ordinary item that had already started and done work. A call carrying a
+			// placeholder is valid, so it must never take that branch. Both paths run `planSpawns`, so
+			// both drop the same placeholders.
+			//
+			// The launcher does plan from the raw streamed arguments while dispatch plans from the
+			// validated ones, and shared validation discards an optional field holding `null`. Measured
+			// end to end, that does not make the two plans differ — a streamed item carrying
+			// `outputSchema: null` is still adopted, and `speculative-launch.test.ts` pins it. Anything
+			// that does make them differ is reconciled by `#matches`/`adopt`, which is the launcher's
+			// own mechanism for it; this hook must not pre-empt that by calling the call invalid.
 			const plan = planSpawns(
 				args,
 				this.#isBatchEnabled(),

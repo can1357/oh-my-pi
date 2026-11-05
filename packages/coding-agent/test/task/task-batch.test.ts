@@ -1068,6 +1068,28 @@ describe("batch model placement", () => {
 		expect(run).not.toHaveBeenCalled();
 	});
 
+	// The same rule pointed the other way: a blank `taskFile` with no `task` also names no work at
+	// all, and must keep its own refusal rather than be told to choose between two fields it already
+	// chose between. Dropping either half of the pair unconditionally loses one of these messages.
+	it.each([
+		["empty", ""],
+		["whitespace", "   "],
+	] as const)("still refuses a %s `taskFile` that has no task, with its own message", async (_label, taskFile) => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": true, "async.enabled": false, "task.file": true } }),
+		);
+		const result = await tool.execute("task-blank-file-alone", {
+			context: "Shared context",
+			tasks: [{ taskFile, solutionSpace: "one fixed answer", name: "Pong", agent: "task" }],
+		} as never);
+		expect(result.isError).toBe(true);
+		expect(getFirstText(result)).toMatch(/absolute path/i);
+		expect(getFirstText(result)).not.toMatch(/exactly one of/i);
+		expect(run).not.toHaveBeenCalled();
+	});
+
 	// Only a string counts as a placeholder. An empty ARRAY must still be refused: the speculative
 	// launcher plans from the raw streamed arguments and dispatch from the validated ones, shared
 	// validation turns `[]` into its string form on the way, and dropping it made the two disagree —
@@ -1143,5 +1165,51 @@ describe("batch model placement", () => {
 		expect(result.isError).toBe(true);
 		expect(getFirstText(result)).not.toContain("TypeError");
 		expect(run).not.toHaveBeenCalled();
+	});
+
+	// An internal caller bypasses the wire schema and may hand dispatch an object whose real `model`
+	// is reached through its prototype. Spreading own properties to drop a blank sibling would delete
+	// that selector on the way, so the gate would never see it: the task would spawn on the agent's
+	// configured model while the approval prompt still named the requested one.
+	it("keeps a real model reached through a prototype while dropping a blank sibling field", async () => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(
+			createSession({
+				settings: {
+					"task.batch": true,
+					"async.enabled": false,
+					"task.perCallModel": "off",
+					"task.structured": true,
+				},
+			}),
+		);
+		const item: Record<string, unknown> = Object.create({ model: "openai/gpt-5.4" });
+		Object.assign(item, { task: "Do work", solutionSpace: "c", agent: "task", name: "Proto", outputSchema: "" });
+		const result = await tool.execute("task-proto-model", { context: "Shared context", tasks: [item] } as never);
+		expect(getFirstText(result)).toMatch(/per-call model is disabled/i);
+		expect(result.isError).toBe(true);
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	// `null` is not a placeholder. Presence, not truthiness, makes the caller's output schema win, so
+	// `outputSchema: null` is how a caller says "no schema, and ignore the agent's own". Dropping it
+	// would silently hand the agent's declared schema back to a spawn that asked for none.
+	it("keeps an explicit `outputSchema: null` as the caller's own schema", async () => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Pong"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": true, "async.enabled": false, "task.structured": true } }),
+		);
+		const result = await tool.execute("task-null-schema", {
+			context: "Shared context",
+			tasks: [{ task: "Do work", solutionSpace: "c", agent: "task", name: "NullSchema", outputSchema: null }],
+		} as never);
+		expect(result.isError).toBeFalsy();
+		expect(run).toHaveBeenCalledTimes(1);
+		const options = run.mock.calls[0]?.[0] as unknown as Record<string, unknown>;
+		expect(options.outputSchemaSource).toBe("caller");
+		expect(options.outputSchemaOverridesAgent).toBe(true);
+		expect(options.outputSchema).toBeNull();
 	});
 });

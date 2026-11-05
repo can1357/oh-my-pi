@@ -11,7 +11,12 @@
  *    extension lifecycle handlers.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import type { AgentToolCall, SpeculativeOperationSink } from "@oh-my-pi/pi-agent-core";
+import {
+	type AgentToolCall,
+	type AgentTool,
+	type SpeculativeOperationSink,
+	validateAgentToolArguments,
+} from "@oh-my-pi/pi-agent-core";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
@@ -23,7 +28,7 @@ import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { BatchArgsScanner, type TaskLaunchSession } from "@oh-my-pi/pi-coding-agent/task/speculative-launch";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -229,29 +234,106 @@ describe("task speculative launch", () => {
 		expect([...startedIds]).toEqual(["Alpha"]);
 	});
 
-	// A placeholder (`model: ""` and the other fields a model fills in with nothing) is dropped on the
-	// way to the spawn plan, but shared validation rewrites the rest of such a call differently on the
-	// dispatch path, so the spawn this launcher derives can differ from the one dispatch derives: the
-	// started child is cancelled and dispatch runs a second one, two executor runs for one item. A call
-	// carrying a placeholder therefore does not speculate at all; dispatch still runs it exactly once.
-	it("does not launch an item whose fields are only placeholders, and dispatch runs it once", async () => {
+	// A placeholder (`model: ""`, `outputSchema: null`, and the other fields a model fills in with
+	// nothing) is dropped on both paths, so the spawn the launcher derives equals the one dispatch
+	// derives and the started child is adopted. Dispatch receives the *validated* arguments, which
+	// differ from the raw streamed ones — validation discards `outputSchema: null` — so this is the
+	// case where the two plans would disagree if the dropping were not shared.
+	it("adopts a speculatively launched item whose fields are only placeholders, running it once", async () => {
 		const placeholders = {
 			context: "ctx",
-			tasks: [{ name: "Alpha", agent: "task", task: "Do A.", model: "", outputSchema: null }],
+			tasks: [
+				{ name: "Alpha", agent: "task", solutionSpace: "one way", task: "Do A.", model: "", outputSchema: null },
+			],
 		};
 		const raw = JSON.stringify(placeholders);
 		const { tool, session } = await openSession();
 
-		session.update(toolCall, raw.slice(0, raw.lastIndexOf("]")));
-		session.finalize({ toolCall, args: placeholders });
-		const result = await tool.execute(toolCall.id, placeholders as never);
-		expect(result.isError).toBeFalsy();
-
-		// One run, not two: a speculative launch here could only have been cancelled and replaced,
-		// because shared validation removes the `outputSchema: null` the raw arguments still carry.
+		session.update(toolCall, raw.slice(0, raw.indexOf("}]") + 1));
 		await spawn("Alpha").started.promise;
+
+		session.finalize({ toolCall, args: placeholders });
+		const validated = validateAgentToolArguments(tool as unknown as AgentTool, {
+			type: "toolCall",
+			id: toolCall.id,
+			name: tool.name,
+			arguments: placeholders,
+		});
+		const result = await tool.execute(toolCall.id, validated as TaskParams);
+
+		expect(result.isError).toBeFalsy();
+		// One run, not two: the speculative child was adopted rather than cancelled and replaced.
 		expect(executorModule.runSubprocess).toHaveBeenCalledTimes(1);
 		expect([...startedIds]).toEqual(["Alpha"]);
+	});
+
+	// Regression: the launcher's `spawns` returning `undefined` means "this call is invalid", and at
+	// finalize the session discards every run it already started. A later item carrying a placeholder
+	// must not make the whole call look invalid: an earlier, ordinary item has already started, and
+	// discarding it makes dispatch run it a second time — work already performed, done twice.
+	it("keeps an already-launched item when a later item in the same batch carries a placeholder", async () => {
+		const mixed = {
+			context: "ctx",
+			tasks: [
+				{ name: "Alpha", agent: "task", solutionSpace: "one way", task: "Do A." },
+				{ name: "Beta", agent: "task", solutionSpace: "one way", task: "Do B.", model: "", outputSchema: null },
+			],
+		};
+		const raw = JSON.stringify(mixed);
+		const { tool, session } = await openSession();
+
+		session.update(toolCall, raw.slice(0, raw.indexOf('{"name":"Beta"') + 10));
+		await spawn("Alpha").started.promise;
+		expect(startedIds.has("Beta")).toBe(false);
+
+		session.finalize({ toolCall, args: mixed });
+		await spawn("Beta").started.promise;
+		const validated = validateAgentToolArguments(tool as unknown as AgentTool, {
+			type: "toolCall",
+			id: toolCall.id,
+			name: tool.name,
+			arguments: mixed,
+		});
+		const result = await tool.execute(toolCall.id, validated as TaskParams);
+
+		expect(result.isError).toBeFalsy();
+		// Two runs for two items. A discarded Alpha would show as a third call and an `Alpha-2` id.
+		expect(executorModule.runSubprocess).toHaveBeenCalledTimes(2);
+		expect([...startedIds].sort()).toEqual(["Alpha", "Beta"]);
+	});
+
+	// Shared validation discards an optional field holding `null`, and the spawn carries
+	// `outputSchema` by presence, so a streamed `outputSchema: null` is the obvious candidate for the
+	// launcher and dispatch deriving different spawns. Measured end to end it does not: the item is
+	// adopted and runs once. This pins that, so a future change to either path that does split them
+	// shows up here as a duplicate run rather than in production.
+	it("matches dispatch for an item whose outputSchema is null, running it once", async () => {
+		const withNull = {
+			context: "ctx",
+			tasks: [
+				{ name: "Alpha", agent: "task", solutionSpace: "one way", task: "Do A.", outputSchema: null },
+				{ name: "Beta", agent: "task", solutionSpace: "one way", task: "Do B." },
+			],
+		};
+		const raw = JSON.stringify(withNull);
+		const { tool, session } = await openSession();
+
+		session.update(toolCall, raw.slice(0, raw.indexOf('{"name":"Beta"') + 10));
+		await spawn("Alpha").started.promise;
+
+		session.finalize({ toolCall, args: withNull });
+		await spawn("Beta").started.promise;
+		const validated = validateAgentToolArguments(tool as unknown as AgentTool, {
+			type: "toolCall",
+			id: toolCall.id,
+			name: tool.name,
+			arguments: withNull,
+		});
+		const result = await tool.execute(toolCall.id, validated as TaskParams);
+
+		expect(result.isError).toBeFalsy();
+		expect(executorModule.runSubprocess).toHaveBeenCalledTimes(2);
+		expect([...startedIds].sort()).toEqual(["Alpha", "Beta"]);
 	});
 });
 
