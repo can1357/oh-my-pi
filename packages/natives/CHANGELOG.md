@@ -27,7 +27,8 @@
 
 ### Fixed
 
-- Fixed the bash tool's shell reporting the kernel's bare error for a command it refused to execute when that command's own redirection had to be applied by the spawned process: a bad `#!` interpreter is now named (`…: bad interpreter: …`, status 126), a directory is `Is a directory`, and a binary without `#!` is `cannot execute binary file`, as in Bash 5.3
+- Fixed the bash tool's shell reporting the kernel's bare error for a command it refused to execute when that command's own redirection had to be applied by the spawned process: a bad `#!` interpreter is now named (`…: bad interpreter: …`, status 126), a directory is `Is a directory`, a binary without `#!` is `cannot execute binary file`, and a file whose missing interpreter cannot be read is `cannot execute: required file not found` (status 127), as in Bash 5.3
+- Fixed the bash tool's shell naming one byte too much of an over-long `#!` interpreter in that diagnostic: like Bash it now reads the interpreter out of the first 127 bytes of the file
 - Fixed the bash tool's `$!` inside a command substitution, a `( )` subshell or a pipeline stage: it now names the parent's last background job, as in Bash ([#18107](https://github.com/can1357/oh-my-pi/pull/18107) by [@sjawhar](https://github.com/sjawhar))
 - Fixed Windows `rsync` treating a one-letter daemon host such as `h::module` as a local drive path ([#18048](https://github.com/can1357/oh-my-pi/pull/18048) by [@jchanghong023](https://github.com/jchanghong023))
 - Removed embedded-shell compiler warnings and fixed history saves hanging when a stale lock cannot be removed
