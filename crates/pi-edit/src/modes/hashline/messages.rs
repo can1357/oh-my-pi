@@ -588,24 +588,6 @@ pub fn trailing_comma_replacement_message(start_line: u32, end_line: u32) -> Str
 	)
 }
 
-/// Exact-text boundary rows were removed because the remaining payload covers
-/// the selected range and the same rows already survive immediately outside it.
-pub fn textual_boundary_echo_warning(start_line: u32, leading: u32, trailing: u32) -> String {
-	let mut parts = Vec::new();
-	if leading > 0 {
-		parts.push(format!("{leading} leading"));
-	}
-	if trailing > 0 {
-		parts.push(format!("{trailing} trailing"));
-	}
-	let joined = parts.join(" and ");
-	format!(
-		"Auto-repaired a replacement boundary echo at line {start_line}: dropped {joined} body \
-		 line(s) already present outside the range. Issue the body as final content for the \
-		 selected range only."
-	)
-}
-
 /// A replacement range's boundary disposition was corrected by the search.
 ///
 /// Judged by the syntax probe: syntax-essential source boundary rows were
@@ -1228,12 +1210,6 @@ mod tests {
 
 	#[test]
 	fn test_boundary_warnings_and_json_quote() {
-		assert_eq!(
-			textual_boundary_echo_warning(10, 1, 2),
-			"Auto-repaired a replacement boundary echo at line 10: dropped 1 leading and 2 trailing \
-			 body line(s) already present outside the range. Issue the body as final content for the \
-			 selected range only."
-		);
 		assert_eq!(
 			boundary_variant_repair_warning(10, 2, 1),
 			"Auto-repaired replacement boundaries at line 10: retained 2 syntax-essential source \

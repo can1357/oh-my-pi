@@ -15,8 +15,8 @@ use super::{
 		after_insert_opener_escape_warning, ambiguous_boundary_echo_message,
 		ambiguous_boundary_placement_message, block_insert_landing_shift_warning,
 		boundary_echo_outcome_message, boundary_variant_repair_warning, edit_broke_parse_warning,
-		repeated_boundary_echo_message, textual_boundary_echo_warning,
-		trailing_comma_replacement_message, two_sided_boundary_echo_message,
+		repeated_boundary_echo_message, trailing_comma_replacement_message,
+		two_sided_boundary_echo_message,
 	},
 	syntax::{enclosing_boundaries, node_chain, parses_cleanly},
 	types::{Anchor, ApplyResult, BlockResolution, Cursor, Edit},
@@ -394,14 +394,45 @@ impl Ambiguity {
 		})
 	}
 }
+/// A hypothetical drop of `drop_l`/`drop_t` boundary rows would leave a body
+/// that still restates a neighbour and is too short for the range. Record that
+/// shape so the edit is refused. The rows stay: deleting them would apply a
+/// different edit than the one authored.
+fn record_repeated_short(
+	group: &ReplacementGroup,
+	lines: &[&str],
+	drop_l: usize,
+	drop_t: usize,
+	ambiguities: &mut Vec<Ambiguity>,
+) {
+	if drop_l == 0 && drop_t == 0 || group.delete_indices.len() <= 1 {
+		return;
+	}
+	let mut rest = group.clone();
+	rest.payload.drain(..drop_l);
+	if drop_t > 0 {
+		rest.payload.truncate(rest.payload.len() - drop_t);
+	}
+	let (leading, trailing) = restated_edges(&rest.payload, lines, group.start, group.end);
+	if let Some(mut ambiguity) = short_echo(&rest, leading, trailing) {
+		ambiguity.repeated = true;
+		ambiguities.push(ambiguity);
+	}
+}
 
+/// Note boundary echoes that cannot be read as the range's final content.
+///
+/// A row that repeats the line just outside the range is kept. The body is
+/// that range's complete final content, so deleting the row would apply a
+/// different edit and only warn. The shapes recorded here are the ones where
+/// reading the repeated rows as context would delete range rows the body
+/// never restates; those are refused before anything is written.
 fn normalize_echoes(
 	edits: &[Edit],
 	lines: &[&str],
 	path: Option<&str>,
-) -> (Vec<Edit>, Vec<String>, Vec<Ambiguity>) {
+) -> (Vec<Edit>, Vec<Ambiguity>) {
 	let mut out = Vec::new();
-	let mut warnings = Vec::new();
 	let mut ambiguities = Vec::new();
 	let mut i = 0;
 	while i < edits.len() {
@@ -413,12 +444,10 @@ fn normalize_echoes(
 		let leading = duplicate_leading(&group, lines);
 		let trailing = duplicate_trailing(&group, lines);
 		let range_len = group.delete_indices.len();
-		let (mut drop_l, mut drop_t) = (0, 0);
 		if leading > 0 && trailing > 0 {
 			let between = group.payload.len().checked_sub(leading + trailing);
 			if between == Some(range_len) {
-				drop_l = leading;
-				drop_t = trailing;
+				record_repeated_short(&group, lines, leading, trailing, &mut ambiguities);
 			} else {
 				// With both neighbours restated the range cannot be shifted, and
 				// the rows between the echoes are too few for it: no reading
@@ -432,7 +461,7 @@ fn normalize_echoes(
 				|| annotation_echo(lines, path, group.start - leading as u32, group.start - 1))
 		{
 			if group.payload.len().saturating_sub(leading) >= range_len {
-				drop_l = leading;
+				record_repeated_short(&group, lines, leading, 0, &mut ambiguities);
 			} else {
 				ambiguities.extend(short_echo(&group, leading, 0));
 			}
@@ -441,40 +470,21 @@ fn normalize_echoes(
 				|| annotation_echo(lines, path, group.end + 1, group.end + trailing as u32))
 		{
 			if group.payload.len().saturating_sub(trailing) >= range_len {
-				drop_t = trailing;
+				record_repeated_short(&group, lines, 0, trailing, &mut ambiguities);
 			} else {
 				ambiguities.extend(short_echo(&group, 0, trailing));
 			}
 		}
-		if drop_l > 0 || drop_t > 0 {
-			// A body that restates the neighbour more than once keeps a copy
-			// after this drop; record the too-short shape that copy exposes.
-			let mut rest = group.clone();
-			rest.payload.drain(..drop_l);
-			rest.payload.truncate(rest.payload.len() - drop_t);
-			let (j, k) = restated_edges(&rest.payload, lines, group.start, group.end);
-			if range_len > 1
-				&& let Some(mut ambiguity) = short_echo(&rest, j, k)
-			{
-				ambiguity.repeated = true;
-				ambiguities.push(ambiguity);
-			}
-			let inserts = group_inserts(&group, edits);
-			out.extend(inserts[drop_l..inserts.len() - drop_t].iter().cloned());
-			out.extend(group_deletes(&group, edits));
-			warnings.push(textual_boundary_echo_warning(group.start, drop_l as u32, drop_t as u32));
-		} else {
-			out.extend(
-				group
-					.insert_indices
-					.iter()
-					.chain(&group.delete_indices)
-					.map(|&idx| with_index(&edits[idx], idx as u32)),
-			);
-		}
+		out.extend(
+			group
+				.insert_indices
+				.iter()
+				.chain(&group.delete_indices)
+				.map(|&idx| with_index(&edits[idx], idx as u32)),
+		);
 		i = group.delete_indices.last().copied().unwrap() + 1;
 	}
-	(out, warnings, ambiguities)
+	(out, ambiguities)
 }
 
 fn indent_columns(line: &str) -> usize {
@@ -871,9 +881,9 @@ fn repair_boundaries(
 	};
 	// The best repair drops an echo from a body too short for its range. If
 	// `normalize_echoes` recorded a too-short refusal for this patch, returning
-	// no repair hands the edit to it. For a group it dropped an echo from, it
-	// records one only when the copy left behind exposes that shape, so with no
-	// recorded refusal the edit is refused here.
+	// no repair hands the edit to it. A repeated echo is recorded without
+	// deleting rows, and apply skips repair for it. With no recorded refusal
+	// the edit is refused here.
 	if let Some(lossy) = groups
 		.iter()
 		.zip(&combo.choices)
@@ -1294,11 +1304,10 @@ pub fn apply_edits(
 	validate_bounds(&target, &lines)?;
 	let indentation_warnings = repair_indentation(&mut target, &lines);
 	let (landed, landing_warnings) = repair_landings(&target, &lines, options.path);
-	let (normalized, echo_warnings, ambiguities) = normalize_echoes(&landed, &lines, options.path);
+	let (normalized, ambiguities) = normalize_echoes(&landed, &lines, options.path);
 	let mut leading = clipboard_warnings;
 	leading.extend(indentation_warnings);
 	leading.extend(landing_warnings);
-	leading.extend(echo_warnings);
 	let authored = materialize(&lines, &normalized);
 	let baseline = parses_cleanly(options.path, text);
 	let authored_parses = parses_cleanly(options.path, &authored.0);
@@ -1314,12 +1323,13 @@ pub fn apply_edits(
 		}
 	};
 	// A body that restates both neighbouring lines and is too short for its
-	// range has no reading that keeps the rows it leaves out, so no repair is
-	// tried for it.
+	// range, or that restates a neighbour more than once and is then too
+	// short, has no reading that keeps the rows it leaves out. No repair is
+	// tried: rewriting it would write a different edit.
 	let repair = if authored_parses
 		|| ambiguities
 			.iter()
-			.any(|ambiguity| matches!(ambiguity.echoed, Echoed::Both(..)))
+			.any(|ambiguity| matches!(ambiguity.echoed, Echoed::Both(..)) || ambiguity.repeated)
 	{
 		None
 	} else {
@@ -1352,13 +1362,14 @@ pub fn apply_edits(
 
 /// The last check before a patch is applied, whichever path produced it.
 ///
-/// For every replacement group whose body restates a neighbouring line (an
-/// echo the passes above act on), look at the rows the committed edits write
-/// in place of its range. Refuse if they hold a second copy of a neighbouring
-/// line, or if they are fewer than the range once such copies are set aside:
-/// either way the patch loses or duplicates lines that no reading of the body
-/// asks for. The echo passes refuse the shapes they recognise with a more
-/// specific message; this keeps one they do not recognise from applying.
+/// For every replacement group whose body restates a neighbouring line, look
+/// at the rows the committed edits write in place of its range. A body applied
+/// as written may repeat that neighbour: those rows are the range's final
+/// content when they still cover the range. A repair, or a body too short to
+/// cover the range once such copies are set aside, is refused: it loses or
+/// duplicates lines that no reading of the body asks for. The echo passes
+/// refuse the shapes they recognise with a more specific message; this keeps
+/// one they do not recognise from applying.
 fn lossy_echo_outcome(
 	authored: &[Edit],
 	committed: &[Edit],
@@ -1381,8 +1392,8 @@ fn lossy_echo_outcome(
 		let range_len = group.delete_indices.len();
 		let leading = duplicate_leading(&group, lines);
 		let trailing = duplicate_trailing(&group, lines);
-		// The same conditions under which `normalize_echoes` treats the rows
-		// as an echo; elsewhere (a one-row range) they are content.
+		// The same conditions under which `normalize_echoes` records an echo;
+		// elsewhere (a one-row range) the rows are content.
 		let echo = if leading > 0 && trailing > 0 {
 			range_len > 1 || group.payload.len().checked_sub(leading + trailing) == Some(range_len)
 		} else if leading > 0 {
@@ -1397,6 +1408,12 @@ fn lossy_echo_outcome(
 			continue;
 		}
 		let rows = committed_rows(&group, authored, committed, lines);
+		if rows == group.payload {
+			let (above, below) = restated_edges(&rows, lines, group.start, group.end);
+			if rows.len().saturating_sub(above + below) >= range_len {
+				continue;
+			}
+		}
 		let (mut above, mut below) = restated_edges(&rows, lines, group.start, group.end);
 		if deleted(group.start - 1) {
 			above = 0;

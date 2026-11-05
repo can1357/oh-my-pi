@@ -116,7 +116,7 @@
 						"text": "it('a', () => {\n\tsetup2();\n\trun2();\n});\nafter();",
 						"firstChangedLine": 2,
 						"warnings": [
-							"Auto-repaired a replacement boundary echo at line 2: dropped 1 trailing body line(s) already present outside the range. Issue the body as final content for the selected range only."
+							"Auto-repaired replacement boundaries at line 2: dropped 1 body row(s) duplicated just outside the range. The result was verified by the syntax probe — re-issue with the range covering exactly the changed lines and the body as their complete final content."
 						]
 					}
 				}
@@ -142,7 +142,7 @@
 						"text": "class Foo {\n\t/** doc */\n\tplanRender(\n\t\ta: string[],\n\t\tb: boolean,\n\t\tc: number,\n\t): Intent {\n\t\treturn x;\n\t}\n}",
 						"firstChangedLine": 4,
 						"warnings": [
-							"Auto-repaired a replacement boundary echo at line 4: dropped 1 leading body line(s) already present outside the range. Issue the body as final content for the selected range only."
+							"Auto-repaired replacement boundaries at line 4: dropped 1 body row(s) duplicated just outside the range. The result was verified by the syntax probe — re-issue with the range covering exactly the changed lines and the body as their complete final content."
 						]
 					}
 				}
@@ -224,7 +224,7 @@
 			]
 		},
 		{
-			"name": "drops duplicated leading and trailing boundary lines around a range replacement",
+			"name": "keeps duplicated leading and trailing boundary lines as final content",
 			"parse": [
 				{
 					"input": "PUT 2-3:\n+func _cmd_travel_homeworld():\n+\tvar destination = find_homeworld()\n+\ttravel_to(destination)\n+\tprint_status()",
@@ -240,11 +240,8 @@
 					"input": "PUT 2-3:\n+func _cmd_travel_homeworld():\n+\tvar destination = find_homeworld()\n+\ttravel_to(destination)\n+\tprint_status()",
 					"path": "fixture.ts",
 					"expect": {
-						"text": "func _cmd_travel_homeworld():\n\tvar destination = find_homeworld()\n\ttravel_to(destination)\n\tprint_status()",
-						"firstChangedLine": 2,
-						"warnings": [
-							"Auto-repaired a replacement boundary echo at line 2: dropped 1 leading and 1 trailing body line(s) already present outside the range. Issue the body as final content for the selected range only."
-						]
+						"text": "func _cmd_travel_homeworld():\nfunc _cmd_travel_homeworld():\n\tvar destination = find_homeworld()\n\ttravel_to(destination)\n\tprint_status()\n\tprint_status()",
+						"firstChangedLine": 2
 					}
 				}
 			]
@@ -319,7 +316,7 @@
 			]
 		},
 		{
-			"name": "still drops a balance-neutral wrapper echo",
+			"name": "keeps a balance-neutral wrapper echo when the nested result parses",
 			"parse": [
 				{
 					"input": "PUT 2-2:\n+function f() {\n+fresh();\n+}",
@@ -335,11 +332,8 @@
 					"input": "PUT 2-2:\n+function f() {\n+fresh();\n+}",
 					"path": "fixture.ts",
 					"expect": {
-						"text": "function f() {\nfresh();\n}",
-						"firstChangedLine": 2,
-						"warnings": [
-							"Auto-repaired a replacement boundary echo at line 2: dropped 1 leading and 1 trailing body line(s) already present outside the range. Issue the body as final content for the selected range only."
-						]
+						"text": "function f() {\nfunction f() {\nfresh();\n}\n}",
+						"firstChangedLine": 2
 					}
 				}
 			]
@@ -414,7 +408,7 @@
 			]
 		},
 		{
-			"name": "drops a one-sided trailing keeper echo in a multi-line rewrite",
+			"name": "keeps a one-sided trailing boundary repeat in a multi-line rewrite",
 			"parse": [
 				{
 					"input": "PUT 2-3:\n+  a2();\n+  b2();\n+  const out = [];",
@@ -430,11 +424,8 @@
 					"input": "PUT 2-3:\n+  a2();\n+  b2();\n+  const out = [];",
 					"path": "fixture.ts",
 					"expect": {
-						"text": "function f() {\n  a2();\n  b2();\n  const out = [];\n  return out;\n}",
-						"firstChangedLine": 2,
-						"warnings": [
-							"Auto-repaired a replacement boundary echo at line 2: dropped 1 trailing body line(s) already present outside the range. Issue the body as final content for the selected range only."
-						]
+						"text": "function f() {\n  a2();\n  b2();\n  const out = [];\n  const out = [];\n  return out;\n}",
+						"firstChangedLine": 2
 					}
 				}
 			]
@@ -538,7 +529,7 @@
 			]
 		},
 		{
-			"name": "drops a one-sided leading keeper echo in a multi-line rewrite",
+			"name": "keeps a one-sided leading boundary repeat in a multi-line rewrite",
 			"parse": [
 				{
 					"input": "PUT 3-4:\n+a();\n+B();\n+C();",
@@ -554,11 +545,8 @@
 					"input": "PUT 3-4:\n+a();\n+B();\n+C();",
 					"path": "fixture.ts",
 					"expect": {
-						"text": "setup();\na();\nB();\nC();",
-						"firstChangedLine": 3,
-						"warnings": [
-							"Auto-repaired a replacement boundary echo at line 3: dropped 1 leading body line(s) already present outside the range. Issue the body as final content for the selected range only."
-						]
+						"text": "setup();\na();\na();\nB();\nC();",
+						"firstChangedLine": 3
 					}
 				}
 			]
@@ -998,7 +986,7 @@
 						"text": "addEventListener(\"click\", () => {\n\tsetup();\n\tfoo();\n\tbar();\n});\n\nconst config = {\n\ta: 1,\n\tb: 2,\n};",
 						"firstChangedLine": 2,
 						"warnings": [
-							"Auto-repaired a replacement boundary echo at line 2: dropped 1 trailing body line(s) already present outside the range. Issue the body as final content for the selected range only.",
+							"Auto-repaired replacement boundaries at line 2: dropped 1 body row(s) duplicated just outside the range. The result was verified by the syntax probe — re-issue with the range covering exactly the changed lines and the body as their complete final content.",
 							"Auto-repaired replacement boundaries at line 8: retained 1 syntax-essential source boundary row(s) selected by the range. The result was verified by the syntax probe — re-issue with the range covering exactly the changed lines and the body as their complete final content."
 						]
 					}
@@ -1632,7 +1620,7 @@
 			]
 		},
 		{
-			"name": "drops a trailing attribute echo in a single-line replacement",
+			"name": "keeps a trailing attribute repeat in a single-line replacement",
 			"parse": [
 				{
 					"input": "PUT 2.=2:\n+/// semantics. `context` defaults to 4 like jsdiff.\n+#[napi]",
@@ -1648,17 +1636,14 @@
 					"input": "PUT 2.=2:\n+/// semantics. `context` defaults to 4 like jsdiff.\n+#[napi]",
 					"path": "fixture.rs",
 					"expect": {
-						"text": "/// Unified-diff hunks with jsdiff\n/// semantics. `context` defaults to 4 like jsdiff.\n#[napi]\npub fn structured_patch_hunks() {}",
-						"firstChangedLine": 2,
-						"warnings": [
-							"Auto-repaired a replacement boundary echo at line 2: dropped 1 trailing body line(s) already present outside the range. Issue the body as final content for the selected range only."
-						]
+						"text": "/// Unified-diff hunks with jsdiff\n/// semantics. `context` defaults to 4 like jsdiff.\n#[napi]\n#[napi]\npub fn structured_patch_hunks() {}",
+						"firstChangedLine": 2
 					}
 				}
 			]
 		},
 		{
-			"name": "drops the echo when the body carries several new doc rows",
+			"name": "keeps an attribute repeat when the body carries several new doc rows",
 			"parse": [
 				{
 					"input": "PUT 2.=2:\n+///\n+/// Returns UTF-16 lines with active SGR codes carried across line boundaries.\n+#[napi]",
@@ -1674,17 +1659,14 @@
 					"input": "PUT 2.=2:\n+///\n+/// Returns UTF-16 lines with active SGR codes carried across line boundaries.\n+#[napi]",
 					"path": "fixture.rs",
 					"expect": {
-						"text": "/// Wrap text to a visible width, preserving ANSI escape codes across line\n///\n/// Returns UTF-16 lines with active SGR codes carried across line boundaries.\n#[napi]\npub fn wrap_text_with_ansi() {}",
-						"firstChangedLine": 2,
-						"warnings": [
-							"Auto-repaired a replacement boundary echo at line 2: dropped 1 trailing body line(s) already present outside the range. Issue the body as final content for the selected range only."
-						]
+						"text": "/// Wrap text to a visible width, preserving ANSI escape codes across line\n///\n/// Returns UTF-16 lines with active SGR codes carried across line boundaries.\n#[napi]\n#[napi]\npub fn wrap_text_with_ansi() {}",
+						"firstChangedLine": 2
 					}
 				}
 			]
 		},
 		{
-			"name": "drops a leading attribute echo in a single-line replacement",
+			"name": "keeps a leading attribute repeat in a single-line replacement",
 			"parse": [
 				{
 					"input": "PUT 2.=2:\n+#[napi]\n+/// New summary.",
@@ -1700,11 +1682,8 @@
 					"input": "PUT 2.=2:\n+#[napi]\n+/// New summary.",
 					"path": "fixture.rs",
 					"expect": {
-						"text": "#[napi]\n/// New summary.\npub fn f() {}",
-						"firstChangedLine": 2,
-						"warnings": [
-							"Auto-repaired a replacement boundary echo at line 2: dropped 1 leading body line(s) already present outside the range. Issue the body as final content for the selected range only."
-						]
+						"text": "#[napi]\n#[napi]\n/// New summary.\npub fn f() {}",
+						"firstChangedLine": 2
 					}
 				}
 			]
@@ -1730,7 +1709,7 @@
 			]
 		},
 		{
-			"name": "drops a trailing decorator echo in a single-line replacement",
+			"name": "keeps a trailing decorator repeat in a single-line replacement",
 			"parse": [
 				{
 					"input": "PUT 1.=1:\n+/** Creates request-scoped services. */\n+@Injectable()",
@@ -1746,11 +1725,8 @@
 					"input": "PUT 1.=1:\n+/** Creates request-scoped services. */\n+@Injectable()",
 					"path": "fixture.ts",
 					"expect": {
-						"text": "/** Creates request-scoped services. */\n@Injectable()\nclass Service {}",
-						"firstChangedLine": 1,
-						"warnings": [
-							"Auto-repaired a replacement boundary echo at line 1: dropped 1 trailing body line(s) already present outside the range. Issue the body as final content for the selected range only."
-						]
+						"text": "/** Creates request-scoped services. */\n@Injectable()\n@Injectable()\nclass Service {}",
+						"firstChangedLine": 1
 					}
 				}
 			]
