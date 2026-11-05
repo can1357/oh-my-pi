@@ -54,7 +54,7 @@ import { generateCodexAttestation } from "../live/attestation";
 import { redactUrlForLog } from "../mcp/json-rpc";
 import type { AuthStorage } from "../session/auth-storage";
 import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
-import type { ConfigError, ConfigFile } from "./config-file";
+import type { ConfigError, ConfigFile, LoadResult } from "./config-file";
 import {
 	buildCustomModelOverlay,
 	type CustomModelDefinitionLike,
@@ -370,8 +370,10 @@ export class ModelRegistry {
 	#configError: ConfigError | undefined = undefined;
 	#warnedCompatKeys = new Set<string>();
 	#configWarnings: string[] = [];
-	/** `ConfigFile.normalizationEpoch` last copied into {@link #configWarnings}. */
-	#publishedModelsFileEpoch = -1;
+	/** Cached models.yml load last copied into {@link #configWarnings}. */
+	#publishedModelsLoad?: LoadResult<ModelsConfig>;
+	/** Findings copied from {@link #publishedModelsLoad}, replaced when a new load is published. */
+	#publishedModelsFileWarnings: string[] = [];
 	#modelsConfigFile: ConfigFile<ModelsConfig>;
 	#lastStaticLoadMtime: number | null = null;
 	#registeredProviderSources: Set<string> = new Set();
@@ -1310,14 +1312,25 @@ export class ModelRegistry {
 		return warnings;
 	}
 
-	#publishModelsFileWarnings(): void {
-		const epoch = this.#modelsConfigFile.normalizationEpoch();
-		if (epoch === this.#publishedModelsFileEpoch) return;
-		this.#publishedModelsFileEpoch = epoch;
+	#publishModelsFileWarnings(result: LoadResult<ModelsConfig>): void {
+		// The same cached load is what every registry in the process reads.
+		// Publish when that object changes, and replace the findings copied
+		// from the previous one: `omp models refresh` force-reparses before
+		// anything drains #configWarnings, and a second registry must still
+		// see the modality warning the first one already published.
+		if (result === this.#publishedModelsLoad) return;
+		this.#publishedModelsLoad = result;
+		if (this.#publishedModelsFileWarnings.length > 0) {
+			const published = new Set(this.#publishedModelsFileWarnings);
+			this.#configWarnings = this.#configWarnings.filter(warning => !published.has(warning));
+			this.#publishedModelsFileWarnings = [];
+		}
+		if (result.status !== "ok") return;
 		const prefix = `${this.#modelsConfigFile.path()}: `;
-		this.#configWarnings = this.#configWarnings.filter(warning => !warning.startsWith(prefix));
-		for (const warning of this.#modelsConfigFile.drainWarnings()) {
-			this.#configWarnings.push(`${prefix}${warning}`);
+		for (const warning of result.warnings) {
+			const message = `${prefix}${warning}`;
+			this.#publishedModelsFileWarnings.push(message);
+			this.#configWarnings.push(message);
 		}
 	}
 
@@ -2047,11 +2060,9 @@ export class ModelRegistry {
 				found: false,
 			};
 		}
-		const { value, error, status } = this.#modelsConfigFile.tryLoad();
-		// `omp models refresh` builds the registry and then force-reparses the
-		// same file before anything drains #configWarnings. Publish the findings
-		// of the latest parse only, or the same modality warning is printed twice.
-		this.#publishModelsFileWarnings();
+		const loaded = this.#modelsConfigFile.tryLoad();
+		this.#publishModelsFileWarnings(loaded);
+		const { value, error, status } = loaded;
 
 		if (status === "error") {
 			return {

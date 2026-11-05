@@ -278,8 +278,9 @@ describe("models.yml input modality the catalog cannot express (#16342)", () => 
 		const config = ModelsConfigFile.relocate(file);
 		const result = config.tryLoad();
 		expect(result.status).toBe("ok");
+		if (result.status !== "ok") throw new Error("expected the file to load");
 		expect(result.value?.providers?.openrouter?.models?.[0]?.input).toEqual(catalogInputModalities());
-		const [warning] = config.drainWarnings();
+		const [warning] = result.warnings;
 		expect(warning).toContain('provider "openrouter"');
 		expect(warning).toContain('model "some/video-capable-model"');
 		expect(warning).toContain('modality "video"');
@@ -288,19 +289,35 @@ describe("models.yml input modality the catalog cannot express (#16342)", () => 
 		}
 	});
 
+	test("a later read of the same load still carries the dropped modality", () => {
+		// The default models.yml handle is one ConfigFile for the process, and
+		// tryLoad returns its cached result. Findings live on that result, so a
+		// second registry reports the same modality warning.
+		const file = writeModelsFile([{ id: "some/video-capable-model", input: "text, image, video" }]);
+		const config = ModelsConfigFile.relocate(file);
+		const first = config.tryLoad();
+		const second = config.tryLoad();
+		expect(second).toBe(first);
+		if (first.status !== "ok" || second.status !== "ok") throw new Error("expected the file to load");
+		expect(first.warnings.some(warning => warning.includes('modality "video"'))).toBe(true);
+		expect(second.warnings).toEqual(first.warnings);
+	});
+
 	test("a failed load does not keep the dropped-modality warning", () => {
 		// `input: [video, 7]` reports `video` and then fails the schema. The
 		// next successful load of the same file must not repeat that warning.
 		const file = writeModelsFile([{ id: "m", input: "video, 7" }]);
 		const config = ModelsConfigFile.relocate(file);
-		expect(config.tryLoad().status).toBe("error");
-		expect(config.drainWarnings()).toEqual([]);
+		const failed = config.tryLoad();
+		expect(failed.status).toBe("error");
+		expect("warnings" in failed).toBe(false);
 		fs.writeFileSync(file, modelsYaml([{ id: "m", input: "text" }]));
 		config.invalidate();
 		const result = config.tryLoad();
 		expect(result.status).toBe("ok");
+		if (result.status !== "ok") throw new Error("expected the file to load");
 		expect(result.value?.providers?.openrouter?.models?.[0]?.input).toEqual(["text"]);
-		expect(config.drainWarnings()).toEqual([]);
+		expect(result.warnings).toEqual([]);
 	});
 
 	test("a model whose only modality is unsupported keeps the catalog default", () => {

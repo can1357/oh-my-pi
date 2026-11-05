@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { OmpErrors, type Type } from "@oh-my-pi/omptype";
 import { getAgentDir, isEnoent, logger, stringifyYamlConfig } from "@oh-my-pi/pi-utils";
 import { JSONC, YAML } from "bun";
+import { writeFileAtomicallySync } from "../utils/atomic-file";
 
 /** Minimal subset of the AJV ConfigSchemaError shape this module actually relies on. */
 interface ConfigSchemaError {
@@ -46,7 +47,9 @@ function migrateJsonToYml(jsonPath: string, ymlPath: string) {
 			migratedPaths.add(key);
 			return;
 		}
-		fs.writeFileSync(ymlPath, stringifyYamlConfig(parsed));
+		// The migrated config can carry inline API keys: publish it with
+		// owner-only permissions and never leave a half-written file behind.
+		writeFileAtomicallySync(ymlPath, stringifyYamlConfig(parsed));
 		migratedPaths.add(key);
 	} catch (error) {
 		logger.warn("migrateJsonToYml: migration failed", { error: String(error) });
@@ -130,7 +133,7 @@ export type LoadStatus = "ok" | "error" | "not-found";
 
 export type LoadResult<T> =
 	| { value?: null; error: ConfigError; status: "error" }
-	| { value: T; error?: undefined; status: "ok" }
+	| { value: T; warnings: readonly string[]; error?: undefined; status: "ok" }
 	| { value?: null; error?: unknown; status: "not-found" };
 
 export class ConfigFile<T> implements IConfigFile<T> {
@@ -142,8 +145,6 @@ export class ConfigFile<T> implements IConfigFile<T> {
 	#cache?: LoadResult<T>;
 	#auxValidate?: (value: T) => void;
 	#normalize?: ConfigNormalizer;
-	#warnings: string[] = [];
-	#normalizationEpoch = 0;
 
 	constructor(
 		readonly id: string,
@@ -232,8 +233,9 @@ export class ConfigFile<T> implements IConfigFile<T> {
 	 * Normalize the parsed file before schema validation. The normalizer may
 	 * rewrite the value — a file may spell something the schema cannot express
 	 * — and report what it dropped, so the file still loads instead of failing
-	 * the whole config. The reported findings are drained with
-	 * {@link drainWarnings}.
+	 * the whole config. A successful {@link LoadResult} carries those findings.
+	 * A failed parse carries none: the findings never leave the parse that
+	 * produced them.
 	 */
 	withNormalization(name: string, normalize: ConfigNormalizer): this {
 		const prev = this.#normalize;
@@ -246,26 +248,6 @@ export class ConfigFile<T> implements IConfigFile<T> {
 			}
 		};
 		return this;
-	}
-
-	/**
-	 * Drain the findings the normalizer reported for the last successful parse.
-	 * A failed parse discards its findings, and a later parse replaces them, so
-	 * a drain never republishes a warning from a parse that did not stick.
-	 */
-	drainWarnings(): string[] {
-		const warnings = this.#warnings;
-		this.#warnings = [];
-		return warnings;
-	}
-
-	/**
-	 * How many times this file has been parsed from disk. A cache hit does not
-	 * advance it, so a caller can tell a fresh parse from a repeat of the one
-	 * whose findings it already published.
-	 */
-	normalizationEpoch(): number {
-		return this.#normalizationEpoch;
 	}
 
 	createDefault(): T {
@@ -285,18 +267,11 @@ export class ConfigFile<T> implements IConfigFile<T> {
 	}
 
 	#parseContent(content: string): LoadResult<T> {
-		// Findings belong to the parse that produced them. Drop whatever a
-		// previous parse left, then drop again unless this parse succeeds: a
-		// file that reports `video` and then fails the schema must not surface
-		// that `video` warning after the next load no longer contains it.
-		this.#warnings = [];
-		this.#normalizationEpoch += 1;
-		const result = this.#parseNormalized(content);
-		if (result.status !== "ok") this.#warnings = [];
-		return result;
-	}
-
-	#parseNormalized(content: string): LoadResult<T> {
+		// Findings belong to this parse. They are attached only when it
+		// succeeds and stored on the cached result, so a later reader of the
+		// same load sees them. A file that reports `video` and then fails the
+		// schema never publishes that `video` warning.
+		const warnings: string[] = [];
 		try {
 			let parsed: unknown;
 			const readPath = this.#resolveReadPath();
@@ -310,7 +285,7 @@ export class ConfigFile<T> implements IConfigFile<T> {
 
 			if (this.#normalize) {
 				try {
-					parsed = this.#normalize(parsed, message => this.#warnings.push(message));
+					parsed = this.#normalize(parsed, message => warnings.push(message));
 				} catch (error) {
 					const wrapped =
 						error instanceof ConfigError
@@ -340,7 +315,7 @@ export class ConfigFile<T> implements IConfigFile<T> {
 						: new ConfigError(this.id, undefined, { err: error, stage: "AuxValidate" });
 				return this.#storeCache({ error: wrapped, status: "error" });
 			}
-			return this.#storeCache({ value, status: "ok" });
+			return this.#storeCache({ value, warnings, status: "ok" });
 		} catch (error) {
 			logger.warn("Failed to parse config file", { path: this.path(), error });
 			return this.#storeCache({
@@ -384,6 +359,5 @@ export class ConfigFile<T> implements IConfigFile<T> {
 
 	invalidate() {
 		this.#cache = undefined;
-		this.#warnings = [];
 	}
 }
