@@ -34,6 +34,7 @@ import type {
 	ClientBridgeTerminalHandle,
 	ClientBridgeTerminalOutput,
 } from "../session/client-bridge";
+import { escapeHarnessTags } from "../session/harness-tags";
 import { DEFAULT_MAX_BYTES, enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
@@ -960,12 +961,16 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (options.notices?.length) {
 			lines.push(...options.notices, "");
 		}
+		// The command and directory are model-authored text: escaped like job output, they cannot
+		// close or forge a harness block.
 		lines.push(
-			formatBackgroundNotice(job.jobId, timeoutSec, {
-				command: job.command,
-				// A `local://`-style cwd stays as written; a host directory shows relative to the session's.
-				cwd: path.isAbsolute(job.cwd) ? formatToolWorkingDirectory(job.cwd, this.session.cwd) : job.cwd,
-			}),
+			escapeHarnessTags(
+				formatBackgroundNotice(job.jobId, timeoutSec, {
+					command: job.command,
+					// A `local://`-style cwd stays as written; a host directory shows relative to the session's.
+					cwd: path.isAbsolute(job.cwd) ? formatToolWorkingDirectory(job.cwd, this.session.cwd) : job.cwd,
+				}),
+			),
 		);
 		return {
 			content: [{ type: "text", text: lines.join("\n") }],
