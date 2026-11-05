@@ -76,3 +76,81 @@ fn empty_program_is_a_bare_file_in_the_shfmt_dialect() {
 		"{\n\t\"Type\": \"File\"\n}\n"
 	);
 }
+
+struct OneAlias(&'static [u8], &'static [u8]);
+
+impl AliasLookup for OneAlias {
+	fn alias(&self, name: &[u8]) -> Option<&[u8]> {
+		(name == self.0).then_some(self.1)
+	}
+}
+
+fn token_range(v: &serde_json::Value) -> Option<(u64, u64)> {
+	let pos = v.get("Pos")?.get("Offset")?.as_u64()?;
+	let end = v.get("End")?.get("Offset")?.as_u64()?;
+	Some((pos, end))
+}
+
+fn range_faults(
+	v: &serde_json::Value,
+	parent: Option<((u64, u64), String)>,
+	path: &str,
+	bad: &mut Vec<String>,
+) {
+	let mut here = parent.clone();
+	match v {
+		serde_json::Value::Object(map) => {
+			if let Some((pos, end)) = token_range(v) {
+				if end < pos {
+					bad.push(format!("{path}: backwards [{pos},{end}]"));
+				}
+				if let Some(((ppos, pend), ppath)) = &parent
+					&& (pos < *ppos || end > *pend)
+				{
+					bad.push(format!("{path} [{pos},{end}] outside {ppath} [{ppos},{pend}]"));
+				}
+				here = Some(((pos, end), path.to_string()));
+			}
+			for (k, child) in map {
+				range_faults(child, here.clone(), &format!("{path}.{k}"), bad);
+			}
+		},
+		serde_json::Value::Array(items) => {
+			for (i, child) in items.iter().enumerate() {
+				range_faults(child, here.clone(), &format!("{path}[{i}]"), bad);
+			}
+		},
+		_ => {},
+	}
+}
+
+#[test]
+fn an_alias_expanded_conditional_exports_ranges_that_contain_their_children() {
+	for text in [
+		&b"[[ ( ! a ) && b ]]"[..] as &'static [u8],
+		&b"[[ ! ! a && -n b || ( c ) ]]"[..],
+		&b"[[ a && ( b || c ) ]]"[..],
+		&b"[[ -n a ]]"[..],
+	] {
+		let src = b"check\n";
+		let table = OneAlias(b"check", text);
+		let mut parser = Parser::new(src, Features::NONE, &table);
+		let mut commands = Vec::new();
+		while let Some(cmd) = parser.next_command() {
+			commands.push(cmd.expect("the aliased conditional parses"));
+		}
+		let program = Program { commands };
+		for offsets in [Offsets::Bytes, Offsets::Utf16] {
+			let json = to_json(src, &program, JsonDialect::Shfmt, offsets);
+			let shfmt: serde_json::Value = serde_json::from_str(&json).unwrap();
+			let mut bad = Vec::new();
+			range_faults(&shfmt, None, "", &mut bad);
+			assert!(
+				bad.is_empty(),
+				"{} range faults for {} in {offsets:?}: {bad:?}\n{json}",
+				bad.len(),
+				String::from_utf8_lossy(text)
+			);
+		}
+	}
+}
