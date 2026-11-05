@@ -4,8 +4,8 @@
 
 ### Added
 
-- Added shell trace visualization support, including the `ShellTrace` model and TSP `shell` kind for representing shell runs, node state, and layout.
-- Enhanced code views with score-based line shading and gradients, collapsible code folds with labels, notes, tones, and hover cards, and an overview strip.
+- Added shell trace visualization: `ShellTrace` model and TSP `shell` kind for shell runs, node state, and layout.
+- Code views gain score-based line shading, labeled collapsible folds with notes, tones, and hover cards, and an overview strip.
 
 ## [18.16.0] - 2026-11-02
 

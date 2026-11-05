@@ -4,8 +4,8 @@
 
 ### Fixed
 
-- Fixed Frustration counting agent-attributed messages as user messages; historical stats are corrected after the next sync ([#18183](https://github.com/can1357/oh-my-pi/issues/18183)).
-- Fixed slow session synchronization when an `omp stats` dashboard page was open, so sessions now catch up promptly without repeatedly refreshing the page during a full sync.
+- Frustration no longer counts agent-attributed messages as user messages; history is corrected on next sync ([#18183](https://github.com/can1357/oh-my-pi/issues/18183)).
+- Sessions sync promptly while an `omp stats` dashboard page is open, without repeated page refreshes during full sync.
 
 ## [18.16.0] - 2026-11-02
 

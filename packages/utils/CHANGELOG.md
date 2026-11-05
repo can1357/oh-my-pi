@@ -4,14 +4,14 @@
 
 ### Added
 
-- Added `getUpdateStateDir()` for accessing auto-update state files under `~/.omp/update`.
-- Added `logger.setLogForwarder()` and `logger.emitForeign()` APIs for forwarding and emitting log records across threads while preserving context and timestamps.
-- Added `expandTilde()` to expand a leading `~` in paths to the user's home directory.
+- Added `getUpdateStateDir()`, returning the auto-update state directory (`~/.omp/update`).
+- Added `logger.setLogForwarder()` and `logger.emitForeign()` to forward log records across threads, preserving context and timestamps.
+- Added `expandTilde()` to expand a leading `~` to the home directory.
 
 ### Fixed
 
-- Fixed graceful shutdown of `ptree` commands with `subreaper: true` so that all descendant processes are terminated reliably.
-- Fixed `fatal()` in a worker thread so the parent's `error` listeners receive the error instead of only an exit code 1.
+- `ptree` commands with `subreaper: true` now reliably terminate all descendants on graceful shutdown.
+- `fatal()` in a worker thread now reaches the parent's `error` listeners instead of only exiting with code 1.
 
 ## [18.16.0] - 2026-11-02
 

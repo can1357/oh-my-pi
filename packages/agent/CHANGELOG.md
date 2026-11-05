@@ -4,8 +4,8 @@
 
 ### Added
 
-- Added `Agent.queuedMessageGate`, allowing applications to filter queued messages before delivery and observe when claimed messages are returned undelivered.
-- Added `wireToolsFingerprint()`, which provides a hash of the tool specifications sent with a request.
+- Added `Agent.queuedMessageGate` to filter queued messages before delivery and observe claimed messages returned undelivered.
+- Added `wireToolsFingerprint()`, returning a hash of the tool specs sent with a request.
 
 ## [18.16.0] - 2026-11-02
 

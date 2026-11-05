@@ -4,19 +4,19 @@
 
 ### Breaking Changes
 
-- `fromJsonSchema` now returns an opaque validator for the entire document; object-shape methods such as `.pick()` and `.props` are no longer available on imported schemas. The `format` keyword is treated as an annotation unless a corresponding check is provided through `formats`. Malformed or unresolved `$ref` values now throw `invalid $ref` or `unresolved $ref` errors.
+- `fromJsonSchema` returns an opaque whole-document validator (no `.pick()`/`.props`); `format` is annotation-only unless checked via `formats`; bad `$ref` throws `invalid $ref`/`unresolved $ref`.
 
 ### Added
 
-- Added `fromJsonSchema(schema, { draft, schemas, formats })` for validating JSON Schema draft 2020-12 and draft 7 schemas, including dynamic and remote references, unevaluated properties and items, identifiers and anchors, and meta-schema vocabularies.
+- Added `fromJsonSchema(schema, { draft, schemas, formats })`, validating JSON Schema draft 2020-12 and draft 7, including dynamic/remote refs and unevaluated keywords.
 
 ### Changed
 
-- Improved `fromJsonSchema` validation performance, including for schemas with extensive `$ref` usage.
+- Faster `fromJsonSchema` validation, including `$ref`-heavy schemas.
 
 ### Fixed
 
-- Fixed `fromJsonSchema` failing with `EvalError` in environments that forbid generated code; schemas now fall back to interpreter-based validation.
+- `fromJsonSchema` falls back to interpreted validation instead of throwing `EvalError` where generated code is forbidden.
 
 ## [18.13.3] - 2026-10-28
 

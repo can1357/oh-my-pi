@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Development installs now reuse fastembed’s ONNX Runtime, avoiding installation of a duplicate native runtime.
+- Development installs reuse fastembed’s ONNX Runtime instead of installing a duplicate native runtime.
 
 ## [18.14.2] - 2026-10-31
 

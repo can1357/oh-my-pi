@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed `compact()` so archived histories saved before version 16.1.0 retain their image content in the reported dropped-history summary.
+- `compact()` now keeps image content from pre-16.1.0 archived histories in the dropped-history summary.
 
 ## [18.16.0] - 2026-11-02
 
