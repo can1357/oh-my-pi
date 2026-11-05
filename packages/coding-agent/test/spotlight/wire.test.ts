@@ -22,6 +22,7 @@ import { SPOTLIGHT_ENTRY } from "@oh-my-pi/pi-coding-agent/spotlight/types";
 import { StencilCredential } from "@oh-my-pi/pi-coding-agent/stencil/credential";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import { spotlightNames } from "@oh-my-pi/pi-coding-agent/tools/jfind/questions";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { reasonShows, type SpotlightReason, spotlightDetails } from "@oh-my-pi/pi-tui/chat/spotlight";
@@ -50,6 +51,12 @@ afterEach(async () => {
 	for (const dir of tmpDirs.splice(0)) await removeWithRetries(dir);
 });
 
+interface SpotlightWireRequest {
+	items: string[];
+	questions: Record<string, { probe: string }>;
+	source: string;
+}
+
 /**
  * A Spotlight endpoint stand-in: `score` rates each item, or `hang` never answers (the request runs into its
  * timeout). Warm-up requests are refused at once so none outlives a test.
@@ -59,15 +66,14 @@ function fakeSpotlight(options: {
 	hang?: boolean;
 	/** Sees each ranking request's `source`. */
 	onSource?: (source: string) => void;
+	/** Sees each ranking request's parsed JSON body. */
+	onRequest?: (request: SpotlightWireRequest) => void;
 }): typeof fetch {
 	return (async (_url: string | URL | Request, init?: RequestInit) => {
-		const body = JSON.parse(String(init?.body)) as {
-			items: string[];
-			questions: Record<string, unknown>;
-			source: string;
-		};
+		const body = JSON.parse(String(init?.body)) as SpotlightWireRequest;
 		if (body.items.length === 1 && body.items[0] === "ok") throw new Error("warm-up refused");
 		options.onSource?.(body.source);
+		options.onRequest?.(body);
 		if (options.hang) {
 			const aborted = Promise.withResolvers<never>();
 			init?.signal?.addEventListener("abort", () => aborted.reject(init.signal?.reason));
@@ -148,6 +154,34 @@ function bashOutput(output: string): bashExecutor.BashResult {
 		outputBytes: output.length,
 	};
 }
+
+describe("spotlight probe prefixes", () => {
+	function expectPrefixProbes(requests: SpotlightWireRequest[]): void {
+		expect(requests).toHaveLength(1);
+		for (const { probe } of Object.values(requests[0]!.questions)) {
+			expect(probe.endsWith("`")).toBe(true);
+			expect(probe).toMatch(/\S$/);
+		}
+	}
+
+	it("sends the shaping probe without trailing whitespace", async () => {
+		const requests: SpotlightWireRequest[] = [];
+		const client = spotlightClient(fakeSpotlight({ onRequest: request => requests.push(request) }));
+		const scorer = new RecordingScorer(client, "low");
+		const ctx = buildCallContext([], "x", "./ingest.sh", undefined);
+
+		expect(await scorer.score(["a", "b"], ctx)).toEqual([0, 0]);
+		expectPrefixProbes(requests);
+	});
+
+	it("sends the filename-ranking probe without trailing whitespace", async () => {
+		const requests: SpotlightWireRequest[] = [];
+		const client = spotlightClient(fakeSpotlight({ onRequest: request => requests.push(request) }));
+
+		await client.rank(spotlightNames("implementation", ["src/example.ts"], "low"));
+		expectPrefixProbes(requests);
+	});
+});
 
 const LONG_LOG = Array.from({ length: 400 }, (_, i) =>
 	i === 200
