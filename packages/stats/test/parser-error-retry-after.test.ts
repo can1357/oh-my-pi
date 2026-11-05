@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { formatRequestError } from "@oh-my-pi/omp-stats/client/data/formatters";
+import { formatRequestError, hasRequestFailure } from "@oh-my-pi/omp-stats/client/data/formatters";
 import { getRecentRequests, initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
 import { parseSessionFile } from "@oh-my-pi/omp-stats/parser";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
@@ -137,5 +137,35 @@ describe("a textless refusal is still shown", () => {
 				errorRetryAfterMs: 30_000,
 			}),
 		).toContain("the caller's 10 s providerRetryWaitCeilingMs refused it");
+	});
+});
+
+// The overview's status column and the request drawer's error section ask one
+// question through one predicate: did this request fail. That is not the same
+// as "did the provider send words about it" — a wait refused before any
+// provider text exists is a failure whose only text is omp's own explanation,
+// and testing the raw column labelled such a row OK beside a drawer that
+// showed the refusal.
+describe("hasRequestFailure", () => {
+	it.each([
+		["the provider's own words", { errorMessage: "503 overloaded", errorDisplayMessage: null }],
+		[
+			"omp's words alone",
+			{
+				errorMessage: null,
+				errorDisplayMessage:
+					"(server asked to wait 30 s before retrying; the caller's 10 s providerRetryWaitCeilingMs refused it, so the provider did not retry)",
+			},
+		],
+	])("reads a row carrying %s as failed", (_name, row) => {
+		expect(hasRequestFailure(row)).toBe(true);
+		// And the section the badge promises has something to show.
+		expect(formatRequestError({ ...row, errorRetryAfterMs: null })).not.toBeNull();
+	});
+
+	it("reads a row that carries neither as not failed", () => {
+		const row = { errorMessage: null, errorDisplayMessage: null };
+		expect(hasRequestFailure(row)).toBe(false);
+		expect(formatRequestError({ ...row, errorRetryAfterMs: null })).toBeNull();
 	});
 });

@@ -99,6 +99,19 @@ export function formatFolder(folder: string): string {
 }
 
 /**
+ * Whether a stored request failed.
+ *
+ * Not the same question as "did the provider send words about it": a wait
+ * refused before any provider text exists is a failure whose only text is
+ * omp's own explanation, and a view that tested the raw column labelled it
+ * OK. One predicate, so a status badge and an error section cannot disagree
+ * about whether the same row failed.
+ */
+export function hasRequestFailure(row: Pick<MessageStats, "errorMessage" | "errorDisplayMessage">): boolean {
+	return Boolean(row.errorMessage || row.errorDisplayMessage);
+}
+
+/**
  * A failed request's error as a person reads it: the text omp built for a
  * person when ingest stored one, else the provider's own, plus the server's
  * retry wait from its own column, rendered here and nowhere earlier.

@@ -553,7 +553,10 @@
               if (msg.stopReason === 'aborted') {
                 return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-muted">(aborted)</span>`;
               }
-              if (msg.errorMessage) {
+              // Whether the turn failed, not whether the provider sent words
+              // about it: a refused wait with no provider text is a failure
+              // whose only text is omp's own explanation.
+              if (msg.errorDisplayMessage || msg.errorMessage) {
                 return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-error">${escapeHtml(withRetryWait(truncate(msg.errorDisplayMessage ?? msg.errorMessage), msg.errorRetryAfterMs))}</span>`;
               }
               return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-muted">(no text)</span>`;

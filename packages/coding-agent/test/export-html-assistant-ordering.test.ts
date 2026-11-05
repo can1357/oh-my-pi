@@ -541,4 +541,51 @@ describe("HTML export assistant content ordering", () => {
 			`Error: ${withRetryWait(longError, 9_000)}`,
 		);
 	});
+
+	// A refused wait can be a failure's only text: omp records the explanation
+	// and the provider sent no words of its own. The tree asked whether the
+	// provider had sent words to decide whether the turn failed, so it showed
+	// "(no text)" for exactly that failure while the message view explained it.
+	test("marks a failure whose only text is omp's own explanation", () => {
+		const note =
+			"(server asked to wait 30 s before retrying; the caller's 10 s providerRetryWaitCeilingMs refused it, so the provider did not retry)";
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "ask",
+				parentId: null,
+				timestamp: "2026-01-01T00:00:01.000Z",
+				message: { role: "user", content: "hi", timestamp: 1 },
+			},
+			{
+				type: "message",
+				id: "failed",
+				parentId: "ask",
+				timestamp: "2026-01-01T00:00:02.000Z",
+				message: {
+					role: "assistant",
+					content: [],
+					model: "test-model",
+					provider: "test",
+					api: "openai-completions",
+					timestamp: 2,
+					stopReason: "error",
+					errorDisplayMessage: note,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+				},
+			},
+		];
+		const rendered = renderSession(entries, "failed", {});
+		const order = renderedSidebarOrder(rendered);
+
+		expect(order[1]).toContain("providerRetryWaitCeilingMs refused it");
+		expect(order[1]).not.toContain("(no text)");
+	});
 });
