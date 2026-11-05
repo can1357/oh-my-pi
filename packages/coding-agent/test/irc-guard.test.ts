@@ -148,20 +148,68 @@ describe("IrcBus ingress guard", () => {
 		expect(receipts.every(receipt => receipt.outcome === "injected")).toBe(true);
 	});
 
-	it("does not spend budget on a refused message, so the next window refills at the limit", async () => {
-		const bus = makeBus({ "irc.rateLimitTokens": 10 });
+	it("does not spend budget on a refused message, so the window still has room for what fits", async () => {
+		const bus = makeBus();
+		const { sink } = registerPeers();
+
+		// One 30-token window: 40 chars = 10 tokens, 100 chars = 25, 48 chars = 12.
+		expect((await bus.send({ from: "0-Sender", to: "0-Sink", body: "ten".padEnd(40, "x") })).outcome).toBe(
+			"injected",
+		);
+		expect((await bus.send({ from: "0-Sender", to: "0-Sink", body: "twentyfive".padEnd(100, "x") })).outcome).toBe(
+			"failed",
+		);
+		// Still inside the same window (the first send is 200 ms old). Had the
+		// refusal been charged, 35 tokens would be spent and this 12-token send
+		// (47 total) refused; charged nothing, 10 + 12 = 22 fits.
+		clock.now += 200;
+		expect((await bus.send({ from: "0-Sender", to: "0-Sink", body: "twelve".padEnd(48, "x") })).outcome).toBe(
+			"injected",
+		);
+		expect(sink.delivered).toHaveLength(2);
+	});
+
+	it("cuts a flood spread over several recipients: the rate key is the sender, not the pair", async () => {
+		const bus = makeBus();
+		registerPeers();
+		const peers: FakeSession[] = [];
+		for (let index = 0; index < 4; index++) {
+			const peer = makeFakeSession();
+			registry.register({ id: `0-Peer${index}`, displayName: `peer${index}`, kind: "sub", session: peer.session });
+			peers.push(peer);
+		}
+
+		const receipts = [];
+		for (let index = 0; index < 4; index++) {
+			receipts.push(
+				await bus.send({ from: "0-Sender", to: `0-Peer${index}`, body: `msg-${index}`.padEnd(40, "x") }),
+			);
+		}
+
+		// Three 10-token sends exhaust the 30-token budget however many recipients
+		// they are spread over; the fourth peer never sees its message.
+		expect(receipts.slice(0, 3).every(receipt => receipt.outcome === "injected")).toBe(true);
+		expect(receipts[3]?.outcome).toBe("failed");
+		expect(receipts[3]?.error).toStartWith("rate limited");
+		expect(peers[3]?.delivered).toHaveLength(0);
+	});
+
+	it("neither refills the budget nor lets a flood through after a backward wall-clock step", async () => {
+		const bus = makeBus({ "irc.rateLimitTokens": 20 });
 		const { sink } = registerPeers();
 
 		expect((await bus.send({ from: "0-Sender", to: "0-Sink", body: "first".padEnd(40, "x") })).outcome).toBe(
 			"injected",
 		);
+		// A backward NTP correction must not make the first send look newer than it
+		// is: the second send is still charged against the same window.
+		clock.now -= 10_000;
 		expect((await bus.send({ from: "0-Sender", to: "0-Sink", body: "second".padEnd(40, "x") })).outcome).toBe(
-			"failed",
-		);
-		clock.now += 501;
-		// Had the refusal been charged, one 10-token message would still exceed the budget.
-		expect((await bus.send({ from: "0-Sender", to: "0-Sink", body: "third".padEnd(40, "x") })).outcome).toBe(
 			"injected",
+		);
+		clock.now += 10_000;
+		expect((await bus.send({ from: "0-Sender", to: "0-Sink", body: "third".padEnd(40, "x") })).outcome).toBe(
+			"failed",
 		);
 		expect(sink.delivered).toHaveLength(2);
 	});
@@ -238,8 +286,19 @@ describe("IrcBus ingress guard", () => {
 		// The display-only relay follows delivery, so a refused send never shows up there.
 		expect(main.relayed.map(record => record.content)).toHaveLength(1);
 		expect(main.relayed[0]?.content).toContain("one");
-		// Neither refusal nor progress may count as a reply; a refusal is not a send at all.
-		expect(bus.sentSince("0-Sender", "0-Sink", clock.now)).toBe(true);
+
+		// A recipient that only ever saw refusals has no send mark at all: a refusal
+		// is not a send, so `sentSince`/`unansweredSends` cannot read it as one.
+		const quiet = makeFakeSession();
+		registry.register({ id: "0-Quiet", displayName: "quiet", kind: "sub", session: quiet.session });
+		expect((await bus.send({ from: "0-Sender", to: "0-Quiet", body: "three".padEnd(40, "x") })).outcome).toBe(
+			"failed",
+		);
+		expect((await bus.send({ from: "0-Sender", to: "0-Quiet", body: "four".padEnd(40, "x") })).outcome).toBe(
+			"failed",
+		);
+		expect(bus.sentSince("0-Sender", "0-Quiet", 0)).toBe(false);
+		expect(bus.sentSince("0-Sender", "0-Sink", 0)).toBe(true);
 	});
 
 	it("does not charge a broadcast's legs against the sender's rate budget", async () => {

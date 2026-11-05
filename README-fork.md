@@ -141,7 +141,11 @@ Tasks → Subagents):
 - `irc.ingressGuard` (default on) — master switch.
 - `irc.rateLimitTokens` (default 30) — tokens per sender per 500 ms; `0` off.
 - `irc.dedupWindowMs` (default 30000) — duplicate window; `0` off.
-- `irc.maxHops` (default 28) — longest accepted chain; `0` off.
+- `irc.maxHops` (default 28) — longest accepted chain; `0` off. Only
+  automatic wake relays carry a chain forward: an ordinary `write
+  agent://<id>` reply starts a fresh one (`hops = [sender]`), because the
+  reply tool never sees the inbound message's chain. The ceiling therefore
+  binds automated ping-pong chains, not hand-written forwards.
 
 The policy is read from the acting agent's session settings, falling back to
 the main session's, so a worker-proxied send follows the main policy. Covering

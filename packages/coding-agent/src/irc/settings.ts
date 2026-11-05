@@ -66,7 +66,7 @@ export const cfgIrcMaxHops = register({
 		group: "Subagents",
 		label: "IRC Max Hops",
 		description:
-			"Longest accepted chain of agents a message may pass through (each send appends its sender); a longer chain is refused. 0 disables the limit",
+			"Longest accepted chain of agents a message may pass through (each send appends its sender; automatic wake relays carry the chain on, a manual reply starts a fresh one); a longer chain is refused. 0 disables the limit",
 		options: [
 			{ value: "0", label: "Unlimited" },
 			{ value: "8", label: "8 hops" },

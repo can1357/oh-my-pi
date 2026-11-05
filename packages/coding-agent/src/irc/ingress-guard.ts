@@ -61,6 +61,8 @@ export class IrcIngressGuard {
 	readonly #dedup = new Map<string, number>();
 	readonly #dedupOrder: DedupEntry[] = [];
 	#dedupHead = 0;
+	/** Highest send time seen; see {@link IrcIngressGuard.check}. */
+	#lastNow = 0;
 
 	/**
 	 * Refuse `message` under `limits`, or return `undefined` to let it through.
@@ -69,13 +71,20 @@ export class IrcIngressGuard {
 	 * Order: hops (a chain over the ceiling never reaches anyone), then rate
 	 * (flooding costs the recipient the most), then dedup. Refusals spend
 	 * nothing, so a refused message is not counted against the next attempt.
+	 *
+	 * Windows run on send time, clamped to the highest time already seen: a
+	 * backward wall-clock step (NTP correction, resume from sleep) must not
+	 * leave future-dated entries that keep a sender refused — or stop dedup
+	 * keys from expiring — until the clock catches up again.
 	 */
 	check(message: IrcMessage, limits: IrcIngressLimits): IrcIngressRefusal | undefined {
+		const now = Math.max(message.ts, this.#lastNow);
+		this.#lastNow = now;
 		const hopped = this.#checkHops(message, limits.maxHops);
 		if (hopped) return hopped;
-		const rate = this.#checkRate(message, limits.rateLimitTokens);
+		const rate = this.#checkRate(message, limits.rateLimitTokens, now);
 		if (rate) return rate;
-		return this.#checkDedup(message, limits.dedupWindowMs);
+		return this.#checkDedup(message, limits.dedupWindowMs, now);
 	}
 
 	#checkHops(message: IrcMessage, maxHops: number): IrcIngressRefusal | undefined {
@@ -87,14 +96,16 @@ export class IrcIngressGuard {
 		};
 	}
 
-	#checkRate(message: IrcMessage, limit: number): IrcIngressRefusal | undefined {
+	#checkRate(message: IrcMessage, limit: number, now: number): IrcIngressRefusal | undefined {
 		if (limit <= 0) return undefined;
 		// A broadcast is one authored message the tool fans out, and a wake relay is
 		// the runtime answering a woken turn: charging every leg would refuse a
 		// legitimate announcement to more peers than a sender's budget covers.
-		// Repeated authored sends and progress notes stay charged.
+		// Repeated authored sends and progress notes stay charged. This exemption
+		// leans on the upstream invariant that only the main agent broadcasts
+		// (`irc/messaging.ts`: "Only the main agent can broadcast"); if subagents
+		// ever regain broadcast, charge its legs again.
 		if (message.broadcast || message.wakeRelay) return undefined;
-		const now = message.ts;
 		let window = this.#rates.get(message.from);
 		if (!window) {
 			// Agent ids are unique per spawn, so a long-lived process would keep one
@@ -131,12 +142,11 @@ export class IrcIngressGuard {
 		return undefined;
 	}
 
-	#checkDedup(message: IrcMessage, windowMs: number): IrcIngressRefusal | undefined {
+	#checkDedup(message: IrcMessage, windowMs: number, now: number): IrcIngressRefusal | undefined {
 		// Progress notes and automated wake relays are meant to repeat: an agent
 		// may send the same interim line twice, and two wake turns can end with
 		// identical output. Neither is the repetition loop dedup exists to stop.
 		if (windowMs <= 0 || message.progress || message.wakeRelay) return undefined;
-		const now = message.ts;
 		while (this.#dedupHead < this.#dedupOrder.length) {
 			const entry = this.#dedupOrder[this.#dedupHead]!;
 			if (now - entry.ts < windowMs) break;
