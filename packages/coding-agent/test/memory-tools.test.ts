@@ -58,6 +58,8 @@ function makeConfig(overrides: Partial<HindsightConfig> = {}): HindsightConfig {
 		retainMission: null,
 		autoRecall: true,
 		autoRetain: true,
+		outboxEnabled: false,
+		outboxMaxEvents: 1000,
 		retainMode: "full-session",
 		retainEveryNTurns: 3,
 		retainOverlapTurns: 2,
@@ -325,7 +327,7 @@ describe("retain.execute", () => {
 		const tool = MemoryRetainTool.createIf(makeSession(settings))!;
 		const result = await tool.execute("call-1", { items: [{ content: "user prefers tabs" }] });
 
-		expect(result.content[0]).toEqual({ type: "text", text: "1 memory queued." });
+		expect(result.content[0]).toEqual({ type: "text", text: "1 memory queued (in memory only; not durable)." });
 		// Tool returns before any HTTP work happens.
 		expect(retainBatchSpy).not.toHaveBeenCalled();
 		expect(retainSpy).not.toHaveBeenCalled();
@@ -350,7 +352,7 @@ describe("retain.execute", () => {
 				{ content: "pi builds with bun", scope: "project" },
 			],
 		});
-		expect(result.content[0]).toEqual({ type: "text", text: "3 memories queued." });
+		expect(result.content[0]).toEqual({ type: "text", text: "3 memories queued (in memory only; not durable)." });
 		await registeredState?.flushRetainQueue();
 
 		expect(retainBatchSpy).toHaveBeenCalledTimes(2);
@@ -387,14 +389,16 @@ describe("retain.execute", () => {
 		]);
 	});
 
-	it("retains items queued through the two-argument enqueue as project-scoped", async () => {
+	it("retains items queued directly without a scope as project-scoped", async () => {
 		const settings = Settings.isolated({ "memory.backend": "hindsight" });
 		const client = new HindsightApi({ baseUrl: "http://localhost:8888" });
 		const retainBatchSpy = vi.spyOn(HindsightApi.prototype, "retainBatch").mockResolvedValue({} as never);
 		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
 		registerState(client, settings, { retainTags: ["project:pi"], config: { scoping: "per-project-tagged" } });
 
-		registeredState!.retainQueue.enqueue("legacy caller fact", "legacy context");
+		await registeredState!.retainQueue.enqueue("call-direct", [
+			{ content: "legacy caller fact", context: "legacy context" },
+		]);
 		await registeredState?.flushRetainQueue();
 
 		expect(retainBatchSpy).toHaveBeenCalledTimes(1);
@@ -405,11 +409,13 @@ describe("retain.execute", () => {
 
 	it.each(HINDSIGHT_GLOBAL_REJECTIONS)(
 		"rejects a global item enqueued directly on the queue %s",
-		(_label, config, error) => {
+		async (_label, config, error) => {
 			const client = new HindsightApi({ baseUrl: "http://localhost:8888" });
 			registerState(client, undefined, { config });
 
-			expect(() => registeredState!.retainQueue.enqueue("cross-project fact", undefined, "global")).toThrow(error);
+			await expect(
+				registeredState!.retainQueue.enqueue("call-rejected", [{ content: "cross-project fact", scope: "global" }]),
+			).rejects.toThrow(error);
 			expect(registeredState?.retainQueue.depth).toBe(0);
 		},
 	);
@@ -476,7 +482,7 @@ describe("retain.execute", () => {
 		const result = await tool.execute("call-batch", {
 			items: [{ content: "fact one" }, { content: "fact two", context: "user override" }],
 		});
-		expect(result.content[0]).toEqual({ type: "text", text: "2 memories queued." });
+		expect(result.content[0]).toEqual({ type: "text", text: "2 memories queued (in memory only; not durable)." });
 
 		await registeredState?.flushRetainQueue();
 

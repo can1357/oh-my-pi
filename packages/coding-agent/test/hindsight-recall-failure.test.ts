@@ -15,6 +15,8 @@ const config = {
 	retainMission: null,
 	autoRecall: true,
 	autoRetain: true,
+	outboxEnabled: false,
+	outboxMaxEvents: 1000,
 	retainMode: "full-session",
 	retainEveryNTurns: 3,
 	retainOverlapTurns: 2,

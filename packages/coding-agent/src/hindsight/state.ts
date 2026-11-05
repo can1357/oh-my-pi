@@ -1,4 +1,5 @@
 import { logger, sanitizeText, truncate } from "@oh-my-pi/pi-utils";
+import { getAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import type { MemoryWriteScope } from "../memory-backend/global-scope";
 import { findPersistedRecall, persistRecall } from "../memory-backend/recall-entry";
 import type { MemoryPromptPreparation } from "../memory-backend/types";
@@ -21,6 +22,7 @@ import {
 	tryLoadMentalModelsBlock,
 } from "./mental-models";
 import { countUserTurns, extractMessages } from "./transcript";
+import { HindsightOutbox, type RetainInput } from "./outbox";
 
 /** `notice` source of Hindsight recall/retain failures; print mode writes these to stderr. */
 export const HINDSIGHT_NOTICE_SOURCE = "Hindsight";
@@ -70,6 +72,7 @@ export interface HindsightSessionStateApi {
 }
 
 export interface HindsightSessionStateOptions {
+	agentDir?: string;
 	/** Session id used for retain-queue metadata. */
 	sessionId: string;
 	client: HindsightClientApi;
@@ -103,40 +106,72 @@ export interface HindsightSessionStateOptions {
  */
 export class HindsightRetainQueue {
 	readonly #state: HindsightSessionState;
+	readonly #outbox?: HindsightOutbox;
 	#items: PendingRetainItem[] = [];
 	#timer?: NodeJS.Timeout;
 	#flushing?: Promise<void>;
 	#closed = false;
 
-	constructor(state: HindsightSessionState) {
+	constructor(state: HindsightSessionState, agentDir: string) {
 		this.#state = state;
+		if (state.config.outboxEnabled) {
+			this.#outbox = new HindsightOutbox({
+				agentDir,
+				apiUrl: state.config.hindsightApiUrl!,
+				bankId: state.bankId,
+				apiToken: state.config.hindsightApiToken,
+				maxEvents: state.config.outboxMaxEvents,
+				retainTimeoutMs: state.config.retainTimeoutMs,
+				client: state.client,
+				ensureBank: () => ensureBankExists(state.client, state.bankId, state.config, state.banksSet),
+				notice: message => state.session.emitNotice("warning", message, HINDSIGHT_NOTICE_SOURCE),
+			});
+		}
 	}
 
 	get depth(): number {
-		return this.#items.length;
+		return this.#outbox?.depth ?? this.#items.length;
 	}
 
-	enqueue(content: string, context?: string, scope: MemoryWriteScope = "project"): void {
+	async enqueue(toolCallId: string, items: RetainInput[]): Promise<void> {
 		if (this.#closed) {
 			throw new Error("Hindsight retain queue is closed.");
 		}
-		if (scope === "global") this.#state.assertGlobalRetainAvailable();
-		this.#items.push({ content, context, scope, timestamp: new Date() });
+		if (items.some(item => item.scope === "global")) this.#state.assertGlobalRetainAvailable();
+		if (this.#outbox) {
+			await this.#outbox.enqueue(
+				this.#state.sessionId,
+				toolCallId,
+				items,
+				this.#state.config.retainContext,
+				this.#state.retainTags,
+				this.#state.session.sessionManager.getCwd(),
+			);
+		} else {
+			this.#items.push(...items.map(item => ({ ...item, scope: item.scope ?? "project", timestamp: new Date() })));
+		}
 
-		if (this.#items.length >= RETAIN_FLUSH_BATCH_SIZE) {
+		if (this.depth >= RETAIN_FLUSH_BATCH_SIZE) {
 			void this.flush();
 			return;
 		}
-		if (!this.#timer) {
-			this.#timer = setTimeout(() => {
-				void this.flush();
-			}, RETAIN_FLUSH_INTERVAL_MS);
+		this.#schedule(RETAIN_FLUSH_INTERVAL_MS);
+	}
+
+	#schedule(delay: number): void {
+		if (!this.#closed && !this.#timer) {
+			this.#timer = setTimeout(
+				() => {
+					void this.flush();
+				},
+				Math.max(1, delay),
+			);
 			// Don't pin the event loop alive just for a pending retain flush.
 			this.#timer.unref?.();
 		}
 	}
 
-	async flush(): Promise<void> {
+	async flush(startup = false): Promise<void> {
 		if (this.#timer) {
 			clearTimeout(this.#timer);
 			this.#timer = undefined;
@@ -146,19 +181,35 @@ export class HindsightRetainQueue {
 			// Coalesce: wait for the in-flight flush, then drain anything that
 			// landed after it started so we don't strand items.
 			await this.#flushing;
-			if (this.#items.length > 0) await this.flush();
+			if (this.depth > 0) await this.flush();
 			return;
 		}
 
-		if (this.#items.length === 0) return;
+		if (!this.#outbox && this.#items.length === 0) return;
 
-		const items = this.#items.splice(0);
-		const flushPromise = this.#doFlush(items);
+		const flushPromise = this.#outbox ? this.#drainOutbox(startup) : this.#doFlush(this.#items.splice(0));
 		this.#flushing = flushPromise;
 		try {
 			await flushPromise;
 		} finally {
 			this.#flushing = undefined;
+		}
+	}
+
+	async #drainOutbox(startup: boolean): Promise<void> {
+		try {
+			await this.#outbox!.drain(startup);
+			if (this.#outbox!.nextAttemptAt !== undefined) {
+				this.#schedule(this.#outbox!.nextAttemptAt - Date.now());
+			}
+		} catch {
+			// Never copy HTTP bodies, credentials, or memory content into notices/logs.
+			this.#state.session.emitNotice(
+				"warning",
+				`Hindsight outbox unavailable; ${this.depth} known events kept on disk. Delivery will retry.`,
+				HINDSIGHT_NOTICE_SOURCE,
+			);
+			this.#schedule(RETAIN_FLUSH_INTERVAL_MS);
 		}
 	}
 
@@ -328,7 +379,7 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 		this.#lastRetainedPrefixKey = "";
 		this.hasRecalledForFirstTurn = options.hasRecalledForFirstTurn ?? false;
 		this.aliasOf = options.aliasOf;
-		this.retainQueue = new HindsightRetainQueue(this);
+		this.retainQueue = new HindsightRetainQueue(this, options.agentDir ?? getAgentDir());
 	}
 
 	setSessionId(sessionId: string): void {
@@ -370,8 +421,8 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 	}
 
 	/** Queues a tool-initiated retain; `scope: "global"` retains it untagged (see {@link assertGlobalRetainAvailable}). */
-	enqueueRetain(content: string, context?: string, scope: MemoryWriteScope = "project"): void {
-		this.retainQueue.enqueue(content, context, scope);
+	async enqueueRetain(toolCallId: string, items: RetainInput[]): Promise<void> {
+		await this.retainQueue.enqueue(toolCallId, items);
 	}
 
 	async flushRetainQueue(): Promise<void> {

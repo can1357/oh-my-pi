@@ -133,18 +133,19 @@ export class MemoryRetainTool implements AgentTool<MemoryRetainSchema, MemoryRet
 			state.assertGlobalRetainAvailable();
 		}
 
-		// Push every item onto the session-owned queue and return immediately.
-		// The queue flushes either when it reaches its batch threshold or when
-		// its debounce timer fires. If the eventual batch fails, the queue
-		// surfaces a UI-only warning notice — the LLM is not informed.
-		for (const item of params.items) {
-			state.enqueueRetain(item.content, item.context, item.scope);
-		}
+		// Acknowledge only after the complete call is persisted. Its identity
+		// survives retries; identical content from a different call is a new event.
+		await state.enqueueRetain(_id, params.items);
 
 		const count = params.items.length;
 		const noun = count === 1 ? "memory" : "memories";
 		return {
-			content: [{ type: "text", text: `${count} ${noun} queued.` }],
+			content: [
+				{
+					type: "text",
+					text: `${count} ${noun} queued (${state.config.outboxEnabled ? "durable" : "in memory only; not durable"}).`,
+				},
+			],
 			details: { count },
 		};
 	}

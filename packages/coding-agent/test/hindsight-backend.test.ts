@@ -18,6 +18,8 @@ import {
 import { HindsightApi } from "@oh-my-pi/pi-coding-agent/hindsight/client";
 import { HindsightRetainQueue, type HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
 import type { AgentSessionEventListener } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 
 import {
 	cfgHindsightBankId,
@@ -35,6 +37,23 @@ interface FakeSessionDeps {
 	settings?: Settings;
 	xdevEntries?: Array<{ name: string; summary: string }>;
 }
+
+let outboxDir: TempDir;
+let originalAgentDir: string;
+const states = new Set<HindsightSessionState>();
+beforeEach(() => {
+	originalAgentDir = getAgentDir();
+	outboxDir = TempDir.createSync("@hindsight-backend-");
+	setAgentDir(outboxDir.path());
+});
+afterEach(async () => {
+	for (const state of states) {
+		state.dispose();
+	}
+	states.clear();
+	setAgentDir(originalAgentDir);
+	await outboxDir.remove();
+});
 
 function makeFakeSession(deps: FakeSessionDeps) {
 	const listeners = new Set<AgentSessionEventListener>();
@@ -81,10 +100,12 @@ function makeFakeSession(deps: FakeSessionDeps) {
 			return () => listeners.delete(listener);
 		},
 		refreshBaseSystemPrompt: vi.fn().mockResolvedValue(undefined),
+		emitNotice: () => {},
 		settleMemoryBackend: async () => {},
 		getHindsightSessionState: () => hindsightState,
 		getXdevToolEntries: () => deps.xdevEntries ?? [],
 		setHindsightSessionState(state: HindsightSessionState | undefined) {
+			if (state) states.add(state);
 			const previous = hindsightState;
 			hindsightState = state;
 			return previous;
@@ -767,7 +788,7 @@ describe("hindsightBackend live bank routing", () => {
 		// so the reset bank id picks up the project suffix from cwd.
 		expect(next?.bankId).toBe("omp-_new_xengamekit");
 
-		next!.enqueueRetain("post-reset fact", "reset routing");
+		await next!.enqueueRetain("call-reset", [{ content: "post-reset fact", context: "reset routing" }]);
 		await next!.flushRetainQueue();
 
 		expect(retainBatchSpy).toHaveBeenCalledTimes(1);
@@ -803,7 +824,7 @@ describe("hindsightBackend live bank routing", () => {
 		const next = session.getHindsightSessionState();
 		expect(next?.bankId).toBe("omp");
 
-		next!.enqueueRetain("post-reset global fact");
+		await next!.enqueueRetain("call-reset-global", [{ content: "post-reset global fact" }]);
 		await next!.flushRetainQueue();
 
 		expect(retainBatchSpy).toHaveBeenCalledTimes(1);
@@ -948,7 +969,7 @@ describe("hindsightBackend cwd rebind", () => {
 		const next = session.getHindsightSessionState();
 		expect(next?.bankId).toBe("omp-destination");
 
-		next!.enqueueRetain("fact from the destination project");
+		await next!.enqueueRetain("call-destination", [{ content: "fact from the destination project" }]);
 		await next!.flushRetainQueue();
 		expect(retainBatchSpy).toHaveBeenCalledTimes(1);
 		expect(retainBatchSpy.mock.calls[0][0]).toBe("omp-destination");
@@ -979,7 +1000,7 @@ describe("hindsightBackend cwd rebind", () => {
 			});
 			const initial = session.getHindsightSessionState();
 			if (!initial) throw new Error("Hindsight fixture did not start");
-			initial.enqueueRetain("source fact");
+			await initial.enqueueRetain("call-source", [{ content: "source fact" }]);
 			await initial.flushRetainQueue();
 			expect(createBank).toHaveBeenCalledTimes(1);
 
@@ -987,7 +1008,7 @@ describe("hindsightBackend cwd rebind", () => {
 			await rebindMemoryBackendForCwd(session as never);
 			const rebound = session.getHindsightSessionState();
 			if (!rebound) throw new Error("Hindsight fixture lost its state");
-			rebound.enqueueRetain("destination fact");
+			await rebound.enqueueRetain("call-rebound", [{ content: "destination fact" }]);
 			await rebound.flushRetainQueue();
 
 			expect(createBank).toHaveBeenCalledTimes(2);
@@ -1007,7 +1028,8 @@ describe("hindsightBackend cwd rebind", () => {
 		const parked = Promise.withResolvers<void>();
 		const gate = Promise.withResolvers<void>();
 		let flushes = 0;
-		vi.spyOn(HindsightRetainQueue.prototype, "flush").mockImplementation(async () => {
+		vi.spyOn(HindsightRetainQueue.prototype, "flush").mockImplementation(async startup => {
+			if (startup) return;
 			flushes++;
 			if (flushes > 1) return;
 			parked.resolve();
@@ -1067,7 +1089,8 @@ describe("hindsightBackend cwd rebind", () => {
 		const parked = Promise.withResolvers<void>();
 		const gate = Promise.withResolvers<void>();
 		let flushes = 0;
-		vi.spyOn(HindsightRetainQueue.prototype, "flush").mockImplementation(async () => {
+		vi.spyOn(HindsightRetainQueue.prototype, "flush").mockImplementation(async startup => {
+			if (startup) return;
 			flushes++;
 			if (flushes > 1) return;
 			parked.resolve();
@@ -1146,7 +1169,7 @@ describe("hindsightBackend retain queue flush on session teardown", () => {
 		});
 		const state = session.getHindsightSessionState();
 
-		state!.enqueueRetain("durable fact", "test context");
+		await state!.enqueueRetain("call-durable", [{ content: "durable fact", context: "test context" }]);
 
 		// AgentSession.dispose order: flush first, THEN clear, THEN dispose.
 		// Reversed (clear → flush), `#doFlush`'s identity check would fail and
@@ -1160,14 +1183,14 @@ describe("hindsightBackend retain queue flush on session teardown", () => {
 		expect(bankId).toBe("omp");
 		expect(items).toHaveLength(1);
 		expect(items[0].content).toBe("durable fact");
-		expect(items[0].timestamp).toBeInstanceOf(Date);
+		expect(Date.parse(String(items[0].timestamp))).not.toBeNaN();
 	});
 
 	// Companion contract test: documents the failure mode the dispose-order
 	// fix prevents. If the session pointer is cleared first, the queue's
 	// identity guard drops the spliced batch (and `retainBatch` is NOT
 	// called). This is exactly what was happening before the fix.
-	it("drops the spliced batch when the session pointer is cleared before flush (anti-regression)", async () => {
+	it("delivers durable events even after the session pointer is cleared", async () => {
 		const retainBatchSpy = vi.spyOn(HindsightApi.prototype, "retainBatch").mockResolvedValue({} as never);
 		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
 
@@ -1185,12 +1208,12 @@ describe("hindsightBackend retain queue flush on session teardown", () => {
 			taskDepth: 0,
 		});
 		const state = session.getHindsightSessionState();
-		state!.enqueueRetain("dropped fact");
+		await state!.enqueueRetain("call-cleared", [{ content: "kept fact" }]);
 
-		// Buggy order — clear THEN flush. The queue's identity check fails.
+		// Durable events no longer depend on the old session pointer remaining installed.
 		session.setHindsightSessionState(undefined);
 		await state!.flushRetainQueue();
 
-		expect(retainBatchSpy).not.toHaveBeenCalled();
+		expect(retainBatchSpy).toHaveBeenCalledTimes(1);
 	});
 });

@@ -447,6 +447,8 @@ describe("Hindsight recall across a resume", () => {
 		retainMission: null,
 		autoRecall: true,
 		autoRetain: false,
+		outboxEnabled: false,
+		outboxMaxEvents: 1000,
 		retainMode: "full-session",
 		retainEveryNTurns: 3,
 		retainOverlapTurns: 2,

@@ -45,6 +45,7 @@ export const hindsightBackend: MemoryBackend = {
 			if (!parent) return;
 			const previous = session.setHindsightSessionState(
 				new HindsightSessionState({
+					agentDir: options.agentDir,
 					sessionId,
 					client: parent.client,
 					bankId: parent.bankId,
@@ -290,6 +291,7 @@ async function installPrimaryState(
 	}
 
 	const state = new HindsightSessionState({
+		agentDir: settings.getAgentDir(),
 		sessionId,
 		client,
 		bankId: scope.bankId,
@@ -310,6 +312,9 @@ async function installPrimaryState(
 	}
 	previous?.dispose();
 	state.attachSessionListeners();
+	// Every primary installation retries its destination, including events from
+	// earlier sessions/projects. Captured tags, not this session's tags, route them.
+	if (config.outboxEnabled) void state.retainQueue.flush(true);
 
 	// Kick off mental-model bootstrap. Resolves asynchronously; the first
 	// turn races and is covered in `beforeAgentStartPrompt` via

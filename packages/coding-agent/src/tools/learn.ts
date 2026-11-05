@@ -131,8 +131,8 @@ export class LearnTool implements AgentTool<LearnSchema> {
 				throw new Error("Hindsight backend is not initialised for this session.");
 			}
 			// Throws before queueing while global scope is off or has no destination, so no skill is written either.
-			state.enqueueRetain(params.memory, params.context, params.scope);
-			memoryMessage = "Lesson queued for retention";
+			await state.enqueueRetain(_id, [{ content: params.memory, context: params.context, scope: params.scope }]);
+			memoryMessage = `Lesson queued for retention (${state.config.outboxEnabled ? "durable" : "in memory only; not durable"})`;
 		}
 
 		// 2) Optionally mint/enhance a managed skill. A failure here is surfaced

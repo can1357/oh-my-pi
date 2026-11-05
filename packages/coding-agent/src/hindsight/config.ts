@@ -19,6 +19,8 @@ import {
 	cfgHindsightMentalModelAutoSeed,
 	cfgHindsightMentalModelMaxRenderChars,
 	cfgHindsightMentalModelsEnabled,
+	cfgHindsightOutboxEnabled,
+	cfgHindsightOutboxMaxEvents,
 	cfgHindsightRecallBudget,
 	cfgHindsightRecallContextTurns,
 	cfgHindsightRecallMaxQueryChars,
@@ -52,6 +54,8 @@ export interface HindsightConfig {
 
 	autoRecall: boolean;
 	autoRetain: boolean;
+	outboxEnabled: boolean;
+	outboxMaxEvents: number;
 
 	retainMode: "full-session" | "last-turn";
 	retainEveryNTurns: number;
@@ -103,6 +107,8 @@ export function loadHindsightConfig(settings: Settings): HindsightConfig {
 
 		autoRecall: cfgHindsightAutoRecall.get(settings),
 		autoRetain: cfgHindsightAutoRetain.get(settings),
+		outboxEnabled: cfgHindsightOutboxEnabled.get(settings),
+		outboxMaxEvents: cfgHindsightOutboxMaxEvents.get(settings),
 
 		retainMode: cfgHindsightRetainMode.get(settings),
 		retainEveryNTurns: cfgHindsightRetainEveryNTurns.get(settings),

@@ -151,7 +151,7 @@ describe("memory thread service", () => {
 			tags: ["project:alpha"],
 			metadata: { session_id: report.childSessionId },
 		});
-		expect(items?.[0]?.timestamp).toBeInstanceOf(Date);
+		expect(Date.parse(String(items?.[0]?.timestamp))).not.toBeNaN();
 		// Recall ran on main's client with the parent's tag filter.
 		expect(recall).toHaveBeenCalledTimes(1);
 		expect(recall.mock.calls[0]?.[0]).toBe("main-bank");
