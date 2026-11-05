@@ -4,39 +4,13 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
-	replaceConfigFileAtomically,
 	replaceFileAtomically,
+	writeConfigFileAtomically,
 	writeFileAtomically,
 	writeFileAtomicallySync,
 } from "../src/atomic-file";
 import { getAgentDir, setAgentDir } from "../src/dirs";
 import { removeWithRetries } from "../src/temp";
-
-/**
- * Stage content and publish it through the one config entry point the module
- * exports, which is how every production config write reaches the link rule:
- * `marketplace/registry.ts` stages its JSON and calls
- * `replaceConfigFileAtomically`. The staging path is a sibling of the path as
- * GIVEN, never of the resolved destination, exactly as the registry writer
- * stages beside the registry it was handed — so these tests exercise the real
- * arrangement rather than a convenience wrapper that no longer exists.
- */
-async function writeConfigFileAtomically(filePath: string, content: string, mode: number = 0o600): Promise<void> {
-	const staged = `${filePath}.${process.pid}.${crypto.randomUUID()}.staged`;
-	try {
-		const handle = await fs.open(staged, "wx", mode);
-		try {
-			await handle.writeFile(content, "utf8");
-		} finally {
-			await handle.close();
-		}
-		await fs.chmod(staged, mode);
-		await replaceConfigFileAtomically(staged, filePath);
-	} catch (error) {
-		await fs.rm(staged, { force: true }).catch(() => {});
-		throw error;
-	}
-}
 
 /**
  * A config write follows a link only while every step stays inside a directory
@@ -224,7 +198,7 @@ describe("a config write follows a symlinked destination", () => {
 		},
 	);
 
-	test("publishes a staged file onto the link's target and removes the staged copy", async () => {
+	test("stages beside the file the link names, so the publish is one rename in that directory", async () => {
 		const shared = path.join(root, "shared");
 		const profile = path.join(root, "profile");
 		await fs.mkdir(shared);
@@ -232,15 +206,67 @@ describe("a config write follows a symlinked destination", () => {
 		const target = path.join(shared, "registry.json");
 		const link = path.join(profile, "registry.json");
 		await linkTo(target, link);
-		const staged = path.join(profile, "registry.json.staged");
-		await fs.writeFile(staged, "new");
 
-		await replaceConfigFileAtomically(staged, link);
+		await writeConfigFileAtomically(link, "new", 0o644);
 
 		expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
 		expect(await fs.readFile(target, "utf8")).toBe("new");
-		expect(fsSync.existsSync(staged)).toBe(false);
+		// Nothing is left behind on either side, and in particular the staging
+		// never happened beside the LINK — staging there and renaming onto the
+		// target is what fails EXDEV once the two are on different filesystems.
+		expect(await fs.readdir(profile)).toEqual(["registry.json"]);
+		expect(await fs.readdir(shared)).toEqual(["registry.json"]);
 	});
+
+	// A link from one accepted root to another where the two sit on DIFFERENT
+	// filesystems: the config root under a temp `HOME`, the agent directory on
+	// tmpfs. `PI_CODING_AGENT_DIR` exists precisely to relocate the agent
+	// directory, so this needs no exotic layout — and staging beside the path as
+	// GIVEN, then renaming onto the resolved one, fails `EXDEV` here and loses the
+	// write. Two reviewers reproduced that through `omp plugin marketplace add`.
+	//
+	// It runs in a CHILD process because the config root comes from `os.homedir()`,
+	// which does not follow a later `process.env.HOME`: the only way to have two
+	// accepted roots on two filesystems is to set `HOME` before the module loads.
+	test.skipIf(!fsSync.existsSync("/dev/shm"))(
+		"publishes onto a link that leaves this filesystem but stays inside omp's directories",
+		async () => {
+			const home = await fs.mkdtemp(path.join(os.tmpdir(), "atomic-file-home-"));
+			const elsewhere = await fs.mkdtemp(path.join("/dev/shm", "atomic-file-agent-"));
+			try {
+				const configRoot = path.join(home, ".omp");
+				await fs.mkdir(configRoot);
+				if (fsSync.statSync(configRoot).dev === fsSync.statSync(elsewhere).dev) return;
+
+				const target = path.join(elsewhere, "shared.json");
+				const link = path.join(configRoot, "marketplaces.json");
+				await fs.writeFile(target, "old");
+				await fs.symlink(target, link);
+
+				const script = path.join(home, "write.ts");
+				await fs.writeFile(
+					script,
+					`import { writeConfigFileAtomically } from ${JSON.stringify(path.join(import.meta.dir, "..", "src", "atomic-file.ts"))};\n` +
+						`await writeConfigFileAtomically(${JSON.stringify(link)}, "new", 0o644);\n`,
+				);
+				const child = Bun.spawnSync([process.execPath, "run", script], {
+					env: { ...process.env, HOME: home, PI_CODING_AGENT_DIR: elsewhere },
+					stderr: "pipe",
+				});
+
+				expect(child.stderr.toString()).toBe("");
+				expect(child.exitCode).toBe(0);
+				expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+				expect(await fs.readFile(target, "utf8")).toBe("new");
+				// No staging debris beside the link, where a cross-device publish
+				// would have had to leave it.
+				expect((await fs.readdir(configRoot)).sort()).toEqual(["marketplaces.json"]);
+			} finally {
+				await removeWithRetries(elsewhere);
+				await removeWithRetries(home);
+			}
+		},
+	);
 });
 
 describe("a config write never follows a link inside a project's own config directory", () => {
@@ -258,25 +284,19 @@ describe("a config write never follows a link inside a project's own config dire
 		expect(await fs.readFile(link, "utf8")).toBe("new");
 	});
 
-	test("the staged form refuses it too, and the sync writer never reaches the rule", async () => {
-		const victim = path.join(root, "victim-staged");
-		const link = path.join(project, "mcp.json");
-		await linkTo(victim, link, "untouched");
-		const staged = path.join(project, "mcp.json.staged");
-		await fs.writeFile(staged, "new");
+	test("the sync writer never reaches the rule, and leaves the named file alone anyway", async () => {
 		const syncVictim = path.join(root, "victim-sync");
 		const syncLink = path.join(project, "config.yml");
 		await linkTo(syncVictim, syncLink, "untouched");
 
-		await replaceConfigFileAtomically(staged, link);
 		writeFileAtomicallySync(syncLink, "new", 0o644);
 
-		// Both leave the named file alone, for different reasons worth keeping
-		// apart: the staged config form asks the rule and the rule says no, while
-		// the sync writer never follows anything in the first place.
-		expect(await fs.readFile(victim, "utf8")).toBe("untouched");
+		// Same outcome as the config form on this path, for a different reason
+		// worth keeping apart: the config form asks the rule and the rule says no,
+		// while the sync writer never follows anything in the first place.
 		expect(await fs.readFile(syncVictim, "utf8")).toBe("untouched");
 		expect((await fs.lstat(syncLink)).isSymbolicLink()).toBe(false);
+		expect(await fs.readFile(syncLink, "utf8")).toBe("new");
 	});
 
 	test("a nested project directory is recognised at any depth", async () => {

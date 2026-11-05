@@ -159,7 +159,7 @@ function insideAProjectConfigDir(filePath: string): boolean {
  * are followed to their target, so publishing by rename replaces the file the
  * link names instead of the link itself.
  *
- * This is what {@link replaceConfigFileAtomically} uses, and nothing else does.
+ * This is what {@link writeConfigFileAtomically} uses, and nothing else does.
  * It is not exported: one entry point, so a future writer opts in by calling
  * that function rather than by resolving a path itself and losing the project
  * rule. A write that does not ask for it keeps replacing a link with a regular
@@ -218,22 +218,46 @@ async function resolveConfigWriteTarget(filePath: string): Promise<string> {
  * Publish a staged sibling file atomically, preserving an existing destination
  * across Windows `EPERM`/`EEXIST` replacement failures.
  *
- * A symlink at the destination is replaced, as it always has been. A config
- * writer that wants the link kept asks for it by name:
- * {@link replaceConfigFileAtomically}.
+ * A symlink at the destination is replaced, as it always has been. The one
+ * writer form that keeps the link is {@link writeConfigFileAtomically}.
  */
 export async function replaceFileAtomically(tempPath: string, targetPath: string): Promise<void> {
 	await publishStagedFile(tempPath, targetPath);
 }
 
 /**
- * {@link replaceFileAtomically} for a path the person using omp owns, where a
- * symlink is their own arrangement: the link is followed and the file it names
- * is replaced, so a shared profile keeps sharing. A path inside a project's
- * config directory is never followed — that tree is a checkout's.
+ * Write a config file the person using omp owns, where a symlink at the
+ * destination is their own arrangement: the link is followed and the file it
+ * names is replaced, so a shared profile keeps sharing. A path inside a
+ * project's config directory is never followed — that tree is a checkout's.
+ *
+ * **The link is resolved BEFORE the temp file is staged, and the staging
+ * happens beside the resolved destination.** That ordering is the whole
+ * difference between this and a plain write, and it is load-bearing three ways:
+ *
+ * 1. The publishing `rename` is then always within one directory, so it is the
+ *    atomic replace this module promises. Staging beside the path as GIVEN and
+ *    renaming onto the resolved one crosses a filesystem boundary whenever the
+ *    link does — `getAgentDir()` is an accepted root and `PI_CODING_AGENT_DIR`
+ *    exists to relocate it — and `rename` then fails `EXDEV` and the write is
+ *    lost. Two independent reviewers reproduced exactly that through
+ *    `omp plugin marketplace add` and `omp plugin install`.
+ * 2. A destination whose directory cannot be written fails HERE, at the staging
+ *    `open`, reporting `EACCES`/`EROFS` against the resolved path, rather than
+ *    diverting the write to a fresh file at the link.
+ * 3. The destination cannot be swapped between resolving and publishing,
+ *    because there is nothing in between.
+ *
+ * `mode` left undefined keeps the file at the user's umask, which is what the
+ * registries had before they shared this helper; a number is applied to the
+ * staged file and survives publication, for a destination holding a secret.
  */
-export async function replaceConfigFileAtomically(tempPath: string, targetPath: string): Promise<void> {
-	await publishStagedFile(tempPath, await resolveConfigWriteTarget(targetPath));
+export async function writeConfigFileAtomically(
+	filePath: string,
+	content: string | NodeJS.ArrayBufferView,
+	mode?: number,
+): Promise<void> {
+	await stageAndPublish(await resolveConfigWriteTarget(filePath), content, mode);
 }
 
 /**
@@ -309,7 +333,7 @@ async function replaceAfterWindowsRenameFailure(
  * leaves the destination untouched.
  *
  * A symlink at the destination is replaced, as it always has been. The one
- * writer form that keeps the link is {@link replaceConfigFileAtomically}.
+ * writer form that keeps the link is {@link writeConfigFileAtomically}.
  *
  * The staged file is created with `mode` (0600 by default) and published with
  * that mode, so the destination stays readable only by its owner even when it
@@ -327,12 +351,15 @@ export async function writeFileAtomically(
 async function stageAndPublish(
 	destination: string,
 	content: string | NodeJS.ArrayBufferView,
-	mode: number,
+	mode: number | undefined,
 ): Promise<void> {
 	const tempPath = `${destination}.${process.pid}.${crypto.randomUUID()}.tmp`;
 	let removeTemp = false;
 	try {
-		const handle = await fs.promises.open(tempPath, "wx", mode);
+		// `0o666` with no explicit mode leaves the result to the user's umask,
+		// which is what a file written by `Bun.write` carries and what the
+		// registries had before they shared this helper.
+		const handle = await fs.promises.open(tempPath, "wx", mode ?? 0o666);
 		removeTemp = true;
 		try {
 			await handle.writeFile(content, "utf8");
@@ -340,8 +367,10 @@ async function stageAndPublish(
 		} finally {
 			await handle.close();
 		}
-		// The umask narrows the mode passed to open(); restore it explicitly.
-		await fs.promises.chmod(tempPath, mode);
+		// The umask narrows the mode passed to open(), so an explicitly requested
+		// one is restored; an umask-defaulted file is left exactly as the umask
+		// made it.
+		if (mode !== undefined) await fs.promises.chmod(tempPath, mode);
 		await publishStagedFile(tempPath, destination);
 		removeTemp = false;
 	} finally {
@@ -355,7 +384,7 @@ async function stageAndPublish(
  * Synchronous sibling of {@link writeFileAtomically} for callers that cannot
  * await, such as the boot-time config migration. It never follows a symlinked
  * destination: the one opt-in this module offers is
- * {@link replaceConfigFileAtomically}, and nothing synchronous asked for it.
+ * {@link writeConfigFileAtomically}, and nothing synchronous asked for it.
  */
 export function writeFileAtomicallySync(filePath: string, content: string, mode: number = 0o600): void {
 	const destination = filePath;

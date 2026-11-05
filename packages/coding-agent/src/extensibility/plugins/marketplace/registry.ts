@@ -10,17 +10,18 @@
  * Read/write functions accept explicit file paths so callers control the
  * location. Path helpers compute the default paths from the dir singleton.
  *
- * All three are staged next to their path and published with
- * `replaceConfigFileAtomically`, the shared helper's config form: one rename,
- * a symlinked destination followed so the link survives, and the Windows
- * replacement fallback.
+ * All three publish with `writeConfigFileAtomically`, the shared helper's one
+ * config form: a symlinked destination is resolved first, the temp file is
+ * staged beside the file the link names, and one rename inside that directory
+ * publishes it — so the link survives, the replace stays atomic, and a link onto
+ * another filesystem still publishes.
  */
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 import { getPluginsDir, isEnoent, logger, tryParseJson } from "@oh-my-pi/pi-utils";
-import { replaceConfigFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
+import { writeConfigFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 
 export { getMarketplacesRegistryPath } from "@oh-my-pi/pi-utils";
 
@@ -47,22 +48,19 @@ export function getPluginsCacheDir(): string {
 // ── Atomic write ─────────────────────────────────────────────────────
 
 /**
- * Stage the JSON ourselves and let the shared helper publish it: `Bun.write`
- * leaves the mode to the user's umask, which is what these files had before and
- * what a 0600-or-0644 argument to `writeFileAtomically` would override.
+ * The one opt-in to link-following in the tree. The helper resolves a symlinked
+ * destination, stages beside the file the link names, and publishes with a
+ * single rename inside that directory — so a shared profile keeps sharing, and
+ * a link onto another filesystem publishes rather than failing `EXDEV`, which is
+ * what staging beside the path as given used to do.
+ *
+ * No `mode` argument: these files keep the user's umask, which is what they had
+ * before they shared this helper and what a 0600-or-0644 argument would
+ * override.
  */
 async function atomicWriteJson(filePath: string, data: unknown): Promise<void> {
 	await fs.mkdir(path.dirname(filePath), { recursive: true });
-	// Unique per writer, so two processes writing one registry never share a
-	// staging path and rename each other's file out from under them.
-	const tempPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
-	try {
-		await Bun.write(tempPath, `${JSON.stringify(data, null, 2)}\n`);
-		await replaceConfigFileAtomically(tempPath, filePath);
-	} catch (error) {
-		await fs.rm(tempPath, { force: true }).catch(() => {});
-		throw error;
-	}
+	await writeConfigFileAtomically(filePath, `${JSON.stringify(data, null, 2)}\n`);
 }
 
 // ── Marketplaces registry ────────────────────────────────────────────
