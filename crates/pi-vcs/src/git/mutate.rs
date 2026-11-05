@@ -1839,24 +1839,32 @@ fn collect_clone_reconciliation_paths(
 /// symlinks or walking Git metadata. Return the removed directory paths so
 /// target-tracked entries can be checked out even when both indexes agree.
 ///
-/// A directory that holds a `.git` entry of its own is another repository's
-/// checkout — a linked worktree, a submodule, or an unrelated clone that
-/// happens to sit under the source tree. Git never checks its contents out
-/// into a worktree (they are untracked, or a gitlink it leaves uninitialized),
-/// and the `.git` points at the source's administrative files, so a copy is a
-/// stale half-checkout carrying another session's uncommitted work. Its
-/// contents go at any depth: a backend is free to clone a whole subtree in one
-/// operation (APFS `clonefile`), so the copy cannot be prevented, only undone.
-/// The directory itself stays, emptied, because that is what Git materializes
-/// for a gitlink — an absent one reports the submodule as deleted — and an
-/// empty directory is invisible to Git everywhere else.
+/// A directory whose `.git` is a *pointer* — a `gitdir:` file or a symlink,
+/// as a linked worktree and an absorbed submodule have — belongs to the source
+/// repository's administrative files, so a copy of it resolves back into the
+/// source: a copied linked worktree shares another session's `HEAD` and index,
+/// and a copied submodule makes `git status` fail with `not a git repository`
+/// for the whole worktree. Its contents go at any depth: a backend is free to
+/// clone a whole subtree in one operation (APFS `clonefile`), so the copy
+/// cannot be prevented, only undone. The directory itself stays, emptied,
+/// because that is what Git materializes for a gitlink — an absent one reports
+/// the submodule as deleted — and an empty directory is invisible to Git
+/// everywhere else.
+///
+/// A `.git` *directory* is not pointed at this: it is a self-contained
+/// repository that shares nothing with the source, and package managers keep
+/// such clones inside the very ignored caches this clone exists to carry
+/// (Composer's `vendor/`, Terraform's `.terraform/modules/`, an editable
+/// `pip install git+…`). Emptying one would leave the manifest claiming an
+/// install that is no longer there.
 fn prune_nonrelocatable_clone_dirs(root: &Path) -> Result<BTreeSet<PathBuf>> {
 	let mut excluded = BTreeSet::new();
 	let mut pending = vec![root.to_path_buf()];
 	while let Some(dir) = pending.pop() {
 		// The worktree's own `.git` is the registration this clone just got,
 		// not a nested checkout, so the root is never marked by it.
-		let nested_checkout = dir != root && fs::symlink_metadata(dir.join(".git")).is_ok();
+		let nested_checkout =
+			dir != root && fs::symlink_metadata(dir.join(".git")).is_ok_and(|meta| !meta.is_dir());
 		let marked = nested_checkout
 			|| dir.join("pyvenv.cfg").is_file()
 			|| dir.join("CMakeCache.txt").is_file();
@@ -3072,11 +3080,12 @@ mod tests {
 	}
 
 	/// A worktree carries the committed tree plus the source's ignored build
-	/// caches — and never another repository's checkout. The clone copies all
-	/// untracked content, so a nested checkout (a linked worktree's `.git`
-	/// file, an unrelated clone's `.git` directory) arrives as a stale
-	/// half-checkout of someone else's working directory unless it is pruned,
-	/// at the top level and at depth alike.
+	/// caches, and never a checkout whose `.git` points back into the source's
+	/// administrative files — a linked worktree or an absorbed submodule —
+	/// which arrives sharing another session's `HEAD` or resolving to nothing
+	/// at all. A self-contained nested clone (`.git` is a directory) shares
+	/// nothing and keeps travelling: package managers put such clones inside
+	/// the ignored caches this feature exists to carry.
 	#[test]
 	fn clone_first_worktree_refuses_nested_checkouts_and_keeps_ignored_caches() {
 		let (temp, repo) = fixture();
@@ -3094,11 +3103,13 @@ mod tests {
 		git(source, &["worktree", "add", "-q", "--detach", ".worktrees/nested", "HEAD"]);
 		fs::create_dir_all(source.join("vendor/deep")).unwrap();
 		git(source, &["worktree", "add", "-q", "--detach", "vendor/deep/checkout", "HEAD"]);
-		// An unrelated repository at depth 2 whose `.git` is a directory.
-		let unrelated = source.join("tools/unrelated");
-		fs::create_dir_all(&unrelated).unwrap();
-		git(&unrelated, &["init", "-q", "-b", "main"]);
-		fs::write(unrelated.join("own.txt"), "theirs\n").unwrap();
+		// A self-contained repository inside the ignored cache, whose `.git` is
+		// a directory: a package manager's vendored source clone (Composer,
+		// Terraform, an editable `pip install git+…`), which must still ride.
+		let vendored = source.join("node_modules/vendored-src");
+		fs::create_dir_all(&vendored).unwrap();
+		git(&vendored, &["init", "-q", "-b", "main"]);
+		fs::write(vendored.join("own.txt"), "theirs\n").unwrap();
 		git(source, &["branch", "nested-probe"]);
 
 		let linked = source.join("../linked-nested-probe");
@@ -3120,7 +3131,7 @@ mod tests {
 			);
 		}
 
-		for nested in [".worktrees/nested", "vendor/deep/checkout", "tools/unrelated"] {
+		for nested in [".worktrees/nested", "vendor/deep/checkout"] {
 			let carried = linked.join(nested);
 			assert!(
 				!carried.join(".git").exists(),
@@ -3133,6 +3144,11 @@ mod tests {
 				.unwrap_or(0);
 			assert_eq!(left, 0, "{nested} kept {left} entries of another checkout");
 		}
+		assert_eq!(
+			linked.join("node_modules/vendored-src/.git").is_dir(),
+			result.cloned_with.is_some(),
+			"a self-contained nested clone rides along like any other ignored cache"
+		);
 		// The feature the clone exists for stays: only checkouts are refused.
 		assert_eq!(
 			linked.join("target/debug/artifact.o").exists(),
@@ -3147,7 +3163,7 @@ mod tests {
 		assert_eq!(fs::read_to_string(linked.join("a")).unwrap(), "one\n");
 		assert_eq!(git(&linked, &["status", "--porcelain"]), "");
 		// The source keeps every nested checkout it had.
-		for nested in [".worktrees/nested", "vendor/deep/checkout", "tools/unrelated"] {
+		for nested in [".worktrees/nested", "vendor/deep/checkout", "node_modules/vendored-src"] {
 			assert!(source.join(nested).join(".git").exists(), "source lost {nested}");
 		}
 		let _ = repo.worktree_remove(&linked, true);

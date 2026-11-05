@@ -307,15 +307,9 @@ fn clone_target_cleanup_does_not_discard_keep_changes() {
 	assert_eq!(snapshot(&source), source_before);
 }
 
-/// The clone-time prune drops a repository checkout nested under the source,
-/// and the target-ignore cleanup that follows unlinks a source-only symlink
-/// without following it out of the clone. Before the prune, the nested
-/// checkout was carried: this asserted it survived cleanup, which read as a
-/// statement about `clean`'s blast radius (it enters no nested repository)
-/// but left another repository's working directory inside the worktree.
 #[cfg(unix)]
 #[test]
-fn clone_refuses_nested_repositories_and_unlinks_only_symlinks() {
+fn clone_target_cleanup_keeps_nested_repositories_and_unlinks_only_symlinks() {
 	let (temp, source, repo) = fixture();
 	if !clone_works_on(temp.path()) {
 		eprintln!("SKIP: no working clone backend on this filesystem");
@@ -357,24 +351,10 @@ fn clone_refuses_nested_repositories_and_unlinks_only_symlinks() {
 		})
 		.unwrap();
 	assert!(result.cloned_with.is_some(), "{:?}", result.clone_error);
-	let carried = target.join("repositories/nested");
-	assert!(
-		!carried.join(".git").exists(),
-		"a worktree must not carry another repository's checkout"
-	);
-	// `repositories/` is ignored here, so the target-ignore cleanup that runs
-	// after the prune takes the emptied directory too; a tracked gitlink keeps
-	// its empty directory (see the submodule test below). Either way, nothing
-	// of the other checkout is carried.
+	assert!(target.join("repositories/nested/.git").is_dir());
 	assert_eq!(
-		fs::read_dir(&carried).map_or(0, |entries| entries.count()),
-		0,
-		"the refused checkout left content behind"
-	);
-	assert_eq!(
-		fs::read_to_string(source.join("repositories/nested/data.txt")).unwrap(),
-		"nested repository data\n",
-		"the source's nested repository must be left alone"
+		fs::read_to_string(target.join("repositories/nested/data.txt")).unwrap(),
+		"nested repository data\n"
 	);
 	assert!(!target.join("links").exists(), "source-only symlink was not unlinked");
 	assert_eq!(snapshot(&outside), outside_before, "cleanup followed a symlink outside the clone");

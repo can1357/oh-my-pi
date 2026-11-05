@@ -84,7 +84,7 @@ export const cfgWorktreeClone = register({
 		group: "Isolation",
 		label: "Clone Checkout into Worktrees",
 		description:
-			"New worktrees from `github pr_checkout` and `git worktree add` in bash start as a copy-on-write clone of the current checkout so ignored build artifacts (node_modules, target) carry over, minus any nested repository checkout; falls back to a plain checkout when the filesystem cannot clone",
+			"New worktrees from `github pr_checkout` and `git worktree add` in bash start as a copy-on-write clone of the current checkout so ignored build artifacts (node_modules, target) carry over, minus any checkout whose `.git` points back into the source repository; falls back to a plain checkout when the filesystem cannot clone",
 	},
 });
 
