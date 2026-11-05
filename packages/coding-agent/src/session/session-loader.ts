@@ -226,8 +226,12 @@ export async function readSessionHeaderId(filePath: string): Promise<string | un
  */
 export function sessionHeaderIdSync(filePath: string): string | undefined {
 	const readPrefix = (limit: number): string | undefined | typeof HEADER_INCOMPLETE => {
-		const fd = nodeFs.openSync(filePath, "r");
+		// O_NONBLOCK so a fifo or a device at this path cannot park a caller
+		// that must not block; it does nothing to a regular file, and anything
+		// that is not one is rejected from the descriptor below.
+		const fd = nodeFs.openSync(filePath, nodeFs.constants.O_RDONLY | nodeFs.constants.O_NONBLOCK);
 		try {
+			if (!nodeFs.fstatSync(fd).isFile()) return undefined;
 			const buffer = Buffer.alloc(limit);
 			const read = nodeFs.readSync(fd, buffer, 0, limit, 0);
 			return sessionHeaderIdFromPrefix(buffer.subarray(0, read), read < limit);

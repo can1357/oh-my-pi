@@ -209,13 +209,21 @@ function reindexDemonstrablyRecovers(root: string, relative: string, id: string)
 		if (!fs.statSync(file).isFile()) return false;
 		// Derive the id, rather than checking we are allowed to try.
 		if (generatedNameId(file) !== id && sessionHeaderIdSync(file) !== id) return false;
+		const snapshot = path.join(root, SESSION_LOCATOR_BASE_FILE);
+		let published: fs.Stats | undefined;
 		try {
-			// Read it, as the publish step does. Permission is not readability:
-			// a directory at that path passes an access check and then fails the
-			// read, and the publish refuses rather than replacing it.
-			fs.readFileSync(path.join(root, SESSION_LOCATOR_BASE_FILE));
+			published = fs.statSync(snapshot);
 		} catch (error) {
 			if (!isEnoent(error)) return false;
+		}
+		if (published !== undefined) {
+			// Anything other than a regular file is the loud answer without
+			// opening it: a directory would fail the publish's read, and opening
+			// a fifo or a device here would block this error handler forever.
+			if (!published.isFile()) return false;
+			// Then read it, as the publish step does. Permission to open a file
+			// is not evidence that its bytes come out.
+			fs.readFileSync(snapshot);
 		}
 		return true;
 	} catch {

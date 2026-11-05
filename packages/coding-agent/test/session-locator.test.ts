@@ -1004,6 +1004,16 @@ describe("session index: lookups by id", () => {
 				obstruct: (sessions: string) => fs.mkdirSync(path.join(sessions, SESSION_LOCATOR_BASE_FILE)),
 			},
 			{
+				// A reader must answer "not recoverable" here WITHOUT opening it:
+				// opening a fifo with no writer never returns, and this decision
+				// runs inside an error handler that must not park the process.
+				what: "a snapshot that is a fifo",
+				obstruct: (sessions: string) => {
+					const snapshot = path.join(sessions, SESSION_LOCATOR_BASE_FILE);
+					expect(Bun.spawnSync(["mkfifo", snapshot]).exitCode).toBe(0);
+				},
+			},
+			{
 				what: "a transcript whose bytes cannot be read",
 				obstruct: (sessions: string, bucket: string, file: string) => fs.chmodSync(file, 0o000),
 			},
