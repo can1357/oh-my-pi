@@ -278,6 +278,8 @@ export interface MCPManagerApi {
 	addToolsChangedListener(listener: () => void): () => void;
 	/** Subscribe to every server notification frame; returns an unsubscribe fn. */
 	addNotificationListener(listener: (serverName: string, method: string, params: unknown) => void): () => void;
+	/** Known server inventory, including pending and failed handshakes. */
+	getAllServerNames(): string[];
 	/** Names of currently connected servers. */
 	getConnectedServers(): string[];
 	/** Cached resources/templates of one server. */
@@ -1537,11 +1539,18 @@ export class MCPManager implements MCPManagerApi {
 	}
 
 	/**
-	 * Get all known server names (connected, connecting, or discovered).
+	 * Get all known server names (connected, connecting, configured, or discovered).
+	 * Includes preserved `#serverConfigs` entries so source-less runtime/extension
+	 * servers that failed handshake remain visible after pending work settles.
 	 */
 	getAllServerNames(): string[] {
 		return Array.from(
-			new Set([...this.#sources.keys(), ...this.#connections.keys(), ...this.#pendingConnections.keys()]),
+			new Set([
+				...this.#sources.keys(),
+				...this.#connections.keys(),
+				...this.#pendingConnections.keys(),
+				...this.#serverConfigs.keys(),
+			]),
 		);
 	}
 

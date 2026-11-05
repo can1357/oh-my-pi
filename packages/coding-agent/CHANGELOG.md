@@ -53,6 +53,8 @@
 
 ### Fixed
 
+- Fixed search and find treating `;`-separated lists of internal URLs and local paths as one target; valid lists fan out, while literal `;` in a resource name or query stays intact ([#15637](https://github.com/can1357/oh-my-pi/pull/15637) by [@Komzpa](https://github.com/Komzpa))
+- Fixed exact MCP resource discovery waiting on unrelated stalled catalogs, rejecting recovered catalog retries, or splitting URLs after source-less server handshakes fail ([#15637](https://github.com/can1357/oh-my-pi/pull/15637) by [@Komzpa](https://github.com/Komzpa))
 - Subagents loading MCP tools (such as Kata's `load_*`) no longer change the main session's tools or system prompt
 - Mounting an MCP tool mid-session on prefix-bound models no longer changes the eval tool description, and the mount notice now reaches the model
 - Worker-thread subagents are faster: switching views on long transcripts no longer lags, `wait` no longer streams full transcripts, and they stall less on a busy main thread

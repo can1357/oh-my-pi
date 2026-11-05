@@ -116,6 +116,19 @@ describe("integrations thread service", () => {
 		expect(echoed.text).toBe("from worker");
 	}, 20_000);
 
+	it("keeps failed MCP handshakes unknown during worker resource discovery", async () => {
+		const result = await manager.connectServers(
+			{
+				broken: { type: "stdio", command: process.execPath, args: ["-e", "process.exit(1)"] },
+			},
+			{},
+		);
+		expect(result.errors.has("broken")).toBe(true);
+		await expect(probe.exactMcpResource("skill://demo;/tmp/tail.md")).rejects.toThrow("cannot safely split");
+		await manager.disconnectServer("broken");
+		expect(await probe.exactMcpResource("skill://demo;/tmp/tail.md")).toBe(false);
+	}, 20_000);
+
 	it("aborts a worker's MCP call on main's connection", async () => {
 		const controller = new AbortController();
 		const call = probe.mcpCall(registry, toolNamed("hang"), { text: "x" }, controller.signal);

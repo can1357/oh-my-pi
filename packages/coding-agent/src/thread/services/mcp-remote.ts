@@ -35,6 +35,7 @@ export type McpManagerProtocol = {
 	/** Subscribe; the returned unsubscribe is synchronous for the worker. */
 	onToolsChanged: RpcMethod<[listener: () => void], () => void>;
 	onNotification: RpcMethod<[listener: McpNotificationListener], () => void>;
+	allServerNames: RpcMethod<[], string[]>;
 	connectedServers: RpcMethod<[], string[]>;
 	serverResources: RpcMethod<
 		[name: string],
@@ -86,6 +87,10 @@ export class RemoteMCPManager implements MCPManagerApi {
 
 	addNotificationListener(listener: McpNotificationListener): () => void {
 		return this.#remote.callSync("onNotification", listener);
+	}
+
+	getAllServerNames(): string[] {
+		return this.#remote.callSync("allServerNames");
 	}
 
 	getConnectedServers(): string[] {

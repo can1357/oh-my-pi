@@ -330,6 +330,7 @@ function serveMcpManager(state: PeerIntegrationState): RpcServe<MCPManager, McpM
 					settleQuietly(listener(serverName, method, params)),
 				),
 			),
+		allServerNames: manager => manager.getAllServerNames(),
 		connectedServers: manager => manager.getConnectedServers(),
 		serverResources: (manager, name) => manager.getServerResources(name),
 		ensureServerResources: (manager, name) => manager.ensureServerResources(name),
