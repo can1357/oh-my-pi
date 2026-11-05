@@ -21,6 +21,7 @@ import { cfgEvalPy } from "@oh-my-pi/pi-coding-agent/eval/settings";
 import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgSearxngBasicPassword, cfgSearxngEndpoint } from "@oh-my-pi/pi-coding-agent/web/settings";
 import { cfgToolsApproval } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { readUserApprovalPolicies, userApprovalPolicy } from "@oh-my-pi/pi-coding-agent/tools/approval";
 
 const tick = () => Promise.resolve();
 
@@ -688,5 +689,30 @@ describe("settings registry", () => {
 		).toThrow("Invalid task.agentCompactionThresholdOverrides.scout");
 		expect(() => Settings.isolated({ temperature: "hot" })).toThrow("Invalid value for temperature");
 		expect(cfgModelRoles.get(Settings.isolated({ modelRoles: { smol: "a/b" } }))).toEqual({ smol: "a/b" });
+	});
+
+	it("carries a dropped tools.approval to a worker mirror, which asks as the main instance does", async () => {
+		// A worker mirror receives the layers after their rejected values were dropped, so without the
+		// rejection record it reads an unreadable `tools.approval` as unset — permissive under `yolo`.
+		using dir = TempDir.createSync("@pi-approval-mirror-");
+		const overlay = path.join(dir.path(), "overlay.yml");
+		fs.writeFileSync(overlay, YAML.stringify({ tools: { approval: "deny-bash" } }));
+		const source = await Settings.init({
+			cwd: dir.path(),
+			agentDir: path.join(dir.path(), "agent"),
+			configFiles: [overlay],
+		});
+		const expected = { policy: "prompt", unreadable: true };
+		expect(userApprovalPolicy(readUserApprovalPolicies(source), "bash")).toMatchObject(expected);
+
+		const mirror = Settings.mirror(
+			{
+				write: () => source.mirrorState(),
+				refresh: () => Promise.resolve(source.mirrorState()),
+				cloneForCwd: cwd => Promise.resolve(source.cloneForCwd(cwd)),
+			},
+			source.mirrorState(),
+		);
+		expect(userApprovalPolicy(readUserApprovalPolicies(mirror), "bash")).toMatchObject(expected);
 	});
 });

@@ -330,6 +330,14 @@ interface OwnLayers {
 /** The layers an {@link Settings.overlay} child writes locally; see {@link Settings.overlayLayers}. */
 export type OverlayLayers = Readonly<Pick<OwnLayers, "global" | "overrides"> & { derived: boolean }>;
 
+/** One {@link IgnoredValue} as a {@link SettingsMirrorState} carries it: the setting travels by id. */
+export interface MirroredIgnoredValue {
+	readonly id: string;
+	readonly source: string | undefined;
+	readonly valueType: string;
+	readonly valueLength: number;
+}
+
 /**
  * Copy of one instance's own layers and scope, from which a worker-thread {@link Settings.mirror}
  * is built and kept current ({@link Settings.mirrorState}, {@link Settings.applyMirrorState}).
@@ -347,6 +355,13 @@ export interface SettingsMirrorState {
 	readonly derived: boolean;
 	readonly projectShellPathSource: string | undefined;
 	readonly overlayShellPathSource: string | undefined;
+	/**
+	 * What the source ignores because its setting rejects it ({@link Settings.ignoredValues}). Carried
+	 * because the layers alone no longer show it: a project or `--config` file's rejected value is
+	 * dropped as it loads. Without it a worker mirror reads an unreadable `tools.approval` as unset,
+	 * which is permissive — the opposite of what the file says.
+	 */
+	readonly ignored: readonly MirroredIgnoredValue[];
 }
 
 /** A write made on a worker mirror, replayed on its main-thread instance; settings travel by id. */
@@ -780,6 +795,11 @@ export class Settings {
 	#layerGeneration = 0;
 	/** Observers of own-layer and scope changes ({@link onLayersChange}). */
 	#layerListeners = new Set<() => void>();
+	/**
+	 * Worker mirror: what the main instance ignores because its setting rejects it, carried in
+	 * {@link SettingsMirrorState.ignored}. Empty on a main-thread instance, which reads its own layers.
+	 */
+	#mirroredIgnored: IgnoredValue[] = [];
 
 	private constructor(options: SettingsOptions = {}) {
 		this.#cwd = path.normalize(options.cwd ?? getProjectDir());
@@ -1049,6 +1069,12 @@ export class Settings {
 			derived: this.#derived,
 			projectShellPathSource: this.#projectShellPathSource,
 			overlayShellPathSource: this.#overlayShellPathSource,
+			ignored: this.ignoredValues().map(({ setting, source, valueType, valueLength }) => ({
+				id: setting.id,
+				source,
+				valueType,
+				valueLength,
+			})),
 		};
 	}
 
@@ -1074,6 +1100,12 @@ export class Settings {
 		this.#derived = state.derived;
 		this.#projectShellPathSource = state.projectShellPathSource;
 		this.#overlayShellPathSource = state.overlayShellPathSource;
+		// The layers do not carry what their files hold and this build cannot read; without this a
+		// worker mirror reads an unreadable `tools.approval` as unset, which is permissive.
+		this.#mirroredIgnored = state.ignored.flatMap(({ id, source, valueType, valueLength }) => {
+			const setting = lookupSetting(id);
+			return setting ? [{ setting, source, valueType, valueLength }] : [];
+		});
 		this.#rebuildMerged();
 		if (previous) this.#fireChangesSince(previous);
 	}
@@ -1154,6 +1186,7 @@ export class Settings {
 			ignored.set(`${setting.id}\0${source ?? ""}`, { setting, source, valueType, valueLength });
 		};
 		for (const value of this.#parent?.ignoredValues() ?? []) add(value);
+		for (const value of this.#mirroredIgnored) add(value);
 		for (const value of this.warnState.invalid.values()) add(value);
 		for (const layer of this.warnState.dropped.values()) for (const value of layer.values()) add(value);
 		for (const setting of permissiveDefaultSettings()) {
