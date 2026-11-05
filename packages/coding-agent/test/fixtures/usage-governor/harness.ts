@@ -162,38 +162,6 @@ export async function awaitCondition(check: () => boolean, timeoutMs: number, in
 	return check();
 }
 
-/**
- * SQLite may briefly reject a read-only connection while the child initializes WAL sidecars.
- * Retry only that error while polling; a persistent failure must not look like an empty ledger.
- */
-export async function awaitLedgerCondition(check: () => boolean, timeoutMs: number, intervalMs = 50): Promise<boolean> {
-	const deadline = performance.now() + timeoutMs;
-	let lastError: unknown;
-	while (true) {
-		try {
-			const matched = check();
-			lastError = undefined;
-			if (matched) return true;
-		} catch (error) {
-			if (
-				!(error instanceof Error) ||
-				error.name !== "SQLiteError" ||
-				!("code" in error) ||
-				error.code !== "SQLITE_CANTOPEN"
-			) {
-				throw error;
-			}
-			lastError = error;
-		}
-		const remaining = deadline - performance.now();
-		if (remaining <= 0) {
-			if (lastError !== undefined) throw lastError;
-			return false;
-		}
-		await Bun.sleep(Math.min(intervalMs, remaining));
-	}
-}
-
 /** Inherited names among a child's environment keys that must never be present. */
 export function forbiddenNames(names: readonly string[]): string[] {
 	return names.filter(name => FORBIDDEN_CHILD_NAME.test(name));
