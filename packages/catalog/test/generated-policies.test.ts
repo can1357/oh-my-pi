@@ -345,6 +345,154 @@ describe("generated model policies", () => {
 		}
 	});
 
+	it("prices GPT-6.1 Sol's whole request at the long tier once total input passes 272K, on every billing host", () => {
+		const card = { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 };
+		const billed: [label: string, model: Model<Api>, scale: number][] = [
+			[
+				"openai",
+				buildGenerated(createSpec({ id: "gpt-6.1-sol", api: "openai-responses", provider: "openai", cost: card })),
+				1,
+			],
+			[
+				"bedrock",
+				buildGenerated(
+					createSpec({
+						id: "global.openai.gpt-6.1-sol",
+						api: "openai-responses",
+						provider: "amazon-bedrock",
+						cost: card,
+					}),
+				),
+				1,
+			],
+			// A user-declared gateway is materialized by `buildModel` alone, with no generation pass.
+			[
+				"custom gateway",
+				buildModel(
+					createSpec({
+						id: "openai/gpt-6.1-sol",
+						api: "openai-responses",
+						provider: "example-gateway" as Provider,
+						cost: card,
+					}),
+				),
+				1,
+			],
+			// Batch bills half the card in both tiers, so the tier scales from the row's own rates.
+			[
+				"openrouter batch",
+				buildGenerated(
+					createSpec({
+						id: "openai/gpt-6.1-sol:batch",
+						api: "openai-completions",
+						provider: "openrouter",
+						cost: { input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25 },
+					}),
+				),
+				0.5,
+			],
+			// Venice drops the dot from the revision, so `*gpt-6.1-sol*` misses it
+			// and a revision selector reads `61` as major 61.
+			[
+				"venice dotless",
+				buildGenerated(
+					createSpec({
+						id: "openai-gpt-61-sol",
+						api: "openai-completions",
+						provider: "venice" as Provider,
+						cost: card,
+					}),
+				),
+				1,
+			],
+			// Venice Ultrafast is the same model at 6x the card; the multiplier form
+			// must scale from its own rates to reach its published 24/90/1.2/30.
+			[
+				"venice ultrafast",
+				buildGenerated(
+					createSpec({
+						id: "openai-gpt-61-sol-ultrafast",
+						api: "openai-completions",
+						provider: "venice" as Provider,
+						cost: { input: 12, output: 60, cacheRead: 0.6, cacheWrite: 15 },
+					}),
+				),
+				6,
+			],
+			// The rolling alias OpenRouter, Kilo and NanoGPT publish; OpenRouter
+			// reports `alias_target.slug: openai/gpt-6.1-sol` for it.
+			[
+				"rolling alias",
+				buildGenerated(
+					createSpec({
+						id: "~openai/gpt-sol-latest",
+						api: "openai-completions",
+						provider: "openrouter",
+						cost: card,
+					}),
+				),
+				1,
+			],
+		];
+		for (const [label, model, scale] of billed) {
+			expect(model.cost.longContext, label).toMatchObject({ inputThreshold: 272_000 });
+			expect(model.cost.longContext?.cacheWrite, label).toBeCloseTo(5 * scale, 10);
+			// OpenAI's prompt size counts cache reads: 12K new + 260K read is exactly 272K, still standard.
+			const at = pricedUsage(model, 12_000, 260_000);
+			expect(at.input, label).toBeCloseTo((2 * scale * 12_000) / 1e6, 10);
+			expect(at.cacheRead, label).toBeCloseTo((0.1 * scale * 260_000) / 1e6, 10);
+			expect(at.output, label).toBeCloseTo((10 * scale * 10_000) / 1e6, 10);
+			// 20K new + 260K read is a 280K prompt: 2x input and cache reads, 1.5x output, whole request.
+			const over = pricedUsage(model, 20_000, 260_000);
+			expect(over.input, label).toBeCloseTo((4 * scale * 20_000) / 1e6, 10);
+			expect(over.cacheRead, label).toBeCloseTo((0.2 * scale * 260_000) / 1e6, 10);
+			expect(over.output, label).toBeCloseTo((15 * scale * 10_000) / 1e6, 10);
+		}
+
+		// Subscription Codex carries no surcharge, Copilot's long tier is its own
+		// `-1m` sibling, and the three globs must not reach an older Sol
+		// generation: Venice spells 5.6 Sol `openai-gpt-56-sol` and GPT-6 Sol
+		// `openai-gpt-6-sol`, both of which `*gpt-61-sol*` must miss.
+		const exempt: [label: string, model: Model<Api>][] = [
+			[
+				"openai-codex",
+				buildGenerated(createSpec({ id: "gpt-6.1-sol", api: "openai-codex-responses", provider: "openai-codex" })),
+			],
+			[
+				"github-copilot",
+				buildGenerated(
+					createSpec({ id: "gpt-6.1-sol", api: "openai-responses", provider: "github-copilot", cost: card }),
+				),
+			],
+			[
+				"venice gpt-6 sol",
+				buildGenerated(
+					createSpec({
+						id: "openai-gpt-6-sol",
+						api: "openai-completions",
+						provider: "venice" as Provider,
+						cost: card,
+					}),
+				),
+			],
+			[
+				"venice gpt-5.6 sol dotless",
+				buildGenerated(
+					createSpec({
+						id: "openai-gpt-56-sol",
+						api: "openai-completions",
+						provider: "venice" as Provider,
+						cost: card,
+					}),
+				),
+			],
+		];
+		for (const [label, model] of exempt) {
+			expect(model.cost.longContext, label).toBeUndefined();
+			expect(pricedUsage(model, 20_000, 260_000).input, label).toBeCloseTo((2 * 20_000) / 1e6, 10);
+		}
+	});
+
 	it("pins Claude Mythos 5 first-party Anthropic catalog metadata", () => {
 		const model = buildGenerated(
 			createSpec({

@@ -18,6 +18,10 @@
 
 - Factory Droid reports client version 1.1.0, and Claude requests routed to Azure Foundry stream tool input eagerly like the Anthropic and Vertex routes ([#17885](https://github.com/can1357/oh-my-pi/pull/17885) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Fixed
+
+- GPT-6.1 Sol prompts over 272K input tokens now cost OpenAI's long-context rates (2x input and cache, 1.5x output) on every per-token host, including the hosts that spell it differently (Venice's `openai-gpt-61-sol` and its Ultrafast row, and the `gpt-sol-latest` rolling alias on OpenRouter, Kilo and NanoGPT); each row's tier scales from its own card, and with extended context off a catalog row's window stops at 272K so compaction runs first. Codex subscriptions, GitHub Copilot and credit hosts with a zero card are unchanged
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

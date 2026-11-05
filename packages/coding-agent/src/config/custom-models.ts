@@ -1,5 +1,5 @@
 import type { Api, Model, ModelSpec, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { buildModel, ruleScaledLongContextTier } from "@oh-my-pi/pi-catalog/build";
 import { getVariantAliasSources, resolveVariantSelector } from "@oh-my-pi/pi-catalog/compat/collapse";
 import {
 	getBundledModelReferenceIndex,
@@ -118,7 +118,7 @@ export function finalizeCustomModel(resolvedModel: CustomModelOverlay, options: 
 		(options.useDefaults ? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } : undefined);
 	const input = resolvedModel.input ?? reference?.input ?? (options.useDefaults ? ["text"] : undefined);
 	const supportsTools = resolvedModel.supportsTools ?? reference?.supportsTools;
-	const built = buildModel({
+	const spec = {
 		id: resolvedModel.id,
 		name: resolvedModel.name ?? (options.useDefaults ? resolvedModel.id : undefined),
 		api: resolvedModel.api,
@@ -147,12 +147,16 @@ export function finalizeCustomModel(resolvedModel: CustomModelOverlay, options: 
 		remoteCompaction: resolvedModel.remoteCompaction,
 		premiumMultiplier: resolvedModel.premiumMultiplier,
 		isOAuth: resolvedModel.isOAuth,
-	} as ModelSpec<Api>);
+	} as ModelSpec<Api>;
+	const built = buildModel(spec);
 	if (resolvedModel.cost) {
 		// Explicit custom prices outrank catalog corrections and schedules, just
-		// as they do for same-id model patches.
-		built.cost = { ...resolvedModel.cost };
-		delete built.cost.timeBased;
+		// as they do for same-id model patches. A rule's multiplier-form
+		// long-context tier is a function of the card, so it is derived from the
+		// explicit card unless the definition states its own tier.
+		const { timeBased: _timeBased, ...explicit } = resolvedModel.cost;
+		const longContext = explicit.longContext ?? ruleScaledLongContextTier(spec, explicit);
+		built.cost = longContext ? { ...explicit, longContext } : explicit;
 	}
 	// Explicit custom limits outrank the catalog `limits-patch` buildModel applied.
 	if (resolvedModel.contextWindow !== undefined) built.contextWindow = resolvedModel.contextWindow;

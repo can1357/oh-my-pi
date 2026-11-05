@@ -2177,6 +2177,108 @@ describe("ModelRegistry", () => {
 			});
 		});
 
+		test("a same-id models.yml price rescales a multiplier tier, and a free card carries one only if it says so", () => {
+			// Same provider and id as a bundled row, so this goes through
+			// `applyModelPatch`, not `finalizeCustomModel`.
+			writeRawModelsJson({
+				openai: {
+					modelOverrides: {
+						"gpt-6.1-sol": { cost: { input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25 } },
+						"gpt-6-sol": { cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+						// Free below the threshold, charged above it: a tariff a gateway
+						// really publishes, and the config states it outright.
+						"gpt-6-luna": {
+							cost: {
+								input: 0,
+								output: 0,
+								cacheRead: 0,
+								cacheWrite: 0,
+								longContext: {
+									inputThreshold: 272_000,
+									input: 4,
+									output: 15,
+									cacheRead: 0.2,
+									cacheWrite: 5,
+								},
+							},
+						},
+					},
+				},
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const usage = {
+				input: 20_000,
+				output: 10_000,
+				cacheRead: 260_000,
+				cacheWrite: 0,
+				totalTokens: 290_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			};
+			const half = registry.find("openai", "gpt-6.1-sol");
+			if (!half) throw new Error("Expected the bundled GPT-6.1 Sol row");
+			// The tier is a multiple of the card in force, not the list card: the
+			// list tier (4/15) against a declared 1/5 overcharged by 4x.
+			expect(half.cost.longContext).toMatchObject({
+				inputThreshold: 272_000,
+				input: 2,
+				output: 7.5,
+			});
+			expect(calculateUsageCost(half.cost, usage).input).toBeCloseTo((2 * 20_000) / 1e6, 10);
+			// Free at every context length: it used to bill the catalog's long
+			// tier over a zero card.
+			const free = registry.find("openai", "gpt-6-sol");
+			if (!free) throw new Error("Expected the bundled GPT-6 Sol row");
+			expect(free.cost.longContext).toBeUndefined();
+			expect(calculateUsageCost(free.cost, usage).total).toBe(0);
+			// Free only below the threshold: the authored tier outranks the
+			// all-zero card, which must not be read as free at every length.
+			const banded = registry.find("openai", "gpt-6-luna");
+			if (!banded) throw new Error("Expected the bundled GPT-6 Luna row");
+			expect(banded.cost.longContext).toMatchObject({ inputThreshold: 272_000, input: 4, output: 15 });
+			expect(calculateUsageCost(banded.cost, usage).input).toBeCloseTo((4 * 20_000) / 1e6, 10);
+			// 12K new + 260K read is exactly 272K: still free.
+			expect(calculateUsageCost(banded.cost, { ...usage, input: 12_000 }).total).toBe(0);
+		});
+
+		test("a models.yml row with its own price keeps the catalog's multiplier long-context tier, scaled to that price", () => {
+			// A gateway serving GPT-6.1 Sol at half the list card, as a user declares it: no tier of its own.
+			writeRawModelsJson({
+				"example-gateway": {
+					baseUrl: "https://example.com/v1",
+					auth: "none",
+					api: "openai-responses",
+					models: [
+						{
+							id: "openai/gpt-6.1-sol",
+							contextWindow: 272_000,
+							maxContextWindow: 1_050_000,
+							maxTokens: 128_000,
+							cost: { input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25 },
+						},
+					],
+				},
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const sol = registry.find("example-gateway", "openai/gpt-6.1-sol");
+			if (!sol) throw new Error("Expected the gateway GPT-6.1 Sol row");
+			expect(sol.cost).toMatchObject({ input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25 });
+			// 20K new + 260K cache-read is a 280K prompt: the whole request bills 2x input/cache, 1.5x output.
+			const usage = {
+				input: 20_000,
+				output: 10_000,
+				cacheRead: 260_000,
+				cacheWrite: 0,
+				totalTokens: 290_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			};
+			const cost = calculateUsageCost(sol.cost, usage);
+			expect(cost.input).toBeCloseTo((2 * 20_000) / 1e6, 10);
+			expect(cost.cacheRead).toBeCloseTo((0.1 * 260_000) / 1e6, 10);
+			expect(cost.output).toBeCloseTo((7.5 * 10_000) / 1e6, 10);
+			// 12K new + 260K read is exactly 272K: still the declared card.
+			expect(calculateUsageCost(sol.cost, { ...usage, input: 12_000 }).input).toBeCloseTo((1 * 12_000) / 1e6, 10);
+		});
+
 		test("non-price overrides keep scheduled rates while user prices stay fixed across tariff changes", () => {
 			expect(scheduledPrices.getError()).toBeUndefined();
 			const renamed = scheduledPrices.find("deepseek", "deepseek-v4-flash");
@@ -2951,11 +3053,44 @@ describe("ModelRegistry", () => {
 			// GPT-5.6 bills 2x input above 272K on both the API and Codex.
 			expect(registry.find("openai", "gpt-5.6-sol")?.contextWindow).toBe(272_000);
 			expect(registry.find("openai-codex", "gpt-5.6-sol")?.contextWindow).toBe(272_000);
+			// GPT-6.1 Sol bills its >272K tier per token, but Codex subscription usage has no surcharge,
+			// so the subscription row keeps its 500K window.
+			expect(registry.find("openai", "gpt-6.1-sol")?.contextWindow).toBe(272_000);
+			expect(registry.find("openrouter", "openai/gpt-6.1-sol")?.contextWindow).toBe(272_000);
+			expect(registry.find("openai-codex", "gpt-6.1-sol")?.contextWindow).toBe(500_000);
 			// Standard-priced 1M models (no long-context tier) keep their window.
 			expect(registry.find("anthropic", "claude-opus-4-8")?.contextWindow).toBe(1_000_000);
 			// SuperGrok carries public xAI tiers (200K threshold) for stats estimates,
 			// not billing, so it keeps its full 1M window.
 			expect(registry.find("xai-oauth", "grok-4.20-0309-reasoning")?.contextWindow).toBe(1_000_000);
+		});
+
+		test("a price override that removes the long-context tier releases the threshold clamp", async () => {
+			// The clamp runs in #applyHardcodedModelPolicies, before #applyModelOverrides
+			// reaches the configured price, so a row priced free would otherwise keep a
+			// window clamped to a premium threshold its resolved card no longer has.
+			writeRawModelsJson({
+				openai: {
+					modelOverrides: {
+						"gpt-6.1-sol": { cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+						"gpt-6-sol": { cost: { input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25 } },
+					},
+				},
+			});
+			await Settings.init({ inMemory: true, overrides: { extendedContext: false } });
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			// Declared free: no tier, so no surcharge to compact ahead of, so the
+			// clamp is released and the row keeps its full window.
+			const free = registry.find("openai", "gpt-6.1-sol");
+			expect(free?.cost.longContext).toBeUndefined();
+			expect(free?.contextWindow).toBe(1_050_000);
+			// Declared at half price: the tier rescales and survives, so the clamp
+			// that matches it stays.
+			const half = registry.find("openai", "gpt-6-sol");
+			expect(half?.cost.longContext).toMatchObject({ inputThreshold: 272_000 });
+			expect(half?.contextWindow).toBe(272_000);
+			// An untouched tiered row is unaffected either way.
+			expect(registry.find("openrouter", "openai/gpt-6.1-sol")?.contextWindow).toBe(272_000);
 		});
 
 		test("reapplyModelPolicies re-clamps and restores premium windows on toggle", async () => {

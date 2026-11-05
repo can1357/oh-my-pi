@@ -65,6 +65,51 @@ class "openai" {
 	revision ">=6 <7" {
 		supports-configuration-update #true
 	}
+	// GPT-6.1 Sol's per-token card bills the whole request at 2x input and
+	// cache rates and 1.5x output once prompt input passes 272K tokens, in
+	// every processing mode (Standard, Batch, Flex, Fast, Ultrafast):
+	// https://developers.openai.com/api/docs/models/gpt-6.1-sol and
+	// https://developers.openai.com/api/docs/pricing. "Input" is the API's
+	// `input_tokens`, which includes cache reads and writes. The tier is the
+	// model's price card, not one host's, so resellers billing that card
+	// (OpenRouter publishes the same >272K override for every Sol row,
+	// `-pro` and `:batch` included) and custom gateways serving the id carry
+	// it too; the multiplier form scales from each row's own base card.
+	// Subscription and credit hosts opt out in their provider files, and a
+	// credit host's zero card yields no tier (`build.ts`).
+	//
+	// Three spellings, because hosts do not agree on one. `*gpt-6.1-sol*` is
+	// OpenAI's own and the namespaced reseller ids built from it
+	// (`openai/…`, `global.openai.…`, `-pro`, `:batch`, `-fast`). Venice
+	// drops the dot (`openai-gpt-61-sol`, `-ultrafast`), which also defeats a
+	// revision selector: the taxonomy reads `61` as major 61, not 6.1.
+	// `gpt-sol-latest` is the rolling alias OpenRouter, Kilo and NanoGPT
+	// publish; OpenRouter reports `alias_target.slug: openai/gpt-6.1-sol` for
+	// it, and all three price it at Sol 6.1's card (cache read 0.1, against
+	// GPT-6 Sol's 0.2). The multiplier form is what makes one rule right for
+	// all of them: each row's tier scales from its own base card, so Venice
+	// Ultrafast's 12/60/0.6/15 yields its published 24/90/1.2/30. None of the
+	// three matches `gpt-6-sol`, `gpt-56-sol` or `gpt-5.6-sol`.
+	//
+	// residue: taxonomy ranks cannot isolate this set. Revision ranks are out
+	// because Venice's `openai-gpt-61-sol` parses as major 61, and a `=6.1`
+	// rank would also take `gpt-6.1-terra`, which is a different card. There is
+	// no family rank for Sol. So the member set is spelled as id globs, and the
+	// multiplier form keeps that honest: each row scales from its own card.
+	// `*gpt-sol-latest*` is the weakest of the three and is scheduled for
+	// replacement — it names a ROLLING alias, so when a host repoints it to the
+	// next Sol this rule would price that model with 6.1's band and the
+	// registry would keep clamping, with nothing to flag the drift. It wants a
+	// taxonomy `override` pinning the alias to revision 6.1.0 with an
+	// `expires-at-ms` (taxonomy/openai.kdl uses that pattern for OpenAI's
+	// Daybreak aliases) so the pin lapses loudly instead of silently aging.
+	models "*gpt-6.1-sol*" "*gpt-61-sol*" "*gpt-sol-latest*" {
+		long-context-cost {
+			input-threshold 272000
+			multiplier 2.0
+			output-multiplier 1.5
+		}
+	}
 	// Codex SKUs: the advertised 400K figure includes the output budget; the
 	// true prompt window is 272K. Spark budgets are its own family's.
 	family "codex" {

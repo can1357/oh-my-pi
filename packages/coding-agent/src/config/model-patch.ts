@@ -1,5 +1,5 @@
 import type { Api, Model, ModelSpec, RemoteCompactionConfig, ThinkingConfig } from "@oh-my-pi/pi-ai/types";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { buildModel, ruleScaledLongContextTier } from "@oh-my-pi/pi-catalog/build";
 import { isVertexExpressOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
@@ -312,14 +312,37 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	}
 	if (patch.premiumMultiplier !== undefined) result.premiumMultiplier = patch.premiumMultiplier;
 	if (patch.cost) {
-		const longContext = patch.cost.longContext ?? base.cost.longContext;
-		result.cost = {
+		const card = {
 			input: patch.cost.input ?? base.cost.input,
 			output: patch.cost.output ?? base.cost.output,
 			cacheRead: patch.cost.cacheRead ?? base.cost.cacheRead,
 			cacheWrite: patch.cost.cacheWrite ?? base.cost.cacheWrite,
-			...(longContext ? { longContext } : {}),
 		};
+		// A configured price replaces the catalog's card, so a tier that is a
+		// FUNCTION of that card has to be recomputed from it: keeping the list
+		// tier billed a row declared at half price, or free, at the list rates.
+		// Order: the patch's own tier wins outright, because a config that
+		// states both a card and a tier has said exactly what it wants -- "free
+		// below the threshold, charged above it" is a tariff a gateway really
+		// publishes, and an all-zero card must not be read as "free at every
+		// context length" when the config says otherwise. Then the rule's
+		// multiplier form re-derived from the configured card (the same rule
+		// `finalizeCustomModel` applies to a new custom model, so a `models.yml`
+		// row and a same-id patch of the bundled row price alike). Then the
+		// row's existing tier, which keeps a tier the rules state as absolute
+		// figures rather than as a multiple of the card -- the first-party
+		// `gpt-5.6` card (`providers/openai.kdl`), Cursor's rows
+		// (`providers/cursor.kdl`) and Claude Haiku 5.5's
+		// (`classes/anthropic.kdl`) -- rather than letting a partial override of
+		// one leg silently delete it. A row whose rule is in multiplier form
+		// never reaches this step; it is rescaled above. An all-zero card with
+		// no tier of its own inherits none: a row declared free that still
+		// charged the list tier past the threshold was the worst of these.
+		const free = card.input === 0 && card.output === 0 && card.cacheRead === 0 && card.cacheWrite === 0;
+		const longContext =
+			patch.cost.longContext ??
+			(free ? undefined : (ruleScaledLongContextTier(toModelSpec(result), card) ?? base.cost.longContext));
+		result.cost = longContext ? { ...card, longContext } : card;
 	}
 	let compat: ModelSpec<Api>["compat"];
 	if (transport === "merge") {

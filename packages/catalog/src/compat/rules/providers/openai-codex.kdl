@@ -128,6 +128,18 @@ provider "openai-codex" {
 		}
 		max-context-window 922000
 	}
+	// residue: the opt-out is a glob while the prices above are exact ids, and
+	// deliberately so. Subscription usage carries no long-context surcharge
+	// (https://developers.openai.com/api/docs/models/gpt-6.1-sol), so EVERY Sol
+	// 6.1 id this host surfaces must opt out of the lineage's >272K tier
+	// (classes/openai.kdl), which would otherwise bill a subscription for it and
+	// cap the 500K window at 272K. Exact ids covered only the two rows the
+	// census had: a dated variant, a speed-tier row or anything else discovery
+	// adds would silently inherit the surcharge. The prices stay exact because
+	// they are those two rows' own figures, not the model's.
+	models "gpt-6.1-sol*" priority=10 {
+		long-context-cost {}
+	}
 	// Codex Ultrafast ships on GPT-6 Astra and GPT-6.1 Sol. This table uses
 	// OpenAI's included-usage multipliers for Codex: Ultrafast 8x and Fast 2.5x
 	// Standard (purchased credits / Enterprise pay-as-you-go bill 6x and 2x
