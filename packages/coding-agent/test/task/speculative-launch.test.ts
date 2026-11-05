@@ -422,6 +422,41 @@ describe("task speculative launch", () => {
 		expect(result.details?.progress?.map(progress => progress.id)).toEqual(["Alpha", "Beta"]);
 		expect(duplicateJobs(manager, ["Alpha", "Beta"])).toEqual([]);
 	});
+
+	// Regression, and the reason `ARRAY_BLANKABLE_KEYS` carries a second condition. A key is only
+	// array-blankable if its declared wire type admits an array, so the raw streamed arguments and the
+	// validated ones carry the same value. `sourceSession` is declared `string` alone, so validation
+	// rewrites `[]` to the string `"[]"`: while it was a member, the launcher dropped the raw array
+	// and started the child, dispatch kept `"[]"` and refused the whole call, and the started run was
+	// discarded after doing work. Both review arms reproduced that independently. Nothing may start.
+	it.each([
+		["an empty array", [] as unknown],
+		["an array of blanks", ["", "  "]],
+	] as const)("starts nothing for a streamed call whose sourceSession is %s", async (_label, sourceSession) => {
+		const call = {
+			context: "ctx",
+			tasks: [
+				{ name: "Alpha", agent: "task", solutionSpace: "one way", task: "Do A.", sourceSession },
+				{ name: "Beta", agent: "task", solutionSpace: "one way", task: "Do B." },
+			],
+		};
+		const raw = JSON.stringify(call);
+		const { tool, session } = await openSession();
+
+		session.update(toolCall, raw.slice(0, raw.indexOf('{"name":"Beta"') + 10));
+		session.finalize({ toolCall, args: call });
+		const validated = validateAgentToolArguments(tool as unknown as AgentTool, {
+			type: "toolCall",
+			id: toolCall.id,
+			name: tool.name,
+			arguments: call,
+		});
+		const result = await tool.execute(toolCall.id, validated as TaskParams);
+
+		// Dispatch refuses it, so the launcher must not have started work to be thrown away.
+		expect(result.isError).toBe(true);
+		expect([...startedIds]).toEqual([]);
+	});
 });
 
 describe("speculative launch authorization", () => {

@@ -553,17 +553,32 @@ function isBlankString(value: unknown): boolean {
 	return typeof value === "string" && value.trim() === "";
 }
 /**
- * The keys whose array form can be filler. An array that names nothing is only safe to drop where
- * its *populated* form reaches a refusal that says what to send instead —
- * `invalidModelSelectorReason` for `model`, the seance checks for `sourceSession`.
+ * The keys whose array form may be filler. A key qualifies only if **both** hold:
  *
- * `outputSchema` is deliberately not here, and leaving it in was a defect this change introduced:
- * `outputSchemaInputSchema` admits any `object`, and an array is one, so `outputSchema: [{…}]`
- * survives validation and nothing downstream shape-checks it (`resolveSchema` takes it by presence).
- * Treating an array as filler there turned "silently ignored" into "silently malformed" for a key
- * outside this change's subject.
+ * 1. A *populated* array there reaches a refusal that says what to send instead, so dropping the
+ *    empty form cannot be mistaken for accepting a malformed one.
+ * 2. Its declared wire type admits an array, so the raw streamed arguments and the validated ones
+ *    carry the same value and the speculative launcher plans what dispatch plans.
+ *
+ * Only `model` satisfies both. `invalidModelSelectorReason` gives it (1), and ./types declares it
+ * `string | string[]` on every variant, which gives it (2).
+ *
+ * `sourceSession` was a member and had to be removed: it satisfies (1) — the seance checks refuse a
+ * populated array — but ./seance declares it `string` alone, so validation rewrites an array to its
+ * JSON text. The launcher, planning from the raw arguments, dropped `sourceSession: []` and started
+ * the child; dispatch kept `"[]"` and refused the whole call, so the run was started, did work, and
+ * was discarded. Both review arms reproduced that independently. The blank-*string* arm still
+ * covers it, which is the form a model actually sends for a field the schema offered it.
+ *
+ * `outputSchema` fails (1): its declared type admits any object, an array is one, and nothing
+ * downstream shape-checks it (`resolveSchema` takes it by presence), so a populated array is
+ * forwarded rather than refused. Treating an array as filler there dropped a caller's
+ * `outputSchema: []` and handed back the agent's own schema.
+ *
+ * `task` and `taskFile` satisfy (1) and are deliberately left out: the conditional pair's behaviour
+ * is unchanged by this pass, and the criterion permits membership without requiring it.
  */
-const ARRAY_BLANKABLE_KEYS: Partial<Record<BlankableKey, true>> = { model: true, sourceSession: true };
+const ARRAY_BLANKABLE_KEYS: Partial<Record<BlankableKey, true>> = { model: true };
 
 /**
  * An array that names nothing — `[]`, or one whose every entry is a blank string. That is what a
