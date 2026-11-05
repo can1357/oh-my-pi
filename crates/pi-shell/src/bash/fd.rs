@@ -367,9 +367,20 @@ impl FdRef {
 	}
 
 	/// `fstat(2)` of the underlying object ([`File::stat`]); `None` when
-	/// closed, lost or an engine-memory object.
+	/// closed or lost.
 	pub fn stat(&self) -> Option<io::Result<crate::bash::fs::Stat>> {
 		self.0.state.lock().file_ref().map(File::stat)
+	}
+
+	/// Whether the underlying object is a file on a filesystem
+	/// ([`File::on_filesystem`]); `false` when closed, lost or engine memory.
+	pub fn on_filesystem(&self) -> bool {
+		self
+			.0
+			.state
+			.lock()
+			.file_ref()
+			.is_some_and(File::on_filesystem)
 	}
 
 	/// OS handle an external can inherit directly.

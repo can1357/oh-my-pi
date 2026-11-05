@@ -1432,22 +1432,29 @@ impl FsPending<Box<dyn File>> for NoClobberPath {
 	}
 }
 
-/// Whether `noclobber` must refuse the object `st` describes.
+/// Whether `noclobber` must refuse an object that IS a file on a
+/// filesystem, given its own `fstat` answer `st`. bash fails closed when
+/// it cannot establish the object's kind: with `fstat` made to report
+/// `EIO`, Bash 5.2.21 and 5.3.0 both refuse `>/dev/null`, which they
+/// otherwise write.
+fn refuses_fs_object(st: std::io::Result<Stat>) -> bool {
+	match st {
+		Ok(st) => st.kind == StatKind::File,
+		Err(_) => true,
+	}
+}
+
+/// Whether `noclobber` must refuse the object `file`.
 ///
 /// [`File::kind`] says how the engine must DRIVE an object — a provider's
 /// regular file that cannot be seeked is driven as a device, a
 /// here-document as a seekable regular object — so it cannot answer this
-/// question; the object's own metadata does. An object with no filesystem
-/// metadata at all answers `Unsupported` ([`File::stat`]'s contract): it
-/// is no file on any filesystem (a here-document, a pipeline buffer) and
-/// cannot be clobbered. Any OTHER failure means the object's kind could
-/// not be established, and bash fails closed there: with `fstat` made to
-/// report `EIO`, Bash 5.2.21 and 5.3.0 both refuse `>/dev/null`.
-fn must_not_clobber(st: std::io::Result<Stat>) -> bool {
-	match st {
-		Ok(st) => st.kind == StatKind::File,
-		Err(err) => err.kind() != std::io::ErrorKind::Unsupported,
-	}
+/// question. Engine memory is no file on any filesystem and cannot be
+/// clobbered, which the object says itself ([`File::on_filesystem`]) and
+/// not through an errno: a provider can report `Unsupported` for a real
+/// file it could not stat.
+fn must_not_clobber(file: &dyn File) -> bool {
+	file.on_filesystem() && refuses_fs_object(file.stat())
 }
 
 /// `noclobber`'s plain reopen of an existing file: a regular file is
@@ -1458,7 +1465,7 @@ struct NoClobberReopen(Box<dyn FsPending<Box<dyn File>>>);
 impl NoClobberReopen {
 	fn judge(r: std::io::Result<Box<dyn File>>) -> std::io::Result<Box<dyn File>> {
 		match r {
-			Ok(file) if must_not_clobber(file.stat()) => {
+			Ok(file) if must_not_clobber(file.as_ref()) => {
 				Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, NoClobberRefused))
 			},
 			Err(err) => Err(NoClobberUnopenable::wrap(err)),
@@ -1538,7 +1545,10 @@ fn install_held(
 	flags: OpenFlags,
 	line: u32,
 ) -> Result<(), Halt> {
-	if flags.contains(OpenFlags::EXCL) && h.stat().is_some_and(must_not_clobber) {
+	if flags.contains(OpenFlags::EXCL)
+		&& h.on_filesystem()
+		&& h.stat().is_some_and(refuses_fs_object)
+	{
 		return Err(fail(k, vp, cx, line, Diag::NoClobber { path: path.clone() }));
 	}
 	for &fd in fds {

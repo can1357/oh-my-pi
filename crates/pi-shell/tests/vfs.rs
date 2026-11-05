@@ -29,11 +29,11 @@ struct DelayedFilesystem {
 	/// Every open of `virtual://existing` reports that the file exists,
 	/// the creating one and the plain one alike.
 	always_eexist:  bool,
-	/// Asking an OPENED file for its metadata fails with a real error,
-	/// while the path's own metadata still answers. The object's kind
-	/// cannot be established, which is not the same as the object having
-	/// no metadata at all.
-	metadata_fails: bool,
+	/// Asking an OPENED file for its metadata fails with this error, while
+	/// the path's own metadata still answers. The object's kind cannot be
+	/// established, which is not the same as the object having no metadata
+	/// at all — and a provider can report `ENOTSUP` for either.
+	metadata_errno: Option<i32>,
 }
 
 impl DelayedFilesystem {
@@ -104,7 +104,7 @@ impl FileSystem for DelayedFilesystem {
 		Ok(File::from_handle(DelayedFile {
 			file,
 			seekable: self.seekable,
-			metadata_fails: self.metadata_fails,
+			metadata_errno: self.metadata_errno,
 		}))
 	}
 
@@ -232,7 +232,7 @@ impl FileSystem for DelayedFilesystem {
 struct DelayedFile {
 	file:           File,
 	seekable:       bool,
-	metadata_fails: bool,
+	metadata_errno: Option<i32>,
 }
 
 #[async_trait]
@@ -257,8 +257,8 @@ impl FileHandle for DelayedFile {
 
 	async fn metadata(&self) -> io::Result<Metadata> {
 		delay().await;
-		if self.metadata_fails {
-			return Err(io::Error::from_raw_os_error(libc::EIO));
+		if let Some(errno) = self.metadata_errno {
+			return Err(io::Error::from_raw_os_error(errno));
 		}
 		self.file.metadata_async().await
 	}
@@ -280,7 +280,7 @@ fn provider(root: &Path, seekable: bool) -> Fs {
 		root: root.to_path_buf(),
 		seekable,
 		always_eexist: false,
-		metadata_fails: false,
+		metadata_errno: None,
 	}))
 }
 
@@ -291,18 +291,18 @@ fn provider_refusing_every_open(root: &Path) -> Fs {
 		root:           root.to_path_buf(),
 		seekable:       true,
 		always_eexist:  true,
-		metadata_fails: false,
+		metadata_errno: None,
 	}))
 }
 
 /// `virtual://` served from `root` by a [`DelayedFilesystem`] that cannot
 /// answer what an OPENED file is, though the path's own metadata answers.
-fn provider_whose_open_file_has_no_answer(root: &Path) -> Fs {
+fn provider_whose_open_file_has_no_answer(root: &Path, errno: i32) -> Fs {
 	Fs::new(Arc::new(DelayedFilesystem {
 		root:           root.to_path_buf(),
 		seekable:       true,
 		always_eexist:  false,
-		metadata_fails: true,
+		metadata_errno: Some(errno),
 	}))
 }
 
@@ -1103,38 +1103,43 @@ async fn noclobber_settles_when_a_nonregular_reopen_reports_the_file_exists() {
 /// `noclobber` fails closed when it cannot establish what the object it
 /// opened is. Bash does: with the target's `fstat` made to report `EIO`,
 /// Bash 5.2.21 and 5.3.0 both refuse `>/dev/null`, which they otherwise
-/// write. An object that HAS no filesystem metadata is a different thing
-/// and is still written (the here-document rows of
+/// write. `ENOTSUP` is the same answer, though it is also the errno a
+/// provider reports for an object that HAS no filesystem metadata — the
+/// object says which it is, not its errno. An object that really has none
+/// is still written (the here-document rows of
 /// `shell::tests::redirections`).
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn noclobber_refuses_an_object_whose_kind_it_cannot_establish() {
-	for alias in [false, true] {
-		for op in [">", "&>", ">&"] {
-			let directory = tempfile::tempdir().expect("isolated provider filesystem");
-			fs::write(directory.path().join("f"), b"ORIGINAL").expect("regular provider file");
-			let script = if alias {
-				format!("exec 3<>virtual://f; set -C; printf BAD {op}/dev/fd/3; echo s=$?")
-			} else {
-				format!("set -C; printf BAD {op}virtual://f; echo s=$?")
-			};
-			let run = tokio::time::timeout(
-				Duration::from_secs(20),
-				run_script(provider_whose_open_file_has_no_answer(directory.path()), None, &script),
-			)
-			.await
-			.expect("the run finishes");
-			assert_eq!(run.stdout, "s=1\n", "alias={alias} `{op}`: {}", run.stderr);
-			assert!(
-				run.stderr.contains("cannot overwrite existing file"),
-				"alias={alias} `{op}`: {}",
-				run.stderr
-			);
-			assert_eq!(
-				fs::read_to_string(directory.path().join("f")).expect("kept"),
-				"ORIGINAL",
-				"alias={alias} `{op}`"
-			);
+	for errno in [libc::EIO, libc::ENOTSUP] {
+		for alias in [false, true] {
+			for op in [">", "&>", ">&"] {
+				let directory = tempfile::tempdir().expect("isolated provider filesystem");
+				fs::write(directory.path().join("f"), b"ORIGINAL").expect("regular provider file");
+				let script = if alias {
+					format!("exec 3<>virtual://f; set -C; printf BAD {op}/dev/fd/3; echo s=$?")
+				} else {
+					format!("set -C; printf BAD {op}virtual://f; echo s=$?")
+				};
+				let run = tokio::time::timeout(
+					Duration::from_secs(20),
+					run_script(
+						provider_whose_open_file_has_no_answer(directory.path(), errno),
+						None,
+						&script,
+					),
+				)
+				.await
+				.expect("the run finishes");
+				let row = format!("errno={errno} alias={alias} `{op}`");
+				assert_eq!(run.stdout, "s=1\n", "{row}: {}", run.stderr);
+				assert!(run.stderr.contains("cannot overwrite existing file"), "{row}: {}", run.stderr);
+				assert_eq!(
+					fs::read_to_string(directory.path().join("f")).expect("kept"),
+					"ORIGINAL",
+					"{row}"
+				);
+			}
 		}
 	}
 }

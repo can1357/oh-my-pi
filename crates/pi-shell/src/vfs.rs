@@ -952,6 +952,10 @@ impl File for VfsFile {
 		self.desc.stat.map_err(io::Error::from)
 	}
 
+	fn on_filesystem(&self) -> bool {
+		true
+	}
+
 	fn os_handle(&self) -> Option<OsHandle> {
 		None
 	}

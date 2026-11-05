@@ -262,6 +262,15 @@ pub trait File: Send {
 	fn stat(&self) -> io::Result<Stat> {
 		Err(io::ErrorKind::Unsupported.into())
 	}
+	/// Whether this object is a file on a filesystem, so that asking the
+	/// filesystem about it is meaningful and a failure to answer means the
+	/// answer is unknown rather than absent. Engine memory — here-documents,
+	/// pipeline buffers, captures — is not, and says so here rather than
+	/// through the errno of [`Self::stat`], which a provider can also
+	/// report for a real file it could not stat.
+	fn on_filesystem(&self) -> bool {
+		false
+	}
 	/// Whether writes must pass through the engine to observe visible output.
 	fn observes_output(&self) -> bool {
 		false
