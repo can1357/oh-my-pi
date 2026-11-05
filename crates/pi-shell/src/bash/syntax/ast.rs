@@ -353,6 +353,10 @@ pub struct CaseArm {
 	pub patterns:  Vec<Word>,
 	/// Arm body (may be empty).
 	pub body:      List,
+	/// Span of the `)` that closes the patterns, as the parser read it. An
+	/// arm with neither a body nor a terminator ends there, and the text an
+	/// alias expands to has no byte after the last pattern to end it at.
+	pub rparen:    Option<Span>,
 	/// Arm terminator.
 	pub term:      CaseTerm,
 	/// Span of the terminator as the parser read it. `None` when the arm

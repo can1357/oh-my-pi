@@ -103,8 +103,9 @@ use crate::bash::{
 /// a conditional group the offset after its `)`, and version 20 records
 /// every compound command's own keyword and operator offsets (`do`, `done`,
 /// `then`, `fi`, `else`, `in`, `esac`, the arm terminators, the arithmetic
-/// header, and each closing `)`, `}`, `))` and `]]`).
-pub const IR_VERSION: u32 = 20;
+/// header, and each closing `)`, `}`, `))` and `]]`), and version 21 adds
+/// the `)` that closes a `case` arm's patterns.
+pub const IR_VERSION: u32 = 21;
 
 /// Opcodes.
 #[derive(

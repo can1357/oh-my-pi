@@ -675,7 +675,7 @@ impl Parser<'_> {
 					break;
 				}
 			}
-			self.expect(T::RParen)?;
+			let rparen = Some(self.expect(T::RParen)?.span());
 			self.skip_newlines()?;
 			let body =
 				if matches!(self.peek_kind()?, T::SemiSemi | T::SemiAnd | T::SemiSemiAnd | T::Esac) {
@@ -690,12 +690,18 @@ impl Parser<'_> {
 				T::SemiSemiAnd => CaseTerm::Continue,
 				T::Esac => {
 					// No terminator was written: the arm ends at `esac`.
-					arms.push(CaseArm { patterns, body, term: CaseTerm::Break, term_span: None });
+					arms.push(CaseArm {
+						patterns,
+						body,
+						rparen,
+						term: CaseTerm::Break,
+						term_span: None,
+					});
 					break;
 				},
 				_ => return Err(self.token_error(&t)),
 			};
-			arms.push(CaseArm { patterns, body, term, term_span: Some(t.span()) });
+			arms.push(CaseArm { patterns, body, rparen, term, term_span: Some(t.span()) });
 		}
 		self.close_compound();
 		Ok(CommandKind::Case(Case { word, arms, in_pos }))

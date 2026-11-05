@@ -1469,8 +1469,16 @@ mod shfmt {
 					let mut at = in_pos + 2;
 					for arm in &cs.arms {
 						let plo = arm.patterns.first().map_or(at, |w| w.span.lo);
+						// An arm with no body ends after the `)` that closes
+						// its patterns, which the parser recorded: in alias
+						// text there is no byte after the last pattern.
 						let body_end = arm.body.items.last().map_or_else(
-							|| arm.patterns.last().map_or(plo, |w| w.span.hi + 1),
+							|| {
+								arm.rparen.map_or_else(
+									|| arm.patterns.last().map_or(plo, |w| w.span.hi + 1),
+									|r| r.hi,
+								)
+							},
 							|it| it.and_or.span.hi,
 						);
 						let op: &[u8] = match arm.term {
