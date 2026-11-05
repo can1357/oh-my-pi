@@ -564,11 +564,12 @@ pub fn wait(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		}
 		if a.first().is_some_and(u8::is_ascii_digit) {
 			let Some(pid) = number(a).and_then(|n| u32::try_from(n).ok()) else {
-				// bash returns at once on a malformed pid: it waits for no
-				// operand it had already read, and its result names no child,
-				// so `wait -p` writes no variable.
+				// Stop reading operands, but still wait for the earlier ones.
+				// The malformed operand decides the status and names no child.
 				ctx.usage(format!("`{}': not a pid or valid job spec", a.as_bstr()));
-				return done(1);
+				status = 1;
+				kept = Some((0, 1));
+				break;
 			};
 			match child(ctx, pid) {
 				Child::Waitable(v) => {

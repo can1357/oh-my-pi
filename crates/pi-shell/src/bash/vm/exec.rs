@@ -31,7 +31,7 @@ use crate::bash::{
 	ir::{self, ComsubForm, Op, Opcode, SpawnKind, Unit},
 	mem::{self, Capture},
 	pattern::PatOpts,
-	store::{Attrs, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, TrapKey},
+	store::{Attrs, Change, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, TrapKey},
 	syntax::{CompleteCommand, Features, ParseError, ParseErrorKind, Parser, Pos, Resume},
 	zshopt::ZshOpt,
 };
@@ -1903,6 +1903,11 @@ pub fn start_procsub(
 	}
 	let child = vp.child(k, cx.store, Arc::clone(unit), entry, fds);
 	let vpid = child.vpid;
+	// The parent can read `$!` and call `wait` in this same slice, before
+	// the scheduler adopts the child. Publish its parentage and running
+	// state before publishing the pid, so every wait lookup can find it.
+	let rec = Record::Proc { parent: child.parent, status: None };
+	k.root.write(cx.store, Change::Put(Key::Proc(vpid), rec));
 	k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid });
 	k.spawned.push(Box::new(child));
 	vp.fds.set(fd, Some(mine));
