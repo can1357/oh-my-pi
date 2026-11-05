@@ -1687,3 +1687,35 @@ async fn a_failed_redirection_installs_no_descriptor_and_assigns_no_variable() {
 	.join("\n");
 	assert_eq!(output, expected);
 }
+
+/// A `{var}` redirection that succeeds assigns its variable with the
+/// descriptor already installed, which is the order bash's `F_DUPFD`
+/// gives, and which `BASH_XTRACEFD` depends on: its setter validates the
+/// number against the open descriptors and rejects one that names
+/// nothing. Regression: assigning before installing made `exec
+/// {BASH_XTRACEFD}>trace.log` print `BASH_XTRACEFD: 10: invalid value
+/// for trace file descriptor` where Bash 5.2.21 is silent, and the same
+/// for `>>` and `<>`.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_var_redirection_assigns_its_variable_after_installing_the_descriptor() {
+	let dir = tempfile::tempdir().expect("temporary directory");
+	let first = format!("cd '{}'", dir.path().display());
+	let script = [
+		first.as_str(),
+		"exec {BASH_XTRACEFD}>trace.log; printf 'trace=%s %s\\n' \"$?\" \"$BASH_XTRACEFD\"",
+		"exec {a}>>app.log; printf 'append=%s %s\\n' \"$?\" \"$a\"",
+		"exec {b}<>rw.log; printf 'rw=%s %s\\n' \"$?\" \"$b\"",
+		"set -x",
+		": hello",
+		"set +x",
+		"printf 'traced=%s\\n' \"$([ -s trace.log ] && echo yes || echo no)\"",
+	]
+	.join("\n");
+	let (result, output) = execute_captured(script).await;
+	assert_eq!(result.exit_code, Some(0), "{output:?}");
+	// No diagnostic on any line: the trace goes to `trace.log`, which the
+	// last row proves is not empty.
+	let expected = ["trace=0 10", "append=0 11", "rw=0 12", "traced=yes", ""].join("\n");
+	assert_eq!(output, expected);
+}

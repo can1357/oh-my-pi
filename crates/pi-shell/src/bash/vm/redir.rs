@@ -411,6 +411,30 @@ fn assign_fd_var(
 	Ok(())
 }
 
+/// Store a `{var}` redirection's fd, once the descriptor is installed and
+/// nothing else can fail. The order is bash's: `F_DUPFD` makes the
+/// descriptor and the assignment follows it, which is also what
+/// `BASH_XTRACEFD`'s setter needs -- it validates the number against the
+/// open descriptors. An assignment that fails (a readonly name) leaves
+/// the file made and the fd closed again, as bash leaves them.
+fn assign_var(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	target: &RedirFdIr,
+	fd: i32,
+	line: u32,
+) -> Result<(), Halt> {
+	let RedirFdIr::Var(name) = target else {
+		return Ok(());
+	};
+	if let Err(d) = assign_fd_var(k, vp, cx, name, fd, line) {
+		set_fd(vp, fd, None);
+		return Err(fail(k, vp, cx, line, d));
+	}
+	Ok(())
+}
+
 /// The fd number a `{var}` holds, if it holds one (through namerefs).
 fn var_fd(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, name: &[u8]) -> Option<i32> {
 	let (base, index) = builtins::split_subscript(name);
@@ -460,11 +484,8 @@ fn install(
 				let word = BString::from(fd.to_string());
 				return Err(limit_fail(k, vp, cx, line, &r.fd, word));
 			}
-			if let RedirFdIr::Var(name) = &r.fd {
-				assign_fd_var(k, vp, cx, name, fd, line).map_err(|d| fail(k, vp, cx, line, d))?;
-			}
 			set_fd(vp, fd, Some(FdRef::mem(MemBuf::new(target.to_vec()))));
-			Ok(())
+			assign_var(k, vp, cx, &r.fd, fd, line)
 		},
 		RedirKind::DupIn | RedirKind::DupOut => {
 			let closing = target.as_slice() == b"-";
@@ -500,10 +521,8 @@ fn install(
 					// bash's `dup2` fails; it names the source word.
 					return Err(limit_fail(k, vp, cx, line, &r.fd, word));
 				}
-				if let RedirFdIr::Var(name) = &r.fd {
-					assign_fd_var(k, vp, cx, name, fd, line).map_err(|d| fail(k, vp, cx, line, d))?;
-				}
 				set_fd(vp, fd, Some(h));
+				assign_var(k, vp, cx, &r.fd, fd, line)?;
 				if moving && src != fd {
 					set_fd(vp, src, None);
 					super::exec::coproc_fd_closed(k, vp, cx, src);
@@ -543,9 +562,9 @@ fn install(
 			let h = open_handle(k, vp, cx, target, flags, line)?;
 			// bash then moves the descriptor to its number, which fails past
 			// the limit: the file is made, the fd is not, and the variable is
-			// not assigned. The handle is installed only once nothing is left
-			// to fail, so the failure's own diagnostic is never written
-			// through the descriptor this redirection opened.
+			// not assigned. Nothing is installed before this guard, so the
+			// failure's own diagnostic is never written through the handle
+			// this redirection opened.
 			if past_limit(vp, cx, fd) {
 				let word = match &r.fd {
 					RedirFdIr::Var(_) => target.clone(),
@@ -553,11 +572,8 @@ fn install(
 				};
 				return Err(limit_fail(k, vp, cx, line, &r.fd, word));
 			}
-			if let RedirFdIr::Var(name) = &r.fd {
-				assign_fd_var(k, vp, cx, name, fd, line).map_err(|d| fail(k, vp, cx, line, d))?;
-			}
 			set_fd(vp, fd, Some(h));
-			Ok(())
+			assign_var(k, vp, cx, &r.fd, fd, line)
 		},
 	}
 }
@@ -1153,14 +1169,9 @@ fn zsh_install(
 		RedirKind::HereDoc | RedirKind::HereString => {
 			let fd = zsh_target_fd(k, vp, cx, r).map_err(|d| fail(k, vp, cx, line, d))?;
 			let h = FdRef::mem(MemBuf::new(target.to_vec()));
-			// The assignment is the redirection's last failure point (a
-			// readonly name), so it runs before the fd is installed: a
-			// failed redirection installs nothing, and its diagnostic is
-			// not written through a descriptor it just placed.
-			if let RedirFdIr::Var(name) = &r.fd {
-				assign_fd_var(k, vp, cx, name, fd, line).map_err(|d| fail(k, vp, cx, line, d))?;
+			if matches!(r.fd, RedirFdIr::Var(_)) {
 				set_fd(vp, fd, Some(h));
-				return Ok(());
+				return assign_var(k, vp, cx, &r.fd, fd, line);
 			}
 			place_on(k, vp, cx, fd, h, false)
 		},
@@ -1199,10 +1210,9 @@ fn zsh_install(
 				return Err(fail(k, vp, cx, line, zsh_msg(format!("{src}: bad file descriptor"))));
 			};
 			let fd = zsh_target_fd(k, vp, cx, r).map_err(|d| fail(k, vp, cx, line, d))?;
-			if let RedirFdIr::Var(name) = &r.fd {
-				assign_fd_var(k, vp, cx, name, fd, line).map_err(|d| fail(k, vp, cx, line, d))?;
+			if matches!(r.fd, RedirFdIr::Var(_)) {
 				set_fd(vp, fd, Some(h));
-				return Ok(());
+				return assign_var(k, vp, cx, &r.fd, fd, line);
 			}
 			place_on(k, vp, cx, fd, h, output)
 		},
@@ -1224,10 +1234,9 @@ fn zsh_install(
 			let fd = zsh_target_fd(k, vp, cx, r).map_err(|d| fail(k, vp, cx, line, d))?;
 			let flags = zsh_flags(k, vp, cx, r, target, line)?;
 			let h = zsh_open(k, vp, cx, target, flags, line)?;
-			if let RedirFdIr::Var(name) = &r.fd {
-				assign_fd_var(k, vp, cx, name, fd, line).map_err(|d| fail(k, vp, cx, line, d))?;
+			if matches!(r.fd, RedirFdIr::Var(_)) {
 				set_fd(vp, fd, Some(h));
-				return Ok(());
+				return assign_var(k, vp, cx, &r.fd, fd, line);
 			}
 			// `<>` is both: never part of a multio.
 			if r.op == RedirKind::ReadWrite {
