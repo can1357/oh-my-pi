@@ -5,6 +5,11 @@
  * call's listener, which takes holds for a call that already ended and
  * refuses the child's idle wait.
  */
+import { constants as fsConstants } from "node:fs";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { getDaemonRuntimeDir } from "@oh-my-pi/pi-utils";
 import { afterEach, beforeEach, expect, it, vi } from "bun:test";
 import { IrcBus } from "../../src/irc/bus";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
@@ -15,6 +20,7 @@ import type { ThreadService } from "../../src/thread/services";
 import { agentsThreadService } from "../../src/thread/services/agents";
 import { identityThreadService } from "../../src/thread/services/identity";
 import { SubagentWorker } from "../../src/thread/subagent-worker";
+import { canonicalProjectDir } from "../../src/launch/paths";
 import type { AwaitsProxyProbe, AwaitsProxyProbeGlobals } from "../fixtures/awaits-proxy-worker";
 
 const cleanups: Array<() => unknown> = [];
@@ -134,6 +140,11 @@ it("refuses within a tick when the forwarded awaits subscription was dropped", a
 
 	const parked = probe.childIdleText(30);
 	await waitFor(() => forwarded.length > 0);
+	// An RPC round trip to the worker: the reply can only be served after the
+	// idle block's own setup ran, so its first `waitersOn` read is already
+	// behind us. Without this barrier the hold below can land before that
+	// read and be found by it, which refuses with no re-read at all.
+	await probe.waiters();
 	// Main drops the worker's forwarded subscription: no change event can reach
 	// the worker from here on.
 	for (const detach of forwarded.splice(0)) detach();
@@ -145,6 +156,79 @@ it("refuses within a tick when the forwarded awaits subscription was dropped", a
 	const text = await parked;
 
 	expect(text).toContain("Nothing to wait for: `Main` is waiting on your result");
-	// Bounded by the re-read tick, not by the caller's 30 s deadline.
-	expect(Date.now() - started).toBeLessThan(10_000);
+	// Bounded by the one-second re-read tick, not by the caller's 30 s
+	// deadline: before the tick existed this returned at 30 s.
+	expect(Date.now() - started).toBeLessThan(5_000);
+}, 120_000);
+
+it("refuses within a tick when the block starts while the broker refresh hangs", async () => {
+	// The same lost notification, but landing while the wait's owned-service
+	// refresh is still outstanding: the broker token read blocks on a FIFO with
+	// no writer, so the refresh cannot finish on its own. The re-read has to
+	// cover that race too, or the call leaves `Main` blocked for its whole
+	// deadline.
+	const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "awaits-broker-"));
+	cleanups.push(() => fs.rm(cwd, { recursive: true, force: true }));
+	const runtimeDir = getDaemonRuntimeDir(await canonicalProjectDir(cwd));
+	await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
+	const token = path.join(runtimeDir, "broker.token");
+	expect(Bun.spawnSync(["mkfifo", token]).exitCode).toBe(0);
+
+	const registry = AgentRegistry.global();
+	for (const id of ["Main", "Child"] as const) {
+		registry.register({
+			id,
+			displayName: id,
+			kind: id === "Main" ? "main" : "sub",
+			...(id === "Child" ? { parentId: "Main" } : {}),
+			session: { isStreaming: true } as never,
+			status: "running",
+		});
+	}
+	const realOnChange = registry.awaits.onChange.bind(registry.awaits);
+	const forwarded: Array<() => void> = [];
+	vi.spyOn(registry.awaits, "onChange").mockImplementation(listener => {
+		const detach = realOnChange(listener);
+		forwarded.push(detach);
+		return detach;
+	});
+	const probe = await startWorker();
+	cleanups.push(() => probe.close());
+	// Release the token read before the probe is closed, however this test
+	// ends: the non-blocking open fails outright if the read is already gone,
+	// and otherwise hands the abandoned reader its bytes so nothing in the
+	// worker is left blocked on a FIFO that is about to be removed.
+	cleanups.push(async () => {
+		try {
+			const handle = await fs.open(token, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
+			await handle.writeFile("0".repeat(32), "utf8");
+			await handle.close();
+		} catch {
+			// No reader left: nothing to release.
+		}
+		await fs.rm(token, { force: true });
+	});
+
+	let settled = false;
+	const parked = probe.childIdleTextWithBroker(cwd, 30).then(text => {
+		settled = true;
+		return text;
+	});
+	// The refresh subscribes before it races the broker, so a forwarded
+	// subscription proves the token read is already outstanding.
+	await waitFor(() => forwarded.length > 0);
+	for (const detach of forwarded.splice(0)) detach();
+	vi.restoreAllMocks();
+
+	const started = Date.now();
+	const release = registry.awaits.hold("Main", ["Child"], { interruptible: false });
+	cleanups.push(() => release());
+	const text = await parked;
+	const elapsedMs = Date.now() - started;
+
+	expect(text).toContain("Nothing to wait for: `Main` is waiting on your result");
+	// The refresh is still hanging on the FIFO; only the re-read can have ended
+	// this. Before it covered the refresh, the call returned at its 30 s deadline.
+	expect(elapsedMs).toBeLessThan(5_000);
+	expect(settled).toBe(true);
 }, 120_000);

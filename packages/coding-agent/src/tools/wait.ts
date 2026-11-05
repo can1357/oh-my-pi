@@ -312,9 +312,11 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	 * trusted: client creation and connection setup do not observe the signal,
 	 * so the wait stops waiting on it at the deadline, an abort, or once
 	 * `awaited` reports an agent blocked on the caller of a call that would
-	 * idle. The abandoned refresh checks its aborted signal once each of those
-	 * steps ends and stops there, before it subscribes the session or changes
-	 * its service tracking.
+	 * idle, which is read both on a change notification and on a
+	 * {@link WAITERS_RECHECK_INTERVAL_MS} tick, so a lost notification costs
+	 * one tick rather than the broker's whole answer. The abandoned refresh
+	 * checks its aborted signal once each of those steps ends and stops there,
+	 * before it subscribes the session or changes its service tracking.
 	 */
 	async #refreshServices(
 		signal: AbortSignal | undefined,
@@ -341,15 +343,31 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		if (refreshSignal.aborted) onStop();
 		else refreshSignal.addEventListener("abort", onStop, { once: true });
 		// An agent may start blocking on the caller while the broker answers.
-		const unsubscribe = registry?.awaits.onChange(() => {
+		// The change notification is not trusted on its own, for the same
+		// reason the parked idle block does not trust it: a worker's registry
+		// is a proxy, and main drops a forwarded subscription after one failed
+		// delivery. So the table is re-read on the same tick as there. Without
+		// that re-read a lost notification keeps the caller's parent blocked
+		// for the broker's whole answer, up to the caller's entire `timeout`.
+		const checkAwaited = () => {
 			if (awaited().length > 0) awaitedStop.abort();
-		});
+		};
+		const recheck = setInterval(checkAwaited, WAITERS_RECHECK_INTERVAL_MS);
+		recheck.unref?.();
+		// Every release this race acquires registers here, so each one runs
+		// however the race ends: a refresh that threw must leave behind neither
+		// the subscription, nor the abort listener, nor the tick.
+		const cleanup: Array<() => void> = [
+			() => clearInterval(recheck),
+			() => refreshSignal.removeEventListener("abort", onStop),
+		];
+		const unsubscribe = registry?.awaits.onChange(checkAwaited);
+		if (unsubscribe) cleanup.push(unsubscribe);
 		let failure: { error: unknown } | undefined;
 		try {
 			failure = await Promise.race([refresh, stopped.promise]);
 		} finally {
-			unsubscribe?.();
-			refreshSignal.removeEventListener("abort", onStop);
+			releaseAll([...cleanup].reverse());
 		}
 		// An interrupt landing during the refresh (most often the notice of the
 		// job this wait is for) ends the wait as one landing just after it does:

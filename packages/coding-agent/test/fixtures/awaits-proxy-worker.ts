@@ -8,6 +8,7 @@
 import { MessagePort, parentPort } from "node:worker_threads";
 import { AsyncJobManager } from "../../src/async/job-manager";
 import { Settings } from "../../src/config/settings";
+import { closeDaemonClients } from "../../src/launch/client";
 import { holdOwnedJobs } from "../../src/registry/agent-awaits";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 // Loads the cyclic service graph before the isolated service imports below.
@@ -34,6 +35,11 @@ export interface AwaitsProxyProbe {
 	waiters(): Promise<string[]>;
 	/** The child's own `wait({ timeout })`, through the real tool. */
 	childIdleText(timeoutSeconds?: number): Promise<string>;
+	/**
+	 * The same call with the launch broker enabled against `cwd`, so the wait
+	 * runs its owned-service refresh against that project's broker token.
+	 */
+	childIdleTextWithBroker(cwd: string, timeoutSeconds: number): Promise<string>;
 	/** Finish the job and drop everything this probe holds. */
 	close(): Promise<void>;
 }
@@ -50,14 +56,20 @@ const manager = new AsyncJobManager({ onJobComplete: () => {} });
 const childRun = Promise.withResolvers<string>();
 let unsubscribe: (() => void) | undefined;
 
-function childSession(): ToolSession {
+function childSession(opts: { cwd?: string; launch?: boolean } = {}): ToolSession {
 	return {
-		cwd: process.cwd(),
-		settings: Settings.isolated({ "launch.enabled": false }),
+		cwd: opts.cwd ?? process.cwd(),
+		settings: Settings.isolated({ "launch.enabled": opts.launch ?? false }),
 		agentRegistry: AgentRegistry.global(),
 		asyncJobManager: manager,
 		getAgentId: () => "Child",
 	} as unknown as ToolSession;
+}
+
+async function idleText(session: ToolSession, timeoutSeconds: number): Promise<string> {
+	const result = await new WaitTool(session).execute("child-idle", { timeout: timeoutSeconds });
+	const first = result.content[0];
+	return first?.type === "text" ? (first.text ?? "") : "";
 }
 
 const probe: AwaitsProxyProbe = {
@@ -81,12 +93,11 @@ const probe: AwaitsProxyProbe = {
 		unsubscribe = AgentRegistry.global().onChange(() => {});
 	},
 	waiters: async () => AgentRegistry.global().awaits.waitersOn("Child"),
-	childIdleText: async (timeoutSeconds = 1) => {
-		const result = await new WaitTool(childSession()).execute("child-idle", { timeout: timeoutSeconds });
-		const first = result.content[0];
-		return first?.type === "text" ? (first.text ?? "") : "";
-	},
+	childIdleText: async (timeoutSeconds = 1) => idleText(childSession(), timeoutSeconds),
+	childIdleTextWithBroker: async (cwd, timeoutSeconds) =>
+		idleText(childSession({ cwd, launch: true }), timeoutSeconds),
 	close: async () => {
+		await closeDaemonClients();
 		unsubscribe?.();
 		childRun.resolve("done");
 		await manager.dispose({ timeoutMs: 1_000 });
