@@ -798,6 +798,20 @@ mod shfmt {
 		else_pos:  Option<u32>,
 	}
 
+	/// A position `n` bytes before `hi`, never before `lo`.
+	///
+	/// A node the parser read from the text an alias expanded to occupies no
+	/// source bytes, so there is no room for a token `n` bytes back: its one
+	/// position is `lo`, the offset just after the aliased word.
+	const fn back(lo: u32, hi: u32, n: u32) -> u32 {
+		if hi > lo + n { hi - n } else { lo }
+	}
+
+	/// A position `n` bytes after `lo`, never past `hi`.
+	const fn fwd(lo: u32, hi: u32, n: u32) -> u32 {
+		if lo + n < hi { lo + n } else { hi }
+	}
+
 	/// Source scanning helpers.
 	struct Ctx<'a> {
 		m:   &'a OffMap,
@@ -1528,8 +1542,12 @@ mod shfmt {
 					("X", self.test(e)),
 				]),
 				CommandKind::FuncDef(fd) => {
-					let name_lo = if fd.keyword { self.skip_ws(lo + 8) } else { lo };
-					let name_hi = name_lo + fd.name.len() as u32;
+					let name_lo = if fd.keyword {
+						self.skip_ws(fwd(lo, c.span.hi, 8))
+					} else {
+						lo
+					};
+					let name_hi = fwd(name_lo, c.span.hi, fd.name.len() as u32);
 					let (extra, names_hi) = self.extra_names(name_hi, &fd.extra_names);
 					let parens = self.at(self.skip_ws(names_hi)) == b'(';
 					let mut f = vec![
@@ -1571,8 +1589,8 @@ mod shfmt {
 						("Coproc", p(lo)),
 					];
 					if let Some(name) = &cp.name {
-						let nlo = self.skip_ws(lo + 6);
-						let nhi = nlo + name.len() as u32;
+						let nlo = self.skip_ws(fwd(lo, c.span.hi, 6));
+						let nhi = fwd(nlo, c.span.hi, name.len() as u32);
 						f.push((
 							"Name",
 							V::Obj(vec![
@@ -1902,7 +1920,7 @@ mod shfmt {
 			if a.append {
 				f.push(("Append", V::Bool(true)));
 			}
-			let nhi = a.span.lo + a.name.len() as u32;
+			let nhi = fwd(a.span.lo, a.span.hi, a.name.len() as u32);
 			f.push(("Name", self.lit_value(a.span.lo, nhi, &a.name)));
 			if let Some(i) = &a.index {
 				f.push(("Index", self.word(i, true)));
@@ -1918,7 +1936,7 @@ mod shfmt {
 					let alo = if self.at(alo) == b'(' {
 						alo
 					} else {
-						a.span.hi.saturating_sub(1)
+						back(a.span.lo, a.span.hi, 1)
 					};
 					f.push(("Array", self.array(alo, a.span.hi, elems)));
 				},
@@ -1934,7 +1952,7 @@ mod shfmt {
 					let elo = e
 						.key
 						.as_ref()
-						.map_or(e.value.span.lo, |k| k.span.lo.saturating_sub(1));
+						.map_or(e.value.span.lo, |k| back(lo, k.span.hi, k.span.hi - k.span.lo + 1));
 					let mut f = vec![("Pos", p(elo)), ("End", p(e.value.span.hi))];
 					if let Some(k) = &e.key {
 						f.push(("Index", self.word(k, true)));
@@ -1949,7 +1967,7 @@ mod shfmt {
 				("Pos", p(lo)),
 				("End", p(hi)),
 				("Lparen", p(lo)),
-				("Rparen", p(hi.saturating_sub(1))),
+				("Rparen", p(back(lo, hi, 1))),
 			];
 			if !es.is_empty() {
 				f.push(("Elems", V::Arr(es)));
@@ -1973,8 +1991,8 @@ mod shfmt {
 				if append {
 					f.push(("Append", V::Bool(true)));
 				}
-				f.push(("Name", self.lit_value(lo, lo + name.len() as u32, name)));
-				let vlo = lo + eq as u32 + 1;
+				f.push(("Name", self.lit_value(lo, fwd(lo, hi, name.len() as u32), name)));
+				let vlo = fwd(lo, hi, eq as u32 + 1);
 				if let Some(WordPart::Compound(elems)) = w.parts.get(1) {
 					f.push(("Array", self.array(vlo, hi, elems)));
 				} else if vlo < hi {
@@ -2073,7 +2091,7 @@ mod shfmt {
 						("Pos", p(lo)),
 						("End", p(hi)),
 						("Left", p(lo)),
-						("Right", p(hi.saturating_sub(1))),
+						("Right", p(back(lo, hi, 1))),
 					];
 					if matches!(part, WordPart::AnsiC(_)) {
 						f.push(("Dollar", V::Bool(true)));
@@ -2086,15 +2104,15 @@ mod shfmt {
 				},
 				WordPart::DQuote(inner) | WordPart::Locale(inner) => {
 					let dollar = matches!(part, WordPart::Locale(_));
-					let ilo = lo + 1 + u32::from(dollar);
-					let spans = part_spans(self.src, ilo, hi.saturating_sub(1), inner);
+					let ilo = fwd(lo, hi, 1 + u32::from(dollar));
+					let spans = part_spans(self.src, ilo, back(lo, hi, 1), inner);
 					let parts = self.parts(inner, &spans);
 					let mut f = vec![
 						("Type", s(b"DblQuoted")),
 						("Pos", p(lo)),
 						("End", p(hi)),
 						("Left", p(lo)),
-						("Right", p(hi.saturating_sub(1))),
+						("Right", p(back(lo, hi, 1))),
 					];
 					if dollar {
 						f.push(("Dollar", V::Bool(true)));
@@ -2111,7 +2129,7 @@ mod shfmt {
 						("Pos", p(lo)),
 						("End", p(hi)),
 						("Left", p(lo)),
-						("Right", p(hi.saturating_sub(1))),
+						("Right", p(back(lo, hi, 1))),
 					];
 					if !c.body.items.is_empty() {
 						f.push(("Stmts", self.list(&c.body)));
@@ -2131,7 +2149,7 @@ mod shfmt {
 						("Pos", p(lo)),
 						("End", p(hi)),
 						("Left", p(lo)),
-						("Right", p(hi.saturating_sub(if bracket { 1 } else { 2 }))),
+						("Right", p(back(lo, hi, if bracket { 1 } else { 2 }))),
 					];
 					if bracket {
 						f.push(("Bracket", V::Bool(true)));
@@ -2147,7 +2165,7 @@ mod shfmt {
 						("Pos", p(lo)),
 						("End", p(hi)),
 						("OpPos", p(lo)),
-						("Rparen", p(hi.saturating_sub(1))),
+						("Rparen", p(back(lo, hi, 1))),
 						("Op", s(if ps.output { b">(" } else { b"<(" })),
 					];
 					if !ps.body.items.is_empty() {
@@ -2169,21 +2187,21 @@ mod shfmt {
 			let p = |o| self.m.pos(o);
 			let mut f =
 				vec![("Type", s(b"ParamExp")), ("Pos", p(lo)), ("End", p(hi)), ("Dollar", p(lo))];
-			let mut name_lo = lo + 1;
+			let mut name_lo = fwd(lo, hi, 1);
 			if pp.braced {
-				f.push(("Rbrace", p(hi.saturating_sub(1))));
-				name_lo += 1;
+				f.push(("Rbrace", p(back(lo, hi, 1))));
+				name_lo = fwd(name_lo, hi, 1);
 			} else {
 				f.push(("Short", V::Bool(true)));
 			}
 			let excl = matches!(pp.op, ParamOp::Indirect | ParamOp::PrefixNames { .. }) || pp.indirect;
 			if excl {
 				f.push(("Excl", V::Bool(true)));
-				name_lo += 1;
+				name_lo = fwd(name_lo, hi, 1);
 			}
 			if pp.op == ParamOp::Length {
 				f.push(("Length", V::Bool(true)));
-				name_lo += 1;
+				name_lo = fwd(name_lo, hi, 1);
 			}
 			let mut name = Vec::new();
 			match &pp.name {
@@ -2191,7 +2209,7 @@ mod shfmt {
 				ParamName::Positional(n) => crate::bash::syntax::util::push_u32(&mut name, *n),
 				ParamName::Special(sp) => name.push(special_char(*sp)),
 			}
-			let name_hi = name_lo + name.len() as u32;
+			let name_hi = fwd(name_lo, hi, name.len() as u32);
 			f.push(("Param", self.lit_value(name_lo, name_hi, &name)));
 			match &pp.index {
 				Some(Subscript::At | Subscript::Star) => {
@@ -2204,9 +2222,16 @@ mod shfmt {
 						"Index",
 						V::Obj(vec![
 							("Type", s(b"Word")),
-							("Pos", p(name_hi + 1)),
-							("End", p(name_hi + 2)),
-							("Parts", V::Arr(vec![self.lit_with(name_hi + 1, name_hi + 2, at)])),
+							("Pos", p(fwd(name_hi, hi, 1))),
+							("End", p(fwd(name_hi, hi, 2))),
+							(
+								"Parts",
+								V::Arr(vec![self.lit_with(
+									fwd(name_hi, hi, 1),
+									fwd(name_hi, hi, 2),
+									at,
+								)]),
+							),
 						]),
 					));
 				},
@@ -2396,11 +2421,20 @@ mod shfmt {
 
 // ---- part spans
 // ---------------------------------------------------------------------
-
 /// Source spans of `parts`, which lie in `src[lo..hi]` (re-scanning the
 /// source; transformed text such as re-printed command substitutions is
 /// located by its delimiters).
+///
+/// A word the parser read from the text an alias expanded to occupies no
+/// source bytes: `lo == hi`, the one position just after the aliased word
+/// (`parser/cursor.rs` `off`). Every part of it was read from a buffer that
+/// is not the source, so none of them has a source span of its own, and
+/// scanning `src[lo..lo]` would answer with bytes of the aliased word or
+/// run backwards. Each part reports that one position instead.
 fn part_spans(src: &[u8], lo: u32, hi: u32, parts: &[WordPart]) -> Vec<(u32, u32)> {
+	if hi <= lo {
+		return vec![(lo, lo); parts.len()];
+	}
 	let mut sc = PartScan { src, i: lo as usize, hi: hi as usize };
 	let mut out = Vec::with_capacity(parts.len());
 	for p in parts {
