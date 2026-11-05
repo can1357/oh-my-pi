@@ -165,6 +165,26 @@ async fn an_arithmetic_for_header_error_runs_no_err_trap() {
 	.await;
 }
 
+/// The failing header ends its own loop, not the loop around it: the inner
+/// loop's record is the one discarded, so the enclosing loop keeps
+/// iterating and reports its own status.
+#[tokio::test]
+async fn an_arithmetic_for_header_error_ends_only_its_own_loop() {
+	run(
+		concat!(
+			"for i in 1 2; do for ((j=0@;j<2;j++)); do :; done; echo in=$?; done\necho out=$?\n",
+			"while :; do for ((k=0;1+;k++)); do echo never; done; echo w=$?; break; done\necho \
+			 after=$?\n",
+			"for i in 1 2; do for ((;;)); do echo body$i; break; done; echo in2=$?; done\necho \
+			 out2=$?\n",
+		),
+		"in=1\nin=1\nout=0\nw=1\nafter=0\nbody1\nin2=0\nbody2\nin2=0\nout2=0\n",
+		true,
+		0,
+	)
+	.await;
+}
+
 #[tokio::test]
 async fn malformed_arithmetic_fallback_reports_its_substitution_error() {
 	run(
