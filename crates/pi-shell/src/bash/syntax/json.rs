@@ -5,7 +5,7 @@ use alloc::{string::String, vec, vec::Vec};
 use crate::bash::syntax::{
 	JsonDialect, Offsets,
 	ast::*,
-	parser::{TextMode, parse_text},
+	parser::{TextMode, parse_text_at},
 	span::Span,
 };
 
@@ -1281,7 +1281,8 @@ mod shfmt {
 		/// final literal at the end of the delimiter line (`doc_end`).
 		fn text_parts(&self, lo: u32, hi: u32, doc_end: u32) -> Vec<V> {
 			let text = &self.src[lo as usize..hi as usize];
-			let Ok(w) = parse_text(text, crate::bash::syntax::Features::NONE, TextMode::HereDoc)
+			let Ok(w) =
+				parse_text_at(text, crate::bash::syntax::Features::NONE, TextMode::HereDoc, lo)
 			else {
 				return vec![self.lit_with(lo, doc_end, text)];
 			};

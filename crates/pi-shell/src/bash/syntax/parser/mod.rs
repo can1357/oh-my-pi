@@ -317,8 +317,29 @@ pub enum TextMode {
 /// line relative to `src`; the engine adds the context (`command
 /// substitution: `) and the base line.
 pub fn parse_text(src: &[u8], feat: Features, mode: TextMode) -> Result<Word, ParseError> {
+	parse_text_at(src, feat, mode, 0)
+}
+
+/// Parse `src` as one word in `mode`, reporting every offset as `base +
+/// <offset in `src`>`.
+///
+/// A here-document body is a buffer of its own, cut out of the source. Its
+/// parts must still point at the source for a consumer that slices it, so
+/// the caller that knows where the body starts passes that offset here
+/// rather than letting the spans stay relative to the body.
+///
+/// # Errors
+/// The same as [`parse_text`]: bash's message, with a line relative to
+/// `src`.
+pub fn parse_text_at(
+	src: &[u8],
+	feat: Features,
+	mode: TextMode,
+	base: u32,
+) -> Result<Word, ParseError> {
 	let mut p = Parser::new(src, feat, NO_ALIASES);
 	p.virt = 0;
+	p.base = base;
 	let mut word = p.text_word(mode)?;
 	finish::finish_word(&mut word, &p.docs);
 	Ok(word)
