@@ -1471,23 +1471,14 @@ mod shfmt {
 							CaseTerm::FallThrough => b";&",
 							CaseTerm::Continue => b";;&",
 						};
-						let term = arm.term_span.unwrap_or_else(|| {
-							let at = self.find(body_end, op);
-							let found = self
-								.src
-								.get(at as usize..)
-								.is_some_and(|r| r.starts_with(op));
-							if found {
-								Span::new(at, at + op.len() as u32)
-							} else {
-								Span::new(body_end, body_end)
-							}
-						});
-						let found = arm.term_span.is_some() || term.hi > term.lo;
-						let end = if found { term.hi } else { body_end };
+						// The parser records the terminator it read. `None`
+						// means the arm ended at `esac` with none written, so
+						// there is nothing to point at: scanning forward for
+						// one finds the terminator of an enclosing arm.
+						let end = arm.term_span.map_or(body_end, |t| t.hi);
 						let mut f = vec![("Pos", p(plo)), ("End", p(end)), ("Op", s(op))];
-						if found {
-							f.push(("OpPos", p(term.lo)));
+						if let Some(t) = arm.term_span {
+							f.push(("OpPos", p(t.lo)));
 						}
 						f.push((
 							"Patterns",
