@@ -18,6 +18,7 @@
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
+import { setWorkerHostJob } from "./services/async-jobs";
 import {
 	type ExecutorOptions,
 	type FollowUpTurnOptions,
@@ -139,6 +140,12 @@ export async function runSubprocessPlaced(
 	}
 	const startTime = Date.now();
 	const placement = await pool.settle(placed);
+	// What this worker is running, for the length of the run. A worker's job
+	// registrations hand their slots down from it, and the main side reads it
+	// here rather than trusting an id the worker sends: the manager's own
+	// per-run scope cannot cross a thread, but this placement can record what
+	// crossed it.
+	const forgetHost = placement.worker ? setWorkerHostJob(placement.worker.threadId, options.id) : undefined;
 	try {
 		const worker = placement.worker;
 		if (!worker || !request) return await runHere(options);
@@ -148,6 +155,7 @@ export async function runSubprocessPlaced(
 			error => lostRunResult(options, error, startTime),
 		);
 	} finally {
+		forgetHost?.();
 		placement.release();
 	}
 }

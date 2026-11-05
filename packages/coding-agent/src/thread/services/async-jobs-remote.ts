@@ -32,6 +32,7 @@ import type {
 	AsyncJobRun,
 	AsyncJobRunResult,
 	AsyncJobType,
+	SlotRequest,
 } from "../../async/job-manager";
 import type { JobTextSource, JobWidgetInputs, JobWidgetRegistry } from "../../job-widgets/types";
 import type { RemoteObject } from "../rpc";
@@ -42,6 +43,7 @@ import {
 	type JobFeedDelta,
 	type JobFeedSource,
 	toWireReason,
+	toWireSignal,
 	type WireJobFeed,
 	type WireJobRun,
 	type WireRegisterOptions,
@@ -122,6 +124,7 @@ export class RemoteAsyncJob implements AsyncJob {
 	readonly agentId?: string;
 	readonly agentOutputPublished?: boolean;
 	readonly queued?: boolean;
+	readonly waitingForSlot?: boolean;
 	readonly foreground?: boolean;
 	readonly process?: AsyncJobProcess;
 	readonly widgetInputs?: JobWidgetInputs;
@@ -146,6 +149,7 @@ export class RemoteAsyncJob implements AsyncJob {
 		this.agentId = wire.agentId;
 		this.agentOutputPublished = wire.agentOutputPublished;
 		this.queued = wire.queued;
+		this.waitingForSlot = wire.waitingForSlot;
 		this.foreground = wire.foreground;
 		const pids = wire.process?.pids ?? [];
 		this.process =
@@ -260,6 +264,8 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 			agentId: options?.agentId,
 			onProgress: options?.onProgress,
 			queued: options?.queued,
+			startImmediately: options?.startImmediately,
+			hostJobId: options?.hostJobId,
 			foreground: options?.foreground,
 			intent: options?.intent,
 			feed: feed?.wire(),
@@ -267,6 +273,11 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 		const id = this.#remote.callSync("register", type, label, wired, wireOptions);
 		if (local) this.#local.set(id, local);
 		return id;
+	}
+
+	async acquireSlot(signal: AbortSignal, request?: SlotRequest): Promise<() => void> {
+		const release = await this.#remote.call("acquireSlot", toWireSignal(signal), request);
+		return () => ignoreSettle(release());
 	}
 
 	publishCompleted(

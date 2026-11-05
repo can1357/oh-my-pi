@@ -979,6 +979,13 @@ export const cfgAsyncMaxJobs = register({
 	protocolDefault: ["rpc"],
 	type: "number",
 	default: 100,
+	ui: {
+		tab: "tools",
+		group: "Execution",
+		label: "Max Background Jobs",
+		description:
+			"Maximum background jobs running at once in a session and all its subagents (0 or less = no limit). Counts running async tasks (not tasks still waiting for a task.maxConcurrency slot), async bash, eval agent() handles and workpool() batches, and blocking bash and eval calls that can auto-background, from their start; at the cap such a call runs untracked in the foreground instead. A background job started at the cap is queued, not refused, and starts in arrival order as running jobs end. At the cap, work a subagent that already holds a slot starts takes that subagent's own slot, one at a time, instead of queueing behind it, so a tree of agents waiting on their own children keeps running; each slot can host one such chain, so a nested session can run up to this many jobs times one plus the nesting depth.",
+	},
 });
 
 // Print mode is single-shot by default: it disposes after the last prompt, cancelling the

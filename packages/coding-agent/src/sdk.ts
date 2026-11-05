@@ -2476,9 +2476,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// Every root owns its jobs and delivery sinks, even when another root is live.
 	// Children use the exact manager passed by their parent; the singleton remains
 	// only a legacy pointer to whichever root first installed it, never a routing fallback.
+	// `async.maxJobs` caps the running jobs of the root and every subagent under it; 0 lifts the cap.
 	const asyncJobManager = !options.parentTaskPrefix
 		? new AsyncJobManager({
-				maxRunningJobs: () => Math.min(100, cfgAsyncMaxJobs.get(settings)),
+				maxRunningJobs: () => cfgAsyncMaxJobs.get(settings),
+				watchMaxRunningJobs: onChange => cfgAsyncMaxJobs.listen(settings, onChange),
 			})
 		: undefined;
 	if (asyncJobManager) {

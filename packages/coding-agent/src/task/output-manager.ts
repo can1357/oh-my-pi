@@ -81,11 +81,19 @@ export class AgentOutputManager {
 		}
 	}
 
-	/** Pick the first free name (base, then `base-2`, `base-3`, …) and reserve it. */
+	/**
+	 * Pick the first free name (base, then `base-2`, `base-3`, …) and reserve it.
+	 *
+	 * A dot is the nesting separator in an agent id, so a requested name may not
+	 * contain one — the scan above already assumes that, and a top-level `A.B`
+	 * beside a top-level `A` reads as A's child to anything that parses the id,
+	 * including the running-job cap's hand-down. Replaced rather than rejected:
+	 * a spawn should not fail over a character in a label.
+	 */
 	#allocateUnique(id: string): string {
-		let candidate = id;
+		let candidate = id.replaceAll(".", "-");
 		for (let n = 2; this.#taken.has(candidate); n++) {
-			candidate = `${id}-${n}`;
+			candidate = `${id.replaceAll(".", "-")}-${n}`;
 		}
 		this.#taken.add(candidate);
 		return this.#parentPrefix ? `${this.#parentPrefix}.${candidate}` : candidate;

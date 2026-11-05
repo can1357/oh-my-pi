@@ -95,6 +95,17 @@ export interface BashExecutorOptions {
 	 */
 	onSessionShellBusy?: () => void;
 	/**
+	 * Return the cancelled result without waiting for the aborted shell to wind
+	 * down. Only an interactive foreground call sets this: a person pressing Esc
+	 * must see `[Command cancelled]` at once, and nothing is accounting for that
+	 * command. Every other caller — an async job holding a running-job slot, a
+	 * subagent's blocking call inside a task spawn that holds one — waits, so the
+	 * command is not reported finished while its shell is still being killed.
+	 * Defaulting to waiting is deliberate: a caller that forgets this option is
+	 * safe, and only an explicit opt-out can release work early.
+	 */
+	fastCancel?: boolean;
+	/**
 	 * Asked once the run settles: `false` means the agent session that owns
 	 * `sessionKey` was left (new, fork, switch, branch) while the command ran,
 	 * so the persistent shell it used is dropped instead of kept for a next call.
@@ -153,6 +164,14 @@ export interface BashResult extends OutputSummary {
  *  command line, so a hostile `.envrc` can't smuggle shell syntax through
  *  `unset`. `.envrc` never produces non-identifier names in practice. */
 const SAFE_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * How long a cancelled command waits for its shell to stop before it reports
+ * finished anyway. Long enough for a TERM handler; short enough that a native
+ * run which never returns (#10308) cannot pin its caller, or the running-job
+ * slot accounting for it, for the life of the process.
+ */
+const CANCEL_WINDDOWN_MAX_MS = 10_000;
 
 /** A `scheme://` working directory: it exists only in the embedded shell's injected filesystem. */
 const URL_CWD_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
@@ -841,6 +860,24 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				quarantineShellSession(sessionKey, runPromise, cleanupPromise);
 			} else {
 				void Promise.allSettled([runPromise, cleanupPromise]);
+			}
+			// Unless the caller asked for a fast answer, the command is not reported
+			// finished until its shell has stopped: whatever accounts for this run (a
+			// running-job slot) then cannot free while the process is still alive.
+			// Bounded, because a native run that never returns (#10308) must not hold
+			// its caller for the life of the process.
+			if (options?.fastCancel !== true) {
+				// The losing timer must not keep the loop alive: `Bun.sleep` refs it,
+				// so a cancelled command in a print run would add this whole window
+				// to process exit even once the shell had already stopped.
+				const winddown = Promise.withResolvers<void>();
+				const windownTimer = setTimeout(() => winddown.resolve(), CANCEL_WINDDOWN_MAX_MS);
+				windownTimer.unref();
+				try {
+					await Promise.race([Promise.allSettled([runPromise, cleanupPromise]), winddown.promise]);
+				} finally {
+					clearTimeout(windownTimer);
+				}
 			}
 			let notice = "Command cancelled";
 			if (winner.kind === "timeout" && deadlineTimeoutMs !== undefined) {

@@ -120,4 +120,21 @@ Agent Hub is the human-facing live session view. Adjacent commands and internal 
 
 Advisor rows are intentionally excluded from the agent-facing peer roster, `history://` index, and `agent://` messaging workflows.
 
+### Queued jobs
+
+When running jobs fill `async.maxJobs`, a new background job (async `bash`, an async `task` spawn, eval `agent()`, a `workpool()` batch, a `judge_batch()`) is accepted and queued instead of refused. The call returns its job id at once. `read proc://`, `wait` and `/jobs` show the job as `queued`, and `read proc://<id>` says it waits for a slot — those read live state and are the authoritative answer. A `task` call's own result also names its queued spawns, best-effort: a spawn asks for its slot a moment after the call has returned its ids, so one that starts queueing just after that is missing from the line while still showing as `queued` in the views above. Queued jobs count toward nothing; they start on their own in the order they were requested as running jobs end. Cancelling a queued job (`write proc://<id>/kill`, `/jobs kill`) removes it without running its work. A cancelled running job keeps its slot until its work has stopped, so the next queued job never runs alongside it. A task spawn shows as `queued` until its subagent starts: it first waits for its session's `task.maxConcurrency` permit, holding no slot, then for a slot.
+
+A run's slot covers work started inside that run. When the cap is full, such work takes the run's own slot instead of queueing behind it, one piece at a time, because a run waiting on work it started can never free its slot for it. So a tree of agents that each wait on their own children keeps running: each level makes progress one child at a time, and the cap still bounds how many independent lines of work start at the top. A leaf job — a shell command — starts nothing and never hands its slot down, so ordinary background work cannot exceed the cap. The overshoot is per chain, not per session: each of the cap's slots can host one chain, and each level of that chain adds one running job that does not count, so a session can run up to `async.maxJobs` × (1 + nesting depth) jobs at once. Size `async.maxJobs` for that if the cap is there to protect memory, CPU or a provider rate limit.
+
+A subagent running in a **worker thread** gets the hand-down too: the run is recorded when it is placed there, and its registrations name it. That covers `task.workerThreads`, which is where subagents past the first few run.
+
+**Four paths do not get it, and still wait at a full cap.** Whether work was started inside a run is known only within one execution context, and each of these crosses one without carrying it, so the work arrives with no run to attribute it to:
+
+- a backgrounded eval cell's own `agent()`, `tool.task()`, async `bash` or `judge_batch()`;
+- a parent and child both brought back by `--restore`, where the parent then waits on the child;
+- a speculatively launched agent (`task.speculativeLaunch`, on by default) that waits on a child it starts;
+- a woken follow-up turn or a cold-revived session running on a worker, which are placed without that record.
+
+In each, the waiting side holds a slot while the work it waits for is queued behind it, so that tree stops until something else ends. Raise `async.maxJobs` (or set `0` for no cap) when a session runs agents that start their own jobs on those paths. Covering them means carrying the originating run across each of those boundaries, which is tracked separately.
+
 See also [Task Agent Discovery and Selection](./task-agent-discovery.md), [Collaboration](./collab.md), and [Advisor, WATCHDOG.md, and WATCHDOG.yml](./advisor-watchdog.md).

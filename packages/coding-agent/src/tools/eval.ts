@@ -626,8 +626,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		};
 
 		const autoBgManager = session.asyncJobManager;
-		// At the running-job cap, fall through to direct foreground execution
-		// instead of failing every eval call until a slot frees up.
+		// At the running-job cap (or with jobs already queued there), run in the
+		// foreground: a foreground-backed job would queue behind them and stall the call.
 		if (!cfgEvalAutoBackgroundEnabled.get(session.settings) || !autoBgManager || autoBgManager.atCapacity) {
 			return await run(signal, emitToolUpdate, () => true);
 		}

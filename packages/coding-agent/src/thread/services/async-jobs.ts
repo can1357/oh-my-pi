@@ -34,6 +34,7 @@ import {
 	type AsyncJobManagerProtocol,
 	type AsyncJobWire,
 	fromWireReason,
+	fromWireSignal,
 	type JobFeedDelta,
 	toWireSignal,
 	type WireJobFeed,
@@ -152,6 +153,7 @@ export function toJobWire(job: AsyncJob): AsyncJobWire {
 		agentId: job.agentId,
 		agentOutputPublished: job.agentOutputPublished,
 		queued: job.queued,
+		waitingForSlot: job.waitingForSlot,
 		foreground: job.foreground,
 		process: process
 			? {
@@ -174,14 +176,55 @@ function toJobWires(jobs: readonly AsyncJob[]): AsyncJobWire[] {
 	return jobs.map(toJobWire);
 }
 
+/**
+ * The subagent runs each worker thread is hosting, recorded on this side as
+ * each run is placed. A worker's registrations hand their slots down from the
+ * run that made them, and the worker names which one — but the name is only
+ * honoured if this side placed that run on that thread.
+ *
+ * A set, not one id: the pool gives a worker a second run once it has as many
+ * workers as `task.workerThreads` allows, so several runs share a thread and
+ * each must be able to name its own. Keeping one id per thread would hand a
+ * run the slot of whichever sibling was placed last — an unrelated job's —
+ * and leave the other's work queued behind it, which is the deadlock this
+ * branch exists to remove.
+ */
+const workerHostJobs = new Map<ThreadId, Set<string>>();
+
+/** Record that `threadId` is hosting `jobId`'s run; returns the undo for that one run. */
+export function setWorkerHostJob(threadId: ThreadId, jobId: string): () => void {
+	let hosted = workerHostJobs.get(threadId);
+	if (!hosted) {
+		hosted = new Set();
+		workerHostJobs.set(threadId, hosted);
+	}
+	hosted.add(jobId);
+	return () => {
+		const live = workerHostJobs.get(threadId);
+		if (!live?.delete(jobId)) return;
+		if (live.size === 0) workerHostJobs.delete(threadId);
+	};
+}
+
+/** The host a worker may name: one this side placed on that thread, or none. */
+function placedHostJob(threadId: ThreadId, named: string | undefined): string | undefined {
+	return named !== undefined && workerHostJobs.get(threadId)?.has(named) === true ? named : undefined;
+}
+
 /** Main-side registration options for a worker job. */
-function mainRegisterOptions(options: WireRegisterOptions | undefined, feed: JobFeedMirror | undefined) {
+function mainRegisterOptions(
+	options: WireRegisterOptions | undefined,
+	feed: JobFeedMirror | undefined,
+	threadId: ThreadId,
+) {
 	const result: AsyncJobRegisterOptions = {
 		id: options?.id,
 		ownerId: options?.ownerId,
 		agentId: options?.agentId,
 		onProgress: options?.onProgress,
 		queued: options?.queued,
+		startImmediately: options?.startImmediately,
+		hostJobId: placedHostJob(threadId, options?.hostJobId),
 		foreground: options?.foreground,
 		intent: options?.intent,
 		process: feed?.process,
@@ -217,8 +260,48 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 					};
 					return run(wire);
 				},
-				mainRegisterOptions(options, feed),
+				mainRegisterOptions(options, feed, threadId),
 			);
+		},
+		// Tracked, so a worker that exits holding a slot gives it back. A worker
+		// that exits while still waiting gives up its place in line too, so a dead
+		// worker never shrinks the cap for good: the link's close aborts imported
+		// signals, and this exit watch does not depend on that ordering. An OS
+		// process the worker started and did not kill outlives both and is
+		// nobody's slot — killing a dead worker's children is process-group
+		// teardown, not job accounting.
+		acquireSlot: async (manager, signal, request) => {
+			// Same as registration: the host comes from what this link is running,
+			// never from the request, so a supplied id cannot borrow another job's
+			// slot. A worker's spawn is registered before its run asks for a slot,
+			// so the recorded host is already on the job by the time this runs.
+			const scoped = { ...request, hostJobId: placedHostJob(threadId, request?.hostJobId) };
+			const exited = new AbortController();
+			const stopWatchingExit = cleanups.track(threadId, () => exited.abort(new Error("Worker exited")));
+			let release: () => void;
+			// Only the worker's exit aborts `exited`; the caller's own wire signal
+			// aborts the combined signal instead. So reading it is exactly "the
+			// worker exited" — but it must be read BEFORE the teardown call, because
+			// `cleanups.track` hands back a run-once invoker of the tracked body, not
+			// an untracker, so that call aborts `exited` itself. Reading it after
+			// would be true every time and throw at the caller of every grant.
+			let exitWon: boolean;
+			try {
+				release = await manager.acquireSlot(AbortSignal.any([fromWireSignal(signal), exited.signal]), scoped);
+			} finally {
+				exitWon = exited.signal.aborted;
+				stopWatchingExit();
+			}
+			// The exit can also win after the grant: the slot is held, and this
+			// worker's cleanup set has already run. Tracking the release here would
+			// open a fresh set nothing will ever run, and the closed link cannot
+			// carry the release back, so the slot would be lost for the manager's
+			// life. Give it back here instead — the caller is gone either way.
+			if (exitWon) {
+				release();
+				throw exited.signal.reason;
+			}
+			return cleanups.track(threadId, release);
 		},
 		publishCompleted: (manager, type, label, result, options) =>
 			manager.publishCompleted(type, label, result, options),

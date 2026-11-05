@@ -212,8 +212,9 @@ export class JudgmentBatch {
 
 	/**
 	 * Kick off the fan-out and register the async job; returns once registered,
-	 * not once done. Without a job manager (or at the running-job limit) the run
-	 * still proceeds — only auto-delivery and `hub` addressing are lost.
+	 * not once done. At the running-job cap the job queues and the fan-out starts
+	 * when a slot frees. Without a job manager (or when registration fails) the
+	 * run still proceeds — only auto-delivery and `hub` addressing are lost.
 	 */
 	start(): void {
 		this.#emitProgressEvent();

@@ -50,6 +50,8 @@ export interface JobSnapshot {
 	id: string;
 	type: "bash" | "task" | "eval";
 	status: "running" | "completed" | "failed" | "cancelled";
+	/** Running job that has not started yet: it waits at the background job cap or behind its caller's gate. */
+	queued?: boolean;
 	label: string;
 	/** What the job is for, in the model's words (a process job's `label` is its command line). */
 	intent?: string;
@@ -442,10 +444,20 @@ function jobsRenderResult(
 			);
 		}
 		// Running jobs without a drawn tile (no widget, or past the cap) collapse
-		// into one count; the header already carries it while nothing settled.
-		const quietRunning = counts.running - shownWidgetJobs.length;
+		// into one count; the header already carries it while nothing settled. A
+		// job waiting for a running-job slot is `running` with `queued` set, so it
+		// would otherwise be counted as working — the one state the collapsed card
+		// most needs to distinguish, since the user's question is why nothing moves.
+		const quiet = sortedJobs.filter(job => job.status === "running" && !shownWidgetJobs.includes(job));
+		const quietQueued = quiet.filter(job => job.queued === true).length;
+		const quietRunning = quiet.length - quietQueued;
 		if (quietRunning > 0 && (settledJobs.length > 0 || shownWidgetJobs.length < widgetJobs.length)) {
 			lines.push(`${indent}${uiTheme.fg("dim", `${quietRunning} still running`)}`);
+		}
+		// Always shown: a queued job is the reason a wait is not progressing, and
+		// the header's running count does not separate it out.
+		if (quietQueued > 0) {
+			lines.push(`${indent}${uiTheme.fg("warning", `${quietQueued} queued at the background job cap`)}`);
 		}
 		return lines;
 	};
@@ -489,11 +501,15 @@ function jobsRenderResult(
 									job.status === "running" ? options.spinnerFrame : undefined,
 								)}${job.exitCode === undefined ? "" : `${uiTheme.sep.dot}${uiTheme.fg(job.exitCode === 0 ? "muted" : "error", `exit ${job.exitCode}`)}`}`;
 								const typeBadge = formatBadge(job.type, statusToColor(job.status), uiTheme);
+								const queuedTag =
+									job.status === "running" && job.queued === true
+										? `${uiTheme.sep.dot}${uiTheme.fg("warning", "queued")}`
+										: "";
 								const completion =
 									job.status === "running" && job.completionPercent !== undefined
 										? `${uiTheme.sep.dot}${uiTheme.fg("accent", `${job.completionPercent}%`)}`
 										: "";
-								const durationSuffix = `${completion}${uiTheme.sep.dot}${uiTheme.fg("dim", formatDuration(job.durationMs))}`;
+								const durationSuffix = `${queuedTag}${completion}${uiTheme.sep.dot}${uiTheme.fg("dim", formatDuration(job.durationMs))}`;
 								const displayId = truncateToWidth(
 									replaceTabs(job.id).replace(/\s+/g, " "),
 									Math.max(0, rowWidth - visibleWidth(`${icon} ${typeBadge} ${durationSuffix}`)),
@@ -514,6 +530,9 @@ function jobsRenderResult(
 								const continuationWidth = Math.max(0, rowWidth - visibleWidth("  "));
 								if (job.widget?.state === "live") {
 									const meta = compact([
+										job.status === "running" && job.queued === true
+											? uiTheme.fg("warning", "queued")
+											: undefined,
 										job.status === "running" && job.completionPercent !== undefined
 											? uiTheme.fg("accent", `${job.completionPercent}%`)
 											: undefined,

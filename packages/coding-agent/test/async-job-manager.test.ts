@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { AsyncJobError, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import {
+	AsyncJobError,
+	AsyncJobManager,
+	asyncJobStatusLabel,
+	queuedJobNotice,
+} from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { buildAsyncResultBatchMessage } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
 
 async function waitForJobEviction(manager: AsyncJobManager, jobId: string): Promise<void> {
@@ -474,67 +479,579 @@ describe("AsyncJobManager", () => {
 		}
 	});
 
-	test("enforces maxRunningJobs cap", () => {
-		const manager = new AsyncJobManager({
-			maxRunningJobs: 1,
-			onJobComplete: async () => {},
-		});
+	test("queues a job registered at the cap and starts queued jobs in arrival order as slots free", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 2, onJobComplete: async () => {} });
+		const started: string[] = [];
+		const releases = new Map<string, PromiseWithResolvers<void>>();
+		const register = (label: string): string => {
+			const release = Promise.withResolvers<void>();
+			releases.set(label, release);
+			return manager.register(
+				"bash",
+				label,
+				async () => {
+					started.push(label);
+					await release.promise;
+					return `${label} done`;
+				},
+				{ id: label },
+			);
+		};
+		try {
+			register("held-1");
+			register("held-2");
+			expect(manager.atCapacity).toBe(true);
+			// At main the third registration throws "Background job limit reached (2)".
+			const queuedIds = ["a", "b", "c"].map(register);
+			expect(started).toEqual(["held-1", "held-2"]);
+			for (const id of queuedIds) {
+				const job = manager.getJob(id)!;
+				expect(job.status).toBe("running");
+				expect(job.queued).toBe(true);
+				expect(job.waitingForSlot).toBe(true);
+				expect(asyncJobStatusLabel(job)).toBe("queued");
+			}
+			expect(manager.getRunningJobs().map(job => job.id)).toEqual(["held-1", "held-2", ...queuedIds]);
+			expect(queuedJobNotice(queuedIds.map(id => manager.getJob(id)))).toContain("Jobs `a`, `b`, `c` are queued");
 
-		const firstJobId = manager.register("bash", "first", async ({ signal }) => {
-			await new Promise<void>(resolve => {
-				signal.addEventListener("abort", () => resolve(), { once: true });
-			});
-			return "done";
-		});
+			releases.get("held-1")!.resolve();
+			await waitForCondition(() => started.length === 3);
+			expect(started).toEqual(["held-1", "held-2", "a"]);
+			expect(manager.getJob("a")).toMatchObject({ queued: false, waitingForSlot: false });
+			expect(manager.getJob("b")?.waitingForSlot).toBe(true);
 
-		expect(() =>
-			manager.register("bash", "second", async () => {
-				return "second";
-			}),
-		).toThrow(/Background job limit reached/);
+			releases.get("a")!.resolve();
+			await waitForCondition(() => started.length === 4);
+			expect(started).toEqual(["held-1", "held-2", "a", "b"]);
 
-		manager.cancel(firstJobId);
+			releases.get("held-2")!.resolve();
+			await waitForCondition(() => started.length === 5);
+			expect(started).toEqual(["held-1", "held-2", "a", "b", "c"]);
+			expect(manager.atCapacity).toBe(true);
+		} finally {
+			for (const release of releases.values()) release.resolve();
+			await manager.waitForAll();
+			await manager.dispose();
+		}
+		expect(started).toEqual(["held-1", "held-2", "a", "b", "c"]);
 	});
 
-	test("queued jobs do not count toward the cap until markRunning", async () => {
-		const manager = new AsyncJobManager({
-			maxRunningJobs: 1,
-			onJobComplete: async () => {},
-		});
-
-		const gate = Promise.withResolvers<void>();
-		const started = Promise.withResolvers<void>();
-		const release = Promise.withResolvers<void>();
-		const queuedJobId = manager.register(
-			"task",
-			"queued",
-			async ({ markRunning }) => {
-				await gate.promise;
-				markRunning();
-				started.resolve();
+	test("never runs more jobs than the cap while queued jobs start", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 3, onJobComplete: async () => {} });
+		let running = 0;
+		let peak = 0;
+		const order: number[] = [];
+		const releases = Array.from({ length: 20 }, () => Promise.withResolvers<void>());
+		const released = new Set<number>();
+		const ids = releases.map((release, index) =>
+			manager.register("bash", `job ${index}`, async () => {
+				running++;
+				peak = Math.max(peak, running);
+				order.push(index);
 				await release.promise;
-				return "queued done";
+				running--;
+				return "done";
+			}),
+		);
+		// End the newest running job each time, so jobs finish out of start order.
+		for (let remaining = releases.length; remaining > 0; remaining--) {
+			await waitForCondition(() => order.length - released.size === Math.min(3, remaining));
+			const newest = order.findLast(index => !released.has(index))!;
+			released.add(newest);
+			releases[newest]!.resolve();
+		}
+		await manager.waitForAll();
+		expect(peak).toBe(3);
+		expect(order).toEqual(ids.map((_, index) => index));
+		expect(ids.every(id => manager.getJob(id)?.status === "completed")).toBe(true);
+		await manager.dispose();
+	});
+
+	test("cancelling a queued job drops it without a slot and lets the next one start", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: async () => {} });
+		const hold = Promise.withResolvers<void>();
+		const calls: Array<{ label: string; aborted: boolean }> = [];
+		const body =
+			(label: string) =>
+			async ({ signal }: { signal: AbortSignal }): Promise<string> => {
+				calls.push({ label, aborted: signal.aborted });
+				if (signal.aborted) throw new Error(`${label} aborted before work`);
+				await hold.promise;
+				return `${label} done`;
+			};
+		const holderId = manager.register("bash", "holder", body("holder"));
+		const droppedId = manager.register("bash", "dropped", body("dropped"));
+		const nextId = manager.register("bash", "next", body("next"));
+		try {
+			expect(manager.cancel(droppedId)).toBe(true);
+			await manager.getJob(droppedId)!.promise;
+			const dropped = manager.getJob(droppedId)!;
+			expect(dropped.status).toBe("cancelled");
+			expect(dropped.waitingForSlot).toBe(false);
+			expect(dropped.errorText).toContain("never ran");
+			// Its run only saw the aborted signal; the holder still holds the only slot.
+			expect(calls).toEqual([
+				{ label: "holder", aborted: false },
+				{ label: "dropped", aborted: true },
+			]);
+			expect(manager.getJob(nextId)?.waitingForSlot).toBe(true);
+			expect(manager.getDeliveryState().pendingJobIds).not.toContain(droppedId);
+
+			hold.resolve();
+			await manager.getJob(holderId)!.promise;
+			await waitForCondition(() => manager.getJob(nextId)?.status === "completed");
+			expect(calls.map(call => call.label)).toEqual(["holder", "dropped", "next"]);
+			expect(manager.getJob(nextId)?.status).toBe("completed");
+		} finally {
+			hold.resolve();
+			await manager.waitForAll();
+			await manager.dispose();
+		}
+	});
+
+	test("cancelAll drops an owner's queued jobs without starting any of them", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: async () => {} });
+		const hold = Promise.withResolvers<void>();
+		const sawLiveSignal: string[] = [];
+		const register = (label: string, ownerId: string): string =>
+			manager.register(
+				"bash",
+				label,
+				async ({ signal }) => {
+					if (!signal.aborted) sawLiveSignal.push(label);
+					const aborted = Promise.withResolvers<void>();
+					if (signal.aborted) aborted.resolve();
+					else signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+					await Promise.race([hold.promise, aborted.promise]);
+					return label;
+				},
+				{ ownerId },
+			);
+		register("mine-running", "mine");
+		const mineQueued = [register("mine-q1", "mine"), register("mine-q2", "mine")];
+		const otherQueued = register("other-q", "other");
+		manager.cancelAll({ ownerId: "mine" });
+		await Promise.all(mineQueued.map(id => manager.getJob(id)!.promise));
+		await waitForCondition(() => sawLiveSignal.includes("other-q"));
+		expect(sawLiveSignal).toEqual(["mine-running", "other-q"]);
+		expect(mineQueued.map(id => manager.getJob(id)?.status)).toEqual(["cancelled", "cancelled"]);
+		hold.resolve();
+		await manager.waitForAll();
+		expect(manager.getJob(otherQueued)?.status).toBe("completed");
+		await manager.dispose();
+	});
+
+	test("a caller-gated job takes no slot; the slot its caller acquires waits in arrival order with queued jobs", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: async () => {} });
+		const hold = Promise.withResolvers<void>();
+		const gate = Promise.withResolvers<void>();
+		const started: string[] = [];
+		manager.register("bash", "holder", async () => {
+			await hold.promise;
+			return "held";
+		});
+		let bodyCalled = false;
+		const gatedId = manager.register(
+			"task",
+			"gated",
+			async ({ jobId, signal, markRunning }) => {
+				bodyCalled = true;
+				const release = await manager.acquireSlot(signal, { jobId });
+				try {
+					markRunning();
+					started.push("gated");
+					await gate.promise;
+					return "gated done";
+				} finally {
+					release();
+				}
 			},
 			{ queued: true },
 		);
-
-		// Queued job holds no slot: another job registers fine at cap 1.
-		const runningJobId = manager.register("bash", "running", async ({ signal }) => {
-			await new Promise<void>(resolve => {
-				signal.addEventListener("abort", () => resolve(), { once: true });
+		try {
+			// Its run starts at once; it asks for a slot only for the work it starts.
+			expect(bodyCalled).toBe(true);
+			await waitForCondition(() => manager.getJob(gatedId)?.waitingForSlot === true);
+			expect(manager.getJob(gatedId)).toMatchObject({ status: "running", queued: true });
+			const laterId = manager.register("bash", "later", async () => {
+				started.push("later");
+				return "later done";
 			});
-			return "done";
-		});
+			expect(manager.getJob(laterId)?.waitingForSlot).toBe(true);
 
-		// Free the slot, then let the queued job start: it now occupies the slot.
-		manager.cancel(runningJobId);
-		gate.resolve();
-		await started.promise;
-		expect(() => manager.register("bash", "third", async () => "third")).toThrow(/Background job limit reached/);
+			hold.resolve();
+			await waitForCondition(() => started.length === 1);
+			expect(started).toEqual(["gated"]);
+			expect(manager.getJob(gatedId)).toMatchObject({ queued: false, waitingForSlot: false });
+			expect(manager.getJob(laterId)?.waitingForSlot).toBe(true);
+
+			gate.resolve();
+			await manager.getJob(laterId)!.promise;
+			expect(started).toEqual(["gated", "later"]);
+		} finally {
+			hold.resolve();
+			gate.resolve();
+			await manager.waitForAll();
+			await manager.dispose();
+		}
+	});
+
+	test("cancelling a running job keeps its slot until its run settles", async () => {
+		// A cancelled run may still be winding down (a process handling TERM); the
+		// next queued job must not start alongside it.
+		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: async () => {} });
+		const woundDown = Promise.withResolvers<void>();
+		const started: string[] = [];
+		const firstId = manager.register("bash", "first", async ({ signal }) => {
+			started.push("first");
+			const aborted = Promise.withResolvers<void>();
+			signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+			await aborted.promise;
+			await woundDown.promise;
+			return "first stopped";
+		});
+		const nextId = manager.register("bash", "next", async () => {
+			started.push("next");
+			return "next done";
+		});
+		try {
+			expect(manager.cancel(firstId)).toBe(true);
+			expect(manager.getJob(firstId)?.status).toBe("cancelled");
+			for (let tick = 0; tick < 20; tick++) await scheduler.yield();
+			expect(started).toEqual(["first"]);
+			expect(manager.getJob(nextId)?.waitingForSlot).toBe(true);
+			expect(manager.atCapacity).toBe(true);
+
+			woundDown.resolve();
+			await manager.getJob(firstId)!.promise;
+			await manager.getJob(nextId)!.promise;
+			expect(started).toEqual(["first", "next"]);
+		} finally {
+			woundDown.resolve();
+			await manager.waitForAll();
+			await manager.dispose();
+		}
+	});
+
+	test("a slot request that aborts while it waits takes no slot; dispose refuses the rest", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: async () => {} });
+		const hold = Promise.withResolvers<void>();
+		manager.register("bash", "holder", async () => {
+			await hold.promise;
+			return "held";
+		});
+		const outcome = (request: Promise<() => void>): Promise<string> =>
+			request.then(
+				() => "granted",
+				(error: Error) => error.message,
+			);
+		const dropped = new AbortController();
+		const droppedRequest = outcome(manager.acquireSlot(dropped.signal));
+		const kept = manager.acquireSlot(new AbortController().signal);
+		dropped.abort(new Error("no longer needed"));
+		expect(await droppedRequest).toBe("no longer needed");
+		hold.resolve();
+		const release = await kept;
+		expect(manager.atCapacity).toBe(true);
+		const pending = outcome(manager.acquireSlot(new AbortController().signal));
+		await manager.dispose();
+		expect(await pending).toBe("Async job manager is disposed");
+		release();
+	});
+
+	test("startImmediately runs a job at once even at the cap", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: async () => {} });
+		const hold = Promise.withResolvers<void>();
+		manager.register("bash", "holder", async () => {
+			await hold.promise;
+			return "held";
+		});
+		let called = false;
+		const id = manager.register(
+			"task",
+			"adopted",
+			async () => {
+				called = true;
+				await hold.promise;
+				return "adopted";
+			},
+			{ startImmediately: true },
+		);
+		expect(called).toBe(true);
+		expect(manager.getJob(id)?.waitingForSlot).toBeUndefined();
+		hold.resolve();
+		await manager.waitForAll();
+		await manager.dispose();
+	});
+
+	test("a raised cap starts waiting jobs at the next registration", async () => {
+		let cap = 1;
+		const manager = new AsyncJobManager({ maxRunningJobs: () => cap, onJobComplete: async () => {} });
+		const hold = Promise.withResolvers<void>();
+		const started: string[] = [];
+		const register = (label: string): string =>
+			manager.register("bash", label, async () => {
+				started.push(label);
+				await hold.promise;
+				return label;
+			});
+		register("first");
+		register("second");
+		expect(started).toEqual(["first"]);
+		cap = 3;
+		register("third");
+		await waitForCondition(() => started.length === 3);
+		expect(started).toEqual(["first", "second", "third"]);
+		hold.resolve();
+		await manager.waitForAll();
+		await manager.dispose();
+	});
+
+	test("a raised cap starts waiting slot requests at the next registration or request", async () => {
+		// Raising async.maxJobs is how a user widens a saturated session. A
+		// registration that does not itself wait (a caller-gated task job) and a
+		// later slot request must both start what is already waiting.
+		let cap = 1;
+		const manager = new AsyncJobManager({ maxRunningJobs: () => cap, onJobComplete: async () => {} });
+		const hold = Promise.withResolvers<void>();
+		manager.register("bash", "holder", async () => {
+			await hold.promise;
+			return "held";
+		});
+		const idle = new AbortController().signal;
+		const first = manager.acquireSlot(idle);
+		const granted: string[] = [];
+		void first.then(() => granted.push("first"));
+		expect(manager.atCapacity).toBe(true);
+
+		cap = 3;
+		// A caller-gated job never waits itself, so only the pump can start the request.
+		manager.register("task", "gated", async () => "gated done", { queued: true });
+		await waitForCondition(() => granted.length === 1);
+
+		const second = await manager.acquireSlot(idle);
+		expect(manager.atCapacity).toBe(true);
+		second();
+		(await first)();
+		hold.resolve();
+		await manager.waitForAll();
+		await manager.dispose();
+	});
+
+	/**
+	 * The hand-down keys on the job whose run registered a job, so these drive
+	 * that relation rather than naming ids: a host registers its work from
+	 * inside its own run, exactly as every producer does.
+	 */
+	function hostRunning(manager: AsyncJobManager, label: string, body: () => Promise<void>) {
+		const settled = Promise.withResolvers<void>();
+		manager.register(
+			"eval",
+			label,
+			async () => {
+				await body();
+				settled.resolve();
+				return `${label} done`;
+			},
+			{ ownerId: "Main" },
+		);
+		return settled.promise;
+	}
+
+	test("work started inside a slot-holding run takes that run's slot instead of queueing behind it", async () => {
+		// The deadlock this prevents: the host holds the only slot and waits on
+		// work it started, so it can never free the slot that work is queued for.
+		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: async () => {} });
+		let childRan = false;
+		const host = hostRunning(manager, "host", async () => {
+			const childId = manager.register("task", "Child", async ({ signal }) => {
+				if (!signal.aborted) childRan = true;
+				return "child done";
+			});
+			await manager.getJob(childId)!.promise;
+		});
+		await host;
+		expect(childRan).toBe(true);
+		await manager.waitForAll();
+		await manager.dispose();
+	});
+
+	test("one hand-down at a time: a second piece of the host's work waits for the first", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: async () => {} });
+		const release = Promise.withResolvers<void>();
+		const started: string[] = [];
+		const host = hostRunning(manager, "host", async () => {
+			const first = manager.register("task", "First", async () => {
+				started.push("First");
+				await release.promise;
+				return "first done";
+			});
+			manager.register("task", "Second", async () => {
+				started.push("Second");
+				return "second done";
+			});
+			// Nothing fires when a request correctly waits, so this negative check
+			// needs a real moment; a wrong grant is synchronous inside register().
+			await Bun.sleep(20);
+			expect(started).toEqual(["First"]);
+			release.resolve();
+			await manager.getJob(first)!.promise;
+			await waitForCondition(() => started.length === 2);
+		});
+		await host;
+		expect(started).toEqual(["First", "Second"]);
+		await manager.waitForAll();
+		await manager.dispose();
+	});
+
+	test("work of the same owner the host did not start still queues, so one cell cannot double the cap", async () => {
+		// The over-admission a review arm measured when the lend was keyed on the
+		// owner: a shell command and a top-level spawn of the same agent ran
+		// beside the host at a cap of one, with no nesting at all.
+		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: async () => {} });
+		const release = Promise.withResolvers<void>();
+		const host = hostRunning(manager, "host", async () => {
+			await release.promise;
+		});
+		// Registered from outside the host's run: a sibling, not work inside it.
+		const leaf = manager.register("bash", "leaf", async () => "leaf done", { ownerId: "Main" });
+		expect(manager.getJob(leaf)?.waitingForSlot).toBe(true);
+
+		const idle = new AbortController().signal;
+		let spawnGranted = false;
+		const spawn = manager.acquireSlot(idle, { jobId: leaf });
+		void spawn.then(() => {
+			spawnGranted = true;
+		});
+		await Bun.sleep(20);
+		expect(spawnGranted).toBe(false);
 
 		release.resolve();
+		await host;
+		await waitForCondition(() => spawnGranted);
+		(await spawn)();
 		await manager.waitForAll();
-		expect(manager.getJob(queuedJobId)?.status).toBe("completed");
+		await manager.dispose();
+	});
+
+	test("the hand-down reads the recorded host, not the shape of an id", async () => {
+		// Two unrelated top-level agents can be named `A` and `A.B` in a session
+		// restored from disk. Reading a dotted prefix as ancestry handed `A`'s
+		// slot to `A.B`'s work; nothing about an id is consulted now.
+		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: async () => {} });
+		const release = Promise.withResolvers<void>();
+		manager.register(
+			"task",
+			"A",
+			async () => {
+				await release.promise;
+				return "A done";
+			},
+			{ id: "A", agentId: "A", ownerId: "Main" },
+		);
+		const child = manager.register("task", "A.B.C", async () => "child done", {
+			id: "A.B.C",
+			agentId: "A.B.C",
+			ownerId: "A.B",
+		});
+		expect(manager.getJob(child)?.waitingForSlot).toBe(true);
+		release.resolve();
+		await manager.waitForAll();
+		await manager.dispose();
+	});
+
+	test("a top-level request still queues at the cap: the hand-down needs a host that holds a slot", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: async () => {} });
+		const idle = new AbortController().signal;
+		const first = await manager.acquireSlot(idle, {});
+
+		const granted: string[] = [];
+		const second = manager.acquireSlot(idle, {});
+		void second.then(() => granted.push("Beta"));
+		// Same negative check as above: nothing fires when a request correctly waits.
+		await Bun.sleep(20);
+		expect(granted).toEqual([]);
+
+		first();
+		await waitForCondition(() => granted.length === 1);
+		(await second)();
+		await manager.dispose();
+	});
+
+	test("dispose settles queued jobs without starting their work", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: async () => {} });
+		const liveStarts: string[] = [];
+		const register = (label: string): string =>
+			manager.register("bash", label, async ({ signal }) => {
+				if (!signal.aborted) liveStarts.push(label);
+				const aborted = Promise.withResolvers<void>();
+				if (signal.aborted) aborted.resolve();
+				else signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+				await aborted.promise;
+				return label;
+			});
+		register("running");
+		const queuedId = register("queued");
+		const queued = manager.getJob(queuedId)!;
+		expect(await manager.dispose()).toBe(true);
+		expect(liveStarts).toEqual(["running"]);
+		expect(queued.status).toBe("cancelled");
+	});
+
+	/** Registers `count` jobs that each run until `release` settles; returns their ids. */
+	function registerHeldJobs(manager: AsyncJobManager, count: number, release: Promise<void>): string[] {
+		const ids: string[] = [];
+		for (let i = 0; i < count; i++) {
+			ids.push(
+				manager.register("bash", `held ${i}`, async () => {
+					await release;
+					return "done";
+				}),
+			);
+		}
+		return ids;
+	}
+
+	test("a cap of 0 means no limit: 101 jobs run at once", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 0, onJobComplete: async () => {} });
+		const release = Promise.withResolvers<void>();
+		try {
+			const ids = registerHeldJobs(manager, 101, release.promise);
+			expect(manager.getRunningJobs().map(job => job.id)).toEqual(ids);
+			expect(manager.atCapacity).toBe(false);
+		} finally {
+			release.resolve();
+			await manager.waitForAll();
+			await manager.dispose();
+		}
+	});
+
+	test("a negative cap means no limit too", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: () => -1, onJobComplete: async () => {} });
+		const release = Promise.withResolvers<void>();
+		try {
+			expect(registerHeldJobs(manager, 101, release.promise)).toHaveLength(101);
+			expect(manager.atCapacity).toBe(false);
+		} finally {
+			release.resolve();
+			await manager.waitForAll();
+			await manager.dispose();
+		}
+	});
+
+	test("a cap between 0 and 1 still allows one running job, as before", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: () => 0.5, onJobComplete: async () => {} });
+		const release = Promise.withResolvers<void>();
+		try {
+			registerHeldJobs(manager, 1, release.promise);
+			expect(manager.atCapacity).toBe(true);
+			const [secondId] = registerHeldJobs(manager, 1, release.promise);
+			expect(manager.getJob(secondId!)?.waitingForSlot).toBe(true);
+		} finally {
+			release.resolve();
+			await manager.waitForAll();
+			await manager.dispose();
+		}
 	});
 
 	test("evicts completed jobs after retention period", async () => {

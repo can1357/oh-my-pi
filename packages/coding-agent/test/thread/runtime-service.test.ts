@@ -12,7 +12,7 @@ import { cfgSessionMaxCost } from "../../src/session/settings";
 import type { MainThreadLink, SubagentMainApi, SubagentWorkerApi } from "../../src/thread/protocol";
 import { type RpcFrame, RpcLink } from "../../src/thread/rpc";
 import type { ThreadService, WorkerPeer } from "../../src/thread/services";
-import { asyncJobsThreadService } from "../../src/thread/services/async-jobs";
+import { asyncJobsThreadService, setWorkerHostJob } from "../../src/thread/services/async-jobs";
 import { runtimeThreadService } from "../../src/thread/services/runtime";
 import { settingsThreadService } from "../../src/thread/services/settings";
 import { EventBus } from "../../src/utils/event-bus";
@@ -201,6 +201,162 @@ describe("runtime thread services: async jobs", () => {
 		manager.publishCompleted("task", "after exit", { text: "late" }, { ownerId: "Worker" });
 		expect(await manager.drainDeliveries({ timeoutMs: 1_000 })).toBe(true);
 	});
+
+	it("counts a worker's slot against main's cap and frees it on release, on exit, and when exit beats the grant", async () => {
+		// The RPC path is not a thin forwarder: it has its own exit race, and it
+		// is how production task subagents take slots. The deadlock this branch
+		// fixes is in subagent spawning, so this path needs its own guard. Every
+		// phase ends by proving a later request is actually granted — "nothing
+		// threw" is what let a grant-throwing regression hide here once already.
+		const manager = new AsyncJobManager({ maxRunningJobs: 1 });
+		managers.push(manager);
+		/**
+		 * Takes and returns a real slot, so a phase passes only when the cap
+		 * genuinely has one to give — "nothing threw" is what hid a regression
+		 * here once. Every caller expects the grant, so this awaits the grant
+		 * itself; the cap exists only to turn a hang into a named failure, and is
+		 * far wider than the work so a loaded box cannot read as "no slot".
+		 */
+		const slotIsFree = async (): Promise<boolean> => {
+			try {
+				(await manager.acquireSlot(AbortSignal.timeout(30_000), {}))();
+				return true;
+			} catch {
+				return false;
+			}
+		};
+
+		const probe = await startWorker();
+		const releaseMain = await manager.acquireSlot(new AbortController().signal, {});
+		let granted = false;
+		const acquired = probe("acquireSlot", manager, "Worker").then(() => {
+			granted = true;
+		});
+		await probe("noop");
+		expect(granted).toBe(false);
+
+		releaseMain();
+		await acquired;
+		expect(manager.atCapacity).toBe(true);
+		await probe("releaseSlot");
+		expect(await slotIsFree()).toBe(true);
+
+		// A worker that exits holding a slot gives it back.
+		await probe("acquireSlot", manager, "Worker");
+		expect(manager.atCapacity).toBe(true);
+		const entry = started[0];
+		if (!entry) throw new Error("no worker");
+		for (const service of SERVICES) service.onWorkerExit?.(entry.peer, "crash");
+		expect(await slotIsFree()).toBe(true);
+
+		// A worker that exits while it waits gives up its place: its request must
+		// reject at the exit, not merely once unrelated work frees a slot, or a
+		// dead worker's request could still take the next slot that comes along.
+		const releaseAgain = await manager.acquireSlot(new AbortController().signal, {});
+		const waiter = await startWorker();
+		const waiterRequest = waiter("acquireSlot", manager, "Waiter").then(
+			() => "granted",
+			() => "rejected",
+		);
+		await waiter("noop");
+		const waiting = started[1];
+		if (!waiting) throw new Error("no second worker");
+		for (const service of SERVICES) service.onWorkerExit?.(waiting.peer, "crash");
+		expect(await waiterRequest).toBe("rejected");
+		releaseAgain();
+		expect(await slotIsFree()).toBe(true);
+
+		// The exit wins the race after the grant. `releaseLast()` resolves the
+		// waiter synchronously inside the grant pump, so firing the exit before
+		// awaiting puts it between the grant and the handler resuming — the
+		// ordering that tracked the release on a cleanup set that had already
+		// run, losing the slot for the manager's life. The premise is asserted:
+		// were grants ever deferred, the exit would win before the grant and this
+		// phase would quietly become a second copy of the one above.
+		const releaseLast = await manager.acquireSlot(new AbortController().signal, {});
+		const racer = await startWorker();
+		void racer("acquireSlot", manager, "Racer").catch(() => {});
+		await racer("noop");
+		const racing = started[2];
+		if (!racing) throw new Error("no third worker");
+		releaseLast();
+		// The premise, checked rather than assumed: the racer took the slot inside
+		// `releaseLast()`. This catches the slot simply not being taken; it cannot
+		// tell a synchronous grant from a deferred one, because `atCapacity` is
+		// also true while anything is queued. Defer grants and this phase becomes
+		// exit-before-grant coverage instead, which is why the correction it
+		// guards is stated in the handler rather than left to this assertion.
+		expect(manager.atCapacity).toBe(true);
+		for (const service of SERVICES) service.onWorkerExit?.(racing.peer, "crash");
+		expect(await slotIsFree()).toBe(true);
+
+		// The hand-down across the link: this is the behaviour the branch exists
+		// for, and the worker is where it is hardest, because the manager's own
+		// per-run scope cannot cross a thread. The main side records what each
+		// worker is running when it places the run, and the handler reads that —
+		// never an id the worker sends.
+		const hostRelease = Promise.withResolvers<void>();
+		const hostId = manager.register(
+			"task",
+			"WorkerHost",
+			async () => {
+				await hostRelease.promise;
+				return "host done";
+			},
+			{ id: "WorkerHost", agentId: "WorkerHost", ownerId: "Main" },
+		);
+		expect(manager.atCapacity).toBe(true);
+
+		// A link with nothing recorded against it names a live job as its host.
+		// A supplied id is just a string: honouring one hands the slot that job's
+		// own work is waiting for to unrelated work, so it must queue instead.
+		const forger = await startWorker();
+		let forgedGranted = false;
+		void forger("acquireSlot", manager, "Forged.Child", hostId).then(() => {
+			forgedGranted = true;
+		});
+		// Nothing fires when a request correctly waits, so this negative check
+		// needs a real moment; a wrong grant returns on the next round trip.
+		await Bun.sleep(250);
+		expect(forgedGranted).toBe(false);
+
+		// The link the host's run was actually placed on, recorded before it asks
+		// as a real placement records it. Same request, and it is granted while
+		// the host still holds: the hand-down the branch exists for, over the link.
+		const nested = await startWorker();
+		const nestedEntry = started.at(-1);
+		if (!nestedEntry) throw new Error("no worker entry");
+		const forgetHost = setWorkerHostJob(nestedEntry.peer.threadId, hostId);
+		// A worker hosts more than one run once the pool is at its worker limit.
+		// A sibling placed on the same thread, and then ended, must not take this
+		// run's record with it: holding one id per thread would have overwritten
+		// it here and dropped it on the undo, and the request below would be
+		// refused — or worse, earlier, granted the sibling's slot.
+		setWorkerHostJob(nestedEntry.peer.threadId, "SiblingRun")();
+		expect(await nested("acquireSlot", manager, "WorkerHost.Child", hostId)).toBe(true);
+		// The child runs on its host's slot, not a second counted one: the cap is
+		// still full. That is the other half of the documented bound — a hand-down
+		// adds a running job without adding a slot the pool could issue.
+		expect(manager.atCapacity).toBe(true);
+		// And the forged request is still waiting, not riding the same slot.
+		expect(forgedGranted).toBe(false);
+
+		await nested("releaseSlot");
+		forgetHost();
+		hostRelease.resolve();
+		// The forged request was never wrong to make, only wrong to hand a borrowed
+		// slot: once the host's own pool slot frees it is granted normally, which
+		// also proves it had really been queued rather than dropped.
+		for (let i = 0; i < 200 && !forgedGranted; i++) await Bun.sleep(25);
+		expect(forgedGranted).toBe(true);
+		await forger("releaseSlot");
+		expect(await slotIsFree()).toBe(true);
+		// Four real workers, each paying module init on a shared box. Bun's default
+		// 5 s bound is a quiet-machine number: this failed on one run in two under
+		// gate contention while every assertion still held. The bound is here to
+		// turn a hang into a named failure, not to measure anything, so it is far
+		// wider than the work.
+	}, 120_000);
 });
 
 describe("runtime thread services: cost gate, event bus, artifacts, storage", () => {

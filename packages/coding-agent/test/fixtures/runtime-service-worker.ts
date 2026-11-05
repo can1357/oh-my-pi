@@ -33,6 +33,7 @@ interface Body {
 const bodies = new Map<string, Body>();
 const deliveries: unknown[] = [];
 const events: unknown[] = [];
+let releaseSlot: (() => void) | undefined;
 
 function manager(value: unknown): AsyncJobManagerApi {
 	if (!(value instanceof RemoteAsyncJobManager)) throw new Error("expected a remote job manager");
@@ -138,6 +139,16 @@ const probe: RuntimeProbe = async (op, ...args) => {
 			return true;
 		case "deliveries":
 			return deliveries.splice(0);
+		case "acquireSlot":
+			releaseSlot = await manager(args[0]).acquireSlot(new AbortController().signal, {
+				jobId: args[1] === undefined ? undefined : String(args[1]),
+				hostJobId: args[2] === undefined ? undefined : String(args[2]),
+			});
+			return true;
+		case "releaseSlot":
+			releaseSlot?.();
+			releaseSlot = undefined;
+			return true;
 		case "cost": {
 			const gate = costGate(args[0]);
 			gate.record(Number(args[1]));

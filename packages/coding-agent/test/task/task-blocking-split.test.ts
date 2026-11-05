@@ -253,13 +253,12 @@ describe("task per-item blocking split", () => {
 			makeResult(options.id ?? "?", options.agent.name),
 		);
 
-		// A running non-queued filler job exhausts maxRunningJobs, so the
-		// worker spawn's registration throws while the scout still runs inline.
-		const filler = Promise.withResolvers<string>();
-		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: () => {} });
-		managers.push(manager);
-		manager.register("bash", "filler", () => filler.promise, { id: "filler" });
-
+		// A registration that throws (here, a manager that refuses it) fails the
+		// worker spawn's scheduling while the scout still runs inline.
+		const manager = createManager();
+		vi.spyOn(manager, "register").mockImplementation(() => {
+			throw new Error("registration refused");
+		});
 		const tool = await TaskTool.create(createSession({ manager }));
 		const result = await tool.execute("tc-mixed-schedfail", {
 			context: "ctx",
@@ -268,7 +267,6 @@ describe("task per-item blocking split", () => {
 				{ name: "WorkerThree", agent: "task", task: "Build." },
 			],
 		} as TaskParams);
-		filler.resolve("done");
 
 		const text = firstText(result);
 		expect(text).toContain('id="ScoutThree"');
@@ -277,5 +275,156 @@ describe("task per-item blocking split", () => {
 		expect(result.details?.results.map(r => r.id)).toEqual(["ScoutThree"]);
 		expect(result.details?.async?.state).toBe("failed");
 		expect(manager.getJob("WorkerThree")).toBeUndefined();
+	});
+
+	it("queues the async spawn of a mixed call at the background job cap and starts it when the cap frees", async () => {
+		mockDiscovery();
+		const started: string[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			started.push(options.id ?? "?");
+			return makeResult(options.id ?? "?", options.agent.name);
+		});
+		const filler = Promise.withResolvers<string>();
+		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: () => {} });
+		managers.push(manager);
+		manager.register("bash", "filler", () => filler.promise, { id: "filler" });
+
+		const tool = await TaskTool.create(createSession({ manager }));
+		const result = await tool.execute("tc-mixed-queued", {
+			context: "ctx",
+			tasks: [
+				{ name: "ScoutFour", agent: "scout", task: "Research." },
+				{ name: "WorkerFour", agent: "task", task: "Build." },
+			],
+		} as TaskParams);
+
+		const text = firstText(result);
+		expect(text).toContain('id="ScoutFour"');
+		expect(text).not.toContain("Failed to schedule");
+		expect(text).toContain("Job `WorkerFour` is queued");
+		expect(started).toEqual(["ScoutFour"]);
+		expect(manager.getJob("WorkerFour")).toMatchObject({ status: "running", queued: true, waitingForSlot: true });
+
+		filler.resolve("done");
+		await manager.waitForAll();
+		await manager.getJob("WorkerFour")?.promise;
+		expect(started).toEqual(["ScoutFour", "WorkerFour"]);
+		expect(manager.getJob("WorkerFour")?.status).toBe("completed");
+	});
+
+	async function until(predicate: () => boolean, what: string): Promise<void> {
+		const deadline = Date.now() + 5_000;
+		while (!predicate()) {
+			if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+			await Bun.sleep(5);
+		}
+	}
+
+	it("starts no more of a call's async subagents than the background job cap leaves free", async () => {
+		mockDiscovery();
+		const gates = new Map<string, PromiseWithResolvers<void>>();
+		const started: string[] = [];
+		let running = 0;
+		let peak = 0;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			const id = options.id ?? "?";
+			started.push(id);
+			running++;
+			peak = Math.max(peak, running);
+			const gate = Promise.withResolvers<void>();
+			gates.set(id, gate);
+			await gate.promise;
+			running--;
+			return makeResult(id, options.agent.name);
+		});
+		// The filler holds one of the two slots, so one subagent may run at a time.
+		const filler = Promise.withResolvers<string>();
+		const manager = new AsyncJobManager({ maxRunningJobs: 2, onJobComplete: () => {} });
+		managers.push(manager);
+		manager.register("bash", "filler", () => filler.promise, { id: "filler" });
+
+		const tool = await TaskTool.create(createSession({ manager }));
+		const result = await tool.execute("tc-fanout-cap", {
+			context: "ctx",
+			tasks: [
+				{ name: "WorkerA", agent: "task", task: "A." },
+				{ name: "WorkerB", agent: "task", task: "B." },
+				{ name: "WorkerC", agent: "task", task: "C." },
+			],
+		} as TaskParams);
+		try {
+			expect(firstText(result)).not.toContain("Failed to schedule");
+			// Settles either way: one spawn started and the rest waiting (the contract),
+			// or every spawn started at once (the defect), so a regression reads as a diff.
+			await until(
+				() =>
+					started.length === 3 ||
+					(started.length === 1 && ["WorkerB", "WorkerC"].every(id => manager.getJob(id)?.waitingForSlot)),
+				"the call's spawns to settle into started and waiting",
+			);
+			expect(started).toEqual(["WorkerA"]);
+			expect(manager.getJob("WorkerB")).toMatchObject({ status: "running", queued: true });
+
+			gates.get("WorkerA")!.resolve();
+			await until(() => started.length === 2, "the next spawn to start");
+			expect(started).toEqual(["WorkerA", "WorkerB"]);
+			expect(manager.getJob("WorkerC")?.waitingForSlot).toBe(true);
+			// While the filler holds a slot, never more than one subagent ran.
+			expect(peak).toBe(1);
+		} finally {
+			filler.resolve("done");
+			for (const id of ["WorkerA", "WorkerB", "WorkerC"]) {
+				await until(() => gates.has(id), `${id} to start`);
+				gates.get(id)!.resolve();
+			}
+			await manager.waitForAll();
+		}
+		expect(["WorkerA", "WorkerB", "WorkerC"].map(id => manager.getJob(id)?.status)).toEqual([
+			"completed",
+			"completed",
+			"completed",
+		]);
+	});
+
+	it("settles the card of an async spawn cancelled while it waits for a slot", async () => {
+		mockDiscovery();
+		const launched = vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			throw new Error(`launched ${options.id}`);
+		});
+		const filler = Promise.withResolvers<string>();
+		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: () => {} });
+		managers.push(manager);
+		manager.register("bash", "filler", () => filler.promise, { id: "filler" });
+
+		const tool = await TaskTool.create(createSession({ manager }));
+		const updates: TaskToolDetails[] = [];
+		const result = await tool.execute(
+			"tc-cancel-queued",
+			{ context: "ctx", tasks: [{ name: "NeverRan", agent: "task", task: "Build." }] } as TaskParams,
+			undefined,
+			update => {
+				if (update.details) updates.push(update.details);
+			},
+		);
+		try {
+			expect(firstText(result)).toContain("Job `NeverRan` is queued");
+			expect(result.details?.async?.state).toBe("running");
+			await until(() => manager.getJob("NeverRan")?.waitingForSlot === true, "the spawn to wait for a slot");
+
+			expect(manager.cancel("NeverRan")).toBe(true);
+			await manager.getJob("NeverRan")!.promise;
+			expect(manager.getJob("NeverRan")).toMatchObject({ status: "cancelled", waitingForSlot: false });
+			expect(launched).not.toHaveBeenCalled();
+			// The call's card reads the last update: it must not stay running.
+			const last = updates.at(-1);
+			expect(last?.async?.state).toBe("failed");
+			expect(last?.progress?.[0]?.status).toBe("aborted");
+			// The cancelled request took no slot: the next job waits only for the filler.
+			expect(manager.atCapacity).toBe(true);
+		} finally {
+			filler.resolve("done");
+			await manager.waitForAll();
+		}
+		expect(manager.atCapacity).toBe(false);
 	});
 });

@@ -26,6 +26,7 @@ import {
 	type AsyncJobReapResult,
 	type AsyncJobRunResult,
 	type AsyncJobType,
+	type SlotRequest,
 } from "../../async/job-manager";
 import type { JobWidgetBrief } from "../../job-widgets/types";
 import type { RpcMethod } from "../rpc";
@@ -52,6 +53,7 @@ export interface AsyncJobWire {
 	readonly agentId?: string;
 	readonly agentOutputPublished?: boolean;
 	readonly queued?: boolean;
+	readonly waitingForSlot?: boolean;
 	readonly foreground?: boolean;
 	/** The job's process: command line, start directory, and its live pids at projection time. */
 	readonly process?: { readonly command: string; readonly cwd: string; readonly pids: readonly number[] };
@@ -92,6 +94,8 @@ export interface WireRegisterOptions {
 	readonly agentId?: string;
 	readonly onProgress?: (text: string, details?: AsyncJobDetails) => void | Promise<void>;
 	readonly queued?: boolean;
+	readonly startImmediately?: boolean;
+	readonly hostJobId?: string;
 	readonly foreground?: boolean;
 	readonly intent?: string;
 	readonly feed?: WireJobFeed;
@@ -123,6 +127,8 @@ export type AsyncJobManagerProtocol = {
 		[type: AsyncJobType, label: string, run: WireJobRun, options: WireRegisterOptions | undefined],
 		string
 	>;
+	/** Resolves with the slot's release once one is free; see `AsyncJobManagerApi.acquireSlot`. */
+	acquireSlot: RpcMethod<[signal: AbortSignal, request: SlotRequest | undefined], WireUnsubscribe>;
 	publishCompleted: RpcMethod<
 		[
 			type: AsyncJobType,

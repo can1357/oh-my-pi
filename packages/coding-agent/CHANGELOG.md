@@ -134,6 +134,13 @@
 
 - Browser: a headless Chrome launched in-process by an SDK embedding or a `bun test` run now exits when that process is killed, instead of running on with its temporary profile on Linux and macOS ([#17908](https://github.com/can1357/oh-my-pi/pull/17908) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Changed
+
+- `async.maxJobs` now sets the cap on background jobs running at once in a session and its subagents without the fixed 100 ceiling, and `0` means no limit; the default stays 100 ([#17965](https://github.com/can1357/oh-my-pi/pull/17965) by [@sjawhar](https://github.com/sjawhar))
+- A background job started while running jobs fill `async.maxJobs` (async `bash`, async `task` spawns, eval `agent()`, `workpool()` batches, `judge_batch()`) is now queued instead of refused with `Background job limit reached`: the call returns its job id at once and says the job is queued, `read proc://`, `wait` and `/jobs` show it as `queued`, it counts toward nothing, and queued jobs start in arrival order as running jobs end; cancelling a queued job drops it without running its work. A task call's async subagents now also wait for a free slot, so one call can no longer start more of them than the cap allows ([#18006](https://github.com/can1357/oh-my-pi/pull/18006) by [@sjawhar](https://github.com/sjawhar))
+- A background subagent that starts work of its own at the `async.maxJobs` cap — a nested `task` spawn, an async `bash`, an eval job — now takes that subagent's own slot, one piece of work at a time, instead of queueing behind it. Before this, a subagent holding the last slot and waiting on a child it queued could never finish, and `omp -p --wait-async` never exited. A deep tree can now exceed the cap by at most one running job per level of nesting ([#18082](https://github.com/can1357/oh-my-pi/pull/18082) by [@sjawhar](https://github.com/sjawhar))
+- Raising `async.maxJobs` in a running session now starts waiting background jobs at once, instead of at the next registration or slot request ([#18082](https://github.com/can1357/oh-my-pi/pull/18082) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
