@@ -167,6 +167,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `snowflake`                      | `SNOWFLAKE_PAT` + `SNOWFLAKE_ACCOUNT`                                               |
 | `litellm`                        | `LITELLM_API_KEY`; optional `LITELLM_BASE_URL` for the proxy endpoint               |
 | `kilo`                           | `KILO_API_KEY`                                                                      |
+| `kenari`                         | `KENARI_API_KEY`                                                                    |
 | `zai`                            | `ZAI_API_KEY`                                                                       |
 | `zenmux`                         | `ZENMUX_API_KEY`                                                                    |
 | `zhipu-coding-plan`              | `ZHIPU_API_KEY`                                                                     |

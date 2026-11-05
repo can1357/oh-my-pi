@@ -40,6 +40,7 @@ export type KnownProvider =
 	| "helmcode"
 	| "huggingface"
 	| "inception"
+	| "kenari"
 	| "kilo"
 	| "kimi-code"
 	| "litellm"

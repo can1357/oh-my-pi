@@ -1,0 +1,13 @@
+auth "kenari" {
+	name "Kenari"
+	login "api-key" {
+		auth-url "https://kenari.id/keys"
+		instructions "Create an API key in the Kenari dashboard. It starts with kn-."
+		prompt "Paste your Kenari API key" placeholder="kn-..."
+		// GET /v1/models is public, so it cannot check a key. The quota route
+		// rejects a bad key with 401 and does not spend balance. optional keeps
+		// an outage from blocking login. trust-forbidden keeps a shared key,
+		// which this route answers with 403 and which can still call a model.
+		validate "models-endpoint" label="Kenari" url="https://kenari.id/v1/account/quota" optional=#true trust-forbidden=#true
+	}
+}

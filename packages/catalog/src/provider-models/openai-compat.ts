@@ -3910,6 +3910,50 @@ export function zenmuxModelManagerOptions(config?: ZenMuxModelManagerConfig): Mo
 }
 
 // ---------------------------------------------------------------------------
+// Kenari
+// ---------------------------------------------------------------------------
+
+const KENARI_BASE_URL = "https://kenari.id/v1";
+
+/**
+ * Kenari's public list prices in micro-rupiah. Leave cost at 0: the catalog
+ * cost fields are USD per 1M tokens. A row without `max_output_tokens` keeps
+ * maxTokens null instead of an invented cap.
+ */
+function mapKenariModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+): ModelSpec<"openai-completions"> | null {
+	if (entry.tool_call !== true) return null;
+	const modalities = isRecord(entry.modalities) ? entry.modalities.input : undefined;
+	return {
+		...defaults,
+		name: toModelName(entry.name, defaults.name),
+		reasoning: entry.reasoning === true,
+		input: toInputCapabilities(modalities),
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: toPositiveNumber(entry.context_length, null),
+		maxTokens: toPositiveNumber(entry.max_output_tokens, null),
+	};
+}
+
+export function kenariModelManagerOptions(config?: ModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+	const baseUrl = (config?.baseUrl ?? KENARI_BASE_URL).replace(/\/$/, "");
+	return {
+		providerId: "kenari",
+		dynamicModelsAuthoritative: true,
+		fetchDynamicModels: () =>
+			fetchOpenAICompatibleModels({
+				api: "openai-completions",
+				provider: "kenari",
+				baseUrl,
+				mapModel: mapKenariModel,
+				fetch: config?.fetch,
+			}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 10.6 Kilo Gateway
 // ---------------------------------------------------------------------------
 
