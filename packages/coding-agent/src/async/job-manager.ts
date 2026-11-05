@@ -745,6 +745,11 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			structured: result.structured,
 			agentOutputPublished: result.agentOutputPublished,
 		};
+		// Same chain `register` records: without it this row is chainless, so the
+		// ownership rule falls back to the bare id and a superseded owner's
+		// cleanup evicts a result belonging to whoever holds that id now.
+		const chain = this.#ownerChain(job.ownerId);
+		if (chain) this.#ownerLineages.set(job, chain);
 		this.#jobs.set(id, job);
 		this.#recordAgentReply(job);
 		this.#enqueueDelivery(id, result.text);

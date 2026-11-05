@@ -573,6 +573,22 @@ describe("AsyncJobManager", () => {
 		await manager.waitForAll();
 	});
 
+	test("a published result belongs to the incarnation that produced it, not to the id's next agent", async () => {
+		const registry = new AgentRegistry();
+		const manager = new AsyncJobManager({ onJobComplete: async () => {}, agents: registry });
+		agent(registry, "Main");
+		agent(registry, "Lane", "Main");
+		// A finished subagent's result, published rather than run.
+		const published = manager.publishCompleted("task", "lane result", { text: "done" }, { ownerId: "Lane" });
+		// The id is then taken by a different agent, whose cleanup evicts by id.
+		const replacement = agent(registry, "Lane", "Main");
+
+		manager.evictCompletedJobs({ ownerId: "Lane", includeDescendants: true, agentLineage: replacement.lineage });
+
+		expect(manager.getJob(published)?.resultText).toBe("done");
+		await manager.waitForAll();
+	});
+
 	test("a job whose body ends its own agent while registering is cancelled by that end", async () => {
 		const registry = new AgentRegistry();
 		const manager = new AsyncJobManager({ onJobComplete: async () => {}, agents: registry });

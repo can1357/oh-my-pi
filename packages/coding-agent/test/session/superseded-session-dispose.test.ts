@@ -163,3 +163,80 @@ it("disposing a superseded session leaves the replacement agent's own work and i
 		authStorage.close();
 	}
 }, 60_000);
+
+it("a superseded session that never ran a turn still cancels the work it owns", async () => {
+	const cwd = path.join(root, "home", "work");
+	const authStorage = createInMemoryAuthStorage();
+	authStorage.keys.setRuntime("mock", "test-key");
+	const modelRegistry = new ModelRegistry(authStorage);
+	const mock = createMockModel({ handler: () => ({ content: ["ok"] }) });
+	const catalogAvailable = modelRegistry.getAvailable.bind(modelRegistry);
+	vi.spyOn(modelRegistry, "getAvailable").mockImplementation(kind => [mock, ...catalogAvailable(kind)]);
+	const registry = AgentRegistry.global();
+	const jobManager = new AsyncJobManager({ agents: registry });
+	const settings = Settings.isolated({
+		"async.enabled": true,
+		"advisor.enabled": false,
+		"compaction.enabled": false,
+		"retry.enabled": false,
+		modelRoles: { default: "mock/mock-model" },
+	});
+	const options = {
+		cwd,
+		agentDir: path.join(root, "home", ".omp", "agent"),
+		authStorage,
+		modelRegistry,
+		model: mock,
+		settings,
+		agentRegistry: registry,
+		asyncJobManager: jobManager,
+		disableExtensionDiscovery: true,
+		skills: [],
+		contextFiles: [],
+		promptTemplates: [],
+		slashCommands: [],
+		enableMCP: false,
+		enableLsp: false,
+		skipPythonPreflight: true,
+		toolNames: [],
+	};
+	const superseded = await createAgentSession({
+		...options,
+		agentId: "Shared",
+		parentAgentId: "Main",
+		parentTaskPrefix: "Shared",
+		sessionManager: SessionManager.create(cwd, path.join(root, "sessions-pre-a")),
+	});
+	// Work this session owns before it has ever run a turn: the window a
+	// first-agent-event hook cannot cover, because no event has happened.
+	const stop = Promise.withResolvers<void>();
+	const ownWork = jobManager.register(
+		"bash",
+		"work owned before the first turn",
+		async ({ signal }) => {
+			signal.addEventListener("abort", () => stop.resolve(), { once: true });
+			await stop.promise;
+			return "stopped";
+		},
+		{ ownerId: "Shared" },
+	);
+	const replacementSession = await createAgentSession({
+		...options,
+		agentId: "Shared",
+		parentAgentId: "Main",
+		parentTaskPrefix: "Shared",
+		sessionManager: SessionManager.create(cwd, path.join(root, "sessions-pre-b")),
+	});
+
+	try {
+		await superseded.session.dispose();
+
+		expect(jobManager.getJob(ownWork)?.status).toBe("cancelled");
+	} finally {
+		stop.resolve();
+		jobManager.cancel(ownWork);
+		await replacementSession.session.dispose();
+		await jobManager.dispose({ timeoutMs: 500 });
+		authStorage.close();
+	}
+}, 60_000);

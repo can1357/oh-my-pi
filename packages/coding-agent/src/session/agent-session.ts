@@ -1230,6 +1230,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	readonly #agentRegistry: AgentRegistryApi | undefined;
 	/** Lineage of the ref this session runs as ({@link AgentSession.#recordOwnAgentLineage}). */
 	#ownAgentLineage: number | undefined;
+	/** Drops the registry watch that records {@link AgentSession.#ownAgentLineage}; cleared once it fires. */
+	#unsubscribeOwnRef: (() => void) | undefined;
 	#agentKind: "main" | "sub" = "main";
 	#scoutAllowedBySpawnPolicy = true;
 	#providerSessionId: string | undefined;
@@ -2729,6 +2731,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				build: buildAsyncResultBatchMessage,
 			});
 		}
+		// The registry attaches this session to its ref after construction, and
+		// that event is the earliest — and for a session that owns a job before
+		// its first turn, the only — moment this session can learn which ref it
+		// runs as. It must know before it can be superseded, because afterwards
+		// its id names the replacement and nothing can recover its own lineage.
+		if (this.#agentRegistry && this.#agentId) {
+			this.#unsubscribeOwnRef = this.#agentRegistry.onChange(event => {
+				if (event.ref.id !== this.#agentId || event.ref.session !== this) return;
+				this.#ownAgentLineage ??= event.ref.lineage;
+				this.#unsubscribeOwnRef?.();
+				this.#unsubscribeOwnRef = undefined;
+			});
+		}
 		this.agent.setAssistantMessageEventInterceptor((message, assistantMessageEvent) => {
 			this.#loopGuards.onAssistantEvent(message, assistantMessageEvent);
 		});
@@ -3288,6 +3303,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	get asyncJobManager(): AsyncJobManagerApi | undefined {
+		// Every job this session can own is registered through this manager, and
+		// this getter is the only way to reach it — so recording here closes the
+		// window a first-agent-event hook alone leaves open: a session that owns
+		// a job before its first turn, is then superseded, and could no longer
+		// name its own tree at cleanup time. See #recordOwnAgentLineage.
+		this.#recordOwnAgentLineage();
 		return this.#asyncJobManager;
 	}
 
@@ -6571,6 +6592,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// dead-letter rather than enqueue a follow-up into a disposing session.
 		this.#unregisterAsyncDeliverySink?.();
 		this.#unregisterAsyncDeliverySink = undefined;
+		this.#unsubscribeOwnRef?.();
+		this.#unsubscribeOwnRef = undefined;
 		const manager = this.#ownedAsyncJobManager;
 		// The shutdown reason is reserved for the top-level session that OWNS the
 		// manager — the genuine process/handled-shutdown path — so the task
