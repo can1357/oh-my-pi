@@ -12,22 +12,20 @@ describe("Editor atom table", () => {
 		expect(editor.getExpandedText()).toBe("before [Image #1, 800x600] ");
 	});
 
-	it("keeps each run's own token when a host rebuilds the buffer from runs", () => {
+	it("expands the longest label first so #1 never corrupts #10", () => {
 		const editor = new Editor(defaultEditorTheme);
-		editor.setRuns([{ atom: "🖼 #10", expansion: "[Image #10]" }, " ", { atom: "🖼 #1", expansion: "[Image #1]" }]);
-		expect(editor.getText()).toBe("🖼 #10 🖼 #1");
+		for (let n = 1; n <= 10; n++) editor.registerAtom(`🖼 #${n}`, `[Image #${n}]`);
+		editor.setText("🖼 #10 🖼 #1");
 		expect(editor.getExpandedText()).toBe("[Image #10] [Image #1]");
 	});
 
 	it("never rescans expanded content for other tokens", () => {
 		const editor = new Editor(defaultEditorTheme);
-		// The expansion contains another atom's label verbatim; it is content, not buffer, so
-		// nothing looks at it again.
-		editor.setRuns([
-			{ atom: "🗒 #1", expansion: "body mentioning 🖼 #1 literally" },
-			" and ",
-			{ atom: "🖼 #1", expansion: "[Image #1]" },
-		]);
+		// The paste body contains another atom's label verbatim; single-pass
+		// expansion must leave it untouched inside the expanded content.
+		editor.registerAtom("🗒 #1", "body mentioning 🖼 #1 literally");
+		editor.registerAtom("🖼 #1", "[Image #1]");
+		editor.setText("🗒 #1 and 🖼 #1");
 		expect(editor.getExpandedText()).toBe("body mentioning 🖼 #1 literally and [Image #1]");
 	});
 

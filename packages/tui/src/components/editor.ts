@@ -12,7 +12,6 @@ import {
 	SKILL_NAMESPACE,
 } from "../autocomplete";
 import { BracketedPasteHandler, decodeReencodedPasteControls } from "../bracketed-paste";
-import type { EditorRun, ExternalEditPayload, ExternalEditToken } from "./external-edit";
 import { canonicalKeyId, getKeybindings, type KeybindingsManager } from "../keybindings";
 import { extractPrintableText, matchesKey, parseKey } from "../keys";
 import { KillRing } from "../kill-ring";
@@ -625,35 +624,10 @@ function diffFlatLines(
  */
 const PROVISIONAL_SPACE_ABSORBERS = /^[-.,;:!?)\]}]/;
 
-/**
- * One place where this editor put a collapsed token: a registered atom chip, or a `[Paste #N]`
- * marker standing for a stored body. `start`/`end` index the joined buffer text
- * ({@link Editor.getText}).
- *
- * These records are the only authority on what a token is. Buffer text that merely reads like a
- * token — typed, pasted, prefilled, or returned by an external editor — is the person's own
- * characters, and no amount of resemblance turns it into one. An edit that touches a record's
- * characters destroys the record: the token becomes the literal text it now is, and its
- * attachment is dropped rather than moved somewhere it was not meant to be.
- */
-export interface TokenPlacement {
-	start: number;
-	end: number;
-	kind: "atom" | "paste";
-	/** The registered atom label, or the paste id as a string. */
-	key: string;
-	/** The exact buffer characters this record stands for; checked against the buffer so a
-	 *  record can never outlive the characters it names. */
-	text: string;
-}
-
 interface EditorState {
 	lines: string[];
 	cursorLine: number;
 	cursorCol: number;
-	/** Token occurrences, ordered by `start` and never overlapping. Part of the state so undo
-	 *  and redo restore the person's tokens exactly as they stood. */
-	placements: TokenPlacement[];
 }
 
 interface LayoutLine {
@@ -706,9 +680,6 @@ interface LocalHistoryEntry {
 	draft?: {
 		pastes: Map<number, string>;
 		atoms: Map<string, string>;
-		/** Where this draft's tokens stood, so a recalled draft keeps them without re-finding
-		 *  them in its text. */
-		placements: TokenPlacement[];
 		pasteCounter: number;
 		restore?: () => void;
 	};
@@ -792,11 +763,7 @@ export class Editor implements Component, Focusable {
 		lines: [""],
 		cursorLine: 0,
 		cursorCol: 0,
-		placements: [],
 	};
-	/** The buffer text the placements in {@link #state} were last measured against. Every change
-	 *  maps them from this text to the new one; a span the change touched is dropped. */
-	#placementBase = "";
 	/** Focusable interface - set by TUI when focus changes */
 	focused: boolean = false;
 
@@ -935,8 +902,7 @@ export class Editor implements Component, Focusable {
 	/** Terminal height source for clamping the autocomplete dropdown. Hosts wire this to their Terminal's rows. */
 	viewportRowsProvider?: () => number;
 
-	/** Paste id → the body its `[Paste #N]` marker stands for. The marker's own characters live
-	 *  on its {@link TokenPlacement}, which is what makes them a marker at all. */
+	// Paste tracking for large pastes
 	#pastes: Map<number, string> = new Map();
 	#pasteCounter: number = 0;
 
@@ -1262,24 +1228,17 @@ export class Editor implements Component, Focusable {
 	rememberDraft(restore?: () => void): void {
 		const text = this.getText();
 		if (!text.trim()) return;
-		const placements = this.#livePlacements(text);
 		const pastes = new Map<number, string>();
-		const atoms = new Map<string, string>();
-		for (const placement of placements) {
-			if (placement.kind === "paste") {
-				const value = this.#pastes.get(Number(placement.key));
-				if (value !== undefined) pastes.set(Number(placement.key), value);
-			} else {
-				const value = this.#atoms.get(placement.key);
-				if (value !== undefined) atoms.set(placement.key, value);
-			}
+		for (const match of text.matchAll(/\[Paste #(\d+)(?:, (?:\+\d+ lines|\d+ chars))?\]/g)) {
+			const id = Number(match[1]);
+			const value = this.#pastes.get(id);
+			if (value !== undefined) pastes.set(id, value);
 		}
 		this.#pushHistory({
 			text,
 			draft: {
 				pastes,
-				atoms,
-				placements: placements.map(placement => ({ ...placement })),
+				atoms: new Map([...this.#atoms].filter(([label]) => text.includes(label))),
 				pasteCounter: this.#pasteCounter,
 				restore,
 			},
@@ -1288,12 +1247,11 @@ export class Editor implements Component, Focusable {
 
 	/**
 	 * Drop the collapsed-paste payloads, keeping registered atoms and the id counter. For a host
-	 * that has replaced the buffer with text in which every paste is already expanded: the text
-	 * that stood for a paste is the person's own characters from here on.
+	 * that has replaced the buffer with text in which every paste is already expanded: a
+	 * `[Paste #N]` left in that text is the person's own characters and must never expand again.
 	 */
 	clearPastes(): void {
 		this.#pastes.clear();
-		this.#state.placements = this.#state.placements.filter(placement => placement.kind !== "paste");
 	}
 
 	/** Release the current draft's expansion payloads without touching history. */
@@ -1302,7 +1260,6 @@ export class Editor implements Component, Focusable {
 		this.#pasteCounter = 0;
 		this.#atoms.clear();
 		this.#atomsRevision++;
-		this.#state.placements = [];
 		this.#historyDraftActive = false;
 	}
 
@@ -1351,25 +1308,14 @@ export class Editor implements Component, Focusable {
 		// entry: Up opens a multi-row entry at its top, Down at its bottom (#99).
 		// #setTextInternal drops that request for single-row entries — see there.
 		const cursorAnchor: HistoryCursorAnchor = direction === -1 ? "start" : "end";
-		this.#setTextInternal(entry?.text ?? "", cursorAnchor, entry?.draft?.placements);
+		this.#setTextInternal(entry?.text ?? "", cursorAnchor);
 	}
 	/** Internal setText that doesn't reset history state - used by navigateHistory */
-	#setTextInternal(
-		text: string,
-		cursorAnchor: HistoryCursorAnchor = "end",
-		placements?: readonly TokenPlacement[],
-	): void {
+	#setTextInternal(text: string, cursorAnchor: HistoryCursorAnchor = "end"): void {
 		this.#endVimSession();
 		this.#undoStack.length = 0;
-		const loaded = sanitizeLoadedText(text);
-		const lines = loaded.split("\n");
+		const lines = sanitizeLoadedText(text).split("\n");
 		this.#state.lines = lines.length === 0 ? [""] : lines;
-		// Wholesale replacement carries no provenance of its own: only a caller that says where
-		// its tokens are ({@link setRuns}, the external-editor round trip) keeps any, and every
-		// other caller's text is literal from here on.
-		this.#state.placements = placements ? placements.map(placement => ({ ...placement })) : [];
-		this.#placementBase = this.#state.lines.join("\n");
-		this.#dropUnbackedPlacements();
 		// A single-row entry's top and bottom are the same row, so the directional
 		// anchor degenerates to a bare column choice: the caret would sit at the start
 		// when Up recalled the entry and at the end when Down reached the same entry,
@@ -3361,86 +3307,7 @@ export class Editor implements Component, Focusable {
 	#notifyChange(text?: string): void {
 		this.#textRevision++;
 		this.#insertedPrediction = undefined;
-		const next = text ?? this.getText();
-		this.#movePlacements(next);
-		this.onChange?.(next);
-	}
-
-	/**
-	 * Map every token record from the text they were last measured against onto `next`, and drop
-	 * the ones the change reached. The change is one replaced stretch — the common prefix and
-	 * suffix bound it — so a record wholly before it keeps its offsets, one wholly after it
-	 * shifts by the length difference, and one the stretch overlaps is gone: the person edited
-	 * those characters, so they are the person's text now.
-	 */
-	#movePlacements(next: string): void {
-		const prev = this.#placementBase;
-		if (prev === next) return;
-		if (this.#state.placements.length === 0) {
-			this.#placementBase = next;
-			return;
-		}
-		const min = Math.min(prev.length, next.length);
-		let prefix = 0;
-		while (prefix < min && prev.charCodeAt(prefix) === next.charCodeAt(prefix)) prefix++;
-		let suffix = 0;
-		while (
-			suffix < min - prefix &&
-			prev.charCodeAt(prev.length - 1 - suffix) === next.charCodeAt(next.length - 1 - suffix)
-		) {
-			suffix++;
-		}
-		const changedEnd = prev.length - suffix;
-		const delta = next.length - prev.length;
-		const kept: TokenPlacement[] = [];
-		for (const placement of this.#state.placements) {
-			if (placement.end <= prefix) kept.push(placement);
-			else if (placement.start >= changedEnd) {
-				kept.push({ ...placement, start: placement.start + delta, end: placement.end + delta });
-			}
-		}
-		this.#state.placements = kept;
-		this.#placementBase = next;
-		this.#dropUnbackedPlacements();
-	}
-
-	/** Drop records whose payload is gone, or whose characters are no longer the token's — the
-	 *  last guard against a mutation path that changed the buffer without saying so. */
-	#dropUnbackedPlacements(): void {
-		if (this.#state.placements.length === 0) return;
-		const text = this.#placementBase;
-		this.#state.placements = this.#state.placements.filter(placement => {
-			if (placement.text !== text.slice(placement.start, placement.end)) return false;
-			if (placement.kind === "atom" && !this.#atoms.has(placement.key)) return false;
-			return this.#placementExpansion(placement) !== undefined;
-		});
-	}
-
-	/** What this record expands to on submit. */
-	#placementExpansion(placement: TokenPlacement): string | undefined {
-		return placement.kind === "atom" ? this.#atoms.get(placement.key) : this.#pastes.get(Number(placement.key));
-	}
-
-	/** The records as they stand against `text`, reconciled first so a caller never reads stale
-	 *  offsets. */
-	#livePlacements(text: string): readonly TokenPlacement[] {
-		this.#movePlacements(text);
-		return this.#state.placements;
-	}
-
-	/** Record the token this editor just put at `start` (an offset into the buffer text). */
-	#recordPlacement(start: number, kind: "atom" | "paste", key: string, text: string): void {
-		const placement: TokenPlacement = { start, end: start + text.length, kind, key, text };
-		const at = this.#state.placements.findIndex(other => other.start >= placement.end);
-		if (at === -1) this.#state.placements.push(placement);
-		else this.#state.placements.splice(at, 0, placement);
-	}
-
-	/** Offset of `(line, col)` in the joined buffer text. */
-	#offsetAt(line: number, col: number): number {
-		let offset = 0;
-		for (let i = 0; i < line; i++) offset += (this.#state.lines[i]?.length ?? 0) + 1;
-		return offset + col;
+		this.onChange?.(text ?? this.getText());
 	}
 
 	/** Whether the buffer text equals `value`, without `getText()`'s full join —
@@ -3452,36 +3319,44 @@ export class Editor implements Component, Focusable {
 		return this.getText() === value;
 	}
 
-	/**
-	 * Expand the buffer into runs, each saying whether this editor placed it: a `[Paste #N]`
-	 * marker becomes its stored body, an atom chip its registered expansion, and everything else
-	 * is the person's characters verbatim.
-	 *
-	 * Only {@link TokenPlacement} records decide what is a token. Nothing here matches buffer
-	 * text against the atom table or a `[Paste #N]` pattern, so a file name, a quotation or a
-	 * fence that happens to read like a token survives as the text it is.
-	 */
-	#expandRuns(): ExpandedRun[] {
-		const text = this.getText();
-		const placements = this.#livePlacements(text);
-		if (placements.length === 0) return text ? [{ text }] : [];
-		const runs: ExpandedRun[] = [];
-		let last = 0;
-		for (const placement of placements) {
-			const expansion = this.#placementExpansion(placement);
-			if (expansion === undefined || placement.start < last) continue;
-			if (placement.start > last) runs.push({ text: text.slice(last, placement.start) });
-			if (placement.kind === "paste") runs.push({ text: expansion });
-			else runs.push({ text: expansion, atom: placement.key });
-			last = placement.end;
+	/** Expand collapsed markers — `[Paste #N]` tokens and registered atom labels — into their
+	 *  stored content, keeping each run's origin. Single pass, so replaced content is never
+	 *  rescanned: a paste's body is the person's own characters, and text in it that reads like
+	 *  a token or another paste marker survives verbatim. Longer atom labels are tried first so
+	 *  `#1` never shadows `#10`. A host that delivers an attachment through the paste channel
+	 *  passes it as its own piece ({@link PasteDelivery}) rather than burying its token in a
+	 *  body, so nothing is lost by not looking there. */
+	#expandRuns(text: string): ExpandedRun[] {
+		const sources: string[] = [];
+		for (const pasteId of this.#pastes.keys()) {
+			sources.push(`\\[Paste #${pasteId}(?:, (?:\\+\\d+ lines|\\d+ chars))?\\]`);
 		}
-		if (last < text.length) runs.push({ text: text.slice(last) });
+		for (const label of [...this.#atoms.keys()].sort((a, b) => b.length - a.length)) {
+			sources.push(RegExp.escape(label));
+		}
+		if (sources.length === 0) return [{ text }];
+		const runs: ExpandedRun[] = [];
+		const literal = (value: string) => {
+			if (value) runs.push({ text: value });
+		};
+		const markerRegex = new RegExp(sources.join("|"), "g");
+		let last = 0;
+		for (const match of text.matchAll(markerRegex)) {
+			const paste = /^\[Paste #(\d+)/.exec(match[0]);
+			const expansion = paste ? this.#pastes.get(Number(paste[1])) : this.#atoms.get(match[0]);
+			if (expansion === undefined) continue;
+			literal(text.slice(last, match.index));
+			if (paste) literal(expansion);
+			else runs.push({ text: expansion, atom: match[0] });
+			last = match.index + match[0].length;
+		}
+		literal(text.slice(last));
 		return runs;
 	}
 
 	#expandedText(): string {
 		let out = "";
-		for (const run of this.#expandRuns()) out += run.text;
+		for (const run of this.#expandRuns(this.#state.lines.join("\n"))) out += run.text;
 		return out;
 	}
 
@@ -3492,10 +3367,9 @@ export class Editor implements Component, Focusable {
 		this.#atomsRevision++;
 	}
 
-	/** Insert `label` (plus a trailing space) at the cursor, register it as an atom expanding to
-	 *  `expansion` on submit, and record that this editor put it there — the only thing that
-	 *  makes those characters a token. Pair with {@link atomicTokenPattern} so the label deletes
-	 *  as a unit. */
+	/** Insert `label` (plus a trailing space) at the cursor and register it as an atom expanding
+	 *  to `expansion` on submit. Pair with {@link atomicTokenPattern} so the label deletes as a
+	 *  unit. */
 	insertAtom(label: string, expansion: string): void {
 		this.#historyIndex = -1;
 		this.#resetKillSequence();
@@ -3504,24 +3378,6 @@ export class Editor implements Component, Focusable {
 		this.#withUndoSuspended(() => {
 			this.#insertTextAtCursor(`${label} `);
 		});
-		// The insert left the cursor after the label's trailing space.
-		const end = this.#offsetAt(this.#state.cursorLine, this.#state.cursorCol) - 1;
-		this.#recordPlacement(end - label.length, "atom", label, label);
-	}
-
-	/** Insert `label`, already registered by {@link registerAtom}, as a token this editor owns —
-	 *  without {@link insertAtom}'s trailing space, for a host delivering an attachment as one
-	 *  piece of a paste whose own spacing must stand. */
-	insertRegisteredAtom(label: string): void {
-		if (!this.#atoms.has(label)) return;
-		this.#historyIndex = -1;
-		this.#resetKillSequence();
-		this.#recordUndoState();
-		this.#withUndoSuspended(() => {
-			this.#insertTextAtCursor(label);
-		});
-		const end = this.#offsetAt(this.#state.cursorLine, this.#state.cursorCol);
-		this.#recordPlacement(end - label.length, "atom", label, label);
 	}
 
 	/** Collapse the typed span `[start, end)` on `line` into the atom `label` (expanding back
@@ -3540,14 +3396,12 @@ export class Editor implements Component, Focusable {
 		}
 		this.#lastAction = null;
 		this.#notifyChange();
-		this.#recordPlacement(this.#offsetAt(line, start), "atom", label, label);
 	}
 
 	/** Drop every registered atom expansion (draft cleared or replaced by the host). */
 	clearAtoms(): void {
 		this.#atoms.clear();
 		this.#atomsRevision++;
-		this.#state.placements = this.#state.placements.filter(placement => placement.kind !== "atom");
 	}
 
 	/**
@@ -3564,7 +3418,7 @@ export class Editor implements Component, Focusable {
 	 * re-scanning {@link getExpandedText}.
 	 */
 	getExpandedRuns(): ExpandedRun[] {
-		return this.#expandRuns();
+		return this.#expandRuns(this.#state.lines.join("\n"));
 	}
 
 	getLines(): string[] {
@@ -3668,78 +3522,6 @@ export class Editor implements Component, Focusable {
 		this.#historyIndex = -1; // Exit history browsing mode
 		this.#resetKillSequence();
 		this.#setTextInternal(text);
-	}
-
-	/**
-	 * Replace the buffer with `runs`, keeping the tokens the caller names as tokens. This is the
-	 * only way text a host builds can carry provenance: the caller says which runs are its own
-	 * atoms, and every other character is the person's, however much it reads like a token.
-	 *
-	 * Use it to re-open a draft the host produced (its recorded runs) or to restore a buffer
-	 * whose tokens are known — never to re-collapse text by searching it.
-	 */
-	setRuns(runs: readonly EditorRun[]): void {
-		let text = "";
-		const placements: TokenPlacement[] = [];
-		for (const run of runs) {
-			if (typeof run === "string") {
-				text += sanitizeLoadedText(run);
-				continue;
-			}
-			const label = sanitizeLoadedText(run.atom);
-			this.registerAtom(label, run.expansion);
-			placements.push({
-				start: text.length,
-				end: text.length + label.length,
-				kind: "atom",
-				key: label,
-				text: label,
-			});
-			text += label;
-		}
-		this.#historyIndex = -1;
-		this.#resetKillSequence();
-		this.#setTextInternal(text, "end", placements);
-	}
-
-	/**
-	 * What to hand an external editor, and where this editor's tokens sit in it: a paste marker
-	 * is written out as the body it stands for, an atom chip as its own label, and everything
-	 * else verbatim. Pair with {@link applyExternalEdit}, which is the only way the returned text
-	 * can keep those tokens.
-	 */
-	externalEditPayload(): ExternalEditPayload {
-		const text = this.getText();
-		const placements = this.#livePlacements(text);
-		let out = "";
-		let last = 0;
-		const tokens: ExternalEditToken[] = [];
-		for (const placement of placements) {
-			if (placement.start < last) continue;
-			out += text.slice(last, placement.start);
-			if (placement.kind === "atom") {
-				tokens.push({ start: out.length, text: placement.key, expansion: this.#atoms.get(placement.key) ?? "" });
-				out += placement.key;
-			} else {
-				out += this.#placementExpansion(placement) ?? "";
-			}
-			last = placement.end;
-		}
-		out += text.slice(last);
-		return { text: out, tokens };
-	}
-
-	/**
-	 * Take the text an external editor returned, with each surviving token mapped back to where
-	 * it now stands. `runs` comes from {@link mapExternalEdit}, which attributes every token by
-	 * the diff rather than by searching the returned text for a token's characters.
-	 *
-	 * The collapsed-paste payloads go: the payload was written out in full, so what came back is
-	 * the person's characters, whatever it reads like.
-	 */
-	applyExternalEdit(runs: readonly EditorRun[]): void {
-		this.clearPastes();
-		this.setRuns(runs);
 	}
 	submit(): void {
 		if (this.disableSubmit) return;
@@ -4182,8 +3964,6 @@ export class Editor implements Component, Focusable {
 		const marker =
 			lineCount > 10 ? `[Paste #${pasteId}, +${lineCount} lines]` : `[Paste #${pasteId}, ${content.length} chars]`;
 		this.#insertTextAtCursor(marker);
-		const end = this.#offsetAt(this.#state.cursorLine, this.#state.cursorCol);
-		this.#recordPlacement(end - marker.length, "paste", String(pasteId), marker);
 	}
 
 	/** Re-evaluate autocomplete triggers for the text ending at the cursor (used after bulk edits). */
@@ -4261,8 +4041,7 @@ export class Editor implements Component, Focusable {
 
 		const result = this.#expandedText().trim();
 
-		this.#state = { lines: [""], cursorLine: 0, cursorCol: 0, placements: [] };
-		this.#placementBase = "";
+		this.#state = { lines: [""], cursorLine: 0, cursorCol: 0 };
 		this.clearPasteState();
 		this.#historyIndex = -1;
 		this.#scrollOffset = 0;
@@ -4560,14 +4339,13 @@ export class Editor implements Component, Focusable {
 
 	#recordUndoState(): void {
 		if (this.#suspendUndo) return;
-		// EditorState holds primitives, an array of immutable strings and the token records:
-		// shallow array copies are a complete snapshot. structuredClone pays for general-case
-		// dispatch per element on every edit keystroke.
+		// EditorState holds only primitives plus an array of immutable strings:
+		// a shallow array copy is a complete snapshot. structuredClone pays for
+		// general-case dispatch per element on every edit keystroke.
 		this.#undoStack.push({
 			lines: this.#state.lines.slice(),
 			cursorLine: this.#state.cursorLine,
 			cursorCol: this.#state.cursorCol,
-			placements: this.#state.placements.slice(),
 		});
 		if (this.#undoStack.length <= MAX_UNDO_STACK) return;
 		const pin = this.#pinnedUndo;
@@ -4590,9 +4368,6 @@ export class Editor implements Component, Focusable {
 		this.#resetKillSequence();
 		this.#preferredVisualCol = null;
 		Object.assign(this.#state, snapshot);
-		// The snapshot carries the tokens that stood with its text, so undo restores both
-		// together and no reconciliation runs against the text being left behind.
-		this.#placementBase = this.#state.lines.join("\n");
 
 		this.#notifyChange();
 

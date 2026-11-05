@@ -29,7 +29,6 @@ import {
 	collapseImageMarkers,
 	collapseModelMentions,
 	collapseSkillTokens,
-	collapseWithin,
 	composerTokenRegex,
 	modelChipStyle,
 	PLACEHOLDER_REGEX,
@@ -608,23 +607,24 @@ export class CustomEditor extends Editor {
 	}
 
 	/** Set restored text with image, skill, and model references collapsed into atomic chips.
-	 *  Leaves pending image/text state untouched — callers own that.
-	 *
-	 *  The collapse reports runs: the chips are the ones it made here, recorded as such, and the
-	 *  rest is the person's text. A marker they wrote out themselves — a file name, a quotation —
-	 *  comes back as the characters they wrote, not as somebody's attachment. */
+	 *  Leaves pending image/text state untouched — callers own that. */
 	setCollapsedText(text: string): void {
-		let runs = collapseImageMarkers(
-			expandModelMentionTags(text, this.modelMentionSelector),
-			this.pendingImages.length,
+		const register = (label: string, expansion: string) => this.registerAtom(label, expansion);
+		this.setText(
+			collapseModelMentions(
+				collapseSkillTokens(
+					collapseImageMarkers(
+						expandModelMentionTags(text, this.modelMentionSelector),
+						this.pendingImages.length,
+						register,
+					),
+					name => this.skillFilePath(name) !== undefined,
+					register,
+				),
+				selector => this.#mentionChipFor(selector),
+				register,
+			),
 		);
-		runs = collapseWithin(runs, literal =>
-			collapseSkillTokens(literal, name => this.skillFilePath(name) !== undefined),
-		);
-		runs = collapseWithin(runs, literal =>
-			collapseModelMentions(literal, selector => this.#mentionChipFor(selector)),
-		);
-		this.setRuns(runs);
 		this.#syncComposerTokenPattern();
 	}
 
