@@ -1,5 +1,5 @@
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
-import { ProviderHttpError, wrappedErrorEnvelope } from "../../error";
+import { ProviderHttpError, responseErrorEnvelope } from "../../error";
 
 export type CodexRateLimit = {
 	used_percent?: number;
@@ -50,8 +50,10 @@ export async function parseCodexError(response: Response): Promise<CodexErrorInf
 		// the inner one carries the code, and without it a refusal reads as a plain failure.
 		// Only when the outer has no code or type: an `error` field beside a valid outer code is
 		// a diagnostic, and taking it would lose the plan and reset the outer carries.
-		const outer = parsed?.error ?? {};
-		const err = (wrappedErrorEnvelope(outer) ?? outer) as Record<string, unknown>;
+		// One authority for which object the error is, the flat root included: a body with no
+		// `error` member but a `code` of its own is the shape compat hosts return, and taking `{}`
+		// instead sent the same declined content to every stored credential.
+		const err = (responseErrorEnvelope(parsed) ?? {}) as Record<string, unknown>;
 
 		const headers = response.headers;
 		const primary = {

@@ -51,23 +51,21 @@ export class OpenAIHttpError extends ProviderHttpError {
 	): { detail: string | undefined; code: string | undefined } {
 		if (typeof bodyJson === "object" && bodyJson !== null) {
 			const envelope = bodyJson as { error?: unknown; message?: unknown };
-			const error = envelope.error;
-			if (typeof error === "object" && error !== null) {
-				// Some gateways wrap the envelope in itself (`{ error: { error: { code, message } } }`);
-				// read the inner one, or its code is lost and a refusal looks like a plain failure.
-				// Only when the outer carries no code of its own: an `error` field beside a valid
-				// outer code is a diagnostic, not the envelope, and the outer code is the answer.
-				const source = (wrappedErrorEnvelope(error) ?? error) as {
-					message?: unknown;
-					code?: unknown;
-					type?: unknown;
-				};
+			// One authority for which object the error is, the flat root included: a body with no
+			// `error` member but a `code` of its own is the shape compat hosts return, and dropping
+			// its code made the same refusal rotate every credential over HTTP while reading
+			// correctly in band.
+			const source = responseErrorEnvelope(bodyJson) as
+				| { message?: unknown; code?: unknown; type?: unknown }
+				| undefined;
+			if (source) {
 				const { message, code, type } = source;
 				return {
 					detail: typeof message === "string" && message.length > 0 ? message : bodyText,
 					code: typeof code === "string" ? code : typeof type === "string" ? type : undefined,
 				};
 			}
+			const error = envelope.error;
 			if (typeof error === "string" && error.length > 0) {
 				return { detail: error, code: undefined };
 			}
@@ -124,6 +122,29 @@ export function wrappedErrorEnvelope(error: object, depth = 0): object | undefin
 	// Nothing of its own: a pure intermediate wrapper, which a gateway fronting a gateway produces.
 	// Walk through it rather than stopping, or the code at the bottom is lost.
 	return wrappedErrorEnvelope(inner, depth + 1);
+}
+
+/**
+ * Which object a reader should take an error out of, given a parsed response body.
+ *
+ * The `error` member resolved to its innermost envelope, or **the body itself** when it carries no
+ * `error` object but does carry a machine code of its own — the flat `{ code, message }` shape
+ * compat hosts return, which the shared in-band probe has always accepted and which three readers
+ * of a non-2xx body discarded, so the same refusal was a refusal in band and three spent
+ * credentials over HTTP. `undefined` when the body carries no error at all.
+ *
+ * The root only counts when it carries a `code` or `type` **string**: an ordinary success body has
+ * neither, so this cannot mistake one for a failure.
+ */
+export function responseErrorEnvelope(bodyJson: unknown): object | undefined {
+	if (typeof bodyJson !== "object" || bodyJson === null || Array.isArray(bodyJson)) return undefined;
+	const error: unknown = Reflect.get(bodyJson, "error");
+	if (typeof error === "object" && error !== null && !Array.isArray(error)) {
+		return wrappedErrorEnvelope(error) ?? error;
+	}
+	const rootCode = Reflect.get(bodyJson, "code");
+	const rootType = Reflect.get(bodyJson, "type");
+	return typeof rootCode === "string" || typeof rootType === "string" ? bodyJson : undefined;
 }
 
 /** Non-2xx response from the Anthropic API. */

@@ -29,7 +29,7 @@ const model: Model<"openai-responses"> = buildModel({
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 } satisfies ModelSpec<"openai-responses">);
 
-function failedResponse(error: Record<string, unknown>): Response {
+function failedResponse(error: Record<string, unknown>, inStatusDetails = false): Response {
 	const response = { id: "resp_refused", status: "in_progress" };
 	const frames = [
 		`event: response.created\ndata: ${JSON.stringify({ type: "response.created", sequence_number: 0, response })}`,
@@ -37,7 +37,9 @@ function failedResponse(error: Record<string, unknown>): Response {
 		`event: response.failed\ndata: ${JSON.stringify({
 			type: "response.failed",
 			sequence_number: 2,
-			response: { ...response, status: "failed", error },
+			response: inStatusDetails
+				? { ...response, status: "failed", status_details: { error } }
+				: { ...response, status: "failed", error },
 		})}`,
 		"data: [DONE]",
 	];
@@ -176,7 +178,9 @@ type RefusalCarrier =
 	| "http403-numeric-code-beside-the-type"
 	| "sse-numeric-code-beside-the-type"
 	| "sse-wrapped-three-deep"
-	| "http403-wrapped-three-deep";
+	| "http403-wrapped-three-deep"
+	| "http403-flat-root"
+	| "sse-in-status-details";
 
 /** A transient cause a gateway may attach beside a refusal; it must never replace it. */
 const INNER_DIAGNOSTIC = { code: "server_error", message: "upstream diagnostic", status: 503 };
@@ -198,6 +202,10 @@ function refusalOn(api: Api, carrier: RefusalCarrier): Response {
 	const error = { code: "cyber_policy", message };
 	// Some gateways wrap the error envelope in itself; the refusal code sits one level deeper.
 	if (carrier === "http403-gateway-wrapped") return Response.json({ error: { error } }, { status: 403 });
+	// A compat host answers with the envelope AT THE ROOT, no `error` member at all. The shared
+	// in-band probe has always accepted that shape; three readers of a non-2xx body discarded it,
+	// so the same refusal read correctly in band and spent every credential over HTTP.
+	if (carrier === "http403-flat-root") return Response.json(error, { status: 403 });
 	// A gateway fronting a gateway: the middle level carries nothing of its own, so a reader that
 	// refuses to walk through it never reaches the code at the bottom.
 	if (carrier === "http403-wrapped-three-deep") {
@@ -229,7 +237,10 @@ function refusalOn(api: Api, carrier: RefusalCarrier): Response {
 						: carrier === "sse-numeric-code-beside-the-type"
 							? { code: 400, type: "cyber_policy", message }
 							: inner;
-	if (api !== "openai-completions") return failedResponse(streamed);
+	// `sse-in-status-details` puts the same envelope in `response.status_details.error`, the
+	// position one Responses-family reader consulted and the Codex one did not. Chat Completions
+	// has no such field, so for that API the carrier is the ordinary in-band chunk.
+	if (api !== "openai-completions") return failedResponse(streamed, carrier === "sse-in-status-details");
 	// Chat Completions streams a failure as an in-band `error` chunk.
 	return new Response(`data: ${JSON.stringify({ error: streamed })}\n\ndata: [DONE]\n\n`, {
 		status: 200,
@@ -251,6 +262,8 @@ describe("content-policy refusals on every OpenAI-wire API and carrier", () => {
 		"sse-numeric-code-beside-the-type",
 		"sse-wrapped-three-deep",
 		"http403-wrapped-three-deep",
+		"http403-flat-root",
+		"sse-in-status-details",
 	];
 	it.each(apis.flatMap(api => carriers.map(carrier => ({ api, carrier }))))(
 		"$api $carrier: one attempt, no rotation, the refusal's stopDetails kept",

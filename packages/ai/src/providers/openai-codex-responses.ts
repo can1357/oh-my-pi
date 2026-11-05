@@ -4605,13 +4605,20 @@ const innerFailureEventSchema = type({
 });
 
 /**
- * Replace a doubly wrapped error envelope (`{ error: { error: { code, message } } }`) with the
- * envelope it wraps, in both the top-level and the `response.error` position. The schema below
- * accepts a wrapper and reads nothing out of it, so a refusal carried that way arrives with no
- * code at all and the failure reads as a plain one. Only a real wrapper is descended into: an
- * `error` field beside a code of its own is a diagnostic, and taking it would discard the code the
- * outer already carries. Returns `raw` itself when nothing is wrapped, so the ordinary event
- * allocates nothing.
+ * Normalise a Codex failure event into the one shape the schema below reads: a single `error`
+ * object, resolved to its innermost envelope, in the top-level and the `response` positions.
+ *
+ * Two things it repairs, both the same defect — a reader disagreeing with the reader beside it
+ * about which object the error is:
+ * - a wrapped envelope (`{ error: { error: { code, message } } }`). The schema accepts a wrapper
+ *   and reads nothing out of it, so a refusal carried that way arrives with no code at all.
+ * - `response.status_details.error`, which the Responses reader in `openai-shared` consults and
+ *   this one did not. Byte-identical bodies therefore gave exit 4 with the provider's own code on
+ *   one wire and a plain `status=failed` line on the other; a Codex user lost the reason, the exit
+ *   status and the refusal retry allowance.
+ *
+ * Only a real wrapper is descended into: an `error` field beside a code of its own is a diagnostic.
+ * Returns `raw` itself when nothing needs moving, so the ordinary event allocates nothing.
  */
 function unwrapCodexFailureEnvelope(raw: unknown): unknown {
 	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return raw;
@@ -4624,9 +4631,16 @@ function unwrapCodexFailureEnvelope(raw: unknown): unknown {
 	let unwrappedResponse = response;
 	if (typeof response === "object" && response !== null && !Array.isArray(response)) {
 		const record = response as Record<string, unknown>;
-		const responseError =
+		const statusDetails = record.status_details;
+		const nested: unknown =
 			typeof record.error === "object" && record.error !== null
-				? (AIError.wrappedErrorEnvelope(record.error) ?? record.error)
+				? record.error
+				: typeof statusDetails === "object" && statusDetails !== null
+					? (statusDetails as Record<string, unknown>).error
+					: undefined;
+		const responseError =
+			typeof nested === "object" && nested !== null
+				? (AIError.wrappedErrorEnvelope(nested) ?? nested)
 				: record.error;
 		if (responseError !== record.error) unwrappedResponse = { ...record, error: responseError };
 	}
