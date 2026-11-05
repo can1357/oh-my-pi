@@ -4888,7 +4888,12 @@ fn interpreter(text: &[u8]) -> BString {
 	let mut interp = BString::from(&rest[..end]);
 	if interp.last() == Some(&b'\r') {
 		interp.pop();
-		interp.extend_from_slice(b"^M");
+		// Measured on Bash 5.3.0: a trailing CR after a name shows as
+		// `^M`, but a `#!` line that is ONLY a CR names the empty
+		// interpreter.
+		if !interp.is_empty() {
+			interp.extend_from_slice(b"^M");
+		}
 	}
 	interp
 }

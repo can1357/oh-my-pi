@@ -109,10 +109,18 @@ fn long_interpreter(dir: &std::path::Path) {
 }
 
 /// A `#!` line ending in a carriage return, as a file edited on Windows
-/// does. Both Bash versions name the interpreter with the CR shown as
-/// `^M` rather than writing the control byte out.
+/// does. Bash 5.3.0 names the interpreter with the CR shown as `^M`
+/// rather than writing the control byte out.
 fn interpreter_with_a_carriage_return(dir: &std::path::Path) {
 	write(&dir.join("s"), "#!/does/not/exist\r\necho hi\n", 0o755);
+}
+
+/// A `#!` line that is ONLY a carriage return. Bash 5.3.0 drops it and
+/// names the EMPTY interpreter — there is no `^M` here, because nothing
+/// precedes it. (Bash 5.2.21 gives 127 `cannot execute: required file not
+/// found`; 5.3.0 wins.)
+fn interpreter_is_only_a_carriage_return(dir: &std::path::Path) {
+	write(&dir.join("s"), "#!\r", 0o755);
 }
 
 /// `#!` and nothing but blanks, and no newline at all: bash names an
@@ -228,6 +236,14 @@ const IMMEDIATE: &[Row] = &[
 		script: "./s",
 		status: 126,
 		wants:  &["/does/not/exist^M: bad interpreter: No such file or directory", "!exist\r"],
+	},
+	Row {
+		name:   "interpreter-is-only-a-carriage-return",
+		setup:  interpreter_is_only_a_carriage_return,
+		fifo:   false,
+		script: "./s",
+		status: 126,
+		wants:  &["./s: : bad interpreter: No such file or directory", "!^M"],
 	},
 	Row {
 		name:   "long-interpreter",
@@ -358,6 +374,14 @@ const DEFERRED: &[Row] = &[
 			"status=126",
 			"!exist\r",
 		],
+	},
+	Row {
+		name:   "deferred-interpreter-is-only-a-carriage-return",
+		setup:  interpreter_is_only_a_carriage_return,
+		fifo:   true,
+		script: "/bin/cat f >out & p=$!; ./s >f & q=$!; wait $q; echo status=$?; wait $p",
+		status: 0,
+		wants:  &["./s: : bad interpreter: No such file or directory", "status=126", "!^M"],
 	},
 	Row {
 		name:   "deferred-long-interpreter",

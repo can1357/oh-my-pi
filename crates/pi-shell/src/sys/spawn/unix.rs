@@ -1034,7 +1034,10 @@ fn shebang(sample: &[u8]) -> Option<(&[u8], bool)> {
 		.unwrap_or(rest.len());
 	let interp = &rest[..end];
 	match interp.split_last() {
-		Some((b'\r', head)) => Some((head, true)),
+		// Measured on Bash 5.3.0: a trailing CR after a name shows as `^M`,
+		// but a `#!` line that is ONLY a CR names the empty interpreter.
+		Some((b'\r', head)) if !head.is_empty() => Some((head, true)),
+		Some((b'\r', _)) => Some((b"", false)),
 		_ => Some((interp, false)),
 	}
 }
