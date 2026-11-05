@@ -949,6 +949,10 @@ const streamOpenAICompletionsOnce = (
 				const builtParams = buildParams(model, context, options, effectiveToolStrictModeOverride);
 				appliedStrictTools = builtParams.strictToolsApplied;
 				let params = builtParams.params;
+				// Re-aim before the effort-fallback key is derived from the wire id:
+				// effort negotiated after a reroute belongs to the route that will
+				// carry the request, not the one the host refused.
+				if (serviceTierCapacityRetry) applyServiceTierCapacityRetry(params, serviceTierCapacityRetry);
 				// Tool-triggered suppression is a hard wire constraint; cached
 				// enabled-effort negotiation must not overwrite its `none`.
 				const reasoningEffortFallbackKey = builtParams.reasoningEffortFallbackAllowed
@@ -967,6 +971,7 @@ const streamOpenAICompletionsOnce = (
 				const replacedParams = await options?.onPayload?.(params, model);
 				if (replacedParams !== undefined) params = replacedParams as typeof params;
 				activeRequestParams = params;
+				// A payload hook may hand back a body that re-states the refused id.
 				if (serviceTierCapacityRetry) applyServiceTierCapacityRetry(params, serviceTierCapacityRetry);
 				rawRequestDump = {
 					provider: model.provider,

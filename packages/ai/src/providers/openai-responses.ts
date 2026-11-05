@@ -862,6 +862,24 @@ const streamOpenAIResponsesOnce = (
 			let pendingReasoningEffortFallback: { key: string; fallback: OpenAIReasoningEffortFallback } | undefined;
 			let activeReasoningEffortFallbackKey: string | undefined;
 			let activeRequestParams: OpenAIResponsesSamplingParams | undefined;
+			// Set once the host refuses the serving tier for want of capacity. Every
+			// later rebuild re-applies it, so a strict-tools or stale-chain repair
+			// cannot resurrect the tier the host just said it has no capacity for.
+			let serviceTierCapacityRetry: ServiceTierCapacityRetry | undefined;
+			// The tier the request was actually served on: a recovery that dropped
+			// `service_tier` must not keep accounting the turn at the refused tier's
+			// rate when the response carries no tier echo of its own.
+			const effectiveRequestServiceTier = (): ServiceTier | undefined =>
+				serviceTierCapacityRetry?.dropServiceTier ? undefined : options?.serviceTier;
+			/**
+			 * Re-aim a freshly built request at the standard tier before anything
+			 * downstream reads its wire id. The effort-fallback key is derived from
+			 * that id, so applying the reroute later would negotiate effort for the
+			 * route the host refused and cache it under the wrong one.
+			 */
+			const reaimForServiceTierCapacity = (requestParams: { model?: unknown; service_tier?: unknown }): void => {
+				if (serviceTierCapacityRetry) applyServiceTierCapacityRetry(requestParams, serviceTierCapacityRetry);
+			};
 			const applyReasoningEffortFallbackForRequest = (requestParams: OpenAIResponsesSamplingParams): string => {
 				const fallbackKey = createOpenAIReasoningEffortFallbackKey(
 					"responses",
@@ -899,6 +917,7 @@ const streamOpenAIResponsesOnce = (
 				const { params, trailingScaffoldingItems } = builtParams;
 				wireToolNames = builtParams.toolNamesByWire;
 				if (chainState && !chainState.disabled) params.store = true;
+				reaimForServiceTierCapacity(params);
 				applyReasoningEffortFallbackForRequest(params);
 				const chained: OpenAIResponsesChainedParams =
 					chainState && !chainState.disabled
@@ -1071,15 +1090,6 @@ const streamOpenAIResponsesOnce = (
 				});
 			};
 			let strictRetryAvailable = true;
-			// Set once the host refuses the serving tier for want of capacity. Every
-			// later rebuild re-applies it, so a strict-tools or stale-chain repair
-			// cannot resurrect the tier the host just said it has no capacity for.
-			let serviceTierCapacityRetry: ServiceTierCapacityRetry | undefined;
-			// The tier the request was actually served on: a recovery that dropped
-			// `service_tier` must not keep accounting the turn at the refused tier's
-			// rate when the response carries no tier echo of its own.
-			const effectiveRequestServiceTier = (): ServiceTier | undefined =>
-				serviceTierCapacityRetry?.dropServiceTier ? undefined : options?.serviceTier;
 			let activeStrictToolsApplied = builtParams.strictToolsApplied;
 			let forceDisableStrictTools = false;
 			const openResponsesStreamWithFallbacks = async (): Promise<AsyncIterable<ResponseStreamEvent>> => {
@@ -1167,13 +1177,11 @@ const streamOpenAIResponsesOnce = (
 								strictRetryAvailable = false;
 								forceDisableStrictTools = true;
 								disableStrictToolsForScope(providerSessionState, strictToolsScope);
+								// `prepareRequest` re-aims the rebuilt request itself, so the
+								// effort already negotiated for the peer is found again.
 								const fallback = await prepareRequest(true);
 								chained = fallback.chained;
 								activeParams = fallback.builtParams.params;
-								if (serviceTierCapacityRetry) {
-									applyServiceTierCapacityRetry(chained.params, serviceTierCapacityRetry);
-									applyServiceTierCapacityRetry(activeParams, serviceTierCapacityRetry);
-								}
 								activeRawRequestDump.body = chained.params;
 								activeTrailingScaffoldingItems = fallback.builtParams.trailingScaffoldingItems;
 								continue;
@@ -1217,11 +1225,9 @@ const streamOpenAIResponsesOnce = (
 							// retry must be chainable next turn, and the consecutive stale-failure
 							// breaker only trips when each retry stores and the next turn re-chains.
 							currentParams.store = !zdrRejection;
+							reaimForServiceTierCapacity(currentParams);
 							const retryParams = await applyPayloadReplacement(currentParams);
-							if (serviceTierCapacityRetry) {
-								applyServiceTierCapacityRetry(retryParams, serviceTierCapacityRetry);
-								applyServiceTierCapacityRetry(currentParams, serviceTierCapacityRetry);
-							}
+							reaimForServiceTierCapacity(retryParams);
 							chained = { params: retryParams };
 							activeRawRequestDump.body = retryParams;
 							activeParams = currentParams;
