@@ -737,6 +737,14 @@ impl Shell {
 		if !restored {
 			shell.lose_running(cx, &mut report)?;
 		}
+		// The frames header's IR version covers the frames blob only, and
+		// a restore from the root store alone has none. Nothing else has
+		// looked at the serialized function bodies the store holds, and a
+		// body this build cannot read is recompiled from its canonical
+		// text at its first call, which moves the line numbers inside it.
+		// Report those bodies here: a restore that changes what a
+		// function does must not read as a clean one.
+		lose_unreadable_units(cx, &mut report)?;
 		shell.k.sync_root(cx.store, &shell.procs[0]);
 		if let Some(err) = shell.k.root.take_fault() {
 			return Err(RestoreError::Store(err));
@@ -1186,6 +1194,38 @@ pub fn load_unit(
 	Ok(engine.intern(unit))
 }
 
+/// Report, and drop, every stored function body this build cannot read.
+///
+/// A dropped body is recompiled from the function's canonical text at its
+/// first call, which is what happened before in silence; the restore now
+/// says so. The decode is the one [`load_unit`] would make at that call,
+/// so nothing is read twice.
+fn lose_unreadable_units(cx: &mut Cx<'_>, report: &mut RestoreReport) -> Result<(), RestoreError> {
+	let mut units: Vec<UnitId> = Vec::new();
+	cx.store.scan(Table::Func, &mut |_, rec| {
+		if let Record::Func { unit, .. } = rec {
+			units.push(*unit);
+		}
+	})?;
+	units.sort_unstable();
+	units.dedup();
+	for unit in units {
+		let Some(bytes) = cx.store.get_blob(BlobSlot::Unit(unit))? else {
+			continue;
+		};
+		// A blob with no version in front is one an older build wrote;
+		// its first bytes are a unit, which no version can be read from.
+		let found = match postcard::from_bytes::<(u32, Unit)>(&bytes) {
+			Ok((version, u)) if version == IR_VERSION && u.id == unit && valid(&u) => continue,
+			Ok((version, _)) => Some(version),
+			Err(_) => None,
+		};
+		report.lost.push(Lost::Unit { unit, found });
+		cx.store.del_blob(BlobSlot::Unit(unit))?;
+	}
+	Ok(())
+}
+
 /// Every operand of every op and every index inside the side tables points
 /// at an existing entry, so a decoded unit cannot make the VM index out of
 /// bounds.
@@ -1416,7 +1456,7 @@ mod tests {
 
 		let old = postcard::to_stdvec(unit).unwrap();
 		store.put_blob(BlobSlot::Unit(id), &old).unwrap();
-		let refused = super::load_unit(&engine, &mut store, id);
+		let refused = super::load_unit(&engine, &mut store, id, false);
 		assert!(
 			refused.is_err(),
 			"a blob without this build's IR version must not be decoded as if it had it"
@@ -1424,7 +1464,7 @@ mod tests {
 
 		let stale = postcard::to_stdvec(&(IR_VERSION - 1, unit)).unwrap();
 		store.put_blob(BlobSlot::Unit(id), &stale).unwrap();
-		let found = match super::load_unit(&engine, &mut store, id) {
+		let found = match super::load_unit(&engine, &mut store, id, false) {
 			Err(crate::bash::RestoreError::UnitVersion { found, .. }) => found,
 			other => panic!("expected a version refusal, got {other:?}"),
 		};
@@ -1432,7 +1472,8 @@ mod tests {
 
 		let current = postcard::to_stdvec(&(IR_VERSION, unit)).unwrap();
 		store.put_blob(BlobSlot::Unit(id), &current).unwrap();
-		let back = super::load_unit(&engine, &mut store, id).expect("this build's own blob loads");
+		let back =
+			super::load_unit(&engine, &mut store, id, false).expect("this build's own blob loads");
 		assert_eq!(back.id, id);
 	}
 }

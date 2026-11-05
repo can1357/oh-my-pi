@@ -656,20 +656,28 @@ impl<'a> Walker<'a> {
 	}
 
 	fn condition(&mut self, expr: &'a CondExpr, owner: NodeKey, context: Context) {
-		match expr {
-			CondExpr::Unary { arg, .. } | CondExpr::Word(arg) => self.word(arg, owner, context, "arg"),
-			CondExpr::Binary { lhs, rhs, op } => {
-				self.word(lhs, owner, context, "arg");
-				self.word(rhs, owner, context, "arg");
-				if matches!(op.as_slice(), b"-eq" | b"-ne" | b"-lt" | b"-le" | b"-gt" | b"-ge") {
-					self.opaque_mutation = true;
-				}
-			},
-			CondExpr::Not(expr) | CondExpr::Group(expr) => self.condition(expr, owner, context),
-			CondExpr::And(lhs, rhs) | CondExpr::Or(lhs, rhs) => {
-				self.condition(lhs, owner, context);
-				self.condition(rhs, owner, context);
-			},
+		// A chain of `&&` / `||` and a run of `!` are flat and can hold
+		// 100,000 operands, so this walks an explicit stack: recursing on
+		// them overflows it. Operands are pushed in reverse, so they are
+		// read left to right.
+		let mut stack = vec![expr];
+		while let Some(expr) = stack.pop() {
+			match expr {
+				CondExpr::Unary { arg, .. } | CondExpr::Word(arg) => {
+					self.word(arg, owner, context, "arg");
+				},
+				CondExpr::Binary { lhs, rhs, op, .. } => {
+					self.word(lhs, owner, context, "arg");
+					self.word(rhs, owner, context, "arg");
+					if matches!(op.as_slice(), b"-eq" | b"-ne" | b"-lt" | b"-le" | b"-gt" | b"-ge") {
+						self.opaque_mutation = true;
+					}
+				},
+				CondExpr::Not { expr, .. } | CondExpr::Group { expr, .. } => stack.push(expr),
+				CondExpr::And(terms, _) | CondExpr::Or(terms, _) => {
+					stack.extend(terms.iter().rev());
+				},
+			}
 		}
 	}
 

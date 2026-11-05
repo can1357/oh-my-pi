@@ -52,7 +52,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bash::{
 	fs::FileKind,
-	ids::{NativeRef, RunId, Vpid},
+	ids::{NativeRef, RunId, UnitId, Vpid},
 };
 
 /// Options of [`Shell::restore`](crate::bash::Shell::restore).
@@ -140,5 +140,19 @@ pub enum Lost {
 		/// What the host object was (file, pipe, socket, terminal, device),
 		/// so a consumer can tell which open OS handle was dropped.
 		kind: FileKind,
+	},
+	/// A compiled function body the store holds in a serialized layout
+	/// this build cannot read. The function itself survives: it is
+	/// recompiled from its canonical `declare -f` text at its first call,
+	/// which is alias-free and one line shorter than the text it was
+	/// defined from, so `$LINENO` and `caller` inside it move. The body
+	/// is reported here rather than silently replaced.
+	Unit {
+		/// The unit the function record pointed at.
+		unit:  UnitId,
+		/// IR version that wrote the blob, or `None` when it carried none
+		/// (a build from before unit blobs were versioned) or could not
+		/// be decoded at all.
+		found: Option<u32>,
 	},
 }
