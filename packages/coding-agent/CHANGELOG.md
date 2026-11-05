@@ -31,6 +31,7 @@
 
 ### Fixed
 
+- An extension provider with `authHeader: true` keeps its cached `fetchDynamicModels` catalog when `omp models refresh` fails, instead of showing 0 models until the next successful forced refresh ([#18227](https://github.com/can1357/oh-my-pi/issues/18227))
 - Agents using `computer` from Eval now `zoom` for a legible close-up instead of cropping the saved screenshot file, which is downscaled to the capture size on large or Retina windows ([#18158](https://github.com/can1357/oh-my-pi/pull/18158) by [@will-bogusz](https://github.com/will-bogusz))
 - Python eval `@tool` definitions with type annotations now register on Python 3.9 instead of failing with `module 'types' has no attribute 'UnionType'` ([#18143](https://github.com/can1357/oh-my-pi/pull/18143) by [@Winston-Hsiao](https://github.com/Winston-Hsiao))
 - `read` of an SEC EDGAR filing document or filing folder (`sec.gov/Archives/edgar/data/<cik>/<accession>/…`) returns that document instead of the company's profile and recent filings list ([#18150](https://github.com/can1357/oh-my-pi/pull/18150) by [@will-bogusz](https://github.com/will-bogusz))
