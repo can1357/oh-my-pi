@@ -3917,14 +3917,14 @@ const KENARI_BASE_URL = "https://kenari.id/v1";
 
 /**
  * Kenari's public list prices in micro-rupiah. Leave cost at 0: the catalog
- * cost fields are USD per 1M tokens. Output limits are omitted upstream, so
- * maxTokens stays null instead of an invented cap.
+ * cost fields are USD per 1M tokens. A row without `max_output_tokens` keeps
+ * maxTokens null instead of an invented cap.
  */
 function mapKenariModel(
 	entry: OpenAICompatibleModelRecord,
 	defaults: ModelSpec<"openai-completions">,
 ): ModelSpec<"openai-completions"> | null {
-	if (defaults.id === "kenari/auto" || entry.tool_call !== true) return null;
+	if (entry.tool_call !== true) return null;
 	const modalities = isRecord(entry.modalities) ? entry.modalities.input : undefined;
 	return {
 		...defaults,
@@ -3933,7 +3933,7 @@ function mapKenariModel(
 		input: toInputCapabilities(modalities),
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: toPositiveNumber(entry.context_length, null),
-		maxTokens: null,
+		maxTokens: toPositiveNumber(entry.max_output_tokens, null),
 	};
 }
 

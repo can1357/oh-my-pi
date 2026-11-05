@@ -9,6 +9,7 @@ const priced = {
 	tool_call: true,
 	reasoning: true,
 	context_length: 1_000_000,
+	max_output_tokens: 128_000,
 	modalities: { input: ["text", "image", "pdf"] },
 	pricing: {
 		input: 15_000_000_000,
@@ -24,7 +25,6 @@ function catalogFixture(): Response {
 	return Response.json({
 		data: [
 			priced,
-			{ id: "kenari/auto", tool_call: true, context_length: 128_000, pricing: { varies: true } },
 			{ id: "embed-only", tool_call: false, context_length: 8_000 },
 			{ id: "no-window", tool_call: true, reasoning: false },
 			{ id: "agnes-2-0-flash:free", tool_call: true, reasoning: false, context_length: 32_000 },
@@ -57,7 +57,7 @@ describe("Kenari built-in provider", () => {
 			reasoning: true,
 			input: ["text", "image"],
 			contextWindow: 1_000_000,
-			maxTokens: null,
+			maxTokens: 128_000,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		});
 		expect(models?.find(item => item.id === "no-window")).toMatchObject({
