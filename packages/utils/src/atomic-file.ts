@@ -6,6 +6,7 @@ import {
 	getBaseConfigRoot,
 	getConfigDirName,
 	getConfigRootDir,
+	pathIsWithin,
 	relativePathWithinRoot,
 } from "./dirs";
 import { hasFsCode, isEexist, isEnoent } from "./fs-error";
@@ -75,9 +76,7 @@ function insideOmpRoots(candidate: string): boolean {
 	} catch {
 		// Not on disk yet; judge the lexical spelling of its parent.
 	}
-	return [getConfigRootDir(), getBaseConfigRoot(), getAgentDir()].some(
-		root => relativePathWithinRoot(root, dir) !== null || path.resolve(root) === dir,
-	);
+	return [getConfigRootDir(), getBaseConfigRoot(), getAgentDir()].some(root => pathIsWithin(root, dir));
 }
 
 /**
@@ -113,14 +112,15 @@ function insideAProjectConfigDir(filePath: string): boolean {
 	}
 	let searched: string | undefined;
 	for (const root of [getConfigRootDir(), getBaseConfigRoot(), getAgentDir()]) {
-		// A directory that IS a root is inside it, with nothing below. Reading the
-		// null that `relativePathWithinRoot` returns for equality as "not inside"
-		// left the absolute path to be searched, and its own `.omp` then looked
-		// like a project's — so a link sitting directly in the config root, which
-		// is where the default profile keeps every one of these files, was never
-		// followed.
-		const below = path.resolve(root) === dir ? "" : relativePathWithinRoot(root, dir);
-		if (below !== null && (searched === undefined || below.length < searched.length)) searched = below;
+		// `pathIsWithin` canonicalizes both sides and counts a directory that IS
+		// the root as inside it. Comparing spellings instead left two holes: a
+		// link directly in the config root was never followed, which is where the
+		// default profile keeps every one of these files, and a root reached
+		// through a symlinked parent — `/home` on an automounted machine — missed
+		// every time.
+		if (!pathIsWithin(root, dir)) continue;
+		const below = relativePathWithinRoot(root, dir) ?? "";
+		if (searched === undefined || below.length < searched.length) searched = below;
 	}
 	const segments = [...(searched ?? dir).split(path.sep), path.basename(resolved)];
 	return projectConfigDirNames().some(name => containsSequence(segments, name));
@@ -324,7 +324,7 @@ export async function writeFileAtomically(
 	content: string | NodeJS.ArrayBufferView,
 	mode: number = 0o600,
 ): Promise<void> {
-	await stageAndPublish(filePath, filePath, content, mode);
+	await stageAndPublish(filePath, content, mode);
 }
 
 /**
@@ -347,11 +347,10 @@ export async function writeConfigFileAtomically(
 	content: string | NodeJS.ArrayBufferView,
 	mode: number = 0o600,
 ): Promise<void> {
-	await stageAndPublish(filePath, await resolveConfigWriteTarget(filePath), content, mode);
+	await stageAndPublish(await resolveConfigWriteTarget(filePath), content, mode);
 }
 
 async function stageAndPublish(
-	filePath: string,
 	destination: string,
 	content: string | NodeJS.ArrayBufferView,
 	mode: number,

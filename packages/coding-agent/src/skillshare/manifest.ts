@@ -8,7 +8,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { OmpErrors, type } from "@oh-my-pi/omptype";
-import { getAgentDir, getSkillshareStoreDir, hasFsCode, isEnoent } from "@oh-my-pi/pi-utils";
+import { getAgentDir, hasFsCode, isEnoent } from "@oh-my-pi/pi-utils";
 import { resolveOrDefaultProjectRegistryPath } from "../discovery/helpers";
 import { replaceConfigFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 
@@ -89,7 +89,10 @@ function installPathsIn(dir: string): SkillsInstallPaths {
 	return { dir, manifest: path.join(dir, SKILLS_MANIFEST_FILE), lock: path.join(dir, SKILLS_LOCK_FILE) };
 }
 
-export { getSkillshareStoreDir };
+/** Root of the unpacked package store, next to the agent dir. */
+export function getSkillshareStoreDir(): string {
+	return path.join(path.dirname(getAgentDir()), "skillshare");
+}
 
 /** Unpacked directory of one installed version. Throws on ids or versions that are not path-safe. */
 export function getSkillStorePath(scope: string, name: string, version: string): string {

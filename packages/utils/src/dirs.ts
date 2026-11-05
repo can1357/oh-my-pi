@@ -563,11 +563,6 @@ export function getConfigRootDir(): string {
 	return dirs.configRoot;
 }
 
-/** Root of the unpacked skill package store, next to the agent dir (~/.omp/skillshare). */
-export function getSkillshareStoreDir(): string {
-	return path.join(path.dirname(dirs.agentDir), "skillshare");
-}
-
 /** Set the coding agent directory. Creates a fresh resolver, invalidating all cached paths. */
 export function setAgentDir(dir: string): void {
 	activeProfile = undefined;

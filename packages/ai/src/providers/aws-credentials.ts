@@ -618,10 +618,10 @@ async function refreshSsoToken(
 /**
  * Persist a refreshed token so the AWS CLI, other SDKs, and the next OMP process
  * all start from a live token. Written atomically so a concurrent reader never
- * observes a half-written cache entry, and through the link if the cache entry
- * is one, so a `~/.aws` someone manages with stow or chezmoi keeps its shape —
- * which is what the AWS CLI itself does with it. A failure here is logged and
- * ignored, since the in-memory token is still usable for this run.
+ * observes a half-written cache entry. `~/.aws` is outside omp's own directories,
+ * so a symlinked cache entry there is replaced rather than written through —
+ * the same as every other write omp makes to a link outside them. A failure
+ * here is logged and ignored, since the in-memory token is still usable.
  */
 async function writeSsoCachedToken(file: string, token: SsoCachedToken): Promise<void> {
 	const target = path.join(os.homedir(), ".aws", "sso", "cache", file);
