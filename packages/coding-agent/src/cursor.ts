@@ -80,6 +80,12 @@ interface CursorExecBridgeOptions {
 	cwd: string;
 	getCwd?: () => string;
 	tools: Map<string, AgentTool>;
+	/**
+	 * Whether the session may run `name` (its `--tools` allow-list). Every frame
+	 * dispatches through one check, so a frame cannot run a tool the session
+	 * neither offers nor mounts.
+	 */
+	isToolAllowed?: (name: string) => boolean;
 	/** Resolves execution overrides (mounted-device permission wrappers) before the canonical map. */
 	getExecutableTool?: (name: string) => AgentTool | undefined;
 	/**
@@ -302,7 +308,10 @@ async function executeTool(
 	args: Record<string, unknown>,
 	overrideTool?: CursorBridgeTool,
 ): Promise<ToolResultMessage> {
-	const tool = overrideTool ?? options.getExecutableTool?.(toolName) ?? options.tools.get(toolName);
+	const tool =
+		options.isToolAllowed?.(toolName) === false
+			? undefined
+			: (overrideTool ?? options.getExecutableTool?.(toolName) ?? options.tools.get(toolName));
 	if (!tool) {
 		return buildUnavailableToolResult(options, toolCallId, toolName);
 	}

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `--tools <list>` is now an allow-list for everything the model can invoke, not only the initial built-ins: extension, custom, plugin and MCP tools and `xd://` devices are offered or mounted only when the list names them (`mcp:<server>` selects a server's tools, `xd:*` every tool that is not built in), files change only through tools the list names, and a list with no MCP entry starts no MCP server. Before, `--tools read,grep,glob` still mounted every extension and MCP tool behind `write xd://`.
+
 ### Added
 
 - Added `skills.manualSkills` glob patterns to keep skills available manually while hiding them from the model catalog, without editing their `SKILL.md` files ([#18114](https://github.com/can1357/oh-my-pi/pull/18114) by [@Shadorain](https://github.com/Shadorain))

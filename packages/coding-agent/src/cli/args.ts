@@ -19,6 +19,7 @@ import {
 } from "./flag-tables";
 import { getExtraHelpText } from "./help-extra";
 import { CliUsageError } from "./usage-error";
+import { isToolAllowListSelector } from "../tools/tool-allowlist";
 
 export { getExtraHelpText };
 
@@ -469,7 +470,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 export function validateToolNames(requested: readonly string[] | undefined, known: readonly string[]): void {
 	if (!requested) return;
 	const knownNames = new Set(known);
-	const missing = requested.filter(name => !knownNames.has(name));
+	// `mcp:<server>` and `xd:*` select groups of tools, not one name.
+	const missing = requested.filter(name => !isToolAllowListSelector(name) && !knownNames.has(name));
 	if (missing.length === 0) return;
 	const builtinNames = new Set<string>(BUILTIN_TOOL_NAMES);
 	const unavailable = missing.filter(name => builtinNames.has(name));

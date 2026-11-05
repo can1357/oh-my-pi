@@ -81,6 +81,17 @@ export class XdProtocolHandler implements ProtocolHandler {
 		const session = context?.session;
 		if (!session) throw new ToolError(NOT_MOUNTED);
 		const { name } = target;
+		// Every device goes through the session's `--tools` list, the always-mounted
+		// `report_issue` too. Resolution devices only apply a preview that a tool the
+		// list allowed made, so they follow that tool.
+		if (
+			name &&
+			!isResolutionDeviceName(name) &&
+			session.toolAllowList &&
+			!session.toolAllowList.allows(name, session.xdev?.tools.get(name))
+		) {
+			throw new ToolError(`No such tool: xd://${name}`);
+		}
 		if (name === REPORT_ISSUE_DEVICE_NAME) {
 			const { result, xdev } = await dispatchReportIssueDevice(session, content);
 			return { content: result.content, details: { xdev }, isError: result.isError, useless: result.useless };

@@ -51,6 +51,7 @@ import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
 import type { SettingsGatedToolDelta } from "./session-tools";
 import type { CostGateApi } from "./cost-gate";
 import type { SessionManager } from "./session-manager";
+import type { ToolAllowList } from "../tools/tool-allowlist";
 
 /** Maximum time the interactive shutdown path waits for Mnemopi consolidation. */
 export const SHUTDOWN_CONSOLIDATE_BUDGET_MS = 1_500;
@@ -357,6 +358,8 @@ export interface AgentSessionConfig {
 	xdev?: XdevState;
 	/** Names pinned top-level during runtime repartitioning. */
 	presentationPinnedToolNames?: ReadonlySet<string>;
+	/** Allow-list for every tool the model can invoke (CLI `--tools`); see `ToolAllowList`. */
+	toolAllowList?: ToolAllowList;
 	/** Accessor for live MCP server instructions. */
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
 	/** Installs a host-owned MCP instructions source; see {@link AgentSession.setMcpServerInstructionsSource}. */

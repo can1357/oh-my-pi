@@ -165,6 +165,8 @@ export class TanCommandController {
 								systemPrompt,
 								toolNames,
 								mountedToolNames,
+								// The clone can invoke nothing its source's `--tools` does not allow.
+								toolAllowList: session.toolAllowList,
 								advertiseHeadlessAsk: activeToolNames.includes("ask"),
 								providerSessionId: `${parentSessionId}:tan:${Snowflake.next()}`,
 								providerPromptCacheKey: parentPromptCacheKey,

@@ -311,6 +311,7 @@ import {
 	warmupLspServers,
 	xdevEntries,
 } from "./tools";
+import { allowListDeniesWrite, type ToolAllowList } from "./tools/tool-allowlist";
 import { resolveYieldReportText } from "./tools/yield";
 import {
 	createModelJobCaptionWriter,
@@ -845,6 +846,13 @@ export interface CreateAgentSessionOptions {
 	skipPythonPreflight?: boolean;
 	/** Tool names explicitly requested (enables disabled-by-default tools) */
 	toolNames?: string[];
+	/**
+	 * Allow-list for everything the model can invoke (CLI `--tools`): built-in,
+	 * extension and custom tools, `xd://` devices and MCP tools. A tool it does
+	 * not allow is neither offered nor mounted, and with no MCP entry no MCP
+	 * server starts. See {@link ToolAllowList}.
+	 */
+	toolAllowList?: ToolAllowList;
 	/** Names from `toolNames` that a fork inherits as `xd://` devices rather than explicit top-level tools. */
 	mountedToolNames?: string[];
 	/** Limit the session to explicitly supplied tool names, without discovered extras. */
@@ -2817,7 +2825,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		});
 
 		// Restricted sessions cannot inherit or discover MCP capabilities.
-		const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
+		// A structured subagent must be able to report its result, whatever its
+		// parent's list names: `yield` only ends the run.
+		const toolAllowList =
+			options.requireYieldTool === true ? options.toolAllowList?.withNames(["yield"]) : options.toolAllowList;
+		// An allow-list with no MCP entry can reach no MCP tool: start no server.
+		const enableMCP = !restrictToolNames && (options.enableMCP ?? true) && (toolAllowList?.allowsMCP ?? true);
 		let mcpManager: MCPManagerApi | undefined = enableMCP ? options.mcpManager : undefined;
 		// A subagent worker thread never connects MCP servers itself: it reuses the main thread's manager.
 		if (enableMCP && !mcpManager && !isMainThread()) mcpManager = MCPManager.instance();
@@ -2825,6 +2838,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		let ownedMcpManager: MCPManager | undefined;
 		toolSession.mcpManager = mcpManager;
 		toolSession.enableMCP = enableMCP;
+		toolSession.toolAllowList = toolAllowList;
 		const deferMCPDiscoveryForUI = enableMCP && !mcpManager && options.hasUI === true;
 		const customTools: CustomTool[] = [];
 		const initialMcpManagerTools: CustomTool[] = [];
@@ -4139,6 +4153,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// bridge already passes one.
 			getCwd: () => sessionManager.getCwd(),
 			tools: toolRegistry,
+			isToolAllowed: toolAllowList ? name => toolAllowList.allows(name, toolRegistry.get(name)) : undefined,
 			getExecutableTool: resolveDeviceTool,
 			// `pi_edit` needs the `replace`-mode instance specifically, and the
 			// registry may still hold the session's own `edit` (any mode) when
@@ -4159,11 +4174,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// registry tool. Resolve both the transactional active predicate and
 			// live access mode: Agent.state.tools commits only after prompt rebuilding,
 			// while this predicate revokes before the await and rolls back on failure.
+			// A `--tools` list that does not name `write` removes or creates no whole file,
+			// whatever else it allows (`edit` changes the files it edits).
 			allowDirectFileMutation: () =>
-				(editWasGranted && toolSession.isToolActive?.("edit") === true) ||
-				(toolSession.isToolActive?.("write") === true &&
-					toolRegistry.has("write") &&
-					toolSession.deviceOnlyWrite !== true),
+				!allowListDeniesWrite(toolSession.toolAllowList) &&
+				((editWasGranted && toolSession.isToolActive?.("edit") === true) ||
+					(toolSession.isToolActive?.("write") === true &&
+						toolRegistry.has("write") &&
+						toolSession.deviceOnlyWrite !== true)),
 		});
 
 		// Resolve the live inline-descriptors setting against the active model.
@@ -4414,7 +4432,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				taskIrcEnabled: !restrictToolNames && isIrcEnabled(settings, options.taskDepth ?? 0),
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
 				writeTransportOnly:
-					toolSession.deviceOnlyWrite === true && toolSession.pendingFullWriteDescription !== true,
+					(toolSession.deviceOnlyWrite === true && toolSession.pendingFullWriteDescription !== true) ||
+					allowListDeniesWrite(toolSession.toolAllowList),
 				secretsEnabled: obfuscator?.obfuscates() === true,
 				workspaceTree: workspaceTreePromise ?? emptyWorkspaceTree,
 				includeWorkspaceTree,
@@ -4523,6 +4542,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (toolRegistry.has(name) && !initialToolNames.includes(name)) {
 				initialToolNames.push(name);
 			}
+		}
+		if (toolAllowList) {
+			initialToolNames = initialToolNames.filter(name => toolAllowList.allows(name, toolRegistry.get(name)));
 		}
 
 		// Pre-register in the global agent registry BEFORE building the system prompt,
@@ -5058,7 +5080,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// `bash`/`write` the user configured as `ask` or `deny`. Meta-notice
 		// first, matching the registry's wrap order.
 		const advisorTools: Tool[] = built
-			.filter((tool): tool is Tool => tool != null)
+			// The advisor's config selects from what the session's `--tools` allows, never past it.
+			.filter((tool): tool is Tool => tool != null && (!toolAllowList || toolAllowList.allows(tool.name, tool)))
 			.map(tool => new ExtensionToolWrapper(wrapToolWithMetaNotice(tool), extensionRunner, advisorAgent) as Tool);
 
 		const advisorWatchdogPrompts = [...watchdogFiles];
@@ -5164,6 +5187,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,
 			presentationPinnedToolNames,
+			toolAllowList,
 			setActiveToolNames: setSessionActiveToolNames,
 			ensureWriteRegistered,
 			isDeviceOnlyWrite: () => toolSession.deviceOnlyWrite === true,
@@ -5706,6 +5730,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			primaryPromptCacheKey: model => session.getPromptCacheKeyForModel(model),
 			captureTools: () =>
 				(["manage_skill", "learn"] as const)
+					// The private capture offers only what the session's `--tools` allows.
+					.filter(name => !toolAllowList || toolAllowList.allows(name, session.getToolByName(name)))
 					.map(name => session.getToolByName(name))
 					.filter((tool): tool is AgentTool => tool !== undefined),
 			onPayload,

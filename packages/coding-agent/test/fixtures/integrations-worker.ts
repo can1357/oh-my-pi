@@ -15,6 +15,7 @@ import { authService } from "../../src/thread/services/auth";
 import { integrationsThreadService } from "../../src/thread/services/integrations";
 import { RemoteMCPManager } from "../../src/thread/services/mcp-remote";
 import { settingsThreadService } from "../../src/thread/services/settings";
+import { ToolAllowList } from "../../src/tools/tool-allowlist";
 
 /** Outcome of one tool call made from the worker. */
 export interface ToolCallOutcome {
@@ -53,6 +54,8 @@ export interface IntegrationsProbe {
 	}>;
 	/** Read local-protocol getters synchronously, twice with an awaited gap the test fills. */
 	localRoot(options: LocalProtocolOptions): Promise<string>;
+	/** What a `--tools` list sent from main allows in this thread. */
+	allowList(list: ToolAllowList): Promise<{ isList: boolean; write: boolean; read: boolean; mcp: boolean }>;
 	/** Bind prepared extensions in this thread and list the commands they registered. */
 	bindExtensions(prepared: PreparedExtension[], cwd: string): Promise<{ commands: string[]; errors: string[] }>;
 }
@@ -157,6 +160,12 @@ function buildProbe(): IntegrationsProbe {
 			approvalTargets: options.customTools?.[0]?.approvalCacheTargets?.({ path: "a.txt" }),
 		}),
 		localRoot: async options => resolveLocalRoot(options),
+		allowList: async list => ({
+			isList: list instanceof ToolAllowList,
+			write: list.allows("write", undefined),
+			read: list.allows("read", undefined),
+			mcp: list.allows("mcp__fixture_probe", { name: "mcp__fixture_probe", mcpServerName: "fixture" }),
+		}),
 		bindExtensions: async (prepared, cwd) => {
 			const result = await bindPreparedExtensions(prepared, cwd);
 			return {

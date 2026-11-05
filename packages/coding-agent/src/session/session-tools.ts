@@ -77,6 +77,7 @@ import {
 	cfgToolsXdevInlineDevices,
 	cfgToolsXdevNotices,
 } from "../tools/settings";
+import type { ToolAllowList } from "../tools/tool-allowlist";
 
 /** Capabilities borrowed from the owning AgentSession. */
 export interface SessionToolsHost {
@@ -157,6 +158,8 @@ interface SessionToolsOptions {
 	createThinkTool?: () => Promise<AgentTool | null>;
 	builtInToolNames?: Iterable<string>;
 	presentationPinnedToolNames?: ReadonlySet<string>;
+	/** Allow-list for every tool the model can invoke; a tool it does not allow is never offered or mounted. */
+	toolAllowList?: ToolAllowList;
 	/** MCP tool names whose current registry entries came from the manager snapshot. */
 	mcpManagerToolNames?: Iterable<string>;
 	ensureWriteRegistered?: () => Promise<boolean>;
@@ -398,6 +401,7 @@ export class SessionTools {
 	#announcedMounts = new Set<string>();
 	#announcedMountsSeeded = false;
 	#presentationPinnedToolNames: ReadonlySet<string> | undefined;
+	readonly #toolAllowList: ToolAllowList | undefined;
 	#runtimeSelectedToolNames: ReadonlySet<string> | undefined;
 	#baseSystemPrompt: string[];
 	/**
@@ -503,6 +507,7 @@ export class SessionTools {
 			}
 		}
 		this.#presentationPinnedToolNames = options.presentationPinnedToolNames;
+		this.#toolAllowList = options.toolAllowList;
 		this.#ensureWriteRegistered = options.ensureWriteRegistered;
 		this.#isDeviceOnlyWrite = options.isDeviceOnlyWrite;
 		this.#deviceOnlyWriteTransportAvailable = this.#isDeviceOnlyWrite?.() === true;
@@ -1309,9 +1314,14 @@ export class SessionTools {
 			const goalRegistration = this.#ensureGoalRegistered?.();
 			if (goalRegistration) await untilAborted(signal, goalRegistration);
 		}
+		// Every activation path (startup, MCP refresh, extension registration,
+		// runtime selection) passes here: a tool the allow-list does not name is
+		// neither offered nor mounted, so `write xd://` cannot reach it either.
+		const toolAllowList = this.#toolAllowList;
 		const selectedTools = toolNames.flatMap(name => {
 			const tool = this.#toolRegistry.get(name);
-			return tool ? [{ name, tool }] : [];
+			if (!tool || (toolAllowList && !toolAllowList.allows(name, tool))) return [];
+			return [{ name, tool }];
 		});
 		const xdevReadAvailable = this.#builtInToolNames.has("read") && selectedTools.some(({ name }) => name === "read");
 		const xdevWriteAvailable =

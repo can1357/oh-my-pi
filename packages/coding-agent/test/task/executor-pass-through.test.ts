@@ -33,6 +33,7 @@ import { manyToolName } from "../fixtures/many-tools-mcp";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 import { cfgTierAnthropic, cfgTierGoogle, cfgTierOpenai } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { ToolAllowList } from "@oh-my-pi/pi-coding-agent/tools/tool-allowlist";
 
 function createMockSession(
 	onPrompt: (params: { emit: (event: AgentSessionEvent) => void }) => void | Promise<void>,
@@ -418,6 +419,18 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.mcpManager).toBe(mcpManager);
 		expect(forwarded?.mcpTools?.map(tool => tool.name)).toEqual(["mcp__private_read"]);
 		expect(forwarded?.customTools).toBeUndefined();
+	});
+
+	// A child can invoke nothing its parent's `--tools` allow-list does not allow.
+	it("forwards the parent's tool allow-list to the child", async () => {
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const toolAllowList = ToolAllowList.parse(["read", "task"]);
+
+		const result = await runSubprocess({ ...baseOptions, id: "allow-list-child", toolAllowList });
+
+		expect(result.exitCode).toBe(0);
+		expect(spy.mock.calls[0]?.[0]?.toolAllowList).toBe(toolAllowList);
 	});
 
 	it("preserves the legacy result shape when no output schema is selected", async () => {

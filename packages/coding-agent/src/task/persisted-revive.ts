@@ -59,6 +59,7 @@ import { cfgTaskAgentAccountPools, cfgTaskMaxEffort } from "./settings";
 import { type RestoredSeanceSession, restoreSeanceSession } from "./seance";
 import { seanceIsolationOptions } from "./seance-policy";
 import type { AgentDefinition } from "./types";
+import type { ToolAllowList } from "../tools/tool-allowlist";
 
 /**
  * Ambient context the reviver needs at revive time. The top-level session is
@@ -73,6 +74,8 @@ export interface PersistedSubagentReviveContext {
 	settings: Settings;
 	/** LSP policy of the top-level session; revived subagents inherit it rather than defaulting on. */
 	enableLsp: boolean;
+	/** Tool allow-list of the top-level session (CLI `--tools`); revived subagents inherit it. */
+	toolAllowList?: ToolAllowList;
 	/**
 	 * Shared event bus feeding RPC/collab subagent subscriptions. Passed through
 	 * to the wake-turn monitor so an IRC send to a cold-revived subagent emits
@@ -110,6 +113,7 @@ export interface PersistedReviveSpec {
 	readonly modelRegistry: ModelRegistry;
 	readonly settings: Settings;
 	readonly enableLsp: boolean;
+	readonly toolAllowList: ToolAllowList | undefined;
 	readonly eventBus: EventBus | undefined;
 	readonly subagentEventBus: EventBus | undefined;
 }
@@ -233,6 +237,7 @@ export function createPersistedSubagentReviverFactory(
 				modelRegistry: ctx.modelRegistry,
 				settings: ctx.settings,
 				enableLsp: ctx.enableLsp,
+				toolAllowList: ctx.toolAllowList,
 				eventBus: ctx.eventBus,
 				subagentEventBus: ctx.subagentEventBus,
 			};
@@ -477,6 +482,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 			outputSchemaMode: init.outputSchemaMode,
 			restrictToolNames: restrictToolNames || undefined,
 			requireYieldTool: structured,
+			toolAllowList: spec.toolAllowList,
 			systemPrompt: () => [...init.systemPrompt],
 			// Inherit current owner policy, never extension authority from a transcript.
 			extensionRoots: () => spec.root.effectiveExtensionRoots,
