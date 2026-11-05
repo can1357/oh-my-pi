@@ -1822,6 +1822,104 @@ describe("NativeJudge Workers AI dialect", () => {
 	});
 });
 
+describe("NativeJudge Liquid AI dialect", () => {
+	const d1Ultra = buildModel({
+		id: "d1-ultra",
+		name: "Liquid d1-ultra",
+		api: "liquid-systemone",
+		provider: "liquid",
+		baseUrl: "https://api.liquid.ai",
+		reasoning: false,
+		input: ["text", "image"],
+		cost: { input: 0.042, output: 0, cacheRead: 0.042, cacheWrite: 0 },
+		contextWindow: 32_768,
+		maxTokens: null,
+	});
+	const request = {
+		state: "Checkout is down.",
+		questions: { urgent: { type: "noul", instructions: "Urgent?" } },
+	} as const;
+
+	it("posts to {baseUrl}/decisions/v1/systemone with Bearer token and verbatim model", async () => {
+		const calls: { url: string; init: RequestInit | undefined }[] = [];
+		const judge = createNativeJudge(d1Ultra, {
+			apiKey: "liquid-test-key",
+			fetch: async (url, init) => {
+				calls.push({ url: String(url), init });
+				return Response.json({
+					model: "d1-ultra",
+					answers: { urgent: { type: "noul", noul: 0.98 } },
+					usage: { input_tokens: 16, output_tokens: 0 },
+				});
+			},
+		});
+
+		const result = await judge.judge(request);
+
+		expect(calls[0].url).toBe("https://api.liquid.ai/decisions/v1/systemone");
+		expect(new Headers(calls[0].init?.headers).get("authorization")).toBe("Bearer liquid-test-key");
+		expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+			state: request.state,
+			model: "d1-ultra",
+			questions: request.questions,
+		});
+		expect(result.answers.urgent.noul).toBe(0.98);
+		expect(result.model).toBe("d1-ultra");
+		expect(result.usage).toMatchObject({ input: 16, totalTokens: 16 });
+
+		const gifImage: ImageContent = {
+			type: "image",
+			data: "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
+			mimeType: "image/gif",
+		};
+
+		await judge.judge({ ...request, images: [...IMAGE_REFS, gifImage] });
+
+		expect(JSON.parse(String(calls[1].init?.body))).toEqual({
+			state: request.state,
+			model: "d1-ultra",
+			questions: request.questions,
+			images: [
+				"data:image/png;base64,AQID",
+				"data:image/jpeg;base64,BAUG",
+				"data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
+			],
+		});
+	});
+
+	it("rejects request bodies exceeding 4.5 MB before calling fetch", async () => {
+		let calls = 0;
+		const judge = createNativeJudge(d1Ultra, {
+			apiKey: "liquid-test-key",
+			fetch: async () => {
+				calls++;
+				return new Response("unreachable", { status: 500 });
+			},
+		});
+		const hugeState = "x".repeat(5 * 1024 * 1024);
+		const error = await judge.judge({ ...request, state: hugeState }).catch((caught: unknown) => caught);
+		expect(error).toBeInstanceOf(ValidationError);
+		expect(String(error)).toMatch(/Liquid AI System One request body exceeds 4\.5 MB/);
+		expect(calls).toBe(0);
+	});
+
+	it("rejects images with an aspect ratio exceeding 100:1 before calling fetch", async () => {
+		let calls = 0;
+		const judge = createNativeJudge(d1Ultra, {
+			apiKey: "liquid-test-key",
+			fetch: async () => {
+				calls++;
+				return new Response("unreachable", { status: 500 });
+			},
+		});
+		const extremeRatioImage = pngHeader(1010, 10);
+		const error = await judge.judge({ ...request, images: [extremeRatioImage] }).catch((caught: unknown) => caught);
+		expect(error).toBeInstanceOf(ValidationError);
+		expect(String(error)).toMatch(/Liquid AI image aspect ratio exceeds 100:1 \(images\[0\] is 1010x10\)/);
+		expect(calls).toBe(0);
+	});
+});
+
 describe("chat judgment backend images", () => {
 	it("sends image blocks for supported models and rejects guarded text-only models before send", async () => {
 		const chatModel = buildModel({

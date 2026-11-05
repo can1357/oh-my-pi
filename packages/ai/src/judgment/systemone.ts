@@ -16,7 +16,7 @@
  *   API token plus the account id the URL needs.
  */
 import { parseCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
-import { $env, isRecord } from "@oh-my-pi/pi-utils";
+import { $env, isRecord, parseImageMetadata } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { embeddedImageDataUrl } from "../images/shared";
 import type { ImageContent } from "../types";
@@ -204,4 +204,41 @@ export const workersAiWire: JudgmentWire = {
 		...(request.images?.length ? { images: request.images.map(embeddedImageDataUrl) } : {}),
 	}),
 	decode: payload => (isRecord(payload) ? decodeSystemOne(payload.result) : undefined),
+};
+
+/** Liquid AI decision models (`d1.1`, `d1-ultra`) through `/decisions/v1/systemone`. */
+export const liquidWire: JudgmentWire = {
+	...systemOneWire("/decisions/v1/systemone"),
+	// https://docs.liquid.ai/lfm/models/d1.md#image-requirements
+	images: {
+		mimeTypes: ["image/jpeg", "image/png", "image/webp", "image/gif"],
+		maxCount: 8,
+		maxBytes: 3 * 1024 * 1024,
+		maxTotalBytes: 3 * 1024 * 1024,
+		maxPixels: 10_240_000,
+	},
+	encode(request, model) {
+		const body = {
+			state: request.state,
+			model,
+			questions: wireQuestions(request.questions),
+			...(request.images?.length ? { images: request.images.map(embeddedImageDataUrl) } : {}),
+		};
+		for (const [index, image] of (request.images ?? []).entries()) {
+			const metadata = parseImageMetadata(Buffer.from(image.data, "base64"));
+			if (metadata?.width && metadata?.height) {
+				const { width, height } = metadata;
+				if (Math.max(width, height) > 100 * Math.min(width, height)) {
+					throw new AIError.ValidationError(
+						`Liquid AI image aspect ratio exceeds 100:1 (images[${index}] is ${width}x${height})`,
+					);
+				}
+			}
+		}
+		const bodyBytes = Buffer.byteLength(JSON.stringify(body));
+		if (bodyBytes > 4.5 * 1024 * 1024) {
+			throw new AIError.ValidationError(`Liquid AI System One request body exceeds 4.5 MB (${bodyBytes} bytes)`);
+		}
+		return body;
+	},
 };

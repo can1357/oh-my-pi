@@ -414,6 +414,15 @@ export function cloudflareWorkersAiModelManagerOptions(): ModelManagerOptions<"w
 	};
 }
 
+/** Liquid AI decision models (`d1.1`, `d1-ultra`). */
+export function liquidModelManagerOptions(): ModelManagerOptions<"liquid-systemone"> {
+	return {
+		providerId: "liquid",
+		cacheProviderId: resolveModelCacheProviderId("liquid"),
+		staticModels: seedModels<"liquid-systemone">("liquid"),
+	};
+}
+
 /** Credentials and endpoint overrides for the TypeSafe catalog manager. */
 export interface TypeSafeModelManagerConfig {
 	apiKey?: string;
