@@ -1,31 +1,90 @@
 //! How the cli tests start processes, all through [`command`]: hermetic
-//! (none of the caller's environment — a fixed [`PATH`] and the account's
-//! own name, nothing else — stdin `/dev/null`, stdout and stderr pipes, on
-//! Unix nothing but stdio inherited) and bounded (on Unix in its own
-//! process group, killed with whatever it left in it).
+//! (none of the caller's environment — a [`TEST_PATH`] built from where
+//! the programs the tests need actually live, and the account's own name,
+//! nothing else — stdin `/dev/null`, stdout and stderr pipes, on Unix
+//! nothing but stdio inherited) and bounded (on Unix in its own process
+//! group, killed with whatever it left in it).
 
 #![allow(dead_code, reason = "each test crate uses a subset")]
 
 use std::{
-	ffi::OsStr,
+	ffi::{OsStr, OsString},
 	io::Read,
+	path::{Path, PathBuf},
 	process::{Child, Command, ExitStatus, Output, Stdio},
+	sync::LazyLock,
 	thread::{self, JoinHandle},
 	time::{Duration, Instant},
 };
 #[cfg(unix)]
-use std::{
-	ffi::{CStr, OsString},
-	os::unix::ffi::OsStringExt as _,
-	sync::LazyLock,
-};
+use std::{ffi::CStr, os::unix::ffi::OsStringExt as _};
 
-/// The `PATH` the test process gets, instead of the caller's. The tests
-/// that run a real external (`sh`, `cat`) need one, and a fixed one keeps
-/// which binary they run out of the caller's hands: under a launcher whose
-/// `PATH` has no coreutils, `cat` was not found and the test failed. A test
-/// that cares about the search sets its own.
-const PATH: &str = "/usr/bin:/bin";
+/// The programs the tests resolve through `PATH`, found by tracing
+/// `execve` across every test that starts a process through [`command`]
+/// rather than by reading the scripts. Everything else the tests run they
+/// name absolutely.
+const REQUIRED: [&str; 10] =
+	["cat", "cut", "ln", "ls", "mkfifo", "mv", "rm", "sh", "sleep", "tty"];
+
+/// Where a host following the filesystem hierarchy standard keeps them.
+/// Searched before anything the caller offers, so on such a host no
+/// launcher can put its own `cat` in front of the system's.
+#[cfg(unix)]
+const SYSTEM_DIRS: &[&str] = &["/usr/bin", "/bin"];
+#[cfg(not(unix))]
+const SYSTEM_DIRS: &[&str] = &[];
+
+/// The `PATH` the test process gets, instead of the caller's: the
+/// directories the programs in [`REQUIRED`] were found in, in the order
+/// they were found, and nothing else.
+///
+/// A fixed `/usr/bin:/bin` is hermetic and wrong on a host that does not
+/// follow the filesystem hierarchy standard. This repository ships
+/// `nix/dev-shell.nix`, so NixOS is one: `cat` is in the Nix store and the
+/// FIFO test's `cat < f` failed with the program installed. Resolving each
+/// program keeps both properties — the search starts at [`SYSTEM_DIRS`],
+/// so an FHS host answers exactly as a fixed list would and the caller
+/// cannot redirect anything; a host that keeps its tools elsewhere
+/// contributes only the directories those tools are in.
+///
+/// What is read from the caller is therefore which directories to search
+/// AFTER the system ones, never a startup file, a shell option or a
+/// setting that changes what obash does. A program found nowhere puts no
+/// directory on the `PATH` and the test that needs it fails on it, as it
+/// does today on a host that lacks it.
+pub static TEST_PATH: LazyLock<OsString> = LazyLock::new(|| {
+	let caller = std::env::var_os("PATH").unwrap_or_default();
+	let searched: Vec<PathBuf> = SYSTEM_DIRS
+		.iter()
+		.map(PathBuf::from)
+		.chain(std::env::split_paths(&caller).filter(|dir| dir.is_absolute()))
+		.collect();
+	let mut found: Vec<PathBuf> = Vec::new();
+	for program in REQUIRED {
+		if let Some(dir) = searched.iter().find(|dir| is_program(&dir.join(program)))
+			&& !found.contains(dir)
+		{
+			found.push(dir.clone());
+		}
+	}
+	std::env::join_paths(found).expect("a directory holding one of these programs separates PATH")
+});
+
+/// Whether `path` is a file this account can execute, following links:
+/// a Nix store entry reached through a profile is a symlink.
+fn is_program(path: &Path) -> bool {
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::PermissionsExt as _;
+
+		std::fs::metadata(path)
+			.is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+	}
+	#[cfg(not(unix))]
+	{
+		path.is_file()
+	}
+}
 
 /// The name of the account the tests run as, read from the password
 /// database rather than taken from the caller's `USER`.
@@ -95,7 +154,7 @@ pub fn open_fds() -> Vec<i32> {
 /// after the listing fall in a 64-fd margin.
 pub fn command(program: impl AsRef<OsStr>) -> Command {
 	let mut cmd = Command::new(program);
-	cmd.env_clear().env("PATH", PATH);
+	cmd.env_clear().env("PATH", &*TEST_PATH);
 	#[cfg(unix)]
 	if let Some(user) = ACCOUNT_NAME.as_deref() {
 		cmd.env("USER", user);

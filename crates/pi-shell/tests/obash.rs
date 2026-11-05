@@ -192,12 +192,16 @@ fn script_file_errors_use_the_script_name() {
 	assert_eq!(out.status.code(), Some(2));
 }
 
+/// The `PATH` here is the harness's own, not `/usr/bin:/bin`: this test
+/// cares that the shell searches the variable it is given, not that the
+/// system keeps `sh` in a particular directory, and a host that keeps it
+/// elsewhere failed this on the hardcoded pair.
 #[test]
 fn external_commands_run_through_path() {
 	let out = output(
 		obash()
 			.args(["-c", "sh -c 'exit 3'; echo s=$?"])
-			.env("PATH", "/usr/bin:/bin"),
+			.env("PATH", &*obash_support::TEST_PATH),
 	);
 	assert_eq!(out.stdout, b"s=3\n");
 }
