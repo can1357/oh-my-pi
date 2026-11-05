@@ -5,6 +5,8 @@ import {
 	validateAgentToolArguments,
 } from "@oh-my-pi/pi-agent-core";
 import { type ImageContent, toolWireSchema } from "@oh-my-pi/pi-ai";
+import { fuzzyRank } from "@oh-my-pi/pi-tui";
+import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ToolSession } from "../../tools";
@@ -89,9 +91,18 @@ function getTool(session: ToolSession, name: string): AgentTool {
 	if (tool) return tool;
 	// A registry hit means the tool exists, but the session does not expose it here.
 	if (session.getToolForEvalBridge && session.getToolByName?.(name)) {
-		throw new ToolError(`Tool is registered but not available in this session: ${name}`);
+		throw new ToolError(`Tool is registered but not available in this session: ${name} (disabled or excluded)`);
 	}
-	throw new ToolError(`Unknown tool from js runtime: ${name}`);
+	// Suggestions are advisory only: never resolve or execute a fuzzy match.
+	const query = stripXdUrlPrefix(name);
+	const suggestions =
+		query.length >= 2
+			? fuzzyRank(session.getEvalBridgeToolNames?.() ?? [], query, candidate => candidate)
+					.slice(0, 3)
+					.map(match => match.item)
+			: [];
+	const hint = suggestions.length > 0 ? `. Did you mean ${suggestions.join(", ")}?` : "";
+	throw new ToolError(`Unknown tool from js runtime: ${name}${hint}`);
 }
 
 function parsePreludeRequest(args: unknown): { name: string; parameters: unknown } {
