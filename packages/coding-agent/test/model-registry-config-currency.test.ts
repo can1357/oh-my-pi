@@ -256,9 +256,7 @@ describe("a configured discovery keeps the configuration it started under", () =
 		// declared ahead of the credential.
 		const hold = `x-hold: "${held.command}"`;
 		writeWithNewMtime(modelsPath, keyless(hold, "Authorization: Bearer wire-one"));
-		await reloadDuringDiscovery(() =>
-			writeWithNewMtime(modelsPath, keyless(hold, "Authorization: Bearer wire-two")),
-		);
+		await reloadDuringDiscovery(() => writeWithNewMtime(modelsPath, keyless(hold, "Authorization: Bearer wire-two")));
 		expect(wire.flat()).not.toContain("authorization: Bearer wire-one");
 		expect(sent).toEqual([]);
 		expect(registry.find("probe", "listed-model")).toBeUndefined();
