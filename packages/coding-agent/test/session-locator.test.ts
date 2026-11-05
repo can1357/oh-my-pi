@@ -453,40 +453,30 @@ describe("session index: lookups by id", () => {
 		expect(await findSessionFiles(id)).toEqual([file]);
 	});
 
-	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
-		"drops a row whose file is gone, and keeps one it cannot check",
-		async () => {
-			const sessions = getSessionsDir();
-			const goneId = "019a001b-0000-7000-8000-000000000001";
-			const keptId = "019a001b-0000-7000-8000-000000000002";
-			const unknownId = "019a001b-0000-7000-8000-000000000003";
-			const bucket = path.join(sessions, "--pruned--");
-			const gone = path.join(bucket, `2026-01-02T03-04-05-000Z_${goneId}.jsonl`);
-			const kept = path.join(bucket, `2026-01-02T03-04-06-000Z_${keptId}.jsonl`);
-			const unreadableBucket = path.join(sessions, "--unreadable--");
-			const unknown = path.join(unreadableBucket, `2026-01-02T03-04-07-000Z_${unknownId}.jsonl`);
-			writeTranscript(gone, goneId, "/p");
-			writeTranscript(kept, keptId, "/p");
-			writeTranscript(unknown, unknownId, "/p");
-			expect((await rebuildSessionLocator(sessions)).indexed).toBe(3);
+	it("carries every row a reindex found before, including one it cannot reach now", async () => {
+		// A reindex adds and never removes. This process cannot tell a file that
+		// is gone from one it merely cannot reach right now — a bucket whose
+		// symlink target is away, a mount not up yet — and a dropped row costs
+		// the session while a stale one costs a stat the lookup does anyway.
+		const sessions = getSessionsDir();
+		const awayId = "019a001b-0000-7000-8000-000000000001";
+		const keptId = "019a001b-0000-7000-8000-000000000002";
+		const bucket = path.join(sessions, "--carried--");
+		const away = path.join(bucket, `2026-01-02T03-04-05-000Z_${awayId}.jsonl`);
+		const kept = path.join(bucket, `2026-01-02T03-04-06-000Z_${keptId}.jsonl`);
+		writeTranscript(away, awayId, "/p");
+		writeTranscript(kept, keptId, "/p");
+		expect((await rebuildSessionLocator(sessions)).indexed).toBe(2);
 
-			// One file deleted, and one whose directory cannot be searched at all.
-			fs.rmSync(gone);
-			fs.chmodSync(unreadableBucket, 0o000);
-			try {
-				await rebuildSessionLocator(sessions);
-				const rows = fs.readFileSync(path.join(sessions, SESSION_LOCATOR_BASE_FILE), "utf8");
-				// Gone for certain: dropped, so what a lookup reads stays bounded.
-				expect(rows).not.toContain(goneId);
-				// Still there: kept.
-				expect(rows).toContain(keptId);
-				// Could not be checked: kept, because "cannot tell" is not "delete".
-				expect(rows).toContain(unknownId);
-			} finally {
-				fs.chmodSync(unreadableBucket, 0o700);
-			}
-		},
-	);
+		// One file is gone as far as this process can see.
+		fs.rmSync(away);
+		await rebuildSessionLocator(sessions);
+		const rows = fs.readFileSync(path.join(sessions, SESSION_LOCATOR_BASE_FILE), "utf8");
+		expect(rows).toContain(awayId);
+		expect(rows).toContain(keptId);
+		// And the row that is still real still resolves.
+		expect((await resolveResumableSession(keptId, cwdB))?.session.path).toBe(kept);
+	});
 
 	it("reports a transcript it read without finding an id, rather than counting it as walked", async () => {
 		const bucket = path.join(getSessionsDir(), "--no-id--");
