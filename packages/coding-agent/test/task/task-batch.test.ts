@@ -16,7 +16,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Agent, type AgentTool, validateAgentToolArguments } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentTool, type AgentToolResult, validateAgentToolArguments } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
@@ -1115,46 +1115,92 @@ describe("batch model placement", () => {
 	// An array that names nothing is filler too, and three work streams outside this one were blocked
 	// by it: the gate fires for any value that is not `undefined`, before a selector is looked at, so
 	// `model: []` was answered with "Per-call model is disabled… Omit model" for a field the caller
-	// filled with nothing. Measured: shared validation does NOT turn an array into its string form —
-	// `[]` arrives as `[]` — so the raw and validated arguments agree and dropping it cannot split
-	// the speculative launcher's plan from dispatch's.
-	it.each([
-		["an empty array", [] as unknown],
-		["an array of blanks", ["", "  "]],
-	] as const)("dispatches a call whose model is %s", async (_label, model) => {
+	// filled with nothing.
+	//
+	// These go through `validateAgentToolArguments`, which the earlier version of them did not — they
+	// called `execute` directly while their comment cited validation as the measurement, which is how
+	// a conditional schema went unnoticed. `model` used to be widened to `string | string[]` only
+	// while seance was advertised; with it hidden, validation rewrote an array to its JSON text and
+	// `[]` reached dispatch as `"[]"`. So each row runs with seance advertised AND hidden, and in both
+	// gate modes: the declaration is unconditional now, so all four cells must agree.
+	const arrayCells = [
+		["advertised", true],
+		["hidden", false],
+	] as const;
+	const gateCells = ["off", "on"] as const;
+
+	interface ArrayModelDispatch {
+		result: AgentToolResult;
+		spawned: number;
+		grants: unknown;
+	}
+
+	async function dispatchArrayModel(
+		seanceAdvertised: boolean,
+		perCallModel: string,
+		model: unknown,
+	): Promise<ArrayModelDispatch> {
 		const seance = loadBundledAgents().find(agent => agent.name === "seance");
 		if (!seance) throw new Error("Expected the bundled seance agent");
-		mockDiscovery([taskAgent, seance]);
+		mockDiscovery(seanceAdvertised ? [taskAgent, seance] : [taskAgent]);
 		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Pong"));
 		const tool = await TaskTool.create(
-			createSession({ settings: { "task.batch": true, "async.enabled": false, "task.perCallModel": "off" } }),
+			createSession({ settings: { "task.batch": true, "async.enabled": false, "task.perCallModel": perCallModel } }),
 		);
-		const result = await tool.execute("task-empty-array-model", {
-			context: "Shared context",
-			tasks: [{ task: "Reply PONG.", solutionSpace: "one fixed answer", agent: "task", model }],
-		} as never);
-		expect(result.isError).toBeFalsy();
-		expect(run).toHaveBeenCalledTimes(1);
-		expect(run.mock.calls[0]?.[0].perCallModelGrants).toBeUndefined();
-	});
+		const args = validateAgentToolArguments(tool as unknown as AgentTool, {
+			type: "toolCall",
+			id: "task-array-model",
+			name: tool.name,
+			arguments: {
+				context: "Shared context",
+				tasks: [{ task: "Reply PONG.", solutionSpace: "one fixed answer", agent: "task", name: "Pong", model }],
+			},
+		});
+		const result = await tool.execute("task-array-model", args as TaskParams);
+		return { result, spawned: run.mock.calls.length, grants: run.mock.calls[0]?.[0].perCallModelGrants };
+	}
 
-	// A populated array is a real mistake, not filler: `model` is documented as one exact selector,
-	// "no roles, arrays, globs or partial IDs". It must keep reaching the gate rather than be dropped.
-	it("still refuses a populated array model", async () => {
-		const seance = loadBundledAgents().find(agent => agent.name === "seance");
-		if (!seance) throw new Error("Expected the bundled seance agent");
-		mockDiscovery([taskAgent, seance]);
-		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
-		const tool = await TaskTool.create(
-			createSession({ settings: { "task.batch": true, "async.enabled": false, "task.perCallModel": "off" } }),
-		);
-		const result = await tool.execute("task-populated-array-model", {
-			context: "Shared context",
-			tasks: [{ task: "Reply PONG.", solutionSpace: "one fixed answer", agent: "task", model: ["openai/gpt-5.4"] }],
-		} as never);
-		expect(result.isError).toBe(true);
-		expect(run).not.toHaveBeenCalled();
-	});
+	for (const [seanceLabel, seanceAdvertised] of arrayCells) {
+		for (const gate of gateCells) {
+			it.each([
+				["an empty array", [] as unknown],
+				["an array of blanks", ["", "  "]],
+			] as const)(
+				`dispatches a validated call whose model is %s (seance ${seanceLabel}, gate ${gate})`,
+				async (_label, model) => {
+					const { result, spawned, grants } = await dispatchArrayModel(seanceAdvertised, gate, model);
+					expect(getFirstText(result)).not.toMatch(/per-call model is disabled/i);
+					expect(result.isError).toBeFalsy();
+					expect(spawned).toBe(1);
+					expect(grants).toBeUndefined();
+				},
+			);
+
+			// A populated array is a real mistake, not filler, and must reach a message that says what to
+			// send instead. With the gate off that is "omit model"; with it on, the exact selector form.
+			// A non-string entry is populated too: the looser `!some(isRealString)` predicate dropped
+			// `[123]` silently, which contradicted the rule it was written under.
+			it.each([
+				["a real selector", ["openai/gpt-5.4"] as unknown],
+				["two selectors", ["openai/gpt-5.4", "anthropic/claude-opus-5"]],
+				["a non-string entry", [123]],
+			] as const)(
+				`refuses a validated call whose model is %s (seance ${seanceLabel}, gate ${gate})`,
+				async (_label, model) => {
+					const { result, spawned } = await dispatchArrayModel(seanceAdvertised, gate, model);
+					expect(result.isError).toBe(true);
+					expect(spawned).toBe(0);
+					if (gate === "off") {
+						expect(getFirstText(result)).toMatch(/Omit model to use the agent's configured model/);
+					} else {
+						expect(getFirstText(result)).toMatch(/one exact provider\/model-id selector/);
+						// The value quoted back is the one the caller sent, not a stringified rewrite of it.
+						expect(getFirstText(result)).toContain(JSON.stringify(model));
+					}
+				},
+			);
+		}
+	}
 
 	// Regression: lenient argument repair deletes keys an item's schema does not declare, at any depth, so an
 	// item that needs repair (`name: 5`) loses a real `model` unless the item schema keeps declaring it. The

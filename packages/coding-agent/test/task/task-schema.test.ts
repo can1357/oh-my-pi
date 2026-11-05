@@ -169,14 +169,23 @@ describe("task schema seance fields", () => {
 			}
 		}
 	});
-	it("omits seance fields when they are not enabled", () => {
+	// What seance advertisement controls is `sourceSession`, not the shape of `model`. `model` is
+	// declared `string | string[]` on every variant now: while the list form was seance-only, the
+	// narrow schema rewrote an array to its JSON text, so a `model: []` a caller filled with nothing
+	// reached dispatch as the string `"[]"` and the speculative launcher — which plans from the raw
+	// arguments — saw the array, so the two disagreed wherever seance was hidden.
+	it("omits seance fields when they are not enabled, while `model` keeps both forms", () => {
 		for (const batchEnabled of [false, true]) {
 			for (const isolationEnabled of [false, true]) {
 				const schema = getTaskSchema({ batchEnabled, isolationEnabled });
-				const wireSchema = JSON.stringify(schema.toJsonSchema());
-				expect(wireSchema).not.toContain('"sourceSession"');
-				// Only the per-call `model` remains: one string, never the seance selector list.
-				expect(wireSchema).toContain('"model":{"type":"string"}');
+				expect(JSON.stringify(schema.toJsonSchema())).not.toContain('"sourceSession"');
+				const call = (model: unknown): unknown =>
+					batchEnabled
+						? schema({ context: "c", tasks: [{ task: "x", solutionSpace: "c", model }] })
+						: schema({ task: "x", solutionSpace: "c", model });
+				expect(call("openai/gpt-5.4") instanceof type.errors).toBe(false);
+				expect(call(["openai/gpt-5.4"]) instanceof type.errors).toBe(false);
+				expect(call([]) instanceof type.errors).toBe(false);
 			}
 		}
 	});
@@ -225,7 +234,9 @@ Custom prompt.`,
 		const planSchema = JSON.stringify(planMode.parameters.toJsonSchema());
 		expect(planSchema).not.toContain('"sourceSession"');
 		expect(planSchema).not.toContain("seance");
-		expect(planSchema).toContain('"model":{"type":"string"}');
+		// `model` stays declared in plan mode. What plan mode hides is `sourceSession` and every mention
+		// of seance; the shape of `model` is no longer what advertisement controls.
+		expect(planSchema).toContain('"model"');
 		expect(planMode.description).not.toContain("seance");
 		expect(planMode.description).not.toContain("Historical consults");
 

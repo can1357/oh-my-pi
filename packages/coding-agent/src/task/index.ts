@@ -553,24 +553,29 @@ function isBlankString(value: unknown): boolean {
 	return typeof value === "string" && value.trim() === "";
 }
 /**
- * A value that names nothing: an empty or whitespace-only string, or an array with no entry that
- * names anything. Both are what a model sends for a field it has nothing to put in, and the
- * per-call gate refuses either — it fires for any value that is not `undefined`, before a selector
- * is ever looked at, so `model: []` is answered with "Per-call model is disabled… Omit model" for a
- * field the caller filled with nothing.
+ * A value that names nothing: an empty or whitespace-only string, or an array whose every entry is
+ * one. Both are what a model sends for a field it has nothing to put in, and the per-call gate
+ * refuses either — it fires for any value that is not `undefined`, before a selector is ever looked
+ * at, so `model: []` was answered with "Per-call model is disabled… Omit model" for a field the
+ * caller filled with nothing.
  *
- * A *populated* array stays. `task.md` documents "no roles, arrays, globs or partial IDs", so one
- * is a real mistake that deserves a real message rather than being silently dropped.
+ * `every` on a blank, not `!some` on a real one. They differ on an array holding a non-string —
+ * `[123]`, `[{…}]`, `[["…"]]` — which the looser form called blank and dropped, contradicting the
+ * rule below. Two review arms found it independently, and both found that swapping the predicate
+ * left 127 tests green, which is why the distinction is pinned by a test now.
  *
- * Measured, because an earlier revision of this file asserted the opposite and was wrong: shared
- * validation does **not** turn an array into its string form. Through `validateAgentToolArguments`,
- * `[]` arrives as `[]` and `[""]` as `[""]`. That also means the raw streamed arguments and the
- * validated ones agree on arrays, so dropping one here cannot split the speculative launcher's
- * plan from dispatch's — which was the stated reason for leaving them, and it did not hold.
+ * A *populated* array stays, including a non-string one. `task.md` documents "no roles, arrays,
+ * globs or partial IDs", so one is a real mistake, and `invalidModelSelectorReason` answers it with
+ * the exact selector form to send instead.
+ *
+ * This is safe on both planning paths only because ./types declares `model` as `string | string[]`
+ * unconditionally. While that widening was seance-only, the narrow schema rewrote an array to its
+ * JSON text, so dispatch saw `"[]"` where the speculative launcher — which plans from the raw
+ * arguments — saw `[]`, and the two disagreed wherever seance was hidden.
  */
 function isBlankValue(value: unknown): boolean {
 	if (typeof value === "string") return value.trim() === "";
-	return Array.isArray(value) && !value.some(entry => isRealString(entry));
+	return Array.isArray(value) && value.every(entry => isBlankString(entry));
 }
 
 /** A string that names something: the other half of a `task`/`taskFile` pair that was really chosen. */
