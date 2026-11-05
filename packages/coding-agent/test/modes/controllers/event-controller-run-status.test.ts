@@ -11,6 +11,7 @@ import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/eve
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { cfgToolsApproval } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import * as runStatus from "@oh-my-pi/pi-coding-agent/utils/run-status";
+import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
@@ -102,6 +103,42 @@ describe("EventController run status at turn end", () => {
 	});
 });
 
+describe("EventController settle with a queued compaction", () => {
+	function queuedCompactionContext() {
+		const ctx = createInteractiveModeContext();
+		const runYieldCompaction = vi.fn();
+		const restoreCompactionQueueToEditor = vi.fn();
+		Object.assign(ctx, {
+			yieldCompaction: { text: "/compact", sessionId: "session", leafId: null },
+			runYieldCompaction,
+			restoreCompactionQueueToEditor,
+		});
+		return { ctx, runYieldCompaction, restoreCompactionQueueToEditor };
+	}
+
+	it("runs it when the run yields", async () => {
+		const { ctx, runYieldCompaction, restoreCompactionQueueToEditor } = queuedCompactionContext();
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent(agentEnd([assistant("stop")]));
+
+		expect(runYieldCompaction).toHaveBeenCalledTimes(1);
+		expect(restoreCompactionQueueToEditor).not.toHaveBeenCalled();
+	});
+
+	it("hands it back when the user stopped the run (loop-mode Esc aborts without restoring the queue)", async () => {
+		const { ctx, runYieldCompaction, restoreCompactionQueueToEditor } = queuedCompactionContext();
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent(agentEnd([assistant("aborted", USER_INTERRUPT_LABEL)]));
+
+		expect(runYieldCompaction).not.toHaveBeenCalled();
+		expect(restoreCompactionQueueToEditor).toHaveBeenCalledTimes(1);
+	});
+});
+
 describe("EventController run status while prompts wait on the user", () => {
 	it("reports the prompt still waiting when another resolves, and working once none is left", async () => {
 		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
@@ -129,5 +166,30 @@ describe("EventController run status while prompts wait on the user", () => {
 		await controller.handleEvent(toolStart("bash-1", "bash", { command: "rm -rf build" }));
 
 		expect(report).toHaveBeenLastCalledWith(expect.objectContaining({ state: "blocked", kind: "permission" }));
+	});
+
+	it("judges a focused subagent's tool call by the subagent's own settings and session approvals", async () => {
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		const bash = { name: "bash", label: "Bash" } as unknown as AgentTool;
+		let approved = false;
+		const controller = new EventController(
+			createInteractiveModeContext({
+				viewSession: {
+					getToolByName: () => bash,
+					settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
+					hasSessionApproval: (key: string) => approved && key === "bash\0exec",
+				},
+			}),
+		);
+
+		// The root session runs yolo; the focused subagent asks before exec-tier calls.
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent(toolStart("bash-1", "bash", { command: "make" }));
+		expect(report).toHaveBeenLastCalledWith(expect.objectContaining({ state: "blocked", kind: "permission" }));
+
+		approved = true;
+		report.mockClear();
+		await controller.handleEvent(toolStart("bash-2", "bash", { command: "make" }));
+		expect(report).not.toHaveBeenCalledWith(expect.objectContaining({ state: "blocked" }));
 	});
 });

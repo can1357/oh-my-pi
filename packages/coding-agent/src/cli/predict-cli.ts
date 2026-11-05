@@ -22,7 +22,7 @@ import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { col, compact, keyed, node, row, span, text } from "@oh-my-pi/pi-tui/native/describe";
 import { Memo } from "@oh-my-pi/pi-tui/native/memo";
 import type { NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
-import { actionBar, actionButton } from "@oh-my-pi/pi-tui/native/overlay";
+import { actionBar, actionButton, iconButton } from "@oh-my-pi/pi-tui/native/overlay";
 import {
 	type WordCompletionEngine,
 	WordCompletionProvider,
@@ -267,13 +267,7 @@ class PredictCompareComponent implements Component, Focusable {
 									align: "center",
 									role: "omp.app.fresh",
 								}),
-							node("icon", {
-								name: "x",
-								role: "omp.app.ibtn",
-								title: "Quit  esc",
-								aria: "Quit",
-								actions: { click: "quit" },
-							}),
+							iconButton("x", "quit", "Quit  esc", { aria: "Quit" }),
 						]),
 						{ gap: "md", align: "center", role: "omp.app.tools" },
 					),

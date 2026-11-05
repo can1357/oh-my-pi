@@ -171,11 +171,37 @@ const instances = new Map<string, AgentStorage>();
 let cancelExitCleanup: (() => void) | undefined;
 
 /**
+ * The agent.db surface sessions and tools reach through `Settings.getStorage()`.
+ * {@link AgentStorage} implements it over SQLite; a subagent worker's settings
+ * mirrors return a remote implementation that runs every call on the main
+ * thread's open storage (`thread/services/runtime-remote.ts`), so workers never
+ * open a second connection.
+ */
+export interface AgentStorageApi {
+	/** Cached value by key; null when missing or expired. */
+	getCache(key: string): string | null;
+	/** Set a cached value with expiry time (unix seconds). */
+	setCache(key: string, value: string, expiresAtSec: number): void;
+	/** Stored auth credentials, optionally filtered by provider. */
+	listAuthCredentials(provider?: string, includeDisabled?: boolean): StoredAuthCredential[];
+	/** Record a model use ("provider/modelId"), bumping it in the MRU order. */
+	recordModelUsage(modelKey: string): void;
+	/** Model keys, most recently used first. */
+	getModelUsageOrder(): string[];
+	/** Fold one completed request's timing into the model's perf aggregates. */
+	recordModelPerf(modelKey: string, sample: ModelPerfSample, serviceTier?: ServiceTier | null): Promise<void>;
+	/** Recency-weighted perf averages keyed by "provider/modelId". */
+	getModelPerf(): Map<string, ModelPerfStats>;
+	/** Claim a one-time notice across every process sharing the database. */
+	claimNotice(key: string, expiresAtMs: number): boolean;
+}
+
+/**
  * Unified SQLite storage for agent settings, model usage, and auth credentials.
  * Delegates auth credential operations to AuthCredentialStore from @oh-my-pi/pi-ai.
  * Uses singleton pattern per database path; access via AgentStorage.open().
  */
-export class AgentStorage {
+export class AgentStorage implements AgentStorageApi {
 	#db: Database;
 	#authStore: AuthCredentialStore;
 

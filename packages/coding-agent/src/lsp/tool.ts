@@ -20,6 +20,7 @@ import { clampTimeout, resolveLspTimeouts, TOOL_TIMEOUTS } from "../tools/tool-t
 import {
 	applyWorkspaceEditWithLsp,
 	clearInitializationFailure,
+	ensureWorkspaceFolders,
 	getActiveClients,
 	getOrCreateClient,
 	isRustAnalyzerClient,
@@ -114,6 +115,9 @@ import { cfgToolsMaxTimeout } from "../tools/settings";
 import { cfgLspRequestTimeout } from "./settings";
 
 const MAX_RENAME_PAIRS = 1000;
+
+/** File actions whose answer can draw on other open documents; those are synced from disk first. */
+const CROSS_FILE_ACTIONS: ReadonlySet<string> = new Set([...PROJECT_INDEXED_ACTIONS, "code_actions"]);
 
 interface FileRenamePair {
 	oldUri: string;
@@ -640,8 +644,24 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			for (const [serverName, serverConfig] of servers) {
 				throwIfAborted(signal);
 				let client: LspClient;
+				// A server that never received the rename's checkouts answers without them.
+				let folderError: unknown;
 				try {
 					client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+					// Per renamed file, both sides, not per directory: a rename can span checkouts.
+					// One file per directory is enough, and one notification adds them all.
+					const byDir = new Map<string, string>();
+					for (const { oldUri, newUri } of pairs) {
+						for (const filePath of [uriToFile(oldUri), uriToFile(newUri)]) {
+							if (!byDir.has(path.dirname(filePath))) byDir.set(path.dirname(filePath), filePath);
+						}
+					}
+					try {
+						await ensureWorkspaceFolders(client, [...byDir.values()], signal);
+					} catch (err) {
+						if (err instanceof ToolAbortError || signal?.aborted) throw err;
+						folderError = err;
+					}
 					if (isProjectAwareLspServer(serverConfig)) {
 						await waitForProjectLoaded(client, signal);
 					}
@@ -663,7 +683,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						signal,
 					)) as WorkspaceEdit | null;
 					respondingServers.add(serverName);
-					if (result && (result.changes || result.documentChanges)) {
+					if (folderError !== undefined) {
+						// Its edits leave out the checkout it never loaded; method-not-found
+						// (below) means it has no rename edits to miss.
+						const msg = folderError instanceof Error ? folderError.message : String(folderError);
+						serverNotes.push(`  ${serverName}: could not add the rename's checkout to its workspace: ${msg}`);
+						hardFailures.push(serverName);
+					} else if (result && (result.changes || result.documentChanges)) {
 						perServerEdits.push({ serverName, edit: result });
 					}
 				} catch (err) {
@@ -1058,6 +1084,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						undefined,
 						signal,
 					);
+					// Results point into every open document, so sync those edited outside OMP first.
+					await reconcileOpenFilesFromDisk(workspaceClient, signal, undefined, "close");
 					const workspaceResult = (await sendRequest(
 						workspaceClient,
 						"workspace/symbol",
@@ -1249,6 +1277,17 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 			if (needsProjectIndex && !isRustAnalyzerServer) {
 				await waitForProjectLoaded(client, signal);
+			}
+
+			// Answers that span files are computed from every open document, and one
+			// edited outside OMP still holds its stale overlay: references and
+			// definitions then point at old lines, and a rename or code action
+			// writes its edits onto them. Sync them all after the waits, right
+			// before the request. An action that writes edits fails on an open file
+			// it cannot read; a read-only query closes that file and goes on.
+			if (CROSS_FILE_ACTIONS.has(action)) {
+				const writesEdits = action === "rename" || (action === "code_actions" && apply === true);
+				await reconcileOpenFilesFromDisk(client, signal, undefined, writesEdits ? "throw" : "close");
 			}
 
 			switch (action) {
@@ -1548,15 +1587,6 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							details: { action, serverName, success: false },
 						};
 					}
-
-					// A project-wide rename answers with ranges for every file it
-					// touches. An already-open consumer that was edited outside OMP
-					// still holds its stale overlay, so those ranges point at the old
-					// text and the edit lands on the wrong lines while the rename
-					// reports success (#15772). Sync every open document, not just
-					// the requested target, so the server computes the workspace
-					// edit against current disk text.
-					await reconcileOpenFilesFromDisk(client, signal);
 
 					const result = (await sendRequest(
 						client,

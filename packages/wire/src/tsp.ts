@@ -18,6 +18,8 @@
  * here is optional.
  */
 
+import type { ShellVizPresentation } from "./shell-viz";
+
 /** Protocol version this build speaks. */
 export const TSP_VERSION = 1;
 /** APC identifier: every TSP message body starts with `tsp;`. */
@@ -67,6 +69,7 @@ export const TSP_KINDS = [
 	"tabs",
 	"editor",
 	"input",
+	"button",
 	"status",
 	"seg",
 	"overlay",
@@ -80,6 +83,7 @@ export const TSP_KINDS = [
 	"chart",
 	"meter",
 	"effort",
+	"shell",
 ] as const;
 
 export type TspKind = (typeof TSP_KINDS)[number];
@@ -222,18 +226,66 @@ export interface TspMarkdownProps {
 	/** Literal runs drawn as these spans wherever they occur in prose (a sent prompt's chip tokens). */
 	marks?: readonly TspSpan[];
 }
+/** One marked line of a {@link TspCodeProps.marks}. */
+export interface TspCodeMark {
+	line: number;
+	tone?: TspTone;
+	heat?: number;
+	/**
+	 * Scores in [0, 1] washing the row on the `heat` ramp in place of `heat`'s wash: one flat, several a gradient across
+	 * the row, an evenly spaced stop per score from left to right. `heat` still sizes the line's overview bar.
+	 */
+	wash?: readonly number[];
+}
+/** A run of lines a {@link TspCodeProps} draws as one row until it is opened. */
+export interface TspCodeFold {
+	/** First and last folded line, in the gutter's numbering. */
+	from: number;
+	to: number;
+	/** The folded row's text, in the code's face (default `… [lines {from}-{to}]`, `… [line {from}]` for one line). */
+	label?: string;
+	/** What the fold hides, after a sparkline of its lines' mark `heat`. */
+	note?: TspText;
+	/** `error` tints the row; any tone colors the note. */
+	tone?: TspTone;
+	/** Drawn open; a click on the folded row (or on an open fold's head) toggles it in place. */
+	open?: boolean;
+	/** A card shown while the pointer rests on the folded row, as the common {@link TspCommonProps.hovercard}. */
+	hovercard?: TspPropNode;
+}
 export interface TspCodeProps {
 	text?: string;
 	/** The language of text that is no file's (`bash`, `json`); wins over `path`. */
 	lang?: string;
 	/** The file the text comes from: the terminal picks the grammar from it (and heads a block outside a tool card with it). */
 	path?: string;
+	/** The first line's number; later lines count up from it. */
 	start?: number;
+	/**
+	 * Each line's number (one per line of `text`, strictly ascending), for non-contiguous lines: replaces counting from
+	 * `start`, and a `…` gap row is drawn before every line whose number is not the previous one's + 1. Marks' `line` and
+	 * folds' `from`/`to` are in this numbering. Ignored (numbers count from `start`) when its length differs from the
+	 * text's line count or it is not strictly ascending.
+	 */
+	nums?: readonly number[];
 	numbers?: boolean;
-	marks?: readonly { line: number; tone: TspTone }[];
+	/**
+	 * Marked lines (`line` is the drawn line number). `heat` in [0, 1] washes the row in a heat ramp, `wash` runs that
+	 * ramp across it; `tone` draws a bar, and any tone but `accent` also tints an unwashed row. A mark without `heat`
+	 * or `wash` has tone `accent` by default; one with only those draws no bar.
+	 */
+	marks?: readonly TspCodeMark[];
 	wrap?: boolean;
 	/** Clamp to the first `lines` drawn lines under a "N more lines" button; gives way inside an open disclosure. */
 	preview?: TspPreview;
+	/** Runs of lines drawn folded: sorted, not overlapping; marks inside apply once a fold is open. */
+	folds?: readonly TspCodeFold[];
+	/**
+	 * An overview strip above the lines: one bar per line (its height the mark's `heat`, its color the mark's tone),
+	 * a band under it over the lines outside folds, and a bracket over the lines in view. A click or drag on it
+	 * scrolls the code there.
+	 */
+	overview?: boolean;
 }
 export interface TspDiffHunk {
 	oldStart: number;
@@ -383,6 +435,29 @@ export interface TspItemProps {
 export interface TspTabsProps {
 	items: readonly { id: string; label: TspText }[];
 	active?: string;
+	/** `underline` (default): an accent underline under the active tab; `segmented`: a well with a raised thumb. */
+	variant?: "underline" | "segmented";
+}
+/**
+ * A push button. A click sends an `action` event with `actions.click` (else
+ * `click`); a disabled or busy button sends nothing. It never takes focus.
+ */
+export interface TspButtonProps {
+	/** Label; empty with an `icon` draws an icon-only button (give it a `title` or `aria`). */
+	text?: string;
+	/** Leading icon name. */
+	icon?: string;
+	/** Keycaps drawn after the label (the key names of `kbd`); display only. */
+	keys?: readonly string[];
+	variant?: "default" | "primary" | "quiet" | "danger";
+	/** `md` 28px (bars, heads, forms), `sm` 22px (inline, rows). */
+	size?: "sm" | "md";
+	/** A pressed toggle. */
+	on?: boolean;
+	/** Dimmed and inert; a string is the reason, shown as the tooltip. */
+	disabled?: boolean | string;
+	/** A spinner in the icon's place; inert. */
+	busy?: boolean;
 }
 export interface TspEditorDecoration {
 	from: number;
@@ -864,6 +939,26 @@ export interface TspChartProps {
 	size?: "sm" | "md" | "lg";
 }
 
+/** Engine-produced shell presentation; hosts render rows and forward controls, never syntax or history. */
+export interface TspShellProps {
+	/** Canonical semantic presentation, shared with the ANSI inspector. */
+	presentation: ShellVizPresentation;
+	/** Show replay controls only in the explicitly opened inspector. */
+	inspector?: boolean;
+	/** Changed only by explicit seek/reset/live-mode transitions, clearing native highlight trails. */
+	replayEpoch?: number;
+	/** This mounted call received a real execution-start event, not a settled historical load. */
+	liveOrigin?: boolean;
+	/** Working directory shown ahead of the script when it differs from the project's. */
+	cwd?: string;
+	lang?: "bash" | "zsh";
+	/**
+	 * Clamp the command to its first `lines` drawn lines under a "N more lines" button; gives way inside an open
+	 * disclosure, and never applies in the inspector. The Raw/Pseudo switch and menu stay on the first line.
+	 */
+	preview?: { lines: number };
+}
+
 /** Kind-specific props, indexed by kind. */
 export interface TspPropsByKind {
 	col: TspColProps;
@@ -897,6 +992,7 @@ export interface TspPropsByKind {
 	tabs: TspTabsProps;
 	editor: TspEditorProps;
 	input: TspInputProps;
+	button: TspButtonProps;
 	status: TspStatusProps;
 	seg: TspSegProps;
 	overlay: TspOverlayProps;
@@ -910,6 +1006,7 @@ export interface TspPropsByKind {
 	chart: TspChartProps;
 	meter: TspMeterProps;
 	effort: TspEffortProps;
+	shell: TspShellProps;
 }
 
 /**

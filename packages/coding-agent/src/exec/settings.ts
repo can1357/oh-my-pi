@@ -149,7 +149,7 @@ export const cfgBashGitGuard = register({
 		group: "Bash",
 		label: "Git Guard",
 		description:
-			"Refuse git commands that discard or move shared work in the bash tool: stash, reset --hard or to another commit, and checkout/switch/restore outside a merge or rebase conflict",
+			"Refuse git commands that discard or move shared work in a repository's main checkout: stash, reset --hard or to another commit, and checkout/switch/restore outside a merge or rebase conflict. In a linked worktree they run, saving uncommitted changes they discard first",
 	},
 });
 

@@ -3,14 +3,14 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/agent-protocol";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentRegistry, type AgentRegistryApi } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 
 const received = new Map<string, IrcMessage[]>();
-let registry: AgentRegistry;
+let registry: AgentRegistryApi;
 
 function registerPeer(id: string, status: "running" | "idle" = "running"): void {
 	const messages: IrcMessage[] = [];
@@ -112,33 +112,17 @@ describe("write agent:// messaging", () => {
 		);
 	});
 
-	it("does not duplicate a child broadcast in the main session's relay view", async () => {
+	it("refuses a subagent's broadcast without waking anyone, while its direct messages still go through", async () => {
 		registerPeer("Sender");
-		registerPeer("Sibling");
-		const delivered: IrcMessage[] = [];
-		const relayed: unknown[] = [];
-		registry.register({
-			id: "Main",
-			displayName: "Main",
-			kind: "main",
-			session: {
-				deliverIrcMessage: async (message: IrcMessage) => {
-					delivered.push(message);
-					return "injected";
-				},
-				emitIrcRelayObservation: (record: unknown) => {
-					relayed.push(record);
-				},
-			} as AgentSession,
-		});
-		const result = await new WriteTool(makeSession({ senderId: "Sender" })).execute("broadcast", {
-			path: "agent://all",
-			content: "one update",
-		});
-		expect(result.content[0]).toMatchObject({ text: expect.stringContaining("2 of 2 peer(s)") });
-		expect(delivered.map(message => message.body)).toEqual(["one update"]);
-		expect(received.get("Sibling")?.map(message => message.body)).toEqual(["one update"]);
-		expect(relayed).toEqual([]);
+		registerPeer("Sibling", "idle");
+		const tool = new WriteTool(makeSession({ senderId: "Sender" }));
+		const refused = await tool.execute("broadcast", { path: "agent://all", content: "editing auth.ts" });
+		expect(refused.isError).toBeTrue();
+		expect(refused.content[0]).toMatchObject({ text: expect.stringContaining("Only the main agent can broadcast") });
+		expect(received.get("Sibling")).toEqual([]);
+		const direct = await tool.execute("direct", { path: "agent://Sibling", content: "who owns auth.ts?" });
+		expect(direct.isError).toBeFalsy();
+		expect(received.get("Sibling")?.map(message => message.body)).toEqual(["who owns auth.ts?"]);
 	});
 
 	it("reports unknown and stopped recipients without delivering", async () => {

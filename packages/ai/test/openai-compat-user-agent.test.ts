@@ -124,6 +124,21 @@ describe("resolveOpenAIRequestSetup User-Agent", () => {
 	});
 });
 
+test("per-call headers replace differently cased model headers", () => {
+	const setup = resolveOpenAIRequestSetup(
+		{
+			provider: "openai",
+			id: "gpt-4o-mini",
+			api: "openai-completions",
+			reasoning: false,
+			baseUrl: "https://api.openai.com/v1",
+			headers: { "X-Client-Identity": "model-client" },
+		},
+		{ apiKey: "sk-test", messages: [], extraHeaders: { "x-client-identity": "request-client" } },
+	);
+	expect(new Headers(setup.headers).get("x-client-identity")).toBe("request-client");
+});
+
 describe("xAI stream User-Agent", () => {
 	test("xAI Responses POST sends omp User-Agent", async () => {
 		const captured = await captureStreamHeaders(

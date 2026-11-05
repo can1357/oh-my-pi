@@ -525,6 +525,13 @@ describe("pickElectronTarget", () => {
 			const ownedName = `owned-${crypto.randomUUID()}`;
 			try {
 				await waitForCdp(`http://127.0.0.1:${port}`, 15_000);
+				const existing = await acquireBrowser(
+					{ kind: "spawned", path: exe, args: [...flags, `--user-data-dir=${borrowedProfile}`] },
+					{ cwd: session.cwd },
+				);
+				if (!("browser" in existing)) throw new Error("Expected Chromium browser");
+				const original = await existing.browser.newPage();
+				await original.goto("data:text/html,<title>Original user tab</title>");
 				await invoke({
 					action: "open",
 					name: borrowedName,
@@ -547,6 +554,7 @@ describe("pickElectronTarget", () => {
 				expect(ownedTab.browser.subprocess).toBeDefined();
 				const ownedTitle = await invoke({ action: "run", name: ownedName, code: "return await tab.title();" });
 				expect(ownedTitle.details).toMatchObject({ value: "Owned" });
+				expect(await original.title()).toBe("Original user tab");
 				const title = await invoke({ action: "run", name: borrowedName, code: "return await tab.title();" });
 				expect(title.details).toMatchObject({ value: "Borrowed" });
 				await invoke({ action: "close", name: borrowedName, kill: true });
@@ -563,7 +571,53 @@ describe("pickElectronTarget", () => {
 	);
 
 	test.skipIf(!CHROMIUM_AVAILABLE)(
-		"reports a connected browser's own viewport on open and observe",
+		"opens and owns a page in an empty custom Chrome profile",
+		async () => {
+			const exe = await ensureChromiumExecutable();
+			if (!exe) throw new Error("Expected a Chromium executable");
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-empty-profile-"));
+			const profile = path.join(root, "fresh");
+			const flags = [
+				"--headless=new",
+				"--no-sandbox",
+				"--no-startup-window",
+				"--no-first-run",
+				"--use-mock-keychain",
+				"--password-store=basic",
+				`--user-data-dir=${profile}`,
+			];
+			const session = makeSession();
+			const prelude = createBrowserPrelude(session);
+			const invoke = (parameters: unknown) => prelude.invoke(parameters, { session, toolCallId: "empty-profile" });
+			const name = `empty-profile-${crypto.randomUUID()}`;
+			try {
+				const handle = await acquireBrowser({ kind: "spawned", path: exe, args: flags }, { cwd: session.cwd });
+				if (!("browser" in handle)) throw new Error("Expected Chromium browser");
+				for (const page of await handle.browser.pages()) await page.close();
+				expect(handle.browser.targets().filter(target => String(target.type()) === "page")).toEqual([]);
+				await invoke({
+					action: "open",
+					name,
+					app: { path: exe, args: flags },
+					url: "data:text/html,<title>Fresh profile</title>",
+				});
+				const tab = getTab(name);
+				if (tab?.backend !== "worker") throw new Error("Expected Chromium worker tab");
+				expect(tab.ownsPage).toBe(true);
+				expect(tab.browser).toBe(handle);
+				expect((await invoke({ action: "run", name, code: "return await tab.title();" })).details).toMatchObject({
+					value: "Fresh profile",
+				});
+			} finally {
+				await invoke({ action: "close", name, kill: true }).catch(() => {});
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		},
+		30_000,
+	);
+
+	test.skipIf(!CHROMIUM_AVAILABLE)(
+		"reports a connected browser's own viewport on open and observe, and applies one an open asks for",
 		async () => {
 			const exe = await ensureChromiumExecutable();
 			if (!exe) throw new Error("Expected a Chromium executable");
@@ -590,12 +644,17 @@ describe("pickElectronTarget", () => {
 			const name = `connected-viewport-${crypto.randomUUID()}`;
 			try {
 				await waitForCdp(`http://127.0.0.1:${port}`, 15_000);
-				const opened = await invoke({
-					action: "open",
-					name,
-					url: "data:text/html,<title>Viewport</title>",
-					app: { cdp_url: `http://127.0.0.1:${port}` },
-				});
+				const app = { cdp_url: `http://127.0.0.1:${port}` };
+				// No `scale`: the window keeps its own device scale (2 here).
+				const viewport = { width: 390, height: 844 };
+				// An open that fails after adopting the page (a file where the downloads folder goes) leaves no size
+				// behind. No `url` after it: Chrome drops a leftover size when the page navigates.
+				const notAFolder = path.join(root, "not-a-folder");
+				await Bun.write(notAFolder, "");
+				expect(
+					await rejectionOf(invoke({ action: "open", name, app, viewport, downloads: notAFolder })),
+				).toBeInstanceOf(Error);
+				const opened = await invoke({ action: "open", name, app });
 				const result = await invoke({
 					action: "run",
 					name,
@@ -612,8 +671,24 @@ describe("pickElectronTarget", () => {
 				// The window's chrome eats into --window-size differently per OS, so pin only the forced
 				// pixel ratio; it differs from DEFAULT_VIEWPORT's 1.25, which main reported here.
 				expect(window).toMatchObject({ deviceScaleFactor: 2 });
+				expect(window).not.toMatchObject({ width: viewport.width, height: viewport.height });
 				expect(observed).toEqual(window);
 				expect(opened.details).toMatchObject({ viewport: window });
+				await invoke({ action: "close", name });
+				const pageSize = {
+					action: "run",
+					name,
+					code: "return await tab.evaluate(() => ({ width: innerWidth, height: innerHeight, deviceScaleFactor: devicePixelRatio }));",
+				};
+				const sized = await invoke({ action: "open", name, app, viewport });
+				const asked = { width: 390, height: 844, deviceScaleFactor: 2 };
+				expect(sized.details).toMatchObject({ viewport: asked });
+				expect((await invoke(pageSize)).details).toMatchObject({ value: asked });
+				// Reopening the live tab resizes it the same way.
+				await invoke({ action: "open", name, app, viewport: { width: 400, height: 800 } });
+				expect((await invoke(pageSize)).details).toMatchObject({
+					value: { width: 400, height: 800, deviceScaleFactor: 2 },
+				});
 			} finally {
 				await invoke({ action: "close", name }).catch(() => {});
 				child.kill();
@@ -630,7 +705,7 @@ describe("pickElectronTarget", () => {
 		async () => {
 			const launched = sharedHeadless;
 			if (!launched || !("browser" in launched)) throw new Error("Expected a shared Puppeteer browser");
-			const endpoint = new URL(launched.browser.wsEndpoint());
+			const endpoint = new URL(launched.wsEndpoint);
 			const session = makeSession();
 			const prelude = createBrowserPrelude(session);
 			const invokeBrowser = (parameters: unknown) =>
@@ -675,7 +750,7 @@ describe("pickElectronTarget", () => {
 			// navigate again and read 2.
 			const launched = sharedHeadless;
 			if (!launched || !("browser" in launched)) throw new Error("Expected a shared Puppeteer browser");
-			const endpoint = new URL(launched.browser.wsEndpoint());
+			const endpoint = new URL(launched.wsEndpoint);
 			const targetPage = (await launched.browser.pages())[0];
 			if (!targetPage) throw new Error("Expected the launched browser to expose a page target");
 

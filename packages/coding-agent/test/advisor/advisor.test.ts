@@ -5362,6 +5362,60 @@ describe("advisor", () => {
 			expect(failures).toEqual([]);
 		});
 
+		it("goes straight to the model fallback when the refused batch carried no reasoning", async () => {
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const failures: unknown[] = [];
+			const state: { messages: AgentMessage[]; error?: string } = { messages: [] };
+			let modelRefuses = true;
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+					state.error = modelRefuses ? "Refusal (bio): blocked under Anthropic's Usage Policy" : undefined;
+					state.messages.push({
+						role: "assistant",
+						content: [],
+						stopReason: modelRefuses ? "error" : "stop",
+						stopDetails: modelRefuses ? { type: "refusal", category: "bio" } : undefined,
+						errorMessage: state.error,
+						timestamp: promptInputs.length + 1,
+					} as unknown as AgentMessage);
+				},
+				abort: () => {},
+				reset: () => {},
+				rollbackTo: count => {
+					state.messages.length = count;
+					state.error = undefined;
+				},
+				state,
+			};
+			const messages = [
+				{ role: "assistant", content: [{ type: "text", text: "answer" }], timestamp: 1 } as AgentMessage,
+			];
+			let fallbackCalls = 0;
+			const runtime = new AdvisorRuntime(
+				agent,
+				{
+					snapshotMessages: () => messages,
+					notifyFailure: error => failures.push(error),
+					onTurnError: async () => {
+						fallbackCalls++;
+						modelRefuses = false;
+						return true;
+					},
+				},
+				0,
+			);
+
+			runtime.onTurnEnd(messages);
+			await settleUntil(() => runtime.backlog === 0);
+
+			// Stripping reasoning cannot change this batch, so the refused request is
+			// not resent byte-for-byte: refuse, switch models, the fallback answers.
+			expect(fallbackCalls).toBe(1);
+			expect(promptInputs).toHaveLength(2);
+			expect(failures).toEqual([]);
+		});
+
 		it("starts a fresh fallback cascade after the host declines to switch models", async () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
 			const failures: unknown[] = [];

@@ -56,7 +56,7 @@ import { copyPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
-import { formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
+import { cleanTinyMessage, formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
 import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 
 export {
@@ -89,6 +89,10 @@ const EPHEMERAL_REPLY_MAX_BYTES = 4096;
 const REPLAN_TITLE_CONTEXT_TURN_LIMIT = 6;
 /** Max chars kept from each anchored user request in the replan title context. */
 const REPLAN_TITLE_ANCHOR_CHARS = 400;
+/** Chars of recent conversation the title-drift judge reads; see {@link buildTitleDriftTurns}. */
+const TITLE_DRIFT_CONTEXT_CHARS = 3000;
+/** Max chars kept from one turn, so one long reply cannot fill the drift window alone. */
+const TITLE_DRIFT_TURN_CHARS = 1000;
 
 /**
  * Removes replay-bound provider state before reparenting an assistant message
@@ -188,6 +192,58 @@ export function operatorTitleText(message: AgentMessage): string | undefined {
 	if (message.role === "custom") return titleTextFromSkillPrompt(message);
 	if (message.role !== "user" || message.attribution !== "user") return undefined;
 	return textFromContent(message.content) || undefined;
+}
+
+/** One turn of the recent conversation the title-drift judge compares with the session title. */
+export type TitleDriftTurn = { role: "user" | "assistant"; text: string };
+
+/**
+ * The latest conversation, oldest first, that the title-drift judge compares
+ * with the session title: operator prompts and assistant reply text (never
+ * thinking), newest turns kept until {@link TITLE_DRIFT_CONTEXT_CHARS}. The
+ * latest operator prompt leads when the window holds none, since the notes of a
+ * long tool loop rarely say what was asked; it displaces the oldest turns it
+ * would push past the window.
+ */
+export function buildTitleDriftTurns(messages: readonly AgentMessage[]): TitleDriftTurn[] {
+	const turns: TitleDriftTurn[] = [];
+	let chars = 0;
+	let i = messages.length - 1;
+	for (; i >= 0; i--) {
+		const turn = titleDriftTurn(messages[i]);
+		if (!turn) continue;
+		if (turns.length > 0 && chars + turn.text.length > TITLE_DRIFT_CONTEXT_CHARS) break;
+		turns.push(turn);
+		chars += turn.text.length;
+	}
+	turns.reverse();
+	if (turns.some(turn => turn.role === "user")) return turns;
+	for (; i >= 0; i--) {
+		const anchor = titleDriftTurn(messages[i]);
+		if (anchor?.role !== "user") continue;
+		let start = 0;
+		while (start < turns.length - 1 && chars + anchor.text.length > TITLE_DRIFT_CONTEXT_CHARS) {
+			chars -= turns[start++]!.text.length;
+		}
+		return [anchor, ...turns.slice(start)];
+	}
+	return turns;
+}
+
+function titleDriftTurn(message: AgentMessage | undefined): TitleDriftTurn | undefined {
+	if (!message) return undefined;
+	let role: TitleDriftTurn["role"];
+	let raw: string | undefined;
+	if (message.role === "assistant") {
+		if (message.stopReason === "aborted" || message.stopReason === "error") return undefined;
+		role = "assistant";
+		raw = textFromContent(message.content);
+	} else {
+		role = "user";
+		raw = operatorTitleText(message);
+	}
+	const text = raw ? cleanTinyMessage(raw).slice(0, TITLE_DRIFT_TURN_CHARS) : "";
+	return text ? { role, text } : undefined;
 }
 
 /**

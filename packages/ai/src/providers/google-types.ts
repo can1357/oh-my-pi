@@ -22,6 +22,8 @@ export type FinishReason =
 	| "PROHIBITED_CONTENT"
 	| "SPII"
 	| "MALFORMED_FUNCTION_CALL"
+	// Not in `@google/genai`'s enum, though the Gemini API sends it ("finished due to malformed response").
+	| "MALFORMED_RESPONSE"
 	| "IMAGE_SAFETY"
 	| "IMAGE_PROHIBITED_CONTENT"
 	| "IMAGE_RECITATION"

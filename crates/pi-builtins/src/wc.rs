@@ -160,9 +160,7 @@ mod count_fast {
 	
 	/// A [`BUF_SIZE`] read buffer aligned to a 32-byte boundary.
 	///
-	/// This is useful as bytecount uses 256-bit wide vector operations that run
-	/// much faster on aligned data (at least on x86 with AVX2 support). One
-	/// serves every input of an invocation: zero-filling 256 KiB per file
+	/// One buffer serves every input of an invocation: zero-filling 256 KiB per file
 	/// dwarfs counting a small one.
 	#[repr(align(32))]
 	pub(crate) struct AlignedBuffer {
@@ -204,17 +202,14 @@ mod count_fast {
 						total.bytes += n;
 					}
 					if COUNT_CHARS {
-						total.chars += if simd_allowed {
-							bytecount::num_chars(&buf[..n])
-						} else {
-							bytecount::naive_num_chars(&buf[..n])
-						};
+						// Count leading bytes so UTF-8 sequences split across reads count once.
+						total.chars += buf[..n].iter().filter(|&&byte| byte & 0xc0 != 0x80).count();
 					}
 					if COUNT_LINES {
 						total.lines += if simd_allowed {
-							bytecount::count(&buf[..n], b'\n')
+							memchr::memchr_iter(b'\n', &buf[..n]).count()
 						} else {
-							bytecount::naive_count(&buf[..n], b'\n')
+							buf[..n].iter().filter(|&&byte| byte == b'\n').count()
 						};
 					}
 				},
@@ -567,7 +562,6 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 use thiserror::Error;
 use utf8::{BufReadDecoder, BufReadDecoderError};
@@ -583,7 +577,7 @@ use self::{
 	countable::WordCountable,
 	word_count::WordCount,
 };
-use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes_lossy, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes_lossy};
 
 /// The minimum character width for formatting counts when reading from stdin.
 const MINIMUM_WIDTH: usize = 7;
@@ -625,8 +619,7 @@ impl Settings {
 
 		let total_when = matches
 			.get_one::<String>(options::TOTAL)
-			.map(Into::into)
-			.unwrap_or_default();
+			.map_or_default(Into::into);
 
 		let settings = Self {
 			show_bytes: matches.get_flag(options::BYTES),
@@ -1383,7 +1376,7 @@ fn validate_files0(items: Vec<InputIterItem>, source: &Input) -> Vec<InputIterIt
 		.into_iter()
 		.enumerate()
 		.map(|(index, item)| match item {
-			Ok(Input::Path(path)) if path.as_os_str().is_empty() => {
+			Ok(Input::Path(path)) if path.is_empty() => {
 				Err(WcError::zero_len(Some((source, index + 1))))
 			},
 			_ => item,
@@ -1547,7 +1540,7 @@ fn wc(inputs: &Inputs, settings: &Settings, host: &mut Host) {
 				record_error(
 					host,
 					WcError::Io {
-						context: format!("failed to print result for {}", title.to_string_lossy()),
+						context: format!("failed to print result for {}", title.display()),
 						source,
 					},
 				);
@@ -1604,11 +1597,6 @@ fn print_stats(
 	}
 	line.push(b'\n');
 	stdout.write_all(&line)
-}
-
-/// Creates the `wc` builtin registration.
-pub(crate) fn wc_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Wc, SE>()
 }
 
 #[cfg(test)]

@@ -53,7 +53,7 @@ export interface PublishPackage {
 	preBuild?: readonly (readonly string[])[];
 	/** Extra entries to splice into `files`. */
 	extraFiles?: readonly string[];
-	/** Extra tsgo invocations beyond `tsconfig.publish.json`. */
+	/** Extra compiler invocations beyond `tsconfig.publish.json`. */
 	extraTypeConfigs?: readonly string[];
 	/**
 	 * Also emit transpiled JS to `dist/js` (via `tsconfig.publish.js.json`)
@@ -91,13 +91,12 @@ interface PackageManifest {
 const repoRoot = path.join(import.meta.dir, "..");
 const isDryRun = process.argv.includes("--dry-run");
 const MIT_LICENSE = "LICENSE";
-const THIRD_PARTY_NOTICES = "THIRD-PARTY-NOTICES.txt";
 
 /** Selects the legal payload contract for a publishable first-party package. */
 export function legalPayloadFiles(license: string | undefined): string[] {
 	switch (license) {
 		case "MIT":
-			return [MIT_LICENSE, THIRD_PARTY_NOTICES];
+			return [MIT_LICENSE];
 		default:
 			throw new Error(`Unsupported package license: ${license ?? "<missing>"}`);
 	}
@@ -105,7 +104,7 @@ export function legalPayloadFiles(license: string | undefined): string[] {
 
 /**
  * Materialize the legal payload beside a package manifest before packing.
- * Package-local license/notice files win; missing files fall back to the
+ * Package-local license files win; missing files fall back to the
  * repository payload so generated and source packages follow one contract.
  */
 export async function stageLegalPayloads(
@@ -268,12 +267,12 @@ async function preparePackage(pkg: PublishPackage): Promise<PackageManifest> {
 	for (const argv of pkg.preBuild ?? []) {
 		await $`${argv}`.cwd(pkgDir);
 	}
-	await $`bun x tsgo -p tsconfig.publish.json`.cwd(pkgDir);
+	await $`bun x tsc -p tsconfig.publish.json`.cwd(pkgDir);
 	for (const cfg of pkg.extraTypeConfigs ?? []) {
-		await $`bun x tsgo -p ${cfg}`.cwd(pkgDir);
+		await $`bun x tsc -p ${cfg}`.cwd(pkgDir);
 	}
 	if (pkg.publishJs) {
-		await $`bun x tsgo -p tsconfig.publish.js.json`.cwd(pkgDir);
+		await $`bun x tsc -p tsconfig.publish.js.json`.cwd(pkgDir);
 	}
 	const sourceManifest = (await Bun.file(path.join(pkgDir, "package.json")).json()) as PackageManifest;
 	await stageLegalPayloads(pkgDir, sourceManifest.license, !isDryRun);
@@ -333,10 +332,13 @@ export async function prepareNativeCorePackage(pkgDir: string, write: boolean): 
 		"native/loader-state.d.ts",
 		"native/path.js",
 		"native/path.d.ts",
+		"native/sqlite-locks.js",
+		"native/sqlite-locks.d.ts",
 		"native/vcs.js",
 		"native/vcs.d.ts",
 		"native/embedded-addon.js",
 		"README.md",
+		"THIRD-PARTY-NOTICES.txt",
 		...legalFiles,
 	];
 	if (write) await Bun.write(manifestPath, `${JSON.stringify(manifest, null, "\t")}\n`);

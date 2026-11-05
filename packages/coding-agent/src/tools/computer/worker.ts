@@ -29,6 +29,7 @@ import type {
 	PointerOptions,
 } from "@oh-my-pi/pi-natives";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
+import { expandTilde } from "@oh-my-pi/pi-utils/path";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
@@ -56,7 +57,7 @@ import {
 	screenStateNotice,
 	type ToolReply,
 } from "./protocol";
-import { describeWindowMiss } from "./window-miss";
+import { describeWindowMiss, matchesWindowApp } from "./window-miss";
 
 /** A native input call; resolves to its takeover focus report when it took over. */
 type InputCall = Promise<DesktopFocusReturn | null | void>;
@@ -82,7 +83,7 @@ export interface NativeDesktopSession {
 	holdDisplayUntilReleased(): void;
 	/** Let a turn's hold go now (activity outside a turn keeps its grace); later activity gets the grace again. */
 	releaseDisplayAwake(): void;
-	/** Sets when the current run ends, `remainingMs` from now; bounds how long input waits for the user to pause. */
+	/** Sets when the current run ends, `remainingMs` from now; bounds how long input waits for the user to pause (macOS) or for a Wayland permission prompt. */
 	setRunDeadline(remainingMs: number): void;
 	listApplications(options?: ApplicationQuery): Promise<Application[]>;
 	openApplication(id: string, options?: ApplicationOpenOptions): Promise<OpenedApplication>;
@@ -129,7 +130,9 @@ export type NativeDesktopSessionFactory = (
 	options: DesktopSessionOptions,
 ) => NativeDesktopSession | Promise<NativeDesktopSession>;
 
-type WindowFilter = { id?: string | number; app?: string; title?: string };
+type WindowFilter = { id?: string | number; app?: string; title?: string; wait?: number };
+const MAX_WINDOW_WAIT_MS = 10_000;
+const WINDOW_WAIT_INTERVAL_MS = 100;
 /** Window listings are session-transcript payload; `window()` lookups search the whole native list. */
 const MAX_LISTED_WINDOWS = 48;
 /**
@@ -332,15 +335,24 @@ function strictObject(value: unknown, allowed: string[], label: string): asserts
 	}
 }
 
-function matchesFilter(window: DesktopWindow, filter?: WindowFilter): boolean {
+function matchesFilter(window: DesktopWindow, filter?: WindowFilter, appPids?: ReadonlySet<number>): boolean {
 	if (!filter) return true;
 	const app = filter.app?.toLocaleLowerCase();
 	const title = filter.title?.toLocaleLowerCase();
 	return (
 		(filter.id === undefined || window.id === String(filter.id)) &&
-		(!app || window.app.toLocaleLowerCase().includes(app)) &&
+		(!app || matchesWindowApp(window, app, appPids)) &&
 		(!title || window.title.toLocaleLowerCase().includes(title))
 	);
+}
+
+function windowWait(wait: unknown): number {
+	if (wait === undefined) return 0;
+	if (typeof wait !== "number" || !Number.isFinite(wait) || wait < 0 || wait > MAX_WINDOW_WAIT_MS) {
+		const got = typeof wait === "number" ? String(wait) : describeArgument(wait);
+		throw new ToolError(`window({ wait }) takes milliseconds from 0 to ${MAX_WINDOW_WAIT_MS}; got ${got}`);
+	}
+	return wait;
 }
 
 function guardRun(context: ComputerRunContext, method: string): void {
@@ -383,12 +395,16 @@ const URL_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]+:/;
 /**
  * `apps.open`'s target or `app` selector, against the session's folder
  * `cwd` when it names a path there: one written as a relative path (`./a`,
- * `a/b`), even if missing, or a bare name of an existing entry. An exact
+ * `a/b`), even if missing, or a bare name of an existing entry. `~` and a
+ * leading `~/` are the user's home ([`expandTilde`]); `~name` stays a name or
+ * ID, since application IDs and names can start with `~`. An exact
  * application ID or native path (`listed`) keeps precedence over a same-named
  * entry; absolute paths, URLs and other names pass through to native
  * resolution.
  */
 async function sessionPath(value: string, cwd: string, listed: (value: string) => Promise<boolean>): Promise<string> {
+	if (value === "~" || value.startsWith("~/") || value.startsWith(`~${path.sep}`))
+		return path.resolve(expandTilde(value));
 	if (path.isAbsolute(value) || URL_SCHEME.test(value)) return value;
 	const local = path.resolve(cwd, value);
 	const written = value.startsWith(".") || value.includes("/") || value.includes(path.sep);
@@ -1694,6 +1710,29 @@ export class ComputerWorkerCore {
 		const getContext = this.#currentRunContext;
 		const makeWin = (window: DesktopWindow): Win => new Win(session, getContext, window);
 		const el = (node: AxNode): El => new El(session, getContext, node);
+		const listWindows = async (filter: WindowFilter | undefined, signal: AbortSignal) => {
+			const windows = await nativeCall(signal, () => session.listWindows());
+			let appPids: Set<number> | undefined;
+			const app = filter?.app?.toLocaleLowerCase();
+			// An app filter that names no window's app is looked up as an application id or path.
+			if (
+				app &&
+				windows.some(window => window.pid !== undefined) &&
+				!windows.some(window => matchesWindowApp(window, app))
+			) {
+				const applications = await nativeCall(signal, () => session.listApplications({ runningOnly: true }));
+				appPids = new Set<number>();
+				for (const application of applications) {
+					if (
+						application.pid !== undefined &&
+						(application.id.toLocaleLowerCase() === app || application.path.toLocaleLowerCase() === app)
+					) {
+						appPids.add(application.pid);
+					}
+				}
+			}
+			return { windows, appPids, matches: windows.filter(window => matchesFilter(window, filter, appPids)) };
+		};
 		const desktopTarget = new Win(session, getContext, {
 			id: "desktop",
 			app: "desktop",
@@ -1829,17 +1868,26 @@ export class ComputerWorkerCore {
 			},
 			windows: async (filter?: WindowFilter): Promise<DesktopWindow[]> => {
 				const { signal } = getContext();
-				return (await nativeCall(signal, () => session.listWindows()))
-					.filter(window => matchesFilter(window, filter))
-					.slice(0, MAX_LISTED_WINDOWS);
+				const { matches } = await listWindows(filter, signal);
+				return matches.slice(0, MAX_LISTED_WINDOWS);
 			},
 			window: async (selector: string | number | WindowFilter): Promise<Win> => {
 				const { signal } = getContext();
-				const windows = await nativeCall(signal, () => session.listWindows());
-				const matches =
-					typeof selector === "string" || typeof selector === "number"
-						? windows.filter(window => window.id === String(selector))
-						: windows.filter(window => matchesFilter(window, selector));
+				const id = typeof selector === "string" || typeof selector === "number" ? String(selector) : undefined;
+				const wait = typeof selector === "object" && selector !== null ? windowWait(selector.wait) : 0;
+				// Monotonic, like the run deadline: a wall-clock step must not end or stretch the wait.
+				const deadline = performance.now() + wait;
+				let windows: DesktopWindow[];
+				let matches: DesktopWindow[];
+				let appPids: ReadonlySet<number> | undefined;
+				for (;;) {
+					const listed = await listWindows(id === undefined ? (selector as WindowFilter) : { id }, signal);
+					({ windows, matches, appPids } = listed);
+					// The last interval sleeps only what is left, so the final listing lands at the deadline.
+					const remaining = deadline - performance.now();
+					if (matches.length > 0 || remaining <= 0) break;
+					await waitForRun(Math.min(WINDOW_WAIT_INTERVAL_MS, remaining), signal);
+				}
 				// Untyped scripts may pass nothing or `null`, which `matchesFilter` accepts as no filter: a desktop with one
 				// window returns it, and otherwise the error names the missing selector.
 				const unfiltered =
@@ -1852,7 +1900,7 @@ export class ComputerWorkerCore {
 					const lead = unfiltered
 						? `${unfiltered}, and none is open`
 						: `no window matches ${JSON.stringify(selector)}`;
-					throw new ToolError(`${lead}\n${describeWindowMiss(windows, app, route)}`);
+					throw new ToolError(`${lead}\n${describeWindowMiss(windows, app, route, appPids)}`);
 				}
 				if (matches.length > 1) {
 					const candidates = matches

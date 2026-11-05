@@ -15,6 +15,7 @@
  *   can resolve to that same object; an unchanged reference does not re-render.
  */
 
+import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { startTransition, useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { currentLiveVersion, useLiveVersion } from "./live";
 import { cachedEntry, type Inflight, inflightRequest, loadQuery, type QueryFetcher, releaseQuery } from "./query-store";
@@ -60,6 +61,7 @@ export function useQuery<T>(key: readonly unknown[], fetcher: QueryFetcher<T>, o
 	const version = useLiveVersion(enabled);
 
 	const [, rerender] = useReducer((n: number) => n + 1, 0);
+	const [settled, recheck] = useReducer((n: number) => n + 1, 0);
 	const [error, setError] = useState<{ key: string; error: Error } | null>(null);
 	const [refreshing, setRefreshing] = useState(false);
 
@@ -82,8 +84,10 @@ export function useQuery<T>(key: readonly unknown[], fetcher: QueryFetcher<T>, o
 		waiting.current = { key: targetKey, request };
 		// Join the new request before leaving the old one, so a shared request isn't aborted in between.
 		if (current) releaseQuery(current.key, current.request);
+		let succeeded = false;
 		request.promise
 			.then(data => {
+				succeeded = true;
 				if (keyRef.current !== targetKey) return;
 				// Revalidated to the very same object: nothing on screen changes.
 				if (data === shownBefore) {
@@ -97,11 +101,15 @@ export function useQuery<T>(key: readonly unknown[], fetcher: QueryFetcher<T>, o
 			})
 			.catch((err: unknown) => {
 				if (keyRef.current !== targetKey || request.controller.signal.aborted) return;
-				setError({ key: targetKey, error: err instanceof Error ? err : new Error(String(err)) });
+				setError({ key: targetKey, error: toError(err) });
 			})
 			.finally(() => {
-				if (waiting.current?.request === request) waiting.current = null;
-				if (keyRef.current === targetKey) setRefreshing(false);
+				if (waiting.current?.request !== request) return;
+				waiting.current = null;
+				if (keyRef.current !== targetKey) return;
+				setRefreshing(false);
+				// A newer live version may have arrived while this older request was in flight.
+				if (succeeded && (cachedEntry(targetKey)?.version ?? -1) < currentLiveVersion()) recheck();
 			});
 	}, []);
 
@@ -128,7 +136,7 @@ export function useQuery<T>(key: readonly unknown[], fetcher: QueryFetcher<T>, o
 		}
 		const timer = setTimeout(() => run(keyString), wait);
 		return () => clearTimeout(timer);
-	}, [keyString, enabled, version, run, leave]);
+	}, [keyString, enabled, version, settled, run, leave]);
 
 	useEffect(() => {
 		if (!enabled || !pollMs) return;
