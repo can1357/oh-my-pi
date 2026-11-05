@@ -201,6 +201,34 @@ describe("a configured discovery keeps the configuration it started under", () =
 		expect(sent).toEqual([]);
 		expect(registry.find("probe", "listed-model")).toBeUndefined();
 	});
+
+	test("reordering a list inside the opaque request body still refuses the discovery", async () => {
+		// `extraBody` is copied into the request body verbatim, so a member of it
+		// called `only` is an ordered payload, not a routing allowlist, however
+		// much its name looks like one. Normalising by member name wherever it
+		// appears would call these two bodies the same request.
+		const body = (first: string, second: string) =>
+			probeConfig(
+				`    compat:\n      extraBody:\n        openRouterRouting:\n          only: [${first}, ${second}]\n`,
+			);
+		fs.writeFileSync(modelsPath, body("first", "second"));
+		await reloadDuringDiscovery(() => writeWithNewMtime(modelsPath, body("second", "first")));
+		expect(sent).toEqual([]);
+		expect(registry.find("probe", "listed-model")).toBeUndefined();
+	});
+
+	test("respelling a configured Authorization header still refuses the discovery", async () => {
+		// Discovery builds its bearer as `{ ...configured, Authorization: ... }`,
+		// so an exact-case `Authorization` is overwritten by the generated one
+		// while a lowercase `authorization` survives and is combined with it.
+		// The two spellings send different values, so folding the case away
+		// would accept a discovery whose credential had changed under it.
+		const auth = (name: string) => probeConfig(`    headers:\n      ${name}: Bearer manual-config\n`);
+		fs.writeFileSync(modelsPath, auth("Authorization"));
+		await reloadDuringDiscovery(() => writeWithNewMtime(modelsPath, auth("authorization")));
+		expect(sent).toEqual([]);
+		expect(registry.find("probe", "listed-model")).toBeUndefined();
+	});
 });
 
 interface HeldCommand {

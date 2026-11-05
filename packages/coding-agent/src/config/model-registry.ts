@@ -211,52 +211,83 @@ interface ConfiguredModelDiscoveryResult {
 	configIdentity: string;
 }
 
+/** JSON with every object's keys in sorted order: configuration identity, where member order carries no meaning. */
+function canonicalJson(value: unknown): string {
+	return JSON.stringify(value, (_key, member: unknown) =>
+		member !== null && typeof member === "object" && !Array.isArray(member)
+			? Object.fromEntries(
+					Object.entries(member as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+				)
+			: member,
+	);
+}
+
 /**
- * JSON for a configuration identity: two configurations that send the same
- * request must produce the same string, and two that do not must not. Object
- * member order carries no meaning and is sorted away. Two collections need
- * more than that, and this is the only place either rule lives.
+ * A header record as the wire will see it: one entry per HTTP field name,
+ * sorted, each holding that name's declarations in the order they were
+ * written, with their spelling.
  *
- * `headers` is folded by the HTTP field name rather than the property name.
- * Field names are case-insensitive, and two declarations of one name are
- * combined, in declaration order, into one comma-joined value. So the order
- * of two DIFFERENT names is spelling, while the order of two spellings of the
- * SAME name is the value that gets sent. Sorting property names alone cannot
- * tell those apart: `{x-route, X-Route}` and the same record the other way
- * round sort equal while the wire value goes from `first, second` to
- * `second, first`.
+ * Field names are case-insensitive and two declarations of one name combine,
+ * in declaration order, into one value, so the order of two DIFFERENT names
+ * is spelling while the order of two spellings of the SAME name is the value
+ * that gets sent. Sorting property names cannot tell those apart.
  *
+ * The spelling is kept, not folded away, because discovery assembles its
+ * bearer as `{ ...configured, Authorization: … }` (`model-discovery.ts`): a
+ * configured `Authorization` is overwritten by the generated one, while a
+ * configured `authorization` survives beside it and is combined with it. The
+ * two spellings of one name therefore send different values, and an identity
+ * that folded them together would accept a discovery whose credential had
+ * changed under it.
+ */
+function canonicalHeaderIdentity(headers: Record<string, string>): Array<[string, Array<[string, string]>]> {
+	const byField = new Map<string, Array<[string, string]>>();
+	for (const [name, value] of Object.entries(headers)) {
+		const field = name.toLowerCase();
+		const declarations = byField.get(field);
+		if (declarations) declarations.push([name, value]);
+		else byField.set(field, [[name, value]]);
+	}
+	return [...byField].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/**
  * `only` inside `openRouterRouting` and `vercelGatewayRouting` is an
  * allowlist, which `OpenRouterRouting` and `VercelGatewayRouting` in
  * `@oh-my-pi/pi-catalog` distinguish from `.order`, the preference sequence;
  * both providers document the same split. Writing an allowlist's members the
  * other way round changes no request, so it must not suppress a discovery
- * that is still current. `.order` keeps its order, and no other array is
- * touched, because an array whose order a consumer reads must keep it.
+ * that is still current. `.order` keeps its order.
+ *
+ * Only these typed fields are normalised, and the walk descends only into
+ * `whenThinking`, the one typed nesting of a compat record. `extraBody` is
+ * opaque JSON that the provider copies into the request body verbatim, so a
+ * member of it that happens to be called `only` is an ordered payload, not an
+ * allowlist, and a member called `headers` holds case-sensitive JSON names,
+ * not HTTP field names. Matching on a name wherever it appears reaches into
+ * that body and calls two different requests the same.
  */
-function canonicalJson(value: unknown): string {
-	return JSON.stringify(value, (key, member: unknown) => {
-		if (member === null || typeof member !== "object" || Array.isArray(member)) return member;
-		const record = member as Record<string, unknown>;
-		if (key === "headers") return canonicalHeaderIdentity(record);
-		const entries =
-			(key === "openRouterRouting" || key === "vercelGatewayRouting") && Array.isArray(record.only)
-				? Object.entries({ ...record, only: [...record.only].sort() })
-				: Object.entries(record);
-		return Object.fromEntries(entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
-	});
-}
-
-/** One entry per HTTP field name, sorted, each holding that name's values in declaration order. */
-function canonicalHeaderIdentity(headers: Record<string, unknown>): Array<[string, unknown[]]> {
-	const byField = new Map<string, unknown[]>();
-	for (const [name, value] of Object.entries(headers)) {
-		const field = name.toLowerCase();
-		const values = byField.get(field);
-		if (values) values.push(value);
-		else byField.set(field, [value]);
+function canonicalCompatIdentity(compat: unknown): unknown {
+	if (compat === null || typeof compat !== "object" || Array.isArray(compat)) return compat;
+	const record = compat as Record<string, unknown>;
+	const normalized: Record<string, unknown> = { ...record };
+	let changed = false;
+	for (const field of ["openRouterRouting", "vercelGatewayRouting"]) {
+		const routing = record[field];
+		if (routing === null || typeof routing !== "object" || Array.isArray(routing)) continue;
+		const only = (routing as Record<string, unknown>).only;
+		if (!Array.isArray(only)) continue;
+		normalized[field] = { ...(routing as Record<string, unknown>), only: [...only].sort() };
+		changed = true;
 	}
-	return [...byField].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+	if (record.whenThinking !== undefined) {
+		const nested = canonicalCompatIdentity(record.whenThinking);
+		if (nested !== record.whenThinking) {
+			normalized.whenThinking = nested;
+			changed = true;
+		}
+	}
+	return changed ? normalized : compat;
 }
 
 /**
@@ -1754,10 +1785,19 @@ export class ModelRegistry {
 			registrationId = this.#registrationIds.get(registration) ?? this.#nextRegistrationId++;
 			this.#registrationIds.set(registration, registrationId);
 		}
-		// `headers` and the routing allowlists are canonicalised by
-		// `canonicalJson`, which sees them wherever they sit. These two are
-		// typed fields of the state itself, so they are normalised here.
-		const canonicalState = <T extends { baseUrl?: string; baseUrlApis?: readonly Api[] }>(state: T | undefined) =>
+		// Every spelling that does not change a request is normalised here, at
+		// the typed field that holds it, and never by matching a member's name
+		// somewhere in a subtree whose shape this code does not own.
+		const canonicalState = <
+			T extends {
+				baseUrl?: string;
+				baseUrlApis?: readonly Api[];
+				headers?: Record<string, string>;
+				compat?: unknown;
+			},
+		>(
+			state: T | undefined,
+		) =>
 			state
 				? {
 						...state,
@@ -1769,6 +1809,8 @@ export class ModelRegistry {
 						// ever asks `.includes` (`resolveProviderBaseUrl`), so the order
 						// two APIs appear in must not read as a change.
 						baseUrlApis: state.baseUrlApis && [...state.baseUrlApis].sort(),
+						headers: state.headers && canonicalHeaderIdentity(state.headers),
+						compat: state.compat && canonicalCompatIdentity(state.compat),
 					}
 				: null;
 		return canonicalJson({
