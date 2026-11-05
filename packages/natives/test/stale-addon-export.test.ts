@@ -7,12 +7,10 @@
  * tool used it first (every `write` call, after the read-projection guard
  * landed), with nothing naming the stale addon.
  *
- * `missingNativeExport` closes that gap for functions and `missingNativeClass`
- * for classes — a class was exported bare, so `new Thing(...)` threw
- * `undefined is not a constructor` from the caller's own file. Both on the
- * stale path only: on a current addon an absent export is not version drift,
- * and callers use exactly that absence as a capability probe, so it must stay
- * `undefined`.
+ * `missingNativeExport` covers functions and `missingNativeClass` classes,
+ * both on the stale path only: on a current addon an absent export is not
+ * version drift, and callers use exactly that absence as a capability probe,
+ * so it must stay `undefined`.
  *
  * `staleWorkspaceAddonNotice` covers what no per-symbol stub can — a symbol
  * the old addon *does* have, running that release's behaviour.
@@ -79,12 +77,9 @@ describe("native exports missing from a stale addon", () => {
 		expect(loaded?.stale).toBe(loaded?.version !== loaded?.packageVersion);
 	});
 
-	// The class half of the same surface. `RunTrace` landed in the addon after
-	// 18.1.18; against that stale addon `native/index.js` exported it as
-	// `undefined`, so `new RunTrace(cmd)` in `bash-executor.ts` threw
-	// `undefined is not a constructor` pointing at the executor — every
-	// shell-driven test then failed for a reason that named neither the addon
-	// nor the rebuild.
+	// A bare `undefined` class export reaches `new RunTrace(cmd)` in
+	// `bash-executor.ts` as `undefined is not a constructor`, a stack that
+	// names the executor and nothing about the addon.
 	it("throws from the constructor naming the class, the addon, both releases, and the rebuild", () => {
 		const Stub = missingNativeClass("RunTrace", status());
 		expect(typeof Stub).toBe("function");
@@ -95,8 +90,7 @@ describe("native exports missing from a stale addon", () => {
 	});
 
 	// `FileLock.tryAcquire`, `IpcServer.listen` and `Process.fromPid` are
-	// entered through a static, so a constructor-only stand-in would still
-	// have read `FileLock.tryAcquire is not a function`.
+	// entered through a static, which never runs a constructor.
 	it("answers a static entrypoint with the same diagnostic as the constructor", () => {
 		const Stub = missingNativeClass("FileLock", status()) as unknown as { tryAcquire: () => void };
 		expect(() => Stub.tryAcquire()).toThrow("FileLock.tryAcquire");
@@ -104,7 +98,7 @@ describe("native exports missing from a stale addon", () => {
 	});
 
 	// A thrown read from `prototype`/`name` would break `instanceof`, stack
-	// formatting and every inspector before the caller sees the message above.
+	// formatting and every inspector before the caller sees the diagnostic.
 	it("keeps the function intrinsics readable so the stand-in can still be inspected", () => {
 		const Stub = missingNativeClass("IpcServer", status())!;
 		expect(typeof Stub).toBe("function");

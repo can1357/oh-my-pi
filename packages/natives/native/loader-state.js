@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
+import { isMainThread } from "node:worker_threads";
 import packageJson from "../package.json" with { type: "json" };
 import { embeddedAddon } from "./embedded-addon.js";
 import { bindingsHaveReleaseIdentity, bindingsReleaseVersion, containsVersionStamp } from "./version-sentinel.js";
@@ -702,26 +703,20 @@ export function missingNativeExport(symbolName, addon = loadedAddon) {
 const CLASS_STUB_PLAIN_STATICS = new Set(["prototype", "name", "length", "constructor", "then"]);
 
 /**
- * Stand-in for a *class* the loaded addon does not provide.
- *
- * `missingNativeExport` covers the function half of the generated surface in
- * `native/index.js`; classes were exported bare, so a class the stale addon
- * predates reached callers as `undefined` and `new Thing(...)` threw
- * `undefined is not a constructor` from the callsite's own file — a stack that
- * names the caller and never the addon. The same release mismatch therefore
- * read as a defect in whatever code ran first.
+ * Class counterpart of {@link missingNativeExport}: a stand-in that fails with
+ * the addon's identity attached instead of as a bare `undefined` export, which
+ * surfaces as `undefined is not a constructor` at the callsite and names
+ * nothing.
  *
  * Same staleness rule as the function stub: only a stale addon gets a
  * stand-in, so `typeof native.Thing === "function"` capability probes against
  * a current addon keep their meaning.
  *
- * Several of these classes are entered through a static, not a constructor —
- * `FileLock.tryAcquire`, `IpcServer.listen`, `Process.fromPid`,
- * `PowerAssertion.start` — which would read `<Class>.<method> is not a
- * function`, unattributed again. The stand-in therefore answers any other
- * static read with the same diagnostic. Only a stale addon reaches this, and
- * only for a class it does not carry, so nothing on a healthy tree meets a
- * proxy.
+ * Several of these classes are entered through a static rather than a
+ * constructor — `FileLock.tryAcquire`, `IpcServer.listen`, `Process.fromPid`,
+ * `PowerAssertion.start` — so the stand-in answers any other static read with
+ * the same diagnostic. Only a stale addon reaches it, and only for a class
+ * that addon does not carry, so nothing on a healthy tree meets a proxy.
  * @param {string} symbolName
  * @param {ReturnType<typeof nativeAddonStatus>} [addon]
  * @returns {(new (...args: unknown[]) => never) | undefined}
@@ -766,14 +761,13 @@ export function missingNativeExportMessage(symbolName, addon = loadedAddon) {
 /**
  * One-line notice for a workspace tree running an addon from another release.
  *
- * The missing-symbol stubs above only speak when a caller touches a symbol the
- * addon does not carry. A mismatched addon also *changes behaviour* of symbols
- * it does have — an older shell, an older grep — and those failures carry no
- * marker at all, so a run of them reads as broken code rather than a tree that
- * never rebuilt. This notice gives every such failure its provenance.
+ * The missing-symbol stubs only speak when a caller touches a symbol the addon
+ * does not carry. A symbol it does carry runs that release's behaviour — an
+ * older shell, an older grep — with no marker at all, so this notice is the
+ * only provenance those failures get.
  *
- * The wording does not assume which side is older: `stale` is any difference,
- * and a checkout moved backwards without a rebuild hits it too.
+ * `stale` is any release difference, so the wording must not assume the addon
+ * is the older side.
  * @param {NonNullable<ReturnType<typeof nativeAddonStatus>>} addon
  * @returns {string}
  */
@@ -786,40 +780,41 @@ export function staleWorkspaceAddonNotice(addon) {
 	);
 }
 
-/**
- * Whether the stale-addon notice has been emitted by this module instance.
- * One per JavaScript realm, so a worker thread that imports natives gets its
- * own, and so does a second copy of this package resolved in the same
- * process. That is the intended scope: the latch exists to stop one realm
- * repainting the line on every lazy `loadNative()`, not to coordinate realms.
- */
+/** Whether this process has already written the mismatched-addon notice. */
 const staleNoticeState = { reported: false };
 
 /**
- * Emit {@link staleWorkspaceAddonNotice} at most once per module instance
- * (see {@link staleNoticeState}), and only for the one mismatch this loader
- * tolerates: a workspace load.
+ * Write {@link staleWorkspaceAddonNotice} once, from the main thread, when a
+ * workspace tree loads an addon of another release.
  *
- * Both guards matter. `loadNative()` is not called once at startup — the lazy
- * entrypoints in `clipboard.js` and friends call it on every invocation — so
- * without the latch a stale tree would repaint the notice under a running
- * TUI. And `validateLoadedBindings` has a second success path: it accepts a
- * pre-sentinel addon on an installed load (`isCompatiblePreSentinelNativeAddon`),
- * which reports no release and so is `stale`. Telling that user to run a
- * repository build would be wrong, and it is not the case this notice is for.
+ * Three guards, each load-bearing.
+ *
+ * Main thread only, because fd 2 is shared and a worker reaches `loadNative()`
+ * long after interactive mode owns the terminal — the subagent, JS-eval and
+ * tab workers all start then, so a per-worker write paints into a rendered
+ * frame. The main thread has already said it at startup; a worker repeating it
+ * adds nothing and costs the display.
+ *
+ * Latched, because `loadNative()` is not a startup-only call: the lazy
+ * entrypoints in `clipboard.js` and friends call it on every invocation.
+ *
+ * Workspace loads only, because {@link validateLoadedBindings} has a second
+ * success path — it accepts a pre-sentinel addon on an installed load
+ * (`isCompatiblePreSentinelNativeAddon`), which reports no release and so
+ * counts as `stale`. That user has no repository to build.
  *
  * The write is a synchronous `fs.writeSync` to fd 2 for the same reason as
  * {@link startupMarker}: it must survive a crash that follows it. `write` and
  * `state` are injectable so a test can exercise the latch without consuming
- * the module's own.
+ * this process's.
  * @param {{ isWorkspaceLoad: boolean }} ctx
  * @param {NonNullable<ReturnType<typeof nativeAddonStatus>>} addon
  * @param {{ write?: (text: string) => void; state?: { reported: boolean } }} [deps]
- * @returns {boolean} whether this call emitted the notice
+ * @returns {boolean} whether this call wrote the notice
  */
 export function reportStaleWorkspaceAddon(ctx, addon, deps = {}) {
 	const state = deps.state ?? staleNoticeState;
-	if (!ctx.isWorkspaceLoad || !addon.stale || state.reported) return false;
+	if (!isMainThread || !ctx.isWorkspaceLoad || !addon.stale || state.reported) return false;
 	state.reported = true;
 	try {
 		(deps.write ?? (text => fs.writeSync(2, text)))(staleWorkspaceAddonNotice(addon));

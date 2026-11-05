@@ -158,9 +158,8 @@ export function missingNativeClass(
 export function staleWorkspaceAddonNotice(addon: NativeAddonStatus): string;
 
 /**
- * Emit {@link staleWorkspaceAddonNotice} at most once per module instance (one
- * per realm, so a worker thread has its own), and only on a workspace load.
- * Returns whether this call emitted it.
+ * Write {@link staleWorkspaceAddonNotice} once per process, from the main
+ * thread, and only on a workspace load. Returns whether this call wrote it.
  */
 export function reportStaleWorkspaceAddon(
 	ctx: { isWorkspaceLoad: boolean },
