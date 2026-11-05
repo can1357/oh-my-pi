@@ -10,6 +10,7 @@
 
 import { InternalUrlRouter } from "../internal-urls";
 import { FileChangeType, notifyWorkspaceWatchedFiles } from "../lsp/client";
+import { cfgLspEnabled } from "../lsp/settings";
 import type { ToolSession } from ".";
 import { resolvePlanPath, targetsLocalSandbox } from "./plan-mode-guard";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -95,7 +96,7 @@ export async function routeWriteThroughBridge(
 	} catch (error) {
 		throw new ToolError(error instanceof Error ? error.message : String(error));
 	}
-	if (session.enableLsp ?? true) {
+	if ((session.enableLsp ?? true) && cfgLspEnabled.get(session.settings)) {
 		await notifyWorkspaceWatchedFiles(session.cwd, [{ filePath: absolutePath, type: changeType }], signal);
 	}
 	session.bumpFileMutationVersion?.(absolutePath);

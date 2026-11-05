@@ -13,7 +13,7 @@ export const cfgLspEnabled = register({
 		tab: "files",
 		group: "LSP",
 		label: "LSP",
-		description: "Enable the lsp tool for code intelligence (definitions, references, diagnostics, rename)",
+		description: "Enable LSP code intelligence and language-server diagnostics and formatting for file writes",
 	},
 });
 

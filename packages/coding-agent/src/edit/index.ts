@@ -74,6 +74,7 @@ import {
 } from "./settings";
 import {
 	cfgLspDiagnosticsDeduplicate,
+	cfgLspEnabled,
 	cfgLspDiagnosticsOnEdit,
 	cfgLspFormatOnWrite,
 	cfgLspRequestTimeout,
@@ -170,7 +171,7 @@ export function resolveEditToolDescription(
 
 /** Builds the LSP writethrough from the current `lsp.*` settings; called per write so changes apply immediately. */
 function createEditWritethrough(session: ToolSession): WritethroughCallback {
-	const enableLsp = session.enableLsp ?? true;
+	const enableLsp = (session.enableLsp ?? true) && cfgLspEnabled.get(session.settings);
 	const enableDiagnostics = enableLsp && cfgLspDiagnosticsOnEdit.get(session.settings);
 	const enableFormat = enableLsp && cfgLspFormatOnWrite.get(session.settings);
 	const deduplicate = enableDiagnostics && cfgLspDiagnosticsDeduplicate.get(session.settings);
