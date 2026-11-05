@@ -678,6 +678,8 @@ Computer settings and the active model's coordinate-safe image limits are read f
 
 ### Shell, eval, and LSP
 
+Set `display.shellVisualization: false` to show bash commands as plain shell text instead of the interactive execution visualization. The setting applies to streaming calls and saved transcripts; execution traces are still recorded for replay if visualization is re-enabled.
+
 ```yaml
 bash:
    enabled: true
