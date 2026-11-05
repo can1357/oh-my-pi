@@ -1893,7 +1893,7 @@ mod tests {
 			1, 0, 1, 99, 15, 39, 40, 1, 0, 1, 100, 1, 29, 0, 0, 0, 0, 0,
 		];
 
-		assert_eq!((crate::bash::ir::IR_VERSION, deferred.as_slice()), (20, WIRE.as_slice()));
+		assert_eq!((crate::bash::ir::IR_VERSION, deferred.as_slice()), (21, WIRE.as_slice()));
 	}
 
 	#[test]

@@ -817,6 +817,7 @@ impl Ctx<'_> {
 				self.tw()
 			};
 			let mut patterns = Vec::new();
+			let mut rparen = None;
 			self.ps.incasepat = -1;
 			self.ps.incmdpos = true;
 			if !skip_lex {
@@ -824,6 +825,7 @@ impl Ctx<'_> {
 			}
 			loop {
 				if self.lx.tok == T::Outpar {
+					rparen = Some(self.tok_span());
 					patterns.push(zword(core::mem::take(&mut s.0), s.1));
 					self.ps.incasepat = 0;
 					self.ps.incmdpos = true;
@@ -863,7 +865,7 @@ impl Ctx<'_> {
 			};
 			let term_span =
 				matches!(self.lx.tok, T::Dsemi | T::Semiamp | T::Semibar).then(|| self.tok_span());
-			arms.push(CaseArm { patterns, body, term, term_span });
+			arms.push(CaseArm { patterns, body, rparen, term, term_span });
 			if (self.lx.tok == T::Esac && !brflag) || (self.lx.tok == T::Outbrace && brflag) {
 				self.cmd_close = Some(self.lx.lo);
 				break;

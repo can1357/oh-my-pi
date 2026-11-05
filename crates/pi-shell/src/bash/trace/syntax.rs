@@ -7,7 +7,16 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::bash::{ids::ModeId, ir, syntax as syn};
 
-const ARCHIVE_VERSION: u8 = 1;
+/// Version of the archived tree's own layout.
+///
+/// The archive holds a serialized [`syn::Program`], so every field added to
+/// the syntax tree changes it. Version 1 archives were written before the
+/// compound commands recorded their keyword offsets; decoding one as
+/// version 2 reads an offset where a `None` discriminant used to be, which
+/// postcard reports as a corrupt value rather than as an old archive. This
+/// number rises with the tree, beside `ir::IR_VERSION`, so an older archive
+/// is refused by its version instead.
+const ARCHIVE_VERSION: u8 = 2;
 
 /// Exact originating region, when the engine supplies one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,6 +270,27 @@ mod tests {
 			error
 				.to_string()
 				.contains("unsupported native syntax archive version")
+		);
+	}
+
+	#[test]
+	fn archive_rejects_the_previous_version_rather_than_misreading_its_tree() {
+		// An archive a previous build wrote carries a tree of that build's
+		// layout. Reading one under this build's layout finds a field where
+		// another used to be, which postcard reports as a corrupt value
+		// ("Found an Option discriminant that wasn't 0 or 1") rather than as
+		// an archive this build cannot read. The version is what refuses it,
+		// so it must rise with every field the tree gains.
+		let mut old = vec![ARCHIVE_VERSION - 1];
+		old.extend_from_slice(&[0u8; 32]);
+		let encoded = serde_json::to_string(&STANDARD.encode(&old)).unwrap();
+		let error = serde_json::from_str::<UnitSyntax>(&encoded).unwrap_err();
+		assert!(
+			error
+				.to_string()
+				.contains("unsupported native syntax archive version"),
+			"a version-{} archive must be refused by its version: {error}",
+			ARCHIVE_VERSION - 1
 		);
 	}
 
