@@ -3108,20 +3108,24 @@ export class ModelRegistry {
 			epoch: this.#configEpoch(descriptor.providerId),
 			configIdentity: this.#providerConfigIdentity(descriptor.providerId),
 		}));
-		// Catalog-only providers have no endpoint manager and no credential to
-		// resolve, so nothing of theirs happens before the awaits below — but their
-		// identity is captured here, with the others, because capturing it after
-		// the awaits is what left their publication check reading a configuration
-		// that had already moved.
+		// Catalog-only providers capture their identity AT THE MOMENT THEY BECAME
+		// ELIGIBLE, which is not one fixed point, and both of the fixed choices
+		// were tried and are wrong. The contract is that a result publishes only
+		// if the configuration is, by value, the one it was fetched under.
 		//
-		// Only the identity moves earlier. ELIGIBILITY IS STILL DECIDED AFTER THE
-		// AWAITS, because one of its terms is live: an extension manager
-		// unregistered while a credential resolves makes its provider newly
-		// eligible here, and one registered makes it ineligible. Deciding that up
-		// here dropped such a provider from the pass entirely — measured, seven of
-		// seven catalog-only providers, by a reviewer whose brief asked exactly
-		// this question. So this list is the CANDIDATES, filtered on the settled
-		// terms only, and the live term is applied where it is read.
+		//   - Already eligible up here (no runtime manager yet): capture NOW, with
+		//     the others. Their pass begins here, so a configuration change during
+		//     the awaits must still refuse them. Capturing at selection instead
+		//     made that check pass everything.
+		//   - Not eligible up here: capture at SELECTION. Such a provider becomes
+		//     eligible precisely BECAUSE its extension registration went away
+		//     during the awaits, and the identity includes that registration — so
+		//     an identity from before the unregistration can never match again and
+		//     its roster is refused for ever. Measured across all seven.
+		//
+		// So `configIdentity` is undefined exactly when the provider was ineligible
+		// before the awaits, and that is a signal rather than a missing entry: the
+		// fallback at the use site is this provider's real capture point.
 		const bundledProviderIds: Record<string, true> = Object.create(null);
 		for (const providerId of getBundledProviders()) bundledProviderIds[providerId] = true;
 		const catalogOnlyCandidates = MODELS_DEV_CATALOG_PROVIDER_IDS.filter(providerId => {
@@ -3129,7 +3133,12 @@ export class ModelRegistry {
 			if (bundledProviderIds[providerId] !== true) return false;
 			if (disabledProviders.has(providerId) || configuredDiscoveryProviders.has(providerId)) return false;
 			return !providerFilter || providerFilter.has(providerId);
-		}).map(providerId => ({ providerId, configIdentity: this.#providerConfigIdentity(providerId) }));
+		}).map(providerId => ({
+			providerId,
+			configIdentity: this.#runtimeModelManagers.has(providerId)
+				? undefined
+				: this.#providerConfigIdentity(providerId),
+		}));
 		const isUnchanged = (providerId: string, epoch: number) => this.#configEpoch(providerId) === epoch;
 		const standardProviderKeys = await Promise.all(
 			standardProviderDescriptors.map(descriptor => {
@@ -3219,11 +3228,15 @@ export class ModelRegistry {
 
 		// Catalog-only providers have no endpoint manager. Give their bundled
 		// slices the same shared remote layer without requiring credentials. The
-		// candidates and their identities were settled before the awaits; the one
-		// live term is read here, so a manager unregistered while a credential
-		// resolved makes its provider eligible on this pass, as it always did.
-		for (const { providerId, configIdentity } of catalogOnlyCandidates) {
+		// candidate set was settled before the awaits; the one live term and the
+		// identity are both read here, so a manager unregistered while a
+		// credential resolved makes its provider eligible on this pass — and
+		// publishable under the configuration that made it eligible.
+		for (const { providerId, configIdentity: capturedIdentity } of catalogOnlyCandidates) {
 			if (this.#runtimeModelManagers.has(providerId)) continue;
+			// Undefined means this provider was ineligible before the awaits and has
+			// only just become eligible, so here is where its pass begins. See above.
+			const configIdentity = capturedIdentity ?? this.#providerConfigIdentity(providerId);
 			const modelsDev = modelsDevCatalogFallback(providerId, this.#fetch);
 			if (!modelsDev) continue;
 			options.push({
