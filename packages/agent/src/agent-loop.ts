@@ -3951,8 +3951,10 @@ async function executeToolCalls(
  * `source` names the state that prevented execution — either an assistant-side
  * turn termination (`assistant_stop_*`) or a mid-batch interrupt that skipped a
  * still-pending call to service queued steering/peer input (`interrupt_skipped`).
- * `upstreamError` is the provider-reported message when the turn ended with
- * `stopReason === "error"`.
+ * `upstreamError` is whatever the provider reported, when it reported anything.
+ * It is local metadata and never reaches a model: the result's `content` is a
+ * fixed sentence, because `content` is replayed on every later request and a
+ * refusal quoted there makes the next turn be refused too (INFRA-1191).
  */
 export interface SyntheticToolResultDetails {
 	__synthetic: true;
@@ -4009,7 +4011,10 @@ function syntheticDetailsFor(
 		__synthetic: true,
 		source,
 		executed: false,
-		...(reason === "error" && errorMessage ? { upstreamError: errorMessage } : {}),
+		// The provider's own words are kept here, never in `content`: `details`
+		// is local metadata (UI, telemetry, ACP) and is not replayed to a model,
+		// while `content` is sent back on every later request.
+		...(errorMessage ? { upstreamError: errorMessage } : {}),
 	};
 }
 
@@ -4035,7 +4040,12 @@ export function createSyntheticToolResultMessage(
 		role: "toolResult",
 		toolCallId: toolCall.id,
 		toolName: toolCall.name,
-		content: [{ type: "text", text: errorMessage ? `${message}: ${errorMessage}` : `${message}.` }],
+		// A fixed sentence only. Interpolating the provider's error text here put
+		// a refusal verbatim into stored history, and every later request resent
+		// it as a user message — which made the provider's classifier refuse the
+		// next turn, permanently (INFRA-1191). The text stays in
+		// `details.upstreamError`, which no request carries.
+		content: [{ type: "text", text: `${message}.` }],
 		details,
 		isError: true,
 		timestamp: Date.now(),

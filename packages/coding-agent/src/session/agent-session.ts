@@ -461,7 +461,12 @@ import {
 	type SessionAdvisorsHost,
 } from "./session-advisors";
 import type { SessionContext, TranscriptSessionContextOptions } from "./session-context";
-import { buildSessionContext, getRestorableSessionModels, isTranscriptEntry } from "./session-context";
+import {
+	buildSessionContext,
+	getRestorableSessionModels,
+	isOrphanedSyntheticResult,
+	isTranscriptEntry,
+} from "./session-context";
 import {
 	type CacheRefreshOutcome,
 	type CacheWarmer,
@@ -4269,6 +4274,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					compactionEpoch: this.#stats.compactionEpoch,
 				};
 			}
+		}
+		// A classifier refusal and an empty error turn are dropped above, but the
+		// synthetic results that turn's started calls produced arrive afterwards
+		// and used to be stored anyway — an orphan every later request replayed
+		// as a bare user message (INFRA-1191). The refused turn itself must stay
+		// unstored (storing it would put the refusal and its arguments back into
+		// history, which is what the drop exists to prevent), so its result goes
+		// with it. `buildSessionContext` applies the same predicate on load,
+		// which is what heals a session already carrying one.
+		if (isOrphanedSyntheticResult(this.sessionManager.getBranchView(), message)) {
+			logger.debug("Dropping synthetic tool result whose assistant turn was not stored", {
+				toolCallId: message.role === "toolResult" ? message.toolCallId : undefined,
+			});
+			return;
 		}
 		const skipPersistedRewindResult =
 			message.role === "toolResult" &&

@@ -5,6 +5,7 @@ import {
 	agentLoop,
 	agentLoopContinue,
 	agentLoopDetailed,
+	type SyntheticToolResultDetails,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
 	TOOL_INTERRUPT_ABORT_REASON,
 } from "@oh-my-pi/pi-agent-core/agent-loop";
@@ -1312,7 +1313,11 @@ describe("agentLoop with AgentMessage", () => {
 		expect(text).not.toContain("Tool execution failed due to an error");
 		expect(text.toLowerCase()).toContain("not executed");
 		expect(text.toLowerCase()).toContain("provider");
-		expect(text).toContain("Codex websocket transport error: websocket closed (1000)");
+		// The provider's own words must NOT be here: `content` is replayed to the
+		// model on every later request, and a refusal quoted there gets the next
+		// turn refused too, permanently (INFRA-1191). `details.upstreamError`
+		// below keeps them for the UI, telemetry and ACP.
+		expect(text).not.toContain("Codex websocket transport error: websocket closed (1000)");
 
 		// Structured details on the synthetic result let downstream consumers
 		// (UI, telemetry, ACP) distinguish it from a real tool failure without
@@ -7007,11 +7012,12 @@ describe("agentLoop passive additionalContext", () => {
 		const toolResult = messages[2] as ToolResultMessage;
 		expect(toolResult.toolCallId).toBe("tc-late-1");
 		expect(toolResult.isError).toBe(true);
-		const text = toolResult.content
-			.filter((c): c is { type: "text"; text: string } => c.type === "text")
-			.map(c => c.text)
-			.join("\n");
-		expect(text).toContain("Deadline exceeded");
+		expect(toolResult.content).toEqual([{ type: "text", text: "Tool execution was aborted." }]);
+		// The cause is local metadata, not model-visible text: `content` is
+		// replayed on every later request, and interpolating whatever string
+		// ended the turn put a provider refusal there (INFRA-1191).
+		const details = toolResult.details as SyntheticToolResultDetails;
+		expect(details.upstreamError).toBe("Deadline exceeded");
 		expect(events.map(event => event.type)).toContain("agent_end");
 	});
 
