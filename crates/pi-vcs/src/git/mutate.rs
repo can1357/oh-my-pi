@@ -1939,26 +1939,26 @@ fn git_entry_points_outside(root: &Path, dir: &Path) -> bool {
 		return false;
 	}
 	let target = if meta.is_symlink() {
-		let Ok(target) = fs::read_link(&entry) else {
+		let Ok(link) = fs::read_link(&entry) else {
 			return true;
 		};
-		target
+		// A `.git` symlink may land on another gitfile, and Git reads that one
+		// too. Stopping at the link would read a chain ending outside the
+		// clone as ending inside it.
+		match fs::metadata(dir.join(&link)) {
+			Ok(pointed) if pointed.is_file() => {
+				let Some(gitdir) = read_gitfile(&dir.join(&link)) else {
+					return true;
+				};
+				gitdir
+			},
+			_ => link,
+		}
 	} else {
-		let Ok(bytes) = fs::read(&entry) else {
+		let Some(gitdir) = read_gitfile(&entry) else {
 			return true;
 		};
-		let Some(gitdir) = bytes
-			.split(|&byte| byte == b'\n')
-			.find_map(|line| line.trim_ascii().strip_prefix(b"gitdir:".as_slice()))
-		else {
-			return true;
-		};
-		// The path is bytes on Unix, and Git opens it as bytes: decoding it as
-		// UTF-8 would call a working checkout unreadable and empty it.
-		let Some(target) = os_path_from_bytes(gitdir.trim_ascii()) else {
-			return true;
-		};
-		target
+		gitdir
 	};
 	// Where the pointer really lands decides whenever the kernel can say,
 	// because a `..` run crosses symlinks in both directions and the text
@@ -1977,6 +1977,34 @@ fn git_entry_points_outside(root: &Path, dir: &Path) -> bool {
 		return true;
 	};
 	!resolved.starts_with(root) || resolved.starts_with(root.join(".git"))
+}
+
+/// A gitfile's `gitdir:` value, read the way Git reads it.
+///
+/// Git requires the marker at the start of the file and one space after it,
+/// stops at the first NUL because it holds the value as a C string, drops the
+/// line terminator, and keeps every other byte — a space on either side of
+/// the value is part of the path it opens, measured with `git rev-parse
+/// --absolute-git-dir`. Finding the marker is left looser than Git's, since a
+/// file Git rejects outright holds no repository either way, but the value is
+/// read exactly: trimming a space or keeping a NUL tail would name a
+/// different directory than the one Git opens, and the difference decides
+/// whether this copy reaches out of the clone.
+fn read_gitfile(path: &Path) -> Option<PathBuf> {
+	let bytes = fs::read(path).ok()?;
+	let value = bytes
+		.split(|&byte| byte == b'\n')
+		.find_map(|line| line.trim_ascii_start().strip_prefix(b"gitdir:".as_slice()))?;
+	let value = value.strip_prefix(b" ").unwrap_or(value);
+	let value = match value.iter().position(|&byte| byte == 0) {
+		Some(nul) => &value[..nul],
+		None => value,
+	};
+	let end = value
+		.iter()
+		.rposition(|&byte| byte != b'\r' && byte != b'\n')
+		.map_or(0, |last| last + 1);
+	os_path_from_bytes(&value[..end])
 }
 
 /// A gitfile's `gitdir:` value as a path, keeping the platform's own bytes.
@@ -3176,6 +3204,109 @@ mod tests {
 		works
 	}
 
+	/// The clone-path test above can only compare against `cloned_with`, so on
+	/// a filesystem without reflink every one of its rows reads "absent" and
+	/// passes whatever the predicate does. These rows exercise the predicate
+	/// itself, so the contract is defended on every filesystem and platform.
+	#[test]
+	fn a_nested_checkout_is_judged_by_where_its_pointer_leads() {
+		let temp = tempfile::tempdir().unwrap();
+		let root = temp.path().join("worktree");
+		// What the clone leaves at the root: a registration file, not a
+		// repository directory.
+		fs::create_dir_all(&root).unwrap();
+		fs::write(root.join(".git"), "gitdir: /elsewhere/.git/worktrees/wt\n").unwrap();
+		let outside = temp.path().join("outside-repository");
+		fs::create_dir_all(outside.join("meta")).unwrap();
+
+		let case = |name: &str, build: &dyn Fn(&Path)| -> bool {
+			let dir = root.join(name);
+			fs::create_dir_all(&dir).unwrap();
+			build(&dir);
+			git_entry_points_outside(&root, &dir)
+		};
+
+		// Carried: the metadata is in the clone and relocates with it.
+		assert!(!case("plain", &|dir| {
+			fs::create_dir_all(dir.join(".git")).unwrap();
+		}));
+		assert!(!case("beside", &|dir| {
+			fs::create_dir_all(dir.join("meta")).unwrap();
+			fs::write(dir.join(".git"), "gitdir: meta\n").unwrap();
+		}));
+		assert!(!case("crlf", &|dir| {
+			fs::create_dir_all(dir.join("meta")).unwrap();
+			fs::write(dir.join(".git"), "gitdir: meta\r\n").unwrap();
+		}));
+		assert!(!case("dangling-inside", &|dir| {
+			fs::write(dir.join(".git"), "gitdir: no-such-meta\n").unwrap();
+		}));
+		// Refused: the repository is not in the clone.
+		assert!(case("absorbed", &|dir| {
+			fs::write(dir.join(".git"), "gitdir: ../.git/modules/absorbed\n").unwrap();
+		}));
+		assert!(case("absolute-outside", &|dir| {
+			fs::write(dir.join(".git"), format!("gitdir: {}\n", outside.display())).unwrap();
+		}));
+		assert!(case("dangling-outside", &|dir| {
+			fs::write(dir.join(".git"), "gitdir: ../../../no-such-place\n").unwrap();
+		}));
+		assert!(case("no-marker", &|dir| {
+			fs::write(dir.join(".git"), "this names no repository\n").unwrap();
+		}));
+
+		#[cfg(unix)]
+		{
+			use std::os::unix::fs::symlink;
+
+			// The pointer is followed, so the text it reads as does not decide.
+			assert!(!case("through-inside", &|dir| {
+				fs::create_dir_all(dir.join("a/b")).unwrap();
+				fs::create_dir_all(dir.join("meta")).unwrap();
+				symlink("a/b", dir.join("hop")).unwrap();
+				fs::write(dir.join(".git"), "gitdir: hop/../../meta\n").unwrap();
+			}));
+			assert!(case("through-outside", &|dir| {
+				symlink(&outside, dir.join("hop")).unwrap();
+				fs::write(dir.join(".git"), "gitdir: hop/meta\n").unwrap();
+			}));
+			// Git reads a `.git` symlink that lands on a gitfile as a gitfile,
+			// and resolves its value against the checkout, so this walk does
+			// too; stopping at the link would read this as landing inside.
+			assert!(case("chain-outside", &|dir| {
+				fs::write(dir.join("pointer"), format!("gitdir: {}\n", outside.display())).unwrap();
+				symlink("pointer", dir.join(".git")).unwrap();
+			}));
+			assert!(!case("chain-inside", &|dir| {
+				fs::create_dir_all(dir.join("meta")).unwrap();
+				fs::write(dir.join("pointer"), "gitdir: meta\n").unwrap();
+				symlink("pointer", dir.join(".git")).unwrap();
+			}));
+			// The value is the bytes Git opens: a space on either side belongs
+			// to the path, and nothing after a NUL does.
+			assert!(case("trailing-space-out", &|dir| {
+				symlink(&outside, dir.join("meta ")).unwrap();
+				fs::create_dir_all(dir.join("meta")).unwrap();
+				fs::write(dir.join(".git"), "gitdir: meta \n").unwrap();
+			}));
+			assert!(case("leading-space-out", &|dir| {
+				symlink(&outside, dir.join(" meta")).unwrap();
+				fs::create_dir_all(dir.join("meta")).unwrap();
+				fs::write(dir.join(".git"), "gitdir:  meta\n").unwrap();
+			}));
+			assert!(case("nul-out", &|dir| {
+				symlink(&outside, dir.join("hop")).unwrap();
+				fs::write(dir.join(".git"), b"gitdir: hop\0/../meta\n").unwrap();
+			}));
+			// And a non-UTF-8 metadata path is a path, not an unreadable file.
+			use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+			assert!(!case("byte-path", &|dir| {
+				fs::create_dir_all(dir.join(OsStr::from_bytes(b"meta-\xff"))).unwrap();
+				fs::write(dir.join(".git"), b"gitdir: meta-\xff\n").unwrap();
+			}));
+		}
+	}
+
 	#[test]
 	fn clone_first_worktree_at_source_head_needs_no_checkout() {
 		let (temp, repo) = fixture();
@@ -3254,6 +3385,21 @@ mod tests {
 		fs::create_dir_all(selfcontained.join("repository-metadata")).unwrap();
 		fs::write(selfcontained.join(".git"), "gitdir: repository-metadata\n").unwrap();
 		fs::write(selfcontained.join("own.txt"), "mine\n").unwrap();
+		// An absorbed submodule of this repository: its `gitdir:` names the
+		// source's own administrative files, which the new worktree's `.git`
+		// registration file is not, so the copy cannot work and goes.
+		let absorbed = source.join("libs/absorbed");
+		fs::create_dir_all(source.join(".git/modules/absorbed")).unwrap();
+		fs::write(source.join(".git/modules/absorbed/HEAD"), "ref: refs/heads/main\n").unwrap();
+		fs::create_dir_all(&absorbed).unwrap();
+		fs::write(absorbed.join(".git"), "gitdir: ../../.git/modules/absorbed\n").unwrap();
+		fs::write(absorbed.join("own.txt"), "absorbed\n").unwrap();
+		// A pointer naming nothing, relative: broken the same way in the
+		// source, so emptying the directory would only cost the user files.
+		let dangling = source.join("node_modules/dangling");
+		fs::create_dir_all(&dangling).unwrap();
+		fs::write(dangling.join(".git"), "gitdir: no-such-metadata\n").unwrap();
+		fs::write(dangling.join("own.txt"), "dangling\n").unwrap();
 		// Three shapes only a symlink or a non-UTF-8 path can make. Following
 		// the pointer and reading it as text disagree about the first two, and
 		// the third is a working checkout whose path is not UTF-8.
@@ -3285,6 +3431,19 @@ mod tests {
 			std::os::unix::fs::symlink(&outside_metadata, escaping.join("out")).unwrap();
 			fs::write(escaping.join(".git"), "gitdir: out/metadata\n").unwrap();
 			fs::write(escaping.join("own.txt"), "escaping\n").unwrap();
+			// A `.git` symlink landing on a further `gitdir:` file that names
+			// a repository outside the checkout. Git reads the chain to its
+			// end, so stopping at the link would carry a working tree on a
+			// repository this clone does not own.
+			let chained = source.join("node_modules/chain-outside");
+			fs::create_dir_all(&chained).unwrap();
+			fs::write(
+				chained.join("pointer"),
+				format!("gitdir: {}\n", outside_metadata.join("metadata").display()),
+			)
+			.unwrap();
+			std::os::unix::fs::symlink("pointer", chained.join(".git")).unwrap();
+			fs::write(chained.join("own.txt"), "chained\n").unwrap();
 			// A working checkout whose metadata directory is named by bytes
 			// that are not UTF-8, which Git opens and this walk must not call
 			// unreadable.
@@ -3350,40 +3509,49 @@ mod tests {
 		for nested in [".worktrees/nested", "vendor/deep/checkout", "node_modules/vendored-src"] {
 			assert!(source.join(nested).join(".git").exists(), "source lost {nested}");
 		}
-		for carried in
-			["node_modules/vendored-src/deps/inner/inner.txt", "node_modules/pointer-inside/own.txt"]
-		{
+		for carried in [
+			"node_modules/vendored-src/deps/inner/inner.txt",
+			"node_modules/pointer-inside/own.txt",
+			"node_modules/dangling/own.txt",
+		] {
 			assert_eq!(
 				linked.join(carried).exists(),
 				result.cloned_with.is_some(),
 				"{carried} resolves inside the clone and must relocate with it"
 			);
 		}
+		// An absorbed submodule names this repository's administrative files,
+		// which the new worktree does not have, so only the gitlink remains.
+		assert!(
+			!linked.join("libs/absorbed/own.txt").exists(),
+			"a submodule absorbed into the source cannot work in the clone"
+		);
+		assert!(source.join("libs/absorbed/own.txt").exists(), "the source keeps it");
 		#[cfg(unix)]
 		{
-			for carried in [
-				"node_modules/jump-inside/own.txt",
-				"node_modules/jump-inside/repository-metadata/HEAD",
-				"node_modules/byte-path/own.txt",
-			] {
+			for carried in ["node_modules/jump-inside/own.txt", "node_modules/byte-path/own.txt"] {
 				assert_eq!(
 					linked.join(carried).exists(),
 					result.cloned_with.is_some(),
 					"{carried} resolves inside the clone and must relocate with it"
 				);
 			}
-			// Following the pointer, not reading it, is what decides: this one
-			// reads as naming a path inside the worktree and leads out.
-			let escaped = linked.join("node_modules/escape-inside");
-			assert!(
-				!escaped.join("own.txt").exists(),
-				"a pointer that leads out through a symlinked component is not carried"
-			);
-			assert!(source.join("node_modules/escape-inside/own.txt").exists(), "the source keeps it");
+			// Following the pointer, not reading it, is what decides. The
+			// first reads as naming a path inside the worktree and leads out;
+			// the second leads out only once the symlinked `.git` is read as
+			// the further gitfile Git reads it as.
+			for refused in ["node_modules/escape-inside", "node_modules/chain-outside"] {
+				assert!(
+					!linked.join(refused).join("own.txt").exists(),
+					"{refused} leads out of the clone and must not be carried"
+				);
+				assert!(source.join(refused).join("own.txt").exists(), "the source keeps {refused}");
+			}
 			assert!(
 				outside_metadata.join("metadata/HEAD").exists(),
-				"the repository it pointed at is untouched"
+				"the repository they pointed at is untouched"
 			);
+			let _ = fs::remove_dir_all(&outside_metadata);
 		}
 		let _ = repo.worktree_remove(&linked, true);
 	}

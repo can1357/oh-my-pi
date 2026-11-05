@@ -340,15 +340,20 @@ checkout carrying its own metadata is kept and carried like any other ignored
 cache — a `.git` directory, a `.git` naming a path inside the checkout, or a
 vendored clone's own submodule, whose `gitdir:` lands inside that clone —
 since package managers keep such clones inside those caches. Which of the two
-a pointer is gets decided by following it, not by reading it as text, so a
-pointer that reaches its own metadata through a symlink inside the checkout is
-kept and one that leaves through a symlinked component is dropped. A pointer
-whose target does not exist is judged by its text instead: a relative one is
-kept, since it is broken the same way in the source, and one naming a path
-outside the worktree is dropped, as is a `.git` that cannot be read or holds
-no `gitdir:` line. Tracked files inside excluded directories are restored from
-Git; when keeping changes, their live source contents and staged state are
-preserved.
+a pointer is gets decided by following it the way Git follows it — through a
+`.git` symlink onto a further `gitdir:` file, with the value read byte for
+byte, so a space on either side of it and anything after a NUL are treated as
+Git treats them — and the directory is kept only when the pointer lands
+inside the new worktree and outside the worktree's own `.git`. A pointer
+reaching its own metadata through a symlink inside the checkout is therefore
+kept, and one leaving through a symlinked component is dropped, whichever way
+its text reads. When the target cannot be followed at all — it does not
+exist, or resolving it fails — the text decides instead: one that reads as
+naming a path inside the worktree is kept, since it is broken the same way in
+the source, and one that reads as leading out of it is dropped, as is a
+`.git` that cannot be read or holds no `gitdir:` line. Tracked files inside
+excluded directories are restored from Git; when keeping changes, their live
+source contents and staged state are preserved.
 
 Clean clones also discard carried files that are untracked under the target
 commit's own ignore rules, after its tree and index have been written. Caches
