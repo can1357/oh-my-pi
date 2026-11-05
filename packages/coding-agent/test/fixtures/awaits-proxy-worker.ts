@@ -33,7 +33,7 @@ export interface AwaitsProxyProbe {
 	/** Who waits on `Child` now. */
 	waiters(): Promise<string[]>;
 	/** The child's own `wait({ timeout })`, through the real tool. */
-	childIdleText(): Promise<string>;
+	childIdleText(timeoutSeconds?: number): Promise<string>;
 	/** Finish the job and drop everything this probe holds. */
 	close(): Promise<void>;
 }
@@ -81,8 +81,8 @@ const probe: AwaitsProxyProbe = {
 		unsubscribe = AgentRegistry.global().onChange(() => {});
 	},
 	waiters: async () => AgentRegistry.global().awaits.waitersOn("Child"),
-	childIdleText: async () => {
-		const result = await new WaitTool(childSession()).execute("child-idle", { timeout: 1 });
+	childIdleText: async (timeoutSeconds = 1) => {
+		const result = await new WaitTool(childSession()).execute("child-idle", { timeout: timeoutSeconds });
 		const first = result.content[0];
 		return first?.type === "text" ? (first.text ?? "") : "";
 	},

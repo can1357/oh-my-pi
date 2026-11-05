@@ -5,7 +5,7 @@
  * call's listener, which takes holds for a call that already ended and
  * refuses the child's idle wait.
  */
-import { afterEach, beforeEach, expect, it } from "bun:test";
+import { afterEach, beforeEach, expect, it, vi } from "bun:test";
 import { IrcBus } from "../../src/irc/bus";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import { AgentRegistry } from "../../src/registry/agent-registry";
@@ -31,6 +31,18 @@ afterEach(async () => {
 	AgentRegistry.resetGlobalForTests();
 	IrcBus.resetGlobalForTests();
 });
+/**
+ * Poll a condition fed by another thread. There is no in-process clock to fake
+ * across a real worker; this waits on the condition itself, never a guessed
+ * duration.
+ */
+async function waitFor(check: () => boolean, timeoutMs = 10_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!check()) {
+		if (Date.now() > deadline) throw new Error("condition not met in time");
+		await Bun.sleep(10);
+	}
+}
 
 async function startWorker(): Promise<AwaitsProxyProbe> {
 	const probe = Promise.withResolvers<AwaitsProxyProbe>();
@@ -90,4 +102,49 @@ it("revives no hold of a worker call whose registry subscription failed", async 
 	expect(await probe.waiters()).toEqual([]);
 	// The child is free to idle: nothing is waiting on its result.
 	expect(await probe.childIdleText()).toContain("Deadline reached");
+}, 120_000);
+
+it("refuses within a tick when the forwarded awaits subscription was dropped", async () => {
+	// Main ends a forwarded subscription after a single failed delivery
+	// (`MainSessionBridge.forward`), and the worker never hears that a block
+	// started. The parked idle wait must still notice, from its own re-read,
+	// rather than park on for its whole deadline while an agent waits on it.
+	const registry = AgentRegistry.global();
+	for (const id of ["Main", "Child"] as const) {
+		registry.register({
+			id,
+			displayName: id,
+			kind: id === "Main" ? "main" : "sub",
+			...(id === "Child" ? { parentId: "Main" } : {}),
+			session: { isStreaming: true } as never,
+			status: "running",
+		});
+	}
+	// Capture the release main hands its forwarding wrapper, so the test can
+	// drop the subscription exactly as a failed delivery does.
+	const realOnChange = registry.awaits.onChange.bind(registry.awaits);
+	const forwarded: Array<() => void> = [];
+	vi.spyOn(registry.awaits, "onChange").mockImplementation(listener => {
+		const detach = realOnChange(listener);
+		forwarded.push(detach);
+		return detach;
+	});
+	const probe = await startWorker();
+	cleanups.push(() => probe.close());
+
+	const parked = probe.childIdleText(30);
+	await waitFor(() => forwarded.length > 0);
+	// Main drops the worker's forwarded subscription: no change event can reach
+	// the worker from here on.
+	for (const detach of forwarded.splice(0)) detach();
+	vi.restoreAllMocks();
+
+	const started = Date.now();
+	const release = registry.awaits.hold("Main", ["Child"], { interruptible: false });
+	cleanups.push(() => release());
+	const text = await parked;
+
+	expect(text).toContain("Nothing to wait for: `Main` is waiting on your result");
+	// Bounded by the re-read tick, not by the caller's 30 s deadline.
+	expect(Date.now() - started).toBeLessThan(10_000);
 }, 120_000);

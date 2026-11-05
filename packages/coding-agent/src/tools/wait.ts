@@ -42,6 +42,20 @@ const WAIT_NOTICE_RUNG = 1;
 /** After one watched job settles, keep collecting briefly so near-simultaneous completions share one wait result. */
 const WAIT_SETTLE_WINDOW_MS = 1500;
 const PROGRESS_INTERVAL_MS = 500;
+/**
+ * How often a parked idle wait re-reads who is blocked on the caller, instead
+ * of trusting only the change notification.
+ *
+ * A forwarded subscription can be dropped on main after a single failed
+ * delivery (`MainSessionBridge.forward`), and a worker then never hears that a
+ * block started; without a re-read the caller would park on for its whole
+ * deadline while an agent waits on its result. One second because the read is
+ * cheap — an in-memory graph walk on main, one sync call on an already-open
+ * link in a worker, the same call this block already makes once on entry — and
+ * because `timeout` itself is clamped to whole seconds, so a finer tick could
+ * not show up in the result anyway.
+ */
+const WAITERS_RECHECK_INTERVAL_MS = 1_000;
 
 /** Back-to-back waits that each elapsed with nothing new. */
 interface IdleStreak {
@@ -478,8 +492,15 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 					awaited.resolve();
 				};
 				cleanup.push(messaging.registry.awaits.onChange(checkWaiters));
-				// A worker's registry is a proxy: a block that began between the
-				// caller's check and this subscription sends no change event here.
+				// The notification is not trusted on its own: a worker's registry is
+				// a proxy, so a block that began between the caller's check and this
+				// subscription sends no change event here, and main drops a
+				// forwarded subscription after one failed delivery. Read once now,
+				// then on a tick, so a lost notification delays the refusal by one
+				// interval instead of the caller's whole deadline.
+				const recheck = setInterval(checkWaiters, WAITERS_RECHECK_INTERVAL_MS);
+				recheck.unref?.();
+				cleanup.push(() => clearInterval(recheck));
 				checkWaiters();
 			}
 			// A wait on jobs blocks the caller until the first of them settles,
