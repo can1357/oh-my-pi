@@ -57,10 +57,17 @@ export type ClobberBackup =
 	| { kind: "too-large"; reason: ClobberReason; from: string; bytes: number }
 	| { kind: "failed"; reason: ClobberReason; from: string; error: string };
 
-/** What a path looked like when this session last wrote it. The inode catches a delete and recreate. */
+/**
+ * What a path looked like when this session last wrote it. The inode catches a
+ * delete and recreate; `ctimeMs` catches the rest of what `mtimeMs` misses,
+ * because a `cp --preserve=timestamps` or a restore from an archive can put
+ * someone else's equal-length bytes there with the mtime this session left.
+ * The kernel moves ctime on any write, and no ordinary tool can forge it.
+ */
 interface WrittenFile {
 	size: number;
 	mtimeMs: number;
+	ctimeMs: number;
 	ino: number;
 }
 
@@ -169,13 +176,19 @@ function isForeignSessionDirectory(session: ClobberBackupSession, realTarget: st
 function clobberReason(
 	session: ClobberBackupSession,
 	realTarget: string,
-	stat: { size: number; mtimeMs: number; ino: number },
+	stat: WrittenFile,
 ): ClobberReason | undefined {
 	if (isForeignSessionDirectory(session, realTarget)) return "foreign-session-dir";
 	const written = createdFiles(session).byPath.get(realTarget);
 	// Same path is not enough: another writer may have replaced the content, or
 	// the file itself, since this session wrote it.
-	if (written && written.size === stat.size && written.mtimeMs === stat.mtimeMs && written.ino === stat.ino) {
+	if (
+		written &&
+		written.size === stat.size &&
+		written.mtimeMs === stat.mtimeMs &&
+		written.ctimeMs === stat.ctimeMs &&
+		written.ino === stat.ino
+	) {
 		return undefined;
 	}
 	return "not-created-here";
@@ -199,7 +212,12 @@ export async function noteOwnWrite(
 		if (!created && !files.byPath.has(target)) return;
 		const stat = await fs.stat(target).catch(() => undefined);
 		if (!stat?.isFile()) return;
-		files.byPath.set(target, { size: stat.size, mtimeMs: stat.mtimeMs, ino: Number(stat.ino) });
+		files.byPath.set(target, {
+			size: stat.size,
+			mtimeMs: stat.mtimeMs,
+			ctimeMs: stat.ctimeMs,
+			ino: Number(stat.ino),
+		});
 	} catch (error) {
 		logger.debug("Could not record a written path", { path: absolutePath, error: String(error) });
 	}
@@ -243,33 +261,36 @@ async function listDayDirs(root: string): Promise<string[]> {
 }
 
 /**
- * Bytes a day holds. The index is the fast answer — one file read per day
- * instead of one syscall per backup, which is what keeps the sweep off the
- * critical path of a tool call in a store with many entries. A day whose index
- * is missing or unreadable is counted the slow way rather than reported as
- * empty, so copies whose index line never landed still weigh on the budget.
+ * Bytes a day holds. The index answers for every copy whose entry landed —
+ * one file read per day instead of one syscall per backup, which is what keeps
+ * the sweep off the critical path of a tool call in a store with many entries.
+ * Anything in the directory the index does not name is then stat-ed, so a copy
+ * whose entry never landed still weighs on the budget; in the ordinary case
+ * that is one `readdir` and no stats.
  *
- * Both answers are logical bytes: a sparse file or a reflink counts what it
- * says it holds, not what it occupies.
+ * Logical bytes throughout: a sparse file or a reflink counts what it says it
+ * holds, not what it occupies.
  */
 async function dayBytes(dayDir: string): Promise<number> {
-	let total = 0;
+	const indexed = new Map<string, number>();
 	try {
 		const text = await Bun.file(path.join(dayDir, INDEX_NAME)).text();
 		for (const line of text.split("\n")) {
 			if (!line) continue;
 			const entry: unknown = JSON.parse(line);
-			const bytes = entry && typeof entry === "object" && "bytes" in entry ? entry.bytes : undefined;
-			if (typeof bytes === "number") total += bytes;
+			if (!entry || typeof entry !== "object") continue;
+			const to = "to" in entry ? entry.to : undefined;
+			const bytes = "bytes" in entry ? entry.bytes : undefined;
+			if (typeof to === "string" && typeof bytes === "number") indexed.set(path.basename(to), bytes);
 		}
-		return total;
 	} catch (error) {
-		logger.debug("Clobber backup index unreadable; sizing the day by hand", { dayDir, error: String(error) });
+		if (!isEnoent(error)) logger.debug("Clobber backup index unreadable", { dayDir, error: String(error) });
 	}
-	total = 0;
+	let total = 0;
+	for (const bytes of indexed.values()) total += bytes;
 	try {
 		for (const entry of await fs.readdir(dayDir, { withFileTypes: true })) {
-			if (!entry.isFile() || entry.name === INDEX_NAME) continue;
+			if (!entry.isFile() || entry.name === INDEX_NAME || indexed.has(entry.name)) continue;
 			total += (await fs.stat(path.join(dayDir, entry.name)).catch(() => undefined))?.size ?? 0;
 		}
 	} catch (error) {
@@ -345,6 +366,7 @@ export async function backupBeforeClobber(
 		reason = clobberReason(session, target, {
 			size: stat.size,
 			mtimeMs: stat.mtimeMs,
+			ctimeMs: stat.ctimeMs,
 			ino: Number(stat.ino),
 		});
 		if (reason === undefined) return undefined;
@@ -370,14 +392,19 @@ export async function backupBeforeClobber(
 				path.join(dayDir, INDEX_NAME),
 				`${JSON.stringify({ at: now.toISOString(), reason, from: target, to: destination, bytes: size })}\n`,
 			);
-			if (sweptStores.get(root) !== day) {
-				sweptStores.set(root, day);
-				await sweepStore(root, day);
-			}
 		} catch (error) {
-			logger.warn("Clobber backup bookkeeping failed; the copy itself is on disk", {
+			logger.warn("Clobber backup index entry failed; the copy itself is on disk", {
 				to: destination,
 				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+		// Outside the index's catch: an unwritable index must not also stop
+		// retention and the budget from being enforced on a store that is still
+		// taking copies.
+		if (sweptStores.get(root) !== day) {
+			sweptStores.set(root, day);
+			await sweepStore(root, day).catch(error => {
+				logger.warn("Clobber backup sweep failed", { root, error: String(error) });
 			});
 		}
 		return { kind: "saved", reason, from: target, to: destination, bytes: size };

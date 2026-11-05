@@ -600,7 +600,13 @@ export class EditTool implements AgentTool<TInput> {
 					writethrough: createEditWritethrough(this.session),
 					signal,
 				});
-				if (repaired) getEditStore(this.session).invalidate(snapshot.path);
+				// The repair writes the file a second time, so the record taken by
+				// the edit itself is stale; left alone, the session's next write to
+				// its own repaired file is copied aside under "did not create it".
+				if (repaired) {
+					getEditStore(this.session).invalidate(snapshot.path);
+					await noteOwnWrite(this.session, snapshot.path, false);
+				}
 			} catch (error) {
 				logger.warn("Edit auto-repair failed", {
 					path: snapshot.path,

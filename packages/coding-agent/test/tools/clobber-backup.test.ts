@@ -259,6 +259,46 @@ describe("copy-before-clobber: a file this session did not create", () => {
 		expect(backups).toHaveLength(1);
 		expect(await Bun.file(backups[0]!).text()).toBe(DOOMED);
 	});
+
+	test("a move whose rewrite is the same length still keeps the source", async () => {
+		// The branch that reads and compares the bytes only runs when length
+		// cannot answer; the test above never reaches it.
+		await fs.writeFile(path.join(tempDir, "a.md"), DOOMED);
+
+		const rewritten = await new EditTool(makeSession(tempDir), "patch").execute("move-rewrite-same-length", {
+			path: "a.md",
+			edits: [{ op: "update", diff: "@@\n-register entry 2\n+register entry 9", rename: "a-moved.md" }],
+		});
+
+		expect(rewritten.isError).toBeFalsy();
+		expect(await Bun.file(path.join(tempDir, "a-moved.md")).text()).toBe(DOOMED.replace("entry 2", "entry 9"));
+		const backups = await backupFiles();
+		expect(backups).toHaveLength(1);
+		expect(await Bun.file(backups[0]!).text()).toBe(DOOMED);
+	});
+
+	test("a session-created file another writer replaced in place, timestamps restored, is no longer its own", async () => {
+		const session = makeSession(tempDir);
+		const tool = new WriteTool(session);
+		const target = path.join(tempDir, "scratch.md");
+		await tool.execute("create", { path: "scratch.md", content: DOOMED });
+		const mine = await fs.stat(target);
+		// Same length, same inode, and the timestamps this session left, as far as
+		// `utimes` can restore them: a `cp --preserve=timestamps` in miniature.
+		const theirContent = DOOMED.replace("entry 2", "entry 9");
+		await fs.writeFile(target, theirContent);
+		await fs.utimes(target, mine.atime, mine.mtime);
+		const theirs = await fs.stat(target);
+		expect(theirs.size).toBe(mine.size);
+		expect(theirs.ino).toBe(mine.ino);
+
+		const result = await tool.execute("rewrite", { path: "scratch.md", content: "gone\n" });
+
+		const backups = await backupFiles();
+		expect(backups).toHaveLength(1);
+		expect(await Bun.file(backups[0]!).text()).toBe(theirContent);
+		expect(resultText(result)).toContain("this session did not create it");
+	});
 });
 
 describe("copy-before-clobber: another session's directory", () => {
