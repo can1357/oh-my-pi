@@ -537,13 +537,18 @@ fn local_delete_copies_terminate() {
 	}
 }
 
-/// Byte totals are a function of the transfer, not of thread timing: the same
-/// local copy run repeatedly reports identical `sent`/`received` counts (rsync
-/// 3.5.1 is deterministic here, even under CPU load). Frames meet reads only where
-/// upstream's processes would: reads happen at refills with the socketpair-sized
-/// in-process pipe, never ahead of them.
+/// Byte totals are a function of the transfer, give or take where a frame
+/// ends. rsync 3.5.1 closes its pending data frame whenever it has to wait
+/// for input (`io.c` `perform_io`), so a run that waited once more reports
+/// one more 4-byte multiplex header: on this tree it did in 16 of 200 runs on
+/// two busy CPUs (none of 200 idle), and the builtin in 1 of 200, idle and
+/// busy alike. The same local copy run repeatedly must therefore report
+/// counts that differ only by whole headers; apart by anything else, or by
+/// more than four headers (the bound the conformance harness allows, after a
+/// three-header difference was measured under load), frames meet reads where
+/// upstream's would not.
 #[test]
-fn local_copy_byte_totals_are_deterministic() {
+fn local_copy_byte_totals_differ_only_by_frame_headers() {
 	let dir = tempfile::tempdir().unwrap();
 	make_tree(&dir.path().join("src"));
 	for i in 0..20 {
@@ -557,7 +562,11 @@ fn local_copy_byte_totals_are_deterministic() {
 		let summary = out.lines().find(|l| l.starts_with("sent ")).unwrap();
 		totals.push(sent_received(summary));
 	}
-	assert!(totals.windows(2).all(|w| w[0] == w[1]), "{totals:?}");
+	for (which, count) in [("sent", 0), ("received", 1)] {
+		let values: Vec<i64> = totals.iter().map(|t| if count == 0 { t.0 } else { t.1 }).collect();
+		let (least, most) = (values.iter().min().unwrap(), values.iter().max().unwrap());
+		assert!(values.iter().all(|v| (v - least) % 4 == 0) && most - least <= 16, "{which}: {totals:?}");
+	}
 }
 
 /// A server's stdio may be O_NONBLOCK: EAGAIN is retried, not fatal.

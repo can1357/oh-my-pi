@@ -237,6 +237,44 @@ jobs:
          - uses: ./.github/actions/bun-install
          - id: cache
            uses: ./.github/actions/bazel-cache
+         # The rsync conformance scenarios compare the built-in rsync's output
+         # byte for byte against rsync 3.5.1's, and fail rather than skip when
+         # the rsync they find is another version, because a skip there reads
+         # as a pass. Ubuntu ships 3.2.7, so build 3.5.1 once and cache it: a
+         # miss costs about 20 s (14 s of it ./configure), a hit a cache
+         # restore. The binary goes in /usr/local/bin because that is what a
+         # bazel test action's PATH (/usr/local/bin:/usr/bin:/bin) finds; a
+         # PATH entry added here would not reach the sandbox. Every step
+         # fails the job if it cannot produce 3.5.1, so a broken install can
+         # never fall through to a run against the wrong rsync.
+         - name: Cache rsync 3.5.1
+           id: rsync351
+           uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              path: /opt/rsync-3.5.1
+              key: rsync-3.5.1-${{ runner.os }}-${{ runner.arch }}
+         - name: Build rsync 3.5.1
+           if: steps.rsync351.outputs.cache-hit != 'true'
+           run: |
+              set -euo pipefail
+              curl -fsSL --retry 3 -o "$RUNNER_TEMP/rsync-3.5.1.tar.gz" https://download.samba.org/pub/rsync/src/rsync-3.5.1.tar.gz
+              echo 'c55f9c9dc10fb8bec397b399a0fdded53cc9a2d8e30891bb0d63724d25c37bef  '"$RUNNER_TEMP/rsync-3.5.1.tar.gz" | sha256sum -c -
+              tar -xzf "$RUNNER_TEMP/rsync-3.5.1.tar.gz" -C "$RUNNER_TEMP"
+              cd "$RUNNER_TEMP/rsync-3.5.1"
+              ./configure --prefix=/opt/rsync-3.5.1 --disable-md2man --disable-openssl \
+                --disable-xxhash --disable-zstd --disable-lz4 --disable-idn \
+                --disable-acl-support --disable-xattr-support
+              make -j"$(nproc)"
+              make install
+         - name: Install rsync 3.5.1 where the tests look
+           run: |
+              set -euo pipefail
+              if [ -w /usr/local/bin ]; then
+                 install -m 0755 /opt/rsync-3.5.1/bin/rsync /usr/local/bin/rsync
+              else
+                 sudo install -m 0755 /opt/rsync-3.5.1/bin/rsync /usr/local/bin/rsync
+              fi
+              /usr/local/bin/rsync --version | head -1 | grep -qx 'rsync  version 3.5.1  protocol version 33'
          - name: Rust tests
            # The ulimit guard runs in the step that launches the bazel server
            # (limits are per-process and the server persists across steps).

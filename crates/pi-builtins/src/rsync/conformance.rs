@@ -12,24 +12,42 @@
 //!   permission bits, owners, mtimes (to the nanosecond when not set by the
 //!   run itself), symlink targets, hard-link groups, empty directories.
 //!
-//! The reference itself is not deterministic run to run: its three local
-//! processes (and a remote peer) report through one stream, so sender,
-//! generator, and receiver lines interleave differently, and its byte totals
-//! (`Total bytes sent/received`, the `sent … received …` summary) depend on
-//! how many multiplexed frames each run happened to flush. Rather than mask
-//! those values, the comparison stays exact and samples the reference: when
-//! ours differs from the reference in any way, the reference is rerun on a
-//! fresh fixture up to [`REFERENCE_RETRIES`] times, and the scenario passes if
-//! ours exactly equals (exit code, normalized stdout and stderr, tree) any
-//! one reference outcome. A real bug still fails because ours matches none of
-//! them; the failure report names how many distinct reference outcomes were
-//! seen and diffs ours against the first.
+//! The reference itself is not deterministic run to run, in two ways.
+//!
+//! - Line order. Its sender, generator, and receiver are separate processes
+//!   reporting through one stream, so their lines interleave differently from
+//!   run to run. Rows where that is measured compare stdout as a sorted
+//!   multiset (`u()` in [`cases`]).
+//! - Byte counts. `sent N bytes  received N bytes` (the summary and a log
+//!   file's exit line) and `Total bytes sent/received` count every 4-byte
+//!   multiplex header. A writer closes its pending `MSG_DATA` frame whenever
+//!   it must wait for input, and it waits only when the input has not
+//!   arrived yet (`io.c` `perform_io`: lines 726-728 return at once when the
+//!   input is buffered; lines 767-796 otherwise close the frame and reserve
+//!   a new header). So the same transfer reports counts whole headers
+//!   apart, depending on which process ran first and how often each waited.
+//!   The counts of stdout, stderr, and the log file are therefore compared on
+//!   their own ([`normalize::counts_match`]): each may differ from the
+//!   reference's by a whole number of 4-byte headers, up to
+//!   [`normalize::MAX_HEADERS`], either way, and by nothing else. That is the
+//!   variation measured, not a bound the source sets: a builtin whose
+//!   accounting is off by a few whole headers passes too.
+//!
+//! Everything else compares exactly, and the reference is sampled: when ours
+//! differs from the reference in any way, the reference is rerun on a fresh
+//! fixture up to [`REFERENCE_RETRIES`] times, and the scenario passes if ours
+//! equals (exit code, normalized stdout and stderr, tree) one reference
+//! outcome whose byte counts match. A real bug still fails because ours
+//! matches none of them; the failure report names how many distinct
+//! reference outcomes were seen and diffs ours against the first.
 //!
 //! The reference runs with an empty environment (plus `TZ` when set, so
 //! local-time output uses one zone on both sides), matching the test host's
 //! empty shell environment; the fake remote shell, the reference server, and
 //! the password files are named by the same absolute paths on both sides.
-//! The suite skips itself when no rsync 3.5.1 is installed. Set
+//! The suite needs exactly rsync 3.5.1 (protocol 33), the version whose
+//! output the builtin reproduces; with any other, or none, it skips itself
+//! and says why on standard error (`--no-capture` shows it). Set
 //! `RSYNC_CONFORMANCE_FILTER=<substring>` to run only matching scenarios.
 #![cfg(unix)]
 
@@ -95,7 +113,7 @@ enum Client {
 	Reference,
 }
 
-/// Everything compared about one run.
+/// Everything compared exactly about one run.
 #[derive(PartialEq, Eq)]
 struct Outcome {
 	code: i32,
@@ -104,17 +122,38 @@ struct Outcome {
 	tree: Snapshot,
 }
 
-/// The reference rsync 3.5.1 binary, when one is installed. Other versions
-/// are skipped: the builtin's output is byte-for-byte 3.5.1's.
-fn reference() -> Option<PathBuf> {
+/// Why these scenarios have no reference rsync to compare against.
+enum NoReference {
+	/// No `rsync` at all. There is nothing to compare against, so the
+	/// scenarios are skipped.
+	None,
+	/// An `rsync` that is not 3.5.1: each one looked at, with the first line
+	/// it printed for `--version`. The builtin's output is compared
+	/// byte-for-byte against 3.5.1's, so another version proves nothing, and
+	/// skipping for it reads as a pass; the scenarios fail instead.
+	Other(String),
+}
+
+/// The reference rsync 3.5.1 binary, or why there is none.
+fn reference() -> Result<PathBuf, NoReference> {
 	let mut candidates = vec![PathBuf::from("/opt/homebrew/bin/rsync")];
 	if let Some(path) = std::env::var_os("PATH") {
 		candidates.extend(std::env::split_paths(&path).map(|d| d.join("rsync")));
 	}
-	candidates.into_iter().find(|p| {
-		Command::new(p).arg("--version").env_clear().output().is_ok_and(|o| {
-			String::from_utf8_lossy(&o.stdout).starts_with("rsync  version 3.5.1  protocol version 33\n")
-		})
+	let mut seen = Vec::new();
+	for candidate in candidates {
+		let Ok(output) = Command::new(&candidate).arg("--version").env_clear().output() else {
+			continue;
+		};
+		let version = String::from_utf8_lossy(&output.stdout).into_owned();
+		if version.starts_with("rsync  version 3.5.1  protocol version 33\n") {
+			return Ok(candidate);
+		}
+		seen.push(format!("{} reports {:?}", candidate.display(), version.lines().next().unwrap_or("")));
+	}
+	Err(match seen.is_empty() {
+		true => NoReference::None,
+		false => NoReference::Other(seen.join("; ")),
 	})
 }
 
@@ -166,8 +205,10 @@ impl Bench {
 		argv
 	}
 
-	/// Builds the fixture in `<base>/<side>` and runs `client` there.
-	fn run(&self, case: &Case, side: &str, client: Client) -> Outcome {
+	/// Builds the fixture in `<base>/<side>`, runs `client` there, and
+	/// returns what is compared exactly plus the byte counts of stdout,
+	/// stderr, and the log file, in that order.
+	fn run(&self, case: &Case, side: &str, client: Client) -> (Outcome, Vec<normalize::Count>) {
 		let w = self.base.join(side);
 		fs::create_dir_all(&w).unwrap();
 		fixture::build(&w, case.tweaks);
@@ -197,17 +238,17 @@ impl Bench {
 		drop(daemon);
 		let window = ((start / 1_000_000_000) as i64, (end / 1_000_000_000) as i64);
 		let wb = w.as_os_str().as_bytes();
-		let mut out = normalize(&out, wb, window);
+		let spelling = normalize::Spelling::of_args(&argv);
+		let (mut out, mut counts) = normalize(&out, wb, window, spelling);
 		if case.unordered {
 			let sorted = sorted_lines(&out).join(&b'\n');
 			out = sorted;
 		}
-		Outcome {
-			code,
-			out,
-			err: normalize(&err, wb, window),
-			tree: Snapshot::take(&w, start, end),
-		}
+		let (err, err_counts) = normalize(&err, wb, window, spelling);
+		let (tree, log_counts) = Snapshot::take(&w, start, end);
+		counts.extend(err_counts);
+		counts.extend(log_counts);
+		(Outcome { code, out, err, tree }, counts)
 	}
 }
 
@@ -224,24 +265,40 @@ fn check(reference: &Path, mode: Mode, case: &Case) -> Result<(), String> {
 	// reports to the reference (macOS: /var → /private/var).
 	let base = fs::canonicalize(dir.path()).unwrap();
 	let bench = Bench::new(&base, reference, mode);
-	let ours = bench.run(case, "ours", Client::Ours);
-	// Distinct reference outcomes seen so far, first run first.
+	let (ours, our_counts) = bench.run(case, "ours", Client::Ours);
+	// Distinct reference outcomes seen so far, first run first, and the byte
+	// counts of each reference run that otherwise matched ours.
 	let mut seen: Vec<Outcome> = Vec::new();
+	let mut matched_counts: Vec<Vec<String>> = Vec::new();
+	let show = |counts: &[normalize::Count]| counts.iter().map(|c| String::from_utf8_lossy(&c.token).into_owned()).collect::<Vec<_>>();
 	for attempt in 0..=REFERENCE_RETRIES {
-		let outcome = bench.run(case, &format!("theirs{attempt}"), Client::Reference);
+		let (outcome, counts) = bench.run(case, &format!("theirs{attempt}"), Client::Reference);
 		if outcome == ours {
-			if ours.code == case.exit {
-				return Ok(());
+			if normalize::counts_match(&our_counts, &counts) {
+				if ours.code == case.exit {
+					return Ok(());
+				}
+				seen.insert(0, outcome);
+				break;
 			}
-			seen.insert(0, outcome);
-			break;
+			matched_counts.push(show(&counts));
 		}
 		if !seen.contains(&outcome) {
 			seen.push(outcome);
 		}
 	}
 	let theirs = &seen[0];
-	let verdict = if ours == *theirs {
+	// Any reference run whose output matched ours but whose counts did not
+	// is the diagnosis, whichever run came first.
+	let verdict = if !matched_counts.is_empty() {
+		format!(
+			"ours matched the output of a reference run, but its byte counts {:?} are not within {} whole \
+			 {}-byte multiplex headers of every such run's: {matched_counts:?}",
+			show(&our_counts),
+			normalize::MAX_HEADERS,
+			normalize::MUX_HEADER
+		)
+	} else if ours == *theirs {
 		format!("ours matched one of {} distinct reference outcome(s)", seen.len())
 	} else {
 		format!("ours matched none of {} distinct reference outcome(s); diff against the first", seen.len())
@@ -270,7 +327,19 @@ fn check(reference: &Path, mode: Mode, case: &Case) -> Result<(), String> {
 
 /// Runs every scenario of `table` (a few at a time) and fails with all reports.
 fn run_table(mode: Mode, table: &[Case]) {
-	let Some(reference) = reference() else { return };
+	let reference = match reference() {
+		Ok(reference) => reference,
+		Err(NoReference::None) => {
+			eprintln!("skipped: these scenarios compare against rsync 3.5.1 (protocol 33), and there is no rsync at /opt/homebrew/bin/rsync or on PATH");
+			return;
+		},
+		// Skipping for the wrong version printed a pass and proved nothing,
+		// which is how a whole run against rsync 3.2.7 went unnoticed.
+		Err(NoReference::Other(seen)) => panic!(
+			"these scenarios compare against rsync 3.5.1 (protocol 33) byte for byte, and the rsync found is not it: {seen}. \
+			 Install rsync 3.5.1 and put it first on PATH, or uninstall rsync to skip these scenarios."
+		),
+	};
 	let filter = std::env::var("RSYNC_CONFORMANCE_FILTER").unwrap_or_default();
 	let cases: Vec<&Case> = table.iter().filter(|c| c.name.contains(filter.as_str())).collect();
 	let next = AtomicUsize::new(0);
