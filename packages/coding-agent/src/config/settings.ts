@@ -1192,12 +1192,17 @@ export class Settings {
 	/**
 	 * {@link ignoredValues} without what a parent ignores, which a child reads live from that parent.
 	 * This is what a {@link mirrorState} carries: a child mirror that froze its parent's records would
-	 * keep asking after the parent's file is repaired.
+	 * keep asking after the parent's file is repaired. An overlay shares its parent's warning state
+	 * and global layer, so what the parent reports is subtracted rather than assumed absent.
 	 */
 	#ownIgnoredValues(): IgnoredValue[] {
+		const inherited = new Set(
+			(this.#parent?.ignoredValues() ?? []).map(({ setting, source }) => `${setting.id}\0${source ?? ""}`),
+		);
 		const ignored = new Map<string, IgnoredValue>();
 		const add = ({ setting, source, valueType, valueLength }: IgnoredValue): void => {
-			ignored.set(`${setting.id}\0${source ?? ""}`, { setting, source, valueType, valueLength });
+			const key = `${setting.id}\0${source ?? ""}`;
+			if (!inherited.has(key)) ignored.set(key, { setting, source, valueType, valueLength });
 		};
 		for (const value of this.#mirroredIgnored) add(value);
 		for (const value of this.warnState.invalid.values()) add(value);
