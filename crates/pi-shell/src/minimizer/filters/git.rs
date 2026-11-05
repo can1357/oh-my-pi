@@ -966,6 +966,15 @@ struct DiffFile {
 	added:   usize,
 	removed: usize,
 	hunks:   Vec<DiffHunk>,
+	/// `Binary files … differ`: changed, but without lines to count.
+	binary:  bool,
+}
+
+impl DiffFile {
+	/// Nothing recorded since its header, so a following header names it.
+	const fn is_blank(&self) -> bool {
+		self.added == 0 && self.removed == 0 && self.hunks.is_empty() && !self.binary
+	}
 }
 
 struct DiffHunk {
@@ -987,12 +996,18 @@ pub(crate) fn compact_diff_output(input: &str) -> String {
 
 	let mut out = String::new();
 	for file in files.iter().take(20) {
-		let changed = file.added + file.removed;
 		out.push_str(&file.path);
 		out.push_str(" | ");
-		out.push_str(changed.format_into(&mut NumBuffer::new()));
-		out.push(' ');
-		out.push_str(&diff_bar(file.added, file.removed));
+		if file.binary {
+			out.push_str("Bin");
+		} else {
+			let changed = file.added + file.removed;
+			out.push_str(changed.format_into(&mut NumBuffer::new()));
+			if changed > 0 {
+				out.push(' ');
+				out.push_str(&diff_bar(file.added, file.removed));
+			}
+		}
 		out.push('\n');
 	}
 	if files.len() > 20 {
@@ -1010,6 +1025,9 @@ pub(crate) fn compact_diff_output(input: &str) -> String {
 		out.push_str("File: ");
 		out.push_str(&file.path);
 		out.push('\n');
+		if file.binary {
+			out.push_str("  Binary files differ\n");
+		}
 		for hunk in file.hunks.iter().take(8) {
 			out.push_str("  ");
 			out.push_str(&hunk.header);
@@ -1083,7 +1101,7 @@ fn parse_unified_diff(input: &str) -> Vec<DiffFile> {
 			if let Some(file) = current.take() {
 				files.push(file);
 			}
-			current = Some(DiffFile { path, added: 0, removed: 0, hunks: Vec::new() });
+			current = Some(DiffFile { path, added: 0, removed: 0, hunks: Vec::new(), binary: false });
 			pending_old_path = None;
 			continue;
 		}
@@ -1099,9 +1117,7 @@ fn parse_unified_diff(input: &str) -> Vec<DiffFile> {
 				path
 			};
 			flush_hunk(&mut current, &mut current_hunk);
-			let update_current_path = current
-				.as_ref()
-				.is_some_and(|file| file.added == 0 && file.removed == 0 && file.hunks.is_empty());
+			let update_current_path = current.as_ref().is_some_and(DiffFile::is_blank);
 			if update_current_path {
 				if let Some(file) = current.as_mut() {
 					file.path = path.to_string();
@@ -1113,6 +1129,7 @@ fn parse_unified_diff(input: &str) -> Vec<DiffFile> {
 					added:   0,
 					removed: 0,
 					hunks:   Vec::new(),
+					binary:  false,
 				});
 			} else {
 				current = Some(DiffFile {
@@ -1120,6 +1137,7 @@ fn parse_unified_diff(input: &str) -> Vec<DiffFile> {
 					added:   0,
 					removed: 0,
 					hunks:   Vec::new(),
+					binary:  false,
 				});
 			}
 			pending_old_path = None;
@@ -1132,6 +1150,47 @@ fn parse_unified_diff(input: &str) -> Vec<DiffFile> {
 			continue;
 		}
 		if line.starts_with("+++") || line.starts_with("---") {
+			continue;
+		}
+		if line == "GIT binary patch" {
+			if let Some(file) = current.as_mut() {
+				file.binary = true;
+			}
+			continue;
+		}
+		if let Some(names) = line
+			.strip_prefix("Binary files ")
+			.and_then(|rest| rest.strip_suffix(" differ"))
+		{
+			flush_hunk(&mut current, &mut current_hunk);
+			// Under `diff --git` the block's header already named the file; a
+			// recursive `diff -r` prints the line alone, after the previous file.
+			match current.as_mut() {
+				Some(file) if file.is_blank() => file.binary = true,
+				_ => {
+					if let Some(file) = current.take() {
+						files.push(file);
+					}
+					current = Some(DiffFile {
+						path:    binary_diff_path(names).to_string(),
+						added:   0,
+						removed: 0,
+						hunks:   Vec::new(),
+						binary:  true,
+					});
+				},
+			}
+			continue;
+		}
+		// A rename's header names two paths that unquoted spaces make ambiguous;
+		// this line names the new one whole.
+		if let Some(path) = line
+			.strip_prefix("rename to ")
+			.or_else(|| line.strip_prefix("copy to "))
+			&& let Some(file) = current.as_mut()
+			&& file.is_blank()
+		{
+			file.path = unquote_path(path).to_string();
 			continue;
 		}
 		let Some(file) = current.as_mut() else {
@@ -1151,17 +1210,54 @@ fn parse_unified_diff(input: &str) -> Vec<DiffFile> {
 		files.push(file);
 	}
 	files
-		.into_iter()
-		.filter(|file| file.added > 0 || file.removed > 0)
-		.collect()
 }
 
+/// The file named by `Binary files <old> and <new> differ`. Either name may
+/// hold ` and ` itself, so the split taken is the one whose sides end in the
+/// same file name (or where one side is `/dev/null`); with none or several,
+/// the whole text names the file rather than a guessed half of it.
+fn binary_diff_path(names: &str) -> &str {
+	let mut splits = names
+		.match_indices(" and ")
+		.map(|(at, sep)| (&names[..at], &names[at + sep.len()..]))
+		.filter(|(old, new)| {
+			*old == "/dev/null"
+				|| *new == "/dev/null"
+				|| old.rsplit('/').next() == new.rsplit('/').next()
+		});
+	match (splits.next(), splits.next()) {
+		(Some((old, "/dev/null")), None) => old.strip_prefix("a/").unwrap_or(old),
+		(Some((_, new)), None) => new.strip_prefix("b/").unwrap_or(new),
+		_ => names,
+	}
+}
+
+/// The new path of a `diff --git a/<old> b/<new>` header. Unquoted paths may
+/// hold spaces, so a header naming one path twice is split at its middle; a
+/// rename falls back to the second word until its `rename to` line.
 fn parse_diff_git_path(line: &str) -> Option<String> {
 	let rest = line.strip_prefix("diff --git ")?;
+	let mid = rest.len() / 2;
+	if rest.as_bytes().get(mid) == Some(&b' ')
+		&& let Some(old) = unquote_path(&rest[..mid]).strip_prefix("a/")
+		&& let Some(new) = unquote_path(&rest[mid + 1..]).strip_prefix("b/")
+		&& old == new
+	{
+		return Some(new.to_string());
+	}
 	let mut parts = rest.split_whitespace();
 	let _old = parts.next()?;
 	let new = parts.next()?;
 	Some(new.strip_prefix("b/").map_or(new, |path| path).to_string())
+}
+
+/// A path git printed in C-style quotes (it holds a tab, quote or non-ASCII
+/// byte), without the quotes; escapes stay as git printed them.
+fn unquote_path(path: &str) -> &str {
+	path
+		.strip_prefix('"')
+		.and_then(|path| path.strip_suffix('"'))
+		.unwrap_or(path)
 }
 
 /// Old and new line counts of a two-way `@@ -a[,b] +c[,d] @@` header; an
@@ -2198,6 +2294,37 @@ mod tests {
 			out.text
 		);
 		assert!(out.text.contains("  ----\n"), "{}", out.text);
+	}
+
+	#[test]
+	fn diff_lists_files_without_counted_lines() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = test_ctx(Some("diff"), "git diff HEAD", &cfg);
+		// A `--binary` patch, a `binary` .gitattributes file, a pure rename and
+		// one text edit, as git prints them; unquoted paths hold spaces.
+		let input = past_whole_budget(
+			"diff --git a/app icon.png b/app icon.png\nindex bdc955b..8835708 100644\nGIT binary \
+			 patch\nliteral 2\nJcmZQz0ssI600RI3\n\nliteral 2\nJcmZQz1ONa700IC2\n\ndiff --git a/salt \
+			 and pepper.bin b/salt and pepper.bin\nindex bdc955b..8835708 100644\nBinary files \
+			 a/salt and pepper.bin and b/salt and pepper.bin differ\ndiff --git a/old name.txt b/new \
+			 name.txt\nsimilarity index 100%\nrename from old name.txt\nrename to new name.txt\ndiff \
+			 --git a/t.rs b/t.rs\nindex 422c2b7..0f7bc76 100644\n--- a/t.rs\n+++ b/t.rs\n@@ -1,2 \
+			 +1,2 @@\n a\n-b\n+c\n",
+		);
+		let out = filter(&ctx, &input, 0);
+		assert_eq!(out.text.lines().take(5).collect::<Vec<_>>(), [
+			"app icon.png | Bin",
+			"salt and pepper.bin | Bin",
+			"new name.txt | 0",
+			"t.rs | 2 +-",
+			"4 files changed, 1 insertions(+), 1 deletions(-)",
+		]);
+		assert!(
+			out.text
+				.contains("File: salt and pepper.bin\n  Binary files differ\n"),
+			"{}",
+			out.text
+		);
 	}
 
 	#[test]

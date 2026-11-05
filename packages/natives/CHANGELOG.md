@@ -39,6 +39,7 @@
 - Fixed `capabilities()` on Wayland desktops whose xdg-desktop-portal has no RemoteDesktop backend, such as sway, reporting `input: true`: it now reports `input: false` and `inputPermission: "unavailable"`, and typing and key presses fail at once naming the missing portal ([#18012](https://github.com/can1357/oh-my-pi/pull/18012) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `.bzl` files resolving to Python instead of Starlark in `ast-grep`, `astGrep`, `astEdit`, code summaries, and block operations ([#18145](https://github.com/can1357/oh-my-pi/pull/18145) by [@eggpeat](https://github.com/eggpeat))
 - Fixed minimized `rustfmt --check` output counting each diff location as a separate file and saying files were reformatted: it now reports how many files need formatting ([#18147](https://github.com/can1357/oh-my-pi/pull/18147) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed minimized `git diff`, `git show` and `diff -r` output leaving binary files, pure renames and mode-only changes out of its file list and count: binary files now show as `Bin`, as in `git diff --stat` ([#18148](https://github.com/can1357/oh-my-pi/pull/18148) by [@will-bogusz](https://github.com/will-bogusz))
 ### Fixed
 
 - Fixed `el.type` and `el.press(keys)` on Wayland moving focus inside the element's app (GNOME showed "… is ready") before refusing the call: they are now refused before anything reaches the app ([#17915](https://github.com/can1357/oh-my-pi/pull/17915) by [@will-bogusz](https://github.com/will-bogusz))
