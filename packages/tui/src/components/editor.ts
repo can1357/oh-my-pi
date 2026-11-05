@@ -3333,9 +3333,9 @@ export class Editor implements Component, Focusable {
 	 *  stored content, keeping each run's origin. Single pass, so replaced content is never
 	 *  rescanned: a paste's body is the person's own characters, and text in it that reads like
 	 *  a token or another paste marker survives verbatim. Longer atom labels are tried first so
-	 *  `#1` never shadows `#10`. A host that delivers an attachment through the paste channel
-	 *  passes it as its own piece ({@link PasteDelivery}) rather than burying its token in a
-	 *  body, so nothing is lost by not looking there. */
+	 *  `#1` never shadows `#10`. A host that attaches an image hands its token over as its own
+	 *  piece of the delivery ({@link PasteDelivery}) instead of burying it in a body, which is why
+	 *  a body is not searched: a token spliced into pasted text stays part of that text. */
 	#expandRuns(text: string): ExpandedRun[] {
 		const sources: string[] = [];
 		for (const pasteId of this.#pastes.keys()) sources.push(pasteMarkerSource(pasteId));
