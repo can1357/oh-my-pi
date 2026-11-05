@@ -3110,18 +3110,25 @@ export class ModelRegistry {
 		}));
 		// Catalog-only providers have no endpoint manager and no credential to
 		// resolve, so nothing of theirs happens before the awaits below — but their
-		// identity is still captured here, with the others. Selecting them needs
-		// only state that is already settled, and capturing it after the awaits is
-		// what left their publication check reading a configuration that had
-		// already moved.
+		// identity is captured here, with the others, because capturing it after
+		// the awaits is what left their publication check reading a configuration
+		// that had already moved.
+		//
+		// Only the identity moves earlier. ELIGIBILITY IS STILL DECIDED AFTER THE
+		// AWAITS, because one of its terms is live: an extension manager
+		// unregistered while a credential resolves makes its provider newly
+		// eligible here, and one registered makes it ineligible. Deciding that up
+		// here dropped such a provider from the pass entirely — measured, seven of
+		// seven catalog-only providers, by a reviewer whose brief asked exactly
+		// this question. So this list is the CANDIDATES, filtered on the settled
+		// terms only, and the live term is applied where it is read.
 		const bundledProviderIds: Record<string, true> = Object.create(null);
 		for (const providerId of getBundledProviders()) bundledProviderIds[providerId] = true;
-		const catalogOnlyAtStart = MODELS_DEV_CATALOG_PROVIDER_IDS.filter(providerId => {
+		const catalogOnlyCandidates = MODELS_DEV_CATALOG_PROVIDER_IDS.filter(providerId => {
 			if (BUILT_IN_MODEL_MANAGER_PROVIDER_IDS[providerId] === true) return false;
 			if (bundledProviderIds[providerId] !== true) return false;
 			if (disabledProviders.has(providerId) || configuredDiscoveryProviders.has(providerId)) return false;
-			if (providerFilter && !providerFilter.has(providerId)) return false;
-			return !this.#runtimeModelManagers.has(providerId);
+			return !providerFilter || providerFilter.has(providerId);
 		}).map(providerId => ({ providerId, configIdentity: this.#providerConfigIdentity(providerId) }));
 		const isUnchanged = (providerId: string, epoch: number) => this.#configEpoch(providerId) === epoch;
 		const standardProviderKeys = await Promise.all(
@@ -3212,9 +3219,11 @@ export class ModelRegistry {
 
 		// Catalog-only providers have no endpoint manager. Give their bundled
 		// slices the same shared remote layer without requiring credentials. The
-		// selection happened before the awaits, with its identity; this loop only
-		// builds what was selected.
-		for (const { providerId, configIdentity } of catalogOnlyAtStart) {
+		// candidates and their identities were settled before the awaits; the one
+		// live term is read here, so a manager unregistered while a credential
+		// resolved makes its provider eligible on this pass, as it always did.
+		for (const { providerId, configIdentity } of catalogOnlyCandidates) {
+			if (this.#runtimeModelManagers.has(providerId)) continue;
 			const modelsDev = modelsDevCatalogFallback(providerId, this.#fetch);
 			if (!modelsDev) continue;
 			options.push({
