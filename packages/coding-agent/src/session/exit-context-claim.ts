@@ -18,10 +18,13 @@
  * - A pass finds copies by listing the directory, not by a note in shared
  *   memory. A copy whose maker died before it could record anything is still
  *   found, as is one left by an earlier process that had this pid.
- * - Words are merged by the mtime the sender's write left on the file, so no
- *   reader has to decide whether another is dead, nothing is taken over, and
- *   the word the process ends with does not depend on how threads were
- *   scheduled.
+ * - Words are merged by the modification time the sender's write left on the
+ *   file, so no reader has to decide whether another is dead, nothing is taken
+ *   over, and the word the process ends with does not depend on how threads
+ *   were scheduled. That time is the sender's write to its staged file, not
+ *   its rename of that file into place, so two senders for one pid whose
+ *   writes overlap are ranked by which wrote last and not by which published
+ *   last (`ExitContextWord`).
  *
  * Nothing here waits for another thread. The board is lock-free
  * (`./exit-context-protocol`), so its two steps — a load of its head and a
@@ -43,7 +46,7 @@ import {
 	type ExitContextWord,
 } from "./exit-context-protocol";
 
-/** What a reader learns from a file it reads: its first bytes and when its sender wrote it. */
+/** What a reader learns from a file it reads: its first bytes and the modification time its sender's write left on it. */
 export interface ExitContextFile {
 	text: string;
 	mtimeMs: number;
@@ -103,7 +106,13 @@ export function claimedCopyPath(intentDir: string, pid: number): string {
 	return path.join(intentDir, `${claimedCopyPrefix(pid)}${crypto.randomUUID()}`);
 }
 
-/** The word in `file`, or `undefined` when it is blank or was left for an earlier process with this pid. */
+/**
+ * The word in `file`, or `undefined` when it is blank or was left for an
+ * earlier process with this pid. The test is the sender's write time, so a
+ * word whose bytes were written before this process started and renamed into
+ * place after is dropped too — a sender can only do that by addressing a pid
+ * that did not yet exist when it began writing.
+ */
 function publishedWord(file: ExitContextFile, processStartMs: number): ExitContextWord | undefined {
 	if (file.mtimeMs < processStartMs) return undefined;
 	const word = file.text.trim().slice(0, EXIT_INTENT_MAX_CHARS);
@@ -198,7 +207,7 @@ export function* claimExitIntent(input: ExitContextClaimInput): ExitContextClaim
 	const standing = newest ? yield* recordWord(intentPath, newest) : known;
 	for (const { copy, word } of read) {
 		// A copy goes only once this pass has seen its word on the board, seen a
-		// word published no earlier there, or found it was never this process's.
+		// word written no earlier there, or found it was never this process's.
 		if (word && !(standing && standing.mtimeMs >= word.mtimeMs)) continue;
 		yield* removeClaimedCopy(copy);
 	}

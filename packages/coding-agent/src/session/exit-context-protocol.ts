@@ -41,10 +41,20 @@ export interface ExitContextIoResult {
 }
 
 /**
- * A word taken from an intent file, dated with that file's mtime: the moment
- * the sender published it. Readers merge words by that date and never by the
- * order in which they happen to run, so what the process records does not
- * depend on how its threads were scheduled.
+ * A word taken from an intent file, dated with that file's modification time:
+ * the moment the sender's write landed on the staged file it later renamed
+ * into place, which is **not** the moment of that rename. A sender writes,
+ * fsyncs, closes and chmods the staged file before it renames it over
+ * `<intentDir>/<pid>`, and only the write sets the time.
+ *
+ * Readers merge words by that date and never by the order in which they happen
+ * to run, so what the process records does not depend on how its threads were
+ * scheduled. Two senders for one pid whose writes overlap are therefore ranked
+ * by which wrote last, which can be the opposite of which renamed last; the
+ * loser is removed once the winner is recorded, as any superseded word is. A
+ * reader has nothing better to rank by: the filesystem keeps no rename order,
+ * and the status-change time that a rename does set is reset by the reader's
+ * own rename of the file it takes.
  */
 export interface ExitContextWord {
 	word: string;
@@ -83,7 +93,7 @@ export type ExitContextPublishResult = "published" | "lost" | "full";
  *  16   records, each 8-byte aligned:
  *         +0   Int32   offset of the record published before it, 0 at the end
  *         +4   Int32   length of the intent path in UTF-8 bytes
- *         +8   Float64 the mtime its sender's write left on the intent file
+ *         +8   Float64 the modification time the sender's write left on its staged file
  *         +16  Int32   length of the word in UTF-8 bytes
  *         +20  the path's bytes, then the word's
  * ```

@@ -55,7 +55,15 @@ class World {
 	violations: string[] = [];
 	#clock = PROCESS_START_MS;
 
-	/** A sender's `omp session exit-intent`: one atomic replacement of the intent file. */
+	/**
+	 * A sender's `omp session exit-intent`: one atomic replacement of the intent
+	 * file, stamped with a clock that only moves forward. A real sender's write
+	 * to its staged file and its rename of that file into place are separate, so
+	 * two senders whose writes overlap can land in the directory in the opposite
+	 * order to their stamps. This model runs the two as one step and so does not
+	 * cover that interleaving; what it does cover is every reader interleaving
+	 * against whatever order the stamps end up in.
+	 */
 	publish(word: string): void {
 		const mtimeMs = ++this.#clock;
 		this.files.set(INTENT_PATH, { text: `${word}\n`, mtimeMs });
