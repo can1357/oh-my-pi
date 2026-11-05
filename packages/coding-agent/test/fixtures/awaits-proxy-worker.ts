@@ -21,6 +21,7 @@ import type { ThreadService } from "../../src/thread/services";
 import { agentsThreadService } from "../../src/thread/services/agents";
 import { identityThreadService } from "../../src/thread/services/identity";
 import type { ToolSession } from "../../src/tools";
+import { WorkPool } from "../../src/task/workpool";
 import { WaitTool } from "../../src/tools/wait";
 
 /** Operations the test drives on the worker. */
@@ -40,6 +41,18 @@ export interface AwaitsProxyProbe {
 	 * runs its owned-service refresh against that project's broker token.
 	 */
 	childIdleTextWithBroker(cwd: string, timeoutSeconds: number): Promise<string>;
+	/**
+	 * Run one real `WorkPool` batch on this worker and report how it ended. The
+	 * pool is worker-local while its aggregate and batch jobs reach main, so the
+	 * dependency its turn takes is a registry call over the link.
+	 */
+	workpoolTurn(): Promise<{
+		batchStatus: string | undefined;
+		batchError: string | undefined;
+		aggregateStatus: string | undefined;
+		itemsRunning: number;
+		itemsFailed: number;
+	}>;
 	/** Finish the job and drop everything this probe holds. */
 	close(): Promise<void>;
 }
@@ -96,11 +109,81 @@ const probe: AwaitsProxyProbe = {
 	childIdleText: async (timeoutSeconds = 1) => idleText(childSession(), timeoutSeconds),
 	childIdleTextWithBroker: async (cwd, timeoutSeconds) =>
 		idleText(childSession({ cwd, launch: true }), timeoutSeconds),
+	workpoolTurn: async () => {
+		const agent = {
+			name: "scout",
+			description: "Work pool probe",
+			systemPrompt: "unused",
+			source: "bundled",
+		};
+		const session = {
+			cwd: process.cwd(),
+			hasUI: false,
+			settings: Settings.isolated({
+				"task.maxConcurrency": 1,
+				"task.maxRuntimeMs": 0,
+				"launch.enabled": false,
+			}),
+			asyncJobManager: manager,
+			agentRegistry: AgentRegistry.global(),
+			getAgentId: () => "Main",
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			getArtifactsDir: () => null,
+		} as unknown as ToolSession;
+		const pool = new WorkPool(session, {
+			name: "hold-rejected",
+			policy: {
+				discovery: { agents: [agent], projectAgentsDir: null },
+				agentName: agent.name,
+				agent,
+				effectiveAgent: agent,
+				structured: true,
+				schema: { source: "none", mode: "permissive", outputSchemaOverridesAgent: false },
+				planMode: false,
+				isIsolated: false,
+				mergeMode: "patch",
+				applyChanges: true,
+				enableLsp: false,
+				enableIrc: true,
+			} as never,
+		});
+		pool.push(["one batch whose dependency fails"]);
+		const deadline = Date.now() + 10_000;
+		while (!pool.batches[0] || manager.getJob(pool.batches[0].jobId)?.status === "running") {
+			if (Date.now() > deadline) throw new Error("batch never reached a terminal job state");
+			await Bun.sleep(10);
+		}
+		const batchJob = manager.getJob(pool.batches[0].jobId);
+		// The aggregate settles from the batch's own settlement, one tick later.
+		await Bun.sleep(100);
+		const status = pool.status();
+		const result = {
+			batchStatus: batchJob?.status,
+			batchError: batchJob?.errorText,
+			aggregateStatus: manager.getJob(pool.name)?.status,
+			itemsRunning: status.items.running,
+			itemsFailed: status.items.failed,
+		};
+		pool.close();
+		manager.cancel(pool.name, { ownerId: "Main" });
+		return result;
+	},
 	close: async () => {
-		await closeDaemonClients();
-		unsubscribe?.();
-		childRun.resolve("done");
-		await manager.dispose({ timeoutMs: 1_000 });
+		// Each release runs even when an earlier one fails: a broker client that
+		// refuses to close must not leave this worker's registry subscription
+		// attached or its job manager undisposed, which would keep main's awaits
+		// table holding for a probe that is gone.
+		try {
+			await closeDaemonClients();
+		} finally {
+			try {
+				unsubscribe?.();
+			} finally {
+				childRun.resolve("done");
+				await manager.dispose({ timeoutMs: 1_000 });
+			}
+		}
 	},
 };
 
@@ -154,11 +237,21 @@ port.on("message", (message: unknown) => {
 				sync: { port: message.replyPort, counter: new Int32Array(message.counter) },
 			},
 		);
-		for (const service of services) service.installWorker?.(link);
-		link.handle("boot", async globals => {
-			for (const service of services) await service.boot?.(globals[service.name], link);
-		});
-		link.handle("ping", nonce => nonce);
+		// An install or handler registration that throws would otherwise leave the
+		// link and its frame handler in place and never post the ready message, so
+		// main would sit on this worker until its init timeout instead of seeing
+		// the failure.
+		try {
+			for (const service of services) service.installWorker?.(link);
+			link.handle("boot", async globals => {
+				for (const service of services) await service.boot?.(globals[service.name], link);
+			});
+			link.handle("ping", nonce => nonce);
+		} catch (error) {
+			frameHandler = undefined;
+			link.close(String(error));
+			throw error;
+		}
 		const ready: SubagentWorkerReady = {
 			type: "subagent-worker-ready",
 			changedModules: loadedModulesChangedSince(message.mainStartedAt),

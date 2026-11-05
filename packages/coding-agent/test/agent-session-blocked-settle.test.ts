@@ -26,6 +26,7 @@ describe("AgentSession.settleAsyncWork and idle waits of the agents it waits on"
 
 	afterEach(async () => {
 		vi.useRealTimers();
+		vi.restoreAllMocks();
 		for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 		AsyncJobManager.resetForTests();
 		AgentRegistry.resetGlobalForTests();
@@ -34,6 +35,7 @@ describe("AgentSession.settleAsyncWork and idle waits of the agents it waits on"
 
 	async function lead(): Promise<{ session: AgentSession; manager: AsyncJobManager }> {
 		const authStorage = await AuthStorage.create(":memory:");
+		cleanups.push(() => authStorage.close());
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
 		const agent = new Agent({
@@ -43,6 +45,9 @@ describe("AgentSession.settleAsyncWork and idle waits of the agents it waits on"
 			streamFn: mock.stream,
 		});
 		const manager = new AsyncJobManager({});
+		cleanups.push(async () => {
+			await manager.dispose({ timeoutMs: 100 });
+		});
 		const session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -51,7 +56,6 @@ describe("AgentSession.settleAsyncWork and idle waits of the agents it waits on"
 			agentId: "Lead",
 			asyncJobManager: manager,
 		});
-		cleanups.push(() => authStorage.close());
 		cleanups.push(() => session.dispose());
 		AgentRegistry.global().register({ id: "Lead", displayName: "Lead", kind: "sub", session, status: "idle" });
 		AgentRegistry.global().register({

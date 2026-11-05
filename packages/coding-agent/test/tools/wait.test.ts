@@ -64,12 +64,22 @@ async function stillPending(promise: Promise<unknown>): Promise<boolean> {
 }
 
 describe("wait", () => {
+	const managers = new Set<AsyncJobManager>();
+	const controllers = new Set<AbortController>();
+	const waits = new Set<Promise<unknown>>();
+
 	beforeEach(() => {
 		AgentRegistry.resetGlobalForTests();
 		IrcBus.resetGlobalForTests();
 	});
-	afterEach(() => {
+	afterEach(async () => {
 		vi.useRealTimers();
+		for (const controller of controllers) controller.abort(TOOL_INTERRUPT_ABORT_REASON);
+		controllers.clear();
+		await Promise.allSettled(waits);
+		waits.clear();
+		for (const manager of managers) await manager.dispose({ timeoutMs: 1000 });
+		managers.clear();
 		vi.restoreAllMocks();
 		AgentRegistry.resetGlobalForTests();
 		IrcBus.resetGlobalForTests();
@@ -77,6 +87,7 @@ describe("wait", () => {
 
 	test("a settling job is recovered once, suppressing its async duplicate", async () => {
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		managers.add(manager);
 		const { promise, resolve } = Promise.withResolvers<string>();
 		const id = manager.register("bash", "build", async () => promise, { ownerId: "Main" });
 		const waiting = new WaitTool(session(manager)).execute("wait-1", {});
@@ -91,6 +102,7 @@ describe("wait", () => {
 	test("jobs finishing moments apart are reported by one wait", async () => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		managers.add(manager);
 		const a = Promise.withResolvers<string>();
 		const b = Promise.withResolvers<string>();
 		const first = manager.register("bash", "a", async () => a.promise, { ownerId: "Main" });
@@ -107,6 +119,7 @@ describe("wait", () => {
 	test("a job still running past the settle window does not hold the settled one back", async () => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		managers.add(manager);
 		const slow = Promise.withResolvers<string>();
 		const done = manager.register("bash", "a", async () => "a done", { ownerId: "Main" });
 		const running = manager.register("bash", "b", async () => slow.promise, { ownerId: "Main" });
@@ -128,6 +141,7 @@ describe("wait", () => {
 	test("a single job adds no settle delay", async () => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		managers.add(manager);
 		const id = manager.register("bash", "a", async () => "a done", { ownerId: "Main" });
 		const result = await new WaitTool(session(manager)).execute("wait-1", {});
 		expect(result.details?.jobs?.[0]).toMatchObject({ id, status: "completed" });
@@ -136,6 +150,7 @@ describe("wait", () => {
 	test("back-to-back idle waits climb the ladder and, from the 10s rung on, send the agent back to work", async () => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		managers.add(manager);
 		const build = Promise.withResolvers<string>();
 		const id = manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
 		const tool = new WaitTool(session(manager));
@@ -154,6 +169,7 @@ describe("wait", () => {
 	test("news or a minute away from wait restarts the ladder at the floor", async () => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		managers.add(manager);
 		const build = Promise.withResolvers<string>();
 		manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
 		const tool = new WaitTool(session(manager));
@@ -187,6 +203,7 @@ describe("wait", () => {
 		});
 		// Subagents share the process job manager with their owner.
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		managers.add(manager);
 		const childRun = Promise.withResolvers<string>();
 		manager.register("task", "Child", async () => childRun.promise, {
 			id: "Child",
@@ -201,6 +218,7 @@ describe("wait", () => {
 
 	test("an interrupted wait leaves later job completion auto-deliverable", async () => {
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		managers.add(manager);
 		const delivered: string[] = [];
 		manager.registerDeliverySink("Main", (_id, text) => {
 			delivered.push(text);
@@ -219,6 +237,7 @@ describe("wait", () => {
 
 	test("a message interrupt returns a non-error result and leaves the completion auto-deliverable", async () => {
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		managers.add(manager);
 		const delivered: string[] = [];
 		manager.registerDeliverySink("Main", (_id, text) => {
 			delivered.push(text);
@@ -240,6 +259,7 @@ describe("wait", () => {
 
 	test("returns a settled job whose delivery has not reached the transcript yet", async () => {
 		const manager = new AsyncJobManager({});
+		managers.add(manager);
 		// The owner's sink parks the result like a yield-queue receipt awaiting injection.
 		const injected = Promise.withResolvers<void>();
 		const sinkEntered = Promise.withResolvers<string>();
@@ -264,6 +284,7 @@ describe("wait", () => {
 		registry.register({ id: "Main", displayName: "Main", kind: "main", session: null });
 		registry.register({ id: "Peer", displayName: "Peer", kind: "sub", parentId: "Main", session: null });
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		managers.add(manager);
 		const { promise } = Promise.withResolvers<string>();
 		const id = manager.register("bash", "unfinished", async () => promise, { ownerId: "Main" });
 		const waiting = new WaitTool(session(manager)).execute("wait-3", {});
@@ -310,6 +331,7 @@ describe("wait", () => {
 		test("a broadcast and a progress note leave a wait on its own job blocking, and inject after it", async () => {
 			const bridge = streamingMain();
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			managers.add(manager);
 			const build = Promise.withResolvers<string>();
 			const id = manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
 			const waiting = new WaitTool(session(manager)).execute("wait-chatter", {});
@@ -332,6 +354,7 @@ describe("wait", () => {
 		test("a direct message still ends the wait, returning the chatter queued before it, oldest first", async () => {
 			const bridge = streamingMain();
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			managers.add(manager);
 			const id = manager.register("bash", "build", async () => Promise.withResolvers<string>().promise, {
 				ownerId: "Main",
 			});
@@ -353,6 +376,7 @@ describe("wait", () => {
 		test("returns every message queued before the wait in one result, oldest first", async () => {
 			const bridge = streamingMain();
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			managers.add(manager);
 			const id = manager.register("bash", "build", async () => Promise.withResolvers<string>().promise, {
 				ownerId: "Main",
 			});
@@ -374,6 +398,7 @@ describe("wait", () => {
 		test("does not return early for chatter alone queued before the wait", async () => {
 			const bridge = streamingMain();
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			managers.add(manager);
 			const build = Promise.withResolvers<string>();
 			manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
 			await IrcBus.global().send({ from: "Peer", to: "Main", body: "editing auth.ts", broadcast: true });
@@ -394,6 +419,7 @@ describe("wait", () => {
 		} as unknown as DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(hungBroker);
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		managers.add(manager);
 		const { promise, resolve } = Promise.withResolvers<string>();
 		const id = manager.register("bash", "build", async () => promise, { ownerId: "Main" });
 		const waiting = new WaitTool(session(manager, "Main", true)).execute("wait-hung-broker", {});
@@ -416,6 +442,7 @@ describe("wait", () => {
 
 		test("returns a settled job whose notice is still queued", async () => {
 			const manager = new AsyncJobManager({});
+			managers.add(manager);
 			const injected = Promise.withResolvers<void>();
 			const sinkEntered = Promise.withResolvers<void>();
 			manager.registerDeliverySink("Main", async () => {
@@ -455,6 +482,7 @@ describe("wait", () => {
 			} as unknown as DaemonBrokerClient;
 			vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(broker);
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			managers.add(manager);
 			const id = manager.register("bash", "unfinished", async () => Promise.withResolvers<string>().promise, {
 				ownerId: "Main",
 			});
@@ -469,6 +497,7 @@ describe("wait", () => {
 
 		test("ends as an interrupted wait, as after the refresh, when only running jobs remain", async () => {
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			managers.add(manager);
 			const id = manager.register("bash", "still running", async () => Promise.withResolvers<string>().promise, {
 				ownerId: "Main",
 			});
@@ -488,7 +517,9 @@ describe("wait", () => {
 		test("reports nothing to wait for, as after the refresh, when the caller has no work", async () => {
 			const controller = new AbortController();
 			controller.abort(TOOL_INTERRUPT_ABORT_REASON);
-			const result = await new WaitTool(session(new AsyncJobManager({}), "Main", true)).execute(
+			const manager = new AsyncJobManager({});
+			managers.add(manager);
+			const result = await new WaitTool(session(manager, "Main", true)).execute(
 				"interrupted-refresh-idle",
 				{},
 				controller.signal,
@@ -552,8 +583,10 @@ describe("wait", () => {
 		}
 
 		const ask = () => IrcBus.global().send({ from: "Child", to: "Main", body: "which codeword?" });
-		const childWait = (manager = new AsyncJobManager({})) =>
-			new WaitTool(session(manager, "Child")).execute("child-wait", {});
+		const childWait = (manager = new AsyncJobManager({})) => {
+			managers.add(manager);
+			return new WaitTool(session(manager, "Child")).execute("child-wait", {});
+		};
 		/** Text of a wait that returned at once instead of blocking; never an error. */
 		const idleText = async (
 			waiting: Promise<{ isError?: boolean; content: Array<{ type: string; text?: string }> }>,
@@ -592,6 +625,7 @@ describe("wait", () => {
 		test("ends once the agent asked starts waiting on the caller's result instead of answering", async () => {
 			registerParentAndChild();
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			managers.add(manager);
 			const childRun = registerChildJob(manager);
 			await ask();
 			const waiting = childWait(manager);
@@ -608,6 +642,7 @@ describe("wait", () => {
 		test("keeps waiting while the agent asked waits on the caller or other work, whichever ends first", async () => {
 			registerParentAndChild();
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			managers.add(manager);
 			const childRun = registerChildJob(manager);
 			const build = Promise.withResolvers<string>();
 			manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
@@ -698,18 +733,24 @@ describe("wait", () => {
 		test("returns at once while the agent asked waits on the caller's eval handle with no timeout", async () => {
 			registerParentAndChild();
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			managers.add(manager);
 			const childRun = registerChildJob(manager);
 			const parentSession = { asyncJobManager: manager, getAgentId: () => "Main" } as unknown as ToolSession;
 			const handleWait = runEvalWait({ items: [{ kind: "agent", id: "Child" }] }, { session: parentSession });
-			await ask();
-			expect(await idleText(childWait(manager))).toContain("`Main` cannot reply before you finish");
-			childRun.resolve("done");
-			await handleWait;
+			void handleWait.catch(() => {});
+			try {
+				await ask();
+				expect(await idleText(childWait(manager))).toContain("`Main` cannot reply before you finish");
+			} finally {
+				childRun.resolve("done");
+				await handleWait;
+			}
 		});
 
 		test("a handle that settled before an untimed eval wait began holds nothing while a sibling job runs", async () => {
 			registerParentAndChild();
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			managers.add(manager);
 			const childRun = registerChildJob(manager);
 			const otherRun = Promise.withResolvers<string>();
 			manager.register("bash", "other", async () => otherRun.promise, { id: "other", ownerId: "Main" });
@@ -725,18 +766,23 @@ describe("wait", () => {
 				},
 				{ session: parentSession },
 			);
-			await ask();
-			const waiting = childWait(manager);
-			expect(await stillPending(waiting)).toBe(true);
-			await IrcBus.global().send({ from: "Main", to: "Child", body: "heliotrope" });
-			expect((await waiting).details?.waited).toMatchObject([{ from: "Main", body: "heliotrope" }]);
-			otherRun.resolve("done");
-			await handleWait;
+			void handleWait.catch(() => {});
+			try {
+				await ask();
+				const waiting = childWait(manager);
+				expect(await stillPending(waiting)).toBe(true);
+				await IrcBus.global().send({ from: "Main", to: "Child", body: "heliotrope" });
+				expect((await waiting).details?.waited).toMatchObject([{ from: "Main", body: "heliotrope" }]);
+			} finally {
+				otherRun.resolve("done");
+				await handleWait;
+			}
 		});
 
 		test("a handle settling during an untimed eval wait releases its block before the sibling job ends", async () => {
 			registerParentAndChild();
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			managers.add(manager);
 			const childRun = registerChildJob(manager);
 			const otherRun = Promise.withResolvers<string>();
 			manager.register("bash", "other", async () => otherRun.promise, { id: "other", ownerId: "Main" });
@@ -750,34 +796,44 @@ describe("wait", () => {
 				},
 				{ session: parentSession },
 			);
-			await ask();
-			// While the child's own job still runs, the parent does owe on it.
-			expect(await idleText(childWait(manager))).toContain("`Main` cannot reply before you finish");
-			childRun.resolve("done");
-			await manager.getJob("Child")?.promise;
-			const waiting = childWait(manager);
-			expect(await stillPending(waiting)).toBe(true);
-			await IrcBus.global().send({ from: "Main", to: "Child", body: "heliotrope" });
-			expect((await waiting).details?.waited).toMatchObject([{ from: "Main", body: "heliotrope" }]);
-			otherRun.resolve("done");
-			await handleWait;
+			void handleWait.catch(() => {});
+			try {
+				await ask();
+				// While the child's own job still runs, the parent does owe on it.
+				expect(await idleText(childWait(manager))).toContain("`Main` cannot reply before you finish");
+				childRun.resolve("done");
+				await manager.getJob("Child")?.promise;
+				const waiting = childWait(manager);
+				expect(await stillPending(waiting)).toBe(true);
+				await IrcBus.global().send({ from: "Main", to: "Child", body: "heliotrope" });
+				expect((await waiting).details?.waited).toMatchObject([{ from: "Main", body: "heliotrope" }]);
+			} finally {
+				childRun.resolve("done");
+				otherRun.resolve("done");
+				await handleWait;
+			}
 		});
 
 		test("keeps waiting while the agent asked runs a timed eval handle wait on the caller", async () => {
 			registerParentAndChild();
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			managers.add(manager);
 			const childRun = registerChildJob(manager);
 			const parentSession = { asyncJobManager: manager, getAgentId: () => "Main" } as unknown as ToolSession;
 			const handleWait = runEvalWait(
 				{ items: [{ kind: "agent", id: "Child" }], timeoutMs: 60_000 },
 				{ session: parentSession },
 			);
-			await ask();
-			const waiting = childWait(manager);
-			await IrcBus.global().send({ from: "Main", to: "Child", body: "heliotrope" });
-			expect((await waiting).details?.waited).toMatchObject([{ from: "Main", body: "heliotrope" }]);
-			childRun.resolve("done");
-			await handleWait;
+			void handleWait.catch(() => {});
+			try {
+				await ask();
+				const waiting = childWait(manager);
+				await IrcBus.global().send({ from: "Main", to: "Child", body: "heliotrope" });
+				expect((await waiting).details?.waited).toMatchObject([{ from: "Main", body: "heliotrope" }]);
+			} finally {
+				childRun.resolve("done");
+				await handleWait;
+			}
 		});
 
 		test("a progress note from the agent asked keeps the wait blocking for its answer", async () => {
@@ -827,7 +883,9 @@ describe("wait", () => {
 			registerParentAndChild();
 			await ask();
 			vi.useFakeTimers();
-			const tool = new WaitTool(session(new AsyncJobManager({}), "Child"));
+			const manager = new AsyncJobManager({});
+			managers.add(manager);
+			const tool = new WaitTool(session(manager, "Child"));
 			expect(await idleText(elapse(tool, 5_000))).toContain("No reply within 5.0s");
 			expect(notice(await elapse(tool, 10_000))).toContain("15.0s");
 		});
@@ -869,7 +927,11 @@ describe("wait", () => {
 
 		test("idles until a direct message arrives and returns it", async () => {
 			registerMain();
-			const waiting = new WaitTool(session()).execute("idle-message", { timeout: 600 });
+			const controller = new AbortController();
+			controllers.add(controller);
+			const waiting = new WaitTool(session()).execute("idle-message", { timeout: 600 }, controller.signal);
+			void waiting.catch(() => {});
+			waits.add(waiting);
 			await Promise.resolve();
 			await IrcBus.global().send({ from: "Peer", to: "Main", body: "the schema changed" });
 			const result = await waiting;
@@ -878,7 +940,11 @@ describe("wait", () => {
 
 		test("keeps idling through a broadcast, which injects as an aside", async () => {
 			registerMain();
-			const waiting = new WaitTool(session()).execute("idle-broadcast", { timeout: 600 });
+			const controller = new AbortController();
+			controllers.add(controller);
+			const waiting = new WaitTool(session()).execute("idle-broadcast", { timeout: 600 }, controller.signal);
+			void waiting.catch(() => {});
+			waits.add(waiting);
 			await Promise.resolve();
 			await IrcBus.global().send({ from: "Peer", to: "Main", body: "editing auth.ts", broadcast: true });
 			await IrcBus.global().send({ from: "Peer", to: "Main", body: "the schema changed" });
@@ -889,7 +955,10 @@ describe("wait", () => {
 		test("ends on a steer or aside interrupt like any wait", async () => {
 			registerMain();
 			const interrupt = new AbortController();
+			controllers.add(interrupt);
 			const waiting = new WaitTool(session()).execute("idle-interrupt", { timeout: 600 }, interrupt.signal);
+			void waiting.catch(() => {});
+			waits.add(waiting);
 			await Promise.resolve();
 			interrupt.abort(TOOL_INTERRUPT_ABORT_REASON);
 			const result = await waiting;
@@ -940,6 +1009,7 @@ describe("wait", () => {
 			test("returns at once while its parent waits on its result", async () => {
 				vi.useFakeTimers();
 				const manager = new AsyncJobManager({ onJobComplete: () => {} });
+				managers.add(manager);
 				const childRun = registerChild(manager);
 				const parentWait = new WaitTool(session(manager, "Main")).execute("parent-wait", {});
 				const childWait = new WaitTool(session(manager, "Child")).execute("child-idle", { timeout: 600 });
@@ -957,6 +1027,7 @@ describe("wait", () => {
 			test("stops idling once its parent starts waiting on its result", async () => {
 				vi.useFakeTimers();
 				const manager = new AsyncJobManager({ onJobComplete: () => {} });
+				managers.add(manager);
 				const childRun = registerChild(manager);
 				const childWait = new WaitTool(session(manager, "Child")).execute("child-idle", { timeout: 600 });
 				await Promise.resolve();
@@ -974,8 +1045,17 @@ describe("wait", () => {
 
 			test("idles until a message while its parent works on without waiting on it", async () => {
 				const manager = new AsyncJobManager({ onJobComplete: () => {} });
+				managers.add(manager);
 				const childRun = registerChild(manager);
-				const childWait = new WaitTool(session(manager, "Child")).execute("child-idle", { timeout: 600 });
+				const controller = new AbortController();
+				controllers.add(controller);
+				const childWait = new WaitTool(session(manager, "Child")).execute(
+					"child-idle",
+					{ timeout: 600 },
+					controller.signal,
+				);
+				void childWait.catch(() => {});
+				waits.add(childWait);
 				await Promise.resolve();
 				await IrcBus.global().send({ from: "Main", to: "Child", body: "the schema changed" });
 				const result = await childWait;
@@ -985,11 +1065,20 @@ describe("wait", () => {
 
 			test("keeps idling while its parent's wait can also end on a bash job", async () => {
 				const manager = new AsyncJobManager({ onJobComplete: () => {} });
+				managers.add(manager);
 				const childRun = registerChild(manager);
 				const build = Promise.withResolvers<string>();
 				manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
 				const parentWait = new WaitTool(session(manager, "Main")).execute("parent-wait", {});
-				const childWait = new WaitTool(session(manager, "Child")).execute("child-idle", { timeout: 600 });
+				const controller = new AbortController();
+				controllers.add(controller);
+				const childWait = new WaitTool(session(manager, "Child")).execute(
+					"child-idle",
+					{ timeout: 600 },
+					controller.signal,
+				);
+				void childWait.catch(() => {});
+				waits.add(childWait);
 				await Promise.resolve();
 				await IrcBus.global().send({ from: "Peer", to: "Child", body: "the schema changed" });
 				const result = await childWait;
@@ -1008,6 +1097,7 @@ describe("wait", () => {
 				vi.useFakeTimers();
 				const delivered: string[] = [];
 				const manager = new AsyncJobManager({ onJobComplete: () => {} });
+				managers.add(manager);
 				manager.registerDeliverySink("Main", jobId => {
 					delivered.push(jobId);
 				});
@@ -1043,6 +1133,7 @@ describe("wait", () => {
 				// must put the message back, or it is in no mailbox, no inbox and
 				// no result.
 				const manager = new AsyncJobManager({ onJobComplete: () => {} });
+				managers.add(manager);
 				const childRun = registerChild(manager);
 				const onUpdate = () => {
 					void IrcBus.global().send({ from: "Child", to: "Main", body: "the schema changed" });
@@ -1083,12 +1174,12 @@ describe("wait", () => {
 
 				test("returns at once while its parent already waits on its result", async () => {
 					const manager = new AsyncJobManager({ onJobComplete: () => {} });
+					managers.add(manager);
 					const childRun = registerChild(manager);
 					const refresh = refreshStarted();
 					const parentWait = new WaitTool(session(manager, "Main")).execute("parent-wait", {});
 					const childWait = new WaitTool(session(manager, "Child", true)).execute("child-idle", { timeout: 3600 });
-					const outcome = await settledOrWaiting(childWait);
-					refresh.release();
+					const outcome = await settledOrWaiting(childWait).finally(() => refresh.release());
 					await childWait;
 					childRun.resolve("done");
 					await parentWait;
@@ -1097,13 +1188,13 @@ describe("wait", () => {
 
 				test("returns once its parent starts waiting on its result during the refresh", async () => {
 					const manager = new AsyncJobManager({ onJobComplete: () => {} });
+					managers.add(manager);
 					const childRun = registerChild(manager);
 					const refresh = refreshStarted();
 					const childWait = new WaitTool(session(manager, "Child", true)).execute("child-idle", { timeout: 3600 });
 					await refresh.started;
 					const parentWait = new WaitTool(session(manager, "Main")).execute("parent-wait", {});
-					const outcome = await settledOrWaiting(childWait);
-					refresh.release();
+					const outcome = await settledOrWaiting(childWait).finally(() => refresh.release());
 					await childWait;
 					childRun.resolve("done");
 					await parentWait;
@@ -1116,6 +1207,7 @@ describe("wait", () => {
 			registerMain();
 			vi.useFakeTimers();
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			managers.add(manager);
 			const job = Promise.withResolvers<string>();
 			manager.register("bash", "build", async () => job.promise, { ownerId: "Main" });
 			let returned = false;
@@ -1135,13 +1227,13 @@ describe("wait", () => {
 			expect(result.details?.jobs?.[0]).toMatchObject({ status: "running" });
 			expect(result.useless).toBe(true);
 			job.resolve("done");
-			await manager.dispose({ timeoutMs: 1000 });
 		});
 
 		test("an elapsed timeout wait counts towards the idle streak and its reminder", async () => {
 			registerMain();
 			vi.useFakeTimers();
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			managers.add(manager);
 			const job = Promise.withResolvers<string>();
 			manager.register("bash", "build", async () => job.promise, { ownerId: "Main" });
 			const tool = new WaitTool(session(manager));
@@ -1155,7 +1247,6 @@ describe("wait", () => {
 			expect(await elapse("first")).not.toContain("<system-notice>");
 			expect(await elapse("second")).toContain("Nothing new after 10.0s of back-to-back waits");
 			job.resolve("done");
-			await manager.dispose({ timeoutMs: 1000 });
 		});
 
 		for (const cooperative of [true, false]) {
@@ -1174,13 +1265,16 @@ describe("wait", () => {
 					}
 					return release.promise;
 				});
-				const started = Date.now();
-				const result = await new WaitTool(session(undefined, "Main", true)).execute("slow-refresh", {
-					timeout: 1,
-				});
-				expect(Date.now() - started).toBeLessThan(10_000);
-				expect(result.content[0]).toMatchObject({ text: expect.stringContaining("Deadline reached") });
-				release.reject(new Error("broker gave up"));
+				try {
+					const started = Date.now();
+					const result = await new WaitTool(session(undefined, "Main", true)).execute("slow-refresh", {
+						timeout: 1,
+					});
+					expect(Date.now() - started).toBeLessThan(10_000);
+					expect(result.content[0]).toMatchObject({ text: expect.stringContaining("Deadline reached") });
+				} finally {
+					release.reject(new Error("broker gave up"));
+				}
 			});
 		}
 
@@ -1192,17 +1286,20 @@ describe("wait", () => {
 			registerMain();
 			const release = Promise.withResolvers<never>();
 			vi.spyOn(servicesModule, "listServicesTolerant").mockImplementation(async () => release.promise);
-			const controller = new AbortController();
-			controller.abort(TOOL_INTERRUPT_ABORT_REASON);
-			const started = Date.now();
-			const result = await new WaitTool(session(undefined, "Main", true)).execute(
-				"preaborted-refresh",
-				{ timeout: 1 },
-				controller.signal,
-			);
-			expect(Date.now() - started).toBeLessThan(10_000);
-			expect(result.content).toEqual([{ type: "text", text: "Wait interrupted by message." }]);
-			release.reject(new Error("broker gave up"));
+			try {
+				const controller = new AbortController();
+				controller.abort(TOOL_INTERRUPT_ABORT_REASON);
+				const started = Date.now();
+				const result = await new WaitTool(session(undefined, "Main", true)).execute(
+					"preaborted-refresh",
+					{ timeout: 1 },
+					controller.signal,
+				);
+				expect(Date.now() - started).toBeLessThan(10_000);
+				expect(result.content).toEqual([{ type: "text", text: "Wait interrupted by message." }]);
+			} finally {
+				release.reject(new Error("broker gave up"));
+			}
 		});
 
 		test("a refresh the deadline abandoned does not subscribe the session once its broker client arrives", async () => {
@@ -1238,12 +1335,15 @@ describe("wait", () => {
 				...session(undefined, "Main", true),
 				registerDisposeCallback: (callback: () => void) => disposeCallbacks.push(callback),
 			} as unknown as ToolSession;
-			const result = await new WaitTool(caller).execute("abandoned-refresh", { timeout: 1 });
-			expect(result.content[0]).toMatchObject({ text: expect.stringContaining("Deadline reached") });
-			// The caller disposes the session; then client creation completes.
-			for (const callback of disposeCallbacks.splice(0)) callback();
-			client.resolve(broker);
-			await abandoned?.catch(() => undefined);
+			try {
+				const result = await new WaitTool(caller).execute("abandoned-refresh", { timeout: 1 });
+				expect(result.content[0]).toMatchObject({ text: expect.stringContaining("Deadline reached") });
+			} finally {
+				// The caller disposes the session; then client creation completes.
+				for (const callback of disposeCallbacks.splice(0)) callback();
+				client.resolve(broker);
+				await abandoned?.catch(() => undefined);
+			}
 			expect(subscribed).toEqual([]);
 			expect(disposeCallbacks).toEqual([]);
 		});

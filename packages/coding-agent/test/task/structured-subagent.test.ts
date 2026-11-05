@@ -606,8 +606,11 @@ describe("structured subagent primitive", () => {
 
 		const inline = await runStructuredSubagent(request({ detached: false, retainArtifacts: true }));
 
-		expect(childWaits).toEqual([expect.stringContaining("Nothing to wait for: `Main` is waiting on your result")]);
-		await fs.rm(inline.artifactsDir, { recursive: true, force: true });
+		try {
+			expect(childWaits).toEqual([expect.stringContaining("Nothing to wait for: `Main` is waiting on your result")]);
+		} finally {
+			await fs.rm(inline.artifactsDir, { recursive: true, force: true });
+		}
 	});
 	it("propagates a custom thinking-suffixed role alias through policy, dispatch, and settlement", async () => {
 		const customAgent = { ...AGENT, model: ["@reviewer:high"] };

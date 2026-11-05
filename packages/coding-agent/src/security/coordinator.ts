@@ -630,7 +630,9 @@ export class SecurityCoordinator {
 			});
 			record.snapshot.sessionFile = session.sessionFile;
 			const abortSession = (): void => {
-				void session?.abort({ reason: "Security scan cancelled" });
+				void Promise.resolve(session?.abort({ reason: "Security scan cancelled" })).catch(error => {
+					logger.warn("Security scan session abort failed", { error: String(error) });
+				});
 			};
 			signal.addEventListener("abort", abortSession, { once: true });
 			try {

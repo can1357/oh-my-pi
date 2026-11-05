@@ -180,19 +180,31 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			pending.removeAbort = () => signal.removeEventListener("abort", abort);
 		}
 		this.#pending.set(id, pending);
-		socket.send(
-			JSON.stringify({
-				id,
-				token: this.#token,
-				owners: [...this.#completionSinks.keys()],
-				detachedOwners: [...this.#preservedCompletionOwners],
-				completionEvents: true,
-				completionUnsubscribes,
-				completionReplays,
-				completionSubscriptionId: this.#completionSubscriptionId,
-				operation,
-			}),
-		);
+		try {
+			socket.send(
+				JSON.stringify({
+					id,
+					token: this.#token,
+					owners: [...this.#completionSinks.keys()],
+					detachedOwners: [...this.#preservedCompletionOwners],
+					completionEvents: true,
+					completionUnsubscribes,
+					completionReplays,
+					completionSubscriptionId: this.#completionSubscriptionId,
+					operation,
+				}),
+			);
+		} catch (error) {
+			// The socket died between the check above and the write, so no answer
+			// can arrive: unwind the request here instead of leaving its timer
+			// armed and its listener on the caller's signal until the operation's
+			// own timeout reaps an entry nobody awaits.
+			if (this.#pending.delete(id)) {
+				clearTimeout(timer);
+				pending.removeAbort?.();
+			}
+			throw error;
+		}
 		const result = await promise;
 		for (const owner of completionUnsubscribes) {
 			if (!this.#completionSinks.has(owner)) this.#completionUnsubscribes.delete(owner);

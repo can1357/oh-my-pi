@@ -169,34 +169,38 @@ async function waitForSettlement(
 	).then((): "settled" => "settled");
 	const races: Array<Promise<"settled" | "timeout" | "aborted">> = [waiting];
 	let timeout: NodeJS.Timeout | undefined;
-	if (timeoutMs !== undefined) {
-		const deferred = Promise.withResolvers<"timeout">();
-		// setTimeout overflows past 2^31-1 ms (fires in ~1ms with a
-		// TimeoutOverflowWarning): re-arm in max-size chunks (#12375).
-		let remaining = timeoutMs;
-		const arm = (): void => {
-			timeout = setTimeout(
-				() => {
-					remaining -= MAX_TIMER_MS;
-					if (remaining > 0) arm();
-					else deferred.resolve("timeout");
-				},
-				Math.min(Math.max(0, remaining), MAX_TIMER_MS),
-			);
-			timeout.unref?.();
-		};
-		arm();
-		races.push(deferred.promise);
-	}
 	let onAbort: (() => void) | undefined;
-	if (signal) {
-		const deferred = Promise.withResolvers<"aborted">();
-		onAbort = () => deferred.resolve("aborted");
-		if (signal.aborted) onAbort();
-		else signal.addEventListener("abort", onAbort, { once: true });
-		races.push(deferred.promise);
-	}
+	// Both the timer and the listener are taken inside the region that releases
+	// them. A signal whose `aborted` read or `addEventListener` throws (a
+	// proxied one) would otherwise strand an armed timer that re-arms itself
+	// for the rest of `timeoutMs` and then resolves a deferred nobody awaits.
 	try {
+		if (timeoutMs !== undefined) {
+			const deferred = Promise.withResolvers<"timeout">();
+			// setTimeout overflows past 2^31-1 ms (fires in ~1ms with a
+			// TimeoutOverflowWarning): re-arm in max-size chunks (#12375).
+			let remaining = timeoutMs;
+			const arm = (): void => {
+				timeout = setTimeout(
+					() => {
+						remaining -= MAX_TIMER_MS;
+						if (remaining > 0) arm();
+						else deferred.resolve("timeout");
+					},
+					Math.min(Math.max(0, remaining), MAX_TIMER_MS),
+				);
+				timeout.unref?.();
+			};
+			arm();
+			races.push(deferred.promise);
+		}
+		if (signal) {
+			const deferred = Promise.withResolvers<"aborted">();
+			onAbort = () => deferred.resolve("aborted");
+			if (signal.aborted) onAbort();
+			else signal.addEventListener("abort", onAbort, { once: true });
+			races.push(deferred.promise);
+		}
 		return await Promise.race(races);
 	} finally {
 		clearTimeout(timeout);

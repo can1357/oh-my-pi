@@ -33,6 +33,9 @@ beforeEach(() => {
 
 afterEach(async () => {
 	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+	// Hook-registered, so a test that fails before its own restore still leaves
+	// the shared registry unspied for the next file.
+	vi.restoreAllMocks();
 	AgentLifecycleManager.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
 	IrcBus.resetGlobalForTests();
@@ -139,6 +142,9 @@ it("refuses within a tick when the forwarded awaits subscription was dropped", a
 	cleanups.push(() => probe.close());
 
 	const parked = probe.childIdleText(30);
+	// Registered the moment it starts: a failure before the `await` below would
+	// otherwise let the worker's termination reject an RPC nobody observes.
+	cleanups.push(() => parked.catch(() => undefined));
 	await waitFor(() => forwarded.length > 0);
 	// An RPC round trip to the worker: the reply can only be served after the
 	// idle block's own setup ran, so its first `waitersOn` read is already
@@ -160,6 +166,46 @@ it("refuses within a tick when the forwarded awaits subscription was dropped", a
 	// deadline: before the tick existed this returned at 30 s.
 	expect(Date.now() - started).toBeLessThan(5_000);
 }, 120_000);
+/**
+ * A project directory whose broker token is a FIFO with no writer, so the
+ * owned-service refresh of a wait started against it blocks in its token read.
+ * Each piece registers its release as it is made: a worker that fails to start
+ * afterwards must not strand the FIFO, on which the next run's `mkfifo` would
+ * fail with `EEXIST`.
+ *
+ * `releaseToken` is idempotent and is also returned, because the order matters:
+ * closing the probe awaits the broker client this read is blocking, so a caller
+ * that closes a probe must release the token first.
+ */
+async function brokerProjectWithHungToken(): Promise<{ cwd: string; releaseToken: () => Promise<void> }> {
+	const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "awaits-broker-"));
+	cleanups.push(() => fs.rm(cwd, { recursive: true, force: true }));
+	const runtimeDir = getDaemonRuntimeDir(await canonicalProjectDir(cwd));
+	await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
+	// Keyed by project hash under the daemon runtime root, not under `cwd`, so
+	// removing `cwd` would leave it behind.
+	cleanups.push(() => fs.rm(runtimeDir, { recursive: true, force: true }));
+	const token = path.join(runtimeDir, "broker.token");
+	expect(Bun.spawnSync(["mkfifo", token]).exitCode).toBe(0);
+	// The non-blocking open fails outright once the read is gone, and otherwise
+	// hands the abandoned reader its bytes, so nothing is left blocked on a FIFO
+	// about to be removed.
+	const releaseToken = async (): Promise<void> => {
+		try {
+			const handle = await fs.open(token, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
+			try {
+				await handle.writeFile("0".repeat(32), "utf8");
+			} finally {
+				await handle.close();
+			}
+		} catch {
+			// No reader left: nothing to release.
+		}
+		await fs.rm(token, { force: true });
+	};
+	cleanups.push(releaseToken);
+	return { cwd, releaseToken };
+}
 
 it("refuses within a tick when the block starts while the broker refresh hangs", async () => {
 	// The same lost notification, but landing while the wait's owned-service
@@ -167,12 +213,7 @@ it("refuses within a tick when the block starts while the broker refresh hangs",
 	// no writer, so the refresh cannot finish on its own. The re-read has to
 	// cover that race too, or the call leaves `Main` blocked for its whole
 	// deadline.
-	const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "awaits-broker-"));
-	cleanups.push(() => fs.rm(cwd, { recursive: true, force: true }));
-	const runtimeDir = getDaemonRuntimeDir(await canonicalProjectDir(cwd));
-	await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
-	const token = path.join(runtimeDir, "broker.token");
-	expect(Bun.spawnSync(["mkfifo", token]).exitCode).toBe(0);
+	const { cwd, releaseToken } = await brokerProjectWithHungToken();
 
 	const registry = AgentRegistry.global();
 	for (const id of ["Main", "Child"] as const) {
@@ -193,20 +234,11 @@ it("refuses within a tick when the block starts while the broker refresh hangs",
 		return detach;
 	});
 	const probe = await startWorker();
-	cleanups.push(() => probe.close());
-	// Release the token read before the probe is closed, however this test
-	// ends: the non-blocking open fails outright if the read is already gone,
-	// and otherwise hands the abandoned reader its bytes so nothing in the
-	// worker is left blocked on a FIFO that is about to be removed.
 	cleanups.push(async () => {
-		try {
-			const handle = await fs.open(token, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
-			await handle.writeFile("0".repeat(32), "utf8");
-			await handle.close();
-		} catch {
-			// No reader left: nothing to release.
-		}
-		await fs.rm(token, { force: true });
+		// Before the probe closes: closing it awaits the broker client whose
+		// token read this FIFO is blocking.
+		await releaseToken();
+		await probe.close();
 	});
 
 	let settled = false;
@@ -214,6 +246,7 @@ it("refuses within a tick when the block starts while the broker refresh hangs",
 		settled = true;
 		return text;
 	});
+	cleanups.push(() => parked.catch(() => undefined));
 	// The refresh subscribes before it races the broker, so a forwarded
 	// subscription proves the token read is already outstanding.
 	await waitFor(() => forwarded.length > 0);
@@ -238,12 +271,7 @@ it("leaves no refresh tick behind when the proxy awaits subscription rejects", a
 	// subscription is an RPC request that main can reject. A rejection must
 	// release the tick with everything else: otherwise an ended call goes on
 	// reading main's awaits table once a second until the worker exits.
-	const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "awaits-setup-"));
-	cleanups.push(() => fs.rm(cwd, { recursive: true, force: true }));
-	const runtimeDir = getDaemonRuntimeDir(await canonicalProjectDir(cwd));
-	await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
-	const token = path.join(runtimeDir, "broker.token");
-	expect(Bun.spawnSync(["mkfifo", token]).exitCode).toBe(0);
+	const { cwd, releaseToken } = await brokerProjectWithHungToken();
 
 	const registry = AgentRegistry.global();
 	for (const id of ["Main", "Child"] as const) {
@@ -257,16 +285,10 @@ it("leaves no refresh tick behind when the proxy awaits subscription rejects", a
 		});
 	}
 	const probe = await startWorker();
-	cleanups.push(() => probe.close());
 	cleanups.push(async () => {
-		try {
-			const handle = await fs.open(token, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
-			await handle.writeFile("0".repeat(32), "utf8");
-			await handle.close();
-		} catch {
-			// No reader left: nothing to release.
-		}
-		await fs.rm(token, { force: true });
+		// Before the probe closes, for the same reason as the test above.
+		await releaseToken();
+		await probe.close();
 	});
 
 	// Count the reads the worker's tick would make, over the real link.
@@ -297,4 +319,38 @@ it("leaves no refresh tick behind when the proxy awaits subscription rejects", a
 	await Bun.sleep(2_400);
 
 	expect(reads).toBe(readsWhenRejected);
+}, 120_000);
+
+it("settles a pool whose turn's dependency acquisition rejects on main", async () => {
+	// A work pool stays on the worker while its aggregate and batch jobs live on
+	// main, so the dependency each turn takes is a registry call over the link.
+	// When main rejects it, the turn must settle like any other failure: before
+	// the acquisition moved inside the recovery region the batch job failed
+	// while the pool item, the batch and the aggregate stayed running, and the
+	// aggregate's drain never ended.
+	const registry = AgentRegistry.global();
+	registry.register({
+		id: "Main",
+		displayName: "Main",
+		kind: "main",
+		session: { isStreaming: true } as never,
+		status: "running",
+	});
+	const probe = await startWorker();
+	cleanups.push(() => probe.close());
+
+	let holds = 0;
+	vi.spyOn(registry.awaits, "hold").mockImplementation(() => {
+		holds++;
+		throw new Error("injected main awaits.hold rejection");
+	});
+
+	const outcome = await probe.workpoolTurn();
+
+	expect(holds).toBe(1);
+	expect(outcome.batchStatus).toBe("failed");
+	expect(outcome.batchError).toContain("injected main awaits.hold rejection");
+	expect(outcome.aggregateStatus).not.toBe("running");
+	expect(outcome.itemsRunning).toBe(0);
+	expect(outcome.itemsFailed).toBe(1);
 }, 120_000);

@@ -317,9 +317,12 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	 * `awaited` reports an agent blocked on the caller of a call that would
 	 * idle, which is read both on a change notification and on a
 	 * {@link WAITERS_RECHECK_INTERVAL_MS} tick, so a lost notification costs
-	 * one tick rather than the broker's whole answer. The abandoned refresh
-	 * checks its aborted signal once each of those steps ends and stops there,
-	 * before it subscribes the session or changes its service tracking.
+	 * one tick rather than the broker's whole answer. However this call ends —
+	 * the answer, a stop, or a setup step throwing — it aborts the refresh on
+	 * its way out. The abandoned refresh checks its aborted signal once each of
+	 * its own steps ends and stops there, before it subscribes the session or
+	 * changes its service tracking, so no answer arriving later can make a
+	 * completion sink of a session the caller has since disposed.
 	 */
 	async #refreshServices(
 		signal: AbortSignal | undefined,
@@ -338,15 +341,21 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		};
 		const stopped = Promise.withResolvers<undefined>();
 		const onStop = () => stopped.resolve(undefined);
-		// Everything the race acquires registers its release here as it is
-		// taken, and the `finally` below runs them however the race ends.
-		// Setting the race up calls out to the caller's registry, and a
-		// worker's is an RPC proxy whose subscription request can reject: that
-		// must not strand the tick, which would go on reading main's awaits
-		// table once a second for a call that already ended.
+		// Everything the race acquires or starts registers its release here as it
+		// is taken, and the `finally` below runs them however the race ends.
+		// Setting the race up calls out to the caller's registry, and a worker's
+		// is an RPC proxy whose subscription request can reject: that must not
+		// strand the tick, which would go on reading main's awaits table once a
+		// second for a call that already ended, nor the refresh itself, whose
+		// client acquisition does not observe the signal — it would subscribe a
+		// session this call's failure has already let the caller dispose.
 		const cleanup: Array<() => void> = [];
 		let failure: { error: unknown } | undefined;
+		// Whether the race stopped on an abort rather than the broker's answer,
+		// read before the cleanup aborts the refresh for good.
+		let abandoned = false;
 		try {
+			cleanup.push(() => awaitedStop.abort());
 			const refresh = listServicesTolerant(this.session, refreshSignal).then(
 				() => undefined,
 				(error: unknown) => ({ error }),
@@ -373,10 +382,11 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			const unsubscribe = registry?.awaits.onChange(checkAwaited);
 			if (unsubscribe) cleanup.push(unsubscribe);
 			failure = await Promise.race([refresh, stopped.promise]);
+			abandoned = refreshSignal.aborted;
 		} finally {
 			releaseAll([...cleanup].reverse());
 		}
-		if (failure && !refreshSignal.aborted) throw failure.error;
+		if (failure && !abandoned) throw failure.error;
 	}
 
 	/**

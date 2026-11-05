@@ -80,6 +80,11 @@ function track(session: ToolSession, daemon: DaemonSnapshot): void {
 function subscribe(session: ToolSession, client: DaemonBrokerClient): void {
 	const owner = serviceOwner(session);
 	if (!owner) return;
+	// Both releases below are optional session hooks. A session offering
+	// neither could never drop this sink, and the client it goes on is shared
+	// by the whole process: it would feed a dead session for as long as omp
+	// runs. Take nothing that nothing can release.
+	if (!session.registerDisposeCallback && !session.registerSessionChangeCallback) return;
 	const clients = serviceState(session).subscribed;
 	if (clients.has(client)) return;
 	clients.add(client);
