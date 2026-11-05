@@ -215,7 +215,11 @@ export function normalizePathForComparison(inputPath: string): string {
  */
 export function relativePathWithinNormalizedRoot(normalizedRoot: string, normalizedCandidate: string): string | null {
 	const relative = path.relative(normalizedRoot, normalizedCandidate);
-	if (relative !== "" && (relative.startsWith("..") || path.isAbsolute(relative))) return null;
+	// Only a `..` COMPONENT leaves the root. Testing the prefix alone also
+	// rejected an ordinary directory whose name merely starts with dots, such as
+	// `..config`, which is inside the root like any other name.
+	const escapes = relative === ".." || relative.startsWith(`..${path.sep}`);
+	if (relative !== "" && (escapes || path.isAbsolute(relative))) return null;
 	return relative;
 }
 

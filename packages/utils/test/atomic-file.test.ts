@@ -427,3 +427,43 @@ describe("a declared root that is itself a symlink", () => {
 		expect(await fs.readFile(target, "utf8")).toBe("new");
 	});
 });
+
+describe("the boundary reads names the way the filesystem does", () => {
+	// `PI_CONFIG_DIR` is a path. Discovery resolves it, so `./custom/config`
+	// names the directory `custom/config`; splitting the raw string gave a `.`
+	// component no real directory has, and the project went unrecognised.
+	test("a configured project directory spelled with `.` or `..` is still recognised", async () => {
+		const previous = process.env.PI_CONFIG_DIR;
+		process.env.PI_CONFIG_DIR = "./custom/config";
+		try {
+			const checkout = path.join(root, "checkout-spelled", "custom", "config");
+			await fs.mkdir(checkout, { recursive: true });
+			const victim = path.join(root, "victim-spelled");
+			const link = path.join(checkout, "installed_plugins.json");
+			await linkTo(victim, link, "untouched");
+
+			await writeConfigFileAtomically(link, "new", 0o644);
+
+			expect(await fs.readFile(victim, "utf8")).toBe("untouched");
+			expect((await fs.lstat(link)).isSymbolicLink()).toBe(false);
+		} finally {
+			if (previous === undefined) delete process.env.PI_CONFIG_DIR;
+			else process.env.PI_CONFIG_DIR = previous;
+		}
+	});
+
+	test("a directory whose name merely starts with dots is inside its root", async () => {
+		// `..ordinary` is a name, not a traversal; containment that tested the
+		// prefix put it outside the root and stopped following links under it.
+		const dir = path.join(root, "..ordinary");
+		await fs.mkdir(dir);
+		const target = path.join(root, "shared.json");
+		const link = path.join(dir, "entry.json");
+		await linkTo(target, link);
+
+		await writeConfigFileAtomically(link, "new", 0o644);
+
+		expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+		expect(await fs.readFile(target, "utf8")).toBe("new");
+	});
+});

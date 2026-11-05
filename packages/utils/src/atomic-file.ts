@@ -47,9 +47,25 @@ function namesADirectory(value: string): boolean {
 	return tail === "" || tail === "." || tail === "..";
 }
 
-/** The configured project config directory names, each split into its components. */
+/**
+ * The project config directory names, each as the components the filesystem
+ * would make of it.
+ *
+ * `PI_CONFIG_DIR` is a path, and discovery treats it as one: `./custom/config`
+ * and `nested/../custom` name the same directories `custom/config` and
+ * `custom`. Splitting the raw string instead produced components no real
+ * directory ever has — `.`, `..`, `nested` — so the name never matched and a
+ * project directory spelled that way was not recognised as one. A backslash is
+ * a separator only where the platform says it is; on POSIX it is part of the
+ * name.
+ */
 function projectConfigDirNames(): string[][] {
-	return [CONFIG_DIR_NAME, getConfigDirName()].map(name => name.split(/[\\/]/).filter(Boolean));
+	return [CONFIG_DIR_NAME, getConfigDirName()].map(name =>
+		path
+			.normalize(name)
+			.split(path.sep)
+			.filter(segment => segment !== "" && segment !== "."),
+	);
 }
 
 function containsSequence(segments: readonly string[], wanted: readonly string[]): boolean {
