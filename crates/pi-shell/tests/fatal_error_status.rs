@@ -582,3 +582,40 @@ async fn round_six_rows() {
 	])
 	.await;
 }
+
+/// Round-7 review rows, each the output and status of Bash 5.2.21 and 5.3.0
+/// for the same `-c` string. bash samples `was_error_trap` before a command
+/// runs, so an ERR trap the command itself installs does not fire for that
+/// command; and a declaration builtin's arithmetic *subscript* error makes
+/// the same assignment jump its value error does.
+#[tokio::test(flavor = "multi_thread")]
+async fn round_seven_rows() {
+	check(&[
+		// `was_error_trap` is sampled before the command.
+		(r##"f(){ trap 'set -e; return 6' ERR; false; }; f; echo OUT:$?"##, "", 6),
+		(r##"f(){ trap 'echo T' ERR; false; }; f; echo OUT:$?"##, "T\nOUT:1\n", 0),
+		(r##"g(){ trap 'echo T:$?' ERR; return 3; }; g; echo OUT:$?"##, "OUT:3\n", 0),
+		(r##"f(){ trap 'echo T' ERR; true; false; }; f; echo OUT:$?"##, "T\nOUT:1\n", 0),
+		(r##"f(){ false; trap 'echo T' ERR; }; f; echo OUT:$?"##, "OUT:0\n", 0),
+		// A trap already set when the call starts fires for the call too.
+		(
+			r##"trap 'echo PRE' ERR; f(){ trap 'echo T' ERR; false; }; f; echo OUT:$?"##,
+			"T\nT\nOUT:1\n",
+			0,
+		),
+		(r##"trap 'echo T' ERR; false; echo OUT:$?"##, "T\nOUT:1\n", 0),
+		// A declaration builtin's arithmetic subscript error is the
+		// assignment jump, which no `eval` or subshell answers.
+		(r##"eval 'declare -i "A[bad!]=3"'; echo BAD:$?"##, "", 1),
+		(r##"eval 'declare "A[bad!]=3"'; echo BAD:$?"##, "", 1),
+		(r##"declare -i "A[bad!]=3"; echo BAD:$?"##, "", 1),
+		(r##"f(){ local -i "A[bad!]=3"; echo IN:$?; }; f; echo BAD:$?"##, "", 1),
+		(
+			r##"trap '( declare -i "A[bad!]=3" ); echo OUT:$?' EXIT; exit 7"##,
+			"OUT:7\n",
+			7,
+		),
+		(r##"declare -a A; A[bad!]=x; echo BAD:$?"##, "", 1),
+	])
+	.await;
+}
