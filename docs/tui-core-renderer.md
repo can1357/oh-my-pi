@@ -24,14 +24,14 @@ each render the provider receives the current `ViewportSize` and returns a
 
 ```ts
 interface HistoryBatch {
-  readonly id: number;
-  readonly rows: readonly string[];
-  readonly kind?: "append" | "replay";
+	readonly id: number;
+	readonly rows: readonly string[];
+	readonly kind?: "append" | "replay";
 }
 
 interface TerminalFramePlan {
-  readonly history?: HistoryBatch;
-  readonly viewport: readonly string[];
+	readonly history?: HistoryBatch;
+	readonly viewport: readonly string[];
 }
 ```
 
@@ -228,7 +228,7 @@ A terminal that sees `"send"` and a ready composer may submit a supplied prompt
 with an `e` message:
 
 ```json
-{"ev":"send","sf":"s:1","id":"k.line/input","text":"First line\nSecond line"}
+{ "ev": "send", "sf": "s:1", "id": "k.line/input", "text": "First line\nSecond line" }
 ```
 
 `sf` must name a live surface and `id` its editable composer node (the

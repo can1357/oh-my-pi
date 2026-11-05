@@ -125,13 +125,6 @@ function selectTargets(tags: readonly string[] | undefined): readonly LeafTarget
 	return targets;
 }
 
-async function resolveLegalPayload(packageDir: string, file: string): Promise<string | undefined> {
-	const local = path.join(packageDir, file);
-	if (await Bun.file(local).exists()) return local;
-	const repository = path.resolve(packageDir, "../..", file);
-	return (await Bun.file(repository).exists()) ? repository : undefined;
-}
-
 export async function generateNpmPackages({
 	packageDir = packageDirDefault,
 	dryRun = false,
@@ -166,8 +159,10 @@ export async function generateNpmPackages({
 			await fs.copyFile(path.join(nativeDir, file), path.join(leafDir, file));
 		}
 		for (const file of NATIVE_LEAF_LEGAL_FILES) {
-			const source = await resolveLegalPayload(packageDir, file);
-			if (!source) throw new Error(`Missing legal payload ${file} for generated native leaf ${target.tag}`);
+			const source = path.join(packageDir, file);
+			if (!(await Bun.file(source).exists())) {
+				throw new Error(`Missing legal payload ${file} for generated native leaf ${target.tag}`);
+			}
 			await fs.copyFile(source, path.join(leafDir, file));
 		}
 		await Bun.write(path.join(leafDir, "package.json"), `${JSON.stringify(manifest, null, "\t")}\n`);

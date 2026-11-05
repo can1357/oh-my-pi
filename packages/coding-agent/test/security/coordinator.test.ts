@@ -4,7 +4,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
-import { createMockModel, type MockResponseSource, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import {
+	createMockModel,
+	type MockHandler,
+	type MockResponseSource,
+	registerMockApi,
+} from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { $ } from "bun";
 import { ModelRegistry } from "../../src/config/model-registry";
@@ -89,11 +94,31 @@ function storeFactory(): Promise<SecurityStore> {
 	return SecurityStore.open(repositoryRoot, { stateRoot });
 }
 
-function coordinatorWithMockSession(responses: MockResponseSource) {
+const FIXTURE_PUBLICATION = {
+	findings: [
+		{
+			rule_id: "fixture.command-injection",
+			title: "Untrusted command reaches a shell",
+			summary: "A fixture value is interpolated into a shell command.",
+			severity: "high",
+			confidence: "high",
+			category: "command-injection",
+			locations: [{ path: "src/app.ts", start_line: 1, role: "sink" }],
+			evidence: [{ label: "shell sink", explanation: "Fixture evidence" }],
+			remediation: "Use an argument-vector API.",
+			validation: "validated",
+		},
+	],
+	coverage: { completeness: "complete" },
+	report: "# Fixture security report\n\nOne validated finding.\n",
+};
+
+function coordinatorWithMockSession(responses: MockResponseSource, handler?: MockHandler) {
 	const mock = createMockModel({
 		id: "security-mock",
 		provider: "openai-codex",
 		responses,
+		handler,
 	});
 	const coordinator = new SecurityCoordinator(
 		{
@@ -130,32 +155,7 @@ describe("native security coordinator", () => {
 
 	test("scripted mock model publishes a canonical completed scan and restartable session", async () => {
 		const { coordinator, mock } = coordinatorWithMockSession([
-			{
-				content: [
-					{
-						type: "toolCall",
-						name: "security_publish",
-						arguments: {
-							findings: [
-								{
-									rule_id: "fixture.command-injection",
-									title: "Untrusted command reaches a shell",
-									summary: "A fixture value is interpolated into a shell command.",
-									severity: "high",
-									confidence: "high",
-									category: "command-injection",
-									locations: [{ path: "src/app.ts", start_line: 1, role: "sink" }],
-									evidence: [{ label: "shell sink", explanation: "Fixture evidence" }],
-									remediation: "Use an argument-vector API.",
-									validation: "validated",
-								},
-							],
-							coverage: { completeness: "complete" },
-							report: "# Fixture security report\n\nOne validated finding.\n",
-						},
-					},
-				],
-			},
+			{ content: [{ type: "toolCall", name: "security_publish", arguments: FIXTURE_PUBLICATION }] },
 			{ content: ["Security publication completed."] },
 		]);
 		const createdPlan = await coordinator.preflight({ credentialId, model: mock.model });
@@ -172,6 +172,51 @@ describe("native security coordinator", () => {
 			initialCwd: repositoryRoot,
 		});
 		expect(reopened.getSessionId()).toBeTruthy();
+	});
+
+	test("waits for background security-reviewer workers before ending the scan", async () => {
+		// Coordinator delegates, ends its turn while the worker runs as a background
+		// job, and publishes only once the worker's result is delivered back.
+		const { coordinator, mock } = coordinatorWithMockSession([], context => {
+			if (context.tools?.some(tool => tool.name === "yield")) {
+				return {
+					delayMs: 200,
+					content: [
+						{
+							type: "toolCall",
+							name: "yield",
+							arguments: { type: "result", data: { coverage_summary: "Reviewed src/app.ts" } },
+						},
+					],
+				};
+			}
+			const toolResults = context.messages.filter(message => message.role === "toolResult");
+			if (toolResults.some(message => message.toolName === "security_publish")) {
+				return { content: ["Security publication completed."] };
+			}
+			if (!toolResults.some(message => message.toolName === "task")) {
+				return {
+					content: [
+						{
+							type: "toolCall",
+							name: "task",
+							arguments: {
+								context: "Review the fixture repository.",
+								tasks: [{ task: "Review src/app.ts", solutionSpace: "open" }],
+							},
+						},
+					],
+				};
+			}
+			if (context.messages.at(-1)?.role === "toolResult") {
+				return { content: ["Waiting for the security-reviewer result."] };
+			}
+			return { content: [{ type: "toolCall", name: "security_publish", arguments: FIXTURE_PUBLICATION }] };
+		});
+		const plan = await coordinator.preflight({ credentialId, model: mock.model });
+		const started = await coordinator.start({ planId: plan.id });
+		const terminal = await coordinator.wait(started.operationId);
+		expect(terminal).toMatchObject({ phase: "completed", findingCount: 1 });
 	});
 
 	test("records a terminal failure when initial scan persistence fails", async () => {
@@ -259,6 +304,8 @@ describe("native security coordinator", () => {
 						throw new Error("review interrupted");
 					},
 					waitForIdle: async () => undefined,
+					hasPendingAsyncWork: () => false,
+					settleAsyncWork: async () => undefined,
 					abort: async () => {
 						abortCalls++;
 						promptFinished.resolve();
@@ -316,6 +363,8 @@ describe("native security coordinator", () => {
 							return true;
 						},
 						waitForIdle: async () => undefined,
+						hasPendingAsyncWork: () => false,
+						settleAsyncWork: async () => undefined,
 						abort: async () => undefined,
 						dispose: async () => undefined,
 					};

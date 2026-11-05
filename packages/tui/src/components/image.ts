@@ -744,6 +744,19 @@ export class Image implements Component {
 		this.#cachedWidth = undefined;
 	}
 
+	/**
+	 * Refit to a new row ceiling; a SIXEL reserves its rows until the off-thread
+	 * encode lands. A demoted fallback keeps the height already drawn only
+	 * within the new ceiling: the owner chose to shrink the block.
+	 */
+	setMaxHeightCells(maxHeightCells: number): void {
+		if (this.#options.maxHeightCells === maxHeightCells) return;
+		this.#options.maxHeightCells = maxHeightCells;
+		this.#renderedGraphicRows = Math.min(this.#renderedGraphicRows, maxHeightCells);
+		this.#native = undefined;
+		this.invalidate();
+	}
+
 	releaseRenderCaches(): void {
 		this.#cachedLines = undefined;
 		this.#cachedWidth = undefined;

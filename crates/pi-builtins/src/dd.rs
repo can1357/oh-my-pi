@@ -15,7 +15,7 @@ use std::{
 	time::{Duration, Instant},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use crate::openfile::OpenFile;
 use clap::{Arg, ArgMatches, Command};
 use pi_vfs::{File, OpenOptions};
 use uucore::{
@@ -25,7 +25,7 @@ use uucore::{
 };
 
 use self::human::human_readable;
-use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno};
 
 /// Default `ibs`/`obs`.
 const DEFAULT_BLOCKSIZE: usize = 512;
@@ -172,8 +172,7 @@ impl Utility for Dd {
 		let operands: Vec<OsString> = self
 			.matches
 			.get_many::<OsString>(OPERANDS)
-			.map(|values| values.cloned().collect())
-			.unwrap_or_default();
+			.map_or_default(|values| values.cloned().collect());
 		let settings = match parse_operands(host, &operands) {
 			Ok(settings) => settings,
 			Err(code) => return code,
@@ -252,11 +251,6 @@ fn app() -> Command {
 		.after_help(AFTER_HELP)
 		.infer_long_args(true)
 		.arg(Arg::new(OPERANDS).num_args(1..).value_parser(clap::value_parser!(OsString)))
-}
-
-/// Creates the `dd` builtin registration.
-pub(crate) fn dd_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Dd, SE>()
 }
 
 // ---------------------------------------------------------------------------
@@ -776,13 +770,10 @@ fn try_zeroed(len: usize) -> Option<Vec<u8>> {
 	}
 	let layout = std::alloc::Layout::array::<u8>(len).ok()?;
 	// SAFETY: `layout` has a non-zero size.
-	let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
-	if ptr.is_null() {
-		return None;
-	}
+	let ptr = std::ptr::NonNull::new(unsafe { std::alloc::alloc_zeroed(layout) })?;
 	// SAFETY: `ptr` came from the global allocator with the layout of `len`
 	// bytes, all initialized (zeroed); capacity equals that allocation.
-	Some(unsafe { Vec::from_raw_parts(ptr, len, len) })
+	Some(unsafe { Vec::from_parts(ptr, len, len) })
 }
 
 // ---------------------------------------------------------------------------
@@ -1754,8 +1745,8 @@ impl Copier<'_> {
 			len -= 1;
 			self.saved_byte = Some(ibuf[from + len]);
 		}
-		for pair in ibuf[from..from + len].chunks_exact_mut(2) {
-			pair.swap(0, 1);
+		for [a, b] in ibuf[from..from + len].as_chunks_mut::<2>().0 {
+			std::mem::swap(a, b);
 		}
 		(from, len)
 	}
@@ -1987,7 +1978,7 @@ mod tests {
 		sync::{Arc, Mutex},
 	};
 
-	use brush_core::openfiles;
+	use crate::openfile as openfiles;
 	use clap::Parser;
 
 	use super::*;
@@ -2029,21 +2020,7 @@ mod tests {
 		}
 	}
 
-	impl openfiles::Stream for Chunked {
-		fn clone_box(&self) -> Box<dyn openfiles::Stream> {
-			Box::new(self.clone())
-		}
-
-		#[cfg(unix)]
-		fn try_clone_to_owned(&self) -> Result<std::os::fd::OwnedFd, brush_core::Error> {
-			Err(brush_core::error::ErrorKind::CannotConvertToNativeFd.into())
-		}
-
-		#[cfg(unix)]
-		fn try_borrow_as_fd(&self) -> Result<std::os::fd::BorrowedFd<'_>, brush_core::Error> {
-			Err(brush_core::error::ErrorKind::CannotConvertToNativeFd.into())
-		}
-	}
+	impl openfiles::Stream for Chunked {}
 
 	struct Outcome {
 		code: i32,

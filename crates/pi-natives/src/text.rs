@@ -570,17 +570,14 @@ fn parse_osc66_meta_u16(meta: &[u16]) -> (usize, Option<usize>) {
 				let value = &part[eq + 1..];
 				if key.len() == 1 {
 					match key[0] {
-						0x73 => {
+						0x73
 							if let Some(parsed) = parse_ascii_usize_u16(value)
-								&& (1..=7).contains(&parsed)
-							{
-								scale = parsed;
-							}
+								&& (1..=7).contains(&parsed) =>
+						{
+							scale = parsed;
 						},
-						0x77 => {
-							if let Some(parsed) = parse_ascii_usize_u16(value) {
-								explicit_width = Some(parsed);
-							}
+						0x77 if let Some(parsed) = parse_ascii_usize_u16(value) => {
+							explicit_width = Some(parsed);
 						},
 						_ => {},
 					}
