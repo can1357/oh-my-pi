@@ -65,12 +65,16 @@ async function leaseFrom(pool: SubagentWorkerPool): Promise<{ worker: SubagentWo
 	return { worker, release: () => placement.release() };
 }
 
-/** Mark the fixture module `name` as edited after this process started; restored after the test. */
-function touchFixture(name: string): void {
-	const file = path.join(import.meta.dir, "../fixtures", name);
+/** Mark `file` as written after this process started; restored after the test. */
+function touchFile(file: string): void {
 	const { atime, mtime } = fs.statSync(file);
 	fs.utimesSync(file, atime, new Date());
 	cleanups.push(() => fs.utimesSync(file, atime, mtime));
+}
+
+/** Mark the fixture module `name` as edited after this process started. */
+function touchFixture(name: string): void {
+	touchFile(path.join(import.meta.dir, "../fixtures", name));
 }
 
 function probeService(): ThreadService & { installed: WorkerPeer[]; exits: string[] } {
@@ -315,6 +319,21 @@ describe("SubagentWorkerPool", () => {
 
 	it("still uses a worker when only modules the main thread never loaded changed", async () => {
 		touchFixture("code-skew-worker-only.ts");
+		const pool = workerOnlyPool(1, {
+			worker: { entry: new URL("../fixtures/code-skew-worker.ts", import.meta.url) },
+		});
+
+		const lease = await leaseFrom(pool);
+		expect(lease.worker.booted).toBe(true);
+		lease.release();
+	});
+
+	it("still uses a worker when the native addon both threads loaded was written after main started", async () => {
+		// What a compiled binary's first run does: it extracts the addon to the natives dir, then loads it.
+		let addon: string | undefined;
+		for (const modulePath in require.cache) if (modulePath.endsWith(".node")) addon ??= modulePath;
+		if (!addon) throw new Error("the main thread loaded no native addon");
+		touchFile(addon);
 		const pool = workerOnlyPool(1, {
 			worker: { entry: new URL("../fixtures/code-skew-worker.ts", import.meta.url) },
 		});

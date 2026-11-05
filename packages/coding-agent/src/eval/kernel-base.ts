@@ -89,6 +89,8 @@ export interface BaseKernelOptions<TExecuteOptions extends KernelExecuteOptions 
 	shutdownGraceMs: number;
 	/** Serializes an execution request into the runner's wire protocol. */
 	buildPayload: (code: string, msgId: string, options?: TExecuteOptions) => string;
+	/** Wire payload naming the execution a following SIGINT is meant for. */
+	interruptPayload?: (msgId: string) => string;
 }
 
 export type FrameType =
@@ -343,6 +345,8 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 				finalize();
 				return;
 			}
+			const interruptPayload = this.#options.interruptPayload?.(msgId);
+			if (interruptPayload) void this.#writeLine(interruptPayload).catch(() => {});
 			void this.interrupt();
 			const escalation = setTimeout(() => {
 				if (pending.settled) return;

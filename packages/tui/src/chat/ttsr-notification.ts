@@ -46,6 +46,11 @@ export class TtsrNotificationComponent extends Container {
 		this.#notice.setToolActivityVisible(visible);
 	}
 
+	/** A snapshot: {@link addRules} grows the block's own list in place. */
+	get rules(): readonly NotificationRule[] {
+		return [...this.#rules];
+	}
+
 	/** Merge additional rules into this block (deduped by rule name). */
 	addRules(rules: NotificationRule[]): void {
 		let changed = false;
