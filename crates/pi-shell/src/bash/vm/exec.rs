@@ -2104,6 +2104,14 @@ fn shell_command(cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 enum Catch {
 	/// `run_exit_trap`: the EXIT trap being run, with the status it saved.
 	ExitTrap(i32),
+	/// An ERR, DEBUG or signal trap running inside the EXIT trap's action:
+	/// the jump leaves both actions, and the status is the one the nested
+	/// `parse_and_execute` leaves in `last_command_exit_value` — 1 for an
+	/// ERR or DEBUG trap, and for a signal trap the status `run_pending_traps`
+	/// puts back, the one the trap started with — not the status the EXIT
+	/// trap saved. A RETURN trap is not one of these: its own
+	/// `return_catch` swallows the jump, so what encloses it decides.
+	TrapInExitTrap(i32),
 	/// The shell itself (`run_one_command` for a `-c` string, `reader_loop`
 	/// for a script).
 	Shell,
@@ -2118,15 +2126,28 @@ enum Catch {
 }
 
 fn catch(cx: &mut Cx<'_>, vp: &Vproc) -> Catch {
-	// `run_exit_trap` catches every jump out of its action.
-	let saved = vp.frames.iter().rev().find_map(|f| match f.kind {
-		FrameKind::Script { what: ScriptKind::Trap { key: TrapKey::Exit, status, .. }, .. } => {
-			Some(status)
-		},
-		_ => None,
-	});
-	if let Some(saved) = saved {
-		return Catch::ExitTrap(saved);
+	// The innermost trap action the jump leaves decides, from the inside
+	// out: `run_exit_trap` catches every jump out of its own action, and a
+	// trap that runs inside that action takes the status of the moment
+	// with it. A RETURN trap catches nothing a jump cares about.
+	let mut inner_trap = None;
+	for frame in vp.frames.iter().rev() {
+		let FrameKind::Script { what: ScriptKind::Trap { key, status, .. }, .. } = frame.kind else {
+			continue;
+		};
+		match key {
+			TrapKey::Exit => {
+				return match inner_trap {
+					Some(status) => Catch::TrapInExitTrap(status),
+					None => Catch::ExitTrap(status),
+				};
+			},
+			TrapKey::Return => {},
+			// `run_pending_traps` puts the status back around a signal
+			// trap; an ERR or DEBUG trap leaves the failure status.
+			TrapKey::Signal(_) => inner_trap = Some(status),
+			TrapKey::Err | TrapKey::Debug => inner_trap = Some(1),
+		}
 	}
 	if !super::nested::in_subshell(cx.store, vp) {
 		return Catch::Shell;
@@ -2143,6 +2164,9 @@ fn catch(cx: &mut Cx<'_>, vp: &Vproc) -> Catch {
 fn jump_status(cx: &mut Cx<'_>, vp: &mut Vproc, discarded: Option<i32>) -> i32 {
 	match catch(cx, vp) {
 		Catch::ExitTrap(saved) => saved,
+		// The nested trap's status, which the EXIT trap's own catch would
+		// have replaced with the status it saved.
+		Catch::TrapInExitTrap(status) => discarded.unwrap_or(status),
 		// `run_one_command`: 127 for `FORCE_EOF`, 1 for `DISCARD`.
 		Catch::Shell if discarded.is_some() => 1,
 		Catch::Shell => {
@@ -2188,6 +2212,11 @@ fn fork_landing(cx: &mut Cx<'_>, vp: &Vproc) -> Landing {
 			// A status is a byte, as bash's is; the mask makes this exact.
 			let saved = u8::try_from(saved & 0xff).unwrap_or(0);
 			Landing { fatal: saved, discard: Some(saved), exit_trap: false }
+		},
+		// The child of such a trap lands on that trap's status.
+		Catch::TrapInExitTrap(status) => {
+			let status = u8::try_from(status & 0xff).unwrap_or(0);
+			Landing { fatal: status, discard: Some(status), exit_trap: false }
 		},
 		Catch::Shell => Landing {
 			fatal:     if shell_command(cx, vp) { 127 } else { 1 },

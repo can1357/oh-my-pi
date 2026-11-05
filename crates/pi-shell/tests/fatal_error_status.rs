@@ -166,3 +166,72 @@ async fn posix_assignment_error_is_a_fatal_error() {
 	])
 	.await;
 }
+
+/// A trap that runs inside the EXIT trap's action (ERR, DEBUG, a signal)
+/// takes the jump out of both actions, and the shell exits with the status
+/// of that moment, not with the status the EXIT trap saved (bash's nested
+/// `parse_and_execute` leaves `last_command_exit_value` behind). A RETURN
+/// trap is different: its own `return_catch` swallows the jump, so what
+/// encloses it decides. The engine exited with the EXIT trap's saved
+/// status in every one of them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trap_inside_the_exit_trap_exits_with_the_status_of_the_moment() {
+	check(&[
+		(r##"trap ': "${zz?B}"' ERR; trap false EXIT; exit 7"##, "", 1),
+		(r##"trap ': "${zz?B}"' ERR; trap 'echo S:a; false; echo S:b' EXIT; exit 7"##, "S:a\n", 1),
+		(r##"trap 'echo S:E1; : "${zz?B}"; echo S:E2' ERR; trap false EXIT; exit 7"##, "S:E1\n", 1),
+		(r##"trap ': "${zz?B}"' ERR; f(){ false; }; trap 'f' EXIT; exit 7"##, "", 1),
+		(r##"trap ': "${zz?B}"' ERR; trap 'false' EXIT; exit 0"##, "", 1),
+		(r##"trap ': "${zz?B}"' USR1; trap 'kill -USR1 $$; echo S:in $?' EXIT; exit 7"##, "", 0),
+		// A RETURN trap's jump is caught by the trap itself.
+		(r##"trap ': "${zz?B}"' RETURN; f(){ return 3; }; trap 'f' EXIT; exit 7"##, "", 7),
+		(r##"trap ': "${zz?B}"' RETURN; f(){ return 3; }; f; echo S:after $?"##, "S:after 3\n", 0),
+		// Outside an EXIT trap the shell's own catch still decides.
+		(r##"trap ': "${zz?B}"' ERR; false; echo S:after $?"##, "", 127),
+		(r##"trap ': "${zz?B}"' USR1; kill -USR1 $$; echo S:after $?"##, "", 127),
+		(r##"trap 'exit 9' ERR; trap false EXIT; exit 7"##, "", 9),
+	])
+	.await;
+}
+
+/// `exec`ing a text file the operating system refuses (no `#!`) makes the
+/// shell run that file as a script, and bash had already reset the traps
+/// before it called `execve`, so the replaced shell's EXIT trap never runs
+/// (`shell_execve`'s `ENOEXEC` path). The engine ran it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_exec_of_a_text_file_runs_no_exit_trap() {
+	check(&[
+		(
+			r##"d=$(mktemp -d); printf ': ${zz?B}\n' > $d/t; chmod +x $d/t; trap 'echo S:T:$?' EXIT; exec $d/t; echo S:BAD"##,
+			"",
+			1,
+		),
+		(
+			r##"d=$(mktemp -d); printf 'echo S:ran\n' > $d/t; chmod +x $d/t; trap 'echo S:T:$?' EXIT; exec $d/t; echo S:BAD"##,
+			"S:ran\n",
+			0,
+		),
+		(
+			r##"d=$(mktemp -d); printf 'exit 6\n' > $d/t; chmod +x $d/t; trap 'echo S:T:$?' EXIT; exec $d/t; echo S:BAD"##,
+			"",
+			6,
+		),
+		(
+			r##"d=$(mktemp -d); printf ': ${zz?B}\n' > $d/t; chmod +x $d/t; ( trap 'echo S:T:$?' EXIT; exec $d/t ); echo S:$?"##,
+			"S:1\n",
+			0,
+		),
+		(
+			r##"d=$(mktemp -d); printf ': ${zz?B}\n' > $d/t; chmod +x $d/t; x=$( trap 'echo S:T:$?' EXIT; exec $d/t ); echo "[$x] S:$?""##,
+			"[] S:1\n",
+			0,
+		),
+		// Without `exec` the shell is not replaced and its trap still runs.
+		(
+			r##"d=$(mktemp -d); printf ': ${zz?B}\n' > $d/t; chmod +x $d/t; trap 'echo S:T:$?' EXIT; $d/t; echo S:after $?"##,
+			"S:after 1\nS:T:0\n",
+			0,
+		),
+	])
+	.await;
+}

@@ -4771,6 +4771,10 @@ fn run_script_file(
 	// PATH (or hash table) result.
 	let name = st(vp).argv[0].clone();
 	let file = if name.contains(&b'/') { name } else { path };
+	// The program was tried: this shell replaced itself with the script.
+	if st(vp).exec_as.is_some() {
+		exec_tried(k, cx, vp);
+	}
 	super::nested::start_script(k, vp, cx, &env, &file, &text)
 }
 
@@ -4814,19 +4818,25 @@ fn exec_failed(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, tried: bool) {
 			return;
 		}
 	}
-	if tried && vp.mode.dialect() == crate::bash::ids::Dialect::Bash {
-		let exit = crate::bash::store::TrapKey::Exit;
-		if vp.parent.is_some() {
-			vp.own_traps = vp.own_traps.without(exit);
-		} else {
-			state::store_record(
-				&mut k.root,
-				cx.store,
-				vp,
-				crate::bash::store::KeyBuf::Trap(exit),
-				None,
-			);
-		}
+	if tried {
+		exec_tried(k, cx, vp);
+	}
+}
+
+/// bash resets the child's traps (`reset_signal_handlers`) before it calls
+/// `execve`, so once a program was tried the shell that replaced itself
+/// with it runs no EXIT trap, whether the call failed or the file turned
+/// out to be a script this shell runs instead
+/// (`shell_execve`'s `ENOEXEC` path, [`run_script_file`]).
+fn exec_tried(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
+	if vp.mode.dialect() != crate::bash::ids::Dialect::Bash {
+		return;
+	}
+	let exit = crate::bash::store::TrapKey::Exit;
+	if vp.parent.is_some() {
+		vp.own_traps = vp.own_traps.without(exit);
+	} else {
+		state::store_record(&mut k.root, cx.store, vp, crate::bash::store::KeyBuf::Trap(exit), None);
 	}
 }
 
