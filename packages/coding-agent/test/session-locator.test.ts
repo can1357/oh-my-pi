@@ -363,6 +363,77 @@ describe("session index: lookups by id", () => {
 	});
 
 	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"does not list an indexed root whose snapshot it cannot read",
+		async () => {
+			// An unreadable snapshot means "this process cannot tell", not "never
+			// rebuilt". Answering "never rebuilt" would send the lookup back to
+			// listing a root that is in fact indexed — the stall this change
+			// exists to remove, returning exactly when the index is damaged.
+			const sessions = getSessionsDir();
+			const parent = await persistedSession(cwdA);
+			const id = parent.getSessionId();
+			await parent.close();
+			await rebuildSessionLocator(sessions);
+			const snapshot = path.join(sessions, SESSION_LOCATOR_BASE_FILE);
+			fs.chmodSync(snapshot, 0o000);
+			try {
+				expect(await sessionLocatorMayBeIncomplete(sessions)).toBe(false);
+				const localDir = computeDefaultSessionDir(cwdB, new FileSessionStorage());
+				const probe = countListings(path.resolve(sessions), localDir);
+				try {
+					await resolveResumableSession(id, cwdB);
+				} finally {
+					probe.restore();
+				}
+				expect(probe.listed).toEqual([]);
+			} finally {
+				fs.chmodSync(snapshot, 0o600);
+			}
+		},
+	);
+
+	it("keeps a row whose file moved to a configured extra root", async () => {
+		// A row names a place, and a lookup rebases that relative path under
+		// every root it consults: a tree moved to an extra root is found through
+		// exactly this row, so "absent from the root that recorded it" must not
+		// mean "drop it".
+		const sessions = getSessionsDir();
+		const moved = path.join(agentDir, "moved-root");
+		fs.mkdirSync(moved, { recursive: true });
+		const id = "019a001c-0000-7000-8000-000000000001";
+		const bucket = "--relocated--";
+		const name = `2026-01-02T03-04-05-000Z_${id}.jsonl`;
+		writeTranscript(path.join(sessions, bucket, name), id, "/p");
+		configureSessionExtraRoots([moved]);
+		// Both roots are indexed BEFORE the move, so neither is listed and the
+		// old root's row is the only record of where the session went. That is
+		// the state in which dropping it loses the session outright.
+		await rebuildSessionLocator(moved);
+		await rebuildSessionLocator(sessions);
+
+		// The tree moves out of the old root into the configured one.
+		fs.renameSync(path.join(sessions, bucket), path.join(moved, bucket));
+		try {
+			expect((await resolveResumableSession(id, cwdB))?.session.path).toBe(path.join(moved, bucket, name));
+			// Reindexing the OLD root must not forget where that session went.
+			await rebuildSessionLocator(sessions);
+			expect((await resolveResumableSession(id, cwdB))?.session.path).toBe(path.join(moved, bucket, name));
+		} finally {
+			configureSessionExtraRoots([]);
+		}
+	});
+
+	it("finds a legacy session by id for history callers before any reindex", async () => {
+		// `findSessionFiles` is the other entry point a user reaches by id (the
+		// history and archive tools). An upgrade must cost it nothing either.
+		const id = "019a001d-0000-7000-8000-000000000001";
+		const file = path.join(getSessionsDir(), "--legacy-history--", `2026-01-02T03-04-05-000Z_${id}.jsonl`);
+		writeTranscript(file, id, "/legacy");
+		expect(await sessionLocatorMayBeIncomplete()).toBe(true);
+		expect(await findSessionFiles(id)).toEqual([file]);
+	});
+
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
 		"drops a row whose file is gone, and keeps one it cannot check",
 		async () => {
 			const sessions = getSessionsDir();

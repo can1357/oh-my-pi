@@ -667,15 +667,25 @@ export async function locateSessions(idPrefix: string, options: LocateSessionsOp
 }
 
 /**
- * Whether this process's sessions root was never rebuilt with `omp session
- * reindex`, so sessions an older omp created there may be in no index.
+ * Whether `root` was never rebuilt with `omp session reindex`, so sessions an
+ * older omp created there may be in no index.
+ *
+ * Only an **absent** snapshot, or one present without the rebuilt marker,
+ * counts. A snapshot that exists and cannot be read says nothing about
+ * whether a rebuild happened — it says this process cannot tell — and
+ * answering "never rebuilt" there would send a lookup back to listing a root
+ * that is in fact indexed, which is the stall this change exists to remove,
+ * reappearing exactly when the index is damaged.
  */
 export async function sessionLocatorMayBeIncomplete(root: string = getSessionsDir()): Promise<boolean> {
+	const snapshot = path.join(root, SESSION_LOCATOR_BASE_FILE);
 	try {
-		const head = await Bun.file(path.join(root, SESSION_LOCATOR_BASE_FILE)).slice(0, REBUILT_MARKER.length).text();
+		const head = await Bun.file(snapshot).slice(0, REBUILT_MARKER.length).text();
 		return head !== REBUILT_MARKER;
-	} catch {
-		return true;
+	} catch (error) {
+		// Absent: never rebuilt. Anything else: a snapshot is there and this
+		// process cannot read it, which is not evidence of no rebuild.
+		return isEnoent(error);
 	}
 }
 
@@ -896,17 +906,30 @@ export async function rebuildSessionLocator(root: string): Promise<SessionLocato
 				const tab = line.indexOf("\t");
 				if (tab > 0 && SESSION_ID_RE.test(line.slice(0, tab)) && line.length > tab + 1) carried.push(line);
 			}
+			// A row names a place; a lookup rebases that same relative path under
+			// every root it consults, so "absent from the root that recorded it"
+			// is NOT "gone". A tree moved to a configured extra root is found
+			// through exactly this row, and dropping it here would be the only
+			// record of where that session went. Keep the row unless every root
+			// a lookup would try says ENOENT.
+			const lookupRoots = sessionLocatorRoots();
+			const searched = lookupRoots.includes(resolvedRoot) ? lookupRoots : [resolvedRoot, ...lookupRoots];
 			const live = await Promise.all(
 				carried.map(async line => {
 					const stored = decodeStoredPath(line.slice(line.indexOf("\t") + 1));
 					if (stored === undefined || path.isAbsolute(stored)) return true;
-					const candidate = path.join(resolvedRoot, stored.split("/").join(path.sep));
-					try {
-						await fs.promises.lstat(candidate);
-						return true;
-					} catch (error) {
-						return !isEnoent(error);
+					const relative = stored.split("/").join(path.sep);
+					for (const base of searched) {
+						try {
+							await fs.promises.lstat(path.join(base, relative));
+							return true;
+						} catch (error) {
+							// Only a definite absence here lets the next root decide;
+							// anything else means this process cannot tell, so keep it.
+							if (!isEnoent(error)) return true;
+						}
 					}
+					return false;
 				}),
 			);
 			for (let i = 0; i < carried.length; i++) if (live[i]) keep(carried[i]);

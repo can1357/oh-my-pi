@@ -1552,13 +1552,28 @@ export async function listRecentProjects(
 /**
  * Session files whose recorded session id starts with `idPrefix`, newest
  * first: top-level transcripts and nested subagent transcripts alike, in
- * every root the session index covers ({@link locateSessions}). Reads index
- * files, never lists a directory. Archived `.jsonl.gz` transcripts are left
- * out: no caller opens one. Prefixes outside `[A-Za-z0-9_-]` match nothing.
+ * every root the session index covers ({@link locateSessions}). Archived
+ * `.jsonl.gz` transcripts are left out: no caller opens one. Prefixes outside
+ * `[A-Za-z0-9_-]` match nothing.
+ *
+ * Reads index files and, when they hold nothing for the prefix, lists any
+ * root this release has never rebuilt — the same upgrade path
+ * {@link resolveResumableSession} takes, because this is the other entry
+ * point a user reaches by id (`omp` history and archive tools) and an upgrade
+ * must cost it nothing either. An indexed root is never listed.
  */
 export async function findSessionFiles(idPrefix: string, roots?: readonly string[]): Promise<string[]> {
 	const located = await locateSessions(idPrefix, { roots });
-	return dedupeRealPaths(located.filter(hit => !hit.archived).map(hit => hit.path));
+	const files = await dedupeRealPaths(located.filter(hit => !hit.archived).map(hit => hit.path));
+	if (files.length > 0) return files;
+	const storage = new FileSessionStorage();
+	const fromListing: string[] = [];
+	for (const root of await unindexedSessionRoots(roots ?? undefined)) {
+		for (const session of await listAllSessions(storage, root)) {
+			if (sessionMatchesResumeArg(session, idPrefix)) fromListing.push(session.path);
+		}
+	}
+	return dedupeRealPaths(fromListing);
 }
 
 /**
