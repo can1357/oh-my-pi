@@ -121,7 +121,13 @@ export async function resolveSeanceSource(
 	const storage = options.storage ?? defaultSessionStorage();
 	if (source.includes("/") || source.includes("\\") || source.endsWith(".jsonl")) {
 		const file = resolveToCwd(source, options.cwd);
-		if (!(await storage.exists(file))) {
+		// A regular file, as the `fs.stat(...).isFile()` this replaced required:
+		// `exists` also accepts a directory or a device node, and opening a FIFO
+		// named `*.jsonl` blocks until an EOF that never comes.
+		try {
+			if (!storage.statSync(file).isFile) throw new Error("The selected path is not a session file.");
+		} catch (error) {
+			if (error instanceof Error && error.message === "The selected path is not a session file.") throw error;
 			throw new Error("The selected session file was not found or could not be accessed.");
 		}
 		return validateSourceFile(file, storage);

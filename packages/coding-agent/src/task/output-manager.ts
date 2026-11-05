@@ -70,15 +70,24 @@ export class AgentOutputManager {
 		const dir = this.#getArtifactsDir();
 		if (!dir) return;
 
-		let files: string[];
+		// One tolerant read, as the `fs.readdir` this extends always was: an
+		// artifacts directory that cannot be listed (EACCES, EIO) leaves the
+		// allocator with no seed rather than failing it, and the storage
+		// listing — which the key-indexed backends need, since their
+		// transcripts are rows and not on disk — is inside the same tolerance.
+		const files: string[] = [];
 		try {
-			files = await fs.readdir(dir);
+			files.push(...(await fs.readdir(dir)));
 		} catch {
-			files = []; // Directory doesn't exist yet
+			// Directory doesn't exist yet, or cannot be listed.
 		}
-		const storage = this.#storage ?? defaultSessionStorage();
-		await storage.refresh?.();
-		for (const transcript of storage.listFilesSync(dir, "*.jsonl")) files.push(path.basename(transcript));
+		try {
+			const storage = this.#storage ?? defaultSessionStorage();
+			await storage.refresh?.();
+			for (const transcript of storage.listFilesSync(dir, "*.jsonl")) files.push(path.basename(transcript));
+		} catch {
+			// Same tolerance: a listing fault leaves the seed short, never throws.
+		}
 
 		const prefix = this.#parentPrefix ? `${this.#parentPrefix}.` : "";
 		for (const file of files) {

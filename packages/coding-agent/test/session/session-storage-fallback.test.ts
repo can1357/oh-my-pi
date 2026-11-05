@@ -224,6 +224,49 @@ describe("sql → file fallback", () => {
 		expect(String(lines[0]?.session_id).trim()).toBe("(unresolved)");
 	});
 
+	it("a line another process appended between the decision and the refinement is left alone", async () => {
+		const { env, ledger } = brokenSqlEnv();
+		await resolveSessionStorage({ settings: Settings.isolated(), env, resumableFileSession: async () => true });
+		const ours = ledgerLines(ledger)[0];
+		expect(String(ours?.session_id).trim()).toBe("(unresolved)");
+
+		// Another process appends while this launch is still starting. Nothing
+		// may record a byte offset before this: `O_APPEND` chose where our own
+		// line went, and this one moves the end again.
+		const foreign = ledgerLine(fallbackEvent("ffffffff-0000-7000-8000-00000000ffff", "db-unreachable", "/other"));
+		fs.appendFileSync(ledger, foreign, "utf8");
+
+		await commitSessionStorageFallback("01a1a000-0000-7000-8000-00000000aaaa");
+
+		const lines = ledgerLines(ledger);
+		expect(lines).toHaveLength(2);
+		expect(String(lines[0]?.session_id).trim()).toBe("01a1a000-0000-7000-8000-00000000aaaa");
+		expect(lines[0]).toMatchObject({ dsn_path: ours?.dsn_path });
+		// The other process's line keeps its own id and its own path.
+		expect(String(lines[1]?.session_id).trim()).toBe("ffffffff-0000-7000-8000-00000000ffff");
+		expect(lines[1]).toMatchObject({ dsn_path: "/other", reason: "db-unreachable" });
+	});
+
+	it("an id with a quote, a newline or a multibyte character cannot break the line", async () => {
+		for (const id of ['a"b', "a\nb", "héllo-ünïcøde", "x".repeat(200)]) {
+			resetSqlWriteLatchForTest();
+			const { env, ledger } = brokenSqlEnv();
+			await resolveSessionStorage({ settings: Settings.isolated(), env, resumableFileSession: async () => true });
+			await commitSessionStorageFallback(id);
+
+			const raw = fs.readFileSync(ledger, "utf8");
+			// One physical line, still parseable, and the field is exactly as wide
+			// as it was: the refinement writes bytes in place.
+			expect(raw.split("\n").filter(part => part.length > 0)).toHaveLength(1);
+			const parsed = JSON.parse(raw.trim()) as Record<string, string>;
+			expect(Buffer.byteLength(JSON.stringify(parsed.session_id).slice(1, -1), "utf8")).toBe(36);
+			// Either the id round-trips, or the placeholder stayed; never a
+			// half-written value.
+			const recorded = String(parsed.session_id).trimEnd();
+			expect(recorded === id || recorded === "(unresolved)").toBe(true);
+		}
+	});
+
 	it("a ledger line stays inside one page however large its caller-sized fields are", () => {
 		for (const [session, dsn] of [
 			["s".repeat(64), "/".repeat(9000)],

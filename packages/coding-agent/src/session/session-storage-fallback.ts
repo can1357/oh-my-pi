@@ -100,9 +100,18 @@ const SESSION_ID_WIDTH = 36;
 /** What a ledger line records until the launch has opened a session. */
 export const UNRESOLVED_SESSION = "(unresolved)";
 
-/** `id` in the fixed-width form a ledger line holds, or `undefined` when it does not fit. */
+/**
+ * `id` as the exact {@link SESSION_ID_WIDTH} **bytes** a ledger line's
+ * `session_id` field holds, or `undefined` when it cannot be represented in
+ * them. JSON-escaped first: an id carrying a quote would otherwise end the
+ * string, a newline would split one line into two, and a multibyte character
+ * counts for more bytes than it does characters — the field is overwritten in
+ * place, so its byte length is the contract, not its length in code units.
+ */
 function paddedSessionId(id: string): string | undefined {
-	return id.length > SESSION_ID_WIDTH ? undefined : id.padEnd(SESSION_ID_WIDTH, " ");
+	const escaped = JSON.stringify(id).slice(1, -1);
+	const width = Buffer.byteLength(escaped, "utf8");
+	return width > SESSION_ID_WIDTH ? undefined : escaped + " ".repeat(SESSION_ID_WIDTH - width);
 }
 
 /**
@@ -146,8 +155,14 @@ interface PendingFallback {
 	reason: SessionStorageFallbackReason;
 	dsnPath: string;
 	ledgerFile: string;
-	/** Byte offset of the `session_id` value inside the written line. */
-	idOffset: number;
+	/**
+	 * The exact line written, so the refinement can find it again. A byte
+	 * offset recorded at write time is wrong the moment another process
+	 * appends: `O_APPEND` places the write at whatever the end is then, not at
+	 * the size read before it. Appends never move bytes already in the file,
+	 * so locating the line when the refinement runs is stable.
+	 */
+	line: string;
 }
 
 let pending: PendingFallback | undefined;
@@ -159,6 +174,24 @@ let committed = false;
  */
 export function pendingSessionStorageFallback(): { reason: SessionStorageFallbackReason; dsnPath: string } | undefined {
 	return pending ? { reason: pending.reason, dsnPath: pending.dsnPath } : undefined;
+}
+
+const SESSION_ID_MARKER = '"session_id":"';
+
+/**
+ * Byte offset of the `session_id` value in the ledger's copy of `line`, found
+ * when the refinement runs rather than when the line was written. `O_APPEND`
+ * decides a write's position at the kernel, so nothing can record it in
+ * advance; appends never move bytes already in the file, so a scan now is
+ * stable. The last match wins: an identical earlier line would be another
+ * process's, and ours is the most recent.
+ */
+function locateSessionIdField(contents: Buffer, line: string): number | undefined {
+	const needle = Buffer.from(line, "utf8");
+	const at = contents.lastIndexOf(needle);
+	if (at < 0) return undefined;
+	const inLine = Buffer.byteLength(line.slice(0, line.indexOf(SESSION_ID_MARKER)), "utf8");
+	return at + inLine + Buffer.byteLength(SESSION_ID_MARKER, "utf8");
 }
 
 /**
@@ -180,8 +213,10 @@ export function commitSessionStorageFallbackSync(sessionId: string): void {
 	if (padded === undefined) return;
 	let handle: number | undefined;
 	try {
+		const offset = locateSessionIdField(fsSync.readFileSync(pending.ledgerFile), pending.line);
+		if (offset === undefined) return;
 		handle = fsSync.openSync(pending.ledgerFile, "r+");
-		fsSync.writeSync(handle, Buffer.from(padded, "utf8"), 0, SESSION_ID_WIDTH, pending.idOffset);
+		fsSync.writeSync(handle, Buffer.from(padded, "utf8"), 0, SESSION_ID_WIDTH, offset);
 	} catch {
 		// A signal handler has nowhere to report to; the line is already counted.
 	} finally {
@@ -205,10 +240,19 @@ export async function commitSessionStorageFallback(sessionId: string): Promise<v
 		});
 		return;
 	}
+	const line = pending.line;
 	let handle: fs.FileHandle | undefined;
 	try {
+		const offset = locateSessionIdField(await fs.readFile(ledgerFile), line);
+		if (offset === undefined) {
+			logger.warn("Fallback ledger line not found for refinement; it keeps its placeholder", {
+				ledger: ledgerFile,
+				session: sessionId,
+			});
+			return;
+		}
 		handle = await fs.open(ledgerFile, "r+");
-		await handle.write(Buffer.from(padded, "utf8"), 0, SESSION_ID_WIDTH, pending.idOffset);
+		await handle.write(Buffer.from(padded, "utf8"), 0, SESSION_ID_WIDTH, offset);
 	} catch (err) {
 		logger.warn("Could not name the session in the fallback ledger line; the fallback stays counted", {
 			ledger: ledgerFile,
@@ -251,26 +295,19 @@ export async function reserveSessionStorageFallback(
 	ledgerFile: string,
 ): Promise<void> {
 	const line = ledgerLine(fallbackEvent(UNRESOLVED_SESSION, reason, dsnPath));
-	const marker = `"session_id":"`;
-	const idOffsetInLine = line.indexOf(marker);
 	let handle: fs.FileHandle | undefined;
 	try {
 		await fs.mkdir(path.dirname(ledgerFile), { recursive: true });
 		handle = await fs.open(ledgerFile, "a+");
-		// O_APPEND: the write lands whole at the end whatever another process
-		// is doing, and its returned position is where this line starts.
-		const before = (await handle.stat()).size;
+		// O_APPEND: the write lands whole at the end whatever another process is
+		// doing. Where that is cannot be known in advance, so nothing records a
+		// position here; the refinement finds the line.
 		const written = await handle.write(line, null, "utf8");
 		if (written.bytesWritten !== Buffer.byteLength(line, "utf8")) {
 			throw new Error(`short write: ${written.bytesWritten} of ${Buffer.byteLength(line, "utf8")} bytes`);
 		}
 		await handle.sync();
-		pending = {
-			reason,
-			dsnPath,
-			ledgerFile,
-			idOffset: before + Buffer.byteLength(line.slice(0, idOffsetInLine + marker.length), "utf8"),
-		};
+		pending = { reason, dsnPath, ledgerFile, line };
 	} catch (err) {
 		throw new SessionStorageFallbackLedgerError(ledgerFile, err);
 	} finally {

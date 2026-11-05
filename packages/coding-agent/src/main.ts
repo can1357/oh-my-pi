@@ -130,7 +130,12 @@ import {
 	type SessionContinuation,
 	type SessionInfo,
 } from "./session/session-listing";
-import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
+import {
+	ForkSourceNotFoundError,
+	resolveBreadcrumbToInteractiveRoot,
+	SessionManager,
+	SessionMoveRefusedError,
+} from "./session/session-manager";
 import type { FileEntry } from "./session/session-entries";
 import { computeDefaultSessionDir, readTerminalBreadcrumbEntry } from "./session/session-paths";
 import { FileSessionStorage, setDefaultSessionStorage } from "./session/session-storage";
@@ -142,6 +147,7 @@ import {
 	UNRESOLVED_SESSION,
 } from "./session/session-storage-fallback";
 import { forkIfMovedAway, lastSessionTransfer } from "./session/session-transfer";
+import { pathIsWithin } from "./security/preflight";
 import { shouldShowStartupSplash } from "./startup-splash";
 import {
 	discoverSystemPromptOverride,
@@ -395,11 +401,22 @@ export async function resumableFileSessionId(
 		// new session whatever else the directory holds.
 		if (breadcrumb?.fresh && !breadcrumb.exists) return false;
 		const dir = args.sessionDir ?? computeDefaultSessionDir(cwd, storage);
-		const chosen =
-			breadcrumb?.exists && path.resolve(breadcrumb.cwd) === path.resolve(cwd)
-				? breadcrumb.sessionFile
-				: await findMostRecentNonEmptySession(dir, storage);
-		return chosen !== null && chosen !== undefined && (await continuableFileSession(chosen, storage));
+		let chosen: string | null = null;
+		if (breadcrumb?.exists) {
+			// The breadcrumb's own three steps, from `continueRecent`: a crumb
+			// pointing at a subagent transcript resolves up to the interactive
+			// session, one outside an explicit `--session-dir` is out of scope
+			// and ignored, and one recorded in another cwd reaches a re-rooting
+			// branch that may move the session — not predictable from here, so
+			// that launch refuses rather than guesses.
+			const root = resolveBreadcrumbToInteractiveRoot(breadcrumb.sessionFile, storage);
+			if (path.resolve(breadcrumb.cwd) !== path.resolve(cwd)) return false;
+			if (!args.sessionDir || pathIsWithin(root, path.resolve(dir))) chosen = root;
+			else chosen = await findMostRecentNonEmptySession(dir, storage);
+		} else {
+			chosen = await findMostRecentNonEmptySession(dir, storage);
+		}
+		return chosen !== null && (await continuableFileSession(chosen, storage));
 	} catch (err) {
 		logger.warn("Could not tell whether this launch resumes a session file", { error: toError(err).message });
 		return false;

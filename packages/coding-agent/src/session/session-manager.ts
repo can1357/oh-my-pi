@@ -431,7 +431,7 @@ async function relocateArtifactsDirectory(source: string, destination: string): 
  * any nested artifact — must resolve back up to the top-level session so
  * `--continue` resumes the real conversation instead of a subagent transcript.
  */
-function resolveBreadcrumbToInteractiveRoot(sessionFile: string, storage: SessionStorage): string {
+export function resolveBreadcrumbToInteractiveRoot(sessionFile: string, storage: SessionStorage): string {
 	let current = path.resolve(sessionFile);
 	// Walk up while the containing dir is itself a session's artifacts dir
 	// (`<dir>.jsonl` is held by the storage). Capped to defend against
