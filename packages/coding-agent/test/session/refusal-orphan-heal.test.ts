@@ -138,7 +138,7 @@ describe("synthetic tool result content", () => {
 		]);
 		// Local metadata keeps it: the UI, telemetry and ACP still report what
 		// the provider said, and no request carries `details`.
-		expect(refused.details.upstreamError).toBe(REFUSAL_MARKER);
+		expect(refused.details?.upstreamError).toBe(REFUSAL_MARKER);
 	});
 
 	it("tells the model omp's own reason, which is what it must act on", () => {
@@ -155,7 +155,7 @@ describe("synthetic tool result content", () => {
 			{ type: "text", text: "Tool execution was aborted: TTSR matched rule: no-unwrap" },
 		]);
 		expect(JSON.stringify(cancelled.content)).not.toContain(REFUSAL_MARKER);
-		expect(cancelled.details.upstreamError).toBe(REFUSAL_MARKER);
+		expect(cancelled.details?.upstreamError).toBe(REFUSAL_MARKER);
 	});
 });
 
