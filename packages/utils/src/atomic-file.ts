@@ -35,6 +35,28 @@ const MAX_BASENAME_BYTES = 255;
 const MAX_PATH_BYTES = 4095;
 
 /**
+ * Bounds on the random run in the compact staging suffix, used only when a
+ * directory leaves too little room for the readable `pid`-and-uuid form.
+ *
+ * Eight hex digits is an **entropy policy, not a physical floor** — a reviewer
+ * established that distinction by measuring it. A one-byte sibling is creatable
+ * in a directory that leaves one byte, so shorter names are possible; they are
+ * refused because at that width two writers pick the same name often enough to
+ * matter. A collision is caught rather than silent — the staging `open` is
+ * exclusive, so it surfaces as `EEXIST` instead of a lost write — but a write
+ * that fails for that reason is indistinguishable to its user from one that
+ * failed for a real one, and a config write is not the place to trade a
+ * confusing failure for a rare success.
+ *
+ * So where even eight digits will not fit, this refuses deliberately and says
+ * so. Do not read that as "no name could have fitted": it is a choice about
+ * collision probability, and a future caller that genuinely needs a 4095-byte
+ * destination to publish should widen this knowingly rather than discover it.
+ */
+const MIN_RANDOM_DIGITS = 8;
+const MAX_RANDOM_DIGITS = 12;
+
+/**
  * A staging path beside `destination`, short enough to create in both of the
  * ways a path can be too long.
  *
@@ -67,10 +89,19 @@ function stagingPathFor(destination: string, extension: string): string {
 	// against a cwd this cannot see, so reserving for that would be a guess.
 	const pathRoom = MAX_PATH_BYTES - (Buffer.byteLength(dir, "utf8") + 1);
 	const room = Math.min(MAX_BASENAME_BYTES, pathRoom);
-	// Longest first: the readable form, then a compact one that drops the pid and
-	// shortens the uuid for a directory with almost no room left.
-	const compact = crypto.randomUUID().replaceAll("-", "").slice(0, 12);
-	for (const suffix of [`.${process.pid}.${crypto.randomUUID()}.${extension}`, `.${compact}.${extension}`]) {
+	// The readable form first; then, for a directory with almost no room left, a
+	// compact one SIZED FROM THE ROOM THAT IS ACTUALLY THERE rather than from a
+	// guess. A fixed-length fallback is the same mistake as the fixed-length
+	// suffix it rescues: a reviewer measured a 4095-byte destination whose
+	// directory left 13 bytes, which a 17-byte fallback could not use and a
+	// 13-byte one can. `.` + digits + `.` + extension, so the digits that fit are
+	// the room less those two dots and the extension.
+	const compactDigits = Math.min(MAX_RANDOM_DIGITS, room - `..${extension}`.length);
+	const suffixes = [`.${process.pid}.${crypto.randomUUID()}.${extension}`];
+	if (compactDigits >= MIN_RANDOM_DIGITS) {
+		suffixes.push(`.${crypto.randomUUID().replaceAll("-", "").slice(0, compactDigits)}.${extension}`);
+	}
+	for (const suffix of suffixes) {
 		const suffixBytes = Buffer.byteLength(suffix, "utf8");
 		if (suffixBytes > room) continue;
 		// By CODE POINT, not by `slice(0, -1)`: slicing drops one UTF-16 unit, so
@@ -87,8 +118,12 @@ function stagingPathFor(destination: string, extension: string): string {
 		}
 		return path.join(dir, `${kept}${suffix}`);
 	}
+	// Reached when the directory leaves less room than the shortest suffix this
+	// is willing to use. A shorter name would fit — see MIN_RANDOM_DIGITS — so the
+	// message says what the refusal actually is rather than implying the
+	// filesystem made it impossible.
 	const error: NodeJS.ErrnoException = new Error(
-		`ENAMETOOLONG: no room beside '${destination}' for a staging file (directory is ${Buffer.byteLength(dir, "utf8")} bytes of the ${MAX_PATH_BYTES}-byte path limit)`,
+		`ENAMETOOLONG: refusing to stage a write beside '${destination}': its directory is ${Buffer.byteLength(dir, "utf8")} bytes of the ${MAX_PATH_BYTES}-byte path limit, leaving ${room} for a staging name, and this needs ${MIN_RANDOM_DIGITS + `..${extension}`.length}`,
 	);
 	error.code = "ENAMETOOLONG";
 	error.path = destination;

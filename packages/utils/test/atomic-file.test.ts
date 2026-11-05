@@ -51,6 +51,54 @@ async function linkTo(target: string, link: string, contents = "old"): Promise<v
 	await fs.symlink(target, link);
 }
 
+/**
+ * Build a target whose RESOLVED path is `targetBytes` long, reachable from
+ * `root` through a link whose own body is short, and return the link and the
+ * physical directory holding it.
+ *
+ * The depth is physical 200-byte directory components; the shortening is a chain
+ * of directory symlinks, each body about 205 bytes. A single link straight to
+ * the deep path would have a ~4000-byte body, and **XFS caps a symlink body at
+ * 1024 bytes** where tmpfs and ext4 allow up to `PATH_MAX` — so that fixture
+ * passes wherever `TMPDIR` is tmpfs and dies in `symlink()` wherever it is XFS,
+ * before the code under test is reached at all. A reviewer running on XFS found
+ * exactly that. Short hops measure the writer instead of the filesystem's
+ * symlink storage.
+ */
+async function deepTargetViaShortHops(leaf: string, targetBytes: number): Promise<{ link: string; directory: string }> {
+	const component = "d".repeat(200);
+	let physical = path.join(root, "deep");
+	await fs.mkdir(physical, { recursive: true });
+	let hop = path.join(root, "h0");
+	await fs.symlink("deep", hop);
+	let index = 0;
+	for (;;) {
+		const next = path.join(physical, component);
+		if (Buffer.byteLength(path.join(next, leaf), "utf8") > targetBytes) break;
+		await fs.mkdir(next);
+		physical = next;
+		index += 1;
+		const nextHop = path.join(root, `h${index}`);
+		await fs.symlink(path.join(`h${index - 1}`, component), nextHop);
+		hop = nextHop;
+	}
+	const shortfall = targetBytes - Buffer.byteLength(path.join(physical, leaf), "utf8") - 1;
+	if (shortfall > 0) {
+		const tail = "d".repeat(shortfall);
+		await fs.mkdir(path.join(physical, tail));
+		physical = path.join(physical, tail);
+		index += 1;
+		const nextHop = path.join(root, `h${index}`);
+		await fs.symlink(path.join(`h${index - 1}`, tail), nextHop);
+		hop = nextHop;
+	}
+	await fs.writeFile(path.join(physical, leaf), "old");
+	const link = path.join(root, "marketplaces.json");
+	// Short body: through the hop chain, not the physical path.
+	await fs.symlink(path.join(path.basename(hop), leaf), link);
+	return { link, directory: physical };
+}
+
 describe("a config write follows a symlinked destination", () => {
 	test("follows a link that sits directly in the config root", async () => {
 		// Where the default profile keeps every one of these files, and the one
@@ -284,31 +332,14 @@ describe("a config write follows a symlinked destination", () => {
 		// measured a 4047-byte resolved destination with a 13-byte basename —
 		// legal, creatable, readable — whose staging name reached 4096 bytes and
 		// was refused. The basename is nowhere near NAME_MAX there; the DIRECTORY
-		// is nearly all of PATH_MAX, so the budget has to come from both.
+		// is nearly all of PATH_MAX, so the budget has to come from both. Below
+		// 4047 the defect does not reproduce, which is how a first attempt at this
+		// test passed against the broken code.
 		const leaf = "registry.json";
-		// Stack 200-byte components, then one sized exactly, so the destination
-		// lands in the window where it is itself legal (under 4096) but has less
-		// than a suffix's worth of room left. Below 4047 the defect does not
-		// reproduce at all, which is how a first attempt at this test passed
-		// against the broken code.
-		let deep = path.join(root, "deep");
-		await fs.mkdir(deep);
-		const component = "d".repeat(200);
-		while (Buffer.byteLength(path.join(deep, component, leaf), "utf8") < 4060) {
-			deep = path.join(deep, component);
-			await fs.mkdir(deep);
-		}
-		const shortfall = 4060 - Buffer.byteLength(path.join(deep, leaf), "utf8") - 1;
-		if (shortfall > 0) {
-			deep = path.join(deep, "d".repeat(shortfall));
-			await fs.mkdir(deep);
-		}
-		const target = path.join(deep, leaf);
-		const link = path.join(root, "marketplaces.json");
-		await fs.writeFile(target, "old");
-		await fs.symlink(target, link);
-		// The window that matters: legal as a path, too long once a 49-byte
-		// suffix is appended to it.
+		const { link, directory } = await deepTargetViaShortHops(leaf, 4060);
+		const target = path.join(directory, leaf);
+		// The window that matters: legal as a path, too long once the suffix is
+		// appended to it.
 		expect(Buffer.byteLength(target, "utf8")).toBeGreaterThan(4047);
 		expect(Buffer.byteLength(target, "utf8")).toBeLessThan(4096);
 
@@ -316,7 +347,30 @@ describe("a config write follows a symlinked destination", () => {
 
 		expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
 		expect(await fs.readFile(target, "utf8")).toBe("new");
-		expect(await fs.readdir(deep)).toEqual(["registry.json"]);
+		expect(await fs.readdir(directory)).toEqual([leaf]);
+	});
+
+	test("falls back to a compact staging name when the directory leaves almost no room", async () => {
+		// A reviewer measured this one: a destination at the very limit, whose
+		// directory leaves fewer bytes than the readable `pid`-and-uuid suffix but
+		// enough for `.` + 8 hex + `.tmp`. A fixed-length fallback failed here,
+		// which is the same mistake as the fixed-length suffix it rescues.
+		const leaf = "r.json";
+		const { link, directory } = await deepTargetViaShortHops(leaf, 4087);
+		// Assert the window rather than trusting the arithmetic, and make it the
+		// window that DISCRIMINATES: a fixed 12-hex fallback needs 17 bytes and
+		// must not fit, while `.` + 8 hex + `.tmp` needs 13 and must. A first
+		// version of this test left 21 bytes, where both fit, so the fixed-length
+		// mutation passed it.
+		const room = 4095 - (Buffer.byteLength(directory, "utf8") + 1);
+		expect(room).toBeGreaterThanOrEqual(13);
+		expect(room).toBeLessThan(17);
+
+		await writeConfigFileAtomically(link, "new", 0o644);
+
+		expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+		expect(await fs.readFile(path.join(directory, leaf), "utf8")).toBe("new");
+		expect(await fs.readdir(directory)).toEqual([leaf]);
 	});
 
 	// A link from one accepted root to another where the two sit on DIFFERENT
