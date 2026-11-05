@@ -30,6 +30,8 @@
 
 ### Fixed
 
+- LSP references, definitions and workspace symbols no longer point at old lines of an open file edited outside OMP; hover and code actions also see its current text
+- LSP diagnostics and renames no longer keep every open file loaded in the language server; files unused for 5 minutes close again when another file opens
 - Thin tool images are padded to the vision model's minimum height or width instead of causing a 400 on the next turn ([#18081](https://github.com/can1357/oh-my-pi/issues/18081))
 - JSON query truncation notices now report the 50KB read budget instead of the bytes shown ([#18022](https://github.com/can1357/oh-my-pi/pull/18022) by [@eggpeat](https://github.com/eggpeat))
 - Extension links stay clickable and extension-drawn replies and custom messages keep their renderers on every launch, not only the first after an edit; `ctx.ui.getLinkClicksAvailable()` no longer turns false on later launches ([#18116](https://github.com/can1357/oh-my-pi/pull/18116) by [@materemias](https://github.com/materemias))

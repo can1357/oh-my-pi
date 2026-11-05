@@ -1741,7 +1741,20 @@ export async function reconcileFileFromDisk(
 		return reopening && client.openFiles.has(uri);
 	}
 	openFile.lastUsedAt = Date.now();
+	return syncOpenFileFromDisk(client, filePath, uri, signal);
+}
 
+/**
+ * Push disk text for an open document whose overlay diverged from it; `true` when a
+ * `didChange` went out. Does not count as a use of the document, so a sync of every
+ * open document leaves idle ones to close.
+ */
+async function syncOpenFileFromDisk(
+	client: LspClient,
+	filePath: string,
+	uri: string,
+	signal?: AbortSignal,
+): Promise<boolean> {
 	// An in-flight OMP write has already synced newer (possibly formatted) text to
 	// the server ahead of committing it to disk; the on-disk file is the stale side,
 	// so reconciling from it would clobber the overlay. Leave it to the write.
@@ -1819,10 +1832,10 @@ export async function reconcileFileFromDisk(
  * request reports success (#15772). Reconciling only the requested target
  * leaves those consumers stale, so sync all open documents first.
  *
- * Files with an in-flight OMP write are skipped by
- * {@link reconcileFileFromDisk} (their overlay leads disk), unchanged files
- * send nothing, and `excludeUri` is left for the caller to sync. Returns the
- * number of documents that were re-synced.
+ * Files with an in-flight OMP write are skipped (their overlay leads disk),
+ * unchanged files send nothing, and `excludeUri` is left for the caller to
+ * sync. The sweep is not a use of each document, so idle ones still close.
+ * Returns the number of documents that were re-synced.
  */
 export async function reconcileOpenFilesFromDisk(
 	client: LspClient,
@@ -1830,9 +1843,11 @@ export async function reconcileOpenFilesFromDisk(
 	excludeUri?: string,
 ): Promise<number> {
 	let reconciled = 0;
-	for (const uri of Array.from(client.openFiles.keys())) {
+	for (const [uri, info] of Array.from(client.openFiles)) {
 		if (uri === excludeUri || !uri.startsWith("file://")) continue;
-		if (await reconcileFileFromDisk(client, uriToFile(uri), signal)) reconciled++;
+		throwIfAborted(signal);
+		if (client.openFiles.get(uri) !== info) continue;
+		if (await syncOpenFileFromDisk(client, uriToFile(uri), uri, signal)) reconciled++;
 	}
 	return reconciled;
 }

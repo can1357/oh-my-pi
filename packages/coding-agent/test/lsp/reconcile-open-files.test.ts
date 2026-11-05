@@ -12,7 +12,7 @@ import type { LspClient } from "@oh-my-pi/pi-coding-agent/lsp/types";
 import { fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/utils";
 
 /** Minimal client double: open files, a diagnostics map, and a frame sink. */
-function fakeClient(openFiles: Map<string, { version: number; languageId: string }>): {
+function fakeClient(openFiles: Map<string, { version: number; languageId: string; lastUsedAt?: number }>): {
 	client: LspClient;
 	frames: string[];
 } {
@@ -45,12 +45,16 @@ describe("reconcileOpenFilesFromDisk", () => {
 			const consumer = path.join(dir, "b.ts");
 			await fs.writeFile(consumer, "const respond = 1;\n");
 			const uri = fileToUri(consumer);
-			const { client, frames } = fakeClient(new Map([[uri, { version: 1, languageId: "typescript" }]]));
+			const { client, frames } = fakeClient(
+				new Map([[uri, { version: 1, languageId: "typescript", lastUsedAt: 0 }]]),
+			);
 
 			expect(await reconcileOpenFilesFromDisk(client)).toBe(1);
 			const didChange = frames.filter(frame => frame.includes("didChange"));
 			expect(didChange.length).toBe(1);
 			expect(didChange[0]).toContain("const respond = 1;");
+			// A sweep is not a use: the document still closes once idle.
+			expect(client.openFiles.get(uri)?.lastUsedAt).toBe(0);
 
 			// In sync now: a second pass sends nothing.
 			expect(await reconcileOpenFilesFromDisk(client)).toBe(0);
