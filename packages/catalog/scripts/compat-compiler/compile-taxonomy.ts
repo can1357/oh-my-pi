@@ -177,6 +177,7 @@ function parseCollapse(node: KdlNodeView): CompiledCollapse {
 	const collapse: CompiledCollapse = {
 		suffixes: [],
 		pairTokens: [],
+		pairTokenExemptProviders: [],
 		lanes: [],
 		routingVariants: [],
 		effortFamilies: [],
@@ -210,6 +211,14 @@ function parseCollapse(node: KdlNodeView): CompiledCollapse {
 					collapse.pairTokens.push(token);
 				}
 				if (child.children || collapse.pairTokens.length === 0) malformed(child);
+				break;
+			case "pair-token-exempt":
+				validateProps(child, []);
+				for (const provider of positionalStrings(child).map(value => value.toLowerCase())) {
+					if (!provider || collapse.pairTokenExemptProviders.includes(provider)) malformed(child);
+					collapse.pairTokenExemptProviders.push(provider);
+				}
+				if (child.children || collapse.pairTokenExemptProviders.length === 0) malformed(child);
 				break;
 			case "thinking-suffix":
 			case "effort-suffix": {

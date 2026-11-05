@@ -390,9 +390,13 @@ export function collapseVariantId(provider: string, model: string): CollapsedVar
  *
  * Unlike {@link collapseVariantId}, this vocabulary-only helper also handles an
  * infix token used to pair live discovery siblings. Negated forms such as
- * `non-thinking` and `no-thinking` are not variants.
+ * `non-thinking` and `no-thinking` are not variants, and neither is any id
+ * of a `pair-token-exempt` provider.
  */
-export function stripThinkingVariantSuffix(model: string): string | undefined {
+export function stripThinkingVariantSuffix(model: string, provider?: string): string | undefined {
+	if (provider !== undefined && rules.taxonomy.collapse.pairTokenExemptProviders.includes(provider.toLowerCase())) {
+		return undefined;
+	}
 	const lower = model.toLowerCase();
 	for (const token of rules.taxonomy.collapse.pairTokens) {
 		const needle = `-${token}`;

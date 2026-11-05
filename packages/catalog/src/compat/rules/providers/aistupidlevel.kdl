@@ -1,0 +1,154 @@
+// AI Stupid Level Smart Router deployment contract
+// (https://aistupidlevel.info/router/docs, read 2026-10-23).
+//
+// One OpenAI-compatible Chat Completions endpoint at
+// https://aistupidlevel.info/v1 in front of Claude, GPT, Gemini, DeepSeek,
+// Kimi and GLM models. A request names either a routing mode (`auto-coding`,
+// `auto-reasoning`, ...), for which the router picks a model from AI Stupid
+// Level's benchmark results, or a real model id, which pins that model. The
+// router calls the chosen model with the user's own provider keys, so the
+// provider bills the user directly and no row carries a per-token price.
+// `GET /v1/models` lists the routing modes and the pinnable model ids with no
+// capability data; the list is the same for every router key.
+provider "aistupidlevel" {
+	default-model "auto-coding"
+	env "AISTUPIDLEVEL_API_KEY"
+	dynamic-models-authoritative #true
+	// `auto` is also an OpenRouter id (a router that accepts images). Same-id
+	// rows on other hosts describe other routers, so the generator must not
+	// backfill these rows from them.
+	skip-cross-provider-reference-fills #true
+	// Deliberately no `discovery` node: `/v1/models` needs a router key and the
+	// routing modes are a documented set, so the bundle is exactly the seed
+	// below. Runtime discovery adds the pinnable model ids and drops a mode the
+	// router stops listing.
+
+	// The routing modes `/v1/models` lists (2026-10-23), in its order.
+	seed api="openai-completions" base-url="https://aistupidlevel.info/v1" bundle="always" {
+		model "auto" name="Auto (Saved Strategy)" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=262144 max-tokens=64000
+		}
+		model "auto-coding" name="Auto Coding" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=262144 max-tokens=64000
+		}
+		model "auto-reasoning" name="Auto Reasoning" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=262144 max-tokens=64000
+		}
+		model "auto-tooling" name="Auto Tool Use" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=262144 max-tokens=64000
+		}
+		model "auto-best" name="Auto Best Overall" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=262144 max-tokens=64000
+		}
+		model "auto-cheapest" name="Auto Cheapest" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=262144 max-tokens=64000
+		}
+		model "auto-fastest" name="Auto Fastest" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=262144 max-tokens=64000
+		}
+		model "auto-fastest-quality" name="Auto Fastest Quality" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=262144 max-tokens=64000
+		}
+		model "auto-consistent" name="Auto Consistent" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=262144 max-tokens=64000
+		}
+		model "auto-value" name="Auto Value" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=262144 max-tokens=64000
+		}
+		model "auto-value-coding" name="Auto Value Coding" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=262144 max-tokens=64000
+		}
+		model "auto-value-reasoning" name="Auto Value Reasoning" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=262144 max-tokens=64000
+		}
+		model "auto-value-tooling" name="Auto Value Tool Use" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=262144 max-tokens=64000
+		}
+		model "auto-task" name="Auto Task" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=262144 max-tokens=64000
+		}
+		model "auto-split" name="Auto Split" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=262144 max-tokens=64000
+		}
+	}
+
+	// Request dialect. The router reads only its documented Chat Completions
+	// parameters, which do not include `store`. Its docs put the output cap of
+	// reasoning models on `max_completion_tokens`, and it accepts that field
+	// for every model.
+	supports-store #false
+	max-tokens-field "max_completion_tokens"
+
+	// One contract for every row, routing mode or pinned id. `models "*"`
+	// outranks the class-, family- and revision-scoped rules in classes/*.kdl,
+	// which describe the vendors' own APIs rather than this router:
+	// - Text only: the router answers image, audio and file parts with
+	//   `400 unsupported_content`.
+	// - 262,144 is the smallest context window in the router's pool (Kimi K2.7
+	//   Code) and 64,000 its smallest output cap (Claude Sonnet 4.6), so both
+	//   hold whichever model answers.
+	// - `reasoning_effort` accepts `none` through `max` for any model; the
+	//   router maps it to the nearest level the chosen model supports, so
+	//   `none` turns reasoning off where the model allows it.
+	models "*" {
+		input-modalities "text"
+		limits-patch {
+			context-window 262144
+			max-tokens 64000
+		}
+		thinking-upgrade-neutral #true
+		thinking-mode "effort"
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh" "max"
+		reasoning-disable-mode "none-effort"
+	}
+	// A routing mode costs whatever the model it routes to costs, which can
+	// change from one request to the next.
+	models "auto" "auto-*" {
+		pricing-status "variable"
+	}
+}

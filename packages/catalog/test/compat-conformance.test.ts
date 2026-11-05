@@ -60,6 +60,7 @@ function collectReferencedProviders(): Map<string, string> {
 	for (const variant of taxonomy.collapse.routingVariants) {
 		for (const provider of variant.providers) referenced.set(provider, `routing-variant ${variant.suffix}`);
 	}
+	for (const provider of taxonomy.collapse.pairTokenExemptProviders) referenced.set(provider, "pair-token-exempt");
 	for (const family of taxonomy.collapse.effortFamilies)
 		referenced.set(family.provider, `effort-family ${family.logical}`);
 	for (const provider of taxonomy.discovery.canonicalRecovery) referenced.set(provider, "recover-canonical-params");

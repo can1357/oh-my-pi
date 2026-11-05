@@ -155,6 +155,8 @@ export interface CompiledCollapse {
 	suffixes: CompiledCollapseSuffix[];
 	/** Bounded (possibly infix) tokens naming the thinking sibling of a bare twin; pair derivation only. */
 	pairTokens: string[];
+	/** Providers whose ids carry pair tokens that name no thinking sibling; `pairTokens` never apply to them. */
+	pairTokenExemptProviders: string[];
 	lanes: CompiledEffortLane[];
 	routingVariants: CompiledRoutingVariant[];
 	effortFamilies: CompiledEffortFamily[];

@@ -1,0 +1,12 @@
+// `/v1/models` needs a router key: it answers 401 `invalid_api_key` both
+// without a bearer key and to a rejected one (verified 2026-10-23), so login
+// validates the pasted key there. Listing models bills nothing.
+auth "aistupidlevel" {
+	name "AI Stupid Level"
+	login "api-key" {
+		auth-url "https://aistupidlevel.info/router/keys"
+		instructions "Create a router key in the AI Stupid Level dashboard and add your provider keys under Provider keys (router keys look like aism_...)"
+		prompt "Paste your AI Stupid Level router key" placeholder="aism_..."
+		validate "models-endpoint" label="AI Stupid Level" url="https://aistupidlevel.info/v1/models"
+	}
+}
