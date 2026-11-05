@@ -157,6 +157,7 @@ import {
 	type MCPLoadResult,
 	MCPManager,
 	type MCPManagerApi,
+	type MCPToolScope,
 	MCPToolCache,
 	type MCPToolsLoadResult,
 	shouldFilterBrowserMCPForPrelude,
@@ -840,6 +841,8 @@ export interface CreateAgentSessionOptions {
 	 * entry keeps precedence and drops the proxy. Ignored for restricted sessions.
 	 */
 	mcpTools?: CustomTool[];
+	/** This session's view of {@link mcpManager} when it shares one it does not own (subagents); see `MCPManagerApi.getTools`. */
+	mcpToolScope?: MCPToolScope;
 
 	/** Enable LSP integration (tool, formatting, diagnostics, warmup). Default: true */
 	enableLsp?: boolean;
@@ -2656,7 +2659,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			},
 			getToolByName: name => session?.getToolByName(name),
 			getToolForEvalBridge: name => session?.getToolForEvalBridge(name),
-			getEvalBridgeToolNames: () => session?.getEvalBridgeToolNames() ?? [],
+			getAdvertisedEvalToolNames: () => session?.getAdvertisedEvalToolNames() ?? [],
 			agentRegistry,
 			// The global lifecycle releases through AgentRegistry.global(); wiring it
 			// onto a caller-supplied registry would report a cancel while releasing an
@@ -2830,6 +2833,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		/** Manager this session created by running discovery (it owns its callbacks); unset when reused. */
 		let ownedMcpManager: MCPManager | undefined;
 		toolSession.mcpManager = mcpManager;
+		toolSession.mcpToolScope = options.mcpToolScope;
 		toolSession.enableMCP = enableMCP;
 		const deferMCPDiscoveryForUI = enableMCP && !mcpManager && options.hasUI === true;
 		const customTools: CustomTool[] = [];
