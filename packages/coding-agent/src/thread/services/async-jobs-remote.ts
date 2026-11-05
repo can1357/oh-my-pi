@@ -18,6 +18,7 @@
  * Its `process` / `widgetInputs` stay here too; main reads them through a
  * {@link WireJobFeed} whose pulls and final push this module answers.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type {
 	AsyncJob,
@@ -56,6 +57,28 @@ import { ignoreSettle, localUnsubscribe } from "./support";
  * row retention, so the row is gone first.
  */
 const LOCAL_INPUTS_RETENTION_MS = 10 * 60 * 1000;
+
+/**
+ * The main-side job whose run is executing on this worker, mirroring the main
+ * manager's own run scope: that scope is an `AsyncLocalStorage`, which cannot
+ * cross a thread, so the worker keeps its own and names the job explicitly on
+ * every registration and slot request.
+ *
+ * It is entered twice. Once at the top of a placed subagent run, from the job
+ * id the main side recorded when it placed that run here — so everything the
+ * subagent does, including an async `bash`, names it. Then again around each
+ * job this worker registers, from the id main returned — so a grandchild names
+ * its own parent rather than the run at the top of the thread.
+ *
+ * Main does not trust what arrives: it honours a name only if it placed that
+ * run on this thread or this thread registered that job.
+ */
+const workerHostJob = new AsyncLocalStorage<string>();
+
+/** Run `fn` with `jobId` as the host of every job this worker registers inside it. */
+export function runWithWorkerHostJob<T>(jobId: string | undefined, fn: () => T): T {
+	return jobId === undefined ? fn() : workerHostJob.run(jobId, fn);
+}
 
 type Remote = RemoteObject<AsyncJobManagerProtocol>;
 
@@ -246,12 +269,16 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 		const feed = local ? new WorkerJobFeed(local) : undefined;
 		const wired: WireJobRun = async ctx => {
 			try {
-				return await run({
-					jobId: ctx.jobId,
-					signal: fromWireSignal(ctx.signal),
-					reportProgress: ctx.reportProgress,
-					markRunning: () => ignoreSettle(ctx.markRunning()),
-				});
+				// This job's own run, so work it starts names it rather than the run
+				// at the top of this thread: a grandchild hands down from its parent.
+				return await runWithWorkerHostJob(ctx.jobId, () =>
+					run({
+						jobId: ctx.jobId,
+						signal: fromWireSignal(ctx.signal),
+						reportProgress: ctx.reportProgress,
+						markRunning: () => ignoreSettle(ctx.markRunning()),
+					}),
+				);
 			} finally {
 				// Sent ahead of the result, so main's final widget read sees the job's last output.
 				if (feed && ctx.pushFeed) ignoreSettle(ctx.pushFeed(feed.delta()));
@@ -265,7 +292,7 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 			onProgress: options?.onProgress,
 			queued: options?.queued,
 			startImmediately: options?.startImmediately,
-			hostJobId: options?.hostJobId,
+			hostJobId: options?.hostJobId ?? workerHostJob.getStore(),
 			foreground: options?.foreground,
 			intent: options?.intent,
 			feed: feed?.wire(),
@@ -276,7 +303,11 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 	}
 
 	async acquireSlot(signal: AbortSignal, request?: SlotRequest): Promise<() => void> {
-		const release = await this.#remote.call("acquireSlot", toWireSignal(signal), request);
+		// Same as registration: a request made inside a placed run names it, so a
+		// spawn with no job row of its own (a speculative launch) still hands down.
+		const scoped: SlotRequest | undefined =
+			request?.hostJobId === undefined ? { ...request, hostJobId: workerHostJob.getStore() } : request;
+		const release = await this.#remote.call("acquireSlot", toWireSignal(signal), scoped);
 		return () => ignoreSettle(release());
 	}
 

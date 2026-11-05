@@ -16,6 +16,7 @@
  * Kept apart from the thread service so importing it never evaluates the service list.
  */
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import { currentHostJobId } from "../async/job-manager";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
 import { setWorkerHostJob } from "./services/async-jobs";
@@ -131,9 +132,17 @@ export async function runSubprocessPlaced(
 	runHere: (options: ExecutorOptions) => Promise<SingleResult>,
 ): Promise<SingleResult> {
 	const placed = pool.place();
+	// The job whose run is placing this subagent — a job id, read from the
+	// manager's own run scope, never the agent id in `options.id`. The two
+	// coincide only for a detached spawn whose id did not collide: `register()`
+	// suffixes a colliding id, and a *blocking* spawn has no job row at all, so
+	// its host is the job further up whose run it is still inside. Recording the
+	// agent id instead named a row the manager resolves to someone else's job,
+	// or to no job, which is the whole of this mechanism's history of defects.
+	const hostJobId = currentHostJobId();
 	let request: SubagentRunRequest | undefined;
 	try {
-		request = placed.worker ? subagentRunRequest(bridgeIntegrationOptions(options)) : undefined;
+		request = placed.worker ? subagentRunRequest(bridgeIntegrationOptions(options), hostJobId) : undefined;
 	} catch (error) {
 		placed.release();
 		throw error;
@@ -145,7 +154,8 @@ export async function runSubprocessPlaced(
 	// here rather than trusting an id the worker sends: the manager's own
 	// per-run scope cannot cross a thread, but this placement can record what
 	// crossed it.
-	const forgetHost = placement.worker ? setWorkerHostJob(placement.worker.threadId, options.id) : undefined;
+	const forgetHost =
+		placement.worker && hostJobId !== undefined ? setWorkerHostJob(placement.worker.threadId, hostJobId) : undefined;
 	try {
 		const worker = placement.worker;
 		if (!worker || !request) return await runHere(options);

@@ -357,6 +357,63 @@ describe("runtime thread services: async jobs", () => {
 		// turn a hang into a named failure, not to measure anything, so it is far
 		// wider than the work.
 	}, 120_000);
+
+	it("a run placed on a worker hosts its own registrations, and each of those hosts the next level", async () => {
+		// What the previous rounds could not reach. The carry used to work only
+		// when the worker itself named a host, and the one name it sent was the
+		// session's agent id — which the manager resolves in a job map, so it
+		// named someone else's job or none at all. Two consequences are asserted
+		// here: a placed run's own work needs no name, and a job that run
+		// registers is nameable in turn, so a grandchild is not stranded.
+		const manager = new AsyncJobManager({ maxRunningJobs: 1 });
+		managers.push(manager);
+		const hostRelease = Promise.withResolvers<void>();
+		const hostId = manager.register(
+			"task",
+			"PlacedHost",
+			async () => {
+				await hostRelease.promise;
+				return "host done";
+			},
+			// The agent id differs from the job id on purpose: only the job id is
+			// a name this manager can resolve.
+			{ id: "job-7", agentId: "PlacedHost", ownerId: "Main" },
+		);
+		expect(hostId).toBe("job-7");
+		expect(manager.atCapacity).toBe(true);
+
+		const worker = await startWorker();
+		const entry = started.at(-1);
+		if (!entry) throw new Error("no worker entry");
+		// Exactly what a real placement records now: the job id, not the agent id.
+		const forgetHost = setWorkerHostJob(entry.peer.threadId, hostId);
+
+		// The run's own work supplies no host — an async `bash` inside a
+		// worker-hosted subagent sends none — and is still granted at a full cap.
+		expect(await worker("placedSlot", manager, hostId)).toBe(true);
+
+		// A job that run registers starts on the host's slot rather than queueing,
+		// and the cap is unchanged because the slot was handed down, not issued.
+		const childId = await worker("placedRegister", manager, hostId, "PlacedHost");
+		if (typeof childId !== "string") throw new Error("placedRegister returned no id");
+		// No wait: main hands the slot down inside the same `register` call the
+		// worker is still blocked on, so the row is already admitted here.
+		expect(manager.getJob(childId)?.waitingForSlot).not.toBe(true);
+		expect(manager.getJob(childId)?.queued).not.toBe(true);
+		expect(manager.atCapacity).toBe(true);
+
+		// The grandchild: work inside the child's run names the child. Before the
+		// child was recorded as this thread's own, that name was refused and the
+		// grandchild queued behind a parent waiting for it.
+		expect(await worker("acquireSlot", manager, "PlacedHost.Child.Leaf", childId)).toBe(true);
+		expect(manager.atCapacity).toBe(true);
+
+		await worker("releaseSlot");
+		await worker("finish", childId, "child done");
+		forgetHost();
+		hostRelease.resolve();
+		await manager.waitForAll();
+	}, 120_000);
 });
 
 describe("runtime thread services: cost gate, event bus, artifacts, storage", () => {

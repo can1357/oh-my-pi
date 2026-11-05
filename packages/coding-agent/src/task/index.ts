@@ -839,14 +839,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			acquire: async signal => {
 				const releasePermit = await this.#permit.acquire(signal);
 				try {
-					// `hostJobId` is read only when this session is in a worker: the
-					// manager's own scope cannot cross a thread, and a subagent's job
-					// id is its agent id, so this names the run that is starting the
-					// spawn. On the main thread the scope already knows and wins.
-					const releaseSlot = await manager.acquireSlot(signal, {
-						jobId: jobId(),
-						hostJobId: this.session.getAgentId?.() ?? undefined,
-					});
+					// No `hostJobId` here: the run that is starting this spawn supplies
+					// it. On the main thread that is the manager's own run scope; on a
+					// worker it is the scope `runSubagentRunRequest` enters from the id
+					// the main side recorded at placement. The session's agent id is
+					// not that fact — it names an agent, not a job row.
+					const releaseSlot = await manager.acquireSlot(signal, { jobId: jobId() });
 					return () => {
 						releaseSlot();
 						releasePermit();
@@ -1802,7 +1800,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				agentId,
 				queued: true,
 				ownerId: this.session.getAgentId?.() ?? undefined,
-				hostJobId: this.session.getAgentId?.() ?? undefined,
 				widgetInputs: createTaskWidgetInputs({
 					manager,
 					agentId,

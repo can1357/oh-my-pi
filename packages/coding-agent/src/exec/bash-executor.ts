@@ -95,14 +95,17 @@ export interface BashExecutorOptions {
 	 */
 	onSessionShellBusy?: () => void;
 	/**
-	 * Return the cancelled result without waiting for the aborted shell to wind
-	 * down. Only an interactive foreground call sets this: a person pressing Esc
-	 * must see `[Command cancelled]` at once, and nothing is accounting for that
-	 * command. Every other caller — an async job holding a running-job slot, a
-	 * subagent's blocking call inside a task spawn that holds one — waits, so the
-	 * command is not reported finished while its shell is still being killed.
-	 * Defaulting to waiting is deliberate: a caller that forgets this option is
-	 * safe, and only an explicit opt-out can release work early.
+	 * Return the cancelled result without waiting for the aborted run and its
+	 * cleanup to settle. Only an interactive foreground call sets this: a person
+	 * pressing Esc must see `[Command cancelled]` at once, and nothing is
+	 * accounting for that command. Every other caller waits.
+	 *
+	 * What waiting buys is the run's own settlement, **not** a reaped process
+	 * group: `Shell.pids()` can report empty while a TERM handler's child is
+	 * still alive, so a job cancelled here can report finished — and free its
+	 * running-job slot — with a process of its own still running. Making the
+	 * abort resolve only once the group is reaped belongs to the native shell
+	 * and is owned by #17855; this option does not close that window.
 	 */
 	fastCancel?: boolean;
 	/**
@@ -166,10 +169,10 @@ export interface BashResult extends OutputSummary {
 const SAFE_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**
- * How long a cancelled command waits for its shell to stop before it reports
- * finished anyway. Long enough for a TERM handler; short enough that a native
- * run which never returns (#10308) cannot pin its caller, or the running-job
- * slot accounting for it, for the life of the process.
+ * How long a cancelled command waits for its run and cleanup to settle before
+ * it reports finished anyway. Long enough for a TERM handler to be given a
+ * chance; short enough that a native run which never returns (#10308) cannot
+ * pin its caller for the life of the process.
  */
 const CANCEL_WINDDOWN_MAX_MS = 10_000;
 
@@ -861,9 +864,9 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			} else {
 				void Promise.allSettled([runPromise, cleanupPromise]);
 			}
-			// Unless the caller asked for a fast answer, the command is not reported
-			// finished until its shell has stopped: whatever accounts for this run (a
-			// running-job slot) then cannot free while the process is still alive.
+			// Unless the caller asked for a fast answer, the cancelled command is not
+			// reported finished until its own run and cleanup settle. That is not the
+			// same as the process being gone — see `fastCancel` above and #17855.
 			// Bounded, because a native run that never returns (#10308) must not hold
 			// its caller for the life of the process.
 			if (options?.fastCancel !== true) {

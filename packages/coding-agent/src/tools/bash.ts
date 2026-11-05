@@ -1081,7 +1081,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						onStart: probe => {
 							pids = probe;
 						},
-						// No fastCancel: a cancelled job stays charged until its shell stops.
+						// No fastCancel: a cancelled job stays charged until its run settles.
 						onSessionShellBusy: () => notices.push(SESSION_SHELL_BUSY_NOTICE),
 					}).finally(() => {
 						pids = NO_PIDS;
@@ -1827,9 +1827,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 					onSessionShellBusy: () => pendingNotices.push(SESSION_SHELL_BUSY_NOTICE),
 					// A person watching this call must see the cancellation at once, and
-					// nothing is accounting for it. Every other caller of this path — a
-					// subagent inside a task spawn that holds a running-job slot — waits
-					// for the shell to stop, so its slot is not freed around a live process.
+					// nothing is accounting for it. Every other caller of this path waits
+					// for the run to settle instead; that still does not prove the process
+					// is gone (#17855 owns the reaped-group signal).
 					fastCancel: this.session.hasUI === true,
 				});
 		const wallTimeMs = performance.now() - wallTimeStart;

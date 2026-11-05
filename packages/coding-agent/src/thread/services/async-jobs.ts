@@ -247,10 +247,16 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 			),
 		register: (manager, type, label, run, options) => {
 			const feed = options?.feed ? new JobFeedMirror(options.feed) : undefined;
-			return manager.register(
+			// A job this worker registered is this worker's own, so the worker may
+			// name it as the host of the work that job's run starts — which is how a
+			// grandchild two levels down a worker chain reaches a slot at all.
+			// Assigned right after `register` returns and cleared when the run ends;
+			// a job cancelled before it ran leaves its entry to the thread's exit.
+			const recorded: { forget?: () => void } = {};
+			const id = manager.register(
 				type,
 				label,
-				ctx => {
+				async ctx => {
 					const wire: WireRunContext = {
 						jobId: ctx.jobId,
 						signal: toWireSignal(ctx.signal),
@@ -258,10 +264,17 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 						markRunning: ctx.markRunning,
 						pushFeed: feed ? delta => feed.apply(delta, true) : undefined,
 					};
-					return run(wire);
+					try {
+						return await run(wire);
+					} finally {
+						recorded.forget?.();
+					}
 				},
 				mainRegisterOptions(options, feed, threadId),
 			);
+			recorded.forget = setWorkerHostJob(threadId, id);
+			cleanups.track(threadId, () => recorded.forget?.());
+			return id;
 		},
 		// Tracked, so a worker that exits holding a slot gives it back. A worker
 		// that exits while still waiting gives up its place in line too, so a dead
