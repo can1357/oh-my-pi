@@ -106,7 +106,7 @@ describe("parseAgentFields", () => {
 		).toEqual(["read", "grep"]);
 	});
 
-	test("gives a malformed tools declaration only the required child yield tool, not default built-ins", async () => {
+	test("gives a malformed tools declaration only the required child yield tool and its handback, not default built-ins", async () => {
 		const fields = parseAgentFields({ name: "quiet", description: "desc", tools: 42 });
 		if (!fields) throw new Error("agent fields did not parse");
 		const session: ToolSession = {
@@ -122,7 +122,7 @@ describe("parseAgentFields", () => {
 		};
 
 		const plan = await resolveBuiltinToolPlan(session, fields.tools);
-		expect(plan.names).toEqual(["yield"]);
+		expect(plan.names).toEqual(["yield", "handback"]);
 	});
 
 	test("maps legacy search alias to grep and keeps find canonical", () => {

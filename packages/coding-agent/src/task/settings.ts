@@ -598,6 +598,25 @@ export const cfgTaskSoftRequestBudgetNotice = register({
 	},
 });
 
+export const cfgTaskTokenBudget = register({
+	id: "task.tokenBudget",
+	type: "number",
+	default: 0,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Subagent Token Budget",
+		description:
+			"Soft per-subagent context-token budget for one run (input + output tokens the child consumes). Crossing 50% injects one `<total_tokens>N tokens left of M</total_tokens>` aside so the child can plan by tokens, not requests; crossing 90% injects one wrap-up steering notice. 0 disables the guard. Every run, wake, revival and workpool turn uses it. This is not the goal-mode token budget (the goal tool's `token_budget`, which caps a whole goal across turns).",
+		options: [
+			{ value: "0", label: "Disabled" },
+			{ value: "500000", label: "500K tokens" },
+			{ value: "1000000", label: "1M tokens" },
+			{ value: "2000000", label: "2M tokens" },
+		],
+	},
+});
+
 export const cfgTaskMaxEffort = register({
 	id: "task.maxEffort",
 	type: "enum",

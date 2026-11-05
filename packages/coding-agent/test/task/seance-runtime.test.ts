@@ -417,7 +417,7 @@ describe("seance startup contracts", () => {
 			expect(revived.systemPrompt).toEqual(warmPrompt);
 			for (const markerName of markerNames) expect(revived.systemPrompt.join("\n")).not.toContain(markerName);
 			expect(await fs.readFile(sourceFile, "utf8")).toBe(sourceText);
-			expect(warmToolNames).toEqual(["glob", "grep", "read", "yield"]);
+			expect(warmToolNames).toEqual(["glob", "grep", "handback", "read", "yield"]);
 			expect(revived.getActiveToolNames().toSorted()).toEqual(warmToolNames);
 			expect(extensionLoaded).toBe(false);
 		} finally {

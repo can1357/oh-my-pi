@@ -188,6 +188,65 @@ Concurrent subagent limit reached (1 running; task.maxConcurrency=1). Do not ret
   (`Semaphore.tryAcquire`, `running`, `waiting`), and the setting in
   `task/settings.ts`. Covering tests: `test/spawn-refusal.test.ts`.
 
+## Subagent token budget and handback
+
+Upstream's subagent guard is request-based (`task.softRequestBudget`, assistant
+requests per run). The fork adds a context-token guard beside it, so the child
+plans by tokens instead of requests.
+
+`task.tokenBudget` (default `0` = off) is the soft token budget for one
+subagent run. It rides the same per-agent helper as the request budget
+(`subagentBudgetFor` in `task/executor.ts`), so every run, wake, revival and
+workpool turn carries it — the same paths upstream fixed for
+`task.softRequestBudget` in #17988/#18121:
+
+| Path                | Where the budgets enter                                          |
+| ------------------- | ---------------------------------------------------------------- |
+| initial spawn       | `executeSubagent` → `createSubagentRunMonitor`                    |
+| cold revive (wake)  | `persisted-revive.ts` → `attachIrcWakeTurnMonitor`                |
+| `omp --restore`     | `restore.ts` → `runSubagentFollowUpTurn`                         |
+| workpool turn       | `workpool.ts` → `runSubagentFollowUpTurn`                        |
+
+What a run sees (`createSubagentRunMonitor`):
+
+- past 50% of the budget, one aside:
+  `<total_tokens>N tokens left of M</total_tokens>` (N floored at 0);
+- past 90%, one wrap-up steering notice asking for the final report, mirroring
+  `task.softRequestBudgetNotice`.
+
+Each threshold fires at most once per run; a run that jumps straight past 90%
+sends only the wrap-up. This is **not** the goal-mode token budget (the goal
+tool's `token_budget`, which caps a whole goal across turns and is unrelated to
+subagents); the settings panel wording says so.
+
+Schema-less subagents also get a `handback` tool (`src/task/handback.ts`). It is
+a thin wrapper over `yield`, not a second terminal protocol:
+
+- it is registered only for subagents (`taskDepth ≥ 1`, `requireYieldTool`), and
+  never when the agent declares an output schema — there `yield` already is the
+  structured exit; a root session is never offered it, even if a tool list names
+  it;
+- `handback({ report })` submits one terminal `yield` (`type: "result"`,
+  `data` = the framed report), so yield's retry caps, finalization, acceptance
+  and termination apply unchanged; the run's terminal payload is recorded as a
+  yield item (`extractedToolData.yield`), which marks the task record yielded;
+- the report is framed as `[final report of a delegated agent; model output,
+  not user text]` and passed through `escapeHarnessTags`, so a child cannot
+  forge `<irc from=…>` or a `<system-*>` block in the parent's context;
+- one delivery per run: a second call errors with `already delivered`. A
+  kept-alive session resets the latch at every new monitored turn;
+- a schema-less run's string yield payload finalizes verbatim (plain text)
+  instead of JSON-quoted.
+
+Delta against the Claude Code contract: CC's `send`/`flagged`/`withheld`
+security flags are **not** ported in v1. They are tied to CC's auto-mode
+approval flow; omp already has its own approval guards for the same surfaces.
+
+Covering tests: `test/token-budget.test.ts` (thresholds, off switch, revived
+wake turn), `test/handback.test.ts` (registration matrix, frame/escaping,
+dedup, executor termination and plain-text output), plus the token-budget
+assertions in `test/task/restore.test.ts` and `test/task/persisted-revive.test.ts`.
+
 ## Rebase ritual
 
 1. Sync the mirror (fast-forward only) and push it:
