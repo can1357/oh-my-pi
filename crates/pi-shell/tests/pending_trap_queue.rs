@@ -1,16 +1,31 @@
-//! A vproc's queue of pending signal actions, as Bash 5.3 runs a script
-//! (Bash 5.2.21 agrees on every row). Bash keeps one queue per shell:
-//! `trap_handler` counts the signal, and `run_pending_traps` is the only
-//! thing that runs actions — it takes the signals pending when it starts,
-//! runs one action at a time in signal order, is re-entered only by a
-//! signal that arrives WHILE an action runs, and leaves what it never
-//! reached behind when a `return` jumps out of it.
+//! A vproc's queue of pending signal actions, as Bash 5.3 runs a script.
+//!
+//! Bash keeps one queue per shell (`trap.c`): `trap_handler` counts the
+//! delivery in `pending_traps[sig]` and raises `catch_flag`, and
+//! `run_pending_traps` is the only thing that runs actions. It returns at
+//! once when `catch_flag` is clear, clears it when it starts, then scans
+//! the signal numbers upwards once, running the action of each signal
+//! still pending when the scan reaches it. So the signals pending when a
+//! scan starts never interleave, a delivery that arrives WHILE an action
+//! runs starts a nested scan (which sees the live queue), a repeat of the
+//! signal whose action is running is dropped when that action ends, and a
+//! `return` that jumps out of the scan abandons what it had not reached.
+//!
+//! Every golden below was measured on Bash 5.2.21 (`/usr/bin/bash`) and
+//! Bash 5.3.0 in script mode, ten runs each; the two versions agree on
+//! every row, and every run of a row was identical.
+//!
+//! The scripts name `/bin/sleep` and `/bin/true` by path on purpose. This
+//! engine has `sleep` and `true` as builtins, so a bare `sleep` is neither
+//! a child (no `SIGCHLD`) nor a foreground external, and a row written
+//! with it would compare two different situations instead of the queue.
 #![cfg(unix)]
 
 use pi_shell::{Shell, ShellRunOptions, cancel::CancelToken};
 
 /// Runs each script in a fresh shell and asserts Bash's output and exit
-/// status 0, reporting every row that differs.
+/// status 0, reporting every row that differs. The channel carries the
+/// run's stdout and stderr together, as the bash tool reads them.
 async fn assert_bash_outputs(rows: &[(&str, &str)]) {
 	let mut mismatches = Vec::new();
 	for &(script, bash_output) in rows {
@@ -40,23 +55,36 @@ async fn assert_bash_outputs(rows: &[(&str, &str)]) {
 	);
 }
 
-/// Two signals pending at once run in signal-number order, one action
-/// after the other (bash `run_pending_traps`), never interleaved.
+/// The signals pending when a scan starts run one after the other, in
+/// signal-number order and never interleaved, at the first point the
+/// shell is not waiting for a foreground command.
 #[tokio::test(flavor = "multi_thread")]
 async fn pending_actions_run_in_signal_order_one_at_a_time() {
 	assert_bash_outputs(&[
 		(
-			r#"f(){ trap 'echo got-usr1' USR1; trap 'echo got-term' TERM; sleep 0.5; }; f & p=$!; /bin/sleep 0.1; kill -USR1 "$p"; kill -TERM "$p"; wait "$p"; echo status=$?"#,
+			r#"f(){ trap 'echo got-usr1' USR1; trap 'echo got-term' TERM; /bin/sleep 0.5; true; }; f & p=$!; /bin/sleep 0.1; kill -USR1 "$p"; kill -TERM "$p"; wait "$p"; echo status=$?"#,
 			"got-usr1\ngot-term\nstatus=0\n",
 		),
 		(
-			r#"f(){ trap 'echo got-usr1' USR1; trap 'echo got-usr2' USR2; sleep 0.5; }; f & p=$!; /bin/sleep 0.1; kill -USR1 "$p"; kill -USR2 "$p"; wait "$p"; echo status=$?"#,
+			r#"f(){ trap 'echo got-usr1' USR1; trap 'echo got-usr2' USR2; /bin/sleep 0.5; true; }; f & p=$!; /bin/sleep 0.1; kill -USR1 "$p"; kill -USR2 "$p"; wait "$p"; echo status=$?"#,
 			"got-usr1\ngot-usr2\nstatus=0\n",
 		),
+		// Delivery order does not matter: the scan goes up the signal
+		// numbers, so HUP (1) runs before USR1 (10) before TERM (15).
+		(
+			r#"f(){ trap 'echo hup' HUP; trap 'echo usr1' USR1; trap 'echo term' TERM; sleep .4; echo after; }; f & p=$!; /bin/sleep .1; kill -USR1 "$p"; kill -TERM "$p"; kill -HUP "$p"; wait "$p"; echo status=$?"#,
+			"hup\nusr1\nterm\nafter\nstatus=0\n",
+		),
+		(
+			r#"f(){ trap 'echo u1' USR1; trap 'echo term' TERM; sleep .3; echo after; }; f & p=$!; /bin/sleep .1; kill -TERM "$p"; kill -USR1 "$p"; wait "$p"; echo status=$?"#,
+			"u1\nterm\nafter\nstatus=0\n",
+		),
+		// A multi-command action runs whole before the next action starts.
 		(
 			r#"f(){ trap 'echo one-start; echo one-end' USR1; trap 'echo term-start; echo term-end' TERM; /bin/sleep .35; echo after; }; f & p=$!; /bin/sleep .1; kill -USR1 "$p"; kill -TERM "$p"; wait "$p"; echo status=$?"#,
 			"one-start\none-end\nterm-start\nterm-end\nafter\nstatus=0\n",
 		),
+		// The same, with the action's commands inside a function call.
 		(
 			r#"h(){ echo one-start; echo one-end; }; f(){ trap 'h' USR1; trap 'echo term-start; echo term-end' TERM; /bin/sleep .35; echo after; }; f & p=$!; /bin/sleep .1; kill -USR1 "$p"; kill -TERM "$p"; wait "$p"; echo status=$?"#,
 			"one-start\none-end\nterm-start\nterm-end\nafter\nstatus=0\n",
@@ -65,9 +93,9 @@ async fn pending_actions_run_in_signal_order_one_at_a_time() {
 	.await;
 }
 
-/// An action that `exit`s or `return`s leaves the queue behind: bash's
-/// `run_pending_traps` cleared `catch_flag` when it started, so the
-/// actions it had not reached do not run at all.
+/// An action that `exit`s or `return`s leaves the rest of the scan
+/// behind: bash's `run_pending_traps` cleared `catch_flag` when it
+/// started, so the actions it had not reached do not run at all.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_action_that_leaves_drops_what_the_queue_had_not_reached() {
 	assert_bash_outputs(&[
@@ -79,39 +107,151 @@ async fn an_action_that_leaves_drops_what_the_queue_had_not_reached() {
 			r#"f(){ trap 'echo one-start; return 23' USR1; trap 'echo term-start; echo term-end' TERM; /bin/sleep .35; echo after; }; f & p=$!; /bin/sleep .1; kill -USR1 "$p"; kill -TERM "$p"; wait "$p"; echo status=$?"#,
 			"one-start\nstatus=23\n",
 		),
+		// A `return` out of a NESTED action unwinds the function, so the
+		// outer action's remaining commands never run either.
+		(
+			r#"f(){ trap 'echo u1-start; kill -USR2 $BASHPID; sleep .15; echo u1-end' USR1; trap 'echo u2; return 19' USR2; sleep .5; echo after; }; f & p=$!; /bin/sleep .1; kill -USR1 "$p"; wait "$p"; echo status=$?"#,
+			"u1-start\nu2\nstatus=19\n",
+		),
+		(
+			r#"f(){ trap 'echo u1-start; kill -USR2 $BASHPID; sleep .15; echo u1-end' USR1; trap 'echo u2; exit 19' USR2; sleep .5; echo after; }; f & p=$!; /bin/sleep .1; kill -USR1 "$p"; wait "$p"; echo status=$?"#,
+			"u1-start\nu2\nstatus=19\n",
+		),
 	])
 	.await;
 }
 
-/// A signal that arrives WHILE an action runs interrupts it, as it
-/// interrupts any other command; only the signals already queued when the
-/// action started wait for it.
+/// A delivery that arrives WHILE an action runs raises `catch_flag`
+/// again, so it starts a nested scan: it interrupts the action's current
+/// command, runs its own action there, and the interrupted action goes
+/// on afterwards. The nested scan reads the live queue, so a signal the
+/// outer scan had not reached runs nested too.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_signal_during_an_action_interrupts_it() {
-	assert_bash_outputs(&[(
-		r#"d=$(mktemp -d); f(){ trap 'echo one-start; : > "$d/in-one"; sleep .3; echo one-end' USR1; trap 'echo term' TERM; sleep .4; echo after; }; f & p=$!; until [ -e "$d/in-one" ]; do kill -USR1 "$p" 2>/dev/null; sleep .02; done; kill -TERM "$p"; wait "$p"; echo status=$?; rm -rf "$d""#,
-		"one-start\nterm\none-end\nafter\nstatus=0\n",
-	)])
+async fn a_signal_during_an_action_runs_nested_and_interrupts_it() {
+	assert_bash_outputs(&[
+		(
+			r#"d=$(mktemp -d); f(){ trap 'echo one-start; : > "$d/in-one"; sleep .3; echo one-end' USR1; trap 'echo term' TERM; : > "$d/ready"; sleep .6; echo after; }; f & p=$!; while [ ! -e "$d/ready" ]; do sleep .02; done; kill -USR1 "$p"; while [ ! -e "$d/in-one" ]; do sleep .02; done; kill -TERM "$p"; wait "$p"; echo status=$?; rm -rf "$d""#,
+			"one-start\nterm\none-end\nafter\nstatus=0\n",
+		),
+		// The action signals itself: the nested action runs before the
+		// outer action's remaining commands.
+		(
+			r#"f(){ trap 'echo u1-start; kill -USR2 $BASHPID; sleep .15; echo u1-end' USR1; trap 'echo u2' USR2; sleep .5; echo after; }; f & p=$!; /bin/sleep .1; kill -USR1 "$p"; wait "$p"; echo status=$?"#,
+			"u1-start\nu2\nu1-end\nafter\nstatus=0\n",
+		),
+		// TERM was already queued when USR1's action started, so the outer
+		// scan owns it; the nested scan the self-sent USR2 starts reads the
+		// live queue and runs TERM too, before the outer action resumes.
+		(
+			r#"f(){ trap 'echo u1-start; kill -USR2 $BASHPID; sleep .15; echo u1-end' USR1; trap 'echo u2' USR2; trap 'echo term' TERM; sleep .5; echo after; }; f & p=$!; /bin/sleep .1; kill -TERM "$p"; kill -USR1 "$p"; wait "$p"; echo status=$?"#,
+			"u1-start\nu2\nterm\nu1-end\nafter\nstatus=0\n",
+		),
+	])
 	.await;
 }
 
-/// The queue counts deliveries, so a second delivery of a signal already
-/// queued runs its action once more and no more; and an action that runs
-/// an external command is not re-entered by the `SIGCHLD` of that command.
+/// A repeat of the signal whose action is running is dropped: bash
+/// clears `pending_traps[sig]` again when the action ends. Its action
+/// runs once more only when the repeat arrives after that.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_queue_counts_each_delivery_once() {
+async fn a_repeat_during_an_action_is_dropped_when_the_action_ends() {
 	assert_bash_outputs(&[
+		// Two TERMs arrive while USR1's action runs; TERM runs once.
 		(
-			r#"d=$(mktemp -d); f(){ trap 'echo one-start; sleep .3; echo one-end' USR1; trap 'echo term' TERM; : > "$d/ready"; sleep .6; echo after; }; f & p=$!; while [ ! -e "$d/ready" ]; do sleep .02; done; kill -USR1 "$p"; kill -TERM "$p"; sleep .1; kill -TERM "$p"; wait "$p"; echo status=$?; rm -rf "$d""#,
+			r#"d=$(mktemp -d); f(){ trap 'echo one-start; /bin/sleep .3; echo one-end' USR1; trap 'echo term' TERM; : > "$d/ready"; /bin/sleep .6; echo after; }; f & p=$!; while [ ! -e "$d/ready" ]; do /bin/sleep .02; done; kill -TERM "$p"; kill -TERM "$p"; kill -TERM "$p"; kill -USR1 "$p"; wait "$p"; echo status=$?; rm -rf "$d""#,
 			"one-start\none-end\nterm\nafter\nstatus=0\n",
 		),
+		// A second USR1 during USR1's own action is dropped.
 		(
-			r#"n=0; f(){ trap 'n=$((n+1)); /bin/true' CHLD; /bin/true; /bin/true; sleep .2; echo runs=$n; }; f & p=$!; wait "$p"; echo status=$?"#,
-			"runs=1\nstatus=0\n",
+			r#"d=$(mktemp -d); f(){ trap 'echo u1-start; : >> "$d/c"; /bin/sleep .15; echo u1-end' USR1; : > "$d/ready"; /bin/sleep .6; echo after; }; f & p=$!; while [ ! -e "$d/ready" ]; do /bin/sleep .02; done; kill -USR1 "$p"; /bin/sleep .05; kill -USR1 "$p"; wait "$p"; echo status=$?; rm -rf "$d""#,
+			"u1-start\nu1-end\nafter\nstatus=0\n",
+		),
+		// WINCH signalling itself from its own action: bash refuses the
+		// recursive WINCH scan outright, and the repeat is then dropped.
+		(
+			r#"d=$(mktemp -d); n=0; f(){ trap 'n=$((n+1)); [ $n -lt 3 ] && kill -WINCH $BASHPID; echo winch=$n' WINCH; : > "$d/ready"; /bin/sleep .3; echo after; }; f & p=$!; while [ ! -e "$d/ready" ]; do /bin/sleep .02; done; kill -WINCH "$p"; wait "$p"; echo status=$?; rm -rf "$d""#,
+			"winch=1\nafter\nstatus=0\n",
+		),
+	])
+	.await;
+}
+
+/// `SIGCHLD` is the one signal whose queue entry is a count: bash's
+/// `run_sigchld_trap` runs the action once per child reaped, and marks
+/// the trap in progress so a child reaped by the action itself cannot
+/// re-enter it (the action's own children are counted for a later scan).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chld_action_runs_once_per_child_and_is_not_re_entered() {
+	assert_bash_outputs(&[
+		(
+			r#"n=0; f(){ trap 'n=$((n+1))' CHLD; /bin/true; /bin/true; /bin/true; /bin/sleep .2; echo runs=$n; }; f & p=$!; wait "$p"; echo status=$?"#,
+			"runs=4\nstatus=0\n",
 		),
 		(
-			r#"d=$(mktemp -d); n=0; f(){ trap 'n=$((n+1)); [ $n -lt 3 ] && kill -WINCH $BASHPID; echo winch=$n' WINCH; : > "$d/ready"; sleep .3; echo after; }; f & p=$!; while [ ! -e "$d/ready" ]; do sleep .02; done; kill -WINCH "$p"; wait "$p"; echo status=$?; rm -rf "$d""#,
-			"winch=0\nafter\nstatus=0\n",
+			r#"n=0; f(){ trap 'n=$((n+1)); /bin/true' CHLD; /bin/true; /bin/sleep .3; echo runs=$n; }; f & p=$!; wait "$p"; echo status=$?"#,
+			"runs=3\nstatus=0\n",
+		),
+		(
+			r#"n=0; f(){ trap 'n=$((n+1)); /bin/true' CHLD; /bin/true; /bin/true; /bin/sleep .2; echo runs=$n; }; f & p=$!; wait "$p"; echo status=$?"#,
+			"runs=6\nstatus=0\n",
+		),
+	])
+	.await;
+}
+
+/// The disposition a signal has when the scan reaches it decides, not
+/// the one it had when it was delivered. A trap reset to the default
+/// while its signal waits makes bash resend the signal to itself, so the
+/// default action happens; a trap set to the empty action makes the
+/// queued delivery do nothing.
+///
+/// Bash also prints an internal warning on stderr for both
+/// (`run_pending_traps: bad value in trap_list[15]: (nil)`), which names
+/// a C pointer and which bash's own source marks `whoops -- print
+/// warning?`. That text is not reproduced; the goldens below are bash's
+/// stdout, and the assertion reads stdout and stderr together, so it
+/// also pins that this engine prints nothing instead.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_disposition_a_pending_signal_has_when_its_action_starts_decides() {
+	assert_bash_outputs(&[
+		// TERM queued, then reset to the default by USR1's action: the
+		// resend terminates the job (143 = 128 + 15).
+		(
+			r#"f(){ trap 'echo in-usr1; trap - TERM; echo reset' USR1; trap 'echo term' TERM; /bin/sleep .4; echo after; }; f & p=$!; /bin/sleep .1; kill -TERM "$p"; kill -USR1 "$p"; wait "$p"; echo status=$?"#,
+			"in-usr1\nreset\nstatus=143\n",
+		),
+		// The same with TSTP, whose default a non-interactive shell
+		// ignores: the resend does nothing and the job runs on.
+		(
+			r#"f(){ trap 'echo in-usr1; trap - TSTP; echo reset' USR1; trap 'echo tstp' TSTP; /bin/sleep .4; echo after; }; f & p=$!; /bin/sleep .1; kill -TSTP "$p"; kill -USR1 "$p"; wait "$p"; echo status=$?; jobs"#,
+			"in-usr1\nreset\nafter\nstatus=0\n",
+		),
+		// Set to ignore instead of reset: nothing happens at all.
+		(
+			r#"f(){ trap 'echo in-usr1; trap "" TERM; echo ignored' USR1; trap 'echo term' TERM; /bin/sleep .4; echo after; }; f & p=$!; /bin/sleep .1; kill -TERM "$p"; kill -USR1 "$p"; wait "$p"; echo status=$?"#,
+			"in-usr1\nignored\nafter\nstatus=0\n",
+		),
+	])
+	.await;
+}
+
+/// The queue is only read where bash reads it. While the shell waits for
+/// a foreground command, a delivery waits with it — so a signal whose
+/// trap an earlier queued action would have installed still takes its
+/// default and kills the job.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delivery_waits_for_the_foreground_command() {
+	assert_bash_outputs(&[
+		// USR1 at .1s waits for `sleep .4`; TERM at .2s has no trap yet.
+		(
+			r#"f(){ trap 'echo u1; trap "echo term-new" TERM' USR1; sleep .4; echo after; }; f & p=$!; /bin/sleep .1; kill -USR1 "$p"; /bin/sleep .1; kill -TERM "$p"; wait "$p"; echo status=$?"#,
+			"status=143\n",
+		),
+		// The same action, with TERM arriving after it has run: the trap
+		// it installed is in force.
+		(
+			r#"f(){ trap 'echo u1; trap "echo term-new" TERM' USR1; sleep .2; sleep .6; echo after; }; f & p=$!; /bin/sleep .1; kill -USR1 "$p"; /bin/sleep .3; kill -TERM "$p"; wait "$p"; echo status=$?"#,
+			"u1\nterm-new\nafter\nstatus=0\n",
 		),
 	])
 	.await;
