@@ -468,6 +468,8 @@ export interface ExecutorOptions {
 	asyncJobManager?: AsyncJobManagerApi;
 	/** Parent session whose stored credential affinities seed the child session. */
 	credentialSourceSessionId?: string;
+	/** Peer-terminal agents registered on the parent's A2A bridge; rendered into the subagent prompt so it can delegate to them by name. */
+	a2aPeers?: readonly string[];
 	worktree?: string;
 	agent: AgentDefinition;
 	task: string;
@@ -4102,6 +4104,8 @@ interface SubagentPromptInputs {
 	ircRenders: Map<string, IrcPeerRosterData>;
 	/** Peer roster of the prompt the parked session held; a warm revive renders it again. */
 	ircRoster?: IrcPeerRosterData;
+	/** Peer-terminal names from the parent's A2A bridge, fixed at spawn. */
+	a2aPeers: readonly string[];
 	/** Set while a warm revive rebuilds the session. */
 	reviving: boolean;
 }
@@ -4190,6 +4194,7 @@ function buildSubagentSessionOptions(
 				ircParkedCount: ircRoster?.parkedCount ?? 0,
 				ircOmittedCount: ircRoster?.omittedCount ?? 0,
 				ircSelfId: inputs.ircEnabled ? inputs.id : "",
+				a2aPeers: inputs.a2aPeers,
 			});
 			if (ircRoster) recordIrcRender(inputs, subagentPrompt, ircRoster);
 			// Per-spawn text (context, worktree, IRC roster) goes after the trailing
@@ -5068,6 +5073,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					ircRoot: {},
 					ircRenders: new Map(),
 					reviving: false,
+					a2aPeers: options.a2aPeers ?? [],
 				},
 			};
 

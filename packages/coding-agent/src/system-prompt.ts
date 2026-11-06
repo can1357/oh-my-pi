@@ -559,6 +559,8 @@ export interface BuildSystemPromptOptions {
 	taskMaxConcurrency?: number;
 	/** Whether IRC-backed parallel coordination can be included in delegation policy. */
 	taskIrcEnabled?: boolean;
+	/** Names of the peer-terminal agents registered on the session's A2A bridge; enables the peer-network section. */
+	a2aPeers?: readonly string[];
 	/** Whether the read-only `scout` subagent is spawnable (not disabled, allowed by spawn policy). Defaults to true. */
 	scoutAvailable?: boolean;
 	/** Active model's delegation appetite (catalog `delegation-bias` axis); selects the Delegation section's wording. Default: `eager`. */
@@ -681,6 +683,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		taskBatch = true,
 		taskMaxConcurrency = 0,
 		taskIrcEnabled = false,
+		a2aPeers = [],
 		secretsEnabled = false,
 		workspaceTree: providedWorkspaceTree,
 		scoutAvailable = true,
@@ -1026,6 +1029,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		MAX_CONCURRENCY: normalizeConcurrencyLimit(taskMaxConcurrency),
 		scoutAvailable,
 		taskIrcEnabled,
+		a2aPeers,
+		a2aPeersList: a2aPeers.join(", "),
 		secretsEnabled,
 		browserEnabled: evalPreludes.some(prelude => prelude.name === "browser"),
 		computerEnabled: evalPreludes.some(prelude => prelude.name === "computer"),

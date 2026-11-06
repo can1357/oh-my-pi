@@ -782,6 +782,11 @@ function buildExecutorOptions(
 		additionalDirectories: session.additionalDirectories,
 		getApiKey: session.getApiKey,
 		credentialSourceSessionId: session.getCredentialSourceSessionId?.(),
+		a2aPeers:
+			session
+				.getA2aBridge?.()
+				?.list()
+				.map(agent => agent.name) ?? [],
 		agent: policy.effectiveAgent,
 		task: renderSubagentUserPrompt(request.assignment),
 		assignment: request.assignment.trim(),
