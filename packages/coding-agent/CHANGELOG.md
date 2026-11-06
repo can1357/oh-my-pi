@@ -4,25 +4,6 @@
 
 ### Added
 
-- Added `skills.manualSkills` glob patterns to keep skills available manually while hiding them from the model catalog, without editing their `SKILL.md` files ([#18114](https://github.com/can1357/oh-my-pi/pull/18114) by [@Shadorain](https://github.com/Shadorain))
-- Added Keenable as a web search engine (`web/keenable`). It uses `KEENABLE_API_KEY` or a stored `keenable` credential when present; an explicit selection without a key uses Keenable's keyless public endpoint ([#17953](https://github.com/can1357/oh-my-pi/pull/17953) by [@KGKallasmaa](https://github.com/KGKallasmaa))
-- Bash commands now visualize execution incrementally in Raw or Python-like Pseudo, with variable values beside their latest setter and bounded replay history for foreground and background jobs; PTY and user-shell runs retain their plain command view.
-- Added opt-in auto-update (`update.auto`, offered by a new setup wizard step): a launch that finds a newer release installs it in the background through whatever installed omp (standalone binary, Homebrew, mise, bun, npm), shows the version and download progress beside the welcome banner's version, and the next launch runs it. Quitting mid-update does not interrupt it. Skipped under Tern, which updates its omp itself, and on Nix and source checkouts
-- `omp update` now refuses to start while another update (including a background auto-update) is installing, instead of running two installers at once
-- Added `none` to `edit.mode` (and `PI_EDIT_VARIANT`): it removes the `edit` tool and keeps `bash` available even when `bash.enabled` is off
-- Added the default-off `providers.openaiResponsesWebsockets` setting for catalog-supported standard Responses models, independently of Codex; model/request `false` always disables it ([#17354](https://github.com/can1357/oh-my-pi/pull/17354) by [@TatsukiMeng](https://github.com/TatsukiMeng))
-- Pinned sessions show a pin beside their title in the status line and the band composer's title, and `/unpin [session id]` unpins a session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
-- Added a fullscreen extension link browser for picking links already in terminal scrollback: press Alt+O again (or Page Up) while link tags are shown, or Alt+O with no extension link on screen ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
-- Added a `cache` status-line segment (in the `full` and `nerd` presets) showing before you send whether the next message reads the prompt cache; hover it in Tern or open `/session` for why not and how much it re-sends ([#12677](https://github.com/can1357/oh-my-pi/issues/12677)) ([#17496](https://github.com/can1357/oh-my-pi/pull/17496) by [@will-bogusz](https://github.com/will-bogusz))
-- Added a `:level` suffix to `^` model tags, such as `^openai-codex/gpt-6-astra:high`, that sets the tagged subagent's initial effort. Typing `:` after a mention lists the model's supported levels. The task tool's `effort` hint and `task.maxEffort` do not override the tagged level, and a per-call `model` for that agent fails as a conflict ([#17574](https://github.com/can1357/oh-my-pi/pull/17574) by [@a-glapinski](https://github.com/a-glapinski))
-- Added `omp zsh`, `omp bash` and `omp sh`: run omp's built-in shell engine as that shell in your terminal. Every argument goes to the shell unchanged (`omp zsh -c 'echo $ZSH_NAME'`, `omp zsh ./script.zsh a b`, `printf 'echo hi\n' | omp zsh`, `omp bash --help`), and `omp` exits with the shell's status. Ctrl-C, `kill` and descriptors you pass (`3>file`) work as with the real shells
-- `omp zsh` keeps zsh's history: it reads and writes your `$HISTFILE` in zsh's own format and locking (shared with real zsh, `extendedhistory`, `sharehistory`, `incappendhistory` and the other history options), expands `!!`, `!$`, `^old^new` and the rest of zsh's history syntax, runs `zshaddhistory`, and has full `fc`, `history`, `r`, `print -s`, `$history` and `HISTCMD`; `omp bash` gets `history -a -n -r -w -p`, `HISTTIMEFORMAT`, `HISTIGNORE`, `fc` editing and `!` expansion
-- `omp zsh` runs interactively like zsh: zsh's line editor (emacs and vi keymaps, `bindkey`, `zle -N` widgets, `vared`), completion (`compinit`, `compdef`, `menu select`), job control (Ctrl-Z, `fg`, `bg`, `jobs`), prompts with `precmd`/`preexec` hooks, and the zsh modules plugins load (`zsh/zpty`, `zsh/system`, `zsh/terminfo`, `zsh/pcre`, `zsh/datetime`, …), so oh-my-zsh and powerlevel10k configs start
-- RPC `bash` results now say when the output was cut: `elidedBytes`/`elidedLines` for a dropped middle, and `columnTruncatedLines`, `columnTruncatedRange`, `columnDroppedBytes` and `columnMax` for lines cut to the column cap. The Go, Python and Rust SDKs decode them ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
-- Added `pi.getShortcutConflict(chord)`, which tells an extension whether a key chord is free or held by omp, a keybinding (an `app.*` action or an editing key) or another extension ([#17961](https://github.com/can1357/oh-my-pi/pull/17961) by [@materemias](https://github.com/materemias))
-- `unwrapHashlineHeaderPath` is exported from `@oh-my-pi/pi-coding-agent`, turning a `[path#TAG]` write/edit target into its plain path ([#17961](https://github.com/can1357/oh-my-pi/pull/17961) by [@materemias](https://github.com/materemias))
-- The `devin-cli` login imports Devin CLI credentials into a stored `devin` account, so the provider no longer requires `DEVIN_API_KEY` ([#13637](https://github.com/can1357/oh-my-pi/pull/13637) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
-- The `devin-windsurf` login lets Windsurf Enterprise users authenticate the `devin` provider with their existing Windsurf account ([#13288](https://github.com/can1357/oh-my-pi/pull/13288) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 - `/usage` and `omp usage` show LiteLLM key and user budgets for the built-in `litellm` provider and for every models.yml provider declared with `discovery.type: litellm`, probed with that provider's configured key and endpoint without waiting for model discovery ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
 - `/usage` and `omp usage` no longer probe providers listed in `disabledProviders`, with any credential; re-enabling a provider reuses its cached snapshot ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
 
@@ -156,39 +137,6 @@
 - Out-of-credit provider errors now fail immediately instead of retrying for long periods; Retry works promptly once the account is funded.
 - DeepSeek-style `*** End` and `*** End Patch` markers are no longer written into files or truncate later edits
 - Composer prediction ghost text no longer vanishes when advisor messages arrive
-- A subagent that spawned subagents of its own stayed in memory after it parked, whole transcript included, for as long as the session ran: each child's revive record held the parent through its extension-root provider (bound to the parent) and through any eval-defined tools the parent handed it. A lead that runs lanes with reviewers no longer grows by every finished lane; a child calling a parent's eval-defined tool after that parent has gone gets a tool error ([#17916](https://github.com/can1357/oh-my-pi/pull/17916) by [@sjawhar](https://github.com/sjawhar))
-
-### Fixed
-
-- `omp models` (`ls`, `find`, `refresh`) prints a stderr warning naming an extension provider whose `fetchDynamicModels` discovery failed, with its error, instead of silently omitting the provider; the failure is also logged ([#17925](https://github.com/can1357/oh-my-pi/issues/17925))
-
-### Fixed
-
-- A read summary that names URLs (for example `Read 2 files` over two links) links each of them, so the terminal can open them instead of leaving them as dead text ([#17929](https://github.com/can1357/oh-my-pi/pull/17929) by [@iacore](https://github.com/iacore))
-
-### Fixed
-
-- Fixed `ast_grep` and `ast_edit` ignoring files whose extension is not lowercase (`.R`, `.PY`, …) unless `lang` was given; `.C`/`.H` resolve to C++ ([#17958](https://github.com/can1357/oh-my-pi/pull/17958) by [@e-kotov](https://github.com/e-kotov))
-
-### Fixed
-
-- Fixed snapcompact taking a new archive as a reduction because it is smaller than an archive saved before omp 16.1.0, whose imaged history it cannot carry over; such an archive's frames no longer count as replaced ([#17883](https://github.com/can1357/oh-my-pi/pull/17883) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Fixed
-
-- `computer.windows` and `computer.window` now find a running app's windows by its application ID or path when process identity is available ([#17896](https://github.com/can1357/oh-my-pi/pull/17896) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Fixed
-
-- Fixed `computer` runs on Wayland ending in a generic `Computer code execution timed out` when the RemoteDesktop permission dialog went unanswered: the input call now fails with `Timeout` naming the dialog before the run's deadline ([#17932](https://github.com/can1357/oh-my-pi/pull/17932) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Fixed
-
-- `computer.apps.open("~/…")` and its `app` option open from your home folder instead of failing with "must identify an existing .app bundle" ([#17931](https://github.com/can1357/oh-my-pi/pull/17931) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Fixed
-
-- Browser: a headless Chrome launched in-process by an SDK embedding or a `bun test` run now exits when that process is killed, instead of running on with its temporary profile on Linux and macOS ([#17908](https://github.com/can1357/oh-my-pi/pull/17908) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.16.0] - 2026-11-02
 
