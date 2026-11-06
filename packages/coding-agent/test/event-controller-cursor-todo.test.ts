@@ -201,6 +201,21 @@ describe("EventController + Cursor todo bridge", () => {
 		expect(f.ctx.setTodos).toHaveBeenCalledWith(current);
 	});
 
+	it("refreshes Todo phases from a nested update recorded on an Eval cell", async () => {
+		// Current eval results keep status events on each cell only, with no call-level copy.
+		const f = createFixture();
+		const current = [{ name: "Current", tasks: [{ content: "Later", status: "in_progress" as const }] }];
+		f.ctx.viewSession.getTodoPhases = () => current;
+		const end = evalEnd("eval-todo-cell");
+		end.result.details = {
+			cells: [{ statusEvents: [{ op: "read" }] }, { statusEvents: [{ op: "todo", committed: true }] }],
+		};
+
+		await f.controller.handleEvent(end);
+
+		expect(f.ctx.setTodos).toHaveBeenCalledWith(current);
+	});
+
 	it("keeps the Todo panel current when Eval fails after a nested update", async () => {
 		const f = createFixture();
 		const current = [{ name: "Current", tasks: [{ content: "Committed", status: "completed" as const }] }];

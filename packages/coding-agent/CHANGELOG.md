@@ -10,6 +10,7 @@
 - `grep -e` and `rg -e` in the bash tool accept patterns that start with `-` (e.g. `grep -e "--canary"`) instead of failing with an unknown-option error.
 - The bash execution visualization keeps updating, and saved traces still restore, after a command handles bytes that aren't valid UTF-8 (e.g. `v=$(printf '\377')`)
 - On Windows, `grep`, `glob` and isolated subagents no longer flash a console window when they query or start the ovnfs daemon.
+- Fixed `eval` cells that spawn or wait on subagents writing multi-megabyte tool results to the session: each subagent progress row copied the full assignment, extracted tool data and recent tool calls, and every status event was stored twice (once for the call, once for its cell). Rows now keep only their one-line fields, with long text cut to 256 characters, and events are stored once per cell; an audit session's 12.5 MB eval result with 269 subagent rows comes to about 0.4 MB ([#18281](https://github.com/can1357/oh-my-pi/pull/18281) by [@aleister1102](https://github.com/aleister1102))
 
 ## [18.17.0] - 2026-11-06
 
