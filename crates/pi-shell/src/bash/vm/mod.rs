@@ -1832,6 +1832,7 @@ impl Shell {
 	/// every engine entry that runs or inspects shell code (`step`, `api`,
 	/// `externalize`).
 	fn see_epoch(&mut self, cx: &mut Cx<'_>) {
+		self.k.root.sync_restore(cx.store);
 		let epoch = cx.store.epoch();
 		if epoch == self.k.root.epoch() {
 			return;

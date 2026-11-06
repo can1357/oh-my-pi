@@ -731,8 +731,9 @@ impl Shell {
 	}
 
 	/// Re-attach to a store that holds root state (and possibly a `Frames`
-	/// blob) — after a heap restore, in any process. The frames blob is
-	/// consumed (deleted) on success.
+	/// blob) — after a heap restore, in any process. Preparation is read-only:
+	/// any restore error leaves the store unchanged. Cleanup after the commit
+	/// point is retried at the next sync if the backend refuses it.
 	///
 	/// Externals in flight are lost (their waiters see 137 and a `Lost`
 	/// event); tasks resume through
@@ -751,7 +752,8 @@ impl Shell {
 		cx: &mut Cx<'_>,
 		opts: RestoreOpts,
 	) -> Result<(Self, RestoreReport), RestoreError> {
-		let root = Root::load(cx.store)?;
+		let mut root = Root::load(cx.store)?;
+		root.stage_restore();
 		let argv0 = state::root_misc(cx.store, MiscKey::Argv0)?
 			.map_or_else(|| BString::from("bash"), BString::from);
 		let shell_pid = parse_misc(cx.store, MiscKey::ShellPid)?.unwrap_or(0);
@@ -816,9 +818,12 @@ impl Shell {
 				shell.seed_orphans();
 				restored = true;
 			}
-			cx.store.del_blob(BlobSlot::Frames)?;
+			shell.k.root.queue_blob_delete(BlobSlot::Frames);
 		}
-		cx.store.apply(Change::Del(Key::Misc(MiscKey::JobFrames)))?;
+		shell
+			.k
+			.root
+			.write(cx.store, Change::Del(Key::Misc(MiscKey::JobFrames)));
 		if !restored {
 			shell.lose_running(cx, &mut report)?;
 		}
@@ -827,6 +832,10 @@ impl Shell {
 			return Err(RestoreError::Store(err));
 		}
 		reinstall_signal_traps(cx)?;
+		// Commit point: frame/unit decoding, root/proc/job reads and signal
+		// setup all succeeded. Only replayable cleanup writes remain; none
+		// can turn this restore into an error or discard its prepared shell.
+		shell.k.root.commit_restore(cx.store);
 		let root = (shell.procs[0].vpid, shell.procs[0].mode);
 		shell
 			.k

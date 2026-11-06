@@ -583,3 +583,99 @@ fn drop_frames_refused_signal_setup_preserves_store() {
 fn frameless_refused_signal_setup_preserves_store() {
 	signal_refusal(false, true);
 }
+
+#[test]
+fn frameless_refused_scope_cleanup_cannot_leak_locals_into_the_next_function() {
+	let image = image_for(true);
+	let mut store = RefusingStore {
+		inner: MemStore::from_bytes(&image.bytes).unwrap(),
+		refuse_forever: Some("del Scope(0)".into()),
+		..RefusingStore::default()
+	};
+	let engine = Engine::new(EngineConfig::default());
+	let mut host = FakeHost::new();
+	let (mut shell, report) = Shell::restore(
+		&engine,
+		&mut Cx { host: &mut host, store: &mut store },
+		RestoreOpts::default(),
+	)
+	.unwrap();
+	assert_eq!(report, expected_report(&image, false, true));
+	assert!(store.refusals > 0, "restore must have attempted the scope reset");
+	store.refuse_forever = None;
+	// No suspension or intervening step: the first command reuses the
+	// abandoned function's depth and materializes another local there.
+	let run = shell.submit(Script::command(
+		br#"fresh_scope(){ local fresh=1; echo local=${KEEP-unset}; }; fresh_scope"#.as_slice(),
+	));
+	let mut done = false;
+	for _ in 0..10_000 {
+		match shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget::default()) {
+			Step::Done { run: id, status } if id == run => {
+				assert_eq!(status, 0);
+				done = true;
+				break;
+			},
+			Step::Yield => {},
+			other => panic!("the new function must complete: {other:?}"),
+		}
+	}
+	assert!(done);
+	assert_eq!(host.stdout.bytes(), b"local=unset\n");
+}
+
+#[test]
+fn refused_image_cleanup_survives_immediate_externalize_and_restore() {
+	for operation in ["del_blob Frames", "del Misc(JobFrames)"] {
+		let image = snapshot();
+		let mut store = RefusingStore {
+			inner: MemStore::from_bytes(&image.bytes).unwrap(),
+			refuse_forever: Some(operation.into()),
+			..RefusingStore::default()
+		};
+		let engine = Engine::new(EngineConfig::default());
+		let mut host = FakeHost::new();
+		let (mut shell, report) = Shell::restore(
+			&engine,
+			&mut Cx { host: &mut host, store: &mut store },
+			RestoreOpts::default(),
+		)
+		.unwrap();
+		assert_eq!(report, expected_report(&image, false, false));
+		assert!(store.refusals > 0, "the old image cleanup must have been refused: {operation}");
+		let error = shell
+			.externalize(&mut Cx { host: &mut host, store: &mut store })
+			.unwrap_err();
+		assert!(
+			matches!(error, pi_shell::bash::ExtError::Store(_)),
+			"pending cleanup remains refused: {operation}: {error:?}"
+		);
+		store.refuse_forever = None;
+		shell
+			.externalize(&mut Cx { host: &mut host, store: &mut store })
+			.unwrap();
+		let frames = store
+			.inner
+			.get_blob(BlobSlot::Frames)
+			.unwrap()
+			.expect("the new image must contain frames");
+		assert!(matches!(
+			shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget::default()),
+			Step::Blocked
+		));
+		assert_eq!(
+			store.inner.get_blob(BlobSlot::Frames).unwrap().as_deref(),
+			Some(frames.as_slice()),
+			"an acknowledged old cleanup must not delete the replacement image: {operation}"
+		);
+		drop(shell);
+		let (mut restored, report) = Shell::restore(
+			&Engine::new(EngineConfig::default()),
+			&mut Cx { host: &mut host, store: &mut store },
+			RestoreOpts::default(),
+		)
+		.unwrap();
+		assert_eq!(report, expected_report(&image, false, false));
+		resume(&mut restored, &mut host, &mut store, &image);
+	}
+}

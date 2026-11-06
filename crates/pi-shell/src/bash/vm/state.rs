@@ -21,8 +21,8 @@ use crate::bash::{
 	host::Rlimit,
 	ids::{JobId, Vpid},
 	store::{
-		Attrs, Change, Elem, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, Table,
-		VarValue, ZshScope,
+		Attrs, BlobSlot, Change, Elem, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError,
+		Table, VarValue, ZshScope,
 	},
 	zshopt::{ZshOpt, ZshOpts},
 };
@@ -347,11 +347,68 @@ pub struct Root {
 	fault:             Option<StoreError>,
 	/// The root vproc's in-place fields as last written ([`sync_root`]).
 	synced:            Synced,
-	/// Latest deletions and proc ownership decisions not yet accepted by
-	/// the store. Other refused root fields are rebuilt by the dirty sync.
+	/// Latest record or blob changes not yet accepted by the store. Restore
+	/// stages its changes here until every fallible preparation step succeeds.
 	pending:           PendingWrites,
 	/// zsh's history events as last written (mirrors their store record).
 	pub hist_events:   parking_lot::Mutex<super::builtins::history::model::EventsCache>,
+}
+
+/// Record and blob keys have separate namespaces without adding store keys.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum PendingKey {
+	Record(KeyBuf),
+	Blob(BlobSlot),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum PendingAddress<'a> {
+	Record(Key<'a>),
+	Blob(BlobSlot),
+}
+
+impl PendingKey {
+	fn address(&self) -> PendingAddress<'_> {
+		match self {
+			Self::Record(key) => PendingAddress::Record(key.as_key()),
+			Self::Blob(slot) => PendingAddress::Blob(*slot),
+		}
+	}
+}
+
+impl PendingAddress<'_> {
+	fn to_buf(self) -> PendingKey {
+		match self {
+			Self::Record(key) => PendingKey::Record(key.to_buf()),
+			Self::Blob(slot) => PendingKey::Blob(slot),
+		}
+	}
+}
+
+impl<'a> From<Key<'a>> for PendingAddress<'a> {
+	fn from(key: Key<'a>) -> Self {
+		Self::Record(key)
+	}
+}
+
+impl From<BlobSlot> for PendingAddress<'_> {
+	fn from(slot: BlobSlot) -> Self {
+		Self::Blob(slot)
+	}
+}
+
+impl hashbrown::Equivalent<PendingKey> for PendingAddress<'_> {
+	fn equivalent(&self, key: &PendingKey) -> bool {
+		*self == key.address()
+	}
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum WritePhase {
+	#[default]
+	Active,
+	Staging,
+	Cleanup,
 }
 
 /// One current intent per key; acknowledgements address its generation,
@@ -359,23 +416,25 @@ pub struct Root {
 #[derive(Debug, Default)]
 struct PendingWrites {
 	sequence: u64,
-	current:  hashbrown::HashMap<KeyBuf, PendingWrite>,
+	current:  hashbrown::HashMap<PendingKey, PendingWrite>,
+	phase:    WritePhase,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct PendingWrite {
 	sequence: u64,
-	value:    ProcIntent,
+	value:    WriteIntent,
 }
 
-#[derive(Clone, Copy, Debug)]
-enum ProcIntent {
+#[derive(Clone, Debug)]
+enum WriteIntent {
 	Delete,
-	Proc { parent: Option<Vpid>, status: Option<i32> },
+	Put(Record),
 }
 
 impl PendingWrites {
-	fn submit(&mut self, key: Key<'_>, value: Option<ProcIntent>) -> u64 {
+	fn submit<'a>(&mut self, key: impl Into<PendingAddress<'a>>, value: Option<WriteIntent>) -> u64 {
+		let key = key.into();
 		self.sequence = self
 			.sequence
 			.checked_add(1)
@@ -391,25 +450,29 @@ impl PendingWrites {
 		self.sequence
 	}
 
-	fn value(&self, key: Key<'_>) -> Option<ProcIntent> {
-		self.current.get(&key).map(|intent| intent.value)
+	fn value<'a>(&self, key: impl Into<PendingAddress<'a>>) -> Option<&WriteIntent> {
+		self.current.get(&key.into()).map(|intent| &intent.value)
 	}
 
 	/// Acknowledging any generation other than the current one is a no-op.
-	fn acknowledge(&mut self, key: Key<'_>, sequence: u64) {
-		if let hashbrown::hash_map::EntryRef::Occupied(entry) = self.current.entry_ref(&key)
+	fn acknowledge<'a>(&mut self, key: impl Into<PendingAddress<'a>>, sequence: u64) {
+		if let hashbrown::hash_map::EntryRef::Occupied(entry) = self.current.entry_ref(&key.into())
 			&& entry.get().sequence == sequence
 		{
 			entry.remove();
 		}
 	}
 
-	fn attempt(
+	fn attempt<'a>(
 		&mut self,
 		store: &mut dyn StateStore,
-		key: Key<'_>,
+		key: impl Into<PendingAddress<'a>>,
 		sequence: u64,
 	) -> Result<(), StoreError> {
+		if self.phase == WritePhase::Staging {
+			return Ok(());
+		}
+		let key = key.into();
 		let Some(intent) = self
 			.current
 			.get(&key)
@@ -417,28 +480,42 @@ impl PendingWrites {
 		else {
 			return Ok(());
 		};
-		let change = match intent.value {
-			ProcIntent::Delete => Change::Del(key),
-			ProcIntent::Proc { parent, status } => Change::Put(key, Record::Proc { parent, status }),
-		};
-		store.apply(change)?;
+		match (key, &intent.value) {
+			(PendingAddress::Record(key), WriteIntent::Delete) => store.apply(Change::Del(key))?,
+			(PendingAddress::Record(key), WriteIntent::Put(record)) => {
+				store.apply(Change::Put(key, record.clone()))?;
+			},
+			(PendingAddress::Blob(slot), WriteIntent::Delete) => store.del_blob(slot)?,
+			(PendingAddress::Blob(_), WriteIntent::Put(_)) => {
+				unreachable!("only blob deletions are queued")
+			},
+		}
 		self.acknowledge(key, sequence);
 		Ok(())
 	}
 
 	fn replay(&mut self, store: &mut dyn StateStore) -> Option<StoreError> {
-		let tickets: Vec<_> = self
+		if self.phase == WritePhase::Staging {
+			return None;
+		}
+		let mut tickets: Vec<_> = self
 			.current
 			.iter()
 			.map(|(key, intent)| (key.clone(), intent.sequence))
 			.collect();
+		// Preserve submission order across keys, including scope deletion and
+		// the records written after it; map iteration order is not a write order.
+		tickets.sort_unstable_by_key(|(_, sequence)| *sequence);
 		let mut fault = None;
 		for (key, sequence) in tickets {
-			if let Err(err) = self.attempt(store, key.as_key(), sequence)
+			if let Err(err) = self.attempt(store, key.address(), sequence)
 				&& fault.is_none()
 			{
 				fault = Some(err);
 			}
+		}
+		if self.phase == WritePhase::Cleanup && self.current.is_empty() {
+			self.phase = WritePhase::Active;
 		}
 		fault
 	}
@@ -558,6 +635,37 @@ impl Root {
 		Ok(root)
 	}
 
+	/// Prepare a restore without consuming any of its backing store.
+	pub const fn stage_restore(&mut self) {
+		self.pending.phase = WritePhase::Staging;
+	}
+
+	/// Queue the old execution image's cleanup in the same keyed intent map
+	/// as record cleanup, so a backend refusal survives until the next sync.
+	pub fn queue_blob_delete(&mut self, slot: BlobSlot) {
+		self.pending.submit(slot, Some(WriteIntent::Delete));
+	}
+
+	/// The restore has no fallible preparation left. A cleanup refusal now
+	/// retains its intent, not an error that can abort the restored shell.
+	pub fn commit_restore(&mut self, store: &mut dyn StateStore) {
+		self.pending.phase = WritePhase::Cleanup;
+		let _ = self.pending.replay(store);
+	}
+
+	pub fn sync_restore(&mut self, store: &mut dyn StateStore) {
+		if self.pending.phase == WritePhase::Cleanup {
+			self.sync_pending(store);
+		}
+	}
+
+	fn sync_pending(&mut self, store: &mut dyn StateStore) {
+		if let Some(err) = self.pending.replay(store) {
+			self.fail(err);
+			self.synced.dirty = true;
+		}
+	}
+
 	/// Count the root scopes and rebuild the scope masks and the nameref
 	/// flag from the store: one scan of the scopes, their locals and the
 	/// global variables.
@@ -653,7 +761,10 @@ impl Root {
 	/// the store. Adoption and exit must observe the same transition.
 	pub fn disowned(&mut self, store: &mut dyn StateStore, vpid: Vpid) -> bool {
 		if let Some(intent) = self.pending.value(Key::Proc(vpid)) {
-			return matches!(intent, ProcIntent::Proc { parent: Some(super::DISOWNED), .. });
+			return matches!(
+				intent,
+				WriteIntent::Put(Record::Proc { parent: Some(super::DISOWNED), .. })
+			);
 		}
 		match store.get(Key::Proc(vpid)) {
 			Ok(Some(Record::Proc { parent: Some(super::DISOWNED), .. })) => true,
@@ -671,13 +782,13 @@ impl Root {
 		self.note(&change);
 		let result = match change {
 			Change::Del(key) => {
-				let sequence = self.pending.submit(key, Some(ProcIntent::Delete));
+				let sequence = self.pending.submit(key, Some(WriteIntent::Delete));
 				self.pending.attempt(store, key, sequence)
 			},
-			Change::Put(key @ Key::Proc(_), Record::Proc { parent, status }) => {
-				let sequence = self
-					.pending
-					.submit(key, Some(ProcIntent::Proc { parent, status }));
+			Change::Put(key, record)
+				if self.pending.phase == WritePhase::Staging || matches!(key, Key::Proc(_)) =>
+			{
+				let sequence = self.pending.submit(key, Some(WriteIntent::Put(record)));
 				self.pending.attempt(store, key, sequence)
 			},
 			change => {
@@ -3216,10 +3327,7 @@ fn write_jobs(root: &mut Root, store: &mut dyn StateStore, jobs: &JobTable, forc
 pub fn sync_root(root: &mut Root, store: &mut dyn StateStore, vp: &Vproc) {
 	debug_assert!(vp.overlay.is_none(), "only the root vproc's fields are in the store");
 	let all = std::mem::take(&mut root.synced.dirty);
-	if let Some(err) = root.pending.replay(store) {
-		root.fail(err);
-		root.synced.dirty = true;
-	}
+	root.sync_pending(store);
 	if all || vp.status != root.synced.status {
 		root.synced.status = vp.status;
 		root.set_misc(store, MiscKey::Status, decimal(vp.status));
@@ -3983,9 +4091,9 @@ mod tests {
 	#[test]
 	fn proc_retry_obsolete_replays_and_acknowledgements_cannot_replace_current_intents() {
 		let values = [
-			ProcIntent::Delete,
-			ProcIntent::Proc { parent: Some(super::super::DISOWNED), status: None },
-			ProcIntent::Proc { parent: Some(Vpid(1)), status: Some(23) },
+			WriteIntent::Delete,
+			WriteIntent::Put(Record::Proc { parent: Some(super::super::DISOWNED), status: None }),
+			WriteIntent::Put(Record::Proc { parent: Some(Vpid(1)), status: Some(23) }),
 		];
 		for key in [Key::Proc(Vpid(42)), Key::Proc(Vpid(43))] {
 			let other = if key == Key::Proc(Vpid(42)) {
@@ -3993,14 +4101,16 @@ mod tests {
 			} else {
 				Key::Proc(Vpid(42))
 			};
-			for old_value in values {
-				for new_value in values {
+			for old_value in &values {
+				for new_value in &values {
 					let mut pending = PendingWrites::default();
 					let mut store = crate::bash::MemStore::new();
-					let old = pending.submit(key, Some(old_value));
-					let independent = pending
-						.submit(other, Some(ProcIntent::Proc { parent: Some(Vpid(1)), status: Some(7) }));
-					let current = pending.submit(key, Some(new_value));
+					let old = pending.submit(key, Some(old_value.clone()));
+					let independent = pending.submit(
+						other,
+						Some(WriteIntent::Put(Record::Proc { parent: Some(Vpid(1)), status: Some(7) })),
+					);
+					let current = pending.submit(key, Some(new_value.clone()));
 					pending.acknowledge(key, old);
 					pending.attempt(&mut store, key, old).unwrap();
 					assert_eq!(
@@ -4011,8 +4121,8 @@ mod tests {
 					pending.attempt(&mut store, other, independent).unwrap();
 					pending.attempt(&mut store, key, current).unwrap();
 					let wanted = match new_value {
-						ProcIntent::Delete => None,
-						ProcIntent::Proc { parent, status } => Some(Record::Proc { parent, status }),
+						WriteIntent::Delete => None,
+						WriteIntent::Put(record) => Some(record.clone()),
 					};
 					assert_eq!(
 						store.get(key).unwrap(),
@@ -4023,8 +4133,10 @@ mod tests {
 						store.get(other).unwrap(),
 						Some(&Record::Proc { parent: Some(Vpid(1)), status: Some(7) })
 					);
-					let newest = pending
-						.submit(key, Some(ProcIntent::Proc { parent: Some(Vpid(1)), status: Some(37) }));
+					let newest = pending.submit(
+						key,
+						Some(WriteIntent::Put(Record::Proc { parent: Some(Vpid(1)), status: Some(37) })),
+					);
 					pending.acknowledge(key, current);
 					pending.attempt(&mut store, key, current).unwrap();
 					pending.attempt(&mut store, key, newest).unwrap();
