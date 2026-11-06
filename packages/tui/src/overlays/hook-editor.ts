@@ -321,14 +321,6 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		this.#wordCompletion.setMethod(features.autocomplete);
 	}
 
-	get editor(): Editor {
-		return this.#editor;
-	}
-
-	get spellingProvider(): MacOSSpellingProvider {
-		return this.#spelling;
-	}
-
 	/** Keep the nested editor's software/hardware cursor mode aligned with the dialog focus target. */
 	setUseTerminalCursor(useTerminalCursor: boolean): void {
 		this.#field.setUseTerminalCursor(useTerminalCursor);

@@ -189,7 +189,7 @@
 - Prewalk no longer hands a subagent to its cheap model when the subagent messages its parent or another agent (`write agent://…`) before its first file edit ([#18322](https://github.com/can1357/oh-my-pi/pull/18322) by [@1vivy](https://github.com/1vivy))
 ### Added
 
-- The ask dialog's "Other" answer box, hook editors, and extension editor prompts now get macOS spelling assistance (typo undercurls, Tab completions, on-space autocorrect), following the `spelling.*` settings and updating live when they change ([#12517](https://github.com/can1357/oh-my-pi/pull/12517) by [@aleister1102](https://github.com/aleister1102))
+- The ask dialog's "Other" answer box, hook editors, and the advisor instructions editor now get macOS spelling assistance (typo undercurls, Tab completions, on-space autocorrect) under the same `spelling.*` settings as the prompt editor, read when they open; open hook editors also update live when those settings change ([#12517](https://github.com/can1357/oh-my-pi/pull/12517) by [@aleister1102](https://github.com/aleister1102))
 
 ## [18.17.0] - 2026-11-06
 

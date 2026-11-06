@@ -33,7 +33,7 @@ import { getSelectListTheme, theme } from "../theme";
 import { sanitizeDisplayWarnings } from "../render/render-utils";
 import { formatKeyHint } from "../app-keybindings";
 import { editorKey, editorKeys } from "../chrome/keybinding-hints";
-import { HookEditorComponent } from "./hook-editor";
+import { HookEditorComponent, type HookEditorOptions } from "./hook-editor";
 import {
 	buildBrowserItems,
 	ModelBrowser,
@@ -144,6 +144,8 @@ export interface AdvisorConfigDeps {
 	browserSource: ModelBrowserSource;
 	defaultToolNames: ReadonlySet<string>;
 	externalEditor?: (text: string) => Promise<string | null>;
+	/** Spelling assistance for the instructions editor; the host passes the same settings the prompt editor follows. */
+	spellingFeatures?: HookEditorOptions["spellingFeatures"];
 	scopedModels: ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	availableToolNames: string[];
 	syncBacklog?: AdvisorSyncBacklog;
@@ -1671,7 +1673,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 				if (shared) this.#showList();
 				else this.#showDetail(index);
 			},
-			{ externalEditor: this.#deps.externalEditor },
+			{ externalEditor: this.#deps.externalEditor, spellingFeatures: this.#deps.spellingFeatures },
 		);
 		this.#setScreen("instructions", editor, "");
 	}
