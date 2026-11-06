@@ -3,6 +3,7 @@ import { isShellTrace, type ShellTrace, type ShellVizPreferences, type ShellVizP
 import { defaultShellVizPreferences, readShellPresentation, shellVisualization } from "../tools/shell-viz";
 import { changeShellVizPreferences, shellVizEventAction } from "../tools/shell-trace";
 import { ShellVisualizer } from "../apps/shell-visualizer";
+import { chatTranscriptDisplayPreferences } from "./display-preferences";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Box } from "../components/box";
@@ -640,7 +641,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	#getShellPresentation(): ShellVizPresentation | undefined {
-		if (this.#toolName !== "bash") return undefined;
+		if (this.#toolName !== "bash" || !chatTranscriptDisplayPreferences.shellVisualization) return undefined;
 		const script =
 			this.#shellTrace?.script ??
 			(isRecord(this.#args) && typeof this.#args.command === "string" ? this.#args.command : undefined);
@@ -681,7 +682,7 @@ export class ToolExecutionComponent extends Container {
 
 	/** Handle exactly the shared native action vocabulary; inspector uses this same controller. */
 	shellVizAction(action: string): void {
-		if (this.#toolName !== "bash") return;
+		if (this.#toolName !== "bash" || !chatTranscriptDisplayPreferences.shellVisualization) return;
 		if (action === "inspect") {
 			this.openShellVisualizer();
 			return;
@@ -727,7 +728,8 @@ export class ToolExecutionComponent extends Container {
 
 	/** Open the focused inspector without intercepting composer input while it is closed. */
 	openShellVisualizer(): void {
-		if (this.#toolName !== "bash" || !this.#ui.showOverlay) return;
+		if (this.#toolName !== "bash" || !chatTranscriptDisplayPreferences.shellVisualization || !this.#ui.showOverlay)
+			return;
 		if (this.#shellInspector) return;
 		const inspector = new ShellVisualizer({
 			presentation: () => this.#getShellPresentation(),
@@ -1198,7 +1200,7 @@ export class ToolExecutionComponent extends Container {
 
 	/** Mirrors the card collapsed or expanded in the terminal, so `Ctrl+O` and native toggles share one state. */
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (this.#toolName === "bash") {
+		if (this.#toolName === "bash" && chatTranscriptDisplayPreferences.shellVisualization) {
 			const action = shellVizEventAction(event, this.#shellPreferences);
 			if (action) {
 				this.shellVizAction(action);
@@ -1320,6 +1322,7 @@ export class ToolExecutionComponent extends Container {
 			this.#sealed,
 			this.#parkedBackground,
 			this.#showImages,
+			this.#toolName === "bash" && chatTranscriptDisplayPreferences.shellVisualization,
 			this.#displayInputVersion,
 			this.#toolActivityVisible,
 			host.media,
@@ -1634,7 +1637,7 @@ export class ToolExecutionComponent extends Container {
 		// TUI startup, so a result rendered before it lands must re-shape once it
 		// does (it gates Image children vs text fallback in #rebuildDisplay); keyed
 		// here for the same reason markdown.ts keys its render cache on it.
-		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#argsComplete ? "1" : "0"}|${this.#executionStarted ? "1" : "0"}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}|${imageLinksEnabled()}`;
+		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#argsComplete ? "1" : "0"}|${this.#executionStarted ? "1" : "0"}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}|${imageLinksEnabled()}|${this.#toolName === "bash" && chatTranscriptDisplayPreferences.shellVisualization}`;
 		if (key === this.#lastDisplayKey && this.#displayBuilt) return;
 		this.#lastDisplayKey = key;
 

@@ -56,6 +56,17 @@ impl SourceMap {
 			.unwrap_or_default()
 	}
 }
+/// Map for `len` script bytes from `at`, parsed on their own.
+pub fn script_map(source: &impl VizSource, at: usize, len: usize) -> SourceMap {
+	SourceMap {
+		offset: 0,
+		projection: 0,
+		len,
+		outer: super::printer::script_utf16(source)
+			.get(at..=at + len)
+			.map(Into::into),
+	}
+}
 pub fn unit_map(source: &impl VizSource, unit: &SourceUnit<'_>) -> SourceMap {
 	build(source, unit, 0)
 }

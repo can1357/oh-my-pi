@@ -41,10 +41,12 @@ import { DeferredMCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import { MCPToolCache } from "@oh-my-pi/pi-coding-agent/mcp/tool-cache";
 import type { MCPHttpServerConfig, MCPStdioServerConfig, MCPToolDefinition } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import type { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { createMCPProxyTools } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { createXdevState } from "@oh-my-pi/pi-coding-agent/tools";
 import { xdevDocs } from "@oh-my-pi/pi-coding-agent/tools/xdev";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { MARKER_ENV, RENAME_TOOL, RENAMED_TOOL } from "./fixtures/renaming-mcp";
 
 const GOOD_TOKEN = "stored-by-another-session";
 const GUARD_MS = 5_000;
@@ -513,6 +515,72 @@ describe("MCP server that is not connected", () => {
 		} finally {
 			unsubscribe();
 			await dying.disconnectAll();
+			await removeWithRetries(workDir);
+		}
+	}, 30_000);
+
+	/**
+	 * R2-a across the per-session tool views main gained in c4917829f8. A tool
+	 * a server adds while one session's call to it runs is visible to that
+	 * session alone, so "are this server's tools mounted" is a question about
+	 * one view, not about the manager's array. Here the server renames its
+	 * only tool during the caller's call and then dies: the renamed tool is in
+	 * the array, the caller sees it, and no other session does. Answering from
+	 * the array tells every other session a server is "still serving the tools
+	 * cached from an earlier connect" while its own tool list holds none of
+	 * them — the contradiction round 1 blocked, re-entering through a
+	 * structure round 1 did not have.
+	 */
+	it("partitions the note by the asking session's view, not by the manager's array", async () => {
+		const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-scope-note-"));
+		const renaming = new MCPManager(workDir, null, undefined, SINGLE_ATTEMPT);
+		const { promise: failed, resolve: onFailed } = Promise.withResolvers<void>();
+		const unsubscribe = renaming.addConnectionStatusListener(event => {
+			if (event.type === "failed" && event.serverName === "kata") onFailed();
+		});
+		try {
+			const config: MCPStdioServerConfig = {
+				type: "stdio",
+				command: process.execPath,
+				args: [path.join(import.meta.dir, "fixtures", "renaming-mcp.ts")],
+				env: { [MARKER_ENV]: path.join(workDir, "spawned") },
+				timeout: 5_000,
+			};
+			await renaming.connectServers({ kata: config }, {});
+			await renaming.waitForStartup(GUARD_MS);
+			expect(renaming.getTools().map(tool => tool.name)).toEqual([`mcp__kata_${RENAME_TOOL}`]);
+
+			renaming.openToolScope("caller");
+			renaming.openToolScope("subagent");
+			const loader = createMCPProxyTools(renaming, "caller").find(tool => tool.mcpToolName === RENAME_TOOL);
+			if (!loader?.execute) throw new Error("expected the caller's proxy for the loader");
+			await loader.execute("call-1", {}, undefined, {} as CustomToolContext);
+
+			// The server then dies and cannot be respawned, so it is down with
+			// the renamed tool registered — and visible to the caller alone.
+			await failed;
+			await renaming.waitForStartup(GUARD_MS);
+			expect(renaming.getConnectionStatus("kata")).toBe("disconnected");
+			expect(renaming.getTools("caller").map(tool => tool.name)).toEqual([`mcp__kata_${RENAMED_TOOL}`]);
+			expect(renaming.getTools("subagent")).toHaveLength(0);
+			expect(renaming.getTools()).toHaveLength(0);
+
+			// The caller can see that catalog, so it is told the catalog is stale.
+			const callerNote = renaming.explainMissingTool("mcp__kata_other", "caller");
+			expect(callerNote).toContain("still serving the tools cached from an earlier connect");
+			expect(callerNote).not.toContain("tools are not mounted");
+
+			// The subagent cannot, so it is told the tools are not mounted: the
+			// only one of the two sentences its own tool list does not refute.
+			const subagentNote = renaming.explainMissingTool("mcp__kata_other", "subagent");
+			expect(subagentNote).toContain("so its tools are not mounted: kata");
+			expect(subagentNote).not.toContain("still serving the tools cached from an earlier connect");
+
+			// An omitted scope answers for the owning session, as `getTools` does.
+			expect(renaming.explainMissingTool("mcp__kata_other")).toBe(subagentNote);
+		} finally {
+			unsubscribe();
+			await renaming.disconnectAll();
 			await removeWithRetries(workDir);
 		}
 	}, 30_000);
