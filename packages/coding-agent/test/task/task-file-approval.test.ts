@@ -17,6 +17,7 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { ExecutorOptions } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { approvalCacheKeyForPath } from "@oh-my-pi/pi-coding-agent/tools/approval-cache";
 import { withToolApprovalScope } from "@oh-my-pi/pi-coding-agent/tools/approval-scope";
 import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 
@@ -183,7 +184,7 @@ describe("taskFile approval binding", () => {
 		const { tool } = await createWrapper(async () => "Approve");
 
 		const result = await withToolApprovalScope(async () => {
-			expect(tool.approvalRestrictionPaths({ taskFile })).toEqual([safe]);
+			expect(tool.approvalRestrictionPaths({ taskFile })).toEqual([approvalCacheKeyForPath(safe)]);
 			return tool.execute("unbound-direct-call", { taskFile });
 		});
 
