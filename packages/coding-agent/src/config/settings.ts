@@ -2703,7 +2703,7 @@ export class Settings {
 				warningsSeen = new Set(projectWarnings);
 				for (const item of result.items as SettingsCapabilityItem[]) {
 					if (item.level === "project") {
-						merged = this.#deepMerge(merged, dropSettingsGroupShadows(item.data as RawSettings, item.path));
+						merged = this.#deepMerge(merged, dropSettingsGroupShadows(item.data as RawSettings, item.path), true);
 						sourcePaths.push(item.path);
 						if (Object.hasOwn(item.data, "shellPath")) shellPathSource = item.path;
 					}
@@ -2755,7 +2755,7 @@ export class Settings {
 		let settings: RawSettings = {};
 		for (const filePath of this.#configFiles) {
 			const overlay = await this.#loadOverlayYaml(filePath, captureLegacyChangelogVersion);
-			settings = this.#deepMerge(settings, overlay);
+			settings = this.#deepMerge(settings, overlay, true);
 			if (Object.hasOwn(overlay, "shellPath")) shellPathSource = filePath;
 		}
 		return { settings, shellPathSource };
@@ -4192,8 +4192,13 @@ export class Settings {
 
 	/** `layers` (global, project, `--config` overlay, runtime) merged in precedence order. */
 	#mergeOwnLayers(layers: OwnLayers): RawSettings {
-		let merged = this.#deepMerge(this.#deepMerge({}, layers.global), projectLayerForMerge(layers.project));
-		merged = this.#deepMerge(merged, layers.configOverlay);
+		let merged = this.#deepMerge(
+			this.#deepMerge({}, layers.global),
+			projectLayerForMerge(layers.project),
+			true,
+			true,
+		);
+		merged = this.#deepMerge(merged, layers.configOverlay, true, true);
 		return this.#deepMerge(merged, layers.overrides);
 	}
 
@@ -4214,23 +4219,60 @@ export class Settings {
 	 * `overrides` deep-merged over `base`. Keys follow the higher layer's order, then base-only keys:
 	 * record order is meaningful to some consumers (`retry.fallbackChains` is searched in order).
 	 */
-	#deepMerge(base: RawSettings, overrides: RawSettings): RawSettings {
+	#deepMerge(
+		base: RawSettings,
+		overrides: RawSettings,
+		mergeArrays = false,
+		useDefaultArrayBase = false,
+		prefix = "",
+	): RawSettings {
 		const result: RawSettings = {};
 		for (const key of Object.keys(overrides)) {
 			const override = overrides[key];
 			const baseVal = Object.hasOwn(base, key) ? base[key] : undefined;
 
 			if (override === undefined) continue;
+			const settingPath = prefix ? `${prefix}.${key}` : key;
 
+			const isOverrideRecord = typeof override === "object" && override !== null && !Array.isArray(override);
+			const isBaseRecord = typeof baseVal === "object" && baseVal !== null && !Array.isArray(baseVal);
 			if (
-				typeof override === "object" &&
-				override !== null &&
-				!Array.isArray(override) &&
-				typeof baseVal === "object" &&
-				baseVal !== null &&
-				!Array.isArray(baseVal)
+				isOverrideRecord &&
+				(isBaseRecord ||
+					(mergeArrays &&
+						useDefaultArrayBase &&
+						baseVal === undefined &&
+						Object.hasOwn(settingsGroupOnlyPrefixes(), settingPath)))
 			) {
-				setOwn(result, key, this.#deepMerge(baseVal as RawSettings, override as RawSettings));
+				setOwn(
+					result,
+					key,
+					this.#deepMerge(
+						(isBaseRecord ? baseVal : {}) as RawSettings,
+						override as RawSettings,
+						mergeArrays,
+						useDefaultArrayBase,
+						settingPath,
+					),
+				);
+			} else if (mergeArrays && Array.isArray(override)) {
+				const setting = lookupSetting(settingPath);
+				const strategy = setting?.definition.type === "array" ? setting.definition.merge : undefined;
+				const fallbackBase =
+					useDefaultArrayBase &&
+					baseVal === undefined &&
+					override.length > 0 &&
+					setting?.definition.type === "array"
+						? setting.default
+						: undefined;
+				const effectiveBase = Array.isArray(baseVal) ? baseVal : fallbackBase;
+				if (override.length > 0 && strategy === "prepend" && Array.isArray(effectiveBase)) {
+					setOwn(result, key, [...override, ...effectiveBase]);
+				} else if (override.length > 0 && strategy === "append" && Array.isArray(effectiveBase)) {
+					setOwn(result, key, [...effectiveBase, ...override]);
+				} else {
+					setOwn(result, key, override);
+				}
 			} else {
 				setOwn(result, key, override);
 			}

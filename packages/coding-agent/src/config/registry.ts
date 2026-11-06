@@ -148,10 +148,22 @@ export interface EnumDefinition<T extends readonly string[] = readonly string[]>
 	ui?: UiEnum<T>;
 }
 
+export type ArrayMergeStrategy = "replace" | "prepend" | "append";
+
 export interface ArrayDefinition<T = unknown> extends DefinitionBase {
 	type: "array";
 	default: readonly T[];
 	env?: SettingEnv<readonly T[]>;
+	/**
+	 * How higher-precedence config layers (`project`, `--config` overlay) combine with lower
+	 * layers (`global`):
+	 *  - `"replace"` (default): a configured array replaces lower layers wholesale.
+	 *  - `"prepend"`: higher-layer entries are placed before lower-layer entries.
+	 *  - `"append"`: higher-layer entries are placed after lower-layer entries.
+	 *
+	 * Runtime overrides (`Setting.override`) still replace the effective list wholesale.
+	 */
+	merge?: ArrayMergeStrategy;
 	/**
 	 * Closed vocabulary for the entries (`label` names one entry in messages, e.g. "status line
 	 * segment"). Writes naming an unknown entry are rejected; configured values that already contain
