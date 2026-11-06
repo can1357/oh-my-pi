@@ -67,6 +67,9 @@ function createModelRegistryStub(key = "key") {
 		resolver: vi.fn(() => async () => key),
 		authStorage: { usage: { ingestHeaders: vi.fn() }, oauth: { identity: vi.fn() } },
 		hasLazyRuntimeMetadata: vi.fn(() => false),
+		reloadIfConfigChanged: vi.fn(async () => false),
+		configGeneration: 0,
+		find: vi.fn(() => undefined),
 	};
 }
 
@@ -1128,7 +1131,8 @@ describe("AgentSession message pipeline", () => {
 		expect(capturedOptions?.promptCacheKey).toBe(promptCacheKey);
 		expect(capturedOptions?.sessionId).toStartWith(`${cacheSessionId}:side:`);
 		expect(capturedOptions?.sessionId).not.toBe(cacheSessionId);
-		expect(capturedOptions?.preferWebsockets).toBe(true);
+		// The Codex-only global opt-in must not leak into an unrelated side-turn provider.
+		expect(capturedOptions?.preferWebsockets).toBeUndefined();
 		expect(capturedOptions?.providerSessionState).toBe(session.providerSessionState);
 	});
 
@@ -1875,6 +1879,9 @@ describe("AgentSession message pipeline", () => {
 			modelRegistry: {
 				getApiKey: vi.fn(async () => "old-key"),
 				resolver,
+				reloadIfConfigChanged: async () => false,
+				configGeneration: 0,
+				find: () => undefined,
 			} as never,
 		});
 		sessions.push(session);
@@ -2175,6 +2182,7 @@ describe("AgentSession message pipeline", () => {
 				type: "toolcall_delta",
 				contentIndex: 0,
 				delta: "rep",
+				partial: assistantMessage,
 			},
 		} as never);
 

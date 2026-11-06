@@ -36,7 +36,7 @@ import type {
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Api, FetchImpl, KnownApi, Model, Provider, ThinkingBudgets, Usage } from "@oh-my-pi/pi-catalog/types";
-import type { ApiKey } from "./auth-retry";
+import type { ApiKey, ApiKeyResolution } from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
@@ -240,8 +240,10 @@ export function resolveModelServiceTier(
  * `service_tier_for_request`); an empty or missing list counts as "not
  * reported" — accounts whose `/models` lists no tiers keep `/fast` — so the
  * provider-level answer stands. `flex` and `default` are never gated.
- * First-party OpenAI takes `ultrafast` as-is. A bare provider string cannot
- * carry the list, so it answers for the provider alone.
+ * First-party OpenAI takes `ultrafast` as-is. An OpenAI-family relay on the
+ * Responses/Completions APIs gets `ultrafast` only when its discovered
+ * `service_tiers` lists it. A bare provider string cannot carry the list, so
+ * it answers for the provider alone.
  */
 export function shouldSendServiceTier(
 	serviceTier: ServiceTier | null | undefined,
@@ -260,7 +262,11 @@ export function shouldSendServiceTier(
 		if (advertised !== undefined && advertised.length > 0) return advertised.includes(serviceTier);
 	}
 	if (serviceTier === "ultrafast") {
-		return provider === "openai" || (typeof target === "string" && provider === "openai-codex");
+		if (typeof target === "string") return provider === "openai" || provider === "openai-codex";
+		if (provider === "openai") return true;
+		return (
+			target !== undefined && isOpenAIServiceTierModel(target) && target.serviceTiers?.includes(serviceTier) === true
+		);
 	}
 	if (provider === "openai" || provider === "openai-codex") return true;
 	if (provider === "openrouter") {
@@ -587,9 +593,10 @@ export interface StreamOptions {
 	 */
 	promptCache?: OpenAIPromptCacheOptions;
 	/**
-	 * Disable OpenAI Responses server-side turn chaining for this request.
-	 * Diagnostic callers that compare independent requests can set this to
-	 * `false` so `previous_response_id` cannot explain a result.
+	 * Server-side turn chaining: OpenAI Responses `previous_response_id` and
+	 * Anthropic message threads. `false` sends every request in full (diagnostic
+	 * callers comparing independent requests); `true` chains even where the
+	 * provider would not by default. Unset follows the provider default.
 	 */
 	statefulResponses?: boolean;
 	/**
@@ -602,6 +609,13 @@ export interface StreamOptions {
 	 * without the capability.
 	 */
 	storeResponses?: boolean;
+	/**
+	 * Request the Daybreak Blue cyber access program on Codex when the account
+	 * is eligible (see `openai-codex/access-programs.ts`). `false` omits
+	 * `access_programs`. Unset falls back to the host's
+	 * `configureCodexAccessPrograms` default, else on. Ignored elsewhere.
+	 */
+	codexAccessPrograms?: boolean;
 	/**
 	 * Disable native reasoning when the caller supplies an external scratchpad.
 	 * OpenAI Responses emits `reasoning: { effort: "none" }`; Anthropic and
@@ -650,6 +664,8 @@ export interface StreamOptions {
 	/**
 	 * Optional callback for inspecting or replacing provider payloads before sending.
 	 * Return undefined to keep the payload unchanged.
+	 * A pre-send standard Responses WS fallback rebuilds the HTTP candidate and
+	 * invokes this hook again. WS connection-local delta shaping follows it.
 	 */
 	onPayload?: (
 		payload: unknown,
@@ -658,6 +674,9 @@ export interface StreamOptions {
 	) => unknown | undefined | Promise<unknown | undefined>;
 	/**
 	 * Optional callback for provider response metadata after headers are received.
+	 * Standard Responses WS reports each physical handshake once with
+	 * metadata.transport="websocket" and metadata.phase="handshake", not each
+	 * generation. Its headers are not per-generation cache/request metadata.
 	 */
 	onResponse?: (response: ProviderResponseMetadata, model?: Model<Api>, signal?: AbortSignal) => void | Promise<void>;
 	/**
@@ -723,6 +742,8 @@ export interface StreamOptions {
 	 * implementation when set. Defaults to `globalThis.fetch`. Providers that
 	 * do not use `fetch` (Bedrock's AWS SDK transport, Cursor's HTTP/2
 	 * channel) silently ignore the override.
+	 * Standard Responses defaults to HTTP/SSE when set unless a request or model
+	 * explicitly selects WebSockets. WebSocket connections do not use this hook.
 	 */
 	fetch?: FetchImpl;
 	/** Current session working directory for providers that need workspace-scoped discovery. */
@@ -768,6 +789,21 @@ export interface LiveSteerClaim {
 	reject(): void;
 }
 
+/**
+ * Keeps a request's endpoint, headers and credential on one configuration version when the
+ * configuration can change while the request waits (for a concurrency slot, or before an auth
+ * retry). `streamSimple` calls it once per dispatch attempt, right after the attempt's
+ * credential resolves.
+ */
+export interface RequestBinding {
+	/**
+	 * `model` as the configuration version `credential` was resolved from configures it, or
+	 * `undefined` when that version is no longer the current one: the attempt then resolves its
+	 * credential again. A credential the binding does not know is sent with `model` as given.
+	 */
+	bind<TApi extends Api>(model: Model<TApi>, credential: ApiKeyResolution): Model<TApi> | undefined;
+}
+
 // Unified options with reasoning passed to streamSimple() and completeSimple()
 export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	/**
@@ -778,6 +814,11 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	 * ever see the resolved {@link StreamOptions.apiKey} string.
 	 */
 	apiKey?: ApiKey;
+	/**
+	 * With a resolver {@link apiKey}: binds each dispatch attempt (the first send and every
+	 * auth retry) to one configuration version, after the attempt's credential resolves.
+	 */
+	requestBinding?: RequestBinding;
 	reasoning?: Effort;
 	/**
 	 * Force-disable reasoning for the request even when the model supports it.
@@ -836,7 +877,7 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	kimiApiFormat?: "openai" | "anthropic";
 	/** API format for Synthetic provider: "openai" or "anthropic" (default: "openai") */
 	syntheticApiFormat?: "openai" | "anthropic";
-	/** Hint that websocket transport should be preferred when supported by the provider implementation. */
+	/** Standard Responses is opt-in and catalog-gated; either model/request false vetoes true. Codex keeps its independent policy. */
 	preferWebsockets?: boolean;
 	/**
 	 * OpenRouter routing-variant suffix automatically appended to model IDs when
@@ -863,6 +904,8 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	 * provider. Non-Anthropic providers ignore the field.
 	 */
 	fallbacks?: FallbackParam[];
+	/** Factory Droid only: omit refusal fallbacks and reject responses served by another model. */
+	disableServerSideFallback?: boolean;
 }
 
 // Generic StreamFunction with typed options

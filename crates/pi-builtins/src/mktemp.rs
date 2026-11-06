@@ -11,7 +11,6 @@ use std::{
 	path::{Path, PathBuf, is_separator},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{
 	Arg, ArgAction, ArgMatches, Command,
 	builder::{TypedValueParser, ValueParserFactory},
@@ -24,7 +23,7 @@ use rand::{
 use thiserror::Error;
 use uucore::display::Quotable;
 
-use crate::host::{Host, Utility, forward_slash_display, format_usage, matches_parser, os_bytes, util};
+use crate::host::{Host, Utility, forward_slash_display, format_usage, matches_parser, os_bytes};
 
 static DEFAULT_TEMPLATE: &str = "tmp.XXXXXXXXXX";
 
@@ -537,11 +536,6 @@ fn get_tmpdir_env_or_default(host: &Host) -> PathBuf {
 		Some(value) => PathBuf::from(value),
 		None => env::temp_dir(),
 	}
-}
-
-/// Creates the `mktemp` builtin registration.
-pub(crate) fn mktemp_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Mktemp, SE>()
 }
 
 #[cfg(test)]

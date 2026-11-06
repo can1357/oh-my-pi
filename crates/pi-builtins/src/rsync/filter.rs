@@ -1461,7 +1461,7 @@ impl Filters {
 		{
 			return (rd.read)(rel);
 		}
-		(rd.read)(path)
+		(rd.read)(os_name(path))
 	}
 
 	fn relative_to_curr<'p>(&self, path: &'p [u8]) -> Option<&'p [u8]> {
@@ -1882,6 +1882,20 @@ fn rule_prefix(rflags: u32, pat: &[u8], xfer: Option<XferCtx>) -> Option<Vec<u8>
 		op.push(b' ');
 	}
 	Some(op)
+}
+
+/// The filesystem spelling of an absolute filter name. [`Filters::set_curr_dir`]
+/// roots a Windows drive path as `/C:/…`, which Windows would read as `\C:\…`
+/// on the current drive.
+fn os_name(path: &[u8]) -> &[u8] {
+	match path {
+		[b'/', drive, b':', rest @ ..]
+			if cfg!(windows) && drive.is_ascii_alphabetic() && matches!(rest.first(), None | Some(b'/')) =>
+		{
+			&path[1..]
+		},
+		_ => path,
+	}
 }
 
 /// Does `rule` match `fname`? `skip_elide` names the side tag that makes a rule

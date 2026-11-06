@@ -280,7 +280,7 @@ function systemPromptDigest(blocks: readonly string[]): string {
 }
 
 /** The digest a branch entry records, `undefined` for a malformed record, or `null` when it is not a record. */
-function promptDigestOfEntry(entry: SessionEntry): string | undefined | null {
+export function promptDigestOfEntry(entry: SessionEntry): string | undefined | null {
 	if (entry.type !== "custom" || entry.customType !== SYSTEM_PROMPT_DIGEST_CUSTOM_TYPE) return null;
 	return typeof entry.data === "string" ? entry.data : undefined;
 }
@@ -387,6 +387,8 @@ export class SessionTools {
 	 * the same array scans just the appended entries.
 	 */
 	#recordedDigestScan: { branch: readonly SessionEntry[]; scanned: number; digest: string | undefined } | undefined;
+	/** {@link currentPromptDigest} for the base prompt array it hashed. */
+	#currentPromptDigest: { base: readonly string[]; digest: string } | undefined;
 	/**
 	 * Dynamic (`xd://`) devices the model has already been told are mounted.
 	 * Seeded lazily from persisted history on resume (see
@@ -1065,6 +1067,7 @@ export class SessionTools {
 							userPolicies,
 							getApprovalGrants(this.#host.settings.getAgentDir(), this.#host.sessionManager.getSessionId()),
 							restrictions,
+							ctx,
 						);
 						if (resolved.policy === "deny") throw denyError(resolved, target.name);
 						if (resolved.policy === "allow") {
@@ -1549,6 +1552,16 @@ export class SessionTools {
 			}
 		}
 		this.#recordedDigestScan = { branch, scanned: branch.length, digest };
+		return digest;
+	}
+
+	/** Digest of the agent's current base prompt, comparable with the digests recorded on the branch. */
+	currentPromptDigest(): string {
+		const base = this.baseOfSystemPrompt(this.#host.agent.state.systemPrompt);
+		const memo = this.#currentPromptDigest;
+		if (memo?.base === base) return memo.digest;
+		const digest = systemPromptDigest(base);
+		this.#currentPromptDigest = { base, digest };
 		return digest;
 	}
 

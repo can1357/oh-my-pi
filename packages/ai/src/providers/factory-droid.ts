@@ -7,6 +7,7 @@ import {
 } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
+import { serverSideFallbackModels } from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
 import type { RequestPolicy } from "@oh-my-pi/pi-catalog/compat/types";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
@@ -88,6 +89,8 @@ const FACTORY_DROID_RUNTIME_VERSION = "v26.3.0";
 const FACTORY_DROID_COMPLETIONS_TEMPERATURE = 1;
 
 export interface FactoryDroidOptions extends StreamOptions {
+	/** Per-call workers only: send no refusal fallbacks or fallback-credit beta, and fail a response served by another model. */
+	disableServerSideFallback?: boolean;
 	reasoning?: Effort;
 	disableReasoning?: boolean;
 	toolChoice?: ToolChoice;
@@ -219,8 +222,8 @@ function resolveRoute(
 	if (wire === "google-generate") {
 		route = { policy: resolveModelPolicy(model, { upstream }).request };
 	} else {
-		const resolved = resolveModelPolicy({ ...model, api: wire }, { upstream });
-		const fallbackModels = resolved.catalog.serverSideFallbackModels;
+		const spec = { ...model, api: wire };
+		const resolved = resolveModelPolicy(spec, { upstream });
 		route = {
 			policy: resolved.request,
 			inner: buildModel({
@@ -230,9 +233,7 @@ function resolveRoute(
 				compat: resolved.compat,
 				thinking: resolved.thinking,
 			} as ModelSpec<SharedWire>),
-			serverSideFallbackModels: Array.isArray(fallbackModels)
-				? fallbackModels.filter((entry): entry is string => typeof entry === "string")
-				: undefined,
+			serverSideFallbackModels: serverSideFallbackModels(spec, { upstream }),
 		};
 	}
 	routes.set(key, route);
@@ -330,7 +331,11 @@ function buildCompletionsReasoningBody(
 		case "none":
 			return {};
 		case "effort":
-			return { ...effortField(disabled ? "none" : effort), ...history };
+			return {
+				...effortField(disabled ? "none" : effort),
+				...history,
+				...(policy.completionsAllowMissingThinking ? { allow_missing_thinking: true } : {}),
+			};
 		case "forced-on":
 			// The route cannot turn thinking off; off maps to its lowest rung.
 			return { ...effortField(disabled ? "low" : effort), ...history };
@@ -387,13 +392,19 @@ type ForwardedOptions = Pick<
 interface Attempt {
 	model: Model<"factory-droid-agent">;
 	route: ResolvedRoute;
+	/** Registry base model whose wire identity may serve this fast tier. */
+	baseVariant?: string;
 	baseUrl: string;
+	/** Organization the request is served for. */
+	orgId: string | undefined;
 	effort: Effort | undefined;
 	disabled: boolean;
 	sessionUuid: string;
 	context: Context;
 	options: FactoryDroidOptions | undefined;
 	forwarded: ForwardedOptions;
+	/** Disallowed served model or handoff observed before forwarding its content. */
+	modelSwitchReason?: string;
 }
 
 function streamGoogleWire(a: Attempt): AssistantMessageEventStream {
@@ -423,10 +434,53 @@ function streamMessagesWire(a: Attempt, inner: Model<"anthropic-messages">): Ass
 			: !adaptive && (effort === "xhigh" || effort === "max")
 				? "high"
 				: effort;
-	const fallbackModels = a.route.serverSideFallbackModels;
-	const refusalFallbacks = fallbackModels?.length ? fallbackModels.map(model => ({ model })) : undefined;
+	// Discovery narrows the route's fallbacks to models its account can run; a
+	// model built without discovery keeps the route's full list, and a request
+	// served for another organization than discovery saw gets none.
+	const discoveredFor = a.model.factoryDroidOrgId;
+	const available =
+		discoveredFor !== undefined && discoveredFor !== a.orgId ? [] : a.model.factoryDroidRefusalFallbacks;
+	const fallbackModels = a.route.serverSideFallbackModels?.filter(model => available?.includes(model) ?? true);
+	const refusalFallbacks =
+		options?.disableServerSideFallback || !fallbackModels?.length
+			? undefined
+			: fallbackModels.map(model => ({ model }));
+	// Check raw frames before the shared transport can emit content events.
+	// Diagnostic observers cannot throw through that transport, so abort the
+	// attempt and let the outer stream surface the model-switch error instead.
+	const fallbackAbort = options?.disableServerSideFallback ? new AbortController() : undefined;
+	const observeServedModel = fallbackAbort
+		? (((event, servedFor) => {
+				try {
+					const parsed = JSON.parse(event.data) as {
+						type?: string;
+						message?: { model?: unknown };
+						content_block?: { type?: string };
+					};
+					const type = parsed.type ?? event.event;
+					if (type === "message_start") {
+						const served = parsed.message?.model;
+						if (typeof served === "string" && served.trim()) {
+							a.modelSwitchReason ??= servedByAnotherModel(a.model.id, served.trim(), a.baseVariant);
+						}
+					} else if (type === "content_block_start" && parsed.content_block?.type === "fallback") {
+						a.modelSwitchReason ??= "it carries a fallback handoff block";
+					}
+				} catch {
+					// An unparseable frame tells us nothing about the served model.
+				}
+				if (a.modelSwitchReason !== undefined) fallbackAbort.abort();
+				options?.onSseEvent?.(event, servedFor);
+			}) satisfies NonNullable<AnthropicOptions["onSseEvent"]>)
+		: undefined;
 	return streamAnthropic(inner, a.context, {
 		...a.forwarded,
+		signal: fallbackAbort
+			? a.forwarded.signal
+				? AbortSignal.any([a.forwarded.signal, fallbackAbort.signal])
+				: fallbackAbort.signal
+			: a.forwarded.signal,
+		...(observeServedModel ? { onSseEvent: observeServedModel } : {}),
 		// The non-OAuth client keeps Factory's system channel intact and sends
 		// its WorkOS bearer token in Authorization.
 		isOAuth: false,
@@ -463,6 +517,20 @@ function streamMessagesWire(a: Attempt, inner: Model<"anthropic-messages">): Ass
 		serviceTier: options?.serviceTier,
 		toolChoice: mapAnthropicToolChoice(options?.toolChoice),
 	});
+}
+
+/**
+ * Live Factory responses observed on 2026-10-30 report Anthropic ids with dots
+ * replaced by hyphens and fast tiers as their registry baseVariant. Accept
+ * those wire identities case-insensitively, but no other model or tier.
+ */
+function servedByAnotherModel(requestedId: string, servedId: string, baseVariant?: string): string | undefined {
+	const requested = requestedId.toLowerCase();
+	const served = servedId.toLowerCase();
+	if (served === requested || served === requested.replaceAll(".", "-")) return undefined;
+	const base = baseVariant?.toLowerCase();
+	if (base !== undefined && (served === base || served === base.replaceAll(".", "-"))) return undefined;
+	return `it was served by ${servedId}`;
 }
 
 function streamResponsesWire(a: Attempt, inner: Model<"openai-responses">): AssistantMessageEventStream {
@@ -687,6 +755,8 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 			const attempt: Attempt = {
 				model: scope.model,
 				route,
+				baseVariant: registry?.entitlement.baseVariant,
+				orgId: scope.orgId,
 				baseUrl: scope.baseUrl,
 				...selectEffort(scope.model, registry, options),
 				sessionUuid,
@@ -733,6 +803,12 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 			};
 
 			for await (const event of streamWire(wire, attempt)) {
+				// Set by the raw-frame observer of a per-call request, which aborts the attempt before content.
+				if (attempt.modelSwitchReason !== undefined) {
+					throw new Error(
+						`Factory did not keep this per-call request on ${model.id}: ${attempt.modelSwitchReason}.`,
+					);
+				}
 				if (event.type === "error") {
 					const regionMessage = asRegionUnavailableError(model, event.error.errorMessage);
 					if (regionMessage != null) {

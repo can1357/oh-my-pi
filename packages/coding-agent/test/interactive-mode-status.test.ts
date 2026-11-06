@@ -20,6 +20,7 @@ function renderContainer(container: Container, width = 120): string {
 function createInitialRenderHarness(): { ctx: InteractiveModeContext; helpers: UiHelpers } {
 	const ctx = {
 		chatContainer: new Container(),
+		pendingShellContainer: new Container(),
 		pendingMessagesContainer: new Container(),
 		updatePendingMessagesDisplay: vi.fn(),
 		pendingBashComponents: [],

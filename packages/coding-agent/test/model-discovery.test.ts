@@ -26,7 +26,7 @@ import {
 	discoverOpenAIModelsList,
 	discoveryProbeTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/config/model-discovery";
-import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { kNoAuth, ModelRegistry, type ModelRegistryOwner } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resolveCliModel } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { ProviderDiscoverySchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -431,6 +431,110 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(registry.getError()?.message).toContain("Failed to load config file models");
 		expect(registry.find("gateway", "first-model")).toBeUndefined();
 		expect(await registry.getApiKeyForProvider("gateway")).toBeUndefined();
+	});
+
+	test("reloadIfConfigChanged folds a models config edit into a running registry and keeps the last good one when an edit does not load", async () => {
+		const gateway = (compat?: Record<string, unknown>) => ({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9991",
+				apiKey: "TEST_KEY",
+				api: "anthropic-messages",
+				...(compat ? { compat } : {}),
+				models: [{ id: "claude-gateway", reasoning: false, input: ["text"] }],
+			},
+		});
+		const touch = () => {
+			const next = new Date(fs.statSync(modelsJsonPath).mtimeMs + 1_000);
+			fs.utimesSync(modelsJsonPath, next, next);
+		};
+		const longRetention = () =>
+			(registry.find("gateway", "claude-gateway")?.compat as { supportsLongCacheRetention?: boolean } | undefined)
+				?.supportsLongCacheRetention;
+		writeRawModelsJson(gateway());
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		const startGeneration = registry.configGeneration;
+		expect(longRetention()).toBe(false);
+		expect(await registry.reloadIfConfigChanged()).toBe(false);
+
+		writeRawModelsJson(gateway({ supportsLongCacheRetention: true }));
+		touch();
+		expect(await registry.reloadIfConfigChanged()).toBe(true);
+		expect(longRetention()).toBe(true);
+		expect(registry.configGeneration).toBeGreaterThan(startGeneration);
+		const goodGeneration = registry.configGeneration;
+
+		// A half-written edit: the provider and its flag stay as last loaded.
+		fs.writeFileSync(modelsJsonPath, "providers:\n  gateway: [unterminated\n");
+		touch();
+		expect(await registry.reloadIfConfigChanged()).toBe(false);
+		expect(longRetention()).toBe(true);
+		expect(registry.configGeneration).toBe(goodGeneration);
+		expect(await registry.reloadIfConfigChanged()).toBe(false);
+
+		// The next good edit loads again.
+		writeRawModelsJson(gateway());
+		touch();
+		expect(await registry.reloadIfConfigChanged()).toBe(true);
+		expect(longRetention()).toBe(false);
+	});
+
+	test("a worker mirror's reloadIfConfigChanged reloads on the owner, which pushes the rebuilt catalog to the mirror", async () => {
+		writeRawModelsJson({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9991",
+				apiKey: "TEST_KEY",
+				api: "anthropic-messages",
+				models: [{ id: "claude-gateway", reasoning: false, input: ["text"] }],
+			},
+		});
+		const owner = new ModelRegistry(authStorage, modelsJsonPath);
+		// The owner surface the worker bridge serves (thread/services/auth.ts); only the reload is exercised.
+		const ownerSurface = {
+			reloadIfConfigChanged: () => owner.reloadIfConfigChanged(),
+		} as unknown as ModelRegistryOwner;
+		const mirror = new ModelRegistry(authStorage, modelsJsonPath, { owner: ownerSurface });
+		// A writer truncates models.yml after main validated it and before the mirror replays the reload:
+		// the mirror must rebuild from main's parse, not from what the file now holds.
+		let truncateBeforeReplay = false;
+		const subscription = owner.subscribeMirror(batch => {
+			if (truncateBeforeReplay && batch.changes.some(change => change.kind === "reload")) {
+				fs.writeFileSync(modelsJsonPath, "providers:\n  gateway: [unterminated\n");
+			}
+			mirror.applyMirrorBatch(batch);
+		});
+		mirror.applyMirrorBatch(subscription.snapshot);
+		const longRetention = () =>
+			(mirror.find("gateway", "claude-gateway")?.compat as { supportsLongCacheRetention?: boolean } | undefined)
+				?.supportsLongCacheRetention;
+		try {
+			const startGeneration = mirror.configGeneration;
+			expect(longRetention()).toBe(false);
+
+			writeRawModelsJson({
+				gateway: {
+					baseUrl: "http://127.0.0.1:9991",
+					apiKey: "TEST_KEY",
+					api: "anthropic-messages",
+					compat: { supportsLongCacheRetention: true },
+					models: [{ id: "claude-gateway", reasoning: false, input: ["text"] }],
+				},
+			});
+			const next = new Date(fs.statSync(modelsJsonPath).mtimeMs + 1_000);
+			fs.utimesSync(modelsJsonPath, next, next);
+			truncateBeforeReplay = true;
+			expect(await mirror.reloadIfConfigChanged()).toBe(true);
+			// The owner flushes its change batch on a microtask; the bridge delivers it before answering.
+			await Bun.sleep(0);
+			expect(longRetention()).toBe(true);
+			expect(mirror.configGeneration).toBeGreaterThan(startGeneration);
+			// The reload ran on the owner, so main and every other mirror see the edit too.
+			expect(
+				(owner.find("gateway", "claude-gateway")?.compat as { supportsLongCacheRetention?: boolean } | undefined)
+					?.supportsLongCacheRetention,
+			).toBe(true);
+		} finally {
+			subscription.unsubscribe();
+		}
 	});
 
 	test("refreshProvider online refreshes expired anthropic OAuth before model discovery", async () => {
@@ -3345,6 +3449,44 @@ describe("ModelRegistry runtime discovery", () => {
 		expect((await sendThroughStreamSimple(optional, {})).reasoning_effort).toBeUndefined();
 	});
 
+	test("openai-models-list discovery reads relay rows' advertised service tiers", async () => {
+		writeRawModelsJson({
+			"codex-relay": {
+				baseUrl: "http://127.0.0.1:9994",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		// Relays republish the Codex catalog's tiers as bare ids, or (codex-lb)
+		// as codex-rs `{ id }` objects nested under `metadata`.
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9994/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{ id: "gpt-6.1-sol", object: "model", service_tiers: ["priority", "ultrafast"] },
+							{ id: "gpt-6-sol", object: "model", service_tiers: ["priority"] },
+							{
+								id: "gpt-6-astra",
+								object: "model",
+								metadata: { service_tiers: [{ id: "ultrafast", name: "Ultrafast" }] },
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		expect(registry.find("codex-relay", "gpt-6.1-sol")?.serviceTiers).toEqual(["priority", "ultrafast"]);
+		expect(registry.find("codex-relay", "gpt-6-astra")?.serviceTiers).toEqual(["ultrafast"]);
+		expect(registry.find("codex-relay", "gpt-6-sol")?.serviceTiers).toEqual(["priority"]);
+	});
+
 	test("openai-models-list discovery reads server-advertised input modalities for ids absent from the catalog", async () => {
 		writeRawModelsJson({
 			"openai-test": {
@@ -4606,7 +4748,7 @@ describe("ModelRegistry runtime discovery", () => {
 		const writeKey = cursorModelManagerOptions({ apiKey: tokenAtWrite }).cacheProviderId;
 		if (!writeKey) throw new Error("Expected Cursor manager options to name a cache namespace");
 		// Cursor discovery is authoritative: the row carries the manager's static fingerprint.
-		const fingerprint = fingerprintStaticModels(getBundledModels("cursor"), true);
+		const fingerprint = fingerprintStaticModels(getBundledModels("cursor"), { authoritative: true });
 		writeModelCache(writeKey, Date.now(), [discovered], true, fingerprint, cacheDbPath);
 		await authStorage.credentials.set("cursor", {
 			type: "oauth",

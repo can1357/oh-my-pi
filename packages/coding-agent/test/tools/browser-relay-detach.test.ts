@@ -24,8 +24,8 @@ const HANG = { code: "await page.evaluate(() => new Promise(function ompHang() {
 /**
  * The relay extension's side of the wire, played over a real headless Chromium's CDP endpoint: `attach`,
  * `send` and `detach` drive one page target the way `chrome.debugger` drives a tab. {@link chromeDetach}
- * does what Chrome does when another extension's frame loads in the tab: it ends the attachment, fails the
- * command in flight, and reports the detach.
+ * does what Chrome does when another extension's frame loads in the tab: it ends the attachment and its
+ * cross-site frames' sessions, fails the command in flight, and reports the detach.
  */
 class ChromeBackedExtension {
 	readonly #relay: WebSocket;
@@ -34,6 +34,8 @@ class ChromeBackedExtension {
 	readonly #replies = new Map<number, (message: Record<string, unknown>) => void>();
 	/** The page target's flat session while "chrome.debugger" is attached. */
 	#root: string | undefined;
+	/** Flat sessions of the cross-site frames Chrome auto-attached under the root. */
+	readonly #children = new Set<string>();
 	/** Chrome command id → relay RPC id of in-flight `send`s, answered with Chrome's error when the attachment ends. */
 	readonly #inFlight = new Map<number, number>();
 	/** Resolved by the next forwarded command each one matches. */
@@ -110,6 +112,9 @@ class ChromeBackedExtension {
 		}
 		const sessionId = typeof message.sessionId === "string" ? message.sessionId : undefined;
 		if (!sessionId || this.#root === undefined) return;
+		const child = isRecord(message.params) ? message.params.sessionId : undefined;
+		if (typeof child === "string" && message.method === "Target.attachedToTarget") this.#children.add(child);
+		if (typeof child === "string" && message.method === "Target.detachedFromTarget") this.#children.delete(child);
 		this.#relay.send(
 			JSON.stringify({
 				t: "cdpEvent",
@@ -217,14 +222,22 @@ class ChromeBackedExtension {
 		);
 	}
 
-	/** Chrome ends the attachment by itself: the command in flight fails, then `onDetach` fires. */
+	/**
+	 * Chrome ends the attachment by itself: its cross-site frames' sessions detach, the command in flight fails,
+	 * then `onDetach` fires, all before the extension handles any later request.
+	 */
 	async chromeDetach(reason: string): Promise<void> {
 		const root = this.#root;
 		this.#root = undefined;
+		for (const sessionId of this.#children) {
+			const event = { t: "cdpEvent", tabId: TAB_ID, method: "Target.detachedFromTarget", params: { sessionId } };
+			this.#relay.send(JSON.stringify(event));
+		}
+		this.#children.clear();
 		for (const rpcId of this.#inFlight.values()) this.#reply(rpcId, { error: "Detached while handling command." });
 		this.#inFlight.clear();
-		if (root) await this.#chromeSend("Target.detachFromTarget", { sessionId: root }).promise;
 		this.#relay.send(JSON.stringify({ t: "detached", tabId: TAB_ID, reason }));
+		if (root) await this.#chromeSend("Target.detachFromTarget", { sessionId: root }).promise;
 	}
 
 	close(): void {
@@ -251,10 +264,14 @@ describe("relay tabs Chrome detaches omp from", () => {
 		site = Bun.serve({
 			hostname: "127.0.0.1",
 			port: 0,
-			fetch: () =>
-				new Response('<title>Sign in</title><input id="user"><input id="pw" type="password">', {
-					headers: { "content-type": "text/html" },
-				}),
+			fetch: request => {
+				const url = new URL(request.url);
+				// `?frame` embeds the sign-in form from another site, which Chrome runs as an out-of-process frame.
+				const body = url.searchParams.has("frame")
+					? `<title>Sign in</title><iframe src="http://localhost:${url.port}/form"></iframe>`
+					: '<title>Sign in</title><input id="user"><input id="pw" type="password">';
+				return new Response(body, { headers: { "content-type": "text/html" } });
+			},
 		});
 	});
 
@@ -279,10 +296,10 @@ describe("relay tabs Chrome detaches omp from", () => {
 	}
 
 	/** Adopt a page through the relay and leave state on it that only survives a re-adoption without reload. */
-	async function openRelayTab(): Promise<ChromeBackedExtension> {
+	async function openRelayTab(query = ""): Promise<ChromeBackedExtension> {
 		if (!chromium || !site) throw new Error("Chromium not launched");
 		page = await chromium.newPage();
-		pageUrl = `${site.url}login?case=${crypto.randomUUID()}`;
+		pageUrl = `${site.url}login?case=${crypto.randomUUID()}${query}`;
 		await page.goto(pageUrl);
 		// Puppeteer exposes a target's CDP id only on the private field.
 		const target = page.target() as unknown as { _targetId: string };
@@ -362,6 +379,24 @@ describe("relay tabs Chrome detaches omp from", () => {
 			expect(failure).toContain("Chrome detached omp from this tab (target_closed) during this call");
 			expect(failure).toContain("password manager");
 			expect(failure).toContain("may already have landed");
+			expect(failure).toContain("reattached to the same tab");
+			expect((await invoke(readMark)).value).toBe("kept");
+		},
+		60_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"names the detach to a call running in a cross-site frame, whose session Chrome ends first",
+		async () => {
+			const ext = await openRelayTab("&frame");
+			const evaluating = ext.hanging();
+			const inForm = HANG.code.replace("page.evaluate", "form.evaluate");
+			const code = `const form = page.frames().find(frame => frame.url().endsWith("/form")); ${inForm}`;
+			const stalled = invoke({ action: "run", code, timeout: HANG.timeout }).catch((error: unknown) => error);
+			await evaluating;
+			await ext.chromeDetach("target_closed");
+			const failure = String(await stalled);
+			expect(failure).toContain("Chrome detached omp from this tab (target_closed) during this call");
 			expect(failure).toContain("reattached to the same tab");
 			expect((await invoke(readMark)).value).toBe("kept");
 		},

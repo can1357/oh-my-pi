@@ -181,7 +181,7 @@ function resolveGlobScopePattern(
 /**
  * Format a model as "provider/modelId" string.
  */
-export function formatModelString(model: Model<Api>): string {
+export function formatModelString(model: Pick<Model<Api>, "provider" | "id">): string {
 	return `${model.provider}/${model.id}`;
 }
 
@@ -210,6 +210,22 @@ export function formatModelStringWithRouting(model: Model<Api>): string {
 	const selector = formatModelString(model);
 	const upstream = getSingleUpstreamRoute(model);
 	return upstream ? `${selector}@${upstream}` : selector;
+}
+
+/** Restore a canonical model identity without interpreting any part of its id as a thinking selector. */
+export function resolveExactModelIdentity(
+	identity: string,
+	modelRegistry: ModelLookupRegistry,
+): Model<Api> | undefined {
+	const models = modelRegistry.getAvailable();
+	const literal = models.find(model => formatModelStringWithRouting(model) === identity);
+	if (literal) return literal;
+	const routing = splitUpstreamRouting(identity);
+	if (!routing) return undefined;
+	const base = models.find(model => formatModelString(model) === routing.base);
+	if (!base || !supportsUpstreamRouting(base)) return undefined;
+	const routed = applyUpstreamRouting(base, routing.upstream);
+	return formatModelStringWithRouting(routed) === identity ? routed : undefined;
 }
 
 function getOpenRouterRouteSuffix(modelId: string): { baseId: string; suffix: string } | undefined {
@@ -261,12 +277,45 @@ function getOpenRouterFallbackModelIds(modelId: string): string[] {
 	return orderedCandidates;
 }
 
+/**
+ * How a model was derived from another: its source, and how to derive the same variant again.
+ * `scope` is the settings scope the variant is wanted for (a refitted context window follows it).
+ */
+export type DeriveModel = (source: Model<Api>, scope?: Settings) => Model<Api>;
+
+export interface ModelDerivation {
+	readonly source: Model<Api>;
+	readonly derive: DeriveModel;
+}
+
+/**
+ * Models a selector derived from a catalog row (an `@upstream` pin, an OpenRouter requested id,
+ * a Bedrock inference profile, a refitted context window), so `ModelRegistry.currentConfigOf`
+ * can rebind the source to a models.yml edit and derive the same variant from the result.
+ */
+const modelDerivations = new WeakMap<Model<Api>, ModelDerivation>();
+
+/** Record that `derived` is `derive(source)`; returns `derived`. */
+export function recordModelDerivation<T extends Model<Api>>(derived: T, source: Model<Api>, derive: DeriveModel): T {
+	if (derived !== source) modelDerivations.set(derived, { source, derive });
+	return derived;
+}
+
+/** How `model` was derived from another model, when a selector or the registry derived it. */
+export function modelDerivationOf(model: Model<Api>): ModelDerivation | undefined {
+	return modelDerivations.get(model);
+}
+
 function cloneModelWithRequestedId(model: Model<Api>, requestedId: string): Model<Api> {
-	return {
-		...model,
-		id: requestedId,
-		...(model.name === model.id ? { name: requestedId } : {}),
-	};
+	return recordModelDerivation(
+		{
+			...model,
+			id: requestedId,
+			...(model.name === model.id ? { name: requestedId } : {}),
+		},
+		model,
+		source => cloneModelWithRequestedId(source, requestedId),
+	);
 }
 
 const AMAZON_BEDROCK_PROVIDER = "amazon-bedrock";
@@ -290,7 +339,12 @@ function resolveBedrockInferenceProfileModelId(
 	const template = availableModels.find(model => model.provider.toLowerCase() === AMAZON_BEDROCK_PROVIDER);
 	if (!template) return undefined;
 
-	return buildModel({
+	return buildBedrockInferenceProfileModel(requestedId, template);
+}
+
+/** An inference-profile model on `template`'s endpoint, headers and guardrails. */
+function buildBedrockInferenceProfileModel(requestedId: string, template: Model<Api>): Model<Api> {
+	const model = buildModel({
 		id: requestedId,
 		name: "Bedrock inference profile",
 		api: "bedrock-converse-stream",
@@ -309,6 +363,7 @@ function resolveBedrockInferenceProfileModelId(
 		...(template.guardrailTrace !== undefined ? { guardrailTrace: template.guardrailTrace } : {}),
 		...(template.requestMetadata !== undefined ? { requestMetadata: template.requestMetadata } : {}),
 	});
+	return recordModelDerivation(model, template, source => buildBedrockInferenceProfileModel(requestedId, source));
 }
 
 function resolveBedrockInferenceProfileReference(
@@ -325,22 +380,28 @@ function supportsUpstreamRouting(model: Model<Api>): boolean {
 	return modelMatchesHost(model, "openrouter") || modelMatchesHost(model, "vercelAIGateway");
 }
 
-/** Pin a resolved aggregator model to a single upstream provider via its compat routing block. */
+/**
+ * Pin a resolved aggregator model to a single upstream provider via its compat routing block. The
+ * pinned model records its derivation, so a models.yml edit to the aggregator rebinds it with the pin kept.
+ */
 function applyUpstreamRouting(model: Model<Api>, upstream: string): Model<Api> {
 	const aggregatorModel = model as Model<"openai-completions">;
 	const routing = { only: [upstream] };
-	return buildModel({
+	const routed = buildModel({
 		...model,
 		compat: modelMatchesHost(model, "vercelAIGateway")
 			? { ...aggregatorModel.compatConfig, vercelGatewayRouting: routing }
 			: { ...aggregatorModel.compatConfig, openRouterRouting: routing },
 	} as ModelSpec<Api>);
+	return recordModelDerivation(routed, model, source => applyUpstreamRouting(source, upstream));
 }
 
 const kProviderModelIndex = Symbol("model-resolver.providerIndex");
+const kProviderExactIndex = Symbol("model-resolver.providerExactIndex");
 const kProviderSpellingIndex = Symbol("model-resolver.providerSpellingIndex");
 type ModelsWithProviderIndex = readonly Model<Api>[] & {
 	[kProviderModelIndex]?: Map<string, Model<Api> | null>;
+	[kProviderExactIndex]?: Map<string, Model<Api> | null>;
 	[kProviderSpellingIndex]?: Map<string, Model<Api> | null>;
 };
 
@@ -376,6 +437,21 @@ function getProviderModelIndex(availableModels: readonly Model<Api>[]): Map<stri
 	if (cached) return cached;
 	const index = buildProviderIndex(availableModels, id => id.toLowerCase());
 	tagged[kProviderModelIndex] = index;
+	return index;
+}
+
+/**
+ * `provider\0id` → model with the id kept case-sensitive. Lets an exact id win
+ * when a provider carries ids differing only by case (a `models.yml` entry
+ * `MiMo-V2.6-Pro` beside the bundled `mimo-v2.6-pro`), which the
+ * case-insensitive {@link getProviderModelIndex} marks ambiguous.
+ */
+function getProviderExactIndex(availableModels: readonly Model<Api>[]): Map<string, Model<Api> | null> {
+	const tagged = availableModels as ModelsWithProviderIndex;
+	const cached = tagged[kProviderExactIndex];
+	if (cached) return cached;
+	const index = buildProviderIndex(availableModels, id => id);
+	tagged[kProviderExactIndex] = index;
 	return index;
 }
 
@@ -433,9 +509,15 @@ export function resolveProviderModelReference(
 	availableModels: readonly Model<Api>[],
 ): Model<Api> | undefined {
 	const normalizedProvider = provider.trim().toLowerCase();
-	const normalizedModelId = modelId.trim().toLowerCase();
+	const trimmedModelId = modelId.trim();
+	const normalizedModelId = trimmedModelId.toLowerCase();
 	if (!normalizedProvider || !normalizedModelId) {
 		return undefined;
+	}
+
+	const exactCase = getProviderExactIndex(availableModels).get(`${normalizedProvider}\u0000${trimmedModelId}`);
+	if (exactCase) {
+		return exactCase;
 	}
 
 	const index = getProviderModelIndex(availableModels);
@@ -1649,14 +1731,49 @@ export function resolveRoleChain(role: string, settings: Settings, pool: Model<A
 
 /**
  * Resolve a list of override patterns to the first matching model.
+ *
+ * `exactOnly` matches each pattern only as a literal `provider/model-id`,
+ * optionally followed by a supported `:level` and an aggregator `@upstream` pin:
+ * no role aliases, globs, or fuzzy ids.
  */
 export function resolveModelOverride(
 	modelPatterns: string[],
 	modelRegistry: ModelLookupRegistry,
 	settings?: Settings,
+	options?: { exactOnly?: boolean },
 ): { model?: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel; explicitThinkingLevel: boolean; warning?: string } {
 	if (modelPatterns.length === 0) return { explicitThinkingLevel: false };
 	const availableModels = modelRegistry.getAvailable();
+	if (options?.exactOnly) {
+		const find = (selector: string) => availableModels.find(model => `${model.provider}/${model.id}` === selector);
+		const exact = (selector: string) => {
+			// Some real ids end in a level-shaped segment, so the literal id wins over a suffix split.
+			const literal = find(selector);
+			if (literal) return { model: literal, explicitThinkingLevel: false };
+			const { base, level } = splitThinkingSuffix(selector, -1, MAX_THINKING_SUFFIX_OPTIONS);
+			if (!level) return undefined;
+			const model = find(base);
+			if (!model) return undefined;
+			return {
+				model,
+				thinkingLevel:
+					level === AUTO_THINKING ? AUTO_THINKING : (resolveThinkingLevelForModel(model, level) ?? level),
+				explicitThinkingLevel: true,
+			};
+		};
+		for (const pattern of modelPatterns) {
+			const selector = pattern.trim();
+			const direct = exact(selector);
+			if (direct) return direct;
+			// The pin is part of the selection: it rides the resolved model to dispatch.
+			const routing = splitUpstreamRouting(selector);
+			const routed = routing ? exact(routing.base) : undefined;
+			if (routing && routed && supportsUpstreamRouting(routed.model)) {
+				return { ...routed, model: applyUpstreamRouting(routed.model, routing.upstream) };
+			}
+		}
+		return { explicitThinkingLevel: false };
+	}
 	const matchPreferences = getModelMatchPreferences(settings);
 	let warning: string | undefined;
 	for (const pattern of modelPatterns) {
@@ -1770,6 +1887,7 @@ export async function resolveModelOverrideWithAuthFallback(
 	modelRegistry: ModelLookupRegistry & Pick<ModelRegistry, "getApiKey">,
 	settings?: Settings,
 	sessionId?: string,
+	options?: { exactOnly?: boolean },
 ): Promise<{
 	model?: Model<Api>;
 	thinkingLevel?: ConfiguredThinkingLevel;
@@ -1783,7 +1901,7 @@ export async function resolveModelOverrideWithAuthFallback(
 		const enabledModels = modelRegistry.getAvailable().filter(model => !disabledProviders.has(model.provider));
 		lookupRegistry = { getAvailable: () => enabledModels };
 	}
-	const primary = resolveModelOverride(modelPatterns, lookupRegistry, settings);
+	const primary = resolveModelOverride(modelPatterns, lookupRegistry, settings, options);
 	if (!primary.model || !parentActiveModelPattern) {
 		return { ...primary, authFallbackUsed: false };
 	}

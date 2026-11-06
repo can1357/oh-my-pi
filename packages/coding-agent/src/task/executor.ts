@@ -1,7 +1,9 @@
 /**
- * In-process execution for subagents.
+ * Subagent execution.
  *
- * Runs each subagent on the main thread and forwards AgentEvents for progress tracking.
+ * Runs each subagent on its home thread (a pooled worker when worker mode is on, see
+ * `../thread/services/executor`; else the calling thread) and forwards AgentEvents for
+ * progress tracking.
  */
 
 import * as fs from "node:fs/promises";
@@ -11,7 +13,12 @@ import { AgentBusyError, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-ag
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, popLoopPhase, prompt, pushLoopPhase, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
-import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobError, AsyncJobManager, type AsyncJobRunResult } from "../async";
+import {
+	ASYNC_JOB_MANAGER_SHUTDOWN_REASON,
+	AsyncJobError,
+	type AsyncJobManagerApi,
+	type AsyncJobRunResult,
+} from "../async";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { ModelRegistry } from "../config/model-registry";
@@ -49,17 +56,17 @@ import type { ToolPathWithSource } from "../extensibility/custom-tools";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { PreparedExtension } from "../extensibility/extensions/types";
 import { buildSkillPromptMessage, type Skill } from "../extensibility/skills";
-import type { HindsightSessionState } from "../hindsight/state";
+import type { HindsightSessionStateApi } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { IrcBus } from "../irc/bus";
-import type { MCPManager } from "../mcp/manager";
-import type { MnemopiSessionState } from "../mnemopi/state";
+import type { MCPManagerApi } from "../mcp/manager";
+import type { MnemopiSessionStateApi } from "../mnemopi/state";
 import { initializeExtensions } from "../modes/runtime-init";
 import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pending.md" with { type: "text" };
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../registry/persisted-agents";
 import {
 	type CreateAgentSessionOptions,
@@ -74,15 +81,19 @@ import {
 	PromptDroppedError,
 	type PromptOptions,
 } from "../session/agent-session";
-import { type ArtifactManager, writeArtifact } from "../session/artifacts";
+import { isLocalAgentSession } from "../session/agent-session-handle";
+import { type ArtifactManagerApi, writeArtifact } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
-import type { CostGate } from "../session/cost-gate";
+import type { CostGateApi } from "../session/cost-gate";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
+	AUTO_THINKING,
+	assertModelSupportsEffortCeiling,
 	type ConfiguredThinkingLevel,
+	clampThinkingLevelToCeiling,
 	prewalkWouldBeNoop,
 	resolveTaskEffortLevel,
 	type TaskEffort,
@@ -98,6 +109,9 @@ import { ToolAbortError } from "../tools/tool-errors";
 import { resetYieldTurnState } from "../tools/yield";
 import { type EventBus, emitSubagentFrame } from "../utils/event-bus";
 import { trackLateCleanup } from "../utils/late-cleanup";
+import { isMainThread } from "../thread/identity";
+import { runFollowUpTurnOnHome, runSubprocessPlaced } from "../thread/executor-routing";
+import { existingSubagentWorkerPool, subagentWorkerPool } from "../thread/subagent-worker";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
 import { isCompletionProbeEnabled, startCompletionProbe } from "./completion-probe";
@@ -131,6 +145,7 @@ import {
 	type YieldItem,
 } from "@oh-my-pi/pi-tui/tools/task";
 import { yieldSectionShapes } from "./yield-assembly";
+import { assertPerCallModelApproved, PerCallModelError, type PerCallModelGrants } from "./model-approval";
 import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
 import {
 	cfgTaskPrewalk,
@@ -201,6 +216,21 @@ export function resolveSoftRequestBudget(
 	const normalized = Math.max(0, Math.trunc(configuredBudget));
 	if (normalized === 0) return 0;
 	return Math.min(normalized, SOFT_REQUEST_BUDGET[agentName] ?? normalized);
+}
+
+/** `agentName`'s soft request budget and notice switch from `settings`: every run, wake, revival and workpool turn. */
+export function softRequestBudgetFor(
+	agentName: string,
+	settings: Settings,
+): { softRequestBudget: number; softRequestBudgetNotice: boolean } {
+	return {
+		softRequestBudget: resolveSoftRequestBudget(
+			agentName,
+			Number(cfgTaskSoftRequestBudget.get(settings)) || 0,
+			cfgTaskAgentSoftRequestBudget.get(settings),
+		),
+		softRequestBudgetNotice: cfgTaskSoftRequestBudgetNotice.get(settings),
+	};
 }
 
 /** Extra requests allowed after a budget stop for the forced yield to land before the run is hard-aborted. */
@@ -357,7 +387,7 @@ export interface IrcPeerRosterData {
 }
 
 export function collectIrcPeerRoster(
-	registry: AgentRegistry,
+	registry: AgentRegistryApi,
 	selfId: string,
 	rootSessionFile?: string,
 ): IrcPeerRosterData {
@@ -397,13 +427,13 @@ export function collectIrcPeerRoster(
 export interface ExecutorOptions {
 	cwd: string;
 	/** Cost gate of the parent session tree; the subagent's requests count toward it. */
-	costGate?: CostGate;
+	costGate?: CostGateApi;
 	/** Additional workspace directories to seed on the subagent session (multi-root). */
 	additionalDirectories?: string[];
 	/** Exact provider credential resolver inherited from the parent session. */
 	getApiKey?: CreateAgentSessionOptions["getApiKey"];
 	/** Parent session's manager; the child and its revived turns use this exact delivery scope. */
-	asyncJobManager?: AsyncJobManager;
+	asyncJobManager?: AsyncJobManagerApi;
 	/** Parent session whose stored credential affinities seed the child session. */
 	credentialSourceSessionId?: string;
 	worktree?: string;
@@ -441,6 +471,8 @@ export interface ExecutorOptions {
 	 * if the resolved subagent model has no working credentials. See #985.
 	 */
 	parentActiveModelPattern?: string;
+	/** Set for a per-call `model`; every model the child sends to must stay approved by these grants. */
+	perCallModelGrants?: PerCallModelGrants;
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Caller-requested coarse effort (`lo`/`med`/`hi`); maps onto the resolved model's supported thinking range and wins over {@link thinkingLevel}. */
 	effort?: TaskEffort;
@@ -535,7 +567,7 @@ export interface ExecutorOptions {
 	 * tool against its own `CustomToolAPI` (cwd, exec, pushPendingAction, UI).
 	 */
 	preloadedCustomToolPaths?: ToolPathWithSource[];
-	mcpManager?: MCPManager;
+	mcpManager?: MCPManagerApi;
 	/** User-authorized model agents available to this child and its descendants. */
 	inheritedSessionAgents?: CreateAgentSessionOptions["inheritedSessionAgents"];
 	authStorage?: AuthStorage;
@@ -565,9 +597,9 @@ export interface ExecutorOptions {
 	 * unique across the whole agent tree and all artifacts land in the parent's
 	 * artifacts directory (no per-subagent subdir).
 	 */
-	parentArtifactManager?: ArtifactManager;
-	parentHindsightSessionState?: HindsightSessionState;
-	parentMnemopiSessionState?: MnemopiSessionState;
+	parentArtifactManager?: ArtifactManagerApi;
+	parentHindsightSessionState?: HindsightSessionStateApi;
+	parentMnemopiSessionState?: MnemopiSessionStateApi;
 	/**
 	 * Parent agent's OpenTelemetry configuration. When defined, the subagent's
 	 * loop is started with the same tracer/hooks but its own agent identity
@@ -967,7 +999,7 @@ function getUsageTokens(usage: unknown): number {
  * including timeout=0; a second Task deadline would silently cap longer calls.
  * The proxy only races caller cancellation around source execution.
  */
-export function createMCPProxyTools(mcpManager: MCPManager): CustomTool[] {
+export function createMCPProxyTools(mcpManager: MCPManagerApi): CustomTool[] {
 	return mcpManager.getTools().map(tool => {
 		const serverName = tool.mcpServerName ?? "";
 		const mcpToolName = tool.mcpToolName ?? "";
@@ -1046,7 +1078,7 @@ export interface MCPToolFollower {
  * so those tools win, and every rebind must keep dropping them, or the first
  * reload would replace the child's own tool with the MCP capability.
  */
-export function followMCPTools(mcpManager: MCPManager, reservedNames?: ReadonlySet<string>): MCPToolFollower {
+export function followMCPTools(mcpManager: MCPManagerApi, reservedNames?: ReadonlySet<string>): MCPToolFollower {
 	let session: MCPToolFollowerSession | undefined;
 	let pending = false;
 	let scheduled = false;
@@ -1114,7 +1146,8 @@ function inheritedSubagentServiceTiers(
  */
 const kRootCompactionThresholds = Symbol("task.rootCompactionThresholds");
 
-interface RootCompactionThresholds extends CompactionThresholdPair {
+/** Root compaction thresholds a subagent chain pins (see {@link kRootCompactionThresholds}). */
+export interface RootCompactionThresholds extends CompactionThresholdPair {
 	modelThresholdsEnabled: boolean;
 }
 
@@ -1160,42 +1193,45 @@ export function createSubagentSettings(
 		modelThresholdsEnabled: cfgCompactionModelThresholdsEnabled.get(baseSettings),
 	};
 	// Every other setting reads through to the parent live; writes on the overlay stay local.
-	const subagentSettings: SubagentChainSettings = baseSettings.overlay({
-		...(inheritedRootThresholds && {
-			"compaction.thresholdPercent": inheritedRootThresholds.thresholdPercent,
-			"compaction.thresholdTokens": inheritedRootThresholds.thresholdTokens,
-			"compaction.modelThresholdsEnabled": inheritedRootThresholds.modelThresholdsEnabled,
-		}),
-		// A subagent's thinking level is chosen at spawn (agent definition, `effort`, or this
-		// snapshot of the parent default); a later parent default edit must not re-steer it.
-		defaultThinkingLevel: cfgDefaultThinkingLevel.get(baseSettings),
-		"tier.openai": subagentTiers.openai ?? "none",
-		"tier.anthropic": subagentTiers.anthropic ?? "none",
-		"tier.google": subagentTiers.google ?? "none",
-		// Async jobs and bash/eval auto-backgrounding are inherited from the parent:
-		// background jobs are owner-routed to the subagent's own session, and
-		// the run driver's quiescence barrier + teardown reap guarantee no
-		// owner job outlives the run, so worktree capture/cleanup stays
-		// race-free (previously both were force-disabled here).
+	const subagentSettings: SubagentChainSettings = baseSettings.overlay(
+		{
+			...(inheritedRootThresholds && {
+				"compaction.thresholdPercent": inheritedRootThresholds.thresholdPercent,
+				"compaction.thresholdTokens": inheritedRootThresholds.thresholdTokens,
+				"compaction.modelThresholdsEnabled": inheritedRootThresholds.modelThresholdsEnabled,
+			}),
+			// A subagent's thinking level is chosen at spawn (agent definition, `effort`, or this
+			// snapshot of the parent default); a later parent default edit must not re-steer it.
+			defaultThinkingLevel: cfgDefaultThinkingLevel.get(baseSettings),
+			"tier.openai": subagentTiers.openai ?? "none",
+			"tier.anthropic": subagentTiers.anthropic ?? "none",
+			"tier.google": subagentTiers.google ?? "none",
+			// Async jobs and bash/eval auto-backgrounding are inherited from the parent:
+			// background jobs are owner-routed to the subagent's own session, and
+			// the run driver's quiescence barrier + teardown reap guarantee no
+			// owner job outlives the run, so worktree capture/cleanup stays
+			// race-free (previously both were force-disabled here).
 
-		// Subagents run headless — there is no UI to confirm prompts against, so
-		// the parent task approval is the authorization boundary. Use yolo mode
-		// to preserve unattended subagent execution. User `tools.approval` policies still apply.
-		"tools.approvalMode": "yolo",
-		// Subagents run unadvised by default; runSubprocess opts a spawn back in
-		// per agent (frontmatter `advisor` / `task.agentAdvisor`) via overrides.
-		"advisor.enabled": false,
-		// A subagent assignment is one turn: its tool loop ends only when the run
-		// yields, so post-turn `checkCompaction` (driven from `agent_end`) fires
-		// after the run is over and `maintainContextMidRun` is the only proactive
-		// compaction the child ever reaches. `compaction.midTurnEnabled` encodes an
-		// interactive preference — keep compaction boundaries on real user turns —
-		// that has no counterpart here, so inheriting `false` left hours-long
-		// worker runs sailing past the configured threshold until the provider
-		// rejected the context (#13211). A per-spawn override still wins.
-		"compaction.midTurnEnabled": true,
-		...overrides,
-	});
+			// Subagents run headless — there is no UI to confirm prompts against, so
+			// the parent task approval is the authorization boundary. Use yolo mode
+			// to preserve unattended subagent execution. User `tools.approval` policies still apply.
+			"tools.approvalMode": "yolo",
+			// Subagents run unadvised by default; runSubprocess opts a spawn back in
+			// per agent (frontmatter `advisor` / `task.agentAdvisor`) via overrides.
+			"advisor.enabled": false,
+			// A subagent assignment is one turn: its tool loop ends only when the run
+			// yields, so post-turn `checkCompaction` (driven from `agent_end`) fires
+			// after the run is over and `maintainContextMidRun` is the only proactive
+			// compaction the child ever reaches. `compaction.midTurnEnabled` encodes an
+			// interactive preference — keep compaction boundaries on real user turns —
+			// that has no counterpart here, so inheriting `false` left hours-long
+			// worker runs sailing past the configured threshold until the provider
+			// rejected the context (#13211). A per-spawn override still wins.
+			"compaction.midTurnEnabled": true,
+			...overrides,
+		},
+		{ derived: true },
+	);
 	subagentSettings[kRootCompactionThresholds] = rootThresholds;
 	return subagentSettings;
 }
@@ -3045,6 +3081,8 @@ export interface IrcWakeTurnMonitorOptions {
 	 * (see {@link isCompletionProbeEnabled}); a peer-woken turn never does.
 	 */
 	completionProbe?: boolean;
+	softRequestBudget?: number;
+	softRequestBudgetNotice?: boolean;
 	/** `false` = the session has no `yield` tool; see {@link ExecutorOptions.structured}. */
 	structured?: boolean;
 	outputSchema?: unknown;
@@ -3237,6 +3275,8 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 	const { id, agent } = options;
 	const index = options.index ?? 0;
 	const maxRuntimeMs = options.maxRuntimeMs ?? 0;
+	const softRequestBudget = options.softRequestBudget ?? 0;
+	const softRequestBudgetNotice = options.softRequestBudgetNotice ?? softRequestBudget > 0;
 	session.setIrcWakeTurnObserver(records => {
 		// Autonomous IRC wake turns reuse the session's YieldTool just like
 		// runSubagentFollowUpTurn; clear the prior run's incremental-section flag
@@ -3326,8 +3366,8 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			parentToolCallId: options.parentToolCallId,
 			detached: true,
 			sessionFile,
-			softRequestBudget: 0,
-			softRequestBudgetNotice: false,
+			softRequestBudget,
+			softRequestBudgetNotice,
 			maxRuntimeMs,
 			// A peer's message gets a short answer, too short to probe; the owner's message is an
 			// assignment the owner waits on.
@@ -3375,7 +3415,9 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			const lastAssistant = session.getLastAssistantMessage();
 			const yielded = turnMonitor.yieldCalled();
 			const runtimeLimitExceeded = turnMonitor.runtimeLimitExceeded();
-			const aborted = runtimeLimitExceeded || (lastAssistant?.stopReason === "aborted" && !yielded);
+			const budgetExceeded = turnMonitor.abortKind() === "budget";
+			const aborted =
+				runtimeLimitExceeded || budgetExceeded || (lastAssistant?.stopReason === "aborted" && !yielded);
 			// Two error lanes. `error` carries full diagnostics (a thrown turn
 			// error's stack) for `done.error`, logs, and lifecycle. `errorForPeer`
 			// carries only the short, attributed message: a stack trace injected
@@ -3700,8 +3742,32 @@ export interface FollowUpTurnOptions {
 	maxRuntimeMs?: number;
 	/** Periodically ask for a completion estimate during this turn; see {@link isCompletionProbeEnabled}. */
 	completionProbe?: boolean;
+	softRequestBudget?: number;
+	softRequestBudgetNotice?: boolean;
 	/** Workpool items accepted by the child yield tool during this turn. */
 	workPoolYieldItems?: WorkPoolYieldItem[];
+}
+
+/**
+ * Revive `id` and return its session for a follow-up turn. Follow-up turns run
+ * on the subagent's home thread, where its live session is the local
+ * {@link AgentSession}.
+ */
+async function ensureLocalLive(id: string): Promise<AgentSession> {
+	const session = await AgentLifecycleManager.global().ensureLive(id);
+	if (!isLocalAgentSession(session)) {
+		throw new Error(`Subagent ${id} is homed on another thread; its follow-up turn must run there.`);
+	}
+	return session;
+}
+
+/**
+ * The subagent's own attached session. Its prompt builders run on its home
+ * thread, so an attached session is the local {@link AgentSession}.
+ */
+function ownAttachedSession(id: string): AgentSession | undefined {
+	const session = AgentRegistry.global().get(id)?.session;
+	return session && isLocalAgentSession(session) ? session : undefined;
 }
 
 /**
@@ -3715,12 +3781,42 @@ export interface FollowUpTurnOptions {
  * Unlike {@link runSubprocess}, the session is NOT torn down afterwards — it
  * stays adopted by the {@link AgentLifecycleManager} (idle → TTL park →
  * revive), and an aborted turn only aborts the in-flight turn.
+ *
+ * The turn runs on the session's home thread: a session homed on another thread
+ * (a worker-homed child seen from main, or any non-local one seen from a worker)
+ * is routed there.
  */
 export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Promise<SingleResult> {
+	const startTime = Date.now();
+	const session = await AgentLifecycleManager.global().ensureLive(options.id);
+	if (!isLocalAgentSession(session)) return runFollowUpTurnOnHome(session, options);
+	// A turn of a main-homed session loads the main thread like a placed run.
+	const endMainRun = isMainThread() ? existingSubagentWorkerPool()?.beginMainRun() : undefined;
+	try {
+		return await driveFollowUpTurn(options, session, startTime);
+	} finally {
+		endMainRun?.();
+	}
+}
+
+/**
+ * {@link runSubagentFollowUpTurn} on the session's home thread, where its live session is
+ * the local {@link AgentSession}. Entry point of follow-up turns routed into a worker.
+ */
+export async function runFollowUpTurnOnThisThread(options: FollowUpTurnOptions): Promise<SingleResult> {
+	const startTime = Date.now();
+	return driveFollowUpTurn(options, await ensureLocalLive(options.id), startTime);
+}
+
+/** The follow-up turn itself, on `live`, the subagent's revived local session. */
+async function driveFollowUpTurn(
+	options: FollowUpTurnOptions,
+	live: AgentSession,
+	startTime: number,
+): Promise<SingleResult> {
 	const { id, agent, message, signal } = options;
 	const index = options.index ?? 0;
-	const startTime = Date.now();
-	let session = await AgentLifecycleManager.global().ensureLive(id);
+	let session = live;
 	// Acquire turn ownership before mutating the shared yield contract: installing
 	// pooled items under a running ordinary wake would reject its in-flight tool
 	// calls. The check-to-install section below has no await, so once idle is
@@ -3753,7 +3849,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	// already be streaming a wake, so ownership is reacquired every round.
 	for (let acquireAttempts = 0; ; acquireAttempts++) {
 		await session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
-		const live = await AgentLifecycleManager.global().ensureLive(id);
+		const live = await ensureLocalLive(id);
 		if (live === session) break;
 		if (acquireAttempts >= 2) {
 			throw new Error(
@@ -3769,6 +3865,8 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	resetYieldTurnState(session.getToolByName("yield"));
 	const ref = AgentRegistry.global().get(id);
 	const sessionFile = ref?.sessionFile ?? undefined;
+	const softRequestBudget = options.softRequestBudget ?? 0;
+	const softRequestBudgetNotice = options.softRequestBudgetNotice ?? softRequestBudget > 0;
 
 	const monitor = createSubagentRunMonitor({
 		index,
@@ -3784,8 +3882,8 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		parentToolCallId: options.parentToolCallId,
 		detached: true,
 		sessionFile,
-		softRequestBudget: 0,
-		softRequestBudgetNotice: false,
+		softRequestBudget,
+		softRequestBudgetNotice,
 		maxRuntimeMs: options.maxRuntimeMs ?? 0,
 		completionProbe: options.completionProbe ?? false,
 	});
@@ -3959,6 +4057,8 @@ function buildSubagentSessionOptions(
 		expectedAgentRef,
 		resolveServiceTierByFamily: launch?.resolveServiceTierByFamily,
 		onFirstChatDispatch: launch?.onFirstChatDispatch,
+		// A launch prompts its assignment only after setup; a revive's turns are its IRC wakes.
+		awaitingAssignment: launch !== undefined,
 		systemPrompt: defaultPrompt => {
 			// A revive shows the roster the parked session's prompt held, and a rebuild that leaves the
 			// rest of the prompt unchanged keeps the roster the prompt it replaces showed: peer rows carry
@@ -3984,9 +4084,7 @@ function buildSubagentSessionOptions(
 				// would pin its whole graph past park. A revive builds while the registry session is
 				// null, so it renders the cleared set rather than the launch-time pooled instructions.
 				workPoolYieldItems:
-					AgentRegistry.global().get(inputs.id)?.session?.getWorkPoolYieldItems?.() ??
-					launch?.workPoolYieldItems ??
-					[],
+					ownAttachedSession(inputs.id)?.getWorkPoolYieldItems?.() ?? launch?.workPoolYieldItems ?? [],
 				ircPeers: ircRoster?.peers ?? [],
 				ircParkedCount: ircRoster?.parkedCount ?? 0,
 				ircOmittedCount: ircRoster?.omittedCount ?? 0,
@@ -4008,7 +4106,7 @@ function buildSubagentSessionOptions(
  * when the default blocks changed.
  */
 function heldIrcRoster(inputs: SubagentPromptInputs, defaultPrompt: readonly string[]): IrcPeerRosterData | undefined {
-	const held = AgentRegistry.global().get(inputs.id)?.session?.baseSystemPrompt;
+	const held = ownAttachedSession(inputs.id)?.baseSystemPrompt;
 	if (!held || held.length <= defaultPrompt.length) return undefined;
 	if (defaultPrompt.some((block, index) => held[index] !== block)) return undefined;
 	return held.map(block => inputs.ircRenders.get(block)).find(roster => roster !== undefined);
@@ -4016,7 +4114,7 @@ function heldIrcRoster(inputs: SubagentPromptInputs, defaultPrompt: readonly str
 
 /** Remembers the roster `block` shows, dropping blocks the live session's base prompt no longer holds. */
 function recordIrcRender(inputs: SubagentPromptInputs, block: string, roster: IrcPeerRosterData): void {
-	const held = AgentRegistry.global().get(inputs.id)?.session?.baseSystemPrompt;
+	const held = ownAttachedSession(inputs.id)?.baseSystemPrompt;
 	if (held) {
 		for (const rendered of inputs.ircRenders.keys()) {
 			if (!held.includes(rendered)) inputs.ircRenders.delete(rendered);
@@ -4077,9 +4175,11 @@ function restoreSubagentSettings(recipe: SubagentSettingsRecipe): Settings {
 interface WarmReviveCapture {
 	sessionFile: string;
 	spec: SubagentSessionSpec;
+	/** A per-call worker never switches models; its warm revive keeps only the exact saved model. */
+	perCallModel: boolean;
 	/** Re-captured whenever the live session is disposed, so a revive restores its latest settings writes. */
 	settings: SubagentSettingsRecipe;
-	parentArtifactManager: ArtifactManager | undefined;
+	parentArtifactManager: ArtifactManagerApi | undefined;
 	/** Todos are parent-owned and stripped from subagents, except under prewalk (its todo gate needs them). */
 	keepTodo: boolean;
 	wake: IrcWakeTurnMonitorOptions;
@@ -4165,7 +4265,11 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 		// transcript restores the effort, and the spawn selection only backs the model up when it is
 		// unavailable. The spawn's prewalk stays configured; the coordinator sees it was spent. A seance
 		// fork's selections belong to its source run, never to the consult.
-		const sessionLocalModel = capture.spec.preparedSession ? undefined : reopened.getSessionLocalModelChange()?.model;
+		// A per-call worker never switches models, so its warm revive never prepends a session-local switch.
+		const sessionLocalModel =
+			capture.spec.preparedSession || capture.perCallModel
+				? undefined
+				: reopened.getSessionLocalModelChange()?.model;
 		try {
 			try {
 				const options = buildSubagentSessionOptions(
@@ -4231,9 +4335,43 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 }
 
 /**
- * Run a single agent in-process.
+ * Run a single agent. On the main thread with worker mode on, the pool places the whole run
+ * on this thread or in a pooled subagent worker (the child session is homed where it runs),
+ * by how many subagents run at once; otherwise — worker mode off, or already inside a
+ * worker, so nested spawns stay in their worker — it runs on this thread. Worker mode is
+ * read from `options.settings`; a call without settings runs here.
  */
 export async function runSubprocess(options: ExecutorOptions): Promise<SingleResult> {
+	const pool = isMainThread() && options.settings ? subagentWorkerPool(options.settings) : undefined;
+	return pool ? runSubprocessPlaced(pool, options, runSubprocessOnThisThread) : runSubprocessOnThisThread(options);
+}
+
+/** A routed {@link runSubprocess} call as it crosses into a worker. */
+export interface SubagentRunRequest {
+	/** The caller's options, after `bridgeIntegrationOptions`. */
+	readonly options: ExecutorOptions;
+	/** Root compaction thresholds tagged on `options.settings` (a symbol property, which never crosses). */
+	readonly rootThresholds: RootCompactionThresholds | undefined;
+}
+
+/** Package `options` for a worker, carrying what the settings' symbol tag holds explicitly. */
+export function subagentRunRequest(options: ExecutorOptions): SubagentRunRequest {
+	const settings: SubagentChainSettings | undefined = options.settings;
+	return { options, rootThresholds: settings?.[kRootCompactionThresholds] };
+}
+
+/** Worker entry of a routed run: re-tag the settings mirror, then run here. */
+export function runSubagentRunRequest(request: SubagentRunRequest): Promise<SingleResult> {
+	const settings: SubagentChainSettings | undefined = request.options.settings;
+	if (settings && request.rootThresholds) settings[kRootCompactionThresholds] = request.rootThresholds;
+	return runSubprocessOnThisThread(request.options);
+}
+
+/**
+ * Run a single agent on the calling thread: create the child session here, drive and
+ * monitor it, and finalize its lifecycle. {@link runSubprocess} routes here.
+ */
+async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<SingleResult> {
 	const {
 		cwd,
 		agent,
@@ -4326,13 +4464,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	// TTL before an adopted idle subagent is parked by the lifecycle manager.
 	// <= 0 disables parking (the session stays live until process teardown).
 	const agentIdleTtlMs = Math.trunc(Number(cfgTaskAgentIdleTtlMs.get(settings)) || 0);
-	const configuredDefaultBudget = Math.max(0, Math.trunc(Number(cfgTaskSoftRequestBudget.get(settings)) || 0));
-	const softRequestBudget = resolveSoftRequestBudget(
-		agent.name,
-		configuredDefaultBudget,
-		cfgTaskAgentSoftRequestBudget.get(settings),
-	);
-	const softRequestBudgetNotice = cfgTaskSoftRequestBudgetNotice.get(settings);
+	const { softRequestBudget, softRequestBudgetNotice } = softRequestBudgetFor(agent.name, settings);
 	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
 	const restrictToolNames = options.restrictToolNames === true || preparedSession !== undefined;
@@ -4441,6 +4573,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		parentToolCallId: options.parentToolCallId,
 		sessionFile: subtaskSessionFile,
 		maxRuntimeMs,
+		softRequestBudget,
+		softRequestBudgetNotice,
 		structured,
 		outputSchema,
 		outputSchemaMode: options.outputSchemaMode,
@@ -4513,6 +4647,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 			checkAbort();
 
+			if (options.perCallModelGrants) {
+				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
+			}
 			const configuredModelPatterns = resolveConfiguredModelPatterns(modelPatterns, settings);
 			const inheritedRetryFallbackChain =
 				configuredModelPatterns.length === 1
@@ -4535,8 +4672,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					modelRegistry,
 					settings,
 					id,
+					options.perCallModelGrants ? { exactOnly: true } : undefined,
 				),
 			);
+			if (options.perCallModelGrants && !model) {
+				throw new PerCallModelError(
+					`Requested exact model ${JSON.stringify(modelPatterns)} is unavailable. Use an exact provider/model[:level] selector; do not substitute another model.`,
+				);
+			}
 			if (modelResolutionWarning) {
 				logger.warn("Subagent model resolution warning", {
 					warning: modelResolutionWarning,
@@ -4550,6 +4693,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					resolvedProvider: model.provider,
 					resolvedModel: model.id,
 				});
+			}
+			// Preflight skips these checks while the registry is cold, so hold the model
+			// a per-call child actually starts on to them before its session exists.
+			if (options.perCallModelGrants && model) {
+				assertPerCallModelApproved(model, options.perCallModelGrants, modelRegistry);
 			}
 			// The exact-name `task.agentServiceTierOverrides` entry dispatch resolved
 			// for this agent. The session evaluates it against its final model —
@@ -4589,13 +4737,22 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// through to the normal selectors below.
 			// The ceiling outlives initial resolution: it rides into the session so
 			// retry-fallback recovery can never clamp effort back up past it.
-			const spawnEffortCeiling = options.effort !== undefined ? cfgTaskMaxEffort.get(settings) : undefined;
+			// A per-call `model` is caller-chosen too, so its `:level` is held to the same
+			// ceiling, and a model whose lowest effort is above it fails the spawn
+			// exactly as an `effort` hint does.
+			const spawnEffortCeiling =
+				options.effort !== undefined || options.perCallModelGrants ? cfgTaskMaxEffort.get(settings) : undefined;
+			if (model && spawnEffortCeiling) assertModelSupportsEffortCeiling(model, spawnEffortCeiling);
 			const effortLevel =
 				options.effort !== undefined
 					? resolveTaskEffortLevel(model, options.effort, spawnEffortCeiling)
 					: undefined;
+			const explicitLevel =
+				explicitThinkingLevel && resolvedThinkingLevel !== AUTO_THINKING
+					? clampThinkingLevelToCeiling(model, resolvedThinkingLevel, spawnEffortCeiling)
+					: resolvedThinkingLevel;
 			if (model) {
-				const displayLevel = effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : undefined);
+				const displayLevel = effortLevel ?? (explicitThinkingLevel ? explicitLevel : undefined);
 				progress.resolvedModelIdentity = formatModelStringWithRouting(model);
 				progress.resolvedThinkingLevel = displayLevel;
 				progress.resolvedModel =
@@ -4607,7 +4764,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// model pattern > agent-definition default (e.g. task's `auto`) >
 			// pattern-derived level.
 			const effectiveThinkingLevel =
-				effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : (thinkingLevel ?? resolvedThinkingLevel));
+				effortLevel ?? (explicitThinkingLevel ? explicitLevel : (thinkingLevel ?? resolvedThinkingLevel));
 			resolvedAt = performance.now();
 			const effectiveCwd = worktree ?? cwd;
 			const fork = preparedSession?.fork;
@@ -4638,14 +4795,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// fast/cheap target at its first edit/write — the same mechanism as the
 			// session-level --prewalk. The bundled generic `task` agent has no
 			// frontmatter default; the `task.prewalk` toggle (default off) arms it.
-			// Resolution failures skip prewalk instead of failing the spawn.
+			// Resolution failures skip prewalk instead of failing the spawn. A per-call
+			// worker never switches models, so it never prewalks.
+			const perCallModelGrants = options.perCallModelGrants;
 			let prewalk: Prewalk | undefined;
-			const prewalkPattern = preparedSession
-				? undefined
-				: resolveAgentPrewalkPattern({
-						settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
-						agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
-					});
+			const prewalkPattern =
+				preparedSession || perCallModelGrants
+					? undefined
+					: resolveAgentPrewalkPattern({
+							settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
+							agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
+						});
 			if (prewalkPattern) {
 				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
 				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
@@ -4730,6 +4890,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					modelPatternDefaultFallbackChain:
 						model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
 					thinkingLevel: effectiveThinkingLevel,
+					...(perCallModelGrants
+						? {
+								// Every request stays on an approved model that can run at or below the spawn's effort ceiling.
+								assertDispatchModel: (dispatchModel: Model) => {
+									assertPerCallModelApproved(dispatchModel, perCallModelGrants, modelRegistry);
+									if (spawnEffortCeiling) assertModelSupportsEffortCeiling(dispatchModel, spawnEffortCeiling);
+								},
+								disableModelFallback: true,
+								disableServerSideFallback: true,
+							}
+						: {}),
 					thinkingLevelCeiling: spawnEffortCeiling,
 					// Subagents are short-lived; never schedule background warm requests.
 					cacheWarming: false,
@@ -4901,6 +5072,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				const reviveCapture: WarmReviveCapture = {
 					sessionFile,
 					spec: sessionSpec,
+					perCallModel: perCallModelGrants !== undefined,
 					settings: captureSubagentSettings(settings, subagentSettings),
 					parentArtifactManager: preparedSession ? undefined : options.parentArtifactManager,
 					keepTodo: prewalk !== undefined,
@@ -4951,9 +5123,18 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				systemPrompt: session.agent.state.systemPrompt,
 				task,
 				tools: persistedSubagentTools,
+				mountedTools: session.getMountedXdevToolNames(),
 				agent: agent.name,
 				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
 				resolvedModel: progress.resolvedModel,
+				...(perCallModelGrants
+					? {
+							perCallModel: true,
+							// Display selectors can conflate literal :level ids with effort, so revival records each separately.
+							perCallModelIdentity: formatModelStringWithRouting(session.model!),
+							perCallThinkingLevel: session.configuredThinkingLevel() ?? null,
+						}
+					: {}),
 				// Deferred model resolution installs this role inside createAgentSession,
 				// so read it back from the settings both install paths write.
 				retryFallback: getRetryFallbackRole(subagentSettings, subagentRetryFallbackRole(id)),

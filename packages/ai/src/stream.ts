@@ -13,9 +13,15 @@ import {
 	resolveWireModelId,
 	withoutUnverifiedThinking,
 } from "@oh-my-pi/pi-catalog/model-thinking";
-import { $env, getProviderInFlightRoot, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { $env, getProviderInFlightRoot, isEnoent, isPidAlive, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
-import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
+import {
+	type ApiKeyResolution,
+	createAuthRetryKeyState,
+	isApiKeyResolver,
+	resolvedApiKeyBearer,
+	resolveNextAuthRetryKey,
+} from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
 import { getEnvApiKey } from "./env-api-key";
 import * as AIError from "./error";
@@ -165,18 +171,6 @@ function providerInFlightLockDir(provider: string): string {
 	return `${providerInFlightDir(provider)}.lock`;
 }
 
-// `process.kill(pid, 0)` may throw for permission/sandbox reasons even when a
-// process exists. Treat non-ESRCH failures as alive; timestamp expiry still
-// reaps leases whose heartbeat stopped.
-function isProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code !== "ESRCH";
-	}
-}
-
 async function readProviderInFlightInfo(infoPath: string): Promise<ProviderInFlightLeaseInfo | null> {
 	try {
 		const content = await fs.readFile(infoPath, "utf-8");
@@ -208,7 +202,7 @@ async function writeProviderInFlightInfo(dir: string, token: string): Promise<vo
 async function isProviderInFlightDirStale(dir: string, staleMs: number): Promise<boolean> {
 	const info = await readProviderInFlightInfo(path.join(dir, "info.json"));
 	if (info) {
-		if (!isProcessAlive(info.pid)) return true;
+		if (!isPidAlive(info.pid)) return true;
 		return Date.now() - info.timestamp > staleMs;
 	}
 
@@ -231,7 +225,7 @@ async function isProviderInFlightDirStale(dir: string, staleMs: number): Promise
 async function readProviderInFlightStaleLock(lockDir: string): Promise<ProviderInFlightStaleLock | null> {
 	const infoPath = path.join(lockDir, "info.json");
 	const info = await readProviderInFlightInfo(infoPath);
-	if (info) return isProcessAlive(info.pid) ? null : { token: info.token };
+	if (info) return isPidAlive(info.pid) ? null : { token: info.token };
 
 	try {
 		const stat = await fs.stat(lockDir);
@@ -1176,9 +1170,20 @@ export function streamSimple<TApi extends Api>(
 	// byte-identical to a non-reasoning model's.
 	const effortRequested =
 		sessionOptions.reasoning !== undefined && !sessionOptions.disableReasoning && !sessionOptions.forceReasoningOff;
+	const sourceModel = model;
 	if (!effortRequested) model = withoutUnverifiedThinking(model);
+	const shapedModel = model;
+	const binding = sessionOptions.requestBinding;
+	// The binding rebinds the model the caller sent; a rebound model gets the same request shaping.
+	const bindAttempt: AttemptBinder<TApi> | undefined = binding
+		? credential => {
+				const bound = binding.bind(sourceModel, credential);
+				if (bound === sourceModel) return shapedModel;
+				return bound && !effortRequested ? withoutUnverifiedThinking(bound) : bound;
+			}
+		: undefined;
 	if (!model.requiresGlyphTokenization) {
-		return streamSimpleRequest(model, context, sessionOptions);
+		return streamSimpleRequest(model, context, sessionOptions, bindAttempt);
 	}
 	const codec = applyGlyphCodec(context);
 	const execHandlers = sessionOptions.cursorExecHandlers ?? sessionOptions.execHandlers;
@@ -1191,7 +1196,7 @@ export function streamSimple<TApi extends Api>(
 					execHandlers: wrappedExecHandlers,
 					cursorExecHandlers: wrappedExecHandlers,
 				};
-	return codec.wrap(streamSimpleRequest(model, codec.context, wireOptions));
+	return codec.wrap(streamSimpleRequest(model, codec.context, wireOptions, bindAttempt));
 }
 
 /**
@@ -1214,10 +1219,14 @@ function forwardBedrockUserAgent(
 	return modelUserAgent === undefined ? callerHeaders : { ...callerHeaders, "User-Agent": modelUserAgent };
 }
 
+/** Rebinds a request's model to the configuration a resolved credential came from (see {@link RequestBinding}). */
+type AttemptBinder<TApi extends Api> = (credential: ApiKeyResolution) => Model<TApi> | undefined;
+
 function streamSimpleRequest<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
 	options?: SimpleStreamOptions,
+	bindAttempt?: AttemptBinder<TApi>,
 ): AssistantMessageEventStream {
 	const requestOptions = withSupportedSamplingParams(
 		model,
@@ -1228,10 +1237,26 @@ function streamSimpleRequest<TApi extends Api>(
 	if (apiKeyResolver) {
 		const outer = new AssistantMessageEventStream();
 		const signal = requestOptions?.signal;
+		// The credential an attempt sends and the model (endpoint, headers) it sends it with come
+		// from one configuration version: a credential resolved after the configuration moved on
+		// is resolved again, so a new key never reaches an old endpoint, nor an old key a new one.
+		const bindCredential = async (
+			resolved: ApiKeyResolution,
+		): Promise<{ resolved: ApiKeyResolution; model: Model<TApi> }> => {
+			if (!bindAttempt) return { resolved, model };
+			let bound = bindAttempt(resolved);
+			while (bound === undefined) {
+				signal?.throwIfAborted();
+				resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal });
+				bound = bindAttempt(resolved);
+			}
+			return { resolved, model: bound };
+		};
 		// One inner attempt against a resolved key, or against the Bedrock AWS
 		// credential chain when its optional resolver has no stored bearer key.
 		// Retryable auth failures are buffered until replay is safe.
 		const runAttempt = async (
+			attemptModel: Model<TApi>,
 			apiKey?: string,
 			credentialId?: number,
 			oauthIdentity?: OAuthRequestIdentity,
@@ -1244,8 +1269,14 @@ function streamSimpleRequest<TApi extends Api>(
 			};
 
 			try {
-				const attemptOptions = { ...requestOptions, apiKey, credentialId, oauthIdentity };
-				const inner = streamSimpleRequest(model, context, attemptOptions);
+				const attemptOptions = {
+					...requestOptions,
+					apiKey,
+					credentialId,
+					oauthIdentity,
+					requestBinding: undefined,
+				};
+				const inner = streamSimpleRequest(attemptModel, context, attemptOptions);
 				for await (const event of inner) {
 					if (credentialId !== undefined) {
 						if ("partial" in event) event.partial.credentialId = credentialId;
@@ -1260,14 +1291,14 @@ function streamSimpleRequest<TApi extends Api>(
 						!emittedReplayUnsafeEvent &&
 						event.type === "error" &&
 						isRetryableUpstreamError(
-							model,
+							attemptModel,
 							event.error,
 							extractStatusFromAssistantError(event.error),
 							event.error.errorMessage,
 						)
 					) {
 						return {
-							error: contextualizeAuthRetryError(model, createAssistantAuthError(event.error)),
+							error: contextualizeAuthRetryError(attemptModel, createAssistantAuthError(event.error)),
 							bufferedEvents,
 							terminalEvent: event,
 						};
@@ -1287,13 +1318,13 @@ function streamSimpleRequest<TApi extends Api>(
 				if (
 					!emittedReplayUnsafeEvent &&
 					isRetryableUpstreamError(
-						model,
+						attemptModel,
 						error,
 						AIError.status(error),
 						error instanceof Error ? error.message : undefined,
 					)
 				) {
-					return { error: contextualizeAuthRetryError(model, error), bufferedEvents };
+					return { error: contextualizeAuthRetryError(attemptModel, error), bufferedEvents };
 				}
 				flushBuffered();
 				outer.fail(error);
@@ -1313,8 +1344,11 @@ function streamSimpleRequest<TApi extends Api>(
 			let lastKey: string | undefined;
 			let credentialId: number | undefined;
 			let oauthIdentity: OAuthRequestIdentity | undefined;
+			let attemptModel: Model<TApi>;
 			try {
-				const resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal });
+				const bound = await bindCredential(await apiKeyResolver({ lastChance: false, error: undefined, signal }));
+				const resolved = bound.resolved;
+				attemptModel = bound.model;
 				lastKey = resolvedApiKeyBearer(resolved);
 				credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 				oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
@@ -1331,7 +1365,7 @@ function streamSimpleRequest<TApi extends Api>(
 			}
 			if (lastKey === undefined) {
 				if (getProviderDefinition(model.provider)?.allowsMissingApiKey) {
-					const failure = await runAttempt();
+					const failure = await runAttempt(attemptModel);
 					if (failure) emitFailure(failure);
 					return;
 				}
@@ -1339,26 +1373,39 @@ function streamSimpleRequest<TApi extends Api>(
 				return;
 			}
 			const retryState = createAuthRetryKeyState(lastKey);
-			let failure = await runAttempt(lastKey, credentialId, oauthIdentity);
+			let failure = await runAttempt(attemptModel, lastKey, credentialId, oauthIdentity);
 			if (!failure) return;
 			while (true) {
 				// Caller aborted between attempts: don't mint a fresh token or fire
 				// another doomed request — emit the captured failure instead.
 				if (signal?.aborted) break;
-				let nextCredentialId: number | undefined;
-				let nextOAuthIdentity: OAuthRequestIdentity | undefined;
-				const nextKey = await resolveNextAuthRetryKey(
+				let nextResolved: ApiKeyResolution = undefined;
+				const retryKey = await resolveNextAuthRetryKey(
 					retryState,
 					apiKeyResolver,
 					failure.error,
 					signal,
 					resolved => {
-						nextCredentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
-						nextOAuthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
+						nextResolved = resolved;
 					},
 				);
+				if (retryKey === undefined) break;
+				// A retry is a dispatch attempt too: its credential and endpoint share one version.
+				let bound: { resolved: ApiKeyResolution; model: Model<TApi> };
+				try {
+					bound = await bindCredential(nextResolved);
+				} catch {
+					break;
+				}
+				const nextKey = resolvedApiKeyBearer(bound.resolved);
 				if (nextKey === undefined) break;
-				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
+				if (nextKey !== retryKey) {
+					retryState.attemptedKeys.add(nextKey);
+					retryState.lastKey = nextKey;
+				}
+				const nextCredentialId = typeof bound.resolved === "string" ? undefined : bound.resolved?.credentialId;
+				const nextOAuthIdentity = typeof bound.resolved === "string" ? undefined : bound.resolved?.oauthIdentity;
+				const next = await runAttempt(bound.model, nextKey, nextCredentialId, nextOAuthIdentity);
 				if (!next) return;
 				failure = next;
 			}
@@ -1813,6 +1860,7 @@ function mapOptionsForApi<TApi extends Api>(
 		codexSseMaxAttempts: options?.codexSseMaxAttempts,
 		providerSessionState: options?.providerSessionState,
 		parentSessionId: options?.parentSessionId,
+		statefulResponses: options?.statefulResponses,
 		minimizeEffort: options?.minimizeEffort,
 		liveSteering: options?.liveSteering,
 		maxInFlightRequests: options?.maxInFlightRequests,
@@ -2022,7 +2070,7 @@ function mapOptionsForApi<TApi extends Api>(
 					forceReasoningOff: options?.forceReasoningOff,
 					textVerbosity: options?.textVerbosity,
 					promptCache: options?.promptCache,
-					statefulResponses: options?.statefulResponses,
+					preferWebsockets: options?.preferWebsockets,
 				});
 			}
 			return castApi<"openai-completions">({
@@ -2064,8 +2112,8 @@ function mapOptionsForApi<TApi extends Api>(
 				forceReasoningOff: options?.forceReasoningOff,
 				textVerbosity: options?.textVerbosity,
 				promptCache: options?.promptCache,
-				statefulResponses: options?.statefulResponses,
 				storeResponses: options?.storeResponses,
+				preferWebsockets: options?.preferWebsockets,
 			});
 
 		case "azure-openai-responses":
@@ -2076,7 +2124,6 @@ function mapOptionsForApi<TApi extends Api>(
 				serviceTier: options?.serviceTier,
 				reasoningSummary: options?.hideThinkingSummary ? null : undefined,
 				promptCache: options?.promptCache,
-				statefulResponses: options?.statefulResponses,
 				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
 				forceReasoningOff: options?.forceReasoningOff,
 			});
@@ -2089,6 +2136,7 @@ function mapOptionsForApi<TApi extends Api>(
 				serviceTier: options?.serviceTier,
 				preferWebsockets: options?.preferWebsockets,
 				codexCompaction: options?.codexCompaction,
+				codexAccessPrograms: options?.codexAccessPrograms,
 				reasoningSummary: options?.hideThinkingSummary ? null : undefined,
 				textVerbosity: options?.textVerbosity,
 				disableReasoning: options?.disableReasoning,
@@ -2332,6 +2380,7 @@ function mapOptionsForApi<TApi extends Api>(
 				maxTokens: options?.maxTokens,
 				reasoning,
 				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
+				disableServerSideFallback: options?.disableServerSideFallback,
 				hideThinkingSummary: options?.hideThinkingSummary,
 				textVerbosity: options?.textVerbosity,
 				serviceTier: options?.serviceTier,
