@@ -8255,6 +8255,16 @@ export interface ScalewayModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
+// OrcaRouter
+// ---------------------------------------------------------------------------
+
+/** OrcaRouter OpenAI-compatible Responses API configuration. */
+export interface OrcaRouterModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
 /**
  * Scaleway model manager: plain OpenAI-compatible chat completions at
  * `api.scaleway.ai/v1` (fr-par serverless Generative APIs). `/v1/models`
@@ -8274,5 +8284,68 @@ export function scalewayModelManagerOptions(
 		requireApiKey: true,
 		filterModel: (_entry, model) => !isExcludedModel("scaleway", model.id),
 		mapModel: mapWithBundledReference,
+	});
+}
+
+const ORCAROUTER_BASE_URL = "https://api.orcarouter.ai/v1";
+
+/**
+ * OrcaRouter rows follow OpenRouter's roster shape: `architecture.input_modalities`,
+ * `pricing` (per-token decimal strings), and `supported_parameters`. Live fields
+ * win for what the public roster actually reports (a bundled row with neutral
+ * zero cost must not stay free once the roster prices it), while bundled
+ * reference values survive for everything the roster leaves out.
+ */
+function mapOrcaRouterModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-responses">,
+	reference: ModelSpec<"openai-responses"> | undefined,
+): ModelSpec<"openai-responses"> {
+	const mapped = mapWithBundledReference(entry, defaults, reference);
+	const parameters = Array.isArray(entry.supported_parameters)
+		? entry.supported_parameters.filter((param): param is string => typeof param === "string")
+		: [];
+	const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+	const input = toInputCapabilities(architecture?.input_modalities);
+	const live = perTokenPricingCost(entry.pricing);
+	const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
+	return {
+		...mapped,
+		reasoning: parameters.includes("reasoning") || parameters.includes("include_reasoning") || mapped.reasoning,
+		// Nested `top_provider.max_completion_tokens` is the OpenRouter-shaped
+		// output ceiling; the root field is a secondary source.
+		maxTokens: toPositiveNumber(topProvider?.max_completion_tokens ?? entry.max_completion_tokens, mapped.maxTokens),
+		input: input.length > 0 ? input : mapped.input,
+		cost: live.input > 0 || live.output > 0 ? live : mapped.cost,
+		...(parameters.length > 0 && !parameters.includes("tools") && !parameters.includes("tool_choice")
+			? { supportsTools: false }
+			: {}),
+	};
+}
+
+/**
+ * OrcaRouter model manager: OpenAI-compatible Responses API at
+ * https://api.orcarouter.ai/v1. The `/v1/models` endpoint is public and
+ * returns the live model roster with context windows and capabilities, so
+ * discovery runs without credentials and `requireApiKey` is left off.
+ * Discovered models use the Responses API wire format.
+ */
+export function orcaRouterModelManagerOptions(
+	config?: OrcaRouterModelManagerConfig,
+): ModelManagerOptions<"openai-responses"> {
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-responses",
+		providerId: "orcarouter",
+		defaultBaseUrl: ORCAROUTER_BASE_URL,
+		config,
+		// The public `/v1/models` roster is the source of truth: rows it retires
+		// are dropped from static-only catalogs instead of lingering selectable
+		// until a request fails.
+		dynamicModelsAuthoritative: true,
+		filterModel: entry =>
+			entry.id !== "auto" &&
+			Array.isArray(entry.supported_endpoint_types) &&
+			entry.supported_endpoint_types.includes("openai-response"),
+		mapModel: mapOrcaRouterModel,
 	});
 }
