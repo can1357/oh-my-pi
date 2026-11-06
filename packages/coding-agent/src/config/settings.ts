@@ -1185,7 +1185,7 @@ export class Settings {
 
 	/** The global config file, on a worker mirror the one its main instance reads. */
 	#globalConfigPath(): string | undefined {
-		return (this.#configPath ?? this.#mirroredConfigPath) ?? undefined;
+		return this.#configPath ?? this.#mirroredConfigPath ?? undefined;
 	}
 
 	/** The config file(s) holding `setting`'s merged value, as {@link getProvenance} finds its layer. */
