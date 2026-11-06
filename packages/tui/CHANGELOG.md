@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `WriteToolDetails.touchesNoFiles` marks a write that touched no files (an agent message, a reply or a background-work cancellation) ([#18322](https://github.com/can1357/oh-my-pi/pull/18322) by [@1vivy](https://github.com/1vivy))
+
 ## [18.17.0] - 2026-11-06
 
 ### Breaking Changes
