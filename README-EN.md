@@ -62,6 +62,10 @@ One-shot `<8hex>@<id>` tokens (10-minute TTL, in-memory). A destructive op (dirt
 
 Extensions can spawn subagents (`pi.spawnSubagent({agent, prompt})`) with ordinary subagent rights and the shared concurrency limit. An upstream-PR candidate.
 
+### 9. Agent Teams — planned
+
+An analog of Claude Code's Agent Teams is planned on top of the A2A bridge: a lead session plus persistent teammates (full sessions with own context), direct teammate-to-teammate messaging, a shared task list, per-agent mailboxes, and a team config file. Not implemented yet — see [docs/agent-teams.md](./docs/agent-teams.md) for the direction and the design doc.
+
 ## Settings summary
 
 | Setting | Default | Description |
@@ -73,6 +77,7 @@ Extensions can spawn subagents (`pi.spawnSubagent({agent, prompt})`) with ordina
 | `irc.dedupWindowMs` | 30000 | dedup window |
 | `irc.maxHops` | 28 | relay-chain limit |
 | `task.concurrencyPolicy` | "queue" | "refuse" = refuse when saturated |
+| `team.enabled` / `team.maxTeammates` | off / 4 | declarative agent teams (`.omp/teams/*.md`, `/team start`) |
 | `task.tokenBudget` | 0 (off) | subagent token budget |
 
 ## Install on this machine

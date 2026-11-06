@@ -750,6 +750,31 @@ export const cfgA2aName = register({
 	},
 });
 
+export const cfgTeamEnabled = register({
+	id: "team.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tasks",
+		group: "Teams",
+		label: "Agent Teams",
+		description:
+			"Enable /team slash commands for declarative agent teams (.omp/teams/*.md with members referencing agent definitions)",
+	},
+});
+
+export const cfgTeamMaxTeammates = register({
+	id: "team.maxTeammates",
+	type: "number",
+	default: 4,
+	ui: {
+		tab: "tasks",
+		group: "Teams",
+		label: "Max Teammates",
+		description: "Cap on members spawned per /team start; the refusal names the numbers and the setting",
+	},
+});
+
 export const cfgSessionRetentionDays = register({
 	id: "session.retentionDays",
 	type: "number",

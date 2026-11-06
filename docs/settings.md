@@ -1102,6 +1102,81 @@ The session journal (`session.jsonl`) records the experiment as `custom` entries
 
 The result's `details.spotlight` trace carries the same sizes and coins, `savedTokens`, and for a changed text `original` (the original as a session artifact, its per-line heat, kept runs, and reasons). A held-out result's trace adds `holdout: true`; `savedTokens` is the would-be saving, `original.kept` the would-be kept runs, and `original.shapedUrl` the session artifact holding the would-be text.
 
+### Inter-terminal agent networking (A2A)
+
+The fork's A2A bridge exposes each omp session to the other omp processes on
+the same machine over the Agent2Agent v1.0 protocol (JSON-RPC 2.0 on HTTP,
+loopback only, bearer-token auth). Every terminal can act as server and
+client; peers are discovered through a shared registry file and registered as
+spawnable `a2a:<name>` agents. See [Agent Teams (planned)](./agent-teams.md)
+for where this is heading.
+
+```yaml
+a2a:
+   enabled: true
+   port: 0 # 0 = a free ephemeral port per terminal
+   name: "" # empty keeps "Main"
+   token: "" # empty = generated token file
+   maxPeerSkills: 8
+   autoRegister: true
+   clientTimeoutMs: 0 # 0 = wait indefinitely
+```
+
+| Key                    | Type    | Default | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ---------------------- | ------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `a2a.enabled`         | boolean | `true`  | Serve the A2A bridge on `127.0.0.1`. On by default (fork behavior): every terminal becomes reachable by its peers. The server is loopback-only with bearer auth; nothing is exposed off-host. A startup failure is reported as a notice and never blocks the session.                                                                                                                                                                                                                                                              |
+| `a2a.port`            | number  | `0`     | Loopback port for the bridge. `0` (the default) asks the OS for a free ephemeral port each launch, so several terminals never collide; `--a2a-port` pins a port for one run. A fixed port serves one terminal at a time.                                                                                                                                                                                                                                                                                                          |
+| `a2a.token`           | string  | `""`    | Bearer token for the bridge. Empty (the default) generates and reuses `<agent dir>/a2a.token` (32 random bytes hex, mode 600); with the default shared profile every terminal reuses the same token file, which is what makes passwordless `/a2a auto` work. An explicit value overrides the file. Clients never mint a token file; they only read one.                                                                                                                                                                            |
+| `a2a.name`            | string  | `""`    | Public name for this terminal's agents in the A2A network: the main agent's skill id becomes this name (`a2a:<name>` on peers), and the agent card carries it. Empty keeps the default (`Main`). `--a2a-name` overrides it for one run. Same-name peers on the same URL refresh in place; on different URLs they get `-2`/`-3` suffixes.                                                                                                                                                                                           |
+| `a2a.maxPeerSkills`   | number  | `8`     | Cap on skills registered from one peer bridge's agent card. Guards the roster against a peer advertising swarms of finished one-shot workers: only the first N skills of the card are taken (card order, main first). An empty-skill card still yields a single entry from its card name.                                                                                                                                                                                                                                                                                                    |
+| `a2a.autoRegister`    | boolean | `true`  | At session start, register every live local bridge (from `<agent dir>/a2a-bridges.json`, dead entries pruned by pid liveness) as spawnable `a2a:` agents, so peer terminals are available from the first turn with no manual `/a2a auto`. No effect when no other bridges run. `--no-a2a-auto-register` disables it for one run.                                                                                                                                                                                                                                                                 |
+| `a2a.clientTimeoutMs` | number  | `0`     | Total budget for a remote `a2a:` spawn in milliseconds. `0` (the default) waits indefinitely — A2A tasks can run for hours. The per-request connect timeout is always a fixed 10 s, unaffected by this setting. A timed-out spawn fails with a timeout error; the remote task itself keeps running.                                                                                                                                                                                                                                                                                                |
+| `session.retentionDays` | number | `30`   | Prune session transcripts and custom-session files older than this many days at startup; `0` disables the GC. Colocated with the A2A settings in the tasks tab because long-lived multi-terminal workloads are what accumulate stale session files. (Registered by the session GC, not the A2A module.)                                                                                                                                                                                                                                                                               |
+
+### Peer messaging guard (IrcBus)
+
+These settings govern the `agent://` message bus between agents of one
+session (subagents, spawns, revivals). The guard refuses — as silent delivery
+receipts, never exceptions — messages that exhaust the sender's budget,
+repeat a recent body, or carry too long a hop chain. A2A deliveries inbound
+from a peer terminal are exempt: they arrive marked `external` and skip the
+guard.
+
+```yaml
+irc:
+   ingressGuard: true
+   rateLimitTokens: 30
+   dedupWindowMs: 30000
+   maxHops: 28
+```
+
+| Key                   | Type    | Default  | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| --------------------- | ------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `irc.ingressGuard`   | boolean | `true`   | Enable the ingress guard for peer messages: refuse messages that exhaust the sender's rate budget, repeat a body already sent to the same recipient, or carry too long a hop chain.                                                                                                                                                                                                                                                                                                                                                                                          |
+| `irc.rateLimitTokens` | number  | `30`    | Tokens one sender may spend per 500 ms window of peer messaging. A message costs its body length in characters divided by 4, at least 1 — so **a single message of any size always passes**; it is the rapid follow-ups that get refused. `0` disables the rate limit.                                                                                                                                                                                                                                                                                                        |
+| `irc.dedupWindowMs`  | number  | `30000`  | Refuse an identical message (same sender, recipient, and body) sent again within this many milliseconds. `0` disables duplicate detection.                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `irc.maxHops`        | number  | `28`     | Longest accepted chain of agents a message may pass through: each send appends its sender, so only automatic wake relays extend a chain (a manual reply starts a fresh one). A longer chain is refused. `0` disables the limit.                                                                                                                                                                                                                                                                                                                                                                                                              |
+
+### Subagent pressure and budgets (fork)
+
+| Key                      | Type | Default  | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ------------------------ | ---- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `task.concurrencyPolicy` | enum | `queue`  | What a spawn does when `task.maxConcurrency` subagents already run: `queue` waits for a free slot; `refuse` fails the spawn immediately with `Concurrent subagent limit reached (N running, M waiting; task.maxConcurrency=L). Do not retry; wait for running tasks or ask the user to raise task.maxConcurrency.` — a model-visible error naming the counts, so the caller plans around the limit instead of silently queueing. The limit covers every spawn path: the task tool, A2A (`a2a:` agents), `pi.spawnSubagent` extensions, and workflow `agent()`. |
+| `task.tokenBudget`       | number | `0`    | Soft per-subagent context-token budget for one run (input + output tokens the child consumes). Crossing 50% injects one `<total_tokens>N tokens left of M</total_tokens>` aside so the child can plan by tokens, not requests; crossing 90% injects one wrap-up steering notice. `0` disables the guard. Every run, wake, revival, and workpool turn uses it. This is not the goal-mode token budget (the goal tool's `token_budget`, which caps a whole goal across turns).                                                                                                                                                                                                                                                   |
+
+### Browser relay
+
+`browser.relay` drives your own Chrome tabs (logins, extensions, cookies
+included) through the omp browser relay, instead of an isolated Chrome for
+Testing. Install the relay extension once with
+`omp browser-relay install`; the relay server (CDP proxy on `127.0.0.1:9224`)
+auto-starts when the browser prelude needs it. Takes precedence over the
+Browser CDP URL. See [computer use](./computer-use.md).
+
+| Key            | Type    | Default | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| -------------- | ------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `browser.relay` | boolean | `false` | Drive your own Chrome tabs through the omp browser relay. The relay server auto-starts when the browser prelude needs it. `PI_BROWSER_RELAY=0` or `PI_BROWSER_RELAY=1` overrides it for the process. |
+
 ### Other groups
 
 Every schema path not individually tabulated in this catalog is explicitly deferred to `omp config list`. Additional groups include:

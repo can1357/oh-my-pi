@@ -1827,6 +1827,10 @@ export interface SpawnSubagentOptions {
 	prompt: string;
 	/** Shared background rendered into the child's prompt, like a `task` call's context. */
 	context?: string;
+	/** Stable handle: becomes the spawn's registry id (`agent://<handle>`) instead of the agent name. */
+	handle?: string;
+	/** Extra workspace roots added to the child's directories (team workspace). */
+	teamWorkspace?: string;
 }
 
 /**
