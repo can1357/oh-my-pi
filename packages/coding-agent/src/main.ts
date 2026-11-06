@@ -198,7 +198,7 @@ import {
 	cfgSessionWorktreeScope,
 } from "./session/settings";
 import { cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings";
-import { cfgA2aEnabled, cfgA2aPort, cfgTaskAgentIdleTtlMs } from "./task/settings";
+import { cfgA2aAutoRegister, cfgA2aEnabled, cfgA2aPort, cfgTaskAgentIdleTtlMs } from "./task/settings";
 import { cfgSkillsIncludeSkills } from "./extensibility/settings";
 import { cfgWorkspaceAdditionalDirectories } from "./session/context-settings";
 
@@ -2718,6 +2718,30 @@ export async function runRootCommand(
 					const message = error instanceof Error ? error.message : String(error);
 					notifs.push({ kind: "error", message: `A2A bridge failed to start: ${message}` });
 					process.stderr.write(chalk.red(`A2A bridge failed to start: ${message}\n`));
+				}
+			}
+
+			// A2A peer auto-registration: every live local bridge (any session,
+			// including this one when --a2a-port/a2a.enabled started one) becomes
+			// spawnable as a2a:<skill>. Best effort: failures surface as a notice,
+			// never block startup. Off via a2a.autoRegister: false.
+			if (cfgA2aAutoRegister.get(settingsInstance) && !parsedArgs.noA2aAutoRegister) {
+				try {
+					const { autoRegisterLocalBridges } = await import("./a2a/agent-bridge");
+					const peers = await autoRegisterLocalBridges({
+						bridge: session.a2aBridge,
+						agentDir: settingsInstance.getAgentDir(),
+						settings: settingsInstance,
+					});
+					const count = [...peers.registered.values()].reduce((sum, names) => sum + names.length, 0);
+					if (count > 0) {
+						notifs.push({
+							kind: "info",
+							message: `A2A: auto-registered ${count} peer agent${count === 1 ? "" : "s"} from ${peers.registered.size} local bridge${peers.registered.size === 1 ? "" : "s"} (/a2a list)`,
+						});
+					}
+				} catch {
+					// discovery is best effort
 				}
 			}
 

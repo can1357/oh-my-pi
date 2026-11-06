@@ -735,6 +735,19 @@ export const cfgA2aToken = register({
 	},
 });
 
+export const cfgA2aAutoRegister = register({
+	id: "a2a.autoRegister",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tasks",
+		group: "A2A",
+		label: "Auto-Register Peers",
+		description:
+			"At session start, register every live local A2A bridge (a2a-bridges.json) as spawnable a2a: agents; no effect when no other bridges run",
+	},
+});
+
 export const cfgA2aClientTimeoutMs = register({
 	id: "a2a.clientTimeoutMs",
 	type: "number",

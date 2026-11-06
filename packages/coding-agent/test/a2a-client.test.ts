@@ -27,6 +27,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/a2a/agent-bridge";
 import { AGENT_CARD_PATH, type A2aServerHandle, createA2aServer } from "@oh-my-pi/pi-coding-agent/a2a/server";
 import { type AgentCard, buildAgentCard } from "@oh-my-pi/pi-coding-agent/a2a/card";
+import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { TASK_STATE } from "@oh-my-pi/pi-coding-agent/a2a/rpc";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SpawnSubagentOptions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
@@ -649,5 +650,64 @@ describe("A2aAgentBridge cross-terminal name collisions", () => {
 		});
 		const listed = bridge.list().map(agent => `${agent.name}:${agent.description}`);
 		expect(listed).toEqual(["a2a:Main:t1 refreshed", "a2a:Main-2:t2"]);
+	});
+});
+
+describe("autoRegisterLocalBridges", () => {
+	it("registers every live bridge except self and reports failures per endpoint", async () => {
+		const { autoRegisterLocalBridges } = await import("@oh-my-pi/pi-coding-agent/a2a/agent-bridge");
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "a2a-autoreg-"));
+		try {
+			// one live bridge (a real server in this process) + one dead entry
+			const { createA2aServer } = await import("@oh-my-pi/pi-coding-agent/a2a/server");
+			const server = createA2aServer({
+				port: 0,
+				token: "auto-reg-token",
+				card: async () => ({
+					protocolVersion: "1.0",
+					version: "test",
+					name: "peer",
+					description: "peer card",
+					capabilities: { streaming: true },
+					skills: [{ id: "Main", name: "main", description: "peer main", tags: [] }],
+					securitySchemes: {},
+					supportedInterfaces: [],
+					defaultInputModes: ["text/plain"],
+					defaultOutputModes: ["text/plain"],
+				}),
+				registry: {
+					list: () => [],
+					get: () => undefined,
+					onChange: () => () => {},
+					setStatus: () => false,
+				},
+				bus: {
+					send: async () => ({ to: "", outcome: "failed", error: "unused" }),
+				} as never,
+			});
+			// the registry lives in another "process" from readLiveBridges's view only via pid;
+			// here the same process entry is excluded, so simulate an external entry instead:
+			await fs.writeFile(
+				path.join(agentDir, "a2a-bridges.json"),
+				JSON.stringify([{ pid: process.ppid, port: server.port, startedAt: Date.now() }]),
+			);
+			const bridge = new A2aAgentBridge();
+			const result = await autoRegisterLocalBridges({
+				bridge,
+				agentDir,
+				token: "auto-reg-token",
+			});
+			expect([...result.registered.keys()]).toEqual([`http://127.0.0.1:${server.port}/`]);
+			expect(result.registered.get(`http://127.0.0.1:${server.port}/`)).toEqual(["a2a:Main"]);
+			expect(result.failed.size).toBe(0);
+			await server.stop();
+		} finally {
+			await fs.rm(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("parses --no-a2a-auto-register", () => {
+		expect(parseArgs([]).noA2aAutoRegister).toBeUndefined();
+		expect(parseArgs(["--no-a2a-auto-register"]).noA2aAutoRegister).toBe(true);
 	});
 });

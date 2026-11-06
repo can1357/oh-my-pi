@@ -7,7 +7,7 @@
  * spawn of one to the remote JSON-RPC endpoint instead of a local subagent.
  */
 import { addA2aAgentsFromUrl } from "../a2a/agent-bridge";
-import { readLiveBridges } from "../a2a/server";
+import { autoRegisterLocalBridges } from "../a2a/agent-bridge";
 import { cardRequiresBearer } from "../a2a/client";
 import { commandConsumed, parseSubcommand, usage } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";
@@ -77,28 +77,24 @@ export const BUILTIN_A2A_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			if (verb === "auto") {
 				const parsed = parseAddArgs(rest);
 				if (parsed.error) return usage(parsed.error, runtime);
-				const token = parsed.token;
 				try {
-					const live = await readLiveBridges(runtime.settings.getAgentDir());
-					if (live.size === 0) {
+					const result = await autoRegisterLocalBridges({
+						bridge,
+						agentDir: runtime.settings.getAgentDir(),
+						settings: runtime.settings,
+						token: parsed.token,
+						signal: runtime.signal,
+					});
+					if (result.registered.size === 0 && result.failed.size === 0) {
 						await runtime.output("No other live local A2A bridges found.");
 						return commandConsumed();
 					}
 					const lines: string[] = [];
-					for (const entry of live.values()) {
-						const url = `http://127.0.0.1:${entry.port}/`;
-						try {
-							const result = await addA2aAgentsFromUrl({
-								url,
-								token,
-								bridge,
-								agentDir: runtime.settings.getAgentDir(),
-								settings: runtime.settings,
-							});
-							lines.push(`${url} — ${result.added.map(a => a.name).join(", ")}`);
-						} catch (error) {
-							lines.push(`${url} — failed: ${error instanceof Error ? error.message : String(error)}`);
-						}
+					for (const [url, names] of result.registered) {
+						lines.push(`${url} — ${names.join(", ") || "(no skills)"}`);
+					}
+					for (const [url, reason] of result.failed) {
+						lines.push(`${url} — failed: ${reason}`);
 					}
 					await runtime.output(lines.join("\n"));
 				} catch (error) {

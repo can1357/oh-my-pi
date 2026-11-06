@@ -276,3 +276,49 @@ export async function spawnA2aAgent(options: SpawnA2aAgentOptions): Promise<Spaw
 		return { exitCode: 1, output: message, error: message, state: TASK_STATE.FAILED };
 	}
 }
+
+export interface AutoRegisterResult {
+	/** Successfully registered agent names per endpoint URL. */
+	registered: Map<string, string[]>;
+	/** Endpoint URLs that failed, with the reason. */
+	failed: Map<string, string>;
+}
+
+/**
+ * Register every live local bridge (excluding this process) from the
+ * machine-local discovery registry. Shared by `/a2a auto` and session-start
+ * auto-registration. Failures are per-endpoint: one dead card never blocks
+ * the rest.
+ */
+export async function autoRegisterLocalBridges(options: {
+	bridge: A2aAgentBridge;
+	agentDir: string;
+	settings?: Settings;
+	token?: string;
+	signal?: AbortSignal;
+}): Promise<AutoRegisterResult> {
+	const { readLiveBridges } = await import("./server");
+	const live = await readLiveBridges(options.agentDir);
+	const registered = new Map<string, string[]>();
+	const failed = new Map<string, string>();
+	for (const entry of live.values()) {
+		const url = `http://127.0.0.1:${entry.port}/`;
+		try {
+			const result = await addA2aAgentsFromUrl({
+				bridge: options.bridge,
+				url,
+				token: options.token,
+				agentDir: options.agentDir,
+				settings: options.settings,
+				signal: options.signal,
+			});
+			registered.set(
+				url,
+				result.added.map(agent => agent.name),
+			);
+		} catch (error) {
+			failed.set(url, error instanceof Error ? error.message : String(error));
+		}
+	}
+	return { registered, failed };
+}
