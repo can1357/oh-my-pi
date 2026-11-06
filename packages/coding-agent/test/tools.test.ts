@@ -12,6 +12,7 @@ import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import * as bashExecutor from "../src/exec/bash-executor";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { RACY_STAMP_WINDOW_MS } from "@oh-my-pi/pi-coding-agent/tools/racy-stamp";
@@ -2910,19 +2911,36 @@ function b() {
 			const subDir = path.join(testDir, "sub-dir");
 			fs.mkdirSync(subDir, { recursive: true });
 
-			const result = await bashTool.execute("test-call-cd-semicolon-hoist", {
-				command: "cd sub-dir; pwd",
-			});
-			const output = getTextOutput(result);
-			expect(output).toContain("sub-dir");
+			const spy = vi.spyOn(bashExecutor, "executeBash");
+			try {
+				const result = await bashTool.execute("test-call-cd-semicolon-hoist", {
+					command: "cd sub-dir; pwd",
+				});
+				const output = getTextOutput(result);
+				expect(output).toContain("sub-dir");
+				expect(spy).toHaveBeenCalled();
+				const [calledCommand, options] = spy.mock.calls[0]!;
+				expect(calledCommand).toBe("pwd");
+				expect(options?.cwd?.replace(/\\/g, "/")).toMatch(/\/sub-dir$/);
+			} finally {
+				spy.mockRestore();
+			}
 		});
 
 		it("should not hoist leading cd with ; when the target directory does not exist", async () => {
-			const result = await bashTool.execute("test-call-cd-semicolon-missing", {
-				command: "cd /this/directory/definitely/does/not/exist/12345; echo still-executed",
-			});
-			const output = getTextOutput(result);
-			expect(output).toContain("still-executed");
+			const spy = vi.spyOn(bashExecutor, "executeBash");
+			try {
+				const result = await bashTool.execute("test-call-cd-semicolon-missing", {
+					command: "cd /this/directory/definitely/does/not/exist/12345; echo still-executed",
+				});
+				const output = getTextOutput(result);
+				expect(output).toContain("still-executed");
+				expect(spy).toHaveBeenCalled();
+				const [calledCommand] = spy.mock.calls[0]!;
+				expect(calledCommand).toBe("cd /this/directory/definitely/does/not/exist/12345; echo still-executed");
+			} finally {
+				spy.mockRestore();
+			}
 		});
 
 		it("should fail early when cd target does not exist with &&", async () => {
