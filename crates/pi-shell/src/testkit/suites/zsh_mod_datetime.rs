@@ -57,6 +57,10 @@ fn strftime_libc_conversions() {
 }
 
 #[test]
+#[cfg_attr(
+	not(target_os = "macos"),
+	ignore = "expects macOS `%x` and an installed en_US.UTF-8 locale"
+)]
 fn strftime_options() {
 	let (out, ..) = dt("strftime -s v '%s' 5; print -r $v; strftime -n x 0; echo .");
 	assert_eq!(out, "5\nx.\n");
@@ -159,6 +163,7 @@ fn datetime_parameters() {
 }
 
 #[test]
+#[cfg_attr(not(target_os = "macos"), ignore = "C-locale `nl_langinfo` values are macOS libc's")]
 fn langinfo_in_the_c_locale() {
 	let (out, err, _) = zsh(
 		"LC_ALL=C; zmodload zsh/langinfo; for k in ${(k)langinfo}; do print -rn -- \
