@@ -145,7 +145,7 @@ import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { PythonResult } from "../eval/py/executor";
 import { EVAL_STATE_CONTEXT_TYPE, formatEvalStateContext, isEvalStateContext } from "../eval/state";
 import { WorkPoolRegistry } from "../task/workpool";
-import { type BashPtyOptions, type BashResult, releaseShellSessions } from "../exec/bash-executor";
+import { type BashResult, releaseShellSessions } from "../exec/bash-executor";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool } from "../extensibility/custom-tools/types";
@@ -348,7 +348,7 @@ import {
 	type AsyncResultEntry,
 	buildAsyncResultBatchMessage,
 } from "./async-job-delivery";
-import { BashRunner, type BashRunnerHost } from "./bash-runner";
+import { type BashExecuteOptions, BashRunner, type BashRunnerHost } from "./bash-runner";
 import {
 	checkpointStartedAtFromEntry,
 	completedRewindFromEntry,
@@ -384,7 +384,7 @@ import {
 import { COST_GATE_NOTICE_SOURCE, type CostCapRefusal, CostGate, type CostGateApi } from "./cost-gate";
 import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
 import { isDateCwdReminderControl } from "./date-cwd-reminder";
-import { EvalRunner, type EvalRunnerHost } from "./eval-runner";
+import { EvalRunner, type EvalRunnerHost, type PythonExecuteOptions } from "./eval-runner";
 import {
 	collectPendingToolCalls,
 	createInterruptedToolResults,
@@ -709,6 +709,7 @@ const noOpUIContext: ExtensionUIContext = {
 	notify: () => {},
 	onTerminalInput: () => () => {},
 	rerenderMessage: () => {},
+	refreshTranscript: () => {},
 	getLinkClicksAvailable: () => false,
 	setStatus: () => {},
 	setWorkingMessage: () => {},
@@ -1169,9 +1170,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	readonly #autoTitle: boolean;
 	#titleGenerationInFlightFor: string | undefined;
 	/** First-message auto-title that may be retried from conversation context.
-	 *  Once the title model declines the message (greeting-like or too ambiguous,
-	 *  e.g. a pasted image plus "help") AND the assistant has replied, the title is
-	 *  regenerated once from the recent user/assistant/thinking turns. */
+	 *  Once the operator's message has been declined — by the title model (too
+	 *  ambiguous, e.g. a pasted image plus "help"), or before any request by the
+	 *  deterministic pre-filter in {@link #noteTitleInput} (a greeting, or a
+	 *  request that is all attachment or markup) — AND the assistant has
+	 *  replied, the title is regenerated once from the recent
+	 *  user/assistant/thinking turns. At most one such request per operator
+	 *  message: no assistant turn ever arms it. */
 	#deferredTitle: { sessionId: string; declined: boolean; replied: boolean; words: number } | undefined;
 	/** What the next automatic title names (see {@link #maybeStartTitle}). */
 	#titleInput: TitleInput | undefined;
@@ -7326,6 +7331,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#tools.getEvalBridgeToolNames();
 	}
 
+	/** Eval tool names frozen into the provider-visible eval description (see {@link SessionTools.advertisedEvalToolNames}). */
+	getAdvertisedEvalToolNames(): readonly string[] {
+		return this.#tools.advertisedEvalToolNames;
+	}
+
 	/** Whether a registry entry came from a built-in factory. */
 	hasBuiltInTool(name: string): boolean {
 		return this.#tools.hasBuiltInTool(name);
@@ -11223,12 +11233,25 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#scheduleTitleRefresh("drift");
 	}
 
-	/** Record an operator message as the title source while an auto-titled session is unnamed. */
+	/**
+	 * Record an operator message as the title source while an auto-titled session
+	 * is unnamed. A message {@link isLowSignalTitleInput} declines (a greeting, or
+	 * one that is all attachment or markup) records no input; it arms
+	 * {@link #deferredTitle} instead, so a session launched from one attached brief
+	 * is still titled from the assistant's reading. An existing deferral is kept.
+	 */
 	#noteTitleInput(message: AgentMessage): void {
 		if (!this.#autoTitle || this.sessionName || $env.PI_NO_TITLE) return;
 		const text = operatorTitleText(message);
-		if (!text || isLowSignalTitleInput(text)) return;
-		this.#titleInput = { sessionId: this.sessionManager.getSessionId(), text, replied: false, tried: false };
+		if (!text) return;
+		const sessionId = this.sessionManager.getSessionId();
+		if (isLowSignalTitleInput(text)) {
+			if (this.#deferredTitle?.sessionId !== sessionId) {
+				this.#deferredTitle = { sessionId, declined: true, replied: false, words: 0 };
+			}
+			return;
+		}
+		this.#titleInput = { sessionId, text, replied: false, tried: false };
 	}
 
 	/**
@@ -11423,8 +11446,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 		deferred[step] = true;
 		if (!deferred.declined || !deferred.replied) return;
+		// A request still running calls back here when it settles
+		// ({@link #afterTitleRequest}), so a ready deferral waits for it rather than
+		// being spent on a retry that cannot start — otherwise a brief that arrived
+		// while the previous retry ran loses the only try it had.
+		if (this.#titleGenerationInFlightFor === sessionId) return;
 		this.#deferredTitle = undefined;
-		if (this.#titleGenerationInFlightFor === sessionId || $env.PI_NO_TITLE) return;
+		if ($env.PI_NO_TITLE) return;
 		const context = this.#buildReplanTitleContext();
 		if (!context || isLowSignalTitleInput(context)) return;
 		this.#startAutoTitle(context, sessionId);
@@ -12940,12 +12968,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * @param onChunk Optional streaming callback for output
 	 * @param options.excludeFromContext If true, command output won't be sent to LLM (!! prefix)
 	 * @param options.useUserShell If true, allow caller to request configured user-shell routing
+	 * @param options.onRecorded Receives the `bashExecution` message the run is recorded as, once it is persisted or queued; a throw is logged
 	 */
-	executeBash(
-		command: string,
-		onChunk?: (chunk: string) => void,
-		options?: { excludeFromContext?: boolean; useUserShell?: boolean; pty?: BashPtyOptions },
-	): Promise<BashResult> {
+	executeBash(command: string, onChunk?: (chunk: string) => void, options?: BashExecuteOptions): Promise<BashResult> {
 		return this.#bash.executeBash(command, onChunk, options);
 	}
 
@@ -12979,11 +13004,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * @param code The Python code to execute
 	 * @param onChunk Optional streaming callback for output
 	 * @param options.excludeFromContext If true, execution won't be sent to LLM ($$ prefix)
+	 * @param options.onRecorded Receives the `pythonExecution` message the cell is recorded as, once it is persisted or queued; a throw is logged
 	 */
 	executePython(
 		code: string,
 		onChunk?: (chunk: string) => void,
-		options?: { excludeFromContext?: boolean },
+		options?: PythonExecuteOptions,
 	): Promise<PythonResult> {
 		return this.#eval.executePython(code, onChunk, options);
 	}

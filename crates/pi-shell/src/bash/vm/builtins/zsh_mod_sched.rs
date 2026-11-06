@@ -54,7 +54,9 @@ fn decode(rec: Option<&Record>) -> Vec<SchedEvent> {
 	let Some(Record::Words(w)) = rec else {
 		return Vec::new();
 	};
-	w.chunks_exact(3)
+	w.as_chunks::<3>()
+		.0
+		.iter()
 		.map(|c| SchedEvent {
 			time:  c[0].to_str().ok().and_then(|s| s.parse().ok()).unwrap_or(0),
 			flags: c[1].to_str().ok().and_then(|s| s.parse().ok()).unwrap_or(0),

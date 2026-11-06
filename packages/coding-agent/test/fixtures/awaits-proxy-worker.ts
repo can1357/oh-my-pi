@@ -13,7 +13,6 @@ import { holdOwnedJobs } from "../../src/registry/agent-awaits";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 // Loads the cyclic service graph before the isolated service imports below.
 import "../../src/session/agent-session";
-import { loadedModulesChangedSince } from "../../src/thread/code-skew";
 import { isThreadId, setCurrentThreadId } from "../../src/thread/identity";
 import type { SubagentWorkerInit, SubagentWorkerReady, WorkerThreadLink } from "../../src/thread/protocol";
 import { type RpcFrame, RpcLink } from "../../src/thread/rpc";
@@ -252,10 +251,7 @@ port.on("message", (message: unknown) => {
 			link.close(String(error));
 			throw error;
 		}
-		const ready: SubagentWorkerReady = {
-			type: "subagent-worker-ready",
-			changedModules: loadedModulesChangedSince(message.mainStartedAt),
-		};
+		const ready: SubagentWorkerReady = { type: "subagent-worker-ready" };
 		port.postMessage(ready);
 		return;
 	}

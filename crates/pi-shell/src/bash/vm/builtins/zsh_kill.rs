@@ -32,7 +32,13 @@ fn sig_name(n: i64, platform: Platform) -> String {
 /// `alt_sigs` (`CLD` and `IO` where they alias `CHLD` and `POLL`; `ERR`
 /// names zsh's `SIGZERR`, past `SIGCOUNT`, so never a signal here).
 fn sig_number(name: &[u8], platform: Platform, nocase: bool) -> Option<i64> {
-	let eq = |a: &[u8], b: &[u8]| if nocase { a.eq_ignore_ascii_case(b) } else { a == b };
+	let eq = |a: &[u8], b: &[u8]| {
+		if nocase {
+			a.eq_ignore_ascii_case(b)
+		} else {
+			a == b
+		}
+	};
 	if let Some(n) = (1..=SIGCOUNT).find(|&n| eq(sig_name(n, platform).as_bytes(), name)) {
 		return Some(n);
 	}
@@ -100,12 +106,11 @@ fn list(ctx: &mut Ctx<'_, '_>, args: &[BString], platform: Platform) -> R {
 		let rest = &arg[end..];
 		if end == 0 || !arg[..end].iter().any(u8::is_ascii_digit) {
 			let name = rest.strip_prefix(b"SIG").unwrap_or(rest);
-			match sig_number(name, platform, true) {
-				Some(n) => ctx.out(format!("{n}\n").as_bytes()),
-				None => {
-					ctx.usage(format!("unknown signal: SIG{}", name.as_bstr()));
-					status += 1;
-				},
+			if let Some(n) = sig_number(name, platform, true) {
+				ctx.out(format!("{n}\n").as_bytes());
+			} else {
+				ctx.usage(format!("unknown signal: SIG{}", name.as_bstr()));
+				status += 1;
 			}
 		} else if !rest.is_empty() {
 			ctx.usage(format!("unknown signal: SIG{}", rest.as_bstr()));

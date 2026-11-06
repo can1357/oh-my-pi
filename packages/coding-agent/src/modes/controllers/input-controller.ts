@@ -1032,6 +1032,11 @@ export class InputController {
 			pasteImage: image =>
 				this.#pasteImageIntoFocus(sink => sink.attach(image, `Unsupported pasted image format: ${image.mimeType}`)),
 			showStatus: message => this.ctx.showStatus(message),
+			pasteNative: () => {
+				if (!this.#clipboardIsTerminalLocal()) return false;
+				void this.handleImagePaste();
+				return true;
+			},
 		});
 		this.ctx.ui.addInputListener(data => (this.#enhancedPaste?.handleInput(data) ? { consume: true } : undefined));
 		this.ctx.ui.addStartListener(() => this.#enhancedPaste?.enable());
@@ -3103,7 +3108,8 @@ export class InputController {
 
 	setToolsExpanded(expanded: boolean): void {
 		this.ctx.toolOutputExpanded = expanded;
-		for (const child of this.ctx.chatContainer.children) {
+		// `!`/`$` runs queued while the agent streams join the transcript later.
+		for (const child of [...this.ctx.chatContainer.children, ...this.ctx.pendingShellContainer.children]) {
 			if (isExpandable(child)) {
 				child.setExpanded(expanded);
 			}

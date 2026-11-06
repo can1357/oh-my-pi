@@ -10,9 +10,10 @@ import {
 } from "@oh-my-pi/pi-coding-agent/lsp/client";
 import type { LspClient } from "@oh-my-pi/pi-coding-agent/lsp/types";
 import { fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/utils";
+import { rejectionOf } from "../helpers/rejection";
 
 /** Minimal client double: open files, a diagnostics map, and a frame sink. */
-function fakeClient(openFiles: Map<string, { version: number; languageId: string }>): {
+function fakeClient(openFiles: Map<string, { version: number; languageId: string; lastUsedAt?: number }>): {
 	client: LspClient;
 	frames: string[];
 } {
@@ -45,16 +46,40 @@ describe("reconcileOpenFilesFromDisk", () => {
 			const consumer = path.join(dir, "b.ts");
 			await fs.writeFile(consumer, "const respond = 1;\n");
 			const uri = fileToUri(consumer);
-			const { client, frames } = fakeClient(new Map([[uri, { version: 1, languageId: "typescript" }]]));
+			const { client, frames } = fakeClient(
+				new Map([[uri, { version: 1, languageId: "typescript", lastUsedAt: 0 }]]),
+			);
 
 			expect(await reconcileOpenFilesFromDisk(client)).toBe(1);
 			const didChange = frames.filter(frame => frame.includes("didChange"));
 			expect(didChange.length).toBe(1);
 			expect(didChange[0]).toContain("const respond = 1;");
+			// A sweep is not a use: the document still closes once idle.
+			expect(client.openFiles.get(uri)?.lastUsedAt).toBe(0);
 
 			// In sync now: a second pass sends nothing.
 			expect(await reconcileOpenFilesFromDisk(client)).toBe(0);
 			expect(frames.filter(frame => frame.includes("didChange")).length).toBe(1);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("re-syncs an unchanged file when the server's text diverged from it since the last sync", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-reconcile-open-"));
+		try {
+			const file = path.join(dir, "c.ts");
+			await fs.writeFile(file, "export const y = 2;\n");
+			const uri = fileToUri(file);
+			const { client, frames } = fakeClient(new Map([[uri, { version: 1, languageId: "typescript" }]]));
+			expect(await reconcileOpenFilesFromDisk(client)).toBe(1);
+
+			// An OMP change synced other text to the server; the file on disk did not change.
+			const info = client.openFiles.get(uri);
+			if (!info) throw new Error("Expected the document to stay open");
+			info.syncedHash = 0;
+			expect(await reconcileOpenFilesFromDisk(client)).toBe(1);
+			expect(frames.filter(frame => frame.includes("didChange")).length).toBe(2);
 		} finally {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
@@ -87,6 +112,26 @@ describe("reconcileOpenFilesFromDisk", () => {
 			const { client, frames } = fakeClient(new Map([[uri, { version: 1, languageId: "python" }]]));
 
 			expect(await reconcileOpenFilesFromDisk(client)).toBe(0);
+			expect(frames.filter(frame => frame.includes("textDocument/didClose") && frame.includes(uri)).length).toBe(1);
+			expect(client.openFiles.has(uri)).toBe(false);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("throws on an open document that is no longer readable unless told to close it", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-reconcile-open-"));
+		try {
+			// A `git checkout` replaced the open file with a directory.
+			const file = path.join(dir, "consumer.py");
+			await fs.mkdir(file);
+			const uri = fileToUri(file);
+			const { client, frames } = fakeClient(new Map([[uri, { version: 1, languageId: "python" }]]));
+
+			expect(await rejectionOf(reconcileOpenFilesFromDisk(client))).toBeInstanceOf(Error);
+			expect(client.openFiles.has(uri)).toBe(true);
+
+			expect(await reconcileOpenFilesFromDisk(client, undefined, undefined, "close")).toBe(0);
 			expect(frames.filter(frame => frame.includes("textDocument/didClose") && frame.includes(uri)).length).toBe(1);
 			expect(client.openFiles.has(uri)).toBe(false);
 		} finally {

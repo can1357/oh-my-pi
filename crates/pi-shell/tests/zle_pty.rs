@@ -102,9 +102,8 @@ fn continuation_prompt_shows_open_constructs() {
 
 #[test]
 fn precmd_and_preexec_order_and_arguments() {
-	let rc = "precmd() { print -r -- \"precmd $?\" }\n\
-	          preexec() { print -r -- \"preexec <$1> <$2> <$3>\" }\n\
-	          precmd_functions=(p2)\np2() { print -r -- p2 }\n";
+	let rc = "precmd() { print -r -- \"precmd $?\" }\npreexec() { print -r -- \"preexec <$1> <$2> \
+	          <$3>\" }\nprecmd_functions=(p2)\np2() { print -r -- p2 }\n";
 	same(rc, |pty| keys(pty, "false; echo a\r"));
 }
 
@@ -124,9 +123,8 @@ fn widget_listing_and_keymap_parameters() {
 fn zle_fd_handler_fires() {
 	// `/dev/null` is always readable: the handler runs as soon as the
 	// editor waits for a key, once (it removes itself).
-	let rc = "exec {pfd}</dev/null\n\
-	          h() { zle -I; print -r -- \"fired $# $(( $1 == pfd ))\"; zle -F $1; }\n\
-	          zle -F $pfd h\n";
+	let rc = "exec {pfd}</dev/null\nh() { zle -I; print -r -- \"fired $# $(( $1 == pfd ))\"; zle \
+	          -F $1; }\nzle -F $pfd h\n";
 	same(rc, |pty| {
 		thread::sleep(Duration::from_millis(300));
 		pty.settle(QUIET, TIMEOUT)?;
