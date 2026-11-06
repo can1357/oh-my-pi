@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { logger } from "@oh-my-pi/pi-utils";
 import { fingerprintBearer } from "../auth/bearer-fingerprint";
 import type {
@@ -9,6 +10,7 @@ import type {
 } from "./types";
 
 let registered: UsageAdmission | undefined;
+const scopedAdmission = new AsyncLocalStorage<{ admission: UsageAdmission | undefined }>();
 
 /**
  * Registers the usage admission seam for this thread: the main thread, or one worker. `undefined` clears it.
@@ -18,13 +20,26 @@ export function configureUsageAdmission(admission: UsageAdmission | undefined): 
 	registered = admission;
 }
 
-/** The seam registered on this thread, if any. */
+/** Runs work with its own admission owner, including an explicitly absent owner. */
+export function withUsageAdmission<T>(admission: UsageAdmission | undefined, run: () => T): T {
+	return scopedAdmission.run({ admission }, run);
+}
+
+/** Clear only the matching explicitly configured fallback. */
+export function clearUsageAdmission(admission: UsageAdmission): void {
+	if (registered === admission) registered = undefined;
+}
+
+/** The scoped owner, or the explicitly configured thread fallback. */
 export function currentUsageAdmission(): UsageAdmission | undefined {
-	return registered;
+	const scope = scopedAdmission.getStore();
+	return scope ? scope.admission : registered;
 }
 
 /** Attribution for one send, as its call site knows it. */
 export interface UsageAdmissionCall {
+	/** Captured owner for this physical send; null explicitly means none. */
+	admission?: UsageAdmission | null;
 	/** Stored credential row serving the send, when known. */
 	credentialId?: number;
 	/** The bearer about to be sent, passed to the governor only as a fingerprint. */
@@ -62,7 +77,8 @@ export function validateSendRoute(call: UsageAdmissionCall): void {
 	const binding = call.usageRouteBinding;
 	if (!binding) return;
 	const request = admissionRequest(call);
-	if (!registered?.active || registered.validateRoute?.(binding, request) !== true) {
+	const admission = call.admission === undefined ? currentUsageAdmission() : call.admission;
+	if (!admission?.active || admission.validateRoute?.(binding, request) !== true) {
 		throw new UsageRouteInvalidatedError();
 	}
 }
@@ -78,8 +94,9 @@ export interface AdmittedSend {
  * nothing is sent.
  */
 export async function admitSend(call: UsageAdmissionCall, signal?: AbortSignal): Promise<AdmittedSend | undefined> {
-	const admission = registered;
-	validateSendRoute(call);
+	const admission = call.admission === undefined ? currentUsageAdmission() : call.admission;
+	const captured = { ...call, admission: admission ?? null };
+	validateSendRoute(captured);
 	if (!admission?.active) return undefined;
 	const grant = await admission.admit(admissionRequest(call), signal);
 	if (grant === undefined) return undefined;

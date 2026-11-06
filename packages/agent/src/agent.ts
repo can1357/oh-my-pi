@@ -21,6 +21,8 @@ import {
 	type ThinkingBudgets,
 	type ToolChoice,
 	type ToolResultMessage,
+	type UsageAdmission,
+	withUsageAdmission,
 } from "@oh-my-pi/pi-ai";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
@@ -188,6 +190,7 @@ export interface AgentOptions {
 	 * Useful for expiring tokens and model-scoped credential routing.
 	 */
 	getApiKey?: (model: Model) => Promise<ApiKey | undefined> | ApiKey | undefined;
+	usageAdmission?: UsageAdmission;
 	prepareModelCallAuth?: AgentLoopConfig["prepareModelCallAuth"];
 
 	/**
@@ -528,6 +531,7 @@ export class Agent {
 
 	streamFn: StreamFn;
 	getApiKey?: (model: Model) => Promise<ApiKey | undefined> | ApiKey | undefined;
+	usageAdmission?: UsageAdmission;
 	prepareModelCallAuth?: AgentLoopConfig["prepareModelCallAuth"];
 	/** Prepare actual queue deliveries after dequeue gates; commit runs only while ownership remains valid. */
 	prepareQueuedMessages?: PrepareQueuedMessages;
@@ -598,6 +602,7 @@ export class Agent {
 		this.#hideThinkingSummary = opts.hideThinkingSummary;
 		this.#maxRetryDelayMs = opts.maxRetryDelayMs;
 		this.getApiKey = opts.getApiKey;
+		this.usageAdmission = opts.usageAdmission;
 		this.prepareModelCallAuth = opts.prepareModelCallAuth;
 		this.#onPayload = opts.onPayload;
 		this.#onResponse = opts.onResponse;
@@ -1873,7 +1878,9 @@ export class Agent {
 
 	/** Run `fn` with {@link logContext} on every record it logs. */
 	#inLogContext<T>(fn: () => T): T {
-		return this.logContext ? logger.withContext(this.logContext, fn) : fn();
+		return withUsageAdmission(this.usageAdmission, () =>
+			this.logContext ? logger.withContext(this.logContext, fn) : fn(),
+		);
 	}
 
 	/**

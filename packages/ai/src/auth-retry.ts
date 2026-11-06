@@ -324,13 +324,15 @@ async function admittedSend<T>(
 	signal: AbortSignal | undefined,
 	run: () => Promise<T>,
 ): Promise<T> {
-	if (currentUsageAdmission()?.active !== true && !call.usageRouteBinding) return run();
-	const send = await admitSend(call, signal);
+	const admission = call.admission === undefined ? currentUsageAdmission() : call.admission;
+	const captured = { ...call, admission: admission ?? null };
+	if (admission?.active !== true && !call.usageRouteBinding) return run();
+	const send = await admitSend(captured, signal);
 	if (send === undefined && !call.usageRouteBinding) return run();
 	let sent = false;
 	try {
 		if (signal?.aborted) throw signal.reason;
-		validateSendRoute(call);
+		validateSendRoute(captured);
 		sent = true;
 		return await run();
 	} finally {
@@ -493,6 +495,7 @@ export async function withOAuthAccess<T>(
 	// Each attempt admits under the credential that produced its access token.
 	const admittedAttempt = (access: OAuthAccess): Promise<T> => {
 		const call: UsageAdmissionCall = {
+			admission: "governor" in storage ? (storage.governor ?? null) : (currentUsageAdmission() ?? null),
 			provider,
 			modelId: opts?.usage?.modelId,
 			context: opts?.usage?.context,

@@ -26,7 +26,6 @@ import type {
 	UsageRequestContext,
 	UsageRequestSource,
 } from "@oh-my-pi/pi-ai";
-import { configureUsageAdmission, currentUsageAdmission } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import type { DiscoverAuthStorageOptions } from "@oh-my-pi/pi-ai/auth-broker/discover";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
@@ -1153,8 +1152,6 @@ export async function discoverAuthStorage(
 			},
 		},
 	});
-	// First registration wins: a child or command storage never displaces the main session's seam.
-	if (!currentUsageAdmission()) configureUsageAdmission(storage.governor);
 	return storage;
 }
 
@@ -1892,6 +1889,7 @@ export function createAutoLearnCaptureRunner(
 			sentToolDefinitions: sourceSentToolDefinitions.copy(name => !hostRuns(name)),
 			providerSessionState: captureProviderSessionState,
 			getApiKey: requestModel => options.sourceAgent.getApiKey?.(requestModel),
+			usageAdmission: options.sourceAgent.usageAdmission,
 			onPayload: options.onPayload,
 			onResponse: options.onResponse,
 		});
@@ -4915,6 +4913,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			...cfgSampling.get(settings),
 			getToolContext: tc => toolContextStore.getContext(tc),
 			getApiKey: effectiveGetApiKey,
+			usageAdmission: modelRegistry.authStorage.governor,
 			streamFn: (streamModel, context, streamOptions) => {
 				options.assertDispatchModel?.(streamModel);
 				// The loop checks the cap before each request, but a side request can finish
@@ -5155,6 +5154,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			advisorConfigs: discoveredAdvisors.advisors,
 			advisorConfigWarnings: discoveredAdvisors.warnings,
 			agent,
+			registryAuthResolver: options.getApiKey === undefined ? effectiveGetApiKey : undefined,
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
 			disableModelFallback: options.disableModelFallback,

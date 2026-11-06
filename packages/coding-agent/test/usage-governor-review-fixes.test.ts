@@ -118,6 +118,7 @@ test("failed usage is attributed to the response credential without clearing ano
 		expect(x.h.storage.sessions.pin(CODEX, "s", x.pinnedId)).toBe(true);
 		const host = {
 			settings: x.settings,
+			usesRegistryAuth: () => true,
 			modelRegistry: x.registry,
 			model: () => x.fallback,
 			sessionId: () => "s",
@@ -187,6 +188,7 @@ test("a stale fallback is rejected once and then rebound to a newly authorized r
 		};
 		const host = {
 			settings: x.settings,
+			usesRegistryAuth: () => true,
 			modelRegistry: x.registry,
 			usageRouting: routing,
 			agent: { state: { messages: [] } },
@@ -270,6 +272,7 @@ for (const failure of ["usage", "policy"] as const) {
 				const state = { messages: [] as AssistantMessage[], systemPrompt: [] as string[], tools: [] };
 				const host = {
 					settings: x.settings,
+					usesRegistryAuth: () => true,
 					modelRegistry: x.registry,
 					usageRouting: routing,
 					agent: {
@@ -426,7 +429,9 @@ test("a custom direct-session stream validates a bound route with the issuing tr
 	let binding: UsageRouteBinding;
 	let bearer = "";
 	let reached = false;
+	const registryResolver = () => undefined;
 	const agent = new Agent({
+		getApiKey: registryResolver,
 		initialState: { model: x.fallback, systemPrompt: [], tools: [], messages: [] },
 		streamFn: async (model, context, options) => {
 			const key = options?.apiKey;
@@ -448,6 +453,7 @@ test("a custom direct-session stream validates a bound route with the issuing tr
 	});
 	const session = new AgentSession({
 		agent,
+		registryAuthResolver: registryResolver,
 		sessionManager: manager,
 		settings: x.settings,
 		modelRegistry: x.registry,

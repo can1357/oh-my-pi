@@ -664,7 +664,8 @@ function withAdmittedDispatch<TOptions extends DispatchOptions>(
 	// chokepoint — so the loop guard (which wraps this) sees healed events and all
 	// provider exits are covered by one wrap. Official first-party providers are
 	// exempt (see `healLeakedThinking`); healing is otherwise idempotent.
-	if (limit === undefined && currentUsageAdmission()?.active !== true && !options?.usageRouteBinding) {
+	const admission = currentUsageAdmission();
+	if (limit === undefined && admission?.active !== true && !options?.usageRouteBinding) {
 		options?.beforeDispatch?.();
 		return healLeakedThinking(model, dispatch(false));
 	}
@@ -698,6 +699,7 @@ function withAdmittedDispatch<TOptions extends DispatchOptions>(
 		let outcome: UsageAdmissionOutcome = "not-sent";
 		try {
 			const call: UsageAdmissionCall = {
+				admission: admission ?? null,
 				credentialId: options?.credentialId,
 				bearer: typeof options?.apiKey === "string" ? options.apiKey : undefined,
 				provider: model.provider,
@@ -867,6 +869,19 @@ function withResolvedModelHeaders<TApi extends Api>(
 	return outer;
 }
 
+/** Bind response observations to the credential used by this physical attempt. */
+function withResponseCredential<T extends { credentialId?: number; onResponse?: StreamOptions["onResponse"] }>(
+	options: T,
+): T {
+	const onResponse = options.onResponse;
+	if (!onResponse) return options;
+	const credentialId = options.credentialId ?? null;
+	return {
+		...options,
+		onResponse: (response, model, signal) => onResponse({ ...response, credentialId }, model, signal),
+	};
+}
+
 export function stream<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
@@ -897,9 +912,8 @@ function streamDispatch<TApi extends Api>(
 	options: OptionsForApi<TApi> | undefined,
 	limited: boolean,
 ): AssistantMessageEventStream {
-	const requestOptions = withSupportedSamplingParams(
-		model,
-		withTransportFetch(model, (options || {}) as StreamOptions),
+	const requestOptions = withResponseCredential(
+		withSupportedSamplingParams(model, withTransportFetch(model, (options || {}) as StreamOptions)),
 	) as OptionsForApi<TApi>;
 	assertExplicitOpenAIResponsesPromptCacheSupport(model, requestOptions);
 
@@ -1261,7 +1275,7 @@ function streamSimpleRequest<TApi extends Api>(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-	const requestOptions = withSupportedSamplingParams(
+	let requestOptions = withSupportedSamplingParams(
 		model,
 		withTransportFetch(model, (options || {}) as SimpleStreamOptions),
 	);
@@ -1432,6 +1446,7 @@ function streamSimpleRequest<TApi extends Api>(
 			streamSimpleRequest(resolvedModel, context, requestOptions),
 		);
 	}
+	requestOptions = withResponseCredential(requestOptions);
 
 	// Pi-native transport short-circuits the per-provider dispatch entirely:
 	// the gateway resolves provider + credential server-side, so we don't

@@ -73,6 +73,7 @@ import type {
 	UsageHistoryQuery,
 	UsageLimitMarkResult,
 	UsageProvider,
+	UsageHeaderIngestOptions,
 	UsageReport,
 	UsageAdmissionGrant,
 	UsageAdmissionOutcome,
@@ -499,11 +500,7 @@ class RemoteUsage implements UsageApi {
 	cachedReport(provider: Provider, credential: AuthCredential, options?: { baseUrl?: string }): UsageReport | null {
 		return this.#remote.callSync("usage.cachedReport", provider, credential, options);
 	}
-	ingestHeaders(
-		provider: Provider,
-		headers: Record<string, string>,
-		options?: { sessionId?: string; baseUrl?: string; responseStatus?: number },
-	): boolean {
+	ingestHeaders(provider: Provider, headers: Record<string, string>, options?: UsageHeaderIngestOptions): boolean {
 		// Once per response; without a stored OAuth credential main ingests nothing.
 		if (!this.#availability.of(provider).oauth) return false;
 		return this.#remote.callSync("usage.ingestHeaders", provider, headers, options);

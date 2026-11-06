@@ -178,6 +178,7 @@ async function preparationHarness(kind: "unavailable" | "context" | "effort" | "
 	const host = {
 		agent: { state: { messages: [] } },
 		settings: x.settings,
+		usesRegistryAuth: () => true,
 		modelRegistry: x.registry,
 		usageRouting: { candidates: async () => routes },
 		model: () => active,

@@ -7,6 +7,7 @@ import type {
 	UsageRoutingScope,
 	UsageRouteTarget,
 } from "@oh-my-pi/pi-ai";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { filterAvailableModelsByEnabledPatterns, resolveModelOverride } from "../config/model-resolver";
 import { cfgDisabledProviders, cfgEnabledModels } from "../config/model-settings";
@@ -40,6 +41,47 @@ export class SessionUsageRouting {
 
 	refresh(force = false): UsageRoutingScope | undefined {
 		if (this.#disposed) return undefined;
+		// A forced rebuild drops the published scope first, so nothing routes on the old one while it rebuilds.
+		if (force) this.#revoke();
+		let rebuilt: Pick<UsageRoutingScope, "roles" | "models">;
+		try {
+			rebuilt = this.#reconstruct();
+		} catch (error) {
+			// Fail closed: the revoked scope stays unpublished until a later refresh rebuilds successfully.
+			this.#revoke();
+			logger.warn("usage routing scope rebuild failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return undefined;
+		}
+		const signature = JSON.stringify({ roles: rebuilt.roles, models: rebuilt.models });
+		if (!force && this.#scope && signature === this.#signature) return this.#scope;
+		// Do not retain an unpublished revision if the governor rejects the replacement.
+		const scope = { id: this.#id, revision: this.#revision + 1, ...rebuilt };
+		try {
+			this.registry.authStorage.governor.setRoutingScope(scope);
+		} catch (error) {
+			this.#revoke();
+			logger.warn("usage routing scope publication failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return undefined;
+		}
+		this.#signature = signature;
+		this.#revision = scope.revision;
+		this.#scope = scope;
+		return scope;
+	}
+
+	/** Remove the published governor scope, if any. The next refresh republishes even on an unchanged signature. */
+	#revoke(): void {
+		if (!this.#scope) return;
+		this.#scope = undefined;
+		this.#signature = "";
+		this.registry.authStorage.governor.removeRoutingScope(this.#id);
+	}
+
+	#reconstruct(): Pick<UsageRoutingScope, "roles" | "models"> {
 		const chains = getRetryFallbackChains(this.settings);
 		const context = {
 			chains,
@@ -101,13 +143,7 @@ export class SessionUsageRouting {
 				: [];
 			return { selector, targets: buildTargets([selector, ...entries.map(item => item.raw)]) };
 		});
-		const signature = JSON.stringify({ roles, models });
-		if (force || signature !== this.#signature) {
-			this.#signature = signature;
-			this.#scope = { id: this.#id, revision: ++this.#revision, roles, models };
-			this.registry.authStorage.governor.setRoutingScope(this.#scope);
-		}
-		return this.#scope;
+		return { roles, models };
 	}
 
 	async evaluate(

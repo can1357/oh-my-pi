@@ -63,6 +63,7 @@ import type {
 	RotateCredentialOptions,
 	StoredAuthCredential,
 	StoredCredentialBlock,
+	UsageHeaderIngestOptions,
 	UsageHistoryEntry,
 	UsageHistoryQuery,
 	UsageLimitMarkResult,
@@ -246,11 +247,7 @@ export type AuthStorageProtocol = {
 		UsageReport | null
 	>;
 	"usage.ingestHeaders": RpcMethod<
-		[
-			provider: Provider,
-			headers: Record<string, string>,
-			options?: { sessionId?: string; baseUrl?: string; responseStatus?: number },
-		],
+		[provider: Provider, headers: Record<string, string>, options?: UsageHeaderIngestOptions],
 		boolean
 	>;
 	"usage.invalidate": RpcMethod<[provider?: string, signal?: AbortSignal], void>;

@@ -415,6 +415,7 @@ export class TurnRecovery {
 		model: Model,
 		signal?: AbortSignal,
 	): Promise<PreparedModelAuth | undefined> {
+		if (this.#host.usesRegistryAuth?.() !== true) return undefined;
 		const registry = this.#host.modelRegistry;
 		const sessionId = this.#host.sessionId();
 		const resolved = await registry.getApiKeyWithCredentialForProvider(model.provider, sessionId, {
@@ -425,7 +426,13 @@ export class TurnRecovery {
 			recordAffinity: false,
 			signal,
 		});
-		if (!resolved || resolved.credentialId !== candidate.credentialId || signal?.aborted) return undefined;
+		if (
+			!resolved ||
+			resolved.credentialId !== candidate.credentialId ||
+			signal?.aborted ||
+			this.#host.usesRegistryAuth?.() !== true
+		)
+			return undefined;
 		const bearerFingerprint = createHash("sha256").update(resolved.apiKey).digest("base64url");
 		const binding = { ...candidate, bearerFingerprint };
 		if (
@@ -449,6 +456,11 @@ export class TurnRecovery {
 		failedCredentialId: number | undefined,
 		signal?: AbortSignal,
 	): Promise<boolean> {
+		if (this.#host.usesRegistryAuth?.() !== true) {
+			this.#governedRoute = undefined;
+			this.#governedRouteStale = false;
+			return false;
+		}
 		const pending = this.#governedRoute;
 		if (!pending || failedCredentialId === undefined || pending.credentialId !== failedCredentialId) return false;
 		if (
@@ -521,6 +533,11 @@ export class TurnRecovery {
 		owner: UsageRoutingOwner,
 		signal?: AbortSignal,
 	): Promise<PreparedModelAuth | undefined> {
+		if (this.#host.usesRegistryAuth?.() !== true) {
+			this.#governedRoute = undefined;
+			this.#governedRouteStale = false;
+			return undefined;
+		}
 		if (!cfgUsageGovernorEnabled.get(this.#host.settings)) return undefined;
 		const pending = this.#governedRoute;
 		if (
@@ -566,6 +583,11 @@ export class TurnRecovery {
 				candidate = { ...pending, revision: evaluation.scope.revision, target };
 			}
 			const bound = await this.#resolveGovernedRoute(candidate, model, signal);
+			if (this.#host.usesRegistryAuth?.() !== true) {
+				this.#governedRoute = undefined;
+				this.#governedRouteStale = false;
+				return undefined;
+			}
 			if (!bound) {
 				this.#governedRouteStale = true;
 				throw new UsageRouteInvalidatedError();
@@ -577,6 +599,7 @@ export class TurnRecovery {
 		this.#governedRoute = undefined;
 		this.#governedRouteStale = false;
 		const current = await resolveCurrent();
+		if (this.#host.usesRegistryAuth?.() !== true) return undefined;
 		if (!cfgRetryModelFallback.get(this.#host.settings) || this.#host.modelFallbackDisabled?.()) return current;
 		const credentialId = typeof current.resolved === "object" ? current.resolved?.credentialId : undefined;
 		const candidates =
@@ -1089,6 +1112,11 @@ export class TurnRecovery {
 		const id = this.#classifyRetryMessage(message);
 		const activeModel = this.#host.model();
 		if (!activeModel || !AIError.is(id, AIError.Flag.UsageLimit)) return false;
+		if (cfgUsageGovernorEnabled.get(this.#host.settings) && this.#host.usesRegistryAuth?.() !== true) {
+			this.#governedRoute = undefined;
+			this.#governedRouteStale = false;
+			return false;
+		}
 		if (cfgUsageGovernorEnabled.get(this.#host.settings) && message.credentialId === undefined) return false;
 
 		let recorded = this.#usageLimitOutcomes.get(message);
@@ -2628,6 +2656,11 @@ export class TurnRecovery {
 		// under a different one.
 		const sourceModel = this.#host.model();
 		const governorEnabled = cfgUsageGovernorEnabled.get(this.#host.settings);
+		if (governorEnabled && this.#host.usesRegistryAuth?.() !== true) {
+			this.#governedRoute = undefined;
+			this.#governedRouteStale = false;
+			return false;
+		}
 		let governorCandidates: UsageRouteCandidate[] = [];
 		if (governorEnabled) {
 			if (!sourceModel || !this.#host.usageRouting) return false;

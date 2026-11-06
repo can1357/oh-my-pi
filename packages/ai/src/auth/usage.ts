@@ -38,7 +38,7 @@ import { mergeRefreshedOrganizationScope, OAUTH_REFRESH_SKEW_MS } from "./refres
 import type { OAuthRefresher } from "./refresh";
 import { USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
 import type { AuthCredentialStore } from "./store";
-import type { AuthCredential, OAuthCredential, ObservedUsageInput, UsageApi } from "./types";
+import type { AuthCredential, OAuthCredential, ObservedUsageInput, UsageApi, UsageHeaderIngestOptions } from "./types";
 import {
 	dedupeUsageReports,
 	isUsageLimitExhausted,
@@ -532,16 +532,29 @@ export class UsageService implements UsageApi {
 	}
 
 	/** Merge rate-limit headers into the latest account report. */
-	ingestHeaders(
-		provider: Provider,
-		headers: Record<string, string>,
-		options?: { sessionId?: string; baseUrl?: string; responseStatus?: number },
-	): boolean {
-		const parseHeaders = this.providerFor(provider)?.parseRateLimitHeaders;
-		if (!parseHeaders) return false;
+	ingestHeaders(provider: Provider, headers: Record<string, string>, options?: UsageHeaderIngestOptions): boolean {
+		const providerImpl = this.providerFor(provider);
+		const parseHeaders = providerImpl?.parseRateLimitHeaders;
+		if (!parseHeaders || options?.credentialId === null) return false;
 
-		const credential = this.#deps.affinity.activeOAuth(provider, options?.sessionId);
+		const row =
+			options?.credentialId === undefined
+				? undefined
+				: this.#deps.pool.entries(provider).find(entry => entry.id === options.credentialId);
+		const credential =
+			options?.credentialId === undefined
+				? this.#deps.affinity.activeOAuth(provider, options?.sessionId)
+				: row?.credential.type === "oauth"
+					? row.credential
+					: undefined;
 		if (!credential) return false;
+		if (
+			options?.credentialId !== undefined &&
+			providerImpl?.supports &&
+			!providerImpl.supports(oauthUsageRequest(provider, credential, options?.baseUrl))
+		) {
+			return false;
+		}
 
 		const cacheKey = this.#deps.cache.reportKey(oauthUsageRequest(provider, credential, options?.baseUrl));
 		const now = Date.now();

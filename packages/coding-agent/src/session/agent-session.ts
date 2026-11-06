@@ -89,6 +89,7 @@ import {
 	type UsageGovernorEvent,
 	type UsageGovernorWaitReason,
 } from "@oh-my-pi/pi-ai";
+import { withUsageAdmission } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
@@ -1280,6 +1281,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	// Model registry for API key resolution
 	#modelRegistry: ModelRegistry;
+	#registryAuthResolver?: Agent["getApiKey"];
 	#usageRouting?: SessionUsageRouting;
 	#usageRoutingRole?: string;
 	/** Main thread only: spots streaming spawning tool calls so a subagent worker boots ahead of dispatch. */
@@ -2135,6 +2137,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
+		this.#registryAuthResolver = config.registryAuthResolver;
 		this.tokenRate = new TokenRateMeter(text => this.agent.tokenizer.countTokens(text));
 		this.#reseedTokenRate();
 		this.agent.setQueuedMessageGrouping(
@@ -2148,6 +2151,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#skillDescriptions = config.skillDescriptions ?? new SkillDescriptionCatalog();
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;
+		this.agent.usageAdmission = this.#modelRegistry.authStorage.governor;
 		this.#allowSessionModelFallback = config.allowSessionModelFallback === true;
 		this.#disableModelFallback = config.disableModelFallback === true;
 		const usageRouting = new SessionUsageRouting(this.settings, this.#modelRegistry);
@@ -2347,6 +2351,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			modelRegistry: this.#modelRegistry,
 			usageRouting,
 			routingRole: () => this.#usageRoutingRole,
+			usesRegistryAuth: () =>
+				this.#registryAuthResolver !== undefined && this.agent.getApiKey === this.#registryAuthResolver,
 			configWarnings: this.configWarnings,
 			model: () => this.model,
 			contextFitsModel: (model, excludedMessage) => this.#maintenance.contextFitsModel(model, excludedMessage),
@@ -9255,14 +9261,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				);
 			}
 
-			// Validate API key; a provider without one walks the retry fallback chain first.
-			const apiKey = await logger.time("prompt:apiKey", () => this.#modelRegistry.getApiKey(model, this.sessionId));
-			if (!apiKey && !(await this.#recovery.applyMissingCredentialFallback(setupAbort.signal))) {
-				if (setupAbort.signal.aborted) return false;
-				throw new PromptPreflightError(
-					`No API key found for ${model.provider}.\n\n` +
-						`Use /login, set an API key environment variable, or create ${getAgentDbPath()}`,
+			// A custom resolver owns its own credentials and must not trigger registry resolution.
+			if (
+				!cfgUsageGovernorEnabled.get(this.settings) ||
+				(this.#registryAuthResolver !== undefined && this.agent.getApiKey === this.#registryAuthResolver)
+			) {
+				const apiKey = await logger.time("prompt:apiKey", () =>
+					this.#modelRegistry.getApiKey(model, this.sessionId),
 				);
+				if (!apiKey && !(await this.#recovery.applyMissingCredentialFallback(setupAbort.signal))) {
+					if (setupAbort.signal.aborted) return false;
+					throw new PromptPreflightError(
+						`No API key found for ${model.provider}.\n\n` +
+							`Use /login, set an API key environment variable, or create ${getAgentDbPath()}`,
+					);
+				}
 			}
 
 			// Recover a previously failed/incomplete assistant turn before sending.
@@ -9637,7 +9650,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const args = parseCommandArgs(argsString);
 			// Commands that consult findScopedSettings, including /review, must see this
 			// session's cache kill switch instead of the default enabled cache.
-			const result = await withActiveSettings(this.settings, () => loaded.command.execute(args, ctx, argsString));
+			const result = await withUsageAdmission(this.#modelRegistry.authStorage.governor, () =>
+				withActiveSettings(this.settings, () => loaded.command.execute(args, ctx, argsString)),
+			);
 			// If result is a string, it's a prompt to send to LLM
 			// If void/undefined, command handled everything
 			return result ?? "";
@@ -11545,17 +11560,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (titleSignal.aborted || this.#costGate.check()) return null;
 		// The title request carries user text, so it follows this session's own credential
 		// redaction policy like its conversation requests (see `settingsAwareStreamFn`).
-		const title = await withCredentialRedaction(cfgSecretsEnabled.get(this.settings), () =>
-			generateSessionTitle(
-				firstMessage,
-				this.#modelRegistry,
-				this.settings,
-				sessionId,
-				this.model,
-				provider => buildSessionMetadata(sessionId, provider, this.#modelRegistry.authStorage),
-				customSystemPrompt ?? this.#titleSystemPrompt,
-				titleSignal,
-				parentSessionId,
+		const title = await withUsageAdmission(this.#modelRegistry.authStorage.governor, () =>
+			withCredentialRedaction(cfgSecretsEnabled.get(this.settings), () =>
+				generateSessionTitle(
+					firstMessage,
+					this.#modelRegistry,
+					this.settings,
+					sessionId,
+					this.model,
+					provider => buildSessionMetadata(sessionId, provider, this.#modelRegistry.authStorage),
+					customSystemPrompt ?? this.#titleSystemPrompt,
+					titleSignal,
+					parentSessionId,
+				),
 			),
 		);
 		if (await this.#sessionGenerationChanged(sessionGeneration)) return null;

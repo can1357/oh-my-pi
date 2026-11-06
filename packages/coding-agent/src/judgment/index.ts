@@ -11,6 +11,7 @@
  * (the session ledger) and one `judgment` telemetry span, so a judgment backed
  * by a chat model is never billed again from its aggregated result.
  */
+import { withUsageAdmission } from "@oh-my-pi/pi-ai";
 import {
 	type AgentTelemetry,
 	type AgentTelemetryConfig,
@@ -437,6 +438,17 @@ export class ChainJudge implements Judge {
 
 	/** Run `run` against each candidate able to answer `request` (any candidate when omitted) until one succeeds. */
 	async #withCandidate<T>(
+		run: (judge: Judge, kind: JudgeKind, model: Model, prepared?: PreparedImages) => Promise<T>,
+		options: JudgeOptions,
+		request?: JudgmentRequest,
+		prepare?: (model: Model, kind: JudgeKind) => Promise<PreparedImages | undefined>,
+	): Promise<T> {
+		return withUsageAdmission(this.#deps.registry.authStorage.governor, () =>
+			this.#withCandidateScoped(run, options, request, prepare),
+		);
+	}
+
+	async #withCandidateScoped<T>(
 		run: (judge: Judge, kind: JudgeKind, model: Model, prepared?: PreparedImages) => Promise<T>,
 		options: JudgeOptions,
 		request?: JudgmentRequest,

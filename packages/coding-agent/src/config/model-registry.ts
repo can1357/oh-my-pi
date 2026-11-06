@@ -682,8 +682,10 @@ export class ModelRegistry {
 	 */
 	applyMirrorBatch(batch: ModelRegistryMirrorBatch): void {
 		if (!this.#owner) throw new Error("applyMirrorBatch: this registry is not a mirror");
+		const attempted: ModelRegistryMirrorChange[] = [];
 		for (const change of batch.changes) {
 			if (change.seq <= this.#mirrorSeq) continue;
+			attempted.push(change);
 			try {
 				this.#applyMirrorChange(change);
 			} catch (error) {
@@ -696,6 +698,9 @@ export class ModelRegistry {
 		}
 		this.#mirrorSeq = Math.max(this.#mirrorSeq, batch.seq);
 		if (batch.discovery) this.#installDiscoveryLayer(batch.discovery);
+		// Notify once, synchronously, for any batch that changed something; a batch of skipped changes is silent.
+		if (attempted.length === 0 && !batch.discovery) return;
+		this.#notifyMirrorListeners({ seq: this.#mirrorSeq, changes: attempted, discovery: batch.discovery });
 	}
 
 	#applyMirrorChange(change: ModelRegistryMirrorChange): void {
@@ -778,6 +783,14 @@ export class ModelRegistry {
 			discovery = catalogUnchanged ? { states: current.states } : current;
 		}
 		const batch: ModelRegistryMirrorBatch = { seq: this.#mirrorSeq, changes, discovery };
+		this.#notifyMirrorListeners(batch);
+	}
+
+	/**
+	 * Deliver `batch` to each subscribed listener. A throwing listener is logged and does not stop the rest.
+	 * Mirror-side callers never record the batch (see {@link ModelRegistry.#recordMirrorChange}), so no echo.
+	 */
+	#notifyMirrorListeners(batch: ModelRegistryMirrorBatch): void {
 		for (const listener of this.#mirrorListeners) {
 			try {
 				listener(batch);
