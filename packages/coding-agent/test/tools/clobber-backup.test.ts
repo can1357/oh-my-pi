@@ -391,6 +391,26 @@ describe("copy-before-clobber: a file this session did not create", () => {
 		expect(await Bun.file(grew).exists()).toBe(false);
 		expect(await backupFiles()).toHaveLength(1);
 	});
+
+	test("a multibyte name leaves room for the oversize mark", async () => {
+		// 78 CJK characters are 78 JavaScript characters and 234 UTF-8 bytes. A
+		// name capped by characters produced a 253-byte backup name, and the
+		// rename to `.oversize` then failed with ENAMETOOLONG: the copy stayed
+		// unmarked and the budget charged it the per-file cap for the day.
+		const name = `${"界".repeat(78)}.md`;
+		await fs.writeFile(path.join(tempDir, name), DOOMED);
+
+		await new WriteTool(makeSession(tempDir)).execute("clobber", { path: name, content: "gone\n" });
+
+		const backups = await backupFiles();
+		expect(backups).toHaveLength(1);
+		expect(await Bun.file(backups[0]!).text()).toBe(DOOMED);
+		const basename = path.basename(backups[0]!);
+		expect(Buffer.byteLength(basename, "utf8") + ".oversize".length).toBeLessThanOrEqual(255);
+		// Cut on a code-point boundary, so the name is still readable.
+		expect(basename).not.toContain("\uFFFD");
+		expect(basename).toEndWith(".md");
+	});
 });
 
 describe("copy-before-clobber: another session's directory", () => {

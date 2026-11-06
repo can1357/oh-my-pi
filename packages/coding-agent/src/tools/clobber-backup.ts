@@ -244,6 +244,23 @@ export function forgetOwnWrite(session: ClobberBackupSession, absolutePath: stri
 	session.clobberCreatedPaths?.byPath.delete(realPath(absolutePath, false));
 }
 
+/** Longest entry name a POSIX filesystem accepts, in bytes. */
+const NAME_MAX_BYTES = 255;
+
+/**
+ * The tail of `name` that fits `max` bytes of UTF-8, cut on a code-point
+ * boundary. The tail is what carries the extension, and bytes are what the
+ * kernel counts: a name capped by JavaScript characters lets 78 CJK characters
+ * through as 234 bytes.
+ */
+function tailWithinBytes(name: string, max: number): string {
+	const bytes = Buffer.from(name, "utf8");
+	if (bytes.length <= max) return name;
+	// A lossy decode of a cut multi-byte sequence yields U+FFFD at the front;
+	// dropping it leaves whole code points.
+	return new TextDecoder().decode(bytes.subarray(bytes.length - max)).replace(/^\uFFFD+/, "");
+}
+
 /** `<HHMMSSmmm>-<rand>-<name>`: sorts by time inside its day, keeps the original extension readable. */
 function backupFileName(now: Date, originalName: string): string {
 	const stamp =
@@ -252,9 +269,13 @@ function backupFileName(now: Date, originalName: string): string {
 		`${now.getSeconds()}`.padStart(2, "0") +
 		`${now.getMilliseconds()}`.padStart(3, "0");
 	const unique = Bun.randomUUIDv7("hex").slice(-8);
-	// A basename has no separators; the cap keeps a pathological name from
-	// pushing the whole entry past NAME_MAX.
-	return `${stamp}-${unique}-${originalName.slice(-120)}`;
+	const prefix = `${stamp}-${unique}-`;
+	// The room left is NAME_MAX minus this prefix minus the mark a copy whose
+	// source grew will need: without that reservation the rename to `.oversize`
+	// fails with ENAMETOOLONG, the copy stays unmarked, and the budget charges
+	// it the per-file cap for the rest of the day.
+	const room = NAME_MAX_BYTES - Buffer.byteLength(prefix, "utf8") - OVERSIZE_SUFFIX.length;
+	return `${prefix}${tailWithinBytes(originalName, room)}`;
 }
 
 /** Local calendar day, the directory a backup lands in. */
