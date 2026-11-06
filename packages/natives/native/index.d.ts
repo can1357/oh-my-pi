@@ -87,8 +87,8 @@ export declare class DesktopSession {
   retire(): void
   /**
    * Sets when the current run ends, `remaining_ms` from now; each run sets
-   * it before its first call. On macOS, input waiting for the user to pause
-   * in its app gives up shortly before it.
+   * it before its first call. Input waiting for the user to pause in its app
+   * (macOS) or for a Wayland permission prompt gives up shortly before it.
    */
   setRunDeadline(remainingMs: number): void
   capture(target: string, caps?: CaptureCaps | undefined | null): Promise<DesktopCapture>
@@ -428,6 +428,24 @@ export declare class MacAppearanceObserver {
   stop(): void
 }
 
+/** The app the user had in front when `macOSFrontApp()` read it. */
+export declare class MacOSFrontApp {
+  /**
+   * Puts this app back in front, without raising its windows, each time the
+   * app that took the front from it takes it again during the next
+   * `durationMs`. Ends early once a hardware mouse button or ⌘/⌃ is used
+   * after the app was read, the app came from a launcher or Spotlight panel,
+   * or a different app comes forward: that is the user picking an app.
+   * Typing does not end it, and a hand-back macOS refuses for a key typed
+   * meanwhile is asked again. Holds nothing when called over a second after
+   * the latest read, as picks made since then went unwatched. Owns desktop
+   * input/focus control only for each hand-back, and rejects if another
+   * operation owns it then. Resolves how many times it put the app back.
+   */
+  keepInFront(durationMs: number): Promise<number>
+}
+export type MacosFrontApp = MacOSFrontApp
+
 /** A transactional, process-owned native OAuth callback receiver. */
 export declare class NativeOAuthCallback {
   /** Create a receiver without touching the filesystem or OS registration. */
@@ -549,7 +567,46 @@ export declare class PtySession {
   kill(): void
 }
 
-/** Persistent brush-core shell session. */
+/**
+ * Actual command state, source units and bounded history for one shell run,
+ * including observed assignments and producer-attributed output.
+ *
+ * Create one over the command text and
+ * pass it as [`ShellRunOptions::trace`]; poll [`RunTrace::version`] while the
+ * run is in flight and take [`RunTrace::snapshot`] when it changed.
+ */
+export declare class RunTrace {
+  /** A trace of `script`, the exact command text about to run. */
+  constructor(script: string)
+  /**
+   * Revision of semantic events, assignments and visible output; unchanged
+   * means `snapshot()` is unchanged, even when adjacent output coalesces.
+   */
+  version(): number
+  /**
+   * The `ShellTrace` JSON with byte-offset layout, current node states and
+   * ordered replay `history`. The newest 20,000 records retain at most
+   * 2 MiB visible output and 8 MiB payload; `historyTruncated` explicitly
+   * reports eviction. History timestamps are measured ns since `RunStart`;
+   * output identifies its real producer (`u`, `n`, `command`) when known.
+   * Semantic entries carry their actual `vpid`; `rootVpid` distinguishes
+   * root lifecycle from owned tool children even after journal trimming.
+   * A UTF-8 scalar spanning producers has exact byte `contributors`
+   * instead of an invented primary producer. Decoding ends at capture EOF.
+   * Segmented minimizer submissions share one epoch and final status;
+   * their history carries `segment`, with `logicalEnd`/`logicalStatus`
+   * finalizing the last actual root RunEnd after output draining.
+   * Serialization borrows the locked model rather than cloning its history.
+   */
+  snapshot(): string
+  /**
+   * Render directly over the borrowed native state; no snapshot or syntax
+   * roundtrip.
+   */
+  present(options: ShellVizOptions): string
+}
+
+/** Persistent embedded bash engine (pi-shell) shell session. */
 export declare class Shell {
   /**
    * Create a new shell session from optional configuration.
@@ -587,6 +644,15 @@ export declare class Shell {
    * running command.
    */
   pids(): Array<number>
+}
+
+/**
+ * Persisted native visualization, restored once rather than reparsed on each
+ * frame.
+ */
+export declare class ShellVisualization {
+  constructor(snapshot: string)
+  present(options: ShellVizOptions): string
 }
 
 /** One word-completion engine running on its own thread. */
@@ -1424,10 +1490,8 @@ export declare function countTokens(input: string | string[], encoding?: Encodin
 /**
  * Decode one complete SIXEL control string into a PNG on the calling thread.
  *
- * The decoder is deliberately bounded before handing the stream to
- * `icy_sixel`: raster declarations, repeats, and row advances are scanned
- * first so hostile dimensions cannot make the dependency allocate its much
- * larger internal maximum.
+ * Raster declarations, repeats, and row advances are bounded before allocating
+ * the decoded RGBA buffer.
  */
 export declare function decodeSixelToPng(bytes: Uint8Array): Uint8Array
 
@@ -2017,7 +2081,7 @@ export declare enum Encoding {
 export declare function execReplace(argv: Array<string>): void
 
 /**
- * Execute a brush shell command.
+ * Execute a command in the embedded bash engine (pi-shell).
  *
  * Creates a fresh session for each call. The `on_chunk` callback receives
  * streamed stdout/stderr output. Returns the exit code when the command
@@ -2378,6 +2442,25 @@ export declare function hashlineStripPrefixes(lines: Array<string>): Array<strin
 export declare function hasMatch(content: string | Uint8Array, pattern: string | Uint8Array, ignoreCase?: boolean | undefined | null, multiline?: boolean | undefined | null): boolean
 
 /**
+ * How `path` is held by this process: open through another descriptor and
+ * locked. `null` when it is not, and always outside Linux.
+ *
+ * Looks at the path's inode through the descriptors already open, without
+ * opening the file.
+ */
+export declare function heldFileKind(path: string): HeldFileKind | null
+
+/** What a file this process holds locked is. */
+export declare enum HeldFileKind {
+  /** A SQLite database this process has open with its locks. */
+  Database = 'database',
+  /** A SQLite WAL-index (`-shm`) file this process has open with its locks. */
+  WalIndex = 'wal-index',
+  /** Another file this process holds open with a record lock. */
+  Locked = 'locked'
+}
+
+/**
  * Highlight code and return ANSI-colored lines.
  *
  * # Arguments
@@ -2466,6 +2549,15 @@ export interface InlineSloppyRegion {
   end: number
   payload: string
 }
+
+/**
+ * Moves this process's SQLite record locks onto open-file-description locks.
+ *
+ * No other close of the file can release those (see `ofd_locks.rs`). Call it
+ * before the process opens any SQLite database. Returns whether SQLite now
+ * uses them: `false` outside Linux, or when Bun's SQLite is not found.
+ */
+export declare function installSqliteLockShim(): boolean
 
 /** Options for `IpcConnection.connect`. */
 export interface IpcConnectOptions {
@@ -2738,6 +2830,12 @@ export declare function macOSAutocorrectWord(text: string, start: number, length
  * On macOS, the check runs on the dedicated spelling thread.
  */
 export declare function macOSCheckSpelling(text: string): Promise<Array<SpellingRange>>
+
+/**
+ * The app macOS `WindowServer` has in front. `null` off macOS and when the
+ * front-process SPI is unavailable.
+ */
+export declare function macOSFrontApp(): MacOSFrontApp | null
 
 /** Whether the host can use Apple's native spelling service. */
 export declare function macOSSpellCheckerAvailable(): boolean
@@ -3313,6 +3411,19 @@ export declare function renderMermaidAscii(text: string, options?: MermaidRender
 export declare function renderSnapcompactPng(text: string, options: SnapcompactRenderOptions): Promise<string>
 
 /**
+ * Run the pi-shell engine as a process shell in this process (`omp zsh`,
+ * `omp bash`, `omp sh`): `argv` is the shell's whole command line,
+ * `argv[0]` naming it (`zsh`, `bash` or `sh` pick the dialect), as a real
+ * shell gets it. Synchronous: blocks the calling thread until the shell
+ * exits and returns the status the process should exit with (0–255; 101
+ * after a panic). The shell uses the process's own stdin, stdout, stderr,
+ * terminal and inherited descriptors (duplicated, never taken over); the
+ * job-control and termination signals the runtime handles are reset to
+ * their defaults for the run and restored after it.
+ */
+export declare function runShellMain(argv: Array<string>): number
+
+/**
  * Search content for a pattern (one-shot, compiles pattern each time).
  * For repeated searches with the same pattern, use [`grep`] with file filters.
  *
@@ -3363,7 +3474,10 @@ export interface SearchResult {
 
 export declare function setHangulCompatJamoWidthOverride(value: number): void
 
-/** Options for executing a shell command via brush-core. */
+/**
+ * Options for executing a shell command via the embedded bash engine
+ * (pi-shell).
+ */
 export interface ShellExecuteOptions {
   /** Command string to execute in the shell. */
   command: string
@@ -3733,6 +3847,8 @@ export interface ShellRunOptions {
   filesystem?: ShellFilesystem
   /** Receives a copy of every byte crossing the run's pipeline pipes. */
   streams?: PipeStreams
+  /** Folds the run's engine events into a live model of the command. */
+  trace?: RunTrace
 }
 
 /** Result of running a shell command. */
@@ -3752,6 +3868,28 @@ export interface ShellRunResult {
   minimized?: MinimizerResult
   /** Shell working directory after command completion. */
   workingDir?: string
+}
+
+/** Native non-executing visualization transformations. */
+export interface ShellVizLayers {
+  color: boolean
+  inline: boolean
+  idioms: boolean
+  effects: boolean
+  unwrap: boolean
+}
+
+/** Native presentation controls. Node identities are opaque engine keys. */
+export interface ShellVizOptions {
+  view: 'raw' | 'pseudo'
+  layers: ShellVizLayers
+  split: boolean
+  cursor?: number
+  cursorSeq?: number
+  playing: boolean
+  speed: number
+  selectedNode?: string
+  expandedNodes: Array<string>
 }
 
 /**

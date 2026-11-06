@@ -1052,9 +1052,12 @@ mod tests {
 	}
 
 	/// An empty config directory, so a developer's own `jj` configuration
-	/// cannot reach these tests. Without it a `default-description` or a
-	/// commit trailer in `~/.config/jj/config.toml` rewrites the descriptions
-	/// they assert on.
+	/// cannot reach these tests. Without it these tests measure the config
+	/// rather than the code: on the machine this was written, a commit trailer
+	/// in the user's `jj` config appended an `Omp-Session: <uuid>` line to
+	/// every description, so the colocated-workspace regression below failed
+	/// against *fixed* code while the working-copy change had in fact
+	/// survived. A `default-description` does the same thing.
 	fn jj_config_dir() -> &'static Path {
 		static DIR: std::sync::LazyLock<tempfile::TempDir> =
 			std::sync::LazyLock::new(|| tempfile::tempdir().unwrap());
@@ -1320,8 +1323,16 @@ mod tests {
 	/// workspace's next `jj` command re-imported HEAD and replaced its
 	/// working-copy commit with a new empty one.
 	///
-	/// Whether this test means anything depends on the `jj` that runs it. With
-	/// a `jj` that is present but too old to colocate it fails rather than
+	/// **Run this with an official `jj` release.** The result depends on which
+	/// `jj` is first on PATH, and not only on its version number: measured on
+	/// 2026-11-06, a locally built `jj 0.46.0-sami.20261008` fork passes this
+	/// test against *both* broken and fixed code, so a green row from it says
+	/// nothing. Official `jj 0.46.0` fails at jj-lib 0.44 with an empty
+	/// description and passes here. Whoever runs this next will likely have
+	/// that fork first on PATH and reach the opposite conclusion; check
+	/// `jj --version` before believing either outcome.
+	///
+	/// With a `jj` that is present but too old to colocate it fails rather than
 	/// skipping, because that is the case where a skip would report a vacuous
 	/// pass for the very behaviour under test. With no `jj` at all it skips and
 	/// says so, as the other CLI-dependent tests here do: CI installs no `jj`

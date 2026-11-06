@@ -22,7 +22,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, AssistantMessageEvent, ImageContent } from "@oh-my-pi/pi-ai";
-import { getConfigRootDir, logger } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, logger, toError } from "@oh-my-pi/pi-utils";
 import type { AgentHubRemote, AgentHubRemoteTranscript } from "@oh-my-pi/pi-tui/overlays/agent-hub";
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentRegistry } from "../registry/agent-registry";
@@ -330,7 +330,7 @@ export class CollabGuestLink {
 		this.#writeToken = parsed.writeToken ? Buffer.from(parsed.writeToken).toString("base64url") : undefined;
 		this.#returnSessionFile = this.#ctx.sessionManager.getSessionFile() ?? null;
 		// Claim the process before any async setup or replica session transition.
-		this.#ctx.collabGuest = this;
+		this.#ctx.setCollabGuest(this);
 		let key: CryptoKey;
 		try {
 			key = await importRoomKey(parsed.key);
@@ -407,7 +407,7 @@ export class CollabGuestLink {
 				.catch(err => {
 					logger.warn("collab guest frame apply failed", { type: frame.t, error: String(err) });
 					if (frame.t === "welcome" || frame.t === "snapshot-chunk") {
-						if (!joined) firstWelcome.reject(err instanceof Error ? err : new Error(String(err)));
+						if (!joined) firstWelcome.reject(toError(err));
 						else this.#restoreAfterDisconnect();
 					}
 				});
@@ -979,7 +979,7 @@ export class CollabGuestLink {
 			this.#replicaLease = undefined;
 		}
 		if (this.#ctx.collabGuest !== this) return false;
-		this.#ctx.collabGuest = undefined;
+		this.#ctx.setCollabGuest(undefined);
 		this.#ctx.syncRunningSubagentBadge();
 		return this.#replicaActivated;
 	}

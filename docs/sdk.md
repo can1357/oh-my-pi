@@ -58,6 +58,10 @@ unsubscribe();
 await session.dispose();
 ```
 
+## Process shutdown
+
+Importing the SDK installs no signal or fatal-error handlers; the host owns its process lifecycle. OMP's registered cleanup still runs when the process exits. To run it earlier in an asynchronous shutdown, call `postmortem.cleanup()` from `@oh-my-pi/pi-utils` after disposing sessions.
+
 ## What `createAgentSession()` discovers by default
 
 `createAgentSession()` follows “provide to override, omit to discover”.
