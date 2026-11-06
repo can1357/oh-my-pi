@@ -18,11 +18,19 @@ function definition(id: string, overrides: Partial<TodoBackendDefinition> = {}):
 }
 
 describe("TodoBackendRegistry", () => {
-	test("rejects a duplicate id and names the id and the first registrant", () => {
-		const registry = new TodoBackendRegistry();
-		registry.register(definition("tracker"), "ext-first");
-		expect(() => registry.register(definition("tracker"), "ext-second")).toThrow(/"tracker".*ext-first/);
-		expect(registry.list()).toHaveLength(1);
+	test("an extension reusing a taken id keeps its other registrations; the first backend stays", async () => {
+		const runtime = new ExtensionRuntime();
+		const load = (factory: ExtensionFactory, name: string) =>
+			loadExtensionFromFactory(factory, process.cwd(), new EventBus(), runtime, name);
+		await load(pi => pi.registerTodoBackend({ id: "tracker", label: "First", create: () => noopBackend }), "a");
+
+		const second = await load(pi => {
+			pi.registerTodoBackend({ id: "tracker", label: "Second", create: () => noopBackend });
+			pi.registerCommand("second-cmd", { handler: async () => {} });
+		}, "b");
+
+		expect(second.commands.has("second-cmd")).toBe(true);
+		expect(runtime.todoBackends.list().map(entry => entry.definition.label)).toEqual(["First"]);
 	});
 
 	test("rejects an empty id, an empty label and a non-function create", () => {

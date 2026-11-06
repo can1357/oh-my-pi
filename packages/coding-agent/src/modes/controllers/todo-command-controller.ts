@@ -1,11 +1,5 @@
 import * as fs from "node:fs/promises";
-import {
-	applyOpsToPhases,
-	getLatestTodoPhasesFromEntries,
-	markdownToPhases,
-	phasesToMarkdown,
-	resolveTodoMarkdownPath,
-} from "../../tools/todo";
+import { applyOpsToPhases, markdownToPhases, phasesToMarkdown, resolveTodoMarkdownPath } from "../../tools/todo";
 import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { copyToClipboard } from "../../utils/clipboard";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
@@ -136,16 +130,6 @@ type TodoPlan = { phases: TodoPhase[]; action: string; status: string; removed?:
 export class TodoCommandController {
 	constructor(private readonly ctx: InteractiveModeContext) {}
 
-	/**
-	 * True latest todo state for the user-facing /todo verbs. Reads from session
-	 * entries or falls back to the active session state.
-	 */
-	#currentPhases(): TodoPhase[] {
-		const fromEntries = getLatestTodoPhasesFromEntries(this.ctx.sessionManager.getBranch());
-		if (fromEntries.length > 0) return fromEntries;
-		return this.ctx.session.getTodoPhases();
-	}
-
 	async handleTodoCommand(args: string): Promise<void> {
 		const trimmed = args.trim();
 		if (!trimmed) {
@@ -201,7 +185,7 @@ export class TodoCommandController {
 	}
 
 	#showCurrent(): void {
-		const phases = this.#currentPhases();
+		const phases = this.ctx.session.getTodoPhases();
 		if (phases.length === 0) {
 			this.ctx.showStatus("No todos. Use /todo append <task> to start one.");
 			return;
@@ -210,7 +194,7 @@ export class TodoCommandController {
 	}
 
 	#copyMarkdown(): void {
-		const phases = this.#currentPhases();
+		const phases = this.ctx.session.getTodoPhases();
 		if (phases.length === 0) {
 			this.ctx.showWarning("No todos to copy.");
 			return;
@@ -228,7 +212,7 @@ export class TodoCommandController {
 	}
 
 	async #exportToFile(rest: string): Promise<void> {
-		const phases = this.#currentPhases();
+		const phases = this.ctx.session.getTodoPhases();
 		if (phases.length === 0) {
 			this.ctx.showWarning("No todos to export.");
 			return;
@@ -412,7 +396,7 @@ export class TodoCommandController {
 			return;
 		}
 
-		const current = this.#currentPhases();
+		const current = this.ctx.session.getTodoPhases();
 		const initialMarkdown =
 			current.length > 0 ? phasesToMarkdown(current) : "# Todos\n- [ ] (replace this with your tasks)\n";
 

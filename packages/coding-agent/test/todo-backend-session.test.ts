@@ -545,11 +545,15 @@ export default function(pi) {
 		expect(result.details).toMatchObject({ op: "append", phases: before });
 		expect(heldSignal.aborted).toBe(true);
 
-		// The aborted apply has not returned, yet the next write runs and carries the full list.
+		// The aborted apply has not returned, yet the next write runs. The backend may still apply
+		// "ghost", so it first gets the committed list, then the next op.
 		recorder.beforeApply = undefined;
+		const callsBefore = recorder.calls.length;
 		await todo(session, { op: "append", phase: "Tasks", items: ["real"] });
-		const lastApply = recorder.calls.filter(call => call.method === "apply").at(-1);
-		expect(contentsOf(lastApply?.phases ?? [])).toEqual(["base", "real"]);
+		expect(recorder.calls.slice(callsBefore).map(call => [call.method, contentsOf(call.phases)])).toEqual([
+			["replace", ["base"]],
+			["apply", ["base", "real"]],
+		]);
 		expect(taskContents(session)).toEqual(["base", "real"]);
 
 		gate.release.resolve();

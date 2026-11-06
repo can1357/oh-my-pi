@@ -1103,6 +1103,8 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		commit(current => current, { mirrored: true }).then(
 			committed => {
 				const phases = committed ?? [];
+				// Timing-dependent: this rewrite is what gets saved only while the agent loop has not
+				// persisted `result` yet (it does so after the stream ends); later, the entry above wins.
 				result.content = [
 					{
 						type: "text",

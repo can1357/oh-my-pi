@@ -1,4 +1,5 @@
 import { sanitizeDisplayLine } from "@oh-my-pi/pi-tui/overlays/extensions/display-text";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { TodoOperation, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import type { ExtensionContext } from "../extensibility/extensions/types";
 import { errorMessage } from "../slash-commands/helpers/parse";
@@ -41,8 +42,10 @@ export type TodoOp = TodoOperation;
  *
  * `apply` and `replace` get the extension handler budget (30 s). When it runs out, or the user
  * aborts the `todo` call, omp aborts `signal`, fails the call with the list unchanged and stops
- * waiting: the next call can then start while one that ignores `signal` is still running. A
- * `create` that runs out of the same budget falls back to native todos.
+ * waiting: the next call can then start while one that ignores `signal` is still running. After a
+ * call that failed, timed out or whose write did not commit, omp calls `replace` with the
+ * committed list before the next `apply`. A `create` that runs out of the same budget falls back
+ * to native todos.
  */
 export interface TodoBackend {
 	/**
@@ -52,8 +55,9 @@ export interface TodoBackend {
 	apply(op: TodoOp, params: TodoBackendParams, next: TodoPhase[], signal: AbortSignal): Promise<void>;
 	/**
 	 * Called for edits made outside the `todo` tool, where a throw refuses the edit and leaves the list
-	 * unchanged; and after the list was reset or reloaded (`/new`, a session switch, rewind, tree
-	 * navigation, a fork from a message), where the list is already in place and a throw only warns.
+	 * unchanged; after the list was reset or reloaded (`/new`, a session switch, rewind, tree
+	 * navigation, a fork from a message), where the list is already in place and a throw only warns;
+	 * and before an `apply` that follows a lost call (see above).
 	 */
 	replace(phases: TodoPhase[], signal: AbortSignal): Promise<void>;
 }
@@ -61,13 +65,18 @@ export interface TodoBackend {
 /** Registration payload for `pi.registerTodoBackend()`. */
 export interface TodoBackendDefinition {
 	/**
-	 * Value users put in the `todo.backend` setting. Must not be `native`; `register` rejects a duplicate.
+	 * Value users put in the `todo.backend` setting. Must not be `native`; an id already registered by
+	 * another extension is skipped with a warning.
 	 */
 	id: string;
 	/** Human-readable name. */
 	label: string;
 	description?: string;
-	/** Builds the backend for the main session. A throw makes omp fall back to native todos. */
+	/**
+	 * Builds the backend for the main session. A throw makes omp fall back to native todos. Can run
+	 * several times per session (each switch to this backend, and after its extension is disabled
+	 * and re-enabled); omp drops the previous instance without notice.
+	 */
 	create(ctx: ExtensionContext): TodoBackend | Promise<TodoBackend>;
 }
 
@@ -117,6 +126,11 @@ export interface TodoBackendRegistration {
 export class TodoBackendRegistry {
 	readonly #byId = new Map<string, TodoBackendRegistration>();
 
+	/**
+	 * Add a backend. A malformed definition or the reserved `native` id throws; an id already taken
+	 * is skipped with a warning, so the second extension keeps its other registrations (as with
+	 * conflicting commands and shortcuts).
+	 */
 	register(definition: TodoBackendDefinition, sourceId: string): void {
 		const id: unknown = definition.id;
 		if (typeof id !== "string" || id.trim() === "") {
@@ -133,7 +147,12 @@ export class TodoBackendRegistry {
 		}
 		const existing = this.#byId.get(id);
 		if (existing) {
-			throw new Error(`Todo backend "${id}" from ${sourceId} is already registered by ${existing.sourceId}`);
+			logger.warn("Todo backend id already registered; skipping", {
+				id,
+				extensionPath: sourceId,
+				existingExtensionPath: existing.sourceId,
+			});
+			return;
 		}
 		this.#byId.set(id, { definition, sourceId });
 	}

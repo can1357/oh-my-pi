@@ -2220,7 +2220,10 @@ export interface ExtensionAPI {
 	 *
 	 * omp applies each `todo` op natively, then calls `apply` before committing; the transcript
 	 * stays the source of truth. Users select it with the `todo.backend` setting. `native` is
-	 * reserved and duplicate ids throw. Main session only.
+	 * reserved and throws; an id another extension already registered is skipped with a warning.
+	 * `create` can run several times per session (each switch to the backend, and after its
+	 * extension is disabled and re-enabled); omp drops the previous instance without notice. Main
+	 * session only.
 	 */
 	registerTodoBackend(definition: TodoBackendDefinition): void;
 

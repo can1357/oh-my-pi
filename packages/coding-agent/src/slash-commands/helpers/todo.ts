@@ -1,11 +1,5 @@
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
-import {
-	applyOpsToPhases,
-	getLatestTodoPhasesFromEntries,
-	markdownToPhases,
-	phasesToMarkdown,
-	resolveTodoMarkdownPath,
-} from "../../tools/todo";
+import { applyOpsToPhases, markdownToPhases, phasesToMarkdown, resolveTodoMarkdownPath } from "../../tools/todo";
 import { commitTodoEdit } from "../../session/todo-writes";
 import type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime } from "../types";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./parse";
@@ -90,11 +84,6 @@ function findTaskFuzzy(phases: TodoPhase[], query: string): TodoTaskMatch | unde
 	return undefined;
 }
 
-function currentPhases(runtime: SlashCommandRuntime): TodoPhase[] {
-	const fromEntries = getLatestTodoPhasesFromEntries(runtime.sessionManager.getBranch());
-	return fromEntries.length > 0 ? fromEntries : runtime.session.getTodoPhases();
-}
-
 type TodoEdit = { phases: TodoPhase[]; message: string } | { error: string };
 
 /** Runs `compute` inside the session's queued commit (see {@link commitTodoEdit}), then reports the outcome. */
@@ -125,14 +114,14 @@ const TODO_HELP_TEXT = [
 ].join("\n");
 
 async function handleTodoCopyCommand(runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
-	const phases = currentPhases(runtime);
+	const phases = runtime.session.getTodoPhases();
 	const markdown = phases.length === 0 ? "" : phasesToMarkdown(phases).trimEnd();
 	await runtime.output(`Copy not available in ACP mode; printing instead:\n\n${markdown || "No todos."}`);
 	return commandConsumed();
 }
 
 async function handleTodoExportCommand(restArgs: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
-	const phases = currentPhases(runtime);
+	const phases = runtime.session.getTodoPhases();
 	if (phases.length === 0) {
 		await runtime.output("No todos to export.");
 		return commandConsumed();
@@ -252,7 +241,7 @@ export async function handleTodoAcp(
 ): Promise<SlashCommandResult> {
 	const trimmed = command.args.trim();
 	if (!trimmed) {
-		const phases = currentPhases(runtime);
+		const phases = runtime.session.getTodoPhases();
 		await runtime.output(
 			phases.length === 0 ? "No todos. Use /todo append <task> to start one." : phasesToMarkdown(phases).trimEnd(),
 		);

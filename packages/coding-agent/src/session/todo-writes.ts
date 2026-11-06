@@ -96,7 +96,7 @@ export class TodoWrites {
 		if (this.#armed || !runner) return;
 		this.#armed = true;
 		cfgTodoBackend.listen(this.#host, () => this.#observeSetting());
-		runner.onSuspensionChange(() => this.#observeSetting());
+		this.#host.addDisposer?.(runner.onSuspensionChange(() => this.#observeSetting()));
 	}
 
 	/**
@@ -322,12 +322,25 @@ export class TodoWrites {
 			if (!backend || typeof backend.apply !== "function" || typeof backend.replace !== "function") {
 				throw new Error("create() did not return an object with apply() and replace()");
 			}
+			const todo = this.#host.todo;
+			// The list the backend was last sent, recorded before each call. A call omp stopped waiting
+			// for, or one whose write did not commit, leaves it different from the committed list; the
+			// next `apply` then sends `replace` with the committed list first. It starts at the
+			// committed list, so switching backends does not copy the list.
+			let sent = todo.phases;
+			const replace = (phases: TodoPhase[], signal: AbortSignal | undefined) => {
+				sent = todo.clonePhases(phases);
+				return runner.runTodoBackendCall(backendSignal => backend.replace(phases, backendSignal), signal);
+			};
 			this.#active = {
 				label: sanitizeTodoBackendText(definition.label),
-				apply: (op, params, next, signal) =>
-					runner.runTodoBackendCall(backendSignal => backend.apply(op, params, next, backendSignal), signal),
-				replace: (phases, signal) =>
-					runner.runTodoBackendCall(backendSignal => backend.replace(phases, backendSignal), signal),
+				apply: async (op, params, next, signal) => {
+					const committed = todo.phases;
+					if (!Bun.deepEquals(sent, committed)) await replace(committed, signal);
+					sent = todo.clonePhases(next);
+					await runner.runTodoBackendCall(backendSignal => backend.apply(op, params, next, backendSignal), signal);
+				},
+				replace,
 			};
 		} catch (error) {
 			const message = sanitizeTodoBackendText(error);

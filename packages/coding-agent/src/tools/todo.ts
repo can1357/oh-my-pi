@@ -744,10 +744,11 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 	): Promise<AgentToolResult<TodoToolDetails>> {
 		// Compute → backend apply → commit runs as one write: inline with native todos, one queued unit
 		// with a backend, so concurrent writes and backend switches cannot interleave with it.
-		const run = this.session.runTodoWrite;
-		if (!run) return this.#write(params, undefined, undefined, signal);
+		if (!this.session.runTodoWrite) return this.#write(params, undefined, undefined, signal);
 		try {
-			return await run((active, guard) => this.#write(params, active, guard, signal), { signal });
+			return await this.session.runTodoWrite((active, guard) => this.#write(params, active, guard, signal), {
+				signal,
+			});
 		} catch (error) {
 			// The queued write can no longer commit, and its backend call (if any) saw the same abort.
 			if (signal?.aborted) return this.#abortedResult(params);
