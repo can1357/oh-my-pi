@@ -60,7 +60,7 @@ The wire schema is shape-swapped by `task.batch` (default on). One unit of work 
 
 There is no wire label field: the one-line UI label shown in the TUI/registry is generated automatically from the `task` text by the tiny/title model (fire-and-forget), so callers never provide it.
 
-With `task.file=true`, an item may name its instructions by file instead: `{ "name": "Implement", "taskFile": "local://implementation-prompt.md", "solutionSpace": "…" }`. The file is read once at dispatch and formatted exactly like inline `task` text, except that JSON escape repair never touches it. Recorded tool-call arguments keep the submitted path.
+With `task.file=true`, an item may name its instructions by file instead: `{ "name": "Implement", "taskFile": "local://implementation-prompt.md", "solutionSpace": "…" }`. The file is read once at dispatch and placed in the subagent prompt exactly like inline `task` text, except that JSON escape repair never touches it. Both are trimmed and get LF line endings; interior whitespace (blank lines, Markdown hard breaks, table padding) is kept. Recorded tool-call arguments keep the submitted path.
 
 Restricted folders cover task files as well as the working directory. `always-ask-cached` never remembers a task approval per file: a grant on the path would cover whatever the file holds later. Approval dialogs list every batch file path, and pending task cards show the shortened path.
 
