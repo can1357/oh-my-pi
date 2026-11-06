@@ -238,9 +238,10 @@ describe("settling the output pump before the terminal is handed back", () => {
 		pump.catchUp();
 
 		expect(pump.discards).toBe(1);
-		const resetAt = pump.delivered.indexOf(SETTLE_RESET);
-		expect(resetAt).toBeGreaterThan(-1);
-		expect(pump.delivered[resetAt + 1]).toContain(ALT_SCREEN_EXIT);
+		// The terminal may coalesce the reset with the exit that follows it into
+		// one write, so order in the delivered bytes is the contract, not which
+		// write carried them.
+		expect(positionsInOrder(pump.stream, [SETTLE_RESET, ALT_SCREEN_EXIT])).not.toContain(-1);
 	});
 
 	it("keeps the keyboard-protocol pop that drainInput queues after its own discard", async () => {
@@ -457,6 +458,6 @@ describe("ProcessTerminal output encoding", () => {
 		// The stream fallback, used without a pump, sends the same text.
 		harness = createProcessTerminalRenderHarness(80, 24);
 		harness.terminal.write("[a\uD800b]");
-		expect(harness.writes).toContain("[a\uFFFDb]");
+		expect(harness.writes.join("")).toContain("[a\uFFFDb]");
 	});
 });

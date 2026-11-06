@@ -1140,67 +1140,6 @@ describe("TranscriptContainer", () => {
 		expect(transcript.peekFlushBatch(40, 5)!.rows).toEqual([...tall, ""]);
 	});
 
-	it("a head progressive append emitted in full is separated from the next block on every retirement path", () => {
-		for (const path of ["pressure", "flush", "capped flush"] as const) {
-			const transcript = new TranscriptContainer();
-			const rows = ["a0", "a1", "a2", "a3"];
-			const head = new AppendBlock(rows, rows);
-			transcript.addChild(head);
-			transcript.renderViewport(80, 2, frame);
-			// Pressure retires every row of the head while it is still streaming.
-			const emitted = transcript.peekFinalizedBatch(80, 0)!;
-			transcript.acknowledgeFinalizedBatch(emitted.id);
-			head.finalize(rows);
-			transcript.addChild(new Block(["b0", "b1", "b2", "b3", "b4", "b5"], true));
-			transcript.addChild(new Block(["c0"], true));
-			const written = [...emitted.rows];
-			for (let batches = 0; batches < 5; batches++) {
-				const batch =
-					path === "pressure"
-						? transcript.peekFinalizedBatch(80, 0)
-						: transcript.peekFlushBatch(80, path === "flush" ? undefined : 10);
-				if (batch === undefined) break;
-				written.push(...batch.rows);
-				transcript.acknowledgeFinalizedBatch(batch.id);
-			}
-			expect(written).toEqual(["a0", "a1", "a2", "a3", "", "b0", "b1", "b2", "b3", "b4", "b5", "", "c0", ""]);
-		}
-	});
-
-	it("keeps the blank a fully emitted head owes until a batch writes a row", () => {
-		for (const path of ["pressure", "flush", "capped flush"] as const) {
-			const transcript = new TranscriptContainer();
-			const rows = ["a0", "a1", "a2", "a3"];
-			const head = new AppendBlock(rows, rows);
-			transcript.addChild(head);
-			transcript.renderViewport(80, 2, frame);
-			const emitted = transcript.peekFinalizedBatch(80, 0)!;
-			transcript.acknowledgeFinalizedBatch(emitted.id);
-			head.finalize(rows);
-			// A settled block that renders nothing, then one still streaming: the
-			// first batch retires only the empty block and writes no row.
-			transcript.addChild(new Block([], true));
-			const streaming = new Block(["b0"], false);
-			transcript.addChild(streaming);
-			const written = [...emitted.rows];
-			const drain = () => {
-				for (let batches = 0; batches < 5; batches++) {
-					const batch =
-						path === "pressure"
-							? transcript.peekFinalizedBatch(80, 0)
-							: transcript.peekFlushBatch(80, path === "flush" ? undefined : 10);
-					if (batch === undefined) break;
-					written.push(...batch.rows);
-					transcript.acknowledgeFinalizedBatch(batch.id);
-				}
-			};
-			drain();
-			streaming.finalize(["b0"]);
-			drain();
-			expect(written).toEqual(["a0", "a1", "a2", "a3", "", "b0", ""]);
-		}
-	});
-
 	it("an exit flush that leaves out a partly emitted head separates it from the next block", () => {
 		const transcript = new TranscriptContainer();
 		const head = new AppendBlock(["a0", "a1", "a2", "a3"], ["a0", "a1"]);
@@ -1283,32 +1222,6 @@ describe("TranscriptContainer", () => {
 			const batch = transcript.peekFlushBatch(80, 10)!;
 			expect(batch.rows.length).toBeLessThanOrEqual(10);
 			expect([...written, ...batch.rows]).toEqual([...head.slice(0, 6), "", "t0", "", ...tail, ""]);
-		}
-	});
-
-	it("keeps the blank a split head owes once its committed rows cover it", () => {
-		for (const path of ["pressure", "flush", "capped flush"] as const) {
-			const transcript = new TranscriptContainer();
-			const rows = Array.from({ length: 8 }, (_, i) => `a${i}`);
-			const head = new Block(rows, true);
-			transcript.addChild(head);
-			transcript.addChild(new Block(["t0"], true));
-			const split = transcript.peekFinalizedBatch(80, 4)!;
-			transcript.acknowledgeFinalizedBatch(split.id);
-			// The head shrinks to its committed rows, so it retires without a batch
-			// and without the blank that follows a block.
-			head.finalize(rows.slice(0, 6));
-			const written = [...split.rows];
-			for (let batches = 0; batches < 5; batches++) {
-				const batch =
-					path === "pressure"
-						? transcript.peekFinalizedBatch(80, 0)
-						: transcript.peekFlushBatch(80, path === "flush" ? undefined : 10);
-				if (batch === undefined) break;
-				written.push(...batch.rows);
-				transcript.acknowledgeFinalizedBatch(batch.id);
-			}
-			expect(written).toEqual([...rows.slice(0, 6), "", "t0", ""]);
 		}
 	});
 

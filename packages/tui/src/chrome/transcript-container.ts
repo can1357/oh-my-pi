@@ -1093,7 +1093,7 @@ export class TranscriptContainer extends Container {
 				start,
 				end,
 				width,
-				this.#historyEnd,
+				this.#aboveBatchStart(start),
 				policy === "flush" ? undefined : RETIREMENT_BUDGET_MS,
 			);
 			rows = retirement.rows;
@@ -1544,6 +1544,21 @@ export class TranscriptContainer extends Container {
 	}
 
 	/**
+	 * What history ends with just before a batch starting at `start`. A batch
+	 * that continues the frontier head's own rows picks up where they left off
+	 * ({@link #historyEnd}); one that starts past the head leaves the head's
+	 * committed or emitted rows as the last thing in scrollback, so it owes them
+	 * the separator they would otherwise never get and the two blocks would run
+	 * together.
+	 */
+	#aboveBatchStart(start: number): RowsAbove {
+		if (start <= this.#frontier) return this.#historyEnd;
+		const head = this.#entries[this.#frontier];
+		if (head === undefined || (head.split === undefined && head.emitted === 0)) return this.#historyEnd;
+		return isCompact(head.component);
+	}
+
+	/**
 	 * Where a capped flush of `[frontier, end)` starts: at the oldest block from
 	 * which every block through `end`, with the separators between them and the
 	 * one the batch opens with, fits in `maxRows` rows. The batch never starts
@@ -1565,10 +1580,12 @@ export class TranscriptContainer extends Container {
 			const height = this.#liveBlock(entry, index, width).rows.length;
 			if (height === 0) continue;
 			const compact = isCompact(entry.component);
-			const added = height + (below === undefined ? 0 : separatorRows(compact, below));
+			// The newest block brings the blank that closes the batch; every older
+			// one brings the separator between it and the block below it.
+			const added = height + (below === undefined ? 1 : separatorRows(compact, below));
 			// As the oldest block of the batch it also brings the blank the batch
-			// opens with, which history's own end decides.
-			const lead = separatorRows(this.#historyEnd, compact);
+			// opens with, which what history ends with decides.
+			const lead = separatorRows(this.#aboveBatchStart(index), compact);
 			if (below !== undefined && rows + added + lead > maxRows) return index + 1;
 			rows += added;
 			below = compact;
