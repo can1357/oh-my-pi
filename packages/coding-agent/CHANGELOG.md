@@ -32,6 +32,8 @@
 - Fixed collaboration input disappearing when the local relay queue refuses admission during join, leave, closure, or overload. Reconnect backlogs remain supported; admitted prompts are not automatically replayed after later transport errors, and rejected batches return in submission order. Refused detached host-only builtins retain their images and links beside newer drafts ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed queued prompts and attachments disappearing when compaction or a session change cancels credential lookup beside a newer draft; cancellation recovery no longer clears a newer submission's UI ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed ovnfs searches ignoring cancellation while waiting for the daemon handshake, without cancelling other callers sharing the connection ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- Fixed the session crashing with `Native shell returned an invalid execution trace` when a bash command assigned a long value containing multi-byte characters such as Chinese text ([#18259](https://github.com/can1357/oh-my-pi/issues/18259))
+- `grep -e` and `rg -e` in the bash tool accept patterns that start with `-` (e.g. `grep -e "--canary"`) instead of failing with an unknown-option error.
 
 ## [18.17.0] - 2026-11-06
 
