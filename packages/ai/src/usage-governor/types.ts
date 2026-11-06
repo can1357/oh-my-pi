@@ -5,6 +5,12 @@ export type UsageRequestSource = "turn" | "side" | "advisor" | "background" | "s
 export interface UsageRequestContext {
 	/** Assigned model role (`default`, `task`, ...); undefined when unknown. */
 	role?: string;
+	/** The session whose authorized routes are used for cross-role protection. */
+	routingScopeId?: string;
+	/** Revision of the routing scope used for this request. */
+	routingRevision?: number;
+	/** Routing role, which may differ from the display role for subagents. */
+	routingRole?: string;
 	source: UsageRequestSource;
 	/** A person is waiting on this request in the foreground. */
 	interactive?: boolean;
@@ -19,6 +25,8 @@ export interface UsageGovernorConfig {
 	lead: number;
 	/** `hold`: interactive requests keep the reserve. `spend`: they may use it. */
 	interactiveReserve: "hold" | "spend";
+	/** Prefer independent included routes for roles with more verified alternatives. */
+	roleProtection?: "off" | "prefer-alternatives";
 }
 
 /** One send about to be made. */
@@ -57,6 +65,55 @@ export interface UsageAdmission {
 }
 
 export type UsageWindowState = "open" | "paced" | "closed" | "stale" | "unknown";
+
+/** One already-authorized model route, preserving routed selector and effort. */
+export interface UsageRouteTarget {
+	selector: string;
+	provider: string;
+	modelId: string;
+	baseUrl?: string;
+}
+
+/** The routes belonging to a single role. */
+export interface UsageRoleRoutePlan {
+	role: string;
+	targets: readonly UsageRouteTarget[];
+}
+
+/** A session's effective role routes, revised when settings or registry change. */
+export interface UsageRoutingScope {
+	id: string;
+	revision: number;
+	roles: readonly UsageRoleRoutePlan[];
+}
+
+/** Request to evaluate a role's already-authorized routes without resolving a bearer. */
+export interface UsageRouteEvaluationRequest {
+	scopeId: string;
+	revision: number;
+	role: string;
+	sessionId: string;
+	targets: readonly UsageRouteTarget[];
+}
+
+/** Known account state for one candidate; unknown facts never establish capacity. */
+export interface UsageRouteAccountEvaluation {
+	selector: string;
+	credentialId: number;
+	eligibility: "eligible" | "ineligible" | "unknown";
+	allowance: "included" | "spent" | "unknown";
+	quotaKeys: readonly string[];
+	state: UsageWindowState;
+	admissibleAtMs?: number;
+	protectedFor: readonly string[];
+	resetTieBreakExpiresAtMs?: number;
+}
+
+export interface UsageRouteEvaluation {
+	scopeId: string;
+	revision: number;
+	accounts: readonly UsageRouteAccountEvaluation[];
+}
 
 export interface UsageGovernorBankedResets {
 	available: number;
@@ -126,6 +183,11 @@ export type UsageGovernorEvent =
 /** `AuthStorage.governor`. */
 export interface GovernorApi extends UsageAdmission {
 	readonly config: UsageGovernorConfig;
+	/** Replace one session's effective routing scope. */
+	setRoutingScope(scope: UsageRoutingScope): void;
+	removeRoutingScope(scopeId: string): void;
+	/** Evaluate cached data only; never fetch, rotate, redeem, or mark limits. */
+	evaluateRoutes(request: UsageRouteEvaluationRequest, signal?: AbortSignal): Promise<UsageRouteEvaluation>;
 	configure(config: UsageGovernorConfig): void;
 	/** Read-only: no network, no credential mutation, no pool reload. */
 	status(options?: { provider?: string; waitLimit?: number }): UsageGovernorStatus;
