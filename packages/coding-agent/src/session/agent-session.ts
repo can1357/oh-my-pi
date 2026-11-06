@@ -259,7 +259,6 @@ import {
 	resumeComputerUseForOwner,
 	revokeComputerControlForOwner,
 } from "../tools/computer/supervisor";
-import { isAutoQaEnabled } from "../tools/report-tool-issue";
 import {
 	buildResolveReminderMessage,
 	isPreviewResolutionToolCall,
@@ -592,8 +591,6 @@ import {
 	cfgArchiveEnabled,
 	cfgComputerEnabled,
 	cfgRatchetEnabled,
-	cfgDevAutoqa,
-	cfgDevAutoqaConsent,
 	cfgTodoEnabled,
 	cfgToolsApproval,
 } from "../tools/settings";
@@ -605,11 +602,9 @@ const cfgAdvisorRuntimeInputs = combine({
 	maxNotesPerUpdate: cfgAdvisorMaxNotesPerUpdate,
 	tier: cfgTierAdvisor,
 });
-/** Settings behind the session's extra workspace roots and the auto-QA prompt note. */
+/** Settings behind the session's extra workspace roots. */
 const cfgWorkspacePromptInputs = combine({
 	additionalDirectories: cfgWorkspaceAdditionalDirectories,
-	autoqa: cfgDevAutoqa,
-	autoqaConsent: cfgDevAutoqaConsent,
 });
 
 const PLAN_MODE_REMINDER_MAX = 3;
@@ -1091,8 +1086,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#exitRecorded = false;
 	/** Last observed `workspace.additionalDirectories`, diffed on change to add/remove only settings-seeded roots. */
 	#settingsWorkspaceDirectories: readonly string[] = [];
-	/** Last observed auto-QA gate; the system prompt advertises `xd://report_issue` only while it holds. */
-	#autoQaEnabled = false;
 	/** Teardowns registered via {@link addDisposer} (including settings listeners bound to this session); drained on dispose. */
 	#disposers: Array<() => void> = [];
 	/** Idle recap and idle compaction, once the owner opts in via {@link enableIdleMaintenance}. */
@@ -3247,7 +3240,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Keeps workspace roots, the auto-QA prompt note, and the held power assertion in step with live settings. */
 	#watchWorkspaceAndPowerSettings(): void {
 		this.#settingsWorkspaceDirectories = cfgWorkspaceAdditionalDirectories.get(this.settings);
-		this.#autoQaEnabled = isAutoQaEnabled(this.settings);
 		cfgPowerSleepPrevention.listen(this, () => {
 			// Swap the held assertion for the new mode mid-prompt; idle sessions
 			// pick the mode up when the next prompt begins.
@@ -3257,10 +3249,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		});
 		cfgWorkspacePromptInputs.listen(this, async () => {
 			const rootsChanged = await this.#syncSettingsWorkspaceDirectories();
-			const autoQaEnabled = isAutoQaEnabled(this.settings);
-			const autoQaChanged = autoQaEnabled !== this.#autoQaEnabled;
-			this.#autoQaEnabled = autoQaEnabled;
-			if ((rootsChanged || autoQaChanged) && !this.#isDisposed) await this.refreshBaseSystemPrompt();
+			if (rootsChanged && !this.#isDisposed) await this.refreshBaseSystemPrompt();
 		});
 	}
 

@@ -83,10 +83,6 @@ export const findHelp = {
 
 export const grepHelp = { description: "Test grep tool" } satisfies CommandMetadata;
 
-export const grievancesHelp = {
-	description: "View, clean, or push reported tool issues (auto-QA grievances)",
-} satisfies CommandMetadata;
-
 export const loginHelp = {
 	description: "Log in to a model provider (terminal counterpart of /login)",
 } satisfies CommandMetadata;

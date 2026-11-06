@@ -14,7 +14,6 @@ describe("credential settings", () => {
 			"auth.broker.token",
 			"searxng.token",
 			"searxng.basicPassword",
-			"dev.autoqaPush.token",
 			"hindsight.apiToken",
 		] as const) {
 			expect(lookup(path)?.isCredential).toBe(true);
@@ -57,7 +56,7 @@ describe("credential masking reaches every surface", () => {
 	});
 
 	it("keeps credentials with no panel entry out of the panel entirely", () => {
-		for (const path of ["auth.broker.token", "searxng.token", "dev.autoqaPush.token"] as const) {
+		for (const path of ["auth.broker.token", "searxng.token"] as const) {
 			expect(getSettingDef(createSettingsHost().entries, path)).toBeUndefined();
 		}
 	});

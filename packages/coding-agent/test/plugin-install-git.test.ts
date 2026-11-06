@@ -9,8 +9,7 @@
  * `PluginManager.install` end-to-end without hitting the network.
  *
  * `vi.spyOn` + `vi.restoreAllMocks()` is the same pattern used by
- * `test/tools/report-tool-issue.test.ts` (which spies on
- * `piUtils.getInstallId`), so we know namespace spying on `pi-utils` exports
+ * `test/git-process-config.test.ts`, so we know namespace spying on `pi-utils` exports
  * propagates through to consumers of the barrel re-exports. The
  * `vi.spyOn(Bun, "spawn")` mock follows `test/git-process-config.test.ts`.
  */

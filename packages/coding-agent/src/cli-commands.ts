@@ -140,11 +140,6 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.gitHelp,
 	},
 	{
-		name: "grievances",
-		load: () => import("./commands/grievances").then(m => m.default),
-		help: commandHelp.grievancesHelp,
-	},
-	{
 		name: "images",
 		load: () => import("./commands/images").then(m => m.default),
 		aliases: ["img"],

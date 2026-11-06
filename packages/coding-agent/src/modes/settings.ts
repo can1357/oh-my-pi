@@ -1257,12 +1257,13 @@ export const cfgStartupSetupWizard = register({
 export const cfgStartupCheckUpdate = register({
 	id: "startup.checkUpdate",
 	type: "boolean",
-	default: true,
+	default: false,
 	ui: {
 		tab: "interaction",
 		group: "Startup & Updates",
 		label: "Check for Updates",
-		description: "Check for omp updates on startup",
+		description:
+			"Check for omp updates on startup (fork: off by default — a check would recommend replacing this fork's binary with an upstream release)",
 	},
 });
 

@@ -62,11 +62,6 @@ import {
 	type XdevMountedRenderer,
 } from "./xdev";
 import { describeResolutionDeviceCall, isResolutionDeviceName, renderResolutionDeviceCall } from "./resolve";
-import {
-	describeReportIssueDeviceCall,
-	REPORT_ISSUE_DEVICE_NAME,
-	renderReportIssueDeviceCall,
-} from "./report-tool-issue";
 import { pendingFileLinkPath } from "./read";
 
 /** Details returned by the write tool for transcript rendering. */
@@ -622,7 +617,6 @@ export const writeToolRenderer = {
 			const pathSettled = args.content !== undefined;
 			if (!xdev?.name || !pathSettled) return undefined;
 			if (isResolutionDeviceName(xdev.name)) return renderResolutionDeviceCall(xdev.name, args.content, uiTheme);
-			if (xdev.name === REPORT_ISSUE_DEVICE_NAME) return renderReportIssueDeviceCall(args.content, uiTheme);
 			return renderXdevCall(xdev.name, args.content, options, uiTheme, options.renderContext?.resolveXdevMounted);
 		}
 		const filePath = sanitizeText(shortenPath(rawPath));
@@ -808,7 +802,6 @@ export const writeToolRenderer = {
 			const xdev = parseXdUrl(rawPath);
 			if (!xdev?.name || args.content === undefined) return undefined;
 			if (isResolutionDeviceName(xdev.name)) return describeResolutionDeviceCall(xdev.name, args.content);
-			if (xdev.name === REPORT_ISSUE_DEVICE_NAME) return describeReportIssueDeviceCall(args.content);
 			return describeXdevCall(xdev.name, args.content, options, options.renderContext?.resolveXdevMounted);
 		}
 		const content = normalizeDisplayText(args.content);

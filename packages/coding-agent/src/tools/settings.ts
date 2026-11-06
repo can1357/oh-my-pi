@@ -1072,59 +1072,6 @@ export const cfgToolsXdevNotices = register({
 	},
 });
 
-export const cfgDevAutoqa = register({
-	id: "dev.autoqa",
-	type: "boolean",
-	default: true,
-	env: "PI_AUTO_QA",
-	ui: {
-		tab: "tools",
-		group: "Developer",
-		label: "Auto QA",
-		description:
-			"Automated tool issue reporting (xd://report_issue). On by default; the first report asks for consent, and denying it disables reporting until re-enabled explicitly",
-	},
-});
-
-export const cfgDevAutoqaPushEndpoint = register({
-	id: "dev.autoqaPush.endpoint",
-	type: "string",
-	default: "https://qa.omp.sh/v1/grievances" as const,
-	ui: {
-		tab: "tools",
-		group: "Developer",
-		label: "Auto QA Push Endpoint",
-		description: "Full URL receiving Auto QA JSON reports (default https://qa.omp.sh/v1/grievances)",
-	},
-});
-
-export const cfgDevAutoqaPushToken = register({
-	id: "dev.autoqaPush.token",
-	type: "string",
-	default: undefined,
-	credential: true,
-});
-
-/**
- * User decision on sharing automatic `report_tool_issue` grievances.
- *
- *   - `"unset"`  — never asked; the first `report_tool_issue` invocation
- *                  pops a consent dialog and persists the answer here.
- *   - `"granted"` — record and (when push is configured) ship grievances.
- *   - `"denied"`  — silently no-op every `report_tool_issue` call.
- *
- * Owned by `packages/coding-agent/src/tools/report-tool-issue.ts` via the
- * process-global consent handler registered by `InteractiveMode`.
- *
- * @default "unset"
- */
-export const cfgDevAutoqaConsent = register({
-	id: "dev.autoqaConsent",
-	type: "enum",
-	values: ["unset", "granted", "denied"] as const,
-	default: "unset" as const,
-});
-
 /** Settings read by `resolveBuiltinToolPlan` (`tools/index.ts`); a live session reconciles its built-ins when any changes. */
 export const cfgBuiltinToolGates = combine({
 	ask: cfgAskEnabled,

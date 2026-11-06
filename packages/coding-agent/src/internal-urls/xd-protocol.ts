@@ -1,12 +1,10 @@
 import type { ToolApprovalDecision } from "@oh-my-pi/pi-agent-core";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import { REPORT_ISSUE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/report-tool-issue";
 import { isResolutionDeviceName } from "@oh-my-pi/pi-tui/tools/resolve";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { parseXdTopicUrl, parseXdUrl } from "@oh-my-pi/pi-tui/tools/xd-url";
 import type { ToolSession } from "../tools";
 import { resolveToolTier } from "../tools/approval";
-import { dispatchReportIssueDevice, reportIssueDeviceUsage } from "../tools/report-tool-issue";
 import { dispatchResolutionDevice, resolutionDeviceUsage } from "../tools/resolve";
 import { dispatchXdevTool, resolveXdevTool, xdevDocs, xdevListing } from "../tools/xdev";
 import type {
@@ -36,7 +34,6 @@ function deviceWriteTier(
 	try {
 		const target = parseXdUrl(url.rawHref ?? url.href);
 		const name = target?.name;
-		if (name === REPORT_ISSUE_DEVICE_NAME) return "write";
 		if (name && isResolutionDeviceName(name)) return "read";
 		const inst = name && session?.xdev ? resolveXdevTool(session.xdev, name) : undefined;
 		if (!name || !inst) return "exec";
@@ -81,10 +78,6 @@ export class XdProtocolHandler implements ProtocolHandler {
 		const session = context?.session;
 		if (!session) throw new ToolError(NOT_MOUNTED);
 		const { name } = target;
-		if (name === REPORT_ISSUE_DEVICE_NAME) {
-			const { result, xdev } = await dispatchReportIssueDevice(session, content);
-			return { content: result.content, details: { xdev }, isError: result.isError, useless: result.useless };
-		}
 		if (name && isResolutionDeviceName(name)) {
 			const { result, xdev } = await dispatchResolutionDevice(session, name, content);
 			return { content: result.content, details: { xdev }, isError: result.isError, useless: result.useless };
@@ -116,7 +109,6 @@ export class XdProtocolHandler implements ProtocolHandler {
 
 	/** `read xd://` listing, or one device's usage/docs. */
 	#usage(session: ToolSession, name: string | null): string {
-		if (name === REPORT_ISSUE_DEVICE_NAME) return reportIssueDeviceUsage();
 		if (name && isResolutionDeviceName(name)) return resolutionDeviceUsage(name);
 		const xdev = session.xdev;
 		if (!xdev) throw new ToolError(NOT_MOUNTED);

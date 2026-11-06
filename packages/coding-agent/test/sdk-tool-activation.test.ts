@@ -2209,28 +2209,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
-	it("renders report-issue guidance only for unrestricted sessions", async () => {
-		const normalDir = makeTempDir();
-		const restrictedDir = makeTempDir();
-		const { session: normal } = await createAgentSession({
-			...baseOptions(normalDir),
-			settings: Settings.isolated({ "dev.autoqa": true }),
-		});
-		const { session: restricted } = await createAgentSession({
-			...baseOptions(restrictedDir),
-			settings: Settings.isolated({ "dev.autoqa": true }),
-			toolNames: ["read"],
-			restrictToolNames: true,
-		});
-
-		try {
-			expect(normal.systemPrompt.join("\n")).toContain("xd://report_issue");
-			expect(restricted.systemPrompt.join("\n")).not.toContain("xd://report_issue");
-		} finally {
-			await Promise.all([normal.dispose(), restricted.dispose()]);
-		}
-	});
-
 	it("ignores an inherited MCP manager when MCP is disabled", async () => {
 		const tempDir = makeTempDir();
 		const inheritedManager = {

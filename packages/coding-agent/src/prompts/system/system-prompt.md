@@ -144,13 +144,6 @@ NEVER use `sed`|`perl`|`python` via `{{toolRefs.bash}}` to issue individual edit
 </critical>
 {{/has}}
 
-{{#if autoQaEnabled}}
-{{#has tools "write"}}
-<critical>
-`{{toolRefs.write}} xd://report_issue`: automated QA. Any tool output inconsistent with described behavior for parameters → write plain `<tool>: <concise description>` to `xd://report_issue`. False positives fine.
-</critical>
-{{/has}}
-{{/if}}
 
 # Exploration
 

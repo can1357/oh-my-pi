@@ -208,7 +208,6 @@ import {
 	TRUNCATE_LENGTHS,
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui/render/render-utils";
-import { setAutoQaConsentHandler } from "../tools/report-tool-issue";
 import { type CfgApproval, type CfgChangeRequest, setCfgApprovalHost } from "../internal-urls/cfg-protocol";
 import {
 	createTodoHudStateData,
@@ -2482,13 +2481,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		// FIRST and its dispose() would otherwise persist the generic "dispose".
 		this.#cleanupUnsubscribe = postmortem.register("session-teardown", reason => this.#signalTeardown!(reason));
 
-		// Wire the report_tool_issue consent gate to the Yes/No dialog popup.
-		// The handler is process-global — subagent tools (which can't reach
-		// `showHookSelector` on their own) resolve through this exact closure.
-		// `Settings.instance` is the disk-backed singleton; passing it explicitly
-		// guarantees the decision persists even when the prompt is triggered
-		// from a subagent whose own `Settings` is an in-memory snapshot.
-		setAutoQaConsentHandler(() => this.session.waitForUser(() => this.#promptAutoQaConsent()), Settings.instance);
 		// Same wiring for cfg:// writes: every settings change the agent makes is
 		// confirmed here, and `/save` persists to disk. Subagents and headless
 		// sessions are refused by the handler before reaching this host. Changes
@@ -8030,68 +8022,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/**
-	 * Pool of consent-prompt variants. Each entry is `[headline, reassurance]`;
-	 * the second line always promises the same scope (tool name + confusion
-	 * details, never personal data) so users learn what they're consenting to
-	 * even as the top line rotates.
-	 *
-	 * Kept in-module rather than i18n'd because the whole charm is the tone
-	 * — translations would need to preserve it deliberately, not auto-render.
-	 */
-	static #AUTOQA_CONSENT_PROMPTS: ReadonlyArray<readonly [string, string]> = [
-		[
-			"🧾 Your agent drafted a strongly worded letter to one of its tools.",
-			"Mail it to the devs? Just the tool name + the grievance, nothing personal.",
-		],
-		[
-			"🕵️ Your agent caught a tool acting suspicious.",
-			"Tip off the devs? Tool name + the evidence, no personal info.",
-		],
-		[
-			"👻 Your agent swears one of its tools is haunted.",
-			"Call in the devs for an exorcism? Tool name + the spooky bit, nothing personal.",
-		],
-		["🫖 Your agent has tea about a tool.", "Spill it to the devs? Tool name + the tea, never anything personal."],
-		[
-			"🦆 Your agent explained a tool to its rubber duck. The duck is also confused.",
-			"Escalate past the duck to the devs? Tool name + the confusion, no personal info.",
-		],
-		[
-			"📟 Your agent is asking to speak to a tool's manager.",
-			"Put the call through to the devs? Tool name + the complaint, nothing personal.",
-		],
-		[
-			"🧂 Your agent is extremely salty about a tool.",
-			"Let it salt the devs' inbox? Tool name + what soured it, no personal info.",
-		],
-		[
-			"🐛 Your agent found a bug. A real one. In a tool.",
-			"Hand the specimen to the devs? Tool name + where it crawled out, nothing personal.",
-		],
-		[
-			"🍿 Your agent just watched a tool pull a plot twist nobody asked for.",
-			"Send the devs a spoiler? Tool name + what happened, never anything personal.",
-		],
-		[
-			"📉 Your agent's opinion of a tool just crashed.",
-			"Send the post-mortem to the devs? Tool name + what tanked it, no personal info.",
-		],
-	];
-
-	/**
-	 * Show the report_tool_issue consent popup (mirrored to writable `/collab` guests)
-	 * and return the user's decision.
-	 * Invoked by the process-global consent handler the tool dispatches to;
-	 * subagent invocations bubble up here through the shared module state.
-	 */
-	async #promptAutoQaConsent(): Promise<boolean | null> {
-		const pool = InteractiveMode.#AUTOQA_CONSENT_PROMPTS;
-		const [headline, body] = pool[Math.floor(Math.random() * pool.length)];
-		const choice = await this.#extensionUiController.showCollabAwareSelector(`${headline}\n${body}`, ["Yes", "No"]);
-		return choice === "Yes";
-	}
-
-	/**
 	 * Ask the user to approve one `cfg://` settings change; writable `/collab` guests get the
 	 * same prompt and the first answer wins. Dismissing the dialog denies it, as does
 	 * aborting the calling turn or stopping the mode. The wait honors `ask.timeout`
@@ -8195,9 +8125,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#cleanupUnsubscribe) {
 			this.#cleanupUnsubscribe();
 		}
-		// Clear the process-global consent handler so it doesn't outlive this
-		// InteractiveMode instance (e.g. test harnesses, headless re-init).
-		setAutoQaConsentHandler(null, null);
 		setCfgApprovalHost(null);
 		this.#disposeImageBlobWriter?.();
 		this.#disposeImageBlobWriter = undefined;
