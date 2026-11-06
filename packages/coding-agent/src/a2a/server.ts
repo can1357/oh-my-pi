@@ -466,11 +466,21 @@ function localBridgesPath(agentDir: string): string {
 }
 
 /** Record this bridge in the machine-local discovery registry (best effort). */
-async function registerLocalBridge(options: { agentDir: string; port: number; token: string }): Promise<void> {
+async function registerLocalBridge(options: {
+	agentDir: string;
+	port: number;
+	token: string;
+	name?: string;
+}): Promise<void> {
 	try {
 		const file = localBridgesPath(options.agentDir);
 		const existing = await readLiveBridges(options.agentDir);
-		existing.set(process.pid, { pid: process.pid, port: options.port, startedAt: Date.now() });
+		existing.set(process.pid, {
+			pid: process.pid,
+			port: options.port,
+			startedAt: Date.now(),
+			...(options.name !== undefined ? { name: options.name } : {}),
+		});
 		await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
 		await fs.writeFile(
 			file,
