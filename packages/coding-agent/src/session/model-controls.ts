@@ -590,11 +590,12 @@ export class ModelControls {
 	 * Skips missing roles and changes only the active session model.
 	 * @param roleOrder - Order of roles to cycle through (e.g., ["slow", "default", "smol"])
 	 * @param direction - "forward" (default) or "backward"
+	 * @returns The selected role, undefined if fewer than two roles are available, or null if superseded.
 	 */
 	async cycleRoleModels(
 		roleOrder: readonly string[],
 		direction: "forward" | "backward" = "forward",
-	): Promise<RoleModelCycleResult | undefined> {
+	): Promise<RoleModelCycleResult | null | undefined> {
 		const scope = this.#publicationScope;
 		const cycle = this.getRoleModelCycle(roleOrder);
 		if (!cycle || cycle.models.length <= 1) return undefined;
@@ -602,7 +603,7 @@ export class ModelControls {
 		const step = direction === "backward" ? -1 : 1;
 		const next = cycle.models[(cycle.currentIndex + step + cycle.models.length) % cycle.models.length];
 
-		if (!(await this.applyRoleModel(next)) || this.#publicationScope !== scope) return undefined;
+		if (!(await this.applyRoleModel(next)) || this.#publicationScope !== scope) return null;
 
 		return { model: next.model, thinkingLevel: this.thinkingLevel, role: next.role };
 	}

@@ -3043,7 +3043,8 @@ export class InputController {
 		try {
 			const cycleOrder = cfgCycleOrder.get(settings);
 			const result = await this.ctx.viewSession.cycleRoleModels(cycleOrder, direction);
-			if (!result) {
+			if (result === null) return;
+			if (result === undefined) {
 				this.ctx.showStatus("Only one role model available");
 				return;
 			}

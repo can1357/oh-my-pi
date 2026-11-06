@@ -12112,7 +12112,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	cycleRoleModels(
 		roleOrder: readonly string[],
 		direction: "forward" | "backward" = "forward",
-	): Promise<RoleModelCycleResult | undefined> {
+	): Promise<RoleModelCycleResult | null | undefined> {
 		return this.#models.cycleRoleModels(roleOrder, direction);
 	}
 

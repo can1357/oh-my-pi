@@ -326,11 +326,11 @@ export interface AgentViewSession extends AgentSessionHandle {
 	): Promise<boolean>;
 	/** Model-role cycle for the given role order. */
 	getRoleModelCycle(roleOrder: readonly string[]): RoleModelCycle | undefined;
-	/** Cycle through role models. */
+	/** Cycle through role models; undefined means insufficient roles, null means superseded. */
 	cycleRoleModels(
 		roleOrder: readonly string[],
 		direction?: "forward" | "backward",
-	): Promise<RoleModelCycleResult | undefined>;
+	): Promise<RoleModelCycleResult | null | undefined>;
 	/** Apply a resolved role model; returns whether this call still owns the selection. */
 	applyRoleModel(entry: ResolvedRoleModel): Promise<boolean>;
 	/** Service tier in effect for `model`. */

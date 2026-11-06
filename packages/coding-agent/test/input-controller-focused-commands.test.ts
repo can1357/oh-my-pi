@@ -246,6 +246,38 @@ describe("focused subagent view slash commands", () => {
 		expect(mainCycleRoles).not.toHaveBeenCalled();
 	});
 
+	it.each([null, undefined])("handles a role-cycle result of %s without misleading feedback", async result => {
+		const focused = createFocusedContext();
+		Object.assign(focused.raw.viewSession, { cycleRoleModels: vi.fn(async () => result) });
+		const invalidate = vi.fn();
+		const updateEditorBorderColor = vi.fn();
+		const showModelCycleTrack = vi.fn();
+		Object.assign(focused.raw, {
+			statusLine: { invalidate },
+			updateEditorBorderColor,
+			showModelCycleTrack,
+		});
+		const controller = new InputController(focused.ctx);
+		const settingsState = beginSettingsTest();
+		try {
+			await Settings.init({ inMemory: true });
+			await controller.cycleRoleModel("forward");
+		} finally {
+			restoreSettingsTestState(settingsState);
+		}
+
+		if (result === undefined) {
+			expect(focused.raw.showStatus).toHaveBeenCalledTimes(1);
+			expect(focused.raw.showStatus).toHaveBeenCalledWith("Only one role model available");
+		} else {
+			expect(focused.raw.showStatus).not.toHaveBeenCalled();
+		}
+		expect(focused.raw.showError).not.toHaveBeenCalled();
+		expect(invalidate).not.toHaveBeenCalled();
+		expect(updateEditorBorderColor).not.toHaveBeenCalled();
+		expect(showModelCycleTrack).not.toHaveBeenCalled();
+	});
+
 	it("keeps other commands gated to the main session, draft intact", async () => {
 		const { editor, prompt } = await submit("/compact");
 		expect(editor.getText()).toBe("/compact");

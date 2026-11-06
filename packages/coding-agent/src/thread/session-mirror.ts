@@ -280,7 +280,7 @@ export type SessionHostProtocol = {
 	>;
 	cycleRoleModels: RpcMethod<
 		[roleOrder: readonly string[], direction?: "forward" | "backward"],
-		RoleModelCycleResult | undefined
+		RoleModelCycleResult | null | undefined
 	>;
 	applyRoleModel: RpcMethod<[entry: ResolvedRoleModel], boolean>;
 	fetchUsageReports: RpcMethod<[signal?: AbortSignal], UsageReport[] | null>;

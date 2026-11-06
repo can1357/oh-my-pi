@@ -2816,6 +2816,7 @@ export class SessionMaintenance {
 		// the history at all. The post-turn threshold path already promotes before
 		// compacting; without this, the pre-prompt path would pre-empt promotion and
 		// compact (snapcompact/summary) a session that should have just been promoted.
+		const generation = this.#host.promptGeneration();
 		if (await this.#promoteContextModel()) {
 			logger.debug("Pre-prompt context promotion avoided compaction", {
 				contextTokens,
@@ -2824,6 +2825,7 @@ export class SessionMaintenance {
 			});
 			return;
 		}
+		if (this.#host.promptGeneration() !== generation) return;
 
 		logger.debug("Pre-prompt context maintenance triggered by pending prompt size", {
 			contextTokens,

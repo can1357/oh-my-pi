@@ -610,7 +610,7 @@ export class RemoteAgentSession implements AgentViewSession {
 	cycleRoleModels(
 		roleOrder: readonly string[],
 		direction?: "forward" | "backward",
-	): Promise<RoleModelCycleResult | undefined> {
+	): Promise<RoleModelCycleResult | null | undefined> {
 		return this.#command("cycleRoleModels", roleOrder, direction);
 	}
 

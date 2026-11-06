@@ -17,10 +17,12 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { type CreateAgentSessionResult, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { ModelControls } from "@oh-my-pi/pi-coding-agent/session/model-controls";
 import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { SessionMemory } from "@oh-my-pi/pi-coding-agent/session/session-memory";
+import { COMPACTION_CHECK_NONE, SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionTools } from "@oh-my-pi/pi-coding-agent/session/session-tools";
 import { cfgDefaultThinkingLevel } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
@@ -1335,6 +1337,105 @@ describe("AgentSession model persistence", () => {
 		},
 	);
 
+	it.each(["newSession", "switchSession"] as const)(
+		"pre-prompt promotion canceled by %s does not compact the incoming session",
+		async transition => {
+			const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const target = getAnthropicModelOrThrow("claude-sonnet-4-6");
+			const created = await createSession({
+				initialModel: source,
+				settings: Settings.isolated({
+					"compaction.enabled": true,
+					"compaction.asyncEnabled": false,
+					"compaction.thresholdTokens": 1,
+					"contextPromotion.enabled": true,
+				}),
+			});
+			const incomingFile = await writeRoleModelSession(modelValue(source), modelValue(source));
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const refresh = sharedModelRegistry.refreshSelectedModelMetadata.bind(sharedModelRegistry);
+			const metadata = vi
+				.spyOn(sharedModelRegistry, "refreshSelectedModelMetadata")
+				.mockImplementation(async model => {
+					if (model.id === target.id) {
+						entered.resolve();
+						await release.promise;
+					}
+					return refresh(model);
+				});
+			const promotionTarget = vi
+				.spyOn(SessionMaintenance.prototype, "resolveContextPromotionTarget")
+				.mockResolvedValue(target);
+			const compaction = vi
+				.spyOn(SessionMaintenance.prototype, "runAutoCompaction")
+				.mockResolvedValue(COMPACTION_CHECK_NONE);
+			const dispatch = vi.spyOn(created.session.agent, "prompt").mockResolvedValue();
+			const originId = created.session.sessionManager.getSessionId();
+			let compactionCalls = 0;
+			let dispatchCalls = 0;
+			const pending = created.session.prompt("outgoing prompt ".repeat(100));
+			try {
+				await entered.promise;
+				if (transition === "newSession") expect(await created.session.newSession()).toBe(true);
+				else expect(await created.session.switchSession(incomingFile)).toBe(true);
+				expect(created.session.sessionManager.getSessionId()).not.toBe(originId);
+			} finally {
+				release.resolve();
+				await pending;
+				compactionCalls = compaction.mock.calls.length;
+				dispatchCalls = dispatch.mock.calls.length;
+				metadata.mockRestore();
+				promotionTarget.mockRestore();
+				compaction.mockRestore();
+				dispatch.mockRestore();
+			}
+			expect(compactionCalls).toBe(0);
+			expect(dispatchCalls).toBe(0);
+			expect(created.session.model?.id).toBe(source.id);
+		},
+	);
+
+	it.each(["false", "error"] as const)(
+		"pre-prompt promotion returning %s in the same session still permits compaction",
+		async failure => {
+			const created = await createSession({
+				settings: Settings.isolated({
+					"compaction.enabled": true,
+					"compaction.asyncEnabled": false,
+					"compaction.thresholdTokens": 1,
+					"contextPromotion.enabled": true,
+				}),
+			});
+			const promotionTarget = vi
+				.spyOn(SessionMaintenance.prototype, "resolveContextPromotionTarget")
+				.mockResolvedValue(getAnthropicModelOrThrow("claude-sonnet-4-6"));
+			const promotion = vi.spyOn(ModelControls.prototype, "setModelTemporary").mockImplementation(async () => {
+				if (failure === "error") throw new Error("promotion unavailable");
+				return false;
+			});
+			const compaction = vi
+				.spyOn(SessionMaintenance.prototype, "runAutoCompaction")
+				.mockResolvedValue(COMPACTION_CHECK_NONE);
+			const dispatch = vi.spyOn(created.session.agent, "prompt").mockResolvedValue();
+			try {
+				await created.session.prompt("same-session prompt ".repeat(100));
+				expect(promotion).toHaveBeenCalledTimes(1);
+				expect(compaction).toHaveBeenCalledWith(
+					"threshold",
+					false,
+					expect.objectContaining({ autoContinue: false, phase: "pre_turn" }),
+				);
+				expect(dispatch).toHaveBeenCalledTimes(1);
+			} finally {
+				promotionTarget.mockRestore();
+				promotion.mockRestore();
+				compaction.mockRestore();
+				dispatch.mockRestore();
+			}
+		},
+	);
+
 	it.each([...receiptPublications])(
 		"an unpublished %s preparation cannot select a model after newSession",
 		async publication => {
@@ -1525,7 +1626,7 @@ describe("AgentSession model persistence", () => {
 			result = await pending;
 			preparation.mockRestore();
 		}
-		expect(result).toBeUndefined();
+		expect(result).toBeNull();
 		expect(created.session.model?.id).toBe(source.id);
 		expect(created.session.configuredThinkingLevel()).toBe(thinkingLevel);
 	});

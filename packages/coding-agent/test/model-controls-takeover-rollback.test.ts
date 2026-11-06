@@ -124,6 +124,7 @@ describe("ModelControls durable continuations superseded by a temporary selectio
 			sessionManager: {
 				appendModelChange: (value: string, role?: string) => receipts.push({ value, role }),
 				appendThinkingLevelChange: () => {},
+				getLastModelChangeRole: () => receipts.at(-1)?.role,
 			},
 			model: () => active,
 			sessionGenerationSettled: () => undefined,
@@ -218,6 +219,27 @@ describe("ModelControls durable continuations superseded by a temporary selectio
 				value: "test/durable",
 				role: "slow",
 			});
+		},
+	);
+
+	it.each(["reconciliation", "sync"] as const)(
+		"a role cycle superseded during %s reports cancellation, not insufficient roles or stale success",
+		async phase => {
+			const h = durableHarness(phase);
+			h.settings.setModelRole("default", "test/source");
+			h.settings.setModelRole("slow", "test/durable:high");
+			const pending = h.controls.cycleRoleModels(["default", "slow"]);
+			await h.entered.promise;
+			try {
+				expect(await h.controls.setModelTemporary(h.temporary, Effort.Max, { ephemeral: true })).toBe(true);
+			} finally {
+				h.release.resolve();
+			}
+
+			expect(await pending).toBeNull();
+			expect(h.active()).toBe(h.temporary);
+			expect(h.controls.configuredThinkingLevel()).toBe(Effort.Max);
+			expect(await h.controls.cycleRoleModels(["default"])).toBeUndefined();
 		},
 	);
 
