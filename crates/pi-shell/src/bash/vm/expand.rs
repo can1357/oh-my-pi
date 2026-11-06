@@ -2573,6 +2573,21 @@ impl<'e, 'c> Expander<'e, 'c> {
 					let items = ex.hash_table(table)?.into_iter().map(|(k, _)| k).collect();
 					return Ok(Val::List { items, star });
 				}
+				// `${!BASH_ARGC[@]}` and `${!BASH_ARGV[@]}` are reads of the
+				// call stack's arrays, so they go through the same dynamic
+				// getter a value read uses — `get_bashargcv` in bash, which
+				// both materializes the keys and initializes the argument
+				// base. Reading the stored variable instead returned no
+				// keys and left the base uncaptured, so a later read froze
+				// a different set of positional parameters.
+				if matches!(name.as_slice(), b"BASH_ARGC" | b"BASH_ARGV") {
+					crate::bash::vm::callstack::read_base(ex.k, ex.cx.store, ex.vp)?;
+					let items =
+						crate::bash::vm::callstack::listed_array(ex.k, ex.cx.store, ex.vp, &name)?
+							.map(|v| v.keys())
+							.unwrap_or_default();
+					return Ok(Val::List { items, star });
+				}
 				Ok(match state::lookup(&ex.k.root, ex.cx.store, ex.vp, &name)? {
 					Some(var) => Val::List { items: var.keys(), star },
 					None => Val::List { items: Vec::new(), star },

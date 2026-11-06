@@ -509,6 +509,20 @@ async fn named_declarations_read_the_arrays_in_the_callers_context() {
 			"set -- A B\nf(){ declare -p BASH_ARGC BASH_ARGV; echo \"rc=$?\"; }\nf F1",
 			"declare -a BASH_ARGC=()\ndeclare -a BASH_ARGV=()\nrc=0\n",
 		),
+		// A named `declare -p` reports the call stack's VALUE with the
+		// declared variable's ATTRIBUTES. These two names carry
+		// `readonly`, `export` and `integer` like any other, and bash
+		// prints them. Measured on Bash 5.2.21 and 5.3.0.
+		(
+			&[],
+			"set -- A B\nreadonly BASH_ARGV\ndeclare -p BASH_ARGV; echo \"rc=$?\"",
+			"declare -ar BASH_ARGV=([0]=\"B\" [1]=\"A\")\nrc=0\n",
+		),
+		(
+			&[],
+			"set -- A B\nexport BASH_ARGC\ndeclare -p BASH_ARGC; echo \"rc=$?\"",
+			"declare -ax BASH_ARGC=([0]=\"2\")\nrc=0\n",
+		),
 	])
 	.await;
 }
@@ -622,6 +636,31 @@ async fn registered_pops_consume_the_innermost_remaining_arguments_not_the_owner
 			"set -- A B\nshopt -s extdebug\nf(){ . ./lib S1; }\nf F1 F2 F3\necho \"after: \
 			 c=[${BASH_ARGC[*]}] v=[${BASH_ARGV[*]}] f=[${FUNCNAME[*]}]\"",
 			"after: c=[3 2] v=[F3 F2 F1 B A] f=[]\n",
+		),
+	])
+	.await;
+}
+
+/// `${!BASH_ARGC[@]}` and `${!BASH_ARGV[@]}` are reads of the call stack's
+/// arrays: they list the keys and they initialize the argument base, as
+/// bash's `get_bashargcv` does for a value read. Reading the stored
+/// variable instead returned no keys and left the base uncaptured, so a
+/// later read froze a different set of positional parameters. Measured on
+/// Bash 5.2.21 and 5.3.0.
+#[tokio::test]
+async fn a_key_read_lists_the_indices_and_freezes_the_base() {
+	assert_rows(&[
+		(
+			&[],
+			"set -- ROOT1 ROOT2\nprintf 'key=<%s>\\n' \"${!BASH_ARGV[@]}\"\nset -- 			 LATER\nprintf \
+			 'C=[%s] V=[%s]\\n' \"${BASH_ARGC[*]}\" \"${BASH_ARGV[*]}\"",
+			"key=<0>\nkey=<1>\nC=[2] V=[ROOT2 ROOT1]\n",
+		),
+		(
+			&[],
+			"set -- ROOT1 ROOT2\nprintf 'key=<%s>\\n' \"${!BASH_ARGC[@]}\"\nset -- 			 LATER\nprintf \
+			 'C=[%s] V=[%s]\\n' \"${BASH_ARGC[*]}\" \"${BASH_ARGV[*]}\"",
+			"key=<0>\nC=[2] V=[ROOT2 ROOT1]\n",
 		),
 	])
 	.await;

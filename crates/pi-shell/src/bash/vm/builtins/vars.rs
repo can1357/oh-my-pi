@@ -1686,7 +1686,21 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 				// `declare_builtin`'s named lookup invokes `get_bashargcv`,
 				// unlike a listing of every variable.
 				crate::bash::vm::callstack::read_base(ctx.k, ctx.cx.store, ctx.vp)?;
-				crate::bash::vm::callstack::listed_array(ctx.k, ctx.cx.store, ctx.vp, name)?
+				let dynamic =
+					crate::bash::vm::callstack::listed_array(ctx.k, ctx.cx.store, ctx.vp, name)?;
+				// The value is the call stack's, but the ATTRIBUTES are the
+				// declared variable's: these two names can carry `readonly`,
+				// `export` or `integer` like any other, and bash's
+				// `declare -p` prints them (`declare -ar BASH_ARGV=…`).
+				// Reporting the dynamic value with `Attrs::NONE` dropped
+				// them, so a consumer that replays the declaration lost
+				// them too.
+				match (dynamic, declared(ctx, name)?) {
+					(Some(dynamic), Some(stored)) => {
+						Some(Var { attrs: stored.attrs, value: dynamic.value })
+					},
+					(dynamic, _) => dynamic,
+				}
 			} else {
 				declared(ctx, name)?
 			};
