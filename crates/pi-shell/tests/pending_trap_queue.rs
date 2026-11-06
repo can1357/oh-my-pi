@@ -361,6 +361,109 @@ fn a_snapshot_keeps_owed_children_and_the_running_action_before_later_signals() 
 	assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
+/// Both standard streams share one real file, preserving their combined
+/// order across the exec-mode process replacements as the bash tool does.
+/// The second file is written by the trap, not by the test harness.
+fn snapshot_action_mismatch(
+	mode: &str,
+	script: &str,
+	bash_status: i32,
+	bash_output: &str,
+	bash_effect: &str,
+) -> Option<String> {
+	let dir = tempfile::tempdir().unwrap();
+	let path = dir.path().join("script.sh");
+	let stats = dir.path().join("stats");
+	let combined = dir.path().join("combined");
+	let effect = dir.path().join("effect");
+	std::fs::write(&path, script).unwrap();
+	let sink = std::fs::File::create(&combined).unwrap();
+	let output = obash_support::output(
+		obash_support::obash()
+			.arg("--fault=1:1")
+			.arg(format!("--fault-mode={mode}"))
+			.arg(&path)
+			.env("PI_SHELL_FAULT_STATS", &stats)
+			.env("TRAP_OUTPUT", &effect)
+			.stdout(sink.try_clone().unwrap())
+			.stderr(sink),
+	);
+	let counters = std::fs::read_to_string(stats).unwrap();
+	let restored: u64 = counters
+		.split_whitespace()
+		.find_map(|field| field.strip_prefix("restored="))
+		.unwrap()
+		.parse()
+		.unwrap();
+	assert!(restored > 0, "{mode}: {counters}");
+	assert!(counters.split_whitespace().any(|field| field == "lost=0"), "{counters}");
+	let combined = std::fs::read_to_string(combined).unwrap();
+	let effect = std::fs::read_to_string(effect).ok();
+	let actual = (output.status.code(), combined.as_str(), effect.as_deref());
+	let expected = (Some(bash_status), bash_output, Some(bash_effect));
+	(actual != expected).then(|| {
+		format!("{mode}: `{script}`\n  bash: {expected:?}\n  omp:  {actual:?}\n  {counters}")
+	})
+}
+
+/// A fresh different signal must interrupt the running action regardless
+/// of whether its signal number is above or below the outer scan's cursor.
+/// With `exit`, deferring that action also loses its real file write.
+fn assert_snapshot_fresh_signal(mode: &str, leave: &str, status: i32, expected: &str) {
+	let mut mismatches = Vec::new();
+	for (running, fresh) in [("USR1", "USR2"), ("USR2", "USR1")] {
+		let script = format!(
+			"trap 'echo start >&2; kill -{fresh} $BASHPID; {leave}echo tail' {running}; \
+			 trap 'printf saved > \"$TRAP_OUTPUT\"; echo nested' {fresh}; \
+			 kill -{running} $BASHPID; echo end"
+		);
+		if let Some(mismatch) = snapshot_action_mismatch(mode, &script, status, expected, "saved") {
+			mismatches.push(mismatch);
+		}
+	}
+	assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+#[test]
+fn a_snapshot_preserves_a_fresh_different_signal_before_exit_in_step_mode() {
+	assert_snapshot_fresh_signal("step", "exit 23; ", 23, "start\nnested\n");
+}
+
+#[test]
+fn a_snapshot_preserves_a_fresh_different_signal_before_exit_in_exec_mode() {
+	assert_snapshot_fresh_signal("exec", "exit 23; ", 23, "start\nnested\n");
+}
+
+#[test]
+fn a_snapshot_preserves_a_fresh_different_signal_before_the_tail_in_step_mode() {
+	assert_snapshot_fresh_signal("step", "", 0, "start\nnested\ntail\nend\n");
+}
+
+#[test]
+fn a_snapshot_preserves_a_fresh_different_signal_before_the_tail_in_exec_mode() {
+	assert_snapshot_fresh_signal("exec", "", 0, "start\nnested\ntail\nend\n");
+}
+
+/// The old batch owes two actions in total, not a third action for the
+/// child reaped inside its first action after replacing the live trap.
+fn assert_snapshot_chld_remainder(mode: &str) {
+	let script = r#"n=0; trap 'n=$((n+1)); echo old=$n; printf saved >> "$TRAP_OUTPUT"; if [ $n -eq 1 ]; then trap "echo new" CHLD; /bin/true; fi' CHLD; /bin/true | /bin/sleep .1; echo end=$n"#;
+	assert_eq!(
+		snapshot_action_mismatch(mode, script, 0, "old=1\nold=2\nend=2\n", "savedsaved"),
+		None
+	);
+}
+
+#[test]
+fn a_snapshot_separates_the_captured_chld_remainder_from_new_children_in_step_mode() {
+	assert_snapshot_chld_remainder("step");
+}
+
+#[test]
+fn a_snapshot_separates_the_captured_chld_remainder_from_new_children_in_exec_mode() {
+	assert_snapshot_chld_remainder("exec");
+}
+
 /// A reset-to-default stop parks the whole scan until CONT. The marker
 /// tests timing, not Bash's job-status text or whether TTIN is coalesced.
 #[tokio::test(flavor = "multi_thread")]
