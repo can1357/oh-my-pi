@@ -56,7 +56,7 @@ use crate::bash::{
 /// Version of the [`Image`] layout; part of the header and the build id.
 /// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
 /// variant: an exec target holds it by index.
-pub const FRAMES_VERSION: u32 = 29;
+pub const FRAMES_VERSION: u32 = 30;
 
 const MAGIC: [u8; 4] = *b"OBF1";
 
@@ -353,6 +353,10 @@ struct ScratchImage {
 	logs:         [Vec<Atom>; 4],
 	sub:          Option<SubImage>,
 	exec:         Option<ExecState>,
+	/// The redirection's open was an exclusive create in flight (reported
+	/// lost by the externalize, and again by the restore, which is where a
+	/// consumer that only loads the store learns of it).
+	redir_lost:   bool,
 	redir_done:   usize,
 	redir_target: Option<BString>,
 	redir_more:   Vec<(u32, BString)>,
@@ -440,14 +444,17 @@ fn scratch_image(
 	// file, and the create that replaced it would meet that file and refuse
 	// to overwrite it. Such a step is reported lost rather than restarted as
 	// if nothing had begun.
-	if let Some(open) = sc.io.as_deref().and_then(|io| io.redir.opening.as_deref()) {
-		if open.reissuable() {
-			report.reissued_fs += 1;
-		} else {
-			report
-				.lost
-				.push(Lost::Pending { vpid, kind: FileKind::Regular });
-		}
+	let redir_lost = sc
+		.io
+		.as_deref()
+		.and_then(|io| io.redir.opening.as_deref())
+		.is_some_and(|open| !open.reissuable());
+	match sc.io.as_deref().and_then(|io| io.redir.opening.as_deref()) {
+		Some(open) if open.reissuable() => report.reissued_fs += 1,
+		Some(_) => report
+			.lost
+			.push(Lost::Pending { vpid, kind: FileKind::Regular }),
+		None => {},
 	}
 	let io = sc.io.as_deref();
 	ScratchImage {
@@ -466,6 +473,7 @@ fn scratch_image(
 			},
 		}),
 		exec,
+		redir_lost,
 		redir_done: io.map_or(0, |io| io.redir.done),
 		redir_target: io.and_then(|io| io.redir.target.clone()),
 		redir_more: io
@@ -924,6 +932,14 @@ impl Shell {
 					Some(img) => {
 						let mut live = Live::None;
 						let ext_live = img.ext_live;
+						// The exclusive create the snapshot lost: the consumer
+						// that loads the store learns of it here, as the one
+						// that wrote it learned of it from the externalize.
+						if img.redir_lost {
+							report
+								.lost
+								.push(Lost::Pending { vpid, kind: FileKind::Regular });
+						}
 						let exec = img.exec.map(|mut state| {
 							match state.waiting {
 								Some(Awaited::Task(native)) => match state.checkpoint.take() {

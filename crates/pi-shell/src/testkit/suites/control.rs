@@ -174,10 +174,12 @@ fn restore_drop_frames_abandons_the_running_script_with_255() {
 /// A `noclobber` exclusive create still in flight when the shell is
 /// snapshotted may already have created the file. The restore starts the
 /// open again, meets that file and refuses to overwrite it, so the
-/// redirection's output is gone: the snapshot must report that pending open
-/// as lost rather than count it among the operations it re-issues, which is
-/// the contract every other pending filesystem operation already keeps
-/// ([`crate::bash::fs::FsPending::reissuable`]).
+/// redirection's output is gone: that pending open is reported lost rather
+/// than counted among the operations re-issued, which is the contract every
+/// other pending filesystem operation already keeps
+/// ([`crate::bash::fs::FsPending::reissuable`]). Both reports say so: the
+/// process that writes the snapshot learns it from the externalize, and the
+/// process that only loads the store learns it from the restore.
 #[test]
 fn a_pending_noclobber_create_is_reported_lost_not_reissued() {
 	for op in [">", "&>", ">&"] {
@@ -218,6 +220,21 @@ fn a_pending_noclobber_create_is_reported_lost_not_reissued() {
 				.any(|l| matches!(l, Lost::Pending { .. })),
 			"{op}: the pending create is reported lost, got {:?}",
 			report.lost
+		);
+		drop(shell);
+		let (_shell, restored) = Shell::restore(
+			&engine,
+			&mut Cx { host: &mut host, store: &mut store },
+			RestoreOpts::default(),
+		)
+		.unwrap();
+		assert!(
+			restored
+				.lost
+				.iter()
+				.any(|l| matches!(l, Lost::Pending { .. })),
+			"{op}: the restore reports it too, got {:?}",
+			restored.lost
 		);
 	}
 }
