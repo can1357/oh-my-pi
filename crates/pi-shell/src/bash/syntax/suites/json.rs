@@ -364,95 +364,438 @@ fn range_faults(
 	}
 }
 
-#[test]
-fn alias_expanded_compounds_export_ranges_that_contain_their_children() {
-	// Every compound command form, including the conditional forms the alias
-	// defect was first seen in. A compound's keyword and operator positions
-	// are the parser's to record: the text an alias expands to has no bytes
-	// in the source, so neither arithmetic on the command's end nor a scan
-	// of the source finds them.
-	//
-	// Word forms are left out, and so is a here-document body: the export
-	// locates the positions inside a word by scanning the source, which is
-	// the wrong buffer for alias text and for a here-document's inner
-	// command substitution at main as well. That is a separate defect with
-	// its own change.
-	let mut faults = Vec::new();
-	for text in [
-		&b"[[ ( ! a ) && b ]]"[..] as &'static [u8],
-		&b"[[ ! ! a && -n b || ( c ) ]]"[..],
-		&b"[[ a && ( b || c ) ]]"[..],
-		&b"[[ -n a ]]"[..],
-		&b"( echo ok )"[..],
-		&b"{ echo ok; }"[..],
-		&b"( ( echo ok ) )"[..],
-		&b"{ { echo ok; }; }"[..],
-		&b"while false; do echo ok; done"[..],
-		&b"until true; do echo ok; done"[..],
-		&b"for i in a b; do echo ok; done"[..],
-		&b"select i in a b; do echo ok; done"[..],
-		&b"for (( i = 0; i < 2; i++ )); do echo ok; done"[..],
-		&b"case x in a) echo a ;; *) echo b ;; esac"[..],
-		&b"case x in x) esac"[..],
-		&b"case x in a) echo a ;; *) esac"[..],
-		&b"case x in (a|b) echo a ;; esac"[..],
-		&b"(( 1 + 1 ))"[..],
-		&b"if true; then echo a; elif false; then echo b; else echo c; fi"[..],
-		&b"while false; do echo ok; done >/dev/null"[..],
-		&b"( echo ok ) >/dev/null"[..],
-	] {
-		let src = b"check\n";
-		let table = AliasOne(b"check", text);
-		let mut parser = Parser::new(src, Features::NONE, &table);
-		let mut commands = Vec::new();
-		while let Some(cmd) = parser.next_command() {
-			commands.push(cmd.expect("the aliased text parses"));
-		}
-		let program = Program { commands };
-		for offsets in [Offsets::Bytes, Offsets::Utf16] {
-			let json = to_json(src, &program, JsonDialect::Shfmt, offsets);
-			let shfmt: serde_json::Value = serde_json::from_str(&json).unwrap();
-			let mut bad = Vec::new();
-			range_faults(&shfmt, None, "", &mut bad);
-			for fault in bad {
-				faults.push(format!("{} in {offsets:?}: {fault}", String::from_utf8_lossy(text)));
+/// Name every [`CommandKind`] variant. The match is exhaustive, so a
+/// command form added to the tree does not compile until it is named here,
+/// and the coverage assertion below then fails until a sample produces it.
+fn command_kind_name(k: &CommandKind) -> &'static str {
+	match k {
+		CommandKind::Simple(_) => "Simple",
+		CommandKind::Brace(_) => "Brace",
+		CommandKind::Subshell(_) => "Subshell",
+		CommandKind::If(_) => "If",
+		CommandKind::While(_) => "While",
+		CommandKind::For(_) => "For",
+		CommandKind::ArithFor(_) => "ArithFor",
+		CommandKind::Select(_) => "Select",
+		CommandKind::Case(_) => "Case",
+		CommandKind::Arith(_) => "Arith",
+		CommandKind::Cond(_) => "Cond",
+		CommandKind::FuncDef(_) => "FuncDef",
+		CommandKind::Coproc(_) => "Coproc",
+		CommandKind::Repeat(_) => "Repeat",
+		CommandKind::Try(_) => "Try",
+		CommandKind::AnonFunc(_) => "AnonFunc",
+	}
+}
+
+/// Name every [`WordPart`] variant, on the same contract.
+fn word_part_name(p: &WordPart) -> &'static str {
+	match p {
+		WordPart::Lit(_) => "Lit",
+		WordPart::Escaped(_) => "Escaped",
+		WordPart::SQuote(_) => "SQuote",
+		WordPart::DQuote(_) => "DQuote",
+		WordPart::AnsiC(_) => "AnsiC",
+		WordPart::Locale(_) => "Locale",
+		WordPart::Param(_) => "Param",
+		WordPart::Comsub(_) => "Comsub",
+		WordPart::Arith(_) => "Arith",
+		WordPart::ProcSub(_) => "ProcSub",
+		WordPart::Compound(_) => "Compound",
+		WordPart::BadSubst(_) => "BadSubst",
+		WordPart::BadComsub(_) => "BadComsub",
+		WordPart::DroppedQuote => "DroppedQuote",
+		WordPart::Zsh(_) => "Zsh",
+	}
+}
+
+/// Every name [`command_kind_name`] can return.
+const ALL_COMMAND_KINDS: [&str; 16] = [
+	"Simple", "Brace", "Subshell", "If", "While", "For", "ArithFor", "Select", "Case", "Arith",
+	"Cond", "FuncDef", "Coproc", "Repeat", "Try", "AnonFunc",
+];
+
+/// Every name [`word_part_name`] can return.
+const ALL_WORD_PARTS: [&str; 15] = [
+	"Lit",
+	"Escaped",
+	"SQuote",
+	"DQuote",
+	"AnsiC",
+	"Locale",
+	"Param",
+	"Comsub",
+	"Arith",
+	"ProcSub",
+	"Compound",
+	"BadSubst",
+	"BadComsub",
+	"DroppedQuote",
+	"Zsh",
+];
+
+/// Which change owns the positions a sample exports.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Owner {
+	/// This change: the sample must export no containment fault.
+	Here,
+	/// The sibling change (`wip/ShellPortAudit-18193-words`): the positions
+	/// INSIDE a word — a quote's `Right`, a `${…}`'s `Rbrace`, an array's
+	/// parentheses — are still derived from the word's end or located by
+	/// scanning the source, which is the wrong buffer for alias text. The
+	/// sample must still fault here, so the marker cannot outlive the
+	/// defect: the sibling moves it to `Here` in the commit that fixes it.
+	Sibling,
+}
+
+/// One sample: the text the alias `check` expands to, the source that
+/// reaches it, the dialect, and who owns its exported positions.
+struct Sample {
+	src:   &'static [u8],
+	text:  &'static [u8],
+	zsh:   bool,
+	owner: Owner,
+}
+
+const fn bash(text: &'static [u8]) -> Sample {
+	Sample { src: b"check\n", text, zsh: false, owner: Owner::Here }
+}
+
+/// A bash sample whose only faults are inside a word.
+const fn word(text: &'static [u8]) -> Sample {
+	Sample { src: b"check\n", text, zsh: false, owner: Owner::Sibling }
+}
+
+const fn zsh(text: &'static [u8]) -> Sample {
+	Sample { src: b"check\n", text, zsh: true, owner: Owner::Here }
+}
+
+/// An alias standing inside a compound of the source, so every exported
+/// node has a real enclosing node with real bytes around it: a position the
+/// export scans for can then land on a token of the enclosing command.
+const fn nested(src: &'static [u8], text: &'static [u8]) -> Sample {
+	Sample { src, text, zsh: false, owner: Owner::Here }
+}
+
+/// The same, in zsh grammar.
+const fn nested_zsh(src: &'static [u8], text: &'static [u8]) -> Sample {
+	Sample { src, text, zsh: true, owner: Owner::Here }
+}
+
+/// Every command form and every word form, in both dialects. The list is
+/// held exhaustive by the assertion below rather than by a reviewer naming
+/// the row that broke: every variant of [`CommandKind`] and [`WordPart`]
+/// must be produced by a sample here.
+const SAMPLES: &[Sample] = &[
+	// Command forms, bash.
+	bash(b"echo ok"),
+	bash(b"{ echo ok; }"),
+	bash(b"( echo ok )"),
+	bash(b"{ { echo ok; }; }"),
+	bash(b"( ( echo ok ) )"),
+	bash(b"if true; then echo a; elif false; then echo b; else echo c; fi"),
+	bash(b"while false; do echo ok; done"),
+	bash(b"until true; do echo ok; done"),
+	bash(b"for i in a b; do echo ok; done"),
+	bash(b"for (( i = 0; i < 2; i++ )); do echo ok; done"),
+	bash(b"select i in a b; do echo ok; done"),
+	bash(b"case x in a) echo a ;; *) echo b ;; esac"),
+	bash(b"case x in x) esac"),
+	bash(b"case x in a) echo a ;; *) esac"),
+	bash(b"case x in (a|b) echo a ;; esac"),
+	bash(b"(( 1 + 1 ))"),
+	bash(b"[[ -n a ]]"),
+	bash(b"[[ ( ! a ) && b ]]"),
+	bash(b"[[ ! ! a && -n b || ( c ) ]]"),
+	bash(b"[[ a && ( b || c ) ]]"),
+	bash(b"f() { echo ok; }"),
+	bash(b"function f { echo ok; }"),
+	bash(b"coproc c { echo ok; }"),
+	bash(b"while false; do echo ok; done >/dev/null"),
+	bash(b"( echo ok ) >/dev/null"),
+	nested(b"case x in x) check;; esac\n", b"case x in x) esac"),
+	nested(b"case x in x) check;& esac\n", b"case x in a) echo a ;; *) esac"),
+	nested(b"for i in a; do check; done\n", b"case x in x) esac"),
+	nested(b"{ check; }\n", b"( echo ok )"),
+	// Command forms zsh alone has, and zsh's extra names.
+	zsh(b"repeat 2 do echo ok; done"),
+	zsh(b"{ echo ok } always { echo done }"),
+	zsh(b"() { echo ok }"),
+	// Round 4's rows: the aliased construct stands inside a source compound
+	// whose own `do` and `}` a forward scan reaches. The bodies are written
+	// without `;` because a statement separator inside alias text is the
+	// sibling change's row, not this one's.
+	nested_zsh(b"for i in a; do check; done\n", b"repeat 0 { : }"),
+	nested_zsh(b"for i in a; do check; done\n", b"{ : } always { : }"),
+	zsh(b"function f g { echo ok }"),
+	zsh(b"f g () { echo ok }"),
+	zsh(b"for a b in 1 2; do echo ok; done"),
+	zsh(b"if true; then echo a; else echo b; fi"),
+	zsh(b"while false; do echo ok; done"),
+	zsh(b"for i in a b; do echo ok; done"),
+	zsh(b"for (( i = 0; i < 2; i++ )); do echo ok; done"),
+	zsh(b"select i in a b; do echo ok; done"),
+	zsh(b"case x in a) echo a ;; esac"),
+	zsh(b"(( 1 + 1 ))"),
+	zsh(b"[[ -n a ]]"),
+	zsh(b"f() { echo ok }"),
+	zsh(b"( echo ok )"),
+	zsh(b"echo ok"),
+	// Word forms. A quoted or substituted word still derives the positions
+	// inside itself, which is the sibling change's defect, so those rows
+	// are marked and must keep faulting until it lands.
+	bash(b"echo a\\bc"),
+	bash(b"echo ${a b}"),
+	word(b"echo 'a'"),
+	word(b"echo \"a\""),
+	word(b"echo $'a'"),
+	word(b"echo $\"a\""),
+	word(b"echo ${x:-d}"),
+	word(b"echo $(x)"),
+	word(b"echo $(( 1 + 1 ))"),
+	word(b"cat <(x)"),
+	word(b"declare -a a=(1 2)"),
+	word(b"echo \"${a+'$('\\'}\""),
+	word(b"echo \"${x-'\"'y}\""),
+];
+
+fn collect_cmd_names(cmd: &Command, kinds: &mut Vec<&'static str>, parts: &mut Vec<&'static str>) {
+	kinds.push(command_kind_name(&cmd.kind));
+	match &cmd.kind {
+		CommandKind::Simple(s) => {
+			for a in &s.assigns {
+				match &a.value {
+					AssignValue::Scalar(w) => collect_part_names(&w.parts, parts),
+					AssignValue::Array(elems) => {
+						for e in elems {
+							collect_part_names(&e.value.parts, parts);
+						}
+					},
+				}
 			}
+			for w in &s.words {
+				collect_part_names(&w.parts, parts);
+			}
+		},
+		CommandKind::If(i) => {
+			for arm in &i.arms {
+				collect_list_names(&arm.cond, kinds, parts);
+				collect_list_names(&arm.body, kinds, parts);
+			}
+			if let Some(e) = &i.else_body {
+				collect_list_names(e, kinds, parts);
+			}
+		},
+		CommandKind::While(w) => {
+			collect_list_names(&w.cond, kinds, parts);
+			collect_list_names(&w.body, kinds, parts);
+		},
+		CommandKind::For(f) | CommandKind::Select(f) => {
+			for w in f.words.iter().flatten() {
+				collect_part_names(&w.parts, parts);
+			}
+			collect_list_names(&f.body, kinds, parts);
+		},
+		CommandKind::ArithFor(f) => collect_list_names(&f.body, kinds, parts),
+		CommandKind::Case(c) => {
+			collect_part_names(&c.word.parts, parts);
+			for arm in &c.arms {
+				for p in &arm.patterns {
+					collect_part_names(&p.parts, parts);
+				}
+				collect_list_names(&arm.body, kinds, parts);
+			}
+		},
+		CommandKind::Brace(l) | CommandKind::Subshell(l) => collect_list_names(l, kinds, parts),
+		CommandKind::Arith(_) => {},
+		CommandKind::Cond(e) => collect_cond_names(e, parts),
+		CommandKind::FuncDef(f) => collect_cmd_names(&f.body, kinds, parts),
+		CommandKind::Coproc(c) => collect_cmd_names(&c.body, kinds, parts),
+		CommandKind::Repeat(r) => {
+			collect_part_names(&r.count.parts, parts);
+			collect_list_names(&r.body, kinds, parts);
+		},
+		CommandKind::Try(t) => {
+			collect_list_names(&t.body, kinds, parts);
+			collect_list_names(&t.always, kinds, parts);
+		},
+		CommandKind::AnonFunc(a) => {
+			collect_cmd_names(&a.body, kinds, parts);
+			for w in &a.args {
+				collect_part_names(&w.parts, parts);
+			}
+		},
+	}
+	for r in &cmd.redirs {
+		if let RedirTarget::Word(w) = &r.target {
+			collect_part_names(&w.parts, parts);
 		}
 	}
-	// The same texts reached through an alias that stands inside a compound
-	// of the source, so each exported node has a real enclosing node with
-	// real bytes around it: a position the export scans for can land on a
-	// token of the enclosing command rather than of its own.
-	for (src, text) in [
-		(&b"case x in x) check;; esac\n"[..], &b"case x in x) esac"[..]),
-		(&b"case x in x) check;& esac\n"[..], &b"case x in a) echo a ;; *) esac"[..]),
-		(&b"for i in a; do check; done\n"[..], &b"case x in x) esac"[..]),
-		(&b"{ check; }\n"[..], &b"( echo ok )"[..]),
-		// `if true; then check; fi` with a loop aliased into it belongs to
-		// the sibling change: the statements inside the loop take their span
-		// from a word token, which invents a byte in alias text at upstream
-		// main as well (6 faults there, 4 here).
-	] {
-		let table = AliasOne(b"check", text);
-		let mut parser = Parser::new(src, Features::NONE, &table);
-		let mut commands = Vec::new();
-		while let Some(cmd) = parser.next_command() {
-			commands.push(cmd.expect("the source parses"));
+}
+
+fn collect_list_names(l: &List, kinds: &mut Vec<&'static str>, parts: &mut Vec<&'static str>) {
+	for it in &l.items {
+		for stage in it
+			.and_or
+			.rest
+			.iter()
+			.map(|(_, p)| p)
+			.chain(core::iter::once(&it.and_or.first))
+			.flat_map(|p| &p.stages)
+		{
+			collect_cmd_names(&stage.cmd, kinds, parts);
 		}
-		let program = Program { commands };
+	}
+}
+
+fn collect_cond_names(e: &CondExpr, parts: &mut Vec<&'static str>) {
+	match e {
+		CondExpr::Word(w) | CondExpr::Unary { arg: w, .. } => collect_part_names(&w.parts, parts),
+		CondExpr::Binary { lhs, rhs, .. } => {
+			collect_part_names(&lhs.parts, parts);
+			collect_part_names(&rhs.parts, parts);
+		},
+		CondExpr::Not { expr, .. } | CondExpr::Group { expr, .. } => collect_cond_names(expr, parts),
+		CondExpr::And(terms, _) | CondExpr::Or(terms, _) => {
+			for term in terms {
+				collect_cond_names(term, parts);
+			}
+		},
+	}
+}
+
+fn collect_part_names(ps: &[WordPart], parts: &mut Vec<&'static str>) {
+	for p in ps {
+		parts.push(word_part_name(p));
+		match p {
+			WordPart::DQuote(inner) | WordPart::Locale(inner) => collect_part_names(inner, parts),
+			WordPart::Param(pp) => match &pp.op {
+				ParamOp::Default { word, .. }
+				| ParamOp::Assign { word, .. }
+				| ParamOp::Alt { word, .. } => collect_part_names(&word.parts, parts),
+				ParamOp::Error { word: Some(w), .. } | ParamOp::Trim { pat: w, .. } => {
+					collect_part_names(&w.parts, parts);
+				},
+				ParamOp::Replace { pat, rep, .. } => {
+					collect_part_names(&pat.parts, parts);
+					if let Some(r) = rep {
+						collect_part_names(&r.parts, parts);
+					}
+				},
+				ParamOp::Case { pat: Some(w), .. } => collect_part_names(&w.parts, parts),
+				_ => {},
+			},
+			WordPart::Comsub(c) => {
+				let (mut k, mut q) = (Vec::new(), Vec::new());
+				collect_list_names(&c.body, &mut k, &mut q);
+				parts.append(&mut q);
+			},
+			WordPart::ProcSub(ps) => {
+				let (mut k, mut q) = (Vec::new(), Vec::new());
+				collect_list_names(&ps.body, &mut k, &mut q);
+				parts.append(&mut q);
+			},
+			WordPart::Compound(elems) => {
+				for e in elems {
+					collect_part_names(&e.value.parts, parts);
+				}
+			},
+			_ => {},
+		}
+	}
+}
+
+/// zsh's defaults for the parse-affecting options of a non-interactive
+/// shell.
+fn zsh_features() -> Features {
+	Features::ZSH
+		| Features::ZSH_SHORT_LOOPS
+		| Features::ZSH_MULTI_FUNC_DEF
+		| Features::ZSH_INTERACTIVE_COMMENTS
+}
+
+/// Parse `sample`'s source with `check` aliased to its text.
+fn parse_sample(sample: &Sample) -> Program {
+	let table = AliasOne(b"check", sample.text);
+	let features = if sample.zsh {
+		zsh_features()
+	} else {
+		Features::NONE
+	};
+	let mut parser = Parser::new(sample.src, features, &table);
+	let mut commands = Vec::new();
+	while let Some(cmd) = parser.next_command() {
+		commands.push(
+			cmd.unwrap_or_else(|e| panic!("{} parses: {e}", String::from_utf8_lossy(sample.text))),
+		);
+	}
+	Program { commands }
+}
+
+#[test]
+fn every_node_kind_has_an_alias_sample() {
+	// The fixture list used to grow only when a reviewer named the row that
+	// broke, so a form nobody thought of (zsh's `repeat`, its `always`, a
+	// bare `case` arm) stayed uncovered until the round after it broke.
+	// Coverage is now a property of the list: every variant the tree can
+	// hold must be produced by a sample, in whichever dialect parses it.
+	let (mut kinds, mut parts) = (Vec::new(), Vec::new());
+	for sample in SAMPLES {
+		for unit in &parse_sample(sample).commands {
+			collect_list_names(&unit.list, &mut kinds, &mut parts);
+		}
+	}
+	let missing_kinds: Vec<&str> = ALL_COMMAND_KINDS
+		.into_iter()
+		.filter(|k| !kinds.contains(k))
+		.collect();
+	let missing_parts: Vec<&str> = ALL_WORD_PARTS
+		.into_iter()
+		.filter(|p| !parts.contains(p))
+		.collect();
+	assert!(
+		missing_kinds.is_empty() && missing_parts.is_empty(),
+		"no alias sample produces command kinds {missing_kinds:?} or word parts {missing_parts:?}"
+	);
+}
+
+#[test]
+fn alias_expanded_nodes_export_ranges_that_contain_their_children() {
+	// A node's keyword, operator and closing-token positions are the
+	// parser's to record: the text an alias expands to has no bytes in the
+	// source, so neither arithmetic on the node's end nor a scan of the
+	// source finds them. Every sample of every variant must export a tree
+	// whose every position lies inside the node that holds it.
+	let mut faults = Vec::new();
+	let mut clean_siblings = Vec::new();
+	for sample in SAMPLES {
+		let program = parse_sample(sample);
+		let mut here = Vec::new();
 		for offsets in [Offsets::Bytes, Offsets::Utf16] {
-			let json = to_json(src, &program, JsonDialect::Shfmt, offsets);
+			let json = to_json(sample.src, &program, JsonDialect::Shfmt, offsets);
 			let shfmt: serde_json::Value = serde_json::from_str(&json).unwrap();
 			let mut bad = Vec::new();
 			range_faults(&shfmt, None, "", &mut bad);
 			for fault in bad {
-				faults.push(format!(
+				here.push(format!(
 					"{} with {} aliased, in {offsets:?}: {fault}",
-					String::from_utf8_lossy(src).escape_debug(),
-					String::from_utf8_lossy(text)
+					String::from_utf8_lossy(sample.src).escape_debug(),
+					String::from_utf8_lossy(sample.text)
 				));
 			}
 		}
+		match sample.owner {
+			Owner::Here => faults.append(&mut here),
+			Owner::Sibling if here.is_empty() => {
+				clean_siblings.push(String::from_utf8_lossy(sample.text).into_owned());
+			},
+			Owner::Sibling => {},
+		}
 	}
 	assert!(faults.is_empty(), "{} range faults:\n{}", faults.len(), faults.join("\n"));
+	assert!(
+		clean_siblings.is_empty(),
+		"these samples no longer fault, so they are this change's now, not the word change's: {}",
+		clean_siblings.join(", ")
+	);
 }
