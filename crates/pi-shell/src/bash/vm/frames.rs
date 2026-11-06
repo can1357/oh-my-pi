@@ -55,8 +55,14 @@ use crate::bash::{
 
 /// Version of the [`Image`] layout; part of the header and the build id.
 /// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
-/// variant: an exec target holds it by index.
-pub const FRAMES_VERSION: u32 = 29;
+/// variant: an exec target holds it by index. 30 adds each vproc's
+/// `args_set` (bash's `changed_dollar_vars & ARGS_SETBLTIN`); 31 adds each
+/// run's `launch` (what a host callout's carrier command runs, until that
+/// command has taken it) and 32 its dispatch, whether the run's source is
+/// the engine's own, and a `BASH_COMMAND` that is a callout operand's text
+/// rather than a unit's syntax node; 33 adds the launch's fd duplications
+/// and the content address of the command the engine built to run it.
+pub const FRAMES_VERSION: u32 = 33;
 
 const MAGIC: [u8; 4] = *b"OBF1";
 
@@ -254,12 +260,15 @@ struct ProcImage {
 	trace_base:    u32,
 	/// `$BASH_SUBSHELL`.
 	subshell:      u32,
-	/// `BASH_COMMAND`: the unit (written to the store) and syntax node; a
-	/// trap action that runs after the restore still names the trapped
-	/// command.
-	command:       Option<(UnitId, u32)>,
+	/// `BASH_COMMAND`: the unit (written to the store) and syntax node, or
+	/// a host callout operand's own text; a trap action that runs after the
+	/// restore still names the trapped command.
+	command:       Option<CommandImage>,
 	/// Pushes onto bash's call-stack arrays.
 	calls:         Vec<super::callstack::Call>,
+	/// Whether the `set` builtin replaced the positional parameters outside
+	/// any function since the innermost `.` file started.
+	args_set:      bool,
 	/// The pseudo-signal traps the vproc set itself.
 	own_traps:     super::proc::OwnTraps,
 	/// Current mode (the root's is also `MiscKey::Mode`).
@@ -288,6 +297,14 @@ struct Fields {
 	rlimits:    Vec<(crate::bash::host::Rlimit, Option<u64>, Option<u64>)>,
 }
 
+/// Where a vproc's `BASH_COMMAND` text comes from
+/// ([`CmdSite`](super::proc::CmdSite)).
+#[derive(Serialize, Deserialize)]
+enum CommandImage {
+	Node(UnitId, u32),
+	Text(BString),
+}
+
 #[derive(Serialize, Deserialize)]
 struct RunImage {
 	id:                RunId,
@@ -299,6 +316,9 @@ struct RunImage {
 	explicit_mode:     bool,
 	lossy:             u8,
 	args:              Option<Vec<BString>>,
+	launch:            super::proc::LaunchSlot,
+	carrier:           Option<UnitId>,
+	engine:            bool,
 	cwd:               Option<BString>,
 	env:               Vec<(BString, BString)>,
 	started:           bool,
@@ -573,14 +593,15 @@ impl Shell {
 				.collect();
 			runs.extend(p.runs.iter().map(|r| r.id));
 			let command = match &p.command {
-				Some((unit, node)) => {
+				Some(super::proc::CmdSite::Node(unit, node)) => {
 					if self.k.written.insert(unit.id) {
 						let bytes = postcard::to_stdvec(&**unit).map_err(ExtError::Encode)?;
 						cx.store.put_blob(BlobSlot::Unit(unit.id), &bytes)?;
 						report.units_written += 1;
 					}
-					Some((unit.id, *node))
+					Some(CommandImage::Node(unit.id, *node))
 				},
+				Some(super::proc::CmdSite::Text(text)) => Some(CommandImage::Text((**text).clone())),
 				None => None,
 			};
 			let fields = p.overlay.as_ref().map(|overlay| Fields {
@@ -612,6 +633,7 @@ impl Shell {
 				subshell: p.subshell,
 				command,
 				calls: p.calls.clone(),
+				args_set: p.args_set,
 				own_traps: p.own_traps,
 				mode: p.mode,
 				zsh: p.zsh.clone(),
@@ -836,19 +858,26 @@ impl Shell {
 			vp.trace_base = p.trace_base;
 			vp.subshell = p.subshell;
 			vp.calls = p.calls;
+			vp.args_set = p.args_set;
 			vp.own_traps = p.own_traps;
 			vp.mode = p.mode;
 			vp.zsh = p.zsh;
 			vp.lineage = p.lineage;
-			if let Some((id, node)) = p.command {
-				let unit = load_unit(
-					engine,
-					cx.store,
-					id,
-					k.mask.contains(crate::bash::event::EventKind::UnitCompiled),
-				)?;
-				k.written.insert(unit.id);
-				vp.command = Some((unit, node));
+			match p.command {
+				Some(CommandImage::Node(id, node)) => {
+					let unit = load_unit(
+						engine,
+						cx.store,
+						id,
+						k.mask.contains(crate::bash::event::EventKind::UnitCompiled),
+					)?;
+					k.written.insert(unit.id);
+					vp.command = Some(super::proc::CmdSite::Node(unit, node));
+				},
+				Some(CommandImage::Text(text)) => {
+					vp.command = Some(super::proc::CmdSite::Text(Box::new(text)));
+				},
+				None => {},
 			}
 			// Waits on engine objects whose wake-ups were restored (child
 			// vprocs, jobs, in-memory pipes) keep their mark, so scheduling
@@ -878,6 +907,9 @@ impl Shell {
 					explicit_mode:     r.explicit_mode,
 					lossy:             r.lossy,
 					args:              r.args,
+					launch:            r.launch,
+					carrier:           r.carrier,
+					engine:            r.engine,
 					cwd:               r.cwd,
 					env:               r.env,
 					started:           r.started,
@@ -1116,6 +1148,9 @@ fn run_image(r: &Run) -> RunImage {
 		explicit_mode:     r.explicit_mode,
 		lossy:             r.lossy,
 		args:              r.args.clone(),
+		launch:            r.launch.clone(),
+		carrier:           r.carrier,
+		engine:            r.engine,
 		cwd:               r.cwd.clone(),
 		env:               r.env.clone(),
 		started:           r.started,

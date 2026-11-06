@@ -40,8 +40,8 @@ use parking_lot::Mutex;
 
 use crate::{
 	bash::{
-		CallId, CallOutcome, ControlHandle, Cx, IoPoll, Lineage, NativeRef, RunId, Script, Shell,
-		ShellApi, ToolCall, ToolRef,
+		CallId, CallOutcome, ControlHandle, Cx, IoPoll, Launch, LaunchHow, Lineage, NativeRef, RunId,
+		Script, Shell, ShellApi, ToolCall, ToolRef,
 	},
 	extras::{ExtrasGate, ReportedError},
 	git::{GitLayers, flag_on},
@@ -331,9 +331,17 @@ struct Child {
 }
 
 impl Child {
-	/// Run `argv` (`"$@"`, so functions, builtins and externals run as
-	/// anywhere) in a subshell of the caller under a fresh label;
-	/// `redirect` is appended to the command (`>&2`).
+	/// Run `argv` (so functions, builtins and externals run as anywhere) in
+	/// a subshell of the caller under a fresh label; `dups` are the fd
+	/// duplications the command carries (`(1, 2)`: its output goes to the
+	/// caller's stderr).
+	///
+	/// The words, their dispatch and those duplications go to the engine
+	/// as data ([`Script::launch`]), not as the subshell's positional
+	/// parameters and not as text of its source, so the subshell keeps the
+	/// caller's parameters, every callout of the same shape runs the same
+	/// engine-built command, and nothing a caller can name, alias or
+	/// shadow stands between the shell and the operand.
 	fn start(
 		&mut self,
 		api: &mut ShellApi<'_, '_>,
@@ -341,11 +349,12 @@ impl Child {
 		call: &ToolCall,
 		argv: Vec<BString>,
 		detached: bool,
-		redirect: &str,
+		dups: &[(u32, u32)],
 	) {
 		self.label = turn.labels.fresh(api.lineage().label);
-		let mut script = Script::command(format!("\"$@\"{redirect}").into_bytes());
-		script.args = Some(argv);
+		let mut script = Script::command(Vec::new());
+		script.launch = Some(Launch { argv, how: LaunchHow::Plain, dups: dups.to_vec() });
+		script.engine_source = true;
 		// The command's environment, per-command assignments included.
 		script.env = call
 			.env

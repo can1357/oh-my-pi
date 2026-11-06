@@ -1038,6 +1038,117 @@ pub(crate) fn compile(
 	})
 }
 
+/// The one command of a host callout's synthetic script: a simple command
+/// with no words at all, whose argv is the run's own launch
+/// ([`crate::bash::Launch`], taken when the command expands) and whose
+/// `dups` are the host's `fd>&to` duplications.
+///
+/// The engine builds it instead of taking it from a script, so the
+/// command holds no word of the engine's — no carrier name, no
+/// `command`, no `exec` — for a caller to alias, shadow, trap, look up or
+/// read back out of a compiled unit, a trace node, `BASH_COMMAND`,
+/// `set -x` or a checkpoint image. The operand is not in the unit either,
+/// so its content address does not vary with the operand and one unit
+/// serves every callout of the same shape in a session.
+///
+/// A command the engine built has no bytes to re-parse, so it carries the
+/// syntax a reader needs
+/// ([`UnitSyntax`](crate::bash::trace::syntax::UnitSyntax)) instead of leaving
+/// the reader to recover it from a source.
+pub(crate) fn launch_unit(mode: ModeId, features: u32, dups: &[(u32, u32)]) -> Unit {
+	let text: Vec<u8> = dups
+		.iter()
+		.flat_map(|&(fd, to)| format!("{fd}>&{to}").into_bytes())
+		.collect();
+	let mut unit = Unit::empty(&text, mode, features);
+	let span = crate::bash::syntax::Span { lo: 0, hi: text.len() as u32 };
+	unit.nodes =
+		vec![NodeInfo { kind: NodeKind::Simple, lo: 0, hi: text.len() as u32, line: 0, col: 1 }];
+	unit.lists = vec![Vec::new()];
+	let mut syn_redirs = Vec::new();
+	let redirs = if dups.is_empty() {
+		None
+	} else {
+		let mut at = 0u32;
+		let list = dups
+			.iter()
+			.map(|&(fd, to)| {
+				let target = to.to_string();
+				let written = format!("{fd}>&{to}");
+				let lo = at;
+				at += written.len() as u32;
+				let node = unit.nodes.len() as u32;
+				let word_lo = at - target.len() as u32;
+				unit.nodes.push(NodeInfo {
+					kind: NodeKind::Word,
+					lo:   word_lo,
+					hi:   at,
+					line: 0,
+					col:  word_lo + 1,
+				});
+				let word = unit.words.len() as u32;
+				unit.words.push(Word {
+					parts: vec![Part::Lit(BString::from(target.clone()))],
+					node,
+					..Word::default()
+				});
+				syn_redirs.push(crate::bash::syntax::Redir {
+					span:   crate::bash::syntax::Span { lo, hi: at },
+					fd:     Some(crate::bash::syntax::RedirFd::Num(fd)),
+					op:     crate::bash::syntax::RedirOp::DupOut,
+					target: crate::bash::syntax::RedirTarget::Word(crate::bash::syntax::Word {
+						id:    crate::bash::syntax::NodeId(node),
+						span:  crate::bash::syntax::Span { lo: word_lo, hi: at },
+						parts: vec![crate::bash::syntax::WordPart::Lit(target.into_bytes())],
+					}),
+				});
+				RedirIr {
+					fd:      RedirFdIr::Num(fd),
+					op:      RedirKind::DupOut,
+					target:  RedirTargetIr::Word(word),
+					clobber: false,
+				}
+			})
+			.collect();
+		unit.redirs.push(list);
+		Some(0)
+	};
+	unit.cmds = vec![Cmd { assigns: Vec::new(), words: 0, redirs, typeset: false }];
+	unit.ops = vec![
+		Op {
+			code:  Opcode::Exec,
+			flags: 0,
+			ev:    Opcode::Exec.ev_bits(),
+			a:     0,
+			b:     0,
+			node:  0,
+		},
+		Op {
+			code:  Opcode::End,
+			flags: 0,
+			ev:    Opcode::End.ev_bits(),
+			a:     0,
+			b:     0,
+			node:  0,
+		},
+	];
+	unit.seal();
+	let command = crate::bash::syntax::Command {
+		id: crate::bash::syntax::NodeId(0),
+		span,
+		kind: crate::bash::syntax::CommandKind::Simple(crate::bash::syntax::Simple::default()),
+		redirs: syn_redirs,
+	};
+	let _ = unit.trace_syntax.set(std::sync::Arc::new(
+		crate::bash::trace::syntax::UnitSyntax::new(
+			0,
+			crate::bash::trace::syntax::SyntaxTree::Command(std::sync::Arc::new(command)),
+		)
+		.with_context(mode, features),
+	));
+	unit
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

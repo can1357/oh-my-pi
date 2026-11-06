@@ -3138,6 +3138,11 @@ pub fn set(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		state::sync_option_vars(&mut ctx.k.root, ctx.cx.store, ctx.vp)?;
 	}
 	if let Some(p) = positional {
+		// bash's `set_dollar_vars_changed`: outside a function this is the
+		// change that makes a `.` file keep its own parameters
+		// (`ARGS_SETBLTIN`); inside one bash records `ARGS_FUNC`, which no
+		// `.` file reads.
+		ctx.vp.args_set |= state::func_scope(&ctx.k.root, ctx.cx.store, ctx.vp)?.is_none();
 		state::set_positional(&mut ctx.k.root, ctx.cx.store, ctx.vp, p);
 	}
 	done(0)

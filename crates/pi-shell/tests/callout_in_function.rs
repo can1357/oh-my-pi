@@ -94,25 +94,20 @@ async fn function_callouts_run_in_every_context() {
 
 /// The caller's positional parameters are never the operand, and a function
 /// operand sees the caller's locals with its own arguments.
+///
+/// One callout stands for both argument paths: `timeout` and `nohup` install
+/// a callout's operand arguments through the same `Shell::submit_from` scope,
+/// and `nohup`'s own builder and its `$!` are covered by the two tests above.
 #[tokio::test]
 async fn operands_use_their_own_arguments() {
 	let wrong = "/bin/sh -c 'printf wrong > marker; exit 7'";
 	let operand = "operand(){ printf '%s:%s\\n' \"$local_value\" \"$1\" > marker; return 3; }";
 	assert_callouts(&[
 		(&format!("f(){{ timeout 5 {RAN}; }}; f {wrong}"), 3, "ran"),
-		(&format!("f(){{ nohup {RAN} >/dev/null 2>&1; }}; f {wrong}"), 3, "ran"),
 		(
 			&format!(
 				"{operand}; f(){{ local local_value=local; timeout 5 operand argument; s=$?; printf \
 				 '%s\\n' \"$1\" >> marker; return $s; }}; f caller"
-			),
-			3,
-			"local:argument\ncaller\n",
-		),
-		(
-			&format!(
-				"{operand}; f(){{ local local_value=local; nohup operand argument >/dev/null 2>&1; \
-				 s=$?; printf '%s\\n' \"$1\" >> marker; return $s; }}; f caller"
 			),
 			3,
 			"local:argument\ncaller\n",

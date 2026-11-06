@@ -67,6 +67,14 @@ pub fn source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		ctx.builtin_usage();
 		return done(2);
 	};
+	// bash's `source_file`: a `.` with a file operand starts with no `set` of
+	// its own recorded, whether or not it was given arguments and whether or
+	// not the file can be read. So an enclosing file's `set` does not make
+	// this one keep its parameters, a `set` in this one reaches the file
+	// around it when this one saved nothing, and a `.` of a missing file, a
+	// directory or a binary file ends the enclosing file's record too. A
+	// usage error above leaves it alone: that `.` never started.
+	ctx.vp.args_set = false;
 	let posix = ctx.option(OptId::Posix)?;
 	let mut path = None;
 	if !file.contains(&b'/') {
@@ -237,8 +245,8 @@ pub fn zsh_source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 
 /// The arguments of `. file args` become the positional parameters while
 /// the file runs; what its end puts back. `bash`: outside any function a
-/// file that changes them keeps its own (bash `maybe_pop_dollar_vars`);
-/// zsh `bin_dot` always restores.
+/// file that replaces them with the `set` builtin keeps its own (bash
+/// `maybe_pop_dollar_vars`); zsh `bin_dot` always restores.
 fn source_args(
 	ctx: &mut Ctx<'_, '_>,
 	rest: &[BString],
@@ -248,14 +256,9 @@ fn source_args(
 	if rest.is_empty() {
 		return Ok(None);
 	}
-	let args = state::positional(&ctx.k.root, ctx.cx.store, ctx.vp)?;
-	let installed = if bash && state::func_scope(&ctx.k.root, ctx.cx.store, ctx.vp)?.is_none() {
-		Some(rest.to_vec())
-	} else {
-		None
-	};
+	let args = state::positional_ref(&ctx.k.root, ctx.cx.store, ctx.vp)?.to_vec();
 	state::set_positional(&mut ctx.k.root, ctx.cx.store, ctx.vp, rest.to_vec());
-	Ok(Some(Box::new(crate::bash::vm::callstack::SourceSave { args, installed })))
+	Ok(Some(Box::new(crate::bash::vm::callstack::SourceSave { args, bash })))
 }
 
 /// A bad argument to `return`, `exit`, `break` or `continue` (reported).
