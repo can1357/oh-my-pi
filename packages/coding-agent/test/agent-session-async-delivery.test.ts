@@ -135,6 +135,76 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(deliveredImages).toEqual([image]);
 	});
 
+	it("keeps late ACP results out of hidden turns while allowing an owned async drain", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+		const sessionManager = SessionManager.inMemory();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Lead",
+			asyncJobManager: manager,
+		});
+		session.setClientBridge({ capabilities: {}, deferAgentInitiatedTurns: true });
+
+		await session.prompt("First user prompt");
+		manager.register("task", "late result", async () => "LATE_ACP_RESULT", {
+			id: "late-acp-result",
+			ownerId: "Lead",
+		});
+		await session.settleAsyncWork();
+
+		expect(mock.calls).toHaveLength(1);
+		expect(session.isStreaming).toBe(false);
+		expect(session.hasPendingAsyncWork()).toBe(false);
+		expect(
+			sessionManager
+				.getEntries()
+				.filter(entry => entry.type === "custom_message" && entry.customType === "async-result"),
+		).toHaveLength(1);
+
+		await session.prompt("Next user prompt");
+		await session.waitForIdle();
+		expect(mock.calls).toHaveLength(2);
+		expect(
+			mock.calls[1]?.context.messages.filter(message =>
+				typeof message.content === "string"
+					? message.content.includes("LATE_ACP_RESULT")
+					: message.content.some(content => content.type === "text" && content.text.includes("LATE_ACP_RESULT")),
+			),
+		).toHaveLength(1);
+
+		const queued = observeAsyncResultEnqueue(session);
+		manager.register("task", "owned result", async () => "OWNED_ACP_RESULT", {
+			id: "owned-acp-result",
+			ownerId: "Lead",
+		});
+		await queued;
+		expect(await session.drainAsyncJobDeliveriesForAcp({ timeoutMs: 2_000 })).toBe(true);
+		await session.waitForIdle();
+		expect(mock.calls).toHaveLength(3);
+		expect(
+			mock.calls[2]?.context.messages.some(message =>
+				typeof message.content === "string"
+					? message.content.includes("OWNED_ACP_RESULT")
+					: message.content.some(content => content.type === "text" && content.text.includes("OWNED_ACP_RESULT")),
+			),
+		).toBe(true);
+	});
+
 	it("exposes a process job's full command in the async job snapshot", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
