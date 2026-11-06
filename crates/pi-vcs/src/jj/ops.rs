@@ -9,7 +9,7 @@ use std::{
 	sync::Arc,
 };
 
-use futures::TryStreamExt as _;
+use futures::{StreamExt as _, TryStreamExt as _};
 use jj_lib::{
 	backend::{CommitId, MergedTreeValue},
 	commit::Commit,
@@ -30,7 +30,7 @@ use jj_lib::{
 	repo_path::{RepoPath, RepoPathBuf},
 	settings::UserSettings,
 	working_copy::{SnapshotOptions, WorkingCopyFreshness},
-	workspace::Workspace,
+	workspace::{DefaultWorkspaceLoaderFactory, Workspace, WorkspaceLoaderFactory as _},
 };
 
 use super::JjWorkspace;
@@ -134,7 +134,7 @@ impl JjWorkspace {
 				else {
 					return Ok(StatusSummary::default());
 				};
-				let changes = collect_changes(&before, &after, &copies, &[], "jj status")?;
+				let changes = collect_changes(&before, &after, &copies, &[], "jj status").await?;
 				let mut summary = StatusSummary::default();
 				for change in changes {
 					if change.before.is_absent() {
@@ -159,7 +159,8 @@ impl JjWorkspace {
 				else {
 					return Ok(String::new());
 				};
-				let changes = collect_changes(&before, &after, &copies, &pathspecs, "jj status")?;
+				let changes =
+					collect_changes(&before, &after, &copies, &pathspecs, "jj status").await?;
 				Ok(render_status_porcelain(&changes, nul_terminated))
 			})
 		})
@@ -175,7 +176,7 @@ impl JjWorkspace {
 				else {
 					return Ok(String::new());
 				};
-				let changes = collect_changes(&before, &after, &copies, &files, "jj diff")?;
+				let changes = collect_changes(&before, &after, &copies, &files, "jj diff").await?;
 				render_git_diff(repo.as_ref(), &before, &after, changes).await
 			})
 		})
@@ -191,7 +192,8 @@ impl JjWorkspace {
 				else {
 					return Ok(Vec::new());
 				};
-				Ok(collect_changes(&before, &after, &copies, &files, "jj diff")?
+				Ok(collect_changes(&before, &after, &copies, &files, "jj diff")
+					.await?
 					.into_iter()
 					.map(|change| change.after_path.as_internal_file_string().to_owned())
 					.collect())
@@ -209,7 +211,7 @@ impl JjWorkspace {
 				else {
 					return Ok(Vec::new());
 				};
-				let changes = collect_changes(&before, &after, &copies, &files, "jj diff")?;
+				let changes = collect_changes(&before, &after, &copies, &files, "jj diff").await?;
 				render_numstat(repo.as_ref(), &before, &after, changes).await
 			})
 		})
@@ -264,11 +266,16 @@ impl JjWorkspace {
 					.map_err(|err| Error::backend("jj show", err))?;
 				let root_id = repo.store().root_commit_id();
 				let author = commit.author();
+				// jj-lib 0.47 moved timestamps from chrono to jiff. `Zoned`'s own
+				// `Display` appends an IANA annotation in square brackets, so
+				// format explicitly: this is the spelling jj-lib itself uses, and
+				// it reproduces what chrono's `to_rfc3339` emitted.
 				let date = author
 					.timestamp
-					.to_datetime()
+					.to_zoned()
 					.map_err(|err| Error::backend("jj show", err))?
-					.to_rfc3339();
+					.strftime("%Y-%m-%dT%H:%M:%S%.f%:z")
+					.to_string();
 				let raw_message = commit.description();
 				let message = raw_message
 					.strip_suffix('\n')
@@ -311,7 +318,8 @@ impl JjWorkspace {
 					.get_commit_async(wc_id)
 					.await
 					.map_err(|err| Error::backend("jj files", err))?;
-				Ok(tree_entries(&commit.tree(), "jj files")?
+				Ok(tree_entries(&commit.tree(), "jj files")
+					.await?
 					.into_keys()
 					.map(|path| path.as_internal_file_string().to_owned())
 					.collect())
@@ -339,9 +347,14 @@ impl JjWorkspace {
 		let settings = user_settings().map_err(|err| Error::backend(context, err))?;
 		let store_factories = default_backend_factories();
 		let working_copy_factories = default_working_copy_factories();
-		let mut workspace =
-			Workspace::load(&settings, &self.root, &store_factories, &working_copy_factories)
-				.map_err(|err| Error::backend(context, err))?;
+		// jj-lib 0.47 removed `Workspace::load`; the loader a factory builds for
+		// the root owns it now. Still synchronous, so the runtime below is
+		// unaffected.
+		let mut workspace = DefaultWorkspaceLoaderFactory
+			.create(&self.root)
+			.map_err(|err| Error::backend(context, err))?
+			.load(&settings, &store_factories, &working_copy_factories)
+			.map_err(|err| Error::backend(context, err))?;
 		let runtime = tokio::runtime::Builder::new_current_thread()
 			.enable_all()
 			.build()
@@ -349,7 +362,10 @@ impl JjWorkspace {
 		runtime.block_on(async move {
 			let mut repo = workspace
 				.repo_loader()
-				.load_at_head()
+				// 0.47 exposes the workspace name 0.46 hard-coded to `None` here.
+				// It only tags the "reconcile divergent operations" transaction;
+				// a reader attributes that merge to no workspace, as before.
+				.load_at_head(None)
 				.await
 				.map_err(|err| Error::backend(context, err))?;
 			if snapshot {
@@ -614,7 +630,7 @@ async fn working_copy_trees(
 		.await
 		.map_err(|err| Error::backend(context, err))?;
 	let parent_tree = commit
-		.parent_tree(repo)
+		.parent_tree(repo.index())
 		.await
 		.map_err(|err| Error::backend(context, err))?;
 	// Renames and copies come from the backend (the git backend runs gix
@@ -635,7 +651,13 @@ async fn working_copy_trees(
 	Ok(Some((parent_tree, commit.tree(), copies)))
 }
 
-fn tree_entries(
+/// jj-lib 0.47 made `MergedTree::entries` a stream, so enumerating a tree is
+/// awaited rather than iterated.
+#[allow(
+	clippy::future_not_send,
+	reason = "driven on a per-call current-thread runtime; jj-lib's tree stream is !Send"
+)]
+async fn tree_entries(
 	tree: &MergedTree,
 	context: &'static str,
 ) -> Result<BTreeMap<RepoPathBuf, MergedTreeValue>> {
@@ -646,18 +668,23 @@ fn tree_entries(
 				.map(|value| (path, value))
 				.map_err(|err| Error::backend(context, err))
 		})
-		.collect()
+		.try_collect()
+		.await
 }
 
-fn collect_changes(
+#[allow(
+	clippy::future_not_send,
+	reason = "driven on a per-call current-thread runtime; jj-lib's tree stream is !Send"
+)]
+async fn collect_changes(
 	before_tree: &MergedTree,
 	after_tree: &MergedTree,
 	copies: &CopyRecords,
 	files: &[String],
 	context: &'static str,
 ) -> Result<Vec<TreeChange>> {
-	let before = tree_entries(before_tree, context)?;
-	let after = tree_entries(after_tree, context)?;
+	let before = tree_entries(before_tree, context).await?;
+	let after = tree_entries(after_tree, context).await?;
 	let mut changes = Vec::new();
 	let mut removed: BTreeSet<RepoPathBuf> = before
 		.keys()
@@ -998,6 +1025,8 @@ fn local_bookmarks_for_commit(repo: &dyn Repo, commit_id: &CommitId) -> Vec<Stri
 mod tests {
 	use std::{collections::BTreeMap, fs, path::Path, process::Command};
 
+	use jj_lib::ref_name::WorkspaceName;
+
 	use super::*;
 
 	fn init_internal_jj(root: &Path) {
@@ -1007,7 +1036,12 @@ mod tests {
 			.build()
 			.unwrap();
 		runtime
-			.block_on(Workspace::init_internal_git(&settings, root, gix::hash::Kind::Sha1))
+			.block_on(Workspace::init_internal_git(
+				&settings,
+				root,
+				WorkspaceName::DEFAULT,
+				gix::hash::Kind::Sha1,
+			))
 			.unwrap();
 	}
 
@@ -1015,9 +1049,20 @@ mod tests {
 		Command::new("jj").arg("--version").output().is_ok()
 	}
 
+	/// An empty config directory, so a developer's own `jj` configuration
+	/// cannot reach these tests. Without it a `default-description` or a
+	/// commit trailer in `~/.config/jj/config.toml` rewrites the descriptions
+	/// they assert on.
+	fn jj_config_dir() -> &'static Path {
+		static DIR: std::sync::LazyLock<tempfile::TempDir> =
+			std::sync::LazyLock::new(|| tempfile::tempdir().unwrap());
+		DIR.path()
+	}
+
 	fn run_jj(root: &Path, args: &[&str]) -> String {
 		let output = Command::new("jj")
 			.current_dir(root)
+			.env("JJ_CONFIG", jj_config_dir())
 			.env("JJ_USER", "VCS Test")
 			.env("JJ_EMAIL", "vcs@example.com")
 			.args(args)
@@ -1272,6 +1317,11 @@ mod tests {
 	/// view; a jj-lib older than that field dropped it on the write, and the
 	/// workspace's next `jj` command re-imported HEAD and replaced its
 	/// working-copy commit with a new empty one.
+	///
+	/// With no `jj` on PATH the test skips, as the others here do. With a `jj`
+	/// that is present but too old to colocate it fails rather than skipping:
+	/// that is the one case where a skip would report a vacuous pass for the
+	/// very behaviour under test.
 	#[test]
 	fn reading_over_divergent_op_heads_keeps_colocated_workspace_working_copy() {
 		if !jj_available() {
@@ -1286,11 +1336,10 @@ mod tests {
 		jj(&main, &["commit", "-m", "base"]);
 		jj(&main, &["--config", "git.colocate=true", "workspace", "add", "../colocated"]);
 		let colocated = temp.path().join("colocated");
-		if !colocated.join(".git").exists() {
-			// This `jj` predates colocated secondary workspaces, so it records no
-			// Git HEAD for one and the read has nothing to drop.
-			return;
-		}
+		assert!(
+			colocated.join(".git").exists(),
+			"this jj does not colocate secondary workspaces, so it cannot exercise the fix"
+		);
 		jj(&colocated, &["describe", "-m", "work in colocated"]);
 		// A pure-jj workspace for the reader: with no `.git` beside it,
 		// detection takes the jj path.

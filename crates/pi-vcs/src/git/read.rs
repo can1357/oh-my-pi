@@ -1268,7 +1268,7 @@ fn parse_worktree_cli(raw: &str) -> Vec<WorktreeEntry> {
 	}
 	out
 }
-fn commit_subject(commit: &gix::Commit<'_>) -> gix::ExnMessageResult<String> {
+fn commit_subject(commit: &gix::Commit<'_>) -> std::result::Result<String, gix::Error> {
 	Ok(commit
 		.message()?
 		.title
