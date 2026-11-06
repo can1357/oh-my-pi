@@ -31,13 +31,17 @@ import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import { isFilesystemSourcePath } from "../../tools/path-utils";
 import { InternalUrlRouter } from "../../internal-urls/router";
+import type { ProtocolHandler } from "../../internal-urls/types";
 import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
 import { resolveExtensionDirectory } from "./directory-resolution";
+import { ExpectedReplies } from "./expected-replies";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 import { getAllPluginExtensionPaths } from "../plugins/loader";
 
 import { resolvePath, withHostGuard } from "../utils";
+import { ExtensionRegistrations } from "./registrations";
+import { claimExtensionUrlScheme, isStandardLinkScheme } from "./url-schemes";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import { notifyTranscriptPresentersChanged } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import type {
@@ -47,6 +51,7 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 	ExtensionFactory,
+	ExtensionReplies,
 	ExtensionRuntime as IExtensionRuntime,
 	LoadExtensionsResult,
 	MessageRenderer,
@@ -67,22 +72,6 @@ type LoadedExtensionModule = ExtensionFactory | { default?: ExtensionFactory };
 
 /** RFC 3986 scheme syntax, lowercased, two characters at least so `c` cannot capture `C:/` paths. */
 const LINK_SCHEME_PATTERN = /^[a-z][a-z0-9+.-]+$/;
-
-/** Standard schemes an extension may not claim: web, file and mail links. omp's internal URLs are refused too. */
-const STANDARD_LINK_SCHEMES: Readonly<Record<string, true>> = {
-	about: true,
-	blob: true,
-	data: true,
-	file: true,
-	ftp: true,
-	http: true,
-	https: true,
-	javascript: true,
-	mailto: true,
-	ssh: true,
-	ws: true,
-	wss: true,
-};
 
 function getExtensionFactory(module: LoadedExtensionModule): ExtensionFactory | null {
 	const candidate = typeof module === "function" ? module : module.default;
@@ -123,6 +112,7 @@ export class ExtensionRuntimeNotInitializedError extends Error {
 export class ExtensionRuntime implements IExtensionRuntime {
 	flagValues = new Map<string, boolean | string>();
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }> = [];
+	readonly expectedReplies = new ExpectedReplies();
 
 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void {
 		this.pendingProviderRegistrations.push({ name, config, sourceId });
@@ -214,9 +204,36 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		config: ProviderConfig;
 		sourceId: string;
 	}> = [];
+	/**
+	 * Expectations go to the session's store and follow this load (see `Extension.registrations`):
+	 * they stop counting while it is suspended, and go with it at teardown.
+	 */
+	readonly replies: ExtensionReplies = {
+		expect: (peerId, options) => {
+			const registrations = this.extension.registrations;
+			// A callback the torn-down load left behind records nothing, so no `wait` ever blocks on it.
+			if (registrations?.released) return () => {};
+			const expectation = this.runtime.expectedReplies.expect(peerId, {
+				promised: options?.promised,
+				suspended: registrations?.suspended,
+			});
+			const untrack = registrations?.add(expectation);
+			return () => {
+				// Released by the extension itself: untracked, so a long-lived load does not accumulate them.
+				untrack?.();
+				expectation.release();
+			};
+		},
+	};
+	/** Identity of this load's source for URL scheme ownership: its resolved path, or an inline factory. */
+	readonly #urlSchemeSource: string | ExtensionFactory;
 
 	get pi() {
 		return getCodingAgentApi();
+	}
+
+	get expectedReplies(): ExpectedReplies {
+		return this.runtime.expectedReplies;
 	}
 
 	constructor(
@@ -224,7 +241,9 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		private readonly runtime: IExtensionRuntime,
 		private readonly cwd: string,
 		public readonly events: EventBus,
+		urlSchemeSource: string | ExtensionFactory,
 	) {
+		this.#urlSchemeSource = urlSchemeSource;
 		// Extensions destructure `pi.on` or forward API methods as callbacks, so every
 		// prototype method must keep its receiver when detached. Walk the prototype
 		// rather than listing methods: a new method is bound without touching this.
@@ -241,6 +260,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		const list = this.extension.handlers.get(event) ?? [];
 		list.push(handler);
 		this.extension.handlers.set(event, list);
+	}
+
+	onSuspensionChange(listener: (suspended: boolean) => void): () => void {
+		return this.extension.registrations?.onSuspensionChange(listener) ?? (() => {});
 	}
 
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void {
@@ -343,11 +366,26 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 				`registerLinkScheme: "${scheme}" is not a URL scheme of two or more characters (letters, digits, "+", "-", ".")`,
 			);
 		}
-		// `=== true`: inherited keys such as `constructor` are not reserved.
-		if (STANDARD_LINK_SCHEMES[normalized] === true || InternalUrlRouter.instance().isBuiltin(normalized)) {
+		if (isStandardLinkScheme(normalized) || InternalUrlRouter.instance().isBuiltin(normalized)) {
 			throw new Error(`registerLinkScheme: "${scheme}" is reserved for standard or omp-internal links`);
 		}
 		if (!this.extension.linkSchemes.includes(normalized)) this.extension.linkSchemes.push(normalized);
+	}
+
+	registerUrlScheme(handler: ProtocolHandler): () => void {
+		const extension = this.extension;
+		const registration = claimExtensionUrlScheme(
+			InternalUrlRouter.instance(),
+			{ source: this.#urlSchemeSource, label: extension.resolvedPath, sessionId: () => extension.getSessionId?.() },
+			handler,
+		);
+		// The scheme's promptDoc and completion must exist when the session starts.
+		extension.registersUrlSchemes = true;
+		const untrack = extension.registrations?.add(registration);
+		return () => {
+			untrack?.();
+			registration.release();
+		};
 	}
 
 	registerComposerShape(definition: ComposerShapeDefinition): void {
@@ -466,6 +504,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		commands: new Map(),
 		flags: new Map(),
 		shortcuts: new Map(),
+		registrations: new ExtensionRegistrations(),
 	};
 }
 
@@ -478,6 +517,7 @@ async function runExtensionFactory(
 	factory: ExtensionFactory,
 	api: ExtensionAPI,
 	runtime: IExtensionRuntime,
+	extension: Extension,
 ): Promise<void> {
 	const providerRegistrationCheckpoint = [...runtime.pendingProviderRegistrations];
 
@@ -489,6 +529,8 @@ async function runExtensionFactory(
 			runtime.pendingProviderRegistrations.length,
 			...providerRegistrationCheckpoint,
 		);
+		// The failed load never joins a runner, so nothing else would release what it registered.
+		extension.registrations?.release();
 		throw error;
 	}
 }
@@ -529,8 +571,10 @@ async function bindExtension(
 	}
 	try {
 		const extension = createExtension(extensionPath, imported.resolvedPath);
-		const api = new ConcreteExtensionAPI(extension, runtime, cwd, eventBus);
-		await withHostGuard(() => runExtensionFactory(factory, api, runtime));
+		// A rebound inline SDK factory (`<inline-N>`, a per-session positional id) is its own source.
+		const urlSchemeSource = imported.resolvedPath.startsWith("<inline") ? factory : imported.resolvedPath;
+		const api = new ConcreteExtensionAPI(extension, runtime, cwd, eventBus, urlSchemeSource);
+		await withHostGuard(() => runExtensionFactory(factory, api, runtime, extension));
 
 		return { extension, error: null };
 	} catch (err) {
@@ -540,7 +584,8 @@ async function bindExtension(
 }
 
 /**
- * Create an Extension from an inline factory function.
+ * Create an Extension from an inline factory function. `name` labels it; the factory itself is its
+ * source identity, since inline names (`<inline-N>`) restart in every session.
  */
 export async function loadExtensionFromFactory(
 	factory: ExtensionFactory,
@@ -550,8 +595,8 @@ export async function loadExtensionFromFactory(
 	name = "<inline>",
 ): Promise<Extension> {
 	const extension = createExtension(name, name);
-	const api = new ConcreteExtensionAPI(extension, runtime, cwd, eventBus);
-	await runExtensionFactory(factory, api, runtime);
+	const api = new ConcreteExtensionAPI(extension, runtime, cwd, eventBus, factory);
+	await runExtensionFactory(factory, api, runtime, extension);
 	return extension;
 }
 

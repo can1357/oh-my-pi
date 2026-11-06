@@ -14,7 +14,7 @@ import {
 	parseArchivePathCandidates,
 } from "@oh-my-pi/pi-utils/ar";
 import { getEditStore, recordFullySeenRows } from "../edit/store";
-import { sessionResolveContext } from "../internal-urls/context";
+import { sessionCallerId, sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import { grep } from "../ovnfs/search";
@@ -1266,7 +1266,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					const header = URL_HEADER_RE.exec(line);
 					if (!header) continue;
 					const target = header[1]!.trimEnd().replace(HEADER_SUFFIX_RE, "");
-					const resolved = router.locateSync(target);
+					const resolved = router.locateSync(target, { sessionId: sessionCallerId(this.session) });
 					if (resolved) (displayTargets ??= {})[target] = resolved;
 				}
 				const truncated = Boolean(

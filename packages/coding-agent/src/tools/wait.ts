@@ -15,6 +15,7 @@ import { buildJobResult, snapshotJobs, undeliveredJobs } from "../async/job-cont
 import { hasLiveOwnedService, listServicesTolerant, waitForOwnedServiceCompletion } from "../launch/services";
 import { drainPendingInbox, messageResult } from "../irc/messaging";
 import { USER_AWAIT_ID } from "../registry/agent-awaits";
+import type { ExpectedReplies } from "../extensibility/extensions/expected-replies";
 import type { AgentRegistryApi } from "../registry/agent-registry";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
@@ -50,6 +51,8 @@ interface IdleStreak {
 interface WaitMessaging {
 	registry: AgentRegistryApi;
 	senderId: string;
+	/** Replies the caller's extensions expect for it from peers outside the registry. */
+	expected: ExpectedReplies | undefined;
 }
 
 /**
@@ -80,6 +83,18 @@ interface PendingReplies {
 	onUser: string[];
 	/** Agents asked whose turn ended without an answer, or that are gone. */
 	stopped: string[];
+	/**
+	 * Peers the caller's extensions expect a reply from (`pi.replies.expect`): opaque ids with no
+	 * session to inspect, owed a reply until the extension releases it. Kept apart from {@link from},
+	 * which feeds the IRC bus's broadcast filter: an opaque id that happens to equal a local agent's
+	 * must not let that agent's unrelated broadcast end the wait.
+	 */
+	expected: string[];
+}
+
+/** Whether anyone asked, an IRC agent or an expected peer, can still answer. */
+function canStillAnswer(replies: PendingReplies): boolean {
+	return replies.from.length > 0 || replies.expected.length > 0;
 }
 
 /**
@@ -95,7 +110,15 @@ interface PendingReplies {
  */
 function pendingReplies(messaging: WaitMessaging): PendingReplies {
 	const { registry, senderId } = messaging;
-	const replies: PendingReplies = { from: [], blocked: [], onUser: [], stopped: [] };
+	// A peer an extension expects a reply from (one in another process, behind a bridge) has no
+	// session to inspect: it can answer until the extension releases the expectation.
+	const replies: PendingReplies = {
+		from: [],
+		blocked: [],
+		onUser: [],
+		stopped: [],
+		expected: expectedPeers(messaging),
+	};
 	const since = registry.get(senderId)?.session?.runStartedAt ?? 0;
 	for (const { to, sentAt, promised } of IrcBus.global().unansweredSends(senderId, since)) {
 		const session = registry.get(to)?.session;
@@ -108,17 +131,31 @@ function pendingReplies(messaging: WaitMessaging): PendingReplies {
 	return replies;
 }
 
-/** Why a reply wait cannot (or can no longer) get its answer. */
-function noReplyText(replies: PendingReplies): string {
-	const ids = (list: string[]) => list.map(id => `\`${id}\``).join(", ");
+/** Peers the caller's extensions await a reply from in its current run (see `ExpectedReplies.pending`). */
+function expectedPeers({ registry, senderId, expected }: WaitMessaging): string[] {
+	return expected?.pending(registry.get(senderId)?.session?.runStartedAt ?? 0) ?? [];
+}
+
+function idList(ids: string[]): string {
+	return ids.map(id => `\`${id}\``).join(", ");
+}
+
+/**
+ * Why a reply wait cannot (or can no longer) get its answer. `released` names the peers an
+ * extension stopped expecting a reply from while the caller waited.
+ */
+function noReplyText(replies: PendingReplies, released: string[] = []): string {
 	if (replies.blocked.length > 0) {
-		return `${ids(replies.blocked)} cannot reply before you finish: it is waiting on your result. Finish without the answer.`;
+		return `${idList(replies.blocked)} cannot reply before you finish: it is waiting on your result. Finish without the answer.`;
 	}
 	if (replies.onUser.length > 0) {
-		return `${ids(replies.onUser)} is waiting on the user and cannot reply until they answer. Go on without the answer; its reply, if it comes, arrives as a message.`;
+		return `${idList(replies.onUser)} is waiting on the user and cannot reply until they answer. Go on without the answer; its reply, if it comes, arrives as a message.`;
 	}
 	if (replies.stopped.length > 0) {
-		return `${ids(replies.stopped)} finished its turn without replying. Ask again, or finish without the answer.`;
+		return `${idList(replies.stopped)} finished its turn without replying. Ask again, or finish without the answer.`;
+	}
+	if (released.length > 0) {
+		return `${idList(released)} no longer owes a reply: an answer it sent arrives as a message. Otherwise ask again, or finish without the answer.`;
 	}
 	return "no background job or service you started is running, and no agent you messaged this run owes a reply. Other agents' results and messages arrive on their own.";
 }
@@ -130,10 +167,12 @@ export function hasWaitTool(session: ToolSession): boolean {
 
 /**
  * Blocks on background jobs and services the calling agent started, or on
- * the reply to a message it sent this run. Other agents' work never sustains
- * a wait: a peer owes no message. A reply wait ends once no agent asked can
- * still answer soon: each one finished its turn, is blocked on the caller
- * itself (the cycle that would park both sides), or is waiting on the user.
+ * the reply to a message it sent this run (including one an extension
+ * expects for it from a peer outside the process). Other agents' work never
+ * sustains a wait: a peer owes no message. A reply wait ends once no agent
+ * asked can still answer soon: each one finished its turn, is blocked on the
+ * caller itself (the cycle that would park both sides), is waiting on the
+ * user, or had its expectation released or suspended with its extension.
  * With nothing new, a wait returns after a window from {@link WAIT_LADDER_MS}
  * that climbs across back-to-back idle waits. A direct message arriving
  * mid-wait ends any wait, returning every message queued by then. Broadcast
@@ -169,7 +208,8 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		this.#idle = undefined;
 		const registry = this.session.agentRegistry;
 		const senderId = this.session.getAgentId?.() ?? undefined;
-		const messaging = registry && senderId ? { registry, senderId } : undefined;
+		const messaging =
+			registry && senderId ? { registry, senderId, expected: this.session.expectedReplies } : undefined;
 		const manager = this.session.asyncJobManager;
 
 		if (messaging) {
@@ -202,8 +242,10 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		}
 		const serviceRunning = hasLiveOwnedService(this.session);
 		if (jobs.length === 0 && !serviceRunning) {
-			const replies = messaging ? pendingReplies(messaging) : { from: [], blocked: [], onUser: [], stopped: [] };
-			if (replies.from.length === 0) {
+			const replies = messaging
+				? pendingReplies(messaging)
+				: { from: [], blocked: [], onUser: [], stopped: [], expected: [] };
+			if (!canStillAnswer(replies)) {
 				// An idle poll, not a failure: flagged so the loop guard keeps counting
 				// across it, unless an interrupt (news for the model) landed meanwhile
 				// or the text names an agent asked that can no longer answer.
@@ -250,20 +292,28 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			: undefined;
 		// A reply wait re-checks whether an agent asked can still answer on
 		// every block change (including an asked agent opening or closing a
-		// dialog that waits on the user), status change, and end of an asked
-		// agent's turn (after any automatic reply that turn owes has been sent).
+		// dialog that waits on the user), status change, end of an asked
+		// agent's turn (after any automatic reply that turn owes has been sent),
+		// and release or suspension of an extension's expected reply.
 		let noReply: PendingReplies | undefined;
+		// Peers extensions expect a reply from as the wait starts: a wait that ends on `noReply` saw
+		// every expectation go, so each of them was released or suspended meanwhile.
+		let releasedPeers: string[] = [];
 		const replyGone = Promise.withResolvers<void>();
 		const unsubscribers: Array<() => void> = [];
 		if (replyWait) {
+			releasedPeers = expectedPeers(messaging);
 			const checkReplies = () => {
 				const replies = pendingReplies(messaging);
-				if (replies.from.length > 0) return;
+				if (canStillAnswer(replies)) return;
 				noReply = replies;
 				replyGone.resolve();
 			};
 			unsubscribers.push(messaging.registry.awaits.onChange(checkReplies));
 			unsubscribers.push(messaging.registry.onChange(checkReplies));
+			// Re-checked once the extension's current step is done: releasing one expectation and
+			// recording the next in the same step must not end the wait in between.
+			if (messaging.expected) unsubscribers.push(messaging.expected.onChange(() => queueMicrotask(checkReplies)));
 			for (const id of asked) {
 				const session = messaging.registry.get(id)?.session;
 				if (!session) continue;
@@ -369,8 +419,10 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			}
 			if (wake === "timeout") {
 				const span = formatDuration(WAIT_LADDER_MS[rung]);
+				// A reply wait that ran out names the peers an extension still expects a reply from.
+				const peers = replyWait ? expectedPeers(messaging) : [];
 				const text = replyWait
-					? `No reply within ${span}.`
+					? `No reply${peers.length > 0 ? ` from ${idList(peers)}` : ""} within ${span}.`
 					: `No service finished within ${span}. Read proc:// for status.`;
 				// A wait that ran out with nothing to report is an idle poll.
 				const result: AgentToolResult<CoordinationDetails> = {
@@ -386,7 +438,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 						type: "text",
 						text:
 							wake === "unanswerable" && noReply
-								? noReplyText(noReply)
+								? noReplyText(noReply, releasedPeers)
 								: "A service finished. Read proc:// for its status and output.",
 					},
 				],

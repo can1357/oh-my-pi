@@ -91,6 +91,7 @@ import type { LiveTranscript } from "../../live/controller";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
 import type * as PiCodingAgent from "../../index";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
+import type { ProtocolHandler } from "../../internal-urls/types";
 import type { LoopLimitConfig } from "../../modes/loop-limit";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
@@ -149,7 +150,9 @@ import type {
 	TurnStartEvent,
 } from "../shared-events";
 import type { SlashCommandInfo } from "../slash-commands";
+import type { ExtensionRegistrations } from "./registrations";
 import type { TerminalLaunchRequest, TerminalLaunchResult } from "../../subprocess/terminal-launch";
+import type { ExpectedReplies } from "./expected-replies";
 
 export type { Keybinding, OverlayHandle, OverlayOptions } from "@oh-my-pi/pi-tui";
 export type { AppKeybinding, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -1918,6 +1921,14 @@ export interface ExtensionAPI {
 	on(event: "mcp_notification", handler: ExtensionHandler<McpNotificationEvent>): void;
 	on(event: "link_activate", handler: ExtensionHandler<LinkActivateEvent>): void;
 
+	/**
+	 * Call `listener` when this load is suspended (`true`) or resumed (`false`) in place, as a live
+	 * `disabledExtensions` edit does. A suspended load keeps its module state, but receives no events
+	 * until resumed, so work it drives itself (a socket, a timer) should pause here. Returns the
+	 * unsubscribe; listeners are dropped when the load is torn down.
+	 */
+	onSuspensionChange(listener: (suspended: boolean) => void): () => void;
+
 	// =========================================================================
 	// Tool Registration
 	// =========================================================================
@@ -2083,6 +2094,29 @@ export interface ExtensionAPI {
 	registerLinkScheme(scheme: string): void;
 
 	/**
+	 * Route the internal URL scheme `handler.scheme` (`<scheme>://…`) to `handler`: `read` resolves
+	 * it, `write` writes it when `handler.spec.write.via` is `"handler"`, the composer completes it
+	 * when the handler has `complete()`, and the write approval gate applies `spec.write.tier` like
+	 * any built-in scheme's. Handlers receive the calling session in `context` (`cwd`, `sessionId`,
+	 * `sessionFile`, the tool `session` for tool calls).
+	 *
+	 * A scheme belongs to one extension source for the whole process: the resolved entry path, or an
+	 * inline SDK factory itself. Every load of that source — the root session's and each subagent's —
+	 * may register it. A call naming its session goes to that session's own registration, and finds
+	 * no service in a session without one; a call naming no session goes to the earliest active
+	 * registration, whose spec and `promptDoc` serve every session in the process. Throws for invalid
+	 * scheme syntax (`^[a-z][a-z0-9+.-]*$` after lowercasing), an OMP-owned or standard scheme
+	 * (`local`, `http`, …), a scheme another extension source holds, a scheme registered outside
+	 * extensions (RPC host URIs), or a spec the handler contradicts.
+	 *
+	 * Paused while this load is suspended through a live `disabledExtensions` edit (the scheme leaves
+	 * the router when no active registration is left) and resumed with it. Released when this load is
+	 * torn down (session shutdown, a throwing factory) or by calling the returned function; releasing
+	 * twice is a no-op. Registering one keeps the extension out of startup deferral.
+	 */
+	registerUrlScheme(handler: ProtocolHandler): () => void;
+
+	/**
 	 * Register a composer shape for the interactive editor.
 	 *
 	 * Registration happens during extension load. Built-in ids cannot be
@@ -2165,6 +2199,12 @@ export interface ExtensionAPI {
 	/** Set the session name. Persists to the session file. */
 	setSessionName(name: string): Promise<void>;
 
+	/**
+	 * Replies this session's agent awaits from peers the built-in tools cannot see, such as agents
+	 * in other processes behind a bridge. See {@link ExtensionReplies}.
+	 */
+	replies: ExtensionReplies;
+
 	// =========================================================================
 	// Provider Registration
 	// =========================================================================
@@ -2214,6 +2254,36 @@ export interface ExtensionAPI {
 
 	/** Shared event bus for extension communication. */
 	events: EventBus;
+}
+
+/** Options for {@link ExtensionReplies.expect}. */
+export interface ExpectReplyOptions {
+	/**
+	 * The peer promised a later answer, like an IRC progress note: the expectation stays awaited in
+	 * the agent's later runs until released. Without it, an expectation counts only in the run it
+	 * was recorded in, like an unanswered IRC question.
+	 */
+	promised?: boolean;
+}
+
+/** `pi.replies`: replies the extension's own agent awaits, which the `wait` tool honours. */
+export interface ExtensionReplies {
+	/**
+	 * Record that this session's agent awaits a reply from `peerId`, an opaque display id (for
+	 * example `@murmur/leia`) that need not name a registered agent. While any expectation is
+	 * unreleased, `wait` blocks for the reply instead of returning "Nothing to wait for"; a message
+	 * that reaches the agent mid-wait (e.g. the answer injected with `pi.sendUserMessage(text,
+	 * { deliverAs: "steer" })`) ends it as usual, and a wait that runs out names the peers still
+	 * awaited. Releasing the last expectation a blocked `wait` depended on ends that wait.
+	 *
+	 * Returns the release function: call it once the reply has been delivered (the injected
+	 * message started, e.g. on its `message_start` event), or when the peer is gone or the ask
+	 * failed. Release is idempotent. Expectations are scoped to this session and follow the
+	 * extension load: while a live `disabledExtensions` edit suspends it they stop counting (a
+	 * blocked `wait` depending only on them ends) and count again on resume; teardown (session
+	 * shutdown, a factory that throws) releases them, and an `expect` after it records nothing.
+	 */
+	expect(peerId: string, options?: ExpectReplyOptions): () => void;
 }
 
 // ============================================================================
@@ -2391,6 +2461,8 @@ export interface ExtensionRuntimeState {
 	unregisterProvider(name: string, sourceId: string): void;
 	/** What holds `shortcut` for the extension at `extensionPath`; answered by the runner once it exists. */
 	getShortcutConflict(shortcut: KeyId, extensionPath: string): ShortcutConflict | undefined;
+	/** Replies the session's agent awaits through `pi.replies.expect`; read by the `wait` tool. */
+	readonly expectedReplies: ExpectedReplies;
 }
 
 /** Action implementations for ExtensionAPI methods. */
@@ -2480,6 +2552,16 @@ export interface Extension {
 	shortcuts: Map<KeyId, ExtensionShortcut>;
 	/** Set once the extension calls `registerProvider`; providers feed startup model resolution. */
 	registersProviders?: boolean;
+	/** Set once the extension calls `registerUrlScheme`; a scheme's promptDoc and completion must exist at startup. */
+	registersUrlSchemes?: boolean;
+	/** Live id of the session whose runner adopted this load; set by `ExtensionRunner`, absent until then. */
+	getSessionId?: () => string;
+	/**
+	 * Registrations this load made outside its own session state (process-wide URL schemes, reply
+	 * expectations a tool honours): suspended and resumed with the load, released when it is torn
+	 * down. Absent on extensions not created by the loader.
+	 */
+	registrations?: ExtensionRegistrations;
 }
 
 /**
