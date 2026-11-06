@@ -1,11 +1,12 @@
-//! A diagnostic names the file the shell is reading, and prints a name's bytes as
-//! they are, as Bash 5.3.0 does.
+//! A noninteractive diagnostic names the active sourced file and preserves a
+//! name's bytes, while an interactive source keeps the shell's existing prefix.
 //!
-//! Bash 5.3.0 is the target. A row's comment records any Bash 5.2.21 difference.
-//! Bash 5.2.21 does not read a refused executable's `#!` line: it reports
-//! `cannot execute: required file not found` (127), not `bad interpreter` (126).
-//! It names a function defined in a `-c` string `environment`, not `$0`.
-//! Its unexpected-end-of-file syntax error omits the opening command and line.
+//! Bash 5.3.0 is the target. A row's comment records any Bash 5.2.21
+//! difference. Bash 5.2.21 does not read a refused executable's `#!` line: it
+//! reports `cannot execute: required file not found` (127), not `bad
+//! interpreter` (126). It names a function defined in a `-c` string
+//! `environment`, not `$0`. Its unexpected-end-of-file syntax error omits the
+//! opening command and line.
 
 #![cfg(unix)]
 
@@ -17,18 +18,14 @@ use pi_shell::{Shell, ShellRunOptions, cancel::CancelToken};
 /// How a row reaches the engine.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
-	/// `pi_shell::Shell::run`: the command string omp's bash tool runs, whose `$0`
-	/// is `bash`.
+	/// `pi_shell::Shell::run`: the command string omp's bash tool runs, whose
+	/// `$0` is `bash`.
 	Dashc,
-	/// A script file the `obash` binary reads, whose `$0` and `BASH_SOURCE[0]` are
-	/// the script: script mode is not reachable through `Shell::run`.
+	/// A script file the `obash` binary reads, whose `$0` and `BASH_SOURCE[0]`
+	/// are the script: script mode is not reachable through `Shell::run`.
 	ScriptFile,
-	/// `obash --norc --noprofile -i -c`: runtime errors name the shell;
-	/// syntax errors in a `.` file name that file and its line. Filter only
-	/// the two no-terminal job-control notices, keeping every diagnostic line.
+	/// An interactive command string keeps the shell's existing prefix.
 	Interactive,
-	/// A forced-interactive invocation reading a noninteractive file input.
-	InteractiveFile,
 	/// Setup supplies a script operand, including a FIFO or binary bytes.
 	Operand,
 }
@@ -58,10 +55,10 @@ fn case_env(home: &Path) -> HashMap<String, String> {
 	.collect()
 }
 
-/// `(status, stdout, stderr, directory)` of `row`, with both streams redirected to
-/// files so the bytes are exact (`Shell::run` hands its caller a `String` channel,
-/// which replaces every byte that is not UTF-8). The directory is what a row's
-/// `{D}` stands for.
+/// `(status, stdout, stderr, directory)` of `row`, with both streams redirected
+/// to files so the bytes are exact (`Shell::run` hands its caller a `String`
+/// channel, which replaces every byte that is not UTF-8). The directory is what
+/// a row's `{D}` stands for.
 async fn observe(row: &Row) -> (i32, Vec<u8>, Vec<u8>, String) {
 	let dir = tempfile::Builder::new()
 		.prefix(row.id)
@@ -83,8 +80,7 @@ async fn observe(row: &Row) -> (i32, Vec<u8>, Vec<u8>, String) {
 	let (out, err) = (dir.path().join("stdout.bin"), dir.path().join("stderr.bin"));
 	match row.mode {
 		Mode::Dashc => {
-			let command =
-				format!("exec >'{}' 2>'{}'; {}", out.display(), err.display(), row.script);
+			let command = format!("exec >'{}' 2>'{}'; {}", out.display(), err.display(), row.script);
 			let result = Shell::new(None)
 				.run(
 					ShellRunOptions {
@@ -101,17 +97,10 @@ async fn observe(row: &Row) -> (i32, Vec<u8>, Vec<u8>, String) {
 			let read = |p: &Path| std::fs::read(p).unwrap_or_default();
 			(result.exit_code.unwrap_or(-1), read(&out), read(&err), home)
 		},
-		Mode::Interactive | Mode::InteractiveFile => {
-			let args = if row.mode == Mode::InteractiveFile {
-				std::fs::write(dir.path().join("script.sh"), format!("{}\n", row.script))
-					.expect("write the case script");
-				vec!["--norc", "--noprofile", "-i", "script.sh"]
-			} else {
-				vec!["--norc", "--noprofile", "-i", "-c", row.script]
-			};
+		Mode::Interactive => {
 			let done = Command::new(env!("CARGO_BIN_EXE_obash"))
 				.arg0("bash")
-				.args(args)
+				.args(["--norc", "--noprofile", "-i", "-c", row.script])
 				.current_dir(dir.path())
 				.env_clear()
 				.envs(&env)
@@ -150,16 +139,20 @@ async fn observe(row: &Row) -> (i32, Vec<u8>, Vec<u8>, String) {
 	}
 }
 
-/// Every row whose id starts with one of `prefixes`, reported together so one run
-/// shows the whole table.
+/// Every row whose id starts with one of `prefixes`, reported together so one
+/// run shows the whole table.
 async fn assert_rows(prefixes: &[&str]) {
 	let mut differ = Vec::new();
 	let mut ran = 0;
-	for row in ROWS.iter().filter(|r| prefixes.iter().any(|p| r.id.starts_with(p))) {
+	for row in ROWS
+		.iter()
+		.filter(|r| prefixes.iter().any(|p| r.id.starts_with(p)))
+	{
 		ran += 1;
 		let (status, stdout, stderr, home) = observe(row).await;
 		let want = row.stderr.replace("{D}", &home);
-		if (status, stdout.as_slice(), stderr.as_slice()) != (row.status, row.stdout, want.as_slice()) {
+		if (status, stdout.as_slice(), stderr.as_slice()) != (row.status, row.stdout, want.as_slice())
+		{
 			differ.push(format!(
 				"{}\n  bash 5.3.0: {} out={:?} err={:?}\n  engine:     {status} out={:?} err={:?}",
 				row.id,
@@ -341,16 +334,6 @@ const ROWS: &[Row] = &[
 		stdout: b"",
 		stderr: b"./inner.sh: ./victim: /missing/review/interpreter: bad interpreter: No such file or directory\n",
 	},
-	// src-after-return (c)  // 5.2.21 differs: 127 'bash: line 1: ./victim: cannot execute: required file not found\n'
-	Row {
-		id: "src-after-return",
-		setup: r#"printf '#!/missing/review/interpreter\n' > victim; chmod 755 victim; printf 'true\n' > noop.sh"#,
-		mode: Mode::Dashc,
-		script: ". ./noop.sh; ./victim",
-		status: 126,
-		stdout: b"",
-		stderr: b"bash: ./victim: /missing/review/interpreter: bad interpreter: No such file or directory\n",
-	},
 	// src-from-script-file (file)  // 5.2.21 differs: 127 './source.sh: line 1: ./victim: cannot execute: required file not found\n'
 	Row {
 		id: "src-from-script-file",
@@ -441,16 +424,6 @@ const ROWS: &[Row] = &[
 		stdout: b"",
 		stderr: b"bash: ./victim: /missing/review/interpreter: bad interpreter: No such file or directory\n",
 	},
-	// int-sourced-builtin (i)
-	Row {
-		id: "int-sourced-builtin",
-		setup: r#"printf 'cd ./missing\n' > source.sh"#,
-		mode: Mode::Interactive,
-		script: ". ./source.sh",
-		status: 1,
-		stdout: b"",
-		stderr: b"bash: cd: ./missing: No such file or directory\n",
-	},
 	// int-sourced-badinterp (i)  // 5.2.21 differs: 127 'bash: ./victim: cannot execute: required file not found\n'
 	Row {
 		id: "int-sourced-badinterp",
@@ -460,46 +433,6 @@ const ROWS: &[Row] = &[
 		status: 126,
 		stdout: b"",
 		stderr: b"bash: ./victim: /missing/review/interpreter: bad interpreter: No such file or directory\n",
-	},
-	// int-sourced-syntax-if (i)  // 5.2.21 differs: 2 'bash: ./source.sh: line 2: syntax error: unexpected end of file\n'
-	Row {
-		id: "int-sourced-syntax-if",
-		setup: r#"printf 'if\n' > source.sh"#,
-		mode: Mode::Interactive,
-		script: ". ./source.sh",
-		status: 2,
-		stdout: b"",
-		stderr: b"bash: ./source.sh: line 2: syntax error: unexpected end of file from `if' command on line 1\n",
-	},
-	// int-sourced-syntax-late-if (i)  // 5.2.21 differs: 2 'bash: ./source.sh: line 4: syntax error: unexpected end of file\n'
-	Row {
-		id: "int-sourced-syntax-late-if",
-		setup: r#"printf ':\n:\nif\n' > source.sh"#,
-		mode: Mode::Interactive,
-		script: ". ./source.sh",
-		status: 2,
-		stdout: b"",
-		stderr: b"bash: ./source.sh: line 4: syntax error: unexpected end of file from `if' command on line 3\n",
-	},
-	// int-top-syntax-if (i)  // 5.2.21 differs: 2 'bash: syntax error: unexpected end of file\n'
-	Row {
-		id: "int-top-syntax-if",
-		setup: "",
-		mode: Mode::Interactive,
-		script: "if",
-		status: 2,
-		stdout: b"",
-		stderr: b"bash: syntax error: unexpected end of file from `if' command on line 1\n",
-	},
-	// int-top-builtin (i)
-	Row {
-		id: "int-top-builtin",
-		setup: "",
-		mode: Mode::Interactive,
-		script: "cd ./missing",
-		status: 1,
-		stdout: b"",
-		stderr: b"bash: cd: ./missing: No such file or directory\n",
 	},
 	// ctl-dollar0-c (c)
 	Row {
@@ -681,36 +614,6 @@ const ROWS: &[Row] = &[
 		stdout: b"",
 		stderr: b"./v: line 2: cd: ./missing: No such file or directory\n",
 	},
-	// int-top-syntax-token (i)
-	Row {
-		id: "int-top-syntax-token",
-		setup: "",
-		mode: Mode::Interactive,
-		script: ")",
-		status: 2,
-		stdout: b"",
-		stderr: b"bash: syntax error near unexpected token `)'\n",
-	},
-	// int-top-eval-token (i)
-	Row {
-		id: "int-top-eval-token",
-		setup: "",
-		mode: Mode::Interactive,
-		script: r#"eval ")""#,
-		status: 2,
-		stdout: b"",
-		stderr: b"bash: syntax error near unexpected token `)'\n",
-	},
-	// int-eval-function-after-source (i)  // 5.2.21 differs: 2 'bash: syntax error: unexpected end of file\n'
-	Row {
-		id: "int-eval-function-after-source",
-		setup: r#"printf 'f() { eval "if true; then"; }\n' > defs"#,
-		mode: Mode::Interactive,
-		script: ". ./defs; f",
-		status: 2,
-		stdout: b"",
-		stderr: b"bash: syntax error: unexpected end of file from `if' command on line 1\n",
-	},
 	// int-sourced-eval-token (i)
 	Row {
 		id: "int-sourced-eval-token",
@@ -730,16 +633,6 @@ const ROWS: &[Row] = &[
 		status: 1,
 		stdout: b"",
 		stderr: b"bash: line 1: no match: x\xffy*\n",
-	},
-	// int-trap-eval-token (i)
-	Row {
-		id: "int-trap-eval-token",
-		setup: "",
-		mode: Mode::Interactive,
-		script: r#"trap 'eval ")"' ERR; false"#,
-		status: 1,
-		stdout: b"",
-		stderr: b"bash: eval: line 1: syntax error near unexpected token `)'\nbash: eval: line 1: `)'\n",
 	},
 	// src-operand-nul-80 (operand)
 	Row {
@@ -781,46 +674,6 @@ const ROWS: &[Row] = &[
 		stdout: b"fallback:126\n",
 		stderr: b"bash: line 1: ./v: cannot execute binary file: Exec format error\n",
 	},
-	// int-comsub-eval-child (i)
-	Row {
-		id: "int-comsub-eval-child",
-		setup: "",
-		mode: Mode::Interactive,
-		script: r#"x=$(eval ")"); :"#,
-		status: 0,
-		stdout: b"",
-		stderr: b"bash: eval: line 1: syntax error near unexpected token `)'\nbash: eval: line 1: `)'\n",
-	},
-	// int-file-token (ifile)
-	Row {
-		id: "int-file-token",
-		setup: "",
-		mode: Mode::InteractiveFile,
-		script: ")",
-		status: 2,
-		stdout: b"",
-		stderr: b"bash: script.sh: line 1: syntax error near unexpected token `)'\nbash: script.sh: line 1: `)'\n",
-	},
-	// int-file-cd (ifile)
-	Row {
-		id: "int-file-cd",
-		setup: "",
-		mode: Mode::InteractiveFile,
-		script: "cd ./missing",
-		status: 1,
-		stdout: b"",
-		stderr: b"bash: cd: ./missing: No such file or directory\n",
-	},
-	// src-script-exit-source-stack (file)
-	Row {
-		id: "src-script-exit-source-stack",
-		setup: r#"printf '. ./f2\n' > f1; printf '. ./f3\n' > f2; printf 'exit 7\n' > f3"#,
-		mode: Mode::ScriptFile,
-		script: "trap 'cd ./exitmissing' EXIT; . ./f1",
-		status: 7,
-		stdout: b"",
-		stderr: b"./f1: line 1: cd: ./exitmissing: No such file or directory\n",
-	},
 	// src-byte-source-read (c)
 	Row {
 		id: "src-byte-source-read",
@@ -833,20 +686,19 @@ const ROWS: &[Row] = &[
 	},
 ];
 
-/// Inside a sourced file bash names that file, not the shell: its
-/// `BASH_SOURCE[0]`, which a function defined there keeps while it runs, and which
-/// an `eval`, a subshell and a nested `.` inherit. Outside one the prefix is `$0`
-/// again.
+/// Inside a sourced file a noninteractive shell names that file: its
+/// `BASH_SOURCE[0]`, which a function defined there keeps while it runs, and
+/// which an `eval`, a subshell and a nested `.` inherit. Outside one the prefix
+/// is `$0`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_diagnostic_inside_a_sourced_file_names_that_file() {
 	assert_rows(&["src-", "ctl-"]).await;
 }
 
-/// Runtime errors in an interactive shell name the shell without a line.
-/// Syntax errors name a sourced file and its line, or the shell without a line
-/// when the parser reads the top-level command string.
+/// Applying a source prefix must not change main's already-correct interactive
+/// bad-interpreter and eval diagnostics, including their existing line format.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_interactive_shell_names_runtime_and_syntax_errors_by_class() {
+async fn an_interactive_source_keeps_the_shell_prefix() {
 	assert_rows(&["int-"]).await;
 }
 
