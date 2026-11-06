@@ -1431,35 +1431,18 @@ describe("terminal launch dispatcher", () => {
 			expect(result).toEqual({ multiplexer: "herdr-core", placement: "pane", id: "t1q" });
 		});
 
-		it("starts a named child without app labels when the calling terminal has none", async () => {
-			const { calls, launch } = createHarness(herdrCoreEnv, [
-				{ stdout: JSON.stringify({ address: "t1d", labels: {}, parent: null }), exitCode: 0 },
-				{ stdout: JSON.stringify({ address: "t2a" }), exitCode: 0 },
-			]);
+		it("rejects a pane launch from a terminal the app does not show, before starting a terminal", async () => {
+			for (const labels of [{}, { "herdr.space": "sp9cda" }, { "herdr.tab": "tb2933" }]) {
+				const { calls, launch } = createHarness(herdrCoreEnv, [
+					{ stdout: JSON.stringify({ address: "t1d", labels, parent: null }), exitCode: 0 },
+				]);
 
-			const result = await launch({
-				multiplexer: "herdr-core",
-				placement: "pane",
-				command: ["omp"],
-				cwd: "/repo",
-				name: "fork-1",
-			});
+				const rejection = launch({ multiplexer: "herdr-core", placement: "pane", command: ["omp"], cwd: "/repo" });
 
-			expect(calls[1]?.argv).toEqual([
-				"hc",
-				"run",
-				"--bg",
-				"--json",
-				"--no-notify",
-				"--outlive-parent",
-				"--cwd",
-				"/repo",
-				"--name",
-				"fork-1",
-				"--",
-				"omp",
-			]);
-			expect(result.id).toBe("t2a");
+				await expect(rejection).rejects.toBeInstanceOf(TerminalLaunchError);
+				await expect(rejection).rejects.toMatchObject({ operation: "target" });
+				expect(calls.map(call => call.argv[1])).toEqual(["get"]);
+			}
 		});
 
 		it("rejects a name herdr-core cannot accept before starting a terminal", async () => {
