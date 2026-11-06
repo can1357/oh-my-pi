@@ -79,6 +79,52 @@ describe("context overflow evidence", () => {
 	});
 });
 
+describe("isContextOverflow - rate-limit status vetoes token-cap wording", () => {
+	const bedrockTooManyTokens =
+		"429 Too many tokens, please wait before trying again. (type=rate_limit_error param=rate_limit_exceeded)";
+
+	it("does not flag a 429 token-cap body as context overflow", () => {
+		// Bedrock's per-minute throttle reads like a window-excess error to the
+		// text patterns; the 429 status must veto the match or the session skips
+		// retry and the fallback chain for a compaction that cannot help.
+		const message = createErrorMessage(bedrockTooManyTokens);
+		message.errorStatus = 429;
+		expect(isContextOverflow(message, 262144)).toBe(false);
+		const id = AIError.classifyMessage({ errorMessage: bedrockTooManyTokens, errorStatus: 429 });
+		expect(AIError.is(id, AIError.Flag.ContextOverflow)).toBe(false);
+	});
+
+	it("recovers the status from a raw-status errorId when errorStatus is absent", () => {
+		expect(isContextOverflow({ stopReason: "error", errorMessage: bedrockTooManyTokens, errorId: 429 })).toBe(false);
+	});
+
+	it("recovers the status from the text when the message carries none", () => {
+		// A thrown plain-text 429 reaches the session without an errorStatus field;
+		// the leading "429" in the body is the only status evidence.
+		expect(isContextOverflow({ stopReason: "error", errorMessage: bedrockTooManyTokens }, 262144)).toBe(false);
+	});
+
+	it("does not flag a 402 token-cap body as context overflow", () => {
+		const errorMessage = "402 Payment required: too many tokens this billing period";
+		expect(isContextOverflow({ stopReason: "error", errorMessage, errorStatus: 402 })).toBe(false);
+		const id = AIError.classifyMessage({ errorMessage, errorStatus: 402 });
+		expect(AIError.is(id, AIError.Flag.ContextOverflow)).toBe(false);
+	});
+
+	it("still flags the same wording on a 400", () => {
+		const errorMessage = "400 Too many tokens in the request";
+		expect(isContextOverflow({ stopReason: "error", errorMessage, errorStatus: 400 })).toBe(true);
+		const id = AIError.classifyMessage({ errorMessage, errorStatus: 400 });
+		expect(AIError.is(id, AIError.Flag.ContextOverflow)).toBe(true);
+	});
+
+	it("still flags the same wording when no status is known", () => {
+		const errorMessage = "Too many tokens";
+		expect(isContextOverflow({ stopReason: "error", errorMessage })).toBe(true);
+		expect(AIError.is(AIError.classifyMessage({ errorMessage }), AIError.Flag.ContextOverflow)).toBe(true);
+	});
+});
+
 describe("isContextOverflow - model_context_window_exceeded", () => {
 	it("detects model_context_window_exceeded in finish_reason error message", () => {
 		const message = createErrorMessage("Provider finish_reason: model_context_window_exceeded");
