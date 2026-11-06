@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { withOAuthAccess } from "@oh-my-pi/pi-ai/auth-retry";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 
 const PROVIDER = "unit-oauth-select";
@@ -122,6 +123,37 @@ describe("AuthStorage OAuth account selection", () => {
 				sessionId: "child-session",
 			}),
 		).toBe("a@example.com");
+	});
+
+	test("tries undiscovered accounts before reusing rate-limited discovery matches", async () => {
+		const storage = authStorage;
+		if (!storage) throw new Error("test setup failed");
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (provider, credentials) => {
+			const credential = credentials[provider];
+			return credential ? { newCredentials: credential, apiKey: credential.access } : null;
+		});
+		const accounts = ["a", "b", "c", "d", "e", "f", "g"];
+		await storage.credentials.set(PROVIDER, accounts.map(oauthCredential));
+		const options = { accountIds: ["acc-a", "acc-b"] };
+		const sessionId = "partial-discovery-failover";
+		const attempted: string[] = [];
+		const error = new ProviderHttpError(
+			"This request would exceed your account's rate limit. Please try again later. retry-after-ms=13724000",
+			429,
+		);
+
+		for (const _account of accounts) {
+			const key = await storage.keys.get(PROVIDER, sessionId, options);
+			if (!key) throw new Error("expected a stored account");
+			attempted.push(key);
+			const rotation = await storage.limits.rotate(PROVIDER, sessionId, { error, apiKey: key });
+			expect(rotation.switched).toBe(attempted.length < accounts.length);
+		}
+
+		expect(new Set(attempted)).toEqual(new Set(accounts.map(account => `access-${account}`)));
+		expect(new Set(attempted.slice(0, 2))).toEqual(new Set(["access-a", "access-b"]));
+		// With every account blocked, the normal last-resort lookup still prefers discovery matches.
+		expect(await storage.keys.get(PROVIDER, sessionId, options)).toMatch(/^access-[ab]$/);
 	});
 
 	test("resolves the account at the requested position by ID and touches only that one", async () => {

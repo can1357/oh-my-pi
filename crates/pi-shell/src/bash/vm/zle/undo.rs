@@ -110,10 +110,12 @@ pub fn mkundoent(ed: &mut Editor) {
 	let ll = ed.line.len();
 	let lastll = u.lastline.len();
 	let sh = ll.min(lastll);
-	let mut pre = 0;
-	while pre < sh && ed.line[pre] == u.lastline[pre] {
-		pre += 1;
-	}
+	let pre = ed
+		.line
+		.iter()
+		.zip(&u.lastline)
+		.take_while(|(a, b)| a == b)
+		.count();
 	let mut suf = 0;
 	while suf < sh - pre && ed.line[ll - 1 - suf] == u.lastline[lastll - 1 - suf] {
 		suf += 1;
