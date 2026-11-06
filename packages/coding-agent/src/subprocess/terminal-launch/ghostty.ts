@@ -142,9 +142,11 @@ function parseTerminalList(request: GhosttyLaunchRequest, stdout: string): Ghost
 		if (!line.trim()) continue;
 		const [id, pid, tty, windowId] = line.split("|");
 		const pidNumber = Number(pid);
-		if (!id || !windowId || !Number.isSafeInteger(pidNumber) || pidNumber <= 0) {
-			throw launchError(request, "list terminals", "ghostty list terminals returned invalid terminal information.");
-		}
+		// A surface whose foreground process is gone reports `pid` 0 or `missing
+		// value` (Ghostty keeps windows open after `wait after command:false`
+		// commands exit). Such a surface cannot host this process, so skip it
+		// instead of failing the whole listing.
+		if (!id || !windowId || !Number.isSafeInteger(pidNumber) || pidNumber <= 0) continue;
 		terminals.push({ id, windowId, pid: pidNumber, tty: tty ?? "" });
 	}
 	return terminals;

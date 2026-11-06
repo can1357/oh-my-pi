@@ -159,9 +159,27 @@ describe("Ghostty launches", () => {
 		expect(script).toContain('"win-1"');
 		expect(script).toContain('"term-host"');
 		expect(script).toContain("split hostTerm direction right with configuration cfg");
-		expect(script).toContain("command:\"'omp' '--fork' '/repo/session.jsonl'\"");
+		expect(script).toContain('command:"\'omp\' \'--fork\' \'/repo/session.jsonl\'"');
 		expect(script).toContain('initial working directory:"/repo"');
 		expect(script).toContain("wait after command:false");
+	});
+
+	it("ignores surfaces without a live process when listing terminals", async () => {
+		const { calls, launch } = createHarness(GHOSTTY_ENV, [
+			VERSION_OK,
+			processTable(),
+			terminalList([
+				`term-dead|0|/dev/ttys010|win-leftover`,
+				`term-idle|missing value|/dev/ttys011|win-1`,
+				`term-host|${process.ppid}|/dev/ttys003|win-1`,
+			]),
+			{ stdout: "OK|term-new\n", exitCode: 0 },
+		]);
+		const result = await launch(paneRequest());
+		expect(result).toEqual({ multiplexer: "ghostty", placement: "pane", id: "term-new" });
+		const script = calls[3]!.argv[2]!;
+		expect(script).toContain('"term-host"');
+		expect(script).not.toContain('"term-dead"');
 	});
 
 	it("opens a tab in the hosting window and restores focus to the host when focus is false", async () => {
