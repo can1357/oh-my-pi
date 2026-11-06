@@ -44,13 +44,29 @@ const SYSTEM_DIRS: &[&str] = &[];
 /// exists to remove, arrived at by the harness itself. Found by review
 /// on a host where every caller entry was rejected.
 ///
-/// `/dev/null` is not a directory, so a lookup through it finds nothing
-/// and stops there. The test that needed a program then fails on that
-/// program, which is what a reader can act on.
-#[cfg(unix)]
-const NO_PROGRAMS: &str = "/dev/null";
-#[cfg(not(unix))]
-const NO_PROGRAMS: &str = "NUL";
+/// The entry is this test binary's own path. A lookup of `sh` through it
+/// asks for `<this binary>/sh`, which is not a path a file can have, so
+/// the search finds nothing and stops; the test that needed a program
+/// then fails on that program, which is what a reader can act on.
+///
+/// It is the binary's own path rather than a name like `/dev/null`
+/// because this has to hold no programs on EVERY host, and naming a
+/// system path only moves the question to whether that path is what we
+/// think it is. A reviewer mounted a directory of programs at
+/// `/dev/null` and the harness ran one. The running binary needs no such
+/// assumption: anybody who can turn it into a directory of programs has
+/// already replaced the test.
+///
+/// `current_exe` failing is the one case left, and a host that cannot
+/// name the binary it is running has nothing better to offer; the root
+/// directory stands in there because whatever else it is, it is not the
+/// working directory.
+fn no_programs() -> OsString {
+	std::env::current_exe().map_or_else(
+		|_| OsString::from(std::path::MAIN_SEPARATOR_STR),
+		PathBuf::into_os_string,
+	)
+}
 
 /// The `PATH` the test process gets, instead of the caller's: the
 /// directories the programs in [`REQUIRED`] were found in, **in search
@@ -107,7 +123,7 @@ pub static TEST_PATH: LazyLock<OsString> = LazyLock::new(|| {
 		.filter(|(dir, _)| std::env::join_paths([dir.as_path()]).is_ok())
 		.map(|(dir, _)| dir);
 	let joined = std::env::join_paths(kept).unwrap_or_default();
-	if joined.is_empty() { OsString::from(NO_PROGRAMS) } else { joined }
+	if joined.is_empty() { no_programs() } else { joined }
 });
 
 /// One of the caller's `PATH` entries, if this harness supports it.
