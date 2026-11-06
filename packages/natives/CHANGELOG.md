@@ -13,6 +13,7 @@
 - `Shell` and `executeShell` now run pi-shell's Bash engine with Bash 5.3 semantics, including aliases containing pipelines, subshells, and separators.
 - Native shell is faster across parsing, functions, expansion, redirections, arithmetic, loops, and external command startup.
 - Sixel image output now uses a built-in encoder.
+- Built-in `ps -o` accepts Apple's `utime` (alias `putime`) for user CPU time, instead of failing with `unknown output format specifier 'utime'`.
 - Shell spawn benchmarks now report median and p99 latency.
 
 ### Changed
