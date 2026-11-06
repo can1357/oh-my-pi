@@ -162,7 +162,9 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	 */
 	async locate(url: InternalUrl, context?: ResolveContext): Promise<string | null> {
 		const outputId = url.rawHost || url.hostname;
-		if (!outputId) throw new Error("agent:// URL requires an output ID: agent://<id>");
+		// Bare `agent://` is the roster view handled by resolve(); there is no
+		// file to locate for it.
+		if (!outputId) return null;
 		if (outputId === "all" || hasPathExtraction(url)) return null;
 		if (isSuperseded(context?.agentRegistry ?? AgentRegistry.global(), outputId)) return null;
 		const dirs = await this.#outputDirs(context);
