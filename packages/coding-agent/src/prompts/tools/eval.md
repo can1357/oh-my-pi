@@ -14,7 +14,7 @@ print(value, ...)  log(message)  phase(title)  env(key?, value?) — sync
 read(path, offset?, limit?)  write(path, content); JS: await read(path, offset?, limit?)  await write(path, content) — Python: sync; JS: async
 output(*ids, format?, query?, offset?, limit?); JS: await output(...ids, { format?, query?, offset?, limit? }) — Python: sync; JS: async
 wait(handles, timeout?=None, raise_errors?=True); JS: await wait(handles, { timeout?, raiseErrors? }) — Python: sync; JS: async; agent/completion barrier, ordered results; `raise_errors=False` / `raiseErrors: false` retains failures.
-await tool.<name>(args) — async; session tool; `args` is its parameter object
+await tool.<name>(args) — async; session tool; `args` is its parameter object; a result whose `truncated` is set carries a sample of the text, and `truncated.artifact` addresses the whole of it
 ```
 {{else}}
 `await` marks async helpers; the rest are sync.
@@ -24,7 +24,7 @@ Python (kwargs):
 print(value, ...)  log(message)  phase(title)  env(key?, value?)
 read(path, offset?, limit?)  write(path, content)  output(*ids, format?, query?, offset?, limit?)
 wait(handles, timeout?=None, raise_errors?=True) — agent/completion barrier, ordered results; `raise_errors=False` retains failures.
-await tool.<name>(args) — session tool; `args` is its parameter object
+await tool.<name>(args) — session tool; `args` is its parameter object; a result whose `truncated` is set carries a sample of the text, and `truncated.artifact` addresses the whole of it
 ```
 {{/if}}
 {{#if js}}
@@ -33,7 +33,7 @@ JS (positional args or ONE trailing options object):
 print(value, ...)  log(message)  phase(title)  env(key?, value?)
 await read(path, offset?, limit?)  await write(path, content)  await output(...ids, { format?, query?, offset?, limit? })
 await wait(handles, { timeout?, raiseErrors? }) — agent/completion barrier, ordered results; `raiseErrors: false` retains failures.
-await tool.<name>(args) — session tool; `args` is its parameter object
+await tool.<name>(args) — session tool; `args` is its parameter object; a result whose `truncated` is set carries a sample of the text, and `truncated.artifact` addresses the whole of it
 ```
 {{/if}}
 {{/ifAll}}

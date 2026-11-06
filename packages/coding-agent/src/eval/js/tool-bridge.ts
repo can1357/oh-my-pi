@@ -62,6 +62,35 @@ export interface ToolBridgeOptions {
 	onReply?: (text: string) => void;
 }
 
+/**
+ * What a bridged call reports when the harness handed the cell a sample of the
+ * result instead of the result.
+ *
+ * The sample itself always says so in prose — the truncation notice the tool
+ * wrapper appends to the text. That sentence is written for a reader, and on
+ * the eval path the consumer is a script: it slices, counts or filters `text`
+ * and never reads the last line. Worse, `details` keeps describing the whole
+ * object the call asked about, so the two halves of one value disagree with
+ * nothing between them saying which is narrower (`envoy_sessions` answers
+ * `details.count: 684` beside a `text` holding 44 of those sessions).
+ *
+ * So the fact is also carried where a script trips over it: `truncated` is
+ * present if and only if the text is a sample, and `artifact` addresses the
+ * whole value. Every field is derived from the same `details.meta.truncation`
+ * the prose notice is formatted from, so the two can never disagree.
+ */
+export interface BridgeTruncation {
+	/** Lines of the whole result, and how many of them the text carries. */
+	lines: { shown: number; total: number };
+	/** Bytes of the whole result, and how many of them the text carries. */
+	bytes: { shown: number; total: number };
+	/**
+	 * Internal URL of the whole result, readable with `read`. Absent when saving
+	 * it failed: then the elided bytes are gone, which `truncated` still reports.
+	 */
+	artifact?: string;
+}
+
 type ToolValue =
 	| string
 	| EvalBudgetResult
@@ -78,10 +107,38 @@ type ToolValue =
 			details?: unknown;
 			images?: Omit<ImageContent, "type">[];
 			hasError?: boolean;
+			truncated?: BridgeTruncation;
 	  };
 function toolResultHasError(result: AgentToolResult): boolean {
 	if (isRecord(result) && result.isError === true) return true;
 	return isRecord(result.details) && result.details.isError === true;
+}
+
+/**
+ * The {@link BridgeTruncation} for a result whose text the harness sampled, or
+ * `undefined` when the text is the whole result. Reads the wrapper's own
+ * `details.meta.truncation`, so a tool that truncated itself (bash, read, eval)
+ * and one the central artifact spill cut report identically.
+ */
+function bridgeTruncation(details: unknown): BridgeTruncation | undefined {
+	if (!isRecord(details)) return undefined;
+	const meta = details.meta;
+	if (!isRecord(meta)) return undefined;
+	const truncation = meta.truncation;
+	if (!isRecord(truncation)) return undefined;
+	const { totalLines, outputLines, totalBytes, outputBytes, artifactId } = truncation;
+	if (typeof totalLines !== "number" || typeof totalBytes !== "number") return undefined;
+	const shownLines = typeof outputLines === "number" ? outputLines : totalLines;
+	const shownBytes = typeof outputBytes === "number" ? outputBytes : totalBytes;
+	// A per-line column cap records a limit without dropping lines or bytes; the
+	// text is then the whole result with long lines shortened, not a sample.
+	if (shownLines >= totalLines && shownBytes >= totalBytes) return undefined;
+	const value: BridgeTruncation = {
+		lines: { shown: shownLines, total: totalLines },
+		bytes: { shown: shownBytes, total: totalBytes },
+	};
+	if (typeof artifactId === "string" && artifactId.length > 0) value.artifact = `artifact://${artifactId}`;
+	return value;
 }
 
 function getTool(session: ToolSession, name: string): AgentTool {
@@ -189,12 +246,16 @@ export function bridgeValueFromToolResult(
 		const event = summarize(name, args, result, text, hasError);
 		if (event) emitStatus(event);
 	}
-	if (result.details === undefined && imageBlocks.length === 0 && !hasError) return text;
+	const truncated = bridgeTruncation(result.details);
+	// A sampled text is never handed back as a bare string: the caller would
+	// have nowhere to find out that it is a sample.
+	if (result.details === undefined && imageBlocks.length === 0 && !hasError && !truncated) return text;
 	const value: Exclude<ToolValue, string> = { text, details: result.details };
 	if (imageBlocks.length > 0) {
 		value.images = imageBlocks.map(({ type: _type, ...image }) => image);
 	}
 	if (hasError) value.hasError = true;
+	if (truncated) value.truncated = truncated;
 	return value;
 }
 
