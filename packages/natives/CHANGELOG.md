@@ -23,6 +23,7 @@
 
 ### Fixed
 
+- Fixed a command found through a relative `PATH` entry or the command hash being named by its absolute path in errors, `hash`, `BASH_CMDS` and `type -p` ([#18249](https://github.com/can1357/oh-my-pi/pull/18249) by [@sjawhar](https://github.com/sjawhar))
 - Fixed `$!` in command substitutions, subshells and pipeline stages to name the parent's last background job, as in Bash ([#18107](https://github.com/can1357/oh-my-pi/pull/18107) by [@sjawhar](https://github.com/sjawhar))
 - Fixed Windows `rsync` treating a one-letter daemon host like `h::module` as a drive path ([#18048](https://github.com/can1357/oh-my-pi/pull/18048) by [@jchanghong023](https://github.com/jchanghong023))
 - Fixed history saves hanging when a stale lock cannot be removed.
