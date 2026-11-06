@@ -666,6 +666,51 @@ describe("tool-owned dynamic approval declarations", () => {
 			reason: "Prompt required by bash pattern: curl *",
 		});
 	});
+
+	it("allows leading environment assignments only when permitted by bash.allowedEnvVars or rule.env, and strips them for deny/prompt", () => {
+		const settingsOverrides = {
+			"bash.allowedEnvVars": ["GOOS", "GOARCH", "CGO_ENABLED", "CARGO_TARGET_DIR", "GOFIPS*"],
+			"bash.patterns": [
+				{ match: "rm -rf *", approval: "deny" },
+				{ match: "curl *", approval: "prompt" },
+				{ match: "go test*", approval: "allow" },
+				{ match: "bun run build:native*", approval: "allow", env: ["CMAKE_GENERATOR"] },
+			],
+		};
+
+		for (const command of [
+			"GOOS=linux go test ./...",
+			"CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOFIPS140=latest go test ./...",
+			'CARGO_TARGET_DIR="/tmp/target dir" CMAKE_GENERATOR=Ninja bun run build:native',
+		]) {
+			expect(bashApproval(command, settingsOverrides)).toEqual({ tier: "write", policy: "allow" });
+		}
+
+		// Unlisted env vars or bare assignments with no command must not ride the allow pattern.
+		for (const command of [
+			"LD_PRELOAD=/tmp/evil.so go test ./...",
+			"GOOS=linux LD_PRELOAD=/tmp/evil.so go test ./...",
+			"CMAKE_GENERATOR=Ninja go test ./...",
+			"GOOS=linux",
+			"GOOS=linux   ",
+		]) {
+			expect(bashApproval(command, settingsOverrides)).toBe("exec");
+		}
+
+		// Leading env assignments cannot bypass deny or prompt rules.
+		expect(bashApproval("FOO=1 BAR=2 rm -rf build", settingsOverrides)).toEqual({
+			tier: "exec",
+			override: true,
+			policy: "deny",
+			reason: "Blocked by bash pattern: rm -rf *",
+		});
+		expect(bashApproval("HTTP_PROXY=http://proxy.local curl https://example.com", settingsOverrides)).toEqual({
+			tier: "exec",
+			override: true,
+			policy: "prompt",
+			reason: "Prompt required by bash pattern: curl *",
+		});
+	});
 	it("never auto-approves a command that only prefixes an allow pattern", () => {
 		const settingsOverrides = {
 			"bash.patterns": [{ match: "git *", approval: "allow" }],

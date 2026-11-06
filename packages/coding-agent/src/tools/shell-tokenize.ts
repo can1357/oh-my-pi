@@ -228,7 +228,75 @@ const SHELL_INTERPRETER_COMMANDS: Record<string, true> = {
 };
 
 const SHELL_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*\+?=/u;
+const SHELL_ASSIGNMENT_NAME = /^([A-Za-z_][A-Za-z0-9_]*)\+?=/u;
 const SHELL_REINTERPRET_OPTION = /^(?:-[^-]*[ce]|--(?:command|eval)(?:=.*)?)$/u;
+
+/** Whether `word` begins with a POSIX shell variable assignment prefix (`NAME=` or `NAME+=`). */
+export function isShellEnvironmentAssignment(word: string): boolean {
+	return SHELL_ASSIGNMENT.test(word);
+}
+
+/** Finds the end of a shell word, respecting quotes and escapes; returns null for incomplete syntax. */
+function skipShellWord(command: string, start: number): number | null {
+	let inSingle = false;
+	let inDouble = false;
+	for (let i = start; i < command.length; i++) {
+		const ch = command[i];
+		if (inSingle) {
+			if (ch === "'") inSingle = false;
+			continue;
+		}
+		if (inDouble) {
+			if (ch === "\\") {
+				if (i + 1 >= command.length) return null;
+				i++;
+				continue;
+			}
+			if (ch === '"') inDouble = false;
+			continue;
+		}
+		if (ch === "'") {
+			inSingle = true;
+			continue;
+		}
+		if (ch === '"') {
+			inDouble = true;
+			continue;
+		}
+		if (ch === "\\") {
+			if (i + 1 >= command.length) return null;
+			i++;
+			continue;
+		}
+		if (ch === " " || ch === "\t") return i;
+	}
+	return inSingle || inDouble ? null : command.length;
+}
+
+/**
+ * Removes leading `NAME=value` (or `NAME+=value`) assignments without interpreting shell syntax.
+ * When `allowName` is supplied, stops stripping at the first assignment whose variable name it rejects.
+ */
+export function withoutLeadingEnvironmentAssignments(
+	command: string,
+	allowName?: (name: string) => boolean,
+): string | null {
+	let index = 0;
+	let foundAssignment = false;
+	while (index < command.length) {
+		while (command[index] === " " || command[index] === "\t") index++;
+		const match = SHELL_ASSIGNMENT_NAME.exec(command.slice(index));
+		if (!match) break;
+		if (allowName && !allowName(match[1])) break;
+		const wordEnd = skipShellWord(command, index + match[0].length);
+		if (wordEnd === null) return null;
+		foundAssignment = true;
+		index = wordEnd;
+	}
+	if (!foundAssignment) return null;
+	const commandWithoutAssignments = command.slice(index).trimStart();
+	return commandWithoutAssignments.length > 0 ? commandWithoutAssignments : null;
+}
 
 /**
  * Parses the deliberately small command language eligible for compound-command

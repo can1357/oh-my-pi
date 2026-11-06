@@ -101,6 +101,7 @@ bash:
 - By default, `allow` can lower the approval tier for a simple command, but cannot approve a compound command. For example, `match: "git *"` does not approve `git status && rm -rf build`.
 - With `bash.allowCompoundCommands: true` (default `false`) and a configured POSIX shell, literal `&&` chains are evaluated per command. Every segment needs an `allow` rule to allow the chain; an unmatched segment retains normal exec-tier approval. Segment rules remain first-match-wins, any segment or chain-wide deny wins, and prompts are retained. Expansions, other shell operators, and critical command patterns do not gain an allow bypass.
 - `deny` and `prompt` check the complete command and each shell command segment. A rule such as `match: "rm -rf *"` therefore catches `cd /tmp && rm -rf build`.
+- Leading `KEY=VALUE` assignments on `allow` rules are stripped only when the variable name matches `bash.allowedEnvVars` or the rule's optional `env: [...]` list (wildcards `*` supported); `deny` and `prompt` rules always check segments with and without leading `KEY=VALUE` assignments so leading environment variable assignments cannot bypass a restriction.
 
 Use this setting for safety and user control. It remains useful for commands with no appropriate replacement tool, such as destructive removal, network access, deployment scripts, or project-specific scripts.
 

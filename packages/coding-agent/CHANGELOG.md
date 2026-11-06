@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `bash.allowedEnvVars` and per-rule `env` lists on `bash.patterns` to allow specified leading `KEY=VALUE` environment variable prefixes on `allow` rules without duplicating rules for each variable combination ([#18351](https://github.com/can1357/oh-my-pi/pull/18351) by [@asuffield](https://github.com/asuffield))
 - Added `skills.manualSkills` glob patterns to keep skills available manually while hiding them from the model catalog, without editing their `SKILL.md` files ([#18114](https://github.com/can1357/oh-my-pi/pull/18114) by [@Shadorain](https://github.com/Shadorain))
 - Added Keenable as a web search engine (`web/keenable`). It uses `KEENABLE_API_KEY` or a stored `keenable` credential when present; an explicit selection without a key uses Keenable's keyless public endpoint ([#17953](https://github.com/can1357/oh-my-pi/pull/17953) by [@KGKallasmaa](https://github.com/KGKallasmaa))
 - Bash commands now visualize execution incrementally in Raw or Python-like Pseudo, with variable values beside their latest setter and bounded replay history for foreground and background jobs; PTY and user-shell runs retain their plain command view.
@@ -30,6 +31,7 @@
 
 ### Fixed
 
+- Leading `KEY=VALUE` environment assignments are now stripped when evaluating `deny` and `prompt` rules in `bash.patterns` so they cannot bypass command restrictions ([#18351](https://github.com/can1357/oh-my-pi/pull/18351) by [@asuffield](https://github.com/asuffield))
 - Bash commands starting with `cd <dir>; ...` now run in `<dir>` as their working directory when it exists, so its direnv environment loads and the directory shows on the tool card ([#18329](https://github.com/can1357/oh-my-pi/pull/18329) by [@harshaygadekar](https://github.com/harshaygadekar))
 - Task-file approvals show and keep the checked file target through dispatch, so retargeted symlinks cannot silently substitute another assignment; replaced files require a retry ([#18314](https://github.com/can1357/oh-my-pi/pull/18314) by [@iliaal](https://github.com/iliaal)).
 - Subagents receive task instructions with their blank lines, Markdown hard breaks, and table spacing intact, whether given inline or via `taskFile`.
