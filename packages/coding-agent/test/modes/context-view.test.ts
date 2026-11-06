@@ -158,7 +158,7 @@ describe("context snapshot prompt sources", () => {
 			skills,
 		});
 	const entryTexts = (data: ContextViewData, id: string) => category(data, id).entries.map(entry => entry.text);
-	const notice = "Some prompt sources could not be attributed; their content remains in System Prompt.";
+	const notice = "Some prompt sources could not be attributed.";
 
 	it.each([
 		{ name: "bundled prompt", customPrompt: undefined, skill: "- fixture: Use <T> & {{literal}} without expansion" },
