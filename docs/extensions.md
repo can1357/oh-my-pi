@@ -973,12 +973,12 @@ editor.
 #### Launching terminal commands
 
 `ctx.ui.openTerminal(request)` is available only in the interactive TUI. It creates a
-multiplexer pane or provider-native group (a tmux window, Zellij/Herdr/Orca tab, or CMUX
+multiplexer pane or provider-native group (a tmux window, Zellij/Herdr/Orca/Ghostty tab, or CMUX
 workspace—not an OS window) and returns the reported native ID, plus a `warning` when
 the provider started the command but could not show it where requested. RPC, ACP,
 print, and headless contexts do not provide this optional method. The request type and
 supported provider set derive from canonical launch capabilities: tmux, Zellij,
-Herdr, CMUX, and Orca are supported; screen and wmux remain recognized by the
+Herdr, CMUX, Orca, and Ghostty are supported; screen and wmux remain recognized by the
 multiplexer taxonomy but are currently unsupported.
 
 Provider-specific session detection is centralized in
@@ -986,8 +986,8 @@ Provider-specific session detection is centralized in
 `hasTerminalMultiplexerSession(provider, env)` checks explicit session markers, while
 `classifyTerminalMultiplexer(env)` names the multiplexer hosting the process: session
 markers first, then a `tmux`/`screen` `TERM` fallback, then outer applications such as
-Orca, so a multiplexer running inside Orca wins. `isInsideTerminalMultiplexer(env)` is
-true only when the classified multiplexer owns the screen grid; Orca keeps the
+Orca and Ghostty, so a multiplexer running inside them wins. `isInsideTerminalMultiplexer(env)` is
+true only when the classified multiplexer owns the screen grid; Orca and Ghostty keep the
 direct-terminal render path. A classified multiplexer does not prove that a nested
 provider session or a native pane ID exists.
 
@@ -1042,6 +1042,8 @@ Targets are provider-native IDs/refs, with different meanings by placement:
   An explicit surface target is authoritative and is not combined with the ambient
   workspace. Socket-path and transport markers alone do not establish an active
   local CMUX surface.
+- Ghostty placements take no target. The adapter resolves the terminal hosting
+  the calling process itself (see the Ghostty paragraph below).
 
 Unsupported target combinations fail rather than being ignored. Capability checks
 use provider identity markers or a native target, not `TERM` alone. `focus` controls
@@ -1050,7 +1052,9 @@ apply only where a placement supports them: tmux uses `-d` when false, Zellij us
 passes `--focus true|false` to both split and workspace creation. Orca tab creation
 maps `focus: true` to `--focus`; otherwise focus follows Orca's default. Orca pane
 splits have no focus option. When Orca cannot show a new tab, it starts the command
-in a background terminal, and the result's `warning` says so.
+in a background terminal, and the result's `warning` says so. Ghostty honors
+`focus` explicitly: `true` focuses the new terminal, `false` returns focus to the
+host terminal, and omitting it leaves Ghostty's own focus behavior in place.
 
 Execution is provider-specific. tmux execs a multi-argument command directly but runs
 a single argument through its configured `default-shell -c`, which may be fish, Nushell,
@@ -1086,13 +1090,28 @@ The Orca CLI is resolved in Orca's documented order: `ORCA_CLI_COMMAND` when set
 `orca-dev` in an Orca development checkout (`ORCA_DEV_REPO_ROOT`), `orca-ide` on Linux
 outside an Orca terminal, and `orca` otherwise.
 
+Ghostty launches are macOS-only and drive Ghostty's AppleScript dictionary
+(`split`, `new tab`, surface configuration records) through `osascript`; there is
+no Ghostty CLI for placement on macOS. The dictionary ships with Ghostty 1.4.0,
+so older versions fail before anything is created with an error naming the
+required version. Ghostty's surface configuration `command` is shell text, so
+Ghostty requests require `shellGrammar: "posix"` like CMUX and Orca; the working
+directory travels as its own configuration field rather than inside the shell
+text. The adapter finds the surface to split by intersecting this process's
+ancestor chain with the PIDs of the terminals Ghostty hosts — `GHOSTTY_SURFACE_ID`
+is not used, as it does not equal the AppleScript terminal ID — and falls back to
+matching the process's controlling TTY when no ancestor is hosted. `window`
+placement opens a new tab in the hosting window. A denied Automation permission
+(AppleScript error -1743) and a host terminal that cannot be found both fail with
+errors naming the cause; the first launch prompts for Automation permission once.
+
 Because these commands are submitted as terminal input, shell-input requests
 reject C0/C1 control bytes and DEL in command arguments before creating a pane or
 workspace; CMUX and Orca also reject them in `cwd`, which is embedded in their
 shell command. The restriction is not applied to direct tmux or Zellij argv,
 where argument newlines remain data rather than terminal input.
 
-Herdr, Zellij, and Orca `window` placements create tabs; CMUX creates a workspace.
+Herdr, Zellij, Orca, and Ghostty `window` placements create tabs; CMUX creates a workspace.
 Provider-specific fields include pane direction, Zellij floating panes/names,
 Herdr tab labels, and CMUX workspace names. Zellij floating panes cannot specify a
 split direction, and Zellij new-tab creation cannot target a tab. tmux returns
@@ -1103,7 +1122,7 @@ its JSON response. CMUX reports workspace/pane IDs when present, but its JSON
 response may omit an ID, in which case `result.id` is unavailable.
 Orca returns a pane handle at `result.split.handle` or a tab handle at
 `result.terminal.handle`; the top-level JSON `id` is the RPC request ID, not the
-terminal handle.
+terminal handle. Ghostty returns the new terminal's AppleScript ID.
 
 `cwd` must be an absolute path. A request that is not an object or names an unknown
 multiplexer or placement rejects with a `TypeError`. Every other failure, including a
