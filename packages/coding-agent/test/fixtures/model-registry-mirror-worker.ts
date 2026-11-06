@@ -1,5 +1,6 @@
 import { type MessagePort, parentPort } from "node:worker_threads";
-import { streamSimple } from "@oh-my-pi/pi-ai";
+import { type AgentTool, normalizeTools } from "@oh-my-pi/pi-agent-core";
+import { type Api, type Context, type Model, streamSimple } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../../src/config/model-registry";
 import type { WorkerThreadLink } from "../../src/thread/protocol";
 import { type RpcFrame, RpcLink } from "../../src/thread/rpc";
@@ -37,6 +38,11 @@ export interface MirrorProbe {
 		abortAfterDeltas?: number,
 		withFetch?: boolean,
 	): Promise<StreamRecord>;
+	/**
+	 * Stream `provider/id` with one tool in the context, built as the agent loop builds it
+	 * from a session tool whose own fields hold class instances (see {@link SessionBoundTool}).
+	 */
+	streamWithTools(registry: ModelRegistry, provider: string, id: string): Promise<StreamRecord>;
 	/** Request-time headers of `provider/id` on the mirror, resolving `!command` values in this worker. */
 	resolveHeaders(registry: ModelRegistry, provider: string, id: string): Promise<Record<string, string> | undefined>;
 	/** `refreshRuntimeProviders` on the mirror (runs on main). */
@@ -48,6 +54,54 @@ export interface MirrorProbe {
 function isTestGlobals(value: unknown): value is { ready(probe: MirrorProbe): void } {
 	return typeof value === "object" && value !== null && typeof Reflect.get(value, "ready") === "function";
 }
+
+class ProbeSession {
+	readonly cwd = "/probe";
+}
+
+/** A session tool like `ExtensionToolWrapper`: its constructor fields are live class instances. */
+class SessionBoundTool {
+	readonly name = "probe_tool";
+	readonly label = "Probe";
+	readonly description = "Reads a path";
+	readonly parameters = {
+		type: "object",
+		properties: { path: { type: "string" } },
+		required: ["path"],
+	};
+
+	constructor(readonly session: ProbeSession) {}
+
+	async execute(): Promise<never> {
+		throw new Error("not run");
+	}
+}
+
+async function recordStream(
+	model: Model<Api>,
+	context: Context,
+	abortAfterDeltas?: number,
+	withFetch?: boolean,
+): Promise<StreamRecord> {
+	const controller = new AbortController();
+	const fetched: FetchSeen[] = [];
+	const stream = streamSimple(model, context, {
+		apiKey: "worker-request-key",
+		signal: controller.signal,
+		fetch: withFetch ? scriptedFetch(fetched) : undefined,
+	});
+	const events: string[] = [];
+	let deltas = 0;
+	for await (const event of stream) {
+		events.push(event.type === "text_delta" ? `text_delta:${event.delta}` : event.type);
+		if (event.type === "text_delta" && ++deltas === abortAfterDeltas) controller.abort();
+	}
+	const result = await stream.result();
+	const text = result.content.map(part => (part.type === "text" ? part.text : "")).join("");
+	return { events, stopReason: result.stopReason, text, errorMessage: result.errorMessage, fetched };
+}
+
+const USER_HI: Context["messages"] = [{ role: "user", content: "hi", timestamp: 0 }];
 
 const probe: MirrorProbe = {
 	providerModels: async (registry, provider) =>
@@ -67,26 +121,13 @@ const probe: MirrorProbe = {
 	stream: async (registry, provider, id, abortAfterDeltas, withFetch) => {
 		const model = registry.find(provider, id);
 		if (!model) throw new Error(`mirror has no ${provider}/${id}`);
-		const controller = new AbortController();
-		const fetched: FetchSeen[] = [];
-		const stream = streamSimple(
-			model,
-			{ messages: [{ role: "user", content: "hi", timestamp: 0 }] },
-			{
-				apiKey: "worker-request-key",
-				signal: controller.signal,
-				fetch: withFetch ? scriptedFetch(fetched) : undefined,
-			},
-		);
-		const events: string[] = [];
-		let deltas = 0;
-		for await (const event of stream) {
-			events.push(event.type === "text_delta" ? `text_delta:${event.delta}` : event.type);
-			if (event.type === "text_delta" && ++deltas === abortAfterDeltas) controller.abort();
-		}
-		const result = await stream.result();
-		const text = result.content.map(part => (part.type === "text" ? part.text : "")).join("");
-		return { events, stopReason: result.stopReason, text, errorMessage: result.errorMessage, fetched };
+		return recordStream(model, { messages: USER_HI }, abortAfterDeltas, withFetch);
+	},
+	streamWithTools: async (registry, provider, id) => {
+		const model = registry.find(provider, id);
+		if (!model) throw new Error(`mirror has no ${provider}/${id}`);
+		const tool = new SessionBoundTool(new ProbeSession()) as unknown as AgentTool;
+		return recordStream(model, { messages: USER_HI, tools: normalizeTools([tool], { injectIntent: false }) });
 	},
 	resolveHeaders: async (registry, provider, id) => {
 		const model = registry.find(provider, id);
