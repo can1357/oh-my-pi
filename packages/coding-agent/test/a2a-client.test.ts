@@ -15,8 +15,10 @@ import {
 	A2aClient,
 	A2aClientError,
 	A2aTimeoutError,
+	cardRequiresBearer,
 	fetchAgentCard,
 	resolveAgentCardUrl,
+	resolveRpcEndpoint,
 } from "@oh-my-pi/pi-coding-agent/a2a/client";
 import {
 	A2A_AUTH_REQUIRED_TEXT,
@@ -24,8 +26,16 @@ import {
 	A2aAgentBridge,
 	addA2aAgentsFromUrl,
 	runtimeAgentName,
+	spawnA2aAgent,
 } from "@oh-my-pi/pi-coding-agent/a2a/agent-bridge";
-import { AGENT_CARD_PATH, type A2aServerHandle, createA2aServer } from "@oh-my-pi/pi-coding-agent/a2a/server";
+import {
+	AGENT_CARD_PATH,
+	type A2aServerHandle,
+	createA2aServer,
+	readLocalBridgeEntry,
+	resolveA2aToken,
+	startA2aServer,
+} from "@oh-my-pi/pi-coding-agent/a2a/server";
 import { type AgentCard, buildAgentCard } from "@oh-my-pi/pi-coding-agent/a2a/card";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { TASK_STATE } from "@oh-my-pi/pi-coding-agent/a2a/rpc";
@@ -45,6 +55,7 @@ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { IrcDeliveryReceipt } from "@oh-my-pi/pi-tui/tools/irc";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -794,5 +805,508 @@ describe("peer skill registration cap", () => {
 	it("default cap is 8", async () => {
 		const { A2A_DEFAULT_MAX_PEER_SKILLS } = await import("@oh-my-pi/pi-coding-agent/a2a/agent-bridge");
 		expect(A2A_DEFAULT_MAX_PEER_SKILLS).toBe(8);
+	});
+});
+
+describe("spawnA2aAgent reply channel (metadata.from/fromUrl)", () => {
+	type AgentRef = RegistryAgentRef;
+
+	function terminalMainRef(): AgentRef {
+		const now = Date.now();
+		return {
+			id: "Main",
+			displayName: "Main",
+			kind: "main",
+			parentId: "Main",
+			status: "idle",
+			session: null,
+			sessionFile: null,
+			createdAt: now,
+			lastActivity: now,
+		} as unknown as AgentRef;
+	}
+
+	/** A registry whose "Main" conversation records every bus delivery it receives. */
+	function conversationRegistry(): AgentRegistryApi {
+		const refs = new Map<string, AgentRef>([["Main", terminalMainRef()]]);
+		return {
+			get: (id: string) => refs.get(id),
+			list: () => [...refs.values()],
+			onChange: () => () => {},
+			setStatus: () => false,
+		} as unknown as AgentRegistryApi;
+	}
+
+	function recordingBus(inbox: Array<{ to: string; body: string; external?: boolean }>) {
+		return {
+			send: async (message: { to: string; body: string; external?: boolean }): Promise<IrcDeliveryReceipt> => {
+				inbox.push({ to: message.to, body: message.body, external: message.external });
+				return { to: message.to, outcome: "injected" };
+			},
+		};
+	}
+
+	/** One terminal: a real in-tree bridge serving a card under its public identity. */
+	async function startTerminal(options: {
+		agentDir: string;
+		name?: string;
+		inbox: Array<{ to: string; body: string; external?: boolean }>;
+	}): Promise<A2aServerHandle> {
+		const settings = await Settings.loadIsolated({ inMemory: true, agentDir: options.agentDir });
+		return startA2aServer({
+			settings,
+			agentDir: options.agentDir,
+			port: 0,
+			...(options.name !== undefined ? { name: options.name } : {}),
+			registry: conversationRegistry(),
+			bus: recordingBus(options.inbox),
+			session: { cwd: options.agentDir, getSessionAgents: () => [] },
+		});
+	}
+
+	it("stamps metadata.from/fromUrl so the peer can address the reply back", async () => {
+		using dir = TempDir.createSync("@a2a-reply-wire-");
+		const remoteInbox: Array<{ to: string; body: string; external?: boolean }> = [];
+		const remote = await startTerminal({ agentDir: dir.path(), name: "builder", inbox: remoteInbox });
+		try {
+			const bridge = new A2aAgentBridge();
+			await addA2aAgentsFromUrl({ bridge, url: remote.url, agentDir: dir.path() });
+
+			const result = await spawnA2aAgent({
+				agent: bridge.get("a2a:builder")!,
+				prompt: "what is 17+25?",
+				fromIdentity: { name: "alpha", url: "http://127.0.0.1:1/" },
+			});
+
+			// The wire contract: the addressed send carries this terminal's identity
+			// so the peer knows which a2a:<name> to spawn for the reply.
+			expect(remoteInbox).toHaveLength(1);
+			const delivered = remoteInbox[0]!;
+			expect(delivered.to).toBe("Main");
+			expect(delivered.external).toBe(true);
+			expect(delivered.body).toContain("[A2A task from peer terminal alpha");
+			expect(delivered.body).toContain("spawning the agent a2a:alpha");
+			expect(delivered.body).toContain("what is 17+25?");
+			// The spawn reports delivery, not the answer: the work runs remotely.
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toContain("Delivered to a2a:builder");
+			expect(result.remoteTaskId).toBe("Main");
+		} finally {
+			remote.stop();
+		}
+	});
+
+	it("omits the reply envelope when the caller has no identity", async () => {
+		using dir = TempDir.createSync("@a2a-reply-anon-");
+		const remoteInbox: Array<{ to: string; body: string; external?: boolean }> = [];
+		const remote = await startTerminal({ agentDir: dir.path(), inbox: remoteInbox });
+		try {
+			const bridge = new A2aAgentBridge();
+			await addA2aAgentsFromUrl({ bridge, url: remote.url, agentDir: dir.path() });
+
+			await spawnA2aAgent({ agent: bridge.get("a2a:Main")!, prompt: "plain question" });
+
+			// Without from/fromUrl the peer gets only the raw text: there is no
+			// return address, so no envelope may claim one exists.
+			expect(remoteInbox).toHaveLength(1);
+			expect(remoteInbox[0]!.body).toBe("plain question");
+			expect(remoteInbox[0]!.body).not.toContain("[A2A task from peer terminal");
+		} finally {
+			remote.stop();
+		}
+	});
+
+	it("full round trip: remote answers by spawning a2a:<sender> and the reply lands in the sender terminal", async () => {
+		using dir = TempDir.createSync("@a2a-reply-loop-");
+		const senderInbox: Array<{ to: string; body: string; external?: boolean }> = [];
+		const remoteInbox: Array<{ to: string; body: string; external?: boolean }> = [];
+		const sender = await startTerminal({ agentDir: dir.path(), name: "alpha", inbox: senderInbox });
+		const remote = await startTerminal({ agentDir: dir.path(), name: "builder", inbox: remoteInbox });
+		try {
+			// Terminal alpha spawns builder's main agent — the outbound half.
+			const senderBridge = new A2aAgentBridge();
+			await addA2aAgentsFromUrl({ bridge: senderBridge, url: remote.url, agentDir: dir.path() });
+			const outbound = await spawnA2aAgent({
+				agent: senderBridge.get("a2a:builder")!,
+				prompt: "what is 17+25?",
+				fromIdentity: { name: "alpha", url: sender.url },
+			});
+			expect(outbound.exitCode).toBe(0);
+			expect(remoteInbox[0]!.body).toContain("spawning the agent a2a:alpha");
+
+			// Terminal builder obeys the envelope: it registers the sender's card
+			// and spawns a2a:alpha — the reply half over the real wire.
+			const remoteBridge = new A2aAgentBridge();
+			await addA2aAgentsFromUrl({ bridge: remoteBridge, url: sender.url, agentDir: dir.path() });
+			const registered = remoteBridge.get("a2a:alpha");
+			expect(registered).toBeDefined();
+			expect(registered!.url).toBe(sender.url);
+
+			const reply = await spawnA2aAgent({
+				agent: registered!,
+				prompt: "the answer is 42",
+				fromIdentity: { name: "builder", url: remote.url },
+			});
+
+			// The answer is delivered into alpha's own conversation, marked external
+			// (bus ingress guard exemption), and addressed to its Main agent.
+			expect(reply.exitCode).toBe(0);
+			expect(senderInbox).toHaveLength(1);
+			const answer = senderInbox[0]!;
+			expect(answer.to).toBe("Main");
+			expect(answer.external).toBe(true);
+			expect(answer.body).toContain("[A2A task from peer terminal builder");
+			expect(answer.body).toContain("the answer is 42");
+			// The envelope points the next hop back at builder, not at alpha itself.
+			expect(answer.body).toContain("spawning the agent a2a:builder");
+		} finally {
+			remote.stop();
+			sender.stop();
+		}
+	});
+});
+
+describe("/a2a remove", () => {
+	it("forgets one agent by skill name and by full a2a: name, and reports unknowns as failed", async () => {
+		const server = mockA2a({ onRpc: () => rpcResult(1, {}) });
+		const bridge = new A2aAgentBridge();
+		const outputs: string[] = [];
+		const runtime = slashRuntime(bridge, outputs);
+		const spec = a2aCommand();
+		await spec.handle({ name: "a2a", args: `add ${server.url} --token t`, text: "" }, runtime);
+
+		// Bare skill name form: `remove main` resolves to `a2a:main`.
+		const removed = await spec.handle({ name: "a2a", args: "remove main", text: "" }, runtime);
+		expect(removed).toEqual({ consumed: true });
+		expect(bridge.get("a2a:main")).toBeUndefined();
+		expect(outputs.join("\n")).toContain("Forgot a2a:main");
+
+		// Full name form removes the same way after re-registration.
+		await spec.handle({ name: "a2a", args: `add ${server.url} --token t`, text: "" }, runtime);
+		await spec.handle({ name: "a2a", args: "remove a2a:main", text: "" }, runtime);
+		expect(bridge.list()).toEqual([]);
+
+		// An unknown name is a failed consume, not a silent success: print mode
+		// turns `failed` into a nonzero exit code.
+		const unknown = await spec.handle({ name: "a2a", args: "remove ghost", text: "" }, runtime);
+		expect(unknown).toEqual({ consumed: true, failed: true });
+		expect(outputs.join("\n")).toContain("No registered remote agent: a2a:ghost");
+
+		// A bare name never invents an entry where none was registered.
+		expect(bridge.list()).toEqual([]);
+	});
+
+	it("removing one agent leaves its siblings registered", async () => {
+		const server = mockA2a({
+			onRpc: () => rpcResult(1, {}),
+			skills: [
+				{ id: "Main", displayName: "Main", description: "peer main" },
+				{ id: "Helper", displayName: "Helper", description: "peer helper" },
+			],
+		});
+		const bridge = new A2aAgentBridge();
+		const runtime = slashRuntime(bridge, []);
+		const spec = a2aCommand();
+		await spec.handle({ name: "a2a", args: `add ${server.url} --token t`, text: "" }, runtime);
+
+		await spec.handle({ name: "a2a", args: "remove Helper", text: "" }, runtime);
+
+		// The surviving sibling stays spawnable through the task tool's roster.
+		expect(bridge.get("a2a:Helper")).toBeUndefined();
+		expect(bridge.get("a2a:Main")).toMatchObject({ skillId: "Main", url: server.url });
+		expect(bridge.list()).toHaveLength(1);
+	});
+});
+
+describe("A2aClient poll-failure tolerance", () => {
+	/** A flaky peer: `failFor` consecutive GetTask calls answer HTTP 503 garbage. */
+	function flakyServer(failFor: number): { url: string; polls: () => number; stop(): void } {
+		let polls = 0;
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				const body = (await request.json()) as { id: unknown; method: string };
+				if (body.method === "SendMessage") {
+					return Response.json(
+						rpcResult(body.id, { task: { id: "task-poll", status: { state: TASK_STATE.WORKING } } }),
+					);
+				}
+				polls += 1;
+				if (polls <= failFor) return new Response("Service Unavailable", { status: 503 });
+				return Response.json(
+					rpcResult(body.id, {
+						task: {
+							id: "task-poll",
+							status: { state: TASK_STATE.COMPLETED },
+							artifacts: [{ artifactId: "task-poll:output", parts: [{ text: "recovered" }] }],
+						},
+					}),
+				);
+			},
+		});
+		return { url: `http://127.0.0.1:${server.port}/`, polls: () => polls, stop: () => server.stop(true) };
+	}
+
+	it("rides out two consecutive transport failures and still returns the task output", async () => {
+		const server = flakyServer(2);
+		try {
+			const client = new A2aClient({ url: server.url, pollIntervalMs: 5 });
+
+			const run = await client.sendAndWait("transient outage");
+
+			expect(run.state).toBe(TASK_STATE.COMPLETED);
+			expect(run.text).toBe("recovered");
+			expect(server.polls()).toBe(3);
+		} finally {
+			server.stop();
+		}
+	});
+
+	it("fails the run after three consecutive transport failures without more polling", async () => {
+		let polls = 0;
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				const body = (await request.json()) as { id: unknown; method: string };
+				if (body.method === "SendMessage") {
+					return Response.json(
+						rpcResult(body.id, { task: { id: "task-dead", status: { state: TASK_STATE.WORKING } } }),
+					);
+				}
+				polls += 1;
+				return new Response("Service Unavailable", { status: 503 });
+			},
+		});
+		try {
+			const client = new A2aClient({ url: `http://127.0.0.1:${server.port}/`, pollIntervalMs: 5 });
+
+			const error = await client.sendAndWait("hard outage").catch((cause: unknown) => cause);
+
+			// The third failed poll is terminal: the spawn reports the transport
+			// error instead of polling a dead endpoint forever.
+			expect(error).toBeInstanceOf(A2aClientError);
+			expect((error as A2aClientError).code).toBeUndefined();
+			expect(String((error as Error).message)).toContain("GetTask");
+			expect(polls).toBe(3);
+		} finally {
+			server.stop(true);
+		}
+	});
+});
+
+describe("resolveRpcEndpoint and cardRequiresBearer", () => {
+	function card(overrides: Partial<AgentCard>): AgentCard {
+		return {
+			name: "peer",
+			description: "peer card",
+			protocolVersion: "1.0",
+			version: "1",
+			supportedInterfaces: [],
+			capabilities: { streaming: true },
+			defaultInputModes: ["text/plain"],
+			defaultOutputModes: ["text/plain"],
+			skills: [],
+			securitySchemes: {},
+			...overrides,
+		};
+	}
+
+	it("prefers the advertised interface, falls back to the fetch URL, and rejects neither-given", () => {
+		const advertised = resolveRpcEndpoint(
+			card({
+				supportedInterfaces: [
+					{ url: "http://127.0.0.1:7391/rpc", protocolBinding: "JSONRPC", protocolVersion: "1.0" },
+				],
+			}),
+		);
+		expect(advertised).toBe("http://127.0.0.1:7391/rpc");
+
+		// A malformed first entry (no url) must not shadow a valid later one.
+		const secondValid = resolveRpcEndpoint(
+			card({
+				supportedInterfaces: [
+					{
+						protocolBinding: "JSONRPC",
+						protocolVersion: "1.0",
+					} as unknown as AgentCard["supportedInterfaces"][number],
+					{ url: "http://127.0.0.1:7392/rpc", protocolBinding: "JSONRPC", protocolVersion: "1.0" },
+				],
+			}),
+		);
+		expect(secondValid).toBe("http://127.0.0.1:7392/rpc");
+
+		const fallback = resolveRpcEndpoint(card({}), "http://127.0.0.1:7393/base/");
+		expect(fallback).toBe("http://127.0.0.1:7393/base/");
+
+		// No endpoint at all is a hard client error: registration must not
+		// silently pick a guessed URL and post bearer tokens to it.
+		expect(() => resolveRpcEndpoint(card({}))).toThrow(A2aClientError);
+	});
+
+	it("fetchAgentCard resolves the endpoint through the same precedence", async () => {
+		// A peer whose card advertises a different RPC path than its card URL:
+		// the client must talk to the advertised endpoint, not the card host root.
+		let port = 0;
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(request) {
+				const url = new URL(request.url);
+				if (request.method === "GET" && url.pathname === AGENT_CARD_PATH) {
+					return Response.json(
+						card({
+							supportedInterfaces: [
+								{
+									url: `http://127.0.0.1:${port}/rpc`,
+									protocolBinding: "JSONRPC",
+									protocolVersion: "1.0",
+								},
+							],
+						}),
+					);
+				}
+				return Response.json(rpcResult(1, {}));
+			},
+		});
+		port = server.port!;
+
+		try {
+			const { card: fetched, endpoint } = await fetchAgentCard({ url: `http://127.0.0.1:${server.port}/` });
+			expect(fetched.name).toBe("peer");
+			expect(endpoint).toBe(`http://127.0.0.1:${server.port}/rpc`);
+		} finally {
+			server.stop(true);
+		}
+	});
+
+	it("cardRequiresBearer detects bearer schemes case-insensitively and rejects others", () => {
+		expect(
+			cardRequiresBearer(
+				card({ securitySchemes: { b: { httpAuthSecurityScheme: { scheme: "Bearer", bearerFormat: "opaque" } } } }),
+			),
+		).toBe(true);
+		expect(
+			cardRequiresBearer(
+				card({ securitySchemes: { b: { httpAuthSecurityScheme: { scheme: "bearer", bearerFormat: "opaque" } } } }),
+			),
+		).toBe(true);
+		// A non-bearer scheme must not trigger token-file reads during registration.
+		expect(
+			cardRequiresBearer(
+				card({ securitySchemes: { b: { httpAuthSecurityScheme: { scheme: "Basic", bearerFormat: "opaque" } } } }),
+			),
+		).toBe(false);
+		expect(cardRequiresBearer(card({}))).toBe(false);
+	});
+});
+
+describe("a2a.name card propagation", () => {
+	type AgentRef = RegistryAgentRef;
+
+	function mainRef(): AgentRef {
+		const now = Date.now();
+		return {
+			id: "Main",
+			displayName: "Main",
+			kind: "main",
+			parentId: "Main",
+			status: "running",
+			session: null,
+			sessionFile: null,
+			createdAt: now,
+			lastActivity: now,
+		} as unknown as AgentRef;
+	}
+
+	it("startA2aServer renames the card name, main skill id, and local bridge entry", async () => {
+		using dir = TempDir.createSync("@a2a-name-card-");
+		const registry = new Map<string, AgentRef>([["Main", mainRef()]]);
+		const settings = await Settings.loadIsolated({ inMemory: true, agentDir: dir.path() });
+		const handle = await startA2aServer({
+			settings,
+			agentDir: dir.path(),
+			port: 0,
+			name: "builder",
+			registry: {
+				get: (id: string) => registry.get(id),
+				list: () => [...registry.values()],
+				onChange: () => () => {},
+				setStatus: () => false,
+			} as unknown as Parameters<typeof startA2aServer>[0]["registry"],
+			bus: { send: async () => ({ to: "Main", outcome: "injected" }) } as never,
+			session: { cwd: dir.path(), getSessionAgents: () => [] },
+		});
+		try {
+			const card = (await (await fetch(`${handle.url}${AGENT_CARD_PATH}`)).json()) as {
+				name: string;
+				skills: Array<{ id: string }>;
+			};
+			// The public identity is what peers auto-register as a2a:<name> and what
+			// reply envelopes address; both the card name and the main skill id carry it.
+			expect(card.name).toBe("builder");
+			expect(card.skills.map(skill => skill.id)).toEqual(["builder"]);
+
+			// The machine-local registry entry carries the same identity, so
+			// `#ownA2aIdentity` stamps reply envelopes with it.
+			const entry = await readLocalBridgeEntry(dir.path(), process.pid);
+			expect(entry).toMatchObject({ pid: process.pid, port: handle.port, name: "builder" });
+		} finally {
+			handle.stop();
+		}
+	});
+
+	it("a named terminal is addressed through its identity, not only its registry id", async () => {
+		using dir = TempDir.createSync("@a2a-name-address-");
+		const inbox: Array<{ to: string; body: string; external?: boolean }> = [];
+		const registry = new Map<string, AgentRef>([["Main", mainRef()]]);
+		const settings = await Settings.loadIsolated({ inMemory: true, agentDir: dir.path() });
+		const handle = await startA2aServer({
+			settings,
+			agentDir: dir.path(),
+			port: 0,
+			name: "builder",
+			registry: {
+				get: (id: string) => registry.get(id),
+				list: () => [...registry.values()],
+				onChange: () => () => {},
+				setStatus: () => false,
+			} as unknown as Parameters<typeof startA2aServer>[0]["registry"],
+			bus: {
+				send: async (message: { to: string; body: string; external?: boolean }): Promise<IrcDeliveryReceipt> => {
+					inbox.push({ to: message.to, body: message.body, external: message.external });
+					return { to: message.to, outcome: "injected" };
+				},
+			} as never,
+			session: { cwd: dir.path(), getSessionAgents: () => [] },
+		});
+		try {
+			// A peer that registered this terminal's card sends to the skill id it
+			// was given ("builder"); the bridge must resolve it back to Main.
+			const token = await resolveA2aToken({ agentDir: dir.path() });
+			const posted = await fetch(handle.url, {
+				method: "POST",
+				headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+				body: JSON.stringify({
+					jsonrpc: "2.0",
+					id: 1,
+					method: "SendMessage",
+					params: {
+						message: { messageId: "m-name", role: "ROLE_USER", parts: [{ text: "reach me by identity" }] },
+						metadata: { to: "builder" },
+					},
+				}),
+			});
+			const payload = (await posted.json()) as {
+				result?: { task?: { metadata?: { delivery?: { outcome?: string } } } };
+			};
+			expect(payload.result?.task?.metadata?.delivery?.outcome).toBe("injected");
+			expect(inbox).toHaveLength(1);
+			expect(inbox[0]!.to).toBe("Main");
+			expect(inbox[0]!.body).toBe("reach me by identity");
+		} finally {
+			handle.stop();
+		}
 	});
 });

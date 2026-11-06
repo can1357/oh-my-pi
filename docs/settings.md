@@ -1108,8 +1108,9 @@ The fork's A2A bridge exposes each omp session to the other omp processes on
 the same machine over the Agent2Agent v1.0 protocol (JSON-RPC 2.0 on HTTP,
 loopback only, bearer-token auth). Every terminal can act as server and
 client; peers are discovered through a shared registry file and registered as
-spawnable `a2a:<name>` agents. See [Agent Teams (planned)](./agent-teams.md)
-for where this is heading.
+spawnable `a2a:<name>` agents. **Addressing, the reply channel, and safeguards
+are covered in [A2A inter-terminal agent networking](./a2a.md).** See
+[Agent Teams](./agent-teams.md) for teams built on top of this messaging.
 
 ```yaml
 a2a:

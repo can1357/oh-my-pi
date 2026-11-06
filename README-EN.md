@@ -88,7 +88,7 @@ The `omp` command points to the fork binary (`~/.local/lib/omp-fork/omp`, 233 MB
 # roll back to the original omp:
 ln -sf ../install/global/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js ~/.bun/bin/omp
 # refresh the fork binary after edits:
-cd ~/Documents/LAB/oh-my-pi && bun run build && rsync -a packages/coding-agent/dist/omp ~/.local/lib/omp-fork/omp
+cd <path-to-clone> && bun run build && rsync -a packages/coding-agent/dist/omp ~/.local/lib/omp-fork/omp
 ```
 
 ## Quality

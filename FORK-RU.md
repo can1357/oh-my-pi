@@ -8,9 +8,9 @@
 ```bash
 ln -sf ../install/global/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js ~/.bun/bin/omp
 ```
-**Обновление форк-бинарника после правок в `~/Documents/LAB/oh-my-pi`:**
+**Обновление форк-бинарника после правок в рабочей копии:**
 ```bash
-cd ~/Documents/LAB/oh-my-pi && bun run build && rsync -a packages/coding-agent/dist/omp ~/.local/lib/omp-fork/omp
+cd <путь-к-клону> && bun run build && rsync -a packages/coding-agent/dist/omp ~/.local/lib/omp-fork/omp
 ```
 
 ---
