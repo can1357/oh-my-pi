@@ -57,6 +57,7 @@ export interface BackgroundTanDispatchDetails {
 	sessionFile: string;
 }
 
+/** One skill loaded by a user-invoked skill prompt: its registered name, the SKILL.md file read, and its body line count. */
 export interface SkillPromptSkill {
 	name: string;
 	path: string;
