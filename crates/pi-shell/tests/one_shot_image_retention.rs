@@ -18,6 +18,7 @@ use pi_shell::{
 	bash::{
 		Budget, Cx, Engine, EngineConfig, Event, EventData, EventMask, EventSink, MemStore,
 		RestoreOpts, Script, Shell, Step,
+		trace::{RunTrace, history::HISTORY_EVENTS},
 	},
 	testkit::{FakeHost, fault::skeleton_init},
 };
@@ -192,4 +193,122 @@ fn a_function_defined_before_many_evals_survives_the_checkpoint() {
 		}
 	}
 	assert!(host.stdout.bytes().ends_with(b"kept alive\n"), "the restored function has its body");
+}
+
+/// Forwards every event to the trace under test and notices the moment a
+/// one-shot source has just been compiled, which is when a checkpoint
+/// catches it announced and on a live frame.
+struct Watch {
+	trace: Arc<RunTrace>,
+	flag:  Arc<AtomicBool>,
+}
+
+impl EventSink for Watch {
+	fn mask(&self) -> EventMask {
+		EventMask::ALL
+	}
+
+	fn event(&self, e: &Event<'_>) {
+		if matches!(e.data, EventData::UnitCompiled(_)) {
+			self.flag.store(true, Ordering::SeqCst);
+		}
+		self.trace.event(e);
+	}
+}
+
+/// One cold restore per this many compiled one-shot sources.
+const PER_RESTORE: usize = 50;
+
+/// Run `rounds` distinct `eval` texts in one run, suspending every
+/// `PER_RESTORE` compiled sources to write a checkpoint and restore it into
+/// a fresh engine, and report how many sources the observer that was
+/// attached the whole time still holds at the end.
+fn evals_across_restores(rounds: usize) -> usize {
+	let source = format!(
+		"for ((i=0;i<{rounds};i++)); do printf -v w '%0512d' \"$i\"; eval \"printf '%s' '$w'\" \
+		 >/dev/null; done; printf 'done\\n'"
+	);
+	let trace = Arc::new(RunTrace::new(source.as_str()));
+	let compiled = Arc::new(AtomicBool::new(false));
+	let watch = Arc::new(Watch { trace: Arc::clone(&trace), flag: Arc::clone(&compiled) });
+	let mut host = FakeHost::new().with_event_sink(watch);
+	let mut store = MemStore::new();
+	let engine = Engine::new(EngineConfig::default());
+	let mut shell =
+		Shell::create(&engine, &mut Cx { host: &mut host, store: &mut store }, skeleton_init(&[]))
+			.expect("shell");
+	shell.set_event_mask(EventMask::ALL);
+	let fresh = Engine::new(EngineConfig::default());
+	let run = shell.submit(Script::command(source.into_bytes()));
+	let (mut turns, mut compiles) = (0usize, 0usize);
+	loop {
+		turns += 1;
+		assert!(turns < 50_000_000, "the run makes progress");
+		match shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget {
+			max_ops: 1,
+			max_ns:  u64::MAX,
+		}) {
+			Step::Done { run: id, status } if id == run => {
+				assert_eq!(status, 0, "the script succeeds");
+				break;
+			},
+			Step::Idle => panic!("idle before the root finished"),
+			_ => {},
+		}
+		host.events.clear();
+		if !compiled.swap(false, Ordering::SeqCst) {
+			continue;
+		}
+		compiles += 1;
+		if compiles % PER_RESTORE != 0 {
+			continue;
+		}
+		shell.control().request_suspend();
+		assert!(matches!(
+			shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget::default()),
+			Step::SuspendReady
+		));
+		// A mid-run checkpoint of a live vproc cannot carry its stdout
+		// device, which the restore reopens; no unit is lost.
+		shell
+			.externalize(&mut Cx { host: &mut host, store: &mut store })
+			.expect("externalize");
+		let image = store.to_bytes();
+		drop(shell);
+		store = MemStore::from_bytes(&image).expect("image decodes");
+		let (restored, _) = Shell::restore(
+			&fresh,
+			&mut Cx { host: &mut host, store: &mut store },
+			RestoreOpts::default(),
+		)
+		.expect("the checkpoint restores");
+		shell = restored;
+		shell.set_event_mask(EventMask::ALL);
+		compiled.store(false, Ordering::SeqCst);
+		host.events.clear();
+	}
+	assert!(host.stdout.bytes().ends_with(b"done\n"), "every eval ran");
+	assert!(compiles / PER_RESTORE > 1, "the run restored more than once: {compiles} compiles");
+	trace.snapshot().units.len()
+}
+
+/// An observer kept across cold restores must not pin the sources the
+/// kernels before them announced to it. A restored kernel remembers none of
+/// those announcements, so it can never retire them; unless the observer
+/// forgets its own mappings when it sees the shell restored, every source
+/// announced before a checkpoint stays in it for ever and the retained
+/// table grows with the iteration count again — which is the growth the
+/// rest of this change removes.
+#[test]
+fn an_observer_kept_across_restores_does_not_pin_the_sources_it_was_shown() {
+	let (small_rounds, large_rounds) = (HISTORY_EVENTS / 4, HISTORY_EVENTS / 2);
+	let small = evals_across_restores(small_rounds);
+	let large = evals_across_restores(large_rounds);
+	assert!(
+		large <= small + 64,
+		"the observer pinned the sources of the kernels it outlived: {small} -> {large} retained \
+		 units for {small_rounds} -> {large_rounds} iterations over {} -> {} restores",
+		small_rounds / PER_RESTORE,
+		large_rounds / PER_RESTORE,
+	);
 }
