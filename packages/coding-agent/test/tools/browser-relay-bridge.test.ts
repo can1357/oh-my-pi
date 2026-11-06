@@ -2639,6 +2639,50 @@ describe("RelayBridge file chooser interception", () => {
 });
 
 describe("RelayBridge focus emulation", () => {
+	it("finishes focus reset before detaching a released tab and re-adopting it", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+		await setSwitch(bridge, ext, connId, sessionId, FOCUS, true);
+
+		bridge.cdpClosed(connId);
+		await flush();
+		expect(switchSends(ext, FOCUS)).toEqual([true, false]);
+		expect(ext.rpcs("detach")).toEqual([]);
+
+		const next = new FakeCdpSocket();
+		const nextConn = bridge.cdpConnected(next);
+		const targetsId = ++msgSeq;
+		bridge.cdpMessage(nextConn, JSON.stringify({ id: targetsId, method: "Target.getTargets" }));
+		expect(next.messages.find(message => message.id === targetsId)?.result?.targetInfos).toEqual([
+			expect.objectContaining({ attached: false }),
+		]);
+		const reattachId = ++msgSeq;
+		bridge.cdpMessage(
+			nextConn,
+			JSON.stringify({
+				id: reattachId,
+				method: "Target.attachToTarget",
+				params: { targetId: `PAGE${ANON}.1`, flatten: true },
+			}),
+		);
+		await flush();
+		expect(ext.pending("attach")).toHaveLength(0);
+
+		ack(bridge, ext, "send");
+		await flush();
+		expect(ext.pending("detach")).toHaveLength(1);
+		ack(bridge, ext, "detach");
+		await flush();
+		expect(ext.pending("attach")).toHaveLength(1);
+		ack(bridge, ext, "attach");
+		await flush();
+		expect(next.sessionFor(reattachId)).toBeDefined();
+	});
+
 	it("keeps a tab focus-emulated while any session asks, and ends it when the last client goes away", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
