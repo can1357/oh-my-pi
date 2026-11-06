@@ -1461,8 +1461,10 @@ export class ModelRegistry {
 	}
 
 	#loadModels() {
-		// The stamp the rebuild that called us read the file at, else the file's current one.
-		const configStamp = this.#pendingConfigStamp ?? this.#modelsConfigFile.getStamp();
+		// The stamp the rebuild that called us read the file at, else the file's current one. `null`
+		// is a stamp of its own (the file was missing), so only `undefined` means none was taken.
+		const configStamp =
+			this.#pendingConfigStamp !== undefined ? this.#pendingConfigStamp : this.#modelsConfigFile.getStamp();
 		this.#pendingConfigStamp = undefined;
 		this.#resetStaticComposition();
 		// Load custom config first (to know which providers to override).
@@ -3843,6 +3845,9 @@ export class ModelRegistry {
 		const provider = model.provider;
 		const providerEdited = then.digests.get(provider) !== this.#providerConfigDigests.get(provider);
 		const configuredLimits = this.#configuredLimits(now);
+		// A limit follows models.yml only where it configures one now: a window this registry probed
+		// for the held object survives the rebind. Removing a configured limit therefore reaches the
+		// held model at its next lookup rather than through this rebind.
 		const contextWindowEdited =
 			configuredLimits.contextWindow !== undefined && then.entry.contextWindow !== now.contextWindow;
 		const maxTokensEdited = configuredLimits.maxTokens !== undefined && then.entry.maxTokens !== now.maxTokens;
@@ -4091,7 +4096,25 @@ export class ModelRegistry {
 				: undefined;
 		if (generation === undefined) return model;
 		if (generation !== this.#configGeneration) return undefined;
+		// The current catalog no longer defines this model, so its endpoint and headers belong to the
+		// configuration it came from while the credential belongs to this one: binding would send a
+		// mixed pair. The caller resolves again and gives up when the model stays gone.
+		if (!this.#stillInCatalog(model)) return undefined;
 		return this.currentConfigOf(model, scope) as Model<TApi>;
+	}
+
+	/** Whether the current catalog still has the entry `model` was handed out from (or derived from). */
+	#stillInCatalog(model: Model<Api>): boolean {
+		const then = this.#handedOut.get(model);
+		if (!then) {
+			const derivation = modelDerivationOf(model);
+			// Not ours: an SDK caller's model goes out as given.
+			return derivation ? this.#stillInCatalog(derivation.source) : true;
+		}
+		return (
+			resolveProviderModelReference(model.provider, then.ref, this.#modelsForProviderLookup(model.provider)) !==
+			undefined
+		);
 	}
 
 	async #peekApiKeyForProvider(provider: string, options?: AuthPeekOptions): Promise<string | undefined> {

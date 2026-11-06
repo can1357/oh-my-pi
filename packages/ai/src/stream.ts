@@ -1228,6 +1228,9 @@ function forwardBedrockUserAgent(
 /** Rebinds a request's model to the configuration a resolved credential came from (see {@link RequestBinding}). */
 type AttemptBinder<TApi extends Api> = (credential: ApiKeyResolution) => Model<TApi> | undefined;
 
+/** How many times a dispatch attempt re-resolves its credential to reach one configuration version. */
+const MAX_REQUEST_BINDING_ATTEMPTS = 4;
+
 function streamSimpleRequest<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
@@ -1246,15 +1249,23 @@ function streamSimpleRequest<TApi extends Api>(
 		// The credential an attempt sends and the model (endpoint, headers) it sends it with come
 		// from one configuration version: a credential resolved after the configuration moved on
 		// is resolved again, so a new key never reaches an old endpoint, nor an old key a new one.
+		// A configuration that keeps moving, or one that no longer defines this model at all, would
+		// never bind, so the attempts are bounded and the request fails saying so rather than
+		// sending a mixed pair.
 		const bindCredential = async (
 			resolved: ApiKeyResolution,
 		): Promise<{ resolved: ApiKeyResolution; model: Model<TApi> }> => {
 			if (!bindAttempt) return { resolved, model };
 			let bound = bindAttempt(resolved);
-			while (bound === undefined) {
+			for (let attempt = 0; bound === undefined && attempt < MAX_REQUEST_BINDING_ATTEMPTS; attempt++) {
 				signal?.throwIfAborted();
 				resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal });
 				bound = bindAttempt(resolved);
+			}
+			if (bound === undefined) {
+				throw new Error(
+					`Model configuration for ${model.provider}/${model.id} changed while the request was prepared and no longer matches its credential; it may have been removed from the configuration.`,
+				);
 			}
 			return { resolved, model: bound };
 		};
