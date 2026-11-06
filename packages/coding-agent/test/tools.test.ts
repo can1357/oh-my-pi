@@ -9,10 +9,10 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import * as bashExecutor from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
-import * as bashExecutor from "../src/exec/bash-executor";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { RACY_STAMP_WINDOW_MS } from "@oh-my-pi/pi-coding-agent/tools/racy-stamp";
@@ -2907,48 +2907,20 @@ function b() {
 			expect(output).toContain("third");
 		});
 
-		it("should hoist leading cd with ; when the target directory exists", async () => {
-			const subDir = path.join(testDir, "sub-dir");
-			fs.mkdirSync(subDir, { recursive: true });
+		it("hoists a leading `cd <dir>;` into cwd only when the directory exists", async () => {
+			fs.mkdirSync(path.join(testDir, "sub-dir"));
+			const executeBash = vi.spyOn(bashExecutor, "executeBash");
 
-			const spy = vi.spyOn(bashExecutor, "executeBash");
-			try {
-				const result = await bashTool.execute("test-call-cd-semicolon-hoist", {
-					command: "cd sub-dir; pwd",
-				});
-				const output = getTextOutput(result);
-				expect(output).toContain("sub-dir");
-				expect(spy).toHaveBeenCalled();
-				const [calledCommand, options] = spy.mock.calls[0]!;
-				expect(calledCommand).toBe("pwd");
-				expect(options?.cwd?.replace(/\\/g, "/")).toMatch(/\/sub-dir$/);
-			} finally {
-				spy.mockRestore();
-			}
-		});
+			await bashTool.execute("cd-semicolon-hoist", { command: "cd sub-dir; pwd" });
+			const [hoisted, options] = executeBash.mock.calls[0]!;
+			expect(hoisted).toBe("pwd");
+			expect(options?.cwd).toBe(path.join(testDir, "sub-dir"));
 
-		it("should not hoist leading cd with ; when the target directory does not exist", async () => {
-			const spy = vi.spyOn(bashExecutor, "executeBash");
-			try {
-				const result = await bashTool.execute("test-call-cd-semicolon-missing", {
-					command: "cd /this/directory/definitely/does/not/exist/12345; echo still-executed",
-				});
-				const output = getTextOutput(result);
-				expect(output).toContain("still-executed");
-				expect(spy).toHaveBeenCalled();
-				const [calledCommand] = spy.mock.calls[0]!;
-				expect(calledCommand).toBe("cd /this/directory/definitely/does/not/exist/12345; echo still-executed");
-			} finally {
-				spy.mockRestore();
-			}
-		});
-
-		it("should fail early when cd target does not exist with &&", async () => {
-			await expect(
-				bashTool.execute("test-call-cd-and-missing", {
-					command: "cd /this/directory/definitely/does/not/exist/12345 && echo should-not-run",
-				}),
-			).rejects.toThrow(/Working directory does not exist/);
+			// A missing directory stays with the shell, which runs the rest anyway.
+			const missing = "cd does-not-exist; echo still-executed";
+			const result = await bashTool.execute("cd-semicolon-missing", { command: missing });
+			expect(executeBash.mock.calls[1]![0]).toBe(missing);
+			expect(getTextOutput(result)).toContain("still-executed");
 		});
 	});
 

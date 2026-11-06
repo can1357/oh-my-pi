@@ -694,58 +694,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	}
 
 	/**
-	 * Probe or stat a candidate cwd: handles internal URL schemas via `#urlFilesystem`
-	 * or host paths via `fs.promises.stat(resolveToCwd(...))`.
-	 */
-	async #statCwd(
-		targetCwd: string,
-		signal?: AbortSignal,
-		approvalTier: ToolTier = "read",
-	): Promise<{
-		path: string;
-		isVirtual: boolean;
-		isDirectory: boolean;
-		error?: unknown;
-	}> {
-		const router = InternalUrlRouter.instance();
-		if (router.canHandle(targetCwd)) {
-			const virtualPath = router.normalize(targetCwd);
-			try {
-				const st = await this.#urlFilesystem(signal, approvalTier).stat(virtualPath);
-				return {
-					path: virtualPath,
-					isVirtual: true,
-					isDirectory: st.type === "directory",
-				};
-			} catch (err) {
-				return {
-					path: virtualPath,
-					isVirtual: true,
-					isDirectory: false,
-					error: err,
-				};
-			}
-		}
-
-		const hostPath = resolveToCwd(targetCwd, this.session.cwd);
-		try {
-			const st = await fs.promises.stat(hostPath);
-			return {
-				path: hostPath,
-				isVirtual: false,
-				isDirectory: st.isDirectory(),
-			};
-		} catch (err) {
-			return {
-				path: hostPath,
-				isVirtual: false,
-				isDirectory: false,
-				error: err,
-			};
-		}
-	}
-
-	/**
 	 * Session identity for a command, read when its tool call starts, so
 	 * `/fork`, `/new`, and `/resume` take effect on the next call while a call
 	 * already under way keeps the session it began in. `PI_TOOL_CALL_ID` is the
@@ -1240,38 +1188,25 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// shell, nor hand it the new session's identity.
 		const sessionId = this.session.getSessionId?.() ?? undefined;
 		const sessionEnv = this.#sessionEnv(toolCallId);
-		const name = blankToUndefined(rawName);
-		const approval = this.approval({ command: rawCommand });
-		const approvalTier = typeof approval === "string" ? approval : approval.tier;
 
-		// Extract a leading `cd <path> && ...` or `cd <path>; ...` into cwd when the model
-		// ignores the cwd parameter. The scanner captures only a single path token and defers
-		// to the shell for anything else (redirects, extra args, shell expansion),
-		// so it never absorbs shell syntax like `cd /tmp 2>/dev/null && ...` into
-		// the structured cwd.
-		//
-		// Hoisting is unconditional for `&&` (failing early matches shell short-circuiting).
-		// For `;`, hoisting is opportunistic: hoist only when the target directory already
-		// exists, preserving bash's continue-after-failure behavior when it does not.
-		// Skip `;` hoisting for virtual URL targets when running an external process (service or PTY)
-		// because virtual URLs exist only in the embedded shell.
+		// Extract a leading `cd <path> && ...` / `cd <path>; ...` into cwd when the
+		// model ignores the cwd parameter. The scanner captures only a single path
+		// token and defers to the shell for anything else (redirects, extra args,
+		// shell expansion), so it never absorbs shell syntax like
+		// `cd /tmp 2>/dev/null && ...` into the structured cwd. `&&` always hoists:
+		// a missing directory fails early, as the shell would short-circuit. `;`
+		// runs the rest even when `cd` fails, so it hoists only onto an existing host
+		// directory; anything else (URL targets included) stays with the shell.
 		if (!cwd) {
 			const cd = extractLeadingCdTarget(command);
-			if (cd) {
-				if (cd.separator === "&&") {
-					cwd = cd.path;
-					command = cd.rest;
-				} else {
-					const isVirtual = InternalUrlRouter.instance().canHandle(cd.path);
-					const cannotHostVirtual = name !== undefined || canUseInteractiveBashPty(pty === true, ctx);
-					if (!isVirtual || !cannotHostVirtual) {
-						const stat = await this.#statCwd(cd.path, signal, approvalTier);
-						if (stat.isDirectory) {
-							cwd = cd.path;
-							command = cd.rest;
-						}
-					}
-				}
+			const hoist =
+				cd?.separator === "&&" ||
+				(cd?.separator === ";" &&
+					!InternalUrlRouter.instance().canHandle(cd.path) &&
+					(await fs.promises.stat(resolveToCwd(cd.path, this.session.cwd)).catch(() => null))?.isDirectory());
+			if (cd && hoist) {
+				cwd = cd.path;
+				command = cd.rest;
 			}
 		}
 		// Mode selection runs on normalized fields: a caller that materializes
@@ -1279,6 +1214,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// for a plain command. Only `async: true` is an async request, a blank
 		// `name` is no service name, and service-only fields with nothing in
 		// them are not a service request.
+		const name = blankToUndefined(rawName);
 		const ready = normalizeReady(rawReady);
 		const asyncRequested = rawAsync === true;
 		const pendingNotices: string[] = [];
@@ -1315,38 +1251,44 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// tier this command was approved at. A URL cwd stays a URL: only that
 		// filesystem can enter it, so external backends (service, PTY, client
 		// terminal) never run there.
-		const targetCwd = cwd ?? this.session.cwd;
-		const cwdStat = await this.#statCwd(targetCwd, signal, approvalTier);
-		if (cwdStat.isVirtual) {
+		const approval = this.approval({ command: rawCommand });
+		const approvalTier = typeof approval === "string" ? approval : approval.tier;
+		const router = InternalUrlRouter.instance();
+		const virtualCwd = cwd && router.canHandle(cwd) ? router.normalize(cwd) : undefined;
+		const commandCwd = virtualCwd ?? (cwd ? resolveToCwd(cwd, this.session.cwd) : this.session.cwd);
+		if (virtualCwd !== undefined) {
 			if (name !== undefined || canUseInteractiveBashPty(pty === true, ctx)) {
 				throw new ToolError(
-					`Working directory ${cwdStat.path} exists only in the embedded shell; ${name !== undefined ? "services" : "pty commands"} run external processes and need a host directory.`,
+					`Working directory ${virtualCwd} exists only in the embedded shell; ${name !== undefined ? "services" : "pty commands"} run external processes and need a host directory.`,
 				);
 			}
-			if (cwdStat.error) {
-				if (cwdStat.error instanceof UrlFsError && cwdStat.error.code === "ENOENT") {
-					throw new ToolError(`Working directory does not exist: ${cwdStat.path}`);
-				}
-				throw new ToolError(
-					`Working directory ${cwdStat.path} is unavailable: ${cwdStat.error instanceof Error ? cwdStat.error.message : String(cwdStat.error)}`,
-				);
-			}
-			if (!cwdStat.isDirectory) {
-				throw new ToolError(`Working directory is not a directory: ${cwdStat.path}`);
+			const cwdStat = await this.#urlFilesystem(signal, approvalTier)
+				.stat(virtualCwd)
+				.catch((err: unknown) => {
+					if (err instanceof UrlFsError && err.code === "ENOENT") {
+						throw new ToolError(`Working directory does not exist: ${virtualCwd}`);
+					}
+					throw new ToolError(
+						`Working directory ${virtualCwd} is unavailable: ${err instanceof Error ? err.message : String(err)}`,
+					);
+				});
+			if (cwdStat.type !== "directory") {
+				throw new ToolError(`Working directory is not a directory: ${virtualCwd}`);
 			}
 		} else {
-			if (cwdStat.error) {
-				if (isEnoent(cwdStat.error)) {
-					throw new ToolError(`Working directory does not exist: ${cwdStat.path}`);
+			let cwdStat: fs.Stats;
+			try {
+				cwdStat = await fs.promises.stat(commandCwd);
+			} catch (err) {
+				if (isEnoent(err)) {
+					throw new ToolError(`Working directory does not exist: ${commandCwd}`);
 				}
-				throw cwdStat.error;
+				throw err;
 			}
-			if (!cwdStat.isDirectory) {
-				throw new ToolError(`Working directory is not a directory: ${cwdStat.path}`);
+			if (!cwdStat.isDirectory()) {
+				throw new ToolError(`Working directory is not a directory: ${commandCwd}`);
 			}
 		}
-		const virtualCwd = cwdStat.isVirtual ? cwdStat.path : undefined;
-		const commandCwd = cwdStat.path;
 
 		if (name !== undefined) {
 			// Only a readiness wait can outlast a steer; without `ready` the start
