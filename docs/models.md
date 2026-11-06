@@ -316,6 +316,23 @@ Loading models.yml checks a `modelOverrides` `kind` only against an api the file
 - `imageCountBudget`: positive integer. Set this on a custom model or `modelOverrides` entry to state how many images one request to its host may carry. It replaces the catalog budget, which is 5 for a provider no catalog rule names. A gateway in front of a vendor with a higher limit needs it: once a session holds more images than the budget, OMP drops the oldest ones, which changes the cached prompt prefix.
 - `tokenizer`: opt into a specific embedded local tokenizer when a proxy's model id is ambiguous or noncanonical. Allowed values: `claude-v3`, `claude-v47`, `claude-v5`, `claude-v5-sonnet`, `qwen3`, `deepseek-v3`, `kimi-k2`, `glm5`, `cl100k` (OpenAI GPT-3.5 and GPT-4) and `o200k` (OpenAI GPT-5 and later). Omit it to use catalog identity policy; models without one count in o200k.
 
+### Service tiers
+
+Set `serviceTiers` on a custom model or `modelOverrides` entry to declare the service-tier IDs its host supports, for example `[priority, ultrafast]`. This supplies the same model metadata used by discovery when a gateway does not advertise its tiers.
+
+```yaml
+providers:
+  gateway:
+    baseUrl: https://gateway.example.com/v1
+    api: openai-responses
+    apiKey: GATEWAY_API_KEY
+    models:
+      - id: gpt-6.1-sol
+        serviceTiers: [priority, ultrafast]
+```
+
+For an OpenAI-family model, listing `ultrafast` lets `/fast ultra` or `tier.openai: ultrafast` select that tier through the gateway. The list declares capabilities; it does not turn a tier on or enable support on the server. Codex-backend models also use a non-empty list to gate `priority` and `scale`. Omitting the field keeps existing discovery and provider behavior.
+
 ## Validation rules (current)
 
 ### Full custom provider (`models` is non-empty)
@@ -444,7 +461,7 @@ Provider defaults vs per-model overrides:
 - Model `headers` override provider header keys.
 - `modelOverrides` can override model metadata (`name`, `api`, `kind`, `reasoning`, `thinking`, `input`,
   `imageInputDecoder`, `imageCountBudget`, `tokenizer`, `supportsTools`, `cost`, `promptCache`, `premiumMultiplier`, `contextWindow`,
-  `maxContextWindow`, `maxTokens`, `omitMaxOutputTokens`, `preferWebsockets`, `headers`, `compat`,
+  `maxContextWindow`, `maxTokens`, `omitMaxOutputTokens`, `preferWebsockets`, `serviceTiers`, `headers`, `compat`,
   `contextPromotionTarget`, `compactionModel`, and `remoteCompaction`).
 - `compat` is deep-merged for nested routing blocks (`openRouterRouting`, `vercelGatewayRouting`,
   `extraBody`, and `whenThinking`).
