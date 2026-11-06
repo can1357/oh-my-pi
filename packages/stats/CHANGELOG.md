@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the trace dashboard returning HTTP 431 on subagent-heavy sessions: the trace ETag now hashes the child-transcript fingerprint to a fixed-size value instead of echoing the unbounded `name@mtime` list in `If-None-Match`. ([#18279](https://github.com/can1357/oh-my-pi/pull/18279) by [@aleister1102](https://github.com/aleister1102))
+
 ## [18.17.0] - 2026-11-06
 
 ### Fixed
