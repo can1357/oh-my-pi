@@ -96,7 +96,7 @@ use crate::bash::{
 };
 
 /// IR version; part of the frames header.
-pub const IR_VERSION: u32 = 15;
+pub const IR_VERSION: u32 = 16;
 
 /// Opcodes.
 #[derive(
@@ -295,30 +295,6 @@ pub struct Unit {
 	pub funcs:               Vec<FuncIr>,
 }
 
-/// The hash of a unit's source context (see [`Unit::source_hasher`]).
-pub(crate) fn source_hasher(
-	mode: ModeId,
-	features: u32,
-	source: &[u8],
-	aliases: &[(BString, BString)],
-	line: u32,
-) -> blake3::Hasher {
-	let mut h = blake3::Hasher::new();
-	h.update(&IR_VERSION.to_le_bytes());
-	h.update(<&'static str>::from(mode).as_bytes());
-	h.update(&features.to_le_bytes());
-	h.update(&(source.len() as u64).to_le_bytes());
-	h.update(source);
-	for (name, value) in aliases {
-		h.update(&(name.len() as u64).to_le_bytes());
-		h.update(name);
-		h.update(&(value.len() as u64).to_le_bytes());
-		h.update(value);
-	}
-	h.update(&line.to_le_bytes());
-	h
-}
-
 impl Unit {
 	/// An empty unit for `mode`/`features` over `source`.
 	pub(crate) fn empty(source: &[u8], mode: ModeId, features: u32) -> Self {
@@ -452,6 +428,30 @@ impl Unit {
 				.map(|f| f.body.weight() + f.definition.as_ref().map_or(0, FuncDefinition::weight))
 				.sum::<usize>()
 	}
+}
+
+/// The hash of a unit's source context (see [`Unit::source_hasher`]).
+pub(crate) fn source_hasher(
+	mode: ModeId,
+	features: u32,
+	source: &[u8],
+	aliases: &[(BString, BString)],
+	line: u32,
+) -> blake3::Hasher {
+	let mut h = blake3::Hasher::new();
+	h.update(&IR_VERSION.to_le_bytes());
+	h.update(<&'static str>::from(mode).as_bytes());
+	h.update(&features.to_le_bytes());
+	h.update(&(source.len() as u64).to_le_bytes());
+	h.update(source);
+	for (name, value) in aliases {
+		h.update(&(name.len() as u64).to_le_bytes());
+		h.update(name);
+		h.update(&(value.len() as u64).to_le_bytes());
+		h.update(value);
+	}
+	h.update(&line.to_le_bytes());
+	h
 }
 
 /// A syntax node's location.
@@ -1041,7 +1041,11 @@ pub fn compile_all(src: &[u8], mode: ModeId, features: crate::bash::syntax::Feat
 	let mut units = Vec::new();
 	while let Some(res) = parser.next_command() {
 		units.push(match res {
-			Ok(cc) => compile(&cc, src, mode, features),
+			Ok(cc) => {
+				let unit = compile(&cc, src, mode, features);
+				parser.recycle(cc.tree);
+				unit
+			},
 			Err(e) => syntax_unit(&e, src, mode, features),
 		});
 	}
@@ -1087,10 +1091,9 @@ mod tests {
 			.next_command()
 			.unwrap()
 			.unwrap();
-		let expected = crate::bash::syntax::print(
-			&command.list.items[0].and_or.first.stages[0].cmd,
-			PrintStyle::DeclareF,
-		);
+		let first = command.list().items().first().unwrap().and_or().first();
+		let expected =
+			crate::bash::syntax::print(first.stages().first().unwrap(), PrintStyle::DeclareF);
 		let unit = lower_deferred(&command, source, ModeId::Bash, Features::NONE).unwrap();
 		assert_eq!(FuncText::of(&unit.funcs[0]).as_slice(), expected);
 	}

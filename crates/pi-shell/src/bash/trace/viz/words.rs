@@ -2,7 +2,13 @@
 //! Quoting and substitutions preserve complete values; display folding belongs
 //! to rows.
 use super::{analysis::Analysis, model::Layers};
-use crate::bash::syntax::*;
+use crate::bash::syntax::{
+	AndOrOp, CaseMode, ComsubKind, PrintStyle, ReplaceMode, Sep, Special, print,
+	tree::{
+		ArrayElem, Assign, AssignValue, CommandKind, Cond, CondExpr, List, Param, ParamName, ParamOp,
+		Part, Pipeline, Seq, Subscript, Word, WordPart,
+	},
+};
 
 pub struct WordPrinter<'a> {
 	pub layers:   &'a Layers,
@@ -34,71 +40,68 @@ pub fn quote(value: &str) -> String {
 	out
 }
 impl WordPrinter<'_> {
-	pub fn word(&self, word: &Word) -> String {
-		if word.parts.is_empty() {
+	pub fn word(&self, word: Word<'_>) -> String {
+		let parts = word.parts();
+		if let Some(p) = parts.one() {
+			return self.part(p);
+		}
+		if parts.is_empty() {
 			return quote("");
 		}
-		if word.parts.len() == 1 {
-			return self.part(&word.parts[0]);
-		}
-		let parts: Vec<_> = word.parts.iter().map(|p| self.part(p)).collect();
+		let parts: Vec<_> = parts.iter().map(|p| self.part(p)).collect();
 		format!("concat({})", parts.join(", "))
 	}
 
-	fn part(&self, p: &WordPart) -> String {
-		match p {
-			WordPart::Lit(v) | WordPart::Escaped(v) | WordPart::SQuote(v) => quote(&text(v)),
-			WordPart::AnsiC(v) => quote(&text(&crate::bash::syntax::ansi_decode_all(v))),
-			WordPart::DQuote(v) | WordPart::Locale(v) => self.interpolation(v),
-			WordPart::Param(p) => self.parameter(p),
-			WordPart::Comsub(c) => format!(
+	fn part(&self, p: WordPart<'_>) -> String {
+		match p.get() {
+			Part::Lit(v) | Part::Escaped(v) | Part::SQuote(v) => quote(&text(v)),
+			Part::AnsiC(v) => quote(&text(&crate::bash::syntax::ansi_decode_all(v))),
+			Part::DQuote(v) | Part::Locale(v) => self.interpolation(v),
+			Part::Param(p) => self.parameter(p),
+			Part::Comsub(c) => format!(
 				"{}⟨{}⟩",
-				match c.kind {
+				match c.kind() {
 					ComsubKind::ValueSub => "reply",
 					ComsubKind::NoFork => "current",
 					_ => "",
 				},
-				self.list_inline(&c.body)
+				self.list_inline(c.body())
 			),
-			WordPart::ProcSub(p) => format!(
+			Part::ProcSub(p) => format!(
 				"{}⟨{}⟩",
-				if p.output { "write_file" } else { "file" },
-				self.list_inline(&p.body)
+				if p.output() { "write_file" } else { "file" },
+				self.list_inline(p.body())
 			),
-			WordPart::Arith(a) => self.analysis.arithmetic(&a.src).map_or_else(
+			Part::Arith(a) => self.analysis.arithmetic(a.src()).map_or_else(
 				|| {
-					if a.bracket {
-						format!("$[{}]", text(&a.src))
+					if a.bracket() {
+						format!("$[{}]", text(a.src()))
 					} else {
-						format!("$(({}))", text(&a.src))
+						format!("$(({}))", text(a.src()))
 					}
 				},
 				|value| value.to_string(),
 			),
-			WordPart::Compound(e) => self.elements(e),
-			WordPart::BadSubst(v) | WordPart::Zsh(v) => text(v),
-			WordPart::BadComsub(c) => text(&c.text),
-			WordPart::DroppedQuote => "\"".into(),
+			Part::Compound(e) => self.elements(e),
+			Part::BadSubst(v) | Part::Zsh(v) => text(v),
+			Part::BadComsub(c) => text(c.text()),
+			Part::DroppedQuote => "\"".into(),
 		}
 	}
 
-	fn interpolation(&self, parts: &[WordPart]) -> String {
+	fn interpolation(&self, parts: Seq<'_, WordPart<'_>>) -> String {
 		let dynamic = parts.iter().any(|p| {
 			!matches!(
-				p,
-				WordPart::Lit(_)
-					| WordPart::Escaped(_)
-					| WordPart::SQuote(_)
-					| WordPart::AnsiC(_)
-					| WordPart::DroppedQuote
+				p.get(),
+				Part::Lit(_) | Part::Escaped(_) | Part::SQuote(_) | Part::AnsiC(_) | Part::DroppedQuote
 			)
 		});
 		let mut content = String::new();
 		for part in parts {
-			let literal = match part {
-				WordPart::Lit(v) | WordPart::Escaped(v) | WordPart::SQuote(v) => Some(text(v)),
-				WordPart::AnsiC(v) => Some(text(&crate::bash::syntax::ansi_decode_all(v))),
-				WordPart::DroppedQuote => Some("\"".into()),
+			let literal = match part.get() {
+				Part::Lit(v) | Part::Escaped(v) | Part::SQuote(v) => Some(text(v)),
+				Part::AnsiC(v) => Some(text(&crate::bash::syntax::ansi_decode_all(v))),
+				Part::DroppedQuote => Some("\"".into()),
 				_ => None,
 			};
 			if let Some(literal) = literal {
@@ -123,15 +126,15 @@ impl WordPrinter<'_> {
 		format!("{}\"{content}\"", if dynamic { "f" } else { "" })
 	}
 
-	fn elements(&self, e: &[ArrayElem]) -> String {
+	fn elements(&self, e: Seq<'_, ArrayElem<'_>>) -> String {
 		format!(
 			"[{}]",
 			e.iter()
 				.map(|e| {
-					let value = self.word(&e.value);
-					match &e.key {
+					let value = self.word(e.value());
+					match e.key() {
 						Some(k) => {
-							format!("{} {} {}", self.word(k), if e.append { "+=" } else { ":" }, value)
+							format!("{} {} {}", self.word(k), if e.append() { "+=" } else { ":" }, value)
 						},
 						None => value,
 					}
@@ -141,25 +144,26 @@ impl WordPrinter<'_> {
 		)
 	}
 
-	pub fn assignment(&self, a: &Assign) -> String {
-		let mut name = text(&a.name);
-		if let Some(i) = &a.index {
+	pub fn assignment(&self, a: Assign<'_>) -> String {
+		let mut name = text(a.name());
+		if let Some(i) = a.index() {
 			name.push('[');
 			name.push_str(&self.word(i));
 			name.push(']');
 		}
-		format!("{name} {} {}", if a.append { "+=" } else { "=" }, match &a.value {
+		format!("{name} {} {}", if a.append() { "+=" } else { "=" }, match a.value() {
 			AssignValue::Scalar(w) => self.word(w),
 			AssignValue::Array(e) => self.elements(e),
 		})
 	}
 
-	pub fn parameter(&self, p: &Param) -> String {
+	pub fn parameter(&self, p: Param<'_>) -> String {
+		let (op, index) = (p.op(), p.index());
 		if self.layers.inline
-			&& matches!(p.op, ParamOp::None)
-			&& p.index.is_none()
-			&& !p.indirect
-			&& let ParamName::Var(name) = &p.name
+			&& matches!(op, ParamOp::None)
+			&& index.is_none()
+			&& !p.indirect()
+			&& let ParamName::Var(name) = p.name()
 			&& let Some(value) = self
 				.analysis
 				.variables
@@ -174,7 +178,7 @@ impl WordPrinter<'_> {
 		{
 			return format!("‹{value}›");
 		}
-		let mut v = match &p.name {
+		let mut v = match p.name() {
 			ParamName::Var(n) => text(n),
 			ParamName::Positional(n) => format!("arg{n}"),
 			ParamName::Special(s) => match s {
@@ -188,22 +192,20 @@ impl WordPrinter<'_> {
 			}
 			.into(),
 		};
-		if matches!(p.op, ParamOp::Indirect)
-			&& matches!(p.index, Some(Subscript::At | Subscript::Star))
-		{
+		if matches!(op, ParamOp::Indirect) && matches!(index, Some(Subscript::At | Subscript::Star)) {
 			return format!(
 				"{}keys({v})",
-				if matches!(p.index, Some(Subscript::Star)) {
+				if matches!(index, Some(Subscript::Star)) {
 					"joined_"
 				} else {
 					""
 				}
 			);
 		}
-		if p.indirect {
+		if p.indirect() {
 			v = format!("indirect({v})");
 		}
-		if let Some(index) = &p.index {
+		if let Some(index) = index {
 			v = format!("{v}[{}]", match index {
 				Subscript::At => ":".into(),
 				Subscript::Star => "*".into(),
@@ -211,39 +213,36 @@ impl WordPrinter<'_> {
 			});
 		}
 		let presence = |colon: bool| format!("{}({v})", if colon { "nonempty" } else { "is_set" });
-		match &p.op {
+		match op {
 			ParamOp::None => v,
 			ParamOp::Length => format!("len({v})"),
 			ParamOp::Indirect => format!("indirect({v})"),
 			ParamOp::PrefixNames { star } => {
-				format!("variable_names({}, {})", quote(&v), quote(if *star { "*" } else { "@" }))
+				format!("variable_names({}, {})", quote(&v), quote(if star { "*" } else { "@" }))
 			},
 			ParamOp::Default { colon, word } => {
-				format!("({v} if {} else {})", presence(*colon), self.word(word))
+				format!("({v} if {} else {})", presence(colon), self.word(word))
 			},
 			ParamOp::Assign { colon, word } => {
-				format!("default_assign({v}, {}, {})", self.word(word), presence(*colon))
+				format!("default_assign({v}, {}, {})", self.word(word), presence(colon))
 			},
 			ParamOp::Error { colon, word } => format!(
 				"require({v}, {}, {})",
-				word
-					.as_ref()
-					.map_or_else(|| quote("parameter null or not set"), |w| self.word(w)),
-				presence(*colon)
+				word.map_or_else(|| quote("parameter null or not set"), |w| self.word(w)),
+				presence(colon)
 			),
 			ParamOp::Alt { colon, word } => {
-				format!("({} if {} else \"\")", self.word(word), presence(*colon))
+				format!("({} if {} else \"\")", self.word(word), presence(colon))
 			},
 			ParamOp::Substr { offset, len } => format!(
 				"slice({v}, {}{})",
-				text(&offset.src),
-				len.as_ref()
-					.map_or_default(|l| format!(", {}", text(&l.src)))
+				text(offset.src()),
+				len.map_or_default(|l| format!(", {}", text(l.src())))
 			),
 			ParamOp::Trim { suffix, longest, pat } => format!(
 				"strip_{}{}({v}, {})",
-				if *longest { "longest_" } else { "" },
-				if *suffix { "suffix" } else { "prefix" },
+				if longest { "longest_" } else { "" },
+				if suffix { "suffix" } else { "prefix" },
 				self.word(pat)
 			),
 			ParamOp::Replace { mode, pat, rep } => format!(
@@ -255,7 +254,7 @@ impl WordPrinter<'_> {
 					ReplaceMode::Suffix => "suffix",
 				},
 				self.word(pat),
-				rep.as_ref().map_or_else(|| quote(""), |w| self.word(w))
+				rep.map_or_else(|| quote(""), |w| self.word(w))
 			),
 			ParamOp::Case { mode, all, pat } => format!(
 				"{}_{}({v}{})",
@@ -264,25 +263,24 @@ impl WordPrinter<'_> {
 					CaseMode::Lower => "lower",
 					CaseMode::Toggle => "toggle_case",
 				},
-				if *all { "all" } else { "first" },
-				pat.as_ref()
-					.map_or_default(|w| format!(", {}", self.word(w)))
+				if all { "all" } else { "first" },
+				pat.map_or_default(|w| format!(", {}", self.word(w)))
 			),
 			ParamOp::Transform(op) => {
-				format!("transform({v}, {})", quote(&char::from(*op).to_string()))
+				format!("transform({v}, {})", quote(&char::from(op).to_string()))
 			},
 		}
 	}
 
-	pub fn condition(&self, c: &CondExpr) -> String {
-		match c {
-			CondExpr::Word(w) => format!("nonempty({})", self.word(w)),
-			CondExpr::Not(c) => format!("not ({})", self.condition(c)),
-			CondExpr::Group(c) => format!("({})", self.condition(c)),
-			CondExpr::And(a, b) => format!("({} and {})", self.condition(a), self.condition(b)),
-			CondExpr::Or(a, b) => format!("({} or {})", self.condition(a), self.condition(b)),
-			CondExpr::Unary { op, arg } => {
-				let f = match op.as_slice() {
+	pub fn condition(&self, c: CondExpr<'_>) -> String {
+		match c.get() {
+			Cond::Word(w) => format!("nonempty({})", self.word(w)),
+			Cond::Not(c) => format!("not ({})", self.condition(c)),
+			Cond::Group(c) => format!("({})", self.condition(c)),
+			Cond::And(a, b) => format!("({} and {})", self.condition(a), self.condition(b)),
+			Cond::Or(a, b) => format!("({} or {})", self.condition(a), self.condition(b)),
+			Cond::Unary { op, arg } => {
+				let f = match op {
 					b"-f" => "is_file",
 					b"-d" => "is_dir",
 					b"-e" => "exists",
@@ -298,15 +296,15 @@ impl WordPrinter<'_> {
 				};
 				format!("{f}({})", self.word(arg))
 			},
-			CondExpr::Binary { op, lhs, rhs } => {
+			Cond::Binary { op, lhs, rhs } => {
 				let a = self.word(lhs);
 				let b = self.word(rhs);
-				match op.as_slice() {
+				match op {
 					b"=~" => format!("regex({a}, {b})"),
 					b"=" | b"==" => format!("matches({a}, {b})"),
 					b"!=" => format!("not matches({a}, {b})"),
 					b"-eq" | b"-ne" | b"-lt" | b"-le" | b"-gt" | b"-ge" => {
-						format!("int({a}) {} int({b})", match op.as_slice() {
+						format!("int({a}) {} int({b})", match op {
 							b"-eq" => "==",
 							b"-ne" => "!=",
 							b"-lt" => "<",
@@ -322,42 +320,107 @@ impl WordPrinter<'_> {
 		}
 	}
 
-	pub fn list_inline(&self, list: &List) -> String {
-		list.items.iter().map(|item| {
-   let pipeline=|p:&Pipeline| {
-    let mut value=p.stages.iter().enumerate().map(|(i,s)| {
-     let command=if s.cmd.redirs.is_empty() {match &s.cmd.kind {
-      CommandKind::Simple(c)=>{
-       if c.assigns.is_empty() && matches!(c.words.first().map(|w|w.parts.as_slice()),Some([WordPart::Lit(name)]) if name==b"echo") && !matches!(c.words.get(1).map(|w|w.parts.as_slice()),Some([WordPart::Lit(arg)]) if arg.starts_with(b"-")) {
-        format!("print({})",c.words[1..].iter().map(|w|self.word(w)).collect::<Vec<_>>().join(", "))
-       } else {
-        let mut parts:Vec<String>=c.assigns.iter().map(|a|self.assignment(a)).collect();
-        parts.extend(c.words.iter().enumerate().map(|(i,w)|if i==0 {match w.parts.as_slice(){[WordPart::Lit(v)]=>text(v),_=>self.word(w)}}else{self.word(w)}));
-        parts.join(" ")
-       }
-      },
-      CommandKind::Cond(c)=>self.condition(c),
-      CommandKind::Arith(a)=>self.analysis.arithmetic(&a.src).map_or_else(||format!("(({}))",text(&a.src)), |value|value.to_string()),
-      CommandKind::Brace(l)=>format!("{{ {} }}",self.list_inline(l)),
-      CommandKind::Subshell(l)=>format!("subshell({})",self.list_inline(l)),
-      _=>text(&print(&s.cmd,PrintStyle::Compact)),
-     }}else{text(&print(&s.cmd,PrintStyle::Compact))};
-     if i==0{command}else{format!("{} {command}",if p.stages[i-1].pipe_stderr{"|&"}else{"|"})}
-    }).collect::<Vec<_>>().join(" ");
-    if p.bang {value=format!("not ({value})");}
-    if let Some(time)=&p.time {value=format!("time{}({value})",if time.posix{"_posix"}else{""});}
-    value
-   };
-   let mut value=pipeline(&item.and_or.first);
-   for (op,p) in &item.and_or.rest {value.push_str(match op{AndOrOp::And=>" and ",AndOrOp::Or=>" or "});value.push_str(&pipeline(p));}
-   match item.sep{Sep::Amp=>format!("background({value})"),Sep::Disown=>format!("disown({value})"),_=>value}
-  }).collect::<Vec<_>>().join("; ")
+	pub fn list_inline(&self, list: List<'_>) -> String {
+		list
+			.items()
+			.iter()
+			.map(|item| {
+				let ao = item.and_or();
+				let mut value = self.pipeline_inline(ao.first());
+				for (op, p) in ao.rest() {
+					value.push_str(match op {
+						AndOrOp::And => " and ",
+						AndOrOp::Or => " or ",
+					});
+					value.push_str(&self.pipeline_inline(p));
+				}
+				match item.sep() {
+					Sep::Amp => format!("background({value})"),
+					Sep::Disown => format!("disown({value})"),
+					_ => value,
+				}
+			})
+			.collect::<Vec<_>>()
+			.join("; ")
+	}
+
+	fn pipeline_inline(&self, p: Pipeline<'_>) -> String {
+		fn lit(w: Option<Word<'_>>) -> Option<&[u8]> {
+			match w.and_then(|w| w.parts().one()).map(WordPart::get) {
+				Some(Part::Lit(v)) => Some(v),
+				_ => None,
+			}
+		}
+		let mut prev_stderr = false;
+		let mut value = p
+			.stages()
+			.iter()
+			.enumerate()
+			.map(|(i, cmd)| {
+				let compact = || text(&print(cmd, PrintStyle::Compact));
+				let command = if cmd.redirs().is_empty() {
+					match cmd.kind() {
+						CommandKind::Simple(c) => {
+							let words = c.words();
+							if c.assigns().is_empty()
+								&& lit(words.first()) == Some(b"echo")
+								&& !lit(words.get(1)).is_some_and(|arg| arg.starts_with(b"-"))
+							{
+								format!(
+									"print({})",
+									words
+										.skip(1)
+										.iter()
+										.map(|w| self.word(w))
+										.collect::<Vec<_>>()
+										.join(", ")
+								)
+							} else {
+								let mut parts: Vec<String> =
+									c.assigns().iter().map(|a| self.assignment(a)).collect();
+								parts.extend(words.iter().enumerate().map(|(i, w)| match lit(Some(w)) {
+									Some(v) if i == 0 => text(v),
+									_ => self.word(w),
+								}));
+								parts.join(" ")
+							}
+						},
+						CommandKind::Cond(c) => self.condition(c),
+						CommandKind::Arith(a) => self
+							.analysis
+							.arithmetic(a.src())
+							.map_or_else(|| format!("(({}))", text(a.src())), |value| value.to_string()),
+						CommandKind::Brace(l) => format!("{{ {} }}", self.list_inline(l)),
+						CommandKind::Subshell(l) => format!("subshell({})", self.list_inline(l)),
+						_ => compact(),
+					}
+				} else {
+					compact()
+				};
+				let pipe = if prev_stderr { "|&" } else { "|" };
+				prev_stderr = cmd.pipe_stderr();
+				if i == 0 {
+					command
+				} else {
+					format!("{pipe} {command}")
+				}
+			})
+			.collect::<Vec<_>>()
+			.join(" ");
+		if p.bang() {
+			value = format!("not ({value})");
+		}
+		if let Some(time) = p.time() {
+			value = format!("time{}({value})", if time.posix { "_posix" } else { "" });
+		}
+		value
 	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::bash::syntax::{Features, parse_all};
 	fn render(source: &[u8]) -> String {
 		let program = parse_all(source, Features::NONE).expect("canonical bash parse");
 		let analysis = Analysis::default();
@@ -367,7 +430,7 @@ mod tests {
 		program
 			.commands
 			.iter()
-			.map(|c| printer.list_inline(&c.list))
+			.map(|c| printer.list_inline(c.list()))
 			.collect::<Vec<_>>()
 			.join("; ")
 	}

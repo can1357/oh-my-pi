@@ -743,6 +743,12 @@ pub(super) struct Ctx<'s> {
 	pub(super) inpartime:  bool,
 	/// Here-document bodies by sequence number.
 	pub(super) docs:       Vec<Vec<u8>>,
+	/// The syntax of the event being parsed.
+	pub(super) t:          crate::bash::syntax::tree::Tree,
+	/// Here-document text nodes waiting for their bodies, and the
+	/// sequence numbers of the bodies.
+	pub(super) doc_nodes:
+		Vec<(crate::bash::syntax::tree::Id<crate::bash::syntax::tree::shape::Text>, u32)>,
 	/// Alias substitutions of the current top-level command.
 	pub(super) alias_uses: Vec<AliasUse>,
 	/// Line of the first token of the event being parsed.
@@ -963,6 +969,8 @@ impl<'s> Ctx<'s> {
 			inalmore: false,
 			inpartime: false,
 			docs: Vec::new(),
+			t: crate::bash::syntax::tree::Tree::default(),
+			doc_nodes: Vec::new(),
 			alias_uses: Vec::new(),
 			ev_line: line,
 			err_tok: T::Endinput,
