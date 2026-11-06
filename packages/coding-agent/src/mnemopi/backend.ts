@@ -107,7 +107,7 @@ async function installMnemopiState(
 		state.attachSessionListeners();
 		// Promote age-eligible working memory to episodic before the session's
 		// first write can TTL-trim unconsolidated retain/learn rows (#10770).
-		state.promoteEligibleWorkingMemory();
+		await state.promoteEligibleWorkingMemory();
 		return state;
 	} catch (error) {
 		setMnemopiSessionState(session, undefined);

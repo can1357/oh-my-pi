@@ -971,16 +971,16 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 	 *
 	 * Bank-global because each bank opens with `sessionId = <bank>`, so a single
 	 * session-scoped `sleep` covers rows written by every prior session. Cheap
-	 * when nothing is old enough — `sleep` short-circuits to a no-op with no
+	 * when nothing is old enough — `sleepAsync` short-circuits to a no-op with no
 	 * eligible rows — and failures are logged, never thrown, so a consolidation
 	 * error cannot make the backend inert.
 	 */
-	promoteEligibleWorkingMemory(): void {
+	async promoteEligibleWorkingMemory(): Promise<void> {
 		if (this.aliasOf) return;
 		const scoped = this.#local();
 		for (const memory of scoped.owned) {
 			try {
-				memory.sleep(false);
+				await memory.sleepAsync(false);
 			} catch (error) {
 				this.#logLifecycleFailure("startup consolidation", [scoped.retain.bank], error);
 			}
