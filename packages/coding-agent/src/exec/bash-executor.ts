@@ -5,9 +5,11 @@
  * execution.
  */
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import * as fs from "node:fs";
 import {
 	type MinimizerOptions,
 	type PipeStreams,
+	Process,
 	PtySession,
 	RunTrace,
 	Shell,
@@ -15,6 +17,8 @@ import {
 	type ShellRunResult,
 } from "@oh-my-pi/pi-natives";
 import { isShellTrace, type ShellTrace } from "@oh-my-pi/pi-wire";
+import { logger } from "@oh-my-pi/pi-utils";
+import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings } from "../config/settings";
@@ -595,7 +599,141 @@ async function executeUserShellPty(run: {
 	};
 }
 
+/** Live processes a stalled run's report names before it elides the rest. */
+const STALLED_RUN_MAX_PROCESSES = 4;
+/** Width each named process is cut to, so one long command line cannot fill the notice. */
+const STALLED_RUN_PROCESS_WIDTH = 80;
+/**
+ * Thread name of the native addon's worker pool. The pool runs the embedded
+ * shell and the file-search tools (`glob`, `grep`, `fuzzyFind`, `ast_grep`)
+ * alike, so filesystem work that blocks its threads also stops a shell run
+ * from ever starting. A build that renames the threads simply reports nothing.
+ */
+const NATIVE_WORKER_COMM = "tokio-rt-worker";
+
+/**
+ * The addon's worker threads sitting in uninterruptible IO wait, read from
+ * procfs. `D` is the one thread state a timeout cannot explain away: those
+ * threads are inside a filesystem syscall that has not returned, so a run that
+ * never started was never going to start. `wchan` names the wait
+ * (`xfs_buf_iowait` for an inode-cache miss on XFS). Linux only, and only on
+ * the timeout path. `taskDir` exists for the tests, which cannot put a real
+ * thread into `D`.
+ */
+export function describeBlockedNativeWorkers(
+	taskDir = "/proc/self/task",
+): { text: string; fields: Record<string, unknown> } | undefined {
+	if (process.platform !== "linux") return undefined;
+	let workers = 0;
+	let blocked = 0;
+	const waits = new Set<string>();
+	try {
+		for (const tid of fs.readdirSync(taskDir)) {
+			const dir = `${taskDir}/${tid}`;
+			if (fs.readFileSync(`${dir}/comm`, "utf8").trim() !== NATIVE_WORKER_COMM) continue;
+			workers += 1;
+			// `stat` holds the thread name in parentheses before the state, and the
+			// name may itself contain them, so split after the last `) `.
+			const stat = fs.readFileSync(`${dir}/stat`, "utf8");
+			if (stat.slice(stat.lastIndexOf(") ") + 2).charAt(0) !== "D") continue;
+			blocked += 1;
+			const wchan = fs.readFileSync(`${dir}/wchan`, "utf8").trim();
+			if (wchan) waits.add(wchan);
+		}
+	} catch {
+		// No procfs, or threads that exited mid-read: report nothing rather than
+		// a half-read count.
+		return undefined;
+	}
+	if (blocked === 0) return undefined;
+	const named = [...waits].slice(0, 2).join(", ");
+	return {
+		text:
+			`${blocked} of ${workers} native worker threads are blocked in uninterruptible IO` +
+			(named ? ` (${named})` : ""),
+		fields: { nativeWorkers: workers, nativeWorkersBlocked: blocked, nativeWorkerWaits: [...waits] },
+	};
+}
+
+/** What the executor knows about a run its result-only watchdog had to end. */
+interface StalledRunFacts {
+	/** Wall time spent on the rc snapshot and the direnv preflight, before the deadline existed. */
+	preflightMs: number;
+	/** Wall time since the command was handed to the embedded shell. */
+	runMs: number;
+	streamedChunks: number;
+	streamedChars: number;
+	ownsPersistentSession: boolean;
+	sessionBusy: boolean;
+}
+
+/** `argv` of a live pid for a stalled run's report; the pid alone when it cannot be read. */
+function describeLivePid(pid: number): string {
+	try {
+		const argv = Process.fromPid(pid)?.args() ?? [];
+		if (argv.length === 0) return `pid ${pid}`;
+		return `${truncateToWidth(replaceTabs(argv.join(" ")), STALLED_RUN_PROCESS_WIDTH)} (pid ${pid})`;
+	} catch {
+		// The process exited between `pids()` and this read: it has no argv left.
+		return `pid ${pid}`;
+	}
+}
+
+/**
+ * What a bash call was waiting on when the executor's result-only watchdog
+ * fired: the processes the embedded shell still has alive, how much output
+ * reached the sink, which shell ran the command, and how its wall time split
+ * between setup and the run.
+ *
+ * `Shell.pids()` is synchronous and never takes the session lock, so it
+ * answers while the run is wedged. A shell that spawned nothing reports an
+ * empty list, which is itself the finding: the engine never came back from a
+ * command that had no process of its own.
+ */
+function describeStalledRun(shell: Shell, facts: StalledRunFacts): { text: string; fields: Record<string, unknown> } {
+	let pids: readonly number[] = [];
+	try {
+		pids = shell.pids();
+	} catch {
+		// A shell torn down between the deadline and this probe reports nothing.
+	}
+	const named = pids.slice(0, STALLED_RUN_MAX_PROCESSES).map(describeLivePid);
+	const hidden = pids.length - named.length;
+	const running =
+		named.length > 0
+			? `still running: ${named.join(", ")}${hidden > 0 ? ` and ${hidden} more` : ""}`
+			: "nothing of the command was still running, so the shell itself never returned";
+	let shellRole = "this session's shell";
+	if (!facts.ownsPersistentSession) {
+		shellRole = facts.sessionBusy
+			? "a one-shot shell (this session's shell was busy)"
+			: "a one-shot shell (this session's shell was quarantined)";
+	}
+	const pool = describeBlockedNativeWorkers();
+	const text = [
+		running,
+		...(pool ? [pool.text] : []),
+		`${facts.streamedChars} characters of output in ${facts.streamedChunks} chunks`,
+		`ran on ${shellRole}`,
+		`setup ${Math.round(facts.preflightMs)} ms, then ${(facts.runMs / 1000).toFixed(1)} s in the shell`,
+	].join("; ");
+	return {
+		text,
+		fields: {
+			pids: [...pids],
+			processes: named,
+			...pool?.fields,
+			streamedChars: facts.streamedChars,
+			streamedChunks: facts.streamedChunks,
+			shell: shellRole,
+			preflightMs: Math.round(facts.preflightMs),
+			runMs: Math.round(facts.runMs),
+		},
+	};
+}
+
 export async function executeBash(command: string, options?: BashExecutorOptions): Promise<BashResult> {
+	const callStartedAt = performance.now();
 	const settings = await Settings.init();
 	const baseShellConfig = settings.getShellConfig();
 	const shellConfig =
@@ -639,6 +777,9 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			commandPrefix: prefix,
 		}),
 	]);
+	// Setup runs before the deadline timer exists, so a slow rc snapshot or
+	// `.envrc` load is invisible in the timeout report unless it is measured here.
+	const preflightMs = performance.now() - callStartedAt;
 	const commandEnv = buildNonInteractiveEnv(preflight.env);
 	const runCdInPersistentShell = options?.useUserShell === true && !prefix && isPersistentShellCdCommand(command);
 	// Never wrap in cmd.exe: it is only the Windows no-bash fallback for spawn
@@ -674,8 +815,12 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	let acceptingChunks = true;
 	let graphicsFinished = false;
 	let decodedImages: ImageContent[] = [];
+	let streamedChunks = 0;
+	let streamedChars = 0;
 	const enqueueChunk = (chunk: string) => {
 		if (!acceptingChunks) return;
+		streamedChunks += 1;
+		streamedChars += chunk.length;
 		const clean = graphics.push(chunk);
 		if (clean) sink.push(clean);
 	};
@@ -810,6 +955,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	};
 
 	try {
+		const runStartedAt = performance.now();
 		const runPromise = executionShell.run(
 			{
 				command: finalCommand,
@@ -849,13 +995,30 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			let notice = "Command cancelled";
 			if (winner.kind === "timeout" && deadlineTimeoutMs !== undefined) {
 				const seconds = Math.round(deadlineTimeoutMs / 1000);
+				notice = `Command timed out after ${seconds} seconds`;
 				// With an explicit timeout the native shell owns enforcement and
 				// this JS timer is only a backstop. If it still wins, the native
 				// run never returned — any output is stuck in the undrained pipe,
-				// so this is not a confirmed empty run (#10308).
-				notice = nativeOwnsTimeout
-					? `Command timed out after ${seconds} seconds; the shell backend did not respond, so any output above may be incomplete`
-					: `Command timed out after ${seconds} seconds`;
+				// so this is not a confirmed empty run (#10308). Name what the run
+				// was waiting on: the bare "did not respond" sentence leaves the
+				// reader nothing to act on, and nothing lands in the log either.
+				if (nativeOwnsTimeout) {
+					const stalled = describeStalledRun(executionShell, {
+						preflightMs,
+						runMs: performance.now() - runStartedAt,
+						streamedChunks,
+						streamedChars,
+						ownsPersistentSession,
+						sessionBusy,
+					});
+					notice += `; the shell backend did not respond, so any output above may be incomplete (${stalled.text})`;
+					logger.warn("bash: the shell backend did not respond", {
+						command: truncateToWidth(replaceTabs(finalCommand), STALLED_RUN_PROCESS_WIDTH),
+						sessionKey: options?.sessionKey,
+						timeoutMs: deadlineTimeoutMs,
+						...stalled.fields,
+					});
+				}
 			}
 			return {
 				exitCode: undefined,

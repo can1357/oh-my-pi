@@ -9,6 +9,7 @@ import {
 	applyDirenvPreflight,
 	type BashResult,
 	buildMinimizerOptions,
+	describeBlockedNativeWorkers,
 	executeBash,
 	isPersistentShellCdCommand,
 } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
@@ -927,6 +928,93 @@ exit 64
 		expect(result.output).toContain("the shell backend did not respond");
 		expect(nativeSignal?.aborted).toBe(false);
 		expect(abortSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("names the processes the shell still has alive when the backend does not respond", async () => {
+		const realSetTimeout = globalThis.setTimeout;
+		vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void, ms?: number, ...rest: unknown[]) =>
+			realSetTimeout(
+				handler,
+				typeof ms === "number" && ms >= 1000 ? 5 : ms,
+				...rest,
+			)) as typeof globalThis.setTimeout);
+		vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation((_options, onChunk) => {
+			onChunk?.(null, "partial\n");
+			return Promise.withResolvers<never>().promise;
+		});
+		vi.spyOn(piNatives.Shell.prototype, "abort").mockResolvedValue();
+		vi.spyOn(piNatives.Shell.prototype, "pids").mockReturnValue([424_242]);
+		vi.spyOn(piNatives.Process, "fromPid").mockReturnValue({
+			args: () => ["sleep", "300"],
+		} as unknown as piNatives.Process);
+
+		const result = await executeBash("sleep 300", {
+			cwd: tempDir,
+			timeout: 1000,
+			sessionKey: "stalled-run-names-its-wait",
+		});
+
+		// A timeout that cannot say what it waited on tells its reader nothing:
+		// the notice must name the live process, the output that did arrive, and
+		// which shell ran the command.
+		expect(result.output).toContain("still running: sleep 300 (pid 424242)");
+		expect(result.output).toContain("8 characters of output in 1 chunks");
+		expect(result.output).toContain("ran on this session's shell");
+	});
+
+	it("reports a stalled run with no live process as the shell itself not returning", async () => {
+		const realSetTimeout = globalThis.setTimeout;
+		vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void, ms?: number, ...rest: unknown[]) =>
+			realSetTimeout(
+				handler,
+				typeof ms === "number" && ms >= 1000 ? 5 : ms,
+				...rest,
+			)) as typeof globalThis.setTimeout);
+		vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation(() => Promise.withResolvers<never>().promise);
+		vi.spyOn(piNatives.Shell.prototype, "abort").mockResolvedValue();
+		vi.spyOn(piNatives.Shell.prototype, "pids").mockReturnValue([]);
+
+		const result = await executeBash("echo ok", {
+			cwd: tempDir,
+			timeout: 1000,
+			sessionKey: "stalled-run-without-children",
+		});
+
+		// The `echo` case: no child to blame, so the report must say the engine
+		// never came back rather than leave the reader guessing.
+		expect(result.output).toContain("nothing of the command was still running");
+		expect(result.output).toContain("0 characters of output in 0 chunks");
+	});
+
+	it.skipIf(process.platform !== "linux")("names the filesystem wait when the native pool is blocked in IO", () => {
+		// Measured on 2026-11-06 against a wedged session (omp pid 2139 in box
+		// agentbox-0b59380e4b0c): all eight of the addon's core workers sat in
+		// `statx` under `path_lookupat`, seven of them `D` on `xfs_buf_iowait`,
+		// while the shell could not run `echo`. A fake task dir stands in for a
+		// state a test cannot produce.
+		const taskDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-task-"));
+		const thread = (tid: string, comm: string, state: string, wchan: string): void => {
+			const dir = path.join(taskDir, tid);
+			fs.mkdirSync(dir);
+			fs.writeFileSync(path.join(dir, "comm"), `${comm}\n`);
+			fs.writeFileSync(path.join(dir, "stat"), `${tid} (${comm}) ${state} 1 1 0 0 -1 0\n`);
+			fs.writeFileSync(path.join(dir, "wchan"), wchan);
+		};
+		thread("101", "tokio-rt-worker", "D", "xfs_buf_iowait");
+		thread("102", "tokio-rt-worker", "D", "xfs_buf_iowait");
+		thread("103", "tokio-rt-worker", "S", "futex_do_wait");
+		thread("104", "Bun Pool 0", "D", "xfs_buf_iowait");
+
+		const blocked = describeBlockedNativeWorkers(taskDir);
+		expect(blocked?.text).toBe("2 of 3 native worker threads are blocked in uninterruptible IO (xfs_buf_iowait)");
+		expect(blocked?.fields).toMatchObject({ nativeWorkers: 3, nativeWorkersBlocked: 2 });
+
+		// A pool that is merely idle must say nothing: a report that fires every
+		// time names nothing.
+		fs.rmSync(path.join(taskDir, "101"), { recursive: true });
+		fs.rmSync(path.join(taskDir, "102"), { recursive: true });
+		expect(describeBlockedNativeWorkers(taskDir)).toBeUndefined();
+		fs.rmSync(taskDir, { recursive: true, force: true });
 	});
 
 	it("explicitly aborts an overlapping one-shot shell when timeout cleanup stalls", async () => {

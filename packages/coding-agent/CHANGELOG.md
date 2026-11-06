@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- A bash command whose timeout was reached without the shell backend answering now names what it was waiting on — the processes the shell still had alive, how many of the native addon's worker threads are blocked in uninterruptible filesystem IO and on what (`xfs_buf_iowait` and the like), how much output had arrived, whether the call ran on the session's shell or a one-shot one, and how long setup took — in the result and in a `warn` log line. The addon runs the embedded shell and the file-search tools on one worker pool, so a pool blocked on the filesystem stops a shell run from ever starting.
+
 ## [18.17.0] - 2026-11-06
 
 ### Added
