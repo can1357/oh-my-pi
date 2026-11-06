@@ -434,52 +434,35 @@ const ALL_WORD_PARTS: [&str; 15] = [
 	"Zsh",
 ];
 
-/// Which change owns the positions a sample exports.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Owner {
-	/// This change: the sample must export no containment fault.
-	Here,
-	/// The sibling change (`wip/ShellPortAudit-18193-words`): the positions
-	/// INSIDE a word — a quote's `Right`, a `${…}`'s `Rbrace`, an array's
-	/// parentheses — are still derived from the word's end or located by
-	/// scanning the source, which is the wrong buffer for alias text. The
-	/// sample must still fault here, so the marker cannot outlive the
-	/// defect: the sibling moves it to `Here` in the commit that fixes it.
-	Sibling,
-}
-
 /// One sample: the text the alias `check` expands to, the source that
-/// reaches it, the dialect, and who owns its exported positions.
+/// reaches it, and the dialect that parses it. Every sample must export a
+/// tree with no containment fault: #18193 owns a command node's own
+/// positions, this change owns the positions inside a word, and between
+/// them that is every row.
 struct Sample {
-	src:   &'static [u8],
-	text:  &'static [u8],
-	zsh:   bool,
-	owner: Owner,
+	src:  &'static [u8],
+	text: &'static [u8],
+	zsh:  bool,
 }
 
 const fn bash(text: &'static [u8]) -> Sample {
-	Sample { src: b"check\n", text, zsh: false, owner: Owner::Here }
-}
-
-/// A bash sample whose only faults are inside a word.
-const fn word(text: &'static [u8]) -> Sample {
-	Sample { src: b"check\n", text, zsh: false, owner: Owner::Sibling }
+	Sample { src: b"check\n", text, zsh: false }
 }
 
 const fn zsh(text: &'static [u8]) -> Sample {
-	Sample { src: b"check\n", text, zsh: true, owner: Owner::Here }
+	Sample { src: b"check\n", text, zsh: true }
 }
 
 /// An alias standing inside a compound of the source, so every exported
 /// node has a real enclosing node with real bytes around it: a position the
 /// export scans for can then land on a token of the enclosing command.
 const fn nested(src: &'static [u8], text: &'static [u8]) -> Sample {
-	Sample { src, text, zsh: false, owner: Owner::Here }
+	Sample { src, text, zsh: false }
 }
 
 /// The same, in zsh grammar.
 const fn nested_zsh(src: &'static [u8], text: &'static [u8]) -> Sample {
-	Sample { src, text, zsh: true, owner: Owner::Here }
+	Sample { src, text, zsh: true }
 }
 
 /// Every command form and every word form, in both dialects. The list is
@@ -546,17 +529,17 @@ const SAMPLES: &[Sample] = &[
 	// are marked and must keep faulting until it lands.
 	bash(b"echo a\\bc"),
 	bash(b"echo ${a b}"),
-	word(b"echo 'a'"),
-	word(b"echo \"a\""),
-	word(b"echo $'a'"),
-	word(b"echo $\"a\""),
-	word(b"echo ${x:-d}"),
-	word(b"echo $(x)"),
-	word(b"echo $(( 1 + 1 ))"),
-	word(b"cat <(x)"),
-	word(b"declare -a a=(1 2)"),
-	word(b"echo \"${a+'$('\\'}\""),
-	word(b"echo \"${x-'\"'y}\""),
+	bash(b"echo 'a'"),
+	bash(b"echo \"a\""),
+	bash(b"echo $'a'"),
+	bash(b"echo $\"a\""),
+	bash(b"echo ${x:-d}"),
+	bash(b"echo $(x)"),
+	bash(b"echo $(( 1 + 1 ))"),
+	bash(b"cat <(x)"),
+	bash(b"declare -a a=(1 2)"),
+	bash(b"echo \"${a+'$('\\'}\""),
+	bash(b"echo \"${x-'\"'y}\""),
 ];
 
 fn collect_cmd_names(cmd: &Command, kinds: &mut Vec<&'static str>, parts: &mut Vec<&'static str>) {
@@ -767,37 +750,23 @@ fn alias_expanded_nodes_export_ranges_that_contain_their_children() {
 	// source finds them. Every sample of every variant must export a tree
 	// whose every position lies inside the node that holds it.
 	let mut faults = Vec::new();
-	let mut clean_siblings = Vec::new();
 	for sample in SAMPLES {
 		let program = parse_sample(sample);
-		let mut here = Vec::new();
 		for offsets in [Offsets::Bytes, Offsets::Utf16] {
 			let json = to_json(sample.src, &program, JsonDialect::Shfmt, offsets);
 			let shfmt: serde_json::Value = serde_json::from_str(&json).unwrap();
 			let mut bad = Vec::new();
 			range_faults(&shfmt, None, "", &mut bad);
 			for fault in bad {
-				here.push(format!(
+				faults.push(format!(
 					"{} with {} aliased, in {offsets:?}: {fault}",
 					String::from_utf8_lossy(sample.src).escape_debug(),
 					String::from_utf8_lossy(sample.text)
 				));
 			}
 		}
-		match sample.owner {
-			Owner::Here => faults.append(&mut here),
-			Owner::Sibling if here.is_empty() => {
-				clean_siblings.push(String::from_utf8_lossy(sample.text).into_owned());
-			},
-			Owner::Sibling => {},
-		}
 	}
 	assert!(faults.is_empty(), "{} range faults:\n{}", faults.len(), faults.join("\n"));
-	assert!(
-		clean_siblings.is_empty(),
-		"these samples no longer fault, so they are this change's now, not the word change's: {}",
-		clean_siblings.join(", ")
-	);
 }
 
 #[test]
