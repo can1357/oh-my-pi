@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import { parseCodeStatus, summarizeCode } from "../native";
+import { parseCodeStatus, summarizeCode, wasmGrammarFor } from "../native";
 
 describe("parseCodeStatus", () => {
 	it.each([
@@ -24,6 +24,11 @@ describe("parseCodeStatus", () => {
 		expect(status.language ?? null).toBe(language);
 		expect(status.parsed).toBe(summary.parsed);
 		expect(status.language ?? null).toBe(summary.language ?? null);
+	});
+
+	it("infers .bzl files as Starlark rather than Python", () => {
+		expect(wasmGrammarFor({ path: "defs.bzl" })?.language).toBe("starlark");
+		expect(wasmGrammarFor({ path: "defs.bzl" })).toEqual(wasmGrammarFor({ lang: "bzl" }));
 	});
 
 	it("reports syntax recovery across repeated edits to the same path", () => {

@@ -2,28 +2,33 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `find()` missing elements more than 24 levels down, such as VS Code's editor; it now searches 64 levels deep ([#18221](https://github.com/can1357/oh-my-pi/pull/18221) by [@will-bogusz](https://github.com/will-bogusz))
+- `glob`, `grep`, `fuzzyFind`, `ast_grep` and `ast_edit` now run their directory traversal on a filesystem runtime of their own, so a search over a large or cold tree can no longer take the worker threads that the embedded shell and every other native call are scheduled on. Those threads are named `pi-fs-worker`, so a stall in a search is tellable apart from a stall elsewhere.
+- Fixed a workspace tree whose native addon does not match its checkout failing with `undefined is not a constructor` at the callsite: a class the addon lacks now throws a message naming the addon file, both releases and `bun run build:native` — from its constructor and from any static entrypoint — and the loader reports that mismatch once as it loads ([#18230](https://github.com/can1357/oh-my-pi/pull/18230) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.17.0] - 2026-11-06
+
 ### Breaking Changes
 
-- Replaced visualization-only `parseShell()` with engine-owned `RunTrace.present()` and `ShellVisualization` APIs.
+- Replaced `parseShell()` with `RunTrace.present()` and `ShellVisualization`.
 
 ### Added
 
-- `RunTrace` exposes real command states, assignments, producer-attributed output and bounded replay, with native Raw/Pseudo presentation and persisted-trace restoration.
-- `obash --trace=PATH` writes that model as JSON at exit; `UnitCompiled` events now carry the unit's node table (`nodes: [{kind, lo, hi, line, col}]`) instead of `node_count`
+- Added `RunTrace`: command states, variable assignments, per-producer output, bounded replay, Raw/Pseudo presentation, and restoring persisted traces.
+- Added `obash --trace=PATH` to write a JSON execution trace at exit; `UnitCompiled` events now include source node tables.
+- `Shell` and `executeShell` now run pi-shell's Bash engine with Bash 5.3 semantics, including aliases containing pipelines, subshells, and separators.
+- Native shell is faster across parsing, functions, expansion, redirections, arithmetic, loops, and external command startup.
+- Sixel image output now uses a built-in encoder.
+- Built-in `ps -o` accepts Apple's `utime` (alias `putime`) for user CPU time, instead of failing with `unknown output format specifier 'utime'`.
+- Shell spawn benchmarks now report median and p99 latency.
 
 ### Changed
 
-- Native builds now reuse the shared diff implementation, and macOS display discovery no longer needs a separate capture library
-- Shell spawn benchmarks report median and p99 latency without an additional benchmark framework
-
-- Made the bash tool's shell faster on string appends (`s+=x`), sourcing files full of function definitions (each body compiles on first call), quoted `"$var"`/`"$1"` arguments and file redirections
-- Made the bash tool's shell faster on `while read` loops over files (no per-line `lseek`), output sent to `/dev/null`, `(( ))` arithmetic, recursive functions, plain assignments and every simple command
-- Made starting external commands from the bash tool's shell cheaper on Linux (the child no longer resets every signal disposition before `exec`, and the parent reuses its spawn setup and makes about half as many system calls per command)
-- Made the bash tool's shell parse scripts and define functions about a fifth faster, with a function's `declare -f` text now produced on first use
-- Made the bash tool's shell start with about half as many system calls on Linux
-- The work-profile flamegraph is now a static SVG (hover titles, no click-to-zoom or search)
-- The bash tool's built-in `jq` reports errors as plain text with `line:column` positions instead of colored source snippets
-- Sixel image output uses a built-in encoder; images with more than 256 colors may get a slightly different palette
+- Built-in `jq` now reports errors as plain text with `line:column` locations.
+- Work-profile flamegraphs are now static SVGs with hoverable titles.
+- Built-in `grep -r`, `rg`, `find` and `fd` are faster on small and large trees and stream output to pipes in batches.
 
 ### Fixed
 
@@ -75,16 +80,43 @@
 ### Fixed
 
 - Fixed X11 background `el.type` and `el.press` bringing the element's window to the front and taking your keyboard; an element that does not already hold a GTK 3 window's focus now runs in takeover instead ([#17921](https://github.com/can1357/oh-my-pi/pull/17921) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed a crash on Linux when a zsh-mode sort or `strftime`/`$langinfo` named a locale that is not installed.
+- Fixed `env -i` in the bash tool passing exported shell functions (`BASH_FUNC_name%%`) and non-environment shell variables to the command.
+- Fixed `$!` in command substitutions, subshells and pipeline stages to name the parent's last background job, as in Bash ([#18107](https://github.com/can1357/oh-my-pi/pull/18107) by [@sjawhar](https://github.com/sjawhar))
+- Fixed built-in local `rsync` output on a busy machine sometimes differing from rsync 3.5.1: `--delete`/info lines from subdirectories could print after the top-level names and the byte totals in `sent … received …`/`--stats` could be off by 4.
+- Fixed Windows `rsync` treating a one-letter daemon host like `h::module` as a drive path ([#18048](https://github.com/can1357/oh-my-pi/pull/18048) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed git, its helpers and commit hooks started by omp reading the terminal, which could swallow keystrokes and leave Tern protocol text like `_tsp;e;{"ev":"ack",…}` in the composer; they no longer inherit the terminal or share its session.
+- Fixed `ssh` started by the built-in `rsync` (and `sort --compress-program`) prompting on the user's terminal, e.g. host-key confirmations appearing after exit; they no longer share omp's terminal or session.
+- Fixed history saves hanging when a stale lock cannot be removed.
+- Fixed native addon startup on glibc 2.17–2.28, which lacks `posix_spawn_file_actions_addchdir_np` ([#18046](https://github.com/can1357/oh-my-pi/pull/18046) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed Windows `rmdir` accepting trailing-dot or trailing-space operands that could remove a different directory ([#18047](https://github.com/can1357/oh-my-pi/pull/18047) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed `timeout`, `nohup`, `git` and similar utilities inside shell functions skipping operands or running the function's arguments ([#18030](https://github.com/can1357/oh-my-pi/pull/18030) by [@sjawhar](https://github.com/sjawhar))
+- Fixed native Windows commands not resolving executables via `PATH`/`PATHEXT`, and absolute paths being prefixed with the cwd ([#18041](https://github.com/can1357/oh-my-pi/pull/18041) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed minimized `git stash pop` and `git status` counting status lines and "Dropped" notices as untracked files ([#18159](https://github.com/can1357/oh-my-pi/pull/18159) by [@eggpeat](https://github.com/eggpeat))
+- Fixed associative arrays slowing quadratically: 100,000 inserts and lookups drop from ~90 s to ~0.1 s.
+- Fixed GTK3 Open/Save dialogs on Linux: `ax()` and element input work, and Wayland window lists include them ([#18011](https://github.com/can1357/oh-my-pi/pull/18011) by [@will-bogusz](https://github.com/will-bogusz))
+- `capabilities()` now reports `input: false` and `inputPermission: "unavailable"` on Wayland without a RemoteDesktop portal (e.g. sway); input fails immediately ([#18012](https://github.com/can1357/oh-my-pi/pull/18012) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `.bzl` files being treated as Python instead of Starlark in `ast-grep`, `astGrep`, `astEdit`, and code summaries ([#18145](https://github.com/can1357/oh-my-pi/pull/18145) by [@eggpeat](https://github.com/eggpeat))
+- Minimized `rustfmt --check` output now reports how many files need formatting instead of miscounting diff locations ([#18147](https://github.com/can1357/oh-my-pi/pull/18147) by [@will-bogusz](https://github.com/will-bogusz))
+- Minimized `git diff`, `git show` and `diff -r` now list binary files (as `Bin`), pure renames and mode-only changes ([#18148](https://github.com/can1357/oh-my-pi/pull/18148) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Wayland `el.type` and `el.press(keys)` shifting the app's focus before refusing; they now refuse first ([#17915](https://github.com/can1357/oh-my-pi/pull/17915) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Windows background drags in Tk apps reporting success while doing nothing; they now follow `computer.backgroundFallback` ([#17913](https://github.com/can1357/oh-my-pi/pull/17913) by [@will-bogusz](https://github.com/will-bogusz))
+- Built-in `rsync` now matches rsync 3.5.1 for unopenable `--log-file` errors; empty `--log-file=` logs to syslog ([#17980](https://github.com/can1357/oh-my-pi/pull/17980) by [@sjawhar](https://github.com/sjawhar))
+- Fixed X11 takeover and `raise()` failing on a window previously targeted by background typing, e.g. under Openbox ([#17910](https://github.com/can1357/oh-my-pi/pull/17910) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed X11 background keys into Qt 5/6 apps silently doing nothing; they now use takeover, or refuse when `computer.backgroundFallback` is `refuse` ([#17911](https://github.com/can1357/oh-my-pi/pull/17911) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Wayland `doubleClick` and `click` with `count` registering as a single click in KDE Plasma Qt apps ([#17903](https://github.com/can1357/oh-my-pi/pull/17903) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `press()`, `perform()` and `menu.select()` failing on Linux in browsers, VS Code, LibreOffice and non-English locales; `press()` now toggles toggle/radio buttons ([#17936](https://github.com/can1357/oh-my-pi/pull/17936) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `computer.focusedWindow()`, `ax()` and `observe()` on GNOME/KDE Wayland reading a shell surface instead of the focused app ([#17922](https://github.com/can1357/oh-my-pi/pull/17922) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed takeover keys into iPhone Mirroring and Screen Sharing leaving Fn held, dropping Shift and later letters ([#17909](https://github.com/can1357/oh-my-pi/pull/17909) by [@will-bogusz](https://github.com/will-bogusz))
+- An unanswered Wayland RemoteDesktop permission dialog now fails input with `Timeout` before the run deadline, sending nothing ([#17932](https://github.com/can1357/oh-my-pi/pull/17932) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed X11 takeover input stopping with `Cancelled` after you typed locally; Escape now stops computer use for the rest of the turn ([#17912](https://github.com/can1357/oh-my-pi/pull/17912) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed X11 background `el.type`/`el.press` raising the window and taking your keyboard; elements without GTK 3 focus now use takeover ([#17921](https://github.com/can1357/oh-my-pi/pull/17921) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.16.0] - 2026-11-02
 
 ### Added
 
 - Added `macOSFrontApp()`, which reads the app macOS has in front and can put it back in front for a while (`keepInFront`) without stopping for the user's typing ([#16284](https://github.com/can1357/oh-my-pi/pull/16284) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Changed
-
-- Replaced the embedded shell interpreter behind `Shell` and `executeShell` with pi's own bash engine, now part of `pi-shell`: bash 5.3 semantics, including alias bodies with pipes, subshells and separators
 
 ### Fixed
 

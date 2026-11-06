@@ -126,16 +126,16 @@ impl Prof {
 		fn s(v: impl std::fmt::Display) -> BString {
 			BString::from(v.to_string())
 		}
-		let mut w = vec![s(&self.funcs.len()), s(&self.arcs.len()), s(&self.stack.len())];
+		let mut w = vec![s(self.funcs.len()), s(self.arcs.len()), s(self.stack.len())];
 		for f in &self.funcs {
-			w.extend([f.name.clone(), s(&f.calls), s(&f.time), s(&f.self_)]);
+			w.extend([f.name.clone(), s(f.calls), s(f.time), s(f.self_)]);
 		}
 		for a in &self.arcs {
-			w.extend([s(&a.from), s(&a.to), s(&a.calls), s(&a.time), s(&a.self_)]);
+			w.extend([s(a.from), s(a.to), s(a.calls), s(a.time), s(a.self_)]);
 		}
 		for e in &self.stack {
-			let arc = e.arc.map_or_else(|| BString::from("-"), |a| s(&a));
-			w.extend([s(&e.f), s(&e.beg), s(&e.prev), arc, s(&e.depth)]);
+			let arc = e.arc.map_or_else(|| BString::from("-"), s);
+			w.extend([s(e.f), s(e.beg), s(e.prev), arc, s(e.depth)]);
 		}
 		Record::Words(w)
 	}
@@ -291,7 +291,7 @@ fn f2(v: f64, width: usize) -> String {
 
 /// `calls` as C's `(double)`.
 #[allow(clippy::cast_precision_loss, reason = "zsh's (double) cast")]
-fn d(n: i64) -> f64 {
+const fn d(n: i64) -> f64 {
 	n as f64
 }
 
@@ -365,11 +365,10 @@ fn report(p: &Prof) -> String {
 	}
 	fs.sort_by(|&a, &b| desc(p.funcs[a].time, p.funcs[b].time));
 	for &i in &fs {
-		out.push_str(
-			"\n-----------------------------------------------------------------------------------\n\\
-			 \
-			 n",
-		);
+		out.push_str(concat!(
+			"\n-------------------------------------------",
+			"----------------------------------------\n\n",
+		));
 		for &ai in &arcs {
 			let a = &p.arcs[ai];
 			if a.to == i {

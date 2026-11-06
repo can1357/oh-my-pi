@@ -14,6 +14,7 @@ import { defaultEditorTheme } from "./test-themes";
 // Records as the Windows console host emits them: CSI Vk;Sc;Uc;Kd;Cs;Rc _
 const SHIFT_ENTER = "\x1b[13;28;13;1;16;1_";
 const CTRL_ENTER = "\x1b[13;28;10;1;8;1_";
+const CTRL_J = "\x1b[74;36;10;1;8;1_";
 const ENTER = "\x1b[13;28;13;1;0;1_";
 const ENTER_UP = "\x1b[13;28;13;0;0;1_";
 
@@ -33,6 +34,12 @@ describe("Win32InputModeDecoder", () => {
 		expect(matchesKey(decodeOne(SHIFT_ENTER), "shift+enter")).toBe(true);
 		expect(matchesKey(decodeOne(CTRL_ENTER), "ctrl+enter")).toBe(true);
 		expect(matchesKey(decodeOne(CTRL_ENTER), "enter")).toBe(false);
+	});
+
+	it("keeps Ctrl+J with Uc=LF as ctrl+j", () => {
+		const ctrlJ = decodeOne(CTRL_J);
+		expect(matchesKey(ctrlJ, "ctrl+j")).toBe(true);
+		expect(matchesKey(ctrlJ, "enter")).toBe(false);
 	});
 
 	it("drops key releases and bare modifier presses", () => {

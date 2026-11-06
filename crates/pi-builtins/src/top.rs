@@ -13,7 +13,7 @@ use tokio::time;
 
 use crate::{
 	host::{INTERRUPTED_EXIT_CODE, ProcContext, Process},
-	proc_snapshot::{ProcInfo, sanitize_process_command},
+	proc_snapshot::{CpuTimes, ProcInfo, sanitize_process_command},
 };
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -270,7 +270,7 @@ impl Process for TopCommand {
 					}
 
 					let start_time = process.start_time();
-					let cpu_time = process.cpu_time();
+					let cpu_time = process.cpu_times().map(CpuTimes::total);
 					let cpu_percent = cpu_time
 						.and_then(|current| {
 							previous

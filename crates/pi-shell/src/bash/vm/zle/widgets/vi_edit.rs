@@ -382,7 +382,7 @@ pub fn visetbuffer(zw: &mut Zw<'_, '_>) -> WResult {
 		if args.len() > 1 || a.len() > 1 {
 			return WResult::Done(1);
 		}
-		let ch = a.first().map(|&b| char::from(b)).unwrap_or('\0');
+		let ch = a.first().map_or('\0', |&b| char::from(b));
 		return WResult::Done(set_buffer(zw.ed, Some(ch)));
 	}
 	then(Await::Char, |zw, got| {
@@ -401,7 +401,17 @@ pub fn vipoundinsert(zw: &mut Zw<'_, '_>) -> WResult {
 	vichange(zw, -1);
 	let ed = &mut *zw.ed;
 	utils::vifirstnonblank(ed);
-	if at(&ed.line, ed.cs) != '#' {
+	if at(&ed.line, ed.cs) == '#' {
+		utils::foredel(ed, 1, 0);
+		if ed.cs < ed.ls.viinsbegin {
+			let mut v = ed.ls.viinsbegin;
+			utils::decpos(ed, &mut v);
+			ed.ls.viinsbegin = v;
+		}
+		if ed.cs < oldcs {
+			utils::decpos(ed, &mut oldcs);
+		}
+	} else {
 		utils::spaceinline(ed, 1);
 		ed.line[ed.cs] = '#';
 		if ed.cs <= ed.ls.viinsbegin {
@@ -411,16 +421,6 @@ pub fn vipoundinsert(zw: &mut Zw<'_, '_>) -> WResult {
 		}
 		if ed.cs <= oldcs {
 			utils::incpos(ed, &mut oldcs);
-		}
-	} else {
-		utils::foredel(ed, 1, 0);
-		if ed.cs < ed.ls.viinsbegin {
-			let mut v = ed.ls.viinsbegin;
-			utils::decpos(ed, &mut v);
-			ed.ls.viinsbegin = v;
-		}
-		if ed.cs < oldcs {
-			utils::decpos(ed, &mut oldcs);
 		}
 	}
 	ed.cs = oldcs;
@@ -511,7 +511,7 @@ pub fn vibackwardkillword(zw: &mut Zw<'_, '_>) -> WResult {
 // ---- puts -------------------------------------------------------------------
 
 /// The buffer a put takes: the selected register, else the cut buffer.
-fn put_source(ed: &Editor) -> KctBuf {
+const fn put_source(ed: &Editor) -> KctBuf {
 	if ed.zmod.flags & modflags::VIBUF != 0 {
 		KctBuf::Vi(ed.zmod.vibuf as usize)
 	} else {
@@ -569,11 +569,12 @@ pub fn put_replace_selection(zle: &mut Zle, ed: &mut Editor) -> i32 {
 		zle.vibuf[35] = None;
 	}
 	ed.zmod.flags = 0;
-	let mut pos = 2;
-	if ed.region_active == 2 && prevbuf.flags & crate::bash::vm::zle::CUTBUFFER_LINE != 0 {
+	let pos = if ed.region_active == 2 && prevbuf.flags & crate::bash::vm::zle::CUTBUFFER_LINE != 0 {
 		let (_, b) = yank::regionlines(ed);
-		pos = u8::from(b == ed.line.len());
-	}
+		u8::from(b == ed.line.len())
+	} else {
+		2
+	};
 	yank::kill_region(zle, ed);
 	utils::pastebuf(ed, &prevbuf, n, pos);
 	0

@@ -694,6 +694,48 @@ export function missingNativeExport(symbolName, addon = loadedAddon) {
 }
 
 /**
+ * Static reads a {@link missingNativeClass} stand-in answers normally rather
+ * than throwing: the function-object intrinsics every caller and inspector
+ * touches, and `then`, so an accidental `await` on the export resolves to the
+ * class instead of exploding somewhere unrelated.
+ */
+const CLASS_STUB_PLAIN_STATICS = new Set(["prototype", "name", "length", "constructor", "then"]);
+
+/**
+ * Class counterpart of {@link missingNativeExport}: a stand-in that fails with
+ * the addon's identity attached instead of as a bare `undefined` export, which
+ * surfaces as `undefined is not a constructor` at the callsite and names
+ * nothing.
+ *
+ * Same staleness rule as the function stub: only a stale addon gets a
+ * stand-in, so `typeof native.Thing === "function"` capability probes against
+ * a current addon keep their meaning.
+ *
+ * Several of these classes are entered through a static rather than a
+ * constructor — `FileLock.tryAcquire`, `IpcServer.listen`, `Process.fromPid`,
+ * `PowerAssertion.start` — so the stand-in answers any other static read with
+ * the same diagnostic. Only a stale addon reaches it, and only for a class
+ * that addon does not carry, so nothing on a healthy tree meets a proxy.
+ * @param {string} symbolName
+ * @param {ReturnType<typeof nativeAddonStatus>} [addon]
+ * @returns {(new (...args: unknown[]) => never) | undefined}
+ */
+export function missingNativeClass(symbolName, addon = loadedAddon) {
+	if (!addon?.stale) return undefined;
+	const stub = class MissingNativeClass {
+		constructor() {
+			throw new Error(missingNativeExportMessage(symbolName, addon));
+		}
+	};
+	return new Proxy(stub, {
+		get(target, key, receiver) {
+			if (typeof key === "symbol" || CLASS_STUB_PLAIN_STATICS.has(key)) return Reflect.get(target, key, receiver);
+			throw new Error(missingNativeExportMessage(`${symbolName}.${key}`, addon));
+		},
+	});
+}
+
+/**
  * Actionable text for {@link missingNativeExport}. `addon` is injectable so the
  * wording can be pinned without a stale `.node` on disk.
  * @param {string} symbolName
@@ -713,6 +755,106 @@ export function missingNativeExportMessage(symbolName, addon = loadedAddon) {
 		`@oh-my-pi/pi-natives export \`${symbolName}\` is missing: ${addon.path} is ${loaded}, not ` +
 		`@${addon.packageVersion} — ${rebuild}.`
 	);
+}
+
+/**
+ * One-line notice for a workspace tree running an addon from another release.
+ *
+ * The missing-symbol stubs only speak when a caller touches a symbol the addon
+ * does not carry. A symbol it does carry runs that release's behaviour — an
+ * older shell, an older grep — with no marker at all, so this notice is the
+ * only provenance those failures get.
+ *
+ * `stale` is any release difference, so the wording must not assume the addon
+ * is the older side.
+ * @param {NonNullable<ReturnType<typeof nativeAddonStatus>>} addon
+ * @returns {string}
+ */
+export function staleWorkspaceAddonNotice(addon) {
+	const loaded = addon.version ? `@oh-my-pi/pi-natives@${addon.version}` : "an addon without a release stamp";
+	return (
+		`[pi-natives] ${addon.path} is ${loaded}, but this checkout is @${addon.packageVersion}. ` +
+		"Symbols this checkout expects may be missing and shared ones may behave differently; " +
+		"run `bun run build:native` before trusting results from this tree.\n"
+	);
+}
+
+/**
+ * Whether the copy of this module running on the current thread has already
+ * written the mismatched-addon notice. One per loaded copy, which is one per
+ * main thread in every shape this package ships; the write itself is confined
+ * to the main thread by {@link onMainThread}.
+ */
+const staleNoticeState = { reported: false };
+
+/** Memoized answer from {@link onMainThread}; `undefined` until first asked. */
+let mainThreadAnswer;
+
+/**
+ * True on a process's main thread, false inside a worker thread.
+ *
+ * Resolved through `createRequire` on first use rather than imported at module
+ * scope: `packages/coding-agent/src/cli.ts` keeps `node:worker_threads` out of
+ * ordinary startup on purpose, and this module is reached statically from
+ * `sqlite-locks` on launches that never load an addon. Asking only when a
+ * mismatch has already been found keeps that boundary. A runtime without the
+ * builtin answers "main thread", which is the safe side: the notice prints.
+ * @returns {boolean}
+ */
+function onMainThread() {
+	if (mainThreadAnswer === undefined) {
+		try {
+			mainThreadAnswer = createRequire(import.meta.url)("node:worker_threads").isMainThread !== false;
+		} catch {
+			mainThreadAnswer = true;
+		}
+	}
+	return mainThreadAnswer;
+}
+
+/**
+ * Write {@link staleWorkspaceAddonNotice} once, from the main thread, when a
+ * workspace tree loads an addon of another release.
+ *
+ * Three guards, each load-bearing.
+ *
+ * Main thread only, because fd 2 is shared and a worker reaches `loadNative()`
+ * long after interactive mode owns the terminal — the subagent, JS-eval and
+ * tab workers all start then, so a per-worker write paints into a rendered
+ * frame. The main thread has already said it at startup; a worker repeating it
+ * adds nothing and costs the display. A worker *process* keeps the notice: it
+ * has its own main thread, and `subprocess/worker-client.ts` captures its
+ * stderr to a file rather than the terminal.
+ *
+ * Latched, because `loadNative()` is not a startup-only call: the lazy
+ * entrypoints in `clipboard.js` and friends call it on every invocation.
+ *
+ * Workspace loads only, because {@link validateLoadedBindings} has a second
+ * success path — it accepts a pre-sentinel addon on an installed load
+ * (`isCompatiblePreSentinelNativeAddon`), which reports no release and so
+ * counts as `stale`. That user has no repository to build.
+ *
+ * The write is a synchronous `fs.writeSync` to fd 2 for the same reason as
+ * {@link startupMarker}: it must survive a crash that follows it. `write` and
+ * `state` are injectable so a test can exercise the guards without consuming
+ * this copy's latch.
+ * @param {{ isWorkspaceLoad: boolean }} ctx
+ * @param {NonNullable<ReturnType<typeof nativeAddonStatus>>} addon
+ * @param {{ write?: (text: string) => void; state?: { reported: boolean } }} [deps]
+ * @returns {boolean} whether this call wrote the notice
+ */
+export function reportStaleWorkspaceAddon(ctx, addon, deps = {}) {
+	const state = deps.state ?? staleNoticeState;
+	// Thread identity last: the three cheap gates reject every ordinary launch
+	// before `node:worker_threads` is resolved at all.
+	if (!ctx.isWorkspaceLoad || !addon.stale || state.reported || !onMainThread()) return false;
+	state.reported = true;
+	try {
+		(deps.write ?? (text => fs.writeSync(2, text)))(staleWorkspaceAddonNotice(addon));
+	} catch {
+		// stderr unavailable; the notice is best-effort, the stubs still speak
+	}
+	return true;
 }
 
 /**
@@ -881,6 +1023,7 @@ export function loadNative() {
 			installNativeTokioRuntime(bindings);
 			configureGrammarDir(bindings, ctx.nativesDir);
 			loadedAddon = describeLoadedAddon(bindings, candidate, ctx);
+			reportStaleWorkspaceAddon(ctx, loadedAddon);
 	        cleanupStaleNativeVersions({ nativesDir: ctx.nativesDir, currentVersion: ctx.packageVersion });
 			startupMarker("native:loadNative:done");
 			return bindings;
