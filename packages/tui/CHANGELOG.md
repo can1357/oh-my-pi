@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Enabled macOS spelling assistance (typo undercurls, Tab completions, on-space autocorrect) in the hook and ask answer editor (`HookEditorComponent`), following the `spelling.*` settings ([#12517](https://github.com/can1357/oh-my-pi/pull/12517) by [@aleister1102](https://github.com/aleister1102))
+
 ## [18.17.0] - 2026-11-06
 
 ### Breaking Changes

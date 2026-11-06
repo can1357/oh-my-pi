@@ -50,6 +50,7 @@ import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { launchTerminal } from "../../subprocess/terminal-launch";
 import { approvalAnswerForChoice, approvalChoiceLabels, approvalOnceLabel } from "../../tools/approval";
+import { cfgSpellingAutocomplete, cfgSpellingAutocorrect, cfgSpellingTypoDetection } from "../settings";
 
 const MAX_WIDGET_LINES = 10;
 
@@ -146,6 +147,15 @@ export class ExtensionUiController {
 	/** Remove extension-owned composer styles from the process registries. */
 	disposeComposerShapes(): void {
 		for (const dispose of this.#composerShapeDisposers.splice(0)) dispose();
+	}
+
+	/** Spelling options for hook and ask answer editors, read from the current settings. */
+	#spellingFeatures() {
+		return {
+			typoDetection: cfgSpellingTypoDetection.get(this.ctx.settings),
+			autocomplete: cfgSpellingAutocomplete.get(this.ctx.settings),
+			autocorrect: cfgSpellingAutocorrect.get(this.ctx.settings),
+		};
 	}
 
 	/**
@@ -885,7 +895,13 @@ export class ExtensionUiController {
 					prefill,
 					(text, images) => finishPrompt({ text, images }),
 					() => finishPrompt(undefined),
-					{ promptStyle: true, externalEditor: editDialogExternally, question: prompt.question, ...options },
+					{
+						promptStyle: true,
+						externalEditor: editDialogExternally,
+						spellingFeatures: this.#spellingFeatures(),
+						question: prompt.question,
+						...options,
+					},
 				);
 				this.ctx.closeLinkBrowser();
 				this.ctx.editorContainer.clear();
@@ -1280,7 +1296,11 @@ export class ExtensionUiController {
 				prefill,
 				value => settle(value),
 				() => settle(undefined),
-				{ ...editorOptions, externalEditor: editDialogExternally },
+				{
+					...editorOptions,
+					externalEditor: editDialogExternally,
+					spellingFeatures: this.#spellingFeatures(),
+				},
 			);
 			this.ctx.closeLinkBrowser();
 			this.ctx.editorContainer.clear();

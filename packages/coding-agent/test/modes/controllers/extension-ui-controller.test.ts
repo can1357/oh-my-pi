@@ -11,6 +11,7 @@ import { ExtensionUiController } from "../../../src/modes/controllers/extension-
 import { InputController } from "../../../src/modes/controllers/input-controller";
 import { getEditorTheme, getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../../src/modes/types";
+import { Settings } from "../../../src/config/settings";
 
 afterEach(() => {
 	setKeybindings(KeybindingsManager.inMemory());
@@ -77,6 +78,7 @@ function makeHarness() {
 		closeLinkBrowser: vi.fn(),
 		rerenderInLinkBrowser: vi.fn(),
 		rebuildTranscriptScrollback: vi.fn(),
+		settings: Settings.isolated(),
 	} as unknown as InteractiveModeContext;
 
 	const controller = new ExtensionUiController(ctx);

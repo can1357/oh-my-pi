@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The ask dialog's "Other" answer box and hook editors now get macOS spelling assistance (typo undercurls, Tab completions, on-space autocorrect), following the `spelling.*` settings when opened; open hook editors also update live when those settings change ([#12517](https://github.com/can1357/oh-my-pi/pull/12517) by [@aleister1102](https://github.com/aleister1102))
+
 ### Fixed
 
 - Subagents receive task instructions with their blank lines, Markdown hard breaks, and table spacing intact, whether given inline or via `taskFile`.
