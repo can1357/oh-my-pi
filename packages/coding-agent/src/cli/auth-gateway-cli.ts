@@ -49,6 +49,7 @@ import { ModelRegistry } from "../config/model-registry";
 import { cfgDisabledProviders, cfgModelProviderOrder } from "../config/model-settings";
 import { resolveProviderModelReference } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import { isProviderExhausted } from "../session/provider-exhaustion";
 import {
 	type AuthBrokerClientConfig,
 	loadEffectiveAuthAccountPolicyConfig,
@@ -321,7 +322,8 @@ export function resolveGatewayModel(
 	index: GatewayModelIndex,
 	options?: ModelResolveOptions,
 ): Model<Api> | undefined {
-	const accepts = options?.accepts ?? (() => true);
+	const accepts = (model: Model<Api>): boolean =>
+		!isProviderExhausted(model.provider) && (options?.accepts?.(model) ?? true);
 	const exact = index.qualified.get(id);
 	if (exact) return accepts(exact) ? exact : undefined;
 	for (const tier of index.bare.get(id) ?? []) {
@@ -332,6 +334,11 @@ export function resolveGatewayModel(
 	if (!id.startsWith(prefix)) return undefined;
 	const variant = resolveProviderModelReference("openrouter", id.slice(prefix.length), index.models);
 	return variant && accepts(variant) ? variant : undefined;
+}
+
+/** Recheck shared exhaustion on every catalog request, without rebuilding the index. */
+export function gatewayAvailableModels(index: GatewayModelIndex): Model<Api>[] {
+	return [...index.qualified.values()].filter(model => !isProviderExhausted(model.provider));
 }
 
 /**
@@ -456,7 +463,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 		trustProxyHeaders: flags.trustProxyHeaders,
 		version: VERSION,
 		resolveModel: (id, options) => resolveGatewayModel(id, index, options),
-		listModels: () => index.qualified.values(),
+		listModels: () => gatewayAvailableModels(index),
 		excludeProviders: new Set(cfgDisabledProviders.get(settings)),
 		clients,
 	});
