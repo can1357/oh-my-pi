@@ -155,7 +155,7 @@ fn env(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, zle: &mut Zle, ed: &Edit
 	}
 }
 
-/// The PROMPT_SUBST and `%` steps of zsh's `promptexpand(raw, ns = 1)`
+/// The `PROMPT_SUBST` and `%` steps of zsh's `promptexpand(raw, ns = 1)`
 /// for the line editor: `lastval` is `%?`, `cmdstack` is `%_`.
 ///
 /// # Errors
