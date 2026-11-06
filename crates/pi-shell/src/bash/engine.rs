@@ -84,7 +84,7 @@ pub struct Engine {
 
 #[derive(Default)]
 struct UnitCache {
-	map:   HashMap<UnitId, Arc<Unit>>,
+	map:   HashMap<UnitId, Arc<Unit>, crate::bash::ids::UnitIdState>,
 	order: VecDeque<UnitId>,
 	bytes: usize,
 }
@@ -159,10 +159,23 @@ impl Engine {
 		features: Features,
 		observed: bool,
 	) -> Arc<Unit> {
-		let compiled = ir::lower_deferred(&cc, src, mode, features).unwrap_or_else(|what| {
-			ir::abort_unit(cc.span.slice(src), mode, features, cc.line, vec![what.into()], 0, 2)
+		// A source-replayable command's unit is named by its source: one
+		// already compiled (a loop's `eval`, a re-sourced file) is reused
+		// without lowering again.
+		let replay = ir::replay_hasher(&cc, src, mode, features).map(|h| (ir::replay_id(&h), h));
+		let cached = replay
+			.as_ref()
+			.and_then(|(id, _)| self.units.lock().map.get(id).cloned());
+		let unit = cached.unwrap_or_else(|| {
+			let lowered = match replay {
+				Some((id, h)) => ir::lower_deferred_hashed(&cc, src, mode, features, h, id),
+				None => ir::lower_deferred(&cc, src, mode, features),
+			};
+			let compiled = lowered.unwrap_or_else(|what| {
+				ir::abort_unit(cc.span.slice(src), mode, features, cc.line, vec![what.into()], 0, 2)
+			});
+			self.intern(compiled)
 		});
-		let unit = self.intern(compiled);
 		if observed && unit.trace_syntax.get().is_none() {
 			let syntax = Arc::new(
 				crate::bash::trace::syntax::UnitSyntax::list(cc).with_context(mode, features.bits()),
