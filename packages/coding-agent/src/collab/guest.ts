@@ -45,6 +45,7 @@ import {
 	parseCollabLink,
 } from "./protocol";
 import { CollabSocket } from "./relay-client";
+import { collabRelayHeaders } from "./relay-headers";
 
 /** Commands a guest may run locally; everything else is host-only. */
 export const COLLAB_GUEST_ALLOWED_COMMANDS: Record<string, true> = {
@@ -340,7 +341,12 @@ export class CollabGuestLink {
 			throw err;
 		}
 
-		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
+		const socket = new CollabSocket({
+			wsUrl: parsed.wsUrl,
+			role: "guest",
+			key,
+			connectHeaders: url => collabRelayHeaders(this.#ctx.session, url, "guest"),
+		});
 		this.#socket = socket;
 
 		const firstWelcome = Promise.withResolvers<void>();
@@ -428,10 +434,11 @@ export class CollabGuestLink {
 			this.#ctx.showStatus(`Collab session ended (${reason})`);
 			this.#restoreAfterDisconnect();
 		};
+		// Cover a blackholed WebSocket handshake too; onOpen resets the timer. It starts
+		// once the socket exists, so the connect-header wait does not count against it.
+		socket.onConnecting = () => this.#armWelcomeTimer();
 		try {
 			socket.connect();
-			// Cover a blackholed WebSocket handshake too; onOpen resets the timer.
-			this.#armWelcomeTimer();
 			await firstWelcome.promise;
 			if (this.#left) throw new Error("Collab join cancelled");
 		} catch (err) {

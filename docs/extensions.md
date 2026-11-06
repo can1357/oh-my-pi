@@ -664,6 +664,17 @@ pi.on("mcp_notification", event => {
 
 The runtime handles the JSON-RPC transport and its own list/update refresh first; the handler runs afterwards and can inject a mid-turn steer via `pi.sendMessage` / `pi.sendUserMessage`.
 
+### Collab relay connections
+
+- `collab_relay_connect` — `{ url, role }` before each `/collab` relay WebSocket opens, for hosts (`role: "host"`) and guests (`role: "guest"`), on the first connect and on every reconnect. Return `{ headers }` to add WebSocket upgrade headers, for example a credential for an authenticating gateway (Cloudflare Access, oauth2-proxy) in front of a self-hosted relay. omp waits for the handlers (normal handler timeout) and for startup-deferred extensions, so `omp join <link>` also sends the headers. The relay connect timeout starts after the headers, so a slow token refresh does not count as a slow relay. For the same header name the last handler wins. A handler error is reported and omp connects without that handler's headers.
+
+```ts
+pi.on("collab_relay_connect", async event => {
+	if (new URL(event.url).host !== "collab.example.com") return;
+	return { headers: { Authorization: `Bearer ${await getFreshToken()}` } };
+});
+```
+
 ### User command interception
 
 - `user_bash` (override with `{ result }`)

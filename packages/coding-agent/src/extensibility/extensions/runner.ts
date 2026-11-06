@@ -63,6 +63,8 @@ import type {
 	BeforeProviderRequestEventResult,
 	BeforeSubagentSpawnEvent,
 	BeforeSubagentSpawnEventResult,
+	CollabRelayConnectEvent,
+	CollabRelayConnectEventResult,
 	CompactOptions,
 	ContextEvent,
 	ContextEventResult,
@@ -413,6 +415,7 @@ type RunnerEmitEvent = Exclude<
 	| CacheWarmingDecisionEvent
 	| BeforeProviderRequestEvent
 	| AfterProviderResponseEvent
+	| CollabRelayConnectEvent
 	| BeforeAgentStartEvent
 	| ResourcesDiscoverEvent
 	| InputEvent
@@ -2490,6 +2493,48 @@ export class ExtensionRunner {
 				await this.#runHandlerWithTimeout(handler, event, ctx, ext, extensionHandlerTimeoutMs, undefined, signal);
 			}
 		}
+	}
+
+	/**
+	 * Collects WebSocket upgrade headers for a collab relay connection. Handlers run
+	 * in load order; for the same header name (case-insensitive) the last value wins.
+	 * Returns `undefined` when no handler adds a header.
+	 */
+	async emitCollabRelayConnect(
+		event: Omit<CollabRelayConnectEvent, "type">,
+	): Promise<Record<string, string> | undefined> {
+		if (!this.hasHandlers("collab_relay_connect")) return undefined;
+		const ctx = this.createContext();
+		const headers = new Headers();
+
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("collab_relay_connect");
+			if (!handlers || handlers.length === 0) continue;
+
+			for (const handler of handlers) {
+				const result = (await this.#runHandlerWithTimeout(
+					handler,
+					{ type: "collab_relay_connect", ...event } satisfies CollabRelayConnectEvent,
+					ctx,
+					ext,
+					extensionHandlerTimeoutMs,
+				)) as CollabRelayConnectEventResult | undefined;
+				for (const [name, value] of Object.entries(result?.headers ?? {})) {
+					try {
+						headers.set(name, value);
+					} catch (error) {
+						this.emitError({
+							extensionPath: ext.path,
+							event: "collab_relay_connect",
+							error: `invalid header ${JSON.stringify(name)}: ${error instanceof Error ? error.message : String(error)}`,
+						});
+					}
+				}
+			}
+		}
+
+		const merged = Object.fromEntries(headers);
+		return Object.keys(merged).length > 0 ? merged : undefined;
 	}
 
 	async emitBeforeAgentStart(

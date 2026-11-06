@@ -176,6 +176,8 @@ The relay is a small content-blind Go service. It keeps no state beyond live con
 - `POST /s` / `GET /s/<id>` / `GET /s/<id>/raw` — `/share` blob upload, viewer page, and blob fetch,
 - `GET /healthz` — liveness.
 
+A relay behind an authenticating proxy needs credentials on the WebSocket upgrade. omp sends none by itself; an extension adds them with the [`collab_relay_connect`](./extensions.md#collab-relay-connections) event.
+
 ## Implementation files
 
 - [`src/slash-commands/builtin-collaboration.ts`](../packages/coding-agent/src/slash-commands/builtin-collaboration.ts) — TUI commands and join-link presentation

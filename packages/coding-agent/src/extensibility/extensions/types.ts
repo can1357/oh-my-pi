@@ -1334,6 +1334,31 @@ export interface McpNotificationEvent {
 }
 
 // ============================================================================
+// Collab Events
+// ============================================================================
+
+/**
+ * Fired before each collab relay WebSocket opens, for `/collab` hosts and guests,
+ * on the first connect and on every reconnect. omp waits for the handlers, so a
+ * handler can refresh a credential before it returns it.
+ */
+export interface CollabRelayConnectEvent {
+	type: "collab_relay_connect";
+	/** WebSocket URL omp opens, `ws(s)://host[:port]/r/<roomId>?role=<role>`. */
+	url: string;
+	role: "host" | "guest";
+}
+
+/** Result from a `collab_relay_connect` handler. */
+export interface CollabRelayConnectEventResult {
+	/**
+	 * Headers for the WebSocket upgrade request. When two handlers set the same
+	 * header, the handler that runs last wins.
+	 */
+	headers?: Record<string, string>;
+}
+
+// ============================================================================
 // Link Activation Events
 // ============================================================================
 
@@ -1681,6 +1706,7 @@ export type ExtensionEvent =
 	| GoalUpdatedEvent
 	| CredentialDisabledEvent
 	| McpNotificationEvent
+	| CollabRelayConnectEvent
 	| LinkActivateEvent
 	| UserBashEvent
 	| UserPythonEvent
@@ -1916,6 +1942,10 @@ export interface ExtensionAPI {
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
 	on(event: "user_python", handler: ExtensionHandler<UserPythonEvent, UserPythonEventResult>): void;
 	on(event: "mcp_notification", handler: ExtensionHandler<McpNotificationEvent>): void;
+	on(
+		event: "collab_relay_connect",
+		handler: ExtensionHandler<CollabRelayConnectEvent, CollabRelayConnectEventResult>,
+	): void;
 	on(event: "link_activate", handler: ExtensionHandler<LinkActivateEvent>): void;
 
 	// =========================================================================

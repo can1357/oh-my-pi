@@ -55,6 +55,7 @@ import {
 	publishCollabHost,
 } from "./registry";
 import { CollabSocket } from "./relay-client";
+import { collabRelayHeaders } from "./relay-headers";
 import {
 	COLLAB_ENTRY_OMITTED_CUSTOM_TYPE,
 	copyForReplication,
@@ -413,7 +414,12 @@ export class CollabHost {
 		const key = await importRoomKey(rawKey);
 		if (this.ending) throw new CollabHostStoppedError("collab host stopped before connecting");
 
-		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "host", key });
+		const socket = new CollabSocket({
+			wsUrl: parsed.wsUrl,
+			role: "host",
+			key,
+			connectHeaders: url => collabRelayHeaders(this.#ctx.session, url, "host"),
+		});
 		this.#socket = socket;
 
 		let opened = false;
@@ -446,12 +452,16 @@ export class CollabHost {
 				this.#onEnded?.();
 			}
 		};
+		// The deadline covers the relay, not the connect-header wait before the first socket.
+		let timeout: NodeJS.Timeout | undefined;
+		socket.onConnecting = () => {
+			if (opened || timeout) return;
+			timeout = setTimeout(
+				() => firstOpen.reject(new CollabRelayUnavailableError("timed out connecting to relay")),
+				CONNECT_TIMEOUT_MS,
+			);
+		};
 		socket.connect();
-
-		const timeout = setTimeout(
-			() => firstOpen.reject(new CollabRelayUnavailableError("timed out connecting to relay")),
-			CONNECT_TIMEOUT_MS,
-		);
 		try {
 			await firstOpen.promise;
 		} catch (err) {

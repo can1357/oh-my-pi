@@ -93,11 +93,23 @@ export interface CollabSocketOptions {
 	wsUrl: string;
 	role: "host" | "guest";
 	key: CryptoKey;
+	/**
+	 * Called before each socket opens: the first connect and every reconnect. The
+	 * resolved headers go on the WebSocket upgrade request; a rejection opens the
+	 * socket without them. Return `undefined` to open the socket at once.
+	 */
+	connectHeaders?: (url: string) => Promise<Record<string, string> | undefined> | undefined;
 }
 
 export class CollabSocket {
 	/** Fires after every successful (re)connect. */
 	onOpen?: () => void;
+	/**
+	 * Fires each time a WebSocket is created: after {@link CollabSocketOptions.connectHeaders}
+	 * resolves, on the first connect and on every reconnect. Connect deadlines start here,
+	 * so a slow header provider does not count as a slow relay.
+	 */
+	onConnecting?: () => void;
 	onFrame?: (frame: CollabFrame, fromPeer: number) => void;
 	onControl?: (msg: RelayControlMessage) => void;
 	/** Fires on each close; `willReconnect` distinguishes retries from terminal shutdown. */
@@ -161,6 +173,10 @@ export class CollabSocket {
 	 * is acting on somebody else's record.
 	 */
 	#roomGeneration = 0;
+	/** True while an open waits for {@link CollabSocketOptions.connectHeaders}. */
+	#awaitingHeaders = false;
+	/** Bumped by each open and by close(), so a late header result opens nothing. */
+	#openGeneration = 0;
 
 	constructor(opts: CollabSocketOptions) {
 		this.#opts = opts;
@@ -184,7 +200,7 @@ export class CollabSocket {
 	onRoomRecreated?: () => void;
 
 	connect(): void {
-		if (this.#ws || this.#retryTimer) return;
+		if (this.#ws || this.#retryTimer || this.#awaitingHeaders) return;
 		this.#closed = false;
 		this.#retryMissingRoom = false;
 		this.#hostReclaimUntil = undefined;
@@ -505,7 +521,9 @@ export class CollabSocket {
 
 	/** Intentional close: clears any retry timer, suppresses reconnect. A later connect() starts fresh. */
 	close(): void {
-		const hadActivity = this.#ws !== null || this.#retryTimer !== undefined;
+		const hadActivity = this.#ws !== null || this.#retryTimer !== undefined || this.#awaitingHeaders;
+		this.#awaitingHeaders = false;
+		this.#openGeneration++;
 		this.#clearRetry();
 		this.#clearProvisional();
 		this.#stopHeartbeat();
@@ -537,8 +555,49 @@ export class CollabSocket {
 	#openSocket(): void {
 		this.#clearBackpressureDrain();
 		const url = `${this.#opts.wsUrl}?role=${this.#opts.role}`;
+		let pending: Promise<Record<string, string> | undefined> | undefined;
+		try {
+			pending = this.#opts.connectHeaders?.(url);
+		} catch (error) {
+			this.#warnHeadersFailed(error);
+		}
+		if (!pending) {
+			this.#createSocket(url, undefined);
+			return;
+		}
+		const generation = ++this.#openGeneration;
+		this.#awaitingHeaders = true;
+		pending
+			.catch((error: unknown) => {
+				this.#warnHeadersFailed(error);
+				return undefined;
+			})
+			.then(headers => {
+				if (generation !== this.#openGeneration) return;
+				this.#awaitingHeaders = false;
+				if (this.#closed) return;
+				try {
+					this.#createSocket(url, headers);
+				} catch (error) {
+					// Off the connect() call stack, so the owner learns it from onClose.
+					this.#failFatal(
+						`could not open relay connection: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+			});
+	}
+
+	#warnHeadersFailed(error: unknown): void {
+		logger.warn("collab: relay connect headers failed; connecting without them", {
+			role: this.#opts.role,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
+
+	#createSocket(url: string, headers: Record<string, string> | undefined): void {
 		const options = {
 			proxy: getProxyForUrl("collab", new URL(url)),
+			headers,
 		} satisfies Bun.WebSocketOptions;
 		const ws: WebSocket = Reflect.construct(WebSocket, [url, options]);
 		ws.binaryType = "arraybuffer";
@@ -577,6 +636,7 @@ export class CollabSocket {
 			this.#ws = null;
 			this.#handleClose(event.code, event.reason);
 		};
+		this.onConnecting?.();
 	}
 
 	/**
@@ -774,10 +834,12 @@ export class CollabSocket {
 		this.#scheduleRetry(this.#attempt++);
 	}
 
-	/** Decryption failure: wrong key or corrupted frame. Never reconnect. */
+	/** Unrecoverable failure (wrong key, corrupted frame, socket construction). Never reconnect. */
 	#failFatal(reason: string): void {
 		if (this.#closed) return;
 		this.#closed = true;
+		this.#awaitingHeaders = false;
+		this.#openGeneration++;
 		this.#clearRetry();
 		this.#clearProvisional();
 		this.#stopHeartbeat();
