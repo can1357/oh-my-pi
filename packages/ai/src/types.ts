@@ -54,7 +54,7 @@ import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICodexResponsesOptions } from "./providers/openai-codex-responses";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
 import type { OpenAIResponsesOptions } from "./providers/openai-responses";
-import type { UsageRequestContext } from "./usage-governor/types";
+import type { UsageRequestContext, UsageRouteBinding } from "./usage-governor/types";
 import type { kStreamingPartialJson } from "./utils/block-symbols";
 import type { AssistantMessageEventStream } from "./utils/event-stream";
 
@@ -523,6 +523,8 @@ export interface StreamOptions {
 	 * Read by pi-ai's admission seam only; never sent on the wire.
 	 */
 	usageContext?: UsageRequestContext;
+	/** @internal Single-attempt authorization for an automatically selected route. */
+	usageRouteBinding?: UsageRouteBinding;
 	cacheRetention?: CacheRetention;
 	/**
 	 * Anthropic preserved-thinking behavior when a signed block no longer matches

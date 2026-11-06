@@ -1,5 +1,6 @@
 import type {
 	ApiKey,
+	ApiKeyResolution,
 	AssistantMessage,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
@@ -185,11 +186,26 @@ export interface SteeringQueueState {
 	source?: SteeringInterruptSource;
 }
 
+/** Credential resolution for a model request, including durable provenance. */
+export interface PreparedModelAuth {
+	model: Model;
+	apiKey: ApiKey | undefined;
+	resolved: ApiKeyResolution;
+}
+
+/** Request-local auth preparation, used before a governed model request. */
+export type PrepareModelCallAuth = (
+	model: Model,
+	resolveCurrent: () => Promise<PreparedModelAuth>,
+	signal?: AbortSignal,
+) => Promise<PreparedModelAuth | undefined>;
 /**
  * Configuration for the agent loop.
  */
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model;
+	/** @internal Prepare a governed route without changing permanent account pins. */
+	prepareModelCallAuth?: PrepareModelCallAuth;
 
 	/** Reports whether this loop has reached a safe process-pause boundary. */
 	onPauseChange?: (paused: boolean) => void;

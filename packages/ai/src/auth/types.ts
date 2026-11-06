@@ -490,6 +490,8 @@ export interface ModelUsageHealthOptions {
 /** Options controlling model, base URL, cancellation, and forced OAuth refresh in KeysApi.get. */
 export type AuthApiKeyOptions = {
 	baseUrl?: string;
+	/** Restrict this resolution to one stored row without changing permanent session pins. */
+	requestCredential?: { credentialId: number };
 	modelId?: string;
 	/**
 	 * {@link oauthAccountKey}s known to serve `modelId` from discovery.

@@ -5,7 +5,7 @@ import { isAuthRetryableError, isInvalidatedOAuthTokenError } from "./error/auth
 import { isAccountPolicyError, isUsageLimit } from "./error/flags";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
 import { admitSend, currentUsageAdmission, type UsageAdmissionCall } from "./usage-governor/admission";
-import type { UsageRequestContext } from "./usage-governor/types";
+import type { UsageRequestContext, UsageRouteBinding } from "./usage-governor/types";
 
 /**
  * Context passed to an {@link ApiKeyResolver} on each resolution attempt.
@@ -44,6 +44,8 @@ export interface ResolvedApiKey {
 	apiKey: string;
 	/** Durable row id of the credential that supplied this bearer, when known. */
 	credentialId?: number;
+	/** @internal Single-attempt authorization of a governor-selected route. */
+	usageRouteBinding?: UsageRouteBinding;
 	/**
 	 * The OAuth access token behind this bearer, when the bearer came from a
 	 * stored OAuth credential. A provider whose API key wraps the token in a

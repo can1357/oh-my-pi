@@ -40,6 +40,8 @@ export interface UsageAdmissionRequest {
 	modelId?: string;
 	baseUrl?: string;
 	context?: UsageRequestContext;
+	/** Single-attempt authorization for an automatically chosen route. */
+	usageRouteBinding?: UsageRouteBinding;
 }
 
 /** Admission of one send. Settle exactly once. */
@@ -56,6 +58,8 @@ export type UsageAdmissionOutcome = "sent" | "not-sent";
 export interface UsageAdmission {
 	/** Synchronous. `false` keeps every send on the pre-governor path. */
 	readonly active: boolean;
+	/** A bound route must be rejected if this verifier is absent or returns false. */
+	validateRoute?(binding: UsageRouteBinding, request: UsageAdmissionRequest): boolean;
 	/**
 	 * Resolves when the send may go out and rejects only when `signal` aborts.
 	 * Resolves `undefined` when the request is not governed or the ledger is degraded.
@@ -65,6 +69,27 @@ export interface UsageAdmission {
 }
 
 export type UsageWindowState = "open" | "paced" | "closed" | "stale" | "unknown";
+
+/** Why a request is walking its authorized routes. */
+export type UsageRouteIntent = "proactive" | "error";
+
+/** Authorization owner is distinct from display attribution. */
+export type UsageRoutingOwner = { kind: "role"; role: string } | { kind: "model"; selector: string };
+
+/** One cached candidate awaiting request-local credential resolution. */
+export interface UsageRouteCandidate {
+	scopeId: string;
+	revision: number;
+	owner: UsageRoutingOwner;
+	target: UsageRouteTarget;
+	credentialId: number;
+	intent: UsageRouteIntent;
+}
+
+/** A single-attempt candidate bound to the actual resolved bearer fingerprint. */
+export interface UsageRouteBinding extends UsageRouteCandidate {
+	bearerFingerprint: string;
+}
 
 /** One already-authorized model route, preserving routed selector and effort. */
 export interface UsageRouteTarget {
