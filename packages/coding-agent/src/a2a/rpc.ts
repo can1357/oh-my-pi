@@ -379,6 +379,8 @@ export interface A2aDispatchDeps {
 	readOutput?: (path: string) => Promise<string | undefined>;
 	/** Sender agent id recorded on bus messages. */
 	senderId?: string;
+	/** This bridge's public identity (`a2a.name`): `to` by that name resolves to the main agent. */
+	identityName?: string;
 }
 
 export const A2A_SENDER_ID = "a2a";
@@ -388,10 +390,18 @@ export const A2A_SENDER_ID = "a2a";
  * transcripts are not peers — the agent card and ListTasks already hide them,
  * so GetTask/CancelTask must not reach them either.
  */
-export function resolveAddressedRef(registry: Pick<AgentRegistryApi, "get">, to: string): AgentRef | undefined {
+export function resolveAddressedRef(
+	registry: Pick<AgentRegistryApi, "get">,
+	to: string,
+	identityName?: string,
+): AgentRef | undefined {
 	// `to` may be the registry id ("Main"), the literal "main", or the
 	// terminal's public A2A identity (a2a.name): all resolve to the main ref.
 	const lowered = to.toLowerCase();
+	if (identityName !== undefined && lowered === identityName.toLowerCase()) {
+		const byIdentity = registry.get(MAIN_AGENT_ID);
+		if (byIdentity !== undefined) return byIdentity.kind === "advisor" ? undefined : byIdentity;
+	}
 	const ref =
 		registry.get(to) ??
 		(lowered === "main" ? registry.get(MAIN_AGENT_ID) : undefined) ??
@@ -415,7 +425,7 @@ function isSpawnRejection(error: unknown): error is Error {
 export async function sendA2aMessage(params: unknown, deps: A2aDispatchDeps): Promise<A2aTask> {
 	const request = parseSendMessageParams(params);
 	if (request.to !== undefined && request.spawn !== true) {
-		const target = resolveAddressedRef(deps.registry, request.to);
+		const target = resolveAddressedRef(deps.registry, request.to, deps.identityName);
 		if (!target) {
 			throw new RpcError(RPC_ERRORS.TASK_NOT_FOUND, `Task not found: ${request.to}`, { httpStatus: 404 });
 		}

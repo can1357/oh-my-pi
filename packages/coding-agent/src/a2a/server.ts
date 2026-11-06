@@ -61,6 +61,8 @@ export interface A2aServerOptions {
 	token: string;
 	port?: number;
 	host?: string;
+	/** Public A2A identity: renames the main skill and resolves `to` by name. */
+	name?: string;
 	registry: Pick<AgentRegistryApi, "get" | "list" | "onChange" | "setStatus">;
 	bus: A2aBus;
 	spawn?: (options: SpawnSubagentOptions) => Promise<AgentRef>;
@@ -253,6 +255,7 @@ export function createA2aServer(options: A2aServerOptions): A2aServerHandle {
 	const activeStreams = new Set<() => void>();
 	const dispatchDeps = {
 		registry: options.registry,
+		...(options.name !== undefined ? { identityName: options.name } : {}),
 		send: (message: Omit<IrcMessage, "id" | "ts">) => options.bus.send(message),
 		spawn: options.spawn,
 		readOutput: readPublishedOutput,
