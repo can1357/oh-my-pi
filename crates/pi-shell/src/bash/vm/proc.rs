@@ -412,46 +412,34 @@ impl PendingTraps {
 			.is_none_or(|q| !q.catch && q.scans.is_empty())
 	}
 
-	/// The signals queued, for the frames image.
-	pub fn queued(&self) -> SigSet {
-		self.0.as_deref().map_or(SigSet::EMPTY, |q| q.queued)
+	/// The signals queued, for the frames image. The existing child count
+	/// includes an active batch's remainder: older readers need its bit
+	/// set too, or they never run those owed actions.
+	pub fn queued(&self, chld: u32) -> SigSet {
+		let queued = self.0.as_deref().map_or(SigSet::EMPTY, |q| q.queued);
+		if chld > 0 {
+			queued.with(Signal::Chld)
+		} else {
+			queued
+		}
 	}
 
-	/// Rebuild scans from the trap frames in a version-29 image. A queued
-	/// copy of a running ordinary signal is a fresh delivery (its original
-	/// bit was cleared before the action), so it can nest. Otherwise resume
-	/// the action first, then drain the queue from the lowest signal.
-	pub fn restore(&mut self, queued: SigSet, frames: &[Frame], chld: u32, mode: ModeId) {
-		for (depth, frame) in frames.iter().enumerate() {
-			let FrameKind::Script {
-				src,
-				what: ScriptKind::Trap { key: crate::bash::store::TrapKey::Signal(sig), .. },
-				..
-			} = &frame.kind
-			else {
-				continue;
-			};
-			let q = self.get();
-			let is_chld = *sig == Signal::Chld;
-			q.chld_running |= is_chld;
-			q.scans.push(Scan {
-				cursor: 0,
-				depth,
-				running: Some(*sig),
-				chld_left: if is_chld { chld } else { 0 },
-				chld_action: (is_chld && !src.is_empty())
-					.then(|| (src.clone(), frame.unit.as_ref().map_or(mode, |u| u.mode))),
-			});
-		}
-		if queued != SigSet::EMPTY || self.0.is_some() {
+	/// Version-29 images save pending bits and a child-action count, not
+	/// the scan's cursor, catch flag or captured batch. Resume that debt
+	/// as unscanned deliveries rather than inventing a scan that can drop
+	/// an action. Only the active CHLD exclusion is known from its trap
+	/// frame; the original scan's nesting relationship is not recoverable.
+	pub fn restore_legacy(&mut self, queued: SigSet, chld: u32, chld_running: bool) {
+		let queued = if chld > 0 {
+			queued.with(Signal::Chld)
+		} else {
+			queued
+		};
+		if queued != SigSet::EMPTY || chld_running {
 			let q = self.get();
 			q.queued = queued;
-			q.catch = (q.scans.is_empty() && queued != SigSet::EMPTY)
-				|| q.scans.iter().any(|scan| {
-					scan.running.is_some_and(|sig| {
-						!matches!(sig, Signal::Chld | Signal::Winch) && queued.contains(sig)
-					})
-				});
+			q.catch = queued != SigSet::EMPTY;
+			q.chld_running = chld_running;
 		}
 	}
 

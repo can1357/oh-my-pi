@@ -245,9 +245,8 @@ struct ProcImage {
 	/// A subshell's own state (`None` for the root vproc).
 	fields:        Option<Fields>,
 	out:           Vec<PendingWrite>,
-	/// Queued signals. Restore rebuilds active scans from their existing
-	/// trap script frames and the persisted job counter, without extending
-	/// the version-29 postcard layout.
+	/// Pending bits, resumed as unscanned deliveries. The version-29
+	/// layout does not hold an interrupted scan or captured CHLD batch.
 	pending_traps: SigSet,
 	stopped:       bool,
 	transient:     bool,
@@ -614,7 +613,7 @@ impl Shell {
 				fds: slots,
 				fields,
 				out: p.out.iter().cloned().collect(),
-				pending_traps: p.traps.queued(),
+				pending_traps: p.traps.queued(p.jobs.chld),
 				stopped: p.stopped,
 				transient: p.transient,
 				procsubs: p.procsubs.clone(),
@@ -897,6 +896,7 @@ impl Shell {
 				});
 			}
 			report.runs += vp.runs.len() as u32;
+			let mut chld_running = false;
 			for f in p.frames {
 				let unit = match f.unit {
 					Some(id) => {
@@ -1035,13 +1035,14 @@ impl Shell {
 				frame.subshell_line = f.subshell_line;
 				frame.getopts =
 					(f.getopts != super::proc::GetoptsState::default()).then(|| Box::new(f.getopts));
-				if matches!(frame.kind, FrameKind::Script { what: ScriptKind::Trap { .. }, .. }) {
+				if let FrameKind::Script { what: ScriptKind::Trap { key, .. }, .. } = frame.kind {
 					vp.trap_frames += 1;
+					chld_running |= key == TrapKey::Signal(Signal::Chld);
 				}
 				vp.frames.push(frame);
 			}
 			vp.traps
-				.restore(p.pending_traps, &vp.frames, vp.jobs.chld, vp.mode);
+				.restore_legacy(p.pending_traps, vp.jobs.chld, chld_running);
 			procs.push(Box::new(vp));
 		}
 		if procs.is_empty() {

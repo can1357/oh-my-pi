@@ -21,7 +21,20 @@
 //! with it would compare two different situations instead of the queue.
 #![cfg(unix)]
 
-use pi_shell::{Shell, ShellRunOptions, cancel::CancelToken};
+use std::os::unix::ffi::OsStrExt;
+
+use bstr::BStr;
+use pi_shell::{
+	Shell, ShellRunOptions,
+	bash::{
+		Budget, Cx, Engine, EngineConfig, MemStore, RestoreOpts, RunId, Shell as CoreShell, SigSet,
+		StateStore, Step,
+		store::{Change, Key},
+	},
+	cancel::CancelToken,
+	process::{NativeHost, no_callouts, wait_runnable},
+	sys::Parker,
+};
 
 mod obash_support;
 mod pty_support;
@@ -306,25 +319,11 @@ async fn a_chld_batch_keeps_its_original_action() {
 /// Exact Bash output also prevents plain and restored runs agreeing on
 /// the same bug. Counters ensure restoration was not silently skipped.
 #[test]
-fn a_snapshot_keeps_owed_children_and_the_running_action_before_later_signals() {
-	let rows = [
-		(
-			r#"n=0; trap 'n=$((n+1)); echo chld=$n' CHLD; /bin/true & /bin/true & /bin/true & /bin/sleep .2; echo end=$n; wait"#,
-			"chld=1\nchld=2\nchld=3\nchld=4\nend=4\n",
-		),
-		(
-			r#"trap 'echo one-start; echo one-end' USR1; trap 'echo term-start; echo term-end' TERM; /bin/bash -c 'kill -USR1 $PPID; kill -TERM $PPID'; echo end"#,
-			"one-start\none-end\nterm-start\nterm-end\nend\n",
-		),
-		(
-			r#"n=0; trap 'n=$((n+1)); echo enter=$n; if [ $n -lt 3 ]; then kill -USR1 $BASHPID; fi; echo leave=$n' USR1; kill -USR1 $BASHPID; echo end=$n"#,
-			"enter=1\nenter=2\nenter=3\nleave=3\nleave=3\nleave=3\nend=3\n",
-		),
-		(
-			r#"n=0; trap 'n=$((n+1)); echo old=$n; trap "echo new" CHLD' CHLD; /bin/true | /bin/true | /bin/true | /bin/sleep .2; echo end=$n"#,
-			"old=1\nold=2\nold=3\nold=4\nend=4\n",
-		),
-	];
+fn a_snapshot_keeps_an_ordinary_signals_recursive_actions() {
+	let rows = [(
+		r#"n=0; trap 'n=$((n+1)); echo enter=$n; if [ $n -lt 3 ]; then kill -USR1 $BASHPID; fi; echo leave=$n' USR1; kill -USR1 $BASHPID; echo end=$n"#,
+		"enter=1\nenter=2\nenter=3\nleave=3\nleave=3\nleave=3\nend=3\n",
+	)];
 	let mut mismatches = Vec::new();
 	for (row, (script, expected)) in rows.into_iter().enumerate() {
 		for mode in ["step", "exec"] {
@@ -413,9 +412,8 @@ fn assert_snapshot_fresh_signal(mode: &str, leave: &str, status: i32, expected: 
 	let mut mismatches = Vec::new();
 	for (running, fresh) in [("USR1", "USR2"), ("USR2", "USR1")] {
 		let script = format!(
-			"trap 'echo start >&2; kill -{fresh} $BASHPID; {leave}echo tail' {running}; \
-			 trap 'printf saved > \"$TRAP_OUTPUT\"; echo nested' {fresh}; \
-			 kill -{running} $BASHPID; echo end"
+			"trap 'echo start >&2; kill -{fresh} $BASHPID; {leave}echo tail' {running}; trap 'printf \
+			 saved > \"$TRAP_OUTPUT\"; echo nested' {fresh}; kill -{running} $BASHPID; echo end"
 		);
 		if let Some(mismatch) = snapshot_action_mismatch(mode, &script, status, expected, "saved") {
 			mismatches.push(mismatch);
@@ -444,24 +442,102 @@ fn a_snapshot_preserves_a_fresh_different_signal_before_the_tail_in_exec_mode() 
 	assert_snapshot_fresh_signal("exec", "", 0, "start\nnested\ntail\nend\n");
 }
 
-/// The old batch owes two actions in total, not a third action for the
-/// child reaped inside its first action after replacing the live trap.
-fn assert_snapshot_chld_remainder(mode: &str) {
-	let script = r#"n=0; trap 'n=$((n+1)); echo old=$n; printf saved >> "$TRAP_OUTPUT"; if [ $n -eq 1 ]; then trap "echo new" CHLD; /bin/true; fi' CHLD; /bin/true | /bin/sleep .1; echo end=$n"#;
+fn assert_snapshot_child_actions(mode: &str) {
+	let script = r#"n=0; trap 'n=$((n+1)); printf saved >> "$TRAP_OUTPUT"; echo chld' CHLD; /bin/true & /bin/true & /bin/true & /bin/sleep .2; echo end=$n; wait"#;
 	assert_eq!(
-		snapshot_action_mismatch(mode, script, 0, "old=1\nold=2\nend=2\n", "savedsaved"),
+		snapshot_action_mismatch(
+			mode,
+			script,
+			0,
+			"chld\nchld\nchld\nchld\nend=4\n",
+			"savedsavedsavedsaved",
+		),
 		None
 	);
 }
 
 #[test]
-fn a_snapshot_separates_the_captured_chld_remainder_from_new_children_in_step_mode() {
-	assert_snapshot_chld_remainder("step");
+fn a_snapshot_runs_every_owed_child_action_and_file_write_in_step_mode() {
+	assert_snapshot_child_actions("step");
 }
 
 #[test]
-fn a_snapshot_separates_the_captured_chld_remainder_from_new_children_in_exec_mode() {
-	assert_snapshot_chld_remainder("exec");
+fn a_snapshot_runs_every_owed_child_action_and_file_write_in_exec_mode() {
+	assert_snapshot_child_actions("exec");
+}
+
+fn assert_different_signal_during_child_action(mode: &str) {
+	let script = r#"trap 'echo different; printf saved > "$TRAP_OUTPUT"' USR1; trap 'echo child; kill -USR1 $BASHPID; echo tail' CHLD; /bin/true; echo end"#;
+	assert_eq!(
+		snapshot_action_mismatch(mode, script, 0, "child\ndifferent\ntail\nend\n", "saved"),
+		None
+	);
+}
+
+#[test]
+fn a_different_signal_still_interrupts_a_running_child_action_in_step_mode() {
+	assert_different_signal_during_child_action("step");
+}
+
+#[test]
+fn a_different_signal_still_interrupts_a_running_child_action_in_exec_mode() {
+	assert_different_signal_during_child_action("exec");
+}
+
+/// Genuine upstream image: 75e7801e247d4e3263439d4cc08ccad60dc64bdd,
+/// pi-shell 18.17.0. USR1 is running; HUP, USR2 and TERM are pending.
+/// Only the ordinary variable `d` is rebound to isolate real file writes;
+/// the Frames blob, identities and units are never rewritten or regenerated.
+/// These bytes contain pending deliveries, not an interrupted scan to replay.
+#[test]
+fn a_legacy_upstream_snapshot_runs_every_unscanned_action_without_inventing_a_scan() {
+	let dir = tempfile::tempdir().unwrap();
+	let mut store = MemStore::from_bytes(include_bytes!(
+		"fixtures/pending-trap-queue/upstream-18.17.0-mid-action.store"
+	))
+	.unwrap();
+	store
+		.apply(Change::SetScalar(
+			Key::Var(BStr::new(b"d")),
+			BStr::new(dir.path().as_os_str().as_bytes()),
+		))
+		.unwrap();
+	let engine = Engine::new(EngineConfig::default());
+	let mut host = NativeHost::new(None, false, Vec::new(), SigSet::EMPTY, 0, false);
+	let (mut shell, report) = CoreShell::restore(
+		&engine,
+		&mut Cx { host: &mut host, store: &mut store },
+		RestoreOpts::default(),
+	)
+	.unwrap();
+	assert!(report.lost.is_empty(), "{report:?}");
+	assert!(report.abandoned.is_empty(), "{report:?}");
+	let mut parker = Parker::new();
+	let mut status = None;
+	for _ in 0..100_000 {
+		match shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget::default()) {
+			Step::Done { run: RunId(1), status: code } => {
+				status = Some(code);
+				break;
+			},
+			Step::Call { id, .. } => no_callouts(&mut shell, id),
+			Step::Blocked | Step::Paused => {
+				wait_runnable(
+					&mut parker,
+					&shell,
+					pi_shell::bash::Vpid(EngineConfig::default().vpid_base),
+				);
+			},
+			Step::Yield => parker.poll_exits(),
+			Step::Idle => panic!("legacy image became idle before completing its action"),
+			_ => {},
+		}
+	}
+	assert_eq!(status, Some(23), "legacy image did not finish with its action's exit status");
+	for signal in ["hup", "usr2", "term"] {
+		assert_eq!(std::fs::read(dir.path().join(signal)).unwrap(), b"saved", "{signal}");
+	}
+	assert_eq!(std::fs::read(dir.path().join("order")).unwrap(), b"hup\nusr2\nterm\n");
 }
 
 /// A reset-to-default stop parks the whole scan until CONT. The marker

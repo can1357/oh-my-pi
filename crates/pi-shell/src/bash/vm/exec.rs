@@ -1593,6 +1593,23 @@ pub fn pop_frame(root: &mut Root, store: &mut dyn StateStore, vp: &mut Vproc) {
 	if matches!(f.kind, FrameKind::Script { what: ScriptKind::Trap { .. }, .. }) {
 		vp.trap_frames = vp.trap_frames.saturating_sub(1);
 	}
+	if matches!(f.kind, FrameKind::Script {
+		what: ScriptKind::Trap { key: TrapKey::Signal(Signal::Chld), .. },
+		..
+	}) {
+		let q = vp.traps.get();
+		if q.chld_running
+			&& !q
+				.scans
+				.iter()
+				.any(|scan| scan.running == Some(Signal::Chld))
+		{
+			// A restored action has no owning scan, but its frame still
+			// excludes CHLD re-entry. Resume deferred work when it ends.
+			q.chld_running = false;
+			q.catch |= q.queued.contains(Signal::Chld);
+		}
+	}
 	if let Some(sc) = f.scratch.take() {
 		drop_scratch(root, store, vp, sc);
 	}
@@ -4518,8 +4535,8 @@ fn start_action(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, sig: Signal) ->
 				return false;
 			},
 		};
-		// Unstarted actions stay in the persisted job counter. Moving the
-		// whole batch into the transient scan would lose it on restore.
+		// Unstarted actions stay in the persisted job counter. A restore
+		// resumes them as deliveries, not as this captured batch.
 		vp.jobs.chld -= 1;
 		let started = match &action {
 			Some((action, mode)) => push_trap(k, vp, cx, key, action, *mode),
