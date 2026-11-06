@@ -69,6 +69,8 @@ rust_test(
     compile_data = glob([
         "src/bash/syntax/suites/data/**",
         "src/bash/pattern/zsh/testdata/**",
+        "src/bash/vm/zle/testdata/**",
+        "src/testkit/fixtures/**",
     ]),
     crate = ":pi-shell",
     data = glob(["src/testkit/fixtures/**"]),

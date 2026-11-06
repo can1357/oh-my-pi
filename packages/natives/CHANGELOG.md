@@ -26,6 +26,7 @@
 
 ### Fixed
 
+- Fixed `env -i` in the bash tool passing exported shell functions (`BASH_FUNC_name%%`) and non-environment shell variables to the command.
 - Fixed `$!` in command substitutions, subshells and pipeline stages to name the parent's last background job, as in Bash ([#18107](https://github.com/can1357/oh-my-pi/pull/18107) by [@sjawhar](https://github.com/sjawhar))
 - Fixed built-in local `rsync` output on a busy machine sometimes differing from rsync 3.5.1: `--delete`/info lines from subdirectories could print after the top-level names and the byte totals in `sent … received …`/`--stats` could be off by 4.
 - Fixed Windows `rsync` treating a one-letter daemon host like `h::module` as a drive path ([#18048](https://github.com/can1357/oh-my-pi/pull/18048) by [@jchanghong023](https://github.com/jchanghong023))
