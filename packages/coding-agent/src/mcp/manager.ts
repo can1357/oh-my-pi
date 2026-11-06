@@ -38,6 +38,8 @@ import {
 import {
 	lookupMcpOAuthCredential,
 	type MCPOAuthCredentialLookup,
+	mcpStoredLoginIdentity,
+	NO_STORED_LOGIN,
 	refreshStoredManagedMcpOAuthCredential,
 } from "./oauth-credentials";
 import type { MCPStoredOAuthCredential } from "./oauth-flow";
@@ -110,10 +112,14 @@ function createMcpStartupFailure(serverName: string, error: string, source?: Sou
  * sites does not.
  *
  * Currency matters to the readers that act on the live definition —
- * {@link MCPManager.explainMissingTool} and `#reconnectWithStoredLogin`, both
- * through `#liveFailure`. {@link MCPManager.waitForStartup} reads the record
- * directly: the barrier reports what happened to the attempt it waited on,
- * which a later edit does not change.
+ * {@link MCPManager.explainMissingTool} and `#reconnectWithStoredLogin`,
+ * both through `#liveFailure`, which filters by that binding and never
+ * writes. {@link MCPManager.waitForStartup} reads the record directly and
+ * reports the last failure recorded under the name, whichever config that
+ * attempt used and whether or not this call waited on it; a definition
+ * replaced since does not make that attempt's error any less what it was.
+ * A record leaves the map only when a connect succeeds or the server is
+ * torn down, so no reader can change what another reader will say.
  *
  * `config` is `undefined` for a name the manager holds no config for: a
  * config that fails validation is never stored, and neither is the
@@ -124,12 +130,49 @@ type McpStartupFailure = {
 	readonly error: string;
 	readonly config: MCPServerConfig | undefined;
 	/**
-	 * The attempt was refused for want of credentials while no OAuth login
-	 * for `config` was stored, so a login appearing later is worth one retry
-	 * (see `MCPManager.#reconnectWithStoredLogin`). A server that is merely
+	 * The server answered the attempt with an auth challenge, so a login
+	 * that differs from the one the attempt sent can fix it (see
+	 * `MCPManager.#reconnectWithStoredLogin`). A server that is merely
 	 * unreachable has no login to wait for.
 	 */
-	readonly awaitingLogin: boolean;
+	readonly authRefused: boolean;
+	/**
+	 * Which stored OAuth login the attempt sent, or
+	 * {@link NO_STORED_LOGIN} if it went out unauthenticated — the credential
+	 * that was actually on the wire, not whatever the store holds when the
+	 * failure is read. Recovery compares against it, so a login stored while
+	 * the attempt was in flight still counts as new, and a token the server
+	 * has already refused is not sent again.
+	 */
+	readonly login: string;
+};
+
+/**
+ * What one connect attempt was made of, handed to
+ * {@link MCPManager.#emitConnectionStatus} by the code that made it.
+ *
+ * Every field is captured when the attempt starts. Reading any of it back
+ * when the failure lands would describe the world at that later moment
+ * instead of the attempt: a writer that arrived in between owns the config,
+ * and a login another process stored in between is exactly the login the
+ * attempt did not have.
+ */
+type McpConnectAttempt = {
+	/** The definition the attempt used, or the one validation rejected. */
+	readonly config: MCPServerConfig | undefined;
+	/**
+	 * The error that ended the attempt, when the caller has the object and
+	 * not only its message. It decides whether the server refused
+	 * credentials; a `failed` event raised without one refused nothing.
+	 */
+	readonly cause?: unknown;
+	/** {@link McpStartupFailure.login} for this attempt. */
+	readonly login: string;
+	/**
+	 * No connect happened: `config` failed validation and was never stored,
+	 * so it is a rejected edit rather than an attempt that went wrong.
+	 */
+	readonly rejected?: boolean;
 };
 
 /**
@@ -481,21 +524,12 @@ export class MCPManager implements MCPManagerApi {
 	}
 
 	/**
-	 * @param cause - The error that ended the attempt, when the caller has
-	 *   the object and not only its message. It decides whether the failure
-	 *   was the server refusing credentials; a `failed` event raised without
-	 *   one (a config that failed validation, the crash-storm breaker)
-	 *   refused nothing.
-	 * @param attemptConfig - The definition the attempt actually used. A
-	 *   writer can land between an attempt starting and its failure landing
-	 *   (`updateServerConfig` from `/mcp reauth`, an incremental
-	 *   `connectServers` from `/mcp enable` or a project-config reload), and
-	 *   reading `#serverConfigs` here would hand the old attempt's error to
-	 *   whatever replaced it. Omitted where no attempt was made — a config
-	 *   that failed validation, `.mcp.json` itself, the crash-storm breaker
-	 *   — and the stored definition (often none) stands in.
+	 * @param attempt - What the attempt was, captured when it started (see
+	 *   {@link McpConnectAttempt}). Omitted where no attempt was made and
+	 *   nothing was rejected either — `.mcp.json` itself, the crash-storm
+	 *   breaker — and the stored definition (often none) stands in.
 	 */
-	#emitConnectionStatus(event: McpConnectionStatusEvent, cause?: unknown, attemptConfig?: MCPServerConfig): void {
+	#emitConnectionStatus(event: McpConnectionStatusEvent, attempt?: McpConnectAttempt): void {
 		// Every server this manager holds a config for, not only the startup
 		// barrier's members: a `lazy` server is dropped from `#startupServers`
 		// on purpose — dormant is not a failure — but once something asks it to
@@ -507,23 +541,37 @@ export class MCPManager implements MCPManagerApi {
 			event.type === "failed" &&
 			(this.#startupServers.has(event.serverName) || this.#serverConfigs.has(event.serverName))
 		) {
-			const config = attemptConfig ?? this.#serverConfigs.get(event.serverName);
-			this.#startupFailures.set(event.serverName, {
-				error: event.error,
-				config,
-				// `AIError.Flag.AuthFailed` is the codebase's recogniser for a
-				// server refusing credentials (`analyzeAuthError` gates OAuth
-				// discovery on it): an HTTP 401/403 and the auth-failure
-				// wordings it knows count, `ECONNREFUSED` does not. Only then
-				// is a login worth waiting for — promising one for a host that
-				// is simply down points the user at `/mcp reauth` for a network
-				// outage.
-				awaitingLogin:
-					(config?.type === "http" || config?.type === "sse") &&
-					cause !== undefined &&
-					AIError.is(AIError.classify(cause), AIError.Flag.AuthFailed) &&
-					!lookupMcpOAuthCredential(this.#authStorage, config),
-			});
+			const stored = this.#serverConfigs.get(event.serverName);
+			// A rejected edit is not an attempt. The definition the manager
+			// still holds is untouched by it, and so is whatever that
+			// definition's own last attempt recorded — an HTTP 401 and the
+			// login recovery that goes with it. Overwriting that with the
+			// replacement's validation error would report an endpoint nobody
+			// configured and strip the live one's recovery. A name with no
+			// stored config is the case the record is for: nothing else
+			// speaks for it. Either way the listeners below see the event.
+			if (!attempt?.rejected || stored === undefined) {
+				const config = attempt?.rejected ? stored : (attempt?.config ?? stored);
+				this.#startupFailures.set(event.serverName, {
+					error: event.error,
+					config,
+					// `AIError.Flag.AuthFailed` is the codebase's recogniser for
+					// a server refusing credentials (`analyzeAuthError` gates
+					// OAuth discovery on it): an HTTP 401/403 and the
+					// auth-failure wordings it knows count, `ECONNREFUSED` does
+					// not. Whether a login is worth waiting for is decided here
+					// and only here: what the store happens to hold at this
+					// moment is neither the credential the attempt sent nor a
+					// statement that it is good, so it cannot disarm the
+					// recovery — `#reconnectWithStoredLogin` compares against
+					// `login` instead.
+					authRefused:
+						(config?.type === "http" || config?.type === "sse") &&
+						attempt?.cause !== undefined &&
+						AIError.is(AIError.classify(attempt.cause), AIError.Flag.AuthFailed),
+					login: attempt?.login ?? NO_STORED_LOGIN,
+				});
+			}
 		} else if (event.type === "connected") {
 			this.#startupFailures.delete(event.serverName);
 		}
@@ -929,9 +977,9 @@ export class MCPManager implements MCPManagerApi {
 		onStatus?: (event: McpConnectionStatusEvent) => void,
 		startupTimeoutMs?: number,
 	): Promise<MCPLoadResult> {
-		const notify = (event: McpConnectionStatusEvent, cause?: unknown, attemptConfig?: MCPServerConfig) => {
+		const notify = (event: McpConnectionStatusEvent, attempt?: McpConnectAttempt) => {
 			onStatus?.(event);
-			this.#emitConnectionStatus(event, cause, attemptConfig);
+			this.#emitConnectionStatus(event, attempt);
 		};
 		type ConnectionTask = {
 			name: string;
@@ -946,7 +994,7 @@ export class MCPManager implements MCPManagerApi {
 		const reportedErrors = new Set<string>();
 		let allowBackgroundLogging = false;
 		const statusServerNames: string[] = [];
-		const validationFailures: Array<{ name: string; message: string }> = [];
+		const validationFailures: Array<{ name: string; message: string; rejected: MCPServerConfig }> = [];
 
 		// Prepare connection tasks
 		const connectionTasks: ConnectionTask[] = [];
@@ -988,7 +1036,7 @@ export class MCPManager implements MCPManagerApi {
 				if (validationErrors.length > 0) {
 					const message = validationErrors.join("; ");
 					errors.set(name, message);
-					validationFailures.push({ name, message });
+					validationFailures.push({ name, message, rejected: config });
 					reportedErrors.add(name);
 					continue;
 				}
@@ -1010,7 +1058,7 @@ export class MCPManager implements MCPManagerApi {
 			if (validationErrors.length > 0) {
 				const message = validationErrors.join("; ");
 				errors.set(name, message);
-				validationFailures.push({ name, message });
+				validationFailures.push({ name, message, rejected: config });
 				reportedErrors.add(name);
 				continue;
 			}
@@ -1024,9 +1072,14 @@ export class MCPManager implements MCPManagerApi {
 			const connectSignal = this.#connectAbort.signal;
 
 			// Resolve auth config before connecting, but do so per-server in parallel.
+			// `attemptLogin` is what this connect put on the wire; the failure
+			// handler below records it, and it stays `NO_STORED_LOGIN` if the
+			// resolution itself threw, because nothing was sent then either.
+			let attemptLogin = NO_STORED_LOGIN;
 			const connectionPromise = (async () => {
-				const resolvedConfig = await this.#resolveAuthConfig(config, { signal: connectSignal });
-				return connectToServer(name, resolvedConfig, {
+				const resolved = await this.#resolveAuthConfig(config, { signal: connectSignal });
+				attemptLogin = resolved.login;
+				return connectToServer(name, resolved.config, {
 					signal: connectSignal,
 					onNotification: (method, params) => {
 						this.#handleServerNotification(name, method, params);
@@ -1063,7 +1116,10 @@ export class MCPManager implements MCPManagerApi {
 						lookupMcpOAuthCredential(this.#authStorage, config)
 					) {
 						connection.transport.onAuthError = async () => {
-							const refreshed = await this.#resolveAuthConfig(config, { forceRefresh: true });
+							const { config: refreshed, login } = await this.#resolveAuthConfig(config, {
+								forceRefresh: true,
+							});
+							attemptLogin = login;
 							if (refreshed.type === "http" || refreshed.type === "sse") {
 								return refreshed.headers ?? null;
 							}
@@ -1130,7 +1186,11 @@ export class MCPManager implements MCPManagerApi {
 						return;
 					this.#pendingToolLoads.delete(name);
 					const message = error instanceof Error ? error.message : String(error);
-					notify(createMcpStartupFailure(name, message, sources[name]), error, config);
+					notify(createMcpStartupFailure(name, message, sources[name]), {
+						config,
+						cause: error,
+						login: attemptLogin,
+					});
 					if (allowBackgroundLogging && !reportedErrors.has(name)) {
 						logger.error("MCP tool load failed", { path: `mcp:${name}`, error: message });
 					}
@@ -1158,8 +1218,12 @@ export class MCPManager implements MCPManagerApi {
 		if (statusServerNames.length > 0) {
 			notify({ type: "connecting", serverNames: statusServerNames });
 		}
-		for (const { name, message } of validationFailures) {
-			notify(createMcpStartupFailure(name, message, sources[name]));
+		for (const { name, message, rejected } of validationFailures) {
+			notify(createMcpStartupFailure(name, message, sources[name]), {
+				config: rejected,
+				login: NO_STORED_LOGIN,
+				rejected: true,
+			});
 		}
 
 		// Register lazy servers' cached tools as deferred: `waitForConnection`
@@ -1452,12 +1516,16 @@ export class MCPManager implements MCPManagerApi {
 			} else {
 				status.failed.push({
 					name,
-					// The last attempt's error, whether or not its definition is
-					// still the current one: the barrier reports what happened to
-					// the server it waited on, and a definition replaced since
-					// does not make that attempt's error any less what it was.
+					// The last failure recorded under this name, whichever
+					// definition that attempt used and whether or not this call
+					// waited on it: a definition replaced since does not make
+					// that attempt's error any less what it was. Only a
+					// successful connect or a teardown retires a record — no
+					// reader does — so this string does not depend on whether
+					// `explainMissingTool` was called first.
 					// `explainMissingTool` is the reader that needs currency,
-					// because it recommends action on the live config.
+					// because it recommends action on the live config, and it
+					// filters on the binding without writing.
 					error: this.#startupFailures.get(name)?.error ?? "Connection closed before tools became available",
 				});
 			}
@@ -1513,8 +1581,6 @@ export class MCPManager implements MCPManagerApi {
 		const unmounted: McpConnectionFailure[] = [];
 		const servingCachedTools: McpConnectionFailure[] = [];
 		const awaitingLogin: string[] = [];
-		// #liveFailure may drop the entry it is asked about; deleting the key
-		// the iterator is standing on leaves the rest of the walk intact.
 		for (const serverName of this.#startupFailures.keys()) {
 			const failure = this.#liveFailure(serverName);
 			if (!failure) continue;
@@ -1526,7 +1592,7 @@ export class MCPManager implements MCPManagerApi {
 			};
 			if (this.#tools.some(tool => tool.mcpServerName === serverName)) servingCachedTools.push(reported);
 			else unmounted.push(reported);
-			if (!failure.awaitingLogin) continue;
+			if (!failure.authRefused) continue;
 			awaitingLogin.push(serverName);
 			void this.#reconnectWithStoredLogin(serverName);
 		}
@@ -1538,24 +1604,40 @@ export class MCPManager implements MCPManagerApi {
 	/**
 	 * The failure recorded for `name` while it still describes the config the
 	 * manager holds for it, else `undefined`. A record left behind by a
-	 * config that has since been replaced is dropped here rather than read:
-	 * reporting it would name an endpoint nobody configured any more, and
-	 * acting on its login check would connect a server nothing has asked for.
+	 * config that has since been replaced is filtered out rather than acted
+	 * on: reporting it would name an endpoint nobody configured any more,
+	 * and acting on its login check would connect a server nothing has asked
+	 * for.
+	 *
+	 * A pure read. It used to delete the stale record it found, which made
+	 * {@link MCPManager.waitForStartup} report the specific error or the
+	 * generic one depending on whether a missing-tool lookup had run first,
+	 * for identical manager state. Records are retired by a successful
+	 * connect, `disconnectServer` and `disconnectAll` — the lifecycle, not a
+	 * reader.
 	 */
 	#liveFailure(name: string): McpStartupFailure | undefined {
 		const failure = this.#startupFailures.get(name);
 		if (!failure) return undefined;
-		if (failure.config === this.#serverConfigs.get(name)) return failure;
-		this.#startupFailures.delete(name);
-		return undefined;
+		return failure.config === this.#serverConfigs.get(name) ? failure : undefined;
 	}
 
 	/**
-	 * Reconnect `name`, which failed while no OAuth login for it was stored,
-	 * if one is stored now. The login usually comes from another process
-	 * sharing this `agent.db` (`/mcp reauth` in another session), which this
-	 * process's in-memory credential pool has not seen yet, so the pool polls
-	 * the store first.
+	 * Reconnect `name`, whose last attempt a server refused with an auth
+	 * challenge, if the store now holds a different login than that attempt
+	 * sent. The new one usually comes from another process sharing this
+	 * `agent.db` (`/mcp reauth` in another session), which this process's
+	 * in-memory credential pool has not seen yet, so the pool polls the
+	 * store first.
+	 *
+	 * The comparison is against the credential the attempt used, not against
+	 * whether any credential exists. Mere existence answers the wrong
+	 * question twice over: a login stored while the request was in flight is
+	 * present but was never sent, and a rotated or revoked token is present
+	 * but is exactly what the server refused. It is also what keeps this
+	 * from becoming a reconnect storm — an unchanged credential means the
+	 * only login available is the refused one, so the poll happens and the
+	 * handshake does not.
 	 */
 	async #reconnectWithStoredLogin(name: string): Promise<void> {
 		if (this.#loginChecks.has(name)) return;
@@ -1563,10 +1645,11 @@ export class MCPManager implements MCPManagerApi {
 		try {
 			await this.#authStorage?.credentials.poll();
 			const config = this.#serverConfigs.get(name);
-			if (!config || !this.#liveFailure(name)?.awaitingLogin || this.getConnectionStatus(name) !== "disconnected")
-				return;
-			if (!lookupMcpOAuthCredential(this.#authStorage, config)) return;
-			logger.debug("MCP login stored since the server failed; reconnecting", { path: `mcp:${name}` });
+			const failure = this.#liveFailure(name);
+			if (!config || !failure?.authRefused || this.getConnectionStatus(name) !== "disconnected") return;
+			const stored = mcpStoredLoginIdentity(lookupMcpOAuthCredential(this.#authStorage, config));
+			if (stored === failure.login) return;
+			logger.debug("MCP login changed since the server failed; reconnecting", { path: `mcp:${name}` });
 			await this.reconnectServer(name);
 		} catch (error) {
 			logger.debug("MCP reconnect with a stored login failed", { path: `mcp:${name}`, error: String(error) });
@@ -1666,7 +1749,7 @@ export class MCPManager implements MCPManagerApi {
 	 * unauthenticated probe, which must observe the server's bare 401).
 	 */
 	async prepareConfig(config: MCPServerConfig, options?: { oauth?: boolean }): Promise<MCPServerConfig> {
-		return this.#resolveAuthConfig(config, options);
+		return (await this.#resolveAuthConfig(config, options)).config;
 	}
 
 	/**
@@ -1971,6 +2054,9 @@ export class MCPManager implements MCPManagerApi {
 		// Retry with backoff — the server may still be starting up. A scheduled
 		// attempt is a single quiet probe; its pacing is the schedule itself.
 		const delays = scheduled ? [] : this.reconnectPolicy.ladderMs;
+		// Filled by each handshake with the login it sent, so a failure records
+		// that credential rather than whatever the store holds afterwards.
+		const sent = { login: NO_STORED_LOGIN };
 		for (let attempt = 0; attempt <= delays.length; attempt++) {
 			if (this.#epoch !== reconnectEpoch || this.#serverConfigs.get(name) !== config) {
 				logger.debug("MCP reconnect aborted before attempt after configuration changed", {
@@ -1981,7 +2067,7 @@ export class MCPManager implements MCPManagerApi {
 				return null;
 			}
 			try {
-				const connection = await this.#connectAndWireServer(name, config, source, reconnectEpoch);
+				const connection = await this.#connectAndWireServer(name, config, source, reconnectEpoch, sent);
 				logger.debug("MCP reconnected", { path: `mcp:${name}`, tools: connection.tools?.length ?? 0 });
 				this.#emitConnectionStatus({ type: "connected", serverName: name });
 				return connection;
@@ -2007,7 +2093,10 @@ export class MCPManager implements MCPManagerApi {
 					logger.debug("MCP scheduled reconnect attempt failed", { path: `mcp:${name}`, error: msg });
 				} else {
 					logger.error("MCP reconnect failed after retries", { path: `mcp:${name}`, error: msg });
-					this.#emitConnectionStatus({ type: "failed", serverName: name, error: msg }, error, config);
+					this.#emitConnectionStatus(
+						{ type: "failed", serverName: name, error: msg },
+						{ config, cause: error, login: sent.login },
+					);
 					// Don't remove stale tools — keep them in the registry so they
 					// remain selected. Calls will fail with MCP errors, which
 					// triggers the tool-level reconnect, or the user can run
@@ -2019,17 +2108,24 @@ export class MCPManager implements MCPManagerApi {
 		return null;
 	}
 
-	/** Establish a new connection to a server, wire handlers, load tools. */
+	/**
+	 * Establish a new connection to a server, wire handlers, load tools.
+	 *
+	 * @param attempt - Filled with the login this handshake sends, so the
+	 *   caller can record it when the handshake throws.
+	 */
 	async #connectAndWireServer(
 		name: string,
 		config: MCPServerConfig,
 		source: SourceMeta | undefined,
 		reconnectEpoch: number,
+		attempt?: { login: string },
 	): Promise<MCPServerConnection> {
 		// Capture before resolving credentials: a disconnectAll during that wait must abort this handshake too.
 		const connectSignal = this.#connectAbort.signal;
-		const resolvedConfig = await this.#resolveAuthConfig(config, { signal: connectSignal });
-		const connection = await connectToServer(name, resolvedConfig, {
+		const resolved = await this.#resolveAuthConfig(config, { signal: connectSignal });
+		if (attempt) attempt.login = resolved.login;
+		const connection = await connectToServer(name, resolved.config, {
 			signal: connectSignal,
 			onNotification: (method, params) => {
 				this.#handleServerNotification(name, method, params);
@@ -2056,7 +2152,8 @@ export class MCPManager implements MCPManagerApi {
 		// Same gate as connectServers: any resolvable managed credential.
 		if (isAuthRefreshableMCPTransport(connection.transport) && lookupMcpOAuthCredential(this.#authStorage, config)) {
 			connection.transport.onAuthError = async () => {
-				const refreshed = await this.#resolveAuthConfig(config, { forceRefresh: true });
+				const { config: refreshed, login } = await this.#resolveAuthConfig(config, { forceRefresh: true });
+				if (attempt) attempt.login = login;
 				if (refreshed.type === "http" || refreshed.type === "sse") {
 					return refreshed.headers ?? null;
 				}
@@ -2382,13 +2479,19 @@ export class MCPManager implements MCPManagerApi {
 	 * Resolve OAuth credentials and shell commands in config.
 	 * `oauth: false` skips credential injection (reauth's unauthenticated probe);
 	 * `forceRefresh` bypasses the expiry buffer (401/403 auth-error hook).
+	 *
+	 * Returns the login that went into the config with it: this is the one
+	 * place that knows which stored credential a connect will actually send,
+	 * refresh included, and a failure records it (see
+	 * {@link McpStartupFailure.login}).
 	 */
 	async #resolveAuthConfig(
 		config: MCPServerConfig,
 		opts?: { forceRefresh?: boolean; oauth?: boolean; signal?: AbortSignal },
-	): Promise<MCPServerConfig> {
+	): Promise<{ config: MCPServerConfig; login: string }> {
 		const signal = opts?.signal;
 		let resolved: MCPServerConfig = { ...config };
+		let login = NO_STORED_LOGIN;
 
 		const auth = config.auth;
 		const lookup: MCPOAuthCredentialLookup | undefined =
@@ -2417,6 +2520,8 @@ export class MCPManager implements MCPManagerApi {
 					logger.warn("MCP OAuth refresh failed definitively; cleared credential", { credentialId });
 				}
 				credential = refreshResult.credential;
+				// After the refresh, so a rotated token is the one recorded.
+				login = mcpStoredLoginIdentity(credential ? { credentialId, credential } : undefined);
 
 				if (credential) {
 					if (resolved.type === "http" || resolved.type === "sse") {
@@ -2476,7 +2581,7 @@ export class MCPManager implements MCPManagerApi {
 			}
 		}
 
-		return resolved;
+		return { config: resolved, login };
 	}
 }
 

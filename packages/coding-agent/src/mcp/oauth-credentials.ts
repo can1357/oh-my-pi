@@ -19,6 +19,32 @@ export interface MCPOAuthCredentialLookup {
 	credential: MCPStoredOAuthCredential;
 }
 
+/** {@link mcpStoredLoginIdentity} for an attempt that sent no stored OAuth login. */
+export const NO_STORED_LOGIN = "none";
+
+/**
+ * Which stored OAuth login a value is — stable for the same token, different
+ * for a rotated one, and never the token itself.
+ *
+ * A connect attempt records this for the credential it actually sent, and a
+ * later recovery check compares it against the store's current one: equal
+ * means the only login available is the one the server already refused, so
+ * reconnecting would repeat the same 401.
+ *
+ * The credential id alone cannot say that — a rotated token keeps its row,
+ * so `/mcp reauth` in another session would look like no change at all.
+ * Neither can `expires`: a revoked token keeps the expiry it was issued
+ * with, and a reissued one can land on the same second. The row id and
+ * SQLite's `updated_at` are `SqliteAuthCredentialStore` internals that
+ * {@link AuthStorage}'s credential pool does not surface, which leaves the
+ * token material, so this is a SHA-256 digest of the access token, scoped by
+ * the credential id it was read from.
+ */
+export function mcpStoredLoginIdentity(lookup: MCPOAuthCredentialLookup | undefined): string {
+	if (!lookup) return NO_STORED_LOGIN;
+	return `${lookup.credentialId}#${new Bun.CryptoHasher("sha256").update(lookup.credential.access).digest("hex")}`;
+}
+
 export type MCPOAuthRefreshMaterial = MCPStoredOAuthCredential | MCPAuthConfig | undefined;
 
 export function mcpOAuthCredentialIdsForServerUrl(serverUrl: string | undefined): string[] {

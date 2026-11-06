@@ -18,11 +18,16 @@
  *   described as having none: it is not why the asked-for tool is missing;
  * - a failure belongs to the config that produced it, so replacing a
  *   server's config retires both its error text and its pending login check;
- * - a remote server that failed while no login was stored is reconnected, with
- *   no restart, once another session stores a login and the model asks for
- *   one of its tools again; without a stored login nothing is retried, and a
- *   server that failed for any reason other than an auth challenge is never
- *   promised a login check at all.
+ * - a remote server whose connect was answered with an auth challenge is
+ *   reconnected, with no restart, once the store holds a login other than the
+ *   one that attempt sent — whether it sent none or a token since rotated —
+ *   and is left alone, polls aside, while that login is unchanged; a server
+ *   that failed for any other reason is never promised a login check;
+ * - a rejected config edit changes neither the definition the manager holds
+ *   nor what its own last attempt recorded;
+ * - reading the report does not change what the startup barrier reports;
+ * - a server's name reaches the report whole, because the report tells the
+ *   model to type it into `/mcp reconnect <server>`.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
@@ -107,15 +112,23 @@ interface LoginRequiredServer {
 	stop(): void;
 }
 
-/** Streamable HTTP MCP server that answers 401 to any request without the stored token. */
-function startLoginRequiredServer(): LoginRequiredServer {
+/**
+ * Streamable HTTP MCP server that answers 401 to any request without the
+ * stored token. `onRefusedPost` runs before the 401 is written, so a test
+ * can hold an unauthenticated request on the wire while the credential
+ * store changes under it.
+ */
+function startLoginRequiredServer(options: { onRefusedPost?: () => Promise<void> | void } = {}): LoginRequiredServer {
 	const state = { authorizedPosts: 0, refusedPosts: 0 };
 	const server = Bun.serve({
 		port: 0,
 		hostname: "127.0.0.1",
 		async fetch(request) {
 			if (request.headers.get("authorization") !== `Bearer ${GOOD_TOKEN}`) {
-				if (request.method === "POST") state.refusedPosts += 1;
+				if (request.method === "POST") {
+					state.refusedPosts += 1;
+					await options.onRefusedPost?.();
+				}
 				return Response.json(
 					{ jsonrpc: "2.0", id: null, error: { code: -32001, message: "missing_token" } },
 					{
@@ -729,6 +742,245 @@ describe("MCP server that is not connected", () => {
 			expect(after.failed[0]?.error).not.toContain("Connection closed before tools became available");
 		} finally {
 			await barrier.disconnectAll();
+			await removeWithRetries(workDir);
+		}
+	}, 30_000);
+
+	/**
+	 * R3-a. The login a failed attempt did not have can arrive while that
+	 * attempt is still on the wire: another process writes the row and any
+	 * ordinary credential poll in this one adopts it. Deciding at emit time
+	 * that a login is already stored — and therefore that none is awaited —
+	 * disarms the only recovery a lazy server has, for a 401 that went out
+	 * unauthenticated. The record has to describe the attempt: it sent no
+	 * login, so a login in the store is new to it.
+	 */
+	it("recovers a server whose login was stored while its unauthenticated attempt was in flight", async () => {
+		const onWire = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let held = false;
+		const inflight = startLoginRequiredServer({
+			onRefusedPost: async () => {
+				if (held) return;
+				held = true;
+				onWire.resolve();
+				await release.promise;
+			},
+		});
+		const racing = new MCPManager(tempDir, null, undefined, SINGLE_ATTEMPT);
+		racing.setAuthStorage(session);
+		try {
+			const connecting = racing.connectServers({ remote: { type: "http", url: inflight.url, timeout: 10_000 } }, {});
+			// The initialize is at the server, sent without Authorization.
+			await onWire.promise;
+			// Another omp process signs the server in, and this process's pool
+			// adopts the row — what any other missing-tool lookup's poll does.
+			await otherSession.credentials.set(mcpOAuthCredentialId(inflight.url), {
+				type: "oauth",
+				access: GOOD_TOKEN,
+				refresh: "unused-refresh",
+				expires: Date.now() + 3_600_000,
+			});
+			await session.credentials.poll();
+			release.resolve();
+			await connecting;
+			await racing.waitForStartup(GUARD_MS);
+			expect(racing.getConnectionStatus("remote")).toBe("disconnected");
+			expect(inflight.state.authorizedPosts).toBe(0);
+
+			const note = racing.explainMissingTool("mcp__remote_ping");
+			expect(note).toContain("omp is checking now whether a login was stored for remote");
+			await Promise.race([connectionEstablished(racing, "remote"), Bun.sleep(5_000)]);
+			expect(racing.getConnectionStatus("remote")).toBe("connected");
+			expect(inflight.state.authorizedPosts).toBeGreaterThan(0);
+		} finally {
+			release.resolve();
+			await racing.disconnectAll();
+			inflight.stop();
+			await otherSession.credentials.remove(mcpOAuthCredentialId(inflight.url));
+			await session.credentials.poll();
+		}
+	}, 30_000);
+
+	/**
+	 * R3-b. The same defect in its other spelling: a credential is present
+	 * and is exactly what the server refused. A rotated or revoked token
+	 * made the note promise no login check and `/mcp reconnect` unable to
+	 * succeed, while a credential poll plus the same reconnect did — which
+	 * is #18014's own user story, told about a token instead of about none.
+	 */
+	it("reconnects with a login that replaced the token the server refused", async () => {
+		const rotating = startLoginRequiredServer();
+		const stale = new MCPManager(tempDir, null, undefined, SINGLE_ATTEMPT);
+		stale.setAuthStorage(session);
+		try {
+			await otherSession.credentials.set(mcpOAuthCredentialId(rotating.url), {
+				type: "oauth",
+				access: "rotated-away",
+				refresh: "unused-refresh",
+				expires: Date.now() + 3_600_000,
+			});
+			await session.credentials.poll();
+			await stale.connectServers({ remote: { type: "http", url: rotating.url, timeout: 2_000 } }, {});
+			await stale.waitForStartup(GUARD_MS);
+			expect(stale.getConnectionStatus("remote")).toBe("disconnected");
+			expect(rotating.state.authorizedPosts).toBe(0);
+
+			const note = stale.explainMissingTool("mcp__remote_ping");
+			expect(note).toContain("omp is checking now whether a login was stored for remote");
+			// The only login in the store is still the refused one.
+			await session.credentials.poll();
+			expect(stale.getConnectionStatus("remote")).toBe("disconnected");
+
+			await otherSession.credentials.set(mcpOAuthCredentialId(rotating.url), {
+				type: "oauth",
+				access: GOOD_TOKEN,
+				refresh: "unused-refresh",
+				expires: Date.now() + 3_600_000,
+			});
+			stale.explainMissingTool("mcp__remote_ping");
+			await Promise.race([connectionEstablished(stale, "remote"), Bun.sleep(5_000)]);
+			expect(stale.getConnectionStatus("remote")).toBe("connected");
+			expect(rotating.state.authorizedPosts).toBeGreaterThan(0);
+		} finally {
+			await stale.disconnectAll();
+			rotating.stop();
+			await otherSession.credentials.remove(mcpOAuthCredentialId(rotating.url));
+			await session.credentials.poll();
+		}
+	}, 30_000);
+
+	/**
+	 * R3-c. Arming the check on the auth challenge alone would be a
+	 * reconnect storm if the check then acted on a credential's mere
+	 * presence: every miss would re-handshake a server whose stored token
+	 * the server has already refused. Comparing against the credential the
+	 * attempt sent is what bounds it — the store is polled on every miss,
+	 * the network is not touched again.
+	 */
+	it("polls on every miss without re-handshaking while the stored login is unchanged", async () => {
+		const refusing = startLoginRequiredServer();
+		const quiet = new MCPManager(tempDir, null, undefined, SINGLE_ATTEMPT);
+		quiet.setAuthStorage(session);
+		try {
+			await otherSession.credentials.set(mcpOAuthCredentialId(refusing.url), {
+				type: "oauth",
+				access: "rotated-away",
+				refresh: "unused-refresh",
+				expires: Date.now() + 3_600_000,
+			});
+			await session.credentials.poll();
+			await quiet.connectServers({ remote: { type: "http", url: refusing.url, timeout: 2_000 } }, {});
+			await quiet.waitForStartup(GUARD_MS);
+			const afterConnect = refusing.state.refusedPosts;
+			expect(afterConnect).toBeGreaterThan(0);
+
+			for (let miss = 0; miss < 20; miss++) {
+				expect(quiet.explainMissingTool("mcp__remote_ping")).toContain("omp is checking now");
+				// Each check is one pool poll and a comparison; it was queued
+				// first, so it has settled once this poll of the same pool has.
+				await session.credentials.poll();
+			}
+			expect(refusing.state.refusedPosts).toBe(afterConnect);
+			expect(refusing.state.authorizedPosts).toBe(0);
+			expect(quiet.getConnectionStatus("remote")).toBe("disconnected");
+		} finally {
+			await quiet.disconnectAll();
+			refusing.stop();
+			await otherSession.credentials.remove(mcpOAuthCredentialId(refusing.url));
+			await session.credentials.poll();
+		}
+	}, 30_000);
+
+	/**
+	 * R3-d. The barrier's string must not depend on who read the record
+	 * first. `#liveFailure` used to delete the stale record it was asked
+	 * about, so headless `omp -p` printed the server's own error or the
+	 * generic fallback according to whether the model had asked for a
+	 * missing MCP tool in between — identical manager and server state,
+	 * different answer.
+	 */
+	it("reports the same barrier error whether or not a missing-tool lookup ran first", async () => {
+		const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-drift-"));
+		const drift = new MCPManager(workDir, null, undefined, SINGLE_ATTEMPT);
+		try {
+			const config: MCPStdioServerConfig = {
+				type: "stdio",
+				command: process.execPath,
+				args: ["-e", "process.exit(3)"],
+				timeout: 2_000,
+			};
+			await drift.connectServers({ swapped: config }, {});
+			const before = await drift.waitForStartup(GUARD_MS);
+			expect(before.failed[0]?.error).toContain("MCP subprocess closed stdout before responding");
+
+			// A replacement nobody has tried: the record is stale for the
+			// reader that acts on the live config, and that reader says so
+			// without changing what the barrier will say.
+			drift.updateServerConfig("swapped", { ...config });
+			expect(drift.explainMissingTool("mcp__swapped_ping")).toBeUndefined();
+
+			const after = await drift.waitForStartup(GUARD_MS);
+			expect(after.failed[0]?.error).toBe(before.failed[0]?.error);
+		} finally {
+			await drift.disconnectAll();
+			await removeWithRetries(workDir);
+		}
+	}, 30_000);
+
+	/**
+	 * R3-e. A config that fails validation is never stored, so the server
+	 * the manager holds is the one that was there before — and so is its
+	 * last attempt. Binding the rejection's error to the live definition
+	 * replaced a real HTTP 401 with `requires "url" field` and, because a
+	 * validation failure refuses nothing, took the login recovery with it.
+	 */
+	it("keeps a live endpoint's failure and recovery when an invalid edit is rejected", async () => {
+		const live = manager.getServerConfig("remote");
+		await manager.connectServers({ remote: { type: "http", url: "" } }, {});
+		expect(manager.getServerConfig("remote")).toBe(live);
+
+		const note = manager.explainMissingTool("mcp__remote_ping");
+		expect(note).toContain("401");
+		expect(note).not.toContain('requires "url" field');
+		expect(note).toContain("omp is checking now whether a login was stored for remote");
+
+		// And the recovery the rejected edit used to strip still runs.
+		await storeLoginInOtherSession();
+		manager.explainMissingTool("mcp__remote_ping");
+		await toolRegistered(manager, "mcp__remote_ping");
+		expect(manager.getConnectionStatus("remote")).toBe("connected");
+	}, 30_000);
+
+	/**
+	 * R3-f. The note's last sentence tells the model to run
+	 * `/mcp reconnect <server>`. A name cut at 40 columns is not a name any
+	 * command accepts, and two servers whose names share that prefix render
+	 * as one string, so the note cannot even say which of them it means.
+	 */
+	it("renders long server names whole, as the reconnect command needs them", async () => {
+		const alpha = "github-enterprise-internal-tools-server-alpha";
+		const beta = "github-enterprise-internal-tools-server-beta";
+		expect(alpha.length).toBeGreaterThan(40);
+		expect(beta.length).toBeGreaterThan(40);
+		const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-names-"));
+		const named = new MCPManager(workDir, null, undefined, SINGLE_ATTEMPT);
+		try {
+			const config: MCPStdioServerConfig = {
+				type: "stdio",
+				command: process.execPath,
+				args: ["-e", "process.exit(3)"],
+				timeout: 2_000,
+			};
+			await named.connectServers({ [alpha]: config, [beta]: { ...config } }, {});
+			await named.waitForStartup(GUARD_MS);
+
+			const note = named.explainMissingTool(`mcp__${alpha}_ping`);
+			expect(note).toContain(alpha);
+			expect(note).toContain(beta);
+			expect(note).not.toContain("github-enterprise-internal-tools-server…");
+		} finally {
+			await named.disconnectAll();
 			await removeWithRetries(workDir);
 		}
 	}, 30_000);

@@ -29,21 +29,36 @@ export type McpConnectionStatusSnapshot = {
 	failedServers: readonly McpConnectionFailure[];
 };
 
-function sanitizeMcpStatusText(value: string, maxWidth: number): string {
+function sanitizeMcpStatusText(value: string, maxWidth?: number): string {
 	const text = shortenEmbeddedPaths(
 		replaceTabs(sanitizeText(value))
 			.replace(/[\r\n]+/g, " ")
 			.trim(),
 	);
-	return truncateToWidth(text.length > 0 ? text : "(unnamed)", maxWidth);
+	const safe = text.length > 0 ? text : "(unnamed)";
+	return maxWidth === undefined ? safe : truncateToWidth(safe, maxWidth);
 }
 
-function sanitizeMcpServerName(serverName: string): string {
-	return sanitizeMcpStatusText(serverName, TRUNCATE_LENGTHS.SHORT);
+/**
+ * A server name for display.
+ *
+ * `whole` keeps the name at full length. The status line is one terminal
+ * line and nobody retypes a name from it, so there it stays capped at
+ * {@link TRUNCATE_LENGTHS.SHORT}; the unavailable-servers note is the other
+ * case, because its next sentence tells the model to run
+ * `/mcp reconnect <server>`. A name cut at 40 columns makes that command
+ * wrong, and two longer names that share a prefix render as the same
+ * string, so the note cannot even say which server it means. Server names
+ * come from config files and have no length limit; the control characters,
+ * tabs, newlines and home paths that would break a terminal are still
+ * removed above, and only the length cap is lifted.
+ */
+function sanitizeMcpServerName(serverName: string, whole = false): string {
+	return sanitizeMcpStatusText(serverName, whole ? undefined : TRUNCATE_LENGTHS.SHORT);
 }
 
-function formatServerList(serverNames: readonly string[]): string {
-	return serverNames.map(sanitizeMcpServerName).join(", ");
+function formatServerList(serverNames: readonly string[], whole = false): string {
+	return serverNames.map(name => sanitizeMcpServerName(name, whole)).join(", ");
 }
 
 function formatServerCount(count: number): string {
@@ -57,11 +72,11 @@ export function formatMCPConnectingMessage(serverNames: readonly string[]): stri
 	return `Connecting to MCP servers: ${formatServerList(serverNames)}…`;
 }
 
-function formatFailedServer({ serverName, error, sourcePath }: McpConnectionFailure): string {
+function formatFailedServer({ serverName, error, sourcePath }: McpConnectionFailure, whole = false): string {
 	const source = sourcePath
 		? ` [config: ${sanitizeMcpStatusText(shortenPath(sourcePath), TRUNCATE_LENGTHS.CONTENT)}]`
 		: "";
-	return `${sanitizeMcpServerName(serverName)}${source}: ${sanitizeMcpStatusError(error)}`;
+	return `${sanitizeMcpServerName(serverName, whole)}${source}: ${sanitizeMcpStatusError(error)}`;
 }
 
 export function formatMCPConnectionStatusMessage(snapshot: McpConnectionStatusSnapshot): string {
@@ -75,13 +90,13 @@ export function formatMCPConnectionStatusMessage(snapshot: McpConnectionStatusSn
 			parts.push(`Connected: ${formatServerList(connectedServers)}.`);
 		}
 		if (failedServers.length > 0) {
-			parts.push(`Failed: ${failedServers.map(formatFailedServer).join("; ")}.`);
+			parts.push(`Failed: ${failedServers.map(failure => formatFailedServer(failure)).join("; ")}.`);
 		}
 		parts.push(`Still connecting: ${formatServerList(pendingServers)}…`);
 		return parts.join(" ");
 	}
 	if (failedServers.length > 0) {
-		const failureText = failedServers.map(formatFailedServer).join("; ");
+		const failureText = failedServers.map(failure => formatFailedServer(failure)).join("; ");
 		if (connectedServers.length === 0) {
 			return `MCP ${formatServerCount(failedServers.length)} failed to connect: ${failureText}`;
 		}
@@ -110,9 +125,13 @@ export function formatMCPConnectionStatusMessage(snapshot: McpConnectionStatusSn
  * explains the miss, is that the cache predates the failure and a tool the
  * server has added or renamed since is not in it.
  *
- * `awaitingLogin` names the listed servers that failed while no OAuth login
- * for them was stored and that the caller is checking for one now; only they
- * get the sentence saying omp reconnects a server once a login turns up.
+ * `awaitingLogin` names the listed servers whose last attempt the server
+ * refused with an auth challenge and that the caller is checking the
+ * credential store for now; only they get the sentence saying omp
+ * reconnects a server once a login it has not tried turns up.
+ *
+ * Server names are rendered whole here, unlike in the status line: the note
+ * ends by telling the model to type `/mcp reconnect <server>`.
  */
 export function formatMCPUnavailableServersNote(
 	unmounted: readonly McpConnectionFailure[],
@@ -121,10 +140,10 @@ export function formatMCPUnavailableServersNote(
 ): string {
 	return prompt.render(unavailableServersTemplate, {
 		single: unmounted.length === 1,
-		servers: unmounted.map(formatFailedServer).join("; "),
+		servers: unmounted.map(failure => formatFailedServer(failure, true)).join("; "),
 		cachedSingle: servingCachedTools.length === 1,
-		cachedServers: servingCachedTools.map(formatFailedServer).join("; "),
-		awaitingLogin: formatServerList(awaitingLogin),
+		cachedServers: servingCachedTools.map(failure => formatFailedServer(failure, true)).join("; "),
+		awaitingLogin: formatServerList(awaitingLogin, true),
 	});
 }
 
