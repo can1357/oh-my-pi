@@ -42,7 +42,7 @@ use std::{
 };
 
 use crate::{
-	bash::{ExitStatus, ExtProc, OsHandle, Signal},
+	bash::{ExitStatus, ExtProc, OsHandle, ProcEvent, Signal},
 	sys::pump::{
 		BUF, BURST, End, PollIo, orphan,
 		os::{self, OsPipe, Timer},
@@ -102,12 +102,14 @@ struct Relay {
 	/// `None` once the stream ended, the sink refused text or the relay was
 	/// ended at its program's exit.
 	pipe:     Option<OsPipe>,
-	decoder:  Box<dyn ByteDecoder>,
+	decoder:  Option<Box<dyn ByteDecoder>>,
 	sink:     End,
 	buf:      Box<[u8]>,
 	/// Decoded text, written into the sink up to `sent`.
 	text:     Vec<u8>,
 	sent:     usize,
+	/// Raw bytes pending in `buf`, without a copy through `text`.
+	raw_len:  usize,
 	/// Bytes read from the program so far.
 	consumed: u64,
 	phase:    Phase,
@@ -118,7 +120,7 @@ struct Relay {
 }
 
 impl Relay {
-	fn new(pipe: OsPipe, decoder: Box<dyn ByteDecoder>, sink: End) -> Self {
+	fn new(pipe: OsPipe, decoder: Option<Box<dyn ByteDecoder>>, sink: End) -> Self {
 		Self {
 			pipe: Some(pipe),
 			decoder,
@@ -126,6 +128,7 @@ impl Relay {
 			buf: vec![0; BUF].into_boxed_slice(),
 			text: Vec::new(),
 			sent: 0,
+			raw_len: 0,
 			consumed: 0,
 			phase: Phase::Reading,
 			target: None,
@@ -136,8 +139,18 @@ impl Relay {
 	/// Forward what can move now; ready once done. Yields after a burst.
 	fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
 		for _ in 0..BURST {
-			while self.sent < self.text.len() {
-				match std::task::ready!(self.sink.poll_write(cx, &self.text[self.sent..])) {
+			let pending = if self.decoder.is_some() {
+				self.text.len()
+			} else {
+				self.raw_len
+			};
+			while self.sent < pending {
+				let bytes = if self.decoder.is_some() {
+					&self.text[..]
+				} else {
+					&self.buf[..self.raw_len]
+				};
+				match std::task::ready!(self.sink.poll_write(cx, &bytes[self.sent..])) {
 					Ok(n) if n > 0 => self.sent += n,
 					Err(e) if e.kind() == io::ErrorKind::Interrupted => {},
 					_ => {
@@ -154,6 +167,7 @@ impl Relay {
 				}
 			}
 			self.text.clear();
+			self.raw_len = 0;
 			self.sent = 0;
 			match self.phase {
 				Phase::Reading => {
@@ -164,14 +178,20 @@ impl Relay {
 					match read {
 						Ok(n) if n > 0 => {
 							self.consumed += n as u64;
-							self.text = self.decoder.push(&self.buf[..n]).into_bytes();
+							if let Some(decoder) = &mut self.decoder {
+								self.text = decoder.push(&self.buf[..n]).into_bytes();
+							} else {
+								self.raw_len = n;
+							}
 						},
 						// End of file, or a failed pipe.
 						_ => self.end(),
 					}
 				},
 				Phase::Finish => {
-					self.text = self.decoder.finish().into_bytes();
+					if let Some(decoder) = &mut self.decoder {
+						self.text = decoder.finish().into_bytes();
+					}
 					self.phase = Phase::Flush;
 				},
 				Phase::Flush => {
@@ -216,8 +236,11 @@ impl Relay {
 			return false;
 		};
 		self.consumed >= target
-			&& self.sent >= self.text.len()
-			&& (!self.decoder.holds_bytes()
+			&& self.sent >= self.text.len().max(self.raw_len)
+			&& (!self
+				.decoder
+				.as_ref()
+				.is_some_and(|decoder| decoder.holds_bytes())
 				|| self
 					.grace
 					.get_or_insert_with(|| Timer::after(HOLD_GRACE))
@@ -251,23 +274,28 @@ impl Future for Forward {
 /// which then polls the relays, or dropped with the relays (the spawn
 /// failed).
 pub(crate) struct Relays<'a> {
-	decoding: &'a dyn OutputDecoding,
+	decoding: Option<&'a dyn OutputDecoding>,
 	writers:  Vec<fs::File>,
 	set:      Vec<Relay>,
 }
 
 impl<'a> Relays<'a> {
-	pub(crate) fn new(decoding: &'a dyn OutputDecoding) -> Self {
+	pub(crate) fn new(decoding: Option<&'a dyn OutputDecoding>) -> Self {
 		Self { decoding, writers: Vec::new(), set: Vec::new() }
 	}
 
-	/// Set up a relay forwarding decoded text into `sink`; the OS handle the
-	/// program writes to.
-	pub(crate) fn attach(&mut self, sink: End) -> io::Result<OsHandle> {
+	/// Set up a relay into `sink`, decoding only explicitly designated text
+	/// sinks. Returns the OS handle the program writes to.
+	pub(crate) fn attach(&mut self, sink: End, text: bool) -> io::Result<OsHandle> {
 		let (pipe, writer) = os::pipe(false)?;
-		self
-			.set
-			.push(Relay::new(pipe, self.decoding.decoder(), sink));
+		self.set.push(Relay::new(
+			pipe,
+			self
+				.decoding
+				.filter(|_| text)
+				.map(|decoding| decoding.decoder()),
+			sink,
+		));
 		let os = writer_handle(&writer);
 		self.writers.push(writer);
 		Ok(os)
@@ -297,15 +325,28 @@ impl ExtProc for Relayed {
 	}
 
 	fn poll_wait(&mut self, cx: &mut Context<'_>) -> Poll<ExitStatus> {
+		loop {
+			match std::task::ready!(self.poll_event(cx)) {
+				ProcEvent::Exited(status) => return Poll::Ready(status),
+				ProcEvent::Stopped(_) | ProcEvent::Continued => {},
+			}
+		}
+	}
+
+	fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<ProcEvent> {
 		for relay in &mut self.relays {
 			let _ = relay.poll(cx);
 		}
 		let status = if let Some(status) = self.status {
 			status
 		} else {
-			let status = std::task::ready!(self.child.poll_wait(cx));
-			self.status = Some(status);
-			status
+			match std::task::ready!(self.child.poll_event(cx)) {
+				ProcEvent::Exited(status) => {
+					self.status = Some(status);
+					status
+				},
+				change => return Poll::Ready(change),
+			}
 		};
 		let mut drained = true;
 		for relay in &mut self.relays {
@@ -313,10 +354,14 @@ impl ExtProc for Relayed {
 		}
 		orphan::poll(cx);
 		if drained {
-			Poll::Ready(status)
+			Poll::Ready(ProcEvent::Exited(status))
 		} else {
 			Poll::Pending
 		}
+	}
+
+	fn pgid(&self) -> Option<u32> {
+		self.child.pgid()
 	}
 
 	fn signal(&mut self, sig: Signal) -> io::Result<()> {
@@ -408,6 +453,38 @@ mod tests {
 		fn finish(&mut self) -> String {
 			self.held.take().map(char::from).into_iter().collect()
 		}
+	}
+
+	/// An observation-only relay forwards the original read buffer, even
+	/// when its host has a decoder configured for other text sinks.
+	#[tokio::test]
+	async fn raw_relay_preserves_non_utf8_bytes() {
+		use std::io::{Read, Seek, Write};
+
+		let mut output = tempfile::tempfile().unwrap();
+		let decoding = Latin1 { hold: true };
+		let mut relays = Relays::new(Some(&decoding));
+		relays
+			.attach(
+				End::File(Box::new(super::super::StdFile::new(output.try_clone().unwrap()))),
+				false,
+			)
+			.unwrap();
+		relays.writers[0].write_all(b"\xff\xc3\0").unwrap();
+		relays.writers.clear();
+		std::future::poll_fn(|cx| relays.set[0].poll(cx)).await;
+		output.rewind().unwrap();
+		let mut bytes = Vec::new();
+		output.read_to_end(&mut bytes).unwrap();
+		assert_eq!(bytes, b"\xff\xc3\0");
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn extra_output_alias_shares_the_text_relay() {
+		let out =
+			run(&mut session(false), "exec 3>&1; /bin/sh -c 'printf a; printf b >&3; printf c'", true)
+				.await;
+		assert_eq!(out, b"abc");
 	}
 
 	/// Latin-1 `café\n`, as a program writing a legacy code page emits it.

@@ -61,15 +61,11 @@ import { assertEditableFile } from "./auto-generated-guard";
 import { isReadTruncationNotice } from "@oh-my-pi/pi-tui/tools/hashline-format";
 import { hasColumnTruncationClause, isColumnTruncationNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { recoverConflictUriPrefix } from "./conflict-detect";
+import { unwrapHashlineHeaderPath } from "./hashline-header-path";
 import { outputMeta } from "./output-meta";
 import { formatPathRelativeToCwd, probeLiteralPathExists, specialFileKind } from "./path-utils";
 import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
-import {
-	enforcePlanModeWrite,
-	resolvePlanPath,
-	targetsLocalSandbox,
-	unwrapHashlineHeaderPath,
-} from "./plan-mode-guard";
+import { enforcePlanModeWrite, resolvePlanPath, targetsLocalSandbox } from "./plan-mode-guard";
 import { decodeUtf8Text } from "./read-format";
 import { routeReadThroughBridge } from "./read-summary";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -1006,8 +1002,15 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					// Device payloads are dispatch arguments, not resource text, so only
 					// non-device text writes are checked against a truncated read projection.
 					if (!verbatim && target.spec.backing !== "device" && endsWithReadTruncationNotice(content)) {
-						const currentResource = await router.resolve(path, sessionResolveContext(this.session, { signal }));
-						assertNotShorterReadProjection(path, content, currentResource.content, cleanContent);
+						let currentContent: string | undefined;
+						try {
+							currentContent = (await router.resolve(path, sessionResolveContext(this.session, { signal })))
+								.content;
+						} catch (error) {
+							// A missing target has no source to discard, as for a new disk file (readCurrentWriteSource).
+							if (!isEnoent(error)) throw error;
+						}
+						assertNotShorterReadProjection(path, content, currentContent, cleanContent);
 					}
 					// Handler-owned writes mutate state outside the sandbox unless they touch no
 					// files (peer messages, replies, background-work cancellation) or dispatch a

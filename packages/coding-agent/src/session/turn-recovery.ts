@@ -44,7 +44,7 @@ import {
 	modelSupportsEffortCeiling,
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
-import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
+import type { EditModeSetting } from "../edit/settings";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ResetRecoveryResult } from "./codex-auto-reset";
 import type {
@@ -307,12 +307,12 @@ export interface TurnRecoveryHost {
 	sessionMessageAlreadyPersisted(message: AssistantMessage): boolean;
 	setModelWithProviderSessionReset(model: Model): Promise<void>;
 	/** Edit mode resolved for the active model and settings, captured before a fallback swap. */
-	resolveActiveEditMode(): EditMode;
+	resolveActiveEditMode(): EditModeSetting;
 	/**
 	 * Rebuilds the model-dependent base system prompt after a swap. Retry fallback passes
 	 * `retryFallback`, which rebuilds only for an edit-mode change so the cached prompt survives.
 	 */
-	syncAfterModelChange(previousEditMode: EditMode, options?: { retryFallback?: boolean }): Promise<void>;
+	syncAfterModelChange(previousEditMode: EditModeSetting, options?: { retryFallback?: boolean }): Promise<void>;
 	resetCurrentResponsesProviderSession(reason: string): void;
 	/**
 	 * Spend an eligible saved reset for the blocked provider pool.

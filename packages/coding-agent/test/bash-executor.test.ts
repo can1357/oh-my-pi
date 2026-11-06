@@ -14,6 +14,11 @@ import {
 } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import * as direnvModule from "@oh-my-pi/pi-coding-agent/exec/direnv";
 import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import {
+	defaultShellVizPreferences,
+	readShellPresentation,
+	shellVisualization,
+} from "@oh-my-pi/pi-tui/tools/shell-viz";
 import * as shellSnapshot from "@oh-my-pi/pi-coding-agent/utils/shell-snapshot";
 import { encodeTerminalImage } from "@oh-my-pi/pi-coding-agent/utils/terminal-graphics";
 import type { Shell, ShellRunResult } from "@oh-my-pi/pi-natives";
@@ -103,6 +108,37 @@ describe("executeBash", () => {
 		if (fs.existsSync(tempDir)) {
 			removeSyncWithRetries(tempDir);
 		}
+	});
+
+	it("publishes the same live native owner before each trace callback", async () => {
+		const snapshots: piNatives.RunTrace[] = [];
+		const result = await executeBash("printf 'attached-native\\n'", {
+			cwd: tempDir,
+			timeout: 5000,
+			onTrace: trace => {
+				const source = shellVisualization(trace);
+				expect(source).toBeInstanceOf(piNatives.RunTrace);
+				if (source instanceof piNatives.RunTrace) snapshots.push(source);
+				readShellPresentation(source, defaultShellVizPreferences(), trace);
+			},
+		});
+		expect(snapshots.length).toBeGreaterThan(0);
+		expect(new Set(snapshots).size).toBe(1);
+		expect(result.trace).toBeDefined();
+		if (!result.trace) throw new Error("Expected final native trace");
+		expect(shellVisualization(result.trace)).toBe(snapshots[0]);
+	});
+
+	it("finishes the command when a trace snapshot fails validation", async () => {
+		// A non-UTF-8 assignment value serializes as a byte array, which the wire guard rejects;
+		// the timer poll must skip it instead of throwing an uncaught exception.
+		const result = await executeBash("v=$(printf '\\377'); sleep 0.3; echo done", {
+			cwd: tempDir,
+			timeout: 5000,
+			onTrace: () => {},
+		});
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("done");
 	});
 
 	it("omits minimizer options when the feature is disabled", () => {

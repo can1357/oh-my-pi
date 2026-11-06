@@ -294,6 +294,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	getSteeringMessages?: (signal?: AbortSignal) => Promise<AgentMessage[]>;
 
+	/** Whether input is still owned by a queue and must be restored if a model call is aborted before it starts. */
+	isUndeliveredQueuedMessage?: (message: AgentMessage) => boolean;
+
 	/**
 	 * Peeks whether steering messages are queued, without consuming them.
 	 *

@@ -10,15 +10,14 @@ use std::{
 	time::{Duration, Instant},
 };
 
-use core_graphics::{
-	event::{CGEvent, CGEventType},
-	event_source::{CGEventSource, CGEventSourceStateID},
-	geometry::CGPoint,
-};
-use foreign_types::ForeignType;
 use libc::pid_t;
 use objc2_app_kit::NSRunningApplication;
-use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType};
+use objc2_core_foundation::{
+	CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGPoint,
+};
+use objc2_core_graphics::{
+	CGEvent, CGEventField, CGEventSource, CGEventSourceStateID, CGEventType,
+};
 use parking_lot::Mutex;
 
 use super::{
@@ -250,8 +249,8 @@ fn resolve_conditional_front() -> Option<ConditionalFront> {
 	Some(ConditionalFront { set_front: symbol(c"SLSSetFrontProcessWithInfo")?, timestamp_key })
 }
 
-fn event_ptr(event: &CGEvent) -> *mut c_void {
-	event.as_ptr().cast()
+const fn event_ptr(event: &CGEvent) -> *mut c_void {
+	std::ptr::from_ref(event).cast_mut().cast()
 }
 
 /// Stamps raw `SkyLight` integer event fields onto `event`.
@@ -330,8 +329,9 @@ fn post_to_pid(
 	post: impl FnOnce(&Routes, *mut c_void) -> CoreResult<()>,
 ) -> CoreResult<()> {
 	control::check()?;
-	event.set_integer_value_field(
-		core_graphics::event::EventField::EVENT_SOURCE_USER_DATA,
+	CGEvent::set_integer_value_field(
+		Some(event),
+		CGEventField::EventSourceUserData,
 		control::SYNTHETIC_EVENT_TAG,
 	);
 	let routes = required()?.routes;
@@ -555,7 +555,7 @@ static OWN_POINTER_PRESSES: AtomicU32 = AtomicU32::new(0);
 /// before the event is posted to the HID event tap, so a reader never sees
 /// the HID counter move ahead of this count.
 pub(super) fn note_hid_post(event_type: CGEventType) {
-	if control::is_pointer_press(event_type as u32) {
+	if control::is_pointer_press(event_type.0) {
 		OWN_POINTER_PRESSES.fetch_add(1, Ordering::AcqRel);
 	}
 }
@@ -1123,13 +1123,13 @@ impl BackgroundFocusLease {
 /// is not the target, while the pointer sprite and transparent overlays that
 /// let clicks through do not count.
 fn pointer_over(pid: pid_t) -> bool {
-	let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+	let Some(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
 		return false;
 	};
-	let Ok(event) = CGEvent::new(source) else {
+	let Some(event) = CGEvent::new(Some(&source)) else {
 		return false;
 	};
-	let point = event.location();
+	let point = CGEvent::location(Some(&event));
 	ax::point_owner(point.x, point.y).is_some_and(|owner| owner.pid == pid)
 }
 

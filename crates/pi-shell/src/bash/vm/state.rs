@@ -347,6 +347,8 @@ pub struct Root {
 	fault:             Option<StoreError>,
 	/// The root vproc's in-place fields as last written ([`sync_root`]).
 	synced:            Synced,
+	/// zsh's history events as last written (mirrors their store record).
+	pub hist_events:   parking_lot::Mutex<super::builtins::history::model::EventsCache>,
 }
 
 /// The root vproc's fields the interpreter updates in place (`vp.status = …`
@@ -523,6 +525,7 @@ impl Root {
 		self.zopts_known = ZshOpts::default();
 		self.builtins_disabled = None;
 		self.locale_gen += 1;
+		self.hist_events.lock().clear();
 		if let Err(err) = self.rescan(store) {
 			self.fail(err);
 		}
@@ -631,6 +634,7 @@ impl Root {
 	///
 	/// # Errors
 	/// [`StoreError`] when the option record cannot be read.
+	#[inline]
 	pub fn option(&mut self, store: &mut dyn StateStore, opt: OptId) -> Result<bool, StoreError> {
 		let bit = opt_bit(opt);
 		if self.opts_known & bit == 0 {
@@ -702,6 +706,7 @@ impl Root {
 ///
 /// # Errors
 /// [`StoreError`] when the store fails or the record is no variable.
+#[inline]
 pub fn global<'s>(
 	store: &'s mut dyn StateStore,
 	name: &[u8],
@@ -755,35 +760,150 @@ fn root_scope(store: &mut dyn StateStore, depth: u32) -> Result<ScopeHeader<'_>,
 
 /// The innermost root scope binding `name`: only the scopes that may bind
 /// a local are read ([`Root`]'s mask; every one from [`SCOPE_BITS`] up).
+#[inline]
 fn root_binding(
 	root: &Root,
 	store: &mut dyn StateStore,
 	name: &[u8],
 ) -> Result<Option<u32>, StoreError> {
-	root_binding_below(root, store, name, root.depth)
+	// Outside every function and temporary scope, a lookup (most of a
+	// script's) needs no call.
+	if root.depth == 0 {
+		return Ok(None);
+	}
+	root_binding_below(root, store, name, root.depth, true)
 }
 
-/// [`root_binding`] among the root scopes below `top`.
+/// [`root_binding`] among the root scopes below `top`. With
+/// `hide_private`, a zsh private parameter hidden from the running
+/// function ([`private_hidden`]) does not count as a binding.
 fn root_binding_below(
 	root: &Root,
 	store: &mut dyn StateStore,
 	name: &[u8],
 	top: u32,
+	hide_private: bool,
 ) -> Result<Option<u32>, StoreError> {
 	let top = top.min(root.depth);
+	if top == 0 || !store.may_have_local(name) {
+		return Ok(None);
+	}
+	// The innermost function scope, read once a private binding needs it.
+	let mut func = FuncScope::Unread;
 	for depth in (SCOPE_BITS..top).rev() {
-		if store.get(local_key(depth, name))?.is_some() {
+		if root_binds(root, store, name, depth, hide_private, &mut func)? {
 			return Ok(Some(depth));
 		}
 	}
 	let mut bits = root.locals & below(top);
 	while let Some(depth) = bits.checked_ilog2() {
-		if store.get(local_key(depth, name))?.is_some() {
+		if root_binds(root, store, name, depth, hide_private, &mut func)? {
 			return Ok(Some(depth));
 		}
 		bits &= !(1 << depth);
 	}
 	Ok(None)
+}
+
+/// [`root_binds`]' cache of the innermost function scope.
+#[derive(Clone, Copy)]
+enum FuncScope {
+	/// Not read yet.
+	Unread,
+	/// [`root_func_scope`]'s answer.
+	Read(Option<u32>),
+}
+
+/// Whether root scope `depth` binds `name` for [`root_binding_below`]:
+/// with `hide_private`, a zsh private parameter there counts only when no
+/// function scope lies above it. `func` caches the innermost function
+/// scope.
+fn root_binds(
+	root: &Root,
+	store: &mut dyn StateStore,
+	name: &[u8],
+	depth: u32,
+	hide_private: bool,
+	func: &mut FuncScope,
+) -> Result<bool, StoreError> {
+	let private = match store.get(local_key(depth, name))? {
+		None => return Ok(false),
+		Some(Record::Var(v)) => v.attrs.contains(Attrs::ZSH_PRIVATE),
+		Some(_) => false,
+	};
+	if !private || !hide_private {
+		return Ok(true);
+	}
+	let innermost = match *func {
+		FuncScope::Read(f) => f,
+		FuncScope::Unread => {
+			let f = root_func_scope(root, store)?;
+			*func = FuncScope::Read(f);
+			f
+		},
+	};
+	Ok(!private_hidden(depth as usize, innermost.map(|f| f as usize)))
+}
+
+/// zsh/param/private's visibility rule (`getprivatenode`): a private
+/// parameter ([`Attrs::ZSH_PRIVATE`]) bound in scope `at` is hidden while a
+/// function scope lies above it (`innermost` is the innermost function
+/// scope): the functions its declaring function calls see the next outer
+/// parameter of the name instead.
+const fn private_hidden(at: usize, innermost: Option<usize>) -> bool {
+	match innermost {
+		Some(f) => f > at,
+		None => false,
+	}
+}
+
+/// The innermost of `vp`'s own scopes (a subshell's) binding `name` for a
+/// dynamic lookup: a zsh private parameter hidden from the running
+/// function ([`private_hidden`]) is skipped.
+fn vec_binding(vp: &Vproc, name: &[u8]) -> Option<usize> {
+	vp.scopes.iter().enumerate().rev().find_map(|(i, s)| {
+		let entry = s.vars.get(name)?;
+		let private = entry
+			.as_ref()
+			.is_some_and(|v| v.attrs.contains(Attrs::ZSH_PRIVATE));
+		if private && vp.scopes[i + 1..].iter().any(|s| s.func.is_some()) {
+			return None;
+		}
+		Some(i)
+	})
+}
+
+/// Whether the innermost scope binding `name`, with no zsh/param/private
+/// visibility applied (zsh's raw parameter table node), holds a private
+/// parameter: zsh's `createparam` of a global `name` then fails (`NAME:
+/// can't change parameter attribute`, the private being `PM_RO_BY_DESIGN`).
+///
+/// # Errors
+/// [`StoreError`] when the store cannot be read.
+pub fn innermost_private(
+	root: &Root,
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+	name: &[u8],
+) -> Result<bool, StoreError> {
+	if vp.overlay.is_none() {
+		let Some(depth) = root_binding_below(root, store, name, root.depth, false)? else {
+			return Ok(false);
+		};
+		return Ok(matches!(
+			store.get(local_key(depth, name))?,
+			Some(Record::Var(v)) if v.attrs.contains(Attrs::ZSH_PRIVATE)
+		));
+	}
+	Ok(vp
+		.scopes
+		.iter()
+		.rev()
+		.find_map(|s| s.vars.get(name))
+		.is_some_and(|e| {
+			e.as_ref()
+				.is_some_and(|v| v.attrs.contains(Attrs::ZSH_PRIVATE))
+		}))
 }
 
 /// The innermost root function scope.
@@ -832,6 +952,7 @@ enum At {
 
 /// Where `name` is bound for a dynamic lookup: the innermost scope binding
 /// it, else the overlay when it has it, else the global variables.
+#[inline]
 fn bound_at(
 	root: &Root,
 	store: &mut dyn StateStore,
@@ -841,7 +962,7 @@ fn bound_at(
 	if vp.overlay.is_none() {
 		return Ok(root_binding(root, store, name)?.map_or(At::Global, |d| At::Scope(In::Store(d))));
 	}
-	if let Some(i) = vp.scopes.iter().rposition(|s| s.vars.contains_key(name)) {
+	if let Some(i) = vec_binding(vp, name) {
 		return Ok(At::Scope(In::Vec(i)));
 	}
 	if vp
@@ -855,6 +976,7 @@ fn bound_at(
 }
 
 /// The variable bound at `at` (`None`: declared but unset there, or absent).
+#[inline]
 fn var_at<'a>(
 	store: &'a mut dyn StateStore,
 	vp: &'a Vproc,
@@ -879,6 +1001,7 @@ fn var_at<'a>(
 
 /// Where an assignment to `name` at `level` lands among `vp`'s scopes;
 /// `None`: its overlay or the root.
+#[inline]
 fn level_at(
 	root: &Root,
 	store: &mut dyn StateStore,
@@ -900,11 +1023,7 @@ fn level_at(
 			.iter()
 			.rposition(|s| s.func.is_some())
 			.map(In::Vec),
-		Level::Dynamic => vp
-			.scopes
-			.iter()
-			.rposition(|s| s.vars.contains_key(name))
-			.map(In::Vec),
+		Level::Dynamic => vec_binding(vp, name).map(In::Vec),
 	})
 }
 
@@ -1030,6 +1149,7 @@ pub fn lookup<'a>(
 ///
 /// # Errors
 /// [`StoreError`] when a variable cannot be read.
+#[inline]
 pub fn lookup_declared<'a>(
 	root: &Root,
 	store: &'a mut dyn StateStore,
@@ -1038,6 +1158,28 @@ pub fn lookup_declared<'a>(
 ) -> Result<Option<&'a Var>, StoreError> {
 	let at = bound_at(root, store, vp, name)?;
 	var_at(store, vp, name, at)
+}
+
+/// A declared variable and its binding scope, from one dynamic lookup.
+/// The scope is `None` for an overlay or global binding; name references
+/// are not followed and declared-but-unset variables are returned.
+///
+/// # Errors
+/// [`StoreError`] when a variable cannot be read.
+#[inline]
+pub fn lookup_declared_scoped<'a>(
+	root: &Root,
+	store: &'a mut dyn StateStore,
+	vp: &'a Vproc,
+	name: &[u8],
+) -> Result<(Option<&'a Var>, Option<usize>), StoreError> {
+	let at = bound_at(root, store, vp, name)?;
+	let scope = match at {
+		At::Scope(In::Vec(i)) => Some(i),
+		At::Scope(In::Store(depth)) => Some(depth as usize),
+		At::Overlay | At::Global => None,
+	};
+	Ok((var_at(store, vp, name, at)?, scope))
 }
 
 /// A token for a cache of something derived from the locale variables
@@ -1500,7 +1642,7 @@ pub fn store_var_below(
 ) {
 	let found = if vp.overlay.is_none() {
 		let top = u32::try_from(top).unwrap_or(u32::MAX);
-		match root_binding_below(root, store, name, top) {
+		match root_binding_below(root, store, name, top, true) {
 			Ok(depth) => depth.map(In::Store),
 			Err(err) => {
 				root.fail(err);
@@ -1884,6 +2026,7 @@ pub fn store_record(
 ///
 /// # Errors
 /// [`StoreError`] when the option record cannot be read.
+#[inline]
 pub fn option(
 	root: &mut Root,
 	store: &mut dyn StateStore,
@@ -2092,13 +2235,15 @@ pub fn exported(
 	})
 }
 
-/// Push `name` with `var`'s scalar view when it is exported and set.
+/// Push `name` with `var`'s value when it is an exported, set scalar
+/// (an exported array keeps the attribute but stays out of the
+/// environment, in bash and zsh alike).
 fn push_exported(out: &mut Vec<(BString, BString)>, name: &[u8], var: &Var) {
 	if var.attrs.contains(Attrs::EXPORT)
 		&& !var.attrs.contains(Attrs::INVISIBLE)
-		&& let Some(s) = value_scalar(&var.value)
+		&& let VarValue::Str(s) = &var.value
 	{
-		out.push((BString::from(name), BString::from(s)));
+		out.push((BString::from(name), s.clone()));
 	}
 }
 
@@ -2140,7 +2285,7 @@ pub fn exported_funcs(
 		if let Record::Func { source, attrs, .. } = rec
 			&& attrs.contains(Attrs::EXPORT)
 		{
-			out.push((BString::from(name), source.clone()));
+			out.push((BString::from(name), (**source).clone()));
 		}
 	};
 	let overlay = vp.overlay.as_ref().map(|ov| ov.records.iter());
@@ -2219,13 +2364,24 @@ fn scan_vars(
 				},
 			}
 		};
+		// A zsh private parameter hidden from the running function
+		// ([`private_hidden`]) leaves the outer one listed.
+		let private = |var: Option<&Var>| var.is_some_and(|v| v.attrs.contains(Attrs::ZSH_PRIVATE));
 		if vp.overlay.is_none() && root.depth > 0 {
-			for (_, name, var) in &root_locals(store)? {
+			let innermost = root_func_scope(root, store)?.map(|f| f as usize);
+			for (depth, name, var) in &root_locals(store)? {
+				if private(var.as_ref()) && private_hidden(*depth as usize, innermost) {
+					continue;
+				}
 				shadow(name, var.as_ref());
 			}
 		}
-		for scope in &vp.scopes {
+		let innermost = vp.scopes.iter().rposition(|s| s.func.is_some());
+		for (i, scope) in vp.scopes.iter().enumerate() {
 			for (name, var) in &scope.vars {
+				if private(var.as_ref()) && private_hidden(i, innermost) {
+					continue;
+				}
 				shadow(name, var.as_ref());
 			}
 		}
@@ -2549,6 +2705,25 @@ pub fn scope_set(
 		root.materialize(store);
 	}
 	put_scope(root, store, vp, at, name, var);
+}
+
+/// Remove the binding of `name` from scope `i` of `vp` (it is no longer
+/// declared there).
+pub fn scope_unbind(
+	root: &mut Root,
+	store: &mut dyn StateStore,
+	vp: &mut Vproc,
+	i: usize,
+	name: &[u8],
+) {
+	match scope_in(vp, i) {
+		In::Vec(i) => {
+			if let Some(s) = vp.scopes.get_mut(i) {
+				s.vars.remove(name);
+			}
+		},
+		In::Store(depth) => root.write(store, Change::Del(local_key(depth, name))),
+	}
 }
 
 /// Remove every binding of scope `i` of `vp`.
@@ -3399,7 +3574,7 @@ mod tests {
 		let func = |src: &str, attrs| Record::Func {
 			mode: ModeId::Bash,
 			sticky: None,
-			source: src.into(),
+			source: BString::from(src).into(),
 			unit: UnitId([0; 32]),
 			attrs,
 			file: BString::default(),
@@ -3481,7 +3656,7 @@ mod tests {
 				.into_iter()
 				.filter_map(|(k, r)| match (k, r) {
 					(KeyBuf::Func(n), Record::Func { source, attrs, .. }) if attrs.contains(x) => {
-						Some((n, source))
+						Some((n, (*source).clone()))
 					},
 					_ => None,
 				})

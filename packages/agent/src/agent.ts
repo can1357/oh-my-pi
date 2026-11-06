@@ -1125,6 +1125,7 @@ export class Agent {
 		// Live steering was taken before anything the run still holds undelivered.
 		this.#liveSteered = this.#liveSteered.filter(entry => {
 			if (entry.controller !== controller) return true;
+			if (entry.message.role === "user") delete entry.message.liveSteered;
 			restored.steering.push(entry.message);
 			return false;
 		});
@@ -1529,6 +1530,19 @@ export class Agent {
 	peekSteeringQueue(): readonly AgentMessage[] {
 		const claim = this.#queuedMessageClaims.steering;
 		return claim ? [...claim.messages, ...this.#steeringQueue] : this.#steeringQueue;
+	}
+
+	#isUndeliveredQueuedMessage(message: AgentMessage): boolean {
+		for (const entry of this.#liveSteered) {
+			if (entry.message === message || entry.additional?.includes(message)) return true;
+		}
+		for (const delivery of this.#queuedMessageDeliveries) {
+			if (delivery.additional.includes(message)) return true;
+			for (let i = delivery.next; i < delivery.messages.length; i++) {
+				if (delivery.messages[i] === message) return true;
+			}
+		}
+		return false;
 	}
 
 	/** Dequeued messages not yet in the transcript, e.g. steering a provider
@@ -2082,6 +2096,7 @@ export class Agent {
 				}
 				return this.#dequeueSteeringMessagesAfterHooks(signal ?? loopSignal);
 			},
+			isUndeliveredQueuedMessage: message => this.#isUndeliveredQueuedMessage(message),
 			hasSteeringMessages: () =>
 				steeringQueueState(
 					this.#steeringQueue,

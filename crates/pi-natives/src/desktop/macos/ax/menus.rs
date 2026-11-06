@@ -211,7 +211,7 @@ fn with_window_menu<T>(
 			&& read_leaves_focus(key_focus(pid), wid, skylight::window_parent);
 		let prepared = enter_menu_context(access, || {
 			let prepared =
-				make_key_in_background(&source()?, pid, wid, window, entry_front, overlay, visit)?;
+				make_key_in_background(&*source()?, pid, wid, window, entry_front, overlay, visit)?;
 			// The user may have brought the app forward while its key window
 			// settled.
 			recheck_background(
