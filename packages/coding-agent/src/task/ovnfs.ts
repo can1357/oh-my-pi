@@ -88,7 +88,7 @@ async function removeCheckout(command: string, checkout: string): Promise<void> 
  * Remove `checkout`, then delete `dir`. A removal that cannot be confirmed
  * keeps `dir` and the checkout record in it, so `omp worktree clear` can retry.
  */
-async function releaseCheckoutRecord(dir: string, command: string, checkout: string): Promise<boolean> {
+async function releaseCheckoutRecord(dir: string, command: string, checkout: string): Promise<void> {
 	try {
 		await removeCheckout(command, checkout);
 	} catch (err) {
@@ -97,10 +97,9 @@ async function releaseCheckoutRecord(dir: string, command: string, checkout: str
 			checkout,
 			error: err instanceof Error ? err.message : String(err),
 		});
-		return false;
+		return;
 	}
 	await fs.rm(dir, { recursive: true, force: true });
-	return true;
 }
 
 /**
