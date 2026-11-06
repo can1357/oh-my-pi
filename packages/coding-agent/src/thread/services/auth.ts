@@ -53,6 +53,7 @@ import {
 	type BaseUrlTable,
 	MODEL_REGISTRY_KIND,
 	type ModelRegistryProtocol,
+	type ProviderAuthAvailability,
 	SLOW_MODE_LANE_KIND,
 	SLOW_MODE_LANES_KIND,
 	type SlowModeLaneProtocol,
@@ -167,16 +168,22 @@ function usageProviderView(provider: UsageProvider): UsageProvider {
 	return view;
 }
 
+/** Answer `keys.availabilityOf`: see {@link AuthStorageProtocol}. */
+function providerAvailability(storage: AuthStorage, provider: string): ProviderAuthAvailability {
+	return {
+		source: storage.keys.source(provider),
+		keyless: storage.keys.keyless(provider),
+		oauth: storage.credentials.hasOAuth(provider),
+	};
+}
+
 /** Answer `keys.availability`: see {@link AuthStorageProtocol}. */
 function authAvailability(storage: AuthStorage, providers: readonly string[]): AuthAvailabilityTable {
 	const domain = new Set<string>(getBundledProviders());
 	for (const provider in storage.credentials.all()) domain.add(provider);
 	for (const provider of providers) domain.add(provider);
-	const keys = storage.keys;
 	const table: AuthAvailabilityTable = {};
-	for (const provider of domain) {
-		table[provider] = { source: keys.source(provider), keyless: keys.keyless(provider) };
-	}
+	for (const provider of domain) table[provider] = providerAvailability(storage, provider);
 	return table;
 }
 /** Main-side implementation of {@link AuthStorageProtocol} for one worker. */
@@ -215,6 +222,7 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 		"keys.peek": (storage, provider, options) => storage.keys.peek(provider, options),
 		"keys.source": (storage, provider, options) => storage.keys.source(provider, options),
 		"keys.availability": (storage, providers) => authAvailability(storage, providers),
+		"keys.availabilityOf": (storage, provider) => providerAvailability(storage, provider),
 		"keys.describe": (storage, provider, sessionId) => storage.keys.describe(provider, sessionId),
 		"keys.setRuntime": (storage, provider, apiKey) => storage.keys.setRuntime(provider, apiKey),
 		"keys.removeRuntime": (storage, provider) => storage.keys.removeRuntime(provider),

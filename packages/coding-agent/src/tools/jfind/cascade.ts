@@ -15,7 +15,8 @@
  */
 import * as path from "node:path";
 import type { Judge, JudgmentResult, NoulQuestion } from "@oh-my-pi/pi-ai";
-import type { FindCoverage, FindHit, FindStats } from "@oh-my-pi/pi-tui/tools/find";
+import type { FindCoverage, FindHit, FindStats, FindTimeout } from "@oh-my-pi/pi-tui/tools/find";
+import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { InternalUrlFilesystem } from "../../internal-urls/url-filesystem";
 import { type SpotlightClient, SpotlightError } from "../../spotlight/client";
 import type { SpotlightThinking } from "../../spotlight/types";
@@ -107,6 +108,12 @@ export interface CascadeOptions {
 	spotlight?: CascadeSpotlight;
 	includeHidden: boolean;
 	signal?: AbortSignal;
+	/**
+	 * The call's wall-clock budget. Firing during verification ends the search
+	 * with the hits verified so far and {@link CascadeResult.timeout}; firing
+	 * earlier, or a `signal` abort, rejects.
+	 */
+	deadline?: AbortSignal;
 	onProgress?: (message: string) => void;
 }
 
@@ -119,6 +126,8 @@ export interface CascadeResult {
 	keywords: string[];
 	stats: FindStats;
 	ranking: CascadeRanking;
+	/** Set when the deadline cut verification short. */
+	timeout?: FindTimeout;
 }
 
 interface FilePlan {
@@ -150,6 +159,8 @@ function compareRel(a: FileEntry, b: FileEntry): number {
 
 class Cascade {
 	readonly #options: CascadeOptions;
+	/** Caller cancellation and the deadline: every request and scan stops on either. */
+	readonly #signal: AbortSignal | undefined;
 	readonly stats: FindStats = {
 		listed: 0,
 		requests: 0,
@@ -170,6 +181,8 @@ class Cascade {
 
 	constructor(options: CascadeOptions) {
 		this.#options = options;
+		const { signal, deadline } = options;
+		this.#signal = signal && deadline ? AbortSignal.any([signal, deadline]) : (signal ?? deadline);
 	}
 
 	#fail(phase: string, error: unknown): void {
@@ -179,10 +192,12 @@ class Cascade {
 	}
 
 	async #ask(request: Request): Promise<Outcome> {
-		const { judge, signal } = this.#options;
+		const { judge } = this.#options;
+		const signal = this.#signal;
 		const started = performance.now();
 		try {
-			const result = await judge.judge(request, { signal });
+			// A judge that settles after the abort is not waited for, so nothing reaches the stats once the call ended.
+			const result = await untilAborted(signal, () => judge.judge(request, { signal }));
 			this.stats.requests++;
 			this.stats.apiMs += performance.now() - started;
 			this.stats.inputTokens += result.usage.input;
@@ -200,22 +215,26 @@ class Cascade {
 
 	/**
 	 * Run every job with at most {@link PARALLEL} requests in flight, handing each
-	 * outcome to `settle` in completion order. Resolves once the queue drains.
+	 * outcome to `settle` in completion order. Resolves once the queue drains;
+	 * on an abort, rejects once every worker has stopped.
 	 */
 	async #dispatch<J extends { request: Request }>(jobs: readonly J[], settle: (job: J, outcome: Outcome) => void) {
 		let next = 0;
 		const worker = async () => {
 			while (next < jobs.length) {
-				throwIfAborted(this.#options.signal);
+				throwIfAborted(this.#signal);
 				const job = jobs[next++]!;
 				settle(job, await this.#ask(job.request));
 			}
 		};
-		await Promise.all(Array.from({ length: Math.min(PARALLEL, jobs.length) }, worker));
+		const settled = await Promise.allSettled(Array.from({ length: Math.min(PARALLEL, jobs.length) }, worker));
+		const stopped = settled.find(result => result.status === "rejected");
+		if (stopped) throw stopped.reason;
 	}
 
 	async run(): Promise<CascadeResult> {
-		const { root, filesystem, query, includeHidden, signal, onProgress } = this.#options;
+		const { root, filesystem, query, includeHidden, onProgress } = this.#options;
+		const signal = this.#signal;
 		const keywords = deriveKeywords(query, this.#options.extraKeywords);
 
 		onProgress?.("lexical scan");
@@ -368,7 +387,8 @@ class Cascade {
 		}
 		onProgress?.(`verifying ${survivors.length} passages in ${chosen.size} files`);
 		const results = new Map<number, { score: number; heat: HeatRange[]; lines: number; bytes: number }>();
-		await this.#dispatch(verifyJobs, (job, outcome) => {
+		let timeout: FindTimeout | undefined;
+		const verification = this.#dispatch(verifyJobs, (job, outcome) => {
 			if (!outcome.ok) {
 				this.#fail("verification", outcome.error);
 				return;
@@ -397,6 +417,12 @@ class Cascade {
 				this.stats.windowsJudged++;
 			});
 		});
+		try {
+			await verification;
+		} catch (error) {
+			if (!this.#options.deadline?.aborted || this.#options.signal?.aborted) throw error;
+			timeout = { verified: this.stats.windowsJudged, passages: survivors.length };
+		}
 
 		const hits: FindHit[] = [];
 		for (const [f, entry] of results) {
@@ -417,8 +443,9 @@ class Cascade {
 		this.stats.filesRead += files.length - results.size;
 		hits.sort((a, b) => b.contentScore - a.contentScore);
 		const { requests, failed } = this.stats;
-		const coverage: FindCoverage = failed === 0 ? "complete" : failed === requests ? "unavailable" : "partial";
-		return { hits, coverage, threshold: THRESHOLD, keywords, stats: this.stats, ranking };
+		const coverage: FindCoverage =
+			failed > 0 && failed === requests ? "unavailable" : failed > 0 || timeout ? "partial" : "complete";
+		return { hits, coverage, threshold: THRESHOLD, keywords, stats: this.stats, ranking, timeout };
 	}
 
 	/**
@@ -433,7 +460,8 @@ class Cascade {
 		entries: readonly FileEntry[],
 		nameScore: (number | undefined)[],
 	): Promise<NonNullable<CascadeRanking["spotlight"]>> {
-		const { query, signal, onProgress } = this.#options;
+		const { query, onProgress } = this.#options;
+		const signal = this.#signal;
 		const order = [...nodes].sort((a, b) => compareRel(entries[a]!, entries[b]!));
 		onProgress?.(`spotlight ranking ${order.length} files`);
 		const started = performance.now();

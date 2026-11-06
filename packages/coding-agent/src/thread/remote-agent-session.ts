@@ -10,12 +10,13 @@
  *   message list the publisher keeps current;
  * - view reads come from the {@link SessionViewState} and entry list the
  *   publisher pushes while main watches the session (any `subscribe`
- *   listener, e.g. the focused TUI view), or are computed on main from them:
- *   the transcript context (entries + leaf), role-model cycles, temporary
- *   model thinking levels and service tiers (main-side settings and model
- *   registry), async job views (the root job manager scoped to the child's
- *   agent id), and generation tok/s (a main-local meter fed by forwarded
- *   events);
+ *   listener, e.g. the focused TUI view; the entry list is kept between
+ *   watches, so a new watch only catches it up), or are computed on main
+ *   from them: the transcript context (entries + leaf), role-model cycles,
+ *   temporary model thinking levels and service tiers (main-side settings
+ *   and model registry), async job views (the root job manager scoped to the
+ *   child's agent id), and generation tok/s (a main-local meter fed by
+ *   forwarded events);
  * - `settings` is rebuilt on main from the main instance the worker's
  *   settings mirror plus the child's own overlay layers, and `modelRegistry`
  *   is the main registry the worker's registry mirrors;
@@ -94,7 +95,7 @@ import {
 	type TranscriptSessionContextOptions,
 } from "../session/session-context";
 import type { CustomEntry, SessionEntry } from "../session/session-entries";
-import { lastModelChangeRole, SessionEntryIndex } from "../session/session-manager";
+import { conversationTip, lastModelChangeRole, SessionEntryIndex } from "../session/session-manager";
 import type { AgentDefinition } from "../task/types";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import { type ApprovalGrantStore, getApprovalGrants } from "../tools/approval-cache";
@@ -341,6 +342,7 @@ export class RemoteAgentSession implements AgentViewSession {
 			getEntries: () => [...this.#entries],
 			getBranch: fromId => this.#entryIndex.pathTo(fromId),
 			getLeafId: () => this.#entryIndex.leafId(),
+			getConversationTip: () => conversationTip(this.#entries, this.#entryIndex.branchView()),
 			getSeanceSourceArtifactsDir: () => this.#view.seanceSourceArtifactsDir,
 			appendCustomEntry: (customType, data) => this.#appendCustomEntry(customType, data),
 			flush: () => this.#command("flushSession"),
@@ -513,7 +515,7 @@ export class RemoteAgentSession implements AgentViewSession {
 	 * caller's thread; draining another thread's queue from a mirror would
 	 * consume records its owner is about to inject.
 	 */
-	drainPendingIrcInboxMessages(_agentId: string, _opts?: { from?: string; limit?: number }): IrcMessage[] {
+	drainPendingIrcInboxMessages(_agentId: string, _opts?: { ifAny?: (msg: IrcMessage) => boolean }): IrcMessage[] {
 		throw new Error(
 			`drainPendingIrcInboxMessages must run on the session's home thread (${this.home}), not on a mirror`,
 		);
@@ -880,16 +882,17 @@ export class RemoteAgentSession implements AgentViewSession {
 		for (const message of delta.messages) this.#messages.push(message);
 	}
 
-	/** Bridge only: a watch started; replace the view state and entry list with the publisher's snapshot. */
-	applyView(state: SessionViewState, entries: SessionEntry[]): void {
+	/**
+	 * Bridge only: a watch started; replace the view state with the publisher's
+	 * snapshot and catch the entry list (kept across watches) up with `entries`.
+	 */
+	applyView(state: SessionViewState, entries: SessionEntriesDelta | undefined): void {
 		if (this.#closed !== undefined) return;
 		this.#view = state;
 		this.#pruneSettled(state.restorableQueue);
 		this.#activeUpdates.clear();
 		for (const update of state.activeToolExecutionUpdates) this.#activeUpdates.set(update.toolCallId, update);
-		this.#provisional.clear();
-		this.#entries = entries;
-		this.#entryIndex.rebuild(entries);
+		if (entries) this.applyEntries(entries);
 		this.#entryIndex.setLeaf(state.leafId);
 		this.#syncViewDerived(state);
 		this.#reseedTokenRate();

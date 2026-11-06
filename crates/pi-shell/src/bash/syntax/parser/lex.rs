@@ -740,7 +740,7 @@ impl<'s> Parser<'s> {
 		let plain = keyword.or_else(|| w.as_ref().and_then(WordTok::plain));
 		// NUMBER: all digits before `<`/`>`, or after `<&`/`>&`.
 		if let Some(text) = plain
-			&& !text.is_empty()
+			&& text.first().is_some_and(u8::is_ascii_digit)
 			&& text.iter().all(u8::is_ascii_digit)
 			&& (matches!(next, Some(b'<' | b'>')) || matches!(self.lx.last, T::LtAnd | T::GtAnd))
 			&& let Some(n) = parse_int(text)
@@ -839,13 +839,37 @@ impl<'s> Parser<'s> {
 		}
 		let buf: &'s [u8] = self.buf;
 		let rest = &buf[self.pos..];
-		let n = rest
-			.iter()
-			.take(9)
-			.position(|c| !c.is_ascii_lowercase())
-			.unwrap_or_else(|| rest.len().min(9));
+		let keyword: &[u8] = match rest {
+			[b'i', b'f', ..] => b"if",
+			[b'i', b'n', ..] => b"in",
+			[b't', b'h', ..] => b"then",
+			[b't', b'i', ..] => b"time",
+			[b'e', b'l', b's', ..] => b"else",
+			[b'e', b'l', b'i', ..] => b"elif",
+			[b'e', b's', ..] => b"esac",
+			[b'f', b'i', ..] => b"fi",
+			[b'f', b'o', ..] => b"for",
+			[b'f', b'u', ..] => b"function",
+			[b'c', b'a', ..] => b"case",
+			[b'c', b'o', ..] => b"coproc",
+			[b's', b'e', ..] => b"select",
+			[b'w', b'h', ..] => b"while",
+			[b'u', b'n', ..] => b"until",
+			[b'd', b'o', b'n', ..] => b"done",
+			[b'd', b'o', ..] => b"do",
+			[b'{', ..] => b"{",
+			[b'}', ..] => b"}",
+			[b'!', b'(', ..] if self.lx.extglob => return None,
+			[b'!', ..] => b"!",
+			[b'[', b'[', ..] => b"[[",
+			[b']', b']', ..] => b"]]",
+			_ => return None,
+		};
+		if !rest.starts_with(keyword) {
+			return None;
+		}
+		let n = keyword.len();
 		let text = &rest[..n];
-		reserved(text)?;
 		if rest
 			.get(n)
 			.is_some_and(|c| !matches!(c, b' ' | b'\t' | b'\n' | b';' | b'&' | b'|' | b'(' | b')'))

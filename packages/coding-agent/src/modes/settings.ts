@@ -751,7 +751,8 @@ export const cfgDisplaySmoothStreaming = register({
 		tab: "appearance",
 		group: "Display",
 		label: "Smooth Streaming",
-		description: "Reveal assistant text and streamed tool input smoothly while chunks arrive",
+		description:
+			"Reveal assistant text and streamed tool input smoothly while chunks arrive (Tern types assistant text out itself)",
 	},
 });
 
@@ -803,6 +804,18 @@ export const cfgDisplayCacheMissMarker = register({
 	},
 });
 
+export const cfgDisplayShellVisualization = register({
+	id: "display.shellVisualization",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Shell Visualization",
+		description: "Show bash commands as an interactive execution visualization instead of plain shell commands",
+	},
+});
+
 export const cfgDisplayAdvisorCollapsedLines = register({
 	id: "display.advisorCollapsedLines",
 	type: "number",
@@ -825,6 +838,7 @@ export const cfgDisplayAdvisorCollapsedLines = register({
 effect(
 	combine({
 		hideToolActivity: cfgDisplayHideToolActivity,
+		shellVisualization: cfgDisplayShellVisualization,
 		readToolResultPreview: cfgReadToolResultPreview,
 		showImages: cfgTerminalShowImages,
 		cacheMissMarker: cfgDisplayCacheMissMarker,
@@ -1279,6 +1293,24 @@ export const cfgUpdateChannel = register({
 			{ value: "stable", label: "Stable" },
 			{ value: "canary", label: "Canary" },
 		],
+	},
+});
+
+/**
+ * Background self-update: a launch that finds a newer release installs it the
+ * way `omp update` would, showing progress beside the welcome banner's version;
+ * the next launch runs it. Ignored where omp cannot update itself (Tern, Nix, a
+ * source checkout). Offered by the setup wizard.
+ */
+export const cfgUpdateAuto = register({
+	id: "update.auto",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Startup & Updates",
+		label: "Auto Update",
+		description: "Install omp updates in the background on startup; the next launch runs the new version",
 	},
 });
 

@@ -237,6 +237,18 @@ Judgment requests can share image attachments with vision-chat requests. Native 
 
 Catalog-backed native judges apply the selected model's image bounds. Direct `NativeJudge` constructors can supply `imageInput` bounds explicitly; opting into images does not inherit Jev's size limits for unrelated System One models.
 
+`openrouter-decisions` judges honor the model's `compat.openRouterRouting` and `compat.extraBody` as OpenRouter chat models do, under any base URL: routing (including an `@provider` selector pin) becomes the request's `provider` field, then `extraBody` is merged over the body. `openRouterRouting` accepts only `only` and `order`; for other [provider preferences](https://openrouter.ai/docs/provider-routing) such as `allow_fallbacks` or `data_collection`, set the whole `provider` object in `extraBody`, which replaces the routing block. Other judgment APIs ignore both keys.
+
+```yaml
+providers:
+   openrouter:
+      modelOverrides:
+         typesafe/jev-1.14:
+            compat:
+               extraBody:
+                  provider: { only: [typesafe], allow_fallbacks: false, data_collection: deny }
+```
+
 OpenAI Decisions forwards embedded `ImageContent.detail`, and different explicit fidelity settings retain separate native image-judgment cache entries. TypeSafe Jev has no image-detail equivalent: detail is ignored on the wire and in cache identity, so requests that differ only by detail can reuse an answer. Omitted detail and explicit `auto` share the default setting.
 
 Image inputs are validated before any candidate runs; malformed images fail as caller errors rather than exhausting the chain. Providers may enforce additional limits. Workers AI Clef accepts at most 4 PNG, JPEG, or WebP images of up to 4 MiB and 16 MP each, 8 MiB in total. Valid padded and unpadded base64, and MIME case variants, share one cache identity.

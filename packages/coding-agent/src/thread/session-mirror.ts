@@ -168,6 +168,7 @@ export interface SessionViewState {
 	skills: Skill[];
 	/** TTSR rules; null when the session has no TTSR manager. */
 	rules: Rule[] | null;
+	/** Published only while idle (false mid-run), the one time the retry hint reads it. */
 	hasAbortedToolCallTail: boolean;
 	isAutoThinking: boolean;
 	isCompacting: boolean;
@@ -225,6 +226,7 @@ export interface SessionAbortOptions {
 	goalReason?: "interrupted" | "internal";
 	reason?: string;
 	preserveCompaction?: boolean;
+	deliverQueuedMessages?: boolean;
 }
 
 /**
@@ -300,8 +302,11 @@ export type SessionBridgeProtocol = {
 	messages: RpcMethod<[key: string, delta: SessionMessagesDelta], void>;
 	event: RpcMethod<[key: string, event: AgentSessionEvent], void>;
 	runState: RpcMethod<[key: string, state: SessionRunState], void>;
-	/** Watch started: the full view state and entry list. */
-	view: RpcMethod<[key: string, state: SessionViewState, entries: SessionEntry[]], void>;
+	/**
+	 * Watch started: the full view state, and what main's entry list (kept across
+	 * watches) lacks; undefined when it is current.
+	 */
+	view: RpcMethod<[key: string, state: SessionViewState, entries: SessionEntriesDelta | undefined], void>;
 	viewPatch: RpcMethod<[key: string, patch: Partial<SessionViewState>], void>;
 	/**
 	 * Synchronous, from the agent's queued-message gate: queued entries `ids` are

@@ -60,9 +60,6 @@ use crate::{
 	workloads::Workload,
 };
 
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 /// Workloads and iterations per run (≈ 30–100 ms each in release).
 const WORKLOADS: [(Workload, u32); 3] =
 	[(Workload::Loop, 100_000), (Workload::Func, 60_000), (Workload::Strops, 60_000)];

@@ -28,7 +28,7 @@
 	--spot-score-free: #8b9cff;
 	--spot-holdout: var(--ink-1);
 	--spot-reference: var(--ink-3);
-	/* Edit-likely reads the edit gate kept whole: shown whole like the holdout, in a hue of their own. */
+	/* Reads pi's former edit gate kept whole: shown whole like the holdout, in a hue of their own. */
 	--spot-gated: #46c08a;
 }
 
@@ -793,35 +793,6 @@
 		var(--raised) 50%,
 		color-mix(in srgb, var(--ok) 70%, var(--card))
 	);
-}
-
-/* --------------------------------------------------------------------------
-   Edit-aware gate
-   -------------------------------------------------------------------------- */
-.spot-gate-share {
-	font-size: 12px;
-	color: var(--ink-3);
-}
-
-.spot-gate-share .num {
-	color: var(--ink-1);
-	font-weight: 600;
-}
-
-.spot-gate-net {
-	font-weight: 600;
-}
-
-.spot-gate-net[data-tone="ok"] {
-	color: var(--ok);
-}
-
-.spot-gate-net[data-tone="bad"] {
-	color: var(--bad);
-}
-
-.spot-gate-interval {
-	font-size: 11px;
 }
 
 /* --------------------------------------------------------------------------
