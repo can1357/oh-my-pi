@@ -34,7 +34,7 @@ import {
 } from "../../extensibility/extensions";
 import {
 	type BuiltSkillPromptMessage,
-	loadSkillPrompt,
+	loadSkillPrompts,
 	parseSkillInvocation,
 	type Skill,
 	type SkillPromptInput,
@@ -260,7 +260,7 @@ export type RpcSkillCommandSession = Pick<
 export type RpcSkillCommandResult = { agentInvoked: true };
 
 export interface RpcSkillInvocation extends SkillPromptInput {
-	skill: Skill;
+	skills: Skill[];
 	queueChipText: string;
 }
 
@@ -271,11 +271,11 @@ export interface RpcSkillInvocation extends SkillPromptInput {
  */
 export function resolveRpcSkillInvocation(session: RpcSkillCommandSession, text: string): RpcSkillInvocation | null {
 	if (!session.skillsSettings?.enableSkillCommands) return null;
-	const parsed = parseSkillInvocation(text);
+	const parsed = parseSkillInvocation(text, name => session.skills.some(candidate => candidate.name === name));
 	if (!parsed) return null;
-	const skill = session.skills.find(candidate => candidate.name === parsed.name);
-	if (!skill) return null;
-	return { skill, args: parsed.args, prompt: parsed.prompt, queueChipText: text };
+	const skills = parsed.names.flatMap(name => session.skills.find(candidate => candidate.name === name) ?? []);
+	if (skills.length === 0) return null;
+	return { skills, args: parsed.args, prompt: parsed.prompt, queueChipText: text };
 }
 
 /**
@@ -293,7 +293,7 @@ export async function runRpcSkillCommand(
 	onPromptAdmitted?: () => void,
 	images?: ImageContent[],
 ): Promise<boolean> {
-	const built = prebuilt ?? (await session.buildUserSkillPrompt(invocation.skill, invocation));
+	const built = prebuilt ?? (await session.buildUserSkillPrompt(invocation.skills, invocation));
 	return session.promptCustomMessage(
 		{
 			customType: SKILL_PROMPT_MESSAGE_TYPE,
@@ -331,13 +331,13 @@ export async function dispatchRpcSkillPrompt(input: {
 }): Promise<RpcSkillCommandResult | "cancelled" | null> {
 	const invocation = resolveRpcSkillInvocation(input.session, input.message);
 	if (!invocation) return null;
-	// Read the skill before acknowledging the command so a missing SKILL.md
+	// Read the skills before acknowledging the command so a missing SKILL.md
 	// still fails immediately (a stale one is read from its rediscovered
 	// replacement first). Rendering (and authorizing model tags) happens
 	// only after the in-flight submission survives the currentness check.
-	const loaded = await loadSkillPrompt(invocation.skill, input.session);
+	const loaded = await loadSkillPrompts(invocation.skills, input.session);
 	if (input.isCurrent && !input.isCurrent()) return "cancelled";
-	const built = input.session.renderUserSkillPrompt(loaded.skill, invocation, loaded.body);
+	const built = input.session.renderUserSkillPrompt(loaded, invocation);
 	// A failure before admission still resolves this wait (without rejecting this
 	// call) — reportPromptResult already routed it to onError and a failed prompt_result.
 	await watchAndReportPromptResult({

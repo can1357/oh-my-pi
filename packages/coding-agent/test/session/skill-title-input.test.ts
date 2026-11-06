@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { skillPromptTitleInput, titleTextFromSkillPrompt } from "@oh-my-pi/pi-tui/chat/skill-title-input";
 import { formatTitleConversationContext } from "../../src/tiny/message-preproc";
+import { renderSkillPromptMessage } from "../../src/extensibility/skills";
 
 describe("skillPromptTitleInput", () => {
 	it("prefers the operator chip over reconstructed skill args", () => {
@@ -67,5 +68,26 @@ describe("replan title envelope", () => {
 		expect(context).toContain("07-manual-llm.md");
 		expect(context).toContain("ticket 07");
 		expect(context).not.toContain("SKILL.md");
+	});
+});
+
+describe("multi-skill prompt title", () => {
+	it("titles a two-skill submission from the full draft, not only the first skill", () => {
+		// ACP and RPC send no queue chip, so the live title reads the persisted `details.prompt`.
+		const built = renderSkillPromptMessage(
+			[
+				{ skill: { name: "alpha", filePath: "/skills/alpha/SKILL.md", baseDir: "/skills/alpha" }, body: "Alpha" },
+				{ skill: { name: "beta", filePath: "/skills/beta/SKILL.md", baseDir: "/skills/beta" }, body: "Beta" },
+			],
+			{ args: "inspect", prompt: "/skill:alpha /skill:beta inspect" },
+		);
+		expect(
+			titleTextFromSkillPrompt({
+				role: "custom",
+				customType: "skill-prompt",
+				attribution: "user",
+				details: built.details,
+			}),
+		).toBe("/skill:alpha /skill:beta inspect");
 	});
 });
