@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.17.0] - 2026-11-06
+
 ### Breaking Changes
 
 - Replaced `parseShell()` with `RunTrace.present()` and `ShellVisualization`.

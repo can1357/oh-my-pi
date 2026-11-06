@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.17.0] - 2026-11-06
+
 ### Added
 
 - Added `getUpdateStateDir()`, returning the auto-update state directory (`~/.omp/update`).
