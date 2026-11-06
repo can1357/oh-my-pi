@@ -92,7 +92,8 @@ export class OAuthAccounts implements OAuthApi {
 			if (!result) {
 				return undefined;
 			}
-			await this.#deps.pool.storeLoginApiKey(provider, result);
+			// `store-as` routes API-key logins too, not only OAuth credentials.
+			await this.#deps.pool.storeLoginApiKey(def.storeCredentialsAs ?? provider, result);
 			return { type: "api_key" };
 		}
 		// Stamp the interactive-login instant: providers with an absolute grant

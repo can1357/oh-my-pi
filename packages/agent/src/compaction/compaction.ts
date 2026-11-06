@@ -86,15 +86,12 @@ import handoffDocumentPrompt from "./prompts/handoff-document.md" with { type: "
 import snapcompactArchiveContextPrompt from "./prompts/snapcompact-archive-context.md" with { type: "text" };
 
 import {
-	computeFileLists,
-	createFileOps,
 	escapeSummaryBoundaryTags,
 	extractFileOpsFromMessage,
-	type FileOperations,
+	incompleteOutputError,
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversationForSummary,
 	stripReadSelector,
-	upsertFileOperations,
 } from "./utils";
 
 // ============================================================================
@@ -114,8 +111,8 @@ function extractFileOperations(
 	messages: AgentMessage[],
 	entries: SessionEntry[],
 	prevCompactionIndex: number,
-): FileOperations {
-	const fileOps = createFileOps();
+): snapcompact.FileOperations {
+	const fileOps = snapcompact.createFileOps();
 
 	// Collect from previous compaction's details (if pi-generated)
 	if (prevCompactionIndex >= 0) {
@@ -750,6 +747,8 @@ export interface SummaryOptions {
 	providerSessionState?: Map<string, ProviderSessionState>;
 	/** Whether Codex remote compaction should prefer the provider WebSocket transport. */
 	preferWebsockets?: boolean;
+	/** Daybreak Blue request on Codex remote compaction; see `StreamOptions.codexAccessPrograms`. */
+	codexAccessPrograms?: boolean;
 	/** Classification shared by every provider request in this logical compaction. */
 	codexCompaction?: CodexCompactionContext;
 	/** Provider-visible tools for remote compaction transports that replay native tool history. */
@@ -1073,6 +1072,9 @@ async function summarizeConversationWindow(
 	if (response.stopReason === "error") {
 		throw createSummarizationError("Summarization failed", response);
 	}
+	if (response.stopReason === "length") {
+		throw new Error(incompleteOutputError("Summarization failed"));
+	}
 
 	const textContent = response.content
 		.filter((c): c is { type: "text"; text: string } => c.type === "text")
@@ -1179,6 +1181,9 @@ export async function generateHandoffFromContext(
 
 	if (response.stopReason === "error") {
 		throw createSummarizationError("Handoff generation failed", response);
+	}
+	if (response.stopReason === "length") {
+		throw new Error(incompleteOutputError("Handoff generation failed"));
 	}
 
 	return response.content
@@ -1303,8 +1308,10 @@ async function generateShortSummary(
 				case "error":
 					outcome = { kind: "failed", error: response.errorMessage || "Unknown error" };
 					break;
-				case "stop":
 				case "length":
+					outcome = { kind: "failed", error: incompleteOutputError("Short summary failed") };
+					break;
+				case "stop":
 				case "toolUse":
 					outcome = {
 						kind: "text",
@@ -1373,7 +1380,7 @@ export interface CompactionPreparation {
 	/** Preserved opaque compaction payload from the previous compaction, if any. */
 	previousPreserveData?: Record<string, unknown>;
 	/** File operations extracted from messagesToSummarize */
-	fileOps: FileOperations;
+	fileOps: snapcompact.FileOperations;
 	/** Compaction settions from settings.jsonl	*/
 	settings: CompactionSettings;
 }
@@ -1765,6 +1772,7 @@ export async function compact(
 				: options?.promptCacheKey,
 		providerSessionState: options?.providerSessionState,
 		preferWebsockets: options?.preferWebsockets,
+		codexAccessPrograms: options?.codexAccessPrograms,
 		codexCompaction: options?.codexCompaction,
 		tools: options?.tools,
 		fetch: options?.fetch,
@@ -2000,6 +2008,7 @@ export async function compact(
 						fetch: summaryOptions.fetch,
 						providerSessionState: summaryOptions.providerSessionState,
 						preferWebsockets: summaryOptions.preferWebsockets,
+						codexAccessPrograms: summaryOptions.codexAccessPrograms,
 						codexCompaction: summaryOptions.codexCompaction,
 					}),
 				{ signal },
@@ -2330,8 +2339,8 @@ export async function compact(
 			});
 
 	// Compute file lists and append to summary
-	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
-	summary = upsertFileOperations(summary, readFiles, modifiedFiles, fileOps.read);
+	const { readFiles, modifiedFiles } = snapcompact.computeFileLists(fileOps);
+	summary = snapcompact.upsertFileOperations(summary, readFiles, modifiedFiles, fileOps.read);
 	if (nativeSummary !== undefined) {
 		// The replayed block (summary and any `tool_changes`) stays
 		// byte-identical to the API's output so it matches its signature. The
@@ -2339,7 +2348,7 @@ export async function compact(
 		// summary message with the block and skips its text, so they would
 		// otherwise be invisible to this provider. Every other provider keeps
 		// reading the entry text.
-		const filesText = upsertFileOperations("", readFiles, modifiedFiles, fileOps.read) || undefined;
+		const filesText = snapcompact.upsertFileOperations("", readFiles, modifiedFiles, fileOps.read) || undefined;
 		preserveData = withAnthropicCompactionPreserveData(preserveData, {
 			provider: model.provider,
 			content: nativeSummary,
@@ -2430,6 +2439,9 @@ async function generateTurnPrefixSummary(
 
 	if (response.stopReason === "error") {
 		throw createSummarizationError("Turn prefix summarization failed", response);
+	}
+	if (response.stopReason === "length") {
+		throw new Error(incompleteOutputError("Turn prefix summarization failed"));
 	}
 
 	return response.content

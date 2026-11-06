@@ -19,6 +19,8 @@ interface JobSnapshotLike {
 	/** "running" | "completed" | "failed" | "cancelled" upstream. */
 	status: string;
 	label: string;
+	/** What the job is for, in the model's words; shown over a command `label`. */
+	intent: string;
 	durationMs: number;
 	resultText: string;
 	errorText: string;
@@ -70,6 +72,7 @@ function jobOf(value: unknown): JobSnapshotLike | null {
 		type: str(value.type) ?? "",
 		status: str(value.status) ?? "",
 		label: str(value.label) ?? "",
+		intent: str(value.intent) ?? "",
 		durationMs: num(value.durationMs) ?? 0,
 		resultText: str(value.resultText) ?? "",
 		errorText: str(value.errorText) ?? "",
@@ -137,7 +140,7 @@ function stripTaskResultEnvelope(text: string): string {
 
 function JobRow({ job }: { job: JobSnapshotLike }): ReactNode {
 	const tone = statusTone(job.status);
-	const label = normalizeWs(job.label) || "(no label)";
+	const label = normalizeWs(job.intent) || normalizeWs(job.label) || "(no label)";
 	// Task jobs label themselves with their agent id — drop the id column
 	// instead of stuttering it twice.
 	const showId = label !== job.id;

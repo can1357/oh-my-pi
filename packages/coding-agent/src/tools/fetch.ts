@@ -13,8 +13,8 @@ import type { Element } from "@oh-my-pi/pi-utils/dom";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import type { ToolSession } from "../sdk";
-import type { AgentStorage } from "../session/agent-storage";
-import { DEFAULT_MAX_BYTES, truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import type { AgentStorageApi } from "../session/agent-storage";
+import { DEFAULT_MAX_BYTES, truncateHead, truncateHeadBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import { CONVERTIBLE_EXTENSIONS } from "../utils/markit";
@@ -643,7 +643,7 @@ export async function renderHtmlToText(
 	timeout: number,
 	settings: Settings,
 	userSignal: AbortSignal | undefined,
-	storage: AgentStorage | null,
+	storage: AgentStorageApi | null,
 	fetchOverride?: FetchImpl,
 ): Promise<{ content: string; ok: boolean; method: string }> {
 	const overallSignal = ptree.combineSignals(userSignal, timeout * 1000);
@@ -1107,7 +1107,7 @@ async function handleSpecialUrls(
 	url: string,
 	timeout: number,
 	signal: AbortSignal | undefined,
-	storage: AgentStorage | null,
+	storage: AgentStorageApi | null,
 	modelRegistry: ModelRegistry | undefined,
 ): Promise<FetchRenderResult | null> {
 	const specialHandlers = await loadSpecialHandlers();
@@ -1134,7 +1134,7 @@ async function renderUrl(
 	raw: boolean,
 	settings: Settings,
 	signal: AbortSignal | undefined,
-	storage: AgentStorage | null,
+	storage: AgentStorageApi | null,
 	modelRegistry: ModelRegistry | undefined,
 	fetchOverride?: FetchImpl,
 	excludeWebP?: true,
@@ -1802,10 +1802,23 @@ export async function executeReadUrl(
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<ReadUrlToolDetails>> {
 	let entry = await fetchReadUrl(session, params, signal);
-	const truncation = truncateHead(entry.output, {
+	let truncation = truncateHead(entry.output, {
 		maxBytes: DEFAULT_MAX_BYTES,
 		maxLines: FETCH_DEFAULT_MAX_LINES,
 	});
+	if (truncation.firstLineExceedsLimit) {
+		// `truncateHead` keeps whole lines only, so a minified page's first line left the body empty.
+		// Show that line's head instead, as file reads do; the budget's bytes all lie inside it.
+		const preview = truncateHeadBytes(entry.output, DEFAULT_MAX_BYTES);
+		const newline = entry.output.indexOf("\n");
+		truncation = {
+			...truncation,
+			content: preview.text,
+			totalBytes: Buffer.byteLength(newline === -1 ? entry.output : entry.output.slice(0, newline), "utf-8"),
+			outputLines: preview.bytes > 0 ? 1 : 0,
+			outputBytes: preview.bytes,
+		};
+	}
 	const needsArtifact = truncation.truncated;
 	if (needsArtifact && !entry.artifactId) {
 		entry = await ensureReadUrlArtifact(session, entry);
