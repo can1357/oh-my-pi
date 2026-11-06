@@ -1,4 +1,5 @@
 import { type MessagePort, parentPort } from "node:worker_threads";
+import { Type } from "@oh-my-pi/omptype/typebox";
 import { type AgentTool, normalizeTools } from "@oh-my-pi/pi-agent-core";
 import { type Api, type Context, type Model, streamSimple } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../../src/config/model-registry";
@@ -59,16 +60,14 @@ class ProbeSession {
 	readonly cwd = "/probe";
 }
 
+const PROBE_PARAMETERS = Type.Object({ path: Type.String() });
+
 /** A session tool like `ExtensionToolWrapper`: its constructor fields are live class instances. */
-class SessionBoundTool {
+class SessionBoundTool implements AgentTool<typeof PROBE_PARAMETERS> {
 	readonly name = "probe_tool";
 	readonly label = "Probe";
 	readonly description = "Reads a path";
-	readonly parameters = {
-		type: "object",
-		properties: { path: { type: "string" } },
-		required: ["path"],
-	};
+	readonly parameters = PROBE_PARAMETERS;
 
 	constructor(readonly session: ProbeSession) {}
 
@@ -126,7 +125,7 @@ const probe: MirrorProbe = {
 	streamWithTools: async (registry, provider, id) => {
 		const model = registry.find(provider, id);
 		if (!model) throw new Error(`mirror has no ${provider}/${id}`);
-		const tool = new SessionBoundTool(new ProbeSession()) as unknown as AgentTool;
+		const tool = new SessionBoundTool(new ProbeSession());
 		return recordStream(model, { messages: USER_HI, tools: normalizeTools([tool], { injectIntent: false }) });
 	},
 	resolveHeaders: async (registry, provider, id) => {

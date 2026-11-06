@@ -318,7 +318,12 @@ describe("worker model registry mirror", () => {
 				{
 					name: "probe_tool",
 					description: "Reads a path",
-					parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+					parameters: {
+						type: "object",
+						properties: { path: { type: "string" } },
+						required: ["path"],
+						additionalProperties: false,
+					},
 				},
 			],
 		]);
