@@ -697,7 +697,9 @@ mod tests {
 			.build()
 			.unwrap();
 		// The host's only scheduler worker: whatever an ordinary task runs on.
-		let host_worker = host.block_on(host.spawn(async { std::thread::current().id() })).unwrap();
+		let host_worker = host
+			.block_on(host.spawn(async { std::thread::current().id() }))
+			.unwrap();
 
 		let parent: Arc<Mutex<Option<ThreadId>>> = Arc::new(Mutex::new(None));
 		let child: Arc<Mutex<Option<ThreadId>>> = Arc::new(Mutex::new(None));
@@ -726,11 +728,13 @@ mod tests {
 		let child_thread = child.lock().unwrap().expect("the walk spawned no child");
 		assert_ne!(
 			parent_thread, host_worker,
-			"filesystem work ran on the host scheduler worker, where it can starve every other native call"
+			"filesystem work ran on the host scheduler worker, where it can starve every other \
+			 native call"
 		);
 		assert_ne!(
 			child_thread, host_worker,
-			"filesystem work spawned a child onto the host scheduler worker, which is where the syscalls that park a thread actually run"
+			"filesystem work spawned a child onto the host scheduler worker, which is where the \
+			 syscalls that park a thread actually run"
 		);
 	}
 
