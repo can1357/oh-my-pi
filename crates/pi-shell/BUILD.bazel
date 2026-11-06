@@ -23,7 +23,10 @@ rust_library(
         exclude = ["src/bin/**"],
     ),
     aliases = aliases(),
-    compile_data = glob(["src/minimizer/filters/fixtures/**"]),
+    compile_data = glob([
+        "src/minimizer/filters/fixtures/**",
+        "src/process/*.txt",
+    ]),
     crate_name = "pi_shell",
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
