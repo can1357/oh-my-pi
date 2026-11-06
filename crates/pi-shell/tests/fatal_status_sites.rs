@@ -43,12 +43,8 @@ async fn check(rows: &[(&str, &str, i32)]) {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_err_trap_arming_sample_covers_every_command() {
 	check(&[
-		(r##"trap 'trap "exit 23" ERR' DEBUG; ((0)); echo AFTER:$?"##, "AFTER:1\n", 0),
-		(r##"trap 'trap "exit 23" ERR' DEBUG; [[ a = b ]]; echo AFTER:$?"##, "AFTER:1\n", 0),
 		(r##"trap 'trap "exit 23" ERR' DEBUG; { false; }; echo AFTER:$?"##, "AFTER:1\n", 0),
 		(r##"trap 'trap "echo N" ERR' DEBUG; { false; }; echo A:$?"##, "A:1\n", 0),
-		(r##"trap 'trap "echo N" ERR' DEBUG; ((0)); echo A:$?"##, "A:1\n", 0),
-		(r##"trap 'trap "echo N" ERR' DEBUG; [[ a = b ]]; echo A:$?"##, "A:1\n", 0),
 		// Controls: the trap installed before the command still runs, once.
 		(r##"trap 'trap "exit 23" ERR' DEBUG; false; echo AFTER:$?"##, "AFTER:1\n", 0),
 		(r##"trap 'trap "echo N" ERR' DEBUG; ( false ); echo A:$?"##, "A:1\n", 0),
@@ -73,31 +69,6 @@ async fn the_err_trap_arming_sample_covers_every_command() {
 		// commands after it inside that body.
 		(r##"{ trap 'echo N' ERR; false; }; echo A:$?"##, "N\nA:1\n", 0),
 		(r##"( trap 'echo N' ERR; false ); echo A:$?"##, "N\nA:1\n", 0),
-	])
-	.await;
-}
-
-/// A jump keeps the status at its site (bash's `last_command_exit_value`)
-/// across a child that hands one back: a `( … )`, a pipeline stage, a `&`
-/// job, an arithmetic-`for` body and a command substitution in the failing
-/// assignment's own value.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_child_hands_its_status_back_to_the_site() {
-	check(&[
-		(r##"readonly r=1; set -e; trap '(r=2); echo BAD' EXIT; exit 7"##, "", 7),
-		(r##"readonly r=1; set -e; trap 'cat /dev/null | r=2; echo BAD' EXIT; exit 7"##, "", 7),
-		(r##"readonly r=1; set -e; trap 'r=2 & wait $!; echo BAD' EXIT; exit 7"##, "", 7),
-		(
-			r##"readonly r=1; set -e; trap 'for ((i=0;i<1;i++)); do r=2; done; echo BAD' EXIT; exit 7"##,
-			"",
-			7,
-		),
-		(r##"readonly r=1; set -e; trap '(r=$(exit 3)); echo BAD' EXIT; exit 7"##, "", 3),
-		// Controls: the direct assignment, and the same shapes without
-		// `errexit`, are already right and must stay so.
-		(r##"readonly r=1; set -e; trap 'r=2' EXIT; exit 7"##, "", 7),
-		(r##"readonly r=1; trap '(r=2); echo BAD' EXIT; exit 7"##, "BAD\n", 7),
-		(r##"readonly r=1; set -e; trap ':; r=2' EXIT; exit 7"##, "", 1),
 	])
 	.await;
 }

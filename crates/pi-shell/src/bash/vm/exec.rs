@@ -433,13 +433,22 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			Flow::Return(status) => {
 				// `${ ;}` ends like a function; a subshell of a function
 				// (`( return )`, `$( return )`) exits.
-				let target = vp.frames.iter().rposition(|f| {
-					matches!(
-						f.kind,
-						FrameKind::Function { .. }
-							| FrameKind::NoFork
-							| FrameKind::Script { what: ScriptKind::Source, .. }
-					)
+				// bash runs a sourced file's RETURN trap after the `.` has
+				// already ended, so a `return` in that action has no
+				// sourced script to leave and must not replace the status
+				// the file returned. A function's frame is still live when
+				// its RETURN action runs, so a `return` there is valid.
+				let return_action = vp.frames.iter().rposition(|f| {
+					matches!(f.kind, FrameKind::Script {
+						what: ScriptKind::Trap { key: TrapKey::Return, .. },
+						..
+					})
+				});
+				let target = (0..vp.frames.len()).rev().find(|&i| {
+					let f = &vp.frames[i];
+					matches!(f.kind, FrameKind::Function { .. } | FrameKind::NoFork)
+						|| (matches!(f.kind, FrameKind::Script { what: ScriptKind::Source, .. })
+							&& return_action.is_none_or(|t| i > t))
 				});
 				if let Some(i) = target {
 					// bash's `run_return_trap` runs before the `return`'s
@@ -539,14 +548,23 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 		// the command itself installs does not fire for it. Only an `Exec`
 		// samples at its own start (`starts_command` is unconditional for
 		// it), so only an `Exec` is gated; zsh's ZERR has no such test.
+		// A `(( ))` and a `[[ ]]` are not gated yet: their sample is taken
+		// on another frame than the one their completion reads, so gating
+		// them here loses the trap a command before them installed.
 		let armed = zsh
 			|| op.code != Opcode::Exec
 			|| vp.frames.get(fi).is_some_and(|f| f.err_trap_armed);
-		if failed_command && armed && start_trap(k, vp, cx, TrapKey::Err) {
-			set_trap_line(vp, err_line);
+		if failed_command {
+			// The command bash reports is this one, whether or not its
+			// sample armed the trap: an enclosing group or compound must
+			// not report the same failure again (`{ false; }` runs the
+			// trap once, or not at all).
 			for frame in &mut vp.frames[..fi.saturating_add(1)] {
 				frame.err_reported = true;
 			}
+		}
+		if failed_command && armed && start_trap(k, vp, cx, TrapKey::Err) {
+			set_trap_line(vp, err_line);
 			// bash runs the ERR trap first and reads
 			// `exit_immediately_on_error` only after it returns
 			// (`execute_cmd.c:869-880`), so the action's own `set -e` /

@@ -897,6 +897,27 @@ fn expand(
 					.position(|&c| c == b']')
 					.map_or(src.len(), |p| p + 1);
 				k.diag(cx, vp, line, Diag::InvalidIdent { name: BString::from(&src[..close]) });
+				// In posix mode an invalid temporary-environment NAME is an
+				// assignment error like any other: a special builtin ends
+				// the shell with the fatal status, any other command
+				// abandons the line with the discard one and never runs.
+				// Outside posix mode bash runs the command without the
+				// assignment.
+				if unit.mode.dialect() != crate::bash::ids::Dialect::Zsh
+					&& state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
+						.unwrap_or(false)
+				{
+					if IntrinsicId::from_name(&st(vp).argv[0]).is_some_and(is_special) {
+						return Some(exec::fatal(k, vp, cx));
+					}
+					if !matches!(st(vp).target, Some(Target::Function(_))) {
+						return Some(Flow::Discard(1));
+					}
+					let s = st(vp);
+					s.status = 1;
+					s.stage = Stage::Finish;
+					return None;
+				}
 				let s = st(vp);
 				s.assigns.push((a.name.clone(), BString::default()));
 				s.values
