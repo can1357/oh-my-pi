@@ -16,6 +16,7 @@ import type {
 	AnthropicSlowModeRetry,
 	AnthropicSlowModeSignal,
 	Api,
+	ApiKeyConfig,
 	ApiKeyResolver,
 	AssistantMessage,
 	AssistantMessageEvent,
@@ -184,7 +185,7 @@ export type AuthStorageProtocol = {
 	"keys.describe": RpcMethod<[provider: string, sessionId?: string], string | undefined>;
 	"keys.setRuntime": RpcMethod<[provider: string, apiKey: string], void>;
 	"keys.removeRuntime": RpcMethod<[provider: string], void>;
-	"keys.setConfig": RpcMethod<[provider: string, apiKeyConfig: string, options?: { fallback?: boolean }], void>;
+	"keys.setConfig": RpcMethod<[provider: string, apiKeyConfig: ApiKeyConfig, options?: { fallback?: boolean }], void>;
 	"keys.removeConfig": RpcMethod<[provider: string], void>;
 	"keys.clearConfig": RpcMethod<[], void>;
 	"keys.setResolver": RpcMethod<[resolver: (config: string) => Promise<string | undefined>], void>;

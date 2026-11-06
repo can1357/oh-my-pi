@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `keys.setConfig` accepts an ordered list of key references; requests use the first unblocked entry, and `limits.rotate`/`limits.markReached` block a rejected entry so the next one serves until the block expires ([#18247](https://github.com/can1357/oh-my-pi/pull/18247) by [@VeigaPunk](https://github.com/VeigaPunk))
+
 ## [18.17.0] - 2026-11-06
 
 ### Added

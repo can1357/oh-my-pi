@@ -1,6 +1,11 @@
 import * as path from "node:path";
 import type { ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
-import { type AuthApiKeyOptions, type AuthPeekOptions, oauthAccountKey } from "@oh-my-pi/pi-ai/auth-storage";
+import {
+	type ApiKeyConfig,
+	type AuthApiKeyOptions,
+	type AuthPeekOptions,
+	oauthAccountKey,
+} from "@oh-my-pi/pi-ai/auth-storage";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
@@ -326,7 +331,7 @@ export class ModelRegistry {
 	#internedStaticModels: Map<string, Model<Api>> = new Map();
 	#providerLookupSnapshots: Map<string, Model<Api>[]> = new Map();
 	#fullKindSnapshots = new WeakMap<Model<Api>[], Partial<Record<ModelKind, Model<Api>[]>>>();
-	#customProviderApiKeys: Map<string, string> = new Map();
+	#customProviderApiKeys: Map<string, ApiKeyConfig> = new Map();
 	// Every command-backed (`!cmd`) config value a provider carries — apiKey plus
 	// provider/model-override header values — keyed by provider. The 401 auth
 	// retry invalidates these command caches so the request-boundary resolver
@@ -496,10 +501,12 @@ export class ModelRegistry {
 	 */
 	#collectCommandConfigValues(
 		target: Set<string>,
-		apiKey: string | undefined,
+		apiKey: ApiKeyConfig | undefined,
 		headers: Record<string, string> | undefined,
 	): void {
-		if (isCommandConfigValue(apiKey)) target.add(apiKey);
+		for (const keyConfig of typeof apiKey === "string" ? [apiKey] : (apiKey ?? [])) {
+			if (isCommandConfigValue(keyConfig)) target.add(keyConfig);
+		}
 		if (!headers) return;
 		for (const key in headers) {
 			const value = headers[key];
@@ -522,7 +529,10 @@ export class ModelRegistry {
 
 	/** Drop only this process's cached results for `provider`'s command-backed values. */
 	#invalidateLocalProviderCommandConfigs(provider: string): void {
-		invalidateCommandConfig(this.#customProviderApiKeys.get(provider));
+		const keyConfig = this.#customProviderApiKeys.get(provider);
+		for (const entry of typeof keyConfig === "string" ? [keyConfig] : (keyConfig ?? [])) {
+			invalidateCommandConfig(entry);
+		}
 		const configs = this.#commandConfigsByProvider.get(provider);
 		if (configs) {
 			for (const config of configs) invalidateCommandConfig(config);
@@ -565,7 +575,7 @@ export class ModelRegistry {
 		this.#reloadStaticModels();
 	}
 
-	#installProviderApiKey(provider: string, keyConfig: string, options?: { fallback?: boolean }): void {
+	#installProviderApiKey(provider: string, keyConfig: ApiKeyConfig, options?: { fallback?: boolean }): void {
 		this.#customProviderApiKeys.set(provider, keyConfig);
 		if (!this.#owner) this.authStorage.keys.setConfig(provider, keyConfig, options);
 	}
@@ -2115,7 +2125,8 @@ export class ModelRegistry {
 								? normalizeBareDiscoveryBaseUrl(providerConfig.baseUrl)
 								: providerConfig.baseUrl,
 					headers: providerConfig.headers,
-					apiKey: providerConfig.apiKey,
+					// Only `authHeader` reads this, and the schema limits that to a single key.
+					apiKey: typeof providerConfig.apiKey === "string" ? providerConfig.apiKey : undefined,
 					authHeader: providerConfig.authHeader,
 					compat: mergeCompat(providerConfig.compat, disableStrictCompat),
 					remoteCompaction: providerConfig.remoteCompaction,
@@ -3333,7 +3344,7 @@ export class ModelRegistry {
 					providerConfig.baseUrl!,
 					providerConfig.api as Api | undefined,
 					providerConfig.headers,
-					providerConfig.apiKey,
+					typeof providerConfig.apiKey === "string" ? providerConfig.apiKey : undefined,
 					providerConfig.authHeader,
 					providerCompat,
 					(providerConfig.auth as ProviderAuthMode | undefined) ?? undefined,
@@ -3513,7 +3524,9 @@ export class ModelRegistry {
 	 */
 	hasCommandBackedApiKey(provider: string): boolean {
 		const keyConfig = this.#customProviderApiKeys.get(provider);
-		return isCommandConfigValue(keyConfig);
+		return typeof keyConfig === "string"
+			? isCommandConfigValue(keyConfig)
+			: (keyConfig?.some(isCommandConfigValue) ?? false);
 	}
 
 	getDiscoverableProviders(): string[] {

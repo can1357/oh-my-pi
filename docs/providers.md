@@ -57,7 +57,7 @@ Implicit `ollama` and `lm-studio` discovery is keyless by default; implicit `lla
 When a provider needs an API key, `omp` resolves it in this order (first match wins):
 
 1. **Runtime override**: a key supplied for the current process, for example CLI `--api-key`. Never persisted.
-2. **`models.yml` config key**: an `apiKey` pinned on a custom provider, registered as a config-sourced bearer. This deliberately beats stored OAuth, so a key supplied for a custom `baseUrl` or gateway is honored instead of forwarding an upstream OAuth token the proxy would reject.
+2. **`models.yml` config key**: an `apiKey` pinned on a custom provider, registered as a config-sourced bearer. This deliberately beats stored OAuth, so a key supplied for a custom `baseUrl` or gateway is honored instead of forwarding an upstream OAuth token the proxy would reject. A list of keys is tried in order: later entries serve only while earlier ones are rejected (see [Pinning a key in `models.yml`](#pinning-a-key-in-modelsyml)).
 3. **Stored OAuth credential**: refreshed when needed; multiple accounts are ranked and rotated automatically. For Anthropic and ChatGPT (Codex), each organization or workspace counts as its own account: one email holding both a Team or Enterprise seat and a personal plan can log in once per subscription (pick the workspace on the browser consent page), and rotation treats them as two accounts.
 4. **Login-sourced stored API key**: an API-key credential saved by a successful `/login`.
 5. **Extension config fallback**: an extension provider registered with both an `apiKey` reference and an OAuth/login flow ranks that reference below stored OAuth and login keys.
@@ -104,6 +104,16 @@ providers:
 ```
 
 If `authHeader: true` is set on a custom provider, the resolved key is injected as an `Authorization: Bearer <key>` header on every request to that provider.
+
+To give a provider a primary key and fallbacks, list them in priority order. Requests use the first entry; when the provider rejects it with a 401/403 or a usage/quota limit, that entry is blocked for the same time a stored credential would be and the request retries on the next one. The primary is used again once its block expires. An entry whose command fails is skipped.
+
+```yaml
+providers:
+   mistral:
+      apiKey:
+         - MISTRAL_API_KEY # primary
+         - "!cat ~/.config/mistral/backup-key" # fallback while the primary is rejected
+```
 
 ## Environment variables and `.env` files
 

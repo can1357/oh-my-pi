@@ -24,6 +24,12 @@ import type {
 /** Default remaining quota protected for accounts without an explicit policy override. */
 export const DEFAULT_USAGE_RESERVE_PCT = 10;
 
+/**
+ * Config-sourced API key reference (env var name, `!command`, or literal), or
+ * an ordered list of them where earlier entries are preferred.
+ */
+export type ApiKeyConfig = string | readonly string[];
+
 /** Stored API key used by credential selection. */
 export type ApiKeyCredential = {
 	type: "api_key";
@@ -1031,8 +1037,12 @@ export interface KeysApi {
 	 * `fallback: true` ranks the value below stored OAuth and `/login`
 	 * credentials instead, so a provider's default key reference cannot shadow
 	 * a key the user logged in with.
+	 *
+	 * A list is an ordered set of keys: requests use the first entry that is
+	 * not blocked and resolves to a non-empty value; `limits.rotate` blocks the
+	 * entry that served a rejected request so the next one takes over.
 	 */
-	setConfig(provider: string, apiKeyConfig: string, options?: { fallback?: boolean }): void;
+	setConfig(provider: string, apiKeyConfig: ApiKeyConfig, options?: { fallback?: boolean }): void;
 	/**
 	 * Remove a single config-sourced API key (override or fallback).
 	 */

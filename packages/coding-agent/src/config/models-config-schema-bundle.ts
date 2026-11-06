@@ -375,7 +375,8 @@ export const getModelsConfigSchemaBundle = once(() => {
 
 	const ProviderConfigSchema = type({
 		"baseUrl?": "string",
-		"apiKey?": "string",
+		/** One key reference, or an ordered list: later entries serve only while earlier ones are rejected. */
+		"apiKey?": "string | string[]",
 		"api?": ApiSchema,
 		"headers?": { "[string]": "string" },
 		"compat?": ApiCompatSchema,
@@ -415,6 +416,14 @@ export const getModelsConfigSchemaBundle = once(() => {
 		}
 		if (value.apiKey !== undefined && typeof value.apiKey === "string" && value.apiKey.length === 0) {
 			return ctx.mustBe("apiKey a non-empty string");
+		}
+		if (Array.isArray(value.apiKey)) {
+			if (value.apiKey.length === 0 || value.apiKey.some(entry => entry.length === 0)) {
+				return ctx.mustBe("apiKey a non-empty list of non-empty strings");
+			}
+			if (value.authHeader === true) {
+				return ctx.mustBe("apiKey a single string when authHeader is true");
+			}
 		}
 		return true;
 	});

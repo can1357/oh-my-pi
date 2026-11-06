@@ -3,6 +3,7 @@
  */
 
 import type { FluentType } from "@oh-my-pi/omptype";
+import type { ApiKeyConfig } from "@oh-my-pi/pi-ai/auth-storage";
 import type { Api, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { AXES } from "@oh-my-pi/pi-catalog/compat/axes";
 import { type ModelKind, servedKinds } from "@oh-my-pi/pi-catalog/types";
@@ -25,7 +26,7 @@ export interface ProviderValidationModel {
 export interface ProviderValidationConfig {
 	baseUrl?: string;
 	headers?: Record<string, string>;
-	apiKey?: string;
+	apiKey?: ApiKeyConfig;
 	api?: Api;
 	auth?: ProviderAuthMode;
 	oauthConfigured?: boolean;
