@@ -941,13 +941,14 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 	/// transfer's reply; `true` on failure.
 	fn senddata(&mut self, name: &str, recv: bool, progress: bool, startat: i64) -> Z<bool> {
 		let mut sofar = 0;
-		let mut last = 0;
-		if progress && self.func("zftp_progress")? {
+		let mut last = if progress && self.func("zftp_progress")? {
 			// The start: ZFTP_COUNT is 0.
 			self.hook("zftp_progress")?;
 			sofar = startat;
-			last = startat;
-		}
+			startat
+		} else {
+			0
+		};
 		let Some(data_fd) = self.sess().dfd else {
 			return Ok(true);
 		};
@@ -1056,7 +1057,6 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 		&mut self,
 		fnam: &[u8],
 		remote: bool,
-		want_size: bool,
 		want_mdtm: bool,
 		fd0: bool,
 	) -> Z<(i32, i64, Option<BString>)> {
@@ -1064,26 +1064,24 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 		let mut mt = None;
 		if remote {
 			let (hs, hm) = (self.sess().has_size, self.sess().has_mdtm);
-			if (hs == CP_NOPE && want_size) || (hm == CP_NOPE && want_mdtm) {
+			if hs == CP_NOPE || (hm == CP_NOPE && want_mdtm) {
 				return Ok((2, -1, None));
 			}
 			let ty = self.status() & ST_TMSK;
 			self.settype(ty)?;
-			if want_size {
-				let mut cmd = BString::from("SIZE ");
-				cmd.extend_from_slice(fnam);
-				cmd.extend_from_slice(b"\r\n");
-				if self.sendcmd(&cmd)? == 6 {
-					return Ok((1, -1, None));
-				} else if self.st.lastcode < 300 {
-					sz = zstrtol(&self.st.lastmsg);
-					self.sess().has_size = CP_YUPP;
-				} else if (500..=504).contains(&self.st.lastcode) {
-					self.sess().has_size = CP_NOPE;
-					return Ok((2, -1, None));
-				} else if self.st.lastcode == 550 {
-					return Ok((1, -1, None));
-				}
+			let mut cmd = BString::from("SIZE ");
+			cmd.extend_from_slice(fnam);
+			cmd.extend_from_slice(b"\r\n");
+			if self.sendcmd(&cmd)? == 6 {
+				return Ok((1, -1, None));
+			} else if self.st.lastcode < 300 {
+				sz = zstrtol(&self.st.lastmsg);
+				self.sess().has_size = CP_YUPP;
+			} else if (500..=504).contains(&self.st.lastcode) {
+				self.sess().has_size = CP_NOPE;
+				return Ok((2, -1, None));
+			} else if self.st.lastcode == 550 {
+				return Ok((1, -1, None));
 			}
 			if want_mdtm {
 				let mut cmd = BString::from("MDTM ");
@@ -1114,7 +1112,7 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 				mt = Some(mdtm(mtime));
 			}
 		}
-		Ok((0, if want_size { sz } else { -1 }, mt))
+		Ok((0, sz, mt))
 	}
 
 	/// zsh `zfstarttrans`.
@@ -1213,12 +1211,11 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 
 	/// zsh `newsession`: switch to session `nm`, creating it.
 	fn newsession(&mut self, nm: &[u8]) -> Z<()> {
-		match self.st.sessions.iter().position(|s| s.name == nm) {
-			Some(i) => self.st.cur = i,
-			None => {
-				self.st.sessions.push(Session::new(nm));
-				self.st.cur = self.st.sessions.len() - 1;
-			},
+		if let Some(i) = self.st.sessions.iter().position(|s| s.name == nm) {
+			self.st.cur = i;
+		} else {
+			self.st.sessions.push(Session::new(nm));
+			self.st.cur = self.st.sessions.len() - 1;
 		}
 		let name = self.sess().name.clone();
 		self.setsparam("ZFTP_SESSION", &name)
@@ -1287,11 +1284,12 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 				}
 			}
 		}
-		let mut ret = 0;
-		if self.control_fd().is_some() && flags & (TEST | SESS) == 0 {
-			// Anything waiting on the connection (a 421 after a timeout).
-			ret = self.test()?;
-		}
+		// Anything waiting on the connection (a 421 after a timeout).
+		let ret = if self.control_fd().is_some() && flags & (TEST | SESS) == 0 {
+			self.test()?
+		} else {
+			0
+		};
 		if flags & CONN != 0 && self.control_fd().is_none() {
 			if ret != 2 {
 				self.warn(&fullname, "not connected.")?;
@@ -1350,12 +1348,11 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 	/// zsh `zftp_open`.
 	fn open(&mut self, name: &str, args: &[BString]) -> Z<i32> {
 		let args: Vec<BString> = if args.is_empty() {
-			match self.sess().userparams.clone() {
-				Some(u) => u,
-				None => {
-					self.warn(name, "no host specified")?;
-					return Ok(1);
-				},
+			if let Some(u) = self.sess().userparams.clone() {
+				u
+			} else {
+				self.warn(name, "no host specified")?;
+				return Ok(1);
 			}
 		} else {
 			args.to_vec()
@@ -1826,7 +1823,7 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 		let mut i = 0;
 		while i < args.len() || dofd {
 			let arg = args.get(i).cloned().unwrap_or_default();
-			let (newret, sz, mt) = self.stats(&arg, flags & HERE == 0, true, true, dofd)?;
+			let (newret, sz, mt) = self.stats(&arg, flags & HERE == 0, true, dofd)?;
 			if newret == 2 {
 				return Ok(2);
 			}
@@ -1886,7 +1883,7 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 				let mut sz = -1;
 				let st = self.status();
 				if (self.st.prefs & PF_DUMB == 0 && st & (ST_NOSZ | ST_TRSZ) != ST_TRSZ) || !recv {
-					sz = self.stats(&arg, recv, true, false, !recv)?.1;
+					sz = self.stats(&arg, recv, false, !recv)?.1;
 					if recv && sz == -1 {
 						getsize = true;
 					}

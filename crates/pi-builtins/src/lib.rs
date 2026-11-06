@@ -1,6 +1,7 @@
 //! pi's in-process extras for the embedded shell: the uutils-style utilities
 //! (`cat`, `grep`, `sed`, `ls`, …) and the process builtins (`ps`, `top`,
 //! `sleep`, `pgrep`, `pkill`, `pidwait`). Hosts run them through [`extras`].
+#![cfg_attr(unix, feature(process_setsid))]
 
 /// Output block sizes for `du` and `df`.
 #[cfg(any(feature = "util.du", feature = "util.df"))]

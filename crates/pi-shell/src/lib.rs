@@ -24,6 +24,12 @@
 //!   injector of the `obash` binary (`src/bin/obash`: the engine as a
 //!   standalone shell, for differential tests and benchmarks against bash).
 
+#![allow(
+	clippy::many_single_char_names,
+	reason = "the bash and zsh ports keep upstream's single-letter locals so the code reads \
+	          against the C sources"
+)]
+
 // The parser is `no_std`-clean and names `alloc` paths.
 extern crate alloc;
 

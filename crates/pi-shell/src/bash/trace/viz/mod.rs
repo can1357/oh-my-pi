@@ -56,6 +56,7 @@ impl VizSource for Inner {
 			syntax:     unit.syntax.as_deref(),
 			projection: unit.projection,
 			nodes:      &unit.nodes,
+			callout:    unit.callout,
 		})
 	}
 
@@ -93,6 +94,8 @@ struct StoredUnit {
 	features:   u32,
 	#[serde(default)]
 	aliases:    Vec<(BString, BString)>,
+	#[serde(default)]
+	callout:    bool,
 }
 const fn first_line() -> u32 {
 	1
@@ -235,6 +238,7 @@ impl VizSource for StoredVisualization {
 			syntax:     unit.syntax.as_ref(),
 			projection: unit.projection,
 			nodes:      &unit.nodes,
+			callout:    unit.callout,
 		})
 	}
 

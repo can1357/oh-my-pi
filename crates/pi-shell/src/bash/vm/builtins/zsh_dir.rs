@@ -142,9 +142,9 @@ fn fixdir(ctx: &mut Ctx<'_, '_>, src: &[u8]) -> Result<(BString, bool), Need> {
 		}
 		if at(i) == b'.' && at(i + 1) == b'.' && matches!(at(i + 2), 0 | b'/') && !chasedots {
 			if out.len() > 1 {
-				// `foo/..` goes only when `foo` is a directory.
-				let foo = out.strip_suffix(b"/").unwrap_or(&out);
-				if !stat(ctx, foo, true)?.is_some_and(|s| s.kind == StatKind::Dir) {
+				// `dir/..` goes only when `dir` is a directory.
+				let parent = out.strip_suffix(b"/").unwrap_or(&out);
+				if !stat(ctx, parent, true)?.is_some_and(|s| s.kind == StatKind::Dir) {
 					out.extend_from_slice(tail(src, i));
 					return Ok((out.into(), true));
 				}
@@ -565,8 +565,7 @@ fn new_pwd(ctx: &mut Ctx<'_, '_>, cd: &mut Cd, dir: usize, quiet: bool) -> R {
 			let mut out: Vec<u8> = fprintdirs(ctx, &[new.as_slice()])?
 				.into_iter()
 				.next()
-				.map(Vec::from)
-				.unwrap_or_default();
+				.map_or_default(Vec::from);
 			out.push(b'\n');
 			ctx.out(&out);
 		}
