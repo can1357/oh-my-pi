@@ -2,6 +2,7 @@
 
 import * as path from "node:path";
 import { $, Glob } from "bun";
+import { compareVersions } from "../packages/utils/src/version.ts";
 
 const CHANGELOG_GLOB = "packages/*/CHANGELOG.md";
 const ORDERED_SECTION_TITLES = ["Breaking Changes", "Added", "Changed", "Fixed", "Removed"] as const;
@@ -99,16 +100,26 @@ interface CliOptions {
 	help: boolean;
 }
 
-interface HistoricalReleaseRecovery {
+export interface HistoricalReleaseRecovery {
 	itemKeys: Set<string>;
 	sectionsByTitle: Map<string, ReleaseSection>;
 }
 
+/** The only level-1 heading a changelog has, above its first release. */
+const CHANGELOG_TITLE = "# Changelog";
+
+/**
+ * `## [title]` at the start of a line. `[Unreleased]` only alone on its line: `bun run release`
+ * moves no other spelling into the new release, so `## [Unreleased] ##` would keep its entries
+ * unreleased while the fixer and the check read them as [Unreleased].
+ */
 function isReleaseHeading(line: string): boolean {
-	return /^## \[[^\]]+\]/.test(line);
+	const title = /^## \[([^\]]+)\]/.exec(line)?.[1];
+	if (title === undefined) return false;
+	return title !== "Unreleased" || /^## \[Unreleased\][ \t]*$/.test(line);
 }
 
-function isSubsectionHeading(line: string): boolean {
+export function isSubsectionHeading(line: string): boolean {
 	return /^###\s+\S/.test(line);
 }
 
@@ -117,7 +128,7 @@ function parseReleaseTitle(heading: string): string {
 	return match?.[1] ?? heading.replace(/^##\s+/, "").trim();
 }
 
-function parseSubsectionTitle(heading: string): string {
+export function parseSubsectionTitle(heading: string): string {
 	return heading.replace(/^###\s+/, "").trim();
 }
 
@@ -130,7 +141,10 @@ function normalizeItemText(text: string): string {
 }
 
 function splitContentLines(content: string): string[] {
-	const normalized = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+	const normalized = content
+		.replace(/^\uFEFF/, "")
+		.replace(/\r\n/g, "\n")
+		.replace(/\r/g, "\n");
 	if (normalized.endsWith("\n")) {
 		return normalized.slice(0, -1).split("\n");
 	}
@@ -141,11 +155,254 @@ function createNumberedLine(text: string, lineNumber: number): NumberedLine {
 	return { text, lineNumber };
 }
 
-export function parseChangelog(content: string): ChangelogDocument {
+/** How the changelog tools may write each heading; anything else Markdown shows as a heading is refused. */
+export const HEADING_RULE =
+	"Write the title as `# Changelog`, once, above the first release, the unreleased section as `## [Unreleased]` with nothing after it, a release as `## [x.y.z] - YYYY-MM-DD` and a category as `### Added`, each at the start of its line with one space after the `#`s, write no other heading, and start no line with `[^label]:`, which GitHub reads as a footnote definition, wherever that line stands, a code block and an HTML comment included; to show such text, put it in a code span in the middle of a sentence.";
+
+/** A heading as Markdown shows it. */
+interface ShownHeading {
+	level: number;
+	text: string;
+}
+
+/** Where a changelog breaks the heading rule; nothing was changed. */
+export interface HeadingMismatch {
+	/** 1-based: the line the rule refuses, or the first line after which Markdown's headings differ from the tools'. */
+	lineNumber: number;
+	line: string;
+	/** The whole sentence, where the line breaks a rule no renderer decides, such as the footnote rule. */
+	description?: string;
+	/** What Markdown shows there, such as `a level-2 heading "[9.9.9]"`. */
+	shown: string;
+	/** What the tools read there. */
+	read: string;
+}
+
+/** A changelog whose headings the tools would read other than as Markdown shows them; nothing was changed. */
+export class ChangelogHeadingError extends Error {
+	constructor(
+		readonly changelogPath: string,
+		readonly mismatch: HeadingMismatch,
+		remedy: string = HEADING_RULE,
+	) {
+		super(`${changelogPath}: ${describeHeadingMismatch(mismatch)}. ${remedy}`);
+	}
+}
+
+export function describeHeadingMismatch(mismatch: HeadingMismatch): string {
+	const problem =
+		mismatch.description ?? `Markdown shows ${mismatch.shown} where the changelog tools read ${mismatch.read}`;
+	return `line ${mismatch.lineNumber}, ${JSON.stringify(mismatch.line)}: ${problem}`;
+}
+
+/** An HTML heading element, as Markdown renders a heading and as raw HTML writes one. */
+const HTML_HEADING_TAG = /<h[1-6](?=[\s/>])/gi;
+
+/**
+ * A line GitHub can read as a footnote definition: `[^label]:` after nothing
+ * but indentation, `>` quote markers and list markers. GitHub renders a
+ * definition's text as Markdown at the end of the page, so `[^n]: ## [9.9.9]`
+ * is a release heading there, and Bun's renderer, which has no footnotes,
+ * shows it as text.
+ */
+const FOOTNOTE_PREFIX = /^[ \t]*(?:(?:>[ \t]*)|(?:[-*+]|\d{1,9}[.)])(?:[ \t]+|$))*/;
+const FOOTNOTE_DEFINITION = /^\[\^[^\]\n]*\]:/;
+
+/**
+ * The first line (0-based) GitHub can read as a footnote definition, or -1.
+ * No block state decides this: a line that starts with `[^label]:` is refused
+ * wherever it stands — in a fenced or indented code block, in an HTML block,
+ * in a comment, in a quote, in a list. Deciding it by block state needs
+ * GitHub's own block parser, and three rounds of emulating it by hand each
+ * left a shape that hid a definition (an unclosed fence inside a list, a
+ * blank line inside an HTML block, a renderer without footnotes). This rule
+ * is fail-closed by construction: GitHub renders a footnote definition only
+ * from a line that begins this way, so no block state can hide one. The cost
+ * is that a changelog cannot start a line with `[^label]:` inside a code
+ * block; `[^label]:` after other text, such as a code span in an entry, is
+ * no definition and stays fine.
+ */
+function footnoteDefinitionLine(lines: readonly string[]): number {
+	for (let index = 0; index < lines.length; index++) {
+		const line = lines[index] ?? "";
+		const prefix = FOOTNOTE_PREFIX.exec(line)?.[0].length ?? 0;
+		if (FOOTNOTE_DEFINITION.test(line.slice(prefix))) return index;
+	}
+	return -1;
+}
+
+/** The refusal for a line that starts a footnote definition. */
+function footnoteMismatch(lines: readonly string[], index: number): HeadingMismatch {
+	return {
+		lineNumber: index + 1,
+		line: lines[index] ?? "",
+		description:
+			"the line starts a footnote definition, whose text GitHub renders as Markdown at the end of the page, " +
+			"so a changelog starts no line with `[^label]:`, in a code block or anywhere else; " +
+			"show such text inline instead, in a code span in the middle of a sentence",
+		shown: "a footnote definition",
+		read: "text",
+	};
+}
+
+/** A line marker between two private-use characters, which have no Markdown meaning. */
+const LINE_MARKER = /\uE000[^\uE001]*\uE001/g;
+
+/** The headings Markdown shows, in order, and how many heading elements its HTML holds, raw `<h2>` tags included. */
+function shownHeadings(markdown: string): { headings: ShownHeading[]; elements: number } {
+	const headings: ShownHeading[] = [];
+	Bun.markdown.render(markdown, {
+		heading: (children: string, meta: { level: number }) => {
+			headings.push({ level: meta.level, text: children });
+			return "";
+		},
+	});
+	return { headings, elements: Bun.markdown.html(markdown).match(HTML_HEADING_TAG)?.length ?? 0 };
+}
+
+/** Lines the tools read as headings (0-based) and their levels: the first `# Changelog` above the first release, each `## [title]`, and `### Name` below one. */
+function readHeadingLines(lines: readonly string[]): { index: number; level: number }[] {
+	const found: { index: number; level: number }[] = [];
+	let inRelease = false;
+	let titled = false;
+	for (let index = 0; index < lines.length; index++) {
+		const line = lines[index] ?? "";
+		if (isReleaseHeading(line)) {
+			inRelease = true;
+			found.push({ index, level: 2 });
+		} else if (inRelease) {
+			if (isSubsectionHeading(line)) found.push({ index, level: 3 });
+		} else if (!titled && line === CHANGELOG_TITLE) {
+			titled = true;
+			found.push({ index, level: 1 });
+		}
+	}
+	return found;
+}
+
+/** Level 0 is a line the tools read as a heading that Markdown never shows as one, even alone. */
+function describeHeading(heading: ShownHeading | undefined): string {
+	if (!heading) return "no heading";
+	if (heading.level === 0) return `the heading ${JSON.stringify(heading.text)}`;
+	return `a level-${heading.level} heading ${JSON.stringify(heading.text)}`;
+}
+
+/**
+ * Where a changelog breaks the heading rule, or undefined where it keeps it.
+ * Two rules decide it, and the earlier line wins. A line that starts a
+ * footnote definition is refused outright, by the line scan above: GitHub
+ * renders a definition's text as Markdown at the end of the page and no
+ * renderer here has footnotes, so no block state may excuse such a line.
+ * Every other heading is decided by what Markdown shows (a CommonMark
+ * renderer, Bun's) against what the tools read: each heading Markdown shows
+ * comes from a line the tools read as a heading, at its level, and each such
+ * line shows as one, in order. A line the tools read must be a heading where
+ * it stands, and not code, HTML or text a list or a quote holds; every other
+ * heading Markdown shows, in any spelling (indented, a tab or two spaces
+ * after the `#`s, underlined, in a list or a quote, an HTML `<h2>`), is one
+ * the tools would not read, so a release written that way would escape them,
+ * even with the same text as one they read. GitHub's own block parser differs
+ * from CommonMark only where it reads a footnote definition, and the footnote
+ * rule refuses every such line first, so the renderer decides the rest. The
+ * title must be `# Changelog`, once, above the first release: `bun run release`
+ * writes the next `## [Unreleased]` below it.
+ */
+export function findHeadingMismatch(content: string): HeadingMismatch | undefined {
+	const lines = splitContentLines(content);
+	const footnote = footnoteDefinitionLine(lines);
+	const heading = headingMismatch(lines);
+	if (footnote >= 0 && (heading === undefined || footnote + 1 <= heading.lineNumber)) {
+		return footnoteMismatch(lines, footnote);
+	}
+	return heading;
+}
+
+/** Where the headings Markdown shows and the headings the tools read first differ, or the missing title. */
+function headingMismatch(lines: readonly string[]): HeadingMismatch | undefined {
+	const read = readHeadingLines(lines);
+	// Each line the tools read ends with a marker no changelog can forge, so a
+	// heading Markdown shows is matched to its own line, not to another line with
+	// the same text. A marker at the end of an ATX heading line changes no block.
+	const nonce = crypto.randomUUID();
+	const marker = (index: number) => `\uE000${nonce}:${index}\uE001`;
+	const marked = [...lines];
+	for (const { index } of read) marked[index] = `${lines[index]} ${marker(index)}`;
+	const compare = (count: number) => {
+		const shown = shownHeadings(marked.slice(0, count).join("\n"));
+		let expected = 0;
+		while (expected < read.length && (read[expected]?.index ?? 0) < count) expected++;
+		let first = 0;
+		while (
+			first < shown.headings.length &&
+			first < expected &&
+			shown.headings[first]?.level === read[first]?.level &&
+			shown.headings[first]?.text.includes(marker(read[first]?.index ?? -1))
+		)
+			first++;
+		return {
+			agree: first === expected && first === shown.headings.length && shown.elements === first,
+			shown: shown.headings[first],
+			read: first < expected ? read[first] : undefined,
+		};
+	};
+	const untitled = missingTitle(lines, read);
+	if (compare(lines.length).agree) return untitled;
+	// The first `count` lines agree for `low` and not for `high`: line `high` is where they part.
+	let low = 0;
+	let high = lines.length;
+	while (high - low > 1) {
+		const middle = Math.floor((low + high) / 2);
+		if (compare(middle).agree) low = middle;
+		else high = middle;
+	}
+	const parted = compare(high);
+	if (untitled && untitled.lineNumber <= high) return untitled;
+	const shown = parted.shown && { level: parted.shown.level, text: parted.shown.text.replace(LINE_MARKER, "").trim() };
+	// What Markdown makes of the line the tools read on its own: the heading they read there.
+	const readLine = parted.read ? (lines[parted.read.index] ?? "") : "";
+	const alone = parted.read ? shownHeadings(readLine).headings : [];
+	return {
+		lineNumber: high,
+		line: lines[high - 1] ?? "",
+		shown: shown || parted.read ? describeHeading(shown) : "an HTML heading element",
+		read: describeHeading(parted.read && (alone.length === 1 ? alone[0] : { level: 0, text: readLine })),
+	};
+}
+
+/** The changelog's first heading, or its first line, when no `# Changelog` title is above it; the tools require one. */
+function missingTitle(
+	lines: readonly string[],
+	read: readonly { index: number; level: number }[],
+): HeadingMismatch | undefined {
+	if (read[0]?.level === 1) return undefined;
+	const index = read[0]?.index ?? 0;
+	return {
+		lineNumber: index + 1,
+		line: lines[index] ?? "",
+		shown: `no ${JSON.stringify(CHANGELOG_TITLE)} title above it`,
+		read: "that title",
+	};
+}
+
+/** Throws {@link ChangelogHeadingError} when Markdown shows `content`'s headings other than as the tools read them. */
+export function assertChangelogHeadings(changelogPath: string, content: string): void {
+	const mismatch = findHeadingMismatch(content);
+	if (mismatch) throw new ChangelogHeadingError(changelogPath, mismatch);
+}
+
+/** One `## [title]` heading and every line up to the next one, kept verbatim. */
+export interface ReleaseBlock {
+	heading: NumberedLine;
+	title: string;
+	bodyLines: NumberedLine[];
+}
+
+/** Splits a changelog at its `## [title]` headings; lines keep their text (only CRLF becomes LF). */
+export function splitReleaseBlocks(content: string): { prefixLines: NumberedLine[]; blocks: ReleaseBlock[] } {
 	const lines = splitContentLines(content);
 	const numberedLines = lines.map((text, index) => createNumberedLine(text, index + 1));
 	const prefixLines: NumberedLine[] = [];
-	const sections: ReleaseSection[] = [];
+	const blocks: ReleaseBlock[] = [];
 	let index = 0;
 
 	while (index < numberedLines.length && !isReleaseHeading(numberedLines[index]?.text ?? "")) {
@@ -166,13 +423,21 @@ export function parseChangelog(content: string): ChangelogDocument {
 			index++;
 		}
 
-		sections.push(parseReleaseSection(headingLine.text, bodyLines));
+		blocks.push({ heading: headingLine, title: parseReleaseTitle(headingLine.text), bodyLines });
 	}
 
-	return { prefixLines, sections };
+	return { prefixLines, blocks };
 }
 
-function parseReleaseSection(heading: string, bodyLines: readonly NumberedLine[]): ReleaseSection {
+export function parseChangelog(content: string): ChangelogDocument {
+	const { prefixLines, blocks } = splitReleaseBlocks(content);
+	return {
+		prefixLines,
+		sections: blocks.map(block => parseReleaseSection(block.heading.text, block.bodyLines)),
+	};
+}
+
+export function parseReleaseSection(heading: string, bodyLines: readonly NumberedLine[]): ReleaseSection {
 	const leadingLines: NumberedLine[] = [];
 	const subsections: Subsection[] = [];
 	let index = 0;
@@ -383,7 +648,8 @@ function compactAdjacentListSpacing(lines: readonly string[]): string[] {
 	return flattenedItems;
 }
 
-function normalizeSection(section: ReleaseSection): FixCounters {
+/** Normalizes one section in place: trims, merges duplicate `###` headings, drops empty ones, compacts bullet spacing. */
+export function normalizeSection(section: ReleaseSection): FixCounters {
 	const counters: FixCounters = {
 		promotedItems: 0,
 		mergedDuplicateHeadings: 0,
@@ -442,22 +708,11 @@ function sectionHasContent(section: ReleaseSection): boolean {
 	return section.subsections.some(subsection => trimBlankLines(numberedText(subsection.lines)).length > 0);
 }
 
-function compareVersionTitlesDesc(left: string, right: string): number {
-	const leftParts = left.split(".").map(part => Number.parseInt(part, 10));
-	const rightParts = right.split(".").map(part => Number.parseInt(part, 10));
-	const limit = Math.max(leftParts.length, rightParts.length);
-	for (let index = 0; index < limit; index++) {
-		const difference = (rightParts[index] ?? 0) - (leftParts[index] ?? 0);
-		if (difference !== 0) return difference;
-	}
-	return 0;
-}
-
-function sortReleaseSections(document: ChangelogDocument): void {
+export function sortReleaseSections(document: ChangelogDocument): void {
 	const unreleasedSections = document.sections.filter(section => section.title === "Unreleased");
 	const releasedSections = document.sections
 		.filter(section => section.title !== "Unreleased")
-		.sort((left, right) => compareVersionTitlesDesc(left.title, right.title));
+		.sort((left, right) => compareVersions(right.title, left.title));
 	document.sections = [...unreleasedSections, ...releasedSections];
 }
 
@@ -562,10 +817,11 @@ function appendArchiveFooter(body: string, archiveLink: string): string {
 
 /**
  * Collapse the oldest release sections of a rendered changelog until the file
- * (including the `archiveLink` footer) fits in `maxBytes`. The first two
- * sections — `[Unreleased]` plus the newest release — are always kept, so the
- * result may exceed `maxBytes` when those alone are over budget. Returns the
- * body without the footer appended.
+ * (including the `archiveLink` footer) fits in `maxBytes`. Every section up to
+ * and including the newest release is always kept — each `[Unreleased]` above
+ * it, even when a merge left more than one — so the result may exceed
+ * `maxBytes` when those alone are over budget. Returns the body without the
+ * footer appended.
  */
 export function collapseChangelogTail(
 	content: string,
@@ -579,10 +835,16 @@ export function collapseChangelogTail(
 
 	const lines = splitContentLines(content);
 	const headingLines: number[] = [];
+	let newestRelease: number | undefined;
 	for (let index = 0; index < lines.length; index++) {
-		if (isReleaseHeading(lines[index] ?? "")) headingLines.push(index);
+		const line = lines[index] ?? "";
+		if (!isReleaseHeading(line)) continue;
+		if (newestRelease === undefined && parseReleaseTitle(line) !== "Unreleased") newestRelease = headingLines.length;
+		headingLines.push(index);
 	}
-	if (headingLines.length <= 2) return { content, collapsedReleases: 0 };
+	if (newestRelease === undefined) return { content, collapsedReleases: 0 };
+	const minKeptSections = newestRelease + 1;
+	if (headingLines.length <= minKeptSections) return { content, collapsedReleases: 0 };
 
 	// cumulativeBytes[i] = byte length of lines[0..i) with a trailing newline per line.
 	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
@@ -599,8 +861,8 @@ export function collapseChangelogTail(
 	};
 
 	const budget = maxBytes - footerBytes;
-	let keptSections = 2;
-	for (let candidate = headingLines.length - 1; candidate >= 2; candidate--) {
+	let keptSections = minKeptSections;
+	for (let candidate = headingLines.length - 1; candidate >= minKeptSections; candidate--) {
 		if ((cumulativeBytes[bodyEndBeforeLine(headingLines[candidate] ?? 0)] ?? 0) <= budget) {
 			keptSections = candidate;
 			break;
@@ -864,18 +1126,38 @@ async function gitMaybe(args: readonly string[], cwd: string): Promise<string | 
 	return result.text();
 }
 
+/**
+ * Released sections and bullets of each tagged changelog. A tagged changelog
+ * whose headings Markdown shows other than as the fixer reads them stops the
+ * recovery: its sections are not the releases that tag shows, so taking them
+ * could drop a release or make one out of text.
+ */
 async function collectHistoricalReleaseRecovery(
 	repoRoot: string,
 	paths: readonly string[],
 ): Promise<Map<string, HistoricalReleaseRecovery>> {
 	const tags = await recoveryTags(repoRoot);
 	const recoveryByPath = new Map<string, HistoricalReleaseRecovery>();
+	// Most tags share each changelog's text with the tag before; check each text once.
+	const checked = new Set<string>();
 
 	for (const tag of tags) {
 		for (const changelogPath of paths) {
 			const content = await gitMaybe(["show", `${tag}:${changelogPath}`], repoRoot);
 			if (content === undefined) continue;
 
+			const digest = new Bun.CryptoHasher("sha256").update(content).digest("hex");
+			if (!checked.has(digest)) {
+				const mismatch = findHeadingMismatch(content);
+				if (mismatch) {
+					throw new ChangelogHeadingError(
+						`${tag}:${changelogPath}`,
+						mismatch,
+						`--recover takes the releases of every tag that contains the '${CHANGELOG_BASELINE_NAME}' baseline (${CHANGELOG_BASELINE_REF}), or of every tag without one, and cannot tell which releases this tag shows. Point ${CHANGELOG_BASELINE_REF} at a commit after this tag to recover from later tags only.`,
+					);
+				}
+				checked.add(digest);
+			}
 			const document = parseChangelog(content);
 			let recovery = recoveryByPath.get(changelogPath);
 			for (const section of document.sections) {
@@ -919,6 +1201,75 @@ async function changelogDiff(repoRoot: string, since: string, paths: readonly st
 	return git(["diff", "--unified=0", "--no-color", "--no-ext-diff", since, "--", ...paths], repoRoot);
 }
 
+export interface FixChangelogFileOptions {
+	/** Start lines of items added to a released section since the baseline; they move under `[Unreleased]`. */
+	promotableAddedItemStartLines: ReadonlySet<number>;
+	/** `--recover`: released sections and bullets from tagged history. */
+	historicalRecovery?: HistoricalReleaseRecovery;
+	maxBytes: number;
+	/** The commit the archive footer names; asked for only once the file is over `maxBytes`. */
+	archiveCommit: () => Promise<string | undefined>;
+}
+
+export interface FixChangelogFileResult extends FixCounters {
+	content: string;
+	collapsedReleases: number;
+}
+
+/**
+ * Everything `runChangelogFixer` does to one changelog's text. The two inputs
+ * that come from git (items added since the baseline, and the commit an
+ * archive footer names) are parameters. Throws {@link ChangelogHeadingError},
+ * and changes nothing, when Markdown shows the headings of the text, or of the
+ * text it would write, other than as the fixer reads them.
+ */
+export async function fixChangelogFile(
+	changelogPath: string,
+	rawContent: string,
+	options: FixChangelogFileOptions,
+): Promise<FixChangelogFileResult> {
+	assertChangelogHeadings(changelogPath, rawContent);
+	const { body: currentContent, archiveLink: existingArchiveLink } = splitArchiveFooter(rawContent);
+	const recoveredContent =
+		options.historicalRecovery === undefined
+			? currentContent
+			: rebuildReleasedSectionsFromHistory(currentContent, options.historicalRecovery.sectionsByTitle);
+	const result = fixChangelogContent(
+		recoveredContent,
+		options.promotableAddedItemStartLines,
+		options.historicalRecovery?.itemKeys ?? new Set<string>(),
+	);
+
+	let body = result.content;
+	let archiveLink = existingArchiveLink;
+	let collapsedReleases = 0;
+	const projectedBytes =
+		Buffer.byteLength(body, "utf8") + (archiveLink ? Buffer.byteLength(`\n${archiveLink}\n`, "utf8") : 0);
+	if (projectedBytes > options.maxBytes) {
+		const archiveCommit = await options.archiveCommit();
+		if (archiveCommit) {
+			const candidateLink = archiveLinkLine(changelogPath, archiveCommit);
+			const collapsed = collapseChangelogTail(body, candidateLink, options.maxBytes);
+			if (collapsed.collapsedReleases > 0) {
+				body = collapsed.content;
+				collapsedReleases = collapsed.collapsedReleases;
+				archiveLink = candidateLink;
+			}
+		}
+	}
+
+	const content = archiveLink ? appendArchiveFooter(body, archiveLink) : body;
+	assertChangelogHeadings(`${changelogPath} as fixed`, content);
+	return {
+		content,
+		promotedItems: result.promotedItems,
+		mergedDuplicateHeadings: result.mergedDuplicateHeadings,
+		removedEmptyHeadings: result.removedEmptyHeadings,
+		droppedReleasedDuplicates: result.droppedReleasedDuplicates,
+		collapsedReleases,
+	};
+}
+
 export async function runChangelogFixer(options: RunChangelogFixerOptions = {}): Promise<RunChangelogFixerResult> {
 	const repoRoot = await resolveRepoRoot(options.repoRoot);
 	const since = await resolveSince(repoRoot, options.since);
@@ -930,45 +1281,22 @@ export async function runChangelogFixer(options: RunChangelogFixerOptions = {}):
 		? await collectHistoricalReleaseRecovery(repoRoot, paths)
 		: new Map<string, HistoricalReleaseRecovery>();
 	const changedFiles: ChangedChangelogSummary[] = [];
+	// Written only once every changelog is fixed, so one the fixer refuses leaves every file as it was.
+	const writes: { absolutePath: string; content: string }[] = [];
 
 	for (const changelogPath of paths) {
 		const absolutePath = path.join(repoRoot, changelogPath);
 		const rawContent = await Bun.file(absolutePath).text();
-		const { body: currentContent, archiveLink: existingArchiveLink } = splitArchiveFooter(rawContent);
-		const historicalRecovery = historicalRecoveryByPath.get(changelogPath);
-		const recoveredContent =
-			historicalRecovery === undefined
-				? currentContent
-				: rebuildReleasedSectionsFromHistory(currentContent, historicalRecovery.sectionsByTitle);
-		const result = fixChangelogContent(
-			recoveredContent,
-			addedItemLines.get(changelogPath) ?? new Set<number>(),
-			historicalRecovery?.itemKeys ?? new Set<string>(),
-		);
-
-		let body = result.content;
-		let archiveLink = existingArchiveLink;
-		let collapsedReleases = 0;
-		const maxBytes = options.maxBytes ?? MAX_CHANGELOG_BYTES;
-		const projectedBytes =
-			Buffer.byteLength(body, "utf8") + (archiveLink ? Buffer.byteLength(`\n${archiveLink}\n`, "utf8") : 0);
-		if (projectedBytes > maxBytes) {
+		const result = await fixChangelogFile(changelogPath, rawContent, {
+			promotableAddedItemStartLines: addedItemLines.get(changelogPath) ?? new Set<number>(),
+			historicalRecovery: historicalRecoveryByPath.get(changelogPath),
+			maxBytes: options.maxBytes ?? MAX_CHANGELOG_BYTES,
 			// The last commit touching this file still holds every section being
 			// collapsed (plus any earlier footer, chaining further back).
-			const archiveCommit = (await gitMaybe(["rev-list", "-1", "HEAD", "--", changelogPath], repoRoot))?.trim();
-			if (archiveCommit) {
-				const candidateLink = archiveLinkLine(changelogPath, archiveCommit);
-				const collapsed = collapseChangelogTail(body, candidateLink, maxBytes);
-				if (collapsed.collapsedReleases > 0) {
-					body = collapsed.content;
-					collapsedReleases = collapsed.collapsedReleases;
-					archiveLink = candidateLink;
-				}
-			}
-		}
-
-		const finalContent = archiveLink ? appendArchiveFooter(body, archiveLink) : body;
-		if (finalContent === rawContent) continue;
+			archiveCommit: async () =>
+				(await gitMaybe(["rev-list", "-1", "HEAD", "--", changelogPath], repoRoot))?.trim() || undefined,
+		});
+		if (result.content === rawContent) continue;
 
 		changedFiles.push({
 			path: changelogPath,
@@ -976,14 +1304,14 @@ export async function runChangelogFixer(options: RunChangelogFixerOptions = {}):
 			mergedDuplicateHeadings: result.mergedDuplicateHeadings,
 			droppedReleasedDuplicates: result.droppedReleasedDuplicates,
 			removedEmptyHeadings: result.removedEmptyHeadings,
-			collapsedReleases,
+			collapsedReleases: result.collapsedReleases,
 		});
-
-		if (options.write !== false) {
-			await Bun.write(absolutePath, finalContent);
-		}
+		writes.push({ absolutePath, content: result.content });
 	}
 
+	if (options.write !== false) {
+		for (const { absolutePath, content } of writes) await Bun.write(absolutePath, content);
+	}
 	return { since, changedFiles };
 }
 
@@ -1047,6 +1375,9 @@ function usage(): string {
 		"blank separators between adjacent bullet items, then removes duplicate or empty",
 		"### category headings.",
 		"",
+		"A changelog whose headings Markdown shows other than as the fixer reads them (`## [x.y.z]`,",
+		"`### Added`, each at the start of its line) is refused, and no changelog is written.",
+		"",
 		`Changelogs over ${MAX_CHANGELOG_BYTES / 1024} KiB are collapsed: the oldest release sections are removed`,
 		"and replaced with a footer linking the last commit that still contains them. Repeated",
 		"collapses chain — each footer's commit carries the previous footer.",
@@ -1058,7 +1389,8 @@ function usage(): string {
 		"With --recover, the fixer scans every tagged changelog snapshot from the baseline forward",
 		"and treats every historically released bullet as authoritative, so stale [Unreleased]",
 		"items copied forward by past bad releases are pruned even if the current file no longer",
-		"contains a matching released copy. After committing a recovery, run --pin to mark it.",
+		"contains a matching released copy. After committing a recovery, run --pin to mark it. A tagged",
+		"changelog whose headings Markdown shows other than as the fixer reads them stops the recovery.",
 		"",
 		`With --pin, move the '${CHANGELOG_BASELINE_NAME}' baseline ref to HEAD and exit without fixing.`,
 		"",

@@ -7,9 +7,11 @@ import {
 	collapseChangelogTail,
 	collectPromotableAddedItemLines,
 	fixChangelogContent,
+	fixChangelogFile,
 	runChangelogFixer,
 	splitArchiveFooter,
 } from "./fix-changelogs";
+const TEST_TIMEOUT_MS = 60_000;
 
 describe("collectPromotableAddedItemLines", () => {
 	it("keeps new changelog item additions while ignoring moves and edits", () => {
@@ -315,6 +317,30 @@ describe("collapseChangelogTail", () => {
 		expect(result.content).not.toContain("## [1.0.0]");
 	});
 
+	it("keeps every [Unreleased] section and the newest release when a merge left two [Unreleased] headings", () => {
+		const twoUnreleased = FOUR_SECTIONS.replace("## [1.2.0]", "## [Unreleased]\n\n## [1.2.0]");
+
+		const result = collapseChangelogTail(twoUnreleased, ARCHIVE_LINK, 16);
+
+		expect(result.collapsedReleases).toBe(2);
+		expect(result.content).toBe(`${twoUnreleased.slice(0, twoUnreleased.indexOf("\n\n## [1.1.0]"))}\n`);
+	});
+
+	it("sorts a stable release ahead of its prerelease before collapsing", () => {
+		const prereleaseFirst = FOUR_SECTIONS.replace("## [1.2.0] - 2026-03-01", "## [2.0.0-rc.9] - 2026-02-01").replace(
+			"## [1.1.0] - 2026-02-01",
+			"## [2.0.0] - 2026-02-01",
+		);
+
+		const normalized = fixChangelogContent(prereleaseFirst, new Set()).content;
+		expect(normalized.indexOf("## [2.0.0] - ")).toBeLessThan(normalized.indexOf("## [2.0.0-rc.9]"));
+
+		const result = collapseChangelogTail(normalized, ARCHIVE_LINK, 16);
+		expect(result.collapsedReleases).toBe(2);
+		expect(result.content).toContain("## [2.0.0] - ");
+		expect(result.content).not.toContain("## [2.0.0-rc.9]");
+	});
+
 	it("leaves content under the budget untouched", () => {
 		const result = collapseChangelogTail(FOUR_SECTIONS, ARCHIVE_LINK, 1024 * 1024);
 
@@ -365,53 +391,57 @@ const RELEASED_PLUS_RECOVERED = `# Changelog
 `;
 
 describe("runChangelogFixer baseline pin", () => {
-	it("uses the clog baseline ref as the diff floor so a recovered released bullet is not re-promoted", async () => {
-		const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clog-fix-"));
-		const git = (...args: string[]) =>
-			$`git ${args}`
-				.cwd(repoRoot)
-				.quiet()
-				.env({
-					...process.env,
-					GIT_CONFIG_GLOBAL: "/dev/null",
-					GIT_CONFIG_SYSTEM: "/dev/null",
-					GIT_AUTHOR_NAME: "t",
-					GIT_AUTHOR_EMAIL: "t@t",
-					GIT_COMMITTER_NAME: "t",
-					GIT_COMMITTER_EMAIL: "t@t",
-				});
-		try {
-			const changelogPath = path.join(repoRoot, "packages/foo/CHANGELOG.md");
-			await git("init", "-b", "main");
-			await Bun.write(changelogPath, RELEASED_ONLY);
-			await git("add", "-A");
-			await git("commit", "-m", "release 1.0.0");
-			await git("tag", "v1.0.0");
+	it(
+		"uses the clog baseline ref as the diff floor so a recovered released bullet is not re-promoted",
+		async () => {
+			const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clog-fix-"));
+			const git = (...args: string[]) =>
+				$`git ${args}`
+					.cwd(repoRoot)
+					.quiet()
+					.env({
+						...process.env,
+						GIT_CONFIG_GLOBAL: "/dev/null",
+						GIT_CONFIG_SYSTEM: "/dev/null",
+						GIT_AUTHOR_NAME: "t",
+						GIT_AUTHOR_EMAIL: "t@t",
+						GIT_COMMITTER_NAME: "t",
+						GIT_COMMITTER_EMAIL: "t@t",
+					});
+			try {
+				const changelogPath = path.join(repoRoot, "packages/foo/CHANGELOG.md");
+				await git("init", "-b", "main");
+				await Bun.write(changelogPath, RELEASED_ONLY);
+				await git("add", "-A");
+				await git("commit", "-m", "release 1.0.0");
+				await git("tag", "v1.0.0");
 
-			// Simulate a `--recover` restoring a historically released bullet that the
-			// v1.0.0 snapshot no longer carries.
-			await Bun.write(changelogPath, RELEASED_PLUS_RECOVERED);
-			await git("add", "-A");
-			await git("commit", "-m", "recover dropped bullet");
+				// Simulate a `--recover` restoring a historically released bullet that the
+				// v1.0.0 snapshot no longer carries.
+				await Bun.write(changelogPath, RELEASED_PLUS_RECOVERED);
+				await git("add", "-A");
+				await git("commit", "-m", "recover dropped bullet");
 
-			// No baseline tag: the floor is the latest version tag, which predates the
-			// recovery, so the restored released bullet reads as added-in-a-released
-			// section and is wrongly promoted back into [Unreleased].
-			const withoutPin = await runChangelogFixer({ repoRoot, write: false });
-			expect(withoutPin.since).toBe("v1.0.0");
-			const promoted = withoutPin.changedFiles.find(file => file.path === "packages/foo/CHANGELOG.md");
-			expect(promoted?.promotedItems).toBe(1);
+				// No baseline tag: the floor is the latest version tag, which predates the
+				// recovery, so the restored released bullet reads as added-in-a-released
+				// section and is wrongly promoted back into [Unreleased].
+				const withoutPin = await runChangelogFixer({ repoRoot, write: false });
+				expect(withoutPin.since).toBe("v1.0.0");
+				const promoted = withoutPin.changedFiles.find(file => file.path === "packages/foo/CHANGELOG.md");
+				expect(promoted?.promotedItems).toBe(1);
 
-			// Pin `clog` (a custom ref, not a tag — see resolveSince) to the recovery
-			// commit: the plain run now diffs against it and leaves the bullet untouched.
-			await git("update-ref", "refs/clog", "HEAD");
-			const withPin = await runChangelogFixer({ repoRoot, write: false });
-			expect(withPin.since).toBe("refs/clog");
-			expect(withPin.changedFiles).toHaveLength(0);
-		} finally {
-			await fs.rm(repoRoot, { recursive: true, force: true });
-		}
-	});
+				// Pin `clog` (a custom ref, not a tag — see resolveSince) to the recovery
+				// commit: the plain run now diffs against it and leaves the bullet untouched.
+				await git("update-ref", "refs/clog", "HEAD");
+				const withPin = await runChangelogFixer({ repoRoot, write: false });
+				expect(withPin.since).toBe("refs/clog");
+				expect(withPin.changedFiles).toHaveLength(0);
+			} finally {
+				await fs.rm(repoRoot, { recursive: true, force: true });
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
 });
 describe("runChangelogFixer size limit", () => {
 	it("collapses oversized changelogs behind a link to the last commit containing them, idempotently", async () => {
@@ -470,4 +500,162 @@ describe("runChangelogFixer size limit", () => {
 			await fs.rm(repoRoot, { recursive: true, force: true });
 		}
 	});
+});
+
+describe("changelog headings", () => {
+	const CLEAN = "# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2025-01-01\n\n### Fixed\n\n- Old released bullet.\n";
+
+	// Markdown shows each of these as a level-2 release heading; the fixer reads only `## [`.
+	it.each([
+		{ name: "two spaces after the #s", heading: "##  [9.9.9]" },
+		{ name: "a tab after the #s", heading: "##\t[9.9.9]" },
+		{ name: "one space before the #s", heading: " ## [9.9.9]" },
+		{ name: "a dashed underline", heading: "[9.9.9]\n---------" },
+	])(
+		"refuses a release written with $name, naming the line, and writes no changelog",
+		async ({ heading }) => {
+			const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clog-heading-"));
+			try {
+				// The fixer would merge this changelog's duplicate headings, were nothing refused.
+				const fixable = "packages/a/CHANGELOG.md";
+				const fixableContent = CLEAN.replace(
+					"- Old released bullet.\n",
+					"- Old released bullet.\n\n### Fixed\n\n- More.\n",
+				);
+				const misheaded = CLEAN.replace("## [1.0.0]", `${heading}\n\n### Added\n\n- Shipped?\n\n## [1.0.0]`);
+				await Bun.write(path.join(repoRoot, fixable), fixableContent);
+				await Bun.write(path.join(repoRoot, "packages/b/CHANGELOG.md"), misheaded);
+				await $`git init -q -b main && git add -A && git -c user.name=t -c user.email=t@t commit -qm start && git tag v1.0.0`
+					.cwd(repoRoot)
+					.env({ ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" })
+					.quiet();
+
+				const line = 5 + heading.split("\n").length - 1;
+				const refused = await runChangelogFixer({ repoRoot }).catch((error: unknown) => error);
+				expect(refused).toBeInstanceOf(Error);
+				expect((refused as Error).message).toStartWith(
+					`packages/b/CHANGELOG.md: line ${line}, ${JSON.stringify(heading.split("\n").at(-1))}: Markdown shows a level-2 heading "[9.9.9]" where the changelog tools read no heading.`,
+				);
+				expect(await Bun.file(path.join(repoRoot, fixable)).text()).toBe(fixableContent);
+			} finally {
+				await fs.rm(repoRoot, { recursive: true, force: true });
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it("refuses to write what Markdown would show otherwise: sorting moves a release's open code fence above an older one", async () => {
+		// Last in the file the open fence hides nothing; sorted first, it would hide 1.0.0.
+		const content =
+			"# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2025-01-01\n\n### Fixed\n\n- Old.\n\n## [1.1.0] - 2025-02-01\n\n### Added\n\n- New:\n\n```\n";
+		const fixed = fixChangelogFile("packages/a/CHANGELOG.md", content, {
+			promotableAddedItemStartLines: new Set<number>(),
+			maxBytes: Number.POSITIVE_INFINITY,
+			archiveCommit: async () => undefined,
+		});
+		await expect(fixed).rejects.toThrow(
+			/^packages\/a\/CHANGELOG\.md as fixed: line \d+, "## \[1\.0\.0\] - 2025-01-01": Markdown shows no heading where the changelog tools read a level-2 heading "\[1\.0\.0\] - 2025-01-01"\./,
+		);
+	});
+
+	it("fixes a changelog whose entry shows `[^note]:` as inline code, which defines no footnote", async () => {
+		const content = CLEAN.replace(
+			"## [Unreleased]",
+			"## [Unreleased]\n\n### Added\n\n- Documented the `[^note]:` footnote syntax",
+		);
+		const fixed = await fixChangelogFile("packages/a/CHANGELOG.md", content, {
+			promotableAddedItemStartLines: new Set<number>(),
+			maxBytes: Number.POSITIVE_INFINITY,
+			archiveCommit: async () => undefined,
+		});
+		expect(fixed.content).toContain("- Documented the `[^note]:` footnote syntax\n");
+	});
+
+	// The line starts `[^note]:`, so the fixer refuses it wherever it stands; GitHub would end the title there.
+	it("refuses a changelog whose reference definition's title holds a footnote definition", async () => {
+		const content = CLEAN.replace(
+			"## [Unreleased]",
+			'## [Unreleased]\n\nRef[^note].\n\n[link]: https://example.com "\n[^note]: ## [9.9.9]\n"',
+		);
+		const fixed = fixChangelogFile("packages/a/CHANGELOG.md", content, {
+			promotableAddedItemStartLines: new Set<number>(),
+			maxBytes: Number.POSITIVE_INFINITY,
+			archiveCommit: async () => undefined,
+		});
+		await expect(fixed).rejects.toThrow(
+			'packages/a/CHANGELOG.md: line 8, "[^note]: ## [9.9.9]": the line starts a footnote definition',
+		);
+	});
+
+	// `bun run release` finds `## [Unreleased]` with nothing after it; read as [Unreleased], these would stay unreleased.
+	it.each([
+		{ name: "closing #s", heading: "## [Unreleased] ##" },
+		{ name: "a date", heading: "## [Unreleased] - 2026-01-01" },
+	])("refuses an [Unreleased] heading written with $name, which a release would not move", async ({ heading }) => {
+		const content = CLEAN.replace("## [Unreleased]", `${heading}\n\n### Added\n\n- Pending.`);
+		const fixed = fixChangelogFile("packages/a/CHANGELOG.md", content, {
+			promotableAddedItemStartLines: new Set<number>(),
+			maxBytes: Number.POSITIVE_INFINITY,
+			archiveCommit: async () => undefined,
+		});
+		await expect(fixed).rejects.toThrow(
+			`packages/a/CHANGELOG.md: line 3, ${JSON.stringify(heading)}: Markdown shows a level-2 heading "[Unreleased]`,
+		);
+	});
+
+	it.each([
+		{ name: "no title", content: CLEAN.replace("# Changelog\n\n", ""), line: 1, text: "## [Unreleased]" },
+		{ name: "another title", content: CLEAN.replace("# Changelog", "# Wrong"), line: 1, text: "# Wrong" },
+		{
+			name: "a second level-1 heading above the first release",
+			content: CLEAN.replace("# Changelog\n", "# Changelog\n\n# Notes\n"),
+			line: 3,
+			text: "# Notes",
+		},
+	])("refuses a changelog with $name instead of one # Changelog title", async ({ content, line, text }) => {
+		const fixed = fixChangelogFile("packages/a/CHANGELOG.md", content, {
+			promotableAddedItemStartLines: new Set<number>(),
+			maxBytes: Number.POSITIVE_INFINITY,
+			archiveCommit: async () => undefined,
+		});
+		await expect(fixed).rejects.toThrow(
+			`packages/a/CHANGELOG.md: line ${line}, ${JSON.stringify(text)}: Markdown shows `,
+		);
+	});
+
+	it.each([
+		{ name: "a release written one space in, which recovery would lose", tagged: " ## [0.9.0] - 2024-12-01" },
+		{
+			name: "a release heading an HTML block hides, which recovery would make a release of",
+			tagged: "<hr>\n## [0.9.0] - 2024-12-01",
+		},
+	])(
+		"stops --recover at a tag whose changelog shows $name",
+		async ({ tagged }) => {
+			const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clog-recover-heading-"));
+			try {
+				const changelog = path.join(repoRoot, "packages/a/CHANGELOG.md");
+				// Above 1.0.0: read as [Unreleased] text it is dropped; read as a release it is restored.
+				await Bun.write(
+					changelog,
+					CLEAN.replace("## [1.0.0]", `${tagged}\n\n### Fixed\n\n- Historical fix.\n\n## [1.0.0]`),
+				);
+				const git = $`git init -q -b main && git add -A && git -c user.name=t -c user.email=t@t commit -qm old && git tag v0.9.0`;
+				await git
+					.cwd(repoRoot)
+					.env({ ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" })
+					.quiet();
+				await Bun.write(changelog, CLEAN);
+
+				const refused = await runChangelogFixer({ repoRoot, recover: true }).catch((error: unknown) => error);
+				expect(refused).toBeInstanceOf(Error);
+				expect((refused as Error).message).toStartWith("v0.9.0:packages/a/CHANGELOG.md: line ");
+				expect((refused as Error).message).toContain("--recover takes the releases of every tag");
+				expect(await Bun.file(changelog).text()).toBe(CLEAN);
+			} finally {
+				await fs.rm(repoRoot, { recursive: true, force: true });
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
 });
