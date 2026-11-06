@@ -2047,6 +2047,9 @@ const streamOpenAICompletionsOnce = (
 			if (error instanceof OpenAIHttpError && AIError.isTransientStatus(result.status)) {
 				transportExhaustedMessages.add(output);
 			}
+			output.errorType = result.errorType;
+			output.errorCode = result.errorCode;
+			output.errorResetAt = result.errorResetAt;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
 			// Some providers via OpenRouter include extra details here.
