@@ -2640,10 +2640,7 @@ fn spawned_external(
 			st(vp).target = Some(Target::Refused { path, code });
 		},
 		Err(err) => {
-			// bash names the file it tried: the PATH (or hash table)
-			// result, a name with `/` as written.
-			let name = st(vp).argv[0].clone();
-			let name = if name.contains(&b'/') { name } else { path };
+			let name = tried_name(vp, &path);
 			let (diag, status) = spawn_error(name, err);
 			k.diag(cx, vp, line, diag);
 			let s = st(vp);
