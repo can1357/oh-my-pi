@@ -11,7 +11,7 @@ interface TaskFileIdentity {
 
 interface TaskFileSnapshot {
 	path: string;
-	target: string;
+	target?: string;
 	identity?: TaskFileIdentity;
 	error?: string;
 }
@@ -39,46 +39,60 @@ function captureTaskFile(taskFile: string): TaskFileSnapshot {
 	}
 }
 
-/** Capture task-file targets once per owner and approval scope; unwrapped callers only resolve restriction paths. */
+/** Bind task files once per owner in the wrapper's invocation scope, after extension preflight. */
+export function bindTaskFileApproval(
+	owner: object,
+	taskFiles: string[],
+	resolvePath: (taskFile: string) => string | undefined,
+): void {
+	const scope = toolApprovalScopeToken();
+	if (!scope) return;
+	let owners = approvalStates.get(scope);
+	if (!owners) {
+		owners = new WeakMap();
+		approvalStates.set(scope, owners);
+	}
+	if (owners.has(owner)) return;
+	const files = new Map<string, TaskFileSnapshot>(
+		[...new Set(taskFiles)].map(taskFile => {
+			const filePath = resolvePath(taskFile);
+			const snapshot =
+				filePath === undefined
+					? { path: taskFile, error: "does not resolve to a local file" }
+					: captureTaskFile(filePath);
+			return [taskFile, snapshot];
+		}),
+	);
+	const targets = [...files.values()].flatMap(file => (file.target === undefined ? [] : [file.target]));
+	owners.set(owner, { files, targets });
+}
+
+/** Query bound restriction targets, or resolve paths before binding, without changing approval state. */
 export function taskFileRestrictionPaths(
 	owner: object,
 	taskFiles: string[],
 	resolvePath: (taskFile: string) => string | undefined,
 ): string[] | undefined {
 	const scope = toolApprovalScopeToken();
-	if (!scope) {
-		return taskFiles.flatMap(taskFile => {
-			const filePath = resolvePath(taskFile);
-			return filePath === undefined ? [] : [approvalCacheKeyForPath(filePath)];
-		});
-	}
-	let owners = approvalStates.get(scope);
-	if (!owners) {
-		owners = new WeakMap();
-		approvalStates.set(scope, owners);
-	}
-	let state = owners.get(owner);
-	if (!state) {
-		const files = new Map(
-			[...new Set(taskFiles)].map(taskFile => {
-				const filePath = resolvePath(taskFile);
-				const snapshot =
-					filePath === undefined
-						? { path: taskFile, target: taskFile, error: "does not resolve to a local file" }
-						: captureTaskFile(filePath);
-				return [taskFile, snapshot];
-			}),
-		);
-		const targets = [...files.values()].map(file => file.target);
-		state = { files, targets };
-		owners.set(owner, state);
-	}
-	return state.targets.length > 0 ? state.targets : undefined;
+	const state = scope ? approvalStates.get(scope)?.get(owner) : undefined;
+	if (state) return state.targets.length > 0 ? state.targets : undefined;
+	return taskFiles.flatMap(taskFile => {
+		const filePath = resolvePath(taskFile);
+		return filePath === undefined ? [] : [approvalCacheKeyForPath(filePath)];
+	});
+}
+
+/** Read the captured target for approval display without resolving paths or surfacing capture errors. */
+export function taskFileApprovalPath(owner: object, taskFile: string): string | undefined {
+	const scope = toolApprovalScopeToken();
+	const snapshot = scope ? approvalStates.get(scope)?.get(owner)?.files.get(taskFile) : undefined;
+	return snapshot?.target === undefined ? undefined : snapshot.path;
 }
 
 /**
  * Read a captured task file without changing approval state. Return undefined for unwrapped execution;
  * within a scope, throw if the file was not bound or its capture failed.
+ * Direct calls inside another tool's scope also require a binding; they are not unwrapped execution.
  */
 export function approvedTaskFile(owner: object, taskFile: string): TaskFileSnapshot | undefined {
 	const scope = toolApprovalScopeToken();

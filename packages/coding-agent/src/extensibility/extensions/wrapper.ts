@@ -24,7 +24,7 @@ import {
 	truncateForPrompt,
 } from "../../tools/approval";
 import { getApprovalGrants } from "../../tools/approval-cache";
-import { resetToolApprovalScope, withToolApprovalScope } from "../../tools/approval-scope";
+import { withToolApprovalScope } from "../../tools/approval-scope";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
@@ -357,9 +357,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// input that newly resolves to `deny` is caught here even though the original passed the
 		// short-circuit above.
 		const resolvedArgs = approvalArgs(effectiveParams, context);
-		// The final input, after extension preflight, owns the invocation's file bindings.
-		resetToolApprovalScope();
-		this.tool.approvalRestrictionPaths?.(resolvedArgs);
+		this.tool.bindApprovalTargets?.(resolvedArgs);
 		const resolved = resolveApproval(
 			this.tool,
 			resolvedArgs,

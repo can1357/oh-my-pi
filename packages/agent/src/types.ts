@@ -1276,12 +1276,16 @@ export interface AgentTool<
 	approvalCacheTargets?: (args: unknown) => readonly string[] | undefined;
 
 	/**
-	 * Paths a call reads beyond its working directory, matched against restricted folders when it
-	 * reports no `approvalCacheTargets`. Unlike cache targets they never key a remembered grant.
-	 * The coding-agent wrapper also invokes this after extension preflight, before final approval,
-	 * even without restricted folders. It may capture per-invocation bindings; repeated calls in the
-	 * same approval scope must reuse them. The wrapper resets that scope before the final invocation,
-	 * discarding any bindings captured by the earlier policy precheck.
+	 * Capture per-invocation targets after extension preflight, before final approval and execution.
+	 * The coding-agent wrapper calls this once with the final approval args, even without a prompt
+	 * or restricted folders. Restriction queries and approval details may then read the binding.
+	 */
+	bindApprovalTargets?: (args: unknown) => void;
+
+	/**
+	 * Query paths a call reads beyond its working directory, matched against restricted folders when
+	 * it reports no `approvalCacheTargets`. Never capture bindings here: this also runs before preflight.
+	 * Unlike cache targets these paths never key a remembered grant.
 	 */
 	approvalRestrictionPaths?: (args: unknown) => readonly string[] | undefined;
 

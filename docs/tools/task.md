@@ -62,7 +62,7 @@ There is no wire label field: the one-line UI label shown in the TUI/registry is
 
 With `task.file=true`, an item may name its instructions by file instead: `{ "name": "Implement", "taskFile": "local://implementation-prompt.md", "solutionSpace": "…" }`. The file is read once at dispatch and placed in the subagent prompt exactly like inline `task` text, except that JSON escape repair never touches it. Both are trimmed and get LF line endings; interior whitespace (blank lines, Markdown hard breaks, table padding) is kept. Recorded tool-call arguments keep the submitted path.
 
-Restricted folders cover task files as well as the working directory. `always-ask-cached` never remembers a task approval per file: a grant on the path would cover whatever the file holds later. Approval dialogs list every batch file path, and pending task cards show the shortened path.
+Restricted folders cover task files as well as the working directory. `always-ask-cached` never remembers a task approval per file: a grant on the path would cover whatever the file holds later. Approval dialogs show `submitted -> target` when a task file's resolved target differs, including every file in a batch. Pending task cards show the shortened submitted path.
 
 Each tool invocation binds task files to their resolved targets after extension preflight and before approval. Retargeting a submitted symlink does not change which file is read. If the resolved file is replaced, including an editor's atomic save to a new inode, retry the call to approve the replacement. Edits to the same file remain visible at dispatch; approval does not freeze its contents.
 

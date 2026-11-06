@@ -17,6 +17,7 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { ExecutorOptions } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { withToolApprovalScope } from "@oh-my-pi/pi-coding-agent/tools/approval-scope";
 import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 
 describe("taskFile approval binding", () => {
@@ -97,6 +98,7 @@ describe("taskFile approval binding", () => {
 				description: tool.description,
 				parameters: tool.parameters,
 				approval: tool.approval,
+				bindApprovalTargets: tool.bindApprovalTargets,
 				approvalRestrictionPaths: tool.approvalRestrictionPaths,
 				formatApprovalDetails: tool.formatApprovalDetails,
 				execute: tool.execute.bind(tool),
@@ -112,7 +114,7 @@ describe("taskFile approval binding", () => {
 			hasQueuedMessages: () => false,
 			abort: () => undefined,
 		};
-		return { wrapper, context, runner };
+		return { wrapper, context, runner, tool };
 	}
 
 	async function linkedFiles(local = false) {
@@ -130,10 +132,13 @@ describe("taskFile approval binding", () => {
 	it.each([false, true])(
 		"reads the approved target when its symlink changes while approval is pending (local=%s)",
 		async local => {
-			const { taskFile, restricted, linkPath } = await linkedFiles(local);
-			const { wrapper, context } = await createWrapper(async () => {
+			const { safe, taskFile, restricted, linkPath } = await linkedFiles(local);
+			const expectedPath = `Task file: ${JSON.stringify(taskFile)} -> ${JSON.stringify(safe)}`;
+			const { wrapper, context, tool } = await createWrapper(async title => {
+				expect(title).toContain(expectedPath);
 				await fs.promises.unlink(linkPath);
 				await fs.promises.symlink(restricted, linkPath);
+				expect(tool.formatApprovalDetails({ taskFile })).toContain(expectedPath);
 				return "Approve";
 			});
 
@@ -143,6 +148,67 @@ describe("taskFile approval binding", () => {
 			expect(executions.map(item => item.assignment)).toEqual(["Approved assignment."]);
 		},
 	);
+
+	it("shows each bound batch target after an inline item", async () => {
+		const { safe, taskFile } = await linkedFiles(true);
+		const direct = path.join(directory, "direct.md");
+		await Bun.write(direct, "Direct assignment.");
+		const { wrapper, context } = await createWrapper(async title => {
+			expect(title).toContain(`Task 2 file: ${JSON.stringify(taskFile)} -> ${JSON.stringify(safe)}`);
+			expect(title.split("\n")).toContain(`Task 3 file: ${JSON.stringify(direct)}`);
+			return "Approve";
+		});
+
+		const result = await wrapper.execute(
+			"batch-target-display",
+			{
+				context: "Complete all assignments.",
+				tasks: [{ task: "Inline assignment." }, { taskFile }, { taskFile: direct }],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
+		expect(executions.map(item => item.assignment).sort()).toEqual([
+			"Approved assignment.",
+			"Direct assignment.",
+			"Inline assignment.",
+		]);
+	});
+
+	it("does not authorize direct execution by querying restriction paths", async () => {
+		const { safe, taskFile } = await linkedFiles();
+		const { tool } = await createWrapper(async () => "Approve");
+
+		const result = await withToolApprovalScope(async () => {
+			expect(tool.approvalRestrictionPaths({ taskFile })).toEqual([safe]);
+			return tool.execute("unbound-direct-call", { taskFile });
+		});
+
+		expect(result.isError).toBe(true);
+		expect(result.content).toEqual([
+			expect.objectContaining({ text: expect.stringContaining("was not included in this call's approval") }),
+		]);
+		expect(executions).toHaveLength(0);
+	});
+
+	it("omits unresolved local URLs from restriction targets and reports the dispatch error", async () => {
+		const taskFile = "local://%ZZ";
+		const { wrapper, context, tool } = await createWrapper(async () => {
+			expect(tool.approvalRestrictionPaths({ taskFile })).toBeUndefined();
+			return "Approve";
+		});
+
+		const result = await wrapper.execute("unresolved-file", { taskFile }, undefined, undefined, context);
+
+		expect(result.isError).toBe(true);
+		expect(result.content).toEqual([
+			expect.objectContaining({ text: expect.stringContaining("does not resolve to a local file") }),
+		]);
+		expect(executions).toHaveLength(0);
+	});
 
 	it.each(["file", "ancestor", "regular-file"])(
 		"rejects an approved %s replaced before dispatch",
