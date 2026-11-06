@@ -462,13 +462,15 @@ fn assignment_statement(
 				return Some(exec::assign_jump(vp, cx));
 			}
 			// bash abandons the rest of the command line after a failed
-			// assignment statement; a posix shell exits.
+			// assignment statement; a posix shell exits. The site leaves
+			// `last_command_exit_value` alone, so an `errexit` conversion
+			// answers with the status that stood before it.
 			if state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
 				.unwrap_or(false)
 			{
 				return Some(exec::fatal(k, vp, cx));
 			}
-			return Some(Flow::Discard(1));
+			return Some(Flow::DiscardKeep(1));
 		}
 	}
 	vp.status = 0;
@@ -1089,13 +1091,15 @@ fn expand(
 					return Some(exec::assign_jump(vp, cx));
 				}
 				// bash abandons the rest of the command line after a failed
-				// assignment statement; a posix shell exits.
+				// assignment statement; a posix shell exits. The site
+				// leaves `last_command_exit_value` alone, so an `errexit`
+				// conversion answers with the status that stood before it.
 				if state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
 					.unwrap_or(false)
 				{
 					return Some(exec::fatal(k, vp, cx));
 				}
-				return Some(Flow::Discard(1));
+				return Some(Flow::DiscardKeep(1));
 			}
 			if k.mask.contains(crate::bash::event::EventKind::Assign)
 				&& matches!(name.as_slice(), b"BASH_ALIASES" | b"BASH_CMDS" | b"DIRSTACK" | b"RANDOM")

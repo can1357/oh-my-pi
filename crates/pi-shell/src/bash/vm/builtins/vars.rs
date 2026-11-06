@@ -1330,7 +1330,7 @@ fn has_shell_metas(s: &[u8]) -> bool {
 }
 
 /// Which builtin of the `declare` family runs.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, strum::VariantNames)]
 pub enum DeclareKind {
 	/// `declare` / `typeset`.
 	Declare,

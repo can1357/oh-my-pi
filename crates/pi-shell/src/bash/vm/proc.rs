@@ -373,7 +373,7 @@ pub struct Landing {
 /// jump ([`super::exec`]): `run_exit_trap` (`trap.c`), `run_one_command`
 /// (`shell.c`), `reader_loop` (`eval.c`), `execute_in_subshell`
 /// (`execute_cmd.c`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, strum::VariantNames)]
 pub enum LandingCatch {
 	/// `run_exit_trap`: the EXIT trap's action.
 	ExitTrap,

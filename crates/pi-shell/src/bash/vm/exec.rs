@@ -63,6 +63,15 @@ pub enum Flow {
 	/// An arithmetic error in a word (`: $((7/0))`): abandoned the same
 	/// way, but `errexit` does not raise bash's `ERREXIT` in its place.
 	DiscardArith(i32),
+	/// A failed assignment statement (`readonly r=1; r=2`): abandoned the
+	/// same way and converted by `errexit` like any other discard, but
+	/// from a site that leaves `last_command_exit_value` alone, so the
+	/// `ERREXIT` answers with the status that stood before it. The catch
+	/// that carries on still raises the status to the one carried here, as
+	/// bash's `parse_and_execute` does. Measured in both bashes: `set -e;
+	/// trap 'r=2' EXIT; exit 7` is 7 and `set -e; trap ':; r=2' EXIT; exit
+	/// 7` is 1, where an expansion error's discard is 1 either way.
+	DiscardKeep(i32),
 }
 
 /// Run vproc `vp` for up to `slice` ops; stops early when it parks, a
@@ -320,7 +329,10 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 		let cancel_transfer = cancellation.is_some()
 			&& matches!(
 				flow,
-				Flow::Return(_) | Flow::Abort(_) | Flow::Discard(_) | Flow::DiscardArith(_)
+				Flow::Return(_)
+					| Flow::Abort(_) | Flow::Discard(_)
+					| Flow::DiscardArith(_)
+					| Flow::DiscardKeep(_)
 			);
 		let failing = !ignore_errexit && vp.status != 0 && matches!(flow, Flow::Next | Flow::Jump(_));
 		let failed_command = failing
@@ -456,7 +468,7 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			Flow::Break { n, cont } => break_loops(k, vp, cx, n, cont, op),
 			Flow::Exit(status) if unit.mode.dialect() == Dialect::Zsh => zsh_exit(k, vp, cx, status),
 			Flow::Exit(status) => exit_shell(k, vp, cx, status),
-			Flow::Discard(status) | Flow::DiscardArith(status)
+			Flow::Discard(status) | Flow::DiscardArith(status) | Flow::DiscardKeep(status)
 				if unit.mode.dialect() == Dialect::Zsh =>
 			{
 				zsh_discard(k, vp, cx, status);
@@ -464,8 +476,13 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			// bash's `parse_and_execute` hands the jump on in a subshell
 			// (`subshell_environment`): it ends where a fatal error lands,
 			// with its EXIT trap. The site set the status to 1 first,
-			// except an arithmetic error's, which bash leaves as it is.
-			Flow::Discard(status) if super::nested::in_subshell(cx.store, vp) => {
+			// except an arithmetic error's, which bash leaves as it is. A
+			// subshell answers a status-preserving discard with the 1 its
+			// own catch sets, so it joins the ordinary arm: measured,
+			// `readonly r=1; ( (exit 3); r=2 ); echo A:$?` is `A:1`.
+			Flow::Discard(status) | Flow::DiscardKeep(status)
+				if super::nested::in_subshell(cx.store, vp) =>
+			{
 				vp.status = status;
 				let code =
 					if errexit_jump(k, cx, vp) { JumpCode::Errexit } else { JumpCode::Discard };
@@ -486,7 +503,12 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				let status = jump_status(cx, vp, JumpCode::Errexit);
 				exit_shell(k, vp, cx, status);
 			},
-			Flow::Discard(status) | Flow::DiscardArith(status) => {
+			Flow::DiscardKeep(status) if errexit_jump(k, cx, vp) => {
+				let answer = jump_status(cx, vp, JumpCode::Errexit);
+				vp.status = status;
+				exit_shell(k, vp, cx, answer);
+			},
+			Flow::Discard(status) | Flow::DiscardArith(status) | Flow::DiscardKeep(status) => {
 				vp.status = status;
 				// bash's `parse_and_execute` (the script, `-c`, `eval`, `.`,
 				// a trap action) catches the jump: the innermost script goes
@@ -2153,8 +2175,8 @@ fn stopped(
 /// `last_command_exit_value` as it stands at the jump site, which is
 /// `vp.status` here. `EXITPROG` and `EXITBLTIN` (`exit n`) are
 /// [`Flow::Exit`], whose status every catch takes as it is.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum JumpCode {
+#[derive(Clone, Copy, PartialEq, Eq, strum::VariantNames)]
+pub(super) enum JumpCode {
 	/// `FORCE_EOF`: a fatal error (`${x?}`, `set -u`, a posix shell's
 	/// assignment error). The site sets the status to 1 first.
 	ForceEof,
@@ -2182,13 +2204,28 @@ enum JumpCode {
 /// whose status is `n` wherever it runs. The site sets the status to 1
 /// first, as bash's does, and `errexit` raises `ERREXIT` in its place.
 pub fn fatal(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Flow {
+	fatal_code(k, vp, cx, true)
+}
+
+/// A posix shell's **arithmetic** error, which is fatal there like every
+/// other expansion error but is one of the sites `errexit` never converts:
+/// `set -o posix; set -e; : $((1/0))` is 127 in both bashes, where a
+/// converted jump would answer with the status at the site.
+pub fn fatal_arith(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Flow {
+	fatal_code(k, vp, cx, false)
+}
+
+fn fatal_code(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, errexit: bool) -> Flow {
 	if vp.mode.dialect() == Dialect::Zsh {
 		// zsh: 127 from a `-c` string, 1 elsewhere (`zsh_exit` decides the rest).
 		return Flow::Exit(if shell_command(cx, vp) { 127 } else { 1 });
 	}
 	vp.status = 1;
-	let code =
-		if errexit_jump(k, cx, vp) { JumpCode::Errexit } else { JumpCode::ForceEof };
+	let code = if errexit && errexit_jump(k, cx, vp) {
+		JumpCode::Errexit
+	} else {
+		JumpCode::ForceEof
+	};
 	Flow::Exit(jump_status(cx, vp, code))
 }
 
@@ -2200,6 +2237,21 @@ pub fn fatal(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Flow {
 /// "carry on with the next command" of a plain [`Flow::Discard`].
 pub fn assign_jump(vp: &mut Vproc, cx: &mut Cx<'_>) -> Flow {
 	Flow::Exit(jump_status(cx, vp, JumpCode::AssignDiscard))
+}
+
+/// Any OTHER failure of an assignment statement (`readonly r=1; r=2`, a
+/// nameref that cannot bind): the same jump from the same
+/// status-preserving site, except that `errexit` does raise `ERREXIT` in
+/// its place. That one difference is all that separates it from
+/// [`assign_jump`], and both bashes show it: inside an EXIT trap's action
+/// `set -e; trap 'r=2' EXIT; exit 7` is 7 and `set -e; trap ':; r=2' EXIT;
+/// exit 7` is 1 (the status at the site, a zero raised to 1), while the
+/// arithmetic form is 7 either way.
+pub fn assignment_jump(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Flow {
+	if errexit_jump(k, cx, vp) {
+		return Flow::Exit(jump_status(cx, vp, JumpCode::Errexit));
+	}
+	assign_jump(vp, cx)
 }
 
 /// Whether `vp` runs a `-c` string as the shell itself (a nested shell,
@@ -2286,8 +2338,12 @@ fn catch(cx: &mut Cx<'_>, vp: &Vproc) -> Catch {
 /// inherited, as bash's child does before it resets its traps
 /// ([`forked_dispatch`]).
 fn jump_status(cx: &mut Cx<'_>, vp: &mut Vproc, code: JumpCode) -> i32 {
-	// bash's `last_command_exit_value` at the jump site.
-	let at_site = vp.status;
+	// bash's `last_command_exit_value` at the jump site. A shell never
+	// leaves on an error with a zero status, so an `ERREXIT` whose site
+	// kept a zero answers 1: `readonly r=1; set -e; trap ':; r=2' EXIT;
+	// exit 7` is 1 in both bashes, where the site's own status is 0.
+	let at_site =
+		if code == JumpCode::Errexit && vp.status == 0 { 1 } else { vp.status };
 	let answer = |landing: LandingCatch, saved: i32| match landing {
 		// `run_exit_trap`: `ERREXIT` with the status at the site, every
 		// other code with the status it saved.
@@ -2503,8 +2559,16 @@ pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, sto
 			}
 			Flow::Discard(1)
 		},
+		// The same error in a posix shell is fatal instead, and the
+		// arithmetic one keeps the same exemption there: both bashes make
+		// `set -o posix; set -e; : $((1/0))` 127, not the status at the
+		// site that a converted jump would answer with.
 		Stop::Fail(d) | Stop::Fatal(d) => {
+			let arith = matches!(d, Diag::Arith { .. } | Diag::ArithSubscript { .. });
 			k.diag(cx, vp, line, d);
+			if arith {
+				return fatal_arith(k, vp, cx);
+			}
 			fatal(k, vp, cx)
 		},
 		Stop::Store(err) => {
