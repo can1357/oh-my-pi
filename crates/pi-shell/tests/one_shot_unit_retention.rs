@@ -166,18 +166,21 @@ async fn retained_output_of_a_one_shot_source_keeps_its_own_command() {
 	}
 }
 
-/// The same source, run once, retired while thousands of other sources run,
-/// and run again: the second run must be announced again and resolve to its
-/// own text rather than to a placeholder with no source.
+/// One source position, run once, retired while the whole replay window of
+/// other sources runs, and run again: the second run must be announced
+/// again and resolve to its own text rather than to a placeholder with no
+/// source. The two runs are the same occurrence in the script, so they
+/// share an announcement key and the row fails unless retirement really
+/// forgets that key.
 #[tokio::test]
 async fn a_source_run_again_after_retirement_is_announced_again() {
 	let count = HISTORY_EVENTS / 4;
-	let repeated = "eval 'printf \"repeated %s\\n\" \"$BASH_SOURCE\"'";
 	let script = format!(
-		"{repeated} >/dev/null; for ((i=0;i<{count};i++)); do eval \"printf '%0512d' $i\" \
-		 >/dev/null; done; {repeated}; echo {count}"
+		"repeat() {{ eval 'printf \"repeated\\n\"'; }}; repeat >/dev/null; for \
+		 ((i=0;i<{count};i++)); do eval \"printf '%0512d' $i\" >/dev/null; done; repeat; echo \
+		 {count}"
 	);
-	let trace = trace(&script, &[], &format!("repeated \n{count}")).await;
+	let trace = trace(&script, &[], &format!("repeated\n{count}")).await;
 	let snapshot = trace.snapshot();
 	let event = snapshot
 		.history
@@ -196,6 +199,37 @@ async fn a_source_run_again_after_retirement_is_announced_again() {
 	assert!(
 		String::from_utf8_lossy(&source[node.lo as usize..node.hi as usize]).contains("repeated"),
 		"the re-announced source carries its own text, not an empty placeholder"
+	);
+}
+
+/// Retirement must not take a definition's provenance with it. A function
+/// defined inside an `eval` is announced again when it is called again,
+/// long after the defining source was retired, and that announcement still
+/// has to name where the definition came from — otherwise the presentation
+/// shows the same function twice, the second time as code with no place in
+/// the script.
+#[tokio::test]
+async fn a_function_defined_in_an_eval_keeps_its_parent_when_it_runs_again() {
+	let count = HISTORY_EVENTS / 4;
+	let script = format!(
+		"eval 'keeper() {{ printf \"kept\\n\"; }}; keeper >/dev/null'; for \
+		 ((i=0;i<{count};i++)); do eval \"printf '%0512d' $i\" >/dev/null; done; keeper; echo \
+		 {count}"
+	);
+	let trace = trace(&script, &[], &format!("kept\n{count}")).await;
+	let snapshot = trace.snapshot();
+	let event = snapshot
+		.history
+		.iter()
+		.rev()
+		.find(|event| matches!(&event.data, HistoryData::Output { text, .. } if text.starts_with(b"kept")))
+		.expect("the second call of the eval-defined function produced output");
+	let unit = &snapshot.units[event.u.expect("the second call resolves to a source") as usize];
+	assert!(
+		unit.syntax
+			.as_ref()
+			.is_some_and(|syntax| syntax.parent.is_some()),
+		"the re-announced function body still names the source that defined it"
 	);
 }
 
