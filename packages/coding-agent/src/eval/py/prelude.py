@@ -539,7 +539,8 @@ if "__omp_prelude_loaded__" not in globals():
             return schema
         if origin is typing.Literal:
             return {"enum": list(args)}
-        if origin in (typing.Union, types.UnionType):
+        # `X | Y` unions (types.UnionType) exist from Python 3.10 only.
+        if origin in (typing.Union, getattr(types, "UnionType", typing.Union)):
             non_null = [item for item in args if item is not type(None)]
             if len(non_null) == 1 and len(non_null) != len(args):
                 return {

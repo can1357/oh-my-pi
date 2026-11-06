@@ -227,7 +227,7 @@ enum ModCond<'a> {
 
 /// The operand counts (`conddef`'s `min`, `max`) of the prefix conditions
 /// zsh's modules define.
-fn prefix_arity(name: &[u8]) -> (usize, Option<usize>) {
+const fn prefix_arity(name: &[u8]) -> (usize, Option<usize>) {
 	match name {
 		b"len" | b"prefix" | b"suffix" => (1, Some(2)),
 		b"after" => (1, Some(1)),

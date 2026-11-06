@@ -574,8 +574,8 @@ const RESWDS: &[&str] = &[
 const PREFIXES: &[&str] = &["-", "builtin", "command", "exec", "noglob"];
 
 /// `s` as zsh's `dupstring` of a possibly-`NULL` C string.
-fn opt(s: &Option<BString>) -> &[u8] {
-	s.as_deref().map_or(&[][..], |s| s.as_slice())
+fn opt(s: Option<&BString>) -> &[u8] {
+	s.map_or(&[][..], |s| s.as_slice())
 }
 
 /// zsh `rembslash` of a metafied string.
@@ -714,7 +714,7 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 		if let Some(Some(r)) = self.facts.get(n) {
 			return Ok(r.clone());
 		}
-		let r = match self.ctx.probe(p.clone()) {
+		let r = match self.ctx.probe(p) {
 			Ok(r) => r,
 			Err(Need::Probe(p)) => {
 				let mut sc = Scratch::default();
@@ -857,7 +857,7 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			return Ok(Some(nn));
 		}
 		for dir in self.path()? {
-			let mut buf = dir.clone();
+			let mut buf = dir;
 			if !buf.is_empty() {
 				buf.push(b'/');
 			}
@@ -876,7 +876,7 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			if dir.first() != Some(&b'/') {
 				continue;
 			}
-			let mut buf = dir.clone();
+			let mut buf = dir;
 			buf.push(b'/');
 			buf.extend_from_slice(arg0);
 			if self.iscom(&buf)? {
@@ -1066,17 +1066,12 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 					.map(|n| (m(n.as_bytes()), Hn::default()))
 					.collect()
 			},
-			Ht::Thingy => ctx
-				.vp
-				.zle
-				.as_ref()
-				.map(|z| {
-					z.widgets
-						.iter()
-						.map(|(n, _)| (m(n), Hn::default()))
-						.collect()
-				})
-				.unwrap_or_default(),
+			Ht::Thingy => ctx.vp.zle.as_ref().map_or_default(|z| {
+				z.widgets
+					.iter()
+					.map(|(n, _)| (m(n), Hn::default()))
+					.collect()
+			}),
 		})
 	}
 
@@ -1507,10 +1502,7 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 		while let Some(start) = cc {
 			let mn = self.c.core.mnum;
 			let mut cur = Some(start);
-			loop {
-				let Some(id) = cur else {
-					break;
-				};
+			while let Some(id) = cur {
 				if !sub {
 					self.brange = 0;
 					self.erange = self.c.tricky.clwnum - 1;
@@ -1785,7 +1777,7 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			crate::bash::syntax::Features::ZSH,
 		)
 		.map_err(Need::from)?;
-		let mut foo: Vec<BString> = Vec::new();
+		let mut wordlist: Vec<BString> = Vec::new();
 		let mut got = false;
 		let mut cur: i32 = -1;
 		let mut i: i32 = 0;
@@ -1829,7 +1821,7 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 				}
 				let p = lx.tokstr().filter(|t| !t.is_empty()).map(<[u8]>::to_vec);
 				if let Some(p) = &p {
-					foo.push(p.clone().into());
+					wordlist.push(p.clone().into());
 				}
 				if !got && lx.lexflags() & LEXFLAGS_ZLE == 0 {
 					got = true;
@@ -1951,7 +1943,7 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 		let cut = usize::try_from(swb - i32::try_from(sl).unwrap_or(0) - 1)
 			.unwrap_or(0)
 			.min(s.len());
-		let mut qp = opt(&self.c.tricky.qipre).to_vec();
+		let mut qp = opt(self.c.tricky.qipre.as_ref()).to_vec();
 		qp.extend_from_slice(&self.multiquote(&s[..cut], false)?);
 		if swe < swb {
 			swe = swb;
@@ -1967,7 +1959,7 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 		}
 		let tail = &s[usize::try_from(swe).unwrap_or(0).min(s.len())..];
 		let mut qs = self.multiquote(tail, false)?.to_vec();
-		qs.extend_from_slice(opt(&self.c.tricky.qisuf));
+		qs.extend_from_slice(opt(self.c.tricky.qisuf.as_ref()));
 		let nsl = i32::try_from(ns.len()).unwrap_or(0);
 		if soffs > nsl {
 			soffs = nsl;
@@ -1983,15 +1975,15 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			let olwp = self.c.tricky.clwpos;
 			let (obr, oer, oof) = (self.brange, self.erange, self.c.tricky.offs);
 			let occ = self.ccont;
-			let newq = if self.c.tricky.instring != i32::from(qt::NONE) {
-				u8::try_from(self.c.tricky.instring).unwrap_or(qt::BACKSLASH)
-			} else {
+			let newq = if self.c.tricky.instring == i32::from(qt::NONE) {
 				qt::BACKSLASH
+			} else {
+				u8::try_from(self.c.tricky.instring).unwrap_or(qt::BACKSLASH)
 			};
 			let mut nq = vec![newq];
 			nq.extend_from_slice(&qstack);
 			self.c.complete.compqstack = Some(nq.into());
-			let words: Vec<BString> = foo
+			let words: Vec<BString> = wordlist
 				.into_iter()
 				.map(|w| {
 					let mut w = w.to_vec();
@@ -2330,10 +2322,10 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			let s1i = s1.unwrap_or(0);
 			let s1_is_rpre = s1.is_none();
 			let s2i = s2.unwrap_or(rsuf.len());
-			let ppre: Vec<u8> = if at(&rpre, s1i) != b'/' {
-				Vec::new()
-			} else {
+			let ppre: Vec<u8> = if at(&rpre, s1i) == b'/' {
 				rpre[..=s1i].to_vec()
+			} else {
+				Vec::new()
 			};
 			let psuf: Vec<u8> = rsuf[s2i..].to_vec();
 			self.ppre = Some(ppre.clone().into());
@@ -2341,9 +2333,12 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			let cs = self.c.line.cs;
 			let wb = usize::try_from(self.c.tricky.wb).unwrap_or(0);
 			let we = usize::try_from(self.c.tricky.we).unwrap_or(0);
-			if cs != wb {
+			if cs == wb {
+				self.lppre = None;
+				self.lppl = 0;
+			} else {
 				let line = self.c.line.bytes().to_vec();
-				let qipre = opt(&self.c.tricky.qipre).to_vec();
+				let qipre = opt(self.c.tricky.qipre.as_ref()).to_vec();
 				let skip = if qipre.is_empty() {
 					0
 				} else {
@@ -2369,14 +2364,14 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 					self.lppl = i32::try_from(ppre.len()).unwrap_or(0);
 					self.lppre = Some(ppre.clone().into());
 				}
-			} else {
-				self.lppre = None;
-				self.lppl = 0;
 			}
-			if cs != we {
+			if cs == we {
+				self.lpsuf = None;
+				self.lpsl = 0;
+			} else {
 				let line = self.c.line.bytes().to_vec();
 				let mut end = we;
-				let qisuf = opt(&self.c.tricky.qisuf).to_vec();
+				let qisuf = opt(self.c.tricky.qisuf.as_ref()).to_vec();
 				if !qisuf.is_empty() {
 					let ql = qisuf.len();
 					end -= ql - usize::from(matches!(qisuf[ql - 1], b'\'' | b'"'));
@@ -2393,16 +2388,13 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 				}
 				self.lpsuf = match ls.find_byte(b'/') {
 					Some(sl) => Some(ls[sl..].to_vec().into()),
-					None if sf2 != 0 => Some(psuf.clone().into()),
+					None if sf2 != 0 => Some(psuf.into()),
 					None => None,
 				};
 				self.lpsl = self
 					.lpsuf
 					.as_ref()
 					.map_or(0, |l| i32::try_from(l.len()).unwrap_or(0));
-			} else {
-				self.lpsuf = None;
-				self.lpsl = 0;
 			}
 			// The file prefix.
 			let s_slash = at(&s, 0) == b'/';
@@ -2439,14 +2431,14 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			if self.ic == TILDE {
 				let oi = self.c.core.ipre.clone();
 				let mut ni = b"~".to_vec();
-				ni.extend_from_slice(opt(&oi));
+				ni.extend_from_slice(opt(oi.as_ref()));
 				self.c.core.ipre = Some(ni.into());
 				self.maketildelist()?;
 				self.c.core.ipre = oi;
 			} else if self.ic == EQUALS {
 				let oi = self.c.core.ipre.clone();
 				let mut ni = b"=".to_vec();
-				ni.extend_from_slice(opt(&oi));
+				ni.extend_from_slice(opt(oi.as_ref()));
 				self.c.core.ipre = Some(ni.into());
 				if self.isset(ZshOpt::Hashlistall)? {
 					self.fillcmdnamtable()?;
@@ -2477,11 +2469,10 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 				}
 			} else {
 				self.addwhat = i32::try_from(cc::FILES).unwrap_or(0);
-				let mut dirs: Option<Vec<BString>> = None;
-				if let Some(withd) = &n.withd
+				let dirs: Option<Vec<BString>> = if let Some(withd) = &n.withd
 					&& let Some(pp) = self.get_user_var(withd)?
 				{
-					dirs = Some(
+					Some(
 						pp.into_iter()
 							.map(|d| {
 								let mut tp = d.to_vec();
@@ -2490,8 +2481,10 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 								BString::from(tp)
 							})
 							.collect(),
-					);
-				}
+					)
+				} else {
+					None
+				};
 				let dirs = dirs.unwrap_or_else(|| {
 					vec![match &n.withd {
 						Some(w) => {
@@ -2504,7 +2497,7 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 					}]
 				});
 				for dir in dirs {
-					self.prpre = Some(dir.clone());
+					self.prpre = Some(dir);
 					if sf2 != 0 {
 						self.gen_matches_files(true, false, false)?;
 					} else {
@@ -2553,8 +2546,8 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 		}
 		if self.ic == 0
 			&& n.mask & cc::COMMPATH != 0
-			&& opt(&self.ppre).is_empty()
-			&& opt(&self.psuf).is_empty()
+			&& opt(self.ppre.as_ref()).is_empty()
+			&& opt(self.psuf.as_ref()).is_empty()
 		{
 			// Command names: aliases, reserved words, functions, builtins,
 			// external commands.
@@ -2709,10 +2702,10 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 				let mut args: Vec<BString> = Vec::new();
 				if let Some(g) = self.c.core.mgroup {
 					for m in &self.c.groups.get(g).lmatches {
-						let mut p = opt(&m.ppre).to_vec();
+						let mut p = opt(m.ppre.as_ref()).to_vec();
 						if m.ppre.is_some() {
 							p.extend_from_slice(&m.str);
-							p.extend_from_slice(opt(&m.psuf));
+							p.extend_from_slice(opt(m.psuf.as_ref()));
 						} else {
 							p = m.str.to_vec();
 						}
@@ -2784,7 +2777,7 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 
 	/// The `-g` patterns of a compctl, globbed in directory `prpre`.
 	fn glob_matches(&mut self, n: &Cc, glob: &[u8], sf1: i32, ispattern: i32) -> G<()> {
-		let prpre = opt(&self.prpre).to_vec();
+		let prpre = opt(self.prpre.as_ref()).to_vec();
 		let pl = prpre.len();
 		let md = self.isset(ZshOpt::Markdirs)?;
 		if md {
@@ -2840,7 +2833,7 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 					subst::filesub(ex, &mut w, 0)?;
 					Ok(w)
 				})?;
-				r.unwrap_or(pat.clone())
+				r.unwrap_or_else(|_| pat.clone())
 			} else if at(&pat, 0) == b'/' && n.withd.is_none() {
 				pat.clone()
 			} else {
@@ -2880,7 +2873,7 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 	/// The words of `compctl -s`: `str` lexed as arguments, expanded and
 	/// globbed.
 	fn str_matches(&mut self, str: &[u8]) -> G<()> {
-		let mut foo: Vec<Vec<u8>> = Vec::new();
+		let mut wordlist: Vec<Vec<u8>> = Vec::new();
 		let feat = mode::features(
 			&mut self.ctx.k.root,
 			self.ctx.cx.store,
@@ -2910,13 +2903,13 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 					break;
 				}
 				if !first && let Some(t) = lx.tokstr().filter(|t| !t.is_empty()) {
-					foo.push(t.to_vec());
+					wordlist.push(t.to_vec());
 				}
 				first = false;
 			}
 		}
 		let r = self.ex(|ex| {
-			let mut l = subst::List { nodes: foo, array: false };
+			let mut l = subst::List { nodes: wordlist, array: false };
 			let mut rf = 0;
 			subst::prefork(ex, &mut l, 0, &mut rf)?;
 			Ok(l.nodes)
@@ -3002,15 +2995,12 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 		if sub.is_empty() {
 			self.cmdstr = ow.get(br).cloned();
 			*incmd = i32::from(self.c.tricky.clwpos == 0);
-			self.c.tricky.clwords = ow.get(br..).map(<[BString]>::to_vec).unwrap_or_default();
+			self.c.tricky.clwords = ow.get(br..).map_or_default(<[BString]>::to_vec);
 		} else {
 			self.c.tricky.clwpos += 1;
 			self.c.tricky.clwnum += 1;
 			*incmd = 0;
-			let mut w = ow
-				.get(br - 1..)
-				.map(<[BString]>::to_vec)
-				.unwrap_or_default();
+			let mut w = ow.get(br - 1..).map_or_default(<[BString]>::to_vec);
 			if let Some(first) = w.first_mut() {
 				*first = sub.into();
 			}
@@ -3033,7 +3023,7 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 	/// `prpre` (all, or directories and/or executables).
 	fn gen_matches_files(&mut self, mut dirs: bool, mut execs: bool, mut all: bool) -> G<()> {
 		let aw = self.addwhat;
-		let psuf = opt(&self.psuf).to_vec();
+		let psuf = opt(self.psuf.as_ref()).to_vec();
 		let mut ns = false;
 		if !psuf.is_empty() {
 			let q = *psuf.last().expect("not empty");
@@ -3166,8 +3156,8 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			|| aw == -8;
 		let ms: Option<BString>;
 		if files_like {
-			let ppl = opt(&self.ppre).len();
-			let psl = opt(&self.psuf).len();
+			let ppl = opt(self.ppre.as_ref()).len();
+			let psl = opt(self.psuf.as_ref()).len();
 			let adv = |list: &[super::super::types::Brinfo], mut i: usize, lim: usize| {
 				while i < list.len() && usize::try_from(list[i].curpos).unwrap_or(0) < lim {
 					i += 1;
@@ -3176,7 +3166,8 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			};
 			bpl = adv(&self.c.tricky.brbeg, bpl, ppl);
 			bsl = adv(&self.c.tricky.brend, bsl, psl);
-			if (aw == i32::try_from(cc::FILES).unwrap_or(0) || aw == -5) && opt(&self.psuf).is_empty()
+			if (aw == i32::try_from(cc::FILES).unwrap_or(0) || aw == -5)
+				&& opt(self.psuf.as_ref()).is_empty()
 			{
 				// The fignore check.
 				let fignore = self
@@ -3200,7 +3191,11 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 				(
 					self.tildequote(&qfpre, true)?,
 					self.multiquote(&qfsuf, true)?,
-					if opt(&self.ppre).is_empty() { 2 } else { 1 },
+					if opt(self.ppre.as_ref()).is_empty() {
+						2
+					} else {
+						1
+					},
 				)
 			} else {
 				let fpre = self.fpre.clone();
@@ -3332,16 +3327,16 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			&ms,
 			s,
 			lc,
-			sl(&ipre),
-			sl(&ripre),
-			sl(&isuf),
-			sl(&pre),
-			sl(&prpre),
-			sl(&lppre),
+			sl(ipre.as_ref()),
+			sl(ripre.as_ref()),
+			sl(isuf.as_ref()),
+			sl(pre.as_ref()),
+			sl(prpre.as_ref()),
+			sl(lppre.as_ref()),
 			None,
-			sl(&lpsuf),
+			sl(lpsuf.as_ref()),
 			None,
-			sl(&suf),
+			sl(suf.as_ref()),
 			flags,
 			isexact,
 		);
@@ -3373,7 +3368,7 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 				None
 			};
 			let cp = cp.zip(env.as_ref()).map(|(p, env)| (p, env.env()));
-			compmatch::comp_match(ex, c, pfx, Some(sfx), w, cp, clp, qu, bpl, bcp, bsl, bcs, exact)
+			Ok(compmatch::comp_match(ex, c, pfx, Some(sfx), w, cp, clp, qu, bpl, bcp, bsl, bcs, exact))
 		})?
 		.ok()
 		.flatten())
@@ -3400,12 +3395,12 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 }
 
 /// A C string argument that may be `NULL`.
-fn sl(s: &Option<BString>) -> Option<&[u8]> {
-	s.as_ref().map(|v| v.as_slice())
+fn sl(s: Option<&BString>) -> Option<&[u8]> {
+	s.map(|v| v.as_slice())
 }
 
 /// The `st_mode` of `st` (type bits and permissions).
-fn st_mode(st: &Stat) -> u32 {
+const fn st_mode(st: &Stat) -> u32 {
 	let ty = match st.kind {
 		StatKind::File => 0o100_000,
 		StatKind::Dir => 0o040_000,
