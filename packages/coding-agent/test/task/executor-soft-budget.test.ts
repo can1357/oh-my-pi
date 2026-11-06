@@ -111,6 +111,7 @@ function createMockSession(
 		getLastAssistantMessage: () => messages[messages.length - 1] as never,
 		sendUserMessage: async (content, options) => {
 			sentUserMessages.push({ content, options });
+			return { handled: "prompt" as const };
 		},
 		setIrcWakeTurnObserver: observer => {
 			ircWakeTurnObserver = observer;

@@ -1183,14 +1183,21 @@ export class AcpAgent implements Agent {
 		}
 	}
 
-	#trackExtensionUserMessage(record: ManagedSessionRecord, task: Promise<void>): void {
-		const tracked = task.catch((error: unknown) => {
-			logger.warn("ACP extension sendUserMessage failed", { error });
-		});
+	/** Track an extension send for the prompt turn, and hand the task back to the extension unchanged:
+	 *  the handler attached here keeps a caller that ignores the answer from raising an unhandled
+	 *  rejection, while one that awaits it still sees the error. */
+	#trackExtensionUserMessage<T>(record: ManagedSessionRecord, task: Promise<T>): Promise<T> {
+		const tracked = task.then(
+			() => {},
+			(error: unknown) => {
+				logger.warn("ACP extension sendUserMessage failed", { error });
+			},
+		);
 		record.extensionUserMessageTasks.add(tracked);
 		void tracked.finally(() => {
 			record.extensionUserMessageTasks.delete(tracked);
 		});
+		return task;
 	}
 
 	async #waitForExtensionUserMessages(
@@ -3069,9 +3076,8 @@ export class AcpAgent implements Agent {
 						logger.warn("ACP extension sendMessage failed", { error });
 					});
 				},
-				sendUserMessage: (content, options) => {
-					this.#trackExtensionUserMessage(record, record.session.sendUserMessage(content, options));
-				},
+				sendUserMessage: (content, options) =>
+					this.#trackExtensionUserMessage(record, record.session.sendUserMessage(content, options)),
 				appendEntry: (customType, data) => {
 					record.session.sessionManager.appendCustomEntry(customType, data);
 				},

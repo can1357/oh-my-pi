@@ -119,9 +119,9 @@ describe("RPC queued-message editing", () => {
 			expect(updates.at(-1)?.followUp).toEqual(["second"]);
 			expect((await client.getState()).queuedMessages).toEqual(updates.at(-1)!);
 
-			// Snapshot-string-removal invariant: every chip string in a snapshot,
+			// Snapshot-string-removal invariant: every untagged chip string in a snapshot,
 			// passed back verbatim to remove_queued_message with its queue, removes
-			// that message.
+			// that message (tagged extension-input chips are listed but never removable).
 			const snapshot = (await client.getState()).queuedMessages;
 			for (const text of snapshot.steering) {
 				expect(await client.removeQueuedMessage(text, "steering")).toEqual({ removed: true });

@@ -65,10 +65,25 @@ export function isUserQueuedMessage(message: AgentMessage): boolean {
 
 /**
  * Whether a queued user prompt was authored by the user rather than handed off by an
- * agent. Queue editing (chips, removal, promotion, editor restore) only touches these.
+ * agent. Chips and promotion touch only these; removal and editor restore further
+ * require {@link isRestorableQueuedMessage}.
  */
 export function isUserAuthoredQueuedMessage(message: AgentMessage): boolean {
 	return isUserQueuedMessage(message) && !("attribution" in message && message.attribution === "agent");
+}
+
+/**
+ * Whether a queued user prompt may be handed back as editable text (editor restore,
+ * Alt+Up, RPC removal). Input an extension forwarded with a `tag` (`sendUserInput`) may
+ * not: the editor and RPC clients carry only text, so the bridge that matches the
+ * message by its tag would lose it. Such input stays queued (or, on an interrupt, is
+ * recorded with its tag) and still shows as a queue chip.
+ */
+export function isRestorableQueuedMessage(message: AgentMessage): boolean {
+	return (
+		isUserAuthoredQueuedMessage(message) &&
+		!((message.role === "user" || message.role === "custom") && message.tag !== undefined)
+	);
 }
 
 /** Hidden magic-keyword notice types (`<id>-notice`) queued alongside a user prompt. */

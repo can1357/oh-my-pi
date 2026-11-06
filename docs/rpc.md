@@ -407,7 +407,7 @@ Remove the first matching user-authored message from the selected pending queue:
 
 Companions and their prompt are enqueued and dequeued as a complete group, including in `one-at-a-time` mode. Once that group leaves the pending queue for delivery, a removal request cannot report success after only part of its context has been emitted.
 
-Agent-authored entries never match, including internal handoffs with `role: "user"` and `attribution: "agent"`. With duplicate text, each request removes only the first matching occurrence; repeating a successful request can remove another occurrence.
+Agent-authored entries never match, including internal handoffs with `role: "user"` and `attribution: "agent"`. Input an extension queued with `pi.sendUserMessage(…, { expand: true, tag })` never matches either, though it shows as a queue chip: the response carries only text, so removing it would lose the tag the extension matches it by; it stays queued and is delivered with its tag. With duplicate text, each request removes only the first matching occurrence; repeating a successful request can remove another occurrence.
 
 The check and removal are synchronous: `data.removed: false` means no matching user message is pending in that queue at dispatch time. Already-dequeued messages and inputs still being preprocessed cannot be cancelled by this command. Live-steered input may remain visible in queue snapshots until the transcript records it, even though it has already left the removable pending queue. It does not resend input, abort a turn, or change interruption behavior. Non-string `message` values and missing or invalid `queue` values produce an error response.
 
@@ -426,7 +426,7 @@ Move the first matching user-authored follow-up to the end of the steering queue
 {"id":"req_3","type":"response","command":"promote_queued_message","success":true,"data":{"promoted":true}}
 ```
 
-The command moves the existing queued message, including its attachments and contiguous preceding hidden user companions, without reprocessing or duplicating it. `message` matches exactly as for `remove_queued_message`, so agent-authored entries never match. With duplicate text, each request moves only the first matching follow-up; repeating a successful request can move another occurrence.
+The command moves the existing queued message, including its attachments and contiguous preceding hidden user companions, without reprocessing or duplicating it. `message` matches as for `remove_queued_message`, so agent-authored entries never match, except that input an extension queued with a `tag` can be promoted: promotion moves the message itself, so its tag is kept. With duplicate text, each request moves only the first matching follow-up; repeating a successful request can move another occurrence.
 
 `data.promoted: false` means no matching user follow-up is pending at dispatch time (for example, it was already delivered). Non-string `message` values produce an error response. Existing steering, follow-up, and interrupt modes still apply; promotion does not abort the model stream or guarantee cancellation of running tools. While the agent is idle, a promoted message starts a turn right away, including after a user `abort` — promoting is an explicit request to steer now. The move is reported as one `queue_update` in which the message has already left `followUp` and joined `steering`.
 
@@ -443,7 +443,7 @@ Take queued user input back and abort, atomically — the RPC equivalent of pres
 {"id":"req_4","type":"response","command":"abort_and_restore_queue","success":true,"data":{"steering":[{"text":"Use the existing parser"}],"followUp":[{"text":"Then run the tests","images":[{"type":"image","mimeType":"image/png","data":"..."}]}]}}
 ```
 
-Before aborting, the server withdraws every user-authored steering and follow-up message, including input the run already took from the queue but never recorded in the transcript: steering the aborted response claimed live, and steering or follow-ups dequeued for its next model call. Visible queued messages that an extension or agent sent (extension cards from `pi.sendMessage`, a parent agent's steer, agent-attributed prompts with their hidden companions, advisor cards) are not returned and not lost: once the run stops, the abort records them in the transcript without starting a turn, so the model sees them with the next prompt. Other hidden queued context is dropped: `display: false` custom messages (goal/plan/budget notices) and synthetic developer directives. The abort starts no turn from the old queue; if another source started a turn while it was finishing, the visible messages join that turn as follow-ups. A plain `abort` instead requeues stranded steers and drains them into a fresh turn; withdrawing them first with `remove_queued_message` races the agent loop.
+Before aborting, the server withdraws every user-authored steering and follow-up message, including input the run already took from the queue but never recorded in the transcript: steering the aborted response claimed live, and steering or follow-ups dequeued for its next model call. Input an extension queued with `pi.sendUserMessage(…, { expand: true, tag })` is not returned: the abort records it in the transcript with its tag. Visible queued messages that an extension or agent sent (extension cards from `pi.sendMessage`, a parent agent's steer, agent-attributed prompts with their hidden companions, advisor cards) are not returned and not lost: once the run stops, the abort records them in the transcript without starting a turn, so the model sees them with the next prompt. Other hidden queued context is dropped: `display: false` custom messages (goal/plan/budget notices) and synthetic developer directives. The abort starts no turn from the old queue; if another source started a turn while it was finishing, the visible messages join that turn as follow-ups. A plain `abort` instead requeues stranded steers and drains them into a fresh turn; withdrawing them first with `remove_queued_message` races the agent loop.
 
 `data.steering` and `data.followUp` list the withdrawn messages oldest first, as `{ text, images? }` with `text` being the queue-chip text, so a client can put them back in its editor. The command otherwise behaves like `abort`: it stops goal continuation, cancels input received before it that is not yet admitted (that input is dropped, not returned), and responds after the abort completes. Older runtimes reject this command. The TypeScript client exposes `abortAndRestoreQueue(): Promise<{ steering, followUp }>`.
 
@@ -572,7 +572,8 @@ RPC process to apply and verify the new configuration.
 
 `queuedMessages` holds the same displayable queue-chip text as the `queue_update`
 event below. Use this text with `remove_queued_message`, subject to its pending-queue
-boundary: live-steered input stays visible until recorded but is no longer removable.
+boundary: live-steered input stays visible until recorded but is no longer removable,
+and input an extension queued with a `tag` is listed but never removable.
 Clients should render the queue from these snapshots instead of tracking chips
 independently, and treat removal responses as confirmation rather than a second
 source of truth. `queuedMessageCount` also includes advisor cards and pending
@@ -900,7 +901,8 @@ against the last value sent — a mutation that leaves the snapshot unchanged
 (for example, an agent-authored aside that never renders as a chip) never
 re-emits. `steering`/`followUp` mirror `get_state`'s `queuedMessages` field and
 carry the queue-chip text accepted by `remove_queued_message` while the message
-is still pending. Live-steered messages stay listed until recorded in the
+is still pending (input an extension queued with a `tag` is listed but never
+removable). Live-steered messages stay listed until recorded in the
 transcript, even after they cease to be removable. Render the queue from this
 event rather than tracking chips independently, and treat removal replies as
 confirmation of a change rather than independent queue state.

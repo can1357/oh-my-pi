@@ -17,6 +17,8 @@ type QueueContextOptions = {
 	focusedQueue?: RestoredQueuedMessage[];
 	compaction?: CompactionQueuedMessage[];
 	draft?: string;
+	/** Chips of queued tagged extension input: listed, never popped. */
+	taggedChips?: string[];
 };
 
 function makeCtx(opts: QueueContextOptions = {}) {
@@ -29,11 +31,22 @@ function makeCtx(opts: QueueContextOptions = {}) {
 	// last queued entry, or undefined when empty. clearQueue is spied so the test
 	// proves the dequeue path never drains the whole queue.
 	const clearQueue = mock(() => ({ steering: [] as RestoredQueuedMessage[], followUp: queue.splice(0) }));
+	const taggedChips = opts.taggedChips ?? [];
 	const session = {
 		popLastQueuedMessage: () => queue.pop(),
+		getQueuedMessages: () => ({
+			steering: [...queue.map(m => m.text), ...taggedChips],
+			followUp: [],
+			liveSteered: 0,
+		}),
 		clearQueue,
 	};
-	const viewSession = opts.focusedQueue ? { popLastQueuedMessage: () => focusedQueue.pop() } : session;
+	const viewSession = opts.focusedQueue
+		? {
+				popLastQueuedMessage: () => focusedQueue.pop(),
+				getQueuedMessages: () => ({ steering: focusedQueue.map(m => m.text), followUp: [], liveSteered: 0 }),
+			}
+		: session;
 
 	const ctx = {
 		session,
@@ -117,6 +130,13 @@ describe("InputController.handleDequeue (Alt+Up)", () => {
 		const { ctx, statuses, getText } = makeCtx();
 		new InputController(ctx).handleDequeue();
 		expect(statuses).toEqual(["No queued messages to restore"]);
+		expect(getText()).toBe("");
+	});
+
+	test("says why a queued tagged extension message cannot be restored", () => {
+		const { ctx, statuses, getText } = makeCtx({ taggedChips: ["forwarded message"] });
+		new InputController(ctx).handleDequeue();
+		expect(statuses).toEqual(["Queued extension input keeps its tag and cannot be edited"]);
 		expect(getText()).toBe("");
 	});
 

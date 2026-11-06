@@ -35,7 +35,7 @@ import {
 import {
 	type BuiltSkillPromptMessage,
 	loadSkillPrompt,
-	parseSkillInvocation,
+	resolveSkillInvocation,
 	type Skill,
 	type SkillPromptInput,
 	type SkillRediscoverySource,
@@ -265,17 +265,13 @@ export interface RpcSkillInvocation extends SkillPromptInput {
 }
 
 /**
- * Fast in-memory pre-check for a skill invocation: settings gate, text shape,
- * and skill lookup. Returns null when the message is not a runnable skill
- * command. Performs no I/O — safe to run on the RPC serial queue.
+ * Fast in-memory pre-check for a skill invocation, in the shape the RPC prompt path
+ * carries it. Returns null when the message is not a runnable skill command. Performs
+ * no I/O — safe to run on the RPC serial queue.
  */
 export function resolveRpcSkillInvocation(session: RpcSkillCommandSession, text: string): RpcSkillInvocation | null {
-	if (!session.skillsSettings?.enableSkillCommands) return null;
-	const parsed = parseSkillInvocation(text);
-	if (!parsed) return null;
-	const skill = session.skills.find(candidate => candidate.name === parsed.name);
-	if (!skill) return null;
-	return { skill, args: parsed.args, prompt: parsed.prompt, queueChipText: text };
+	const resolved = resolveSkillInvocation(session, text);
+	return resolved ? { ...resolved, queueChipText: text } : null;
 }
 
 /**

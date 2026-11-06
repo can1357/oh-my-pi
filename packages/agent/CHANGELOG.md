@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `CustomMessage` has an optional `tag`, a caller correlation id that stays with the message
+
 ## [18.17.0] - 2026-11-06
 
 ### Added

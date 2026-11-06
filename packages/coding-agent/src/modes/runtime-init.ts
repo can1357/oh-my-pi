@@ -108,7 +108,27 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			sendUserMessage: (content, sendOptions) => {
 				const sendTask = session.sendUserMessage(content, sendOptions);
 				trackExtensionSend?.(sendTask);
-				if (trackAgentInvokingMessage) {
+				if (sendOptions?.expand) {
+					// Expanded input can be handled locally without submitting anything (a command ran, an
+					// `input` handler consumed the text), and a built-in like `/retry` starts a turn without
+					// a message. Claim turn ownership only once the answer says a turn started.
+					const invokingTask = sendTask.then(result => {
+						if (result.handled !== "prompt" && result.handled !== "skill" && !result.agentInvoked) {
+							throw new Error("input did not invoke the agent");
+						}
+					});
+					// Outside a prompt scope nothing attaches a handler, and this rejection — a normal
+					// outcome — would otherwise be unobserved and fatal the process.
+					invokingTask.catch(() => {});
+					if (trackAgentInvokingMessage) {
+						trackAgentInvokingMessage(invokingTask);
+					} else {
+						invokingTask.then(
+							() => markAgentInvokingMessage?.(),
+							() => {},
+						);
+					}
+				} else if (trackAgentInvokingMessage) {
 					trackAgentInvokingMessage(sendTask);
 				} else {
 					markAgentInvokingMessage?.();
@@ -116,6 +136,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 				sendTask.catch(e => {
 					reportSendError("extension_send_user", toError(e));
 				});
+				return sendTask;
 			},
 			appendEntry: (customType, data) => {
 				session.sessionManager.appendCustomEntry(customType, data);
