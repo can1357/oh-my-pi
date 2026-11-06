@@ -34,6 +34,7 @@ import type {
 	ToolChoice,
 	ToolResultMessage,
 } from "../types";
+import { parseServiceTier } from "../types";
 import { normalizeSystemPrompts, normalizeToolCallId, resolveCacheRetention } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
 import { isDemotedThinking, kStreamingLastParseLen } from "../utils/block-symbols";
@@ -948,17 +949,6 @@ const streamOpenAICompletionsOnce = (
 			// Set once the host refuses the serving tier for want of capacity; every
 			// request built after that is re-aimed at standard serving.
 			let serviceTierCapacityRetry: ServiceTierCapacityRetry | undefined;
-			/**
-			 * The tier the request the host accepted actually asked for, used when
-			 * the response carries no tier echo of its own. Once a capacity
-			 * recovery has rewritten the request the caller's original choice is no
-			 * longer what went out, so the sent body answers instead — mirrors the
-			 * Responses streamer.
-			 */
-			const effectiveRequestServiceTier = (): ServiceTier | undefined => {
-				if (!serviceTierCapacityRetry) return options?.serviceTier;
-				return activeRequestParams?.service_tier ?? undefined;
-			};
 			const createCompletionsStream = async (toolStrictModeOverride?: ToolStrictModeOverride) => {
 				const effectiveToolStrictModeOverride = disableStrictTools ? "none" : toolStrictModeOverride;
 				const builtParams = buildParams(model, context, options, effectiveToolStrictModeOverride);
@@ -1442,6 +1432,11 @@ const streamOpenAICompletionsOnce = (
 			let awaitTrailingUsageDetails = false;
 			/** Last `service_tier` echo seen on a chunk; the tier the turn was billed at. */
 			let servedServiceTier: string | undefined;
+			/**
+			 * The last usage payload parsed, kept so a tier echo arriving after it
+			 * can reprice the turn from the host's own numbers.
+			 */
+			let lastRawUsage: object | undefined;
 			/** Server-declared repetition stop; classified after the finalization sweep. */
 			let repetitionStop: string | undefined;
 			let nativeFinishError: string | undefined;
@@ -1460,13 +1455,18 @@ const streamOpenAICompletionsOnce = (
 					servedModel,
 				);
 				// This wire sends `service_tier` and is billed for it exactly as the
-				// Responses one is, so it accounts for it the same way.
+				// Responses one is, so it accounts for it the same way. Where the
+				// response carries no echo, the tier is read off the body that went
+				// out: the caller's setting is only where that body started, since
+				// an `onPayload` hook may add, change or drop `service_tier` and a
+				// capacity recovery rewrites it.
 				output.serviceTier = applyOpenAIServiceTierCost(
 					servedModel ?? model,
 					output.usage,
 					responseServiceTier,
-					effectiveRequestServiceTier(),
+					parseServiceTier(activeRequestParams?.service_tier),
 				);
+				lastRawUsage = rawUsage;
 				sawUsagePayload = true;
 				awaitTrailingUsageDetails = !hasPositiveCacheReadTokenField(rawUsage);
 			};
@@ -1524,16 +1524,28 @@ const streamOpenAICompletionsOnce = (
 						typeof upstreamProvider === "string" && upstreamProvider.length > 0 ? upstreamProvider : undefined;
 				}
 
+				const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
+				// Usage rides the chunk itself, or on some hosts its only choice.
+				const chunkUsage = chunk.usage ?? (choice as OpenAICompletionsChoiceUsage | undefined)?.usage;
+				const usagePayload = typeof chunkUsage === "object" && chunkUsage !== null ? chunkUsage : undefined;
+
 				// Hosts echo the tier they served on their chunks; latch it so a
 				// trailing usage-only chunk that omits it still prices at the tier
 				// the turn ran on rather than falling back to what was asked for.
-				if (chunk.service_tier != null) servedServiceTier = chunk.service_tier;
-
-				if (chunk.usage) {
-					applyUsagePayload(chunk.usage, servedServiceTier);
+				// The echo can also land after the usage payload — a finish frame
+				// naming the tier the host settled on, with no usage of its own —
+				// so that case reprices from the payload already seen. Accounting
+				// re-runs whole, off the card, rather than compounding the
+				// multiplier the superseded tier already applied.
+				if (chunk.service_tier != null && chunk.service_tier !== servedServiceTier) {
+					servedServiceTier = chunk.service_tier;
+					if (usagePayload === undefined && lastRawUsage !== undefined) {
+						applyUsagePayload(lastRawUsage, servedServiceTier);
+					}
 				}
 
-				const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
+				if (usagePayload !== undefined) applyUsagePayload(usagePayload, servedServiceTier);
+
 				if (!choice) {
 					// Trailing usage-only chunk (`stream_options.include_usage`) after
 					// `finish_reason`: the response is complete — stop pulling instead
@@ -1542,13 +1554,6 @@ const streamOpenAICompletionsOnce = (
 					// compliant hosts still get to relay `[DONE]` before the socket closes.
 					if (streamFinishedAt !== undefined && sawUsagePayload) break;
 					continue;
-				}
-
-				if (!chunk.usage) {
-					const choiceUsage = (choice as OpenAICompletionsChoiceUsage).usage;
-					if (typeof choiceUsage === "object" && choiceUsage !== null) {
-						applyUsagePayload(choiceUsage, servedServiceTier);
-					}
 				}
 
 				// A server-declared repetition stop completes the response, so it takes

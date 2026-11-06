@@ -43,9 +43,12 @@ describe("standard OpenAI Responses service-tier cost", () => {
 		// downgraded turn cannot be attributed to the requested tier.
 		expect(applyOpenAIServiceTierCost(ultrafastModel, billed, "ultrafast", "ultrafast")).toBe("ultrafast");
 		expect(billed.premiumRequests).toBe(1);
-		expect(billed.cost.input).toBeCloseTo(0.00006);
-		expect(billed.cost.output).toBeCloseTo(0.0003);
-		expect(billed.cost.total).toBeCloseTo(0.00036);
+		// Charges here are around 1e-5, so every comparison names a precision:
+		// `toBeCloseTo` defaults to 2, which passes on any amount under 0.005 —
+		// including zero.
+		expect(billed.cost.input).toBeCloseTo(0.00006, 12);
+		expect(billed.cost.output).toBeCloseTo(0.0003, 12);
+		expect(billed.cost.total).toBeCloseTo(0.00036, 12);
 	});
 
 	it("leaves a model with no published ultrafast price at 1x", () => {
@@ -54,8 +57,8 @@ describe("standard OpenAI Responses service-tier cost", () => {
 
 		const billed = usage();
 		applyOpenAIServiceTierCost(luna, billed, "ultrafast", "ultrafast");
-		expect(billed.cost.input).toBeCloseTo(0.00001);
-		expect(billed.cost.total).toBeCloseTo(0.00006);
+		expect(billed.cost.input).toBeCloseTo(0.00001, 12);
+		expect(billed.cost.total).toBeCloseTo(0.00006, 12);
 		// Still a premium request: the tier reached the wire, only its price is unknown.
 		expect(billed.premiumRequests).toBe(1);
 	});
@@ -65,17 +68,17 @@ describe("standard OpenAI Responses service-tier cost", () => {
 
 		const priority = usage();
 		applyOpenAIServiceTierCost(luna, priority, "priority", "priority");
-		expect(priority.cost.input).toBeCloseTo(0.00002);
+		expect(priority.cost.input).toBeCloseTo(0.00002, 12);
 
 		const flex = usage();
 		applyOpenAIServiceTierCost(luna, flex, "flex", "flex");
-		expect(flex.cost.input).toBeCloseTo(0.000005);
+		expect(flex.cost.input).toBeCloseTo(0.000005, 12);
 
 		// A downgraded turn (requested ultrafast, served default) bills standard and
 		// is not counted as a premium request.
 		const downgraded = usage();
 		expect(applyOpenAIServiceTierCost(model("gpt-6-astra"), downgraded, "default", "ultrafast")).toBe("default");
-		expect(downgraded.cost.input).toBeCloseTo(0.00001);
+		expect(downgraded.cost.input).toBeCloseTo(0.00001, 12);
 		expect(downgraded.premiumRequests).toBe(0);
 	});
 
@@ -95,6 +98,6 @@ describe("standard OpenAI Responses service-tier cost", () => {
 		const billed = usage();
 		expect(applyOpenAIServiceTierCost(proxied, billed, "ultrafast", "ultrafast")).toBeUndefined();
 		expect(billed.premiumRequests).toBeUndefined();
-		expect(billed.cost.input).toBeCloseTo(0.00001);
+		expect(billed.cost.input).toBeCloseTo(0.00001, 12);
 	});
 });

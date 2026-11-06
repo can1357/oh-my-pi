@@ -86,6 +86,30 @@ function completionsOk(servedServiceTier?: string): Response {
 	});
 }
 
+/**
+ * A completions stream whose frames are described one by one: `tier` puts a
+ * `service_tier` echo on that frame, `usage` puts the usage payload there. The
+ * first frame carries the text and the last one finishes the turn, so where
+ * the echo sits relative to the usage payload is the only thing that varies.
+ */
+function completionsFrames(frames: readonly { tier?: string; usage?: boolean }[]): Response {
+	const chunks = frames.map((frame, index) => ({
+		id: "c",
+		object: "chat.completion.chunk",
+		choices: [
+			index === frames.length - 1
+				? { index: 0, delta: {}, finish_reason: "stop" }
+				: { index: 0, delta: index === 0 ? { content: "ok" } : {} },
+		],
+		...(frame.tier === undefined ? {} : { service_tier: frame.tier }),
+		...(frame.usage === true ? { usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } } : {}),
+	}));
+	return new Response(`${chunks.map(chunk => `data: ${JSON.stringify(chunk)}`).join("\n\n")}\n\ndata: [DONE]\n\n`, {
+		status: 200,
+		headers: { "content-type": "text/event-stream" },
+	});
+}
+
 /** Records the `model` and `service_tier` of every request body the stub receives. */
 function recordingFetch(respond: (sent: { model: string; serviceTier?: string }) => Response): {
 	fetch: FetchImpl;
@@ -676,6 +700,92 @@ describe("service-tier capacity refusals", () => {
 			expect(message.usage.premiumRequests).toBe(row.premium);
 			expect(message.usage.cost.total).toBeCloseTo(row.multiplier * base, 12);
 		}
+	});
+
+	it("completions: the tier billed is the one on the body that went out, not the caller's choice", async () => {
+		// `onPayload` owns the request. A hook may drop the tier the caller asked
+		// for, or add one the caller never asked for; either way the body the host
+		// accepted is what it served and billed. No capacity recovery is involved
+		// here — reading the caller's setting is wrong on an ordinary turn too.
+		const base = (PLAIN_ROUTE_COST.input + PLAIN_ROUTE_COST.output) / 1_000_000;
+		const dropped = recordingFetch(() => completionsOk());
+		const withoutTier = await collect(
+			streamOpenAICompletions(completionsModel("gpt-6-astra"), context, {
+				apiKey: "k",
+				fetch: dropped.fetch,
+				serviceTier: "priority",
+				onPayload: payload => {
+					const { service_tier: _dropped, ...rest } = payload as { service_tier?: unknown };
+					return rest;
+				},
+			}),
+		);
+		expect(dropped.sent).toEqual([{ model: "gpt-6-astra" }]);
+		expect(withoutTier.serviceTier).toBeUndefined();
+		expect(withoutTier.usage.premiumRequests).toBe(0);
+		expect(withoutTier.usage.cost.total).toBeCloseTo(base, 12);
+
+		const added = recordingFetch(() => completionsOk());
+		const withTier = await collect(
+			streamOpenAICompletions(completionsModel("gpt-6-astra"), context, {
+				apiKey: "k",
+				fetch: added.fetch,
+				onPayload: payload => ({ ...(payload as object), service_tier: "priority" }),
+			}),
+		);
+		expect(added.sent).toEqual([{ model: "gpt-6-astra", serviceTier: "priority" }]);
+		expect(withTier.serviceTier).toBe("priority");
+		expect(withTier.usage.premiumRequests).toBe(1);
+		expect(withTier.usage.cost.total).toBeCloseTo(2 * base, 12);
+	});
+
+	it("responses: the tier billed is the one on the body that went out, not the caller's choice", async () => {
+		// The same contract on the other wire: the hook's body is what the host
+		// billed, with no recovery to make the sent body authoritative.
+		const base = (PLAIN_ROUTE_COST.input + PLAIN_ROUTE_COST.output) / 1_000_000;
+		const { fetch, sent } = recordingFetch(() => responsesOk());
+		const message = await collect(
+			streamOpenAIResponses(responsesModel("gpt-6-astra"), context, {
+				apiKey: "k",
+				fetch,
+				serviceTier: "priority",
+				onPayload: payload => {
+					const { service_tier: _dropped, ...rest } = payload as { service_tier?: unknown };
+					return rest;
+				},
+			}),
+		);
+		expect(sent).toEqual([{ model: "gpt-6-astra" }]);
+		expect(message.serviceTier).toBeUndefined();
+		expect(message.usage.premiumRequests).toBe(0);
+		expect(message.usage.cost.total).toBeCloseTo(base, 12);
+	});
+
+	it("completions: the last tier echo prices the turn, whichever side of the usage payload it lands", async () => {
+		// Astra's ultrafast tier is 6x and counts a premium request; default is
+		// neither. A host that echoes one tier mid-stream and reports another on
+		// the frame that ends the turn served the later one, so the charge has to
+		// move with it even though no further usage arrives — and the earlier echo
+		// must still survive a usage payload that omits the field.
+		const base = (PLAIN_ROUTE_COST.input + PLAIN_ROUTE_COST.output) / 1_000_000;
+		const latched = recordingFetch(() => completionsFrames([{ tier: "ultrafast" }, { usage: true }]));
+		const kept = await collect(
+			streamOpenAICompletions(completionsModel("gpt-6-astra"), context, { apiKey: "k", fetch: latched.fetch }),
+		);
+		expect(kept.serviceTier).toBe("ultrafast");
+		expect(kept.usage.premiumRequests).toBe(1);
+		expect(kept.usage.cost.total).toBeCloseTo(6 * base, 12);
+
+		const revised = recordingFetch(() =>
+			completionsFrames([{ tier: "ultrafast" }, { usage: true }, { tier: "default" }]),
+		);
+		const message = await collect(
+			streamOpenAICompletions(completionsModel("gpt-6-astra"), context, { apiKey: "k", fetch: revised.fetch }),
+		);
+		expect(message.stopReason).toBe("stop");
+		expect(message.serviceTier).toBe("default");
+		expect(message.usage.premiumRequests).toBe(0);
+		expect(message.usage.cost.total).toBeCloseTo(base, 12);
 	});
 
 	it("responses: the Copilot premium weight follows the route that served the turn", async () => {

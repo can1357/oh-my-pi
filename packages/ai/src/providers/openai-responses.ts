@@ -24,6 +24,7 @@ import type {
 	Tool,
 	ToolChoice,
 } from "../types";
+import { parseServiceTier } from "../types";
 import {
 	createOpenAIResponsesHistoryPayload,
 	normalizeSystemPrompts,
@@ -869,23 +870,18 @@ const streamOpenAIResponsesOnce = (
 			// cannot resurrect the tier the host just said it has no capacity for.
 			let serviceTierCapacityRetry: ServiceTierCapacityRetry | undefined;
 			/**
-			 * The tier the request the host accepted actually asked for, used when
-			 * the response carries no tier echo of its own.
+			 * The tier the body the host accepted actually asked for, used when the
+			 * response carries no tier echo of its own.
 			 *
-			 * Once a capacity recovery has rewritten the request, the caller's
-			 * original choice is no longer what went out: the refused tier was
-			 * dropped, and an `onPayload` hook may since have chosen another. Read
-			 * the sent body in that case, so the turn is neither discounted at the
-			 * tier the host refused nor billed flat for one a hook picked.
+			 * The caller's setting is only where that body started: an `onPayload`
+			 * hook may add, change or drop `service_tier`, and a capacity recovery
+			 * drops the refused tier outright. `chained.params` is the body that
+			 * goes on the wire — a hook may have returned a replacement object
+			 * rather than mutating the one the builder produced — so it is the only
+			 * thing the host served and billed.
 			 */
-			const effectiveRequestServiceTier = (): ServiceTier | undefined => {
-				if (!serviceTierCapacityRetry) return options?.serviceTier;
-				// `chained.params` is the body that goes on the wire: an `onPayload`
-				// hook may have returned a replacement object rather than mutating
-				// the one the builder produced.
-				const sent = chained?.params?.service_tier;
-				return sent ?? undefined;
-			};
+			const effectiveRequestServiceTier = (): ServiceTier | undefined =>
+				parseServiceTier(chained?.params?.service_tier);
 			/**
 			 * Re-aim a freshly built request at the standard tier before anything
 			 * downstream reads its wire id. The effort-fallback key is derived from
