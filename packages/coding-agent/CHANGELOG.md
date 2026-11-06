@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added the default-off `usageGovernor.enabled` setting, with `usageGovernor.leadPct` and `usageGovernor.interactiveReserve`, which paces requests against cached quota windows; `/usage` and `omp usage` show the governor state (`--json` adds a `governor` key), and [docs/usage-governor.md](../../docs/usage-governor.md) describes the model
+- Added opt-in usage pacing, role-aware fallback and shared-quota protection, with governor status in `/usage` and `omp usage` ([#18240](https://github.com/can1357/oh-my-pi/pull/18240) by [@jwaldrip](https://github.com/jwaldrip))
 - Added `skills.manualSkills` glob patterns to keep skills available manually while hiding them from the model catalog, without editing their `SKILL.md` files ([#18114](https://github.com/can1357/oh-my-pi/pull/18114) by [@Shadorain](https://github.com/Shadorain))
 - Added Keenable as a web search engine (`web/keenable`). It uses `KEENABLE_API_KEY` or a stored `keenable` credential when present; an explicit selection without a key uses Keenable's keyless public endpoint ([#17953](https://github.com/can1357/oh-my-pi/pull/17953) by [@KGKallasmaa](https://github.com/KGKallasmaa))
 - `web_search` results now list in `details.failures` each provider that failed before another answered, or every provider when all failed, with its reason and status code, so session transcripts show how often each one fails or refuses ([#18124](https://github.com/can1357/oh-my-pi/pull/18124) by [@will-bogusz](https://github.com/will-bogusz))
