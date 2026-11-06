@@ -1,17 +1,21 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isEnoent, logger, sanitizeText, withFileLock } from "@oh-my-pi/pi-utils";
+import { isEnoent, sanitizeText, tryAcquireFileLock, withFileLock } from "@oh-my-pi/pi-utils";
 import type { MemoryWriteScope } from "../memory-backend/global-scope";
 import { redactMemorySecrets } from "../memory-backend/redact";
 import { writeFileAtomically } from "../utils/atomic-file";
-import { HindsightError, type HindsightClientApi } from "./client";
+import { type HindsightClientApi, HindsightError } from "./client";
 
-const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-/** How long a quarantined event stays available for review; quarantine never counts toward `maxEvents`. */
+const QUARANTINE_DIR = "quarantine";
+/** Undelivered events older than this are quarantined, so a destination no session drains anymore cannot keep them forever. */
+const EVENT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/** Quarantined events stay this long for manual review. */
 const QUARANTINE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+/** Undelivered events per destination; past it, writes fail instead of evicting. */
+const MAX_EVENTS = 1000;
 const BATCH_SIZE = 16;
-const EVENT_FILE = /^(omp-retain-[a-f0-9]{32})(?:\.inflight\.(\d+)\.(\d+))?\.json$/;
-/** Statuses that refuse the request body itself. Auth, missing-bank, rate-limit and server failures retry until expiry. */
+const EVENT_FILE = /^omp-retain-[a-f0-9]{32}\.json$/;
+/** Statuses that refuse the request body itself; every other failure is retried. */
 const REJECTED_PAYLOAD_STATUSES = new Set([400, 413, 422]);
 
 export interface RetainInput {
@@ -20,338 +24,322 @@ export interface RetainInput {
 	scope?: MemoryWriteScope;
 }
 
+/** A published event file. Never rewritten, so its mtime is its enqueue time. */
 export interface OutboxEvent {
 	version: 1;
-	eventId: string;
-	destination: { apiUrl: string; bankId: string };
+	/** Also the server `document_id`, so a resend replaces instead of duplicating. */
+	id: string;
 	scope: MemoryWriteScope;
 	tags: string[];
 	timestamp: string;
 	content: string;
 	context: string;
-	metadata: Record<string, string>;
-	attempts: number;
-	nextAttemptAt: number;
+	sessionId: string;
 }
 
-interface OutboxOptions {
+export interface RetainCall {
+	sessionId: string;
+	toolCallId: string;
+	/** Context for items without their own. */
+	context: string;
+	/** Tags of project-scoped items; global items are retained untagged. */
+	tags: string[] | undefined;
+}
+
+export interface DrainResult {
+	/** Another holder is draining this destination; nothing was sent. */
+	busy: boolean;
+	delivered: number;
+	/** Events refused by the server, malformed, or past their TTL, across all destinations. */
+	quarantined: number;
+	/** Set when a retryable failure stopped delivery; `kept` events remain for retry. */
+	error?: string;
+	kept: number;
+}
+
+export interface HindsightOutboxOptions {
 	agentDir: string;
 	apiUrl: string;
 	bankId: string;
 	apiToken: string | null;
-	maxEvents: number;
-	retainTimeoutMs: number;
 	client: HindsightClientApi;
 	ensureBank: () => Promise<void>;
-	notice: (message: string) => void;
 }
 
-interface ClaimedEvent {
+interface Pending {
 	file: string;
 	event: OutboxEvent;
+	/** Publication time (mtime); delivery follows it. */
+	published: number;
 }
+
+type SendOutcome = "accepted" | "rejected" | { error: string };
 
 /**
- * Stable across retries of one call's item. Tool call ids are not guaranteed unique, so the
- * persisted scope, context and content are part of the identity: a reused id with different
- * content becomes its own document instead of being dropped or replacing an earlier memory.
+ * Durable queue of tool-initiated retains: one immutable file per memory under
+ * `<agentDir>/hindsight-outbox/<destination>/`. A 2xx response deletes the event; it
+ * means server acceptance, not completed extraction.
+ *
+ * Concurrency: a per-destination queue lock serializes capacity checks and
+ * publication; a per-destination drain lease, released by the OS when its process
+ * exits, lets exactly one holder send and delete events. Event files are never
+ * rewritten, so writers and the drainer never contend for one file.
  */
-function retainEventId(
-	sessionId: string,
-	toolCallId: string,
-	index: number,
-	item: Pick<OutboxEvent, "scope" | "context" | "content">,
-): string {
-	const identity = JSON.stringify([sessionId, toolCallId, index, item.scope, item.context, item.content]);
-	return `omp-retain-${new Bun.CryptoHasher("sha256").update(identity).digest("hex").slice(0, 32)}`;
-}
-
-/** No credentials, query parameters or fragments are persisted as routing metadata. */
-function destinationUrl(apiUrl: string): string {
-	const url = new URL(apiUrl);
-	return `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
-}
-
-/** Tool writes only: acceptance means the server accepted the request, not that extraction completed. */
 export class HindsightOutbox {
-	readonly #options: OutboxOptions;
+	readonly #root: string;
 	readonly #dir: string;
-	readonly #destination: OutboxEvent["destination"];
-	depth = 0;
-	nextAttemptAt: number | undefined;
+	readonly #options: HindsightOutboxOptions;
 
-	constructor(options: OutboxOptions) {
+	constructor(options: HindsightOutboxOptions) {
 		this.#options = options;
-		this.#dir = path.join(options.agentDir, "hindsight-outbox");
-		this.#destination = { apiUrl: destinationUrl(options.apiUrl), bankId: options.bankId };
+		this.#root = path.join(options.agentDir, "hindsight-outbox");
+		this.#dir = path.join(this.#root, destinationKey(options.apiUrl, options.bankId));
 	}
 
+	/** Where refused, malformed, and expired events go for review. */
+	get quarantineDir(): string {
+		return path.join(this.#root, QUARANTINE_DIR);
+	}
+
+	/**
+	 * Persists one tool call's items, all or none, before resolving. Returns how many
+	 * events are new: a retried call has the same ids and publishes nothing again.
+	 */
+	async enqueue(call: RetainCall, items: RetainInput[]): Promise<number> {
+		if (!call.sessionId || !call.toolCallId) throw new Error("Hindsight retain requires a session and tool call id.");
+		const events = items.map((item, index) => this.#event(call, item, index));
+		await fs.mkdir(this.#dir, { recursive: true, mode: 0o700 });
+		return withFileLock(path.join(this.#dir, "queue"), async () => {
+			const existing = new Set(await eventFiles(this.#dir));
+			const fresh = events.filter(event => !existing.has(eventFile(event.id)));
+			if (existing.size + fresh.length > MAX_EVENTS) {
+				throw new Error(`Hindsight outbox full (${existing.size} undelivered memories); memory NOT queued.`);
+			}
+			const written: string[] = [];
+			try {
+				for (const event of fresh) {
+					const file = path.join(this.#dir, eventFile(event.id));
+					await writeFileAtomically(file, JSON.stringify(event));
+					written.push(file);
+				}
+				await syncDirectory(this.#dir);
+			} catch (error) {
+				await Promise.all(written.map(file => fs.rm(file, { force: true })));
+				throw new Error("Hindsight outbox write failed; memory NOT queued.", { cause: error });
+			}
+			return fresh.length;
+		});
+	}
+
+	/**
+	 * Sends this destination's events and quarantines every destination's expired
+	 * ones. Stops at the first retryable failure; events stay on disk for the next drain.
+	 */
+	async drain(): Promise<DrainResult> {
+		const result: DrainResult = { busy: false, delivered: 0, quarantined: 0, kept: 0 };
+		let destinations: string[];
+		try {
+			destinations = (await fs.readdir(this.#root, { withFileTypes: true }))
+				.filter(entry => entry.isDirectory() && entry.name !== QUARANTINE_DIR)
+				.map(entry => path.join(this.#root, entry.name));
+		} catch (error) {
+			if (isEnoent(error)) return result;
+			throw error;
+		}
+		for (const dir of destinations) {
+			const lease = tryAcquireFileLock(path.join(dir, "drain"));
+			if (!lease) {
+				if (dir === this.#dir) result.busy = true;
+				continue;
+			}
+			try {
+				if (dir === this.#dir) await this.#deliver(result);
+				else await this.#expire(dir, result);
+			} finally {
+				lease.release();
+			}
+		}
+		return result;
+	}
+
+	#event(call: RetainCall, item: RetainInput, index: number): OutboxEvent {
+		const scope = item.scope ?? "project";
+		const context = this.#clean(item.context ?? call.context);
+		const content = this.#clean(item.content);
+		// Tool call ids are not guaranteed unique, so the persisted fields are part of the
+		// identity: a reused id with new content is a new document, not a replacement.
+		const identity = JSON.stringify([call.sessionId, call.toolCallId, index, scope, context, content]);
+		return {
+			version: 1,
+			id: `omp-retain-${new Bun.CryptoHasher("sha256").update(identity).digest("hex").slice(0, 32)}`,
+			scope,
+			tags: scope === "global" ? [] : (call.tags ?? []).map(tag => this.#clean(tag)),
+			timestamp: new Date().toISOString(),
+			content,
+			context,
+			sessionId: this.#clean(call.sessionId),
+		};
+	}
+
+	/** Events are stored at rest: strip terminal controls, the bearer token, and recognizable secrets. */
 	#clean(text: string): string {
 		const token = this.#options.apiToken;
 		return redactMemorySecrets(sanitizeText(token ? text.replaceAll(token, "[REDACTED]") : text));
 	}
 
-	async #prepare(): Promise<void> {
-		await fs.mkdir(this.#dir, { recursive: true, mode: 0o700 });
-		await fs.chmod(this.#dir, 0o700);
-	}
-
-	async #syncDirectory(): Promise<void> {
-		// Windows does not support opening directories for fsync. File contents are still synced before rename.
-		if (process.platform === "win32") return;
-		const directory = await fs.open(this.#dir, "r");
-		try {
-			await directory.sync();
-		} finally {
-			await directory.close();
+	async #deliver(result: DrainResult): Promise<void> {
+		const now = Date.now();
+		const invalid: string[] = [];
+		const pending: Pending[] = [];
+		for (const name of await eventFiles(this.#dir)) {
+			const file = path.join(this.#dir, name);
+			const entry = await readEvent(file, now);
+			if (entry) pending.push(entry);
+			else invalid.push(file);
 		}
-	}
-
-	async enqueue(
-		sessionId: string,
-		toolCallId: string,
-		items: RetainInput[],
-		context: string,
-		tags: string[] | undefined,
-	): Promise<void> {
-		if (!sessionId || !toolCallId) throw new Error("Hindsight retain requires a session and tool call identity.");
-		await this.#prepare();
-		await withFileLock(path.join(this.#dir, "queue"), async () => {
-			const files = (await fs.readdir(this.#dir)).filter(file => EVENT_FILE.test(file));
-			const existing = new Set(files.map(file => EVENT_FILE.exec(file)![1]));
-			const events = items.map((item, index): OutboxEvent => {
-				const scope = item.scope ?? "project";
-				const itemContext = this.#clean(item.context ?? context);
-				const content = this.#clean(item.content);
-				return {
-					version: 1,
-					eventId: retainEventId(sessionId, toolCallId, index, { scope, context: itemContext, content }),
-					destination: this.#destination,
-					scope,
-					tags: scope === "global" ? [] : (tags ?? []).map(tag => this.#clean(tag)),
-					timestamp: new Date().toISOString(),
-					content,
-					context: itemContext,
-					metadata: { session_id: this.#clean(sessionId) },
-					attempts: 0,
-					nextAttemptAt: 0,
-				};
-			});
-			const fresh = events.filter(event => !existing.has(event.eventId));
-			// Only deliverable events hold capacity; quarantine is bounded by its own TTL.
-			if (files.length + fresh.length > this.#options.maxEvents) {
-				throw new Error(`Hindsight outbox full (${files.length} events); memory NOT queued. Nothing was evicted.`);
-			}
-			let saved = 0;
-			try {
-				for (const event of fresh) {
-					await writeFileAtomically(path.join(this.#dir, `${event.eventId}.json`), JSON.stringify(event));
-					saved++;
-				}
-				await this.#syncDirectory();
-			} catch (error) {
-				throw new Error(
-					`Hindsight outbox write failed; ${saved} new events kept. Retry the same tool call to resume.`,
-					{ cause: error },
-				);
-			}
-			this.depth = files.length + saved;
-		});
-	}
-
-	/**
-	 * Moves files to quarantine for review, then deletes quarantined events past the review
-	 * period, so quarantine stays bounded by what was quarantined within it. Callers hold the queue lock.
-	 */
-	async #quarantine(files: string[]): Promise<void> {
-		if (files.length === 0) return;
-		const dir = path.join(this.#dir, "quarantine");
-		await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-		await fs.chmod(dir, 0o700);
-		const now = new Date();
-		for (const file of files) {
-			const target = path.join(dir, `${EVENT_FILE.exec(file)![1]}.json`);
-			await fs.rename(path.join(this.#dir, file), target);
-			// The review period starts at quarantine, not at the event's last write.
-			await fs.utimes(target, now, now);
+		// Hindsight unions a request's item tags onto its document(s): one request per tag set, so
+		// untagged global memories never share a request with project-tagged ones.
+		const groups = new Map<string, Pending[]>();
+		for (const entry of pending.sort((a, b) => a.published - b.published)) {
+			const key = JSON.stringify(entry.event.tags.toSorted());
+			const group = groups.get(key);
+			if (group) group.push(entry);
+			else groups.set(key, [entry]);
 		}
-		for (const file of await fs.readdir(dir)) {
-			const filePath = path.join(dir, file);
-			try {
-				if ((await fs.stat(filePath)).mtimeMs < now.getTime() - QUARANTINE_TTL_MS) await fs.unlink(filePath);
-			} catch (error) {
-				if (!isEnoent(error)) throw error;
-			}
-		}
-	}
-
-	async #claim(force: boolean): Promise<ClaimedEvent[]> {
-		return withFileLock(path.join(this.#dir, "queue"), async () => {
-			const claimed: ClaimedEvent[] = [];
-			const unusable: string[] = [];
-			const now = Date.now();
-			this.depth = 0;
-			this.nextAttemptAt = undefined;
-			for (const file of (await fs.readdir(this.#dir)).sort()) {
-				const match = EVENT_FILE.exec(file);
-				if (!match) continue;
-				let event: OutboxEvent;
-				try {
-					event = await Bun.file(path.join(this.#dir, file)).json();
-					if (
-						event.version !== 1 ||
-						event.eventId !== match[1] ||
-						!Number.isFinite(Date.parse(event.timestamp)) ||
-						!Number.isFinite(event.attempts) ||
-						!Number.isFinite(event.nextAttemptAt) ||
-						!Array.isArray(event.tags) ||
-						typeof event.content !== "string" ||
-						typeof event.context !== "string" ||
-						!event.destination
-					)
-						throw new Error("Invalid event");
-				} catch {
-					unusable.push(file);
-					continue;
-				}
-				const ours =
-					event.destination.apiUrl === this.#destination.apiUrl &&
-					event.destination.bankId === this.#destination.bankId;
-				if (match[3] && now - Number(match[3]) <= this.#options.retainTimeoutMs) {
-					if (ours) {
-						this.depth++;
-						this.nextAttemptAt = Math.min(
-							this.nextAttemptAt ?? Infinity,
-							Number(match[3]) + this.#options.retainTimeoutMs + 1,
-						);
-					}
-					continue;
-				}
-				// Expiry ignores the destination: events no session drains anymore must not hold capacity forever.
-				if (now - Date.parse(event.timestamp) > MAX_AGE_MS) {
-					unusable.push(file);
-					continue;
-				}
-				if (!ours) continue;
-				this.depth++;
-				if ((!force && event.nextAttemptAt > now) || claimed.length >= BATCH_SIZE) {
-					this.nextAttemptAt = Math.min(this.nextAttemptAt ?? Infinity, Math.max(now, event.nextAttemptAt));
-					continue;
-				}
-				const claim = `${event.eventId}.inflight.${process.pid}.${now}.json`;
-				await fs.rename(path.join(this.#dir, file), path.join(this.#dir, claim));
-				claimed.push({ file: claim, event });
-			}
-			await this.#quarantine(unusable);
-			if (unusable.length)
-				this.#options.notice(
-					`Hindsight outbox: ${unusable.length} events moved to quarantine (invalid or older than 7 days); review hindsight-outbox/quarantine within 30 days.`,
-				);
-			return claimed;
-		});
-	}
-
-	async drain(force = false): Promise<void> {
-		this.depth = 0;
-		this.nextAttemptAt = undefined;
-		await this.#prepare();
-		// Bank setup is best-effort. Do it before claiming so its separate HTTP
-		// timeout cannot consume a retain claim's lease.
-		if (!(await fs.readdir(this.#dir)).some(file => EVENT_FILE.test(file))) return;
+		result.quarantined += await this.#quarantine(invalid);
+		if (groups.size === 0) return;
 		await this.#options.ensureBank();
-		const claimed = await this.#claim(force);
-		const groups = new Map<string, ClaimedEvent[]>();
-		for (const claim of claimed) {
-			const key = JSON.stringify([claim.event.scope, [...claim.event.tags].sort()]);
-			const group = groups.get(key) ?? [];
-			group.push(claim);
-			groups.set(key, group);
-		}
-		const outcome = { failed: 0, rejected: 0 };
-		await Promise.all(
-			[...groups.values()].map(async group => {
-				const result = await this.#send(group);
-				if (group.length === 1 || result !== "rejected") {
-					await this.#settle(group, result, outcome);
+		for (const group of groups.values()) {
+			for (let start = 0; start < group.length; start += BATCH_SIZE) {
+				if (!(await this.#deliverBatch(group.slice(start, start + BATCH_SIZE), result))) {
+					result.kept = (await eventFiles(this.#dir)).length;
 					return;
 				}
-				// One refused item fails the whole request; resend singly so only refused items are quarantined.
-				for (const claim of group) await this.#settle([claim], await this.#send([claim]), outcome);
-			}),
-		);
-		if (outcome.failed)
-			this.#options.notice(`Memory retention failed; ${this.depth} events kept in the Hindsight outbox for retry.`);
-		if (outcome.rejected)
-			this.#options.notice(
-				`Hindsight outbox: ${outcome.rejected} events moved to quarantine after the server rejected them; review hindsight-outbox/quarantine within 30 days.`,
-			);
-		if (claimed.length && !outcome.failed && !outcome.rejected)
-			logger.debug("Hindsight outbox drained", { count: claimed.length });
+			}
+		}
 	}
 
-	/** `rejected` means the server refused the request body itself; every other failure is retried. */
-	async #send(group: ClaimedEvent[]): Promise<"accepted" | "rejected" | "retry"> {
+	/** Returns false when a retryable failure should stop this drain. */
+	async #deliverBatch(batch: Pending[], result: DrainResult): Promise<boolean> {
+		const outcome = await this.#send(batch);
+		if (outcome === "accepted") {
+			await Promise.all(batch.map(({ file }) => fs.rm(file, { force: true })));
+			result.delivered += batch.length;
+			return true;
+		}
+		if (outcome !== "rejected") {
+			result.error = outcome.error;
+			return false;
+		}
+		if (batch.length === 1) {
+			result.quarantined += await this.#quarantine([batch[0].file]);
+			return true;
+		}
+		// One refused item fails the whole request; resend singly so only refused items are quarantined.
+		for (const pending of batch) {
+			if (!(await this.#deliverBatch([pending], result))) return false;
+		}
+		return true;
+	}
+
+	async #send(batch: Pending[]): Promise<SendOutcome> {
 		try {
 			await this.#options.client.retainBatch(
-				this.#destination.bankId,
-				group.map(({ event }) => ({
+				this.#options.bankId,
+				batch.map(({ event }) => ({
 					content: event.content,
 					context: event.context,
-					timestamp: event.timestamp,
-					metadata: event.metadata,
-					tags: event.tags.length ? event.tags : undefined,
-					documentId: event.eventId,
+					timestamp: new Date(event.timestamp),
+					metadata: { session_id: event.sessionId },
+					tags: event.tags.length > 0 ? event.tags : undefined,
+					documentId: event.id,
 					updateMode: "replace",
 				})),
 				{ async: true },
 			);
 			return "accepted";
 		} catch (error) {
-			return error instanceof HindsightError &&
-				error.statusCode !== undefined &&
-				REJECTED_PAYLOAD_STATUSES.has(error.statusCode)
-				? "rejected"
-				: "retry";
+			if (error instanceof HindsightError && REJECTED_PAYLOAD_STATUSES.has(error.statusCode ?? 0)) return "rejected";
+			return { error: error instanceof Error ? error.message : String(error) };
 		}
 	}
 
-	async #settle(
-		group: ClaimedEvent[],
-		result: "accepted" | "rejected" | "retry",
-		outcome: { failed: number; rejected: number },
-	): Promise<void> {
-		await withFileLock(path.join(this.#dir, "queue"), async () => {
-			const rejected: string[] = [];
-			for (const { file, event } of group) {
-				const filePath = path.join(this.#dir, file);
-				// A stale claim may have been reclaimed while this process was suspended.
-				try {
-					await fs.stat(filePath);
-				} catch (caught) {
-					if (isEnoent(caught)) continue;
-					throw caught;
-				}
-				if (result === "accepted") {
-					await fs.unlink(filePath);
-					this.depth--;
-				} else if (result === "rejected") {
-					rejected.push(file);
-					this.depth--;
-				} else {
-					event.attempts++;
-					const delay =
-						Math.min(30 * 60 * 1000, 5_000 * 2 ** Math.min(event.attempts - 1, 10)) * (0.8 + Math.random() * 0.4);
-					event.nextAttemptAt = Date.now() + Math.round(delay);
-					// Update the claimed file before publishing pending: a crash never exposes two copies.
-					await writeFileAtomically(filePath, JSON.stringify(event));
-					await fs.rename(filePath, path.join(this.#dir, `${event.eventId}.json`));
-					this.nextAttemptAt = Math.min(this.nextAttemptAt ?? Infinity, event.nextAttemptAt);
-					outcome.failed++;
-				}
-			}
-			await this.#quarantine(rejected);
-			outcome.rejected += rejected.length;
-			await this.#syncDirectory();
-		});
+	/** Quarantines another destination's expired events; their owner may never drain again. */
+	async #expire(dir: string, result: DrainResult): Promise<void> {
+		const cutoff = Date.now() - EVENT_TTL_MS;
+		const expired: string[] = [];
+		for (const name of await eventFiles(dir)) {
+			const file = path.join(dir, name);
+			if ((await fs.stat(file)).mtimeMs < cutoff) expired.push(file);
+		}
+		result.quarantined += await this.#quarantine(expired);
+	}
+
+	/** Moves `files` to quarantine, then deletes quarantined events past their review period. */
+	async #quarantine(files: string[]): Promise<number> {
+		if (files.length === 0) return 0;
+		const dir = this.quarantineDir;
+		await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+		const now = new Date();
+		for (const file of files) {
+			const target = path.join(dir, path.basename(file));
+			await fs.rename(file, target);
+			// The review period starts now, not at enqueue.
+			await fs.utimes(target, now, now);
+		}
+		const cutoff = now.getTime() - QUARANTINE_TTL_MS;
+		for (const name of await fs.readdir(dir)) {
+			const file = path.join(dir, name);
+			if ((await fs.stat(file)).mtimeMs < cutoff) await fs.rm(file, { force: true });
+		}
+		return files.length;
+	}
+}
+
+function eventFile(id: string): string {
+	return `${id}.json`;
+}
+
+async function eventFiles(dir: string): Promise<string[]> {
+	return (await fs.readdir(dir)).filter(name => EVENT_FILE.test(name));
+}
+
+/** Credential-free: query, fragment, and userinfo never reach the directory name. */
+function destinationKey(apiUrl: string, bankId: string): string {
+	const url = new URL(apiUrl);
+	const identity = `${url.origin}${url.pathname.replace(/\/+$/, "")}\0${bankId}`;
+	return new Bun.CryptoHasher("sha256").update(identity).digest("hex").slice(0, 16);
+}
+
+/** The pending event, or `undefined` when it is malformed or past its TTL. */
+async function readEvent(file: string, now: number): Promise<Pending | undefined> {
+	const published = (await fs.stat(file)).mtimeMs;
+	if (published < now - EVENT_TTL_MS) return undefined;
+	try {
+		const event = (await Bun.file(file).json()) as OutboxEvent;
+		const valid =
+			event.version === 1 &&
+			eventFile(event.id) === path.basename(file) &&
+			(event.scope === "project" || event.scope === "global") &&
+			Array.isArray(event.tags) &&
+			event.tags.every(tag => typeof tag === "string") &&
+			Number.isFinite(Date.parse(event.timestamp)) &&
+			typeof event.content === "string" &&
+			typeof event.context === "string" &&
+			typeof event.sessionId === "string";
+		return valid ? { file, event, published } : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+async function syncDirectory(dir: string): Promise<void> {
+	// Windows cannot open a directory for fsync; file contents are still synced before rename.
+	if (process.platform === "win32") return;
+	const handle = await fs.open(dir, "r");
+	try {
+		await handle.sync();
+	} finally {
+		await handle.close();
 	}
 }

@@ -185,22 +185,6 @@ export const cfgHindsightRetainOverlapTurns = register({
 
 export const cfgHindsightRetainContext = register({ id: "hindsight.retainContext", type: "string", default: "omp" });
 
-export const cfgHindsightOutboxEnabled = register({
-	id: "hindsight.outboxEnabled",
-	type: "boolean",
-	default: true,
-});
-
-export const cfgHindsightOutboxMaxEvents = register({
-	id: "hindsight.outboxMaxEvents",
-	type: "number",
-	default: 1000,
-	validate(value: unknown): void {
-		if (value === undefined || (typeof value === "number" && Number.isSafeInteger(value) && value > 0)) return;
-		throw new Error("hindsight.outboxMaxEvents must be a positive integer.");
-	},
-});
-
 export const cfgHindsightRecallBudget = register({
 	id: "hindsight.recallBudget",
 	env: "HINDSIGHT_RECALL_BUDGET",

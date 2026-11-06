@@ -29,8 +29,6 @@ function makeConfig(overrides: Partial<HindsightConfig> = {}): HindsightConfig {
 		retainMission: null,
 		autoRecall: false,
 		autoRetain: false,
-		outboxEnabled: false,
-		outboxMaxEvents: 1000,
 		retainMode: "full-session",
 		retainEveryNTurns: 3,
 		retainOverlapTurns: 2,

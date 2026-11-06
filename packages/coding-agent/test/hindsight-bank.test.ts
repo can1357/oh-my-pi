@@ -50,8 +50,6 @@ const baseConfig = (overrides: Partial<HindsightConfig> = {}): HindsightConfig =
 	retainMission: null,
 	autoRecall: true,
 	autoRetain: true,
-	outboxEnabled: false,
-	outboxMaxEvents: 1000,
 	retainMode: "full-session",
 	retainEveryNTurns: 3,
 	retainOverlapTurns: 2,

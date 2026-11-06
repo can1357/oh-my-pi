@@ -290,8 +290,7 @@ describe("learn execute", () => {
 			{
 				getHindsightSessionState: () =>
 					({
-						config: { outboxEnabled: true },
-						enqueueRetain: async (_id: string, items: Array<{ content: string; context?: string }>) => {
+						enqueueRetain: async (_toolCallId: string, items: Array<{ content: string; context?: string }>) => {
 							queued.push(...items.map(item => ({ memory: item.content, context: item.context })));
 						},
 					}) as unknown as HindsightSessionState,
@@ -304,7 +303,7 @@ describe("learn execute", () => {
 		});
 
 		expect(queued).toEqual([{ memory: "Queue this lesson.", context: "from review" }]);
-		expect(result.content[0]).toEqual({ type: "text", text: "Lesson queued for retention (durable)." });
+		expect(result.content[0]).toEqual({ type: "text", text: "Lesson queued for retention." });
 	});
 
 	it("reports Hindsight skill failures as queued partial outcomes", async () => {
@@ -314,8 +313,7 @@ describe("learn execute", () => {
 			{
 				getHindsightSessionState: () =>
 					({
-						config: { outboxEnabled: true },
-						enqueueRetain: async (_id: string, items: Array<{ content: string }>) => {
+						enqueueRetain: async (_toolCallId: string, items: Array<{ content: string }>) => {
 							queued.push(...items.map(item => item.content));
 						},
 					}) as unknown as HindsightSessionState,
@@ -327,7 +325,7 @@ describe("learn execute", () => {
 				memory: "queued lesson",
 				skill: { action: "create", name: "../evil", description: "d", body: "b" },
 			}),
-		).rejects.toThrow(/Lesson queued for retention \(durable\), but the managed skill could not be written/);
+		).rejects.toThrow(/Lesson queued for retention, but the managed skill could not be written/);
 		expect(queued).toEqual(["queued lesson"]);
 	});
 

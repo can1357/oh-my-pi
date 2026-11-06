@@ -133,19 +133,13 @@ export class MemoryRetainTool implements AgentTool<MemoryRetainSchema, MemoryRet
 			state.assertGlobalRetainAvailable();
 		}
 
-		// Acknowledge only after the complete call is persisted. A retry of the same
-		// call deduplicates; another call, or a reused call id with new content, is a new event.
+		// Acknowledge only once the whole call is on disk; delivery happens on a later flush.
 		await state.enqueueRetain(toolCallId, params.items);
 
 		const count = params.items.length;
 		const noun = count === 1 ? "memory" : "memories";
 		return {
-			content: [
-				{
-					type: "text",
-					text: `${count} ${noun} queued (${state.config.outboxEnabled ? "durable" : "in memory only; not durable"}).`,
-				},
-			],
+			content: [{ type: "text", text: `${count} ${noun} queued.` }],
 			details: { count },
 		};
 	}
