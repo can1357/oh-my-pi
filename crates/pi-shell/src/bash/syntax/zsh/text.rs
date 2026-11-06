@@ -518,7 +518,7 @@ impl Text {
 				self.s(&f.name);
 				for n in &f.extra_names {
 					self.c(b' ');
-					self.s(n);
+					self.s(&n.text);
 				}
 				self.s(b" () { ... }");
 			},
@@ -527,7 +527,7 @@ impl Text {
 				self.s(&f.name);
 				for n in &f.extra_names {
 					self.c(b' ');
-					self.s(n);
+					self.s(&n.text);
 				}
 				self.s(b" () {");
 				self.indent += 1;
@@ -561,7 +561,7 @@ impl Text {
 				self.s(&f.var);
 				for v in &f.extra_vars {
 					self.c(b' ');
-					self.s(v);
+					self.s(&v.text);
 				}
 				if let Some(ws) = &f.words {
 					self.s(b" in ");

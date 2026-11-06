@@ -209,19 +209,26 @@ pub enum CommandKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Repeat {
 	/// The count, evaluated arithmetically once at the start.
-	pub count: Word,
+	pub count:  Word,
 	/// Loop body.
-	pub body:  List,
+	pub body:   List,
+	/// Offset of `do` (or of the `{` of a brace body), as the parser read
+	/// it. `None` for a short form that writes neither.
+	pub do_pos: Option<u32>,
 }
 
 /// zsh `{ try-list } always { always-list }`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Try {
 	/// The try list.
-	pub body:   List,
+	pub body:       List,
 	/// Runs after the try list however it ended (error, `return`, `break`,
 	/// `exit` in a subshell), then that ending resumes.
-	pub always: List,
+	pub always:     List,
+	/// Offset of the `}` that closes the try list, as the parser read it.
+	pub rbrace:     u32,
+	/// Offset of `always`, as the parser read it.
+	pub always_pos: u32,
 }
 
 /// zsh anonymous function.
@@ -295,7 +302,7 @@ pub struct For {
 	pub var:        Vec<u8>,
 	/// zsh `for a b c in …`: the loop variables after [`For::var`], each
 	/// pass taking that many words (empty in bash grammar).
-	pub extra_vars: Vec<Vec<u8>>,
+	pub extra_vars: Vec<Name>,
 	/// Span of the variable word.
 	pub var_span:   Span,
 	/// `in` words; `None` means `"$@"`.
@@ -324,9 +331,9 @@ pub struct ArithFor {
 	/// Loop body.
 	pub body:   List,
 	/// Span of the `((init; cond; step))` header, as the parser read it.
-	pub header: Option<Span>,
+	pub header: Span,
 	/// Offset of the header's closing `))`, as the parser read it.
-	pub rparen: Option<u32>,
+	pub rparen: u32,
 	/// Offset of `do` (or of the `{` of zsh's brace body), as the parser
 	/// read it.
 	pub do_pos: Option<u32>,
@@ -450,16 +457,29 @@ pub enum CondExpr {
 	},
 }
 
+/// A name the parser read, with the span it read it at.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Name {
+	/// The name as written.
+	pub text: Vec<u8>,
+	/// Where it was read.
+	pub span: Span,
+}
+
 /// Function definition.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FuncDef {
 	/// Function name.
 	pub name:        Vec<u8>,
+	/// Span of the name, as the parser read it.
+	pub name_span:   Span,
 	/// zsh `f g () { … }` / `function f g { … }`: further names defined
 	/// with the same body (empty in bash grammar).
-	pub extra_names: Vec<Vec<u8>>,
+	pub extra_names: Vec<Name>,
 	/// Defined with the `function` keyword.
 	pub keyword:     bool,
+	/// Written with `()` after the names.
+	pub parens:      bool,
 	/// zsh `function -T name { … }`: defined traced (`PM_TAGGED_LOCAL`).
 	pub traced:      bool,
 	/// Body (a compound command).
@@ -469,8 +489,9 @@ pub struct FuncDef {
 /// `coproc [NAME] cmd`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Coproc {
-	/// Explicit name (default `COPROC`).
-	pub name: Option<Vec<u8>>,
+	/// Explicit name (default `COPROC`), with the span the parser read it
+	/// at.
+	pub name: Option<Name>,
 	/// The coprocess command.
 	pub body: Box<Command>,
 }

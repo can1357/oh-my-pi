@@ -566,7 +566,7 @@ fn functions_coprocs_and_conditionals() {
 	let CommandKind::Coproc(c) = first_cmd(b"coproc N { a; }").kind else {
 		panic!()
 	};
-	assert_eq!(c.name.as_deref(), Some(&b"N"[..]));
+	assert_eq!(c.name.map(|n| n.text), Some(b"N".to_vec()));
 	let CommandKind::Coproc(c) = first_cmd(b"coproc a b").kind else {
 		panic!()
 	};

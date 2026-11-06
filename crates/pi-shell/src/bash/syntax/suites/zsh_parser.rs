@@ -278,7 +278,16 @@ fn for_forms() {
 	let CommandKind::For(f) = first_cmd(b"for a b (1 2 3 4) echo $a $b").kind else {
 		panic!()
 	};
-	assert_eq!((f.var.as_slice(), f.extra_vars.clone()), (&b"a"[..], vec![b"b".to_vec()]));
+	let extra: Vec<(Vec<u8>, Span)> = f
+		.extra_vars
+		.iter()
+		.map(|n| (n.text.clone(), n.span))
+		.collect();
+	assert_eq!(
+		(f.var.as_slice(), extra),
+		(&b"a"[..], vec![(b"b".to_vec(), Span::new(6, 7))]),
+		"the second loop variable keeps the span the parser read it at"
+	);
 	assert_eq!(f.words.as_ref().unwrap().len(), 4);
 	let CommandKind::For(f) = first_cmd(b"foreach x (a b)\necho $x\nend").kind else {
 		panic!()

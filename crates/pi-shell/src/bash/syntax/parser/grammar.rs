@@ -636,8 +636,8 @@ impl Parser<'_> {
 			body,
 			// The whole `(( … ))` is one token; its expression text runs
 			// from `arith.lo` to `arith.hi`, so `))` starts there.
-			header: Some(t.span()),
-			rparen: Some(arith.hi),
+			header: t.span(),
+			rparen: arith.hi,
 			do_pos,
 			braces,
 		}))
@@ -712,8 +712,9 @@ impl Parser<'_> {
 		self.take()?;
 		self.expect(T::RParen)?;
 		self.skip_newlines()?;
+		let span = name.span();
 		let name = word_text(name.word.as_ref().expect("word token"));
-		self.function_body(name, false, lo)
+		self.function_body(Name { text: name, span }, false, true, lo)
 	}
 
 	fn function_keyword(&mut self, lo: u32) -> PResult<Command> {
@@ -722,9 +723,12 @@ impl Parser<'_> {
 		if !matches!(t.kind, T::Word | T::Assign) {
 			return Err(self.token_error(&t));
 		}
+		let span = t.span();
 		let name = word_text(t.word.as_ref().expect("word token"));
+		let mut parens = false;
 		match self.peek_kind()? {
 			T::LParen => {
+				parens = true;
 				self.take()?;
 				self.expect(T::RParen)?;
 				self.skip_newlines()?;
@@ -732,10 +736,16 @@ impl Parser<'_> {
 			T::Newline => self.skip_newlines()?,
 			_ => {},
 		}
-		self.function_body(name, true, lo)
+		self.function_body(Name { text: name, span }, true, parens, lo)
 	}
 
-	fn function_body(&mut self, name: Vec<u8>, keyword: bool, lo: u32) -> PResult<Command> {
+	fn function_body(
+		&mut self,
+		name: Name,
+		keyword: bool,
+		parens: bool,
+		lo: u32,
+	) -> PResult<Command> {
 		let k = self.peek_kind()?;
 		if !starts_shell_command(k) {
 			return Err(self.unexpected());
@@ -747,9 +757,11 @@ impl Parser<'_> {
 			span:   Span::new(lo, self.last_hi),
 			close:  None,
 			kind:   CommandKind::FuncDef(FuncDef {
-				name,
+				name: name.text,
+				name_span: name.span,
 				extra_names: Vec::new(),
 				keyword,
+				parens,
 				traced: false,
 				body: Box::new(body),
 			}),
@@ -767,9 +779,10 @@ impl Parser<'_> {
 			let blo = self.peek_tok()?.lo;
 			let t = self.take()?;
 			if starts_shell_command(self.peek_kind()?) {
+				let span = t.span();
 				let name = word_text(t.word.as_ref().expect("word token"));
 				let blo2 = self.peek_tok()?.lo;
-				(Some(name), self.shell_command_with_redirs(blo2)?)
+				(Some(Name { text: name, span }), self.shell_command_with_redirs(blo2)?)
 			} else {
 				(None, self.simple(Some(t), blo)?)
 			}
