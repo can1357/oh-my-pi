@@ -55,6 +55,9 @@ function createModelRegistry(model: Model): any {
 	return {
 		find: vi.fn(() => model),
 		getAll: vi.fn(() => [model]),
+		getAvailable(): Model[] {
+			return this.getAll();
+		},
 		getApiKey: vi.fn(async () => "test-api-key"),
 		resolver: vi.fn(() => async () => "test-api-key"),
 	};
@@ -246,6 +249,28 @@ describe("memories runtime", () => {
 			);
 		});
 	}
+
+	test("does not extract memories with an unavailable configured or restored session model", async () => {
+		const fx = await createFixture({ modelRoles: { default: "openai/test-model" } });
+		vi.spyOn(fx.modelRegistry, "getAvailable").mockReturnValue([]);
+		await Bun.write(
+			path.join(fx.sessionDir, "thread-exhausted.jsonl"),
+			`${JSON.stringify({ type: "session", id: "thread-exhausted", cwd: fx.agentDir })}\n${JSON.stringify({ type: "message", message: { role: "user", content: "remember this" } })}\n`,
+		);
+		const completeSpy = vi.spyOn(ai, "completeSimple");
+
+		startMemoryStartupTask({
+			session: fx.session,
+			settings: fx.settings,
+			modelRegistry: fx.modelRegistry,
+			agentDir: fx.agentDir,
+			taskDepth: 0,
+		});
+		await settle(fx.whenSettled, "unavailable memory model");
+
+		expect(completeSpy).not.toHaveBeenCalled();
+		expect(fx.modelRegistry.getApiKey).not.toHaveBeenCalled();
+	});
 
 	test("runs phase1 to phase2 and writes consolidated outputs", async () => {
 		const fx = await createFixture();

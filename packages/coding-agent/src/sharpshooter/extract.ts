@@ -172,9 +172,8 @@ export async function resolveSharpshooterModel(
 ): Promise<Model | undefined> {
 	const offline = cfgOffline.get(settings);
 	if (offline && !provider) return undefined;
-	const models = offline
-		? modelRegistry.getAll().filter(model => model.provider === provider)
-		: modelRegistry.getAll();
+	const available = modelRegistry.getAvailable();
+	const models = offline ? available.filter(model => model.provider === provider) : available;
 	const selector = cfgSharpshooterModel.get(settings);
 	if (selector) {
 		const resolved = resolveModelRoleValue(selector, models, {
@@ -185,12 +184,7 @@ export async function resolveSharpshooterModel(
 		logger.debug("Sharpshooter extraction model selector did not resolve", { selector });
 	}
 
-	const available = modelRegistry.getAvailable();
-	const fallback = resolveRoleSelection(
-		["smol"],
-		settings,
-		offline ? available.filter(model => model.provider === provider) : available,
-	)?.model;
+	const fallback = resolveRoleSelection(["smol"], settings, models)?.model;
 	if (!fallback) logger.debug("Sharpshooter extraction skipped: no model available");
 	return fallback;
 }
