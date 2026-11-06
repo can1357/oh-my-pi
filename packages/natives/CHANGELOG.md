@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Shell snapshots now name incompatible execution formats before reading state, preserve unknown optional state while reporting its loss, and explain explicit frame abandonment without resuming discarded execution ([#18299](https://github.com/can1357/oh-my-pi/pull/18299) by [@sjawhar](https://github.com/sjawhar)).
+
 ## [18.17.0] - 2026-11-06
 
 ### Breaking Changes

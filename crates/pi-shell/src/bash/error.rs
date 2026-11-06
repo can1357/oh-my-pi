@@ -24,8 +24,8 @@ pub enum RestoreError {
 	/// The store failed.
 	#[error("could not read the shell state")]
 	Store(#[from] StoreError),
-	/// The frames blob was written by another engine build or IR version;
-	/// retry with `RestoreOpts { drop_frames: true }`.
+	/// The frames build, encoding, core/IR version or required vocabulary is
+	/// unsupported; retry with `RestoreOpts { drop_frames: true }`.
 	#[error("frames blob is incompatible with this engine ({why})")]
 	Incompatible {
 		/// Which check failed.
@@ -67,10 +67,12 @@ pub enum RestoreError {
 	},
 }
 
-/// Which compatibility check of the frames header failed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, strum::Display)]
+/// Which compatibility check of the frames header or vocabulary failed.
+#[derive(
+	Clone, Copy, Debug, PartialEq, Eq, Hash, strum::Display, serde::Serialize, serde::Deserialize,
+)]
 pub enum Incompatibility {
-	/// Not a frames blob (`OBF1` magic missing).
+	/// Not a recognized frames encoding (`OBF1` or `OBF2`).
 	#[strum(to_string = "bad magic")]
 	Magic,
 	/// Another IR version.
@@ -80,6 +82,24 @@ pub enum Incompatibility {
 		found:    u32,
 		/// This engine's version.
 		expected: u32,
+	},
+	/// Another non-extensible execution-core version.
+	#[strum(to_string = "frames version {found}, expected {expected}")]
+	FramesVersion {
+		/// Version in the blob.
+		found:    u32,
+		/// This engine's core version.
+		expected: u32,
+	},
+	/// A required entry or payload revision has no decoder in this reader.
+	#[strum(to_string = "required vocabulary entry {id}, revision {revision} is unsupported")]
+	Vocabulary {
+		/// Permanent entry identifier.
+		id:       u32,
+		/// Payload revision the writer used.
+		revision: u32,
+		/// Owning virtual process, or shell-wide state.
+		vpid:     Option<crate::bash::Vpid>,
 	},
 	/// Another engine build.
 	#[strum(to_string = "engine build differs")]

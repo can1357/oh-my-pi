@@ -1,5 +1,6 @@
 //! Cross-build images are written by independent libraries, never rewritten by
-//! these tests. See fixtures/format-vocabulary/provenance.json for their writers.
+//! these tests. See fixtures/format-vocabulary/provenance.json for their
+//! writers.
 
 use bstr::BStr;
 use pi_shell::{
@@ -14,24 +15,28 @@ use pi_shell::{
 const BASE: &[u8] = include_bytes!("fixtures/format-vocabulary/base-parent-wait.image");
 const UNKNOWN: &[u8] = include_bytes!("fixtures/format-vocabulary/unknown-root-kept.image");
 const UNKNOWN_RECORD: &[u8] = include_bytes!("fixtures/format-vocabulary/unknown-root-kept.record");
-const UNKNOWN_CHILD: &[u8] = include_bytes!("fixtures/format-vocabulary/unknown-subshell-kept.image");
-const UNKNOWN_CHILD_RECORD: &[u8] = include_bytes!("fixtures/format-vocabulary/unknown-subshell-kept.record");
+const UNKNOWN_CHILD: &[u8] =
+	include_bytes!("fixtures/format-vocabulary/unknown-subshell-kept.image");
+const UNKNOWN_CHILD_RECORD: &[u8] =
+	include_bytes!("fixtures/format-vocabulary/unknown-subshell-kept.record");
 const NEWER: &[u8] = include_bytes!("fixtures/format-vocabulary/newer-parent-wait.image");
 const FOREIGN: &[u8] = include_bytes!("fixtures/format-vocabulary/foreign-parent-wait.image");
 
 fn records(store: &mut MemStore) -> Vec<Vec<u8>> {
 	let mut records = Vec::new();
-	store.scan(Table::Misc, &mut |key, record| {
-		records.push(postcard::to_stdvec(&(key.to_buf(), record)).unwrap());
-	}).unwrap();
+	store
+		.scan(Table::Misc, &mut |key, record| {
+			records.push(postcard::to_stdvec(&(key.to_buf(), record)).unwrap());
+		})
+		.unwrap();
 	records
 }
 
 /// A real backend whose records cannot be read. An incompatible header must
 /// win over that backend error, without invoking record access or any write.
 struct UnreadableRecords {
-	store: MemStore,
-	reads: usize,
+	store:  MemStore,
+	reads:  usize,
 	writes: usize,
 }
 
@@ -43,49 +48,85 @@ impl UnreadableRecords {
 }
 
 impl StateStore for UnreadableRecords {
-	fn get(&mut self, _: Key<'_>) -> Result<Option<&Record>, StoreError> { Err(self.refused()) }
-	fn scan(&mut self, _: Table, _: &mut dyn FnMut(Key<'_>, &Record)) -> Result<(), StoreError> { Err(self.refused()) }
+	fn get(&mut self, _: Key<'_>) -> Result<Option<&Record>, StoreError> {
+		Err(self.refused())
+	}
+
+	fn scan(&mut self, _: Table, _: &mut dyn FnMut(Key<'_>, &Record)) -> Result<(), StoreError> {
+		Err(self.refused())
+	}
+
 	fn apply(&mut self, change: Change<'_>) -> Result<(), StoreError> {
 		self.writes += 1;
 		self.store.apply(change)
 	}
+
 	fn put_blob(&mut self, slot: BlobSlot, bytes: &[u8]) -> Result<(), StoreError> {
 		self.writes += 1;
 		self.store.put_blob(slot, bytes)
 	}
-	fn get_blob(&mut self, slot: BlobSlot) -> Result<Option<Vec<u8>>, StoreError> { self.store.get_blob(slot) }
+
+	fn get_blob(&mut self, slot: BlobSlot) -> Result<Option<Vec<u8>>, StoreError> {
+		self.store.get_blob(slot)
+	}
+
 	fn del_blob(&mut self, slot: BlobSlot) -> Result<(), StoreError> {
 		self.writes += 1;
 		self.store.del_blob(slot)
 	}
-	fn epoch(&self) -> u64 { self.store.epoch() }
+
+	fn epoch(&self) -> u64 {
+		self.store.epoch()
+	}
 }
 
 fn refuse_before_records(bytes: &[u8], frames_version: bool) {
 	let engine = Engine::new(EngineConfig::default());
 	let mut host = FakeHost::new();
-	let mut store = UnreadableRecords { store: MemStore::from_bytes(bytes).unwrap(), reads: 0, writes: 0 };
+	let mut store =
+		UnreadableRecords { store: MemStore::from_bytes(bytes).unwrap(), reads: 0, writes: 0 };
 	let before = store.store.to_bytes();
-	let result = Shell::restore(&engine, &mut Cx { host: &mut host, store: &mut store }, RestoreOpts::default());
+	let result = Shell::restore(
+		&engine,
+		&mut Cx { host: &mut host, store: &mut store },
+		RestoreOpts::default(),
+	);
 	let shell_returned = result.is_ok();
-	let error = result.err().expect("an incompatible image must return no shell");
-	println!("error={error:?}; shell_returned={shell_returned}; record_reads={}; writes={}; unchanged={}", store.reads, store.writes, before == store.store.to_bytes());
+	let error = result
+		.err()
+		.expect("an incompatible image must return no shell");
+	println!(
+		"error={error:?}; shell_returned={shell_returned}; record_reads={}; writes={}; unchanged={}",
+		store.reads,
+		store.writes,
+		before == store.store.to_bytes()
+	);
 	assert_eq!(store.store.to_bytes(), before, "refusal consumed persisted execution");
 	assert_eq!(store.writes, 0, "refusal attempted a store write");
 	assert_eq!(store.reads, 0, "incompatibility must precede every record read: {error:?}");
 	if frames_version {
 		let named = format!("{error:?}");
-		assert!(named.contains("FramesVersion") && named.contains("4294967295"), "name the unsupported frames version, not corrupt data or a different build: {error:?}");
+		assert!(
+			named.contains("FramesVersion") && named.contains("4294967295"),
+			"name the unsupported frames version, not corrupt data or a different build: {error:?}"
+		);
 	} else {
-		assert!(matches!(error, RestoreError::Incompatible { why: Incompatibility::Build }), "a foreign identity must be refused explicitly: {error:?}");
+		assert!(
+			matches!(error, RestoreError::Incompatible { why: Incompatibility::Build }),
+			"a foreign identity must be refused explicitly: {error:?}"
+		);
 	}
 }
 
 #[test]
-fn foreign_identity_is_refused_before_any_record_is_read() { refuse_before_records(FOREIGN, false); }
+fn foreign_identity_is_refused_before_any_record_is_read() {
+	refuse_before_records(FOREIGN, false);
+}
 
 #[test]
-fn newer_frames_are_refused_before_any_record_is_read() { refuse_before_records(NEWER, true); }
+fn newer_frames_are_refused_before_any_record_is_read() {
+	refuse_before_records(NEWER, true);
+}
 
 #[test]
 fn newer_frames_refusal_identifies_the_unsupported_wire_version() {
@@ -93,20 +134,36 @@ fn newer_frames_refusal_identifies_the_unsupported_wire_version() {
 	let mut host = FakeHost::new();
 	let mut store = MemStore::from_bytes(NEWER).unwrap();
 	let before = store.to_bytes();
-	let result = Shell::restore(&engine, &mut Cx { host: &mut host, store: &mut store }, RestoreOpts::default());
+	let result = Shell::restore(
+		&engine,
+		&mut Cx { host: &mut host, store: &mut store },
+		RestoreOpts::default(),
+	);
 	let error = result.err().expect("newer frames must not return a shell");
 	println!("error={error:?}; shell_returned=false; unchanged={}", before == store.to_bytes());
 	assert_eq!(store.to_bytes(), before);
 	let named = format!("{error:?}");
-	assert!(named.contains("FramesVersion") && named.contains("4294967295"), "report which frames version is newer: {error:?}");
+	assert!(
+		named.contains("FramesVersion") && named.contains("4294967295"),
+		"report which frames version is newer: {error:?}"
+	);
 }
 
 fn preserves_unknown_record(image: &[u8], original: &[u8], vprocs: u32) {
-	let mut store = MemStore::from_bytes(image).expect("one unknown key must not make the entire table undecodable");
-	assert!(records(&mut store).iter().any(|record| record == original), "the unknown record's original bytes must survive decoding");
+	let mut store = MemStore::from_bytes(image)
+		.expect("one unknown key must not make the entire table undecodable");
+	assert!(
+		records(&mut store).iter().any(|record| record == original),
+		"the unknown record's original bytes must survive decoding"
+	);
 	let engine = Engine::new(EngineConfig::default());
 	let mut host = FakeHost::new();
-	let (mut shell, report) = Shell::restore(&engine, &mut Cx { host: &mut host, store: &mut store }, RestoreOpts::default()).unwrap();
+	let (mut shell, report) = Shell::restore(
+		&engine,
+		&mut Cx { host: &mut host, store: &mut store },
+		RestoreOpts::default(),
+	)
+	.unwrap();
 	println!("restore={report:?}");
 	assert_eq!((report.vprocs, report.runs), (vprocs, 1));
 	assert_eq!(report.lost.len(), 1, "the skipped record must be reported, not silently ignored");
@@ -115,15 +172,27 @@ fn preserves_unknown_record(image: &[u8], original: &[u8], vprocs: u32) {
 	let mut idle = false;
 	for _ in 0..10_000 {
 		match shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget::default()) {
-			Step::Idle => { idle = true; break; },
+			Step::Idle => {
+				idle = true;
+				break;
+			},
 			Step::Yield | Step::Done { .. } => {},
 			other => panic!("restored execution did not continue: {other:?}"),
 		}
 	}
 	assert!(idle, "restored execution never completed");
-	assert_eq!(host.stdout.bytes(), b"kept=127\n", "the rest of the table and execution must remain usable");
+	assert_eq!(
+		host.stdout.bytes(),
+		b"kept=127\n",
+		"the rest of the table and execution must remain usable"
+	);
 	let mut written_back = MemStore::from_bytes(&store.to_bytes()).unwrap();
-	assert!(records(&mut written_back).iter().any(|record| record == original), "a reader that cannot name the record deleted or rewrote it");
+	assert!(
+		records(&mut written_back)
+			.iter()
+			.any(|record| record == original),
+		"a reader that cannot name the record deleted or rewrote it"
+	);
 }
 
 #[test]
@@ -142,7 +211,12 @@ fn genuine_legacy_frames_keep_the_active_child_and_parent_wait() {
 	let mut host = FakeHost::new();
 	let mut store = MemStore::from_bytes(BASE).unwrap();
 	assert!(store.record(Key::Var(BStr::new("KEEP"))).is_some());
-	let (_, report) = Shell::restore(&engine, &mut Cx { host: &mut host, store: &mut store }, RestoreOpts::default()).unwrap();
+	let (_, report) = Shell::restore(
+		&engine,
+		&mut Cx { host: &mut host, store: &mut store },
+		RestoreOpts::default(),
+	)
+	.unwrap();
 	println!("restore={report:?}");
 	assert_eq!(report, RestoreReport { vprocs: 2, runs: 1, ..RestoreReport::default() });
 }

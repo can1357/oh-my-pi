@@ -47,5 +47,46 @@
     "frames_version": 29,
     "sha256": "e89cc12a6f2756acf03ba1727a91c8a88f7bfb1b6e11f01da4e14a9ed4a8752c",
     "size": 2506
+  },
+  "frameless-bg-pids.image": {
+    "writer": "dbc063ff00b917301bad22c88648a84a37f20caa unmodified product source",
+    "crate_version": "18.17.0",
+    "frames_version": null,
+    "sha256": "6528c50a5aa8a130b90cc92c26a0264bc8a9dea611bdb1b9ebc9af6d4a358af8",
+    "size": 1001
+  },
+  "frameless-root-marks.image": {
+    "writer": "dbc063ff00b917301bad22c88648a84a37f20caa unmodified product source",
+    "crate_version": "18.17.0",
+    "frames_version": null,
+    "sha256": "695d87421a6e388c9b75f6ea91737e1b45ca67ff281d97d24fe91b82d2e9285a",
+    "size": 1021
+  },
+  "owned-required-vocabulary.image": {
+    "writer": "75e7801e247d4e3263439d4cc08ccad60dc64bdd + archived vocabulary writer patch and independently observed owner",
+    "crate_version": "18.17.0",
+    "frames_version": 29,
+    "writer_vpid_base": 0,
+    "observed_owner_vpid": 1,
+    "sha256": "5e9d63084e92922c12e58fb9b4c74e475449e719061fed89195251a09f7f5375",
+    "size": 2593
+  },
+  "owned-optional-vocabulary.image": {
+    "writer": "75e7801e247d4e3263439d4cc08ccad60dc64bdd + archived vocabulary writer patch and independently observed owner",
+    "crate_version": "18.17.0",
+    "frames_version": 29,
+    "writer_vpid_base": 0,
+    "observed_owner_vpid": 1,
+    "sha256": "9ea2863668afb36c0befed3086eb9f49806eb775c15d42bd3dc246858217374a",
+    "size": 2593
+  },
+  "owned-reserved-required.image": {
+    "writer": "75e7801e247d4e3263439d4cc08ccad60dc64bdd + archived vocabulary writer patch and independently observed owner",
+    "crate_version": "18.17.0",
+    "frames_version": 29,
+    "writer_vpid_base": 0,
+    "observed_owner_vpid": 1,
+    "sha256": "3651d559bd65aabb67f3711228e57e69a95e54a1f349abf32acb4836eecef753",
+    "size": 2591
   }
 }
