@@ -77,7 +77,7 @@ import {
 	cfgBashPatterns,
 } from "../exec/settings";
 import { cfgSkillful } from "../session/settings";
-import { cfgWorktreeClone } from "../task/settings";
+import { cfgWorktreeClone, ovnfsCommand } from "../task/settings";
 import { nativeShapingOff, shapeToolText, shapingExperiment } from "../spotlight";
 import { SPOTLIGHT_FULL_OUTPUT_MAX_BYTES } from "../spotlight/types";
 import type { SpotlightDetails } from "@oh-my-pi/pi-tui/chat/spotlight";
@@ -1063,6 +1063,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						timeout: options.timeoutMs ?? 0,
 						signal: runSignal,
 						gitGuard: cfgBashGitGuard.get(this.session.settings),
+						ovnfs: ovnfsCommand(this.session.settings),
 						// Bound to the job's own signal: the job outlives the call that started it.
 						filesystem: this.#urlFilesystem(runSignal, options.approvalTier, onReply).shellFilesystem(),
 						artifactPath,
@@ -1803,6 +1804,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					timeout: timeoutMs ?? 0,
 					signal,
 					gitGuard: cfgBashGitGuard.get(this.session.settings),
+					ovnfs: ovnfsCommand(this.session.settings),
 					filesystem: this.#urlFilesystem(signal, approvalTier, text => {
 						replies.push(text);
 						emitFrame?.();

@@ -643,7 +643,7 @@ fn options(flags: OpenFlags, mode: u32) -> OpenOptions {
 
 /// The `open(2)` flags of `flags` that [`OpenOptions`] has no setter for.
 #[cfg(unix)]
-fn custom_flags(flags: OpenFlags) -> libc::c_int {
+const fn custom_flags(flags: OpenFlags) -> libc::c_int {
 	let mut custom = 0;
 	if flags.contains(OpenFlags::APPEND) && flags.contains(OpenFlags::TRUNC) {
 		custom |= libc::O_APPEND;
@@ -1156,7 +1156,8 @@ impl Fs for StdFs {
 	}
 
 	fn sync(&mut self) -> FsPoll<()> {
-		FsPoll::Ready(super::fs_ops::sync())
+		super::fs_ops::sync();
+		FsPoll::Ready(Ok(()))
 	}
 
 	fn getxattr(&mut self, path: &BStr, name: &BStr, follow: bool) -> FsPoll<BString> {
