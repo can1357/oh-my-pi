@@ -17,6 +17,10 @@
 - `fatal()` in a worker thread now reaches the parent's `error` listeners instead of only exiting with code 1.
 - Fixed the terminal stderr guard leaking a copy of the terminal into processes spawned from native code.
 
+### Added
+
+- Added `$otelEnv` and `withOmpOtelEnv` for reading `OTEL_*` values from omp's own `.env` files, which no longer enter `Bun.env` ([#17685](https://github.com/can1357/oh-my-pi/pull/17685) by [@Flare576](https://github.com/Flare576))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

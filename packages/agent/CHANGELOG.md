@@ -9,6 +9,10 @@
 - Added `Agent.queuedMessageGate` to filter queued messages before delivery and observe claimed messages returned undelivered.
 - Added `wireToolsFingerprint()`, returning a hash of the tool specs sent with a request.
 
+### Fixed
+
+- Fixed GenAI message-content capture set in omp's own `.env` files so it still applies now that those values stay out of the process environment ([#17685](https://github.com/can1357/oh-my-pi/pull/17685) by [@Flare576](https://github.com/Flare576))
+
 ## [18.16.0] - 2026-11-02
 
 ### Changed
