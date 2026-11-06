@@ -204,8 +204,8 @@ describe("bare agent:// roster", () => {
 	it("lists local registry agents and A2A bridge registrations", async () => {
 		const { A2aAgentBridge } = await import("@oh-my-pi/pi-coding-agent/a2a/agent-bridge");
 		const registry = new AgentRegistry();
-		registry.register({ id: "Scout", kind: "agent", status: "running" });
-		registry.register({ id: "AdvisorX", kind: "advisor", status: "running" });
+		registry.register({ id: "Scout", displayName: "Scout", kind: "sub", session: null, status: "running" });
+		registry.register({ id: "AdvisorX", displayName: "AdvisorX", kind: "advisor", session: null, status: "running" });
 		const bridge = new A2aAgentBridge();
 		bridge.add({
 			name: "a2a:Main",
@@ -218,7 +218,7 @@ describe("bare agent:// roster", () => {
 			agentRegistry: registry,
 			session: { getA2aBridge: () => bridge } as never,
 		});
-		expect(resource.content).toContain("Scout (running, agent");
+		expect(resource.content).toContain("Scout (running, sub");
 		expect(resource.content).toContain("a2a:Main (remote, a2a, http://127.0.0.1:7001/)");
 		expect(resource.content).not.toContain("AdvisorX");
 		expect(resource.content).toContain("task tool");
