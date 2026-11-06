@@ -22,9 +22,9 @@ enum Mode {
 	/// A script file the `obash` binary reads, whose `$0` and `BASH_SOURCE[0]` are
 	/// the script: script mode is not reachable through `Shell::run`.
 	ScriptFile,
-	/// `obash --norc --noprofile -i -c`: an interactive shell, which bash names
-	/// by itself however deep in a `.` file it is. With no terminal it first
-	/// prints two job-control notices, so the row compares the last line.
+	/// `obash --norc --noprofile -i -c`: runtime errors name the shell;
+	/// syntax errors in a `.` file name that file and its line. Filter only
+	/// the two no-terminal job-control notices, keeping every diagnostic line.
 	Interactive,
 }
 
@@ -105,13 +105,17 @@ async fn observe(row: &Row) -> (i32, Vec<u8>, Vec<u8>, String) {
 				.envs(&env)
 				.output()
 				.expect("run obash");
-			let last = done
+			let stderr = done
 				.stderr
 				.split_inclusive(|&c| c == b'\n')
-				.filter(|l| l.len() > 1)
-				.next_back()
-				.map_or_else(Vec::new, <[u8]>::to_vec);
-			(done.status.code().unwrap_or(-1), done.stdout, last, home)
+				.filter(|line| {
+					!line.starts_with(b"bash: cannot set terminal process group")
+						&& *line != b"bash: no job control in this shell\n"
+				})
+				.flatten()
+				.copied()
+				.collect();
+			(done.status.code().unwrap_or(-1), done.stdout, stderr, home)
 		},
 		Mode::ScriptFile => {
 			std::fs::write(dir.path().join("script.sh"), format!("{}\n", row.script))
@@ -459,6 +463,96 @@ const ROWS: &[Row] = &[
 		status: 0,
 		stdout: b"./one\n./two\n./three\nhits\tcommand\n   1\tthree\n   1\ttwo\n   1\tone\n",
 		stderr: b"",
+	},
+	// res-exec-single-dot (c)  // 5.2.21 differs: 127 'bash: line 1: {D}/victim: cannot execute: required file not found\n'
+	Row {
+		id: "res-exec-single-dot",
+		setup: r#"printf '#!/missing/review/interpreter\n' > victim; chmod 755 victim"#,
+		mode: Mode::Dashc,
+		script: "exec ./victim",
+		status: 126,
+		stdout: b"",
+		stderr: b"bash: {D}/victim: /missing/review/interpreter: bad interpreter: No such file or directory\n",
+	},
+	// res-exec-double-dot (c)  // 5.2.21 differs: 127 'bash: line 1: {D}/./victim: cannot execute: required file not found\n'
+	Row {
+		id: "res-exec-double-dot",
+		setup: r#"printf '#!/missing/review/interpreter\n' > victim; chmod 755 victim"#,
+		mode: Mode::Dashc,
+		script: "exec ././victim",
+		status: 126,
+		stdout: b"",
+		stderr: b"bash: {D}/./victim: /missing/review/interpreter: bad interpreter: No such file or directory\n",
+	},
+	// res-exec-dot-directory (c)  // 5.2.21 differs: 126 'bash: line 1: {D}/bin: Is a directory\nbash: line 1: exec: {D}/bin: cannot execute: Is a directory\n'
+	Row {
+		id: "res-exec-dot-directory",
+		setup: "mkdir -p bin",
+		mode: Mode::Dashc,
+		script: "exec ./bin",
+		status: 126,
+		stdout: b"",
+		stderr: b"bash: line 1: {D}/bin: Is a directory\n",
+	},
+	// res-exec-dot-path (c)  // 5.2.21 differs: 127 'bash: line 1: {D}/bin/victim: cannot execute: required file not found\n'
+	Row {
+		id: "res-exec-dot-path",
+		setup: r#"mkdir -p bin; printf '#!/missing/review/interpreter\n' > bin/victim; chmod 755 bin/victim"#,
+		mode: Mode::Dashc,
+		script: "PATH=./bin:/usr/bin:/bin; exec victim",
+		status: 126,
+		stdout: b"",
+		stderr: b"bash: {D}/bin/victim: /missing/review/interpreter: bad interpreter: No such file or directory\n",
+	},
+	// res-exec-dot-hash (c)  // 5.2.21 differs: 127 'bash: line 1: {D}/victim: cannot execute: required file not found\n'
+	Row {
+		id: "res-exec-dot-hash",
+		setup: r#"printf '#!/missing/review/interpreter\n' > victim; chmod 755 victim"#,
+		mode: Mode::Dashc,
+		script: "hash -p ./victim q; exec q",
+		status: 126,
+		stdout: b"",
+		stderr: b"bash: {D}/victim: /missing/review/interpreter: bad interpreter: No such file or directory\n",
+	},
+	// res-exec-absolute-dot-control (c)  // 5.2.21 differs: 127 'bash: line 1: {D}/./victim: cannot execute: required file not found\n'
+	Row {
+		id: "res-exec-absolute-dot-control",
+		setup: r#"printf '#!/missing/review/interpreter\n' > victim; chmod 755 victim"#,
+		mode: Mode::Dashc,
+		script: r#"exec "$PWD"/./victim"#,
+		status: 126,
+		stdout: b"",
+		stderr: b"bash: {D}/./victim: /missing/review/interpreter: bad interpreter: No such file or directory\n",
+	},
+	// res-exec-foreign-elf (c)  // 5.2.21 differs: 126 'bash: line 1: {D}/v: cannot execute binary file: Exec format error\nbash: line 1: {D}/v: Success\n'
+	Row {
+		id: "res-exec-foreign-elf",
+		setup: r#"cp /bin/true v; printf '\267\000' | dd of=v bs=1 seek=18 conv=notrunc 2>/dev/null"#,
+		mode: Mode::Dashc,
+		script: "exec ./v",
+		status: 126,
+		stdout: b"",
+		stderr: b"bash: line 1: {D}/v: cannot execute binary file: Exec format error\n",
+	},
+	// res-foreign-elf-slash-control (c)
+	Row {
+		id: "res-foreign-elf-slash-control",
+		setup: r#"cp /bin/true v; printf '\267\000' | dd of=v bs=1 seek=18 conv=notrunc 2>/dev/null"#,
+		mode: Mode::Dashc,
+		script: "./v",
+		status: 126,
+		stdout: b"",
+		stderr: b"bash: line 1: ./v: cannot execute binary file: Exec format error\n",
+	},
+	// res-foreign-elf-command-control (c)
+	Row {
+		id: "res-foreign-elf-command-control",
+		setup: r#"cp /bin/true v; printf '\267\000' | dd of=v bs=1 seek=18 conv=notrunc 2>/dev/null"#,
+		mode: Mode::Dashc,
+		script: "command ./v",
+		status: 126,
+		stdout: b"",
+		stderr: b"bash: line 1: ./v: cannot execute binary file: Exec format error\n",
 	},
 ];
 
