@@ -147,13 +147,17 @@ pub struct Stage {
 	pub pipe_stderr: bool,
 }
 
-/// A command with its trailing redirections.
+/// A command with its redirections.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Command {
 	/// Preorder id.
 	pub id:     NodeId,
 	/// Source span, redirections included.
 	pub span:   Span,
+	/// The command proper, recorded before/after its grammar rule, excluding
+	/// surrounding redirections. Absent for simple commands and synthesized
+	/// groups, which have no compound tokens of their own.
+	pub extent: Option<Span>,
 	/// Offset of the token that closes this compound command (`)`, `}`,
 	/// `done`, `esac`, `fi`, `))`, `]]`), as the parser read it. `None` when
 	/// the command has no closing token (a simple command) or the parser

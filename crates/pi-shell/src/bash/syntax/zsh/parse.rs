@@ -90,6 +90,7 @@ fn empty_command(span: Span) -> Command {
 	Command {
 		id: NodeId(0),
 		span,
+		extent: None,
 		close: None,
 		kind: CommandKind::Simple(Simple::default()),
 		redirs: Vec::new(),
@@ -110,6 +111,7 @@ fn pipeline_command(p: Pipeline) -> Command {
 	Command {
 		id: NodeId(0),
 		span,
+		extent: None,
 		close: None,
 		kind: CommandKind::Brace(List { items: vec![ListItem { and_or, sep: Sep::None }] }),
 		redirs: Vec::new(),
@@ -125,7 +127,14 @@ fn list_command(mut list: List, span: Span) -> Command {
 	if lone && let Some(item) = list.items.pop() {
 		return pipeline_command(item.and_or.first);
 	}
-	Command { id: NodeId(0), span, close: None, kind: CommandKind::Brace(list), redirs: Vec::new() }
+	Command {
+		id: NodeId(0),
+		span,
+		extent: None,
+		close: None,
+		kind: CommandKind::Brace(list),
+		redirs: Vec::new(),
+	}
 }
 
 /// zsh `IS_DASH`.
@@ -474,6 +483,7 @@ impl Ctx<'_> {
 			let cmd = Command {
 				id: NodeId(0),
 				span,
+				extent: Some(span),
 				close: None,
 				kind: CommandKind::Coproc(Coproc { name: None, body: Box::new(body) }),
 				redirs: Vec::new(),
@@ -544,6 +554,7 @@ impl Ctx<'_> {
 		let mut redirs = Vec::new();
 		self.trailing_redirs(&mut redirs);
 		let nr = redirs.len();
+		let cmd_lo = self.lx.lo;
 		if self.lx.tok == T::Time && !self.inpartime {
 			self.inpartime = true;
 			let tp = self.par_time(lo);
@@ -608,11 +619,14 @@ impl Ctx<'_> {
 			self.cmdpop();
 		}
 		let kind = kind.unwrap_or_else(failed);
+		let extent =
+			(!matches!(kind, CommandKind::Simple(_))).then(|| Span::new(cmd_lo, self.lx.last_hi));
 		self.trailing_redirs(&mut redirs);
 		self.end_cmd();
 		let mut cmd = Command {
 			id: NodeId(0),
 			span: Span::new(lo, self.lx.last_hi),
+			extent,
 			close: self.cmd_close.take(),
 			kind,
 			redirs,
@@ -1113,6 +1127,7 @@ impl Ctx<'_> {
 			return Some(Command {
 				id: NodeId(0),
 				span: Span::new(lo, self.lx.last_hi),
+				extent: Some(Span::new(lo, self.lx.last_hi)),
 				close,
 				kind: CommandKind::Brace(list),
 				redirs: Vec::new(),
@@ -1866,10 +1881,17 @@ fn attach_function_redirs(cmd: &mut Command) {
 		*f.body = Command {
 			id: NodeId(0),
 			span,
+			extent: None,
 			close: None,
 			kind: CommandKind::Brace(List { items: vec![ListItem { and_or, sep: Sep::None }] }),
 			redirs: Vec::new(),
 		};
+	}
+	// The body owns these redirections, so its enclosing range must own
+	// their parsed spans too. Its compound extent stays at its own tokens.
+	for r in &redirs {
+		f.body.span.lo = f.body.span.lo.min(r.span.lo);
+		f.body.span.hi = f.body.span.hi.max(r.span.hi);
 	}
 	f.body.redirs.extend(redirs);
 }

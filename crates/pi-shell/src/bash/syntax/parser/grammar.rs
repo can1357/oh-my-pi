@@ -315,6 +315,7 @@ impl Parser<'_> {
 			let cmd = Command {
 				id:     NodeId(0),
 				span:   Span::new(at, at),
+				extent: None,
 				close:  None,
 				kind:   CommandKind::Simple(Simple::default()),
 				redirs: Vec::new(),
@@ -445,6 +446,7 @@ impl Parser<'_> {
 		Ok(Command {
 			id: NodeId(0),
 			span: Span::new(lo, self.last_hi),
+			extent: Some(Span::new(lo, self.last_hi)),
 			close: Some(close),
 			kind,
 			redirs: Vec::new(),
@@ -762,6 +764,7 @@ impl Parser<'_> {
 		Ok(Command {
 			id:     NodeId(0),
 			span:   Span::new(lo, self.last_hi),
+			extent: Some(Span::new(lo, self.last_hi)),
 			close:  None,
 			kind:   CommandKind::FuncDef(FuncDef {
 				name: name.text,
@@ -802,6 +805,7 @@ impl Parser<'_> {
 		Ok(Command {
 			id:     NodeId(0),
 			span:   Span::new(lo, self.last_hi),
+			extent: Some(Span::new(lo, self.last_hi)),
 			close:  None,
 			kind:   CommandKind::Coproc(Coproc { name, body: Box::new(body) }),
 			redirs: Vec::new(),
@@ -858,6 +862,7 @@ impl Parser<'_> {
 		Ok(Command {
 			id: NodeId(0),
 			span: Span::new(lo, self.last_hi),
+			extent: None,
 			close: None,
 			kind: CommandKind::Simple(s),
 			redirs,

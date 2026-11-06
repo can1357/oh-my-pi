@@ -177,8 +177,9 @@ fn write(out: &mut String, v: V, pretty: bool, depth: usize) {
 /// use node types shfmt lacks (`RepeatClause`, `TryClause`, `AnonFuncDecl`),
 /// `&|` sets `Background` and `Disown`, and extra loop variables or function
 /// names are listed in `ExtraNames`.
-/// Command keyword positions absent from the tree are omitted, not replaced
-/// with operand positions. Every object in `Parts` includes its `Type`.
+/// Command extents and keyword positions come from the parser, not from
+/// adjacent redirections. Unwritten group delimiters and conditional keywords
+/// are omitted. Every object in `Parts` includes its `Type`.
 pub fn to_json(src: &[u8], program: &Program, dialect: JsonDialect, offsets: Offsets) -> String {
 	let map = OffMap::new(src, offsets);
 	let mut out = String::new();
@@ -1291,16 +1292,10 @@ mod shfmt {
 			out
 		}
 
-		/// The shfmt command for `c` and the end of the command proper
-		/// (without trailing redirections).
+		/// The shfmt command and its parser-recorded extent, without surrounding
+		/// redirections. Synthesized groups retain only their enclosing range.
 		fn command(&self, c: &Command) -> (Option<V>, u32) {
-			let lo = c.span.lo;
-			let hi = match c.redirs.first() {
-				Some(r) if !matches!(c.kind, CommandKind::Simple(_) | CommandKind::FuncDef(_)) => {
-					self.trim_back(lo, r.span.lo)
-				},
-				_ => c.span.hi,
-			};
+			let Span { lo, hi } = c.extent.unwrap_or(c.span);
 			let p = |o| self.m.pos(o);
 			// The closing token's own offset is the parser's to record. A
 			// command it synthesized rather than read has none, and the
@@ -1315,15 +1310,19 @@ mod shfmt {
 			let v = match &c.kind {
 				CommandKind::Simple(sc) => return self.simple(sc),
 				CommandKind::Brace(l) => {
-					let mut f =
-						vec![("Type", s(b"Block")), ("Pos", p(lo)), ("End", p(hi)), ("Lbrace", p(lo))];
+					let mut f = vec![("Type", s(b"Block")), ("Pos", p(lo)), ("End", p(hi))];
+					if let Some(span) = c.extent {
+						f.push(("Lbrace", p(span.lo)));
+					}
 					close(&mut f, "Rbrace");
 					f.push(("Stmts", self.list(l)));
 					V::Obj(f)
 				},
 				CommandKind::Subshell(l) => {
-					let mut f =
-						vec![("Type", s(b"Subshell")), ("Pos", p(lo)), ("End", p(hi)), ("Lparen", p(lo))];
+					let mut f = vec![("Type", s(b"Subshell")), ("Pos", p(lo)), ("End", p(hi))];
+					if let Some(span) = c.extent {
+						f.push(("Lparen", p(span.lo)));
+					}
 					close(&mut f, "Rparen");
 					f.push(("Stmts", self.list(l)));
 					V::Obj(f)
@@ -1489,7 +1488,7 @@ mod shfmt {
 				CommandKind::FuncDef(fd) => {
 					let mut f = vec![
 						("Type", s(b"FuncDecl")),
-						("Pos", p(lo)),
+						("Pos", p(c.span.lo)),
 						("End", p(c.span.hi)),
 						("Position", p(lo)),
 					];

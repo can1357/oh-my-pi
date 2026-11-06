@@ -365,7 +365,10 @@ fn range_faults(
 				{
 					bad.push(format!("{path}.{k} at {o} outside [{pos},{end}]"));
 				}
-				range_faults(child, here.clone(), &format!("{path}.{k}"), bad);
+				// shfmt attaches leading/trailing comments to a statement,
+				// but they are trivia, outside its syntactic source range.
+				let enclosing = if k == "Comments" { None } else { here.clone() };
+				range_faults(child, enclosing, &format!("{path}.{k}"), bad);
 			}
 		},
 		serde_json::Value::Array(items) => {
@@ -914,6 +917,176 @@ fn exported_nodes_contain_their_children_in_source_and_alias_text() {
 		"these samples no longer fault, so they are this change's now, not the word change's: {}",
 		clean_siblings.join(", ")
 	);
+}
+
+#[test]
+fn compound_ranges_do_not_borrow_their_redirections() {
+	let mut faults = Vec::new();
+	let mut sibling_faults = Vec::new();
+	let mut documents = 0;
+	let mut rejected = 0;
+	let mut rows = Vec::new();
+	for_each_sample(|sample| {
+		if sample.owner != Owner::Here {
+			return;
+		}
+		let program = parse_sample(sample, false);
+		let cmd = &program.commands[0].list.items[0].and_or.first.stages[0].cmd;
+		if matches!(cmd.kind, CommandKind::Simple(_)) {
+			return;
+		}
+		let text = String::from_utf8_lossy(sample.text);
+		for zsh in [false, true] {
+			let features = if zsh { zsh_features() } else { Features::NONE };
+			let mut base = Parser::new(sample.text, features, NO_ALIASES);
+			let base_valid = std::iter::from_fn(|| base.next_command()).all(|cmd| cmd.is_ok());
+			for leading in [false, true] {
+				let redirected = if leading {
+					format!(">/dev/null {text}")
+				} else {
+					format!("{text} >/dev/null")
+				};
+				// Source alone, alias alone, and a source redirection beside an
+				// aliased compound. The last must not collapse the redirection's
+				// position together with the compound's positions.
+				for (src, alias) in [
+					(format!("# 😀\n{redirected}\n"), ""),
+					("# 😀\ncheck\n".to_owned(), redirected.as_str()),
+					(
+						if leading {
+							"# 😀\n>/dev/null check\n".to_owned()
+						} else {
+							"# 😀\ncheck >/dev/null\n".to_owned()
+						},
+						text.as_ref(),
+					),
+				] {
+					let table = AliasOne(b"check", alias.as_bytes());
+					let mut parser = Parser::new(src.as_bytes(), features, &table);
+					let commands: Result<Vec<_>, _> =
+						std::iter::from_fn(|| parser.next_command()).collect();
+					let Ok(commands) = commands else {
+						// Bash does not accept a redirection before a compound.
+						// In zsh, coproc is a pipeline prefix, not a par_cmd form.
+						assert!(
+							!base_valid
+								|| (leading && (!zsh || matches!(cmd.kind, CommandKind::Coproc(_)))),
+							"unexpected rejection: {src:?}, alias={alias:?}"
+						);
+						rejected += 1;
+						continue;
+					};
+					let program = Program { commands };
+					for offsets in [Offsets::Bytes, Offsets::Utf16] {
+						for dialect in [JsonDialect::Native, JsonDialect::Shfmt] {
+							let owner = if sample.text.starts_with(b"for ((")
+								&& !zsh
+								&& !alias.is_empty()
+								&& dialect == JsonDialect::Native
+							{
+								Owner::Sibling
+							} else {
+								Owner::Here
+							};
+							rows.push(serde_json::json!({
+								"src": src, "alias": alias, "zsh": zsh,
+								"utf16": offsets == Offsets::Utf16, "native": dialect == JsonDialect::Native,
+								"sibling_operands": owner == Owner::Sibling,
+							}));
+							documents += 1;
+							let json = to_json(src.as_bytes(), &program, dialect, offsets);
+							let document: serde_json::Value = serde_json::from_str(&json).unwrap();
+							let mut bad = Vec::new();
+							range_faults(&document, None, "", &mut bad);
+							if owner == Owner::Sibling {
+								assert_eq!(
+									bad.len(),
+									3,
+									"stale arithmetic operand marker: {json}\n{bad:?}"
+								);
+								for operand in ["init", "cond", "step"] {
+									let cause = format!(
+										".commands[0].list[0].and_or.first.stages[0].cmd.{operand}: \
+										 backwards ["
+									);
+									assert!(
+										bad.iter().any(|fault| fault.starts_with(&cause)),
+										"wrong arithmetic operand fault: {bad:?}"
+									);
+								}
+								sibling_faults.extend(bad);
+								continue;
+							}
+							for fault in bad {
+								faults.push(format!(
+									"{src:?}, alias={alias:?}, zsh={}, {dialect:?}, {offsets:?}: {fault}",
+									zsh
+								));
+							}
+						}
+					}
+				}
+			}
+		}
+	});
+	assert_eq!(sibling_faults.len(), 24, "arithmetic operand marker coverage changed");
+	if let Some(path) = std::env::var_os("EXPORT_REDIRECTION_FAULTS") {
+		std::fs::write(
+			path,
+			serde_json::to_vec(&serde_json::json!({
+				"documents": documents, "rejected": rejected, "faults": faults, "rows": rows,
+				"sibling_faults": sibling_faults,
+			}))
+			.unwrap(),
+		)
+		.unwrap();
+	}
+	assert!(
+		faults.is_empty(),
+		"{} range faults in {documents} documents ({rejected} rejected):\n{}",
+		faults.len(),
+		faults.join("\n")
+	);
+}
+
+#[test]
+fn compound_openers_do_not_point_at_leading_redirections() {
+	for (text, end, opening, closing, close) in [
+		("{ : }", 16, "Lbrace", "Rbrace", 15),
+		("( : )", 16, "Lparen", "Rparen", 15),
+		("for i in a; do :; done", 33, "ForPos", "DonePos", 29),
+		("[[ -n a ]]", 21, "Left", "Right", 19),
+		("(( 1 ))", 18, "Left", "Right", 16),
+	] {
+		for zsh in [false, true] {
+			for (src, alias, byte_range, utf16_range) in [
+				(format!(">/dev/null {text}"), "", (11, end, close), (11, end, close)),
+				("# 😀\ncheck\n".to_owned(), text, (12, 12, 12), (10, 10, 10)),
+				("# 😀\n>/dev/null check\n".to_owned(), text, (23, 23, 23), (21, 21, 21)),
+			] {
+				if !zsh && (alias.is_empty() || src.contains(">/dev/null") || text == "{ : }") {
+					continue; // Bash rejects leading redirections and an unseparated `}`.
+				}
+				let table = AliasOne(b"check", alias.as_bytes());
+				let features = if zsh { zsh_features() } else { Features::NONE };
+				let mut parser = Parser::new(src.as_bytes(), features, &table);
+				let commands = std::iter::from_fn(|| parser.next_command())
+					.collect::<Result<Vec<_>, _>>()
+					.expect("compound parses");
+				let program = Program { commands };
+				for (offsets, (lo, hi, close)) in
+					[(Offsets::Bytes, byte_range), (Offsets::Utf16, utf16_range)]
+				{
+					let json = to_json(src.as_bytes(), &program, JsonDialect::Shfmt, offsets);
+					let document: serde_json::Value = serde_json::from_str(&json).unwrap();
+					let cmd = &document["Stmts"][0]["Cmd"];
+					assert_eq!(token_range(cmd), Some((lo, hi)), "{json}");
+					assert_eq!(cmd[opening]["Offset"], lo, "{json}");
+					assert_eq!(cmd[closing]["Offset"], close, "{json}");
+				}
+			}
+		}
+	}
 }
 
 #[test]

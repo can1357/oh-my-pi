@@ -98,9 +98,9 @@ use crate::bash::{
 ///
 /// Deferred function bodies can contain a serialized syntax tree. A tree
 /// layout change raises this version so restore rejects incompatible bytes.
-/// This layout records each iterator header and each redirection's descriptor
-/// text and span and its operator position.
-pub const IR_VERSION: u32 = 23;
+/// This layout records each compound's own extent separately from its
+/// enclosing command span, which also contains redirections.
+pub const IR_VERSION: u32 = 24;
 
 /// Opcodes.
 #[derive(
