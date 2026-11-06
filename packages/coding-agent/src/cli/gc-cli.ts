@@ -2336,25 +2336,27 @@ function renderText(result: GcResult): string {
  * Put `text` on `stream` and wait until the kernel has it.
  *
  * `write` returns false when the pipe is full and keeps the bytes in a
- * userspace buffer, so a caller that carries straight on is making a claim
+ * userspace buffer, so a caller that carries straight on has made a claim
  * about the order of two statements rather than about what a reader saw.
- * Both of this command's out-of-band writes need the stronger thing and for
- * the same reason:
+ * The reclamation warning needs the stronger thing: it must be *delivered*
+ * before the first unlink, measured at one unlinked blob and zero warning
+ * bytes when it was merely queued.
  *
- * - the reclamation warning must be *delivered* before the first unlink —
- *   measured at one unlinked blob and zero warning bytes;
- * - the summary a failing run prints must survive the rethrow — measured, on
- *   a backpressured stdout, at a blob deleted and a receipt that stopped
- *   mid-pathname and parsed as invalid JSON, because the process exited on
- *   the uncaught error before the queued bytes drained.
+ * One caller, deliberately. An earlier revision also used this for a summary
+ * printed when a later phase threw, and that is withdrawn: writing on the
+ * failure path made `omp gc` the first writer to stdout while it was already
+ * failing, and stdout's lifetime there belongs to `postmortem.ts`, which
+ * reads a broken pipe as `| head` and exits 0. Six review rounds produced
+ * five defects in that one behaviour and in the fixes for its fixes. It
+ * belongs in `postmortem.ts`, not here.
  *
- * A write that fails is the same answer as a write that cannot finish, and
- * the caller decides what that means: the warning path refuses to delete,
- * the report path lets the original failure stand. Not a closed descriptor,
- * though — Bun replaces an inherited closed stdout or stderr with
- * `/dev/null` before any of this runs, so the write succeeds and the run
- * carries on, which is the right answer for an operator who redirected it
- * on purpose.
+ * A write that fails is the same answer as a write that cannot finish:
+ * nothing is deleted. `/dev/full` and a broken pipe end the run before the
+ * blob phase, and that is the behaviour being kept. Not a closed descriptor
+ * 2, though: Bun replaces an inherited closed stderr with `/dev/null` before
+ * any of this runs, so the write succeeds and the run carries on — an
+ * operator who sends the warning to `/dev/null` is suppressing a diagnostic
+ * on purpose, and this does not try to outvote them.
  */
 async function writeDrained(stream: NodeJS.WriteStream, text: string): Promise<void> {
 	const { promise, resolve, reject } = Promise.withResolvers<void>();
