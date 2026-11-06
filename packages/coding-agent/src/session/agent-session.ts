@@ -228,6 +228,7 @@ import { type AgentRef, AgentRegistry, type AgentRegistryApi } from "../registry
 import { cfgSecretsEnabled } from "../secrets/settings";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
+import type { SupermemorySessionState } from "../supermemory/state";
 import { toolReadsSkillUris } from "../system-prompt";
 import {
 	AUTO_THINKING,
@@ -1491,6 +1492,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** {@link #branchPromptCacheObservation}'s fold of the current branch view. */
 	#branchPromptCacheScan: BranchPromptCacheScan | undefined;
 	#hindsightSessionState: HindsightSessionState | undefined = undefined;
+	#supermemorySessionState: SupermemorySessionState | undefined = undefined;
 	readonly #memory: SessionMemory;
 	readonly rawSseDebugBuffer: RawSseDebugBuffer;
 
@@ -2450,6 +2452,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			setHindsightSessionState: state => this.setHindsightSessionState(state),
 			getMnemopiSessionState: () => this.getMnemopiSessionState(),
 			takeMnemopiSessionState: () => setMnemopiSessionState(this, undefined),
+			getSupermemorySessionState: () => this.getSupermemorySessionState(),
+			setSupermemorySessionState: state => this.setSupermemorySessionState(state),
 			setBaseSystemPrompt: prompt => {
 				this.#tools.setBaseSystemPrompt(prompt);
 				this.agent.setSystemPrompt(prompt);
@@ -3493,6 +3497,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	getMnemopiSessionState(): MnemopiSessionState | undefined {
 		return getMnemopiSessionState(this);
+	}
+
+	getSupermemorySessionState(): SupermemorySessionState | undefined {
+		return this.#supermemorySessionState;
+	}
+
+	setSupermemorySessionState(state: SupermemorySessionState | undefined): SupermemorySessionState | undefined {
+		const previous = this.#supermemorySessionState;
+		this.#supermemorySessionState = state;
+		return previous;
 	}
 
 	/** TTSR manager for time-traveling stream rules */
@@ -6819,6 +6833,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 		const hindsightState = this.getHindsightSessionState();
 		const mnemopiState = setMnemopiSessionState(this, undefined);
+		const supermemoryState = this.setSupermemorySessionState(undefined);
 		// Bound the wait for a just-fired sharpshooter extraction before dropping
 		// its subscriptions, so print-mode exits don't cut queued-delta writes.
 		const sharpshooterFlushed = flushSharpshooterExtraction(this, options.mnemopiConsolidateTimeoutMs);
@@ -6837,6 +6852,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#disconnectOwnedMcp(),
 			advisorRecorderClosed,
 			hindsightState?.flushRetainQueue() ?? Promise.resolve(),
+			supermemoryState?.dispose() ?? Promise.resolve(),
 			this.#disposeMnemopi(mnemopiState, options.mnemopiConsolidateTimeoutMs),
 			sharpshooterFlushed,
 		]);

@@ -25,7 +25,7 @@
 ## Registration / Visibility
 
 - Tool metadata: `strict = true`, `loadMode = "discoverable"`. Approval is dynamic: a call with any `scope: "global"` item has `approval = "write"`, because the write reaches every project's recall; otherwise `approval = "read"`, even though successful calls enqueue or perform memory writes.
-- The tool is registered only for `memory.backend = "hindsight"` or `"mnemopi"`; it is absent for `"off"` and `"local"`. Hindsight additionally requires a non-empty configured API URL (`isHindsightConfigured(loadHindsightConfig(...))`).
+- The tool is registered only for `memory.backend = "hindsight"`, `"mnemopi"`, or `"supermemory"`; it is absent for `"off"` and `"local"`. Hindsight additionally requires a non-empty configured API URL (`isHindsightConfigured(loadHindsightConfig(...))`); Supermemory requires an API key and an accepted base URL (`isSupermemoryConfigured(loadSupermemoryConfig(...))`).
 - In unrestricted sessions with an explicit tool list, registration auto-includes the shared `recall`/`retain`/`reflect` set for either supported backend. Restricted lists are not widened.
 - In an ordinary `tools.xdev` session, discoverable built-ins may be presented as `xd://retain`; an explicitly requested tool remains top-level.
 - Execution returns one final result and has no progress callback or cancellation parameter.
@@ -90,6 +90,13 @@ Mnemopi:
    - persisted Hindsight memories are cross-session server-side bank data;
    - persisted Mnemopi memories are local SQLite data;
    - subagents alias parent memory state for both supported backends.
+
+### Supermemory
+
+- Reads `session.getSupermemorySessionState()`; throws `Supermemory backend is not initialised for this session.` when it is missing. `scope` is never offered.
+- Each item is stored immediately as one `POST /v3/documents` in the session container (secret-redacted, `source: "coding-agent-retain"`, optional `context`); the result says `N memories stored.`.
+- Items are written in order; a failure throws `Supermemory did not store item i of n: <reason>. k earlier item(s) were stored.` and later items are not attempted.
+- Subagents write to the same container. See [Supermemory remote backend](../memory.md#supermemory-remote-backend).
 
 ## Side Effects
 

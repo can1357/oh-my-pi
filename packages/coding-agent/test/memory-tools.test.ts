@@ -239,6 +239,55 @@ describe("Hindsight tool factories", () => {
 	});
 });
 
+describe("Supermemory retain tool", () => {
+	it("stops at the first failed item and reports what was stored", async () => {
+		const save = vi
+			.fn()
+			.mockResolvedValueOnce({ id: "d1", status: "queued" })
+			.mockRejectedValueOnce(new Error("Supermemory request failed with HTTP 500."));
+		const session = makeSession(
+			Settings.isolated({
+				"memory.backend": "supermemory",
+				"supermemory.apiKey": "sm-synthetic-key",
+				"supermemory.baseUrl": "http://127.0.0.1:1",
+			}),
+		);
+		session.getSupermemorySessionState = () => ({ save }) as never;
+		const tool = new MemoryRetainTool(session);
+		await expect(
+			tool.execute("call", { items: [{ content: "first" }, { content: "second" }, { content: "third" }] }),
+		).rejects.toThrow(
+			"Supermemory did not store item 2 of 3: Supermemory request failed with HTTP 500.. 1 earlier item(s) were stored.",
+		);
+		expect(save).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe("Supermemory tool factories", () => {
+	it("offers recall/retain but never reflect or memory_edit, and only once configured", () => {
+		const configured = makeSession(
+			Settings.isolated({
+				"memory.backend": "supermemory",
+				"supermemory.apiKey": "sm-synthetic-key",
+				"supermemory.baseUrl": "http://127.0.0.1:1",
+			}),
+		);
+		expect(MemoryRetainTool.createIf(configured)).toBeInstanceOf(MemoryRetainTool);
+		expect(MemoryRecallTool.createIf(configured)).toBeInstanceOf(MemoryRecallTool);
+		expect(MemoryReflectTool.createIf(configured)).toBeNull();
+		expect(MemoryEditTool.createIf(configured)).toBeNull();
+
+		const insecure = makeSession(
+			Settings.isolated({
+				"memory.backend": "supermemory",
+				"supermemory.apiKey": "sm-synthetic-key",
+				"supermemory.baseUrl": "http://sm.test",
+			}),
+		);
+		expect(MemoryRecallTool.createIf(insecure)).toBeNull();
+	});
+});
+
 describe("Mnemopi tool factories", () => {
 	beforeEach(() => {
 		resetSettingsForTest();

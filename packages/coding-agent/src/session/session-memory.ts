@@ -10,11 +10,12 @@ import { resolveMemoryBackend } from "../memory-backend/resolve";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
+import type { SupermemorySessionState } from "../supermemory/state";
 
 import { cfgMemoryBackend } from "../memory-backend/settings";
 
 /** Id prefixes of the memory backends' own settings; their live edits reconfigure the active backend. */
-const MEMORY_BACKEND_SETTING_PREFIXES: readonly string[] = ["hindsight.", "mnemopi.", "sharpshooter."];
+const MEMORY_BACKEND_SETTING_PREFIXES: readonly string[] = ["hindsight.", "mnemopi.", "sharpshooter.", "supermemory."];
 
 let memorySettings: Derived<Record<string, unknown>> | undefined;
 
@@ -50,6 +51,8 @@ export interface SessionMemoryHost {
 	setHindsightSessionState(state: HindsightSessionState | undefined): void;
 	getMnemopiSessionState(): MnemopiSessionState | undefined;
 	takeMnemopiSessionState(): MnemopiSessionState | undefined;
+	getSupermemorySessionState(): SupermemorySessionState | undefined;
+	setSupermemorySessionState(state: SupermemorySessionState | undefined): void;
 	setBaseSystemPrompt(prompt: string[]): void;
 	refreshBaseSystemPrompt(): Promise<void>;
 	replaceMemoryTools(tools: AgentTool[]): Promise<void>;
@@ -226,16 +229,25 @@ export class SessionMemory {
 		return true;
 	}
 
+	#resetSupermemoryConversationTrackingIfSupermemory(): boolean {
+		if (cfgMemoryBackend.get(this.#host.settings) !== "supermemory") return false;
+		const state = this.#host.getSupermemorySessionState();
+		if (!state?.automatic) return false;
+		state.resetConversationTracking();
+		return true;
+	}
+
 	/** Resets transcript-scoped memory counters and removes a promoted prompt. */
 	async resetContextForNewTranscript(): Promise<void> {
 		const hadPromotedMemoryPrompt = this.#baseSystemPromptBeforeMemoryPromotion !== undefined;
 		const resetHindsight = this.#resetHindsightConversationTrackingIfHindsight();
 		const resetMnemopi = this.#resetMnemopiConversationTrackingIfMnemopi();
+		const resetSupermemory = this.#resetSupermemoryConversationTrackingIfSupermemory();
 		if (hadPromotedMemoryPrompt) {
 			this.#host.setBaseSystemPrompt(this.#baseSystemPromptBeforeMemoryPromotion!);
 			this.#baseSystemPromptBeforeMemoryPromotion = undefined;
 		}
-		if (resetHindsight || resetMnemopi || hadPromotedMemoryPrompt) {
+		if (resetHindsight || resetMnemopi || resetSupermemory || hadPromotedMemoryPrompt) {
 			await this.#host.refreshBaseSystemPrompt();
 		}
 	}
@@ -284,6 +296,12 @@ export class SessionMemory {
 			} catch (error) {
 				logger.warn("Memory lifecycle: Mnemopi dispose failed", { error: String(error) });
 			}
+		}
+
+		const supermemory = this.#host.getSupermemorySessionState();
+		if (supermemory) {
+			this.#host.setSupermemorySessionState(undefined);
+			await supermemory.dispose();
 		}
 	}
 

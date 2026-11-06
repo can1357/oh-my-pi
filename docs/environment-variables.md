@@ -547,6 +547,13 @@ Shell subprocess filtering is separate (`packages/utils/src/env.ts`): it strips 
 | `STENCIL_SPOTLIGHT_URL`      | Overrides `spotlight.url`, the Spotlight ranking endpoint (default `https://cloud.stencil.so/v1/spotlight`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `OMP_DAEMON_IDLE_GRACE_MS`   | Milliseconds a daemon broker waits after its last `omp` client disconnects before it shuts down and stops the non-detached daemons it supervises, such as services started with the bash tool's `name` (default `3000`). Read once when an `omp` process launches the broker, using the base-10 `parseInt` prefix (`5s` reads as `5`, `2.5` as `2`); `0` shuts the broker down as soon as the last client disconnects, and negative values or values without leading digits use the default                                                                                                                |
 
+### Supermemory memory backend
+
+| Variable               | Setting overridden     | Accepted value / built-in default                                                                       |
+| ---------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------- |
+| `SUPERMEMORY_API_KEY`  | `supermemory.apiKey`   | Non-empty API key; unset leaves the backend inert                                                       |
+| `SUPERMEMORY_BASE_URL` | `supermemory.baseUrl`  | `https:` URL, or `http:` on a loopback host; default `https://api.supermemory.ai`; other URLs are rejected |
+
 ### Hindsight memory backend
 
 Each supported environment variable overrides the corresponding `hindsight.*` setting, which in

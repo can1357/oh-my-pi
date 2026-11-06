@@ -1,6 +1,6 @@
 # Autonomous Memory
 
-omp supports five memory modes. Memory is disabled by default; select one backend via `/settings` or `config.yml`:
+omp supports six memory modes. Memory is disabled by default; select one backend via `/settings` or `config.yml`:
 
 | `memory.backend` | Storage and behavior                                                                               | Guide                                                   |
 | ---------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
@@ -8,6 +8,7 @@ omp supports five memory modes. Memory is disabled by default; select one backen
 | `local`          | Project-scoped summaries and lessons generated from persisted sessions                             | This page                                               |
 | `hindsight`      | Remote, bank-scoped Hindsight memory                                                               | [Hindsight](#hindsight-remote-backend)                  |
 | `mnemopi`        | Local Mnemopi SQLite memory                                                                        | [Mnemopi memory backend](./mnemosyne-memory-backend.md) |
+| `supermemory`    | Remote Supermemory memory, one opaque container per repository (or global)                         | [Supermemory](#supermemory-remote-backend)              |
 | `sharpshooter`   | Friction-gated project decision files (architecture/product/style), consolidated in the background | [Sharpshooter](#sharpshooter-backend)                   |
 
 Enable the local summary pipeline:
@@ -156,6 +157,30 @@ Tool-initiated `retain` and `learn` writes go through a durable outbox: each mem
 Recall is injected as background context, not instructions, and recalled memory is also available as extra context during compaction. The first-turn recall is stored in the session file, so resuming, switching to, or forking the session sends it unchanged instead of recalling again; a context reset, a different bank or tag filter, or a branch that edits the first prompt recalls afresh. Hindsight memories cannot be looked up by id, so changes to them since the recall are not reported. Mental models are still reloaded when a new process starts. Selecting Hindsight exposes `recall`, `retain`, and `reflect`; `memory_edit` is not available because upstream Hindsight memories are not edited through this backend.
 
 `/memory view`, `/memory stats`, `/memory diagnose`, and `/memory enqueue` operate through the active Hindsight state. `/memory clear` first drains pending retains, then clears only the local session state and recall cache. It **does not delete the server-side bank**; delete that bank with the Hindsight UI or API.
+
+## Supermemory remote backend
+
+Select `memory.backend: supermemory` and supply the API key through the environment (or `supermemory.apiKey`):
+
+```sh
+export SUPERMEMORY_API_KEY=sm_...
+# optional: SUPERMEMORY_BASE_URL=https://api.supermemory.ai
+```
+
+```yaml
+memory:
+   backend: supermemory
+supermemory:
+   scoping: per-project # or global
+```
+
+- **Scoping**: `per-project` (default) stores memories in `omp-project-<24 hex>`, a SHA-256 of the primary repository root (falling back to the cwd outside a repository), so subdirectories and linked worktrees share one container. `global` uses `omp-global`.
+- **Privacy**: Container tags never contain local paths; transcript text, prompts and retained items are sent as written (after secret redaction). The tag hashes the absolute primary checkout root, so a moved or re-cloned checkout, or another machine, starts a new container.
+- **Recall**: with `supermemory.autoRecall` (default on), the first turn of a transcript fetches the container profile and searches for the prompt (`supermemory.searchMode`, `supermemory.recallLimit`, `supermemory.threshold`). The escaped results are added to the system prompt as `<supermemory_profile>`/`<supermemory_recall>` and replayed unchanged on resume. The `recall` tool searches the same container.
+- **Retain**: with `supermemory.autoRetain` (default on), every `supermemory.retainEveryNTurns` (default 3) user turns the window is stored as one document with a stable `customId`, so retries update the window and later windows never overwrite earlier ones. Windows over 60,000 characters keep their newest part and record the truncation in metadata. `/memory enqueue` stores every turn not yet retained as one document right away; a resumed process restarts at the last complete-window boundary, so its next window may upsert over that document. Windows that failed, or that the 2 s shutdown flush cut off, are not retried. `retain` and `learn` store items directly. Subagents can use the tools but never auto-recall or auto-retain.
+- **Base URL**: must be a plain `https:` origin, or `http:` on `localhost`, `127.0.0.1` or `[::1]`, with no credentials, query or fragment; redirects are refused. Anything else leaves the backend inert.
+- **Clear**: `/memory clear` waits for pending writes and drops the cached recall; the backend stays active. Server-side memories are untouched; delete them from the Supermemory console.
+- `reflect` and `memory_edit` are not available with this backend.
 
 ## Sharpshooter backend
 

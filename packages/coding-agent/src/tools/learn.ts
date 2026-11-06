@@ -5,6 +5,7 @@ import { sanitizeSkillName, writeManagedSkill } from "../autolearn/managed-skill
 import { isNameClaimedByAuthoredSkill } from "../extensibility/skills";
 import { isHindsightConfigured, loadHindsightConfig } from "../hindsight/config";
 import { localBackend } from "../memory-backend/local-backend";
+import { isSupermemoryConfigured, loadSupermemoryConfig } from "../supermemory/config";
 import learnDescription from "../prompts/tools/learn.md" with { type: "text" };
 import type { ToolSession } from ".";
 
@@ -71,8 +72,10 @@ export class LearnTool implements AgentTool<LearnSchema> {
 	static createIf(session: ToolSession): LearnTool | null {
 		if (!cfgAutolearnEnabled.get(session.settings)) return null;
 		const backend = cfgMemoryBackend.get(session.settings);
-		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "local") return null;
+		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "supermemory" && backend !== "local")
+			return null;
 		if (backend === "hindsight" && !isHindsightConfigured(loadHindsightConfig(session.settings))) return null;
+		if (backend === "supermemory" && !isSupermemoryConfigured(loadSupermemoryConfig(session.settings))) return null;
 		return new LearnTool(session);
 	}
 
@@ -116,6 +119,20 @@ export class LearnTool implements AgentTool<LearnSchema> {
 			} catch (error) {
 				const reason = error instanceof Error ? error.message : String(error);
 				throw new Error(`Mnemopi did not store the lesson: ${reason}`, { cause: error });
+			}
+		} else if (backend === "supermemory") {
+			const state = this.session.getSupermemorySessionState?.();
+			if (!state) {
+				throw new Error("Supermemory backend is not initialised for this session.");
+			}
+			try {
+				await state.save(params.memory, {
+					source: "coding-agent-learn",
+					...(params.context ? { context: params.context } : {}),
+				});
+			} catch (error) {
+				const reason = error instanceof Error ? error.message : String(error);
+				throw new Error(`Supermemory did not store the lesson: ${reason}`, { cause: error });
 			}
 		} else if (backend === "local") {
 			const result = await localBackend.save?.(

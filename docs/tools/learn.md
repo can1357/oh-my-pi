@@ -14,7 +14,7 @@
 
 - `loadMode = "essential"` and `strict = true`, so the tool remains top-level rather than mounting under `xd://`.
 - Approval is dynamic: a call containing `skill` or `scope: "global"`, or any call while `memory.backend = "local"`, has `approval = "write"`; any other memory-only Hindsight/Mnemopi call has `approval = "read"`.
-- Registration requires `autolearn.enabled = true` (default `false`) and `memory.backend` equal to `"hindsight"`, `"mnemopi"`, or `"local"`. Hindsight additionally requires a configured backend (`isHindsightConfigured(loadHindsightConfig(settings))`).
+- Registration requires `autolearn.enabled = true` (default `false`) and `memory.backend` equal to `"hindsight"`, `"mnemopi"`, `"supermemory"`, or `"local"`. Hindsight and Supermemory additionally require a configured backend (`isHindsightConfigured(...)` / `isSupermemoryConfigured(...)`); Supermemory stores the lesson as one document in the session container.
 - Enabled top-level sessions auto-include `learn` in an ordinary explicit tool list. Subagents do not discover or auto-receive it, but may use it when their requested-tools/frontmatter list explicitly includes it.
 - Execution is single-shot and emits no progress updates.
 
@@ -56,6 +56,12 @@
 - Lesson plus managed skill create/update for repeatable procedures worth codifying as `SKILL.md`.
 - Backend-specific persistence: queued Hindsight, scoped Mnemopi SQLite, or project-scoped local `learned.md`.
 - `create` fails if the managed skill file exists; `update` fails if it does not. Same-name in-process mutations are serialized.
+
+### Supermemory
+
+- The lesson is stored immediately as one `POST /v3/documents` in the session container (secret-redacted, `source: "coding-agent-learn"`); `scope: "global"` is never offered.
+- Errors: `Supermemory backend is not initialised for this session.` without state; `Supermemory did not store the lesson: <reason>` on a failed write, before any skill is written.
+- See [Supermemory remote backend](../memory.md#supermemory-remote-backend).
 
 ## Side Effects
 

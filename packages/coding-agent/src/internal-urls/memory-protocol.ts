@@ -267,7 +267,9 @@ function fileBackedRootUnavailableError(backend: string | undefined): Error {
 			? " Use `recall`/`reflect` to search Mnemopi memories, or `read memory://<memory-id>` for a full row."
 			: backend === "hindsight"
 				? " Use `recall`/`reflect` to search Hindsight memories."
-				: "";
+				: backend === "supermemory"
+					? " Use `recall` to search Supermemory memories."
+					: "";
 	return new Error(
 		`File-backed memory artifacts only exist with memory.backend=local (active backend: ${backend}).${searchHint}`,
 	);

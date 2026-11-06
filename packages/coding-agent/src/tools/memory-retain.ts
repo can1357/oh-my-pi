@@ -4,6 +4,7 @@ import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { prompt, withLoopPhase } from "@oh-my-pi/pi-utils";
 import { isHindsightConfigured, loadHindsightConfig } from "../hindsight/config";
 import retainDescription from "../prompts/tools/retain.md" with { type: "text" };
+import { isSupermemoryConfigured, loadSupermemoryConfig } from "../supermemory/config";
 import type { ToolSession } from ".";
 
 import { isGlobalMemoryScopeAvailable } from "../memory-backend/global-scope";
@@ -56,13 +57,39 @@ export class MemoryRetainTool implements AgentTool<MemoryRetainSchema, MemoryRet
 
 	static createIf(session: ToolSession): MemoryRetainTool | null {
 		const backend = cfgMemoryBackend.get(session.settings);
-		if (backend !== "hindsight" && backend !== "mnemopi") return null;
+		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "supermemory") return null;
 		if (backend === "hindsight" && !isHindsightConfigured(loadHindsightConfig(session.settings))) return null;
+		if (backend === "supermemory" && !isSupermemoryConfigured(loadSupermemoryConfig(session.settings))) return null;
 		return new MemoryRetainTool(session);
 	}
 
 	async execute(toolCallId: string, params: MemoryRetainParams): Promise<AgentToolResult<MemoryRetainDetails>> {
 		const backend = cfgMemoryBackend.get(this.session.settings);
+		if (backend === "supermemory") {
+			const state = this.session.getSupermemorySessionState?.();
+			if (!state) {
+				throw new Error("Supermemory backend is not initialised for this session.");
+			}
+			for (const [index, item] of params.items.entries()) {
+				try {
+					await state.save(item.content, {
+						source: "coding-agent-retain",
+						...(item.context ? { context: item.context } : {}),
+					});
+				} catch (error) {
+					const reason = error instanceof Error ? error.message : String(error);
+					throw new Error(
+						`Supermemory did not store item ${index + 1} of ${params.items.length}: ${reason}. ${index} earlier item(s) were stored.`,
+						{ cause: error },
+					);
+				}
+			}
+			const count = params.items.length;
+			return {
+				content: [{ type: "text", text: `${count} ${count === 1 ? "memory" : "memories"} stored.` }],
+				details: { count },
+			};
+		}
 		if (backend === "mnemopi") {
 			const state = this.session.getMnemopiSessionState?.();
 			if (!state) {
