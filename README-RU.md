@@ -2,7 +2,7 @@
 
 **Форк [oh-my-pi](https://github.com/can1357/oh-my-pi): межтерминальная сеть агентов (A2A), chrome-mcp как базовый браузер, детерминированный workflow-оркестратор, защиты от шторма агентов.**
 
-- Репозиторий: [spgsroot/oh-my-pi](https://github.com/spgsroot/oh-my-pi), ветка `main` = зеркало upstream + фичи
+- Репозиторий: [spgsroot/oh-my-pi-team-agents](https://github.com/spgsroot/oh-my-pi-team-agents), ветка `main` = зеркало upstream + фичи
 - Базовая версия upstream: 18.16+ (main `96e4d8eb`)
 - [English version](./README-EN.md) · [Полное руководство по настройкам](./FORK-RU.md)
 

@@ -1,6 +1,6 @@
 # omp-fork: полное руководство по функциям и возможностям
 
-**Форк:** `spgsroot/oh-my-pi` (main `a1d33f5`), база — upstream `can1357/oh-my-pi` 18.16+
+**Форк:** `spgsroot/oh-my-pi-team-agents` (main `a1d33f5`), база — upstream `can1357/oh-my-pi` 18.16+
 **Установка на этой машине:** команда `omp` указывает на форк-бинарник
 (`~/.bun/bin/omp → ~/.local/lib/omp-fork/omp-launcher.sh → ~/.local/lib/omp-fork/omp`).
 Профиль — штатный `~/.omp` (ваши модели, skills, MCP — всё как было).

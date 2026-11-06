@@ -2,7 +2,7 @@
 
 **A fork of [oh-my-pi](https://github.com/can1357/oh-my-pi): cross-terminal agent networking (A2A), chrome-mcp as the base browser, a deterministic workflow orchestrator, agent-storm guards.**
 
-- Repository: [spgsroot/oh-my-pi](https://github.com/spgsroot/oh-my-pi), branch `main` = upstream mirror + features
+- Repository: [spgsroot/oh-my-pi-team-agents](https://github.com/spgsroot/oh-my-pi-team-agents), branch `main` = upstream mirror + features
 - Upstream base: 18.16+ (main `96e4d8eb`)
 - [Русская версия](./README-RU.md) · [Full settings guide (RU)](./FORK-RU.md)
 
