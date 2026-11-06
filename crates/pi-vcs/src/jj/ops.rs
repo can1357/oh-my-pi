@@ -1338,7 +1338,9 @@ mod tests {
 	/// says so, as the other CLI-dependent tests here do: CI installs no `jj`
 	/// today, so failing instead would redden every job without covering
 	/// anything. Until CI provisions the official `jj`, treat this as a local
-	/// regression check and read the skip line rather than the pass.
+	/// regression check and read the skip line rather than the pass — nextest
+	/// captures a passing test's stderr, so the line needs
+	/// `--success-output immediate` to appear at all.
 	#[test]
 	fn reading_over_divergent_op_heads_keeps_colocated_workspace_working_copy() {
 		if !jj_available() {
