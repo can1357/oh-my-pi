@@ -43,6 +43,12 @@ unmergeable, because upstream main deleted the vendored brush crates and rewrote
 Rebase each one onto live main, resolve the conflicts, re-run the shell suite and report.
 </file>`;
 
+/** A second launcher brief, for the operator who sends one while the first one's retry runs. */
+const ATTACHED_FOLLOW_UP = `<file name="/mnt/briefs/shellport-audit-2.md">
+Correction to the brief: #17858 is already merged, so drop it and take the remaining six. Report
+to the lead once the shell suite is green on each one.
+</file>`;
+
 /** A reply of at least DEFERRED_TITLE_MIN_WORDS (40) words, which is what arms the deferred retitle. */
 const AUDIT_REPLY =
 	"Starting on the ShellPortAudit lane. Seven pull requests need rebasing onto live main after the vendored brush crates were deleted, so each one's conflicts have to be resolved against the new builtins before the shell suite can run again. I will take them oldest first and report once the suite is green.";
@@ -212,6 +218,34 @@ describe("AgentSession titles a session whose operator message cannot be titled"
 
 		const titled = nextTitle(target);
 		firstRequest.resolve(createAssistantMessage("<title/>"));
+		await titled;
+
+		expect(target.sessionName).toBe("Rebase the ShellPortAudit pull requests");
+		expect(calls).toBe(2);
+	});
+
+	it("names the session from a brief that arrives while the previous retry is still running", async () => {
+		// The retry consumed its deferral when it started, so the follow-up brief
+		// arms one of its own; it is ready before the running request settles, and
+		// must wait for it rather than be spent on a request that cannot start.
+		const main = createMockModel({
+			responses: [{ content: [AUDIT_REPLY] }, { content: [AUDIT_REPLY] }],
+		});
+		const target = await createSession(main, [], { "title.generator": "tiny" });
+		const firstRetry = Promise.withResolvers<ai.AssistantMessage>();
+		let calls = 0;
+		vi.spyOn(ai, "completeSimple").mockImplementation(() => {
+			calls++;
+			if (calls === 1) return firstRetry.promise;
+			return Promise.resolve(createAssistantMessage("<title>Rebase the ShellPortAudit pull requests</title>"));
+		});
+
+		await target.prompt(ATTACHED_BRIEF);
+		expect(calls).toBe(1);
+		await target.prompt(ATTACHED_FOLLOW_UP);
+
+		const titled = nextTitle(target);
+		firstRetry.resolve(createAssistantMessage("<title/>"));
 		await titled;
 
 		expect(target.sessionName).toBe("Rebase the ShellPortAudit pull requests");

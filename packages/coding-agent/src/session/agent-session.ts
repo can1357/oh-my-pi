@@ -1173,7 +1173,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *  Once the operator's message has been declined — by the title model (too
 	 *  ambiguous, e.g. a pasted image plus "help"), or before any request by the
 	 *  deterministic pre-filter in {@link #noteTitleInput} (a greeting, or a
-	 *  request that is all attachment, code or markup) — AND the assistant has
+	 *  request that is all attachment or markup) — AND the assistant has
 	 *  replied, the title is regenerated once from the recent
 	 *  user/assistant/thinking turns. At most one such request per operator
 	 *  message: no assistant turn ever arms it. */
@@ -11234,12 +11234,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * alone never gets one — it stays unnamed for its whole life. Arming it
 	 * instead retitles once from the assistant's own reading of the task, exactly
 	 * as an attachment-only request already does ({@link #titleWithTitleModel}).
-	 *
-	 * It only ever arms a retry this session does not already have. A declined
-	 * message that replaced a live deferral would drop the half of it the
-	 * assistant had already satisfied, and the retry it replaced it with cannot
-	 * run while that earlier request is still in flight — so a "hm" typed during
-	 * a title request left the session unnamed where it had been named before.
+	 * It never replaces a retry this session already has: a declined message that
+	 * overwrote a live deferral would drop the half of it the assistant had
+	 * already satisfied, and a "hm" typed during a title request then left the
+	 * session unnamed where it had been named before.
 	 */
 	#noteTitleInput(message: AgentMessage): void {
 		if (!this.#autoTitle || this.sessionName || $env.PI_NO_TITLE) return;
@@ -11247,12 +11245,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (!text) return;
 		const sessionId = this.sessionManager.getSessionId();
 		if (isLowSignalTitleInput(text)) {
-			// An untried earlier message still owns the next request; it arms its own deferral.
-			if (this.#titleInput?.sessionId === sessionId && !this.#titleInput.tried) return;
-			// A deferral already armed, or a request still running, IS this session's one retry.
-			if (this.#deferredTitle?.sessionId === sessionId) return;
-			if (this.#titleGenerationInFlightFor === sessionId) return;
-			this.#deferredTitle = { sessionId, declined: true, replied: false, words: 0 };
+			if (this.#deferredTitle?.sessionId !== sessionId) {
+				this.#deferredTitle = { sessionId, declined: true, replied: false, words: 0 };
+			}
 			return;
 		}
 		this.#titleInput = { sessionId, text, replied: false, tried: false };
@@ -11450,8 +11445,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 		deferred[step] = true;
 		if (!deferred.declined || !deferred.replied) return;
+		// A request still running calls back here when it settles
+		// ({@link #afterTitleRequest}), so a ready deferral waits for it rather than
+		// being spent on a retry that cannot start — otherwise a brief that arrived
+		// while the previous retry ran loses the only try it had.
+		if (this.#titleGenerationInFlightFor === sessionId) return;
 		this.#deferredTitle = undefined;
-		if (this.#titleGenerationInFlightFor === sessionId || $env.PI_NO_TITLE) return;
+		if ($env.PI_NO_TITLE) return;
 		const context = this.#buildReplanTitleContext();
 		if (!context || isLowSignalTitleInput(context)) return;
 		this.#startAutoTitle(context, sessionId);
