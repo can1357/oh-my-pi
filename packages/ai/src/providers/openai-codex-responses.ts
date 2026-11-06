@@ -4203,13 +4203,11 @@ function createCodexHeaders(
 	} else {
 		headers.delete(OPENAI_HEADERS.ATTESTATION);
 	}
-	const betaHeader =
-		transport === "websocket"
-			? OPENAI_HEADER_VALUES.BETA_RESPONSES_WEBSOCKETS_V2
-			: OPENAI_HEADER_VALUES.BETA_RESPONSES;
+	// codex-rs sends `OpenAI-Beta` only on the WebSocket handshake; HTTP carries none.
 	headers.delete(OPENAI_HEADERS.BETA);
-	headers.delete("openai-beta");
-	headers.set(OPENAI_HEADERS.BETA, betaHeader);
+	if (transport === "websocket") {
+		headers.set(OPENAI_HEADERS.BETA, OPENAI_HEADER_VALUES.BETA_RESPONSES_WEBSOCKETS_V2);
+	}
 	headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
 	headers.set(OPENAI_HEADERS.VERSION, codexClientVersion);
 	headers.set("User-Agent", USER_AGENT);

@@ -67,7 +67,11 @@ function makeTempDir(prefix: string): string {
 
 /** Inert shared manager exposing the members a revived subagent reads: its tools and change feed. */
 function fakeMcpManager(getTools: () => Array<{ name: string; label: string }>): MCPManager {
-	return { getTools, addToolsChangedListener: () => () => {} } as unknown as MCPManager;
+	return {
+		getTools,
+		addToolsChangedListener: () => () => {},
+		openToolScope: () => {},
+	} as unknown as MCPManager;
 }
 
 function createRef(sessionFile: string): AgentRef {
