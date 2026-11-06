@@ -445,10 +445,12 @@ fn stat_win32(path: &Path, follow: bool) -> io::Result<FileInfo> {
 	} else {
 		std::fs::symlink_metadata(path)?
 	};
-	let attrs = meta.file_attributes();
-	let file_type = if attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+	let kind = meta.file_type();
+	// Non-name-surrogate reparse points (such as cloud placeholders) remain
+	// ordinary files or directories; the reparse attribute alone is not a link.
+	let file_type = if kind.is_symlink() {
 		FileType::Symlink
-	} else if attrs & FILE_ATTRIBUTE_DIRECTORY != 0 {
+	} else if kind.is_dir() {
 		FileType::Dir
 	} else {
 		FileType::File

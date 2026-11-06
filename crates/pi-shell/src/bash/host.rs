@@ -73,6 +73,15 @@ pub trait Host {
 	/// spawn's outcome and drops the future on a cancel or suspend before
 	/// it resolved; the host must not start the process before then.
 	fn spawn(&mut self, spec: SpawnSpec<'_>) -> SpawnFuture;
+	/// Cancel owned externals together, before the engine unwinds their frames.
+	/// Hosts that signal descendant trees can snapshot every root before sending
+	/// any signal. Failures are best-effort, as with cancellation of one
+	/// external.
+	fn cancel_externals(&mut self, sig: Signal, externals: &mut [&mut dyn ExtProc]) {
+		for external in externals {
+			let _ = external.signal(sig);
+		}
+	}
 	/// Whether a spawned process can open `path` (absolute) itself
 	/// ([`SpawnSpec::redirs`]). Asked when the open of a background job's
 	/// lone external's redirection would wait (a FIFO without its other
@@ -607,6 +616,11 @@ pub trait ExtProc: Send {
 	}
 	/// Signal the process group (Unix) or Job Object (Windows).
 	fn signal(&mut self, sig: Signal) -> io::Result<()>;
+	/// Record a cancellation signal delivered by [`Host::cancel_externals`]
+	/// without sending it again. `targets` pins the tree captured before the
+	/// signal; termination bookkeeping retains it through escalation.
+	/// Decorators must forward both arguments.
+	fn signal_delivered(&mut self, _sig: Signal, _targets: crate::proctree::TerminationTargets) {}
 	/// Stop the process group (job pause).
 	fn stop(&mut self) -> io::Result<()>;
 	/// Continue after [`ExtProc::stop`].

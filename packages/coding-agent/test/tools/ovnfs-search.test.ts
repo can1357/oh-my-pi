@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { FileType, type GlobMatch } from "@oh-my-pi/pi-natives";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { callSocket } from "../../src/ovnfs/client";
 import { glob, grep } from "../../src/ovnfs/search";
 
 function frame(value: object): Buffer {
@@ -160,6 +161,59 @@ describe("ovnfs search fast path", () => {
 		await expect(search).rejects.toMatchObject({ name: "AbortError", message: "Aborted: Signal" });
 		await cancelled.promise;
 		expect(received).toEqual([{ id: expect.any(Number), grep: expect.any(Object) }, { cancel: received[0]?.id }]);
+	});
+
+	it("aborts a caller waiting for welcome without cancelling another caller", async () => {
+		const socket = path.join(root, "held.sock");
+		const accepted = Promise.withResolvers<net.Socket>();
+		const requests: Record<string, unknown>[] = [];
+		const sockets = new Set<net.Socket>();
+		const held = net.createServer(conn => {
+			sockets.add(conn);
+			accepted.resolve(conn);
+			let buffered = Buffer.alloc(0);
+			conn.on("data", (chunk: Buffer) => {
+				buffered = Buffer.concat([buffered, chunk]);
+				while (buffered.length >= 4 && buffered.length >= 4 + buffered.readUInt32LE(0)) {
+					const length = buffered.readUInt32LE(0);
+					const message = JSON.parse(buffered.subarray(4, 4 + length).toString("utf8"));
+					buffered = buffered.subarray(4 + length);
+					if (typeof message.id !== "number") continue;
+					requests.push(message);
+					conn.write(frame({ id: message.id, ok: message.glob }));
+				}
+			});
+		});
+		const listening = Promise.withResolvers<void>();
+		held.listen(socket, listening.resolve);
+		await listening.promise;
+		const controller = new AbortController();
+		const reason = new Error("cancel pending welcome");
+		const cancelled = callSocket(socket, "glob", { caller: "cancelled" }, controller.signal);
+		const remaining = callSocket(socket, "glob", { caller: "remaining" });
+		const settled = Promise.allSettled([cancelled, remaining]);
+		let rejected: unknown;
+		void cancelled.catch(error => {
+			rejected = error;
+		});
+		try {
+			const conn = await accepted.promise;
+			controller.abort(reason);
+			const turn = Promise.withResolvers<void>();
+			setImmediate(turn.resolve);
+			await turn.promise;
+			expect(rejected).toBe(reason);
+			conn.write(frame({ welcome: { version: 5, ops: ["glob"] } }));
+			await expect(remaining).resolves.toEqual({ caller: "remaining" });
+			expect(requests).toEqual([{ id: expect.any(Number), glob: { caller: "remaining" } }]);
+			expect(sockets.size).toBe(1);
+		} finally {
+			const closed = Promise.withResolvers<void>();
+			held.close(() => closed.resolve());
+			for (const conn of sockets) conn.destroy();
+			await closed.promise;
+			await settled;
+		}
 	});
 
 	it("falls back to native grep when the daemon reports an error", async () => {

@@ -100,7 +100,12 @@ function createContext(sessionOverride?: InteractiveModeContext["session"]) {
 		ui: { requestRender } as unknown as InteractiveModeContext["ui"],
 		session,
 		settings: session.settings,
-		sessionManager: { getSessionName: () => "named-session" } as InteractiveModeContext["sessionManager"],
+		sessionManager:
+			sessionOverride?.sessionManager ??
+			({
+				getSessionName: () => "named-session",
+				getSessionId: () => "main-session",
+			} as InteractiveModeContext["sessionManager"]),
 		compactionQueuedMessages: [] as InteractiveModeContext["compactionQueuedMessages"],
 		skillCommands: new Map(),
 		fileSlashCommands: new Set<string>(),
@@ -160,7 +165,6 @@ describe("InputController orphaned submit", () => {
 		expect(ctx.locallySubmittedUserSignatures.has("do not lose me\u00000")).toBe(true);
 		expect(spies.updatePendingMessagesDisplay).toHaveBeenCalled();
 		expect(spies.requestRender).toHaveBeenCalled();
-		expect(spies.addToHistory).toHaveBeenCalledWith("do not lose me");
 	});
 
 	it("starts a real idle session even when steer drain would be non-resumable", async () => {

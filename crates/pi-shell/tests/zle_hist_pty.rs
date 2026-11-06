@@ -59,6 +59,7 @@ fn screens(
 	drive: impl Fn(&mut Pty) -> io::Result<()>,
 ) -> io::Result<(String, Option<String>)> {
 	let run = |pty: &mut Pty| -> io::Result<()> {
+		pty.wait_raw(TIMEOUT)?;
 		pty.settle(QUIET, TIMEOUT)?;
 		keys(pty, ". ~/.zshrc\r")?;
 		// A clean screen for the case itself.

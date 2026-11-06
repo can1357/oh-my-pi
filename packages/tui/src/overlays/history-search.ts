@@ -9,14 +9,17 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "../index";
+import { logger } from "@oh-my-pi/pi-utils";
 import { theme } from "../theme/theme";
 import {
 	matchesAppInterrupt,
+	matchesSelectCancel,
 	matchesSelectDown,
 	matchesSelectPageDown,
 	matchesSelectPageUp,
 	matchesSelectUp,
 } from "../keybinding-matchers";
+
 /** Prompt history fields displayed in search results. */
 export interface HistorySearchEntry {
 	prompt: string;
@@ -30,6 +33,7 @@ export interface HistorySource {
 	search(query: string, limit: number): HistorySearchEntry[];
 	getRecent(limit: number): HistorySearchEntry[];
 }
+
 import { boundKeys, editorKeys, keyHint, rawKeyHint } from "../chrome/keybinding-hints";
 import { OverlayPanel } from "../chrome/overlay-box";
 import { contentRowWidth, renderScrollableList } from "../chrome/selector-helpers";
@@ -52,6 +56,7 @@ function nativeEntryKey(entry: HistorySearchEntry): string {
 
 interface HistoryNativeMemo {
 	picker: boolean;
+	title: string;
 	items: readonly HistorySearchEntry[];
 	selected: HistorySearchEntry | undefined;
 	query: string;
@@ -61,6 +66,11 @@ interface HistoryNativeMemo {
 
 /** Key of the `picker` child a dock-mounted history search describes (hoisted into `layer`). */
 const PICKER_KEY = "picker";
+
+/** A labeled source already bound to its scope by the host. */
+export interface HistorySearchScope extends HistorySource {
+	label: string;
+}
 
 /** Visible result rows; also the jump distance for PageUp/PageDown. */
 const MAX_VISIBLE = 10;
@@ -112,6 +122,8 @@ function historyPickerItem(entry: HistorySearchEntry, tokens: readonly string[])
 class HistoryResultsList implements Component {
 	#menu: MenuSelection<HistorySearchEntry>;
 	#tokens: string[] = [];
+	// Set before every render by the owning overlay.
+	#emptyMessage = "";
 	#maxVisible = MAX_VISIBLE;
 	/** Highlighted prompt text per entry, valid for one `(tokens, budget)` pair; reset on invalidate (theme). */
 	#highlightCache = new WeakMap<HistorySearchEntry, { tokens: string[]; budget: number; text: string }>();
@@ -120,8 +132,9 @@ class HistoryResultsList implements Component {
 		this.#menu = menu;
 	}
 
-	setTokens(tokens: string[]): void {
+	setQuery(tokens: string[], emptyMessage: string): void {
 		this.#tokens = tokens;
+		this.#emptyMessage = emptyMessage;
 	}
 
 	invalidate(): void {
@@ -143,8 +156,7 @@ class HistoryResultsList implements Component {
 		const items = this.#menu.visibleItems;
 
 		if (items.length === 0) {
-			const message = this.#tokens.length > 0 ? "No matching history" : "No history yet";
-			lines.push(theme.fg("muted", `  ${theme.status.info} ${message}`));
+			lines.push(theme.fg("muted", `  ${theme.status.info} ${this.#emptyMessage}`));
 			return lines;
 		}
 
@@ -193,24 +205,46 @@ class HistoryResultsList implements Component {
 }
 
 export class HistorySearchComponent extends OverlayPanel {
-	#historyStorage: HistorySource;
+	#scopes: readonly HistorySearchScope[];
+	#scopeIndex = 0;
 	#searchInput: Input;
 	#menu: MenuSelection<HistorySearchEntry>;
 	#resultsList: HistoryResultsList;
+	#hint: Text;
 	#onSelect: (prompt: string) => void;
 	#onCancel: () => void;
 	#resultLimit = 100;
 	#nativeHints: NativeNode | undefined;
 	#nativeMemo: HistoryNativeMemo | undefined;
 	#pickerItems: { items: readonly HistorySearchEntry[]; rows: readonly TspPickerItem[] } | undefined;
+	#emptyMessage = "";
 	/** Trimmed query the current results were fetched for; `undefined` before the first fetch. */
 	#resultsQuery: string | undefined;
 	#searchTimer: NodeJS.Timeout | undefined;
 	#onRequestRender?: () => void;
 
-	constructor(historyStorage: HistorySource, onSelect: (prompt: string) => void, onCancel: () => void) {
+	/** Accept a single source, or labeled host-bound sources ordered for Tab cycling. */
+	constructor(
+		source: HistorySource | readonly HistorySearchScope[],
+		onSelect: (prompt: string) => void,
+		onCancel: () => void,
+	) {
 		super("History", "omp.overlay.history");
-		this.#historyStorage = historyStorage;
+		let scopes: readonly HistorySearchScope[];
+		if (Array.isArray(source)) {
+			scopes = source;
+		} else {
+			const historySource = source as HistorySource;
+			scopes = [
+				{
+					label: "",
+					getRecent: limit => historySource.getRecent(limit),
+					search: (query, limit) => historySource.search(query, limit),
+				},
+			];
+		}
+		if (scopes.length === 0) throw new RangeError("History search requires at least one source");
+		this.#scopes = scopes;
 		this.#onSelect = prompt => {
 			this.#cancelPendingSearch();
 			onSelect(prompt);
@@ -237,19 +271,43 @@ export class HistorySearchComponent extends OverlayPanel {
 		};
 
 		this.#resultsList = new HistoryResultsList(this.#menu);
-
-		const dot = theme.fg("dim", theme.sep.dot);
-		const navigate = theme.fg("dim", editorKeys("tui.select.up", "tui.select.down")) + theme.fg("muted", " navigate");
-		const hint = [navigate, rawKeyHint("enter", "select"), keyHint("tui.select.cancel", "cancel")].join(dot);
+		this.#hint = new Text("", 0, 0);
 
 		this.addChild(new Spacer(1));
 		this.addChild(this.#searchInput);
 		this.addChild(new Spacer(1));
 		this.addChild(this.#resultsList);
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(hint, 0, 0));
+		this.addChild(this.#hint);
 		this.addChild(new Spacer(1));
 
+		this.#updateChrome();
+		this.#updateResults();
+	}
+
+	#scopeAt(index: number): HistorySearchScope {
+		const count = this.#scopes.length;
+		return this.#scopes[((index % count) + count) % count]!;
+	}
+
+	#updateChrome(): void {
+		this.#nativeHints = undefined;
+		const label = this.#scopeAt(this.#scopeIndex).label;
+		this.title = label ? `History (${label})` : "History";
+		const dot = theme.fg("dim", theme.sep.dot);
+		const navigate = theme.fg("dim", editorKeys("tui.select.up", "tui.select.down")) + theme.fg("muted", " navigate");
+		const hints = [navigate, rawKeyHint("enter", "select")];
+		// A one-scope ring cannot cycle, so advertising Tab would promise a no-op.
+		if (this.#scopes.length > 1) hints.push(rawKeyHint("tab", this.#scopeAt(this.#scopeIndex + 1).label));
+		hints.push(keyHint("tui.select.cancel", "cancel"));
+		this.#hint.setText(hints.join(dot));
+	}
+
+	#cycleScope(direction: 1 | -1): void {
+		if (this.#scopes.length < 2) return;
+		this.#scopeIndex =
+			(((this.#scopeIndex + direction) % this.#scopes.length) + this.#scopes.length) % this.#scopes.length;
+		this.#updateChrome();
 		this.#updateResults();
 	}
 
@@ -268,6 +326,16 @@ export class HistorySearchComponent extends OverlayPanel {
 	}
 
 	handleInput(keyData: string): void {
+		// Tab and Shift+Tab cycle the scope ring in opposite directions. The ring starts on
+		// the configured scope and wraps, so neither key is strictly "wider" than the other.
+		// Deliberately not `handleTabSwitchKey`: that helper also consumes Left/Right, which
+		// move the cursor inside the query field.
+		const forward = matchesKey(keyData, "tab");
+		if (forward || matchesKey(keyData, "shift+tab")) {
+			this.#cycleScope(forward ? 1 : -1);
+			return;
+		}
+
 		if (matchesSelectUp(keyData)) {
 			this.#flushPendingSearch();
 			this.#menu.move(-1, false);
@@ -313,7 +381,7 @@ export class HistorySearchComponent extends OverlayPanel {
 			return;
 		}
 
-		if (matchesAppInterrupt(keyData)) {
+		if (matchesAppInterrupt(keyData) || matchesSelectCancel(keyData)) {
 			this.#onCancel();
 			return;
 		}
@@ -340,6 +408,7 @@ export class HistorySearchComponent extends OverlayPanel {
 		if (
 			memo &&
 			memo.picker === usePicker &&
+			memo.title === this.title &&
 			memo.items === items &&
 			memo.selected === selected &&
 			memo.query === query &&
@@ -349,7 +418,7 @@ export class HistorySearchComponent extends OverlayPanel {
 		}
 		if (usePicker) {
 			const root = col([keyed(this.#describePicker(items, selected, query), PICKER_KEY)]);
-			this.#nativeMemo = { picker: true, items, selected, query, cursor, node: root };
+			this.#nativeMemo = { picker: true, title: this.title, items, selected, query, cursor, node: root };
 			return root;
 		}
 
@@ -369,7 +438,7 @@ export class HistorySearchComponent extends OverlayPanel {
 			{
 				selected: selected ? nativeEntryKey(selected) : null,
 				filter: query || undefined,
-				empty: query ? "No matching history" : "No history yet",
+				empty: this.#emptyMessage,
 				max: { lines: MAX_VISIBLE },
 				virtual: true,
 			},
@@ -379,10 +448,16 @@ export class HistorySearchComponent extends OverlayPanel {
 		this.#nativeHints ??= hintsRow([
 			actionHint(["tui.select.up", "tui.select.down"], "navigate"),
 			{ keys: ENTER_KEYS, label: "select" },
+			...(this.#scopes.length > 1
+				? [
+						{ keys: ["tab" as const], label: this.#scopeAt(this.#scopeIndex + 1).label },
+						{ keys: ["shift+tab" as const], label: this.#scopeAt(this.#scopeIndex - 1).label },
+					]
+				: []),
 			actionHint("tui.select.cancel", "cancel"),
 		]);
 		const root = overlayCard(this.nativeRole, this.title, [this.#searchInput, list, this.#nativeHints]);
-		this.#nativeMemo = { picker: false, items, selected, query, cursor, node: root };
+		this.#nativeMemo = { picker: false, title: this.title, items, selected, query, cursor, node: root };
 		return root;
 	}
 
@@ -409,9 +484,15 @@ export class HistorySearchComponent extends OverlayPanel {
 			columns: [{ id: "when", format: "time" }],
 			items: rows.rows,
 			selected: selected ? nativeEntryKey(selected) : null,
-			empty: "No history yet",
+			empty: this.#emptyMessage,
 			actions: [
 				pickerAction("insert", "Insert", "enter", { primary: true }),
+				...(this.#scopes.length > 1
+					? [
+							pickerAction("scope", this.#scopeAt(this.#scopeIndex + 1).label, "tab"),
+							pickerAction("scope-back", this.#scopeAt(this.#scopeIndex - 1).label, "shift+tab"),
+						]
+					: []),
 				pickerAction("close", "Close", boundKeys("app.interrupt", ["escape"])[0] ?? "escape", { end: true }),
 			],
 		});
@@ -431,6 +512,8 @@ export class HistorySearchComponent extends OverlayPanel {
 			if (ev.kind === "action") {
 				if (ev.act === "close") this.#onCancel();
 				else if (ev.act === "insert") this.handleInput("\r");
+				else if (ev.act === "scope") this.#cycleScope(1);
+				else if (ev.act === "scope-back") this.#cycleScope(-1);
 				else if (ev.act === "clear") {
 					this.#searchInput.setValue("");
 					this.#updateResults();
@@ -491,14 +574,31 @@ export class HistorySearchComponent extends OverlayPanel {
 	}
 
 	#updateResults(): void {
+		this.#nativeMemo = undefined;
+		this.#pickerItems = undefined;
 		this.#cancelPendingSearch();
 		const query = this.#searchInput.getValue().trim();
 		this.#resultsQuery = query;
-		const results = query
-			? this.#historyStorage.search(query, this.#resultLimit)
-			: this.#historyStorage.getRecent(this.#resultLimit);
+		const scope = this.#scopeAt(this.#scopeIndex);
+		// Source failures must not escape a keystroke handler; the next input retries.
+		let results: HistorySearchEntry[] = [];
+		try {
+			results = query ? scope.search(query, this.#resultLimit) : scope.getRecent(this.#resultLimit);
+		} catch (error) {
+			this.#resultsQuery = undefined;
+			logger.warn("History search read failed", { error: String(error) });
+		}
 		this.#menu.setItems(results);
 		this.#menu.moveToBoundary("first");
-		this.#resultsList.setTokens(query ? queryTokens(query) : []);
+		if (scope.label) {
+			const nextScope = this.#scopeAt(this.#scopeIndex + 1).label;
+			const widen = this.#scopes.length > 1 ? ` Press Tab for ${nextScope}.` : "";
+			this.#emptyMessage = query
+				? `No matching history in ${scope.label}.${widen}`
+				: `No history in ${scope.label}.${widen}`;
+		} else {
+			this.#emptyMessage = query ? "No matching history" : "No history yet";
+		}
+		this.#resultsList.setQuery(query ? queryTokens(query) : [], this.#emptyMessage);
 	}
 }

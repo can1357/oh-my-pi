@@ -41,6 +41,7 @@ fn keys(pty: &mut Pty, text: &str) -> io::Result<()> {
 /// Run `drive` against both shells; assert the final screens match.
 fn same(drive: impl Fn(&mut Pty) -> io::Result<()>) {
 	let run = |pty: &mut Pty| -> io::Result<()> {
+		pty.wait_raw(TIMEOUT)?;
 		pty.settle(QUIET, TIMEOUT)?;
 		drive(pty)
 	};

@@ -517,12 +517,50 @@ describe("selector navigation keybindings", () => {
 		expect(list.getSearchQuery()).toBe("jira");
 	});
 
+	it("does not repaint a closed history search when selector cancel differs from interrupt", () => {
+		setKeybindings(KeybindingsManager.inMemory({ "app.interrupt": "ctrl+c", "tui.select.cancel": "escape" }));
+		vi.useFakeTimers();
+		try {
+			const entries = [{ prompt: "deploy release", created_at: 1 }];
+			let canceled = 0;
+			let renders = 0;
+			const selector = new HistorySearchComponent(
+				[
+					{
+						label: "folder",
+						getRecent: () => entries,
+						search: query => entries.filter(entry => entry.prompt.includes(query)),
+					},
+				],
+				() => {},
+				() => {
+					canceled++;
+					selector.dispose();
+				},
+			);
+			selector.setOnRequestRender(() => renders++);
+			selector.handleInput("d");
+			selector.handleInput("\x1b");
+			vi.advanceTimersByTime(150);
+			expect(canceled).toBe(1);
+			expect(renders).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("uses tui.select.down in history search", async () => {
 		setKeybindings(TEST_KEYBINDINGS);
 		const selected: string[] = [];
 		const storage = await createHistoryStorage(["old prompt", "middle prompt", "new prompt"]);
 		const selector = new HistorySearchComponent(
-			storage,
+			[
+				{
+					label: "all projects",
+					getRecent: limit => storage.getRecent(limit),
+					search: (query, limit) => storage.search(query, limit),
+				},
+			],
 			prompt => selected.push(prompt),
 			() => {},
 		);
@@ -538,7 +576,13 @@ describe("selector navigation keybindings", () => {
 		// Added oldest-first; getRecent returns newest-first, so index 0 is "p14", index 14 is "p0".
 		const storage = await createHistoryStorage(Array.from({ length: 15 }, (_, i) => `p${i}`));
 		const selector = new HistorySearchComponent(
-			storage,
+			[
+				{
+					label: "all projects",
+					getRecent: limit => storage.getRecent(limit),
+					search: (query, limit) => storage.search(query, limit),
+				},
+			],
 			prompt => selected.push(prompt),
 			() => {},
 		);

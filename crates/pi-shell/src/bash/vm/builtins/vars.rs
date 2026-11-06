@@ -1237,6 +1237,25 @@ pub fn define_function(
 		attrs,
 		file,
 	};
+	if mode.dialect() == crate::bash::ids::Dialect::Zsh {
+		match super::trap::func_defined(k, cx, vp, &f.name, super::trap::FunctionDefinition::Body) {
+			Ok(true) => {},
+			Ok(false) => {
+				vp.status = 1;
+				return Flow::Next;
+			},
+			Err(err) => {
+				k.fail(err);
+				return Flow::Discard(1);
+			},
+		}
+		if let Err(err) =
+			super::trap::set_function_disabled(&mut k.root, cx.store, vp, &f.name, false)
+		{
+			k.fail(err);
+			return Flow::Discard(1);
+		}
+	}
 	state::store_record(&mut k.root, cx.store, vp, KeyBuf::Func(f.name.clone()), Some(rec));
 	vp.status = 0;
 	Flow::Next

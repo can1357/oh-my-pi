@@ -565,8 +565,32 @@ describe("update-cli package manager commands", () => {
 		if (!miseBinary) throw new Error("mise binary unavailable");
 		const root = await makeTempDir();
 		const releases = [
-			{ tag_name: "v2.0.0", draft: false, prerelease: false, created_at: "2026-09-09T00:00:00Z", assets: [] },
-			{ tag_name: "v1.0.0", draft: false, prerelease: false, created_at: "2020-01-01T00:00:00Z", assets: [] },
+			{
+				tag_name: "v2.0.0",
+				draft: false,
+				prerelease: false,
+				created_at: "2026-09-09T00:00:00Z",
+				assets: [
+					{
+						name: "omp-linux-x64",
+						url: "https://api.github.com/repos/can1357/oh-my-pi/releases/assets/2000",
+						browser_download_url: "https://github.com/can1357/oh-my-pi/releases/download/v2.0.0/omp-linux-x64",
+					},
+				],
+			},
+			{
+				tag_name: "v1.0.0",
+				draft: false,
+				prerelease: false,
+				created_at: "2020-01-01T00:00:00Z",
+				assets: [
+					{
+						name: "omp-linux-x64",
+						url: "https://api.github.com/repos/can1357/oh-my-pi/releases/assets/1000",
+						browser_download_url: "https://github.com/can1357/oh-my-pi/releases/download/v1.0.0/omp-linux-x64",
+					},
+				],
+			},
 		];
 		const server = Bun.serve({
 			hostname: "127.0.0.1",
@@ -613,6 +637,7 @@ describe("update-cli package manager commands", () => {
 				return stdout + stderr;
 			};
 
+			await run(["trust", path.join(root, "mise.toml")]);
 			const blocked = await run(["upgrade", "github:can1357/oh-my-pi", "--bump", "--dry-run"]);
 			expect(blocked).not.toContain("Would install github:can1357/oh-my-pi@2.0.0");
 

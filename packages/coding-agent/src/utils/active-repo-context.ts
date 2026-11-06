@@ -23,13 +23,30 @@ function buildContext(cwd: string, repoRoot: string): ActiveRepoContext {
 	};
 }
 
+/**
+ * Primary root of the repository containing `dir`, or `null` when `dir` is not inside a
+ * repository or cannot be inspected (empty path, unreadable `.git`). Never throws.
+ *
+ * Distinct from {@link primaryRootOrCwd}: a directory that *is* a repository root and a
+ * directory outside every repository both fall back to `dir` there, so callers that must
+ * tell "no repository" from "repository root" use this one.
+ */
+export function repoRootOrNull(dir: string): string | null {
+	try {
+		return vcs.repo(dir)?.primaryRoot() ?? null;
+	} catch {
+		return null;
+	}
+}
+
+/** {@link repoRootOrNull}, falling back to `dir` itself for directories outside a repository. */
+export function primaryRootOrCwd(dir: string): string {
+	return repoRootOrNull(dir) ?? dir;
+}
+
 /** Whether `cwd` already sits inside a VCS repository. */
 function insideRepository(cwd: string): boolean {
-	try {
-		return vcs.repo(cwd) !== null;
-	} catch {
-		return false;
-	}
+	return repoRootOrNull(cwd) !== null;
 }
 
 async function readDirectChildren(cwd: string): Promise<fs.Dirent[]> {

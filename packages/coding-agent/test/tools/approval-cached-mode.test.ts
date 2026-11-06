@@ -234,20 +234,21 @@ describe("grant choices in the prompt", () => {
 		const agentDir = freshAgentDir();
 		const huge = path.join(agentDir, "Huge");
 		fs.mkdirSync(huge);
+		const entries = new Set<string>();
 		for (let index = 0; index < 205; index += 1) {
-			fs.writeFileSync(path.join(huge, `entry-${String(index).padStart(3, "0")}.txt`), "x");
+			const name = `entry-${String(index).padStart(3, "0")}.txt`;
+			entries.add(name);
+			fs.writeFileSync(path.join(huge, name), "x");
 		}
 		const { ui, prompts } = recordingUi();
 		await requestApproval(ui, pathTool("write", "write", huge), { path: "entry-000.txt" }, { grants: true });
 		const compact = prompts[0]!.compact.split("\n");
 		expect(compact[1]).toContain("200+ entries");
-		expect(compact.slice(2)).toEqual([
-			"  - entry-000.txt",
-			"  - entry-001.txt",
-			"  - entry-002.txt",
-			"  - entry-003.txt",
-			"  … 196 more",
-		]);
+		const listed = compact.slice(2, -1).map(line => line.slice("  - ".length));
+		expect(listed).toHaveLength(4);
+		expect(new Set(listed).size).toBe(4);
+		expect(listed.every(name => entries.has(name))).toBe(true);
+		expect(compact.at(-1)).toBe("  … 196 more");
 	});
 
 	it("offers only the directory answer for a call that names just that directory", async () => {

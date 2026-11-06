@@ -158,6 +158,16 @@ impl Lifecycle {
 		}
 	}
 
+	/// Cancellation still owns the outer external even when a relay already
+	/// collected this process's exit while its output remained blocked.
+	/// The engine unwinds it next: revoke collection so drop sweeps its scope,
+	/// without repeating the signal already delivered by the cancellation wave.
+	#[cfg(unix)]
+	pub const fn cancellation_delivered(&mut self, sig: Signal) {
+		self.collected = false;
+		self.signalled(sig);
+	}
+
 	/// Schedule KILL at `at` (keeps an earlier deadline); no-op once exited
 	/// or killed.
 	pub fn schedule_kill(&mut self, at: Instant) {
@@ -237,18 +247,31 @@ impl Lifecycle {
 
 /// The lifecycle plus the input-pump cancellation shared by an `ExtProc`
 /// (whose `poll_wait` polls the pumps) and its waiter.
-#[derive(Debug)]
 pub struct Tracker {
-	life:   Mutex<Lifecycle>,
-	cancel: AtomicBool,
+	life:         Mutex<Lifecycle>,
+	cancel:       AtomicBool,
+	/// Captured before cancellation can orphan descendants outside the scope.
+	#[cfg(unix)]
+	cancellation: Mutex<Option<crate::proctree::TerminationTargets>>,
+}
+
+impl std::fmt::Debug for Tracker {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Tracker")
+			.field("life", &self.life)
+			.field("cancel", &self.cancel)
+			.finish_non_exhaustive()
+	}
 }
 
 impl Tracker {
 	/// Tracker of a process with `draining` output pumps.
 	pub fn new(draining: usize) -> Arc<Self> {
 		Arc::new(Self {
-			life:   Mutex::new(Lifecycle::new(draining)),
+			life: Mutex::new(Lifecycle::new(draining)),
 			cancel: AtomicBool::new(false),
+			#[cfg(unix)]
+			cancellation: Mutex::new(None),
 		})
 	}
 
@@ -257,6 +280,34 @@ impl Tracker {
 	/// exit is recorded under this lock.
 	pub fn lock(&self) -> MutexGuard<'_, Lifecycle> {
 		self.life.lock()
+	}
+
+	/// Retain the pre-signal snapshot until the existing escalation worker runs.
+	#[cfg(unix)]
+	pub(crate) fn cancellation_delivered(
+		&self,
+		sig: Signal,
+		targets: crate::proctree::TerminationTargets,
+	) {
+		let mut retained = self.cancellation.lock();
+		if let Some(retained) = retained.as_mut() {
+			retained.append(targets);
+		} else {
+			*retained = Some(targets);
+		}
+		drop(retained);
+		self.life.lock().cancellation_delivered(sig);
+	}
+
+	/// Refresh retained orphan subtrees before the hard wave, then release pins.
+	#[cfg(unix)]
+	pub(crate) fn kill_cancellation(&self) {
+		let targets = self.cancellation.lock().take();
+		if let Some(targets) = targets
+			&& !targets.is_empty()
+		{
+			targets.signal(crate::proctree::KILL_SIGNAL);
+		}
 	}
 
 	/// [`Lifecycle::poll`].
@@ -390,6 +441,32 @@ mod tests {
 			sweep_at: now + grace,
 		});
 		assert!(!life.take_kill(now + grace), "the exited process itself is never KILLed");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn cancellation_of_a_collected_relay_exit_sweeps_without_repeating_term() {
+		let now = Instant::now();
+		let grace = Duration::from_secs(2);
+		let (_, w) = waker();
+		let mut life = Lifecycle::new(0);
+		life.exited(ExitStatus::Exited(0));
+		assert_eq!(life.poll(&Context::from_waker(&w)), Poll::Ready(ExitStatus::Exited(0)));
+		life.cancellation_delivered(Signal::Term);
+		assert_eq!(life.abandon(now, grace), Abandon::Orphaned {
+			term:     false,
+			sweep_at: now + grace,
+		});
+	}
+
+	#[test]
+	fn ordinary_term_after_a_collected_exit_does_not_schedule_an_orphan_sweep() {
+		let (_, w) = waker();
+		let mut life = Lifecycle::new(0);
+		life.exited(ExitStatus::Exited(0));
+		assert_eq!(life.poll(&Context::from_waker(&w)), Poll::Ready(ExitStatus::Exited(0)));
+		life.signalled(Signal::Term);
+		assert_eq!(life.abandon(Instant::now(), Duration::from_secs(2)), Abandon::Exited);
 	}
 
 	#[test]

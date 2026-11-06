@@ -271,6 +271,20 @@ Related APIs:
 - `sendCustomMessage({ customType, content, ... }, { deliverAs?, triggerTurn? })`
 - `abort()`
 
+### Admission and queued-message ownership
+
+`prompt()` and `promptCustomMessage()` accept `onPromptAdmitted`. It runs synchronously when an idle prompt enters its own turn setup, before preflight/provider dispatch; when streaming input enters its queue, after that input's image preprocessing; or before an extension command handler runs. Admission does not guarantee a model call or successful completion. Observe the returned promise for failures.
+
+`prompt()` also accepts a synchronous `onPromptDropped(prompt)` callback when its caller owns recovery of unsent input. It replaces the session's `setPromptDropped` host hook for that submission and receives the original typed text, images, and optional refusal reason. Without an owner, the host hook keeps its existing behavior. The notification does not await asynchronous recovery: wait for the prompt promise to settle before recovery that depends on session transitions or admitted submissions. Drop notifications still precede any `PromptDroppedError` rejection requested with `throwOnDrop`.
+
+`onPromptQueued(queued)` reports the exact `AgentMessage` objects pushed onto a steering or follow-up queue, immediately before `onPromptAdmitted`. It includes that prompt's hidden companions in queue order, followed by the prompt itself. It is available on `prompt()`, `promptCustomMessage()`, `steer()`, and `followUp()`. It does not run for a prompt that starts its own turn or for aside delivery.
+
+To roll back only work a caller queued, retain those object groups and pass them to `session.dropQueuedMessages(messages)`. Removal uses object identity across the steering and follow-up queues; messages already delivered or removed are skipped. Other producers' messages, even messages with identical text, remain queued. Include the complete reported group so hidden notices do not survive without their prompt. Admission and queue callbacks are ownership boundaries, not remote collaboration acknowledgements.
+
+Externally replayed input can pass `conversationOrigin: { sessionId, leafId }` to `prompt()`, `promptCustomMessage()`, `steer()`, or `followUp()`. Capture it with `conversationPosition(session.sessionManager)` from `session/conversation-position`. Origin-bound submissions wait for active session transitions after deferred loading and maintenance, and again before local effects and admission. A rolled-back transition can still admit valid original input; a committed different session or branch rejects with `ConversationChangedError` before publication/setup. Normal continuation from the captured branch remains valid. Ownership notifications remain synchronous.
+
+This optional provenance is not automatically inherited by extension hooks or other SDK calls. Do not attach an external replay's origin to a prompt awaited by that same transition's hook: waiting for its own transition would create a dependency cycle. Ordinary SDK calls without `conversationOrigin` keep their existing transition/reentrancy behavior.
+
 `deliverAs: "aside"` (both APIs) delivers at the next agent step boundary without interrupting the current tool batch, instead of steering (which skips remaining tools) or waiting for the run to finish. The one exception is a running interruptible `wait` or `vibe_wait`, which an aside ends so the message is not delayed behind it. When the session is idle both start a turn instead (in plan mode the custom message is folded into context without a turn).
 
 ## Idle maintenance

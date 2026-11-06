@@ -121,13 +121,14 @@ impl JobCtl {
 }
 
 /// zsh `sigmsg`: how a signal is named in job notices.
-pub const fn sigmsg(sig: Signal) -> &'static str {
+pub const fn sigmsg(sig: Signal, platform: Platform) -> &'static str {
 	match sig {
 		Signal::Hup => "hangup",
 		Signal::Int => "interrupt",
 		Signal::Quit => "quit",
 		Signal::Ill => "illegal hardware instruction",
 		Signal::Trap => "trace trap",
+		Signal::Abrt if matches!(platform, Platform::Linux) => "IOT instruction",
 		Signal::Abrt => "abort",
 		Signal::Bus => "bus error",
 		Signal::Fpe => "floating point exception",
@@ -150,6 +151,7 @@ pub const fn sigmsg(sig: Signal) -> &'static str {
 		Signal::Vtalrm => "virtual time alarm",
 		Signal::Prof => "profile signal",
 		Signal::Winch => "window size changed",
+		Signal::Io if matches!(platform, Platform::Linux) => "pollable event occurred",
 		Signal::Io => "i/o ready",
 		Signal::Sys => "invalid system call",
 		Signal::Emt => "EMT instruction",
@@ -192,10 +194,10 @@ pub fn format_job(vp: &Vproc, number: u32, how: JobLine, platform: Platform) -> 
 	let word: String = match job.state {
 		JobState::Running if how.conted => "continued".into(),
 		JobState::Running => "running".into(),
-		JobState::Stopped(sig) => sigmsg(sig).into(),
+		JobState::Stopped(sig) => sigmsg(sig, platform).into(),
 		JobState::Done(0) => "done".into(),
 		JobState::Done(status) => match death_signal(status, platform) {
-			Some(sig) => sigmsg(sig).into(),
+			Some(sig) => sigmsg(sig, platform).into(),
 			None => format!("exit {status:<4}"),
 		},
 	};
@@ -434,7 +436,7 @@ fn interrupt(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
 	if vp.frames.is_empty() {
 		return;
 	}
-	exec::unwind(&mut k.root, cx.store, vp, 1);
+	exec::unwind(k, cx, vp, 1);
 	exec::clear_scratch(&mut k.root, cx.store, vp);
 	let f = &mut vp.frames[0];
 	let saves: Vec<Vec<Saved>> = std::mem::take(&mut f.redirs);
@@ -780,7 +782,7 @@ pub fn suspend(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, sig: Signal) -> 
 			undo_scratch(k, cx, vp, sc);
 			live_children(sc, &mut children);
 		}
-		exec::pop_frame(&mut k.root, cx.store, vp);
+		exec::pop_frame(k, cx, vp);
 		moved.push(frame);
 	}
 	moved.reverse();
@@ -957,7 +959,8 @@ pub fn fg_done(
 		Some(Signal::Int) => notice(k, vp, b"\n"),
 		Some(Signal::Pipe) | None => {},
 		Some(sig) => {
-			let line = format!("zsh: {:<w$}", sigmsg(sig), w = sigmsg(sig).len().max(9) + 2);
+			let word = sigmsg(sig, k.engine.config().platform);
+			let line = format!("zsh: {word:<w$}", w = word.len().max(9) + 2);
 			let mut line = line.into_bytes();
 			line.extend_from_slice(text);
 			line.push(b'\n');

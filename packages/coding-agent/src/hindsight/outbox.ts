@@ -35,6 +35,8 @@ export interface OutboxEvent {
 	content: string;
 	context: string;
 	sessionId: string;
+	/** Input order when filesystem publication timestamps tie; absent in older events. */
+	itemIndex?: number;
 }
 
 export interface RetainCall {
@@ -80,10 +82,10 @@ type SendOutcome = "accepted" | "rejected" | { error: string };
  * `<agentDir>/hindsight-outbox/<destination>/`. A 2xx response deletes the event; it
  * means server acceptance, not completed extraction.
  *
- * Concurrency: a per-destination queue lock serializes capacity checks and
- * publication; a per-destination drain lease, released by the OS when its process
- * exits, lets exactly one holder send and delete events. Event files are never
- * rewritten, so writers and the drainer never contend for one file.
+ * Concurrency: a per-destination queue lock serializes capacity checks,
+ * publication, and delivery snapshots; a per-destination drain lease, released
+ * by the OS when its process exits, lets exactly one holder send and delete
+ * events. Delivery cannot observe a call that might still roll back.
  */
 export class HindsightOutbox {
 	readonly #root: string;
@@ -146,6 +148,7 @@ export class HindsightOutbox {
 			if (isEnoent(error)) return result;
 			throw error;
 		}
+		await this.#quarantine([]);
 		for (const dir of destinations) {
 			const lease = tryAcquireFileLock(path.join(dir, "drain"));
 			if (!lease) {
@@ -175,6 +178,7 @@ export class HindsightOutbox {
 			scope,
 			tags: scope === "global" ? [] : (call.tags ?? []).map(tag => this.#clean(tag)),
 			timestamp: new Date().toISOString(),
+			itemIndex: index,
 			content,
 			context,
 			sessionId: this.#clean(call.sessionId),
@@ -188,19 +192,27 @@ export class HindsightOutbox {
 	}
 
 	async #deliver(result: DrainResult): Promise<void> {
-		const now = Date.now();
-		const invalid: string[] = [];
-		const pending: Pending[] = [];
-		for (const name of await eventFiles(this.#dir)) {
-			const file = path.join(this.#dir, name);
-			const entry = await readEvent(file, now);
-			if (entry) pending.push(entry);
-			else invalid.push(file);
-		}
+		const { invalid, pending } = await withFileLock(path.join(this.#dir, "queue"), async () => {
+			const now = Date.now();
+			const invalid: string[] = [];
+			const pending: Pending[] = [];
+			for (const name of await eventFiles(this.#dir)) {
+				const file = path.join(this.#dir, name);
+				const entry = await readEvent(file, now);
+				if (entry) pending.push(entry);
+				else invalid.push(file);
+			}
+			return { invalid, pending };
+		});
 		// Hindsight unions a request's item tags onto its document(s): one request per tag set, so
 		// untagged global memories never share a request with project-tagged ones.
 		const groups = new Map<string, Pending[]>();
-		for (const entry of pending.sort((a, b) => a.published - b.published)) {
+		for (const entry of pending.sort(
+			(a, b) =>
+				a.published - b.published ||
+				Date.parse(a.event.timestamp) - Date.parse(b.event.timestamp) ||
+				(a.event.itemIndex ?? 0) - (b.event.itemIndex ?? 0),
+		)) {
 			const key = JSON.stringify(entry.event.tags.toSorted());
 			const group = groups.get(key);
 			if (group) group.push(entry);
@@ -277,7 +289,6 @@ export class HindsightOutbox {
 
 	/** Moves `files` to quarantine, then deletes quarantined events past their review period. */
 	async #quarantine(files: string[]): Promise<number> {
-		if (files.length === 0) return 0;
 		const dir = this.quarantineDir;
 		await fs.mkdir(dir, { recursive: true, mode: 0o700 });
 		const now = new Date();
@@ -324,6 +335,7 @@ async function readEvent(file: string, now: number): Promise<Pending | undefined
 			Array.isArray(event.tags) &&
 			event.tags.every(tag => typeof tag === "string") &&
 			Number.isFinite(Date.parse(event.timestamp)) &&
+			(event.itemIndex === undefined || (Number.isInteger(event.itemIndex) && event.itemIndex >= 0)) &&
 			typeof event.content === "string" &&
 			typeof event.context === "string" &&
 			typeof event.sessionId === "string";

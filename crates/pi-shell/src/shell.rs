@@ -383,7 +383,6 @@ pub async fn execute_shell_streams(
 	};
 	run_shell_oneshot_streams(config, run_config, streams, cancel_token).await
 }
-
 /// How long a cancelled run waits for its task to wind down before aborting
 /// it (discarding any output still queued in the pipe readers, and stopping
 /// the command with `KILL`).
@@ -398,7 +397,6 @@ pub async fn execute_shell_streams(
 const CANCEL_RUN_GRACE: Duration = Duration::from_secs(5);
 #[cfg(not(windows))]
 const CANCEL_RUN_GRACE: Duration = Duration::from_secs(2);
-
 /// Delay between cancellation and cancelling the output readers. Readers stay
 /// open so pipeline consumers can flush after their producers die, and so a
 /// TERM trap that writes output during the session's TERM grace does not hit
@@ -663,6 +661,11 @@ fn merge_path_values(existing: &str, incoming: &str) -> String {
 		.map_or_else(|_| merged.join(";"), |paths| paths.to_string_lossy().into_owned())
 }
 
+#[cfg(not(windows))]
+fn merge_path_values(_existing: &str, incoming: &str) -> String {
+	incoming.to_string()
+}
+
 #[cfg(windows)]
 fn push_unique_paths(merged: &mut Vec<String>, seen: &mut HashSet<String>, value: &str) {
 	for segment in std::env::split_paths(value) {
@@ -690,11 +693,6 @@ fn normalize_path_segment(segment: &str) -> String {
 	}
 
 	normalized.to_string_lossy().to_ascii_lowercase()
-}
-
-#[cfg(not(windows))]
-fn merge_path_values(_existing: &str, incoming: &str) -> String {
-	incoming.to_string()
 }
 
 #[cfg(test)]

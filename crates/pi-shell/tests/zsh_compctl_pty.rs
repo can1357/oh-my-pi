@@ -71,6 +71,7 @@ fn keys(pty: &mut Pty, text: &str) -> io::Result<()> {
 fn same(name: &str, rc: &str, drive: &str) {
 	let dir = fixture(name);
 	let run = |pty: &mut Pty| -> io::Result<()> {
+		pty.wait_raw(TIMEOUT)?;
 		pty.settle(QUIET, TIMEOUT)?;
 		keys(pty, ". ~/.zshrc\r")?;
 		keys(pty, "\x0c")?;

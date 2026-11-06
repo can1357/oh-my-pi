@@ -5,7 +5,7 @@
 //! output comes from `/bin/zsh -f -c` 5.9.
 
 use crate::{
-	bash::{ModeId, Script, ShellInit},
+	bash::{EngineConfig, ModeId, Platform, Script, ShellInit},
 	testkit::{FakeHost, Fault, Rig, fault::skeleton_init},
 };
 
@@ -182,4 +182,131 @@ fn getopts_keeps_position_in_optind() {
 fn print_p_expands_prompt_escapes() {
 	let (out, ..) = zsh(r#"print -P "%% %?""#);
 	assert_eq!(out, "% 0\n");
+}
+
+#[test]
+fn gnu_zsh_function_trap_identity_survives_every_op_snapshot() {
+	let cases = [
+		(
+			"TRAPIO() { print ALIAS; }; TRAPPOLL() { print CANON; }; print -r -- \
+			 \"IO=${+functions[TRAPIO]} POLL=${+functions[TRAPPOLL]}\"; kill -29 $$; print SURVIVED",
+			"IO=0 POLL=1\nCANON\nSURVIVED\n",
+		),
+		(
+			"TRAPPOLL() { print CANON; }; TRAPIO() { print ALIAS; }; print -r -- \
+			 \"IO=${+functions[TRAPIO]} POLL=${+functions[TRAPPOLL]}\"; kill -29 $$; print SURVIVED",
+			"IO=1 POLL=0\nALIAS\nSURVIVED\n",
+		),
+		(
+			"TRAPIO() { print -r -- \"outer:$1\"; }; f() { setopt localtraps; trap : POLL; }; f; \
+			 print -r -- \"IO=${+functions[TRAPIO]} POLL=${+functions[TRAPPOLL]}\"; kill -29 $$; \
+			 print SURVIVED",
+			"IO=1 POLL=0\nouter:29\nSURVIVED\n",
+		),
+		(
+			"TRAPPOLL() { :; }; TRAPIO() { :; }; trap - 29; print -r -- \"IO=${+functions[TRAPIO]} \
+			 POLL=${+functions[TRAPPOLL]}\"",
+			"IO=0 POLL=0\n",
+		),
+		("trap : IO; f() { setopt localtraps; trap : POLL; }; f; trap", "trap -- : IO\n"),
+		("trap 'print NUM_ERR' 32; false; print DONE", "NUM_ERR\nDONE\n"),
+		("TRAPERR() { print ERR_TRAP; }; false; print DONE", "ERR_TRAP\nDONE\n"),
+		(
+			"TRAP0() { print WRONG; }; ( TRAPEXIT() { print OWN_EXIT; }; print BODY ); print PARENT",
+			"BODY\nOWN_EXIT\nPARENT\n",
+		),
+		("TRAPUSR1() { print -r -- \"USR1:$1\"; }; kill -10 $$; print DONE", "USR1:10\nDONE\n"),
+		(
+			"zmodload zsh/parameter; functions[TRAPIO]='print INDIRECT'; kill -29 $$; print DONE",
+			"INDIRECT\nDONE\n",
+		),
+		(
+			"TRAPIO() { :; }; handler() { print -r -- \"COPY:$1\"; }; functions -c handler TRAPIO; \
+			 kill -29 $$; print DONE",
+			"COPY:29\nDONE\n",
+		),
+		(
+			"TRAPUSR1() { print CAUGHT; }; disable -f TRAPUSR1; enable -f TRAPUSR1; kill -10 $$; \
+			 print DONE",
+			"CAUGHT\nDONE\n",
+		),
+		(
+			"handler() { print COPY; }; functions -c handler TRAPIO; enable -f TRAPIO; kill -29 $$; \
+			 print DONE",
+			"COPY\nDONE\n",
+		),
+		(
+			"TRAPIO() { print IO; }; handler() { print POLL; }; functions -c handler TRAPPOLL; \
+			 disable -f TRAPPOLL; enable -f TRAPIO; f() { setopt localtraps; trap : 29; }; f; kill \
+			 -29 $$; print DONE",
+			"IO\nDONE\n",
+		),
+		("f() { print OLD; }; disable -f f; f() { print NEW; }; f", "NEW\n"),
+		("f() { print OLD; }; disable -f f; g() { print NEW; }; functions -c g f; f", "NEW\n"),
+	];
+	for fault in [Fault::None, Fault::Snapshot { every: 1 }] {
+		for (script, expected) in cases {
+			let init = ShellInit { mode: ModeId::Zsh, argv0: "zsh".into(), ..skeleton_init(&[]) };
+			let cfg = EngineConfig { platform: Platform::Linux, ..EngineConfig::default() };
+			let mut rig = Rig::with_config(FakeHost::new(), init, cfg);
+			let status = rig.run(Script::command(script.as_bytes()), fault);
+			assert_eq!(status, 0, "{fault:?}: {script}");
+			assert_eq!(rig.host.stdout.bytes(), expected.as_bytes(), "{fault:?}: {script}");
+			assert!(rig.host.stderr.bytes().is_empty(), "{fault:?}: {script}");
+			if matches!(fault, Fault::Snapshot { .. }) {
+				assert!(rig.snapshots > 0, "the saved function-key representation was exercised");
+			}
+		}
+	}
+}
+
+#[test]
+fn gnu_zsh_function_activation_is_not_function_name_existence() {
+	let cases = [
+		(
+			"handler() { print WRONG; }; functions -c handler TRAPIO; trap; kill -29 $$; print WRONG",
+			157,
+			"",
+		),
+		(
+			"handler() { :; }; functions -c handler TRAPIO; TRAPIO() { print WRONG; }; trap; kill \
+			 -29 $$",
+			157,
+			"",
+		),
+		("TRAPUSR1() { print WRONG; }; disable -f TRAPUSR1; kill -10 $$", 138, ""),
+		(
+			"TRAPUSR1() { print WRONG; }; f() { setopt localtraps; disable -f TRAPUSR1; }; f; trap; \
+			 kill -10 $$",
+			138,
+			"",
+		),
+		(
+			"TRAPUSR1() { print WRONG; }; enable -f TRAPUSR1; trap; kill -10 $$; print FIRST; kill \
+			 -10 $$; print DONE",
+			0,
+			"FIRST\nDONE\n",
+		),
+		("TRAPUSR1() { :; }; enable -f TRAPUSR1; trap -; kill -10 $$; print WRONG", 138, ""),
+		(
+			"TRAPUSR1() { print WRONG; }; disable -f TRAPUSR1; f() { setopt localtraps; enable -f \
+			 TRAPUSR1; }; f; print -r -- \"FN=${+functions[TRAPUSR1]}\"; trap",
+			0,
+			"FN=0\n",
+		),
+	];
+	for fault in [Fault::None, Fault::Snapshot { every: 1 }] {
+		for (script, expected_status, expected) in cases {
+			let init = ShellInit { mode: ModeId::Zsh, argv0: "zsh".into(), ..skeleton_init(&[]) };
+			let cfg = EngineConfig { platform: Platform::Linux, ..EngineConfig::default() };
+			let mut rig = Rig::with_config(FakeHost::new(), init, cfg);
+			assert_eq!(
+				rig.run(Script::command(script.as_bytes()), fault),
+				expected_status,
+				"{fault:?}: {script}"
+			);
+			assert_eq!(rig.host.stdout.bytes(), expected.as_bytes(), "{fault:?}: {script}");
+			assert!(rig.host.stderr.bytes().is_empty(), "{fault:?}: {script}");
+		}
+	}
 }

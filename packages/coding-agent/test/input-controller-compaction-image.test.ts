@@ -27,6 +27,7 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { CompactionQueuedMessage, InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { RestoredQueuedMessage } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
 beforeAll(() => {
 	initTheme();
@@ -62,6 +63,7 @@ function makeCtx(initialQueue: CompactionQueuedMessage[] = []) {
 
 	const ctx = {
 		session,
+		sessionManager: SessionManager.inMemory(),
 		compactionQueuedMessages: [...initialQueue],
 		pendingMessagesContainer: { clear: () => {}, addChild: () => {}, removeChild: () => {} },
 		editor: {
@@ -125,6 +127,37 @@ describe("compaction queue image forwarding", () => {
 		const { ctx } = makeCtx();
 		new UiHelpers(ctx).queueCompactionMessage("no images here", "followUp", []);
 		expect(ctx.compactionQueuedMessages).toEqual([{ text: "no images here", mode: "followUp", images: undefined }]);
+	});
+
+	test("queueCompactionMessage does not file a credential-bearing slash command", () => {
+		// Queuing skips the slash block that filters the other recording sites, so the secret
+		// filter is repeated there. `/join <link>` carries the room key, `/login <args>` an auth
+		// code, and `history.db` stores the row in the clear.
+		for (const secret of ["/join https://room.example/0123456789abcdefKEY", "/login ?code=SECRET"]) {
+			const { ctx } = makeCtx();
+			const filed: string[] = [];
+			(ctx.editor as unknown as { addToHistory: (t: string) => void }).addToHistory = t => {
+				filed.push(t);
+			};
+
+			new UiHelpers(ctx).queueCompactionMessage(secret, "followUp", undefined, { preserveDraft: true });
+
+			expect(filed).toEqual([]);
+			// The message is still queued — only the history write is withheld.
+			expect(ctx.compactionQueuedMessages).toHaveLength(1);
+		}
+	});
+
+	test("queueCompactionMessage still files an ordinary message", () => {
+		const { ctx } = makeCtx();
+		const filed: string[] = [];
+		(ctx.editor as unknown as { addToHistory: (t: string) => void }).addToHistory = t => {
+			filed.push(t);
+		};
+
+		new UiHelpers(ctx).queueCompactionMessage("run the migration", "followUp", undefined, { preserveDraft: true });
+
+		expect(filed).toEqual(["run the migration"]);
 	});
 
 	test("flush forwards the first queued prompt's images via session.prompt", async () => {

@@ -1,9 +1,17 @@
-import type { SessionManager } from "../../session/session-manager";
+import type { SessionManager } from "./session-manager";
 
 /** Where a conversation stood when input was submitted: its session and the branch leaf. */
 export interface ConversationPosition {
 	sessionId: string;
 	leafId: string | null;
+}
+
+/** Origin-bound input no longer belongs to the session's settled conversation. */
+export class ConversationChangedError extends Error {
+	constructor() {
+		super("Conversation changed before queued input was admitted");
+		this.name = "ConversationChangedError";
+	}
 }
 
 export function conversationPosition(

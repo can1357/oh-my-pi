@@ -469,6 +469,14 @@ impl ExtProc for SignalsOnExit {
 		self.child.signal(sig)
 	}
 
+	fn signal_delivered(
+		&mut self,
+		sig: crate::bash::Signal,
+		targets: crate::proctree::TerminationTargets,
+	) {
+		self.child.signal_delivered(sig, targets);
+	}
+
 	fn stop(&mut self) -> io::Result<()> {
 		self.child.stop()
 	}

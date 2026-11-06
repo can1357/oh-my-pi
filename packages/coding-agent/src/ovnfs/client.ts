@@ -15,7 +15,7 @@
  * const reply = await callSocket<{ total: number }>(socket, "glob", { dir, pattern: "*.ts" }, signal);
  */
 import * as net from "node:net";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { isRecord, untilAborted } from "@oh-my-pi/pi-utils";
 
 /** The ovnfs admin protocol generation this client speaks. */
 export const PROTOCOL_VERSION = 5;
@@ -202,7 +202,11 @@ function connection(socket: string): Promise<Connection> {
  */
 export async function callSocket<T>(socket: string, op: string, args: object, signal?: AbortSignal): Promise<T> {
 	signal?.throwIfAborted();
-	const conn = await connection(socket);
+	const conn = await untilAborted(signal, connection(socket)).catch(error => {
+		// Keep this client's exact abort reason without closing the shared socket.
+		if (signal?.aborted) throw signal.reason;
+		throw error;
+	});
 	// Replies are the daemon's api shapes; callers name the one their op returns.
 	return conn.call(op, args, signal) as Promise<T>;
 }

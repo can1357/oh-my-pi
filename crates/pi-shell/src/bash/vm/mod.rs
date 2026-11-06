@@ -66,7 +66,7 @@ use crate::bash::{
 	event::{AssignScope, Event, EventData, EventMask, Origin, OriginChain, OriginLink},
 	fd::{FdOrigin, FdRef, FdTable},
 	fs::File,
-	host::{EnvView, Host, StdFd, Verdict},
+	host::{EnvView, ExtProc, Host, StdFd, Verdict},
 	ids::{CallId, CmdTag, JobId, ModeId, RunId, ToolRef, UnitId, Vpid},
 	ir::{self, Unit},
 	signal::{DefaultAction, SigTarget, Signal},
@@ -1252,9 +1252,9 @@ pub fn zsh_startup_values(
 	}
 	// `signals`: `EXIT`, the signal names by number, `ZERR`, `DEBUG`.
 	let mut signals = vec![BString::from("EXIT")];
-	for n in 1..=31u8 {
+	for n in 1..=crate::bash::signal::ZSH_SIGCOUNT {
 		match crate::bash::signal::Signal::from_number(n, platform) {
-			Some(s) => signals.push(BString::from(s.to_string())),
+			Some(s) => signals.push(BString::from(s.zsh_name(platform))),
 			None => signals.push(BString::from(format!("SIG{n}"))),
 		}
 	}
@@ -1497,7 +1497,11 @@ impl Shell {
 			k.root.set_record(
 				cx.store,
 				KeyBuf::Trap(crate::bash::store::TrapKey::Signal(sig)),
-				Some(Record::Trap { mode: init.mode, action: BString::default() }),
+				Some(Record::Trap {
+					mode:         init.mode,
+					action:       BString::default(),
+					assumed_name: false,
+				}),
 			);
 		}
 		let vpid = k.vpid(cx.store);
@@ -2000,6 +2004,22 @@ impl Shell {
 		if req & CANCEL != 0 {
 			let sig = self.k.ctl.cancel_signal();
 			let status = sig.exit_status(self.k.engine.config().platform);
+			{
+				let mut externals: Vec<&mut dyn ExtProc> = Vec::new();
+				for process in &mut self.procs {
+					if process.lineage.detached {
+						continue;
+					}
+					for frame in &mut process.frames {
+						if let Some(sc) = frame.scratch.as_mut()
+							&& let Live::Ext(external) = &mut sc.live
+						{
+							externals.push(external.as_mut());
+						}
+					}
+				}
+				cx.host.cancel_externals(sig, &mut externals);
+			}
 			for i in (0..self.procs.len()).rev() {
 				// A detached tree (`nohup`) outlives the cancellation.
 				if self.procs[i].lineage.detached {
@@ -2024,7 +2044,6 @@ impl Shell {
 							match &mut sc.live {
 								Live::Task(task) => task.signal(sig),
 								Live::Ext(ext) => {
-									let _ = ext.signal(sig);
 									let _ = ext.cont();
 								},
 								_ => {},
@@ -2035,10 +2054,10 @@ impl Shell {
 					if trapped {
 						exec::mark_cancel(&mut self.procs[i], status);
 					} else {
-						exec::finish_cancel(&mut self.k.root, cx.store, &mut self.procs[i], status);
+						exec::finish_cancel(&mut self.k, cx, &mut self.procs[i], status);
 					}
 				} else {
-					self.kill(cx, i, sig, status);
+					self.kill(cx, i, sig, status, false);
 				}
 			}
 			// Calls of the cancelled vprocs are void; a detached tree's go on.
@@ -2097,23 +2116,26 @@ impl Shell {
 		None
 	}
 
-	/// Terminate vproc `i` with `status`: signal its task or external, end its
-	/// scripts. Transient vprocs are removed.
-	fn kill(&mut self, cx: &mut Cx<'_>, i: usize, sig: Signal, status: i32) {
+	/// Terminate vproc `i` with `status`: signal its task and, unless already
+	/// signalled as a cancellation batch, its external. End its scripts and
+	/// remove transient vprocs.
+	fn kill(&mut self, cx: &mut Cx<'_>, i: usize, sig: Signal, status: i32, signal_external: bool) {
 		let p = &mut self.procs[i];
 		for f in &mut p.frames {
 			if let Some(sc) = f.scratch.as_mut() {
 				match &mut sc.live {
 					Live::Task(t) => t.signal(sig),
 					Live::Ext(e) => {
-						let _ = e.signal(sig);
+						if signal_external {
+							let _ = e.signal(sig);
+						}
 						let _ = e.cont();
 					},
 					_ => {},
 				}
 			}
 		}
-		exec::unwind(&mut self.k.root, cx.store, p, 0);
+		exec::unwind(&mut self.k, cx, p, 0);
 		while state::drop_scope(&mut self.k.root, cx.store, p) {}
 		p.out.clear();
 		p.blocked = None;
@@ -2227,9 +2249,10 @@ impl Shell {
 				None
 			} else {
 				let key = crate::bash::store::TrapKey::Signal(sig);
-				match state::record(cx.store, &self.procs[i], crate::bash::store::Key::Trap(key)) {
-					Ok(Some(Record::Trap { action, .. })) => Some(action.is_empty()),
-					Ok(_) => None,
+				match builtins::trap::effective(cx.store, &self.procs[i], key, platform) {
+					Ok(builtins::trap::Handler::Absent) => None,
+					Ok(builtins::trap::Handler::Ignored) => Some(true),
+					Ok(_) => Some(false),
 					Err(err) => {
 						self.k.fail(err);
 						return;
@@ -2308,7 +2331,7 @@ impl Shell {
 				continue;
 			}
 			match sig.default_action() {
-				DefaultAction::Terminate => self.kill(cx, i, sig, sig.exit_status(platform)),
+				DefaultAction::Terminate => self.kill(cx, i, sig, sig.exit_status(platform), true),
 				DefaultAction::Stop | DefaultAction::Continue => {
 					let stop = sig.default_action() == DefaultAction::Stop;
 					let p = &mut self.procs[i];
@@ -2348,7 +2371,7 @@ impl Shell {
 			message: BStr::new(&message),
 		});
 		for i in (0..self.procs.len()).rev() {
-			self.kill(cx, i, Signal::Term, 1);
+			self.kill(cx, i, Signal::Term, 1, true);
 		}
 	}
 
@@ -2509,14 +2532,9 @@ pub fn owe_chld(k: &mut Kernel, cx: &mut Cx<'_>, p: &mut Vproc, background: bool
 	if zsh && !background {
 		return;
 	}
-	let key = crate::bash::store::Key::Trap(crate::bash::store::TrapKey::Signal(Signal::Chld));
-	let trapped = match state::record(cx.store, p, key) {
-		Ok(Some(Record::Trap { action, .. })) => !action.is_empty(),
-		Ok(None) if zsh => matches!(
-			state::record(cx.store, p, crate::bash::store::Key::Func(bstr::BStr::new(b"TRAPCHLD"))),
-			Ok(Some(Record::Func { .. }))
-		),
-		Ok(_) => false,
+	let key = crate::bash::store::TrapKey::Signal(Signal::Chld);
+	let trapped = match builtins::trap::effective(cx.store, p, key, k.engine.config().platform) {
+		Ok(handler) => handler.caught(),
 		Err(err) => {
 			k.fail(err);
 			false

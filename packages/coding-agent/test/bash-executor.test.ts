@@ -728,6 +728,8 @@ exit 64
 		if (!zshPath) {
 			return;
 		}
+		// A fresh ZDOTDIR can start zsh-newuser-install before the command runs.
+		fs.writeFileSync(path.join(tempDir, ".zshrc"), "");
 		cfgShellPath.set(Settings.instance, zshPath);
 		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 			shell: zshPath,
