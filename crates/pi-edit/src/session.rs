@@ -15,6 +15,7 @@ use crate::{
 	},
 	error::{EditError, EditResult},
 	files::{FileCache, FileSource},
+	modes::hashline::syntax::has_syntax_oracle,
 	notebook,
 	path_policy::{PathPolicy, UrlResolution, canonical_key},
 	store::{EditStore, Snapshot, file_hash, seen_lines_from_body},
@@ -591,6 +592,9 @@ fn prune_snapshots(
 /// True when tree-sitter parses `code` (language from `path`) without
 /// errors. Unknown languages never "parse", so they never regress.
 pub fn source_parses(code: &str, path: &str) -> bool {
+	if !has_syntax_oracle(path) {
+		return false;
+	}
 	let code = if code.is_empty() { "\n" } else { code };
 	pi_ast::summary::parse_code_status(code, None, Some(path))
 		.is_ok_and(|language| language.is_some())

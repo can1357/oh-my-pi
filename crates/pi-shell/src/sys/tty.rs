@@ -179,8 +179,8 @@ mod unix {
 	}
 
 	#[cfg(not(target_os = "linux"))]
-	fn code(baud: u32) -> Option<libc::speed_t> {
-		Some(libc::speed_t::from(baud))
+	fn code(baud: u32) -> libc::speed_t {
+		libc::speed_t::from(baud)
 	}
 
 	const fn field(t: &mut libc::termios, f: Field) -> &mut libc::tcflag_t {
@@ -266,11 +266,15 @@ mod unix {
 		os.c_cc[libc::VMIN] = t.min;
 		os.c_cc[libc::VTIME] = t.time;
 		// An unknown speed keeps the encoding's.
-		if let Some(i) = code(t.ispeed) {
+		#[cfg(target_os = "linux")]
+		let (ispeed, ospeed) = (code(t.ispeed), code(t.ospeed));
+		#[cfg(not(target_os = "linux"))]
+		let (ispeed, ospeed) = (Some(code(t.ispeed)), Some(code(t.ospeed)));
+		if let Some(i) = ispeed {
 			// SAFETY: `os` is a valid termios.
 			unsafe { libc::cfsetispeed(&raw mut os, i) };
 		}
-		if let Some(o) = code(t.ospeed) {
+		if let Some(o) = ospeed {
 			// SAFETY: `os` is a valid termios.
 			unsafe { libc::cfsetospeed(&raw mut os, o) };
 		}
@@ -431,9 +435,10 @@ mod unix {
 		flags != -1 && flags & libc::O_ACCMODE == libc::O_RDWR
 	}
 
-	/// zsh's `init_io`: the shell's terminal and its name. The tty of fd 0
-	/// reopened read-write by name, else fd 0 itself when it is open
-	/// read-write; else fd 1's when it is a read-write terminal; else
+	/// zsh's `init_io`: the shell's terminal and its name.
+	///
+	/// The tty of fd 0 reopened read-write by name, else fd 0 itself when it is
+	/// open read-write; else fd 1's when it is a read-write terminal; else
 	/// `/dev/tty`. The descriptor is at 10 or above, close-on-exec; the
 	/// process's own descriptors are only duplicated, never taken over.
 	pub fn open_controlling() -> io::Result<Option<(OwnedFd, BString)>> {
@@ -644,7 +649,7 @@ impl NativeTerminal {
 	/// A terminal host; `restore` puts every terminal's modes back when it
 	/// is dropped.
 	#[must_use]
-	pub fn new(restore: bool) -> Self {
+	pub const fn new(restore: bool) -> Self {
 		Self {
 			#[cfg(unix)]
 			guards: Vec::new(),

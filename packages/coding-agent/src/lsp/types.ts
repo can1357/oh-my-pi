@@ -406,6 +406,11 @@ export interface OpenFile {
 	 * reconcile treats the document as dirty and resyncs from disk.
 	 */
 	syncedHash?: number | bigint;
+	/**
+	 * The disk text a reconcile last read: its stat stamp and text hash. While the stamp is
+	 * unchanged and `hash` equals `syncedHash`, the server already holds the disk text.
+	 */
+	disk?: { stamp: string; hash: number | bigint };
 	/** When an OMP operation last used this document; long-unused documents close before the next open. */
 	lastUsedAt: number;
 	/** When OMP last reopened this document (an idle close, or a diagnostics reopen); absent for a first open. */

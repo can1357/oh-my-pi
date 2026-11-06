@@ -297,7 +297,7 @@ pub fn echoti(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 		ctx.out(&out);
 		return done(0);
 	}
-	let strarg = STRCAP.iter().any(|c| *c == s);
+	let strarg = STRCAP.contains(&s);
 	let pars: Vec<TParm<'_>> = rest
 		.iter()
 		.enumerate()

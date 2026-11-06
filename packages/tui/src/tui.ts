@@ -281,7 +281,9 @@ export interface Component {
 	 * an overlay: the sheet's `role` (Tern styles `omp.overlay.*` roles as
 	 * glass sheets, so the component's own root must not draw a second frame),
 	 * `head` spans for the sheet's title row, and `size`/`anchor` overriding
-	 * the ones derived from the overlay options.
+	 * the ones derived from the overlay options. `size` is a width class: on a
+	 * narrow pane the backend fills it only when the described content is tall
+	 * (see `NativeBackend`).
 	 */
 	nativeOverlay?: {
 		role?: string;

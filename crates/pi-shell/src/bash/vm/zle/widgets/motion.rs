@@ -244,7 +244,7 @@ pub const fn set_mark_command(ed: &mut Editor) -> i32 {
 }
 
 /// Widget `set-mark-command`.
-pub fn setmarkcommand(zw: &mut Zw<'_, '_>) -> WResult {
+pub const fn setmarkcommand(zw: &mut Zw<'_, '_>) -> WResult {
 	WResult::Done(set_mark_command(zw.ed))
 }
 

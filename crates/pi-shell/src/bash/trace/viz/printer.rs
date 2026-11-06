@@ -79,6 +79,8 @@ struct Cached {
 	raw:          [Option<(usize, Arc<raw::Static>)>; 2],
 	docs:         HashMap<NodeKey, Arc<Vec<Option<Span>>>>,
 	script_utf16: Option<Arc<[u32]>>,
+	/// Parses of uncompiled script byte ranges; the script never changes.
+	ahead:        HashMap<(usize, usize), Option<Arc<Ahead>>>,
 }
 #[derive(Clone, Debug)]
 struct UnitStamp {
@@ -153,6 +155,17 @@ struct Nested {
 	map:      SourceMap,
 	analysis: Analysis,
 }
+/// Unit of script parsed ahead of the engine; no compiled unit has it.
+const AHEAD: u32 = u32::MAX;
+/// Script bytes the engine has not compiled yet, parsed statically.
+#[derive(Debug)]
+struct Ahead {
+	program:  Program,
+	/// Source identity per command: one past its script byte offset.
+	ids:      Vec<u32>,
+	map:      SourceMap,
+	analysis: Analysis,
+}
 #[derive(Clone, Debug)]
 struct ByteOrigins {
 	base: u32,
@@ -205,8 +218,9 @@ pub(crate) fn analyzed(source: &impl VizSource) -> Arc<Analysis> {
 	}
 	Arc::clone(&cache.analysis.as_ref().unwrap().1)
 }
-/// Render only syntax the engine has announced. Uncompiled script bytes stay
-/// literal.
+/// Render announced syntax with its outcomes. Script the engine has not
+/// compiled yet is parsed ahead and drawn without outcomes; what does not
+/// parse stays literal.
 pub fn render(source: &impl VizSource, runtime: &Runtime<'_>, options: &Options) -> Presentation {
 	let analysis = analyzed(source);
 	let original = if options.view == View::Pseudo && options.split {
@@ -227,12 +241,14 @@ pub fn render(source: &impl VizSource, runtime: &Runtime<'_>, options: &Options)
 			children: HashSet::new(),
 		};
 		p.root_units();
-		// Dynamic units with no proven outer origin remain explicitly unlocated.
+		// Dynamic units with no proven outer origin remain explicitly
+		// unlocated; a callout's script is drawn by its calling command.
 		for index in 0..source.unit_count() {
 			let Some(unit) = source.unit(index) else {
 				continue;
 			};
 			if unit.at.is_some()
+				|| unit.callout
 				|| p.children.contains(&unit.index)
 				|| unit.syntax.and_then(|s| s.parent.as_ref()).is_some()
 			{
@@ -248,7 +264,7 @@ pub fn render(source: &impl VizSource, runtime: &Runtime<'_>, options: &Options)
 					origin:   None,
 					analysis: &analysis,
 				};
-				p.frame(unit.index, 0, "dynamic shell source · original location unavailable", None);
+				p.frame(unit.index, 0, "built at runtime · not in the command text", None);
 				p.tree(&syntax.tree, &context, 1);
 			}
 		}
@@ -476,11 +492,7 @@ impl<S: VizSource> Printer<'_, S> {
 			};
 			let start = at as usize;
 			if start > cursor {
-				self.pending(
-					&source.script()[cursor..start.min(source.script().len())],
-					cursor as u32,
-					0,
-				);
+				self.ahead(cursor, start.min(source.script().len()));
 			}
 			if self.options.layers.idioms
 				&& let Some(end) = self.setup_units(roots, position)
@@ -507,9 +519,88 @@ impl<S: VizSource> Printer<'_, S> {
 			cursor = cursor.max(start.saturating_add(unit.source.len()));
 			position += 1;
 		}
-		if cursor < source.script().len() {
-			self.pending(&source.script()[cursor..], cursor as u32, 0);
+		self.ahead(cursor, source.script().len());
+	}
+
+	/// Draws script bytes `lo..hi` the engine has not compiled (still
+	/// streaming in, or not reached yet) from a static parse with default
+	/// features, so Pseudo shows a command before it runs. Nothing there
+	/// has an outcome until the engine announces it; the first command that
+	/// does not parse and everything after it stay literal, as does a unit
+	/// the engine announced without syntax (its parse may have used aliases
+	/// or features this one lacks) and everything after that.
+	fn ahead(&mut self, lo: usize, hi: usize) {
+		if lo >= hi {
+			return;
 		}
+		let source = self.source;
+		let script: &[u8] = source.script().as_ref();
+		let stop = (0..source.unit_count())
+			.filter_map(|index| source.unit(index)?.at)
+			.map(|at| at as usize)
+			.filter(|at| (lo..hi).contains(at))
+			.min()
+			.unwrap_or(hi);
+		let Some(ahead) = self.parsed_ahead(lo, stop) else {
+			self.pending(&script[lo..hi], lo as u32, 0);
+			return;
+		};
+		let bytes = &script[lo..stop];
+		let mut cursor = 0;
+		for (command, id) in ahead.program.commands.iter().zip(&ahead.ids) {
+			let start = command.span.lo as usize;
+			if start > cursor {
+				self.pending(&bytes[cursor..start], (lo + cursor) as u32, 0);
+			}
+			let context = Context {
+				unit: AHEAD,
+				source: *id,
+				bytes,
+				map: ahead.map.clone(),
+				untraced: None,
+				origin: None,
+				analysis: &ahead.analysis,
+			};
+			self.list(&command.list, &context, 0);
+			cursor = command.span.hi as usize;
+		}
+		self.pending(&script[lo + cursor..hi], (lo + cursor) as u32, 0);
+	}
+
+	fn parsed_ahead(&self, lo: usize, hi: usize) -> Option<Arc<Ahead>> {
+		if let Some(cached) = self.source.cache().inner.lock().ahead.get(&(lo, hi)) {
+			return cached.clone();
+		}
+		let script: &[u8] = self.source.script().as_ref();
+		let mut parser = Parser::new(&script[lo..hi], Features::NONE, NO_ALIASES);
+		let mut commands = Vec::new();
+		while let Some(Ok(command)) = parser.next_command() {
+			commands.push(command);
+		}
+		let parsed = (!commands.is_empty()).then(|| {
+			let program = Program { commands };
+			let ids: Vec<u32> = program
+				.commands
+				.iter()
+				.map(|command| lo as u32 + command.span.lo + 1)
+				.collect();
+			let mut analysis = analysis::program(&program, AHEAD, &ids);
+			analysis.arithmetic = Arc::clone(&self.analysis.arithmetic);
+			Arc::new(Ahead {
+				map: source::script_map(self.source, lo, hi - lo),
+				program,
+				ids,
+				analysis,
+			})
+		});
+		self
+			.source
+			.cache()
+			.inner
+			.lock()
+			.ahead
+			.insert((lo, hi), parsed.clone());
+		parsed
 	}
 
 	fn setup_units(&mut self, roots: &[u32], position: usize) -> Option<usize> {
@@ -852,11 +943,14 @@ impl<S: VizSource> Printer<'_, S> {
 				})
 			});
 		if all_simple {
-			let mut segments = Vec::new();
+			// One row per pipeline: `and`/`or` lead each continuation row, so a
+			// chain reads down the page and every command keeps its own status.
+			let mut lead = Vec::new();
 			if background {
-				segments.push(self.segment(c, a.id, a.span, "spawn ", "kw", false));
+				lead.push(self.segment(c, a.id, a.span, "spawn ", "kw", false));
 			}
-			segments.extend(self.pipeline(&a.first, c));
+			lead.extend(self.pipeline(&a.first, c));
+			let mut rows = vec![(&a.first, depth, lead)];
 			for (index, (op, p)) in a.rest.iter().enumerate() {
 				if self.options.layers.idioms
 					&& index + 1 == a.rest.len()
@@ -875,22 +969,20 @@ impl<S: VizSource> Printer<'_, S> {
 					let cmd = &p.stages[0].cmd;
 					let mut s = self.segment(c, cmd.id, cmd.span, " may fail", "badge", true);
 					s.expanded = Some(format!("|| {}", c.text(cmd.span)));
-					segments.push(s);
+					if let Some((_, _, segments)) = rows.last_mut() {
+						segments.push(s);
+					}
 				} else {
-					segments.push(self.segment(
-						c,
-						a.id,
-						a.span,
-						if *op == AndOrOp::And { " and " } else { " or " },
-						"op",
-						false,
-					));
+					let connector = if *op == AndOrOp::And { "and " } else { "or " };
+					let mut segments = vec![self.segment(c, a.id, a.span, connector, "op", false)];
 					segments.extend(self.pipeline(p, c));
+					rows.push((p, depth + 1, segments));
 				}
 			}
-			let owner = &a.first.stages[0].cmd;
-			self.emit(c, owner, depth, "stmt", segments, None);
-			self.documents(a, c, depth);
+			for (p, depth, segments) in rows {
+				self.emit(c, &p.stages[0].cmd, depth, "stmt", segments, None);
+				self.documents(p, c, depth);
+			}
 		} else {
 			for (pi, p) in std::iter::once(&a.first)
 				.chain(a.rest.iter().map(|(_, p)| p))
@@ -1124,18 +1216,17 @@ impl<S: VizSource> Printer<'_, S> {
 			}
 			out.push(self.segment(c, cmd.id, cmd.span, ")", "op", true));
 		} else if builtin && matches!(name.as_str(), "[" | "test") {
+			// A bare `[` (one word) yields the empty range 1..0; `get` keeps it empty.
+			let end = if name == "[" {
+				s.words.len().saturating_sub(1)
+			} else {
+				s.words.len()
+			};
 			out.push(self.segment(
 				c,
 				cmd.id,
 				cmd.span,
-				test_words(
-					&s.words[1..if name == "[" {
-						s.words.len().saturating_sub(1)
-					} else {
-						s.words.len()
-					}],
-					&self.words(c),
-				),
+				test_words(s.words.get(1..end).unwrap_or_default(), &self.words(c)),
 				"var",
 				true,
 			));
@@ -2163,12 +2254,10 @@ impl<S: VizSource> Printer<'_, S> {
 		cache.nested.get(&key).is_some_and(Option::is_some)
 	}
 
-	fn documents(&mut self, a: &AndOr, c: &Context<'_>, depth: u32) {
-		for p in std::iter::once(&a.first).chain(a.rest.iter().map(|(_, p)| p)) {
-			for stage in &p.stages {
-				if let CommandKind::Simple(s) = &stage.cmd.kind {
-					self.command_documents(&stage.cmd, s, c, depth);
-				}
+	fn documents(&mut self, p: &Pipeline, c: &Context<'_>, depth: u32) {
+		for stage in &p.stages {
+			if let CommandKind::Simple(s) = &stage.cmd.kind {
+				self.command_documents(&stage.cmd, s, c, depth);
 			}
 		}
 	}

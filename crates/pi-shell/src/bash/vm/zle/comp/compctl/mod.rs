@@ -185,7 +185,7 @@ pub(crate) struct Cc {
 	/// `-J`/`-V`.
 	pub gname:   Option<BString>,
 	/// The `-x` patterns (zsh's `ext` list linked by `next`).
-	pub ext:     Vec<Cc>,
+	pub ext:     Vec<Self>,
 	/// This one's condition when it is an `-x` pattern: or'ed groups of
 	/// and'ed conditions.
 	pub cond:    Vec<Vec<Cond>>,
@@ -335,7 +335,7 @@ const ARGV_END: &[u8] = b"x";
 
 impl Parser {
 	/// `argv[a]` exists (zsh `argv[a] != NULL`).
-	fn has(&self, a: usize) -> bool {
+	const fn has(&self, a: usize) -> bool {
 		a < self.words.len()
 	}
 
@@ -382,7 +382,7 @@ struct Cct {
 }
 
 impl Cct {
-	fn new() -> Self {
+	const fn new() -> Self {
 		let mut cc = Cc::zero();
 		cc.mask2 = cc2::CCCONT;
 		Self { cc }
@@ -398,7 +398,7 @@ enum Special {
 }
 
 impl State {
-	fn special(&mut self, s: Special) -> &mut Cc {
+	const fn special(&mut self, s: Special) -> &mut Cc {
 		match s {
 			Special::Compos => &mut self.compos,
 			Special::Default => &mut self.default,
@@ -721,9 +721,8 @@ fn get_xcompctl(
 		if ready {
 			break Ok(());
 		}
-		let cond = match parse_cond(ctx, p.rest(*a).to_vec()) {
-			Ok(c) => c,
-			Err(()) => break Err(()),
+		let Ok(cond) = parse_cond(ctx, p.rest(*a).to_vec()) else {
+			break Err(());
 		};
 		let mut next = Cc::zero();
 		next.cond = cond;

@@ -335,14 +335,21 @@ describe("native IPC", () => {
 			});
 		`;
 		const child = Bun.spawn([process.execPath, "-e", script], { stdout: "pipe", stderr: "inherit" });
-		const peer = record(await accepted);
 		// Real time is the subject here: a leaked loop ref means the child never
-		// exits, so the only observable failure is the deadline expiring.
-		const exited = await Promise.race([child.exited, Bun.sleep(10_000).then(() => "timeout" as const)]);
+		// exits, so the only observable failure is the deadline expiring. One
+		// deadline bounds every step, so a stall reports where it stopped.
+		const deadline = Bun.sleep(10_000).then(() => "timeout" as const);
+		const connection = await Promise.race([accepted, deadline]);
+		if (connection === "timeout") {
+			child.kill();
+			throw new Error("the child never connected");
+		}
+		const peer = record(connection);
+		const exited = await Promise.race([child.exited, deadline]);
 		if (exited === "timeout") child.kill();
 		expect(exited).toBe(0);
 		expect(await new Response(child.stdout).text()).toContain("connected");
-		await peer.closed;
+		expect(await Promise.race([peer.closed.then(() => "closed" as const), deadline])).toBe("closed");
 		expect(peer.reason).toBeNull();
 	});
 });
