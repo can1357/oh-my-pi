@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.17.0] - 2026-11-06
+
 ### Breaking Changes
 
 - `fromJsonSchema` returns an opaque whole-document validator (no `.pick()`/`.props`); `format` is annotation-only unless checked via `formats`; bad `$ref` throws `invalid $ref`/`unresolved $ref`.

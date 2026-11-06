@@ -767,6 +767,11 @@ fn expandmb_quoting_backslashes_the_history_character() {
 
 #[test]
 fn expandmb_sorting_follows_lc_collate() {
+	// The expected order is en_US.UTF-8's; hosts without that locale sort
+	// bytewise.
+	if crate::sys::langinfo::Collator::new(b"en_US.UTF-8").is_none() {
+		return;
+	}
 	let (out, err, st) = zsh(
 		"LANG=en_US.UTF-8; a=(oracle.py oracle_ob.py drive.py B a b10 b9); print ${(o)a}; print \
 		 ${(On)a}; LC_COLLATE=C; print ${(o)a}",

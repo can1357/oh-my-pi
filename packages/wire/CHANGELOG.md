@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.17.0] - 2026-11-06
+
 ### Added
 
 - Added shell trace visualization: `ShellTrace` model and TSP `shell` kind for shell runs, node state, and layout.

@@ -425,7 +425,7 @@ impl RunTrace {
 	}
 
 	/// Publish logical completion after the segmented driver has its real
-	/// outcome and drained output. Real segment RunEnds remain in history.
+	/// outcome and drained output. Real segment `RunEnds` remain in history.
 	pub fn finish_segments(&self, status: i32) {
 		let mut inner = self.inner.lock();
 		inner.status = Some(status);
@@ -627,7 +627,7 @@ impl Inner {
 		self.t_ns = t;
 		match ev.data {
 			EventData::RunEnd { status } if root && self.segment.is_none() => {
-				self.status = Some(status)
+				self.status = Some(status);
 			},
 			EventData::UnitCompiled(cu) => {
 				let parent = cu.parent.and_then(|origin| {
@@ -875,11 +875,9 @@ impl Inner {
 				projection = prefix;
 				source = &source[prefix as usize..end as usize];
 				exact_at = Some(segment.source.at);
-				line = 1
-					+ self.script[..segment.source.at as usize]
-						.iter()
-						.filter(|&&byte| byte == b'\n')
-						.count() as u32;
+				line = self.script[..segment.source.at as usize]
+					.split(|&byte| byte == b'\n')
+					.count() as u32;
 				mapped_nodes = nodes.to_vec();
 				for node in &mut mapped_nodes {
 					if prefix <= node.lo && node.hi <= end {
@@ -924,15 +922,14 @@ impl Inner {
 			});
 		if let Some(u) = existing {
 			let unit = &mut self.units[u];
-			if let Some(syntax) = syntax {
-				if unit.syntax.as_ref().is_none_or(|existing| {
+			if let Some(syntax) = syntax
+				&& unit.syntax.as_ref().is_none_or(|existing| {
 					!existing.shares_tree(&syntax)
 						&& (existing.parent.is_none() || syntax.parent.is_some())
 						&& !(matches!(existing.tree, syntax::SyntaxTree::List(_))
 							&& matches!(syntax.tree, syntax::SyntaxTree::Command(_)))
 				}) {
-					unit.syntax = Some(syntax);
-				}
+				unit.syntax = Some(syntax);
 			}
 			unit.projection = projection;
 			if let Some(at) = exact_at {
@@ -1169,11 +1166,7 @@ struct NodeSlot<'a> {
 
 /// `a` cut to [`ARG_BYTES`].
 fn cut(a: &BString) -> BString {
-	let mut end = a.len().min(ARG_BYTES);
-	if let Ok(text) = std::str::from_utf8(a) {
-		end = text.floor_char_boundary(end);
-	}
-	BString::from(&a[..end])
+	BString::from(text::cut(a, ARG_BYTES))
 }
 
 /// Every node's state, children before parents: its own runs, else the

@@ -209,7 +209,7 @@ pub fn normalize(s: &[u8]) -> BString {
 	BString::from(normalized(s).collect::<Vec<u8>>())
 }
 
-/// The bytes of [`normalize`]`(s)`, without allocating.
+/// The bytes of `normalize(s)`, without allocating.
 fn normalized(s: &[u8]) -> impl Iterator<Item = u8> + '_ {
 	let s = &s[s.iter().take_while(|&&c| inblank(c)).count()..];
 	let mut i = 0;
@@ -613,33 +613,30 @@ impl Hist {
 		let key = normalize(&self.entries[i].text);
 		let old = self.tab_lookup(&key, i);
 		let mut i = i;
-		match old {
-			Some(o) => {
-				let he = &self.entries[i];
-				let foreign_adjacent = he.flags & HIST_FOREIGN != 0 && o + 1 == i;
-				if he.flags & HIST_MAKEUNIQUE != 0 || foreign_adjacent {
-					let he = &mut self.events_mut()[i];
-					he.flags |= HIST_DUP;
-					he.flags &= !HIST_MAKEUNIQUE;
-				} else {
-					self.events_mut()[o].flags |= HIST_DUP;
-					if let Some(tab) = &mut self.tab {
-						tab.insert(key, self.entries[i].num);
-					}
-					if self.st.ignore_all_dups {
-						self.events_mut().remove(o);
-						if o < i {
-							i -= 1;
-						}
-					}
-				}
-			},
-			None => {
-				self.events_mut()[i].flags &= !HIST_MAKEUNIQUE;
+		if let Some(o) = old {
+			let he = &self.entries[i];
+			let foreign_adjacent = he.flags & HIST_FOREIGN != 0 && o + 1 == i;
+			if he.flags & HIST_MAKEUNIQUE != 0 || foreign_adjacent {
+				let he = &mut self.events_mut()[i];
+				he.flags |= HIST_DUP;
+				he.flags &= !HIST_MAKEUNIQUE;
+			} else {
+				self.events_mut()[o].flags |= HIST_DUP;
 				if let Some(tab) = &mut self.tab {
 					tab.insert(key, self.entries[i].num);
 				}
-			},
+				if self.st.ignore_all_dups {
+					self.events_mut().remove(o);
+					if o < i {
+						i -= 1;
+					}
+				}
+			}
+		} else {
+			self.events_mut()[i].flags &= !HIST_MAKEUNIQUE;
+			if let Some(tab) = &mut self.tab {
+				tab.insert(key, self.entries[i].num);
+			}
 		}
 		i
 	}

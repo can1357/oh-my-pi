@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.17.0] - 2026-11-06
+
 ### Added
 
 - Added `tool-name-prefix` compat axis for Responses hosts that reject certain tool names; Muse Code sets it to `_` ([#17435](https://github.com/can1357/oh-my-pi/issues/17435), [#17515](https://github.com/can1357/oh-my-pi/pull/17515) by [@harshav167](https://github.com/harshav167), continued in [#18053](https://github.com/can1357/oh-my-pi/pull/18053) by [@abilliontokens](https://github.com/abilliontokens))
