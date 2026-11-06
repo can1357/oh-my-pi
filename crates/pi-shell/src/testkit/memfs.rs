@@ -257,7 +257,9 @@ impl MemFs {
 			Some(Node::Dir { .. }) => Arc::new(Mutex::new(Vec::new())),
 			Some(Node::Null) => return Ok(Box::new(NullFile)),
 			// A link loop.
-			Some(Node::Link { .. }) => return Err(io::Error::other("Too many levels of symbolic links")),
+			Some(Node::Link { .. }) => {
+				return Err(io::Error::other("Too many levels of symbolic links"));
+			},
 			Some(Node::File { .. }) if flags.contains(OpenFlags::EXCL) => {
 				return Err(io::ErrorKind::AlreadyExists.into());
 			},

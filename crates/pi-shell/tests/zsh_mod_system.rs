@@ -36,10 +36,13 @@ fn zsh(script: &str) -> (String, String, i32) {
 fn zsh_mod_system_sysopen_sysseek_systell_on_files() {
 	let (out, err, st) = zsh(
 		"zmodload zsh/system
-sysopen -w -o create -u fd f2; (( fd >= 10 )) && echo high; syswrite -o $fd hello; echo $(( systell(fd) ))
-sysseek -u $fd 1; echo $(( systell(fd) )); sysseek -u $fd -w end 0; echo $(( systell(fd) )); sysseek -u $fd -w current -2; echo $(( systell(fd) ))
+sysopen -w -o create -u fd f2; (( fd >= 10 )) && echo high; syswrite -o $fd hello; echo $(( \
+		 systell(fd) ))
+sysseek -u $fd 1; echo $(( systell(fd) )); sysseek -u $fd -w end 0; echo $(( systell(fd) )); \
+		 sysseek -u $fd -w current -2; echo $(( systell(fd) ))
 syswrite -o $fd XY; exec {fd}>&-; cat f2; echo
-sysopen -r -u 5 f2; sysread -i 5 x; print -r $x; sysseek -u 5 -w start 2; sysread -i 5 -s 2 y; print $y; echo $(( systell(5) )); sysseek -u 5 -5; echo $?; syserror
+sysopen -r -u 5 f2; sysread -i 5 x; print -r $x; sysseek -u 5 -w start 2; sysread -i 5 -s 2 y; \
+		 print $y; echo $(( systell(5) )); sysseek -u 5 -5; echo $?; syserror
 sysopen -w -o excl -u fd f2; echo $?; sysopen -a -u fd f2; syswrite -o $fd .; cat f2; echo
 sysopen -w -m 600 -o create,O_TRUNC -u fd f3; ls -l f3 | cut -c1-10
 sysopen -r -o cloexec -u fd f2; cat /dev/fd/$fd 2>/dev/null; echo $?

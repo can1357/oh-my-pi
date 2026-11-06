@@ -59,7 +59,8 @@ fn pcre_compile_errors_are_pcre1s() {
 		zsh(r#"zmodload zsh/pcre; pcre_compile "(abc"; echo $?; pcre_match abc; echo $?"#),
 		warned(
 			"1\n1\n",
-			"zsh:pcre_compile:1: error in regex: missing )\nzsh:pcre_match:1: no pattern has been compiled\n"
+			"zsh:pcre_compile:1: error in regex: missing )\nzsh:pcre_match:1: no pattern has been \
+			 compiled\n"
 		)
 	);
 	for (re, msg) in [
@@ -97,14 +98,17 @@ fn pcre_match_sets_match_and_captures() {
 fn pcre_match_offsets() {
 	assert_eq!(
 		zsh(
-			"zmodload zsh/pcre; pcre_compile 'b(c)'; pcre_match -b abcbc; echo $? $ZPCRE_OP $MATCH $match; \
-			 pcre_match -b -n 2 abcbc; echo $? $ZPCRE_OP; pcre_match -n 5 abcbc; echo $?; pcre_match -n 4 abcbc; \
-			 echo $?"
+			"zmodload zsh/pcre; pcre_compile 'b(c)'; pcre_match -b abcbc; echo $? $ZPCRE_OP $MATCH \
+			 $match; pcre_match -b -n 2 abcbc; echo $? $ZPCRE_OP; pcre_match -n 5 abcbc; echo $?; \
+			 pcre_match -n 4 abcbc; echo $?"
 		),
 		ok("0 1 3 bc c\n0 3 5\n1\n1\n")
 	);
 	assert_eq!(
-		zsh("zmodload zsh/pcre; pcre_compile a; pcre_match -n x a; echo $?; pcre_match -n -1 a; echo $?; pcre_match -n ' 0' a; echo $?"),
+		zsh(
+			"zmodload zsh/pcre; pcre_compile a; pcre_match -n x a; echo $?; pcre_match -n -1 a; echo \
+			 $?; pcre_match -n ' 0' a; echo $?"
+		),
 		warned(
 			"1\n1\n0\n",
 			"zsh:pcre_match:1: integer expected: x\nzsh:pcre_match:1: integer expected: -1\n"
@@ -115,17 +119,23 @@ fn pcre_match_offsets() {
 #[test]
 fn pcre_compile_options() {
 	assert_eq!(
-		zsh("zmodload zsh/pcre; pcre_compile -i ABC; pcre_match xabcx; echo $? $MATCH; pcre_compile ABC; pcre_match xabcx; echo $?"),
+		zsh(
+			"zmodload zsh/pcre; pcre_compile -i ABC; pcre_match xabcx; echo $? $MATCH; pcre_compile \
+			 ABC; pcre_match xabcx; echo $?"
+		),
 		ok("0 abc\n1\n")
 	);
 	assert_eq!(
-		zsh("zmodload zsh/pcre; pcre_compile -a b; pcre_match ab; echo $?; pcre_match ba; echo $? $MATCH"),
+		zsh(
+			"zmodload zsh/pcre; pcre_compile -a b; pcre_match ab; echo $?; pcre_match ba; echo $? \
+			 $MATCH"
+		),
 		ok("1\n0 b\n")
 	);
 	assert_eq!(
 		zsh(
-			"zmodload zsh/pcre; pcre_compile -m '^b$'; pcre_match $'a\\nb'; echo $?; pcre_compile -s 'a.b'; \
-			 pcre_match $'a\\nb'; echo $?; pcre_compile 'a.b'; pcre_match $'a\\nb'; echo $?"
+			"zmodload zsh/pcre; pcre_compile -m '^b$'; pcre_match $'a\\nb'; echo $?; pcre_compile -s \
+			 'a.b'; pcre_match $'a\\nb'; echo $?; pcre_compile 'a.b'; pcre_match $'a\\nb'; echo $?"
 		),
 		ok("0\n0\n1\n")
 	);
@@ -147,8 +157,8 @@ fn compiled_pattern_is_inherited_by_subshells() {
 fn utf8_subjects() {
 	assert_eq!(
 		zsh(
-			"LANG=en_US.UTF-8; zmodload zsh/pcre; pcre_compile 'l'; pcre_match -b héllo; echo $? $ZPCRE_OP; \
-			 pcre_match -n 2 héllo; echo $?"
+			"LANG=en_US.UTF-8; zmodload zsh/pcre; pcre_compile 'l'; pcre_match -b héllo; echo $? \
+			 $ZPCRE_OP; pcre_match -n 2 héllo; echo $?"
 		),
 		warned("0 3 4\n1\n", "zsh:pcre_match:1: error in pcre_exec [-11]\n")
 	);
@@ -217,7 +227,10 @@ fn rematchpcre_routes_eq_tilde_to_pcre() {
 		ok("0 b\nzsh/main\nzsh/pcre\n")
 	);
 	assert_eq!(
-		zsh("setopt rematchpcre; [[ ABC =~ 'b' ]]; echo $?; setopt nocasematch; [[ ABC =~ 'b' ]]; echo $? $MATCH"),
+		zsh(
+			"setopt rematchpcre; [[ ABC =~ 'b' ]]; echo $?; setopt nocasematch; [[ ABC =~ 'b' ]]; \
+			 echo $? $MATCH"
+		),
 		ok("1\n0 B\n")
 	);
 	assert_eq!(

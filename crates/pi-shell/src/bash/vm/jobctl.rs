@@ -29,7 +29,7 @@ use bstr::{BStr, BString};
 use super::{
 	Cx, Kernel, Shell,
 	exec::{self, Flow},
-	proc::{Frame, FrameKind, JobState, Live, PendingWrite, Saved, Scratch, ScriptKind, Vproc},
+	proc::{Frame, FrameKind, JobState, PendingWrite, Saved, Scratch, ScriptKind, Vproc},
 	state,
 };
 use crate::bash::{
@@ -121,7 +121,7 @@ impl JobCtl {
 }
 
 /// zsh `sigmsg`: how a signal is named in job notices.
-pub fn sigmsg(sig: Signal) -> &'static str {
+pub const fn sigmsg(sig: Signal) -> &'static str {
 	match sig {
 		Signal::Hup => "hangup",
 		Signal::Int => "interrupt",
@@ -269,10 +269,11 @@ pub fn init_io(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
 	}
 	open_shtty(k, cx);
 	let monitor = state::option(&mut k.root, cx.store, vp, OptId::Monitor).unwrap_or(false);
-	if monitor && !acquire(k, cx) {
-		if let Err(err) = state::set_zsh_option(&mut k.root, cx.store, vp, ZshOpt::Monitor, false) {
-			k.fail(err);
-		}
+	if monitor
+		&& !acquire(k, cx)
+		&& let Err(err) = state::set_zsh_option(&mut k.root, cx.store, vp, ZshOpt::Monitor, false)
+	{
+		k.fail(err);
 	}
 	for sig in [Signal::Int, Signal::Winch, Signal::Alrm] {
 		let _ = cx.host.set_signal_trap(sig, Some(BStr::new(CATCH)));
@@ -301,7 +302,7 @@ fn open_shtty(k: &mut Kernel, cx: &mut Cx<'_>) {
 /// The signals the interactive shell ignores itself (zsh `init_signals`):
 /// `QUIT` and `TERM`, and the terminal stop signals while it does job
 /// control.
-fn held_ignored(k: &Kernel) -> SigSet {
+const fn held_ignored(k: &Kernel) -> SigSet {
 	let mut set = SigSet::EMPTY.with(Signal::Quit).with(Signal::Term);
 	if k.jobctl.pgrp.is_some() {
 		set = set.with(Signal::Tstp).with(Signal::Ttin).with(Signal::Ttou);
@@ -582,9 +583,7 @@ pub fn started(k: &mut Kernel, cx: &mut Cx<'_>, vpid: Vpid, number: u32) {
 /// the flow of the op that waited); any other change is applied to the job
 /// table after the turn. `None`: the vproc goes on waiting.
 pub fn ext_event(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, ev: ProcEvent) -> Option<Flow> {
-	if k.jobctl.pgrp.is_none() {
-		return None;
-	}
+	k.jobctl.pgrp?;
 	match ev {
 		ProcEvent::Stopped(sig) if vp.parent.is_none() => Some(suspend(k, cx, vp, sig)),
 		ProcEvent::Exited(_) => None,
@@ -1036,7 +1035,7 @@ fn long_list(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 
 /// Print job `number`'s changed state (zsh `printjob` from `scanjobs` or
 /// `update_job`) and forget it when it is done (`deletejob`).
-fn report(k: &mut Kernel, vp: &mut Vproc, number: u32, platform: Platform, how: JobLine) {
+fn report(k: &Kernel, vp: &mut Vproc, number: u32, platform: Platform, how: JobLine) {
 	if let Some(line) = format_job(vp, number, how, platform) {
 		notice(k, vp, &line);
 	}
@@ -1237,13 +1236,13 @@ pub fn suspend_shell(k: &mut Kernel, cx: &mut Cx<'_>) -> bool {
 
 /// `jobs` listed the jobs: an `exit` right after leaves without the
 /// warning (zsh `bin_fg`: `stopmsg = 2`).
-pub fn jobs_listed(k: &mut Kernel) {
+pub const fn jobs_listed(k: &mut Kernel) {
 	k.jobctl.stopmsg = 2;
 }
 
 /// The interactive root read a command: an earlier `exit` warning wears
 /// off (zsh `loop`: `if (stopmsg) stopmsg--`).
-pub fn command_read(k: &mut Kernel) {
+pub const fn command_read(k: &mut Kernel) {
 	k.jobctl.stopmsg = k.jobctl.stopmsg.saturating_sub(1);
 }
 
@@ -1346,19 +1345,20 @@ impl Shell {
 						if let Some(job) = self.procs[owner].jobs.get_mut(number) {
 							job.notified = true;
 						}
-						// The `fg` waiting for it returns.
-						self.procs[owner].blocked = None;
-						self.k.ctl.notify();
-					} else {
-						if state::option(&mut self.k.root, cx.store, &self.procs[owner], OptId::Notify)
-							.unwrap_or(false)
-						{
-							report_async(&mut self.k, cx, &mut self.procs[owner], number, platform);
-						}
-						// A `wait` for it ends (a stop ends a wait with job control).
-						self.procs[owner].blocked = None;
-						self.k.ctl.notify();
+					} else if state::option(
+						&mut self.k.root,
+						cx.store,
+						&self.procs[owner],
+						OptId::Notify,
+					)
+					.unwrap_or(false)
+					{
+						report_async(&mut self.k, cx, &mut self.procs[owner], number, platform);
 					}
+					// The `fg` waiting for it returns; a `wait` for it ends (a stop
+					// ends a wait with job control).
+					self.procs[owner].blocked = None;
+					self.k.ctl.notify();
 				},
 				ProcEvent::Continued => self.job_changed(cx, leader, None),
 				ProcEvent::Exited(_) => {},
@@ -1368,6 +1368,7 @@ impl Shell {
 
 	/// Whether the program vproc `vpid` waits for is stopped now (`true`
 	/// when it cannot be told).
+	#[cfg(unix)]
 	fn ext_stopped(&self, vpid: Vpid) -> bool {
 		let Some(p) = self.procs.iter().find(|p| p.vpid == vpid) else {
 			return true;
@@ -1377,7 +1378,7 @@ impl Shell {
 			.iter()
 			.rev()
 			.find_map(|f| match f.scratch.as_deref().map(|sc| &sc.live) {
-				Some(Live::Ext(ext)) => Some(ext.pid()),
+				Some(super::proc::Live::Ext(ext)) => Some(ext.pid()),
 				_ => None,
 			});
 		let Some(pid) = pid.and_then(|pid| i32::try_from(pid).ok()) else {
@@ -1385,6 +1386,13 @@ impl Shell {
 		};
 		crate::sys::proc::info(pid)
 			.is_none_or(|info| info.state == crate::sys::proc::ProcState::Stopped)
+	}
+
+	/// Windows has no process-table state to recheck: a reported stop stands.
+	#[cfg(not(unix))]
+	#[expect(clippy::unused_self, reason = "the Unix variant reads the vprocs")]
+	const fn ext_stopped(&self, _vpid: Vpid) -> bool {
+		true
 	}
 
 	/// Whether vproc `v` is `ancestor` or below it.
