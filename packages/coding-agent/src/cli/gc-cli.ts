@@ -2333,36 +2333,50 @@ function renderText(result: GcResult): string {
 }
 
 /**
- * Put `text` on stderr and wait until the kernel has it.
+ * Put `text` on `stream` and wait until the kernel has it.
  *
- * `process.stderr.write` returns false when the pipe is full and keeps the
- * bytes in a userspace buffer, so a run that carried straight on could
- * delete a blob and then be killed with the warning never delivered —
- * measured at one unlinked blob and zero warning bytes. Awaiting the drain
- * is what makes "before the deletion" a fact about the reader rather than
- * about the order of two statements.
+ * `write` returns false when the pipe is full and keeps the bytes in a
+ * userspace buffer, so a caller that carries straight on is making a claim
+ * about the order of two statements rather than about what a reader saw.
+ * Both of this command's out-of-band writes need the stronger thing and for
+ * the same reason:
  *
- * A write that fails is the same answer as a write that cannot finish:
- * nothing is deleted. `/dev/full` and a broken pipe already end the run
- * before the blob phase, and that is the behaviour being kept. Not a
- * closed descriptor 2, though: Bun replaces an inherited closed stderr
- * with `/dev/null` before any of this runs, so the write succeeds and the
- * run carries on — an operator who sends the warning to `/dev/null` is
- * suppressing a diagnostic on purpose, and this does not try to outvote
- * them.
+ * - the reclamation warning must be *delivered* before the first unlink —
+ *   measured at one unlinked blob and zero warning bytes;
+ * - the summary a failing run prints must survive the rethrow — measured, on
+ *   a backpressured stdout, at a blob deleted and a receipt that stopped
+ *   mid-pathname and parsed as invalid JSON, because the process exited on
+ *   the uncaught error before the queued bytes drained.
+ *
+ * A write that fails is the same answer as a write that cannot finish, and
+ * the caller decides what that means: the warning path refuses to delete,
+ * the report path lets the original failure stand. Not a closed descriptor,
+ * though — Bun replaces an inherited closed stdout or stderr with
+ * `/dev/null` before any of this runs, so the write succeeds and the run
+ * carries on, which is the right answer for an operator who redirected it
+ * on purpose.
  */
-async function writeWarningBeforeDeleting(text: string): Promise<void> {
+async function writeDrained(stream: NodeJS.WriteStream, text: string): Promise<void> {
 	const { promise, resolve, reject } = Promise.withResolvers<void>();
 	// `true` means the stream handed the bytes straight to the kernel:
 	// nothing is queued, so there is nothing to wait for. `false` means they
 	// are sitting in a userspace buffer, which is the case this exists for —
 	// wait for the write callback, or for the drain that says the buffer has
 	// emptied, whichever the host delivers.
-	const accepted = process.stderr.write(text, error => (error ? reject(error) : resolve()));
+	const accepted = stream.write(text, error => (error ? reject(error) : resolve()));
 	if (accepted) return;
-	process.stderr.once("drain", resolve);
-	process.stderr.once("error", reject);
-	await promise;
+	const onDrain = (): void => resolve();
+	const onError = (error: Error): void => reject(error);
+	stream.once("drain", onDrain);
+	stream.once("error", onError);
+	try {
+		await promise;
+	} finally {
+		// One run may write twice, and a settled promise does not remove the
+		// listener that did not fire.
+		stream.off("drain", onDrain);
+		stream.off("error", onError);
+	}
 }
 
 /**
@@ -2390,8 +2404,13 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	// Built outside the lock so a phase that throws after an earlier one
 	// deleted something still has somewhere to say what was done.
 	const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath: "" };
-	const report = (): void => {
-		process.stdout.write(options.json ? `${JSON.stringify(next, null, 2)}\n` : renderText(next));
+	// Awaited, not queued. A failing run rethrows straight after reporting and
+	// the process exits on that error, so an unawaited write loses the receipt
+	// exactly when it matters: measured against a backpressured stdout, a
+	// reclaiming run deleted a blob and printed a truncated object that did not
+	// parse. The success path awaits for the same reason and costs nothing.
+	const report = async (): Promise<void> => {
+		await writeDrained(process.stdout, options.json ? `${JSON.stringify(next, null, 2)}\n` : renderText(next));
 	};
 	try {
 		await withGcLock(options.agentDir, async lockPath => {
@@ -2414,7 +2433,7 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 				// that arrives only when every later phase succeeds is a
 				// receipt, and the reader who most needs it is the one whose
 				// run then failed.
-				if (options.apply) await writeWarningBeforeDeleting(`warning: blobs: ${GC_BLOBS_WARNING}\n`);
+				if (options.apply) await writeDrained(process.stderr, `warning: blobs: ${GC_BLOBS_WARNING}\n`);
 				next.blobs = await runBlobGc(options, archiveRoot);
 			}
 			if (options.runArchive) next.archive = await runArchiveGc(options, archiveRoot, registeredSessionPaths);
@@ -2433,9 +2452,13 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 		// unreadable `custom-session-files` immediately after it starts; both
 		// printed `GC applied (<dir>)`, and a metadata-only object under
 		// `--json`, for a run that touched nothing.
-		if (hasPhaseResult(next)) report();
+		// Awaited before the rethrow: the process exits on this error, and a
+		// receipt still sitting in a userspace buffer is not a receipt. A
+		// report that itself cannot be written does not replace the failure
+		// the run is already reporting.
+		if (hasPhaseResult(next)) await report().catch(() => undefined);
 		throw error;
 	}
-	report();
+	await report();
 	return next;
 }

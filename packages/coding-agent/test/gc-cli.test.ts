@@ -3099,6 +3099,100 @@ describe("runGcCommand blob reclamation is opt-in and announced", () => {
 		process.platform !== "win32" &&
 		Bun.spawnSync(["mkfifo", "--version"], { stdout: "ignore", stderr: "ignore" }).success;
 	test.if(fifoAvailable)(
+		"delivers what it deleted even when stdout is backpressured",
+		async () => {
+			const orphan = await writeBlob(root, hashFor("stdout-backpressure"), "orphan");
+			await agePath(orphan);
+			// A database the checkpoint phase fails on, after the blob phase has
+			// already deleted something.
+			await fs.mkdir(getHistoryDbPath(root), { recursive: true });
+
+			// A real pipe, really full, on stdout this time. The receipt is
+			// written and the run then rethrows; the process exits on that
+			// error, so a queued write is a receipt nobody receives — measured
+			// at a deleted blob and a JSON object that stopped mid-string.
+			const fifo = path.join(root, "stdout.fifo");
+			expect(await Bun.spawn(["mkfifo", fifo]).exited).toBe(0);
+			const reader = await fs.open(fifo, fsSync.constants.O_RDONLY | fsSync.constants.O_NONBLOCK);
+			const writer = await fs.open(fifo, fsSync.constants.O_WRONLY | fsSync.constants.O_NONBLOCK);
+			const block = Buffer.alloc(4096, 0x50);
+			let prefilled = 0;
+			for (;;) {
+				try {
+					prefilled += (await writer.write(block)).bytesWritten;
+				} catch {
+					break;
+				}
+			}
+			expect(prefilled).toBeGreaterThan(0);
+
+			const child = Bun.spawn(
+				[
+					process.execPath,
+					path.join(import.meta.dir, "..", "src", "cli.ts"),
+					"gc",
+					"--blobs",
+					"--wal",
+					"--apply",
+					"--json",
+				],
+				{
+					env: { ...process.env, PI_CODING_AGENT_DIR: root, NO_COLOR: "1" },
+					stdout: writer.fd,
+					stderr: "ignore",
+				},
+			);
+			try {
+				// Nothing is read while the child runs: the pipe stays full, so
+				// its receipt can only be queued, never delivered. An unawaited
+				// write returns here and the rethrow ends the process with the
+				// bytes still in a userspace buffer.
+				await Bun.sleep(1_500);
+
+				const drained: Buffer[] = [];
+				const sink = Buffer.alloc(65_536);
+				const deadline = Date.now() + 20_000;
+				for (;;) {
+					try {
+						const read = await reader.read(sink, 0, sink.length);
+						if (read.bytesRead > 0) {
+							drained.push(Buffer.from(sink.subarray(0, read.bytesRead)));
+							continue;
+						}
+					} catch {
+						// Nothing readable yet.
+					}
+					if (await Promise.race([child.exited.then(() => true), Bun.sleep(50).then(() => false)])) break;
+					if (Date.now() > deadline) break;
+				}
+				for (;;) {
+					try {
+						const read = await reader.read(sink, 0, sink.length);
+						if (read.bytesRead === 0) break;
+						drained.push(Buffer.from(sink.subarray(0, read.bytesRead)));
+					} catch {
+						break;
+					}
+				}
+
+				// The run failed on the checkpoint, so exit 1 — and the receipt
+				// for the deletion it had already made still arrived, whole.
+				expect(await child.exited).toBe(1);
+				const receipt = Buffer.concat(drained).toString().slice(prefilled);
+				expect(receipt).toContain('"deleted": 1');
+				expect(() => JSON.parse(receipt) as unknown).not.toThrow();
+				expect(await Bun.file(orphan).exists()).toBe(false);
+			} finally {
+				child.kill();
+				await child.exited;
+				await writer.close();
+				await reader.close();
+			}
+		},
+		60_000,
+	);
+
+	test.if(fifoAvailable)(
 		"does not delete while the warning is still queued",
 		async () => {
 			const orphan = await writeBlob(root, hashFor("backpressure-orphan"), "orphan");
