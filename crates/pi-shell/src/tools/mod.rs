@@ -40,8 +40,8 @@ use parking_lot::Mutex;
 
 use crate::{
 	bash::{
-		CallId, CallOutcome, ControlHandle, Cx, IoPoll, Launch, LaunchHow, Lineage, NativeRef,
-		RunId, Script, Shell, ShellApi, ToolCall, ToolRef,
+		CallId, CallOutcome, ControlHandle, Cx, IoPoll, Launch, LaunchHow, Lineage, NativeRef, RunId,
+		Script, Shell, ShellApi, ToolCall, ToolRef,
 	},
 	extras::{ExtrasGate, ReportedError},
 	git::{GitLayers, flag_on},

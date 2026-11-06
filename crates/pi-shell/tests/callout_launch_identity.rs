@@ -7,14 +7,14 @@
 //! of blocked names:
 //!
 //! 1. **By name.** The launch belongs to the run and is taken by the one
-//!    command the engine built for it. A function, an alias or a trap
-//!    action named like any word the engine ever used cannot reach it, and
-//!    naming one must not change what the shell does.
-//! 2. **By text.** No compiled unit, no retained trace and no checkpoint
-//!    image holds a word of the engine's own. The rows below search those
-//!    bytes mechanically. Each search is validated in the same run by a
-//!    marker that *is* in the operand: a search that finds nothing because
-//!    it is looking in the wrong place fails here.
+//!    command the engine built for it. A function, an alias or a trap action
+//!    named like any word the engine ever used cannot reach it, and naming one
+//!    must not change what the shell does.
+//! 2. **By text.** No compiled unit, no retained trace and no checkpoint image
+//!    holds a word of the engine's own. The rows below search those bytes
+//!    mechanically. Each search is validated in the same run by a marker that
+//!    *is* in the operand: a search that finds nothing because it is looking in
+//!    the wrong place fails here.
 //!
 //! What the shell reports for such a command is the operand's own text,
 //! rendered as `set -x` renders a word list — a zero-length word as `''`.
@@ -30,8 +30,7 @@ use pi_shell::{
 	Shell, ShellOptions, ShellRunOptions,
 	bash::{
 		Budget, CallOutcome, Cx, Engine, EngineConfig, Event, EventData, EventMask, EventSink,
-		MemStore, Script, Shell as BashShell, Step,
-		trace::RunTrace,
+		MemStore, Script, Shell as BashShell, Step, trace::RunTrace,
 	},
 	cancel::CancelToken,
 	testkit::{FakeHost, fault::skeleton_init},
@@ -130,8 +129,8 @@ async fn a_debug_trap_named_like_the_engine_cannot_take_the_launch() {
 #[tokio::test]
 async fn a_debug_trap_naming_the_engine_does_not_change_the_callouts_status() {
 	assert_name_blind(
-		"set -T\ntrap 'NAME' DEBUG 2>/dev/null\ntimeout 3 printf 'OPERAND\\n' \
-		 2>/dev/null\nprintf 'rc=%s\\n' \"$?\"",
+		"set -T\ntrap 'NAME' DEBUG 2>/dev/null\ntimeout 3 printf 'OPERAND\\n' 2>/dev/null\nprintf \
+		 'rc=%s\\n' \"$?\"",
 		ENGINE_WORDS,
 	)
 	.await;
@@ -167,8 +166,7 @@ async fn the_reported_command_keeps_a_zero_length_word() {
 		(
 			"set -T\ntrap 'printf \"CMD=<%s>\\n\" \"$BASH_COMMAND\"' DEBUG\ntimeout 3 printf \
 			 '%s|%s|%s\\n' a '' b",
-			"CMD=<timeout 3 printf '%s|%s|%s\\n' a '' b>\nCMD=<printf '%s|%s|%s\\n' a '' \
-			 b>\na||b\n",
+			"CMD=<timeout 3 printf '%s|%s|%s\\n' a '' b>\nCMD=<printf '%s|%s|%s\\n' a '' b>\na||b\n",
 		),
 	])
 	.await;
@@ -179,7 +177,7 @@ async fn the_reported_command_keeps_a_zero_length_word() {
 async fn xtrace_shows_the_operand_and_no_word_of_the_engines() {
 	let got = output("set -x\ntimeout 3 printf 'OPERAND:%s\\n' ''\n").await;
 	assert!(got.contains("OPERAND:"), "the operand ran: {got:?}");
-    for word in ENGINE_WORDS {
+	for word in ENGINE_WORDS {
 		assert!(!got.contains(word), "`{word}` reached an xtrace line: {got:?}");
 	}
 	assert!(got.contains("printf 'OPERAND:%s\\n' ''"), "the empty word is shown: {got:?}");
@@ -235,10 +233,7 @@ timeout 3 printf '[%s]OPERAND-MARKER-F\\n' ''
 	for marker in ["A", "B", "C", "D", "E", "F"] {
 		assert!(out.contains(&format!("OPERAND-MARKER-{marker}")), "operand {marker} ran: {out:?}");
 	}
-	assert!(
-		json.contains("OPERAND-MARKER-A"),
-		"the trace carries the operands it is searched for"
-	);
+	assert!(json.contains("OPERAND-MARKER-A"), "the trace carries the operands it is searched for");
 	// The user wrote `__pi_callout` here, as an alias and a function, so
 	// the source of *their* commands holds it; the engine's own command
 	// must hold nothing. Every unit the trace kept is checked by source.
@@ -254,10 +249,7 @@ timeout 3 printf '[%s]OPERAND-MARKER-F\\n' ''
 	for unit in engine_units {
 		let src = unit["source"].as_str().unwrap_or_default();
 		for word in ENGINE_WORDS {
-			assert!(
-				!src.contains(word),
-				"a unit the user never wrote holds `{word}`: {unit}"
-			);
+			assert!(!src.contains(word), "a unit the user never wrote holds `{word}`: {unit}");
 		}
 	}
 }
@@ -360,7 +352,9 @@ fn no_compiled_unit_or_checkpoint_image_holds_an_engine_word() {
 		String::from_utf8_lossy(&plain_out)
 	);
 	assert!(
-		plain_units.iter().any(|s| s.windows(6).any(|w| w == b"printf")),
+		plain_units
+			.iter()
+			.any(|s| s.windows(6).any(|w| w == b"printf")),
 		"the search sees the units the user wrote"
 	);
 	let count = |haystack: &[u8], needle: &str| {

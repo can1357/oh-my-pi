@@ -79,9 +79,7 @@ impl Git {
 								if let Some(git) = git_path(&self.call) {
 									let argv = std::iter::once(git).chain(args).collect();
 									let dups: &[(u32, u32)] = if to_stderr { &[(1, 2)] } else { &[] };
-									self
-										.child
-										.start(api, turn, &self.call, argv, false, dups);
+									self.child.start(api, turn, &self.call, argv, false, dups);
 									Stage::Running
 								} else {
 									self.out.push(2, "git: command not found\n");

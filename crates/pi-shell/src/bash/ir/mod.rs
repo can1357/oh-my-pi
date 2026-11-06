@@ -1052,8 +1052,9 @@ pub(crate) fn compile(
 /// serves every callout of the same shape in a session.
 ///
 /// A command the engine built has no bytes to re-parse, so it carries the
-/// syntax a reader needs ([`UnitSyntax`](crate::bash::trace::syntax::UnitSyntax))
-/// instead of leaving the reader to recover it from a source.
+/// syntax a reader needs
+/// ([`UnitSyntax`](crate::bash::trace::syntax::UnitSyntax)) instead of leaving
+/// the reader to recover it from a source.
 pub(crate) fn launch_unit(mode: ModeId, features: u32, dups: &[(u32, u32)]) -> Unit {
 	let text: Vec<u8> = dups
 		.iter()
@@ -1061,13 +1062,8 @@ pub(crate) fn launch_unit(mode: ModeId, features: u32, dups: &[(u32, u32)]) -> U
 		.collect();
 	let mut unit = Unit::empty(&text, mode, features);
 	let span = crate::bash::syntax::Span { lo: 0, hi: text.len() as u32 };
-	unit.nodes = vec![NodeInfo {
-		kind: NodeKind::Simple,
-		lo:   0,
-		hi:   text.len() as u32,
-		line: 0,
-		col:  1,
-	}];
+	unit.nodes =
+		vec![NodeInfo { kind: NodeKind::Simple, lo: 0, hi: text.len() as u32, line: 0, col: 1 }];
 	unit.lists = vec![Vec::new()];
 	let mut syn_redirs = Vec::new();
 	let redirs = if dups.is_empty() {
@@ -1119,14 +1115,28 @@ pub(crate) fn launch_unit(mode: ModeId, features: u32, dups: &[(u32, u32)]) -> U
 	};
 	unit.cmds = vec![Cmd { assigns: Vec::new(), words: 0, redirs, typeset: false }];
 	unit.ops = vec![
-		Op { code: Opcode::Exec, flags: 0, ev: Opcode::Exec.ev_bits(), a: 0, b: 0, node: 0 },
-		Op { code: Opcode::End, flags: 0, ev: Opcode::End.ev_bits(), a: 0, b: 0, node: 0 },
+		Op {
+			code:  Opcode::Exec,
+			flags: 0,
+			ev:    Opcode::Exec.ev_bits(),
+			a:     0,
+			b:     0,
+			node:  0,
+		},
+		Op {
+			code:  Opcode::End,
+			flags: 0,
+			ev:    Opcode::End.ev_bits(),
+			a:     0,
+			b:     0,
+			node:  0,
+		},
 	];
 	unit.seal();
 	let command = crate::bash::syntax::Command {
-		id:     crate::bash::syntax::NodeId(0),
-		span:   span,
-		kind:   crate::bash::syntax::CommandKind::Simple(crate::bash::syntax::Simple::default()),
+		id: crate::bash::syntax::NodeId(0),
+		span,
+		kind: crate::bash::syntax::CommandKind::Simple(crate::bash::syntax::Simple::default()),
 		redirs: syn_redirs,
 	};
 	let _ = unit.trace_syntax.set(std::sync::Arc::new(
