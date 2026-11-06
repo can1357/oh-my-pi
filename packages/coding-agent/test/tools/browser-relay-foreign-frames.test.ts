@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
+import {
+	closeLaunchedBrowser,
+	ensureChromiumExecutable,
+	RENDERER_PRIORITY_ARGS,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import puppeteer from "puppeteer-core";
 import { pastForeignFrames } from "../../../browser-relay/extension/foreign-frames";
 import { rejectionOf } from "../helpers/rejection";
@@ -82,7 +86,7 @@ describe("pastForeignFrames", () => {
 			const browser = await puppeteer.launch({
 				executablePath: await ensureChromiumExecutable(),
 				headless: true,
-				args: ["--no-first-run"],
+				args: ["--no-first-run", ...RENDERER_PRIORITY_ARGS],
 			});
 			try {
 				const page = await browser.newPage();
@@ -117,7 +121,7 @@ describe("pastForeignFrames", () => {
 				).toBeTrue();
 				expect(await page.$eval("iframe", frame => frame.hasAttribute("srcdoc"))).toBeTrue();
 			} finally {
-				await browser.close();
+				await closeLaunchedBrowser(browser);
 			}
 		},
 		30_000,
