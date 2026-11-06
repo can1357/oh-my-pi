@@ -131,16 +131,13 @@ pub(super) fn expand_args(ctx: &mut Ctx<'_, '_>, list: &List, args: &[BString]) 
 		let defev = h.addhistnum(h.st.curhist, -1, 0);
 		h.curline = Some(LineState { defev, lex: Lex::new(), ..LineState::default() });
 		let mut steps = Steps::new(&none, 0);
-		match bang::expand_line(&mut h, arg, &o, &mut steps) {
-			Ok(text) => {
-				out.extend_from_slice(&text);
-				out.push(b'\n');
-			},
-			Err(_) => {
-				ctx.out(&std::mem::take(&mut out));
-				ctx.usage(format!("{}: history expansion failed", arg.as_bstr()));
-				status = 1;
-			},
+		if let Ok(text) = bang::expand_line(&mut h, arg, &o, &mut steps) {
+			out.extend_from_slice(&text);
+			out.push(b'\n');
+		} else {
+			ctx.out(&std::mem::take(&mut out));
+			ctx.usage(format!("{}: history expansion failed", arg.as_bstr()));
+			status = 1;
 		}
 	}
 	ctx.out(&out);

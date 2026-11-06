@@ -74,7 +74,7 @@ fn ztat(ctx: &Ctx<'_, '_>, nam: &[u8], ls: bool) -> Result<Option<Stat>, Need> {
 }
 
 /// Same file (`st_dev` and `st_ino`).
-fn same(a: &Stat, b: &Stat) -> bool {
+const fn same(a: &Stat, b: &Stat) -> bool {
 	a.dev == b.dev && a.ino == b.ino
 }
 
@@ -120,21 +120,23 @@ fn cfp_test_exact(
 	if accept.len() == 1 && is(&accept[0], ["false", "no", "off", "0"]) {
 		return Ok(None);
 	}
-	let mut alist: Option<Vec<Arc<crate::bash::pattern::zsh::Pattern>>> = None;
-	if accept.len() > 1 || !is(&accept[0], ["true", "yes", "on", "1"]) {
-		let mut l = Vec::new();
-		let mut any = false;
-		for p in accept {
-			if p == "*" {
-				any = true;
-				break;
+	let alist: Option<Vec<Arc<crate::bash::pattern::zsh::Pattern>>> =
+		if accept.len() > 1 || !is(&accept[0], ["true", "yes", "on", "1"]) {
+			let mut l = Vec::new();
+			let mut any = false;
+			for p in accept {
+				if p == "*" {
+					any = true;
+					break;
+				}
+				if let Some(prog) = compile(ctx, failed, &metafy(p))? {
+					l.push(prog);
+				}
 			}
-			if let Some(prog) = compile(ctx, failed, &metafy(p))? {
-				l.push(prog);
-			}
-		}
-		alist = (!any).then_some(l);
-	}
+			(!any).then_some(l)
+		} else {
+			None
+		};
 	let sl = skipped.len() + env.prefix.len() + env.suffix.len();
 	if sl > PATH_MAX2 {
 		return Ok(None);
@@ -284,7 +286,7 @@ fn cfp_matcher_pats(matcher: &[u8], add: &[u8], utf8: bool, warns: &mut Vec<Vec<
 	let mut ms: Vec<Option<Arc<Cmatcher>>> = vec![None; add.len()];
 	let step = |s: &[u8], i: usize| metachar(s, i, utf8).0;
 	let mut m = Some(first);
-	while let Some(cm) = m.filter(|_| !add.is_empty()) {
+	while let Some(cm) = m.take().filter(|_| !add.is_empty()) {
 		let mut stopp: Option<(Vec<Cpattern>, i32)> = None;
 		if cm.flags & (cmf::LEFT | cmf::RIGHT) == 0 {
 			if cm.llen == 1 && cm.wlen == 1 {
@@ -342,7 +344,7 @@ fn cfp_matcher_pats(matcher: &[u8], add: &[u8], utf8: bool, warns: &mut Vec<Vec<
 				t += step(&add, t);
 			}
 		}
-		m = cm.next.clone();
+		m.clone_from(&cm.next);
 	}
 	if add.is_empty() {
 		add
@@ -386,7 +388,7 @@ fn cfp_opt_pats(
 		let mut t = rembslash(&[&pre[..], &env.suffix[..]].concat()).to_vec();
 		tokenize(&mut t);
 		remnulargs(&mut t);
-		let popts = px(ctx, failed, |ex| zpattern::opts(ex))?.unwrap_or_default();
+		let popts = px(ctx, failed, zpattern::opts)?.unwrap_or_default();
 		if haswilds(&mut t, &popts) {
 			return Ok(());
 		}
@@ -621,7 +623,7 @@ fn cf_pats(
 /// zsh `cf_ignore`: names to ignore because they are the current or the
 /// parent directory (`ignore-parents` style `style`, `path` the prefix).
 fn cf_ignore(
-	ctx: &mut Ctx<'_, '_>,
+	ctx: &Ctx<'_, '_>,
 	env: &Env,
 	names: &[BString],
 	ign: &mut Vec<BString>,
@@ -629,11 +631,11 @@ fn cf_ignore(
 	path: &[u8],
 ) -> Result<(), Need> {
 	let tpar = style.find(b"parent").is_some();
-	let mut est = None;
-	if style.find(b"pwd").is_some() {
-		let pwd = ctx.vp.cwd.clone();
-		est = stat(ctx, &pwd, false)?;
-	}
+	let est = if style.find(b"pwd").is_some() {
+		stat(ctx, &ctx.vp.cwd, false)?
+	} else {
+		None
+	};
 	if !tpar && est.is_none() {
 		return Ok(());
 	}

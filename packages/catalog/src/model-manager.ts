@@ -432,7 +432,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			// non-authoritative row reads back as a fresh catalog and suppresses
 			// refetch for NON_AUTHORITATIVE_RETRY_MS, hiding every discovery-only
 			// model until it ages out. Writing nothing lets the next launch retry
-			// immediately (#10964).
+			// immediately (#10964). Likewise keep a prior row whose header-bearing
+			// models cannot be restored offline: rewriting it would drop them and
+			// mark the remainder fresh, while the untouched row keeps forcing a
+			// refetch that recovers them (#18227).
 			const latestCache = readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath);
 			const latestRestoredCache = restoreCachedModelHeaders(
 				latestCache?.models ?? cache?.models ?? [],
@@ -468,7 +471,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 					? retainModelIds(mergedFallbackModels, latestUsableCacheModels)
 					: mergedFallbackModels,
 			);
-			if (fallbackSnapshotModels.length > 0 || latestCache !== null || cache !== null) {
+			if (
+				latestRestoredCache.unresolvedModelIds.size === 0 &&
+				(fallbackSnapshotModels.length > 0 || latestCache !== null || cache !== null)
+			) {
 				writeModelCache(
 					cacheProviderId,
 					now(),

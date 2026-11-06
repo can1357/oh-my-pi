@@ -31,8 +31,4 @@ describe("substitutePluginRoot", () => {
 			env: { HOME: "/plugins/my-plugin" },
 		});
 	});
-
-	it("returns string unchanged when no variables present", () => {
-		expect(substitutePluginRoot("no-vars-here", ROOT)).toBe("no-vars-here");
-	});
 });

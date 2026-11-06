@@ -424,12 +424,11 @@ pub fn expand_prompt_in(
 	cmdstack: Vec<&'static str>,
 ) -> X<Vec<u8>> {
 	use crate::bash::vm::state;
-	let (percent, bang, subst) = match opts {
-		Some(o) => o,
-		None => {
-			let mut zopt = |o: ZshOpt| state::zsh_option(&mut ex.k.root, ex.cx.store, ex.vp, o);
-			(zopt(ZshOpt::Promptpercent)?, zopt(ZshOpt::Promptbang)?, zopt(ZshOpt::Promptsubst)?)
-		},
+	let (percent, bang, subst) = if let Some(o) = opts {
+		o
+	} else {
+		let mut zopt = |o: ZshOpt| state::zsh_option(&mut ex.k.root, ex.cx.store, ex.vp, o);
+		(zopt(ZshOpt::Promptpercent)?, zopt(ZshOpt::Promptbang)?, zopt(ZshOpt::Promptsubst)?)
 	};
 	let text = if subst {
 		let status = ex.vp.status;
