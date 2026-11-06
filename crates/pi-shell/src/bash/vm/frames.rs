@@ -60,8 +60,9 @@ use crate::bash::{
 /// run's `launch` (what a host callout's carrier command runs, until that
 /// command has taken it) and 32 its dispatch, whether the run's source is
 /// the engine's own, and a `BASH_COMMAND` that is a callout operand's text
-/// rather than a unit's syntax node.
-pub const FRAMES_VERSION: u32 = 32;
+/// rather than a unit's syntax node; 33 adds the launch's fd duplications
+/// and the content address of the command the engine built to run it.
+pub const FRAMES_VERSION: u32 = 33;
 
 const MAGIC: [u8; 4] = *b"OBF1";
 
@@ -315,7 +316,8 @@ struct RunImage {
 	explicit_mode:     bool,
 	lossy:             u8,
 	args:              Option<Vec<BString>>,
-	launch:            Option<super::Launch>,
+	launch:            super::proc::LaunchSlot,
+	carrier:           Option<UnitId>,
 	engine:            bool,
 	cwd:               Option<BString>,
 	env:               Vec<(BString, BString)>,
@@ -906,6 +908,7 @@ impl Shell {
 					lossy:             r.lossy,
 					args:              r.args,
 					launch:            r.launch,
+					carrier:           r.carrier,
 					engine:            r.engine,
 					cwd:               r.cwd,
 					env:               r.env,
@@ -1146,6 +1149,7 @@ fn run_image(r: &Run) -> RunImage {
 		lossy:             r.lossy,
 		args:              r.args.clone(),
 		launch:            r.launch.clone(),
+		carrier:           r.carrier,
 		engine:            r.engine,
 		cwd:               r.cwd.clone(),
 		env:               r.env.clone(),

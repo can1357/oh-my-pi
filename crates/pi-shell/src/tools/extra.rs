@@ -39,8 +39,8 @@ use tokio_util::sync::CancellationToken;
 use super::{Child, ToolConfig, Turn};
 use crate::{
 	bash::{
-		CallOutcome, IntrinsicId, LAUNCH_CARRIER, Launch, LaunchHow, Lineage, ModeId, RunId,
-		RunStdio, Script, ShellApi, ToolCall, VprocSel,
+		CallOutcome, IntrinsicId, Launch, LaunchHow, Lineage, ModeId, RunId, RunStdio, Script,
+		ShellApi, ToolCall, VprocSel,
 	},
 	extras::Done,
 	sys::StdFile,
@@ -233,12 +233,13 @@ fn script(mut command: ShellCommand, program: &Program, env_names: &[BString]) -
 		}
 	}
 	let mut args: Vec<BString> = command.args().iter().map(|arg| os_bytes(arg)).collect();
-	// The operand's words, how they run and the text the shell shows for
-	// them go to the engine as data ([`Script::launch`]), not into the
-	// synthetic source and not as positional parameters: the subshell keeps
-	// the caller's parameters, the source is the same one command whatever
-	// the operand is, and no `command` or `exec` word is there for a
-	// caller's function or alias of that name to take.
+	// The operand's words, how they run, the fds its command duplicates
+	// and the text the shell shows for them go to the engine as data
+	// ([`Script::launch`]), not into the synthetic source and not as
+	// positional parameters: the subshell keeps the caller's parameters,
+	// the command that runs them is one the engine builds with no word in
+	// it, and no `command` or `exec` word is there for a caller's function
+	// or alias of that name to take.
 	let how = match program {
 		Program::Builtin => LaunchHow::Builtin,
 		Program::Path(path) => {
@@ -249,9 +250,8 @@ fn script(mut command: ShellCommand, program: &Program, env_names: &[BString]) -
 			LaunchHow::Exec { argv0 }
 		},
 	};
-	source.extend_from_slice(LAUNCH_CARRIER.as_bytes());
 	let mut script = Script::command(source);
-	script.launch = Some(Launch { argv: args, how });
+	script.launch = Some(Launch { argv: args, how, dups: Vec::new() });
 	// The environment sweep above is the engine's own text, parsed without
 	// the caller's aliases and resolved without its functions.
 	script.engine_source = true;

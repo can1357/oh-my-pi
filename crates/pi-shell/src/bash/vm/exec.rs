@@ -15,9 +15,9 @@ use super::{
 	expand::{self, Expander, Stop},
 	is_ident, probe,
 	proc::{
-		AssignValue, Atom, Bang, BangStage, CmdSite, Coproc, Depths, Frame, FrameKind, InlineStage,
-		LastBg, LoopKind, LoopRec, ParseSnapshot, PendingSub, PendingWrite, Probe, ProbeResult, Run,
-		Saved, Scratch, ScriptKind, Slot, TryEnd, Vproc,
+		AssignValue, Atom, Bang, BangStage, Carrier, CmdSite, Coproc, Depths, Frame, FrameKind,
+		InlineStage, LastBg, LoopKind, LoopRec, ParseSnapshot, PendingSub, PendingWrite, Probe,
+		ProbeResult, Run, Saved, Scratch, ScriptKind, Slot, TryEnd, Vproc,
 	},
 	redir,
 	state::{self, Level, Root, Scope, Var, VarMap},
@@ -573,10 +573,11 @@ pub fn set_trap_line(vp: &mut Vproc, line: u32) {
 ///
 /// A host callout's carrier command is recorded as its operand's own text
 /// instead ([`CmdSite::Text`]), from this first reader on: the DEBUG trap
-/// runs before the command's words are expanded, so the carrier would
-/// otherwise be what it reports. The carrier is the one command of the
-/// engine's own script whose source is [`LAUNCH_CARRIER`], and the run
-/// still carries the operand until that command expands.
+/// runs before the command's words are expanded, so an empty text would
+/// otherwise be what it reports. The carrier is the command the engine
+/// built for this run ([`Carrier`]) — its own frame and its own unit, not
+/// a name and not a word of source — and the run still carries the
+/// operand until that command expands.
 fn note_command(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, unit: &Arc<Unit>, op: Op) {
 	if vp.trap_frames == 0
 		|| !vp
@@ -584,14 +585,12 @@ fn note_command(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, unit: &Arc<Unit
 			.iter()
 			.any(|f| matches!(f.kind, FrameKind::Script { what: ScriptKind::Trap { .. }, .. }))
 	{
-		if vp.runs.front().is_some_and(|r| r.launch.is_some())
-			&& node_text(unit, op.node) == crate::bash::vm::LAUNCH_CARRIER.as_bytes()
-		{
+		if let Some(carrier) = Carrier::of(vp) {
 			let utf8 = super::locale::is_utf8(k, cx.store, vp);
 			let text = vp
 				.runs
 				.front()
-				.and_then(|r| r.launch.as_ref())
+				.and_then(|r| r.launch.peek(&carrier))
 				.map(|launch| command::launch_text(launch, utf8));
 			if let Some(text) = text {
 				vp.command = Some(CmdSite::Text(Box::new(text)));
@@ -1091,6 +1090,36 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 				top_frame(vp).scratch = Some(sc);
 				return Some(key);
 			}
+		}
+		// The one command of a host callout's synthetic script is not in
+		// that script: when the engine's own source (an `env` environment
+		// sweep, or nothing at all) has run out, the engine installs the
+		// command it built for the run's launch ([`ir::launch_unit`]). It
+		// has no words, so there is nothing in it to alias, shadow, trap
+		// or read, and its content address — not a name — is what lets
+		// [`Carrier`] recognise it. It is installed once: `carrier` is set
+		// here and the frame pops on the next pass.
+		let carrier_dups = if matches!(
+			vp.frames.as_slice(),
+			[frame] if matches!(frame.kind, FrameKind::Script { what: ScriptKind::Run, .. })
+		) {
+			vp.runs
+				.front()
+				.filter(|r| r.engine && r.launch.pending() && r.carrier.is_none())
+				.map(|r| r.launch.dups())
+		} else {
+			None
+		};
+		if let Some(dups) = carrier_dups {
+			let unit = k.engine.intern(ir::launch_unit(mode, feat.bits(), &dups));
+			if let Some(run) = vp.runs.front_mut() {
+				run.carrier = Some(unit.id);
+			}
+			let frame = top_frame(vp);
+			frame.unit = Some(Arc::clone(&unit));
+			frame.pc = 0;
+			announce(k, cx, vp.vpid, vp.runs.front(), &unit, 1);
+			return None;
 		}
 		let frame = top_frame(vp);
 		let (status, source, cancel, return_target, exit) = match frame.kind {

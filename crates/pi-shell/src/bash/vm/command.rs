@@ -14,17 +14,16 @@ use std::{
 use bstr::{BStr, BString};
 
 use super::{
-	CallOutcome, Cx, Kernel, LAUNCH_CARRIER, Launch, LaunchHow, ToolCall, assign_scope,
+	CallOutcome, Cx, Kernel, Launch, LaunchHow, ToolCall, assign_scope,
 	builtins::{self, Chunk, Control, Ctx, Lhs, Need},
 	exec::{self, Flow, expanding, line_of},
 	expand::{CompoundElem, Expander, Stop, compound_text},
 	probe::{self, Search, absolute, candidates},
 	proc::{
-		AssignValue, Awaited, BangStage, DeferPhase, ExecAs, ExecState, Frame, FrameKind, JobState,
-		Live, PathSearch, PendingWrite, Probe, ProbeResult, Scratch, ScriptKind, Slot, Stage, Target,
-		Transfer, Vproc,
+		AssignValue, Awaited, BangStage, Carrier, DeferPhase, ExecAs, ExecState, Frame, FrameKind,
+		JobState, Live, PathSearch, PendingWrite, Probe, ProbeResult, Scratch, ScriptKind, Slot,
+		Stage, Target, Transfer, Vproc,
 	},
-	quote,
 	state::{self, Level, Scope, Var, VarMap},
 	xtrace,
 };
@@ -206,7 +205,7 @@ pub fn exec(
 		.last()
 		.and_then(|f| f.scratch.as_ref())
 		.is_none_or(|s| s.exec.is_none())
-		&& vp.runs.front().is_none_or(|r| r.launch.is_none())
+		&& vp.runs.front().is_none_or(|r| !r.launch.pending())
 		&& let Some(flow) = assignment_statement(k, vp, cx, unit, op, line)
 			.or_else(|| plain_statement(k, vp, cx, unit, op, line))
 	{
@@ -858,6 +857,11 @@ fn expand(
 	if unit.mode.dialect() == crate::bash::ids::Dialect::Zsh {
 		zsh_last_arg(k, vp, cx);
 	}
+	// The engine's own carrier command has no words of its own, so its
+	// launch has to become its words before anything decides what kind of
+	// command this is: a word-less command is otherwise a statement of
+	// assignments and redirections.
+	take_launch(k, cx, vp);
 	let assign_only = st(vp).argv.is_empty();
 	if !assign_only && !cmd.assigns.is_empty() && !st(vp).scoped {
 		// The command's temporary scope: each prefix assignment enters it
@@ -1181,22 +1185,23 @@ fn expand(
 /// parameters, as the `( … )` subshell a callout stands for does, and one
 /// unit serves every call.
 ///
-/// Nothing of the carrier reaches the user. Its word is never resolved as
-/// a name (the operand's words replace it first), never alias-expanded
-/// (the source is the engine's own), and never shown: what
-/// `BASH_COMMAND`, the DEBUG and ERR traps and the trace report is the
-/// operand's own text, which [`exec::note_command`] records before the
-/// first of them can read it.
+/// Nothing of the carrier reaches the user. It has no words at all, so
+/// there is no name to resolve, nothing for an alias to rewrite and no
+/// source text to read; what `BASH_COMMAND`, the DEBUG and ERR traps and
+/// the trace report is the operand's own text, which
+/// [`exec::note_command`] records before the first of them can read it.
 ///
-/// The carrier is recognised by its expanded word list, which the engine
-/// wrote as the single word [`LAUNCH_CARRIER`]. The other commands a
-/// synthetic script may carry (`env -i`'s unset sweep, its `export`
-/// assignments) never expand to it.
+/// The carrier is recognised by [`Carrier`]: the innermost frame is this
+/// run's own script frame and the unit it runs is the one the engine
+/// built for this launch, matched by content address. The other commands
+/// a synthetic script may carry (`env -i`'s unset sweep, its `export`
+/// assignments) run in that same frame from a different unit, so they
+/// cannot ask, and a trap, a function or an operand runs a frame deeper.
 fn take_launch(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
-	if st(vp).argv.len() != 1 || st(vp).argv[0].as_slice() != LAUNCH_CARRIER.as_bytes() {
+	let Some(carrier) = Carrier::of(vp) else {
 		return;
-	}
-	let Some(launch) = vp.runs.front_mut().and_then(|r| r.launch.take()) else {
+	};
+	let Some(launch) = vp.runs.front_mut().and_then(|r| r.launch.take(carrier)) else {
 		return;
 	};
 	let zsh = vp.mode.dialect() == crate::bash::ids::Dialect::Zsh;
@@ -1233,10 +1238,11 @@ fn take_launch(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
 	}
 }
 
-/// A host callout's operand as the shell prints a command: each word
-/// quoted only where it needs it (bash's `printable_filename`, which
-/// `hash -l` and `set -x` use), and the name the program is presented as
-/// (`exec -a`) rather than the path it was resolved to.
+/// A host callout's operand as the shell prints a command: each word as
+/// `set -x` prints it ([`xtrace::push_word`], bash's `printable_filename`
+/// over a word list, with a zero-length word as `''`), and the name the
+/// program is presented as (`exec -a`) rather than the path it was
+/// resolved to.
 pub(super) fn launch_text(launch: &Launch, utf8: bool) -> BString {
 	let mut out: Vec<u8> = Vec::new();
 	for (i, word) in launch.argv.iter().enumerate() {
@@ -1247,7 +1253,7 @@ pub(super) fn launch_text(launch: &Launch, utf8: bool) -> BString {
 			(0, LaunchHow::Exec { argv0 }) => argv0.as_slice(),
 			_ => word.as_slice(),
 		};
-		out.extend_from_slice(&quote::printable_filename(word, utf8, true));
+		xtrace::push_word(&mut out, word, utf8);
 	}
 	BString::from(out)
 }
@@ -1265,7 +1271,7 @@ pub(super) fn launch_text(launch: &Launch, utf8: bool) -> BString {
 fn engine_private(vp: &Vproc) -> bool {
 	vp.runs
 		.front()
-		.is_some_and(|r| r.engine && r.launch.is_some())
+		.is_some_and(|r| r.engine && r.launch.pending())
 		&& matches!(
 			vp.frames.as_slice(),
 			[frame] if matches!(frame.kind, FrameKind::Script { what: ScriptKind::Run, .. })

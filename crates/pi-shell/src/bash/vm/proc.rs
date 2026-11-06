@@ -754,8 +754,8 @@ pub enum CmdSite {
 	/// A host callout's operand ([`super::Launch`]), which has no source of
 	/// its own: the words as the shell would print them, boxed so this site
 	/// stays the size of the node one (every byte here is a byte per idle
-	/// vproc). The carrier word the engine compiled is private and never
-	/// reported.
+	/// vproc). The command the engine built to run them has no words at
+	/// all, so there is nothing of the engine's to report.
 	Text(Box<BString>),
 }
 
@@ -827,10 +827,14 @@ pub struct Run {
 	/// Root scripts: positional parameters, cwd and exported variables to
 	/// install when the script starts.
 	pub args:              Option<Vec<BString>>,
-	/// The command this run's carrier command runs
+	/// What this run's carrier command runs
 	/// ([`Script::launch`](super::Script::launch)), taken by that command
-	/// once its own words are expanded and `None` from then on.
-	pub launch:            Option<super::Launch>,
+	/// once its own words are expanded and empty from then on.
+	pub launch:            LaunchSlot,
+	/// The unit the engine built for this run's carrier command, once it
+	/// has been installed ([`Carrier`]). A content address: the one thing
+	/// that identifies the carrier, in place of a name.
+	pub carrier:           Option<crate::bash::ids::UnitId>,
 	/// The source is the engine's own
 	/// ([`Script::engine_source`](super::Script::engine_source)).
 	pub engine:            bool,
@@ -838,6 +842,75 @@ pub struct Run {
 	pub env:               Vec<(BString, BString)>,
 	pub started:           bool,
 	pub exit_trap_started: bool,
+}
+
+/// A run's pending launch, and the proof needed to take it.
+///
+/// The host writes the slot when it submits the script; it is read
+/// exactly once, by the carrier command the engine built for that run.
+/// Reading it needs a [`Carrier`], and nothing a caller writes can make
+/// one: the only constructor checks that the innermost frame is this
+/// run's own script frame and that the unit running in it is the very
+/// unit the engine installed for this launch, matched by content
+/// address. A function, an alias, a trap or an operand named like any
+/// word of the engine's own is therefore not merely rejected — it has no
+/// way to ask.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LaunchSlot(Option<super::Launch>);
+
+impl LaunchSlot {
+	/// The slot a submitted script asks for.
+	pub fn new(launch: Option<super::Launch>) -> Self {
+		Self(launch)
+	}
+
+	/// Whether a launch is still to run. Says nothing about what it is.
+	pub fn pending(&self) -> bool {
+		self.0.is_some()
+	}
+
+	/// The fd duplications the carrier command applies, which the engine
+	/// needs to build that command before it can prove it is running it.
+	pub(super) fn dups(&self) -> Vec<(u32, u32)> {
+		self.0.as_ref().map_or_else(Vec::new, |l| l.dups.clone())
+	}
+
+	/// Read the launch without consuming it (the text the shell reports
+	/// for the command, recorded before the DEBUG trap can read it).
+	pub(super) fn peek(&self, _: &Carrier) -> Option<&super::Launch> {
+		self.0.as_ref()
+	}
+
+	/// Take the launch. The token is consumed with it: one carrier, one
+	/// read.
+	pub(super) fn take(&mut self, _: Carrier) -> Option<super::Launch> {
+		self.0.take()
+	}
+}
+
+/// Proof that the command now running is the carrier of a run's launch.
+///
+/// Not a name and not a byte of text: the frame identity of the run that
+/// owns the launch, and the content address of the unit the engine built
+/// for it.
+pub(super) struct Carrier(());
+
+impl Carrier {
+	/// The proof, if this vproc is running that command right now.
+	pub(super) fn of(vp: &Vproc) -> Option<Self> {
+		let run = vp.runs.front()?;
+		if !run.engine || !run.launch.pending() {
+			return None;
+		}
+		let carrier = run.carrier?;
+		let [frame] = vp.frames.as_slice() else {
+			return None;
+		};
+		if !matches!(frame.kind, FrameKind::Script { what: ScriptKind::Run, .. }) {
+			return None;
+		}
+		(frame.unit.as_ref()?.id == carrier).then_some(Self(()))
+	}
 }
 
 /// What kind of activation a frame is.

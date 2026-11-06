@@ -219,14 +219,16 @@ pub struct Script {
 	/// script. Putting the operand's words in that script — as positional
 	/// parameters, or quoted into its text — makes per-call data part of
 	/// something the engine keys on: a scope, which has a lifetime, or a
-	/// compiled unit, which has a content address. These words are neither.
-	/// The source is one fixed carrier command per callout shape, so every
-	/// callout in a session compiles to the same unit; the words, how they
-	/// are dispatched and the text the shell shows for them replace the
-	/// carrier's own the moment that command's words are expanded, and the
-	/// slot is empty from then on. The subshell's positional parameters
-	/// are its caller's throughout, exactly as in the `( … )` subshell a
-	/// callout stands for, and nothing the operand runs can reach the slot.
+	/// compiled unit, which has a content address. These words are
+	/// neither. The command that runs them is not text at all: the engine
+	/// builds it, with no word in it, so one unit serves every callout of
+	/// the same shape and nothing of the engine's can be named, aliased,
+	/// trapped or read back. The words, how they are dispatched and the
+	/// text the shell shows for them become that command's own the moment
+	/// it is expanded, and the slot is empty from then on. The subshell's
+	/// positional parameters are its caller's throughout, exactly as in
+	/// the `( … )` subshell a callout stands for, and nothing the operand
+	/// runs can reach the slot.
 	///
 	/// Unrelated to [`Script::args`], which is still the script's own
 	/// positional parameters.
@@ -237,8 +239,8 @@ pub struct Script {
 	/// names may rewrite them: they are parsed without the shell's aliases,
 	/// and the commands they contain themselves (not the operand the host
 	/// supplies in [`Script::launch`]) resolve without the shell's
-	/// functions. A callout's own `unset`, `export` or carrier word is
-	/// therefore not something a caller can alias, shadow or observe.
+	/// functions. A callout's own `unset` or `export` is therefore not
+	/// something a caller can alias, shadow or observe.
 	pub engine_source: bool,
 	/// Which virtual process runs it.
 	pub vproc:         VprocSel,
@@ -256,25 +258,24 @@ pub struct Script {
 	pub unexport_env:  Vec<BString>,
 }
 
-/// The one word of a host callout's synthetic script, a private marker in
-/// bytes the engine wrote and no user text reaches.
-///
-/// It is never resolved as a name (the operand's words replace it before
-/// the command is looked up), never alias-expanded
-/// ([`Script::engine_source`]) and never shown (the operand's own text is
-/// what `BASH_COMMAND`, the DEBUG and ERR traps and the trace report), so
-/// every callout of the same redirect shape has the same source and
-/// compiles to the same unit, whatever its operand is.
-pub const LAUNCH_CARRIER: &str = "__pi_callout";
-
 /// What a host callout's carrier command runs ([`Script::launch`]): the
-/// operand's words, and how the shell dispatches them.
+/// operand's words, how the shell dispatches them, and the fd
+/// duplications the command itself carries.
+///
+/// None of it is text. The engine builds the carrier command from this
+/// ([`crate::bash::ir::launch_unit`]) rather than writing words into a
+/// script, so no compiled unit, trace node, `BASH_COMMAND`, `set -x`
+/// line or checkpoint image holds a word of the engine's own.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Launch {
-	/// The command's words, which replace the carrier's.
+	/// The command's words.
 	pub argv: Vec<BString>,
 	/// How they are dispatched.
 	pub how:  LaunchHow,
+	/// `(fd, to)` pairs the carrier command applies as `fd>&to` (a tool
+	/// whose operand writes to the caller's stderr), stated rather than
+	/// written as a redirection in a source.
+	pub dups: Vec<(u32, u32)>,
 }
 
 /// How a [`Launch`]'s words run.
@@ -1678,7 +1679,8 @@ impl Shell {
 			explicit_mode: script.mode.is_some(),
 			lossy: 0,
 			args: None,
-			launch: script.launch,
+			launch: crate::bash::vm::proc::LaunchSlot::new(script.launch),
+			carrier: None,
 			engine: script.engine_source,
 			cwd: None,
 			env: Vec::new(),
