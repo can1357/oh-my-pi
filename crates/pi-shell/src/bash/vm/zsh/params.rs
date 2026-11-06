@@ -46,7 +46,7 @@ use crate::bash::{
 		unmetafy, untokenize,
 	},
 	vm::{
-		builtins::Ctx,
+		builtins::{Ctx, zsh_module},
 		expand::{Expander, Stop, X},
 		mode,
 		state::{self, Level, Var},
@@ -85,6 +85,10 @@ impl PmFlags {
 	pub const LOWER: Self = Self(1 << 8);
 	/// `PM_READONLY`.
 	pub const READONLY: Self = Self(1 << 10);
+	/// `PM_REMOVABLE`: here only zsh/param/private's mark of a private
+	/// parameter ([`Attrs::ZSH_PRIVATE`]), which also carries `PM_HIDE`,
+	/// `PM_SPECIAL` and `PM_RO_BY_DESIGN` (zsh `makeprivate`).
+	pub const REMOVABLE: Self = Self(1 << 25);
 	/// `PM_RIGHT_B`.
 	pub const RIGHT_B: Self = Self(1 << 6);
 	/// `PM_RIGHT_Z`.
@@ -168,6 +172,12 @@ impl PmFlags {
 				f = f.with(Self::DECLARED);
 			}
 		}
+		if a.contains(Attrs::ZSH_PRIVATE) {
+			f = f
+				.with(Self::HIDE)
+				.with(Self::SPECIAL)
+				.with(Self::RO_BY_DESIGN);
+		}
 		f
 	}
 
@@ -197,7 +207,7 @@ impl PmFlags {
 }
 
 /// Store attributes and the zsh flags they stand for (besides the type).
-const ATTR_MAP: [(Attrs, PmFlags); 12] = [
+const ATTR_MAP: [(Attrs, PmFlags); 13] = [
 	(Attrs::LOWER, PmFlags::LOWER),
 	(Attrs::UPPER, PmFlags::UPPER),
 	(Attrs::READONLY, PmFlags::READONLY),
@@ -210,6 +220,7 @@ const ATTR_MAP: [(Attrs, PmFlags); 12] = [
 	(Attrs::ZSH_TIED, PmFlags::TIED),
 	(Attrs::ZSH_HIDE, PmFlags::HIDE),
 	(Attrs::ZSH_HIDEVAL, PmFlags::HIDEVAL),
+	(Attrs::ZSH_PRIVATE, PmFlags::REMOVABLE),
 ];
 
 /// A parameter's value as zsh code sees it (raw bytes).
@@ -242,6 +253,11 @@ pub struct Param {
 	pub scope:   Option<usize>,
 	/// `typeset -T` partner and separator (built-in ties included).
 	pub tied:    Option<(BString, u8)>,
+	/// The value was not computed: a keyed special
+	/// ([`Special::keyed`]) about to be read through one key, which
+	/// [`specials::get_elem`] answers alone. [`Param::materialize`]
+	/// computes the whole value for every other use.
+	pub lazy:    bool,
 	/// The stored attributes (association table size included).
 	attrs:       Attrs,
 }
@@ -263,6 +279,7 @@ impl Param {
 			special: None,
 			scope: None,
 			tied: None,
+			lazy: false,
 			attrs: flags.to_attrs(0, 0),
 		}
 	}
@@ -278,8 +295,33 @@ impl Param {
 			special: Some(sp),
 			scope: None,
 			tied: sp.tie_partner().map(|(p, sep)| (BString::from(p), sep)),
+			lazy: false,
 			attrs: flags.to_attrs(0, 0),
 		}
+	}
+
+	/// A keyed special whose value is computed only when needed
+	/// ([`Param::lazy`]).
+	fn lazy_special(name: &[u8], sp: Special) -> Self {
+		let mut p = Self::special(name, sp.flags(), PValue::Hash(Vec::new()), sp);
+		p.lazy = true;
+		p
+	}
+
+	/// Compute the whole value of a [`Param::lazy`] parameter.
+	///
+	/// # Errors
+	/// [`Stop::Store`] when the state cannot be read.
+	pub fn materialize(&mut self, ex: &mut Expander<'_, '_>) -> X<()> {
+		if !self.lazy {
+			return Ok(());
+		}
+		if let Some(sp) = self.special {
+			let value = specials::param(ex, sp, &self.name)?.value;
+			self.value = value;
+		}
+		self.lazy = false;
+		Ok(())
 	}
 
 	/// The scalar text (no padding or case applied): a scalar's value,
@@ -297,9 +339,9 @@ impl Param {
 
 	/// zsh `getstrvalue` with `VALFLAG_SUBST`: [`Self::text`] with the
 	/// `-L/-R/-Z` padding and `-l/-u` case applied (raw bytes).
-	pub fn strval(&self) -> BString {
+	pub fn strval(&self, mb: bool) -> BString {
 		let s = metafy(&self.text());
-		BString::from(unmetafy(&pad_and_case(self, s, false)))
+		BString::from(unmetafy(&pad_and_case(self, s, false, mb)))
 	}
 
 	/// The type description of `${(t)x}` and `$parameters` (subst.c's
@@ -313,7 +355,12 @@ impl Param {
 			PmFlags::HASHED => "association",
 			_ => "scalar",
 		});
-		if self.scope.is_some() && self.special.is_none() {
+		// zsh/complete's specials are locals of the completion function
+		// (`makecompparams` at `locallevel + 1`).
+		if (self.scope.is_some() && self.special.is_none())
+			|| matches!(self.special, Some(Special::Comp(_)))
+			|| f.contains(PmFlags::LOCAL)
+		{
 			s.push_str("-local");
 		}
 		for (flag, word) in [
@@ -359,14 +406,14 @@ impl Param {
 
 /// zsh `getstrvalue`'s `VALFLAG_SUBST` block on the metafied text `s`:
 /// `-L/-R/-Z` padding and `-l/-u` case.
-fn pad_and_case(pm: &Param, s: Vec<u8>, cbases: bool) -> Vec<u8> {
+fn pad_and_case(pm: &Param, s: Vec<u8>, cbases: bool, mb: bool) -> Vec<u8> {
 	let f = pm.flags;
 	let mut s = s;
 	if f.intersects(PmFlags::LEFT.with(PmFlags::RIGHT_B).with(PmFlags::RIGHT_Z)) {
 		let fwidth = if pm.width > 0 {
 			usize::from(pm.width)
 		} else {
-			text::strlen_chars(&s)
+			text::strlen_chars(&s, mb)
 		};
 		let lr = PmFlags(f.0 & (PmFlags::LEFT.0 | PmFlags::RIGHT_B.0 | PmFlags::RIGHT_Z.0));
 		if lr.contains(PmFlags::LEFT) {
@@ -383,14 +430,14 @@ fn pad_and_case(pm: &Param, s: Vec<u8>, cbases: bool) -> Vec<u8> {
 			let mut tend = t;
 			let mut t0 = 0;
 			while t0 < fwidth && tend < s.len() {
-				tend += text::charlen(&s, tend);
+				tend += text::charlen(&s, tend, mb);
 				t0 += 1;
 			}
 			let mut out = span(&s, t, tend).to_vec();
 			out.resize(out.len() + (fwidth - t0), b' ');
 			s = out;
 		} else {
-			let charlen = text::strlen_chars(&s);
+			let charlen = text::strlen_chars(&s, mb);
 			if charlen < fwidth {
 				let mut zero = true;
 				let mut valprefend = 0;
@@ -430,16 +477,16 @@ fn pad_and_case(pm: &Param, s: Vec<u8>, cbases: bool) -> Vec<u8> {
 			} else {
 				let mut skip = 0;
 				for _ in 0..charlen - fwidth {
-					skip += text::charlen(&s, skip);
+					skip += text::charlen(&s, skip, mb);
 				}
 				s.drain(..skip);
 			}
 		}
 	}
 	if f.contains(PmFlags::LOWER) && !f.contains(PmFlags::UPPER) {
-		s = text::casemodify(&s, text::CaseMod::Lower);
+		s = text::casemodify(&s, text::CaseMod::Lower, mb);
 	} else if f.contains(PmFlags::UPPER) && !f.contains(PmFlags::LOWER) {
-		s = text::casemodify(&s, text::CaseMod::Upper);
+		s = text::casemodify(&s, text::CaseMod::Upper, mb);
 	}
 	s
 }
@@ -496,7 +543,10 @@ pub const ASSPM_KEY_VALUE: u32 = 1 << 4;
 // ------------------------------------------------------------------
 
 /// One zsh option for the vproc the expander runs in.
-pub(super) fn opt(ex: &mut Expander<'_, '_>, o: ZshOpt) -> X<bool> {
+///
+/// # Errors
+/// A store failure when the option cannot be read.
+pub(crate) fn opt(ex: &mut Expander<'_, '_>, o: ZshOpt) -> X<bool> {
 	Ok(state::zsh_option(&mut ex.k.root, ex.cx.store, ex.vp, o)?)
 }
 
@@ -521,8 +571,9 @@ pub(super) fn bad_subscript(msg: impl Into<BString>) -> Stop {
 }
 
 /// zsh `isident`: a name, a run of digits, or either with a balanced
-/// `[…]` subscript after it (`s` untokenized or tokenized).
-pub fn isident(s: &[u8]) -> bool {
+/// `[…]` subscript after it (`s` untokenized or tokenized, metafied);
+/// `wide` as for [`text::ident_end`] ([`wide_idents`]).
+pub fn isident(s: &[u8], wide: bool) -> bool {
 	if s.is_empty() {
 		return false;
 	}
@@ -531,7 +582,7 @@ pub fn isident(s: &[u8]) -> bool {
 			.position(|c| !c.is_ascii_digit())
 			.unwrap_or(s.len())
 	} else {
-		text::ident_end(s, 0)
+		text::ident_end(s, 0, wide)
 	};
 	if end == s.len() {
 		return true;
@@ -546,17 +597,11 @@ pub fn isident(s: &[u8]) -> bool {
 }
 
 /// The stored variable named `name` as `vp` sees it (declared-but-unset
-/// ones included), copied, and the scope binding it.
-fn read_var(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<(Option<Var>, Option<usize>)> {
-	let var = state::lookup_declared(&ex.k.root, ex.cx.store, ex.vp, name)?
-		.filter(|v| !bash_only(name, v))
-		.cloned();
-	let scope = if var.is_some() && state::scope_count(&ex.k.root, ex.vp) > 0 {
-		state::binding_scope(&ex.k.root, ex.cx.store, ex.vp, name)?
-	} else {
-		None
-	};
-	Ok((var, scope))
+/// ones included), borrowed, and the scope binding it.
+fn read_var<'a>(ex: &'a mut Expander<'_, '_>, name: &[u8]) -> X<(Option<&'a Var>, Option<usize>)> {
+	let (var, scope) = state::lookup_declared_scoped(&ex.k.root, ex.cx.store, ex.vp, name)?;
+	let var = var.filter(|v| !bash_only(name, v));
+	Ok((var, scope.filter(|_| var.is_some())))
 }
 
 /// Whether a stored variable is one the bash side keeps for its own
@@ -622,9 +667,9 @@ pub fn set_tie_sep(ex: &mut Expander<'_, '_>, scalar: &[u8], sep: u8) -> X<bool>
 
 /// The partner and separator of a `typeset -T` tie of `name`.
 fn tie_of(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<(BString, BString, u8)>> {
-	let words = match state::record(ex.cx.store, ex.vp, Key::Misc(MiscKey::ZshTies))? {
-		Some(Record::Words(w)) => w.clone(),
-		_ => return Ok(None),
+	let Some(Record::Words(words)) = state::record(ex.cx.store, ex.vp, Key::Misc(MiscKey::ZshTies))?
+	else {
+		return Ok(None);
 	};
 	for t in words.as_chunks::<3>().0 {
 		if t[0].as_slice() == name || t[1].as_slice() == name {
@@ -636,9 +681,20 @@ fn tie_of(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<(BString, BString,
 }
 
 /// The parameter for a stored variable.
-fn param_of(name: &[u8], var: &Var, scope: Option<usize>, plain: Option<Special>) -> Param {
+fn param_of(
+	name: &[u8],
+	var: &Var,
+	scope: Option<usize>,
+	plain: Option<Special>,
+	type_only: bool,
+) -> Param {
 	let flags = PmFlags::from_var(var);
 	let value = match &var.value {
+		_ if type_only => match flags.type_bits() {
+			PmFlags::ARRAY => PValue::Array(Vec::new()),
+			PmFlags::HASHED => PValue::Hash(Vec::new()),
+			_ => PValue::Scalar(BString::default()),
+		},
 		VarValue::Str(s) => {
 			if flags.type_bits() == PmFlags::ARRAY {
 				PValue::Array(Vec::new())
@@ -664,6 +720,7 @@ fn param_of(name: &[u8], var: &Var, scope: Option<usize>, plain: Option<Special>
 		special: None,
 		scope,
 		tied: None,
+		lazy: false,
 		attrs: var.attrs,
 	};
 	if let Some(sp) = plain {
@@ -694,22 +751,130 @@ fn shadowed(ex: &mut Expander<'_, '_>, name: &[u8]) {
 /// # Errors
 /// [`Stop::Store`] when the store fails.
 pub fn getparam(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<Param>> {
-	let sp = specials::lookup(name);
+	getparam_in(ex, name, Defer::None)
+}
+
+/// [`getparam`] for a read through one key: a keyed special
+/// ([`Special::keyed`]) comes back [`Param::lazy`], its whole value not
+/// computed (`$+functions[f]` must not regenerate every function body).
+///
+/// # Errors
+/// [`Stop::Store`] when the store fails.
+pub fn getparam_lazy(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<Param>> {
+	getparam_in(ex, name, Defer::Keyed)
+}
+
+/// [`getparam`] for its type and flags only (zsh/parameter's
+/// `$parameters`): stored values are not copied and no computed special's
+/// value is computed (each keystroke
+/// of a highlighter scanning `$parameters` must not list the history).
+///
+/// # Errors
+/// [`Stop::Store`] when the store fails.
+pub fn getparam_type(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<Param>> {
+	getparam_in(ex, name, Defer::All)
+}
+
+/// Which computed specials [`getparam_in`] leaves [`Param::lazy`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Defer {
+	/// None: every value is computed.
+	None,
+	/// Keyed specials ([`Special::keyed`]).
+	Keyed,
+	/// Every computed special, and the values of stored parameters.
+	All,
+	/// Only stored parameter values; computed getters still run.
+	Stored,
+}
+
+fn getparam_in(ex: &mut Expander<'_, '_>, name: &[u8], defer: Defer) -> X<Option<Param>> {
+	let mut sp = specials::as_started(ex, specials::lookup(name), name)?;
+	// The editor's parameters exist while shell code runs for the line
+	// editor (zsh `makezleparams` locals); otherwise the names are plain.
+	if let Some(Special::Zle(z)) = sp
+		&& !crate::bash::vm::zle::params::visible(ex.vp, z)
+	{
+		sp = None;
+	}
+	// zsh/complete's exist while a completion function runs.
+	if let Some(Special::Comp(_)) = sp
+		&& !crate::bash::vm::zle::comp::complete::visible(ex.vp)
+	{
+		sp = None;
+	}
+	// A module's parameter exists while its module provides it (and
+	// autoloads the module when it is an autoload stub).
+	let mut pstate = zsh_module::ParamState::default();
+	if sp.is_some_and(|s| s.module().is_some()) {
+		match zsh_module::param_state(ex, name)? {
+			Some(s) => pstate = s,
+			None => sp = None,
+		}
+	}
 	let (var, scope) = read_var(ex, name)?;
+	let attrs = var.map(|v| v.attrs);
+	// Only ordinary parameters need the stored value. A computed special
+	// uses its backing binding's attributes, never a copy of its value.
+	let hide = !pstate.unhidden && sp.is_some_and(|s| s.flags().contains(PmFlags::HIDE));
+	let hidden = attrs.is_some_and(|a| a.contains(Attrs::ZSH_HIDE) || (hide && scope.is_some()));
+	let stored = if sp.is_none_or(Special::is_plain) || hidden {
+		var.map(|v| {
+			param_of(
+				name,
+				v,
+				scope,
+				sp.filter(|s| s.is_plain() && !v.attrs.contains(Attrs::ZSH_HIDE)),
+				matches!(defer, Defer::All | Defer::Stored),
+			)
+		})
+	} else {
+		None
+	};
+	// An autoload stub of a parameter no module of the engine defines
+	// (`zmodload -ap`): loading its module fails to define it.
+	if sp.is_none() && attrs.is_none() && zsh_module::param_stub(ex.cx.store, ex.vp, name)? {
+		zsh_module::param_present(ex, name)?;
+		return Ok(None);
+	}
 	if let Some(sp) = sp
 		&& !sp.is_plain()
 	{
-		let hidden = var
-			.as_ref()
-			.is_some_and(|v| v.attrs.contains(Attrs::ZSH_HIDE));
+		// zsh `typeset_single` makes a local of a `PM_HIDE` special's name
+		// an ordinary parameter hiding it (from the functions it calls too).
 		if !hidden {
-			if var.is_some() && !sp.is_backed_by(name) {
+			// `local SECONDS`: the special itself, local to that scope.
+			let local = attrs.is_some_and(|a| a.contains(Attrs::ZSH_LOCAL_SPECIAL));
+			if attrs.is_some() && !local && !sp.is_backed_by(name) {
 				shadowed(ex, name);
 			}
-			return Ok(Some(specials::param(ex, sp, name)?));
+			let mut p = if pstate.unset {
+				// `unset` kept the special, `PM_UNSET`.
+				let flags = sp.flags().with(PmFlags::UNSET);
+				let value = match flags.type_bits() {
+					PmFlags::ARRAY => PValue::Array(Vec::new()),
+					PmFlags::HASHED => PValue::Hash(Vec::new()),
+					_ => PValue::Scalar(BString::default()),
+				};
+				Param::special(name, flags, value, sp)
+			} else if (defer == Defer::All && sp != Special::Seconds)
+				|| (defer == Defer::Keyed && sp.keyed())
+			{
+				Param::lazy_special(name, sp)
+			} else {
+				specials::param(ex, sp, name)?
+			};
+			if !hide {
+				p.flags = p.flags.without(PmFlags::HIDE);
+			}
+			if local {
+				p.flags = p.flags.with(PmFlags::LOCAL);
+				p.scope = scope;
+			}
+			return Ok(Some(p));
 		}
 	}
-	let Some(var) = var else {
+	let Some(mut p) = stored else {
 		if let Some(sp @ Special::Version(_)) = sp {
 			let p = specials::param(ex, sp, name)?;
 			return Ok(Some(Param { special: None, ..p }));
@@ -717,9 +882,8 @@ pub fn getparam(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<Param>> {
 		return Ok(None);
 	};
 	// A local hiding a special (`typeset -h`) is an ordinary parameter.
-	let sp = sp.filter(|_| !var.attrs.contains(Attrs::ZSH_HIDE));
-	let mut p = param_of(name, &var, scope, sp.filter(|s| s.is_plain()));
-	if var.attrs.contains(Attrs::ZSH_TIED)
+	let sp = sp.filter(|_| !p.attrs.contains(Attrs::ZSH_HIDE));
+	if p.attrs.contains(Attrs::ZSH_TIED)
 		&& let Some((scalar, array, sep)) = tie_of(ex, name)?
 	{
 		let partner = if scalar.as_slice() == name {
@@ -729,8 +893,13 @@ pub fn getparam(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<Param>> {
 		};
 		p.tied = Some((partner, sep));
 	}
-	if let Some((partner, sep)) = sp.and_then(Special::tie_partner) {
-		p.flags = p.flags.with(PmFlags::TIED);
+	if let Some(sp) = sp
+		&& let Some((partner, sep)) = sp.tie_partner()
+	{
+		// zsh/watch's `WATCH` is tied without `PM_TIED`.
+		p.flags = p
+			.flags
+			.with(PmFlags::from_bits(sp.flags().bits() & PmFlags::TIED.bits()));
 		p.tied = Some((BString::from(partner), sep));
 	}
 	Ok(Some(p))
@@ -885,35 +1054,47 @@ impl Value {
 		}
 	}
 
-	/// zsh `getvaluearr`: the whole array (metafied), cached; for an
-	/// association the scan its flags select.
-	fn getvaluearr(&mut self, ex: &mut Expander<'_, '_>) -> X<Option<Vec<Vec<u8>>>> {
-		if let Some(a) = &self.arr {
-			return Ok(Some(a.clone()));
-		}
-		if self.elem.is_some() {
-			return Ok(None);
+	/// Cache zsh `getvaluearr`: the whole array (metafied), or the
+	/// association scan its flags select. Scalar views leave it absent.
+	fn ensure_valuearr(&mut self, ex: &mut Expander<'_, '_>) -> X<()> {
+		if self.arr.is_some() || self.elem.is_some() {
+			return Ok(());
 		}
 		let arr = match &self.pm.value {
 			PValue::Array(a) if self.pm.flags.type_bits() == PmFlags::ARRAY => {
 				a.iter().map(|e| metafy(e)).collect()
 			},
 			PValue::Hash(h) if self.pm.flags.type_bits() == PmFlags::HASHED => {
-				let h = h.clone();
-				let a = self.paramvalarr(ex, &h)?;
+				let a = self.paramvalarr(ex, h)?;
 				self.start = 0;
 				self.end = i64::try_from(a.len()).unwrap_or(i64::MAX) + 1;
 				a
 			},
-			_ => return Ok(None),
+			_ => return Ok(()),
 		};
-		self.arr = Some(arr.clone());
-		Ok(Some(arr))
+		self.arr = Some(arr);
+		Ok(())
 	}
 
 	/// zsh `paramvalarr` + `scanparamvals` over the entries `h`.
 	fn paramvalarr(&self, ex: &mut Expander<'_, '_>, h: &[(BString, BString)]) -> X<Vec<Vec<u8>>> {
 		let flags = self.isarr;
+		if flags & (SCANPM_MATCHVAL | SCANPM_MATCHKEY | SCANPM_KEYMATCH) == 0 {
+			// Plain key/value iteration needs no pattern environment, and
+			// value-only reads never need to encode the keys.
+			let keys = flags & SCANPM_WANTKEYS != 0;
+			let vals = !keys || flags & SCANPM_WANTVALS != 0;
+			let mut out = Vec::with_capacity(h.len() * (usize::from(keys) + usize::from(vals)));
+			for (k, v) in h {
+				if keys {
+					out.push(metafy(k));
+				}
+				if vals {
+					out.push(metafy(v));
+				}
+			}
+			return Ok(out);
+		}
 		let env = super::zpattern::char_env(ex)?;
 		let opts = super::zpattern::opts(ex)?;
 		let mut out: Vec<Vec<u8>> = Vec::new();
@@ -984,10 +1165,26 @@ impl Value {
 		} else {
 			match self.pm.flags.type_bits() {
 				PmFlags::HASHED | PmFlags::ARRAY => {
-					let ss = self.getvaluearr(ex)?.unwrap_or_default();
+					// A scalar indexed-array view needs one element, not a
+					// metafied copy of every element and an array cache.
+					if self.pm.flags.type_bits() == PmFlags::ARRAY
+						&& self.isarr == 0
+						&& self.arr.is_none()
+						&& let PValue::Array(a) = &self.pm.value
+					{
+						if self.start < 0 {
+							self.start += i64::try_from(a.len()).unwrap_or(0);
+						}
+						return Ok(usize::try_from(self.start)
+							.ok()
+							.and_then(|i| a.get(i))
+							.map_or_else(Vec::new, |s| metafy(s)));
+					}
+					self.ensure_valuearr(ex)?;
+					let ss = self.arr.as_deref().unwrap_or_default();
 					if self.isarr != 0 {
 						let ifs = ifs(ex)?;
-						return Ok(text::sepjoin(&ss, None, ifs.as_deref()));
+						return Ok(text::sepjoin(ss, None, ifs.as_deref(), mb(ex)?));
 					}
 					if self.start < 0 {
 						self.start += i64::try_from(ss.len()).unwrap_or(0);
@@ -1001,16 +1198,17 @@ impl Value {
 				},
 			}
 		};
+		let mb = mb(ex)?;
 		if self.flags & VALFLAG_SUBST != 0 && self.elem.is_none() {
 			let cbases = opt(ex, ZshOpt::Cbases)?;
-			s = pad_and_case(&self.pm, s, cbases);
+			s = pad_and_case(&self.pm, s, cbases, mb);
 		}
-		Ok(self.slice_str(s))
+		Ok(self.slice_str(s, mb))
 	}
 
 	/// The `[start, end)` character range of a scalar view (the tail of
 	/// zsh `getstrvalue`).
-	fn slice_str(&mut self, s: Vec<u8>) -> Vec<u8> {
+	fn slice_str(&mut self, s: Vec<u8>, mb: bool) -> Vec<u8> {
 		if self.start == 0 && self.end == -1 {
 			return s;
 		}
@@ -1023,7 +1221,7 @@ impl Value {
 			if self.end >= 0 {
 				let e = usize::try_from(self.end).unwrap_or(0);
 				if e < s.len() {
-					self.end += i64::try_from(text::charlen(&s, e)).unwrap_or(1);
+					self.end += i64::try_from(text::charlen(&s, e, mb)).unwrap_or(1);
 				}
 			}
 		}
@@ -1046,12 +1244,15 @@ impl Value {
 		if self.flags & VALFLAG_INV != 0 {
 			return Ok(vec![self.start.to_string().into_bytes()]);
 		}
-		let s = match self.getvaluearr(ex)? {
-			Some(s) => s,
-			None => vec![self.getstrvalue(ex)?],
+		self.ensure_valuearr(ex)?;
+		let scalar = if self.arr.is_none() {
+			vec![self.getstrvalue(ex)?]
+		} else {
+			Vec::new()
 		};
+		let s = self.arr.as_deref().unwrap_or(&scalar);
 		if self.start == 0 && self.end == -1 {
-			return Ok(s);
+			return Ok(s.to_vec());
 		}
 		let n = i64::try_from(s.len()).unwrap_or(i64::MAX);
 		if self.start < 0 {
@@ -1070,7 +1271,7 @@ impl Value {
 		} else {
 			let a = usize::try_from(self.start).unwrap_or(0);
 			let b = usize::try_from(self.end.min(n)).unwrap_or(0);
-			span(&s, a, b).to_vec()
+			span(s, a, b).to_vec()
 		})
 	}
 
@@ -1085,7 +1286,7 @@ impl Value {
 		if self.isarr != 0 {
 			let a = self.getarrvalue(ex)?;
 			let ifs = ifs(ex)?;
-			let s = text::sepjoin(&a, None, ifs.as_deref());
+			let s = text::sepjoin(&a, None, ifs.as_deref(), mb(ex)?);
 			return arith::matheval(ex, &s);
 		}
 		if self.elem.is_none() {
@@ -1156,10 +1357,151 @@ pub(super) fn ifs(ex: &mut Expander<'_, '_>) -> X<Option<Vec<u8>>> {
 
 /// The separator classes of `$IFS` (zsh's default when unset).
 pub(super) fn seps(ex: &mut Expander<'_, '_>) -> X<text::Seps> {
+	let mb = mb(ex)?;
 	Ok(match ifs(ex)? {
-		Some(v) => text::Seps::new(&v),
-		None => text::Seps::new(text::DEFAULT_IFS),
+		Some(v) => text::Seps::new(&v, mb),
+		None => text::Seps::new(text::DEFAULT_IFS, mb),
 	})
+}
+
+/// zsh `isset(MULTIBYTE)` in a UTF-8 locale: characters are UTF-8
+/// sequences (zsh's `MB_METACHARLEN` and friends decode them) rather than
+/// bytes.
+///
+/// # Errors
+/// A store failure reading the option.
+pub fn mb_in(
+	k: &mut crate::bash::vm::Kernel,
+	store: &mut dyn crate::bash::store::StateStore,
+	vp: &crate::bash::vm::proc::Vproc,
+) -> Result<bool, crate::bash::store::StoreError> {
+	Ok(state::zsh_option(&mut k.root, store, vp, ZshOpt::Multibyte)?
+		&& crate::bash::vm::locale::is_utf8(k, store, vp))
+}
+
+/// [`mb_in`] where a store failure cannot stop the caller: it is recorded
+/// on the kernel and reads as off.
+pub fn mb_quiet(
+	k: &mut crate::bash::vm::Kernel,
+	store: &mut dyn crate::bash::store::StateStore,
+	vp: &crate::bash::vm::proc::Vproc,
+) -> bool {
+	mb_in(k, store, vp).unwrap_or_else(|e| {
+		k.fail(e);
+		false
+	})
+}
+
+/// [`mb_in`] for the expander.
+///
+/// # Errors
+/// A store failure reading the option.
+pub fn mb(ex: &mut Expander<'_, '_>) -> X<bool> {
+	Ok(mb_in(ex.k, ex.cx.store, ex.vp)?)
+}
+
+/// Whether identifiers admit non-ASCII alphanumerics (zsh `itype_end`
+/// with `IIDENT`): [`mb_in`] without `POSIX_IDENTIFIERS`.
+///
+/// # Errors
+/// A store failure reading an option.
+pub fn wide_idents_in(
+	k: &mut crate::bash::vm::Kernel,
+	store: &mut dyn crate::bash::store::StateStore,
+	vp: &crate::bash::vm::proc::Vproc,
+) -> Result<bool, crate::bash::store::StoreError> {
+	Ok(mb_in(k, store, vp)? && !state::zsh_option(&mut k.root, store, vp, ZshOpt::Posixidentifiers)?)
+}
+
+/// The collation zsh sorts with (`strcoll` in the `LC_COLLATE` locale:
+/// the first of `LC_ALL`, `LC_COLLATE` and `LANG` set and non-empty);
+/// `None` for the `C` locale (bytes compare). A store failure is recorded
+/// on the root and reads as `C`.
+pub fn collator_in(
+	root: &mut state::Root,
+	store: &mut dyn crate::bash::store::StateStore,
+	vp: &crate::bash::vm::proc::Vproc,
+) -> Option<crate::sys::langinfo::Collator> {
+	for name in [&b"LC_ALL"[..], b"LC_COLLATE", b"LANG"] {
+		let found = state::lookup(root, store, vp, name).map(|v| {
+			v.and_then(|v| v.as_scalar())
+				.filter(|s| !s.is_empty())
+				.map(|s| s.to_vec())
+		});
+		match found {
+			Ok(Some(s)) => return crate::sys::langinfo::Collator::new(&s),
+			Ok(None) => {},
+			Err(e) => {
+				root.fail(e);
+				return None;
+			},
+		}
+	}
+	None
+}
+
+/// [`collator_in`] for the expander.
+pub fn collator(ex: &mut Expander<'_, '_>) -> Option<crate::sys::langinfo::Collator> {
+	collator_in(&mut ex.k.root, ex.cx.store, ex.vp)
+}
+
+/// The history character `quotestring` quotes ([`text::QuoteOpts::bang`]
+/// and [`text::QuoteOpts::bang_special`]): zsh's `bangchar` under
+/// `BANGHIST` (0 without), and whether it is `ISPECIAL` (zsh
+/// `inittyptab`'s `ZTF_BANGCHAR`: an interactive shell reading its
+/// standard input). A store failure is recorded on the root and reads as
+/// no history character.
+pub fn bang_quoting(
+	root: &mut state::Root,
+	store: &mut dyn crate::bash::store::StateStore,
+	vp: &crate::bash::vm::proc::Vproc,
+) -> (u8, bool) {
+	fn read(
+		root: &mut state::Root,
+		store: &mut dyn crate::bash::store::StateStore,
+		vp: &crate::bash::vm::proc::Vproc,
+	) -> Result<(u8, bool), crate::bash::store::StoreError> {
+		if !state::zsh_option(root, store, vp, ZshOpt::Banghist)? {
+			return Ok((0, false));
+		}
+		let bang = crate::bash::vm::builtins::history::zsh::histchars_param(root, store, vp)?
+			.first()
+			.copied()
+			.unwrap_or(0);
+		let special = state::zsh_option(root, store, vp, ZshOpt::Interactive)?
+			&& state::zsh_option(root, store, vp, ZshOpt::Shinstdin)?;
+		Ok((bang, special && bang != 0))
+	}
+	read(root, store, vp).unwrap_or_else(|e| {
+		root.fail(e);
+		(0, false)
+	})
+}
+
+/// [`wide_idents_in`] for a builtin; a store failure is recorded on the
+/// kernel and reads as off.
+pub fn wide_idents_ctx(ctx: &mut Ctx<'_, '_>) -> bool {
+	wide_idents_in(ctx.k, ctx.cx.store, ctx.vp).unwrap_or_else(|e| {
+		ctx.k.fail(e);
+		false
+	})
+}
+
+/// [`mb_in`] for a builtin; a store failure is recorded on the kernel
+/// and reads as off.
+pub fn mb_ctx(ctx: &mut Ctx<'_, '_>) -> bool {
+	mb_in(ctx.k, ctx.cx.store, ctx.vp).unwrap_or_else(|e| {
+		ctx.k.fail(e);
+		false
+	})
+}
+
+/// [`wide_idents_in`] for the expander.
+///
+/// # Errors
+/// A store failure reading an option.
+pub fn wide_idents(ex: &mut Expander<'_, '_>) -> X<bool> {
+	Ok(wide_idents_in(ex.k, ex.cx.store, ex.vp)?)
 }
 
 /// zsh `fetchvalue`: the parameter whose name starts at `s[*pos]` (a
@@ -1182,6 +1524,7 @@ pub fn fetchvalue(
 	let c = s.get(i).copied().unwrap_or(0);
 	let mut ppar: i64 = 0;
 	let mut name: Vec<u8> = Vec::new();
+	let ident_e = text::ident_end(s, i, wide_idents(ex)?);
 	if c.is_ascii_digit() {
 		if bracks >= 0 {
 			let e = tail(s, i)
@@ -1199,10 +1542,9 @@ pub fn fetchvalue(
 			name.push(c);
 			i += 1;
 		}
-	} else if text::ident_end(s, i) != i {
-		let e = text::ident_end(s, i);
-		name.extend_from_slice(span(s, i, e));
-		i = e;
+	} else if ident_e != i {
+		name.extend_from_slice(span(s, i, ident_e));
+		i = ident_e;
 	} else {
 		let n = match c {
 			QUEST => b'?',
@@ -1228,7 +1570,16 @@ pub fn fetchvalue(
 		} else {
 			&name
 		};
-		let Some(pm) = getparam(ex, lookup)? else {
+		// A read through a subscript of a keyed special looks up that key
+		// alone; an assignment rewrites the whole value, so it needs it.
+		let keyed =
+			bracks > 0 && flags & SCANPM_ASSIGNING == 0 && matches!(s.get(i), Some(&(b'[' | INBRACK)));
+		let pm = if keyed {
+			getparam_lazy(ex, lookup)?
+		} else {
+			getparam(ex, lookup)?
+		};
+		let Some(pm) = pm else {
 			*pos = i;
 			return Ok(None);
 		};
@@ -1245,11 +1596,14 @@ pub fn fetchvalue(
 		}
 		if bracks > 0 && matches!(s.get(i), Some(&(b'[' | INBRACK))) {
 			subscript::getindex(ex, s, &mut i, &mut v, flags)?;
+			if v.elem.is_none() {
+				v.pm.materialize(ex)?;
+			}
 			*pos = i;
 			return Ok(Some(v));
 		} else if flags & SCANPM_ASSIGNING == 0
 			&& v.isarr != 0
-			&& text::ident_end(&name, 0) > 0
+			&& text::ident_end(&name, 0, true) > 0
 			&& opt(ex, ZshOpt::Ksharrays)?
 		{
 			v.end = 1;
@@ -1278,10 +1632,21 @@ const fn level_for(_pm: &Param) -> Level {
 /// Store `pm` (its flags, width, base and value) where it is bound, the
 /// value converted to the store's shape; a tie partner is kept in step.
 fn store_param(ex: &mut Expander<'_, '_>, pm: &Param) -> X<()> {
+	store_param_assignment(ex, pm, false)
+}
+
+// Arithmetic opts in at the value setter, not after synchronization: a
+// committed value remains an assignment even when a later tie/prompt hook
+// fails.
+fn store_param_assignment(ex: &mut Expander<'_, '_>, pm: &Param, trace: bool) -> X<()> {
 	if let Some(sp) = pm.special
 		&& !sp.is_plain()
 	{
-		return specials::set(ex, sp, &pm.name, pm.value.clone());
+		specials::set(ex, sp, &pm.name, pm.value.clone())?;
+		if trace {
+			super::super::builtins::emit_assignment(ex.k, ex.cx, ex.vp, &pm.name, level_for(pm));
+		}
+		return Ok(());
 	}
 	// The scalar of a `typeset -UT` tie keeps its words unique (zsh's
 	// colon-array `setfn` with `PM_UNIQUE`).
@@ -1311,7 +1676,11 @@ fn store_param(ex: &mut Expander<'_, '_>, pm: &Param) -> X<()> {
 			// Densifying a sparse (bash) array is a lossy crossing.
 			let sparse = matches!(
 				state::lookup_declared(&ex.k.root, ex.cx.store, ex.vp, &pm.name)?,
-				Some(Var { value: VarValue::Indexed(old), .. }) if dense(old).1
+				Some(Var { value: VarValue::Indexed(old), .. })
+					if old.last().is_some_and(|&(last, _)| {
+						usize::try_from(last + 1).unwrap_or(0) != old.len()
+							|| old.first().is_none_or(|e| e.0 != 0)
+					})
 			);
 			if sparse {
 				let what = format!("gaps of sparse array `{}'", pm.name);
@@ -1329,9 +1698,6 @@ fn store_param(ex: &mut Expander<'_, '_>, pm: &Param) -> X<()> {
 			VarValue::Assoc(h.clone().into())
 		},
 	};
-	if attrs.contains(Attrs::EXPORT) && !matches!(value, VarValue::Str(_)) {
-		attrs = attrs.without(Attrs::EXPORT);
-	}
 	if !pm.flags.contains(PmFlags::UNSET) {
 		attrs = attrs.without(Attrs::INVISIBLE);
 	}
@@ -1344,12 +1710,48 @@ fn store_param(ex: &mut Expander<'_, '_>, pm: &Param) -> X<()> {
 		Some(Var { attrs, value }),
 		level,
 	);
+	if trace {
+		super::super::builtins::emit_assignment(ex.k, ex.cx, ex.vp, &pm.name, level);
+	}
 	if pm.flags.contains(PmFlags::TIED) {
 		sync_tie(ex, pm)?;
+	}
+	if let PValue::Scalar(s) = &pm.value
+		&& pm.special.is_some()
+	{
+		share_prompt(ex, &pm.name, s)?;
+	}
+	// zsh `strsetfn`: a plain scalar that names a directory (or any, under
+	// `AUTO_NAME_DIRS`) keeps its named directory up to date.
+	if pm.special.is_none()
+		&& pm.flags.type_bits() == PmFlags::SCALAR
+		&& let PValue::Scalar(s) = &pm.value
+	{
+		super::nameddir::scalar_assigned(ex, &pm.name, s)?;
 	}
 	// zsh `arrfixenv`: a new `PATH` empties the command hash table.
 	if pm.name == "PATH" {
 		crate::bash::vm::builtins::flush_hash(&mut ex.k.root, ex.cx.store, ex.vp)?;
+	}
+	Ok(())
+}
+
+/// Give the other names of the prompt special `name` (`PS1`, `PROMPT`,
+/// `prompt`, …: one variable in zsh) the value `s`, keeping their own
+/// attributes.
+fn share_prompt(ex: &mut Expander<'_, '_>, name: &[u8], s: &BString) -> X<()> {
+	for &other in specials::prompt_group(name) {
+		if other == name {
+			continue;
+		}
+		let old = state::lookup_declared(&ex.k.root, ex.cx.store, ex.vp, other)?;
+		// A hidden local of that name (`typeset -h`) is a plain parameter.
+		if old.is_some_and(|v| v.attrs.contains(Attrs::ZSH_HIDE)) {
+			continue;
+		}
+		let attrs = old.map_or(Attrs::NONE, |v| v.attrs.without(Attrs::INVISIBLE));
+		let var = Var { attrs, value: VarValue::Str(s.clone()) };
+		state::store_var(&mut ex.k.root, ex.cx.store, ex.vp, other, Some(var), Level::Dynamic);
 	}
 	Ok(())
 }
@@ -1437,12 +1839,60 @@ fn create(ex: &mut Expander<'_, '_>, name: &[u8], flags: PmFlags) -> X<Param> {
 	}
 	// The array side of an unset special tie (`fpath` with `FPATH` unset)
 	// stays special: zsh reuses its node, so the assignment sets the scalar.
-	pm.special =
-		specials::lookup(name).filter(|s| s.is_plain() || matches!(s, Special::TiedArray(_)));
+	pm.special = specials::as_started(ex, specials::lookup(name), name)?
+		.filter(|s| s.is_plain() || matches!(s, Special::TiedArray(_)));
 	if let Some(sp @ Special::TiedArray(_)) = pm.special {
 		pm.flags = sp.flags().with(pm.flags.without(PmFlags::UNSET));
 	}
 	Ok(pm)
+}
+
+/// zsh `createparam` of a global `name` over a zsh/param/private private
+/// parameter (the innermost binding of `name`, visible or not, is one):
+/// `NAME: can't change parameter attribute` (the private is
+/// `PM_RO_BY_DESIGN`). An assignment in a function called by the
+/// declaring one, to a name with no outer parameter, or one to an unset
+/// private, ends here.
+///
+/// # Errors
+/// That error; a store failure.
+pub fn refuse_private(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<()> {
+	if state::innermost_private(&ex.k.root, ex.cx.store, ex.vp, name)? {
+		return Err(bad_assign(name, "can't change parameter attribute"));
+	}
+	Ok(())
+}
+
+/// zsh `unsetparam_pm` removing global `pm` (an unset, or the unset before
+/// a type change) while zsh/param/private privates hidden from here shadow
+/// it: zsh removes the parameter table's node, which is the innermost
+/// private, so every private of the name vanishes with the global (the
+/// declaring functions then see no parameter).
+///
+/// # Errors
+/// A store failure.
+fn drop_shadowing_privates(ex: &mut Expander<'_, '_>, pm: &Param) -> X<()> {
+	if pm.scope.is_some()
+		|| pm.special.is_some()
+		|| !state::innermost_private(&ex.k.root, ex.cx.store, ex.vp, &pm.name)?
+	{
+		return Ok(());
+	}
+	for i in 0..state::scope_count(&ex.k.root, ex.vp) {
+		if let Some(Some(v)) = state::scope_var(ex.cx.store, ex.vp, i, &pm.name)?
+			&& v.attrs.contains(Attrs::ZSH_PRIVATE)
+		{
+			state::scope_unbind(&mut ex.k.root, ex.cx.store, ex.vp, i, &pm.name);
+		}
+	}
+	Ok(())
+}
+
+/// [`create`] where no parameter `name` is set (zsh `createparam` with no
+/// usable old parameter): [`refuse_private`] first.
+fn create_new(ex: &mut Expander<'_, '_>, name: &[u8], flags: PmFlags) -> X<Param> {
+	refuse_private(ex, name)?;
+	create(ex, name, flags)
 }
 
 /// zsh `unsetparam_pm` of a whole parameter (not an element).
@@ -1466,7 +1916,37 @@ fn unset_pm(ex: &mut Expander<'_, '_>, pm: &Param) -> X<()> {
 		drop_attrs(ex, &pm.name, Attrs::ZSH_TIED)?;
 		state::unset_var(&mut ex.k.root, ex.cx.store, ex.vp, &other, true);
 	}
+	drop_shadowing_privates(ex, pm)?;
+	// zsh `unsetparam_pm`: a special parameter is never removed; it stays,
+	// unset, with its flags (`export`, its type), so a later assignment
+	// exports it again.
+	if matches!(pm.special, Some(Special::Plain(i)) if i != u8::MAX)
+		&& let Some(var) = state::lookup_declared(&ex.k.root, ex.cx.store, ex.vp, &pm.name)?.cloned()
+	{
+		let var = Var {
+			attrs: var
+				.attrs
+				.with(Attrs::INVISIBLE)
+				.without(Attrs::ZSH_DEFAULTED),
+			value: VarValue::Str(BString::default()),
+		};
+		state::edit_var(
+			&mut ex.k.root,
+			ex.cx.store,
+			ex.vp,
+			&pm.name,
+			Level::Dynamic,
+			state::VarEdit::Replace(var),
+		)?;
+		return Ok(());
+	}
 	state::unset_var(&mut ex.k.root, ex.cx.store, ex.vp, &pm.name, true);
+	// zsh's `strsetfn(pm, NULL)` empties the variable the other prompt
+	// names share; they stay set. A hidden local (`typeset -h`) is
+	// plain.
+	if pm.special.is_some() {
+		share_prompt(ex, &pm.name, &BString::default())?;
+	}
 	// zsh `unsetparam_pm` clears `PM_DECLARED` (like ksh, not bash).
 	drop_attrs(ex, &pm.name, Attrs::ZSH_DEFAULTED)
 }
@@ -1521,6 +2001,16 @@ impl Value {
 	/// # Errors
 	/// Read-only, slice-of-association and math errors.
 	pub fn assignstrvalue(&mut self, ex: &mut Expander<'_, '_>, val: &[u8], flags: u32) -> X<()> {
+		self.assignstrvalue_assignment(ex, val, flags, false)
+	}
+
+	fn assignstrvalue_assignment(
+		&mut self,
+		ex: &mut Expander<'_, '_>,
+		val: &[u8],
+		flags: u32,
+		trace: bool,
+	) -> X<()> {
 		if self.pm.flags.contains(PmFlags::READONLY) {
 			return Err(readonly(&self.pm.name));
 		}
@@ -1535,10 +2025,6 @@ impl Value {
 			return Err(bad_assign(&self.pm.name, "assignment to invalid subscript range"));
 		}
 		if let Some(e) = &self.elem {
-			let mut h = match &self.pm.value {
-				PValue::Hash(h) => ZHash::from_stored(h, self.pm.attrs),
-				_ => ZHash::new(),
-			};
 			let mut new = unmetafy(val);
 			if self.start == i64::from(i32::MAX)
 				&& let Some(old) = &e.value
@@ -1547,12 +2033,27 @@ impl Value {
 				s.extend_from_slice(&new);
 				new = s;
 			}
+			if self.pm.special == Some(Special::Langinfo) {
+				// zsh/langinfo's elements are `PM_READONLY` parameters of
+				// their own name.
+				return Err(readonly(&e.key));
+			}
+			if self.pm.special == Some(Special::Mapfile) {
+				// zsh/mapfile's `setpmmapfile` writes the file.
+				return crate::bash::vm::builtins::zsh_mod_mapfile::set(ex, &e.key, &new);
+			}
+			// All early-returning special setters are handled above. The
+			// ordinary assignment consumes this snapshot and stores it back.
+			let mut h = match &mut self.pm.value {
+				PValue::Hash(h) => ZHash::from_owned(std::mem::take(h), self.pm.attrs),
+				_ => ZHash::new(),
+			};
 			h.insert(e.key.clone(), BString::from(new));
 			let (items, attrs) = h.into_stored(self.pm.attrs);
 			self.pm.attrs = attrs;
 			self.pm.value = PValue::Hash(items);
 			self.pm.flags = self.pm.flags.without(PmFlags::UNSET);
-			return store_param(ex, &self.pm);
+			return store_param_assignment(ex, &self.pm, trace);
 		}
 		self.pm.flags = self.pm.flags.without(PmFlags::UNSET);
 		match self.pm.flags.type_bits() {
@@ -1589,7 +2090,7 @@ impl Value {
 							self.end = zlen;
 						} else {
 							let e = usize::try_from(self.end).unwrap_or(0);
-							self.end += i64::try_from(text::charlen(&z, e)).unwrap_or(1);
+							self.end += i64::try_from(text::charlen(&z, e, mb(ex)?)).unwrap_or(1);
 						}
 					} else if self.end > zlen {
 						self.end = zlen;
@@ -1612,7 +2113,7 @@ impl Value {
 					}
 					n.to_int()
 				};
-				let t = int_text(ex, &self.pm.clone(), ival)?;
+				let t = int_text(ex, &self.pm, ival)?;
 				self.pm.value = PValue::Scalar(t);
 				if self
 					.pm
@@ -1639,12 +2140,12 @@ impl Value {
 					self.pm.width = u16::try_from(val.len()).unwrap_or(u16::MAX);
 				}
 			},
-			PmFlags::ARRAY => return self.setarrvalue(ex, vec![val.to_vec()]),
+			PmFlags::ARRAY => return self.setarrvalue_assignment(ex, vec![val.to_vec()], trace),
 			_ => {
 				return Err(bad_assign(&self.pm.name, "attempt to set associative array to scalar"));
 			},
 		}
-		store_param(ex, &self.pm)
+		store_param_assignment(ex, &self.pm, trace)
 	}
 
 	/// zsh `setarrvalue`: assign the elements `val` (metafied) to what this
@@ -1653,6 +2154,15 @@ impl Value {
 	/// # Errors
 	/// Read-only, type and slice errors.
 	pub fn setarrvalue(&mut self, ex: &mut Expander<'_, '_>, val: Vec<Vec<u8>>) -> X<()> {
+		self.setarrvalue_assignment(ex, val, false)
+	}
+
+	fn setarrvalue_assignment(
+		&mut self,
+		ex: &mut Expander<'_, '_>,
+		val: Vec<Vec<u8>>,
+		trace: bool,
+	) -> X<()> {
 		if self.pm.flags.contains(PmFlags::READONLY) {
 			return Err(readonly(&self.pm.name));
 		}
@@ -1674,7 +2184,7 @@ impl Value {
 			}
 			self.pm.value = PValue::Array(val.iter().map(|e| BString::from(unmetafy(e))).collect());
 			self.pm.flags = self.pm.flags.without(PmFlags::UNSET);
-			return store_param(ex, &self.pm);
+			return store_param_assignment(ex, &self.pm, trace);
 		}
 		if self.start == -1 && self.end == 0 && is_hash {
 			return arrhashsetfn(ex, &mut self.pm, val, ASSPM_AUGMENT);
@@ -1714,7 +2224,7 @@ impl Value {
 		}
 		self.pm.value = PValue::Array(new);
 		self.pm.flags = self.pm.flags.without(PmFlags::UNSET);
-		store_param(ex, &self.pm)
+		store_param_assignment(ex, &self.pm, trace)
 	}
 }
 
@@ -1897,21 +2407,29 @@ pub(super) fn assignsparam_meta(
 	val: Vec<u8>,
 	flags: u32,
 ) -> X<()> {
-	if !isident(s) {
+	if !isident(s, wide_idents(ex)?) {
 		return Err(not_ident(s));
 	}
+	// zsh `assignstrvalue`: nothing is set under `NO_EXEC`.
+	if !opt(ex, ZshOpt::Exec)? {
+		return Ok(());
+	}
 	let (name, sub) = split_name(s);
+	revive_special(ex, name)?;
 	let mut flags = flags;
 	let mut created = false;
+	let mut revived = None;
 	if sub {
-		match getparam(ex, name)? {
+		// This first read only checks attributes. The target below fetches
+		// its value; preserve computed getters without copying stored arrays.
+		match getparam_in(ex, name, Defer::Stored)? {
 			None => {
-				let pm = create(ex, name, PmFlags::ARRAY)?;
+				let pm = create_new(ex, name, PmFlags::ARRAY)?;
 				store_param(ex, &pm)?;
 				created = true;
 			},
 			Some(pm) if pm.flags.contains(PmFlags::UNSET) && !pm.flags.contains(PmFlags::DECLARED) => {
-				let pm = create(ex, name, PmFlags::ARRAY)?;
+				let pm = create_new(ex, name, PmFlags::ARRAY)?;
 				store_param(ex, &pm)?;
 				created = true;
 			},
@@ -1936,6 +2454,7 @@ pub(super) fn assignsparam_meta(
 				if v.pm.flags.contains(PmFlags::READONLY) {
 					return Err(readonly(name));
 				}
+				drop_shadowing_privates(ex, &v.pm)?;
 				let local = v.pm.scope;
 				let mut pm = create(ex, name, PmFlags::SCALAR)?;
 				pm.scope = local;
@@ -1944,15 +2463,46 @@ pub(super) fn assignsparam_meta(
 			} else {
 				// zsh `createparam`: an unset read-only parameter (`readonly
 				// x` under `POSIX_BUILTINS`) still refuses a value.
-				if getparam(ex, name)?.is_some_and(|p| p.flags.contains(PmFlags::READONLY)) {
+				let old = getparam(ex, name)?;
+				if old
+					.as_ref()
+					.is_some_and(|p| p.flags.contains(PmFlags::READONLY))
+				{
 					return Err(readonly(name));
 				}
-				let pm = create(ex, name, PmFlags::SCALAR)?;
-				store_param(ex, &pm)?;
+				// zsh `createparam`: an unset special (`NUMERIC` without a
+				// numeric argument) is no new parameter: it is set again,
+				// through its own setter.
+				match old {
+					Some(mut pm) if pm.special.is_some_and(|sp| !sp.is_plain()) => {
+						pm.flags = pm.flags.without(PmFlags::UNSET);
+						revived = Some(Value::of(pm));
+					},
+					// A stored special `unset` kept (`unsetparam_pm`): set
+					// again with its flags, `export` included.
+					Some(mut pm) if matches!(pm.special, Some(Special::Plain(i)) if i != u8::MAX) => {
+						pm.flags = pm.flags.without(PmFlags::UNSET);
+						revived = Some(Value::of(pm));
+					},
+					_ => {
+						let pm = create_new(ex, name, PmFlags::SCALAR)?;
+						store_param(ex, &pm)?;
+					},
+				}
 			}
+		} else if existing
+			.as_ref()
+			.is_some_and(|v| v.pm.special.is_none_or(Special::is_plain))
+		{
+			// Ordinary targets have no computed getter to run again.
+			revived = existing;
 		}
 	}
-	let Some(mut v) = target(ex, s, 0)? else {
+	let found = match revived {
+		Some(v) => Some(v),
+		None => target(ex, s, 0)?,
+	};
+	let Some(mut v) = found else {
 		return Ok(());
 	};
 	if flags & ASSPM_WARN != 0 {
@@ -2041,15 +2591,15 @@ fn setnumvalue(
 	check_restricted(ex, &v.pm.name)?;
 	match (v.elem.is_some(), v.pm.flags.type_bits()) {
 		(false, PmFlags::INTEGER) => {
-			let t = int_text(ex, &v.pm.clone(), val.to_int())?;
+			let t = int_text(ex, &v.pm, val.to_int())?;
 			v.pm.value = PValue::Scalar(t);
 			v.pm.flags = v.pm.flags.without(PmFlags::UNSET);
-			store_param(ex, &v.pm)
+			store_param_assignment(ex, &v.pm, true)
 		},
 		(false, PmFlags::EFLOAT | PmFlags::FFLOAT) => {
 			v.pm.value = PValue::Scalar(float_text(&v.pm, val.to_float()));
 			v.pm.flags = v.pm.flags.without(PmFlags::UNSET);
-			store_param(ex, &v.pm)
+			store_param_assignment(ex, &v.pm, true)
 		},
 		_ => {
 			let t = match text {
@@ -2059,7 +2609,7 @@ fn setnumvalue(
 					Number::Float(d) => math::format_float(d).into_bytes(),
 				},
 			};
-			v.assignstrvalue(ex, &t, 0)
+			v.assignstrvalue_assignment(ex, &t, 0, true)
 		},
 	}
 }
@@ -2100,10 +2650,15 @@ pub(super) fn assignaparam_meta(
 	val: Vec<Vec<u8>>,
 	flags: u32,
 ) -> X<()> {
-	if !isident(s) {
+	if !isident(s, wide_idents(ex)?) {
 		return Err(not_ident(s));
 	}
+	// zsh `setarrvalue`: nothing is set under `NO_EXEC`.
+	if !opt(ex, ZshOpt::Exec)? {
+		return Ok(());
+	}
 	let (name, sub) = split_name(s);
+	revive_special(ex, name)?;
 	let mut val = val;
 	let mut created = false;
 	let mut may_warn_nested = true;
@@ -2116,7 +2671,7 @@ pub(super) fn assignaparam_meta(
 				may_warn_nested = false;
 			},
 			_ => {
-				let pm = create(ex, name, PmFlags::ARRAY)?;
+				let pm = create_new(ex, name, PmFlags::ARRAY)?;
 				store_param(ex, &pm)?;
 				created = true;
 			},
@@ -2126,7 +2681,7 @@ pub(super) fn assignaparam_meta(
 		match existing {
 			None => {
 				created = true;
-				let pm = create(ex, name, PmFlags::ARRAY)?;
+				let pm = create_new(ex, name, PmFlags::ARRAY)?;
 				store_param(ex, &pm)?;
 			},
 			Some(mut v)
@@ -2141,6 +2696,7 @@ pub(super) fn assignaparam_meta(
 					let old = v.getstrvalue(ex)?;
 					val.insert(0, old);
 				}
+				drop_shadowing_privates(ex, &v.pm)?;
 				let scope = v.pm.scope;
 				let mut pm = create(ex, name, PmFlags::ARRAY.with(uniq))?;
 				pm.scope = scope;
@@ -2259,6 +2815,38 @@ pub(super) fn assignaparam_meta(
 	v.setarrvalue(ex, val)
 }
 
+/// zsh `unset` of identifier `name` (no subscript) reaching an autoloadable
+/// parameter (`gethashnode2` does not load its module): the stub goes,
+/// the module stays unloaded. `false` when no stub is the parameter
+/// `name` names (a variable hides it, or none names it).
+///
+/// # Errors
+/// A store failure.
+pub fn unset_stub(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<bool> {
+	Ok(read_var(ex, name)?.0.is_none() && zsh_module::remove_param_stub(ex, name)?)
+}
+
+/// zsh `createparam` on an unset module special (after `unset mapfile`,
+/// `unset options`) sets it again instead of making a new parameter.
+fn revive_special(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<()> {
+	if name == b"mapfile" {
+		crate::bash::vm::builtins::zsh_mod_mapfile::revive(ex)?;
+	} else {
+		zsh_module::set_param_unset(ex, name, false)?;
+	}
+	Ok(())
+}
+
+/// zsh `sethparam`: make `name` (raw) an association of the raw key/value
+/// pairs `kv` (keys at even indexes).
+///
+/// # Errors
+/// As [`sethparam_meta`].
+pub fn sethparam(ex: &mut Expander<'_, '_>, name: &[u8], kv: &[BString]) -> X<()> {
+	let kv = kv.iter().map(|e| metafy(e)).collect();
+	sethparam_meta(ex, &metafy(name), kv)
+}
+
 /// zsh `sethparam` on metafied text: make `s` an association of the
 /// key/value pairs `kv`.
 ///
@@ -2266,7 +2854,7 @@ pub(super) fn assignaparam_meta(
 /// As [`assignsparam`]; a subscripted name is
 /// `nested associative arrays not yet supported`.
 pub(super) fn sethparam_meta(ex: &mut Expander<'_, '_>, s: &[u8], kv: Vec<Vec<u8>>) -> X<()> {
-	if !isident(s) {
+	if !isident(s, wide_idents(ex)?) {
 		return Err(not_ident(s));
 	}
 	if split_name(s).1 {
@@ -2274,9 +2862,13 @@ pub(super) fn sethparam_meta(ex: &mut Expander<'_, '_>, s: &[u8], kv: Vec<Vec<u8
 			msg: BString::from("nested associative arrays not yet supported"),
 		}));
 	}
+	// zsh `sethparam`: nothing is set under `NO_EXEC`.
+	if !opt(ex, ZshOpt::Exec)? {
+		return Ok(());
+	}
 	match target(ex, s, SCANPM_ASSIGNING)? {
 		None => {
-			let pm = create(ex, s, PmFlags::HASHED)?;
+			let pm = create_new(ex, s, PmFlags::HASHED)?;
 			store_param(ex, &pm)?;
 		},
 		Some(v) if v.pm.flags.type_bits() != PmFlags::HASHED => {
@@ -2286,6 +2878,7 @@ pub(super) fn sethparam_meta(ex: &mut Expander<'_, '_>, s: &[u8], kv: Vec<Vec<u8
 			if v.pm.flags.contains(PmFlags::READONLY) {
 				return Err(readonly(s));
 			}
+			drop_shadowing_privates(ex, &v.pm)?;
 			let scope = v.pm.scope;
 			let mut pm = create(ex, s, PmFlags::HASHED)?;
 			pm.scope = scope;
@@ -2316,7 +2909,7 @@ pub fn setnparam(
 ) -> X<Assigned> {
 	let mut s = lval.to_vec();
 	untokenize(&mut s);
-	if !isident(&s) {
+	if !isident(&s, wide_idents(ex)?) {
 		return Err(not_ident(&s));
 	}
 	let (name, sub) = split_name(&s);
@@ -2336,13 +2929,24 @@ pub fn setnparam(
 		if cur.pm.flags.contains(PmFlags::READONLY) {
 			return Err(readonly(name));
 		}
-		unset_pm(ex, &cur.pm.clone())?;
+		unset_pm(ex, &cur.pm)?;
 		true
 	} else {
 		false
 	};
 	if was_unset {
 		v = None;
+	}
+	// A stored special `unset` kept (`unsetparam_pm`) is set again with
+	// its flags, `export` included.
+	if v.is_none()
+		&& !sub
+		&& let Some(mut pm) = getparam(ex, name)?
+		&& pm.flags.contains(PmFlags::UNSET)
+		&& matches!(pm.special, Some(Special::Plain(i)) if i != u8::MAX)
+	{
+		pm.flags = pm.flags.without(PmFlags::UNSET);
+		v = Some(Value::of(pm));
 	}
 	let mut v = if let Some(v) = v {
 		check_warn_pm(ex, &v.pm, "numeric", false, true)?;
@@ -2357,7 +2961,13 @@ pub fn setnparam(
 		} else {
 			PmFlags::INTEGER
 		};
-		let mut pm = create(ex, name, ty)?;
+		// zsh `setnparam` unsets an array first, removing the parameter
+		// table node `createparam` would otherwise find.
+		let mut pm = if was_unset {
+			create(ex, name, ty)?
+		} else {
+			create_new(ex, name, ty)?
+		};
 		if ty == PmFlags::INTEGER {
 			pm.base = u8::try_from(radix).unwrap_or(0);
 		}
@@ -2416,7 +3026,7 @@ pub fn getmathparam(ex: &mut Expander<'_, '_>, lval: &[u8]) -> X<Option<(math::P
 	}
 	let s = if v.isarr != 0 {
 		let a = v.getarrvalue(ex)?;
-		text::sepjoin(&a, Some(b" "), None)
+		text::sepjoin(&a, Some(b" "), None, false)
 	} else {
 		v.getstrvalue(ex)?
 	};
@@ -2462,18 +3072,37 @@ pub fn unsetparam(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<()> {
 	let s = metafy(name);
 	let (base, sub) = split_name(&s);
 	if !sub {
+		if unset_stub(ex, base)? {
+			return Ok(());
+		}
 		if let Some(pm) = getparam(ex, base)? {
 			unset_pm(ex, &pm)?;
 		}
 		return Ok(());
 	}
-	let Some(mut v) = target(ex, &s, 0)? else {
+	// zsh's `bin_unset` reaches the elements of the unset zsh/mapfile
+	// special too (its hash table is still there): the file goes, the
+	// special stays unset.
+	let mapfile_unset =
+		base == b"mapfile" && crate::bash::vm::builtins::zsh_mod_mapfile::is_unset(ex)?;
+	if mapfile_unset {
+		crate::bash::vm::builtins::zsh_mod_mapfile::mark_unset(ex, false);
+	}
+	let found = target(ex, &s, 0);
+	if mapfile_unset {
+		crate::bash::vm::builtins::zsh_mod_mapfile::mark_unset(ex, true);
+	}
+	let Some(mut v) = found? else {
 		return Ok(());
 	};
 	if v.pm.flags.contains(PmFlags::READONLY) {
 		return Err(readonly(&v.pm.name));
 	}
 	if let Some(e) = v.elem.take() {
+		if v.pm.special == Some(Special::Mapfile) {
+			// zsh/mapfile's `unsetpmmapfile` removes the file.
+			return crate::bash::vm::builtins::zsh_mod_mapfile::unset(ex, &e.key);
+		}
 		let mut h = match &v.pm.value {
 			PValue::Hash(h) => ZHash::from_stored(h, v.pm.attrs),
 			_ => return Ok(()),
@@ -2587,7 +3216,16 @@ pub fn set_flags(
 	);
 	pm.width = width;
 	pm.base = base;
-	if pm.special.is_some_and(|s| !s.is_plain()) {
+	if let Some(sp) = pm.special.filter(|s| !s.is_plain()) {
+		if sp == Special::Seconds {
+			specials::set_seconds_type(ex, new_type, base);
+			return Ok(());
+		}
+		// `typeset ±h` on a module's `PM_HIDE` special.
+		if sp.module().is_some() && sp.flags().contains(PmFlags::HIDE) {
+			let hide = flags.contains(PmFlags::HIDE);
+			crate::bash::vm::builtins::zsh_module::set_param_hidden(ex, name, hide)?;
+		}
 		return Ok(());
 	}
 	match new_type {
@@ -2597,7 +3235,7 @@ pub fn set_flags(
 			} else {
 				arith::mathevali(ex, &metafy(&text))?
 			};
-			pm.value = PValue::Scalar(int_text(ex, &pm.clone(), n)?);
+			pm.value = PValue::Scalar(int_text(ex, &pm, n)?);
 		},
 		PmFlags::EFLOAT | PmFlags::FFLOAT if !pm.flags.contains(PmFlags::UNSET) => {
 			let d = if text.is_empty() {
@@ -2685,7 +3323,7 @@ pub fn with_ctx<T>(ctx: &mut Ctx<'_, '_>, f: impl FnOnce(&mut Expander<'_, '_>) 
 	let line = ctx.line;
 	let mut ex = Expander::new(ctx.k, ctx.cx, ctx.vp, &mut ctx.log, true, line);
 	ex.cursor = ctx.log_cursor;
-	let r = f(&mut ex);
+	let r = super::subst::begin_pass(&mut ex).and_then(|()| f(&mut ex));
 	let cursor = ex.cursor;
 	ctx.log_cursor = cursor;
 	r
@@ -2733,13 +3371,15 @@ mod tests {
 
 	#[test]
 	fn isident_accepts_balanced_subscripts() {
-		assert!(isident(b"a"));
-		assert!(isident(b"a[1]"));
-		assert!(isident(b"a[(i)x]"));
-		assert!(isident(b"12"));
-		assert!(!isident(b"a["));
-		assert!(!isident(b"1a"));
-		assert!(!isident(b""));
+		assert!(isident(b"a", false));
+		assert!(isident(b"a[1]", false));
+		assert!(isident(b"a[(i)x]", false));
+		assert!(isident(b"12", false));
+		assert!(!isident(b"a[", false));
+		assert!(!isident(b"1a", false));
+		assert!(!isident(b"", false));
+		assert!(isident("hähä".as_bytes(), true));
+		assert!(!isident("hähä".as_bytes(), false));
 	}
 
 	#[test]
@@ -2747,15 +3387,17 @@ mod tests {
 		// zsh: typeset -Z 5 x=12; typeset -L 4 y=abcdef; typeset -R 4 z=ab
 		let mut p = Param::new(b"x", PmFlags::RIGHT_Z);
 		p.width = 5;
-		assert_eq!(pad_and_case(&p, b"12".to_vec(), false), b"00012");
+		assert_eq!(pad_and_case(&p, b"12".to_vec(), false, false), b"00012");
 		let mut p = Param::new(b"y", PmFlags::LEFT);
 		p.width = 4;
-		assert_eq!(pad_and_case(&p, b"abcdef".to_vec(), false), b"abcd");
+		assert_eq!(pad_and_case(&p, b"abcdef".to_vec(), false, false), b"abcd");
+		// zsh: typeset -L 4 y=ééééé; the width counts characters.
+		assert_eq!(pad_and_case(&p, "ééééé".as_bytes().to_vec(), false, true), "éééé".as_bytes());
 		let mut p = Param::new(b"z", PmFlags::RIGHT_B);
 		p.width = 4;
-		assert_eq!(pad_and_case(&p, b"ab".to_vec(), false), b"  ab");
+		assert_eq!(pad_and_case(&p, b"ab".to_vec(), false, false), b"  ab");
 		let mut p = Param::new(b"i", PmFlags::INTEGER.with(PmFlags::RIGHT_Z));
 		p.width = 6;
-		assert_eq!(pad_and_case(&p, b"-16#F".to_vec(), false), b"-16#0F");
+		assert_eq!(pad_and_case(&p, b"-16#F".to_vec(), false, false), b"-16#0F");
 	}
 }

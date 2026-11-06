@@ -17,7 +17,6 @@ import { AuthStorage } from "../../src/session/auth-storage";
 import { convertToLlm } from "../../src/session/messages";
 import { SessionManager } from "../../src/session/session-manager";
 import { isThreadId, setCurrentThreadId } from "../../src/thread/identity";
-import { loadedModulesChangedSince } from "../../src/thread/code-skew";
 import { PeerAgentSession } from "../../src/thread/peer-agent-session";
 import type { SubagentWorkerInit, SubagentWorkerReady, WorkerThreadLink } from "../../src/thread/protocol";
 import { type RpcFrame, RpcLink } from "../../src/thread/rpc";
@@ -272,10 +271,7 @@ port.on("message", (message: unknown) => {
 			for (const service of services) await service.boot?.(globals[service.name], link);
 		});
 		link.handle("ping", nonce => nonce);
-		const ready: SubagentWorkerReady = {
-			type: "subagent-worker-ready",
-			changedModules: loadedModulesChangedSince(message.mainStartedAt),
-		};
+		const ready: SubagentWorkerReady = { type: "subagent-worker-ready" };
 		port.postMessage(ready);
 		return;
 	}

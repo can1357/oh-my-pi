@@ -2,14 +2,16 @@
 //!
 //! Opt-in: active only when `PI_GIT_GUARD` is truthy in the session or process
 //! environment (the coding agent sets it from its `bash.gitGuard` setting).
+//! `PI_GIT_GUARD_OVNFS` supplies the ovnfs command for separate-checkout hints.
 //!
 //! Agents sharing one checkout lose work when one of them runs a git command
 //! that discards uncommitted changes or moves HEAD. The guard judges every
 //! `git` the shell dispatches — after expansion, in the directory it actually
 //! runs in — by whose checkout that is.
 //!
-//! A linked worktree (`git worktree add`) of a repository with a main checkout,
-//! and a submodule inside one, belong to one line of work. There every command
+//! An ovnfs checkout (marked by repository-local `ovnfs.checkout`), a linked
+//! worktree (`git worktree add`) of a repository with a main checkout, and a
+//! submodule inside either belong to one line of work. There every command
 //! runs, except that `stash pop`, `apply`, `drop`, `branch`, and `clear` refuse
 //! entries saved on another branch or a detached HEAD, since every worktree
 //! shares one stash list; and a command that discards uncommitted changes first
@@ -33,7 +35,10 @@
 //! only unstage. Git started by path (`/usr/bin/git`) or by another program
 //! (`xargs git`, `sh -c`) never reaches the builtin and is not judged.
 
-use std::path::{Path, PathBuf};
+use std::{
+	borrow::Cow,
+	path::{Path, PathBuf},
+};
 
 use pi_vcs::git::GitRepo;
 
@@ -50,6 +55,19 @@ const DISCARDED_REF: &str = "refs/omp/discarded";
 /// Where to take a command the guard refuses in a shared checkout.
 const OWN_WORKTREE: &str = "In a worktree of your own (git worktree add <path> [<branch>]) it \
                             runs, and uncommitted changes it would discard are saved first.";
+
+fn own_checkout_hint(ovnfs: Option<&str>) -> Cow<'static, str> {
+	match ovnfs.map(str::trim).filter(|command| !command.is_empty()) {
+		Some(command) => Cow::Owned(format!(
+			"In an ovnfs checkout of your own ({command} new --name <name>) it runs, and uncommitted \
+			 changes it would discard are saved first. Add --rev <rev> to start at a clean commit or \
+			 branch. Use {command} run --rev HEAD -- <command> for a clean-commit check without \
+			 touching this checkout; --take SRC:PATH mixes in paths from the folder (.), the index \
+			 (empty SRC), or another revision."
+		)),
+		None => Cow::Borrowed(OWN_WORKTREE),
+	}
+}
 
 /// A judged `git` invocation, detached from the shell so its repository reads
 /// can run off the shell's thread.
@@ -104,15 +122,16 @@ impl Review {
 	}
 
 	/// Whether git runs, reading and saving repository state as the verdict
-	/// needs. Blocks on repository I/O: run it off the shell's thread.
-	pub fn decide(self) -> Decision {
+	/// needs. `ovnfs` selects the separate-checkout hint. Blocks on repository
+	/// I/O: run it off the shell's thread.
+	pub fn decide(self, ovnfs: Option<&str>) -> Decision {
 		let Judgment::Check(sub, verdict, site) = self.0 else {
 			return Decision::Run;
 		};
 		match Place::of(&site) {
 			Place::Private(repo) => in_private(&repo, sub, verdict, &site),
 			place => in_shared(&place, sub, verdict, &site.dir)
-				.map_or(Decision::Run, |refusal| Decision::Refuse(refusal.message())),
+				.map_or(Decision::Run, |refusal| Decision::Refuse(refusal.message(ovnfs))),
 		}
 	}
 }
@@ -165,11 +184,14 @@ impl Place {
 	}
 }
 
-/// Whether `repo`'s checkout belongs to one line of work: a worktree linked to
-/// a repository that has a main checkout of its own, or a submodule checked
-/// out inside one. Any other checkout may be shared, including every worktree
-/// of a bare repository, where one of them is where a person works.
+/// Whether `repo`'s checkout belongs to one line of work: an ovnfs checkout, a
+/// worktree linked to a repository that has a main checkout of its own, or a
+/// submodule inside either. Other checkouts may be shared, including every
+/// worktree of a bare repository, where one of them is where a person works.
 fn is_private(repo: &GitRepo) -> bool {
+	if repo.config_has_local("ovnfs.checkout").unwrap_or(false) {
+		return true;
+	}
 	let info = repo.info();
 	if repo.is_linked_worktree() {
 		return info
@@ -221,9 +243,9 @@ fn in_private(repo: &GitRepo, sub: Sub, verdict: Verdict, site: &Site) -> Decisi
 	match verdict {
 		Verdict::Allow | Verdict::Stash(Stash::Saves) | Verdict::BranchMove => Decision::Run,
 		Verdict::Stash(Stash::Takes(op, entry)) => foreign_stash(repo, op, entry.as_deref())
-			.map_or(Decision::Run, |refusal| Decision::Refuse(refusal.message())),
+			.map_or(Decision::Run, |refusal| Decision::Refuse(refusal.message(None))),
 		Verdict::Stash(Stash::Clear) => foreign_stash(repo, "clear", None)
-			.map_or(Decision::Run, |refusal| Decision::Refuse(refusal.message())),
+			.map_or(Decision::Run, |refusal| Decision::Refuse(refusal.message(None))),
 		// `--soft` keeps the index and working tree. `--keep` keeps working-tree
 		// changes but can drop staged ones, so it saves first.
 		Verdict::ResetTo(_, true) => Decision::Run,
@@ -267,7 +289,7 @@ fn save_then_run(repo: &GitRepo, sub: Sub, site: &Site, targeted: bool) -> Decis
 			|| info.git_dir.join("modules").is_dir()
 			|| info.common_dir.join("modules").is_dir())
 	{
-		return Decision::Refuse(Refusal::Recursive(sub).message());
+		return Decision::Refuse(Refusal::Recursive(sub).message(None));
 	}
 	let id = match repo.stash_create() {
 		Ok(None) => return Decision::Run,
@@ -275,11 +297,11 @@ fn save_then_run(repo: &GitRepo, sub: Sub, site: &Site, targeted: bool) -> Decis
 		Err(_) if targeted && repo.operation_in_progress().unwrap_or(false) => {
 			return Decision::Run;
 		},
-		Err(err) => return Decision::Refuse(Refusal::Unsaved(sub, err.to_string()).message()),
+		Err(err) => return Decision::Refuse(Refusal::Unsaved(sub, err.to_string()).message(None)),
 	};
 	// Once the changes are written, a failure to keep them is never exempt.
 	if let Err(err) = repo.record_ref(DISCARDED_REF, &id, &format!("before git {}", site.command)) {
-		return Decision::Refuse(Refusal::Unsaved(sub, err.to_string()).message());
+		return Decision::Refuse(Refusal::Unsaved(sub, err.to_string()).message(None));
 	}
 	let short = repo.short_id(&id).unwrap_or(id);
 	Decision::RunNoted(format!(
@@ -921,49 +943,53 @@ enum Refusal {
 }
 
 impl Refusal {
-	fn message(&self) -> String {
+	fn message(&self, ovnfs: Option<&str>) -> String {
 		match self {
 			Self::Stash => format!(
 				"git stash is blocked by workspace policy — do not work around it.\nOther sessions \
-				 may be using this checkout (it is not a worktree of its own): stash takes their \
+				 may be using this checkout (it is not a private checkout): stash takes their \
 				 uncommitted changes out of the working tree along with yours. git stash list, git \
-				 stash show, and git stash create run here.\n{OWN_WORKTREE}\n"
+				 stash show, and git stash create run here.\n{}\n",
+				own_checkout_hint(ovnfs)
 			),
 			Self::Destructive(sub) => format!(
 				"git {} is blocked: this form (--hard / --force / --discard-changes, or a whole-tree \
 				 pathspec like `.`, `:/`, `*`) discards the working tree/index wholesale, and other \
-				 sessions may be using this checkout (it is not a worktree of its own) — being \
+				 sessions may be using this checkout (it is not a private checkout) — being \
 				 mid-conflict does not make it safe.\nResolve conflicts with targeted forms instead: \
 				 git checkout/restore --ours|--theirs <path>. Unstage with git reset <path> or git \
-				 restore --staged <path>.\n{OWN_WORKTREE}\n",
-				sub.name()
+				 restore --staged <path>.\n{}\n",
+				sub.name(),
+				own_checkout_hint(ovnfs)
 			),
 			Self::CommitMove => format!(
 				"git reset to another commit is blocked: it moves the branch checked out here, and \
-				 other sessions may be using this checkout (it is not a worktree of its \
-				 own).\nUnstaging is allowed — drop the commit argument: git reset [-q] [--] <path> \
-				 (or bare git reset to unstage everything), or git restore --staged \
-				 <path>.\n{OWN_WORKTREE}\n"
+				 other sessions may be using this checkout (it is not a private checkout).\nUnstaging \
+				 is allowed — drop the commit argument: git reset [-q] [--] <path> (or bare git reset \
+				 to unstage everything), or git restore --staged <path>.\n{}\n",
+				own_checkout_hint(ovnfs)
 			),
 			Self::BranchMove(sub) => format!(
 				"git {} to another branch or commit is blocked by workspace policy — do not work \
-				 around it.\nOther sessions may be using this checkout (it is not a worktree of its \
-				 own); switching branches moves HEAD and the working tree under them. A merge or \
+				 around it.\nOther sessions may be using this checkout (it is not a private \
+				 checkout); switching branches moves HEAD and the working tree under them. A merge or \
 				 rebase in progress does not make it safe. While resolving conflicts, git checkout -- \
 				 <path> and git restore <path> still run; put -- before a path that shares its name \
 				 with a branch. Inspect other revisions read-only with git show <rev>:<path> / git \
-				 diff / git log.\n{OWN_WORKTREE}\n",
-				sub.name()
+				 diff / git log.\n{}\n",
+				sub.name(),
+				own_checkout_hint(ovnfs)
 			),
 			Self::OutsideConflict(sub) => format!(
 				"git {} is blocked by workspace policy — do not work around it.\nOther sessions may \
-				 be using this checkout (it is not a worktree of its own); overwriting working-tree \
+				 be using this checkout (it is not a private checkout); overwriting working-tree \
 				 files discards uncommitted changes they may rely on. It is exempt only while a \
 				 merge/rebase conflict is being resolved, and the repository is not in \
 				 one.\nUnstaging is always allowed: git reset [<path>] / git restore --staged <path>. \
 				 To undo working-tree edits here, edit forward; inspect history read-only with git \
-				 diff/log/show.\n{OWN_WORKTREE}\n",
-				sub.name()
+				 diff/log/show.\n{}\n",
+				sub.name(),
+				own_checkout_hint(ovnfs)
 			),
 			Self::Redirected(sub) => format!(
 				"git {} is blocked: the guard judges the checkout found from the working directory, \
@@ -1418,14 +1444,31 @@ mod tests {
 		let head = git(&repo, &["rev-parse", "HEAD"]);
 		std::fs::write(repo.join("tracked.txt"), "theirs\n").expect("edit main");
 		std::fs::write(clone.join("tracked.txt"), "theirs\n").expect("edit clone");
-		for (checkout, command) in [
-			(&repo, "cd \"$EMPTY\"; git reset -q --keep topic"),
-			(&repo, "git checkout tracked.txt"),
-			(&clone, "git checkout tracked.txt"),
+		for (checkout, command, hint) in [
+			(&repo, "cd \"$EMPTY\"; git reset -q --keep topic", "git worktree add"),
+			(
+				&repo,
+				"PI_GIT_GUARD_OVNFS=/opt/ovnfs git checkout tracked.txt",
+				"/opt/ovnfs new --name <name>",
+			),
+			(&clone, "git checkout tracked.txt", "git worktree add"),
 		] {
 			let (code, output) = guarded(checkout, command).await;
 			assert_eq!(code, Some(i32::from(REFUSED_EXIT)), "{command}: {output}");
-			assert!(output.contains("git worktree add"), "{command}: {output}");
+			assert!(output.contains(hint), "{command}: {output}");
+			if hint.contains("ovnfs") {
+				assert!(output.contains("--rev <rev>"), "{command}: {output}");
+				assert!(
+					output.contains("/opt/ovnfs run --rev HEAD -- <command>"),
+					"{command}: {output}"
+				);
+				assert!(output.contains("--take SRC:PATH"), "{command}: {output}");
+				assert!(
+					output.contains("folder (.), the index (empty SRC), or another revision"),
+					"{command}: {output}"
+				);
+				assert!(!output.contains("git worktree add"), "{command}: {output}");
+			}
 		}
 		assert_eq!((git(&repo, &["rev-parse", "HEAD"]), read(&repo)), (head, "theirs\n".to_owned()));
 		assert_eq!(read(&clone), "theirs\n");
@@ -1434,6 +1477,73 @@ mod tests {
 			guarded(&worktree, "git reset -q --keep main && git switch -q -c side").await;
 		assert_eq!(code, Some(0), "{output}");
 		assert_eq!(git(&worktree, &["rev-parse", "HEAD"]), git(&repo, &["rev-parse", "main"]));
+	}
+
+	/// Only a repo-local checkout marker makes a checkout private; a global
+	/// marker never permits discarding shared work. Private checkouts retain
+	/// discarded edits.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn ovnfs_checkout_marker_is_repo_local_and_preserves_discarded_changes() {
+		const CHILD: &str = "PI_GUARD_TEST_GLOBAL_HOME";
+		if std::env::var_os(CHILD).is_none() {
+			// Give the child its own actual global config, without changing this
+			// test process's environment or another test's Git configuration.
+			let home = tempfile::tempdir().expect("global config home");
+			std::fs::write(home.path().join(".gitconfig"), "[ovnfs]\n\tcheckout = global-only\n")
+				.expect("global checkout marker");
+			let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+				.args([
+					"--exact",
+					"git::guard::tests::ovnfs_checkout_marker_is_repo_local_and_preserves_discarded_changes",
+					"--nocapture",
+				])
+				.env(CHILD, "1")
+				.env("HOME", home.path())
+				.env("XDG_CONFIG_HOME", home.path().join(".config"))
+				.env_remove("GIT_CONFIG_GLOBAL")
+				.env_remove("GIT_CONFIG_PARAMETERS")
+				.env_remove("GIT_CONFIG_COUNT")
+				.output()
+				.expect("isolated global config test");
+			assert!(
+				output.status.success(),
+				"{}\n{}",
+				String::from_utf8_lossy(&output.stdout),
+				String::from_utf8_lossy(&output.stderr)
+			);
+			return;
+		}
+
+		let (_temp, repo) = fixture();
+		// An ovnfs checkout's .git file points at its own, non-shared gitdir.
+		let private = repo.parent().expect("fixture parent").join("private-git");
+		std::fs::rename(repo.join(".git"), &private).expect("move private gitdir");
+		std::fs::write(repo.join(".git"), format!("gitdir: {}\n", private.display()))
+			.expect("private gitdir pointer");
+		std::fs::write(repo.join("tracked.txt"), "mine\n").expect("edit");
+		assert_eq!(
+			GitRepo::require(&repo)
+				.expect("repo")
+				.config_get("ovnfs.checkout")
+				.expect("global config"),
+			Some("global-only".to_owned())
+		);
+		let (code, output) = guarded(&repo, "git checkout HEAD -- .").await;
+		assert_eq!(code, Some(i32::from(REFUSED_EXIT)), "{output}");
+		assert_eq!(read(&repo), "mine\n");
+
+		git(&repo, &["config", "--global", "--unset", "ovnfs.checkout"]);
+		let (code, output) = guarded(&repo, "git checkout HEAD -- .").await;
+		assert_eq!(code, Some(i32::from(REFUSED_EXIT)), "{output}");
+		assert_eq!(read(&repo), "mine\n");
+
+		git(&repo, &["config", "--local", "ovnfs.checkout", "guard-checkout"]);
+		let (code, output) = guarded(&repo, "git checkout HEAD -- .").await;
+		assert_eq!(code, Some(0), "{output}");
+		assert!(output.contains("saved your uncommitted changes as"), "{output}");
+		assert_eq!(read(&repo), "tracked\n");
+		assert_eq!(git(&repo, &["show", &format!("{DISCARDED_REF}:tracked.txt")]), "mine\n");
 	}
 
 	/// A submodule is as shared as the checkout it lives in, and a command
@@ -1507,9 +1617,18 @@ mod tests {
 		git(&parent, &["clone", "-q", "--bare", &repo.to_string_lossy(), "bare.git"]);
 		git(&bare, &["worktree", "add", "-q", &worktree.to_string_lossy(), "main"]);
 		std::fs::write(worktree.join("tracked.txt"), "mine\n").expect("edit");
-		let (code, output) = guarded(&worktree, "git checkout tracked.txt").await;
+		let (code, output) =
+			guarded(&worktree, "PI_GIT_GUARD_OVNFS=ovnfs git checkout tracked.txt").await;
 		assert_eq!(code, Some(i32::from(REFUSED_EXIT)), "{output}");
-		assert!(output.contains("git worktree add"), "{output}");
+		assert!(output.contains("ovnfs new --name <name>"), "{output}");
+		assert!(output.contains("--rev <rev>"), "{output}");
+		assert!(output.contains("ovnfs run --rev HEAD -- <command>"), "{output}");
+		assert!(output.contains("--take SRC:PATH"), "{output}");
+		assert!(
+			output.contains("folder (.), the index (empty SRC), or another revision"),
+			"{output}"
+		);
+		assert!(!output.contains("git worktree add"), "{output}");
 		assert_eq!(read(&worktree), "mine\n");
 	}
 

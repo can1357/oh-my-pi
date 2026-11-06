@@ -18,13 +18,18 @@ import {
 	attachPageWithTimeout,
 	findFreeCdpPort,
 	findReusableCdp,
+	gracefulKillTreeOnce,
 	pickElectronTarget,
 	probeCdpStatus,
 	resolveSpawnArgs,
 	waitForCdp,
 	waitForMainFrame,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
-import { ensureChromiumExecutable, loadPuppeteer } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
+import {
+	ensureChromiumExecutable,
+	loadPuppeteer,
+	RENDERER_PRIORITY_ARGS,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import {
 	acquireBrowser,
 	type BrowserHandle,
@@ -228,6 +233,7 @@ describe("pickElectronTarget", () => {
 					"--no-default-browser-check",
 					"--use-mock-keychain",
 					"--password-store=basic",
+					...RENDERER_PRIORITY_ARGS,
 					`--user-data-dir=${root}`,
 					`--remote-debugging-port=${port}`,
 				],
@@ -291,7 +297,7 @@ describe("pickElectronTarget", () => {
 				restoreWait?.();
 				await prelude.invoke({ action: "close", name }, context).catch(() => {});
 				if (attached) await releaseBrowser(attached, { kill: false });
-				child.kill();
+				await gracefulKillTreeOnce(child.pid);
 				await child.exited;
 				await fs.rm(root, { recursive: true, force: true });
 			}
@@ -512,6 +518,7 @@ describe("pickElectronTarget", () => {
 				"--no-default-browser-check",
 				"--use-mock-keychain",
 				"--password-store=basic",
+				...RENDERER_PRIORITY_ARGS,
 			];
 			const child = Bun.spawn(
 				[exe, ...flags, `--user-data-dir=${borrowedProfile}`, `--remote-debugging-port=${port}`],
@@ -562,7 +569,7 @@ describe("pickElectronTarget", () => {
 			} finally {
 				await invoke({ action: "close", name: ownedName, kill: true }).catch(() => {});
 				await invoke({ action: "close", name: borrowedName, kill: true }).catch(() => {});
-				child.kill();
+				await gracefulKillTreeOnce(child.pid);
 				await child.exited;
 				await fs.rm(root, { recursive: true, force: true });
 			}
@@ -584,6 +591,7 @@ describe("pickElectronTarget", () => {
 				"--no-first-run",
 				"--use-mock-keychain",
 				"--password-store=basic",
+				...RENDERER_PRIORITY_ARGS,
 				`--user-data-dir=${profile}`,
 			];
 			const session = makeSession();
@@ -617,7 +625,7 @@ describe("pickElectronTarget", () => {
 	);
 
 	test.skipIf(!CHROMIUM_AVAILABLE)(
-		"reports a connected browser's own viewport on open and observe",
+		"reports a connected browser's own viewport on open and observe, and applies one an open asks for",
 		async () => {
 			const exe = await ensureChromiumExecutable();
 			if (!exe) throw new Error("Expected a Chromium executable");
@@ -632,6 +640,7 @@ describe("pickElectronTarget", () => {
 					"--use-mock-keychain",
 					"--window-size=900,700",
 					"--force-device-scale-factor=2",
+					...RENDERER_PRIORITY_ARGS,
 					`--user-data-dir=${root}`,
 					`--remote-debugging-port=${port}`,
 				],
@@ -644,12 +653,17 @@ describe("pickElectronTarget", () => {
 			const name = `connected-viewport-${crypto.randomUUID()}`;
 			try {
 				await waitForCdp(`http://127.0.0.1:${port}`, 15_000);
-				const opened = await invoke({
-					action: "open",
-					name,
-					url: "data:text/html,<title>Viewport</title>",
-					app: { cdp_url: `http://127.0.0.1:${port}` },
-				});
+				const app = { cdp_url: `http://127.0.0.1:${port}` };
+				// No `scale`: the window keeps its own device scale (2 here).
+				const viewport = { width: 390, height: 844 };
+				// An open that fails after adopting the page (a file where the downloads folder goes) leaves no size
+				// behind. No `url` after it: Chrome drops a leftover size when the page navigates.
+				const notAFolder = path.join(root, "not-a-folder");
+				await Bun.write(notAFolder, "");
+				expect(
+					await rejectionOf(invoke({ action: "open", name, app, viewport, downloads: notAFolder })),
+				).toBeInstanceOf(Error);
+				const opened = await invoke({ action: "open", name, app });
 				const result = await invoke({
 					action: "run",
 					name,
@@ -666,11 +680,27 @@ describe("pickElectronTarget", () => {
 				// The window's chrome eats into --window-size differently per OS, so pin only the forced
 				// pixel ratio; it differs from DEFAULT_VIEWPORT's 1.25, which main reported here.
 				expect(window).toMatchObject({ deviceScaleFactor: 2 });
+				expect(window).not.toMatchObject({ width: viewport.width, height: viewport.height });
 				expect(observed).toEqual(window);
 				expect(opened.details).toMatchObject({ viewport: window });
+				await invoke({ action: "close", name });
+				const pageSize = {
+					action: "run",
+					name,
+					code: "return await tab.evaluate(() => ({ width: innerWidth, height: innerHeight, deviceScaleFactor: devicePixelRatio }));",
+				};
+				const sized = await invoke({ action: "open", name, app, viewport });
+				const asked = { width: 390, height: 844, deviceScaleFactor: 2 };
+				expect(sized.details).toMatchObject({ viewport: asked });
+				expect((await invoke(pageSize)).details).toMatchObject({ value: asked });
+				// Reopening the live tab resizes it the same way.
+				await invoke({ action: "open", name, app, viewport: { width: 400, height: 800 } });
+				expect((await invoke(pageSize)).details).toMatchObject({
+					value: { width: 400, height: 800, deviceScaleFactor: 2 },
+				});
 			} finally {
 				await invoke({ action: "close", name }).catch(() => {});
-				child.kill();
+				await gracefulKillTreeOnce(child.pid);
 				await child.exited;
 				await fs.rm(root, { recursive: true, force: true });
 			}

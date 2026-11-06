@@ -84,7 +84,6 @@ describe("cfg:// approval prompt wiring", () => {
 			"test",
 			undefined,
 			undefined,
-			undefined,
 			mcpManager,
 			undefined,
 			new Composer({ terminal: new VirtualTerminal(200, 60) }),

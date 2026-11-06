@@ -16,10 +16,12 @@
 import { type } from "@oh-my-pi/omptype";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
+import type { ComposerNativeState } from "../prompt/custom-editor";
 import { parseThinkingLevel } from "../thinking";
 import { StatusLineComponent } from "./component";
 import type { CompactionBoundaries } from "./context-usage";
 import type { StatusLineHost, StatusLineSession } from "./host";
+import { thinkingLevelWord } from "./segments";
 import {
 	CONTEXT_LINE_MODE_VALUES,
 	STATUS_LINE_PRESET_VALUES,
@@ -57,9 +59,9 @@ const NO_USAGE = {
 	cost: 0,
 };
 
-/** Build the prepaint status line; the caller disposes it once the session-bound bar mounts. */
-export function createStartupStatusLine(data: StatusLineStartupData): StatusLineComponent {
-	const session: StatusLineSession = {
+/** A fresh, unnamed session on the cached model and thinking state. */
+function startupSession(data: StatusLineStartupData): StatusLineSession {
+	return {
 		state: { model: data.model, thinkingLevel: data.thinkingLevel, messages: NO_MESSAGES },
 		model: data.model,
 		messages: NO_MESSAGES,
@@ -78,6 +80,22 @@ export function createStartupStatusLine(data: StatusLineStartupData): StatusLine
 		getAsyncJobSnapshot: () => null,
 		getGoalModeState: () => undefined,
 	};
+}
+
+/**
+ * TSP composer state for the first frame: the cached thinking level on the
+ * effort chip (or as the model chip's icon), until InteractiveMode wires the live one.
+ */
+export function startupComposerState(data: StatusLineStartupData): ComposerNativeState {
+	return {
+		running: false,
+		thinking: thinkingLevelWord(startupSession(data)),
+		thinkingInModel: data.settings.compactThinkingLevel,
+	};
+}
+
+/** Build the prepaint status line; the caller disposes it once the session-bound bar mounts. */
+export function createStartupStatusLine(data: StatusLineStartupData): StatusLineComponent {
 	const host: StatusLineHost = {
 		getSettings: () => data.settings,
 		gitEnabled: () => data.gitEnabled,
@@ -95,7 +113,7 @@ export function createStartupStatusLine(data: StatusLineStartupData): StatusLine
 		limitMatchesActiveAccount: () => false,
 		computeCompactionBoundaries: () => data.compactionBoundaries,
 	};
-	const statusLine = new StatusLineComponent(session, host);
+	const statusLine = new StatusLineComponent(startupSession(data), host);
 	statusLine.setAutoCompactEnabled(data.autoCompactEnabled);
 	return statusLine;
 }

@@ -5,6 +5,7 @@ mod portal;
 mod xkb;
 
 use std::{
+	cell::OnceCell,
 	os::{fd::AsRawFd, unix::net::UnixStream},
 	path::PathBuf,
 };
@@ -135,15 +136,18 @@ pub struct WaylandBackend {
 		not(feature = "wayland-pipewire"),
 		expect(dead_code, reason = "only read by the pipewire capture path")
 	)]
-	display:        DisplaySelector,
-	ax:             Option<AtSpiAx>,
-	ax_error:       Option<DesktopError>,
-	input:          Option<libei::Libei>,
-	displays:       Vec<DesktopDisplay>,
+	display:           DisplaySelector,
+	ax:                Option<AtSpiAx>,
+	ax_error:          Option<DesktopError>,
+	input:             Option<libei::Libei>,
+	/// Why native input can never work here, probed once without a prompt;
+	/// `None` when it may.
+	input_unavailable: OnceCell<Option<String>>,
+	displays:          Vec<DesktopDisplay>,
 	/// The PID that listens on the Wayland socket: gnome-shell on GNOME, whose
 	/// own AT-SPI frames never count as the focused application window. On
 	/// Plasma it is `kwin_wayland_wrapper`, which owns no frames.
-	compositor_pid: Option<u32>,
+	compositor_pid:    Option<u32>,
 }
 
 /// Reads the compositor's PID from the peer credentials of its Wayland socket.
@@ -185,9 +189,22 @@ impl WaylandBackend {
 			ax,
 			ax_error,
 			input: None,
+			input_unavailable: OnceCell::new(),
 			displays: Vec::new(),
 			compositor_pid: compositor_pid(),
 		}
+	}
+
+	/// Read on every call: a `LIBEI_SOCKET` set later in the session reaches
+	/// EIS directly, whatever the cached portal probe found.
+	fn input_unavailable(&self) -> Option<&str> {
+		if std::env::var_os("LIBEI_SOCKET").is_some() {
+			return None;
+		}
+		self
+			.input_unavailable
+			.get_or_init(portal::input_unavailable_reason)
+			.as_deref()
 	}
 
 	fn window_input_error(target: &Target, kind: &str) -> CoreResult<()> {
@@ -210,6 +227,9 @@ impl WaylandBackend {
 		control::check()?;
 		Self::window_input_error(target, kind)?;
 		if self.input.is_none() {
+			if let Some(reason) = self.input_unavailable() {
+				return Err(DesktopError::permission_denied(reason));
+			}
 			self.input = Some(libei::Libei::new()?);
 		}
 		let input = self.input.as_mut().expect("libei was initialized");
@@ -236,8 +256,11 @@ impl WaylandBackend {
 
 impl Backend for WaylandBackend {
 	fn capabilities(&mut self) -> DesktopCapabilities {
+		let input_unavailable = self.input.is_none() && self.input_unavailable().is_some();
 		let input_permission = if self.input.is_some() {
 			"granted"
+		} else if input_unavailable {
+			"unavailable"
 		} else {
 			"prompt-or-granted"
 		};
@@ -248,13 +271,13 @@ impl Backend for WaylandBackend {
 			// wayland-pipewire feature; without it capture() hard-errors, so the
 			// capability report must not advertise a capture the binary cannot do.
 			capture: cfg!(feature = "wayland-pipewire"),
-			input: true,
+			input: !input_unavailable,
 			ax: self.ax.is_some(),
 			background_window_input: false,
 			takeover: false,
 			applications: crate::desktop::applications::supported(),
 			menus: self.ax.is_some(),
-			held_input: true,
+			held_input: !input_unavailable,
 			spaces: false,
 			global_escape: false,
 			capture_permission: if cfg!(feature = "wayland-pipewire") {
@@ -486,12 +509,13 @@ mod tests {
 
 	fn backend_without_services() -> WaylandBackend {
 		WaylandBackend {
-			display:        DisplaySelector::All,
-			ax:             None,
-			ax_error:       None,
-			input:          None,
-			displays:       Vec::new(),
-			compositor_pid: None,
+			display:           DisplaySelector::All,
+			ax:                None,
+			ax_error:          None,
+			input:             None,
+			input_unavailable: OnceCell::from(None),
+			displays:          Vec::new(),
+			compositor_pid:    None,
 		}
 	}
 	fn with_fake_libei(action: impl FnOnce(&mut WaylandBackend)) -> bool {
@@ -545,6 +569,23 @@ mod tests {
 	}
 
 	#[test]
+	fn a_desktop_without_a_remote_desktop_portal_reports_and_refuses_input() {
+		let mut backend = backend_without_services();
+		backend.input_unavailable = OnceCell::from(Some("no RemoteDesktop portal".to_owned()));
+		let capabilities = backend.capabilities();
+		assert!(!capabilities.input);
+		assert!(!capabilities.held_input);
+		assert_eq!(capabilities.input_permission, "unavailable");
+		let source = control::CancellationSource::default();
+		let error = backend
+			.type_text(&Target::Desktop, "x", DeliveryMode::Foreground, &source.token())
+			.unwrap_err();
+		assert_eq!(error.code.as_str(), "PermissionDenied");
+		assert!(error.message.contains("no RemoteDesktop portal"), "{}", error.message);
+		assert!(backend.input.is_none());
+	}
+
+	#[test]
 	fn desktop_input_connects_to_libei_lazily() {
 		let connected = with_fake_libei(|backend| {
 			let _ = backend.type_text(
@@ -555,6 +596,23 @@ mod tests {
 			);
 		});
 		assert!(connected, "desktop input did not connect to libei");
+	}
+
+	/// A probe that already found no portal must not hide an EIS socket set
+	/// later in the session.
+	#[test]
+	fn a_socket_set_after_the_portal_probe_still_reaches_libei() {
+		let connected = with_fake_libei(|backend| {
+			backend.input_unavailable = OnceCell::from(Some("no RemoteDesktop portal".to_owned()));
+			assert!(backend.capabilities().input);
+			let _ = backend.type_text(
+				&Target::Desktop,
+				"hello",
+				DeliveryMode::Foreground,
+				&control::CancellationSource::default().token(),
+			);
+		});
+		assert!(connected, "a cached portal absence blocked the LIBEI_SOCKET route");
 	}
 
 	#[test]
