@@ -818,6 +818,10 @@ export class EditTool implements AgentTool<TInput> {
 			};
 		}
 
+		// Taken before the bridge, because an editor-routed write lands the bytes
+		// just as a local one does and the record has to know what was there.
+		const existedBefore = request.op === "update" ? undefined : await Bun.file(request.path).exists();
+
 		const bridge = await routeWriteThroughBridge(
 			this.session,
 			request.displayPath,
@@ -825,13 +829,15 @@ export class EditTool implements AgentTool<TInput> {
 			request.content,
 			signal,
 		);
-		if (bridge) return { written: bridge.text };
+		if (bridge) {
+			// The editor wrote it, so this session owns it on the same terms as a
+			// local write; without this its own next write is copied aside.
+			await noteOwnWrite(this.session, request.path, existedBefore === false);
+			return { written: bridge.text };
+		}
 
 		// The pre-image is the only way to tell "the write never landed" from
 		// "something else rewrote the file"; a stat cannot (coarse mtimes).
-		// Whether the path existed is what decides ownership below, not the
-		// operation's label: a `create` that overwrote a file did not create it.
-		let existedBefore: boolean;
 		let preWriteBytes: Uint8Array | undefined;
 		if (request.op === "update") {
 			try {
@@ -839,11 +845,12 @@ export class EditTool implements AgentTool<TInput> {
 			} catch (error) {
 				if (!isEnoent(error)) throw error;
 			}
-			existedBefore = preWriteBytes !== undefined;
 		} else {
-			existedBefore = await Bun.file(request.path).exists();
 			await mkdirAllowingFallback(path.dirname(request.path));
 		}
+		// Whether the path existed is what decides ownership below, not the
+		// operation's label: a `create` that overwrote a file did not create it.
+		const created = request.op === "update" ? preWriteBytes === undefined : existedBefore === false;
 
 		// `begin()` claims this mutation's version; only bump when the writethrough
 		// never began a deferred fetch for the path (LSP off, unflushed batch).
@@ -860,7 +867,7 @@ export class EditTool implements AgentTool<TInput> {
 				return this.#deferredDiagnostics.begin(request.path);
 			},
 		);
-		await noteOwnWrite(this.session, request.path, !existedBefore);
+		await noteOwnWrite(this.session, request.path, created);
 
 		if (preWriteBytes !== undefined) {
 			// Fail when a content-changing write left disk at the pre-image. Compare

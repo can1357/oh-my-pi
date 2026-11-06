@@ -7,7 +7,14 @@ import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { backupBeforeClobber } from "@oh-my-pi/pi-coding-agent/tools/clobber-backup";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
-import { getAgentDir, getClobberBackupsDir, getSessionsDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import {
+	$which,
+	getAgentDir,
+	getClobberBackupsDir,
+	getSessionsDir,
+	removeWithRetries,
+	setAgentDir,
+} from "@oh-my-pi/pi-utils";
 import { readArchiveEntries, writeArchive } from "@oh-my-pi/pi-utils/ar";
 
 /** The old content of the file each clobber test destroys; distinctive enough to find anywhere on disk. */
@@ -176,7 +183,7 @@ describe("copy-before-clobber: a file this session did not create", () => {
 		const backups = await backupFiles();
 		expect(backups).toHaveLength(1);
 		expect(await Bun.file(backups[0]!).text()).toBe(DOOMED);
-		expect(resultText(result)).toContain("this session did not create it");
+		expect(resultText(result)).toContain("it changed since this session wrote it");
 	});
 
 	test("a file over the size limit is reported rather than copied", async () => {
@@ -277,27 +284,66 @@ describe("copy-before-clobber: a file this session did not create", () => {
 		expect(await Bun.file(backups[0]!).text()).toBe(DOOMED);
 	});
 
-	test("a session-created file another writer replaced in place, timestamps restored, is no longer its own", async () => {
-		const session = makeSession(tempDir);
-		const tool = new WriteTool(session);
-		const target = path.join(tempDir, "scratch.md");
-		await tool.execute("create", { path: "scratch.md", content: DOOMED });
-		const mine = await fs.stat(target);
-		// Same length, same inode, and the timestamps this session left, as far as
-		// `utimes` can restore them: a `cp --preserve=timestamps` in miniature.
-		const theirContent = DOOMED.replace("entry 2", "entry 9");
-		await fs.writeFile(target, theirContent);
-		await fs.utimes(target, mine.atime, mine.mtime);
-		const theirs = await fs.stat(target);
-		expect(theirs.size).toBe(mine.size);
-		expect(theirs.ino).toBe(mine.ino);
+	/** The system `touch`; Bun's builtin has no `-r`, and nothing in `node:fs` restores a timestamp to the nanosecond. */
+	const systemTouch = $which("touch");
 
-		const result = await tool.execute("rewrite", { path: "scratch.md", content: "gone\n" });
+	test.skipIf(systemTouch === null)(
+		"a session-created file another writer replaced with its timestamps preserved is no longer its own",
+		async () => {
+			const touch = async (...args: string[]): Promise<void> => {
+				const proc = Bun.spawn([systemTouch!, ...args], { stdout: "ignore", stderr: "ignore" });
+				expect(await proc.exited).toBe(0);
+			};
+			const session = makeSession(tempDir);
+			const tool = new WriteTool(session);
+			const target = path.join(tempDir, "scratch.md");
+			await tool.execute("create", { path: "scratch.md", content: DOOMED });
+			const mine = await fs.stat(target);
+			// The timestamps come back through `touch -r`, which restores them to
+			// the nanosecond. `utimes` restores milliseconds, and the mtime check
+			// would then catch the swap on its own — leaving this test green with
+			// `ctimeMs` removed. What is left here is the real case: same size,
+			// same inode, same mtime to the nanosecond, different content.
+			const theirContent = DOOMED.replace("entry 2", "entry 9");
+			const stamp = path.join(tempDir, "stamp.md");
+			await fs.writeFile(stamp, "");
+			await touch("-r", target, stamp);
+			await fs.writeFile(target, theirContent);
+			await touch("-r", stamp, target);
+			const theirs = await fs.stat(target);
+			expect(theirs.size).toBe(mine.size);
+			expect(theirs.ino).toBe(mine.ino);
+			expect(theirs.mtimeMs).toBe(mine.mtimeMs);
 
-		const backups = await backupFiles();
-		expect(backups).toHaveLength(1);
-		expect(await Bun.file(backups[0]!).text()).toBe(theirContent);
-		expect(resultText(result)).toContain("this session did not create it");
+			const result = await tool.execute("rewrite", { path: "scratch.md", content: "gone\n" });
+
+			const backups = await backupFiles();
+			expect(backups).toHaveLength(1);
+			expect(await Bun.file(backups[0]!).text()).toBe(theirContent);
+			expect(resultText(result)).toContain("it changed since this session wrote it");
+		},
+	);
+
+	test("a completed day over the budget is swept even when its index does not account for it", async () => {
+		// 33 x 64 MiB of sparse copies, none named by the index and all in a
+		// subdirectory: the two shapes that let a day outlive the budget while the
+		// index was trusted for sizes.
+		const old = path.join(getClobberBackupsDir(), "2026-10-30");
+		const nested = path.join(old, "nested");
+		await fs.mkdir(nested, { recursive: true });
+		for (let i = 0; i < 33; i++) {
+			const file = path.join(nested, `copy-${i}.md`);
+			await fs.writeFile(file, "x");
+			await fs.truncate(file, 64 * 1024 * 1024);
+		}
+		await fs.writeFile(path.join(old, "index.jsonl"), `${JSON.stringify({ bytes: 1, to: "nowhere" })}\n`);
+		await fs.writeFile(path.join(tempDir, "register.md"), DOOMED);
+
+		// Any backup triggers the day's first sweep.
+		await new WriteTool(makeSession(tempDir)).execute("clobber", { path: "register.md", content: "gone\n" });
+
+		expect(await Bun.file(path.join(nested, "copy-0.md")).exists()).toBe(false);
+		expect(await backupFiles()).toHaveLength(1);
 	});
 });
 

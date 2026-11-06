@@ -48,8 +48,14 @@ const MAX_BACKUP_BYTES = 64 * 1024 * 1024;
 const DAY_DIR_RE = /^\d{4}-\d{2}-\d{2}$/;
 const INDEX_NAME = "index.jsonl";
 
-/** Why the old content was worth keeping. */
-export type ClobberReason = "not-created-here" | "foreign-session-dir";
+/**
+ * Why the old content was worth keeping. `changed-since` is separate from
+ * `not-created-here` so the note never tells a session it did not write a file
+ * it did: an external `chmod`, a new hard link or a timestamp-preserving copy
+ * all move the recorded identity, and the honest thing to say is that the file
+ * changed, not that it was never ours.
+ */
+export type ClobberReason = "not-created-here" | "changed-since" | "foreign-session-dir";
 
 /** What happened to the bytes a mutation was about to destroy. */
 export type ClobberBackup =
@@ -180,10 +186,10 @@ function clobberReason(
 ): ClobberReason | undefined {
 	if (isForeignSessionDirectory(session, realTarget)) return "foreign-session-dir";
 	const written = createdFiles(session).byPath.get(realTarget);
+	if (!written) return "not-created-here";
 	// Same path is not enough: another writer may have replaced the content, or
 	// the file itself, since this session wrote it.
 	if (
-		written &&
 		written.size === stat.size &&
 		written.mtimeMs === stat.mtimeMs &&
 		written.ctimeMs === stat.ctimeMs &&
@@ -191,7 +197,7 @@ function clobberReason(
 	) {
 		return undefined;
 	}
-	return "not-created-here";
+	return "changed-since";
 }
 
 /**
@@ -261,42 +267,42 @@ async function listDayDirs(root: string): Promise<string[]> {
 }
 
 /**
- * Bytes a day holds. The index answers for every copy whose entry landed —
- * one file read per day instead of one syscall per backup, which is what keeps
- * the sweep off the critical path of a tool call in a store with many entries.
- * Anything in the directory the index does not name is then stat-ed, so a copy
- * whose entry never landed still weighs on the budget; in the ordinary case
- * that is one `readdir` and no stats.
+ * Every regular file in a day, counted by `stat`, including its index and
+ * anything in a subdirectory. The index is deliberately NOT trusted for sizes:
+ * an entry can name a file that no longer exists, understate it, collide with
+ * another entry's basename or point outside the day, and each of those made
+ * the budget count something other than what the directory holds.
  *
- * Logical bytes throughout: a sparse file or a reflink counts what it says it
- * holds, not what it occupies.
+ * The sweep only reaches this when {@link sweepStore}'s cheap bound says the
+ * store might be over budget, so the ordinary small store pays one `readdir`
+ * per day and no stats at all.
+ *
+ * Logical bytes: a sparse file or a reflink counts what it says it holds, not
+ * what it occupies.
  */
-async function dayBytes(dayDir: string): Promise<number> {
-	const indexed = new Map<string, number>();
-	try {
-		const text = await Bun.file(path.join(dayDir, INDEX_NAME)).text();
-		for (const line of text.split("\n")) {
-			if (!line) continue;
-			const entry: unknown = JSON.parse(line);
-			if (!entry || typeof entry !== "object") continue;
-			const to = "to" in entry ? entry.to : undefined;
-			const bytes = "bytes" in entry ? entry.bytes : undefined;
-			if (typeof to === "string" && typeof bytes === "number") indexed.set(path.basename(to), bytes);
-		}
-	} catch (error) {
-		if (!isEnoent(error)) logger.debug("Clobber backup index unreadable", { dayDir, error: String(error) });
-	}
+async function dayBytes(dayDir: string, entries: readonly DayEntry[]): Promise<number> {
 	let total = 0;
-	for (const bytes of indexed.values()) total += bytes;
-	try {
-		for (const entry of await fs.readdir(dayDir, { withFileTypes: true })) {
-			if (!entry.isFile() || entry.name === INDEX_NAME || indexed.has(entry.name)) continue;
-			total += (await fs.stat(path.join(dayDir, entry.name)).catch(() => undefined))?.size ?? 0;
-		}
-	} catch (error) {
-		if (!isEnoent(error)) logger.debug("Clobber backup day unreadable", { dayDir, error: String(error) });
+	for (const entry of entries) {
+		total += (await fs.stat(path.join(entry.dir, entry.name)).catch(() => undefined))?.size ?? 0;
 	}
 	return total;
+}
+
+/** A regular file inside a day directory, at any depth. */
+interface DayEntry {
+	dir: string;
+	name: string;
+}
+
+/** Every regular file under `dayDir`, at any depth. Unreadable day: empty. */
+async function dayEntries(dayDir: string): Promise<DayEntry[]> {
+	try {
+		const found = await fs.readdir(dayDir, { withFileTypes: true, recursive: true });
+		return found.filter(e => e.isFile()).map(e => ({ dir: e.parentPath, name: e.name }));
+	} catch (error) {
+		if (!isEnoent(error)) logger.debug("Clobber backup day unreadable", { dayDir, error: String(error) });
+		return [];
+	}
 }
 
 /** Stores already swept today, keyed by store root: one sweep per store per process per day. */
@@ -321,10 +327,21 @@ async function sweepStore(root: string, today: string): Promise<void> {
 		}
 		if (day !== today) kept.push(day);
 	}
+	// A copy cannot exceed the per-file cap, so a count is an upper bound and a
+	// small store is proved under budget without a single `stat`. Only a store
+	// that might be over pays for an exact walk.
+	const entries = new Map<string, DayEntry[]>();
+	let ceiling = 0;
+	for (const day of kept) {
+		const found = await dayEntries(path.join(root, day));
+		entries.set(day, found);
+		ceiling += found.length * MAX_BACKUP_BYTES;
+	}
+	if (ceiling <= STORE_BUDGET_BYTES) return;
 	let total = 0;
 	const sizes = new Map<string, number>();
 	for (const day of kept) {
-		const bytes = await dayBytes(path.join(root, day));
+		const bytes = await dayBytes(path.join(root, day), entries.get(day) ?? []);
 		sizes.set(day, bytes);
 		total += bytes;
 	}
@@ -418,9 +435,14 @@ export async function backupBeforeClobber(
 }
 
 function reasonPhrase(reason: ClobberReason): string {
-	return reason === "foreign-session-dir"
-		? "it is inside another session's directory"
-		: "this session did not create it";
+	switch (reason) {
+		case "foreign-session-dir":
+			return "it is inside another session's directory";
+		case "changed-since":
+			return "it changed since this session wrote it";
+		case "not-created-here":
+			return "this session did not create it";
+	}
 }
 
 /**
@@ -437,6 +459,6 @@ export function clobberBackupNote(backup: ClobberBackup | undefined, displayPath
 		case "too-large":
 			return `[Backup] ${displayPath}: ${why}, but its previous ${backup.bytes} bytes were over the ${MAX_BACKUP_BYTES}-byte backup limit, so they are not recoverable from here`;
 		case "failed":
-			return `[Backup] ${displayPath}: ${why}, but its previous content could not be copied aside (${backup.error}), so it is not recoverable from here`;
+			return `[Backup] ${displayPath}: ${why}, but its previous content could not be copied aside (${shortenPath(backup.error)}), so it is not recoverable from here`;
 	}
 }
