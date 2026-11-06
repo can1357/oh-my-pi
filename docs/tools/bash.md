@@ -101,6 +101,7 @@ bash:
 - By default, `allow` can lower the approval tier for a simple command, but cannot approve a compound command. For example, `match: "git *"` does not approve `git status && rm -rf build`.
 - With `bash.allowCompoundCommands: true` (default `false`) and a configured POSIX shell, literal `&&` chains are evaluated per command. Every segment needs an `allow` rule to allow the chain; an unmatched segment retains normal exec-tier approval. Segment rules remain first-match-wins, any segment or chain-wide deny wins, and prompts are retained. Expansions, other shell operators, and critical command patterns do not gain an allow bypass.
 - `deny` and `prompt` check the complete command and each shell command segment. A rule such as `match: "rm -rf *"` therefore catches `cd /tmp && rm -rf build`.
+- Both `bash.patterns` and `bashInterceptor.patterns` support [path-scoped entries](../settings.md#path-scoped-arrays) (`{ path, patterns: [...] }`), allowing repository-specific command rules to live directly in `~/.omp/agent/config.yml`.
 
 Use this setting for safety and user control. It remains useful for commands with no appropriate replacement tool, such as destructive removal, network access, deployment scripts, or project-specific scripts.
 
