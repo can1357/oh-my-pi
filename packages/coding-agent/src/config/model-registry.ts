@@ -67,6 +67,15 @@ import type { AuthStorage } from "../session/auth-storage";
 import { redactUrlForLog } from "../utils/redact-url";
 import type { SearchParams } from "../web/search/providers/base";
 import type { SearchResponse } from "../web/search/types";
+import {
+	clearProviderAuthOnCredentialChange,
+	isProviderExhausted,
+	probeUnavailableProviders,
+	type ProviderProbeOptions,
+	providerExhaustionRecord,
+	recordProviderFailure,
+} from "../session/provider-exhaustion";
+import { probeProviderInference } from "../session/provider-availability-probe";
 import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
 import type { ConfigError, ConfigFile, LoadResult } from "./config-file";
 import {
@@ -93,6 +102,7 @@ import {
 	discoverLlamaCppModelRuntimeMetadata,
 	discoverLmStudioModelRuntimeMetadata,
 	discoverModelsByProviderType,
+	DiscoveryHttpError,
 	ensureLlamaCppV1BaseUrl,
 	getImplicitOllamaBaseUrl,
 	getOllamaContextLengthOverride,
@@ -453,6 +463,11 @@ export type ResolvedRequestAuth =
  * Model registry - loads and manages models, resolves API keys via AuthStorage.
  */
 export class ModelRegistry {
+	#availabilityTimer: NodeJS.Timeout | undefined;
+	#availabilityRun: Promise<void> | undefined;
+	#credentialVersions = new Map<string, string>();
+	#resolvedCredentialVersions = new Map<string, string>();
+	#discoveryProbeProviders = new Set<string>();
 	#models: Model<Api>[] = [];
 	#unprojectedModels: Model<Api>[] = [];
 	/**
@@ -806,6 +821,9 @@ export class ModelRegistry {
 		if (!this.#owner) this.authStorage.keys.setResolver(resolveConfigValue);
 		// Load config and cache-backed layers synchronously in the constructor.
 		this.#loadModels();
+		for (const provider of this.#knownStaticProviders()) {
+			this.#credentialVersions.set(provider, this.providerCredentialVersion(provider));
+		}
 	}
 
 	/**
@@ -1072,6 +1090,7 @@ export class ModelRegistry {
 			this.#owner.refreshInBackground(strategy);
 			return;
 		}
+		this.#startAvailabilityMonitoring();
 		this.#startBackgroundRefresh(strategy);
 	}
 
@@ -1096,6 +1115,117 @@ export class ModelRegistry {
 				this.#markInitialRefreshSettled();
 			});
 		this.#backgroundRefresh = refreshPromise;
+	}
+
+	/** Operational state never changes the catalog or the configured role preference. */
+	isProviderAvailable(provider: string): boolean {
+		return !this.#isProviderDisabled(provider) && !isProviderExhausted(provider);
+	}
+
+	async #rememberResolvedOverride(provider: string): Promise<void> {
+		const source = this.authStorage.keys.source(provider)?.kind;
+		if (source === "runtime" || source === "config") {
+			const key = await this.authStorage.keys.peek(provider);
+			this.#resolvedCredentialVersions.set(provider, Bun.hash(key ?? "").toString(16));
+		} else {
+			this.#resolvedCredentialVersions.delete(provider);
+		}
+	}
+
+	/** Fingerprint only; credential material is never persisted in availability records. */
+	providerCredentialVersion(provider: string): string {
+		return Bun.hash(
+			JSON.stringify([
+				this.authStorage.credentials.list(provider).map(({ id, credential }) => [id, credential]),
+				this.#runtimeProviderApiKeys.get(provider),
+				this.#resolvedCredentialVersions.get(provider),
+				this.#providerOverrides.get(provider)?.apiKey,
+				getEnvApiKey(provider),
+			]),
+		).toString(16);
+	}
+
+	#startAvailabilityMonitoring(): void {
+		if (this.#availabilityTimer || this.#owner || isBunTestRuntime()) return;
+		const registry = new WeakRef(this);
+		const timer = setInterval(() => {
+			const current = registry.deref();
+			if (!current) {
+				clearInterval(timer);
+				return;
+			}
+			void current.runAvailabilityProbes().catch(error => {
+				logger.debug("Provider availability check failed", { error: String(error) });
+			});
+		}, 60_000);
+		timer.unref();
+		this.#availabilityTimer = timer;
+	}
+
+	stopAvailabilityMonitoring(): void {
+		if (this.#availabilityTimer) clearInterval(this.#availabilityTimer);
+		this.#availabilityTimer = undefined;
+	}
+
+	/** Run one leased recovery pass. Explicit entry point also permits network-free regression tests. */
+	runAvailabilityProbes(options: ProviderProbeOptions = {}): Promise<void> {
+		if (options.force) return this.#runAvailabilityProbes(options);
+		if (this.#owner) return Promise.resolve();
+		this.#availabilityRun ??= this.#runAvailabilityProbes().finally(() => {
+			this.#availabilityRun = undefined;
+		});
+		return this.#availabilityRun;
+	}
+
+	async #runAvailabilityProbes(options: ProviderProbeOptions = {}): Promise<void> {
+		await this.authStorage.credentials.poll();
+		for (const provider of this.#knownStaticProviders()) {
+			if (providerExhaustionRecord(provider)?.class === "auth") {
+				// Peek neither refreshes OAuth nor rotates accounts. Include CLI and
+				// command-backed overrides without exposing key material in state.
+				try {
+					await this.#rememberResolvedOverride(provider);
+				} catch {
+					continue;
+				}
+			}
+			const version = this.providerCredentialVersion(provider);
+			const previous = this.#credentialVersions.get(provider);
+			if (
+				this.authStorage.keys.source(provider) !== undefined &&
+				((previous !== undefined && previous !== version) || isProviderExhausted(provider))
+			) {
+				clearProviderAuthOnCredentialChange(provider, version);
+			}
+			this.#credentialVersions.set(provider, version);
+		}
+		await probeUnavailableProviders(async record => {
+			if (this.#isProviderDisabled(record.provider)) return { available: false };
+			if (record.class === "discovery") {
+				this.#discoveryProbeProviders.add(record.provider);
+				try {
+					await this.refreshDiscoverableProviders([record.provider], "online");
+					const state = this.#providerDiscoveryStates.get(record.provider);
+					return {
+						available: state !== undefined && !state.error && (state.status === "ok" || state.status === "empty"),
+					};
+				} finally {
+					this.#discoveryProbeProviders.delete(record.provider);
+				}
+			}
+			return { available: await probeProviderInference(this, record.provider) };
+		}, options);
+	}
+
+	#recordDiscoveryFailure(provider: string, error: unknown): void {
+		if (this.#discoveryProbeProviders.has(provider)) return;
+		const classified =
+			error instanceof DiscoveryHttpError &&
+			recordProviderFailure(provider, {
+				status: error.status,
+				credentialVersion: this.providerCredentialVersion(provider),
+			});
+		if (!classified) recordProviderFailure(provider, { discoveryFailure: true });
 	}
 
 	/** Whether background discovery started by {@link refreshInBackground} is still running and may add models. */
@@ -2904,6 +3034,7 @@ export class ModelRegistry {
 				return models.map(toModelSpec);
 			} catch (error) {
 				discoveryError = error instanceof Error ? error.message : String(error);
+				this.#recordDiscoveryFailure(providerId, error);
 				// A 401/403 means the endpoint is reachable but rejected the
 				// request's credentials (or the keyless assumption). Surface it
 				// as an auth failure instead of a generic outage so the hub can
@@ -3398,6 +3529,7 @@ export class ModelRegistry {
 								: "empty";
 			// A throwing fetcher still resolves (cache or bundled), but the failure must reach the state and the log.
 			failure = result.fetchError;
+			if (failure !== undefined) this.#recordDiscoveryFailure(options.providerId, failure);
 			this.#providerDiscoveryStates.set(options.providerId, {
 				provider: options.providerId,
 				status,
@@ -3419,6 +3551,7 @@ export class ModelRegistry {
 			return { models, authoritativeProviders, replaceRuntimeProviders };
 		} catch (error) {
 			failure = error instanceof Error ? error.message : String(error);
+			this.#recordDiscoveryFailure(options.providerId, error);
 			const previous = this.#providerDiscoveryStates.get(options.providerId);
 			// Same auth-rejection surfacing as the configured-discovery path: a
 			// 401/403 with nothing to serve is a credential problem, not an
@@ -3935,6 +4068,7 @@ export class ModelRegistry {
 				// by `#keylessProviders`.
 				available =
 					!disabledProviders.has(provider) &&
+					this.isProviderAvailable(provider) &&
 					(this.#keylessProviders.has(provider) ||
 						this.authStorage.keys.source(provider) !== undefined ||
 						this.authStorage.keys.keyless(provider));
@@ -4113,12 +4247,14 @@ export class ModelRegistry {
 	 * - `cached`/`unavailable` while the initial background refresh is in
 	 *   flight: startup replayed a cache row or fell back to the bundled
 	 *   catalog, and that refresh may still add ids (a cold namespace after an
-	 *   upgrade, or a cache row keyed to another credential). With no refresh
-	 *   running (an embedder that manages discovery itself) these states are
-	 *   final, so unresolved selectors warn immediately.
+	 *   upgrade, or a cache row keyed to another credential).
+	 * A failed discovery remains unresolved until recovery: an unavailable
+	 * catalog cannot establish that a configured model does not exist.
 	 */
 	isProviderDiscoveryPending(provider: string): boolean {
-		const status = this.#providerDiscoveryStates.get(provider)?.status;
+		const state = this.#providerDiscoveryStates.get(provider);
+		if (state?.error !== undefined) return true;
+		const status = state?.status;
 		if (status === "idle") return true;
 		if (status !== "cached" && status !== "unavailable") return false;
 		return this.#backgroundRefresh !== undefined && !this.#initialRefreshSettled;
@@ -4129,6 +4265,7 @@ export class ModelRegistry {
 	 * models to find: every caller that falls back to a literal lookup when
 	 * availability-filtered resolution misses (retry fallback candidates,
 	 * advisors, restored and CLI models) would otherwise reach it anyway.
+	 * Operational failures preserve identity; dispatch checks isProviderAvailable.
 	 */
 	find(provider: string, modelId: string): Model<Api> | undefined {
 		if (this.#isProviderDisabled(provider)) return undefined;
@@ -4208,12 +4345,14 @@ export class ModelRegistry {
 		if (this.#isKeylessProvider(model.provider)) {
 			return kNoAuth;
 		}
-		return this.authStorage.keys.get(model.provider, sessionId, {
+		const key = await this.authStorage.keys.get(model.provider, sessionId, {
 			baseUrl: model.baseUrl,
 			modelId: model.id,
 			accountIds: model.accountAccess && Object.keys(model.accountAccess),
 			signal: options?.signal,
 		});
+		await this.#rememberResolvedOverride(model.provider);
+		return key;
 	}
 
 	/** Resolve request authentication through the historical Pi extension facade. */
@@ -4271,7 +4410,7 @@ export class ModelRegistry {
 			return { apiKey: kNoAuth };
 		}
 		const accountAccess = options?.modelId ? this.find(provider, options.modelId)?.accountAccess : undefined;
-		return this.authStorage.keys.getWithCredential(provider, sessionId, {
+		const credential = await this.authStorage.keys.getWithCredential(provider, sessionId, {
 			baseUrl: options?.baseUrl,
 			modelId: options?.modelId,
 			accountIds: accountAccess && Object.keys(accountAccess),
@@ -4280,6 +4419,8 @@ export class ModelRegistry {
 			rejectedAccessToken: options?.rejectedAccessToken,
 			signal: options?.signal,
 		});
+		await this.#rememberResolvedOverride(provider);
+		return credential;
 	}
 
 	/**
@@ -4307,7 +4448,9 @@ export class ModelRegistry {
 		if (this.#keylessProviders.has(provider) && this.authStorage.keys.source(provider) === undefined) {
 			return kNoAuth;
 		}
-		return this.authStorage.keys.peek(provider, options);
+		const key = await this.authStorage.keys.peek(provider, options);
+		await this.#rememberResolvedOverride(provider);
+		return key;
 	}
 
 	/** The extension web search registered for `provider`'s models, which the web search tool runs in place of their grounding backend. */

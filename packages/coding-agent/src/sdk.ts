@@ -258,6 +258,7 @@ import { describeUsageFallback } from "./session/retry-fallback-reason";
 import { kUsageLimitRequestProvider } from "./session/turn-recovery";
 import { getReadableCompactionEntry, getRestorableSessionModels } from "./session/session-context";
 import { completionRecord } from "./session/model-usage-journal";
+import { providerExhaustionRecord } from "./session/provider-exhaustion";
 import { SessionManager } from "./session/session-manager";
 import { cfgOffline } from "./config/auxiliary-model-policy";
 import { SHAPE_RULE } from "./spotlight/shape";
@@ -3871,7 +3872,42 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					}
 				}
 
-				if (!model && !tryResolveDefaultRoleFallback(fallbackCandidates) && pick) {
+				if (!model) tryResolveDefaultRoleFallback(fallbackCandidates);
+				if (!model && defaultRoleConfigured) {
+					// Keep a known configured identity while its whole group is blocked.
+					// The session's dispatch gate waits; unrelated defaults cannot replace
+					// preference just because the provider is temporarily unavailable.
+					const disabled = new Set(cfgDisabledProviders.get(settings));
+					const blockedCandidates = await resolveAllowedModels(
+						{
+							getAvailable: () =>
+								modelRegistry
+									.getAll()
+									.filter(
+										candidate =>
+											!disabled.has(candidate.provider) &&
+											(providerExhaustionRecord(candidate.provider) !== undefined ||
+												!hasModelAuth(candidate)),
+									),
+						},
+						settings,
+						modelMatchPreferences,
+					);
+					const blockedDefault = resolveModelRoleValue(settings.getModelRole("default"), blockedCandidates, {
+						settings,
+						matchPreferences: modelMatchPreferences,
+					});
+					if (blockedDefault.model) {
+						model = blockedDefault.model;
+						defaultRoleSpec = blockedDefault;
+						modelFallbackMessage = undefined;
+						adoptThinkingForModel(model);
+					}
+				}
+				const pendingDefault =
+					explicitDefaultProviders &&
+					[...explicitDefaultProviders].some(provider => providerExhaustionRecord(provider) !== undefined);
+				if (!model && pick && !pendingDefault) {
 					model = pick;
 					adoptThinkingForModel(pick);
 					// A configured default that no longer resolves (a renamed or retired
@@ -3898,6 +3934,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				if (modelFallbackMessage) {
 					modelFallbackMessage += `. Using ${model.provider}/${model.id}`;
 				}
+			} else if (
+				explicitDefaultProviders &&
+				[...explicitDefaultProviders].some(provider => providerExhaustionRecord(provider) !== undefined)
+			) {
+				modelFallbackMessage = undefined;
 			} else {
 				const patterns = cfgEnabledModels.get(settings);
 				modelFallbackMessage =
