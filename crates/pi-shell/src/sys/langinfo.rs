@@ -144,7 +144,12 @@ mod native {
 			// object.
 			let loc =
 				unsafe { libc::newlocale(libc::LC_COLLATE_MASK, c.as_ptr(), core::ptr::null_mut()) };
-			(!loc.is_null()).then_some(Self(Loc(loc)))
+			// Never wrap a null pointer: `Loc` frees it on drop.
+			if loc.is_null() {
+				None
+			} else {
+				Some(Self(Loc(loc)))
+			}
 		}
 
 		pub fn key(&self, s: &[u8]) -> Vec<u8> {
@@ -183,7 +188,8 @@ mod native {
 				// SAFETY: as above, with a literal C string.
 				loc = unsafe { libc::newlocale(mask, c"C".as_ptr(), core::ptr::null_mut()) };
 			}
-			(!loc.is_null()).then_some(Self(loc))
+			// Never wrap a null pointer: `Loc` frees it on drop.
+			if loc.is_null() { None } else { Some(Self(loc)) }
 		}
 	}
 
