@@ -424,4 +424,65 @@ describe("taskFile approval binding", () => {
 		expect(select).not.toHaveBeenCalled();
 		expect(executions.map(item => item.assignment)).toEqual(["Approved assignment."]);
 	});
+
+	// A blank `taskFile` names no file: it resolves against the process working directory, so binding
+	// it would scope the call's approval to that directory and a restricted folder covering it would
+	// stop a call that reads nothing there. The restricted folder below is the working directory the
+	// blanks resolve to; the session's own cwd (a temp directory) is outside it.
+	it.each(["", " ", "\t", "\r\n"])("does not restrict a flat call on the blank taskFile %j", async blank => {
+		const select = vi.fn(async () => "Deny");
+		const { wrapper, context } = await createWrapper(select, "yolo", [process.cwd()]);
+
+		const result = await wrapper.execute(
+			"blank-flat",
+			{ task: "Inline assignment.", taskFile: blank },
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(select).not.toHaveBeenCalled();
+		expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
+		expect(executions.map(item => item.assignment)).toEqual(["Inline assignment."]);
+	});
+
+	it.each(["", " ", "\t", "\r\n"])("does not restrict a batch call on the blank taskFile %j", async blank => {
+		const select = vi.fn(async () => "Deny");
+		const { wrapper, context } = await createWrapper(select, "yolo", [process.cwd()]);
+
+		const result = await wrapper.execute(
+			"blank-batch",
+			{
+				context: "Complete all assignments.",
+				tasks: [
+					{ task: "First assignment.", taskFile: blank },
+					{ task: "Second assignment.", taskFile: blank },
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(select).not.toHaveBeenCalled();
+		expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
+		expect(executions.map(item => item.assignment).sort()).toEqual(["First assignment.", "Second assignment."]);
+	});
+
+	it("still restricts a task file that names a file in a restricted folder", async () => {
+		const { restricted } = await linkedFiles();
+		const titles: string[] = [];
+		const select = vi.fn(async (title: string) => {
+			titles.push(title);
+			return "Deny";
+		});
+		const { wrapper, context } = await createWrapper(select, "yolo");
+
+		await expect(
+			wrapper.execute("restricted-real", { taskFile: restricted }, undefined, undefined, context),
+		).rejects.toThrow("Tool call denied by user: task");
+
+		expect(titles).toEqual([expect.stringContaining(`Restricted folder: ${path.join(directory, "restricted")}`)]);
+		expect(executions).toHaveLength(0);
+	});
 });

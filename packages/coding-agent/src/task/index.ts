@@ -462,10 +462,27 @@ interface SpawnParams extends TaskParams {
 	taskFileSha256?: string;
 }
 
+/**
+ * The `taskFile` values a call submits, for binding and for the restriction check that reads what
+ * binding captured.
+ *
+ * A blank one names no file. It is the placeholder a model fills a declared field with, dispatch
+ * drops it, and `validateTaskInput` refuses it on its own ("must be an absolute path or local://
+ * URL"), so no run ever reads it. Resolving it anyway lands on the process working directory, and
+ * the capture that follows is what the approval gate then treats as a path this call touches — a
+ * restricted folder covering that directory would stop a call that reads nothing there.
+ *
+ * Dropping them here rather than at the restriction check is what makes the two agree: the
+ * binding stores the targets it captured, and the restriction check returns those stored targets
+ * whenever a binding exists. A filter applied only to the check's own argument is bypassed the
+ * moment the wrapper binds, which is immediately before it resolves approval.
+ */
 function submittedTaskFiles(args: unknown): string[] {
 	if (!isRecord(args)) return [];
 	const items = Array.isArray(args.tasks) ? args.tasks : [args];
-	return items.flatMap(item => (isRecord(item) && typeof item.taskFile === "string" ? [item.taskFile] : []));
+	return items.flatMap(item =>
+		isRecord(item) && typeof item.taskFile === "string" && item.taskFile.trim() !== "" ? [item.taskFile] : [],
+	);
 }
 
 /** The filesystem path a `taskFile` names; approval and dispatch share it so both see the same file. */
@@ -923,16 +940,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		bindTaskFileApproval(this, submittedTaskFiles(args), taskFile => taskFilePath(this.session, taskFile));
 	};
 	// Restricted folders cover task files, but approvals are never remembered per file: the grant would
-	// cover whatever the path holds later, and inline items in the same batch.
-	readonly approvalRestrictionPaths = (args: unknown): readonly string[] | undefined => {
-		// A blank `taskFile` is filler the dispatch path drops; scoping an approval to it would
-		// restrict the grant to a path the run never reads.
-		return taskFileRestrictionPaths(
-			this,
-			submittedTaskFiles(args).filter(taskFile => taskFile.trim()),
-			taskFile => taskFilePath(this.session, taskFile),
-		);
-	};
+	// cover whatever the path holds later, and inline items in the same batch. Both this and the
+	// binding above take the same list, so the blanks `submittedTaskFiles` drops are absent from the
+	// captured targets this returns once a binding exists.
+	readonly approvalRestrictionPaths = (args: unknown): readonly string[] | undefined =>
+		taskFileRestrictionPaths(this, submittedTaskFiles(args), taskFile => taskFilePath(this.session, taskFile));
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<TaskParams>;
 		const lines: string[] = [];
