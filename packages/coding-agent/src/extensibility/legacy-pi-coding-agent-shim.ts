@@ -60,7 +60,6 @@ import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	type TruncationResult,
-	truncateHead,
 	truncateTail,
 } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { SessionEntry } from "../session/session-entries";
@@ -674,10 +673,14 @@ export function createFindToolDefinition(cwd: string, options?: FindToolOptions)
 						return rel.split(path.sep).join("/");
 					})
 					.join("\n");
-				const truncation = truncateHead(output, { maxLines: Number.MAX_SAFE_INTEGER });
+				// The listing goes out whole. Clipping it here dropped paths with
+				// no marker, no notice and no recovery link — the clipped text
+				// then fit under the spill threshold, so the wrapper had nothing
+				// left to report. `wrapToolWithMetaNotice` cuts an oversized
+				// listing with its elision marker, its notice and an
+				// `artifact://` link to the whole of it.
 				return {
-					content: [{ type: "text", text: truncation.content || "No files found matching pattern" }],
-					details: truncation.truncated ? { truncation } : undefined,
+					content: [{ type: "text", text: output || "No files found matching pattern" }],
 				};
 			}
 			return tool.execute(

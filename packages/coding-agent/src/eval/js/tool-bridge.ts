@@ -62,6 +62,40 @@ export interface ToolBridgeOptions {
 	onReply?: (text: string) => void;
 }
 
+/**
+ * What a bridged call reports when the harness handed the cell a sample of the
+ * result instead of the result.
+ *
+ * The sample itself always says so in prose — the truncation notice the tool
+ * wrapper appends to the text. That sentence is written for a reader, and on
+ * the eval path the consumer is a script: it slices, counts or filters `text`
+ * and never reads the last line. Worse, `details` keeps describing the whole
+ * object the call asked about, so the two halves of one value disagree with
+ * nothing between them saying which is narrower (`envoy_sessions` answers
+ * `details.count: 684` beside a `text` holding 44 of those sessions).
+ *
+ * So the fact is also carried where a script trips over it: `truncated` is
+ * present if and only if the text is a sample, and `artifact` addresses the
+ * whole value. Every field is derived from the same `details.meta.truncation`
+ * the prose notice is formatted from, so the two can never disagree.
+ */
+export interface BridgeTruncation {
+	/** Lines of the whole result, and how many of them the text carries. */
+	lines: { shown: number; total: number };
+	/** Bytes of the whole result, and how many of them the text carries. */
+	bytes: { shown: number; total: number };
+	/**
+	 * Internal URL of the result, readable with `read`. Absent when saving it
+	 * failed: then the dropped bytes are gone, which `truncated` still reports.
+	 */
+	artifact?: string;
+	/**
+	 * Bytes `tools.artifactMaxBytes` kept out of the saved copy. Present only
+	 * when the artifact is itself a head/tail sample rather than the whole value.
+	 */
+	artifactElidedBytes?: number;
+}
+
 type ToolValue =
 	| string
 	| EvalBudgetResult
@@ -78,10 +112,63 @@ type ToolValue =
 			details?: unknown;
 			images?: Omit<ImageContent, "type">[];
 			hasError?: boolean;
+			truncated?: BridgeTruncation;
 	  };
 function toolResultHasError(result: AgentToolResult): boolean {
 	if (isRecord(result) && result.isError === true) return true;
 	return isRecord(result.details) && result.details.isError === true;
+}
+
+/**
+ * The {@link BridgeTruncation} for a result whose text the harness sampled, or
+ * `undefined` when the text is the whole of what the call asked for. Reads the
+ * wrapper's own `details.meta.truncation`, so a tool that truncated itself
+ * (bash, read, eval) and one the central artifact spill cut report identically.
+ */
+function bridgeTruncation(details: unknown): BridgeTruncation | undefined {
+	if (!isRecord(details)) return undefined;
+	const meta = details.meta;
+	if (!isRecord(meta)) return undefined;
+	// A page the caller asked for is the whole of what it asked for, and names
+	// its own `:N` continuation. The central spill skips it for that reason;
+	// reporting it as a sample would send scripts to an artifact of one page.
+	if (meta.pagedSource === true) return undefined;
+	const truncation = meta.truncation;
+	if (!isRecord(truncation)) return undefined;
+	const { totalLines, totalBytes, outputLines, outputBytes, artifactId, artifactElidedBytes } = truncation;
+	if (typeof totalLines !== "number" || typeof totalBytes !== "number") return undefined;
+	// How much was dropped is the only sound measure of "is this a sample". The
+	// output counters are not: `truncateMiddle` counts its own elision marker
+	// among them, so a middle elision that dropped one line can report more
+	// output lines and bytes than the whole result has, which reads as whole.
+	// The elided counts are also what the prose notice reports, so the two
+	// cannot disagree. Tail truncation leaves them unset and adds no marker,
+	// so there the difference of the counters is exact.
+	const droppedLines =
+		typeof truncation.elidedLines === "number"
+			? truncation.elidedLines
+			: totalLines - (typeof outputLines === "number" ? outputLines : totalLines);
+	const droppedBytes =
+		typeof truncation.elidedBytes === "number"
+			? truncation.elidedBytes
+			: totalBytes - (typeof outputBytes === "number" ? outputBytes : totalBytes);
+	// A per-line column cap shortens long lines without dropping any; its limit
+	// lives in `meta.limits`, but a tool may record both, so check the counts.
+	if (droppedLines <= 0 && droppedBytes <= 0) return undefined;
+	const value: BridgeTruncation = {
+		lines: { shown: Math.max(0, totalLines - Math.max(0, droppedLines)), total: totalLines },
+		bytes: { shown: Math.max(0, totalBytes - Math.max(0, droppedBytes)), total: totalBytes },
+	};
+	if (typeof artifactId === "string" && artifactId.length > 0) {
+		value.artifact = `artifact://${artifactId}`;
+		// Past `tools.artifactMaxBytes` the saved copy is a head/tail sample of
+		// the result too. The prose says so; a caller that follows the URL
+		// expecting the whole value has to be told the same thing.
+		if (typeof artifactElidedBytes === "number" && artifactElidedBytes > 0) {
+			value.artifactElidedBytes = artifactElidedBytes;
+		}
+	}
+	return value;
 }
 
 function getTool(session: ToolSession, name: string): AgentTool {
@@ -189,12 +276,16 @@ export function bridgeValueFromToolResult(
 		const event = summarize(name, args, result, text, hasError);
 		if (event) emitStatus(event);
 	}
-	if (result.details === undefined && imageBlocks.length === 0 && !hasError) return text;
+	const truncated = bridgeTruncation(result.details);
+	// A sampled text is never handed back as a bare string: the caller would
+	// have nowhere to find out that it is a sample.
+	if (result.details === undefined && imageBlocks.length === 0 && !hasError && !truncated) return text;
 	const value: Exclude<ToolValue, string> = { text, details: result.details };
 	if (imageBlocks.length > 0) {
 		value.images = imageBlocks.map(({ type: _type, ...image }) => image);
 	}
 	if (hasError) value.hasError = true;
+	if (truncated) value.truncated = truncated;
 	return value;
 }
 
