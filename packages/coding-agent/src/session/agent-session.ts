@@ -1176,6 +1176,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#deferredTitle: { sessionId: string; declined: boolean; replied: boolean; words: number } | undefined;
 	/** What the next automatic title names (see {@link #maybeStartTitle}). */
 	#titleInput: TitleInput | undefined;
+	/** Whether the transcript this session resumed with may still arm
+	 *  {@link #titleInput} once (see {@link #adoptResumedTitleInput}). */
+	#resumeTitlePending = false;
 	/** Operator prompts since the last title check, toward `title.refreshAfterPrompts`. */
 	#titleDrift: { sessionId: string; prompts: number } | undefined;
 	#titleProviderSessionId: string | undefined;
@@ -2424,6 +2427,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.agent.serviceTierResolver = model => this.#models.effectiveServiceTier(model);
 		this.#titleSystemPrompt = config.titleSystemPrompt;
 		this.#autoTitle = config.autoTitle === true;
+		// A session built over a transcript was resumed. Its relaunch may send no
+		// operator message at all, so record that the carried transcript still owes
+		// this session one title try; {@link #adoptResumedTitleInput} spends it.
+		this.#resumeTitlePending = this.#autoTitle && config.agent.state.messages.length > 0;
 		this.#transformContext = config.transformContext ?? (messages => messages);
 		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
 		this.#onPayload = config.onPayload;
@@ -4607,17 +4614,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const expectedSpawns =
 			event.type === "message_update" ? this.#spawnSignal?.observe(event.assistantMessageEvent) : undefined;
 		if (expectedSpawns) prewarmSubagentWorker(this.settings, this.#modelRegistry, expectedSpawns);
-		// Title the session once the reply to the operator's latest message starts
-		// a non-thinking block, synchronously: a title fork snapshots the streaming
+		// Title the session once the reply to the operator's latest message — or,
+		// on a resume that carries none, to the transcript itself — starts a
+		// non-thinking block, synchronously: a title fork snapshots the streaming
 		// reply before its first await.
 		if (event.type === "message_end") {
 			this.#noteTitleInput(event.message);
 			this.#noteTitleDrift(event.message);
-		} else if (event.type === "message_update" && this.#titleInput) {
+		} else if (event.type === "message_update") {
 			const kind = event.assistantMessageEvent.type;
 			if (kind === "text_start" || kind === "toolcall_start") {
-				this.#titleInput.replied = true;
-				this.#maybeStartTitle();
+				this.#adoptResumedTitleInput();
+				if (this.#titleInput) {
+					this.#titleInput.replied = true;
+					this.#maybeStartTitle();
+				}
 			}
 		}
 		// Expected internal transitions stamp a structural suppression flag on the
@@ -11221,6 +11232,31 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#noteTitleInput(message: AgentMessage): void {
 		if (!this.#autoTitle || this.sessionName || $env.PI_NO_TITLE) return;
 		const text = operatorTitleText(message);
+		if (!text || isLowSignalTitleInput(text)) return;
+		this.#titleInput = { sessionId: this.sessionManager.getSessionId(), text, replied: false, tried: false };
+	}
+
+	/**
+	 * Record the transcript a resumed session carries as its title source, once.
+	 *
+	 * A relaunch need not send an operator message: a wake notice arrives as a
+	 * `custom` message, which {@link operatorTitleText} reads only for `/skill:`
+	 * chips, so {@link #noteTitleInput} never fires and the session stays unnamed
+	 * until a person types — in the case this fixes, five hours, while it worked.
+	 * The carried transcript is a better source than a first message anyway: it
+	 * is what {@link #advanceDeferredTitle} already retitles from.
+	 *
+	 * The bound is one title request per resumed session, the same budget one
+	 * operator message buys: the flag is spent on the first reply whatever the
+	 * outcome, so a decline, a refusal or an unnameable transcript costs one call
+	 * and no more, and a session that never replies costs none. A session that is
+	 * already named (including one named by `--title`) spends nothing.
+	 */
+	#adoptResumedTitleInput(): void {
+		if (!this.#resumeTitlePending) return;
+		this.#resumeTitlePending = false;
+		if (!this.#autoTitle || this.sessionName || this.#titleInput || $env.PI_NO_TITLE) return;
+		const text = this.#buildReplanTitleContext();
 		if (!text || isLowSignalTitleInput(text)) return;
 		this.#titleInput = { sessionId: this.sessionManager.getSessionId(), text, replied: false, tried: false };
 	}

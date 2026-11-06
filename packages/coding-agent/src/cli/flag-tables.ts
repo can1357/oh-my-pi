@@ -259,6 +259,9 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--export": (result, value) => {
 		result.export = value;
 	},
+	"--title": (result, value) => {
+		result.title = value;
+	},
 	"--hook": (result, value) => {
 		result.hooks = result.hooks ?? [];
 		result.hooks.push(value);

@@ -1735,6 +1735,12 @@ export async function buildSessionOptions(
 	if (titleSystemPrompt) {
 		options.titleSystemPrompt = titleSystemPrompt;
 	}
+	// `--title`: the launcher already knows what the session is called, so no
+	// generated title ever has to be waited for. Recorded as a title the user
+	// set, which every automatic path yields to.
+	if (parsed.title) {
+		options.sessionTitle = parsed.title;
+	}
 
 	// Tools
 	if (parsed.noTools) {

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `--title <text>` to name a session at launch, recorded as a title you set, so a relaunch can give the replacement the name its predecessor had ([#PR](https://github.com/can1357/oh-my-pi/pull/PR) by [@sjawhar](https://github.com/sjawhar))
+
+### Fixed
+
+- A resumed session with no title now names itself from the transcript it carries, instead of staying unnamed until someone types ([#PR](https://github.com/can1357/oh-my-pi/pull/PR) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.17.0] - 2026-11-06
 
 ### Added
