@@ -1,4 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import * as os from "node:os";
+import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
@@ -6,7 +8,7 @@ import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-messa
 import { setChatTranscriptDisplayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
-import { formatStatusIcon } from "@oh-my-pi/pi-tui/render/render-utils";
+import { formatStatusIcon, type ToolUIStatus } from "@oh-my-pi/pi-tui/render/render-utils";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { createUsageRowBlock } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
@@ -49,7 +51,7 @@ describe("display.collapsedToolTitles", () => {
 		expect(expanded).toContain("BODY:secret-output");
 	});
 
-	const glyph = (status: Parameters<typeof formatStatusIcon>[0], frame?: number) =>
+	const glyph = (status: ToolUIStatus, frame?: number) =>
 		stripVTControlCharacters(formatStatusIcon(status, theme, frame));
 
 	it("leads each settled row with its semantic status glyph", () => {
@@ -98,6 +100,14 @@ describe("display.collapsedToolTitles", () => {
 		expect(c.render(100).join("")).not.toContain("\u001b[2J");
 	});
 
+	it("shortens a home path in the title target", () => {
+		setChatTranscriptDisplayPreferences({ collapsedToolTitles: true });
+		const c = mount({ path: path.join(os.homedir(), "proj", "src") });
+		c.updateResult({ content: [{ type: "text", text: "ok" }] }, false);
+		expect(text(c)).toEqual([expect.stringContaining(`Probe · ~${path.sep}proj${path.sep}src`)]);
+		expect(text(c).join("")).not.toContain(os.homedir());
+	});
+
 	it("titles search-style calls by their query or pattern", () => {
 		setChatTranscriptDisplayPreferences({ collapsedToolTitles: true });
 		for (const [key, value] of [
@@ -137,9 +147,9 @@ describe("display.collapsedToolTitles", () => {
 	describe("read groups", () => {
 		function readGroup(showContentPreview: boolean, files: string[]) {
 			const g = new ReadToolGroupComponent({ showContentPreview });
-			files.forEach((path, i) => {
-				g.updateArgs({ path }, `r${i}`);
-				g.updateResult({ content: [{ type: "text", text: `body-of-${path}` }] }, false, `r${i}`);
+			files.forEach((file, i) => {
+				g.updateArgs({ path: file }, `r${i}`);
+				g.updateResult({ content: [{ type: "text", text: `body-of-${file}` }] }, false, `r${i}`);
 			});
 			return g;
 		}
@@ -151,7 +161,7 @@ describe("display.collapsedToolTitles", () => {
 
 		for (const showContentPreview of [true, false]) {
 			for (const files of [["a.ts"], ["a.ts", "b.ts"]]) {
-				it(`lists paths, hides bodies until expanded (preview=${showContentPreview}, ${files.length} file)`, () => {
+				it(`lists paths, shows bodies only expanded with preview on (preview=${showContentPreview}, ${files.length} file)`, () => {
 					setChatTranscriptDisplayPreferences({ collapsedToolTitles: true });
 					const g = readGroup(showContentPreview, files);
 					const collapsed = lines(g);
@@ -163,7 +173,11 @@ describe("display.collapsedToolTitles", () => {
 					expect(collapsed.split("\n")[0]?.trimEnd()).toBe(`${glyph("success")} ${head}`);
 					g.setExpanded(true);
 					const expanded = lines(g);
-					for (const f of files) expect(expanded).toContain(`body-of-${f}`);
+					for (const f of files) {
+						expect(expanded).toContain(f);
+						if (showContentPreview) expect(expanded).toContain(`body-of-${f}`);
+						else expect(expanded).not.toContain(`body-of-${f}`);
+					}
 				});
 			}
 		}

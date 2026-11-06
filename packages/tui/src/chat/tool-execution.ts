@@ -57,11 +57,11 @@ import {
 	formatStatusIcon,
 	replaceTabs,
 	resolveImageOptions,
+	shortenPath,
 } from "../render/render-utils";
 import type { XdevMountedState } from "../tools/xdev";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../render/index";
 import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
-import { chatTranscriptDisplayPreferences } from "./display-preferences";
 import { type ToolRunCall, toolRunOf } from "./tool-run";
 import { FenceFigure } from "./fence-figure";
 import { SpotlightNotices } from "./spotlight";
@@ -1806,24 +1806,11 @@ export class ToolExecutionComponent extends Container {
 	/** Sanitized one-line label and primary target, shared by the title row and tool-run summaries. */
 	#titleParts(): { label: string; detail: string | undefined } {
 		const summary = this.#activitySummary();
-		// Without a renderer summary the detail is a generic command/path/input guess or a
-		// "running" placeholder; a search's query or pattern names the call better.
-		const generic = this.#renderer?.activitySummary === undefined || summary.detail === "running";
-		const target = ((generic ? this.#titleTarget() : undefined) ?? summary.detail ?? "").replace(/\s+/g, " ").trim();
+		const target = (summary.detail ?? "").replace(/\s+/g, " ").trim();
 		return {
 			label: sanitizeText(summary.label).replace(/\s+/g, " "),
 			detail: target ? sanitizeText(target) : undefined,
 		};
-	}
-
-	/** Search-style primary targets the shared summary fallback leaves out. */
-	#titleTarget(): string | undefined {
-		if (!isRecord(this.#args)) return undefined;
-		for (const key of ["query", "pattern", "pat", "url"] as const) {
-			const value = this.#args[key];
-			if (typeof value === "string" && value.length > 0) return value.split("\n", 1)[0];
-		}
-		return undefined;
 	}
 
 	#activitySummary(): ToolActivitySummary {
@@ -1842,10 +1829,12 @@ export class ToolExecutionComponent extends Container {
 			return this.#isRunning() ? { ...summary, detail: "running" } : summary;
 		}
 		if (isRecord(this.#args)) {
-			for (const key of ["command", "path", "input"] as const) {
+			// A search's query or pattern names the call better than its path.
+			for (const key of ["command", "query", "pattern", "pat", "url", "path", "input"] as const) {
 				const value = this.#args[key];
 				if (typeof value === "string" && value.length > 0) {
-					return { label: this.#toolLabel, detail: value.split("\n", 1)[0] };
+					const detail = value.split("\n", 1)[0]!;
+					return { label: this.#toolLabel, detail: key === "path" ? shortenPath(detail) : detail };
 				}
 			}
 		}

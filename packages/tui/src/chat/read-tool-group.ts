@@ -522,7 +522,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			.filter(entry => entry.presentation.shown.mode !== "hidden")
 			.map(entry => ({
 				label: "Read",
-				detail: entry.path,
+				detail: shortenPath(entry.path),
 				status: entry.status === "pending" ? "running" : entry.status,
 			}));
 	}
@@ -1484,8 +1484,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	/** Terminal transcript rows: title mode shows file bodies only once expanded. */
 	#shouldRenderTuiPreview(entry: ReadEntry): boolean {
-		if (!chatTranscriptDisplayPreferences.collapsedToolTitles) return this.#shouldRenderPreview(entry);
-		return this.#expanded && entry.contentText !== undefined;
+		const shown = this.#shouldRenderPreview(entry);
+		return chatTranscriptDisplayPreferences.collapsedToolTitles ? this.#expanded && shown : shown;
 	}
 
 	/** Title mode matches the shared tool title row: status glyph, label, ` · ` target. */

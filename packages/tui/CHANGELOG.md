@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- `ChatTranscriptDisplayPreferences.collapsedToolTitles`: collapsed tool calls and read groups draw one title row (status glyph, label, shortened target); bodies, diffs and previews wait for expansion, and `read.toolResultPreview=false` still hides read bodies ([#16726](https://github.com/can1357/oh-my-pi/pull/16726) by [@Quentin-M](https://github.com/Quentin-M))
+- `ChatTranscriptDisplayPreferences.groupToolCalls` and `chat/tool-run`: `TranscriptContainer` folds back-to-back tool blocks and their usage rows into one summary row, expandable per run with `toggleToolRun()` ([#16726](https://github.com/can1357/oh-my-pi/pull/16726) by [@Quentin-M](https://github.com/Quentin-M))
+
 ## [18.17.0] - 2026-11-06
 
 ### Breaking Changes
