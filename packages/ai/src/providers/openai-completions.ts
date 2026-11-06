@@ -1,7 +1,7 @@
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
-import { calculateCost } from "@oh-my-pi/pi-catalog/models";
+import { calculateUsageCost } from "@oh-my-pi/pi-catalog/models";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { clinePassClientHeaders } from "@oh-my-pi/pi-catalog/wire/cline-pass";
 import {
@@ -34,6 +34,7 @@ import type {
 	ToolChoice,
 	ToolResultMessage,
 } from "../types";
+import { parseServiceTier } from "../types";
 import { normalizeSystemPrompts, normalizeToolCallId, resolveCacheRetention } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
 import { isDemotedThinking, kStreamingLastParseLen } from "../utils/block-symbols";
@@ -46,7 +47,7 @@ import {
 	iterateWithIdleTimeout,
 	iterateWithTerminalGrace,
 } from "../utils/idle-iterator";
-import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
+import { isServiceTierCapacityRejection, OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import {
@@ -97,6 +98,8 @@ import {
 	applyOpenAIGatewayRouting,
 	applyOpenAIServiceTier,
 	applyProviderReportedCost,
+	applyServiceTierCapacityRetry,
+	canRerouteServiceTierCapacity,
 	applyWireModelIdTransform,
 	calculateOpenAIUsageAccounting,
 	clearOpenAIStrictToolsState,
@@ -118,6 +121,12 @@ import {
 	resolveOpenAICompletionsOutputClamp,
 	resolveOpenAIOutputTokenParam,
 	resolveOpenAIRequestSetup,
+	reapplyServiceTierCapacityRetryAfterHook,
+	resolveServiceTierCapacityRetry,
+	resolveServedModelRow,
+	applyOpenAIServiceTierCost,
+	applyServedCopilotPremiumRequests,
+	type ServiceTierCapacityRetry,
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
 } from "./openai-shared";
@@ -937,11 +946,18 @@ const streamOpenAICompletionsOnce = (
 			const completionsUrl = query
 				? `${trimmedBaseUrl}/chat/completions?${new URLSearchParams(query)}`
 				: `${trimmedBaseUrl}/chat/completions`;
+			// Set once the host refuses the serving tier for want of capacity; every
+			// request built after that is re-aimed at standard serving.
+			let serviceTierCapacityRetry: ServiceTierCapacityRetry | undefined;
 			const createCompletionsStream = async (toolStrictModeOverride?: ToolStrictModeOverride) => {
 				const effectiveToolStrictModeOverride = disableStrictTools ? "none" : toolStrictModeOverride;
 				const builtParams = buildParams(model, context, options, effectiveToolStrictModeOverride);
 				appliedStrictTools = builtParams.strictToolsApplied;
 				let params = builtParams.params;
+				// Re-aim before the effort-fallback key is derived from the wire id:
+				// effort negotiated after a reroute belongs to the route that will
+				// carry the request, not the one the host refused.
+				if (serviceTierCapacityRetry) applyServiceTierCapacityRetry(params, serviceTierCapacityRetry);
 				// Tool-triggered suppression is a hard wire constraint; cached
 				// enabled-effort negotiation must not overwrite its `none`.
 				const reasoningEffortFallbackKey = builtParams.reasoningEffortFallbackAllowed
@@ -960,6 +976,9 @@ const streamOpenAICompletionsOnce = (
 				const replacedParams = await options?.onPayload?.(params, model);
 				if (replacedParams !== undefined) params = replacedParams as typeof params;
 				activeRequestParams = params;
+				// A payload hook may hand back a body that re-states the refused id;
+				// a body it re-routed somewhere else of its own accord stands.
+				if (serviceTierCapacityRetry) reapplyServiceTierCapacityRetryAfterHook(params, serviceTierCapacityRetry);
 				rawRequestDump = {
 					provider: model.provider,
 					api: output.api,
@@ -994,6 +1013,12 @@ const streamOpenAICompletionsOnce = (
 							copilotCacheKey,
 							copilotCacheSnapshot,
 						),
+						// Resending identical bytes cannot find capacity the host just
+						// said it has none of — but only decline the transport retry
+						// when this request has somewhere else to go, so a deployment
+						// with no standard peer keeps today's recovery.
+						shouldRetryResponse: (_response, bodyText) =>
+							!(canRerouteServiceTierCapacity(model, params) && isServiceTierCapacityRejection(bodyText)),
 						// Transient 408/429/5xx get Retry-After-aware transport retries.
 						// The first-event watchdog above aborts `requestSignal`, which
 						// bounds every attempt and backoff sleep — retries cannot
@@ -1020,47 +1045,77 @@ const streamOpenAICompletionsOnce = (
 			// omits `cached_tokens`; captured here for the usage parser.
 			let responseHeaders: Headers | undefined;
 			let openaiStream: AsyncIterable<ChatCompletionChunk>;
-			try {
-				openaiStream = await createCompletionsStream();
-			} catch (error) {
-				const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
-				// A caller disable with a retained effort preference is still an
-				// explicit disable: without this, a fieldless rejection of the
-				// resulting `none` resolves to a delete-effort retry that gets
-				// cached and strips later enabled turns.
-				const isExplicitDisable = options?.disableReasoning === true;
-				const reasoningEffortFallback =
-					activeReasoningEffortFallbackKey && activeRequestParams && !requestSignal.aborted
-						? resolveOpenAIReasoningEffortFallback(error, capturedErrorResponse, activeRequestParams, {
-								explicitDisable: isExplicitDisable,
-							})
-						: undefined;
-				if (reasoningEffortFallback !== undefined && activeReasoningEffortFallbackKey) {
-					const retryMarker = `${activeReasoningEffortFallbackKey}:${String(reasoningEffortFallback)}`;
-					if (attemptedReasoningEffortFallbacks.has(retryMarker)) throw error;
-					attemptedReasoningEffortFallbacks.add(retryMarker);
-					requestReasoningEffortFallbacks.set(activeReasoningEffortFallbackKey, reasoningEffortFallback);
+			// A request repair is confirmed only by the open that carries it, so the
+			// effort fallback is remembered for the session after the retry connects,
+			// not when it is chosen. Every repair below sets its state and re-enters
+			// the loop, so a capacity reroute and a strict-tools or effort rejection
+			// compose instead of the second one escaping unrepaired.
+			let pendingReasoningEffortFallback: { key: string; fallback: OpenAIReasoningEffortFallback } | undefined;
+			while (true) {
+				try {
 					openaiStream = await createCompletionsStream();
-					// Explicit-disable fallbacks stay per-request so a reasoning-off
-					// side request cannot downgrade later normal turns sharing
-					// the session state.
-					if (!isExplicitDisable) {
+					if (pendingReasoningEffortFallback) {
 						rememberOpenAIReasoningEffortFallback(
 							providerSessionState,
-							activeReasoningEffortFallbackKey,
-							reasoningEffortFallback,
+							pendingReasoningEffortFallback.key,
+							pendingReasoningEffortFallback.fallback,
 						);
+						pendingReasoningEffortFallback = undefined;
 					}
-				} else if (
-					model.compat.retryWithoutStrictOnGrammarError &&
-					!disableStrictTools &&
-					isCompiledGrammarTooLargeStrictError(error, capturedErrorResponse)
-				) {
-					disableStrictToolsForScope(providerSessionState, strictToolsScope);
-					disableStrictTools = true;
-					openaiStream = await createCompletionsStream("none");
-				} else {
+					break;
+				} catch (error) {
+					const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
+					// A caller disable with a retained effort preference is still an
+					// explicit disable: without this, a fieldless rejection of the
+					// resulting `none` resolves to a delete-effort retry that gets
+					// cached and strips later enabled turns.
+					const isExplicitDisable = options?.disableReasoning === true;
+					const reasoningEffortFallback =
+						activeReasoningEffortFallbackKey && activeRequestParams && !requestSignal.aborted
+							? resolveOpenAIReasoningEffortFallback(error, capturedErrorResponse, activeRequestParams, {
+									explicitDisable: isExplicitDisable,
+								})
+							: undefined;
+					const tierCapacityRetry =
+						!serviceTierCapacityRetry && activeRequestParams && !requestSignal.aborted
+							? resolveServiceTierCapacityRetry(error, model, activeRequestParams)
+							: undefined;
+					if (reasoningEffortFallback !== undefined && activeReasoningEffortFallbackKey) {
+						const retryMarker = `${activeReasoningEffortFallbackKey}:${String(reasoningEffortFallback)}`;
+						if (attemptedReasoningEffortFallbacks.has(retryMarker)) throw error;
+						attemptedReasoningEffortFallbacks.add(retryMarker);
+						requestReasoningEffortFallbacks.set(activeReasoningEffortFallbackKey, reasoningEffortFallback);
+						// Explicit-disable fallbacks stay per-request so a reasoning-off
+						// side request cannot downgrade later normal turns sharing
+						// the session state.
+						pendingReasoningEffortFallback = isExplicitDisable
+							? undefined
+							: { key: activeReasoningEffortFallbackKey, fallback: reasoningEffortFallback };
+						continue;
+					}
 					if (
+						model.compat.retryWithoutStrictOnGrammarError &&
+						!disableStrictTools &&
+						isCompiledGrammarTooLargeStrictError(error, capturedErrorResponse)
+					) {
+						disableStrictToolsForScope(providerSessionState, strictToolsScope);
+						disableStrictTools = true;
+						continue;
+					}
+					if (tierCapacityRetry) {
+						// A tier the host has no capacity for: re-aim the same request at
+						// standard serving. Once only — a second refusal means the peer is
+						// genuinely unavailable too, and must surface.
+						serviceTierCapacityRetry = tierCapacityRetry;
+						logger.warn("openai-completions: service tier unavailable, retrying on the standard peer", {
+							model: model.id,
+							peer: tierCapacityRetry.model,
+							droppedServiceTier: tierCapacityRetry.dropServiceTier,
+						});
+						continue;
+					}
+					if (
+						disableStrictTools ||
 						!shouldRetryWithoutStrictTools(error, capturedErrorResponse, {
 							model,
 							strictToolsApplied: appliedStrictTools,
@@ -1073,7 +1128,6 @@ const streamOpenAICompletionsOnce = (
 					// subsequent request doesn't pay a strict-400 + retry round-trip.
 					disableStrictToolsForScope(providerSessionState, strictToolsScope);
 					disableStrictTools = true;
-					openaiStream = await createCompletionsStream("none");
 				}
 			}
 			if (premiumRequestsTotal !== undefined) {
@@ -1376,17 +1430,43 @@ const streamOpenAICompletionsOnce = (
 			let streamFinishedAt: number | undefined;
 			let sawUsagePayload = false;
 			let awaitTrailingUsageDetails = false;
+			/** Last `service_tier` echo seen on a chunk; the tier the turn was billed at. */
+			let servedServiceTier: string | undefined;
+			/**
+			 * The last usage payload parsed, kept so a tier echo arriving after it
+			 * can reprice the turn from the host's own numbers.
+			 */
+			let lastRawUsage: object | undefined;
 			/** Server-declared repetition stop; classified after the finalization sweep. */
 			let repetitionStop: string | undefined;
 			let nativeFinishError: string | undefined;
-			const applyUsagePayload = (rawUsage: object): void => {
+			const applyUsagePayload = (rawUsage: object, responseServiceTier: unknown): void => {
+				// A capacity recovery moved the turn off the row's route; every
+				// model-keyed part of the record — card, tier table, Copilot premium
+				// weight — follows the one the host accepted. `undefined` keeps the
+				// model's own row.
+				const servedModel = resolveServedModelRow(model, serviceTierCapacityRetry, activeRequestParams?.model);
 				output.usage = parseChunkUsage(
 					rawUsage,
 					model,
 					premiumRequestsTotal,
 					output.timestamp,
 					parseFireworksCachedPromptTokens(responseHeaders),
+					servedModel,
 				);
+				// This wire sends `service_tier` and is billed for it exactly as the
+				// Responses one is, so it accounts for it the same way. Where the
+				// response carries no echo, the tier is read off the body that went
+				// out: the caller's setting is only where that body started, since
+				// an `onPayload` hook may add, change or drop `service_tier` and a
+				// capacity recovery rewrites it.
+				output.serviceTier = applyOpenAIServiceTierCost(
+					servedModel ?? model,
+					output.usage,
+					responseServiceTier,
+					parseServiceTier(activeRequestParams?.service_tier),
+				);
+				lastRawUsage = rawUsage;
 				sawUsagePayload = true;
 				awaitTrailingUsageDetails = !hasPositiveCacheReadTokenField(rawUsage);
 			};
@@ -1444,11 +1524,28 @@ const streamOpenAICompletionsOnce = (
 						typeof upstreamProvider === "string" && upstreamProvider.length > 0 ? upstreamProvider : undefined;
 				}
 
-				if (chunk.usage) {
-					applyUsagePayload(chunk.usage);
+				const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
+				// Usage rides the chunk itself, or on some hosts its only choice.
+				const chunkUsage = chunk.usage ?? (choice as OpenAICompletionsChoiceUsage | undefined)?.usage;
+				const usagePayload = typeof chunkUsage === "object" && chunkUsage !== null ? chunkUsage : undefined;
+
+				// Hosts echo the tier they served on their chunks; latch it so a
+				// trailing usage-only chunk that omits it still prices at the tier
+				// the turn ran on rather than falling back to what was asked for.
+				// The echo can also land after the usage payload — a finish frame
+				// naming the tier the host settled on, with no usage of its own —
+				// so that case reprices from the payload already seen. Accounting
+				// re-runs whole, off the card, rather than compounding the
+				// multiplier the superseded tier already applied.
+				if (chunk.service_tier != null && chunk.service_tier !== servedServiceTier) {
+					servedServiceTier = chunk.service_tier;
+					if (usagePayload === undefined && lastRawUsage !== undefined) {
+						applyUsagePayload(lastRawUsage, servedServiceTier);
+					}
 				}
 
-				const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
+				if (usagePayload !== undefined) applyUsagePayload(usagePayload, servedServiceTier);
+
 				if (!choice) {
 					// Trailing usage-only chunk (`stream_options.include_usage`) after
 					// `finish_reason`: the response is complete — stop pulling instead
@@ -1457,13 +1554,6 @@ const streamOpenAICompletionsOnce = (
 					// compliant hosts still get to relay `[DONE]` before the socket closes.
 					if (streamFinishedAt !== undefined && sawUsagePayload) break;
 					continue;
-				}
-
-				if (!chunk.usage) {
-					const choiceUsage = (choice as OpenAICompletionsChoiceUsage).usage;
-					if (typeof choiceUsage === "object" && choiceUsage !== null) {
-						applyUsagePayload(choiceUsage);
-					}
 				}
 
 				// A server-declared repetition stop completes the response, so it takes
@@ -2310,6 +2400,14 @@ export function parseChunkUsage(
 	premiumRequests: number | undefined,
 	timestamp?: number,
 	cachedTokensHeader?: number,
+	/**
+	 * Catalog row the turn is accounted against, when the request was served by
+	 * a route other than the model row's own — a tier-capacity recovery, plus
+	 * whatever an `onPayload` hook did after it. Its card and its Copilot
+	 * premium weight apply together; the caller applies its tier table.
+	 * Defaults to the model's own row.
+	 */
+	servedModel?: Model,
 ): AssistantMessage["usage"] {
 	const usageLike = rawUsage as OpenAICompletionsUsageLike;
 	const rawPromptTokenDetails = usageLike.prompt_tokens_details;
@@ -2366,8 +2464,10 @@ export function parseChunkUsage(
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		...(premiumRequests !== undefined ? { premiumRequests } : {}),
 	};
-	calculateCost(model, usage, timestamp);
+	// A gateway-reported charge, applied next, still overrides this estimate.
+	calculateUsageCost(servedModel?.cost ?? model.cost, usage, timestamp);
 	applyProviderReportedCost(model, usage, rawUsage);
+	applyServedCopilotPremiumRequests(usage, servedModel);
 	return usage;
 }
 

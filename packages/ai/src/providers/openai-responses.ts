@@ -24,6 +24,7 @@ import type {
 	Tool,
 	ToolChoice,
 } from "../types";
+import { parseServiceTier } from "../types";
 import {
 	createOpenAIResponsesHistoryPayload,
 	normalizeSystemPrompts,
@@ -39,7 +40,7 @@ import {
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
-import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
+import { isServiceTierCapacityRejection, OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { getProxyForUrl } from "../utils/proxy";
 import { toolNamesByWire } from "../utils/tool-names";
@@ -94,6 +95,8 @@ import {
 	applyOpenAIExtraBody,
 	applyOpenAIGatewayRouting,
 	applyResponsesCompatPolicy,
+	applyServiceTierCapacityRetry,
+	canRerouteServiceTierCapacity,
 	applyVercelResponsesCacheControls,
 	applyWireModelIdTransform,
 	buildResponsesDeltaInput,
@@ -122,6 +125,10 @@ import {
 	resolveOpenAIRequestSetup,
 	resolveOpenAIResponsesOutputClamp,
 	resolveReasoningSummaryOption,
+	reapplyServiceTierCapacityRetryAfterHook,
+	resolveServiceTierCapacityRetry,
+	resolveServedModelRow,
+	type ServiceTierCapacityRetry,
 	type ResponsesToolNaming,
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
@@ -858,6 +865,32 @@ const streamOpenAIResponsesOnce = (
 			let pendingReasoningEffortFallback: { key: string; fallback: OpenAIReasoningEffortFallback } | undefined;
 			let activeReasoningEffortFallbackKey: string | undefined;
 			let activeRequestParams: OpenAIResponsesSamplingParams | undefined;
+			// Set once the host refuses the serving tier for want of capacity. Every
+			// later rebuild re-applies it, so a strict-tools or stale-chain repair
+			// cannot resurrect the tier the host just said it has no capacity for.
+			let serviceTierCapacityRetry: ServiceTierCapacityRetry | undefined;
+			/**
+			 * The tier the body the host accepted actually asked for, used when the
+			 * response carries no tier echo of its own.
+			 *
+			 * The caller's setting is only where that body started: an `onPayload`
+			 * hook may add, change or drop `service_tier`, and a capacity recovery
+			 * drops the refused tier outright. `chained.params` is the body that
+			 * goes on the wire — a hook may have returned a replacement object
+			 * rather than mutating the one the builder produced — so it is the only
+			 * thing the host served and billed.
+			 */
+			const effectiveRequestServiceTier = (): ServiceTier | undefined =>
+				parseServiceTier(chained?.params?.service_tier);
+			/**
+			 * Re-aim a freshly built request at the standard tier before anything
+			 * downstream reads its wire id. The effort-fallback key is derived from
+			 * that id, so applying the reroute later would negotiate effort for the
+			 * route the host refused and cache it under the wrong one.
+			 */
+			const reaimForServiceTierCapacity = (requestParams: { model?: unknown; service_tier?: unknown }): void => {
+				if (serviceTierCapacityRetry) applyServiceTierCapacityRetry(requestParams, serviceTierCapacityRetry);
+			};
 			const applyReasoningEffortFallbackForRequest = (requestParams: OpenAIResponsesSamplingParams): string => {
 				const fallbackKey = createOpenAIReasoningEffortFallbackKey(
 					"responses",
@@ -876,6 +909,11 @@ const streamOpenAIResponsesOnce = (
 				const replacementPayload = await options?.onPayload?.(requestParams, model);
 				const payload =
 					replacementPayload !== undefined ? (replacementPayload as OpenAIResponsesSamplingParams) : requestParams;
+				// A hook may hand back a body that restates the refused route — it is
+				// handed the model row, whose id is still the tier one. Re-aim before
+				// the effort key is derived from the payload's own wire id, so the
+				// hook cannot undo a recovery it knows nothing about.
+				if (serviceTierCapacityRetry) reapplyServiceTierCapacityRetryAfterHook(payload, serviceTierCapacityRetry);
 				applyReasoningEffortFallbackForRequest(payload);
 				return payload;
 			};
@@ -895,6 +933,7 @@ const streamOpenAIResponsesOnce = (
 				const { params, trailingScaffoldingItems } = builtParams;
 				wireToolNames = builtParams.toolNamesByWire;
 				if (chainState && !chainState.disabled) params.store = true;
+				reaimForServiceTierCapacity(params);
 				applyReasoningEffortFallbackForRequest(params);
 				const chained: OpenAIResponsesChainedParams =
 					chainState && !chainState.disabled
@@ -1017,8 +1056,13 @@ const streamOpenAIResponsesOnce = (
 							copilotCacheSnapshot,
 						),
 						shouldRetryResponse: (response, bodyText) =>
-							!AIError.isRequestBodyReadTimeout(response.status, bodyText) ||
-							lastSubmittedRequestWasFullReplay !== true,
+							(!AIError.isRequestBodyReadTimeout(response.status, bodyText) ||
+								lastSubmittedRequestWasFullReplay !== true) &&
+							// Resending identical bytes cannot find capacity the host just
+							// said it has none of — but only decline the transport retry
+							// when this request has somewhere else to go, so a deployment
+							// with no standard peer keeps today's recovery.
+							!(canRerouteServiceTierCapacity(model, requestParams) && isServiceTierCapacityRejection(bodyText)),
 						// Transient 408/429/5xx get Retry-After-aware transport
 						// retries; the first-event watchdog aborts `requestSignal`,
 						// so retries cannot extend the caller's deadline.
@@ -1115,6 +1159,24 @@ const streamOpenAIResponsesOnce = (
 								};
 								continue;
 							}
+							// A tier the host has no capacity for: re-aim the same request
+							// at standard serving. Once only — a second refusal means the
+							// peer is genuinely unavailable too, and must surface.
+							if (!serviceTierCapacityRetry && !requestSignal.aborted) {
+								const tierRetry = resolveServiceTierCapacityRetry(error, model, chained.params);
+								if (tierRetry) {
+									serviceTierCapacityRetry = tierRetry;
+									applyServiceTierCapacityRetry(chained.params, tierRetry);
+									applyServiceTierCapacityRetry(activeParams, tierRetry);
+									activeRawRequestDump.body = chained.params;
+									logger.warn("openai-responses: service tier unavailable, retrying on the standard peer", {
+										model: model.id,
+										peer: tierRetry.model,
+										droppedServiceTier: tierRetry.dropServiceTier,
+									});
+									continue;
+								}
+							}
 							const compiledGrammarTooLarge =
 								model.compat.retryWithoutStrictOnGrammarError &&
 								isCompiledGrammarTooLargeStrictError(error, capturedErrorResponse);
@@ -1131,10 +1193,12 @@ const streamOpenAIResponsesOnce = (
 								strictRetryAvailable = false;
 								forceDisableStrictTools = true;
 								disableStrictToolsForScope(providerSessionState, strictToolsScope);
+								// `prepareRequest` re-aims the rebuilt request itself, so the
+								// effort already negotiated for the peer is found again.
 								const fallback = await prepareRequest(true);
 								chained = fallback.chained;
-								activeRawRequestDump.body = chained.params;
 								activeParams = fallback.builtParams.params;
+								activeRawRequestDump.body = chained.params;
 								activeTrailingScaffoldingItems = fallback.builtParams.trailingScaffoldingItems;
 								continue;
 							}
@@ -1177,6 +1241,7 @@ const streamOpenAIResponsesOnce = (
 							// retry must be chainable next turn, and the consecutive stale-failure
 							// breaker only trips when each retry stores and the next turn re-chains.
 							currentParams.store = !zdrRejection;
+							reaimForServiceTierCapacity(currentParams);
 							const retryParams = await applyPayloadReplacement(currentParams);
 							chained = { params: retryParams };
 							activeRawRequestDump.body = retryParams;
@@ -1236,7 +1301,11 @@ const streamOpenAIResponsesOnce = (
 						onCompleted: () => {
 							sawTerminalResponseEvent = true;
 						},
-						requestServiceTier: options?.serviceTier,
+						requestServiceTier: effectiveRequestServiceTier(),
+						// A capacity recovery moved the turn off the row's route, and
+						// the one the host accepted carries its own card, tier table
+						// and premium weight; `undefined` keeps the model's own row.
+						servedModel: resolveServedModelRow(model, serviceTierCapacityRetry, chained.params.model),
 						toolNamesByWire: wireToolNames,
 					});
 
@@ -1356,7 +1425,8 @@ const streamOpenAIResponsesOnce = (
 										onCompleted: () => {
 											resumedSawTerminal = true;
 										},
-										requestServiceTier: options?.serviceTier,
+										requestServiceTier: effectiveRequestServiceTier(),
+										servedModel: resolveServedModelRow(model, serviceTierCapacityRetry, chained.params.model),
 										toolNamesByWire: wireToolNames,
 									},
 								);

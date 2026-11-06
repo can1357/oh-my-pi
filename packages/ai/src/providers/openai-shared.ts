@@ -1,8 +1,9 @@
 import { toClinePassWireModelId } from "@oh-my-pi/pi-catalog/cline-pass-model-id";
+import { serviceTierPeerFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { toFirepassWireModelId, toFireworksWireModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
-import { calculateCost } from "@oh-my-pi/pi-catalog/models";
+import { calculateUsageCost, getBundledModel, isGeneratedProvider } from "@oh-my-pi/pi-catalog/models";
 import type {
 	CatalogPolicyInputs,
 	OpenAICompat,
@@ -102,6 +103,7 @@ import {
 	buildCopilotDynamicHeaders,
 	getCachedCopilotIntegrationId,
 	getCopilotIntegrationCacheKey,
+	getCopilotPremiumMultiplier,
 	hasCopilotVisionInput,
 	resolveGitHubCopilotBaseUrl,
 } from "./github-copilot-headers";
@@ -394,16 +396,16 @@ export function applyOpenAIServiceTier(
 }
 
 /**
- * Standard OpenAI Responses service-tier cost multipliers. The non-Codex
- * Responses path bills the tier it was served (or requested): Flex processing is
- * half price; Priority (Fast mode) is a 2x premium. Codex bills the same tiers
- * with its own table (Fast is 2.5x on every model) and applies that separately.
- * `ultrafast` has no API-generic default — only models with a published
- * ultrafast price carry a `serviceTierCost.ultrafast` entry (GPT-6 Astra and
- * GPT-6.1 Sol, 6x) and everything else stays at 1x rather than an invented
- * multiplier.
+ * Standard (non-Codex) OpenAI service-tier cost multipliers, shared by the
+ * Responses and Completions wires: both bill the tier they were served (or
+ * requested). Flex processing is half price; Priority (Fast mode) is a 2x
+ * premium. Codex bills the same tiers with its own table (Fast is 2.5x on
+ * every model) and applies that separately. `ultrafast` has no API-generic
+ * default — only models with a published ultrafast price carry a
+ * `serviceTierCost.ultrafast` entry (GPT-6 Astra and GPT-6.1 Sol, 6x) and
+ * everything else stays at 1x rather than an invented multiplier.
  */
-function getOpenAIResponsesServiceTierCostMultiplier(
+function getOpenAIServiceTierCostMultiplier(
 	model: Pick<Model, "serviceTierCost">,
 	tier: string | null | undefined,
 ): number {
@@ -425,13 +427,21 @@ function getOpenAIResponsesServiceTierCostMultiplier(
  * Codex (`applyCodexServiceTierPricing`), but with the standard (non-Codex)
  * multipliers. The served tier comes from the response echo, falling back to the
  * resolved request tier. Scoped to `provider: "openai"` (the only standard
- * Responses biller) so an echoed `service_tier` from an Azure/OpenRouter/Copilot
- * proxy can never skew those costs.
+ * biller of these tiers) so an echoed `service_tier` from an
+ * Azure/OpenRouter/Copilot proxy can never skew those costs.
+ *
+ * Both OpenAI wires send `service_tier` and both are billed for it, so both the
+ * Responses and the Completions streamer call this.
+ *
+ * `model` is the row the request was served as: after a tier-capacity recovery
+ * that is the route the host accepted, not the row the turn started from, and
+ * the card, the tier table and the premium weight all have to name the same
+ * one (see {@link resolveServedModelRow}).
  *
  * Returns the tier the turn ran on for the caller to record on the message, and
  * counts the premium request the tier bills.
  */
-export function applyOpenAIResponsesServiceTierCost(
+export function applyOpenAIServiceTierCost(
 	model: Pick<Model, "provider" | "serviceTierCost" | "api" | "identity">,
 	usage: AssistantMessage["usage"],
 	responseServiceTier: unknown,
@@ -443,7 +453,7 @@ export function applyOpenAIResponsesServiceTierCost(
 	// requested tier when the response omits the echo entirely.
 	const served = parseServiceTier(responseServiceTier) ?? requestServiceTier ?? undefined;
 	usage.premiumRequests ??= getPremiumServiceTierRequests(served, model);
-	const multiplier = getOpenAIResponsesServiceTierCostMultiplier(model, served);
+	const multiplier = getOpenAIServiceTierCostMultiplier(model, served);
 	if (multiplier === 1) return served;
 	usage.cost.input *= multiplier;
 	usage.cost.output *= multiplier;
@@ -1445,6 +1455,155 @@ export function readOpenRouterRawMetadata(
 	if (typeof raw !== "string") return undefined;
 	const trimmed = raw.trim();
 	return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** What a tier-capacity refusal changes before the request is resent. */
+export interface ServiceTierCapacityRetry {
+	/** Wire id the host refused. Only a body still naming it is re-aimed. */
+	refusedModel?: string;
+	/** Standard-tier wire id to send instead, when the refused route pinned the tier in its id. */
+	model?: string;
+	/** Tier the refused request carried in `service_tier`, if it carried one. */
+	refusedServiceTier?: string;
+	/** Whether the resent request must drop the `service_tier` field it carried. */
+	dropServiceTier: boolean;
+}
+
+/**
+ * Resolve the standard-tier resend for a request a host refused for want of
+ * capacity on the tier it asked for (OpenAI's `flex_unavailable`, reported as
+ * a 500). A tier can be named two ways, and a request may use both:
+ *
+ *  - in the wire id, where `<plain>-flex` is a route onto flex capacity — the
+ *    peer comes from the catalog's `service-tier-peer` vocabulary, which
+ *    declares the suffix per host, so a spelling another host reuses for a
+ *    renamed slug or a separate model is never mistaken for a tier; and
+ *  - in the `service_tier` field, where the same id serves every tier.
+ *
+ * Returns `undefined` when the failure is not a tier-capacity refusal, and —
+ * decisively — when neither spelling is present, because then the resend would
+ * be byte-identical and would only ask the same absent pool again.
+ */
+export function resolveServiceTierCapacityRetry(
+	error: unknown,
+	model: Pick<Model, "provider">,
+	params: { model?: unknown; service_tier?: unknown },
+): ServiceTierCapacityRetry | undefined {
+	if (!AIError.isServiceTierCapacityError(error)) return undefined;
+	const refusedModel = typeof params.model === "string" ? params.model : undefined;
+	const peer = refusedModel !== undefined ? serviceTierPeerFor(model.provider, refusedModel) : undefined;
+	const refusedServiceTier =
+		typeof params.service_tier === "string" && params.service_tier !== "default" ? params.service_tier : undefined;
+	if (!peer && refusedServiceTier === undefined) return undefined;
+	return {
+		...(peer ? { refusedModel, model: peer.peerId } : {}),
+		...(refusedServiceTier !== undefined ? { refusedServiceTier } : {}),
+		dropServiceTier: refusedServiceTier !== undefined,
+	};
+}
+
+/**
+ * Whether a tier-capacity refusal of this request would have somewhere to go.
+ * The transport asks before declining its own retry: a request that names no
+ * tier in either spelling has no reroute above it, so resending it is still
+ * the only recovery it has and must stay available.
+ */
+export function canRerouteServiceTierCapacity(
+	model: Pick<Model, "provider">,
+	params: { model?: unknown; service_tier?: unknown },
+): boolean {
+	if (typeof params.model === "string" && serviceTierPeerFor(model.provider, params.model) !== undefined) return true;
+	return typeof params.service_tier === "string" && params.service_tier !== "default";
+}
+
+/**
+ * The catalog row for the route a recovered turn was actually served on.
+ *
+ * Three things in a usage record are keyed to a model: the cost card, the
+ * service-tier table (its multiplier and whether the tier bills a premium
+ * request), and GitHub Copilot's per-model premium weight. They have to name
+ * the same model or the record contradicts itself, so they all read this one
+ * row rather than resolving a served route three times.
+ *
+ * A tier route is its own SKU with its own price — a flex row typically lists
+ * at half its standard peer — and the recovery may not be where the turn
+ * ended up: an `onPayload` hook can pick a third model on a later rebuild.
+ * What the host accepted is the body that went on the wire, so that is what
+ * `sentModelId` must be.
+ *
+ * Only a capacity recovery licenses looking past the row at all. Absent one,
+ * a hook's own routing is the caller's business and the row stands, exactly as
+ * before.
+ *
+ * Only the bundled catalog is consulted. A route the bundle does not carry — a
+ * runtime-discovered gateway row, or a host whose roster lives in a provider
+ * registry rather than `models.json` — leaves the row's own facts in place:
+ * there is no second row to read, and inventing one would be worse than
+ * reporting the row's. Returns `undefined` when nothing changes.
+ */
+export function resolveServedModelRow(
+	model: Pick<Model, "id" | "provider">,
+	retry: ServiceTierCapacityRetry | undefined,
+	sentModelId: unknown,
+): Model | undefined {
+	if (retry === undefined || !isGeneratedProvider(model.provider)) return undefined;
+	if (typeof sentModelId !== "string" || sentModelId === model.id) return undefined;
+	return getBundledModel(model.provider, sentModelId);
+}
+
+/**
+ * Re-weigh a Copilot premium request for the route that served the turn.
+ *
+ * Copilot bills a premium request per model, and the weight is read off the
+ * row while the request is being built — before any capacity refusal has
+ * happened. A turn the host then served on another route was charged that
+ * route's weight, not the refused row's.
+ *
+ * A turn already weighed 0 stays 0: only an agent-initiated continuation
+ * zeroes it, and that is the initiator's doing, not the model's. The tier
+ * premium is not touched here — {@link applyOpenAIServiceTierCost} counts it
+ * afterwards, from the same served row.
+ */
+export function applyServedCopilotPremiumRequests(
+	usage: AssistantMessage["usage"],
+	servedModel: Pick<Model, "premiumMultiplier"> | undefined,
+): void {
+	if (servedModel === undefined || usage.premiumRequests === undefined || usage.premiumRequests === 0) return;
+	usage.premiumRequests = getCopilotPremiumMultiplier(servedModel.premiumMultiplier);
+}
+
+/**
+ * Re-aim a freshly built request at the standard tier.
+ *
+ * Unconditional, because a request the builder just produced always carries
+ * the route the model row selects — which is the tier one. Use
+ * {@link reapplyServiceTierCapacityRetryAfterHook} on a body an `onPayload`
+ * hook has already seen.
+ */
+export function applyServiceTierCapacityRetry(
+	params: { model?: unknown; service_tier?: unknown },
+	retry: ServiceTierCapacityRetry,
+): void {
+	if (retry.model !== undefined) params.model = retry.model;
+	if (retry.dropServiceTier) delete params.service_tier;
+}
+
+/**
+ * Re-aim a body an `onPayload` hook returned, correcting only a field that
+ * still names the route the host refused.
+ *
+ * A hook that restated the refused id or tier — it is handed the model row,
+ * whose id is the tier one — would otherwise undo the recovery. A hook that
+ * deliberately chose some other model or tier keeps its choice: that is a
+ * decision the recovery was not party to, and overwriting it would silently
+ * discard the caller's own routing.
+ */
+export function reapplyServiceTierCapacityRetryAfterHook(
+	params: { model?: unknown; service_tier?: unknown },
+	retry: ServiceTierCapacityRetry,
+): void {
+	if (retry.model !== undefined && params.model === retry.refusedModel) params.model = retry.model;
+	if (retry.dropServiceTier && params.service_tier === retry.refusedServiceTier) delete params.service_tier;
 }
 
 /** Decide whether an OpenAI-family request should retry once with non-strict tools. */
@@ -3301,6 +3460,14 @@ export interface ProcessResponsesStreamOptions {
 	 */
 	requestServiceTier?: ServiceTier;
 	/**
+	 * Catalog row the turn is accounted against, when the request was served by
+	 * a route other than the model row's own — a tier-capacity recovery, plus
+	 * whatever an `onPayload` hook did after it. Its card, its tier table and
+	 * its Copilot premium weight all apply together
+	 * ({@link resolveServedModelRow}). Defaults to the model's own row.
+	 */
+	servedModel?: Model;
+	/**
 	 * Declared tool name per wire name (`toolNamesByWire` in `utils/tool-names`). A
 	 * returned `function_call` dispatches to the tool it was offered as; a name
 	 * the map lacks passes through unchanged.
@@ -3937,10 +4104,15 @@ export async function processResponsesStream<TApi extends Api>(
 				output.responseId = response.id;
 			}
 			populateResponsesUsageFromResponse(output, response?.usage);
-			calculateCost(model, output.usage, output.timestamp);
+			// Every model-keyed input to this record names the route the host
+			// accepted: the model's own row unless a capacity recovery moved the
+			// request off it. A gateway-reported charge still wins below.
+			const accountedModel = options?.servedModel ?? model;
+			calculateUsageCost(accountedModel.cost, output.usage, output.timestamp);
 			applyProviderReportedCost(model, output.usage, response?.usage);
-			output.serviceTier = applyOpenAIResponsesServiceTierCost(
-				model,
+			applyServedCopilotPremiumRequests(output.usage, options?.servedModel);
+			output.serviceTier = applyOpenAIServiceTierCost(
+				accountedModel,
 				output.usage,
 				(response as { service_tier?: unknown } | undefined)?.service_tier,
 				options?.requestServiceTier,
@@ -4291,7 +4463,7 @@ export function applyResponsesReasoningParams<P extends ResponseCreateParamsStre
 	);
 }
 
-/** Populate `output.usage` from a Responses-API `response.usage` payload. Does not invoke `calculateCost`. */
+/** Populate `output.usage` from a Responses-API `response.usage` payload. Does not price it. */
 export function populateResponsesUsageFromResponse(
 	output: AssistantMessage,
 	usage:

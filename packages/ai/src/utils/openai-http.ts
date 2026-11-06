@@ -62,6 +62,27 @@ function isConcurrencyAdmissionRejection(response: Response, bodyText: string): 
 	);
 }
 
+/**
+ * Whether a non-2xx body is a tier-capacity refusal (`flex_unavailable`): the
+ * serving pool the request named is empty, not a statement that the request
+ * failed. Resending identical bytes only asks the same absent pool again and
+ * spends the whole transport budget doing it, so a caller that can re-aim the
+ * request at another tier composes this into its own `shouldRetryResponse` to
+ * surface the refusal at once. It is not applied here, because a caller with
+ * no reroute still has the transport retry as its only recovery.
+ */
+export function isServiceTierCapacityRejection(bodyText: string): boolean {
+	if (!bodyText) return false;
+	let bodyJson: unknown;
+	try {
+		bodyJson = JSON.parse(bodyText);
+	} catch {
+		return false;
+	}
+	const { code } = OpenAIHttpError.parseEnvelope(bodyJson, bodyText);
+	return code !== undefined && AIError.isServiceTierCapacityCode(code);
+}
+
 export interface OpenAIStreamRequestInit {
 	url: string;
 	headers: Record<string, string>;

@@ -16,6 +16,7 @@
 - Added opt-in Responses WebSocket capability via OMP settings or SDK preferences, off by default ([#17354](https://github.com/can1357/oh-my-pi/pull/17354) by [@TatsukiMeng](https://github.com/TatsukiMeng))
 - Added Factory Droid Gemini 4 Argon on Global inference for accounts with the feature flag ([#17861](https://github.com/can1357/oh-my-pi/pull/17861) by [@will-bogusz](https://github.com/will-bogusz))
 - Added Factory Droid Muse Spark 1.3 (Global region, `muse_spark_1_3` flag) with low to xhigh effort ([#17862](https://github.com/can1357/oh-my-pi/pull/17862) by [@will-bogusz](https://github.com/will-bogusz))
+- Added the `service-tier-peer` rule and `serviceTierPeerFor(provider, wireModelId)`: per host, the model-id suffixes that name a serving tier and the standard-tier model the same request falls back to, so a tier a host has no capacity for can be recovered on its peer. Declared only for OpenAI's `-flex`/`-scale`/`-priority` and Factory Droid's `-fast`/`-ultrafast`, so hosts that use the same spelling for an ordinary model — CoralBricks' `glm-5.3-fast`, xAI's `grok-4-fast` — are left alone ([#18233](https://github.com/can1357/oh-my-pi/pull/18233) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 

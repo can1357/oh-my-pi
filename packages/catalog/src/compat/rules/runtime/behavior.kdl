@@ -409,6 +409,43 @@ behavior {
 	pricing-peer provider="minimax-code-cn" peers="minimax-cn" "minimax" {
 		alias "MiniMax-M3.1-Flash-Preview" peer-id="MiniMax-M3"
 	}
+	// A host that bakes the serving tier into the model id serves that tier as
+	// its own route: `<plain>-flex` is `<plain>` answered from flex capacity,
+	// and the two ids differ only in which pool serves them. When the host
+	// refuses the route for want of capacity — OpenAI's `flex_unavailable`,
+	// which it reports as a 500 — the request itself is still servable, so
+	// recovery re-aims it at the plain id. Retrying the tier id unchanged only
+	// asks the same absent pool again, which is why the id is what moves.
+	//
+	// Read only after such a refusal, never during discovery, identity
+	// resolution or pricing, so a tier route keeps its own metadata and its own
+	// price. The longest matching suffix wins within a host, so `-ultrafast` is
+	// never read as `-fast`.
+	//
+	// Every rule names its host, because a capacity error code does not
+	// establish that a suffix is a tier — the spelling is reused for unrelated
+	// things, and a host-blind rule would swap in a sibling that does not
+	// exist. `-fast` alone is CoralBricks' renamed GLM 5.3 slug (it ships no
+	// `glm-5.3`), xAI's and OpenRouter's separately priced Grok 4 Fast model,
+	// and NanoGPT's and Wafer's distilled rows. Only a host that declares both
+	// halves of the pair as one model served two ways belongs here.
+	//
+	// `openai` owns the tier names themselves: `flex`, `scale` and `priority`
+	// are the values of OpenAI's own `service_tier` field, so an OpenAI-hosted
+	// id ending in one names that pool for its plain peer.
+	service-tier-peer provider="openai" {
+		suffix "-flex" tier="flex"
+		suffix "-scale" tier="scale"
+		suffix "-priority" tier="priority"
+	}
+	// Factory Droid is the one host in the catalog that declares both halves:
+	// `providers/factory-droid.kdl` gives every `gpt-*-fast` the `priority`
+	// service tier and every `gpt-*-ultrafast` the `ultrafast` one, alongside
+	// the plain rows they fall back to.
+	service-tier-peer provider="factory-droid" {
+		suffix "-ultrafast" tier="ultrafast"
+		suffix "-fast" tier="priority"
+	}
 	hosted-default provider="zai-search" model="glm-4.7"
 	hosted-default provider="synthetic-search" model="auto"
 	// Built-in default model selector chains per agent role, most preferred

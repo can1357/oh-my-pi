@@ -1,9 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { applyOpenAIResponsesServiceTierCost } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { applyOpenAIServiceTierCost } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
-// The standard (non-Codex) Responses path bills the tier OpenAI actually served:
+// The standard (non-Codex) OpenAI wires bill the tier OpenAI actually served:
 // flex is half price, priority (Fast mode) is 2x, and ultrafast is 6x on the
 // models with a published ultrafast price (GPT-6 Astra, GPT-6.1 Sol). A tier
 // with no table entry stays at 1x rather than an invented multiplier.
@@ -41,11 +41,14 @@ describe("standard OpenAI Responses service-tier cost", () => {
 		const billed = usage();
 		// The returned tier is what the caller records on the message, so a
 		// downgraded turn cannot be attributed to the requested tier.
-		expect(applyOpenAIResponsesServiceTierCost(ultrafastModel, billed, "ultrafast", "ultrafast")).toBe("ultrafast");
+		expect(applyOpenAIServiceTierCost(ultrafastModel, billed, "ultrafast", "ultrafast")).toBe("ultrafast");
 		expect(billed.premiumRequests).toBe(1);
-		expect(billed.cost.input).toBeCloseTo(0.00006);
-		expect(billed.cost.output).toBeCloseTo(0.0003);
-		expect(billed.cost.total).toBeCloseTo(0.00036);
+		// Charges here are around 1e-5, so every comparison names a precision:
+		// `toBeCloseTo` defaults to 2, which passes on any amount under 0.005 —
+		// including zero.
+		expect(billed.cost.input).toBeCloseTo(0.00006, 12);
+		expect(billed.cost.output).toBeCloseTo(0.0003, 12);
+		expect(billed.cost.total).toBeCloseTo(0.00036, 12);
 	});
 
 	it("leaves a model with no published ultrafast price at 1x", () => {
@@ -53,9 +56,9 @@ describe("standard OpenAI Responses service-tier cost", () => {
 		expect(luna.serviceTierCost).toBeUndefined();
 
 		const billed = usage();
-		applyOpenAIResponsesServiceTierCost(luna, billed, "ultrafast", "ultrafast");
-		expect(billed.cost.input).toBeCloseTo(0.00001);
-		expect(billed.cost.total).toBeCloseTo(0.00006);
+		applyOpenAIServiceTierCost(luna, billed, "ultrafast", "ultrafast");
+		expect(billed.cost.input).toBeCloseTo(0.00001, 12);
+		expect(billed.cost.total).toBeCloseTo(0.00006, 12);
 		// Still a premium request: the tier reached the wire, only its price is unknown.
 		expect(billed.premiumRequests).toBe(1);
 	});
@@ -64,20 +67,18 @@ describe("standard OpenAI Responses service-tier cost", () => {
 		const luna = model("gpt-6-luna");
 
 		const priority = usage();
-		applyOpenAIResponsesServiceTierCost(luna, priority, "priority", "priority");
-		expect(priority.cost.input).toBeCloseTo(0.00002);
+		applyOpenAIServiceTierCost(luna, priority, "priority", "priority");
+		expect(priority.cost.input).toBeCloseTo(0.00002, 12);
 
 		const flex = usage();
-		applyOpenAIResponsesServiceTierCost(luna, flex, "flex", "flex");
-		expect(flex.cost.input).toBeCloseTo(0.000005);
+		applyOpenAIServiceTierCost(luna, flex, "flex", "flex");
+		expect(flex.cost.input).toBeCloseTo(0.000005, 12);
 
 		// A downgraded turn (requested ultrafast, served default) bills standard and
 		// is not counted as a premium request.
 		const downgraded = usage();
-		expect(applyOpenAIResponsesServiceTierCost(model("gpt-6-astra"), downgraded, "default", "ultrafast")).toBe(
-			"default",
-		);
-		expect(downgraded.cost.input).toBeCloseTo(0.00001);
+		expect(applyOpenAIServiceTierCost(model("gpt-6-astra"), downgraded, "default", "ultrafast")).toBe("default");
+		expect(downgraded.cost.input).toBeCloseTo(0.00001, 12);
 		expect(downgraded.premiumRequests).toBe(0);
 	});
 
@@ -95,8 +96,8 @@ describe("standard OpenAI Responses service-tier cost", () => {
 			maxTokens: 128_000,
 		});
 		const billed = usage();
-		expect(applyOpenAIResponsesServiceTierCost(proxied, billed, "ultrafast", "ultrafast")).toBeUndefined();
+		expect(applyOpenAIServiceTierCost(proxied, billed, "ultrafast", "ultrafast")).toBeUndefined();
 		expect(billed.premiumRequests).toBeUndefined();
-		expect(billed.cost.input).toBeCloseTo(0.00001);
+		expect(billed.cost.input).toBeCloseTo(0.00001, 12);
 	});
 });

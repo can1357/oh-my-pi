@@ -813,7 +813,15 @@ export function classify(error: unknown, api?: Api): number {
 			) {
 				linkKinds |= Flag.UsageLimit;
 			}
-			if (code === "overloaded_error" || code === "rate_limit_error") {
+			if (
+				code === "overloaded_error" ||
+				code === "rate_limit_error" ||
+				// A tier with no capacity is a statement about the pool, not the
+				// request: retryable whatever status it rides on (OpenAI sends
+				// `flex_unavailable` on a 500, which is transient anyway, but a
+				// host that moved it to a 4xx must not become terminal).
+				(code !== undefined && SERVICE_TIER_CAPACITY_CODE_PATTERN.test(code))
+			) {
 				linkKinds |= Flag.Transient;
 			}
 			if (
@@ -1151,4 +1159,37 @@ export function isStreamEnvelopeError(error: unknown): boolean {
 /** Stream-envelope errors safe to retry against the provider (event ordering only). */
 export function isRetryableStreamEnvelopeError(error: unknown): boolean {
 	return error instanceof Error && STREAM_EVENT_ORDER_PATTERN.test(error.message);
+}
+
+/**
+ * Machine codes a host returns when the serving tier the request asked for has
+ * no capacity right now: OpenAI's `flex_unavailable`, and the same statement
+ * about its sibling tiers, with or without the `_tier` infix hosts vary on.
+ *
+ * This is an absence of capacity, not a verdict on the request — deliberately
+ * separate from the content-policy refusal codes, which are terminal. The
+ * request is servable; only the pool it named is not.
+ */
+const SERVICE_TIER_CAPACITY_CODE_PATTERN =
+	/^(?:(?:flex|scale|priority|ultrafast)(?:[_-]tier)?|service[_-]?tier)[_-]unavailable$/i;
+
+/** Whether a provider's machine error code names a serving tier with no capacity. */
+export function isServiceTierCapacityCode(code: string): boolean {
+	return SERVICE_TIER_CAPACITY_CODE_PATTERN.test(code);
+}
+
+/**
+ * Whether a provider rejected the request because the serving tier it asked
+ * for has no capacity. OpenAI reports `flex_unavailable` with HTTP 500, so the
+ * status alone says "server fault" when the truth is "wrong pool"; the code is
+ * what distinguishes them.
+ *
+ * Matches on the machine code only. Prose is never enough: a 500 whose message
+ * merely mentions flex is an ordinary server fault, and re-aiming it at another
+ * tier would hide a real outage behind a silent reroute.
+ */
+export function isServiceTierCapacityError(error: unknown, depth = 0): boolean {
+	if (depth > 6 || error === null || typeof error !== "object") return false;
+	if ("code" in error && typeof error.code === "string" && isServiceTierCapacityCode(error.code)) return true;
+	return "cause" in error && isServiceTierCapacityError(error.cause, depth + 1);
 }

@@ -18,6 +18,7 @@ import type {
 	CompiledModelOperations,
 	CompiledPlanRequirement,
 	CompiledPricingPeer,
+	CompiledServiceTierPeer,
 	CompiledRetryResetTimezone,
 	CompiledQuotaRule,
 	CompiledResponsesHeuristic,
@@ -295,6 +296,35 @@ function parsePricingPeer(node: KdlNodeView): CompiledPricingPeer {
 	return rule;
 }
 
+/**
+ * `service-tier-peer provider="<host>" { suffix "-flex" tier="flex" … }` — the
+ * wire-id suffixes one host appends to name a serving tier. Suffixes are
+ * unique within a host and must begin with a separator, so stripping one
+ * cannot swallow part of a model name.
+ *
+ * The host is required: a suffix spelling is not a tier on its own, and a rule
+ * that applied everywhere would swap a renamed slug or a separately priced
+ * model for a sibling that does not exist.
+ */
+function parseServiceTierPeer(node: KdlNodeView): CompiledServiceTierPeer {
+	const children = ensureContainer(node, ["provider"]);
+	const provider = requiredProp(node, "provider");
+	const rule: CompiledServiceTierPeer = { provider, suffixes: [] };
+	for (const child of children) {
+		if (child.name !== "suffix") unexpected(child, "service-tier-peer");
+		ensureLeaf(child, ["tier"]);
+		const values = positionalStrings(child);
+		const tier = requiredProp(child, "tier");
+		const suffix = values[0];
+		if (values.length !== 1 || !suffix || !tier) malformed(child);
+		if (!suffix.startsWith("-") || suffix.length < 2) malformed(child);
+		if (rule.suffixes.some(entry => entry.suffix === suffix)) malformed(child);
+		rule.suffixes.push({ suffix, tier });
+	}
+	if (!provider || rule.suffixes.length === 0) malformed(node);
+	return rule;
+}
+
 /** `role-defaults "<role>" { model "<selector>" … }` → the role's ordered selector chain. */
 function parseRoleDefaults(node: KdlNodeView): { role: string; models: string[] } {
 	validateProps(node, []);
@@ -330,6 +360,7 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 		planRequirements: [],
 		retryResetTimezones: [],
 		pricingPeers: [],
+		serviceTierPeers: [],
 		roleDefaults: {},
 	};
 	if (!source) return behavior;
@@ -402,6 +433,13 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 			case "pricing-peer":
 				behavior.pricingPeers.push(parsePricingPeer(node));
 				break;
+			case "service-tier-peer": {
+				const rule = parseServiceTierPeer(node);
+				// One rule per host, so a lookup never has to reconcile two tables.
+				if (behavior.serviceTierPeers.some(peer => peer.provider === rule.provider)) malformed(node);
+				behavior.serviceTierPeers.push(rule);
+				break;
+			}
 			case "retired-providers": {
 				ensureLeaf(node, []);
 				const values = positionalStrings(node);
