@@ -193,6 +193,14 @@ export const eventDefs = {
 		},
 		"Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes.",
 	),
+	AutoLearnCaptureStartEvent: doc(
+		{ type: "'autolearn_capture_start'" },
+		"A private auto-learn capture turn was scheduled (starting immediately or queued behind an in-flight capture); the `agent_end` that triggered it follows this frame. At most one capture is queued: later qualifying turns join it without another frame. Paired 1:1 in FIFO order with `autolearn_capture_end`.",
+	),
+	AutoLearnCaptureEndEvent: doc(
+		{ type: "'autolearn_capture_end'", outcome: "'completed' | 'aborted' | 'error'" },
+		"The oldest unsettled capture turn announced by `autolearn_capture_start` settled with this outcome.",
+	),
 
 	RpcAgentEvent: doc(
 		[
@@ -229,6 +237,8 @@ export const eventDefs = {
 			"ThinkingLevelChangedEvent",
 			"GoalUpdatedEvent",
 			"QueueUpdateEvent",
+			"AutoLearnCaptureStartEvent",
+			"AutoLearnCaptureEndEvent",
 		].join(" | "),
 		"A session event, discriminated by `type`; `set_event_filter` selects which are sent.",
 	),

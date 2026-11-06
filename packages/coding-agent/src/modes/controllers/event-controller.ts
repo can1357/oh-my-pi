@@ -483,6 +483,10 @@ export class EventController {
 			queue_update: async () => {
 				this.ctx.updatePendingMessagesDisplay();
 			},
+			// The private capture turn renders nothing in the TUI; RPC hosts are
+			// the consumers that wait on this lifecycle.
+			autolearn_capture_start: async () => {},
+			autolearn_capture_end: async () => {},
 		} satisfies AgentSessionEventHandlers;
 	}
 

@@ -1,4 +1,5 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type {
@@ -15,15 +16,24 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { ResponseInput, ResponseOutputItem } from "@oh-my-pi/pi-ai/providers/openai-responses-wire";
 import { createOpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai/utils";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { AutoLearnController, buildAutoLearnInstructions } from "@oh-my-pi/pi-coding-agent/autolearn/controller";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { createAutoLearnCaptureRunner } from "@oh-my-pi/pi-coding-agent/sdk";
-import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
-
 import { cfgAutolearnEnabled } from "@oh-my-pi/pi-coding-agent/autolearn/settings";
-
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { Extension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { createAutoLearnCaptureRunner } from "@oh-my-pi/pi-coding-agent/sdk";
+import { type RpcAgentProcess, RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { TempDir } from "@oh-my-pi/pi-utils";
 class FakeSession {
 	readonly listeners: Array<(event: AgentSessionEvent) => void> = [];
 	readonly captures: string[] = [];
@@ -44,6 +54,8 @@ class FakeSession {
 		if (gate) await gate;
 		if (error) throw error;
 	}
+
+	notifyAutolearnCapturePending(): void {}
 
 	getPlanModeState(): { enabled: boolean } | undefined {
 		return this.planEnabled ? { enabled: true } : undefined;
@@ -810,5 +822,498 @@ describe("buildAutoLearnInstructions", () => {
 		const text = buildAutoLearnInstructions({ manageSkill: true, learn: false });
 		expect(text).toContain("manage_skill");
 		expect(text).not.toContain("long-term memory");
+	});
+});
+
+describe("autolearn capture lifecycle events", () => {
+	let tempDir: TempDir;
+	let authStorage: AuthStorage;
+	let session: AgentSession | undefined;
+
+	beforeEach(async () => {
+		tempDir = TempDir.createSync("@pi-autolearn-lifecycle-");
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		authStorage.keys.setRuntime("openai", "openai-test-key");
+	});
+
+	afterEach(async () => {
+		const current = session;
+		session = undefined;
+		if (current) await current.dispose();
+		authStorage.close();
+		tempDir.removeSync();
+		AsyncJobManager.resetForTests();
+	});
+
+	/** A real session with a recorder subscribed last, after any capture starter. */
+	function createSession(options?: {
+		/** Model calls that answer with a tool call before the final text answer. */
+		toolTurns?: number;
+		/** Extension loaded into the session's runner. */
+		extension?: { extension: Extension; runtime: ExtensionRuntime };
+	}): { events: AgentSessionEvent[]; session: AgentSession } {
+		const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
+		const probeTool: AgentTool = {
+			name: "probe",
+			label: "Probe",
+			description: "Records a tool execution",
+			parameters: type({}),
+			execute: async () => ({ content: [{ type: "text", text: "probed" }] }),
+		};
+		let modelCalls = 0;
+		let turnToolCalls = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [probeTool], messages: [] },
+			convertToLlm,
+			streamFn: () => {
+				const wantsTool = turnToolCalls < (options?.toolTurns ?? 0);
+				const call = modelCalls++;
+				if (wantsTool) turnToolCalls++;
+				else turnToolCalls = 0;
+				const message: AssistantMessage = wantsTool
+					? {
+							role: "assistant",
+							content: [{ type: "toolCall", id: `tc-${call}`, name: "probe", arguments: {} }],
+							api: model.api,
+							provider: model.provider,
+							model: model.id,
+							usage: ZERO_USAGE,
+							stopReason: "toolUse",
+							timestamp: Date.now(),
+						}
+					: {
+							role: "assistant",
+							content: [{ type: "text", text: "Done." }],
+							api: model.api,
+							provider: model.provider,
+							model: model.id,
+							usage: ZERO_USAGE,
+							stopReason: "stop",
+							timestamp: Date.now(),
+						};
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "done", reason: wantsTool ? "toolUse" : "stop", message });
+				});
+				return stream;
+			},
+		});
+		const settings = Settings.isolated({
+			"autolearn.enabled": true,
+			"autolearn.autoContinue": true,
+			"compaction.enabled": false,
+			"todo.enabled": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		const sessionManager = SessionManager.inMemory(tempDir.path());
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		const built = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			toolRegistry: new Map([[probeTool.name, probeTool]]),
+			extensionRunner: options?.extension
+				? new ExtensionRunner(
+						[options.extension.extension],
+						options.extension.runtime,
+						tempDir.path(),
+						sessionManager,
+						modelRegistry,
+					)
+				: undefined,
+		});
+		session = built;
+		const events: AgentSessionEvent[] = [];
+		return { events, session: built };
+	}
+
+	it("emits autolearn_capture_start synchronously and autolearn_capture_end(completed) on settle", async () => {
+		const { events, session: current } = createSession();
+		current.subscribe(event => events.push(event));
+		const release = Promise.withResolvers<void>();
+		const capture = current.runAutolearnCapture(async () => {
+			await release.promise;
+		});
+
+		// Start is emitted before runAutolearnCapture's first await, so it is
+		// already observable when the call returns its promise.
+		expect(events.map(event => event.type)).toContain("autolearn_capture_start");
+		expect(events.some(event => event.type === "autolearn_capture_end")).toBe(false);
+
+		release.resolve();
+		await capture;
+		const end = events.find(event => event.type === "autolearn_capture_end");
+		expect(end).toMatchObject({ type: "autolearn_capture_end", outcome: "completed" });
+	});
+
+	it("settles an aborted capture with autolearn_capture_end(aborted) instead of rejecting", async () => {
+		const { events, session: current } = createSession();
+		current.subscribe(event => events.push(event));
+		const capture = current.runAutolearnCapture(signal => {
+			// Resolves-with-rejection on abort: the shape a real capture LLM
+			// call presents when its AbortSignal fires.
+			const { promise, reject } = Promise.withResolvers<void>();
+			signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+			return promise;
+		});
+		expect(events.map(event => event.type)).toContain("autolearn_capture_start");
+
+		await current.abort();
+		await capture;
+		const end = events.find(event => event.type === "autolearn_capture_end");
+		expect(end).toMatchObject({ type: "autolearn_capture_end", outcome: "aborted" });
+	});
+
+	it("settles a failing capture with autolearn_capture_end(error) while rejecting", async () => {
+		const { events, session: current } = createSession();
+		current.subscribe(event => events.push(event));
+		const capture = current.runAutolearnCapture(async () => {
+			throw new Error("capture exploded");
+		});
+		await expect(capture).rejects.toThrow("capture exploded");
+		const end = events.find(event => event.type === "autolearn_capture_end");
+		expect(end).toMatchObject({ type: "autolearn_capture_end", outcome: "error" });
+	});
+
+	it("starts nothing while a capture is already in flight", async () => {
+		const { events, session: current } = createSession();
+		current.subscribe(event => events.push(event));
+		const release = Promise.withResolvers<void>();
+		const first = current.runAutolearnCapture(async () => {
+			await release.promise;
+		});
+		const second = current.runAutolearnCapture(async () => {});
+		await second;
+		expect(events.filter(event => event.type === "autolearn_capture_start")).toHaveLength(1);
+		release.resolve();
+		await first;
+		expect(events.filter(event => event.type === "autolearn_capture_end")).toHaveLength(1);
+	});
+
+	it("forwards autolearn_capture_start before agent_end to later subscribers on a qualifying turn", async () => {
+		const { events, session: current } = createSession({ toolTurns: 5 });
+		// Install the controller first, exactly like createAgentSession does;
+		// the recorder below plays the role of rpc-mode's forwarder.
+		const release = Promise.withResolvers<void>();
+		const agentEnd = Promise.withResolvers<void>();
+		const captureEnd = Promise.withResolvers<void>();
+		new AutoLearnController({
+			session: current,
+			settings: current.settings,
+			capture: () =>
+				current.runAutolearnCapture(async () => {
+					await release.promise;
+				}),
+		});
+		current.subscribe(event => {
+			events.push(event);
+			if (event.type === "agent_end") agentEnd.resolve();
+			if (event.type === "autolearn_capture_end") captureEnd.resolve();
+		});
+
+		const run = current.prompt("go");
+		await agentEnd.promise;
+
+		// The recorder is subscribed after the controller, so by the time it
+		// sees agent_end the controller's synchronous capture start has already
+		// been dispatched to every listener.
+		const types = events.map(event => event.type);
+		const startAt = types.indexOf("autolearn_capture_start");
+		const endAt = types.indexOf("agent_end");
+		expect(startAt).toBeGreaterThanOrEqual(0);
+		expect(startAt).toBeLessThan(endAt);
+
+		release.resolve();
+		await run;
+		await captureEnd.promise;
+		expect(events.find(event => event.type === "autolearn_capture_end")).toMatchObject({
+			type: "autolearn_capture_end",
+			outcome: "completed",
+		});
+	});
+
+	it("emits neither autolearn event on a non-qualifying turn", async () => {
+		const { events, session: current } = createSession({ toolTurns: 0 });
+		const agentEnd = Promise.withResolvers<void>();
+		new AutoLearnController({
+			session: current,
+			settings: current.settings,
+			capture: () => current.runAutolearnCapture(async () => {}),
+		});
+		current.subscribe(event => {
+			events.push(event);
+			if (event.type === "agent_end") agentEnd.resolve();
+		});
+
+		await current.prompt("go");
+		await agentEnd.promise;
+		// The recorder runs after the controller's listener in the same
+		// agent_end dispatch, so a qualifying-turn bug would already be visible.
+		expect(events.filter(event => event.type.startsWith("autolearn_capture"))).toHaveLength(0);
+	});
+
+	it("announces a queued second capture before its triggering agent_end while the first capture is held", async () => {
+		const { events, session: current } = createSession({ toolTurns: 5 });
+		const releaseFirst = Promise.withResolvers<void>();
+		const releaseSecond = Promise.withResolvers<void>();
+		const secondCaptureStarted = Promise.withResolvers<void>();
+		const secondCaptureEnded = Promise.withResolvers<void>();
+		let captureCall = 0;
+		let outstandingCaptures = 0;
+		const outstandingAtAgentEnd: number[] = [];
+
+		new AutoLearnController({
+			session: current,
+			settings: current.settings,
+			capture: () => {
+				const callIndex = captureCall++;
+				return current.runAutolearnCapture(async () => {
+					if (callIndex === 0) {
+						await releaseFirst.promise;
+					} else {
+						secondCaptureStarted.resolve();
+						await releaseSecond.promise;
+					}
+				});
+			},
+		});
+		current.subscribe(event => {
+			events.push(event);
+			if (event.type === "autolearn_capture_start") outstandingCaptures++;
+			if (event.type === "autolearn_capture_end") {
+				outstandingCaptures--;
+				if (outstandingCaptures === 0) secondCaptureEnded.resolve();
+			}
+			if (event.type === "agent_end") outstandingAtAgentEnd.push(outstandingCaptures);
+		});
+
+		// Turn 1 qualifies and holds Capture 1 in flight.
+		await current.prompt("turn 1");
+		// Turn 2 qualifies while Capture 1 is still held: its pending capture must
+		// be announced synchronously before Turn 2's agent_end.
+		await current.prompt("turn 2");
+
+		const relevant = events
+			.filter(event => event.type === "agent_end" || event.type.startsWith("autolearn_capture"))
+			.map(event => event.type);
+		expect(relevant).toEqual(["autolearn_capture_start", "agent_end", "autolearn_capture_start", "agent_end"]);
+		expect(outstandingAtAgentEnd).toEqual([1, 2]);
+		expect(outstandingCaptures).toBe(2);
+
+		// Settling Capture 1 emits the first end (leaving 1 outstanding) and
+		// immediately starts the queued second capture without a duplicate start.
+		releaseFirst.resolve();
+		await secondCaptureStarted.promise;
+		expect(outstandingCaptures).toBe(1);
+
+		releaseSecond.resolve();
+		await secondCaptureEnded.promise;
+		expect(outstandingCaptures).toBe(0);
+		expect(
+			events
+				.filter(event => event.type === "agent_end" || event.type.startsWith("autolearn_capture"))
+				.map(event => event.type),
+		).toEqual([
+			"autolearn_capture_start",
+			"agent_end",
+			"autolearn_capture_start",
+			"agent_end",
+			"autolearn_capture_end",
+			"autolearn_capture_end",
+		]);
+	});
+
+	it("routes autolearn_capture_start and autolearn_capture_end through RpcClient.onSessionEvent", async () => {
+		const exited = Promise.withResolvers<number>();
+		const proc: RpcAgentProcess = {
+			stdin: { write: () => 0 },
+			stdout: new ReadableStream<Uint8Array>({
+				start(controller) {
+					const encoder = new TextEncoder();
+					for (const frame of [
+						{ type: "ready" },
+						{ type: "autolearn_capture_start" },
+						{ type: "autolearn_capture_end", outcome: "completed" },
+					]) {
+						controller.enqueue(encoder.encode(`${JSON.stringify(frame)}\n`));
+					}
+				},
+			}),
+			peekStderr: () => "",
+			kill: () => exited.resolve(0),
+			exited: exited.promise,
+		};
+
+		using client = new RpcClient({ spawn: () => proc });
+		const received: AgentSessionEvent[] = [];
+		const bothReceived = Promise.withResolvers<void>();
+		client.onSessionEvent(event => {
+			if (event.type === "autolearn_capture_start" || event.type === "autolearn_capture_end") {
+				received.push(event);
+				if (received.length === 2) bothReceived.resolve();
+			}
+		});
+
+		await client.start();
+		await bothReceived.promise;
+		expect(received).toEqual([
+			{ type: "autolearn_capture_start" },
+			{ type: "autolearn_capture_end", outcome: "completed" },
+		]);
+	});
+
+	it("delivers capture lifecycle events to extensions through pi.on", async () => {
+		const seen: string[] = [];
+		const extensionSawStart = Promise.withResolvers<void>();
+		const extensionSawEnd = Promise.withResolvers<void>();
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("autolearn_capture_start", event => {
+					seen.push(event.type);
+					extensionSawStart.resolve();
+				});
+				pi.on("autolearn_capture_end", event => {
+					seen.push(`${event.type}:${event.outcome}`);
+					extensionSawEnd.resolve();
+				});
+			},
+			tempDir.path(),
+			new EventBus(),
+			runtime,
+			"capture-observer",
+		);
+		const { session: current } = createSession({ toolTurns: 5, extension: { extension, runtime } });
+		const release = Promise.withResolvers<void>();
+		new AutoLearnController({
+			session: current,
+			settings: current.settings,
+			capture: () =>
+				current.runAutolearnCapture(async () => {
+					await release.promise;
+				}),
+		});
+
+		await current.prompt("go");
+		await extensionSawStart.promise;
+		// The capture is still held: an extension tracking pane state knows a
+		// background capture is running and has not seen it settle.
+		expect(seen).toEqual(["autolearn_capture_start"]);
+
+		release.resolve();
+		await extensionSawEnd.promise;
+		expect(seen).toEqual(["autolearn_capture_start", "autolearn_capture_end:completed"]);
+	});
+
+	it("has extensions handle the capture start before the capture turn runs", async () => {
+		const handlerEntered = Promise.withResolvers<void>();
+		const releaseHandler = Promise.withResolvers<void>();
+		let handlerFinished = false;
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				// A slow observer: the capture turn's tool calls must not overtake it.
+				pi.on("autolearn_capture_start", async () => {
+					handlerEntered.resolve();
+					await releaseHandler.promise;
+					handlerFinished = true;
+				});
+			},
+			tempDir.path(),
+			new EventBus(),
+			runtime,
+			"slow-capture-observer",
+		);
+		const { session: current } = createSession({ extension: { extension, runtime } });
+		let handlerFinishedWhenCaptureRan: boolean | undefined;
+		const capture = current.runAutolearnCapture(async () => {
+			handlerFinishedWhenCaptureRan = handlerFinished;
+		});
+		await handlerEntered.promise;
+		releaseHandler.resolve();
+		await capture;
+		expect(handlerFinishedWhenCaptureRan).toBe(true);
+	});
+
+	/** Controller whose captures hold until released; records lifecycle frames in order. */
+	function holdCaptures(current: AgentSession) {
+		const runs = [Promise.withResolvers<void>(), Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+		const releases = runs.map(() => Promise.withResolvers<void>());
+		const frames: string[] = [];
+		const allSettled = Promise.withResolvers<void>();
+		let started = 0;
+		let outstanding = 0;
+		new AutoLearnController({
+			session: current,
+			settings: current.settings,
+			capture: () =>
+				current.runAutolearnCapture(async signal => {
+					const index = started++;
+					runs[index]!.resolve();
+					const release = releases[index]!;
+					signal.addEventListener("abort", () => release.reject(new Error("aborted")), { once: true });
+					await release.promise;
+				}),
+		});
+		current.subscribe(event => {
+			if (event.type === "autolearn_capture_start") {
+				outstanding++;
+				frames.push("start");
+			} else if (event.type === "autolearn_capture_end") {
+				outstanding--;
+				frames.push(`end:${event.outcome}`);
+				if (outstanding === 0) allSettled.resolve();
+			} else if (event.type === "agent_end") {
+				frames.push("agent_end");
+			}
+		});
+		return { runs, releases, frames, allSettled: allSettled.promise, captureRuns: () => started };
+	}
+
+	it("joins further qualifying turns to the capture already queued, keeping starts and ends paired", async () => {
+		const { session: current } = createSession({ toolTurns: 5 });
+		const { runs, releases, frames, allSettled, captureRuns } = holdCaptures(current);
+
+		await current.prompt("turn 1");
+		await current.prompt("turn 2");
+		await current.prompt("turn 3");
+		// Turn 3 joins the capture turn 2 queued: no second start, no end for a capture still running.
+		expect(frames).toEqual(["start", "agent_end", "start", "agent_end", "agent_end"]);
+
+		releases[0]!.resolve();
+		await runs[1]!.promise;
+		releases[1]!.resolve();
+		await allSettled;
+		expect(frames.slice(5)).toEqual(["end:completed", "end:completed"]);
+		expect(captureRuns()).toBe(2);
+	});
+
+	it("still runs the queued capture after an abort settles the in-flight one", async () => {
+		const { session: current } = createSession({ toolTurns: 5 });
+		const { runs, releases, frames, allSettled } = holdCaptures(current);
+
+		await current.prompt("turn 1");
+		await current.prompt("turn 2");
+		await current.abort();
+		await runs[1]!.promise;
+		releases[1]!.resolve();
+		await allSettled;
+		expect(frames).toEqual(["start", "agent_end", "start", "agent_end", "end:aborted", "end:completed"]);
+	});
+
+	it("settles a queued capture as aborted without running it when the session is disposed", async () => {
+		const { session: current } = createSession({ toolTurns: 5 });
+		const { frames, allSettled, captureRuns } = holdCaptures(current);
+
+		await current.prompt("turn 1");
+		await current.prompt("turn 2");
+		session = undefined;
+		await current.dispose();
+		await allSettled;
+		expect(frames).toEqual(["start", "agent_end", "start", "agent_end", "end:aborted", "end:aborted"]);
+		expect(captureRuns()).toBe(1);
 	});
 });

@@ -321,6 +321,25 @@ export interface TodoReminderEvent {
 }
 
 // ============================================================================
+// Auto-learn capture
+// ============================================================================
+
+/**
+ * Fired when a qualifying turn schedules a private auto-learn capture turn, before
+ * that turn's `agent_end`. The capture runs outside the primary agent loop, so its
+ * `learn`/`manage_skill` tool calls arrive after `agent_end` with no `agent_start`.
+ */
+export interface AutolearnCaptureStartEvent {
+	type: "autolearn_capture_start";
+}
+
+/** Fired when the oldest capture announced by `autolearn_capture_start` settles. */
+export interface AutolearnCaptureEndEvent {
+	type: "autolearn_capture_end";
+	outcome: "completed" | "aborted" | "error";
+}
+
+// ============================================================================
 // Shared Event Result Shapes
 // ============================================================================
 
