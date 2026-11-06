@@ -2905,6 +2905,33 @@ function b() {
 			expect(output).toContain("second");
 			expect(output).toContain("third");
 		});
+
+		it("should hoist leading cd with ; when the target directory exists", async () => {
+			const subDir = path.join(testDir, "sub-dir");
+			fs.mkdirSync(subDir, { recursive: true });
+
+			const result = await bashTool.execute("test-call-cd-semicolon-hoist", {
+				command: "cd sub-dir; pwd",
+			});
+			const output = getTextOutput(result);
+			expect(output).toContain("sub-dir");
+		});
+
+		it("should not hoist leading cd with ; when the target directory does not exist", async () => {
+			const result = await bashTool.execute("test-call-cd-semicolon-missing", {
+				command: "cd /this/directory/definitely/does/not/exist/12345; echo still-executed",
+			});
+			const output = getTextOutput(result);
+			expect(output).toContain("still-executed");
+		});
+
+		it("should fail early when cd target does not exist with &&", async () => {
+			await expect(
+				bashTool.execute("test-call-cd-and-missing", {
+					command: "cd /this/directory/definitely/does/not/exist/12345 && echo should-not-run",
+				}),
+			).rejects.toThrow(/Working directory does not exist/);
+		});
 	});
 
 	describe("search tool", () => {

@@ -1183,16 +1183,46 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const sessionId = this.session.getSessionId?.() ?? undefined;
 		const sessionEnv = this.#sessionEnv(toolCallId);
 
-		// Extract a leading `cd <path> && ...` into cwd when the model ignores the
-		// cwd parameter. The scanner captures only a single path token and defers
+		// Extract a leading `cd <path> && ...` or `cd <path>; ...` into cwd when the model
+		// ignores the cwd parameter. The scanner captures only a single path token and defers
 		// to the shell for anything else (redirects, extra args, shell expansion),
 		// so it never absorbs shell syntax like `cd /tmp 2>/dev/null && ...` into
-		// the structured cwd. Constrained to a top-level `&&` on the first line.
+		// the structured cwd.
+		//
+		// Hoisting is unconditional for `&&` (failing early matches shell short-circuiting).
+		// For `;`, hoisting is opportunistic: hoist only when the target directory already
+		// exists, preserving bash's continue-after-failure behavior when it does not.
 		if (!cwd) {
 			const cd = extractLeadingCdTarget(command);
 			if (cd) {
-				cwd = cd.path;
-				command = cd.rest;
+				if (cd.separator === "&&") {
+					cwd = cd.path;
+					command = cd.rest;
+				} else {
+					let exists = false;
+					const router = InternalUrlRouter.instance();
+					if (router.canHandle(cd.path)) {
+						const virtualPath = router.normalize(cd.path);
+						const approval = this.approval({ command: rawCommand });
+						const approvalTier = typeof approval === "string" ? approval : approval.tier;
+						exists = await this.#urlFilesystem(signal, approvalTier)
+							.stat(virtualPath)
+							.then(st => st.type === "directory")
+							.catch(() => false);
+					} else {
+						try {
+							const targetPath = resolveToCwd(cd.path, this.session.cwd);
+							const st = await fs.promises.stat(targetPath);
+							exists = st.isDirectory();
+						} catch {
+							exists = false;
+						}
+					}
+					if (exists) {
+						cwd = cd.path;
+						command = cd.rest;
+					}
+				}
 			}
 		}
 		// Mode selection runs on normalized fields: a caller that materializes
