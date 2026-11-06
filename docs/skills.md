@@ -165,6 +165,10 @@ When no tool metadata is supplied, the prompt builder uses the presence of `read
 
 `hide: true` does not disable the skill. Hidden skills are still loaded and remain reachable through `skill://<name>` and `/skill:<name>` when skill commands are enabled.
 
+Descriptions in that list are routing hints, not the authored text (`src/extensibility/skill-descriptions.ts`). When a session starts, each description is shown as a preview of at most 100 characters (its first sentence when that is long enough), and a background call to the `smol` model compresses it to one line (the request asks for at most 12 words). The result is cached in `skill-descriptions.db` (under the agent directory, or `$XDG_DATA_HOME/omp` with XDG directories), keyed by the name, the description, and the compression prompt, and later sessions show the compressed line. A compression request that fails with an error is retried in the next session. An unusable answer (empty, more than one line, longer than 160 characters, or cut off at the token limit) is remembered for that model: the preview stays, and only a newly selected `smol` model is asked again.
+
+Set `skills.compressDescriptions: false` to show descriptions exactly as authored. No preview truncation, no cache reads, no compression calls. Use it when your descriptions are already curated routing text or when background model calls are unwanted, for example headless hosts that start a process per turn. Like the other settings the system prompt renders from, a change made while a session is open (for example in `/settings`) rebuilds that session's prompt right away, and `/new` keeps using it. Switching it off also drops compression requests that are still queued.
+
 Task tool subagents receive the session's discovered/provided skills list via normal session creation; there is no per-task skill pinning override.
 
 ### Interactive `/skill:<name>` commands

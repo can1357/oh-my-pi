@@ -383,33 +383,56 @@ export class SkillDescriptionStore {
 	}
 }
 
+/**
+ * Where a catalog keeps compressed hints: a store, or a function that supplies one when a render
+ * first compresses (`undefined` from it: no store).
+ */
+type SkillDescriptionStoreSource = SkillDescriptionStore | (() => SkillDescriptionStore | undefined);
+
 /** One prompt/session snapshot; completing a background job never mutates its rendered descriptions. */
 export class SkillDescriptionCatalog {
-	readonly #store: SkillDescriptionStore | undefined;
+	readonly #storeSource: SkillDescriptionStoreSource | undefined;
 	readonly #compress?: SkillDescriptionCompressor;
+	readonly #verbatim: boolean | (() => boolean);
 	readonly #snapshot = new Map<string, string>();
+	#store: SkillDescriptionStore | undefined;
+	#storeResolved = false;
 	/** Misses rendered before {@link startCompression}; `undefined` once compression runs. */
 	#deferred: Map<string, Skill> | undefined;
 
 	/**
-	 * `store` defaults to {@link sharedSkillDescriptionStore}; without one, prompts keep previews.
+	 * `store` defaults to {@link sharedSkillDescriptionStore}; without one, prompts keep previews. It is
+	 * resolved by the first render that compresses, so nothing is opened while descriptions render
+	 * verbatim: a function supplies the store then, and `undefined` from it leaves the catalog without one.
 	 * `deferCompression` holds model work until {@link startCompression}: until the owning session's
 	 * cost gate exists, and off a startup path (resolving the compression model composes the catalog).
+	 * `verbatim` renders every description exactly as authored: no preview truncation, no store access,
+	 * and no compression work (`skills.compressDescriptions: false`). A function is read on every call,
+	 * so a setting changed in a live session applies to the next prompt build and to compressions still
+	 * queued.
 	 */
 	constructor(
 		options: {
-			store?: SkillDescriptionStore;
+			store?: SkillDescriptionStoreSource;
 			compress?: SkillDescriptionCompressor;
 			deferCompression?: boolean;
+			verbatim?: boolean | (() => boolean);
 		} = {},
 	) {
-		this.#store = options.store ?? sharedSkillDescriptionStore();
+		this.#storeSource = options.store;
 		this.#compress = options.compress;
+		this.#verbatim = options.verbatim ?? false;
 		if (options.deferCompression) this.#deferred = new Map();
+	}
+
+	/** Whether descriptions currently render exactly as authored. */
+	get verbatim(): boolean {
+		return typeof this.#verbatim === "function" ? this.#verbatim() : this.#verbatim;
 	}
 
 	/** Read the session's frozen prompt hints without starting new model work. */
 	snapshot(skills: readonly Skill[]): Array<Skill & { description: string }> {
+		if (this.verbatim) return skills.map(skill => ({ ...skill }));
 		return skills.map(skill => ({
 			...skill,
 			description: this.#snapshot.get(keyFor(skill)) ?? previewSkillDescription(skill.description),
@@ -418,7 +441,8 @@ export class SkillDescriptionCatalog {
 
 	render(skills: readonly Skill[]): Array<Skill & { description: string }> {
 		if (skills.length === 0) return [];
-		const store = this.#store;
+		if (this.verbatim) return skills.map(skill => ({ ...skill }));
+		const store = this.#resolveStore();
 		const misses = new Map<string, Skill>();
 		const rendered = skills.map(skill => {
 			const key = keyFor(skill);
@@ -459,9 +483,20 @@ export class SkillDescriptionCatalog {
 		await Promise.all(pendingForStore(this.#store));
 	}
 
+	#resolveStore(): SkillDescriptionStore | undefined {
+		if (!this.#storeResolved) {
+			this.#storeResolved = true;
+			const source = this.#storeSource;
+			this.#store = typeof source === "function" ? source() : (source ?? sharedSkillDescriptionStore());
+		}
+		return this.#store;
+	}
+
 	#schedule(store: SkillDescriptionStore, misses: ReadonlyMap<string, Skill>): void {
 		const compressor = this.#compress;
-		if (!compressor || store.isClosing) return;
+		if (!compressor || store.isClosing || this.verbatim) return;
+		// Read again by every queued job: switching to verbatim drops the requests not sent yet.
+		const wanted = (): boolean => !this.verbatim;
 		// One resolution serves the whole batch: each composes the available model catalog, and a
 		// miss that model already answered unusably needs nothing more. Deferred until the current
 		// synchronous prompt rendering has finished.
@@ -470,7 +505,9 @@ export class SkillDescriptionCatalog {
 			const job = `${store.path}:${key}`;
 			if (inFlight.has(job)) continue;
 			batchModel ??= Promise.resolve().then(() => compressor.modelKey());
-			const pending = compressSkill(store, compressor, batchModel, key, skill).finally(() => inFlight.delete(job));
+			const pending = compressSkill(store, compressor, batchModel, key, skill, wanted).finally(() =>
+				inFlight.delete(job),
+			);
 			inFlight.set(job, pending);
 		}
 	}
@@ -479,6 +516,8 @@ export class SkillDescriptionCatalog {
 /**
  * Compress one skill's description into `store`. `batchModel` filters out skills that model
  * already answered unusably (and everything when no model is available) before taking a slot.
+ * `wanted` is checked before taking a slot and again once one is free, so a job queued before the
+ * catalog switched to verbatim sends nothing.
  */
 async function compressSkill(
 	store: SkillDescriptionStore,
@@ -486,13 +525,20 @@ async function compressSkill(
 	batchModel: Promise<string | undefined>,
 	key: string,
 	skill: Skill,
+	wanted: () => boolean,
 ): Promise<void> {
 	try {
 		const candidate = await batchModel;
-		if (candidate === undefined || store.isClosing || store.get(unusableKey(key, candidate)) !== undefined) return;
+		if (
+			candidate === undefined ||
+			!wanted() ||
+			store.isClosing ||
+			store.get(unusableKey(key, candidate)) !== undefined
+		)
+			return;
 		await compressionSlots.acquire();
 		try {
-			if (store.isClosing) return;
+			if (store.isClosing || !wanted()) return;
 			// Unusable answers are remembered per model: that model is not asked again, a newly selected one is.
 			// Re-resolved because the role can change while this job waits behind running requests.
 			const model = compressor.modelKey();
