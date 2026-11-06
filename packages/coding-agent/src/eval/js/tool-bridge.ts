@@ -85,10 +85,15 @@ export interface BridgeTruncation {
 	/** Bytes of the whole result, and how many of them the text carries. */
 	bytes: { shown: number; total: number };
 	/**
-	 * Internal URL of the whole result, readable with `read`. Absent when saving
-	 * it failed: then the elided bytes are gone, which `truncated` still reports.
+	 * Internal URL of the result, readable with `read`. Absent when saving it
+	 * failed: then the dropped bytes are gone, which `truncated` still reports.
 	 */
 	artifact?: string;
+	/**
+	 * Bytes `tools.artifactMaxBytes` kept out of the saved copy. Present only
+	 * when the artifact is itself a head/tail sample rather than the whole value.
+	 */
+	artifactElidedBytes?: number;
 }
 
 type ToolValue =
@@ -116,28 +121,53 @@ function toolResultHasError(result: AgentToolResult): boolean {
 
 /**
  * The {@link BridgeTruncation} for a result whose text the harness sampled, or
- * `undefined` when the text is the whole result. Reads the wrapper's own
- * `details.meta.truncation`, so a tool that truncated itself (bash, read, eval)
- * and one the central artifact spill cut report identically.
+ * `undefined` when the text is the whole of what the call asked for. Reads the
+ * wrapper's own `details.meta.truncation`, so a tool that truncated itself
+ * (bash, read, eval) and one the central artifact spill cut report identically.
  */
 function bridgeTruncation(details: unknown): BridgeTruncation | undefined {
 	if (!isRecord(details)) return undefined;
 	const meta = details.meta;
 	if (!isRecord(meta)) return undefined;
+	// A page the caller asked for is the whole of what it asked for, and names
+	// its own `:N` continuation. The central spill skips it for that reason;
+	// reporting it as a sample would send scripts to an artifact of one page.
+	if (meta.pagedSource === true) return undefined;
 	const truncation = meta.truncation;
 	if (!isRecord(truncation)) return undefined;
-	const { totalLines, outputLines, totalBytes, outputBytes, artifactId } = truncation;
+	const { totalLines, totalBytes, outputLines, outputBytes, artifactId, artifactElidedBytes } = truncation;
 	if (typeof totalLines !== "number" || typeof totalBytes !== "number") return undefined;
-	const shownLines = typeof outputLines === "number" ? outputLines : totalLines;
-	const shownBytes = typeof outputBytes === "number" ? outputBytes : totalBytes;
-	// A per-line column cap records a limit without dropping lines or bytes; the
-	// text is then the whole result with long lines shortened, not a sample.
-	if (shownLines >= totalLines && shownBytes >= totalBytes) return undefined;
+	// How much was dropped is the only sound measure of "is this a sample". The
+	// output counters are not: `truncateMiddle` counts its own elision marker
+	// among them, so a middle elision that dropped one line can report more
+	// output lines and bytes than the whole result has, which reads as whole.
+	// The elided counts are also what the prose notice reports, so the two
+	// cannot disagree. Tail truncation leaves them unset and adds no marker,
+	// so there the difference of the counters is exact.
+	const droppedLines =
+		typeof truncation.elidedLines === "number"
+			? truncation.elidedLines
+			: totalLines - (typeof outputLines === "number" ? outputLines : totalLines);
+	const droppedBytes =
+		typeof truncation.elidedBytes === "number"
+			? truncation.elidedBytes
+			: totalBytes - (typeof outputBytes === "number" ? outputBytes : totalBytes);
+	// A per-line column cap shortens long lines without dropping any; its limit
+	// lives in `meta.limits`, but a tool may record both, so check the counts.
+	if (droppedLines <= 0 && droppedBytes <= 0) return undefined;
 	const value: BridgeTruncation = {
-		lines: { shown: shownLines, total: totalLines },
-		bytes: { shown: shownBytes, total: totalBytes },
+		lines: { shown: Math.max(0, totalLines - Math.max(0, droppedLines)), total: totalLines },
+		bytes: { shown: Math.max(0, totalBytes - Math.max(0, droppedBytes)), total: totalBytes },
 	};
-	if (typeof artifactId === "string" && artifactId.length > 0) value.artifact = `artifact://${artifactId}`;
+	if (typeof artifactId === "string" && artifactId.length > 0) {
+		value.artifact = `artifact://${artifactId}`;
+		// Past `tools.artifactMaxBytes` the saved copy is a head/tail sample of
+		// the result too. The prose says so; a caller that follows the URL
+		// expecting the whole value has to be told the same thing.
+		if (typeof artifactElidedBytes === "number" && artifactElidedBytes > 0) {
+			value.artifactElidedBytes = artifactElidedBytes;
+		}
+	}
 	return value;
 }
 
