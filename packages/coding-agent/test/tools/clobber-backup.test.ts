@@ -7,6 +7,7 @@ import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { createLspWritethrough } from "@oh-my-pi/pi-coding-agent/lsp/writethrough";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { backupBeforeClobber } from "@oh-my-pi/pi-coding-agent/tools/clobber-backup";
+import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { addFileWriteFallback } from "@oh-my-pi/pi-coding-agent/tools/file-write-fallback";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import {
@@ -615,12 +616,13 @@ describe("copy-before-clobber: a record must not claim bytes this session never 
 		},
 	);
 
-	test("a batch flush reports every file it settled except the one its caller is still checking", async () => {
+	test("a batch flush claims only what it rewrote, not what it merely read", async () => {
 		// A batched write commits its bytes immediately and is post-processed at
-		// the flush, which is the last writer of the file. A caller that recorded
-		// the file at commit time recorded a state the operation did not finish
-		// with; the flush has to tell it. The requested destination is excluded
-		// because its caller's own post-write checks have not run yet.
+		// the flush. When the post-processing rewrites the file the flush is its
+		// last writer and has to say so, or the caller's record is stale and the
+		// session re-insures its own formatted file. When it rewrites nothing,
+		// saying so would hand the caller whatever another process left there
+		// between the two tool calls.
 		const settled: string[] = [];
 		const writethrough = createLspWritethrough(tempDir, {
 			onFileSettled: dst => {
@@ -632,11 +634,128 @@ describe("copy-before-clobber: a record must not claim bytes this session never 
 		const batchId = "flush-settled";
 
 		await writethrough(first, "one\n", undefined, undefined, { id: batchId, flush: false });
-		expect(settled).toEqual([]);
+		// Another process replaces the committed file between the two calls.
+		await fs.writeFile(first, DOOMED);
 		await writethrough(second, "two\n", undefined, undefined, { id: batchId, flush: true });
 
-		expect(settled).toEqual([first]);
-		expect(await Bun.file(first).text()).toBe("one\n");
+		// No formatter ran, so the flush wrote nothing and claims nothing.
+		expect(settled).toEqual([]);
+		expect(await Bun.file(first).text()).toBe(DOOMED);
 		expect(await Bun.file(second).text()).toBe("two\n");
+	});
+
+	test("a batched write another process replaced before the flush is still insured", async () => {
+		// The same hole through the real tool: the external write lands between
+		// two completed tool calls, nowhere near the one-`stat` record window, so
+		// nothing may make it the session's own.
+		const session = makeSession(tempDir);
+		session.enableLsp = true;
+		const tool = new WriteTool(session);
+		const batch = (index: number) => ({
+			toolCall: {
+				index,
+				batchId: "external-batch",
+				toolCalls: [
+					{ id: "0", name: "write", arguments: {} },
+					{ id: "1", name: "write", arguments: {} },
+				],
+			},
+		});
+
+		await tool.execute("first", { path: "a.md", content: "own\n" }, undefined, undefined, batch(0));
+		await fs.writeFile(path.join(tempDir, "a.md"), DOOMED);
+		await tool.execute("flush", { path: "b.md", content: "other\n" }, undefined, undefined, batch(1));
+		const destroyed = await tool.execute("destroy", { path: "a.md", content: "gone\n" });
+
+		const backups = await backupFiles();
+		expect(backups).toHaveLength(1);
+		expect(await Bun.file(backups[0]!).text()).toBe(DOOMED);
+		expect(resultText(destroyed)).toContain("[Backup]");
+	});
+
+	test.skipIf($which("ruff") === null)(
+		"a file the batch's formatter rewrote is not re-insured on the next write",
+		async () => {
+			// The other direction, with a real formatter: the flush rewrites an
+			// earlier batch entry, so without the refresh the session's own file
+			// reports "changed since this session wrote it" and is copied for
+			// nothing — the per-edit cost this whole feature must not add.
+			await Bun.write(path.join(tempDir, "ruff.toml"), "line-length = 88\n");
+			const session = makeSession(tempDir);
+			session.enableLsp = true;
+			session.settings = Settings.isolated({
+				"edit.mode": "patch",
+				"lsp.formatOnWrite": true,
+				"lsp.diagnosticsOnWrite": false,
+				"lsp.diagnosticsOnEdit": false,
+			});
+			const tool = new WriteTool(session);
+			const batch = (index: number) => ({
+				toolCall: {
+					index,
+					batchId: "ruff-batch",
+					toolCalls: [
+						{ id: "0", name: "write", arguments: {} },
+						{ id: "1", name: "write", arguments: {} },
+					],
+				},
+			});
+
+			await tool.execute("first", { path: "one.py", content: "x={'a':1}\n" }, undefined, undefined, batch(0));
+			const beforeFlush = await Bun.file(path.join(tempDir, "one.py")).text();
+			await tool.execute("flush", { path: "two.py", content: "y=[1,2,3]\n" }, undefined, undefined, batch(1));
+			const afterFlush = await Bun.file(path.join(tempDir, "one.py")).text();
+
+			// The formatter really did rewrite the earlier entry at the flush.
+			expect(beforeFlush).toBe("x={'a':1}\n");
+			expect(afterFlush).toBe('x = {"a": 1}\n');
+			expect(await backupBeforeClobber(session, path.join(tempDir, "one.py"))).toBeUndefined();
+		},
+	);
+
+	test("a move cannot carry one logical session's exemption into another", async () => {
+		// A `ToolSession` outlives the logical session it serves. Session A writes
+		// the file; the host re-points the session; session B renames it onto an
+		// absent path, so nothing at the destination is insured. B must not
+		// inherit A's ownership of the bytes it just carried there.
+		let id = "session-A";
+		const session = makeSession(tempDir);
+		session.getSessionId = () => id;
+		await new WriteTool(session).execute("create", { path: "a.md", content: DOOMED });
+		id = "session-B";
+
+		const moved = await new EditTool(session, "patch").execute("move-across-sessions", {
+			path: "a.md",
+			edits: [{ op: "update", rename: "b.md", diff: "@@\n register entry 1\n register entry 2" }],
+		});
+		expect(moved.isError).toBeFalsy();
+		const destroyed = await new WriteTool(session).execute("destroy", { path: "b.md", content: "gone\n" });
+
+		const backups = await backupFiles();
+		expect(backups).toHaveLength(1);
+		expect(await Bun.file(backups[0]!).text()).toBe(DOOMED);
+		expect(resultText(destroyed)).toContain("[Backup]");
+	});
+
+	test("a rename onto an existing destination keeps what it replaced", async () => {
+		// Patch mode refuses a rename onto an existing destination; hashline's
+		// `MV` allows it, and is also a rename that rewrites nothing. The
+		// destination's bytes are the ones with no other copy anywhere.
+		const session = makeSession(tempDir);
+		session.settings = Settings.isolated({ "edit.mode": "hashline", "edit.enforceSeenLines": false });
+		await Bun.write(path.join(tempDir, "from.md"), DOOMED);
+		await Bun.write(path.join(tempDir, "to.md"), "destination entry\n");
+		const read = await new ReadTool(session).execute("read", { path: "from.md" });
+		const header = resultText(read).split("\n")[0]!;
+
+		const moved = await new EditTool(session, "hashline").execute("move-onto", {
+			input: `${header}\nMV to.md`,
+		});
+
+		expect(moved.isError).toBeFalsy();
+		const backups = await backupFiles();
+		expect(backups).toHaveLength(1);
+		expect(await Bun.file(backups[0]!).text()).toBe("destination entry\n");
+		expect(await Bun.file(path.join(tempDir, "to.md")).text()).toBe(DOOMED);
 	});
 });

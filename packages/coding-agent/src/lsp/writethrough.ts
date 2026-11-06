@@ -673,10 +673,14 @@ async function flushWritethroughBatch(
 			{ contentAlreadyWritten: true },
 		);
 		finalContents.set(entry.dst, diag.finalContent);
-		// The flush is the last writer of this file; the caller's record of it was
-		// taken before the formatter ran. The entry the caller is waiting on is
-		// excluded: its own post-write checks have not run yet.
-		if (entry.dst !== requestedDst) await options.onFileSettled?.(entry.dst);
+		// Only a destination this flush actually REWROTE. `content` is what was on
+		// disk when the flush read it; when the post-processing returns it
+		// unchanged nothing was written, and reporting it would hand the caller
+		// ownership of whatever another process had left there between the tool
+		// calls — a wider hole than the stale record this hook exists to repair.
+		// The entry the caller is waiting on is excluded either way: its own
+		// post-write checks have not run yet.
+		if (entry.dst !== requestedDst && diag.finalContent !== content) await options.onFileSettled?.(entry.dst);
 		bundle?.finalize(diag.diagnostics);
 		results.push(diag.diagnostics);
 	}

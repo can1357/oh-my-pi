@@ -234,20 +234,26 @@ async function clobberReason(
  * session's writes brings the insurance straight back.
  *
  * What it cannot see is a writer that lands BETWEEN the session's write and the
- * `stat` below: that content is recorded as the session's own and the next
- * write destroys it without a copy. The window is one `stat` wide — the
- * `realpath` runs after it, so nothing but the `stat` itself sits between the
- * bytes landing and the record — and `ino` closes the common shape, because a
- * writer that replaces a file by writing a new one and renaming it over the old
- * (what every editor, `git checkout` and atomic-write helper does) changes the
- * inode and is caught. What is left is an in-place, equal-length write by
- * another process landing inside that one `stat`: it keeps the inode, and its
- * mtime and ctime are the ones the record then stores. The residue is one
- * intermediate state of a file an external tool was concurrently rewriting
- * anyway. Comparing the observed size against the bytes written would narrow it
- * further, but the LSP writethrough legitimately reformats inside the same
- * window, so that check would re-insure every formatted file on every edit —
- * a certain cost for every user against a rare, narrow hole.
+ * `stat` below: whatever that writer left is recorded as the session's own, and
+ * the session's next write to the file destroys it without a copy. The window
+ * is one `stat` wide — the `realpath` runs after it, so nothing but the `stat`
+ * itself sits between the bytes landing and the record.
+ *
+ * `ino` does NOT close any part of that window, and this was measured rather
+ * than assumed: a writer that replaces the file by writing a new one and
+ * renaming it over the old changes the inode, and is still recorded as the
+ * session's own, because the record is taken AFTER the replacement and so
+ * stores the replacement's size, mtime, ctime and inode alike. There is
+ * nothing left to compare it against. `ino` earns its place on writes landing
+ * OUTSIDE the window, between two of this session's writes, where the record
+ * is stale and the comparison fires.
+ *
+ * So the residue is any external write inside that one `stat`, not only an
+ * in-place equal-length one: one intermediate state of a file another tool was
+ * concurrently rewriting anyway. Comparing the observed size against the bytes
+ * written would narrow it, but the LSP writethrough legitimately reformats
+ * inside the same window, so that check would re-insure every formatted file on
+ * every edit — a certain cost for every user against a rare, narrow hole.
  */
 export async function noteOwnWrite(session: ClobberBackupSession, absolutePath: string): Promise<void> {
 	try {
@@ -269,7 +275,7 @@ export async function noteOwnWrite(session: ClobberBackupSession, absolutePath: 
 
 /** Forget a path this session wrote, for a caller that then deleted or moved it away. */
 export async function forgetOwnWrite(session: ClobberBackupSession, absolutePath: string): Promise<void> {
-	session.clobberCreatedPaths?.byPath.delete(await realPath(absolutePath, false));
+	createdFiles(session).byPath.delete(await realPath(absolutePath, false));
 }
 
 /**
@@ -281,7 +287,10 @@ export async function forgetOwnWrite(session: ClobberBackupSession, absolutePath
 export async function ownsCurrentContent(session: ClobberBackupSession, absolutePath: string): Promise<boolean> {
 	const stat = await fs.promises.stat(absolutePath).catch(() => undefined);
 	if (!stat?.isFile()) return false;
-	const written = session.clobberCreatedPaths?.byPath.get(await realPath(absolutePath, false));
+	// Through `createdFiles`, never the raw map: a `ToolSession` outlives the
+	// logical session it serves, and a stale set must be thrown away here as it
+	// is everywhere else, or one session's exemption answers for another's.
+	const written = createdFiles(session).byPath.get(await realPath(absolutePath, false));
 	return (
 		written !== undefined &&
 		written.size === stat.size &&
