@@ -1,4 +1,4 @@
-//! compcore.c: running a completion: `do_completion` (zle_tricky.c's
+//! compcore.c: running a completion: `do_completion` (`zle_tricky.c`'s
 //! entry once the line is metafied), the before/after hooks
 //! (`before_complete`, `after_complete`), building the matches
 //! (`makecomplist`) by calling the completion widget's function with the
@@ -35,9 +35,8 @@ use crate::bash::{
 };
 
 /// zsh `strstr(s, w) != NULL`.
-fn has(s: &Option<BString>, w: &[u8]) -> bool {
-	s.as_ref()
-		.is_some_and(|s| s.windows(w.len()).any(|x| x == w))
+fn has(s: Option<&BString>, w: &[u8]) -> bool {
+	s.is_some_and(|s| s.windows(w.len()).any(|x| x == w))
 }
 
 /// zsh `atoi`.
@@ -76,7 +75,7 @@ fn selfinsert_unmeta(zw: &mut Zw<'_, '_>) -> i32 {
 }
 
 /// zsh `do_completion`: complete the word `s` (`incmd`: in command
-/// position, `lst`: zle_tricky.c's `COMP_*` kind) and do what
+/// position, `lst`: `zle_tricky.c`'s `COMP_*` kind) and do what
 /// `compstate` says with the matches: insert one, the unambiguous
 /// prefix, start menu completion, list. The line is metafied
 /// ([`Comp::line`]). `k` gets zsh's return value.
@@ -175,10 +174,11 @@ fn do_completion_result(
 		restore_origline(c);
 		c.core.minfo.cur = None;
 		zw.ed.clearlist = true;
-		let mut ret = 1;
-		if c.core.useline < 0 {
-			ret = selfinsert_unmeta(zw);
-		}
+		let ret = if c.core.useline < 0 {
+			selfinsert_unmeta(zw)
+		} else {
+			1
+		};
 		return compend(zw, ret, k);
 	}
 	c.tricky.lastprebr = None;
@@ -726,15 +726,15 @@ fn readback(c: &mut Comp, automenu: bool) {
 		Some(l) if l.starts_with(b"ambig") => 3,
 		Some(_) => 0,
 	};
-	c.core.forcelist = i32::from(has(cl, b"force"));
+	c.core.forcelist = i32::from(has(cl.as_ref(), b"force"));
 	c.core.onlyexpl = if cl.is_some() {
-		i32::from(has(cl, b"expl")) | (i32::from(has(cl, b"messages")) << 1)
+		i32::from(has(cl.as_ref(), b"expl")) | (i32::from(has(cl.as_ref(), b"messages")) << 1)
 	} else {
 		0
 	};
 	match c.complete.compinsert.clone() {
 		None => c.core.useline = 0,
-		Some(ins) if has(&Some(ins.clone()), b"tab") => c.core.useline = -1,
+		Some(ins) if has(Some(&ins), b"tab") => c.core.useline = -1,
 		Some(ins) if ins == "unambig" || ins == "unambiguous" || ins == "automenu-unambiguous" => {
 			c.core.useline = 1;
 			c.tricky.usemenu = 0;

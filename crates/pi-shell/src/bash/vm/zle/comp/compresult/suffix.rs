@@ -2,7 +2,7 @@
 //! (`addsuffix`, `addsuffixstring`, `makesuffix`, `makeparamsuffix`,
 //! `makesuffixstr`, `iremovesuffix`, `fixsuffix`).
 //!
-//! zsh keeps this state in zle_misc.c globals; here it is [`Suffix`] in
+//! zsh keeps this state in `zle_misc.c` globals; here it is [`Suffix`] in
 //! [`super::State`], except `suffixlen`, which is
 //! [`LineState::suffixlen`](crate::bash::vm::zle::utils::LineState) (the
 //! display shows it).
@@ -52,7 +52,7 @@ pub struct Suffixset {
 	pub lensuf: i32,
 }
 
-/// zle_misc.c's suffix globals.
+/// `zle_misc.c`'s suffix globals.
 #[derive(Clone, Debug, Default)]
 pub struct Suffix {
 	/// zsh `suffixlist`, first element first (zsh prepends).

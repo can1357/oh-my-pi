@@ -391,11 +391,10 @@ fn addmatches_body(
 	} else {
 		0
 	});
+	endcmgroup(c, None);
 	if let Some(g) = dat.group.clone() {
-		endcmgroup(c, None);
 		begcmgroup(c, Some(&g), gflags);
 	} else {
-		endcmgroup(c, None);
 		begcmgroup(c, Some(b"default"), 0);
 	}
 	if dat.mesg.is_some() || dat.exp.is_some() {
@@ -514,9 +513,8 @@ fn addmatches_body(
 		update_bmatchers(c);
 	}
 	// The suffixes and patterns to ignore (-F).
-	let mut aign: Option<Vec<Vec<u8>>> = None;
-	let mut pign: Option<Vec<Pattern>> = None;
-	if let Some(ign) = dat.ign.clone()
+	let (aign, pign): (Option<Vec<Vec<u8>>>, Option<Vec<Pattern>>) = if let Some(ign) =
+		dat.ign.clone()
 		&& let Some(a) = get_user_var(ex, Some(&ign))?
 	{
 		let opts = zpattern::opts(ex)?;
@@ -535,16 +533,17 @@ fn addmatches_body(
 				pats.push(p);
 			}
 		}
-		aign = (!sfx.is_empty()).then_some(sfx);
-		pign = (!pats.is_empty()).then_some(pats);
-	}
+		((!sfx.is_empty()).then_some(sfx), (!pats.is_empty()).then_some(pats))
+	} else {
+		(None, None)
+	};
 	// The display strings.
 	let mut disp: Disp = match dat.disp.clone() {
 		Some(d) => get_user_var(ex, Some(&d))?.map(|v| (v, 0)),
 		None => None,
 	};
 	// The completion variables, when matching.
-	let get = |s: &Option<BString>| s.as_ref().map(|s| s.to_vec()).unwrap_or_default();
+	let get = |s: &Option<BString>| s.as_ref().map_or_default(|s| s.to_vec());
 	let (mut lipre, mut lisuf, mut lpre, mut lsuf) = (None, None, Vec::new(), Vec::new());
 	let matching = dat.aflags & caf::MATCH != 0;
 	if matching {
@@ -613,12 +612,14 @@ fn addmatches_body(
 	let patmatch = c.complete.comppatmatch.clone().filter(|p| !p.is_empty());
 	if matching {
 		let mut globflag: Vec<u8> = Vec::new();
-		if patmatch.is_some() && dat.ppre.is_some() && lpre.starts_with(b"(#") {
-			if let Some(p) = lpre[2..].iter().position(|&ch| ch == b')') {
-				let p = p + 2;
-				globflag = lpre[..=p].to_vec();
-				lpre.drain(..=p);
-			}
+		if patmatch.is_some()
+			&& dat.ppre.is_some()
+			&& lpre.starts_with(b"(#")
+			&& let Some(p) = lpre[2..].iter().position(|&ch| ch == b')')
+		{
+			let p = p + 2;
+			globflag = lpre[..=p].to_vec();
+			lpre.drain(..=p);
 		}
 		if let Some(s) = dat.ppre.clone() {
 			let ml = match_str(c, &lpre, &s, Some(&mut obpl), 0, None, false, 0, true);
@@ -677,7 +678,7 @@ fn addmatches_body(
 		}
 		if let Some(pm) = &patmatch {
 			let is = pm[0] == b'*';
-			let mut tmp = globflag.clone();
+			let mut tmp = globflag;
 			tmp.extend_from_slice(&lpre);
 			let xat = tmp.len();
 			if is {
@@ -712,7 +713,7 @@ fn addmatches_body(
 	let empty_argv = argv.is_empty();
 	if !noargs && !empty_argv {
 		if dat.prpre.is_none()
-			&& let Some(p) = oppre.clone()
+			&& let Some(p) = oppre
 		{
 			let mut s = singsub(ex, p.to_vec())?;
 			untokenize(&mut s);
@@ -762,16 +763,15 @@ fn addmatches_body(
 				disp_next(&mut disp);
 			}
 			if aign.is_some() || pign.is_some() {
-				let mut ibuf = dat.ppre.as_ref().map(|p| p.to_vec()).unwrap_or_default();
-				ibuf.extend_from_slice(&s);
+				let mut ibuf = dat.ppre.as_ref().map_or_default(|p| p.to_vec());
+				ibuf.extend_from_slice(s);
 				if let Some(p) = &dat.psuf {
 					ibuf.extend_from_slice(p);
 				}
 				let il = ppl + s.len() + psl;
-				let mut addit = true;
-				if let Some(a) = &aign {
-					addit = !a.iter().any(|t| t.len() < il && ibuf.ends_with(t));
-				}
+				let mut addit = aign
+					.as_ref()
+					.is_none_or(|a| !a.iter().any(|t| t.len() < il && ibuf.ends_with(t)));
 				if addit && let Some(p) = &pign {
 					if pattern_env.is_none() {
 						pattern_env = Some(zpattern::char_env(ex)?);
@@ -801,12 +801,12 @@ fn addmatches_body(
 				} else {
 					None
 				};
-				match comp_match(
+				if let Some(ms) = comp_match(
 					ex,
 					c,
 					&lpre,
 					Some(&lsuf),
-					&s,
+					s,
 					cp,
 					&mut lc,
 					qu,
@@ -815,20 +815,19 @@ fn addmatches_body(
 					&mut bsl,
 					bcs,
 					&mut isexact,
-				)? {
-					Some(ms) => ms,
-					None => {
-						dpar_next(&mut dparr);
-						break 'one;
-					},
+				) {
+					ms
+				} else {
+					dpar_next(&mut dparr);
+					break 'one;
 				}
 			} else {
 				let ms = if quote {
 					s.clone()
 				} else {
-					multiquote(ex, c, &s, false)
+					multiquote(ex, c, s, false)
 				};
-				lc = bld_parts(c, &ms, i32::try_from(ms.len()).unwrap_or(0), -1, None, None);
+				lc = Some(bld_parts(c, &ms, i32::try_from(ms.len()).unwrap_or(0), -1, None, None));
 				ms
 			};
 			if doadd {
@@ -859,10 +858,10 @@ fn addmatches_body(
 				) {
 					let d = disp_cur(&disp);
 					set_added(c, a, |m| {
-						m.rems = dat.rems.clone();
-						m.remf = dat.remf.clone();
+						m.rems.clone_from(&dat.rems);
+						m.remf.clone_from(&dat.remf);
 						if d.is_some() {
-							m.disp = d.clone();
+							m.disp.clone_from(&d);
 						}
 					});
 				}
@@ -1056,8 +1055,7 @@ pub fn add_match_data(
 		let mut sl: Option<Cl> = None;
 		if psl > 0 {
 			let mut s =
-				bld_parts(c, psuf.unwrap_or_default(), i32l(psl), i32l(psl), Some(&mut sl), None)
-					.expect("bld_parts of a non-empty string");
+				bld_parts(c, psuf.unwrap_or_default(), i32l(psl), i32l(psl), Some(&mut sl), None);
 			if let Some(sl0) = sline.take() {
 				let sl2 = cp_cline(c, Some(sl0), true).expect("copy of a cline list");
 				let sp = last(c, sl2);
@@ -1084,8 +1082,7 @@ pub fn add_match_data(
 		}
 		if isl > 0 {
 			let mut tsl = None;
-			let s = bld_parts(c, isuf.unwrap_or_default(), i32l(isl), i32l(isl), Some(&mut tsl), None)
-				.expect("bld_parts of a non-empty string");
+			let s = bld_parts(c, isuf.unwrap_or_default(), i32l(isl), i32l(isl), Some(&mut tsl), None);
 			if let Some(sl) = sl {
 				c.clines.get_mut(sl).next = Some(s);
 			} else if let Some(sl0) = sline.take() {
@@ -1100,8 +1097,7 @@ pub fn add_match_data(
 		}
 		if qisl > 0 {
 			let q = qisuf.as_ref().map_or(&[][..], |q| q.as_slice());
-			let qsl = bld_parts(c, q, i32l(qisl), i32l(qisl), None, None)
-				.expect("bld_parts of a non-empty string");
+			let qsl = bld_parts(c, q, i32l(qisl), i32l(qisl), None, None);
 			let n = c.clines.get_mut(qsl);
 			n.flags |= clf::SUF;
 			n.suffix = n.prefix.take();
@@ -1157,8 +1153,7 @@ pub fn add_match_data(
 	};
 	let parts = |c: &mut Comp, s: &[u8]| {
 		let mut lp = None;
-		let p = bld_parts(c, s, i32l(s.len()), i32l(s.len()), Some(&mut lp), None)
-			.expect("bld_parts of a non-empty string");
+		let p = bld_parts(c, s, i32l(s.len()), i32l(s.len()), Some(&mut lp), None);
 		(p, lp.unwrap_or(p))
 	};
 	if pl > 0 {
@@ -1347,7 +1342,7 @@ pub fn add_match_data(
 					.as_ref()
 					.is_none_or(|s| s.is_empty())
 			{
-				let mut e = cm.ppre.as_ref().map(|s| s.to_vec()).unwrap_or_default();
+				let mut e = cm.ppre.as_ref().map_or_default(|s| s.to_vec());
 				e.extend_from_slice(&cm.str);
 				if let Some(p) = &cm.psuf {
 					e.extend_from_slice(p);

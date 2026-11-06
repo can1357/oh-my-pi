@@ -257,9 +257,11 @@ pub const fn iident(c: u8) -> bool {
 	c.is_ascii_alphanumeric() || c == b'_'
 }
 
-/// zsh `itype_end(s, IIDENT, 0)`: index of the first byte of `s[from..]`
-/// (metafied, possibly tokenized) that is not an identifier character
-/// (lexer assignments, expander parameter names). `wide` (zsh's
+/// zsh `itype_end(s, IIDENT, 0)`: end of the identifier at `s[from..]`.
+///
+/// The index of the first byte of `s[from..]` (metafied, possibly
+/// tokenized) that is not an identifier character (lexer assignments,
+/// expander parameter names). `wide` (zsh's
 /// `MULTIBYTE` in a UTF-8 locale without `POSIX_IDENTIFIERS`) admits
 /// alphanumeric non-ASCII characters (`iswalnum`).
 pub fn ident_end(s: &[u8], from: usize, wide: bool) -> usize {
@@ -288,10 +290,11 @@ pub fn ident_end(s: &[u8], from: usize, wide: bool) -> usize {
 	i
 }
 
-/// zsh `mb_metacharlenconv` in a UTF-8 locale: the length in metafied
-/// bytes and the code of the character at `s[i..]` (`i < s.len()`);
-/// `None` for a token or a byte that starts no valid UTF-8 sequence (then
-/// one character long).
+/// zsh `mb_metacharlenconv` in a UTF-8 locale.
+///
+/// The length in metafied bytes and the code of the character at `s[i..]`
+/// (`i < s.len()`); `None` for a token or a byte that starts no valid
+/// UTF-8 sequence (then one character long).
 pub fn mb_metacharlenconv(s: &[u8], i: usize) -> (usize, Option<u32>) {
 	use super::tok::{META, is_meta, is_tok};
 	let c = s[i];
@@ -2736,12 +2739,13 @@ impl Ctx<'_> {
 	}
 }
 
-/// zsh's lexer over the editor line in ZLE mode (`lexflags =
-/// LEXFLAGS_ZLE; inpush(dupstrspace(line)); strinbeg(0)`), token by token
-/// through `ctxtlex`, with the globals completion reads and writes between
-/// tokens (`tok`, `tokstr`, `tokfd`, `incmdpos`, `incond`, `inredir`,
+/// zsh's lexer over the editor line in ZLE mode.
+///
+/// (`lexflags = LEXFLAGS_ZLE; inpush(dupstrspace(line)); strinbeg(0)`), token
+/// by token through `ctxtlex`, with the globals completion reads and writes
+/// between tokens (`tok`, `tokstr`, `tokfd`, `incmdpos`, `incond`, `inredir`,
 /// `intypeset`, `lexflags`, `inbufct`) and lex.c's word positions
-/// ([`ZleWords`]). Used by zle_tricky.c's `get_comp_string`/`getcurcmd`
+/// ([`ZleWords`]). Used by `zle_tricky.c`'s `get_comp_string`/`getcurcmd`
 /// and compcore.c's `set_comp_sep`.
 pub struct ZleLex<'s> {
 	cx: Ctx<'s>,
@@ -2845,17 +2849,18 @@ impl<'s> ZleLex<'s> {
 	}
 
 	/// lex.c's word positions.
-	pub fn z(&self) -> &ZleWords {
+	pub const fn z(&self) -> &ZleWords {
 		self.cx.zle.as_ref().expect("ZleLex always tracks words")
 	}
 
 	/// lex.c's word positions, to update.
-	pub fn z_mut(&mut self) -> &mut ZleWords {
+	pub const fn z_mut(&mut self) -> &mut ZleWords {
 		self.cx.zle.as_mut().expect("ZleLex always tracks words")
 	}
 }
 
-/// The source offset after each token zsh's `ctxtlex` reads from `text`
+/// The source offset after each token zsh's `ctxtlex` reads from `text`.
+///
 /// (raw bytes, lexed as ZLE lexes the line: `LEXFLAGS_ACTIVE`, no
 /// aliases), up to the end of input or a lexer error (zsh's
 /// `zlemetall - inbufct` after each token, as `select-in-shell-word`
@@ -2893,7 +2898,9 @@ pub fn bufferwords(text: &[u8], flags: u32, feat: Features) -> Vec<Vec<u8>> {
 	bufferwords_in(text, flags, None, feat).0
 }
 
-/// zsh `getcurcmd` (`zle_tricky.c`): the command word (as the lexer left
+/// zsh `getcurcmd` (`zle_tricky.c`).
+///
+/// The command word (as the lexer left
 /// it, tokenized) of the command the cursor (byte `cs`) is in, lexing the
 /// editor line `text` (raw bytes) without aliases up to the word holding
 /// the cursor (zsh `gotword`); `None` when there is no command word
@@ -2925,8 +2932,9 @@ pub fn zle_curcmd(text: &[u8], cs: usize, interactive_comments: bool) -> Option<
 	s
 }
 
-/// zsh `bufferwords(NULL, NULL, &index, LEXFLAGS_ZLE)` over the editor
-/// line `text` (metafied) with the cursor at byte `cs` of its unmetafied
+/// zsh `bufferwords(NULL, NULL, &index, LEXFLAGS_ZLE)` over the editor line.
+///
+/// `text` (metafied) with the cursor at byte `cs` of its unmetafied
 /// form: the words and the index of the word the cursor is in or after
 /// (zsh `gotword` stops the ZLE lexing there; `None` without words).
 pub fn bufferwords_zle(text: &[u8], cs: usize) -> (Vec<Vec<u8>>, Option<usize>) {
