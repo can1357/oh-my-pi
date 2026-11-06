@@ -18,6 +18,15 @@ export default function govplanExtension(pi: ExtensionAPI): void {
 	// Warm the fallback in the exercising process, after extension registration
 	// invalidates its provider cache. The governor itself remains cache-only.
 	pi.on("before_agent_start", async (event, ctx) => {
+		if (event.prompt.includes("WARM_CHILD_CHAIN")) {
+			for (const provider of ["govplan", "govplan-g", "govplan-h"] as const) {
+				await ctx.modelRegistry.authStorage.usage.invalidate(provider);
+				await ctx.modelRegistry.authStorage.usage.reports({
+					provider,
+					baseUrlResolver: candidate => ctx.modelRegistry.getProviderBaseUrl(candidate),
+				});
+			}
+		}
 		if (event.prompt.includes("WARM_API_KEY")) {
 			await ctx.modelRegistry.authStorage.usage.reports({
 				provider: "govplan",

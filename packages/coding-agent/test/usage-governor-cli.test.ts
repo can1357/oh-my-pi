@@ -567,6 +567,66 @@ describe("usage governor CLI proof: scenarios", () => {
 		}
 	}, 60_000);
 
+	test("worker uses its own fallback chain, never the parent's", async () => {
+		for (const allowWorkerFallback of [true, false]) {
+			const primary = account("govplan", "primary", { usedFraction: 0, resetInMs: 58_000, perRequest: 0.8 });
+			const worker = account("govplan-g", "worker", { usedFraction: 0, resetInMs: 58_000, perRequest: 0 });
+			const parent = account("govplan-h", "parent", { usedFraction: 0, resetInMs: 58_000, perRequest: 0 });
+			const proof = await GovernorProof.create([primary, worker, parent], {
+				enabled: true,
+				roleProtection: "off",
+				modelRoles: { default: "govplan/m", task: "govplan/m" },
+				fallbackChains: { default: ["govplan-h/m2"], task: allowWorkerFallback ? ["govplan-g/m2"] : [] },
+			});
+			const child = proof.spawnOmp(["-p", "DELEGATE CHILD_CHAIN"]);
+			try {
+				const observed = await awaitCondition(
+					() =>
+						allowWorkerFallback
+							? proof.chats().some(record => record.provider === "govplan-g")
+							: proof.readLedger().waits.some(wait => wait.source === "subagent" && wait.endedAtMs === null),
+					20_000,
+				);
+				if (!observed)
+					throw new Error(
+						`worker routing not observed: ${JSON.stringify({ records: proof.fake.records, ledger: proof.readLedger() })}`,
+					);
+				const chats = proof.chats();
+				expect(chats[0]).toMatchObject({ provider: "govplan", model: "m", bearer: primary.bearer });
+				expect(chats[0].usedFraction ?? 0).toBeGreaterThan(allowedAt(chats[0].resetsAt!, chats[0].atMs));
+				expect(proof.fake.records.some(record => record.kind === "usage" && record.label === "worker")).toBe(true);
+				expect(proof.fake.records.some(record => record.kind === "usage" && record.label === "parent")).toBe(true);
+				const reservations = proof.readLedger().reservations.filter(row => row.source === "subagent");
+				expect(reservations.filter(row => row.provider === "govplan-h")).toEqual([]);
+				if (allowWorkerFallback) {
+					expect(chats.filter(record => record.provider === "govplan-g")).toHaveLength(1);
+					expect(chats.find(record => record.provider === "govplan-g")).toMatchObject({
+						model: "m2",
+						bearer: worker.bearer,
+					});
+					expect(reservations.some(row => row.provider === "govplan-g" && row.role === "task")).toBe(true);
+				} else {
+					expect(chats.filter(record => record.provider === "govplan-g")).toEqual([]);
+					expect(chats.filter(record => record.provider === "govplan-h")).toEqual([]);
+					expect(reservations).toEqual([]);
+					expect(
+						proof
+							.readLedger()
+							.waits.some(
+								wait => wait.source === "subagent" && wait.provider === "govplan" && wait.role === "task",
+							),
+					).toBe(true);
+				}
+				expect(proof.fake.records.filter(record => record.kind === "unexpected")).toEqual([]);
+				assertConfined(proof);
+			} finally {
+				child.kill("SIGINT");
+				await child.exited;
+				proof.close();
+			}
+		}
+	}, 90_000);
+
 	test("role restriction: default-role sends wait and never reach govplan-g; subagent sends are reserved as subagent", async () => {
 		// Both govplan accounts sit at 50 % with the line already crossed. Both govplan-g accounts are fresh.
 		const specs = [

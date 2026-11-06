@@ -247,7 +247,15 @@ function replyFor(provider: FakeProviderId, messages: ChatMessage[], toolResultC
 			name: "task",
 			args: {
 				context: "usage governor proof",
-				tasks: [{ name: "worker", task: "Reply with the word ok.", solutionSpace: "fixed reply" }],
+				tasks: [
+					{
+						name: "worker",
+						task: messages.some(message => messageText(message).includes("CHILD_CHAIN"))
+							? "WARM_CHILD_CHAIN Reply with the word ok."
+							: "Reply with the word ok.",
+						solutionSpace: "fixed reply",
+					},
+				],
 			},
 		};
 	}

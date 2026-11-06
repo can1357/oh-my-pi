@@ -167,6 +167,38 @@ describe("governed role quota protection", () => {
 		}
 	});
 
+	test("a model-owned request protects a role using its full authorized envelope", async () => {
+		const { h, scope } = await setupRoutes(0.1, true);
+		try {
+			const modelOwner = `${PROVIDER}/manual:high`;
+			const modelScope: UsageRoutingScope = {
+				...scope,
+				revision: 2,
+				models: [{ selector: modelOwner, targets: [shared, independent] }],
+			};
+			h.storage.governor.setRoutingScope(modelScope);
+			const result = await h.storage.governor.evaluateRoutes({
+				scopeId: modelScope.id,
+				revision: modelScope.revision,
+				role: "",
+				owner: { kind: "model", selector: modelOwner },
+				sessionId: "session-main",
+				// A binding recheck can ask about just one target; protection must still
+				// inspect the owner's entire authorized envelope.
+				targets: [shared],
+			});
+			expect(result.accounts[0]).toMatchObject({
+				eligibility: "eligible",
+				allowance: "included",
+				state: "open",
+				protectedFor: ["task"],
+			});
+			expectNoStrayFetch(h);
+		} finally {
+			await disposeHarness();
+		}
+	});
+
 	for (const [label, used, verified, allowance] of [
 		["unknown", 0.1, false, "unknown"],
 		["spent", 1, true, "spent"],

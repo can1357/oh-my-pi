@@ -264,12 +264,12 @@ export class CredentialGovernor implements GovernorApi {
 			});
 		const byRole = new Map(scope.roles.map(plan => [plan.role, plan.targets.flatMap(evaluate)]));
 		const accounts = request.targets.flatMap(evaluate);
+		const currentOpportunities = owner.kind === "role" ? (byRole.get(owner.role) ?? []) : targets.flatMap(evaluate);
 		if (this.#config.roleProtection !== "off") {
 			for (const account of accounts) {
 				if (account.eligibility !== "eligible" || account.allowance !== "included" || account.state !== "open")
 					continue;
-				const current = byRole.get(request.role) ?? [];
-				const independent = current.some(
+				const independent = currentOpportunities.some(
 					other =>
 						other.eligibility === "eligible" &&
 						other.allowance === "included" &&
