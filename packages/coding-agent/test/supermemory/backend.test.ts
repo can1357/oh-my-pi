@@ -6,11 +6,7 @@ import { supermemoryBackend } from "@oh-my-pi/pi-coding-agent/supermemory/backen
 import { SupermemoryClient } from "@oh-my-pi/pi-coding-agent/supermemory/client";
 import type { SupermemorySessionState } from "@oh-my-pi/pi-coding-agent/supermemory/state";
 
-const CONFIGURED = {
-	"memory.backend": "supermemory",
-	"supermemory.apiKey": "sm-synthetic-key",
-	"supermemory.baseUrl": "http://127.0.0.1:1",
-};
+const CONFIGURED = { "memory.backend": "supermemory" };
 
 function makeSession(options: { settings?: Record<string, unknown>; cwd?: string } = {}) {
 	const listeners = new Set<AgentSessionEventListener>();
@@ -112,7 +108,8 @@ function denyNetwork() {
 
 describe("supermemoryBackend", () => {
 	beforeEach(() => {
-		for (const name of ENV) delete Bun.env[name];
+		Bun.env.SUPERMEMORY_API_KEY = "sm-synthetic-key";
+		Bun.env.SUPERMEMORY_BASE_URL = "http://127.0.0.1:1";
 	});
 	afterEach(() => {
 		vi.restoreAllMocks();
@@ -124,7 +121,8 @@ describe("supermemoryBackend", () => {
 
 	it("stays inert without an API key", async () => {
 		const fetchSpy = denyNetwork();
-		const session = makeSession({ settings: { "supermemory.apiKey": undefined } });
+		delete Bun.env.SUPERMEMORY_API_KEY;
+		const session = makeSession();
 		await start(session);
 		expect(session.getSupermemorySessionState()).toBeUndefined();
 		expect(
@@ -231,6 +229,25 @@ describe("supermemoryBackend", () => {
 		expect(new Set(docs.map(doc => doc?.customId)).size).toBe(2);
 		expect(docs[0]?.content).toContain("four");
 		expect(docs[0]?.content).not.toContain("three");
+	});
+
+	it("after an in-place transcript reset, retains only turns added since the reset", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		for (const text of ["one", "two", "three", "four"]) {
+			session.addTurn(text);
+			await session.endTurn();
+		}
+		create.mockClear();
+		session.getSupermemorySessionState()?.resetConversationTracking();
+		session.addTurn("after reset");
+		await session.endTurn();
+		expect(create.mock.calls.map(call => call[0]?.metadata)).toMatchObject([{ turnStart: 4, turnEnd: 5 }]);
+		expect(create.mock.calls[0]?.[0]?.content).toContain("after reset");
+		expect(create.mock.calls[0]?.[0]?.content).not.toContain("four");
 	});
 
 	it("lets the shutdown flush finish every queued due window", async () => {

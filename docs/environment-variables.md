@@ -549,10 +549,13 @@ Shell subprocess filtering is separate (`packages/utils/src/env.ts`): it strips 
 
 ### Supermemory memory backend
 
-| Variable               | Setting overridden     | Accepted value / built-in default                                                                       |
-| ---------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------- |
-| `SUPERMEMORY_API_KEY`  | `supermemory.apiKey`   | Non-empty API key; unset leaves the backend inert                                                       |
-| `SUPERMEMORY_BASE_URL` | `supermemory.baseUrl`  | `https:` URL, or `http:` on a loopback host; default `https://api.supermemory.ai`; other URLs are rejected |
+The API key and origin are read from the process environment only; there is no `supermemory.*` setting for
+them, so a project-local config file cannot redirect the key to another origin or replace the account.
+
+| Variable               | Accepted value / built-in default                                                                                      |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `SUPERMEMORY_API_KEY`  | Non-empty API key; unset leaves the backend inert                                                                      |
+| `SUPERMEMORY_BASE_URL` | `https:` URL, or `http:` on `localhost`/`127.0.0.1`/`[::1]`; default `https://api.supermemory.ai`; other URLs are rejected |
 
 ### Hindsight memory backend
 

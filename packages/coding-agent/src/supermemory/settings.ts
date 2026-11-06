@@ -4,35 +4,8 @@
  */
 import { register } from "../config/registry";
 
-// Supermemory (https://supermemory.ai)
-export const cfgSupermemoryApiKey = register({
-	id: "supermemory.apiKey",
-	env: "SUPERMEMORY_API_KEY",
-	type: "string",
-	credential: true,
-	default: undefined,
-	ui: {
-		tab: "memory",
-		group: "Supermemory",
-		label: "Supermemory API Key",
-		description: "Bearer token for the Supermemory API",
-		condition: "supermemoryActive",
-	},
-});
-
-export const cfgSupermemoryBaseUrl = register({
-	id: "supermemory.baseUrl",
-	env: "SUPERMEMORY_BASE_URL",
-	type: "string",
-	default: "https://api.supermemory.ai",
-	ui: {
-		tab: "memory",
-		group: "Supermemory",
-		label: "Supermemory API URL",
-		description: "Supermemory API origin; must be https, or http on a loopback host",
-		condition: "supermemoryActive",
-	},
-});
+// Supermemory (https://supermemory.ai). The API key and origin are deliberately not settings:
+// they come from SUPERMEMORY_API_KEY / SUPERMEMORY_BASE_URL only (see supermemory/config.ts).
 
 export const cfgSupermemoryScoping = register({
 	id: "supermemory.scoping",

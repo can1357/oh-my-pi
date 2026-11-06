@@ -29,27 +29,27 @@ function configWith(env: Partial<Record<(typeof TOUCHED)[number], string>>, over
 }
 
 describe("loadSupermemoryConfig", () => {
-	it("reads SUPERMEMORY_* environment variables over defaults, while a runtime override beats them", () => {
+	it("reads the API key and origin from SUPERMEMORY_* only, defaulting the origin", () => {
 		const fromEnv = configWith({
-			SUPERMEMORY_API_KEY: "sm-synthetic-env",
+			SUPERMEMORY_API_KEY: " sm-synthetic-env ",
 			SUPERMEMORY_BASE_URL: "http://127.0.0.1:1/",
 		});
 		expect(fromEnv.apiKey).toBe("sm-synthetic-env");
 		expect(fromEnv.baseUrl).toBe("http://127.0.0.1:1");
 
-		const overridden = configWith(
-			{ SUPERMEMORY_API_KEY: "sm-synthetic-env" },
-			{ "supermemory.apiKey": "sm-synthetic-override" },
-		);
-		expect(overridden.apiKey).toBe("sm-synthetic-override");
+		for (const name of TOUCHED) delete Bun.env[name];
+		const unset = configWith({});
+		expect(unset.apiKey).toBeNull();
+		expect(unset.baseUrl).toBe("https://api.supermemory.ai");
+		expect(isSupermemoryConfigured(unset)).toBe(false);
 	});
 
 	it("accepts https or loopback http base URLs only", () => {
 		const accepted = ["https://api.example", "http://localhost:8080", "http://127.0.0.1:1", "http://[::1]:9"];
 		for (const baseUrl of accepted) {
-			expect(
-				isSupermemoryConfigured(configWith({}, { "supermemory.apiKey": "k", "supermemory.baseUrl": baseUrl })),
-			).toBe(true);
+			expect(isSupermemoryConfigured(configWith({ SUPERMEMORY_API_KEY: "k", SUPERMEMORY_BASE_URL: baseUrl }))).toBe(
+				true,
+			);
 		}
 		const rejected = [
 			"http://api.example",
@@ -60,7 +60,7 @@ describe("loadSupermemoryConfig", () => {
 			"not a url",
 		];
 		for (const baseUrl of rejected) {
-			const config = configWith({}, { "supermemory.apiKey": "k", "supermemory.baseUrl": baseUrl });
+			const config = configWith({ SUPERMEMORY_API_KEY: "k", SUPERMEMORY_BASE_URL: baseUrl });
 			expect(config.baseUrl).toBeNull();
 			expect(isSupermemoryConfigured(config)).toBe(false);
 		}

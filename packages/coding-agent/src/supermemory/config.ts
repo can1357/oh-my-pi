@@ -1,23 +1,25 @@
 /**
  * Resolved Supermemory runtime configuration.
  *
- * Every field reads a `supermemory.*` setting handle; `SUPERMEMORY_API_KEY` and
- * `SUPERMEMORY_BASE_URL` win over the settings layers through the registry.
+ * The API key and origin come from `SUPERMEMORY_API_KEY` / `SUPERMEMORY_BASE_URL` only, never
+ * from settings: project-local config files merge into settings, so a cloned repository could
+ * otherwise point the user's bearer token at another origin, or swap in its own key and collect
+ * the user's transcripts. Tuning fields read the `supermemory.*` setting handles.
  */
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { resolveEquivalentPath } from "@oh-my-pi/pi-utils/dirs";
 import type { Settings } from "../config/settings";
 import {
-	cfgSupermemoryApiKey,
 	cfgSupermemoryAutoRecall,
 	cfgSupermemoryAutoRetain,
-	cfgSupermemoryBaseUrl,
 	cfgSupermemoryRecallLimit,
 	cfgSupermemoryRetainEveryNTurns,
 	cfgSupermemoryScoping,
 	cfgSupermemorySearchMode,
 	cfgSupermemoryThreshold,
 } from "./settings";
+
+const DEFAULT_BASE_URL = "https://api.supermemory.ai";
 
 export type SupermemoryScoping = "global" | "per-project";
 export type SupermemorySearchMode = "hybrid" | "memories";
@@ -58,8 +60,8 @@ function validateBaseUrl(raw: string | undefined): string | null {
 
 export function loadSupermemoryConfig(settings: Settings): SupermemoryConfig {
 	return {
-		baseUrl: validateBaseUrl(cfgSupermemoryBaseUrl.get(settings)),
-		apiKey: cfgSupermemoryApiKey.get(settings)?.trim() || null,
+		baseUrl: validateBaseUrl(Bun.env.SUPERMEMORY_BASE_URL?.trim() || DEFAULT_BASE_URL),
+		apiKey: Bun.env.SUPERMEMORY_API_KEY?.trim() || null,
 		scoping: cfgSupermemoryScoping.get(settings),
 		autoRecall: cfgSupermemoryAutoRecall.get(settings),
 		autoRetain: cfgSupermemoryAutoRetain.get(settings),

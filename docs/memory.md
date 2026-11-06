@@ -160,7 +160,7 @@ Recall is injected as background context, not instructions, and recalled memory 
 
 ## Supermemory remote backend
 
-Select `memory.backend: supermemory` and supply the API key through the environment (or `supermemory.apiKey`):
+Select `memory.backend: supermemory` and supply the API key through the environment. The key and the API origin are environment-only (unlike Hindsight's `hindsight.apiUrl`/`apiToken`), so a repository's project config cannot send your key to another origin or swap in another account:
 
 ```sh
 export SUPERMEMORY_API_KEY=sm_...

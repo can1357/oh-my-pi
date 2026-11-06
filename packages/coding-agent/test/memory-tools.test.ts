@@ -239,19 +239,27 @@ describe("Hindsight tool factories", () => {
 	});
 });
 
-describe("Supermemory retain tool", () => {
-	it("stops at the first failed item and reports what was stored", async () => {
+describe("Supermemory tools", () => {
+	const SUPERMEMORY_ENV = ["SUPERMEMORY_API_KEY", "SUPERMEMORY_BASE_URL"] as const;
+	const savedSupermemoryEnv = new Map(SUPERMEMORY_ENV.map(name => [name, Bun.env[name]]));
+	const supermemorySession = () => makeSession(Settings.isolated({ "memory.backend": "supermemory" }));
+	beforeEach(() => {
+		Bun.env.SUPERMEMORY_API_KEY = "sm-synthetic-key";
+		Bun.env.SUPERMEMORY_BASE_URL = "http://127.0.0.1:1";
+	});
+	afterEach(() => {
+		for (const [name, value] of savedSupermemoryEnv) {
+			if (value === undefined) delete Bun.env[name];
+			else Bun.env[name] = value;
+		}
+	});
+
+	it("retain stops at the first failed item and reports what was stored", async () => {
 		const save = vi
 			.fn()
 			.mockResolvedValueOnce({ id: "d1", status: "queued" })
 			.mockRejectedValueOnce(new Error("Supermemory request failed with HTTP 500."));
-		const session = makeSession(
-			Settings.isolated({
-				"memory.backend": "supermemory",
-				"supermemory.apiKey": "sm-synthetic-key",
-				"supermemory.baseUrl": "http://127.0.0.1:1",
-			}),
-		);
+		const session = supermemorySession();
 		session.getSupermemorySessionState = () => ({ save }) as never;
 		const tool = new MemoryRetainTool(session);
 		await expect(
@@ -261,30 +269,16 @@ describe("Supermemory retain tool", () => {
 		);
 		expect(save).toHaveBeenCalledTimes(2);
 	});
-});
 
-describe("Supermemory tool factories", () => {
-	it("offers recall/retain but never reflect or memory_edit, and only once configured", () => {
-		const configured = makeSession(
-			Settings.isolated({
-				"memory.backend": "supermemory",
-				"supermemory.apiKey": "sm-synthetic-key",
-				"supermemory.baseUrl": "http://127.0.0.1:1",
-			}),
-		);
+	it("factories offer recall/retain but never reflect or memory_edit, and only once configured", () => {
+		const configured = supermemorySession();
 		expect(MemoryRetainTool.createIf(configured)).toBeInstanceOf(MemoryRetainTool);
 		expect(MemoryRecallTool.createIf(configured)).toBeInstanceOf(MemoryRecallTool);
 		expect(MemoryReflectTool.createIf(configured)).toBeNull();
 		expect(MemoryEditTool.createIf(configured)).toBeNull();
 
-		const insecure = makeSession(
-			Settings.isolated({
-				"memory.backend": "supermemory",
-				"supermemory.apiKey": "sm-synthetic-key",
-				"supermemory.baseUrl": "http://sm.test",
-			}),
-		);
-		expect(MemoryRecallTool.createIf(insecure)).toBeNull();
+		Bun.env.SUPERMEMORY_BASE_URL = "http://sm.test";
+		expect(MemoryRecallTool.createIf(supermemorySession())).toBeNull();
 	});
 });
 
