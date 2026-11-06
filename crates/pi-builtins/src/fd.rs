@@ -677,6 +677,7 @@ async fn search(cli: FdCli, base_dir: PathBuf, host: &mut Host) -> io::Result<Se
 				return Err(io::Error::other(format!("{}: {error}", path.display())));
 			},
 		};
+		let mut pace = host.output_pace();
 		while let Some(event) = tree.next().await {
 			match event {
 				Event::Entry(entry) => {
@@ -697,7 +698,13 @@ async fn search(cli: FdCli, base_dir: PathBuf, host: &mut Host) -> io::Result<Se
 					if matches!(action, Action::SkipDir) {
 						tree.skip_dir();
 					}
-					let _ = host.flush_output().await;
+					// A provider tree's next listing may wait, so its output is
+					// delivered per entry.
+					let _ = if layer.is_native() {
+						host.pace_output(&mut pace).await
+					} else {
+						host.flush_output().await
+					};
 					if max_results.is_some_and(|max| state.matches >= max) {
 						break;
 					}

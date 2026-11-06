@@ -29,7 +29,7 @@ import type { AgentSessionEvent } from "../../src/session/agent-session-events";
 import type { AgentViewSession } from "../../src/session/agent-session-handle";
 import { AuthStorage } from "../../src/session/auth-storage";
 import type { RestoredQueuedMessage } from "../../src/session/agent-session-types";
-import type { SessionRestorableQueue } from "../../src/thread/session-mirror";
+import type { SessionEntriesDelta, SessionRestorableQueue } from "../../src/thread/session-mirror";
 import { RemoteAgentSession } from "../../src/thread/remote-agent-session";
 import type { ThreadService } from "../../src/thread/services";
 import { agentsThreadService } from "../../src/thread/services/agents";
@@ -290,6 +290,37 @@ describe("focused view of a worker-homed agent session", () => {
 		const transcript = remote.buildTranscriptSessionContext().messages.map(message => textOf(message));
 		expect(transcript).toContain("Hello");
 		expect(transcript).toContain("steer from the composer");
+	});
+
+	it("refocuses with the entries the worker appended while unwatched, without re-sending the earlier ones", async () => {
+		const probe = await startWorker();
+		await probe.open("W1", await mainRegistry(), {});
+		await probe.prompt("W1", "first question");
+		const remote = mirrorOf("W1");
+		const applyView = remote.applyView.bind(remote);
+		const snapshots: Array<SessionEntriesDelta | undefined> = [];
+		const onView = vi.spyOn(remote, "applyView").mockImplementation((state, entries) => {
+			snapshots.push(entries);
+			applyView(state, entries);
+		});
+		cleanups.push(() => onView.mockRestore());
+		const view = focusHarness();
+
+		await view.controller.focusAgent("W1");
+		await view.controller.unfocus();
+		await probe.prompt("W1", "second question");
+		await view.controller.focusAgent("W1");
+
+		expect(view.transcripts.at(-1)).toEqual([
+			{ role: "user", text: "first question" },
+			{ role: "assistant", text: "ok" },
+			{ role: "user", text: "second question" },
+			{ role: "assistant", text: "ok" },
+		]);
+		const refocus = snapshots.at(-1);
+		expect(refocus?.kind).toBe("append");
+		const shipped = refocus?.entries.flatMap(entry => (entry.type === "message" ? [textOf(entry.message)] : []));
+		expect(shipped).toEqual(["second question", "ok"]);
 	});
 
 	it("cycles the thinking level on both sides and redraws the status line from the mirror", async () => {
