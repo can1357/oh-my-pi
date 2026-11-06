@@ -548,3 +548,4 @@ Malformed JSON or a missing/invalid server map makes that provider contribute no
 - Filesystem server package: https://www.npmjs.com/package/@modelcontextprotocol/server-filesystem
 - GitHub MCP server: https://github.com/github/github-mcp-server
 - Slack MCP server docs: https://docs.slack.dev/ai/slack-mcp-server/
+- deja-vu (local session-history MCP server across `~/.omp/agent/sessions` and 42 other agents): https://github.com/vshulcz/deja-vu
