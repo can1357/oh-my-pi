@@ -114,6 +114,9 @@ export const launchHelp = {
 		"no-context-files": Flags.boolean({ description: "Disable context files (AGENTS.md, CLAUDE.md, ...)" }),
 		export: Flags.string({ description: "Export session file to HTML and exit" }),
 		"no-title": Flags.boolean({ description: "Disable title auto-generation" }),
+		title: Flags.string({
+			description: "Name the session at launch (as if set by hand); no title is generated for it",
+		}),
 		"spinner-interval": Flags.string({
 			description:
 				"Milliseconds between spinner frames (default 80; 0 = static). Overrides tui.spinnerInterval and PI_SPINNER_INTERVAL for this run",

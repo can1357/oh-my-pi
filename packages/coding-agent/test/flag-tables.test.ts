@@ -277,6 +277,19 @@ describe("restartArgv (/restart relaunch argv)", () => {
 		expect(() => validateGoalLaunch(parseArgs(relaunch), true)).not.toThrow();
 	});
 
+	it("drops a launch --title in both forms, so a relaunch cannot undo a later rename", () => {
+		// The relaunch resumes a session that already carries its name. Replaying
+		// the launch title would overwrite a `/title` typed since, and `/fork
+		// pane|window` would give both sessions the same name.
+		expect(restartArgv(["--title", "ShellPortAudit lane", "--model", "gpt-5"], "sid")).toEqual([
+			"--model",
+			"gpt-5",
+			"--resume",
+			"sid",
+		]);
+		expect(restartArgv(["--title=ShellPortAudit lane", "--no-tools"], undefined)).toEqual(["--no-tools"]);
+	});
+
 	it("drops caller-supplied overrides together with their values", () => {
 		expect(
 			restartArgv(["--model=a/b", "--thinking", "low", "--no-tools", "--cwd", "/old"], undefined, {
@@ -289,6 +302,17 @@ describe("restartArgv (/restart relaunch argv)", () => {
 
 	it("omits --resume for a session that never materialized on disk", () => {
 		expect(restartArgv(["--no-session", "hello"], undefined)).toEqual(["--no-session"]);
+	});
+});
+describe("--title", () => {
+	it("takes the name as its value, and refuses a blank one rather than naming nothing", () => {
+		expect(parseArgs(["--title", "ShellPortAudit lane"]).title).toBe("ShellPortAudit lane");
+
+		// `setSessionName` drops a blank title without a word, so the launcher
+		// would believe it had named the session. Report it instead.
+		const blank = parseArgs(["--title", "   "]);
+		expect(blank.title).toBeUndefined();
+		expect(blank.invalidFlagValues).toHaveLength(1);
 	});
 });
 describe("--restore", () => {

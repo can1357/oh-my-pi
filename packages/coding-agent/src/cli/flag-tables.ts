@@ -259,6 +259,15 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--export": (result, value) => {
 		result.export = value;
 	},
+	"--title": (result, value) => {
+		// A blank title names nothing and `setSessionName` would drop it without a
+		// word, leaving the launcher to believe it named the session.
+		if (value.trim() === "") {
+			result.invalidFlagValues.push("Invalid --title value: a session title cannot be blank.");
+			return;
+		}
+		result.title = value;
+	},
 	"--hook": (result, value) => {
 		result.hooks = result.hooks ?? [];
 		result.hooks.push(value);
@@ -422,7 +431,10 @@ export function flagConsumesValue(flag: string, next: string | undefined): boole
  * session: the relaunch supplies its own session source, and replaying a
  * stale continue/fork/import selector would re-run its one-shot session
  * choice. `--goal` belongs here too: it seeds a fresh session only, and
- * `validateGoalLaunch` rejects it beside any resume/fork selector.
+ * `validateGoalLaunch` rejects it beside any resume/fork selector. So does
+ * `--title`: it names a session once, at launch, and the relaunch resumes a
+ * session that already carries its name — replaying it would undo a `/title`
+ * the operator typed since, or name a session they selected instead.
  */
 const ONE_SHOT_LAUNCH_FLAGS: Readonly<Record<string, true>> = {
 	"--resume": true,
@@ -435,6 +447,7 @@ const ONE_SHOT_LAUNCH_FLAGS: Readonly<Record<string, true>> = {
 	"--from-claude": true,
 	"--from-codex": true,
 	"--goal": true,
+	"--title": true,
 };
 
 /**

@@ -601,6 +601,10 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			interactivePrompts: factoryOptions?.interactivePrompts,
 			deferUsageReserveConfirmation: true,
 			enableMCP: false,
+			// `--title` names the launch's own session once. An ACP host opens a
+			// fresh `session/new` for every conversation, and inheriting the launch
+			// name would stamp the same title on all of them.
+			sessionTitle: undefined,
 			titleSystemPrompt,
 			eventBus,
 			preloadedExtensions: trustedExtensions,
@@ -1734,6 +1738,12 @@ export async function buildSessionOptions(
 	// (`AgentSession.#refreshTitleAfterReplan`) on one source of truth.
 	if (titleSystemPrompt) {
 		options.titleSystemPrompt = titleSystemPrompt;
+	}
+	// `--title`: the launcher already knows what the session is called, so no
+	// generated title ever has to be waited for. Recorded as a title the user
+	// set, which every automatic path yields to.
+	if (parsed.title) {
+		options.sessionTitle = parsed.title;
 	}
 
 	// Tools

@@ -95,6 +95,9 @@ export interface Args {
 	noRules?: boolean;
 	noContextFiles?: boolean;
 	noTitle?: boolean;
+	/** `--title <text>`: name the session at launch, as if the user had set it,
+	 *  instead of waiting for a generated one. Suppresses auto-titling. */
+	title?: string;
 	/** `--spinner-interval <ms>`: ephemeral `tui.spinnerInterval` override for every spinner (0 = static). */
 	spinnerInterval?: number;
 	/** `--max-fps <n>`: ephemeral `tui.maxFps` override — the ceiling on how often the TUI repaints. */

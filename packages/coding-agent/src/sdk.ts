@@ -981,6 +981,13 @@ export interface CreateAgentSessionOptions {
 	 */
 	autoTitle?: boolean;
 	/**
+	 * Name the session before its first turn, recorded as a title the user set
+	 * (`omp --title`). Nothing generates a title over it, so a relaunch can give
+	 * a replacement session the name its predecessor had. Default: unset, which
+	 * leaves naming to {@link autoTitle}.
+	 */
+	sessionTitle?: string;
+	/**
 	 * Hold background skill-description compression until
 	 * {@link AgentSession.startSkillDescriptionCompression}: resolving its model composes the
 	 * whole model catalog. The interactive TUI sets this and starts it after the first frame.
@@ -5004,6 +5011,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
 				);
 			}
+		}
+		// Named by the launch, before anything can generate a name: a replacement
+		// process inherits the name its predecessor was known by, and every
+		// automatic path — which runs only while the session is unnamed — stands down.
+		if (options.sessionTitle) {
+			await sessionManager.setSessionName(options.sessionTitle, "user");
 		}
 
 		// Advisors share this session's extension runner (for the approval gate
