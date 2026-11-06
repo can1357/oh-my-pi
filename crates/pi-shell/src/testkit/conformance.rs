@@ -142,6 +142,9 @@ fn zsh_scope_sample() -> ZshScope {
 		],
 		lossy: LossyKind::SparseGaps.bit() | LossyKind::Shadowed.bit(),
 		pat_disables: vec![bytes(b"*")],
+		keep_underscore: true,
+		underscore: Some(bytes(b"last\xff")),
+		specials: vec![bytes(b"SECONDS")],
 	}
 }
 
@@ -237,7 +240,7 @@ fn samples() -> Vec<(KeyBuf, Record)> {
 		(KeyBuf::Func(bytes(b"f\xff")), Record::Func {
 			mode:   ModeId::Bash,
 			sticky: None,
-			source: bytes(b"f\xff () \n{ \n    :\n}"),
+			source: bytes(b"f\xff () \n{ \n    :\n}").into(),
 			unit:   UnitId([7; 32]),
 			attrs:  Attrs::TRACE,
 			file:   bytes(b"main"),
@@ -245,7 +248,7 @@ fn samples() -> Vec<(KeyBuf, Record)> {
 		(KeyBuf::Func(bytes(b"sticky")), Record::Func {
 			mode:   ModeId::Zsh,
 			sticky: Some(Box::new(sticky_sample())),
-			source: bytes(b"sticky () {\n\tprint -l $x\n}"),
+			source: bytes(b"sticky () {\n\tprint -l $x\n}").into(),
 			unit:   UnitId([8; 32]),
 			attrs:  Attrs::NONE,
 			file:   bytes(b"zsh\xff"),

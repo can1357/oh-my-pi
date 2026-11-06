@@ -5,10 +5,13 @@
 //! directory-stack record (the stack without the current directory, top
 //! first, as zsh's `dirstack`).
 //!
-//! Paths are normalised textually (zsh `fixdir`); the engine's file
-//! system seam offers no `realpath`, so `CHASE_LINKS`/`-P` keep the
-//! logical path. The `chpwd` hook functions run in an `eval`-like frame
-//! after the change (zsh `callhookfunc`).
+//! Paths are normalised textually (zsh `fixdir`, which stats `foo` before
+//! dropping `foo/..`); `CHASE_LINKS`/`-P` resolve the new directory with
+//! the file system's `realpath` (zsh `findpwd`), `-s` refuses symbolic
+//! links on the way (zsh `lchdir` with `hard`). The engine owns the
+//! working directory as a path, so a directory renamed under the shell is
+//! not followed by inode. The `chpwd` hook functions run in an
+//! `eval`-like frame after the change (zsh `callhookfunc`).
 //!
 //! Ported from zsh 5.9 (MIT-style licence, Copyright (c) 1992-1997 Paul
 //! Falstad and the zsh development group).
@@ -16,38 +19,35 @@
 use bstr::{BString, ByteSlice};
 
 use super::{
-	Control, Ctx, Need, Outcome, R, dir, dirstack, done,
+	Control, Ctx, Need, Outcome, R, dirstack, done,
 	zsh_args::{Func, Ops, isset, zerr, zx},
-	zsh_typeset::{PM_EXPORTED, pm_type},
+	zsh_typeset::PM_EXPORTED,
 };
 use crate::bash::{
+	fs::{Stat, StatKind},
 	store::{Key, MiscKey, Record},
 	syntax::zsh::tok::{head, tail},
 	vm::{
 		exec::push_script,
 		proc::{Probe, ProbeResult, ScriptKind},
-		zsh::params::{self, PmFlags},
+		zsh::{
+			nameddir,
+			params::{self, PmFlags},
+		},
 	},
 	zshopt::ZshOpt,
 };
 
-/// zsh `fprintdir` with `$HOME` as the named directory: `~` replaces the
-/// home prefix.
-fn fprintdir(home: Option<&[u8]>, s: &[u8], out: &mut Vec<u8>) {
-	if let Some(h) = home.filter(|h| h.len() > 1)
-		&& s.starts_with(h)
-		&& matches!(s.get(h.len()), None | Some(b'/'))
-	{
-		out.push(b'~');
-		out.extend_from_slice(tail(s, h.len()));
-	} else {
-		out.extend_from_slice(s);
-	}
-}
-
-/// The bytes of an optional value.
-fn opt(h: Option<&BString>) -> Option<&[u8]> {
-	h.map(|h| h.as_slice())
+/// zsh `fprintdir` over `paths`: each with its longest named directory
+/// prefix (`$HOME` included) as `~name`.
+fn fprintdirs(ctx: &mut Ctx<'_, '_>, paths: &[&[u8]]) -> Result<Vec<BString>, Need> {
+	let r = zx(ctx, |ex| {
+		paths
+			.iter()
+			.map(|p| nameddir::abbreviate(ex, p))
+			.collect::<crate::bash::vm::expand::X<Vec<_>>>()
+	})?;
+	Ok(r.unwrap_or_else(|_| paths.iter().map(|p| BString::from(*p)).collect()))
 }
 
 /// `$HOME` (zsh's `home`).
@@ -72,6 +72,15 @@ const fn is_enoent(msg: &[u8]) -> bool {
 /// The state of one `cd`/`pushd`/`popd`.
 struct Cd {
 	func:       Func,
+	/// `-s`: no symbolic links on the way (zsh's `hard`).
+	hard:       bool,
+	/// zsh `chasinglinks`: `-P`, or `CHASE_LINKS` without `-L`; set too
+	/// when `fixdir` met a `..` it could not resolve textually.
+	chasing:    bool,
+	/// The directory the last successful `try_chdir` really reached (its
+	/// own path, or `dest` relative to the working directory when that
+	/// path failed); the engine's working directory becomes this one's.
+	actual:     BString,
 	/// `doprintdir`: print the new directory (`POSIX_CD`).
 	doprintdir: i32,
 	/// The current directory (zsh `pwd`).
@@ -80,14 +89,158 @@ struct Cd {
 	stack:      Vec<BString>,
 }
 
-/// zsh `cd_try_chdir`: change to `pfix/dest` if possible; the full path,
-/// or the error text.
+/// `stat`/`lstat` of the absolute `path`.
+fn stat(ctx: &Ctx<'_, '_>, path: &[u8], follow: bool) -> Result<Option<Stat>, Need> {
+	Ok(match ctx.probe(Probe::Stat { path: path.into(), follow })? {
+		ProbeResult::Stat(s) => s,
+		_ => None,
+	})
+}
+
+/// The canonical physical path of the absolute `path` (zsh `xsymlink`,
+/// `zgetcwd`).
+fn realpath(ctx: &Ctx<'_, '_>, path: &[u8]) -> Result<Option<BString>, Need> {
+	Ok(match ctx.probe(Probe::RealPath { path: path.into() })? {
+		ProbeResult::Path(p) => p,
+		_ => None,
+	})
+}
+
+/// Whether the absolute `path` can be made the working directory; the
+/// error text if not.
+fn chdir_check(ctx: &Ctx<'_, '_>, path: &[u8]) -> Result<Result<(), BString>, Need> {
+	Ok(match ctx.probe(Probe::Chdir { path: path.into() })? {
+		ProbeResult::Bytes(Ok(_)) => Ok(()),
+		ProbeResult::Bytes(Err(msg)) => Err(msg),
+		_ => Err(BString::from("No such file or directory")),
+	})
+}
+
+/// zsh `fixdir` over the absolute `src`: `.` segments, repeated `/`es and
+/// `foo/..` pairs removed. A `foo` that is not a directory stops the
+/// normalisation (the rest stays as written); `CHASE_DOTS` keeps every
+/// `..`. Also whether links must be chased (`..` kept).
+fn fixdir(ctx: &mut Ctx<'_, '_>, src: &[u8]) -> Result<(BString, bool), Need> {
+	let chasedots = isset(ctx, ZshOpt::Chasedots)?;
+	let mut chase = false;
+	let mut out: Vec<u8> = Vec::with_capacity(src.len());
+	let at = |i: usize| src.get(i).copied().unwrap_or(0);
+	let mut i = 0;
+	loop {
+		if at(i) == b'/' {
+			out.push(b'/');
+			i += 1;
+			while at(i) == b'/' {
+				i += 1;
+			}
+		}
+		if i >= src.len() {
+			while out.len() > 1 && out.last() == Some(&b'/') {
+				out.pop();
+			}
+			return Ok((out.into(), chase));
+		}
+		if at(i) == b'.' && at(i + 1) == b'.' && matches!(at(i + 2), 0 | b'/') && !chasedots {
+			if out.len() > 1 {
+				// `dir/..` goes only when `dir` is a directory.
+				let parent = out.strip_suffix(b"/").unwrap_or(&out);
+				if !stat(ctx, parent, true)?.is_some_and(|s| s.kind == StatKind::Dir) {
+					out.extend_from_slice(tail(src, i));
+					return Ok((out.into(), true));
+				}
+				let mut d = out.len() - 1;
+				while d > 1 && out[d - 1] != b'/' {
+					d -= 1;
+				}
+				if out[d - 1] != b'/' {
+					d -= 1;
+				}
+				out.truncate(d);
+			}
+			i += 2;
+			while at(i) == b'/' {
+				i += 1;
+			}
+			continue;
+		}
+		if at(i) == b'.' && at(i + 1) == b'.' && matches!(at(i + 2), 0 | b'/') {
+			// `CHASE_DOTS`: a normal segment, resolved physically.
+			chase = true;
+		}
+		if at(i) == b'.' && matches!(at(i + 1), 0 | b'/') {
+			i += 1;
+			while at(i) == b'/' {
+				i += 1;
+			}
+		} else {
+			while i < src.len() && src[i] != b'/' {
+				out.push(src[i]);
+				i += 1;
+			}
+		}
+	}
+}
+
+/// zsh `lchdir`: whether `path` (relative ones from the working
+/// directory) can be changed to; the path the engine changes to, or the
+/// error text. `hard` refuses symbolic links in any component.
+fn lchdir(ctx: &Ctx<'_, '_>, path: &[u8], hard: bool) -> Result<Result<BString, BString>, Need> {
+	let full: BString = if path.starts_with(b"/") {
+		path.into()
+	} else {
+		let cwd = &ctx.vp.cwd;
+		[cwd.strip_suffix(b"/").unwrap_or(cwd), b"/", path]
+			.concat()
+			.into()
+	};
+	if hard {
+		let base_len = if path.starts_with(b"/") {
+			1
+		} else {
+			full.len() - path.len()
+		};
+		let mut walked: Vec<u8> = full[..base_len].to_vec();
+		for comp in path.split(|&c| c == b'/').filter(|c| !c.is_empty()) {
+			if walked.last() != Some(&b'/') {
+				walked.push(b'/');
+			}
+			walked.extend_from_slice(comp);
+			match stat(ctx, &walked, false)? {
+				Some(s) if s.kind == StatKind::Dir => {},
+				Some(_) => return Ok(Err(BString::from("Not a directory"))),
+				None => {
+					return Ok(Err(
+						chdir_check(ctx, &walked)?
+							.err()
+							.unwrap_or_else(|| BString::from("No such file or directory")),
+					));
+				},
+			}
+		}
+	}
+	// A path with `..` left in it (links chased) is resolved physically.
+	let target = if full.split(|&c| c == b'/').any(|c| c == b"." || c == b"..") {
+		match realpath(ctx, &full)? {
+			Some(real) => real,
+			None => full,
+		}
+	} else {
+		full
+	};
+	Ok(chdir_check(ctx, &target)?.map(|()| target))
+}
+
+/// zsh `cd_try_chdir`: change to `pfix/dest` if possible; the full path
+/// (recording the directory really reached in `cd.actual`), or the error
+/// text.
 fn try_chdir(
-	ctx: &Ctx<'_, '_>,
-	pwd: &[u8],
+	ctx: &mut Ctx<'_, '_>,
+	cd: &mut Cd,
 	pfix: Option<&[u8]>,
 	dest: &[u8],
 ) -> Result<Result<BString, BString>, Need> {
+	let pwd = cd.pwd.clone();
+	let pwd = pwd.as_slice();
 	let buf: Vec<u8> = match pfix.filter(|p| !p.is_empty()) {
 		Some(p) if p.starts_with(b"/") => [p, b"/", dest].concat(),
 		Some(p) => {
@@ -100,12 +253,26 @@ fn try_chdir(
 			[d, b"/", dest].concat()
 		},
 	};
-	let path = dir::logical(b"/", &buf);
-	Ok(match ctx.probe(Probe::Chdir { path: path.clone() })? {
-		ProbeResult::Bytes(Ok(_)) => Ok(path),
-		ProbeResult::Bytes(Err(msg)) => Err(msg),
-		_ => Err(BString::from("No such file or directory")),
-	})
+	let (path, dochase) = if cd.chasing {
+		(BString::from(buf), false)
+	} else {
+		fixdir(ctx, &buf)?
+	};
+	// The full path first, then `dest` relative to the working directory
+	// (useful when the current directory was renamed).
+	let reached = match lchdir(ctx, &path, cd.hard)? {
+		Ok(r) => r,
+		Err(msg) if pfix.is_some() || dest.starts_with(b"/") => return Ok(Err(msg)),
+		Err(_) => match lchdir(ctx, dest, cd.hard)? {
+			Ok(r) => r,
+			Err(msg) => return Ok(Err(msg)),
+		},
+	};
+	if dochase {
+		cd.chasing = true;
+	}
+	cd.actual = reached;
+	Ok(Ok(path))
 }
 
 /// zsh `cd_able_vars`: under `CDABLE_VARS`, `name/rest` where `$name` is
@@ -116,15 +283,13 @@ fn cd_able_vars(ctx: &mut Ctx<'_, '_>, s: &[u8]) -> Result<Option<BString>, Need
 	}
 	let end = s.find_byte(b'/').unwrap_or(s.len());
 	let name = head(s, end).to_vec();
-	let dir = zx(ctx, |ex| {
-		Ok(match params::getparam(ex, &name)? {
-			Some(p) if pm_type(p.flags.bits()) == 0 => Some(p.strval()),
-			_ => None,
-		})
-	})?
-	.ok()
-	.flatten()
-	.filter(|v| v.starts_with(b"/"));
+	let dir = match zx(ctx, |ex| nameddir::getnameddir(ex, &name))? {
+		Ok(d) => d,
+		Err(d) => {
+			ctx.diag(d);
+			None
+		},
+	};
 	Ok(dir.map(|mut d| {
 		d.extend_from_slice(tail(s, end));
 		d
@@ -137,9 +302,8 @@ fn do_chdir(ctx: &mut Ctx<'_, '_>, cd: &mut Cd, dest: &[u8]) -> Result<Option<BS
 	let nocdpath = dest.first() == Some(&b'.')
 		&& (matches!(dest.get(1), None | Some(b'/'))
 			|| (dest.get(1) == Some(&b'.') && matches!(dest.get(2), None | Some(b'/'))));
-	let pwd = cd.pwd.clone();
 	if dest.starts_with(b"/") {
-		return Ok(match try_chdir(ctx, &pwd, None, dest)? {
+		return Ok(match try_chdir(ctx, cd, None, dest)? {
 			Ok(p) => Some(p),
 			Err(msg) => {
 				ctx.usage(format!("{}: {}", errtext(&msg), dest.as_bstr()));
@@ -161,14 +325,14 @@ fn do_chdir(ctx: &mut Ctx<'_, '_>, cd: &mut Cd, dest: &[u8]) -> Result<Option<BS
 		}
 	};
 	if !hasdot && !posixcd {
-		match try_chdir(ctx, &pwd, None, dest)? {
+		match try_chdir(ctx, cd, None, dest)? {
 			Ok(p) => return Ok(Some(p)),
 			Err(m) => note(m, &mut eno),
 		}
 	}
 	if !nocdpath {
 		for p in &cdpath {
-			match try_chdir(ctx, &pwd, Some(p), dest)? {
+			match try_chdir(ctx, cd, Some(p), dest)? {
 				Ok(r) => {
 					if if posixcd {
 						!p.is_empty()
@@ -184,13 +348,13 @@ fn do_chdir(ctx: &mut Ctx<'_, '_>, cd: &mut Cd, dest: &[u8]) -> Result<Option<BS
 		}
 	}
 	if posixcd {
-		match try_chdir(ctx, &pwd, None, dest)? {
+		match try_chdir(ctx, cd, None, dest)? {
 			Ok(p) => return Ok(Some(p)),
 			Err(m) => note(m, &mut eno),
 		}
 	}
 	if let Some(v) = cd_able_vars(ctx, dest)? {
-		match try_chdir(ctx, &pwd, None, &v)? {
+		match try_chdir(ctx, cd, None, &v)? {
 			Ok(p) => {
 				cd.doprintdir += 1;
 				return Ok(Some(p));
@@ -335,6 +499,29 @@ fn new_pwd(ctx: &mut Ctx<'_, '_>, cd: &mut Cd, dir: usize, quiet: bool) -> R {
 	} else if func == Func::Cd && !isset(ctx, ZshOpt::Autopushd)? && !cd.stack.is_empty() {
 		cd.stack.remove(0);
 	}
+	let logical = new.clone();
+	if cd.chasing
+		&& new.starts_with(b"/")
+		&& let Some(real) = realpath(ctx, &new)?
+	{
+		// zsh `findpwd`.
+		new = real;
+	}
+	// The path is the directory really reached unless that one is
+	// elsewhere: `zgetcwd` when the path is gone or links are chased.
+	if !cd.actual.is_empty() && cd.actual != logical {
+		let actual = std::mem::take(&mut cd.actual);
+		match stat(ctx, &new, true)? {
+			None => new = realpath(ctx, &actual)?.unwrap_or(actual),
+			Some(s1) => {
+				if cd.chasing
+					&& stat(ctx, &actual, true)?.is_some_and(|s2| (s1.dev, s1.ino) != (s2.dev, s2.ino))
+				{
+					new = realpath(ctx, &actual)?.unwrap_or(actual);
+				}
+			},
+		}
+	}
 	if isset(ctx, ZshOpt::Pushdignoredups)?
 		&& let Some(i) = cd.stack.iter().position(|d| *d == new)
 	{
@@ -368,20 +555,17 @@ fn new_pwd(ctx: &mut Ctx<'_, '_>, cd: &mut Cd, dir: usize, quiet: bool) -> R {
 	if interactive || isset(ctx, ZshOpt::Posixcd)? {
 		if func != Func::Cd && interactive {
 			if !isset(ctx, ZshOpt::Pushdsilent)? && !quiet {
-				let h = home(ctx)?;
-				let mut out = Vec::new();
-				fprintdir(opt(h.as_ref()), &new, &mut out);
-				for d in &cd.stack {
-					out.push(b' ');
-					fprintdir(opt(h.as_ref()), d, &mut out);
-				}
+				let mut paths: Vec<&[u8]> = vec![new.as_slice()];
+				paths.extend(cd.stack.iter().map(|d| d.as_slice()));
+				let mut out = fprintdirs(ctx, &paths)?.join(&b" "[..]);
 				out.push(b'\n');
 				ctx.out(&out);
 			}
 		} else if !isset(ctx, ZshOpt::Cdsilent)? && cd.doprintdir > 0 {
-			let h = home(ctx)?;
-			let mut out = Vec::new();
-			fprintdir(opt(h.as_ref()), &new, &mut out);
+			let mut out: Vec<u8> = fprintdirs(ctx, &[new.as_slice()])?
+				.into_iter()
+				.next()
+				.map_or_default(Vec::from);
 			out.push(b'\n');
 			ctx.out(&out);
 		}
@@ -448,7 +632,16 @@ pub fn cd(ctx: &mut Ctx<'_, '_>, ops: &Ops, argv: &[BString], func: Func) -> R {
 	let mut stack = dirstack::entries(ctx.cx.store, ctx.vp)?;
 	let pwd = ctx.vp.cwd.clone();
 	stack.insert(0, pwd.clone());
-	let mut cd = Cd { func, doprintdir: 0, pwd, stack };
+	let chasing = ops.isset(b'P') || (isset(ctx, ZshOpt::Chaselinks)? && !ops.isset(b'L'));
+	let mut cd = Cd {
+		func,
+		hard: ops.isset(b's'),
+		chasing,
+		actual: BString::default(),
+		doprintdir: 0,
+		pwd,
+		stack,
+	};
 	if let Some(dir) = get_dest(ctx, &mut cd, argv)? {
 		new_pwd(ctx, &mut cd, dir, ops.isset(b'q'))
 	} else {
@@ -467,21 +660,30 @@ pub fn cd(ctx: &mut Ctx<'_, '_>, ops: &Ops, argv: &[BString], func: Func) -> R {
 pub fn dirs(ctx: &mut Ctx<'_, '_>, ops: &Ops, argv: &[BString]) -> R {
 	if (argv.is_empty() && !ops.isset(b'c')) || ops.isset(b'v') || ops.isset(b'p') {
 		let stack = dirstack::entries(ctx.cx.store, ctx.vp)?;
-		let h = if ops.isset(b'l') { None } else { home(ctx)? };
+		let cwd = ctx.vp.cwd.clone();
+		let mut paths: Vec<&[u8]> = vec![cwd.as_slice()];
+		paths.extend(stack.iter().map(|d| d.as_slice()));
+		// `-l`: full paths, no `~`.
+		let shown: Vec<BString> = if ops.isset(b'l') {
+			paths.iter().map(|p| BString::from(*p)).collect()
+		} else {
+			fprintdirs(ctx, &paths)?
+		};
 		let mut out = Vec::new();
 		if ops.isset(b'v') {
 			out.extend_from_slice(b"0\t");
 		}
-		fprintdir(opt(h.as_ref()), &ctx.vp.cwd, &mut out);
-		for (pos, d) in stack.iter().enumerate() {
-			if ops.isset(b'v') {
-				out.extend_from_slice(format!("\n{}\t", pos + 1).as_bytes());
-			} else if ops.isset(b'p') {
-				out.push(b'\n');
-			} else {
-				out.push(b' ');
+		for (pos, d) in shown.iter().enumerate() {
+			if pos > 0 {
+				if ops.isset(b'v') {
+					out.extend_from_slice(format!("\n{pos}\t").as_bytes());
+				} else if ops.isset(b'p') {
+					out.push(b'\n');
+				} else {
+					out.push(b' ');
+				}
 			}
-			fprintdir(opt(h.as_ref()), d, &mut out);
+			out.extend_from_slice(d);
 		}
 		out.push(b'\n');
 		ctx.out(&out);
@@ -491,10 +693,17 @@ pub fn dirs(ctx: &mut Ctx<'_, '_>, ops: &Ops, argv: &[BString]) -> R {
 	done(0)
 }
 
-/// zsh `bin_pwd`: the current directory (physical with `-r`/`-P` or
-/// `CHASE_LINKS`, which this engine shows as its logical path).
-pub fn pwd(ctx: &mut Ctx<'_, '_>) -> R {
-	let mut line = ctx.vp.cwd.to_vec();
+/// zsh `bin_pwd`: `$PWD`, or the physical directory (`zgetcwd`, `$PWD`
+/// when that fails) with `-r`/`-P` or `CHASE_LINKS` without `-L`.
+pub fn pwd(ctx: &mut Ctx<'_, '_>, ops: &Ops) -> R {
+	let cwd = ctx.vp.cwd.clone();
+	let physical =
+		ops.isset(b'r') || ops.isset(b'P') || (isset(ctx, ZshOpt::Chaselinks)? && !ops.isset(b'L'));
+	let mut line = if physical {
+		realpath(ctx, &cwd)?.unwrap_or(cwd).to_vec()
+	} else {
+		cwd.to_vec()
+	};
 	line.push(b'\n');
 	ctx.out(&line);
 	done(0)
@@ -503,17 +712,6 @@ pub fn pwd(ctx: &mut Ctx<'_, '_>) -> R {
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	#[test]
-	fn fprintdir_abbreviates_home_at_a_boundary() {
-		let mut o = Vec::new();
-		fprintdir(Some(b"/home/u"), b"/home/u/x", &mut o);
-		o.push(b' ');
-		fprintdir(Some(b"/home/u"), b"/home/user", &mut o);
-		o.push(b' ');
-		fprintdir(Some(b"/"), b"/x", &mut o);
-		assert_eq!(o, b"~/x /home/user /x");
-	}
 
 	#[test]
 	fn error_text_lowercases_first_letter() {

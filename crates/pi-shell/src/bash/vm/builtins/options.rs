@@ -20,10 +20,10 @@ use crate::bash::{
 
 /// The emulation `emulate NAME` selects from code in `cur`: zsh's
 /// `emulate` reads the first letter (after an `r`) for names it does not
-/// know; `bash` is the engine's bash dialect. `None` for csh.
-const fn target_mode(cur: ModeId, name: &[u8]) -> Option<ModeId> {
+/// know; `bash` is the engine's bash dialect.
+const fn target_mode(cur: ModeId, name: &[u8]) -> ModeId {
 	if let Some(m) = cur.for_emulate(name) {
-		return Some(m);
+		return m;
 	}
 	let c = match name {
 		[b'r', c, ..] => *c,
@@ -31,10 +31,13 @@ const fn target_mode(cur: ModeId, name: &[u8]) -> Option<ModeId> {
 		[] => 0,
 	};
 	match c {
-		b'c' => None,
-		b'k' => Some(ModeId::Ksh),
-		b's' | b'b' => cur.for_emulate(b"sh"),
-		_ => Some(ModeId::Zsh),
+		b'c' => ModeId::ZshCsh,
+		b'k' => ModeId::Ksh,
+		b's' | b'b' => match cur.dialect() {
+			Dialect::Bash => ModeId::Sh,
+			Dialect::Zsh => ModeId::ZshSh,
+		},
+		_ => ModeId::Zsh,
 	}
 }
 
@@ -45,8 +48,23 @@ const fn target_mode(cur: ModeId, name: &[u8]) -> Option<ModeId> {
 /// option`.
 pub fn dosetopt(ctx: &mut Ctx<'_, '_>, opt: ZshOpt, on: bool) -> Result<bool, Need> {
 	let cur = ctx.zsh_option(opt)?;
-	let interactive = opt == ZshOpt::Exec && ctx.zsh_option(ZshOpt::Interactive)?;
+	let interactive = match opt {
+		ZshOpt::Exec => ctx.zsh_option(ZshOpt::Interactive)?,
+		ZshOpt::Zle => {
+			ctx.zsh_option(ZshOpt::Interactive)?
+				&& crate::bash::vm::jobctl::shtty_file(ctx.k).is_some()
+		},
+		_ => false,
+	};
 	if opt.fixed(cur, on, interactive) {
+		return Ok(false);
+	}
+	// zsh: `monitor` comes on only with a terminal to take over.
+	if opt == ZshOpt::Monitor
+		&& on
+		&& !cur
+		&& !crate::bash::vm::jobctl::enable_monitor(ctx.k, ctx.cx, ctx.vp)
+	{
 		return Ok(false);
 	}
 	ctx.set_zsh_option(opt, on)?;
@@ -210,10 +228,7 @@ pub fn emulate(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		ctx.out(b"\n");
 		return done(0);
 	};
-	let Some(target) = target_mode(cur, name) else {
-		ctx.diag(Diag::Unsupported { what: "csh emulation".into() });
-		return done(1);
-	};
+	let target = target_mode(cur, name);
 	let rest = tail(args, i + 1);
 	if rest.is_empty() {
 		if list {

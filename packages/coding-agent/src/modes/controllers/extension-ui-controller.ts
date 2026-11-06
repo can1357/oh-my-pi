@@ -29,7 +29,6 @@ import type {
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
 import { cfgExtensionAssistantTextRenderers } from "../../extensibility/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import {
 	type AskDialogPrompt,
@@ -159,20 +158,10 @@ export class ExtensionUiController {
 	#rerenderAssistantMessage(timestamp: number): void {
 		if (!cfgExtensionAssistantTextRenderers.get(this.ctx.settings)) return;
 		this.ctx.rerenderInLinkBrowser(timestamp);
-		const native = isNativeRendering();
-		let redrawn = false;
-		let retired = false;
-		for (const child of this.ctx.chatContainer.children) {
-			if (!(child instanceof AssistantMessageComponent)) continue;
-			if (!child.rerenderMessage(timestamp)) continue;
-			redrawn = true;
-			retired ||= !native && !this.ctx.chatContainer.canRemoveBlock(child);
-		}
-		if (retired) {
-			this.ctx.rebuildTranscriptScrollback();
-		} else if (redrawn) {
-			this.ctx.ui.requestRender();
-		}
+		this.ctx.redrawTranscriptBlocks(
+			this.ctx.chatContainer.children,
+			child => child instanceof AssistantMessageComponent && child.rerenderMessage(timestamp),
+		);
 	}
 
 	/**
@@ -191,6 +180,7 @@ export class ExtensionUiController {
 			notify: (message, type) => this.showHookNotify(message, type),
 			onTerminalInput: handler => this.addExtensionTerminalInputListener(handler),
 			rerenderMessage: timestamp => this.#rerenderAssistantMessage(timestamp),
+			refreshTranscript: ids => this.ctx.refreshTranscriptPresentation(new Set(ids)),
 			getLinkClicksAvailable: extensionLinkClicksAvailable,
 			setStatus: (key, text) => this.setHookStatus(key, text),
 			setWorkingMessage: message => this.ctx.setWorkingMessage(message),
@@ -285,6 +275,7 @@ export class ExtensionUiController {
 			getPendingPlanReview: () => this.ctx.getPendingPlanReview(),
 			openPlanReview: () => this.ctx.openPlanReview({ fromExtension: true }),
 			sessionModes: this.ctx.sessionModes,
+			keybindings: this.ctx.keybindings,
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
@@ -518,6 +509,7 @@ export class ExtensionUiController {
 			getPendingPlanReview: () => this.ctx.getPendingPlanReview(),
 			openPlanReview: () => this.ctx.openPlanReview({ fromExtension: true }),
 			sessionModes: this.ctx.sessionModes,
+			keybindings: this.ctx.keybindings,
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,

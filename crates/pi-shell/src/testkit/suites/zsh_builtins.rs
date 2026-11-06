@@ -102,6 +102,31 @@ fn set_a_and_shift() {
 }
 
 #[test]
+fn shift_named_array_type_and_arithmetic_operands() {
+	let (out, err, status) = zsh(
+		r#"a=(x y z)
+shift a
+print -r -- ${(j:,:)a}
+shift -p a
+print -r -- ${(j:,:)a}
+count=1
+set -- p q r
+shift count
+print -r -- "$1/$2"
+a=(1 2 3)
+set -- p q r
+shift 'a[1]'
+print -r -- "$1/$2"
+typeset -a empty
+shift 0 empty
+print $?"#,
+	);
+	assert_eq!(out, "y,z\ny\nq/r\nq/r\n0\n");
+	assert_eq!(err, "");
+	assert_eq!(status, 0);
+}
+
+#[test]
 fn whence_word_forms() {
 	let (out, ..) = zsh("whence -w print typeset nonexist; echo $?");
 	assert_eq!(out, "print: builtin\ntypeset: reserved\nnonexist: none\n1\n");
@@ -115,10 +140,18 @@ fn functions_prints_zsh_text() {
 }
 
 #[test]
-fn zmodload_accepts_built_in_modules_only() {
-	let (out, err, _) = zsh("zmodload zsh/parameter && echo ok; zmodload zsh/regex; echo $?");
+fn zmodload_of_a_module_no_zsh_has_fails() {
+	let (out, err, _) = zsh("zmodload zsh/parameter && echo ok; zmodload zsh/nonesuch; echo $?");
 	assert_eq!(out, "ok\n1\n");
-	assert_eq!(err, "zsh:zmodload:1: failed to load module: zsh/regex\n");
+	#[cfg(target_os = "macos")]
+	assert_eq!(
+		err,
+		"zsh:1: failed to load module `zsh/nonesuch': dlopen(/usr/lib/zsh/5.9/zsh/nonesuch.so, \
+		 0x0009): tried: '/usr/lib/zsh/5.9/zsh/nonesuch.so' (no such file), \
+		 '/System/Volumes/Preboot/Cryptexes/OS/usr/lib/zsh/5.9/zsh/nonesuch.so' (no such file), \
+		 '/usr/lib/zsh/5.9/zsh/nonesuch.so' (no such file, not in dyld cache)\n"
+	);
+	assert!(err.starts_with("zsh:1: failed to load module `zsh/nonesuch': "));
 }
 
 #[test]
