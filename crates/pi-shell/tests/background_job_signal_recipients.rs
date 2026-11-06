@@ -1,5 +1,6 @@
 //! Real kernel recipients through the same Shell/PiHost/spawner API used by
-//! pi-natives. A virtual wait status alone cannot detect a lost or widened signal.
+//! pi-natives. A virtual wait status alone cannot detect a lost or widened
+//! signal.
 #![cfg(target_os = "linux")]
 
 use std::{fs, process::Command};
@@ -32,10 +33,14 @@ async fn assert_recipients(tree: bool) {
 		.output()
 		.expect("compile the real signal observer");
 	assert!(compiled.status.success(), "{}", String::from_utf8_lossy(&compiled.stderr));
-	let cases: Vec<Case> = serde_json::from_str(include_str!("fixtures/signal-recipient.json")).unwrap();
+	let cases: Vec<Case> =
+		serde_json::from_str(include_str!("fixtures/signal-recipient.json")).unwrap();
 	let mut mismatches = Vec::new();
 	let mut rows = 0;
-	for case in cases.iter().filter(|case| (case.topology == "tree") == tree) {
+	for case in cases
+		.iter()
+		.filter(|case| (case.topology == "tree") == tree)
+	{
 		rows += 1;
 		let directory = tempfile::tempdir_in(scratch.path()).unwrap();
 		let args = [

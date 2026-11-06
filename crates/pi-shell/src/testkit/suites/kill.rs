@@ -145,7 +145,7 @@ fn snapshots_report_externals_that_outlived_their_shell() {
 			77
 		}
 
-		fn signal(&mut self, signal: Signal) -> io::Result<()> {
+		fn signal(&mut self, signal: Signal, _scope: crate::bash::SignalScope) -> io::Result<()> {
 			panic!("the foreground program was not targeted: {signal}");
 		}
 

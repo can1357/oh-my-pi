@@ -1618,13 +1618,19 @@ impl ExtProc for UnixProc {
 		}
 	}
 
-	fn signal(&mut self, sig: Signal) -> io::Result<()> {
-		self.tracker.lock().signalled(sig);
-		self.scope.signal(sig)
+	fn signal(&mut self, sig: Signal, scope: crate::bash::SignalScope) -> io::Result<()> {
+		if scope == crate::bash::SignalScope::Group {
+			self.tracker.lock().signalled(sig);
+		}
+		self.signal_number(sig.number(Platform::current()), scope)
 	}
 
-	fn signal_number(&mut self, number: u8) -> io::Result<()> {
-		self.scope.signal_number(number)
+	fn signal_number(&mut self, number: u8, scope: crate::bash::SignalScope) -> io::Result<()> {
+		match scope {
+			crate::bash::SignalScope::Process => Scope::Process { pid: self.pid },
+			crate::bash::SignalScope::Group => self.scope,
+		}
+		.signal_number(number)
 	}
 
 	fn stop(&mut self) -> io::Result<()> {

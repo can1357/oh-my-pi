@@ -581,6 +581,17 @@ pub enum StdioSpec {
 	File(Box<dyn File>),
 }
 
+/// Which recipients a Unix external signal reaches. Windows keeps its Job
+/// Object signal semantics for both scopes. Cancellation includes descendants;
+/// a process-selected Unix `kill` does not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignalScope {
+	/// Only the external program, not processes it starts.
+	Process,
+	/// Its process group (Unix) or Job Object (Windows).
+	Group,
+}
+
 /// A running external process.
 pub trait ExtProc: Send {
 	/// OS process id.
@@ -610,11 +621,11 @@ pub trait ExtProc: Send {
 	fn pgid(&self) -> Option<u32> {
 		None
 	}
-	/// Signal the process group (Unix) or Job Object (Windows).
-	fn signal(&mut self, sig: Signal) -> io::Result<()>;
-	/// Send a platform signal number without a canonical [`Signal`] name.
+	/// Signal the program or its group, as selected by `scope`.
+	fn signal(&mut self, sig: Signal, scope: SignalScope) -> io::Result<()>;
+	/// Send a platform signal number to the same recipient scope as `signal`.
 	/// Hosts without native numeric signals deny the operation.
-	fn signal_number(&mut self, _number: u8) -> io::Result<()> {
+	fn signal_number(&mut self, _number: u8, _scope: SignalScope) -> io::Result<()> {
 		Err(io::ErrorKind::Unsupported.into())
 	}
 	/// Stop the process group (job pause).
