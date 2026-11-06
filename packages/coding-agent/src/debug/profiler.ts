@@ -2,6 +2,8 @@
  * CPU profiling and aggregate memory statistics for debug reports.
  */
 
+import * as v8 from "node:v8";
+import { Session } from "node:inspector/promises";
 import { type HeapStats, heapStats } from "bun:jsc";
 
 export interface CpuProfile {
@@ -115,7 +117,6 @@ function formatProfileAsMarkdown(profileJson: string): string {
  * Returns a session that can be stopped to get the profile data.
  */
 export async function startCpuProfile(): Promise<ProfilerSession> {
-	const v8 = await import("node:v8");
 	try {
 		// Enables `%GetOptimizationStatus` and friends when V8 natives are needed
 		// for ad-hoc profiling. Best-effort: Bun does not implement
@@ -124,7 +125,6 @@ export async function startCpuProfile(): Promise<ProfilerSession> {
 		v8.setFlagsFromString("--allow-natives-syntax");
 	} catch {}
 
-	const { Session } = await import("node:inspector/promises");
 	const session = new Session();
 	session.connect();
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Interactive sessions can capture a 30-second CPU profile without restarting by receiving SIGUSR2.
+
 ### Fixed
 
 - Hindsight `retain` and `learn` memories are no longer lost when delivery fails or omp exits: they are kept on disk, retried, and delivered by the next session without duplicates ([#18176](https://github.com/can1357/oh-my-pi/pull/18176) by [@alphastorm](https://github.com/alphastorm))

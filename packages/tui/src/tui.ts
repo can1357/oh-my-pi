@@ -23,6 +23,8 @@ import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
 import { TuiDebugServer } from "./debug-server";
 import { extractPrintableText, isKeyRelease, matchesKey } from "./keys";
 import { KITTY_PLACEHOLDER } from "./kitty-graphics";
+import { currentLoopPhase } from "@oh-my-pi/pi-utils/loop-phase";
+import { RenderFlightRecorder } from "./render-flight-recorder";
 import { LoopWatchdog } from "./loop-watchdog";
 import { assumedTspHello, NativeBackend, type NativeHost } from "./native/backend";
 import { col } from "./native/describe";
@@ -166,6 +168,7 @@ export type PaintListener = (paint: TuiPaint) => void;
 export interface TUIOptions {
 	renderScheduler?: RenderScheduler;
 	onPaint?: PaintListener;
+	renderFlightRecorder?: RenderFlightRecorder;
 }
 /** Physical terminal dimensions supplied to a frame provider. */
 export interface ViewportSize {
@@ -399,6 +402,8 @@ export interface Focusable {
 export interface RenderRequestOptions {
 	/** Clear terminal scrollback for intentional transcript replacement. */
 	clearScrollback?: boolean;
+	/** Static producer tag for render diagnostics. */
+	caller?: string;
 }
 /**
  * Controls how a settled terminal resize refreshes native history.
@@ -958,6 +963,7 @@ export class TUI extends Container {
 	#renderRequested = false;
 	#renderTimer: RenderTimer | undefined;
 	#renderScheduler: RenderScheduler;
+	#flight: RenderFlightRecorder;
 	#lastRenderAt = 0;
 	/**
 	 * Wall-clock cost of the most recent `#doRender()` call. Used by
@@ -980,6 +986,8 @@ export class TUI extends Container {
 	 * at `#INPUT_FRAME_INTERVAL_MS` instead of the ceiling; cleared when that frame paints.
 	 */
 	#inputRenderPending = false;
+	// Promote once per pending paint: repeated producers must not keep canceling its timer.
+	#inputRenderTimerPromoted = false;
 	/**
 	 * Cap on the adaptive floor derived from `#lastFrameCostMs`. Bounds the UI
 	 * responsiveness at ~5 fps under sustained heavy renders — anything slower
@@ -1159,6 +1167,7 @@ export class TUI extends Container {
 		super();
 		this.terminal = terminal;
 		this.#renderScheduler = options?.renderScheduler ?? DEFAULT_RENDER_SCHEDULER;
+		this.#flight = options?.renderFlightRecorder ?? new RenderFlightRecorder(() => this.#renderScheduler.now());
 		if (options?.onPaint) this.#paintListeners.add(options.onPaint);
 		this.#showHardwareCursor = showHardwareCursor === undefined ? this.#showHardwareCursor : showHardwareCursor;
 		this.#watchdog = new LoopWatchdog();
@@ -1715,7 +1724,7 @@ export class TUI extends Container {
 			this.#nativeUnconfirmed = true;
 			this.#armNativeConfirm(TUI.#NATIVE_CONFIRM_MS);
 		} else if (this.terminal.tspProbePending && !this.#nativeLive) {
-			this.#nativeHoldTimer = this.#renderScheduler.scheduleRender(() => {
+			this.#nativeHoldTimer = this.#scheduleTracedRender(() => {
 				this.#nativeHoldTimer = undefined;
 				if (!this.#stopped && !this.#nativeLive) this.requestRender(true);
 			}, TUI.#NATIVE_PROBE_HOLD_MS);
@@ -1804,7 +1813,7 @@ export class TUI extends Container {
 	 */
 	#armNativeConfirm(delayMs: number): void {
 		const due = this.#renderScheduler.now() + delayMs;
-		this.#nativeConfirmTimer = this.#renderScheduler.scheduleRender(() => {
+		this.#nativeConfirmTimer = this.#scheduleTracedRender(() => {
 			this.#nativeConfirmTimer = undefined;
 			if (!this.#nativeUnconfirmed || this.#stopped) return;
 			if (this.#renderScheduler.now() - due > TUI.#NATIVE_CONFIRM_GRACE_MS) {
@@ -2003,7 +2012,7 @@ export class TUI extends Container {
 			// snapshot the parked offset so the settled probe anchors there.
 			this.#parkedViewportOffset = 0;
 		}
-		this.#resizeSettleTimer = this.#renderScheduler.scheduleRender(() => {
+		this.#resizeSettleTimer = this.#scheduleTracedRender(() => {
 			this.#resizeSettleTimer = undefined;
 			if (this.#stopped) return;
 			this.#prepareResizeReplay(this.terminal.columns, this.terminal.rows);
@@ -2128,7 +2137,7 @@ export class TUI extends Container {
 			this.#pendingAltEnter = `${erase}\x1b[?1049h${this.#keyboardEnhancementEnter()}`;
 		}
 		this.#resizeSettleTimer?.cancel();
-		this.#resizeSettleTimer = this.#renderScheduler.scheduleRender(() => {
+		this.#resizeSettleTimer = this.#scheduleTracedRender(() => {
 			this.#resizeSettleTimer = undefined;
 			if (this.#stopped || !this.#resizeAltActive) return;
 			this.#settleResizeAltPaint();
@@ -2198,7 +2207,7 @@ export class TUI extends Container {
 	 */
 	#beginResizeAnchorProbe(retry = false): void {
 		this.#cancelResizeProbe();
-		const timer = this.#renderScheduler.scheduleRender(() => {
+		const timer = this.#scheduleTracedRender(() => {
 			const probe = this.#resizeProbe;
 			if (probe !== undefined && !probe.retried && (isInsideTerminalMultiplexer() || this.#resizeBurstGrew)) {
 				// A CPR-less resolve is heuristic: a grow's pull span is unknown
@@ -2807,9 +2816,10 @@ export class TUI extends Container {
 
 	requestRender(force = false, options?: RenderRequestOptions): void {
 		if (force) {
+			this.#flight.request(options?.caller ?? currentLoopPhase() ?? "requestRender:forced");
 			this.#prepareForcedRender(options?.clearScrollback === true);
 			this.#renderRequested = true;
-			this.#renderScheduler.scheduleImmediate(() => {
+			this.#scheduleTracedImmediate(() => {
 				if (this.#stopped || !this.#renderRequested) {
 					return;
 				}
@@ -2821,7 +2831,9 @@ export class TUI extends Container {
 		// A render while a keystroke's latch is set rides the fixed input cadence: an animation frame
 		// parked further out under the `tui.maxFps` ceiling is replaced by one the keystroke can ride.
 		// Input listeners (scroll wheel, toggles) and focused components alike request through here.
-		if (this.#inputRenderPending && this.#renderTimer && !this.#nativeLive) {
+		this.#flight.request(options?.caller ?? currentLoopPhase() ?? "requestRender:ordinary");
+		if (this.#inputRenderPending && this.#renderTimer && !this.#nativeLive && !this.#inputRenderTimerPromoted) {
+			this.#inputRenderTimerPromoted = true;
 			this.#renderTimer.cancel();
 			this.#renderTimer = undefined;
 			this.#renderRequested = true;
@@ -2831,9 +2843,41 @@ export class TUI extends Container {
 		this.#requestOrdinaryRender();
 	}
 
+	#scheduleTracedImmediate(callback: () => void): void {
+		this.#flight.event("immediate-scheduled", "render");
+		this.#renderScheduler.scheduleImmediate(() => {
+			const start = this.#renderScheduler.now();
+			this.#flight.event("immediate-fired", "render");
+			try {
+				callback();
+			} finally {
+				this.#flight.task("setImmediate:render", start);
+			}
+		});
+	}
+
+	#scheduleTracedRender(callback: () => void, delayMs: number): RenderTimer {
+		this.#flight.event("timer-scheduled", callback.name || "anonymous", delayMs);
+		const timer = this.#renderScheduler.scheduleRender(() => {
+			const start = this.#renderScheduler.now();
+			this.#flight.event("timer-fired", callback.name || "anonymous");
+			try {
+				callback();
+			} finally {
+				this.#flight.task(callback.name || "setTimeout:anonymous", start);
+			}
+		}, delayMs);
+		return {
+			cancel: () => {
+				this.#flight.event("timer-cancelled", callback.name || "anonymous");
+				timer.cancel();
+			},
+		};
+	}
+
 	/** Run `callback` after `delayMs` on the render scheduler's clock, unless the TUI has stopped. */
 	scheduleAfter(delayMs: number, callback: () => void): RenderTimer {
-		return this.#renderScheduler.scheduleRender(() => {
+		return this.#scheduleTracedRender(() => {
 			if (!this.#stopped) callback();
 		}, delayMs);
 	}
@@ -2860,6 +2904,7 @@ export class TUI extends Container {
 	 * an ordinary render.
 	 */
 	requestComponentRender(_component: Component): void {
+		this.#flight.request(_component.debugKind ?? _component.constructor.name);
 		if (this.#stopped) return;
 		this.#requestOrdinaryRender();
 	}
@@ -2868,7 +2913,7 @@ export class TUI extends Container {
 	#requestOrdinaryRender(): void {
 		if (this.#renderRequested) return;
 		this.#renderRequested = true;
-		this.#renderScheduler.scheduleImmediate(() => this.#scheduleRender());
+		this.#scheduleTracedImmediate(() => this.#scheduleRender());
 	}
 
 	#maybeDeferGhosttyInitialImagePaint(): boolean {
@@ -2878,7 +2923,10 @@ export class TUI extends Container {
 			return false;
 		}
 		if (!this.#imageBudget.hasPendingTransmits()) return false;
-		if (this.#ghosttyInitialImageDelayTimer) return true;
+		if (this.#ghosttyInitialImageDelayTimer) {
+			this.#flight.event("deferred", "ghostty-image");
+			return true;
+		}
 
 		const delayMs = Math.max(0, this.#ghosttyImageReadyAtMs - this.#renderScheduler.now());
 		if (delayMs === 0) {
@@ -2886,13 +2934,14 @@ export class TUI extends Container {
 			return false;
 		}
 
-		this.#ghosttyInitialImageDelayTimer = this.#renderScheduler.scheduleRender(() => {
+		this.#ghosttyInitialImageDelayTimer = this.#scheduleTracedRender(() => {
 			this.#ghosttyInitialImageDelayTimer = undefined;
 			this.#ghosttyInitialImageDelayDone = true;
 			if (this.#stopped) return;
 			this.#executeRender();
 			if (this.#renderRequested) this.#scheduleRender();
 		}, delayMs);
+		this.#flight.event("deferred", "ghostty-image");
 		return true;
 	}
 	#prepareForcedRender(clearScrollback: boolean): void {
@@ -2950,7 +2999,7 @@ export class TUI extends Container {
 		// Native frames are paced by the terminal's acknowledgements (credits),
 		// not by the row renderer's cadence.
 		const delay = this.#nativeLive ? 0 : Math.max(cadenceDelay, adaptiveDelay, inputGraceDelay);
-		this.#renderTimer = this.#renderScheduler.scheduleRender(this.#runScheduledRender, delay);
+		this.#renderTimer = this.#scheduleTracedRender(this.#runScheduledRender, delay);
 	}
 
 	/**
@@ -2975,15 +3024,23 @@ export class TUI extends Container {
 	#deferRenderForOutputBacklog(): boolean {
 		const pending = this.terminal.pendingOutputBytes;
 		if (pending === undefined || pending <= TUI.#MAX_PENDING_OUTPUT_BYTES) return false;
+		this.#flight.event("deferred", "output-backlog", pending);
 		this.#renderRequested = true;
-		this.#renderTimer ??= this.#renderScheduler.scheduleRender(
-			this.#runScheduledRender,
-			TUI.#OUTPUT_BACKLOG_RETRY_MS,
-		);
+		if (!this.#renderTimer) this.#flight.event("timer-scheduled", "output-backlog", TUI.#OUTPUT_BACKLOG_RETRY_MS);
+		this.#renderTimer ??= this.#scheduleTracedRender(this.#runScheduledRender, TUI.#OUTPUT_BACKLOG_RETRY_MS);
 		return true;
 	}
 
 	#handleInput(data: string): void {
+		const start = this.#renderScheduler.now();
+		try {
+			this.#handleTracedInput(data);
+		} finally {
+			this.#flight.task("io:stdin", start);
+		}
+	}
+
+	#handleTracedInput(data: string): void {
 		// Tern Surface Protocol events (acks, pointer actions, resize, theme)
 		// are terminal reports, never keystrokes.
 		if (data.startsWith(TSP_PREFIX)) {
@@ -3506,6 +3563,7 @@ export class TUI extends Container {
 	}
 
 	#notifyFrameWrite(data: string): void {
+		this.#flight.write(Buffer.byteLength(data));
 		for (const listener of this.#frameWriteListeners) {
 			try {
 				listener(data);
@@ -3666,6 +3724,7 @@ export class TUI extends Container {
 		offered: HistoryBatch | undefined,
 		provider: TerminalFrameProvider | undefined,
 	): void {
+		this.#flight.step("emit-plan-frame");
 		// Callers composite their overlays inside the budget pass, so `viewportRows`
 		// is already the complete frame. Bound the store here rather than at
 		// endPass(): this is the last point before the purge and transmit bytes go
@@ -3928,6 +3987,7 @@ export class TUI extends Container {
 			// complete, so pumping it would create a second visible redraw/write.
 			if (history.kind !== "replay") this.requestRender();
 		}
+		this.#flight.settle(this.terminal.pendingOutputBytes);
 	}
 
 	/** Render one frame: alt-screen modal, provider plan, or children fallback. */
@@ -3938,19 +3998,25 @@ export class TUI extends Container {
 			return;
 		}
 		// Awaiting the TSP hello: its resolution (or the hold timeout) repaints.
-		if (this.#nativeHoldTimer) return;
+		if (this.#nativeHoldTimer) {
+			this.#flight.event("deferred", "native-hello");
+			return;
+		}
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;
+		this.#inputRenderTimerPromoted = false;
 		if (this.#resizeAltActive) {
 			this.#renderResizeAltFrame(width, height);
 			return;
 		}
 		if (this.#resizeProbe) {
+			this.#flight.event("deferred", "resize-anchor");
 			// The settled repaint lands via #resolveResizeAnchor; painting now would
 			// use the stale pre-resize anchor.
 			return;
 		}
 		if (this.#resizeInPlaceActive && !this.#altActive) {
+			this.#flight.event("deferred", "resize-in-place");
 			// The normal-buffer anchor is stale until the settled rebuild or CPR
 			// recovery. Painting now would overwrite history and record the new
 			// geometry over the pending recovery, so defer until the settle.
@@ -4048,7 +4114,12 @@ export class TUI extends Container {
 		if (this.#frameProvider !== undefined) this.#prepareResizeReplay(width, height);
 		this.#forgetTransmittedForPendingReset();
 		if (this.#frameProvider !== undefined) {
-			this.#renderProviderFrame(width, height);
+			this.#flight.beginProvider();
+			try {
+				this.#renderProviderFrame(width, height);
+			} finally {
+				this.#flight.endProvider();
+			}
 			return;
 		}
 		this.#renderChildrenFrame(width, height);
