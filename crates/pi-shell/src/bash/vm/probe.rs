@@ -519,18 +519,30 @@ pub fn candidates(
 	out
 }
 
-/// bash's `phash_search`: a hashed relative path is reported as `./path` when
-/// that names the same file from the shell's directory (bash's `HASH_CHKDOT`),
-/// so `hash -p bin/x x; x` reports `./bin/x`. An absolute path, one that
-/// already begins with `./`, and one that names no file keep their spelling.
-#[must_use]
-pub fn hashed_shown(path: &BString, exists: bool) -> BString {
-	if !exists || path.starts_with(b"/") || path.starts_with(b"./") {
-		return path.clone();
+/// bash's `phash_search`: `file_status` / `FS_EXEC_PREFERRED` requires a
+/// regular executable file before a relative hashed path is shown as `./path`.
+/// Resolve that spelling at lookup, before executing the file can change it.
+/// Absolute paths and paths already beginning with `./` keep their spelling.
+pub fn hashed_shown<E>(
+	cwd: &[u8],
+	path: &BString,
+	mut probe: impl FnMut(Probe) -> Result<ProbeResult, E>,
+) -> Result<BString, E> {
+	if path.starts_with(b"/") || path.starts_with(b"./") {
+		return Ok(path.clone());
 	}
 	let mut shown = BString::from("./");
 	shown.extend_from_slice(path);
-	shown
+	let abs = absolute(cwd, &shown);
+	let file = matches!(
+		probe(Probe::Stat { path: abs.clone(), follow: true })?,
+		ProbeResult::Stat(Some(s)) if s.kind == StatKind::File
+	);
+	if file && probe(Probe::Access { path: abs, mode: 4 })? == ProbeResult::Ok(true) {
+		Ok(shown)
+	} else {
+		Ok(path.clone())
+	}
 }
 
 /// The shell's `PATHEXT` suffixes, normalized as the exec check reads them
@@ -695,16 +707,44 @@ mod tests {
 		]);
 	}
 
+	#[cfg(unix)]
 	#[test]
 	fn a_hashed_relative_path_is_shown_from_the_shell_directory() {
-		// bash 5.3: `hash -p bin/x x; hash -t x` prints `./bin/x`; a path that
-		// names no file, an absolute one, and one already dotted keep theirs.
-		assert_eq!(hashed_shown(&BString::from("bin/x"), true), "./bin/x");
-		assert_eq!(hashed_shown(&BString::from("x"), true), "./x");
-		assert_eq!(hashed_shown(&BString::from("../x"), true), "./../x");
-		assert_eq!(hashed_shown(&BString::from("./x"), true), "./x");
-		assert_eq!(hashed_shown(&BString::from("/bin/x"), true), "/bin/x");
-		assert_eq!(hashed_shown(&BString::from("bin/x"), false), "bin/x");
+		use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
+
+		use crate::bash::fs::Fs;
+
+		let dir = tempfile::tempdir().unwrap();
+		let cwd = dir.path().join("cwd");
+		std::fs::create_dir_all(cwd.join("bin")).unwrap();
+		for path in [cwd.join("bin/x"), cwd.join("x"), dir.path().join("x")] {
+			std::fs::write(&path, b"#!/bin/sh\n").unwrap();
+			std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+		}
+		let mut fs = crate::sys::StdFs::default();
+		let mut shown = |path: &str| {
+			hashed_shown(cwd.as_os_str().as_bytes(), &BString::from(path), |p| {
+				let answer = match p {
+					Probe::Stat { path, follow } => match fs.stat(BStr::new(&path), follow) {
+						FsPoll::Ready(r) => ProbeResult::Stat(r.ok()),
+						FsPoll::Pending(_) => panic!("native stat must be synchronous"),
+					},
+					Probe::Access { path, .. } => match fs.access(BStr::new(&path), Access::EXEC) {
+						FsPoll::Ready(r) => ProbeResult::Ok(r.is_ok()),
+						FsPoll::Pending(_) => panic!("native access must be synchronous"),
+					},
+					_ => panic!("unexpected spelling probe"),
+				};
+				Ok::<_, ()>(answer)
+			})
+			.unwrap()
+		};
+		assert_eq!(shown("bin/x"), "./bin/x");
+		assert_eq!(shown("x"), "./x");
+		assert_eq!(shown("../x"), "./../x");
+		assert_eq!(shown("./x"), "./x");
+		assert_eq!(shown("/bin/x"), "/bin/x");
+		assert_eq!(shown("bin/missing"), "bin/missing");
 	}
 
 	#[test]

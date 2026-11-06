@@ -1551,10 +1551,8 @@ pub enum Stage {
 /// How a resolved command is spelled when a diagnostic names it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Spelled {
-	/// A `$PATH` entry joined to the word, shown as joined.
+	/// A `$PATH` entry joined to the word, or a hash lookup's resolved spelling.
 	Joined(BString),
-	/// The hash table's path, shown as bash's `phash_search` shows it.
-	Hashed(BString),
 }
 
 /// What a command name resolved to.

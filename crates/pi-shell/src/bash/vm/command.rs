@@ -1999,9 +1999,26 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 			let checkhash =
 				state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Checkhash)
 					.unwrap_or(false);
+			let hashed = match hashed {
+				Some((path, hits)) => {
+					let shown = probe::hashed_shown(&vp.cwd, &path, |p| match probe::cached(&sc, &p) {
+						Some(r) => Ok(r.clone()),
+						None => probe::perform(k, cx, vp, &mut sc, &p),
+					});
+					let shown = match shown {
+						Ok(shown) => shown,
+						Err(key) => {
+							vp.frames.last_mut().expect("frame").scratch = Some(sc);
+							return Some(Flow::Block(key));
+						},
+					};
+					Some((path, hits, shown))
+				},
+				None => None,
+			};
 			match hashed {
 				// bash runs a hashed name without searching PATH.
-				Some((path, hits)) if !checkhash => {
+				Some((path, hits, shown)) if !checkhash => {
 					let rec = Record::CmdHash { path: path.clone(), hits: hits.saturating_add(1) };
 					let key = KeyBuf::CmdHash(name.clone());
 					state::store_record(&mut k.root, cx.store, vp, key, Some(rec));
@@ -2009,7 +2026,7 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 					// PATH entry): a file relative to the shell's cwd.
 					let target = absolute(&vp.cwd, &path);
 					let exec = sc.exec.as_mut().expect("exec");
-					exec.spelled = Some(Box::new(Spelled::Hashed(path)));
+					exec.spelled = Some(Box::new(Spelled::Joined(shown)));
 					exec.target = Some(Target::External(target));
 				},
 				hashed => {
@@ -2027,9 +2044,9 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 					// zsh `pathdirs` (a name with a slash searched): the name
 					// itself first.
 					let mut cands: Vec<Candidate> = hashed
-						.map(|(p, _)| Candidate {
-							path:   absolute(&vp.cwd, &p),
-							shown:  p,
+						.map(|(p, _, shown)| Candidate {
+							path: absolute(&vp.cwd, &p),
+							shown,
 							hashed: true,
 						})
 						.into_iter()
@@ -2074,23 +2091,22 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 					&& state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Hashall)
 						.unwrap_or(true)
 				{
-					let hits = match state::record(cx.store, vp, Key::CmdHash(BStr::new(&name))) {
-						Ok(Some(Record::CmdHash { path: old, hits })) if *old == found.shown => {
-							hits.saturating_add(1)
+					// A checked hash hit changes its display spelling, not the path
+					// kept by `hash` / `BASH_CMDS`.
+					let (path, hits) = match state::record(cx.store, vp, Key::CmdHash(BStr::new(&name)))
+					{
+						Ok(Some(Record::CmdHash { path: old, hits }))
+							if found.hashed || *old == found.shown =>
+						{
+							(old.clone(), hits.saturating_add(1))
 						},
-						_ => 1,
+						_ => (found.shown.clone(), 1),
 					};
-					// bash hashes the entry joined to the word, not its absolute
-					// form: that is what `hash` and `BASH_CMDS` show.
-					let rec = Record::CmdHash { path: found.shown.clone(), hits };
+					let rec = Record::CmdHash { path, hits };
 					state::store_record(&mut k.root, cx.store, vp, KeyBuf::CmdHash(name), Some(rec));
 				}
 				let exec = sc.exec.as_mut().expect("exec");
-				exec.spelled = Some(Box::new(if found.hashed {
-					Spelled::Hashed(found.shown)
-				} else {
-					Spelled::Joined(found.shown)
-				}));
+				exec.spelled = Some(Box::new(Spelled::Joined(found.shown)));
 				exec.target = Some(Target::External(found.path));
 				None
 			},
@@ -4764,8 +4780,7 @@ fn run_script_file(
 		Ok(_) => BString::default(),
 	};
 	if looks_binary(&text) {
-		// The file was just read, so it is there.
-		let name = tried_name(vp, &path, true);
+		let name = tried_name(vp, &path);
 		k.diag(cx, vp, line, Diag::BinaryFile { name });
 		let s = st(vp);
 		s.status = 126;
@@ -4904,19 +4919,20 @@ fn interpreter(text: &[u8]) -> BString {
 	interp
 }
 
-/// The name bash gives the file it tried to run: a word with `/` as the user
-/// wrote it, else the way resolution spelled it — the `$PATH` entry joined to
-/// the word, or the hash table's path as `phash_search` shows it, which needs
-/// to know whether that path names a file (`exists`).
-fn tried_name(vp: &mut Vproc, path: &BString, exists: bool) -> BString {
+/// The name bash gives the file it tried to run: `exec` uses the absolute
+/// resolved path; otherwise a word with `/` stays as written, and a looked-up
+/// command keeps the spelling chosen during resolution.
+fn tried_name(vp: &mut Vproc, path: &BString) -> BString {
 	let s = st(vp);
+	if s.exec_as.is_some() {
+		return path.clone();
+	}
 	let n = s.argv[0].clone();
 	if n.contains(&b'/') {
 		return n;
 	}
 	match s.spelled.as_deref() {
 		Some(Spelled::Joined(p)) => p.clone(),
-		Some(Spelled::Hashed(p)) => probe::hashed_shown(p, exists),
 		None => path.clone(),
 	}
 }
@@ -4947,7 +4963,7 @@ fn refused(
 		Ok(ProbeResult::Stat(stat)) => stat,
 		Ok(_) => None,
 	};
-	let name = tried_name(vp, path, stat.is_some());
+	let name = tried_name(vp, path);
 	let diag = if stat.as_ref().is_some_and(|s| s.kind == StatKind::Dir) {
 		Diag::IsADirectory { name }
 	} else {

@@ -287,32 +287,29 @@ enum Kind {
 	Hashed(BString),
 }
 
-/// The hashed path of `name`, counting the lookup as a hit, as bash's
-/// `phash_search` does.
-fn hashed(ctx: &mut Ctx<'_, '_>, name: &[u8]) -> Result<Option<BString>, Need> {
+/// The hashed path of `name`, counting the lookup as a hit only in the pass
+/// after every name's probes have settled.
+fn hashed(ctx: &mut Ctx<'_, '_>, name: &[u8], count_hit: bool) -> Result<Option<BString>, Need> {
 	if name.contains(&b'/') {
 		return Ok(None);
 	}
 	match ctx.record(Key::CmdHash(BStr::new(name)))? {
 		Some(Record::CmdHash { path, hits }) => {
-			// The probe may need the host, which restarts the builtin: count the
-			// hit only once its answer is in.
 			let shown = shown_hashed(ctx, &path)?;
-			let rec = Record::CmdHash { path, hits: hits.saturating_add(1) };
-			ctx.store_record(KeyBuf::CmdHash(name.into()), Some(rec));
+			if count_hit {
+				let rec = Record::CmdHash { path, hits: hits.saturating_add(1) };
+				ctx.store_record(KeyBuf::CmdHash(name.into()), Some(rec));
+			}
 			Ok(Some(shown))
 		},
 		_ => Ok(None),
 	}
 }
 
-/// A hashed path as bash's `phash_search` reports it
-/// ([`crate::bash::vm::probe::hashed_shown`]), probing whether it names a file.
-fn shown_hashed(ctx: &mut Ctx<'_, '_>, path: &BString) -> Result<BString, Need> {
-	let abs = absolute(&ctx.vp.cwd, path);
-	let exists =
-		matches!(ctx.probe(Probe::Stat { path: abs, follow: true })?, ProbeResult::Stat(Some(_)));
-	Ok(crate::bash::vm::probe::hashed_shown(path, exists))
+/// A hashed path as bash's `phash_search` reports it, after the regular-file
+/// and executable-access probes have both settled.
+fn shown_hashed(ctx: &Ctx<'_, '_>, path: &BString) -> Result<BString, Need> {
+	probe::hashed_shown(&ctx.vp.cwd, path, |p| ctx.probe(p))
 }
 
 /// bash's `sv_path` (`phash_flush`): any assignment to `PATH`, a command's
@@ -359,6 +356,7 @@ fn kinds(
 	all: bool,
 	path_only: bool,
 	std_path: bool,
+	count_hit: bool,
 ) -> Result<Vec<Kind>, Need> {
 	let mut found = Vec::new();
 	if !path_only {
@@ -406,12 +404,12 @@ fn kinds(
 					found.push(Kind::Builtin);
 				}
 			},
-			Resolved::External(p) => found.push(match hashed(ctx, name)? {
+			Resolved::External(p) => found.push(match hashed(ctx, name, count_hit)? {
 				Some(h) => Kind::Hashed(h),
 				None => Kind::File(p),
 			}),
 			Resolved::NotFound => {
-				if let Some(h) = hashed(ctx, name)? {
+				if let Some(h) = hashed(ctx, name, count_hit)? {
 					found.push(Kind::Hashed(h));
 				}
 			},
@@ -419,7 +417,7 @@ fn kinds(
 		if !found.is_empty() && !all {
 			return Ok(found);
 		}
-	} else if let Some(h) = hashed(ctx, name)? {
+	} else if let Some(h) = hashed(ctx, name, count_hit)? {
 		// `type -P`: the hash table first, as bash's `find_user_command`.
 		found.push(Kind::Hashed(h));
 		return Ok(found);
@@ -445,10 +443,15 @@ pub fn type_(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		Err(st) => return done(st),
 	};
 	let (all, terse, path) = (o.has(b'a'), o.has(b't'), o.has(b'p') || o.has(b'P'));
+	// A pending host probe restarts the whole builtin. Settle every name
+	// before the pass that changes hit counts or writes output.
+	for name in o.rest {
+		kinds(ctx, name, all, o.has(b'P'), false, false)?;
+	}
 	let mut out = Vec::new();
 	let mut status = 0;
 	for name in o.rest {
-		let mut found = kinds(ctx, name, all, o.has(b'P'), false)?;
+		let mut found = kinds(ctx, name, all, o.has(b'P'), false, true)?;
 		if o.has(b'f') {
 			found.retain(|k| !matches!(k, Kind::Function(_)));
 		}
@@ -522,6 +525,9 @@ pub fn command_v(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	if !o.has(b'v') && !o.has(b'V') {
 		return done(0);
 	}
+	for name in o.rest {
+		kinds(ctx, name, false, false, !o.has(b'V') && o.has(b'p'), false)?;
+	}
 	if o.has(b'V') {
 		let mut status = i32::from(!o.rest.is_empty());
 		for name in o.rest {
@@ -534,7 +540,7 @@ pub fn command_v(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	let mut out = Vec::new();
 	let mut status = i32::from(!o.rest.is_empty());
 	for name in o.rest {
-		match kinds(ctx, name, false, false, o.has(b'p'))?
+		match kinds(ctx, name, false, false, o.has(b'p'), true)?
 			.into_iter()
 			.next()
 		{
@@ -823,6 +829,23 @@ pub fn hash(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			);
 		}
 		return done(0);
+	}
+	// No output or hash insertion until all names can be answered without
+	// suspending and replaying earlier effects.
+	if !o.has(b'd') {
+		for name in o.rest {
+			if o.has(b't') {
+				if !reusable
+					&& let Some(Record::CmdHash { path, .. }) =
+						ctx.record(Key::CmdHash(BStr::new(name)))?
+				{
+					shown_hashed(ctx, &path)?;
+				}
+			} else if !name.contains(&b'/') {
+				let path = search_path(ctx, false)?;
+				ctx.probe(Probe::Path { name: name.clone(), path })?;
+			}
+		}
 	}
 	let single = o.rest.len() == 1;
 	for name in o.rest {

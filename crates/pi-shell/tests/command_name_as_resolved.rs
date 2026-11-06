@@ -22,6 +22,10 @@ enum Mode {
 	/// A script file the `obash` binary reads, whose `$0` and `BASH_SOURCE[0]` are
 	/// the script: script mode is not reachable through `Shell::run`.
 	ScriptFile,
+	/// `obash --norc --noprofile -i -c`: an interactive shell, which bash names
+	/// by itself however deep in a `.` file it is. With no terminal it first
+	/// prints two job-control notices, so the row compares the last line.
+	Interactive,
 }
 
 /// One case: what Bash 5.3.0 writes for `script` after `setup`, byte for byte.
@@ -91,6 +95,23 @@ async fn observe(row: &Row) -> (i32, Vec<u8>, Vec<u8>, String) {
 				.expect("run the case");
 			let read = |p: &Path| std::fs::read(p).unwrap_or_default();
 			(result.exit_code.unwrap_or(-1), read(&out), read(&err), home)
+		},
+		Mode::Interactive => {
+			let done = Command::new(env!("CARGO_BIN_EXE_obash"))
+				.arg0("bash")
+				.args(["--norc", "--noprofile", "-i", "-c", row.script])
+				.current_dir(dir.path())
+				.env_clear()
+				.envs(&env)
+				.output()
+				.expect("run obash");
+			let last = done
+				.stderr
+				.split_inclusive(|&c| c == b'\n')
+				.filter(|l| l.len() > 1)
+				.next_back()
+				.map_or_else(Vec::new, <[u8]>::to_vec);
+			(done.status.code().unwrap_or(-1), done.stdout, last, home)
 		},
 		Mode::ScriptFile => {
 			std::fs::write(dir.path().join("script.sh"), format!("{}\n", row.script))
@@ -388,6 +409,56 @@ const ROWS: &[Row] = &[
 		status: 126,
 		stdout: b"",
 		stderr: b"script.sh: ./victim: /missing/review/interpreter: bad interpreter: No such file or directory\n",
+	},
+	// res-hash-p-reldir-noexec (c)
+	Row {
+		id: "res-hash-p-reldir-noexec",
+		setup: r#"mkdir -p bin; printf 'x\n' > bin/noexec; chmod 644 bin/noexec"#,
+		mode: Mode::Dashc,
+		script: "hash -p bin/noexec q; hash -t q; type -p q; command -v q; q",
+		status: 126,
+		stdout: b"bin/noexec\nbin/noexec\nbin/noexec\n",
+		stderr: b"bash: line 1: bin/noexec: Permission denied\n",
+	},
+	// res-hash-becomes-directory (c)
+	Row {
+		id: "res-hash-becomes-directory",
+		setup: r#"mkdir -p bin; printf '#!/missing/review/interpreter\n' > bin/victim; chmod 755 bin/victim"#,
+		mode: Mode::Dashc,
+		script: "hash -p bin/victim q; /bin/rm bin/victim; /bin/mkdir bin/victim; hash -t q",
+		status: 0,
+		stdout: b"bin/victim\n",
+		stderr: b"",
+	},
+	// res-exec-reldir-badinterp (c)  // 5.2.21 differs: 127 'bash: line 1: {D}/bin/victim: cannot execute: required file not found\n'
+	Row {
+		id: "res-exec-reldir-badinterp",
+		setup: r#"mkdir -p bin; printf '#!/missing/review/interpreter\n' > bin/victim; chmod 755 bin/victim"#,
+		mode: Mode::Dashc,
+		script: "PATH=bin:/usr/bin:/bin; exec victim",
+		status: 126,
+		stdout: b"",
+		stderr: b"bash: {D}/bin/victim: /missing/review/interpreter: bad interpreter: No such file or directory\n",
+	},
+	// res-exec-a-reldir-badinterp (c)  // 5.2.21 differs: 127 'bash: line 1: {D}/bin/victim: cannot execute: required file not found\n'
+	Row {
+		id: "res-exec-a-reldir-badinterp",
+		setup: r#"mkdir -p bin; printf '#!/missing/review/interpreter\n' > bin/victim; chmod 755 bin/victim"#,
+		mode: Mode::Dashc,
+		script: "PATH=bin:/usr/bin:/bin; exec -a replacement victim",
+		status: 126,
+		stdout: b"",
+		stderr: b"bash: {D}/bin/victim: /missing/review/interpreter: bad interpreter: No such file or directory\n",
+	},
+	// res-hash-multiple-type-hits (c)
+	Row {
+		id: "res-hash-multiple-type-hits",
+		setup: r#"printf '#!/bin/sh\n' > one; cp one two; cp one three; chmod 755 one two three"#,
+		mode: Mode::Dashc,
+		script: "hash -p one a; hash -p two b; hash -p three c; type -p a b c; hash",
+		status: 0,
+		stdout: b"./one\n./two\n./three\nhits\tcommand\n   1\tthree\n   1\ttwo\n   1\tone\n",
+		stderr: b"",
 	},
 ];
 
