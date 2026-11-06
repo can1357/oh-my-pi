@@ -37,6 +37,10 @@
 - Fixed cycling thinking on models without effort selectors canceling a pending automatic prewalk handoff ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
 - Fixed automatic prewalk restoring the planning model after a retry fallback had selected a different upstream route ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
 - Fixed switching sessions after an automatic prewalk handoff overriding the opened session's saved model and thinking level on its first prompt ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed the session crashing with `Native shell returned an invalid execution trace` when a bash command assigned a long value containing multi-byte characters such as Chinese text ([#18259](https://github.com/can1357/oh-my-pi/issues/18259))
+- `grep -e` and `rg -e` in the bash tool accept patterns that start with `-` (e.g. `grep -e "--canary"`) instead of failing with an unknown-option error.
+- On Windows, `grep`, `glob` and isolated subagents no longer flash a console window when they query or start the ovnfs daemon.
+
 ## [18.17.0] - 2026-11-06
 
 ### Added

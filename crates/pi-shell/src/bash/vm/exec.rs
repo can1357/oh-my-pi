@@ -24,7 +24,7 @@ use super::{
 };
 use crate::bash::{
 	diag::Diag,
-	event::{CompiledUnit, Construct, EventData, NodeKind, Origin, WaitKey},
+	event::{CompiledUnit, Construct, EventData, NodeKind, Origin, WaitKey, assign_preview},
 	fd::FdRef,
 	host::{ResolveCtx, Resolved, Via},
 	ids::{Dialect, ModeId, UnitId, Vpid},
@@ -3683,10 +3683,9 @@ fn for_next(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 		// parameter setter has separate assignment semantics.
 		if !select && vp.mode.dialect() == crate::bash::ids::Dialect::Zsh {
 			let scope = assign_scope(vp);
-			let shown = &value[..value.len().min(256)];
 			k.emit_op(cx, vp, op.node, EventData::Assign {
 				name: BStr::new(&var),
-				value: BStr::new(shown),
+				value: BStr::new(assign_preview(&value)),
 				full_len: value.len(),
 				scope,
 			});
