@@ -23,6 +23,7 @@ let previousNoTitle: string | undefined;
 beforeEach(async () => {
 	previousNoTitle = Bun.env.PI_NO_TITLE;
 	delete Bun.env.PI_NO_TITLE;
+	forkRequests = 0;
 	tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-title-resume-"));
 });
 
@@ -56,8 +57,15 @@ const WAKE_NOTICE = "Session relaunched by agentbox-run; the predecessor's trans
 const RESUMED_REPLY =
 	"Picking the ShellPortAudit lane back up where the previous process stopped: three of the seven pull requests are still unrebased, so I will resolve their brush-builtin conflicts against live main and re-run the shell suite on each before reporting to the lead.";
 
+/** Title requests the fork path started, which the title-model count alone cannot see. */
+let forkRequests = 0;
+
 /** The title fork declines, so every title here comes from the title model and is one countable call. */
-const declineTitleFork = createMockModel({ handler: { content: ["<title/>"] } }).stream;
+const forkStream = createMockModel({ handler: { content: ["<title/>"] } }).stream;
+const declineTitleFork: typeof forkStream = (...args) => {
+	forkRequests++;
+	return forkStream(...args);
+};
 
 /** Plain titles: a card request would double every title-model call and hide the bound under test. */
 const PLAIN_TITLES = { "title.icons": "boring" };
@@ -213,7 +221,10 @@ describe("AgentSession names a resumed session that carries no operator message"
 		expect(titleModel).toHaveBeenCalledTimes(2);
 	});
 
-	it("makes no title-model call when the resumed session already has a title", async () => {
+	it("starts no title request of either kind when the resumed session already has a title", async () => {
+		// Counting the title model alone would miss a title FORK at a named
+		// session: the fork's own fallback declines to call the model, so the
+		// count stays zero while a request has in fact been paid for.
 		const file = await writeDeadTranscript(tmpDir!, "Rebase the ShellPortAudit pull requests");
 		const target = await resume(file);
 		const titleModel = vi
@@ -225,6 +236,7 @@ describe("AgentSession names a resumed session that carries no operator message"
 
 		expect(target.sessionName).toBe("Rebase the ShellPortAudit pull requests");
 		expect(titleModel).not.toHaveBeenCalled();
+		expect(forkRequests).toBe(0);
 		expect(await titleChanges(file)).toBe(1);
 	});
 
@@ -291,5 +303,31 @@ describe("AgentSession names a resumed session that carries no operator message"
 
 		expect(target.sessionName).toBeUndefined();
 		expect(calls).toBe(1);
+	});
+
+	it("keeps the try when persistence moves the same transcript to a sibling file", async () => {
+		// The discriminating case for keying to the conversation rather than the
+		// persisted id. A write conflict makes SessionManager continue this very
+		// transcript in a sibling file under a NEW id; keyed by id, the resume
+		// would read its own persistence as a replaced conversation and lose the
+		// try. A session switch cannot show this: it moves the id AND the
+		// generation, so it passes either way.
+		const file = await writeDeadTranscript(tmpDir!);
+		const target = await resume(file);
+		const before = target.sessionManager.getSessionId();
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(
+			createAssistantMessage("<title>Rebase the ShellPortAudit pull requests</title>"),
+		);
+
+		// Another process claims the journal underneath us.
+		await Bun.write(
+			file,
+			`${JSON.stringify({ type: "session", version: 3, id: "claimed-by-someone-else", timestamp: new Date().toISOString(), cwd: tmpDir })}\n`,
+		);
+		await wake(target);
+		await target.sessionManager.flush();
+
+		expect(target.sessionManager.getSessionId()).not.toBe(before);
+		expect(target.sessionName).toBe("Rebase the ShellPortAudit pull requests");
 	});
 });
