@@ -2070,7 +2070,9 @@ export class Settings {
 			return this.#projectShellPathSource ?? "the active project configuration";
 		}
 		if (this.#parent && !Object.hasOwn(this.#global, "shellPath")) return this.#parent.#shellPathSource();
-		return this.#configPath ?? path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]);
+		// A worker mirror has no config file of its own; naming the default would send someone to a
+		// file that may not exist, when `config.yaml` is the one its main instance read.
+		return this.#globalConfigPath() ?? path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]);
 	}
 
 	/**

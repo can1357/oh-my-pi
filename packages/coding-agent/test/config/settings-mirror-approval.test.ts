@@ -106,4 +106,28 @@ describe("tools.approval across worker settings mirrors", () => {
 		const mirror = Settings.mirror(mirrorSource(source), source.mirrorState());
 		expect(listed(mirror)).toEqual(listed(source));
 	});
+
+	it("names the config file its main instance read when a worker reports a bad shellPath", async () => {
+		// The same class again: `#shellPathSource` fell back to the default `config.yml`, so a worker
+		// told someone to fix a file that does not exist when the main instance read `config.yaml`.
+		using dir = TempDir.createSync("@pi-approval-mirror-shell-");
+		const agentDir = dir.join("agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		const legacy = path.join(agentDir, "config.yaml");
+		fs.writeFileSync(legacy, YAML.stringify({ shellPath: dir.join("no-such-shell") }));
+		const source = await Settings.init({ cwd: dir.path(), agentDir });
+		// A shell that does not exist makes the guidance name the file to edit.
+		const guidance = (settings: Settings) => {
+			try {
+				settings.getShellConfig();
+			} catch (error) {
+				return String(error);
+			}
+			throw new Error("expected a missing shell to be reported");
+		};
+		expect(guidance(source)).toContain(`Please update shellPath in ${legacy}`);
+
+		const mirror = Settings.mirror(mirrorSource(source), source.mirrorState());
+		expect(guidance(mirror)).toBe(guidance(source));
+	});
 });
