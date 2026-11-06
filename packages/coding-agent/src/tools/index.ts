@@ -15,6 +15,7 @@ import type {
 	BeforeSubagentSpawnEvent,
 	BeforeSubagentSpawnEventResult,
 	CustomToolCallEvent,
+	CustomToolResultEvent,
 	PreparedExtension,
 	ToolCallEventResult,
 } from "../extensibility/extensions/types";
@@ -451,11 +452,15 @@ export interface ToolSession {
 	/**
 	 * Fires `tool_call` on this session's extensions for a call that reaches a host capability
 	 * outside the agent loop (eval preludes such as `browser`). Extensions may block it or revise
-	 * its input exactly as for a loop-dispatched call. Prelude calls are call-only: no `tool_result`
-	 * follows, and `additionalContext` on the result is ignored. Undefined when the session has no
-	 * extension runner.
+	 * its input exactly as for a loop-dispatched call; `additionalContext` on the result is ignored.
+	 * Undefined when the session has no extension runner.
 	 */
 	emitToolCall?(event: CustomToolCallEvent, signal?: AbortSignal): Promise<ToolCallEventResult | undefined>;
+	/**
+	 * Fires an observe-only `tool_result` for a call {@link emitToolCall} announced, success or failure,
+	 * so an extension can release what it set up for the call. Handler changes to the result are ignored.
+	 */
+	emitToolResult?(event: CustomToolResultEvent): Promise<void>;
 	/** Auth storage for passing to subagents (avoids re-discovery) */
 	authStorage?: import("../session/auth-storage").AuthStorage;
 	/** Model registry for passing to subagents (avoids re-discovery) */

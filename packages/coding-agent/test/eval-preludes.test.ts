@@ -236,7 +236,7 @@ describe("eval prelude tool_call opt-in", () => {
 		invoke,
 	});
 
-	/** Builds a session whose `emitToolCall` is wired the way `sdk.ts` wires it. */
+	/** Builds a session whose `emitToolCall`/`emitToolResult` are wired the way `sdk.ts` wires them. */
 	async function makeRunnerSession(
 		definition: EvalPreludeDefinition,
 		register: (api: ExtensionAPI) => void,
@@ -250,7 +250,12 @@ describe("eval prelude tool_call opt-in", () => {
 		const session: ToolSession = {
 			...makeSession(() => [definition]),
 			emitToolCall: (event, signal) =>
-				runner.hasToolCallHandlers(event.source) ? runner.emitToolCall(event, signal) : Promise.resolve(undefined),
+				runner.hasToolEventHandlers("tool_call", event.source)
+					? runner.emitToolCall(event, signal)
+					: Promise.resolve(undefined),
+			emitToolResult: async event => {
+				if (runner.hasToolEventHandlers("tool_result", event.source)) await runner.emitToolResult(event);
+			},
 		};
 		return { session, runner };
 	}
@@ -319,6 +324,48 @@ describe("eval prelude tool_call opt-in", () => {
 
 		await invokeEvalPrelude("probe", {}, { session, toolCallId: "prelude-2" });
 		expect(shared).toHaveBeenCalledTimes(1);
+	});
+
+	it("reports every announced outcome to opted-in tool_result handlers, and never to plain ones", async () => {
+		const invoke = vi.fn(async (parameters: unknown): Promise<AgentToolResult<unknown>> => {
+			if ((parameters as { action?: string }).action === "fail") throw new Error("open failed");
+			return { content: [{ type: "text", text: "ran" }] };
+		});
+		const results: { toolCallId: string; isError: boolean; source?: string }[] = [];
+		const plainResult = vi.fn(async () => undefined);
+		const { session } = await makeRunnerSession(probeDefinition(invoke), api => {
+			api.on(
+				"tool_call",
+				async event =>
+					(event.input as { action?: string }).action === "block" ? { block: true, reason: "blocked" } : undefined,
+				{ evalPreludes: true },
+			);
+			api.on("tool_result", plainResult);
+			api.on(
+				"tool_result",
+				async event => {
+					results.push({ toolCallId: event.toolCallId, isError: event.isError, source: event.source });
+					return { content: [{ type: "text", text: "rewritten" }] };
+				},
+				{ evalPreludes: true },
+			);
+		});
+
+		const ok = await invokeEvalPrelude("probe", { action: "open" }, { session, toolCallId: "ok" });
+		await expect(invokeEvalPrelude("probe", { action: "fail" }, { session, toolCallId: "fail" })).rejects.toThrow(
+			/open failed/,
+		);
+		await expect(invokeEvalPrelude("probe", { action: "block" }, { session, toolCallId: "block" })).rejects.toThrow(
+			/blocked/,
+		);
+
+		expect(ok.content).toEqual([{ type: "text", text: "ran" }]);
+		expect(results).toEqual([
+			{ toolCallId: "ok", isError: false, source: "eval-prelude" },
+			{ toolCallId: "fail", isError: true, source: "eval-prelude" },
+			{ toolCallId: "block", isError: true, source: "eval-prelude" },
+		]);
+		expect(plainResult).not.toHaveBeenCalled();
 	});
 });
 

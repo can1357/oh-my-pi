@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- The ask dialog's "Other" answer box and hook editors now get macOS spelling assistance (typo undercurls, Tab completions, on-space autocorrect), following the `spelling.*` settings when opened; open hook editors also update live when those settings change ([#12517](https://github.com/can1357/oh-my-pi/pull/12517) by [@aleister1102](https://github.com/aleister1102))
+- Supported invoking multiple skills in a single prompt submission (`/skill:foo /skill:bar`); every registered `/skill:<name>` token in the prompt is loaded, and unknown tokens stay in the prompt text ([#12535](https://github.com/can1357/oh-my-pi/pull/12535) by [@aleister1102](https://github.com/aleister1102))
+- Eval `browser` calls run the extension `tool_call` and `tool_result` handlers that opt in with `{ evalPreludes: true }`, so an extension that blocks or rewrites `browser` calls (for example to point `app.cdp_url` at a per-agent endpoint) also covers calls made from eval and can release what it set up when the call ends; the `tool_result` is observe-only ([#18277](https://github.com/can1357/oh-my-pi/pull/18277) by [@aleister1102](https://github.com/aleister1102))
+
+### Changed
+
+- Resuming a long session reads only the entry types it needs for transcript replay, the compaction notice, Hindsight message extraction and vibe session recovery, instead of decoding the whole journal
+- Extension event handlers run under a loop phase naming the extension and event, so `ui.loop-blocked` attributes a synchronous block in their handler to that extension instead of "unknown".
+- Per-turn tool-output pruning now walks only the entries kept by the latest compaction (plus the earlier calls kept results refer to) instead of the whole branch ([#16517](https://github.com/can1357/oh-my-pi/pull/16517) by [@Komzpa](https://github.com/Komzpa))
+- `omp` starts faster: the browser's accessibility audit now loads its `axe-core` engine on demand, so a launch no longer pays for it ([#16775](https://github.com/can1357/oh-my-pi/pull/16775) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ### Fixed
 
 - Subagents receive task instructions with their blank lines, Markdown hard breaks, and table spacing intact, whether given inline or via `taskFile`.

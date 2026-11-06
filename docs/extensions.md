@@ -614,7 +614,7 @@ and `/new`. Commands retain their explicit prefill and session-transition action
 
 `tool_result` is middleware-style: handlers run in extension order and each sees prior modifications. Distinct non-blank `additionalContext` from every handler is preserved in registration order (repeats, compared ignoring surrounding whitespace, are dropped) and delivered before that call's `tool_call` context.
 
-`tool_call` handlers see eval prelude calls only when registered with `pi.on("tool_call", handler, { evalPreludes: true })`. Those events carry `source: "eval-prelude"`. Handlers without the option never receive them. Loop and native tool calls reach every handler, as before.
+`tool_call` and `tool_result` handlers see eval prelude calls only when registered with `{ evalPreludes: true }`, for example `pi.on("tool_call", handler, { evalPreludes: true })`. Those events carry `source: "eval-prelude"`. Handlers without the option never receive them. Once a `tool_call` handler has seen a prelude call, a `tool_result` follows whatever the outcome (success, failure, block or abort), so an extension can release what it set up for the call. A prelude `tool_result` is observe-only: changes to its content are ignored. Loop and native tool calls reach every handler, as before.
 
 ### Plan review lifecycle
 

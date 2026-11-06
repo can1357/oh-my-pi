@@ -1564,11 +1564,11 @@ export type ToolCallEvent =
 	| CustomToolCallEvent;
 
 /**
- * Options for `pi.on("tool_call", handler, options)`.
+ * Options for `pi.on("tool_call" | "tool_result", handler, options)`.
  * `evalPreludes: true` also delivers calls made from eval preludes (e.g. `browser`). Off by default, so a
  * handler that does not opt in sees only model-issued calls.
  */
-export interface ToolCallHandlerOptions {
+export interface ToolEventHandlerOptions {
 	evalPreludes?: boolean;
 }
 
@@ -1578,6 +1578,8 @@ interface ToolResultEventBase {
 	input: Record<string, unknown>;
 	content: (TextContent | ImageContent)[];
 	isError: boolean;
+	/** `"eval-prelude"` when an eval prelude made the call; its result is observe-only. Absent for model-issued calls. */
+	source?: "eval-prelude";
 }
 
 export interface BashToolResultEvent extends ToolResultEventBase {
@@ -1925,9 +1927,13 @@ export interface ExtensionAPI {
 	on(
 		event: "tool_call",
 		handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>,
-		options?: ToolCallHandlerOptions,
+		options?: ToolEventHandlerOptions,
 	): void;
-	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
+	on(
+		event: "tool_result",
+		handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>,
+		options?: ToolEventHandlerOptions,
+	): void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
 	on(event: "user_python", handler: ExtensionHandler<UserPythonEvent, UserPythonEventResult>): void;
 	on(event: "mcp_notification", handler: ExtensionHandler<McpNotificationEvent>): void;
@@ -2479,10 +2485,10 @@ export interface Extension {
 	label?: string;
 	handlers: Map<string, HandlerFn[]>;
 	/**
-	 * Indexes into `handlers.get("tool_call")` for handlers registered with `{ evalPreludes: true }`. Indexes
-	 * stay exact because a handler list is append-only. Absent when no handler opted in.
+	 * Per event (`tool_call`, `tool_result`), indexes into `handlers.get(event)` for handlers registered with
+	 * `{ evalPreludes: true }`. Indexes stay exact because a handler list is append-only.
 	 */
-	toolCallEvalPreludeIndexes?: Set<number>;
+	evalPreludeHandlerIndexes?: Map<string, Set<number>>;
 	tools: Map<string, RegisteredTool<any, any>>;
 	toolRegistrationListeners?: Set<ToolRegistrationListener>;
 	assistantThinkingRenderers: AssistantThinkingRenderer[];
