@@ -210,12 +210,19 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			note_command(vp, unit, op);
 			// bash samples `was_error_trap` before the command runs
 			// (`execute_cmd.c`), so a trap the command itself installs does
-			// not fire for that command.
-			let armed = matches!(
-				state::record(cx.store, vp, Key::Trap(TrapKey::Err)),
-				Ok(Some(Record::Trap { action, .. })) if !action.is_empty()
-			);
-			vp.frames[fi].err_trap_armed = armed;
+			// not fire for that command. The DEBUG trap runs between that
+			// sample and the command, and comes back to this op with no
+			// scratch, so the sample is taken only on the first entry —
+			// `debug_pc` is this op's pc once its DEBUG point has passed.
+			// Without that, a DEBUG action that installs an ERR trap armed
+			// the very command it ran before.
+			if vp.frames[fi].debug_pc != Some(vp.frames[fi].pc) {
+				let armed = matches!(
+					state::record(cx.store, vp, Key::Trap(TrapKey::Err)),
+					Ok(Some(Record::Trap { action, .. })) if !action.is_empty()
+				);
+				vp.frames[fi].err_trap_armed = armed;
+			}
 		}
 		// bash's DEBUG trap: before a simple command, `[[ ]]`, `(( ))`, each
 		// arith-for expression, a `case` or `select` command and each `for`

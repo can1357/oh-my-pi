@@ -1748,12 +1748,22 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 			status = 1;
 			continue;
 		}
-		// `declare -r c[100]` declares an indexed array; `readonly a[5]`
-		// and `export a[5]` are no names.
+		// `declare -r c[100]` declares an indexed array; `readonly a[5]` and
+		// `export a[5]` are no names. bash's `readonly`/`export` reject a
+		// subscripted name whether or not it carries a value, and reject it
+		// *before* evaluating the subscript, so an unevaluable subscript is
+		// still only "not a valid identifier" and the line carries on
+		// (`readonly "A[bad!]=3"; echo O:$?` prints `O:1` and exits 0 in both
+		// bashes, and so does `readonly "A[0]=3"` on a declared array). The
+		// diagnostic names the element, not the whole word.
 		let subscripted = value.is_none() && name.len() < arg.len();
 		let special = matches!(kind, DeclareKind::Readonly | DeclareKind::Export);
-		if subscripted && special {
-			ctx.err(Diag::InvalidIdent { name: arg.clone() });
+		if special && (subscripted || index.is_some()) {
+			let shown = match index {
+				Some(i) => element_text(name, i),
+				None => arg.clone(),
+			};
+			ctx.err(Diag::InvalidIdent { name: shown });
 			// A POSIX shell exits on a special builtin's usage error.
 			ctx.usage_error = true;
 			status = 1;
