@@ -2653,10 +2653,10 @@ def _request_interrupt(loop: asyncio.AbstractEventLoop, rid: str) -> None:
     """Interrupt cell ``rid`` from the stdin reader thread. The signal reaches it
     in sync code; the queued cancel reaches it if a sibling's sync code holds
     the main thread. Each interrupt is delivered once."""
+    _STATE.interrupt_ids.add(rid)
     task = _STATE.executing_tasks.get(rid)
     if task is None:
         return
-    _STATE.interrupt_ids.add(rid)
     loop.call_soon_threadsafe(_cancel_parked_cells)
     signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
 
@@ -2938,6 +2938,9 @@ async def _handle_request_async(req: dict) -> None:
         task = asyncio.current_task()
         _STATE.executing_tasks[rid] = task
         try:
+            if rid in _STATE.interrupt_ids:
+                _STATE.interrupt_ids.discard(rid)
+                raise KeyboardInterrupt
             await _exec_source_async(
                 transformed,
                 _STATE.user_ns,

@@ -10,6 +10,9 @@ interface RunnerFrame {
 	revision?: number;
 	digest?: string;
 	admissionRejected?: boolean;
+	cancelled?: boolean;
+	ename?: string;
+	evalue?: string;
 }
 
 const pythonPath = Bun.env.PYTHON ?? ($which("python3") ? "python3" : "python");
@@ -583,6 +586,75 @@ describe("Python runner request dispatch", () => {
 				operations: [],
 				barrier: expect.anything(),
 			});
+		} finally {
+			await runner.dispose();
+		}
+	});
+	it("interrupts a cell whose interrupt request arrives before its task starts", async () => {
+		if (process.platform === "win32") return; // Windows dispatches serially by design; see _serve_windows.
+		const runner = spawnRunner();
+		try {
+			runner.send({
+				id: "setup",
+				code: [
+					"import threading",
+					"from types import SimpleNamespace",
+					"seed = 41",
+					"gate = threading.Event()",
+					"__omp_tools__ = {'release': SimpleNamespace(fn=lambda: gate.set())}",
+				].join("\n"),
+			});
+			const [setup] = await collectDoneOrder(runner, new Set(["setup"]));
+			expect(setup.status).toBe("ok");
+
+			runner.send({ id: "hold", code: "print('holding', flush=True)\ngate.wait()" });
+			while (true) {
+				const frame = await runner.nextFrame();
+				if (frame.type === "stdout" && frame.id === "hold" && frame.data?.includes("holding")) break;
+			}
+
+			// While `hold` occupies the main thread, `aborted` stays queued in
+			// `queue` and is not yet in `_STATE.executing_tasks` when the reader
+			// thread processes its `interrupt` request and then `release`.
+			runner.send({ id: "aborted", code: "seed = 0" });
+			runner.send({ id: "aborted", type: "interrupt" });
+			runner.send({ id: "release", type: "tool", op: "call", name: "release", args: {} });
+
+			const errors: RunnerFrame[] = [];
+			const dones = new Map<string, RunnerFrame>();
+			while (dones.size < 3) {
+				const frame = await runner.nextFrame();
+				if (frame.type === "error" && frame.id === "aborted") {
+					errors.push(frame);
+				}
+				if (
+					frame.type === "done" &&
+					frame.id &&
+					(frame.id === "hold" || frame.id === "aborted" || frame.id === "release")
+				) {
+					dones.set(frame.id, frame);
+				}
+			}
+
+			expect(dones.get("hold")).toMatchObject({ type: "done", id: "hold", status: "ok", cancelled: false });
+			expect(errors).toEqual([
+				expect.objectContaining({
+					type: "error",
+					id: "aborted",
+					ename: "KeyboardInterrupt",
+					evalue: "Execution interrupted",
+				}),
+			]);
+			expect(dones.get("aborted")).toMatchObject({
+				type: "done",
+				id: "aborted",
+				status: "error",
+				cancelled: true,
+			});
+
+			runner.send({ id: "verify", code: "assert seed == 41" });
+			const [verify] = await collectDoneOrder(runner, new Set(["verify"]));
+			expect(verify.status).toBe("ok");
 		} finally {
 			await runner.dispose();
 		}
