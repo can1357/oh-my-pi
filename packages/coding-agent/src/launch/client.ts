@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { IpcConnection } from "@oh-my-pi/pi-natives";
 import { getGlobalDaemonRuntimeDir, isEexist, isEnoent, logger, postmortem, toError } from "@oh-my-pi/pi-utils";
-import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker-client";
+import { daemonEnvFromParent, resolveWorkerSpawnCmd } from "../subprocess/worker-client";
 import { canonicalProjectDir, daemonBrokerEndpoint, daemonRuntimeDir } from "./paths";
 import {
 	DAEMON_BROKER_WORKER_ARG,
@@ -312,7 +312,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		if (this.#idleGraceMs !== undefined) overlay[DAEMON_IDLE_GRACE_ENV] = String(this.#idleGraceMs);
 		const child = Bun.spawn(spawn.cmd, {
 			cwd: spawn.cwd,
-			env: workerEnvFromParent(overlay),
+			env: daemonEnvFromParent(this.projectDir, overlay),
 			stdin: "ignore",
 			stdout: "ignore",
 			stderr: "ignore",

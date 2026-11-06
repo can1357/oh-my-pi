@@ -14,7 +14,7 @@ import {
 	WhichCachePolicy,
 	workerHostEntry,
 } from "@oh-my-pi/pi-utils";
-import { stripGitRepoLocationEnv } from "@oh-my-pi/pi-utils/env";
+import { filterChildShellEnv, stripGitRepoLocationEnv } from "@oh-my-pi/pi-utils/env";
 import type { Subprocess } from "bun";
 
 /**
@@ -188,13 +188,24 @@ export function workerEnvFromParent(overlay?: Record<string, string>): Record<st
 		const value = base[key];
 		if (typeof value === "string") merged[key] = value;
 	}
-	// Inherited repo-location overrides must not reach a worker or the PTY
-	// daemons it hosts (issue #11082); an explicit overlay still wins below.
+	// Inherited repo-location overrides must not reach a worker (issue #11082);
+	// an explicit overlay still wins below.
 	stripGitRepoLocationEnv(merged);
 	if (overlay) {
 		for (const key in overlay) merged[key] = overlay[key];
 	}
 	return merged;
+}
+
+/**
+ * Parent environment for the daemon broker and the services it supervises.
+ * Unlike {@link workerEnvFromParent}, values OMP or Bun loaded from
+ * `projectDir`'s dotenv files are dropped, as for bash tool commands:
+ * otherwise a project `.env` (e.g. `DB_USER`) overrides the `.env` of whatever
+ * the service runs, such as `docker compose` interpolation in another repo.
+ */
+export function daemonEnvFromParent(projectDir: string, overlay?: Record<string, string>): Record<string, string> {
+	return { ...filterChildShellEnv($env, projectDir), ...overlay };
 }
 
 /**
