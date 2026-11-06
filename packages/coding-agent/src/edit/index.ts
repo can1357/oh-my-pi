@@ -834,10 +834,6 @@ export class EditTool implements AgentTool<TInput> {
 			};
 		}
 
-		// Taken before the bridge, because an editor-routed write lands the bytes
-		// just as a local one does and the record has to know what was there.
-		const existedBefore = request.op === "update" ? undefined : await Bun.file(request.path).exists();
-
 		const bridge = await routeWriteThroughBridge(
 			this.session,
 			request.displayPath,
@@ -864,9 +860,6 @@ export class EditTool implements AgentTool<TInput> {
 		} else {
 			await mkdirAllowingFallback(path.dirname(request.path));
 		}
-		// Whether the path existed is what decides ownership below, not the
-		// operation's label: a `create` that overwrote a file did not create it.
-		const created = request.op === "update" ? preWriteBytes === undefined : existedBefore === false;
 
 		// `begin()` claims this mutation's version; only bump when the writethrough
 		// never began a deferred fetch for the path (LSP off, unflushed batch).

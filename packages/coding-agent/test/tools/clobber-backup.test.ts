@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { createLspWritethrough } from "@oh-my-pi/pi-coding-agent/lsp/writethrough";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { backupBeforeClobber } from "@oh-my-pi/pi-coding-agent/tools/clobber-backup";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
@@ -35,6 +36,24 @@ function makeSession(cwd: string, sessionFile: string | null = null): ToolSessio
 		getPlanModeState: () => undefined,
 		settings: Settings.isolated({ "edit.mode": "patch" }),
 	} as ToolSession;
+}
+
+/**
+ * The slice of a tool-call context the `write` tool reads to join a deferred
+ * LSP writethrough batch: which call of the batch this is, and the batch it
+ * belongs to. Nothing else in the context is reached on this path.
+ */
+function batchContext(batchId: string, index: number): AgentToolContext {
+	return {
+		toolCall: {
+			index,
+			batchId,
+			toolCalls: [
+				{ id: "0", name: "write", arguments: {} },
+				{ id: "1", name: "write", arguments: {} },
+			],
+		},
+	} as unknown as AgentToolContext;
 }
 
 function resultText(result: { content: { type: string; text?: string }[] }): string {
@@ -651,20 +670,12 @@ describe("copy-before-clobber: a record must not claim bytes this session never 
 		const session = makeSession(tempDir);
 		session.enableLsp = true;
 		const tool = new WriteTool(session);
-		const batch = (index: number) => ({
-			toolCall: {
-				index,
-				batchId: "external-batch",
-				toolCalls: [
-					{ id: "0", name: "write", arguments: {} },
-					{ id: "1", name: "write", arguments: {} },
-				],
-			},
-		});
+		const first = batchContext("external-batch", 0);
+		const flush = batchContext("external-batch", 1);
 
-		await tool.execute("first", { path: "a.md", content: "own\n" }, undefined, undefined, batch(0));
+		await tool.execute("first", { path: "a.md", content: "own\n" }, undefined, undefined, first);
 		await fs.writeFile(path.join(tempDir, "a.md"), DOOMED);
-		await tool.execute("flush", { path: "b.md", content: "other\n" }, undefined, undefined, batch(1));
+		await tool.execute("flush", { path: "b.md", content: "other\n" }, undefined, undefined, flush);
 		const destroyed = await tool.execute("destroy", { path: "a.md", content: "gone\n" });
 
 		const backups = await backupFiles();
@@ -690,20 +701,12 @@ describe("copy-before-clobber: a record must not claim bytes this session never 
 				"lsp.diagnosticsOnEdit": false,
 			});
 			const tool = new WriteTool(session);
-			const batch = (index: number) => ({
-				toolCall: {
-					index,
-					batchId: "ruff-batch",
-					toolCalls: [
-						{ id: "0", name: "write", arguments: {} },
-						{ id: "1", name: "write", arguments: {} },
-					],
-				},
-			});
+			const first = batchContext("ruff-batch", 0);
+			const flush = batchContext("ruff-batch", 1);
 
-			await tool.execute("first", { path: "one.py", content: "x={'a':1}\n" }, undefined, undefined, batch(0));
+			await tool.execute("first", { path: "one.py", content: "x={'a':1}\n" }, undefined, undefined, first);
 			const beforeFlush = await Bun.file(path.join(tempDir, "one.py")).text();
-			await tool.execute("flush", { path: "two.py", content: "y=[1,2,3]\n" }, undefined, undefined, batch(1));
+			await tool.execute("flush", { path: "two.py", content: "y=[1,2,3]\n" }, undefined, undefined, flush);
 			const afterFlush = await Bun.file(path.join(tempDir, "one.py")).text();
 
 			// The formatter really did rewrite the earlier entry at the flush.
