@@ -36,11 +36,11 @@ use bstr::{BString, ByteSlice};
 use pi_builtins::extras::{CommandRunner, CommandStatus, EnvChange, Fd, ShellCommand};
 use tokio_util::sync::CancellationToken;
 
-use super::{Child, ToolConfig, Turn, quote, quote_words};
+use super::{Child, ToolConfig, Turn};
 use crate::{
 	bash::{
-		CallOutcome, IntrinsicId, Lineage, ModeId, RunId, RunStdio, Script, ShellApi, ToolCall,
-		VprocSel,
+		CallOutcome, IntrinsicId, LAUNCH_CARRIER, Lineage, ModeId, RunId, RunStdio, Script, ShellApi,
+		ToolCall, VprocSel,
 	},
 	extras::Done,
 	sys::StdFile,
@@ -233,23 +233,24 @@ fn script(mut command: ShellCommand, program: &Program, env_names: &[BString]) -
 		}
 	}
 	let mut args: Vec<BString> = command.args().iter().map(|arg| os_bytes(arg)).collect();
-	match program {
-		Program::Builtin => source.extend_from_slice(b"command --"),
+	// The operand's words go to the engine as data, not into the synthetic
+	// source and not as positional parameters ([`Script::launch`]): the
+	// subshell keeps the caller's parameters and the source is the same
+	// one command whatever the operand is.
+	let mut launch: Vec<BString> = match program {
+		Program::Builtin => vec![BString::from("command"), BString::from("--")],
 		Program::Path(path) => {
 			let argv0 = command
 				.presented_argv0()
 				.map_or_else(|| args[0].clone(), os_bytes);
-			source.extend_from_slice(b"exec -a ");
-			quote(&mut source, &argv0);
-			source.extend_from_slice(b" --");
 			args[0] = os_bytes(path.as_os_str());
+			vec![BString::from("exec"), BString::from("-a"), argv0, BString::from("--")]
 		},
-	}
-	// The operand's words go into the synthetic source quoted, so the
-	// subshell's positional parameters stay the caller's ([`quote_words`]).
-	source.push(b' ');
-	quote_words(&mut source, &args);
+	};
+	launch.append(&mut args);
+	source.extend_from_slice(LAUNCH_CARRIER.as_bytes());
 	let mut script = Script::command(source);
+	script.launch = Some(launch);
 	script.foreign_env = foreign_env;
 	script.unexport_env = unexport_env;
 	// The working directory is logical, as after `cd`: `-execdir` hands over
@@ -277,6 +278,19 @@ fn child_stdin(stdin: Option<Fd>) -> RunStdio {
 
 fn os_bytes(s: &OsStr) -> BString {
 	BString::from(s.as_encoded_bytes())
+}
+
+/// Append `word` single-quoted.
+fn quote(out: &mut Vec<u8>, word: &[u8]) {
+	out.push(b'\'');
+	for &c in word {
+		if c == b'\'' {
+			out.extend_from_slice(b"'\\''");
+		} else {
+			out.push(c);
+		}
+	}
+	out.push(b'\'');
 }
 
 /// A shell variable name.

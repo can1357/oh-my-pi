@@ -1,4 +1,13 @@
-//! Host-generated callout commands must not grow the retained source table.
+//! A host callout's synthetic command must not grow the retained source
+//! table with the number of calls.
+//!
+//! Its operand's words reach the engine as data on the run
+//! (`Script::launch`), never as part of a compiled unit's source, so every
+//! callout of one shape is one program and the trace keeps one unit for it
+//! however many times it runs. These rows are what stops that being
+//! undone: the first two would fail the moment per-call data went back
+//! into the source, and the rest pin that a callout's output and the user
+//! code around it stay attributed to the right command.
 #![cfg(unix)]
 
 use std::{collections::HashMap, sync::Arc};
@@ -8,7 +17,7 @@ use pi_shell::{
 	bash::trace::{
 		RunTrace,
 		history::{HISTORY_BYTES, HISTORY_EVENTS, HistoryData},
-		viz::{Options, StoredVisualization},
+		viz::StoredVisualization,
 	},
 	cancel::CancelToken,
 };
@@ -90,36 +99,6 @@ async fn distinct_timeout_operands_stop_growing_the_trace_after_history_truncati
 }
 
 #[tokio::test]
-async fn retained_callout_history_resolves_to_its_own_operand_after_source_eviction() {
-	let count = HISTORY_EVENTS / 2;
-	let trace = trace(
-		&format!("printf '%s\\n' {{1..{count}}} | xargs -n 1 printf '%s\\n' | wc -l"),
-		&[],
-		&count.to_string(),
-	)
-	.await;
-	let snapshot = trace.snapshot();
-	assert!(snapshot.history_truncated);
-	// Replay must still show the actual execution's argv, not a newer
-	// operand that took the evicted source's old table slot.
-	for event in &snapshot.history {
-		if let Some(unit) = event.u {
-			let unit = &snapshot.units[unit as usize];
-			let node = &unit.nodes[event.n.expect("attributed node") as usize];
-			assert!(node.hi > node.lo);
-			if let HistoryData::CmdExpanded { argv, .. } = &event.data {
-				assert_eq!(&node.argv, argv);
-			}
-		} else {
-			assert!(
-				!matches!(event.data, HistoryData::CmdExpanded { .. }),
-				"a retained command lost its source"
-			);
-		}
-	}
-}
-
-#[tokio::test]
 async fn visible_callout_output_keeps_the_operands_own_argv() {
 	let trace = trace("timeout 5 /usr/bin/printf 'operand\\n'", &[], "operand").await;
 	let snapshot = trace.snapshot();
@@ -161,64 +140,5 @@ async fn callouts_keep_user_function_eval_source_and_exit_trap_output_attributed
 			String::from_utf8_lossy(&source[node.lo as usize..node.hi as usize]).contains(label),
 			"{label} output must resolve to its own user command"
 		);
-	}
-}
-
-#[tokio::test]
-async fn compacted_snapshots_keep_selection_and_expansion_on_the_same_source() {
-	let trace = trace("printf first\nprintf second", &[], "firstsecond").await;
-	let mut snapshot: serde_json::Value = serde_json::from_str(&trace.snapshot_json()).unwrap();
-	for (index, unit) in snapshot["units"]
-		.as_array_mut()
-		.unwrap()
-		.iter_mut()
-		.enumerate()
-	{
-		unit["key"] = ((index + 1) * HISTORY_EVENTS).into();
-	}
-	let second = snapshot["history"]
-		.as_array()
-		.unwrap()
-		.iter()
-		.find(|event| event["kind"] == "CmdExpanded" && event["argv"][1] == "second")
-		.unwrap();
-	let selected = format!("{}:0:{}", 2 * HISTORY_EVENTS, second["n"]);
-	let options: Options = serde_json::from_value(serde_json::json!({
-		"view": "raw", "selectedNode": selected, "expandedNodes": [selected]
-	}))
-	.unwrap();
-	// The UI keeps these opaque keys between polls. Removing an earlier
-	// unit must not move its selection or expansion to another command.
-	for compacted in [false, true] {
-		if compacted {
-			snapshot["units"].as_array_mut().unwrap().remove(0);
-			snapshot["history"]
-				.as_array_mut()
-				.unwrap()
-				.retain_mut(|event| match event["u"].as_u64() {
-					Some(0) => false,
-					Some(unit) => {
-						event["u"] = (unit - 1).into();
-						true
-					},
-					None => true,
-				});
-		}
-		let stored = StoredVisualization::from_snapshot_json(&snapshot.to_string()).unwrap();
-		let presented: serde_json::Value =
-			serde_json::from_str(&stored.presentation_json(&options).unwrap()).unwrap();
-		assert!(
-			presented["rows"].as_array().unwrap().iter().any(|row| {
-				row["segments"].as_array().unwrap().iter().any(|segment| {
-					segment["node"] == selected
-						&& segment["text"]
-							.as_str()
-							.is_some_and(|text| text.contains("second"))
-				})
-			}),
-			"selection must resolve to second before and after compaction: {presented}"
-		);
-		assert_eq!(presented["preferences"]["selectedNode"], selected);
-		assert_eq!(presented["preferences"]["expandedNodes"][0], selected);
 	}
 }

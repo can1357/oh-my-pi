@@ -212,6 +212,24 @@ pub struct Script {
 	/// Positional parameters for the script, replacing the inherited current
 	/// positional scope in a new subshell without changing its caller.
 	pub args:         Option<Vec<BString>>,
+	/// The words of the script's carrier command ([`LAUNCH_CARRIER`]),
+	/// supplied by the host instead of written into the source.
+	///
+	/// A host callout runs its operand as one command of a synthetic
+	/// script. Putting the operand's words in that script — as positional
+	/// parameters, or quoted into its text — makes per-call data part of
+	/// something the engine keys on: a scope, which has a lifetime, or a
+	/// compiled unit, which has a content address. These words are neither.
+	/// The source is one fixed carrier command per callout shape, so every
+	/// callout in a session compiles to the same unit; the words replace
+	/// the carrier's own the moment that command's words are expanded, and
+	/// the slot is empty from then on. The subshell's positional parameters
+	/// are its caller's throughout, exactly as in the `( … )` subshell a
+	/// callout stands for, and nothing the operand runs can reach the slot.
+	///
+	/// Unrelated to [`Script::args`], which is still the script's own
+	/// positional parameters.
+	pub launch:       Option<Vec<BString>>,
 	/// Which virtual process runs it.
 	pub vproc:        VprocSel,
 	/// Opaque host tag, echoed in `RunStart`.
@@ -228,6 +246,15 @@ pub struct Script {
 	pub unexport_env: Vec<BString>,
 }
 
+/// The one word of a host callout's synthetic script: the command whose
+/// words [`Script::launch`] supplies.
+///
+/// It is a placeholder, never looked up — the operand's words replace it
+/// before the command is resolved — so every callout of the same redirect
+/// shape has the same source and compiles to the same unit, whatever its
+/// operand is.
+pub const LAUNCH_CARRIER: &str = "__pi_callout";
+
 impl Script {
 	/// A command script (`-c` semantics) on the root vproc.
 	pub fn command(source: impl Into<Arc<[u8]>>) -> Self {
@@ -236,6 +263,7 @@ impl Script {
 			origin:       Origin::Command,
 			mode:         None,
 			args:         None,
+			launch:       None,
 			vproc:        VprocSel::Root,
 			tag:          0,
 			cwd:          None,
@@ -1608,6 +1636,7 @@ impl Shell {
 			explicit_mode: script.mode.is_some(),
 			lossy: 0,
 			args: None,
+			launch: script.launch,
 			cwd: None,
 			env: Vec::new(),
 			started: false,

@@ -14,7 +14,7 @@ use std::{
 use bstr::{BStr, BString};
 
 use super::{
-	CallOutcome, Cx, Kernel, ToolCall, assign_scope,
+	CallOutcome, Cx, Kernel, LAUNCH_CARRIER, ToolCall, assign_scope,
 	builtins::{self, Chunk, Control, Ctx, Lhs, Need},
 	exec::{self, Flow, expanding, line_of},
 	expand::{CompoundElem, Expander, Stop, compound_text},
@@ -194,11 +194,16 @@ pub fn exec(
 	// alone: a block ended the slice (`run_slice` starts stale), and a called
 	// frame's ops kept it current, so a `FuncExit` shares the reading of the
 	// function's last `CmdEnd`.
+	// A run that still carries a host callout's operand words takes no
+	// fast path: the words replace the carrier command's own at one point
+	// in `expand`, so every command of such a run goes through the stages
+	// and there is exactly one place where they can be read.
 	if vp
 		.frames
 		.last()
 		.and_then(|f| f.scratch.as_ref())
 		.is_none_or(|s| s.exec.is_none())
+		&& vp.runs.front().is_none_or(|r| r.launch.is_none())
 		&& let Some(flow) = assignment_statement(k, vp, cx, unit, op, line)
 			.or_else(|| plain_statement(k, vp, cx, unit, op, line))
 	{
@@ -1118,6 +1123,7 @@ fn expand(
 		s.assigns.push((name, shown));
 		s.values.push((index, value));
 	}
+	take_launch(vp);
 	let s = st(vp);
 	if assign_only {
 		// `$?` of `x=$(cmd)` is the status of the last substitution.
@@ -1156,6 +1162,35 @@ fn expand(
 		}
 	}
 	None
+}
+
+/// Give the carrier command of a host callout the operand's words.
+///
+/// The run carries them ([`Script::launch`](crate::bash::Script::launch))
+/// and this is the only reader. It runs once, between the expansion of a
+/// command's words and everything that reads them — the `CmdExpanded`
+/// event, `set -x`, the redirections, the name lookup and the command
+/// itself — so the operand's own words are what every one of them sees,
+/// and the slot is empty before any code of the operand runs. The
+/// operand's words are therefore never positional parameters and never
+/// part of a compiled unit's source: the subshell keeps its caller's
+/// parameters, as the `( … )` subshell a callout stands for does, and one
+/// unit serves every call.
+///
+/// The carrier is recognised by its expanded word list, which the engine
+/// wrote as the single placeholder word [`LAUNCH_CARRIER`]. The other
+/// commands a synthetic script may carry (`env -i`'s unset sweep, its
+/// `export` assignments) never expand to it.
+fn take_launch(vp: &mut Vproc) {
+	if st(vp).argv.len() != 1 || st(vp).argv[0].as_slice() != LAUNCH_CARRIER.as_bytes() {
+		return;
+	}
+	let Some(words) = vp.runs.front_mut().and_then(|r| r.launch.take()) else {
+		return;
+	};
+	let s = st(vp);
+	s.argv = words;
+	s.arrayref.clear();
 }
 
 /// `$(< file)`: read fd 0 (the redirected file) to its end and queue it

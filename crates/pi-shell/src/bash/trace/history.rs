@@ -318,59 +318,6 @@ pub(super) struct Journal {
 }
 
 impl Journal {
-	pub fn mark_units(&self, retained: &mut [Option<u32>]) {
-		let mut mark = |unit: Option<u32>| {
-			if let Some(unit) = unit {
-				retained[unit as usize] = Some(unit);
-			}
-		};
-		for entry in &self.entries {
-			mark(entry.u);
-			if let HistoryData::Output { contributors, .. } = &entry.data {
-				for contributor in contributors {
-					mark(contributor.u);
-				}
-			}
-		}
-		for pending in self.pending_text.values() {
-			for origin in &pending.origins[..pending.len] {
-				mark(origin.u);
-			}
-		}
-	}
-
-	pub fn remap_units(&mut self, units: &[Option<u32>]) {
-		let remap = |unit: &mut Option<u32>| {
-			if let Some(index) = unit {
-				*index = units[*index as usize].expect("retained journal source");
-			}
-		};
-		for entry in &mut self.entries {
-			remap(&mut entry.u);
-			if let HistoryData::Output { contributors, .. } = &mut entry.data {
-				for contributor in contributors {
-					remap(&mut contributor.u);
-				}
-			}
-		}
-		for pending in self.pending_text.values_mut() {
-			for origin in &mut pending.origins[..pending.len] {
-				remap(&mut origin.u);
-			}
-		}
-		self.producers.retain(|_, (unit, _)| {
-			if let Some(mapped) = units[*unit as usize] {
-				*unit = mapped;
-				true
-			} else {
-				false
-			}
-		});
-		self
-			.producer_order
-			.retain(|tag| self.producers.contains_key(tag));
-	}
-
 	/// Exact CmdStart/CmdExpanded binding for this execution, never inferred.
 	pub fn producer(&self, tag: CmdTag) -> Option<(u32, u32)> {
 		self.producers.get(&tag).copied()

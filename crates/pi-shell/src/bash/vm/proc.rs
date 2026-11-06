@@ -802,6 +802,10 @@ pub struct Run {
 	/// Root scripts: positional parameters, cwd and exported variables to
 	/// install when the script starts.
 	pub args:              Option<Vec<BString>>,
+	/// The words of this run's carrier command
+	/// ([`Script::launch`](super::Script::launch)), taken by that command
+	/// once its own words are expanded and `None` from then on.
+	pub launch:            Option<Vec<BString>>,
 	pub cwd:               Option<BString>,
 	pub env:               Vec<(BString, BString)>,
 	pub started:           bool,

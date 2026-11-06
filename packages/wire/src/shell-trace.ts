@@ -101,8 +101,6 @@ export interface ShellTraceNode {
 
 /** One compiled unit (a top-level command, or an eval/function body). */
 export interface ShellTraceUnit {
-	/** Stable presentation identity; unlike the table index, it survives compaction. */
-	key?: number;
 	/** Byte offset of the unit inside `script`; absent when the unit is not part of the script. */
 	at?: number;
 	/** 1-based script line. */
@@ -335,7 +333,6 @@ function traceNode(value: unknown): value is ShellTraceNode {
 function traceUnit(value: unknown): value is ShellTraceUnit {
 	return (
 		record(value) &&
-		optional(value, "key", finite) &&
 		finite(value.line) &&
 		optional(value, "at", finite) &&
 		optional(value, "bytes", finite) &&

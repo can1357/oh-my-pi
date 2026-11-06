@@ -24,12 +24,6 @@ pub(crate) trait VizSource {
 	fn unit_count(&self) -> usize;
 	fn unit(&self, index: usize) -> Option<SourceUnit<'_>>;
 	fn cache(&self) -> &Cache;
-	fn unit_key(&self, index: usize) -> u32 {
-		index as u32
-	}
-	fn unit_position(&self, key: u32) -> Option<usize> {
-		((key as usize) < self.unit_count()).then_some(key as usize)
-	}
 }
 pub(crate) struct SourceUnit<'a> {
 	pub index:      u32,

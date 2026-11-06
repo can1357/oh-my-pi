@@ -56,8 +56,10 @@ use crate::bash::{
 /// Version of the [`Image`] layout; part of the header and the build id.
 /// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
 /// variant: an exec target holds it by index. 30 adds each vproc's
-/// `args_set` (bash's `changed_dollar_vars & ARGS_SETBLTIN`).
-pub const FRAMES_VERSION: u32 = 30;
+/// `args_set` (bash's `changed_dollar_vars & ARGS_SETBLTIN`); 31 adds each
+/// run's `launch` (a host callout's operand words, until its carrier
+/// command has taken them).
+pub const FRAMES_VERSION: u32 = 31;
 
 const MAGIC: [u8; 4] = *b"OBF1";
 
@@ -303,6 +305,7 @@ struct RunImage {
 	explicit_mode:     bool,
 	lossy:             u8,
 	args:              Option<Vec<BString>>,
+	launch:            Option<Vec<BString>>,
 	cwd:               Option<BString>,
 	env:               Vec<(BString, BString)>,
 	started:           bool,
@@ -884,6 +887,7 @@ impl Shell {
 					explicit_mode:     r.explicit_mode,
 					lossy:             r.lossy,
 					args:              r.args,
+					launch:            r.launch,
 					cwd:               r.cwd,
 					env:               r.env,
 					started:           r.started,
@@ -1122,6 +1126,7 @@ fn run_image(r: &Run) -> RunImage {
 		explicit_mode:     r.explicit_mode,
 		lossy:             r.lossy,
 		args:              r.args.clone(),
+		launch:            r.launch.clone(),
 		cwd:               r.cwd.clone(),
 		env:               r.env.clone(),
 		started:           r.started,
