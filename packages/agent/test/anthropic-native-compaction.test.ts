@@ -489,6 +489,50 @@ describe("compact() Anthropic native lane", () => {
 		expect(calls[0]?.ctx.messages.map(message => message.content)).toEqual(["long history", "no safe boundary"]);
 	});
 
+	test("summarizes locally when the native cut would move into pending reasoning", async () => {
+		const model = makeAnthropicModel();
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(
+			assistantMessage(model, { content: [{ type: "text", text: "local summary" }] }),
+		);
+		const { calls, completeImpl } = recordingCompleteImpl(() =>
+			assistantMessage(model, { content: [{ type: "text", text: "local summary" }] }),
+		);
+		// The summarized prefix ends in a tool result and the kept tail opens with the
+		// prompt the interrupted reasoning answers, so the native cut moves past it.
+		const preparation = makePreparation({
+			messagesToSummarize: [
+				assistantMessage(model, {
+					content: [{ type: "toolCall", id: "call-1", name: "read", arguments: {} }],
+					stopReason: "toolUse",
+					timestamp: 1,
+				}),
+				{
+					role: "toolResult",
+					toolCallId: "call-1",
+					toolName: "read",
+					content: [{ type: "text", text: "file" }],
+					isError: false,
+					timestamp: 2,
+				},
+			],
+			recentMessages: [
+				{ role: "user", content: "keep going", timestamp: 3 },
+				assistantMessage(model, {
+					content: [{ type: "thinking", thinking: "unfinished reasoning", thinkingSignature: "sig" }],
+					stopReason: "length",
+					timestamp: 4,
+				}),
+			],
+			recentEntryIds: ["kept-1", "kept-2"],
+		});
+
+		const result = await compact(preparation, model, "sk-ant-test", undefined, undefined, { completeImpl });
+
+		expect(calls.some(call => call.options.anthropicCompaction !== undefined)).toBe(false);
+		expect(result.firstKeptEntryId).toBe("kept-1");
+		expect(result.summary).toContain("local summary");
+	});
+
 	test("leads a follow-up compaction with a legacy replay block and replaces it with a signature", async () => {
 		const model = makeAnthropicModel();
 		const { calls, completeImpl } = recordingCompleteImpl(() =>

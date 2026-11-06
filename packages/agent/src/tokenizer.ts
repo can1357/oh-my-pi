@@ -589,10 +589,10 @@ export class Tokenizer {
 	 * blocks instead, `null` when it replays but the backend reported no
 	 * reasoning tokens to price it by. The payload goes back on the wire only
 	 * to the api, model and provider that produced it (`convertMessages` in
-	 * pi-ai's Responses providers), and then only what survives replay: a
-	 * truncated thinking-only turn is dropped, a hidden-empty or reasoning-only
-	 * payload sanitizes to nothing, and a cold session rebuilds the turn without
-	 * its reasoning, so those send no reasoning and no signature (0).
+	 * pi-ai's Responses providers), and then only what survives replay:
+	 * failed thinking-only turns and ordinary hidden-empty payloads send none.
+	 * Retained output-length reasoning stays in the native input; a cold session
+	 * rebuilds rather than replaying connection-bound state.
 	 */
 	#replayedReasoningTokens(message: AssistantMessage): number | null | undefined {
 		const reader = this.#reasoningReader;
@@ -600,7 +600,9 @@ export class Tokenizer {
 		const items = getOpenAIResponsesHistoryItems(message.providerPayload, reader.provider, message.provider);
 		if (!items) return undefined;
 		if (!items.some(item => item.type === "reasoning") || shouldDropTruncatedThinkingOnlyAssistant(message)) return 0;
-		const replay = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(items);
+		const replay = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(items, {
+			preserveReasoningOnly: message.stopReason === "length",
+		});
 		if (!replay?.some(item => item.type === "reasoning")) return 0;
 		// Cold, only plaintext reasoning bound to no server state replays natively.
 		if (!this.nativeHistoryReplay && !isColdReplayableResponsesTurn(replay)) return 0;

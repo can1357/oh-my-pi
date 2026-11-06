@@ -35,6 +35,7 @@ import {
 	USER_AGENT,
 } from "@oh-my-pi/pi-utils";
 import { NO_AUTH_SENTINEL } from "../auth-retry";
+import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { parseToolCallArguments, replayableToolCallArguments } from "../utils/tool-call-arguments";
 import {
@@ -2321,6 +2322,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 					{
 						supportsImageDetailOriginal,
 						supportsComputerUse: options.model.supportsComputerUse === true,
+						preserveReasoningOnly: assistantMsg.stopReason === "length",
 					},
 				);
 				const replayNativeItems =
@@ -2618,13 +2620,23 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 				reasoningItemEmitted = true;
 				continue;
 			}
-			if (!includeThinkingSignatures) {
-				continue;
-			}
-			const reasoningItem = parseResponseReasoningReplayItem(block.thinkingSignature);
+			const reasoningItem = includeThinkingSignatures
+				? parseResponseReasoningReplayItem(block.thinkingSignature)
+				: undefined;
 			if (reasoningItem) {
 				outputItems.push(requiresReasoningItem ? withRequiredReasoningText(reasoningItem) : reasoningItem);
 				reasoningItemEmitted = true;
+			} else if (
+				assistantMsg.stopReason === "length" &&
+				!requiresReasoningItem &&
+				block.thinking.trim().length > 0
+			) {
+				// No replayable item: carry the interrupted thought as demoted text.
+				outputItems.push({
+					type: "message",
+					role: "assistant",
+					content: renderDemotedThinking(model.id, block.thinking).toWellFormed(),
+				});
 			}
 			continue;
 		}

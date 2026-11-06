@@ -7,6 +7,10 @@
 - Added `Agent.queuedMessageGate` to filter queued messages before delivery and observe claimed messages returned undelivered.
 - Added `wireToolsFingerprint()`, returning a hash of the tool specs sent with a request.
 
+### Fixed
+
+- Compaction keeps reasoning cut off by the output-token cap together with the prompt it answers, and context estimates count that reasoning while it replays ([#18064](https://github.com/can1357/oh-my-pi/pull/18064) by [@SergioHC95](https://github.com/SergioHC95))
+
 ## [18.16.0] - 2026-11-02
 
 ### Changed

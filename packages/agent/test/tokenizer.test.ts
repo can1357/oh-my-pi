@@ -751,9 +751,9 @@ describe("replayed Responses reasoning", () => {
 				),
 			],
 			["reasoning-only", responsesTurn(sol, history(sol.provider, [reasoningItem]), [signedThinking], "stop")],
-			// transformMessages drops thinking-only turns that were cut off, even
-			// when their native items would otherwise replay.
-			...(["length", "error", "aborted"] as const).map((stopReason): [string, AssistantMessage] => [
+			// transformMessages drops thinking-only turns that failed, even when
+			// their native items would otherwise replay.
+			...(["error", "aborted"] as const).map((stopReason): [string, AssistantMessage] => [
 				`thinking-only ${stopReason}`,
 				responsesTurn(sol, history(sol.provider, [reasoningItem, searchItem]), [signedThinking], stopReason),
 			]),
@@ -772,6 +772,22 @@ describe("replayed Responses reasoning", () => {
 		const cutOffCall = responsesTurn(sol, replayed(), [signedThinking, toolCall], "length");
 		expect(wireReasoning(cutOffCall)).toBe(1);
 		expect(tokenizer.countMessage(cutOffCall, floored)).toBe(visibleTokens(tokenizer) + REASONING_TOKENS);
+		// Reasoning cut off by the output cap is retained for the next response to continue,
+		// including a reasoning-only payload the sanitizer drops from a finished turn.
+		const retained: Array<[string, AssistantMessage]> = [
+			[
+				"thinking-only length",
+				responsesTurn(sol, history(sol.provider, [reasoningItem, searchItem]), [signedThinking], "length"),
+			],
+			[
+				"reasoning-only length",
+				responsesTurn(sol, history(sol.provider, [reasoningItem]), [signedThinking], "length"),
+			],
+		];
+		for (const [name, turn] of retained) {
+			expect({ name, wire: wireReasoning(turn) }).toEqual({ name, wire: 1 });
+			expect({ name, floor: tokenizer.countMessage(turn, floored) }).toEqual({ name, floor: REASONING_TOKENS });
+		}
 	});
 
 	test("an Agent recounts replayed reasoning after switching to a model it does not replay to", () => {
