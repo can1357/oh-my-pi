@@ -1320,7 +1320,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					agentSource,
 					modelRole: policy.modelRole,
 					status: "pending",
-					task: renderSubagentUserPrompt(assignment, item.taskFile !== undefined),
+					task: renderSubagentUserPrompt(assignment, { verbatim: item.taskFile !== undefined }),
 					assignment,
 					...(item.taskFile !== undefined ? { taskFile: item.taskFile, taskFileSha256: item.taskFileSha256 } : {}),
 					recentTools: [],

@@ -270,7 +270,10 @@ export class StructuredSubagentError extends Error {
 
 const PLAN_MODE_TOOLS = ["read", "grep", "glob", "web_search"] as const;
 
-export function renderSubagentUserPrompt(assignment: string, verbatim = false): string {
+export function renderSubagentUserPrompt(
+	assignment: string,
+	{ verbatim = false }: { verbatim?: boolean } = {},
+): string {
 	const context = { assignment: assignment.trim() };
 	return verbatim
 		? prompt.compile(subagentUserPromptTemplate)(context).trim()
@@ -775,7 +778,7 @@ function buildExecutorOptions(
 		getApiKey: session.getApiKey,
 		credentialSourceSessionId: session.getCredentialSourceSessionId?.(),
 		agent: policy.effectiveAgent,
-		task: renderSubagentUserPrompt(request.assignment, request.verbatimAssignment),
+		task: renderSubagentUserPrompt(request.assignment, { verbatim: request.verbatimAssignment }),
 		assignment: request.assignment.trim(),
 		preparedSession,
 		context: request.context?.trim() || undefined,
@@ -900,7 +903,7 @@ function buildFailureResult(
 			id,
 			agent: policy.agent.name,
 			agentSource: policy.agent.source,
-			task: renderSubagentUserPrompt(request.assignment, request.verbatimAssignment),
+			task: renderSubagentUserPrompt(request.assignment, { verbatim: request.verbatimAssignment }),
 			assignment: request.assignment.trim(),
 			description: request.invocationKind === "eval" ? trimToUndefined(request.identity?.label) : undefined,
 			exitCode: 1,
