@@ -142,6 +142,8 @@ export function initProgramStatus(options?: { startupRun?: boolean }): void {
 	if (options?.startupRun) {
 		runtime.startup = { state: "working" };
 		runtime.status = runtime.startup;
+		// Not `setRunStatus`: the record waits for `setProgramStatusEnabled`, but the title follows now.
+		setTerminalTitleState(titleState(runtime.status));
 	}
 }
 

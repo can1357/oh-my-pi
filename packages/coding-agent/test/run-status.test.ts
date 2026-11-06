@@ -142,6 +142,8 @@ describe("run status OSC 7501 reporting", () => {
 
 		// The prompt fails before its turn starts: the hold goes back to idle.
 		initProgramStatus({ startupRun: true });
+		// The title separator shows the hold too, not only the record.
+		expect(titleGenerator.setTerminalTitleState).toHaveBeenLastCalledWith("working");
 		setProgramStatusEnabled(true);
 		settleStartupRun();
 		expect(writes).toEqual([report("state=working:app=omp"), report("state=idle:app=omp")]);

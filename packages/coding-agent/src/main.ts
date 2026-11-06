@@ -198,7 +198,7 @@ import {
 	cfgSessionWorktreeScope,
 } from "./session/settings";
 import { cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings";
-import { cfgTaskAgentIdleTtlMs, cfgWorktreeOnStart } from "./task/settings";
+import { cfgTaskAgentIdleTtlMs } from "./task/settings";
 import { cfgSkillsIncludeSkills } from "./extensibility/settings";
 import { cfgWorkspaceAdditionalDirectories } from "./session/context-settings";
 
@@ -716,17 +716,19 @@ async function runInteractiveMode(
 			await setupWizard.markSetupWizardComplete(settings);
 		}
 		playStartupSplash = showStartupSplash && setupScenes.length === 0;
+		const offersStartupWorktree = !resuming && joinLink === undefined;
 
 		await logger.time("InteractiveMode.init", () =>
 			mode.init({
 				suppressWelcomeIntro: resuming || setupScenes.length > 0 || playStartupSplash,
 				clearInitialTerminalHistory: true,
 				autoStartCollab: joinLink === undefined,
-				// Setup scenes and the `worktree.onStart: ask` question wait on the user
-				// before any prompt runs, so they keep the boot `idle`.
+				// Setup scenes and the startup worktree question wait on the user before any
+				// prompt runs, so they keep the boot `idle`. The worktree check runs before its
+				// async git check, so a folder where the question never shows also keeps `idle`.
 				startupRun:
 					setupScenes.length === 0 &&
-					!(cfgWorktreeOnStart.get(settings) === "ask" && !resuming && joinLink === undefined) &&
+					!(offersStartupWorktree && mode.mayAskForStartupWorktree()) &&
 					(startupGoal !== undefined || initialMessage !== undefined || initialMessages.length > 0),
 			}),
 		);
@@ -785,7 +787,7 @@ async function runInteractiveMode(
 			}
 		}
 
-		if (!resuming && joinLink === undefined) {
+		if (offersStartupWorktree) {
 			await mode.maybeAutoCreateWorktree();
 		}
 

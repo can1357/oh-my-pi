@@ -9294,16 +9294,28 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/**
+	 * Whether {@link maybeAutoCreateWorktree} may stop to ask the user (`worktree.onStart: ask`).
+	 * It answers before the async git check, so it also says yes in a folder where the question
+	 * never shows.
+	 */
+	mayAskForStartupWorktree(): boolean {
+		return cfgWorktreeOnStart.get(this.settings) === "ask";
+	}
+
+	/**
 	 * Apply `worktree.onStart` to a fresh launch: optionally move the session into
 	 * a new worktree forked from clean `HEAD`. Silent no-op outside git checkouts;
 	 * failures become a warning so startup continues.
 	 */
 	async maybeAutoCreateWorktree(): Promise<void> {
 		try {
-			const policy = cfgWorktreeOnStart.get(this.settings);
-			if (policy === "off" || !(await canAutoCreateWorktree(this.sessionManager.getCwd()))) return;
 			if (
-				policy === "ask" &&
+				cfgWorktreeOnStart.get(this.settings) === "off" ||
+				!(await canAutoCreateWorktree(this.sessionManager.getCwd()))
+			)
+				return;
+			if (
+				this.mayAskForStartupWorktree() &&
 				!(await this.showHookConfirm(
 					"Create a worktree for this session?",
 					"Work happens on a new wt/* branch; this checkout stays untouched.",
