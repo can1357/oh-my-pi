@@ -11,6 +11,7 @@ const host: SchemeHost = {
 	securityEnabled: false,
 	settingsApproval: false,
 	outReplies: false,
+	subagent: false,
 };
 
 /** A caller session; `enabled` undefined leaves `out.enabled` unset. */

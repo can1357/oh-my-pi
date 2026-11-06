@@ -110,7 +110,29 @@ pub struct Vproc {
 	/// zsh state of a vproc running zsh or mode-switching code (`None` for
 	/// pure bash: nothing to keep, nothing to check).
 	pub zsh:           Option<Box<VprocZsh>>,
+	/// The line editor's state ([`super::zle::Zle`]): keymaps, widgets,
+	/// kill ring and the line being edited; created when ZLE is first used.
+	/// Inherited (copied) by children; never serialized: a restored shell
+	/// starts with zsh's defaults and no line in progress.
+	pub zle:           Option<Box<super::zle::Zle>>,
 }
+
+/// The terminal of the session a vproc runs in when it is not the shell's
+/// ([`VprocZsh::ctty`]).
+#[derive(Clone, Debug, Default)]
+pub struct Ctty(pub Option<FdRef>);
+
+impl PartialEq for Ctty {
+	fn eq(&self, other: &Self) -> bool {
+		match (&self.0, &other.0) {
+			(Some(a), Some(b)) => a.same(b),
+			(None, None) => true,
+			_ => false,
+		}
+	}
+}
+
+impl Eq for Ctty {}
 
 /// A vproc's zsh state ([`Vproc::zsh`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,26 +140,78 @@ pub struct VprocZsh {
 	/// zsh's current sticky emulation (zsh's global `sticky`): set while
 	/// `emulate MODE -c` runs and inside a sticky function; a function
 	/// defined meanwhile records it.
-	pub sticky:       Option<crate::bash::store::Sticky>,
+	pub sticky:             Option<crate::bash::store::Sticky>,
 	/// What frames restore when they end: `(frame count with the frame on
 	/// top, saved state)` for the `eval` frame of `emulate … -c` (zsh
 	/// `bin_emulate`) and a trap running in another mode; innermost last.
-	pub restores:     Vec<(u32, crate::bash::store::ZshScope)>,
+	pub restores:           Vec<(u32, crate::bash::store::ZshScope)>,
 	/// zsh `exit_pending`: `exit N` ran inside a function: `(N, the call
 	/// depth then)` (zsh `exit_val`, `exit_level`). The functions return one
 	/// by one down from that depth (their `always` lists and `EXIT` traps
 	/// run; a call those lists make runs to its end), then the shell exits
 	/// with N.
-	pub exit_pending: Option<(i32, u32)>,
+	pub exit_pending:       Option<(i32, u32)>,
 	/// The diagnostic site a subshell of zsh code inherits (zsh forks keep
 	/// `scriptname`): its parent's script name and the script line its
 	/// lines count from (a function's definition line); used when none of
 	/// its own frames names a site (`Kernel::zsh_site`).
-	pub site:         Option<(BString, u32)>,
+	pub site:               Option<(BString, u32)>,
 	/// The `zsh_eval_context` a subshell of zsh code starts with: its
 	/// parent's when it started (zsh forks keep the context stack); empty
 	/// for none.
-	pub context:      Vec<BString>,
+	pub context:            Vec<BString>,
+	/// The `zsh_eval_context` word of a subshell's first frame when it is
+	/// not a command substitution's (`zpty`, whose command zsh runs with
+	/// `execode(…, "zpty")`).
+	pub first_context:      Option<BString>,
+	/// zsh/zpty's commands (zsh `ptycmds`); a subshell starts with a copy,
+	/// as a zsh fork keeps the table.
+	pub ptys:               crate::bash::vm::builtins::zsh_mod_zpty::PtyTable,
+	/// The terminal of the session this vproc runs in (zsh's `SHTTY` of a
+	/// zpty child): the slave of the `zpty` that started it (or an
+	/// ancestor). Inherited by children, opened for `/dev/tty`, handed to
+	/// every external it spawns ([`crate::bash::SpawnSpec::ctty`]). Never
+	/// serialized: a pty is a host object, lost on restore like the host fds.
+	#[serde(skip)]
+	pub ctty:               Ctty,
+	/// zsh/curses' state (ncurses' screen and zsh's window table) once
+	/// `zcurses init` ran; a subshell starts with a copy, as a zsh fork has
+	/// its own.
+	pub curses:             Option<Box<crate::bash::vm::builtins::zsh_mod_curses::screen::Curses>>,
+	/// zsh `zexit`'s hooks under way or done ([`crate::bash::vm::zsh::zexit`]).
+	/// A subshell starts without.
+	#[serde(default)]
+	pub zexit:              Option<crate::bash::vm::zsh::zexit::ZExit>,
+	/// The shell is exiting because of an `exit` inside a function (zsh's
+	/// `exit_pending` when `zexit` runs; the engine clears
+	/// [`Self::exit_pending`] once the functions have returned).
+	#[serde(default)]
+	pub exit_from_function: bool,
+	/// zsh's `lastmathval`: the value of the last arithmetic evaluation,
+	/// which a user math function returns (zsh `callmathfunc`).
+	#[serde(default)]
+	pub last_math:          Option<LastMath>,
+	/// Files of `=(…)` substitutions: `(frame depth, path)` as
+	/// [`Vproc::procsubs`]; removed when the command is over (zsh's job
+	/// `filelist`). A subshell starts without.
+	#[serde(default)]
+	pub tempfiles:          Vec<(u32, BString)>,
+	/// The code (and line) of a glob's shell-code qualifier to run above
+	/// the op that returned [`Flow::Call`](super::exec::Flow::Call) for it
+	/// (zsh `qualsheval`); pushed by the run loop, which drops it when the
+	/// op returned anything else. Never imaged: it lives within one op step.
+	#[serde(skip)]
+	pub glob_hook:          Option<(BString, u32)>,
+}
+
+/// A number as zsh's `lastmathval` keeps it ([`VprocZsh::last_math`]); a
+/// float by its bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LastMath {
+	/// An integer.
+	Int(i64),
+	/// A double, `f64::to_bits`.
+	Float(u64),
 }
 
 impl VprocZsh {
@@ -148,6 +222,15 @@ impl VprocZsh {
 			&& self.exit_pending.is_none()
 			&& self.site.is_none()
 			&& self.context.is_empty()
+			&& self.first_context.is_none()
+			&& self.tempfiles.is_empty()
+			&& self.ptys.is_empty()
+			&& self.ctty.0.is_none()
+			&& self.curses.is_none()
+			&& self.zexit.is_none()
+			&& !self.exit_from_function
+			&& self.last_math.is_none()
+			&& self.glob_hook.is_none()
 	}
 }
 
@@ -192,7 +275,7 @@ impl Vproc {
 	}
 
 	/// Drop the side table once it holds nothing.
-	fn trim_zsh(&mut self) {
+	pub(super) fn trim_zsh(&mut self) {
 		if self.zsh.as_deref().is_some_and(VprocZsh::is_empty) {
 			self.zsh = None;
 		}
@@ -741,11 +824,15 @@ pub enum FrameKind {
 	/// A function call (a scope is pushed with it).
 	Function {
 		/// Name.
-		name: BString,
+		name:     BString,
 		/// Its scope holds a [`crate::bash::store::ZshScope`] (a zsh-dialect or
 		/// mode-switching call): the return restores from it
 		/// (`mode::leave_call`). False for a bash call within bash.
-		zsh:  bool,
+		zsh:      bool,
+		/// The call that loaded the function (zsh `execautofn`, which runs
+		/// the loaded body with `execode(…, "loadautofunc")`):
+		/// `zsh_eval_context` shows `loadautofunc` after its `shfunc`.
+		autoload: bool,
 	},
 	/// The code of a child vproc: `SubExit`/`End` exits the vproc.
 	Subshell,
@@ -754,6 +841,14 @@ pub enum FrameKind {
 	/// The last stage of a pipeline run in the current shell (`lastpipe`):
 	/// `SubExit` pops, and the `Spawn` op collects its status.
 	Stage,
+	/// The base frame of a job the shell suspended
+	/// ([`super::jobctl::suspend`]): a subshell frame that also ends its
+	/// vproc when its pc reaches `stop_at` (the end of the top-level
+	/// pipeline it took over from the shell).
+	Job {
+		/// Where the job ends.
+		stop_at: u32,
+	},
 }
 
 /// Parser state a [`FrameKind::Script`] keeps between its commands.
@@ -787,6 +882,11 @@ pub enum ScriptKind {
 	Eval,
 	/// `source` / `.` (a `return` target).
 	Source,
+	/// Shell code the line editor runs (a user widget, a hook function
+	/// like `precmd` or `zle-line-init`): the call of a function, which
+	/// zsh makes directly, so it shows in no call context of its own
+	/// (`zsh_eval_context`, diagnostics); the editor restores `$?`.
+	Hook,
 	/// A trap action, restoring the interrupted status when it finishes.
 	Trap {
 		key:           crate::bash::store::TrapKey,
@@ -797,6 +897,36 @@ pub enum ScriptKind {
 		/// the trap ends.
 		exit:          bool,
 	},
+	/// Shell code a builtin runs as zsh's `execode`/`execstring` do with
+	/// a context name (`zstyle -e` values, `zregexparse` guards and
+	/// actions): it parses whole, shows in `zsh_eval_context` under its
+	/// context, reports diagnostics under the caller's name with the line
+	/// numbers it was parsed at, and an error in it ends only the code
+	/// (recorded in [`crate::bash::store::MiscKey::ZshCodeError`] for the
+	/// builtin, which runs again when the frame returns).
+	Code(CodeKind),
+}
+
+/// What a [`ScriptKind::Code`] frame runs (its `zsh_eval_context` word).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CodeKind {
+	/// A `zstyle -e` value (`style`).
+	Style,
+	/// A `zregexparse` guard (`zregexparse-guard`).
+	RegexGuard,
+	/// A `zregexparse` action (`zregexparse-action`).
+	RegexAction,
+}
+
+impl CodeKind {
+	/// The context name zsh passes to `execode`/`execstring`.
+	pub const fn context(self) -> &'static str {
+		match self {
+			Self::Style => "style",
+			Self::RegexGuard => "zregexparse-guard",
+			Self::RegexAction => "zregexparse-action",
+		}
+	}
 }
 
 impl FrameKind {
@@ -839,6 +969,13 @@ pub struct Frame {
 	pub debug_trap_local:  bool,
 	pub err_trap_local:    bool,
 	pub return_trap_local: bool,
+	/// A zsh function call with `PM_TAGGED_LOCAL` in effect (`functions
+	/// -T`, `function -T`, or an anonymous function called from such a
+	/// call): the named functions it calls run with `xtrace` off.
+	pub trace_local:       bool,
+	/// zsh: `ERR_EXIT` as it was when the DEBUG trap at this frame's list
+	/// marker ([`Self::debug_pc`]) started, put back when it ends.
+	pub debug_errexit:     bool,
 	/// A failing nested command already ran the ERR trap.
 	pub err_reported:      bool,
 	/// Called (function, `eval`, `source`, subshell) from a context where
@@ -874,6 +1011,8 @@ impl Frame {
 			debug_trap_local: false,
 			err_trap_local: false,
 			return_trap_local: false,
+			trace_local: false,
+			debug_errexit: false,
 			err_reported: false,
 			ignore_errexit: false,
 			subshell_line: None,
@@ -998,6 +1137,16 @@ pub enum Atom {
 	Sub { out: BString, status: i32 },
 	/// A side effect that already happened.
 	Done,
+	/// A branch decided on the first pass, whose own side effect would
+	/// change the decision on the replay (zsh `${name:=word}`).
+	Branch(bool),
+	/// An assignment a pass made (zsh `${name::=word}`) and what it
+	/// replaced: `old` is `Str(None)` (unset), `Str(Some)` (a scalar) or
+	/// `List` (an array); `new` the scalar it left (`None`: an array). The
+	/// next pass puts `old` back first while `name` still holds `new`, then
+	/// assigns again as it replays, so it sees the first pass's state at
+	/// every point.
+	Wrote { name: BString, old: Box<Self>, new: Option<BString> },
 }
 
 /// Per-op scratch: expansion replay logs, staged progress and transient
@@ -1131,24 +1280,28 @@ impl ScratchIo {
 pub struct ScratchZsh {
 	/// The zsh filename-generation walk of the `Glob` probe in flight (not
 	/// imaged, like [`ScratchIo::walk`]: a restored op restarts its walk).
-	pub zglob:  Option<Box<super::zsh::zglob::Walk>>,
+	pub zglob:     Option<Box<super::zsh::zglob::Walk>>,
 	/// zsh `multios`: per fd redirected by this list, whether it is an
 	/// output and the objects it was redirected to so far (zsh `mfds`).
-	pub multio: Vec<(i32, bool, Vec<FdRef>)>,
+	pub multio:    Vec<(i32, bool, Vec<FdRef>)>,
 	/// zsh `xpandredir`: a redirection whose target expanded to several
 	/// words becomes one redirection per word (index in the list, word),
 	/// applied after the list's own; [`RedirProgress::done`] counts on
 	/// through them.
-	pub more:   Vec<(u32, BString)>,
+	pub more:      Vec<(u32, BString)>,
+	/// The `fcntl` lock a history file operation holds (zsh `flock_fd`,
+	/// `histfcntllock`), released with the op (not imaged).
+	pub hist_lock: Option<Box<dyn crate::bash::fs::File>>,
 }
 
 impl ScratchZsh {
 	/// Clear for the next op, keeping the vectors' allocations.
 	fn clear(&mut self) {
-		let Self { zglob, multio, more } = self;
+		let Self { zglob, multio, more, hist_lock } = self;
 		*zglob = None;
 		multio.clear();
 		more.clear();
+		*hist_lock = None;
 	}
 }
 
@@ -1180,6 +1333,16 @@ pub enum PendingSub {
 	Fork { vpid: Vpid, capture: Capture },
 	/// `${ ;}` / `${| ;}`: a `NoFork` frame above this one.
 	NoFork { capture: Capture, value: bool },
+	/// A zsh hook function call run in the current shell
+	/// ([`crate::bash::vm::expand::Stop::ZshSub::here`]): a script frame
+	/// above this one; `status` is the caller's `$?`, put back when it ends.
+	Here { status: i32 },
+	/// A zsh user math function's shell function run in the current shell
+	/// ([`crate::bash::vm::expand::Stop::MathCall`]): a function frame above
+	/// this one; as [`Self::Here`], with its value ([`VprocZsh::last_math`])
+	/// logged too, in the replay log `slot` of the expansion that called it
+	/// (an op may expand several: `[[ ]]` operands, then its arithmetic).
+	Math { status: i32, slot: Slot },
 }
 
 /// Progress through a redirection list.
@@ -1228,6 +1391,23 @@ pub enum Probe {
 	/// The canonical physical path of an absolute path (zsh's `:A`/`:P`
 	/// modifiers): [`ProbeResult::Path`], `None` when it does not resolve.
 	RealPath { path: BString },
+	/// An fd-level operation of a zsh module builtin (`sysread`, `zselect`,
+	/// `sysopen`, sockets): [`ProbeResult::Fd`]. Asked by builtins only
+	/// (performed by [`super::probe::perform_mut`]).
+	Fd(Box<super::fdprobe::FdProbe>),
+	/// A filesystem request answered with its `errno` (zsh/files, zsh/stat,
+	/// zsh/attr, zsh/mapfile): [`ProbeResult::Fs`]. `seq` numbers the
+	/// asker's requests, so one made twice is asked twice.
+	Fs { seq: u32, req: Box<super::fsprobe::FsReq> },
+	/// An operation of the zsh/zftp `zftp` builtin (network, terminal,
+	/// files): [`ProbeResult::Zftp`]. `seq` numbers the builtin's
+	/// operations within the command. Performed by
+	/// [`super::probe::perform_mut`].
+	Zftp { seq: u32, op: Box<super::builtins::zsh_mod_zftp::ZftpOp> },
+	/// A filesystem or clock step of a history file operation
+	/// ([`super::builtins::history::io`]): [`ProbeResult::Hist`]. `seq`
+	/// numbers the operation's steps.
+	Hist { seq: u32, op: Box<super::builtins::history::io::HistOp> },
 }
 
 /// Answer of a [`Probe`].
@@ -1246,6 +1426,14 @@ pub enum ProbeResult {
 	},
 	/// Matching paths, sorted (empty: no match).
 	Paths(Vec<BString>),
+	/// Answer of a [`Probe::Fd`].
+	Fd(Box<super::fdprobe::FdAnswer>),
+	/// Answer of a [`Probe::Fs`].
+	Fs(super::fsprobe::FsResult),
+	/// Answer of a [`Probe::Zftp`].
+	Zftp(Box<super::builtins::zsh_mod_zftp::ZftpAns>),
+	/// Answer of a [`Probe::Hist`].
+	Hist(Box<super::builtins::history::io::HistAnswer>),
 }
 
 /// Serializable progress of an `Exec` (survives externalize/restore).
@@ -1472,6 +1660,12 @@ pub enum Live {
 	OpenDir(Box<dyn FsPending<Box<dyn crate::bash::fs::DirIter>>>),
 	/// The listing of a glob walk.
 	Dir(Box<dyn crate::bash::fs::DirIter>),
+	/// A socket or lock operation of a [`Probe::Fd`] in flight.
+	Fd(Box<super::fdprobe::FdLive>),
+	/// A request of a [`Probe::Fs`] in flight.
+	Fs(Box<super::fsprobe::FsLive>),
+	/// An operation of a [`Probe::Zftp`] in flight (sockets, timers).
+	Zftp(Box<super::builtins::zsh_mod_zftp::ZftpLive>),
 }
 
 impl Live {
@@ -1491,8 +1685,11 @@ impl Live {
 			| Self::Spawn(_) => true,
 			// A FIFO open is a rendezvous with the other end.
 			Self::Open(open) => open.reissuable(),
+			Self::Fd(live) => live.is_idempotent(),
+			Self::Fs(live) => live.idempotent,
 			Self::File(file) => file.kind() == crate::bash::fs::FileKind::Regular,
-			Self::Task(_) | Self::Ext(_) | Self::Timer(_) | Self::None => false,
+			// Network traffic is not asked twice.
+			Self::Task(_) | Self::Ext(_) | Self::Timer(_) | Self::Zftp(_) | Self::None => false,
 		}
 	}
 }
@@ -1507,8 +1704,9 @@ impl Live {
 // Host lineage (`Vproc::lineage`, 8 B: a `u32` label and a flag) added at
 // most 8 B to that, still under 2,048. The resumable `mapfile -C` counter
 // (`ExecState::resumed`, 368 → 376 B): the bench measured 1,832 B per idle
-// vproc with both.
-const _: () = assert!(size_of::<Vproc>() <= 664, "Vproc grew (idle vproc ≤ 2 KiB)");
+// vproc with both. The line editor's boxed state (`Vproc::zle`, 8 B) brings
+// that to at most 1,840 B.
+const _: () = assert!(size_of::<Vproc>() <= 672, "Vproc grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<Frame>() <= 256, "Frame grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<Scratch>() <= 216, "Scratch grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<ExecState>() <= 376, "ExecState grew (idle vproc ≤ 2 KiB)");

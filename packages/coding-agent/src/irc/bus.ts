@@ -16,9 +16,32 @@ import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry
 import type { CustomMessage } from "../session/messages";
 
 interface IrcWaiter {
-	from?: string;
+	filter: IrcWaitFilter;
 	resolve: (msg: IrcMessage) => void;
 	cancel: () => void;
+}
+
+/** Which messages a bus {@link IrcBusApi.wait} consumes. */
+export interface IrcWaitFilter {
+	/** Only messages from this agent. */
+	from?: string;
+	/**
+	 * Skip broadcast legs and progress notes, which ask the waiter nothing: they
+	 * reach it through ordinary delivery, a non-interrupting aside when it is busy.
+	 */
+	directOnly?: boolean;
+	/**
+	 * With `directOnly`, still take a broadcast from these agents: the waiter
+	 * asked them something, and a broadcast answers it (see {@link IrcBusApi.unansweredSends}).
+	 */
+	repliesFrom?: readonly string[];
+}
+
+/** Whether a bus wait under `filter` consumes `msg`. */
+export function ircWaitAccepts(filter: IrcWaitFilter, msg: IrcMessage): boolean {
+	if (filter.from !== undefined && msg.from !== filter.from) return false;
+	if (!filter.directOnly || (!msg.broadcast && !msg.progress)) return true;
+	return !msg.progress && (filter.repliesFrom?.includes(msg.from) ?? false);
 }
 
 /** When a send went out: wall-clock `ts`, and `seq` to order sends within one millisecond. */
@@ -33,15 +56,15 @@ const MAILBOX_CAP = 100;
 /** Public surface of the process-global IRC bus, implemented locally on main and by a proxy in workers. */
 export interface IrcBusApi {
 	/** Fire-and-forget delivery; the receipt reports how the message reached the recipient. */
-	send(msg: Omit<IrcMessage, "id" | "ts">, opts?: { suppressRelay?: boolean }): Promise<IrcDeliveryReceipt>;
+	send(msg: Omit<IrcMessage, "id" | "ts">): Promise<IrcDeliveryReceipt>;
 	/** Whether `from` successfully sent `to` anything, progress included, at or after `sinceTs`. */
 	sentSince(from: string, to: string, sinceTs: number): boolean;
 	/** Agents `from` messaged directly at or after `sinceTs` that have not answered since. */
 	unansweredSends(from: string, sinceTs: number): Array<{ to: string; sentAt: number; promised: boolean }>;
-	/** Block until a message for `agentId` arrives; null on timeout. */
+	/** Block until a message for `agentId` that `filter` accepts arrives; null on timeout. */
 	wait(
 		agentId: string,
-		filter: { from?: string },
+		filter: IrcWaitFilter,
 		timeoutMs: number,
 		signal?: AbortSignal,
 		options?: { drainPending?: boolean },
@@ -118,18 +141,13 @@ export class IrcBus implements IrcBusApi {
 	 * context, so buffering it too would double-deliver via a later
 	 * `wait`/`inbox` and inflate unread counts. Only a failed live hand-off
 	 * is buffered for the recipient to drain later.
-	 *
-	 * `opts.suppressRelay` skips the display-only main-UI relay for this leg.
-	 * Set by broadcast fan-out when the same broadcast also targets the main
-	 * agent directly: the main agent then already sees the body as its own
-	 * incoming card, so relaying the sibling legs would duplicate it.
 	 */
-	async send(msg: Omit<IrcMessage, "id" | "ts">, opts?: { suppressRelay?: boolean }): Promise<IrcDeliveryReceipt> {
+	async send(msg: Omit<IrcMessage, "id" | "ts">): Promise<IrcDeliveryReceipt> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
 		// Taken before delivery: a reply sent while this message is still being
 		// delivered must still order after it.
 		const mark: SendMark = { ts: message.ts, seq: ++this.#sendSeq };
-		const receipt = await this.#deliver(message, opts);
+		const receipt = await this.#deliver(message);
 		if (receipt.outcome !== "failed") {
 			if (message.progress) {
 				this.#record(this.#lastProgress, message.from, message.to, mark);
@@ -191,7 +209,7 @@ export class IrcBus implements IrcBusApi {
 		return unanswered;
 	}
 
-	async #deliver(message: IrcMessage, opts?: { suppressRelay?: boolean }): Promise<IrcDeliveryReceipt> {
+	async #deliver(message: IrcMessage): Promise<IrcDeliveryReceipt> {
 		const ref = this.#registry.get(message.to);
 		if (!ref) {
 			return {
@@ -246,10 +264,10 @@ export class IrcBus implements IrcBusApi {
 		// A pending `wait` from the recipient consumes the message directly —
 		// it is returned from their irc tool call and never hits the inbox or
 		// the session injection path.
-		const waiter = this.#takeMatchingWaiter(message.to, message.from);
+		const waiter = this.#takeMatchingWaiter(message);
 		if (waiter) {
 			waiter.resolve(message);
-			if (!opts?.suppressRelay) this.#relayToMainUi(message);
+			this.#relayToMainUi(message);
 			return { to: message.to, outcome: revived ? "revived" : "injected" };
 		}
 
@@ -260,7 +278,7 @@ export class IrcBus implements IrcBusApi {
 
 		try {
 			const delivery = await session.deliverIrcMessage(message);
-			if (!opts?.suppressRelay) this.#relayToMainUi(message);
+			this.#relayToMainUi(message);
 			return { to: message.to, outcome: revived ? "revived" : delivery };
 		} catch (error) {
 			// Live hand-off failed (e.g. recipient disposed mid-shutdown): buffer
@@ -277,15 +295,15 @@ export class IrcBus implements IrcBusApi {
 	}
 
 	/**
-	 * Block until a message for `agentId` (optionally from `filter.from`)
-	 * arrives; consume + return it. Null on timeout (`timeoutMs <= 0` waits
+	 * Block until a message for `agentId` that `filter` accepts arrives;
+	 * consume + return it. Null on timeout (`timeoutMs <= 0` waits
 	 * forever). Rejects when `signal` aborts. By default, already-buffered
 	 * mail satisfies the wait before parking a future waiter; callers that
 	 * need a strictly future reply can disable that drain.
 	 */
 	async wait(
 		agentId: string,
-		filter: { from?: string },
+		filter: IrcWaitFilter,
 		timeoutMs: number,
 		signal?: AbortSignal,
 		options?: { drainPending?: boolean },
@@ -296,7 +314,7 @@ export class IrcBus implements IrcBusApi {
 
 		if (options?.drainPending !== false) {
 			// Already-pending mail satisfies the wait without parking a waiter.
-			const pending = this.#takeFromMailbox(agentId, filter.from);
+			const pending = this.#takeFromMailbox(agentId, msg => ircWaitAccepts(filter, msg));
 			if (pending) return pending;
 		}
 
@@ -324,7 +342,7 @@ export class IrcBus implements IrcBusApi {
 		};
 
 		const waiter: IrcWaiter = {
-			from: filter.from,
+			filter,
 			resolve: msg => settle({ kind: "message", msg }),
 			cancel: () => cleanup(),
 		};
@@ -359,7 +377,7 @@ export class IrcBus implements IrcBusApi {
 	 * block without draining the entire backlog.
 	 */
 	take(agentId: string, from?: string): IrcMessage | undefined {
-		return this.#takeFromMailbox(agentId, from);
+		return this.#takeFromMailbox(agentId, msg => from === undefined || msg.from === from);
 	}
 
 	/** Unread count for the local Agent Hub overlay. */
@@ -384,14 +402,14 @@ export class IrcBus implements IrcBusApi {
 		}
 	}
 
-	/** Resolve the OLDEST waiter for `agentId` whose from-filter accepts `from`. */
-	#takeMatchingWaiter(agentId: string, from: string): IrcWaiter | undefined {
-		const waiters = this.#waiters.get(agentId);
+	/** Resolve the OLDEST waiter for the recipient whose filter accepts `message`. */
+	#takeMatchingWaiter(message: IrcMessage): IrcWaiter | undefined {
+		const waiters = this.#waiters.get(message.to);
 		if (!waiters) return undefined;
-		const index = waiters.findIndex(waiter => !waiter.from || waiter.from === from);
+		const index = waiters.findIndex(waiter => ircWaitAccepts(waiter.filter, message));
 		if (index === -1) return undefined;
 		const [waiter] = waiters.splice(index, 1);
-		if (waiters.length === 0) this.#waiters.delete(agentId);
+		if (waiters.length === 0) this.#waiters.delete(message.to);
 		return waiter;
 	}
 
@@ -403,11 +421,11 @@ export class IrcBus implements IrcBusApi {
 		if (waiters.length === 0) this.#waiters.delete(agentId);
 	}
 
-	#takeFromMailbox(agentId: string, from?: string): IrcMessage | undefined {
+	#takeFromMailbox(agentId: string, accepts: (msg: IrcMessage) => boolean): IrcMessage | undefined {
 		const mailbox = this.#mailboxes.get(agentId);
 		if (!mailbox) return undefined;
-		const index = from ? mailbox.findIndex(msg => msg.from === from) : 0;
-		if (index === -1 || mailbox.length === 0) return undefined;
+		const index = mailbox.findIndex(accepts);
+		if (index === -1) return undefined;
 		const [message] = mailbox.splice(index, 1);
 		if (mailbox.length === 0) this.#mailboxes.delete(agentId);
 		return message;

@@ -166,7 +166,7 @@ pub(super) fn metastrlen(m: &[u8], multibyte: bool) -> usize {
 /// Tokens stand for their characters; with `mb` a multibyte character is
 /// assembled from its (possibly metafied) bytes, and a byte that starts no
 /// character steps one byte.
-pub(super) fn metacharinc(pat: &[u8], pos: &mut usize, mb: bool) -> u32 {
+pub(crate) fn metacharinc(pat: &[u8], pos: &mut usize, mb: bool) -> u32 {
 	let at = |idx: usize| pat.get(idx).copied().unwrap_or(0);
 	let unit = |idx: usize| -> (u8, usize) {
 		let byte = at(idx);

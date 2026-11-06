@@ -59,6 +59,14 @@ pub trait StateStore {
 	/// # Errors
 	/// [`StoreError`] when the backend fails or a record cannot be decoded.
 	fn get(&mut self, key: Key<'_>) -> Result<Option<&Record>, StoreError>;
+	/// Whether some root scope may hold a local `name` ([`Key::Local`]).
+	/// A store that indexes local names answers `false` for a name no scope
+	/// declares, and a lookup then goes straight to the global; the default
+	/// `true` makes it read each scope that may bind one.
+	fn may_have_local(&mut self, _name: &[u8]) -> bool {
+		true
+	}
+
 	/// Install a scalar default whose host lookup can wait until observation.
 	///
 	/// Return `true` only when the store accepted the initializer. Reads,
@@ -377,8 +385,9 @@ pub enum Record {
 		/// zsh sticky emulation: set when it was defined while `emulate
 		/// MODE -c` ran; a call applies it (zsh `doshfunc`).
 		sticky: Option<Box<Sticky>>,
-		/// Canonical `declare -f` text, alias-free.
-		source: BString,
+		/// Canonical `declare -f` text, alias-free and materialized on first
+		/// read.
+		source: crate::bash::ir::FuncText,
 		/// Compiled body.
 		unit:   UnitId,
 		/// `-t`, `-x`.
@@ -446,25 +455,36 @@ pub struct Sticky {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZshScope {
 	/// The caller's mode.
-	pub mode:           ModeId,
+	pub mode:            ModeId,
 	/// Every zsh option at entry, env options included: restored on return
 	/// under `localoptions` or after a sticky switch.
-	pub opts:           ZshOpts,
+	pub opts:            ZshOpts,
 	/// The caller's sticky emulation (zsh's global `sticky`).
-	pub sticky:         Option<Sticky>,
+	pub sticky:          Option<Sticky>,
 	/// The call applied a sticky emulation: options, mode and sticky come
 	/// back unconditionally.
-	pub restore_sticky: bool,
+	pub restore_sticky:  bool,
 	/// Traps as they were before this call first changed them, for
 	/// `localtraps` (`None`: unset then).
-	pub traps:          Vec<(TrapKey, Option<Record>)>,
+	pub traps:           Vec<(TrapKey, Option<Record>)>,
 	/// [`LossyKind`] bits already reported through `Diag::ModeLossy` during
 	/// this call (one report per kind per crossing).
-	pub lossy:          u8,
+	pub lossy:           u8,
 	/// The pattern features `disable -p` had turned off at entry
 	/// ([`MiscKey::ZshPatDisables`]), restored on return under
 	/// `localpatterns` (zsh `startpatternscope`/`endpatternscope`).
-	pub pat_disables:   Vec<BString>,
+	pub pat_disables:    Vec<BString>,
+	/// A zsh function call (`runshfunc`): `$_` comes back on return, as it
+	/// was at entry ([`Self::underscore`]).
+	#[serde(default)]
+	pub keep_underscore: bool,
+	/// `$_` ([`MiscKey::LastArg`]) at entry, `None` when unset.
+	#[serde(default)]
+	pub underscore:      Option<BString>,
+	/// The computed specials made local in this scope
+	/// ([`Attrs::ZSH_LOCAL_SPECIAL`]), whose values come back on return.
+	#[serde(default)]
+	pub specials:        Vec<BString>,
 }
 
 /// Kinds of lossy mode crossing (`Diag::ModeLossy`), as bits
@@ -751,6 +771,15 @@ impl Attrs {
 	pub const TRACE: Self = Self(1 << 9);
 	/// `-u`
 	pub const UPPER: Self = Self(1 << 4);
+	/// zsh function `PM_ABSPATH_USED`: loaded from a directory named by an
+	/// absolute path (`autoload /dir/name`, or inherited from such a
+	/// caller); a bare `autoload name` it runs looks in that directory
+	/// first. Shares its bit with the variable-only [`Self::ZSH_FLOAT_F`].
+	pub const ZSH_ABSPATH_USED: Self = Self(1 << 14);
+	/// zsh function `autoload -d` (`PM_CUR_FPATH`): a definition not in
+	/// its load directory is looked for in `$fpath` too. Shares its bit
+	/// with the variable-only [`Self::ZSH_FLOAT_E`].
+	pub const ZSH_CUR_FPATH: Self = Self(1 << 13);
 	/// zsh `PM_DEFAULTED` beside [`Self::INVISIBLE`]: named by `typeset`
 	/// under `TYPESET_TO_UNSET` and not set yet (listed by name); an
 	/// invisible variable without it was unset (`unset` clears zsh's
@@ -768,8 +797,20 @@ impl Attrs {
 	pub const ZSH_KSHSTORED: Self = Self(1 << 48);
 	/// zsh `-L`: left-justify to the width.
 	pub const ZSH_LEFT: Self = Self(1 << 15);
+	/// zsh on a variable: the binding of a computed special made local
+	/// (`local SECONDS`, zsh `typeset_single`'s `newspecial`); the special
+	/// stays itself and the variable holds its value from before, put
+	/// back when the scope ends. Shares its bit with the function-only
+	/// [`Self::ZSH_TRACE_ONCE`].
+	pub const ZSH_LOCAL_SPECIAL: Self = Self(1 << 50);
 	/// Every zsh-only attribute (bash writes do not apply them).
 	pub const ZSH_ONLY: Self = Self(0x3f_e000);
+	/// zsh/param/private on a variable: a private parameter (`private`,
+	/// `local -P`), visible only in the function scope binding it, not in
+	/// the functions that function calls. Shares its bit with the
+	/// function-only [`Self::ZSH_UNALIASED`] (every flag bit is taken; a
+	/// variable and a function never carry each other's attributes).
+	pub const ZSH_PRIVATE: Self = Self(1 << 23);
 	/// zsh `-R`: right-justify with blanks.
 	pub const ZSH_RIGHT_B: Self = Self(1 << 16);
 	/// zsh `-Z`: right-justify with zeros.
@@ -959,6 +1000,19 @@ pub enum MiscKey {
 	/// number (bash's `history_base`) and `1` when the last entry is the
 	/// current input line, which `history -s` replaces.
 	HistoryCounts,
+	/// bash: the start time of each `history` entry (`Record::Words` of
+	/// decimal seconds, parallel to [`MiscKey::History`]; empty: unknown).
+	HistoryTimes,
+	/// zsh: the history events, oldest first (`Record::Misc`, postcard).
+	ZshHistory,
+	/// zsh: the rest of the history state (`Record::Misc`, postcard).
+	ZshHistoryState,
+	/// zsh: the event being read (`chline` and its state; `Record::Misc`,
+	/// postcard); absent between events.
+	ZshHistoryLine,
+	/// zsh: the `fc -p` history stack (`Record::Words`, one postcard level
+	/// each, bottom first).
+	ZshHistoryStack,
 	/// Environment strings whose names are not identifiers (`v[0]=x`),
 	/// as `name=value` (`Record::Words`): bash passes them on to the
 	/// commands it runs.
@@ -966,6 +1020,11 @@ pub enum MiscKey {
 	/// Signals ignored when a script run as a new shell (`ENOEXEC`) started
 	/// (`Record::Words` of signal names): bash will not trap or reset them.
 	HardIgnored,
+	/// zsh: signals whose `''` trap is the one recorded when the shell
+	/// started with them ignored (`QUIT`, zsh `init_signals`'s
+	/// `ZSIG_IGNORED` without trap text; `Record::Words` of signal names):
+	/// `localtraps` does not bring it back.
+	ZshEntryIgnored,
 	/// The vpid of the in-engine nested shell (`bash`/`sh` run through
 	/// `Resolved::SelfShell`) whose state a vproc's overlay holds: that
 	/// vproc is the nested shell itself, its children are its subshells.
@@ -1001,6 +1060,128 @@ pub enum MiscKey {
 	/// `ulimit` values set in the root shell (`Record::Words`, one
 	/// `resource:soft:hard` per limit, `-` for unlimited/unset).
 	Rlimits,
+	/// zsh's named directory table (`Record::Words`): the table's growth
+	/// count (decimal), then one name and one value per entry in zsh's
+	/// iteration order, the value being a flags byte (`ND_USERNAME`,
+	/// `ND_NOABBREV`) followed by the directory
+	/// ([`crate::bash::vm::zsh::nameddir`]).
+	ZshNamedDirs,
+	/// bash's `current_command_number` (decimal; absent: 1), the prompt's
+	/// `\#`: an interactive reader adds one per top-level command it runs.
+	BashCommandNumber,
+	/// zsh's `txtattrmask` (decimal): the text attributes prompt escapes
+	/// (`%B`, `%F{…}`, …) left set, which later expansions re-apply.
+	ZshTxtAttr,
+	/// zsh's module tables (`modulestab`, autoloadable builtins,
+	/// conditions, math functions and parameters) when they differ from
+	/// the ones zsh boots with (`Record::Misc`, postcard;
+	/// [`crate::bash::vm::builtins::zsh_module`]).
+	ZshModules,
+	/// zsh/mathfunc's `signgam`: the sign of Γ the last `lgamma()` left
+	/// (`Record::Misc`, decimal; absent: 0).
+	ZshSigngam,
+	/// zsh/net/tcp's session table (`ztcp_sessions`, `Record::Words`):
+	/// one entry per session in creation order, `FD TYPE LOCALIP LOCALPORT
+	/// PEERIP PEERPORT` with `TYPE` one of `L` (listener), `I` (inbound),
+	/// `O` (outbound), `Z` (zftp) ([`crate::bash::vm::builtins`]'s
+	/// `zsh_mod_tcp`).
+	ZshTcpSessions,
+	/// zsh's `procsubstpid`: the vproc id of the last process
+	/// substitution (`Record::Misc`, decimal; absent: 0).
+	ZshProcsubstPid,
+	/// The C `errno` the last failing zsh module builtin left
+	/// (`syserror` without arguments; `Record::Misc`, decimal; absent: 0).
+	ZshErrno,
+	/// zsh/rlimits' `current_limits` where they differ from the host's:
+	/// what `limit -s`/`ulimit` applied to the shell (`Record::Words`,
+	/// `resource:soft:hard`, `-` for unlimited).
+	ZshRlimits,
+	/// zsh/sched's events (`Record::Words`, `time flags command` per
+	/// event, in order).
+	ZshSched,
+	/// zsh/watch's last login table and check times (`Record::Words`).
+	ZshWatch,
+	/// zsh/zprof's profile; present exactly while zsh/zprof is loaded
+	/// (`Record::Words`).
+	ZshZprof,
+	/// zsh/example's parameters `exint`, `exstr`, `exarr`
+	/// (`Record::Words`).
+	ZshExample,
+	/// zsh/zutil's style table (`zstyle`; `Record::Misc`, postcard of
+	/// `zsh_mod_zutil::StyleTab`).
+	ZshStyles,
+	/// zsh/zutil builtins waiting for shell code they pushed (`zstyle -e`
+	/// values, `zregexparse` guards and actions): their progress by frame
+	/// depth (`Record::Misc`, postcard).
+	ZshCodePending,
+	/// An error ended the last `ScriptKind::Code` frame (zsh's `errflag`
+	/// after `execode`); the builtin that pushed it takes it
+	/// (`Record::Misc`).
+	ZshCodeError,
+	/// zsh/pcre's compiled pattern (`pcre_compile`): `Record::Words` of
+	/// the PCRE option bits (decimal) and the pattern; absent when none
+	/// was compiled or the last compile failed
+	/// ([`crate::bash::vm::builtins::zsh_mod_pcre`]).
+	ZshPcre,
+	/// zsh/zftp's sessions and connection state between commands
+	/// (`Record::Misc`, postcard;
+	/// [`crate::bash::vm::builtins::zsh_mod_zftp`]).
+	Zftp,
+	/// zsh/zftp's status files shared with subshells (zsh's `zfstatfd`;
+	/// `Record::Misc`, postcard), kept in the root store.
+	ZftpStatus,
+	/// The terminal ncurses holds for zsh/terminfo and zsh/termcap
+	/// (`cur_term`: the last `$TERM` set up successfully, or the exported
+	/// `TERM` when a module booted), whose capabilities `${(k)terminfo}`
+	/// and `${(k)termcap}` list (`Record::Misc`: a byte telling how ncurses
+	/// set it up, `S` `setupterm` only, `T` `tgetent`, `F` `tgetent` then a
+	/// failed one, then the terminal name;
+	/// [`crate::bash::vm::builtins::zsh_mod_terminfo`]).
+	ZshCurTerm,
+	/// `unset mapfile` left zsh/mapfile's special unset (zsh's `PM_UNSET`)
+	/// until the next assignment to it or a module unload (`Record::Misc`,
+	/// `1`; [`crate::bash::vm::builtins::zsh_mod_mapfile`]).
+	ZshMapfileUnset,
+	/// zsh/computil's `compdescribe` state between `-i`/`-I` and the `-g`
+	/// calls (`cd_state`; `Record::Misc`, postcard;
+	/// `crate::bash::vm::zle::comp::computil`).
+	ZshCompDescribe,
+	/// zsh/computil's `comparguments` state (`ca_laststate` and its
+	/// definitions; `Record::Misc`, postcard).
+	ZshCompArguments,
+	/// zsh/computil's `compvalues` state (`cv_laststate` and its
+	/// definitions; `Record::Misc`, postcard).
+	ZshCompValues,
+	/// zsh/computil's tag sets by function level (`comptags`,
+	/// `lasttaglevel`; `Record::Misc`, postcard).
+	ZshCompTags,
+	/// zsh/compctl's definitions (`compctltab`, the pattern compctls, the
+	/// `-C`/`-D`/`-T` compctls and the global matchers; `Record::Misc`,
+	/// postcard; `crate::bash::vm::zle::comp::compctl`).
+	ZshCompctl,
+	/// zsh's type of `SECONDS` (`setsecondstype`; `Record::Misc`): `i`, `E`
+	/// or `F`, then the base or precision (decimal); absent: an integer.
+	ZshSecondsType,
+	/// zsh started emulating sh or ksh (`Record::Misc` `1`; absent: it did
+	/// not): `createparamtable` left out the zsh-only specials and tied
+	/// none of the colon arrays (`special_params_sh`).
+	ZshStartedSh,
+	/// zsh's user-defined math functions (`functions -M`; zsh's
+	/// `MFF_USERFUNC` entries of `mathfuncs`; `Record::Words`): five words
+	/// per function, newest first as zsh lists them: the name, `s` for a
+	/// string function (`-Ms`) or empty, the fewest and most arguments
+	/// (decimal, -1 for no limit), and the shell function it calls (empty:
+	/// the same name) ([`crate::bash::vm::zsh::arith`]).
+	ZshMathFuncs,
+	/// The `PATH` whose directories zsh's command table holds every
+	/// command of (zsh `pathchecked` at the end of `path`, after
+	/// `fillcmdnamtable`; `Record::Misc`); absent once the table was
+	/// emptied (`PATH` assigned, `hash -r`).
+	ZshPathChecked,
+	/// `tool` for a shell created with [`crate::bash::Profile::Tool`]
+	/// (`Record::Misc`); absent for a user's shell. Nested shells see the
+	/// root's record.
+	Profile,
 }
 
 crate::bash::packed_names::packed_names!(MiscKey);

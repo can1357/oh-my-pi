@@ -1,0 +1,26 @@
+### "print -\t"
+% print -
+-a  -- with -c/-C, print arguments across before down
+-b  -- recognise bindkey escape sequences
+-c  -- print arguments in columns
+-C  -- print arguments in specified number of columns
+-D  -- substitute any arguments which are named directories using ~ notation
+-f  -- print arguments as for the printf builtin
+-i  -- case-insensitive sorting
+-l  -- print arguments separated by newlines
+-m  -- remove arguments not matching specified pattern
+-n  -- do not add a newline to the result
+-N  -- print arguments separated and terminated by nulls
+-o  -- sort arguments in ascending order
+-O  -- sort arguments in descending order
+-P  -- perform prompt expansion
+-R  -- emulate BSD echo (no escapes, -n & -e flags only)
+-r  -- ignore escape conventions of echo
+-s  -- place results in the history list
+-S  -- place results in the history list, after splitting argument into word
+-u  -- specify file descriptor to print arguments to
+-v  -- store output in named parameter
+-X  -- expand all tabs
+-x  -- expand leading tabs
+-z  -- push arguments onto editing buffer stack
+@ 0,9

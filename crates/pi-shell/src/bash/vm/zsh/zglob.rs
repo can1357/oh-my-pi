@@ -11,8 +11,12 @@
 //! Questions are kept in the op's scratch, so after a park the walk
 //! resumes where it was; after a restore it starts over (Fs reads only).
 //!
-//! Qualifiers that run shell code (`(e:…:)`, `(+func)`, `(oe:…:)`) are not
-//! supported and fail loudly.
+//! The qualifiers that run shell code (`(e:…:)`, `(+func)`, zsh
+//! `qualsheval`) are questions too: the walk runs each (code, file) pair
+//! once, in the current shell above the op's frame (`REPLY` set to the
+//! file, `reply` unset), and keeps its status and `reply`/`REPLY` as the
+//! answer. A restored op starts over and runs them again. Sorting by shell
+//! code (`(oe:…:)`, `(o+…)`) is not supported and fails loudly.
 //!
 //! Ported from zsh 5.9 (MIT-style licence, Copyright (c) 1992-1997 Paul
 //! Falstad and the zsh development group).
@@ -46,19 +50,40 @@ use crate::bash::{
 	zshopt::ZshOpt,
 };
 
+/// A `(e:code:)` / `(+func)` question: the code (metafied, untokenized)
+/// and the file (metafied, as the qualifier sees it).
+type EvalAsk = (Vec<u8>, Vec<u8>);
+
+/// The answer to an [`EvalAsk`] (zsh `qualsheval`).
+#[derive(Clone, Debug)]
+struct EvalFact {
+	/// The code returned 0: the file is selected.
+	ok:      bool,
+	/// zsh `inserts`: the words `reply` (array, association values or
+	/// scalar) or `REPLY` left, metafied, which replace the file name.
+	inserts: Option<Vec<Vec<u8>>>,
+}
+
 /// The answers and open questions of the file-system walks of one
 /// command's globs (kept in the op's scratch across parks).
 #[derive(Default)]
 pub struct Walk {
 	/// Answers so far.
-	facts:  HashMap<Ask, Fact>,
+	facts:        HashMap<Ask, Fact>,
 	/// Questions still to ask, the first one in flight.
-	asking: VecDeque<Ask>,
+	asking:       VecDeque<Ask>,
 	/// Names read so far for an in-flight listing.
-	names:  Vec<BString>,
+	names:        Vec<BString>,
 	/// The answers to the probes of the colon modifiers (`(:A)`, `(:P)`,
 	/// `(:c)`), in the order the expansion asks them.
-	probes: Vec<Atom>,
+	probes:       Vec<Atom>,
+	/// Answers of the shell-code qualifiers.
+	evals:        HashMap<EvalAsk, EvalFact>,
+	/// Shell-code questions still to run, in the order the walk met them.
+	eval_asking:  VecDeque<EvalAsk>,
+	/// The question whose code runs above the op's frame, with the `$?` to
+	/// restore when it is done.
+	eval_running: Option<(EvalAsk, i32)>,
 }
 
 /// A qualifier test (zsh's `qual*` functions).
@@ -82,6 +107,8 @@ enum QFunc {
 	Nonemptydir,
 	Time,
 	Size,
+	/// zsh `qualsheval`: `data` indexes [`Spec::evals`].
+	Eval,
 }
 
 /// One qualifier (zsh `struct qual`).
@@ -139,6 +166,8 @@ struct Spec {
 	shortcircuit: usize,
 	pre_words:    Vec<Vec<u8>>,
 	post_words:   Vec<Vec<u8>>,
+	/// The code of the `e`/`+` qualifiers ([`QFunc::Eval`]).
+	evals:        Vec<Vec<u8>>,
 }
 
 /// A path component of a pattern (zsh `struct complist`).
@@ -159,6 +188,9 @@ struct Gmatch {
 	st:   Option<Stat>,
 	/// `stat` (links followed).
 	st2:  Option<Stat>,
+	/// The name's collation key (`strxfrm`) when names sort in a locale's
+	/// order; empty otherwise.
+	ckey: Vec<u8>,
 }
 
 /// The `zerr` of a glob error.
@@ -351,10 +383,11 @@ fn qgetmodespec(s: &[u8], i: &mut usize) -> X<i64> {
 }
 
 /// zsh `glob_exec_string`: the delimited argument of `e`, `P`, `oe` (or
-/// the identifier of `+`); `s[*i - 1]` is the qualifier letter.
-fn glob_exec_string(s: &[u8], i: &mut usize) -> X<Vec<u8>> {
+/// the identifier of `+`); `s[*i - 1]` is the qualifier letter. `mb` and
+/// `wide` as for [`params::mb`] and [`params::wide_idents`].
+fn glob_exec_string(s: &[u8], i: &mut usize, mb: bool, wide: bool) -> X<Vec<u8>> {
 	if at(s, i.wrapping_sub(1)) == b'+' {
-		let e = text::ident_end(s, *i);
+		let e = text::ident_end(s, *i, wide);
 		if e == *i {
 			return Err(gerr("missing identifier after `+'"));
 		}
@@ -363,7 +396,7 @@ fn glob_exec_string(s: &[u8], i: &mut usize) -> X<Vec<u8>> {
 		*i = e;
 		return Ok(d);
 	}
-	let (t, plus) = subscript::get_strarg(s, *i);
+	let (t, plus) = subscript::get_strarg(s, *i, mb);
 	if t >= s.len() {
 		return Err(gerr("missing end of string"));
 	}
@@ -395,6 +428,7 @@ fn parse_spec(ex: &mut Expander<'_, '_>, word: &[u8], o: &Opts) -> X<Spec> {
 		shortcircuit: 0,
 		pre_words:    Vec::new(),
 		post_words:   Vec::new(),
+		evals:        Vec::new(),
 	};
 	let mut nobareglob = !opt(ex, ZshOpt::Bareglobqual)?;
 	let mut sorted_keys: Vec<(SortKey, bool)> = Vec::new();
@@ -501,7 +535,7 @@ fn parse_spec(ex: &mut Expander<'_, '_>, word: &[u8], o: &Opts) -> X<Spec> {
 					if q.get(i).is_some_and(u8::is_ascii_digit) {
 						data = qgetnum(&q, &mut i)?;
 					} else {
-						let (t, arglen) = subscript::get_strarg(&q, i);
+						let (t, arglen) = subscript::get_strarg(&q, i, params::mb(ex)?);
 						if t >= q.len() {
 							return Err(gerr(format!(
 								"missing delimiter for '{}' glob qualifier",
@@ -662,9 +696,10 @@ fn parse_spec(ex: &mut Expander<'_, '_>, word: &[u8], o: &Opts) -> X<Spec> {
 						.push(Sort { key, follow, desc: (sense & 1 != 0) ^ (c == b'O') });
 				},
 				b'+' | b'e' => {
-					return Err(Stop::Fail(Diag::Unsupported {
-						what: "zsh glob qualifiers running shell code (e, +)".into(),
-					}));
+					let code = glob_exec_string(&q, &mut i, params::mb(ex)?, params::wide_idents(ex)?)?;
+					func = Some(QFunc::Eval);
+					data = i64::try_from(spec.evals.len()).unwrap_or(i64::MAX);
+					spec.evals.push(code);
 				},
 				b'[' | INBRACK => {
 					i -= 1;
@@ -679,7 +714,7 @@ fn parse_spec(ex: &mut Expander<'_, '_>, word: &[u8], o: &Opts) -> X<Spec> {
 					spec.end = v.end;
 				},
 				b'P' => {
-					let w = glob_exec_string(&q, &mut i)?;
+					let w = glob_exec_string(&q, &mut i, params::mb(ex)?, params::wide_idents(ex)?)?;
 					if sense & 1 != 0 {
 						spec.post_words.push(w);
 					} else {
@@ -815,23 +850,26 @@ enum Got<T> {
 
 /// One run of the scanner over the answers known so far.
 struct Run<'a> {
-	facts:   &'a HashMap<Ask, Fact>,
-	missing: Vec<Ask>,
-	spec:    &'a Spec,
-	env:     crate::bash::pattern::zsh::CharEnv<'a>,
-	now:     i64,
-	matches: Vec<Gmatch>,
-	approx:  Approx,
+	facts:        &'a HashMap<Ask, Fact>,
+	missing:      Vec<Ask>,
+	evals:        &'a HashMap<EvalAsk, EvalFact>,
+	/// Shell-code questions without an answer.
+	eval_missing: Vec<EvalAsk>,
+	/// zsh `inserts`: the words of the last shell-code qualifier run for
+	/// the file being inserted.
+	inserts:      Option<Vec<Vec<u8>>>,
+	spec:         &'a Spec,
+	env:          crate::bash::pattern::zsh::CharEnv<'a>,
+	now:          i64,
+	matches:      Vec<Gmatch>,
+	approx:       Approx,
 }
 
 impl Run<'_> {
-	/// The fs path for a metafied path (`""` is `.`).
+	/// The cwd-relative fs path for a metafied path. Keep an empty path
+	/// empty: `answer` joins it to the cwd without an artificial `.` component.
 	fn fspath(p: &[u8]) -> BString {
-		if p.is_empty() {
-			BString::from(".")
-		} else {
-			BString::from(unmetafy(p))
-		}
+		BString::from(unmetafy(p))
 	}
 
 	/// `stat`/`lstat` of `p`.
@@ -987,6 +1025,7 @@ impl Run<'_> {
 		let mut st = None;
 		let mut st2 = None;
 		let mut name = full.clone();
+		self.inserts = None;
 		// zsh `statfullpath`: an empty last component (`*/`) stats
 		// `DIR/.` (following links) for its qualifiers and must be a
 		// directory otherwise.
@@ -1045,7 +1084,7 @@ impl Run<'_> {
 					} else {
 						lst
 					};
-					let Some(r) = self.qualtest(q, &full, &bp) else {
+					let Some(r) = self.qualtest(q, &full, &name, &bp) else {
 						return;
 					};
 					if r == (q.sense & 1 != 0) {
@@ -1090,13 +1129,38 @@ impl Run<'_> {
 				}
 			}
 		}
-		self.matches.push(Gmatch { name, st, st2 });
+		match self.inserts.take() {
+			Some(words) => {
+				for w in words {
+					self
+						.matches
+						.push(Gmatch { name: w, st, st2, ckey: Vec::new() });
+				}
+			},
+			None => self
+				.matches
+				.push(Gmatch { name, st, st2, ckey: Vec::new() }),
+		}
 	}
 
-	/// One qualifier test; `None` while an answer is missing.
-	fn qualtest(&mut self, q: &Qual, name: &[u8], st: &Stat) -> Option<bool> {
+	/// One qualifier test of the file `name` (`shown`: with its type
+	/// marker, what `REPLY` gets); `None` while an answer is missing.
+	fn qualtest(&mut self, q: &Qual, name: &[u8], shown: &[u8], st: &Stat) -> Option<bool> {
 		let mode = i64::from(st.mode & 0o7777);
 		Some(match q.func {
+			QFunc::Eval => {
+				let code = usize::try_from(q.data)
+					.ok()
+					.and_then(|i| self.spec.evals.get(i))?;
+				let ask = (code.clone(), shown.to_vec());
+				if let Some(f) = self.evals.get(&ask) {
+					self.inserts.clone_from(&f.inserts);
+					f.ok
+				} else {
+					self.eval_missing.push(ask);
+					return None;
+				}
+			},
 			QFunc::Islnk => st.kind == StatKind::Symlink,
 			QFunc::Issock => st.kind == StatKind::Socket,
 			QFunc::Isfifo => st.kind == StatKind::Fifo,
@@ -1179,6 +1243,8 @@ const fn unreachable_stat() -> Stat {
 		atime_ns: 0,
 		ctime_ns: 0,
 		blocks:   0,
+		rdev:     0,
+		blksize:  0,
 	}
 }
 
@@ -1194,7 +1260,7 @@ const fn cmp_range(v: i64, data: i64, range: i32) -> bool {
 }
 
 /// zsh `file_type`: the `ls -F` marker of a file.
-const fn file_type(st: &Stat) -> u8 {
+pub const fn file_type(st: &Stat) -> u8 {
 	match st.kind {
 		StatKind::BlockDev => b'#',
 		StatKind::CharDev => b'%',
@@ -1219,16 +1285,11 @@ fn gmatchcmp(a: &Gmatch, b: &Gmatch, sorts: &[Sort], numsort: bool) -> std::cmp:
 		let pick = |m: &Gmatch| if s.follow { m.st2.or(m.st) } else { m.st };
 		let r: Ordering = match s.key {
 			SortKey::Name => {
+				// zsh `zstrcmp`: `strcoll` (the collation keys; bytes when
+				// equal or without a collation), then the numeric rules.
 				let (ua, ub) = (unmetafy(&a.name), unmetafy(&b.name));
-				let mut v = vec![ua.clone(), ub.clone()];
-				super::subst::strmetasort(&mut v, if numsort { 2 | 32 } else { 32 });
-				if ua == ub {
-					Ordering::Equal
-				} else if v.first() == Some(&ua) {
-					Ordering::Less
-				} else {
-					Ordering::Greater
-				}
+				let base = a.ckey.cmp(&b.ckey).then_with(|| ua.cmp(&ub));
+				super::subst::eltpcmp_coll(&ua, &ub, i32::from(numsort), base)
 			},
 			SortKey::Depth => {
 				#[allow(
@@ -1277,6 +1338,8 @@ fn zglob_one(
 	word: &[u8],
 	facts: &HashMap<Ask, Fact>,
 	missing: &mut Vec<Ask>,
+	evals: &HashMap<EvalAsk, EvalFact>,
+	eval_missing: &mut Vec<EvalAsk>,
 ) -> X<Option<Globbed>> {
 	let o = zpattern::opts(ex)?;
 	let spec = parse_spec(ex, word, &o)?;
@@ -1303,6 +1366,9 @@ fn zglob_one(
 	let mut run = Run {
 		facts,
 		missing: Vec::new(),
+		evals,
+		eval_missing: Vec::new(),
+		inserts: None,
 		spec: &spec,
 		env: env.env(),
 		now,
@@ -1311,8 +1377,9 @@ fn zglob_one(
 	};
 	let mut pathbuf = if abs { b"/".to_vec() } else { Vec::new() };
 	run.scanner(&comps, 0, false, &mut pathbuf);
-	if !run.missing.is_empty() {
+	if !run.missing.is_empty() || !run.eval_missing.is_empty() {
 		missing.append(&mut run.missing);
+		eval_missing.append(&mut run.eval_missing);
 		return Ok(None);
 	}
 	let mut matches = run.matches;
@@ -1340,6 +1407,14 @@ fn zglob_one(
 	}
 	let unsorted = spec.sorts.first().is_some_and(|s| s.key == SortKey::None);
 	if !unsorted {
+		// zsh compares names with `strcoll`: their collation keys, once.
+		if spec.sorts.iter().any(|s| s.key == SortKey::Name)
+			&& let Some(coll) = params::collator(ex)
+		{
+			for m in &mut matches {
+				m.ckey = coll.key(&unmetafy(&m.name));
+			}
+		}
 		matches.sort_by(|a, b| gmatchcmp(a, b, &spec.sorts, spec.numsort));
 	}
 	let ct = i64::try_from(matches.len()).unwrap_or(0);
@@ -1390,6 +1465,9 @@ pub fn expand_globs(
 	globs: &[(u32, BString)],
 	line: u32,
 ) -> Result<(), Flow> {
+	if no_exec(k, vp, cx) {
+		return Ok(());
+	}
 	let words = glob_words(k, vp, cx, globs, line)?;
 	for ((i, _), ws) in globs.iter().zip(words).rev() {
 		let i = *i as usize;
@@ -1410,6 +1488,9 @@ pub fn expand_compound_globs(
 	globs: &[(u32, BString)],
 	line: u32,
 ) -> Result<(), Flow> {
+	if no_exec(k, vp, cx) {
+		return Ok(());
+	}
 	let words = glob_words(k, vp, cx, globs, line)?;
 	for ((i, _), ws) in globs.iter().zip(words).rev() {
 		let i = *i as usize;
@@ -1422,6 +1503,33 @@ pub fn expand_compound_globs(
 		elems.splice(i..=i, new);
 	}
 	Ok(())
+}
+
+/// zsh `qualsheval`'s `inserts` after the code ran: the elements of the
+/// array or the values of the association `reply`, else the scalar
+/// `reply` or `REPLY` (metafied).
+fn eval_inserts(ex: &mut Expander<'_, '_>) -> X<Option<Vec<Vec<u8>>>> {
+	if let Some(p) = params::getparam(ex, b"reply")?
+		&& !p.flags.contains(params::PmFlags::UNSET)
+	{
+		match &p.value {
+			params::PValue::Array(a) => return Ok(Some(a.iter().map(|e| metafy(e)).collect())),
+			params::PValue::Hash(h) => return Ok(Some(h.iter().map(|(_, v)| metafy(v)).collect())),
+			params::PValue::Scalar(_) => {},
+		}
+	}
+	for name in [&b"reply"[..], b"REPLY"] {
+		if let Some(s) = params::getsparam(ex, name)? {
+			return Ok(Some(vec![metafy(&s)]));
+		}
+	}
+	Ok(None)
+}
+
+/// zsh `zglob` under `NO_EXEC`: words keep their text, nothing is
+/// generated.
+fn no_exec(k: &mut Kernel, vp: &Vproc, cx: &mut Cx<'_>) -> bool {
+	!crate::bash::vm::state::zsh_option(&mut k.root, cx.store, vp, ZshOpt::Exec).unwrap_or(true)
 }
 
 /// The words each recorded glob becomes (empty for a `cshnullglob`
@@ -1443,6 +1551,26 @@ fn glob_words(
 		.and_then(|f| f.scratch.take())
 		.unwrap_or_default();
 	let mut walk = sc.io().zsh().zglob.take().unwrap_or_default();
+	// A shell-code qualifier ran above the op's frame: its status (`$?`
+	// goes back to the caller's) and what it left in `reply`/`REPLY`.
+	if let Some((ask, saved)) = walk.eval_running.take() {
+		let status = std::mem::replace(&mut vp.status, saved);
+		let mut log = Vec::new();
+		let inserts = eval_inserts(&mut Expander::new(k, cx, vp, &mut log, false, line));
+		match inserts {
+			Ok(inserts) => {
+				walk
+					.evals
+					.insert(ask, EvalFact { ok: status == 0, inserts });
+			},
+			Err(stop) => {
+				if let Some(f) = vp.frames.last_mut() {
+					f.scratch = Some(sc);
+				}
+				return Err(exec::stop_flow(k, vp, cx, line, stop));
+			},
+		}
+	}
 	let result = loop {
 		// Ask every open question first.
 		let mut tcx = Context::from_waker(&k.waker);
@@ -1469,12 +1597,20 @@ fn glob_words(
 		}
 		let mut log = walk.probes.clone();
 		let mut missing = Vec::new();
+		let mut eval_missing = Vec::new();
 		let mut words: Vec<Globbed> = Vec::with_capacity(globs.len());
 		let r: X<()> = {
 			let mut ex = Expander::new(k, cx, vp, &mut log, false, line);
 			let mut r = Ok(());
 			for (_, pattern) in globs {
-				match zglob_one(&mut ex, pattern, &walk.facts, &mut missing) {
+				match zglob_one(
+					&mut ex,
+					pattern,
+					&walk.facts,
+					&mut missing,
+					&walk.evals,
+					&mut eval_missing,
+				) {
 					Ok(Some(g)) => words.push(g),
 					Ok(None) => words.push(Globbed::CshFail),
 					Err(e) => {
@@ -1508,7 +1644,7 @@ fn glob_words(
 			Err(stop) => break Err(stop),
 			Ok(()) => {},
 		}
-		if missing.is_empty() {
+		if missing.is_empty() && eval_missing.is_empty() {
 			break Ok(words);
 		}
 		for m in missing {
@@ -1516,6 +1652,41 @@ fn glob_words(
 				walk.asking.push_back(m);
 			}
 		}
+		// File-system questions first: the code runs once the walk has
+		// reached its file, in the walk's order.
+		if !walk.asking.is_empty() {
+			continue;
+		}
+		walk.eval_asking.clear();
+		for m in eval_missing {
+			if !walk.evals.contains_key(&m) && !walk.eval_asking.contains(&m) {
+				walk.eval_asking.push_back(m);
+			}
+		}
+		let Some(ask) = walk.eval_asking.pop_front() else {
+			continue;
+		};
+		// zsh `qualsheval`: `reply` unset, `REPLY` the file, the code run
+		// in the current shell.
+		let set: X<()> = {
+			let mut log = Vec::new();
+			let mut ex = Expander::new(k, cx, vp, &mut log, false, line);
+			params::unsetparam(&mut ex, b"reply")
+				.and_then(|()| params::assignsparam(&mut ex, b"REPLY", &unmetafy(&ask.1), 0))
+		};
+		if let Err(stop) = set {
+			break Err(stop);
+		}
+		let code = BString::from(unmetafy(&ask.0));
+		walk.eval_running = Some((ask, vp.status));
+		sc.io().zsh().zglob = Some(walk);
+		if let Some(f) = vp.frames.last_mut() {
+			f.scratch = Some(sc);
+		}
+		// The run loop pushes the code's frame once the op has put its
+		// own state back.
+		vp.zsh.get_or_insert_with(Box::default).glob_hook = Some((code, line));
+		return Err(Flow::Call);
 	};
 	if let Some(f) = vp.frames.last_mut() {
 		f.scratch = Some(sc);

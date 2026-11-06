@@ -4,8 +4,9 @@
 //! zsh parameter code.
 //!
 //! `read -k`/`-q` without `-u` read standard input (zsh opens the
-//! terminal); `read -z`, `-l` and `-c` need ZLE or compctl and fail
-//! loudly.
+//! terminal); in a widget they take their keys through the editor.
+//! `read -z` takes the line off the buffer stack;
+//! `-l` and `-c` (compctl) fail loudly.
 //!
 //! Ported from zsh 5.9 (MIT-style licence, Copyright (c) 1992-1997 Paul
 //! Falstad and the zsh development group).
@@ -22,11 +23,12 @@ use crate::bash::{
 	diag::Diag,
 	fs::FileKind,
 	ids::ModeId,
+	store::{Attrs, StateStore, StoreError, VarValue},
 	syntax::zsh::tok::{head, span, tail},
 	vm::{
 		Cx, Kernel,
 		expand::{Expander, Stop},
-		proc::{PendingWrite, Probe, ProbeResult, Vproc},
+		proc::{GetoptsState, PendingWrite, Probe, ProbeResult, Vproc},
 		state,
 		zsh::{arith, math::Number, params},
 	},
@@ -235,12 +237,17 @@ pub fn unset(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString], func: Func) -> 
 		return done(if matched == 0 { 1 } else { returnval });
 	}
 	let mut returnval = 0;
+	// zsh `unsetparam_pm`'s errors are `zerr`s: the other operands are
+	// still unset, then the command line is abandoned.
+	let mut errflag = false;
 	for s in args {
 		let (name, sub) = match s.find_byte(b'[') {
 			Some(open) => (head(s, open), Some(tail(s, open))),
 			None => (s.as_slice(), None),
 		};
-		if sub.is_some_and(|sub| !sub.ends_with(b"]")) || !params::isident(name) {
+		if sub.is_some_and(|sub| !sub.ends_with(b"]"))
+			|| !params::isident(name, params::wide_idents_ctx(ctx))
+		{
 			ctx.usage(format!("{}: invalid parameter name", s.as_bstr()));
 			returnval = 1;
 			continue;
@@ -248,6 +255,11 @@ pub fn unset(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString], func: Func) -> 
 		let full = s.to_vec();
 		let base = name.to_vec();
 		let r = zx(ctx, |ex| {
+			// zsh `bin_unset` (`gethashnode2`) does not load the module
+			// of an autoloadable parameter: the stub goes.
+			if sub.is_none() && params::unset_stub(ex, &base)? {
+				return Ok(None);
+			}
 			let Some(p) = params::getparam(ex, &base)? else {
 				return Ok(None);
 			};
@@ -268,9 +280,12 @@ pub fn unset(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString], func: Func) -> 
 			Ok(_) => {},
 			Err(d) => {
 				ctx.diag(d);
-				returnval = 1;
+				errflag = true;
 			},
 		}
+	}
+	if errflag {
+		return Ok(super::Outcome { status: 1, control: super::Control::DiscardAll });
 	}
 	done(returnval)
 }
@@ -280,10 +295,27 @@ pub fn shift(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 	let mut args = args;
 	let mut num: i64 = 1;
 	if let Some(first) = args.first() {
-		let f = first.clone();
-		let is_array = matches!(zx(ctx, |ex| params::getaparam(ex, &f))?, Ok(Some(_)));
+		let is_array = matches!(
+			zx(ctx, |ex| {
+				if first.is_ascii() && !first.contains(&b'[') && params::isident(first, false) {
+					// Only the type is needed here. Reading the value would copy
+					// an entire array before the shift reads it again below.
+					let Some(pm) = params::getparam_type(ex, first)? else {
+						return Ok(false);
+					};
+					let flags = pm.flags;
+					Ok(flags.type_bits() == params::PmFlags::ARRAY
+						&& (!flags.contains(params::PmFlags::UNSET)
+							|| flags.contains(params::PmFlags::DECLARED))
+						&& !state::zsh_option(&mut ex.k.root, ex.cx.store, ex.vp, ZshOpt::Ksharrays)?)
+				} else {
+					Ok(params::getaparam(ex, first)?.is_some())
+				}
+			})?,
+			Ok(true)
+		);
 		if !is_array {
-			let text = crate::bash::syntax::zsh::tok::metafy(&f);
+			let text = crate::bash::syntax::zsh::tok::metafy(first);
 			num = match zx(ctx, |ex| arith::mathevali(ex, &text))? {
 				Ok(n) => n,
 				Err(d) => return zerr(ctx, d),
@@ -351,6 +383,68 @@ pub fn let_(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		Number::Int(v) => v == 0,
 		Number::Float(d) => d == 0.0,
 	}))
+}
+
+/// zsh `doshfunc` saving `zoptind`/`optcind` at a function call: the
+/// caller's getopts position (`None`: `OPTIND` 1 with no scan under way,
+/// no allocation per call). Without `POSIX_BUILTINS` the function starts
+/// a scan of its own.
+///
+/// # Errors
+/// [`StoreError`] when the store fails.
+pub fn optind_enter(
+	root: &mut state::Root,
+	store: &mut dyn StateStore,
+	vp: &mut Vproc,
+) -> Result<Option<Box<GetoptsState>>, StoreError> {
+	let text = state::lookup(root, store, vp, b"OPTIND")?
+		.and_then(state::Var::as_scalar)
+		.map(BString::from);
+	let fresh = text.as_ref().is_some_and(|t| t.as_slice() == b"1");
+	let saved = if fresh && vp.getopts == GetoptsState::default() {
+		None
+	} else {
+		let next = vp.getopts.next.filter(|_| vp.getopts.optind == text);
+		Some(Box::new(GetoptsState { optind: text, next, at: None }))
+	};
+	if !state::zsh_option(root, store, vp, ZshOpt::Posixbuiltins)? {
+		vp.getopts = GetoptsState::default();
+		set_optind(root, store, vp, b"1")?;
+	}
+	Ok(saved)
+}
+
+/// zsh `doshfunc` at a function's return without `POSIX_BUILTINS` (the
+/// caller checks): the caller's getopts position ([`optind_enter`]) comes
+/// back.
+///
+/// # Errors
+/// [`StoreError`] when the store fails.
+pub fn optind_leave(
+	root: &mut state::Root,
+	store: &mut dyn StateStore,
+	vp: &mut Vproc,
+	saved: Option<Box<GetoptsState>>,
+) -> Result<(), StoreError> {
+	let saved = saved.map_or_else(GetoptsState::default, |s| *s);
+	let text = saved.optind.clone().unwrap_or_else(|| BString::from("1"));
+	set_optind(root, store, vp, &text)?;
+	vp.getopts = saved;
+	Ok(())
+}
+
+/// Store `text` as the value of `OPTIND`, keeping its attributes.
+fn set_optind(
+	root: &mut state::Root,
+	store: &mut dyn StateStore,
+	vp: &mut Vproc,
+	text: &[u8],
+) -> Result<(), StoreError> {
+	let attrs = state::lookup_declared(root, store, vp, b"OPTIND")?
+		.map_or(Attrs::NONE, |v| v.attrs.without(Attrs::INVISIBLE));
+	let var = state::Var { attrs, value: VarValue::Str(BString::from(text)) };
+	state::store_var(root, store, vp, b"OPTIND", Some(var), state::Level::Dynamic);
+	Ok(())
 }
 
 /// zsh `bin_getopts`: `getopts optstring name [args]`, with zsh's
@@ -497,23 +591,57 @@ pub fn getopts(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	}
 }
 
-/// The bytes `read` takes in: everything up to the delimiter (more lines
-/// while a backslash continues them, unless `raw`), whether input ended
-/// first.
+/// Bytes still to read for `data` to hold `n` characters (UTF-8 sequences
+/// when `utf8`): one per missing character, plus the rest of an incomplete
+/// last sequence. Never more than the characters need, so nothing past
+/// them is consumed.
+fn bytes_wanted(data: &[u8], n: usize, utf8: bool) -> usize {
+	if !utf8 {
+		return n.saturating_sub(data.len());
+	}
+	let mut count = 0;
+	let mut short = 0;
+	let mut i = 0;
+	while i < data.len() {
+		let need = match data[i] {
+			0xc2..=0xdf => 2,
+			0xe0..=0xef => 3,
+			0xf0..=0xf4 => 4,
+			_ => 1,
+		};
+		count += 1;
+		if i + need > data.len() && tail(data, i + 1).iter().all(|b| b & 0xc0 == 0x80) {
+			short = i + need - data.len();
+			break;
+		}
+		i += bstr::decode_utf8(tail(data, i)).1.max(1);
+	}
+	short + n.saturating_sub(count)
+}
+
+/// The bytes `read` takes in: everything up to the delimiter `delim` (a
+/// character's bytes; more lines while a backslash continues them, unless
+/// `raw`), or `nchars` characters (UTF-8 sequences when `utf8`); whether
+/// input ended first.
+#[expect(clippy::too_many_arguments, reason = "zsh bin_read's input loop")]
 fn read_input(
 	ctx: &mut Ctx<'_, '_>,
 	fd: i32,
-	delim: Option<u8>,
+	delim: Option<&[u8]>,
 	nchars: Option<usize>,
+	utf8: bool,
 	raw: bool,
 	timeout_ns: Option<u64>,
 	prompt: Option<&[u8]>,
 ) -> Result<(Vec<u8>, bool, bool), Need> {
 	let mut data = Vec::new();
 	let mut part = 0;
+	// The probe stops at the delimiter's last byte; the whole sequence
+	// must end the data.
+	let stop = delim.and_then(|d| d.last().copied());
 	loop {
-		let want = nchars.map(|n| n.saturating_sub(data.len()));
-		let probe = Probe::Input { fd, delim, lines: 1, nchars: want, part, timeout_ns };
+		let want = nchars.map(|n| bytes_wanted(&data, n, utf8));
+		let probe = Probe::Input { fd, delim: stop, lines: 1, nchars: want, part, timeout_ns };
 		let answer = match ctx.probe(probe) {
 			Ok(a) => a,
 			Err(need) => {
@@ -534,12 +662,12 @@ fn read_input(
 		if timed_out {
 			return Ok((data, true, true));
 		}
-		if nchars.is_some_and(|n| data.len() >= n) {
+		if nchars.is_some_and(|n| bytes_wanted(&data, n, utf8) == 0) {
 			return Ok((data, false, false));
 		}
-		let ended = delim.is_some_and(|dl| data.last() == Some(&dl));
-		if ended {
-			let before = head(&data, data.len() - 1);
+		let ended = delim.filter(|dl| !dl.is_empty() && data.ends_with(dl));
+		if let Some(dl) = ended {
+			let before = head(&data, data.len() - dl.len());
 			let run = before.iter().rev().take_while(|&&c| c == b'\\').count();
 			if raw || run % 2 == 0 {
 				return Ok((data, false, false));
@@ -613,9 +741,70 @@ pub fn assign_zsh_loop_var(
 			Err(Diag::StoreFailed)
 		},
 		// A plain name's value is never expanded: nothing can park.
-		Err(Stop::Sub { .. } | Stop::ZshSub { .. } | Stop::Probe(_) | Stop::Wait(_)) => {
-			Err(Diag::Unsupported { what: "a substitution in a `for' variable's assignment".into() })
-		},
+		Err(
+			Stop::Sub { .. }
+			| Stop::ZshSub { .. }
+			| Stop::MathCall(_)
+			| Stop::Probe(_)
+			| Stop::Wait(_),
+		) => Err(Diag::Unsupported { what: "a substitution in a `for' variable's assignment".into() }),
+	}
+}
+
+/// `read_zle`'s answer: the bytes, then two status flags; `Err` is the
+/// outcome to return while the editor runs a frame.
+type ZleRead = Result<(Vec<u8>, bool, bool), Outcome>;
+
+/// `read -k`/`-q` through the active editor (zsh `bin_read`'s `izle`:
+/// `ZLE_CMD_GET_KEY` per byte): `nchars` characters (UTF-8 ones when
+/// `utf8`). The prompt goes out first. `Err` is the outcome to return
+/// while the editor runs a frame.
+fn read_zle(
+	ctx: &mut Ctx<'_, '_>,
+	nchars: usize,
+	utf8: bool,
+	timeout_ns: Option<u64>,
+	prompt: Option<&[u8]>,
+) -> Result<ZleRead, Need> {
+	use crate::bash::vm::zle::builtin::{ReadBytes, read_bytes, reading_bytes};
+	if !reading_bytes(ctx.vp)
+		&& let Some(p) = prompt
+	{
+		ctx.vp
+			.out
+			.push_back(PendingWrite { fd: 2, bytes: p.into(), off: 0 });
+	}
+	// zsh: the timeout in hundredths of a second, rounded up.
+	let timeout_cs = timeout_ns.map(|ns| {
+		i64::try_from(ns / 10_000_000)
+			.unwrap_or(i64::MAX)
+			.saturating_add(1)
+	});
+	let enough = |acc: &[u8]| -> bool {
+		let mut count = 0;
+		let mut i = 0;
+		while i < acc.len() {
+			let len = if utf8 {
+				match acc[i] {
+					0xc2..=0xdf => 2,
+					0xe0..=0xef => 3,
+					0xf0..=0xf4 => 4,
+					_ => 1,
+				}
+			} else {
+				1
+			};
+			if i + len > acc.len() {
+				break;
+			}
+			count += 1;
+			i += len;
+		}
+		count >= nchars
+	};
+	match read_bytes(ctx, timeout_cs, enough)? {
+		ReadBytes::Got(data, ended) => Ok(Ok((data, ended, false))),
+		ReadBytes::Outcome(o) => Ok(Err(o)),
 	}
 }
 
@@ -650,13 +839,13 @@ pub fn read(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 		return done(1);
 	}
 	if ops.isset(b'l') || ops.isset(b'c') {
-		ctx.diag(Diag::Unsupported { what: "read -l/-c (zsh compctl)".into() });
-		return done(1);
+		return crate::bash::vm::zle::comp::compctl::compctlread(ctx, ops, args, &reply);
 	}
-	if ops.isset(b'z') {
-		ctx.diag(Diag::Unsupported { what: "read -z (the ZLE buffer stack)".into() });
-		return done(1);
-	}
+	// `-z` (and `getln`): the line comes off the editor's buffer stack
+	// (zsh `zbuf`: delimiters do not end it).
+	let zbuf: Option<BString> = ops
+		.isset(b'z')
+		.then(|| crate::bash::vm::zle::vared::pop_line(ctx).unwrap_or_default());
 	let keys = ops.isset(b'k') || ops.isset(b'q');
 	let fd = if ops.isset(b'p') || ops.arg(b'u') == Some(b"p") {
 		// The coprocess's output.
@@ -690,9 +879,13 @@ pub fn read(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 		}
 	}
 	let cs = charset(ctx)?;
-	let delim: u8 = match ops.arg(b'd').filter(|_| ops.isset(b'd')) {
-		Some(d) => d.first().copied().unwrap_or(0),
-		None => b'\n',
+	// zsh: the first character of `-d`'s argument (a byte without
+	// multibyte), NUL for an empty one.
+	let delim: Vec<u8> = match ops.arg(b'd').filter(|_| ops.isset(b'd')) {
+		Some(d) => chars(d, cs.utf8)
+			.first()
+			.map_or_else(|| vec![0], |c| c.to_vec()),
+		None => vec![b'\n'],
 	};
 	let timeout_ns = if ops.isset(b't') {
 		let mut ns = 0u64;
@@ -710,9 +903,18 @@ pub fn read(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 	};
 	let raw = ops.isset(b'r');
 	let (echo_only, echo) = (ops.isset(b'e'), ops.isset(b'E'));
+	// zsh `izle`: with the editor active (a widget), `-k`/`-q` keys come
+	// through it unless `-u`/`-p` name another source.
+	let izle = keys && crate::bash::vm::zle::active(ctx.vp) && !ops.isset(b'u') && !ops.isset(b'p');
 	if keys {
-		let (data, eof, timed_out) =
-			read_input(ctx, fd, None, Some(nchars), true, timeout_ns, prompt.as_deref())?;
+		let (data, eof, timed_out) = if izle {
+			match read_zle(ctx, nchars, cs.utf8, timeout_ns, prompt.as_deref())? {
+				Ok(r) => r,
+				Err(o) => return Ok(o),
+			}
+		} else {
+			read_input(ctx, fd, None, Some(nchars), cs.utf8, true, timeout_ns, prompt.as_deref())?
+		};
 		if timed_out && data.is_empty() {
 			return done(if ops.isset(b'q') { 2 } else { 1 });
 		}
@@ -734,8 +936,10 @@ pub fn read(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 		}
 		return done(status);
 	}
-	let (data, _, timed_out) =
-		read_input(ctx, fd, Some(delim), None, raw, timeout_ns, prompt.as_deref())?;
+	let (data, _, timed_out) = match &zbuf {
+		Some(z) => (z.to_vec(), true, false),
+		None => read_input(ctx, fd, Some(&delim), None, cs.utf8, raw, timeout_ns, prompt.as_deref())?,
+	};
 	if timed_out && data.is_empty() {
 		return done(1);
 	}
@@ -746,7 +950,7 @@ pub fn read(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 	let ifs = Ifs { ifs };
 	let cv = chars(&data, cs.utf8);
 	let mut pos = 0;
-	let dl: &[u8] = std::slice::from_ref(&delim);
+	let dl: &[u8] = if zbuf.is_some() { &[] } else { &delim };
 	let mut first = true;
 	let mut gotnl = false;
 	let mut last: Option<&[u8]> = Some(b"");
@@ -823,6 +1027,9 @@ pub fn read(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 		if !echo_only && let Err(d) = zx(ctx, |ex| params::assignaparam(ex, &reply, list, 0))? {
 			return zerr(ctx, d);
 		}
+		if let Some(z) = &zbuf {
+			return done(i32::from(z.is_empty()));
+		}
 		return done(i32::from(at_eof));
 	}
 	let mut buf: Vec<u8> = Vec::new();
@@ -882,6 +1089,9 @@ pub fn read(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 	if let Err(d) = r {
 		ctx.diag(d);
 		return done(1);
+	}
+	if let Some(z) = &zbuf {
+		return done(i32::from(z.is_empty()));
 	}
 	done(i32::from(last.is_none()))
 }

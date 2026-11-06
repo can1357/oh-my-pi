@@ -88,9 +88,7 @@ describe("ToolView xd:// dispatches", () => {
 	});
 
 	it("defaults a running xd://reject to discard before details arrive", () => {
-		const html = renderToStaticMarkup(
-			<ToolView name="reject" defaultOpen running args={{ reason: "" }} />,
-		);
+		const html = renderToStaticMarkup(<ToolView name="reject" defaultOpen running args={{ reason: "" }} />);
 
 		expect(html).toContain("proposed → rejected");
 	});
@@ -133,20 +131,28 @@ describe("ToolView xd:// dispatches", () => {
 		expect(html).toContain("tv-badge--ok");
 	});
 
-	it("renders a received wait message without falling back to JSON", () => {
+	it("renders every received wait message without falling back to JSON", () => {
 		const html = renderToStaticMarkup(
 			<ToolView
 				name="wait"
 				defaultOpen
 				args={{}}
 				result={{
-					content: [{ type: "text", text: "[42] Worker: ready" }],
-					details: { op: "wait", waited: { id: "42", from: "Worker", to: "Main", body: "ready", ts: 0 } },
+					content: [{ type: "text", text: "[42] Worker: ready\n\n[43] Reviewer: looks good" }],
+					details: {
+						op: "wait",
+						waited: [
+							{ id: "42", from: "Worker", to: "Main", body: "ready", ts: 0 },
+							{ id: "43", from: "Reviewer", to: "Main", body: "looks good", ts: 1 },
+						],
+					},
 				}}
 			/>,
 		);
 		expect(html).toContain("← Worker");
 		expect(html).toContain("ready");
+		expect(html).toContain("← Reviewer");
+		expect(html).toContain("looks good");
 		expect(html).not.toContain("tv-out-title");
 	});
 
@@ -160,7 +166,17 @@ describe("ToolView xd:// dispatches", () => {
 					content: [],
 					details: {
 						op: "wait",
-						jobs: [{ id: "a1b2", type: "bash", status: "completed", label: "build", durationMs: 25, resultText: "Built", errorText: "" }],
+						jobs: [
+							{
+								id: "a1b2",
+								type: "bash",
+								status: "completed",
+								label: "build",
+								durationMs: 25,
+								resultText: "Built",
+								errorText: "",
+							},
+						],
 					},
 				}}
 			/>,
@@ -198,7 +214,7 @@ describe("ToolView ask renderer", () => {
 			/>,
 		);
 
-		expect(html).toContain('<span>OAuth2</span>');
+		expect(html).toContain("<span>OAuth2</span>");
 		expect(html).toContain("keep the redirect short-lived");
 	});
 
@@ -217,7 +233,13 @@ describe("ToolView ask renderer", () => {
 					content: [{ type: "text", text: "User answers:" }],
 					details: {
 						results: [
-							{ id: "db", question: "Storage backend?", multi: false, selectedOptions: ["Postgres"], note: "managed instance" },
+							{
+								id: "db",
+								question: "Storage backend?",
+								multi: false,
+								selectedOptions: ["Postgres"],
+								note: "managed instance",
+							},
 							{ id: "cache", question: "Cache?", multi: false, selectedOptions: ["Redis"] },
 						],
 					},
@@ -225,7 +247,7 @@ describe("ToolView ask renderer", () => {
 			/>,
 		);
 
-		expect(html).toContain('<span>Postgres</span>');
+		expect(html).toContain("<span>Postgres</span>");
 		expect(html).toContain("managed instance");
 		// The cache question answered without a note must not leak the db note.
 		expect(html.match(/managed instance/g)?.length).toBe(1);

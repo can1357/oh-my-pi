@@ -30,17 +30,22 @@ type ScopeEntry = (Record, HashMap<BString, Record>);
 #[derive(Clone, Debug, Default)]
 pub struct MemStore {
 	/// Global variables ([`Key::Var`]).
-	vars:     HashMap<BString, Record>,
+	vars:        HashMap<BString, Record>,
 	/// Host defaults not yet observed. Resolved records use the ordinary
 	/// representation, including in images and scans.
-	deferred: HashMap<BString, Arc<DeferredScalar>>,
+	deferred:    HashMap<BString, Arc<DeferredScalar>>,
 	/// The root shell's scopes, outermost first ([`Key::Scope`],
 	/// [`Key::Local`]).
-	scopes:   Vec<ScopeEntry>,
+	scopes:      Vec<ScopeEntry>,
+	/// `local_bloom[d]`: the [`local_bits`] of every local in scopes `0..=d`
+	/// ([`StateStore::may_have_local`]), one entry per scope. Deleting a
+	/// local leaves its bits until its scope pops: a false positive (a scope
+	/// walk), never a false negative.
+	local_bloom: Vec<[u64; 5]>,
 	/// Every other record.
-	records:  HashMap<KeyBuf, Record>,
-	blobs:    HashMap<BlobSlot, Vec<u8>>,
-	epoch:    u64,
+	records:     HashMap<KeyBuf, Record>,
+	blobs:       HashMap<BlobSlot, Vec<u8>>,
+	epoch:       u64,
 }
 
 /// The serialized form of a [`MemStore`]: records sorted by key (scopes
@@ -251,6 +256,8 @@ impl MemStore {
 				let depth = depth as usize;
 				if depth == self.scopes.len() {
 					self.scopes.push((record, HashMap::new()));
+					let outer = self.local_bloom.last().copied().unwrap_or_default();
+					self.local_bloom.push(outer);
 				} else if let Some((scope, _)) = self.scopes.get_mut(depth) {
 					*scope = record;
 				} else {
@@ -261,12 +268,16 @@ impl MemStore {
 				let Some((_, vars)) = self.scopes.get_mut(depth as usize) else {
 					return Err(shape(key));
 				};
-				let name: &[u8] = name;
-				match vars.get_mut(name) {
-					Some(slot) => *slot = record,
-					None => {
-						vars.insert(BString::from(name), record);
-					},
+				if let Some(slot) = vars.get_mut(bytes(name)) {
+					*slot = record;
+				} else {
+					vars.insert(BString::from(bytes(name)), record);
+					let bits = local_bits(name);
+					for words in &mut self.local_bloom[depth as usize..] {
+						for (w, b) in bits {
+							words[w] |= b;
+						}
+					}
 				}
 			},
 			_ => match self.records.get_mut(&key) {
@@ -286,7 +297,10 @@ impl MemStore {
 				self.vars.remove(bytes(name));
 				self.deferred.remove(bytes(name));
 			},
-			Key::Scope(depth) => self.scopes.truncate(depth as usize),
+			Key::Scope(depth) => {
+				self.scopes.truncate(depth as usize);
+				self.local_bloom.truncate(depth as usize);
+			},
 			Key::Local { depth, name } => {
 				if let Some((_, vars)) = self.scopes.get_mut(depth as usize) {
 					vars.remove(bytes(name));
@@ -323,6 +337,29 @@ impl MemStore {
 	}
 }
 
+/// `(word, bit)` pairs of local `name` in a [`MemStore::local_bloom`]
+/// entry. Word 0 is exact for one-byte names (bit `c & 63`: `[A-Za-z_]`
+/// never share one); words 1 to 4 are a 256-bit bloom with two bits per
+/// longer name, keyed by its length and its first and last two bytes. Per
+/// recursive call (scope push, two locals, lookups, pop) it costs about a
+/// third of a refcounted name map, which allocates each new name.
+#[inline]
+fn local_bits(name: &[u8]) -> [(usize, u64); 2] {
+	let key = match name {
+		[c] => return [(0, 1 << (c & 63)); 2],
+		[a, b, .., y, z] => {
+			name.len() as u64
+				| u64::from(u16::from_le_bytes([*a, *b])) << 8
+				| u64::from(u16::from_le_bytes([*y, *z])) << 24
+		},
+		[first, .., last] => name.len() as u64 | u64::from(*first) << 8 | u64::from(*last) << 16,
+		[] => 0,
+	};
+	let h = key.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+	let (p, q) = ((h >> 56) as usize, (h >> 48) as usize & 255);
+	[(1 + (p >> 6), 1 << (p & 63)), (1 + (q >> 6), 1 << (q & 63))]
+}
+
 /// The bytes of a name, for map lookups by `[u8]`.
 fn bytes(name: &BStr) -> &[u8] {
 	name
@@ -335,6 +372,13 @@ fn assign(dst: &mut BString, src: &[u8]) {
 }
 
 impl StateStore for MemStore {
+	fn may_have_local(&mut self, name: &[u8]) -> bool {
+		self
+			.local_bloom
+			.last()
+			.is_some_and(|top| local_bits(name).iter().all(|&(w, b)| top[w] & b != 0))
+	}
+
 	fn defer_scalar(
 		&mut self,
 		name: &[u8],

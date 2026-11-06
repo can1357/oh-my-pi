@@ -253,6 +253,15 @@ pub fn end_scope(
 	Ok(())
 }
 
+/// Whether the trap of `sig` is still the `''` zsh recorded for a signal
+/// ignored when it started ([`MiscKey::ZshEntryIgnored`]).
+fn entry_ignored(store: &mut dyn StateStore, vp: &Vproc, sig: Signal) -> Result<bool, StoreError> {
+	Ok(matches!(
+		state::record(store, vp, Key::Misc(MiscKey::ZshEntryIgnored))?,
+		Some(Record::Words(names)) if names.iter().any(|n| n.as_slice() == sig.to_string().as_bytes())
+	))
+}
+
 /// zsh `removetrap`'s save: the trap for `key` is about to change (`trap`,
 /// a `TRAPNAL` function defined or removed). Inside a zsh function with
 /// `localtraps` the function's scope keeps the trap as it was, once.
@@ -283,7 +292,15 @@ pub fn save_local(
 			continue;
 		};
 		if !z.traps.iter().any(|(k, _)| *k == key) {
-			let now = current(store, vp, key)?;
+			let mut now = current(store, vp, key)?;
+			// zsh `endtrapscope` restores only a trap with text: not the
+			// ignored-on-entry `QUIT`.
+			if let TrapKey::Signal(sig) = key
+				&& matches!(&now, Some(Record::Trap { action, .. }) if action.is_empty())
+				&& entry_ignored(store, vp, sig)?
+			{
+				now = None;
+			}
 			z.traps.push((key, now));
 			state::set_scope_zsh(root, store, vp, i, Some(z));
 		}
@@ -413,16 +430,19 @@ fn zsh_change(
 	if let Some(name) = func_name(key) {
 		ctx.store_record(KeyBuf::Func(name), None);
 	}
+	if let TrapKey::Signal(sig) = key
+		&& entry_ignored(ctx.cx.store, ctx.vp, sig)?
+	{
+		ctx.store_record(KeyBuf::Misc(MiscKey::ZshEntryIgnored), None);
+	}
 	let mut effective = action;
 	if ctx.vp.overlay.is_none()
 		&& let TrapKey::Signal(sig) = key
 		&& !matches!(sig, Signal::Kill | Signal::Stop | Signal::Chld)
 	{
-		match ctx
-			.cx
-			.host
-			.set_signal_trap(sig, effective.as_ref().map(BStr::new))
-		{
+		let disposition =
+			crate::bash::vm::jobctl::trap_disposition(ctx.k, sig, effective.as_ref().map(BStr::new));
+		match ctx.cx.host.set_signal_trap(sig, disposition) {
 			Ok(true) => {},
 			Ok(false) => effective = effective.map(|_| BString::default()),
 			Err(err) => {
@@ -637,11 +657,12 @@ pub(super) fn trap(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		{
 			// The root shell's OS disposition follows its traps (signals
 			// ignored on entry stay ignored, as in a non-interactive bash).
-			match ctx
-				.cx
-				.host
-				.set_signal_trap(sig, effective.as_ref().map(BStr::new))
-			{
+			let disposition = crate::bash::vm::jobctl::trap_disposition(
+				ctx.k,
+				sig,
+				effective.as_ref().map(BStr::new),
+			);
+			match ctx.cx.host.set_signal_trap(sig, disposition) {
 				Ok(true) => {},
 				Ok(false) => effective = Some(BString::default()),
 				Err(err) => {

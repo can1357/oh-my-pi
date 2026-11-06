@@ -1,3 +1,9 @@
+import { RunTrace } from "@oh-my-pi/pi-natives";
+import { isShellTrace, type ShellTrace, type ShellVizPreferences, type ShellVizPresentation } from "@oh-my-pi/pi-wire";
+import { defaultShellVizPreferences, readShellPresentation, shellVisualization } from "../tools/shell-viz";
+import { changeShellVizPreferences, shellVizEventAction } from "../tools/shell-trace";
+import { ShellVisualizer } from "../apps/shell-visualizer";
+import { chatTranscriptDisplayPreferences } from "./display-preferences";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Box } from "../components/box";
@@ -35,7 +41,7 @@ import {
 	type NativeUiEvent,
 	rootToggleExpanded,
 } from "../native/node";
-import { plainText } from "../native/spans";
+import { plainLine, plainText } from "../native/spans";
 import { diagnosticsSection, displayPath, resultText, toolHead } from "../tools/native-view";
 import type { FileDiagnosticsResult } from "../tools/lsp";
 import { NativeImageCache, readMediaPath, shownMedia } from "../native/blobs";
@@ -60,6 +66,8 @@ import { SpotlightNotices } from "./spotlight";
 import { sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
 import { renderDiff } from "../chrome/diff";
 import { type AnimationFrame, trimBlankEdges } from "../chrome/transcript-container";
+import { LateDiagnosticsMessageComponent } from "./late-diagnostics-message";
+import { compactRows, presentNative, TranscriptPresentationState } from "./transcript-presentation";
 
 /** Resolves the canonical renderer key while retaining the provider's wire name in message history. */
 export function toolRenderName(wireName: string, tool: AgentTool | undefined): string {
@@ -134,7 +142,7 @@ function cardPreview(preview: NativeToolView["preview"]): TspPreview | undefined
 type ToolDescriber = Pick<ToolRenderer, "describeCall" | "describeResult" | "mergeCallAndResult">;
 
 /** Optional kinds of the host's vocabulary the describe hooks branch on. */
-type NativeHostKinds = Required<Pick<RenderResultContextOptions, "media" | "json">>;
+type NativeHostKinds = Required<Pick<RenderResultContextOptions, "media" | "json" | "shell">>;
 
 class SafeToolRendererComponent implements Component {
 	#toolName: string;
@@ -221,12 +229,17 @@ export interface ToolExecutionUi {
 	requestComponentRender(component: Component): void;
 	resetDisplay(): void;
 	imageBudget?: TUI["imageBudget"];
+	showOverlay?: TUI["showOverlay"];
+	setFocus?: TUI["setFocus"];
+	terminal?: { readonly rows: number };
 }
 
 export interface ToolExecutionOptions {
 	showImages?: boolean; // default: true (only used if terminal supports images)
 	/** Allow the name-keyed renderer registry only when the active tool is the built-in implementation. */
 	useBuiltInRenderer?: boolean;
+	/** Ask the extension transcript presenters; false for a replayed transcript (overlays). Default: true. */
+	transcriptPresenters?: boolean;
 }
 
 /** A tool result or progress frame as a card shows it. */
@@ -248,6 +261,9 @@ export interface ToolExecutionHandle extends Component {
 	/** Seal the block as final history and stop its animations. */
 	seal(): void;
 }
+
+/** {@link ToolExecutionComponent.nativeTrailers} of a hidden call without late diagnostics. */
+const EMPTY_TRAILERS: readonly Component[] = [];
 
 /** Tools whose returned call hands its card to the background job it started (see {@link parksAsBackground}). */
 const JOB_CARD_TOOLS: Record<string, "always" | "native"> = { task: "always", bash: "native", eval: "native" };
@@ -380,6 +396,19 @@ let toolExecutionInstanceSeq = 0;
  * Component that renders a tool call with its result (updateable)
  */
 export class ToolExecutionComponent extends Container {
+	#shellPreferences: ShellVizPreferences = defaultShellVizPreferences();
+	#shellPendingTrace: RunTrace | undefined;
+	#shellPendingScript: string | undefined;
+	#shellPresentation: ShellVizPresentation | undefined;
+	#shellPresentationKey: string | undefined;
+	#shellTrace: ShellTrace | undefined;
+	#shellTraceDetails: unknown;
+	#shellReplayTimer: NodeJS.Timeout | undefined;
+	#shellReplayAt = 0;
+	#shellReplayNs = 0;
+	#shellReplayPositioned = false;
+	#shellReplayEpoch = 0;
+	#shellInspector: { hide(): void } | undefined;
 	#contentBox: Box; // Used for custom tools and bash visual truncation
 	#contentText: WidthAwareText; // Generic fallback (no custom/built-in renderer)
 	// Which container the constructor mounted: bespoke/built-in renderers use
@@ -477,10 +506,33 @@ export class ToolExecutionComponent extends Container {
 	#executionStartedAtNow: number | undefined;
 	// When the call settled (final result or seal), same clock; freezes the native elapsed timer.
 	#executionEndedAtNow: number | undefined;
-	readonly #toolCallId: string | undefined;
+	#toolCallId: string | undefined;
 	readonly #native = new Memo();
 	// LSP diagnostics that arrived after the result (native only), shown in the frame.
 	#lateDiagnostics: readonly FileDiagnosticsResult[] | undefined;
+	/** The standalone block showing {@link #lateDiagnostics} while the card is not drawn in full. */
+	#lateDiagnosticsBlock:
+		| { files: readonly FileDiagnosticsResult[]; block: LateDiagnosticsMessageComponent }
+		| undefined;
+	/** Whether presenters draw this card (not a replayed transcript). */
+	#presented = true;
+	/** What the presenters chose; an expanded card always draws in full. */
+	readonly #presentation = new TranscriptPresentationState(
+		() =>
+			this.#presented
+				? {
+						type: "toolCall",
+						id: this.#toolCallId ?? "",
+						toolName: this.#toolName,
+						args: this.#args,
+						result: this.#result ? { content: this.#result.content, details: this.#rawDetails } : undefined,
+						isError: this.#result?.isError === true,
+						isPartial: this.#result === undefined || this.#isPartial,
+					}
+				: undefined,
+		() => this.#expanded,
+		this,
+	);
 	readonly #nativeImages = new NativeImageCache();
 	// The Spotlight notice drawn after the card in a native transcript (see nativeTrailers).
 	readonly #spotlight = new SpotlightNotices();
@@ -499,6 +551,9 @@ export class ToolExecutionComponent extends Container {
 		argsComplete?: boolean;
 		executionStarted?: boolean;
 		renderContext?: Record<string, unknown>;
+		shellPresentation?: ShellVizPresentation;
+		shellTrace?: ShellTrace;
+		shellReplayEpoch?: number;
 		/** Live: read at render time, so a ticking spinner advances it. */
 		readonly elapsedMs?: number;
 	} = {
@@ -528,6 +583,7 @@ export class ToolExecutionComponent extends Container {
 		this.#toolLabel = tool?.label ?? toolName;
 		this.#renderer = options.useBuiltInRenderer === false ? undefined : toolRenderers[toolName];
 		this.#showImages = options.showImages ?? true;
+		this.#presented = options.transcriptPresenters ?? true;
 		this.#tool = tool;
 		this.#ui = ui;
 		this.#args = args;
@@ -558,6 +614,148 @@ export class ToolExecutionComponent extends Container {
 		this.#updateDisplay();
 	}
 
+	#updateShellTrace(details: unknown): void {
+		if (this.#toolName !== "bash" || details === this.#shellTraceDetails) return;
+		this.#shellTraceDetails = details;
+		const candidate = isRecord(details) ? details.trace : undefined;
+		if (candidate === undefined || candidate === this.#shellTrace) return;
+		const next = isShellTrace(candidate) ? candidate : undefined;
+		const old = this.#shellTrace;
+		if (old === next) return;
+		if (this.#shellPreferences.cursor !== undefined) {
+			const applied = old?.history?.[this.#shellPreferences.cursor - 1]?.seq;
+			const records = next?.history ?? [];
+			this.#shellPreferences = {
+				...this.#shellPreferences,
+				cursor:
+					applied === undefined
+						? Math.min(this.#shellPreferences.cursor, records.length)
+						: records.filter(record => record.seq <= applied).length,
+			};
+		}
+		this.#shellTrace = next;
+		if (next?.historyTruncated && this.#shellPreferences.cursor === 0 && this.#shellReplayPositioned) {
+			this.#shellReplayNs = Math.max(this.#shellReplayNs, next.history?.[0]?.t_ns ?? 0);
+		}
+		this.#shellPresentationKey = undefined;
+	}
+
+	#getShellPresentation(): ShellVizPresentation | undefined {
+		if (this.#toolName !== "bash" || !chatTranscriptDisplayPreferences.shellVisualization) return undefined;
+		const script =
+			this.#shellTrace?.script ??
+			(isRecord(this.#args) && typeof this.#args.command === "string" ? this.#args.command : undefined);
+		if (!script) return undefined;
+		if (script !== this.#shellPendingScript) {
+			this.#shellPendingTrace = undefined;
+			this.#shellPendingScript = script;
+			this.#shellPresentationKey = undefined;
+		}
+		const key = `${this.#resultVersion}|${this.#displayInputVersion}`;
+		if (this.#shellPresentation && key === this.#shellPresentationKey) return this.#shellPresentation;
+		const source = this.#shellTrace
+			? shellVisualization(this.#shellTrace)
+			: (this.#shellPendingTrace ??= new RunTrace(script));
+		this.#shellPresentation = readShellPresentation(
+			source,
+			this.#shellPreferences,
+			this.#shellTrace,
+			this.#result ? resultText(this.#result) : undefined,
+		);
+		this.#shellPresentationKey = key;
+		return this.#shellPresentation;
+	}
+
+	#shellChanged(): void {
+		this.#shellPresentationKey = undefined;
+		this.#displayInputVersion++;
+		this.#blockVersion++;
+		this.#updateDisplay();
+		this.#ui.requestRender();
+	}
+
+	#stopShellReplay(): void {
+		clearInterval(this.#shellReplayTimer);
+		this.#shellReplayTimer = undefined;
+		this.#shellPreferences = { ...this.#shellPreferences, playing: false };
+	}
+
+	/** Handle exactly the shared native action vocabulary; inspector uses this same controller. */
+	shellVizAction(action: string): void {
+		if (this.#toolName !== "bash" || !chatTranscriptDisplayPreferences.shellVisualization) return;
+		if (action === "inspect") {
+			this.openShellVisualizer();
+			return;
+		}
+		const before = this.#shellPreferences;
+		const wasPlaying = before.playing;
+		const history = this.#shellTrace?.history ?? [];
+		const now = performance.now();
+		if (wasPlaying) this.#shellReplayNs += (now - this.#shellReplayAt) * 1_000_000 * before.speed;
+		this.#shellPreferences = changeShellVizPreferences(before, action, history.length);
+		const seeking = action === "reset" || action === "step" || /^seek:[0-9]+$/.test(action);
+		const restarting = action === "play" && (before.cursor === undefined || before.cursor >= history.length);
+		if (action === "reset" || action === "live" || /^seek:[0-9]+$/.test(action) || restarting)
+			this.#shellReplayEpoch++;
+		if (action === "live") this.#shellReplayPositioned = false;
+		else if (seeking || restarting || (!this.#shellReplayPositioned && this.#shellPreferences.playing)) {
+			const cursor = this.#shellPreferences.cursor ?? 0;
+			this.#shellReplayNs =
+				history[cursor - 1]?.t_ns ?? (this.#shellTrace?.historyTruncated ? (history[0]?.t_ns ?? 0) : 0);
+			this.#shellReplayPositioned = true;
+		}
+		if (this.#shellPreferences.playing) {
+			this.#shellReplayAt = now;
+			if (!this.#shellReplayTimer) {
+				this.#shellReplayTimer = setInterval(() => {
+					const history = this.#shellTrace?.history ?? [];
+					const now = performance.now();
+					this.#shellReplayNs += (now - this.#shellReplayAt) * 1_000_000 * this.#shellPreferences.speed;
+					this.#shellReplayAt = now;
+					let cursor = this.#shellPreferences.cursor ?? 0;
+					while (cursor < history.length && history[cursor].t_ns <= this.#shellReplayNs) cursor++;
+					if (cursor === history.length) this.#stopShellReplay();
+					if (cursor !== this.#shellPreferences.cursor || !this.#shellPreferences.playing) {
+						this.#shellPreferences = { ...this.#shellPreferences, cursor };
+						this.#shellChanged();
+					}
+				}, 80);
+				this.#shellReplayTimer.unref();
+			}
+		} else this.#stopShellReplay();
+		this.#shellChanged();
+	}
+
+	/** Open the focused inspector without intercepting composer input while it is closed. */
+	openShellVisualizer(): void {
+		if (this.#toolName !== "bash" || !chatTranscriptDisplayPreferences.shellVisualization || !this.#ui.showOverlay)
+			return;
+		if (this.#shellInspector) return;
+		const inspector = new ShellVisualizer({
+			presentation: () => this.#getShellPresentation(),
+			replayEpoch: () => this.#shellReplayEpoch,
+			liveOrigin: () => this.#executionStarted,
+			action: action => this.shellVizAction(action),
+			close: () => {
+				this.#stopShellReplay();
+				this.#shellInspector?.hide();
+				this.#shellInspector = undefined;
+				this.#shellChanged();
+			},
+			requestRender: () => this.#ui.requestRender(),
+			height: () => this.#ui.terminal?.rows ?? 24,
+		});
+		this.#shellInspector = this.#ui.showOverlay(inspector, {
+			anchor: "top-left",
+			width: "100%",
+			maxHeight: "100%",
+			fullscreen: true,
+			margin: 0,
+		});
+		this.#ui.setFocus?.(inspector);
+		this.#ui.requestRender();
+	}
+
 	updateArgs(args: unknown, _toolCallId?: string): void {
 		// Reference-equality short-circuit before any further work. Callers
 		// always allocate a new arg object on each streamed delta (see
@@ -565,6 +763,7 @@ export class ToolExecutionComponent extends Container {
 		// signals "nothing meaningful changed" and the renderer can skip.
 		if (args === this.#args) return;
 		this.#args = args;
+		this.#presentation.markStale();
 		this.#displayInputVersion++;
 		this.#updateSpinnerAnimation();
 		this.#updateDisplay();
@@ -666,6 +865,7 @@ export class ToolExecutionComponent extends Container {
 		this.#firstResultViewportRepaintShapePainted = false;
 		this.#partialResultShapePainted = false;
 		this.#rawDetails = result.details;
+		this.#updateShellTrace(result.details);
 		// Renderers receive sanitized details for display; raw paths are available
 		// separately for links and media through the built-in render context.
 		const details = sanitizeTextDeep(result.details);
@@ -673,6 +873,9 @@ export class ToolExecutionComponent extends Container {
 		this.#resultVersion++;
 		this.#blockVersion++;
 		this.#isPartial = isPartial;
+		this.#presentation.markStale();
+		// A final frame can land after the card retired to scrollback, which is never drawn again.
+		if (!isPartial) this.#presentation.recheck();
 		this.#displaceableByToolName = displaceableToolName(this.#toolName, result, isPartial);
 		if (!isPartial && this.#toolCallId !== undefined) {
 			this.#spotlight.set(this.#toolCallId, result.details, resultText(result));
@@ -890,6 +1093,7 @@ export class ToolExecutionComponent extends Container {
 	isTranscriptBlockPending(): boolean {
 		return (
 			this.#toolActivityVisible &&
+			this.#presentation.shown.mode === "full" &&
 			((this.#showImages && this.#kittyConversionsAwaited.size > 0) || this.#figure?.pending === true)
 		);
 	}
@@ -966,6 +1170,9 @@ export class ToolExecutionComponent extends Container {
 	 * interval alive and keep being repainted.
 	 */
 	override dispose(): void {
+		this.#stopShellReplay();
+		this.#shellInspector?.hide();
+		this.#shellInspector = undefined;
 		this.stopAnimation();
 		super.dispose();
 	}
@@ -993,13 +1200,58 @@ export class ToolExecutionComponent extends Container {
 
 	/** Mirrors the card collapsed or expanded in the terminal, so `Ctrl+O` and native toggles share one state. */
 	handleNativeEvent(event: NativeUiEvent): void {
+		if (this.#toolName === "bash" && chatTranscriptDisplayPreferences.shellVisualization) {
+			const action = shellVizEventAction(event, this.#shellPreferences);
+			if (action) {
+				this.shellVizAction(action);
+				return;
+			}
+		}
 		const expanded = rootToggleExpanded(event);
 		if (expanded !== undefined) this.setExpanded(expanded);
 	}
 
-	/** The result's Spotlight notice, a block of its own right after the card (visible while it is collapsed). */
+	/**
+	 * Blocks of their own right after the card: the result's Spotlight notice (visible while it is
+	 * collapsed), and late diagnostics the card absorbed while a presenter compacts or hides it, so
+	 * they stay visible.
+	 */
 	nativeTrailers(): readonly Component[] {
-		return this.#spotlight.list();
+		const mode = this.#presentation.shown.mode;
+		const late = this.#lateDiagnostics;
+		// Drawn in full, the card shows its diagnostics itself: the notices' own (stable) list.
+		if (mode === "full" || late === undefined) return mode === "hidden" ? EMPTY_TRAILERS : this.#spotlight.list();
+		if (this.#lateDiagnosticsBlock?.files !== late) {
+			this.#lateDiagnosticsBlock = { files: late, block: new LateDiagnosticsMessageComponent([...late]) };
+		}
+		const diagnostics = this.#lateDiagnosticsBlock.block;
+		// Not a transcript child: the transcript-wide visibility reaches it only through this card.
+		diagnostics.setToolActivityVisible(this.#toolActivityVisible);
+		// A call a presenter hides takes its notice with it.
+		return mode === "hidden" ? [diagnostics] : [...this.#spotlight.list(), diagnostics];
+	}
+
+	refreshTranscriptPresentation(ids?: ReadonlySet<string>): boolean {
+		if (!this.#presentation.refresh(ids)) return false;
+		this.#blockVersion++;
+		super.invalidate();
+		return true;
+	}
+
+	/** The streamed call's id changed (or an empty one was filled in): presenters see, and refresh by, the new one. */
+	renameToolCallId(toolCallId: string): void {
+		if (toolCallId === this.#toolCallId) return;
+		this.#toolCallId = toolCallId;
+		this.#presentation.markStale();
+		this.#blockVersion++;
+		super.invalidate();
+	}
+
+	isTranscriptBlockCompact(): boolean {
+		if (!this.#toolActivityVisible || this.#allocation === 0 || (this.#toolName === "wait" && this.#isBenignSkip())) {
+			return false;
+		}
+		return this.#presentation.shown.mode === "compact";
 	}
 
 	/** The file paths this call targets (edit/write/apply_patch args), display-relative. */
@@ -1048,15 +1300,21 @@ export class ToolExecutionComponent extends Container {
 	 * `elapsed` timer in the head and terminal-local collapse clamped to the
 	 * view's preview. Renderers without describe hooks (and extension tools
 	 * with only render hooks) get the generic card. Hidden tool activity stays
-	 * mounted so toggling it is one prop change.
+	 * mounted so toggling it is one prop change; a presenter's answer applies on top.
 	 */
 	override describe(cx?: DescribeContext): NativeNode {
 		if (this.#toolName === "wait" && this.#isBenignSkip()) return EMPTY_NODE;
 		const dataFirst = cx?.supports("tool") === true;
-		const host: NativeHostKinds = { media: cx?.supports("media") === true, json: cx?.supports("json") === true };
+		const host: NativeHostKinds = {
+			media: cx?.supports("media") === true,
+			json: cx?.supports("json") === true,
+			shell: cx?.supports("shell") === true,
+		};
+		const presentation = this.#presentation.draw();
 		const key = [
 			dataFirst,
 			this.#resultVersion,
+			this.#toolCallId,
 			this.#expanded,
 			this.#isPartial,
 			this.#argsComplete,
@@ -1064,15 +1322,24 @@ export class ToolExecutionComponent extends Container {
 			this.#sealed,
 			this.#parkedBackground,
 			this.#showImages,
+			this.#toolName === "bash" && chatTranscriptDisplayPreferences.shellVisualization,
 			this.#displayInputVersion,
 			this.#toolActivityVisible,
 			host.media,
 			host.json,
+			host.shell,
 			getThemeEpoch(),
+			presentation,
 		];
-		return this.#native.get(key, () =>
-			withHidden(dataFirst ? this.#describeTool(host) : this.#describeCard(host), !this.#toolActivityVisible),
-		);
+		return this.#native.get(key, () => {
+			const full = dataFirst ? this.#describeTool(host) : this.#describeCard(host);
+			const shown = presentNative(full, presentation, {
+				role: `omp.tool.${this.#toolName}`,
+				title: this.#toolLabel,
+				target: this.#activitySummary().detail,
+			});
+			return withHidden(shown, !this.#toolActivityVisible);
+		});
 	}
 
 	/** Milliseconds since execution started (running) or its total (settled); undefined before it starts. */
@@ -1253,6 +1520,9 @@ export class ToolExecutionComponent extends Container {
 			elapsedMs: this.#elapsedMs(status),
 			cancelled: status === "cancelled",
 			renderContext: this.#buildRenderContext(),
+			shellPresentation: this.#getShellPresentation(),
+			shellTrace: this.#shellTrace,
+			shellReplayEpoch: this.#shellReplayEpoch,
 		};
 		// Custom tools (MCP, extensions) carry their own describe hooks, mirroring
 		// the ANSI path's preference for the tool's renderCall/renderResult.
@@ -1348,6 +1618,7 @@ export class ToolExecutionComponent extends Container {
 	setToolActivityVisible(visible: boolean): void {
 		this.#toolActivityVisible = visible;
 		this.#spotlight.setHidden(!visible);
+		this.#lateDiagnosticsBlock?.block.setToolActivityVisible(visible);
 		super.invalidate();
 	}
 
@@ -1366,7 +1637,7 @@ export class ToolExecutionComponent extends Container {
 		// TUI startup, so a result rendered before it lands must re-shape once it
 		// does (it gates Image children vs text fallback in #rebuildDisplay); keyed
 		// here for the same reason markdown.ts keys its render cache on it.
-		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#argsComplete ? "1" : "0"}|${this.#executionStarted ? "1" : "0"}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}|${imageLinksEnabled()}`;
+		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#argsComplete ? "1" : "0"}|${this.#executionStarted ? "1" : "0"}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}|${imageLinksEnabled()}|${this.#toolName === "bash" && chatTranscriptDisplayPreferences.shellVisualization}`;
 		if (key === this.#lastDisplayKey && this.#displayBuilt) return;
 		this.#lastDisplayKey = key;
 
@@ -1412,6 +1683,15 @@ export class ToolExecutionComponent extends Container {
 		if (!this.#toolActivityVisible || this.#allocation === 0 || (this.#toolName === "wait" && this.#isBenignSkip())) {
 			return [];
 		}
+		const presentation = this.#presentation.draw();
+		if (presentation.mode === "hidden") return [];
+		if (presentation.mode === "compact") {
+			// A squeezed allocation keeps the head (identity, spinner) and as many rows as fit.
+			return compactRows(this.#compactText(width), presentation, width, this.#compactGlyph()).slice(
+				0,
+				this.#allocation,
+			);
+		}
 		let lines = super.render(width);
 		if (this.#allocation < 3) {
 			// A squeezed allocation degrades only blocks that genuinely overflow it.
@@ -1428,9 +1708,12 @@ export class ToolExecutionComponent extends Container {
 		return lines;
 	}
 
-	#renderCompact(width: number): readonly string[] {
+	/** The one-row summary: bold label, muted detail, and the elapsed seconds of a running call. */
+	#compactText(width: number): string {
 		const summary = this.#activitySummary();
-		const detail = summary.detail ? theme.fg("muted", ` · ${summary.detail.replace(/\s+/g, " ")}`) : "";
+		// Raw call input (a bash command): stripped of ANSI and control characters before theming.
+		const shownDetail = summary.detail ? plainLine(summary.detail) : "";
+		const detail = shownDetail ? theme.fg("muted", ` · ${shownDetail}`) : "";
 		// Elapsed ticks only while the call is genuinely running; a settled
 		// placeholder row must not read as live ("Todo · running 0s").
 		const elapsed =
@@ -1440,15 +1723,21 @@ export class ToolExecutionComponent extends Container {
 						` ${Math.max(0, Math.floor((this.#presentationFrame.now - this.#executionStartedAtNow) / 1000))}s`,
 					)
 				: "";
-		const text = truncateToWidth(
-			`${theme.fg("toolTitle", theme.bold(summary.label))}${detail}${elapsed}`,
+		return truncateToWidth(
+			`${theme.fg("toolTitle", theme.bold(plainLine(summary.label)))}${detail}${elapsed}`,
 			Math.max(1, width - 4),
 		);
-		if (this.#allocation === 1) {
-			const glyph = this.#spinnerFrame === undefined ? "•" : (theme.spinnerFrames[this.#spinnerFrame] ?? "•");
-			const styledGlyph = theme.fg(this.#spinnerFrame === undefined ? "dim" : "muted", glyph);
-			return [truncateToWidth(`${styledGlyph} ${text}`, width)];
-		}
+	}
+
+	/** The one-row form's lead glyph: the spinner while it animates, else a dim bullet. */
+	#compactGlyph(): string {
+		const glyph = this.#spinnerFrame === undefined ? "•" : (theme.spinnerFrames[this.#spinnerFrame] ?? "•");
+		return theme.fg(this.#spinnerFrame === undefined ? "dim" : "muted", glyph);
+	}
+
+	#renderCompact(width: number): readonly string[] {
+		const text = this.#compactText(width);
+		if (this.#allocation === 1) return [truncateToWidth(`${this.#compactGlyph()} ${text}`, width)];
 		return [truncateToWidth(`${theme.fg("dim", "╭─")} ${text}`, width), theme.fg("dim", "╰")];
 	}
 
@@ -1892,6 +2181,9 @@ export class ToolExecutionComponent extends Container {
 			context.rawDetails = this.#rawDetails;
 		}
 		if (this.#toolName === "bash") {
+			this.#renderState.shellPresentation = this.#getShellPresentation();
+			this.#renderState.shellTrace = this.#shellTrace;
+			this.#renderState.shellReplayEpoch = this.#shellReplayEpoch;
 			// Bash needs render context even before a result exists. The renderer uses the pending-call args
 			// plus this context to keep the inline command preview visible while tool-call JSON is still streaming.
 			if (this.#result) {
