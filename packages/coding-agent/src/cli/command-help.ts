@@ -200,3 +200,7 @@ export const usageHelp = {
 export const worktreeHelp = {
 	description: "Add, list, or clear git worktrees (clone-first when enabled)",
 } satisfies CommandMetadata;
+
+export const providersHelp = {
+	description: "List provider cooldowns, probe recovery now, or explicitly clear a cooldown",
+} satisfies CommandMetadata;
