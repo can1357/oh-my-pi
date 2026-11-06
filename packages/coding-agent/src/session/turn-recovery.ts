@@ -3154,7 +3154,7 @@ export class TurnRecovery {
 		if (!staleOpenAIResponsesReplayError && recordedUsageLimitOutcome) {
 			const rotated = recordedUsageLimitOutcome.switchedCredential && !retryBudgetExhausted;
 			let restored = false;
-			if (!rotated && !cfgUsageGovernorEnabled.get(this.#host.settings)) {
+			if (!rotated) {
 				const resetAbortController = new AbortController();
 				this.#retryAbortController?.abort();
 				this.#retryAbortController = resetAbortController;

@@ -26,6 +26,7 @@ import type {
 	UsageRequestContext,
 	UsageRequestSource,
 } from "@oh-my-pi/pi-ai";
+import { withUsageAdmission } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import type { DiscoverAuthStorageOptions } from "@oh-my-pi/pi-ai/auth-broker/discover";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
@@ -4831,8 +4832,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// request, not the process-wide switch (the newest effect holder's): concurrent ACP/SDK
 		// sessions in one process each keep their own policy.
 		const settingsAwareStreamFn: StreamFn = (streamModel, context, streamOptions) =>
-			withCredentialRedaction(cfgSecretsEnabled.get(settings), () =>
-				settingsBoundStreamFn(streamModel, context, streamOptions),
+			withUsageAdmission(modelRegistry.authStorage.governor, () =>
+				withCredentialRedaction(cfgSecretsEnabled.get(settings), () =>
+					settingsBoundStreamFn(streamModel, context, streamOptions),
+				),
 			);
 		const stampUsage =
 			(usage: () => UsageRequestContext, next: StreamFn): StreamFn =>

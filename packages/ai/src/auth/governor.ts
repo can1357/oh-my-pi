@@ -440,8 +440,7 @@ export class CredentialGovernor implements GovernorApi {
 		if (!this.active) return { measured: false };
 		const now = this.#now();
 		const source = this.#source();
-		if (credential.type === "api_key" && (!context.modelId || !source.strategies(provider)))
-			return { measured: false };
+		if (credential.type === "api_key" && !context.modelId) return { measured: false };
 		const applicable = this.#applicable(provider, credential, usage, context, now);
 		if (applicable.length === 0) return { measured: false };
 		if (
@@ -570,7 +569,6 @@ export class CredentialGovernor implements GovernorApi {
 		if (
 			row.credential.type === "api_key" &&
 			(!request.modelId ||
-				!source.strategies(provider) ||
 				applicable.some(
 					window => !window.fetchedAt || window.fetchedAt > now || now - window.fetchedAt > GOVERNOR_STALE_MS,
 				))

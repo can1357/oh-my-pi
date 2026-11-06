@@ -2482,7 +2482,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#titleSystemPrompt = config.titleSystemPrompt;
 		this.#autoTitle = config.autoTitle === true;
 		this.#transformContext = config.transformContext ?? (messages => messages);
-		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
+		const sideStream = config.sideStreamFn ?? streamSimple;
+		this.#sideStreamFn = (model, context, options) =>
+			withUsageAdmission(this.#modelRegistry.authStorage.governor, () => sideStream(model, context, options));
 		this.#onPayload = config.onPayload;
 		this.rawSseDebugBuffer = config.rawSseDebugBuffer ?? new RawSseDebugBuffer();
 		// Avoid wrapping in an `async` closure when no user callback is configured: the

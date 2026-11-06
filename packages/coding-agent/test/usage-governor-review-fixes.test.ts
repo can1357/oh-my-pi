@@ -301,6 +301,7 @@ for (const failure of ["usage", "policy"] as const) {
 					setThinkingLevel: () => {},
 					syncAfterModelChange: async () => {},
 					emitSessionEvent: async () => {},
+					maybeAutoRedeemReset: async () => ({ restored: false }),
 					configWarnings: [],
 					abortInProgress: () => false,
 					isDisposed: () => false,

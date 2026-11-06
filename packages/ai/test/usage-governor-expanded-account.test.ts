@@ -33,12 +33,12 @@ class World {
 		governorAllowance: () =>
 			this.allowance === "included" ? ["primary"] : this.allowance === "metered" ? [] : undefined,
 	};
-	async open() {
+	async open(hasStrategy = true) {
 		this.dir = await fs.mkdtemp(path.join(os.tmpdir(), "governor-expanded-account-"));
 		this.store = await SqliteAuthCredentialStore.open(path.join(this.dir, "auth.db"));
 		this.auth = new AuthStorage(this.store, {
 			usageProviderResolver: id => (id === PROVIDER ? this.adapter : undefined),
-			rankingStrategyResolver: id => (id === PROVIDER ? fakeStrategy : undefined),
+			rankingStrategyResolver: id => (hasStrategy && id === PROVIDER ? fakeStrategy : undefined),
 			configValueResolver: async value => this.resolution.get(value) ?? value,
 			governor: { dbPath: path.join(this.dir, "governor.db"), config: CONFIG },
 		});
@@ -134,6 +134,18 @@ async function setup() {
 }
 
 describe("stored coding-plan account admission", () => {
+	test("paces a selected stored key even when no provider ranking strategy exists", async () => {
+		world = await new World().open(false);
+		const w = world;
+		await w.seed(["account-a"]);
+		const selected = await w.auth.keys.getWithCredential(PROVIDER, "session");
+		expect(selected?.credentialId).toBeDefined();
+		const grant = await w.admit(selected!.credentialId, selected!.apiKey);
+		expect(grant?.id).toBeDefined();
+		if (grant) w.auth.governor.settle(grant.id, "not-sent");
+		expect(await w.admit(selected!.credentialId, "another-key")).toBeUndefined();
+	});
+
 	test("requires both the selected row and matching resolved bearer, and reads cache only", async () => {
 		const w = await setup();
 		await w.seed(["account-a"]);
