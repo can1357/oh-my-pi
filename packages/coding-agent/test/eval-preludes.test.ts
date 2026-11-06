@@ -3,6 +3,7 @@ import type { AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core"
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { EvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval";
 import { getEnabledEvalPreludes, invokeEvalPrelude } from "@oh-my-pi/pi-coding-agent/eval";
+import { createBrowserPreludeDefinition } from "@oh-my-pi/pi-coding-agent/tools/browser/prelude-definition";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 function makeSession(getEvalPreludes: () => EvalPreludeDefinition[]): ToolSession {
@@ -143,6 +144,7 @@ describe("eval prelude host invocation", () => {
 			python: "probe = object()",
 			exports: ["probe"],
 			approval: "read",
+			extensionToolCalls: true,
 			enabled: () => true,
 			invoke,
 		};
@@ -164,5 +166,66 @@ describe("eval prelude host invocation", () => {
 			/denied by extension/,
 		);
 		expect(invoke).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not fire extension hooks for a call its approval policy already denies", async () => {
+		const invoke = vi.fn(async (): Promise<AgentToolResult<unknown>> => ({
+			content: [{ type: "text", text: "must not run" }],
+		}));
+		const definition: EvalPreludeDefinition = {
+			name: "guarded",
+			documentation: "Guarded",
+			javascript: "globalThis.guarded = {};",
+			python: "guarded = object()",
+			exports: ["guarded"],
+			approval: { tier: "exec", policy: "deny", reason: "test policy" },
+			extensionToolCalls: true,
+			invoke,
+		};
+		const emitToolCall = vi.fn(async () => undefined);
+		const session: ToolSession = { ...makeSession(() => [definition]), emitToolCall };
+
+		await expect(invokeEvalPrelude("guarded", {}, { session, toolCallId: "denied" })).rejects.toThrow(
+			/blocked by tool policy/,
+		);
+		expect(emitToolCall).not.toHaveBeenCalled();
+		expect(invoke).not.toHaveBeenCalled();
+	});
+
+	it("does not fire extension hooks for a prelude that has not opted in", async () => {
+		const invoke = vi.fn(async (): Promise<AgentToolResult<unknown>> => ({
+			content: [{ type: "text", text: "ran" }],
+		}));
+		const definition: EvalPreludeDefinition = {
+			name: "plain",
+			documentation: "Plain",
+			javascript: "globalThis.plain = {};",
+			python: "plain = object()",
+			exports: ["plain"],
+			approval: "read",
+			invoke,
+		};
+		const emitToolCall = vi.fn(async () => ({ block: true, reason: "must not be consulted" }));
+		const session: ToolSession = { ...makeSession(() => [definition]), emitToolCall };
+
+		expect(await invokeEvalPrelude("plain", {}, { session, toolCallId: "plain-1" })).toEqual({
+			content: [{ type: "text", text: "ran" }],
+		});
+		expect(emitToolCall).not.toHaveBeenCalled();
+		expect(invoke).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("browser eval prelude", () => {
+	it("opts into extension tool_call events under the native browser tool name", () => {
+		const definition = createBrowserPreludeDefinition(
+			makeSession(() => []),
+			{
+				invoke: async () => ({ content: [{ type: "text", text: "" }] }),
+				status: () => undefined,
+			},
+		);
+		expect(definition.name).toBe("browser");
+		expect(definition.extensionToolCalls).toBe(true);
 	});
 });

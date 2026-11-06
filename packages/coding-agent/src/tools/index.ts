@@ -451,8 +451,9 @@ export interface ToolSession {
 	/**
 	 * Fires `tool_call` on this session's extensions for a call that reaches a host capability
 	 * outside the agent loop (eval preludes such as `browser`). Extensions may block it or revise
-	 * its input exactly as for a loop-dispatched call. Undefined when the session has no extension
-	 * runner.
+	 * its input exactly as for a loop-dispatched call. Prelude calls are call-only: no `tool_result`
+	 * follows, and `additionalContext` on the result is ignored. Undefined when the session has no
+	 * extension runner.
 	 */
 	emitToolCall?(event: CustomToolCallEvent, signal?: AbortSignal): Promise<ToolCallEventResult | undefined>;
 	/** Auth storage for passing to subagents (avoids re-discovery) */
