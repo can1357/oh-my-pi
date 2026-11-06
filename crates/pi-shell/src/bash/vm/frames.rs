@@ -56,7 +56,7 @@ use crate::bash::{
 /// Version of the [`Image`] layout; part of the header and the build id.
 /// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
 /// variant: an exec target holds it by index.
-pub const FRAMES_VERSION: u32 = 32;
+pub const FRAMES_VERSION: u32 = 31;
 
 const MAGIC: [u8; 4] = *b"OBF1";
 
@@ -322,10 +322,6 @@ struct FrameImage {
 	debug_pc:          Option<u32>,
 	debug_trap_local:  bool,
 	err_trap_local:    bool,
-	/// bash's `was_error_trap` as the parked command sampled it
-	/// ([`super::proc::Frame::err_trap_armed`]): without it a restored shell
-	/// reads the default and the command's ERR trap never runs.
-	err_trap_armed:    bool,
 	return_trap_local: bool,
 	trace_local:       bool,
 	debug_errexit:     bool,
@@ -555,7 +551,6 @@ impl Shell {
 					debug_pc: f.debug_pc,
 					debug_trap_local: f.debug_trap_local,
 					err_trap_local: f.err_trap_local,
-					err_trap_armed: f.err_trap_armed,
 					return_trap_local: f.return_trap_local,
 					trace_local: f.trace_local,
 					debug_errexit: f.debug_errexit,
@@ -1024,7 +1019,6 @@ impl Shell {
 				frame.debug_pc = f.debug_pc;
 				frame.debug_trap_local = f.debug_trap_local;
 				frame.err_trap_local = f.err_trap_local;
-				frame.err_trap_armed = f.err_trap_armed;
 				frame.return_trap_local = f.return_trap_local;
 				frame.trace_local = f.trace_local;
 				frame.debug_errexit = f.debug_errexit;

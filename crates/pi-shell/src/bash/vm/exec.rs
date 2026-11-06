@@ -217,25 +217,6 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 		let fresh = vp.frames[fi].scratch.is_none();
 		if fresh && starts {
 			note_command(vp, unit, op);
-			// bash samples `was_error_trap` before the command runs
-			// (`execute_cmd.c`), so a trap the command itself installs does
-			// not fire for that command. The DEBUG trap runs between that
-			// sample and the command, and comes back to this op with no
-			// scratch, so the sample is taken only on the first entry —
-			// `debug_pc` is this op's pc once its DEBUG point has passed.
-			// Without that, a DEBUG action that installs an ERR trap armed
-			// the very command it ran before.
-			if vp.frames[fi].debug_pc != Some(vp.frames[fi].pc) {
-				// `pseudo_trap_maybe` first, as `start_trap` does: a shell
-				// with no ERR trap anywhere pays one bit test per command
-				// instead of a `state::record` store read.
-				let armed = pseudo_trap_maybe(k, cx, TrapKey::Err)
-					&& matches!(
-						state::record(cx.store, vp, Key::Trap(TrapKey::Err)),
-						Ok(Some(Record::Trap { action, .. })) if !action.is_empty()
-					);
-				vp.frames[fi].err_trap_armed = armed;
-			}
 		}
 		// bash's DEBUG trap: before a simple command, `[[ ]]`, `(( ))`, each
 		// arith-for expression, a `case` or `select` command and each `for`
@@ -516,20 +497,11 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				vp.status = status;
 				// bash's `parse_and_execute` (the script, `-c`, `eval`, `.`,
 				// a trap action) catches the jump: the innermost script goes
-				// on with its next command. A `${ ;}` substitution runs in
-				// the current shell and catches it too, for the discards its
-				// `parse_and_execute` sees: `readonly r=1; x=${ r=2; }` and
-				// `set -o posix; readonly r=1; x=${ r=2 true; }` print
-				// `AFTER:1` in Bash 5.3.0 (5.2.21 has no such substitution,
-				// so 5.3.0 is the oracle for these rows), while an
-				// assignment's arithmetic error (`x=${ declare -i I;
-				// I=bad!; }`) and a fatal expansion error end the shell
-				// there as everywhere else.
-				let nofork = !matches!(flow, Flow::DiscardArith(_));
-				let script = vp.frames.iter().rposition(|f| {
-					matches!(f.kind, FrameKind::Script { .. })
-						|| (nofork && matches!(f.kind, FrameKind::NoFork))
-				});
+				// on with its next command.
+				let script = vp
+					.frames
+					.iter()
+					.rposition(|f| matches!(f.kind, FrameKind::Script { .. }));
 				if let Some(i) = script {
 					unwind(&mut k.root, cx.store, vp, i + 1);
 					clear_scratch(&mut k.root, cx.store, vp);
@@ -548,14 +520,7 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 		}
 		let zsh = unit.mode.dialect() == Dialect::Zsh;
 		let errexit = errexit_failed && (errexit_on(k, cx, vp) || (zsh && zsh_errreturn_exits(k, cx, vp)));
-		// bash's `was_error_trap`, sampled before the command ran: a trap
-		// the command itself installs does not fire for it. Only an `Exec`
-		// samples at its own start (`starts_command` is unconditional for
-		// it), so only an `Exec` is gated; zsh's ZERR has no such test.
-		let armed = zsh
-			|| op.code != Opcode::Exec
-			|| vp.frames.get(fi).is_some_and(|f| f.err_trap_armed);
-		if failed_command && armed && start_trap(k, vp, cx, TrapKey::Err) {
+		if failed_command && start_trap(k, vp, cx, TrapKey::Err) {
 			set_trap_line(vp, err_line);
 			for frame in &mut vp.frames[..fi.saturating_add(1)] {
 				frame.err_reported = true;

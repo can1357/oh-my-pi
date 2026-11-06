@@ -4,11 +4,7 @@
 //! `-c` string (they agree on all of them), run here through `Shell::run`.
 #![cfg(unix)]
 
-use pi_shell::{
-	Shell, ShellRunOptions,
-	cancel::CancelToken,
-	testkit::{Fault, FakeHost, run_script},
-};
+use pi_shell::{Shell, ShellRunOptions, cancel::CancelToken};
 
 /// Run `script` (its diagnostics discarded) in a fresh shell: its output and
 /// exit status.
@@ -721,30 +717,6 @@ async fn an_arithmetic_for_header_error_ends_only_that_loop() {
 	.await;
 }
 
-/// Bash samples `was_error_trap` before a command runs, so an ERR trap the
-/// command installs does not fire for that command. A trap already set
-/// when a function call starts can fire for the call as well as its body.
-/// Bash 5.2.21 and 5.3.0 agree on these outputs and statuses.
-#[tokio::test(flavor = "multi_thread")]
-async fn an_err_trap_is_sampled_before_the_command_runs() {
-	check(&[
-		// `was_error_trap` is sampled before the command.
-		(r##"f(){ trap 'set -e; return 6' ERR; false; }; f; echo OUT:$?"##, "", 6),
-		(r##"f(){ trap 'echo T' ERR; false; }; f; echo OUT:$?"##, "T\nOUT:1\n", 0),
-		(r##"g(){ trap 'echo T:$?' ERR; return 3; }; g; echo OUT:$?"##, "OUT:3\n", 0),
-		(r##"f(){ trap 'echo T' ERR; true; false; }; f; echo OUT:$?"##, "T\nOUT:1\n", 0),
-		(r##"f(){ false; trap 'echo T' ERR; }; f; echo OUT:$?"##, "OUT:0\n", 0),
-		// A trap already set when the call starts fires for the call too.
-		(
-			r##"trap 'echo PRE' ERR; f(){ trap 'echo T' ERR; false; }; f; echo OUT:$?"##,
-			"T\nT\nOUT:1\n",
-			0,
-		),
-		(r##"trap 'echo T' ERR; false; echo OUT:$?"##, "T\nOUT:1\n", 0),
-	])
-	.await;
-}
-
 /// A declaration builtin's arithmetic subscript error makes the same
 /// assignment jump as an invalid arithmetic value: no `eval` or subshell
 /// answers it. Bash 5.2.21 and 5.3.0 keep the enclosing catch's status.
@@ -763,39 +735,6 @@ async fn a_declaration_subscript_error_takes_the_assignment_jump() {
 			7,
 		),
 		(r##"declare -a A; A[bad!]=x; echo BAD:$?"##, "", 1),
-	])
-	.await;
-}
-
-/// Bash samples `was_error_trap` once, before the DEBUG action that runs
-/// before the command. An ERR trap installed by that action does not arm
-/// the current command. Bash 5.2.21 and 5.3.0 agree, and an unchanged DEBUG
-/// trap still runs before each command.
-#[tokio::test(flavor = "multi_thread")]
-async fn an_err_trap_is_sampled_before_the_debug_action_runs() {
-	check(&[
-		// A DEBUG action that installs an ERR trap does not arm this command.
-		(
-			r##"trap 'trap '"'"'set -e; echo E:$?'"'"' ERR; trap - DEBUG' DEBUG; false; echo O:AFTER:$?"##,
-			"O:AFTER:1\n",
-			0,
-		),
-		(
-			r##"trap 'echo T:$?' EXIT; trap 'trap '"'"': ${review_missing?BOOM}'"'"' ERR; trap - DEBUG' DEBUG; false; echo O:AFTER:$?"##,
-			"O:AFTER:1\nT:0\n",
-			0,
-		),
-		(
-			r##"trap 'echo T:$?' EXIT; trap 'trap '"'"'declare -i I=bad!'"'"' ERR; trap - DEBUG' DEBUG; false; echo O:AFTER:$?"##,
-			"O:AFTER:1\nT:0\n",
-			0,
-		),
-		// A DEBUG trap that installs nothing still runs on every command.
-		(
-			r##"trap 'echo T:$?' EXIT; trap 'echo D' DEBUG; false; echo O:AFTER:$?"##,
-			"D\nD\nO:AFTER:1\nD\nT:0\n",
-			0,
-		),
 	])
 	.await;
 }
@@ -829,28 +768,6 @@ async fn readonly_and_export_reject_subscripted_names_without_evaluating_them() 
 		(r##"declare -i I=bad!; echo O:AFTER:$?"##, "", 1),
 	])
 	.await;
-}
-
-/// The ERR-trap sample a command takes at its start (bash's
-/// `was_error_trap`, [`pi_shell::bash::vm::proc::Frame::err_trap_armed`])
-/// is per-frame state, so it must survive a snapshot: a shell suspended
-/// while a command is parked, imaged, dropped and restored must still run
-/// the ERR trap for that command. The oracle is the same script without a
-/// snapshot, and Bash 5.2.21 and 5.3.0, which both exit 23.
-#[test]
-fn a_parked_commands_err_trap_sample_survives_a_snapshot() {
-	let src = b"f(){ for i in 1 2 3; do :; done; return 1; }; trap 'exit 23' ERR; f";
-	let base = run_script(FakeHost::new(), src, &[], Fault::None);
-	assert_eq!((base.status, base.stdout.as_slice(), base.stderr.as_slice()), (23, &b""[..], &b""[..]));
-	for every in [1_u32, 3, 7] {
-		let hit = run_script(FakeHost::new(), src, &[], Fault::Snapshot { every });
-		assert!(hit.snapshots > 0, "no snapshot landed at every={every}");
-		assert_eq!(
-			(hit.status, hit.stdout.as_slice(), hit.stderr.as_slice()),
-			(base.status, base.stdout.as_slice(), base.stderr.as_slice()),
-			"snapshot every {every} ops changed the answer"
-		);
-	}
 }
 
 /// bash's `execute_arith_for_command` evaluates the three header
@@ -908,34 +825,6 @@ async fn an_arithmetic_for_header_leaves_the_status_alone() {
 			"I:7\n",
 			1,
 		),
-	])
-	.await;
-}
-
-/// A `${ ;}` substitution runs in the current shell, and its
-/// `parse_and_execute` catches a plain discard as an `eval` or a `.` does:
-/// the substitution ends, the command string carries on with status 1. An
-/// assignment's arithmetic error and a fatal expansion error still end the
-/// shell there. Bash 5.2.21 has no such substitution, so Bash 5.3.0 is the
-/// oracle for every row of this test; an earlier round of this change gave
-/// the posix temporary-environment error a jump the substitution did not
-/// catch, which ended the whole command string.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_nofork_substitution_catches_a_discard() {
-	check(&[
-		(r##"x=${ set -o posix; readonly r=1; r=2 true; }; echo AFTER:$?"##, "AFTER:1\n", 0),
-		(r##"set -o posix; readonly r=1; x=${ r=2 true; }; echo AFTER:$?"##, "AFTER:1\n", 0),
-		(r##"readonly r=1; x=${ r=2; }; echo AFTER:$?"##, "AFTER:1\n", 0),
-		// `x=${ : $((1/0)); }` is `AFTER:1` in Bash 5.3.0 and 1 at upstream
-		// main as well as here: an arithmetic error in a word takes another
-		// jump, a site of the follow-up pull request rather than a row this
-		// change moves.
-		// Controls: the jumps a `${ ;}` does not catch, and the forms that
-		// already caught this one.
-		(r##"x=${ declare -i I; I=bad!; }; echo AFTER:$?"##, "", 1),
-		(r##"x=${ : ${u?BOOM}; }; echo AFTER:$?"##, "", 127),
-		(r##"set -o posix; readonly r=1; x=$( r=2 true ); echo AFTER:$?"##, "AFTER:1\n", 0),
-		(r##"set -o posix; readonly r=1; eval 'r=2 true'; echo AFTER:$?"##, "AFTER:1\n", 0),
 	])
 	.await;
 }
