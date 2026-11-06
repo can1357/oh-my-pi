@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- A reclaiming `omp gc` run now prints its data-loss warning before it deletes anything rather than after, shows it under `--json` as well as in text, and still reports what it deleted when a later phase fails instead of exiting 1 with no output. A run that did no work no longer prints a summary saying it applied anything, and the summary of a run that did is delivered rather than queued, so it survives on a slow or full stdout instead of arriving truncated or not at all ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- A reclaiming `omp gc` run now prints its data-loss warning before it deletes anything rather than after, and shows it under `--json` as well as in text ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 
 ### Added
 

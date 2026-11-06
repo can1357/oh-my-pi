@@ -2356,36 +2356,15 @@ function renderText(result: GcResult): string {
  * carries on, which is the right answer for an operator who redirected it
  * on purpose.
  */
-async function writeDrained(stream: NodeJS.WriteStream, text: string, claimErrors = false): Promise<void> {
+async function writeDrained(stream: NodeJS.WriteStream, text: string): Promise<void> {
 	const { promise, resolve, reject } = Promise.withResolvers<void>();
-	// `claimErrors` is for the receipt a *failing* run prints, and it exists
-	// because of what else listens here. `registerStdioDisconnectHandling`
-	// puts an `error` listener on `process.stdout` that treats a broken pipe
-	// as `omp --help | head` — cleanup and exit 0 — which is right for a run
-	// that succeeded and whose reader left early, and wrong for one that is
-	// already failing: `omp gc --blobs --wal --apply --json | true` deleted a
-	// blob, failed its checkpoint, and exited **0** with the `SQLITE_CANTOPEN`
-	// never printed, where upstream main exits 1 and prints it. Attaching
-	// another listener does not prevent that one from running, so for this one
-	// write the stream's `error` listeners are held aside and restored
-	// afterwards. A receipt that cannot be delivered is a lost receipt; it is
-	// never a reason to call a failed run successful.
-	type ErrorListener = (error: Error) => void;
-	const displaced = (claimErrors ? stream.listeners("error") : []) as ErrorListener[];
-	for (const listener of displaced) stream.removeListener("error", listener);
-	const restore = (): void => {
-		for (const listener of displaced) stream.on("error", listener);
-	};
 	// `true` means the stream handed the bytes straight to the kernel:
 	// nothing is queued, so there is nothing to wait for. `false` means they
 	// are sitting in a userspace buffer, which is the case this exists for —
 	// wait for the write callback, or for the drain that says the buffer has
 	// emptied, whichever the host delivers.
 	const accepted = stream.write(text, error => (error ? reject(error) : resolve()));
-	if (accepted) {
-		restore();
-		return;
-	}
+	if (accepted) return;
 	const onDrain = (): void => resolve();
 	const onError = (error: Error): void => reject(error);
 	stream.once("drain", onDrain);
@@ -2393,98 +2372,42 @@ async function writeDrained(stream: NodeJS.WriteStream, text: string, claimError
 	try {
 		await promise;
 	} finally {
-		// One run may write twice, and a settled promise does not remove the
-		// listener that did not fire.
+		// A settled promise does not remove the listener that did not fire.
 		stream.off("drain", onDrain);
 		stream.off("error", onError);
-		restore();
 	}
-}
-
-/**
- * Whether a run produced anything worth printing: one completed phase.
- *
- * A failing run reports what it already did, and that is only meaningful
- * when a phase put a result on the record. Every other field of `GcResult`
- * — the agent directory, `apply`, the lock path — describes the attempt,
- * not the work, so a summary built from those alone announces a maintenance
- * run that never happened.
- */
-function hasPhaseResult(result: GcResult): boolean {
-	return (
-		result.stale !== undefined ||
-		result.blobs !== undefined ||
-		result.archive !== undefined ||
-		result.compress !== undefined ||
-		result.wal !== undefined
-	);
 }
 
 export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	const options = await resolveOptions(args.flags);
 	const archiveRoot = getArchivedSessionsDir(options.agentDir);
-	// Built outside the lock so a phase that throws after an earlier one
-	// deleted something still has somewhere to say what was done.
-	const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath: "" };
-	// Awaited, not queued. A failing run rethrows straight after reporting and
-	// the process exits on that error, so an unawaited write loses the receipt
-	// exactly when it matters: measured against a backpressured stdout, a
-	// reclaiming run deleted a blob and printed a truncated object that did not
-	// parse. The success path awaits for the same reason and costs nothing.
-	const report = async (claimErrors = false): Promise<void> => {
-		await writeDrained(
-			process.stdout,
-			options.json ? `${JSON.stringify(next, null, 2)}\n` : renderText(next),
-			claimErrors,
-		);
-	};
-	try {
-		await withGcLock(options.agentDir, async lockPath => {
-			next.lockPath = lockPath;
-			// Stale cleanup may prune a missing first-save target's registry marker.
-			const registeredSessionPaths = options.runArchive
-				? await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))
-				: [];
-			// Pruned collab replicas release their blobs to this run's sweep.
-			if (options.runStale) next.stale = await runStaleGc(options);
-			if (options.runBlobs) {
-				// On the result, so the JSON route carries it too: the
-				// renderer held the only copy and `--json` bypasses it.
-				next.warnings = [...(next.warnings ?? []), `blobs: ${GC_BLOBS_WARNING}`];
-				// And delivered *before* anything is deleted, which means
-				// waiting for the write to drain rather than queueing it:
-				// `write` returns false when the pipe is full, and the bytes
-				// then sit in a buffer the process can be killed with — one
-				// blob unlinked, zero warning bytes delivered. A warning
-				// that arrives only when every later phase succeeds is a
-				// receipt, and the reader who most needs it is the one whose
-				// run then failed.
-				if (options.apply) await writeDrained(process.stderr, `warning: blobs: ${GC_BLOBS_WARNING}\n`);
-				next.blobs = await runBlobGc(options, archiveRoot);
-			}
-			if (options.runArchive) next.archive = await runArchiveGc(options, archiveRoot, registeredSessionPaths);
-			if (options.runCompress) next.compress = await runCompressGc(options, archiveRoot);
-			if (options.runWal) next.wal = await runWalGc(options);
-			return next;
-		});
-	} catch (error) {
-		// What the run did before it failed, on the same stream and in the
-		// same shape as a run that did not — but only when it did something.
-		// The question is never "did this run reach some point in the code",
-		// it is "is there a phase result to report", so that is what is
-		// asked: an empty summary after a failure is the thing being fixed,
-		// not a thing to reproduce one step later. A held `gc.lock` fails
-		// before the callback; `collectRegisteredSessionPaths` can fail on an
-		// unreadable `custom-session-files` immediately after it starts; both
-		// printed `GC applied (<dir>)`, and a metadata-only object under
-		// `--json`, for a run that touched nothing.
-		// Awaited before the rethrow: the process exits on this error, and a
-		// receipt still sitting in a userspace buffer is not a receipt. A
-		// report that itself cannot be written does not replace the failure
-		// the run is already reporting.
-		if (hasPhaseResult(next)) await report(true).catch(() => undefined);
-		throw error;
-	}
-	await report();
-	return next;
+	const result = await withGcLock(options.agentDir, async lockPath => {
+		const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath };
+		// Stale cleanup may prune a missing first-save target's registry marker.
+		const registeredSessionPaths = options.runArchive
+			? await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))
+			: [];
+		// Pruned collab replicas release their blobs to this run's sweep.
+		if (options.runStale) next.stale = await runStaleGc(options);
+		if (options.runBlobs) {
+			// On the result, so the JSON route carries it too: the renderer
+			// held the only copy and `--json` bypasses it.
+			next.warnings = [...(next.warnings ?? []), `blobs: ${GC_BLOBS_WARNING}`];
+			// And delivered *before* anything is deleted, which means waiting
+			// for the write to drain rather than queueing it: `write` returns
+			// false when the pipe is full, and the bytes then sit in a buffer
+			// the process can be killed with — one blob unlinked, zero warning
+			// bytes delivered.
+			if (options.apply) await writeDrained(process.stderr, `warning: blobs: ${GC_BLOBS_WARNING}\n`);
+			next.blobs = await runBlobGc(options, archiveRoot);
+		}
+		if (options.runArchive) next.archive = await runArchiveGc(options, archiveRoot, registeredSessionPaths);
+		if (options.runCompress) next.compress = await runCompressGc(options, archiveRoot);
+		if (options.runWal) next.wal = await runWalGc(options);
+		return next;
+	});
+
+	const output = options.json ? `${JSON.stringify(result, null, 2)}\n` : renderText(result);
+	process.stdout.write(output);
+	return result;
 }
