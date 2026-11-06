@@ -249,7 +249,7 @@ fn resolve_conditional_front() -> Option<ConditionalFront> {
 	Some(ConditionalFront { set_front: symbol(c"SLSSetFrontProcessWithInfo")?, timestamp_key })
 }
 
-fn event_ptr(event: &CGEvent) -> *mut c_void {
+const fn event_ptr(event: &CGEvent) -> *mut c_void {
 	std::ptr::from_ref(event).cast_mut().cast()
 }
 

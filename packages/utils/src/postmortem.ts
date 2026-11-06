@@ -713,6 +713,8 @@ export async function fatal(error: unknown): Promise<never> {
 	const report = `${Bun.inspect(error, { colors: process.stderr.isTTY === true })}\n`;
 	if (!Bun.isMainThread) {
 		process.stderr.write(`${report}${formatFatalRecoveryHints(fatalRecoveryHintProviders)}`);
+		// An explicit exit alone leaves the parent only `close` with code 1; this reaches its `error` listeners.
+		reportError(err);
 		process.exit(1);
 	}
 	return exitAfterFatal(report, "Fatal error", err, Reason.UNHANDLED_REJECTION);

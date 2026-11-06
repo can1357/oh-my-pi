@@ -205,11 +205,20 @@ fn script(mut command: ShellCommand, program: &Program, env_names: &[BString]) -
 						source.extend_from_slice(b" 2>/dev/null; ");
 					}
 				}
+				// The tool profile has no `compgen`: every variable name comes
+				// from `${!X@}` over each possible first character, and every
+				// function from `declare -F` (`declare -f[x…] name` lines).
+				source.extend_from_slice(b"for __pi_var in");
+				for first in (b'A'..=b'Z').chain(b'a'..=b'z').chain(*b"_") {
+					source.extend_from_slice(b" ${!");
+					source.push(first);
+					source.extend_from_slice(b"@}");
+				}
 				source.extend_from_slice(
-					b"for __pi_var in $(compgen -v); do unset -v \"$__pi_var\" 2>/dev/null \
+					b"; do unset -v \"$__pi_var\" 2>/dev/null \
 					  || export -n \"$__pi_var\" 2>/dev/null; done; unset -v __pi_var; \
-					  for __pi_fn in $(compgen -A function); do unset -f \"$__pi_fn\"; done; \
-					  unset -v __pi_fn; ",
+					  while read -r _ _ __pi_fn; do [ -n \"$__pi_fn\" ] && unset -f \"$__pi_fn\"; \
+					  done <<< \"$(declare -F)\"; unset -v __pi_fn; ",
 				);
 			},
 			EnvChange::Remove(name) if is_name(name) => {

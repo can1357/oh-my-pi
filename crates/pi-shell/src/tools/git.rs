@@ -173,7 +173,10 @@ fn run_layers(
 	let exported = names.iter().copied();
 	let mut out = Vec::new();
 	if layers.guard {
-		match Review::of(cwd, exported.clone(), args).decide() {
+		let ovnfs = env
+			.get(b"PI_GIT_GUARD_OVNFS".as_slice())
+			.and_then(|value| value.to_str().ok());
+		match Review::of(cwd, exported.clone(), args).decide(ovnfs) {
 			Decision::Run => {},
 			Decision::RunNoted(note) => out.push((2, note.into_bytes())),
 			Decision::Refuse(refusal) => {
