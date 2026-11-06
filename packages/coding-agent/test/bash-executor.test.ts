@@ -929,6 +929,62 @@ exit 64
 		expect(abortSpy).toHaveBeenCalledTimes(1);
 	});
 
+	it("names the processes the shell still has alive when the backend does not respond", async () => {
+		const realSetTimeout = globalThis.setTimeout;
+		vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void, ms?: number, ...rest: unknown[]) =>
+			realSetTimeout(
+				handler,
+				typeof ms === "number" && ms >= 1000 ? 5 : ms,
+				...rest,
+			)) as typeof globalThis.setTimeout);
+		vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation((_options, onChunk) => {
+			onChunk?.(null, "partial\n");
+			return Promise.withResolvers<never>().promise;
+		});
+		vi.spyOn(piNatives.Shell.prototype, "abort").mockResolvedValue();
+		vi.spyOn(piNatives.Shell.prototype, "pids").mockReturnValue([424_242]);
+		vi.spyOn(piNatives.Process, "fromPid").mockReturnValue({
+			args: () => ["sleep", "300"],
+		} as unknown as piNatives.Process);
+
+		const result = await executeBash("sleep 300", {
+			cwd: tempDir,
+			timeout: 1000,
+			sessionKey: "stalled-run-names-its-wait",
+		});
+
+		// A timeout that cannot say what it waited on tells its reader nothing:
+		// the notice must name the live process, the output that did arrive, and
+		// which shell ran the command.
+		expect(result.output).toContain("still running: sleep 300 (pid 424242)");
+		expect(result.output).toContain("8 characters of output in 1 chunks");
+		expect(result.output).toContain("ran on this session's shell");
+	});
+
+	it("reports a stalled run with no live process as the shell itself not returning", async () => {
+		const realSetTimeout = globalThis.setTimeout;
+		vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void, ms?: number, ...rest: unknown[]) =>
+			realSetTimeout(
+				handler,
+				typeof ms === "number" && ms >= 1000 ? 5 : ms,
+				...rest,
+			)) as typeof globalThis.setTimeout);
+		vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation(() => Promise.withResolvers<never>().promise);
+		vi.spyOn(piNatives.Shell.prototype, "abort").mockResolvedValue();
+		vi.spyOn(piNatives.Shell.prototype, "pids").mockReturnValue([]);
+
+		const result = await executeBash("echo ok", {
+			cwd: tempDir,
+			timeout: 1000,
+			sessionKey: "stalled-run-without-children",
+		});
+
+		// The `echo` case: no child to blame, so the report must say the engine
+		// never came back rather than leave the reader guessing.
+		expect(result.output).toContain("nothing of the command was still running");
+		expect(result.output).toContain("0 characters of output in 0 chunks");
+	});
+
 	it("explicitly aborts an overlapping one-shot shell when timeout cleanup stalls", async () => {
 		const realSetTimeout = globalThis.setTimeout;
 		vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void, ms?: number, ...rest: unknown[]) =>

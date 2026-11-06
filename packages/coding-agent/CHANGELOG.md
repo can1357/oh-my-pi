@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- A bash command whose timeout was reached without the shell backend answering now names what it was waiting on — the processes the shell still had alive, how much output had arrived, whether the call ran on the session's shell or a one-shot one, and how long setup took — in the result and in a `warn` log line.
+
 ## [18.17.0] - 2026-11-06
 
 ### Added
