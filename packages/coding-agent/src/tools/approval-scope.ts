@@ -1,18 +1,19 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
-const approvalScope = new AsyncLocalStorage<Map<object, unknown>>();
+const approvalScope = new AsyncLocalStorage<{ token: object }>();
 
+/** Give a wrapped call independent approval bindings, restoring its parent's scope after nested calls. */
 export function withToolApprovalScope<T>(run: () => T): T {
-	return approvalScope.run(new Map(), run);
+	return approvalScope.run({ token: {} }, run);
 }
 
+/** Discard preflight bindings before final approval; do nothing outside a wrapped call. */
 export function resetToolApprovalScope(): void {
-	approvalScope.getStore()?.clear();
+	const scope = approvalScope.getStore();
+	if (scope) scope.token = {};
 }
 
-export function toolApprovalState<T>(owner: object, create: () => T): T | undefined {
-	const scope = approvalScope.getStore();
-	if (!scope) return undefined;
-	if (!scope.has(owner)) scope.set(owner, create());
-	return scope.get(owner) as T;
+/** Key feature-owned typed storage by this token; undefined means execution is outside the approval wrapper. */
+export function toolApprovalScopeToken(): object | undefined {
+	return approvalScope.getStore()?.token;
 }

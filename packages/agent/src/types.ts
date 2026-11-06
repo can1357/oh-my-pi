@@ -1278,6 +1278,10 @@ export interface AgentTool<
 	/**
 	 * Paths a call reads beyond its working directory, matched against restricted folders when it
 	 * reports no `approvalCacheTargets`. Unlike cache targets they never key a remembered grant.
+	 * The coding-agent wrapper also invokes this after extension preflight, before final approval,
+	 * even without restricted folders. It may capture per-invocation bindings; repeated calls in the
+	 * same approval scope must reuse them. The wrapper resets that scope before the final invocation,
+	 * discarding any bindings captured by the earlier policy precheck.
 	 */
 	approvalRestrictionPaths?: (args: unknown) => readonly string[] | undefined;
 
