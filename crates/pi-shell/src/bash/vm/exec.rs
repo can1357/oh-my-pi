@@ -3124,10 +3124,10 @@ fn control_flow(
 		Opcode::Nop => Some(Flow::Next),
 		Opcode::Jmp => Some(Flow::Jump(op.a)),
 		Opcode::BrOk | Opcode::BrFail if !k.mask.any_op(op.ev) => {
-			let jump = (vp.status == 0) == (op.code == Opcode::BrOk);
-			if !jump && let Some(status) = arith_for_body(vp, unit, op) {
-				vp.status = status;
-			}
+			let jump = match arith_for_cond(vp, unit, op) {
+				Some(cond) => !cond,
+				None => (vp.status == 0) == (op.code == Opcode::BrOk),
+			};
 			Some(branch(op, jump))
 		},
 		Opcode::LoopNote | Opcode::LoopBack => Some(loop_note(vp, op)),
@@ -3166,13 +3166,12 @@ fn control_flow(
 
 /// `LoopEnter`: a `while`/`until` loop's record.
 fn loop_enter(vp: &mut Vproc, op: Op) -> Flow {
-	let entry = vp.status;
 	let f = top_frame(vp);
 	let depth = depths(f);
 	f.loops.push(LoopRec {
 		kind: LoopKind::While,
 		status: 0,
-		entry,
+		cond: true,
 		iterations: 0,
 		exit: op.a,
 		cont: op.b,
@@ -3200,7 +3199,11 @@ fn plain_arith(
 	Some(match expand::arith_command(k, cx, vp, text) {
 		Ok(v) => {
 			clear_scratch(&mut k.root, cx.store, vp);
-			vp.status = i32::from(v == 0);
+			if is_arith_for(unit, op) {
+				set_arith_for_cond(vp, v);
+			} else {
+				vp.status = i32::from(v == 0);
+			}
 			Flow::Next
 		},
 		Err(d @ (Diag::Arith { .. } | Diag::Readonly { .. })) => {
@@ -3254,21 +3257,38 @@ const fn branch(op: Op, jump: bool) -> Flow {
 	if jump { Flow::Jump(op.a) } else { Flow::Next }
 }
 
-/// The status an arithmetic-`for` body starts a pass with, restored when
-/// the header's branch falls into the body: bash's
+/// The truth value an arithmetic-`for` header's branch `op` reads, or
+/// `None` when `op` is not that branch: bash's
 /// `execute_arith_for_command` evaluates the initialisation, test and step
-/// expressions without touching `last_command_exit_value`, so the first
-/// pass sees the status from before the loop and a later pass the previous
-/// pass's. The engine evaluates those expressions with the same `Arith` op
-/// a `(( ))` command uses, which does set the status for `BrFail` to read.
-fn arith_for_body(vp: &mut Vproc, unit: &Unit, op: Op) -> Option<i32> {
+/// expressions without touching `last_command_exit_value`, so the engine
+/// keeps the test's value on the loop record and leaves the status alone.
+/// A body's first pass then sees the status from before the loop, a later
+/// pass the previous pass's, and a command substitution in the header its
+/// own — exactly as both bashes do. zsh's arithmetic `for` is its own
+/// path, and keeps the status it always wrote.
+fn arith_for_cond(vp: &mut Vproc, unit: &Unit, op: Op) -> Option<bool> {
 	if op.code != Opcode::BrFail
+		|| unit.mode.dialect() != Dialect::Bash
 		|| !unit.nodes.get(op.node as usize).is_some_and(|n| n.kind == NodeKind::ArithFor)
 	{
 		return None;
 	}
-	let rec = top_frame(vp).loops.last()?;
-	Some(if rec.iterations == 0 { rec.entry } else { rec.status })
+	top_frame(vp).loops.last().map(|rec| rec.cond)
+}
+
+/// An arithmetic-`for` header expression evaluated to `v`: its truth value
+/// goes to the loop record, not to the status ([`arith_for_cond`]).
+fn set_arith_for_cond(vp: &mut Vproc, v: i64) {
+	if let Some(rec) = top_frame(vp).loops.last_mut() {
+		rec.cond = v != 0;
+	}
+}
+
+/// Whether `op` belongs to a bash arithmetic-`for` header
+/// ([`arith_for_cond`]).
+fn is_arith_for(unit: &Unit, op: Op) -> bool {
+	unit.mode.dialect() == Dialect::Bash
+		&& unit.nodes.get(op.node as usize).is_some_and(|n| n.kind == NodeKind::ArithFor)
 }
 
 /// `LoopNote`/`LoopBack`: the innermost loop's status and iteration count;
@@ -3295,14 +3315,14 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 		Opcode::Jmp => Flow::Jump(op.a),
 		Opcode::BrOk | Opcode::BrFail => {
 			let status = vp.status;
-			let jump = (status == 0) == (op.code == Opcode::BrOk);
+			let jump = match arith_for_cond(vp, unit, op) {
+				Some(cond) => !cond,
+				None => (status == 0) == (op.code == Opcode::BrOk),
+			};
 			if k.mask.any_op(op.ev) {
 				let data =
 					EventData::Branch { construct: Construct::from_u32(op.b), taken: !jump, status };
 				k.emit_op(cx, vp, op.node, data);
-			}
-			if !jump && let Some(status) = arith_for_body(vp, unit, op) {
-				vp.status = status;
 			}
 			branch(op, jump)
 		},
@@ -3324,7 +3344,13 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 			Flow::Next
 		},
 		Opcode::SetStatus => {
-			vp.status = op.a as i32;
+			// An arithmetic-`for` header with no test: its truth value, not
+			// the status ([`arith_for_cond`]).
+			if is_arith_for(unit, op) {
+				set_arith_for_cond(vp, i64::from(op.a == 0));
+			} else {
+				vp.status = op.a as i32;
+			}
 			Flow::Next
 		},
 		Opcode::Enter => {
@@ -3476,7 +3502,11 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 			match res {
 				Ok(Ok(v)) => {
 					clear_scratch(&mut k.root, cx.store, vp);
-					vp.status = i32::from(v == 0);
+					if arith_for {
+						set_arith_for_cond(vp, v);
+					} else {
+						vp.status = i32::from(v == 0);
+					}
 					Flow::Next
 				},
 				Ok(Err(d)) => {
@@ -4083,7 +4113,7 @@ fn for_in(
 		LoopKind::For { var, items, next: 0 }
 	};
 	f.loops
-		.push(LoopRec { kind, status, entry: status, iterations: 0, exit, cont: pc + 1, depth });
+		.push(LoopRec { kind, status, cond: true, iterations: 0, exit, cont: pc + 1, depth });
 	Flow::Next
 }
 
@@ -5239,7 +5269,7 @@ fn repeat(
 	f.loops.push(LoopRec {
 		kind: LoopKind::Repeat { left: count },
 		status: 0,
-		entry: 0,
+		cond: true,
 		iterations: 0,
 		exit,
 		cont: pc + 1,
@@ -5330,13 +5360,12 @@ fn zsh_next(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 /// the pc of the always-list, `op.b` the pc after it).
 #[inline(never)]
 fn try_enter(vp: &mut Vproc, op: Op) -> Flow {
-	let entry = vp.status;
 	let f = top_frame(vp);
 	let depth = depths(f);
 	f.loops.push(LoopRec {
 		kind: LoopKind::Try { always: false, pending: None },
 		status: 0,
-		entry,
+		cond: true,
 		iterations: 0,
 		exit: op.a,
 		cont: op.b,

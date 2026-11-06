@@ -718,6 +718,27 @@ async fn an_arithmetic_for_header_leaves_the_status_alone() {
 			"I:5\nI:2\nI:2\nA:2\n",
 			0,
 		),
+		// A command substitution in any of the three header expressions
+		// does set the status, and the header's own arithmetic does not:
+		// the body sees the substitution's.
+		(
+			r##"(exit 5); for ((i=$(echo 0); i<1; i++)); do echo "I:$?"; done; echo A:$?"##,
+			"I:0\nA:0\n",
+			0,
+		),
+		(
+			r##"(exit 5); for ((i=0; i<$(echo 1); i++)); do echo "I:$?"; done; echo A:$?"##,
+			"I:0\nA:0\n",
+			0,
+		),
+		(
+			r##"(exit 5); for ((i=0; i<2; i=$(echo $((i+1))) )); do echo "I:$?"; done; echo A:$?"##,
+			"I:5\nI:0\nA:0\n",
+			0,
+		),
+		// A test expression that reads `$?` reads the status the header
+		// left alone, so the first pass runs and the second does not.
+		(r##"(exit 5); for ((i=1;i<$?;i++)); do echo B; done; echo A:$?"##, "B\nA:0\n", 0),
 		(r##"false; for ((;;)); do echo "I:$?"; break; done; echo A:$?"##, "I:1\nA:0\n", 0),
 		// The loop's own result: 0 with no pass or after `break`, 1 from a
 		// failed header expression.
