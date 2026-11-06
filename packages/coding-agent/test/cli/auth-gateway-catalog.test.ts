@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { type Api, AuthStorage, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
@@ -6,6 +6,7 @@ import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import {
 	createSerializedRebuilder,
+	gatewayAvailableModels,
 	gatewayRoutableModels,
 	gatewayRoutableProviders,
 	indexModelsByRequestId,
@@ -13,6 +14,7 @@ import {
 } from "../../src/cli/auth-gateway-cli";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
+import * as availability from "../../src/session/provider-exhaustion";
 
 const authStores: AuthStorage[] = [];
 
@@ -171,6 +173,16 @@ describe("resolveGatewayModel", () => {
 		expect(floor?.provider).toBe("openrouter");
 		expect(floor?.id).toBe(`${base.id}:floor`);
 		expect(floor?.api).toBe(base.api);
+		const blocked = spyOn(availability, "isProviderExhausted").mockImplementation(
+			provider => provider === "openrouter",
+		);
+		try {
+			expect(resolveGatewayModel(`openrouter/${base.id}:floor`, index)).toBeUndefined();
+			blocked.mockReturnValue(false);
+			expect(resolveGatewayModel(`openrouter/${base.id}:floor`, index)?.id).toBe(`${base.id}:floor`);
+		} finally {
+			blocked.mockRestore();
+		}
 		// Route suffixes are an OpenRouter concept; other providers stay exact-match.
 		expect(resolveGatewayModel(`anthropic/${anthropic.id}:floor`, index)).toBeUndefined();
 		expect(resolveGatewayModel("openrouter/no-such-vendor/no-such-model:floor", index)).toBeUndefined();
@@ -199,6 +211,27 @@ describe("resolveGatewayModel", () => {
 	const venice = servedModel("venice", "claude-x", "openai-completions");
 	const catalog = [cursor, venice, snowflake, anthropic];
 	const credentialed = new Set(catalog.map(model => model.provider));
+
+	test("excludes exhausted routes from a cached gateway index until recovery", () => {
+		const index = indexModelsByRequestId(catalog, credentialed);
+		const blocked = spyOn(availability, "isProviderExhausted").mockReturnValue(false);
+		try {
+			expect(resolveGatewayModel("claude-x", index)?.provider).toBe("anthropic");
+			blocked.mockImplementation(provider => provider === "anthropic");
+			expect(gatewayAvailableModels(index).some(model => model.provider === "anthropic")).toBe(false);
+			expect(gatewayAvailableModels(index).some(model => model.provider === "cursor")).toBe(true);
+			expect(resolveGatewayModel("anthropic/claude-x", index)).toBeUndefined();
+			expect(resolveGatewayModel("claude-x", index)?.provider).toBe("cursor");
+			expect(
+				resolveGatewayModel("claude-x", index, { accepts: model => model.provider === "anthropic" }),
+			).toBeUndefined();
+			blocked.mockReturnValue(false);
+			expect(gatewayAvailableModels(index).some(model => model.provider === "anthropic")).toBe(true);
+			expect(resolveGatewayModel("anthropic/claude-x", index)?.provider).toBe("anthropic");
+		} finally {
+			blocked.mockRestore();
+		}
+	});
 
 	test("a bare id resolves to the highest-priority provider whatever order the catalog lists it in", () => {
 		// A discovery refresh re-appends a provider's models at the catalog's end; a bare id

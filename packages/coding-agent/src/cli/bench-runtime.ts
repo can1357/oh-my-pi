@@ -24,6 +24,7 @@ import { ModelRegistry } from "../config/model-registry";
 import { formatModelString, getModelMatchPreferences, resolveCliModel } from "../config/model-resolver";
 import { Settings } from "../config/settings";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
+import { isProviderExhausted } from "../session/provider-exhaustion";
 import { concreteThinkingLevel, resolveThinkingLevelForModel } from "@oh-my-pi/pi-tui/thinking";
 
 /** Injection point for the provider call; tests pass a synthetic event stream. */
@@ -117,6 +118,7 @@ function resolveAuthenticatedAlternative(
 	const seen = new Set<string>();
 	const authenticated: Model<Api>[] = [];
 	const consider = (candidate: Model<Api>): void => {
+		if (isProviderExhausted(candidate.provider)) return;
 		const key = `${candidate.provider}/${candidate.id}`;
 		if (seen.has(key)) return;
 		seen.add(key);
