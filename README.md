@@ -3,6 +3,10 @@
 </p>
 
 <p align="center">
+  <strong>🞄 Fork: <a href="README-EN.md">agent networking (A2A)</a> · <a href="README-EN.md">chrome-mcp base browser</a> · <a href="README-EN.md">workflow VM</a> · <a href="README-RU.md">Русская версия</a></strong>
+</p>
+
+<p align="center">
   <strong>A coding agent with the IDE wired in.</strong>
   <strong><a href="https://omp.sh">omp.sh</a></strong>
 </p>
