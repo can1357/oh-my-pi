@@ -607,9 +607,9 @@ describe("A2A network surface", () => {
 });
 
 describe("A2A opt-in", () => {
-	it("is off by default and only enabled per run by --a2a-port", () => {
-		expect(cfgA2aEnabled.default).toBe(false);
-		expect(cfgA2aPort.default).toBe(7391);
+	it("is on by default with a free port; --a2a-port pins an explicit port for the run", () => {
+		expect(cfgA2aEnabled.default).toBe(true);
+		expect(cfgA2aPort.default).toBe(0);
 		expect(parseArgs([]).a2aPort).toBeUndefined();
 		expect(parseArgs(["--a2a-port", "7123"]).a2aPort).toBe(7123);
 	});

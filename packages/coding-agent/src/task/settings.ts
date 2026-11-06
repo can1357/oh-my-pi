@@ -702,24 +702,26 @@ export const cfgTaskPrewalk = register({
 export const cfgA2aEnabled = register({
 	id: "a2a.enabled",
 	type: "boolean",
-	default: false,
+	default: true,
 	ui: {
 		tab: "tasks",
 		group: "A2A",
 		label: "A2A Bridge",
-		description: "Serve the Agent2Agent v1.0 JSON-RPC bridge on 127.0.0.1; bearer token in <agent dir>/a2a.token",
+		description:
+			"Serve the Agent2Agent v1.0 JSON-RPC bridge on 127.0.0.1 (fork default: on, so every terminal is reachable); bearer token in <agent dir>/a2a.token",
 	},
 });
 
 export const cfgA2aPort = register({
 	id: "a2a.port",
 	type: "number",
-	default: 7391,
+	default: 0,
 	ui: {
 		tab: "tasks",
 		group: "A2A",
 		label: "A2A Port",
-		description: "Loopback port for the A2A bridge (`--a2a-port` overrides it for this run)",
+		description:
+			"Loopback port for the A2A bridge; 0 = a free port per terminal so several never collide (`--a2a-port` overrides it for this run)",
 	},
 });
 
