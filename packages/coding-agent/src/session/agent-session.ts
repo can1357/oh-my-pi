@@ -11227,13 +11227,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *
 	 * A message the deterministic pre-filter declines ({@link isLowSignalTitleInput}:
 	 * a greeting, or a request that cleans away to nothing because it is all file
-	 * attachment, code or markup) names no task a title model could read, so it
-	 * records no title input. That decline is the deferral's first half: without
-	 * arming {@link #deferredTitle} here, the only trigger left is another operator
+	 * attachment or markup) names no task a title model could read, so it records
+	 * no title input. That decline is the deferral's first half: without arming
+	 * {@link #deferredTitle} here, the only trigger left is another operator
 	 * message, and a session launched from one `@brief.md` and then left to run
-	 * alone never gets one — it stays unnamed for its whole life. Arming it instead
-	 * retitles once from the assistant's own reading of the task, exactly as an
-	 * attachment-only request already does ({@link #titleWithTitleModel}).
+	 * alone never gets one — it stays unnamed for its whole life. Arming it
+	 * instead retitles once from the assistant's own reading of the task, exactly
+	 * as an attachment-only request already does ({@link #titleWithTitleModel}).
+	 *
+	 * It only ever arms a retry this session does not already have. A declined
+	 * message that replaced a live deferral would drop the half of it the
+	 * assistant had already satisfied, and the retry it replaced it with cannot
+	 * run while that earlier request is still in flight — so a "hm" typed during
+	 * a title request left the session unnamed where it had been named before.
 	 */
 	#noteTitleInput(message: AgentMessage): void {
 		if (!this.#autoTitle || this.sessionName || $env.PI_NO_TITLE) return;
@@ -11243,6 +11249,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (isLowSignalTitleInput(text)) {
 			// An untried earlier message still owns the next request; it arms its own deferral.
 			if (this.#titleInput?.sessionId === sessionId && !this.#titleInput.tried) return;
+			// A deferral already armed, or a request still running, IS this session's one retry.
+			if (this.#deferredTitle?.sessionId === sessionId) return;
+			if (this.#titleGenerationInFlightFor === sessionId) return;
 			this.#deferredTitle = { sessionId, declined: true, replied: false, words: 0 };
 			return;
 		}

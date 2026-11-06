@@ -189,4 +189,32 @@ describe("AgentSession titles a session whose operator message cannot be titled"
 		expect(target.sessionName).toBe("Rebase the ShellPortAudit pull requests");
 		expect(attempts).toBe(2);
 	});
+
+	it("keeps a running request's retry when an untitleable message lands while it is still in flight", async () => {
+		// The deferral a titleable message armed has already seen its reply; a "hm"
+		// typed before that request settles must not replace it, because the
+		// replacement cannot run while the first request is still in flight.
+		const main = createMockModel({
+			responses: [{ content: [AUDIT_REPLY] }, { content: [AUDIT_REPLY] }],
+		});
+		const target = await createSession(main, [], { "title.generator": "tiny" });
+		const firstRequest = Promise.withResolvers<ai.AssistantMessage>();
+		let calls = 0;
+		vi.spyOn(ai, "completeSimple").mockImplementation(() => {
+			calls++;
+			if (calls === 1) return firstRequest.promise;
+			return Promise.resolve(createAssistantMessage("<title>Rebase the ShellPortAudit pull requests</title>"));
+		});
+
+		await target.prompt("rebase the seven ShellPortAudit pull requests onto live main");
+		expect(calls).toBe(1);
+		await target.prompt(ATTACHED_BRIEF);
+
+		const titled = nextTitle(target);
+		firstRequest.resolve(createAssistantMessage("<title/>"));
+		await titled;
+
+		expect(target.sessionName).toBe("Rebase the ShellPortAudit pull requests");
+		expect(calls).toBe(2);
+	});
 });
