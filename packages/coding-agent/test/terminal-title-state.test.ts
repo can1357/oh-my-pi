@@ -308,6 +308,7 @@ describe("label tracks what the session is doing now", () => {
 	}
 
 	function lastTitle(): string | undefined {
+		vi.advanceTimersByTime(1000);
 		return writes
 			.map(payload => /\x1b\]0;([\s\S]*?)\x07/.exec(payload)?.[1])
 			.filter((t): t is string => t !== undefined)
@@ -315,6 +316,7 @@ describe("label tracks what the session is doing now", () => {
 	}
 
 	beforeEach(() => {
+		vi.useFakeTimers();
 		prevHeadless = setTerminalHeadless(false);
 		ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
 		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
@@ -329,7 +331,9 @@ describe("label tracks what the session is doing now", () => {
 	});
 
 	afterEach(() => {
+		setTerminalTitleTaskNow(undefined);
 		disposeTerminalTitleState();
+		vi.useRealTimers();
 		stdoutSpy?.mockRestore();
 		stdoutSpy = undefined;
 		for (const stub of repoStubs) stub.mockRestore();
@@ -363,6 +367,8 @@ describe("label tracks what the session is doing now", () => {
 			fs.writeFileSync(path.join(dir, ".git", "HEAD"), "ref: refs/heads/main\n");
 			fs.writeFileSync(path.join(dir, ".git", "config"), "[core]\nrepositoryformatversion = 0\nbare = false\n");
 		};
+		// Own the parent repo as well: TMPDIR may itself be inside a checkout.
+		initialize(scratch);
 		initialize(outer);
 		setSessionTerminalTitle("Fix", inner);
 		expect(lastTitle()).toBe(`${BRAND} > outer · Fix`);
@@ -374,7 +380,7 @@ describe("label tracks what the session is doing now", () => {
 		expect(lastTitle()).toBe(`${BRAND} > outer · Fix`);
 		fs.rmSync(path.join(outer, ".git"), { recursive: true });
 		setSessionTerminalTitle("Plain", inner);
-		expect(lastTitle()).toBe(`${BRAND} > new · Plain`);
+		expect(lastTitle()).toBe(`${BRAND} > ${path.basename(scratch)} · Plain`);
 	});
 
 	it("composes the task half against the focused session, then returns to the main one", () => {
