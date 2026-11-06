@@ -221,6 +221,9 @@ describe("settling the output pump before the terminal is handed back", () => {
 		expect(provider.acknowledged).toEqual([1]);
 		expect(pump.discards).toBe(1);
 		expect(pump.stream).not.toContain("hist ");
+		// Paired with the destructive reset, since part of the ledger may already
+		// be in scrollback: the first render after start() runs ED3 with the
+		// replay, so the surviving prefix is not written a second time.
 		expect(provider.replays).toBe(1);
 	});
 

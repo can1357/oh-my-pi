@@ -2858,7 +2858,14 @@ export class TUI extends Container {
 		// Never leave the queue for the next owner instead: its bytes would land
 		// after an editor, a shell or the resumed TUI had already painted, and a
 		// late alternate-screen exit would drop that owner's screen.
-		if (resuming === true && lostCommittedRows) this.#frameProvider?.beginHistoryReplay?.();
+		if (resuming === true && lostCommittedRows) {
+			// Latch the destructive reset too: part of the ledger may already be in
+			// scrollback, so a bare replay would append a second copy of it. The
+			// pair (ED3 + complete ledger) is what the first render after start()
+			// runs, exactly as a settled rebuild-mode resize does.
+			this.#clearScrollbackOnNextRender = true;
+			this.#frameProvider?.beginHistoryReplay?.();
+		}
 		// Deliberately leave transmitted images in the terminal's graphics store:
 		// placeholder cells committed to native scrollback render only while their
 		// image data lives, so a delete-by-id here blanks every transcript image
