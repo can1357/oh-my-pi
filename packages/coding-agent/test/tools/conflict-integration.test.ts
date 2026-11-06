@@ -757,6 +757,129 @@ describe("write resolves conflicts via conflict://N", () => {
 		expect(after).toBe("line 1\noldApi(x)\nnewApi(x)\nline N\n");
 	});
 
+	// A side with no lines (an addition against nothing) must resolve to no
+	// lines: a token that expands to nothing leaves no blank line behind.
+	const EMPTY_THEIRS = ["line 1", "<<<<<<< HEAD", "added(x)", "=======", ">>>>>>> feature/x", "line N", ""].join("\n");
+	const EMPTY_OURS = ["line 1", "<<<<<<< HEAD", "=======", "added(x)", ">>>>>>> feature/x", "line N", ""].join("\n");
+	const EMPTY_BOTH = ["line 1", "<<<<<<< HEAD", "=======", ">>>>>>> feature/x", "line N", ""].join("\n");
+
+	it.each([
+		["@theirs", EMPTY_THEIRS],
+		["@ours", EMPTY_OURS],
+		["@both", EMPTY_BOTH],
+	])("`conflict://1` with `%s` on an empty side splices no lines", async (token, fixture) => {
+		const filePath = path.join(tempDir, "empty-side.ts");
+		await Bun.write(filePath, fixture);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-empty-side", { path: "empty-side.ts" });
+		await write.execute("write-empty-side", { path: "conflict://1", content: token });
+
+		expect(await Bun.file(filePath).text()).toBe("line 1\nline N\n");
+	});
+
+	it.each([
+		["@theirs", "@theirs"],
+		["per-id directives", "1: @theirs\n2: @theirs\n"],
+	])("`conflict://*` with %s on empty sides splices no lines", async (_label, content) => {
+		const filePath = path.join(tempDir, "empty-sides.ts");
+		await Bun.write(
+			filePath,
+			[
+				"<<<<<<< A",
+				"a-ours",
+				"=======",
+				">>>>>>> A",
+				"middle",
+				"<<<<<<< B",
+				"b-ours",
+				"=======",
+				">>>>>>> B",
+				"tail",
+				"",
+			].join("\n"),
+		);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-empty-sides", { path: "empty-sides.ts" });
+		const result = await write.execute("write-empty-sides", { path: "conflict://*", content });
+
+		expect(getText(result)).toContain("Resolved 2 conflicts");
+		expect(await Bun.file(filePath).text()).toBe("middle\ntail\n");
+	});
+
+	it.each([
+		["an empty line typed as the whole content", TWO_WAY, ""],
+		["an empty line typed after a token that expands to nothing", EMPTY_THEIRS, "@theirs\n\n"],
+	])("`conflict://1` keeps %s", async (_label, fixture, content) => {
+		const filePath = path.join(tempDir, "typed-blank.ts");
+		await Bun.write(filePath, fixture);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-typed-blank", { path: "typed-blank.ts" });
+		await write.execute("write-typed-blank", { path: "conflict://1", content });
+
+		expect(await Bun.file(filePath).text()).toBe("line 1\n\nline N\n");
+	});
+
+	// A chosen side is the side's real content, not pasted context: when it
+	// ends with the same statement and blank line that follow the region, all
+	// of it must still land, or the resolved code silently loses a statement.
+	const SIDE_ENDS_LIKE_CONTEXT = [
+		"globalThis.count=0;",
+		"<<<<<<< HEAD",
+		"globalThis.count++;",
+		"globalThis.count++;",
+		"",
+		"=======",
+		"globalThis.count+=2;",
+		">>>>>>> topic",
+		"globalThis.count++;",
+		"",
+		"console.log(globalThis.count);",
+		"",
+	];
+	const RESOLVED_WITH_OURS = [
+		"globalThis.count=0;",
+		"globalThis.count++;",
+		"globalThis.count++;",
+		"",
+		"globalThis.count++;",
+		"",
+		"console.log(globalThis.count);",
+		"",
+	];
+
+	it.each([
+		["conflict://1", "@ours", "\n"],
+		["conflict://*", "@ours", "\n"],
+		["conflict://*", "1: @ours\n", "\n"],
+		["conflict://1", "@ours", "\r\n"],
+		["conflict://*", "@ours", "\r\n"],
+		["conflict://*", "1: @ours\n", "\r\n"],
+	])(
+		"`%s` with %j keeps every line of a side that ends like the context below (EOL %j)",
+		async (uri, content, eol) => {
+			const filePath = path.join(tempDir, "side-echo.js");
+			await Bun.write(filePath, SIDE_ENDS_LIKE_CONTEXT.join(eol));
+			const session = createTestSession(tempDir);
+			const read = await getTool(session, "read");
+			const write = await getTool(session, "write");
+
+			await read.execute("read-side-echo", { path: "side-echo.js" });
+			const result = await write.execute("write-side-echo", { path: uri, content });
+
+			expect(getText(result)).not.toContain("dropped");
+			expect(await Bun.file(filePath).text()).toBe(RESOLVED_WITH_OURS.join(eol));
+		},
+	);
+
 	it("rejects `@base` for a 2-way conflict with a clear error", async () => {
 		const filePath = path.join(tempDir, "nobase.ts");
 		await Bun.write(filePath, TWO_WAY);
