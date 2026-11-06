@@ -201,6 +201,22 @@ describe("settling the output pump before the terminal is handed back", () => {
 		expect(positionsInOrder(pump.stream, [SETTLE_RESET, SHOW_CURSOR, FIRST_RESTORE_WRITE])).not.toContain(-1);
 	});
 
+	it("keeps the flush's own output when the handoff resumes, instead of dropping committed rows", async () => {
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const pump = new FakePump({ flushes: [true, false], thenFlushes: false });
+		const provider = new FlushProvider(200);
+		const session = await startFlushingSession(pump, provider);
+
+		session.tui.stop({ resuming: true });
+		pump.catchUp();
+
+		// The flush marked the batch retired, so the session that resumes will
+		// never offer those rows again: a discard here would lose them for good.
+		expect(provider.acknowledged).toEqual([1]);
+		expect(pump.discards).toBe(0);
+		expect(pump.stream).toContain("hist ");
+	});
+
 	it("leaves a backlog that drains alone", async () => {
 		vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const pump = new FakePump();

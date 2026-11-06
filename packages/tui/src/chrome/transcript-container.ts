@@ -909,7 +909,9 @@ export class TranscriptContainer extends Container {
 		} else if (offered.kind === "commit") {
 			// From the batch's own start, not the frontier: a capped flush skipped
 			// the blocks before it, so re-rendering them would write them after all.
-			const retirement = this.#renderRange(offered.start, offered.end, width, this.#historyEnd);
+			// Same `above` as the compose path, or the re-render drops the blank
+			// the skipped head owes and the two blocks run together in scrollback.
+			const retirement = this.#renderRange(offered.start, offered.end, width, this.#aboveBatchStart(offered.start));
 			rows = retirement.rows;
 			const head = offered.split ? this.#entries[offered.end] : undefined;
 			if (head !== undefined && offered.split !== undefined) {

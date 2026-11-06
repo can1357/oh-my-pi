@@ -610,7 +610,8 @@ export interface Terminal {
 	enableInput?(): void;
 
 	// Stop the terminal and restore state
-	stop(): void;
+	/** `discardQueued: false` keeps what a stalled terminal has not taken, for a handoff the session resumes from. */
+	stop(discardQueued?: boolean): void;
 
 	/**
 	 * Hand the terminal back with nothing still queued: wait (bounded) for the
@@ -620,7 +621,7 @@ export interface Terminal {
 	 * is not reading. Optional so custom Terminals built against older pi-tui
 	 * versions keep working.
 	 */
-	settleOutput?(): boolean;
+	settleOutput?(discard?: boolean): boolean;
 
 	/**
 	 * Drain stdin before exiting to prevent Kitty key release events from
@@ -2442,8 +2443,13 @@ export class ProcessTerminal implements Terminal {
 	 * earlier discard could not interrupt is left alone: waiting again buys
 	 * nothing, and a discard would drop only the handoff bytes queued behind
 	 * that write, which arrive in order once the terminal reads again.
+	 *
+	 * `discard: false` waits and reports, but never drops: a handoff the
+	 * session resumes from has already committed what is queued, so dropping
+	 * it would lose those rows for good. What stays queued arrives in order
+	 * once the terminal reads again.
 	 */
-	settleOutput(): boolean {
+	settleOutput(discard = true): boolean {
 		const pump = this.#outputPump;
 		if (!pump) return true;
 		if (this.#dead) return false;
@@ -2453,6 +2459,7 @@ export class ProcessTerminal implements Terminal {
 			this.#stalledBacklog = undefined;
 			return true;
 		}
+		if (!discard) return false;
 		if (!pump.discard) {
 			if (!this.#staleDiscardWarned) {
 				this.#staleDiscardWarned = true;
@@ -2468,7 +2475,7 @@ export class ProcessTerminal implements Terminal {
 		return false;
 	}
 
-	stop(): void {
+	stop(discardQueued = true): void {
 		// Suppress observer/timer callbacks before any teardown can yield or throw.
 		this.#active = false;
 		this.#inputDeferred = false;
@@ -2486,7 +2493,7 @@ export class ProcessTerminal implements Terminal {
 		restoreTerminalStderr();
 		// Nothing queued may land after the restore writes below. After a caller's
 		// settle the pump is empty or still blocked, so this returns at once.
-		this.settleOutput();
+		this.settleOutput(discardQueued);
 
 		this.#clearProgressTimer();
 		if (this.#progressActive) {

@@ -2784,7 +2784,12 @@ export class TUI extends Container {
 		// discard anything, and one that finds the pump still blocked in the same
 		// write leaves them queued. Never re-emit ?1049l instead: on the normal
 		// screen it restores a stale saved cursor.
-		const backlogDrained = this.terminal.settleOutput?.() ?? true;
+		// A handoff the session resumes from never drops what it has already
+		// committed: a discard here, or after the flush below, would leave rows
+		// marked retired that the terminal never received, and start() would
+		// never offer them again. What stays queued arrives in order instead.
+		const keepQueued = resuming === true;
+		const backlogDrained = this.terminal.settleOutput?.(!keepQueued) ?? true;
 		if (this.#resizeInPlaceActive && this.terminal.rows > 0) {
 			// The hardware cursor sits wherever the drag left it, but tracking still
 			// describes the pre-resize row (no alt-buffer restore replays it back).
@@ -2849,7 +2854,7 @@ export class TUI extends Container {
 		// Drain or drop what the writes above queued before the handoff writes
 		// below, so the prompt placement and cursor show land after them, not
 		// mid-output.
-		this.terminal.settleOutput?.();
+		this.terminal.settleOutput?.(!keepQueued);
 		// Deliberately leave transmitted images in the terminal's graphics store:
 		// placeholder cells committed to native scrollback render only while their
 		// image data lives, so a delete-by-id here blanks every transcript image
@@ -2886,7 +2891,7 @@ export class TUI extends Container {
 		// terminal-level dedupe believes was last written.
 		this.terminal.showCursor(true);
 		this.#forgetHardwareCursorState();
-		this.terminal.stop();
+		this.terminal.stop(!keepQueued);
 	}
 
 	/**

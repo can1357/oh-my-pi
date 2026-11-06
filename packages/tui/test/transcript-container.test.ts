@@ -1170,6 +1170,23 @@ describe("TranscriptContainer", () => {
 		]);
 	});
 
+	it("re-renders a capped batch that skipped the head with the same blank the head owes", () => {
+		const transcript = new TranscriptContainer();
+		const head = new AppendBlock(["a0", "a1", "a2", "a3"], ["a0", "a1"]);
+		transcript.addChild(head);
+		transcript.renderViewport(80, 2, frame);
+		const emitted = transcript.peekFinalizedBatch(80, 0)!;
+		transcript.acknowledgeFinalizedBatch(emitted.id);
+		head.finalize(["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"]);
+		transcript.addChild(new Block(["b0", "b1", "b2", "b3", "b4", "b5"], true));
+		transcript.addChild(new Block(["c0"], true));
+		const batch = transcript.peekFlushBatch(80, 10)!;
+		// The image-budget retry re-renders the outstanding offer; without the
+		// head's own blank the retry would join "a1" and "b0" in scrollback.
+		expect(transcript.rerenderOfferedBatch(80)!.rows).toEqual(batch.rows);
+		expect(batch.rows[0]).toBe("");
+	});
+
 	it("an exit flush renders only the one older block it leaves out when the tail ends exactly on the cap", () => {
 		const transcript = new TranscriptContainer();
 		const blocks = Array.from({ length: 4 }, (_, i) => new CountingBlock([`b${i}r0`, `b${i}r1`, `b${i}r2`]));
