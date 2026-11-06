@@ -44,6 +44,8 @@ const ARG_BYTES: usize = 256;
 const ARG_ITEMS: usize = 64;
 /// Diagnostics kept (the newest).
 const DIAGS: usize = 8;
+/// Amortize source-table collection across a fraction of the replay window.
+const UNIT_GC_INTERVAL: usize = history::HISTORY_EVENTS / 64;
 
 /// A statement's state, derived at snapshot time.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,10 +191,11 @@ impl Node {
 
 /// A compiled unit of the run.
 ///
-/// Serialized as `{at?, line, bytes, source?, nodes, syntax?, projection?}`;
-/// located units slice the original script instead of repeating their source.
+/// Located units slice the original script instead of repeating their source.
 #[derive(Clone, Debug)]
 pub struct Unit {
+	/// Stable presentation identity, independent of this snapshot's table index.
+	pub key:        u32,
 	/// Byte offset in the script (absent when the script does not contain
 	/// the unit: `eval`, a nested shell, a trap).
 	pub at:         Option<u32>,
@@ -216,6 +219,7 @@ pub struct Unit {
 impl Serialize for Unit {
 	fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
 		let mut st = s.serialize_struct("Unit", 5)?;
+		st.serialize_field("key", &self.key)?;
 		if let Some(at) = self.at {
 			st.serialize_field("at", &at)?;
 		}
@@ -281,6 +285,7 @@ pub struct Snapshot {
 /// A unit as the fold keeps it.
 #[derive(Clone, Debug)]
 struct UnitState {
+	key:         u32,
 	segment:     Option<u32>,
 	/// Native source-context identity shared by a definition and its body units.
 	family:      Option<UnitId>,
@@ -316,6 +321,8 @@ struct Inner {
 	runs:         HashSet<RunId>,
 	run_order:    VecDeque<RunId>,
 	units:        Vec<UnitState>,
+	next_key:     u32,
+	collect_at:   usize,
 	by_id:        HashMap<Vpid, HashMap<(Option<u32>, UnitId), u32>>,
 	diags:        Vec<Diag>,
 	journal:      history::Journal,
@@ -403,6 +410,8 @@ impl RunTrace {
 				runs:         HashSet::new(),
 				run_order:    VecDeque::new(),
 				units:        Vec::new(),
+				next_key:     0,
+				collect_at:   UNIT_GC_INTERVAL,
 				by_id:        HashMap::new(),
 				diags:        Vec::new(),
 				journal:      history::Journal::default(),
@@ -455,12 +464,15 @@ impl RunTrace {
 	/// Present the live native syntax and journal while borrowing the locked
 	/// model.
 	pub fn presentation_json(&self, options: &viz::Options) -> Result<String, viz::VizError> {
-		viz::live(&self.inner.lock(), options)
+		let mut inner = self.inner.lock();
+		inner.collect_units(true);
+		viz::live(&inner, options)
 	}
 
 	/// [`Self::snapshot`] as JSON.
 	pub fn snapshot_json(&self) -> String {
 		let mut inner = self.inner.lock();
+		inner.collect_units(true);
 		let ended = inner.status.is_some();
 		for unit in &mut inner.units {
 			derive_states(&mut unit.nodes, &unit.kids, ended);
@@ -480,6 +492,7 @@ impl EventSink for RunTrace {
 	fn mask(&self) -> EventMask {
 		EventMask::NONE
 			.with(EventKind::UnitCompiled)
+			.with(EventKind::UnitRetired)
 			.with(EventKind::RunStart)
 			.with(EventKind::RunEnd)
 			.with(EventKind::CmdStart)
@@ -532,6 +545,7 @@ impl EventSink for RunTrace {
 		}
 		inner.descendants(ev);
 		inner.fold(ev);
+		inner.collect_units(false);
 		self.version.store(inner.seq, Ordering::Release);
 	}
 
@@ -617,6 +631,78 @@ impl Inner {
 		self.by_id.get(&vpid)?.get(&self.unit_key(id)).copied()
 	}
 
+	fn collect_units(&mut self, force: bool) {
+		if !self.journal.truncated || !force && self.units.len() < self.collect_at {
+			return;
+		}
+		let mut remap: Vec<Option<u32>> = self
+			.units
+			.iter()
+			.enumerate()
+			.map(|(index, unit)| unit.at.map(|_| index as u32))
+			.collect();
+		// A vproc that can still execute needs its announced units, even if
+		// their last execution has already left the journal.
+		for units in self.by_id.values() {
+			for &index in units.values() {
+				remap[index as usize] = Some(index);
+			}
+		}
+		self.journal.mark_units(&mut remap);
+		for index in 0..remap.len() {
+			if remap[index].is_none() {
+				continue;
+			}
+			let mut current = index;
+			while let Some(parent) = self.units[current]
+				.syntax
+				.as_ref()
+				.and_then(|syntax| syntax.parent)
+			{
+				let parent = parent.unit as usize;
+				if remap[parent].is_some() {
+					break;
+				}
+				remap[parent] = Some(parent as u32);
+				current = parent;
+			}
+		}
+		let mut count = 0;
+		for index in &mut remap {
+			if index.is_some() {
+				*index = Some(count);
+				count += 1;
+			}
+		}
+		self.collect_at = count as usize + UNIT_GC_INTERVAL;
+		if count as usize == self.units.len() {
+			return;
+		}
+		let mut index = 0;
+		self.units.retain_mut(|unit| {
+			let keep = remap[index].is_some();
+			index += 1;
+			if keep
+				&& let Some(syntax) = &unit.syntax
+				&& let Some(mut parent) = syntax.parent
+			{
+				let mapped = remap[parent.unit as usize].expect("retained syntax parent");
+				if parent.unit != mapped {
+					parent.unit = mapped;
+					unit.syntax = Some(Arc::new(syntax.with_parent(parent)));
+				}
+			}
+			keep
+		});
+		for units in self.by_id.values_mut() {
+			for index in units.values_mut() {
+				*index = remap[*index as usize].expect("active vproc source");
+			}
+		}
+		self.journal.remap_units(&remap);
+		self.viz_cache = viz::printer::Cache::default();
+	}
+
 	fn fold(&mut self, ev: &Event<'_>) {
 		self.seq += 1;
 		let root = ev.run() == self.run;
@@ -663,6 +749,15 @@ impl Inner {
 					root && Some(ev.vpid) == self.root_vpid,
 					callout,
 				);
+			},
+			// The vproc can no longer reach this source, so the mapping that
+			// resolves its node events goes. The unit itself stays until no
+			// retained history entry needs it either (`collect_units`), and
+			// a source that runs again is announced again.
+			EventData::UnitRetired { unit } => {
+				if let Some(units) = self.by_id.get_mut(&ev.vpid) {
+					units.retain(|(_, id), _| *id != unit);
+				}
 			},
 			EventData::Diag { code, message } => {
 				if self.diags.len() == DIAGS {
@@ -728,6 +823,9 @@ impl Inner {
 				command,
 				data,
 			});
+		}
+		if !root && matches!(ev.data, EventData::RunEnd { .. }) {
+			self.by_id.remove(&ev.vpid);
 		}
 	}
 
@@ -809,6 +907,7 @@ impl Inner {
 		} else {
 			let u = self.units.len();
 			self.units.push(UnitState {
+				key:         self.next_key,
 				segment:     self.segment_index(),
 				family:      None,
 				id:          Some(nref.unit),
@@ -822,6 +921,7 @@ impl Inner {
 				placeholder: true,
 				callout:     false,
 			});
+			self.next_key += 1;
 			self.by_id.entry(ev.vpid).or_default().insert(key, u as u32);
 			u
 		};
@@ -994,6 +1094,7 @@ impl Inner {
 			}
 		});
 		self.units.push(UnitState {
+			key: self.next_key,
 			segment,
 			family: Some(family),
 			id: Some(id),
@@ -1011,6 +1112,7 @@ impl Inner {
 			placeholder: false,
 			callout,
 		});
+		self.next_key += 1;
 		self
 			.by_id
 			.entry(vpid)
@@ -1056,6 +1158,7 @@ impl Inner {
 	}
 
 	fn snapshot(&mut self) -> Snapshot {
+		self.collect_units(true);
 		let ended = self.status.is_some();
 		for unit in &mut self.units {
 			derive_states(&mut unit.nodes, &unit.kids, ended);
@@ -1071,6 +1174,7 @@ impl Inner {
 				.units
 				.iter()
 				.map(|unit| Unit {
+					key:        unit.key,
 					at:         unit.at,
 					line:       unit.line,
 					bytes:      unit.source.len() as u32,
@@ -1133,6 +1237,7 @@ impl Serialize for UnitJson<'_> {
 	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
 		let unit = self.unit;
 		let mut out = serializer.serialize_struct("Unit", 5)?;
+		out.serialize_field("key", &unit.key)?;
 		if let Some(at) = unit.at {
 			out.serialize_field("at", &at)?;
 		}

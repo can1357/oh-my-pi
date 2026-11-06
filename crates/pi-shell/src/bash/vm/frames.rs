@@ -508,6 +508,7 @@ impl Shell {
 				}
 			}
 		}
+		let mut live: std::collections::HashSet<UnitId> = funcs.iter().copied().collect();
 		for id in funcs {
 			if !self.k.written.contains(&id)
 				&& let Some(unit) = self.k.engine.cached(&id)
@@ -524,6 +525,9 @@ impl Shell {
 		for p in &mut self.procs {
 			let mut frames = Vec::with_capacity(p.frames.len());
 			for f in &mut p.frames {
+				if let Some(unit) = &f.unit {
+					live.insert(unit.id);
+				}
 				if let Some(unit) = &f.unit
 					&& self.k.written.insert(unit.id)
 				{
@@ -574,6 +578,7 @@ impl Shell {
 			runs.extend(p.runs.iter().map(|r| r.id));
 			let command = match &p.command {
 				Some((unit, node)) => {
+					live.insert(unit.id);
 					if self.k.written.insert(unit.id) {
 						let bytes = postcard::to_stdvec(&**unit).map_err(ExtError::Encode)?;
 						cx.store.put_blob(BlobSlot::Unit(unit.id), &bytes)?;
@@ -618,6 +623,24 @@ impl Shell {
 				lineage: p.lineage,
 				blocked: p.blocked.as_ref().map(|b| (b.key.clone(), b.at)),
 			});
+		}
+		// A unit blob exists for the frames and function records that name
+		// it. One-shot sources (an `eval`, a trap action, a sourced file,
+		// the script a callout runs) are a fresh unit per distinct text, so
+		// without this the image grows with the texts a run ever compiled
+		// rather than with what a restore needs.
+		if self.k.written.len() > live.len() {
+			let stale: Vec<UnitId> = self
+				.k
+				.written
+				.iter()
+				.filter(|id| !live.contains(id))
+				.copied()
+				.collect();
+			for id in stale {
+				cx.store.del_blob(BlobSlot::Unit(id))?;
+				self.k.written.remove(&id);
+			}
 		}
 		let k = &self.k;
 		let header = Header {

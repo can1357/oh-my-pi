@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the bash tool's execution trace and its checkpoints growing without bound while a script runs many distinct one-shot sources (`eval`, a command substitution of evaluated text, a sourced file whose bytes change, a trap action, an `env NAME=value` prefix): what they keep now follows what the trace can still replay and what a restore needs
+
 ## [18.17.0] - 2026-11-06
 
 ### Breaking Changes

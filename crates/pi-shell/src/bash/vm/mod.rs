@@ -405,7 +405,10 @@ pub struct Kernel {
 	/// Units announced by each vproc to the current observer. A prior
 	/// background vproc's rejected events must not suppress current units.
 	/// Not imaged: restored/cached frames announce lazily when executed.
-	pub announced:          HashSet<(Vpid, UnitId, Option<crate::bash::event::SourceOrigin>)>,
+	/// Per vproc, so a vproc that ends takes its entries with it and a
+	/// source it can no longer reach can be retired on its own
+	/// ([`crate::bash::vm::exec::retire_sources`]).
+	pub announced:          HashMap<Vpid, HashSet<(UnitId, Option<crate::bash::event::SourceOrigin>)>>,
 	/// Observed script origins by actual activation depth. Empty without
 	/// tracing.
 	pub trace_sources:      HashMap<Vpid, HashMap<usize, crate::bash::event::SourceOrigin>>,
@@ -531,7 +534,7 @@ impl Kernel {
 			done: VecDeque::new(),
 			calls_out: VecDeque::new(),
 			results: HashMap::new(),
-			announced: HashSet::new(),
+			announced: HashMap::new(),
 			trace_sources: HashMap::new(),
 			trace_unit_origins: HashMap::new(),
 			written: HashSet::new(),
@@ -1839,6 +1842,7 @@ impl Shell {
 			// A subshell vproc exits once its frames and diagnostics are done.
 			if p.transient && !p.has_work() && p.out.is_empty() {
 				let p = self.procs.remove(i);
+				exec::retire_vproc_sources(&mut self.k, cx, p.vpid, p.mode);
 				self.k.trace_sources.remove(&p.vpid);
 				self.k.trace_unit_origins.remove(&p.vpid);
 				jobctl::forget_vproc(&mut self.k, p.vpid);
@@ -2132,6 +2136,7 @@ impl Shell {
 		}
 		if self.procs[i].transient {
 			let p = self.procs.remove(i);
+			exec::retire_vproc_sources(&mut self.k, cx, p.vpid, p.mode);
 			self.k.trace_sources.remove(&p.vpid);
 			self.k.trace_unit_origins.remove(&p.vpid);
 			self.k.settle_bang(p.vpid, None);

@@ -286,15 +286,16 @@ pub fn run_script(host: FakeHost, src: &[u8], args: &[&str], fault: Fault) -> Ou
 /// Events with what legitimately differs between fault plans removed.
 ///
 /// That is `seq`, `t_ns`, `dur_ns`, and the events the faults themselves
-/// cause: `Suspended`/`Restored`/`Stopped`/`Continued`, and the
+/// cause: `Suspended`/`Restored`/`Stopped`/`Continued`, the
 /// `UnitCompiled` a restored shell repeats for the units it can still run
-/// (a shell announces each unit once).
+/// (a shell announces each unit once), and the `UnitRetired` that pairs
+/// with such a repeat.
 pub fn comparable(events: &[Value]) -> Vec<Value> {
 	let mut announced = std::collections::HashSet::new();
 	events
 		.iter()
 		.filter(|e| match e["kind"].as_str() {
-			Some("Suspended" | "Restored" | "Stopped" | "Continued") => false,
+			Some("Suspended" | "Restored" | "Stopped" | "Continued" | "UnitRetired") => false,
 			Some("UnitCompiled") => announced.insert(e["data"]["unit"].to_string()),
 			_ => true,
 		})

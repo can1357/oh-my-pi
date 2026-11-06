@@ -901,6 +901,9 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 	let observed = k.mask.contains(crate::bash::event::EventKind::UnitCompiled);
 	let depth = vp.frames.len();
 	if observed {
+		retire_sources(k, cx, vp);
+	}
+	if observed {
 		if let Some(origins) = k.trace_sources.get_mut(&vp.vpid) {
 			origins.retain(|at, _| *at <= depth);
 		}
@@ -1354,18 +1357,23 @@ fn announce_at(
 	parent: Option<&crate::bash::event::SourceOrigin>,
 ) {
 	if k.mask.contains(crate::bash::event::EventKind::UnitCompiled) && !unit.nodes.is_empty() {
-		let key = (vpid, unit.id, parent.copied());
+		let key = (unit.id, parent.copied());
 		if let Some(parent) = parent {
 			record_source_origin(k, unit, vpid, *parent);
 		} else {
 			clear_source_origin(k, unit, vpid);
 		}
-		// Vpids keep advancing in long-running pipeline/background loops.
-		// Reannouncements are safe; an already-known key needs no eviction.
-		if k.announced.len() >= 20_000 && !k.announced.contains(&key) {
-			k.announced.clear();
-		}
-		if k.announced.insert(key) {
+		let fresh = {
+			let announced = k.announced.entry(vpid).or_default();
+			// A vproc that reaches this many distinct sources without any of
+			// them falling out of reach starts again. Reannouncements are
+			// safe; an already-known key needs no eviction.
+			if announced.len() >= 20_000 && !announced.contains(&key) {
+				announced.clear();
+			}
+			announced.insert(key)
+		};
+		if fresh {
 			if unit.trace_syntax.get().is_none()
 				&& let Some(syntax) = crate::bash::trace::syntax::UnitSyntax::restore(unit)
 			{
@@ -1378,6 +1386,72 @@ fn announce_at(
 				EventData::UnitCompiled(CompiledUnit { unit, line, parent }),
 			);
 		}
+	}
+}
+
+/// Retire the sources this vproc can no longer reach.
+///
+/// A one-shot source — an `eval` string, a trap action, a sourced file, the
+/// script a host callout runs, the text of a command substitution — is a
+/// fresh compiled unit for every distinct text, while what an observer can
+/// still replay is bounded. Without this the observer's own source table
+/// grows with the number of texts rather than with what it can show, for a
+/// program whose own text never changes.
+///
+/// A source on a live frame, or the command in flight, is never retired.
+/// Retiring one early is safe and self-correcting: the next execution
+/// announces it again, because the announcement record goes with it.
+pub(super) fn retire_sources(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) {
+	let Some(announced) = k.announced.get(&vp.vpid) else {
+		return;
+	};
+	// One source per frame plus the command in flight is all a vproc can
+	// reach, so nothing below that can be stale.
+	if announced.len() <= vp.frames.len() + 1 {
+		return;
+	}
+	let live: std::collections::HashSet<crate::bash::ids::UnitId> = vp
+		.frames
+		.iter()
+		.filter_map(|f| f.unit.as_ref().map(|u| u.id))
+		.chain(vp.command.as_ref().map(|(unit, _)| unit.id))
+		.collect();
+	let retired: std::collections::HashSet<crate::bash::ids::UnitId> = announced
+		.iter()
+		.map(|(unit, _)| *unit)
+		.filter(|unit| !live.contains(unit))
+		.collect();
+	if retired.is_empty() {
+		return;
+	}
+	if let Some(announced) = k.announced.get_mut(&vp.vpid) {
+		announced.retain(|(unit, _)| !retired.contains(unit));
+	}
+	for unit in retired {
+		k.emit(cx, (vp.vpid, vp.mode), vp.runs.front(), EventData::UnitRetired { unit });
+	}
+}
+
+/// Retire every source a vproc that is gone had announced. A vproc the
+/// engine forks for a command substitution or a subshell ends without a
+/// `RunEnd` of its own, so this is the only point at which an observer
+/// learns that what it keeps for that vproc can go.
+pub(super) fn retire_vproc_sources(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vpid: Vpid,
+	mode: crate::bash::ids::ModeId,
+) {
+	let Some(announced) = k.announced.remove(&vpid) else {
+		return;
+	};
+	if !k.mask.contains(crate::bash::event::EventKind::UnitRetired) {
+		return;
+	}
+	let units: std::collections::HashSet<crate::bash::ids::UnitId> =
+		announced.into_iter().map(|(unit, _)| unit).collect();
+	for unit in units {
+		k.emit(cx, (vpid, mode), None, EventData::UnitRetired { unit });
 	}
 }
 

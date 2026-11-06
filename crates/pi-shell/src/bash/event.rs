@@ -486,6 +486,7 @@ pub enum EventKind {
 	Restored,
 	Lost,
 	Custom,
+	UnitRetired,
 }
 
 crate::bash::packed_names::packed_names!(EventKind, Display);
@@ -977,6 +978,14 @@ pub enum EventData<'a> {
 		/// What.
 		lost: &'a Lost,
 	},
+	/// A compiled source that no live frame of this vproc can reach again:
+	/// what an observer keeps for it may go. The engine announces the unit
+	/// again (`UnitCompiled`) if it is ever executed again, so retiring one
+	/// early costs a repeated announcement and nothing else.
+	UnitRetired {
+		/// The source.
+		unit: UnitId,
+	},
 	/// Host callout annotation.
 	Custom(&'a CustomEvent),
 }
@@ -1018,6 +1027,7 @@ impl EventData<'_> {
 			Self::Suspended => EventKind::Suspended,
 			Self::Restored { .. } => EventKind::Restored,
 			Self::Lost { .. } => EventKind::Lost,
+			Self::UnitRetired { .. } => EventKind::UnitRetired,
 			Self::Custom(_) => EventKind::Custom,
 		}
 	}
