@@ -34,6 +34,24 @@ const SYSTEM_DIRS: &[&str] = &["/usr/bin", "/bin"];
 #[cfg(not(unix))]
 const SYSTEM_DIRS: &[&str] = &[];
 
+/// The `PATH` for when nothing resolved, which is **not** the empty one.
+///
+/// An empty `PATH` is not "no directories": a shell reads it as the
+/// working directory. A child would then run whatever `sh` or `cat` the
+/// directory it happens to start in contains, and
+/// `external_commands_run_through_path` would **pass** on one — a test
+/// reading the machine it runs on, which is the defect this harness
+/// exists to remove, arrived at by the harness itself. Found by review
+/// on a host where every caller entry was rejected.
+///
+/// `/dev/null` is not a directory, so a lookup through it finds nothing
+/// and stops there. The test that needed a program then fails on that
+/// program, which is what a reader can act on.
+#[cfg(unix)]
+const NO_PROGRAMS: &str = "/dev/null";
+#[cfg(not(unix))]
+const NO_PROGRAMS: &str = "NUL";
+
 /// The `PATH` the test process gets, instead of the caller's: the
 /// directories the programs in [`REQUIRED`] were found in, **in search
 /// order**, and nothing else.
@@ -88,7 +106,8 @@ pub static TEST_PATH: LazyLock<OsString> = LazyLock::new(|| {
 		// entry, so it is not hypothetical.
 		.filter(|(dir, _)| std::env::join_paths([dir.as_path()]).is_ok())
 		.map(|(dir, _)| dir);
-	std::env::join_paths(kept).unwrap_or_default()
+	let joined = std::env::join_paths(kept).unwrap_or_default();
+	if joined.is_empty() { OsString::from(NO_PROGRAMS) } else { joined }
 });
 
 /// One of the caller's `PATH` entries, if this harness supports it.
