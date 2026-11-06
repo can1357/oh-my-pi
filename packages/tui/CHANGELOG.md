@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The BTW history page (`f` on a side answer) scrolls its reader and history list with the mouse wheel, matching the other scrolling sheets ([#18303](https://github.com/can1357/oh-my-pi/pull/18303) by [@ImAlexBlock](https://github.com/ImAlexBlock))
+
 ## [18.17.0] - 2026-11-06
 
 ### Breaking Changes
