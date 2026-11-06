@@ -369,10 +369,18 @@ const DEFAULT_EMBEDDING_BATCH_SIZE = 64;
  * runtime scope's `embeddings.batchSize`, then `MNEMOPI_EMBEDDING_BATCH_SIZE`, then 64.
  */
 function embeddingBatchSize(): number {
-	const override = activeEmbeddingOptions()?.batchSize;
-	if (override !== undefined && override > 0) return Math.trunc(override);
-	const value = Number.parseInt($env.MNEMOPI_EMBEDDING_BATCH_SIZE ?? "", 10);
-	return Number.isFinite(value) && value > 0 ? value : DEFAULT_EMBEDDING_BATCH_SIZE;
+	return (
+		positiveBatchSize(activeEmbeddingOptions()?.batchSize) ??
+		positiveBatchSize(Number.parseInt($env.MNEMOPI_EMBEDDING_BATCH_SIZE ?? "", 10)) ??
+		DEFAULT_EMBEDDING_BATCH_SIZE
+	);
+}
+
+/** Floors a configured size to a whole request cap; undefined unless it is at least 1. */
+function positiveBatchSize(value: number | undefined): number | undefined {
+	if (value === undefined || !Number.isFinite(value)) return undefined;
+	const size = Math.floor(value);
+	return size >= 1 ? size : undefined;
 }
 
 // Same level policy as the local-model failures: debug, or warn when runtime debug is on.
@@ -430,7 +438,11 @@ async function embedApiBatch(texts: readonly string[]): Promise<EmbeddingMatrix 
 				defaultDelayMs: attempt => 2 ** attempt * 1000,
 			});
 			if (res.status === 401) {
-				throw new ProviderHttpError("mnemopi embedding request unauthorized (401)", 401, { headers: res.headers });
+				// Keep the provider's denial text: the log can only show what the error carries.
+				const detail = (await res.text().catch(() => "")).trim();
+				throw new ProviderHttpError(detail || "mnemopi embedding request unauthorized (401)", 401, {
+					headers: res.headers,
+				});
 			}
 			return res;
 		});

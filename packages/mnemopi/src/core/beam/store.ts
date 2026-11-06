@@ -352,11 +352,11 @@ const EMBED_REBUILD_BATCH = 128;
  * `runEmbedding` in `helpers.ts`). When the configured embedding model changes,
  * its vector dimension changes too, so the previously-stored vectors are no
  * longer comparable. On a mismatch we embed one probe text with the new model. Once
- * it answers we wipe every stored vector (the `memory_embeddings` table, the
- * `episodic_memory.binary_vector` column, and the sqlite-vec `vec_episodes` index),
- * then enqueue all live memories for background re-embedding under the new model
- * via `scheduleEmbedding`. The probe and the wipe run as a tracked background task
- * on `beam.pendingExtractions`, so `flushExtractions()` drains them.
+ * it answers we embed the whole corpus under the new model in memory. Only when every
+ * batch comes back do we replace the stored vectors (the `memory_embeddings` table, the
+ * `episodic_memory.binary_vector` column, and the sqlite-vec `vec_episodes` index) in one
+ * transaction, so a rejected batch leaves the old vectors in place. The work runs as a
+ * tracked background task on `beam.pendingExtractions`, so `flushExtractions()` drains it.
  *
  * Runs once per store open; a fresh store (no embeddings) or an already-current
  * store is a no-op. The destructive wipe is skipped whenever it could not be
@@ -384,9 +384,8 @@ export function reconcileEmbeddingModel(beam: BeamMemoryState): void {
 	// (NULL/unstamped counts as a mismatch via `IS NOT`).
 	const mismatch = beam.db.query("SELECT 1 FROM memory_embeddings WHERE model IS NOT ? LIMIT 1").get(active);
 	if (mismatch) {
-		// Wipe only after the new provider answers one request. Otherwise a missing key or an
-		// unreachable endpoint turns a model switch into permanent loss of every stored vector;
-		// with the stale vectors kept, the next store open probes again.
+		// Replace stored vectors only once the whole corpus embeds under the new model. A missing key,
+		// an unreachable endpoint, or a rejected batch keeps the stale vectors; the next open retries.
 		const migrate = async (): Promise<void> => {
 			try {
 				const probe = await embed(["mnemopi embedding probe"]);
@@ -405,8 +404,33 @@ export function reconcileEmbeddingModel(beam: BeamMemoryState): void {
 					`)
 					.all() as EmbedItem[];
 
+				// Embed the whole corpus before touching anything stored. embed() handles the provider's
+				// per-request cap; a rejected chunk abandons the rebuild and leaves the stored vectors alone.
+				const toEmbed = live.filter(item => item.content.trim() !== "");
+				const staged: { memoryId: string; json: string }[] = [];
+				for (let offset = 0; offset < toEmbed.length; offset += EMBED_REBUILD_BATCH) {
+					const chunk = toEmbed.slice(offset, offset + EMBED_REBUILD_BATCH);
+					const vectors = await embed(chunk.map(item => item.content));
+					if (vectors === null || vectors.length !== chunk.length) {
+						logger.warn("mnemopi: embedding rebuild incomplete; keeping stored embeddings", {
+							to: active,
+							embedded: staged.length,
+							total: toEmbed.length,
+						});
+						return;
+					}
+					chunk.forEach((item, index) => {
+						const vector = vectors[index];
+						if (vector !== undefined) {
+							staged.push({ memoryId: item.memoryId, json: JSON.stringify(Array.from(vector)) });
+						}
+					});
+				}
+
 				transaction(beam.db, () => {
-					beam.db.run("DELETE FROM memory_embeddings");
+					// Only stale-model rows go. A vector that a concurrent remember() stamped under the active
+					// model survives, and the INSERT below overwrites any row this rebuild covers.
+					beam.db.query("DELETE FROM memory_embeddings WHERE model IS NOT ?").run(active);
 					beam.db.run("UPDATE episodic_memory SET binary_vector = NULL");
 					if (vecAvailable(beam.db)) {
 						try {
@@ -415,14 +439,18 @@ export function reconcileEmbeddingModel(beam: BeamMemoryState): void {
 							// sqlite-vec cleanup is best-effort; rebuild correctness takes precedence.
 						}
 					}
+					using insertEmbedding = beam.db.prepare(
+						"INSERT OR REPLACE INTO memory_embeddings(memory_id, embedding_json, model) VALUES (?, ?, ?)",
+					);
+					for (const row of staged) insertEmbedding.run(row.memoryId, row.json, active);
 				});
+				beam.caches.queryCache?.invalidate();
 
-				logger.info("mnemopi: embedding model changed, rebuilding", {
+				logger.info("mnemopi: embedding model changed, rebuilt", {
 					from: staleModels.map(row => row.model ?? "(unstamped)"),
 					to: active,
-					count: live.length,
+					count: staged.length,
 				});
-				rebuild(live);
 			} catch (error) {
 				// A store closed during shutdown lands here; the next open resumes from the stamps.
 				logger.debug("mnemopi: embedding migration aborted", { error: String(error) });

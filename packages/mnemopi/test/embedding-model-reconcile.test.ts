@@ -2,9 +2,9 @@
  * Wipe-and-rebuild reconcile: each `memory_embeddings` row is stamped with the
  * model that produced it. When the configured embedding model changes the vector
  * dimension changes too, so on store open `reconcileEmbeddingModel` (wired into
- * the `Mnemopi` constructor) embeds a probe text with the new model; once the
- * provider answers, it wipes every stale vector and enqueues all live memories for
- * re-embedding. A provider that does not answer leaves the stale vectors in place.
+ * the `Mnemopi` constructor) probes the new model, then embeds the whole corpus with it.
+ * Only when every batch returns does it swap the stale vectors for the new ones in one
+ * transaction. A provider that fails any request leaves the stale vectors in place.
  * A matching model is a no-op.
  */
 
@@ -54,8 +54,8 @@ describe("reconcileEmbeddingModel on store open", () => {
 		const { db, ids } = seedDb(OLD_MODEL);
 		const memory = new Mnemopi({ db, embeddings: { model: NEW_MODEL, provider: fakeEmbed() } });
 		try {
-			// The constructor enqueues the migration: it probes the new provider, wipes the stale
-			// vectors and the episodic binary vector, then enqueues the rebuild.
+			// The constructor enqueues the migration: it probes the new provider, embeds the corpus,
+			// then swaps the stale vectors and clears the episodic binary vector.
 			expect(memory.beam.pendingExtractions.size).toBeGreaterThanOrEqual(1);
 			await memory.flushExtractions();
 			const ep = memory.conn.query("SELECT binary_vector AS v FROM episodic_memory WHERE id = 'ep-1'").get() as {
@@ -63,8 +63,7 @@ describe("reconcileEmbeddingModel on store open", () => {
 			};
 			expect(ep.v).toBeNull();
 
-			// The background rebuild repopulates every live memory, stamped with the
-			// new model.
+			// Every live memory is re-stamped with the new model.
 			await memory.flushExtractions();
 			const rows = memory.conn.query("SELECT memory_id, model FROM memory_embeddings ORDER BY memory_id").all() as {
 				memory_id: string;

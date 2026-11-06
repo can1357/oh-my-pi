@@ -81,6 +81,16 @@ describe("embed() against an API with a per-request input cap", () => {
 		const matrix = await run(server.url, () => embed(["1", "2", "3"]));
 		expect(matrix).toBeNull();
 	});
+
+	it("treats a fractional batchSize as the default cap instead of sending empty requests", async () => {
+		server = startServer();
+		const matrix = await withMnemopiRuntimeOptions(
+			{ embeddings: { model: "text-embedding-v4", apiUrl: server.url, apiKey: "test-key", batchSize: 0.5 } },
+			() => embed(["1", "2", "3"]),
+		);
+		expect(matrix?.map(v => v[0])).toEqual([1, 2, 3]);
+		expect(server.sizes).toEqual([3]);
+	});
 });
 
 describe("embed() logging of a rejected API request", () => {
@@ -112,6 +122,20 @@ describe("embed() logging of a rejected API request", () => {
 		try {
 			expect(await run(server.url, () => embed(["1"]))).toBeNull();
 			expect(debugSpy).toHaveBeenCalledWith(REJECTED, expect.objectContaining({ status: 401 }));
+		} finally {
+			debugSpy.mockRestore();
+		}
+	});
+
+	it("logs the provider's 401 body, not a generic message", async () => {
+		server = startServer(() => new Response("invalid api key: check DASHSCOPE_API_KEY", { status: 401 }));
+		const debugSpy = spyOn(logger, "debug").mockImplementation(() => {});
+		try {
+			expect(await run(server.url, () => embed(["1"]))).toBeNull();
+			expect(debugSpy).toHaveBeenCalledWith(REJECTED, {
+				status: 401,
+				body: "invalid api key: check DASHSCOPE_API_KEY",
+			});
 		} finally {
 			debugSpy.mockRestore();
 		}
@@ -192,6 +216,25 @@ describe("an embedding model switch against an API with a per-request input cap"
 		try {
 			await memory.flushExtractions();
 			expect(server.sizes.every(size => size === 1)).toBe(true);
+			const models = storedModels(memory);
+			expect(models).toHaveLength(25);
+			expect(models.every(model => model === "old-model")).toBe(true);
+		} finally {
+			memory.close();
+			db.close();
+		}
+	});
+
+	it("keeps every old vector when a rebuild batch is rejected after the probe succeeds", async () => {
+		server = startServer(call => (call === 2 ? new Response("quota", { status: 403 }) : undefined));
+		const db = seedBank("old-model", 25);
+		const memory = new Mnemopi({
+			db,
+			embeddings: { model: "text-embedding-v4", apiUrl: server.url, apiKey: "test-key", batchSize: LIMIT },
+		});
+		try {
+			await memory.flushExtractions();
+			expect(server.sizes).toEqual([1, 10]);
 			const models = storedModels(memory);
 			expect(models).toHaveLength(25);
 			expect(models.every(model => model === "old-model")).toBe(true);
