@@ -506,6 +506,10 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 		// `Host::child_opens` false here).
 		return Err(io::ErrorKind::Unsupported.into());
 	}
+	if spec.ctty.is_some() {
+		// No controlling terminals on Windows.
+		return Err(io::ErrorKind::Unsupported.into());
+	}
 	let SpawnSpec { path, argv, env, cwd, stdio, pgroup, lineage, .. } = spec;
 	let (app, mut line) = command(path, argv)?;
 	let env = env_block(env)?;

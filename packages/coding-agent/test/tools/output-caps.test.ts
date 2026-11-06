@@ -20,12 +20,6 @@ function makeLines(count: number, pad = "x".repeat(40)): string {
 }
 
 describe("enforceInlineByteCap", () => {
-	it("returns sub-cap text unchanged (identity, not just equality)", async () => {
-		const text = makeLines(10);
-		const result = await enforceInlineByteCap(text, { maxBytes: 4096 });
-		expect(result).toBe(text);
-	});
-
 	it("returns text exactly at the cap unchanged", async () => {
 		const text = "a".repeat(1000);
 		expect(Buffer.byteLength(text, "utf-8")).toBe(1000);

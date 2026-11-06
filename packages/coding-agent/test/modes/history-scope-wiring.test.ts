@@ -168,7 +168,6 @@ async function focusedHistory() {
 		main,
 		"test",
 		undefined,
-		() => {},
 		undefined,
 		undefined,
 		undefined,

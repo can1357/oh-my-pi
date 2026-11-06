@@ -12,7 +12,7 @@ use bstr::{BStr, BString, ByteSlice};
 
 use super::{
 	Cx, Kernel, assign_scope, builtins, command,
-	expand::{Expander, Stop},
+	expand::{self, Expander, Stop},
 	is_ident, probe,
 	proc::{
 		AssignValue, Atom, Bang, BangStage, Coproc, Depths, Frame, FrameKind, InlineStage, LastBg,
@@ -24,7 +24,7 @@ use super::{
 };
 use crate::bash::{
 	diag::Diag,
-	event::{Construct, EventData, NodeKind, Origin, WaitKey},
+	event::{CompiledUnit, Construct, EventData, NodeKind, Origin, WaitKey},
 	fd::FdRef,
 	host::{ResolveCtx, Resolved, Via},
 	ids::{Dialect, ModeId, UnitId, Vpid},
@@ -71,6 +71,11 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 	let mut held: Option<Arc<Unit>> = None;
 	// Time passed since the last turn (`Kernel::clock`).
 	k.clock_stale();
+	// A process of the shell's foreground job stopped while it waited for
+	// something else: the job is suspended before anything else runs.
+	if k.jobctl.has_fg_stop() {
+		super::jobctl::pending_suspend(k, cx, vp);
+	}
 	loop {
 		if k.root.has_fault() {
 			return;
@@ -124,6 +129,14 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			// Reading and parsing the next command take time.
 			k.clock_stale();
 			let at = k.ctl.wakes();
+			// zsh `zexit`: its base frame is on top; the next hook runs.
+			if vp.zsh.is_some() && super::zsh::zexit::at_base(vp) {
+				match super::zsh::zexit::advance(k, cx, vp) {
+					Some(key) => return park(k, cx, vp, key, at),
+					None => unblock(k, cx, vp),
+				}
+				continue;
+			}
 			match next_command(k, vp, cx) {
 				Some(key) => return park(k, cx, vp, key, at),
 				None => unblock(k, cx, vp),
@@ -141,13 +154,52 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 		*ops += 1;
 		let at = k.ctl.wakes();
 		let frame = vp.frames.last().expect("checked above");
+		// A suspended job's base frame ends where the shell's pipeline did.
+		if let FrameKind::Job { stop_at } = frame.kind
+			&& stop_at == frame.pc
+		{
+			end_unit(k, vp, cx);
+			continue;
+		}
 		let current = frame.unit.as_ref().expect("checked above");
 		if !held.as_ref().is_some_and(|u| Arc::ptr_eq(u, current)) {
+			announce(k, cx, vp.vpid, vp.runs.front(), current, current.line);
 			held = Some(Arc::clone(current));
 		}
 		let unit = held.as_ref().expect("just set");
 		let op = unit.ops[frame.pc as usize];
 		let fi = vp.frames.len() - 1;
+		// Control flow of a bash unit: it starts no command, cannot fail as
+		// one or block, and keeps the clock, so none of the bookkeeping
+		// below applies to it.
+		if unit.mode.dialect() == Dialect::Bash
+			&& vp.frames[fi].scratch.is_none()
+			&& let Some(flow) = control_flow(k, cx, vp, unit, op)
+		{
+			vp.frames[fi].debug_pc = None;
+			unblock(k, cx, vp);
+			if !vp.procsubs.is_empty() {
+				close_procsubs(vp, fi);
+			}
+			let frame = top_frame(vp);
+			frame.pc = match flow {
+				Flow::Jump(target) => target,
+				_ => frame.pc + 1,
+			};
+			continue;
+		}
+		// A zsh list marker: the DEBUG trap point before or after a list.
+		if op.code == Opcode::Nop && unit.mode.dialect() == Dialect::Zsh {
+			let ran = vp.frames[fi].debug_pc == Some(vp.frames[fi].pc);
+			if !ran && zsh_debug_trap(k, vp, cx, unit, op) {
+				continue;
+			}
+			unblock(k, cx, vp);
+			let frame = top_frame(vp);
+			frame.debug_pc = None;
+			frame.pc += 1;
+			continue;
+		}
 		let starts = starts_command(unit, op);
 		let fresh = vp.frames[fi].scratch.is_none();
 		if fresh && starts {
@@ -155,20 +207,21 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 		}
 		// bash's DEBUG trap: before a simple command, `[[ ]]`, `(( ))`, each
 		// arith-for expression, a `case` or `select` command and each `for`
-		// iteration that assigns a word.
-		let debug_point = starts
-			|| match op.code {
-				Opcode::Arith => unit
-					.nodes
-					.get(op.node as usize)
-					.is_some_and(|n| n.kind == NodeKind::ArithFor),
-				Opcode::CaseWord => true,
-				Opcode::ForIn => op.flags & Op::SELECT != 0,
-				Opcode::ForNext => vp.frames[fi].loops.last().is_some_and(
-					|r| matches!(&r.kind, LoopKind::For { items, next, .. } if (*next as usize) < items.len()),
-				),
-				_ => false,
-			};
+		// iteration that assigns a word. zsh's runs at its list markers.
+		let debug_point = unit.mode.dialect() == Dialect::Bash
+			&& (starts
+				|| match op.code {
+					Opcode::Arith => unit
+						.nodes
+						.get(op.node as usize)
+						.is_some_and(|n| n.kind == NodeKind::ArithFor),
+					Opcode::CaseWord => true,
+					Opcode::ForIn => op.flags & Op::SELECT != 0,
+					Opcode::ForNext => vp.frames[fi].loops.last().is_some_and(
+						|r| matches!(&r.kind, LoopKind::For { items, next, .. } if (*next as usize) < items.len()),
+					),
+					_ => false,
+				});
 		if debug_point && vp.frames[fi].debug_pc != Some(vp.frames[fi].pc) {
 			vp.frames[fi].debug_pc = Some(vp.frames[fi].pc);
 			if pseudo_trap_maybe(k, cx, TrapKey::Debug) {
@@ -196,7 +249,44 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 		if k.clock.is_some() && !keeps_clock(op.code) {
 			k.clock_stale();
 		}
-		let flow = dispatch(k, vp, cx, unit, op);
+		// The hottest ops straight to their handlers, past `dispatch`'s
+		// frame.
+		let bash = unit.mode.dialect() == Dialect::Bash;
+		let flow = if bash && op.code == Opcode::Exec {
+			command::exec(k, vp, cx, unit, op, line_of(vp, op.node))
+		} else if bash
+			&& op.code == Opcode::Arith
+			&& let Some(flow) = plain_arith(k, vp, cx, unit, op)
+		{
+			flow
+		} else {
+			dispatch(k, vp, cx, unit, op)
+		};
+		// A glob's shell-code qualifier (`(e:…:)`) runs its code above the
+		// op once the op has put its state back ([`VprocZsh::glob_hook`]);
+		// an op that did not pass the call on drops it.
+		if let Some(z) = vp.zsh.as_deref_mut()
+			&& let Some((src, hook_line)) = z.glob_hook.take()
+			&& matches!(flow, Flow::Call)
+		{
+			push_script(vp, &src, hook_line, ScriptKind::Hook);
+		}
+		// Nothing failed and control goes on: no ERR trap, errexit or
+		// transfer to decide (every check below starts from a failure or a
+		// transfer), only the op's state to drop.
+		if vp.status == 0 && matches!(flow, Flow::Next | Flow::Jump(_)) {
+			if let Some(frame) = vp.frames.get_mut(fi) {
+				frame.debug_pc = None;
+			}
+			unblock(k, cx, vp);
+			end_op(k, cx, vp, fi);
+			let frame = top_frame(vp);
+			frame.pc = match flow {
+				Flow::Jump(target) => target,
+				_ => frame.pc + 1,
+			};
+			continue;
+		}
 		let ignore_errexit =
 			op.flags & Op::COND != 0 || vp.frames.get(fi).is_some_and(|frame| frame.ignore_errexit);
 		if matches!(flow, Flow::Call) && ignore_errexit {
@@ -269,12 +359,7 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 		// The op is over unless it parks or called a frame: drop its scratch
 		// and close its process substitutions.
 		if !matches!(flow, Flow::Block(_) | Flow::Call) {
-			if let Some(sc) = vp.frames.get_mut(fi).and_then(|f| f.scratch.take()) {
-				drop_scratch(&mut k.root, cx.store, vp, sc);
-			}
-			if !vp.procsubs.is_empty() {
-				close_procsubs(vp, fi);
-			}
+			end_op(k, cx, vp, fi);
 		}
 		match flow {
 			Flow::Next => top_frame(vp).pc += 1,
@@ -298,7 +383,15 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 						_ => 1,
 					};
 				}
-				unwind(&mut k.root, cx.store, vp, i);
+				// An interactive shell's own input goes on: the command is
+				// dropped and the next one read (zsh `loop`, bash
+				// `reader_loop`).
+				unwind(&mut k.root, cx.store, vp, i + 1);
+				if super::zle::reader::applies(cx, vp) {
+					top_frame(vp).unit = None;
+				} else {
+					unwind(&mut k.root, cx.store, vp, i);
+				}
 			},
 			Flow::Return(status) if unit.mode.dialect() == Dialect::Zsh => {
 				zsh_return_flow(k, vp, cx, op, status, ignore_errexit);
@@ -423,9 +516,32 @@ fn zsh_return_flow(
 		// The always-list runs first; it resumes the return.
 	} else if let Some(i) = target {
 		zsh_leave(k, vp, cx, i);
+	} else if let Some(i) = vp
+		.frames
+		.iter()
+		.rposition(|f| matches!(f.kind, FrameKind::Script { what: ScriptKind::Run, .. }))
+		.filter(|&i| super::zle::reader::input_frame(cx, vp, i))
+	{
+		// zsh `bin_break`: under `INTERACTIVE` and `SHINSTDIN` it sets
+		// `retflag`, which `loop` clears: the rest of the command line (and
+		// a list trap that ran it, p10k's `return 130` on ^C) is dropped and
+		// the shell reads its next one.
+		unwind(&mut k.root, cx.store, vp, i + 1);
+		clear_scratch(&mut k.root, cx.store, vp);
+		truncate(vp, Depths::default());
+		let f = top_frame(vp);
+		f.unit = None;
+		f.loops.clear();
+		vp.status = status;
+		// A trap that ran while the line editor waited for a key: zsh's
+		// `getbyte` sees `retflag` and ends the line, as on an untrapped ^C.
+		if let Some(ed) = vp.zle.as_deref_mut().and_then(|z| z.ed.as_deref_mut()) {
+			ed.aborted = true;
+			ed.interrupted = true;
+		}
 	} else {
 		// zsh `bin_break`: `return` outside a function or `.` file leaves
-		// the shell (`zexit`).
+		// a non-interactive shell (`zexit`).
 		exit_shell(k, vp, cx, status);
 	}
 }
@@ -509,6 +625,15 @@ fn errexit_on(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 /// `exit` inside a function runs the root's trap first, above the
 /// function's frames: bash's trap sees its `FUNCNAME` and locals.
 fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
+	// zsh `zexit` while its hooks run: the hook calls end, the status is the
+	// new one.
+	if vp.zsh.is_some()
+		&& let Some(keep) = super::zsh::zexit::exit_in_hooks(vp, status)
+	{
+		vp.status = status;
+		unwind(&mut k.root, cx.store, vp, keep);
+		return;
+	}
 	let in_exit_trap = vp.frames.iter().any(|f| {
 		matches!(f.kind, FrameKind::Script { what: ScriptKind::Trap { key: TrapKey::Exit, .. }, .. })
 	});
@@ -543,6 +668,11 @@ fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		return;
 	}
 	unwind(&mut k.root, cx.store, vp, 0);
+	// zsh `exit` in a subshell is its `zexit`: the hooks run after its EXIT
+	// trap (pushed below them).
+	if vp.parent.is_some() && vp.runs.is_empty() && vp.mode.dialect() == Dialect::Zsh {
+		super::zsh::zexit::start(k, cx, vp);
+	}
 	if !in_exit_trap && vp.transient && vp.runs.is_empty() {
 		start_trap(k, vp, cx, TrapKey::Exit);
 	}
@@ -563,8 +693,18 @@ fn run_boundary(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 			return true;
 		}
 	}
+	// zsh `zexit` after the EXIT trap: the root's script, `-c` string or
+	// input ends.
+	if vp.parent.is_none()
+		&& vp.mode.dialect() == Dialect::Zsh
+		&& vp.runs.front().is_some_and(|r| r.started)
+		&& super::zsh::zexit::start(k, cx, vp)
+	{
+		return true;
+	}
 	let run = vp.runs.front_mut().expect("present");
 	if run.started {
+		super::zsh::zexit::reset(vp);
 		let run = vp.runs.pop_front().expect("present");
 		// A run's explicit mode ends with it.
 		if let Some(mode) = run.restore_mode {
@@ -641,6 +781,8 @@ fn run_boundary(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 fn end_run(k: &mut Kernel, vp: &Vproc, cx: &mut Cx<'_>, run: &super::proc::Run) {
 	let status = vp.status;
 	k.emit(cx, (vp.vpid, vp.mode), Some(run), EventData::RunEnd { status });
+	k.trace_sources.remove(&vp.vpid);
+	k.trace_unit_origins.remove(&vp.vpid);
 	k.done.push_back((run.id, status));
 }
 
@@ -672,8 +814,29 @@ fn unpark(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
 /// Write queued diagnostics; the fd that would block, if any. Write errors
 /// on a diagnostic stream are dropped, as bash does.
 pub fn flush_out(k: &Kernel, vp: &mut Vproc) -> Option<i32> {
+	use super::zle::tty;
+	// The editor's display bytes still pending were queued before anything
+	// in `vp.out` (later ones wait in it, as `tty::FD` entries): the
+	// terminal gets them first, as zsh's blocking writes order them.
+	if let Some(t) = vp.zle.as_deref_mut().and_then(|z| z.tty.as_mut())
+		&& t.flush(k).is_some()
+	{
+		return Some(tty::FD);
+	}
 	let mut cx = Context::from_waker(&k.waker);
 	while let Some(w) = vp.out.front_mut() {
+		if w.fd == tty::FD {
+			if let Some(t) = vp.zle.as_deref_mut().and_then(|z| z.tty.as_mut()) {
+				t.put(&w.bytes[w.off..]);
+				vp.out.pop_front();
+				if t.flush(k).is_some() {
+					return Some(tty::FD);
+				}
+				continue;
+			}
+			// No editor any more: its fallback, standard error.
+			w.fd = 2;
+		}
 		match vp.fds.handle(w.fd).poll_write(&mut cx, &w.bytes[w.off..]) {
 			Poll::Ready(Ok(n)) if n > 0 => {
 				w.off += n;
@@ -690,8 +853,9 @@ pub fn flush_out(k: &Kernel, vp: &mut Vproc) -> Option<i32> {
 	None
 }
 
-/// Grammar switches from the current options.
-fn features(
+/// Grammar switches from the current options (also `zpty`'s parse of its
+/// command text).
+pub(super) fn features(
 	k: &mut Kernel,
 	store: &mut dyn StateStore,
 	vp: &Vproc,
@@ -734,6 +898,30 @@ fn features(
 /// frame at end of input. A script read from stdin first reads lines until
 /// the command is complete; `Some` is the wait key while fd 0 has none.
 fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitKey> {
+	let observed = k.mask.contains(crate::bash::event::EventKind::UnitCompiled);
+	let depth = vp.frames.len();
+	if observed {
+		if let Some(origins) = k.trace_sources.get_mut(&vp.vpid) {
+			origins.retain(|at, _| *at <= depth);
+		}
+		if let Some(Frame { kind: FrameKind::Script { src, pos, what: ScriptKind::Eval, .. }, .. }) = vp.frames.last()
+			&& pos.0 == 0
+			&& let Some(origin) = literal_script_origin(vp, src, false)
+		{
+			if k.trace_sources.len() < crate::bash::trace::history::HISTORY_EVENTS {
+				k.trace_sources.entry(vp.vpid).or_default().insert(depth, origin);
+			}
+		} else if vp.frames.last().is_some_and(|frame| matches!(&frame.kind, FrameKind::Script { pos, what: ScriptKind::Eval, .. } if pos.0 == 0))
+			&& let Some(origins) = k.trace_sources.get_mut(&vp.vpid) { origins.remove(&depth); }
+	}
+	let source_origin = observed
+		.then(|| {
+			k.trace_sources
+				.get(&vp.vpid)
+				.and_then(|origins| origins.get(&depth))
+				.copied()
+		})
+		.flatten();
 	// zsh `parse_string`: a string (`eval`, a trap, `-c`) parses whole
 	// before it runs; its first command takes the snapshot the rest reuse.
 	let (snapped, snapshot) = match vp.frames.last().map(|f| &f.kind) {
@@ -741,7 +929,9 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		Some(FrameKind::Script { aux: Some(a), .. }) if a.parse.is_some() => (true, false),
 		Some(FrameKind::Script { pos, what, stdin: false, .. }) if pos.0 == 0 => {
 			let string = match what {
-				ScriptKind::Eval | ScriptKind::Trap { .. } => true,
+				ScriptKind::Eval | ScriptKind::Trap { .. } | ScriptKind::Hook | ScriptKind::Code(_) => {
+					true
+				},
 				ScriptKind::Source => false,
 				ScriptKind::Run => matches!(
 					state::record(cx.store, vp, Key::Misc(MiscKey::RunOrigin)),
@@ -775,6 +965,11 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 	// (not `eval`, `.` or trap text) join the history as they are read.
 	let history = matches!(top_frame(vp).kind, FrameKind::Script { what: ScriptKind::Run, .. })
 		&& builtins::history::recording(&mut k.root, cx.store, vp).unwrap_or(false);
+	// zsh: each event read goes through `hbegin`, history expansion and
+	// `hend` (`builtins::history::zsh`).
+	let zhist = history && vp.mode.dialect() == Dialect::Zsh;
+	// The zsh root shell, whose history is saved as its input ends.
+	let zsh_root = vp.mode.dialect() == Dialect::Zsh && vp.parent.is_none();
 	// `set -n`: a non-interactive shell reads its commands (reporting syntax
 	// errors) without running them.
 	let noexec = state::option(&mut k.root, cx.store, vp, OptId::Noexec).unwrap_or(false)
@@ -782,6 +977,14 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 			state::record(cx.store, vp, Key::Misc(MiscKey::Interactive)),
 			Ok(Some(Record::Misc(v))) if v.as_slice() == b"1"
 		);
+	// An interactive shell's own input: the line editor reads it, and
+	// `preexec` runs before each event ([`super::zle::reader`]).
+	let reader = super::zle::reader::applies(cx, vp);
+	let gate = if reader {
+		super::zle::reader::gate(vp)
+	} else {
+		None
+	};
 	let frame = top_frame(vp);
 	let FrameKind::Script { src, pos, aux, stdin, .. } = &mut frame.kind else {
 		// Function and subshell frames never run out of code.
@@ -809,9 +1012,34 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 	}
 	.with_resume(&resume_from);
 	let res = parser.next_command();
-	if *stdin && needs_more_input(src, res.as_ref(), parser.resume().pos) {
+	// zsh: the input ran out with a construct open (`a ||`, `a &&` parse as
+	// complete commands here; interactive zsh's lexer reads another line).
+	if *stdin
+		&& (needs_more_input(src, res.as_ref(), parser.resume().pos)
+			|| parser.zsh_cmdstack().is_some_and(|s| !s.is_empty()))
+	{
+		if reader {
+			// A command left open continues on a `PS2` line; `%_` shows
+			// what is open.
+			let cont = res.is_some();
+			let cmdstack = if cont {
+				parser.zsh_cmdstack().unwrap_or_default()
+			} else {
+				Vec::new()
+			};
+			drop(parser);
+			return super::zle::reader::read_line(k, vp, cx, cont, cmdstack);
+		}
 		drop(parser);
-		return read_script_line(k, vp, cx);
+		// An interactive shell reports changed jobs before it reads its
+		// next line (zsh `preprompt`), once per line.
+		if super::jobctl::interactive(k) && vp.parent.is_none() && top_frame(vp).scratch.is_none() {
+			if let Some(job) = super::jobctl::announce_wait(k) {
+				return Some(WaitKey::Proc(job));
+			}
+			super::jobctl::notices_before_prompt(k, cx, vp);
+		}
+		return read_script_line(k, vp, cx, zhist);
 	}
 	let Some(res) = res else {
 		let empty_src = src.is_empty();
@@ -820,6 +1048,16 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		// zsh's `LOOP_EMPTY` do: no command was ever parsed, so the position
 		// never moved. Until a first command runs, `$?` is the caller's.
 		let no_command = pos.0 == 0;
+		// zsh `zexit`: an interactive shell saves its history as its input
+		// ends.
+		if zsh_root && matches!(frame.kind, FrameKind::Script { what: ScriptKind::Run, .. }) {
+			let mut sc = frame.scratch.take().unwrap_or_default();
+			if let Err(key) = builtins::history::zsh::exit_save(k, cx, vp, &mut sc) {
+				top_frame(vp).scratch = Some(sc);
+				return Some(key);
+			}
+		}
+		let frame = top_frame(vp);
 		let (status, source, cancel, return_target, exit) = match frame.kind {
 			FrameKind::Script {
 				what: ScriptKind::Trap { status, cancel, return_target, exit, .. },
@@ -833,6 +1071,8 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 			..
 		});
 		let eval = matches!(frame.kind, FrameKind::Script { what: ScriptKind::Eval, .. });
+		// zsh `execode` of empty code (`zstyle -e`, `zregexparse`) leaves 0.
+		let code = matches!(frame.kind, FrameKind::Script { what: ScriptKind::Code(_), .. });
 		// A zsh function trap (`TRAPZERR`, …) runs above a trap frame
 		// without text.
 		let func_trap = status.is_some() && empty_src;
@@ -845,7 +1085,10 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 			return None;
 		}
 		pop_frame(&mut k.root, cx.store, vp);
-		if (source || eval) && no_command {
+		if debug && !vp.frames.is_empty() {
+			zsh_debug_done(k, vp, cx);
+		}
+		if (source || eval || code) && no_command {
 			vp.status = 0;
 		}
 		if sub_end {
@@ -891,9 +1134,74 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		}
 		return None;
 	};
+	let from_stdin = *stdin;
 	let resume = parser.resume();
 	let next = resume.pos;
-	let read = history.then(|| input_lines(src, pos.0 as usize, next.offset as usize));
+	let read = (history && !zhist).then(|| input_lines(src, pos.0 as usize, next.offset as usize));
+	// zsh `hend`: the event joins the history; `:p` and `histverify` keep
+	// it from running, an expansion shows the line first.
+	let mut run = true;
+	if zhist {
+		// zsh `hend`'s `zshaddhistory` hooks (the interactive reader runs
+		// them as frames): the first non-zero status decides.
+		let mut hookret = 0;
+		if reader && from_stdin {
+			let at = pos.0;
+			match super::zle::reader::addhistory(k, vp, cx, at) {
+				Ok(r) => hookret = r,
+				Err(key) => return key,
+			}
+		}
+		let frame = top_frame(vp);
+		let FrameKind::Script { src, .. } = &frame.kind else {
+			return None;
+		};
+		let prog = res
+			.as_ref()
+			.ok()
+			.map(|cc| builtins::history::zsh::prog_info(cc, src));
+		let mut sc = frame.scratch.take().unwrap_or_default();
+		match builtins::history::zsh::hend(k, cx, vp, &mut sc, prog.as_ref(), hookret) {
+			Err(key) => {
+				top_frame(vp).scratch = Some(sc);
+				return Some(key);
+			},
+			Ok(out) => hend_output(k, cx, vp, out, &mut run),
+		}
+	}
+	// zsh `loop()`: an event that runs gets `preexec` first, with the
+	// history line `hend` stored, the one-line job text and the full text.
+	if reader
+		&& from_stdin
+		&& run
+		&& !noexec
+		&& let Ok(cc) = &res
+	{
+		let frame = top_frame(vp);
+		let at = match &frame.kind {
+			FrameKind::Script { pos, .. } => pos.0,
+			_ => 0,
+		};
+		if gate != Some(at) {
+			let hist = if zhist {
+				builtins::history::zsh::latest_text(&k.root, cx.store, vp).unwrap_or_default()
+			} else {
+				match &top_frame(vp).kind {
+					FrameKind::Script { src, pos, .. } => src
+						.get(pos.0 as usize..next.offset as usize)
+						.map_or_default(|t| BString::from(t.strip_suffix(b"\n").unwrap_or(t))),
+					_ => BString::default(),
+				}
+			};
+			let jobtext = BString::from(crate::bash::syntax::zsh::getjobtext(&cc.list));
+			let permtext = BString::from(crate::bash::syntax::zsh::getpermtext(&cc.list, 0));
+			return super::zle::reader::before_run(k, vp, cx, at, [hist, jobtext, permtext]);
+		}
+	}
+	let frame = top_frame(vp);
+	let FrameKind::Script { src, pos, aux, .. } = &mut frame.kind else {
+		return None;
+	};
 	*pos = (next.offset, next.line);
 	if !resume.pending.is_empty() {
 		aux.get_or_insert_with(Box::default).pending = Some((
@@ -907,8 +1215,12 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		}
 	}
 	let (unit, line) = match res {
-		Ok(_) if noexec => return None,
-		Ok(cc) => (k.engine.compile(&cc, src, mode, feat), cc.line),
+		Ok(_) if noexec || !run => return None,
+		Ok(cc) => {
+			let line = cc.line;
+			let observed = k.mask.contains(crate::bash::event::EventKind::UnitCompiled);
+			(k.engine.compile(cc, src, mode, feat, observed), line)
+		},
 		Err(e) => {
 			// bash abandons the rest of a script after a syntax error,
 			// except one it recovers from (the parser resumes after it).
@@ -925,19 +1237,94 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 	};
 	frame.unit = Some(Arc::clone(&unit));
 	frame.pc = 0;
-	if let Some(lines) = read {
-		builtins::history::remember(k, cx.store, vp, lines);
+	let top_level = matches!(frame.kind, FrameKind::Script { what: ScriptKind::Run, .. });
+	if top_level && vp.parent.is_none() {
+		super::jobctl::command_read(k);
 	}
-	announce(k, cx, vp.vpid, vp.runs.front(), &unit, line);
+	if let Some(lines) = read {
+		let now = cx.host.wall().secs;
+		builtins::history::remember(k, cx.store, vp, lines, now);
+	}
+	announce_at(k, cx, vp.vpid, vp.runs.front(), &unit, line, source_origin.as_ref());
 	None
 }
 
-/// Announce `unit` with `UnitCompiled` the first time the shell gets it
-/// (`line`: the script line of its first byte), so it precedes every event
-/// that names it: a top-level command when it is parsed, a function body
-/// when the function is defined or imported, every unit a shell can still
-/// run once after `create`/`restore` ([`super::Shell::step`]). `run` is
-/// the script it belongs to, `None` for those re-announcements.
+/// The literal argument that actually entered a native script. IR word ids
+/// are canonical parser ids; fixed-word proof rules out expansion/split drift.
+pub(super) fn literal_script_origin(
+	vp: &Vproc,
+	source: &[u8],
+	shell: bool,
+) -> Option<crate::bash::event::SourceOrigin> {
+	let (unit, node) = vp.command.as_ref()?;
+	let op = unit
+		.ops
+		.iter()
+		.find(|op| op.code == Opcode::Exec && op.node == *node)?;
+	let command = unit.cmds.get(op.a as usize)?;
+	let words = unit.lists.get(command.words as usize)?;
+	let literal = |index: usize| -> Option<Vec<u8>> {
+		let word = unit.words.get(*words.get(index)? as usize)?;
+		if !word.fixed || !word.noglob {
+			return None;
+		}
+		let mut text = Vec::new();
+		for part in &word.parts {
+			match part {
+				ir::Part::Lit(bytes) | ir::Part::Quoted(bytes) => text.extend_from_slice(bytes),
+				_ => return None,
+			}
+		}
+		Some(text)
+	};
+	let index = if shell {
+		let mut executable = None;
+		for i in 0..words.len() {
+			let text = literal(i)?;
+			let name = text.rsplit(|byte| *byte == b'/').next()?;
+			if matches!(name, b"bash" | b"sh" | b"zsh" | b"dash" | b"ksh") {
+				executable = Some(i);
+				break;
+			}
+		}
+		let mut body = None;
+		for i in executable? + 1..words.len() {
+			let flag = literal(i)?;
+			if flag.starts_with(b"-") && !flag.starts_with(b"--") && flag[1..].contains(&b'c') {
+				body = Some(i + 1);
+				break;
+			}
+		}
+		body?
+	} else {
+		if words.len() != 2 || literal(0)?.as_slice() != b"eval" {
+			return None;
+		}
+		1
+	};
+	if literal(index)?.as_slice() != source {
+		return None;
+	}
+	let word = unit.words.get(*words.get(index)? as usize)?;
+	let span = unit.nodes.get(word.node as usize)?;
+	Some(crate::bash::event::SourceOrigin {
+		vpid: vp.vpid,
+		node: word.node,
+		span: crate::bash::event::SpanOwned {
+			unit: unit.id,
+			lo:   span.lo,
+			hi:   span.hi,
+			line: unit.line + span.line,
+			col:  span.col,
+		},
+	})
+}
+
+/// Announce `unit` with `UnitCompiled`, deduplicated within a bounded
+/// observer-generation cache (eviction may safely reannounce a unit).
+/// (`line`: the script line of its first byte), before events naming it.
+/// Parsed commands announce immediately; cached/restored frames announce
+/// only when executed. No store scan or parsing ahead is needed.
 pub fn announce(
 	k: &mut Kernel,
 	cx: &mut Cx<'_>,
@@ -946,15 +1333,81 @@ pub fn announce(
 	unit: &Unit,
 	line: u32,
 ) {
-	if !unit.nodes.is_empty() && k.announced.insert(unit.id) {
-		k.emit(cx, (vpid, unit.mode), run, EventData::UnitCompiled {
-			unit: &unit.id,
-			source: BStr::new(&unit.source),
-			line,
-			node_count: unit.nodes.len() as u32,
-			features: unit.features,
-			aliases: &unit.aliases,
-		});
+	if !k.mask.contains(crate::bash::event::EventKind::UnitCompiled) {
+		return;
+	}
+	let origin = k
+		.trace_unit_origins
+		.get(&vpid)
+		.and_then(|origins| origins.get(&unit.id))
+		.copied();
+	announce_at(k, cx, vpid, run, unit, line, origin.as_ref());
+}
+
+fn announce_at(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vpid: crate::bash::ids::Vpid,
+	run: Option<&Run>,
+	unit: &Unit,
+	line: u32,
+	parent: Option<&crate::bash::event::SourceOrigin>,
+) {
+	if k.mask.contains(crate::bash::event::EventKind::UnitCompiled) && !unit.nodes.is_empty() {
+		let key = (vpid, unit.id, parent.copied());
+		if let Some(parent) = parent {
+			record_source_origin(k, unit, vpid, *parent);
+		} else {
+			clear_source_origin(k, unit, vpid);
+		}
+		// Vpids keep advancing in long-running pipeline/background loops.
+		// Reannouncements are safe; an already-known key needs no eviction.
+		if k.announced.len() >= 20_000 && !k.announced.contains(&key) {
+			k.announced.clear();
+		}
+		if k.announced.insert(key) {
+			if unit.trace_syntax.get().is_none()
+				&& let Some(syntax) = crate::bash::trace::syntax::UnitSyntax::restore(unit)
+			{
+				let _ = unit.trace_syntax.set(Arc::new(syntax));
+			}
+			k.emit(
+				cx,
+				(vpid, unit.mode),
+				run,
+				EventData::UnitCompiled(CompiledUnit { unit, line, parent }),
+			);
+		}
+	}
+}
+
+fn clear_source_origin(k: &mut Kernel, unit: &Unit, vpid: crate::bash::ids::Vpid) {
+	if let Some(origins) = k.trace_unit_origins.get_mut(&vpid) {
+		if origins.contains_key(&unit.id) {
+			Arc::make_mut(origins).remove(&unit.id);
+		}
+		for function in &unit.funcs {
+			clear_source_origin(k, &function.body, vpid);
+		}
+	}
+}
+
+fn record_source_origin(
+	k: &mut Kernel,
+	unit: &Unit,
+	vpid: crate::bash::ids::Vpid,
+	origin: crate::bash::event::SourceOrigin,
+) {
+	if k.trace_unit_origins.len() >= crate::bash::trace::history::HISTORY_EVENTS {
+		return;
+	}
+	let origins = k.trace_unit_origins.entry(vpid).or_default();
+	if origins.get(&unit.id) == Some(&origin) {
+		return;
+	}
+	Arc::make_mut(origins).insert(unit.id, origin);
+	for function in &unit.funcs {
+		record_source_origin(k, &function.body, vpid, origin);
 	}
 }
 
@@ -1007,11 +1460,60 @@ fn needs_more_input(
 	}
 }
 
+/// What zsh's `hend` leaves to the reader: the expanded line shown on the
+/// terminal output (standard error here), messages, and whether the event
+/// runs (`histverify` puts the line back in the editor instead; without
+/// one it is dropped).
+pub(crate) fn hend_output(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vp: &mut Vproc,
+	out: builtins::history::zsh::Hend,
+	run: &mut bool,
+) {
+	for m in out.msgs {
+		k.diag(cx, vp, 0, Diag::Usage { msg: m.to_str_lossy().into_owned().into() });
+	}
+	if let Some(mut line) = out.print {
+		line.push(b'\n');
+		vp.out
+			.push_back(PendingWrite { fd: 2, bytes: line, off: 0 });
+	}
+	*run = out.run;
+}
+
 /// Append the next line of fd 0 to the top (stdin) script frame's source;
 /// at end of file the frame stops reading. `Some` while the line is
-/// pending; the partial read waits in the frame's scratch.
-fn read_script_line(k: &Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitKey> {
+/// pending; the partial read waits in the frame's scratch. `zhist`: zsh
+/// history is on (an event begins with `hbegin`, each line goes through
+/// history expansion; a failed expansion abandons the event, whose `hend`
+/// runs before the next line is read).
+fn read_script_line(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	zhist: bool,
+) -> Option<WaitKey> {
+	use builtins::history::zsh as hz;
 	let mut sc = top_frame(vp).scratch.take().unwrap_or_default();
+	if zhist {
+		match hz::before_line(k, cx, vp, &mut sc) {
+			Err(key) => {
+				top_frame(vp).scratch = Some(sc);
+				return Some(key);
+			},
+			Ok(Some(out)) => {
+				let failed = out.failed;
+				let mut run = true;
+				hend_output(k, cx, vp, out, &mut run);
+				// zsh `loop`: a line that did not parse sets `$?` to 1.
+				if failed && vp.status == 0 {
+					vp.status = 1;
+				}
+			},
+			Ok(None) => {},
+		}
+	}
 	let input = Probe::Input {
 		fd:         0,
 		delim:      Some(b'\n'),
@@ -1020,17 +1522,48 @@ fn read_script_line(k: &Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		part:       0,
 		timeout_ns: None,
 	};
-	let answer = match probe::perform(k, cx, vp, &mut sc, &input) {
-		Ok(answer) => answer,
-		Err(key) => {
-			top_frame(vp).scratch = Some(sc);
-			return Some(key);
+	let answer = match probe::cached(&sc, &input).cloned() {
+		Some(answer) => answer,
+		None => match probe::perform(k, cx, vp, &mut sc, &input) {
+			Ok(answer) => answer,
+			Err(key) => {
+				top_frame(vp).scratch = Some(sc);
+				return Some(key);
+			},
 		},
 	};
-	if let (ProbeResult::Input { data, eof, .. }, FrameKind::Script { src, stdin, .. }) =
-		(answer, &mut top_frame(vp).kind)
-	{
-		src.extend_from_slice(&data);
+	let ProbeResult::Input { data, eof, .. } = answer else {
+		return None;
+	};
+	let mut text = data;
+	if zhist && !text.is_empty() {
+		match hz::expand(k, cx, vp, &mut sc, &text) {
+			Err(key) => {
+				top_frame(vp).scratch = Some(sc);
+				return Some(key);
+			},
+			Ok(hz::Expanded::Line(t)) => text = t,
+			Ok(hz::Expanded::Failed(d)) => {
+				if let Some(d) = d {
+					k.diag(cx, vp, 0, d);
+				}
+				text = BString::default();
+				// The event's earlier lines go with it.
+				if let FrameKind::Script { src, pos, aux, .. } = &mut top_frame(vp).kind {
+					let skipped = src[(pos.0 as usize).min(src.len())..]
+						.split(|&c| c == b'\n')
+						.count()
+						- 1;
+					*pos = (src.len() as u32, pos.1 + skipped as u32 + 1);
+					if let Some(a) = aux {
+						a.pending = None;
+					}
+				}
+			},
+		}
+	}
+	if let FrameKind::Script { src, stdin, .. } = &mut top_frame(vp).kind {
+		src.extend_from_slice(&text);
 		*stdin = !eof;
 	}
 	None
@@ -1057,7 +1590,7 @@ fn end_unit(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) {
 			}
 		},
 		FrameKind::NoFork | FrameKind::Stage => pop_frame(&mut k.root, cx.store, vp),
-		FrameKind::Subshell => {
+		FrameKind::Subshell | FrameKind::Job { .. } => {
 			unwind(&mut k.root, cx.store, vp, 0);
 			start_trap(k, vp, cx, TrapKey::Exit);
 		},
@@ -1081,10 +1614,29 @@ pub fn pop_frame(root: &mut Root, store: &mut dyn StateStore, vp: &mut Vproc) {
 	}
 	let keep = vp.frames.len();
 	close_procsubs(vp, keep);
-	super::callstack::truncate(vp, keep);
+	super::callstack::truncate(root, store, vp, keep);
 	if f.kind == FrameKind::NoFork {
 		pass_reply(root, store, vp);
 	}
+	// A zsh function's caller gets its `OPTIND` back without
+	// `POSIX_BUILTINS`, decided before the function's options go (zsh
+	// `doshfunc`), restored once its locals have.
+	let zsh_body = matches!(f.kind, FrameKind::Function { .. })
+		&& f
+			.unit
+			.as_ref()
+			.is_some_and(|u| u.mode.dialect() == crate::bash::ids::Dialect::Zsh);
+	let zsh_optind = if zsh_body {
+		match state::zsh_option(root, store, vp, crate::bash::zshopt::ZshOpt::Posixbuiltins) {
+			Ok(posix) => (!posix).then(|| f.getopts.take()),
+			Err(err) => {
+				root.fail(err);
+				None
+			},
+		}
+	} else {
+		None
+	};
 	// The function's scope, read before it goes.
 	let top = state::scope_count(root, vp).checked_sub(1);
 	if matches!(f.kind, FrameKind::Function { .. })
@@ -1103,8 +1655,8 @@ pub fn pop_frame(root: &mut Root, store: &mut dyn StateStore, vp: &mut Vproc) {
 		match state::scope_binds(store, vp, top, b"OPTIND") {
 			// A local `OPTIND`: the caller's getopts scan resumes where it
 			// was.
-			Ok(true) => vp.getopts = f.getopts.take().map_or_default(|g| *g),
-			Ok(false) => {},
+			Ok(true) if !zsh_body => vp.getopts = f.getopts.take().map_or_default(|g| *g),
+			Ok(_) => {},
 			Err(err) => root.fail(err),
 		}
 	}
@@ -1120,6 +1672,11 @@ pub fn pop_frame(root: &mut Root, store: &mut dyn StateStore, vp: &mut Vproc) {
 			| FrameKind::Script { what: ScriptKind::Trap { .. }, .. }
 	) {
 		state::drop_scope(root, store, vp);
+	}
+	if let Some(saved) = zsh_optind
+		&& let Err(err) = super::builtins::zsh_vars::optind_leave(root, store, vp, saved)
+	{
+		root.fail(err);
 	}
 }
 
@@ -1257,11 +1814,45 @@ pub fn restore(vp: &mut Vproc, saves: Vec<Saved>) {
 
 /// Current script line of `node` in the top frame.
 pub fn line_of(vp: &Vproc, node: u32) -> u32 {
-	vp.frames.last().map_or(0, |f| {
-		f.unit.as_ref().map_or(0, |u| {
-			(u.line + u.nodes.get(node as usize).map_or(0, |n| n.line)).saturating_sub(f.line_shift)
+	vp.frames
+		.len()
+		.checked_sub(1)
+		.map_or(0, |fi| line_in(vp, fi, node))
+}
+
+/// [`line_of`] in frame `fi`. zsh numbers no lines in a function body
+/// that is a lone command without braces (`f() cmd`, `() cmd`): `lineno`
+/// stays the caller's.
+fn line_in(vp: &Vproc, fi: usize, node: u32) -> u32 {
+	let f = &vp.frames[fi];
+	let Some(u) = f.unit.as_ref() else {
+		return 0;
+	};
+	if fi > 0 && keeps_caller_line(f) {
+		let caller = &vp.frames[fi - 1];
+		if let Some(op) = caller
+			.unit
+			.as_ref()
+			.and_then(|cu| cu.ops.get(caller.pc as usize))
+		{
+			return line_in(vp, fi - 1, op.node);
+		}
+	}
+	(u.line + u.nodes.get(node as usize).map_or(0, |n| n.line)).saturating_sub(f.line_shift)
+}
+
+/// Whether `f` is the call of a zsh function whose body is a lone command
+/// without braces: its commands are on the caller's line (zsh numbers no
+/// lines in it), and diagnostics count from the caller's base.
+pub(super) fn keeps_caller_line(f: &Frame) -> bool {
+	matches!(f.kind, FrameKind::Function { .. })
+		&& f.unit.as_ref().is_some_and(|u| {
+			u.mode.dialect() == Dialect::Zsh
+				&& u
+					.ops
+					.first()
+					.is_some_and(|op| matches!(op.code, Opcode::Exec | Opcode::Spawn))
 		})
-	})
 }
 
 /// Unit-relative line of the last byte of syntax node `node`.
@@ -1327,14 +1918,12 @@ fn break_loops(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, n: u32, cont: bo
 			// leaves every loop).
 			let status = vp.status;
 			let f = top_frame(vp);
-			if cont {
-				f.pc = rec.cont;
-			} else {
-				if let Some(r) = f.loops.last_mut() {
-					r.status = status;
-				}
-				f.pc = rec.exit;
+			// `continue` ends the body with its status too: the loop's
+			// status if no other body command runs.
+			if let Some(r) = f.loops.last_mut() {
+				r.status = status;
 			}
+			f.pc = if cont { rec.cont } else { rec.exit };
 			return;
 		}
 		let crossable = matches!(
@@ -1405,7 +1994,7 @@ pub fn expanding<T>(
 	let mut log = std::mem::take(&mut sc.logs[slot as usize]);
 	let res = {
 		let mut ex = Expander::new(k, cx, vp, &mut log, record, line);
-		let r = f(&mut ex);
+		let r = super::zsh::subst::begin_pass(&mut ex).and_then(|()| f(&mut ex));
 		let st = ex.sub_status;
 		r.map(|v| (v, st))
 	};
@@ -1449,9 +2038,18 @@ fn stopped(
 	stop: Stop,
 ) -> Flow {
 	match stop {
-		Stop::ZshSub { text } => {
-			let flow = start_zsh_sub(k, vp, cx, &mut sc, &text, line);
-			top_frame(vp).scratch = Some(sc);
+		Stop::ZshSub { text, here } => {
+			// A call run here pushes its frame above this op's.
+			let fi = vp.frames.len() - 1;
+			let flow = start_zsh_sub(k, vp, cx, &mut sc, &text, here, line);
+			vp.frames[fi].scratch = Some(sc);
+			flow
+		},
+		Stop::MathCall(call) => {
+			// The function's frame goes above this op's.
+			let fi = vp.frames.len() - 1;
+			let flow = super::command::start_math_call(k, vp, cx, &mut sc, slot, &call, line);
+			vp.frames[fi].scratch = Some(sc);
 			flow
 		},
 		Stop::Probe(p) => {
@@ -1483,6 +2081,13 @@ fn posix_exits(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, stop: Stop) -> Flow {
 	match stop {
 		Stop::Sub { .. } | Stop::ZshSub { .. } => unreachable!("handled by the caller"),
+		// An expansion that cannot park (a glob qualifier's) met a math
+		// function.
+		Stop::MathCall(call) => {
+			let what = format!("a call of math function {} in this expansion", call.argzero);
+			k.diag(cx, vp, line, Diag::Unsupported { what: what.into() });
+			Flow::Discard(1)
+		},
 		// `$!` of a job still deciding on its pid: the op runs again (and
 		// replays) once it has.
 		Stop::Wait(key) => Flow::Block(key),
@@ -1536,11 +2141,21 @@ pub fn settle_probe(
 }
 
 /// The logged form of an expansion probe's answer: a PATH search's path
-/// (`None`: not found); an access check's success as an empty string.
+/// (`None`: not found); an access check's success as an empty string; a
+/// filesystem request's ([`super::fsprobe`]) bytes, names (a list), other
+/// success (empty) or failure (`None`).
 pub fn probe_atom(answer: ProbeResult) -> Atom {
+	use super::fsprobe::FsAns;
 	Atom::Str(match answer {
 		ProbeResult::Path(p) => p,
 		ProbeResult::Ok(ok) => ok.then(BString::default),
+		ProbeResult::Fs(Ok(FsAns::Names(names))) => return Atom::List(names),
+		// User database entries: name and home directory of each.
+		ProbeResult::Fs(Ok(FsAns::Users(users))) => {
+			return Atom::List(users.into_iter().flat_map(|u| [u.name, u.dir]).collect());
+		},
+		ProbeResult::Fs(Ok(FsAns::Bytes(b))) => Some(b),
+		ProbeResult::Fs(Ok(_)) => Some(BString::default()),
 		_ => None,
 	})
 }
@@ -1642,6 +2257,8 @@ pub fn start_sub(
 			// bash keeps job control and the job list in `$( )`: `jobs`
 			// lists the parent's jobs, `fg` finds no current job.
 			child.jobs = inherited_jobs(vp, vp.jobs.subshell);
+			// Its externals stay in the shell's process group.
+			super::jobctl::set_leader(k, child.vpid, None);
 			let vpid = child.vpid;
 			k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid });
 			k.spawned.push(Box::new(child));
@@ -1691,19 +2308,32 @@ pub fn start_sub(
 /// Start a zsh command substitution: `text` (zsh source, the body of
 /// `$(…)` or `` `…` ``) parsed in the vproc's mode and run in a forked
 /// child vproc whose standard output is captured (zsh `getoutput`).
+/// `here` ([`Stop::ZshSub::here`]): a hook function call zsh makes from an
+/// expansion (`subst_string_by_func`) runs in the current shell instead,
+/// above the op's frame, its output uncaptured; the logged substitution
+/// is its status.
 pub fn start_zsh_sub(
 	k: &mut Kernel,
-	vp: &Vproc,
+	vp: &mut Vproc,
 	cx: &mut Cx<'_>,
 	sc: &mut Scratch,
 	text: &[u8],
+	here: bool,
 	line: u32,
 ) -> Flow {
+	if here {
+		sc.sub = Some(PendingSub::Here { status: vp.status });
+		push_script(vp, text, line, ScriptKind::Hook);
+		return Flow::Call;
+	}
 	let capture = Capture::default();
 	let mut fds = vp.fds.clone();
 	fds.set(1, Some(FdRef::mem(capture.clone())));
 	let mut child = vp.child_text(k, cx.store, text, line, fds);
 	child.jobs = inherited_jobs(vp, vp.jobs.subshell);
+	// Its externals stay in the shell's process group (zsh
+	// `ESUB_NOMONITOR`).
+	super::jobctl::set_leader(k, child.vpid, None);
 	let vpid = child.vpid;
 	k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid });
 	k.spawned.push(Box::new(child));
@@ -1718,25 +2348,18 @@ pub enum ZshProcSub {
 	Input,
 	/// `>(…)`: the body reads what the shell writes.
 	Output,
-	/// `=(…)`: the body's output in a temporary file.
-	TempFile,
 }
 
 /// Start a zsh process substitution running `text` (zsh source) in a child
 /// vproc; the `/dev/fd/N` path the command gets (as `start_procsub`).
-///
-/// # Errors
-/// `=(…)` is not supported yet ([`Diag::Unsupported`]).
+/// `=(…)` is [`super::zsh::subst`]'s `getoutputfile`.
 pub fn start_zsh_procsub(
 	k: &mut Kernel,
 	vp: &mut Vproc,
 	cx: &mut Cx<'_>,
 	text: &[u8],
 	kind: ZshProcSub,
-) -> Result<BString, Stop> {
-	if kind == ZshProcSub::TempFile {
-		return Err(Stop::Fail(Diag::Unsupported { what: "zsh =(…) substitution".into() }));
-	}
+) -> BString {
 	let output = kind == ZshProcSub::Output;
 	let (r, w) = mem::pipe();
 	let (r, w) = (FdRef::mem(r), FdRef::mem(w));
@@ -1745,22 +2368,31 @@ pub fn start_zsh_procsub(
 		.rev()
 		.find(|&fd| vp.fds.get(fd).is_none_or(|h| !h.is_open()))
 		.unwrap_or_else(|| vp.fds.lowest_free(64));
+	// The other substitutions' fds stay open in the child (zsh `getproc`'s
+	// `closem` spares `FDT_PROC_SUBST`): its words may name them.
 	let mut fds = vp.fds.clone();
 	fds.set(their_fd, Some(theirs));
-	for &(_, sibling) in &vp.procsubs {
-		if sibling != their_fd {
-			fds.set(sibling, None);
-		}
-	}
 	let line = line_of(vp, 0);
 	let child = vp.child_text(k, cx.store, text, line, fds);
 	let vpid = child.vpid;
+	// Not a job: its externals stay in the shell's group, without the
+	// terminal (zsh `ESUB_ASYNC`).
+	super::jobctl::set_leader(k, vpid, None);
 	k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid });
 	k.spawned.push(Box::new(child));
 	vp.fds.set(fd, Some(mine));
 	vp.procsubs.push((vp.frames.len() as u32, fd));
 	vp.last_bg = LastBg::new(vpid);
-	Ok(BString::from(format!("/dev/fd/{fd}")))
+	// zsh's `procsubstpid` (`$sysparams[procsubstpid]`).
+	let rec = Record::Misc(BString::from(vpid.0.to_string()));
+	state::store_record(
+		&mut k.root,
+		cx.store,
+		vp,
+		KeyBuf::Misc(MiscKey::ZshProcsubstPid),
+		Some(rec),
+	);
+	BString::from(format!("/dev/fd/{fd}"))
 }
 
 /// `${ ;}` bodies re-parsed while no alias is defined, by the unit and
@@ -1819,7 +2451,8 @@ fn nofork_unit(
 			.next_command(),
 	}?
 	.ok()?;
-	let unit = k.engine.compile(&cc, &src, key.4, feat);
+	let observed = k.mask.contains(crate::bash::event::EventKind::UnitCompiled);
+	let unit = k.engine.compile(cc, &src, key.4, feat, observed);
 	announce(k, cx, vp.vpid, vp.runs.front(), &unit, line);
 	if aliases.is_none() {
 		if k.nofork_units.len() >= NOFORK_UNITS {
@@ -1892,6 +2525,9 @@ pub fn start_procsub(
 	}
 	let child = vp.child(k, cx.store, Arc::clone(unit), entry, fds);
 	let vpid = child.vpid;
+	// Not a job: its externals stay in the shell's group, without the
+	// terminal.
+	super::jobctl::set_leader(k, vpid, None);
 	k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid });
 	k.spawned.push(Box::new(child));
 	vp.fds.set(fd, Some(mine));
@@ -1899,6 +2535,39 @@ pub fn start_procsub(
 	// bash: a process substitution sets `$!` (`wait $!` waits for it).
 	vp.last_bg = LastBg::new(vpid);
 	BString::from(format!("/dev/fd/{fd}"))
+}
+
+/// The op of frame `fi` is over: drop its scratch, close its process
+/// substitutions and remove its `=(…)` files.
+#[inline]
+fn end_op(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, fi: usize) {
+	if let Some(sc) = vp.frames.get_mut(fi).and_then(|f| f.scratch.take()) {
+		drop_scratch(&mut k.root, cx.store, vp, sc);
+	}
+	if !vp.procsubs.is_empty() {
+		close_procsubs(vp, fi);
+	}
+	if vp.zsh.as_ref().is_some_and(|z| !z.tempfiles.is_empty()) {
+		remove_tempfiles(cx, vp, fi);
+	}
+}
+
+/// Remove the files of zsh `=(…)` substitutions made by ops of frames
+/// above the first `keep` (their commands are over; zsh `deletefilelist`).
+/// The removal is not waited for: a failure is ignored, as zsh's.
+fn remove_tempfiles(cx: &mut Cx<'_>, vp: &mut Vproc, keep: usize) {
+	let Some(z) = vp.zsh.as_mut() else {
+		return;
+	};
+	let fs = cx.host.fs();
+	z.tempfiles.retain(|(depth, path)| {
+		let over = *depth as usize > keep;
+		if over {
+			drop(fs.unlink(BStr::new(path)));
+		}
+		!over
+	});
+	vp.trim_zsh();
 }
 
 /// Close the process-substitution fds opened by ops of frames above the
@@ -1924,16 +2593,32 @@ pub fn settle_sub(
 	slot: Slot,
 ) -> Option<Flow> {
 	let pending = sc.sub.take()?;
+	// A math function another expansion of the op called.
+	if let PendingSub::Math { slot: theirs, .. } = pending
+		&& theirs != slot
+	{
+		sc.sub = Some(pending);
+		return None;
+	}
 	let (out, status, value) = match pending {
 		PendingSub::Fork { vpid, capture } => {
 			let Some(status) = k.proc_collect(cx.store, vpid) else {
 				sc.sub = Some(PendingSub::Fork { vpid, capture });
 				return Some(Flow::Block(WaitKey::Proc(vpid)));
 			};
-			(capture.take(), status, false)
+			// zsh's `readoutput` trims the output itself; `=(…)` keeps it.
+			(capture.take(), status, vp.mode.dialect() == Dialect::Zsh)
 		},
 		// `${| ;}` left its `REPLY` in the capture (`pass_reply`).
 		PendingSub::NoFork { capture, value } => (capture.take(), vp.status, value),
+		// A zsh hook call: its status is logged, the caller's `$?` is back.
+		PendingSub::Here { status } => (Vec::new(), std::mem::replace(&mut vp.status, status), true),
+		// A math function's value goes with its status.
+		PendingSub::Math { status, .. } => {
+			let value = vp.zsh.as_ref().and_then(|z| z.last_math);
+			let out = super::zsh::arith::encode_last(value);
+			(out, std::mem::replace(&mut vp.status, status), true)
+		},
 	};
 	let mut out = out;
 	// zsh keeps NUL bytes (metafied in the word).
@@ -1977,21 +2662,164 @@ const fn keeps_clock(code: Opcode) -> bool {
 	)
 }
 
+/// The flow of an op [`run_slice`] runs without its bookkeeping: a jump,
+/// an unreported branch, a loop's entry, iteration note or exit, the
+/// entry of a compound command (unless a DEBUG trap may run there) and its
+/// successful leave; `None` for any other op, or one whose event is on.
+#[inline]
+fn control_flow(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vp: &mut Vproc,
+	unit: &Arc<Unit>,
+	op: Op,
+) -> Option<Flow> {
+	match op.code {
+		Opcode::Nop => Some(Flow::Next),
+		Opcode::Jmp => Some(Flow::Jump(op.a)),
+		Opcode::BrOk | Opcode::BrFail if !k.mask.any_op(op.ev) => {
+			Some(branch(op, (vp.status == 0) == (op.code == Opcode::BrOk)))
+		},
+		Opcode::LoopNote | Opcode::LoopBack => Some(loop_note(vp, op)),
+		Opcode::LoopEnter => Some(loop_enter(vp, op)),
+		Opcode::LoopExit if !k.mask.any_op(op.ev) => {
+			if let Some(rec) = top_frame(vp).loops.pop() {
+				vp.status = rec.status;
+			}
+			Some(Flow::Next)
+		},
+		Opcode::Enter if !k.mask.any_op(op.ev) => {
+			// `[[ ]]` and `(( ))` start a command: `BASH_COMMAND` and the
+			// DEBUG trap point.
+			let starts = starts_command(unit, op);
+			if starts && pseudo_trap_maybe(k, cx, TrapKey::Debug) {
+				return None;
+			}
+			if starts {
+				note_command(vp, unit, op);
+			}
+			let f = top_frame(vp);
+			if starts {
+				f.err_reported = false;
+			}
+			f.enters.push((op.node, 0));
+			Some(Flow::Next)
+		},
+		// A failed one may be an errexit or ERR-trap point.
+		Opcode::Leave if !k.mask.any_op(op.ev) && vp.status == 0 => {
+			top_frame(vp).enters.pop();
+			Some(Flow::Next)
+		},
+		_ => None,
+	}
+}
+
+/// `LoopEnter`: a `while`/`until` loop's record.
+fn loop_enter(vp: &mut Vproc, op: Op) -> Flow {
+	let f = top_frame(vp);
+	let depth = depths(f);
+	f.loops.push(LoopRec {
+		kind: LoopKind::While,
+		status: 0,
+		iterations: 0,
+		exit: op.a,
+		cont: op.b,
+		depth,
+	});
+	Flow::Next
+}
+
+/// `((…))` (or an arith-`for` expression) of a bash unit with nothing to
+/// expand ([`Op::LITERAL`]) or trace, evaluated in place
+/// ([`expand::arith_command`]) with the errors mapped as
+/// [`Expander::arith_eval`] and [`dispatch`] map them; `None` for any other
+/// text, which [`dispatch`] runs through an expander.
+fn plain_arith(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	unit: &Unit,
+	op: Op,
+) -> Option<Flow> {
+	if op.b != Op::LITERAL || super::xtrace::on(k, cx, vp) {
+		return None;
+	}
+	let text = &unit.ariths[op.a as usize];
+	Some(match expand::arith_command(k, cx, vp, text) {
+		Ok(v) => {
+			clear_scratch(&mut k.root, cx.store, vp);
+			vp.status = i32::from(v == 0);
+			Flow::Next
+		},
+		Err(d @ (Diag::Arith { .. } | Diag::Readonly { .. })) => {
+			clear_scratch(&mut k.root, cx.store, vp);
+			let d = if matches!(d, Diag::Arith { .. }) {
+				d.by("((")
+			} else {
+				d
+			};
+			let line = line_of(vp, op.node);
+			k.diag(cx, vp, line, d);
+			vp.status = 1;
+			// `((…))` continues; an arith-for header error leaves the loop
+			// (approximated by discarding the command).
+			if unit
+				.nodes
+				.get(op.node as usize)
+				.is_some_and(|n| n.kind == NodeKind::ArithFor)
+			{
+				Flow::Discard(1)
+			} else {
+				Flow::Next
+			}
+		},
+		Err(d @ Diag::Unbound { .. }) => {
+			let line = line_of(vp, op.node);
+			stop_flow(k, vp, cx, line, Stop::Fatal(d))
+		},
+		Err(d) => {
+			let line = line_of(vp, op.node);
+			stop_flow(k, vp, cx, line, Stop::Fail(d))
+		},
+	})
+}
+
+/// Whether `op` (an `Enter`/`Leave`) brackets a zsh `[[ ]]` traced by
+/// `set -x`.
+fn zsh_cond_traced(k: &mut Kernel, vp: &Vproc, cx: &mut Cx<'_>, unit: &Unit, op: Op) -> bool {
+	unit.mode.dialect() == Dialect::Zsh
+		&& unit
+			.nodes
+			.get(op.node as usize)
+			.is_some_and(|n| n.kind == NodeKind::Cond)
+		&& super::xtrace::on(k, cx, vp)
+}
+
+/// A branch op's flow: to its target when `jump`.
+const fn branch(op: Op, jump: bool) -> Flow {
+	if jump { Flow::Jump(op.a) } else { Flow::Next }
+}
+
+/// `LoopNote`/`LoopBack`: the innermost loop's status and iteration count;
+/// `LoopBack` jumps back to the loop's test.
+fn loop_note(vp: &mut Vproc, op: Op) -> Flow {
+	let status = vp.status;
+	if let Some(rec) = top_frame(vp).loops.last_mut() {
+		rec.status = status;
+		rec.iterations += 1;
+	}
+	if op.code == Opcode::LoopBack {
+		Flow::Jump(op.a)
+	} else {
+		Flow::Next
+	}
+}
+
 /// Execute one op.
 fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: Op) -> Flow {
 	let line = line_of(vp, op.node);
 	match op.code {
 		Opcode::Nop => Flow::Next,
-		// zsh `execpline`: under `noexec` (set while running) a command is
-		// not run, not even expanded; its status is 0.
-		Opcode::Exec
-			if unit.mode.dialect() == Dialect::Zsh
-				&& vp.frames.last().is_some_and(|f| f.scratch.is_none())
-				&& state::option(&mut k.root, cx.store, vp, OptId::Noexec).unwrap_or(false) =>
-		{
-			vp.status = 0;
-			Flow::Next
-		},
 		Opcode::Exec => command::exec(k, vp, cx, unit, op, line),
 		Opcode::Jmp => Flow::Jump(op.a),
 		Opcode::BrOk | Opcode::BrFail => {
@@ -2002,7 +2830,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 					EventData::Branch { construct: Construct::from_u32(op.b), taken: !jump, status };
 				k.emit_op(cx, vp, op.node, data);
 			}
-			if jump { Flow::Jump(op.a) } else { Flow::Next }
+			branch(op, jump)
 		},
 		Opcode::Not => {
 			// zsh `evalcond` `COND_NOT`: a `[[ ]]` status 3 (an unknown
@@ -2035,9 +2863,19 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 			if on && let Some(node_kind) = unit.nodes.get(op.node as usize).map(|n| n.kind) {
 				k.emit_op_at(cx, vp, op.node, EventData::CmdStart { node_kind }, start);
 			}
+			// zsh `execcond`: a traced `[[ ]]` is one line, its primaries
+			// added as they are evaluated (`zsh::cond`).
+			if zsh_cond_traced(k, vp, cx, unit, op) {
+				let mut bytes = super::xtrace::ps4(k, cx, vp, line);
+				bytes.extend_from_slice(b"[[");
+				super::xtrace::write(k, cx, vp, bytes);
+			}
 			Flow::Next
 		},
 		Opcode::Leave => {
+			if zsh_cond_traced(k, vp, cx, unit, op) {
+				super::xtrace::write(k, cx, vp, b" ]]\n".to_vec());
+			}
 			let t0 = top_frame(vp).enters.pop().map_or(0, |(_, t)| t);
 			if k.mask.any_op(op.ev) {
 				// One fresh reading for the duration and the event's stamp;
@@ -2056,33 +2894,10 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 			}
 			Flow::Next
 		},
-		Opcode::LoopEnter => {
-			let f = top_frame(vp);
-			let depth = depths(f);
-			f.loops.push(LoopRec {
-				kind: LoopKind::While,
-				status: 0,
-				iterations: 0,
-				exit: op.a,
-				cont: op.b,
-				depth,
-			});
-			Flow::Next
-		},
+		Opcode::LoopEnter => loop_enter(vp, op),
 		Opcode::ForIn => for_in(k, vp, cx, unit, op, line),
 		Opcode::ForNext => for_next(k, vp, cx, op, line),
-		Opcode::LoopNote | Opcode::LoopBack => {
-			let status = vp.status;
-			if let Some(rec) = top_frame(vp).loops.last_mut() {
-				rec.status = status;
-				rec.iterations += 1;
-			}
-			if op.code == Opcode::LoopBack {
-				Flow::Jump(op.a)
-			} else {
-				Flow::Next
-			}
-		},
+		Opcode::LoopNote | Opcode::LoopBack => loop_note(vp, op),
 		Opcode::LoopExit => {
 			if let Some(rec) = top_frame(vp).loops.pop() {
 				vp.status = rec.status;
@@ -2223,6 +3038,9 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 			// bash records a definition's line at its end.
 			let end = (unit.line + end_line(unit, op.node)).saturating_sub(top_frame(vp).line_shift);
 			let line = compound_line(vp, end);
+			if op.b != 0 {
+				return zsh_funcdef_expanded(k, vp, cx, unit, op, line);
+			}
 			if special_name(k, vp, cx, &f.name) {
 				// POSIX interpretation 383: fatal in a non-interactive shell.
 				let msg = format!("`{}': is a special builtin", f.name).into();
@@ -2233,8 +3051,10 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 			// old one).
 			if unit.mode.dialect() == Dialect::Zsh {
 				zsh_trap_funcdef(k, cx, vp, &f.name);
+				// zsh `execfuncdef`: a definition empties `$_`.
+				state::store_record(&mut k.root, cx.store, vp, KeyBuf::Misc(MiscKey::LastArg), None);
 			}
-			builtins::define_function(k, vp, cx, f, line)
+			builtins::define_function(k, vp, cx, f, line, op.flags & Op::TRACED != 0)
 		},
 		Opcode::TimeStart => {
 			let mark = time_mark(&*cx.host);
@@ -2314,6 +3134,54 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 	}
 }
 
+/// zsh `execfuncdef` of a definition whose names expand (`function f$$ {
+/// … }`, word list `op.b - 1`): the names are expanded (globbed), then
+/// each gets the body, its text naming it. An expansion error abandons the
+/// definition. Out of line: zsh only.
+#[inline(never)]
+fn zsh_funcdef_expanded(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	unit: &Arc<Unit>,
+	op: Op,
+	line: u32,
+) -> Flow {
+	let words = &unit.lists[op.b as usize - 1];
+	let record = words.iter().any(|&w| unit.words[w as usize].parks);
+	let res = expanding(k, vp, cx, Slot::Words, record, line, |ex| {
+		let mut out = Vec::new();
+		let mut globs = Vec::new();
+		for &w in words {
+			ex.fields_glob(unit, &unit.words[w as usize], &mut out, &mut globs)?;
+		}
+		Ok((out, globs))
+	});
+	let (mut names, globs) = match res {
+		Ok(v) => v,
+		Err(flow) => return flow,
+	};
+	if !globs.is_empty()
+		&& let Err(flow) = super::zsh::zglob::expand_globs(k, vp, cx, &mut names, &globs, line)
+	{
+		return flow;
+	}
+	clear_scratch(&mut k.root, cx.store, vp);
+	let f = &unit.funcs[op.a as usize];
+	vp.status = 0;
+	// zsh `execfuncdef`: a definition empties `$_`.
+	state::store_record(&mut k.root, cx.store, vp, KeyBuf::Misc(MiscKey::LastArg), None);
+	for name in names {
+		let one = ir::FuncIr { name, definition: f.definition.clone(), body: f.body.clone() };
+		zsh_trap_funcdef(k, cx, vp, &one.name);
+		let flow = builtins::define_function(k, vp, cx, &one, line, op.flags & Op::TRACED != 0);
+		if !matches!(flow, Flow::Next) {
+			return flow;
+		}
+	}
+	Flow::Next
+}
+
 /// zsh: defining function `name` (`TRAPNAL`) sets that trap.
 #[inline(never)]
 fn zsh_trap_funcdef(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, name: &[u8]) {
@@ -2327,7 +3195,7 @@ fn special_name(k: &mut Kernel, vp: &Vproc, cx: &mut Cx<'_>, name: &[u8]) -> boo
 	if !state::option(&mut k.root, cx.store, vp, OptId::Posix).unwrap_or(false) {
 		return false;
 	}
-	let rctx = ResolveCtx { has_slash: false, via: Via::Plain, path_var: BStr::new(b"") };
+	let rctx = ResolveCtx { has_slash: false, via: Via::Plain };
 	matches!(
 		cx.host.resolve(BStr::new(name), mode_of(vp), rctx),
 		Resolved::Intrinsic(id) if command::is_special(id)
@@ -2689,8 +3557,14 @@ fn for_in(
 	let multi = op.flags & Op::MULTI != 0;
 	// zsh `isident`: a positional parameter's number is a name too.
 	let zsh = unit.mode.dialect() == Dialect::Zsh;
-	let name_ok =
-		|n: &[u8]| is_ident(n) || (zsh && !n.is_empty() && n.iter().all(u8::is_ascii_digit));
+	// zsh `itype_end(…, IIDENT)`: multibyte letters too, as the parser
+	// allowed.
+	let wide = zsh && super::zsh::params::wide_idents_in(k, cx.store, vp).unwrap_or(false);
+	let name_ok = |n: &[u8]| {
+		is_ident(n)
+			|| (zsh && !n.is_empty() && n.iter().all(u8::is_ascii_digit))
+			|| (wide && super::zsh::params::isident(&crate::bash::syntax::zsh::tok::metafy(n), true))
+	};
 	let valid = if multi {
 		var.split(|&c| c == b'\n').all(name_ok)
 	} else {
@@ -2805,14 +3679,18 @@ fn for_next(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 		}
 	}
 	if k.mask.any_op(op.ev) {
-		let scope = assign_scope(vp);
-		let shown = &value[..value.len().min(256)];
-		k.emit_op(cx, vp, op.node, EventData::Assign {
-			name: BStr::new(&var),
-			value: BStr::new(shown),
-			full_len: value.len(),
-			scope,
-		});
+		// Bash/select setters emit at their actual commit seam. The zsh
+		// parameter setter has separate assignment semantics.
+		if !select && vp.mode.dialect() == crate::bash::ids::Dialect::Zsh {
+			let scope = assign_scope(vp);
+			let shown = &value[..value.len().min(256)];
+			k.emit_op(cx, vp, op.node, EventData::Assign {
+				name: BStr::new(&var),
+				value: BStr::new(shown),
+				full_len: value.len(),
+				scope,
+			});
+		}
 		k.emit_op(cx, vp, op.node, EventData::IterStart {
 			n,
 			var: BStr::new(&var),
@@ -3044,6 +3922,8 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 				if info.kind == SpawnKind::Background {
 					let level = stage_level(unit, info.stages[0].entry, true);
 					super::set_subshell_depth(&mut child, super::subshell_depth(vp) + level);
+					// A job of its own: its processes get their own group.
+					super::jobctl::own_job(k, child.vpid);
 				}
 				children.push(child.vpid);
 				let vpid = child.vpid;
@@ -3061,7 +3941,10 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					if op.flags & Op::DISOWN == 0 {
 						let text = job_text(k, cx, vp, unit, op.node);
 						let cwd = vp.cwd.clone();
-						vp.jobs.add(job, vpid, text, control, cwd);
+						let number = vp.jobs.add(job, vpid, text, control, cwd);
+						if vp.parent.is_none() {
+							super::jobctl::started(k, cx, vpid, number);
+						}
 					}
 					k.emit_op(cx, vp, op.node, EventData::Background { job, pid: vpid });
 					vp.status = 0;
@@ -3078,10 +3961,15 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 				let n = info.stages.len();
 				let tap = cx.host.pipe_tap();
 				// `lastpipe` without job control: the last stage runs here. zsh
-				// always runs it in the current shell (`execpline`).
-				let lastpipe = unit.mode.dialect() == Dialect::Zsh
-					|| (state::option(&mut k.root, cx.store, vp, OptId::Lastpipe).unwrap_or(false)
-						&& !job_control(k, cx, vp));
+				// runs it in the current shell but under sh emulation
+				// (`execcmd_exec`'s `last1 == 2 && input &&
+				// EMULATION(EMULATE_SH)`).
+				let lastpipe = if unit.mode.dialect() == Dialect::Zsh {
+					vp.mode != ModeId::ZshSh
+				} else {
+					state::option(&mut k.root, cx.store, vp, OptId::Lastpipe).unwrap_or(false)
+						&& !job_control(k, cx, vp)
+				};
 				let mut stdin = vp.fds.get(0).cloned();
 				for (i, stage) in info.stages.iter().enumerate() {
 					if lastpipe && i + 1 == n {
@@ -3152,6 +4040,9 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 		statuses.push(last);
 	}
 	clear_scratch(&mut k.root, cx.store, vp);
+	if vp.parent.is_none() && k.jobctl.has_pgrp() {
+		super::jobctl::fg_done(k, cx, vp, None, b"");
+	}
 	let pipefail = state::option(&mut k.root, cx.store, vp, OptId::Pipefail).unwrap_or(false);
 	vp.status = if pipefail {
 		statuses
@@ -3179,10 +4070,26 @@ fn node_text(unit: &Unit, node: u32) -> BString {
 /// The command of a job at `node` as bash prints it (`jobs`, `fg`, `bg`):
 /// re-printed by bash's `make_command_string` (`( sleep 2; exit 4 )`, a
 /// `while` body indented on its own lines), or as written when the text
-/// does not parse alone.
-fn job_text(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, unit: &Unit, node: u32) -> BString {
+/// does not parse alone. A zsh unit's job shows zsh's `getjobtext`
+/// (`{ sleep 1; echo; }`, `f () { ... }`).
+pub(super) fn job_text(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vp: &Vproc,
+	unit: &Unit,
+	node: u32,
+) -> BString {
 	let src = node_text(unit, node);
 	let feat = features(k, cx.store, vp).unwrap_or(Features::NONE);
+	if unit.mode.dialect() == Dialect::Zsh {
+		let feat = feat | Features::ZSH;
+		return match crate::bash::syntax::parse_all(&src, feat) {
+			Ok(p) if p.commands.len() == 1 => {
+				BString::from(crate::bash::syntax::zsh::getjobtext(&p.commands[0].list))
+			},
+			_ => src,
+		};
+	}
 	match crate::bash::syntax::parse_all(&src, feat) {
 		Ok(p) if p.commands.len() == 1 => {
 			BString::from(crate::bash::syntax::command_string(&p.commands[0].list))
@@ -3200,7 +4107,7 @@ pub fn job_control(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 /// The job table a child that lists its parent's jobs starts with (a
 /// command substitution, a `jobs` pipeline stage): copies of them, which
 /// are not its children; `subshell` turns job control off.
-fn inherited_jobs(vp: &Vproc, subshell: bool) -> super::proc::JobTable {
+pub(super) fn inherited_jobs(vp: &Vproc, subshell: bool) -> super::proc::JobTable {
 	let mut jobs = vp.jobs.clone();
 	jobs.chld = 0;
 	jobs.subshell = subshell;
@@ -3255,6 +4162,8 @@ fn start_coproc(
 	fds.set(0, Some(FdRef::mem(in_r)));
 	fds.set(1, Some(FdRef::mem(out_w)));
 	let child = vp.child(k, cx.store, Arc::clone(unit), entry, fds);
+	// A job of its own under job control (never in the foreground).
+	super::jobctl::own_job(k, child.vpid);
 	let vpid = child.vpid;
 	k.spawned.push(Box::new(child));
 	vp.fds.set(read, Some(FdRef::mem(out_r)));
@@ -3435,6 +4344,85 @@ pub fn current_line(vp: &Vproc) -> u32 {
 /// The vproc's current mode: what its code parses and runs in.
 pub const fn mode_of(vp: &Vproc) -> ModeId {
 	vp.mode
+}
+
+/// zsh `execlist`'s DEBUG trap at the list marker `op` (a `Nop`): before
+/// the list under `DEBUG_BEFORE_CMD` (the default), after it otherwise;
+/// never inside a trap. `ERR_EXIT` is off while it runs (set by the trap,
+/// the list is skipped, [`zsh_debug_done`]); before the list
+/// `$ZSH_DEBUG_CMD` holds its text. Whether the trap started.
+fn zsh_debug_trap(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Unit, op: Op) -> bool {
+	if vp.trap_frames != 0 || !pseudo_trap_maybe(k, cx, TrapKey::Debug) {
+		return false;
+	}
+	let opt = |k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, o| {
+		state::zsh_option(&mut k.root, cx.store, vp, o).unwrap_or_else(|err| {
+			k.fail(err);
+			false
+		})
+	};
+	let before = opt(k, cx, vp, ZshOpt::Debugbeforecmd);
+	if (op.b == Op::LIST_START) != before {
+		return false;
+	}
+	let errexit = opt(k, cx, vp, ZshOpt::Errexit);
+	if errexit
+		&& let Err(err) = state::set_zsh_option(&mut k.root, cx.store, vp, ZshOpt::Errexit, false)
+	{
+		k.fail(err);
+	}
+	let line = line_of(vp, op.node);
+	let frame = top_frame(vp);
+	frame.debug_pc = Some(frame.pc);
+	frame.debug_errexit = errexit;
+	if !start_trap(k, vp, cx, TrapKey::Debug) {
+		if errexit
+			&& let Err(err) = state::set_zsh_option(&mut k.root, cx.store, vp, ZshOpt::Errexit, true)
+		{
+			k.fail(err);
+		}
+		return false;
+	}
+	set_trap_line(vp, line);
+	if before {
+		// In the trap's own scope: gone when it ends (zsh unsets it).
+		let text = unit
+			.nodes
+			.get(op.node as usize)
+			.and_then(|n| unit.source.get(n.lo as usize..n.hi as usize))
+			.and_then(crate::bash::syntax::zsh::list_text)
+			.unwrap_or_default();
+		if let Some(top) = state::scope_count(&k.root, vp).checked_sub(1) {
+			let var = Var::scalar(BString::from(text), Attrs::NONE);
+			state::scope_set(&mut k.root, cx.store, vp, top, b"ZSH_DEBUG_CMD", Some(var));
+		}
+	}
+	true
+}
+
+/// After a zsh DEBUG trap started at a list marker ([`zsh_debug_trap`]):
+/// `ERR_EXIT` comes back; turned on by the trap before a list, the list is
+/// skipped.
+fn zsh_debug_done(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) {
+	let f = top_frame(vp);
+	let Some(op) = f
+		.debug_pc
+		.filter(|&pc| pc == f.pc)
+		.and_then(|pc| f.unit.as_ref()?.ops.get(pc as usize).copied())
+		.filter(|op| op.code == Opcode::Nop && op.b != 0)
+	else {
+		return;
+	};
+	let saved = f.debug_errexit;
+	let now = state::zsh_option(&mut k.root, cx.store, vp, ZshOpt::Errexit).unwrap_or(false);
+	if now != saved
+		&& let Err(err) = state::set_zsh_option(&mut k.root, cx.store, vp, ZshOpt::Errexit, saved)
+	{
+		k.fail(err);
+	}
+	if op.b == Op::LIST_START && now {
+		top_frame(vp).pc = op.a;
+	}
 }
 
 /// Run a configured trap in the interrupted shell, without re-entering it.
@@ -3624,26 +4612,33 @@ impl PseudoTraps {
 /// Whether `key` may have an action: always for EXIT and signals; for
 /// DEBUG/ERR/RETURN per [`PseudoTraps`]. A store read error answers yes
 /// (the full check reports it).
+#[inline]
 fn pseudo_trap_maybe(k: &mut Kernel, cx: &mut Cx<'_>, key: TrapKey) -> bool {
 	let bit = PseudoTraps::bit(key);
 	if bit == 0 || k.pseudo_traps.bits & bit != 0 {
 		return true;
 	}
-	let epoch = k.root.epoch();
-	if k.pseudo_traps.epoch != Some(epoch) {
-		k.pseudo_traps.epoch = Some(epoch);
-		for pseudo in [TrapKey::Debug, TrapKey::Err, TrapKey::Return] {
-			let set = match cx.store.get(Key::Trap(pseudo)) {
-				Ok(Some(Record::Trap { action, .. })) => !action.is_empty(),
-				Ok(_) => false,
-				Err(_) => true,
-			};
-			if set {
-				k.pseudo_traps.note(pseudo);
-			}
-		}
+	if k.pseudo_traps.epoch != Some(k.root.epoch()) {
+		note_pseudo_traps(k, cx);
 	}
 	k.pseudo_traps.bits & bit != 0
+}
+
+/// Read which pseudo-traps the store holds into [`PseudoTraps`], at the
+/// store's current epoch.
+#[inline(never)]
+fn note_pseudo_traps(k: &mut Kernel, cx: &mut Cx<'_>) {
+	k.pseudo_traps.epoch = Some(k.root.epoch());
+	for pseudo in [TrapKey::Debug, TrapKey::Err, TrapKey::Return] {
+		let set = match cx.store.get(Key::Trap(pseudo)) {
+			Ok(Some(Record::Trap { action, .. })) => !action.is_empty(),
+			Ok(_) => false,
+			Err(_) => true,
+		};
+		if set {
+			k.pseudo_traps.note(pseudo);
+		}
+	}
 }
 
 /// [`Frame::debug_pc`] of a function frame whose DEBUG trap at entry is
@@ -3664,7 +4659,7 @@ fn return_trap(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, target: usize) -
 	};
 	let line = body.or_else(|| {
 		let line = super::callstack::source_line(vp, target + 1);
-		super::callstack::truncate(vp, target);
+		super::callstack::truncate(&mut k.root, cx.store, vp, target);
 		line
 	});
 	if !start_trap(k, vp, cx, TrapKey::Return) {
@@ -3985,6 +4980,12 @@ fn zsh_leave(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, target: usize) {
 	} else {
 		None
 	};
+	if matches!(
+		vp.frames.get(target),
+		Some(Frame { kind: FrameKind::Function { zsh: true, .. }, .. })
+	) {
+		restore_local_specials(k, vp, cx);
+	}
 	pop_frame(&mut k.root, cx.store, vp);
 	match exit {
 		Some(builtins::trap::ScopeExit::Text { action, mode }) => {
@@ -3994,6 +4995,20 @@ fn zsh_leave(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, target: usize) {
 			run_func_trap(k, vp, cx, TrapKey::Exit, BString::from("TRAPEXIT"), rec);
 		},
 		None => {},
+	}
+}
+
+/// zsh `scanendscope` for a zsh function's scope, before it goes: the
+/// computed specials it made local get their values back
+/// ([`super::zsh::specials::restore_locals`]).
+fn restore_local_specials(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) {
+	let mut log = Vec::new();
+	let res = {
+		let mut ex = super::expand::Expander::new(k, cx, vp, &mut log, false, 0);
+		super::zsh::specials::restore_locals(&mut ex)
+	};
+	if let Err(super::expand::Stop::Store(err)) = res {
+		k.fail(err);
 	}
 }
 
@@ -4057,14 +5072,12 @@ fn zsh_break(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, n: u32, cont: bool
 					truncate(vp, rec.depth);
 					let status = vp.status;
 					let f = top_frame(vp);
-					if cont {
-						f.pc = rec.cont;
-					} else {
-						if let Some(r) = f.loops.last_mut() {
-							r.status = status;
-						}
-						f.pc = rec.exit;
+					// `continue` ends the body with its status too: the loop's
+					// status if no other body command runs.
+					if let Some(r) = f.loops.last_mut() {
+						r.status = status;
 					}
+					f.pc = if cont { rec.cont } else { rec.exit };
 					return;
 				},
 			}
@@ -4107,8 +5120,10 @@ fn zsh_exit(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		.iter()
 		.any(|f| matches!(f.kind, FrameKind::Function { .. }));
 	if !in_function {
-		if let Some(z) = vp.zsh.as_mut() {
-			z.exit_pending = None;
+		if let Some(z) = vp.zsh.as_mut()
+			&& z.exit_pending.take().is_some()
+		{
+			z.exit_from_function = true;
 		}
 		exit_shell(k, vp, cx, status);
 		return;
@@ -4155,7 +5170,13 @@ fn zsh_discard(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 	vp.status = status;
 	let catcher = vp.frames.iter().rposition(|f| {
 		matches!(f.kind, FrameKind::Script {
-			what: ScriptKind::Eval | ScriptKind::Source | ScriptKind::Trap { .. },
+			what: ScriptKind::Eval
+				| ScriptKind::Source
+				| ScriptKind::Trap { .. }
+				| ScriptKind::Code(_)
+				// The line editor's widget or hook call: the editor goes on
+				// (zsh `execzlefunc`/`callhookfunc` after `doshfunc`).
+				| ScriptKind::Hook,
 			..
 		})
 	});
@@ -4169,10 +5190,23 @@ fn zsh_discard(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		.iter()
 		.rposition(|f| matches!(f.kind, FrameKind::Script { what: ScriptKind::Run, .. }));
 	if let Some(i) = catcher {
+		// Code a builtin runs (`ScriptKind::Code`): the builtin learns of
+		// the error (zsh's `errflag` after `execode`) when it runs again.
+		let code = matches!(vp.frames[i].kind, FrameKind::Script { what: ScriptKind::Code(_), .. });
 		unwind(&mut k.root, cx.store, vp, i);
+		if code {
+			state::store_record(
+				&mut k.root,
+				cx.store,
+				vp,
+				KeyBuf::Misc(MiscKey::ZshCodeError),
+				Some(Record::Misc(BString::from("1"))),
+			);
+		}
 		vp.status = status;
 	} else if let Some(i) = run
-		&& state::zsh_option(&mut k.root, cx.store, vp, ZshOpt::Continueonerror).unwrap_or(false)
+		&& (state::zsh_option(&mut k.root, cx.store, vp, ZshOpt::Continueonerror).unwrap_or(false)
+			|| super::zle::reader::input_frame(cx, vp, i))
 	{
 		unwind(&mut k.root, cx.store, vp, i + 1);
 		clear_scratch(&mut k.root, cx.store, vp);

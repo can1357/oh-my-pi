@@ -51,16 +51,12 @@ function assistantMessage(content: AssistantMessage["content"], stopReason: stri
 	} as unknown as AssistantMessage;
 }
 
+/**
+ * Transcript cards showing {@link CMD}. Counts cards, not text: a streaming card
+ * draws the command through the shell visualization, a finished one as `$ cmd`.
+ */
 function countCommand(mode: InteractiveMode): number {
-	const rendered = Bun.stripANSI(mode.chatContainer.render(120).join("\n"));
-	let count = 0;
-	let index = 0;
-	while (true) {
-		const found = rendered.indexOf(`$ ${CMD}`, index);
-		if (found === -1) return count;
-		count++;
-		index = found + CMD.length;
-	}
+	return mode.chatContainer.children.filter(child => Bun.stripANSI(child.render(120).join("\n")).includes(CMD)).length;
 }
 
 describe("issue #6879 — tool output appears twice after a superseded turn", () => {
@@ -495,7 +491,11 @@ describe("issue #6879 — tool output appears twice after a superseded turn", ()
 				partial: assistantMessage([bashToolCall("")], "toolUse"),
 			},
 		} as Extract<AgentSessionEvent, { type: "message_update" }>);
-		expect(countCommand(mode)).toBe(1);
+		const original = mode.pendingTools.get("");
+		if (!original) throw new Error("Expected pending streamed card");
+		expect(
+			mode.chatContainer.children.filter(child => Bun.stripANSI(child.render(120).join("\n")).includes(CMD)),
+		).toEqual([original]);
 		await ec.handleEvent({
 			type: "message_update",
 			message: assistantMessage([bashToolCall("call-real")], "toolUse"),
@@ -507,13 +507,20 @@ describe("issue #6879 — tool output appears twice after a superseded turn", ()
 			},
 		} as Extract<AgentSessionEvent, { type: "message_update" }>);
 		// The populated id must reuse the existing card, not spawn a second one.
-		expect(countCommand(mode)).toBe(1);
+		expect(mode.pendingTools.has("")).toBe(false);
+		expect(mode.pendingTools.get("call-real")).toBe(original);
+		expect(
+			mode.chatContainer.children.filter(child => Bun.stripANSI(child.render(120).join("\n")).includes(CMD)),
+		).toEqual([original]);
 		await ec.handleEvent({
 			type: "message_end",
 			message: assistantMessage([bashToolCall("call-real")], "toolUse"),
 		} as Extract<AgentSessionEvent, { type: "message_end" }>);
 		await runToolCallToCompletion("call-real");
-		expect(countCommand(mode)).toBe(1);
+		expect(mode.pendingTools.has("call-real")).toBe(false);
+		expect(
+			mode.chatContainer.children.filter(child => Bun.stripANSI(child.render(120).join("\n")).includes(CMD)),
+		).toEqual([original]);
 		// The result routes into the surviving card (no orphaned pending preview).
 		expect(Bun.stripANSI(mode.chatContainer.render(120).join("\n"))).toContain("(no output)");
 	});
@@ -575,6 +582,11 @@ describe("issue #6879 — tool output appears twice after a superseded turn", ()
 				partial: assistantMessage([bashToolCall("call-x")], "toolUse"),
 			},
 		} as Extract<AgentSessionEvent, { type: "message_update" }>);
+		const original = mode.pendingTools.get("call-x");
+		if (!original) throw new Error("Expected pending streamed card");
+		expect(
+			mode.chatContainer.children.filter(child => Bun.stripANSI(child.render(120).join("\n")).includes(CMD)),
+		).toEqual([original]);
 		await ec.handleEvent({
 			type: "message_update",
 			message: assistantMessage([bashToolCall("call-x|abc123==")], "toolUse"),
@@ -585,13 +597,21 @@ describe("issue #6879 — tool output appears twice after a superseded turn", ()
 				partial: assistantMessage([bashToolCall("call-x|abc123==")], "toolUse"),
 			},
 		} as Extract<AgentSessionEvent, { type: "message_update" }>);
-		expect(countCommand(mode)).toBe(1);
+		expect(mode.pendingTools.has("call-x")).toBe(false);
+		expect(mode.pendingTools.get("call-x|abc123==")).toBe(original);
+		expect(
+			mode.chatContainer.children.filter(child => Bun.stripANSI(child.render(120).join("\n")).includes(CMD)),
+		).toEqual([original]);
 		await ec.handleEvent({
 			type: "message_end",
 			message: assistantMessage([bashToolCall("call-x|abc123==")], "toolUse"),
 		} as Extract<AgentSessionEvent, { type: "message_end" }>);
 		await runToolCallToCompletion("call-x|abc123==");
-		expect(countCommand(mode)).toBe(1);
+		expect(mode.pendingTools.has("call-x|abc123==")).toBe(false);
+		expect(
+			mode.chatContainer.children.filter(child => Bun.stripANSI(child.render(120).join("\n")).includes(CMD)),
+		).toEqual([original]);
+		expect(Bun.stripANSI(mode.chatContainer.render(120).join("\n"))).toContain("(no output)");
 	});
 
 	it("settles a held server-resolved completion after the tool-call id is re-keyed", async () => {

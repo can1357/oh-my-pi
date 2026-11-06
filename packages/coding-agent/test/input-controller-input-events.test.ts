@@ -74,11 +74,18 @@ async function createHarness(factory: ExtensionFactory) {
 		abort: vi.fn(async () => {}),
 		prewarmModelConnection: vi.fn(),
 	};
+	let collabGuest: InteractiveModeContext["collabGuest"];
 	const ctx = {
 		editor,
 		session,
 		viewSession: session,
 		sessionManager,
+		get collabGuest() {
+			return collabGuest;
+		},
+		setCollabGuest(guest: InteractiveModeContext["collabGuest"]) {
+			collabGuest = guest;
+		},
 		eventController: { isAwaitingAsyncWork: () => false },
 		settings: Settings.isolated({}),
 		keybindings: KeybindingsManager.inMemory(),
@@ -170,10 +177,10 @@ describe("interactive native input ingress", () => {
 				});
 			});
 			h.session.isCompacting = compacting;
-			h.ctx.collabGuest = {
+			h.ctx.setCollabGuest({
 				readOnly: false,
 				sendPrompt: vi.fn(() => true),
-			} as unknown as InteractiveModeContext["collabGuest"];
+			} as unknown as InteractiveModeContext["collabGuest"]);
 			const storage = attachHistory(h.editor);
 			h.editor.setText("/unknown");
 			const submitting = h.pressSubmit(FOLLOW_UP);
@@ -212,7 +219,7 @@ describe("interactive native input ingress", () => {
 			});
 			h.session.isCompacting = compacting;
 			const sendPrompt = vi.fn(() => true);
-			h.ctx.collabGuest = { readOnly: false, sendPrompt } as unknown as InteractiveModeContext["collabGuest"];
+			h.ctx.setCollabGuest({ readOnly: false, sendPrompt } as unknown as InteractiveModeContext["collabGuest"]);
 			const run = vi.fn(async () => true);
 			h.ctx.handleTanCommand = run;
 			const storage = attachHistory(h.editor);
@@ -869,7 +876,7 @@ describe("interactive native input ingress", () => {
 	it("Enter /tan as a collab guest gives the draft and its image back", async () => {
 		const h = await createHarness(() => {});
 		Object.assign(h.session, { customCommands: [], promptTemplates: [] });
-		Object.assign(h.ctx, { collabGuest: {} });
+		h.ctx.setCollabGuest({} as NonNullable<InteractiveModeContext["collabGuest"]>);
 		const run = vi.fn(async () => true);
 		h.ctx.handleTanCommand = run;
 		h.draftWithImage("/tan fix this block [Image #1]");

@@ -17,7 +17,7 @@ use super::{
 	CallOutcome, Cx, Kernel, ToolCall, assign_scope,
 	builtins::{self, Chunk, Control, Ctx, Lhs, Need},
 	exec::{self, Flow, expanding, line_of},
-	expand::{CompoundElem, Stop, compound_text},
+	expand::{CompoundElem, Expander, Stop, compound_text},
 	probe::{self, Search, absolute, candidates},
 	proc::{
 		AssignValue, Awaited, BangStage, DeferPhase, ExecAs, ExecState, Frame, FrameKind, JobState,
@@ -33,7 +33,7 @@ use crate::bash::{
 	fd::FdRef,
 	fs::StatKind,
 	host::{
-		ChildRedirs, EnvView, ExitStatus, Invocation, PgroupSpec, ResolveCtx, Resolved, SpawnSpec,
+		ChildRedirs, EnvView, ExitStatus, Invocation, ProcEvent, ResolveCtx, Resolved, SpawnSpec,
 		StdioSpec, Via,
 	},
 	ids::{CallId, CmdTag, IntrinsicId, RunId},
@@ -194,6 +194,16 @@ pub fn exec(
 	// alone: a block ended the slice (`run_slice` starts stale), and a called
 	// frame's ops kept it current, so a `FuncExit` shares the reading of the
 	// function's last `CmdEnd`.
+	if vp
+		.frames
+		.last()
+		.and_then(|f| f.scratch.as_ref())
+		.is_none_or(|s| s.exec.is_none())
+		&& let Some(flow) = assignment_statement(k, vp, cx, unit, op, line)
+			.or_else(|| plain_statement(k, vp, cx, unit, op, line))
+	{
+		return flow;
+	}
 	if scratch(vp).exec.is_none() {
 		let on = k.mask.any_op(op.ev);
 		// The clock only with events on: `CmdStart` shares the previous
@@ -206,10 +216,6 @@ pub fn exec(
 			seq:  k.next_cmd,
 		};
 		k.next_cmd += 1;
-		if on {
-			let data = EventData::CmdStart { node_kind: NodeKind::Simple };
-			k.emit_op_at(cx, vp, op.node, data, t0);
-		}
 		let sc = scratch(vp);
 		let state = match sc.spare_exec.take() {
 			Some(mut e) => {
@@ -220,6 +226,14 @@ pub fn exec(
 			None => Box::new(ExecState::new(tag, t0)),
 		};
 		sc.exec = Some(state);
+		if on {
+			let data = EventData::CmdStart { node_kind: NodeKind::Simple };
+			k.emit_op_at(cx, vp, op.node, data, t0);
+		}
+	}
+	if k.mask.bits() != 0 {
+		let tag = st(vp).tag;
+		vp.fds.set_command_tag(Some(tag));
 	}
 	let cmd = &unit.cmds[op.a as usize];
 	loop {
@@ -229,6 +243,18 @@ pub fn exec(
 				if let Some(flow) = expand(k, vp, cx, unit, op, line) {
 					return flow;
 				}
+			},
+			Stage::Redirect
+				if unit.mode.dialect() == crate::bash::ids::Dialect::Zsh
+					&& state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Noexec)
+						.unwrap_or(false) =>
+			{
+				// zsh `execcmd_exec` under `noexec` (set while running): the
+				// words were expanded, reporting errors (assignments and
+				// filename generation do nothing); nothing runs, status 0.
+				let s = st(vp);
+				s.status = 0;
+				s.stage = Stage::Finish;
 			},
 			Stage::Redirect => {
 				if let Some(list) = cmd.redirs {
@@ -323,7 +349,7 @@ pub fn exec(
 				};
 			},
 			Stage::Lookup => {
-				if let Some(flow) = lookup(k, vp, cx, op) {
+				if let Some(flow) = lookup(k, vp, cx, op, cmd.typeset) {
 					return flow;
 				}
 			},
@@ -365,6 +391,300 @@ pub fn exec(
 			},
 		}
 	}
+}
+
+/// An assignment statement of plain scalar values (`i=$((i+1))`,
+/// `x=$1`, `s+=x`) run in one step: each value expanded and assigned in
+/// turn, as the staged command does for a command without words. `None`
+/// when the statement needs the stages: anything that can park (a command
+/// substitution, `$!`), a tilde-prefix (it may look up a user), a
+/// subscript, an array value, a redirection, zsh, `set -x`, or events
+/// that report the command.
+fn assignment_statement(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	unit: &Arc<Unit>,
+	op: Op,
+	line: u32,
+) -> Option<Flow> {
+	use crate::bash::event::EventKind;
+	let cmd = &unit.cmds[op.a as usize];
+	if cmd.assigns.is_empty()
+		|| cmd.redirs.is_some()
+		|| !unit.lists[cmd.words as usize].is_empty()
+		|| op.flags & ir::Op::CAT != 0
+		|| unit.mode.dialect() != crate::bash::ids::Dialect::Bash
+		|| k.mask.any_op(op.ev)
+		|| k.mask.contains(EventKind::Assign)
+		|| k.mask.contains(EventKind::CmdExpanded)
+		|| k.mask.contains(EventKind::CmdEnd)
+	{
+		return None;
+	}
+	for a in &cmd.assigns {
+		let AssignVal::Scalar(w) = a.value else {
+			return None;
+		};
+		let word = &unit.words[w as usize];
+		if a.index.is_some()
+			|| word.parks
+			|| word.parts.iter().any(|p| match p {
+				Part::Lit(b) => b.contains(&b'~'),
+				Part::Zsh(_) => true,
+				_ => false,
+			}) {
+			return None;
+		}
+	}
+	if xtrace::on(k, cx, vp) {
+		return None;
+	}
+	k.next_cmd += 1;
+	for a in &cmd.assigns {
+		let AssignVal::Scalar(w) = a.value else {
+			unreachable!("checked above");
+		};
+		// Nothing in the value can park, so it needs no replay log.
+		let mut log = Vec::new();
+		let value =
+			Expander::new(k, cx, vp, &mut log, false, line).scalar(unit, &unit.words[w as usize]);
+		let value = match value {
+			Ok(v) => v,
+			Err(stop) => return Some(exec::stop_flow(k, vp, cx, line, stop)),
+		};
+		if let Err(d) = assign_now(k, vp, cx, &a.name, None, a.append, AssignValue::Scalar(value)) {
+			k.diag(cx, vp, line, d);
+			// bash abandons the rest of the command line after a failed
+			// assignment statement; a posix shell exits.
+			if state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
+				.unwrap_or(false)
+			{
+				return Some(Flow::Exit(1));
+			}
+			return Some(Flow::Discard(1));
+		}
+	}
+	vp.status = 0;
+	vp.pipestatus.clear();
+	vp.pipestatus.push(0);
+	Some(Flow::Next)
+}
+
+/// A simple command of plain words (`[ "$i" -lt 9 ]`, `f "$x"`,
+/// `printf '%s\n' "$a"`): its words expanded in one step (none can park
+/// or glob, so no replay log), then a builtin run here and its output
+/// written. Whatever the stages would do from there continues in them
+/// with the words already expanded: a function or external from the name
+/// lookup on, a builtin that needs input or pushes a frame, output that
+/// would block. `None` (nothing done) for every other command: one with
+/// assignments or redirections, a name that is not literal, words that
+/// can park or glob, zsh, `set -x`, posix mode, or events that report it.
+fn plain_statement(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	unit: &Arc<Unit>,
+	op: Op,
+	line: u32,
+) -> Option<Flow> {
+	let cmd = &unit.cmds[op.a as usize];
+	let words = &unit.lists[cmd.words as usize];
+	let first = &unit.words[*words.first()? as usize];
+	if !cmd.assigns.is_empty()
+		|| cmd.redirs.is_some()
+		|| op.flags & ir::Op::CAT != 0
+		|| unit.mode.dialect() != crate::bash::ids::Dialect::Bash
+		|| k.mask.bits() != 0
+		|| !first.fixed
+		|| !first.noglob
+		|| first.braces.is_some()
+	{
+		return None;
+	}
+	for &w in words {
+		let word = &unit.words[w as usize];
+		if word.parks
+			|| word.parts.iter().any(|p| match p {
+				Part::Lit(b) => b.contains(&b'~'),
+				Part::Zsh(_) | Part::Compound(_) => true,
+				_ => false,
+			}) {
+			return None;
+		}
+	}
+	let mut name = BString::default();
+	for p in &first.parts {
+		match p {
+			Part::Lit(b) | Part::Quoted(b) => name.extend_from_slice(b),
+			_ => return None,
+		}
+	}
+	if name.contains(&b'/')
+		|| xtrace::on(k, cx, vp)
+		|| state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix).unwrap_or(true)
+		|| state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Keyword)
+			.unwrap_or(true)
+	{
+		return None;
+	}
+	// A builtin to run here; anything else (a function, an external,
+	// `command`/`builtin`/`exec`) resolves in the stages.
+	let id = match state::record(cx.store, vp, Key::Func(BStr::new(&name))) {
+		Ok(None) => {
+			let rctx = ResolveCtx { has_slash: false, via: Via::Plain };
+			match resolve(k, cx, vp, &name, exec::mode_of(vp), rctx) {
+				Ok(Resolved::Intrinsic(id))
+					if !matches!(
+						id,
+						IntrinsicId::Command | IntrinsicId::Builtin | IntrinsicId::Exec
+					) =>
+				{
+					Some(id)
+				},
+				_ => None,
+			}
+		},
+		_ => None,
+	};
+	k.next_cmd += 1;
+	let mut argv = Vec::with_capacity(words.len());
+	let mut arrayref = Vec::new();
+	let mut globs = Vec::new();
+	let expanded = {
+		// Nothing in the words can park, so they need no replay log.
+		let mut log = Vec::new();
+		let mut ex = Expander::new(k, cx, vp, &mut log, false, line);
+		words.iter().try_for_each(|&w| {
+			let word = &unit.words[w as usize];
+			let before = argv.len();
+			ex.fields_glob(unit, word, &mut argv, &mut globs)?;
+			if argv.len() == before + 1 && is_arrayref(word) {
+				arrayref.push(before as u32);
+			}
+			Ok(())
+		})
+	};
+	if let Err(stop) = expanded {
+		return Some(exec::stop_flow(k, vp, cx, line, stop));
+	}
+	// Fields to pathname-expand (directory walks, which may wait), a
+	// function or an external: the stages go on from the expanded words.
+	let id = match id {
+		Some(id) if globs.is_empty() => id,
+		_ => {
+			let mut sc = exec::take_scratch(vp);
+			let mut e = seeded_exec(k, vp, &mut sc, argv, arrayref);
+			e.stage = if globs.is_empty() {
+				Stage::Lookup
+			} else {
+				Stage::Expand
+			};
+			e.globs = globs;
+			sc.exec = Some(e);
+			vp.frames.last_mut().expect("frame").scratch = Some(sc);
+			return Some(exec(k, vp, cx, unit, op, line));
+		},
+	};
+	// The temporary scope the staged command gives a builtin.
+	let scope =
+		Scope { vars: VarMap::default(), positional: None, func: None, zsh: None };
+	state::push_scope(&mut k.root, cx.store, vp, scope);
+	let (res, chunks) = {
+		let mut ctx = Ctx::new(k, cx, vp, &[], line, id.into());
+		ctx.arrayref.clone_from(&arrayref);
+		let r = builtins::run(id, &mut ctx, &argv);
+		(r, std::mem::take(&mut ctx.chunks))
+	};
+	let written = match &res {
+		Ok(outcome) if matches!(outcome.control, Control::None) => write_now(k, vp, &chunks),
+		_ => Err((0, 0)),
+	};
+	if let (Ok(outcome), Ok(())) = (&res, written) {
+		state::drop_scope(&mut k.root, cx.store, vp);
+		vp.status = outcome.status;
+		vp.pipestatus.clear();
+		vp.pipestatus.push(outcome.status);
+		return Some(Flow::Next);
+	}
+	// The stages take over from the expanded words: a builtin that needs
+	// input runs again with its answers (as it does after each answer); one
+	// that finished leaves its state as the stages would, less the output
+	// already written.
+	let mut sc = exec::take_scratch(vp);
+	let mut e = seeded_exec(k, vp, &mut sc, argv, arrayref);
+	e.scoped = true;
+	e.target = Some(Target::Intrinsic(id));
+	e.stage = Stage::Dispatch;
+	sc.exec = Some(e);
+	match res {
+		Ok(outcome) => {
+			if let Some(flow) = settle_builtin(k, vp, cx, line, id, sc, outcome, chunks, false) {
+				return Some(flow);
+			}
+			if let Err((done, off)) = written {
+				let writes = &mut st(vp).writes;
+				writes.drain(..done);
+				if let Some(w) = writes.front_mut() {
+					w.off = off;
+				}
+			}
+		},
+		Err(_) => vp.frames.last_mut().expect("frame").scratch = Some(sc),
+	}
+	Some(exec(k, vp, cx, unit, op, line))
+}
+
+/// The exec state of a command whose words a fast path expanded
+/// ([`plain_statement`]), for the stages to go on from.
+fn seeded_exec(
+	k: &Kernel,
+	vp: &Vproc,
+	sc: &mut Scratch,
+	argv: Vec<BString>,
+	arrayref: Vec<u32>,
+) -> Box<ExecState> {
+	let tag = CmdTag {
+		run:  vp.runs.front().map_or(RunId(0), |r| r.id),
+		vpid: vp.vpid,
+		seq:  k.next_cmd - 1,
+	};
+	let mut e = sc
+		.spare_exec
+		.take()
+		.unwrap_or_else(|| Box::new(ExecState::new(tag, 0)));
+	e.reset(tag, 0);
+	e.argv = argv;
+	e.arrayref = arrayref;
+	e.expanded = true;
+	e
+}
+
+/// Write a fast-path builtin's output now. `Err((n, off))`: the first `n`
+/// chunks and `off` bytes of the next went out, the rest is for the
+/// staged output, which also takes all of it (`Err((0, 0))`) when it has a
+/// diagnostic to render or the shell has output queued before it.
+fn write_now(k: &Kernel, vp: &Vproc, chunks: &[Chunk]) -> Result<(), (usize, usize)> {
+	if !vp.out.is_empty() || chunks.iter().any(|c| !matches!(c, Chunk::Out(..))) {
+		return Err((0, 0));
+	}
+	let mut tcx = Context::from_waker(&k.waker);
+	for (i, c) in chunks.iter().enumerate() {
+		let Chunk::Out(fd, bytes) = c else {
+			unreachable!("checked above");
+		};
+		let handle = vp.fds.handle(*fd);
+		let mut off = 0;
+		while off < bytes.len() {
+			match handle.poll_write(&mut tcx, &bytes[off..]) {
+				Poll::Ready(Ok(n)) if n > 0 => off += n,
+				// Blocked, failed or refused: the staged output waits or
+				// reports it.
+				_ => return Err((i, off)),
+			}
+		}
+	}
+	Ok(())
 }
 
 /// The name of a command whose redirections stopped at an open that would
@@ -510,7 +830,15 @@ fn expand(
 		} else if zsh_noglob(&argv) {
 			Ok(())
 		} else {
-			super::zsh::zglob::expand_globs(k, vp, cx, &mut argv, &globs, line)
+			// `exec`'s options and `-a NAME` are taken before filename
+			// generation.
+			let taken = zsh_exec_words(&argv) as u32;
+			if taken == 0 {
+				super::zsh::zglob::expand_globs(k, vp, cx, &mut argv, &globs, line)
+			} else {
+				let globs: Vec<_> = globs.iter().filter(|(i, _)| *i >= taken).cloned().collect();
+				super::zsh::zglob::expand_globs(k, vp, cx, &mut argv, &globs, line)
+			}
 		};
 		let s = st(vp);
 		s.argv = argv;
@@ -749,7 +1077,9 @@ fn expand(
 				}
 				return Some(Flow::Discard(1));
 			}
-			if k.mask.contains(crate::bash::event::EventKind::Assign) {
+			if k.mask.contains(crate::bash::event::EventKind::Assign)
+				&& matches!(name.as_slice(), b"BASH_ALIASES" | b"BASH_CMDS" | b"DIRSTACK" | b"RANDOM")
+			{
 				let scope = assign_scope(vp);
 				let cut = &shown[..shown.len().min(256)];
 				k.emit_op(cx, vp, node, EventData::Assign {
@@ -767,18 +1097,25 @@ fn expand(
 			&& index.is_none()
 			&& let Some(top) = state::scope_count(&k.root, vp).checked_sub(1)
 		{
-			state::scope_set(&mut k.root, cx.store, vp, top, &name, Some(prefix_var(&value)));
+			let var = prefix_var(&value);
+			for &other in prompt_siblings(vp.mode.dialect() == crate::bash::ids::Dialect::Zsh, &name) {
+				state::scope_set(&mut k.root, cx.store, vp, top, other, Some(var.clone()));
+			}
+			state::scope_set(&mut k.root, cx.store, vp, top, &name, Some(var));
+			builtins::emit_assignment_at(k, cx, vp, &name, Level::Dynamic, node);
 		}
 		// bash's `sv_path` runs for a temporary `PATH` too.
 		if !assign_only
-			&& name.as_slice() == b"PATH"
+			&& (name.as_slice() == b"PATH"
+				|| (k.engine.config().platform == crate::bash::ids::Platform::Windows
+					&& name.as_slice() == b"PATHEXT"))
 			&& let Err(err) = builtins::flush_hash(&mut k.root, cx.store, vp)
 		{
 			k.fail(err);
 			return Some(Flow::Discard(1));
 		}
 		let s = st(vp);
-		s.assigns.push((name.clone(), shown));
+		s.assigns.push((name, shown));
 		s.values.push((index, value));
 	}
 	let s = st(vp);
@@ -808,7 +1145,11 @@ fn expand(
 		);
 	}
 	if xtrace::on(k, cx, vp) {
-		trace(k, vp, cx, unit, &cmd.assigns, line);
+		if unit.mode.dialect() == crate::bash::ids::Dialect::Zsh {
+			trace_zsh(k, vp, cx, unit, &cmd.assigns, line);
+		} else {
+			trace(k, vp, cx, unit, &cmd.assigns, line);
+		}
 		// Out before the command's redirections move stderr.
 		if let Some(fd) = exec::flush_out(k, vp) {
 			return Some(Flow::Block(WaitKey::Write { fd }));
@@ -860,10 +1201,10 @@ fn zsh_read_subst(vp: &Vproc, unit: &Unit, list: u32) -> bool {
 	if aux.as_ref().is_some_and(|a| a.pending.is_some()) {
 		return false;
 	}
-	let lone_exec = matches!(
-		unit.ops.as_slice(),
-		[exec, end] if exec.code == ir::Opcode::Exec && end.code == ir::Opcode::End
-	);
+	// The list markers (`Nop`s) aside.
+	let mut ops = unit.ops.iter().filter(|op| op.code != ir::Opcode::Nop);
+	let lone_exec = matches!((ops.next(), ops.next(), ops.next()), (Some(exec), Some(end), None)
+		if exec.code == ir::Opcode::Exec && end.code == ir::Opcode::End);
 	vp.parent.is_some()
 		&& lone_exec
 		&& unit.redirs.get(list as usize).is_some_and(
@@ -872,10 +1213,10 @@ fn zsh_read_subst(vp: &Vproc, unit: &Unit, list: u32) -> bool {
 		&& src.trim_ascii() == unit.source.trim_ascii()
 }
 
-/// zsh `execcmd` for redirections without a command: `$READNULLCMD` runs
-/// for a lone `<`, else `$NULLCMD`, with them (`:` under `shnullcmd`);
-/// under `cshnullcmd` or without one it is the error `redirection with no
-/// command`. `Some` is that error's flow.
+/// zsh `execcmd` for redirections without a command: without `$NULLCMD`
+/// or under `cshnullcmd` it is the error `redirection with no command`;
+/// else `:` under `shnullcmd`, `$READNULLCMD` for a lone `<`, `$NULLCMD`
+/// otherwise, runs with them. `Some` is that error's flow.
 #[inline(never)]
 fn null_command(
 	k: &mut Kernel,
@@ -899,7 +1240,8 @@ fn null_command(
 		.redirs
 		.get(list as usize)
 		.is_some_and(|rs| matches!(rs.as_slice(), [r] if r.op == RedirKind::In));
-	let word = if option(k, cx, vp, ZshOpt::Cshnullcmd) {
+	let nullcmd = value(k, cx, vp, b"NULLCMD");
+	let word = if nullcmd.is_none() || option(k, cx, vp, ZshOpt::Cshnullcmd) {
 		None
 	} else if option(k, cx, vp, ZshOpt::Shnullcmd) {
 		Some(BString::from(":"))
@@ -907,7 +1249,7 @@ fn null_command(
 		lone_read
 			.then(|| value(k, cx, vp, b"READNULLCMD"))
 			.flatten()
-			.or_else(|| value(k, cx, vp, b"NULLCMD"))
+			.or(nullcmd)
 	};
 	if let Some(word) = word {
 		st(vp).argv.push(word);
@@ -974,8 +1316,14 @@ fn zsh_assign(
 ) -> Option<Flow> {
 	use super::zsh::subst;
 	let record = assign_parks(unit, a);
+	// `set -x` shows the value assigned (zsh `addvars`).
+	let tracing = xtrace::on(k, cx, vp);
+	let mut shown = BString::default();
 	let res = expanding(k, vp, cx, Slot::Assigns, record, line, |ex| match a.value {
-		AssignVal::Scalar(_) => subst::assign_scalar(ex, unit, a).map(|()| None),
+		AssignVal::Scalar(_) => {
+			let out = subst::assign_scalar(ex, unit, a, tracing.then_some(&mut shown))?;
+			Ok(out.map(|(out, globs)| (out, globs, false)))
+		},
 		AssignVal::Array(_) => {
 			let mut out = Vec::new();
 			let mut globs = Vec::new();
@@ -983,6 +1331,7 @@ fn zsh_assign(
 			Ok(Some((out, globs, kv)))
 		},
 	});
+	let mut value = AssignValue::Scalar(shown);
 	match res {
 		Err(flow) => return Some(flow),
 		Ok(None) => {},
@@ -994,20 +1343,31 @@ fn zsh_assign(
 					return Some(flow);
 				}
 			}
-			// The elements are final: nothing of their expansion replays.
-			scratch(vp).logs[Slot::Assigns as usize].clear();
-			if let Err(flow) = expanding(k, vp, cx, Slot::Assigns, false, line, |ex| {
-				subst::assign_array(ex, unit, a, elems, kv)
+			if tracing {
+				value = match a.value {
+					AssignVal::Scalar(_) if elems.len() <= 1 => {
+						AssignValue::Scalar(elems.first().cloned().unwrap_or_default())
+					},
+					_ => AssignValue::Array(elems.iter().map(|e| (None, false, e.clone())).collect()),
+				};
+			}
+			// The assignment itself logs apart from the elements (whose
+			// expansion replays when it parks: zsh/mapfile probes the file
+			// system); an assignment statement runs no builtin, so that
+			// slot is free.
+			if let Err(flow) = expanding(k, vp, cx, Slot::Builtin, false, line, |ex| match a.value {
+				AssignVal::Scalar(_) => subst::assign_globbed(ex, unit, a, elems),
+				AssignVal::Array(_) => subst::assign_array(ex, unit, a, elems, kv),
 			}) {
 				return Some(flow);
 			}
+			scratch(vp).logs[Slot::Builtin as usize].clear();
 		},
 	}
 	scratch(vp).logs[Slot::Assigns as usize].clear();
 	let s = st(vp);
 	s.assigns.push((a.name.clone(), BString::default()));
-	s.values
-		.push((None, AssignValue::Scalar(BString::default())));
+	s.values.push((None, value));
 	None
 }
 
@@ -1038,6 +1398,37 @@ fn zsh_noglob(argv: &[BString]) -> bool {
 	false
 }
 
+/// zsh `execcmd_exec`'s precommand loop: how many leading words are
+/// `exec` (after `-`, `nocorrect` or `noglob`) and its options, `-a NAME`
+/// included; they are not subject to filename generation. 0 for any
+/// other command.
+fn zsh_exec_words(argv: &[BString]) -> usize {
+	let Some(mut i) = argv
+		.iter()
+		.position(|w| !matches!(w.as_slice(), b"-" | b"nocorrect" | b"noglob"))
+		.filter(|&i| argv[i].as_slice() == b"exec")
+	else {
+		return 0;
+	};
+	i += 1;
+	while let Some(w) = argv.get(i) {
+		if w.as_slice() == b"--" {
+			return i + 1;
+		}
+		if w.len() < 2 || w[0] != b'-' {
+			break;
+		}
+		// `-a NAME` or `-aNAME`: the name ends the cluster.
+		if let Some(p) = w.iter().skip(1).position(|&c| c == b'a')
+			&& p + 2 == w.len()
+		{
+			i += 1;
+		}
+		i += 1;
+	}
+	i
+}
+
 /// zsh `execute` under `pathdirs`: a command name with a slash that is not
 /// absolute and not `./…` or `../…` is also looked for in each `PATH`
 /// directory when it does not run as it stands.
@@ -1064,6 +1455,22 @@ fn zsh_precommands(vp: &mut Vproc) {
 		}
 		s.argv.remove(0);
 		shift_arrayref(&mut s.arrayref);
+	}
+}
+
+/// zsh `execcmd`'s `AUTO_RESUME`: a command of one word that starts the
+/// text of a job runs `fg WORD`.
+fn zsh_autoresume(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
+	if current_argv(vp).len() != 1
+		|| !state::zsh_option(&mut k.root, cx.store, vp, ZshOpt::Autoresume).unwrap_or(false)
+		|| super::builtins::zsh_jobs::findjobnam(vp, &current_argv(vp)[0]).is_none()
+	{
+		return;
+	}
+	let s = st(vp);
+	s.argv.insert(0, BString::from("fg"));
+	for i in &mut s.arrayref {
+		*i += 1;
 	}
 }
 
@@ -1154,6 +1561,142 @@ fn trace(
 	for body in lines {
 		xtrace::emit(k, cx, vp, line, &body);
 	}
+}
+
+/// zsh's `set -x` of a simple command (`addvars`, then `execbuiltin`,
+/// `execshfunc` or `makecline`): `PS4`, the assignments as `name=value `
+/// (an array as `name=( a b ) `); then the words, after another `PS4` for
+/// a builtin or a function (which trace themselves), on the same line for
+/// an external command. Words through `quotedzputs`, the precommand
+/// modifiers left out; a typeset-family builtin shows its assignment
+/// arguments as `name=value` and `name=( a b )`.
+fn trace_zsh(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	unit: &Unit,
+	assigns: &[ir::AssignOp],
+	line: u32,
+) {
+	let q = xtrace::ZshQuote::of(k, cx, vp);
+	let mut out = xtrace::ps4(k, cx, vp, line);
+	let s = st(vp);
+	for (i, (index, value)) in s.values.iter().enumerate() {
+		// A skipped (readonly) prefix assignment, `set -k` words.
+		let Some(a) = assigns.get(i) else {
+			break;
+		};
+		if index.as_ref().is_some_and(|i| i.is_empty()) {
+			continue;
+		}
+		out.extend_from_slice(&a.name);
+		if let Some(w) = a.index {
+			out.push(b'[');
+			out.extend_from_slice(exec::word_source(unit, w));
+			out.push(b']');
+		}
+		out.extend_from_slice(if a.append { b"+=" } else { b"=" });
+		match value {
+			AssignValue::Scalar(v) => q.push(&mut out, v),
+			AssignValue::Array(items) => {
+				out.extend_from_slice(b"( ");
+				for (_, _, v) in items {
+					q.push(&mut out, v);
+					out.push(b' ');
+				}
+				out.push(b')');
+			},
+		}
+		out.push(b' ');
+	}
+	let argv = s.argv.clone();
+	let compound = s.compound.clone();
+	let prefixed = !s.values.is_empty();
+	if argv.is_empty() {
+		out.push(b'\n');
+		xtrace::write(k, cx, vp, out);
+		return;
+	}
+	// zsh `execcmd`'s precommand modifiers are not shown.
+	let mut first = 0;
+	while let Some(w) = argv.get(first) {
+		let next_is_option = argv.get(first + 1).is_some_and(|n| n.starts_with(b"-"));
+		match w.as_slice() {
+			b"-" | b"noglob" | b"nocorrect" | b"builtin" => first += 1,
+			b"command" | b"exec" if !next_is_option => first += 1,
+			_ => break,
+		}
+	}
+	let words = &argv[first..];
+	let Some(name) = words.first() else {
+		out.push(b'\n');
+		xtrace::write(k, cx, vp, out);
+		return;
+	};
+	// Assignment arguments only when the typeset word was the command
+	// itself (a reserved word, not after `builtin`).
+	let decl = first == 0
+		&& matches!(
+			name.as_slice(),
+			b"typeset"
+				| b"declare"
+				| b"local"
+				| b"export"
+				| b"readonly"
+				| b"integer"
+				| b"float"
+				| b"private"
+		);
+	let callable = prefixed && {
+		IntrinsicId::from_name(name).is_some()
+			|| state::record(cx.store, vp, Key::Func(BStr::new(name))).is_ok_and(|r| r.is_some())
+	};
+	if callable {
+		out.extend_from_slice(&xtrace::ps4(k, cx, vp, line));
+	}
+	for (i, w) in words.iter().enumerate() {
+		if i > 0 {
+			out.push(b' ');
+		}
+		let eq = w.iter().position(|&c| c == b'=');
+		match eq {
+			Some(eq) if decl && i > 0 && eq > 0 && decl_name(&w[..eq]) => {
+				out.extend_from_slice(&w[..=eq]);
+				let v = &w[eq + 1..];
+				if compound.contains(&(i as u32)) && v.starts_with(b"(") && v.ends_with(b")") {
+					out.push(b'(');
+					let elems = builtins::parse_compound(&v[1..v.len() - 1]);
+					let kv = elems.iter().any(|(k, ..)| k.is_some());
+					for (key, _, v) in elems {
+						if let Some(key) = key.filter(|_| kv) {
+							out.push(b'[');
+							q.push(&mut out, &key);
+							out.extend_from_slice(b"]=");
+						} else {
+							out.push(b' ');
+						}
+						q.push(&mut out, &v);
+					}
+					out.extend_from_slice(b" )");
+				} else {
+					q.push(&mut out, v);
+				}
+			},
+			_ => q.push(&mut out, w),
+		}
+	}
+	out.push(b'\n');
+	xtrace::write(k, cx, vp, out);
+}
+
+/// A typeset assignment argument's name: an identifier, with a subscript
+/// (`a[1]=x`).
+fn decl_name(name: &[u8]) -> bool {
+	let id = name
+		.iter()
+		.take_while(|&&c| c == b'_' || c.is_ascii_alphanumeric())
+		.count();
+	id > 0 && (id == name.len() || (name[id] == b'[' && name.ends_with(b"]")))
 }
 
 /// A compound element's source text as bash's parser keeps it: each
@@ -1263,7 +1806,7 @@ fn resolve(
 	vp: &Vproc,
 	name: &[u8],
 	mode: crate::bash::ids::ModeId,
-	rctx: ResolveCtx<'_>,
+	rctx: ResolveCtx,
 ) -> Result<Resolved, StoreError> {
 	let resolved = cx.host.resolve(BStr::new(name), mode, rctx);
 	let host = match resolved {
@@ -1279,7 +1822,7 @@ fn resolve(
 
 /// Resolve the command name: `command`/`builtin` prefixes, functions,
 /// the host's table, then a PATH search through the pollable `Fs`.
-fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Option<Flow> {
+fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool) -> Option<Flow> {
 	// `command -p`: the search uses the standard utilities' path and not the
 	// hash table (decided while the name resolves; the search starts in the
 	// same turn).
@@ -1288,26 +1831,11 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Option<Flo
 		let zsh = vp.mode.dialect() == crate::bash::ids::Dialect::Zsh;
 		if zsh {
 			zsh_precommands(vp);
+			zsh_autoresume(k, cx, vp);
 		}
 		// zsh `command NAME` runs an external (zsh `BINF_COMMAND`) unless
 		// `posixbuiltins`.
 		let mut external_only = false;
-		// `PATH` copied into the kernel's reused buffer (the resolution
-		// borrows it while the kernel is borrowed): no allocation per
-		// command.
-		let mut path = std::mem::take(&mut k.path_buf);
-		path.clear();
-		match state::lookup(&k.root, cx.store, vp, b"PATH") {
-			Ok(v) => {
-				if let Some(p) = v.and_then(|v| v.as_scalar()) {
-					path.extend_from_slice(p);
-				}
-			},
-			Err(err) => {
-				k.fail(err);
-				return Some(Flow::Discard(1));
-			},
-		}
 		let mode = exec::mode_of(vp);
 		let posix = state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
 			.unwrap_or(false);
@@ -1316,7 +1844,18 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Option<Flo
 			// Borrowed (the resolution only reads `vp`): no copy of the
 			// name per command.
 			let name = &current_argv(vp)[0];
-			let has_slash = name.contains(&b'/');
+			let has_slash = name.contains(&b'/')
+				|| (k.engine.config().platform == crate::bash::ids::Platform::Windows
+					&& name.contains(&b'\\'));
+			// zsh's reserved `typeset`, `local`, …: their builtin even when
+			// disabled, before any function of the name (`execcmd_exec`
+			// with `WC_TYPESET`).
+			if zsh && typeset && via == Via::Plain {
+				let rctx = ResolveCtx { has_slash, via };
+				if let Resolved::Intrinsic(id) = cx.host.resolve(BStr::new(name), mode, rctx) {
+					break Resolved::Intrinsic(id).into();
+				}
+			}
 			if external_only {
 				break if has_slash {
 					Target::External(absolute(&vp.cwd, name))
@@ -1326,7 +1865,7 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Option<Flo
 			}
 			// POSIX: special builtins are found before functions.
 			let special = if posix && !has_slash {
-				let rctx = ResolveCtx { has_slash, via, path_var: BStr::new(&path) };
+				let rctx = ResolveCtx { has_slash, via };
 				match resolve(k, cx, vp, name, mode, rctx) {
 					Ok(resolved) => matches!(resolved, Resolved::Intrinsic(id) if is_special(id)),
 					Err(err) => {
@@ -1351,7 +1890,7 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Option<Flo
 					break Target::Function(name.clone());
 				}
 			}
-			let rctx = ResolveCtx { has_slash, via, path_var: BStr::new(&path) };
+			let rctx = ResolveCtx { has_slash, via };
 			let resolved = match resolve(k, cx, vp, name, mode, rctx) {
 				Ok(resolved) => resolved,
 				Err(err) => {
@@ -1427,7 +1966,6 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Option<Flo
 				other => break other.into(),
 			}
 		};
-		k.path_buf = path;
 		let s = st(vp);
 		s.target = Some(target);
 		s.via_command = matches!(via, Via::Command | Via::CommandP);
@@ -1436,8 +1974,13 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Option<Flo
 		// File-system probes: `CmdExpanded` reads the clock after them.
 		k.clock_stale();
 		// bash's `search_for_command`: a `PATH` in the command's temporary
-		// environment bypasses the hash table (lookup and insertion).
-		let temp_path = st(vp).assigns.iter().any(|(n, _)| n.as_slice() == b"PATH");
+		// environment bypasses the hash table (lookup and insertion); on
+		// Windows `PATHEXT` changes the same answer.
+		let windows = k.engine.config().platform == crate::bash::ids::Platform::Windows;
+		let temp_path = st(vp)
+			.assigns
+			.iter()
+			.any(|(n, _)| n.as_slice() == b"PATH" || (windows && n.as_slice() == b"PATHEXT"));
 		let mut sc = exec::take_scratch(vp);
 		let name = sc.exec.as_ref().map_or_default(|e| e.argv[0].clone());
 		if sc.io.as_ref().is_none_or(|io| io.search.is_none()) {
@@ -1485,7 +2028,14 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Option<Flo
 								.then(|| absolute(&vp.cwd, &name)),
 						)
 						.collect();
-					cands.extend(candidates(&path, &name, &vp.cwd));
+					let extensions = probe::executable_extensions(k, cx, vp);
+					cands.extend(candidates(
+						&path,
+						&name,
+						&vp.cwd,
+						k.engine.config().platform,
+						&extensions,
+					));
 					sc.io().search =
 						Some(PathSearch { cands, idx: 0, checking_exec: false, nonexec: None });
 				},
@@ -1552,20 +2102,47 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Option<Flo
 	None
 }
 
-/// Prefix assignments as variables of a temporary or function scope.
-fn scope_vars(values: &[(Option<BString>, AssignValue)], names: &[(BString, BString)]) -> VarMap {
-	values
-		.iter()
-		.zip(names)
-		.filter(|((index, _), _)| index.is_none())
-		.map(|((_, value), (name, _))| {
-			// A call's prefix assignment, not a local (posix special
-			// builtins in the function assign through it).
-			let mut var = prefix_var(value);
-			var.attrs = var.attrs.with(Attrs::TEMP);
-			(name.clone(), Some(var))
-		})
-		.collect()
+/// Prefix assignments as variables of a temporary or function scope; in
+/// zsh a prompt name's other names (`PS1`/`PROMPT`, `RPS1`/`RPROMPT`, …)
+/// take the value too, as they share one variable there.
+fn scope_vars(
+	zsh: bool,
+	values: &[(Option<BString>, AssignValue)],
+	names: &[(BString, BString)],
+) -> VarMap {
+	let mut vars = VarMap::default();
+	for ((index, value), (name, _)) in values.iter().zip(names) {
+		if index.is_some() {
+			continue;
+		}
+		// A call's prefix assignment, not a local (posix special builtins
+		// in the function assign through it).
+		let mut var = prefix_var(value);
+		var.attrs = var.attrs.with(Attrs::TEMP);
+		for &other in prompt_siblings(zsh, name) {
+			if !names.iter().any(|(n, _)| n.as_slice() == other) {
+				vars.insert(BString::from(other), Some(var.clone()));
+			}
+		}
+		vars.insert(name.clone(), Some(var));
+	}
+	vars
+}
+
+/// The other names of the zsh prompt special `name` ([`PROMPT_GROUPS`]);
+/// none in bash or for any other name.
+///
+/// [`PROMPT_GROUPS`]: super::zsh::specials::PROMPT_GROUPS
+fn prompt_siblings(
+	zsh: bool,
+	name: &[u8],
+) -> impl Iterator<Item = &'static &'static [u8]> + use<'_> {
+	let group: &'static [&'static [u8]] = if zsh {
+		super::zsh::specials::prompt_group(name)
+	} else {
+		&[]
+	};
+	group.iter().filter(move |&&n| n != name)
 }
 
 /// A prefix assignment's value as a variable of a temporary or function
@@ -1600,6 +2177,21 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 		&& !matches!(target, Target::Function(_) | Target::Intrinsic(_))
 		&& zsh_restricted_external(k, vp, cx, line)
 	{
+		return None;
+	}
+	// zsh `addvars` sets a prefix `UID=…` through the special: an id the
+	// shell cannot take fails a builtin or function in the shell (the
+	// list is abandoned) and an external command in its child (status 1).
+	if vp.mode.dialect() == crate::bash::ids::Dialect::Zsh
+		&& let Some(d) = zsh_prefix_ids(k, vp, cx, line)
+	{
+		k.diag(cx, vp, line, d);
+		if matches!(target, Target::Function(_) | Target::Intrinsic(_)) {
+			return Some(Flow::Discard(1));
+		}
+		let s = st(vp);
+		s.status = 1;
+		s.stage = Stage::Output;
 		return None;
 	}
 	match target {
@@ -1790,7 +2382,13 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 				}
 			}
 			let job = k.job_id(cx.store);
+			let pgroup = super::jobctl::pgroup(k, cx, vp, job);
 			let argv = spawn_argv(&st(vp).argv, exec_as.as_deref());
+			let (argv, env) = if vp.mode.dialect() == crate::bash::ids::Dialect::Zsh {
+				zsh_argv0(k, cx, vp, argv, env)
+			} else {
+				(argv, env)
+			};
 			let tag = st(vp).tag;
 			// The redirections left to the process (`deferred_resolved`). Copied,
 			// not taken: a spawn dropped before it finished (a suspend) is asked
@@ -1818,7 +2416,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 					.iter()
 					.map(|(fd, h)| (*fd, stdio_spec(h)))
 					.collect(),
-				pgroup: PgroupSpec::New(job),
+				pgroup,
 				tag,
 				vpid: vp.vpid,
 				umask,
@@ -1826,6 +2424,11 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 				rlimits: &vp.rlimits,
 				lineage: vp.lineage,
 				redirs,
+				ctty: vp
+					.zsh
+					.as_deref()
+					.and_then(|z| z.ctty.0.as_ref())
+					.and_then(crate::bash::fd::FdRef::os_handle),
 			};
 			let mut pending = cx.host.spawn(spec);
 			let mut tcx = Context::from_waker(&k.waker);
@@ -1844,6 +2447,33 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 		},
 		Target::Script(path) => run_script_file(k, vp, cx, line, path),
 	}
+}
+
+/// zsh `execute`: an `ARGV0` in an external command's environment is its
+/// `argv[0]` and leaves the environment (not under `restricted`).
+#[inline(never)]
+fn zsh_argv0(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vp: &Vproc,
+	mut argv: Vec<BString>,
+	env: EnvView,
+) -> (Vec<BString>, EnvView) {
+	if state::zsh_option(&mut k.root, cx.store, vp, ZshOpt::Restricted).unwrap_or(false) {
+		return (argv, env);
+	}
+	let Some(name) = env.get(b"ARGV0").map(BString::from) else {
+		return (argv, env);
+	};
+	if let Some(a0) = argv.first_mut() {
+		*a0 = name;
+	}
+	let pairs = env
+		.iter()
+		.filter(|(n, _)| &n[..] != b"ARGV0")
+		.map(|(n, v)| (BString::from(n), BString::from(v)))
+		.collect();
+	(argv, EnvView::new(pairs))
 }
 
 /// `argv` as an external gets it: `exec -a name` and `exec -l` apply.
@@ -1903,6 +2533,7 @@ fn spawned_external(
 		},
 		Ok(child) => {
 			k.forget_deferral(vp.vpid);
+			super::jobctl::spawned(k, vp, child.as_ref());
 			let pid = child.pid();
 			// The job this vproc may still settle is known by its program
 			// (`bang_dispatch` let only its lone or `exec`'d external
@@ -1971,7 +2602,39 @@ fn spawned_external(
 	None
 }
 
-/// zsh `addvars` (`ADDVAR_RESTRICT`) and `execute`: under `restricted` an
+/// The failure of a prefix assignment to `UID`, `EUID`, `GID` or `EGID`
+/// ([`super::zsh::specials::check_id_prefix`]). Out of line: zsh only.
+#[inline(never)]
+fn zsh_prefix_ids(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> Option<Diag> {
+	let s = st(vp);
+	let ids: Vec<(BString, BString)> = s
+		.assigns
+		.iter()
+		.zip(&s.values)
+		.filter_map(|((n, _), (index, v))| match v {
+			AssignValue::Scalar(text)
+				if index.is_none() && matches!(n.as_slice(), b"UID" | b"EUID" | b"GID" | b"EGID") =>
+			{
+				Some((n.clone(), text.clone()))
+			},
+			_ => None,
+		})
+		.collect();
+	if ids.is_empty() {
+		return None;
+	}
+	let mut log = Vec::new();
+	let ex = super::expand::Expander::new(k, cx, vp, &mut log, false, line);
+	for (name, value) in ids {
+		if let Err(super::expand::Stop::Fail(d) | super::expand::Stop::Fatal(d)) =
+			super::zsh::specials::check_id_prefix(&ex, &name, &value)
+		{
+			return Some(d);
+		}
+	}
+	None
+}
+
 /// zsh `addvars` (`ADDVAR_RESTRICT`) and `execute`: under `restricted` an
 /// external command neither gets a restricted parameter in its environment
 /// nor runs when named by a path. `true`: refused (reported, status 1).
@@ -2015,6 +2678,11 @@ fn call_function(
 		.iter()
 		.filter(|f| matches!(f.kind, FrameKind::Function { .. }))
 		.count() as u32;
+	if vp.mode.dialect() == crate::bash::ids::Dialect::Zsh
+		&& let Some(flow) = zsh_funcnest(k, vp, cx, line, &name, depth)
+	{
+		return Some(flow);
+	}
 	// `FUNCNEST` > 0 lowers the engine's limit; exceeding it abandons the
 	// whole command, as bash's `jump_to_top_level (DISCARD)`.
 	let funcnest = match state::lookup(&k.root, cx.store, vp, b"FUNCNEST") {
@@ -2053,7 +2721,7 @@ fn call_function(
 		};
 	// zsh `autoload` stub: load the definition from `$fpath` first.
 	if attrs.contains(Attrs::ZSH_UNDEFINED) {
-		return autoload(k, vp, cx, op, line, name, mode, attrs);
+		return autoload(k, vp, cx, op, line, name, mode, attrs, file, sticky);
 	}
 	let traced = attrs.contains(Attrs::TRACE);
 	let warn_nested = attrs.contains(Attrs::ZSH_WARN_NESTED);
@@ -2071,21 +2739,68 @@ fn call_function(
 			return Some(Flow::Discard(1));
 		},
 	};
+	let zsh = vp.mode.dialect() == crate::bash::ids::Dialect::Zsh;
 	let s = st(vp);
 	let args = s.argv[1..].to_vec();
-	let vars = scope_vars(&s.values, &s.assigns);
+	let vars = scope_vars(zsh, &s.values, &s.assigns);
 	s.waiting = Some(Awaited::Frame);
 	s.stage = Stage::Await;
-	let callee = Callee { name, body, mode, sticky, file, traced, warn_nested };
-	Some(push_call(k, vp, cx, callee, Call { args, vars, line, node: op.node, depth }))
+	let trace_once = attrs.contains(Attrs::ZSH_TRACE_ONCE);
+	let callee = Callee { name, body, mode, sticky, file, traced, trace_once, warn_nested };
+	let call = Call { args, vars, line, node: op.node, depth, argzero: None };
+	Some(push_call(k, vp, cx, callee, call))
 }
 
-/// zsh `loadautofn` for a call of the autoload stub `name` (defined in
-/// `mode` with `attrs`): find `name` in `$fpath`; zsh style (the default)
-/// the file is the body, which replaces the stub and is called; ksh style
-/// (`autoload -k`, `kshautoload` without `-z`) the file runs, defining the
-/// function, which is then called. Not found: `NAME: function definition
-/// file not found` (status 1).
+/// zsh `doshfunc`'s nesting check before a call of `name` with `depth`
+/// functions running: `FUNCNEST` (zsh's default 700 while unset) not
+/// negative and reached is `maximum nested function level reached;
+/// increase FUNCNEST?`, reported under the function's name at the calling
+/// line, and the command list is abandoned (status 1). Out of line, off
+/// the bash call path.
+#[inline(never)]
+fn zsh_funcnest(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	line: u32,
+	name: &[u8],
+	depth: u32,
+) -> Option<Flow> {
+	let funcnest = match state::lookup(&k.root, cx.store, vp, b"FUNCNEST") {
+		Ok(v) => v
+			.and_then(|v| v.as_scalar())
+			.map_or(Some(700), |s| builtins::number(s.trim_ascii())),
+		Err(err) => {
+			k.fail(err);
+			return Some(Flow::Discard(1));
+		},
+	};
+	let limit = funcnest.unwrap_or(0);
+	if limit < 0 || i64::from(depth) < limit {
+		return None;
+	}
+	let (_, zline) = k.zsh_site(cx, vp, line);
+	let msg = "maximum nested function level reached; increase FUNCNEST?";
+	let diag = Diag::Usage { msg: msg.into() };
+	let bytes = crate::bash::diag::render_zsh(&diag, crate::bash::diag::ZshSite {
+		prefix: name,
+		line:   zline,
+		utf8:   false,
+	});
+	vp.out
+		.push_back(super::proc::PendingWrite { fd: 2, bytes: bytes.into(), off: 0 });
+	vp.status = 1;
+	Some(Flow::Discard(1))
+}
+
+/// zsh `execautofn`/`loadautofn` for a call of the autoload stub `name`
+/// (defined in `mode` with `attrs`, loaded from directory `dir` when not
+/// empty, with sticky emulation `sticky`): find its definition
+/// ([`find_autoload`]); zsh style (the default) the file is the body,
+/// which replaces the stub and is called; ksh style (`autoload -k`,
+/// `kshautoload` without `-z`) the file runs, defining the function, which
+/// is then called. Not found: `NAME: function definition file not found`
+/// (status 1).
 #[expect(clippy::too_many_arguments, reason = "the call's whole context")]
 #[inline(never)]
 fn autoload(
@@ -2097,12 +2812,31 @@ fn autoload(
 	name: BString,
 	mode: crate::bash::ids::ModeId,
 	attrs: Attrs,
+	dir: BString,
+	sticky: Option<Box<crate::bash::store::Sticky>>,
 ) -> Option<Flow> {
-	let (path, text) = match fpath_file(k, vp, cx, &name) {
-		Ok(Some(found)) => found,
-		Ok(None) => {
-			let msg = format!("{name}: function definition file not found").into();
-			k.diag(cx, vp, line, Diag::Usage { msg });
+	let fpath = state::lookup(&k.root, cx.store, vp, b"FPATH")
+		.ok()
+		.flatten();
+	let fpath = fpath_dirs(fpath.as_ref().and_then(|v| v.as_scalar()));
+	let cwd = vp.cwd.clone();
+	let found = {
+		let mut ask = |p: Probe| command_probe(k, cx, vp, &p);
+		match find_autoload::<WaitKey>(&mut ask, &cwd, &name, attrs, &dir, &fpath, false) {
+			Ok(FpFound::File { dir, text }) => {
+				load_dir::<WaitKey>(&mut ask, &cwd, &dir).map(|d| FpFound::File { dir: d, text })
+			},
+			other => other,
+		}
+	};
+	let (dir, text) = match found {
+		Ok(FpFound::File { dir, text }) => (dir, text),
+		Ok(missing) => {
+			let d = match missing {
+				FpFound::Dump(dump) => super::builtins::zsh_zcompile::word_code_only(&dump),
+				_ => Diag::Usage { msg: format!("{name}: function definition file not found").into() },
+			};
+			k.diag(cx, vp, line, d);
 			let s = st(vp);
 			s.status = 1;
 			s.stage = Stage::Output;
@@ -2113,110 +2847,381 @@ fn autoload(
 	let ksh = attrs.contains(Attrs::ZSH_KSHSTORED)
 		|| (!attrs.contains(Attrs::ZSH_ZSHSTORED)
 			&& state::zsh_option(&mut k.root, cx.store, vp, ZshOpt::Kshautoload).unwrap_or(false));
+	let def = Autoloaded { name: &name, text: &text, dir: &dir, mode, attrs, sticky };
 	if ksh {
-		// The file defines the function; it is called with the same words.
-		state::store_record(&mut k.root, cx.store, vp, KeyBuf::Func(name.clone()), None);
-		let mut src = text.to_vec();
-		src.push(b'\n');
-		for word in &st(vp).argv {
-			src.extend_from_slice(&super::quote::sh_single_quote(word));
-			src.push(b' ');
-		}
-		src.push(b'\n');
-		let s = st(vp);
-		s.waiting = Some(Awaited::Frame);
-		s.stage = Stage::Await;
-		exec::push_script(vp, &src, 1, ScriptKind::Eval);
-		return Some(Flow::Call);
+		return ksh_autoload(k, vp, cx, op, line, def);
 	}
-	if !define_autoloaded(k, vp, cx, &name, &text, path, mode, attrs) {
+	if !define_autoloaded(k, vp, cx, def) {
 		let s = st(vp);
 		s.status = 1;
 		s.stage = Stage::Output;
 		return None;
 	}
-	call_function(k, vp, cx, op, line, name)
+	let flow = call_function(k, vp, cx, op, line, name);
+	mark_autoload_call(vp, matches!(flow, Some(Flow::Call)));
+	flow
 }
 
-/// zsh `getfpfunc`: the first regular file named `name` in a directory of
-/// `$fpath`, with its text; `Err` is the wait key of a probe in flight.
-fn fpath_file(
-	k: &Kernel,
+/// The call just pushed (`pushed`) runs a body its autoload loaded (zsh
+/// `execautofn_basic`'s `execode(…, "loadautofunc")`).
+fn mark_autoload_call(vp: &mut Vproc, pushed: bool) {
+	if pushed
+		&& let Some(FrameKind::Function { autoload, .. }) = vp.frames.last_mut().map(|f| &mut f.kind)
+	{
+		*autoload = true;
+	}
+}
+
+/// zsh `loadautofn` of a ksh-style definition file (`autoload -k`,
+/// `kshautoload`) for a call of stub `def.name`: the stub's call runs the
+/// file, which defines the function, then calls it with the call's
+/// arguments (the file sees them too). Out of line, rarely taken.
+#[inline(never)]
+fn ksh_autoload(
+	k: &mut Kernel,
 	vp: &mut Vproc,
 	cx: &mut Cx<'_>,
+	op: Op,
+	line: u32,
+	def: Autoloaded<'_>,
+) -> Option<Flow> {
+	let Autoloaded { name, text, dir, mode, attrs, sticky } = def;
+	let feat = match autoload_features(k, vp, cx, mode, sticky.as_deref()) {
+		Ok(f) => f,
+		Err(err) => {
+			k.fail(err);
+			return Some(Flow::Discard(1));
+		},
+	};
+	let fail = |vp: &mut Vproc| {
+		let s = st(vp);
+		s.status = 1;
+		s.stage = Stage::Output;
+		None
+	};
+	if parse_autoload(vp, name, text, feat).is_err() {
+		return fail(vp);
+	}
+	let quoted = super::quote::sh_single_quote(name);
+	let mut src = BString::from(quoted.as_slice());
+	src.extend_from_slice(b" () {\n");
+	src.extend_from_slice(text);
+	src.push(b'\n');
+	src.extend_from_slice(&quoted);
+	src.extend_from_slice(b" \"$@\"\n}\n");
+	// The body runs at once: lower what the definition deferred.
+	let lowered = ir::function_from_source_at(&src, mode, feat, 0).and_then(|f| {
+		if f.body.deferred.is_some() {
+			ir::materialize(&f.body, k.mask.contains(crate::bash::event::EventKind::UnitCompiled))
+		} else {
+			Some(Arc::unwrap_or_clone(f.body))
+		}
+	});
+	let Some(body) = lowered else {
+		let what =
+			format!("ksh-style autoloaded definition of {} that cannot be lowered", BStr::new(name));
+		k.diag(cx, vp, line, Diag::Unsupported { what: what.into() });
+		return fail(vp);
+	};
+	// The file's definition replaces the stub (a file that defines nothing
+	// leaves the function unknown).
+	state::store_record(&mut k.root, cx.store, vp, KeyBuf::Func(BString::from(name)), None);
+	let body = k.engine.intern(body);
+	exec::announce(k, cx, vp.vpid, vp.runs.front(), &body, body.line);
+	let depth = call_depth(vp);
+	let mut file = BString::from(dir);
+	file.push(b'/');
+	file.extend_from_slice(name);
+	let zsh = vp.mode.dialect() == crate::bash::ids::Dialect::Zsh;
+	let s = st(vp);
+	let args = s.argv[1..].to_vec();
+	let vars = scope_vars(zsh, &s.values, &s.assigns);
+	s.waiting = Some(Awaited::Frame);
+	s.stage = Stage::Await;
+	let callee = Callee {
+		name: BString::from(name),
+		body,
+		mode,
+		sticky,
+		file,
+		traced: attrs.contains(Attrs::TRACE),
+		trace_once: attrs.contains(Attrs::ZSH_TRACE_ONCE),
+		warn_nested: attrs.contains(Attrs::ZSH_WARN_NESTED),
+	};
+	let call = Call { args, vars, line, node: op.node, depth, argzero: None };
+	let flow = push_call(k, vp, cx, callee, call);
+	mark_autoload_call(vp, matches!(flow, Flow::Call));
+	Some(flow)
+}
+
+/// The features an autoloaded file of a function defined in `mode` parses
+/// with: the options of its sticky emulation `sticky` (zsh loads it
+/// after the call switched to it), else the current ones; `#` starts a
+/// comment whatever `interactivecomments` says (zsh `getfpfunc` parses it
+/// as a string).
+fn autoload_features(
+	k: &mut Kernel,
+	vp: &Vproc,
+	cx: &mut Cx<'_>,
+	mode: crate::bash::ids::ModeId,
+	sticky: Option<&crate::bash::store::Sticky>,
+) -> Result<crate::bash::syntax::Features, StoreError> {
+	let feat = match sticky {
+		Some(s) => super::mode::sticky_features(&mut k.root, cx.store, vp, s)?,
+		None => {
+			super::mode::features(&mut k.root, cx.store, vp, crate::bash::syntax::Features::NONE)?
+		},
+	};
+	Ok(if mode.dialect() == crate::bash::ids::Dialect::Zsh {
+		feat | crate::bash::syntax::Features::ZSH_INTERACTIVE_COMMENTS
+	} else {
+		feat
+	})
+}
+
+/// Validate autoloaded file `text` (zsh `parse_string` in `getfpfunc`),
+/// retaining its command when there is exactly one. Syntax errors are
+/// reported under the function's name, as with zsh's `scriptname`.
+fn parse_autoload(
+	vp: &mut Vproc,
 	name: &[u8],
-) -> Result<Option<(BString, BString)>, WaitKey> {
-	let fpath = state::lookup(&k.root, cx.store, vp, b"FPATH")
-		.ok()
-		.flatten()
-		.and_then(|v| v.as_scalar().map(BString::from))
-		.unwrap_or_default();
-	for dir in fpath.split(|&c| c == b':').filter(|d| !d.is_empty()) {
-		let mut path = BString::from(dir);
-		path.push(b'/');
-		path.extend_from_slice(name);
-		let path = absolute(&vp.cwd, &path);
+	text: &[u8],
+	feat: crate::bash::syntax::Features,
+) -> Result<Option<crate::bash::syntax::CompleteCommand>, ()> {
+	let mut parser = crate::bash::syntax::Parser::new(text, feat, crate::bash::syntax::NO_ALIASES);
+	let mut first = None;
+	let mut count = 0;
+	while let Some(cmd) = parser.next_command() {
+		match cmd {
+			Ok(cc) => {
+				count += 1;
+				first = (count == 1).then_some(cc);
+			},
+			Err(e) => {
+				let mut bytes = Vec::new();
+				for (line, msg) in e
+					.detail()
+					.into_iter()
+					.map(|w| (w.line, w.bash_msg))
+					.chain([(e.line, e.bash_msg())])
+				{
+					let diag = Diag::Syntax { msg: msg.into() };
+					let site = crate::bash::diag::ZshSite { prefix: name, line, utf8: false };
+					bytes.extend_from_slice(&crate::bash::diag::render_zsh(&diag, site));
+				}
+				vp.out
+					.push_back(PendingWrite { fd: 2, bytes: bytes.into(), off: 0 });
+				return Err(());
+			},
+		}
+	}
+	Ok(first)
+}
+
+/// The directories of `$fpath` (its `FPATH` text): none when empty; an
+/// empty element is the working directory.
+pub fn fpath_dirs(fpath: Option<&[u8]>) -> Vec<BString> {
+	match fpath {
+		None | Some([]) => Vec::new(),
+		Some(f) => f.split(|&c| c == b':').map(BString::from).collect(),
+	}
+}
+
+/// What zsh `getfpfunc` found for a function.
+pub enum FpFound {
+	/// Its definition file's text, and the directory it is in as searched
+	/// (empty: the working directory).
+	File {
+		/// The directory as searched.
+		dir:  BString,
+		/// The file's text.
+		text: BString,
+	},
+	/// Only a word code file holds it (the engine runs source text only).
+	Dump(BString),
+	/// Nowhere.
+	None,
+}
+
+/// zsh `getfpfunc`: the first regular file `name` in `dirs` (relative to
+/// `cwd`), answered through `ask`.
+///
+/// # Errors
+/// What `ask` fails with (a probe in flight).
+pub fn getfpfunc<E>(
+	ask: &mut super::builtins::zsh_zcompile::Ask<'_, E>,
+	cwd: &[u8],
+	name: &[u8],
+	dirs: &[BString],
+) -> Result<FpFound, E> {
+	for dir in dirs {
+		let mut rel = BString::from(dir.as_slice());
+		if !rel.is_empty() {
+			rel.push(b'/');
+		}
+		rel.extend_from_slice(name);
+		let path = absolute(cwd, &rel);
 		let regular = matches!(
-			command_probe(k, cx, vp, &Probe::Stat { path: path.clone(), follow: true })?,
+			ask(Probe::Stat { path: path.clone(), follow: true })?,
 			ProbeResult::Stat(Some(st)) if st.kind != StatKind::Dir
 		);
 		if !regular {
+			// zsh loads a definition from word code alone (`DIR.zwc`,
+			// `DIR/NAME.zwc`, a digest in `$fpath`).
+			if let Some(dump) = super::builtins::zsh_zcompile::fpath_dump::<E>(ask, cwd, dir, name)? {
+				return Ok(FpFound::Dump(dump));
+			}
 			continue;
 		}
-		if let ProbeResult::Bytes(Ok(text)) =
-			command_probe(k, cx, vp, &Probe::Read { path: path.clone() })?
-		{
-			return Ok(Some((path, text)));
+		if let ProbeResult::Bytes(Ok(text)) = ask(Probe::Read { path })? {
+			return Ok(FpFound::File { dir: dir.clone(), text });
 		}
 	}
-	Ok(None)
+	Ok(FpFound::None)
 }
 
-/// Define function `name` from autoloaded file text `text` read from
-/// `path` (zsh style: the text is the body), keeping its attributes but
-/// the autoload ones. `false` when the text does not parse (reported).
-#[expect(clippy::too_many_arguments, reason = "the definition's whole context")]
+/// zsh `loadautofn`'s search for the definition of stub `name` with
+/// `attrs`: its load directory `dir` (absolute) when it has one, then
+/// `$fpath` (`fpath`) if not found there and `current_fpath` (`-d`) or
+/// the stub's `autoload -d`; else `$fpath`.
+///
+/// # Errors
+/// What `ask` fails with (a probe in flight).
+pub fn find_autoload<E>(
+	ask: &mut super::builtins::zsh_zcompile::Ask<'_, E>,
+	cwd: &[u8],
+	name: &[u8],
+	attrs: Attrs,
+	dir: &[u8],
+	fpath: &[BString],
+	current_fpath: bool,
+) -> Result<FpFound, E> {
+	if dir.first() == Some(&b'/') {
+		let found = getfpfunc(ask, cwd, name, &[BString::from(dir)])?;
+		if !matches!(found, FpFound::None) || !(current_fpath || attrs.contains(Attrs::ZSH_CUR_FPATH))
+		{
+			return Ok(found);
+		}
+	}
+	getfpfunc(ask, cwd, name, fpath)
+}
+
+/// zsh `dircache_set`'s directory: `dir` if absolute, else the working
+/// directory `cwd` and it with the symbolic links resolved (zsh
+/// `xsymlink`).
+///
+/// # Errors
+/// What `ask` fails with (a probe in flight).
+pub fn load_dir<E>(
+	ask: &mut super::builtins::zsh_zcompile::Ask<'_, E>,
+	cwd: &[u8],
+	dir: &[u8],
+) -> Result<BString, E> {
+	if dir.first() == Some(&b'/') {
+		return Ok(BString::from(dir));
+	}
+	let mut path = BString::from(cwd);
+	if !path.ends_with(b"/") {
+		path.push(b'/');
+	}
+	path.extend_from_slice(dir);
+	let mut cut = path.len();
+	loop {
+		if cut > 0
+			&& let ProbeResult::Path(Some(mut real)) =
+				ask(Probe::RealPath { path: BString::from(&path[..cut]) })?
+		{
+			real.extend_from_slice(&path[cut..]);
+			return Ok(real);
+		}
+		if cut == 0 {
+			return Ok(path);
+		}
+		cut = path[..cut].iter().rposition(|&c| c == b'/').unwrap_or(0);
+	}
+}
+
+/// An autoloaded definition to install ([`define_autoloaded`]).
+pub struct Autoloaded<'a> {
+	/// The function.
+	pub name:   &'a [u8],
+	/// Its file's text.
+	pub text:   &'a [u8],
+	/// The directory it was loaded from (absolute).
+	pub dir:    &'a [u8],
+	/// The mode the stub was defined in.
+	pub mode:   crate::bash::ids::ModeId,
+	/// The stub's attributes.
+	pub attrs:  Attrs,
+	/// The stub's sticky emulation: the file parses under its options.
+	pub sticky: Option<Box<crate::bash::store::Sticky>>,
+}
+
+/// Define function `def.name` from its autoloaded file (zsh `loadautofn`,
+/// zsh style: the text is the body; zsh `stripkshdef`: a file that is
+/// exactly one definition of the function gives that definition's body),
+/// keeping the stub's attributes but the autoload ones; its file is
+/// `DIR/NAME` and its lines are the file's. `false` when the text does not
+/// parse: the error is reported under the function's name (zsh parses the
+/// file with `scriptname` set to it).
 pub fn define_autoloaded(
 	k: &mut Kernel,
 	vp: &mut Vproc,
 	cx: &mut Cx<'_>,
-	name: &[u8],
-	text: &[u8],
-	path: BString,
-	mode: crate::bash::ids::ModeId,
-	attrs: Attrs,
+	def: Autoloaded<'_>,
 ) -> bool {
-	let mut src = BString::from(name);
-	src.extend_from_slice(b" () {\n");
-	src.extend_from_slice(text);
-	src.extend_from_slice(b"\n}\n");
-	let feat =
-		match super::mode::features(&mut k.root, cx.store, vp, crate::bash::syntax::Features::NONE) {
-			Ok(f) => f,
-			Err(err) => {
-				k.fail(err);
-				return false;
-			},
-		};
-	// zsh `stripkshdef`: a file that is exactly one definition of `name`
-	// gives that definition's body.
-	let lone = ir::function_from_source(text, mode, feat).filter(|f| f.name.as_slice() == name);
-	let Some(f) = lone.or_else(|| ir::function_from_source(&src, mode, feat)) else {
-		let line = exec::current_line(vp);
-		let msg = format!("{}: parse error in autoloaded file", BStr::new(name)).into();
-		k.diag(cx, vp, line, Diag::Usage { msg });
+	let Autoloaded { name, text, dir, mode, attrs, sticky } = def;
+	let feat = match autoload_features(k, vp, cx, mode, sticky.as_deref()) {
+		Ok(f) => f,
+		Err(err) => {
+			k.fail(err);
+			return false;
+		},
+	};
+	let Ok(command) = parse_autoload(vp, name, text, feat) else {
 		return false;
 	};
-	let unit = k.engine.intern(*f.body);
-	k.persist_unit(cx.store, &unit);
-	exec::announce(k, cx, vp.vpid, vp.runs.front(), &unit, unit.line);
+	let lone = command
+		.as_ref()
+		.and_then(|cc| ir::function_from_parsed(cc, text, mode, feat))
+		.filter(|f| f.name.as_slice() == name);
+	let f = lone.or_else(|| {
+		// Line 0 holds the wrapper: the body's lines are the file's.
+		let mut src = BString::from(name);
+		src.extend_from_slice(b" () {\n");
+		src.extend_from_slice(text);
+		src.extend_from_slice(b"\n}\n");
+		ir::function_from_source_at(&src, mode, feat, 0)
+	});
+	let Some(f) = f else {
+		let what = format!("autoloaded definition of {} that cannot be lowered", BStr::new(name));
+		let line = exec::current_line(vp);
+		k.diag(cx, vp, line, Diag::Unsupported { what: what.into() });
+		return false;
+	};
+	// A deferred body (no ops yet) is only persisted: `load_unit` lowers it
+	// at the first call, so it must not sit in the executable-unit cache.
+	let compiled = f
+		.body
+		.deferred
+		.is_none()
+		.then(|| k.engine.intern((*f.body).clone()));
+	let unit = compiled.as_deref().unwrap_or(&f.body);
+	k.persist_unit(cx.store, unit);
+	if compiled.is_some() {
+		exec::announce(k, cx, vp.vpid, vp.runs.front(), unit, unit.line);
+	}
+	let unit_id = unit.id;
 	let attrs = attrs
 		.without(Attrs::ZSH_UNDEFINED)
 		.without(Attrs::ZSH_KSHSTORED)
 		.without(Attrs::ZSH_ZSHSTORED)
 		.without(Attrs::ZSH_UNALIASED);
-	let sticky = vp.sticky().cloned().map(Box::new);
-	let rec = Record::Func { mode, sticky, source: f.source, unit: unit.id, attrs, file: path };
+	let mut file = BString::from(dir);
+	file.push(b'/');
+	file.extend_from_slice(name);
+	let rec =
+		Record::Func { mode, sticky, source: ir::FuncText::of(&f), unit: unit_id, attrs, file };
 	state::store_record(&mut k.root, cx.store, vp, KeyBuf::Func(BString::from(name)), Some(rec));
 	true
 }
@@ -2233,10 +3238,16 @@ fn load_body(
 	mode: crate::bash::ids::ModeId,
 ) -> Result<Option<Arc<Unit>>, StoreError> {
 	if let Some(unit) = k.engine.cached(&unit_id) {
+		exec::announce(k, cx, vp.vpid, vp.runs.front(), &unit, unit.line);
 		return Ok(Some(unit));
 	}
 	k.clock_stale();
-	match super::frames::load_unit(&k.engine, cx.store, unit_id) {
+	match super::frames::load_unit(
+		&k.engine,
+		cx.store,
+		unit_id,
+		k.mask.contains(crate::bash::event::EventKind::UnitCompiled),
+	) {
 		Ok(u) => {
 			exec::announce(k, cx, vp.vpid, vp.runs.front(), &u, u.line);
 			return Ok(Some(u));
@@ -2250,7 +3261,7 @@ fn load_body(
 	// after it).
 	k.clock_stale();
 	let source = match state::record(cx.store, vp, Key::Func(BStr::new(name)))? {
-		Some(Record::Func { source, .. }) => source.clone(),
+		Some(Record::Func { source, .. }) => (**source).clone(),
 		_ => BString::default(),
 	};
 	let feat = if mode.dialect() == crate::bash::ids::Dialect::Zsh {
@@ -2261,7 +3272,7 @@ fn load_body(
 	let Some(f) = ir::function_from_source(&source, mode, feat) else {
 		return Ok(None);
 	};
-	let unit = k.engine.intern(*f.body);
+	let unit = k.engine.intern(Arc::unwrap_or_clone(f.body));
 	exec::announce(k, cx, vp.vpid, vp.runs.front(), &unit, unit.line);
 	Ok(Some(unit))
 }
@@ -2275,38 +3286,55 @@ struct Callee {
 	sticky:      Option<Box<crate::bash::store::Sticky>>,
 	/// The file it was defined in.
 	file:        BString,
-	/// `declare -ft`.
+	/// `declare -ft` (zsh `functions -t`, `PM_TAGGED`).
 	traced:      bool,
+	/// zsh `functions -T` / `function -T` (`PM_TAGGED_LOCAL`).
+	trace_once:  bool,
 	/// zsh `functions -W`.
 	warn_nested: bool,
 }
 
 /// How a function is called.
 struct Call {
-	args:  Vec<BString>,
+	args:    Vec<BString>,
 	/// Prefix assignments, locals of its scope.
-	vars:  VarMap,
+	vars:    VarMap,
 	/// The calling line.
-	line:  u32,
+	line:    u32,
 	/// The calling command's node (`FuncEnter`).
-	node:  u32,
+	node:    u32,
 	/// Function frames already running.
-	depth: u32,
+	depth:   u32,
+	/// Its `$0` when not the function's name (a zsh math function's
+	/// name, zsh `callmathfunc`).
+	argzero: Option<BString>,
 }
 
 /// Push a function frame with its scope (positional parameters, prefix
 /// assignments as locals) and run its entry (bash `execute_function`, zsh
 /// `doshfunc`: options, sticky emulation, trap scope).
 fn push_call(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, callee: Callee, call: Call) -> Flow {
-	let Callee { name, body, mode, sticky, file, traced, warn_nested } = callee;
-	let Call { args, vars, line, node, depth } = call;
+	let Callee { name, body, mode, sticky, file, traced, trace_once, warn_nested } = callee;
+	let Call { args, vars, line, node, depth, argzero } = call;
 	let zsh_body = body.mode.dialect() == crate::bash::ids::Dialect::Zsh;
 	let entry_line = super::callstack::body_line(&body);
-	let mut frame =
-		Frame::new(Some(body), 0, FrameKind::Function { name: name.clone(), zsh: false });
+	let mut frame = Frame::new(Some(body), 0, FrameKind::Function {
+		name:     name.clone(),
+		zsh:      false,
+		autoload: false,
+	});
 	// bash saves the getopts state on entry (restored on return when the
-	// function made `OPTIND` local).
-	if vp.getopts != super::proc::GetoptsState::default() {
+	// function made `OPTIND` local); zsh saves `OPTIND` and starts afresh
+	// (restored on return without `POSIX_BUILTINS`).
+	if zsh_body {
+		match builtins::zsh_vars::optind_enter(&mut k.root, cx.store, vp) {
+			Ok(saved) => frame.getopts = saved,
+			Err(err) => {
+				k.fail(err);
+				return Flow::Discard(1);
+			},
+		}
+	} else if vp.getopts != super::proc::GetoptsState::default() {
 		frame.getopts = Some(Box::new(vp.getopts.clone()));
 	}
 	// A function with the trace attribute (`declare -ft`) inherits the
@@ -2323,8 +3351,13 @@ fn push_call(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, callee: Callee, ca
 	{
 		None
 	} else {
-		match zsh_enter_call(k, vp, cx, &name, mode, sticky.as_deref(), zsh_body, warn_nested) {
-			Ok(zsh) => zsh,
+		let trace = (traced, trace_once);
+		match zsh_enter_call(k, vp, cx, &name, mode, sticky.as_deref(), zsh_body, warn_nested, trace)
+		{
+			Ok((zsh, local)) => {
+				frame.trace_local = local;
+				zsh
+			},
 			Err(err) => {
 				k.fail(err);
 				return Flow::Discard(1);
@@ -2347,6 +3380,14 @@ fn push_call(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, callee: Callee, ca
 		k.emit_op_at(cx, vp, node, data, t_ns);
 	}
 	vp.frames.push(frame);
+	// zsh's function wrappers (zsh/zprof, zsh/example): nothing unless their
+	// module is loaded.
+	if zsh_body {
+		builtins::zsh_mod_zprof::enter(k, vp, cx, &name, line);
+		// zsh/complete's `comp_wrapper` (inside completion functions only).
+		super::zle::comp::complete::wrap_enter(vp);
+		builtins::zsh_mod_example::enter(k, vp, cx, &name);
+	}
 	// The call-stack level, before the scope: `BASH_ARGV`'s base is the
 	// caller's positional parameters.
 	if let Err(err) =
@@ -2354,7 +3395,7 @@ fn push_call(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, callee: Callee, ca
 	{
 		k.fail(err);
 	}
-	let scope = Scope { vars, positional: Some(args), func: Some(name), zsh };
+	let scope = Scope { vars, positional: Some(args), func: Some(argzero.unwrap_or(name)), zsh };
 	state::push_scope(&mut k.root, cx.store, vp, scope);
 	// `$?` at the function's entry is the caller's (bash's
 	// `execute_function` leaves `last_command_exit_value` alone).
@@ -2376,7 +3417,12 @@ fn push_call(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, callee: Callee, ca
 /// -W` turns `WARN_NESTED_VAR` on for the call, a call from such a
 /// function turns it off, except in an anonymous function, which inherits
 /// it (before the scope: the innermost function is still the caller). What
-/// the return restores, if anything. Out of line, off the bash call path.
+/// the return restores, if anything. `functions -t`/`-T` (`trace`: the
+/// callee's `PM_TAGGED`, `PM_TAGGED_LOCAL`) turn `xtrace` on for the call;
+/// a named function called from a `-T` call runs with it off, an
+/// anonymous one inherits the `-T` (the second value: the call's
+/// `PM_TAGGED_LOCAL`, [`Frame::trace_local`]). Out of line, off the bash
+/// call path.
 #[inline(never)]
 fn zsh_enter_call(
 	k: &mut Kernel,
@@ -2387,10 +3433,35 @@ fn zsh_enter_call(
 	sticky: Option<&crate::bash::store::Sticky>,
 	zsh_body: bool,
 	warn_nested: bool,
-) -> Result<Option<Box<crate::bash::store::ZshScope>>, StoreError> {
+	(tagged, tagged_local): (bool, bool),
+) -> Result<(Option<Box<crate::bash::store::ZshScope>>, bool), StoreError> {
 	let mut zsh = super::mode::enter_call(&mut k.root, cx.store, vp, mode, sticky)?;
 	if !zsh_body {
-		return Ok(zsh);
+		return Ok((zsh, false));
+	}
+	let mut local = tagged_local;
+	if zsh.is_some() {
+		let caller_local = vp
+			.frames
+			.iter()
+			.rev()
+			.find(|f| matches!(f.kind, FrameKind::Function { .. }))
+			.is_some_and(|f| f.trace_local);
+		let xtrace = if tagged || tagged_local {
+			Some(true)
+		} else if caller_local {
+			if name == ir::ANON.as_bytes() {
+				local = true;
+				None
+			} else {
+				Some(false)
+			}
+		} else {
+			None
+		};
+		if let Some(on) = xtrace {
+			state::set_zsh_option(&mut k.root, cx.store, vp, ZshOpt::Xtrace, on)?;
+		}
 	}
 	if let Some(z) = zsh.as_mut() {
 		z.traps = builtins::trap::start_scope(&mut k.root, cx.store, vp)?;
@@ -2405,7 +3476,7 @@ fn zsh_enter_call(
 			state::set_zsh_option(&mut k.root, cx.store, vp, ZshOpt::Warnnestedvar, on)?;
 		}
 	}
-	Ok(zsh)
+	Ok((zsh, local))
 }
 
 /// Whether the innermost running function (past anonymous ones, which
@@ -2454,6 +3525,9 @@ pub fn call_anon(
 	// Back from the body.
 	if current_exec(vp).is_some_and(|e| e.waiting == Some(Awaited::Frame)) {
 		let status = vp.status;
+		// zsh/zprof's wrapper after the call (nothing unless it is loaded).
+		builtins::zsh_mod_zprof::leave(k, vp, cx);
+		super::zle::comp::complete::wrap_leave(vp);
 		exec::clear_scratch(&mut k.root, cx.store, vp);
 		vp.status = status;
 		if let Some(pending) = exec::zsh_exit_pending(vp) {
@@ -2483,8 +3557,48 @@ pub fn call_anon(
 	{
 		return flow;
 	}
+	// zsh `execfuncdef`: `$_` is the last argument (empty without one);
+	// the call brings it back when it returns.
+	state::store_record(
+		&mut k.root,
+		cx.store,
+		vp,
+		KeyBuf::Misc(MiscKey::LastArg),
+		args
+			.last()
+			.filter(|w| !w.is_empty())
+			.cloned()
+			.map(Record::Misc),
+	);
+	// zsh `execshfunc`: the call traced as its name and arguments.
+	if xtrace::on(k, cx, vp) {
+		let q = xtrace::ZshQuote::of(k, cx, vp);
+		let mut out = xtrace::ps4(k, cx, vp, line);
+		q.push(&mut out, ir::ANON.as_bytes());
+		for a in &args {
+			out.push(b' ');
+			q.push(&mut out, a);
+		}
+		out.push(b'\n');
+		xtrace::write(k, cx, vp, out);
+	}
 	let f = &unit.funcs[op.a as usize];
-	let body = k.engine.intern((*f.body).clone());
+	// A lazily lowered body (`Unit::deferred`, no ops yet) is lowered at
+	// its call, as `frames::load_unit` does for named functions.
+	let body = if let Some(u) = k.engine.cached(&f.body.id) {
+		u
+	} else if f.body.deferred.is_some() {
+		let Some(b) =
+			ir::materialize(&f.body, k.mask.contains(crate::bash::event::EventKind::UnitCompiled))
+		else {
+			let what = "an anonymous function body that cannot be lowered";
+			k.diag(cx, vp, line, crate::bash::diag::Diag::Unsupported { what: what.into() });
+			return Flow::Discard(1);
+		};
+		k.engine.intern(b)
+	} else {
+		k.engine.intern((*f.body).clone())
+	};
 	exec::announce(k, cx, vp.vpid, vp.runs.front(), &body, body.line);
 	let tag =
 		CmdTag { run: vp.runs.front().map_or(RunId(0), |r| r.id), vpid: vp.vpid, seq: k.next_cmd };
@@ -2500,10 +3614,80 @@ pub fn call_anon(
 		sticky: None,
 		file: BString::default(),
 		traced: false,
+		trace_once: op.flags & Op::TRACED != 0,
 		warn_nested: false,
 	};
 	let depth = call_depth(vp);
-	let call = Call { args, vars: VarMap::default(), line, node: op.node, depth };
+	let call = Call { args, vars: VarMap::default(), line, node: op.node, depth, argzero: None };
+	push_call(k, vp, cx, callee, call)
+}
+
+/// zsh `callmathfunc`'s `doshfunc` for [`Stop::MathCall`]: call the shell
+/// function `call.func` (defined) in the current shell with `$0`
+/// `call.argzero` and `call.args`, above the op that parked
+/// ([`super::proc::PendingSub::Math`] in its scratch `sc`: the op replays
+/// with the function's value and status logged in its replay log `slot`).
+pub fn start_math_call(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	sc: &mut Scratch,
+	slot: Slot,
+	call: &super::expand::MathCall,
+	line: u32,
+) -> Flow {
+	let name = call.func.clone();
+	let (unit_id, mode, sticky, file, attrs) =
+		match state::record(cx.store, vp, Key::Func(BStr::new(&name))) {
+			Ok(Some(Record::Func { unit, mode, sticky, file, attrs, .. }))
+				if !attrs.contains(Attrs::ZSH_UNDEFINED) =>
+			{
+				(*unit, *mode, sticky.clone(), file.clone(), *attrs)
+			},
+			Ok(_) => {
+				let msg = format!("no such function: {name}");
+				k.diag(cx, vp, line, Diag::BadMathExpr { msg: msg.into() });
+				return Flow::Discard(1);
+			},
+			Err(err) => {
+				k.fail(err);
+				return Flow::Discard(1);
+			},
+		};
+	let depth = call_depth(vp);
+	if let Some(flow) = zsh_funcnest(k, vp, cx, line, &name, depth) {
+		return flow;
+	}
+	let body = match load_body(k, vp, cx, &name, unit_id, mode) {
+		Ok(Some(u)) => u,
+		Ok(None) => {
+			k.diag(cx, vp, line, Diag::Lost { name });
+			return Flow::Discard(1);
+		},
+		Err(err) => {
+			k.fail(err);
+			return Flow::Discard(1);
+		},
+	};
+	sc.sub = Some(super::proc::PendingSub::Math { status: vp.status, slot });
+	let callee = Callee {
+		name,
+		body,
+		mode,
+		sticky,
+		file,
+		traced: attrs.contains(Attrs::TRACE),
+		trace_once: attrs.contains(Attrs::ZSH_TRACE_ONCE),
+		warn_nested: attrs.contains(Attrs::ZSH_WARN_NESTED),
+	};
+	let call = Call {
+		args: call.args.clone(),
+		vars: VarMap::default(),
+		line,
+		node: 0,
+		depth,
+		argzero: Some(call.argzero.clone()),
+	};
 	push_call(k, vp, cx, callee, call)
 }
 
@@ -2532,7 +3716,7 @@ pub fn call_record(
 		else {
 			return false;
 		};
-		let unit = k.engine.intern(*f.body);
+		let unit = k.engine.intern(Arc::unwrap_or_clone(f.body));
 		exec::announce(k, cx, vp.vpid, vp.runs.front(), &unit, unit.line);
 		unit
 	} else {
@@ -2552,10 +3736,11 @@ pub fn call_record(
 		sticky: sticky.clone(),
 		file: file.clone(),
 		traced: attrs.contains(Attrs::TRACE),
+		trace_once: attrs.contains(Attrs::ZSH_TRACE_ONCE),
 		warn_nested: attrs.contains(Attrs::ZSH_WARN_NESTED),
 	};
 	let depth = call_depth(vp);
-	let call = Call { args, vars: VarMap::default(), line, node: 0, depth };
+	let call = Call { args, vars: VarMap::default(), line, node: 0, depth, argzero: None };
 	matches!(push_call(k, vp, cx, callee, call), Flow::Call)
 }
 
@@ -2581,10 +3766,11 @@ fn run_builtin(
 	// assignments (they persist): move them out of the temporary scope
 	// (once; a re-run finds none left). zsh: under `posixbuiltins`, for its
 	// `BINF_PSPECIAL`/`BINF_ASSIGN` builtins not run through `command`
-	// (`execcmd_exec`'s `do_save`).
+	// (`execcmd_exec`'s `do_save`), and for `exec` with only redirections
+	// (`nullexec`, which skips `save_params`).
 	if !st(vp).values.is_empty()
 		&& if vp.mode.dialect() == crate::bash::ids::Dialect::Zsh {
-			zsh_pspecial(id)
+			(zsh_pspecial(id) || id == IntrinsicId::Exec)
 				&& !st(vp).via_command
 				&& state::zsh_option(&mut k.root, cx.store, vp, ZshOpt::Posixbuiltins).unwrap_or(false)
 		} else {
@@ -2637,93 +3823,12 @@ fn run_builtin(
 		debug_assert_eq!(placeholder.capacity(), 0, "builtin log placeholder");
 		std::mem::forget(placeholder);
 		match res {
-			Ok((mut outcome, chunks, fatal)) => {
+			Ok((outcome, chunks, fatal)) => {
 				sc.logs[Slot::Builtin as usize].clear();
-				// A special builtin's usage error ends a posix shell.
-				if fatal
-					&& outcome.status != 0
-					&& is_special(id)
-					&& matches!(outcome.control, Control::None | Control::Return)
-					&& state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
-						.unwrap_or(false)
-				{
-					outcome.control = Control::Exit;
-				}
-				for c in chunks {
-					let (fd, bytes) = match c {
-						Chunk::Out(fd, b) => (fd, b),
-						Chunk::Diag(d) => (2, k.render_diag(cx, vp, line, &d)),
-					};
-					sc.exec
-						.as_mut()
-						.expect("exec")
-						.writes
-						.push_back(PendingWrite { fd, bytes: bytes.into(), off: 0 });
-				}
-				let e = sc.exec.as_mut().expect("exec");
-				e.status = outcome.status;
-				let flow = match outcome.control {
-					Control::None => {
-						e.stage = Stage::Output;
-						None
-					},
-					Control::Frame => {
-						e.waiting = Some(Awaited::Frame);
-						e.stage = Stage::Await;
-						Some(Flow::Call)
-					},
-					Control::Resume => {
-						e.waiting = Some(Awaited::Frame);
-						e.resume = true;
-						e.stage = Stage::Await;
-						Some(Flow::Call)
-					},
-					Control::Wait(w) => {
-						e.wait_for = w.children;
-						e.wait_into = w.into.map(Box::new);
-						e.waiting = Some(if w.any {
-							Awaited::AnyJob
-						} else if w.all {
-							Awaited::AllJobs
-						} else {
-							Awaited::Jobs { force: w.force }
-						});
-						e.stage = Stage::Await;
-						None
-					},
-					Control::Return => {
-						e.control = Some(Transfer::Return(outcome.status));
-						e.stage = Stage::Output;
-						None
-					},
-					Control::Break { n, cont } => {
-						e.control = Some(Transfer::Break { n, cont });
-						e.stage = Stage::Output;
-						None
-					},
-					Control::DiscardAll => {
-						e.control = Some(Transfer::DiscardAll(outcome.status));
-						e.stage = Stage::Output;
-						None
-					},
-					Control::Exit => {
-						e.control = Some(Transfer::Exit(outcome.status));
-						e.stage = Stage::Output;
-						None
-					},
-				};
-				// A pushed frame sits above; the scratch belongs to the frame below
-				// it.
-				let at = if matches!(flow, Some(Flow::Call)) {
-					vp.frames.len() - 2
-				} else {
-					vp.frames.len() - 1
-				};
-				vp.frames[at].scratch = Some(sc);
-				return flow;
+				return settle_builtin(k, vp, cx, line, id, sc, outcome, chunks, fatal);
 			},
 			Err(Need::Probe(p)) => {
-				let r = probe::perform(k, cx, vp, &mut sc, &p);
+				let r = probe::perform_mut(k, cx, vp, &mut sc, &p);
 				vp.frames.last_mut().expect("frame").scratch = Some(sc);
 				if let Err(key) = r {
 					return Some(Flow::Block(key));
@@ -2734,7 +3839,11 @@ fn run_builtin(
 				k.fail(err);
 				return Some(Flow::Discard(1));
 			},
-			Err(Need::Sub(stop @ (Stop::ZshSub { .. } | Stop::Probe(_)))) => {
+			Err(Need::Park(key)) => {
+				vp.frames.last_mut().expect("frame").scratch = Some(sc);
+				return Some(Flow::Block(key));
+			},
+			Err(Need::Sub(stop @ (Stop::ZshSub { .. } | Stop::MathCall(_) | Stop::Probe(_)))) => {
 				if let Some(flow) = builtin_zsh_stop(k, vp, cx, sc, line, stop) {
 					return Some(flow);
 				}
@@ -2755,6 +3864,125 @@ fn run_builtin(
 	}
 }
 
+/// The state a builtin that ran to its end leaves: its output queued, its
+/// status and control transfer (`return`, `exit`, a pushed frame, a wait)
+/// on the command's exec state, the scratch placed on the frame it belongs
+/// to. `fatal`: its usage error ends a posix shell.
+#[expect(clippy::too_many_arguments, reason = "the parts of one finished builtin run")]
+fn settle_builtin(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	line: u32,
+	id: IntrinsicId,
+	mut sc: Box<Scratch>,
+	mut outcome: builtins::Outcome,
+	chunks: Vec<Chunk>,
+	fatal: bool,
+) -> Option<Flow> {
+	// A special builtin's usage error ends a posix shell.
+	if fatal
+		&& outcome.status != 0
+		&& is_special(id)
+		&& matches!(outcome.control, Control::None | Control::Return)
+		&& state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix).unwrap_or(false)
+	{
+		outcome.control = Control::Exit;
+	}
+	// zsh `execcmd`'s `fatal:`: under `posixbuiltins` an error
+	// (`errflag`) of a `BINF_PSPECIAL` builtin exits a
+	// non-interactive shell with status 1; through `command` the
+	// error is cleared, the status stays.
+	if matches!(outcome.control, Control::DiscardAll)
+		&& vp.mode.dialect() == crate::bash::ids::Dialect::Zsh
+		&& zsh_pspecial(id)
+		&& state::zsh_option(&mut k.root, cx.store, vp, ZshOpt::Posixbuiltins).unwrap_or(false)
+	{
+		if sc.exec.as_ref().is_some_and(|e| e.via_command) {
+			outcome.control = Control::None;
+		} else if !state::zsh_option(&mut k.root, cx.store, vp, ZshOpt::Interactive).unwrap_or(false)
+		{
+			outcome.status = 1;
+			outcome.control = Control::Exit;
+		}
+	}
+	for c in chunks {
+		let (fd, bytes) = match c {
+			Chunk::Out(fd, b) => (fd, b),
+			Chunk::Diag(d) => {
+				super::zle::display::trash_for_message(k, cx, vp);
+				(2, k.render_diag(cx, vp, line, &d))
+			},
+		};
+		sc.exec
+			.as_mut()
+			.expect("exec")
+			.writes
+			.push_back(PendingWrite { fd, bytes: bytes.into(), off: 0 });
+	}
+	let e = sc.exec.as_mut().expect("exec");
+	e.status = outcome.status;
+	let flow = match outcome.control {
+		Control::None => {
+			e.stage = Stage::Output;
+			None
+		},
+		Control::Frame => {
+			e.waiting = Some(Awaited::Frame);
+			e.stage = Stage::Await;
+			Some(Flow::Call)
+		},
+		Control::Resume => {
+			e.waiting = Some(Awaited::Frame);
+			e.resume = true;
+			e.stage = Stage::Await;
+			Some(Flow::Call)
+		},
+		Control::Wait(w) => {
+			e.wait_for = w.children;
+			e.wait_into = w.into.map(Box::new);
+			e.waiting = Some(if w.any {
+				Awaited::AnyJob
+			} else if w.all {
+				Awaited::AllJobs
+			} else {
+				Awaited::Jobs { force: w.force }
+			});
+			e.stage = Stage::Await;
+			None
+		},
+		Control::Return => {
+			e.control = Some(Transfer::Return(outcome.status));
+			e.stage = Stage::Output;
+			None
+		},
+		Control::Break { n, cont } => {
+			e.control = Some(Transfer::Break { n, cont });
+			e.stage = Stage::Output;
+			None
+		},
+		Control::DiscardAll => {
+			e.control = Some(Transfer::DiscardAll(outcome.status));
+			e.stage = Stage::Output;
+			None
+		},
+		Control::Exit => {
+			e.control = Some(Transfer::Exit(outcome.status));
+			e.stage = Stage::Output;
+			None
+		},
+	};
+	// A pushed frame sits above; the scratch belongs to the frame below
+	// it.
+	let at = if matches!(flow, Some(Flow::Call)) {
+		vp.frames.len() - 2
+	} else {
+		vp.frames.len() - 1
+	};
+	vp.frames[at].scratch = Some(sc);
+	flow
+}
+
 /// A builtin's expansion (zsh code) needs a zsh command substitution or an
 /// expansion probe (`=cmd`) first: start it, or answer the probe and log it
 /// for the builtin's replay (`None`: it runs again). The scratch goes back
@@ -2769,7 +3997,20 @@ fn builtin_zsh_stop(
 	stop: Stop,
 ) -> Option<Flow> {
 	let flow = match stop {
-		Stop::ZshSub { text } => Some(exec::start_zsh_sub(k, vp, cx, &mut sc, &text, line)),
+		Stop::ZshSub { text, here } => {
+			// A call run here pushes its frame above the builtin's.
+			let fi = vp.frames.len() - 1;
+			let flow = exec::start_zsh_sub(k, vp, cx, &mut sc, &text, here, line);
+			vp.frames[fi].scratch = Some(sc);
+			return Some(flow);
+		},
+		Stop::MathCall(call) => {
+			// The function's frame goes above the builtin's.
+			let fi = vp.frames.len() - 1;
+			let flow = start_math_call(k, vp, cx, &mut sc, Slot::Builtin, &call, line);
+			vp.frames[fi].scratch = Some(sc);
+			return Some(flow);
+		},
 		Stop::Probe(p) => exec::settle_probe(k, cx, vp, &mut sc, Slot::Builtin, &p)
 			.err()
 			.map(Flow::Block),
@@ -3029,6 +4270,14 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 				let data = EventData::FuncExit { name: BStr::new(name), status };
 				k.emit_op_at(cx, vp, op.node, data, t_ns);
 			}
+			// zsh's function wrappers (zsh/zprof, zsh/example) after the call.
+			if vp.mode.dialect() == crate::bash::ids::Dialect::Zsh
+				&& matches!(st(vp).target, Some(Target::Function(_)))
+			{
+				builtins::zsh_mod_zprof::leave(k, vp, cx);
+				builtins::zsh_mod_example::leave(k, vp, cx);
+				super::zle::comp::complete::wrap_leave(vp);
+			}
 			// zsh `exit` inside the call: its caller leaves in turn.
 			if vp.zsh.is_some()
 				&& let Some(pending) = exec::zsh_exit_pending(vp)
@@ -3146,31 +4395,67 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 		Some(Awaited::Ext { pid }) => {
 			let replacing = matches!(st(vp).control, Some(Transfer::Exec));
 			let run = vp.runs.front().map(|run| run.id);
-			let mut tcx = Context::from_waker(&k.waker);
-			match &mut scratch(vp).live {
-				Live::Ext(child) => match child.poll_wait(&mut tcx) {
-					Poll::Ready(ExitStatus::Exited(code)) => {
-						reaped = true;
-						code
-					},
-					Poll::Ready(ExitStatus::Signaled(sig)) => {
-						reaped = true;
-						if replacing && let Some(run) = run {
-							k.exec_signals.insert(run, i32::from(sig.number(platform)));
+			// Owned: a stop event below needs the kernel mutably.
+			let waker = k.waker.clone();
+			let mut tcx = Context::from_waker(&waker);
+			// Stops and continues come first (job control, zsh's
+			// `WUNTRACED`): the shell's own foreground job stopping is
+			// suspended; anything else waits on.
+			let exit = loop {
+				let event = match &mut scratch(vp).live {
+					Live::Ext(child) => child.poll_event(&mut tcx),
+					_ => break None,
+				};
+				match event {
+					Poll::Ready(ProcEvent::Exited(status)) => break Some(status),
+					Poll::Ready(change) => {
+						if let Some(flow) = super::jobctl::ext_event(k, cx, vp, change) {
+							return Some(flow);
 						}
-						sig.exit_status(platform)
-					},
-					Poll::Ready(ExitStatus::SignaledRaw(signal)) => {
-						reaped = true;
-						if replacing && let Some(run) = run {
-							k.exec_signals.insert(run, signal);
-						}
-						128 + signal
 					},
 					Poll::Pending => return Some(Flow::Block(WaitKey::Ext { pid })),
+				}
+			};
+			let killed = match exit {
+				Some(ExitStatus::Signaled(sig)) => Some(sig),
+				_ => None,
+			};
+			let status = match exit {
+				Some(ExitStatus::Exited(code)) => {
+					reaped = true;
+					code
 				},
-				_ => lost(k, vp, cx, op, line, Lost::Ext { vpid: vp.vpid, pid }),
+				Some(ExitStatus::Signaled(sig)) => {
+					reaped = true;
+					if replacing && let Some(run) = run {
+						k.exec_signals.insert(run, i32::from(sig.number(platform)));
+					}
+					sig.exit_status(platform)
+				},
+				Some(ExitStatus::SignaledRaw(signal)) => {
+					reaped = true;
+					if replacing && let Some(run) = run {
+						k.exec_signals.insert(run, signal);
+					}
+					128 + signal
+				},
+				None => lost(k, vp, cx, op, line, Lost::Ext { vpid: vp.vpid, pid }),
+			};
+			if reaped && vp.parent.is_none() && k.jobctl.has_pgrp() {
+				let text = vp
+					.frames
+					.last()
+					.and_then(|f| f.unit.as_ref())
+					.and_then(|u| {
+						let n = u.nodes.get(op.node as usize)?;
+						u.source
+							.get(n.lo as usize..n.hi as usize)
+							.map(<[u8]>::to_vec)
+					})
+					.unwrap_or_default();
+				super::jobctl::fg_done(k, cx, vp, killed, &text);
 			}
+			status
 		},
 		None => st(vp).status,
 	};
@@ -3213,6 +4498,8 @@ fn waited_into(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, pid: 
 
 /// Write the command's own output in order (pollable).
 fn output(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> Option<Flow> {
+	// Most commands queued nothing: no waker (two atomic ops) for them.
+	st(vp).writes.front()?;
 	let waker = k.waker.clone();
 	let mut tcx = Context::from_waker(&waker);
 	loop {
@@ -3245,6 +4532,10 @@ fn output(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> Option<
 						let platform = k.engine.config().platform;
 						return Some(Flow::Exit(crate::bash::signal::Signal::Pipe.exit_status(platform)));
 					}
+					if vp.mode.dialect() == crate::bash::ids::Dialect::Zsh {
+						zsh_write_error(k, vp, cx, line, fd, &err);
+						continue;
+					}
 					let state = st(vp);
 					// bash's `help` does not check its writes.
 					if state.target == Some(Target::Intrinsic(IntrinsicId::Help)) {
@@ -3265,6 +4556,51 @@ fn output(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> Option<
 	}
 }
 
+/// A failed write of a zsh builtin's output to `fd`: `bin_print`'s
+/// `CLOSE_CLEANLY` (`print`/`echo`/`printf` fail with `NAME: write
+/// error`, but for `EBADF` on standard output), then `execcmd`'s check of
+/// `stdout` when the command did not redirect fd 1 (`write error`, the
+/// status kept).
+fn zsh_write_error(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	line: u32,
+	fd: i32,
+	err: &std::io::Error,
+) {
+	let mut text = crate::bash::diag::strerror(err).into_owned();
+	let ebadf = text == "Bad file descriptor";
+	if let Some(c) = text.get_mut(..1) {
+		c.make_ascii_lowercase();
+	}
+	let msg = format!("write error: {text}");
+	let redirected = scratch(vp)
+		.io
+		.as_ref()
+		.is_some_and(|io| io.saved.iter().any(|s| s.fd == 1));
+	let state = st(vp);
+	let print = matches!(
+		state.target,
+		Some(Target::Intrinsic(IntrinsicId::Print | IntrinsicId::Echo | IntrinsicId::Printf))
+	);
+	let mut diags = Vec::new();
+	if print && (fd != 1 || !ebadf) {
+		state.status = 1;
+		let cmd = Cow::Owned(String::from_utf8_lossy(&state.argv[0]).into_owned());
+		diags.push(Diag::Prefixed { cmd, diag: Box::new(Diag::Usage { msg: msg.clone().into() }) });
+	}
+	if fd == 1 && !redirected {
+		diags.push(Diag::Usage { msg: msg.into() });
+	}
+	for d in diags {
+		let bytes = k.render_diag(cx, vp, line, &d);
+		st(vp)
+			.writes
+			.push_back(PendingWrite { fd: 2, bytes: bytes.into(), off: 0 });
+	}
+}
+
 /// Whether `SIGPIPE` is ignored (`trap '' PIPE`), so a write to a pipe
 /// without readers reports `Broken pipe` instead of ending the shell.
 fn sigpipe_ignored(store: &mut dyn StateStore, vp: &Vproc) -> bool {
@@ -3277,18 +4613,9 @@ fn sigpipe_ignored(store: &mut dyn StateStore, vp: &Vproc) -> bool {
 
 /// Report the command and leave the op (or transfer control).
 fn finish(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Flow {
-	let sc = vp
-		.frames
-		.last_mut()
-		.and_then(|f| f.scratch.take())
-		.expect("exec scratch");
-	let e = sc.exec.as_ref().expect("exec");
+	let e = st(vp);
 	let (status, t0, control) = (e.status, e.t0, e.control);
 	let in_shell = matches!(e.target, Some(Target::Function(_) | Target::Intrinsic(_)));
-	exec::drop_scratch(&mut k.root, cx.store, vp, sc);
-	if status != 0 && in_shell && vp.mode.dialect() == crate::bash::ids::Dialect::Zsh {
-		print_exit_value(k, vp, cx, status);
-	}
 	vp.status = status;
 	vp.pipestatus.clear();
 	vp.pipestatus.push(status);
@@ -3299,6 +4626,18 @@ fn finish(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Flow {
 		let dur_ns = if t0 > 0 { end.saturating_sub(t0) } else { 0 };
 		let data = EventData::CmdEnd { status, dur_ns, pipestatus: &[] };
 		k.emit_op_at(cx, vp, op.node, data, end);
+	}
+	let sc = vp
+		.frames
+		.last_mut()
+		.and_then(|f| f.scratch.take())
+		.expect("exec scratch");
+	exec::drop_scratch(&mut k.root, cx.store, vp, sc);
+	if k.mask.bits() != 0 {
+		vp.fds.set_command_tag(None);
+	}
+	if status != 0 && in_shell && vp.mode.dialect() == crate::bash::ids::Dialect::Zsh {
+		print_exit_value(k, vp, cx, status);
 	}
 	match control {
 		None => Flow::Next,
@@ -3316,7 +4655,10 @@ fn finish(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Flow {
 				.rev()
 				.find(|f| matches!(f.kind, FrameKind::Script { .. }))
 				.is_some_and(|f| matches!(f.kind, FrameKind::Script { what: ScriptKind::Run, .. }));
-			if command && in_run {
+			// zsh: a builtin's `zerr` (`errflag`) unwinds through `zsh_discard`
+			// (always-lists run, the builtin's status stays); `Abort` is the
+			// parse-error path.
+			if command && in_run && vp.mode.dialect() != crate::bash::ids::Dialect::Zsh {
 				Flow::Abort(n)
 			} else {
 				Flow::Discard(n)
@@ -3464,20 +4806,25 @@ fn exec_failed(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
 	}
 }
 
-/// bash's `command_not_found_handle`: when that function exists (and is not
-/// the one running), it runs in a subshell with the command's words as its
-/// arguments, and its status is the command's. `None`: no handler, else
-/// the flow that waits for it.
+/// bash's `command_not_found_handle` (zsh's `command_not_found_handler`,
+/// zsh `commandnotfound` in the forked child): when that function exists
+/// (and is not the one running), it runs in a subshell with the command's
+/// words as its arguments, and its status is the command's. `None`: no
+/// handler, else the flow that waits for it.
 fn not_found_hook(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> Option<Flow> {
-	const HOOK: &[u8] = b"command_not_found_handle";
+	let hook: &[u8] = if vp.mode.dialect() == crate::bash::ids::Dialect::Zsh {
+		b"command_not_found_handler"
+	} else {
+		b"command_not_found_handle"
+	};
 	if vp
 		.frames
 		.iter()
-		.any(|f| matches!(&f.kind, FrameKind::Function { name, .. } if name.as_slice() == HOOK))
+		.any(|f| matches!(&f.kind, FrameKind::Function { name, .. } if name.as_slice() == hook))
 	{
 		return None;
 	}
-	match state::record(cx.store, vp, Key::Func(BStr::new(HOOK))) {
+	match state::record(cx.store, vp, Key::Func(BStr::new(hook))) {
 		Ok(Some(Record::Func { .. })) => {},
 		Ok(_) => return None,
 		Err(err) => {
@@ -3485,7 +4832,7 @@ fn not_found_hook(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) ->
 			return Some(Flow::Discard(1));
 		},
 	}
-	let mut text = BString::from(HOOK);
+	let mut text = BString::from(hook);
 	for word in &st(vp).argv {
 		text.extend_from_slice(b" '");
 		for &c in word.iter() {
@@ -3711,9 +5058,11 @@ fn stdio_spec(h: &FdRef) -> StdioSpec {
 }
 
 fn extra_fds(vp: &Vproc) -> Vec<(i32, FdRef)> {
+	// A close-on-exec fd (`sysopen -o cloexec`, a `zsystem flock` lock) is
+	// not inherited.
 	vp.fds
 		.iter()
-		.filter(|(fd, _)| *fd > 2)
+		.filter(|(fd, h)| *fd > 2 && !h.flags().contains(crate::bash::FdFlags::CLOEXEC))
 		.map(|(fd, h)| (fd, h.clone()))
 		.collect()
 }

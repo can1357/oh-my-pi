@@ -132,7 +132,9 @@ pub fn magic_assign_arg(name: &[u8], kshtypeset: bool, word: &[u8]) -> bool {
 	if !kshtypeset {
 		return false;
 	}
-	let end = ident_end(word, 0);
+	// Non-ASCII names are accepted here; `typeset` rejects them itself
+	// under `POSIX_IDENTIFIERS`.
+	let end = ident_end(word, 0, true);
 	end > 0
 		&& matches!(word.get(end), Some(&(EQUALS | b'=')))
 		&& std::str::from_utf8(name)
@@ -173,6 +175,9 @@ pub fn builtin(name: &str) -> Option<Builtin> {
 		":" => b(PSPECIAL, 0, None, Func::None, None, b""),
 		"alias" => b(MAGICEQUALS | PLUSOPTS, 0, None, Func::None, Some(b"Lgmrs"), b""),
 		"autoload" => b(PLUSOPTS, 0, None, Func::None, Some(b"dmktrRTUwWXz"), b"u"),
+		"bg" | "disown" | "fg" => b(0, 0, None, Func::None, None, b""),
+		// zsh/zle (`zle_main.c` bintab).
+		"bindkey" => b(0, 0, None, Func::None, Some(b"evaM:ldDANmrsLRp"), b""),
 		"cd" => b(SKIPINVALID | SKIPDASH | DASHDASHVALID, 0, Some(2), Func::Cd, Some(b"qsPL"), b""),
 		"command" => b(0, 0, None, Func::Command, Some(b"pvV"), b""),
 		"chdir" => {
@@ -197,6 +202,7 @@ pub fn builtin(name: &str) -> Option<Builtin> {
 		"hash" => b(MAGICEQUALS, 0, None, Func::None, Some(b"Ldfmrv"), b""),
 		"history" => b(0, 0, None, Func::None, Some(b"adDEfiLmnpPrt:"), b"l"),
 		"integer" => b(TYPESET, 0, None, Func::None, Some(b"HL:%R:%Z:%ghi:%lp:%rtux"), b"i"),
+		"jobs" => b(0, 0, None, Func::None, Some(b"dlpZrs"), b""),
 		"let" => b(0, 1, None, Func::None, None, b""),
 		"local" => b(TYPESET, 0, None, Func::None, Some(b"AE:%F:%HL:%R:%TUZ:%ahi:%lp:%rtux"), b""),
 		"popd" => b(SKIPINVALID | SKIPDASH | DASHDASHVALID, 0, Some(1), Func::Popd, Some(b"q"), b""),
@@ -207,6 +213,7 @@ pub fn builtin(name: &str) -> Option<Builtin> {
 		},
 		"pushln" => b(0, 0, None, Func::Print, None, b"-nz"),
 		"pwd" => b(0, 0, Some(0), Func::None, Some(b"rLP"), b""),
+		"r" => b(0, 0, None, Func::None, Some(b"IlLnr"), b""),
 		"read" => b(0, 0, None, Func::None, Some(b"cd:ek:%lnpqrst:%zu:AE"), b""),
 		"readonly" => {
 			b(TYPESET, 0, None, Func::Readonly, Some(b"AE:%F:%HL:%R:%TUZ:%afghi:%lptux"), b"r")
@@ -214,6 +221,7 @@ pub fn builtin(name: &str) -> Option<Builtin> {
 		"rehash" => b(0, 0, Some(0), Func::None, Some(b"df"), b"r"),
 		"set" => b(PSPECIAL | HANDLES_OPTS, 0, None, Func::None, None, b""),
 		"shift" => b(PSPECIAL, 0, None, Func::None, Some(b"p"), b""),
+		"suspend" => b(0, 0, Some(0), Func::None, Some(b"f"), b""),
 		"test" => b(HANDLES_OPTS, 0, None, Func::Test, None, b""),
 		"true" => b(0, 0, None, Func::None, None, b""),
 		"type" => b(0, 0, None, Func::None, Some(b"ampfsSw"), b"v"),
@@ -227,7 +235,88 @@ pub fn builtin(name: &str) -> Option<Builtin> {
 		"whence" => b(0, 0, None, Func::None, Some(b"acmpvfsSwx:"), b""),
 		"where" => b(0, 0, None, Func::None, Some(b"pmsSwx:"), b"ca"),
 		"which" => b(0, 0, None, Func::None, Some(b"ampsSwx:"), b"c"),
+		"vared" => b(0, 1, Some(1), Func::None, Some(b"aAcef:ghi:M:m:p:r:t:"), b""),
+		"zle" => b(0, 0, None, Func::None, Some(b"aAcCDfFgGIKlLmMNrRTUw"), b""),
+		"zcompile" => b(0, 0, None, Func::None, Some(b"tUMRcmzka"), b""),
 		"zmodload" => b(0, 0, None, Func::None, Some(b"AFRILP:abcfdilmpsue"), b""),
+		// zsh/zutil.
+		"zformat" => b(0, 3, None, Func::None, None, b""),
+		"zparseopts" => b(0, 1, None, Func::None, None, b""),
+		"zregexparse" => b(0, 3, None, Func::None, Some(b"c"), b""),
+		"zstyle" => b(0, 0, None, Func::None, None, b""),
+		// zsh/complete.
+		"compadd" => b(HANDLES_OPTS, 0, None, Func::None, None, b""),
+		"compset" => b(0, 1, Some(3), Func::None, None, b""),
+		// zsh/datetime.
+		"strftime" => b(0, 1, Some(3), Func::None, Some(b"nqrs:"), b""),
+		// zsh/terminfo, zsh/termcap.
+		"echoti" => b(0, 1, None, Func::None, None, b""),
+		"echotc" => b(0, 1, None, Func::None, None, b""),
+		// zsh/pcre.
+		"pcre_compile" => b(0, 1, Some(1), Func::None, Some(b"aimxs"), b""),
+		"pcre_match" => b(0, 1, Some(1), Func::None, Some(b"a:v:n:b"), b""),
+		"pcre_study" => b(0, 0, Some(0), Func::None, None, b""),
+		// zsh/param/private (`local`'s entry with `P` added).
+		"private" => b(TYPESET, 0, None, Func::None, Some(b"AE:%F:%HL:%PR:%TUZ:%ahi:%lmprtux"), b"P"),
+		// zsh/zpty.
+		"zpty" => b(0, 0, None, Func::None, Some(b"ebdmrwLnt"), b""),
+		// zsh/curses.
+		"zcurses" => b(0, 1, None, Func::None, Some(b""), b""),
+		// zsh/clone.
+		"clone" => b(0, 1, Some(1), Func::None, None, b""),
+		// zsh/rlimits.
+		"limit" => b(0, 0, None, Func::None, Some(b"sh"), b""),
+		"ulimit" => b(0, 0, None, Func::None, None, b""),
+		"unlimit" => b(0, 0, None, Func::None, Some(b"hs"), b""),
+		// zsh/sched, zsh/watch, zsh/zprof, zsh/example, zsh/cap.
+		"sched" => b(0, 0, None, Func::None, None, b""),
+		"log" => b(0, 0, Some(0), Func::None, None, b""),
+		"zprof" => b(0, 0, Some(0), Func::None, Some(b"c"), b""),
+		"example" => b(0, 0, None, Func::None, Some(b"flags"), b""),
+		"cap" => b(0, 0, Some(1), Func::None, None, b""),
+		"getcap" => b(0, 1, None, Func::None, None, b""),
+		"setcap" => b(0, 2, None, Func::None, None, b""),
+		// zsh/files.
+		"chgrp" | "zf_chgrp" => b(0, 2, None, Func::None, Some(b"hRs"), b""),
+		"chmod" | "zf_chmod" => b(0, 2, None, Func::None, Some(b"Rs"), b""),
+		"chown" | "zf_chown" => b(0, 2, None, Func::None, Some(b"hRs"), b""),
+		"ln" | "zf_ln" => b(0, 1, None, Func::None, Some(b"dfhins"), b""),
+		"mkdir" | "zf_mkdir" => b(0, 1, None, Func::None, Some(b"pm:"), b""),
+		"mv" | "zf_mv" => b(0, 2, None, Func::None, Some(b"fi"), b""),
+		"rm" | "zf_rm" => b(0, 1, None, Func::None, Some(b"dfiRrs"), b""),
+		"rmdir" | "zf_rmdir" => b(0, 1, None, Func::None, None, b""),
+		"sync" | "zf_sync" => b(0, 0, Some(0), Func::None, None, b""),
+		// zsh/stat (`bin_stat` parses its own options).
+		"stat" | "zstat" => b(0, 0, None, Func::None, None, b""),
+		// zsh/attr.
+		"zgetattr" => b(0, 2, Some(3), Func::None, Some(b"h"), b""),
+		"zsetattr" => b(0, 3, Some(3), Func::None, Some(b"h"), b""),
+		"zdelattr" => b(0, 2, None, Func::None, Some(b"h"), b""),
+		"zlistattr" => b(0, 1, Some(2), Func::None, Some(b"h"), b""),
+		// zsh/system.
+		"syserror" => b(0, 0, Some(1), Func::None, Some(b"e:p:"), b""),
+		"sysread" => b(0, 0, Some(1), Func::None, Some(b"c:i:o:s:t:"), b""),
+		"syswrite" => b(0, 1, Some(1), Func::None, Some(b"c:o:"), b""),
+		"sysopen" => b(0, 1, Some(1), Func::None, Some(b"rwau:o:m:"), b""),
+		"sysseek" => b(0, 1, Some(1), Func::None, Some(b"u:w:"), b""),
+		"zsystem" => b(0, 1, None, Func::None, None, b""),
+		// zsh/zselect (`bin_zselect` parses its own options).
+		"zselect" => b(0, 0, None, Func::None, None, b""),
+		// zsh/net/socket, zsh/net/tcp.
+		"zsocket" => b(0, 0, Some(3), Func::None, Some(b"ad:ltv"), b""),
+		"ztcp" => b(0, 0, Some(3), Func::None, Some(b"acd:flLtv"), b""),
+		// zsh/zftp.
+		"zftp" => b(0, 1, None, Func::None, None, b""),
+		// zsh/computil.
+		"comparguments" | "compfiles" | "compgroups" | "comptags" | "compvalues" => {
+			b(0, 1, None, Func::None, None, b"")
+		},
+		"compdescribe" => b(0, 3, None, Func::None, None, b""),
+		"compquote" => b(0, 1, None, Func::None, Some(b"p"), b""),
+		// zsh/compctl.
+		"compctl" => b(0, 0, None, Func::None, None, b""),
+		"compcall" => b(0, 0, Some(0), Func::None, Some(b"TD"), b""),
+		"comptry" => b(0, 0, None, Func::None, None, b""),
 		_ => return None,
 	})
 }
@@ -299,7 +388,7 @@ pub fn pattern_arg(ctx: &mut Ctx<'_, '_>, text: &[u8]) -> Result<Option<ZPat>, N
 /// Run builtin `id` in the zsh dialect (`argv[0]` is its name): zsh's
 /// option parsing ([`execbuiltin`]) and handler. `None` for the builtins
 /// zsh shares with the bash implementation (`eval`, `.`/`source`,
-/// `trap`, `kill`, `wait`, the job builtins, `emulate`, `setopt`, …). Out
+/// `trap`, `kill`, `wait`, `emulate`, `setopt`, …). Out
 /// of line: [`super::run`] dispatches every bash builtin too.
 #[inline(never)]
 pub fn run(id: IntrinsicId, ctx: &mut Ctx<'_, '_>, argv: &[BString]) -> Option<R> {
@@ -309,38 +398,42 @@ pub fn run(id: IntrinsicId, ctx: &mut Ctx<'_, '_>, argv: &[BString]) -> Option<R
 		I::Break => return Some(Ok(super::flow::zsh_break(ctx, args, false))),
 		I::Continue => return Some(Ok(super::flow::zsh_break(ctx, args, true))),
 		I::Return => return Some(Ok(super::flow::zsh_return(ctx, args))),
-		I::Exit => return Some(Ok(super::flow::zsh_exit(ctx, args))),
+		I::Exit => return Some(super::flow::zsh_exit(ctx, args)),
+		I::ModuleStub => return Some(super::zsh_module::run_stub(ctx, argv)),
 		I::Source | I::Dot => return Some(super::flow::zsh_source(ctx, args)),
 		I::Trap => return Some(super::trap::zsh_trap(ctx, args)),
-		I::Bindkey
-		| I::Vared
-		| I::Zle
-		| I::Compctl
-		| I::Compcall
-		| I::Compadd
-		| I::Compset
-		| I::Comparguments
-		| I::Compdescribe
-		| I::Compfiles
-		| I::Compgroups
-		| I::Compquote
-		| I::Comptags
-		| I::Comptry
-		| I::Compvalues => {
-			let what = if matches!(id, I::Bindkey | I::Vared | I::Zle) {
-				format!("`{}' (zsh/zle)", ctx.name)
-			} else {
-				format!("`{}' (zsh/compctl, zsh/complete)", ctx.name)
-			};
-			ctx.diag(Diag::Unsupported { what: what.into() });
-			return Some(super::done(1));
+		I::Kill => return Some(super::zsh_kill::kill(ctx, args)),
+		// zsh `execcmd`: a command word `%job` runs `fg %job`.
+		I::Fg if argv.first().is_some_and(|a| a.starts_with(b"%")) => {
+			let f = super::zsh_jobs::JobFunc::Fg;
+			return Some(super::zsh_jobs::bin_fg(ctx, &Ops::default(), argv, f));
 		},
 		// zsh `execcmd`: only `command` with `-v`/`-V` among its leading
 		// options (and no other letter) is `bin_whence`.
 		I::Command if !command_whence(args) => return None,
 		_ => {},
 	}
-	let bn = builtin(ctx.name)?;
+	// An autoloaded module builtin loads its module first (zsh
+	// `resolvebuiltin`).
+	if super::zsh_module::module_of(id).is_some() {
+		match super::zsh_module::resolve_builtin(ctx, id) {
+			Ok(true) => {},
+			Ok(false) => return Some(Ok(Outcome { status: 1, control: Control::DiscardAll })),
+			Err(need) => return Some(Err(need)),
+		}
+	}
+	// zsh/param/private, while loaded, gives `local` its handler and
+	// option string (`local -P`), keeping `local`'s default options.
+	let private_local = matches!(id, I::Local)
+		&& match super::zsh_module::loaded(ctx.cx.store, ctx.vp, b"zsh/param/private") {
+			Ok(on) => on,
+			Err(e) => return Some(Err(Need::from(e))),
+		};
+	let bn = if private_local {
+		Builtin { optstr: builtin("private")?.optstr, ..builtin(ctx.name)? }
+	} else {
+		builtin(ctx.name)?
+	};
 	let Some((mut ops, rest)) = execbuiltin(ctx, &bn, args) else {
 		return Some(super::done(1));
 	};
@@ -353,13 +446,17 @@ pub fn run(id: IntrinsicId, ctx: &mut Ctx<'_, '_>, argv: &[BString]) -> Option<R
 		},
 		I::Bracket => crate::bash::vm::zsh::cond::test(ctx, rest, true),
 		I::Test => crate::bash::vm::zsh::cond::test(ctx, rest, false),
+		I::Local if private_local => super::zsh_mod_private::private(ctx, &mut ops, rest, base),
 		I::Typeset | I::Declare | I::Local | I::Export | I::Readonly | I::Integer | I::Float => {
 			super::zsh_typeset::typeset(ctx, &mut ops, rest, base, bn.func)
 		},
 		I::Set => super::zsh_vars::set(ctx, rest),
 		I::Unset => super::zsh_vars::unset(ctx, &ops, rest, bn.func),
 		I::Shift => super::zsh_vars::shift(ctx, &ops, rest),
-		I::Read => super::zsh_vars::read(ctx, &ops, rest),
+		I::Read | I::Getln => super::zsh_vars::read(ctx, &ops, rest),
+		I::Bindkey => crate::bash::vm::zle::bindkey::bindkey(ctx, &ops, rest),
+		I::Zle => crate::bash::vm::zle::builtin::zle(ctx, &ops, rest),
+		I::Vared => crate::bash::vm::zle::vared::vared(ctx, &ops, rest),
 		I::Getopts => super::zsh_vars::getopts(ctx, rest),
 		I::Let => super::zsh_vars::let_(ctx, rest),
 		I::Alias => super::zsh_names::alias(ctx, &ops, rest),
@@ -370,11 +467,80 @@ pub fn run(id: IntrinsicId, ctx: &mut Ctx<'_, '_>, argv: &[BString]) -> Option<R
 		},
 		I::Functions | I::Autoload => super::zsh_names::functions(ctx, &ops, rest, bn.func),
 		I::Enable | I::Disable => super::zsh_names::enable(ctx, &ops, rest, bn.func),
-		I::Zmodload => super::zsh_names::zmodload(ctx, &ops, rest),
+		I::Zmodload => super::zsh_module::zmodload(ctx, &ops, rest),
+		I::Compctl => crate::bash::vm::zle::comp::compctl::compctl(ctx, &ops, rest),
+		I::Compcall => crate::bash::vm::zle::comp::compctl::compcall(ctx, &ops, rest),
+		I::Compfiles => crate::bash::vm::zle::comp::computil::compfiles(ctx, &ops, rest),
+		I::Compgroups => crate::bash::vm::zle::comp::computil::compgroups(ctx, &ops, rest),
+		I::Comparguments => crate::bash::vm::zle::comp::computil::comparguments(ctx, &ops, rest),
+		I::Compvalues => crate::bash::vm::zle::comp::computil::compvalues(ctx, &ops, rest),
+		I::Comptags => crate::bash::vm::zle::comp::computil::comptags(ctx, &ops, rest),
+		I::Comptry => crate::bash::vm::zle::comp::computil::comptry(ctx, &ops, rest),
+		I::Compdescribe => crate::bash::vm::zle::comp::computil::compdescribe(ctx, &ops, rest),
+		I::Compquote => crate::bash::vm::zle::comp::computil::compquote(ctx, &ops, rest),
+		I::Compadd => crate::bash::vm::zle::comp::complete::compadd(ctx, rest),
+		I::Compset => crate::bash::vm::zle::comp::complete::compset(ctx, rest),
+		I::Zstyle => super::zsh_mod_zutil::zstyle(ctx, &ops, rest),
+		I::Zformat => super::zsh_mod_zutil::zformat(ctx, &ops, rest),
+		I::Zparseopts => super::zsh_mod_zutil::zparseopts(ctx, &ops, rest),
+		I::Zregexparse => super::zsh_mod_zutil::zregexparse(ctx, &ops, rest),
+		I::Strftime => super::zsh_mod_datetime::strftime(ctx, &ops, rest),
+		I::Echoti => super::zsh_mod_terminfo::echoti(ctx, &ops, rest),
+		I::Echotc => super::zsh_mod_termcap::echotc(ctx, &ops, rest),
+		I::PcreCompile => super::zsh_mod_pcre::pcre_compile(ctx, &ops, rest),
+		I::PcreStudy => super::zsh_mod_pcre::pcre_study(ctx, &ops, rest),
+		I::PcreMatch => super::zsh_mod_pcre::pcre_match(ctx, &ops, rest),
+		I::Private => super::zsh_mod_private::private(ctx, &mut ops, rest, base),
+		I::Zpty => super::zsh_mod_zpty::zpty(ctx, &ops, rest),
+		I::Zcurses => super::zsh_mod_curses::zcurses(ctx, &ops, rest),
+		I::ZshClone => super::zsh_mod_clone::clone(ctx, &ops, rest),
+		I::Zcompile => super::zsh_zcompile::zcompile(ctx, &ops, rest),
+		I::Limit => super::zsh_mod_rlimits::limit(ctx, &ops, rest),
+		I::Unlimit => super::zsh_mod_rlimits::unlimit(ctx, &ops, rest),
+		I::Ulimit => super::zsh_mod_rlimits::ulimit(ctx, rest),
+		I::Sched => super::zsh_mod_sched::sched(ctx, rest),
+		I::Log => super::zsh_mod_watch::log(ctx),
+		I::Zprof => super::zsh_mod_zprof::zprof(ctx, &ops),
+		I::Example => super::zsh_mod_example::example(ctx, &ops, rest),
+		I::Cap | I::Getcap | I::Setcap => super::zsh_mod_cap::notavail(ctx),
+		I::Chgrp
+		| I::Chmod
+		| I::Chown
+		| I::Ln
+		| I::Mkdir
+		| I::Mv
+		| I::Rm
+		| I::Rmdir
+		| I::Sync
+		| I::ZfChgrp
+		| I::ZfChmod
+		| I::ZfChown
+		| I::ZfLn
+		| I::ZfMkdir
+		| I::ZfMv
+		| I::ZfRm
+		| I::ZfRmdir
+		| I::ZfSync => super::zsh_mod_files::run(ctx, id, &ops, rest),
+		I::Stat | I::Zstat => super::zsh_mod_stat::stat(ctx, rest),
+		I::Syserror | I::Sysread | I::Syswrite | I::Sysopen | I::Sysseek | I::Zsystem => {
+			super::zsh_mod_system::run(ctx, id, &ops, rest)
+		},
+		I::Zselect => super::zsh_mod_zselect::zselect(ctx, rest),
+		I::Zsocket => super::zsh_mod_socket::zsocket(ctx, &ops, rest),
+		I::Ztcp => super::zsh_mod_tcp::ztcp(ctx, &ops, rest),
+		I::Zftp => super::zsh_mod_zftp::zftp(ctx, rest),
+		I::Zgetattr | I::Zsetattr | I::Zdelattr | I::Zlistattr => {
+			super::zsh_mod_attr::run(ctx, id, &ops, rest)
+		},
 		I::Cd | I::Chdir | I::Pushd | I::Popd => super::zsh_dir::cd(ctx, &ops, rest, bn.func),
 		I::Dirs => super::zsh_dir::dirs(ctx, &ops, rest),
-		I::Pwd => super::zsh_dir::pwd(ctx),
-		I::Fc | I::History => super::history::zsh_fc(ctx, &ops, rest),
+		I::Pwd => super::zsh_dir::pwd(ctx, &ops),
+		I::Jobs => super::zsh_jobs::bin_fg(ctx, &ops, rest, super::zsh_jobs::JobFunc::Jobs),
+		I::Fg => super::zsh_jobs::bin_fg(ctx, &ops, rest, super::zsh_jobs::JobFunc::Fg),
+		I::Bg => super::zsh_jobs::bin_fg(ctx, &ops, rest, super::zsh_jobs::JobFunc::Bg),
+		I::Disown => super::zsh_jobs::bin_fg(ctx, &ops, rest, super::zsh_jobs::JobFunc::Disown),
+		I::Suspend => super::zsh_jobs::suspend(ctx, &ops),
+		I::Fc | I::History | I::R => super::history::zfc::zsh_fc(ctx, &ops, rest),
 		_ => return None,
 	})
 }
@@ -437,6 +603,14 @@ impl Ops {
 	pub fn set(&mut self, c: u8) {
 		if let Some(v) = self.ind.get_mut(usize::from(c)) {
 			*v = 1;
+		}
+	}
+
+	/// Mark `c` as given with `+` (`ops->ind[c] = 2`), as handlers do to
+	/// force an option's plus form.
+	pub fn set_plus(&mut self, c: u8) {
+		if let Some(v) = self.ind.get_mut(usize::from(c)) {
+			*v = 2;
 		}
 	}
 

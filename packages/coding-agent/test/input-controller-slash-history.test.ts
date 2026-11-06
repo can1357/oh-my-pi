@@ -59,6 +59,7 @@ function makeCtx(isStreaming = false, messages: AgentMessage[] = []) {
 		getSessionId: () => sessionManager.sessionId,
 		getLeafId: () => null,
 	};
+	let collabGuest: InteractiveModeContext["collabGuest"];
 	const ctx = {
 		editor,
 		sessionManager,
@@ -76,7 +77,12 @@ function makeCtx(isStreaming = false, messages: AgentMessage[] = []) {
 			prompt,
 		},
 		focusedAgentId: undefined,
-		collabGuest: undefined,
+		get collabGuest() {
+			return collabGuest;
+		},
+		setCollabGuest(guest: InteractiveModeContext["collabGuest"]) {
+			collabGuest = guest;
+		},
 		shutdown,
 		locallySubmittedUserSignatures,
 		flushPendingBashComponents: vi.fn(),
@@ -245,7 +251,7 @@ describe("input controller — slash command history (#3148)", () => {
 	])("refuses guest queue shorthand ($input, readOnly=$readOnly)", async ({ input, readOnly, compacting }) => {
 		const { ctx, editor, addToHistory, followUp, prompt, onInputCallback } = makeCtx(true);
 		const sendPrompt = vi.fn(() => true);
-		Object.assign(ctx, { collabGuest: { readOnly, sendPrompt } });
+		ctx.setCollabGuest({ readOnly, sendPrompt } as unknown as InteractiveModeContext["collabGuest"]);
 		Object.assign(ctx.session, { isCompacting: compacting });
 		controllerFor(ctx);
 		// The real editor clears its text before invoking the submit callback.
@@ -307,10 +313,10 @@ describe("input controller — collab guest history", () => {
 	/** A guest replica: the real dispatcher gates and the real guest branch both run. */
 	function guestCtx() {
 		const harness = makeCtx();
-		harness.ctx.collabGuest = {
+		harness.ctx.setCollabGuest({
 			readOnly: false,
 			sendPrompt: vi.fn(() => true),
-		} as unknown as InteractiveModeContext["collabGuest"];
+		} as unknown as InteractiveModeContext["collabGuest"]);
 		harness.ctx.shutdown = vi.fn(async () => {});
 		// One registered skill, so `/skill:probe` reaches the skill branch that records its text.
 		harness.ctx.skillCommands.set("skill:probe", { name: "probe" } as unknown as Parameters<

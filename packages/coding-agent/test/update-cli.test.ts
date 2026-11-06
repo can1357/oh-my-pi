@@ -37,6 +37,7 @@ import {
 	updateViaBinaryAt,
 	updateViaManager,
 	updateViaShimTakeover,
+	verifyInstalledVersion,
 } from "@oh-my-pi/pi-coding-agent/cli/update-cli";
 import Update from "@oh-my-pi/pi-coding-agent/commands/update";
 import { $which, removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -138,7 +139,7 @@ const TEST_CONFIG: CliConfig = {
 describe("update command plugin dispatch", () => {
 	it("routes -l to plugin upgrade instead of the app updater", async () => {
 		const pluginSpy = spyOn(pluginCli, "runPluginCommand").mockResolvedValue(undefined);
-		const updateSpy = spyOn(updateCli, "runUpdateCommand").mockResolvedValue(undefined);
+		const updateSpy = spyOn(updateCli, "runUpdateCommand").mockResolvedValue({ kind: "current" });
 
 		const command = new Update(["-l"], TEST_CONFIG);
 		await command.run();
@@ -149,7 +150,7 @@ describe("update command plugin dispatch", () => {
 
 	it("keeps normal update flags on the app updater path", async () => {
 		const pluginSpy = spyOn(pluginCli, "runPluginCommand").mockResolvedValue(undefined);
-		const updateSpy = spyOn(updateCli, "runUpdateCommand").mockResolvedValue(undefined);
+		const updateSpy = spyOn(updateCli, "runUpdateCommand").mockResolvedValue({ kind: "current" });
 
 		const command = new Update(["--check", "--force"], TEST_CONFIG);
 		await command.run();
@@ -564,8 +565,32 @@ describe("update-cli package manager commands", () => {
 		if (!miseBinary) throw new Error("mise binary unavailable");
 		const root = await makeTempDir();
 		const releases = [
-			{ tag_name: "v2.0.0", draft: false, prerelease: false, created_at: "2026-09-09T00:00:00Z", assets: [] },
-			{ tag_name: "v1.0.0", draft: false, prerelease: false, created_at: "2020-01-01T00:00:00Z", assets: [] },
+			{
+				tag_name: "v2.0.0",
+				draft: false,
+				prerelease: false,
+				created_at: "2026-09-09T00:00:00Z",
+				assets: [
+					{
+						name: "omp-linux-x64",
+						url: "https://api.github.com/repos/can1357/oh-my-pi/releases/assets/2000",
+						browser_download_url: "https://github.com/can1357/oh-my-pi/releases/download/v2.0.0/omp-linux-x64",
+					},
+				],
+			},
+			{
+				tag_name: "v1.0.0",
+				draft: false,
+				prerelease: false,
+				created_at: "2020-01-01T00:00:00Z",
+				assets: [
+					{
+						name: "omp-linux-x64",
+						url: "https://api.github.com/repos/can1357/oh-my-pi/releases/assets/1000",
+						browser_download_url: "https://github.com/can1357/oh-my-pi/releases/download/v1.0.0/omp-linux-x64",
+					},
+				],
+			},
 		];
 		const server = Bun.serve({
 			hostname: "127.0.0.1",
@@ -612,6 +637,7 @@ describe("update-cli package manager commands", () => {
 				return stdout + stderr;
 			};
 
+			await run(["trust", path.join(root, "mise.toml")]);
 			const blocked = await run(["upgrade", "github:can1357/oh-my-pi", "--bump", "--dry-run"]);
 			expect(blocked).not.toContain("Would install github:can1357/oh-my-pi@2.0.0");
 
@@ -1092,6 +1118,32 @@ describe("update-cli release binary integrity", () => {
 		expect(await Bun.file(targetPath).text()).toBe(content);
 		// Windows has no POSIX mode bits; the executable bit is only observable elsewhere.
 		if (process.platform !== "win32") expect((await fs.stat(targetPath)).mode & 0o777).toBe(0o755);
+	});
+
+	it("reports cumulative bytes per chunk, ending at the full size", async () => {
+		const dir = await makeTempDir();
+		const chunks = ["verified ", "binary"];
+		const received: number[] = [];
+
+		await downloadVerifiedBinary({
+			url,
+			targetPath: path.join(dir, binaryName),
+			expectedSize: Buffer.byteLength(content),
+			expectedDigest: digest,
+			fetchImpl: async () =>
+				new Response(
+					new ReadableStream<Uint8Array>({
+						pull(controller) {
+							const chunk = chunks.shift();
+							if (chunk === undefined) controller.close();
+							else controller.enqueue(new TextEncoder().encode(chunk));
+						},
+					}),
+				),
+			onProgress: bytes => received.push(bytes),
+		});
+
+		expect(received).toEqual([9, 15]);
 	});
 
 	it("aborts the response stream as soon as it exceeds the expected size", async () => {
@@ -1812,6 +1864,31 @@ describe("update-cli concurrent binary updates", () => {
 		expect(await Bun.file(targetPath).bytes()).toEqual(new Uint8Array(payload));
 		const residue = (await fs.readdir(dir)).filter(name => name.endsWith(".bak") || name.endsWith(".new"));
 		expect(residue).toEqual([]);
+	});
+});
+
+describe("verifyInstalledVersion", () => {
+	// A Windows shim takeover retires the launcher PATH first resolved (`omp.cmd`)
+	// for one later on PATH (`omp.exe`); the check must follow it, not a cached path.
+	it.skipIf(process.platform === "win32")("re-resolves PATH after an install moves the launcher", async () => {
+		const [first, second] = [await makeTempDir(), await makeTempDir()];
+		await Bun.write(path.join(first, "omp"), "#!/bin/sh\necho omp/1.0.0\n");
+		await Bun.write(path.join(second, "omp"), "#!/bin/sh\necho omp/2.0.0\n");
+		await fs.chmod(path.join(first, "omp"), 0o755);
+		await fs.chmod(path.join(second, "omp"), 0o755);
+		const originalPath = process.env.PATH;
+		process.env.PATH = [first, second, originalPath].join(path.delimiter);
+		try {
+			expect((await verifyInstalledVersion("2.0.0")).actual).toBe("1.0.0");
+			await fs.rm(path.join(first, "omp"));
+			expect(await verifyInstalledVersion("2.0.0")).toEqual({
+				ok: true,
+				actual: "2.0.0",
+				path: path.join(second, "omp"),
+			});
+		} finally {
+			process.env.PATH = originalPath;
+		}
 	});
 });
 

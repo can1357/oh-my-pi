@@ -27,14 +27,14 @@ pub enum Charset {
 /// `f` of the first of `names` that is set and non-empty, as a shell
 /// variable (borrowed, not copied); `None` when none is.
 fn first_set<R>(
-	k: &Kernel,
+	root: &state::Root,
 	store: &mut dyn StateStore,
 	vp: &Vproc,
 	names: [&[u8]; 3],
 	f: impl Fn(&[u8]) -> R,
 ) -> Result<Option<R>, StoreError> {
 	for name in names {
-		let found = state::lookup(&k.root, store, vp, name)?
+		let found = state::lookup(root, store, vp, name)?
 			.and_then(|v| v.as_scalar())
 			.filter(|value| !value.is_empty())
 			.map(&f);
@@ -58,25 +58,33 @@ const CTYPE_VARS: [&[u8]; 3] = [b"LC_ALL", b"LC_CTYPE", b"LANG"];
 /// none of the three is bound in a scope or overlay and no root write touched a
 /// locale variable, the token is unchanged and the lookups are skipped.
 pub fn charset(k: &mut Kernel, store: &mut dyn StateStore, vp: &Vproc) -> Charset {
-	let token = state::locale_token(&k.root, store, vp, &CTYPE_VARS);
-	if let (Some(token), Some((at, cs))) = (token, k.root.charset)
+	charset_root(&mut k.root, store, vp).unwrap_or_else(|e| {
+		k.fail(e);
+		Charset::Bytes
+	})
+}
+
+/// [`charset`] on the root state alone (the parse-feature path, which has
+/// no kernel).
+///
+/// # Errors
+/// [`StoreError`] when a locale variable cannot be read.
+pub fn charset_root(
+	root: &mut state::Root,
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+) -> Result<Charset, StoreError> {
+	let token = state::locale_token(root, store, vp, &CTYPE_VARS);
+	if let (Some(token), Some((at, cs))) = (token, root.charset)
 		&& token == at
 	{
-		return cs;
+		return Ok(cs);
 	}
-	match first_set(k, store, vp, CTYPE_VARS, charset_of) {
-		Ok(found) => {
-			let cs = found.unwrap_or(Charset::Bytes);
-			if let Some(token) = token {
-				k.root.charset = Some((token, cs));
-			}
-			cs
-		},
-		Err(e) => {
-			k.fail(e);
-			Charset::Bytes
-		},
+	let cs = first_set(root, store, vp, CTYPE_VARS, charset_of)?.unwrap_or(Charset::Bytes);
+	if let Some(token) = token {
+		root.charset = Some((token, cs));
 	}
+	Ok(cs)
 }
 
 /// Whether the shell's locale is UTF-8 ([`charset`] is [`Charset::Utf8`]).
@@ -249,7 +257,7 @@ pub fn push_code_point(cs: Charset, code: u32, out: &mut Vec<u8>) {
 /// languages whose glibc locales use a decimal comma, `.` otherwise (and in
 /// `C`/`POSIX`).
 pub fn decimal_point(k: &mut Kernel, store: &mut dyn StateStore, vp: &Vproc) -> u8 {
-	match first_set(k, store, vp, [b"LC_ALL", b"LC_NUMERIC", b"LANG"], decimal_point_of) {
+	match first_set(&k.root, store, vp, [b"LC_ALL", b"LC_NUMERIC", b"LANG"], decimal_point_of) {
 		Ok(found) => found.unwrap_or(b'.'),
 		Err(e) => {
 			k.fail(e);

@@ -244,6 +244,10 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 			return viewSession ?? this.session;
 		},
 		sessionManager,
+		collabGuest: undefined as InteractiveModeContext["collabGuest"],
+		setCollabGuest: (guest: InteractiveModeContext["collabGuest"]) => {
+			Object.assign(ctx, { collabGuest: guest });
+		},
 		focusedAgentId: undefined,
 		settings: contextSettings,
 		mcpManager: undefined,

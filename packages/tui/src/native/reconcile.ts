@@ -29,7 +29,7 @@
  */
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { TSP_TEXT_KINDS, type TspKind, type TspNode, type TspOp, type TspScrollBy } from "@oh-my-pi/pi-wire";
-import { type Component, Container, CURSOR_MARKER } from "../tui";
+import { type Component, CURSOR_MARKER, ownDescription } from "../tui";
 import { getNativeBlob } from "./blobs";
 import { normalizeIconProps } from "./icons";
 import type { DescribeContext, NativeChild, NativeNode, NativeRevealAt } from "./node";
@@ -376,6 +376,18 @@ export class Reconciler {
 	focusTarget(component: Component): string | null {
 		const state = this.#states.get(component);
 		return state ? this.#findEditor(state, 0) : null;
+	}
+
+	/**
+	 * The last description of `component` on this surface (a settled one only
+	 * while still referenced elsewhere), or undefined when it isn't mounted.
+	 */
+	described(component: Component): NativeNode | undefined {
+		const state = this.#states.get(component);
+		if (!state) return undefined;
+		const node = state.node ?? (state.weak?.deref() as NativeNode | readonly string[] | undefined);
+		// A settled `rows` fallback is held by its lines; its node is kept beside them.
+		return Array.isArray(node) ? (state.rowsNode ?? undefined) : (node as NativeNode | undefined);
 	}
 
 	/** Stop referencing ids the terminal dropped (`gone`). */
@@ -928,15 +940,8 @@ export class Reconciler {
 	/** The component's description, or a `rows` node rendered at `cx.cols`. */
 	#resolve(state: CompState): NativeNode {
 		const comp = state.comp;
-		const describe = comp.describe;
-		// A Container subclass that paints its own rows but inherits the plain
-		// column description would lose its rendering: fall back to rows.
-		// (Read lazily: this module and tui.ts import each other.)
-		const inherited = describe === Container.prototype.describe && comp.render !== Container.prototype.render;
-		if (describe && !inherited) {
-			const node = describe.call(comp, this.#cx!);
-			if (node) return quietMotion(node);
-		}
+		const node = ownDescription(comp, this.#cx!);
+		if (node) return quietMotion(node);
 		this.#rows++;
 		const cols = Math.max(1, this.#cx!.cols);
 		const lines = comp.render(cols);

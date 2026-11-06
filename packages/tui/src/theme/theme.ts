@@ -33,6 +33,7 @@ export {
 	getSymbolTheme,
 	highlightCode,
 	isHighlightLanguage,
+	setMarkdownColorful,
 	setMarkdownMermaidRendering,
 	warmHighlighter,
 } from "./tui-adapters";
