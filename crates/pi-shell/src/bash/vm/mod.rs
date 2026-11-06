@@ -382,7 +382,8 @@ pub struct Shell {
 	/// `orphans` module); empty unless [`Self::gone`] ever had entries.
 	orphans:             Vec<Vpid>,
 	/// External programs still running after their owner was unwound. Their
-	/// handles stay here until exit, without keeping a dead vproc or frame.
+	/// handles stay here until exit or whole-shell cancellation, without
+	/// keeping a dead vproc or frame.
 	surviving_externals: Vec<(Vpid, Box<dyn ExtProc>)>,
 }
 
@@ -2006,6 +2007,7 @@ impl Shell {
 		if req & CANCEL != 0 {
 			let sig = self.k.ctl.cancel_signal();
 			let status = sig.exit_status(self.k.engine.config().platform);
+			self.signal_work(None, sig);
 			for i in (0..self.procs.len()).rev() {
 				// A detached tree (`nohup`) outlives the cancellation.
 				if self.procs[i].lineage.detached {
@@ -2020,23 +2022,6 @@ impl Shell {
 				let unwinds = trapped
 					|| (sig != Signal::Kill && self.procs[i].has_work() && !self.procs[i].transient);
 				if unwinds {
-					for frame in &mut self.procs[i].frames {
-						if let Some(sc) = frame.scratch.as_mut() {
-							// A spawn still pending never starts: the cancelled
-							// command is not resumed (the trap is the last action).
-							if matches!(sc.live, Live::Spawn(_)) {
-								sc.live = Live::None;
-							}
-							match &mut sc.live {
-								Live::Task(task) => task.signal(sig),
-								Live::Ext(ext) => {
-									let _ = ext.signal(sig);
-									let _ = ext.cont();
-								},
-								_ => {},
-							}
-						}
-					}
 					self.procs[i].stopped = false;
 					if trapped {
 						exec::mark_cancel(&mut self.procs[i], status);
@@ -2044,7 +2029,7 @@ impl Shell {
 						exec::finish_cancel(&mut self.k.root, cx.store, &mut self.procs[i], status);
 					}
 				} else {
-					self.kill(cx, i, sig, status);
+					self.end(cx, i, status);
 				}
 			}
 			// Calls of the cancelled vprocs are void; a detached tree's go on.
@@ -2114,29 +2099,57 @@ impl Shell {
 		}
 	}
 
-	/// Terminate vproc `i` with `status`: signal its task or external, end its
-	/// scripts. Transient vprocs are removed.
-	fn kill(&mut self, cx: &mut Cx<'_>, i: usize, sig: Signal, status: i32) {
-		let p = &mut self.procs[i];
+	/// Signal an ending vproc's work, retaining live externals. With no owner,
+	/// signal all non-detached work and release retained handles to the host's
+	/// grace/KILL escalation; frame handles are released by cancellation unwind.
+	fn signal_work(&mut self, owner: Option<usize>, sig: Signal) {
+		let range = owner.map_or(0..self.procs.len(), |i| i..i + 1);
 		let mut task_cx = Context::from_waker(&self.k.waker);
-		for f in &mut p.frames {
-			if let Some(sc) = f.scratch.as_mut() {
-				match &mut sc.live {
-					Live::Task(t) => t.signal(sig),
-					Live::Ext(e) => {
-						let _ = e.signal(sig);
-						let _ = e.cont();
-					},
-					_ => {},
-				}
-				if let Live::Ext(child) = &mut sc.live
-					&& child.poll_wait(&mut task_cx).is_pending()
-					&& let Live::Ext(child) = std::mem::replace(&mut sc.live, Live::None)
-				{
-					self.surviving_externals.push((p.vpid, child));
+		for p in &mut self.procs[range] {
+			if owner.is_none() && p.lineage.detached {
+				continue;
+			}
+			for f in &mut p.frames {
+				if let Some(sc) = f.scratch.as_mut() {
+					if owner.is_none() && matches!(sc.live, Live::Spawn(_)) {
+						sc.live = Live::None;
+					}
+					match &mut sc.live {
+						Live::Task(t) => t.signal(sig),
+						Live::Ext(e) => {
+							let _ = e.signal(sig);
+							let _ = e.cont();
+						},
+						_ => {},
+					}
+					if owner.is_some()
+						&& let Live::Ext(child) = &mut sc.live
+						&& child.poll_wait(&mut task_cx).is_pending()
+						&& let Live::Ext(child) = std::mem::replace(&mut sc.live, Live::None)
+					{
+						self.surviving_externals.push((p.vpid, child));
+					}
 				}
 			}
 		}
+		if owner.is_none() {
+			for (_, mut child) in self.surviving_externals.drain(..) {
+				let _ = child.signal(sig);
+				let _ = child.cont();
+			}
+		}
+	}
+
+	/// Signal and end one vproc, retaining its live external programs.
+	fn kill(&mut self, cx: &mut Cx<'_>, i: usize, sig: Signal, status: i32) {
+		self.signal_work(Some(i), sig);
+		self.end(cx, i, status);
+	}
+
+	/// End vproc `i` with `status` after its work was signalled. Transient
+	/// vprocs are removed.
+	fn end(&mut self, cx: &mut Cx<'_>, i: usize, status: i32) {
+		let p = &mut self.procs[i];
 		exec::unwind(&mut self.k.root, cx.store, p, 0);
 		while state::drop_scope(&mut self.k.root, cx.store, p) {}
 		p.out.clear();

@@ -180,8 +180,10 @@ impl ControlHandle {
 
 	/// Cancel everything the shell runs. `TERM` runs traps then unwinds
 	/// (status 143), `KILL` unwinds without traps (137), `INT` follows bash's
-	/// SIGINT semantics (130). Externals receive the signal; every running
-	/// script reports `Done` with that status. The shell stays usable.
+	/// SIGINT semantics (130). Externals receive the signal, including those
+	/// retained after their virtual owner ended; their released handles let
+	/// the host escalate termination. Every running script reports `Done`
+	/// with that status. The shell stays usable.
 	pub fn cancel(&self, sig: Signal) {
 		self.0.request_cancel(sig);
 	}

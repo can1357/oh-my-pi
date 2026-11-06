@@ -15,9 +15,9 @@ use pi_shell::{
 use tokio_util::sync::CancellationToken;
 
 struct Program {
-	pid: u32,
+	pid:   u32,
 	owner: Vpid,
-	run: RunId,
+	run:   RunId,
 }
 
 fn alive(pid: u32) -> bool {
@@ -42,9 +42,9 @@ fn command(pid_file: &std::path::Path) -> String {
 
 struct NativeShell {
 	engine: Arc<Engine>,
-	shell: Shell,
-	host: PiHost,
-	store: MemStore,
+	shell:  Shell,
+	host:   PiHost,
+	store:  MemStore,
 }
 
 impl NativeShell {
@@ -52,19 +52,19 @@ impl NativeShell {
 		let engine = Engine::new(EngineConfig::default());
 		let mut host = PiHost::new(Box::new(StdFs::default()), tokio::runtime::Handle::current());
 		let mut store = MemStore::new();
-		let shell = Shell::create(&engine, &mut Cx { host: &mut host, store: &mut store }, ShellInit {
-			env: vec![(BString::from("PATH"), BString::from("/usr/bin:/bin"))],
-			..ShellInit::default()
-		})
-		.unwrap();
+		let shell =
+			Shell::create(&engine, &mut Cx { host: &mut host, store: &mut store }, ShellInit {
+				env: vec![(BString::from("PATH"), BString::from("/usr/bin:/bin"))],
+				..ShellInit::default()
+			})
+			.unwrap();
 		Self { engine, shell, host, store }
 	}
 
 	fn step(&mut self) -> Step {
-		self.shell.step(
-			&mut Cx { host: &mut self.host, store: &mut self.store },
-			Budget::default(),
-		)
+		self
+			.shell
+			.step(&mut Cx { host: &mut self.host, store: &mut self.store }, Budget::default())
 	}
 
 	async fn drive_for(&mut self, duration: Duration) {
@@ -107,13 +107,19 @@ async fn retained_program_is_cancelled(signal: Signal) {
 	let dir = tempfile::tempdir().unwrap();
 	let mut native = NativeShell::new();
 	let retained = native.start(&dir.path().join("retained")).await;
-	native.shell.control().signal(SigTarget::Vpid(retained.owner), Signal::Term);
+	native
+		.shell
+		.control()
+		.signal(SigTarget::Vpid(retained.owner), Signal::Term);
 	assert!(matches!(native.step(), Step::Done { run, status: 143 } if run == retained.run));
 
 	// Ending a different owner must not signal the first owner's retained
 	// program. Waiting past the production grace also catches premature drop.
 	let other = native.start(&dir.path().join("other")).await;
-	native.shell.control().signal(SigTarget::Vpid(other.owner), Signal::Kill);
+	native
+		.shell
+		.control()
+		.signal(SigTarget::Vpid(other.owner), Signal::Kill);
 	assert!(matches!(native.step(), Step::Done { run, status: 137 } if run == other.run));
 	native.drive_for(TERM_GRACE * 2).await;
 	println!(
@@ -154,11 +160,11 @@ async fn shell_term_escalates_a_retained_native_without_ending_it_on_a_vproc_sig
 	let dir = tempfile::tempdir().unwrap();
 	let pid_file = dir.path().join("session");
 	let mut session = Session::new(SessionConfig {
-		env: vec![(BString::from("PATH"), BString::from("/usr/bin:/bin"))],
-		cwd: BString::from("/"),
-		fs: Box::new(StdFs::default()),
-		vfs: None,
-		runtime: tokio::runtime::Handle::current(),
+		env:             vec![(BString::from("PATH"), BString::from("/usr/bin:/bin"))],
+		cwd:             BString::from("/"),
+		fs:              Box::new(StdFs::default()),
+		vfs:             None,
+		runtime:         tokio::runtime::Handle::current(),
 		output_decoding: None,
 	})
 	.unwrap();
@@ -172,7 +178,8 @@ async fn shell_term_escalates_a_retained_native_without_ending_it_on_a_vproc_sig
 		token.cancel();
 	};
 	let script = format!("({}) & wait", command(&pid_file));
-	let (outcome, ()) = tokio::join!(session.run(&script, RunStdio::default(), token.clone()), cancel);
+	let (outcome, ()) =
+		tokio::join!(session.run(&script, RunStdio::default(), token.clone()), cancel);
 	let outcome = outcome.unwrap();
 	let pid = std::fs::read_to_string(pid_file).unwrap().parse().unwrap();
 	let _cleanup = Program { pid, owner: Vpid(0), run: RunId(0) };
@@ -183,7 +190,10 @@ async fn shell_term_escalates_a_retained_native_without_ending_it_on_a_vproc_sig
 		tokio::time::sleep(Duration::from_millis(10)).await;
 	}
 	let live = session.live_external_jobs().await.unwrap();
-	println!("production Session::run: outcome={outcome:?} pid={pid} alive={} live={live}", alive(pid));
+	println!(
+		"production Session::run: outcome={outcome:?} pid={pid} alive={} live={live}",
+		alive(pid)
+	);
 	assert!(!alive(pid), "a cancelled production session must not leave its native child running");
 	assert_eq!(live, 0);
 }
@@ -209,11 +219,12 @@ async fn both_restore_modes_report_an_active_native_once_from_identical_snapshot
 	for drop_frames in [false, true] {
 		let mut store = MemStore::from_bytes(&bytes).unwrap();
 		let mut host = PiHost::new(Box::new(StdFs::default()), tokio::runtime::Handle::current());
-		let (mut restored, report) =
-			Shell::restore(&native.engine, &mut Cx { host: &mut host, store: &mut store }, RestoreOpts {
-				drop_frames,
-			})
-			.unwrap();
+		let (mut restored, report) = Shell::restore(
+			&native.engine,
+			&mut Cx { host: &mut host, store: &mut store },
+			RestoreOpts { drop_frames },
+		)
+		.unwrap();
 		println!("drop_frames={drop_frames} expected={expected:?} report={report:?}");
 		let externals: Vec<_> = report
 			.lost
@@ -221,12 +232,30 @@ async fn both_restore_modes_report_an_active_native_once_from_identical_snapshot
 			.filter(|lost| matches!(lost, Lost::Ext { .. }))
 			.copied()
 			.collect();
-		assert_eq!(externals, vec![expected], "both restore modes must report the native pid exactly once");
+		assert_eq!(
+			externals,
+			vec![expected],
+			"both restore modes must report the native pid exactly once"
+		);
 		assert_eq!(report.runs, u32::from(!drop_frames));
-		assert_eq!(report.abandoned, if drop_frames { vec![program.run] } else { vec![] });
+		assert_eq!(
+			report.abandoned,
+			if drop_frames {
+				vec![program.run]
+			} else {
+				vec![]
+			}
+		);
 		assert_eq!(restored.live_external_jobs(), 0, "a reported loss is not a restored handle");
-		let again = restored.externalize(&mut Cx { host: &mut host, store: &mut store }).unwrap();
-		assert!(!again.lost.iter().any(|lost| matches!(lost, Lost::Ext { .. })));
+		let again = restored
+			.externalize(&mut Cx { host: &mut host, store: &mut store })
+			.unwrap();
+		assert!(
+			!again
+				.lost
+				.iter()
+				.any(|lost| matches!(lost, Lost::Ext { .. }))
+		);
 		assert!(alive(program.pid), "restore must not terminate the original native program");
 	}
 }

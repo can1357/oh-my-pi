@@ -701,13 +701,24 @@ impl Shell {
 				.map_err(|why| RestoreError::Incompatible { why })
 				.and_then(|()| postcard::from_bytes::<Image>(body).map_err(RestoreError::Corrupt));
 			let image = match decoded {
-				Ok(mut image) => {
+				Ok(image) => {
 					report.lost.extend(
 						image
 							.survivors
-							.drain(..)
-							.map(|(vpid, pid)| Lost::Ext { vpid, pid }),
+							.iter()
+							.map(|&(vpid, pid)| Lost::Ext { vpid, pid }),
 					);
+					for proc in &image.procs {
+						for frame in &proc.frames {
+							if let Some(scratch) = &frame.scratch
+								&& scratch.ext_live
+								&& let Some(Awaited::Ext { pid }) =
+									scratch.exec.as_ref().and_then(|exec| exec.waiting)
+							{
+								report.lost.push(Lost::Ext { vpid: proc.vpid, pid });
+							}
+						}
+					}
 					(!opts.drop_frames).then_some(image)
 				},
 				Err(
@@ -951,7 +962,6 @@ impl Shell {
 				let scratch = match f.scratch {
 					Some(img) => {
 						let mut live = Live::None;
-						let ext_live = img.ext_live;
 						let exec = img.exec.map(|mut state| {
 							match state.waiting {
 								Some(Awaited::Task(native)) => match state.checkpoint.take() {
@@ -963,9 +973,6 @@ impl Shell {
 										Err(_) => report.lost.push(Lost::Task { vpid, native }),
 									},
 									None => report.lost.push(Lost::Task { vpid, native }),
-								},
-								Some(Awaited::Ext { pid }) if ext_live => {
-									report.lost.push(Lost::Ext { vpid, pid });
 								},
 								Some(
 									Awaited::Ext { .. }

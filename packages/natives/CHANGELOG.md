@@ -28,7 +28,7 @@
 
 ### Fixed
 
-- Shell snapshots and restores now report external programs that outlived their virtual owner, with the original owner and native process identifiers. ([#18212](https://github.com/can1357/oh-my-pi/pull/18212) by [@sjawhar](https://github.com/sjawhar))
+- Shell snapshots and both restore modes report native process identifiers even after their virtual owner ends; cancelling the whole shell also ends those retained programs. ([#18212](https://github.com/can1357/oh-my-pi/pull/18212) by [@sjawhar](https://github.com/sjawhar))
 - Shell restore now refuses an incompatible engine image before reading state-store records; dropping frames cannot bypass a different IR record schema. ([#18212](https://github.com/can1357/oh-my-pi/pull/18212) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the bash tool's `$!` inside a command substitution, a `( )` subshell or a pipeline stage: it now names the parent's last background job, as in Bash ([#18107](https://github.com/can1357/oh-my-pi/pull/18107) by [@sjawhar](https://github.com/sjawhar))
 - Fixed Windows `rsync` treating a one-letter daemon host such as `h::module` as a local drive path ([#18048](https://github.com/can1357/oh-my-pi/pull/18048) by [@jchanghong023](https://github.com/jchanghong023))

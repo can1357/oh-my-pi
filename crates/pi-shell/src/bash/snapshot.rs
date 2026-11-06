@@ -46,11 +46,12 @@
 //! every external process in flight, including programs that outlived their
 //! virtual owner, every task whose `checkpoint` returned `None`, and every fd
 //! backed by a host object that cannot be re-acquired (per-run stdio).
-//! [`RestoreReport::lost`] also reports those ownerless programs with their
-//! original virtual-process and native-process identifiers; it does not
-//! recreate their completed owners. Lost commands with waiters finish with
-//! status 137 and a `Lost` event; lost fds read EOF and fail writes with
-//! "Bad file descriptor".
+//! [`RestoreReport::lost`] reports each external's original virtual-process
+//! and native-process identifiers, whether its owner still has frames or has
+//! completed. Both restore modes report these programs when the image can be
+//! decoded; neither recreates a native handle or a completed owner. Lost
+//! commands with waiters finish with status 137 and a `Lost` event; lost fds
+//! read EOF and fail writes with "Bad file descriptor".
 //!
 //! # Engine upgrades
 //!
