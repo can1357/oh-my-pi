@@ -1153,15 +1153,12 @@ impl Run<'_> {
 					.ok()
 					.and_then(|i| self.spec.evals.get(i))?;
 				let ask = (code.clone(), shown.to_vec());
-				match self.evals.get(&ask) {
-					Some(f) => {
-						self.inserts.clone_from(&f.inserts);
-						f.ok
-					},
-					None => {
-						self.eval_missing.push(ask);
-						return None;
-					},
+				if let Some(f) = self.evals.get(&ask) {
+					self.inserts.clone_from(&f.inserts);
+					f.ok
+				} else {
+					self.eval_missing.push(ask);
+					return None;
 				}
 			},
 			QFunc::Islnk => st.kind == StatKind::Symlink,
