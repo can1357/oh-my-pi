@@ -17,11 +17,10 @@ omp --a2a-port 0        # terminal A: 0 = pick a free port
 omp --a2a-port 0        # terminal B
 omp --a2a-port 0        # terminal C ...
 ```
-In any terminal:
-```
-/a2a auto               # register every live bridge on this machine
-```
-Done: peer agents appear as `a2a:Main`, `a2a:Main-2` … Spawn and talk:
+Auto-registration is on by default (`a2a.autoRegister`): every new session finds all
+live bridges on the machine and wires up their peers — the other terminals' agents are
+available from the first turn as `a2a:Main`, `a2a:Main-2` … (the manual `/a2a auto`
+command also remains; disable with `--no-a2a-auto-register`). Spawn and talk:
 > "Spawn a2a:Main-2 with task X" — the request goes to terminal B's live session, the answer returns in the standard `<task-result>` envelope.
 
 - Loopback-only (`127.0.0.1`), bearer token `~/.omp/agent/a2a.token` (mode 600, auto-generated);
