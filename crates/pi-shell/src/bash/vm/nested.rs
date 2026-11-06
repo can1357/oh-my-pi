@@ -124,9 +124,7 @@ pub fn start(
 			match command_probe(k, cx, vp, &Probe::Read { path }) {
 				Err(key) => return Some(Flow::Block(key)),
 				Ok(ProbeResult::Bytes(Ok(text))) => {
-					let head = &text[..text.len().min(80)];
-					let first = head.split(|&c| c == b'\n').next().unwrap_or(head);
-					if first.contains(&0) {
+					if super::looks_binary(&text) {
 						let text = message(&dollar0, name, b"cannot execute binary file");
 						return reply(vp, 2, text, 126);
 					}

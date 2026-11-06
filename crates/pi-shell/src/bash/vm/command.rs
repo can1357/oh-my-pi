@@ -4702,8 +4702,13 @@ fn is_enoexec(err: &std::io::Error) -> bool {
 
 /// bash `check_binary_file`: a NUL before the first newline in the first
 /// 80 bytes.
-fn looks_binary(text: &[u8]) -> bool {
+pub(crate) fn looks_binary(text: &[u8]) -> bool {
 	let head = &text[..text.len().min(80)];
+	// An ELF image is binary however it reads: bash checks its magic before
+	// looking for a NUL.
+	if head.starts_with(b"\x7fELF") {
+		return true;
+	}
 	let line = head
 		.iter()
 		.position(|&c| c == b'\n')

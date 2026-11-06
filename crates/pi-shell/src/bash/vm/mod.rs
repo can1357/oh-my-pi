@@ -11,6 +11,7 @@ pub(crate) mod arith;
 mod builtins;
 mod callstack;
 mod command;
+pub(crate) use command::looks_binary;
 mod control;
 mod exec;
 mod expand;
@@ -910,16 +911,22 @@ impl Kernel {
 			.and_then(|r| r.chain.links.first())
 			.map_or(&COMMAND, |l| &l.origin);
 		let utf8 = locale::is_utf8(self, cx.store, vp);
-		// An in-engine nested shell names itself (its `$0`).
-		let shell_name = match vp
+		// bash's `get_name_for_error`: the prefix is `BASH_SOURCE[0]`, so inside
+		// a `.` file — and inside a function defined in one — it names that file
+		// rather than the shell. An in-engine nested shell names itself (its
+		// `$0`).
+		let nested = vp
 			.overlay
 			.as_ref()
-			.and_then(|o| o.records.get(&KeyBuf::Misc(MiscKey::Argv0)))
-		{
-			Some(Some(Record::Misc(name))) => name.as_slice(),
-			_ => self.argv0.as_slice(),
+			.and_then(|o| o.records.get(&KeyBuf::Misc(MiscKey::Argv0)));
+		let sourced = callstack::innermost_file(vp);
+		let shell_name = match (sourced, nested) {
+			(Some(file), _) => file.as_slice(),
+			(None, Some(Some(Record::Misc(name)))) => name.as_slice(),
+			(None, _) => self.argv0.as_slice(),
 		};
-		render(diag, DiagSite { shell_name, origin, line, utf8 })
+		let site = DiagSite { shell_name, origin, line, utf8, sourced: sourced.is_some() };
+		render(diag, site)
 	}
 
 	/// The `Diag` event of a diagnostic `vp` prints.
