@@ -7,7 +7,7 @@ import { settleNative } from "@oh-my-pi/pi-tui/native/settle";
 import { isNativeRendering, onNativeRenderingChange } from "@oh-my-pi/pi-tui/native/state";
 import { type Component, Container } from "@oh-my-pi/pi-tui/tui";
 import type { TspOp } from "@oh-my-pi/pi-wire";
-import { ManualScheduler, TspHarness, TspTestTerminal } from "./tsp-harness";
+import { ManualScheduler, TspHarness, TspTestTerminal, tspEvent } from "./tsp-harness";
 
 class Probe implements Component {
 	current: NativeNode;
@@ -135,6 +135,46 @@ describe("native backend", () => {
 		expect(logged.map(event => event.level)).toEqual(["warn", "debug"]);
 		expect(logged[0]?.message).toContain("stopped acknowledging");
 		expect(logged[1]?.context).toMatchObject({ stalledMs: 5800, frames: 5 });
+		expect(h.errors).toEqual([]);
+	});
+
+	it("holds frames sent while stalled to the credit window when a late ack ends the stall", async () => {
+		const stream = new Probe(md("", { stream: true }));
+		harness = await TspHarness.start(tui => tui.addChild(stream), { credits: 2, autoAck: false });
+		const h = harness;
+		const change = async (text: string): Promise<void> => {
+			stream.current = md(text, { stream: true });
+			await h.render();
+		};
+		const ack = (s: number): void => {
+			h.terminal.send(tspEvent({ ev: "ack", sf: h.frames[0]!.sf, s }));
+			h.flush();
+		};
+		await change("a");
+		await change("a b");
+		await change("a b c");
+		h.stall(5000);
+		const firstStall = h.frames.at(-1)!.s + 1;
+		for (const token of [" d", " e", " f", " g"]) {
+			await change(`a b c${token}`);
+			h.stall(200);
+		}
+		expect(h.frames.at(-1)!.s).toBeGreaterThanOrEqual(firstStall + 2);
+		// A late ack for the first stall frame ends the stall. Frames after it are
+		// still unacked, so they hold the window: nothing more may go out.
+		ack(firstStall);
+		const recovered = h.frames.length;
+		for (const token of [" h", " i"]) {
+			await change(`a b c d e f g${token}`);
+			h.stall(200);
+		}
+		expect(h.frames.length).toBe(recovered);
+		ack(firstStall + 1);
+		await change("a b c d e f g h i j");
+		expect(h.frames.length).toBe(recovered);
+		ack(firstStall + 2);
+		await change("a b c d e f g h i j k");
+		expect(h.frames.length).toBe(recovered + 1);
 		expect(h.errors).toEqual([]);
 	});
 

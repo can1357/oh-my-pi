@@ -680,10 +680,12 @@ export class NativeBackend {
 	#sendFrame(surface: Surface, ops: readonly TspOp[]): void {
 		surface.seq++;
 		surface.lastSent = this.#scheduler.now();
-		// A stalled surface's frames aren't counted against its credits; its
-		// first ack ends the stall and credits restart from there.
-		if (surface.stalledSince === undefined) surface.unacked.push(surface.lastSent);
-		else surface.stalledFrames++;
+		// Every frame is queued, stalled or not, so each ack (which counts frames
+		// by sequence number) removes the right entry. While stalled, `#hasCredit`
+		// ignores the queue; frames still unacked after the stall ends keep
+		// holding the window.
+		surface.unacked.push(surface.lastSent);
+		if (surface.stalledSince !== undefined) surface.stalledFrames++;
 		const frame: TspFrame = { sf: surface.id, s: surface.seq, ops };
 		if (surface.doc) {
 			const errors = surface.doc.applyFrame(frame);
