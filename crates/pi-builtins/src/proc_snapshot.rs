@@ -649,10 +649,20 @@ mod proc_snapshot {
 		collections::HashMap,
 		ffi::CStr,
 		path::Path,
+		sync::LazyLock,
 		time::{Duration, SystemTime, UNIX_EPOCH},
 	};
 
 	use super::{ProcessStatus, ThreadInfo, sys};
+
+	#[allow(deprecated)]
+	static TIMEBASE: LazyLock<Option<(u32, u32)>> = LazyLock::new(|| {
+		let mut info = libc::mach_timebase_info_data_t { numer: 0, denom: 0 };
+		// SAFETY: info points to a writable Mach timebase record.
+		let status = unsafe { libc::mach_timebase_info(&raw mut info) };
+		(status == libc::KERN_SUCCESS && info.numer != 0 && info.denom != 0)
+			.then_some((info.numer, info.denom))
+	});
 
 	/// `proc_pidinfo` flavor listing a task's thread handles; absent from `libc`.
 	const PROC_PIDLISTTHREADS: libc::c_int = 6;
@@ -866,7 +876,14 @@ mod proc_snapshot {
 
 		pub fn cpu_time(&self) -> Option<Duration> {
 			let task = self.task.as_ref()?;
-			Some(Duration::from_nanos(task.pti_total_user.saturating_add(task.pti_total_system)))
+			let (numer, denom) = (*TIMEBASE)?;
+			// PROC_PIDTASKINFO CPU counters are Mach absolute-time ticks, not nanoseconds.
+			let ticks = u128::from(task.pti_total_user) + u128::from(task.pti_total_system);
+			let nanos = ticks * u128::from(numer) / u128::from(denom);
+			Some(Duration::new(
+				u64::try_from(nanos / 1_000_000_000).ok()?,
+				(nanos % 1_000_000_000) as u32,
+			))
 		}
 
 		pub fn resident_bytes(&self) -> Option<u64> {
@@ -1024,6 +1041,46 @@ mod proc_snapshot {
 			)
 		};
 		(actual >= size_of::<libc::proc_taskinfo>() as i32).then_some(info)
+	}
+
+	#[cfg(test)]
+	mod tests {
+		use std::time::{Duration, Instant};
+
+		use super::ProcInfo;
+
+		fn process_cpu() -> Duration {
+			ProcInfo::from_pid(std::process::id() as i32)
+				.and_then(|process| process.cpu_time())
+				.expect("process CPU time")
+		}
+
+		fn usage_cpu() -> Duration {
+			// SAFETY: rusage is an integer record that may be zero-initialized.
+			let mut usage = unsafe { std::mem::zeroed::<libc::rusage>() };
+			// SAFETY: usage is a valid writable rusage record.
+			assert_eq!(unsafe { libc::getrusage(libc::RUSAGE_SELF, &raw mut usage) }, 0);
+			let micros = (usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) as u64 * 1_000_000
+				+ (usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) as u64;
+			Duration::from_micros(micros)
+		}
+
+		#[test]
+		fn process_cpu_time_matches_system_usage_after_work() {
+			let before = process_cpu();
+			let usage_before = usage_cpu();
+			let start = Instant::now();
+			while start.elapsed() < Duration::from_millis(150) {
+				std::hint::spin_loop();
+			}
+			let usage_delta = usage_cpu() - usage_before;
+			let delta = process_cpu() - before;
+			assert!(usage_delta > Duration::from_millis(20), "insufficient CPU time: {usage_delta:?}");
+			assert!(
+				delta.abs_diff(usage_delta) < Duration::from_millis(40).max(usage_delta / 4),
+				"process CPU time {delta:?} differs from getrusage {usage_delta:?}"
+			);
+		}
 	}
 }
 
