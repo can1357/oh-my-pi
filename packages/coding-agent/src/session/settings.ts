@@ -1590,3 +1590,10 @@ export const cfgSessionMaxCost = register({
 	default: undefined,
 	validate: validateCostThreshold("session.maxCost"),
 });
+
+/** Host-owned route for provider availability notices; receives JSON on stdin. */
+export const cfgProviderAvailabilityNoticeCommand = register({
+	id: "providers.availabilityNoticeCommand",
+	type: "string",
+	default: "",
+});

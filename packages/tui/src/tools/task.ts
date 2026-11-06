@@ -2475,6 +2475,8 @@ export interface AgentProgress {
 
 /** Result from a single agent execution */
 export interface SingleResult {
+	/** Provider availability is infrastructure, never a model quality verdict. */
+	failureKind?: "infrastructure";
 	index: number;
 	id: string;
 	agent: string;

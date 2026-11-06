@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
@@ -9,6 +9,7 @@ import { buildFactoryDroidModel } from "@oh-my-pi/pi-catalog/discovery";
 import { getModelMatchPreferences, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import * as availability from "@oh-my-pi/pi-coding-agent/session/provider-exhaustion";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import {
@@ -373,6 +374,20 @@ describe("per-call model advertisement", () => {
 });
 
 describe("per-call model grants", () => {
+	it("rejects an exhausted provider even after caching its grant and permits it after recovery", () => {
+		const grants = { settings: Settings.isolated({ modelRoles: { review: "mock/target" } }), agentName: "worker" };
+		const blocked = spyOn(availability, "isProviderExhausted").mockReturnValue(false);
+		try {
+			expect(approved(target, grants)).toBe(true);
+			blocked.mockReturnValue(true);
+			expect(approved(target, grants)).toBe(false);
+			blocked.mockReturnValue(false);
+			expect(approved(target, grants)).toBe(true);
+		} finally {
+			blocked.mockRestore();
+		}
+	});
+
 	it.each(rows)("$name", row => {
 		const grants: PerCallModelGrants = {
 			settings: row.overlay

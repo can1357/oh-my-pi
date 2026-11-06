@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type {
@@ -18,6 +18,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { type BenchSummary, runBenchCommand } from "@oh-my-pi/pi-coding-agent/cli/bench-cli";
 import { type BenchModelRegistry, resolveBenchTargets } from "@oh-my-pi/pi-coding-agent/cli/bench-runtime";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as availability from "@oh-my-pi/pi-coding-agent/session/provider-exhaustion";
 import { getModelDbPath, TempDir } from "@oh-my-pi/pi-utils";
 import { endpoint as responsesEndpoint } from "../../ai/test/fixtures/openai-responses-server";
 
@@ -310,6 +311,34 @@ describe("default bench runtime", () => {
 });
 
 describe("bench credential-aware provider selection", () => {
+	it("does not send a benchmark to an exhausted credential fallback and uses it after recovery", async () => {
+		const registry = fakeRegistry({
+			models: [fakeModel("groq", "openai/gpt-oss-20b"), fakeModel("openrouter", "openai/gpt-oss-20b")],
+			authedProviders: ["openrouter"],
+		});
+		const blocked = spyOn(availability, "isProviderExhausted").mockImplementation(
+			provider => provider === "openrouter",
+		);
+		let calls = 0;
+		const stream = () => {
+			calls += 1;
+			return fakeStream();
+		};
+		try {
+			const excluded = await runBench("openai/gpt-oss-20b", registry, stream);
+			expect(excluded.summary.models[0].model).toBe("groq/openai/gpt-oss-20b");
+			expect(excluded.summary.failures).toBe(1);
+			expect(calls).toBe(0);
+			blocked.mockReturnValue(false);
+			const recovered = await runBench("openai/gpt-oss-20b", registry, stream);
+			expect(recovered.summary.models[0].model).toBe("openrouter/openai/gpt-oss-20b");
+			expect(recovered.summary.failures).toBe(0);
+			expect(calls).toBe(1);
+		} finally {
+			blocked.mockRestore();
+		}
+	});
+
 	it("redirects an ambiguous shared-id selector to an authenticated provider", async () => {
 		// Built-in provider priority makes the unauthenticated `groq` win the default resolution.
 		const registry = fakeRegistry({

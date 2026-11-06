@@ -48,6 +48,7 @@ import {
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
 import { isAuthenticated, kNoAuth, type ModelRegistry } from "./model-registry";
+import { isProviderExhausted } from "../session/provider-exhaustion";
 import {
 	DEFAULT_MODEL_ROLE_ALIAS,
 	formatModelRoleAlias,
@@ -1700,7 +1701,7 @@ export function resolveModelOverride(
 	options?: { exactOnly?: boolean },
 ): { model?: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel; explicitThinkingLevel: boolean; warning?: string } {
 	if (modelPatterns.length === 0) return { explicitThinkingLevel: false };
-	const availableModels = modelRegistry.getAvailable();
+	const availableModels = modelRegistry.getAvailable().filter(model => !isProviderExhausted(model.provider));
 	if (options?.exactOnly) {
 		const find = (selector: string) => availableModels.find(model => `${model.provider}/${model.id}` === selector);
 		const exact = (selector: string) => {
@@ -1786,7 +1787,7 @@ export function resolveSessionModelSelector(
 	const parsed = parseSessionModelSelector(modelRegistry, selector);
 	if (!parsed) return undefined;
 	const model = modelRegistry.find(parsed.provider, parsed.id);
-	if (!model || !modelRegistry.hasConfiguredAuth(model)) return undefined;
+	if (!model || isProviderExhausted(model.provider) || !modelRegistry.hasConfiguredAuth(model)) return undefined;
 	return { model, thinkingLevel: parsed.thinkingLevel };
 }
 
@@ -2269,7 +2270,8 @@ function resolveCliModelInScope(
 		...mergeModelMatchPreferences(settings, options.preferences),
 		isKnownProvider: id => modelRegistry.hasProvider?.(id) ?? false,
 	};
-	const { all: allModels, available: availableModels } = scope;
+	const allModels = scope.all.filter(model => !isProviderExhausted(model.provider));
+	const availableModels = scope.available.filter(model => !isProviderExhausted(model.provider));
 	if (allModels.length === 0) {
 		return {
 			model: undefined,
@@ -2485,13 +2487,14 @@ export async function findInitialModel(options: {
 	const {
 		cliProvider,
 		cliModel,
-		scopedModels,
+		scopedModels: configuredScopedModels,
 		isContinuing,
 		defaultProvider,
 		defaultModelId,
 		defaultThinkingSelector,
 		modelRegistry,
 	} = options;
+	const scopedModels = configuredScopedModels.filter(scoped => !isProviderExhausted(scoped.model.provider));
 
 	let model: Model<Api> | undefined;
 	let thinkingLevel: Effort | undefined;
@@ -2499,8 +2502,8 @@ export async function findInitialModel(options: {
 	// 1. CLI args take priority
 	if (cliProvider && cliModel) {
 		const found = modelRegistry.find(cliProvider, cliModel);
-		if (!found) {
-			console.error(chalk.red(`Model ${cliProvider}/${cliModel} not found`));
+		if (!found || isProviderExhausted(found.provider)) {
+			console.error(chalk.red(`Model ${cliProvider}/${cliModel} not available`));
 			process.exit(1);
 		}
 		return { model: found, thinkingLevel: undefined, fallbackMessage: undefined };
@@ -2524,7 +2527,7 @@ export async function findInitialModel(options: {
 	}
 
 	// 3. Try saved default from settings
-	if (defaultProvider && defaultModelId) {
+	if (defaultProvider && defaultModelId && !isProviderExhausted(defaultProvider)) {
 		const found = modelRegistry.find(defaultProvider, defaultModelId);
 		if (found) {
 			model = found;
@@ -2560,7 +2563,7 @@ export async function restoreModelFromSession(
 	// Check if restored model exists and has a valid API key
 	const hasApiKey = restoredModel ? !!(await modelRegistry.getApiKey(restoredModel)) : false;
 
-	if (restoredModel && hasApiKey) {
+	if (restoredModel && hasApiKey && !isProviderExhausted(restoredModel.provider)) {
 		if (shouldPrintMessages) {
 			console.log(chalk.dim(`Restored model: ${savedProvider}/${savedModelId}`));
 		}
@@ -2568,14 +2571,18 @@ export async function restoreModelFromSession(
 	}
 
 	// Model not found or no API key - fall back
-	const reason = !restoredModel ? "model no longer exists" : "no API key available";
+	const reason = !restoredModel
+		? "model no longer exists"
+		: isProviderExhausted(savedProvider)
+			? "provider unavailable"
+			: "no API key available";
 
 	if (shouldPrintMessages) {
 		console.error(chalk.yellow(`Warning: Could not restore model ${savedProvider}/${savedModelId} (${reason}).`));
 	}
 
 	// If we already have a model, use it as fallback
-	if (currentModel) {
+	if (currentModel && !isProviderExhausted(currentModel.provider)) {
 		if (shouldPrintMessages) {
 			console.log(chalk.dim(`Falling back to: ${currentModel.provider}/${currentModel.id}`));
 		}
