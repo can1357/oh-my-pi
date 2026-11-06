@@ -434,6 +434,53 @@ export function formatStatsDashboardUrl(hostname: string, port: number): string 
 	return `http://${urlHostname}:${port}`;
 }
 
+/** Parse an Accept-Encoding value, honoring `q=0` exclusions. */
+function acceptsEncoding(header: string | null, encoding: string): boolean {
+	if (!header) return false;
+	const wanted = encoding.toLowerCase();
+	// The named coding outranks `*`; `*` applies only when the coding is not listed.
+	let explicit: number | undefined;
+	let wildcard: number | undefined;
+	for (const part of header.split(",")) {
+		const [rawName, ...params] = part.trim().split(";");
+		const name = rawName?.trim().toLowerCase();
+		if (name !== wanted && name !== "*") continue;
+		let q = 1;
+		for (const param of params) {
+			const [rawKey, rawValue] = param.trim().split("=");
+			if (rawKey?.trim().toLowerCase() !== "q") continue;
+			const parsed = Number.parseFloat(rawValue ?? "");
+			if (Number.isFinite(parsed)) q = parsed;
+		}
+		if (name === wanted) explicit = q;
+		else wildcard = q;
+	}
+	return (explicit ?? wildcard ?? 0) > 0;
+}
+
+/** Trace/entry payloads are the multi-MB responses; compress them when the client allows it. */
+const COMPRESSIBLE_API_PATHS = new Set(["/api/session/trace", "/api/session/entry"]);
+
+function maybeCompressApiResponse(req: Request, path: string, response: Response): Response {
+	if (
+		!COMPRESSIBLE_API_PATHS.has(path) ||
+		response.status !== 200 ||
+		!response.body ||
+		typeof CompressionStream === "undefined" ||
+		!acceptsEncoding(req.headers.get("accept-encoding"), "gzip")
+	) {
+		return response;
+	}
+	const headers = new Headers(response.headers);
+	headers.set("content-encoding", "gzip");
+	headers.set("vary", "Accept-Encoding");
+	headers.delete("content-length");
+	return new Response(response.body.pipeThrough(new CompressionStream("gzip")), {
+		status: response.status,
+		headers,
+	});
+}
+
 function createDashboardServer(port: number, hostname: string): Server<undefined> {
 	const server = Bun.serve({
 		port,
@@ -474,10 +521,11 @@ function createDashboardServer(port: number, hostname: string): Server<undefined
 					headers.set(key, dashboardHeaders[key]);
 				}
 
-				return new Response(response.body, {
+				const responseWithIdentity = new Response(response.body, {
 					status: response.status,
 					headers,
 				});
+				return maybeCompressApiResponse(req, path, responseWithIdentity);
 			} catch (error) {
 				logger.error("Stats dashboard request failed", { path, error: String(error) });
 				return Response.json(
