@@ -3,7 +3,7 @@ import { logger, withLoopPhase } from "@oh-my-pi/pi-utils";
 import { transaction } from "../../db";
 import { toUtcIso } from "../../util/datetime";
 import { generateId } from "../../util/ids";
-import { currentEmbeddingModel, embeddingsDisabled } from "../embeddings";
+import { currentEmbeddingModel, embed, embeddingsDisabled } from "../embeddings";
 import { EpisodicGraph } from "../episodic-graph";
 import { countExtractedFactCategories, extractFactCategoriesSafe } from "../extraction";
 import { getMnemopiRuntimeOptions, withMnemopiRuntimeOptions } from "../runtime-options";
@@ -351,18 +351,21 @@ const EMBED_REBUILD_BATCH = 128;
  * Every `memory_embeddings` row is stamped with the model that produced it (see
  * `runEmbedding` in `helpers.ts`). When the configured embedding model changes,
  * its vector dimension changes too, so the previously-stored vectors are no
- * longer comparable. On a mismatch we wipe every stored vector — the
- * `memory_embeddings` table, the `episodic_memory.binary_vector` column, and the
- * sqlite-vec `vec_episodes` index — then enqueue all live memories for
- * background re-embedding under the new model via `scheduleEmbedding`.
+ * longer comparable. On a mismatch we embed one probe text with the new model. Once
+ * it answers we wipe every stored vector (the `memory_embeddings` table, the
+ * `episodic_memory.binary_vector` column, and the sqlite-vec `vec_episodes` index),
+ * then enqueue all live memories for background re-embedding under the new model
+ * via `scheduleEmbedding`. The probe and the wipe run as a tracked background task
+ * on `beam.pendingExtractions`, so `flushExtractions()` drains them.
  *
  * Runs once per store open; a fresh store (no embeddings) or an already-current
  * store is a no-op. The destructive wipe is skipped whenever it could not be
- * rebuilt — embeddings disabled via the runtime option OR the
- * `MNEMOPI_NO_EMBEDDINGS` env, or an unresolved (empty) active model — so a
- * stale-but-valid corpus is never destroyed without a replacement. MUST run
- * inside the active runtime-options scope so `currentEmbeddingModel()` /
- * `embeddingsDisabled()` reflect the per-instance configuration.
+ * rebuilt: embeddings disabled via the runtime option OR the `MNEMOPI_NO_EMBEDDINGS`
+ * env, an unresolved (empty) active model, or a provider that does not answer the
+ * probe (missing key, unreachable endpoint). A stale-but-valid corpus is never
+ * destroyed without a replacement. MUST run inside the active runtime-options scope
+ * so `currentEmbeddingModel()` / `embeddingsDisabled()` reflect the per-instance
+ * configuration.
  */
 export function reconcileEmbeddingModel(beam: BeamMemoryState): void {
 	if (embeddingsDisabled()) return;
@@ -381,35 +384,56 @@ export function reconcileEmbeddingModel(beam: BeamMemoryState): void {
 	// (NULL/unstamped counts as a mismatch via `IS NOT`).
 	const mismatch = beam.db.query("SELECT 1 FROM memory_embeddings WHERE model IS NOT ? LIMIT 1").get(active);
 	if (mismatch) {
-		const staleModels = beam.db
-			.query("SELECT DISTINCT model FROM memory_embeddings WHERE model IS NOT ?")
-			.all(active) as { model: string | null }[];
-		const live = beam.db
-			.query(`
-				SELECT id AS memoryId, COALESCE(embed_text, content) AS content FROM working_memory WHERE superseded_by IS NULL
-				UNION ALL
-				SELECT id AS memoryId, content FROM episodic_memory WHERE superseded_by IS NULL
-			`)
-			.all() as EmbedItem[];
-
-		transaction(beam.db, () => {
-			beam.db.run("DELETE FROM memory_embeddings");
-			beam.db.run("UPDATE episodic_memory SET binary_vector = NULL");
-			if (vecAvailable(beam.db)) {
-				try {
-					beam.db.run("DELETE FROM vec_episodes");
-				} catch {
-					// sqlite-vec cleanup is best-effort; rebuild correctness takes precedence.
+		// Wipe only after the new provider answers one request. Otherwise a missing key or an
+		// unreachable endpoint turns a model switch into permanent loss of every stored vector;
+		// with the stale vectors kept, the next store open probes again.
+		const migrate = async (): Promise<void> => {
+			try {
+				const probe = await embed(["mnemopi embedding probe"]);
+				if (probe === null || probe.length !== 1) {
+					logger.warn("mnemopi: embedding provider did not answer; keeping stored embeddings", { to: active });
+					return;
 				}
-			}
-		});
+				const staleModels = beam.db
+					.query("SELECT DISTINCT model FROM memory_embeddings WHERE model IS NOT ?")
+					.all(active) as { model: string | null }[];
+				const live = beam.db
+					.query(`
+						SELECT id AS memoryId, COALESCE(embed_text, content) AS content FROM working_memory WHERE superseded_by IS NULL
+						UNION ALL
+						SELECT id AS memoryId, content FROM episodic_memory WHERE superseded_by IS NULL
+					`)
+					.all() as EmbedItem[];
 
-		logger.info("mnemopi: embedding model changed, rebuilding", {
-			from: staleModels.map(row => row.model ?? "(unstamped)"),
-			to: active,
-			count: live.length,
-		});
-		rebuild(live);
+				transaction(beam.db, () => {
+					beam.db.run("DELETE FROM memory_embeddings");
+					beam.db.run("UPDATE episodic_memory SET binary_vector = NULL");
+					if (vecAvailable(beam.db)) {
+						try {
+							beam.db.run("DELETE FROM vec_episodes");
+						} catch {
+							// sqlite-vec cleanup is best-effort; rebuild correctness takes precedence.
+						}
+					}
+				});
+
+				logger.info("mnemopi: embedding model changed, rebuilding", {
+					from: staleModels.map(row => row.model ?? "(unstamped)"),
+					to: active,
+					count: live.length,
+				});
+				rebuild(live);
+			} catch (error) {
+				// A store closed during shutdown lands here; the next open resumes from the stamps.
+				logger.debug("mnemopi: embedding migration aborted", { error: String(error) });
+			}
+		};
+		const task = withMnemopiRuntimeOptions(getMnemopiRuntimeOptions(), migrate);
+		const pending = beam.pendingExtractions;
+		if (pending !== undefined) {
+			pending.add(task);
+			void task.finally(() => pending.delete(task));
+		}
 		return;
 	}
 

@@ -70,6 +70,8 @@ The first-turn recall is part of the transcript's history and is stored in the s
 | `mnemopi.llmApiKey`           | env/default        | LLM API key for `llmMode: remote`.                                                                                                                                                                                                                                                                            |
 | `mnemopi.llmModel`            | env/default        | LLM model id for `llmMode: remote`.                                                                                                                                                                                                                                                                           |
 
+When the embedding model changes, a bank rebuilds its stored embeddings on open. The bank first embeds one probe text with the new model and keeps the old embeddings until that request succeeds, so a missing key or an unreachable endpoint cannot erase them; the next open tries again. Embedding API requests carry at most `MNEMOPI_EMBEDDING_BATCH_SIZE` texts (default `64`); set it to the provider's limit when that limit is lower, for example `10` for DashScope.
+
 ## Scoping
 
 The coding-agent wrapper applies scoping on top of the underlying `Mnemopi` package:
