@@ -6,6 +6,8 @@
 //! `disown -a` forgets it. `$!` is the same in every subshell.
 #![cfg(unix)]
 
+mod upstream_frames_support;
+
 use pi_shell::{Shell, ShellRunOptions, cancel::CancelToken};
 
 /// Runs each script in a fresh shell and asserts Bash's output and exit
@@ -761,7 +763,6 @@ fn version_29_wait_image_restores_within_one_build_identity() {
 		},
 		testkit::FakeHost,
 	};
-	const IMAGE: &[u8] = include_bytes!("fixtures/frames/upstream-v29-parent-wait.image");
 	fn records(store: &mut MemStore) -> Vec<(KeyBuf, Record)> {
 		let mut records = Vec::new();
 		for table in [
@@ -787,9 +788,9 @@ fn version_29_wait_image_restores_within_one_build_identity() {
 		records.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 		records
 	}
-	let mut store = MemStore::from_bytes(IMAGE).expect("same-build store image");
-	// Written by upstream main b0b02d1120976535f466b282739c25775f991830.
-	// Keep its engine identity and the complete store unchanged.
+	// The shared consumer records both upstream writer shas and crate versions.
+	// A version bump needs a new genuine fixture pair; stored bytes stay intact.
+	let mut store = upstream_frames_support::store(true, upstream_frames_support::Identity::Same);
 	let blob = store.get_blob(BlobSlot::Frames).unwrap().unwrap();
 	let ((_, _, _, build), _) =
 		postcard::take_from_bytes::<([u8; 4], u32, u32, [u8; 32])>(&blob).unwrap();

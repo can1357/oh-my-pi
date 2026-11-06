@@ -2,18 +2,21 @@
 //! shells.
 #![cfg(unix)]
 
+mod upstream_frames_support;
+
 use pi_shell::{
 	bash::{
-		Budget, CallId, CallOutcome, Cx, Engine, EngineConfig, MemStore, RestoreOpts, RestoreReport,
-		Script, Shell, Step,
+		Budget, CallId, CallOutcome, Cx, Engine, EngineConfig, Incompatibility, RestoreError,
+		RestoreOpts, RestoreReport, Script, Shell, Step,
 	},
 	testkit::FakeHost,
 };
+use upstream_frames_support::Identity;
 
-fn assert_upstream_restore(image: &[u8], runs: u32) {
+fn assert_upstream_restore(parent_wait: bool, runs: u32) {
 	let engine = Engine::new(EngineConfig::default());
 	let mut host = FakeHost::new();
-	let mut store = MemStore::from_bytes(image).expect("upstream store image");
+	let mut store = upstream_frames_support::store(parent_wait, Identity::Same);
 	let (_, report) = Shell::restore(
 		&engine,
 		&mut Cx { host: &mut host, store: &mut store },
@@ -24,21 +27,21 @@ fn assert_upstream_restore(image: &[u8], runs: u32) {
 	assert_eq!(report, RestoreReport { vprocs: 2, runs, ..RestoreReport::default() });
 }
 
-// Both fixtures were written by the unmodified pi-shell library at upstream
-// main b0b02d1120976535f466b282739c25775f991830 (frames version 29). The writer
-// ran KEEP=preserved; f(){ hold; return 23; }; f & p=$!; <tail>
-// and externalized after the child's host call `hold` was pending. No engine
-// identity or image bytes were rewritten. The parent tail is shown per test.
+// Each upstream-written pair runs
+// KEEP=preserved; f(){ hold; return 23; }; f & p=$!; <tail>
+// and externalizes after the child's `hold` call is pending. Writer shas and
+// crate versions are recorded at the shared fixture consumer. A crate version
+// bump changes Engine::build_id and requires a new pair, not an identity edit.
 #[test]
 fn upstream_frames_with_active_child_and_parent_wait_restore_losslessly() {
 	// tail: wait "$p"; upstream reports two vprocs and one unfinished run.
-	assert_upstream_restore(include_bytes!("fixtures/frames/upstream-v29-parent-wait.image"), 1);
+	assert_upstream_restore(true, 1);
 }
 
 #[test]
 fn upstream_frames_with_active_child_without_parent_wait_restore_losslessly() {
 	// tail: :; upstream reports two vprocs and no unfinished root run.
-	assert_upstream_restore(include_bytes!("fixtures/frames/upstream-v29-no-wait.image"), 0);
+	assert_upstream_restore(false, 0);
 }
 
 /// An upstream image has no optional retained-status or wait-state records.
@@ -48,9 +51,7 @@ fn upstream_frames_with_active_child_without_parent_wait_restore_losslessly() {
 fn restored_upstream_shell_retains_new_statuses_without_optional_job_records() {
 	let engine = Engine::new(EngineConfig::default());
 	let mut host = FakeHost::new();
-	let mut store =
-		MemStore::from_bytes(include_bytes!("fixtures/frames/upstream-v29-parent-wait.image"))
-			.expect("upstream image without optional job records");
+	let mut store = upstream_frames_support::store(true, Identity::Same);
 	let (mut shell, _) = Shell::restore(
 		&engine,
 		&mut Cx { host: &mut host, store: &mut store },
@@ -87,4 +88,24 @@ fn restored_upstream_shell_retains_new_statuses_without_optional_job_records() {
 	}
 	assert!(done, "restored shell must finish the status query");
 	assert_eq!(host.stdout.bytes(), b"KEEP=preserved\nchild=23\nforgotten=127\n");
+}
+
+#[test]
+fn foreign_upstream_frames_are_refused_without_changing_the_store() {
+	let engine = Engine::new(EngineConfig::default());
+	let mut host = FakeHost::new();
+	let mut store = upstream_frames_support::store(true, Identity::Different);
+	let before = store.to_bytes();
+	let error = Shell::restore(
+		&engine,
+		&mut Cx { host: &mut host, store: &mut store },
+		RestoreOpts::default(),
+	)
+	.err()
+	.expect("an image from a different engine build must be refused");
+	assert!(
+		matches!(error, RestoreError::Incompatible { why: Incompatibility::Build }),
+		"a foreign identity must be refused, not misread: {error:?}"
+	);
+	assert_eq!(store.to_bytes(), before, "a refused image must remain unchanged");
 }
