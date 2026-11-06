@@ -2917,6 +2917,7 @@ function b() {
 			expect(options?.cwd).toBe(path.join(testDir, "sub-dir"));
 			// Renderers draw the executed `pwd` under the directory it ran in.
 			expect(hoistedResult.details?.cwd).toBe(path.join(testDir, "sub-dir"));
+			expect(hoistedResult.details?.cdSeparator).toBe(";");
 
 			// A missing directory stays with the shell, which runs the rest anyway.
 			const missing = "cd does-not-exist; echo still-executed";

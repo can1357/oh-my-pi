@@ -1177,9 +1177,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// The directory the command actually ran in, set once resolved. A hoisted
 		// `cd <dir>; …` runs only the remainder, so renderers drawing the executed
 		// script read the directory from here instead of re-parsing the command.
-		const ran: { cwd?: string } = {};
+		const ran: { cwd?: string; cdSeparator?: ";" } = {};
 		const stamp = (details: BashToolDetails | undefined): BashToolDetails | undefined =>
-			ran.cwd === undefined ? details : { ...details, cwd: ran.cwd };
+			ran.cwd === undefined
+				? details
+				: { ...details, cwd: ran.cwd, ...(ran.cdSeparator ? { cdSeparator: ran.cdSeparator } : {}) };
 		const result = await this.#execute(
 			toolCallId,
 			input,
@@ -1202,7 +1204,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			async: rawAsync,
 			pty,
 		}: BashToolInput,
-		ran: { cwd?: string },
+		ran: { cwd?: string; cdSeparator?: ";" },
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<BashToolDetails>,
 		ctx?: AgentToolContext,
@@ -1232,6 +1234,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			if (cd && hoist) {
 				cwd = cd.path;
 				command = cd.rest;
+				if (cd.separator === ";") ran.cdSeparator = ";";
 			}
 		}
 		// Mode selection runs on normalized fields: a caller that materializes

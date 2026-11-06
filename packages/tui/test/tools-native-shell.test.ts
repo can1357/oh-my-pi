@@ -168,15 +168,28 @@ describe("bash native run box", () => {
 			timeline: { length: 1, cursor: 1, elapsedNs: 1, durationNs: 1 },
 		};
 		const ranIn = path.join(os.tmpdir(), "hoisted-target");
-		const result = { content: [{ type: "text", text: "built" }], details: { trace, cwd: ranIn } };
+		const result = {
+			content: [{ type: "text", text: "built" }],
+			details: { trace, cwd: ranIn, cdSeparator: ";" as const },
+		};
 		const options = { ...done, shell: true, shellTrace: trace, shellPresentation: presentation };
 		const args = { command: `cd ${ranIn}; echo built` };
+		const card = (details: typeof result.details | { trace: ShellTrace; cwd: string }, command: string) =>
+			Bun.stripANSI(
+				bashToolRenderer
+					.renderResult({ ...result, details }, options, theme, { command })
+					.render(120)
+					.join("\n"),
+			);
 
 		const pane = nodes(nodes(bashToolRenderer.describeResult(result, options, args).body)[0]?.c)[0];
 		expect(props(pane).cwd).toContain("hoisted-target");
 
-		const ansi = Bun.stripANSI(bashToolRenderer.renderResult(result, options, theme, args).render(120).join("\n"));
-		expect(ansi).toMatch(/\$ cd \S*hoisted-target &&/);
+		// The prefix keeps the separator the model wrote.
+		const semicolon = card(result.details, args.command);
+		expect(semicolon).toMatch(/\$ cd \S*hoisted-target;/);
+		expect(semicolon).not.toContain("hoisted-target &&");
+		expect(card({ trace, cwd: ranIn }, `cd ${ranIn} && echo built`)).toMatch(/\$ cd \S*hoisted-target &&/);
 	});
 
 	it("has no target without an intent and no foot before the command starts", () => {
