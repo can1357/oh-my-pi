@@ -759,3 +759,31 @@ async fn an_arithmetic_for_header_leaves_the_status_alone() {
 	])
 	.await;
 }
+
+/// A `${ ;}` substitution runs in the current shell, and its
+/// `parse_and_execute` catches a plain discard as an `eval` or a `.` does:
+/// the substitution ends, the command string carries on with status 1. An
+/// assignment's arithmetic error and a fatal expansion error still end the
+/// shell there. Bash 5.2.21 has no such substitution, so Bash 5.3.0 is the
+/// oracle for every row of this test; an earlier round of this change gave
+/// the posix temporary-environment error a jump the substitution did not
+/// catch, which ended the whole command string.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_nofork_substitution_catches_a_discard() {
+	check(&[
+		(r##"x=${ set -o posix; readonly r=1; r=2 true; }; echo AFTER:$?"##, "AFTER:1\n", 0),
+		(r##"set -o posix; readonly r=1; x=${ r=2 true; }; echo AFTER:$?"##, "AFTER:1\n", 0),
+		(r##"readonly r=1; x=${ r=2; }; echo AFTER:$?"##, "AFTER:1\n", 0),
+		// `x=${ : $((1/0)); }` is `AFTER:1` in Bash 5.3.0 and 1 at upstream
+		// main as well as here: an arithmetic error in a word takes another
+		// jump, a site of the follow-up pull request rather than a row this
+		// change moves.
+		// Controls: the jumps a `${ ;}` does not catch, and the forms that
+		// already caught this one.
+		(r##"x=${ declare -i I; I=bad!; }; echo AFTER:$?"##, "", 1),
+		(r##"x=${ : ${u?BOOM}; }; echo AFTER:$?"##, "", 127),
+		(r##"set -o posix; readonly r=1; x=$( r=2 true ); echo AFTER:$?"##, "AFTER:1\n", 0),
+		(r##"set -o posix; readonly r=1; eval 'r=2 true'; echo AFTER:$?"##, "AFTER:1\n", 0),
+	])
+	.await;
+}

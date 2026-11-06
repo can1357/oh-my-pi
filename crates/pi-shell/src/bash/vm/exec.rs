@@ -512,11 +512,20 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				vp.status = status;
 				// bash's `parse_and_execute` (the script, `-c`, `eval`, `.`,
 				// a trap action) catches the jump: the innermost script goes
-				// on with its next command.
-				let script = vp
-					.frames
-					.iter()
-					.rposition(|f| matches!(f.kind, FrameKind::Script { .. }));
+				// on with its next command. A `${ ;}` substitution runs in
+				// the current shell and catches it too, for the discards its
+				// `parse_and_execute` sees: `readonly r=1; x=${ r=2; }` and
+				// `set -o posix; readonly r=1; x=${ r=2 true; }` print
+				// `AFTER:1` in Bash 5.3.0 (5.2.21 has no such substitution,
+				// so 5.3.0 is the oracle for these rows), while an
+				// assignment's arithmetic error (`x=${ declare -i I;
+				// I=bad!; }`) and a fatal expansion error end the shell
+				// there as everywhere else.
+				let nofork = !matches!(flow, Flow::DiscardArith(_));
+				let script = vp.frames.iter().rposition(|f| {
+					matches!(f.kind, FrameKind::Script { .. })
+						|| (nofork && matches!(f.kind, FrameKind::NoFork))
+				});
 				if let Some(i) = script {
 					unwind(&mut k.root, cx.store, vp, i + 1);
 					clear_scratch(&mut k.root, cx.store, vp);
