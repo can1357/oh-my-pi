@@ -24,6 +24,10 @@ enum Mode {
 	/// A script file the `obash` binary reads, whose `$0` and `BASH_SOURCE[0]` are
 	/// the script: script mode is not reachable through `Shell::run`.
 	ScriptFile,
+	/// `obash --norc --noprofile -i -c`: an interactive shell, which bash names
+	/// by itself however deep in a `.` file it is. With no terminal it first
+	/// prints two job-control notices, so the row compares the last line.
+	Interactive,
 }
 
 /// One case: what Bash 5.3.0 writes for `script` after `setup`, byte for byte.
@@ -93,6 +97,23 @@ async fn observe(row: &Row) -> (i32, Vec<u8>, Vec<u8>, String) {
 				.expect("run the case");
 			let read = |p: &Path| std::fs::read(p).unwrap_or_default();
 			(result.exit_code.unwrap_or(-1), read(&out), read(&err), home)
+		},
+		Mode::Interactive => {
+			let done = Command::new(env!("CARGO_BIN_EXE_obash"))
+				.arg0("bash")
+				.args(["--norc", "--noprofile", "-i", "-c", row.script])
+				.current_dir(dir.path())
+				.env_clear()
+				.envs(&env)
+				.output()
+				.expect("run obash");
+			let last = done
+				.stderr
+				.split_inclusive(|&c| c == b'\n')
+				.filter(|l| l.len() > 1)
+				.next_back()
+				.map_or_else(Vec::new, <[u8]>::to_vec);
+			(done.status.code().unwrap_or(-1), done.stdout, last, home)
 		},
 		Mode::ScriptFile => {
 			std::fs::write(dir.path().join("script.sh"), format!("{}\n", row.script))
@@ -401,6 +422,36 @@ const ROWS: &[Row] = &[
 		stdout: b"",
 		stderr: b"bash: ./victim: /missing/review/interpreter: bad interpreter: No such file or directory\n",
 	},
+	// int-sourced-builtin (i)
+	Row {
+		id: "int-sourced-builtin",
+		setup: r#"printf 'cd ./missing\n' > source.sh"#,
+		mode: Mode::Interactive,
+		script: ". ./source.sh",
+		status: 1,
+		stdout: b"",
+		stderr: b"bash: cd: ./missing: No such file or directory\n",
+	},
+	// int-sourced-badinterp (i)  // 5.2.21 differs: 127 'bash: ./victim: cannot execute: required file not found\n'
+	Row {
+		id: "int-sourced-badinterp",
+		setup: r#"printf '#!/missing/review/interpreter\n' > victim; chmod 755 victim; printf './victim\n' > source.sh"#,
+		mode: Mode::Interactive,
+		script: ". ./source.sh",
+		status: 126,
+		stdout: b"",
+		stderr: b"bash: ./victim: /missing/review/interpreter: bad interpreter: No such file or directory\n",
+	},
+	// int-top-builtin (i)
+	Row {
+		id: "int-top-builtin",
+		setup: "",
+		mode: Mode::Interactive,
+		script: "cd ./missing",
+		status: 1,
+		stdout: b"",
+		stderr: b"bash: cd: ./missing: No such file or directory\n",
+	},
 	// ctl-dollar0-c (c)
 	Row {
 		id: "ctl-dollar0-c",
@@ -540,6 +591,14 @@ const ROWS: &[Row] = &[
 #[tokio::test(flavor = "multi_thread")]
 async fn a_diagnostic_inside_a_sourced_file_names_that_file() {
 	assert_rows(&["src-", "ctl-"]).await;
+}
+
+/// bash reads `BASH_SOURCE[0]` only for a shell that is not interactive
+/// (`get_name_for_error`), so an interactive shell names itself however deep in
+/// a `.` file the message is raised.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_interactive_shell_names_itself_inside_a_sourced_file() {
+	assert_rows(&["int-"]).await;
 }
 
 /// A file name is bytes, and stderr is a byte stream: a name that is not UTF-8
