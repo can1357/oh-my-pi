@@ -3,7 +3,11 @@
 //! signal.
 #![cfg(target_os = "linux")]
 
-use std::{fs, process::Command};
+use std::{
+	fs,
+	path::{Path, PathBuf},
+	process::Command,
+};
 
 use pi_shell::{Shell, ShellRunOptions, cancel::CancelToken};
 use serde::Deserialize;
@@ -22,9 +26,8 @@ fn quote(value: &str) -> String {
 	format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-async fn assert_recipients(tree: bool) {
-	let scratch = tempfile::tempdir().unwrap();
-	let observer = scratch.path().join("signal-recipient");
+fn compile_observer(scratch: &Path) -> PathBuf {
+	let observer = scratch.join("signal-recipient");
 	let compiled = Command::new("cc")
 		.args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-O2"])
 		.arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/signal-recipient.c"))
@@ -33,6 +36,12 @@ async fn assert_recipients(tree: bool) {
 		.output()
 		.expect("compile the real signal observer");
 	assert!(compiled.status.success(), "{}", String::from_utf8_lossy(&compiled.stderr));
+	observer
+}
+
+async fn assert_recipients(tree: bool) {
+	let scratch = tempfile::tempdir().unwrap();
+	let observer = compile_observer(scratch.path());
 	let cases: Vec<Case> =
 		serde_json::from_str(include_str!("fixtures/signal-recipient.json")).unwrap();
 	let mut mismatches = Vec::new();
@@ -107,4 +116,75 @@ async fn a_pipeline_pid_signals_only_its_rightmost_program_and_waits_for_it() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_program_signal_does_not_reach_its_native_descendants() {
 	assert_recipients(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_explicit_subshell_is_not_its_foreground_pipeline() {
+	let scratch = tempfile::tempdir().unwrap();
+	let observer = compile_observer(scratch.path());
+	let mut mismatches = Vec::new();
+	for monitor in [false, true] {
+		for (spec, expected) in [
+			("-32", "kill=0\nwait=160\n"),
+			("-33", "kill=0\nwait=161\n"),
+			("-TERM", "kill=0\nwait=143\n"),
+			("-RTMIN", "kill=0\nwait=162\n"),
+		] {
+			let directory = tempfile::tempdir_in(scratch.path()).unwrap();
+			let args = [observer.to_str().unwrap(), directory.path().to_str().unwrap()]
+				.map(quote)
+				.join(" ");
+			let mode = if monitor { "-m" } else { "+m" };
+			let command = format!(
+				r#"set -- {args}
+exec 2>/dev/null
+set {mode}
+observer=$1
+d=$2
+( "$observer" "$d" left | "$observer" "$d" right ) &
+p=$!
+until [ -s "$d/left-ready" ] && [ -s "$d/right-ready" ]; do /bin/sleep .01; done
+kill {spec} "$p"
+printf 'kill=%s\n' "$?"
+: > "$d/release"
+wait "$p"
+printf 'wait=%s\n' "$?"
+until [ -s "$d/left-events" ] && [ -s "$d/right-events" ]; do /bin/sleep .01; done
+"#,
+			);
+			let (tx, rx) = flume::unbounded::<String>();
+			let result = Shell::new(None)
+				.run(
+					ShellRunOptions { command, ..Default::default() },
+					Some(tx),
+					CancelToken::new(Some(10_000)),
+				)
+				.await
+				.expect("run explicit-subshell recipients through PiHost");
+			let output: String = rx.drain().collect();
+			let mut errors = Vec::new();
+			if (result.exit_code, output.as_str()) != (Some(0), expected) {
+				errors.push(format!(
+					"expected {expected:?}, status={:?} output={output:?}",
+					result.exit_code
+				));
+			}
+			for role in ["left", "right"] {
+				let expected = "15=0 32=0 33=0 34=0 wrong=0\n";
+				let actual = fs::read_to_string(directory.path().join(format!("{role}-events")));
+				if actual.as_ref().ok().map(String::as_str) != Some(expected) {
+					errors.push(format!("{role}: expected {expected:?}, got {actual:?}"));
+				}
+			}
+			if !errors.is_empty() {
+				mismatches.push(format!("explicit-subshell-{spec}-{mode}: {}", errors.join("; ")));
+			}
+		}
+	}
+	assert!(
+		mismatches.is_empty(),
+		"{} of 8 explicit-subshell recipient rows differ from Bash:\n{}",
+		mismatches.len(),
+		mismatches.join("\n"),
+	);
 }
