@@ -1,0 +1,713 @@
+echo <(a|b;  c) >(d)f () 
+{ 
+    echo <(a | b; c) >(d)
+}echo $(a|b;  c) `x|  y` ${ a;  } ${|b;}f () 
+{ 
+    echo $(a | b; c) `x|  y` ${ a; } ${|b; }
+}echo $[1+2] $((  1 + 2 ))f () 
+{ 
+    echo $[1+2] $((  1 + 2 ))
+}((  1+2  ))f () 
+{ 
+    ((  1+2  ))
+}a=(1   2  [k]=v  # c
+ 3) b+=x c[1+2]=yf () 
+{ 
+    a=(1 2 [k]=v 3) b+=x c[1+2]=y
+}for i in 1; { echo; }f () 
+{ 
+    for i in 1;
+    do
+        echo;
+    done
+}echo "a\
+b" a\
+b 'a\
+b'f () 
+{ 
+    echo "ab" ab 'a\
+b'
+}time -p ! af () 
+{ 
+    time -p ! a
+}! time a | bf () 
+{ 
+    time ! a | b
+}echo ${x[ 1 ]} ${x:  -1:2} ${foo bar}f () 
+{ 
+    echo ${x[ 1 ]} ${x:  -1:2} ${foo bar}
+}declare -a x=(1  2) y=(3)f () 
+{ 
+    declare -a x=(1 2) y=(3)
+}echo $"a  $x"f () 
+{ 
+    echo "a  $x"
+}case x in (a) ;; b|c) d;& e) ;;& esacf () 
+{ 
+    case x in 
+        a)
+
+        ;;
+        b | c)
+            d
+        ;&
+        e)
+
+        ;;&
+    esac
+}[[ -n x && ( a == b* || ! c =~ ^(x|y)$ ) ]]f () 
+{ 
+    [[ -n x && ( a == b* || ! c =~ ^(x|y)$ ) ]]
+}cat <<EOF; cat <<-"X"
+a $x
+EOF
+	b
+	Xf () 
+{ 
+    cat <<EOF
+a $x
+EOF
+
+    cat <<-'X'
+b
+X
+
+}echo >&2 <&- >&- 2>&1 <&3 >&$x 2>&- {fd}>f {fd}>&- &>f &>>g 3<>f >|h <<<"x" 2<<< yf () 
+{ 
+    echo 1>&2 0>&- 1>&- 2>&1 0<&3 >&$x 2>&- {fd}> f {fd}>&- &> f &>> g 3<> f >| h <<< "x" 2<<< y
+}time; ! ; time -p; ! ! a; ! time a | bf () 
+{ 
+    time ;
+    ! ;
+    time -p ;
+    a;
+    time ! a | b
+}[[ x ]]; [[ ! ! x ]]; [[ ! ( a && b ) || -f x ]]; [[ a < b ]]f () 
+{ 
+    [[ -n x ]];
+    [[ -n x ]];
+    [[ ! ( -n a && -n b ) || -f x ]];
+    [[ a < b ]]
+}coproc a b; coproc { a; }; coproc N { a; }; coproc N (a)f () 
+{ 
+    coproc a b;
+    coproc COPROC { 
+        a
+    };
+    coproc N { 
+        a
+    };
+    coproc N ( a )
+}g() { a; } >f; function h { b; }; k() ( c ); function m () if a; then b; fif () 
+{ 
+    function g () 
+    { 
+        a
+    } > f;
+    function h () 
+    { 
+        b
+    };
+    function k () 
+    { 
+        ( c )
+    };
+    function m () 
+    { 
+        if a; then
+            b;
+        fi
+    }
+}select x in a b; do :; done; select y; do :; donef () 
+{ 
+    select x in a b;
+    do
+        :;
+    done;
+    select y in "$@";
+    do
+        :;
+    done
+}case x in esac; case x in (esac) a;; esac; case x in a) b; esac; case $x in *) ;; esacf () 
+{ 
+    case x in 
+    esac;
+    case x in 
+        (esac)
+            a
+        ;;
+    esac;
+    case x in 
+        a)
+            b
+        ;;
+    esac;
+    case $x in 
+        *)
+
+        ;;
+    esac
+}for ((;;)); do :; done; for ((i=0;i<3;i++)) { a; }f () 
+{ 
+    for ((1; 1; 1))
+    do
+        :;
+    done;
+    for ((i=0; i<3; i++))
+    do
+        a;
+    done
+}echo $( (a) ) ${ a; } ${ a;} ${|a;} ${ a
+} ${ a& }f () 
+{ 
+    echo $( ( a )) ${ a; } ${ a; } ${|a; } ${ a
+ } ${ a & }
+}a & b; c &f () 
+{ 
+    a & b;
+    c &
+}a |& b | c |& df () 
+{ 
+    a 2>&1 | b | c 2>&1 | d
+}a && b || ! c &f () 
+{ 
+    a && b || ! c &
+}cat <<A && cat <<B
+a
+A
+b
+B
+echo xf () 
+{ 
+    cat <<A && 
+a
+A
+ cat <<B
+b
+B
+
+    echo x
+}cat <<A | cat <<B; echo
+a
+A
+b
+Bf () 
+{ 
+    cat <<A |
+a
+A
+  cat <<B
+b
+B
+
+    echo
+}if cat <<A
+a
+A
+then b; fi
+while cat <<A; do c; done
+a
+Af () 
+{ 
+    if cat <<A
+a
+A
+    then
+        b;
+    fi;
+    while cat <<A
+a
+A
+    do
+        c;
+    done
+}( cat <<A )
+a
+A
+{ cat <<A; }
+a
+Af () 
+{ 
+    ( cat <<A
+a
+A
+ );
+    { 
+        cat <<A
+a
+A
+
+    }
+}case x in a) cat <<A;;
+a
+A
+esacf () 
+{ 
+    case x in 
+        a)
+            cat <<A
+a
+A
+
+        ;;
+    esac
+}cat <<A >f 2>&1 <<-B
+a
+A
+	b
+	Bf () 
+{ 
+    cat <<A > f 2>&1 <<-B
+a
+A
+b
+B
+
+}a <<A & b
+x
+Af () 
+{ 
+    a <<A &
+x
+A
+  b
+}x=$(cat <<A
+a
+A
+) yf () 
+{ 
+    x=$(cat <<A
+a
+A
+) y
+}echo $'a\tb\'c' $'x'y "$'q'"f () 
+{ 
+    echo 'a	b'\''c' 'x'y "$'q'"
+}echo ${x:-$(a;b)} "$(c
+d)" `e
+f` $(case x in a) b;; esac)f () 
+{ 
+    echo ${x:-$(a; b)} "$(c
+d)" `e
+f` $(case x in a)
+        b
+    ;;
+esac)
+}echo $( # c ( x
+a )f () 
+{ 
+    echo $(a)
+}a=( $(x) "y  z" ) declare b=( 1  2 )f () 
+{ 
+    a=($(x) "y  z") declare b=(1 2)
+}echo ${x/a/b} ${x// /_} ${#x} ${!x*} ${x@Q} $(( $(a) + 1 ))f () 
+{ 
+    echo ${x/a/b} ${x// /_} ${#x} ${!x*} ${x@Q} $(( $(a) + 1 ))
+}echo \$x\
+y \\ "a\$b\\" ${x:-"a b"}f () 
+{ 
+    echo \$xy \\ "a\$b\\" ${x:-"a b"}
+}echo $(cat <<EOF
+x $(y)
+EOF
+)f () 
+{ 
+    echo $(cat <<EOF
+x $(y)
+EOF
+)
+}x=$(a) y=`b`f () 
+{ 
+    x=$(a) y=`b`
+}echo $(if a
+then b
+c
+fi)f () 
+{ 
+    echo $(if a; then
+    b
+c;
+fi)
+}for ((i = 0 ; i < 5; i++ )); do :; donef () 
+{ 
+    for ((i = 0 ; i < 5; i++ ))
+    do
+        :;
+    done
+}echo ${x:-$'\t'} "${x:-$'\t'}" "${x#$'a'}"f () 
+{ 
+    echo ${x:-'	'} "${x:-	}" "${x#'a'}"
+}echo $"x" "$"x""f () 
+{ 
+    echo "x" "$"x""
+}echo `echo \`a\` "\$x"`f () 
+{ 
+    echo `echo \`a\` "\$x"`
+}if a; then b; elif c; then d; elif e; then f; else g; fif () 
+{ 
+    if a; then
+        b;
+    else
+        if c; then
+            d;
+        else
+            if e; then
+                f;
+            else
+                g;
+            fi;
+        fi;
+    fi
+}while a
+do
+b
+done; until c; do d; done >xf () 
+{ 
+    while a; do
+        b;
+    done;
+    until c; do
+        d;
+    done > x
+}{ a; b; } > f 2>&1; ( c; d ) | ef () 
+{ 
+    { 
+        a;
+        b
+    } > f 2>&1;
+    ( c;
+    d ) | e
+}f2() { :; }; function f3() { :; }f () 
+{ 
+    function f2 () 
+    { 
+        :
+    };
+    function f3 () 
+    { 
+        :
+    }
+}echo a\ b \' \" \$ \` "\a"f () 
+{ 
+    echo a\ b \' \" \$ \` "\a"
+}echo ${!a[@]} ${a[@]:1:2} ${#a[*]} ${a[$i]} ${!x} ${!x:-y}f () 
+{ 
+    echo ${!a[@]} ${a[@]:1:2} ${#a[*]} ${a[$i]} ${!x} ${!x:-y}
+}echo ${x%%.*} ${x##*/} ${x%/*} ${x#*/} ${x^^} ${x,} ${x/#a/b} ${x/%a/b}f () 
+{ 
+    echo ${x%%.*} ${x##*/} ${x%/*} ${x#*/} ${x^^} ${x,} ${x/#a/b} ${x/%a/b}
+}echo ${x:=1} ${x=1} ${x:?msg} ${x?} ${x:+alt} ${x+alt}f () 
+{ 
+    echo ${x:=1} ${x=1} ${x:?msg} ${x?} ${x:+alt} ${x+alt}
+}a[i]=1 b[$j]+=2 c+=(3 4) d=([0]=a [1]+=b)f () 
+{ 
+    a[i]=1 b[$j]+=2 c+=(3 4) d=([0]=a [1]+=b)
+}local -a x=(1 2); export y=$z; readonly rf () 
+{ 
+    local -a x=(1 2);
+    export y=$z;
+    readonly r
+}echo ~ ~/x {a,b} *.c a?b [ab]f () 
+{ 
+    echo ~ ~/x {a,b} *.c a?b [ab]
+}echo "${a[@]}" "$@" $* $# $? $$ $! $- $0 $9 ${10}f () 
+{ 
+    echo "${a[@]}" "$@" $* $# $? $$ $! $- $0 $9 ${10}
+}trap 'echo x' EXIT; eval "a b"f () 
+{ 
+    trap 'echo x' EXIT;
+    eval "a b"
+}echo $((a+b)) $((a ? b : c)) $(( (a) + (b) ))f () 
+{ 
+    echo $((a+b)) $((a ? b : c)) $(( (a) + (b) ))
+}echo $(echo $(echo a))f () 
+{ 
+    echo $(echo $(echo a))
+}echo "$(echo "$(echo a)")"f () 
+{ 
+    echo "$(echo "$(echo a)")"
+}a=$((1+2)); b=${c:-$((3))}f () 
+{ 
+    a=$((1+2));
+    b=${c:-$((3))}
+}echo foo#bar # commentf () 
+{ 
+    echo foo#bar
+}[[ $a == "$b" ]] && [[ $c =~ ^[0-9]+$ ]] || [[ -z $d ]]f () 
+{ 
+    [[ $a == "$b" ]] && [[ $c =~ ^[0-9]+$ ]] || [[ -z $d ]]
+}[[ a > b && c != d* ]]f () 
+{ 
+    [[ a > b && c != d* ]]
+}x=1 y=2 cmd arg >out 2>&1 <inf () 
+{ 
+    x=1 y=2 cmd arg > out 2>&1 < in
+}cmd 2>/dev/null || :f () 
+{ 
+    cmd 2> /dev/null || :
+}cd /tmp && ls -la | grep foo 2>/dev/null | head -5 > out.txtf () 
+{ 
+    cd /tmp && ls -la | grep foo 2> /dev/null | head -5 > out.txt
+}for f in *.txt; do
+  echo "$f"
+donef () 
+{ 
+    for f in *.txt;
+    do
+        echo "$f";
+    done
+}while read -r line; do echo "$line"; done < filef () 
+{ 
+    while read -r line; do
+        echo "$line";
+    done < file
+}case "$1" in
+  start|stop) echo ok ;;
+  *) echo no ;;
+esacf () 
+{ 
+    case "$1" in 
+        start | stop)
+            echo ok
+        ;;
+        *)
+            echo no
+        ;;
+    esac
+}if [ -f x ]; then
+  cat x
+else
+  echo none
+fif () 
+{ 
+    if [ -f x ]; then
+        cat x;
+    else
+        echo none;
+    fi
+}function f { :; }; g () { :; }f () 
+{ 
+    function f () 
+    { 
+        :
+    };
+    function g () 
+    { 
+        :
+    }
+}echo $(( 2#101 )) $[ 3 * 4 ]f () 
+{ 
+    echo $(( 2#101 )) $[ 3 * 4 ]
+}time { a; b; }f () 
+{ 
+    time { 
+        a;
+        b
+    }
+}! { a; }f () 
+{ 
+    ! { 
+        a
+    }
+}{ a; } &f () 
+{ 
+    { 
+        a
+    } &
+}a; b; c &f () 
+{ 
+    a;
+    b;
+    c &
+}a & b & cf () 
+{ 
+    a & b & c
+}a && b & c || df () 
+{ 
+    a && b & c || d
+}echo a >f; echo b >>f; echo c >|ff () 
+{ 
+    echo a > f;
+    echo b >> f;
+    echo c >| f
+}exec 3>&1 4<&0 5<>ff () 
+{ 
+    exec 3>&1 4<&0 5<> f
+}echo $(<file)f () 
+{ 
+    echo $(< file)
+}x=( a
+b
+# c
+c )f () 
+{ 
+    x=(a b c)
+}echo 'it'\''s'f () 
+{ 
+    echo 'it'\''s'
+}echo "a
+b"f () 
+{ 
+    echo "a
+b"
+}cat <<'E'
+$x
+Ef () 
+{ 
+    cat <<'E'
+$x
+E
+
+}cat <<\E
+$x
+Ef () 
+{ 
+    cat <<'E'
+$x
+E
+
+}cat <<"E"
+$x
+Ef () 
+{ 
+    cat <<'E'
+$x
+E
+
+}cat << E
+\$x \\ \`
+Ef () 
+{ 
+    cat <<E
+\$x \\ \`
+E
+
+}cat <<-E
+		a
+	Ef () 
+{ 
+    cat <<-E
+a
+E
+
+}cat <<E1 <<E2
+a
+E1
+b
+E2f () 
+{ 
+    cat <<E1 <<E2
+a
+E1
+b
+E2
+
+}cat <<E | wc -l
+a
+Ef () 
+{ 
+    cat <<E |
+a
+E
+  wc -l
+}f(){ :;}f () 
+{ 
+    function f () 
+    { 
+        :
+    }
+}echo ${x:-a b} ${x:-'a b'} ${x:-"a"b}f () 
+{ 
+    echo ${x:-a b} ${x:-'a b'} ${x:-"a"b}
+}echo $(( $# > 0 ))f () 
+{ 
+    echo $(( $# > 0 ))
+}arr=("${arr[@]}" new)f () 
+{ 
+    arr=("${arr[@]}" new)
+}read -ra parts <<< "$line"f () 
+{ 
+    read -ra parts <<< "$line"
+}printf '%s\n' "${@:2}"f () 
+{ 
+    printf '%s\n' "${@:2}"
+}echo ${var//[^a-z]/}f () 
+{ 
+    echo ${var//[^a-z]/}
+}[[ -v x ]] && echo ${x@Q}f () 
+{ 
+    [[ -v x ]] && echo ${x@Q}
+}coproc catf () 
+{ 
+    coproc cat
+}echo a | { read x; echo $x; }f () 
+{ 
+    echo a | { 
+        read x;
+        echo $x
+    }
+}(( i++ )); (( i = j + 1 ))f () 
+{ 
+    (( i++ ));
+    (( i = j + 1 ))
+}let i++ j=2f () 
+{ 
+    let i++ j=2
+}select x; do break; donef () 
+{ 
+    select x in "$@";
+    do
+        break;
+    done
+}for x do echo; donef () 
+{ 
+    for x in "$@";
+    do
+        echo;
+    done
+}case a in a) ;& b) echo;;& *) esacf () 
+{ 
+    case a in 
+        a)
+
+        ;&
+        b)
+            echo
+        ;;&
+        *)
+
+        ;;
+    esac
+}{ echo; } 2>/dev/null >&2f () 
+{ 
+    { 
+        echo
+    } 2> /dev/null 1>&2
+}f() { local x=$1; shift; echo "$x"; }f () 
+{ 
+    function f () 
+    { 
+        local x=$1;
+        shift;
+        echo "$x"
+    }
+}echo $'\x41\u00e9\n'f () 
+{ 
+    echo 'Aé
+'
+}echo "${x:-$'a\tb'}"f () 
+{ 
+    echo "${x:-a	b}"
+}echo $"hello $USER"f () 
+{ 
+    echo "hello $USER"
+}echo ${x:0:1}${x:1}f () 
+{ 
+    echo ${x:0:1}${x:1}
+}echo ${#}  ${##} ${#@}f () 
+{ 
+    echo ${#} ${##} ${#@}
+}echo ${@} ${*} ${!}f () 
+{ 
+    echo ${@} ${*} ${!}
+}

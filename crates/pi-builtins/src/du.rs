@@ -11,7 +11,6 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::PossibleValue};
 use glob::Pattern;
 use jiff::{
@@ -36,16 +35,11 @@ use uucore::{
 
 use crate::{
 	block_size::{BlockSize, Scale},
-	host::{Host, StreamWriter, Utility, format_usage, matches_parser, os_bytes_lossy, strip_errno, util},
+	host::{Host, StreamWriter, Utility, format_usage, matches_parser, os_bytes_lossy, strip_errno},
 	locale::{NumericSymbols, ctype_is_utf8, numeric_symbols},
 	quoting_style::quoting_style_by_name,
 	time_zone::shell_time_zone,
 };
-
-/// Registration for the `du` builtin.
-pub(crate) fn du_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Du, SE>()
-}
 
 mod options {
 	pub const HELP: &str = "help";

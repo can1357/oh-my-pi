@@ -44,8 +44,11 @@ const PLAN_YOLO_HANDOFF_MESSAGE_TYPE = "plan-yolo-handoff";
 
 /**
  * Whether a completed tool result is the first workspace-mutating action that
- * arms the prewalk hand-off. A direct `edit`/`write` call always counts; a
- * `write` that dispatched an `xd://` device (e.g. `lsp`, `ast_edit`, `debug`)
+ * arms the prewalk hand-off. A direct `edit`/`write` call counts unless the
+ * write touched no files: a subagent messaging its parent through
+ * `write agent://…`, a reply, or a background-work cancellation is
+ * coordination, not implementation, and must not hand the plan off. A `write`
+ * that dispatched an `xd://` device (e.g. `lsp`, `ast_edit`, `debug`)
  * counts only when the wrapped tool resolved to a `write`/`exec` approval tier.
  * Read-only device calls — LSP navigation, `debug` inspection, `ast_edit` on
  * internal URLs, help lookups — leave the tier `read` (or absent) and must not
@@ -56,8 +59,10 @@ const PLAN_YOLO_HANDOFF_MESSAGE_TYPE = "plan-yolo-handoff";
 function isPrewalkImplementationAction(result: ToolResultMessage): boolean {
 	if (!PREWALK_ACTION_TOOLS[result.toolName]) return false;
 	const details = result.details;
+	if (!details || typeof details !== "object") return true;
+	if ("touchesNoFiles" in details && details.touchesNoFiles === true) return false;
 	// A direct filesystem edit/write carries no `xd://` dispatch metadata.
-	if (!details || typeof details !== "object" || !("xdev" in details) || !details.xdev) return true;
+	if (!("xdev" in details) || !details.xdev) return true;
 	const xdev = details.xdev;
 	// Device dispatch: switch only on a genuine mutation tier. An absent tier
 	// (help lookup, unresolved approval) declines the switch.

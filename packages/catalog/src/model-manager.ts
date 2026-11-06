@@ -1,19 +1,12 @@
+import { type } from "@oh-my-pi/omptype";
 import { logger, VERSION } from "@oh-my-pi/pi-utils";
 import { buildModel } from "./build";
 import { collapseBuiltVariants } from "./compat/collapse";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
 import { readModelCache, writeModelCache } from "./model-cache";
 import { type GeneratedProvider, getBundledModels } from "./models";
-import { isTimeBasedCost } from "./pricing";
-import {
-	type Api,
-	type Model,
-	type ModelCost,
-	modelKind,
-	type ModelSpec,
-	type Provider,
-	type TokenCost,
-} from "./types";
+import { TimeBasedCostShape } from "./pricing";
+import { type Api, type Model, modelKind, type ModelSpec, type Provider } from "./types";
 import { isRecord } from "./utils";
 
 const DEFAULT_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
@@ -134,6 +127,8 @@ export interface ModelResolutionResult<TApi extends Api = Api> {
 	stale: boolean;
 	source: ModelResolutionSource;
 	updatedAt?: number;
+	/** Why the provider's endpoint fetcher threw this call; the models then come from cache, models.dev or bundled data. */
+	fetchError?: string;
 }
 
 /**
@@ -344,9 +339,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		};
 	}
 
-	const [fetchedModelsDevModels, fetchedDynamicModels] = shouldFetchFromNetwork
-		? await Promise.all([fetchModelsDev(options), dynamicFetcher ? fetchDynamicModels(dynamicFetcher) : null])
-		: [null, null];
+	const [fetchedModelsDevModels, dynamicFetch] = shouldFetchFromNetwork
+		? await Promise.all([fetchModelsDev(options), dynamicFetcher ? fetchDynamicModels(dynamicFetcher) : undefined])
+		: [null, undefined];
+	const fetchedDynamicModels = dynamicFetch?.models ?? null;
 	const modelsDevFetchSucceeded = fetchedModelsDevModels !== null;
 	const normalizedModelsDevModels = fetchedModelsDevModels?.models ?? [];
 	const modelsDevModels = modelsDevAdditiveStaticModelIds
@@ -436,7 +432,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			// non-authoritative row reads back as a fresh catalog and suppresses
 			// refetch for NON_AUTHORITATIVE_RETRY_MS, hiding every discovery-only
 			// model until it ages out. Writing nothing lets the next launch retry
-			// immediately (#10964).
+			// immediately (#10964). Likewise keep a prior row whose header-bearing
+			// models cannot be restored offline: rewriting it would drop them and
+			// mark the remainder fresh, while the untouched row keeps forcing a
+			// refetch that recovers them (#18227).
 			const latestCache = readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath);
 			const latestRestoredCache = restoreCachedModelHeaders(
 				latestCache?.models ?? cache?.models ?? [],
@@ -472,7 +471,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 					? retainModelIds(mergedFallbackModels, latestUsableCacheModels)
 					: mergedFallbackModels,
 			);
-			if (fallbackSnapshotModels.length > 0 || latestCache !== null || cache !== null) {
+			if (
+				latestRestoredCache.unresolvedModelIds.size === 0 &&
+				(fallbackSnapshotModels.length > 0 || latestCache !== null || cache !== null)
+			) {
 				writeModelCache(
 					cacheProviderId,
 					now(),
@@ -503,6 +505,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			: cacheContributed && cache
 				? { updatedAt: cache.updatedAt }
 				: {}),
+		...(dynamicFetch?.error !== undefined ? { fetchError: dynamicFetch.error } : {}),
 	};
 }
 
@@ -527,17 +530,15 @@ async function fetchModelsDev<TApi extends Api, TModelsDevPayload>(
 	}
 }
 
+/** The endpoint's catalog (`models: null` when it answered none), and why it threw, if it did. */
 async function fetchDynamicModels<TApi extends Api>(
 	fetcher: () => Promise<readonly ModelSpec<TApi>[] | null>,
-): Promise<DiscoveredModelSet<TApi> | null> {
+): Promise<{ models: DiscoveredModelSet<TApi> | null; error?: string }> {
 	try {
 		const models = await fetcher();
-		if (models === null) {
-			return null;
-		}
-		return buildDiscoveredModelSpecs<TApi>(models);
-	} catch {
-		return null;
+		return { models: models === null ? null : buildDiscoveredModelSpecs<TApi>(models) };
+	} catch (error) {
+		return { models: null, error: error instanceof Error ? error.message : String(error) };
 	}
 }
 
@@ -818,18 +819,19 @@ function preferDiscoveryLimit(discoveryLimit: number | null, fallbackLimit: numb
  * caller treats the source as failed (cache/static fallback) rather than as an
  * intentionally empty catalog that an authoritative provider would prune to.
  */
-function buildDiscoveredModelSpecs<TApi extends Api>(value: unknown): DiscoveredModelSet<TApi> {
+function buildDiscoveredModelSpecs<TApi extends Api>(values: unknown): DiscoveredModelSet<TApi> {
 	const models: Model<TApi>[] = [];
 	const explicitKindModels = new Set<Model<TApi>>();
-	if (!Array.isArray(value)) {
+	if (!Array.isArray(values)) {
 		return { models, explicitKindModels };
 	}
 	const failures: unknown[] = [];
-	for (const item of value) {
-		if (!isModelLike(item)) continue;
+	for (const value of values) {
+		if (!ModelSpecShape.allows(value)) continue;
+		const item = value as ModelSpec<TApi>;
 		let model: Model<TApi>;
 		try {
-			model = buildModel(item as ModelSpec<TApi>);
+			model = buildModel(item);
 		} catch (error) {
 			failures.push(error);
 			logger.warn("model discovery skipped a model that failed to build", {
@@ -846,109 +848,22 @@ function buildDiscoveredModelSpecs<TApi extends Api>(value: unknown): Discovered
 	return { models, explicitKindModels };
 }
 
-function isModelLike(value: unknown): value is ModelSpec<Api> {
-	if (!isRecord(value)) {
-		return false;
-	}
-	const v = value as {
-		id?: unknown;
-		name?: unknown;
-		api?: unknown;
-		provider?: unknown;
-		baseUrl?: unknown;
-		reasoning?: unknown;
-		input?: unknown;
-		cost?: unknown;
-		contextWindow?: unknown;
-		maxTokens?: unknown;
-	};
-	if (typeof v.id !== "string" || v.id.length === 0) {
-		return false;
-	}
-	if (typeof v.name !== "string" || v.name.length === 0) {
-		return false;
-	}
-	if (typeof v.api !== "string" || v.api.length === 0) {
-		return false;
-	}
-	if (typeof v.provider !== "string" || v.provider.length === 0) {
-		return false;
-	}
-	if (typeof v.baseUrl !== "string" || v.baseUrl.length === 0) {
-		return false;
-	}
-	if (typeof v.reasoning !== "boolean") {
-		return false;
-	}
-	if (!isModelInputArray(v.input)) {
-		return false;
-	}
-	if (!isModelCost(v.cost)) {
-		return false;
-	}
-	// Finite positive: NaN > 0 is false, +Infinity < Infinity is false.
-	const cw = v.contextWindow;
-	if (cw !== null && (typeof cw !== "number" || !(cw > 0 && cw < Infinity))) {
-		return false;
-	}
-	const mt = v.maxTokens;
-	if (mt !== null && (typeof mt !== "number" || !(mt > 0 && mt < Infinity))) {
-		return false;
-	}
-	return true;
-}
-
-function isModelInputArray(value: unknown): value is ("text" | "image")[] {
-	if (!Array.isArray(value) || value.length === 0) {
-		return false;
-	}
-	for (let i = 0; i < value.length; i++) {
-		const item = value[i];
-		if (item !== "text" && item !== "image") {
-			return false;
-		}
-	}
-	return true;
-}
-
-function isTokenCost(value: unknown): value is TokenCost {
-	if (!isRecord(value)) {
-		return false;
-	}
-	const c = value as {
-		input?: unknown;
-		output?: unknown;
-		cacheRead?: unknown;
-		cacheWrite?: unknown;
-	};
-	// Finite (NaN-safe): -Infinity < x < Infinity rejects NaN and both infinities.
-	// Preserves original behavior: 0 and negatives remain valid.
-	const ci = c.input;
-	if (typeof ci !== "number" || !(ci > -Infinity && ci < Infinity)) {
-		return false;
-	}
-	const co = c.output;
-	if (typeof co !== "number" || !(co > -Infinity && co < Infinity)) {
-		return false;
-	}
-	const cr = c.cacheRead;
-	if (typeof cr !== "number" || !(cr > -Infinity && cr < Infinity)) {
-		return false;
-	}
-	const cw = c.cacheWrite;
-	if (typeof cw !== "number" || !(cw > -Infinity && cw < Infinity)) {
-		return false;
-	}
-	return true;
-}
-
-function isModelCost(value: unknown): value is ModelCost {
-	if (!isTokenCost(value)) return false;
-	const cost = value as TokenCost & { longContext?: unknown; timeBased?: unknown };
-	if (cost.timeBased !== undefined && !isTimeBasedCost(cost.timeBased)) return false;
-	const longContext = cost.longContext;
-	if (longContext === undefined) return true;
-	if (!isTokenCost(longContext) || !isRecord(longContext)) return false;
-	const threshold = longContext.inputThreshold;
-	return typeof threshold === "number" && threshold > 0 && threshold < Infinity;
-}
+/** Finite rates; 0 and negatives stay valid. */
+const FiniteTokenCost = type({ input: "number", output: "number", cacheRead: "number", cacheWrite: "number" });
+/** Discovery output is built in memory, so optional fields may be present as `undefined`. */
+const ModelSpecShape = type({
+	id: "string > 0",
+	name: "string > 0",
+	api: "string > 0",
+	provider: "string > 0",
+	// Providers such as Azure resolve the deployment endpoint at request time.
+	baseUrl: "string",
+	reasoning: "boolean",
+	input: "('text' | 'image')[] > 0",
+	cost: FiniteTokenCost.and({
+		"timeBased?": TimeBasedCostShape.or("undefined"),
+		"longContext?": FiniteTokenCost.and({ inputThreshold: "number > 0" }).or("undefined"),
+	}),
+	contextWindow: "number > 0 | null",
+	maxTokens: "number > 0 | null",
+});

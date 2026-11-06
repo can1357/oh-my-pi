@@ -1,5 +1,6 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import * as os from "node:os";
 import * as path from "node:path";
 import { inspect } from "node:util";
 import { createContext, runInContext } from "node:vm";
@@ -1907,12 +1908,24 @@ describe("computer worker round trips", () => {
 		}
 
 		it("leads with the requested app's windows when its title filter misses", async () => {
-			const message = await missMessage(desktopWindows, '{ app: "textedit", title: "report" }');
+			const native = new FakeNativeSession();
+			native.listApplications = async () => [
+				{ id: "org.example.editor", name: "TextEdit", path: "/Applications/TextEdit.app", running: true, pid: 10 },
+			];
+			const message = await missMessage(desktopWindows, '{ app: "ORG.EXAMPLE.EDITOR", title: "report" }', {
+				native,
+			});
 			expect(message.split("\n").slice(0, 3)).toEqual([
-				'no window matches {"app":"textedit","title":"report"}',
+				'no window matches {"app":"ORG.EXAMPLE.EDITOR","title":"report"}',
 				'Open windows by app (id "title"):',
 				'- TextEdit: 8 "notes.txt", 9 "draft.txt"',
 			]);
+			native.listApplications = async () => {
+				throw new Error("inventory unavailable");
+			};
+			const byName = await missMessage(desktopWindows, '{ app: "textedit", title: "report" }', { native });
+			expect(byName).not.toContain("No open window belongs");
+			expect(byName.split("\n")[2]).toContain("- TextEdit:");
 		});
 
 		it("says the app has no window and lists every app's windows, untitled ones included", async () => {
@@ -2062,8 +2075,34 @@ describe("computer worker round trips", () => {
 		});
 	});
 
+	it("keeps an app-filter miss without scanning applications when windows have no process identity", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		native.listWindows = async () => [{ ...windowFixture, pid: undefined }];
+		native.listApplications = async () => {
+			throw new Error("inventory must not run");
+		};
+		new ComputerWorkerCore(transport, () => native);
+		const result = await runWorker(
+			transport,
+			"no-window-process",
+			'const listed = await desktop.windows({ app: "org.example.missing" }); let miss; try { await desktop.window({ app: "org.example.missing" }); } catch (error) { miss = error.message; } return { listed, miss };',
+		);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.payload.returnValue).toMatchObject({
+			listed: [],
+			miss: expect.stringContaining("no window matches"),
+		});
+	});
+
 	describe("more windows than the listing cap", () => {
 		class CrowdedSession extends FakeNativeSession {
+			applicationListings = 0;
+			override async listApplications() {
+				this.applicationListings++;
+				return [{ id: "org.example.rear", name: "Rear", path: "/Applications/Rear.app", running: true, pid: 999 }];
+			}
 			override async listWindows(): Promise<DesktopWindow[]> {
 				const front = Array.from({ length: 59 }, (_, index) => ({
 					...windowFixture,
@@ -2071,21 +2110,31 @@ describe("computer worker round trips", () => {
 					app: "Front",
 					focused: false,
 				}));
-				return [...front, { ...windowFixture, id: "999", app: "Rear", focused: false }];
+				return [...front, { ...windowFixture, id: "999", app: "Rear", pid: 999, focused: false }];
 			}
 		}
 
 		it("caps the listing after filtering and finds a window behind the cap by id or app", async () => {
 			const transport = new MemoryTransport();
-			new ComputerWorkerCore(transport, () => new CrowdedSession());
+			const native = new CrowdedSession();
+			new ComputerWorkerCore(transport, () => native);
 			const result = await runWorker(
 				transport,
 				"crowded-desktop",
-				'({ listed: (await desktop.windows()).length, filtered: (await desktop.windows({ app: "rear" })).map(w => w.id), byId: (await desktop.window(999)).app, byApp: (await desktop.window({ app: "rear" })).id })',
+				'({ listed: (await desktop.windows()).length, filtered: (await desktop.windows({ app: "ORG.EXAMPLE.REAR" })).map(w => w.id), byId: (await desktop.window(999)).app, byApp: (await desktop.window({ app: "org.example.rear" })).id, byPath: (await desktop.window({ app: "/applications/rear.app" })).id, byName: (await desktop.window({ app: "rear" })).id, named: (await desktop.windows({ app: "rear" })).map(w => w.id) })',
 			);
 			expect(result.ok).toBe(true);
 			if (result.ok)
-				expect(result.payload.returnValue).toEqual({ listed: 48, filtered: ["999"], byId: "Rear", byApp: "999" });
+				expect(result.payload.returnValue).toEqual({
+					listed: 48,
+					filtered: ["999"],
+					byId: "Rear",
+					byApp: "999",
+					byPath: "999",
+					byName: "999",
+					named: ["999"],
+				});
+			expect(native.applicationListings).toBe(3);
 		});
 
 		it("lists at most 48 candidates for an ambiguous filter", async () => {
@@ -4248,11 +4297,34 @@ describe("computer background fallback", () => {
 			]);
 		});
 
-		it("keeps an exact application ID over a same-named file in the session's folder", async () => {
+		it("opens a path under ~ in the user's home, for the target and the app", async () => {
+			const native = new FileSession();
+			const code = [
+				'await desktop.apps.open("~/Desktop/Bench/Inbox");',
+				'await desktop.apps.open("~/notes.txt", { app: "~/Applications/Editor.app" });',
+				'await desktop.apps.open("~");',
+			].join("\n");
+			expect((await run(native, code, "takeover")).ok).toBe(true);
+			const home = os.homedir();
+			expect(native.opened).toEqual([
+				{ id: path.join(home, "Desktop/Bench/Inbox"), options: {} },
+				{ id: path.join(home, "notes.txt"), options: { app: path.join(home, "Applications/Editor.app") } },
+				{ id: home, options: {} },
+			]);
+		});
+
+		it("keeps an exact application ID or ~name over a same-named file in the session's folder or home", async () => {
 			class ShadowedSession extends FileSession {
 				override async listApplications() {
 					return [
 						{ id: "computer.test.ts", name: "Editor", path: "/Applications/Editor.app", running: true, pid: 123 },
+						{
+							id: "~editor.desktop",
+							name: "Tilde Editor",
+							path: "/usr/share/applications/~editor.desktop",
+							running: true,
+							pid: 124,
+						},
 					];
 				}
 			}
@@ -4260,11 +4332,17 @@ describe("computer background fallback", () => {
 			const code = [
 				'await desktop.apps.open("computer.test.ts");',
 				'await desktop.apps.open("README.md", { app: "computer.test.ts" });',
+				'await desktop.apps.open("~editor.desktop");',
+				'await desktop.apps.open("README.md", { app: "~editor.desktop" });',
+				'await desktop.apps.open("~Editor");',
 			].join("\n");
 			expect((await run(native, code, "takeover")).ok).toBe(true);
 			expect(native.opened).toEqual([
 				{ id: "computer.test.ts", options: {} },
 				{ id: "README.md", options: { app: "computer.test.ts" } },
+				{ id: "~editor.desktop", options: {} },
+				{ id: "README.md", options: { app: "~editor.desktop" } },
+				{ id: "~Editor", options: {} },
 			]);
 		});
 
@@ -4797,10 +4875,22 @@ describe("window() waiting for a window to appear", () => {
 		constructor(readonly appearsAt: number) {
 			super();
 		}
+		override async listApplications() {
+			if (this.listings < this.appearsAt) return [];
+			return [
+				{
+					id: "org.example.preview",
+					name: "Preview",
+					path: "/Applications/Preview.app",
+					running: true,
+					pid: 4,
+				},
+			];
+		}
 		override async listWindows(): Promise<DesktopWindow[]> {
 			this.listings += 1;
 			return this.listings >= this.appearsAt
-				? [windowFixture, { ...windowFixture, id: "151", app: "Preview", title: "report.pdf" }]
+				? [windowFixture, { ...windowFixture, id: "151", app: "Preview", title: "report.pdf", pid: 4 }]
 				: [windowFixture];
 		}
 	}
@@ -4848,10 +4938,12 @@ describe("window() waiting for a window to appear", () => {
 			const native = new OpeningSession(4);
 			const pending = run(
 				native,
-				'return (await desktop.window({ app: "Preview", title: "report.pdf", wait: 2000 })).id',
+				'return (await desktop.window({ app: "org.example.preview", title: "report.pdf", wait: 2000 })).id',
 				true,
 			);
 			await pollListings(native, 4);
+			await turn();
+			vi.advanceTimersByTime(2000);
 			const result = await pending;
 			if (!result.ok) throw new Error(result.error.message);
 			expect(result.payload.returnValue).toBe("151");

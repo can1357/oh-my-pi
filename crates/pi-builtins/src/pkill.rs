@@ -1,9 +1,11 @@
 //! `pkill` process-signalling builtin moved from `pi-shell`.
 
-use brush_core::builtins;
 use clap::Parser;
 
-use crate::proc_match;
+use crate::{
+	host::{ProcContext, Process},
+	proc_match,
+};
 
 /// Selects processes by name or attributes and sends them a signal.
 #[derive(Parser)]
@@ -14,49 +16,52 @@ pub(crate) struct PkillCommand {
 	argv: Vec<String>,
 }
 
-impl builtins::Command for PkillCommand {
-	type Error = brush_core::Error;
+impl Process for PkillCommand {
+	const USES_PATHS: bool = true;
 
-	async fn execute<SE: brush_core::ShellExtensions>(
-		&self,
-		context: brush_core::ExecutionContext<'_, SE>,
-	) -> Result<brush_core::ExecutionResult, Self::Error> {
-		proc_match::run(proc_match::ProcMatchMode::Kill, self.argv.clone(), context).await
+	fn run(&self, context: &ProcContext) -> impl Future<Output = std::io::Result<i32>> + Send {
+		proc_match::run(proc_match::ProcMatchMode::Kill, &self.argv, context)
 	}
 }
 
 #[cfg(test)]
 mod tests {
-	use brush_core::{Shell, builtins};
-
 	use super::PkillCommand;
+	use crate::host::run_proc;
 
-	const NO_MATCH: &str = "^__brush_pkill_test_no_such_process_6f239a1d__$";
+	const NO_MATCH: &str = "^__pi_pkill_test_no_such_process_6f239a1d__$";
 
-	async fn run(args: &str) -> brush_core::ExecutionResult {
-		let mut shell = Shell::builder()
-			.builtin("pkill", builtins::builtin::<PkillCommand, _>())
-			.build()
-			.await
-			.expect("test shell should build");
-		shell
-			.run_dash_c_command(format!("pkill {args} {NO_MATCH}"))
-			.await
-			.expect("pkill should execute")
+	async fn run(args: &[&str]) -> i32 {
+		let argv: Vec<&str> = std::iter::once("pkill").chain(args.iter().copied()).chain([NO_MATCH]).collect();
+		run_proc::<PkillCommand>(&argv, None).await.0
 	}
 
 	#[tokio::test]
 	async fn exits_one_when_no_process_matches() {
-		assert_eq!(u8::from(run("").await.exit_code), 1);
+		assert_eq!(run(&[]).await, 1);
 	}
 
 	#[tokio::test]
 	async fn accepts_a_signal_name() {
-		assert_eq!(u8::from(run("-TERM").await.exit_code), 1);
+		assert_eq!(run(&["-TERM"]).await, 1);
 	}
 
 	#[tokio::test]
 	async fn accepts_a_signal_number() {
-		assert_eq!(u8::from(run("-9").await.exit_code), 1);
+		assert_eq!(run(&["-9"]).await, 1);
+	}
+
+	#[test]
+	fn signal_operands_resolve_to_numbers() {
+		use crate::proc_match::signal_number;
+
+		assert_eq!(signal_number("TERM"), Some(15));
+		assert_eq!(signal_number("SIGKILL"), Some(9));
+		assert_eq!(signal_number("sigint"), Some(2));
+		assert_eq!(signal_number("hup"), Some(1));
+		assert_eq!(signal_number("0"), Some(0));
+		assert_eq!(signal_number("EXIT"), Some(0));
+		assert_eq!(signal_number("NOPE"), None);
+		assert_eq!(signal_number("-1"), None);
 	}
 }

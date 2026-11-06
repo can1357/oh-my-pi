@@ -25,9 +25,10 @@ import type {
 	ToolSpeculationPolicy,
 } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
-import { $env, isRecord, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
+import { $env, hasFsCode, isRecord, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
 import type { EffectiveExtensionRoots } from "../capability/types";
+import type { Settings } from "../config/settings";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "text" };
 import taskAsyncContractTemplate from "../prompts/tools/task-async-contract.md" with { type: "text" };
@@ -52,19 +53,28 @@ import {
 	type TaskToolSchemaInstance,
 } from "./types";
 import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
-import { AsyncJobError, type AsyncJobManager } from "../async";
+import { AsyncJobError, type AsyncJobManagerApi } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
+import {
+	approvedTaskFile,
+	bindTaskFileApproval,
+	taskFileApprovalPath,
+	taskFileMatchesApproval,
+	taskFileRestrictionPaths,
+} from "./file-approval";
+import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "./model-approval";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/tools/task";
 import { repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
 import {
+	invalidModelSelectorReason,
 	renderSubagentUserPrompt,
 	resolveEffectiveSubagentPolicy,
 	runStructuredSubagent,
@@ -91,6 +101,7 @@ import {
 	cfgTaskMaxRuntimeMs,
 	cfgTaskSpeculativeLaunch,
 	cfgTaskStructured,
+	perCallModelEnabled,
 } from "./settings";
 
 function createUsageTotals(): Usage {
@@ -156,6 +167,8 @@ interface TaskDescriptionOptions {
 	disabledAgents: string[];
 	batchEnabled: boolean;
 	effortEnabled: boolean;
+	perCallModelEnabled: boolean;
+	perCallModelAdvertisement?: PerCallModelAdvertisement;
 	evalToolsEnabled: boolean;
 	structured: boolean;
 	file: boolean;
@@ -207,6 +220,8 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		applyIsolatedChanges: options.applyIsolatedChanges,
 		batchEnabled: options.batchEnabled,
 		effortEnabled: options.effortEnabled,
+		perCallModelEnabled: options.perCallModelEnabled,
+		perCallModelAdvertisement: options.perCallModelAdvertisement,
 		evalToolsEnabled: options.evalToolsEnabled,
 		structured: options.structured,
 		file: options.file,
@@ -291,7 +306,13 @@ function validateTaskInput(item: TaskItem | undefined, label: string, fileEnable
 	return undefined;
 }
 
-function validateSpawnParams(params: TaskParams, batchEnabled: boolean, fileEnabled: boolean): string | undefined {
+function validateSpawnParams(
+	params: TaskParams,
+	batchEnabled: boolean,
+	fileEnabled: boolean,
+	defaultAgent: string,
+	settings: Settings,
+): string | undefined {
 	const tasks = params.tasks;
 	if (
 		!fileEnabled &&
@@ -308,14 +329,13 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean, fileEnab
 		}
 		for (let i = 0; i < tasks.length; i++) {
 			const item = tasks[i];
-			const inputError = validateTaskInput(
-				item,
-				`Task ${i + 1}${item?.name ? ` (\`${item.name}\`)` : ""}`,
-				fileEnabled,
-			);
+			const label = `Task ${i + 1}${item?.name ? ` (\`${item.name}\`)` : ""}`;
+			const inputError = validateTaskInput(item, label, fileEnabled);
 			if (inputError) return inputError;
-			const effortError = validateEffort(item.effort, `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""}`);
+			const effortError = validateEffort(item.effort, label);
 			if (effortError) return effortError;
+			const modelError = validateModel(item, label, defaultAgent, settings);
+			if (modelError) return modelError;
 		}
 		const seen = new Map<string, string>();
 		for (const item of tasks) {
@@ -336,7 +356,33 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean, fileEnab
 	if (batchEnabled && params.task === undefined && params.taskFile === undefined) {
 		return "Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`.";
 	}
-	return validateTaskInput(params, "The call", fileEnabled) ?? validateEffort(params.effort, "The call");
+	return (
+		validateTaskInput(params, "The call", fileEnabled) ??
+		validateEffort(params.effort, "The call") ??
+		validateModel(params, "The call", defaultAgent, settings)
+	);
+}
+
+/**
+ * A `model` on a call naming `seance` is checked at preflight, once the name resolves:
+ * the bundled seance takes it as its source-session override, a shadowing agent as a per-call model.
+ */
+function validateModel(
+	item: TaskItem | TaskParams,
+	label: string,
+	defaultAgent: string,
+	settings: Settings,
+): string | undefined {
+	return (item.agent?.trim() || defaultAgent) === SEANCE_AGENT_NAME
+		? undefined
+		: invalidModelSelectorReason(item.model, label, { settings, invocationKind: "task" });
+}
+
+function spawnModelFields(params: TaskParams): Pick<StructuredSubagentRequest, "perCallModel" | "seanceModel"> {
+	if (params.model === undefined) return {};
+	if (params.agent === SEANCE_AGENT_NAME) return { seanceModel: params.model };
+	// `validateModel` rejected anything but one string before dispatch.
+	return typeof params.model === "string" ? { perCallModel: params.model } : {};
 }
 
 /**
@@ -369,6 +415,12 @@ interface SpawnParams extends TaskParams {
 	taskFileSha256?: string;
 }
 
+function submittedTaskFiles(args: unknown): string[] {
+	if (!isRecord(args)) return [];
+	const items = Array.isArray(args.tasks) ? args.tasks : [args];
+	return items.flatMap(item => (isRecord(item) && typeof item.taskFile === "string" ? [item.taskFile] : []));
+}
+
 /** The filesystem path a `taskFile` names; approval and dispatch share it so both see the same file. */
 function taskFilePath(session: ToolSession, taskFile: string): string | undefined {
 	return taskFile.startsWith("local://")
@@ -376,15 +428,27 @@ function taskFilePath(session: ToolSession, taskFile: string): string | undefine
 		: taskFile;
 }
 
-async function resolveTaskFile(session: ToolSession, item: TaskItem): Promise<ResolvedTaskItem> {
+async function resolveTaskFile(owner: object, session: ToolSession, item: TaskItem): Promise<ResolvedTaskItem> {
 	if (item.taskFile === undefined) return item;
 	try {
-		const filePath = taskFilePath(session, item.taskFile);
+		const approved = approvedTaskFile(owner, item.taskFile);
+		const filePath = approved?.path ?? taskFilePath(session, item.taskFile);
 		if (filePath === undefined) throw new Error("does not resolve to a local file");
 		// On POSIX, a non-blocking open lets fstat reject a FIFO without waiting for a writer.
-		const file = await fs.open(filePath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+		const file = await fs
+			.open(filePath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | (approved ? fs.constants.O_NOFOLLOW : 0))
+			.catch(error => {
+				if (approved && (hasFsCode(error, "ELOOP") || hasFsCode(error, "ENOENT") || hasFsCode(error, "ENOTDIR"))) {
+					throw new Error("changed after approval; retry the call");
+				}
+				throw error;
+			});
 		try {
-			if (!(await file.stat()).isFile()) throw new Error("must resolve to a regular file");
+			const stat = await file.stat({ bigint: true });
+			if (approved && !taskFileMatchesApproval(stat, approved)) {
+				throw new Error("changed after approval; retry the call");
+			}
+			if (!stat.isFile()) throw new Error("must resolve to a regular file");
 			const bytes = await Bun.file(file.fd)
 				.slice(0, MAX_TASK_FILE_BYTES + 1)
 				.bytes();
@@ -456,11 +520,12 @@ function planSpawns(
 	fileEnabled: boolean,
 	defaultAgent: string,
 	seanceAdvertised: boolean,
+	settings: Settings,
 ): SpawnPlan | string {
 	const params = repairTaskParams(rawParams as TaskParams);
 	const error =
 		validateShapeParams(batchEnabled, params) ??
-		validateSpawnParams(params, batchEnabled, fileEnabled) ??
+		validateSpawnParams(params, batchEnabled, fileEnabled, defaultAgent, settings) ??
 		validateSeanceParams({ params, batchEnabled, defaultAgent, seanceAdvertised });
 	if (error) return error;
 	const items = resolveSpawnItems(params);
@@ -674,29 +739,38 @@ export async function refreshAgentDiscovery(cwd: string, extensionRoots?: Effect
 export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetails, Theme> {
 	readonly name = "task";
 	readonly approval = "exec" as const;
+	readonly bindApprovalTargets = (args: unknown): void => {
+		bindTaskFileApproval(this, submittedTaskFiles(args), taskFile => taskFilePath(this.session, taskFile));
+	};
 	// Restricted folders cover task files, but approvals are never remembered per file: the grant would
 	// cover whatever the path holds later, and inline items in the same batch.
 	readonly approvalRestrictionPaths = (args: unknown): readonly string[] | undefined => {
-		if (!isRecord(args)) return undefined;
-		const items = Array.isArray(args.tasks) ? args.tasks : [args];
-		return items.flatMap(item =>
-			isRecord(item) && typeof item.taskFile === "string" ? (taskFilePath(this.session, item.taskFile) ?? []) : [],
-		);
+		return taskFileRestrictionPaths(this, submittedTaskFiles(args), taskFile => taskFilePath(this.session, taskFile));
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<TaskParams>;
 		const lines: string[] = [];
+		const formatTaskFile = (taskFile: string): string => {
+			const submitted = truncateForPrompt(sanitizeText(JSON.stringify(taskFile)));
+			const target = taskFileApprovalPath(this, taskFile);
+			return target !== undefined && target !== taskFile
+				? `${submitted} -> ${truncateForPrompt(sanitizeText(JSON.stringify(target)))}`
+				: submitted;
+		};
 		if (typeof params.agent === "string") {
 			lines.push(`Agent: ${truncateForPrompt(params.agent)}`);
 		}
 		if (typeof params.name === "string" && params.name.trim()) {
 			lines.push(`Name: ${truncateForPrompt(params.name)}`);
 		}
+		if (typeof params.model === "string") {
+			lines.push(`Model: ${truncateForPrompt(params.model)}`);
+		}
 		if (typeof params.task === "string") {
 			lines.push(`Task:\n${truncateForPrompt(params.task)}`);
 		}
 		if (typeof params.taskFile === "string") {
-			lines.push(`Task file: ${truncateForPrompt(sanitizeText(JSON.stringify(params.taskFile)))}`);
+			lines.push(`Task file: ${formatTaskFile(params.taskFile)}`);
 		}
 		if (typeof params.context === "string" && params.context.trim()) {
 			lines.push(`Context:\n${truncateForPrompt(params.context)}`);
@@ -730,8 +804,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				}
 			}
 			for (const [index, item] of tasks.entries()) {
+				if (isRecord(item) && typeof item.model === "string") {
+					lines.push(`Task ${index + 1} model: ${truncateForPrompt(item.model)}`);
+				}
 				if (isRecord(item) && typeof item.taskFile === "string") {
-					lines.push(`Task ${index + 1} file: ${truncateForPrompt(sanitizeText(JSON.stringify(item.taskFile)))}`);
+					lines.push(`Task ${index + 1} file: ${formatTaskFile(item.taskFile)}`);
 				}
 			}
 			if (tasks.length > 1) {
@@ -783,6 +860,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				cfgTaskFile.get(this.session.settings),
 				this.#defaultAgent(),
 				this.#seanceSchemaFields() !== undefined,
+				this.session.settings,
 			);
 			return typeof plan === "string" ? undefined : plan.spawns;
 		},
@@ -850,6 +928,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const sessionAgents = this.session.advertisedSessionAgents?.() ?? this.session.getSessionAgents?.() ?? [];
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
 		const isolationEnabled = cfgTaskIsolationEnabled.get(this.session.settings);
+		const perCallModel = perCallModelEnabled(this.session.settings, "task");
 		return renderDescription({
 			agents,
 			sessionAgents,
@@ -858,6 +937,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			disabledAgents,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
+			perCallModelEnabled: perCallModel,
+			perCallModelAdvertisement: perCallModel
+				? getPerCallModelAdvertisement(
+						this.session.settings,
+						this.session.getActiveModel?.(),
+						this.session.modelRegistry,
+					)
+				: undefined,
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			structured: this.#isStructured(),
 			file: cfgTaskFile.get(this.session.settings),
@@ -1028,7 +1115,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			context: this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined,
 			agent: params.agent,
 			sourceSession: params.sourceSession,
-			model: params.model,
+			...spawnModelFields(params),
 			...this.#resultParams(params),
 			...this.#effortParams(params),
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
@@ -1081,6 +1168,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			cfgTaskFile.get(this.session.settings),
 			defaultAgent,
 			this.#seanceSchemaFields() !== undefined,
+			this.session.settings,
 		);
 		if (typeof plan === "string") {
 			return createTaskModeError(plan);
@@ -1088,7 +1176,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const { params } = plan;
 		const spawnItems: ResolvedTaskItem[] = [];
 		try {
-			for (const item of plan.items) spawnItems.push(await resolveTaskFile(this.session, item));
+			for (const item of plan.items) spawnItems.push(await resolveTaskFile(this, this.session, item));
 		} catch (error) {
 			return createTaskModeError(error instanceof Error ? error.message : String(error));
 		}
@@ -1482,7 +1570,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * feeds the caller's aggregate counters.
 	 */
 	#registerSpawnJob(options: {
-		manager: AsyncJobManager;
+		manager: AsyncJobManagerApi;
 		toolCallId: string;
 		spawnParams: SpawnParams;
 		agentId: string;
@@ -1871,7 +1959,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				context,
 				agent: params.agent,
 				sourceSession: params.sourceSession,
-				model: params.model,
+				...spawnModelFields(params),
 				...this.#resultParams(params),
 				...this.#effortParams(params),
 				solutionSpace: params.solutionSpace,
