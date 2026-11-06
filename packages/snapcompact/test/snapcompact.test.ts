@@ -1126,6 +1126,42 @@ describe("compact", () => {
 		expect(result.summary).toContain("`¶think:`");
 	});
 
+	it("renders extension context into the summary and keeps it on the persisted archive", async () => {
+		const context = ["Recalled memory: the deploy freeze stays in place until Friday."];
+		const result = await snapcompact.compact(makePreparation(), {
+			frameSize: TEST_FRAME_SIZE,
+			extraContext: context,
+		});
+
+		expect(result.summary).toContain(context[0]);
+		// Sessions reload preserveData from JSON; the archive must still carry the context.
+		const reloaded = snapcompact.getPreservedArchive(JSON.parse(JSON.stringify(result.preserveData)));
+		expect(reloaded?.context).toEqual(context);
+	});
+
+	it("does not carry a previous archive's context into the next compaction", async () => {
+		const context = ["Recalled memory: the deploy freeze stays in place until Friday."];
+		const first = await snapcompact.compact(makePreparation(), { frameSize: TEST_FRAME_SIZE, extraContext: context });
+		const second = await snapcompact.compact(makePreparation({ previousPreserveData: first.preserveData }), {
+			frameSize: TEST_FRAME_SIZE,
+		});
+
+		expect(second.summary).not.toContain(context[0]);
+		expect(snapcompact.getPreservedArchive(second.preserveData)?.context).toBeUndefined();
+	});
+
+	it("renders extension context even when no history was archived", async () => {
+		const context = ["Recalled memory: the deploy freeze stays in place until Friday."];
+		const result = await snapcompact.compact(makePreparation({ messagesToSummarize: [] }), {
+			frameSize: TEST_FRAME_SIZE,
+			extraContext: context,
+		});
+
+		expect(result.summary).toContain(context[0]);
+		const reloaded = snapcompact.getPreservedArchive(JSON.parse(JSON.stringify(result.preserveData)));
+		expect(reloaded?.context).toEqual(context);
+	});
+
 	it("carries dim tool-output spans from text into the first image frame", async () => {
 		const result = await snapcompact.compact(
 			makePreparation({
@@ -1556,6 +1592,22 @@ describe("archive helpers", () => {
 			expect(snapcompact.viewWithoutThinking("no scopes", plain)).toEqual({ summary: "no scopes", archive: plain });
 		});
 
+		it("keeps the archive's extension context in the re-rendered summary", () => {
+			const context = ["Recalled memory: the deploy freeze stays in place until Friday."];
+			const text = "¶user: ask\n¶think: secret\n¶ai: answer";
+			const view = snapcompact.viewWithoutThinking(THINKING_SUMMARY, {
+				frames: [frame],
+				totalChars: text.length,
+				truncatedChars: 0,
+				text,
+				textHead: text,
+				context,
+			});
+			expect(view.summary).toContain(context[0]);
+			expect(view.summary).not.toContain("¶think:");
+			expect(view.archive.context).toEqual(context);
+		});
+
 		it("fails closed to text edges without frames, reasoning or its legend", () => {
 			// The head edge ends inside a reasoning section: stripping the whole
 			// source before cutting the edges keeps its continuation out too.
@@ -1644,7 +1696,7 @@ describe("archive helpers", () => {
 			return `${view.summary}\n${blocks.map(block => (block.type === "text" ? block.text : "")).join("\n")}`;
 		}
 
-		async function framedArchive(): Promise<snapcompact.CompactionResult> {
+		async function framedArchive(extraContext?: string[]): Promise<snapcompact.CompactionResult> {
 			const fileOps = snapcompact.createFileOps();
 			fileOps.read.add("src/read-only.ts");
 			fileOps.read.add("src/both.ts");
@@ -1662,7 +1714,7 @@ describe("archive helpers", () => {
 					],
 					fileOps,
 				}),
-				{ model: { api: "anthropic-messages" }, frameSize: TEST_FRAME_SIZE, maxFrames: 5 },
+				{ model: { api: "anthropic-messages" }, frameSize: TEST_FRAME_SIZE, maxFrames: 5, extraContext },
 			);
 			const archive = snapcompact.getPreservedArchive(result.preserveData)!;
 			expect(archive.frames.length).toBeGreaterThan(0);
@@ -1670,6 +1722,19 @@ describe("archive helpers", () => {
 			expect(archive.textTail).not.toContain("MIDDLE sentinel");
 			return result;
 		}
+
+		it("keeps the archive's extension context in every text view", async () => {
+			const context = ["Recalled memory: the deploy freeze stays in place until Friday."];
+			const result = await framedArchive(context);
+			const archive = snapcompact.getPreservedArchive(result.preserveData)!;
+			for (const view of [
+				snapcompact.viewWithoutFrames(result.summary, archive),
+				snapcompact.viewWithoutFrames(result.summary, archive, { includeThinking: false, maxChars: 400 }),
+			]) {
+				expect(view.summary).toContain(context[0]);
+				expect(view.archive.context).toEqual(context);
+			}
+		});
 
 		it("reads the archive's whole kept source as text in place of its frames, with its file list", async () => {
 			const result = await framedArchive();

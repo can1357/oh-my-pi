@@ -401,6 +401,7 @@ describe("AgentSession handoff", () => {
 					truncatedChars: 0,
 					text: `archived ${HANDOFF_SECRET}`,
 					textHead: `head ${HANDOFF_SECRET}`,
+					context: [`hook ${HANDOFF_SECRET}`],
 					withoutThinking: {
 						summary: `variant summary ${HANDOFF_SECRET}`,
 						archive: { frames: [], totalChars: 16, truncatedChars: 0, text: `variant ${HANDOFF_SECRET}` },
@@ -430,6 +431,8 @@ describe("AgentSession handoff", () => {
 		const archive = snapcompact.getPreservedArchive(preserve)!;
 		expect(archive.text).toBe(`archived ${placeholder}`);
 		expect(archive.textHead).toBe(`head ${placeholder}`);
+		// Extension context is re-rendered into the summary, so it is redacted too.
+		expect(archive.context).toEqual([`hook ${placeholder}`]);
 		// So is the no-reasoning variant a Claude summarizer reads instead.
 		expect(archive.withoutThinking?.summary).toBe(`variant summary ${placeholder}`);
 		expect(archive.withoutThinking?.archive.text).toBe(`variant ${placeholder}`);

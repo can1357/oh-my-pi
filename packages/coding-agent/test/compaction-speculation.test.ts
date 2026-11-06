@@ -6,6 +6,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { type CompactionMethod, resolveSpeculationMethod } from "@oh-my-pi/pi-coding-agent/session/compaction-methods";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -80,8 +81,9 @@ describe("async speculative compaction", () => {
 			persistTurnMessagesForMidRunCompaction?: () => Promise<boolean>;
 			generateHandoffDocument?: (
 				focus: string,
-				options?: { autoTriggered?: boolean; signal?: AbortSignal },
+				options?: { autoTriggered?: boolean; signal?: AbortSignal; extraContext?: string[] },
 			) => Promise<{ document: string } | undefined>;
+			extensionRunner?: ExtensionRunner;
 		} = {},
 	): SessionMaintenance {
 		agent = new Agent({
@@ -102,7 +104,7 @@ describe("async speculative compaction", () => {
 			sessionManager,
 			settings,
 			modelRegistry,
-			extensionRunner: undefined,
+			extensionRunner: options.extensionRunner,
 			sideStreamFn: async () => {
 				throw new Error("The compact seam should be used instead of the side stream");
 			},
@@ -1079,6 +1081,31 @@ describe("async speculative compaction", () => {
 		expect(entry?.type === "compaction" ? entry.tokensAfter : undefined).toBe(
 			agent.tokenizer.countMessages(convertToLlm(agent.state.messages), { excludeEncryptedReasoning: true }),
 		);
+	});
+
+	it("sends session.compacting context with a speculative handoff and commits its preserveData", async () => {
+		const hookContext = "Recalled memory: the deploy freeze stays in place until Friday.";
+		const generateHandoffDocument = vi.fn(async (_focus: string, _options?: { extraContext?: string[] }) => ({
+			document: "handoff plan",
+		}));
+		const extensionRunner = {
+			hasHandlers: vi.fn((eventType: string) => eventType === "session.compacting"),
+			emit: vi.fn(async (event: { type: string }) =>
+				event.type === "session.compacting"
+					? { context: [hookContext], preserveData: { hookState: "keep-me" } }
+					: undefined,
+			),
+		} as unknown as ExtensionRunner;
+		maintenance = createMaintenance({ methodOrder: ["handoff"], generateHandoffDocument, extensionRunner });
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+		await maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: THRESHOLD });
+
+		expect(generateHandoffDocument).toHaveBeenCalledTimes(1);
+		expect(generateHandoffDocument.mock.calls[0]?.[1]?.extraContext).toEqual([hookContext]);
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		expect(entry?.type === "compaction" ? entry.preserveData : undefined).toMatchObject({ hookState: "keep-me" });
 	});
 });
 

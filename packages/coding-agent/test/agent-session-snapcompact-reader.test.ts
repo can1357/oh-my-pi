@@ -133,11 +133,15 @@ describe("snapcompact archive read by another model", () => {
 	});
 
 	/** Appends an archive rendered under GPT (reasoning included) and a kept reply; `withoutMethod`
-	 *  records it as a legacy or extension-provided entry would, with no method, and `summary`
-	 *  stands in for one an extension wrote over the archive. */
+	 *  records it as a legacy or extension-provided entry would, with no method, `summary`
+	 *  stands in for one an extension wrote over the archive, and `extraContext` is passed to the render. */
 	async function seedArchive(
 		sessionManager: SessionManager,
-		{ withoutMethod = false, summary }: { withoutMethod?: boolean; summary?: string } = {},
+		{
+			withoutMethod = false,
+			summary,
+			extraContext,
+		}: { withoutMethod?: boolean; summary?: string; extraContext?: string[] } = {},
 	): Promise<snapcompact.CompactionResult> {
 		const keptId = sessionManager.appendMessage({ role: "user", content: "Kept turn.", timestamp: Date.now() });
 		const rendered = await snapcompact.compact(
@@ -148,7 +152,7 @@ describe("snapcompact archive read by another model", () => {
 				tokensBefore: 100_000,
 				fileOps: snapcompact.createFileOps(),
 			},
-			{ model: gpt },
+			{ model: gpt, extraContext },
 		);
 		expect(snapcompact.getPreservedArchive(rendered.preserveData)?.frames.length).toBeGreaterThan(0);
 		expect(rendered.summary).toContain("¶think:");
@@ -278,6 +282,21 @@ describe("snapcompact archive read by another model", () => {
 		await resumed.session.prompt("Continue.");
 		expect(render).not.toHaveBeenCalled();
 		expectVariantSent(resumedManager, original, resumed.mock.calls[0]?.context, variantFrames);
+	});
+
+	it("keeps the archive's extension context in the re-rendered no-reasoning variant", async () => {
+		const hookContext = "Recalled memory: the deploy freeze stays in place until Friday.";
+		const sessionManager = SessionManager.inMemory();
+		await seedArchive(sessionManager, { extraContext: [hookContext] });
+		const { session, mock } = startSession(sessionManager, claude);
+
+		await session.prompt("Continue.");
+		const { text } = requestContent(mock.calls[0]?.context.messages);
+		expect(text).toContain(PLAIN_LEGEND);
+		expect(text).toContain(hookContext);
+		expect(
+			snapcompact.getPreservedArchive(latestCompaction(sessionManager).preserveData)?.withoutThinking?.summary,
+		).toContain(hookContext);
 	});
 
 	it("gives a side request to Claude the no-reasoning view while GPT stays active", async () => {

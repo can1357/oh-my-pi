@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added optional `extraContext` to `renderHandoffPrompt()`, prepended as an `<additional-context>` block ([#16720](https://github.com/can1357/oh-my-pi/pull/16720) by [@integrITsolutions](https://github.com/integrITsolutions))
+
 ## [18.17.0] - 2026-11-06
 
 ### Added

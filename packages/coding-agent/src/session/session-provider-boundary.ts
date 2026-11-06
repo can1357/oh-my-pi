@@ -380,6 +380,12 @@ export class SessionProviderBoundary {
 				const next = obfuscator.obfuscate(value);
 				if (next !== value) obfuscated = { ...obfuscated, [key]: next };
 			}
+			// Extension context is re-rendered into the summary on every re-render.
+			const context = archive.context;
+			if (Array.isArray(context)) {
+				const next = context.map(line => (typeof line === "string" ? obfuscator.obfuscate(line) : line));
+				if (next.some((line, i) => line !== context[i])) obfuscated = { ...obfuscated, context: next };
+			}
 			return obfuscated;
 		};
 		let obfuscated = obfuscateText(slot);
