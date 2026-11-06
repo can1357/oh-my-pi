@@ -47,11 +47,15 @@ import { TspDocument } from "./apply";
 import { getNativeBlob, type NativeBlob } from "./blobs";
 import { node } from "./describe";
 import { encodeTspJson, encodeTspMessage, type TspHello, TspReader, splitTspMessage } from "./encode";
+import { estimateRows } from "./measure";
 import type { DescribeContext, NativeChild, NativeNode, NativeSurface, NativeUiEvent } from "./node";
 import { NARROW_SHEET_COLS } from "./overlay";
 import { resetQuietMotion } from "./quiet";
 import { nativeComponentId, Reconciler } from "./reconcile";
-import { setNativeButtons, setNativeRendering } from "./state";
+import { setNativeButtons, setNativePacing, setNativeRendering } from "./state";
+
+/** Share of the viewport's rows a centered sheet's content must reach to fill a narrow pane. */
+const SHEET_FILL_FRACTION = 0.5;
 
 /** A visible TUI overlay, bottom to top. */
 export interface NativeOverlay {
@@ -203,9 +207,9 @@ function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
  * once the real `hello` lists them, so the optimistic start never emits a node
  * an older terminal cannot draw (`media`: files Tern loads by path; `json`:
  * raw JSON values Tern draws as its own tree; `button`: omp's buttons, which
- * older builds get as role-styled rows).
+ * older builds get as role-styled rows; `shell`: the bash tool's live trace).
  */
-const UNASSUMED_KINDS: Partial<Record<TspKind, true>> = { media: true, json: true, button: true };
+const UNASSUMED_KINDS: Partial<Record<TspKind, true>> = { media: true, json: true, button: true, shell: true };
 
 /**
  * The reply a v1 terminal is assumed to give before its real `hello` arrives
@@ -310,6 +314,8 @@ export class NativeBackend {
 	#sawResize = false;
 	#live = false;
 	#overlayNodes = new Map<Component, { key: string; node: NativeNode }>();
+	/** Centered sheets measured tall enough to fill a narrow pane; they keep filling until closed. */
+	#fillingSheets = new Set<Component>();
 	/** Pending delivery owns bytes until sent or confirmed held; settled descriptions may already be released. */
 	#blobs = new Map<string, NativeBlob | "sent">();
 	/** `blobs` queries sent, oldest first: the terminal answers each once, in order. */
@@ -403,6 +409,7 @@ export class NativeBackend {
 		this.#inline.doc?.close();
 		setNativeRendering(false);
 		setNativeButtons(false);
+		setNativePacing(false);
 		this.#unbindMotion?.();
 		this.#unbindMotion = undefined;
 		this.#useNerdSymbols(false);
@@ -532,6 +539,7 @@ export class NativeBackend {
 		if (this.#stats) {
 			logger.debug("TSP frame", { sf: surface.id, ops: ops.length, rows: surface.reconciler.fallbackCount });
 		}
+		this.#measureSheets(surface, overlays);
 		if (ops.length === 0) return;
 		this.#uploadBlobs(ops);
 		this.#sendFrame(surface, ops);
@@ -567,6 +575,7 @@ export class NativeBackend {
 		this.#cx = new NativeContext(hello, hello.cols ?? this.#cx.cols);
 		// A changed vocabulary re-describes every component (`confirm`).
 		setNativeButtons(this.#cx.supports("button"));
+		setNativePacing(this.#cx.feature("pace"));
 		this.#sawResize = false;
 	}
 
@@ -908,9 +917,7 @@ export class NativeBackend {
 		const own = overlay.component.nativeOverlay;
 		const anchor = own?.anchor ?? overlayAnchor(overlay.options);
 		let size = own?.size ?? overlaySize(overlay.options, this.#cx.cols);
-		// A centered sheet in a narrow pane fills it instead of floating with margins: `lg`, and a component's own `md`
-		// sheet (an undeclared `md` is a generic dialog sized from its options).
-		if (anchor === "center" && this.#cx.cols < NARROW_SHEET_COLS && (size === "lg" || own?.size === "md")) {
+		if (anchor === "center" && this.#cx.cols < NARROW_SHEET_COLS && this.#fillingSheets.has(overlay.component)) {
 			size = "full";
 		}
 		const modal = overlay.focused || overlay.options?.fullscreen === true;
@@ -929,9 +936,37 @@ export class NativeBackend {
 		return wrapper;
 	}
 
+	/**
+	 * A narrow pane has no room for a floating sheet with margins, but a sheet
+	 * stretched over content a few lines tall is mostly empty. The terminal lays
+	 * the content out, so estimate its rows from what was just described: a
+	 * centered sheet whose content reaches {@link SHEET_FILL_FRACTION} of the
+	 * viewport fills the pane from the next frame on, and keeps filling while it
+	 * stays open so a filter or a reload never makes it jump between sizes.
+	 */
+	#measureSheets(surface: Surface, overlays: readonly NativeOverlay[]): void {
+		const cols = this.#cx.cols;
+		if (cols >= NARROW_SHEET_COLS) return;
+		const limit = Math.max(1, Math.ceil(this.#host.terminal.rows * SHEET_FILL_FRACTION));
+		let grew = false;
+		for (const { component, options } of overlays) {
+			if (this.#fillingSheets.has(component) || component.nativeSheet?.(this.#cx)) continue;
+			if ((component.nativeOverlay?.anchor ?? overlayAnchor(options)) !== "center") continue;
+			const rows = estimateRows(component, cols, limit, child => surface.reconciler.described(child));
+			if (rows < limit) continue;
+			this.#fillingSheets.add(component);
+			grew = true;
+		}
+		if (grew) this.#host.requestRender();
+	}
+
 	#pruneOverlayNodes(overlays: readonly NativeOverlay[]): void {
 		if (this.#overlayNodes.size <= overlays.length) return;
 		const live = new Set(overlays.map(overlay => overlay.component));
-		for (const component of this.#overlayNodes.keys()) if (!live.has(component)) this.#overlayNodes.delete(component);
+		for (const component of this.#overlayNodes.keys()) {
+			if (live.has(component)) continue;
+			this.#overlayNodes.delete(component);
+			this.#fillingSheets.delete(component);
+		}
 	}
 }

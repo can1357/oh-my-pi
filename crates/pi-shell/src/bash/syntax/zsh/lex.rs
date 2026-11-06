@@ -28,10 +28,11 @@ use crate::bash::syntax::{
 };
 
 /// zsh `enum lextok`: the token kinds `gettok` returns and `exalias` turns
-/// into reserved words.
+/// into reserved words (public as [`super::LexTok`] for the completion
+/// code's [`ZleLex`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u8)]
-pub(super) enum T {
+pub enum T {
 	/// `SEPER`: `;` or a newline, after `zshlex`.
 	Seper,
 	/// `NEWLIN`
@@ -163,13 +164,13 @@ pub(super) enum T {
 
 impl T {
 	/// zsh `IS_REDIROP`.
-	pub(super) const fn is_redirop(self) -> bool {
+	pub const fn is_redirop(self) -> bool {
 		self as u8 >= Self::Outang as u8 && self as u8 <= Self::Trinang as u8
 	}
 }
 
 /// zsh `tokstrings`: the text of a punctuation token.
-const fn tokstring(t: T) -> Option<&'static [u8]> {
+pub const fn tokstring(t: T) -> Option<&'static [u8]> {
 	Some(match t {
 		T::Seper | T::Semi => b";",
 		T::Newlin => b"\\n",
@@ -256,11 +257,75 @@ pub const fn iident(c: u8) -> bool {
 	c.is_ascii_alphanumeric() || c == b'_'
 }
 
-/// zsh `itype_end(s, IIDENT, 0)`: index of the first byte of `s[from..]`
-/// that is not an identifier character (lexer assignments, expander
-/// parameter names).
-pub fn ident_end(s: &[u8], from: usize) -> usize {
-	from + tail(s, from).iter().take_while(|&&c| iident(c)).count()
+/// zsh `itype_end(s, IIDENT, 0)`: end of the identifier at `s[from..]`.
+///
+/// The index of the first byte of `s[from..]` (metafied, possibly
+/// tokenized) that is not an identifier character (lexer assignments,
+/// expander parameter names). `wide` (zsh's
+/// `MULTIBYTE` in a UTF-8 locale without `POSIX_IDENTIFIERS`) admits
+/// alphanumeric non-ASCII characters (`iswalnum`).
+pub fn ident_end(s: &[u8], from: usize, wide: bool) -> usize {
+	if !wide {
+		// A metafied byte is never an ASCII identifier character.
+		return from + tail(s, from).iter().take_while(|&&c| iident(c)).count();
+	}
+	let mut i = from;
+	while i < s.len() {
+		let c = s[i];
+		if super::tok::is_tok(c) {
+			break;
+		}
+		let (len, wc) = mb_metacharlenconv(s, i);
+		let ok = match wc {
+			// Invalid: only an ASCII identifier byte would do.
+			None => false,
+			Some(w) if w <= 0x7f => u8::try_from(w).is_ok_and(iident),
+			Some(w) => char::from_u32(w).is_some_and(char::is_alphanumeric),
+		};
+		if !ok {
+			break;
+		}
+		i += len;
+	}
+	i
+}
+
+/// zsh `mb_metacharlenconv` in a UTF-8 locale.
+///
+/// The length in metafied bytes and the code of the character at `s[i..]`
+/// (`i < s.len()`); `None` for a token or a byte that starts no valid
+/// UTF-8 sequence (then one character long).
+pub fn mb_metacharlenconv(s: &[u8], i: usize) -> (usize, Option<u32>) {
+	use super::tok::{META, is_meta, is_tok};
+	let c = s[i];
+	if c <= 0x7f {
+		return (1, Some(u32::from(c)));
+	}
+	if is_tok(c) {
+		return (1, None);
+	}
+	let mut buf = [0u8; 4];
+	let mut len = 0;
+	let mut pos = i;
+	while pos < s.len() && len < 4 {
+		let inchar = if s[pos] == META {
+			pos += 1;
+			at(s, pos) ^ 32
+		} else if is_meta(s[pos]) {
+			break;
+		} else {
+			s[pos]
+		};
+		pos += 1;
+		buf[len] = inchar;
+		len += 1;
+		match std::str::from_utf8(&buf[..len]) {
+			Ok(decoded) => return (pos - i, decoded.chars().next().map(u32::from)),
+			Err(err) if err.error_len().is_none() => {},
+			Err(_) => break,
+		}
+	}
+	(1 + usize::from(c == META && i + 1 < s.len()), None)
 }
 
 /// zsh `skipparens` (`utils.c`) over a token string.
@@ -291,15 +356,15 @@ pub fn skipparens(inpar: u8, outpar: u8, s: &[u8], at: &mut usize) -> i32 {
 
 /// zsh `isident` (`params.c`) on a token string: a name, a number, or a
 /// name followed by a literal `[…]` subscript. Used by the parser (`for`
-/// variables) and the zsh expander.
-pub fn isident(s: &[u8]) -> bool {
+/// variables) and the zsh expander; `wide` as for [`ident_end`].
+pub fn isident(s: &[u8], wide: bool) -> bool {
 	if s.is_empty() {
 		return false;
 	}
 	let end = if s[0].is_ascii_digit() {
 		1 + tail(s, 1).iter().take_while(|c| c.is_ascii_digit()).count()
 	} else {
-		ident_end(s, 0)
+		ident_end(s, 0, wide)
 	};
 	if end == s.len() {
 		return true;
@@ -688,6 +753,139 @@ pub(super) struct Ctx<'s> {
 	lexflags:              u32,
 	/// zsh `nocomments`.
 	nocomments:            bool,
+	/// zsh `cmdstack`/`cmdsp` (`prompt.c`): the open constructs (`CS_*`),
+	/// innermost last.
+	pub(super) cmdstack:   Vec<u8>,
+	/// `cmdstack` when the input first ran out in this event: what zsh
+	/// would show in `PS2`'s `%_` when it asks for another line.
+	pub(super) eof_stack:  Option<Vec<u8>>,
+	/// zsh `strin`: lexing a string (`strinbeg`), which lets comments in
+	/// once `lexflags` is 0 (the ZLE line after the cursor word).
+	strin:                 bool,
+	/// The ZLE word-tracking globals of lex.c while the editor line is
+	/// lexed for completion ([`ZleLex`]); `None` otherwise.
+	zle:                   Option<ZleWords>,
+	/// With [`Self::zle`]: metafied length of `src[i..]` for each `i`
+	/// (zsh's input is metafied; `inbufct` counts metafied bytes).
+	meta_rest:             Vec<u32>,
+}
+
+/// zsh `CS_FOR` (`zsh.h`): a `for` loop.
+pub const CS_FOR: u8 = 0;
+/// zsh `CS_WHILE`: a `while` loop.
+pub const CS_WHILE: u8 = 1;
+/// zsh `CS_REPEAT`: a `repeat` loop.
+pub const CS_REPEAT: u8 = 2;
+/// zsh `CS_SELECT`: a `select` loop.
+pub const CS_SELECT: u8 = 3;
+/// zsh `CS_UNTIL`: an `until` loop.
+pub const CS_UNTIL: u8 = 4;
+/// zsh `CS_IF`: the condition of an `if`.
+pub const CS_IF: u8 = 5;
+/// zsh `CS_IFTHEN`: the body of an `if`.
+pub const CS_IFTHEN: u8 = 6;
+/// zsh `CS_ELSE`: an `else` branch.
+pub const CS_ELSE: u8 = 7;
+/// zsh `CS_ELIF`: the condition of an `elif`.
+pub const CS_ELIF: u8 = 8;
+/// zsh `CS_MATH`: `((…))`.
+pub const CS_MATH: u8 = 9;
+/// zsh `CS_COND`: `[[…]]`.
+pub const CS_COND: u8 = 10;
+/// zsh `CS_CMDOR`: after `||`.
+pub const CS_CMDOR: u8 = 11;
+/// zsh `CS_CMDAND`: after `&&`.
+pub const CS_CMDAND: u8 = 12;
+/// zsh `CS_PIPE`: after `|`.
+pub const CS_PIPE: u8 = 13;
+/// zsh `CS_ERRPIPE`: after `|&`.
+pub const CS_ERRPIPE: u8 = 14;
+/// zsh `CS_FOREACH`: a `foreach` loop.
+pub const CS_FOREACH: u8 = 15;
+/// zsh `CS_CASE`: a `case`.
+pub const CS_CASE: u8 = 16;
+/// zsh `CS_FUNCDEF`: a function definition.
+pub const CS_FUNCDEF: u8 = 17;
+/// zsh `CS_SUBSH`: `(…)`.
+pub const CS_SUBSH: u8 = 18;
+/// zsh `CS_CURSH`: `{…}`.
+pub const CS_CURSH: u8 = 19;
+/// zsh `CS_ARRAY`: `name=(…)`.
+pub const CS_ARRAY: u8 = 20;
+/// zsh `CS_QUOTE`: `'…'`.
+pub const CS_QUOTE: u8 = 21;
+/// zsh `CS_DQUOTE`: `"…"`.
+pub const CS_DQUOTE: u8 = 22;
+/// zsh `CS_BQUOTE`: `` `…` ``.
+pub const CS_BQUOTE: u8 = 23;
+/// zsh `CS_CMDSUBST`: `$(…)`, `<(…)`, `>(…)`, `=(…)`.
+pub const CS_CMDSUBST: u8 = 24;
+/// zsh `CS_MATHSUBST`: `$((…))`, `$[…]`.
+pub const CS_MATHSUBST: u8 = 25;
+/// zsh `CS_ELIFTHEN`: the body of an `elif`.
+pub const CS_ELIFTHEN: u8 = 26;
+/// zsh `CS_HEREDOC`: a `<<` here-document body.
+pub const CS_HEREDOC: u8 = 27;
+/// zsh `CS_HEREDOCD`: a `<<-` here-document body.
+pub const CS_HEREDOCD: u8 = 28;
+/// zsh `CS_BRACE`: a `{` inside `${…}`.
+pub const CS_BRACE: u8 = 29;
+/// zsh `CS_BRACEPAR`: `${…}`.
+pub const CS_BRACEPAR: u8 = 30;
+/// zsh `CS_ALWAYS`: the `always` block of `{…} always {…}`.
+pub const CS_ALWAYS: u8 = 31;
+/// zsh `CS_COUNT`: the number of `CS_*` codes.
+pub const CS_COUNT: u8 = 32;
+
+/// zsh `CMDSTACKSZ`: pushes beyond this depth are dropped (pops are not).
+const CMDSTACKSZ: usize = 256;
+
+/// zsh `cmdnames` (`prompt.c`), indexed by `CS_*`.
+static CMDNAMES: [&str; CS_COUNT as usize] = [
+	"for",
+	"while",
+	"repeat",
+	"select",
+	"until",
+	"if",
+	"then",
+	"else",
+	"elif",
+	"math",
+	"cond",
+	"cmdor",
+	"cmdand",
+	"pipe",
+	"errpipe",
+	"foreach",
+	"case",
+	"function",
+	"subsh",
+	"cursh",
+	"array",
+	"quote",
+	"dquote",
+	"bquote",
+	"cmdsubst",
+	"mathsubst",
+	"elif-then",
+	"heredoc",
+	"heredocd",
+	"brace",
+	"braceparam",
+	"always",
+];
+
+/// zsh `cmdnames[cs]`: the name `%_` shows for cmdstack code `cs`
+/// (`if`, `then`, `dquote`, `cmdand`, …).
+///
+/// # Panics
+/// When `cs` is not a `CS_*` code (`cs >= CS_COUNT`).
+pub fn cmdname(cs: u8) -> &'static str {
+	match CMDNAMES.get(usize::from(cs)) {
+		Some(&name) => name,
+		None => panic!("cmdname: {cs} is not a zsh cmdstack code"),
+	}
 }
 
 /// zsh `LEXFLAGS_ACTIVE`: lexing a string for its words (unmatched quotes
@@ -701,6 +899,40 @@ pub const LEXFLAGS_COMMENTS_STRIP: u32 = 0x0008;
 pub const LEXFLAGS_NEWLINE: u32 = 0x0010;
 /// zsh `LEXFLAGS_COMMENTS`.
 const LEXFLAGS_COMMENTS: u32 = LEXFLAGS_COMMENTS_KEEP | LEXFLAGS_COMMENTS_STRIP;
+/// zsh `LEXFLAGS_ZLE`: lexing the editor line for completion; word
+/// positions are tracked ([`ZleWords`]) until the word the cursor is in
+/// (zsh `gotword`, which clears `lexflags`).
+pub const LEXFLAGS_ZLE: u32 = 0x0002;
+/// zsh `IN_MATH` (`zsh.h`): the `inwhat` `dquote_parse` sets when the
+/// cursor is inside arithmetic.
+pub const IN_MATH: i32 = 2;
+
+/// zsh lex.c's ZLE globals: positions in the metafied editor line
+/// (`zlemetaline`) while it is lexed for completion.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ZleWords {
+	/// zsh `zlemetacs`: the cursor.
+	pub zlemetacs: i32,
+	/// zsh `zlemetall`: the line length (without the `x` completion
+	/// added at the cursor).
+	pub zlemetall: i32,
+	/// zsh `addedx`: 1 when an `x` was inserted at the cursor, 2 for `x `.
+	pub addedx:    i32,
+	/// zsh `wb`: start of the word the cursor is in.
+	pub wb:        i32,
+	/// zsh `we`: its end.
+	pub we:        i32,
+	/// zsh `wordbeg`: `inbufct` at the start of the current token.
+	pub wordbeg:   i32,
+	/// zsh `parbegin`: `inbufct` after the opening of the command
+	/// substitution the cursor is in (-1: none).
+	pub parbegin:  i32,
+	/// zsh `parend`: `inbufct` after its end (-1: not closed before the
+	/// cursor's word).
+	pub parend:    i32,
+	/// zsh `inwhat`: [`IN_MATH`] once the cursor was found in arithmetic.
+	pub inwhat:    i32,
+}
 
 impl<'s> Ctx<'s> {
 	/// Context reading `src` from `pos` (zsh `lexinit` + `init_parse_status`).
@@ -736,6 +968,91 @@ impl<'s> Ctx<'s> {
 			err_tok: T::Endinput,
 			lexflags: 0,
 			nocomments: false,
+			cmdstack: Vec::new(),
+			eof_stack: None,
+			strin: false,
+			zle: None,
+			meta_rest: Vec::new(),
+		}
+	}
+
+	/// zsh `inbufct`: metafied bytes of input left (all live frames).
+	fn inbufct(&self) -> i32 {
+		let mut n = 0usize;
+		for (i, f) in self.live().iter().enumerate() {
+			if f.restored {
+				continue;
+			}
+			let rest = match self.meta_rest.get(f.pos) {
+				Some(&r) if i == 0 => r as usize,
+				_ => tail(&f.buf, f.pos)
+					.iter()
+					.map(|&c| 1 + usize::from(is_meta(c)))
+					.sum(),
+			};
+			n += rest.saturating_sub(usize::from(f.half));
+		}
+		i32::try_from(n).unwrap_or(i32::MAX)
+	}
+
+	/// zsh `(lexflags & LEXFLAGS_ZLE) && !(inbufflags & INP_ALIAS)`.
+	fn zle_on(&self) -> bool {
+		self.zle.is_some()
+			&& self.lexflags & LEXFLAGS_ZLE != 0
+			&& !self.frames.get(self.top).is_some_and(|f| f.in_alias)
+	}
+
+	/// zsh `SETPARBEGIN`.
+	fn setparbegin(&mut self) {
+		if !self.zle_on() {
+			return;
+		}
+		let ct = self.inbufct();
+		if let Some(z) = self.zle.as_mut()
+			&& z.zlemetacs >= z.zlemetall + 1 - ct
+		{
+			z.parbegin = ct;
+		}
+	}
+
+	/// zsh `SETPAREND`.
+	fn setparend(&mut self) {
+		if !self.zle_on() {
+			return;
+		}
+		let ct = self.inbufct();
+		if let Some(z) = self.zle.as_mut()
+			&& z.parbegin != -1
+			&& z.parend == -1
+		{
+			if z.zlemetacs >= z.zlemetall + 1 - ct {
+				z.parbegin = -1;
+			} else {
+				z.parend = ct;
+			}
+		}
+	}
+
+	/// zsh `gotword`: the word just lexed holds the cursor (or the cursor
+	/// is before it): record its bounds and leave ZLE mode.
+	fn gotword(&mut self) {
+		let ct = self.inbufct();
+		let Some(z) = self.zle.as_mut() else {
+			return;
+		};
+		let nwe = z.zlemetall + 1 - ct + i32::from(z.addedx == 2);
+		if z.zlemetacs <= nwe {
+			let nwb = z.zlemetall - z.wordbeg + z.addedx;
+			if z.zlemetacs >= nwb {
+				z.wb = nwb;
+				z.we = nwe;
+			} else {
+				z.wb = z.zlemetacs + z.addedx;
+				if z.we < z.wb {
+					z.we = z.wb;
+				}
+			}
+			self.lexflags = 0;
 		}
 	}
 
@@ -805,7 +1122,7 @@ impl<'s> Ctx<'s> {
 			let top = self.top;
 			let src0 = self.src_off();
 			let Some(f) = self.frames.get_mut(top) else {
-				self.lexstop = true;
+				self.input_ended();
 				return b' ';
 			};
 			if f.half {
@@ -839,11 +1156,34 @@ impl<'s> Ctx<'s> {
 				.iter()
 				.all(|f| f.restored || f.pos >= f.buf.len())
 			{
-				self.lexstop = true;
+				self.input_ended();
 				return b' ';
 			}
 			self.inpoptop();
 		}
+	}
+
+	/// The input ran out (`lexstop`). The first time in an event this is
+	/// where interactive zsh would print `PS2` and read another line, so
+	/// the cmdstack is kept for `%_`.
+	fn input_ended(&mut self) {
+		self.lexstop = true;
+		if self.eof_stack.is_none() {
+			self.eof_stack = Some(self.cmdstack.clone());
+		}
+	}
+
+	/// zsh `cmdpush` (`prompt.c`): enter construct `cs` (`CS_*`); dropped
+	/// beyond `CMDSTACKSZ`.
+	pub(super) fn cmdpush(&mut self, cs: u8) {
+		if self.cmdstack.len() < CMDSTACKSZ {
+			self.cmdstack.push(cs);
+		}
+	}
+
+	/// zsh `cmdpop` (`prompt.c`): leave the innermost construct.
+	pub(super) fn cmdpop(&mut self) {
+		self.cmdstack.pop();
 	}
 
 	/// zsh `inungetc`/`hungetc`: back up over the last byte read.
@@ -1048,7 +1388,9 @@ impl<'s> Ctx<'s> {
 		if matches!(self.lx.tok, T::Newlin | T::Endinput) {
 			let docs = core::mem::take(&mut self.ps.hdocs);
 			for h in docs {
+				self.cmdpush(if h.strip { CS_HEREDOCD } else { CS_HEREDOC });
 				let text = self.gethere(&h);
+				self.cmdpop();
 				if let Some(slot) = self.docs.get_mut(h.seq) {
 					*slot = text;
 				}
@@ -1108,12 +1450,20 @@ impl<'s> Ctx<'s> {
 				self.lx.lo = self.src_off();
 				return if self.errflag { T::Lexerr } else { T::Endinput };
 			}
+			if self.zle_on() {
+				let ct = self.inbufct();
+				if let Some(z) = self.zle.as_mut() {
+					z.wordbeg = ct;
+				}
+			}
 			if self.lx.dbparens {
 				self.lx.buf.clear();
 				self.lx.has_str = true;
 				self.hungetc(c);
 				let end = if self.ps.infor > 0 { b';' } else { b')' };
+				self.cmdpush(CS_MATH);
 				let r = self.dquote_parse(end, false);
+				self.cmdpop();
 				if r.is_none() && self.ps.infor > 0 {
 					self.ps.infor -= 1;
 					return T::Dinpar;
@@ -1153,8 +1503,9 @@ impl<'s> Ctx<'s> {
 			// zsh reads comments in non-interactive input; the engine says
 			// so with the `interactivecomments` bit. Word splitting
 			// (`bufferwords`) asks for them in `lexflags`.
-			let comments =
-				self.opt(Features::ZSH_INTERACTIVE_COMMENTS) || self.lexflags & LEXFLAGS_COMMENTS != 0;
+			let comments = self.opt(Features::ZSH_INTERACTIVE_COMMENTS)
+				|| self.lexflags & LEXFLAGS_COMMENTS != 0
+				|| (self.strin && self.lexflags == 0);
 			if c == b'#' && !self.nocomments && comments {
 				let keep = self.lexflags & LEXFLAGS_COMMENTS_KEEP != 0;
 				if keep {
@@ -1232,7 +1583,7 @@ impl<'s> Ctx<'s> {
 						{
 							self.lx.buf.clear();
 							self.lx.has_str = true;
-							return match self.cmd_or_math() {
+							return match self.cmd_or_math(CS_MATH) {
 								Com::Math => T::Dinpar,
 								Com::Cmd => {
 									self.lx.has_str = false;
@@ -1393,11 +1744,15 @@ impl<'s> Ctx<'s> {
 	}
 
 	/// zsh `cmd_or_math`: after `((`, whether the text up to `))` parses as
-	/// arithmetic; if not, the input is put back to the first `(`.
-	fn cmd_or_math(&mut self) -> Com {
+	/// arithmetic; if not, the input is put back to the first `(`. `cs`:
+	/// the cmdstack code while reading (`CS_MATH`, `CS_MATHSUBST`).
+	fn cmd_or_math(&mut self, cs: u8) -> Com {
 		let oldlen = self.lx.buf.len();
 		let mut c;
-		match self.dquote_parse(b')', false) {
+		self.cmdpush(cs);
+		let r = self.dquote_parse(b')', false);
+		self.cmdpop();
+		match r {
 			None => {
 				c = self.hgetc();
 				if c == b')' {
@@ -1445,7 +1800,7 @@ impl<'s> Ctx<'s> {
 			let lexpos = self.lx.buf.len();
 			self.add(INPAR);
 			self.add(b'(');
-			let ret = self.cmd_or_math();
+			let ret = self.cmd_or_math(CS_MATHSUBST);
 			if ret == Com::Math {
 				if let Some(c) = self.lx.buf.get_mut(lexpos) {
 					*c = INPARMATH;
@@ -1548,9 +1903,12 @@ impl<'s> Ctx<'s> {
 							e = self.hgetc();
 						}
 						if e == b'[' {
+							self.cmdpush(CS_MATHSUBST);
 							self.add(STRING);
 							self.add(INBRACK);
-							if let Some(err) = self.dquote_parse(b']', sub) {
+							let r = self.dquote_parse(b']', sub);
+							self.cmdpop();
+							if let Some(err) = r {
 								c = err;
 								peek = T::Lexerr;
 								break 'outer;
@@ -1570,6 +1928,7 @@ impl<'s> Ctx<'s> {
 							self.add(c);
 							c = INBRACE;
 							bct += 1;
+							self.cmdpush(CS_BRACEPAR);
 							if in_brace_param == 0 {
 								in_brace_param = bct;
 								seen_brct = false;
@@ -1644,6 +2003,9 @@ impl<'s> Ctx<'s> {
 								self.add(b'{');
 								return T::String;
 							}
+							if in_brace_param > 0 {
+								self.cmdpush(CS_BRACE);
+							}
 							bct += 1;
 						}
 					},
@@ -1653,6 +2015,9 @@ impl<'s> Ctx<'s> {
 						}
 						if bct == 0 {
 							break 'sw;
+						}
+						if in_brace_param > 0 {
+							self.cmdpop();
 						}
 						if bct == in_brace_param {
 							in_brace_param = 0;
@@ -1746,7 +2111,7 @@ impl<'s> Ctx<'s> {
 									t += 1;
 								}
 							} else {
-								t = ident_end(buf, 0);
+								t = ident_end(buf, 0, self.opt(Features::ZSH_WIDE_IDENT));
 								if t < buf.len() {
 									skipparens(INBRACK, OUTBRACK, buf, &mut t);
 								}
@@ -1791,6 +2156,7 @@ impl<'s> Ctx<'s> {
 					Act2::Quote => {
 						let strquote = self.lx.buf.last() == Some(&STRING);
 						self.add(SNULL);
+						self.cmdpush(CS_QUOTE);
 						let e;
 						loop {
 							loop {
@@ -1822,6 +2188,7 @@ impl<'s> Ctx<'s> {
 								if self.lexflags & LEXFLAGS_ACTIVE == 0 {
 									peek = T::Lexerr;
 								}
+								self.cmdpop();
 								break 'outer;
 							}
 							let e2 = self.hgetc();
@@ -1831,13 +2198,17 @@ impl<'s> Ctx<'s> {
 							}
 							self.add(c);
 						}
+						self.cmdpop();
 						self.hungetc(e);
 						self.lexstop = false;
 						c = SNULL;
 					},
 					Act2::Dquote => {
 						self.add(DNULL);
-						if let Some(err) = self.dquote_parse(b'"', sub) {
+						self.cmdpush(CS_DQUOTE);
+						let r = self.dquote_parse(b'"', sub);
+						self.cmdpop();
+						if let Some(err) = r {
 							c = err;
 							unmatched = b'"';
 							if self.lexflags & LEXFLAGS_ACTIVE == 0 {
@@ -1849,6 +2220,8 @@ impl<'s> Ctx<'s> {
 					},
 					Act2::Bquote => {
 						self.add(TICK);
+						self.cmdpush(CS_BQUOTE);
+						self.setparbegin();
 						loop {
 							c = self.hgetc();
 							if c == b'`' || self.lexstop {
@@ -1873,6 +2246,7 @@ impl<'s> Ctx<'s> {
 								self.add(c);
 							}
 						}
+						self.cmdpop();
 						if c != b'`' {
 							unmatched = b'`';
 							if self.lexflags & LEXFLAGS_ACTIVE == 0 {
@@ -1881,6 +2255,7 @@ impl<'s> Ctx<'s> {
 							break 'outer;
 						}
 						c = TICK;
+						self.setparend();
 					},
 					Act2::Dash => c = DASH,
 					Act2::Bang => c = if seen_brct { BANG } else { b'!' },
@@ -1895,6 +2270,11 @@ impl<'s> Ctx<'s> {
 			}
 		}
 		// brk:
+		if in_brace_param > 0 {
+			for _ in in_brace_param..=bct {
+				self.cmdpop();
+			}
+		}
 		if self.errflag {
 			return T::Lexerr;
 		}
@@ -1928,6 +2308,10 @@ impl<'s> Ctx<'s> {
 		let (mut pct, mut brct, mut bct, mut intick) = (0i32, 0i32, 0i32, 0u8);
 		let mut err: u32 = 0;
 		let math = endchar == b')' || endchar == b']' || self.ps.infor > 0;
+		let zlemath = math
+			&& self
+				.zle
+				.is_some_and(|z| z.zlemetacs > z.zlemetall + z.addedx - self.inbufct());
 		let mut c;
 		loop {
 			c = self.hgetc();
@@ -1979,11 +2363,14 @@ impl<'s> Ctx<'s> {
 						} else if c == b'[' {
 							self.add(STRING);
 							self.add(INBRACK);
+							self.cmdpush(CS_MATHSUBST);
 							err = self.dquote_parse(b']', sub).map_or(0, u32::from);
+							self.cmdpop();
 							c = OUTBRACK;
 						} else if c == b'{' {
 							self.add(QSTRING);
 							c = INBRACE;
+							self.cmdpush(CS_BRACEPAR);
 							bct += 1;
 						} else if c == b'$' {
 							self.add(QSTRING);
@@ -1996,10 +2383,18 @@ impl<'s> Ctx<'s> {
 					b'}' if intick == 0 && bct > 0 => {
 						c = OUTBRACE;
 						bct -= 1;
+						self.cmdpop();
 					},
 					b'`' => {
 						c = QTICK;
 						intick = u8::from(intick == 0);
+						if intick != 0 {
+							self.setparbegin();
+							self.cmdpush(CS_BQUOTE);
+						} else {
+							self.setparend();
+							self.cmdpop();
+						}
 					},
 					b'\'' if intick != 0 => {
 						intick = if intick == 1 { 2 } else { 1 };
@@ -2029,7 +2424,9 @@ impl<'s> Ctx<'s> {
 					b'"' if intick == 0 && (endchar == b'"' || bct > 0) => {
 						if bct > 0 {
 							self.add(DNULL);
+							self.cmdpush(CS_DQUOTE);
 							err = self.dquote_parse(b'"', sub).map_or(0, u32::from);
+							self.cmdpop();
 							c = DNULL;
 						} else {
 							err = 1;
@@ -2047,10 +2444,24 @@ impl<'s> Ctx<'s> {
 			}
 			self.add(c);
 		}
+		if intick != 0 {
+			self.cmdpop();
+		}
+		for _ in 0..bct.max(0) {
+			self.cmdpop();
+		}
 		if self.lexstop {
 			err = u32::from(intick != 0 || endchar != 0 || err != 0);
 		} else if err == 1 {
 			err = u32::from(c);
+		}
+		if zlemath {
+			let ct = self.inbufct();
+			if let Some(z) = self.zle.as_mut()
+				&& z.zlemetacs <= z.zlemetall + 1 - ct
+			{
+				z.inwhat = IN_MATH;
+			}
 		}
 		(err != 0).then_some(err as u8)
 	}
@@ -2061,6 +2472,8 @@ impl<'s> Ctx<'s> {
 	fn skipcomm(&mut self) -> bool {
 		let save_infor = self.ps.infor;
 		self.ps.infor = 0;
+		self.cmdpush(CS_CMDSUBST);
+		self.setparbegin();
 		self.add(INPAR);
 		let outer = self.lex_add_raw == 0;
 		let saved_floor = self.raw_floor;
@@ -2075,6 +2488,10 @@ impl<'s> Ctx<'s> {
 			core::mem::replace(&mut self.lx, LexState { tokfd: -1, ..LexState::default() });
 		let saved_ps = core::mem::take(&mut self.ps);
 		let saved_lexstop = self.lexstop;
+		// zsh saves `lexflags` with the lexer context and turns off the ZLE
+		// specials and LEXFLAGS_NEWLINE for the nested parse.
+		let saved_lexflags = self.lexflags;
+		self.lexflags &= !(LEXFLAGS_ZLE | LEXFLAGS_NEWLINE);
 		self.lex_add_raw += 1;
 		let ok = self.parse_event_nested(T::Outpar) && self.lx.tok == T::Outpar;
 		if !ok {
@@ -2087,6 +2504,7 @@ impl<'s> Ctx<'s> {
 		self.lx = saved_lx;
 		self.ps = saved_ps;
 		self.lexstop = saved_lexstop;
+		self.lexflags = saved_lexflags;
 		// parse_context_restore clears the error flag.
 		self.errflag = false;
 		self.lex_add_raw -= 1;
@@ -2099,6 +2517,10 @@ impl<'s> Ctx<'s> {
 			self.lexstop = new_lexstop;
 			self.raw_floor = saved_floor;
 		}
+		if !self.lexstop {
+			self.setparend();
+		}
+		self.cmdpop();
 		self.ps.infor = save_infor;
 		self.lexstop
 	}
@@ -2176,6 +2598,13 @@ impl<'s> Ctx<'s> {
 		} else {
 			self.lx.buf.clone()
 		});
+		if self.zle_on() {
+			let zp = self.lexflags;
+			self.gotword();
+			if zp & LEXFLAGS_ZLE != 0 && self.lexflags == 0 {
+				return false;
+			}
+		}
 		if self.lx.tok == T::String {
 			if (!had_tokens || !self.opt(Features::ZSH_POSIX_ALIASES)) && self.checkalias() {
 				return true;
@@ -2208,9 +2637,12 @@ impl<'s> Ctx<'s> {
 	}
 
 	/// zsh `reswdtab->getnode`: the reserved word `s` unless `disable -r`
-	/// turned it off.
+	/// turned it off; `private` while zsh/param/private is loaded (its
+	/// `reswd_private`, a `TYPESET` word).
 	fn reswd_on(&self, s: &[u8]) -> Option<T> {
-		reswd(s).filter(|_| !self.aliases.reserved_disabled(s))
+		reswd(s)
+			.or_else(|| (s == b"private" && self.aliases.module_reserved(s)).then_some(T::Typeset))
+			.filter(|_| !self.aliases.reserved_disabled(s))
 	}
 
 	/// zsh `gethere`: the body of a here-document, read up to its
@@ -2253,51 +2685,21 @@ impl<'s> Ctx<'s> {
 	}
 }
 
-/// zsh `bufferwords` (`hist.c`): shell words of a string, as `${(z)…}`
-/// splits it.
-///
-/// `text` is metafied, possibly tokenized. Words come back untokenized and
-/// metafied; operators are words of their
-/// own (`;` for a newline unless [`LEXFLAGS_NEWLINE`]); `flags` is a set of
-/// `LEXFLAGS_COMMENTS_KEEP`, `LEXFLAGS_COMMENTS_STRIP`, `LEXFLAGS_NEWLINE`.
-#[allow(clippy::cognitive_complexity, reason = "a direct port of zsh's bufferwords")]
-pub fn bufferwords(text: &[u8], flags: u32) -> Vec<Vec<u8>> {
-	let mut raw = plain(text);
-	raw.push(b' ');
-	let mut cx = Ctx::new(
-		&raw,
-		0,
-		1,
-		Features::ZSH | Features::ZSH_SHORT_LOOPS,
-		crate::bash::syntax::NO_ALIASES,
-	);
-	cx.lexflags = flags | LEXFLAGS_ACTIVE;
-	cx.nocomments = flags & LEXFLAGS_COMMENTS == 0;
-	cx.noaliases = true;
-	let end = raw.len();
-	let mut list = Vec::new();
-	let mut forloop = 0u8;
-	let mut envarray = false;
-	let mut inredir = false;
-	let mut oldpos = false;
-	// `strip`: the word ends at the blank bufferwords added.
-	let strip = |p: &mut Vec<u8>| {
-		let n = p.len();
-		if n > 0 && at(p, n - 1) == b' ' && (n == 1 || at(p, n - 2) != META) {
-			p.pop();
-		}
-	};
-	loop {
-		if cx.ps.incond > 0 {
-			cx.ps.incond = 1
-				+ i32::from(!matches!(
-					cx.lx.tok,
-					T::Dinbrack | T::Inpar | T::Dbar | T::Damper | T::Bang
-				));
-		}
-		// zsh `ctxtlex`.
-		cx.zshlex();
-		match cx.lx.tok {
+/// What zsh's `ctxtlex` keeps between tokens: `inredir` and its static
+/// `oldpos` (the command position before a redirection or `for`).
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct CtxtLex {
+	inredir: bool,
+	oldpos:  bool,
+}
+
+impl Ctx<'_> {
+	/// zsh `ctxtlex`: the next token (`zshlex`), then the command
+	/// position (`incmdpos`), `infor` and redirection bookkeeping the
+	/// next token is lexed with.
+	pub(super) fn ctxtlex(&mut self, st: &mut CtxtLex) {
+		self.zshlex();
+		match self.lx.tok {
 			T::Seper
 			| T::Newlin
 			| T::Semi
@@ -2317,26 +2719,279 @@ pub fn bufferwords(text: &[u8], flags: u32) -> Vec<Vec<u8>> {
 			| T::Then
 			| T::Elif
 			| T::Else
-			| T::Doutbrack => cx.ps.incmdpos = true,
+			| T::Doutbrack => self.ps.incmdpos = true,
 			T::String | T::Typeset | T::Envarray | T::Outpar | T::Case | T::Dinbrack => {
-				cx.ps.incmdpos = false;
+				self.ps.incmdpos = false;
 			},
 			_ => {},
 		}
-		if cx.lx.tok != T::Dinpar {
-			cx.ps.infor = if cx.lx.tok == T::For { 2 } else { 0 };
+		if self.lx.tok != T::Dinpar {
+			self.ps.infor = if self.lx.tok == T::For { 2 } else { 0 };
 		}
-		if cx.lx.tok.is_redirop() || matches!(cx.lx.tok, T::For | T::Foreach | T::Select) {
-			inredir = true;
-			oldpos = cx.ps.incmdpos;
-			cx.ps.incmdpos = false;
-		} else if inredir {
-			cx.ps.incmdpos = oldpos;
-			inredir = false;
+		if self.lx.tok.is_redirop() || matches!(self.lx.tok, T::For | T::Foreach | T::Select) {
+			st.inredir = true;
+			st.oldpos = self.ps.incmdpos;
+			self.ps.incmdpos = false;
+		} else if st.inredir {
+			self.ps.incmdpos = st.oldpos;
+			st.inredir = false;
 		}
+	}
+}
+
+/// zsh's lexer over the editor line in ZLE mode.
+///
+/// (`lexflags = LEXFLAGS_ZLE; inpush(dupstrspace(line)); strinbeg(0)`), token
+/// by token through `ctxtlex`, with the globals completion reads and writes
+/// between tokens (`tok`, `tokstr`, `tokfd`, `incmdpos`, `incond`, `inredir`,
+/// `intypeset`, `lexflags`, `inbufct`) and lex.c's word positions
+/// ([`ZleWords`]). Used by `zle_tricky.c`'s `get_comp_string`/`getcurcmd`
+/// and compcore.c's `set_comp_sep`.
+pub struct ZleLex<'s> {
+	cx: Ctx<'s>,
+	ct: CtxtLex,
+}
+
+impl<'s> ZleLex<'s> {
+	/// Start lexing `src`: the raw (unmetafied) text zsh pushes (the line,
+	/// or the part of it lexing restarts at, with the space `dupstrspace`
+	/// adds). `z` holds the line positions (`zlemetacs`, `zlemetall`,
+	/// `addedx`, `wb`, `we`; `parbegin`/`parend` -1); `noaliases` is
+	/// zsh's global of that name.
+	pub fn new(
+		src: &'s [u8],
+		feat: Features,
+		aliases: &'s dyn AliasLookup,
+		noaliases: bool,
+		z: ZleWords,
+	) -> Self {
+		let mut cx = Ctx::new(src, 0, 1, feat, aliases);
+		cx.lexflags = LEXFLAGS_ZLE;
+		cx.noaliases = noaliases;
+		cx.strin = true;
+		let mut rest = vec![0u32; src.len() + 1];
+		for i in (0..src.len()).rev() {
+			rest[i] = rest[i + 1] + 1 + u32::from(is_meta(src[i]));
+		}
+		cx.meta_rest = rest;
+		cx.zle = Some(z);
+		Self { cx, ct: CtxtLex::default() }
+	}
+
+	/// zsh `ctxtlex`.
+	pub fn ctxtlex(&mut self) {
+		self.cx.ctxtlex(&mut self.ct);
+	}
+
+	/// zsh `tok`.
+	pub const fn tok(&self) -> T {
+		self.cx.lx.tok
+	}
+
+	/// Set zsh `tok` (as `get_comp_string` turns a `LEXERR` into a word).
+	pub const fn set_tok(&mut self, t: T) {
+		self.cx.lx.tok = t;
+	}
+
+	/// zsh `tokstr` (metafied, tokenized; `None` for `NULL`).
+	pub fn tokstr(&self) -> Option<&[u8]> {
+		self.cx.tokstr()
+	}
+
+	/// Set zsh `tokstr`.
+	pub fn set_tokstr(&mut self, s: Option<&[u8]>) {
+		self.cx.lx.buf.clear();
+		self.cx.lx.has_str = s.is_some();
+		if let Some(s) = s {
+			self.cx.lx.buf.extend_from_slice(s);
+		}
+	}
+
+	/// zsh `tokfd`: the explicit fd of a redirection operator, or -1.
+	pub const fn tokfd(&self) -> i32 {
+		self.cx.lx.tokfd
+	}
+
+	/// zsh `incmdpos`.
+	pub const fn incmdpos(&self) -> bool {
+		self.cx.ps.incmdpos
+	}
+
+	/// Set zsh `incmdpos`.
+	pub const fn set_incmdpos(&mut self, on: bool) {
+		self.cx.ps.incmdpos = on;
+	}
+
+	/// zsh `incond`.
+	pub const fn incond(&self) -> i32 {
+		self.cx.ps.incond
+	}
+
+	/// zsh `inredir`.
+	pub const fn inredir(&self) -> bool {
+		self.ct.inredir
+	}
+
+	/// Set zsh `intypeset`.
+	pub const fn set_intypeset(&mut self, on: bool) {
+		self.cx.ps.intypeset = on;
+	}
+
+	/// zsh `lexflags`: [`LEXFLAGS_ZLE`] until the word the cursor is in
+	/// was reached, then 0.
+	pub const fn lexflags(&self) -> u32 {
+		self.cx.lexflags
+	}
+
+	/// zsh `inbufct`: metafied bytes of input left.
+	pub fn inbufct(&self) -> i32 {
+		self.cx.inbufct()
+	}
+
+	/// lex.c's word positions.
+	pub const fn z(&self) -> &ZleWords {
+		self.cx.zle.as_ref().expect("ZleLex always tracks words")
+	}
+
+	/// lex.c's word positions, to update.
+	pub const fn z_mut(&mut self) -> &mut ZleWords {
+		self.cx.zle.as_mut().expect("ZleLex always tracks words")
+	}
+}
+
+/// The source offset after each token zsh's `ctxtlex` reads from `text`.
+///
+/// (raw bytes, lexed as ZLE lexes the line: `LEXFLAGS_ACTIVE`, no
+/// aliases), up to the end of input or a lexer error (zsh's
+/// `zlemetall - inbufct` after each token, as `select-in-shell-word`
+/// records them). `#` starts a comment only with `interactive_comments`
+/// (zsh's `INTERACTIVE_COMMENTS`; `lexflags` without comment flags).
+pub fn ctxtlex_ends(text: &[u8], interactive_comments: bool) -> Vec<usize> {
+	let mut feat = Features::ZSH | Features::ZSH_SHORT_LOOPS;
+	if interactive_comments {
+		feat = feat | Features::ZSH_INTERACTIVE_COMMENTS;
+	}
+	let mut cx = Ctx::new(text, 0, 1, feat, crate::bash::syntax::NO_ALIASES);
+	cx.lexflags = LEXFLAGS_ACTIVE;
+	cx.nocomments = false;
+	cx.noaliases = true;
+	let mut ctxt = CtxtLex::default();
+	let mut ends = Vec::new();
+	loop {
+		cx.ctxtlex(&mut ctxt);
+		if matches!(cx.lx.tok, T::Endinput | T::Lexerr) {
+			return ends;
+		}
+		ends.push(cx.src_off() as usize);
+	}
+}
+
+/// zsh `bufferwords` (`hist.c`): shell words of a string, as `${(z)…}`
+/// splits it.
+///
+/// `text` is metafied, possibly tokenized. Words come back untokenized and
+/// metafied; operators are words of their
+/// own (`;` for a newline unless [`LEXFLAGS_NEWLINE`]); `flags` is a set of
+/// `LEXFLAGS_COMMENTS_KEEP`, `LEXFLAGS_COMMENTS_STRIP`, `LEXFLAGS_NEWLINE`.
+/// `feat`: the shell's parse-affecting options (`cshjunkiequotes`, …).
+pub fn bufferwords(text: &[u8], flags: u32, feat: Features) -> Vec<Vec<u8>> {
+	bufferwords_in(text, flags, None, feat).0
+}
+
+/// zsh `getcurcmd` (`zle_tricky.c`).
+///
+/// The command word (as the lexer left
+/// it, tokenized) of the command the cursor (byte `cs`) is in, lexing the
+/// editor line `text` (raw bytes) without aliases up to the word holding
+/// the cursor (zsh `gotword`); `None` when there is no command word
+/// there. `#` starts a comment only with `interactive_comments`.
+pub fn zle_curcmd(text: &[u8], cs: usize, interactive_comments: bool) -> Option<Vec<u8>> {
+	let mut feat = Features::ZSH | Features::ZSH_SHORT_LOOPS;
+	if interactive_comments {
+		feat = feat | Features::ZSH_INTERACTIVE_COMMENTS;
+	}
+	let mut raw = text.to_vec();
+	raw.push(b' ');
+	let mut cx = Ctx::new(&raw, 0, 1, feat, crate::bash::syntax::NO_ALIASES);
+	cx.noaliases = true;
+	let mut ctxt = CtxtLex::default();
+	let mut s = None;
+	loop {
+		let curlincmd = cx.ps.incmdpos;
+		cx.ctxtlex(&mut ctxt);
+		if matches!(cx.lx.tok, T::Endinput | T::Lexerr) {
+			break;
+		}
+		if cx.lx.tok == T::String && curlincmd {
+			s = Some(cx.lx.buf.clone());
+		}
+		if cx.lx.has_str && cx.top == 0 && cs <= cx.src_off() as usize {
+			break;
+		}
+	}
+	s
+}
+
+/// zsh `bufferwords(NULL, NULL, &index, LEXFLAGS_ZLE)` over the editor line.
+///
+/// `text` (metafied) with the cursor at byte `cs` of its unmetafied
+/// form: the words and the index of the word the cursor is in or after
+/// (zsh `gotword` stops the ZLE lexing there; `None` without words).
+pub fn bufferwords_zle(text: &[u8], cs: usize) -> (Vec<Vec<u8>>, Option<usize>) {
+	bufferwords_in(text, 0, Some(cs), Features::ZSH | Features::ZSH_SHORT_LOOPS)
+}
+
+#[allow(clippy::cognitive_complexity, reason = "a direct port of zsh's bufferwords")]
+fn bufferwords_in(
+	text: &[u8],
+	flags: u32,
+	cursor: Option<usize>,
+	feat: Features,
+) -> (Vec<Vec<u8>>, Option<usize>) {
+	let mut raw = plain(text);
+	raw.push(b' ');
+	let mut cx = Ctx::new(&raw, 0, 1, feat | Features::ZSH, crate::bash::syntax::NO_ALIASES);
+	cx.lexflags = flags | LEXFLAGS_ACTIVE;
+	cx.nocomments = flags & LEXFLAGS_COMMENTS == 0;
+	cx.noaliases = true;
+	let end = raw.len();
+	let mut list = Vec::new();
+	let mut forloop = 0u8;
+	let mut envarray = false;
+	let mut ctxt = CtxtLex::default();
+	// zsh `zlemetacs` (one back from the cursor) and whether `gotword`
+	// found the cursor's word (`got`), its index (`cur`).
+	let zcs = cursor.map(|c| c.saturating_sub(1));
+	let mut cur: Option<usize> = None;
+	let mut got = false;
+	// `strip`: the word ends at the blank bufferwords added.
+	let strip = |p: &mut Vec<u8>| {
+		let n = p.len();
+		if n > 0 && at(p, n - 1) == b' ' && (n == 1 || at(p, n - 2) != META) {
+			p.pop();
+		}
+	};
+	loop {
+		if cx.ps.incond > 0 {
+			cx.ps.incond = 1
+				+ i32::from(!matches!(
+					cx.lx.tok,
+					T::Dinbrack | T::Inpar | T::Dbar | T::Damper | T::Bang
+				));
+		}
+		cx.ctxtlex(&mut ctxt);
 		let tok = cx.lx.tok;
 		if matches!(tok, T::Endinput | T::Lexerr) {
 			break;
+		}
+		// zsh `gotword` (in `exalias`, for a token with text read from
+		// the line): the word ends `nwe` into the line.
+		let gotword = zcs.is_some_and(|zcs| {
+			!got && cx.lx.has_str && cx.top == 0 && zcs <= cx.src_off() as usize + 1
+		});
+		if gotword {
+			got = true;
+			cx.lexflags = 0;
 		}
 		if tok == T::Outpar && envarray {
 			cx.ps.incmdpos = true;
@@ -2382,13 +3037,19 @@ pub fn bufferwords(text: &[u8], flags: u32) -> Vec<Vec<u8>> {
 			}
 			forloop -= 1;
 		}
+		if gotword {
+			cur = list.len().checked_sub(1);
+		}
 	}
-	if cx.lx.tok == T::Lexerr && cx.lx.has_str && !cx.lx.buf.is_empty() {
+	if cursor.is_none() && cx.lx.tok == T::Lexerr && cx.lx.has_str && !cx.lx.buf.is_empty() {
 		let mut p = untok(&cx.lx.buf);
 		strip(&mut p);
 		list.push(p);
 	}
-	list
+	if cursor.is_some() && cur.is_none() && !list.is_empty() {
+		cur = Some(list.len() - 1);
+	}
+	(list, cur)
 }
 
 /// zsh `parse_subst_string`: tokenizes `s` as unquoted word text.

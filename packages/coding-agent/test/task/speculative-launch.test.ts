@@ -108,6 +108,24 @@ describe("BatchArgsScanner", () => {
 		expect(seen.indexOf(1)).toBe(raw.indexOf('"},{"name":"B"') + 1);
 		expect(seen.indexOf(2)).toBe(raw.length - 3);
 	});
+
+	it("scans appended deltas exactly like the growing buffer they add up to", () => {
+		const raw =
+			'{"context":"shared }\\" ctx","tasks":[{"name":"A","task":"use {x} and \\"}\\""},{"name":"B","task":"b"}]}';
+		for (const size of [1, 3, 7]) {
+			const fed = new BatchArgsScanner();
+			const appended = new BatchArgsScanner();
+			for (let start = 0; start < raw.length; start += size) {
+				fed.feed(raw.slice(0, start + size));
+				appended.append(raw.slice(start, start + size));
+				expect([appended.context, appended.items, appended.itemsOpened]).toEqual([
+					fed.context,
+					fed.items,
+					fed.itemsOpened,
+				]);
+			}
+		}
+	});
 });
 
 describe("task speculative launch", () => {

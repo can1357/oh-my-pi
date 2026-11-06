@@ -48,12 +48,10 @@ import { artifactIds, parseReadSelection, resolveReadPath, selectedLines } from 
 import {
 	computeAdjusted,
 	computeCoverage,
-	computeEditGate,
 	computeRanking,
 	computeSteps,
 	computeTimeCost,
 	emptyAdjusted,
-	emptyEditGate,
 	emptyRanking,
 	holdoutBaselines,
 	type SessionMoney,
@@ -135,7 +133,6 @@ interface ResultRow {
 	capped_tokens: number | null;
 	score_free: number;
 	gated: number;
-	edit_likely: number | null;
 	heat: string | null;
 	kept: string | null;
 	need_reread: string | null;
@@ -178,13 +175,11 @@ export interface Result {
 	holdout: boolean;
 	/** The score-free coin skipped Spotlight: the no-score fallback rules shaped it. */
 	scoreFree: boolean;
-	/** The edit gate kept an edit-likely read whole: the model saw `plain`'s page, the counts describe the would-be cut. */
-	gated: boolean;
 	/**
-	 * A read the agent is likely to edit (see {@link markEditLikely}): pi's mark, else classified by the same rule;
-	 * null for other tools.
+	 * A read pi's former edit gate (removed) kept whole: the model saw `plain`'s page, the counts describe the
+	 * would-be cut. Only in transcripts journaled while the gate ran.
 	 */
-	editLikely: boolean | null;
+	gated: boolean;
 	/**
 	 * The cut (shown, or not applied because pi capped it at `plain`'s text) was wider than what `plain` would have
 	 * shown.
@@ -357,7 +352,6 @@ function toResult(row: ResultRow): Result {
 		holdout,
 		scoreFree: row.score_free !== 0,
 		gated,
-		editLikely: row.edit_likely === null ? null : row.edit_likely !== 0,
 		widerThanPlain: capped || (shortened && row.out_tokens > plainTokens),
 		failed: (row.sp_failures ?? 0) > 0,
 		heat: row.heat ?? "",
@@ -419,7 +413,7 @@ class SessionLoader {
 			`SELECT r.tool_call_id, r.timestamp, r.tool, r.in_chars, r.out_chars, r.in_tokens, r.out_tokens,
 			 r.steps, r.holdout, r.path, r.start_line, r.lines, r.hidden, r.hidden_lines, r.artifacts, r.sp_calls,
 			 r.sp_failures, r.sp_ms, r.sp_cost, r.shape_ms, r.plain_chars, r.plain_tokens, r.capped_tokens, r.score_free,
-			 r.gated, r.edit_likely, r.heat, r.kept,
+			 r.gated, r.heat, r.kept,
 			 n.reread AS need_reread, n.edit AS need_edit
 			 FROM spotlight_results r
 			 LEFT JOIN spotlight_needs n ON n.session_file = r.session_file AND n.tool_call_id = r.tool_call_id
@@ -515,7 +509,6 @@ class SessionLoader {
 			agentType: classifyAgentType(session.session_file),
 			edits: new EditLog(calls),
 		};
-		markEditLikely(analysis);
 		detectRecoveries(analysis);
 		detectHoldoutBaselines(analysis);
 		detectFetchBacks(analysis);
@@ -606,60 +599,6 @@ export class EditLog {
 			if (file === undefined || edit.exact.has(file) || edit.globs.some(glob => glob.match(file))) return true;
 		}
 		return false;
-	}
-}
-
-/** Extensions of code files: pi's edit-gate rule (`spotlight.experiment.editGate`), kept in step with it. */
-const CODE_EXTENSIONS: ReadonlySet<string> = new Set([
-	".py",
-	".ts",
-	".tsx",
-	".js",
-	".jsx",
-	".mjs",
-	".cjs",
-	".rs",
-	".go",
-	".c",
-	".cc",
-	".cpp",
-	".h",
-	".hpp",
-	".cu",
-	".cuh",
-	".java",
-	".kt",
-	".swift",
-	".rb",
-	".zig",
-	".lua",
-	".sh",
-	".css",
-	".scss",
-	".html",
-	".sql",
-]);
-
-/**
- * Mark each read result the agent is likely to edit, pi's edit-gate rule: a read of a code file (by extension) by a
- * session that is not a task subagent, or of a file the session already read or edited (`edit`/`write`/`ast_edit`).
- * Paths resolve against the session's working directory with selectors stripped; an `ast_edit` glob counts as written,
- * as pi keys it. pi's own mark (`editLikely` in the trace) wins; results journaled before pi marked reads are
- * classified here.
- */
-export function markEditLikely(analysis: SessionAnalysis): void {
-	const main = analysis.agentType !== "subagent";
-	const seen = new Set<string>();
-	for (const call of analysis.calls) {
-		if (call.tool === "read") {
-			const file = resolveReadPath(parseReadSelection(call.target).path, analysis.cwd);
-			const result = call.result;
-			if (result?.tool === "read" && result.editLikely === null) {
-				result.editLikely = CODE_EXTENSIONS.has(path.extname(file).toLowerCase()) && (main || seen.has(file));
-			}
-			seen.add(file);
-		}
-		for (const file of call.edits) seen.add(file);
 	}
 }
 
@@ -1187,8 +1126,6 @@ function emptyDashboard(experimentStart: number | null): SpotlightDashboardStats
 		steps: [],
 		timeCost: computeTimeCost([], 0),
 		coverage: [],
-		editGate: emptyEditGate(),
-		gated: 0,
 		fetchBack: [],
 		economics: [],
 		gaps: [],
@@ -1327,7 +1264,6 @@ export function buildSpotlightDashboard(
 					stats.holdouts++;
 					recent.push({ call, analysis });
 				}
-				if (result.gated) stats.gated++;
 				if (result.shortened) {
 					point.shaped++;
 					point.savedTokens += result.savedTokens;
@@ -1393,13 +1329,8 @@ export function buildSpotlightDashboard(
 		.toSorted((a, b) => lastActivity(b) - lastActivity(a))
 		.slice(0, SESSION_LIST_LIMIT)
 		.map(summarize);
-	const fetchBackShares = new Map<Call, { turns: number; usd: number }>();
-	for (const analysis of active) {
-		for (const [source, share] of fetchBackTurnShares(analysis)) fetchBackShares.set(source, share);
-	}
 	stats.fetchBack = computeFetchBack(evaluated, tools);
 	stats.economics = computeEconomics(evaluated, active, tools);
-	stats.editGate = computeEditGate(evaluated, fetchBackShares);
 	stats.gaps = computeGaps(evaluated, tools);
 	stats.overhead = computeOverhead(evaluated);
 	stats.adjusted = computeAdjusted(evaluated, money, gross.savedTokens, compounding, tools);
@@ -1496,9 +1427,9 @@ function cutGroup(result: Result): SpotlightCutGroup | null {
 /**
  * Fetch-back rates per tool (in `tools` order): applied (Spotlight-scored) cuts, score-free cuts, held-out results,
  * unchanged results standardized to the applied cuts' original-size mix (bins without unchanged results drop from
- * both; with no applied cuts, the reference keeps its own mix), and reads the edit gate kept whole (only where there
- * are any). Results without a recorded call (issued before the session's marker) and cuts whose Spotlight calls
- * failed are not measured.
+ * both; with no applied cuts, the reference keeps its own mix), and reads pi's former edit gate kept whole (only
+ * where there are any). Results without a recorded call (issued before the session's marker) and cuts whose
+ * Spotlight calls failed are not measured.
  */
 function computeFetchBack(evaluated: readonly Evaluated[], tools: readonly SpotlightTool[]): SpotlightFetchBackCell[] {
 	const cells: SpotlightFetchBackCell[] = [];
@@ -1598,36 +1529,6 @@ function extraTurnShares(analysis: SessionAnalysis): Map<Call, { turns: number; 
 			share.turns += 1 / calls.length;
 			share.usd += usd / calls.length;
 			shares.set(source, share);
-		}
-	}
-	return shares;
-}
-
-/**
- * Requests that did nothing but fetch back evaluated results by the uniform rule ({@link detectFetchBacks}), whatever
- * the model saw, and their cost, shared among their calls' sources: a request of two such calls adds half a turn to
- * each call's sources (split evenly among a call's sources).
- */
-function fetchBackTurnShares(analysis: SessionAnalysis): Map<Call, { turns: number; usd: number }> {
-	const byEntry = new Map<string, Call[]>();
-	for (const call of analysis.calls) {
-		if (call.fetchesBack.length === 0 || !call.entryId) continue;
-		const calls = byEntry.get(call.entryId);
-		if (calls) calls.push(call);
-		else byEntry.set(call.entryId, [call]);
-	}
-	const shares = new Map<Call, { turns: number; usd: number }>();
-	for (const [entryId, calls] of byEntry) {
-		if (calls.length !== calls[0].callsInTurn) continue;
-		const usd = analysis.costByEntry.get(entryId) ?? 0;
-		for (const call of calls) {
-			const part = 1 / calls.length / call.fetchesBack.length;
-			for (const source of call.fetchesBack) {
-				const share = shares.get(source) ?? { turns: 0, usd: 0 };
-				share.turns += part;
-				share.usd += usd * part;
-				shares.set(source, share);
-			}
 		}
 	}
 	return shares;

@@ -29,7 +29,7 @@ use crate::{
 			RERR_IPC, RERR_SYNTAX, RERR_TIMEOUT, RERR_WAITCHILD, RsyncError, timeout_message,
 		},
 		log::{Debug, LogCode, Logger, Role, syserr_text},
-		mux::ReadProbe,
+		mux::{InputPoll, ReadProbe},
 		paths::vec_os_lossy,
 	},
 };
@@ -565,6 +565,28 @@ struct PipeState {
 	buf:           VecDeque<u8>,
 	writer_closed: bool,
 	reader_closed: bool,
+	/// The reader committed to waiting on the empty pipe ([`InputPoll::arm`]).
+	armed:         bool,
+	/// While armed: the length of the first write since, all its read returns.
+	boundary:      Option<usize>,
+}
+
+/// The reader end's [`ReadProbe`].
+struct PipeProbe(Arc<Pipe>);
+
+impl InputPoll for PipeProbe {
+	fn waiting(&self) -> bool {
+		let state = lock(&self.0.state);
+		!state.buf.is_empty() || state.writer_closed
+	}
+
+	fn arm(&self) {
+		let mut state = lock(&self.0.state);
+		if state.buf.is_empty() && !state.writer_closed {
+			state.armed = true;
+			state.boundary = None;
+		}
+	}
 }
 
 struct PipeReader {
@@ -582,7 +604,9 @@ impl Read for PipeReader {
 		let mut state = lock(&self.pipe.state);
 		loop {
 			if !state.buf.is_empty() {
-				let n = buf.len().min(state.buf.len());
+				let limit = if state.armed { state.boundary.take() } else { None };
+				state.armed = false;
+				let n = buf.len().min(state.buf.len()).min(limit.unwrap_or(usize::MAX));
 				for (dst, src) in buf.iter_mut().zip(state.buf.drain(..n)) {
 					*dst = src;
 				}
@@ -590,6 +614,7 @@ impl Read for PipeReader {
 				return Ok(n);
 			}
 			if state.writer_closed {
+				state.armed = false;
 				return Ok(0);
 			}
 			let wait = self.ctl.slice(&self.cancel, started, true)?;
@@ -634,6 +659,9 @@ impl Write for PipeWriter {
 			if room > 0 {
 				let n = room.min(buf.len());
 				state.buf.extend(&buf[..n]);
+				if state.armed && state.boundary.is_none() {
+					state.boundary = Some(n);
+				}
 				self.pipe.changed.notify_all();
 				return Ok(n);
 			}
@@ -671,11 +699,7 @@ pub(crate) fn local_pair(cancel: Arc<AtomicBool>) -> (Connection, Connection) {
 			PipeReader { pipe: Arc::clone(inbound), cancel: Arc::clone(cancel), ctl: ctl.clone() };
 		let writer =
 			PipeWriter { pipe: Arc::clone(outbound), cancel: Arc::clone(cancel), ctl: ctl.clone() };
-		let probed = Arc::clone(inbound);
-		let probe: ReadProbe = Arc::new(move || {
-			let state = lock(&probed.state);
-			!state.buf.is_empty() || state.writer_closed
-		});
+		let probe: ReadProbe = Arc::new(PipeProbe(Arc::clone(inbound)));
 		Connection {
 			reader: Box::new(reader),
 			writer: Box::new(writer),
@@ -1340,6 +1364,31 @@ mod tests {
 	}
 
 	#[test]
+	fn armed_read_gets_the_first_write_alone() {
+		let cancel = Arc::new(AtomicBool::new(false));
+		let (mut client, mut server) = local_pair(cancel);
+		let probe = server.probe.take().unwrap();
+		// Armed on the empty pipe: two writes before the read, the read sees the first.
+		probe.arm();
+		client.writer.write_all(b"first").unwrap();
+		client.writer.write_all(b"second").unwrap();
+		assert!(probe.waiting());
+		let mut buf = [0u8; 64];
+		let n = server.reader.read(&mut buf).unwrap();
+		assert_eq!(&buf[..n], b"first");
+		// Not armed: a read takes everything the pipe holds.
+		client.writer.write_all(b"third").unwrap();
+		let n = server.reader.read(&mut buf).unwrap();
+		assert_eq!(&buf[..n], b"secondthird");
+		// Arming a pipe that holds input changes nothing.
+		client.writer.write_all(b"a").unwrap();
+		probe.arm();
+		client.writer.write_all(b"b").unwrap();
+		let n = server.reader.read(&mut buf).unwrap();
+		assert_eq!(&buf[..n], b"ab");
+	}
+
+	#[test]
 	fn dropping_a_reader_breaks_the_peer_writer() {
 		let cancel = Arc::new(AtomicBool::new(false));
 		let (client, mut server) = local_pair(cancel);
@@ -1433,6 +1482,31 @@ mod tests {
 		}
 
 		const DUMP: &str = "for a in \"$@\"; do printf '%s\\0' \"$a\"; done; printf '\\n--\\n'; cat\n";
+
+		/// The remote shell (`ssh`) leads its own session: in the host's it
+		/// could open `/dev/tty` and prompt (host key, password) on the user's
+		/// terminal underneath the TUI.
+		#[test]
+		fn remote_shell_leads_its_own_session() {
+			let dir = tempfile::tempdir().unwrap();
+			let rsh = script(dir.path(), "fake-rsh", "echo $$; cat >/dev/null\n");
+			let logger = logger();
+			let cancel = Arc::new(AtomicBool::new(false));
+			let mut conn = spawn_shell(&child_env(dir.path()), &base_cfg(&rsh, &logger), cancel).expect("spawn");
+			let mut line = Vec::new();
+			let mut byte = [0u8; 1];
+			while conn.reader.read(&mut byte).unwrap() == 1 && byte[0] != b'\n' {
+				line.push(byte[0]);
+			}
+			let pid: libc::pid_t = std::str::from_utf8(&line).unwrap().parse().unwrap();
+			// SAFETY: getsid only queries session ids; the child is still
+			// running (blocked on stdin).
+			let (child_sid, host_sid) = unsafe { (libc::getsid(pid), libc::getsid(0)) };
+			drop(std::mem::replace(&mut conn.writer, Box::new(io::sink())));
+			conn.finish().unwrap();
+			assert_eq!(child_sid, pid);
+			assert_ne!(child_sid, host_sid);
+		}
 
 		#[test]
 		fn remote_command_line_matches_reference() {

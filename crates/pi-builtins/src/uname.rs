@@ -8,7 +8,6 @@ use std::{
 };
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
-use platform_info::{PlatformInfo, PlatformInfoAPI, UNameAPI};
 use uucore::display::Quotable;
 
 use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes};
@@ -56,7 +55,6 @@ impl UNameOutput {
 	}
 
 	fn new(opts: &Options) -> Result<Self, &'static str> {
-		let uname = PlatformInfo::new().map_err(|_| "cannot get system name")?;
 		let none = !(opts.all
 			|| opts.kernel_name
 			|| opts.nodename
@@ -67,12 +65,101 @@ impl UNameOutput {
 			|| opts.processor
 			|| opts.hardware_platform);
 
-		let kernel_name = (opts.kernel_name || opts.all || none).then(|| uname.sysname().to_owned());
-		let nodename = (opts.nodename || opts.all).then(|| uname.nodename().to_owned());
-		let kernel_release = (opts.kernel_release || opts.all).then(|| uname.release().to_owned());
-		let kernel_version = (opts.kernel_version || opts.all).then(|| uname.version().to_owned());
-		let machine = (opts.machine || opts.all).then(|| uname.machine().to_owned());
-		let os = (opts.os || opts.all).then(|| uname.osname().to_owned());
+		#[cfg(unix)]
+		let (kernel_name, nodename, kernel_release, kernel_version, machine, os) = {
+			use std::os::unix::ffi::OsStrExt;
+
+			let uname = rustix::system::uname();
+			let owned = |value: &std::ffi::CStr| OsStr::from_bytes(value.to_bytes()).to_owned();
+			(
+				(opts.kernel_name || opts.all || none).then(|| owned(uname.sysname())),
+				(opts.nodename || opts.all).then(|| owned(uname.nodename())),
+				(opts.kernel_release || opts.all).then(|| owned(uname.release())),
+				(opts.kernel_version || opts.all).then(|| owned(uname.version())),
+				(opts.machine || opts.all).then(|| owned(uname.machine())),
+				(opts.os || opts.all).then(|| OS_NAME.into()),
+			)
+		};
+
+		#[cfg(windows)]
+		let (kernel_name, nodename, kernel_release, kernel_version, machine, os) = {
+			use windows_sys::{
+				Wdk::System::SystemServices::RtlGetVersion,
+				Win32::System::SystemInformation::{
+					GetNativeSystemInfo, OSVERSIONINFOEXW, PROCESSOR_ARCHITECTURE_ALPHA,
+					PROCESSOR_ARCHITECTURE_ALPHA64, PROCESSOR_ARCHITECTURE_AMD64,
+					PROCESSOR_ARCHITECTURE_ARM, PROCESSOR_ARCHITECTURE_ARM64,
+					PROCESSOR_ARCHITECTURE_IA64, PROCESSOR_ARCHITECTURE_INTEL,
+					PROCESSOR_ARCHITECTURE_MIPS, PROCESSOR_ARCHITECTURE_PPC,
+					PROCESSOR_ARCHITECTURE_SHX, SYSTEM_INFO,
+				},
+			};
+
+			let nodename = windows_nodename().map_err(|_| "cannot get system name")?;
+			let mut version = OSVERSIONINFOEXW {
+				dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOEXW>() as u32,
+				..Default::default()
+			};
+			// RtlGetVersion accepts the extended structure when its size is supplied.
+			if unsafe { RtlGetVersion((&mut version as *mut OSVERSIONINFOEXW).cast()) } < 0 {
+				return Err("cannot get system name");
+			}
+			let mut system = SYSTEM_INFO::default();
+			unsafe { GetNativeSystemInfo(&mut system) };
+			let architecture = match unsafe { system.Anonymous.Anonymous.wProcessorArchitecture } {
+				PROCESSOR_ARCHITECTURE_AMD64 => "x86_64",
+				PROCESSOR_ARCHITECTURE_INTEL => match system.wProcessorLevel {
+					4 => "i486",
+					5 => "i586",
+					6 => "i686",
+					_ => "i386",
+				},
+				PROCESSOR_ARCHITECTURE_IA64 => "ia64",
+				PROCESSOR_ARCHITECTURE_ARM => "arm",
+				PROCESSOR_ARCHITECTURE_ARM64 => "aarch64",
+				PROCESSOR_ARCHITECTURE_MIPS => "mips",
+				PROCESSOR_ARCHITECTURE_PPC => "powerpc",
+				PROCESSOR_ARCHITECTURE_ALPHA | PROCESSOR_ARCHITECTURE_ALPHA64 => "alpha",
+				PROCESSOR_ARCHITECTURE_SHX => "superh",
+				_ => "unknown",
+			};
+			(
+				(opts.kernel_name || opts.all || none).then(|| "Windows_NT".into()),
+				(opts.nodename || opts.all).then_some(nodename),
+				(opts.kernel_release || opts.all)
+					.then(|| format!("{}.{}", version.dwMajorVersion, version.dwMinorVersion).into()),
+				(opts.kernel_version || opts.all).then(|| version.dwBuildNumber.to_string().into()),
+				(opts.machine || opts.all).then(|| architecture.into()),
+				(opts.os || opts.all).then(|| windows_os_name(&version)),
+			)
+		};
+
+		#[cfg(target_os = "wasi")]
+		let (kernel_name, nodename, kernel_release, kernel_version, machine, os) = (
+			(opts.kernel_name || opts.all || none).then(|| "wasi".into()),
+			(opts.nodename || opts.all).then(|| {
+				["HOSTNAME", "COMPUTERNAME"]
+					.into_iter()
+					.filter_map(|name| std::env::var(name).ok())
+					.find(|value| !value.is_empty())
+					.unwrap_or_else(|| "localhost".into())
+					.into()
+			}),
+			(opts.kernel_release || opts.all).then(|| "0.0.0".into()),
+			(opts.kernel_version || opts.all).then(|| "0.0.0".into()),
+			(opts.machine || opts.all).then(|| std::env::consts::ARCH.into()),
+			(opts.os || opts.all).then(|| OS_NAME.into()),
+		);
+
+		#[cfg(not(any(unix, windows, target_os = "wasi")))]
+		let (kernel_name, nodename, kernel_release, kernel_version, machine, os) = (
+			(opts.kernel_name || opts.all || none).then(|| OS_NAME.into()),
+			(opts.nodename || opts.all).then(|| OS_NAME.into()),
+			(opts.kernel_release || opts.all).then(|| OS_NAME.into()),
+			(opts.kernel_version || opts.all).then(|| OS_NAME.into()),
+			(opts.machine || opts.all).then(|| OS_NAME.into()),
+			(opts.os || opts.all).then(|| OS_NAME.into()),
+		);
 
 		// This option is unsupported on modern Linux systems.
 		// See: https://lists.gnu.org/archive/html/bug-coreutils/2005-09/msg00063.html
@@ -93,6 +180,113 @@ impl UNameOutput {
 			hardware_platform,
 		})
 	}
+}
+
+#[cfg(not(windows))]
+const OS_NAME: &str = if cfg!(all(target_os = "linux", any(target_env = "gnu", target_env = ""))) {
+	"GNU/Linux"
+} else if cfg!(target_os = "linux") {
+	"Linux"
+} else if cfg!(target_os = "android") {
+	"Android"
+} else if cfg!(target_os = "freebsd") {
+	"FreeBSD"
+} else if cfg!(target_os = "netbsd") {
+	"NetBSD"
+} else if cfg!(target_os = "openbsd") {
+	"OpenBSD"
+} else if cfg!(target_vendor = "apple") {
+	"Darwin"
+} else if cfg!(target_os = "fuchsia") {
+	"Fuchsia"
+} else if cfg!(target_os = "redox") {
+	"Redox"
+} else if cfg!(target_os = "illumos") {
+	"illumos"
+} else if cfg!(target_os = "solaris") {
+	"Solaris"
+} else if cfg!(target_os = "haiku") {
+	"Haiku"
+} else if cfg!(target_os = "dragonfly") {
+	"DragonFly"
+} else if cfg!(target_os = "aix") {
+	"AIX"
+} else if cfg!(target_os = "cygwin") {
+	"Cygwin"
+} else if cfg!(target_os = "wasi") {
+	"WASI"
+} else if cfg!(target_os = "hurd") {
+	"GNU"
+} else {
+	"unknown"
+};
+
+#[cfg(windows)]
+fn windows_nodename() -> std::io::Result<OsString> {
+	use std::os::windows::ffi::OsStringExt;
+	use windows_sys::Win32::System::SystemInformation::{
+		ComputerNamePhysicalDnsHostname, GetComputerNameExW,
+	};
+
+	let mut size = 0;
+	unsafe {
+		GetComputerNameExW(ComputerNamePhysicalDnsHostname, std::ptr::null_mut(), &mut size);
+	}
+	if size == 0 {
+		return Err(std::io::Error::last_os_error());
+	}
+	let mut buffer = Vec::with_capacity(size as usize);
+	if unsafe {
+		GetComputerNameExW(ComputerNamePhysicalDnsHostname, buffer.as_mut_ptr(), &mut size)
+	} == 0
+	{
+		return Err(std::io::Error::last_os_error());
+	}
+	// Only the code units written by the API become initialized elements.
+	unsafe { buffer.set_len(size as usize) };
+	Ok(OsString::from_wide(&buffer))
+}
+
+#[cfg(windows)]
+fn windows_os_name(
+	version: &windows_sys::Win32::System::SystemInformation::OSVERSIONINFOEXW,
+) -> OsString {
+	use windows_sys::Win32::System::SystemServices::{VER_NT_WORKSTATION, VER_SUITE_WH_SERVER};
+
+	let workstation = u32::from(version.wProductType) == VER_NT_WORKSTATION;
+	let name = match (version.dwMajorVersion, version.dwMinorVersion) {
+		(5, 0) => "Windows 2000",
+		(5, 1) => "Windows XP",
+		(5, 2) if workstation => "Windows XP Professional x64 Edition",
+		(5, 2) if u32::from(version.wSuiteMask) == VER_SUITE_WH_SERVER => "Windows Home Server",
+		(5, 2) => "Windows Server 2003",
+		(6, 0) if workstation => "Windows Vista",
+		(6, 0) => "Windows Server 2008",
+		(6, 1) if workstation => "Windows 7",
+		(6, 1) => "Windows Server 2008 R2",
+		(6, 2) if workstation => "Windows 8",
+		(6, 2) => "Windows Server 2012",
+		(6, 3) if workstation => "Windows 8.1",
+		(6, 3) => "Windows Server 2012 R2",
+		(10, 0) if workstation && version.dwBuildNumber >= 22000 => "Windows 11",
+		(10, 0) if !workstation && (14000..17000).contains(&version.dwBuildNumber) => {
+			"Windows Server 2016"
+		},
+		(10, 0) if !workstation && (17000..19000).contains(&version.dwBuildNumber) => {
+			"Windows Server 2019"
+		},
+		(10, 0) if !workstation && version.dwBuildNumber >= 20000 => "Windows Server 2022",
+		(10, _) => "Windows 10",
+		_ => {
+			let family = if workstation { "Windows" } else { "Windows Server" };
+			return format!(
+				"MS/Windows ({family} {}.{})",
+				version.dwMajorVersion, version.dwMinorVersion,
+			)
+			.into();
+		},
+	};
+	format!("MS/Windows ({name})").into()
 }
 
 struct Options {
