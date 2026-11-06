@@ -8212,7 +8212,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#disposeImageBlobWriter = undefined;
 		this.#hideSessionInfo();
 		if (this.#ownsStartedUi) {
-			this.ui.stop();
+			// The one teardown that hands the terminal back for good, so the one
+			// stop that may be capped; #exitFlush() decides whether it is.
+			this.ui.stop({ exiting: true });
 			this.#ownsStartedUi = false;
 		}
 		// The markdown renderer's extension-link state and the transcript presenters are process-wide;

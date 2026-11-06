@@ -345,13 +345,6 @@ const NO_RUNS: ReadonlyMap<Component, CompactRun> = new Map();
 export class TranscriptContainer extends Container {
 	#entries: TranscriptEntry[] = [];
 	#frontier = 0;
-	/**
-	 * The entry whose rows end native scrollback without the blank that follows
-	 * a block: a head that a progressive append emitted into, or whose head rows
-	 * a split committed. A batch that writes a row from any other entry opens
-	 * with that blank.
-	 */
-	#openEntry: TranscriptEntry | undefined;
 	#nextBatchId = 1;
 	#offered: Offered | undefined;
 	#replayPending = false;
@@ -449,7 +442,6 @@ export class TranscriptContainer extends Container {
 		super.clear();
 		this.#entries = [];
 		this.#frontier = 0;
-		this.#openEntry = undefined;
 		this.#offered = undefined;
 		this.#childStartRows.clear();
 		this.#pinnedFrontier = undefined;

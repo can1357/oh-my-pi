@@ -1258,7 +1258,9 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		// Remains live after transfer until InteractiveMode installs its configured handlers.
 		if (this.#stopped) return;
 		this.#welcome?.stopIntro();
-		if (this.#started) this.ui.stop();
+		// The process leaves the terminal right below, so this stop may be
+		// capped; the owner's exit flush provider decides whether it is.
+		if (this.#started) this.ui.stop({ exiting: true });
 		this.#stopped = true;
 		this.#exit(code);
 	}

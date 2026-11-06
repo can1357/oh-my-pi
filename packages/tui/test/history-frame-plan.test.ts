@@ -485,6 +485,33 @@ describe("terminal frame plans", () => {
 		}
 	});
 
+	it("flushes a stop that does not say it is exiting in full, whatever the provider would cap it to", async () => {
+		const terminal = new VirtualTerminal(40, 10);
+		const renderScheduler = new VirtualRenderScheduler();
+		const composer = new Composer({
+			terminal,
+			exit: () => {},
+			tuiOptions: { renderScheduler },
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+		});
+		composer.ui.setExitFlushProvider(() => ({ maxRows: 10 }));
+		const transcript = new TranscriptContainer();
+		composer.setRuntimeChildren([transcript, new Text("editor", 0, 0)]);
+		composer.start({ playWelcomeIntro: false });
+		await renderScheduler.settle(terminal);
+		composer.ui.showOverlay(new FullscreenOverlay(), { fullscreen: true });
+		await renderScheduler.settle(terminal);
+		for (let i = 0; i < 30; i++) transcript.addChild(new Text(`row-${i}`, 0, 0));
+		composer.ui.requestRender();
+		await renderScheduler.settle(terminal);
+
+		// Capping is opt-in: a caller that forgot to say what this stop is keeps
+		// every row, instead of silently truncating a session that may continue.
+		composer.ui.stop();
+
+		expect(plainBuffer(terminal).filter(row => row.startsWith("row-"))).toHaveLength(30);
+	});
+
 	it("retires by pressure again after a handoff stop resumes", () => {
 		const terminal = new VirtualTerminal(40, 10);
 		const composer = new Composer({

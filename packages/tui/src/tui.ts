@@ -220,8 +220,10 @@ export interface HistoryFlushOptions {
 }
 
 /**
- * How TUI.stop() hands the terminal back. A handoff that resumes with start()
- * never caps its flush: the session continues, so skipped rows would be lost.
+ * How TUI.stop() hands the terminal back. Capping is opt-in: a bare `stop()`
+ * flushes in full, so a handoff that forgot to say what it is keeps every row.
+ * A handoff that resumes with start() never caps either: the session
+ * continues, so skipped rows would be lost.
  */
 export type TUIStopOptions =
 	| {
@@ -233,8 +235,18 @@ export type TUIStopOptions =
 			 */
 			resuming: true;
 			maxRows?: never;
+			exiting?: never;
 	  }
-	| (HistoryFlushOptions & { resuming?: false });
+	| (HistoryFlushOptions & {
+			resuming?: false;
+			/**
+			 * The process is leaving the terminal for good, so the flush may be
+			 * capped: without an explicit `maxRows` it asks
+			 * {@link TUI.setExitFlushProvider}'s provider. Say this only where the
+			 * session really ends; everywhere else a full flush is the safe answer.
+			 */
+			exiting?: boolean;
+	  });
 
 /** The cap an exiting stop passes as `maxRows`. */
 export const EXIT_FLUSH_MAX_ROWS = 2_000;
@@ -1505,11 +1517,12 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * How an exiting stop flushes: `stop()` without options, and a postmortem
+	 * How an exiting stop flushes: `stop({ exiting: true })`, and a postmortem
 	 * restore for any reason but a signal (a fatal error, `postmortem.quit()`
 	 * without a prior stop, a bare `process.exit()`). Read at that moment:
 	 * return `{ maxRows }` only while another copy of the transcript survives.
-	 * Without a provider an exiting stop flushes in full.
+	 * Without a provider, and for every stop that does not say it is exiting,
+	 * the flush is full.
 	 */
 	setExitFlushProvider(provider: (() => HistoryFlushOptions) | undefined): void {
 		this.#exitFlushProvider = provider;
@@ -1759,7 +1772,7 @@ export class TUI extends Container {
 			reason === postmortem.Reason.SIGTERM ||
 			reason === postmortem.Reason.SIGINT
 				? this.stop({ maxRows: EXIT_FLUSH_MAX_ROWS })
-				: this.stop(),
+				: this.stop({ exiting: true }),
 		);
 		for (const listener of this.#startListeners) this.#runStartListener(listener);
 		this.#started = !this.#stopped;
@@ -2757,12 +2770,15 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * Hand the terminal back. Without options this is an exiting stop, which
-	 * flushes as the exit flush provider says (in full without one). See
-	 * {@link TUIStopOptions} for a handoff that resumes with start().
+	 * Hand the terminal back, flushing every un-retired row. Only a stop that
+	 * says `exiting` may be capped, and then by the exit flush provider; see
+	 * {@link TUIStopOptions} for that and for a handoff that resumes with
+	 * start(). A caller that forgets which it is keeps the whole transcript.
 	 */
-	stop(options: TUIStopOptions = this.#exitFlushProvider?.() ?? {}): void {
-		const { resuming, ...flush } = options;
+	stop(options: TUIStopOptions = {}): void {
+		const { resuming, exiting, ...explicit } = options;
+		const flush: HistoryFlushOptions =
+			exiting === true && explicit.maxRows === undefined ? (this.#exitFlushProvider?.() ?? {}) : explicit;
 		this.#appearanceReportUnsubscribe?.();
 		this.#appearanceReportUnsubscribe = undefined;
 		this.#cancelPostmortemRestore?.();
