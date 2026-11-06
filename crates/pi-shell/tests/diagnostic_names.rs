@@ -1,12 +1,11 @@
 //! A diagnostic names the file the shell is reading, and prints a name's bytes as
 //! they are, as Bash 5.3.0 does.
 //!
-//! Bash 5.3.0 is the target. A row whose comment names Bash 5.2.21's output differs
-//! only because 5.2.21 does not read a refused executable's `#!` line: it reports
-//! `cannot execute: required file not found` (127) where 5.3.0 reports
-//! `bad interpreter` (126). The name and the prefix under test are the same in both,
-//! except `ctl-func-badinterp`, where 5.2.21 prefixes a function defined in a `-c`
-//! string with `environment` and 5.3.0 with `$0`; 5.3.0 wins.
+//! Bash 5.3.0 is the target. A row's comment records any Bash 5.2.21 difference.
+//! Bash 5.2.21 does not read a refused executable's `#!` line: it reports
+//! `cannot execute: required file not found` (127), not `bad interpreter` (126).
+//! It names a function defined in a `-c` string `environment`, not `$0`.
+//! Its unexpected-end-of-file syntax error omits the opening command and line.
 
 #![cfg(unix)]
 
@@ -24,9 +23,9 @@ enum Mode {
 	/// A script file the `obash` binary reads, whose `$0` and `BASH_SOURCE[0]` are
 	/// the script: script mode is not reachable through `Shell::run`.
 	ScriptFile,
-	/// `obash --norc --noprofile -i -c`: an interactive shell, which bash names
-	/// by itself however deep in a `.` file it is. With no terminal it first
-	/// prints two job-control notices, so the row compares the last line.
+	/// `obash --norc --noprofile -i -c`: runtime errors name the shell;
+	/// syntax errors in a `.` file name that file and its line. With no terminal,
+	/// Bash first prints two job-control notices, so compare the last line.
 	Interactive,
 }
 
@@ -442,6 +441,36 @@ const ROWS: &[Row] = &[
 		stdout: b"",
 		stderr: b"bash: ./victim: /missing/review/interpreter: bad interpreter: No such file or directory\n",
 	},
+	// int-sourced-syntax-if (i)  // 5.2.21 differs: 2 'bash: ./source.sh: line 2: syntax error: unexpected end of file\n'
+	Row {
+		id: "int-sourced-syntax-if",
+		setup: r#"printf 'if\n' > source.sh"#,
+		mode: Mode::Interactive,
+		script: ". ./source.sh",
+		status: 2,
+		stdout: b"",
+		stderr: b"bash: ./source.sh: line 2: syntax error: unexpected end of file from `if' command on line 1\n",
+	},
+	// int-sourced-syntax-late-if (i)  // 5.2.21 differs: 2 'bash: ./source.sh: line 4: syntax error: unexpected end of file\n'
+	Row {
+		id: "int-sourced-syntax-late-if",
+		setup: r#"printf ':\n:\nif\n' > source.sh"#,
+		mode: Mode::Interactive,
+		script: ". ./source.sh",
+		status: 2,
+		stdout: b"",
+		stderr: b"bash: ./source.sh: line 4: syntax error: unexpected end of file from `if' command on line 3\n",
+	},
+	// int-top-syntax-if (i)  // 5.2.21 differs: 2 'bash: syntax error: unexpected end of file\n'
+	Row {
+		id: "int-top-syntax-if",
+		setup: "",
+		mode: Mode::Interactive,
+		script: "if",
+		status: 2,
+		stdout: b"",
+		stderr: b"bash: syntax error: unexpected end of file from `if' command on line 1\n",
+	},
 	// int-top-builtin (i)
 	Row {
 		id: "int-top-builtin",
@@ -593,11 +622,11 @@ async fn a_diagnostic_inside_a_sourced_file_names_that_file() {
 	assert_rows(&["src-", "ctl-"]).await;
 }
 
-/// bash reads `BASH_SOURCE[0]` only for a shell that is not interactive
-/// (`get_name_for_error`), so an interactive shell names itself however deep in
-/// a `.` file the message is raised.
+/// Runtime errors in an interactive shell name the shell without a line.
+/// Syntax errors name a sourced file and its line, or the shell without a line
+/// when the parser reads the top-level command string.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_interactive_shell_names_itself_inside_a_sourced_file() {
+async fn an_interactive_shell_names_runtime_and_syntax_errors_by_class() {
 	assert_rows(&["int-"]).await;
 }
 
