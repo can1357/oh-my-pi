@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `ShellTrace` fields that carry values from the run (argv, assignments, redirect targets, unlocated unit sources, diagnostics) are `ShellTraceBytes`: a string when the bytes are UTF-8, otherwise the raw byte values. `isShellTrace` accepts both forms
+
 ## [18.17.0] - 2026-11-06
 
 ### Added

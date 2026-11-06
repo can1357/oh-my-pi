@@ -39,7 +39,14 @@ const queries = new Map<string, { found: Promise<Daemon | undefined>; at: number
 async function report(command: string, verb: "start" | "status"): Promise<Daemon> {
 	let child: Bun.Subprocess<"ignore", "pipe", "pipe">;
 	try {
-		child = Bun.spawn([command, "--json", verb], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+		// windowsHide: a console-less omp host (background, IDE) would otherwise
+		// flash a fresh conhost window for every `status` recheck.
+		child = Bun.spawn([command, "--json", verb], {
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "pipe",
+			windowsHide: true,
+		});
 	} catch (err) {
 		throw new Error(
 			`cannot run ${command} (${err instanceof Error ? err.message : String(err)}); set ovnfs.path to the ovnfs binary`,

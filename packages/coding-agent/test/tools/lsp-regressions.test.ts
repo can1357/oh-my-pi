@@ -1632,6 +1632,73 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("feeds document symbol identifier lines into references after Javadoc and annotations", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-symbol-line-");
+		const filePath = path.join(tempDir.path(), "Example.java");
+		const uri = fileToUri(filePath);
+		try {
+			await Bun.write(
+				filePath,
+				"class Example {\n  /** Docs */\n  @Deprecated\n  void freezeCoupon() {}\n  void call() { freezeCoupon(); }\n}\n",
+			);
+			const serverConfig: ServerConfig = { command: "fake-jdtls", fileTypes: ["java"], rootMarkers: [] };
+			installFakeLsp((message, server) => {
+				if (message.method === "initialize") {
+					server.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: { capabilities: { documentSymbolProvider: true, referencesProvider: true } },
+					});
+				} else if (message.method === "textDocument/documentSymbol") {
+					server.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: [
+							{
+								name: "freezeCoupon",
+								kind: 6,
+								range: { start: { line: 1, character: 2 }, end: { line: 3, character: 24 } },
+								selectionRange: { start: { line: 3, character: 7 }, end: { line: 3, character: 19 } },
+							},
+						],
+					});
+				} else if (message.method === "textDocument/references") {
+					server.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: [{ uri, range: { start: { line: 4, character: 16 }, end: { line: 4, character: 28 } } }],
+					});
+				} else if (message.method === "shutdown") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					server.exit(0);
+				}
+			});
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "fake-jdtls": serverConfig },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspClient, "waitForProjectLoaded").mockResolvedValue(undefined);
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const symbols = textResult(await tool.execute("document-symbols", { action: "symbols", file: filePath }));
+			const line = Number(symbols.match(/freezeCoupon @ line (\d+)/)?.[1]);
+			const references = textResult(
+				await tool.execute("symbol-references", {
+					action: "references",
+					file: filePath,
+					line,
+					symbol: "freezeCoupon",
+				}),
+			);
+			expect(references).toContain("Found 1 reference(s)");
+			expect(references).toContain("Example.java:5");
+		} finally {
+			configCache.delete(tempDir.path());
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
 	it("filters and deduplicates workspace symbols by query", () => {
 		const rustUri = fileToUri(path.join(os.tmpdir(), "rust.rs"));
 		const loggerUri = fileToUri(path.join(os.tmpdir(), "logger.ts"));
