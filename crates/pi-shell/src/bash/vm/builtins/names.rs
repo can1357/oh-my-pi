@@ -295,12 +295,24 @@ fn hashed(ctx: &mut Ctx<'_, '_>, name: &[u8]) -> Result<Option<BString>, Need> {
 	}
 	match ctx.record(Key::CmdHash(BStr::new(name)))? {
 		Some(Record::CmdHash { path, hits }) => {
-			let rec = Record::CmdHash { path: path.clone(), hits: hits.saturating_add(1) };
+			// The probe may need the host, which restarts the builtin: count the
+			// hit only once its answer is in.
+			let shown = shown_hashed(ctx, &path)?;
+			let rec = Record::CmdHash { path, hits: hits.saturating_add(1) };
 			ctx.store_record(KeyBuf::CmdHash(name.into()), Some(rec));
-			Ok(Some(path))
+			Ok(Some(shown))
 		},
 		_ => Ok(None),
 	}
+}
+
+/// A hashed path as bash's `phash_search` reports it
+/// ([`crate::bash::vm::probe::hashed_shown`]), probing whether it names a file.
+fn shown_hashed(ctx: &mut Ctx<'_, '_>, path: &BString) -> Result<BString, Need> {
+	let abs = absolute(&ctx.vp.cwd, path);
+	let exists =
+		matches!(ctx.probe(Probe::Stat { path: abs, follow: true })?, ProbeResult::Stat(Some(_)));
+	Ok(crate::bash::vm::probe::hashed_shown(path, exists))
 }
 
 /// bash's `sv_path` (`phash_flush`): any assignment to `PATH`, a command's
@@ -836,11 +848,12 @@ pub fn hash(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 						.expect("writing to a Vec cannot fail");
 				},
 				Some(p) if single => {
-					out.extend_from_slice(&p);
+					out.extend_from_slice(&shown_hashed(ctx, &p)?);
 					out.push(b'\n');
 				},
 				Some(p) => {
-					writeln!(out, "{}\t{}", name.as_bstr(), p.as_bstr())
+					let shown = shown_hashed(ctx, &p)?;
+					writeln!(out, "{}\t{}", name.as_bstr(), shown.as_bstr())
 						.expect("writing to a Vec cannot fail");
 				},
 				None => {

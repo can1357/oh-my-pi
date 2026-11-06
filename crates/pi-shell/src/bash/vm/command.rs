@@ -20,9 +20,9 @@ use super::{
 	expand::{CompoundElem, Expander, Stop, compound_text},
 	probe::{self, Search, absolute, candidates},
 	proc::{
-		AssignValue, Awaited, BangStage, DeferPhase, ExecAs, ExecState, Frame, FrameKind, JobState,
-		Live, PathSearch, PendingWrite, Probe, ProbeResult, Scratch, ScriptKind, Slot, Stage, Target,
-		Transfer, Vproc,
+		AssignValue, Awaited, BangStage, Candidate, DeferPhase, ExecAs, ExecState, Frame, FrameKind,
+		JobState, Live, PathSearch, PendingWrite, Probe, ProbeResult, Scratch, ScriptKind, Slot,
+		Spelled, Stage, Target, Transfer, Vproc,
 	},
 	state::{self, Level, Scope, Var, VarMap},
 	xtrace,
@@ -60,6 +60,7 @@ impl ExecState {
 			keywords: Vec::new(),
 			arrayref: Vec::new(),
 			target: None,
+			spelled: None,
 			waiting: None,
 			scoped: false,
 			control: None,
@@ -91,6 +92,7 @@ impl ExecState {
 			keywords,
 			arrayref,
 			target,
+			spelled,
 			waiting,
 			scoped,
 			control,
@@ -117,6 +119,7 @@ impl ExecState {
 		keywords.clear();
 		arrayref.clear();
 		*target = None;
+		*spelled = None;
 		*waiting = None;
 		*scoped = false;
 		*control = None;
@@ -2005,7 +2008,9 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 					// `hash` keeps bash's display path (`./e` for an empty
 					// PATH entry): a file relative to the shell's cwd.
 					let target = absolute(&vp.cwd, &path);
-					sc.exec.as_mut().expect("exec").target = Some(Target::External(target));
+					let exec = sc.exec.as_mut().expect("exec");
+					exec.spelled = Some(Box::new(Spelled::Hashed(path)));
+					exec.target = Some(Target::External(target));
 				},
 				hashed => {
 					let path = if std_path {
@@ -2021,12 +2026,20 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 					// executable file.
 					// zsh `pathdirs` (a name with a slash searched): the name
 					// itself first.
-					let mut cands: Vec<BString> = hashed
-						.map(|(p, _)| absolute(&vp.cwd, &p))
+					let mut cands: Vec<Candidate> = hashed
+						.map(|(p, _)| Candidate {
+							path:   absolute(&vp.cwd, &p),
+							shown:  p,
+							hashed: true,
+						})
 						.into_iter()
 						.chain(
 							(vp.mode.dialect() == crate::bash::ids::Dialect::Zsh && name.contains(&b'/'))
-								.then(|| absolute(&vp.cwd, &name)),
+								.then(|| Candidate {
+									path:   absolute(&vp.cwd, &name),
+									shown:  name.clone(),
+									hashed: false,
+								}),
 						)
 						.collect();
 					let extensions = probe::executable_extensions(k, cx, vp);
@@ -2051,7 +2064,7 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 		};
 		let flow = match found {
 			None => None,
-			Some(Search::Found(path)) => {
+			Some(Search::Found(found)) => {
 				sc.io().search = None;
 				// bash hashes every command it finds in PATH (not with a
 				// temporary PATH).
@@ -2062,15 +2075,23 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 						.unwrap_or(true)
 				{
 					let hits = match state::record(cx.store, vp, Key::CmdHash(BStr::new(&name))) {
-						Ok(Some(Record::CmdHash { path: old, hits })) if *old == path => {
+						Ok(Some(Record::CmdHash { path: old, hits })) if *old == found.shown => {
 							hits.saturating_add(1)
 						},
 						_ => 1,
 					};
-					let rec = Record::CmdHash { path: path.clone(), hits };
+					// bash hashes the entry joined to the word, not its absolute
+					// form: that is what `hash` and `BASH_CMDS` show.
+					let rec = Record::CmdHash { path: found.shown.clone(), hits };
 					state::store_record(&mut k.root, cx.store, vp, KeyBuf::CmdHash(name), Some(rec));
 				}
-				sc.exec.as_mut().expect("exec").target = Some(Target::External(path));
+				let exec = sc.exec.as_mut().expect("exec");
+				exec.spelled = Some(Box::new(if found.hashed {
+					Spelled::Hashed(found.shown)
+				} else {
+					Spelled::Joined(found.shown)
+				}));
+				exec.target = Some(Target::External(found.path));
 				None
 			},
 			Some(Search::NotFound) => {
@@ -4743,7 +4764,8 @@ fn run_script_file(
 		Ok(_) => BString::default(),
 	};
 	if looks_binary(&text) {
-		let name = st(vp).argv[0].clone();
+		// The file was just read, so it is there.
+		let name = tried_name(vp, &path, true);
 		k.diag(cx, vp, line, Diag::BinaryFile { name });
 		let s = st(vp);
 		s.status = 126;
@@ -4882,6 +4904,23 @@ fn interpreter(text: &[u8]) -> BString {
 	interp
 }
 
+/// The name bash gives the file it tried to run: a word with `/` as the user
+/// wrote it, else the way resolution spelled it — the `$PATH` entry joined to
+/// the word, or the hash table's path as `phash_search` shows it, which needs
+/// to know whether that path names a file (`exists`).
+fn tried_name(vp: &mut Vproc, path: &BString, exists: bool) -> BString {
+	let s = st(vp);
+	let n = s.argv[0].clone();
+	if n.contains(&b'/') {
+		return n;
+	}
+	match s.spelled.as_deref() {
+		Some(Spelled::Joined(p)) => p.clone(),
+		Some(Spelled::Hashed(p)) => probe::hashed_shown(p, exists),
+		None => path.clone(),
+	}
+}
+
 /// bash's `shell_execve` after the OS refused to run `path` with `code`
 /// (not `ENOEXEC`): a directory is `Is a directory`; a missing or
 /// non-executable file, `E2BIG` and `ENOMEM` report the error; an
@@ -4901,12 +4940,6 @@ fn refused(
 		return zsh_refused(k, vp, cx, line, path, code);
 	}
 	let err = std::io::Error::from_raw_os_error(code);
-	// bash names the file it tried: the PATH (or hash table) result, a name
-	// with `/` as written.
-	let name = {
-		let n = st(vp).argv[0].clone();
-		if n.contains(&b'/') { n } else { path.clone() }
-	};
 	let enoent = err.kind() == ErrorKind::NotFound;
 	let mut status = if enoent { 127 } else { 126 };
 	let stat = match command_probe(k, cx, vp, &Probe::Stat { path: path.clone(), follow: true }) {
@@ -4914,6 +4947,7 @@ fn refused(
 		Ok(ProbeResult::Stat(stat)) => stat,
 		Ok(_) => None,
 	};
+	let name = tried_name(vp, path, stat.is_some());
 	let diag = if stat.as_ref().is_some_and(|s| s.kind == StatKind::Dir) {
 		Diag::IsADirectory { name }
 	} else {

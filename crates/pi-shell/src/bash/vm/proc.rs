@@ -1460,6 +1460,11 @@ pub struct ExecState {
 	/// references ([`super::builtins::Ctx::arrayref`]).
 	pub arrayref:    Vec<u32>,
 	pub target:      Option<Target>,
+	/// How resolution spelled the command, for the diagnostic that names it
+	/// when running it fails. `None` when the word itself is the name; boxed
+	/// because an idle vproc holds an `ExecState` and this is set only for an
+	/// external command the shell looked up.
+	pub spelled:     Option<Box<Spelled>>,
 	pub waiting:     Option<Awaited>,
 	/// A temporary scope (builtin environment) was pushed for this command.
 	pub scoped:      bool,
@@ -1543,6 +1548,15 @@ pub enum Stage {
 	Finish,
 }
 
+/// How a resolved command is spelled when a diagnostic names it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Spelled {
+	/// A `$PATH` entry joined to the word, shown as joined.
+	Joined(BString),
+	/// The hash table's path, shown as bash's `phash_search` shows it.
+	Hashed(BString),
+}
+
 /// What a command name resolved to.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Target {
@@ -1602,10 +1616,25 @@ impl From<Resolved> for Target {
 	}
 }
 
+/// One command a `$PATH` search (or the hash table) offers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Candidate {
+	/// The entry joined to the word and made absolute against the shell's
+	/// directory: what `stat`, `access` and `exec` are given.
+	pub path:   BString,
+	/// The entry joined to the word as bash joins it (`sh_makepath`: an empty
+	/// entry read as `.`): what bash names in a diagnostic, stores in the hash
+	/// table, and prints for `type -p`.
+	pub shown:  BString,
+	/// The candidate is the hash table's own path, which bash shows through
+	/// `phash_search` rather than as it is stored.
+	pub hashed: bool,
+}
+
 /// PATH search state: candidates and the probe in progress.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PathSearch {
-	pub cands:         Vec<BString>,
+	pub cands:         Vec<Candidate>,
 	pub idx:           usize,
 	/// The candidate passed `stat`; `access(X)` is next.
 	pub checking_exec: bool,
@@ -1706,10 +1735,12 @@ impl Live {
 // (`ExecState::resumed`, 368 → 376 B): the bench measured 1,832 B per idle
 // vproc with both. The line editor's boxed state (`Vproc::zle`, 8 B) brings
 // that to at most 1,840 B.
+// The spelling a resolved command is named by (`ExecState::spelled`, a boxed
+// pointer, 376 → 384 B) brings the bench's figure to 1,848 B per idle vproc.
 const _: () = assert!(size_of::<Vproc>() <= 672, "Vproc grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<Frame>() <= 256, "Frame grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<Scratch>() <= 216, "Scratch grew (idle vproc ≤ 2 KiB)");
-const _: () = assert!(size_of::<ExecState>() <= 376, "ExecState grew (idle vproc ≤ 2 KiB)");
+const _: () = assert!(size_of::<ExecState>() <= 384, "ExecState grew (idle vproc ≤ 2 KiB)");
 // An op that redirects or probes keeps a `ScratchIo` (cleared per op): its
 // zsh-only progress lives in the boxed `ScratchZsh` (zsh support grew it by one
 // pointer only; `RedirProgress` not at all).
