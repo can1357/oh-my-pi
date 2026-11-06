@@ -5,7 +5,10 @@
 provider "orcarouter" {
 	default-model "orcarouter/fusion"
 	env "ORCA_KEY"
-	discovery label="OrcaRouter"
+	discovery label="OrcaRouter" allow-unauthenticated=#true
+	// The public /v1/models roster is the source of truth: rows it retires
+	// stop shipping with the next generated bundle and disappear at runtime.
+	dynamic-models-authoritative #true
 
 	// Strict tool schemas are unverified across routed upstreams; the axis
 	// stays at its default until a live tool-call check confirms wire behavior.

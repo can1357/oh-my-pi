@@ -8254,11 +8254,10 @@ const ORCAROUTER_BASE_URL = "https://api.orcarouter.ai/v1";
 
 /**
  * OrcaRouter rows follow OpenRouter's roster shape: `architecture.input_modalities`,
- * `pricing` (per-token decimal strings), and `supported_parameters`, where the
- * `reasoning`/`include_reasoning` parameters mark a thinking model. A bundled
- * reference stays canonical for rows the bundle ships; the live fields fill the
- * gaps for rows that appear without one, so a newly routed model is not exposed
- * as text-only and non-reasoning until the next bundle ships.
+ * `pricing` (per-token decimal strings), and `supported_parameters`. Live fields
+ * win for what the public roster actually reports (a bundled row with neutral
+ * zero cost must not stay free once the roster prices it), while bundled
+ * reference values survive for everything the roster leaves out.
  */
 function mapOrcaRouterModel(
 	entry: OpenAICompatibleModelRecord,
@@ -8266,19 +8265,24 @@ function mapOrcaRouterModel(
 	reference: ModelSpec<"openai-responses"> | undefined,
 ): ModelSpec<"openai-responses"> {
 	const mapped = mapWithBundledReference(entry, defaults, reference);
-	if (reference) return mapped;
-
-	const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
 	const parameters = Array.isArray(entry.supported_parameters)
-		? entry.supported_parameters.filter((item): item is string => typeof item === "string")
+		? entry.supported_parameters.filter((param): param is string => typeof param === "string")
 		: [];
+	const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
 	const input = toInputCapabilities(architecture?.input_modalities);
 	const live = perTokenPricingCost(entry.pricing);
+	const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
 	return {
 		...mapped,
 		reasoning: parameters.includes("reasoning") || parameters.includes("include_reasoning") || mapped.reasoning,
+		// Nested `top_provider.max_completion_tokens` is the OpenRouter-shaped
+		// output ceiling; the root field is a secondary source.
+		maxTokens: toPositiveNumber(topProvider?.max_completion_tokens ?? entry.max_completion_tokens, mapped.maxTokens),
 		input: input.length > 0 ? input : mapped.input,
 		cost: live.input > 0 || live.output > 0 ? live : mapped.cost,
+		...(parameters.length > 0 && !parameters.includes("tools") && !parameters.includes("tool_choice")
+			? { supportsTools: false }
+			: {}),
 	};
 }
 
@@ -8297,6 +8301,10 @@ export function orcaRouterModelManagerOptions(
 		providerId: "orcarouter",
 		defaultBaseUrl: ORCAROUTER_BASE_URL,
 		config,
+		// The public `/v1/models` roster is the source of truth: rows it retires
+		// are dropped from static-only catalogs instead of lingering selectable
+		// until a request fails.
+		dynamicModelsAuthoritative: true,
 		filterModel: entry =>
 			entry.id !== "auto" &&
 			Array.isArray(entry.supported_endpoint_types) &&
