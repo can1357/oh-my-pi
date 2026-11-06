@@ -98,7 +98,7 @@ export function currentDb(): Database | null {
 
 const BACKFILL_COMPLETE = "complete";
 const BACKFILL_PENDING = "pending";
-const USER_MESSAGES_BACKFILL_KEY = "user_messages_v9";
+const USER_MESSAGES_BACKFILL_KEY = "user_messages_v10";
 const USER_MESSAGE_LINKS_REPAIR_KEY = "user_message_links_v1";
 // v2: the parser also records the served service tier per message, so a full
 // re-parse fills `service_tier` and re-derives ultrafast premium counts that the
@@ -1382,6 +1382,8 @@ export async function getDailyActivity(days = 371): Promise<DailyActivityPoint[]
  * - v9: stored judge prose (`prose` / `prose_hash`) for the frustration
  *   judge, so every session re-parses once to populate it. Verdicts live in
  *   `frustration_verdicts`, keyed by prose hash, which this reset never touches.
+ * - v10: excluded agent-attributed user-role messages, which diluted user
+ *   frustration rates and could be judged as user complaints.
  *
  * Existing `messages` rows are unaffected - `INSERT OR IGNORE` keeps them.
  */

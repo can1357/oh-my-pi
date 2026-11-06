@@ -706,6 +706,45 @@ describe("Factory Droid gemini wire — native replay policy", () => {
 		expect(contents[2].parts[0].functionResponse).toEqual({ id: "fc-1", name: "Read", response: { result: "body" } });
 	});
 
+	it("defaults a replayed native turn's role to model when stream chunks omit content.role", async () => {
+		const chunks = [
+			JSON.stringify({
+				candidates: [
+					{
+						content: {
+							parts: [
+								{ functionCall: { id: "fc-1", name: "Read", args: { path: "a" } }, thoughtSignature: "s" },
+							],
+						},
+						finishReason: "STOP",
+					},
+				],
+			}),
+		];
+		const first = await run(
+			{ messages: [{ role: "user", content: "go", timestamp: 1 }], tools },
+			chunks,
+			{ requestPolicy: argonPolicy },
+			argon(),
+		);
+		const call = first.result.content.find(block => block.type === "toolCall");
+		if (call?.type !== "toolCall") throw new Error("expected a tool call");
+		const { contents } = await run(
+			{
+				messages: [{ role: "user", content: "go", timestamp: 1 }, first.result, toolResult(call.id, "body")],
+				tools,
+			},
+			undefined,
+			{ requestPolicy: argonPolicy },
+			argon(),
+		);
+		expect(contents[1]).toEqual({
+			role: "model",
+			parts: [{ functionCall: { id: "fc-1", name: "Read", args: { path: "a" } }, thoughtSignature: "s" }],
+		});
+		expect(contents[2].parts[0].functionResponse).toEqual({ id: "fc-1", name: "Read", response: { result: "body" } });
+	});
+
 	it("rebuilds a rewritten turn and stamps its unsigned calls", async () => {
 		const first = await run(
 			{ messages: [{ role: "user", content: "go", timestamp: 1 }], tools },

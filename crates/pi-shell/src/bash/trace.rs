@@ -208,6 +208,9 @@ pub struct Unit {
 	pub syntax:     Option<Arc<syntax::UnitSyntax>>,
 	/// Compiler-known wrapper bytes removed at the presentation boundary.
 	pub projection: u32,
+	/// The script a callout (`timeout`, `git`, `xargs`, …) submitted to run
+	/// its operands: host-generated, so the calling command stands for it.
+	pub callout:    bool,
 }
 
 impl Serialize for Unit {
@@ -227,6 +230,9 @@ impl Serialize for Unit {
 		}
 		if self.projection != 0 {
 			st.serialize_field("projection", &self.projection)?;
+		}
+		if self.callout {
+			st.serialize_field("callout", &true)?;
 		}
 		st.end()
 	}
@@ -289,6 +295,8 @@ struct UnitState {
 	kids:        Vec<Vec<u32>>,
 	/// Built from events alone, never announced: no node table.
 	placeholder: bool,
+	/// See [`Unit::callout`].
+	callout:     bool,
 }
 
 #[derive(Debug)]
@@ -637,6 +645,12 @@ impl Inner {
 					parent
 						.map_or_else(|| Arc::clone(syntax), |parent| Arc::new(syntax.with_parent(parent)))
 				});
+				// Only callouts submit scripts on descendant runs
+				// (`ShellApi::run_subshell`); a function body they reach keeps
+				// its definition's unit.
+				let callout = cu.parent.is_none()
+					&& cu.unit.root.is_none()
+					&& ev.run().is_some_and(|run| self.runs.contains(&run));
 				self.announce(
 					cu.id(),
 					ev.vpid,
@@ -647,6 +661,7 @@ impl Inner {
 					cu.nodes(),
 					syntax,
 					root && Some(ev.vpid) == self.root_vpid,
+					callout,
 				);
 			},
 			EventData::Diag { code, message } => {
@@ -805,6 +820,7 @@ impl Inner {
 				nodes:       Vec::new(),
 				kids:        Vec::new(),
 				placeholder: true,
+				callout:     false,
 			});
 			self.by_id.entry(ev.vpid).or_default().insert(key, u as u32);
 			u
@@ -840,6 +856,7 @@ impl Inner {
 		nodes: &[NodeInfo],
 		syntax: Option<Arc<syntax::UnitSyntax>>,
 		root: bool,
+		callout: bool,
 	) {
 		let mut mapped_nodes = Vec::new();
 		let mut exact_at = None;
@@ -899,7 +916,8 @@ impl Inner {
 					unit.segment == segment
 						&& !unit.placeholder
 						&& unit.line == line
-						&& (unit.id == Some(id) || function && unit.family == Some(family))
+						&& (unit.id == Some(id) && unit.callout == callout
+							|| function && unit.family == Some(family))
 						&& unit.syntax.as_ref().and_then(|syntax| syntax.parent)
 							== syntax.as_ref().and_then(|syntax| syntax.parent)
 				})
@@ -926,6 +944,7 @@ impl Inner {
 				unit.source = source.into();
 				unit.line = line;
 				unit.placeholder = false;
+				unit.callout = callout;
 			}
 			for (i, info) in nodes.iter().enumerate() {
 				match unit.nodes.get_mut(i) {
@@ -993,6 +1012,7 @@ impl Inner {
 				.collect(),
 			kids: nodes::statement_children(nodes, &parents),
 			placeholder: false,
+			callout,
 		});
 		self
 			.by_id
@@ -1061,6 +1081,7 @@ impl Inner {
 					nodes:      unit.nodes.clone(),
 					syntax:     unit.syntax.clone(),
 					projection: unit.projection,
+					callout:    unit.callout,
 				})
 				.collect(),
 			diags:             self.diags.clone(),
@@ -1129,6 +1150,9 @@ impl Serialize for UnitJson<'_> {
 		}
 		if unit.projection != 0 {
 			out.serialize_field("projection", &unit.projection)?;
+		}
+		if unit.callout {
+			out.serialize_field("callout", &true)?;
 		}
 		out.end()
 	}

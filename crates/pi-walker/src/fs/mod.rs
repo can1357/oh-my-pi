@@ -266,21 +266,29 @@ impl Fs {
 	/// the platform separator; URL roots join segment by segment with
 	/// [`pi_vfs::child_path`], which percent-encodes raw names.
 	pub fn join(&self, root: &Path, rel: &[u8]) -> PathBuf {
-		let mut path = root.to_path_buf();
+		let mut path = PathBuf::new();
+		self.join_into(&mut path, root, rel);
+		path
+	}
+
+	/// [`Self::join`] into `out`, replacing its contents and reusing its
+	/// allocation.
+	pub fn join_into(&self, out: &mut PathBuf, root: &Path, rel: &[u8]) {
+		out.clear();
+		out.push(root);
 		if rel.is_empty() {
-			return path;
+			return;
 		}
 		if pi_vfs::is_virtual_path(root) {
 			for segment in rel
 				.split(|&b| b == b'/')
 				.filter(|segment| !segment.is_empty())
 			{
-				path = pi_vfs::child_path(&path, &os_name(segment));
+				*out = pi_vfs::child_path(out, &os_name(segment));
 			}
 		} else {
-			path.push(os_name(rel));
+			out.push(os_name(rel));
 		}
-		path
 	}
 }
 
@@ -651,6 +659,50 @@ impl Session {
 			(Imp::Native(_), DirRepr::Native(h)) => native::stable_stamps(h, stamp),
 			_ => false,
 		}
+	}
+}
+
+/// Opens regular files by absolute path relative to their directory.
+///
+/// It keeps the directory open: consecutive files of one directory (a walk's
+/// output in path order) cost one single-component lookup each instead of a
+/// full path resolution.
+pub struct FileOpener {
+	session:  Session,
+	/// Path of `dir`.
+	dir_path: PathBuf,
+	dir:      Option<Dir>,
+}
+
+impl FileOpener {
+	/// An opener on `fs`.
+	pub fn new(fs: &Fs) -> Self {
+		Self { session: fs.session(), dir_path: PathBuf::new(), dir: None }
+	}
+
+	/// Opens the regular file at the absolute `path` like
+	/// [`Session::open_file`], through its directory.
+	///
+	/// # Errors
+	///
+	/// The directory's open error, or [`Session::open_file_at`]'s.
+	pub async fn open(&mut self, path: &Path) -> io::Result<File> {
+		let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+			return self.session.open_file(path).await.map(|(file, _)| file);
+		};
+		if self.dir.is_none() || self.dir_path.as_os_str() != parent.as_os_str() {
+			self.dir = None;
+			let dir = self.session.open_dir(parent).await?;
+			self.dir_path.clear();
+			self.dir_path.push(parent);
+			self.dir = Some(dir);
+		}
+		let dir = self.dir.as_ref().expect("opened above");
+		self
+			.session
+			.open_file_at(dir, name.as_encoded_bytes())
+			.await
+			.map(|(file, _)| file)
 	}
 }
 

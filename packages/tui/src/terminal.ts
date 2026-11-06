@@ -17,7 +17,7 @@ import {
 	parseGlyphProtocolReply,
 } from "./glyph-protocol";
 import { setKittyProtocolActive } from "./keys";
-import { encodeTspHelloQuery, parseTspMessage, TSP_PREFIX, type TspHello } from "./native/encode";
+import { encodeTspHelloQuery, parseTspMessage, TSP_OSC_PREFIX, TSP_PREFIX, type TspHello } from "./native/encode";
 import { StdinBuffer } from "./stdin-buffer";
 import {
 	isInsideTerminalMultiplexer,
@@ -45,13 +45,6 @@ const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
 const WINDOWS_TERMINAL_OSC11_POLL_MS = 30_000;
 /** How long a relayed ESC record waits for the rest of its sequence before acting as Escape (matches StdinBuffer). */
 const WIN32_RELAYED_ESCAPE_TIMEOUT_MS = 75;
-
-/**
- * Terminal → program TSP messages through a Windows ConPTY: its input parser
- * discards APC strings but passes OSC through, so Tern writes
- * `ESC ] 877 ; tsp;… ESC \` there instead of `ESC _ tsp;… ESC \`.
- */
-const TSP_OSC_PREFIX = `\x1b]877;${TSP_PREFIX.slice(2)}`;
 
 /** How long a TSP hello waits for its reply inside tmux, which answers DA1 itself. */
 const TSP_TMUX_HELLO_TIMEOUT_MS = 1000;
