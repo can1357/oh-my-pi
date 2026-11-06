@@ -51,6 +51,7 @@ import {
 	splitPathAndSelPreferringLiteral,
 } from "./tools/path-utils";
 import type { TodoPhase, TodoStatus } from "@oh-my-pi/pi-tui/tools/todo";
+import { errorMessage } from "./slash-commands/helpers/parse";
 import type { TodoCommitOptions, TodoPhasesUpdate } from "./tools/todo-backend";
 
 /** Phase used for Cursor-owned tasks with no local phase grouping. */
@@ -1095,7 +1096,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 *   the list committed as of its slot.
 	 */
 	#todoCommitRefused(result: ToolResultMessage, error: unknown): void {
-		const message = error instanceof Error ? error.message : String(error);
+		const message = errorMessage(error);
 		this.options.reportTodoRefusal?.(message);
 		const commit = this.options.commitTodoPhases;
 		if (!commit) return;
@@ -1113,7 +1114,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			},
 			(persistError: unknown) => {
 				logger.warn("Could not persist the committed todo list after a refused mirror", {
-					error: persistError instanceof Error ? persistError.message : String(persistError),
+					error: errorMessage(persistError),
 				});
 			},
 		);

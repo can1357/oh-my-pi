@@ -1,6 +1,7 @@
 import { sanitizeDisplayLine } from "@oh-my-pi/pi-tui/overlays/extensions/display-text";
 import type { TodoOperation, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import type { ExtensionContext } from "../extensibility/extensions/types";
+import { errorMessage } from "../slash-commands/helpers/parse";
 import type { TodoParams } from "./todo";
 
 /** Id of omp's built-in todo list. Reserved: extensions cannot register it. */
@@ -16,8 +17,8 @@ export const TODO_BACKEND_NOTICE_SOURCE = "todo-backend";
  * Text an extension or the user supplied (a backend id or label, a thrown error) as one
  * display-safe line. It reaches notices, `/todo` errors and tool results, which render it as is.
  */
-export function todoBackendText(value: unknown): string {
-	return sanitizeDisplayLine(value instanceof Error ? value.message : String(value));
+export function sanitizeTodoBackendText(value: unknown): string {
+	return sanitizeDisplayLine(errorMessage(value));
 }
 
 /**
@@ -83,6 +84,11 @@ export interface ActiveTodoBackend {
 
 /** What a commit sets the list to: a list, or an updater run on the committed list (`undefined` declines). */
 export type TodoPhasesUpdate = TodoPhase[] | ((current: TodoPhase[]) => TodoPhase[] | undefined);
+
+/** The list `update` sets when the committed list is `current`; `undefined` when it declines. */
+export function resolveTodoUpdate(update: TodoPhasesUpdate, current: TodoPhase[]): TodoPhase[] | undefined {
+	return typeof update === "function" ? update(current) : update;
+}
 
 export interface TodoCommitOptions {
 	/** Record the entry only: the bridged `todo` call already updated the list and reached `apply` (eval bridge). */

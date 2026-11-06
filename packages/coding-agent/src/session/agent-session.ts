@@ -3689,7 +3689,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#admittedSubmissionCount++;
 		try {
 			if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
-			if (!this.hasPendingDeferredExtensions) this.#todoWrites.resolveBackend();
+			if (!this.hasPendingDeferredExtensions) this.#todoWrites.allowBackendResolution();
 			return await this.#inLogContext(work);
 		} finally {
 			if (--this.#admittedSubmissionCount === 0 && this.#admittedSubmissionsSettled) {
@@ -7609,7 +7609,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					},
 				)
 				// Extensions are bound (or failed to load): the todo backend can now resolve.
-				.then(() => this.#todoWrites.resolveBackend())
+				.then(() => this.#todoWrites.allowBackendResolution())
 				.finally(() => {
 					if (this.#deferredExtensionLoad === pending) this.#deferredExtensionLoad = undefined;
 				});

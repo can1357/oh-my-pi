@@ -4,14 +4,16 @@ import type { SettingsScope } from "../config/registry";
 import type { ExtensionRunner } from "../extensibility/extensions/runner";
 import { cfgTodoBackend } from "../tools/settings";
 import { getLatestTodoPhasesFromEntries, USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
+import { errorMessage } from "../slash-commands/helpers/parse";
 import {
 	type ActiveTodoBackend,
 	NATIVE_TODO_BACKEND_ID,
+	resolveTodoUpdate,
+	sanitizeTodoBackendText,
 	TODO_BACKEND_NOTICE_SOURCE,
 	type TodoCommitOptions,
 	type TodoPhasesUpdate,
 	type TodoWrite,
-	todoBackendText,
 } from "../tools/todo-backend";
 import type { SessionManager } from "./session-manager";
 import type { TodoTracker } from "./todo-tracker";
@@ -55,9 +57,9 @@ function isBackendId(id: string): boolean {
  * With native todos a write runs inline, as a plain list update. Once a non-native backend is
  * selected in the main session, writes run one at a time: each receives the backend resolved when
  * it starts (`undefined` = native todos) and a guard that fails once the list was reset or
- * reloaded. The backend resolves from `todo.backend` once {@link arm}ed and {@link resolveBackend}
- * allowed it, and again whenever the setting changes or the backend's extension is suspended or
- * resumed.
+ * reloaded. The backend resolves from `todo.backend` once {@link arm}ed and
+ * {@link allowBackendResolution} allowed it, and again whenever the setting changes or the
+ * backend's extension is suspended or resumed.
  */
 export class TodoWrites {
 	readonly #host: TodoWritesHost;
@@ -70,7 +72,7 @@ export class TodoWrites {
 	#requestedAvailable = false;
 	/** Set by {@link arm}; resolution stays dormant until then. */
 	#armed = false;
-	/** Set by {@link resolveBackend}: startup-deferred extensions are bound, so ids can be resolved. */
+	/** Set by {@link allowBackendResolution}: startup-deferred extensions are bound, so ids can be resolved. */
 	#resolvable = false;
 	/** Queued writes and resolutions not yet settled. Native writes run inline only at zero. */
 	#pending = 0;
@@ -103,7 +105,7 @@ export class TodoWrites {
 	 * subscribed its event listeners, so a fallback notice reaches the client. Resolves `todo.backend`
 	 * now unless it is native.
 	 */
-	resolveBackend(): void {
+	allowBackendResolution(): void {
 		if (!this.#armed || this.#resolvable) return;
 		this.#resolvable = true;
 		this.#observeSetting();
@@ -171,13 +173,13 @@ export class TodoWrites {
 	commit(update: TodoPhasesUpdate, options?: TodoCommitOptions): Promise<TodoPhase[] | undefined> {
 		const todo = this.#host.todo;
 		return this.run(async (active, guard) => {
-			const phases = typeof update === "function" ? update(todo.phases) : update;
+			const phases = resolveTodoUpdate(update, todo.phases);
 			if (phases === undefined) return undefined;
 			if (active && !options?.mirrored) {
 				try {
 					await active.replace(todo.clonePhases(phases));
 				} catch (error) {
-					throw new Error(`Todo backend "${active.label}" refused the edit: ${todoBackendText(error)}`, {
+					throw new Error(`Todo backend "${active.label}" refused the edit: ${sanitizeTodoBackendText(error)}`, {
 						cause: error,
 					});
 				}
@@ -246,7 +248,7 @@ export class TodoWrites {
 			} catch (error) {
 				this.#host.emitNotice(
 					"warning",
-					`Todo backend "${active.label}" did not take the todo list after the session changed: ${todoBackendText(error)}`,
+					`Todo backend "${active.label}" did not take the todo list after the session changed: ${sanitizeTodoBackendText(error)}`,
 					TODO_BACKEND_NOTICE_SOURCE,
 				);
 			}
@@ -260,7 +262,7 @@ export class TodoWrites {
 	async #ready(): Promise<void> {
 		if (!this.#armed) return;
 		if (!(await this.#host.bindDeferredExtensions())) return;
-		this.resolveBackend();
+		this.allowBackendResolution();
 	}
 
 	/** Count `work` in {@link #pending} until it settles. */
@@ -310,7 +312,7 @@ export class TodoWrites {
 		if (!definition) {
 			this.#host.emitNotice(
 				"warning",
-				`Todo backend "${todoBackendText(id)}" is not registered by any enabled extension; using native todos.`,
+				`Todo backend "${sanitizeTodoBackendText(id)}" is not registered by any enabled extension; using native todos.`,
 				TODO_BACKEND_NOTICE_SOURCE,
 			);
 			return;
@@ -321,18 +323,18 @@ export class TodoWrites {
 				throw new Error("create() did not return an object with apply() and replace()");
 			}
 			this.#active = {
-				label: todoBackendText(definition.label),
+				label: sanitizeTodoBackendText(definition.label),
 				apply: (op, params, next, signal) =>
 					runner.runTodoBackendCall(backendSignal => backend.apply(op, params, next, backendSignal), signal),
 				replace: (phases, signal) =>
 					runner.runTodoBackendCall(backendSignal => backend.replace(phases, backendSignal), signal),
 			};
 		} catch (error) {
-			const message = todoBackendText(error);
+			const message = sanitizeTodoBackendText(error);
 			logger.warn("Todo backend create failed", { id, error: message });
 			this.#host.emitNotice(
 				"warning",
-				`Todo backend "${todoBackendText(id)}" failed to start: ${message}; using native todos.`,
+				`Todo backend "${sanitizeTodoBackendText(id)}" failed to start: ${message}; using native todos.`,
 				TODO_BACKEND_NOTICE_SOURCE,
 			);
 		}
@@ -357,7 +359,7 @@ export async function commitTodoEdit<T extends { phases: TodoPhase[] }>(
 			return "phases" in result ? result.phases : undefined;
 		});
 	} catch (error) {
-		return { error: error instanceof Error ? error.message : String(error) };
+		return { error: errorMessage(error) };
 	}
 	const result = planned.result;
 	if (result && "error" in result) return { error: result.error };

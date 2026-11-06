@@ -13,7 +13,7 @@ import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 
 import todoDescription from "../prompts/tools/todo.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
-import { type ActiveTodoBackend, type TodoWriteGuard, todoBackendText } from "./todo-backend";
+import { type ActiveTodoBackend, type TodoWriteGuard, sanitizeTodoBackendText } from "./todo-backend";
 import type { SessionEntry } from "../session/session-entries";
 
 import { normalizePathLikeInput, resolveToCwd } from "./path-utils";
@@ -806,7 +806,7 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 					content: [
 						{
 							type: "text",
-							text: `Todo backend "${active.label}" failed to apply "${op}": ${todoBackendText(error)}. The todo list is unchanged.`,
+							text: `Todo backend "${active.label}" failed to apply "${op}": ${sanitizeTodoBackendText(error)}. The todo list is unchanged.`,
 						},
 					],
 					details: { op, phases: previousPhases, storage },

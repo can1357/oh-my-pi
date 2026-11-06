@@ -173,6 +173,7 @@ import type { ShakeMode } from "../session/shake-types";
 import { TodoListChangedError } from "../session/todo-writes";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { buildStaticInlineHint } from "../slash-commands/builtin-completions";
+import { errorMessage } from "../slash-commands/helpers/parse";
 import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
 import { type DictationTarget, MicCursor, type SttCallbacks, STTController, type SttState } from "../stt";
 import type { SpaceHoldHandler } from "@oh-my-pi/pi-tui/space-hold";
@@ -5176,7 +5177,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					// The list was reset or reloaded meanwhile; the new list reconciles on its own.
 					if (error instanceof TodoListChangedError) return;
 					this.#todoReconcileRefusedKey = nextKey;
-					this.showWarning(error instanceof Error ? error.message : String(error));
+					this.showWarning(errorMessage(error));
 				},
 			)
 			.finally(() => {

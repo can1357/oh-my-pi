@@ -8,6 +8,7 @@ import { getLatestTodoPhasesFromEntries, USER_TODO_EDIT_CUSTOM_TYPE } from "@oh-
 import { type TodoPhase, todoToolRenderer } from "@oh-my-pi/pi-tui/tools/todo";
 import { buildSessionContext } from "../src/session/session-context";
 import type { SessionEntry } from "../src/session/session-entries";
+import { resolveTodoUpdate } from "@oh-my-pi/pi-coding-agent/tools/todo-backend";
 
 const TIMESTAMP = "2026-07-25T00:00:00.000Z";
 
@@ -30,7 +31,7 @@ function newHarness(initial: TodoPhase[] = []): Harness {
 		tools: new Map(),
 		getTodoPhases: () => phases,
 		commitTodoPhases: async update => {
-			const next = typeof update === "function" ? update(phases) : update;
+			const next = resolveTodoUpdate(update, phases);
 			if (!next) return undefined;
 			phases = next;
 			entries.push({

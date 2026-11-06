@@ -6,6 +6,7 @@ import { TodoCommandController } from "@oh-my-pi/pi-coding-agent/modes/controlle
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { resolveTodoUpdate, type TodoPhasesUpdate } from "@oh-my-pi/pi-coding-agent/tools/todo-backend";
 
 function createContext(cwd: string, phases: TodoPhase[]): InteractiveModeContext {
 	return {
@@ -14,9 +15,7 @@ function createContext(cwd: string, phases: TodoPhase[]): InteractiveModeContext
 		},
 		session: {
 			getTodoPhases: () => phases,
-			commitTodoPhases: vi.fn(async (update: TodoPhase[] | ((current: TodoPhase[]) => TodoPhase[] | undefined)) =>
-				typeof update === "function" ? update(phases) : update,
-			),
+			commitTodoPhases: vi.fn(async (update: TodoPhasesUpdate) => resolveTodoUpdate(update, phases)),
 		},
 		sessionManager: {
 			appendMessage: vi.fn(),
