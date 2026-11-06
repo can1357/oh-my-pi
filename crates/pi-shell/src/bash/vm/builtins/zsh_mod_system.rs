@@ -448,7 +448,7 @@ fn syserror(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 	{
 		return done(1);
 	}
-	let pfx = ops.arg(b'p').map(<[u8]>::to_vec).unwrap_or_default();
+	let pfx = ops.arg(b'p').map_or_default(<[u8]>::to_vec);
 	let num = match args.first() {
 		None => match ctx.record(Key::Misc(MiscKey::ZshErrno))? {
 			Some(Record::Misc(v)) => atoi(&v),
@@ -462,16 +462,13 @@ fn syserror(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 	};
 	let mut text = pfx;
 	text.extend_from_slice(strerror_of(num).as_bytes());
-	match errvar {
-		Some(var) => {
-			if let Err(d) = setsparam(ctx, &var, &text)? {
-				return zerr(ctx, d);
-			}
-		},
-		None => {
-			text.push(b'\n');
-			ctx.out_fd(2, &text);
-		},
+	if let Some(var) = errvar {
+		if let Err(d) = setsparam(ctx, &var, &text)? {
+			return zerr(ctx, d);
+		}
+	} else {
+		text.push(b'\n');
+		ctx.out_fd(2, &text);
 	}
 	done(0)
 }
@@ -514,16 +511,17 @@ fn sysread(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 	{
 		return done(1);
 	}
-	let mut timeout_ns = None;
-	if let Some(t) = ops.arg(b't').map(<[u8]>::to_vec) {
+	let timeout_ns = if let Some(t) = ops.arg(b't').map(<[u8]>::to_vec) {
 		let ms = match matheval(ctx, &t)? {
 			Ok(Number::Float(d)) => (1000.0 * d) as i32,
 			Ok(Number::Int(l)) => (l as i32).wrapping_mul(1000),
 			Err(d) => return zerr(ctx, d),
 		};
 		// `poll` waits without end for a negative timeout.
-		timeout_ns = u64::try_from(ms).ok().map(|ms| ms * 1_000_000);
-	}
+		u64::try_from(ms).ok().map(|ms| ms * 1_000_000)
+	} else {
+		None
+	};
 	let read = FdProbe::ReadOnce { fd: infd, max: bufsize, timeout_ns };
 	let data = match fd_probe(ctx, read)? {
 		FdAnswer::Read { timed_out: true, .. } => return done(4),
@@ -594,13 +592,14 @@ fn sysread(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 
 /// zsh `bin_syswrite`: status 0 written, 1 bad arguments, 2 write error.
 fn syswrite(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
-	let mut outfd = 1;
-	if let Some(a) = ops.arg(b'o').map(<[u8]>::to_vec) {
+	let outfd = if let Some(a) = ops.arg(b'o').map(<[u8]>::to_vec) {
 		let Some(fd) = getposint(ctx, &a) else {
 			return done(1);
 		};
-		outfd = fd;
-	}
+		fd
+	} else {
+		1
+	};
 	let countvar = ops.arg(b'c').map(<[u8]>::to_vec);
 	if let Some(v) = &countvar
 		&& !ident_ok(ctx, v)
@@ -698,17 +697,17 @@ fn sysopen(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 			rest = next;
 		}
 	}
-	let mut perms = 0o666;
-	if let Some(m) = ops.arg(b'm').map(<[u8]>::to_vec) {
+	let perms = if let Some(m) = ops.arg(b'm').map(<[u8]>::to_vec) {
 		let octal = m.iter().take_while(|c| (b'0'..=b'7').contains(c)).count();
 		if octal != m.len() || octal < 3 {
 			ctx.usage(format!("invalid mode {}", BStr::new(&m)));
 			return done(1);
 		}
-		perms = m
-			.iter()
-			.fold(0u32, |acc, &c| acc.wrapping_mul(8).wrapping_add(u32::from(c - b'0')));
-	}
+		m.iter()
+			.fold(0u32, |acc, &c| acc.wrapping_mul(8).wrapping_add(u32::from(c - b'0')))
+	} else {
+		0o666
+	};
 	let name = args.first().cloned().unwrap_or_default();
 	let path = absolute(&ctx.vp.cwd, &name);
 	let slot = explicit.map_or(FdSlot::Free(10), FdSlot::At);
@@ -745,16 +744,16 @@ enum Whence {
 
 /// zsh `bin_sysseek`: status 0, 1 bad arguments, 2 seek error.
 fn sysseek(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
-	let mut fd = 0;
-	if let Some(a) = ops.arg(b'u').map(<[u8]>::to_vec) {
+	let fd = if let Some(a) = ops.arg(b'u').map(<[u8]>::to_vec) {
 		let Some(n) = getposint(ctx, &a) else {
 			return done(1);
 		};
-		fd = n;
-	}
-	let mut whence = Whence::Set;
-	if let Some(w) = ops.arg(b'w').map(<[u8]>::to_vec) {
-		whence = if w.eq_ignore_ascii_case(b"current") || w == b"1" {
+		n
+	} else {
+		0
+	};
+	let whence = if let Some(w) = ops.arg(b'w').map(<[u8]>::to_vec) {
+		if w.eq_ignore_ascii_case(b"current") || w == b"1" {
 			Whence::Cur
 		} else if w.eq_ignore_ascii_case(b"end") || w == b"2" {
 			Whence::End
@@ -763,8 +762,10 @@ fn sysseek(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 		} else {
 			ctx.usage(format!("unknown argument to -w: {}", BStr::new(&w)));
 			return done(1);
-		};
-	}
+		}
+	} else {
+		Whence::Set
+	};
 	let text = args.first().cloned().unwrap_or_default();
 	let pos = match mathevali(ctx, &text)? {
 		Ok(p) => p,
@@ -803,7 +804,7 @@ pub fn math_def(name: &[u8]) -> Option<MathFunc> {
 ///
 /// # Errors
 /// `file descriptor out of range` for a negative fd.
-pub fn math_call(ex: &mut Expander<'_, '_>, name: &[u8], args: FuncArgs<'_>) -> X<Number> {
+pub fn math_call(ex: &Expander<'_, '_>, name: &[u8], args: FuncArgs<'_>) -> X<Number> {
 	let fd = match args {
 		FuncArgs::Numbers([Number::Int(l), ..]) if name == b"systell" => *l as i32,
 		FuncArgs::Numbers([Number::Float(d), ..]) if name == b"systell" => *d as i32,

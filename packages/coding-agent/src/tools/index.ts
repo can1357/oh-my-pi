@@ -23,7 +23,7 @@ import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import { LspTool } from "../lsp";
-import type { MCPManagerApi } from "../mcp";
+import type { MCPManagerApi, MCPToolScope } from "../mcp";
 import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import type { PlanModeState } from "../plan-mode/state";
@@ -383,8 +383,8 @@ export interface ToolSession {
 	getToolForEvalBridge?: (name: string) => AgentTool | undefined;
 	/** Current session context for eval-bridged tool execution. */
 	getToolContext?: () => AgentToolContext | undefined;
-	/** Names currently authorized for invocation through the eval bridge. */
-	getEvalBridgeToolNames?: () => readonly string[];
+	/** Tool names the eval description advertises as callable from cells; frozen with the cached prompt prefix. */
+	getAdvertisedEvalToolNames?: () => readonly string[];
 	/** Return whether a built-in tool is active in this turn's tool set. */
 	isToolActive?: (name: string) => boolean;
 	/** Update the active built-in tool predicate when a session changes tools mid-run. */
@@ -456,6 +456,8 @@ export interface ToolSession {
 	asyncJobManager?: AsyncJobManagerApi;
 	/** MCP manager visible to subagents without relying on the process-global singleton. */
 	mcpManager?: MCPManagerApi;
+	/** This session's view of {@link mcpManager}; subagents it spawns start from it. Unset for the owner. */
+	mcpToolScope?: MCPToolScope;
 	/** Local protocol root to propagate to nested subagents and eval-created agents. */
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Settings instance for passing to subagents */
