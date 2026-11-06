@@ -117,6 +117,10 @@
 - Out-of-credit provider errors now fail immediately instead of retrying for long periods; Retry works promptly once the account is funded.
 - DeepSeek-style `*** End` and `*** End Patch` markers are no longer written into files or truncate later edits
 - Composer prediction ghost text no longer vanishes when advisor messages arrive
+- Fixed quitting a long session leaving the resume hint in the middle of output: it is now the last line, and nothing keeps painting after omp exits. When the terminal stops reading during the quit, omp waits for it to take the terminal restore and the hint before exiting ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed quitting after a large write sometimes leaving the terminal or tmux window title set to omp's title instead of restoring the previous one ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed quitting or restarting a long session stalling while it wrote the whole un-retired transcript; a saved session, a signal exit or a terminal disconnect now writes only the newest 2,000 rows to scrollback, and `omp --resume` restores a saved session's older messages (notices such as errors older than those rows are not kept) ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed opening the external editor from a fullscreen view, such as `/annotate` or plan review, stalling for many seconds on a long session ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar)).
 
 ## [18.16.0] - 2026-11-02
 
@@ -204,14 +208,6 @@
 - Local dictation stops live previews when the speech model repeatedly cannot keep up, so final transcripts no longer wait behind repeated previews ([#17410](https://github.com/can1357/oh-my-pi/issues/17410)).
 - ACP clients now receive `_omp/compaction/start` and `_omp/compaction/end` notifications, including failures and cancellations, without requiring an active prompt. ([#16969](https://github.com/can1357/oh-my-pi/issues/16969); [#17384](https://github.com/can1357/oh-my-pi/pull/17384) by [@SAKANA-MOONLIGHT](https://github.com/SAKANA-MOONLIGHT)).
 - Fixed `cd` (and `pushd`/`popd`/`z`) failing with `command not found: __zsh_like_cd` in agent shells when `mise activate` or `zoxide init` installed wrapper functions: the shell snapshot now keeps the underscore-prefixed helper functions those wrappers call, instead of dropping every private-looking function ([#17448](https://github.com/can1357/oh-my-pi/pull/17448) by [@KamijoToma](https://github.com/KamijoToma))
-### Fixed
-
-- Fixed quitting a long session leaving the resume hint in the middle of output: it is now the last line, and nothing keeps painting after omp exits. When the terminal stops reading during the quit, omp waits for it to take the terminal restore and the hint before exiting ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
-- Fixed quitting after a large write sometimes leaving the terminal or tmux window title set to omp's title instead of restoring the previous one ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
-### Fixed
-
-- Fixed quitting or restarting a long session stalling while it wrote the whole un-retired transcript; a saved session, a signal exit or a terminal disconnect now writes only the newest 2,000 rows to scrollback, and `omp --resume` restores a saved session's older messages (notices such as errors older than those rows are not kept) ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar)).
-- Fixed opening the external editor from a fullscreen view, such as `/annotate` or plan review, stalling for many seconds on a long session ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar)).
 
 ## [18.14.2] - 2026-10-31
 

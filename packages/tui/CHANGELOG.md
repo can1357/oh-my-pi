@@ -28,6 +28,13 @@
 - Frame-rate ceiling (`frame-rate`: `setMaxFps`, `minFrameIntervalMs`) for rendering and animations; frames awaited by a keystroke keep 30 fps ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 - `setMotionEffects` (`motion-effects`) turns off decorative motion: status-line blink, brand fade, magic-keyword sweep and native `fx` spans ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 - `CompactTranscriptBlock` (`chrome/transcript-container`): consecutive blocks whose `isTranscriptBlockCompact()` is true render without blank rows between them, in terminal and native (TSP) surfaces ([#17997](https://github.com/can1357/oh-my-pi/pull/17997) by [@materemias](https://github.com/materemias))
+- Added optional `Terminal.settleOutput()`, which drains or drops queued output before the terminal is handed over; custom terminals may implement it ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
+- Added `writeStderrBehindTerminal()` (`@oh-my-pi/pi-tui/terminal-handoff`), which writes to stderr after the output a stopped terminal has not delivered yet ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
+- Added `TUI.setExitFlushProvider()`, which decides how an exiting stop (`stop()` without options, or a postmortem restore other than a signal) flushes history ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
+- Added `TUI.stop(options)` with `TUIStopOptions`: `{ maxRows }` caps an exiting stop's history flush, and `{ resuming: true }` marks a handoff that resumes with `start()` ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
+- Added `HistoryFlushOptions`, the flush shape a frame provider's `beginHistoryFlush()` receives ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
+- Added `EXIT_FLUSH_MAX_ROWS` (2,000), the row cap for an exiting stop's history flush ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
+- Added `TerminalFrameProvider.endHistoryFlush()`, which ends the stop-time flush so frames after `start()` retire by pressure again ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 
@@ -50,6 +57,14 @@
 - The LSP diagnostics card lists diagnostics per file, counts every file, and reports server failures instead of `No issues` ([#18106](https://github.com/can1357/oh-my-pi/pull/18106) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Closing an overlay that others opened over no longer makes them return focus to it ([#16476](https://github.com/can1357/oh-my-pi/pull/16476))
 - ASCII tree branches are two columns wide (`|-`, `'-`), so child rows align like Unicode trees ([#18103](https://github.com/can1357/oh-my-pi/pull/18103) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Fixed stopping the TUI after a large write leaving queued output to paint over the shell or editor that takes the terminal next ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed text containing a lone UTF-16 surrogate swallowing the next character on unix terminals; the surrogate now shows as `�` ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed quitting a session with a long un-retired transcript (for example after a fullscreen overlay held the screen) rendering the whole history before exit: `TUI.stop({ maxRows })` writes only the newest whole blocks that fit, or the newest block whole when it alone is taller ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
+- Fixed finished messages moving into terminal scrollback immediately, instead of staying live until the screen fills, after returning from a suspend or an external editor ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed opening the external editor or suspending from a fullscreen view, such as `/annotate`, stalling for many seconds on a long session ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed a long streamed reply being glued to the next message in scrollback ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a long message that scrolled partly off the screen being glued to the next message in scrollback ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
+- Fixed quitting with more inline images than the image budget allows writing the newest ones to scrollback as text instead of the oldest ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 
@@ -96,13 +111,6 @@
 
 - Added `FILE_NAME_COLOR`, `formatStyledPath` and `pathNameStart` to `render/render-utils` for paths in tool bodies and Tern file rows; `createGroupedRowStyler`, `groupedLinkTargets`, `fitGroupsToBudget`, `groupsByFile` and `isMatchRow` to `tools/grouped-file-output`; `splitReadQuery` to `tools/read`; and `HASHLINE_TAG_SUFFIX_RE` to `tools/hashline-format`. `classifyGroupedLines` reports each file header's full `displayPath` and `suffix`, and a `TranscriptStatusPart` without `color` keeps its already-styled text ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - `JobsPanelJob.caption`: the jobs sheet's detail pane shows it, muted, between the job's purpose and its command (`omp.jobs.caption`) ([#17649](https://github.com/can1357/oh-my-pi/pull/17649) by [@wolfiesch](https://github.com/wolfiesch))
-- Added optional `Terminal.settleOutput()`, which drains or drops queued output before the terminal is handed over; custom terminals may implement it ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
-- Added `writeStderrBehindTerminal()` (`@oh-my-pi/pi-tui/terminal-handoff`), which writes to stderr after the output a stopped terminal has not delivered yet ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
-- Added `TUI.setExitFlushProvider()`, which decides how an exiting stop (`stop()` without options, or a postmortem restore other than a signal) flushes history ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
-- Added `TUI.stop(options)` with `TUIStopOptions`: `{ maxRows }` caps an exiting stop's history flush, and `{ resuming: true }` marks a handoff that resumes with `start()` ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
-- Added `HistoryFlushOptions`, the flush shape a frame provider's `beginHistoryFlush()` receives ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
-- Added `EXIT_FLUSH_MAX_ROWS` (2,000), the row cap for an exiting stop's history flush ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
-- Added `TerminalFrameProvider.endHistoryFlush()`, which ends the stop-time flush so frames after `start()` retire by pressure again ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 
@@ -120,14 +128,6 @@
 - Fixed search and diagnostic file paths in Tern dropping the leading `/` of absolute paths and a folder's own `(…)` ending, and AST Edit diffs in Tern losing highlighting to the file's `#tag`; a file name ending in lowercase or other-length `#…` text keeps it ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Fixed a read of a URL drawing as dead text in the folded read row: its target is not a file path, so no link was built for it, and clicking the URL did nothing. The row (and each row of a grouped read) now links to the URL itself, gaining an `https://` scheme for a bare `www.` host ([#17598](https://github.com/can1357/oh-my-pi/pull/17598) by [@iacore](https://github.com/iacore))
 - Fixed replayed transcripts ignoring a registered `async-result` message renderer, so a replayed conversation rendered differently from the live one ([#17372](https://github.com/can1357/oh-my-pi/pull/17372) by [@AlexBrd999](https://github.com/AlexBrd999), from [#14484](https://github.com/can1357/oh-my-pi/pull/14484) by [@F0Rextasy](https://github.com/F0Rextasy); [#14131](https://github.com/can1357/oh-my-pi/issues/14131))
-- Fixed stopping the TUI after a large write leaving queued output to paint over the shell or editor that takes the terminal next ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
-- Fixed text containing a lone UTF-16 surrogate swallowing the next character on unix terminals; the surrogate now shows as `�` ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
-- Fixed quitting a session with a long un-retired transcript (for example after a fullscreen overlay held the screen) rendering the whole history before exit: `TUI.stop({ maxRows })` writes only the newest whole blocks that fit, or the newest block whole when it alone is taller ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
-- Fixed finished messages moving into terminal scrollback immediately, instead of staying live until the screen fills, after returning from a suspend or an external editor ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar)).
-- Fixed opening the external editor or suspending from a fullscreen view, such as `/annotate`, stalling for many seconds on a long session ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar)).
-- Fixed a long streamed reply being glued to the next message in scrollback ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
-- Fixed a long message that scrolled partly off the screen being glued to the next message in scrollback ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
-- Fixed quitting with more inline images than the image budget allows writing the newest ones to scrollback as text instead of the oldest ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.2] - 2026-10-31
 

@@ -14,6 +14,7 @@
 - Native shell is faster across parsing, functions, expansion, redirections, arithmetic, loops, and external command startup.
 - Sixel image output now uses a built-in encoder.
 - Shell spawn benchmarks now report median and p99 latency.
+- Added `TtyWriter.discard()`, which drops terminal output that was queued but not yet written; the chunk already being written still finishes ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
 
 ### Changed
 
@@ -49,6 +50,8 @@
 - An unanswered Wayland RemoteDesktop permission dialog now fails input with `Timeout` before the run deadline, sending nothing ([#17932](https://github.com/can1357/oh-my-pi/pull/17932) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed X11 takeover input stopping with `Cancelled` after you typed locally; Escape now stops computer use for the rest of the turn ([#17912](https://github.com/can1357/oh-my-pi/pull/17912) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed X11 background `el.type`/`el.press` raising the window and taking your keyboard; elements without GTK 3 focus now use takeover ([#17921](https://github.com/can1357/oh-my-pi/pull/17921) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `TtyWriter.flushSync()` and `stop()` sometimes waiting out their whole timeout after the queued output had already been written ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed `TtyWriter.stop()` occasionally hanging forever when the queue had already drained ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
 
 ## [18.16.0] - 2026-11-02
 
@@ -68,14 +71,6 @@
 
 - Fixed the bash tool's shell stopping with status 1 and no message after about 40 levels of nested functions, `eval` or `source` when the process may open only 1,024 files; a shell that runs out of open files now says so and names the limit to raise ([#17668](https://github.com/can1357/oh-my-pi/pull/17668) by [@sjawhar](https://github.com/sjawhar))
 - `bun check` now runs the Rust half when your branch commits a Rust change on a clean tree, skips it on a TypeScript-only branch even under `CI=true`, and prints one line saying which it did and why (`OMP_FORCE_RUST_TASKS=1` always runs it) ([#17628](https://github.com/can1357/oh-my-pi/pull/17628) by [@sjawhar](https://github.com/sjawhar))
-### Added
-
-- Added `TtyWriter.discard()`, which drops terminal output that was queued but not yet written; the chunk already being written still finishes ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
-
-### Fixed
-
-- Fixed `TtyWriter.flushSync()` and `stop()` sometimes waiting out their whole timeout after the queued output had already been written ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
-- Fixed `TtyWriter.stop()` occasionally hanging forever when the queue had already drained ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
 
 ## [18.14.2] - 2026-10-31
 
