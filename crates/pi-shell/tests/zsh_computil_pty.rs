@@ -7,6 +7,10 @@
 //! builtin and keeps what it set in globals, binds it as a `zle -C`
 //! widget to `^T`, types a command line and `^T`, kills the line and
 //! prints the globals. The end-to-end cases drive compsys (`compinit`).
+//!
+//! After each step the line editor has handled the keys and waits for
+//! more ([`Pty::zle_sync`]): completion functions print nothing while they
+//! work, for as long as the load on the machine makes them take.
 
 #![cfg(unix)]
 
@@ -14,15 +18,12 @@ mod pty_support;
 
 use std::{fs, io, path::Path, time::Duration};
 
-use pty_support::{Pty, Spawn, TIMEOUT, differential, have_real_zsh};
+use pty_support::{Pty, Spawn, ZLE_SYNC_SCRIPT, differential, have_real_zsh};
 
 /// The pause between keys.
 const KEY: Duration = Duration::from_millis(60);
-/// How long output must stay quiet before the screen is read (completion
-/// functions print nothing while they work).
-const QUIET: Duration = Duration::from_millis(1500);
-/// How long sourcing the rc file (`compinit`) may take.
-const RC_TIMEOUT: Duration = Duration::from_secs(120);
+/// The bound of waits that run `compinit` or completion functions.
+const SLOW: Duration = Duration::from_secs(120);
 
 /// `zsh -f -i` with a plain prompt and the rc file `rc`, in `cwd`.
 fn spawn(real: bool, rc: &str, cwd: &Path) -> Spawn {
@@ -34,26 +35,28 @@ fn spawn(real: bool, rc: &str, cwd: &Path) -> Spawn {
 	s.args(["-f", "-i"])
 		.env("PS1", "%# ")
 		.rc_file(".zshrc", rc)
+		.zle_sync()
 		.size(24, 80)
 		.cwd(cwd)
 }
 
-/// Type `text` key by key.
+/// Type `text` key by key and wait until the shell has handled it.
 fn keys(pty: &mut Pty, text: &str) -> io::Result<()> {
 	pty.type_keys(text, KEY)?;
-	pty.settle(QUIET, TIMEOUT)
+	pty.zle_sync(SLOW)
 }
 
 /// Run `drive` against both shells in `cwd` after sourcing the rc file;
 /// panic when the final screens differ.
 fn same_in(cwd: &Path, rc: &str, drive: impl Fn(&mut Pty) -> io::Result<()>) {
 	let run = |pty: &mut Pty| -> io::Result<()> {
-		pty.settle(QUIET, TIMEOUT)?;
+		pty.wait_raw(SLOW)?;
 		// `compinit` prints nothing while it works: wait for the marker
-		// (the echoed command line has it quoted apart).
-		pty.write(". ~/.zshrc; print -r -- RC''DONE\r")?;
-		pty.read_until("RCDONE", RC_TIMEOUT)?;
-		pty.settle(QUIET, TIMEOUT)?;
+		// (the echoed command line has it quoted apart), which also says the
+		// sync FIFO is open.
+		pty.write(format!(". ~/.zshrc; . ~/{ZLE_SYNC_SCRIPT}; print -r -- RC''DONE\r"))?;
+		pty.read_until("RCDONE", SLOW)?;
+		pty.zle_sync(SLOW)?;
 		keys(pty, "\x0c")?;
 		drive(pty)
 	};
@@ -240,7 +243,13 @@ fn compfiles_patterns_and_others() {
 fn compgroups_orders_groups() {
 	let rc =
 		widget("compgroups one two\ncompadd -J two zz yy\ncompadd -V one bb aa\ncompadd -J one cc");
-	same(&rc, |pty| keys(pty, "foo \x14\x14"));
+	// The second `^T` waits for the first completion: obash puts the
+	// terminal in canonical mode for a moment while it completes, and a
+	// `^T` typed then is the kernel's `VSTATUS` on macOS.
+	same(&rc, |pty| {
+		keys(pty, "foo \x14")?;
+		keys(pty, "\x14")
+	});
 }
 
 // ---- compsys end to end ----------------------------------------------------

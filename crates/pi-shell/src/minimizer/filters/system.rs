@@ -1008,7 +1008,12 @@ warning: unused import: `baz`
 	fn diff_output_reuses_unified_diff_compaction() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = ctx("diff", &cfg);
-		let mut input = String::from("--- a/a.rs\n+++ b/a.rs\n@@ -1,140 +1,140 @@\n");
+		// `diff -r` prints a binary file's line alone, with no header before it,
+		// and names that hold ` and ` themselves.
+		let mut input = String::from(
+			"Binary files x/salt and pepper.bin and y/salt and pepper.bin differ\n--- a/a.rs\n+++ \
+			 b/a.rs\n@@ -1,140 +1,140 @@\n",
+		);
 		for idx in 0..140 {
 			input.push_str("-old ");
 			input.push_str(&idx.to_string());
@@ -1020,10 +1025,11 @@ warning: unused import: `baz`
 		input.push_str(&"\n".repeat(primitives::WHOLE_OUTPUT_BYTES));
 		let out = filter(&ctx, &input, 0);
 		assert!(out.changed);
+		assert!(out.text.starts_with("y/salt and pepper.bin | Bin\n"), "{}", out.text);
 		assert!(out.text.contains("a.rs | 280"));
 		assert!(
 			out.text
-				.contains("1 file changed, 140 insertions(+), 140 deletions(-)")
+				.contains("2 files changed, 140 insertions(+), 140 deletions(-)")
 		);
 		assert!(out.text.contains("--- Changes ---"));
 		assert!(out.text.contains("-old 0"));

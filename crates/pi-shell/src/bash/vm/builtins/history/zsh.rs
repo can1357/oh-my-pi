@@ -243,31 +243,25 @@ pub fn set_size_param(
 ) -> Result<(), StoreError> {
 	if save {
 		let mut st = load_state(root, store, vp)?;
-		match v {
-			Some(v) => {
-				st.savehistsiz = v.max(0);
-				st.savehist_unset = false;
-			},
-			None => {
-				st.savehist_unset = true;
-				state::unset_var(root, store, vp, b"SAVEHIST", true);
-			},
+		if let Some(v) = v {
+			st.savehistsiz = v.max(0);
+			st.savehist_unset = false;
+		} else {
+			st.savehist_unset = true;
+			state::unset_var(root, store, vp, b"SAVEHIST", true);
 		}
 		Hist::save_state(&st, root, store, vp);
 		return Ok(());
 	}
 	let dups_first = zopt(root, store, vp, ZshOpt::Histexpiredupsfirst)?;
 	let mut h = load(root, store, vp)?;
-	match v {
-		Some(v) => {
-			h.st.histsiz = v.max(1);
-			h.st.histsiz_unset = false;
-			h.resize(dups_first);
-		},
-		None => {
-			h.st.histsiz_unset = true;
-			state::unset_var(root, store, vp, b"HISTSIZE", true);
-		},
+	if let Some(v) = v {
+		h.st.histsiz = v.max(1);
+		h.st.histsiz_unset = false;
+		h.resize(dups_first);
+	} else {
+		h.st.histsiz_unset = true;
+		state::unset_var(root, store, vp, b"HISTSIZE", true);
 	}
 	h.save(root, store, vp);
 	Ok(())
@@ -515,7 +509,7 @@ pub fn hbegin(
 			&mut r,
 		)?;
 		let mut o = o.clone();
-		if let Some(hf) = &set {
+		if let super::zfc::HistfileRestore::Set(hf) = &set {
 			o.histfile = hf.clone().filter(|f| !f.is_empty());
 		}
 		// zsh reads the file once its startup files ran (end of `init_misc`).
@@ -570,7 +564,7 @@ pub fn hbegin(
 	if stack.len() != stack0.len() {
 		super::zfc::stack_save(&stack, &mut k.root, cx.store, vp);
 	}
-	if let Some(hf) = set {
+	if let super::zfc::HistfileRestore::Set(hf) = set {
 		let var = hf.map(|v| state::Var::scalar(v, crate::bash::store::Attrs::NONE));
 		state::store_var(&mut k.root, cx.store, vp, b"HISTFILE", var, state::Level::Global);
 	}
@@ -811,7 +805,7 @@ fn exit_op(
 	let flags = HFILE_USE_OPTIONS | if signal { HFILE_NO_REWRITE } else { 0 };
 	let (_, set) = super::zfc::save_and_pop(h, stack, steps, o, 1, flags, ll, false, r)?;
 	let mut fo = o.clone();
-	if let Some(hf) = set {
+	if let super::zfc::HistfileRestore::Set(hf) = set {
 		fo.histfile = hf.filter(|f| !f.is_empty());
 	}
 	let mut l = Locks::default();
@@ -1069,7 +1063,7 @@ pub fn hend(
 		let ignorespace = zopt(&mut k.root, cx.store, vp, ZshOpt::Histignorespace)?;
 		let nofunctions = zopt(&mut k.root, cx.store, vp, ZshOpt::Histnofunctions)?;
 		let nostore = zopt(&mut k.root, cx.store, vp, ZshOpt::Histnostore)?;
-		let chline = line.as_ref().map(|l| l.chline.clone()).unwrap_or_default();
+		let chline = line.as_ref().map_or_default(|l| l.chline.clone());
 		let ignore = should_ignore(cx.store, vp, &chline, prog, ignorespace, nofunctions, nostore)?;
 		let f = Flags {
 			ignorespace,
@@ -1123,29 +1117,27 @@ pub fn hend(
 		}
 		let flag = ls.done;
 		let mut chline: Vec<u8> = ls.chline.to_vec();
-		let mut save: i32 = 1;
-		if chline.is_empty() {
-			save = 0;
+		let mut save: i32 = if chline.is_empty() {
+			0
 		} else {
-			if chline.last() == Some(&b'\n') {
-				if chline.len() > 1 {
-					chline.pop();
-				} else {
-					save = 0;
-				}
+			let only_newline = chline.as_slice() == b"\n";
+			if chline.len() > 1 && chline.last() == Some(&b'\n') {
+				chline.pop();
 			}
 			let nwords =
 				lex_words(&ls.chline, ls.comments).len() / 2 + usize::from(ls.chline.ends_with(b"\n"));
 			if nwords <= 1 && !ls.lex.had_comment {
-				save = 0;
+				0
 			} else if f.ignore {
-				save = -1;
+				-1
 			} else if hookret == 2 {
-				save = -2;
+				-2
 			} else if hookret != 0 {
-				save = -1;
+				-1
+			} else {
+				i32::from(!only_newline)
 			}
-		}
+		};
 		if flag & (HISTFLAG_DONE | HISTFLAG_RECALL) != 0 {
 			if flag & (HISTFLAG_DONE | HISTFLAG_RECALL) == HISTFLAG_DONE {
 				out.print = Some(BString::from(chline.clone()));
