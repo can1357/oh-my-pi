@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/usage` and `omp usage` now report LiteLLM key and user budgets (USD spent, cap, reset) for the built-in `litellm` provider and any provider declared with `discovery.type: litellm`, using the same API key inference sends; a key's concurrent budget windows (`budget_limits`) each get their own row when the gateway reports their spend; reports carry caveats that counters may lag enforcement and that team-scoped policy is not represented ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
+- `UsageProvider` gained `usesRequestKey` (probe with the pinned runtime/config key) and `defaultBaseUrl` (endpoint when the caller supplies none); `UsageApi.replaceConfiguredProviders` registers configuration-sourced usage providers below runtime extension overrides, and `UsageApi.replaceDisabledProviders` removes a provider's usage concept entirely while it is disabled: this process no longer probes it (local probes, per-credential reports, and a provider-scoped broker request are all skipped), and rows a broker returns in an unscoped aggregate are dropped ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
+- `UsageScope.budget` classifies a limit as a spend budget on the credential's own requests rather than an informational side-counter (no enforcement guarantee); LiteLLM rows with a finite cap set it so the status line can show their monthly window ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
+
+### Fixed
+
+- Merging two partial usage reports of one account (e.g. a key-only and a user-only LiteLLM success) now keeps both reports' notes instead of only the base report's ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
+
 ## [18.17.0] - 2026-11-06
 
 ### Added

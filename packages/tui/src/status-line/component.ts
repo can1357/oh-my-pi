@@ -2423,9 +2423,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 									: durationMs !== undefined && Math.abs(durationMs - 7 * 86_400_000) <= 60_000
 										? "7d"
 										: undefined;
+				// A monthly window is shown only when it is the session's quota: the
+				// provider's subscription (table above) or a limit the adapter classifies
+				// as a budget on the credential's requests. Monthly side-counters stay out.
+				const budget = "budget" in scope && scope.budget === true;
+				const monthlyWindow = windowId === "monthly" || windowId === "30d" || windowId === "1mo";
 				const windowClass =
-					subscriptionWindow ??
-					(monthlySubscriptionProvider && (windowId === "monthly" || windowId === "30d") ? "monthly" : undefined);
+					subscriptionWindow ?? ((monthlySubscriptionProvider || budget) && monthlyWindow ? "monthly" : undefined);
 				if (!windowClass) continue;
 
 				const modelId = normalizeUsageScopeValue("modelId" in scope ? scope.modelId : undefined);
@@ -2509,28 +2513,31 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			if (typeof limitId === "string" && limitId.startsWith("cursor:usd:individual-")) return 2;
 			return 3;
 		};
+		// Within the selected group, the most-used window of each class wins: a
+		// key budget at 25% must not hide its owner's 95% budget in the same window.
 		for (const candidate of selectedGroup.candidates) {
-			if (candidate.windowClass === "5h" && !fiveHour) {
+			const percent = candidate.fraction * 100;
+			if (candidate.windowClass === "5h" && (!fiveHour || percent > fiveHour.percent)) {
 				fiveHour = {
-					percent: candidate.fraction * 100,
+					percent,
 					resetMinutes:
 						typeof candidate.resetsAt === "number"
 							? Math.max(0, Math.round((candidate.resetsAt - now) / 60_000))
 							: undefined,
 				};
 			}
-			if (candidate.windowClass === "daily" && !daily) {
+			if (candidate.windowClass === "daily" && (!daily || percent > daily.percent)) {
 				daily = {
-					percent: candidate.fraction * 100,
+					percent,
 					resetMinutes:
 						typeof candidate.resetsAt === "number"
 							? Math.max(0, Math.round((candidate.resetsAt - now) / 60_000))
 							: undefined,
 				};
 			}
-			if (candidate.windowClass === "7d" && !sevenDay) {
+			if (candidate.windowClass === "7d" && (!sevenDay || percent > sevenDay.percent)) {
 				sevenDay = {
-					percent: candidate.fraction * 100,
+					percent,
 					resetHours:
 						typeof candidate.resetsAt === "number"
 							? Math.max(0, Math.round((candidate.resetsAt - now) / 3_600_000))
@@ -2539,9 +2546,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			}
 			if (candidate.windowClass === "monthly") {
 				const priority = cursorMonthlyPriority(candidate.id);
-				if (priority < monthlyPriority) {
+				if (priority < monthlyPriority || (priority === monthlyPriority && monthly && percent > monthly.percent)) {
 					monthly = {
-						percent: candidate.fraction * 100,
+						percent,
 						resetHours:
 							typeof candidate.resetsAt === "number"
 								? Math.max(0, Math.round((candidate.resetsAt - now) / 3_600_000))

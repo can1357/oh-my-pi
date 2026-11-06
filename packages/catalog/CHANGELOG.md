@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Moved `normalizeLiteLLMManagementBaseUrl` from `provider-models/openai-compat` to `wire/litellm`; import it from `@oh-my-pi/pi-catalog/wire/litellm` ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
+
 ## [18.17.0] - 2026-11-06
 
 ### Added

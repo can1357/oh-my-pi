@@ -1881,6 +1881,74 @@ describe("omp usage --json account policy", () => {
 	});
 });
 
+describe("omp usage LiteLLM aliases", () => {
+	let tempDir: TempDir;
+
+	beforeEach(() => {
+		tempDir = TempDir.createSync("@omp-usage-litellm-");
+		setAgentDir(tempDir.path());
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		__resetDirsFromEnvForTests();
+		closeModelCache();
+		tempDir.removeSync();
+	});
+
+	it("honors disabledProviders from the command's settings before contacting a gateway", async () => {
+		const probed: string[] = [];
+		const usageFetch = Object.assign(
+			async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+				const url = new URL(String(input));
+				probed.push(`${new Headers(init?.headers).get("authorization")} ${url.href}`);
+				if (!url.pathname.endsWith("/v2/user/info")) return new Response("not found", { status: 404 });
+				return Response.json({ user_id: url.hostname, spend: 25, max_budget: 100 });
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		await Bun.write(
+			path.join(tempDir.path(), "models.yml"),
+			JSON.stringify({
+				providers: {
+					"gateway-on": {
+						api: "openai-completions",
+						baseUrl: "https://on.example/v1",
+						apiKey: "fixture-on",
+						discovery: { type: "litellm" },
+					},
+					"gateway-off": {
+						api: "openai-completions",
+						baseUrl: "https://off.example/v1",
+						apiKey: "fixture-off",
+						discovery: { type: "litellm" },
+					},
+				},
+			}),
+		);
+		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), { usageFetch });
+		vi.spyOn(Settings, "loadReadOnly").mockResolvedValue(
+			Settings.isolated({ disabledProviders: ["gateway-off", "litellm"] }),
+		);
+		vi.spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(authStorage);
+		let stdout = "";
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			stdout += String(chunk);
+			return true;
+		});
+
+		try {
+			await runUsageCommand({ json: true, noExtensions: true });
+		} finally {
+			authStorage.close();
+		}
+
+		const payload = JSON.parse(stdout) as { reports: Array<{ provider: string }> };
+		expect(payload.reports.map(report => report.provider)).toEqual(["gateway-on"]);
+		expect(probed).toEqual(["Bearer fixture-on https://on.example/v2/user/info"]);
+	});
+});
+
 describe("omp usage reset", () => {
 	interface ResetRequest {
 		method: string;

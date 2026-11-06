@@ -13,6 +13,7 @@
  */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import {
 	type AuthCredential,
 	type AuthCredentialStore,
@@ -20,8 +21,15 @@ import {
 	SqliteAuthCredentialStore,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
+import type { UsageService } from "@oh-my-pi/pi-ai/auth/usage";
 import { usageCacheIdentity } from "@oh-my-pi/pi-ai/auth/usage-cache";
-import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
+import {
+	type UsageHistoryEntry,
+	type UsageLimit,
+	type UsageProvider,
+	type UsageReport,
+	usageReportSchema,
+} from "@oh-my-pi/pi-ai/usage";
 import { alibabaTokenPlanUsageProvider } from "@oh-my-pi/pi-ai/usage/alibaba-token-plan";
 import * as claudeUsage from "@oh-my-pi/pi-ai/usage/claude";
 import { serializeAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
@@ -1543,5 +1551,404 @@ describe("AuthStorage usage cache: organization scope identity", () => {
 		expect(key).not.toBe(usageCacheIdentity({ ...credential, activeOrganizationId: "workos-b" }));
 		expect(key).not.toBe(usageCacheIdentity({ ...credential, region: "eu" }));
 		expect(key).not.toBe(usageCacheIdentity({ ...credential, inferenceRegion: "global" }));
+	});
+});
+
+const GATEWAY_PROVIDER = "gateway-a";
+
+/** Persisted usage-cache payload: the report snapshot (or a retired `null`) and its freshness deadline. */
+const cachedReportPayloadSchema = type({ value: usageReportSchema.or("null"), expiresAt: "number" });
+
+function gatewayRow(): StoredAuthCredential {
+	return {
+		id: 1,
+		provider: GATEWAY_PROVIDER,
+		credential: { type: "api_key", key: "gateway-key" },
+		disabledCause: null,
+	};
+}
+
+function gatewayReport(provider: string, source: string, used: number): UsageReport {
+	return {
+		provider,
+		fetchedAt: Date.now(),
+		limits: [
+			{
+				id: `${provider}:budget`,
+				label: "Budget",
+				scope: { provider, shared: true },
+				amount: { used, limit: 100, usedFraction: used / 100, unit: "usd" },
+				status: "ok",
+			},
+		],
+		metadata: { accountId: "gateway-user", source },
+	};
+}
+
+interface CountingUsageProvider extends UsageProvider {
+	calls: number;
+}
+
+/** Gateway adapter whose reports carry a distinct source tag and spend counter. */
+function countingUsageProvider(source: string, used: number, cacheVersion?: number): CountingUsageProvider {
+	const usageProvider: CountingUsageProvider = {
+		id: GATEWAY_PROVIDER,
+		cacheVersion,
+		calls: 0,
+		async fetchUsage(params) {
+			usageProvider.calls += 1;
+			return gatewayReport(params.provider, source, used);
+		},
+	};
+	return usageProvider;
+}
+
+function gatewayReading(reports: UsageReport[] | null): { source: unknown; used: number | undefined } | undefined {
+	const report = reports?.find(candidate => candidate.provider === GATEWAY_PROVIDER);
+	return report && { source: report.metadata?.source, used: report.limits[0]?.amount.used };
+}
+
+describe("AuthStorage usage cache: configured usage providers", () => {
+	const rejectingUsageFetch = Object.assign(
+		async (): Promise<Response> => {
+			throw new Error("configured usage provider tests must not reach the network");
+		},
+		{ preconnect: fetch.preconnect },
+	);
+	const storages: AuthStorage[] = [];
+
+	afterEach(() => {
+		for (const storage of storages.splice(0)) storage.close();
+	});
+
+	/** Storage whose resolver knows only `builtIn` for the gateway id, so nothing else is enumerated. */
+	async function openStorage(store: AuthCredentialStore, builtIn?: UsageProvider): Promise<AuthStorage> {
+		const storage = new AuthStorage(store, {
+			usageFetch: rejectingUsageFetch,
+			usageProviderResolver: provider => (provider === GATEWAY_PROVIDER ? builtIn : undefined),
+		});
+		storages.push(storage);
+		await storage.credentials.reload();
+		return storage;
+	}
+
+	it("keeps a durable snapshot across first registration and identity-equal reloads", async () => {
+		// Unversioned, so its namespace is also the one a wrongful pre-registration invalidation would retire.
+		const configured = countingUsageProvider("configured", 10);
+		const store = makeStore([gatewayRow()]);
+		const previousProcess = await openStorage(store);
+		previousProcess.usage.replaceConfiguredProviders(new Map([[GATEWAY_PROVIDER, configured]]));
+		expect(gatewayReading(await previousProcess.usage.reports())).toEqual({ source: "configured", used: 10 });
+
+		const storage = await openStorage(store);
+		storage.usage.replaceConfiguredProviders(new Map([[GATEWAY_PROVIDER, configured]]));
+		expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "configured", used: 10 });
+		storage.usage.replaceConfiguredProviders(new Map([[GATEWAY_PROVIDER, configured]]));
+		expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "configured", used: 10 });
+		expect(configured.calls).toBe(1);
+	});
+
+	it("leaves a runtime adapter's snapshot alone when the configured entry beneath it changes", async () => {
+		const configuredA = countingUsageProvider("configured-a", 10);
+		const configuredB = countingUsageProvider("configured-b", 20);
+		const runtime = countingUsageProvider("runtime", 30);
+		const storage = await openStorage(makeStore([gatewayRow()]));
+		storage.usage.replaceConfiguredProviders(new Map([[GATEWAY_PROVIDER, configuredA]]));
+		storage.usage.setProvider(GATEWAY_PROVIDER, runtime);
+		expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "runtime", used: 30 });
+
+		storage.usage.replaceConfiguredProviders(new Map([[GATEWAY_PROVIDER, configuredB]]));
+		expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "runtime", used: 30 });
+		expect(runtime.calls).toBe(1);
+
+		// The shadowed replacement still took effect beneath the runtime adapter.
+		storage.usage.removeProvider(GATEWAY_PROVIDER);
+		expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "configured-b", used: 20 });
+		expect(configuredA.calls).toBe(0);
+	});
+
+	it.each([
+		["versioned", 1],
+		["unversioned", undefined],
+	] as const)(
+		"retires a shadowed %s configured adapter's own namespace so its successor cannot inherit it",
+		async (_label, version) => {
+			// A caches, then a runtime adapter with another version shadows it; the
+			// configured entry becomes B underneath. Once the override goes, B shares
+			// A's namespace and must probe rather than read A's still-fresh counters.
+			// An unversioned A must retire its own namespace, not the runtime's.
+			const configuredA = countingUsageProvider("configured-a", 10, version);
+			const configuredB = countingUsageProvider("configured-b", 20, version);
+			const runtime = countingUsageProvider("runtime", 30, 2);
+			const store = makeStore([gatewayRow()]);
+			// Mirror the SQLite store: a namespace is retired by key prefix, so rows of
+			// another version are untouched (the in-memory fallback expires every key).
+			store.deleteCachePrefix = prefix => {
+				for (const key of store.cache.keys()) if (key.startsWith(prefix)) store.cache.delete(key);
+			};
+			const storage = await openStorage(store);
+			storage.usage.replaceConfiguredProviders(new Map([[GATEWAY_PROVIDER, configuredA]]));
+			expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "configured-a", used: 10 });
+
+			storage.usage.setProvider(GATEWAY_PROVIDER, runtime);
+			expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "runtime", used: 30 });
+			storage.usage.replaceConfiguredProviders(new Map([[GATEWAY_PROVIDER, configuredB]]));
+			// The runtime adapter's snapshot survives the shadowed transition.
+			expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "runtime", used: 30 });
+			expect(runtime.calls).toBe(1);
+			expect(
+				[...store.cache.keys()].filter(key => key.startsWith(`usage_cache:report:2:${GATEWAY_PROVIDER}:`)),
+			).toHaveLength(1);
+
+			storage.usage.removeProvider(GATEWAY_PROVIDER);
+			expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "configured-b", used: 20 });
+			expect(configuredB.calls).toBe(1);
+		},
+	);
+
+	it("never serves a removed adapter's counters to a re-added adapter in the same namespace", async () => {
+		const configuredA = countingUsageProvider("configured-a", 10, 1);
+		const configuredB = countingUsageProvider("configured-b", 20, 1);
+		const storage = await openStorage(makeStore([gatewayRow()]));
+		storage.usage.replaceConfiguredProviders(new Map([[GATEWAY_PROVIDER, configuredA]]));
+		expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "configured-a", used: 10 });
+
+		storage.usage.replaceConfiguredProviders(new Map());
+		storage.usage.replaceConfiguredProviders(new Map([[GATEWAY_PROVIDER, configuredB]]));
+		expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "configured-b", used: 20 });
+		expect(configuredB.calls).toBe(1);
+	});
+
+	it("retires the outgoing adapter's namespace but reuses the arriving adapter's own snapshot", async () => {
+		const store = makeStore([gatewayRow()]);
+		// Mirror the SQLite store, which retires a namespace by key prefix.
+		store.deleteCachePrefix = prefix => {
+			for (const key of store.cache.keys()) if (key.startsWith(prefix)) store.cache.delete(key);
+		};
+		const configuredA = countingUsageProvider("configured-a", 10, 1);
+		const configuredB = countingUsageProvider("configured-b", 20, 2);
+		// Another process sharing the store has already cached the arriving adapter's report.
+		const peer = await openStorage(store);
+		peer.usage.replaceConfiguredProviders(new Map([[GATEWAY_PROVIDER, configuredB]]));
+		expect(gatewayReading(await peer.usage.reports())).toEqual({ source: "configured-b", used: 20 });
+
+		const storage = await openStorage(store);
+		storage.usage.replaceConfiguredProviders(new Map([[GATEWAY_PROVIDER, configuredA]]));
+		expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "configured-a", used: 10 });
+
+		storage.usage.replaceConfiguredProviders(new Map([[GATEWAY_PROVIDER, configuredB]]));
+		const reportKeys = [...store.cache.keys()].filter(key => key.startsWith("usage_cache:report:"));
+		expect(reportKeys.filter(key => key.startsWith(`usage_cache:report:1:${GATEWAY_PROVIDER}:`))).toEqual([]);
+		expect(reportKeys.filter(key => key.startsWith(`usage_cache:report:2:${GATEWAY_PROVIDER}:`))).toHaveLength(1);
+		expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "configured-b", used: 20 });
+		expect(configuredB.calls).toBe(1);
+	});
+
+	it("answers a probe that straddles a replacement with the successor, caching and recording nothing stale", async () => {
+		const store = makeStore([gatewayRow()]);
+		const recorded: UsageHistoryEntry[] = [];
+		store.recordUsageSnapshots = entries => {
+			recorded.push(...entries);
+		};
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<UsageReport | null>();
+		const outgoing: CountingUsageProvider = {
+			id: GATEWAY_PROVIDER,
+			cacheVersion: 1,
+			calls: 0,
+			async fetchUsage() {
+				outgoing.calls += 1;
+				started.resolve();
+				return release.promise;
+			},
+		};
+		const successor = countingUsageProvider("configured-b", 20, 1);
+		const storage = await openStorage(store);
+		storage.usage.replaceConfiguredProviders(new Map([[GATEWAY_PROVIDER, outgoing]]));
+		try {
+			const pending = storage.usage.reports();
+			await started.promise;
+			storage.usage.replaceConfiguredProviders(new Map([[GATEWAY_PROVIDER, successor]]));
+			release.resolve(gatewayReport(GATEWAY_PROVIDER, "configured-a", 10));
+
+			expect(gatewayReading(await pending)).toEqual({ source: "configured-b", used: 20 });
+			// Retired `null` tombstones may remain; no live snapshot may carry the outgoing adapter's report.
+			const cachedSources = [...store.cache]
+				.filter(([key]) => key.startsWith("usage_cache:report:"))
+				.flatMap(
+					([, entry]) => cachedReportPayloadSchema.assert(JSON.parse(entry.value)).value?.metadata?.source ?? [],
+				);
+			expect(cachedSources).toEqual(["configured-b"]);
+			expect(recorded.map(entry => entry.usedFraction)).toEqual([0.2]);
+			expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "configured-b", used: 20 });
+			expect([outgoing.calls, successor.calls]).toEqual([1, 1]);
+		} finally {
+			release.resolve(null);
+		}
+	});
+
+	it("hands a removed configured provider back to the resolver's adapter", async () => {
+		// Same cache version: only retiring the configured snapshot makes the fallback probe at all.
+		const builtIn = countingUsageProvider("built-in", 30, 1);
+		const configured = countingUsageProvider("configured", 10, 1);
+		const storage = await openStorage(makeStore([gatewayRow()]), builtIn);
+		storage.usage.replaceConfiguredProviders(new Map([[GATEWAY_PROVIDER, configured]]));
+		expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "configured", used: 10 });
+
+		storage.usage.replaceConfiguredProviders(new Map());
+		expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "built-in", used: 30 });
+		expect(builtIn.calls).toBe(1);
+	});
+
+	it("stops probing a removed configured provider that has no resolver adapter", async () => {
+		const configured = countingUsageProvider("configured", 10);
+		const storage = await openStorage(makeStore([gatewayRow()]));
+		storage.usage.replaceConfiguredProviders(new Map([[GATEWAY_PROVIDER, configured]]));
+		expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "configured", used: 10 });
+
+		storage.usage.replaceConfiguredProviders(new Map());
+		expect(gatewayReading(await storage.usage.reports())).toBeUndefined();
+		expect(configured.calls).toBe(1);
+	});
+
+	it("gives a disabled provider no usage at all, and re-enabling reuses its snapshot", async () => {
+		const builtIn = countingUsageProvider("built-in", 30, 1);
+		const runtime = countingUsageProvider("runtime", 40, 2);
+		const store = makeStore([gatewayRow()]);
+		const brokerHook = vi.fn(async (): Promise<UsageReport | null> => gatewayReport(GATEWAY_PROVIDER, "broker", 50));
+		store.getUsageReport = brokerHook;
+		const storage = await openStorage(store, builtIn);
+		// `report()` is the per-credential path health, rotation, and selection use; it is not on the public facade.
+		const usage = storage.usage as UsageService;
+		const row = gatewayRow();
+		expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "built-in", used: 30 });
+		const direct = await usage.report(GATEWAY_PROVIDER, row.credential);
+		expect(gatewayReading(direct ? [direct] : null)).toEqual({ source: "built-in", used: 30 });
+
+		// Disabled: not enumerated, not probed with its stored key, no usage concept for callers —
+		// including the per-credential path, which must neither serve the fresh snapshot nor ask the broker hook.
+		storage.usage.replaceDisabledProviders(new Set([GATEWAY_PROVIDER]));
+		expect(storage.usage.providerFor(GATEWAY_PROVIDER)).toBeUndefined();
+		expect(gatewayReading(await storage.usage.reports())).toBeUndefined();
+		expect(gatewayReading(await storage.usage.reports({ provider: GATEWAY_PROVIDER }))).toBeUndefined();
+		expect(await usage.report(GATEWAY_PROVIDER, row.credential)).toBeNull();
+		expect(await usage.report(GATEWAY_PROVIDER, { type: "oauth", access: "a", refresh: "r", expires: 0 })).toBeNull();
+		expect(brokerHook).not.toHaveBeenCalled();
+		// A runtime extension adapter for a disabled provider is gated the same way.
+		storage.usage.setProvider(GATEWAY_PROVIDER, runtime);
+		expect(gatewayReading(await storage.usage.reports())).toBeUndefined();
+		storage.usage.removeProvider(GATEWAY_PROVIDER);
+		expect(runtime.calls).toBe(0);
+
+		// Re-enabled: the cached snapshot answers without a new probe.
+		storage.usage.replaceDisabledProviders(new Set());
+		expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "built-in", used: 30 });
+		expect(builtIn.calls).toBe(1);
+	});
+
+	it("drops a broker's report for a disabled provider", async () => {
+		const store = makeStore([gatewayRow()]);
+		store.fetchUsageReports = async () => [
+			gatewayReport(GATEWAY_PROVIDER, "broker", 50),
+			gatewayReport("anthropic", "broker", 60),
+		];
+		const storage = await openStorage(store);
+		expect((await storage.usage.reports())?.map(report => report.provider)).toEqual([GATEWAY_PROVIDER, "anthropic"]);
+
+		storage.usage.replaceDisabledProviders(new Set([GATEWAY_PROVIDER]));
+		expect((await storage.usage.reports())?.map(report => report.provider)).toEqual(["anthropic"]);
+		expect(await storage.usage.reports({ provider: GATEWAY_PROVIDER })).toEqual([]);
+	});
+
+	it("answers a provider-scoped poll for a disabled provider without asking the broker", async () => {
+		const store = makeStore([gatewayRow()]);
+		const asked: Array<string | undefined> = [];
+		const brokerHook = vi.fn(async (_signal?: AbortSignal, provider?: string): Promise<UsageReport[] | null> => {
+			asked.push(provider);
+			return [gatewayReport(GATEWAY_PROVIDER, "broker", 50)];
+		});
+		store.fetchUsageReports = brokerHook;
+		const storage = await openStorage(store);
+		storage.usage.replaceDisabledProviders(new Set([GATEWAY_PROVIDER]));
+
+		expect(await storage.usage.reports({ provider: GATEWAY_PROVIDER })).toEqual([]);
+		expect(asked).toEqual([]);
+
+		// An unscoped poll still asks the broker, which cannot exclude providers; its row is dropped here.
+		expect(gatewayReading(await storage.usage.reports())).toBeUndefined();
+		expect(brokerHook).toHaveBeenCalledTimes(1);
+		expect(asked).toEqual([undefined]);
+	});
+
+	it("discards a probe that straddles disabling without caching or recording it", async () => {
+		const store = makeStore([gatewayRow()]);
+		const recorded: UsageHistoryEntry[] = [];
+		store.recordUsageSnapshots = entries => {
+			recorded.push(...entries);
+		};
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<UsageReport | null>();
+		const builtIn: CountingUsageProvider = {
+			id: GATEWAY_PROVIDER,
+			cacheVersion: 1,
+			calls: 0,
+			async fetchUsage() {
+				builtIn.calls += 1;
+				started.resolve();
+				return release.promise;
+			},
+		};
+		const storage = await openStorage(store, builtIn);
+		try {
+			const pending = storage.usage.reports();
+			await started.promise;
+			storage.usage.replaceDisabledProviders(new Set([GATEWAY_PROVIDER]));
+			release.resolve(gatewayReport(GATEWAY_PROVIDER, "built-in", 10));
+
+			expect(gatewayReading(await pending)).toBeUndefined();
+			const cachedSources = [...store.cache]
+				.filter(([key]) => key.startsWith("usage_cache:report:"))
+				.flatMap(
+					([, entry]) => cachedReportPayloadSchema.assert(JSON.parse(entry.value)).value?.metadata?.source ?? [],
+				);
+			expect(cachedSources).toEqual([]);
+			expect(recorded).toEqual([]);
+		} finally {
+			release.resolve(null);
+		}
+	});
+
+	it("keeps the disabled set across a store swap", async () => {
+		const builtIn = countingUsageProvider("built-in", 30, 1);
+		const storage = await openStorage(makeStore([gatewayRow()]), builtIn);
+		storage.usage.replaceDisabledProviders(new Set([GATEWAY_PROVIDER]));
+
+		await storage.replaceStore(makeStore([gatewayRow()]));
+		expect(gatewayReading(await storage.usage.reports())).toBeUndefined();
+		expect(builtIn.calls).toBe(0);
+	});
+
+	it("copies the registration map, so later caller mutations change nothing", async () => {
+		const configuredA = countingUsageProvider("configured-a", 10);
+		const configuredB = countingUsageProvider("configured-b", 20);
+		const storage = await openStorage(makeStore([gatewayRow()]));
+		const registrations = new Map<string, UsageProvider>([[GATEWAY_PROVIDER, configuredA]]);
+		storage.usage.replaceConfiguredProviders(registrations);
+		registrations.set(GATEWAY_PROVIDER, configuredB);
+		registrations.set("gateway-b", configuredB);
+
+		expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "configured-a", used: 10 });
+		expect(configuredB.calls).toBe(0);
+		expect(storage.usage.providerFor("gateway-b")).toBeUndefined();
+	});
+
+	it("carries configured adapters across a store swap", async () => {
+		const configured = countingUsageProvider("configured", 10);
+		const storage = await openStorage(makeStore([gatewayRow()]));
+		storage.usage.replaceConfiguredProviders(new Map([[GATEWAY_PROVIDER, configured]]));
+
+		await storage.replaceStore(makeStore([gatewayRow()]));
+		expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "configured", used: 10 });
+		expect(configured.calls).toBe(1);
 	});
 });

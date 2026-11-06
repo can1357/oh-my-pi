@@ -90,6 +90,9 @@ function mergeUsageReportGroup(reports: UsageReport[]): UsageReport {
 	const mergedLimits = [...base.limits];
 	const limitIds = new Set(mergedLimits.map(limit => limit.id));
 	const mergedMetadata: Record<string, unknown> = { ...base.metadata };
+	// Partial successes of one owner (a key-only report racing a user-only one)
+	// each carry caveats that still apply once their limits are merged.
+	const mergedNotes = new Set<string>(base.notes ?? []);
 	let fetchedAt = base.fetchedAt;
 
 	for (const report of sorted.slice(1)) {
@@ -100,6 +103,7 @@ function mergeUsageReportGroup(reports: UsageReport[]): UsageReport {
 				mergedLimits.push(limit);
 			}
 		}
+		for (const note of report.notes ?? []) mergedNotes.add(note);
 		if (report.metadata) {
 			for (const [key, value] of Object.entries(report.metadata)) {
 				if (mergedMetadata[key] === undefined) {
@@ -113,6 +117,7 @@ function mergeUsageReportGroup(reports: UsageReport[]): UsageReport {
 		...base,
 		fetchedAt,
 		limits: mergedLimits,
+		...(mergedNotes.size > 0 ? { notes: [...mergedNotes] } : {}),
 		metadata: Object.keys(mergedMetadata).length > 0 ? mergedMetadata : undefined,
 	};
 }

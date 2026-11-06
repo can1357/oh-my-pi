@@ -56,6 +56,13 @@ export interface UsageScope {
 	shared?: boolean;
 	/** Stable identity shared by routing-specific copies of one upstream quota. */
 	sharedGroup?: string;
+	/**
+	 * This window is a spend budget on the credential's own requests (a gateway
+	 * cap), not an informational side-counter such as an overage meter or
+	 * billing summary, so compact surfaces may show it even when monthly. It
+	 * says nothing about how or whether the upstream enforces the cap.
+	 */
+	budget?: boolean;
 }
 
 /** Normalized limit entry for a single window or quota bucket. */
@@ -315,6 +322,7 @@ export const usageScopeSchema = type({
 	"windowId?": "string",
 	"shared?": "boolean",
 	"sharedGroup?": "string",
+	"budget?": "boolean",
 });
 
 export const usageLimitSchema = type({
@@ -435,6 +443,14 @@ export interface UsageProvider {
 	retainLastGoodOnFailure?: boolean;
 	/** Provider-specific cool-down after a failed refresh. Defaults to the shared short backoff. */
 	failureBackoffMs?: number;
+	/**
+	 * Opt aggregate collection into the provider's pinned request key (runtime
+	 * `--api-key`, then config `apiKey`) ahead of stored and env credentials, so
+	 * usage follows the credential inference actually sends.
+	 */
+	usesRequestKey?: boolean;
+	/** Endpoint used when the caller supplies none; resolved before cache lookup so it partitions reports. */
+	defaultBaseUrl?(provider: Provider): string | undefined;
 }
 
 /** Request context used when ranking usage for a specific model. */

@@ -59,6 +59,7 @@ import {
 	mergeCopilotApiHeaders,
 	parseGitHubCopilotApiKey,
 } from "../wire/github-copilot";
+import { normalizeLiteLLMManagementBaseUrl } from "../wire/litellm";
 import {
 	SINGULARITYAPI_DEV_API_BASE_URL,
 	SINGULARITYAPI_TECH_API_BASE_URL,
@@ -5689,22 +5690,6 @@ function warnLiteLLMMetadataFallback(managementBaseUrl: string, failure: LiteLLM
 /** Exclude only known non-conversational modes; unknown and non-string modes remain selectable for aliases. */
 export function isSelectableLiteLLMModelMode(mode: unknown): boolean {
 	return typeof mode !== "string" || !isExcludedDiscoveryMode("litellm", mode);
-}
-
-export function normalizeLiteLLMManagementBaseUrl(baseUrl: string): string {
-	const trimmed = baseUrl.trim().replace(/\/+$/g, "");
-	if (!trimmed) {
-		return "";
-	}
-	try {
-		const parsed = new URL(trimmed);
-		const path = parsed.pathname.replace(/\/+$/g, "");
-		parsed.pathname = path.endsWith("/v1") ? path.slice(0, -3) || "/" : path || "/";
-		const normalized = `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
-		return normalized.endsWith("/") ? normalized.slice(0, -1) : normalized;
-	} catch {
-		return trimmed.replace(/\/v1$/, "");
-	}
 }
 
 function normalizeLiteLLMRuntimeBaseUrl(baseUrl: string): string {

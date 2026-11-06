@@ -240,8 +240,12 @@ export class UsageCache {
 		return baseUrl?.trim().replace(/\/+$/, "") ?? "";
 	}
 
-	#usageCacheProviderKey(provider: Provider): string {
-		const cacheVersion = this.#usageProviders(provider)?.cacheVersion;
+	#activeCacheVersion(provider: Provider): number | undefined {
+		return this.#usageProviders(provider)?.cacheVersion;
+	}
+
+	/** Namespace segment for one adapter version; `undefined` is a real value here (unversioned adapter), never a default. */
+	#usageCacheProviderKey(provider: Provider, cacheVersion: number | undefined): string {
 		return cacheVersion === undefined ? provider : `${cacheVersion}:${provider}`;
 	}
 
@@ -294,20 +298,26 @@ export class UsageCache {
 	}
 
 	reportKey(request: UsageRequestDescriptor): string {
-		const baseUrl = this.#normalizeUsageBaseUrl(request.baseUrl) || "default";
-		const identity = usageCacheIdentity(request.credential);
-		const providerKey = this.#usageCacheProviderKey(request.provider);
-		const cacheKey = `${USAGE_REPORT_KEY_PREFIX}${providerKey}:${baseUrl}:${identity}`;
+		const providerKey = this.#usageCacheProviderKey(request.provider, this.#activeCacheVersion(request.provider));
+		const cacheKey = this.#reportKeyFor(request, providerKey);
 		const cacheKeys = this.#usageReportCacheKeysByProvider.get(request.provider) ?? new Set<string>();
 		cacheKeys.add(cacheKey);
 		this.#usageReportCacheKeysByProvider.set(request.provider, cacheKeys);
 		return cacheKey;
 	}
 
+	#reportKeyFor(request: UsageRequestDescriptor, providerKey: string): string {
+		const baseUrl = this.#normalizeUsageBaseUrl(request.baseUrl) || "default";
+		return `${USAGE_REPORT_KEY_PREFIX}${providerKey}:${baseUrl}:${usageCacheIdentity(request.credential)}`;
+	}
+
 	reportsKey(requests: readonly UsageRequestDescriptor[]): string {
 		const snapshot = requests
 			.map(request => {
-				const providerKey = this.#usageCacheProviderKey(request.provider);
+				const providerKey = this.#usageCacheProviderKey(
+					request.provider,
+					this.#activeCacheVersion(request.provider),
+				);
 				return `${providerKey}:${this.#normalizeUsageBaseUrl(request.baseUrl) || "default"}:${usageCacheIdentity(request.credential)}`;
 			})
 			.sort()
@@ -341,7 +351,8 @@ export class UsageCache {
 	invalidateAfterReset(provider: Provider, baseUrl?: string, options?: { resetSpentCredentialId?: number }): void {
 		this.#recoveryEpochs.set(provider, this.recoveryEpoch(provider) + 1);
 		this.#bumpRefreshEpoch(provider);
-		if (!this.deletePrefix(`failure:report:${this.#usageCacheProviderKey(provider)}:`)) {
+		const providerKey = this.#usageCacheProviderKey(provider, this.#activeCacheVersion(provider));
+		if (!this.deletePrefix(`failure:report:${providerKey}:`)) {
 			const keys = new Set(this.#usageReportCacheKeysByProvider.get(provider));
 			for (const entry of this.#pool.entries(provider)) {
 				keys.add(this.reportKey(usageRequest(provider, buildUsageCredential(entry.credential), baseUrl)));
@@ -358,16 +369,31 @@ export class UsageCache {
 	invalidateForProvider(provider: Provider): void {
 		this.#epoch += 1;
 		this.#bumpRefreshEpoch(provider);
-		const expired = Date.now() - 1;
-		const prefix = `${USAGE_REPORT_KEY_PREFIX}${this.#usageCacheProviderKey(provider)}:`;
+		this.#expireNamespace(provider, this.#usageCacheProviderKey(provider, this.#activeCacheVersion(provider)));
+	}
+
+	/**
+	 * Drop the report snapshots a specific adapter version wrote for `provider`
+	 * without touching the adapter currently in effect. Used when a configured
+	 * adapter changes while a runtime override shadows it: the outgoing adapter
+	 * has no probe in flight, so no epoch moves, but its rows must not survive
+	 * for a successor sharing its namespace.
+	 */
+	retireNamespace(provider: Provider, cacheVersion: number | undefined): void {
+		this.#expireNamespace(provider, this.#usageCacheProviderKey(provider, cacheVersion));
+	}
+
+	#expireNamespace(provider: Provider, providerKey: string): void {
+		const prefix = `${USAGE_REPORT_KEY_PREFIX}${providerKey}:`;
 		if (this.deletePrefix(prefix)) return;
-		const cacheKeys = new Set(this.#usageReportCacheKeysByProvider.get(provider));
+		const expired = Date.now() - 1;
+		const cacheKeys = new Set<string>();
+		for (const cacheKey of this.#usageReportCacheKeysByProvider.get(provider) ?? []) {
+			if (cacheKey.startsWith(prefix)) cacheKeys.add(cacheKey);
+		}
 		for (const entry of this.#pool.entries(provider)) {
 			cacheKeys.add(
-				this.reportKey({
-					provider,
-					credential: buildUsageCredential(entry.credential),
-				}),
+				this.#reportKeyFor({ provider, credential: buildUsageCredential(entry.credential) }, providerKey),
 			);
 		}
 		for (const cacheKey of cacheKeys) {
@@ -387,7 +413,7 @@ export class UsageCache {
 		this.#epoch += 1;
 		this.#bumpRefreshEpoch(provider);
 		const prefix = provider
-			? `${USAGE_REPORT_KEY_PREFIX}${this.#usageCacheProviderKey(provider)}:`
+			? `${USAGE_REPORT_KEY_PREFIX}${this.#usageCacheProviderKey(provider, this.#activeCacheVersion(provider))}:`
 			: USAGE_REPORT_KEY_PREFIX;
 		if (!this.deletePrefix(prefix)) {
 			// Third-party stores may not support prefix deletion. Clear every active

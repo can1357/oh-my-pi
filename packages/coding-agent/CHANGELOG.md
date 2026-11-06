@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/usage` and `omp usage` show LiteLLM key and user budgets for the built-in `litellm` provider and for every models.yml provider declared with `discovery.type: litellm`, probed with that provider's configured key and endpoint without waiting for model discovery ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
+- `/usage` and `omp usage` no longer probe providers listed in `disabledProviders`, with any credential; re-enabling a provider reuses its cached snapshot ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
+
 ### Fixed
 
 - Subagents receive task instructions with their blank lines, Markdown hard breaks, and table spacing intact, whether given inline or via `taskFile`.

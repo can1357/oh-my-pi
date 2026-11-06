@@ -1309,6 +1309,24 @@ export interface UsageApi {
 	setProvider(provider: Provider, usageProvider: UsageProvider, apiKey?: string): void;
 	/** Remove a runtime usage provider override and restore configured/default resolution. */
 	removeProvider(provider: Provider): void;
+	/**
+	 * Replace the set of configuration-registered usage providers (e.g. custom
+	 * LiteLLM aliases declared in models.yml). Configured providers rank below
+	 * runtime overrides and above the injected/built-in resolver. Cached reports
+	 * of a provider whose effective adapter changes are retired; identity-equal
+	 * reloads and first registrations keep their snapshots.
+	 */
+	replaceConfiguredProviders(providers: ReadonlyMap<Provider, UsageProvider>): void;
+	/**
+	 * Replace the providers the host has disabled. A disabled provider has no
+	 * usage concept: {@link providerFor} returns undefined, so it is neither
+	 * enumerated nor probed by this process with any credential (local probes,
+	 * per-credential reports, and a provider-scoped broker request are all
+	 * skipped), reports no health, and its accounts are not listed as lacking
+	 * usage. Rows a broker returns in an unscoped aggregate are dropped. Cached
+	 * snapshots are kept for re-enabling.
+	 */
+	replaceDisabledProviders(providers: ReadonlySet<Provider>): void;
 }
 
 /** Credential and model-level health probes. */

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The status-line usage segment shows a monthly window for any provider whose limit is classified `scope.budget` (gateway spend caps), and when several limits share a window class it shows the most-used one instead of the first ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
+
 ## [18.17.0] - 2026-11-06
 
 ### Breaking Changes

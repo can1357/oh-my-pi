@@ -12,6 +12,7 @@ import { googleGeminiCliUsageProvider } from "./gemini";
 import { githubCopilotUsageProvider } from "./github-copilot";
 import { antigravityRankingStrategy, antigravityUsageProvider } from "./google-antigravity";
 import { kimiRankingStrategy, kimiUsageProvider } from "./kimi";
+import { litellmUsageProvider } from "./litellm";
 import { museCodeUsageProvider } from "./muse-code";
 import { minimaxCodeUsageProvider } from "./minimax-code";
 import { ollamaCloudUsageProvider, ollamaUsageProvider } from "./ollama";
@@ -49,6 +50,7 @@ export const DEFAULT_USAGE_PROVIDERS: readonly UsageProvider[] = [
 	devinUsageProvider,
 	charmHyperUsageProvider,
 	commandCodeUsageProvider,
+	litellmUsageProvider,
 ];
 
 const DEFAULT_USAGE_PROVIDER_MAP = new Map<Provider, UsageProvider>(
