@@ -76,6 +76,7 @@ import {
 	cfgBashInterceptorPatterns,
 	cfgBashPatterns,
 } from "../exec/settings";
+import { cfgDisplayShellVisualization } from "../modes/settings";
 import { cfgSkillful } from "../session/settings";
 import { cfgWorktreeClone, ovnfsCommand } from "../task/settings";
 import { nativeShapingOff, shapeToolText, shapingExperiment } from "../spotlight";
@@ -1072,10 +1073,15 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						onPreview: text => {
 							void report(text, { output: text, async: { state: "running", jobId, type: "bash" } });
 						},
-						onTrace: trace => {
-							liveTrace = trace;
-							void report(latestText, { output: latestText, async: { state: "running", jobId, type: "bash" } });
-						},
+						onTrace: cfgDisplayShellVisualization.get(this.session.settings)
+							? trace => {
+									liveTrace = trace;
+									void report(latestText, {
+										output: latestText,
+										async: { state: "running", jobId, type: "bash" },
+									});
+								}
+							: undefined,
 						onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 						streams,
 						onStart: probe => {
@@ -1183,14 +1189,22 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const sessionId = this.session.getSessionId?.() ?? undefined;
 		const sessionEnv = this.#sessionEnv(toolCallId);
 
-		// Extract a leading `cd <path> && ...` into cwd when the model ignores the
-		// cwd parameter. The scanner captures only a single path token and defers
-		// to the shell for anything else (redirects, extra args, shell expansion),
-		// so it never absorbs shell syntax like `cd /tmp 2>/dev/null && ...` into
-		// the structured cwd. Constrained to a top-level `&&` on the first line.
+		// Extract a leading `cd <path> && ...` / `cd <path>; ...` into cwd when the
+		// model ignores the cwd parameter. The scanner captures only a single path
+		// token and defers to the shell for anything else (redirects, extra args,
+		// shell expansion), so it never absorbs shell syntax like
+		// `cd /tmp 2>/dev/null && ...` into the structured cwd. `&&` always hoists:
+		// a missing directory fails early, as the shell would short-circuit. `;`
+		// runs the rest even when `cd` fails, so it hoists only onto an existing host
+		// directory; anything else (URL targets included) stays with the shell.
 		if (!cwd) {
 			const cd = extractLeadingCdTarget(command);
-			if (cd) {
+			const hoist =
+				cd?.separator === "&&" ||
+				(cd?.separator === ";" &&
+					!InternalUrlRouter.instance().canHandle(cd.path) &&
+					(await fs.promises.stat(resolveToCwd(cd.path, this.session.cwd)).catch(() => null))?.isDirectory());
+			if (cd && hoist) {
 				cwd = cd.path;
 				command = cd.rest;
 			}
@@ -1818,12 +1832,13 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 								emitFrame();
 							}
 						: undefined,
-					onTrace: emitFrame
-						? next => {
-								trace = next;
-								emitFrame();
-							}
-						: undefined,
+					onTrace:
+						emitFrame && cfgDisplayShellVisualization.get(this.session.settings)
+							? next => {
+									trace = next;
+									emitFrame();
+								}
+							: undefined,
 					onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 					onSessionShellBusy: () => pendingNotices.push(SESSION_SHELL_BUSY_NOTICE),
 				});
