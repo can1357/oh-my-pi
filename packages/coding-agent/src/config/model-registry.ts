@@ -278,6 +278,8 @@ interface HandedOutModel {
 	readonly entry: Model<Api>;
 	/** Per-provider models.yml digests current when it was handed out. */
 	readonly digests: ReadonlyMap<string, string>;
+	/** Every id this object has been handed out under; the catalog has it while one of them resolves. */
+	readonly refs: Set<string>;
 }
 
 /** A catalog entry's fields other than its limits; `JSON.stringify` drops functions (header resolvers). */
@@ -288,6 +290,12 @@ function configShape(model: Model<Api>): unknown {
 
 /** Catalog generation recorded for a credential resolved while the catalog was rebuilt. */
 const STRADDLED_GENERATION = -1;
+
+/**
+ * Recorded for a catalog built from a file that appeared between the stamp and the read: no file
+ * version describes it, so the next check re-reads rather than comparing equal to either.
+ */
+const UNSETTLED_CONFIG_STAMP = "\u0000unsettled";
 
 /** The context window a model runs with by default, and the larger one extended context opts it into. */
 export interface ContextWindowTiers {
@@ -1085,7 +1093,7 @@ export class ModelRegistry {
 			return Promise.resolve(false);
 		}
 		this.#rejectedConfigStamp = null;
-		const reload = this.#rebuildFromLoadedConfig(stamp).then(
+		const reload = this.#rebuildFromLoadedConfig().then(
 			() => true,
 			error => {
 				logger.warn("models.yml reload failed; keeping the catalog built so far", {
@@ -1100,10 +1108,11 @@ export class ModelRegistry {
 		return this.#configReload;
 	}
 
-	/** Offline rebuild from the config parse already cached in {@link ModelsConfigFile}, recorded as `stamp`. */
-	async #rebuildFromLoadedConfig(stamp: string | null): Promise<void> {
+	/** Offline rebuild from the config parse already cached in {@link ModelsConfigFile}. */
+	async #rebuildFromLoadedConfig(): Promise<void> {
+		// The rebuild records the version it loaded; the stamp read before it would overwrite that
+		// with a file state the catalog may not hold.
 		this.#reloadStaticModels({ force: true, configLoaded: true });
-		this.#loadedConfigStamp = stamp;
 		this.#suppressedSelectors.clear();
 		await this.#refreshRuntimeDiscoveries("offline");
 	}
@@ -1470,7 +1479,7 @@ export class ModelRegistry {
 	#loadModels() {
 		// The stamp the rebuild that called us read the file at, else the file's current one. `null`
 		// is a stamp of its own (the file was missing), so only `undefined` means none was taken.
-		let configStamp =
+		const configStamp =
 			this.#pendingConfigStamp !== undefined ? this.#pendingConfigStamp : this.#modelsConfigFile.getStamp();
 		this.#pendingConfigStamp = undefined;
 		this.#resetStaticComposition();
@@ -1503,13 +1512,12 @@ export class ModelRegistry {
 			this.#applyHardcodedModelPolicies(this.#loadCachedDiscoverableModels()),
 		);
 		this.#lastStaticLoadMtime = this.#modelsConfigFile.getMtimeMs();
-		// A file that appeared between that stamp and the read: the catalog is the file's, not the
-		// missing file's, so record the version it actually came from or a later deletion looks
-		// like no change at all.
-		if (configStamp === null && this.#lastLoadedModelsConfig !== undefined) {
-			configStamp = this.#modelsConfigFile.getStamp();
-		}
-		this.#loadedConfigStamp = configStamp;
+		// The file was missing when the stamp was taken and present when it was read, so no version
+		// of it describes this catalog: neither the missing stamp (a later deletion would compare
+		// equal) nor the current one (an edit that landed after the parse would). A stamp no file
+		// can equal costs one extra reload and never skips a change.
+		this.#loadedConfigStamp =
+			configStamp === null && this.#lastLoadedModelsConfig !== undefined ? UNSETTLED_CONFIG_STAMP : configStamp;
 		// The config #loadCustomModels built from: the file's own parse when it loaded, the last one
 		// that loaded while a later edit does not, and nothing once the file is gone.
 		this.#loadedConfig = this.#ignoreLocalModelConfig ? undefined : this.#lastLoadedModelsConfig;
@@ -3804,7 +3812,7 @@ export class ModelRegistry {
 	find(provider: string, modelId: string): Model<Api> | undefined {
 		if (this.#isProviderDisabled(provider)) return undefined;
 		const model = resolveProviderModelReference(provider, modelId, this.#modelsForProviderLookup(provider));
-		if (model) this.#handOut(model, modelId, true);
+		if (model) this.#handOut(model, modelId);
 		return model;
 	}
 
@@ -3878,7 +3886,12 @@ export class ModelRegistry {
 			contextWindow: contextWindowEdited ? fitted.contextWindow : model.contextWindow,
 			maxTokens: maxTokensEdited ? now.maxTokens : model.maxTokens,
 		};
-		this.#handedOut.set(result, { ref: then.ref, entry: now, digests: this.#providerConfigDigests });
+		this.#handedOut.set(result, {
+			ref: then.ref,
+			refs: new Set(then.refs),
+			entry: now,
+			digests: this.#providerConfigDigests,
+		});
 		return result;
 	}
 
@@ -3893,15 +3906,16 @@ export class ModelRegistry {
 	}
 
 	/** Record that `model` (looked up as `ref`) was handed out under the current configuration. */
-	#handOut(model: Model<Api>, ref: string, selected = false): void {
+	#handOut(model: Model<Api>, ref: string): void {
 		const held = this.#handedOut.get(model);
 		if (!held) {
-			this.#handedOut.set(model, { ref, entry: model, digests: this.#providerConfigDigests });
+			this.#handedOut.set(model, { ref, refs: new Set([ref]), entry: model, digests: this.#providerConfigDigests });
 			return;
 		}
-		// An enumeration tags a collapsed model by its own id; a later explicit lookup names the
-		// variant the caller selected, and that is the reference a rebind and the catalog check need.
-		if (selected && held.ref !== ref) this.#handedOut.set(model, { ...held, ref });
+		// One object can reach callers under several ids: an enumeration tags a collapsed model by
+		// its own id, an explicit lookup by the variant it asked for. Both are references this model
+		// is still reachable by, and neither caller's view may change the other's.
+		held.refs.add(ref);
 	}
 
 	#handOutAll<T extends Model<Api>[]>(models: T): T {
@@ -4129,10 +4143,11 @@ export class ModelRegistry {
 			// Not ours: an SDK caller's model goes out as given.
 			return derivation ? this.#stillInCatalog(derivation.source) : true;
 		}
-		return (
-			resolveProviderModelReference(model.provider, then.ref, this.#modelsForProviderLookup(model.provider)) !==
-			undefined
-		);
+		const lookup = this.#modelsForProviderLookup(model.provider);
+		for (const ref of then.refs) {
+			if (resolveProviderModelReference(model.provider, ref, lookup) !== undefined) return true;
+		}
+		return false;
 	}
 
 	async #peekApiKeyForProvider(provider: string, options?: AuthPeekOptions): Promise<string | undefined> {
