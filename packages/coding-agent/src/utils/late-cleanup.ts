@@ -14,3 +14,21 @@ export function trackLateCleanup(work: Promise<void>, context: Record<string, un
 		.finally(() => pendingCleanups.delete(tracked));
 	pendingCleanups.add(tracked);
 }
+
+/**
+ * Run every release, even when one throws: a cleanup list holds unrelated
+ * resources, so the first failure must not strand the rest — a stranded
+ * dependency goes on telling other agents that an ended call still owes them.
+ * Rethrows the first failure once all of them have run.
+ */
+export function releaseAll(releases: Iterable<() => void>): void {
+	let failure: { error: unknown } | undefined;
+	for (const release of releases) {
+		try {
+			release();
+		} catch (error) {
+			failure ??= { error };
+		}
+	}
+	if (failure) throw failure.error;
+}

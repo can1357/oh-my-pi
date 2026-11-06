@@ -267,6 +267,7 @@ function serveRegistry(bridge: MainSessionBridge): RpcServe<AgentRegistry, Agent
 			bridge.forward(listener, forward => registry.onChange(forward)),
 		awaitsHold: (registry, waiter, awaited, options) => bridge.track(registry.awaits.hold(waiter, awaited, options)),
 		awaitsBlocksOn: (registry, agent, target, sentAt) => registry.awaits.blocksOn(agent, target, sentAt),
+		awaitsWaitersOn: (registry, target) => registry.awaits.waitersOn(target),
 		awaitsSubscribe: (registry, listener) => bridge.forward(listener, forward => registry.awaits.onChange(forward)),
 	};
 }
@@ -299,6 +300,7 @@ function serveBus(bridge: MainSessionBridge): RpcServe<IrcBus, IrcBusProtocol> {
 				options,
 			),
 		take: (bus, agentId, from) => bus.take(agentId, from),
+		restore: (bus, message) => bus.restore(message),
 		unreadCount: (bus, agentId) => bus.unreadCount(agentId),
 		recordReply: (bus, from, to) => bus.recordReply(from, to),
 	};

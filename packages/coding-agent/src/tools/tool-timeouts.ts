@@ -17,6 +17,8 @@ export const TOOL_TIMEOUTS = {
 	lsp: { default: 20, min: 5, max: 300 },
 	debug: { default: 30, min: 5, max: 300 },
 	ida: { default: 120, min: 1, max: 3600 },
+	// `default` is the widest window of a `wait` without `timeout`: the top rung of its idle ladder.
+	wait: { default: 300, min: 1, max: 3600 },
 } as const satisfies Record<string, ToolTimeoutConfig>;
 
 export type ToolWithTimeout = keyof typeof TOOL_TIMEOUTS;

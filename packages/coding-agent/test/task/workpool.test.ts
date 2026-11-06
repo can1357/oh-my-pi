@@ -5,6 +5,7 @@ import { AgentRegistry } from "../../src/registry/agent-registry";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import type { AgentSession } from "../../src/session/agent-session";
 import { WaitTool } from "../../src/tools/wait";
+import { runEvalWait } from "../../src/eval/handle-bridge";
 import type { CustomMessage } from "../../src/session/messages";
 import * as executor from "../../src/task/executor";
 import type { EffectiveSubagentPolicy, StructuredSubagentResult } from "../../src/task/structured-subagent";
@@ -12,6 +13,7 @@ import * as structured from "../../src/task/structured-subagent";
 import type { AgentDefinition } from "../../src/task/types";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { WorkPool, WorkPoolRegistry } from "../../src/task/workpool";
+import { awaitNodeOfJob } from "../../src/registry/agent-awaits";
 import type { ToolSession } from "../../src/tools";
 
 const AGENT: AgentDefinition = {
@@ -456,6 +458,96 @@ describe("WorkPool dispatch", () => {
 		await finishPool(session, workpool);
 		expect(workpool.peek().pending).toBe(0);
 	});
+
+	it("leaves nothing queued when the manager refuses the aggregate registration", async () => {
+		// The items go in before the registration that makes them reportable. With
+		// the manager's running-job slot already taken, that registration is
+		// refused, and the push must leave nothing behind: the next push does
+		// register the aggregate, whose drain would otherwise count an item no
+		// dispatch chain can run, so the pool job would stay running for good.
+		const manager = new AsyncJobManager({ retentionMs: 0, maxRunningJobs: 1 });
+		managers.add(manager);
+		const occupant = Promise.withResolvers<string>();
+		const occupying = manager.register("bash", "hold the only slot", async () => occupant.promise, {
+			ownerId: "Main",
+		});
+		const session = {
+			cwd: "/tmp",
+			hasUI: false,
+			settings: Settings.isolated({
+				"task.maxConcurrency": 1,
+				"task.maxRuntimeMs": 0,
+				"launch.enabled": false,
+			}),
+			asyncJobManager: manager,
+			getAgentId: () => "Main",
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			getArtifactsDir: () => null,
+		} satisfies ToolSession;
+		AgentRegistry.global().register({ id: "Main", displayName: "Main", kind: "main", status: "idle", session: null });
+		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			const id = request.identity?.id ?? "missing";
+			markIdle(id);
+			return execution(id);
+		});
+		const workpool = pool(session, "refused-registration");
+
+		expect(() => workpool.push(["first"])).toThrow();
+		expect(workpool.items).toHaveLength(0);
+
+		occupant.resolve("slot released");
+		await manager.getJob(occupying)?.promise;
+		expect(workpool.push(["second"])).toEqual(["refused-registration#2"]);
+		await finishPool(session, workpool);
+
+		expect(workpool.items.filter(item => item.status === "queued")).toHaveLength(0);
+		expect(manager.getJob(workpool.name)?.status).not.toBe("running");
+	});
+
+	it("keeps the pool's dependency on its worker until the turn has settled", async () => {
+		// Settling a turn awaits the worker's yield-contract reset and can start
+		// the next turn. The pool node must stay blocked on the worker
+		// throughout, because that is the link through which an agent waiting on
+		// the pool job reads "blocked on the worker"; with the link gone, that
+		// agent's idle wait parks instead of refusing.
+		const session = makeSession([], 1);
+		const registry = AgentRegistry.global();
+		const clearing = Promise.withResolvers<void>();
+		const whileSettling: string[][] = [];
+		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			const id = request.identity?.id ?? "missing";
+			registry.register({
+				id,
+				displayName: id,
+				kind: "sub",
+				status: "idle",
+				session: {
+					setWorkPoolYieldItems: async () => {
+						whileSettling.push(registry.awaits.waitersOn(id));
+						await clearing.promise;
+					},
+				} as unknown as AgentSession,
+			});
+			return execution(id);
+		});
+		const workpool = pool(session, "settling");
+		// What a `wait` on the pool job takes: `Main` blocks on the pool node.
+		const release = registry.awaits.hold("Main", [awaitNodeOfJob({ id: "settling", ownerId: "Main" })], {
+			interruptible: true,
+		});
+
+		workpool.push(["one"]);
+		await until(() => whileSettling.length > 0);
+		const worker = workpool.agents[0]?.id;
+
+		expect(worker).toBeDefined();
+		expect(whileSettling[0]).toEqual(["Main"]);
+		clearing.resolve();
+		await finishPool(session, workpool);
+		expect(registry.awaits.waitersOn(worker ?? "")).toEqual([]);
+		release();
+	});
 });
 
 describe("WorkPool model selection", () => {
@@ -508,4 +600,55 @@ describe("WorkPool model selection", () => {
 		expect(follow.mock.calls[0]?.[0].id).toBe(workerId);
 		expect((follow.mock.calls[0]?.[0] as { perCallModel?: string } | undefined)?.perCallModel).toBeUndefined();
 	});
+});
+
+describe("WorkPool owner waits", () => {
+	// The aggregate job settles only after every running turn ends, so an owner
+	// waiting on the pool cannot message its workers: a worker's idle `wait`
+	// must return at once instead of idling until its deadline.
+	for (const via of ["wait", "eval wait"] as const) {
+		it(`tells a running worker that its owner's ${via} on the pool waits on its result`, async () => {
+			const session: ToolSession = { ...makeSession([], 1), agentRegistry: AgentRegistry.global() };
+			const ownerWaiting = Promise.withResolvers<void>();
+			const workerWaits: string[] = [];
+			vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+				const id = request.identity?.id ?? "missing";
+				await ownerWaiting.promise;
+				const worker = {
+					cwd: "/tmp",
+					settings: Settings.isolated({ "launch.enabled": false }),
+					agentRegistry: AgentRegistry.global(),
+					getAgentId: () => id,
+				} as unknown as ToolSession;
+				vi.useFakeTimers();
+				try {
+					const waiting = new WaitTool(worker).execute("worker-idle", { timeout: 600 });
+					// An idling worker would end here, at its deadline, on "Deadline reached".
+					vi.advanceTimersByTime(600_000);
+					const first = (await waiting).content[0];
+					workerWaits.push(first?.type === "text" ? first.text : "");
+				} finally {
+					vi.useRealTimers();
+				}
+				markIdle(id);
+				return execution(id);
+			});
+			const workpool = pool(session, "blocked");
+			workpool.push(["one"]);
+			await until(() => workpool.batches.length === 1);
+			// The owner's wait consumes the pool job, which then leaves the manager.
+			const poolJob = session.asyncJobManager?.getJob("blocked");
+			if (!poolJob) throw new Error("Missing pool job blocked");
+			const ownerWait =
+				via === "wait"
+					? new WaitTool(session).execute("owner-wait", {})
+					: runEvalWait({ items: [{ kind: "agent", id: "blocked" }] }, { session });
+			ownerWaiting.resolve();
+			await ownerWait;
+			await poolJob.promise;
+			expect(workerWaits).toEqual([
+				expect.stringContaining("Nothing to wait for: `Main` is waiting on your result"),
+			]);
+		});
+	}
 });

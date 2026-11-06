@@ -51,6 +51,7 @@ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
@@ -576,6 +577,40 @@ describe("structured subagent primitive", () => {
 		expect(awaits.blocksOn("Main", childIds[0]!, 0)).toBe(false);
 		await fs.rm(inline.artifactsDir, { recursive: true, force: true });
 		await fs.rm(detached.artifactsDir, { recursive: true, force: true });
+	});
+	it("refuses an idle wait in an inline child, whose parent's tool call cannot end before it", async () => {
+		// The inline parent cannot message its child: only the child's result
+		// ends the parent's task call. An idling child would hold both until its
+		// own deadline; it must be told to finish instead.
+		mockDiscovery();
+		const childWaits: string[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			const childSession = {
+				cwd: "/tmp",
+				settings: Settings.isolated({ "launch.enabled": false }),
+				agentRegistry: AgentRegistry.global(),
+				getAgentId: () => options.id,
+			} as unknown as ToolSession;
+			vi.useFakeTimers();
+			try {
+				const waiting = new WaitTool(childSession).execute("child-idle", { timeout: 600 });
+				// An idling child would end here, at its deadline, on "Deadline reached".
+				vi.advanceTimersByTime(600_000);
+				const waited = (await waiting).content[0];
+				childWaits.push(waited?.type === "text" ? waited.text : "");
+			} finally {
+				vi.useRealTimers();
+			}
+			return result();
+		});
+
+		const inline = await runStructuredSubagent(request({ detached: false, retainArtifacts: true }));
+
+		try {
+			expect(childWaits).toEqual([expect.stringContaining("Nothing to wait for: `Main` is waiting on your result")]);
+		} finally {
+			await fs.rm(inline.artifactsDir, { recursive: true, force: true });
+		}
 	});
 	it("propagates a custom thinking-suffixed role alias through policy, dispatch, and settlement", async () => {
 		const customAgent = { ...AGENT, model: ["@reviewer:high"] };

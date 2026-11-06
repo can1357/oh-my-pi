@@ -32,6 +32,7 @@ import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
 import vibeTurnResultTemplate from "../prompts/tools/vibe-turn-result.md" with { type: "text" };
+import { awaitNodeOfJob } from "../registry/agent-awaits";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { SessionManager, SessionPersistenceIndeterminateError } from "../session/session-manager";
@@ -44,6 +45,7 @@ import { type AgentProgress, oneLineLabel, type SingleResult } from "@oh-my-pi/p
 import type { ToolSession } from "../tools";
 import { formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { releaseAll } from "../utils/late-cleanup";
 import { calculateTokensPerSecond } from "../utils/token-rate";
 
 import {
@@ -977,43 +979,66 @@ export class VibeSessionRegistry {
 		}
 
 		let waitEndedByTimeout = false;
-		if (runningJobs.length > 0 && collectSettled().length === 0) {
-			const timeoutMs = Math.max(1, Math.trunc(args.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS));
-			const watchedJobIds = runningJobs.map(job => job.id);
-			manager.watchJobs(watchedJobIds);
-			const { promise: timeoutPromise, resolve: timeoutResolve } = Promise.withResolvers<"timeout">();
-			const timeoutHandle = setTimeout(() => timeoutResolve("timeout"), timeoutMs);
-			const racePromises: Array<Promise<"settled" | "timeout" | "aborted">> = [
-				...runningJobs.map(job => job.promise.then(() => "settled" as const)),
-				timeoutPromise,
-			];
-			let abortCleanup: (() => void) | undefined;
-			if (args.signal) {
-				const { promise: abortPromise, resolve: abortResolve } = Promise.withResolvers<"aborted">();
-				const onAbort = () => abortResolve("aborted");
-				if (args.signal.aborted) {
-					onAbort();
-				} else {
-					args.signal.addEventListener("abort", onAbort, { once: true });
-					abortCleanup = () => args.signal?.removeEventListener("abort", onAbort);
+		// Unwatching an unconsumed finished job re-delivers it at once, so the
+		// watch outlives the block: it ends only after the snapshot below has
+		// been collected and consumed, and a failure while the block is being
+		// set up releases it too.
+		let unwatch: (() => void) | undefined;
+		try {
+			if (runningJobs.length > 0 && collectSettled().length === 0) {
+				const timeoutMs = Math.max(1, Math.trunc(args.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS));
+				const watchedJobIds = runningJobs.map(job => job.id);
+				manager.watchJobs(watchedJobIds);
+				unwatch = () => manager.unwatchJobs(watchedJobIds);
+				// Every acquisition below is released however the block ends, a
+				// throw while setting it up included: a worker's registry answers
+				// the hold over a proxy, and a stranded block would go on telling
+				// the agents it names that this ended call still waits on them.
+				const cleanup: Array<() => void> = [];
+				try {
+					const { promise: timeoutPromise, resolve: timeoutResolve } = Promise.withResolvers<"timeout">();
+					const timeoutHandle = setTimeout(() => timeoutResolve("timeout"), timeoutMs);
+					cleanup.push(() => clearTimeout(timeoutHandle));
+					const racePromises: Array<Promise<"settled" | "timeout" | "aborted">> = [
+						...runningJobs.map(job => job.promise.then(() => "settled" as const)),
+						timeoutPromise,
+					];
+					if (args.signal) {
+						const { promise: abortPromise, resolve: abortResolve } = Promise.withResolvers<"aborted">();
+						const onAbort = () => abortResolve("aborted");
+						if (args.signal.aborted) {
+							onAbort();
+						} else {
+							const signal = args.signal;
+							signal.addEventListener("abort", onAbort, { once: true });
+							cleanup.push(() => signal.removeEventListener("abort", onAbort));
+						}
+						racePromises.push(abortPromise);
+					}
+					// The director is blocked until the first watched turn settles, as a
+					// `wait` on those jobs blocks it; a message still interrupts the call.
+					cleanup.push(
+						(session.agentRegistry ?? AgentRegistry.global()).awaits.hold(
+							scope.ownerId,
+							runningJobs.map(awaitNodeOfJob),
+							{ interruptible: true },
+						),
+					);
+					waitEndedByTimeout = (await Promise.race(racePromises)) === "timeout";
+				} finally {
+					releaseAll([...cleanup].reverse());
 				}
-				racePromises.push(abortPromise);
 			}
-			try {
-				waitEndedByTimeout = (await Promise.race(racePromises)) === "timeout";
-			} finally {
-				manager.unwatchJobs(watchedJobIds);
-				clearTimeout(timeoutHandle);
-				abortCleanup?.();
-			}
-		}
 
-		const settled = collectSettled();
-		manager.consumeJobResults(settled.map(entry => entry.jobId));
-		// Current in-flight state, independent of the snapshot: a session whose
-		// watched turn settled may already be mid queued follow-up.
-		const stillRunning = watched.filter(record => record.turn !== undefined).map(record => record.id);
-		return { settled, stillRunning, timedOut: waitEndedByTimeout && settled.length === 0 };
+			const settled = collectSettled();
+			manager.consumeJobResults(settled.map(entry => entry.jobId));
+			// Current in-flight state, independent of the snapshot: a session whose
+			// watched turn settled may already be mid queued follow-up.
+			const stillRunning = watched.filter(record => record.turn !== undefined).map(record => record.id);
+			return { settled, stillRunning, timedOut: waitEndedByTimeout && settled.length === 0 };
+		} finally {
+			unwatch?.();
+		}
 	}
 
 	/** Detach one parent's process-local workers without tombstoning their persisted conversations. */

@@ -2735,7 +2735,7 @@ async function driveSessionToResult(
 				continue;
 			}
 			if (!monitor.yieldCalled()) {
-				await awaitAbortable(session.settleAsyncWork());
+				await awaitAbortable(session.settleAsyncWork({ blocked: true }));
 				continue;
 			}
 			if (!asyncPendingNoticeSent) {
@@ -2764,7 +2764,7 @@ async function driveSessionToResult(
 					continue;
 				}
 			}
-			await awaitAbortable(session.settleAsyncWork());
+			await awaitAbortable(session.settleAsyncWork({ blocked: true }));
 			// Results delivered during the settle invalidated the recorded
 			// yield: the next iteration's ladder demands a fresh one.
 		}

@@ -528,7 +528,7 @@ async function runPrintModeCore(
 					asyncWaitExpired = true;
 					break;
 				}
-				asyncWaitExpired = await expires(session.settleAsyncWork());
+				asyncWaitExpired = await expires(session.settleAsyncWork({ blocked: true }));
 			}
 		} finally {
 			clearTimeout(deadlineTimer);

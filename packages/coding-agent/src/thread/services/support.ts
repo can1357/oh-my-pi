@@ -42,6 +42,10 @@ export function releasingOnce(off: () => void): () => void {
 /**
  * Track a subscription a worker holds on a main object in `subscriptions` (released when
  * the worker exits); returns its unsubscribe, run-once and synchronous for the worker.
+ *
+ * All or nothing: if handing the unsubscribe to the worker fails, `off` runs and
+ * nothing stays in `subscriptions`, so a caller that never received a release does
+ * not leave a live subscription on main.
  */
 export function trackWorkerSubscription(subscriptions: Set<() => void>, off: () => void): () => void {
 	const unsubscribe = releasingOnce(() => {
@@ -49,7 +53,12 @@ export function trackWorkerSubscription(subscriptions: Set<() => void>, off: () 
 		off();
 	});
 	subscriptions.add(unsubscribe);
-	return rpcSync(unsubscribe);
+	try {
+		return rpcSync(unsubscribe);
+	} catch (error) {
+		unsubscribe();
+		throw error;
+	}
 }
 
 /**

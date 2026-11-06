@@ -52,6 +52,7 @@ export type AgentRegistryProtocol = {
 	subscribe: RpcMethod<[listener: RegistryListener], () => void>;
 	awaitsHold: RpcMethod<[waiter: string, awaited: readonly string[], options: { interruptible: boolean }], () => void>;
 	awaitsBlocksOn: RpcMethod<[agent: string, target: string, sentAt: number], boolean>;
+	awaitsWaitersOn: RpcMethod<[target: string], string[]>;
 	/** One forwarding subscription per worker; returns a sync unsubscribe. */
 	awaitsSubscribe: RpcMethod<[listener: () => void], () => void>;
 };
@@ -91,6 +92,7 @@ export type IrcBusProtocol = {
 		IrcMessage | null
 	>;
 	take: RpcMethod<[agentId: string, from?: string], IrcMessage | undefined>;
+	restore: RpcMethod<[message: IrcMessage], void>;
 	unreadCount: RpcMethod<[agentId: string], number>;
 	recordReply: RpcMethod<[from: string, to: string], void>;
 };

@@ -2,6 +2,7 @@ import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import workpoolBatchTemplate from "../prompts/tools/workpool-batch.md" with { type: "text" };
 import workpoolTurnResultTemplate from "../prompts/tools/workpool-turn-result.md" with { type: "text" };
+import { awaitNodeOfJob } from "../registry/agent-awaits";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import type { CustomMessage } from "../session/messages";
@@ -165,7 +166,19 @@ export class WorkPool {
 			this.items.push(item);
 			queued.push(item);
 		}
-		this.#ensurePoolJob();
+		try {
+			this.#ensurePoolJob();
+		} catch (error) {
+			// The push did not happen: a registration the manager refused (its
+			// running-job limit, most often) leaves nothing to report these items,
+			// and a later push that does register would count them in its drain
+			// while no dispatch chain can ever run them.
+			for (const item of queued) {
+				const index = this.items.indexOf(item);
+				if (index >= 0) this.items.splice(index, 1);
+			}
+			throw error;
+		}
 		for (const item of queued) this.#queueDispatch(item);
 		return queued.map(item => item.id);
 	}
@@ -175,7 +188,6 @@ export class WorkPool {
 		const manager = this.session.asyncJobManager;
 		if (!manager) throw new ToolError("workpool() needs the session's async job manager; unavailable here");
 		if (manager.getJob(this.name)) throw new ToolError(`workpool job id "${this.name}" already exists`);
-		this.#poolJobStarted = true;
 		const id = manager.register(
 			"task",
 			this.name,
@@ -195,13 +207,19 @@ export class WorkPool {
 							return job ? [job.promise] : [];
 						}),
 					);
+					// Consume before the unwatch below: unwatching an unconsumed
+					// finished batch re-delivers its result to the owner, which
+					// already has it in this aggregate.
 					manager.consumeJobResults(batchIds);
-					manager.unwatchJobs(batchIds);
 					this.closed = true;
 					const summary = `Pool \`${this.name}\` drained: ${this.items.length} item(s), ${this.batches.length} batch(es).`;
 					this.#card(signal.aborted ? "cancelled" : "completed", this.ownerId, summary);
 					return this.#renderAggregateResult();
 				} finally {
+					// A drain that threw reported nothing, so its batches keep
+					// their ordinary delivery; either way the watch ends here
+					// instead of outliving the pool.
+					manager.unwatchJobs(this.batches.map(batch => batch.jobId));
 					signal.removeEventListener("abort", onAbort);
 				}
 			},
@@ -211,6 +229,10 @@ export class WorkPool {
 			manager.cancel(id, { ownerId: this.ownerId });
 			throw new ToolError(`workpool job id "${this.name}" is unavailable`);
 		}
+		// Only now: a registration that threw or came back under another id must
+		// not leave the pool believing it has an aggregate job, which would make
+		// every later `push` queue items with nothing to report them.
+		this.#poolJobStarted = true;
 	}
 
 	async #waitForDrain(): Promise<void> {
@@ -378,10 +400,37 @@ export class WorkPool {
 						totalDurationMs: Date.now() - batch.startedAt,
 						progress: [progress],
 					};
-					void reportProgress(`Running agent ${agent.id}...`, { ...details });
+					void reportProgress(`Running agent ${agent.id}...`, { ...details }).catch(error => {
+						logger.debug("workpool progress report failed", { pool: this.name, error: String(error) });
+					});
 				};
 				let result: SingleResult;
+				// The aggregate job cannot settle before this turn ends: record it
+				// blocked on the worker, so an agent waiting on the pool is blocked
+				// on the worker too and the worker's idle `wait` returns at once.
+				// Taking it is a registry call, and a pool that runs on a worker
+				// reaches main's registry over RPC, which can reject: inside the
+				// recovery region, so a rejection settles this turn as any other
+				// failure does instead of leaving the item, the batch and the
+				// aggregate running with nothing left to end them.
+				let releasePoolHold: (() => void) | undefined;
+				// Released only once the turn has settled, not when the run ends:
+				// settling awaits the agent's yield-item reset and may start the
+				// next turn, and the pool node must read as blocked on this worker
+				// throughout. Both exits go through here for that reason.
+				const settle = async (outcome: TurnOutcome): Promise<string> => {
+					try {
+						return await this.#settleTurn(agent, batch, outcome);
+					} finally {
+						releasePoolHold?.();
+					}
+				};
 				try {
+					releasePoolHold = (this.session.agentRegistry ?? AgentRegistry.global()).awaits.hold(
+						awaitNodeOfJob({ id: this.name, ownerId: this.ownerId }),
+						[agent.id],
+						{ interruptible: false },
+					);
 					if (agent.turns === 0) {
 						const execution = await runStructuredSubagent({
 							session: this.session,
@@ -423,9 +472,9 @@ export class WorkPool {
 					}
 				} catch (error) {
 					const output = error instanceof Error ? error.message : String(error);
-					return this.#settleTurn(agent, batch, { exitCode: 1, output, error: output });
+					return await settle({ exitCode: 1, output, error: output });
 				}
-				return this.#settleTurn(agent, batch, result);
+				return await settle(result);
 			},
 			{ id: batch.id, agentId: agent.id, ownerId: this.ownerId },
 		);

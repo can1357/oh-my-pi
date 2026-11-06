@@ -1,8 +1,10 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManagerApi } from "../async";
+import { awaitNodeOfJob } from "../registry/agent-awaits";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { ToolAbortError } from "../tools/tool-errors";
+import { releaseAll } from "../utils/late-cleanup";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { withBridgeTimeoutPause } from "./bridge-timeout";
 import { type CompletionAttempt, getCompletionHandle, type CompletionHandleEntry } from "./completion-bridge";
@@ -167,34 +169,38 @@ async function waitForSettlement(
 	).then((): "settled" => "settled");
 	const races: Array<Promise<"settled" | "timeout" | "aborted">> = [waiting];
 	let timeout: NodeJS.Timeout | undefined;
-	if (timeoutMs !== undefined) {
-		const deferred = Promise.withResolvers<"timeout">();
-		// setTimeout overflows past 2^31-1 ms (fires in ~1ms with a
-		// TimeoutOverflowWarning): re-arm in max-size chunks (#12375).
-		let remaining = timeoutMs;
-		const arm = (): void => {
-			timeout = setTimeout(
-				() => {
-					remaining -= MAX_TIMER_MS;
-					if (remaining > 0) arm();
-					else deferred.resolve("timeout");
-				},
-				Math.min(Math.max(0, remaining), MAX_TIMER_MS),
-			);
-			timeout.unref?.();
-		};
-		arm();
-		races.push(deferred.promise);
-	}
 	let onAbort: (() => void) | undefined;
-	if (signal) {
-		const deferred = Promise.withResolvers<"aborted">();
-		onAbort = () => deferred.resolve("aborted");
-		if (signal.aborted) onAbort();
-		else signal.addEventListener("abort", onAbort, { once: true });
-		races.push(deferred.promise);
-	}
+	// Both the timer and the listener are taken inside the region that releases
+	// them. A signal whose `aborted` read or `addEventListener` throws (a
+	// proxied one) would otherwise strand an armed timer that re-arms itself
+	// for the rest of `timeoutMs` and then resolves a deferred nobody awaits.
 	try {
+		if (timeoutMs !== undefined) {
+			const deferred = Promise.withResolvers<"timeout">();
+			// setTimeout overflows past 2^31-1 ms (fires in ~1ms with a
+			// TimeoutOverflowWarning): re-arm in max-size chunks (#12375).
+			let remaining = timeoutMs;
+			const arm = (): void => {
+				timeout = setTimeout(
+					() => {
+						remaining -= MAX_TIMER_MS;
+						if (remaining > 0) arm();
+						else deferred.resolve("timeout");
+					},
+					Math.min(Math.max(0, remaining), MAX_TIMER_MS),
+				);
+				timeout.unref?.();
+			};
+			arm();
+			races.push(deferred.promise);
+		}
+		if (signal) {
+			const deferred = Promise.withResolvers<"aborted">();
+			onAbort = () => deferred.resolve("aborted");
+			if (signal.aborted) onAbort();
+			else signal.addEventListener("abort", onAbort, { once: true });
+			races.push(deferred.promise);
+		}
 		return await Promise.race(races);
 	} finally {
 		clearTimeout(timeout);
@@ -218,29 +224,40 @@ export async function runEvalWait(
 	return await withBridgeTimeoutPause(
 		options.emitStatus,
 		async () => {
-			for (const handle of resolved) emitLatestProgress(handle);
-			const interval = setInterval(() => {
-				for (const handle of resolved) emitLatestProgress(handle);
-			}, 1_000);
-			interval.unref?.();
 			let outcome: "settled" | "timeout" | "aborted";
-			// An untimed wait keeps the eval call open until every awaited agent
-			// finishes: no message to the caller lands before then.
-			const waiter = options.session.getAgentId?.() ?? MAIN_AGENT_ID;
-			const awaits = (options.session.agentRegistry ?? AgentRegistry.global()).awaits;
-			const releaseHolds =
-				timeoutMs === undefined
-					? resolved.flatMap(handle =>
-							"job" in handle && handle.job.agentId
-								? [awaits.hold(waiter, [handle.job.agentId], { interruptible: false })]
-								: [],
-						)
-					: [];
+			// The progress interval and the blocks below are released however
+			// this wait ends, a throw while setting it up included: emitting
+			// progress calls the eval runtime back, and a worker's registry
+			// answers over a proxy.
+			const cleanup: Array<() => void> = [];
 			try {
+				for (const handle of resolved) emitLatestProgress(handle);
+				const interval = setInterval(() => {
+					for (const handle of resolved) emitLatestProgress(handle);
+				}, 1_000);
+				interval.unref?.();
+				cleanup.push(() => clearInterval(interval));
+				// An untimed wait keeps the eval call open until every awaited job
+				// finishes: no message to the caller lands before then. A job that is
+				// not one agent's run (a workpool) is its own node, leading on to the
+				// agents it waits on. A block covers only work still running: a
+				// handle that already settled gets no hold, and each hold is released
+				// the moment its own job settles, not when the whole group does —
+				// otherwise a finished child is still reported as owing the caller a
+				// result while a sibling job runs, and its idle `wait` is refused.
+				const waiter = options.session.getAgentId?.() ?? MAIN_AGENT_ID;
+				const awaits = (options.session.agentRegistry ?? AgentRegistry.global()).awaits;
+				if (timeoutMs === undefined) {
+					for (const handle of resolved) {
+						if (!("job" in handle) || handle.job.status !== "running") continue;
+						const release = awaits.hold(waiter, [awaitNodeOfJob(handle.job)], { interruptible: false });
+						cleanup.push(release);
+						void handle.job.promise.then(release, release);
+					}
+				}
 				outcome = await waitForSettlement(resolved, timeoutMs, options.signal);
 			} finally {
-				clearInterval(interval);
-				for (const release of releaseHolds) release();
+				releaseAll([...cleanup].reverse());
 			}
 			for (const handle of resolved) emitLatestProgress(handle);
 			if (outcome === "aborted") {

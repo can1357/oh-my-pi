@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { prompt, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
+import { logger, prompt, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 import backgroundTanDispatchPrompt from "../../prompts/system/background-tan-dispatch.md" with { type: "text" };
 import tanContextSwitchPrompt from "../../prompts/system/tan-context-switch.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
@@ -211,7 +211,9 @@ export class TanCommandController {
 							mountedTools: clone.getMountedXdevToolNames(),
 						});
 						const abortClone = () => {
-							void clone?.abort();
+							void Promise.resolve(clone?.abort()).catch(error => {
+								logger.warn("Tan clone abort failed", { error: String(error) });
+							});
 						};
 						signal.addEventListener("abort", abortClone, { once: true });
 						// The fork inherits the parent's todo list via session entries;
@@ -308,7 +310,7 @@ export class TanCommandController {
 							await clone.waitForIdle();
 							while (clone.hasPendingAsyncWork()) {
 								if (signal.aborted) throw new Error("Aborted while settling descendant work");
-								await untilAborted(signal, clone.settleAsyncWork());
+								await untilAborted(signal, clone.settleAsyncWork({ blocked: true }));
 							}
 							return extractAssistantText(clone.getLastAssistantMessage()) || "(no output)";
 						} finally {

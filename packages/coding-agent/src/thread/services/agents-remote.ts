@@ -41,8 +41,12 @@ class ForwardedListeners<A extends unknown[]> {
 	}
 
 	add(listener: (...args: A) => void): () => void {
+		// Open the remote subscription before retaining the listener: a failed
+		// open must leave nothing behind. A listener kept in the set without a
+		// subscription is revived by the next caller's successful open, and
+		// then runs for a call that already failed and ended.
+		if (!this.#close) this.#close = this.#open((...args) => this.#emit(args));
 		this.#listeners.add(listener);
-		this.#close ??= this.#open((...args) => this.#emit(args));
 		return () => {
 			if (!this.#listeners.delete(listener) || this.#listeners.size > 0) return;
 			const close = this.#close;
@@ -78,6 +82,10 @@ export class RemoteAgentAwaits implements AgentAwaitsApi {
 
 	blocksOn(agent: string, target: string, sentAt: number): boolean {
 		return this.#remote.callSync("awaitsBlocksOn", agent, target, sentAt);
+	}
+
+	waitersOn(target: string): string[] {
+		return this.#remote.callSync("awaitsWaitersOn", target);
 	}
 
 	onChange(listener: () => void): () => void {
@@ -256,6 +264,10 @@ export class RemoteIrcBus implements IrcBusApi {
 
 	take(agentId: string, from?: string): IrcMessage | undefined {
 		return this.#remote.callSync("take", agentId, from);
+	}
+
+	restore(message: IrcMessage): void {
+		this.#remote.notify("restore", message);
 	}
 
 	unreadCount(agentId: string): number {
