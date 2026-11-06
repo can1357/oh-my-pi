@@ -145,8 +145,13 @@ function claimPromptSources(
 				located.push({ index, start });
 		const ambiguous = located.length > 1;
 		let unattributed = located.length === 0 || ambiguous;
+		let remains = effective.some(text => text.includes(fragment));
 		for (const { index, start } of located) {
 			const block = metadata.blocks[index]!;
+			// An in-place edit keeps the block text around the fragment; a replacement prompt drops it.
+			const before = block.slice(0, start);
+			const after = block.slice(start + fragment.length);
+			remains ||= effective.some(text => text.includes(before) && text.includes(after));
 			// Never remap moved or changed blocks, even when the fragment text still appears.
 			if (effective[index] !== block || effectiveCounts.get(block) !== 1) {
 				unattributed = true;
@@ -157,8 +162,8 @@ function claimPromptSources(
 			candidates.set(index, ranges);
 		}
 		// Absent from the built prompt: the template omitted it, or whole-prompt formatting (an unclosed
-		// fence) changed it. Otherwise only a fragment the effective prompt still holds is left behind.
-		if (unattributed && (located.length === 0 || effective.some(text => text.includes(fragment)))) complete = false;
+		// fence) changed it. Otherwise only a source the effective prompt may still hold is left behind.
+		if (unattributed && (located.length === 0 || remains)) complete = false;
 	}
 	const claims = new Map<number, SourceClaim[]>();
 	for (const [index, ranges] of candidates) {
@@ -488,8 +493,7 @@ export function buildSessionContextView(
 	};
 
 	const notices: string[] = [];
-	if (!appendSystemPromptEntries(session, state))
-		notices.push("Some prompt sources could not be attributed.");
+	if (!appendSystemPromptEntries(session, state)) notices.push("Some prompt sources could not be attributed.");
 	appendToolDefinitionEntries(session, state);
 	appendMessageEntries(session, state);
 	finalizeToolOutputGroups(state);
