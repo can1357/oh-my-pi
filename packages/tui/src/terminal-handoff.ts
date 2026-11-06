@@ -96,17 +96,23 @@ export function drainTerminalHandoff(): void {
 	const deadline = Date.now() + HANDOFF_DRAIN_DEADLINE_MS;
 	let idleDeadline = Date.now() + HANDOFF_DRAIN_IDLE_MS;
 	let pending = pump.pending();
-	for (;;) {
-		const left = Math.min(idleDeadline, deadline) - Date.now();
-		if (left <= 0 || pump.flushSync(Math.min(STOP_DRAIN_MS, left)) || pump.dead) break;
-		// Bytes still queued. A terminal that took some of them is alive and
-		// keeps the rest: its idle window starts again. One that took none
-		// spends what is left of that window and then loses them.
-		const remaining = pump.pending();
-		if (remaining < pending) {
-			pending = remaining;
-			idleDeadline = Date.now() + HANDOFF_DRAIN_IDLE_MS;
+	// Released whatever the waits do: a throw here would otherwise leave the
+	// handoff held, and every later write would queue behind a pump nothing
+	// will drain.
+	try {
+		for (;;) {
+			const left = Math.min(idleDeadline, deadline) - Date.now();
+			if (left <= 0 || pump.flushSync(Math.min(STOP_DRAIN_MS, left)) || pump.dead) break;
+			// Bytes still queued. A terminal that took some of them is alive and
+			// keeps the rest: its idle window starts again. One that took none
+			// spends what is left of that window and then loses them.
+			const remaining = pump.pending();
+			if (remaining < pending) {
+				pending = remaining;
+				idleDeadline = Date.now() + HANDOFF_DRAIN_IDLE_MS;
+			}
 		}
+	} finally {
+		releaseTerminalHandoff();
 	}
-	releaseTerminalHandoff();
 }
