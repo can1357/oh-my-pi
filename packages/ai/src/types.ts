@@ -1659,6 +1659,8 @@ export interface Tool<TParameters extends TSchema = TSchema> {
 	name: string;
 	description: string;
 	parameters: TParameters;
+	/** Provider-only schema override; execution is always validated against parameters. */
+	wireParameters?: TSchema;
 	/** If true, tool is strictly typed and validated against the parameters schema before execution */
 	strict?: boolean;
 	/** Withhold this Anthropic tool until a `tool_addition` message references it. */

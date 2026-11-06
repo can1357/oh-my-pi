@@ -324,6 +324,7 @@ import {
 } from "./job-widgets";
 import { createBrowserPrelude } from "./tools/browser";
 import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
+import { presentTool, toolLoadMode, warnToolLoadModes } from "./tools/load-mode";
 import { createComputerPrelude } from "./tools/computer";
 import { createRatchetPrelude } from "./ratchet/prelude-definition";
 import { createArchivePrelude } from "./archive/prelude-definition";
@@ -358,6 +359,7 @@ import {
 	cfgToolsAbortOnFabricatedResult,
 	cfgToolsIntentTracing,
 	cfgToolsMaxTimeout,
+	cfgToolsLoadMode,
 	cfgToolsXdev,
 	cfgToolsXdevDocs,
 	cfgToolsXdevInlineDevices,
@@ -1704,6 +1706,7 @@ const CAPTURE_ADVERTISED_KEYS = [
 	"name",
 	"description",
 	"parameters",
+	"wireParameters",
 	"strict",
 	"deferLoading",
 	"customFormat",
@@ -4392,6 +4395,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				nativeTools && !inlineToolDescriptors
 					? { mode: "compact", toolNames: [...toolNames, ...mountedPromptToolNames] }
 					: { mode: "full" },
+				tool => presentTool(tool, toolLoadMode(tool, cfgToolsLoadMode.get(settings), toolNames.includes("read"))),
 			);
 			const defaultPrompt = await buildSystemPromptInternal({
 				cwd: promptCwd,
@@ -4575,6 +4579,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// constructed and attached. Startup failure therefore leaves it revivable.
 		hasRegistered = options.expectedAgentRef === undefined || options.expectedAgentRef === null;
 
+		const initialLoadModes = cfgToolsLoadMode.get(settings);
+		warnToolLoadModes(toolRegistry, initialLoadModes, xdevReadAvailable);
+
 		// Partition the initial enabled set for the xd:// transport. Tool instances
 		// remain in the canonical map; only presentation names move between layers.
 		// Mounting requires both transport halves in the granted set (`read xd://`
@@ -4587,7 +4594,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			for (const name of initialToolNames) {
 				const tool = toolRegistry.get(name);
 				const explicitlyRequested = presentationPinnedToolNames?.has(name) === true;
-				if (tool && xdevReadAvailable && xdevWriteAvailable && !explicitlyRequested && isMountableUnderXdev(tool))
+				if (
+					tool &&
+					xdevReadAvailable &&
+					xdevWriteAvailable &&
+					!explicitlyRequested &&
+					toolLoadMode(tool, initialLoadModes) === undefined &&
+					isMountableUnderXdev(tool)
+				)
 					mountedNames.push(name);
 				else topLevelToolNames.push(name);
 			}
@@ -4730,7 +4744,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		};
 
 		const initialTools = initialToolNames
-			.map(name => toolRegistry.get(name))
+			.map(name => {
+				const tool = toolRegistry.get(name);
+				return tool ? presentTool(tool, toolLoadMode(tool, initialLoadModes, xdevReadAvailable)) : undefined;
+			})
 			.filter((tool): tool is AgentTool => tool !== undefined);
 
 		// `model` is final here: deferred patterns, auth fallback, and extension
@@ -5371,6 +5388,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						builtInRegistryToolNames.has("write") &&
 						enabled.includes("read") &&
 						(enabled.includes("write") || toolSession.deviceOnlyWrite === true) &&
+						toolLoadMode(liveTool, cfgToolsLoadMode.get(settings)) === undefined &&
 						isMountableUnderXdev(liveTool);
 					const nextMounted = shouldMount
 						? mounted.includes(name)

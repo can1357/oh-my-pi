@@ -38,6 +38,7 @@ import {
 } from "../tools/approval";
 import { getApprovalGrants } from "../tools/approval-cache";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
+import { presentTool, toolLoadMode, warnToolLoadModes } from "../tools/load-mode";
 import { isFilesystemSourcePath } from "../tools/path-utils";
 import { supportsExternalThinking } from "../tools/think";
 import { ToolAbortError } from "../tools/tool-errors";
@@ -73,6 +74,7 @@ import { cfgStartupQuiet } from "../modes/settings";
 import {
 	cfgToolsApproval,
 	cfgToolsApprovalMode,
+	cfgToolsLoadMode,
 	cfgToolsXdevDocs,
 	cfgToolsXdevInlineDevices,
 	cfgToolsXdevNotices,
@@ -693,10 +695,13 @@ export class SessionTools {
 	/** Drops cached ACP decisions and re-wraps active tools after the client changes. */
 	refreshAcpPermissionGates(): void {
 		this.#acpPermissionDecisions.clear();
-		const activeTools = this.getActiveToolNames()
+		const activeNames = this.getActiveToolNames();
+		const loadModes = cfgToolsLoadMode.get(this.#host.settings);
+		const readAvailable = activeNames.includes("read");
+		const activeTools = activeNames
 			.map(name => this.#toolRegistry.get(name))
 			.filter((tool): tool is AgentTool => tool !== undefined)
-			.map(tool => this.#wrapToolForAcpPermission(tool));
+			.map(tool => this.#wrapToolForAcpPermission(presentTool(tool, toolLoadMode(tool, loadModes, readAvailable))));
 		this.#host.agent.setTools(activeTools);
 	}
 
@@ -1338,12 +1343,17 @@ export class SessionTools {
 			(selectedTools.some(({ name }) => name === "write") || this.#deviceOnlyWriteTransportAvailable);
 		const isPresentationPinned = (name: string): boolean =>
 			this.#presentationPinnedToolNames?.has(name) === true || this.#runtimeSelectedToolNames?.has(name) === true;
+		const loadModes = cfgToolsLoadMode.get(this.#host.settings);
+		warnToolLoadModes(this.#toolRegistry, loadModes, xdevReadAvailable, message =>
+			this.#host.emitNotice("warning", message, "tools.loadMode"),
+		);
 		const mountCandidates = selectedTools.filter(
 			({ name, tool }) =>
 				this.#xdev !== undefined &&
 				xdevReadAvailable &&
 				xdevWriteAvailable &&
 				!isPresentationPinned(name) &&
+				toolLoadMode(tool, loadModes) === undefined &&
 				isMountableUnderXdev(tool),
 		);
 		const mountNames = new Set(mountCandidates.map(({ name }) => name));
@@ -1351,7 +1361,8 @@ export class SessionTools {
 		const validToolNames: string[] = [];
 		for (const { name, tool } of selectedTools) {
 			if (mountNames.has(name)) continue;
-			tools.push(this.#wrapToolForAcpPermission(tool));
+			const presented = presentTool(tool, toolLoadMode(tool, loadModes, xdevReadAvailable));
+			tools.push(this.#wrapToolForAcpPermission(presented));
 			validToolNames.push(name);
 		}
 

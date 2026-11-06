@@ -1047,7 +1047,7 @@ export function normalizeTools(tools: AgentContext["tools"], options: NormalizeT
 	return tools?.map(t => {
 		const intentMode = resolveIntentMode(t.intent);
 		const doInjectIntent =
-			injectIntent && intentMode !== "omit" && !schemaDefinesProperty(toolWireSchema(t), INTENT_FIELD);
+			injectIntent && intentMode !== "omit" && !schemaDefinesProperty(toolWireSchema(t, t.parameters), INTENT_FIELD);
 		// When the full catalog is rendered into the system prompt, ship the tool
 		// specs without their descriptions (top-level + nested schema annotations)
 		// so they are not duplicated on the wire. Strip the STABLE wire schema (the
@@ -1059,7 +1059,7 @@ export function normalizeTools(tools: AgentContext["tools"], options: NormalizeT
 			const parameters = (
 				doInjectIntent ? memoizedInjectIntentIntoSchema(stripped, intentMode, undefined) : stripped
 			) as TSchema;
-			return { ...t, parameters, description: "" };
+			return { ...t, parameters, wireParameters: undefined, description: "" };
 		}
 		const wire = toolWireSchema(t);
 		const parameters = (
@@ -1068,7 +1068,7 @@ export function normalizeTools(tools: AgentContext["tools"], options: NormalizeT
 		const description = t.description ?? "";
 		const examplesBlock = renderToolExamples({ ...t, parameters }, doInjectIntent ? INTENT_FIELD : undefined);
 		const finalDescription = examplesBlock ? `${description}\n\n${examplesBlock}` : description;
-		return { ...t, parameters, description: finalDescription };
+		return { ...t, parameters, wireParameters: undefined, description: finalDescription };
 	});
 }
 
@@ -3148,7 +3148,8 @@ async function prepareToolCallDispatch(
 		let argsForExecution = toolCall.arguments as Record<string, unknown>;
 		if (intentTracing) {
 			// A schema-owned `i` is a tool argument, never a harness intent.
-			const ownsIntent = tool !== undefined && schemaDefinesProperty(toolWireSchema(tool), INTENT_FIELD);
+			const ownsIntent =
+				tool !== undefined && schemaDefinesProperty(toolWireSchema(tool, tool.parameters), INTENT_FIELD);
 			const { intent, strippedArgs } = ownsIntent
 				? { intent: undefined, strippedArgs: argsForExecution }
 				: extractIntent(toolCall.arguments);

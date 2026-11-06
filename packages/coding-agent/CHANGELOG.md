@@ -202,6 +202,8 @@
 - Out-of-credit provider errors now fail immediately instead of retrying for long periods; Retry works promptly once the account is funded.
 - DeepSeek-style `*** End` and `*** End Patch` markers are no longer written into files or truncate later edits
 - Composer prediction ghost text no longer vanishes when advisor messages arrive
+- Added `tools.loadMode` to defer essential-tool schemas or pin discoverable tools top-level, preserving default modes and warning once per ignored configuration value ([#12393](https://github.com/can1357/oh-my-pi/issues/12393), [#16874](https://github.com/can1357/oh-my-pi/pull/16874) by [@ultravioletcatastrophe](https://github.com/ultravioletcatastrophe))
+- Added a fullscreen extension link browser for picking links already in terminal scrollback: press Alt+O again (or Page Up) while link tags are shown, or Alt+O with no extension link on screen ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
 
 ## [18.16.0] - 2026-11-02
 

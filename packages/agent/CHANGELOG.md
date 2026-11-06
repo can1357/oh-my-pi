@@ -8,6 +8,9 @@
 
 - Added `Agent.queuedMessageGate` to filter queued messages before delivery and observe claimed messages returned undelivered.
 - Added `wireToolsFingerprint()`, returning a hash of the tool specs sent with a request.
+### Added
+
+- Tool calls advertised with lightweight parameters retain full runtime validation and receive the complete schema on validation failure ([#16874](https://github.com/can1357/oh-my-pi/pull/16874) by [@ultravioletcatastrophe](https://github.com/ultravioletcatastrophe))
 
 ## [18.16.0] - 2026-11-02
 

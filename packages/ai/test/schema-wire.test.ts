@@ -54,6 +54,25 @@ describe("toolWireSchema — raw JSON Schema normalization", () => {
 		return { name: "t", description: "", parameters, async execute() {} } as unknown as Tool;
 	}
 
+	it("keeps provider overrides separate from full schemas and caches both conversions", () => {
+		for (const parameters of [
+			type({ path: "string" }),
+			{ type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+		]) {
+			const wireParameters = { type: "object", properties: {}, additionalProperties: true };
+			const tool: Tool = { name: "deferred", description: "", parameters, wireParameters };
+			const loose = toolWireSchema(tool);
+			const full = toolWireSchema(tool, parameters);
+			expect(loose).toEqual(wireParameters);
+			expect(loose).toBe(toolWireSchema(tool));
+			expect(full).toBe(toolWireSchema(tool, parameters));
+			expect(full.required).toEqual(["path"]);
+			expect(full.properties).toEqual({ path: { type: "string" } });
+			expect(tool.parameters).toBe(parameters);
+			expect(tool.wireParameters).toBe(wireParameters);
+		}
+	});
+
 	it("normalizes {} → true for TypeBox / raw JSON Schema tools", () => {
 		const wire = toolWireSchema(
 			jsonTool({
@@ -467,6 +486,22 @@ describe("stripToolDescriptions", () => {
 		expect((stripped.parameters as { properties: Record<string, { type: string }> }).properties.path.type).toBe(
 			"string",
 		);
+	});
+
+	it("materializes and strips the provider override without retaining an override that bypasses stripping", () => {
+		const wireParameters = {
+			type: "object",
+			description: "provider annotation",
+			properties: { hint: { type: "string", description: "hint annotation" } },
+			additionalProperties: true,
+		};
+		const deferred = { ...tool, wireParameters };
+		const [stripped] = stripToolDescriptions([deferred]);
+		expect(stripped.wireParameters).toBeUndefined();
+		expect(toolWireSchema(stripped).properties).toEqual({ hint: { type: "string" } });
+		expect(JSON.stringify(toolWireSchema(stripped))).not.toContain("annotation");
+		expect(deferred.wireParameters).toBe(wireParameters);
+		expect(toolWireSchema(deferred).description).toBe("provider annotation");
 	});
 
 	it("leaves the original tool and the cached wire schema intact", () => {

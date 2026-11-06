@@ -32,6 +32,9 @@
 - Fixed reranking when Cohere-compatible responses omit the model field
 - Reranking requests now send configured model headers, including custom `Authorization`
 - Provider retries no longer retry responses explicitly marked non-retryable
+### Added
+
+- Tools can advertise lightweight `wireParameters` while retaining their full execution schema ([#16874](https://github.com/can1357/oh-my-pi/pull/16874) by [@ultravioletcatastrophe](https://github.com/ultravioletcatastrophe))
 
 ## [18.16.0] - 2026-11-02
 
