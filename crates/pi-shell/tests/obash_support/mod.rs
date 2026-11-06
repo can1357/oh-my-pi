@@ -44,36 +44,25 @@ const SYSTEM_DIRS: &[&str] = &[];
 /// exists to remove, arrived at by the harness itself. Found by review
 /// on a host where every caller entry was rejected.
 ///
-/// The entry is this test binary's own path. A lookup of `sh` through it
-/// asks for `<this binary>/sh`, which is not a path a file can have, so
-/// the search finds nothing and stops; the test that needed a program
-/// then fails on that program, which is what a reader can act on.
+/// So the entry has to be one no program can ever be found through. It
+/// is a single name of five thousand characters: longer than a name any
+/// filesystem accepts (`NAME_MAX` is 255) and longer than a whole path
+/// (`PATH_MAX` is 4096 on Linux, 1024 on macOS), so every lookup
+/// through it fails with `ENAMETOOLONG` before any directory is read,
+/// and nothing can be put there because creating it fails the same way.
 ///
-/// It is the binary's own path rather than a name like `/dev/null`
-/// because this has to hold no programs on EVERY host, and naming a
-/// system path only moves the question to whether that path is what we
-/// think it is. A reviewer mounted a directory of programs at
-/// `/dev/null` and the harness ran one. The running binary needs no such
-/// assumption: anybody who can turn it into a directory of programs has
-/// already replaced the test.
-///
-/// The binary's path still has to be a legal `PATH` entry, and the
-/// question is asked of the function that would reject it rather than of
-/// a hardcoded character — the same check the directories above get. It
-/// is not hypothetical: a binary under a directory named `a::b` produces
-/// an **empty** entry between the colons, which is the working directory
-/// again, and the test went green on an `sh` planted there.
-///
-/// `current_exe` failing, or naming a path no `PATH` can carry, leaves
-/// the root directory: whatever else it is, it is not the working
-/// directory, and a host that cannot name the binary it is running has
-/// nothing better to offer.
+/// That is a limit the kernel enforces, and it is deliberately not a
+/// NAME. Three names were tried first and review ran a program through
+/// each: `/dev/null`, which can be a directory; this test binary's own
+/// path, which becomes a free name to create once the binary is deleted
+/// and Linux reports it as `<path> (deleted)`; and the root directory,
+/// which is a directory by definition, so an `/sh` is found through it.
+/// Every name can be made to hold a program by whoever controls that
+/// part of the filesystem. A length cannot.
 fn no_programs() -> OsString {
-	std::env::current_exe()
-		.ok()
-		.map(PathBuf::into_os_string)
-		.filter(|path| std::env::join_paths([path]).is_ok())
-		.unwrap_or_else(|| OsString::from(std::path::MAIN_SEPARATOR_STR))
+	let mut entry = String::from(std::path::MAIN_SEPARATOR);
+	entry.push_str(&"x".repeat(5000));
+	OsString::from(entry)
 }
 
 /// The `PATH` the test process gets, instead of the caller's: the
