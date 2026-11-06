@@ -29,7 +29,7 @@ use super::{
 };
 use crate::bash::{
 	diag::Diag,
-	event::{EventData, NodeKind, RedirKind, ResolvedKind, WaitKey},
+	event::{EventData, NodeKind, RedirKind, ResolvedKind, WaitKey, assign_preview},
 	fd::FdRef,
 	fs::StatKind,
 	host::{
@@ -1081,10 +1081,9 @@ fn expand(
 				&& matches!(name.as_slice(), b"BASH_ALIASES" | b"BASH_CMDS" | b"DIRSTACK" | b"RANDOM")
 			{
 				let scope = assign_scope(vp);
-				let cut = &shown[..shown.len().min(256)];
 				k.emit_op(cx, vp, node, EventData::Assign {
 					name: BStr::new(&name),
-					value: BStr::new(cut),
+					value: BStr::new(assign_preview(&shown)),
 					full_len: shown.len(),
 					scope,
 				});

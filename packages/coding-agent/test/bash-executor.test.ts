@@ -129,6 +129,18 @@ describe("executeBash", () => {
 		expect(shellVisualization(result.trace)).toBe(snapshots[0]);
 	});
 
+	it("finishes the command when a trace snapshot fails validation", async () => {
+		// A non-UTF-8 assignment value serializes as a byte array, which the wire guard rejects;
+		// the timer poll must skip it instead of throwing an uncaught exception.
+		const result = await executeBash("v=$(printf '\\377'); sleep 0.3; echo done", {
+			cwd: tempDir,
+			timeout: 5000,
+			onTrace: () => {},
+		});
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("done");
+	});
+
 	it("omits minimizer options when the feature is disabled", () => {
 		const group: ShellMinimizerSettings = {
 			enabled: false,
