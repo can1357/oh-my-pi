@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Disabling `display.shellVisualization` now omits bash execution traces from tool updates and saved sessions, including in ACP ([#18267](https://github.com/can1357/oh-my-pi/issues/18267)).
+
 ## [18.17.0] - 2026-11-06
 
 ### Added
