@@ -225,6 +225,17 @@ describe("context snapshot prompt sources", () => {
 		expect(entryTexts(moved, "skills")).toEqual([]);
 		expect(entryTexts(moved, "instruction-files")).toEqual([]);
 		expect(entryTexts(moved, "system-prompt")).toEqual([project, policy]);
+
+		const edited = buildSessionContextView(
+			sessionWith({
+				prompt: [policy!, project!.replace("Unique instruction body", "Edited instruction body")],
+				sources: built.sources,
+				skills,
+			}),
+		);
+		expect(edited.notices).toEqual([notice]);
+		expect(entryTexts(edited, "instruction-files")).toEqual([]);
+		expect(entryTexts(edited, "system-prompt")[1]).toContain("Edited instruction body");
 	});
 
 	it("shows no notice when a replacement prompt drops every source, and keeps empty blocks listed", async () => {
