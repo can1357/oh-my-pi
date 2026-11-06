@@ -2365,6 +2365,25 @@ async function writeWarningBeforeDeleting(text: string): Promise<void> {
 	await promise;
 }
 
+/**
+ * Whether a run produced anything worth printing: one completed phase.
+ *
+ * A failing run reports what it already did, and that is only meaningful
+ * when a phase put a result on the record. Every other field of `GcResult`
+ * — the agent directory, `apply`, the lock path — describes the attempt,
+ * not the work, so a summary built from those alone announces a maintenance
+ * run that never happened.
+ */
+function hasPhaseResult(result: GcResult): boolean {
+	return (
+		result.stale !== undefined ||
+		result.blobs !== undefined ||
+		result.archive !== undefined ||
+		result.compress !== undefined ||
+		result.wal !== undefined
+	);
+}
+
 export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	const options = await resolveOptions(args.flags);
 	const archiveRoot = getArchivedSessionsDir(options.agentDir);
@@ -2405,14 +2424,16 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 		});
 	} catch (error) {
 		// What the run did before it failed, on the same stream and in the
-		// same shape as a run that did not — but only once this run was the
-		// one holding the lock. A failure before the callback starts, a held
-		// `gc.lock` above all, means no phase ran and there is nothing to
-		// report: printing the skeleton there said `GC applied (<dir>)`, and
-		// emitted a nominal JSON result, for a run that did nothing at all.
-		// `lockPath` is set as the callback's first act, so it is exactly the
-		// record of whether this run got that far.
-		if (next.lockPath !== "") report();
+		// same shape as a run that did not — but only when it did something.
+		// The question is never "did this run reach some point in the code",
+		// it is "is there a phase result to report", so that is what is
+		// asked: an empty summary after a failure is the thing being fixed,
+		// not a thing to reproduce one step later. A held `gc.lock` fails
+		// before the callback; `collectRegisteredSessionPaths` can fail on an
+		// unreadable `custom-session-files` immediately after it starts; both
+		// printed `GC applied (<dir>)`, and a metadata-only object under
+		// `--json`, for a run that touched nothing.
+		if (hasPhaseResult(next)) report();
 		throw error;
 	}
 	report();

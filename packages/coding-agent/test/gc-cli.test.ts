@@ -3060,6 +3060,38 @@ describe("runGcCommand blob reclamation is opt-in and announced", () => {
 		});
 	}
 
+	test("says nothing when a run fails after taking the lock but before any phase", async () => {
+		// The lock is free and the callback starts; the very first thing it
+		// does, listing the session-marker registry, fails. Reaching a point
+		// in the code is not doing work, and an empty summary after a failure
+		// is as misleading here as it is for a held lock.
+		const registry = getCustomSessionFilesDir(root);
+		await fs.mkdir(registry, { recursive: true });
+		await fs.chmod(registry, 0o000);
+		const orphan = await writeBlob(root, hashFor("early-failure"), "orphan");
+		await agePath(orphan);
+
+		const written: string[] = [];
+		const stdout = spyOn(process.stdout, "write").mockImplementation(chunk => {
+			written.push(String(chunk));
+			return true;
+		});
+		let failure: unknown;
+		try {
+			await runGcCommand({ flags: { agentDir: root, archive: true, apply: true } }).catch(error => {
+				failure = error;
+			});
+		} finally {
+			stdout.mockRestore();
+			// Before the suite's own cleanup, which cannot remove an
+			// unreadable directory.
+			await fs.chmod(registry, 0o755);
+		}
+
+		expect(failure).toBeDefined();
+		expect(written.join("")).toBe("");
+	});
+
 	// POSIX only, and only where a FIFO can actually be made: the contract under
 	// test is kernel backpressure on stderr, which has no Windows equivalent, and
 	// a host without `mkfifo` would otherwise fail here rather than skip.
