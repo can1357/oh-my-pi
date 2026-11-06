@@ -330,13 +330,24 @@ export interface CompiledPricingPeer {
 }
 
 /**
- * One tier-suffixed route: a wire-id suffix a host appends to name a serving
- * tier, and the tier it names. Stripping the suffix yields the standard-tier
- * peer the same request is servable on.
+ * One tier-suffixed route a host serves: the wire-id suffix it appends to name
+ * a serving tier, and the tier that suffix names. Stripping the suffix yields
+ * the standard-tier peer the same request is servable on.
  */
-export interface CompiledServiceTierPeer {
+export interface CompiledServiceTierSuffix {
 	suffix: string;
 	tier: string;
+}
+
+/**
+ * The tier-suffixed routes one host serves. Host-scoped because the spelling
+ * alone proves nothing: `-fast` is Factory Droid's priority lane, CoralBricks'
+ * renamed GLM slug, and xAI's separately priced Grok 4 Fast model, and only
+ * the first has a standard peer to fall back to.
+ */
+export interface CompiledServiceTierPeer {
+	provider: string;
+	suffixes: CompiledServiceTierSuffix[];
 }
 
 /** Provider timezone assumption for offset-less absolute retry-reset timestamps. */
@@ -359,7 +370,7 @@ export interface CompiledBehavior {
 	excludeModels: CompiledExcludeModels[];
 	planRequirements: CompiledPlanRequirement[];
 	pricingPeers: CompiledPricingPeer[];
-	/** Tier-suffixed wire-id routes, read only after a tier-capacity refusal. */
+	/** Tier-suffixed wire-id routes per host, read only after a tier-capacity refusal. */
 	serviceTierPeers: CompiledServiceTierPeer[];
 	retryResetTimezones: CompiledRetryResetTimezone[];
 	retiredProviders: string[];

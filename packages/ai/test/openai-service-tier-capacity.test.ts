@@ -7,6 +7,7 @@ import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-response
 import type { AssistantMessage, AssistantMessageEvent, Context, FetchImpl, Model, Tool } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { serviceTierPeerFor } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { factoryModel, WORKOS_TOKEN } from "./helpers/factory-droid";
 
 const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 1 }] };
@@ -71,7 +72,12 @@ function responsesOk(): Response {
 function completionsOk(): Response {
 	const chunks = [
 		{ id: "c", object: "chat.completion.chunk", choices: [{ index: 0, delta: { content: "ok" } }] },
-		{ id: "c", object: "chat.completion.chunk", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+		{
+			id: "c",
+			object: "chat.completion.chunk",
+			choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+			usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+		},
 	];
 	return new Response(`${chunks.map(chunk => `data: ${JSON.stringify(chunk)}`).join("\n\n")}\n\ndata: [DONE]\n\n`, {
 		status: 200,
@@ -115,6 +121,18 @@ async function drainToFailure(stream: AsyncIterable<AssistantMessageEvent>): Pro
 	throw new Error("stream was expected to fail");
 }
 
+/**
+ * A tier route's own cost card. A host that sells a tier sells it at its own
+ * rate — OpenAI's flex lists at half the standard pool — and which of the two
+ * cards a recovered turn is billed at is the whole accounting question here.
+ * Both cards must be nonzero and must differ, or every cost assertion in this
+ * file passes whatever the code does.
+ */
+const TIER_ROUTE_COST = { input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25 };
+/** What the same row costs where its id names no tier: twice the flex rate. */
+const PLAIN_ROUTE_COST = { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 };
+const TIER_SUFFIXED_ID = /-(?:flex|scale|priority|ultrafast|fast)$/;
+
 function responsesModel(id: string): Model<"openai-responses"> {
 	return buildModel({
 		id,
@@ -124,7 +142,7 @@ function responsesModel(id: string): Model<"openai-responses"> {
 		baseUrl: "https://api.openai.test/v1",
 		reasoning: false,
 		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		cost: TIER_SUFFIXED_ID.test(id) ? TIER_ROUTE_COST : PLAIN_ROUTE_COST,
 		contextWindow: 200_000,
 		maxTokens: 32_000,
 	}) as Model<"openai-responses">;
@@ -139,9 +157,30 @@ function completionsModel(id: string): Model<"openai-completions"> {
 		baseUrl: "https://api.openai.test/v1",
 		reasoning: false,
 		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		cost: TIER_SUFFIXED_ID.test(id) ? TIER_ROUTE_COST : PLAIN_ROUTE_COST,
 		contextWindow: 200_000,
 		maxTokens: 32_000,
+	}) as Model<"openai-completions">;
+}
+
+/**
+ * A CoralBricks row. Coral renamed its GLM slug to `glm-5.3-fast` on
+ * 2026-10-07 and ships no `glm-5.3`
+ * (`compat/rules/providers/coralbricks.kdl`), so the suffix there is part of
+ * the model's name, not a lane onto a sibling.
+ */
+function coralbricksModel(id: string): Model<"openai-completions"> {
+	return buildModel({
+		id,
+		name: id,
+		api: "openai-completions",
+		provider: "coralbricks",
+		baseUrl: "https://inference.coralbricks.test/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 1.12, output: 4.4, cacheRead: 0, cacheWrite: 1.68 },
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
 	}) as Model<"openai-completions">;
 }
 
@@ -169,15 +208,28 @@ describe("service-tier capacity refusals", () => {
 		expect(AIError.isServiceTierCapacityError(prose)).toBe(false);
 	});
 
-	it("reads the standard peer of a tier-suffixed wire id, longest suffix first", () => {
-		expect(serviceTierPeerFor("gpt-6.1-sol-flex")).toEqual({ peerId: "gpt-6.1-sol", tier: "flex" });
+	it("reads the standard peer of a tier-suffixed wire id on the hosts that declare one", () => {
+		expect(serviceTierPeerFor("openai", "gpt-6.1-sol-flex")).toEqual({ peerId: "gpt-6.1-sol", tier: "flex" });
 		// `-ultrafast` must never be read as the shorter `-fast`.
-		expect(serviceTierPeerFor("gpt-6.1-sol-ultrafast")).toEqual({ peerId: "gpt-6.1-sol", tier: "ultrafast" });
-		expect(serviceTierPeerFor("gpt-6.1-sol-fast")).toEqual({ peerId: "gpt-6.1-sol", tier: "priority" });
-		// An id carrying no declared tier suffix, and one that is nothing but the
-		// suffix, both have no peer.
-		expect(serviceTierPeerFor("gpt-6.1-sol")).toBeUndefined();
-		expect(serviceTierPeerFor("-flex")).toBeUndefined();
+		expect(serviceTierPeerFor("factory-droid", "gpt-6.1-sol-ultrafast")).toEqual({
+			peerId: "gpt-6.1-sol",
+			tier: "ultrafast",
+		});
+		expect(serviceTierPeerFor("factory-droid", "gpt-6-sol-fast")).toEqual({
+			peerId: "gpt-6-sol",
+			tier: "priority",
+		});
+		// An id carrying none of the host's suffixes, and one that is nothing but
+		// the suffix, both have no peer.
+		expect(serviceTierPeerFor("openai", "gpt-6.1-sol")).toBeUndefined();
+		expect(serviceTierPeerFor("openai", "-flex")).toBeUndefined();
+		// The spelling is not the rule. `-fast` is CoralBricks' renamed GLM slug
+		// (it ships no `glm-5.3`) and xAI's separately priced Grok 4 Fast model,
+		// so neither host may have a peer invented for it — and the hosts that do
+		// declare `-fast` do not thereby declare it everywhere.
+		expect(serviceTierPeerFor("coralbricks", "glm-5.3-fast")).toBeUndefined();
+		expect(serviceTierPeerFor("xai", "grok-4-fast")).toBeUndefined();
+		expect(serviceTierPeerFor("openai", "gpt-6.1-sol-fast")).toBeUndefined();
 	});
 
 	it("responses: re-aims a refused flex route at its standard peer and completes", async () => {
@@ -412,5 +464,70 @@ describe("service-tier capacity refusals", () => {
 		expect(message.stopReason).toBe("stop");
 		expect(sent.map(entry => entry.model)).toEqual(["gpt-6.1-sol-ultrafast", "gpt-6.1-sol"]);
 		expect(sent[1]?.serviceTier).toBeUndefined();
+	});
+
+	it("responses: a turn recovered onto the standard peer is billed at the peer's rate", async () => {
+		// The tier row lists at half its peer. Once the recovery rewrote the wire
+		// id the standard SKU served the turn, so the peer's card is the charge;
+		// keeping the refused row's card under-reports the spend by the discount
+		// the host just declined to honour.
+		const peer = getBundledModel("openai", "gpt-6.1-sol");
+		const { fetch } = recordingFetch(entry => (entry.model.endsWith("-flex") ? tierUnavailable() : responsesOk()));
+		const message = await collect(
+			streamOpenAIResponses(responsesModel("gpt-6.1-sol-flex"), context, { apiKey: "k", fetch }),
+		);
+		expect(message.stopReason).toBe("stop");
+		// `responsesOk` reports one input and one output token.
+		expect(message.usage.cost.total).toBeCloseTo((peer.cost.input + peer.cost.output) / 1_000_000, 12);
+		expect(message.usage.cost.total).not.toBeCloseTo(
+			(TIER_ROUTE_COST.input + TIER_ROUTE_COST.output) / 1_000_000,
+			12,
+		);
+	});
+
+	it("completions: a turn recovered onto the standard peer is billed at the peer's rate", async () => {
+		const peer = getBundledModel("openai", "gpt-6.1-sol");
+		const { fetch } = recordingFetch(entry => (entry.model.endsWith("-flex") ? tierUnavailable() : completionsOk()));
+		const message = await collect(
+			streamOpenAICompletions(completionsModel("gpt-6.1-sol-flex"), context, { apiKey: "k", fetch }),
+		);
+		expect(message.stopReason).toBe("stop");
+		expect(message.usage.cost.total).toBeCloseTo((peer.cost.input + peer.cost.output) / 1_000_000, 12);
+		expect(message.usage.cost.total).not.toBeCloseTo(
+			(TIER_ROUTE_COST.input + TIER_ROUTE_COST.output) / 1_000_000,
+			12,
+		);
+	});
+
+	it("responses: a peer the bundle does not carry leaves the refused row's own card in place", async () => {
+		// The peer id is a route, not a price: a row discovered off a gateway has
+		// no bundled sibling to read a card from. Reporting the row's own rate is
+		// a known under-report; inventing a rate for a model the catalog has never
+		// seen would be worse, so the recovery changes the route and not the card.
+		const { fetch, sent } = recordingFetch(entry =>
+			entry.model.endsWith("-flex") ? tierUnavailable() : responsesOk(),
+		);
+		const message = await collect(
+			streamOpenAIResponses(responsesModel("qa-capacity-probe-flex"), context, { apiKey: "k", fetch }),
+		);
+		expect(sent.map(entry => entry.model)).toEqual(["qa-capacity-probe-flex", "qa-capacity-probe"]);
+		expect(message.usage.cost.total).toBeCloseTo((TIER_ROUTE_COST.input + TIER_ROUTE_COST.output) / 1_000_000, 12);
+	});
+
+	it("completions: a capacity refusal where `-fast` is a renamed slug invents no peer", async () => {
+		// CoralBricks ships `glm-5.3-fast` and no `glm-5.3`. A capacity code on
+		// its own says nothing about what the suffix means, so the id must stay
+		// put: stripping it would turn a transient refusal into a request for a
+		// model that does not exist. With no reroute, the transport retry — the
+		// only recovery such a host has — stays available.
+		let refusals = 0;
+		const { fetch, sent } = recordingFetch(() =>
+			refusals++ === 0 ? tierUnavailable("service_tier_unavailable") : completionsOk(),
+		);
+		const message = await collect(
+			streamOpenAICompletions(coralbricksModel("glm-5.3-fast"), context, { apiKey: "k", fetch }),
+		);
+		expect(message.stopReason).toBe("stop");
+		expect(sent.map(entry => entry.model)).toEqual(["glm-5.3-fast", "glm-5.3-fast"]);
 	});
 });

@@ -232,26 +232,38 @@ export function pricingPeerFor(
 }
 
 /**
- * The standard-tier peer of a tier-suffixed wire id, and the tier its suffix
- * names: `gpt-6.1-sol-flex` → `{ peerId: "gpt-6.1-sol", tier: "flex" }`. The
- * longest declared suffix wins, so `-ultrafast` is never read as `-fast`.
+ * The standard-tier peer of a tier-suffixed wire id on a given host, and the
+ * tier its suffix names: `("openai", "gpt-6.1-sol-flex")` →
+ * `{ peerId: "gpt-6.1-sol", tier: "flex" }`. The longest suffix the host
+ * declares wins, so `-ultrafast` is never read as `-fast`.
+ *
+ * Host-scoped on purpose. A suffix spelling does not make a tier: CoralBricks
+ * renamed its GLM slug to `glm-5.3-fast` and ships no `glm-5.3`, and xAI's
+ * `grok-4-fast` is a cheaper model of its own, not a lane onto `grok-4`.
+ * Stripping a suffix on a host that declares no such pair would send a request
+ * to a model id that does not exist.
  *
  * Read **only** after a host has refused the request for want of capacity on
  * that tier — never during discovery, identity resolution or pricing, where a
  * tier route is its own model with its own metadata and price. Returns
- * `undefined` for an id carrying no declared tier suffix, and for one that is
- * nothing but the suffix.
+ * `undefined` for a host that declares no tier routes, for an id carrying none
+ * of that host's suffixes, and for one that is nothing but the suffix.
  */
-export function serviceTierPeerFor(wireModelId: string): { peerId: string; tier: string } | undefined {
+export function serviceTierPeerFor(
+	provider: string,
+	wireModelId: string,
+): { peerId: string; tier: string } | undefined {
+	const rule = behavior.serviceTierPeers.find(candidate => candidate.provider === provider);
+	if (!rule) return undefined;
 	let match: { peerId: string; tier: string } | undefined;
 	let matchedLength = 0;
 	const lower = wireModelId.toLowerCase();
-	for (const rule of behavior.serviceTierPeers) {
-		if (rule.suffix.length <= matchedLength || !lower.endsWith(rule.suffix)) continue;
-		const peerId = wireModelId.slice(0, -rule.suffix.length);
+	for (const entry of rule.suffixes) {
+		if (entry.suffix.length <= matchedLength || !lower.endsWith(entry.suffix)) continue;
+		const peerId = wireModelId.slice(0, -entry.suffix.length);
 		if (!peerId) continue;
-		match = { peerId, tier: rule.tier };
-		matchedLength = rule.suffix.length;
+		match = { peerId, tier: entry.tier };
+		matchedLength = entry.suffix.length;
 	}
 	return match;
 }

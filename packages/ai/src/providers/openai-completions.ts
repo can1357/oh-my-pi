@@ -1,7 +1,7 @@
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
-import { calculateCost } from "@oh-my-pi/pi-catalog/models";
+import { calculateUsageCost } from "@oh-my-pi/pi-catalog/models";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { clinePassClientHeaders } from "@oh-my-pi/pi-catalog/wire/cline-pass";
 import {
@@ -122,6 +122,7 @@ import {
 	resolveOpenAIRequestSetup,
 	reapplyServiceTierCapacityRetryAfterHook,
 	resolveServiceTierCapacityRetry,
+	resolveServiceTierPeerCost,
 	type ServiceTierCapacityRetry,
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
@@ -1014,7 +1015,7 @@ const streamOpenAICompletionsOnce = (
 						// when this request has somewhere else to go, so a deployment
 						// with no standard peer keeps today's recovery.
 						shouldRetryResponse: (_response, bodyText) =>
-							!(canRerouteServiceTierCapacity(params) && isServiceTierCapacityRejection(bodyText)),
+							!(canRerouteServiceTierCapacity(model, params) && isServiceTierCapacityRejection(bodyText)),
 						// Transient 408/429/5xx get Retry-After-aware transport retries.
 						// The first-event watchdog above aborts `requestSignal`, which
 						// bounds every attempt and backoff sleep — retries cannot
@@ -1074,7 +1075,7 @@ const streamOpenAICompletionsOnce = (
 							: undefined;
 					const tierCapacityRetry =
 						!serviceTierCapacityRetry && activeRequestParams && !requestSignal.aborted
-							? resolveServiceTierCapacityRetry(error, activeRequestParams)
+							? resolveServiceTierCapacityRetry(error, model, activeRequestParams)
 							: undefined;
 					if (reasoningEffortFallback !== undefined && activeReasoningEffortFallbackKey) {
 						const retryMarker = `${activeReasoningEffortFallbackKey}:${String(reasoningEffortFallback)}`;
@@ -1436,6 +1437,9 @@ const streamOpenAICompletionsOnce = (
 					premiumRequestsTotal,
 					output.timestamp,
 					parseFireworksCachedPromptTokens(responseHeaders),
+					// A capacity recovery moved the turn onto the peer SKU, which has
+					// its own price; `undefined` keeps the model's own card.
+					resolveServiceTierPeerCost(model, serviceTierCapacityRetry),
 				);
 				sawUsagePayload = true;
 				awaitTrailingUsageDetails = !hasPositiveCacheReadTokenField(rawUsage);
@@ -2360,6 +2364,12 @@ export function parseChunkUsage(
 	premiumRequests: number | undefined,
 	timestamp?: number,
 	cachedTokensHeader?: number,
+	/**
+	 * Cost card the turn is priced from, when the request was served by a route
+	 * other than the model row's own — a tier-capacity recovery that re-aimed it
+	 * at its standard peer. Defaults to the model's own card.
+	 */
+	servedCost?: Model["cost"],
 ): AssistantMessage["usage"] {
 	const usageLike = rawUsage as OpenAICompletionsUsageLike;
 	const rawPromptTokenDetails = usageLike.prompt_tokens_details;
@@ -2416,7 +2426,8 @@ export function parseChunkUsage(
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		...(premiumRequests !== undefined ? { premiumRequests } : {}),
 	};
-	calculateCost(model, usage, timestamp);
+	// A gateway-reported charge, applied next, still overrides this estimate.
+	calculateUsageCost(servedCost ?? model.cost, usage, timestamp);
 	applyProviderReportedCost(model, usage, rawUsage);
 	return usage;
 }

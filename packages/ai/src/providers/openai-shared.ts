@@ -3,7 +3,7 @@ import { serviceTierPeerFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { toFirepassWireModelId, toFireworksWireModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
-import { calculateCost } from "@oh-my-pi/pi-catalog/models";
+import { calculateUsageCost, getBundledModel, isGeneratedProvider } from "@oh-my-pi/pi-catalog/models";
 import type {
 	CatalogPolicyInputs,
 	OpenAICompat,
@@ -1466,7 +1466,9 @@ export interface ServiceTierCapacityRetry {
  * a 500). A tier can be named two ways, and a request may use both:
  *
  *  - in the wire id, where `<plain>-flex` is a route onto flex capacity — the
- *    peer comes from the catalog's `service-tier-peer` vocabulary; and
+ *    peer comes from the catalog's `service-tier-peer` vocabulary, which
+ *    declares the suffix per host, so a spelling another host reuses for a
+ *    renamed slug or a separate model is never mistaken for a tier; and
  *  - in the `service_tier` field, where the same id serves every tier.
  *
  * Returns `undefined` when the failure is not a tier-capacity refusal, and —
@@ -1475,11 +1477,12 @@ export interface ServiceTierCapacityRetry {
  */
 export function resolveServiceTierCapacityRetry(
 	error: unknown,
+	model: Pick<Model, "provider">,
 	params: { model?: unknown; service_tier?: unknown },
 ): ServiceTierCapacityRetry | undefined {
 	if (!AIError.isServiceTierCapacityError(error)) return undefined;
 	const refusedModel = typeof params.model === "string" ? params.model : undefined;
-	const peer = refusedModel !== undefined ? serviceTierPeerFor(refusedModel) : undefined;
+	const peer = refusedModel !== undefined ? serviceTierPeerFor(model.provider, refusedModel) : undefined;
 	const refusedServiceTier =
 		typeof params.service_tier === "string" && params.service_tier !== "default" ? params.service_tier : undefined;
 	if (!peer && refusedServiceTier === undefined) return undefined;
@@ -1496,9 +1499,35 @@ export function resolveServiceTierCapacityRetry(
  * tier in either spelling has no reroute above it, so resending it is still
  * the only recovery it has and must stay available.
  */
-export function canRerouteServiceTierCapacity(params: { model?: unknown; service_tier?: unknown }): boolean {
-	if (typeof params.model === "string" && serviceTierPeerFor(params.model) !== undefined) return true;
+export function canRerouteServiceTierCapacity(
+	model: Pick<Model, "provider">,
+	params: { model?: unknown; service_tier?: unknown },
+): boolean {
+	if (typeof params.model === "string" && serviceTierPeerFor(model.provider, params.model) !== undefined) return true;
 	return typeof params.service_tier === "string" && params.service_tier !== "default";
+}
+
+/**
+ * The cost card a turn recovered onto the standard peer must be billed at.
+ *
+ * A tier route is its own SKU with its own price — a flex row typically lists
+ * at half its standard peer. Once the recovery rewrote the wire id, the turn
+ * was served by the peer, so the peer's card is what the charge comes from;
+ * keeping the refused row's card under-reports the spend by whatever discount
+ * the tier carried.
+ *
+ * Only the bundled catalog is consulted. A peer the bundle does not carry — a
+ * runtime-discovered gateway row, or a host whose roster lives in a provider
+ * registry rather than `models.json` — leaves the row's own card in place:
+ * there is no second card to read, and inventing one would be worse than
+ * reporting the row's. Returns `undefined` when nothing changes.
+ */
+export function resolveServiceTierPeerCost(
+	model: Pick<Model, "provider" | "cost">,
+	retry: ServiceTierCapacityRetry | undefined,
+): Model["cost"] | undefined {
+	if (retry?.model === undefined || !isGeneratedProvider(model.provider)) return undefined;
+	return getBundledModel(model.provider, retry.model)?.cost;
 }
 
 /**
@@ -3389,6 +3418,12 @@ export interface ProcessResponsesStreamOptions {
 	 */
 	requestServiceTier?: ServiceTier;
 	/**
+	 * Cost card the turn is priced from, when the request was served by a route
+	 * other than the model row's own — a tier-capacity recovery that re-aimed
+	 * it at its standard peer. Defaults to the model's own card.
+	 */
+	servedCost?: Model["cost"];
+	/**
 	 * Declared tool name per wire name (`toolNamesByWire` in `utils/tool-names`). A
 	 * returned `function_call` dispatches to the tool it was offered as; a name
 	 * the map lacks passes through unchanged.
@@ -4025,7 +4060,10 @@ export async function processResponsesStream<TApi extends Api>(
 				output.responseId = response.id;
 			}
 			populateResponsesUsageFromResponse(output, response?.usage);
-			calculateCost(model, output.usage, output.timestamp);
+			// The served route's card, which is the model's own unless a capacity
+			// recovery moved the request to its standard peer. A gateway-reported
+			// charge still wins below.
+			calculateUsageCost(options?.servedCost ?? model.cost, output.usage, output.timestamp);
 			applyProviderReportedCost(model, output.usage, response?.usage);
 			output.serviceTier = applyOpenAIResponsesServiceTierCost(
 				model,
@@ -4379,7 +4417,7 @@ export function applyResponsesReasoningParams<P extends ResponseCreateParamsStre
 	);
 }
 
-/** Populate `output.usage` from a Responses-API `response.usage` payload. Does not invoke `calculateCost`. */
+/** Populate `output.usage` from a Responses-API `response.usage` payload. Does not price it. */
 export function populateResponsesUsageFromResponse(
 	output: AssistantMessage,
 	usage:

@@ -419,14 +419,30 @@ behavior {
 	//
 	// Read only after such a refusal, never during discovery, identity
 	// resolution or pricing, so a tier route keeps its own metadata and its own
-	// price. The longest matching suffix wins, so `-ultrafast` is never read as
-	// `-fast`. `-fast` covers Factory Droid's and Codex's priority routes;
-	// Cursor's `-fast` effort lane shares the spelling but cannot reach here,
-	// because Cursor's Connect error vocabulary carries no tier-capacity code.
-	service-tier-peer {
+	// price. The longest matching suffix wins within a host, so `-ultrafast` is
+	// never read as `-fast`.
+	//
+	// Every rule names its host, because a capacity error code does not
+	// establish that a suffix is a tier — the spelling is reused for unrelated
+	// things, and a host-blind rule would swap in a sibling that does not
+	// exist. `-fast` alone is CoralBricks' renamed GLM 5.3 slug (it ships no
+	// `glm-5.3`), xAI's and OpenRouter's separately priced Grok 4 Fast model,
+	// and NanoGPT's and Wafer's distilled rows. Only a host that declares both
+	// halves of the pair as one model served two ways belongs here.
+	//
+	// `openai` owns the tier names themselves: `flex`, `scale` and `priority`
+	// are the values of OpenAI's own `service_tier` field, so an OpenAI-hosted
+	// id ending in one names that pool for its plain peer.
+	service-tier-peer provider="openai" {
 		suffix "-flex" tier="flex"
 		suffix "-scale" tier="scale"
 		suffix "-priority" tier="priority"
+	}
+	// Factory Droid is the one host in the catalog that declares both halves:
+	// `providers/factory-droid.kdl` gives every `gpt-*-fast` the `priority`
+	// service tier and every `gpt-*-ultrafast` the `ultrafast` one, alongside
+	// the plain rows they fall back to.
+	service-tier-peer provider="factory-droid" {
 		suffix "-ultrafast" tier="ultrafast"
 		suffix "-fast" tier="priority"
 	}

@@ -126,6 +126,7 @@ import {
 	resolveReasoningSummaryOption,
 	reapplyServiceTierCapacityRetryAfterHook,
 	resolveServiceTierCapacityRetry,
+	resolveServiceTierPeerCost,
 	type ServiceTierCapacityRetry,
 	type ResponsesToolNaming,
 	shouldDropAutoToolChoiceForReasoning,
@@ -1065,7 +1066,7 @@ const streamOpenAIResponsesOnce = (
 							// said it has none of — but only decline the transport retry
 							// when this request has somewhere else to go, so a deployment
 							// with no standard peer keeps today's recovery.
-							!(canRerouteServiceTierCapacity(requestParams) && isServiceTierCapacityRejection(bodyText)),
+							!(canRerouteServiceTierCapacity(model, requestParams) && isServiceTierCapacityRejection(bodyText)),
 						// Transient 408/429/5xx get Retry-After-aware transport
 						// retries; the first-event watchdog aborts `requestSignal`,
 						// so retries cannot extend the caller's deadline.
@@ -1166,7 +1167,7 @@ const streamOpenAIResponsesOnce = (
 							// at standard serving. Once only — a second refusal means the
 							// peer is genuinely unavailable too, and must surface.
 							if (!serviceTierCapacityRetry && !requestSignal.aborted) {
-								const tierRetry = resolveServiceTierCapacityRetry(error, chained.params);
+								const tierRetry = resolveServiceTierCapacityRetry(error, model, chained.params);
 								if (tierRetry) {
 									serviceTierCapacityRetry = tierRetry;
 									applyServiceTierCapacityRetry(chained.params, tierRetry);
@@ -1305,6 +1306,9 @@ const streamOpenAIResponsesOnce = (
 							sawTerminalResponseEvent = true;
 						},
 						requestServiceTier: effectiveRequestServiceTier(),
+						// A capacity recovery moved the turn onto the peer SKU, which has
+						// its own price; `undefined` keeps the model's own card.
+						servedCost: resolveServiceTierPeerCost(model, serviceTierCapacityRetry),
 						toolNamesByWire: wireToolNames,
 					});
 
@@ -1425,6 +1429,7 @@ const streamOpenAIResponsesOnce = (
 											resumedSawTerminal = true;
 										},
 										requestServiceTier: effectiveRequestServiceTier(),
+										servedCost: resolveServiceTierPeerCost(model, serviceTierCapacityRetry),
 										toolNamesByWire: wireToolNames,
 									},
 								);
