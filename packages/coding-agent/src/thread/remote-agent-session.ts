@@ -458,6 +458,10 @@ export class RemoteAgentSession implements AgentViewSession {
 		return this.#view.skills;
 	}
 
+	get activePersonaName(): null {
+		return null;
+	}
+
 	get isAutoThinking(): boolean {
 		return this.#view.isAutoThinking;
 	}

@@ -97,6 +97,9 @@ function makeContext(setReplicaPersonaName: (name: string | null | undefined) =>
 			resetTranscriptAnchors: () => {},
 		},
 		syncRunningSubagentBadge: () => {},
+		setCollabGuest: (guest: InteractiveModeContext["collabGuest"]) => {
+			Object.assign(ctx, { collabGuest: guest });
+		},
 		eventBus: new EventBus(),
 	} as unknown as InteractiveModeContext;
 	return ctx;

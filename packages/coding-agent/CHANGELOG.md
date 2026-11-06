@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added agent persona cycling: agents with `mode: "primary"` in their frontmatter join a `Tab` / `Ctrl+Tab` cycle in the main chat editor (while the editor is empty), `--agent <name>` picks the starting persona, and the `model` and `order` frontmatter fields set the model a persona loads with and its place in the cycle ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
+- Added an `agent_persona` status-line segment showing the active persona, and `activePersonaName` on `ExtensionContext` for extensions ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
+- Added persona restore on `/resume` and `--resume`: saved messages now record the active persona, and a resumed session reselects the last one, falling back to the first primary agent ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
+
 ### Fixed
 
 - Subagents receive task instructions with their blank lines, Markdown hard breaks, and table spacing intact, whether given inline or via `taskFile`.
@@ -10,6 +16,8 @@
 - `grep -e` and `rg -e` in the bash tool accept patterns that start with `-` (e.g. `grep -e "--canary"`) instead of failing with an unknown-option error.
 - The bash execution visualization keeps updating, and saved traces still restore, after a command handles bytes that aren't valid UTF-8 (e.g. `v=$(printf '\377')`)
 - On Windows, `grep`, `glob` and isolated subagents no longer flash a console window when they query or start the ovnfs daemon.
+- Fixed the startup persona overriding an explicit `--model` or thinking level with its own; explicit startup options now win ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
+- Fixed the active persona's instructions being dropped from the system prompt by any later rebuild, such as a tool-set or model change or the rebuild before each turn ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
 
 ## [18.17.0] - 2026-11-06
 
@@ -143,9 +151,6 @@
 - Bash results the output minimizer rewrote now keep which filter ran and the bytes before and after in the session, and the bash card shows them (`Minimized: git 120.4KB → 3.2KB`) ([#16586](https://github.com/can1357/oh-my-pi/pull/16586) by [@will-bogusz](https://github.com/will-bogusz))
 - Eval completion handles expose `attempts` (JS `await handle.attempts()`, Python `handle.attempts`): each fallback candidate tried, in order, with the model, the reasoning effort sent, its outcome, and the error when it failed ([#17782](https://github.com/can1357/oh-my-pi/pull/17782) by [@xiangnan0811](https://github.com/xiangnan0811))
 - Added `composer.predictionAlternatives` (off by default; `/settings` → Interaction → "Prediction Alternatives", listed while Composer Predictions is on): the same single prediction request returns up to four different next messages, most likely first. Type a few letters to get ghost text for the first one that matches; after inserting one, press Tab again to pick another from a list. Prediction metrics carry how many alternatives were offered (`omp.composer.prediction.choices`), and an accepted prediction now resolves when it retires, with the rank of the alternative inserted last (`omp.composer.prediction.rank`) ([#17796](https://github.com/can1357/oh-my-pi/pull/17796) by [@wolfiesch](https://github.com/wolfiesch))
-- Added agent persona cycling: agents with `mode: "primary"` in their frontmatter join a `Tab` / `Ctrl+Tab` cycle in the main chat editor (while the editor is empty), `--agent <name>` picks the starting persona, and the `model` and `order` frontmatter fields set the model a persona loads with and its place in the cycle ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
-- Added an `agent_persona` status-line segment showing the active persona, and `activePersonaName` on `ExtensionContext` for extensions ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
-- Added persona restore on `/resume` and `--resume`: saved messages now record the active persona, and a resumed session reselects the last one, falling back to the first primary agent ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
 - `/review` and `/annotate code-review` work from a folder of checkouts: `/review owner/repo#123` reviews a GitHub PR from anywhere; `/review ./repo [#123 | !7] [focus]` reviews in that checkout (`#N` a GitHub PR, `!N` a GitLab MR); and outside any repository, the local and open-PR menu choices ask which child repository to use
 
 ### Changed
@@ -178,8 +183,6 @@
 - Fixed a session resumed, or a parked subagent woken, on a later day resending its first message with that day's date, which made Claude drop all of its earlier thinking and missed the prompt cache; earlier messages now keep the date they were sent with ([#15343](https://github.com/can1357/oh-my-pi/issues/15343)) ([#17622](https://github.com/can1357/oh-my-pi/pull/17622) by [@will-bogusz](https://github.com/will-bogusz))
 - `models.yml` accepts `tokenizer: cl100k` on a custom model or override ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
 - Claude no longer receives the reasoning kept in a snapcompact archive whose summary an extension wrote without the reasoning legend, with or without image input, and reads that summary's own words instead of a generic one ([#17745](https://github.com/can1357/oh-my-pi/pull/17745) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed the startup persona overriding an explicit `--model` or thinking level with its own; explicit startup options now win ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
-- Fixed the active persona's instructions being dropped from the system prompt by any later rebuild, such as a tool-set or model change or the rebuild before each turn ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
 - Fixed `~/.omp/agent/agent.db` getting corrupted (wiping stored logins) on Linux when grep, `read`, the bash tool, extensions or eval read it while omp has it open; `write` and `tts` now refuse to overwrite a database omp holds open ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
 
 ## [18.15.0] - 2026-11-01
