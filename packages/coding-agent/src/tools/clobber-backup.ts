@@ -45,6 +45,16 @@ const STORE_BUDGET_BYTES = 2 * 1024 * 1024 * 1024;
 /** Largest file copied aside. Past this the loss is reported instead, so one huge write cannot fill the disk. */
 const MAX_BACKUP_BYTES = 64 * 1024 * 1024;
 
+/**
+ * Suffix on a copy that outgrew {@link MAX_BACKUP_BYTES} while it was being
+ * taken. The cap is decided from a `stat` before the copy, so a source another
+ * writer extends in between lands a copy above it. Throwing that copy away to
+ * keep the arithmetic tidy would destroy the one thing this module exists to
+ * keep, so it is kept and marked, and the sweep weighs a marked copy instead of
+ * assuming the cap holds for it.
+ */
+const OVERSIZE_SUFFIX = ".oversize";
+
 const DAY_DIR_RE = /^\d{4}-\d{2}-\d{2}$/;
 const INDEX_NAME = "index.jsonl";
 
@@ -357,11 +367,16 @@ async function sweepStore(root: string, today: string): Promise<void> {
 		const dayDir = path.join(root, day);
 		const found = await dayEntries(dayDir);
 		entries.set(day, found);
-		const indexes = found.filter(e => e.dir === dayDir && e.name === INDEX_NAME);
-		for (const index of indexes) {
-			ceiling += (await fs.stat(path.join(index.dir, index.name)).catch(() => undefined))?.size ?? 0;
+		// The index has no cap, and neither has a copy whose source grew while it
+		// was being taken; both are measured. Everything else passed the per-file
+		// cap before it landed, so counting it is a sound upper bound.
+		const measured = found.filter(
+			e => (e.dir === dayDir && e.name === INDEX_NAME) || e.name.endsWith(OVERSIZE_SUFFIX),
+		);
+		for (const entry of measured) {
+			ceiling += (await fs.stat(path.join(entry.dir, entry.name)).catch(() => undefined))?.size ?? 0;
 		}
-		ceiling += (found.length - indexes.length) * MAX_BACKUP_BYTES;
+		ceiling += (found.length - measured.length) * MAX_BACKUP_BYTES;
 	}
 	if (ceiling <= STORE_BUDGET_BYTES) return;
 	let total = 0;
@@ -419,11 +434,29 @@ export async function backupBeforeClobber(
 		const day = dayKey(now);
 		const root = getClobberBackupsDir();
 		const dayDir = path.join(root, day);
-		const destination = path.join(dayDir, backupFileName(now, path.basename(target)));
+		let destination = path.join(dayDir, backupFileName(now, path.basename(target)));
 		await fs.mkdir(dayDir, { recursive: true });
 		// A reflink where the filesystem has one, a plain copy everywhere else —
 		// never a hard link, which the in-place truncate below would follow.
 		await fs.copyFile(target, destination, fs.constants.COPYFILE_FICLONE);
+		// What landed is what the index and the note must report: the size above
+		// was read before the copy, and a source another writer extended in
+		// between is both larger than that and larger than the cap allowed.
+		size = (await fs.stat(destination).catch(() => undefined))?.size ?? size;
+		if (size > MAX_BACKUP_BYTES) {
+			const marked = `${destination}${OVERSIZE_SUFFIX}`;
+			const renamed = await fs
+				.rename(destination, marked)
+				.then(() => true)
+				.catch(error => {
+					logger.warn("Could not mark an oversized copy; the budget will undercount it", {
+						to: destination,
+						error: String(error),
+					});
+					return false;
+				});
+			if (renamed) destination = marked;
+		}
 		// Past this point the bytes ARE saved, so nothing below may downgrade the
 		// answer to "could not be copied": the index and the sweep are bookkeeping,
 		// and a caller told its content is gone when a copy exists is worse than a

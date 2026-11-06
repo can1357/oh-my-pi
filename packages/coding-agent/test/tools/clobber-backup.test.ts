@@ -371,6 +371,26 @@ describe("copy-before-clobber: a file this session did not create", () => {
 		expect(await Bun.file(kept).exists()).toBe(false);
 		expect(await backupFiles()).toHaveLength(1);
 	});
+
+	test("a copy that outgrew the per-file cap is weighed, not assumed", async () => {
+		// A source another writer extends between the cap's `stat` and the copy
+		// lands a copy above the cap. The count gate would charge it 64 MiB
+		// forever; the mark is what makes it get measured instead.
+		const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+		const day = `${twoDaysAgo.getFullYear()}-${`${twoDaysAgo.getMonth() + 1}`.padStart(2, "0")}-${`${twoDaysAgo.getDate()}`.padStart(2, "0")}`;
+		const old = path.join(getClobberBackupsDir(), day);
+		await fs.mkdir(old, { recursive: true });
+		const grew = path.join(old, "120000000-abcdef12-grew.md.oversize");
+		await fs.writeFile(grew, "x");
+		await fs.truncate(grew, 3 * 1024 * 1024 * 1024);
+		await fs.writeFile(path.join(old, "index.jsonl"), `${JSON.stringify({ bytes: 1, to: grew })}\n`);
+		await fs.writeFile(path.join(tempDir, "register.md"), DOOMED);
+
+		await new WriteTool(makeSession(tempDir)).execute("clobber", { path: "register.md", content: "gone\n" });
+
+		expect(await Bun.file(grew).exists()).toBe(false);
+		expect(await backupFiles()).toHaveLength(1);
+	});
 });
 
 describe("copy-before-clobber: another session's directory", () => {
