@@ -122,7 +122,9 @@ import {
 	resolveOpenAIRequestSetup,
 	reapplyServiceTierCapacityRetryAfterHook,
 	resolveServiceTierCapacityRetry,
-	resolveServiceTierPeerCost,
+	resolveServedModelRow,
+	applyOpenAIServiceTierCost,
+	applyServedCopilotPremiumRequests,
 	type ServiceTierCapacityRetry,
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
@@ -946,6 +948,17 @@ const streamOpenAICompletionsOnce = (
 			// Set once the host refuses the serving tier for want of capacity; every
 			// request built after that is re-aimed at standard serving.
 			let serviceTierCapacityRetry: ServiceTierCapacityRetry | undefined;
+			/**
+			 * The tier the request the host accepted actually asked for, used when
+			 * the response carries no tier echo of its own. Once a capacity
+			 * recovery has rewritten the request the caller's original choice is no
+			 * longer what went out, so the sent body answers instead — mirrors the
+			 * Responses streamer.
+			 */
+			const effectiveRequestServiceTier = (): ServiceTier | undefined => {
+				if (!serviceTierCapacityRetry) return options?.serviceTier;
+				return activeRequestParams?.service_tier ?? undefined;
+			};
 			const createCompletionsStream = async (toolStrictModeOverride?: ToolStrictModeOverride) => {
 				const effectiveToolStrictModeOverride = disableStrictTools ? "none" : toolStrictModeOverride;
 				const builtParams = buildParams(model, context, options, effectiveToolStrictModeOverride);
@@ -1427,20 +1440,32 @@ const streamOpenAICompletionsOnce = (
 			let streamFinishedAt: number | undefined;
 			let sawUsagePayload = false;
 			let awaitTrailingUsageDetails = false;
+			/** Last `service_tier` echo seen on a chunk; the tier the turn was billed at. */
+			let servedServiceTier: string | undefined;
 			/** Server-declared repetition stop; classified after the finalization sweep. */
 			let repetitionStop: string | undefined;
 			let nativeFinishError: string | undefined;
-			const applyUsagePayload = (rawUsage: object): void => {
+			const applyUsagePayload = (rawUsage: object, responseServiceTier: unknown): void => {
+				// A capacity recovery moved the turn off the row's route; every
+				// model-keyed part of the record — card, tier table, Copilot premium
+				// weight — follows the one the host accepted. `undefined` keeps the
+				// model's own row.
+				const servedModel = resolveServedModelRow(model, serviceTierCapacityRetry, activeRequestParams?.model);
 				output.usage = parseChunkUsage(
 					rawUsage,
 					model,
 					premiumRequestsTotal,
 					output.timestamp,
 					parseFireworksCachedPromptTokens(responseHeaders),
-					// A capacity recovery moved the turn off the row's SKU, and the
-					// route that was accepted has its own price; `undefined` keeps the
-					// model's own card.
-					resolveServiceTierPeerCost(model, serviceTierCapacityRetry, activeRequestParams?.model),
+					servedModel,
+				);
+				// This wire sends `service_tier` and is billed for it exactly as the
+				// Responses one is, so it accounts for it the same way.
+				output.serviceTier = applyOpenAIServiceTierCost(
+					servedModel ?? model,
+					output.usage,
+					responseServiceTier,
+					effectiveRequestServiceTier(),
 				);
 				sawUsagePayload = true;
 				awaitTrailingUsageDetails = !hasPositiveCacheReadTokenField(rawUsage);
@@ -1499,8 +1524,13 @@ const streamOpenAICompletionsOnce = (
 						typeof upstreamProvider === "string" && upstreamProvider.length > 0 ? upstreamProvider : undefined;
 				}
 
+				// Hosts echo the tier they served on their chunks; latch it so a
+				// trailing usage-only chunk that omits it still prices at the tier
+				// the turn ran on rather than falling back to what was asked for.
+				if (chunk.service_tier != null) servedServiceTier = chunk.service_tier;
+
 				if (chunk.usage) {
-					applyUsagePayload(chunk.usage);
+					applyUsagePayload(chunk.usage, servedServiceTier);
 				}
 
 				const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
@@ -1517,7 +1547,7 @@ const streamOpenAICompletionsOnce = (
 				if (!chunk.usage) {
 					const choiceUsage = (choice as OpenAICompletionsChoiceUsage).usage;
 					if (typeof choiceUsage === "object" && choiceUsage !== null) {
-						applyUsagePayload(choiceUsage);
+						applyUsagePayload(choiceUsage, servedServiceTier);
 					}
 				}
 
@@ -2366,11 +2396,13 @@ export function parseChunkUsage(
 	timestamp?: number,
 	cachedTokensHeader?: number,
 	/**
-	 * Cost card the turn is priced from, when the request was served by a route
-	 * other than the model row's own — a tier-capacity recovery that re-aimed it
-	 * at its standard peer. Defaults to the model's own card.
+	 * Catalog row the turn is accounted against, when the request was served by
+	 * a route other than the model row's own — a tier-capacity recovery, plus
+	 * whatever an `onPayload` hook did after it. Its card and its Copilot
+	 * premium weight apply together; the caller applies its tier table.
+	 * Defaults to the model's own row.
 	 */
-	servedCost?: Model["cost"],
+	servedModel?: Model,
 ): AssistantMessage["usage"] {
 	const usageLike = rawUsage as OpenAICompletionsUsageLike;
 	const rawPromptTokenDetails = usageLike.prompt_tokens_details;
@@ -2428,8 +2460,9 @@ export function parseChunkUsage(
 		...(premiumRequests !== undefined ? { premiumRequests } : {}),
 	};
 	// A gateway-reported charge, applied next, still overrides this estimate.
-	calculateUsageCost(servedCost ?? model.cost, usage, timestamp);
+	calculateUsageCost(servedModel?.cost ?? model.cost, usage, timestamp);
 	applyProviderReportedCost(model, usage, rawUsage);
+	applyServedCopilotPremiumRequests(usage, servedModel);
 	return usage;
 }
 

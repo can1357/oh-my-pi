@@ -126,7 +126,7 @@ import {
 	resolveReasoningSummaryOption,
 	reapplyServiceTierCapacityRetryAfterHook,
 	resolveServiceTierCapacityRetry,
-	resolveServiceTierPeerCost,
+	resolveServedModelRow,
 	type ServiceTierCapacityRetry,
 	type ResponsesToolNaming,
 	shouldDropAutoToolChoiceForReasoning,
@@ -1306,10 +1306,10 @@ const streamOpenAIResponsesOnce = (
 							sawTerminalResponseEvent = true;
 						},
 						requestServiceTier: effectiveRequestServiceTier(),
-						// A capacity recovery moved the turn off the row's SKU, and the
-						// route that was accepted has its own price; `undefined` keeps
-						// the model's own card.
-						servedCost: resolveServiceTierPeerCost(model, serviceTierCapacityRetry, chained.params.model),
+						// A capacity recovery moved the turn off the row's route, and
+						// the one the host accepted carries its own card, tier table
+						// and premium weight; `undefined` keeps the model's own row.
+						servedModel: resolveServedModelRow(model, serviceTierCapacityRetry, chained.params.model),
 						toolNamesByWire: wireToolNames,
 					});
 
@@ -1430,11 +1430,7 @@ const streamOpenAIResponsesOnce = (
 											resumedSawTerminal = true;
 										},
 										requestServiceTier: effectiveRequestServiceTier(),
-										servedCost: resolveServiceTierPeerCost(
-											model,
-											serviceTierCapacityRetry,
-											chained.params.model,
-										),
+										servedModel: resolveServedModelRow(model, serviceTierCapacityRetry, chained.params.model),
 										toolNamesByWire: wireToolNames,
 									},
 								);

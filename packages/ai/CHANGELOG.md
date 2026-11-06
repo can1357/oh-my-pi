@@ -30,6 +30,7 @@
 - Reranking requests now send configured model headers, including custom `Authorization`
 - Provider retries no longer retry responses explicitly marked non-retryable
 - A request the host refuses for want of service-tier capacity (OpenAI's `flex_unavailable`) now retries on the standard tier instead of failing, re-aiming a tier-suffixed model id at its standard peer ([#18233](https://github.com/can1357/oh-my-pi/pull/18233) by [@sjawhar](https://github.com/sjawhar))
+- A turn a service-tier capacity recovery moved elsewhere is now costed, tier-billed and premium-counted on the route the host actually served, and OpenAI Chat Completions turns now record and bill their service tier as Responses turns do ([#18233](https://github.com/can1357/oh-my-pi/pull/18233) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 

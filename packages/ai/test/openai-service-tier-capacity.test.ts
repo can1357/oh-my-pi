@@ -69,13 +69,14 @@ function responsesOk(): Response {
 	});
 }
 
-function completionsOk(): Response {
+function completionsOk(servedServiceTier?: string): Response {
 	const chunks = [
 		{ id: "c", object: "chat.completion.chunk", choices: [{ index: 0, delta: { content: "ok" } }] },
 		{
 			id: "c",
 			object: "chat.completion.chunk",
 			choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+			...(servedServiceTier === undefined ? {} : { service_tier: servedServiceTier }),
 			usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
 		},
 	];
@@ -593,5 +594,132 @@ describe("service-tier capacity refusals", () => {
 		);
 		expect(message.stopReason).toBe("stop");
 		expect(sent.map(entry => entry.model)).toEqual(["glm-5.3-fast", "glm-5.3-fast"]);
+	});
+
+	it("responses: a recovered turn is billed at the tier policy of the model that served it", async () => {
+		// `gpt-5-mini-flex` is refused, the recovery aims at `gpt-5-mini`, and a
+		// hook re-routes the non-strict rebuild to Astra on the ultrafast tier.
+		// Astra's card is already read for the base charge; its tier table has to
+		// come from the same row, or the turn is billed at 1x for a 6x tier.
+		const served = getBundledModel("openai", "gpt-6-astra");
+		expect(served.serviceTierCost?.ultrafast).toBe(6);
+		const { fetch, sent } = recordingFetch(entry => {
+			if (entry.model.endsWith("-flex")) return tierUnavailable();
+			if (sent.length === 2) return strictToolsRejection();
+			return responsesOk();
+		});
+		const message = await collect(
+			streamOpenAIResponses(
+				responsesModel("gpt-5-mini-flex"),
+				{ ...context, tools: [echoTool] },
+				{
+					apiKey: "k",
+					fetch,
+					onPayload: payload => {
+						const body = payload as { model?: unknown };
+						return body.model === "gpt-5-mini"
+							? { ...body, model: "gpt-6-astra", service_tier: "ultrafast" }
+							: body;
+					},
+				},
+			),
+		);
+		expect(message.stopReason).toBe("stop");
+		expect(sent.at(-1)).toEqual({ model: "gpt-6-astra", serviceTier: "ultrafast" });
+		expect(message.serviceTier).toBe("ultrafast");
+		expect(message.usage.premiumRequests).toBe(1);
+		// One input and one output token on Astra's card, at Astra's 6x ultrafast rate.
+		expect(message.usage.cost.total).toBeCloseTo((6 * (served.cost.input + served.cost.output)) / 1_000_000, 12);
+		// The card alone, with the refused row's (absent) tier table: the 1x answer.
+		expect(message.usage.cost.total).not.toBeCloseTo((served.cost.input + served.cost.output) / 1_000_000, 12);
+	});
+
+	it("completions: the served tier is accounted on this wire too, at the served route's policy", async () => {
+		// The Completions wire sends `service_tier` and never accounted for it:
+		// no recorded tier, no premium request, and no multiplier. Each row picks
+		// its multiplier from a different place — Astra's published ultrafast
+		// entry, the API-generic priority default, and the response echo that
+		// overrides what the request asked for.
+		const served = getBundledModel("openai", "gpt-6-astra");
+		const base = (served.cost.input + served.cost.output) / 1_000_000;
+		const rows = [
+			{ requested: "ultrafast", echoed: undefined, tier: "ultrafast", multiplier: 6, premium: 1 },
+			{ requested: "priority", echoed: undefined, tier: "priority", multiplier: 2, premium: 1 },
+			// The host downgraded the turn it served; the echo, not the ask, is billed.
+			{ requested: "ultrafast", echoed: "default", tier: "default", multiplier: 1, premium: 0 },
+		] as const;
+		for (const row of rows) {
+			const { fetch, sent } = recordingFetch(entry => {
+				if (entry.model.endsWith("-flex")) return tierUnavailable();
+				if (sent.length === 2) return strictToolsRejection();
+				return completionsOk(row.echoed);
+			});
+			const message = await collect(
+				streamOpenAICompletions(
+					completionsModel("gpt-5-mini-flex"),
+					{ ...context, tools: [echoTool] },
+					{
+						apiKey: "k",
+						fetch,
+						onPayload: payload => {
+							const body = payload as { model?: unknown };
+							return body.model === "gpt-5-mini"
+								? { ...body, model: "gpt-6-astra", service_tier: row.requested }
+								: body;
+						},
+					},
+				),
+			);
+			expect(message.stopReason).toBe("stop");
+			expect(sent.at(-1)).toEqual({ model: "gpt-6-astra", serviceTier: row.requested });
+			expect(message.serviceTier).toBe(row.tier);
+			expect(message.usage.premiumRequests).toBe(row.premium);
+			expect(message.usage.cost.total).toBeCloseTo(row.multiplier * base, 12);
+		}
+	});
+
+	it("responses: the Copilot premium weight follows the route that served the turn", async () => {
+		// Copilot bills a premium request per model, and the weight is read off
+		// the row before the request goes out. Here the body that went out names
+		// another model — the hook's — so the refused row's 0.33 is not what the
+		// account was charged. Copilot never asks for a tier itself; the hook's
+		// body is what the host refused for want of tier capacity, and the resend
+		// it licenses is served on the hook's route.
+		const row = getBundledModel("github-copilot", "gpt-5.4-mini") as Model<"openai-responses">;
+		const served = getBundledModel("github-copilot", "gpt-6-astra");
+		expect(row.premiumMultiplier).toBe(0.33);
+		expect(served.premiumMultiplier).toBeUndefined();
+		const { fetch, sent } = recordingFetch(entry => (entry.serviceTier ? tierUnavailable() : responsesOk()));
+		const message = await collect(
+			streamOpenAIResponses(row, context, {
+				apiKey: "k",
+				fetch,
+				onPayload: payload => ({ ...(payload as object), model: "gpt-6-astra", service_tier: "flex" }),
+			}),
+		);
+		expect(message.stopReason).toBe("stop");
+		expect(sent).toEqual([{ model: "gpt-6-astra", serviceTier: "flex" }, { model: "gpt-6-astra" }]);
+		expect(message.usage.premiumRequests).toBe(1);
+		expect(message.usage.cost.total).toBeCloseTo((served.cost.input + served.cost.output) / 1_000_000, 12);
+		expect(message.usage.cost.total).not.toBeCloseTo((row.cost.input + row.cost.output) / 1_000_000, 12);
+	});
+
+	it("completions: the Copilot premium weight follows the route that served the turn", async () => {
+		const row = getBundledModel("github-copilot", "grok-code-fast-1") as Model<"openai-completions">;
+		const served = getBundledModel("github-copilot", "kimi-k2.7-code");
+		expect(row.premiumMultiplier).toBe(0.25);
+		expect(served.premiumMultiplier).toBeUndefined();
+		const { fetch, sent } = recordingFetch(entry => (entry.serviceTier ? tierUnavailable() : completionsOk()));
+		const message = await collect(
+			streamOpenAICompletions(row, context, {
+				apiKey: "k",
+				fetch,
+				onPayload: payload => ({ ...(payload as object), model: "kimi-k2.7-code", service_tier: "flex" }),
+			}),
+		);
+		expect(message.stopReason).toBe("stop");
+		expect(sent).toEqual([{ model: "kimi-k2.7-code", serviceTier: "flex" }, { model: "kimi-k2.7-code" }]);
+		expect(message.usage.premiumRequests).toBe(1);
+		expect(message.usage.cost.total).toBeCloseTo((served.cost.input + served.cost.output) / 1_000_000, 12);
 	});
 });
