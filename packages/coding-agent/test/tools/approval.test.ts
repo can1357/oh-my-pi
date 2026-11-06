@@ -489,7 +489,7 @@ describe("tools.approval entries as a user writes them by hand", () => {
 	});
 
 	it("refuses a runtime override that leaves tools.approval empty, which would erase every lower deny", () => {
-		const message = "Invalid value for tools.approval: null (length 4) (expected a record)";
+		const message = "Invalid value for tools.approval: null (expected a record)";
 		expect(() => Settings.isolated({ "tools.approval": null })).toThrow(message);
 		const parent = Settings.isolated({ "tools.approval": { bash: "deny" } });
 		expect(() => parent.overlay({ "tools.approval": null })).toThrow(message);

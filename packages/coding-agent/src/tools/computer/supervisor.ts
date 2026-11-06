@@ -8,10 +8,9 @@ import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { workerHostEntry } from "@oh-my-pi/pi-utils/worker-host";
 import {
 	type ApprovalContextSource,
-	type ResolvedApproval,
+	type ApprovalPolicy,
 	resolveApproval,
 	resolveApprovalFromContext,
-	userPolicyReasonLine,
 } from "../approval";
 import type { ToolSession } from "../index";
 import { ToolAbortError, toWorkerErrorPayload } from "../tool-errors";
@@ -23,7 +22,6 @@ import {
 	type ComputerSessionSnapshot,
 	type ComputerWorkerInbound,
 	type ComputerWorkerOutbound,
-	type ControlAnswer,
 	type ControlVerdict,
 	ESCAPE_AFTER_CALL_MESSAGE,
 	ESCAPE_REFUSED_MESSAGE,
@@ -44,9 +42,9 @@ const RESTART_MESSAGE = "computer worker restarted; captures and ax refs were re
  * The user's `tools.approval["computer.control"]` policy. The approval mode never decides it: the default `yolo`
  * would hand the user's foreground to every headless run, so without an explicit entry the user is asked.
  */
-function controlPolicy(context: ApprovalContextSource): ResolvedApproval {
+function controlPolicy(context: ApprovalContextSource): ApprovalPolicy {
 	const { userPolicies } = resolveApprovalFromContext(context);
-	return resolveApproval({ name: "computer.control", approval: "exec" }, undefined, "always-ask", userPolicies);
+	return resolveApproval({ name: "computer.control", approval: "exec" }, undefined, "always-ask", userPolicies).policy;
 }
 
 /** Runs desktop scripts and owns their persistent worker session. */
@@ -404,8 +402,7 @@ export class ComputerSupervisor implements ComputerController {
 		else pending.signal?.addEventListener("abort", onAbort, { once: true });
 		try {
 			const context = pending.context ?? this.#session.getToolContext?.();
-			const resolved = controlPolicy(context ?? { settings: this.#session.settings });
-			const policy = resolved.policy;
+			const policy = controlPolicy(context ?? { settings: this.#session.settings });
 			let verdict: ControlVerdict;
 			if (policy === "allow") {
 				verdict = "approved";
@@ -429,7 +426,7 @@ export class ComputerSupervisor implements ComputerController {
 						(await untilAborted(signal, () =>
 							context.ui!.confirm(
 								"Allow foreground computer control?",
-								`${message.reason}${userPolicyReasonLine(resolved)}\n\nFor this task only. Use the host interrupt to stop and revoke control. This does not authorize external side effects.`,
+								`${message.reason}\n\nFor this task only. Use the host interrupt to stop and revoke control. This does not authorize external side effects.`,
 								{ signal },
 							),
 						)) === true;
@@ -439,12 +436,7 @@ export class ComputerSupervisor implements ComputerController {
 				verdict = approved ? "approved" : deadline.aborted ? "unanswered" : "denied";
 			}
 			if (controller.signal.aborted || this.#pending.get(message.runId) !== pending) verdict = "denied";
-			// An unreadable `tools.approval` entry made this ask: the script hears which, not only the verdict.
-			const value: ControlAnswer | ControlVerdict =
-				verdict !== "approved" && resolved.source === "user" && resolved.reason
-					? { verdict, setting: resolved.reason }
-					: verdict;
-			this.#safeSend({ type: "tool-reply", id: message.id, reply: { ok: true, value } });
+			this.#safeSend({ type: "tool-reply", id: message.id, reply: { ok: true, value: verdict } });
 		} catch (error) {
 			this.#safeSend({
 				type: "tool-reply",

@@ -66,4 +66,20 @@ describe("tools.approval across worker settings mirrors", () => {
 			});
 		}
 	});
+
+	it("reports the project layer as written on a worker mirror, rejected values included", async () => {
+		// `getProjectSettings` answers "what does the project file say", which the merged layers can no
+		// longer tell: a rejected value is dropped as the file loads. A worker that saw `{}` instead
+		// would overwrite a project-owned compaction threshold it was meant to leave alone
+		// (`session/model-compaction-threshold.ts`), and the legacy `SettingsManager` shim reads it too.
+		using dir = TempDir.createSync("@pi-approval-mirror-project-");
+		const written = { compaction: { modelThresholds: { "a/b": "80%" } } };
+		fs.mkdirSync(dir.join(".omp"), { recursive: true });
+		fs.writeFileSync(dir.join(".omp/config.yml"), YAML.stringify(written));
+		const source = await Settings.init({ cwd: dir.path(), agentDir: dir.join("agent") });
+		expect(source.getProjectSettings()).toMatchObject(written);
+
+		const mirror = Settings.mirror(mirrorSource(source), source.mirrorState());
+		expect(mirror.getProjectSettings()).toEqual(source.getProjectSettings());
+	});
 });

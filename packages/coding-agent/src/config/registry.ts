@@ -579,6 +579,17 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		return (this.definition.normalize ? this.definition.normalize(value) : value) as T;
 	}
 
+	/**
+	 * `text` as a parse error names it. What someone typed at `omp config set` is shown as written,
+	 * because the shape of a typo says nothing (`string (length 3)` for `abc`) and they have it on
+	 * screen already. A credential setting, or text long enough to be a pasted token, shows only its
+	 * shape: these messages reach the log.
+	 */
+	#describeTyped(text: string): string {
+		const couldBeSecret = this.isCredential || text.trim().length > TYPED_TEXT_SHOWN_MAX;
+		return couldBeSecret ? describeRejectedValue(text) : Bun.inspect(text);
+	}
+
 	#parseText(text: string): T {
 		const trimmed = text.trim();
 		switch (this.definition.type) {
@@ -587,12 +598,12 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 				if (["true", "1", "yes", "on"].includes(lower)) return true as T;
 				if (["false", "0", "no", "off"].includes(lower)) return false as T;
 				throw new Error(
-					`Invalid boolean value: ${describeRejectedValue(text)}. Use true/false, yes/no, on/off, or 1/0`,
+					`Invalid boolean value: ${this.#describeTyped(text)}. Use true/false, yes/no, on/off, or 1/0`,
 				);
 			}
 			case "number": {
 				const parsed = trimmed === "" ? Number.NaN : Number(trimmed);
-				if (!Number.isFinite(parsed)) throw new Error(`Invalid number: ${describeRejectedValue(text)}`);
+				if (!Number.isFinite(parsed)) throw new Error(`Invalid number: ${this.#describeTyped(text)}`);
 				return parsed as T;
 			}
 			case "array":
@@ -601,10 +612,10 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 				try {
 					parsed = JSON.parse(trimmed);
 				} catch {
-					throw new Error(`Invalid ${this.definition.type} JSON: ${describeRejectedValue(text)}`);
+					throw new Error(`Invalid ${this.definition.type} JSON: ${this.#describeTyped(text)}`);
 				}
 				if (!this.accepts(parsed)) {
-					throw new Error(`Invalid ${this.definition.type} JSON: ${describeRejectedValue(text)}`);
+					throw new Error(`Invalid ${this.definition.type} JSON: ${this.#describeTyped(text)}`);
 				}
 				return parsed as T;
 			}
@@ -621,7 +632,7 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 				}
 				const valid = this.enumValues;
 				if (valid && !valid.includes(value)) {
-					throw new Error(`Invalid value: ${describeRejectedValue(text)}. Valid values: ${valid.join(", ")}`);
+					throw new Error(`Invalid value: ${this.#describeTyped(text)}. Valid values: ${valid.join(", ")}`);
 				}
 				return value as T;
 			}
@@ -950,12 +961,18 @@ export function formatRejectedValue({ valueType, valueLength }: RejectedValueMet
 	return `${valueType} (length ${valueLength})`;
 }
 
+/** Longest typed value a parse error repeats; above it, the text could be a pasted credential. */
+const TYPED_TEXT_SHOWN_MAX = 16;
+
 /**
- * A value a setting rejects, as an error or warning may name it: its type and length only. A token
- * pasted under the wrong key is the likeliest rejected value, and these messages reach the log and
+ * A value a setting rejects, as an error or warning may name it. A number, a boolean or an empty key
+ * is shown as written, because there is no text in it to leak and its shape says nothing useful
+ * (`number (length 3)` for `123`). A string, list or record is shown by type and length only: a
+ * token pasted under the wrong key is the likeliest such value, and these messages reach the log and
  * the terminal.
  */
 export function describeRejectedValue(value: unknown): string {
+	if (value === null || typeof value === "number" || typeof value === "boolean") return Bun.inspect(value);
 	return formatRejectedValue(rejectedValueMetadata(value));
 }
 

@@ -31,6 +31,7 @@
 
 ### Fixed
 
+- A subagent or worker now reports the project config as written (`getProjectSettings`), as the main session does, so a worker no longer overwrites a project-owned compaction threshold it was meant to leave alone ([#18228](https://github.com/can1357/oh-my-pi/pull/18228) by [@sjawhar](https://github.com/sjawhar))
 - A subagent or worker no longer runs tool calls unasked under a `tools.approval` the main session already refuses to read: the rejection travels with the settings it mirrors, so a malformed value in a project or `--config` file asks there too ([#18228](https://github.com/can1357/oh-my-pi/pull/18228) by [@sjawhar](https://github.com/sjawhar))
 - A live config edit that makes `tools.approval` unreadable no longer leaves the running session on the record it held before the edit: the broken value is reported and every tool asks, as it already did on a fresh load, and the keep-last-good warning names only the value's type and length, never its text or the kept value ([#18228](https://github.com/can1357/oh-my-pi/pull/18228) by [@sjawhar](https://github.com/sjawhar))
 - In ACP sessions, a `tools.approvalMode` that is not one of the four modes (a typo, `YOLO`, a number) no longer counts as an explicit `yolo` and no longer turns off the client's permission prompts for `bash`, `edit`, `delete` and `move` ([#18228](https://github.com/can1357/oh-my-pi/pull/18228) by [@sjawhar](https://github.com/sjawhar))

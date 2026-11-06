@@ -350,6 +350,11 @@ export interface SettingsMirrorState {
 	readonly configFiles: readonly string[];
 	readonly global: RawSettings;
 	readonly project: RawSettings;
+	/**
+	 * The project layer as written, rejected values included, which {@link Settings.getProjectSettings}
+	 * reports. It is not derivable from `project`, where those values were dropped as the files loaded.
+	 */
+	readonly projectAsWritten: RawSettings;
 	readonly configOverlay: RawSettings;
 	readonly overrides: RawSettings;
 	readonly derived: boolean;
@@ -1064,6 +1069,7 @@ export class Settings {
 			configFiles: [...this.#configFiles],
 			global: structuredClone(this.#global),
 			project: structuredClone(this.#project),
+			projectAsWritten: structuredClone(this.#projectAsWritten),
 			configOverlay: structuredClone(this.#configOverlay),
 			overrides: structuredClone(this.#overrides),
 			derived: this.#derived,
@@ -1095,6 +1101,7 @@ export class Settings {
 		this.#configFiles = [...state.configFiles];
 		this.#global = structuredClone(state.global);
 		this.#project = structuredClone(state.project);
+		this.#projectAsWritten = structuredClone(state.projectAsWritten);
 		this.#configOverlay = structuredClone(state.configOverlay);
 		this.#overrides = structuredClone(state.overrides);
 		this.#derived = state.derived;
