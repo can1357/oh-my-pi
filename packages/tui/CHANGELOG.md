@@ -5,6 +5,8 @@
 ### Fixed
 
 - Ctrl+J from a win32-input-mode record with `VK_J` and `Uc=LF` now decodes as `ctrl+j`, so Windows Terminal / mini-term insert a newline instead of submitting ([#18253](https://github.com/can1357/oh-my-pi/pull/18253) by [@Clannad47](https://github.com/Clannad47))
+- Fixed every keypress in a long session rescanning the whole retained transcript: `TranscriptContainer` now tracks writes to the child array it owns and skips retained-history reconciliation on stable renders, and still reconciles when the children array is replaced from outside ([#16542](https://github.com/can1357/oh-my-pi/pull/16542) by [@Komzpa](https://github.com/Komzpa))
+- Fixed typing stalls when frequent background updates repeatedly postponed the pending keypress repaint.
 
 ## [18.17.0] - 2026-11-06
 
@@ -275,9 +277,6 @@
 ### Fixed
 
 - Fixed the `/agents` and `/models` hubs in Tern squeezing the left sidebar as long lines (such as a streaming new-agent draft) widen the body pane
-### Fixed
-
-- Fixed every keypress in a long session rescanning the whole retained transcript: `TranscriptContainer` now tracks writes to the child array it owns and skips retained-history reconciliation on stable renders, and still reconciles when the children array is replaced from outside ([#16542](https://github.com/can1357/oh-my-pi/pull/16542) by [@Komzpa](https://github.com/Komzpa))
 
 ## [18.12.4] - 2026-10-20
 

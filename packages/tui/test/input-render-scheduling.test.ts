@@ -92,6 +92,77 @@ describe("TUI input/render scheduling", () => {
 		}
 	});
 
+	it("paints a key while background requests arrive before every timer turn", () => {
+		const term = new VirtualTerminal(140, 40);
+		let nowMs = 0;
+		const immediates: Array<() => void> = [];
+		const timers = new Map<number, { at: number; run: () => void }>();
+		let nextId = 0;
+		const scheduler = {
+			now: () => nowMs,
+			scheduleImmediate: (run: () => void) => {
+				immediates.push(run);
+			},
+			scheduleRender: (run: () => void, delay: number): RenderTimer => {
+				const id = nextId++;
+				timers.set(id, { at: nowMs + Math.max(1, Math.ceil(delay)), run });
+				return {
+					cancel: () => {
+						timers.delete(id);
+					},
+				};
+			},
+		};
+		let input = "";
+		let inputPaintAt: number | undefined;
+		let maxFrameBytes = 0;
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		tui.addFrameWriteListener(data => {
+			maxFrameBytes = Math.max(maxFrameBytes, Buffer.byteLength(data));
+			if (input && inputPaintAt === undefined) inputPaintAt = nowMs;
+		});
+		const probe: Component = {
+			invalidate() {},
+			render: () => [],
+			handleInput: data => {
+				input += data;
+				tui.requestRender();
+			},
+		};
+		tui.setFocus(probe);
+		// Large plan, requirements and worker chrome share the provider with the editor.
+		const rows = [
+			"480 closed / archived tasks; 177 requirements",
+			...Array.from({ length: 11 }, (_, n) => `worker ${n}: ${"progress ".repeat(14)}`),
+		];
+		tui.setFrameProvider({ renderFrame: () => ({ viewport: [...rows, input] }), acknowledgeHistory() {} });
+		const tick = () => {
+			for (const run of immediates.splice(0)) run();
+			const due = Array.from(timers).filter(([, timer]) => timer.at <= nowMs);
+			for (const [id, timer] of due) {
+				if (!timers.delete(id)) continue;
+				timer.run();
+			}
+		};
+		try {
+			tui.start();
+			for (; nowMs < 100; nowMs++) tick();
+			term.sendInput("x");
+			// Timers remain runnable throughout: a ready producer runs just before
+			// each render turn, as an interval or async worker completion can.
+			for (; nowMs < 200; nowMs++) {
+				tui.requestRender();
+				tick();
+			}
+			expect(term.getViewport().join("\n")).toContain("x");
+			expect(inputPaintAt).toBeDefined();
+			expect(inputPaintAt! - 100).toBeLessThanOrEqual(34);
+			expect(maxFrameBytes).toBeLessThan(4096);
+		} finally {
+			tui.stop();
+		}
+	});
+
 	describe("tui.maxFps ceiling", () => {
 		afterEach(() => {
 			setMaxFps(DEFAULT_MAX_FPS);
