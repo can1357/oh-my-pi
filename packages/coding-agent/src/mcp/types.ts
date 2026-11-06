@@ -69,27 +69,6 @@ export interface MCPAuthConfig {
 /** Encoding used for outgoing JSON-RPC request ids. */
 export type MCPRequestIdFormat = "string" | "number";
 
-/**
- * Key of the cache identity a discovered config carries: the same server built
- * from its config-file entry as written, before the provider expanded `${VAR}`
- * placeholders (or read an env-forwarded value, a `{file:...}` reference or a
- * plugin root). `MCPToolCache` keys a catalog on it, so a rotated credential
- * keeps the catalog and an edited literal drops it. A symbol, so JSON never
- * sees it: config writes and hash inputs skip it.
- */
-export const MCP_CONFIG_AS_WRITTEN: unique symbol = Symbol("mcp.configAsWritten");
-
-/** See {@link MCP_CONFIG_AS_WRITTEN}. */
-export interface MCPConfigAsWritten {
-	/** The config built from the entry as written. */
-	config: MCPServerConfig;
-	/**
-	 * Identity of the config it was attached to. A copy whose connection fields
-	 * changed in memory no longer matches, and is keyed on its own fields.
-	 */
-	attachedTo: string;
-}
-
 /** Base server config with shared options */
 interface MCPServerConfigBase {
 	/** Whether this server is enabled (default: true) */
@@ -133,8 +112,6 @@ interface MCPServerConfigBase {
 		/** `prompt` param for the authorization request (default "consent"; "" to omit) */
 		prompt?: string;
 	};
-	/** Cache identity of a discovered config; see {@link MCP_CONFIG_AS_WRITTEN}. */
-	[MCP_CONFIG_AS_WRITTEN]?: MCPConfigAsWritten;
 }
 
 /** Stdio server configuration */

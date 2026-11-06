@@ -12,7 +12,6 @@ import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
 import { readMCPConfigFile } from "./config-writer";
 import { cfgMcpEnableProjectConfig } from "./settings";
-import { attachConfigAsWritten } from "./tool-cache";
 import type { MCPConfigFile, MCPServerConfig } from "./types";
 
 /** Options for loading MCP configs */
@@ -70,17 +69,9 @@ export interface LoadMCPConfigsResult {
 }
 
 /**
- * Convert canonical MCPServer to legacy MCPServerConfig. A server whose
- * provider recorded fields as written ({@link MCPServer.asWritten}) also gets
- * the config built from them as its tool-cache identity.
+ * Convert canonical MCPServer to legacy MCPServerConfig.
  */
 function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
-	const config = buildLegacyConfig(server);
-	if (server.asWritten) attachConfigAsWritten(config, buildLegacyConfig({ ...server, ...server.asWritten }));
-	return config;
-}
-
-function buildLegacyConfig(server: MCPServer): MCPServerConfig {
 	// Determine transport type
 	const transport = server.transport ?? (server.command ? "stdio" : server.url ? "http" : "stdio");
 	const shared = {

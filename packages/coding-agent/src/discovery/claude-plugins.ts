@@ -21,16 +21,14 @@ import {
 	discoverRuleFromMarkdown,
 	type ClaudePluginRoot,
 	createSourceMeta,
-	envVarsDeepAsWritten,
 	expandEnvVarsDeep,
 	listClaudePluginRoots,
 	loadFilesFromDir,
 	parseMcpBooleanField,
 	scanSkillsFromDir,
-	withMcpAsWritten,
 } from "./helpers";
 
-import { resolvePluginStdioPaths, substitutePluginRoot, substitutePluginRootAsWritten } from "./substitute-plugin-root";
+import { resolvePluginStdioPaths, substitutePluginRoot } from "./substitute-plugin-root";
 
 const PROVIDER_ID = "claude-plugins";
 const DISPLAY_NAME = "Claude Code Marketplace";
@@ -553,24 +551,24 @@ async function resolvePluginMCPConfig(root: ClaudePluginRoot): Promise<ResolvedM
 async function resolveMarketplaceEnv(
 	env: Record<string, string>,
 	rootPath: string,
-): Promise<{ env: Record<string, string>; literalKeys: string[]; written: Record<string, string> }> {
+): Promise<{ env: Record<string, string>; literalKeys: string[] }> {
 	// Null prototype: a `__proto__` env key must become an own property, not
 	// mutate the prototype chain (it would silently vanish before spawn).
 	const resolved: Record<string, string> = Object.create(null);
-	const written: Record<string, string> = Object.create(null);
 	const literalKeys: string[] = [];
 	for (const [key, rawValue] of Object.entries(env)) {
 		// Feed the reserved plugin-root names through extraEnv: expansion then
 		// cannot consume an ambient CLAUDE_PLUGIN_ROOT/OMP_PLUGIN_ROOT, and
 		// the registered root inserted as the value is never re-scanned
 		// for `${...}`.
-		const pluginRoots = { CLAUDE_PLUGIN_ROOT: rootPath, OMP_PLUGIN_ROOT: rootPath };
-		const final = expandEnvVarsDeep(rawValue, pluginRoots) as string;
+		const final = expandEnvVarsDeep(rawValue, {
+			CLAUDE_PLUGIN_ROOT: rootPath,
+			OMP_PLUGIN_ROOT: rootPath,
+		}) as string;
 		if (final !== rawValue) literalKeys.push(key);
 		resolved[key] = final;
-		written[key] = envVarsDeepAsWritten(rawValue, pluginRoots);
 	}
-	return { env: resolved, literalKeys, written };
+	return { env: resolved, literalKeys };
 }
 
 async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> {
@@ -712,21 +710,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				...(raw.type !== undefined && { transport: raw.type as MCPServer["transport"] }),
 				_source: createSourceMeta(PROVIDER_ID, sourcePath, root.scope, root.origin),
 			};
-			// What each substitution pass replaced, field by field. This
-			// provider runs three of them over three sets of fields: the
-			// plugin-root pass on `command`/`cwd`/`args`, which knows only its
-			// own two placeholder names, and `${VAR}` expansion on `env`,
-			// `url` and `headers`. `auth`, `oauth` and `type` are read
-			// verbatim, so they declare nothing.
-			const written: Record<string, unknown> = {
-				...(raw.command !== undefined && { command: substitutePluginRootAsWritten(raw.command) }),
-				...(raw.args !== undefined && { args: substitutePluginRootAsWritten(raw.args) }),
-				...(resolvedEnv !== undefined && { env: resolvedEnv.written }),
-				...(raw.cwd !== undefined && { cwd: substitutePluginRootAsWritten(raw.cwd) }),
-				...(raw.url !== undefined && { url: envVarsDeepAsWritten(raw.url) }),
-				...(raw.headers !== undefined && { headers: envVarsDeepAsWritten(raw.headers) }),
-			};
-			items.push(withMcpAsWritten(server, written, { rooting: rooted.bases }));
+			items.push(server);
 		}
 	}
 

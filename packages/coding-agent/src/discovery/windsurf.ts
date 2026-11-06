@@ -20,13 +20,11 @@ import type { LoadContext, LoadResult } from "../capability/types";
 import {
 	discoverRuleFromMarkdown,
 	createSourceMeta,
-	envVarsDeepAsWritten,
 	expandEnvVarsDeep,
 	getProjectPath,
 	getUserPath,
 	loadFilesFromDir,
 	parseMcpBooleanField,
-	withMcpAsWritten,
 } from "./helpers";
 
 const PROVIDER_ID = "windsurf";
@@ -92,7 +90,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 		for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
 			const result = parseServerConfig(name, serverConfig, path, scope);
 			if (result.warning) warnings.push(result.warning);
-			if (result.server) items.push(withMcpAsWritten(result.server, envVarsDeepAsWritten(serverConfig)));
+			if (result.server) items.push(result.server);
 		}
 	}
 

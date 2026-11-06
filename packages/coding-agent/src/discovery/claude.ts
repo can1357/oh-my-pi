@@ -26,13 +26,11 @@ import {
 	calculateDepth,
 	createSourceMeta,
 	discoverExtensionModulePaths,
-	envVarsDeepAsWritten,
 	expandEnvVarsDeep,
 	getExtensionNameFromPath,
 	loadFilesFromDir,
 	parseMcpBooleanField,
 	scanSkillsFromDir,
-	withMcpAsWritten,
 } from "./helpers";
 import type { Setting } from "../config/registry";
 
@@ -116,7 +114,6 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 		if (!json?.mcpServers) return [];
 
 		const mcpServers = expandEnvVarsDeep(json.mcpServers);
-		const written = envVarsDeepAsWritten(json.mcpServers);
 		return Object.entries(mcpServers).map(([name, config]) => {
 			const serverConfig = config as Record<string, unknown>;
 			const server: MCPServer = {
@@ -134,7 +131,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				transport: serverConfig.type as "stdio" | "sse" | "http" | undefined,
 				_source: createSourceMeta(PROVIDER_ID, path, level),
 			};
-			return withMcpAsWritten(server, written?.[name]);
+			return server;
 		});
 	};
 

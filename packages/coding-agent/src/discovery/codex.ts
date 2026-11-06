@@ -40,7 +40,6 @@ import {
 	scanSkillsFromDir,
 } from "./helpers";
 import { resolvePluginStdioPaths } from "./substitute-plugin-root";
-import { asWrittenLiteral, asWrittenSubstitution } from "../mcp/as-written";
 
 import { cfgSkillsEnableCodexUser } from "../extensibility/settings";
 
@@ -240,44 +239,6 @@ function extractMCPServersFromToml(
 		}
 		if (Object.keys(headers).length > 0) {
 			server.headers = headers;
-		}
-
-		// A `${VAR}` placeholder stands in for a value the environment
-		// supplied, so that rotating the variable keeps the server's cached
-		// catalog. It may stand in only where a value was actually taken:
-		// each substitution below repeats the condition its counterpart above
-		// applied. Substituting unconditionally made two different effective
-		// configurations hash the same — with `TOKEN` unset,
-		// `env = { TOKEN: "a" }` and `env = { TOKEN: "b" }` both keyed on
-		// `${TOKEN}`, so editing that literal left a lazy server serving the
-		// previous server's catalog.
-		const asWrittenEnv: Record<string, string> = {};
-		for (const [name, value] of Object.entries(config.env ?? {})) asWrittenEnv[name] = asWrittenLiteral(value);
-		for (const varName of config.env_vars ?? []) {
-			if (Bun.env[varName] !== undefined) asWrittenEnv[varName] = asWrittenSubstitution(`\${${varName}}`);
-		}
-		const asWrittenHeaders: Record<string, string> = {};
-		for (const [name, value] of Object.entries(config.http_headers ?? {})) {
-			asWrittenHeaders[name] = asWrittenLiteral(value);
-		}
-		for (const [headerName, varName] of Object.entries(config.env_http_headers ?? {})) {
-			if (Bun.env[varName] !== undefined) asWrittenHeaders[headerName] = asWrittenSubstitution(`\${${varName}}`);
-		}
-		if (config.bearer_token_env_var && Bun.env[config.bearer_token_env_var]) {
-			asWrittenHeaders.Authorization = `Bearer ${asWrittenSubstitution(`\${${config.bearer_token_env_var}}`)}`;
-		}
-		// Only the substituted fields are recorded; `command`, `cwd`, `args`
-		// and `url` are the effective values and stay out, which is the same
-		// rule `withMcpAsWritten` applies for every other provider. The
-		// config dir is not a value anything rotates — it is where the file
-		// is — so a rooted `./bin/aw` belongs in the identity exactly as it
-		// belongs in the connection, and `./bin/aw` under two projects'
-		// `.codex` dirs stays two servers.
-		if (Object.keys(asWrittenEnv).length > 0 || Object.keys(asWrittenHeaders).length > 0) {
-			server.asWritten = {
-				...(Object.keys(asWrittenEnv).length > 0 && { env: asWrittenEnv }),
-				...(Object.keys(asWrittenHeaders).length > 0 && { headers: asWrittenHeaders }),
-			};
 		}
 
 		// Determine transport type (infer from config if not explicit)

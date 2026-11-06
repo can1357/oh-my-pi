@@ -32,13 +32,11 @@ import { legacyProviderAllowed } from "./agent-plugin-format";
 import {
 	discoverRuleFromMarkdown,
 	createSourceMeta,
-	envVarsDeepAsWritten,
 	expandEnvVarsDeep,
 	loadFilesFromDir,
 	parseMcpBooleanField,
 	parseRequestIdFormat,
 	scanSkillsFromDir,
-	withMcpAsWritten,
 } from "./helpers";
 import { listOmpExtensionRoots, type OmpExtensionRoot } from "./omp-extension-roots";
 import { resolvePluginStdioPaths } from "./substitute-plugin-root";
@@ -321,7 +319,6 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 		}
 		const pluginRoots = { CLAUDE_PLUGIN_ROOT: root.path, OMP_PLUGIN_ROOT: root.path };
 		const servers = expandEnvVarsDeep(parsed.mcpServers, pluginRoots);
-		const written = envVarsDeepAsWritten(parsed.mcpServers, pluginRoots);
 		if (!servers || typeof servers !== "object" || Array.isArray(servers)) continue;
 
 		for (const [serverName, serverCfg] of Object.entries(servers)) {
@@ -383,7 +380,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				...(cfg.type !== undefined && { transport: cfg.type }),
 				_source: createSourceMeta(PROVIDER_ID, mcpPath, root.level),
 			};
-			items.push(withMcpAsWritten(server, written?.[serverName], { rooting: rooted.bases }));
+			items.push(server);
 		}
 	}
 

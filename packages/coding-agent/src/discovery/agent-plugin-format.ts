@@ -14,7 +14,6 @@
 import * as path from "node:path";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { readFile } from "../capability/fs";
-import { asWrittenLiteral, asWrittenSubstitution } from "../mcp/as-written";
 import { isContainedResolved, realpathIfExists, resolveContainedPath } from "./contained-path";
 import { registerPluginCacheInvalidator } from "./helpers";
 
@@ -259,15 +258,6 @@ interface AgentPluginMcpServer {
 	/** Absolute working directory; defaults to the plugin root for stdio servers. */
 	cwd?: string;
 	url?: string;
-	/** Connection fields from the mcp.json entry before plugin-root expansion. */
-	asWritten: {
-		command?: string;
-		args?: string[];
-		env?: Record<string, string>;
-		cwd?: string;
-		url?: string;
-		headers?: Record<string, string>;
-	};
 	headers?: Record<string, string>;
 }
 
@@ -398,23 +388,6 @@ async function parseStdioServer(
 		}
 	}
 
-	// A plugin-relative `./` path is rooted at the install directory, and the
-	// spec puts that directory outside the plugin's identity: an upgrade into
-	// a new directory is the same server. Record what this parse substituted,
-	// so the tool cache reads the substitution rather than inferring one from
-	// the difference (see `withMcpAsWritten`, which records a written form
-	// only where a provider's own pass reports replacing something).
-	const writtenValue = (value: string) =>
-		asWrittenLiteral(value)
-			.replaceAll(PLUGIN_ROOT_VAR, asWrittenSubstitution(PLUGIN_ROOT_VAR))
-			.replaceAll(PLUGIN_DATA_VAR, asWrittenSubstitution(PLUGIN_DATA_VAR));
-	// `command` and `cwd` also accept the plugin-relative `./` form, which
-	// this parse roots at the install directory — the same substitution
-	// `${PLUGIN_ROOT}` names, so it is recorded as the same thing.
-	const writtenPath = (value: string) =>
-		value.startsWith("./")
-			? `${asWrittenSubstitution(PLUGIN_ROOT_VAR)}/${asWrittenLiteral(value.slice(2))}`
-			: writtenValue(value);
 	return {
 		server: {
 			name,
@@ -423,21 +396,6 @@ async function parseStdioServer(
 			...(expandedArgs !== undefined && { args: expandedArgs }),
 			env: expandedEnv,
 			cwd: resolvedCwd,
-			asWritten: {
-				command: writtenPath(command),
-				...(args !== undefined && { args: (args as string[]).map(arg => writtenValue(arg)) }),
-				env: {
-					...Object.fromEntries(
-						Object.entries((env ?? {}) as Record<string, string>).map(([key, value]) => [
-							asWrittenLiteral(key),
-							writtenValue(value),
-						]),
-					),
-					PLUGIN_ROOT: asWrittenSubstitution(PLUGIN_ROOT_VAR),
-					PLUGIN_DATA: asWrittenSubstitution(PLUGIN_DATA_VAR),
-				},
-				cwd: cwd === undefined ? asWrittenSubstitution(PLUGIN_ROOT_VAR) : writtenPath(cwd),
-			},
 		},
 	};
 }
@@ -464,10 +422,6 @@ function parseRemoteServer(name: string, cfg: Record<string, unknown>, transport
 			transport,
 			url,
 			...(headers !== undefined && { headers: headers as Record<string, string> }),
-			asWritten: {
-				url,
-				...(headers !== undefined && { headers: headers as Record<string, string> }),
-			},
 		},
 	};
 }
