@@ -64,6 +64,8 @@ With `task.file=true`, an item may name its instructions by file instead: `{ "na
 
 Restricted folders cover task files as well as the working directory. `always-ask-cached` never remembers a task approval per file: a grant on the path would cover whatever the file holds later. Approval dialogs list every batch file path, and pending task cards show the shortened path.
 
+Each tool invocation binds task files to their resolved targets after extension preflight and before approval. Retargeting a submitted symlink does not change which file is read. If the resolved file is replaced, including an editor's atomic save to a new inode, retry the call to approve the replacement. Edits to the same file remain visible at dispatch; approval does not freeze its contents.
+
 Users can tag models with `^` in the composer. The resulting session-local `m1`, `m2`, … pseudonyms are accepted as `agent` by task, eval `agent()`, and `workpool()`; each uses the bundled task template pinned to the tagged selector. A `^provider/model:level` tag also sets the agent's initial effort, which the `effort` hint does not override. A user-tagged `^provider/model` agent without a level grants its tagged model for per-call selection, subject to `task.perCallModelAllow`; a per-call `model` for a level-tagged agent is a conflict error. See [user-tagged model agents](../task-agent-discovery.md#user-tagged-model-agents) for persistence, boundaries, and precedence.
 
 When per-call selection is enabled for a surface, the task/eval tool descriptions list approved role models from the operator's settings and the narrowing allowlist; project settings never add a model and can only narrow the list.
