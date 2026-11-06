@@ -29,6 +29,7 @@ import {
 	disposeTodoSession,
 	flushTodoWrites,
 	hold,
+	settled,
 	todo,
 	type TodoBackendRecorder,
 	userTodoEdits,
@@ -374,6 +375,47 @@ describe("todo writers reach the selected backend's replace", () => {
 
 		expect(h.session.getTodoPhases()).toEqual(stored);
 		expect(h.recorder.calls.at(-1)).toEqual({ backend: "recorder", method: "replace", phases: stored });
+	});
+
+	it("a replace that throws after /new only warns, and the new list stays", async () => {
+		const h = await createHarness();
+		await seedList(h);
+		const notices: string[] = [];
+		h.session.subscribe(event => {
+			if (event.type === "notice") notices.push(event.message);
+		});
+		h.recorder.replaceError = new Error(REFUSAL);
+
+		await h.session.newSession();
+		await flushTodoWrites(h.session);
+
+		expect(h.session.getTodoPhases()).toEqual([]);
+		expect(notices).toEqual([
+			`Todo backend "Recorder" did not take the todo list after the session changed: ${REFUSAL}`,
+		]);
+	});
+
+	it("a reset superseded while queued sends nothing; only the latest one reaches replace", async () => {
+		const h = await createHarness();
+		await seedList(h);
+		const notices: string[] = [];
+		h.session.subscribe(event => {
+			if (event.type === "notice") notices.push(event.message);
+		});
+		const gate = hold(h.recorder, "apply");
+		const inFlight = settled(todo(h.session, { op: "append", phase: "Work", items: ["late"] }));
+		await gate.started.promise;
+
+		await h.session.newSession();
+		await h.session.newSession();
+		gate.release.resolve();
+		await inFlight;
+		await flushTodoWrites(h.session);
+
+		expect(h.recorder.calls.filter(call => call.method === "replace")).toEqual([
+			{ backend: "recorder", method: "replace", phases: [] },
+		]);
+		expect(notices).toEqual([]);
 	});
 
 	it("an eval-bridged todo call reaches apply once and never replace, and does not undo a /todo edit queued behind it", async () => {

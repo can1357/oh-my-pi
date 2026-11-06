@@ -221,10 +221,12 @@ export class TodoWrites {
 
 	/**
 	 * Queue a `replace` with the list as of its queue slot, so the backend follows a reset or reload.
-	 * The list cannot be refused at that point, so a failure only warns.
+	 * The list cannot be refused at that point, so a failure only warns. Before the first resolution
+	 * there is no backend to follow the list, and a host may still be setting up its extensions
+	 * (ACP loads a session before initializing them), so nothing is queued then.
 	 */
 	#replaceAfterReset(): void {
-		if (!this.queued) return;
+		if (!this.#resolvable || !this.queued) return;
 		const todo = this.#host.todo;
 		this.run(async active => {
 			if (!active) return;

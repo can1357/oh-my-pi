@@ -49,7 +49,11 @@ export interface TodoBackend {
 	 * and leaves the list unchanged.
 	 */
 	apply(op: TodoOp, params: TodoBackendParams, next: TodoPhase[], signal: AbortSignal): Promise<void>;
-	/** Called for edits made outside the `todo` tool. A throw leaves the list unchanged. */
+	/**
+	 * Called for edits made outside the `todo` tool, where a throw refuses the edit and leaves the list
+	 * unchanged; and after the list was reset or reloaded (`/new`, a session switch, rewind, tree
+	 * navigation, a fork from a message), where the list is already in place and a throw only warns.
+	 */
 	replace(phases: TodoPhase[], signal: AbortSignal): Promise<void>;
 }
 

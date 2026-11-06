@@ -626,6 +626,23 @@ export default function(pi) {
 		expect(session.getTodoPhases()).toEqual([]);
 	});
 
+	test("switching a fresh session before any prompt does not create the backend", async () => {
+		// ACP loads and forks a stored session this way, before it initializes the extension runner.
+		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
+		const sessionDir = tempDir.join("sessions");
+		const target = SessionManager.create(tempDir.path(), sessionDir);
+		target.appendMessage({ role: "user", content: "target", timestamp: Date.now() });
+		await target.flush();
+		const targetFile = target.getSessionFile();
+		if (!targetFile) throw new Error("target session has no file");
+		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
+
+		await session.switchSession(targetFile);
+
+		expect(recorder.created).toBe(0);
+		expect(recorder.calls).toEqual([]);
+	});
+
 	test("a maintenance reload while a commit's replace is pending does not reject the commit", async () => {
 		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
 		const replaceGate = hold(recorder, "replace");
