@@ -35,8 +35,13 @@ fn echoti_xterm_values() {
 	);
 	assert_eq!(
 		out,
-		"256\n\x1b[6;11H\x1b[1m\x1b(B\x1b[myes\nno\n\x1b]52;;\x07\x1b[38;5;196m\x1b[?5h\x1b[?5lyes\\
-		 n\x1b[1;5A"
+		concat!(
+			"256\n",
+			"\x1b[6;11H\x1b[1m\x1b(B\x1b[myes\n",
+			"no\n",
+			"\x1b]52;;\x07\x1b[38;5;196m\x1b[?5h\x1b[?5lyes\n",
+			"\x1b[1;5A",
+		)
 	);
 	assert_eq!(err, "");
 	assert_eq!(status, 0);

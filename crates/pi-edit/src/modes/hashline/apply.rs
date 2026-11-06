@@ -1303,7 +1303,7 @@ pub fn apply_edits(
 	let baseline = parses_cleanly(options.path, text);
 	let authored_parses = parses_cleanly(options.path, &authored.0);
 	let finish = |result: (String, Option<u32>), mut warnings: Vec<String>| {
-		if !parses_cleanly(options.path, &result.0) && baseline {
+		if baseline && !parses_cleanly(options.path, &result.0) {
 			warnings.push(edit_broke_parse_warning(result.1));
 		}
 		ApplyResult {

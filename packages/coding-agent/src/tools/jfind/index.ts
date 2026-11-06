@@ -42,8 +42,8 @@ export type FindToolInput = typeof findSchema.infer;
 /** Line ranges shown per hit in the model-facing text, strongest first. */
 const RANGES_SHOWN = 3;
 
-/** Wall-clock budget for one `find` call; a stalled judge fails instead of blocking the turn. */
-const FIND_TIMEOUT_MS = 20_000;
+/** Wall-clock budget for one `find` call; a stalled judge ends it with the hits verified so far instead of blocking the turn. */
+export const FIND_TIMEOUT_MS = 20_000;
 
 /**
  * Resolve `find.enabled` for a session: `auto` enables `find` only when the
@@ -110,8 +110,10 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 		});
 		const experiment = this.session.spotlight;
 		const started = performance.now();
-		const timeout = AbortSignal.timeout(FIND_TIMEOUT_MS);
-		let result: CascadeResult;
+		const deadline = AbortSignal.timeout(FIND_TIMEOUT_MS);
+		// The phase the deadline interrupts, named when nothing was verified before it.
+		let phase = "lexical scan";
+		let result: CascadeResult | undefined;
 		try {
 			result = await runCascade({
 				root,
@@ -121,17 +123,23 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 				judge,
 				spotlight: experiment ? { client: experiment.client, thinking: experiment.thinking } : undefined,
 				includeHidden: false,
-				signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-				onProgress: message => onUpdate?.({ content: [{ type: "text", text: message }] }),
+				signal,
+				deadline,
+				onProgress: message => {
+					phase = message;
+					onUpdate?.({ content: [{ type: "text", text: message }] });
+				},
 			});
 		} catch (error) {
-			if (timeout.aborted && !signal?.aborted) {
-				throw new ToolError(`find timed out after ${formatDuration(FIND_TIMEOUT_MS)}`);
-			}
-			throw error;
+			if (!deadline.aborted || signal?.aborted) throw error;
+		}
+		if (!result || (result.timeout && result.hits.length === 0)) {
+			throw new ToolError(
+				`find timed out after ${formatDuration(FIND_TIMEOUT_MS)} at "${phase}", before any hit was verified. Narrow \`path\` to a smaller tree, or use grep.`,
+			);
 		}
 		const elapsedMs = performance.now() - started;
-		const { stats, threshold, keywords, coverage, ranking } = result;
+		const { stats, threshold, keywords, coverage, ranking, timeout } = result;
 		experiment?.log(SPOTLIGHT_ENTRY.find, {
 			toolCallId,
 			ranker: ranking.ranker,
@@ -161,6 +169,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			hits,
 			coverage,
 			stats,
+			timeout,
 			elapsedMs,
 			cwd,
 			scopePath,
@@ -176,7 +185,12 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 		} else {
 			out.push(`${hits.length} hit(s) for "${query}"${where} (τ ${threshold.toFixed(2)}), strongest first`);
 		}
-		if (coverage === "partial") {
+		if (timeout) {
+			out.push(
+				`partial: timed out after ${formatDuration(FIND_TIMEOUT_MS)} with ${timeout.verified} of ${timeout.passages} passages verified; unverified files may still match. Narrow \`path\` for a complete search.`,
+			);
+		}
+		if (coverage === "partial" && stats.failed > 0) {
 			out.push(
 				`partial: ${stats.failed} of ${stats.requests} judge requests failed; unjudged files may still match`,
 			);

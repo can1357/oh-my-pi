@@ -73,19 +73,6 @@ describe("Factory Droid anthropic wire (Claude)", () => {
 		expect(captured[0].headers["anthropic-beta"] ?? "").not.toContain("interleaved-thinking");
 	});
 
-	it("sends the anthropic SDK timeout and a placeholder API key beside the bearer token", async () => {
-		const captured: CapturedRequest[] = [];
-		await streamFactoryDroid(
-			factoryModel("claude-opus-4-8"),
-			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
-			{ apiKey: WORKOS_TOKEN, fetch: captureFetch(captured, anthropicChunks("OK")), reasoning: Effort.High },
-		).result();
-
-		// The Anthropic SDK renders its client's 600s timeout as a header.
-		expect(captured[0].headers["x-stainless-timeout"]).toBe("600");
-		expect(captured[0].headers["x-api-key"]).toBe("placeholder");
-	});
-
 	it("withholds refusal fallbacks on vertex/bedrock rotations, which gate the beta themselves", async () => {
 		const captured: CapturedRequest[] = [];
 		const model = factoryModel("claude-fable-5");

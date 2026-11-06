@@ -804,6 +804,18 @@ export const cfgDisplayCacheMissMarker = register({
 	},
 });
 
+export const cfgDisplayShellVisualization = register({
+	id: "display.shellVisualization",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Shell Visualization",
+		description: "Show bash commands as an interactive execution visualization instead of plain shell commands",
+	},
+});
+
 export const cfgDisplayAdvisorCollapsedLines = register({
 	id: "display.advisorCollapsedLines",
 	type: "number",
@@ -826,6 +838,7 @@ export const cfgDisplayAdvisorCollapsedLines = register({
 effect(
 	combine({
 		hideToolActivity: cfgDisplayHideToolActivity,
+		shellVisualization: cfgDisplayShellVisualization,
 		readToolResultPreview: cfgReadToolResultPreview,
 		showImages: cfgTerminalShowImages,
 		cacheMissMarker: cfgDisplayCacheMissMarker,
