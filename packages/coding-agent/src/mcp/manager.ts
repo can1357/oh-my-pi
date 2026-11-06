@@ -109,7 +109,10 @@ function createMcpStartupFailure(serverName: string, error: string, source?: Sou
  * handler's refreshed config in `#doReconnect`, plus `disconnectServer`'s
  * delete and `disconnectAll`'s clear. A record that carries its own proof of
  * currency stays correct for a writer added later, which a list of clearing
- * sites does not.
+ * sites does not. Identity means the same *definition*, not the same
+ * parse: `connectServers` keeps the object it already holds when a
+ * re-parse yields an equal definition, so a discovery pass over unchanged
+ * config files retires nothing.
  *
  * Currency matters to the readers that act on the live definition —
  * {@link MCPManager.explainMissingTool} and `#reconnectWithStoredLogin`,
@@ -120,6 +123,12 @@ function createMcpStartupFailure(serverName: string, error: string, source?: Sou
  * replaced since does not make that attempt's error any less what it was.
  * A record leaves the map only when a connect succeeds or the server is
  * torn down, so no reader can change what another reader will say.
+ *
+ * A `failed` event raised without an attempt — the crash-storm breaker,
+ * `.mcp.json` — replaces the error and keeps `authRefused` and `login`
+ * from the record it displaces, when that record is for this same
+ * definition: an emitter that sent nothing learned nothing about
+ * credentials, and the record outlives the condition that produced it.
  *
  * `config` is `undefined` for a name the manager holds no config for: a
  * config that fails validation is never stored, and neither is the
@@ -442,11 +451,21 @@ export class MCPManager implements MCPManagerApi {
 	#startupUpdates = new Map<string, Promise<void>>();
 	#startupServers = new Set<string>();
 	/**
-	 * Per server, the error of the last connect attempt *of the config
-	 * currently held for it*. Written on a `failed` event, dropped when the
-	 * server connects, when it is torn down, and — by
-	 * {@link MCPManager.#liveFailure}, the only reader — as soon as its
-	 * config is replaced.
+	 * Per server, what ended its last connect attempt: the error, the
+	 * definition that attempt used, and what that attempt sent (see
+	 * {@link McpStartupFailure}). Written on a `failed` event.
+	 *
+	 * A record is retired by the lifecycle and by nothing else: a
+	 * successful connect, {@link MCPManager.disconnectServer}, or
+	 * {@link MCPManager.disconnectAll}. No reader removes one, and
+	 * replacing a server's definition does not either —
+	 * {@link MCPManager.#liveFailure} filters a record whose definition is
+	 * no longer the one held out of the readers that act on the live
+	 * definition ({@link MCPManager.explainMissingTool} and
+	 * `#reconnectWithStoredLogin`) while leaving it in the map for
+	 * {@link MCPManager.waitForStartup}, which reports the last failure
+	 * recorded under the name whichever definition produced it. Two
+	 * readers therefore never change what the other will say.
 	 */
 	#startupFailures = new Map<string, McpStartupFailure>();
 	/** Servers {@link #reconnectWithStoredLogin} is checking right now. */
@@ -525,9 +544,10 @@ export class MCPManager implements MCPManagerApi {
 
 	/**
 	 * @param attempt - What the attempt was, captured when it started (see
-	 *   {@link McpConnectAttempt}). Omitted where no attempt was made and
-	 *   nothing was rejected either — `.mcp.json` itself, the crash-storm
-	 *   breaker — and the stored definition (often none) stands in.
+	 *   {@link McpConnectAttempt}). Omitted by the two emitters that make no
+	 *   connect at all — `.mcp.json` itself, which has no server to try, and
+	 *   the crash-storm breaker, which refuses to try — and the stored
+	 *   definition (often none) stands in.
 	 */
 	#emitConnectionStatus(event: McpConnectionStatusEvent, attempt?: McpConnectAttempt): void {
 		// Every server this manager holds a config for, not only the startup
@@ -552,6 +572,19 @@ export class MCPManager implements MCPManagerApi {
 			// speaks for it. Either way the listeners below see the event.
 			if (!attempt?.rejected || stored === undefined) {
 				const config = attempt?.rejected ? stored : (attempt?.config ?? stored);
+				// An event raised without an attempt sent nothing and was
+				// answered by nobody, so it has no evidence about credentials
+				// to record. What the last real attempt against this same
+				// definition found is still the only evidence there is, and
+				// it is carried forward rather than replaced by the "nothing
+				// was refused" default below. Only a connect or a teardown
+				// retires a record, so a breaker event that overwrote a 401's
+				// `authRefused` disarmed the cross-process login recovery for
+				// the rest of the session — long after the 30 s burst window
+				// it belongs to had expired. The event's own `error` still
+				// lands, so the user still reads that automatic reconnects
+				// are suspended; only what the breaker cannot know is kept.
+				const carried = attempt === undefined ? this.#liveFailure(event.serverName) : undefined;
 				this.#startupFailures.set(event.serverName, {
 					error: event.error,
 					config,
@@ -566,10 +599,11 @@ export class MCPManager implements MCPManagerApi {
 					// recovery — `#reconnectWithStoredLogin` compares against
 					// `login` instead.
 					authRefused:
-						(config?.type === "http" || config?.type === "sse") &&
-						attempt?.cause !== undefined &&
-						AIError.is(AIError.classify(attempt.cause), AIError.Flag.AuthFailed),
-					login: attempt?.login ?? NO_STORED_LOGIN,
+						carried?.authRefused ??
+						((config?.type === "http" || config?.type === "sse") &&
+							attempt?.cause !== undefined &&
+							AIError.is(AIError.classify(attempt.cause), AIError.Flag.AuthFailed)),
+					login: carried?.login ?? attempt?.login ?? NO_STORED_LOGIN,
 				});
 			}
 		} else if (event.type === "connected") {
@@ -1000,7 +1034,22 @@ export class MCPManager implements MCPManagerApi {
 		const connectionTasks: ConnectionTask[] = [];
 		const lazyServers: Array<{ name: string; config: MCPServerConfig }> = [];
 
-		for (const [name, config] of Object.entries(configs)) {
+		for (const [name, incoming] of Object.entries(configs)) {
+			// A discovery pass re-parses the config files and hands back a
+			// new object for every definition, changed or not. Object
+			// identity is what binds a definition to the things that are
+			// about it — the failure record (see {@link McpStartupFailure}),
+			// the epoch check that aborts a reconnect whose server was
+			// reconfigured under it — so keeping the object already held
+			// when the two definitions are equal is what makes that binding
+			// mean "the same definition" rather than "the same parse".
+			// `/mcp enable`, the dashboard's single-server enable and
+			// `#applyBrowserFilter(false)` all arrive here with freshly
+			// parsed configs for servers nothing has reconfigured, and each
+			// of them used to retire a live diagnosis: a down server went on
+			// serving its stale catalog while the model was told nothing.
+			const held = this.#serverConfigs.get(name);
+			const config = held !== undefined && Bun.deepEquals(held, incoming) ? held : incoming;
 			this.#startupServers.add(name);
 			if (sources[name]) {
 				this.#sources.set(name, sources[name]);
@@ -1615,6 +1664,10 @@ export class MCPManager implements MCPManagerApi {
 	 * for identical manager state. Records are retired by a successful
 	 * connect, `disconnectServer` and `disconnectAll` — the lifecycle, not a
 	 * reader.
+	 *
+	 * {@link MCPManager.#emitConnectionStatus} asks the same question before
+	 * an attempt-less `failed` event overwrites a record: what it carries
+	 * forward has to be about the definition the new record will name.
 	 */
 	#liveFailure(name: string): McpStartupFailure | undefined {
 		const failure = this.#startupFailures.get(name);

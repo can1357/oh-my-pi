@@ -29,6 +29,35 @@ export type McpConnectionStatusSnapshot = {
 	failedServers: readonly McpConnectionFailure[];
 };
 
+/**
+ * Longest any one field — a server name, an error, a config path — may be
+ * in a rendered MCP status string, in code points.
+ *
+ * A width cap does not bound a string's size: a name made of zero-width
+ * code points occupies no columns at all, and the unavailable-servers note
+ * is read by the model, where the cost is characters rather than terminal
+ * cells. A 100,045-character server name rendered a 200,511-character
+ * note, which is larger than most of what it was explaining.
+ *
+ * 256 because every mainstream filesystem caps a path component at 255
+ * bytes, and server names come from config files and extension directory
+ * names: a name that could have been a file name renders whole. It is also
+ * over five times the longest name these renderers are tested with (45),
+ * so the note's last sentence — type `/mcp reconnect <server>` — still
+ * carries a name a person can use. Beyond it the note grows only with the
+ * number of configured servers.
+ */
+const MCP_STATUS_FIELD_CHARS = 256;
+
+/** `text` cut to `maxChars` code points, with an explicit elision marker. */
+function elideBeyondChars(text: string, maxChars: number): string {
+	if (text.length <= maxChars) return text;
+	// Code points, not UTF-16 units: a cut between a surrogate pair would
+	// leave a lone surrogate in the model's context.
+	const points = [...text];
+	return points.length <= maxChars ? text : `${points.slice(0, maxChars).join("")}…`;
+}
+
 function sanitizeMcpStatusText(value: string, maxWidth?: number): string {
 	const text = shortenEmbeddedPaths(
 		replaceTabs(sanitizeText(value))
@@ -36,22 +65,22 @@ function sanitizeMcpStatusText(value: string, maxWidth?: number): string {
 			.trim(),
 	);
 	const safe = text.length > 0 ? text : "(unnamed)";
-	return maxWidth === undefined ? safe : truncateToWidth(safe, maxWidth);
+	return elideBeyondChars(maxWidth === undefined ? safe : truncateToWidth(safe, maxWidth), MCP_STATUS_FIELD_CHARS);
 }
 
 /**
  * A server name for display.
  *
- * `whole` keeps the name at full length. The status line is one terminal
- * line and nobody retypes a name from it, so there it stays capped at
- * {@link TRUNCATE_LENGTHS.SHORT}; the unavailable-servers note is the other
- * case, because its next sentence tells the model to run
+ * `whole` keeps the name at its full width. The status line is one
+ * terminal line and nobody retypes a name from it, so there it stays
+ * capped at {@link TRUNCATE_LENGTHS.SHORT}; the unavailable-servers note is
+ * the other case, because its next sentence tells the model to run
  * `/mcp reconnect <server>`. A name cut at 40 columns makes that command
  * wrong, and two longer names that share a prefix render as the same
  * string, so the note cannot even say which server it means. Server names
- * come from config files and have no length limit; the control characters,
- * tabs, newlines and home paths that would break a terminal are still
- * removed above, and only the length cap is lifted.
+ * come from config files and have no length limit; control characters,
+ * tabs, newlines and home paths are removed above, and
+ * {@link MCP_STATUS_FIELD_CHARS} still bounds what one name can cost.
  */
 function sanitizeMcpServerName(serverName: string, whole = false): string {
 	return sanitizeMcpStatusText(serverName, whole ? undefined : TRUNCATE_LENGTHS.SHORT);
@@ -131,7 +160,10 @@ export function formatMCPConnectionStatusMessage(snapshot: McpConnectionStatusSn
  * reconnects a server once a login it has not tried turns up.
  *
  * Server names are rendered whole here, unlike in the status line: the note
- * ends by telling the model to type `/mcp reconnect <server>`.
+ * ends by telling the model to type `/mcp reconnect <server>`. Whole means
+ * at full width, not unbounded — every field is still capped at
+ * {@link MCP_STATUS_FIELD_CHARS} code points, so the note the model reads
+ * grows with the number of servers that are down and with nothing else.
  */
 export function formatMCPUnavailableServersNote(
 	unmounted: readonly McpConnectionFailure[],

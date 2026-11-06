@@ -35,7 +35,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { MCPManager, type MCPReconnectPolicy } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import type { CustomToolContext } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { mcpOAuthCredentialId } from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
+import { DeferredMCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import { MCPToolCache } from "@oh-my-pi/pi-coding-agent/mcp/tool-cache";
 import type { MCPHttpServerConfig, MCPStdioServerConfig, MCPToolDefinition } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import type { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
@@ -49,6 +51,17 @@ const GUARD_MS = 5_000;
 
 /** One connect attempt, no ladder, so a failure is reported without retry sleeps. */
 const SINGLE_ATTEMPT: MCPReconnectPolicy = { ladderMs: [], retryBaseMs: 60_000, retryMaxMs: 60_000 };
+
+/**
+ * The crash-storm breaker's sliding window, mirroring
+ * `RECONNECT_BURST_WINDOW_MS` and `RECONNECT_BURST_LIMIT` in
+ * `src/mcp/manager.ts`: one reconnect past the limit opens the breaker, and
+ * the window has to pass before anything may reconnect again. Mirrored
+ * rather than imported so these tests run unchanged against an older
+ * revision of the manager.
+ */
+const BURST_WINDOW_MS = 30_000;
+const BURST_LIMIT = 5;
 
 const PING_DEF: MCPToolDefinition = {
 	name: "ping",
@@ -979,6 +992,205 @@ describe("MCP server that is not connected", () => {
 			expect(note).toContain(alpha);
 			expect(note).toContain(beta);
 			expect(note).not.toContain("github-enterprise-internal-tools-server…");
+		} finally {
+			await named.disconnectAll();
+			await removeWithRetries(workDir);
+		}
+	}, 30_000);
+
+	/**
+	 * R4-a. The crash-storm breaker raises a `failed` event for an attempt
+	 * it refused to make. Writing that event's defaults over the record
+	 * erased what the server's last real attempt found — the 401 and the
+	 * login it sent — and since only a connect or a teardown retires a
+	 * record, the erasure outlived the 30 s window by the rest of the
+	 * session. Six deferred tool calls on a down lazy server are six
+	 * non-manual reconnects (`DeferredMCPTool.execute` → `reconnect`, which
+	 * must never set `manual`), which is ordinary model traffic; after it,
+	 * a login another process stored never brought the server back.
+	 */
+	it("recovers a server whose breaker tripped on deferred calls, once another session stores its login", async () => {
+		const breaking = startLoginRequiredServer();
+		const lazyConfig: MCPHttpServerConfig = { type: "http", url: breaking.url, timeout: 2_000, lazy: true };
+		const cache = new MCPToolCache(memoryStorage());
+		await cache.set("dormant", lazyConfig, [PING_DEF]);
+		const tripped = new MCPManager(tempDir, cache, undefined, SINGLE_ATTEMPT);
+		tripped.setAuthStorage(session);
+		try {
+			const loaded = await tripped.connectServers({ dormant: lazyConfig }, {});
+			const tool = loaded.tools.find(candidate => candidate.mcpServerName === "dormant");
+			expect(tool).toBeInstanceOf(DeferredMCPTool);
+
+			// One more call than the burst limit, every one of them the
+			// per-call path a model tool call takes.
+			for (let call = 0; call <= BURST_LIMIT; call++) {
+				await (tool as DeferredMCPTool).execute(`call-${call}`, {}, undefined, {} as CustomToolContext, undefined);
+			}
+			expect(tripped.explainMissingTool("mcp__dormant_ping")).toContain("automatic reconnects suspended");
+			expect(breaking.state.authorizedPosts).toBe(0);
+
+			// Suspended is not permanent: the window is a sliding 30 s of
+			// `Date.now()`, and surviving it is the whole contract. A real
+			// wait, because the only deterministic alternative is to fake
+			// the clock the breaker reads — which would decide the answer
+			// — and because the recovery it enables is a real loopback
+			// handshake no fake timer can drive.
+			await Bun.sleep(BURST_WINDOW_MS + 1_000);
+
+			await otherSession.credentials.set(mcpOAuthCredentialId(breaking.url), {
+				type: "oauth",
+				access: GOOD_TOKEN,
+				refresh: "unused-refresh",
+				expires: Date.now() + 3_600_000,
+			});
+			tripped.explainMissingTool("mcp__dormant_ping");
+			await Promise.race([connectionEstablished(tripped, "dormant"), Bun.sleep(5_000)]);
+			expect(tripped.getConnectionStatus("dormant")).toBe("connected");
+			expect(breaking.state.authorizedPosts).toBeGreaterThan(0);
+		} finally {
+			await tripped.disconnectAll();
+			breaking.stop();
+			await otherSession.credentials.remove(mcpOAuthCredentialId(breaking.url));
+			await session.credentials.poll();
+		}
+	}, 90_000);
+
+	/**
+	 * R4-b, the same defect read off the note instead of off the network:
+	 * the breaker's own error must reach the model — the user has to learn
+	 * that automatic reconnects are suspended — without taking the 401's
+	 * login recovery with it. An emitter that made no attempt refused no
+	 * credential, so it has nothing to say about one.
+	 */
+	it("keeps a 401's login recovery in the note when the breaker suspends reconnects", async () => {
+		const refusing = startLoginRequiredServer();
+		const storm = new MCPManager(tempDir, null, undefined, SINGLE_ATTEMPT);
+		storm.setAuthStorage(session);
+		try {
+			await storm.connectServers({ remote: { type: "http", url: refusing.url, timeout: 2_000 } }, {});
+			await storm.waitForStartup(GUARD_MS);
+			expect(storm.explainMissingTool("mcp__remote_ping")).toContain("omp is checking now");
+
+			// Non-manual throughout: `/mcp reconnect` would reset the window.
+			for (let attempt = 0; attempt <= BURST_LIMIT; attempt++) {
+				await storm.reconnectServer("remote");
+			}
+
+			const note = storm.explainMissingTool("mcp__remote_ping");
+			expect(note).toContain("automatic reconnects suspended");
+			expect(note).toContain("omp is checking now whether a login was stored for remote");
+		} finally {
+			await storm.disconnectAll();
+			refusing.stop();
+			await session.credentials.poll();
+		}
+	}, 30_000);
+
+	/**
+	 * R4-b, the other side of the same guard. `.mcp.json` is the other
+	 * emitter that reports without an attempt, and it is meant to: there is
+	 * no server to try, and the file's own parse error is the whole
+	 * diagnosis. A guard that kept an attempt-less event from writing at
+	 * all would freeze the first error and report it for the rest of the
+	 * session, however the file changed in between.
+	 */
+	it("reports the current .mcp.json load failure, including a second one", async () => {
+		const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-cfg-"));
+		const messages = ["first parse error", "second parse error"];
+		let call = 0;
+		const unreadable = new MCPManager(workDir, null, async () => {
+			throw new Error(messages[Math.min(call++, messages.length - 1)]);
+		});
+		try {
+			await expect(unreadable.discoverAndConnect()).rejects.toThrow("first parse error");
+			expect(unreadable.explainMissingTool("mcp__anything_ping")).toContain("first parse error");
+
+			await expect(unreadable.discoverAndConnect()).rejects.toThrow("second parse error");
+			const note = unreadable.explainMissingTool("mcp__anything_ping");
+			expect(note).toContain(".mcp.json");
+			expect(note).toContain("second parse error");
+			expect(note).not.toContain("first parse error");
+		} finally {
+			await unreadable.disconnectAll();
+			await removeWithRetries(workDir);
+		}
+	}, 30_000);
+
+	/**
+	 * R4-c. A failure record is bound to the definition that produced it by
+	 * object identity, and a discovery pass re-parses the config files into
+	 * fresh objects whether or not anything changed. `/mcp enable`, the
+	 * dashboard's enable and the browser-filter reconcile all go through
+	 * `connectServers`, so each of them retired a live diagnosis: the
+	 * server stayed down, went on serving its stale cached catalog, and the
+	 * model asking for a tool that catalog does not have was told nothing
+	 * at all.
+	 */
+	it("keeps a live diagnosis when a discovery pass re-parses the same definition", async () => {
+		const reparsed = startLoginRequiredServer();
+		const definition = (): MCPHttpServerConfig => ({ type: "http", url: reparsed.url, timeout: 2_000, lazy: true });
+		const cache = new MCPToolCache(memoryStorage());
+		const first = definition();
+		await cache.set("dormant", first, [PING_DEF]);
+		const rediscovered = new MCPManager(tempDir, cache, undefined, SINGLE_ATTEMPT);
+		rediscovered.setAuthStorage(session);
+		try {
+			await rediscovered.connectServers({ dormant: first }, {});
+			await rediscovered.reconnectServer("dormant", { manual: true });
+			expect(rediscovered.explainMissingTool("mcp__dormant_search")).toContain("401");
+
+			// A second pass over unchanged files: an equal definition in a
+			// new object, which is what every config load produces.
+			const again = definition();
+			expect(again).not.toBe(first);
+			await rediscovered.connectServers({ dormant: again }, {});
+
+			const note = rediscovered.explainMissingTool("mcp__dormant_search");
+			expect(note).toContain("401");
+			expect(note).toContain("still serving the tools cached from an earlier connect");
+			expect(rediscovered.getConnectionStatus("dormant")).toBe("disconnected");
+			expect(rediscovered.getTools().map(tool => tool.name)).toContain("mcp__dormant_ping");
+		} finally {
+			await rediscovered.disconnectAll();
+			reparsed.stop();
+			await session.credentials.poll();
+		}
+	}, 30_000);
+
+	/**
+	 * R4-d. Round 3 lifted the 40-column cap on names in this note so that
+	 * `/mcp reconnect <server>` could be typed from it, which left the note
+	 * unbounded: a 100,045-character name rendered a 200,511-character
+	 * note, larger than most of what it was explaining. Width is not the
+	 * bound to use — the note is read by a model, not a terminal — so the
+	 * cap is on code points, far above any name a person writes.
+	 */
+	it("bounds a pathological server name without shortening realistic ones", async () => {
+		const alpha = "github-enterprise-internal-tools-server-alpha";
+		const beta = "github-enterprise-internal-tools-server-beta";
+		const huge = "x".repeat(100_045);
+		const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-long-"));
+		const named = new MCPManager(workDir, null, undefined, SINGLE_ATTEMPT);
+		try {
+			const config: MCPStdioServerConfig = {
+				type: "stdio",
+				command: process.execPath,
+				args: ["-e", "process.exit(3)"],
+				timeout: 2_000,
+			};
+			await named.connectServers({ [alpha]: config, [beta]: { ...config }, [huge]: { ...config } }, {});
+			await named.waitForStartup(GUARD_MS);
+
+			const note = named.explainMissingTool(`mcp__${alpha}_ping`) ?? "";
+			// Round 3's contract: both long names whole, and distinct from
+			// each other, so the reconnect command can name one of them.
+			expect(note).toContain(alpha);
+			expect(note).toContain(beta);
+			// The pathological one is elided, and the whole note is smaller
+			// than the name that used to be copied into it twice.
+			expect(note).not.toContain(huge);
+			expect(note).toContain("…");
+			expect(note.length).toBeLessThan(4_000);
 		} finally {
 			await named.disconnectAll();
 			await removeWithRetries(workDir);
