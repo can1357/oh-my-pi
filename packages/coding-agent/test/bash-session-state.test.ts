@@ -50,6 +50,23 @@ async function run(tool: BashTool, command: string) {
 	return { text, async: result.details?.async };
 }
 
+it.each([
+	{ managed: false, settings: { "bash.autoBackground.enabled": false } },
+	{ managed: true, settings: { "bash.autoBackground.enabled": true } },
+])("does not stream or return a run trace when visualization is disabled (managed: $managed)", async ({ settings }) => {
+	const tool = bashTool({ ...settings, "display.shellVisualization": false });
+	let frames = 0;
+	let tracedFrames = 0;
+	const result = await tool.execute("trace-disabled", { command: "printf 'plain output\\n'" }, undefined, update => {
+		frames++;
+		if (update.details?.trace) tracedFrames++;
+	});
+	expect(frames).toBeGreaterThan(0);
+	expect(tracedFrames).toBe(0);
+	expect(result.details?.trace).toBeUndefined();
+	expect(result.content.find(block => block.type === "text")?.text).toContain("plain output");
+});
+
 it.skipIf(process.platform === "win32")("keeps a variable set by one call for the next call", async () => {
 	const tool = bashTool();
 	await run(tool, "PI_STATE_VAR=kept");
