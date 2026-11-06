@@ -23,51 +23,6 @@ This repo contains multiple packages, but **`packages/coding-agent/`** is the pr
 
 **Catalog import convention**: code in this repo imports catalog _values_ (bundled models, model-thinking helpers, identity, descriptors, model manager/cache) from `@oh-my-pi/pi-catalog/<module>` — never via `@oh-my-pi/pi-ai`. The pi-ai barrel re-exports only the model/effort _types_ its own signatures use (`Model`, `Api`, `ThinkingConfig`, `Effort`, …); type-only imports of those from `@oh-my-pi/pi-ai` are fine.
 
-## Fork Additions (this fork)
-
-This fork adds agent-network and browser subsystems on top of upstream. Their
-invariants are binding for every change in this repo:
-
-### Multi-agent networking (A2A)
-
-- `packages/coding-agent/src/a2a/`: a v1.0 JSON-RPC bridge (loopback-only,
-  bearer auth). **Base state**: `a2a.enabled: true` + `a2a.port: 0` (free port)
-  — every session runs a bridge and registers in
-  `<agent dir>/a2a-bridges.json` (dead pids pruned on read). Peers auto-register
-  at session start (`a2a.autoRegister`).
-- **Addressing**: a task for a peer terminal goes to **its main agent**
-  (`metadata.to`); spawning a new agent on the peer is opt-in
-  (`metadata.spawn: true` / the task tool's `a2aSpawn`). `a2a.name` /
-  `--a2a-name` is the terminal's public identity: the card's main skill and
-  the `to` resolution use it.
-- **Concurrency**: every spawn path (task tool, A2A seam
-  `pi.spawnSubagent`, workflow `agent()`) shares one session spawn limiter
-  (`task.concurrencyPolicy: "queue" | "refuse"`). Never bypass it.
-- `workflow` tool (`src/workflow/`): a deterministic node:vm sandbox (global
-  allowlist, no require/import/Date.now/Math.random) with a synchronous
-  journal + `resumeFrom` prefix replay. A failed child is journaled `failed`
-  and re-executed on resume.
-- Ingress guard (`src/irc/ingress-guard.ts`): rate/dedup/hops/backpressure on
-  `agent://` messages — refusals are failed receipts, never throws; a single
-  message of any size always passes an empty window.
-
-### Browser via chrome-mcp
-
-- The **user's real Chrome** is the base browser: `src/mcp/auto-chrome-mcp.ts`
-  probes the local chrome-mcp bridge on `127.0.0.1:12306` (IP-literal loopback
-  only, silent skip, CI-safe) and registers its `chrome_*` tools; the built-in
-  `browser` tool (isolated Chrome for Testing) stays as the fallback.
-- Transport: MCP 2026-07-28 streamable-http with automatic downgrade (PR
-  #14172 lineage). A user-configured `chrome` MCP server is never overwritten;
-  off-switches: `disabledServers: ["chrome"]`, `browser.chromeMcp: false`.
-
-### Fork workflow rules
-
-- `bun run setup` is FORBIDDEN on dev machines (overwrites the global omp
-  link); use `bun run build` + copy `dist/omp`. Tests run with an isolated
-  `PI_CODING_AGENT_DIR`. Corporate identifiers never enter commits — this is
-  a public fork.
-
 ## GitHub
 
 - Before posting a GitHub comment or creating an issue, MUST show the target and proposed text and obtain user confirmation. An explicit instruction to post supplied text to a specified target already counts as confirmation.
