@@ -292,15 +292,13 @@ fn compile(zw: &mut Zw<'_, '_>, s: &Isearch) -> Option<Arc<Pattern>> {
 	remnulargs(&mut text);
 	let mut flags = PatFlags::NOANCH;
 	if !s.anchored() {
-		flags = flags | PatFlags::SCAN;
+		flags |= PatFlags::SCAN;
 	}
 	if s.sens == 3 {
-		flags = flags | PatFlags::LCMATCHUC;
+		flags |= PatFlags::LCMATCHUC;
 	}
-	match zw.params(|ex| zpattern::try_compile(ex, &text, flags)) {
-		Ok(p) => p,
-		Err(_) => None,
-	}
+	zw.params(|ex| zpattern::try_compile(ex, &text, flags))
+		.unwrap_or_default()
 }
 
 /// The top of `doisearch`'s loop: search for the string as it is now,
@@ -461,21 +459,21 @@ fn top(zw: &mut Zw<'_, '_>, mut s: Box<Isearch>) -> WResult {
 			};
 		}
 		s.dup_ok = false;
-		if t.is_some() || (s.nosearch && s.nomatch == 0) {
-			if let Some(i) = h.index_of(s.hl) {
-				let cs = if s.dir == 1 { s.end_pos } else { s.pos };
-				return setline_then(
-					zw,
-					&h,
-					i,
-					after(move |zw| {
-						zw.ed.cs = cs;
-						s.status_full = false;
-						s.nomatch = 0;
-						top_tail(zw, s)
-					}),
-				);
-			}
+		if (t.is_some() || (s.nosearch && s.nomatch == 0))
+			&& let Some(i) = h.index_of(s.hl)
+		{
+			let cs = if s.dir == 1 { s.end_pos } else { s.pos };
+			return setline_then(
+				zw,
+				&h,
+				i,
+				after(move |zw| {
+					zw.ed.cs = cs;
+					s.status_full = false;
+					s.nomatch = 0;
+					top_tail(zw, s)
+				}),
+			);
 		}
 	} else {
 		s.top_spot = 0;
@@ -620,19 +618,19 @@ fn on_key(zw: &mut Zw<'_, '_>, mut s: Box<Isearch>, got: Got) -> WResult {
 			s.zt = zt_of(zw, &h, s.hl);
 			s.shown_dir = s.dir;
 			let sbptr = s.sbuf.len();
-			if s.nomatch != 0 || sbptr == 0 || (sbptr == 1 && s.anchored()) {
-				if let Some(i) = h.index_of(s.hl) {
-					let cs = zw.ed.cs;
-					return setline_then(
-						zw,
-						&h,
-						i,
-						after(move |zw| {
-							zw.ed.cs = cs;
-							top(zw, s)
-						}),
-					);
-				}
+			if (s.nomatch != 0 || sbptr == 0 || (sbptr == 1 && s.anchored()))
+				&& let Some(i) = h.index_of(s.hl)
+			{
+				let cs = zw.ed.cs;
+				return setline_then(
+					zw,
+					&h,
+					i,
+					after(move |zw| {
+						zw.ed.cs = cs;
+						top(zw, s)
+					}),
+				);
 			}
 			top(zw, s)
 		},
@@ -685,15 +683,12 @@ fn on_key(zw: &mut Zw<'_, '_>, mut s: Box<Isearch>, got: Got) -> WResult {
 			}
 			then(Await::Char, move |zw, got| {
 				let mut s = s;
-				match got {
-					Got::Char(Some(c)) => {
-						zw.ed.lastchar_wide = Some(c);
-						insert(zw, s)
-					},
-					_ => {
-						s.feep = true;
-						bottom(zw, s)
-					},
+				if let Got::Char(Some(c)) = got {
+					zw.ed.lastchar_wide = Some(c);
+					insert(zw, s)
+				} else {
+					s.feep = true;
+					bottom(zw, s)
 				}
 			})
 		},
@@ -773,18 +768,17 @@ fn finish(zw: &mut Zw<'_, '_>, s: Box<Isearch>) -> WResult {
 					let exitfn = s.exitfn;
 					let rest: Then = after(move |zw| finish_tail(zw, &s));
 					match exitfn.and_then(builtin) {
-						Some(b) => match b.func {
-							Some(f) => {
+						Some(b) => {
+							if let Some(f) = b.func {
 								let r = f(zw);
 								chain(zw, r, rest)
-							},
-							None => {
+							} else {
 								let mut msg = BString::from("zle: widget not implemented: ");
 								msg.extend_from_slice(b.name.as_bytes());
 								utils::showmsg(zw.ed, &msg);
 								utils::handlefeep(zw.ed);
 								rest(zw)
-							},
+							}
 						},
 						None => rest(zw),
 					}

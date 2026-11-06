@@ -308,9 +308,8 @@ impl Env for ShellEnv<'_, '_, '_> {
 			}
 			return Err(MathError::UnknownFunction { name: Nice(name.into()) }.into());
 		}
-		let module = match zsh_module::math_module(self.ex, name)? {
-			Some(m) => m,
-			None => return Err(MathError::UnknownFunction { name: Nice(name.into()) }.into()),
+		let Some(module) = zsh_module::math_module(self.ex, name)? else {
+			return Err(MathError::UnknownFunction { name: Nice(name.into()) }.into());
 		};
 		zsh_module::call_math(self.ex, module, name, args)
 	}
@@ -351,7 +350,9 @@ pub fn user_math_funcs(
 			.unwrap_or(-1)
 	};
 	Ok(w
-		.chunks_exact(5)
+		.as_chunks::<5>()
+		.0
+		.iter()
 		.map(|c| UserMathFunc {
 			name:   c[0].clone(),
 			string: c[1].as_slice() == b"s",

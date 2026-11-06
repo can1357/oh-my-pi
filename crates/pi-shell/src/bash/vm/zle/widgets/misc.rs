@@ -313,7 +313,7 @@ pub fn transposechars(zw: &mut Zw<'_, '_>) -> WResult {
 }
 
 /// zsh `acceptline`: the line is done.
-pub fn acceptline(zw: &mut Zw<'_, '_>) -> WResult {
+pub const fn acceptline(zw: &mut Zw<'_, '_>) -> WResult {
 	zw.ed.done = true;
 	WResult::Done(0)
 }
@@ -347,7 +347,7 @@ pub fn quotedinsert(_zw: &mut Zw<'_, '_>) -> WResult {
 
 /// Widget `overwrite-mode` (zsh `overwritemode`): toggle insert and
 /// overwrite.
-pub fn overwritemode(zw: &mut Zw<'_, '_>) -> WResult {
+pub const fn overwritemode(zw: &mut Zw<'_, '_>) -> WResult {
 	zw.ed.insmode = !zw.ed.insmode;
 	WResult::Done(0)
 }
@@ -370,30 +370,30 @@ pub fn splitundo(zw: &mut Zw<'_, '_>) -> WResult {
 
 /// zsh `sendbreak`: abandon the line as an interrupt does
 /// (`errflag |= ERRFLAG_ERROR|ERRFLAG_INT`).
-pub fn send_break(ed: &mut Editor) -> i32 {
+pub const fn send_break(ed: &mut Editor) -> i32 {
 	ed.aborted = true;
 	1
 }
 
 /// Widget `send-break`.
-pub fn sendbreak(zw: &mut Zw<'_, '_>) -> WResult {
+pub const fn sendbreak(zw: &mut Zw<'_, '_>) -> WResult {
 	WResult::Done(send_break(zw.ed))
 }
 
 /// Widget `undefined-key` (zsh `undefinedkey`): fail, so the core beeps.
-pub fn undefinedkey(_zw: &mut Zw<'_, '_>) -> WResult {
+pub const fn undefinedkey(_zw: &mut Zw<'_, '_>) -> WResult {
 	WResult::Done(1)
 }
 
 /// Widget `beep` (zsh `handlefeep`).
-pub fn beep(zw: &mut Zw<'_, '_>) -> WResult {
+pub const fn beep(zw: &mut Zw<'_, '_>) -> WResult {
 	WResult::Done(utils::handlefeep(zw.ed))
 }
 
 /// A builtin widget zsh has no function for (`accept-search`,
 /// `execute-named-cmd`, `execute-last-named-cmd` outside the code that
 /// acts on their names): `execzlefunc` beeps and succeeds.
-pub fn nullwidget(zw: &mut Zw<'_, '_>) -> WResult {
+pub const fn nullwidget(zw: &mut Zw<'_, '_>) -> WResult {
 	utils::handlefeep(zw.ed);
 	WResult::Done(0)
 }
@@ -401,7 +401,7 @@ pub fn nullwidget(zw: &mut Zw<'_, '_>) -> WResult {
 /// zsh `handlesuffix` (`auto-suffix-remove`, `auto-suffix-retain`):
 /// nothing itself; whether the completion suffix stays is decided by the
 /// widget's `ZLE_KEEPSUFFIX` flag as it runs.
-pub fn handlesuffix(_zw: &mut Zw<'_, '_>) -> WResult {
+pub const fn handlesuffix(_zw: &mut Zw<'_, '_>) -> WResult {
 	WResult::Done(0)
 }
 
@@ -469,7 +469,7 @@ pub fn whatcursorposition_msg(ed: &Editor) -> Vec<u8> {
 		},
 	}
 	let ll = ed.line.len();
-	let pct = if ll == 0 { 0 } else { 100 * ed.cs / ll };
+	let pct = (100 * ed.cs).checked_div(ll).unwrap_or(0);
 	s.extend_from_slice(
 		format!("  point {} of {}({pct}%)  column {}", ed.cs + 1, ll + 1, ed.cs - bol).as_bytes(),
 	);

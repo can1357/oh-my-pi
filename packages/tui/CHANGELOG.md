@@ -2,8 +2,11 @@
 
 ## [Unreleased]
 
+## [18.17.0] - 2026-11-06
+
 ### Breaking Changes
 
+- `MarkdownTheme.heading` receives the heading depth (1–6) as a second argument; callers must pass it.
 - Shell visualization uses the native presentation engine: shell node IDs are opaque strings, and native shell nodes receive presentation data, not raw execution traces.
 - Replaced `CustomEditor.modelMentionLabel` with `resolveModelMention` (returns `{ label, selector }`); `collapseModelMentions` takes the same callback; `getModelMentionSuggestions` returns `ModelMentionCompletion`.
 - `SetupHost` must implement `autoUpdate`, `canAutoUpdate()` and `saveAutoUpdate()` for setup version 3's auto-update scene.
@@ -14,6 +17,7 @@
 
 ### Added
 
+- Colorful Markdown, on by default (`setMarkdownColorful`): headings by level, bold/italic, inline code and table headers take distinct hues from the theme's `terminal.ansi` palette. `MarkdownTheme` gains optional `strong`, `emphasis` and `tableHeader` roles; `Theme.ansiFg()` paints a palette slot, falling back to the terminal's own palette.
 - Bash cards show incremental Python-like pseudocode with a Raw toggle, failure marks and variable values; the inspector adds layers, split source and timestamp replay. Native hosts draw an inline segmented run box (`shell` = command, `omp.tool.bash.output` = output).
 - `VersionUpdate`, `WelcomeComponent.setVersionUpdate()` and `ComposerWelcomeUpdate.versionUpdate`: the welcome banner shows background self-update progress, readiness or failure.
 - `newSessionThinkingLevel` / `resolveConfiguredThinkingLevel` resolve a new session's starting thinking level; `ComposerCache.writeStatus` accepts `{ shared: false }` to keep a project's status out of the any-project fallback.
