@@ -626,15 +626,15 @@ export const cfgTextVerbosity = register({
 	id: "textVerbosity",
 	type: "enum",
 	values: ["low", "medium", "high"] as const,
-	default: "medium",
+	default: "low",
 	ui: {
 		tab: "model",
 		group: "Sampling",
 		label: "Text Verbosity",
 		description: "OpenAI Responses and Codex response verbosity (low, medium, or high)",
 		options: [
-			{ value: "low", label: "Low", description: "Prefer concise responses" },
-			{ value: "medium", label: "Medium", description: "Balance brevity and detail (default)" },
+			{ value: "low", label: "Low", description: "Prefer concise responses (default)" },
+			{ value: "medium", label: "Medium", description: "Balance brevity and detail" },
 			{ value: "high", label: "High", description: "Prefer detailed responses" },
 		],
 	},
@@ -1158,13 +1158,25 @@ export const cfgProvidersOpenaiWebsockets = register({
 	ui: {
 		tab: "providers",
 		group: "Protocol",
-		label: "OpenAI WebSockets",
-		description: "Websocket policy for OpenAI Codex models (auto uses model defaults, on forces, off disables)",
+		label: "OpenAI Codex WebSockets",
+		description: "WebSocket policy for OpenAI Codex models only",
 		options: [
-			{ value: "auto", label: "Auto", description: "Use model/provider default websocket behavior" },
-			{ value: "off", label: "Off", description: "Disable websockets for OpenAI Codex models" },
+			{ value: "auto", label: "Auto", description: "Use Codex model defaults" },
+			{ value: "off", label: "Off", description: "Disable WebSockets for OpenAI Codex models" },
 			{ value: "on", label: "On", description: "Force websockets for OpenAI Codex models" },
 		],
+	},
+});
+
+export const cfgProvidersOpenaiResponsesWebsockets = register({
+	id: "providers.openaiResponsesWebsockets",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "providers",
+		group: "Protocol",
+		label: "OpenAI Responses WebSockets",
+		description: "Opt in for catalog-supported standard Responses models; model or request false disables it",
 	},
 });
 

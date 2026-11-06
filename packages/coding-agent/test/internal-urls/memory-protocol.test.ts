@@ -816,6 +816,7 @@ describe("MemoryProtocolHandler — mnemopi bridge (issue #4443)", () => {
  */
 function withHindsightSession(fn: () => Promise<void>): Promise<void> {
 	const session = {
+		hindsightActive: true,
 		getHindsightSessionState: () => ({ bankId: "test-bank" }),
 	} as unknown as AgentSession;
 	AgentRegistry.global().register({

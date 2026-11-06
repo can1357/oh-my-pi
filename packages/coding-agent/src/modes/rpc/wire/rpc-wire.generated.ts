@@ -532,10 +532,29 @@ export interface BashResult {
 	timedOut?: boolean;
 	artifactId?: string;
 	artifactElidedBytes?: number;
+	/** Bytes dropped from the middle of `output`, which keeps the head and tail. */
+	elidedBytes?: number;
+	/** Lines dropped from the middle of `output`. */
+	elidedLines?: number;
+	/** Bytes the per-line column cap cut from `output`, across all lines. */
+	columnDroppedBytes?: number;
+	/** Lines of `output` the per-line column cap cut; the artifact holds them whole. */
+	columnTruncatedLines?: number;
+	/** First and last lines the column cap cut, numbered as in the artifact; absent when the numbering cannot match it. */
+	columnTruncatedRange?: LineRange;
+	/** The per-line column cap in UTF-8 bytes, set when it cut a line. */
+	columnMax?: number;
 	artifactError?: Record<string, unknown>;
 	minimized?: Record<string, unknown>;
 	workingDir?: string;
 	images?: ImageContent[];
+	/** The embedded shell's final `ShellTrace` of the run; only when the caller asked for one. */
+	trace?: Record<string, unknown>;
+}
+
+export interface LineRange {
+	first: number;
+	last: number;
 }
 
 export interface FastModeResult {

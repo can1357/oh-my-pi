@@ -253,4 +253,53 @@ describe("tool result details with raw control sequences", () => {
 		if (view.k !== "tool") throw new Error("Expected read tool node");
 		expect(view.p?.href).toBe(url);
 	});
+
+	it("links a read of a URL in text mode", () => {
+		applyHyperlinkSetting("always");
+		const url = "https://example.com/a";
+		const group = new ReadToolGroupComponent();
+		group.updateArgs({ path: url }, "u");
+		group.updateResult(
+			{ content: [{ type: "text", text: "needle" }], details: { displayContent: { text: LINE, startLine: 1 } } },
+			false,
+			"u",
+		);
+		expect(group.render(120).join("\n")).toContain(`;${url}\x07`);
+	});
+
+	it("links a grouped read's URL row across the whole URL", () => {
+		const url = "https://api.example.com/repos/o/r/issues/7517";
+		const group = new ReadToolGroupComponent();
+		group.updateArgs({ path: `fixture.txt\n${url}` }, "u");
+		group.updateResult(
+			{
+				content: [{ type: "text", text: "needle" }],
+				details: {
+					displayReadTargets: ["fixture.txt", url],
+					displayContent: { text: LINE, startLine: 1 },
+				},
+			},
+			false,
+			"u",
+		);
+		const view = group.describe({
+			cols: 120,
+			reduceMotion: false,
+			dark: true,
+			supports: kind => kind === "tool",
+			feature: () => true,
+		});
+		if (view.k !== "tool") throw new Error("Expected read tool node");
+		const spans = (view.c ?? []).flatMap(child =>
+			"k" in child && child.k === "row"
+				? (child.c ?? []).flatMap(grandchild =>
+						"k" in grandchild && grandchild.k === "text" ? (grandchild.p?.spans ?? []) : [],
+					)
+				: [],
+		);
+		// The row's last `/` is not a directory boundary: one span holds the URL,
+		// and a click on any of it opens it.
+		const urlSpans = spans.filter(span => url.includes(span.t));
+		expect(urlSpans.map(span => [span.t, span.href])).toEqual([[url, url]]);
+	});
 });

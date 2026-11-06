@@ -1,10 +1,10 @@
 import { getComposerStyle } from "../components/composer/registry";
 import { Spacer } from "../components/spacer";
 import type { StatusLineComponent } from "../status-line/component";
-import { compositeLineAt } from "../render/composite";
-import { type ExtensionLinkLabel, extensionLinkLabels, linkHintTags } from "../render/extension-links";
+import { extensionLinkLabels } from "../render/extension-links";
+import { LinkHints, type ViewportLink, viewportLinkTargets } from "../render/link-hints";
 import type { StatusLineSession } from "../status-line/host";
-import { createStartupStatusLine, type StatusLineStartupData } from "../status-line/startup";
+import { createStartupStatusLine, type StatusLineStartupData, startupComposerState } from "../status-line/startup";
 import { isInsideTerminalMultiplexer } from "../terminal-multiplexer";
 import { ProcessTerminal, type Terminal } from "../terminal";
 import {
@@ -19,13 +19,13 @@ import {
 	type ViewportSize,
 } from "../tui";
 import { wrapLiteralLine } from "../utils";
-import type { NativeChild, NativeSurface, NativeSurfaceProvider } from "../native/node";
+import type { DescribeContext, NativeChild, NativeSurface, NativeSurfaceProvider } from "../native/node";
 import { sameItems } from "../native/memo";
 import { postmortem } from "@oh-my-pi/pi-utils";
 import { CustomEditor } from "./custom-editor";
 import type { WordCompletionMethod } from "./word-completion";
 import { type AnimationFrame, TranscriptContainer } from "../chrome/transcript-container";
-import { WelcomeComponent } from "./welcome";
+import { type VersionUpdate, WelcomeComponent } from "./welcome";
 import { ensureThemeSync, getEditorTheme, theme } from "../theme/theme";
 
 const DOUBLE_INTERRUPT_MS = 500;
@@ -66,6 +66,8 @@ export const COMPOSER_DEFAULTS: ComposerPreferences = {
 /** Welcome data that can be supplied initially or patched as startup resolves it. */
 export interface ComposerWelcomeUpdate {
 	readonly version?: string;
+	/** Background self-update activity after the version label; `null` clears it. */
+	readonly versionUpdate?: VersionUpdate | null;
 }
 
 /**
@@ -186,45 +188,11 @@ export function routeViewportClick(spans: readonly ViewportClickSpan[], index: n
 	return [];
 }
 
-/** An extension link label drawn on a mutable-viewport line: what a click or hint tag lands on. */
-export interface ViewportLink {
-	readonly url: string;
-	/** Mutable-viewport line the label is drawn on. */
-	readonly row: number;
-	/** First cell of the label's part on that line. */
-	readonly start: number;
-}
-
-/** An extension link label tagged for picking by keyboard in link-hint mode. */
-interface ViewportLinkHint {
-	readonly tag: string;
-	readonly link: ViewportLink;
-}
-
 /**
  * Called once when link-hint mode ends; `reason` is `"crowded"` when a row held more links than
  * their tags could fit side by side, so no tags were drawn.
  */
 export type LinkHintsEnd = (reason?: "crowded") => void;
-
-/**
- * The extension link labels drawn on `rows`, top to bottom, a wrapped label once at its first row:
- * a row's first label continues the previous row's last label when that has the same marker id
- * and ends its row.
- */
-function viewportLinkTargets(rows: readonly string[]): ViewportLink[] {
-	const targets: ViewportLink[] = [];
-	let previous: ExtensionLinkLabel | undefined;
-	for (let row = 0; row < rows.length; row++) {
-		const labels = extensionLinkLabels(rows[row]!);
-		for (const [index, label] of labels.entries()) {
-			if (index === 0 && previous?.endsRow && previous.id === label.id) continue;
-			targets.push({ url: label.url, row, start: label.start });
-		}
-		previous = labels.at(-1);
-	}
-	return targets;
-}
 
 /**
  * Nested background opens inside a hovered row. The band wraps the line, so a
@@ -262,6 +230,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#preferences: ComposerPreferences;
 	#welcome: WelcomeComponent | undefined;
 	#version = "";
+	#versionUpdate: VersionUpdate | null = null;
 	#headerBefore: readonly Component[] = [];
 	#headerAfter: readonly Component[] = [];
 	#runtimeChildren: readonly Component[] = [];
@@ -307,12 +276,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#lastViewportRows: readonly string[] = [];
 	/** Click-candidate id under the pointer, painted with the hover band. Id-anchored so it follows streaming rows. */
 	#hoveredClickId: string | undefined;
-	/**
-	 * Keyboard link-hint mode: the tags drawn over the extension links on screen (`undefined` until
-	 * the first frame after `startLinkHints` assigns them), the letters typed so far, and what to run
-	 * when the mode ends for any reason.
-	 */
-	#linkHints: { hints: ViewportLinkHint[] | undefined; typed: string; onEnd: LinkHintsEnd } | undefined;
+	/** Keyboard link-hint mode: its tags (assigned by the first frame after `startLinkHints`) and what to run when it ends. */
+	#linkHints: { hints: LinkHints; onEnd: LinkHintsEnd } | undefined;
 	/** Width of the last painted viewport, which `#lastViewportRows` was laid out for. */
 	#lastViewportWidth = 0;
 	// Hard-row prefix currently above the native viewport. The first resize
@@ -407,6 +372,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 			this.#startupStatus = createStartupStatusLine(statusLine);
 			this.#statusHost.setComponent(this.#startupStatus);
 			this.#startupStatus.attachToEditor(this.editor, getComposerStyle(this.#preferences.composerShape));
+			const state = startupComposerState(statusLine);
+			this.editor.composerState = () => state;
 		}
 		// Emergency controls stay active until InteractiveMode installs configured bindings.
 		// They deliberately mirror the interactive editor's contract so a stalled startup
@@ -574,7 +541,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 			const visibleHeaderRows = Math.max(0, rows - (mutable.length + drop));
 			this.#retiredHeaderStart = Math.max(0, history.rows.length - visibleHeaderRows);
 		}
-		return { history, viewport: this.#paintLinkHints(this.#paintHoverBand(mutable, spans), width) };
+		const painted = this.#paintHoverBand(mutable, spans);
+		return { history, viewport: this.#linkHints?.hints.paint(painted, width) ?? painted };
 	}
 
 	/**
@@ -588,27 +556,9 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#syncLinkHints(rows: readonly string[], width: number): void {
 		const state = this.#linkHints;
 		if (state === undefined) return;
-		const targets = viewportLinkTargets(rows);
-		const hints = state.hints;
-		if (hints === undefined) {
-			state.hints = linkHintTags(targets.length).map((tag, index) => ({ tag, link: targets[index]! }));
-			if (state.hints.length === 0) {
-				this.#endLinkHints();
-				return;
-			}
-		} else {
-			const unchanged =
-				targets.length >= hints.length &&
-				hints.every(({ link }, index) => link.url === targets[index]!.url && link.start === targets[index]!.start);
-			if (!unchanged) {
-				this.#endLinkHints();
-				return;
-			}
-			state.hints = hints.map(({ tag }, index) => ({ tag, link: targets[index]! }));
-		}
-		const cells = new Map<number, number>();
-		for (const { tag, link } of state.hints) cells.set(link.row, (cells.get(link.row) ?? 0) + tag.length);
-		if ([...cells.values()].some(count => count > width)) this.#endLinkHints("crowded");
+		const kept = state.hints.tagged ? state.hints.follow(rows) : state.hints.assign(rows) > 0;
+		if (!kept) this.#endLinkHints();
+		else if (state.hints.crowded(width)) this.#endLinkHints("crowded");
 	}
 
 	#endLinkHints(reason?: "crowded"): void {
@@ -616,46 +566,6 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		if (state === undefined) return;
 		this.#linkHints = undefined;
 		state.onEnd(reason);
-	}
-
-	/**
-	 * Draw every tag the typed letters still lead to over the start of its label. Tags on one row
-	 * never overlap: one that would land on an earlier tag moves right, and tags that would run past
-	 * the right edge move left, so each stays readable as long as the row has room for them all.
-	 */
-	#paintLinkHints(viewport: string[], width: number): string[] {
-		const state = this.#linkHints;
-		if (state?.hints === undefined) return viewport;
-		const rows = new Map<number, { tag: string; col: number }[]>();
-		for (const { tag, link } of state.hints) {
-			if (viewport[link.row] === undefined || !tag.startsWith(state.typed)) continue;
-			let row = rows.get(link.row);
-			if (!row) rows.set(link.row, (row = []));
-			row.push({ tag, col: link.start });
-		}
-		const painted = [...viewport];
-		for (const [index, tags] of rows) {
-			tags.sort((a, b) => a.col - b.col);
-			let free = 0;
-			for (const placed of tags) {
-				placed.col = Math.max(placed.col, free);
-				free = placed.col + placed.tag.length;
-			}
-			let limit = width;
-			for (let i = tags.length - 1; i >= 0; i--) {
-				const placed = tags[i]!;
-				placed.col = Math.max(0, Math.min(placed.col, limit - placed.tag.length));
-				limit = placed.col;
-			}
-			let line = painted[index]!;
-			for (const { tag, col } of tags) {
-				// Raw SGR like the hover highlight: chalk's inverse/bold drop out when it detects no color.
-				const styled = `\x1b[1;7m${theme.fg("accent", tag)}\x1b[22;27m`;
-				line = compositeLineAt(line, styled, col, tag.length, width);
-			}
-			painted[index] = line;
-		}
-		return painted;
 	}
 
 	/**
@@ -667,7 +577,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	 * row, the editor and the status line. There is no history/viewport split:
 	 * retirement, resize replay and hover bands are ANSI concerns.
 	 */
-	describeSurface(): NativeSurface {
+	describeSurface(cx: DescribeContext): NativeSurface {
 		if (!this.#started || this.#stopped) return this.#nativeSurface;
 		const main: NativeChild[] = [...this.#header.children];
 		const dock: NativeChild[] = [];
@@ -681,7 +591,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 				dock.push(...roots);
 			} else {
 				const transcript = roots[transcriptIndex] as TranscriptContainer;
-				main.push(...roots.slice(0, transcriptIndex), ...transcript.nativeBlocks());
+				main.push(...roots.slice(0, transcriptIndex), ...transcript.nativeBlocks(cx));
 				for (const root of this.#nativeTail) main.push(...root.children);
 				const tail: readonly Component[] = this.#nativeTail;
 				dock.push(...(this.#nativeDock ?? roots.slice(transcriptIndex + 1).filter(root => !tail.includes(root))));
@@ -809,7 +719,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	 */
 	startLinkHints(onEnd: LinkHintsEnd): void {
 		this.#endLinkHints();
-		this.#linkHints = { hints: undefined, typed: "", onEnd };
+		this.#linkHints = { hints: new LinkHints(), onEnd };
 	}
 
 	/** Whether link-hint mode is on. */
@@ -826,18 +736,11 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		const state = this.#linkHints;
 		if (state === undefined) return false;
 		// A key typed before the tags were first painted picks among the labels last drawn.
-		if (state.hints === undefined) this.#syncLinkHints(this.#lastViewportRows, this.#lastViewportWidth);
-		const hints = this.#linkHints?.hints;
-		if (hints === undefined) return false;
-		const typed = state.typed + letter.toLowerCase();
-		const matching = hints.filter(hint => hint.tag.startsWith(typed));
-		const picked = matching.length === 1 && matching[0]!.tag === typed ? matching[0]!.link : undefined;
-		if (matching.length === 0 || picked !== undefined) {
-			this.#endLinkHints();
-			return picked ?? false;
-		}
-		state.typed = typed;
-		return true;
+		if (!state.hints.tagged) this.#syncLinkHints(this.#lastViewportRows, this.#lastViewportWidth);
+		if (this.#linkHints !== state) return false;
+		const result = state.hints.type(letter);
+		if (result !== true) this.#endLinkHints();
+		return result;
 	}
 
 	/** Leave link-hint mode without picking a link. */
@@ -1202,6 +1105,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		const welcome = this.#welcome;
 		if (!welcome) return;
 		if (update.version !== undefined) welcome.setVersion(this.#version);
+		if (update.versionUpdate !== undefined) welcome.setVersionUpdate(this.#versionUpdate);
 		this.ui.requestRender();
 	}
 
@@ -1312,10 +1216,13 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 
 	#applyWelcomeUpdate(update: ComposerWelcomeUpdate): void {
 		if (update.version !== undefined) this.#version = update.version;
+		if (update.versionUpdate !== undefined) this.#versionUpdate = update.versionUpdate;
 	}
 
 	#ensureWelcome(): void {
-		this.#welcome ??= new WelcomeComponent(this.#version);
+		if (this.#welcome) return;
+		this.#welcome = new WelcomeComponent(this.#version);
+		this.#welcome.setVersionUpdate(this.#versionUpdate);
 	}
 
 	#rebuildHeader(): void {

@@ -1001,11 +1001,21 @@ mod tests {
 
 	#[test]
 	fn parses_every_flowchart_node_shape() {
-		let graph = parse_flowchart(
-			"graph TD\nA[rectangle]\nB(rounded)\nC{diamond}\nD([stadium])\nE((circle))\\
-			 nF[[subroutine]]\nG(((doublecircle)))\nH{{hexagon}}\nI[(cylinder)]\nJ>asymmetric]\nK[/\
-			 trapezoid\\]\nL[\\trapezoid-alt/]",
-		)
+		let graph = parse_flowchart(concat!(
+			"graph TD\n",
+			"A[rectangle]\n",
+			"B(rounded)\n",
+			"C{diamond}\n",
+			"D([stadium])\n",
+			"E((circle))\n",
+			"F[[subroutine]]\n",
+			"G(((doublecircle)))\n",
+			"H{{hexagon}}\n",
+			"I[(cylinder)]\n",
+			"J>asymmetric]\n",
+			"K[/trapezoid\\]\n",
+			"L[\\trapezoid-alt/]",
+		))
 		.unwrap();
 		let expected = [
 			NodeShape::Rectangle,

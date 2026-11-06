@@ -168,6 +168,9 @@ async function makeHarness(
 			resetTranscriptAnchors: () => {},
 		},
 		syncRunningSubagentBadge: () => {},
+		setCollabGuest: (guest: InteractiveModeContext["collabGuest"]) => {
+			Object.assign(ctx, { collabGuest: guest });
+		},
 		eventBus: new EventBus(),
 	} as unknown as InteractiveModeContext;
 
