@@ -13,9 +13,9 @@
 Agents in **different terminals/tabs/sessions** exchange messages and statuses. Every terminal can be both server and client; any topology (all-to-all via `/a2a auto`).
 
 ```bash
-omp --a2a-port 0        # terminal A: 0 = pick a free port
-omp --a2a-port 0        # terminal B
-omp --a2a-port 0        # terminal C ...
+omp                     # terminal A — the bridge starts by itself (fork base state)
+omp                     # terminal B
+omp                     # terminal C ...
 ```
 Auto-registration is on by default (`a2a.autoRegister`): every new session finds all
 live bridges on the machine and wires up their peers — the other terminals' agents are
@@ -66,7 +66,7 @@ Extensions can spawn subagents (`pi.spawnSubagent({agent, prompt})`) with ordina
 
 | Setting | Default | Description |
 |---|---|---|
-| `a2a.enabled` / `--a2a-port` | off / 7391 | A2A bridge (loopback only) |
+| `a2a.enabled` / `a2a.port` | **on / 0 (auto)** | A2A bridge on a free loopback port; `--a2a-port N` pins a port for the run |
 | `browser.chromeMcp` | on | chrome-mcp bridge auto-discovery |
 | `irc.ingressGuard` | on | `agent://` message guard |
 | `irc.rateLimitTokens` | 30 | per-sender rate per 500 ms |

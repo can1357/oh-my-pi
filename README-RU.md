@@ -66,7 +66,7 @@ omp --a2a-port 0        # терминал C: ...
 
 | Настройка | Default | Описание |
 |---|---|---|
-| `a2a.enabled` / `--a2a-port` | off / 7391 | A2A-мост (только 127.0.0.1) |
+| `a2a.enabled` / `a2a.port` | **on / 0 (авто)** | A2A-мост на свободном порту (только 127.0.0.1); `--a2a-port N` — фикс. порт на запуск |
 | `browser.chromeMcp` | on | автодискавери chrome-mcp bridge |
 | `irc.ingressGuard` | on | гард сообщений `agent://` |
 | `irc.rateLimitTokens` | 30 | rate per-sender за 500 мс |
