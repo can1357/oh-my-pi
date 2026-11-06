@@ -144,6 +144,18 @@ SHOULD use syntax-aware tools before text hacks:
 {{/has}}
 {{/ifAny}}
 
+{{#if ovnfs}}
+{{#has tools "bash"}}
+# Separate checkouts
+Need a second copy of a folder (risky experiment, another branch, tests or review beside the user's work)? MUST use an ovnfs checkout, not `git worktree add`, `git clone` or `cp -r`, unless the user asks for those:
+- `cd <folder> && {{ovnfs}} new --name <name>` prints the checkout's path in about a second at any size; `<name>`: lowercase `a-z0-9._-`. The checkout is the folder as it is now (uncommitted edits, untracked files, `node_modules`/build dirs); writes stay in the checkout; git works inside, commits stay in its private git dir.
+- Add `--rev <rev>` to start tracked files and index at a commit or branch, without the folder's in-flight edits (e.g. to verify your patch); ignored build dirs stay.
+- Work in the printed path; git commands that discard changes run inside a checkout, saving discarded changes first.
+- Back to the folder: `{{ovnfs}} diff <name> [-p]` lists changes; `{{ovnfs}} apply <name> [--dry-run]` merges them into the folder as uncommitted edits, reporting conflicts; `{{ovnfs}} apply <name> --branch <b>` makes the checkout's commits branch `<b>`, folder untouched.
+- Done: `{{ovnfs}} rm <name>`; `{{ovnfs}} ls` lists checkouts.
+{{/has}}
+{{/if}}
+
 {{#has tools "task"}}
 # Delegation
 {{#when delegationBias "==" "gated"}}
