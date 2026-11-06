@@ -11,7 +11,7 @@ import { effect, register } from "../config/registry";
 import type { Settings } from "../config/settings";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
-import { isRecord, logger, setWorktreesDir } from "@oh-my-pi/pi-utils";
+import { $which, isRecord, logger, setWorktreesDir } from "@oh-my-pi/pi-utils";
 import { setFeedModelBadgeEnabled } from "@oh-my-pi/pi-tui/render/render-utils";
 import { getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 
@@ -49,7 +49,12 @@ export const cfgIsolationBackend = register({
 		label: "Isolation Backend",
 		description: "Backend used for subagent isolation and worktree cloning",
 		options: [
-			{ value: "auto", label: "Auto", description: "Let the PAL pick the best available backend" },
+			{
+				value: "auto",
+				label: "Auto",
+				description:
+					"Isolated subagents use ovnfs checkouts when ovnfs is found; otherwise (and for worktrees) the PAL picks the best available backend",
+			},
 			{ value: "apfs", label: "APFS", description: "macOS clonefile reflink (APFS)" },
 			{ value: "btrfs", label: "btrfs", description: "btrfs subvolume snapshot" },
 			{ value: "zfs", label: "ZFS", description: "ZFS snapshot + clone" },
@@ -158,6 +163,30 @@ export const cfgTaskIsolationApply = register({
 			"Automatically apply successful isolated task changes to the parent checkout; disable to retain patch or branch artifacts",
 	},
 });
+
+export const cfgOvnfsPath = register({
+	id: "ovnfs.path",
+	type: "string",
+	default: undefined,
+	ui: {
+		tab: "tasks",
+		group: "Isolation",
+		label: "ovnfs Binary",
+		description:
+			"ovnfs executable; unset looks for `ovnfs` on PATH. When it is found, ovnfs checkouts (copy-on-write views of a folder, ready in about a second at any size) serve every separate copy: the system prompt tells agents to open checkouts instead of git worktrees or copies, and isolated subagents (when allowed, with `isolation.backend` on auto) run in checkouts instead of native clones",
+	},
+});
+
+/**
+ * The ovnfs command agents and isolated subagents use (`ovnfs.path`, else `ovnfs`),
+ * or `undefined` when that binary is not found. Read by the system prompt (checkout
+ * guidance), the bash git guard, `grep`/`glob` (searches through the daemon), and the
+ * task runner (ovnfs-backed isolation when `isolation.backend` is auto).
+ */
+export function ovnfsCommand(settings: Settings): string | undefined {
+	const command = cfgOvnfsPath.get(settings)?.trim() || "ovnfs";
+	return $which(command) ? command : undefined;
+}
 
 export const cfgTaskIsolationMerge = register({
 	id: "task.isolation.merge",
@@ -417,7 +446,7 @@ export const cfgTaskWorkerThreads = register({
 		group: "Subagents",
 		label: "Subagent Worker Threads",
 		description:
-			"Maximum worker threads for subagents. Up to 3 concurrent subagents run on the main thread; at 4 one worker joins, and one more each time the count doubles (8, 16, 32). Workers stop a minute after no subagent is live in them; 0 keeps every subagent on the main thread",
+			"Maximum worker threads for subagents. Up to 8 concurrent subagents run on the main thread; at 9 one worker joins, and one more each time the count doubles (18, 36, 72). Workers stop a minute after no subagent is live in them; 0 keeps every subagent on the main thread",
 		options: [
 			{ value: "0", label: "Main thread only" },
 			{ value: "1", label: "Up to 1 worker" },

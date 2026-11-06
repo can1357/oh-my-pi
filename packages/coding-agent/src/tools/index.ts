@@ -23,7 +23,7 @@ import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import { LspTool } from "../lsp";
-import type { MCPManagerApi } from "../mcp";
+import type { MCPManagerApi, MCPToolScope } from "../mcp";
 import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import type { PlanModeState } from "../plan-mode/state";
@@ -98,6 +98,7 @@ import {
 } from "./settings";
 import { cfgAutolearnEnabled } from "../autolearn/settings";
 import { cfgBashEnabled } from "../exec/settings";
+import { cfgEditMode } from "../edit/settings";
 import { cfgCompactionExperimentalContextManagement } from "../session/context-settings";
 import { cfgPythonInterpreter } from "../eval/settings";
 import { cfgExternalThinking } from "../session/settings";
@@ -292,8 +293,10 @@ export interface ToolSession {
 	 * stored value) so it is materialized live per discovery call — a runtime
 	 * override or settings reload is reflected, never a construction-time
 	 * snapshot. Keeps the task surface byte-identical to the scoped load.
+	 * A standalone function, never a `this`-bound method: subagents forward it
+	 * as is, and a parked subagent keeps it for revival after its parent is gone.
 	 */
-	effectiveExtensionRoots?(): EffectiveExtensionRoots;
+	effectiveExtensionRoots?: () => EffectiveExtensionRoots;
 	/**
 	 * Pre-discovered custom-tool source paths from `.omp/tools/`, `.claude/tools/`,
 	 * plugins, etc. Forwarded to subagents so they skip the FS scan but still
@@ -380,8 +383,8 @@ export interface ToolSession {
 	getToolForEvalBridge?: (name: string) => AgentTool | undefined;
 	/** Current session context for eval-bridged tool execution. */
 	getToolContext?: () => AgentToolContext | undefined;
-	/** Names currently authorized for invocation through the eval bridge. */
-	getEvalBridgeToolNames?: () => readonly string[];
+	/** Tool names the eval description advertises as callable from cells; frozen with the cached prompt prefix. */
+	getAdvertisedEvalToolNames?: () => readonly string[];
 	/** Return whether a built-in tool is active in this turn's tool set. */
 	isToolActive?: (name: string) => boolean;
 	/** Update the active built-in tool predicate when a session changes tools mid-run. */
@@ -453,6 +456,8 @@ export interface ToolSession {
 	asyncJobManager?: AsyncJobManagerApi;
 	/** MCP manager visible to subagents without relying on the process-global singleton. */
 	mcpManager?: MCPManagerApi;
+	/** This session's view of {@link mcpManager}; subagents it spawns start from it. Unset for the owner. */
+	mcpToolScope?: MCPToolScope;
 	/** Local protocol root to propagate to nested subagents and eval-created agents. */
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Settings instance for passing to subagents */
@@ -478,11 +483,12 @@ export interface ToolSession {
 	/** Replace cached todo phases for this session. */
 	setTodoPhases?: (phases: TodoPhase[]) => void;
 	/**
-	 * Record todo phases on the session branch. Direct `todo` calls persist via
-	 * their toolResult entry; callers that produce none (the eval bridge) use this
-	 * so branch rehydration agrees with the in-memory list.
+	 * Replace the todo list from outside the `todo` tool: update the cache and
+	 * record it on the session branch. Direct `todo` calls persist via their
+	 * toolResult entry; callers that produce none (the eval bridge, Cursor sync)
+	 * use this so branch rehydration agrees with the in-memory list.
 	 */
-	persistTodoPhases?: (phases: TodoPhase[]) => void;
+	commitTodoPhases?: (phases: TodoPhase[]) => void;
 	/** Active workpool items whose incremental yields complete the current turn. */
 	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];
 	/**
@@ -758,6 +764,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 			}
 		}
 	}
+	const editDisabled = cfgEditMode.get(session.settings) === "none";
 	const isToolAllowed = (name: string) => {
 		// Never in the default set. Explicitly activatable while goal.enabled and
 		// no goal record exists yet — /guided-goal enables it so the agent can
@@ -770,7 +777,9 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 			return goalState === undefined || goalState.enabled === true || goalState.goal.status === "dropped";
 		}
 		if (name === "lsp") return enableLsp && cfgLspEnabled.get(session.settings);
-		if (name === "bash") return cfgBashEnabled.get(session.settings);
+		// Without an edit tool, bash is the remaining way to modify existing files.
+		if (name === "edit") return !editDisabled;
+		if (name === "bash") return editDisabled || cfgBashEnabled.get(session.settings);
 		if (name === "eval") return allowEval;
 		if (name === "debug") return cfgDebugEnabled.get(session.settings);
 		if (name === "ida") return cfgIdaAvailable.get(session.settings);

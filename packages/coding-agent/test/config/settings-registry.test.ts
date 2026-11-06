@@ -43,13 +43,22 @@ function withEnv(vars: Record<string, string | undefined>, fn: () => void): void
 }
 
 describe("settings registry", () => {
-	it("lets an override env beat every layer while a fallback env only replaces the default", () => {
+	it("ranks a runtime override over an override env, that env over persisted layers, and a fallback env only over the default", () => {
 		withEnv({ PI_EDIT_FUZZY: "0", SEARXNG_ENDPOINT: "https://env.example" }, () => {
-			const configured = Settings.isolated({ "edit.fuzzyMatch": true, "searxng.endpoint": "https://cfg.example" });
-			expect(cfgEditFuzzyMatch.get(configured)).toBe(false);
-			expect(cfgEditFuzzyMatch.provenance(configured)).toBe("env");
-			expect(cfgSearxngEndpoint.get(configured)).toBe("https://cfg.example");
-			expect(cfgSearxngEndpoint.provenance(configured)).toBe("runtime");
+			const settings = Settings.isolated();
+			cfgEditFuzzyMatch.set(settings, true);
+			cfgSearxngEndpoint.set(settings, "https://cfg.example");
+			expect(cfgEditFuzzyMatch.get(settings)).toBe(false);
+			expect(cfgEditFuzzyMatch.provenance(settings)).toBe("env");
+			expect(cfgSearxngEndpoint.get(settings)).toBe("https://cfg.example");
+			expect(cfgSearxngEndpoint.provenance(settings)).toBe("global");
+
+			// A CLI flag or session-only write is more specific than the environment.
+			cfgEditFuzzyMatch.override(settings, true);
+			expect(cfgEditFuzzyMatch.get(settings)).toBe(true);
+			expect(cfgEditFuzzyMatch.provenance(settings)).toBe("runtime");
+			cfgEditFuzzyMatch.clearOverride(settings);
+			expect(cfgEditFuzzyMatch.get(settings)).toBe(false);
 
 			const bare = Settings.isolated();
 			expect(cfgSearxngEndpoint.get(bare)).toBe("https://env.example");
@@ -58,10 +67,11 @@ describe("settings registry", () => {
 	});
 
 	it("parses a boolean env var like parseFlag: empty is unset, unlisted text is false", () => {
-		const configuredOff = Settings.isolated({ "eval.py": false });
+		const configuredOff = Settings.isolated();
+		cfgEvalPy.set(configuredOff, false);
 		withEnv({ PI_PY: "" }, () => {
 			expect(cfgEvalPy.get(configuredOff)).toBe(false);
-			expect(cfgEvalPy.provenance(configuredOff)).toBe("runtime");
+			expect(cfgEvalPy.provenance(configuredOff)).toBe("global");
 		});
 		withEnv({ PI_PY: "y" }, () => expect(cfgEvalPy.get(configuredOff)).toBe(true));
 		withEnv({ PI_PY: "disabled" }, () => {

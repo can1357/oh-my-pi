@@ -209,28 +209,21 @@ pub(super) struct Tok {
 	pub word:  Option<WordTok>,
 	/// `Number` value.
 	pub num:   u32,
-	/// Text of `ArithCmd` / `ArithFor` (bash's token text) and its span.
-	pub arith: Vec<u8>,
-	/// Offsets of the top-level `;`s in `arith` (`ArithFor`).
+	/// Value of `ArithCmd` / `ArithFor`, absent from ordinary tokens.
+	pub arith: Option<Box<ArithTok>>,
+}
+
+/// The uncommon arithmetic token payload, kept out of every word token.
+pub(super) struct ArithTok {
+	pub text:  Vec<u8>,
 	pub semis: Vec<usize>,
-	pub alo:   u32,
-	pub ahi:   u32,
+	pub lo:    u32,
+	pub hi:    u32,
 }
 
 impl Tok {
 	pub(super) const fn new(kind: T, lo: u32, hi: u32, line: u32) -> Self {
-		Self {
-			kind,
-			lo,
-			hi,
-			line,
-			word: None,
-			num: 0,
-			arith: Vec::new(),
-			semis: Vec::new(),
-			alo: 0,
-			ahi: 0,
-		}
+		Self { kind, lo, hi, line, word: None, num: 0, arith: None }
 	}
 
 	pub(super) const fn span(&self) -> Span {
@@ -703,10 +696,7 @@ impl<'s> Parser<'s> {
 			}
 			self.bump();
 			let mut t = Tok::new(T::ArithFor, lo, self.off(), line);
-			t.arith = text;
-			t.semis = semis;
-			t.alo = alo;
-			t.ahi = ahi;
+			t.arith = Some(Box::new(ArithTok { text, semis, lo: alo, hi: ahi }));
 			return Ok(Some(t));
 		}
 		if self.reserved_word_acceptable(self.lx.last) {
@@ -719,9 +709,7 @@ impl<'s> Parser<'s> {
 			if self.peek() == Some(b')') {
 				self.bump();
 				let mut t = Tok::new(T::ArithCmd, lo, self.off(), line);
-				t.arith = text;
-				t.alo = alo;
-				t.ahi = ahi;
+				t.arith = Some(Box::new(ArithTok { text, semis: Vec::new(), lo: alo, hi: ahi }));
 				return Ok(Some(t));
 			}
 			// Not `(( … ))`: a subshell inside a subshell. Re-read from the
@@ -738,12 +726,21 @@ impl<'s> Parser<'s> {
 	/// an alias was expanded and the token must be read again.
 	fn read_word_token(&mut self, lo: u32, line: u32) -> PResult<Option<Tok>> {
 		let acceptable = self.assignment_acceptable();
-		let w = self.read_word(acceptable)?;
+		// Keywords need no word tree unless the grammar treats them as an
+		// ordinary argument. Keep their bytes borrowed until that decision.
+		let keyword = self.keyword_bytes();
+		let w = if let Some(text) = keyword {
+			self.advance(text.len());
+			None
+		} else {
+			Some(self.read_word(acceptable)?)
+		};
 		let hi = self.off();
 		let next = self.peek();
+		let plain = keyword.or_else(|| w.as_ref().and_then(WordTok::plain));
 		// NUMBER: all digits before `<`/`>`, or after `<&`/`>&`.
-		if let Some(text) = w.plain()
-			&& !text.is_empty()
+		if let Some(text) = plain
+			&& text.first().is_some_and(u8::is_ascii_digit)
 			&& text.iter().all(u8::is_ascii_digit)
 			&& (matches!(next, Some(b'<' | b'>')) || matches!(self.lx.last, T::LtAnd | T::GtAnd))
 			&& let Some(n) = parse_int(text)
@@ -752,7 +749,7 @@ impl<'s> Parser<'s> {
 			t.num = n;
 			return Ok(Some(t));
 		}
-		if let Some(text) = w.plain()
+		if let Some(text) = plain
 			&& let Some(k) = self.special_case_tokens(text)
 		{
 			if k == T::LBrace {
@@ -762,16 +759,15 @@ impl<'s> Parser<'s> {
 		}
 		let posix = self.feat.contains(Features::POSIX);
 		if posix
-			&& let Some(text) = w.plain()
+			&& let Some(text) = plain
 			&& let Some(k) = self.check_reserved(text, line)
 		{
 			return Ok(Some(Tok::new(k, lo, hi, line)));
 		}
-		if self.expand_aliases && !w.quoted {
-			match w.plain() {
+		if self.expand_aliases && !w.as_ref().is_some_and(|word| word.quoted) {
+			match plain {
 				Some(text) => {
-					let text = text.to_vec();
-					if self.alias_expand(&text) {
+					if self.alias_expand(text) {
 						return Ok(None);
 					}
 					self.lx.alexpnext = false;
@@ -780,11 +776,20 @@ impl<'s> Parser<'s> {
 			}
 		}
 		if !posix
-			&& let Some(text) = w.plain()
+			&& let Some(text) = plain
 			&& let Some(k) = self.check_reserved(text, line)
 		{
 			return Ok(Some(Tok::new(k, lo, hi, line)));
 		}
+		let w = w.unwrap_or_else(|| WordTok {
+			lo,
+			hi,
+			parts: vec![crate::bash::syntax::WordPart::Lit(
+				keyword.expect("borrowed keyword").to_vec(),
+			)],
+			quoted: false,
+			asg: None,
+		});
 		let last = self.lx.last;
 		if self.command_token_position(last) || self.lx.cmdbltin {
 			match w.plain() {
@@ -824,6 +829,54 @@ impl<'s> Parser<'s> {
 		let mut t = Tok::new(kind, lo, hi, line);
 		t.word = Some(w);
 		Ok(Some(t))
+	}
+
+	/// A contiguous, unquoted keyword entirely in the original source.
+	/// Alias buffers can join words across boundaries and use the full scanner.
+	fn keyword_bytes(&self) -> Option<&'s [u8]> {
+		if !self.in_source() || self.lx.regexp {
+			return None;
+		}
+		let buf: &'s [u8] = self.buf;
+		let rest = &buf[self.pos..];
+		let keyword: &[u8] = match rest {
+			[b'i', b'f', ..] => b"if",
+			[b'i', b'n', ..] => b"in",
+			[b't', b'h', ..] => b"then",
+			[b't', b'i', ..] => b"time",
+			[b'e', b'l', b's', ..] => b"else",
+			[b'e', b'l', b'i', ..] => b"elif",
+			[b'e', b's', ..] => b"esac",
+			[b'f', b'i', ..] => b"fi",
+			[b'f', b'o', ..] => b"for",
+			[b'f', b'u', ..] => b"function",
+			[b'c', b'a', ..] => b"case",
+			[b'c', b'o', ..] => b"coproc",
+			[b's', b'e', ..] => b"select",
+			[b'w', b'h', ..] => b"while",
+			[b'u', b'n', ..] => b"until",
+			[b'd', b'o', b'n', ..] => b"done",
+			[b'd', b'o', ..] => b"do",
+			[b'{', ..] => b"{",
+			[b'}', ..] => b"}",
+			[b'!', b'(', ..] if self.lx.extglob => return None,
+			[b'!', ..] => b"!",
+			[b'[', b'[', ..] => b"[[",
+			[b']', b']', ..] => b"]]",
+			_ => return None,
+		};
+		if !rest.starts_with(keyword) {
+			return None;
+		}
+		let n = keyword.len();
+		let text = &rest[..n];
+		if rest
+			.get(n)
+			.is_some_and(|c| !matches!(c, b' ' | b'\t' | b'\n' | b';' | b'&' | b'|' | b'(' | b')'))
+		{
+			return None;
+		}
+		Some(text)
 	}
 
 	/// bash `special_case_tokens`.
@@ -1178,7 +1231,7 @@ impl<'s> Parser<'s> {
 				push_u32(&mut out, t.num);
 				out
 			},
-			T::ArithCmd | T::ArithFor => t.arith.clone(),
+			T::ArithCmd | T::ArithFor => t.arith.as_ref().expect("arithmetic token").text.clone(),
 			T::RedirWord => {
 				let mut out = Vec::new();
 				if let Some(w) = &t.word {

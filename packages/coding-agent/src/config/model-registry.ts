@@ -2874,6 +2874,7 @@ export class ModelRegistry {
 		options: ModelManagerOptions<Api>,
 		strategy: ModelRefreshStrategy,
 	): Promise<BuiltInDiscoveryResult> {
+		let failure: string | undefined;
 		try {
 			const manager = createModelManager({ ...options, cacheDbPath: this.#cacheDbPath });
 			const result = await withModelDiscoveryTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
@@ -2892,6 +2893,8 @@ export class ModelRegistry {
 							: result.models.length > 0
 								? "ok"
 								: "empty";
+			// A throwing fetcher still resolves (cache or bundled), but the failure must reach the state and the log.
+			failure = result.fetchError;
 			this.#providerDiscoveryStates.set(options.providerId, {
 				provider: options.providerId,
 				status,
@@ -2900,6 +2903,7 @@ export class ModelRegistry {
 				fetchedAt: result.updatedAt,
 				source: result.source,
 				models: models.map(model => model.id),
+				...(failure !== undefined ? { error: failure } : {}),
 			});
 			const authoritativeProviders = new Set<string>();
 			if (options.dynamicModelsAuthoritative && !result.stale) {
@@ -2911,7 +2915,7 @@ export class ModelRegistry {
 			}
 			return { models, authoritativeProviders, replaceRuntimeProviders };
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
+			failure = error instanceof Error ? error.message : String(error);
 			const previous = this.#providerDiscoveryStates.get(options.providerId);
 			// Same auth-rejection surfacing as the configured-discovery path: a
 			// 401/403 with nothing to serve is a credential problem, not an
@@ -2925,13 +2929,13 @@ export class ModelRegistry {
 				...(previous?.fetchedAt !== undefined ? { fetchedAt: previous.fetchedAt } : {}),
 				...(previous?.source !== undefined ? { source: previous.source } : {}),
 				models: previous?.models ?? [],
-				error: message,
-			});
-			logger.warn("model discovery failed for provider", {
-				provider: options.providerId,
-				error: message,
+				error: failure,
 			});
 			return { models: [], authoritativeProviders: new Set(), replaceRuntimeProviders: new Set() };
+		} finally {
+			if (failure !== undefined) {
+				logger.warn("model discovery failed for provider", { provider: options.providerId, error: failure });
+			}
 		}
 	}
 
@@ -3552,6 +3556,20 @@ export class ModelRegistry {
 
 	getProviderDiscoveryState(provider: string): ProviderDiscoveryState | undefined {
 		return this.#providerDiscoveryStates.get(provider);
+	}
+
+	/**
+	 * Discovery states of extension providers (`fetchDynamicModels`) whose last
+	 * discovery attempt failed. `omp models` reports them so a failed fetch is
+	 * distinguishable from a provider with no models (issue #17925).
+	 */
+	getRuntimeDiscoveryFailures(): ProviderDiscoveryState[] {
+		const failures: ProviderDiscoveryState[] = [];
+		for (const provider of this.#runtimeModelManagers.keys()) {
+			const state = this.#providerDiscoveryStates.get(provider);
+			if (state?.error !== undefined) failures.push(state);
+		}
+		return failures;
 	}
 
 	/**

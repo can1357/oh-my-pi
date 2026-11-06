@@ -8,11 +8,13 @@ use bstr::{BStr, BString, ByteSlice};
 use super::{Ctx, Need, R, done, number, opts};
 use crate::bash::{
 	diag::Diag,
+	event::{ASSIGN_PREVIEW_BYTES, AssignScope, EventData, EventKind, assign_preview},
 	ids::IntrinsicId,
 	ir::{self, FuncIr},
 	store::{
 		Attrs, Elem, Key, KeyBuf, MiscKey, OptId, OptKind, Record, StoreError, Table, VarValue,
 	},
+	text,
 	vm::{
 		Cx, Kernel,
 		exec::{self, Flow},
@@ -23,6 +25,121 @@ use crate::bash::{
 		state::{self, Level, Var, VarEdit},
 	},
 };
+
+/// Emit a successful setter's actual stored value, using the current
+/// executable op (or its current explicit assignment node) as its source.
+/// No store lookup, value copy or scope work occurs with Assign disabled.
+pub fn emit_assignment(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, name: &[u8], level: Level) {
+	if !k.mask.contains(EventKind::Assign) {
+		return;
+	}
+	let Some(frame) = vp.frames.last() else {
+		return;
+	};
+	let Some(unit) = frame.unit.as_ref() else {
+		return;
+	};
+	let Some(op) = unit.ops.get(frame.pc as usize) else {
+		return;
+	};
+	let node = if op.code == ir::Opcode::Exec
+		&& let Some(exec) = frame
+			.scratch
+			.as_ref()
+			.and_then(|scratch| scratch.exec.as_ref())
+		&& exec.stage == crate::bash::vm::proc::Stage::Expand
+		&& let Some(assign) = unit
+			.cmds
+			.get(op.a as usize)
+			.and_then(|command| command.assigns.get(exec.values.len()))
+		&& assign.name.as_slice() == name
+	{
+		assign.node
+	} else {
+		op.node
+	};
+	emit_assignment_at(k, cx, vp, name, level, node);
+}
+
+/// Like [`emit_assignment`], with an explicit IR setter node. The binding
+/// is read only after a real successful mutation; this is not a state diff.
+pub fn emit_assignment_at(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vp: &Vproc,
+	name: &[u8],
+	level: Level,
+	node: u32,
+) {
+	if !k.mask.contains(EventKind::Assign) {
+		return;
+	}
+	let read = (|| -> Result<Option<(BString, usize, AssignScope)>, StoreError> {
+		let scope = match level {
+			Level::Global => None,
+			Level::Local => state::func_scope(&k.root, cx.store, vp)?,
+			Level::Dynamic => state::binding_scope(&k.root, cx.store, vp, name)?,
+		};
+		let scope = if let Some(index) = scope {
+			if state::scope_func(cx.store, vp, index)?.is_some() {
+				AssignScope::Local
+			} else {
+				AssignScope::Env
+			}
+		} else if vp.overlay.is_some() {
+			AssignScope::Subshell
+		} else {
+			AssignScope::Global
+		};
+		let Some(var) = state::binding(&k.root, cx.store, vp, name, level)? else {
+			return Ok(None);
+		};
+		let (value, full_len) = match &var.value {
+			VarValue::Str(value) => (BString::from(assign_preview(value)), value.len()),
+			VarValue::Indexed(values) => {
+				assignment_preview(values.iter().map(|(_, value)| value.as_slice()))
+			},
+			VarValue::Assoc(values) => {
+				assignment_preview(values.iter().map(|(_, value)| value.as_slice()))
+			},
+		};
+		Ok(Some((value, full_len, scope)))
+	})();
+	match read {
+		Ok(Some((value, full_len, scope))) => {
+			k.emit_op(cx, vp, node, EventData::Assign {
+				name: BStr::new(name),
+				value: value.as_bstr(),
+				full_len,
+				scope,
+			});
+		},
+		Ok(None) => {},
+		Err(error) => k.fail(error),
+	}
+}
+
+/// The engine's array assignment display, bounded before any copying.
+fn assignment_preview<'a>(values: impl Iterator<Item = &'a [u8]>) -> (BString, usize) {
+	// One byte past the preview tells `text::cut` whether the join was cut.
+	const KEEP: usize = ASSIGN_PREVIEW_BYTES + 1;
+	let mut shown = BString::default();
+	let mut full_len = 0usize;
+	for (index, value) in values.enumerate() {
+		if index != 0 {
+			full_len = full_len.saturating_add(1);
+			if shown.len() < KEEP {
+				shown.push(b' ');
+			}
+		}
+		full_len = full_len.saturating_add(value.len());
+		let kept = value.len().min(KEEP - shown.len());
+		shown.extend_from_slice(&value[..kept]);
+	}
+	let end = text::cut(&shown, ASSIGN_PREVIEW_BYTES).len();
+	shown.truncate(end);
+	(shown, full_len)
+}
 
 /// Left-hand side of an assignment.
 #[derive(Clone, Copy)]
@@ -509,7 +626,7 @@ fn set_value_plain(
 					return Err(Diag::BadSubscript { shown: element_text(name, idx) });
 				}
 				if matches!(var.value, VarValue::Str(_)) {
-					var.value = VarValue::Assoc(Vec::new());
+					var.value = VarValue::Assoc(Default::default());
 				}
 				let old = lhs
 					.append
@@ -536,7 +653,7 @@ fn set_value_plain(
 			if assoc || attrs.contains(Attrs::ASSOC) {
 				let mut items = match (&var.value, lhs.append) {
 					(VarValue::Assoc(items), true) => items.clone(),
-					_ => Vec::new(),
+					_ => Default::default(),
 				};
 				let mut tmp = Var { attrs, value: VarValue::Assoc(std::mem::take(&mut items)) };
 				let mut pending_key: Option<BString> = None;
@@ -690,6 +807,7 @@ fn set_value_plain(
 		k.diag(cx, vp, line, Diag::Usage { msg: msg.into() });
 	}
 	state::store_var(&mut k.root, cx.store, vp, name, Some(var), level);
+	emit_assignment(k, cx, vp, name, level);
 	if name == b"PATH"
 		&& let Err(e) = super::names::flush_hash(&mut k.root, cx.store, vp)
 	{
@@ -765,6 +883,7 @@ pub fn assign_special_prefix(
 		Some(Some(value)) => {
 			let var = Var { attrs: Attrs::NONE, value };
 			state::store_var(&mut k.root, cx.store, vp, lhs.name, Some(var), Level::Global);
+			emit_assignment(k, cx, vp, lhs.name, Level::Global);
 		},
 		Some(None) => {
 			let edit = VarEdit::AddAttrs(Attrs::EXPORT);
@@ -798,7 +917,6 @@ fn assign_in_place(
 		.with(Attrs::LOWER)
 		.with(Attrs::CAPITALIZE)
 		.with(Attrs::NAMEREF)
-		.with(Attrs::ASSOC)
 		.with(Attrs::ZSH_ONLY);
 	let name = lhs.name;
 	if name == b"BASH_ARGV0" || name == b"BASH_XTRACEFD" || is_posix_var(name) {
@@ -813,12 +931,13 @@ fn assign_in_place(
 		},
 	}
 	// What the general path would decide on, read without copying.
-	let (next, indexed, seen) = match state::binding(&k.root, cx.store, vp, name, level) {
+	let (next, indexed, assoc, seen) = match state::binding(&k.root, cx.store, vp, name, level) {
 		// Any one of the special attributes sends it to the general path.
 		Ok(Some(v)) if v.attrs.bits() & SPECIAL.bits() == 0 => match &v.value {
-			VarValue::Str(_) => (1, false, state::Seen::of(v)),
-			VarValue::Indexed(_) => (v.next_index(), true, state::Seen::of(v)),
-			VarValue::Assoc(_) => return Ok(Some(value)),
+			VarValue::Str(_) if v.attrs.contains(Attrs::ASSOC) => return Ok(Some(value)),
+			VarValue::Str(_) => (1, false, false, state::Seen::of(v)),
+			VarValue::Indexed(_) => (v.next_index(), true, false, state::Seen::of(v)),
+			VarValue::Assoc(_) => (0, false, true, state::Seen::of(v)),
 		},
 		Ok(_) => return Ok(Some(value)),
 		Err(e) => {
@@ -826,9 +945,16 @@ fn assign_in_place(
 			return Err(Diag::StoreFailed);
 		},
 	};
-	let index = match (&value, lhs.index) {
+	let elem = match (&value, lhs.index) {
+		(AssignValue::Scalar(_), index) if assoc => {
+			let key = index.unwrap_or(b"0");
+			if key.is_empty() {
+				return Err(Diag::BadSubscript { shown: element_text(name, key) });
+			}
+			Some(Elem::Key(BStr::new(key)))
+		},
 		(AssignValue::Scalar(_), Some(idx)) => {
-			Some(index_of(k, cx, vp, next, idx, &|| element_text(name, idx))?)
+			Some(Elem::Index(index_of(k, cx, vp, next, idx, &|| element_text(name, idx))?))
 		},
 		(AssignValue::Scalar(_), None) => None,
 		(AssignValue::Array(elems), _)
@@ -844,12 +970,12 @@ fn assign_in_place(
 	};
 	// A subscript ran arithmetic since the binding was read (`a[i++]=x`,
 	// `a[(a=1)]=x`): what it showed may be stale.
-	let seen = seen.filter(|_| lhs.index.is_none());
+	let seen = seen.filter(|_| assoc || lhs.index.is_none());
 	// `VarEdit::Set` also gives a declared-but-unset scalar no element 0
 	// (`local z; z[3]=1`) and clears `INVISIBLE`.
 	let edited = match value {
 		AssignValue::Scalar(v) => {
-			let edit = VarEdit::Set { elem: index.map(Elem::Index), value: &v, append: lhs.append };
+			let edit = VarEdit::Set { elem, value: &v, append: lhs.append };
 			state::edit_seen(&mut k.root, cx.store, vp, name, level, edit, seen)
 				.map(|bound| (!bound).then_some(AssignValue::Scalar(v)))
 		},
@@ -860,7 +986,12 @@ fn assign_in_place(
 		},
 	};
 	match edited {
-		Ok(rest) => Ok(rest),
+		Ok(rest) => {
+			if rest.is_none() {
+				emit_assignment(k, cx, vp, name, level);
+			}
+			Ok(rest)
+		},
 		Err(e) => {
 			k.fail(e);
 			Err(Diag::StoreFailed)
@@ -989,7 +1120,10 @@ pub fn assign_loop_var(
 	let var = Var { attrs: attrs.without(Attrs::INVISIBLE), value: VarValue::Str(value) };
 	let edit = VarEdit::Replace(var);
 	match state::edit_var(&mut k.root, cx.store, vp, name, Level::Dynamic, edit) {
-		Ok(_) => Ok(()),
+		Ok(_) => {
+			emit_assignment(k, cx, vp, name, Level::Dynamic);
+			Ok(())
+		},
 		Err(e) => {
 			k.fail(e);
 			Err(Diag::StoreFailed)
@@ -1004,6 +1138,7 @@ pub fn define_function(
 	cx: &mut Cx<'_>,
 	f: &FuncIr,
 	line: u32,
+	traced: bool,
 ) -> Flow {
 	let posix = state::option(&mut k.root, cx.store, vp, OptId::Posix).unwrap_or(false);
 	// bash's `valid_function_word`: no `$`, process substitution or quoting
@@ -1026,10 +1161,19 @@ pub fn define_function(
 		vp.status = 1;
 		return Flow::Next;
 	}
-	let unit = k.engine.intern((*f.body).clone());
-	k.persist_unit(cx.store, &unit);
-	// Announced now, before any event names a node of the body.
-	exec::announce(k, cx, vp.vpid, vp.runs.front(), &unit, unit.line);
+	// Uncalled bodies need only their persistent descriptor, not a second
+	// copy in the executable-unit cache.
+	let compiled = f
+		.body
+		.deferred
+		.is_none()
+		.then(|| k.engine.intern((*f.body).clone()));
+	let unit = compiled.as_deref().unwrap_or(&f.body);
+	k.persist_unit(cx.store, unit);
+	// Deferred bodies are announced after lowering, before their first op.
+	if compiled.is_some() {
+		exec::announce(k, cx, vp.vpid, vp.runs.front(), unit, unit.line);
+	}
 	let mode = exec::mode_of(vp);
 	let attrs = match state::record(cx.store, vp, Key::Func(BStr::new(&f.name))) {
 		Ok(Some(Record::Func { attrs, .. })) => *attrs,
@@ -1045,7 +1189,39 @@ pub fn define_function(
 		vp.status = 1;
 		return Flow::Next;
 	}
-	let file = match crate::bash::vm::callstack::definition_file(k, cx.store, vp) {
+	// zsh `execfuncdef`: a new definition has only `function -T`'s flag;
+	// a function redefining itself while it runs keeps its tracing.
+	let attrs = if mode.dialect() == crate::bash::ids::Dialect::Zsh {
+		let mut fresh = if traced {
+			Attrs::ZSH_TRACE_ONCE
+		} else {
+			Attrs::NONE
+		};
+		use crate::bash::vm::proc::{FrameKind, ScriptKind};
+		let innermost = vp.frames.iter().rev().find_map(|fr| match &fr.kind {
+			FrameKind::Function { name, .. } => Some(Some(name)),
+			FrameKind::Script { what: ScriptKind::Source | ScriptKind::Eval, .. } => Some(None),
+			_ => None,
+		});
+		if innermost.flatten().is_some_and(|n| *n == f.name) {
+			for bit in [Attrs::TRACE, Attrs::ZSH_TRACE_ONCE] {
+				if attrs.contains(bit) {
+					fresh = fresh.with(bit);
+				}
+			}
+		}
+		fresh
+	} else {
+		attrs
+	};
+	// zsh records its `scriptfilename` (a `-c` string's functions are
+	// `zsh`'s, not `$0`'s), bash `BASH_SOURCE[0]`.
+	let file = if mode.dialect() == crate::bash::ids::Dialect::Zsh {
+		super::zsh_print::scriptfilename(k, cx.store, vp)
+	} else {
+		crate::bash::vm::callstack::definition_file(k, cx.store, vp)
+	};
+	let file = match file {
 		Ok(file) => file,
 		Err(e) => {
 			k.fail(e);
@@ -1053,7 +1229,14 @@ pub fn define_function(
 		},
 	};
 	let sticky = vp.sticky().cloned().map(Box::new);
-	let rec = Record::Func { mode, sticky, source: f.source.clone(), unit: unit.id, attrs, file };
+	let rec = Record::Func {
+		mode,
+		sticky,
+		source: crate::bash::ir::FuncText::of(f),
+		unit: unit.id,
+		attrs,
+		file,
+	};
 	state::store_record(&mut k.root, cx.store, vp, KeyBuf::Func(f.name.clone()), Some(rec));
 	vp.status = 0;
 	Flow::Next
@@ -1224,7 +1407,9 @@ pub fn all_functions(ctx: &mut Ctx<'_, '_>) -> Result<Vec<(BString, BString, Att
 	Ok(state::scan(&ctx.k.root, ctx.cx.store, ctx.vp, Table::Func)?
 		.into_iter()
 		.filter_map(|(k, r)| match (k, r) {
-			(KeyBuf::Func(n), Record::Func { source, attrs, .. }) => Some((n, source, attrs)),
+			(KeyBuf::Func(n), Record::Func { source, attrs, .. }) => {
+				Some((n, (*source).clone(), attrs))
+			},
 			_ => None,
 		})
 		.collect())
@@ -1520,6 +1705,7 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 			// returns.
 			let saved = state::set_options_on(&mut ctx.k.root, ctx.cx.store, ctx.vp)?;
 			ctx.set_var(b"-", Some(Var::scalar(saved, Attrs::NONE)), Level::Local);
+			super::emit_assignment(ctx.k, ctx.cx, ctx.vp, b"-", Level::Local);
 			continue;
 		}
 		let flat = match arg.find_byte(b'[') {
@@ -1635,6 +1821,7 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 				r.attrs = r.attrs.without(Attrs::NAMEREF).with(Attrs::INVISIBLE);
 				r.value = VarValue::Str(BString::default());
 				ctx.set_var(name, Some(r.clone()), Level::Dynamic);
+				super::emit_assignment(ctx.k, ctx.cx, ctx.vp, name, Level::Dynamic);
 				raw = Some(r);
 				raw_ref = false;
 			}
@@ -1770,6 +1957,7 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 				continue;
 			},
 		};
+		let mut binds_value = false;
 		if cur.is_none() && level == Level::Local && in_function {
 			// bash will not shadow a readonly global with a local one
 			// (`old_var->context == 0`).
@@ -1786,6 +1974,9 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 				continue;
 			}
 			cur = new_local_start(ctx, name, o.has(b'I'))?;
+			binds_value = cur
+				.as_ref()
+				.is_some_and(|v| !v.attrs.contains(Attrs::INVISIBLE));
 		} else if level == Level::Local
 			&& in_function
 			&& value.is_none()
@@ -1796,6 +1987,7 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 			// innermost temporary value wins.
 			cur =
 				Some(Var { attrs: cur.as_ref().map_or(Attrs::NONE, |v| v.attrs), value: temp.value });
+			binds_value = true;
 		}
 		if cur
 			.as_ref()
@@ -1881,6 +2073,9 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 					.is_none()
 			{
 				ctx.set_var(name, Some(var), level);
+				if binds_value {
+					super::emit_assignment(ctx.k, ctx.cx, ctx.vp, name, level);
+				}
 			}
 			status = 1;
 			continue;
@@ -1888,7 +2083,7 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 		let exists = cur.is_some();
 		let mut var = cur.unwrap_or_else(|| {
 			let value = if on.contains(Attrs::ASSOC) {
-				VarValue::Assoc(Vec::new())
+				VarValue::Assoc(Default::default())
 			} else if on.contains(Attrs::INDEXED) {
 				VarValue::Indexed(Vec::new())
 			} else {
@@ -1941,7 +2136,7 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 			} else {
 				Vec::new()
 			};
-			var.value = VarValue::Assoc(items);
+			var.value = VarValue::Assoc(items.into());
 			// bash's `convert_var_to_assoc` makes a default-size table.
 			if exists {
 				var.attrs = var.attrs.with(Attrs::SMALL_HASH);
@@ -1978,6 +2173,9 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 					var.attrs = var.attrs.with(Attrs::READONLY);
 				}
 				ctx.set_var(name, Some(var), level);
+				if binds_value {
+					super::emit_assignment(ctx.k, ctx.cx, ctx.vp, name, level);
+				}
 				propagate_temp(ctx, name, kind, on, level);
 			},
 			Some(value) if on.contains(Attrs::NAMEREF) && index.is_none() => {
@@ -2061,6 +2259,7 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 					var.attrs = var.attrs.with(Attrs::READONLY);
 				}
 				ctx.set_var(name, Some(var), level);
+				super::emit_assignment(ctx.k, ctx.cx, ctx.vp, name, level);
 			},
 			Some(value)
 				if index.is_none()
@@ -2434,8 +2633,15 @@ fn declare_functions(
 				out.extend_from_slice(name);
 				// `extdebug`: the line and file it was defined in.
 				if ctx.option(OptId::Extdebug)? {
-					let line = crate::bash::vm::frames::load_unit(&ctx.k.engine, ctx.cx.store, unit)
-						.map_or(0, |u| crate::bash::vm::callstack::definition_line(&u));
+					let line = crate::bash::vm::frames::load_unit(
+						&ctx.k.engine,
+						ctx.cx.store,
+						unit,
+						ctx.k
+							.mask
+							.contains(crate::bash::event::EventKind::UnitCompiled),
+					)
+					.map_or(0, |u| crate::bash::vm::callstack::definition_line(&u));
 					out.push(b' ');
 					out.extend_from_slice(line.to_string().as_bytes());
 					out.push(b' ');
@@ -2660,21 +2866,28 @@ pub fn unset(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 				state::Deref::Plain | state::Deref::Circular => (name, index),
 			}
 		};
-		let var = declared(ctx, name)?;
+		let var = state::lookup_declared(&ctx.k.root, ctx.cx.store, ctx.vp, name)?.map(|v| {
+			(
+				v.attrs,
+				matches!(v.value, VarValue::Assoc(_)),
+				matches!(v.value, VarValue::Str(_)),
+				v.next_index(),
+			)
+		});
 		if var.is_none() && !o.has(b'v') && !o.has(b'n') && index.is_none() {
 			status |= unset_function(ctx, name)?;
 			continue;
 		}
-		let Some(mut var) = var else {
+		let Some((attrs, assoc, scalar, next)) = var else {
 			continue;
 		};
 		// `unset -n` acts on a name reference only (bash
 		// `find_variable_last_nameref`, `unbind_nameref`): any other
 		// variable stays.
-		if o.has(b'n') && !var.attrs.contains(Attrs::NAMEREF) {
+		if o.has(b'n') && !attrs.contains(Attrs::NAMEREF) {
 			continue;
 		}
-		if var.attrs.contains(Attrs::READONLY) {
+		if attrs.contains(Attrs::READONLY) {
 			ctx.err(Diag::Usage {
 				msg: format!("{}: cannot unset: readonly variable", name.as_bstr()).into(),
 			});
@@ -2704,7 +2917,6 @@ pub fn unset(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 				// and an index's expansions before evaluating it
 				// (`unset 'b[$(echo 1)]'`; a substitution may park).
 				let expanded;
-				let assoc = matches!(var.value, VarValue::Assoc(_));
 				let again = if assoc {
 					!noexpand
 				} else {
@@ -2732,71 +2944,75 @@ pub fn unset(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 				} else {
 					idx
 				};
-				match &mut var.value {
-					VarValue::Assoc(items) => items.retain(|(k, _)| k.as_slice() != idx),
-					VarValue::Indexed(_) | VarValue::Str(_) => {
-						let scalar = matches!(var.value, VarValue::Str(_));
-						if matches!(idx, b"@" | b"*") && !scalar {
-							// bash 5.3 empties the array (attributes kept);
-							// `BASH_COMPAT` 5.1 and before unset it.
-							let compat = ctx.var(b"BASH_COMPAT")?.and_then(|v| {
-								let s = v.as_scalar()?;
-								let digits: Vec<u8> = s.iter().copied().filter(|&c| c != b'.').collect();
-								std::str::from_utf8(&digits).ok()?.parse::<u32>().ok()
-							});
-							if compat.is_some_and(|c| c <= 51) {
-								ctx.set_var(name, None, Level::Dynamic);
-								continue;
-							}
+				let elem = if assoc {
+					Elem::Key(BStr::new(idx))
+				} else {
+					if matches!(idx, b"@" | b"*") && !scalar {
+						// bash 5.3 empties the array (attributes kept);
+						// `BASH_COMPAT` 5.1 and before unset it.
+						let compat = ctx.var(b"BASH_COMPAT")?.and_then(|v| {
+							let s = v.as_scalar()?;
+							let digits: Vec<u8> = s.iter().copied().filter(|&c| c != b'.').collect();
+							std::str::from_utf8(&digits).ok()?.parse::<u32>().ok()
+						});
+						if compat.is_some_and(|c| c <= 51) {
+							ctx.set_var(name, None, Level::Dynamic);
+							continue;
+						}
+						if let Some(mut var) = declared(ctx, name)? {
 							if let VarValue::Indexed(items) = &mut var.value {
 								items.clear();
 							}
 							ctx.set_var(name, Some(var), Level::Dynamic);
-							continue;
 						}
-						let i = match subscript_value(ctx.k, ctx.cx, ctx.vp, idx) {
-							// Through a reference bash ignores it silently.
-							Ok(i) if via_ref && scalar && i != 0 => continue,
-							Ok(i) if scalar && (i != 0 || matches!(idx, b"@" | b"*")) => {
-								ctx.err(Diag::Usage {
-									msg: format!("{}: not an array variable", name.as_bstr()).into(),
-								});
-								status = 1;
-								continue;
-							},
-							Ok(i) => i,
-							Err(_) if scalar && matches!(idx, b"@" | b"*") => {
-								ctx.err(Diag::Usage {
-									msg: format!("{}: not an array variable", name.as_bstr()).into(),
-								});
-								status = 1;
-								continue;
-							},
-							Err(d) => {
-								ctx.err(d);
-								status = 1;
-								continue;
-							},
-						};
-						let i = if i < 0 { var.next_index() + i } else { i };
-						if i < 0 {
+						continue;
+					}
+					let i = match subscript_value(ctx.k, ctx.cx, ctx.vp, idx) {
+						// Through a reference bash ignores it silently.
+						Ok(i) if via_ref && scalar && i != 0 => continue,
+						Ok(i) if scalar && (i != 0 || matches!(idx, b"@" | b"*")) => {
 							ctx.err(Diag::Usage {
-								msg: format!("[{}]: bad array subscript", idx.as_bstr()).into(),
+								msg: format!("{}: not an array variable", name.as_bstr()).into(),
 							});
 							status = 1;
 							continue;
-						}
-						match &mut var.value {
-							VarValue::Indexed(items) => items.retain(|(k, _)| *k != i),
-							VarValue::Str(_) if i == 0 => {
-								ctx.set_var(name, None, Level::Dynamic);
-								continue;
-							},
-							_ => {},
-						}
-					},
-				}
-				ctx.set_var(name, Some(var), Level::Dynamic);
+						},
+						Ok(i) => i,
+						Err(_) if scalar && matches!(idx, b"@" | b"*") => {
+							ctx.err(Diag::Usage {
+								msg: format!("{}: not an array variable", name.as_bstr()).into(),
+							});
+							status = 1;
+							continue;
+						},
+						Err(d) => {
+							ctx.err(d);
+							status = 1;
+							continue;
+						},
+					};
+					let i = if i < 0 { next + i } else { i };
+					if i < 0 {
+						ctx.err(Diag::Usage {
+							msg: format!("[{}]: bad array subscript", idx.as_bstr()).into(),
+						});
+						status = 1;
+						continue;
+					}
+					if scalar && i == 0 {
+						ctx.set_var(name, None, Level::Dynamic);
+						continue;
+					}
+					Elem::Index(i)
+				};
+				state::edit_var(
+					&mut ctx.k.root,
+					ctx.cx.store,
+					ctx.vp,
+					name,
+					Level::Dynamic,
+					VarEdit::Remove(elem),
+				)?;
 			},
 		}
 	}
@@ -3162,7 +3378,8 @@ mod tests {
 		out.clear();
 		declare_line(b"uu", Some(&uu), &mut out);
 		assert_eq!(out, b"declare -a uu=([0]=\"\" [1]=\"kghfjk\" [3]=$'i\\n')");
-		let m = Var { attrs: Attrs::NONE, value: VarValue::Assoc(vec![("k".into(), "v".into())]) };
+		let m =
+			Var { attrs: Attrs::NONE, value: VarValue::Assoc(vec![("k".into(), "v".into())].into()) };
 		out.clear();
 		declare_line(b"m", Some(&m), &mut out);
 		assert_eq!(out, b"declare -A m=([k]=\"v\" )");

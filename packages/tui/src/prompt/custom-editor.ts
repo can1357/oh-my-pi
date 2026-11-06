@@ -42,6 +42,7 @@ import { type MacOSSpellingFeatures, MacOSSpellingProvider } from "./macos-spell
 import { TypingWordTracker } from "./typing-word";
 import { hasMagicKeyword, highlightMagicKeywords, magicKeywordRanges } from "./magic-keywords";
 import type { TspEditorDecoration, TspText } from "@oh-my-pi/pi-wire";
+import { motionEffectsEnabled } from "../motion-effects";
 import { isNativeRendering } from "../native/state";
 import { isQueuedMessageList, parseQueueShorthand, QUEUE_LIST_MARKER_RE } from "./queue-input";
 import { type WordCompletionMethod, WordCompletionProvider } from "./word-completion";
@@ -873,7 +874,8 @@ export class CustomEditor extends Editor {
 		const caret = this.getCursor();
 		this.#typing.update(this.textRevision, this.#decorationLines, caret.line, caret.col, this.focused);
 		const typing = this.#typing.word;
-		const animated = this.focused && this.#shimmerEnabled() && hasMagicKeyword(editorText);
+		// With decorative motion off the keyword keeps its static highlight; the pending frame chain ends here.
+		const animated = this.focused && this.#shimmerEnabled() && motionEffectsEnabled() && hasMagicKeyword(editorText);
 		const phase = animated ? (Date.now() % CustomEditor.SHIMMER_PERIOD_MS) / CustomEditor.SHIMMER_PERIOD_MS : 0;
 		if (animated) this.#scheduleShimmerFrame();
 		let sourceSearchOffset = 0;

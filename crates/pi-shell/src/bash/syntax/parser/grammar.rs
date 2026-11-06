@@ -139,6 +139,7 @@ impl From<ParseError> for CondFail {
 impl Parser<'_> {
 	/// One top-level command (`inputunit`); `None` at end of input.
 	pub(super) fn complete_command(&mut self) -> PResult<Option<CompleteCommand>> {
+		let source_replay = self.frames.is_empty() && self.in_source();
 		self.reset_lexer();
 		self.discard_line = false;
 		self.compound.clear();
@@ -201,13 +202,13 @@ impl Parser<'_> {
 			hi = hi.max(self.base + end as u32);
 		}
 		let mut list = List { items };
-		super::finish::fill_docs(&mut list, &self.docs);
-		let node_count = super::finish::assign_ids(&mut list);
+		let node_count = super::finish::assign_ids_with_docs(&mut list, &self.docs);
 		Ok(Some(CompleteCommand {
 			span: Span::new(lo, hi.max(lo)),
 			line,
 			list,
 			node_count,
+			source_replay: source_replay && self.alias_uses.is_empty(),
 			aliases: core::mem::take(&mut self.alias_uses),
 			warnings: core::mem::take(&mut self.warnings),
 		}))
@@ -407,10 +408,10 @@ impl Parser<'_> {
 				CommandKind::Brace(body)
 			},
 			T::ArithCmd => {
-				let t = self.take()?;
+				let t = self.take()?.arith.expect("arithmetic token");
 				CommandKind::Arith(ArithText {
-					span:    Span::new(t.alo, t.ahi),
-					src:     t.arith,
+					span:    Span::new(t.lo, t.hi),
+					src:     t.text,
 					bracket: false,
 				})
 			},
@@ -550,7 +551,8 @@ impl Parser<'_> {
 			self.skip_newlines()?;
 		}
 		let body = self.do_body()?;
-		let pieces = split_arith_for(&t.arith, &t.semis);
+		let arith = t.arith.as_ref().expect("arithmetic token");
+		let pieces = split_arith_for(&arith.text, &arith.semis);
 		if pieces.len() != 3 {
 			let detail: &[u8] = if pieces.len() < 3 {
 				b"syntax error: arithmetic expression required"
@@ -558,7 +560,7 @@ impl Parser<'_> {
 				b"syntax error: `;' unexpected"
 			};
 			let mut msg = b"syntax error: `((".to_vec();
-			msg.extend_from_slice(&t.arith);
+			msg.extend_from_slice(&arith.text);
 			msg.extend_from_slice(b"))'");
 			let kind = ParseErrorKind::Message(msg.into_boxed_slice());
 			return Err(
@@ -569,8 +571,8 @@ impl Parser<'_> {
 		let at = |i: usize| {
 			let (s, e) = pieces[i];
 			ArithText {
-				span:    Span::new(t.alo + s as u32, (t.alo + e as u32).min(t.ahi)),
-				src:     t.arith[s..e].to_vec(),
+				span:    Span::new(arith.lo + s as u32, (arith.lo + e as u32).min(arith.hi)),
+				src:     arith.text[s..e].to_vec(),
 				bracket: false,
 			}
 		};
@@ -676,6 +678,7 @@ impl Parser<'_> {
 				name,
 				extra_names: Vec::new(),
 				keyword,
+				traced: false,
 				body: Box::new(body),
 			}),
 			redirs: Vec::new(),

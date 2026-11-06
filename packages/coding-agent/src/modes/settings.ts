@@ -1,5 +1,6 @@
 import { combine, effect, register, type Setting } from "../config/registry";
 import type { Settings } from "../config/settings";
+import { MOTION_MODES, MOTION_PRESETS } from "../config/motion-presets";
 import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
 import { cfgReadToolResultPreview } from "../tools/settings";
 import { MAGIC_KEYWORDS, type MagicKeywordId } from "./magic-keywords";
@@ -19,6 +20,9 @@ import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { setInlineImageMaxColumns, setInlineImageMaxRows } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setShimmerMode } from "@oh-my-pi/pi-tui/theme/shimmer";
 import { setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "@oh-my-pi/pi-tui/theme/theme";
+import { DEFAULT_MAX_FPS, parseMaxFps, setMaxFps } from "@oh-my-pi/pi-tui/frame-rate";
+import { setMotionEffects } from "@oh-my-pi/pi-tui/motion-effects";
+import { parseSpinnerInterval, setSpinnerInterval } from "@oh-my-pi/pi-tui/spinner-clock";
 
 const EMPTY_UNKNOWN_RECORD: Record<string, unknown> = {};
 
@@ -441,6 +445,19 @@ export const cfgTuiTextSizing = register({
 	},
 });
 
+export const cfgTuiColorfulMarkdown = register({
+	id: "tui.colorfulMarkdown",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Colorful Markdown",
+		description:
+			"Color headings by level, bold and italic text, inline code, and table headers from the theme's ANSI palette. Off uses one heading color and plain bold/italic.",
+	},
+});
+
 export const cfgTuiRenderMermaid = register({
 	id: "tui.renderMermaid",
 	type: "boolean",
@@ -558,6 +575,56 @@ export const cfgTuiTitleSpinner = register({
 	},
 });
 
+export const cfgTuiSpinnerInterval = register({
+	id: "tui.spinnerInterval",
+	type: "number",
+	// Unset follows `tui.motion`; any value set (file, flag, env) wins over the preset.
+	default: undefined,
+	env: "PI_SPINNER_INTERVAL",
+	validate: raw => {
+		if (raw !== undefined && raw !== null) parseSpinnerInterval(raw);
+	},
+	normalize: parseSpinnerInterval,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Spinner Interval (ms)",
+		description:
+			"Milliseconds between frames of every spinner, the terminal title included; 0 shows static glyphs. Unset follows Motion",
+		options: [
+			{ value: "0", label: "Static", description: "No animation" },
+			{ value: "80", label: "80 ms", description: "12.5 frames/s" },
+			{ value: "250", label: "250 ms", description: "4 frames/s" },
+			{ value: "1000", label: "1 s", description: "1 frame/s" },
+		],
+	},
+});
+
+export const cfgTuiMaxFps = register({
+	id: "tui.maxFps",
+	type: "number",
+	default: DEFAULT_MAX_FPS,
+	env: "PI_MAX_FPS",
+	validate: raw => {
+		if (raw !== undefined && raw !== null) parseMaxFps(raw);
+	},
+	normalize: parseMaxFps,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Max Frames Per Second",
+		description:
+			"Ceiling on how often the TUI repaints, streaming text included. Keystroke echo keeps 30 fps, so the pane you type in stays responsive",
+		options: [
+			{ value: "30", label: "30 fps", description: "Default" },
+			{ value: "15", label: "15 fps" },
+			{ value: "4", label: "4 fps", description: "Quiet, for many panes" },
+			{ value: "1", label: "1 fps", description: "Minimum" },
+		],
+	},
+});
+effect(cfgTuiMaxFps, setMaxFps);
+
 export const cfgTuiHyperlinks = register({
 	id: "tui.hyperlinks",
 	type: "enum",
@@ -611,7 +678,7 @@ export const cfgDisplayShimmer = register({
 		tab: "appearance",
 		group: "Display",
 		label: "Shimmer",
-		description: "Animation style for working/loading messages",
+		description: "Animation style for working/loading messages; off under reduced or no Motion",
 		options: [
 			{ value: "classic", label: "Classic", description: "Soft cosine wave sweeping across the text" },
 			{ value: "kitt", label: "KITT Scanner", description: "Knight Rider 1982 red light bouncing left-right" },
@@ -619,7 +686,44 @@ export const cfgDisplayShimmer = register({
 		],
 	},
 });
-effect(cfgDisplayShimmer, setShimmerMode);
+
+export const cfgTuiMotion = register({
+	id: "tui.motion",
+	type: "enum",
+	values: MOTION_MODES,
+	default: "full",
+	env: "PI_MOTION",
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Motion",
+		description:
+			"One switch over spinners, shimmer, and decorative blink/fade. Streaming text is unaffected (see Max Frames Per Second). A spinner interval you set still wins",
+		options: [
+			{ value: "full", label: "Full", description: "Every animation at its own setting (default)" },
+			{ value: "reduced", label: "Reduced", description: "Spinners at 250 ms, no shimmer, no blink/fade" },
+			{ value: "none", label: "None", description: "Static spinners and title, no shimmer, no blink/fade" },
+		],
+	},
+});
+
+/** Effective animation settings: `tui.motion`'s preset under the user's own spinner interval and shimmer. */
+export const cfgMotionResolved = combine(
+	{ mode: cfgTuiMotion, spinnerInterval: cfgTuiSpinnerInterval, shimmer: cfgDisplayShimmer },
+	({ mode, spinnerInterval, shimmer }) => {
+		const preset = MOTION_PRESETS[mode];
+		return {
+			spinnerInterval: spinnerInterval ?? preset.spinnerInterval,
+			shimmer: preset.effects ? shimmer : ("disabled" as const),
+			effects: preset.effects,
+		};
+	},
+);
+effect(cfgMotionResolved, motion => {
+	setSpinnerInterval(motion.spinnerInterval);
+	setShimmerMode(motion.shimmer);
+	setMotionEffects(motion.effects);
+});
 
 export const cfgDisplayPinnedAgents = register({
 	id: "display.pinnedAgents",
@@ -660,7 +764,8 @@ export const cfgDisplaySmoothStreaming = register({
 		tab: "appearance",
 		group: "Display",
 		label: "Smooth Streaming",
-		description: "Reveal assistant text and streamed tool input smoothly while chunks arrive",
+		description:
+			"Reveal assistant text and streamed tool input smoothly while chunks arrive (Tern types assistant text out itself)",
 	},
 });
 
@@ -712,6 +817,18 @@ export const cfgDisplayCacheMissMarker = register({
 	},
 });
 
+export const cfgDisplayShellVisualization = register({
+	id: "display.shellVisualization",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Shell Visualization",
+		description: "Show bash commands as an interactive execution visualization instead of plain shell commands",
+	},
+});
+
 export const cfgDisplayAdvisorCollapsedLines = register({
 	id: "display.advisorCollapsedLines",
 	type: "number",
@@ -734,6 +851,7 @@ export const cfgDisplayAdvisorCollapsedLines = register({
 effect(
 	combine({
 		hideToolActivity: cfgDisplayHideToolActivity,
+		shellVisualization: cfgDisplayShellVisualization,
 		readToolResultPreview: cfgReadToolResultPreview,
 		showImages: cfgTerminalShowImages,
 		cacheMissMarker: cfgDisplayCacheMissMarker,
@@ -1188,6 +1306,24 @@ export const cfgUpdateChannel = register({
 			{ value: "stable", label: "Stable" },
 			{ value: "canary", label: "Canary" },
 		],
+	},
+});
+
+/**
+ * Background self-update: a launch that finds a newer release installs it the
+ * way `omp update` would, showing progress beside the welcome banner's version;
+ * the next launch runs it. Ignored where omp cannot update itself (Tern, Nix, a
+ * source checkout). Offered by the setup wizard.
+ */
+export const cfgUpdateAuto = register({
+	id: "update.auto",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Startup & Updates",
+		label: "Auto Update",
+		description: "Install omp updates in the background on startup; the next launch runs the new version",
 	},
 });
 

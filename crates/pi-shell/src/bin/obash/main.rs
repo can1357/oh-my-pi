@@ -9,6 +9,8 @@
 //! obash's own options (before bash's):
 //! --events=jsonl        write every event as a JSON line
 //! --events-out=PATH     write the events to PATH instead of stderr
+//! --trace=PATH          write the run trace (the `ShellTrace` JSON the bash
+//!                       tool's live view draws) to PATH at exit
 //! --fault=SEED:K        inject faults (see --fault-mode); a snapshot that
 //!                       would lose externals in flight or open OS handles is
 //!                       not restored unless PI_SHELL_FAULT_LOST=restore
@@ -43,77 +45,30 @@
 #[cfg(feature = "alloc-stats")]
 mod alloc_stats;
 mod fault;
-mod host;
-mod pending_fs;
-mod signals;
 mod syntax;
-mod timer;
 
 use std::{
 	ffi::OsString,
 	fs,
-	io::{self, BufWriter, IsTerminal, Read, Write},
+	io::{self, BufWriter, Write},
 	path::PathBuf,
+	sync::Arc,
 };
 
 use bstr::BString;
 use clap::Parser;
-use pi_shell::bash::{
-	Cx, Engine, EngineConfig, EventMask, MemStore, ModeId, Origin, RestoreOpts, Script, Shell,
-	ShellInit,
-	invocation::{self, ShellArgs},
-	ir,
-	syntax::Features,
+use pi_shell::{
+	bash::{
+		Cx, Engine, EngineConfig, EventMask, EventSink, MemStore, ModeId, Origin, RestoreOpts,
+		Script, Shell, ir, syntax::Features, trace::RunTrace,
+	},
+	process::{self, Input, Launch, NativeHost, ProcessOptions, Start},
 };
 
-use crate::host::NativeHost;
-
-/// The engine allocates small, short-lived buffers per command (argv, fields,
-/// scratch); with the platform malloc, allocation was about a third of the
-/// dispatch loop's time on macOS.
-#[cfg(not(feature = "alloc-stats"))]
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-/// The same allocator with counters (`--features alloc-stats`, measurement
-/// only): see [`alloc_stats`].
+/// The system allocator with counters for measurement.
 #[cfg(feature = "alloc-stats")]
 #[global_allocator]
-static GLOBAL: alloc_stats::Counting = alloc_stats::Counting(mimalloc::MiMalloc);
-
-/// Turns mimalloc's `arena_eager_commit` off before the first allocation:
-/// an ELF constructor, since Rust's runtime allocates before `main`.
-/// Committed eagerly, the first touches of the arena fault in whole 2 MiB
-/// transparent huge pages under THP `always`, and zeroing them was about
-/// 7 % of `obash -c :` on Linux; committed on demand, only the pages used
-/// are touched (xeon, `perf stat -r 200 obash -c :`: 2.38 → 2.16 ms with
-/// `MIMALLOC_ARENA_EAGER_COMMIT=0`). Unlike mimalloc's `allow_thp=0` (a
-/// `PR_SET_THP_DISABLE` that externals would inherit) it changes nothing
-/// for child processes.
-#[cfg(target_os = "linux")]
-#[used]
-#[unsafe(link_section = ".init_array")]
-static MIMALLOC_LAZY_COMMIT: extern "C" fn() = mimalloc_lazy_commit;
-
-#[cfg(target_os = "linux")]
-extern "C" fn mimalloc_lazy_commit() {
-	/// `mi_option_arena_eager_commit` in mimalloc's `mi_option_e` (v2 and
-	/// v3).
-	const ARENA_EAGER_COMMIT: std::ffi::c_int = 4;
-	// The mimalloc crate does not re-export its C library; the symbol is
-	// in the static library it links.
-	unsafe extern "C" {
-		fn mi_option_set(option: std::ffi::c_int, value: std::ffi::c_long);
-	}
-	// An explicit `MIMALLOC_ARENA_EAGER_COMMIT` wins (startup measurements).
-	// SAFETY: getenv on a NUL-terminated name, before any thread exists.
-	if !unsafe { libc::getenv(c"MIMALLOC_ARENA_EAGER_COMMIT".as_ptr()) }.is_null() {
-		return;
-	}
-	// SAFETY: setting an option only writes mimalloc's option table; it has
-	// no preconditions and runs before any allocation or thread exists.
-	unsafe { mi_option_set(ARENA_EAGER_COMMIT, 0) };
-}
+static GLOBAL: alloc_stats::Counting = alloc_stats::Counting(std::alloc::System);
 
 #[derive(clap::Parser, Debug, Default)]
 #[command(
@@ -127,6 +82,9 @@ struct Cli {
 	/// Event destination (default: stderr).
 	#[arg(long, value_name = "PATH")]
 	events_out:   Option<PathBuf>,
+	/// Write the run trace (`ShellTrace` JSON) to PATH at exit.
+	#[arg(long, value_name = "PATH")]
+	trace:        Option<PathBuf>,
 	/// Fault injection: `--fault=SEED:K`, `--fault-mode=step|pause|exec`.
 	#[command(flatten)]
 	fault:        fault::FaultArgs,
@@ -156,6 +114,7 @@ const OBASH_FLAGS: &[&str] = &["--ir", "--print", "--supported"];
 const OBASH_WITH_VALUE: &[&str] = &[
 	"--events",
 	"--events-out",
+	"--trace",
 	"--fault",
 	"--fault-mode",
 	"--fault-resume",
@@ -233,187 +192,6 @@ fn bytes(s: &OsString) -> BString {
 	BString::from(s.as_encoded_bytes())
 }
 
-/// What to run, and as whom.
-struct Input {
-	source: Vec<u8>,
-	origin: Origin,
-	argv0:  BString,
-	args:   Vec<BString>,
-}
-
-/// A script operand bash refuses to run: the message (complete stderr
-/// text) and the exit status.
-struct ScriptError {
-	text:   Vec<u8>,
-	status: u8,
-}
-
-impl ScriptError {
-	/// `NAME: FILE: what`.
-	fn new(name: &[u8], file: &[u8], what: &str, status: u8) -> Self {
-		let mut text = Vec::with_capacity(name.len() + file.len() + what.len() + 5);
-		text.extend_from_slice(name);
-		text.extend_from_slice(b": ");
-		text.extend_from_slice(file);
-		text.extend_from_slice(b": ");
-		text.extend_from_slice(what.as_bytes());
-		text.push(b'\n');
-		Self { text, status }
-	}
-}
-
-/// `bytes` as a path.
-#[cfg(unix)]
-fn os_path(bytes: &[u8]) -> PathBuf {
-	use std::os::unix::ffi::OsStrExt;
-	PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
-}
-
-/// `bytes` as a path.
-#[cfg(not(unix))]
-fn os_path(bytes: &[u8]) -> PathBuf {
-	PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
-}
-
-/// Read the script operand as bash's `open_shell_script` does: a name
-/// without `/` that is not in the current directory is looked up in
-/// `PATH` (bash's default when unset); a directory or a binary file (a NUL
-/// on the first line of the first 80 bytes) is refused (126); a missing
-/// file is 127. Errors before the file opens are prefixed with the shell's
-/// name, later ones with the script's (`$0`).
-fn read_script(
-	args: &ShellArgs,
-	script: &[u8],
-	env: &[(BString, BString)],
-) -> Result<(BString, Vec<u8>), ScriptError> {
-	if args.mode.dialect() == pi_shell::bash::Dialect::Zsh {
-		return read_zsh_script(args, script, env);
-	}
-	let mut path = BString::from(script);
-	let mut opened = fs::File::open(os_path(&path));
-	if let Err(err) = &opened
-		&& err.kind() == io::ErrorKind::NotFound
-		&& !script.contains(&b'/')
-	{
-		// bash's `find_path_file`: the first file of that name in `PATH` (an
-		// empty entry is the current directory).
-		let search = env
-			.iter()
-			.find(|(n, _)| n.as_slice() == b"PATH")
-			.map_or_else(|| BString::from(invocation::DEFAULT_PATH), |(_, v)| v.clone());
-		let found = search.split(|&c| c == b':').find_map(|dir| {
-			let mut cand = BString::from(if dir.is_empty() { &b"."[..] } else { dir });
-			cand.push(b'/');
-			cand.extend_from_slice(script);
-			fs::metadata(os_path(&cand))
-				.is_ok_and(|m| !m.is_dir())
-				.then_some(cand)
-		});
-		if let Some(found) = found {
-			opened = fs::File::open(os_path(&found));
-			path = found;
-		}
-	}
-	let mut file = opened.map_err(|err| {
-		let status = if err.kind() == io::ErrorKind::NotFound {
-			127
-		} else {
-			126
-		};
-		ScriptError::new(&args.shell_name, &path, &pi_shell::bash::diag::strerror(&err), status)
-	})?;
-	let dollar0 = &args.dollar0;
-	if file.metadata().is_ok_and(|m| m.is_dir()) {
-		return Err(ScriptError::new(dollar0, &path, "Is a directory", 126));
-	}
-	let mut text = Vec::new();
-	file.read_to_end(&mut text).map_err(|err| {
-		ScriptError::new(dollar0, &path, &pi_shell::bash::diag::strerror(&err), 126)
-	})?;
-	let head = &text[..text.len().min(80)];
-	let first_line = head.split(|&c| c == b'\n').next().unwrap_or(head);
-	if first_line.contains(&0) {
-		return Err(ScriptError::new(dollar0, &path, "cannot execute binary file", 126));
-	}
-	Ok((path, text))
-}
-
-/// zsh 5.9 `setupshin`: the script operand as given (not a directory);
-/// failing that, under `pathscript` (on in the sh and ksh emulations) a
-/// name without `/` is looked up in `PATH` (`pathprog`). Anything else is
-/// zsh's `NAME: can't open input file: SCRIPT`, status 127.
-fn read_zsh_script(
-	args: &ShellArgs,
-	script: &[u8],
-	env: &[(BString, BString)],
-) -> Result<(BString, Vec<u8>), ScriptError> {
-	let usable = |p: &[u8]| fs::metadata(os_path(p)).is_ok_and(|m| !m.is_dir());
-	let pathscript = args
-		.zsh_options
-		.iter()
-		.rev()
-		.find(|(opt, _)| *opt == pi_shell::bash::zshopt::ZshOpt::Pathscript)
-		.map_or(args.mode != ModeId::Zsh, |&(_, on)| on);
-	let path = if usable(script) {
-		Some(BString::from(script))
-	} else if pathscript && !script.contains(&b'/') {
-		let search = env
-			.iter()
-			.find(|(n, _)| n.as_slice() == b"PATH")
-			.map_or_else(|| BString::from(invocation::DEFAULT_PATH), |(_, v)| v.clone());
-		search.split(|&c| c == b':').find_map(|dir| {
-			let mut cand = BString::from(dir);
-			cand.push(b'/');
-			cand.extend_from_slice(script);
-			usable(&cand).then_some(cand)
-		})
-	} else {
-		None
-	};
-	if let Some(path) = path
-		&& let Ok(text) = fs::read(os_path(&path))
-	{
-		return Ok((path, text));
-	}
-	let mut text = args.shell_name.to_vec();
-	text.extend_from_slice(b": can't open input file: ");
-	text.extend_from_slice(script);
-	text.push(b'\n');
-	Err(ScriptError { text, status: 127 })
-}
-
-fn input(cli: &Cli, args: &ShellArgs, env: &[(BString, BString)]) -> Result<Input, ScriptError> {
-	let argv0 = args.dollar0_in(env);
-	match &args.input {
-		invocation::Input::Command(cmd) => {
-			Ok(Input { source: cmd.to_vec(), origin: Origin::Command, argv0, args: args.args.clone() })
-		},
-		invocation::Input::Script(script) => {
-			let (path, source) = read_script(args, script, env)?;
-			Ok(Input { source, origin: Origin::File(path), argv0, args: args.args.clone() })
-		},
-		invocation::Input::Stdin => {
-			if cli.print || cli.ir || cli.json.is_some() || args.pretty_print {
-				// The tool modes take the whole text.
-				let mut source = Vec::new();
-				io::stdin().read_to_end(&mut source).map_err(|err| {
-					ScriptError::new(&args.shell_name, b"-", &pi_shell::bash::diag::strerror(&err), 2)
-				})?;
-				return Ok(Input { source, origin: Origin::Command, argv0, args: args.args.clone() });
-			}
-			// The engine reads the script from fd 0 a line at a time, as bash
-			// does, so commands that read stdin get the lines that follow.
-			Ok(Input { source: Vec::new(), origin: Origin::Stdin, argv0, args: args.args.clone() })
-		},
-	}
-}
-
-/// Write `bytes` to stdout (help, version and option listings).
-fn print_out(bytes: &[u8]) -> u8 {
-	let mut out = io::stdout().lock();
-	u8::from(out.write_all(bytes).and_then(|()| out.flush()).is_err())
-}
-
 /// The process entry point: [`obash`]'s status, after flushing stdout (no
 /// std runtime runs at exit). A panic reports as std's runtime would:
 /// status 101.
@@ -425,11 +203,19 @@ extern "C" fn main(
 ) -> std::ffi::c_int {
 	let status = std::panic::catch_unwind(obash).unwrap_or(101);
 	let _ = io::stdout().flush();
-	std::ffi::c_int::from(status)
+	#[cfg(unix)]
+	// SAFETY: `_exit` has no preconditions.
+	unsafe {
+		libc::_exit(status)
+	}
+	#[cfg(not(unix))]
+	status
 }
 
-/// obash: the command line to an exit status.
-fn obash() -> u8 {
+/// obash: the command line to an exit status. Without obash's own options
+/// or test modes this is [`process::main`]; otherwise the test modes run on
+/// the pieces it is made of.
+fn obash() -> i32 {
 	#[cfg(feature = "alloc-stats")]
 	let _alloc_stats = alloc_stats::Report::from_env();
 	let (clap_args, argv) = split_args(std::env::args_os().collect());
@@ -445,145 +231,44 @@ fn obash() -> u8 {
 		return 0;
 	}
 	if let Some(path) = &cli.parse_corpus {
-		return syntax::parse_corpus(path);
+		return i32::from(syntax::parse_corpus(path));
 	}
-	let args = match ShellArgs::parse(&argv) {
-		Ok(args) => args,
-		Err(err) => {
-			let _ = io::stderr().write_all(&err.render(&argv[0]));
-			return err.status() as u8;
-		},
-	};
-	if args.help {
-		return print_out(&invocation::help_text(&args.shell_name));
+	let modes = EnvModes::from_env();
+	if !cli.testing() && modes.as_ref().is_ok_and(|m| !m.testing()) {
+		return process::main(argv, ProcessOptions::default());
 	}
-	if args.version {
-		return print_out(&invocation::version_text());
-	}
-	// bash lists the options and goes on: a failed write does not stop it.
-	if let Some(text) = args.listing_text() {
-		let _ = print_out(&text);
-	}
-	let env: Vec<(BString, BString)> = std::env::vars_os()
-		.map(|(k, v)| (bytes(&k), bytes(&v)))
-		.collect();
-	let input = match input(&cli, &args, &env) {
-		Ok(i) => i,
-		Err(err) => {
-			let _ = io::stderr().write_all(&err.text);
-			return err.status;
-		},
+	let whole_stdin = cli.print || cli.ir || cli.json.is_some();
+	let mut launch = match process::start(&argv, whole_stdin) {
+		Start::Run(launch) => launch,
+		Start::Exit(status) => return status,
 	};
 	if cli.ir {
-		return print_ir(&input);
+		return i32::from(print_ir(&launch.input));
 	}
 	if cli.print {
-		return syntax::print(&input.source, &input.argv0, matches!(input.origin, Origin::Command));
+		let input = &launch.input;
+		return i32::from(syntax::print(
+			&input.source,
+			&input.argv0,
+			matches!(input.origin, Origin::Command),
+		));
 	}
 	if let Some(dialect) = cli.json {
-		return syntax::json(&input.source, dialect);
+		return i32::from(syntax::json(&launch.input.source, dialect));
 	}
-	// bash ignores `--pretty-print` for a `-c` command (it runs it).
-	if args.pretty_print && !args.interactive && !matches!(args.input, invocation::Input::Command(_))
+	if let Some(status) = process::pretty_print_mode(&mut launch) {
+		return status;
+	}
+	let name = launch.args.shell_name.clone();
+	match modes
+		.map_err(Into::into)
+		.and_then(|modes| run(&cli, *launch, modes))
 	{
-		return syntax::pretty_print(&input.source, &input.argv0);
-	}
-	match run(&cli, &args, input, env) {
-		Ok(status) => status as u8,
+		Ok(status) => status & 0xff,
 		Err(err) => {
-			eprintln!("{}: {err}", args.shell_name);
+			eprintln!("{name}: {err}");
 			2
 		},
-	}
-}
-
-/// The new shell's initial state from bash's command line: `$0` and the
-/// positional parameters, the options in bash's order, interactivity (`-i`,
-/// or stdin and stderr on a terminal) and the startup files that exist
-/// (unreadable ones are reported and skipped, as bash's
-/// `maybe_execute_file` does).
-fn shell_init(
-	args: &ShellArgs,
-	input: Input,
-	env: Vec<(BString, BString)>,
-	cwd: BString,
-) -> ShellInit {
-	let interactive = args.is_interactive(io::stdin().is_terminal() && io::stderr().is_terminal());
-	let mut options = args.startup_options(&env, interactive);
-	let home = env
-		.iter()
-		.find(|(n, _)| n.as_slice() == b"HOME")
-		.map_or_else(BString::default, |(_, v)| v.clone());
-	let report = |what: &[u8], msg: &[u8]| {
-		let mut line = args.shell_name.to_vec();
-		if !what.is_empty() {
-			line.extend_from_slice(b": ");
-			line.extend_from_slice(what);
-		}
-		line.extend_from_slice(b": ");
-		line.extend_from_slice(msg);
-		line.push(b'\n');
-		let _ = io::stderr().write_all(&line);
-	};
-	let mut startup = Vec::new();
-	match args.startup_files(&env, &home, interactive) {
-		Ok(files) => {
-			for candidates in files {
-				let Some(path) = candidates
-					.into_iter()
-					.find(|p| fs::metadata(os_path(p)).is_ok())
-				else {
-					continue;
-				};
-				match fs::read(os_path(&path)) {
-					Ok(text) => startup.push((path, BString::from(text))),
-					Err(err) => report(&path, pi_shell::bash::diag::strerror(&err).as_bytes()),
-				}
-			}
-		},
-		Err(err) => report(b"", err.to_string().as_bytes()),
-	}
-	if args.debugger {
-		// bash's `start_debugger`: bashdb's start file with function and
-		// error tracing (and `extdebug`); without it, debugging is off.
-		let file = invocation::DEBUGGER_START_FILE;
-		match fs::read(file) {
-			Ok(text) => {
-				startup.push((BString::from(file), BString::from(text)));
-				options.extend([
-					(pi_shell::bash::store::OptId::Extdebug, true),
-					(pi_shell::bash::store::OptId::Functrace, true),
-					(pi_shell::bash::store::OptId::Errtrace, true),
-				]);
-			},
-			Err(err) => {
-				report(file.as_bytes(), pi_shell::bash::diag::strerror(&err).as_bytes());
-				report(b"", b"warning: cannot start debugger; debugging mode disabled");
-			},
-		}
-	}
-	// A zsh-dialect shell takes zsh option names (the bash ones above stay
-	// empty for it).
-	let options = options
-		.into_iter()
-		.map(|(opt, on)| (BString::from(<&'static str>::from(opt)), on))
-		.chain(
-			args
-				.zsh_options
-				.iter()
-				.map(|&(opt, on)| (BString::from(<&'static str>::from(opt)), on)),
-		)
-		.collect();
-	ShellInit {
-		mode: args.mode,
-		argv0: input.argv0,
-		args: input.args,
-		env,
-		cwd,
-		interactive,
-		options,
-		shell_pid: std::process::id(),
-		startup,
 	}
 }
 
@@ -597,14 +282,10 @@ fn print_ir(input: &Input) -> u8 {
 	0
 }
 
-/// Run the shell; `env` is the process environment (taken once in `main`).
-fn run(
-	cli: &Cli,
-	args: &ShellArgs,
-	mut input: Input,
-	mut env: Vec<(BString, BString)>,
-) -> Result<i32, Box<dyn std::error::Error>> {
-	let modes = EnvModes::from_env()?;
+/// Run the shell under the test modes: events, fault injection, a pending
+/// filesystem; `launch.env` is the process environment.
+fn run(cli: &Cli, launch: Launch, modes: EnvModes) -> Result<i32, Box<dyn std::error::Error>> {
+	let Launch { args, mut env, input } = launch;
 	// An `exec`-mode fault run re-executes obash with the continuation of
 	// the shell it externalized.
 	let resume = cli
@@ -620,7 +301,7 @@ fn run(
 	let inherited = if resume.is_some() {
 		Vec::new()
 	} else {
-		host::inherited_fds()
+		process::inherited_fds(false)
 	};
 	let sink: Option<Box<dyn Write>> = match (cli.events, &cli.events_out) {
 		(None, _) => None,
@@ -638,9 +319,9 @@ fn run(
 		},
 		(Some(EventsFormat::Jsonl), None) => Some(Box::new(BufWriter::new(io::stderr()))),
 	};
-	let ignored = resume.map_or_else(host::ignored_on_entry, |r| r.ignored());
+	let ignored = resume.map_or_else(process::ignored_on_entry, |r| r.ignored());
 	let clock_ns = resume.map_or(0, |r| r.clock_ns());
-	let mut host = NativeHost::new(sink, modes.pending_fs, inherited, ignored, clock_ns);
+	let mut host = NativeHost::new(sink, modes.pending_fs, inherited, ignored, clock_ns, false);
 	let cfg = EngineConfig::default();
 	let engine = Engine::new(cfg);
 	if let Some(resume) = &resume {
@@ -660,27 +341,35 @@ fn run(
 		return Ok(status?);
 	}
 	let mut store = MemStore::new();
-	let cwd = std::env::current_dir()
-		.map_or_else(|_| BString::from("/"), |p| BString::from(p.as_os_str().as_encoded_bytes()));
 	// Nested obash instances (`${THIS_SH}`) draw their own fault stream.
 	env.retain(|(k, _)| k.as_slice() != fault::FAULT_DEPTH.as_bytes());
 	env.push((BString::from(fault::FAULT_DEPTH), BString::from((depth + 1).to_string())));
-	let source = std::mem::take(&mut input.source);
-	let origin = std::mem::replace(&mut input.origin, Origin::Command);
-	let init = shell_init(args, input, env, cwd);
+	let Input { source, origin, argv0, args: params } = input;
+	let trace = cli
+		.trace
+		.as_ref()
+		.map(|_| Arc::new(RunTrace::new(source.clone())));
+	let init = process::shell_init(&args, argv0, params, env, process::current_dir());
 	// Without an event sink nothing observes events: skip building them (each
 	// one reads the clock).
-	let mask = if cli.events.is_some() {
+	let mut mask = if cli.events.is_some() {
 		EventMask::DEFAULT
 	} else {
 		EventMask::NONE
 	};
+	if let Some(trace) = &trace {
+		mask = EventMask::from_bits(mask.bits() | trace.mask().bits());
+		host.set_event_sink(Some(Arc::clone(trace) as Arc<dyn EventSink>));
+	}
 	let mut shell = Shell::create(&engine, &mut Cx { host: &mut host, store: &mut store }, init)?;
 	host.bind_signals(shell.control(), pi_shell::bash::Vpid(cfg.vpid_base));
 	shell.set_event_mask(mask);
 	let run = shell.submit(Script { origin, ..Script::command(source) });
 	let status = injector.drive(fault::Parts { cfg, host, store, shell, run, mask });
 	injector.finish();
+	if let (Some(path), Some(trace)) = (&cli.trace, &trace) {
+		fs::write(path, trace.snapshot_json())?;
+	}
 	Ok(status?)
 }
 
@@ -714,5 +403,25 @@ impl EnvModes {
 			pending_fs: std::env::var_os("PI_SHELL_FS").is_some_and(|v| v == "pending"),
 			fault:      fault::Env::from_env()?,
 		})
+	}
+
+	/// Whether a test mode is on: a fault plan or the pending filesystem.
+	const fn testing(&self) -> bool {
+		self.pending_fs || self.fault.fault.is_some()
+	}
+}
+
+impl Cli {
+	/// Whether an obash option asks for more than the plain shell.
+	const fn testing(&self) -> bool {
+		self.events.is_some()
+			|| self.events_out.is_some()
+			|| self.trace.is_some()
+			|| self.fault.fault.is_some()
+			|| self.fault.fault_mode.is_some()
+			|| self.fault.fault_resume.is_some()
+			|| self.ir
+			|| self.print
+			|| self.json.is_some()
 	}
 }

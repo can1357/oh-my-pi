@@ -2790,6 +2790,30 @@
 				"artifactElidedBytes": {
 					"type": "integer"
 				},
+				"elidedBytes": {
+					"type": "integer",
+					"description": "Bytes dropped from the middle of `output`, which keeps the head and tail."
+				},
+				"elidedLines": {
+					"type": "integer",
+					"description": "Lines dropped from the middle of `output`."
+				},
+				"columnDroppedBytes": {
+					"type": "integer",
+					"description": "Bytes the per-line column cap cut from `output`, across all lines."
+				},
+				"columnTruncatedLines": {
+					"type": "integer",
+					"description": "Lines of `output` the per-line column cap cut; the artifact holds them whole."
+				},
+				"columnTruncatedRange": {
+					"$ref": "#/$defs/LineRange",
+					"description": "First and last lines the column cap cut, numbered as in the artifact; absent when the numbering cannot match it."
+				},
+				"columnMax": {
+					"type": "integer",
+					"description": "The per-line column cap in UTF-8 bytes, set when it cut a line."
+				},
 				"artifactError": {
 					"type": "object",
 					"properties": {},
@@ -2808,6 +2832,12 @@
 					"items": {
 						"$ref": "#/$defs/ImageContent"
 					}
+				},
+				"trace": {
+					"type": "object",
+					"properties": {},
+					"additionalProperties": {},
+					"description": "The embedded shell's final `ShellTrace` of the run; only when the caller asked for one."
 				}
 			},
 			"required": [
@@ -2818,6 +2848,21 @@
 				"totalBytes",
 				"outputLines",
 				"outputBytes"
+			]
+		},
+		"LineRange": {
+			"type": "object",
+			"properties": {
+				"first": {
+					"type": "integer"
+				},
+				"last": {
+					"type": "integer"
+				}
+			},
+			"required": [
+				"first",
+				"last"
 			]
 		},
 		"FastModeResult": {

@@ -48,6 +48,8 @@ import {
 	type IsolationContext,
 	makeIsolationCommitMessage,
 	mergeIsolatedChanges,
+	nativeWorkspace,
+	type OpenWorkspace,
 	persistNestedPatches,
 	prepareIsolationContext,
 	renderIsolationSummary,
@@ -55,6 +57,7 @@ import {
 } from "./isolation-runner";
 import { generateTaskName, sanitizeAgentId } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
+import { ovnfsWorkspace } from "./ovnfs";
 import { resolveSpawnPolicy } from "./spawn-policy";
 import { isBundledSeance, prepareSeance, type PreparedSeanceSession } from "./seance";
 import { SEANCE_AGENT_NAME } from "./seance-policy";
@@ -82,6 +85,7 @@ import {
 	cfgTaskIsolationMerge,
 	cfgTaskMaxRecursionDepth,
 	cfgTaskPerCallModel,
+	ovnfsCommand,
 	perCallModelEnabled,
 } from "./settings";
 import {
@@ -820,6 +824,7 @@ function buildExecutorOptions(
 		asyncJobManager: session.asyncJobManager,
 		inheritedSessionAgents: session.getSessionAgents?.(),
 		mcpManager: enableMCP ? (session.mcpManager ?? MCPManager.instance()) : undefined,
+		mcpToolScope: session.mcpToolScope,
 		enableMCP,
 		customTools: request.customTools,
 		workPoolYieldItems: request.workPoolYieldItems,
@@ -834,7 +839,10 @@ function buildExecutorOptions(
 		// Root policy and module paths have separate jobs: the live policy drives
 		// recursive sub-discovery; preloaded paths only avoid re-scanning/reusing
 		// parent-bound extension instances while constructing the child.
-		extensionRoots: session.effectiveExtensionRoots?.bind(session),
+		// Forward the provider itself, never bound to `session`: the child's revive
+		// capture outlives its parking, so a bound copy would keep this parent's
+		// whole session graph alive for as long as the child can be revived.
+		extensionRoots: session.effectiveExtensionRoots,
 		preloadedExtensionPaths: restrictToolNames ? [] : session.extensionPaths,
 		preloadedPreparedExtensions: session.preparedExtensions,
 		preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
@@ -865,6 +873,13 @@ async function loadPlanReference(
 		request.session.getPlanReferencePath?.() ?? "local://PLAN.md",
 		sessionLocalProtocolOptions(request.session),
 	);
+}
+
+/** Isolated runs work in ovnfs checkouts when `isolation.backend` is auto and ovnfs is found, else in native clones. */
+function openIsolatedWorkspace(settings: Settings): OpenWorkspace {
+	const backend = cfgIsolationBackend.get(settings);
+	const ovnfs = backend === "auto" ? ovnfsCommand(settings) : undefined;
+	return ovnfs ? ovnfsWorkspace(ovnfs) : nativeWorkspace(parseIsolationBackend(backend));
 }
 
 function buildFailureResult(
@@ -1056,7 +1071,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				result = await runIsolatedSubprocess({
 					baseOptions,
 					context: isolationContext,
-					preferredBackend: parseIsolationBackend(cfgIsolationBackend.get(request.session.settings)),
+					openWorkspace: openIsolatedWorkspace(request.session.settings),
 					agentId: id,
 					mergeMode: policy.mergeMode,
 					artifactsDir: lease.artifactsDir,

@@ -13,12 +13,12 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { type GeneratedProvider, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { type Api, type Model, modelKind } from "@oh-my-pi/pi-catalog/types";
 import {
+	expandTilde,
 	getAgentDbPath,
 	getAgentDir,
 	getLastChangelogVersionPath,
@@ -418,10 +418,6 @@ export function dropSettingsGroupShadows(data: RawSettings, sourcePath: string, 
 		result[key] = dropSettingsGroupShadows(value as RawSettings, sourcePath, path);
 	}
 	return result;
-}
-
-function expandTilde(p: string): string {
-	return p === "~" ? os.homedir() : p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p;
 }
 
 function normalizePathPrefix(prefix: string): string {
@@ -1095,6 +1091,17 @@ export class Settings {
 	}
 
 	/**
+	 * Whether a runtime override — a CLI flag, a session-only write, an SDK override — sets `setting`
+	 * here or on an overlay parent. Such an override outranks the setting's environment variable; a
+	 * soft-pinned protocol default does not.
+	 */
+	hasRuntimeOverride(setting: AnySetting): boolean {
+		const own = getByPath(this.#overrides, setting.segments);
+		if (own !== undefined && own !== null) return !this.#softPins.has(setting);
+		return this.#parent?.hasRuntimeOverride(setting) ?? false;
+	}
+
+	/**
 	 * Registry plumbing behind `Setting.set` / `Setting.override`: writes `value` for `setting` to the
 	 * global layer (persisted in the background; releases a soft pin, see {@link pinDefaultValue}) or
 	 * the runtime-override layer, then notifies change listeners (process-wide effects apply
@@ -1317,7 +1324,8 @@ export class Settings {
 	 * Apply on-disk edits live: watch the directories holding config.yml, the
 	 * project settings files, and `--config` overlays, and run a debounced
 	 * keep-last-good reload (a file that fails to parse or validate keeps its
-	 * layer's last good values). Arming a watch also schedules one reload, so
+	 * layer's last good values; a single value this build cannot read keeps its
+	 * last good value). Arming a watch also schedules one reload, so
 	 * edits that landed before it went live are not lost. Only the persisting
 	 * process-global instance watches; other instances ignore the call. Stopped
 	 * by {@link stopWatching} / {@link cancelPendingSaves}.
@@ -1652,6 +1660,7 @@ export class Settings {
 			let layers = this.#ownLayers();
 			const adopted: LayerRefresh[] = [];
 			for (const refresh of refreshed) {
+				if (keepLastGood) this.#keepReadableValues(refresh.settings, layers[refresh.layer], refresh.source);
 				const trial: OwnLayers = { ...layers, [refresh.layer]: refresh.settings };
 				if (keepLastGood && !this.#acceptsLayers(trial, refresh.source)) continue;
 				layers = trial;
@@ -1670,6 +1679,30 @@ export class Settings {
 			this.#rebuildMerged();
 			this.#fireChangesSince(previous);
 			return;
+		}
+	}
+
+	/**
+	 * Keeps, in a re-read layer `fresh`, the value the `live` layer holds for each setting whose new
+	 * on-disk value this build cannot read (an enum value a newer omp added, a wrong type) while its
+	 * old value was readable. Reading an unreadable value falls back to the default, so a config
+	 * written for another version would otherwise move a running session to a value neither config
+	 * chose — and rebuild every tool description and prompt derived from it, losing the session's
+	 * prompt cache. The file keeps the edit; instances loading it fresh read it as before.
+	 */
+	#keepReadableValues(fresh: RawSettings, live: RawSettings, source: string): void {
+		for (const setting of allSettings()) {
+			const next = getByPath(fresh, setting.segments);
+			if (next === undefined || next === null || setting.accepts(next)) continue;
+			const kept = getByPath(live, setting.segments);
+			if (kept === undefined || kept === null || !setting.accepts(kept)) continue;
+			setByPath(fresh, setting.segments, structuredClone(kept));
+			logger.warn("Settings: keeping last good value; on-disk value is invalid", {
+				path: source,
+				setting: setting.id,
+				value: next,
+				kept,
+			});
 		}
 	}
 
@@ -4032,6 +4065,7 @@ export class Settings {
 	 */
 	#adoptSavedGlobal(saved: RawSettings, source: string): void {
 		this.#applyPendingGlobalWrites(saved);
+		this.#keepReadableValues(saved, this.#global, source);
 		if (!this.#acceptsLayers({ ...this.#ownLayers(), global: saved }, source)) return;
 		const previous = this.#snapshot();
 		this.#global = saved;

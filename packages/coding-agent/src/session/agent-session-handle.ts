@@ -133,8 +133,9 @@ export interface AgentSessionHandle {
 	getSessionAgents(): AgentDefinition[];
 	/** Whether a message from `from` still waits for a turn of its own. */
 	hasQueuedIrcFrom(from: string): boolean;
-	/** Surface and consume pending IRC records before automatic injection. */
-	drainPendingIrcInboxMessages(agentId: string, opts?: { from?: string; limit?: number }): IrcMessage[];
+	/** Surface and consume every pending IRC record before automatic injection; with `ifAny`,
+	 *  none unless at least one of them satisfies it. */
+	drainPendingIrcInboxMessages(agentId: string, opts?: { ifAny?: (msg: IrcMessage) => boolean }): IrcMessage[];
 	/** Emit a display-only IRC relay observation on this session's UI. */
 	emitIrcRelayObservation(record: CustomMessage): void;
 	/** Deliver an IRC message into this recipient session. */
@@ -150,6 +151,7 @@ export interface AgentSessionHandle {
 		goalReason?: "interrupted" | "internal";
 		reason?: string;
 		preserveCompaction?: boolean;
+		deliverQueuedMessages?: boolean;
 	}): Promise<void>;
 	/** Replace the pooled-turn yield contract. */
 	setWorkPoolYieldItems(items: readonly WorkPoolYieldItem[]): Promise<void>;
@@ -167,6 +169,8 @@ export interface AgentViewSessionManager extends AgentSessionManagerHandle {
 	getBranch(fromId?: string): SessionEntry[];
 	/** Id of the current leaf entry. */
 	getLeafId(): string | null;
+	/** The newest entry that moves the conversation, when the active branch ends at it (`conversationTip`). */
+	getConversationTip(): SessionEntry | undefined;
 	/** Artifacts directory of the consulted seance source, when this is a seance session. */
 	getSeanceSourceArtifactsDir(): string | null;
 	/** Append a custom entry (a worker-homed session appends on its home thread). */
@@ -361,6 +365,8 @@ export interface AgentViewSession extends AgentSessionHandle {
 	getTodoPhases(): TodoPhase[];
 	/** Replace the todo phases of the session. */
 	setTodoPhases(phases: TodoPhase[]): void;
+	/** Replace the list from outside the `todo` tool: update the cache and record a `user_todo_edit` entry so reloads keep it. */
+	commitTodoPhases(phases: TodoPhase[]): void;
 	/** Whether the user approved approval scope `key` for the rest of this session, so its prompt is skipped. */
 	hasSessionApproval(key: string): boolean;
 	/** Remembered `always-ask-cached` grants this session's tool calls are checked against. */

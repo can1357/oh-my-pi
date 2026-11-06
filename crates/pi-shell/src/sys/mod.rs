@@ -26,28 +26,46 @@
 
 pub mod cmdline;
 mod fs;
+mod fs_ops;
 #[cfg(any(windows, test))]
 mod job;
+pub mod langinfo;
 mod lifecycle;
 mod park;
 pub mod pathext;
+pub mod pcre;
 #[cfg(unix)]
 pub mod proc;
 mod pump;
 #[cfg(unix)]
 mod ready;
+pub mod regex;
 mod relay;
 pub mod rlimit;
 pub mod shebang;
+#[cfg(unix)]
+pub mod socket;
 mod spawn;
+pub mod tty;
+pub mod uname;
+pub mod utmp;
 
 pub use crate::sys::{
 	fs::{StdFile, StdFs, std_stream},
 	park::Parker,
 	relay::{ByteDecoder, OutputDecoding},
-	spawn::{Exits, Leftover, NativeSpawner, Sessions, SpawnConfig, UnsupportedFd},
+	spawn::{
+		Exits, Leftover, NativeSpawner, Sessions, SpawnConfig, UnsupportedFd, dispositions_changed,
+	},
 };
 pub(crate) use crate::sys::{pump::End, relay::Relays};
+
+/// The C library's `PATH_MAX`, which zsh sizes path buffers by. Windows has
+/// no such limit for the engine's paths, so it takes Linux's.
+#[cfg(unix)]
+pub const PATH_MAX: usize = libc::PATH_MAX as usize;
+#[cfg(not(unix))]
+pub const PATH_MAX: usize = 4096;
 
 #[cfg(test)]
 mod suites;

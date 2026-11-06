@@ -63,7 +63,6 @@ import { buildAvailableSlashCommands } from "../../slash-commands/available-comm
 import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
 import { cfgSttEnabled } from "../../stt/settings";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
-import { USER_TODO_EDIT_CUSTOM_TYPE } from "../../tools/todo";
 import type { EventBus } from "../../utils/event-bus";
 import { selectRpcEntries } from "./rpc-compat";
 import { calculateTokensPerSecond } from "../../utils/token-rate";
@@ -1573,6 +1572,10 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			// No transcript is drawn in RPC mode
 		}
 
+		refreshTranscript(): void {
+			// No transcript is drawn in RPC mode
+		}
+
 		getLinkClicksAvailable(): boolean {
 			return false;
 		}
@@ -2358,9 +2361,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			}
 
 			case "set_todos": {
-				session.setTodoPhases(command.phases);
+				session.commitTodoPhases(command.phases);
 				const phases = session.getTodoPhases();
-				session.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
 				return success(id, "set_todos", { todoPhases: phases });
 			}
 

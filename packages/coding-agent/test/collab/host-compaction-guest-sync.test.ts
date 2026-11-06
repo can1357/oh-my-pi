@@ -104,6 +104,9 @@ function makeGuestHarness(model: Model, modelRegistry: ModelRegistry): GuestHarn
 		chatContainer: { clear: () => {}, disposeChildren: () => {} },
 		resetObserverRegistry: () => {},
 		syncRunningSubagentBadge: () => {},
+		setCollabGuest: (guest: InteractiveModeContext["collabGuest"]) => {
+			Object.assign(ctx, { collabGuest: guest });
+		},
 		renderInitialMessages: () => Promise.resolve(),
 		reloadTodos: () => Promise.resolve(),
 		showStatus: () => {},

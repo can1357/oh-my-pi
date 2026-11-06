@@ -171,7 +171,7 @@ impl Fs for VfsFs {
 		let rt = self.rt.clone();
 		self.route(
 			path,
-			|| match StdFs.open(path, flags, mode) {
+			|| match StdFs::default().open(path, flags, mode) {
 				FsPoll::Ready(Err(err)) => FsPoll::Ready(Err(name_the_limit(err))),
 				opened => opened,
 			},
@@ -188,7 +188,7 @@ impl Fs for VfsFs {
 	fn stat(&mut self, path: &BStr, follow: bool) -> FsPoll<Stat> {
 		self.route(
 			path,
-			|| StdFs.stat(path, follow),
+			|| StdFs::default().stat(path, follow),
 			move |fs, path| async move {
 				let meta = if follow {
 					fs.metadata(&path).await?
@@ -203,7 +203,7 @@ impl Fs for VfsFs {
 	fn access(&mut self, path: &BStr, mode: Access) -> FsPoll<()> {
 		self.route(
 			path,
-			|| StdFs.access(path, mode),
+			|| StdFs::default().access(path, mode),
 			move |fs, path| async move {
 				fs.access(
 					&path,
@@ -219,7 +219,7 @@ impl Fs for VfsFs {
 	fn read_dir(&mut self, path: &BStr) -> FsPoll<Box<dyn DirIter>> {
 		self.route(
 			path,
-			|| StdFs.read_dir(path),
+			|| StdFs::default().read_dir(path),
 			|fs, path| async move {
 				// A provider listing is in memory once `read_dir` answers; only
 				// the types it listed are used, since asking for the others
@@ -242,7 +242,7 @@ impl Fs for VfsFs {
 	fn readlink(&mut self, path: &BStr) -> FsPoll<BString> {
 		self.route(
 			path,
-			|| StdFs.readlink(path),
+			|| StdFs::default().readlink(path),
 			|fs, path| async move { Ok(os_bytes(fs.read_link(&path).await?.as_os_str())) },
 		)
 	}
@@ -250,19 +250,19 @@ impl Fs for VfsFs {
 	fn realpath(&mut self, path: &BStr) -> FsPoll<BString> {
 		self.route(
 			path,
-			|| StdFs.realpath(path),
+			|| StdFs::default().realpath(path),
 			|fs, path| async move { Ok(os_bytes(fs.canonicalize(&path).await?.as_os_str())) },
 		)
 	}
 
 	fn mkfifo_or_temp(&mut self, purpose: TempPurpose) -> FsPoll<TempNode> {
-		StdFs.mkfifo_or_temp(purpose)
+		StdFs::default().mkfifo_or_temp(purpose)
 	}
 
 	fn chdir_check(&mut self, path: &BStr) -> FsPoll<()> {
 		self.route(
 			path,
-			|| StdFs.chdir_check(path),
+			|| StdFs::default().chdir_check(path),
 			|fs, path| async move {
 				if !fs.metadata(&path).await?.is_dir() {
 					return Err(io::ErrorKind::NotADirectory.into());
@@ -271,6 +271,190 @@ impl Fs for VfsFs {
 			},
 		)
 	}
+
+	fn unlink(&mut self, path: &BStr) -> FsPoll<()> {
+		self.route(
+			path,
+			|| StdFs::default().unlink(path),
+			|fs, path| async move { fs.remove_file(&path).await },
+		)
+	}
+
+	fn rename(&mut self, from: &BStr, to: &BStr) -> FsPoll<()> {
+		let to_host = match host_path(to) {
+			Ok(t) => t.to_path_buf(),
+			Err(err) => return FsPoll::Ready(Err(err)),
+		};
+		self.route(
+			from,
+			|| StdFs::default().rename(from, to),
+			|fs, from| async move { fs.rename(&from, &to_host).await },
+		)
+	}
+
+	fn symlink(&mut self, target: &BStr, path: &BStr) -> FsPoll<()> {
+		let target_host = match host_path(target) {
+			Ok(t) => t.to_path_buf(),
+			Err(err) => return FsPoll::Ready(Err(err)),
+		};
+		self.route(
+			path,
+			|| StdFs::default().symlink(target, path),
+			|fs, path| async move { fs.symlink(&target_host, &path).await },
+		)
+	}
+
+	fn link(&mut self, from: &BStr, to: &BStr) -> FsPoll<()> {
+		let to_host = match host_path(to) {
+			Ok(t) => t.to_path_buf(),
+			Err(err) => return FsPoll::Ready(Err(err)),
+		};
+		self.route(
+			from,
+			|| StdFs::default().link(from, to),
+			|fs, from| async move { fs.hard_link(&from, &to_host).await },
+		)
+	}
+
+	fn lock(&mut self, path: &BStr) -> FsPoll<Box<dyn File>> {
+		// Record locks are an OS-descriptor feature: only native files have them.
+		self.route(
+			path,
+			|| StdFs::default().lock(path),
+			|_, _| async move { Err(io::ErrorKind::Unsupported.into()) },
+		)
+	}
+
+	fn mkdir(&mut self, path: &BStr, mode: u32) -> FsPoll<()> {
+		self.route(
+			path,
+			|| StdFs::default().mkdir(path, mode),
+			move |fs, path| async move {
+				fs.create_dir_with(&path, &pi_vfs::DirOptions::new().mode(mode))
+					.await
+			},
+		)
+	}
+
+	fn rmdir(&mut self, path: &BStr) -> FsPoll<()> {
+		self.route(
+			path,
+			|| StdFs::default().rmdir(path),
+			|fs, path| async move { fs.remove_dir(&path).await },
+		)
+	}
+
+	fn chmod(&mut self, path: &BStr, mode: u32) -> FsPoll<()> {
+		self.route(
+			path,
+			|| StdFs::default().chmod(path, mode),
+			move |fs, path| async move {
+				fs.set_permissions(&path, pi_vfs::Permissions::from_mode(mode & 0o7777))
+					.await
+			},
+		)
+	}
+
+	fn chown(
+		&mut self,
+		path: &BStr,
+		uid: Option<u32>,
+		gid: Option<u32>,
+		follow: bool,
+	) -> FsPoll<()> {
+		self.route(
+			path,
+			|| StdFs::default().chown(path, uid, gid, follow),
+			move |fs, path| async move { fs.chown(&path, uid, gid, follow).await },
+		)
+	}
+
+	fn sync(&mut self) -> FsPoll<()> {
+		// Providers persist each write themselves: only host buffers wait.
+		StdFs::default().sync()
+	}
+
+	fn getxattr(&mut self, path: &BStr, name: &BStr, follow: bool) -> FsPoll<BString> {
+		let name_os = match xattr_name(name) {
+			Ok(n) => n,
+			Err(err) => return FsPoll::Ready(Err(err)),
+		};
+		self.route(
+			path,
+			|| StdFs::default().getxattr(path, name, follow),
+			move |fs, path| async move {
+				match fs.get_xattr(&path, &name_os, follow).await? {
+					Some(value) => Ok(BString::from(value)),
+					None => Err(no_such_attribute()),
+				}
+			},
+		)
+	}
+
+	fn setxattr(&mut self, path: &BStr, name: &BStr, value: &[u8], follow: bool) -> FsPoll<()> {
+		let name_os = match xattr_name(name) {
+			Ok(n) => n,
+			Err(err) => return FsPoll::Ready(Err(err)),
+		};
+		let owned = value.to_vec();
+		self.route(
+			path,
+			|| StdFs::default().setxattr(path, name, value, follow),
+			move |fs, path| async move { fs.set_xattr(&path, &name_os, &owned, follow).await },
+		)
+	}
+
+	fn removexattr(&mut self, path: &BStr, name: &BStr, follow: bool) -> FsPoll<()> {
+		let name_os = match xattr_name(name) {
+			Ok(n) => n,
+			Err(err) => return FsPoll::Ready(Err(err)),
+		};
+		self.route(
+			path,
+			|| StdFs::default().removexattr(path, name, follow),
+			move |fs, path| async move { fs.remove_xattr(&path, &name_os, follow).await },
+		)
+	}
+
+	fn listxattr(&mut self, path: &BStr, follow: bool) -> FsPoll<Vec<BString>> {
+		self.route(
+			path,
+			|| StdFs::default().listxattr(path, follow),
+			move |fs, path| async move {
+				Ok(fs
+					.list_xattr(&path, follow)
+					.await?
+					.iter()
+					.map(|n| os_bytes(n))
+					.collect())
+			},
+		)
+	}
+
+	fn user_db(
+		&mut self,
+		query: &crate::bash::fs::PwQuery,
+	) -> FsPoll<Vec<crate::bash::fs::PwEntry>> {
+		// The account database is the host's whatever filesystem is mounted.
+		StdFs::default().user_db(query)
+	}
+}
+
+/// An extended attribute name as the provider API takes it.
+fn xattr_name(name: &BStr) -> io::Result<std::ffi::OsString> {
+	<[u8] as bstr::ByteSlice>::to_os_str(name)
+		.map(std::ffi::OsStr::to_os_string)
+		.map_err(|_| io::ErrorKind::InvalidInput.into())
+}
+
+/// `ENOATTR`: a provider reported no attribute of that name.
+fn no_such_attribute() -> io::Error {
+	#[cfg(any(target_os = "macos", target_os = "ios"))]
+	return io::Error::from_raw_os_error(libc::ENOATTR);
+	#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
+	return io::Error::from_raw_os_error(libc::ENODATA);
+	#[cfg(not(unix))]
+	return io::ErrorKind::NotFound.into();
 }
 
 /// `err`, with the open-file limit named when it is `EMFILE` (see the module
@@ -433,6 +617,8 @@ fn stat_of(meta: &pi_vfs::Metadata, path: &Path) -> Stat {
 			.ctime()
 			.map_or(mtime_ns, |secs| time_ns(secs, meta.ctime_nsec())),
 		blocks: meta.blocks().unwrap_or_else(|| size.div_ceil(512)),
+		rdev: meta.rdev().unwrap_or(0),
+		blksize: meta.blksize().unwrap_or(4096),
 	}
 }
 

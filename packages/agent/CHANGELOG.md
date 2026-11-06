@@ -2,9 +2,12 @@
 
 ## [Unreleased]
 
+## [18.17.0] - 2026-11-06
+
 ### Added
 
-- Added `Agent.queuedMessageGate`, a synchronous `QueuedMessageGate` consulted before every queued-message delivery batch (it can drop candidates) and told when claimed messages go back undelivered
+- Added `Agent.queuedMessageGate` to filter queued messages before delivery and observe claimed messages returned undelivered.
+- Added `wireToolsFingerprint()`, returning a hash of the tool specs sent with a request.
 
 ## [18.16.0] - 2026-11-02
 

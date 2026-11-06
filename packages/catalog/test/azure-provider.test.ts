@@ -1,14 +1,20 @@
 import { describe, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import {
 	DEFAULT_MODEL_PER_PROVIDER,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
 	mapModelsDevToModels,
+	modelsDevCatalogFallback,
 	PROVIDER_DESCRIPTORS,
 } from "@oh-my-pi/pi-catalog/provider-models";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import { removeWithRetries } from "../../utils/src/temp";
 
 // A stencil.so "azure" payload: two OpenAI-family models (one reasoning), a
 // non-tool-capable instruct model, and a Foundry-hosted third party served via
@@ -49,6 +55,42 @@ describe("azure catalog provider", () => {
 			expect(model.api).toBe("azure-openai-responses");
 			// Empty baseUrl: the deployment host is per-resource, resolved at runtime.
 			expect(model.baseUrl).toBe("");
+		}
+	});
+
+	test("discovers and caches Azure models with runtime-resolved endpoints", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-azure-discovery-"));
+		try {
+			const fallback = modelsDevCatalogFallback("azure");
+			if (!fallback) throw new Error("Azure did not configure a shared catalog fallback");
+			const options = {
+				providerId: "azure",
+				staticModels: [],
+				cacheDbPath: path.join(tempDir, "models.db"),
+				modelsDev: {
+					...fallback,
+					fetch: async () => ({
+						azure: {
+							models: {
+								"gpt-6.1-terra": {
+									name: "GPT-6.1 Terra",
+									tool_call: true,
+									reasoning: true,
+									limit: { context: 1_050_000, output: 128_000 },
+								},
+							},
+						},
+					}),
+				},
+			};
+			const online = await resolveProviderModels(options, "online");
+			expect(online.models.map(model => `${model.provider}/${model.id}`)).toEqual(["azure/gpt-6.1-terra"]);
+			expect(online.models[0]?.baseUrl).toBe("");
+
+			const cached = await resolveProviderModels(options, "offline");
+			expect(cached.models.map(model => `${model.provider}/${model.id}`)).toEqual(["azure/gpt-6.1-terra"]);
+		} finally {
+			await removeWithRetries(tempDir);
 		}
 	});
 

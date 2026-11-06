@@ -9,15 +9,19 @@ import {
 	type MinimizerOptions,
 	type PipeStreams,
 	PtySession,
+	RunTrace,
 	Shell,
 	type ShellFilesystem,
 	type ShellRunResult,
 } from "@oh-my-pi/pi-natives";
+import { isShellTrace, type ShellTrace } from "@oh-my-pi/pi-wire";
+import { logger } from "@oh-my-pi/pi-utils";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings } from "../config/settings";
 import type { MinimizedMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { type OutputArtifactError, OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { attachShellTrace } from "@oh-my-pi/pi-tui/tools/shell-viz";
 import {
 	resolveOutputMaxColumns,
 	resolveOutputSinkArtifactMaxBytes,
@@ -63,6 +67,8 @@ export interface BashExecutorOptions {
 	 * enforced by the embedded shell's `git` builtin.
 	 */
 	gitGuard?: boolean;
+	/** ovnfs command for the git guard's separate-checkout guidance. */
+	ovnfs?: string;
 	/**
 	 * Filesystem for `scheme://` paths in this run of the embedded shell (a URL
 	 * `cwd` included). External shells and processes never see it.
@@ -73,6 +79,12 @@ export interface BashExecutorOptions {
 	 * embedded shell (`proc://<id>/streams`). The user-shell paths ignore it.
 	 */
 	streams?: PipeStreams;
+	/**
+	 * Receives the embedded shell's live trace of the command (pi-shell's
+	 * `RunTrace` snapshot) every {@link TRACE_POLL_MS} while it changed, and
+	 * once more after the run settles. The PTY path never calls it.
+	 */
+	onTrace?: (trace: ShellTrace) => void;
 	/**
 	 * Invoked once the embedded shell starts the command, with a probe of the
 	 * live pids it spawned (empty once the run ends). Not called on the
@@ -125,21 +137,14 @@ export interface BashPtyOptions {
 	onStdin?: (write: (data: string) => void) => void;
 }
 
-export interface BashResult {
-	output: string;
+/** A command's captured output (the sink's summary, column-cap and middle-elision fields included) and how it ended. */
+export interface BashResult extends OutputSummary {
 	exitCode: number | undefined;
 	cancelled: boolean;
 	/** True when the command was killed by its timeout deadline (not a user abort). */
 	timedOut?: boolean;
-	truncated: boolean;
-	totalLines: number;
-	totalBytes: number;
-	outputLines: number;
-	outputBytes: number;
-	artifactId?: string;
-	/** Bytes the artifact cap dropped from the saved file's middle (the artifact is a head/tail sample). */
-	artifactElidedBytes?: number;
-	artifactError?: OutputArtifactError;
+	/** The final trace snapshot of an embedded-shell run started with `onTrace`. */
+	trace?: ShellTrace;
 	/** The native minimizer's rewrite, set when its output replaced the raw stream. */
 	minimized?: MinimizedMeta;
 	workingDir?: string;
@@ -154,6 +159,45 @@ const SAFE_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /** A `scheme://` working directory: it exists only in the embedded shell's injected filesystem. */
 const URL_CWD_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
+
+/** Cadence of the `onTrace` poll while an embedded run is in flight. */
+const TRACE_POLL_MS = 80;
+
+/**
+ * Polls `trace` every {@link TRACE_POLL_MS} while the run is in flight and
+ * forwards each changed snapshot; `stop()` takes the final one.
+ *
+ * An invalid snapshot is logged once and skipped: the poll runs from a timer,
+ * where a throw would escape as an uncaught exception and end the session,
+ * and the trace is only a visualization of the run.
+ */
+function pollRunTrace(trace: RunTrace, onTrace: (trace: ShellTrace) => void): { stop: () => ShellTrace | undefined } {
+	let last = -1;
+	let latest: ShellTrace | undefined;
+	let warned = false;
+	const poll = () => {
+		const version = trace.version();
+		if (version === last) return;
+		last = version;
+		const snapshot: unknown = JSON.parse(trace.snapshot());
+		if (!isShellTrace(snapshot)) {
+			if (!warned) logger.warn("Native shell returned an invalid execution trace", { version });
+			warned = true;
+			return;
+		}
+		latest = snapshot;
+		attachShellTrace(latest, trace);
+		onTrace(latest);
+	};
+	const timer = setInterval(poll, TRACE_POLL_MS);
+	return {
+		stop: () => {
+			clearInterval(timer);
+			poll();
+			return latest;
+		},
+	};
+}
 
 export interface DirenvPreflightOptions {
 	/** Caller-supplied env overlay; these values win over direnv-provided ones. */
@@ -689,7 +733,9 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 
 	// The embedded shell reads its builtin switches from the session env; a
 	// different env also keys a separate persistent session.
-	const sessionEnv = options?.gitGuard ? { ...shellEnv, PI_GIT_GUARD: "1" } : shellEnv;
+	const sessionEnv = options?.gitGuard
+		? { ...shellEnv, PI_GIT_GUARD: "1", PI_GIT_GUARD_OVNFS: options.ovnfs ?? "" }
+		: shellEnv;
 	const shellOptions = {
 		sessionEnv,
 		snapshotPath: snapshotPath ?? undefined,
@@ -762,6 +808,16 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	}
 
 	let resetSession = false;
+	const runTrace = options?.onTrace ? new RunTrace(finalCommand) : undefined;
+	const tracePoll = runTrace && options?.onTrace ? pollRunTrace(runTrace, options.onTrace) : undefined;
+	// The last snapshot once the run settled (any outcome); `stop()` is idempotent past the first call.
+	let finalTrace: ShellTrace | undefined;
+	const settleTrace = (): { trace: ShellTrace } | Record<string, never> => {
+		if (tracePoll) {
+			finalTrace ??= tracePoll.stop();
+		}
+		return finalTrace ? { trace: finalTrace } : {};
+	};
 
 	try {
 		const runPromise = executionShell.run(
@@ -773,6 +829,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				signal: runAbortController.signal,
 				filesystem: options?.filesystem,
 				streams: options?.streams,
+				trace: runTrace,
 			},
 			(err, chunk) => {
 				if (!err) {
@@ -814,6 +871,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				exitCode: undefined,
 				cancelled: true,
 				...(winner.kind === "timeout" ? { timedOut: true } : {}),
+				...settleTrace(),
 				...(await dump(notice)),
 			};
 		}
@@ -835,6 +893,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				exitCode: undefined,
 				cancelled: true,
 				timedOut: true,
+				...settleTrace(),
 				...(await dump(annotation)),
 			};
 		}
@@ -848,6 +907,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			return {
 				exitCode: undefined,
 				cancelled: true,
+				...settleTrace(),
 				...(await dump("Command cancelled")),
 			};
 		}
@@ -889,12 +949,14 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			cancelled: false,
 			workingDir: winner.result.workingDir,
 			...(minimizedMeta ? { minimized: minimizedMeta } : {}),
+			...settleTrace(),
 			...(await dump()),
 		};
 	} catch (err) {
 		resetSession = true;
 		throw err;
 	} finally {
+		settleTrace();
 		await sink.dispose();
 		if (timeoutTimer) {
 			clearTimeout(timeoutTimer);

@@ -1,11 +1,13 @@
 //! Source positions: byte spans, parser resume points and AST node ids.
 
+use serde::{Deserialize, Serialize};
+
 /// Half-open byte range `[lo, hi)` into the source the parser was given.
 ///
 /// The engine re-bases spans to the start of each compiled unit before they
 /// appear in events, so a client re-parsing the unit bytes sees the same
 /// offsets.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Span {
 	/// First byte.
 	pub lo: u32,
@@ -39,7 +41,9 @@ impl Span {
 /// re-parsing the bytes announced in a `UnitCompiled` event gets identical ids.
 /// Named `NodeId` inside this crate only; the engine re-exports it as
 /// `AstNodeId` so it never collides with the mesh node id of other parts.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+	Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
 pub struct NodeId(pub u32);
 
 /// Parser resume point: byte offset plus the 1-based line at that offset.

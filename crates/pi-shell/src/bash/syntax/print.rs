@@ -15,7 +15,7 @@
 //! unmetafied text; zsh-only constructs (`repeat`, `always`, anonymous
 //! functions, `&|`, `>>|`) print in zsh syntax.
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::vec::Vec;
 
 use crate::bash::syntax::{
 	ast::*,
@@ -44,6 +44,8 @@ pub fn print(cmd: &Command, style: PrintStyle) -> Vec<u8> {
 	match style {
 		PrintStyle::DeclareF => {
 			let mut p = Bp::new(false);
+			let source_len = (cmd.span.hi - cmd.span.lo) as usize;
+			p.out.reserve(source_len * 2);
 			if let CommandKind::FuncDef(f) = &cmd.kind {
 				p.named_function(f);
 			} else {
@@ -160,120 +162,108 @@ enum Conn {
 	Nl,
 }
 
-/// bash's `COMMAND` tree, borrowing the AST.
+/// A borrowed view of bash's connection tree; child views are made on the
+/// stack.
+#[derive(Clone, Copy)]
 enum Node<'a> {
 	Cmd {
 		cmd: &'a Command,
 		fl:  Fl,
 	},
-	/// `elif` arms printed as a nested `if`.
 	IfTail {
 		arms:      &'a [IfArm],
 		else_body: Option<&'a List>,
 	},
-	Conn {
-		first:  Box<Self>,
-		second: Option<Box<Self>>,
-		conn:   Conn,
-		fl:     Fl,
+	List {
+		items: &'a [ListItem],
+		split: usize,
+		nl:    bool,
+		tail:  bool,
+	},
+	/// A left-leaning asynchronous chain after its last non-asynchronous
+	/// connection.
+	Async {
+		items: &'a [ListItem],
+		base:  usize,
+		nl:    bool,
+		tail:  bool,
+	},
+	AndOr {
+		ao:  &'a AndOr,
+		end: usize,
+	},
+	Pipe {
+		pipeline: &'a Pipeline,
+		start:    usize,
+		fl:       Fl,
 	},
 }
 
 impl Node<'_> {
 	const fn flags(&self) -> Fl {
 		match self {
-			Self::Cmd { fl, .. } | Self::Conn { fl, .. } => *fl,
-			Self::IfTail { .. } => Fl { time: false, posix: false, invert: false, stderr: false },
+			Self::Cmd { fl, .. } | Self::Pipe { fl, .. } => *fl,
+			_ => Fl { time: false, posix: false, invert: false, stderr: false },
 		}
 	}
 }
 
-/// A list as bash connects it; `nl`: newline separators stay newlines
-/// (lists parsed inside a command substitution).
+/// A list as bash connects it; newlines remain connections inside command
+/// substitutions.
 fn list_node(list: &List, nl: bool) -> Option<Node<'_>> {
-	let mut cur: Option<Node<'_>> = None;
-	let mut prev = Sep::None;
-	for item in &list.items {
-		let node = and_or_node(&item.and_or);
-		cur = Some(match cur {
-			None => node,
-			Some(c) => match prev {
-				Sep::Amp => connect_async(c, Some(node), Conn::Amp),
-				Sep::Disown => connect_async(c, Some(node), Conn::Disown),
-				Sep::Newline if nl => conn(c, Some(node), Conn::Nl),
-				_ => conn(c, Some(node), Conn::Semi),
-			},
-		});
-		prev = item.sep;
-	}
-	match prev {
-		Sep::Amp => cur = cur.map(|c| connect_async(c, None, Conn::Amp)),
-		Sep::Disown => cur = cur.map(|c| connect_async(c, None, Conn::Disown)),
-		_ => {},
-	}
-	cur
+	list_items(&list.items, nl, true)
 }
 
-fn conn<'a>(first: Node<'a>, second: Option<Node<'a>>, c: Conn) -> Node<'a> {
-	Node::Conn {
-		first:  Box::new(first),
-		second: second.map(Box::new),
-		conn:   c,
-		fl:     Fl::default(),
+fn list_items(items: &[ListItem], nl: bool, tail: bool) -> Option<Node<'_>> {
+	let last = items.last()?;
+	let tail = tail && matches!(last.sep, Sep::Amp | Sep::Disown);
+	if items.len() == 1 && !tail {
+		return Some(and_or_node(&last.and_or, last.and_or.rest.len()));
 	}
+	if let Some(at) = items[..items.len() - 1]
+		.iter()
+		.rposition(|item| !matches!(item.sep, Sep::Amp | Sep::Disown))
+	{
+		// `connect_async_list` absorbs a background command into the right
+		// side of `;`, but not into a newline connection in command
+		// substitutions.
+		if !(nl && items[at].sep == Sep::Newline) || (!tail && at + 2 == items.len()) {
+			return Some(Node::List { items, split: at + 1, nl, tail });
+		}
+		return Some(Node::Async { items, base: at + 2, nl, tail });
+	}
+	Some(Node::Async { items, base: 1, nl, tail })
 }
 
-/// bash `connect_async_list`: `a; b &` backgrounds only `b`; `kind` is
-/// [`Conn::Amp`] or zsh's [`Conn::Disown`].
-fn connect_async<'a>(c: Node<'a>, second: Option<Node<'a>>, kind: Conn) -> Node<'a> {
-	match c {
-		Node::Conn { first, second: Some(s), conn: Conn::Semi, fl } => Node::Conn {
-			first,
-			second: Some(Box::new(connect_async(*s, second, kind))),
-			conn: Conn::Semi,
-			fl,
-		},
-		other => conn(other, second, kind),
+fn and_or_node(ao: &AndOr, end: usize) -> Node<'_> {
+	if end == 0 {
+		pipeline_node(&ao.first, 0)
+	} else {
+		Node::AndOr { ao, end }
 	}
 }
 
-fn and_or_node(ao: &AndOr) -> Node<'_> {
-	let mut node = pipeline_node(&ao.first);
-	for (op, p) in &ao.rest {
-		let c = if *op == AndOrOp::And {
-			Conn::And
-		} else {
-			Conn::Or
-		};
-		node = conn(node, Some(pipeline_node(p)), c);
-	}
-	node
-}
-
-fn pipeline_node(p: &Pipeline) -> Node<'_> {
-	let mut iter = p.stages.iter().rev();
-	let last = iter.next().expect("a pipeline has a stage");
-	let mut node =
-		Node::Cmd { cmd: &last.cmd, fl: Fl { stderr: last.pipe_stderr, ..Fl::default() } };
-	for st in iter {
-		let left = Node::Cmd { cmd: &st.cmd, fl: Fl { stderr: st.pipe_stderr, ..Fl::default() } };
-		node = conn(left, Some(node), Conn::Pipe);
-	}
+fn pipeline_node(pipeline: &Pipeline, start: usize) -> Node<'_> {
+	let stage = &pipeline.stages[start];
 	let fl = Fl {
-		time:   p.time.is_some(),
-		posix:  p.time.is_some_and(|t| t.posix),
-		invert: p.bang,
-		stderr: false,
+		time:   start == 0 && pipeline.time.is_some(),
+		posix:  start == 0 && pipeline.time.is_some_and(|t| t.posix),
+		invert: start == 0 && pipeline.bang,
+		stderr: stage.pipe_stderr,
 	};
-	match &mut node {
-		Node::Cmd { fl: f, .. } | Node::Conn { fl: f, .. } => {
-			f.time = fl.time;
-			f.posix = fl.posix;
-			f.invert = fl.invert;
-		},
-		Node::IfTail { .. } => {},
+	if start + 1 == pipeline.stages.len() {
+		Node::Cmd { cmd: &stage.cmd, fl }
+	} else {
+		Node::Pipe { pipeline, start, fl: Fl { stderr: false, ..fl } }
 	}
-	node
+}
+
+fn async_conn(sep: Sep) -> Conn {
+	if sep == Sep::Disown {
+		Conn::Disown
+	} else {
+		Conn::Amp
+	}
 }
 
 // ---- the print_cmd.c port ---------------------------------------------------
@@ -391,7 +381,60 @@ impl<'a> Bp<'a> {
 			self.put(b"! ");
 		}
 		match node {
-			Node::Conn { first, second, conn, .. } => self.connection(first, second.as_deref(), *conn),
+			Node::List { items, split, nl, tail } => {
+				let first = list_items(&items[..*split], *nl, false).expect("nonempty prefix");
+				let second = list_items(&items[*split..], *nl, *tail);
+				let conn = if *nl && items[*split - 1].sep == Sep::Newline {
+					Conn::Nl
+				} else {
+					Conn::Semi
+				};
+				self.connection(&first, second.as_ref(), conn);
+			},
+			Node::Async { items, base, nl, tail } => {
+				if *tail {
+					let first = if items.len() == *base {
+						list_items(items, *nl, false).expect("nonempty chain")
+					} else {
+						Node::Async { items, base: *base, nl: *nl, tail: false }
+					};
+					self.connection(&first, None, async_conn(items.last().expect("chain").sep));
+				} else {
+					let prefix = &items[..items.len() - 1];
+					let first = if prefix.len() == *base {
+						list_items(prefix, *nl, false).expect("nonempty prefix")
+					} else {
+						Node::Async { items: prefix, base: *base, nl: *nl, tail: false }
+					};
+					let last = &items.last().expect("chain").and_or;
+					let second = and_or_node(last, last.rest.len());
+					self.connection(
+						&first,
+						Some(&second),
+						async_conn(prefix.last().expect("prefix").sep),
+					);
+				}
+			},
+			Node::AndOr { ao, end } => {
+				let first = and_or_node(ao, *end - 1);
+				let (op, pipeline) = &ao.rest[*end - 1];
+				let second = pipeline_node(pipeline, 0);
+				let conn = if *op == AndOrOp::And {
+					Conn::And
+				} else {
+					Conn::Or
+				};
+				self.connection(&first, Some(&second), conn);
+			},
+			Node::Pipe { pipeline, start, .. } => {
+				let stage = &pipeline.stages[*start];
+				let first = Node::Cmd {
+					cmd: &stage.cmd,
+					fl:  Fl { stderr: stage.pipe_stderr, ..Fl::default() },
+				};
+				let second = pipeline_node(pipeline, *start + 1);
+				self.connection(&first, Some(&second), Conn::Pipe);
+			},
 			Node::IfTail { arms, else_body } => self.if_cmd(arms, *else_body),
 			Node::Cmd { cmd, fl } => self.command(cmd, *fl),
 		}
@@ -1537,6 +1580,35 @@ impl<'a> Compact<'a> {
 				self.docs.push(d);
 			},
 			RedirTarget::Word(_) => redirection_text(r, &mut self.out),
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::bash::syntax::{Features, NO_ALIASES, Parser};
+
+	#[test]
+	fn borrowed_connections_keep_background_grouping_and_comsub_newlines() {
+		let cases: &[(&[u8], &[u8])] = &[
+			(
+				b"f() { a; b & c & d; e && f || g | h; }",
+				b"f () \n{ \n    a;\n    b & c & d;\n    e && f || g | h\n}",
+			),
+			(
+				b"g() { echo $(a; b & c); echo $(a\nb & c); }",
+				b"g () \n{ \n    echo $(a; b & c);\n    echo $(a\nb & c)\n}",
+			),
+		];
+		for &(source, expected) in cases {
+			let command = Parser::new(source, Features::NONE, NO_ALIASES)
+				.next_command()
+				.unwrap()
+				.unwrap();
+			let actual =
+				print(&command.list.items[0].and_or.first.stages[0].cmd, PrintStyle::DeclareF);
+			assert_eq!(actual, expected, "{}", String::from_utf8_lossy(source));
 		}
 	}
 }
