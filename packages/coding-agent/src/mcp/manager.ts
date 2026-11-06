@@ -1371,6 +1371,16 @@ export class MCPManager implements MCPManagerApi {
 		});
 	}
 
+	/** Whether initial tool registration or a reconnect is still in flight. */
+	hasPendingStartup(): boolean {
+		return (
+			this.#startupUpdates.size > 0 ||
+			this.#pendingToolLoads.size > 0 ||
+			this.#pendingConnections.size > 0 ||
+			this.#pendingReconnections.size > 0
+		);
+	}
+
 	/**
 	 * Wait for configured servers' initial tools (including timeout-triggered reconnects).
 	 * Zero disables the barrier deadline; an unresponsive server can then wait indefinitely.

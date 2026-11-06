@@ -1,3 +1,5 @@
+import type { ToolLoadModes } from "./load-mode";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { combine, register } from "../config/registry";
 import { cfgAutolearnEnabled } from "../autolearn/settings";
 import { cfgBashEnabled } from "../exec/settings";
@@ -1010,6 +1012,26 @@ export const cfgAsyncWidgets = register({
 	},
 });
 
+const EMPTY_TOOL_LOAD_MODES: ToolLoadModes = {};
+
+export const cfgToolsLoadMode = register({
+	id: "tools.loadMode",
+	type: "record",
+	default: EMPTY_TOOL_LOAD_MODES,
+	validate: raw => {
+		if (raw === undefined) return;
+		if (!isRecord(raw) || Object.values(raw).some(mode => mode !== "essential")) {
+			throw new Error("tools.loadMode must map tool names to 'essential'.");
+		}
+	},
+	ui: {
+		tab: "tools",
+		group: "Discovery & MCP",
+		label: "Essential Tool Overrides",
+		description: "Keep selected enabled tools top-level with full schemas instead of mounting them under xd://.",
+	},
+});
+
 export const cfgToolsXdev = register({
 	id: "tools.xdev",
 	type: "boolean",
@@ -1157,5 +1179,6 @@ export const cfgSessionToolGates = combine({
 	builtins: cfgBuiltinToolGates,
 	generateImage: cfgGenerateImageEnabled,
 	speechgen: cfgSpeechgenEnabled,
+	loadMode: cfgToolsLoadMode,
 	xdev: cfgToolsXdev,
 });

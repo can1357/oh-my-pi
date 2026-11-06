@@ -2622,6 +2622,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			createThinkTool: config.createThinkTool,
 			builtInToolNames: config.builtInToolNames,
 			mcpManagerToolNames: config.mcpManagerToolNames,
+			isMCPDiscoveryPending: config.isMCPDiscoveryPending ?? (() => this.#pendingMCPDiscovery !== undefined),
 			presentationPinnedToolNames: config.presentationPinnedToolNames,
 			ensureWriteRegistered: config.ensureWriteRegistered,
 			isDeviceOnlyWrite: config.isDeviceOnlyWrite,

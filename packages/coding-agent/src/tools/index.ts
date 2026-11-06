@@ -78,6 +78,7 @@ import { TodoTool } from "./todo";
 import { WriteTool } from "./write";
 import { WaitTool } from "./wait";
 import { isMountableUnderXdev, resolveXdevTool, type XdevState } from "./xdev";
+import { toolLoadMode } from "./load-mode";
 import { YieldTool } from "./yield";
 
 import {
@@ -93,6 +94,7 @@ import {
 	cfgLaunchEnabled,
 	cfgSecurityEnabled,
 	cfgTodoEnabled,
+	cfgToolsLoadMode,
 	cfgToolsXdev,
 	cfgWebSearchEnabled,
 } from "./settings";
@@ -934,11 +936,16 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// Explicitly requested built-ins retain their top-level presentation.
 	const xdevEnabled = xdevRequested && tools.some(tool => tool.name === "write");
 	const mountBuiltinTools = requestedTools === undefined;
+	const loadModes = cfgToolsLoadMode.get(session.settings);
 	if (xdevEnabled) {
 		const mountedNames = new Set<string>();
 		const kept: Tool[] = [];
 		for (const tool of tools) {
-			const mountable = mountBuiltinTools && isMountableUnderXdev(tool) && tool.name in BUILTIN_TOOLS;
+			const mountable =
+				mountBuiltinTools &&
+				toolLoadMode(tool, loadModes) === undefined &&
+				isMountableUnderXdev(tool) &&
+				tool.name in BUILTIN_TOOLS;
 			if (mountable) mountedNames.add(tool.name);
 			else kept.push(tool);
 		}

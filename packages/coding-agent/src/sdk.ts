@@ -324,6 +324,7 @@ import {
 } from "./job-widgets";
 import { createBrowserPrelude } from "./tools/browser";
 import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
+import { toolLoadMode, warnToolLoadModes } from "./tools/load-mode";
 import { createComputerPrelude } from "./tools/computer";
 import { createRatchetPrelude } from "./ratchet/prelude-definition";
 import { createArchivePrelude } from "./archive/prelude-definition";
@@ -358,6 +359,7 @@ import {
 	cfgToolsAbortOnFabricatedResult,
 	cfgToolsIntentTracing,
 	cfgToolsMaxTimeout,
+	cfgToolsLoadMode,
 	cfgToolsXdev,
 	cfgToolsXdevDocs,
 	cfgToolsXdevInlineDevices,
@@ -2840,6 +2842,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const customTools: CustomTool[] = [];
 		const initialMcpManagerTools: CustomTool[] = [];
 		let startDeferredMCPDiscovery: ((liveSession: AgentSession) => void) | undefined;
+		const isMCPDiscoveryPending = () =>
+			startDeferredMCPDiscovery !== undefined ||
+			(mcpManager instanceof MCPManager && mcpManager.hasPendingStartup());
 		const onMCPStatus = (event: McpConnectionStatusEvent) => {
 			if (!options.hasUI || cfgStartupQuiet.get(settings)) return;
 			if (event.type === "connecting" && event.serverNames.length === 0) return;
@@ -2911,6 +2916,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 								path: ".mcp.json",
 								error: error instanceof Error ? error.message : String(error),
 							});
+						} finally {
+							startDeferredMCPDiscovery = undefined;
+							if (!liveSession.isDisposed) {
+								warnToolLoadModes(
+									toolRegistry,
+									cfgToolsLoadMode.get(settings),
+									message => {
+										liveSession.configWarnings.push(message);
+										liveSession.emitNotice("warning", message, "tools.loadMode");
+									},
+									isMCPDiscoveryPending(),
+								);
+							}
 						}
 					})();
 					liveSession.setPendingMCPDiscovery(discovery);
@@ -4575,6 +4593,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// constructed and attached. Startup failure therefore leaves it revivable.
 		hasRegistered = options.expectedAgentRef === undefined || options.expectedAgentRef === null;
 
+		const initialLoadModes = cfgToolsLoadMode.get(settings);
+		const toolLoadModeWarnings: string[] = [];
+		warnToolLoadModes(
+			toolRegistry,
+			initialLoadModes,
+			message => toolLoadModeWarnings.push(message),
+			isMCPDiscoveryPending(),
+		);
+
 		// Partition the initial enabled set for the xd:// transport. Tool instances
 		// remain in the canonical map; only presentation names move between layers.
 		// Mounting requires both transport halves in the granted set (`read xd://`
@@ -4587,7 +4614,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			for (const name of initialToolNames) {
 				const tool = toolRegistry.get(name);
 				const explicitlyRequested = presentationPinnedToolNames?.has(name) === true;
-				if (tool && xdevReadAvailable && xdevWriteAvailable && !explicitlyRequested && isMountableUnderXdev(tool))
+				if (
+					tool &&
+					xdevReadAvailable &&
+					xdevWriteAvailable &&
+					!explicitlyRequested &&
+					toolLoadMode(tool, initialLoadModes) === undefined &&
+					isMountableUnderXdev(tool)
+				)
 					mountedNames.push(name);
 				else topLevelToolNames.push(name);
 			}
@@ -5140,6 +5174,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			interactivePrompts: options.interactivePrompts,
 			rebindModelAfterDiscovery: options.model === undefined || options.rebindModelAfterDiscovery === true,
 			toolRegistry,
+			isMCPDiscoveryPending,
 			reconcileBrowserMcpFilter: mcpManager
 				? async enabled => {
 						await mcpManager.reconcileBrowserFilter(enabled);
@@ -5229,6 +5264,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			titleSystemPrompt: options.titleSystemPrompt,
 			autoTitle: options.autoTitle === true && !isSubagentSession,
 		});
+		// Startup notices predate UI subscriptions; retain them for the initial config-warning header.
+		session.configWarnings.push(...toolLoadModeWarnings);
 		hasSession = true;
 		// The session now owns its cost gate; the interactive TUI starts compression after its first frame.
 		if (options.deferSkillDescriptionCompression !== true) skillDescriptions.startCompression();
@@ -5371,6 +5408,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						builtInRegistryToolNames.has("write") &&
 						enabled.includes("read") &&
 						(enabled.includes("write") || toolSession.deviceOnlyWrite === true) &&
+						toolLoadMode(liveTool, cfgToolsLoadMode.get(settings)) === undefined &&
 						isMountableUnderXdev(liveTool);
 					const nextMounted = shouldMount
 						? mounted.includes(name)
