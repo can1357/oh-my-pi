@@ -1042,8 +1042,9 @@ Targets are provider-native IDs/refs, with different meanings by placement:
   is detected from both `HC_TERMINAL_ID` and `HC_TERMINAL_SOCKET`. It supports pane
   placement only and takes no target: the new terminal is a child of the calling
   terminal and copies its `herdr.space`/`herdr.tab` labels from `hc get`, so the app
-  shows it in the same tab. `name` must be 1-32 characters of `a-z`, `0-9`, `-`, `_`;
-  any other name is rejected rather than rewritten.
+  shows it in the same tab. A calling terminal without both labels is not on an app
+  screen, so the launch is rejected before any terminal starts. `name` must be 1-32
+  characters of `a-z`, `0-9`, `-`, `_`; any other name is rejected rather than rewritten.
 - CMUX pane placement targets a surface ID; workspace placement targets a window
   ID. Both targets may be omitted when the corresponding CMUX context is active.
   An explicit surface target is authoritative and is not combined with the ambient
@@ -1105,7 +1106,7 @@ shell command. The restriction is not applied to direct tmux or Zellij argv,
 where argument newlines remain data rather than terminal input.
 
 Herdr, Zellij, and Orca `window` placements create tabs; CMUX creates a workspace; the
-Herdr app has no `window` placement because hc cannot create a tab.
+Herdr app provider launches panes only.
 Provider-specific fields include pane direction, Zellij floating panes/names,
 Herdr tab labels, and CMUX workspace names. Zellij floating panes cannot specify a
 split direction, and Zellij new-tab creation cannot target a tab. tmux returns

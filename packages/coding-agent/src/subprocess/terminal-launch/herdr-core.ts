@@ -3,8 +3,8 @@ import { launchError, nestedString, parseJson, runStep } from "./shared";
 import type { SupportedMultiplexerCapabilities, TerminalLaunchBackend, TerminalLaunchProvider } from "./types";
 
 /**
- * The Herdr app (herdr-core, CLI `hc`) creates tabs itself; `hc` can only start a terminal,
- * which the app shows as a pane in the space and tab its labels name.
+ * The Herdr app (herdr-core, CLI `hc`) shows a core terminal as a pane in the space and tab its
+ * labels name. This provider launches panes only, in the calling terminal's tab.
  */
 const capabilities = {
 	displayName: "Herdr app",
@@ -38,8 +38,8 @@ const launchHerdrCore: TerminalLaunchBackend<"herdr-core", typeof capabilities> 
 			"Herdr app terminal names must be 1-32 characters of lowercase letters, digits, '-' and '_'.",
 		);
 	}
-	// A terminal carrying the app's space and tab labels shows up in that tab; without them it
-	// still starts as a child of this terminal.
+	// The app shows a core terminal only when it carries the app's space and tab labels; a
+	// terminal without them (another hc client's) has no app screen to put the pane on.
 	const current = parseJson(
 		request,
 		"get",
@@ -47,7 +47,10 @@ const launchHerdrCore: TerminalLaunchBackend<"herdr-core", typeof capabilities> 
 	);
 	const space = nestedString(current, "labels", "herdr.space");
 	const tab = nestedString(current, "labels", "herdr.tab");
-	const labelArgs = space && tab ? ["--label", `herdr.space=${space}`, "--label", `herdr.tab=${tab}`] : [];
+	if (!space || !tab) {
+		throw launchError(request, "target", "Herdr app pane launch requires a terminal shown in a Herdr app tab.");
+	}
+	const labelArgs = ["--label", `herdr.space=${space}`, "--label", `herdr.tab=${tab}`];
 
 	// `--no-notify` keeps hc from typing an exit note into this agent, which would start a turn;
 	// `--outlive-parent` keeps the launched program running after this one exits.
