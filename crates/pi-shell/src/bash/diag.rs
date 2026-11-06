@@ -540,19 +540,19 @@ pub fn strerror(err: &io::Error) -> Cow<'static, str> {
 #[derive(Clone, Copy, Debug)]
 pub struct DiagSite<'a> {
 	/// `$0` (bash uses it as the message prefix).
-	pub shell_name: &'a [u8],
+	pub shell_name:  &'a [u8],
 	/// Origin of the running script.
-	pub origin:     &'a Origin,
+	pub origin:      &'a Origin,
 	/// Current line.
-	pub line:       u32,
-	/// The text being read is a `.` file, so a syntax error in it is not the
-	/// `-c` string's and bash does not print `-c`.
-	pub sourced:    bool,
-	/// An interactive shell, which bash names by itself and reports without a
-	/// line number (`interactive_shell` guards both in `error_prefix`).
+	pub line:        u32,
+	/// Innermost sourced file, retained for syntax errors even in an
+	/// interactive shell. Its text is not the `-c` string.
+	pub sourced:     Option<&'a [u8]>,
+	/// Runtime errors name an interactive shell without a line; syntax
+	/// errors in a sourced file retain that file's name and line.
 	pub interactive: bool,
 	/// The locale is UTF-8 (which bytes print as they are in names).
-	pub utf8:       bool,
+	pub utf8:        bool,
 }
 
 /// The full stderr line for `diag` printed at `site`, newline included.
@@ -564,8 +564,17 @@ pub fn render(diag: &Diag, site: DiagSite<'_>) -> Vec<u8> {
 		return diags.iter().flat_map(|d| render(d, site)).collect();
 	}
 	let syntax = matches!(diag, Diag::Syntax { .. } | Diag::SyntaxContext { .. });
+	let interactive = site.interactive && !(syntax && site.sourced.is_some());
+	let name = site
+		.sourced
+		.filter(|_| !interactive)
+		.unwrap_or(site.shell_name);
 	let mut out = Vec::with_capacity(64);
-	out.extend_from_slice(site.shell_name);
+	if site.interactive && !interactive {
+		out.extend_from_slice(site.shell_name);
+		out.extend_from_slice(b": ");
+	}
+	out.extend_from_slice(name);
 	if let Diag::ComsubSyntax { line, msg } = diag {
 		out.extend_from_slice(b": command substitution: line ");
 		out.extend_from_slice(line.format_into(&mut fmt::NumBuffer::new()).as_bytes());
@@ -589,10 +598,10 @@ pub fn render(diag: &Diag, site: DiagSite<'_>) -> Vec<u8> {
 		out.push(b'\n');
 		return out;
 	}
-	if syntax && !site.sourced && matches!(site.origin, Origin::Command) {
+	if syntax && !interactive && site.sourced.is_none() && matches!(site.origin, Origin::Command) {
 		out.extend_from_slice(b": -c");
 	}
-	if !site.interactive {
+	if !interactive {
 		out.extend_from_slice(b": line ");
 		out.extend_from_slice(site.line.format_into(&mut fmt::NumBuffer::new()).as_bytes());
 	}

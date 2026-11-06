@@ -910,10 +910,9 @@ impl Kernel {
 			.and_then(|r| r.chain.links.first())
 			.map_or(&COMMAND, |l| &l.origin);
 		let utf8 = locale::is_utf8(self, cx.store, vp);
-		// bash's `get_name_for_error`: a NON-interactive shell is named by
-		// `BASH_SOURCE[0]`, so inside a `.` file — and inside a function defined
-		// in one — the message names that file; an interactive shell always
-		// names itself, and so does an in-engine nested shell (its `$0`).
+		// Keep the shell and source names separate: runtime errors use
+		// `get_name_for_error`, while parser errors retain the parsed file
+		// even in an interactive shell. The renderer selects by class.
 		let nested = vp
 			.overlay
 			.as_ref()
@@ -922,18 +921,12 @@ impl Kernel {
 			state::record(cx.store, vp, crate::bash::store::Key::Misc(MiscKey::Interactive)),
 			Ok(Some(Record::Misc(v))) if v.as_slice() == b"1"
 		);
-		let sourced = if interactive {
-			None
-		} else {
-			callstack::innermost_file(vp)
+		let sourced = callstack::innermost_file(vp).map(|file| file.as_slice());
+		let shell_name = match nested {
+			Some(Some(Record::Misc(name))) => name.as_slice(),
+			_ => self.argv0.as_slice(),
 		};
-		let shell_name = match (sourced, nested) {
-			(Some(file), _) => file.as_slice(),
-			(None, Some(Some(Record::Misc(name)))) => name.as_slice(),
-			(None, _) => self.argv0.as_slice(),
-		};
-		let site =
-			DiagSite { shell_name, origin, line, utf8, sourced: sourced.is_some(), interactive };
+		let site = DiagSite { shell_name, origin, line, utf8, sourced, interactive };
 		render(diag, site)
 	}
 
