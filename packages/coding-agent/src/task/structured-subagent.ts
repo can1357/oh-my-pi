@@ -129,6 +129,8 @@ export interface StructuredSubagentRequest {
 	session: ToolSession;
 	invocationKind: "task" | "eval";
 	assignment: string;
+	/** Skip prompt whitespace formatting for file-backed assignments. */
+	verbatimAssignment?: boolean;
 	context?: string;
 	agent?: string;
 	/** Saved source session selected for the bundled seance agent. */
@@ -268,8 +270,11 @@ export class StructuredSubagentError extends Error {
 
 const PLAN_MODE_TOOLS = ["read", "grep", "glob", "web_search"] as const;
 
-export function renderSubagentUserPrompt(assignment: string): string {
-	return prompt.render(subagentUserPromptTemplate, { assignment: assignment.trim() });
+export function renderSubagentUserPrompt(assignment: string, verbatim = false): string {
+	const context = { assignment: assignment.trim() };
+	return verbatim
+		? prompt.compile(subagentUserPromptTemplate)(context).trim()
+		: prompt.render(subagentUserPromptTemplate, context);
 }
 
 function trimToUndefined(value: string | undefined): string | undefined {
@@ -770,7 +775,7 @@ function buildExecutorOptions(
 		getApiKey: session.getApiKey,
 		credentialSourceSessionId: session.getCredentialSourceSessionId?.(),
 		agent: policy.effectiveAgent,
-		task: renderSubagentUserPrompt(request.assignment),
+		task: renderSubagentUserPrompt(request.assignment, request.verbatimAssignment),
 		assignment: request.assignment.trim(),
 		preparedSession,
 		context: request.context?.trim() || undefined,
@@ -895,7 +900,7 @@ function buildFailureResult(
 			id,
 			agent: policy.agent.name,
 			agentSource: policy.agent.source,
-			task: renderSubagentUserPrompt(request.assignment),
+			task: renderSubagentUserPrompt(request.assignment, request.verbatimAssignment),
 			assignment: request.assignment.trim(),
 			description: request.invocationKind === "eval" ? trimToUndefined(request.identity?.label) : undefined,
 			exitCode: 1,

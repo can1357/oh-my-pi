@@ -220,16 +220,41 @@ describe("taskFile dispatch", () => {
 		expect(result.details?.progress).toBeUndefined();
 	});
 
-	it("formats file instructions exactly like inline ones", async () => {
-		const source = "  First instruction.  \r\n\r\n\r\nSecond instruction.\r\n  ";
+	it.each([false, true])("preserves file whitespace in the subagent prompt (batch=%s)", async batch => {
+		const assignment = [
+			"First instruction.  ",
+			"",
+			"",
+			"```text",
+			"\tindented code  ",
+			"```",
+			"",
+			"| column | value |",
+			"| --- | --- |",
+			"| literal | <widget> & {{literal}} |",
+			"",
+			String.raw`Keep \n and \t literal.`,
+		].join("\r\n");
+		const source = ` \r\n${assignment}\r\n\t `;
 		const taskFile = await writeTaskFile("formatted.md", source);
+		const tool = await createTool(batch);
+		const item = { name: "File", taskFile };
+
+		const result = await tool.execute("file", batch ? { context: "Shared context.", tasks: [item] } : item);
+
+		expect(result.isError).not.toBe(true);
+		expect(executions).toHaveLength(1);
+		expect(executions[0].assignment).toBe(assignment);
+		expect(executions[0].task).toContain(assignment);
+	});
+
+	it("continues formatting inline instructions", async () => {
+		const source = "  First instruction.  \r\n\r\n\r\nSecond instruction.\r\n  ";
 		const tool = await createTool();
 
-		await tool.execute("file", { name: "File", taskFile });
 		await tool.execute("inline", { name: "Inline", task: source });
 
-		expect(executions).toHaveLength(2);
-		expect(executions[0].task).toBe(executions[1].task);
+		expect(executions[0].task).toContain("First instruction.\nSecond instruction.");
 	});
 
 	it("keeps literal JSON escape sequences in file contents", async () => {
@@ -240,6 +265,7 @@ describe("taskFile dispatch", () => {
 		await tool.execute("literal-escapes", { name: "LiteralEscapes", taskFile });
 
 		expect(executions[0]?.assignment).toBe(source);
+		expect(executions[0]?.task).toContain(source);
 	});
 
 	it("resolves local URLs to their backing file for restrictions and dispatch", async () => {
@@ -272,7 +298,7 @@ describe("taskFile dispatch", () => {
 		started.set("Blocker", blockerStarted);
 		await tool.execute("blocking-job", { name: "Blocker", task: "Occupy the only execution slot." });
 		await blockerStarted.promise;
-		const source = "\uFEFF  Resolve the async task.\r\n  ";
+		const source = "\uFEFF  Resolve the async task.  \r\n\r\n\r\nKeep this hard break.\r\n  ";
 		const bytes = new TextEncoder().encode(source);
 		await Bun.write(taskFile, bytes);
 		const updates: TaskToolDetails[] = [];
@@ -291,6 +317,7 @@ describe("taskFile dispatch", () => {
 
 		const expected = { assignment: source.trim(), taskFile, taskFileSha256: await sha256(bytes) };
 		expect(executions.find(item => item.id === "AsyncFile")?.assignment).toBe(source.trim());
+		expect(executions.find(item => item.id === "AsyncFile")?.task).toContain(source.trim());
 		expect(updates.at(-1)?.progress?.[0]).toMatchObject({ ...expected, status: "completed" });
 	});
 
