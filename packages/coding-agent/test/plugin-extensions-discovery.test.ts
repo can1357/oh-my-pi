@@ -139,28 +139,45 @@ describe("plugin extension discovery", () => {
 		expect(await getAllPluginToolPaths(projectDir.path())).toContain(toolPath);
 	});
 
-	it("loads a configured extension directory only when its Agent Plugins manifest is valid (§5.2)", async () => {
-		const writePackage = (dirName: string, pluginName: string, command: string): string => {
-			const dir = path.join(projectDir.path(), dirName);
-			fs.mkdirSync(dir, { recursive: true });
-			fs.writeFileSync(
-				path.join(dir, "plugin.json"),
-				JSON.stringify({ $schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", name: pluginName }),
-			);
-			fs.writeFileSync(
-				path.join(dir, "index.ts"),
-				`export default function(pi) { pi.registerCommand("${command}", { handler: async () => {} }); }\n`,
-			);
-			return dir;
-		};
-		const valid = writePackage("valid-pkg", "valid-pkg", "valid-ext");
-		const invalid = writePackage("invalid-pkg", "Bad--Name", "invalid-ext");
+	// `-e`/settings paths are filtered by the loader; legacy `.omp/settings.json#extensions`
+	// is expanded separately by the native provider, so each source must reject on its own.
+	it.each(["configured", "settings.json"] as const)(
+		"loads a %s extension directory only when its Agent Plugins manifest is valid (§5.2)",
+		async source => {
+			const writePackage = (dirName: string, pluginName: string, command: string): string => {
+				const dir = path.join(projectDir.path(), dirName);
+				fs.mkdirSync(dir, { recursive: true });
+				fs.writeFileSync(
+					path.join(dir, "plugin.json"),
+					JSON.stringify({
+						$schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+						name: pluginName,
+					}),
+				);
+				fs.writeFileSync(
+					path.join(dir, "index.ts"),
+					`export default function(pi) { pi.registerCommand("${command}", { handler: async () => {} }); }\n`,
+				);
+				return dir;
+			};
+			const valid = writePackage("valid-pkg", "valid-pkg", "valid-ext");
+			const invalid = writePackage("invalid-pkg", "Bad--Name", "invalid-ext");
+			let configuredPaths = [valid, invalid];
+			if (source === "settings.json") {
+				fs.mkdirSync(path.join(projectDir.path(), ".omp"), { recursive: true });
+				fs.writeFileSync(
+					path.join(projectDir.path(), ".omp", "settings.json"),
+					JSON.stringify({ extensions: configuredPaths }),
+				);
+				configuredPaths = [];
+			}
 
-		const result = await discoverAndLoadExtensions([valid, invalid], projectDir.path());
+			const result = await discoverAndLoadExtensions(configuredPaths, projectDir.path());
 
-		expect(result.extensions.some(ext => ext.commands.has("valid-ext"))).toBe(true);
-		expect(result.extensions.some(ext => ext.commands.has("invalid-ext"))).toBe(false);
-	});
+			expect(result.extensions.some(ext => ext.commands.has("valid-ext"))).toBe(true);
+			expect(result.extensions.some(ext => ext.commands.has("invalid-ext"))).toBe(false);
+		},
+	);
 
 	it("loads installed plugin extensions that detach API methods", async () => {
 		const extensionPath = path.join(getPluginsDir(), "node_modules", "@demo", "plugin", "dist", "extension.ts");
