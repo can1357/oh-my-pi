@@ -1187,4 +1187,65 @@ mod tests {
 		];
 		assert_eq!(got, want);
 	}
+
+	/// Node ids reach observers (`NodeRef.node` of events): each id names
+	/// the same syntax across parser rewrites. Ids in order: assignments
+	/// before words, redirection targets after them, `for` words and
+	/// `case` patterns before the bodies; here-document and arithmetic
+	/// contents carry none.
+	#[test]
+	fn node_ids_number_syntax_in_walk_order() {
+		let src: &[u8] = b"a=1 cmd ${x[i]:-d} >o | tr a b && (( z + 1 )); for v in w; do :; done; \
+		                   case s in p|q) :;; esac; cat <<E\n$y\nE\n";
+		let units = compile_all(src, ModeId::Bash, crate::bash::syntax::Features::NONE);
+		let got: Vec<String> = units[0]
+			.nodes
+			.iter()
+			.map(|n| {
+				let text = &units[0].source[n.lo as usize..n.hi as usize];
+				format!("{:?} {}", n.kind, core::str::from_utf8(text).unwrap())
+			})
+			.collect();
+		assert_eq!(units.len(), 1);
+		assert_eq!(got, [
+			"AndOr a=1 cmd ${x[i]:-d} >o | tr a b && (( z + 1 ))",
+			"Pipeline a=1 cmd ${x[i]:-d} >o | tr a b",
+			"Simple a=1 cmd ${x[i]:-d} >o",
+			"Assign a=1",
+			"Word 1",
+			"Word cmd",
+			"Word ${x[i]:-d}",
+			"Word i",
+			"Word d",
+			"Word o",
+			"Simple tr a b",
+			"Word tr",
+			"Word a",
+			"Word b",
+			"Pipeline (( z + 1 ))",
+			"Arith (( z + 1 ))",
+			"AndOr for v in w; do :; done",
+			"Pipeline for v in w; do :; done",
+			"For for v in w; do :; done",
+			"Word w",
+			"AndOr :",
+			"Pipeline :",
+			"Simple :",
+			"Word :",
+			"AndOr case s in p|q) :;; esac",
+			"Pipeline case s in p|q) :;; esac",
+			"Case case s in p|q) :;; esac",
+			"Word s",
+			"Word p",
+			"Word q",
+			"AndOr :",
+			"Pipeline :",
+			"Simple :",
+			"Word :",
+			"AndOr cat <<E",
+			"Pipeline cat <<E",
+			"Simple cat <<E",
+			"Word cat",
+		]);
+	}
 }
