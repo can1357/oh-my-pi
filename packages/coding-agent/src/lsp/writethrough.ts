@@ -98,6 +98,13 @@ export interface WritethroughOptions {
 	transformDiagnostics?: (absPath: string, result: FileDiagnosticsResult) => FileDiagnosticsResult;
 	/** `lsp.requestTimeout` in seconds; raises the late-diagnostics wait for slow (cold-starting) servers. */
 	requestTimeoutSec?: number;
+	/**
+	 * Called once per destination a batch flush rewrote, after its final bytes
+	 * are on disk. A batched write commits its file immediately but is formatted
+	 * later, at the flush, so whatever the caller recorded about the file at
+	 * commit time describes bytes the operation did not finish with.
+	 */
+	onFileSettled?: (dst: string) => Promise<void> | void;
 }
 
 /** Internal resolved form of {@link WritethroughOptions} that the writethrough machinery operates on. */
@@ -107,6 +114,8 @@ type ResolvedWritethroughOptions = {
 	transformDiagnostics?: (absPath: string, result: FileDiagnosticsResult) => FileDiagnosticsResult;
 	/** Per-server wait budget (ms) for diagnostics delivered late through the deferred channel. */
 	deferredWaitMs: number;
+	/** See {@link WritethroughOptions.onFileSettled}. */
+	onFileSettled?: (dst: string) => Promise<void> | void;
 };
 
 /** Per-file deferred LSP diagnostics wiring for {@link WritethroughCallback}. */
@@ -179,6 +188,7 @@ function getOrCreateWritethroughBatch(id: string, options: ResolvedWritethroughO
 		existing.options.enableDiagnostics ||= options.enableDiagnostics;
 		existing.options.transformDiagnostics ??= options.transformDiagnostics;
 		existing.options.deferredWaitMs = Math.max(existing.options.deferredWaitMs, options.deferredWaitMs);
+		existing.options.onFileSettled ??= options.onFileSettled;
 		return existing;
 	}
 	const batch: LspWritethroughBatchState = {
@@ -663,6 +673,10 @@ async function flushWritethroughBatch(
 			{ contentAlreadyWritten: true },
 		);
 		finalContents.set(entry.dst, diag.finalContent);
+		// The flush is the last writer of this file; the caller's record of it was
+		// taken before the formatter ran. The entry the caller is waiting on is
+		// excluded: its own post-write checks have not run yet.
+		if (entry.dst !== requestedDst) await options.onFileSettled?.(entry.dst);
 		bundle?.finalize(diag.diagnostics);
 		results.push(diag.diagnostics);
 	}
@@ -681,6 +695,7 @@ export function createLspWritethrough(cwd: string, options?: WritethroughOptions
 		enableFormat: options?.enableFormat ?? false,
 		enableDiagnostics: options?.enableDiagnostics ?? false,
 		transformDiagnostics: options?.transformDiagnostics,
+		onFileSettled: options?.onFileSettled,
 		deferredWaitMs: deferredDiagnosticsWaitMs(options?.requestTimeoutSec),
 	};
 	return async (

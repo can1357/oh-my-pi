@@ -35,7 +35,13 @@ import type { ToolSession } from "../tools";
 import { routeWriteThroughBridge } from "../tools/acp-bridge";
 import { approvalTargetKey } from "../tools/approval-targets";
 import { strictestApproval, truncateForPrompt } from "../tools/approval";
-import { backupBeforeClobber, clobberBackupNote, forgetOwnWrite, noteOwnWrite } from "../tools/clobber-backup";
+import {
+	backupBeforeClobber,
+	clobberBackupNote,
+	forgetOwnWrite,
+	noteOwnWrite,
+	ownsCurrentContent,
+} from "../tools/clobber-backup";
 import {
 	deleteFileWithFallback,
 	hasFileWriteFallback,
@@ -182,6 +188,7 @@ function createEditWritethrough(session: ToolSession): WritethroughCallback {
 				transformDiagnostics: deduplicate
 					? (filePath, result) => getDiagnosticsLedger(session).reduce(filePath, result)
 					: undefined,
+				onFileSettled: dst => noteOwnWrite(session, dst),
 				requestTimeoutSec: cfgLspRequestTimeout.get(session.settings),
 			})
 		: writethroughNoop;
@@ -763,7 +770,6 @@ export class EditTool implements AgentTool<TInput> {
 			}
 			const mode = await movedFileMode(request.path);
 			await mkdirAllowingFallback(path.dirname(request.moveTo));
-			const destinationExisted = await Bun.file(request.moveTo).exists();
 			await this.#insureClobber(
 				request.moveTo,
 				path.relative(this.session.cwd, request.moveTo) || request.moveTo,
@@ -791,11 +797,21 @@ export class EditTool implements AgentTool<TInput> {
 			if (rewritten) {
 				await this.#insureClobber(request.path, request.displayPath, clobberNotes);
 			}
+			// A rename that rewrites nothing carries the SOURCE's bytes to the
+			// destination, and they are this session's own only if the source was.
+			// Recording the destination regardless would hand the session ownership
+			// of content nobody here wrote, and the next write to it would be the
+			// uninsured one. Asked before the source's record is dropped.
+			const destinationIsOwn = rewritten || (await ownsCurrentContent(this.session, request.path));
 			await writeFileWithFallback(request.moveTo, request.content);
 			if (mode !== undefined) await chmodMovedFile(request.moveTo, mode);
 			await forgetOwnWrite(this.session, request.path);
 			await deleteFileWithFallback(request.path, Bun.file(request.path));
-			await noteOwnWrite(this.session, request.moveTo);
+			// Not own: drop whatever the destination path was recorded as before,
+			// so an earlier record of a file this move replaced cannot exempt the
+			// bytes that landed on top of it.
+			if (destinationIsOwn) await noteOwnWrite(this.session, request.moveTo);
+			else await forgetOwnWrite(this.session, request.moveTo);
 			if (this.session.enableLsp ?? true) {
 				await notifyWorkspaceWatchedFiles(
 					this.session.cwd,
@@ -867,8 +883,6 @@ export class EditTool implements AgentTool<TInput> {
 				return this.#deferredDiagnostics.begin(request.path);
 			},
 		);
-		await noteOwnWrite(this.session, request.path);
-
 		if (preWriteBytes !== undefined) {
 			// Fail when a content-changing write left disk at the pre-image. Compare
 			// post vs pre first (native memcmp, usually a length mismatch) so the
@@ -891,6 +905,12 @@ export class EditTool implements AgentTool<TInput> {
 				);
 			}
 		}
+
+		// After the check, never before it: a write the check rejects did not
+		// land, and a record taken for it would claim the pre-image on disk as
+		// this session's own — the model's retry would then destroy it with no
+		// copy taken.
+		await noteOwnWrite(this.session, request.path);
 
 		if (!began) this.session.bumpFileMutationVersion?.(request.path);
 		return {

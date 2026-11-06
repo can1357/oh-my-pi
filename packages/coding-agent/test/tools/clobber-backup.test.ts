@@ -4,8 +4,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import { createLspWritethrough } from "@oh-my-pi/pi-coding-agent/lsp/writethrough";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { backupBeforeClobber } from "@oh-my-pi/pi-coding-agent/tools/clobber-backup";
+import { addFileWriteFallback } from "@oh-my-pi/pi-coding-agent/tools/file-write-fallback";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import {
 	$which,
@@ -525,5 +527,116 @@ describe("copy-before-clobber: another session's directory", () => {
 
 		expect(await backupFiles()).toHaveLength(0);
 		expect(resultText(result)).not.toContain("[Backup]");
+	});
+});
+
+describe("copy-before-clobber: a record must not claim bytes this session never wrote", () => {
+	test("a rename that rewrites nothing leaves the destination's bytes insured", async () => {
+		// The destination now holds the SOURCE's content. A plain rename loses
+		// nothing, so there is nothing to copy yet — but the session did not write
+		// those bytes, and the write that replaces them is the one that must.
+		await fs.writeFile(path.join(tempDir, "a.md"), DOOMED);
+		const session = makeSession(tempDir);
+
+		const moved = await new EditTool(session, "patch").execute("move-only", {
+			path: "a.md",
+			edits: [{ op: "update", rename: "a-moved.md", diff: "@@\n register entry 1\n register entry 2" }],
+		});
+
+		expect(moved.isError).toBeFalsy();
+		expect(await Bun.file(path.join(tempDir, "a-moved.md")).text()).toBe(DOOMED);
+		expect(await backupFiles()).toHaveLength(0);
+
+		const clobbered = await new WriteTool(session).execute("clobber", {
+			path: "a-moved.md",
+			content: "gone\n",
+		});
+
+		const backups = await backupFiles();
+		expect(backups).toHaveLength(1);
+		expect(await Bun.file(backups[0]!).text()).toBe(DOOMED);
+		expect(resultText(clobbered)).toContain("this session did not create it");
+	});
+
+	test("a rename of a file this session wrote carries the exemption to the destination", async () => {
+		// The other half: the bytes the rename carried ARE this session's own, so
+		// the destination inherits the exemption and the next write copies nothing.
+		const session = makeSession(tempDir);
+		await new WriteTool(session).execute("create", { path: "a.md", content: DOOMED });
+
+		const moved = await new EditTool(session, "patch").execute("move-own", {
+			path: "a.md",
+			edits: [{ op: "update", rename: "a-moved.md", diff: "@@\n register entry 1\n register entry 2" }],
+		});
+		expect(moved.isError).toBeFalsy();
+		const after = await new WriteTool(session).execute("rewrite", { path: "a-moved.md", content: "gone\n" });
+
+		expect(await backupFiles()).toHaveLength(0);
+		expect(resultText(after)).not.toContain("[Backup]");
+	});
+
+	test.skipIf(process.getuid?.() === 0)(
+		"an edit the tool rejected because it never landed does not claim the file",
+		async () => {
+			// A registered write fallback that reports success without writing is the
+			// real shape of "the write said it worked and disk still holds the
+			// pre-image": the edit tool's own post-write check rejects it. The record
+			// must not be taken for a write that did not happen, or the next write of
+			// the same file destroys the pre-image without a word to the model.
+			const target = path.join(tempDir, "register.md");
+			await fs.writeFile(target, DOOMED);
+			await fs.chmod(target, 0o444);
+			const removeFallback = addFileWriteFallback(async () => true);
+			try {
+				const session = makeSession(tempDir);
+				const failed = await new EditTool(session, "patch").execute("edit-unlanded", {
+					path: "register.md",
+					edits: [{ op: "update", diff: "@@\n-register entry 2\n+clobbered" }],
+				});
+
+				expect(resultText(failed)).toContain("did not change on disk");
+				expect(await Bun.file(target).text()).toBe(DOOMED);
+				expect(await backupFiles()).toHaveLength(1);
+
+				// The retry, now permitted to land, destroys bytes nobody in this
+				// session wrote: it is insured and the model is told so.
+				await fs.chmod(target, 0o644);
+				const retried = await new EditTool(session, "patch").execute("edit-retry", {
+					path: "register.md",
+					edits: [{ op: "update", diff: "@@\n-register entry 2\n+clobbered" }],
+				});
+
+				expect(retried.isError).toBeFalsy();
+				expect(await backupFiles()).toHaveLength(2);
+				expect(resultText(retried)).toContain("this session did not create it");
+			} finally {
+				removeFallback();
+			}
+		},
+	);
+
+	test("a batch flush reports every file it settled except the one its caller is still checking", async () => {
+		// A batched write commits its bytes immediately and is post-processed at
+		// the flush, which is the last writer of the file. A caller that recorded
+		// the file at commit time recorded a state the operation did not finish
+		// with; the flush has to tell it. The requested destination is excluded
+		// because its caller's own post-write checks have not run yet.
+		const settled: string[] = [];
+		const writethrough = createLspWritethrough(tempDir, {
+			onFileSettled: dst => {
+				settled.push(dst);
+			},
+		});
+		const first = path.join(tempDir, "one.md");
+		const second = path.join(tempDir, "two.md");
+		const batchId = "flush-settled";
+
+		await writethrough(first, "one\n", undefined, undefined, { id: batchId, flush: false });
+		expect(settled).toEqual([]);
+		await writethrough(second, "two\n", undefined, undefined, { id: batchId, flush: true });
+
+		expect(settled).toEqual([first]);
+		expect(await Bun.file(first).text()).toBe("one\n");
+		expect(await Bun.file(second).text()).toBe("two\n");
 	});
 });

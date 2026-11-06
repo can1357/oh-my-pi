@@ -656,6 +656,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			transformDiagnostics: dedup
 				? (path, result) => getDiagnosticsLedger(this.session).reduce(path, result)
 				: undefined,
+			onFileSettled: dst => noteOwnWrite(this.session, dst),
 			requestTimeoutSec: cfgLspRequestTimeout.get(settings),
 		});
 		return { writethrough, deferred: enableDiagnostics ? this.#deferredDiagnostics : undefined };

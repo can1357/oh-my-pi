@@ -15,11 +15,15 @@
  * cannot be taken degrades to a note saying so. Nothing here throws.
  *
  * What it costs on the ordinary path — a session rewriting a file it created —
- * is two `stat`s and two `realpath`s: one pair to decide (measured ~96 µs) and
- * one in {@link noteOwnWrite} to refresh the record (~38 µs), against a write
- * that takes milliseconds. The `realpath`s are what make the sessions-root test
- * agree with itself when `~/.omp` or the target is reached through a symlink; a
- * lexical test is cheaper and would under-insure.
+ * is two `stat`s and two `realpath`s: one pair to decide and one in
+ * {@link noteOwnWrite} to refresh the record, against a write that takes
+ * milliseconds. Measured end to end over a whole tool call, twice and
+ * independently, both times on a loaded many-core box: +0.99 ms on a file's
+ * first write and +0.57 ms on each one after, and +0.47 ms / +0.07 ms on the
+ * second measurement. Same shape, materially different size; neither run is an
+ * upper bound, because neither machine was quiet. The `realpath`s are what make
+ * the sessions-root test agree with itself when `~/.omp` or the target is
+ * reached through a symlink; a lexical test is cheaper and would under-insure.
  *
  * Bounds (see {@link RETENTION_DAYS}, {@link STORE_BUDGET_BYTES},
  * {@link MAX_BACKUP_BYTES}): copies live under `~/.omp/agent/clobbered/<date>/`
@@ -228,12 +232,30 @@ async function clobberReason(
  * The record still revokes itself: {@link clobberReason} compares size, mtime,
  * ctime and inode, so anything another writer does to the file between this
  * session's writes brings the insurance straight back.
+ *
+ * What it cannot see is a writer that lands BETWEEN the session's write and the
+ * `stat` below: that content is recorded as the session's own and the next
+ * write destroys it without a copy. The window is one `stat` wide — the
+ * `realpath` runs after it, so nothing but the `stat` itself sits between the
+ * bytes landing and the record — and `ino` closes the common shape, because a
+ * writer that replaces a file by writing a new one and renaming it over the old
+ * (what every editor, `git checkout` and atomic-write helper does) changes the
+ * inode and is caught. What is left is an in-place, equal-length write by
+ * another process landing inside that one `stat`: it keeps the inode, and its
+ * mtime and ctime are the ones the record then stores. The residue is one
+ * intermediate state of a file an external tool was concurrently rewriting
+ * anyway. Comparing the observed size against the bytes written would narrow it
+ * further, but the LSP writethrough legitimately reformats inside the same
+ * window, so that check would re-insure every formatted file on every edit —
+ * a certain cost for every user against a rare, narrow hole.
  */
 export async function noteOwnWrite(session: ClobberBackupSession, absolutePath: string): Promise<void> {
 	try {
-		const target = await realPath(absolutePath, false);
-		const stat = await fs.promises.stat(target).catch(() => undefined);
+		// The `stat` first and the `realpath` after: everything deferred past the
+		// `stat` is time an external writer cannot use to get itself recorded.
+		const stat = await fs.promises.stat(absolutePath).catch(() => undefined);
 		if (!stat?.isFile()) return;
+		const target = await realPath(absolutePath, false);
 		createdFiles(session).byPath.set(target, {
 			size: stat.size,
 			mtimeMs: stat.mtimeMs,
@@ -248,6 +270,25 @@ export async function noteOwnWrite(session: ClobberBackupSession, absolutePath: 
 /** Forget a path this session wrote, for a caller that then deleted or moved it away. */
 export async function forgetOwnWrite(session: ClobberBackupSession, absolutePath: string): Promise<void> {
 	session.clobberCreatedPaths?.byPath.delete(await realPath(absolutePath, false));
+}
+
+/**
+ * True when what `absolutePath` holds right now is this session's own output:
+ * it has a record and the file still matches it. For a caller that is about to
+ * carry those bytes somewhere else — a rename — and has to decide whether the
+ * destination inherits the exemption or earns none.
+ */
+export async function ownsCurrentContent(session: ClobberBackupSession, absolutePath: string): Promise<boolean> {
+	const stat = await fs.promises.stat(absolutePath).catch(() => undefined);
+	if (!stat?.isFile()) return false;
+	const written = session.clobberCreatedPaths?.byPath.get(await realPath(absolutePath, false));
+	return (
+		written !== undefined &&
+		written.size === stat.size &&
+		written.mtimeMs === stat.mtimeMs &&
+		written.ctimeMs === stat.ctimeMs &&
+		written.ino === Number(stat.ino)
+	);
 }
 
 /** Longest entry name a POSIX filesystem accepts, in bytes. */
