@@ -4253,6 +4253,13 @@ export class InteractiveMode implements InteractiveModeContext {
 			// setPreferences re-themes the editor, which resets its mode-tinted border.
 			this.updateEditorBorderColor();
 		}
+		if (any("spelling.typoDetection", "spelling.autocomplete", "spelling.autocorrect")) {
+			this.hookEditor?.setSpellingFeatures({
+				typoDetection: cfgSpellingTypoDetection.get(this.settings),
+				autocomplete: cfgSpellingAutocomplete.get(this.settings),
+				autocorrect: cfgSpellingAutocorrect.get(this.settings),
+			});
+		}
 		if (any("composer.shape")) this.syncComposerShape();
 		if (any("tui.vimMode", "tui.vimModeDisplay")) this.#applyVimModeSetting();
 		if (any("display.pinnedAgents")) this.applyPinnedAgentsSetting();
