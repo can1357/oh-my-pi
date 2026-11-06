@@ -17,6 +17,12 @@ export interface MCPServer {
 	name: string;
 	/** Whether this server is enabled (default: true) */
 	enabled?: boolean;
+	/**
+	 * Connect on first use instead of at startup. Startup serves the tool
+	 * definitions cached from the last successful connect; the first tool
+	 * invocation (or `/mcp reconnect`) establishes the real connection.
+	 */
+	lazy?: boolean;
 	/** Connection timeout in milliseconds */
 	timeout?: number;
 	/** Encoding for outgoing JSON-RPC request ids (default: `"number"`) */
@@ -69,9 +75,22 @@ export interface MCPServer {
 	};
 	/** Transport type */
 	transport?: "stdio" | "sse" | "http";
+	/**
+	 * The connection fields as the config file wrote them, where they differ
+	 * from the fields above: before the provider expanded `${VAR}` placeholders
+	 * or read an env-forwarded value, a `{file:...}` reference or a plugin root.
+	 * The tool cache keys the server's catalog on them (`attachConfigAsWritten`
+	 * in `mcp/tool-cache.ts`), so a rotated credential keeps the catalog.
+	 */
+	asWritten?: MCPServerAsWritten;
 	/** Source metadata (added by loader) */
 	_source: SourceMeta;
 }
+
+/** The {@link MCPServer} connection fields a provider can fill from values it reads at load time. */
+export type MCPServerAsWritten = Partial<
+	Pick<MCPServer, "command" | "args" | "env" | "cwd" | "url" | "headers" | "auth" | "oauth">
+>;
 
 /** Compare the transport inputs that determine which MCP endpoint gets connected. */
 export function isSameMCPConnection(left: MCPServer, right: MCPServer): boolean {

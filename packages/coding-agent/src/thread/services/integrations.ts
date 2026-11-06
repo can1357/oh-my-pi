@@ -337,6 +337,7 @@ function serveMcpManager(state: PeerIntegrationState): RpcServe<MCPManager, McpM
 		readServerResource: (manager, name, uri, options) => manager.readServerResource(name, uri, options),
 		serverInstructions: manager => manager.getServerInstructions(),
 		reconcileBrowserFilter: (manager, enabled) => manager.reconcileBrowserFilter(enabled),
+		explainMissingTool: (manager, toolName, scope) => manager.explainMissingTool(toolName, scope),
 	};
 }
 

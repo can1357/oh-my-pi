@@ -31,6 +31,13 @@ import {
 	type OAuthFlowResult,
 } from "../../mcp/oauth-reauth";
 import { connectToServer, disconnectServer, listTools } from "../../mcp/client";
+import { mcpDiscoveryOptionsForSession, type LoadMCPConfigsOptions } from "../../mcp/config";
+import {
+	describeTestedServerSync,
+	syncTestedServer,
+	TESTED_SERVER_CLOSE_WAIT_MS,
+	type TestedServerSync,
+} from "../../mcp/tested-server";
 import {
 	addMCPServer,
 	readDisabledServers,
@@ -1005,13 +1012,21 @@ export class MCPCommandController {
 		}
 	}
 
-	async #syncManagerConnection(name: string, config: MCPServerConfig): Promise<void> {
-		if (!this.ctx.mcpManager) return;
-		if (this.ctx.mcpManager.getConnectionStatus(name) !== "disconnected") return;
-		await this.ctx.mcpManager.connectServers({ [name]: config }, {});
-		if (this.ctx.mcpManager.getConnectionStatus(name) === "connected") {
-			await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
-		}
+	/** Same discovery filters as startup, for each command-side rediscovery. */
+	#discoveryOptions(): LoadMCPConfigsOptions {
+		return mcpDiscoveryOptionsForSession(this.ctx.settings, this.ctx.session);
+	}
+
+	/** Hand a just-tested server to the session's manager ({@link syncTestedServer}). */
+	async #syncManagerConnection(name: string): Promise<TestedServerSync> {
+		if (!this.ctx.mcpManager) return "synced";
+		return await syncTestedServer({
+			manager: this.ctx.mcpManager,
+			name,
+			cwd: getProjectDir(),
+			discovery: this.#discoveryOptions(),
+			refreshTools: tools => this.ctx.session.refreshMCPTools(tools),
+		});
 	}
 
 	async #handleWizardComplete(name: string, config: MCPServerConfig, scope: "user" | "project"): Promise<void> {
@@ -1038,7 +1053,7 @@ export class MCPCommandController {
 				try {
 					await this.#handleTestConnection(config);
 					isConnected = true;
-					await this.#syncManagerConnection(name, config);
+					await this.#syncManagerConnection(name);
 				} catch {
 					// Keep disconnected status
 				}
@@ -1173,18 +1188,7 @@ export class MCPCommandController {
 				for (const name of userServers) {
 					const config = userConfig.mcpServers![name];
 					const type = config.type ?? "stdio";
-					const state =
-						config.enabled === false
-							? "inactive"
-							: (this.ctx.mcpManager?.getConnectionStatus(name) ?? "disconnected");
-					const status =
-						state === "inactive"
-							? theme.fg("warning", " ◌ inactive")
-							: state === "connected"
-								? theme.fg("success", " ● connected")
-								: state === "connecting"
-									? theme.fg("muted", " ◌ connecting")
-									: theme.fg("muted", " ○ not connected");
+					const status = this.#formatListStatus(name, config.enabled === false);
 					lines.push(`  ${theme.fg("accent", name)}${status} ${theme.fg("dim", `[${type}]`)}`);
 				}
 				lines.push("");
@@ -1196,18 +1200,7 @@ export class MCPCommandController {
 				for (const name of projectServers) {
 					const config = projectConfig.mcpServers![name];
 					const type = config.type ?? "stdio";
-					const state =
-						config.enabled === false
-							? "inactive"
-							: (this.ctx.mcpManager?.getConnectionStatus(name) ?? "disconnected");
-					const status =
-						state === "inactive"
-							? theme.fg("warning", " ◌ inactive")
-							: state === "connected"
-								? theme.fg("success", " ● connected")
-								: state === "connecting"
-									? theme.fg("muted", " ◌ connecting")
-									: theme.fg("muted", " ○ not connected");
+					const status = this.#formatListStatus(name, config.enabled === false);
 					lines.push(`  ${theme.fg("accent", name)}${status} ${theme.fg("dim", `[${type}]`)}`);
 				}
 				lines.push("");
@@ -1218,13 +1211,7 @@ export class MCPCommandController {
 				for (const { providerName, shortPath, items: entries } of groupBySource(discoveredServers, e => e.source)) {
 					lines.push(theme.fg("accent", providerName) + theme.fg("muted", ` (${shortPath}):`));
 					for (const { name } of entries) {
-						const state = this.ctx.mcpManager!.getConnectionStatus(name);
-						const status =
-							state === "connected"
-								? theme.fg("success", " ● connected")
-								: state === "connecting"
-									? theme.fg("muted", " ◌ connecting")
-									: theme.fg("muted", " ○ not connected");
+						const status = this.#formatListStatus(name, false);
 						lines.push(`  ${theme.fg("accent", name)}${status}`);
 					}
 					lines.push("");
@@ -1244,6 +1231,29 @@ export class MCPCommandController {
 		} catch (error) {
 			this.ctx.showError(`Failed to list servers: ${error instanceof Error ? error.message : String(error)}`);
 		}
+	}
+
+	/** One server's `/mcp list` status badge. */
+	#formatListStatus(name: string, inactive: boolean): string {
+		if (inactive) return theme.fg("warning", " ◌ inactive");
+		const manager = this.ctx.mcpManager;
+		const state = manager?.getConnectionStatus(name) ?? "disconnected";
+		if (state === "connected") return theme.fg("success", " ● connected");
+		if (state === "connecting") return theme.fg("muted", " ◌ connecting");
+		const toolCount = manager?.getTools().filter(tool => tool.mcpServerName === name).length ?? 0;
+		if (toolCount === 0 || !manager) return theme.fg("muted", " ○ not connected");
+		const tools = `${toolCount} tool${toolCount === 1 ? "" : "s"}`;
+		// Tools registered without a connection are a cached catalog, which a
+		// server whose last connect failed keeps too (`MCPManager.isServerDormant`).
+		// Only a dormant server connects when one of them is invoked; for the
+		// other the invocation is refused and `/mcp reconnect` is the recovery,
+		// so its badge counts the catalog and claims nothing more.
+		return theme.fg(
+			"muted",
+			manager.isServerDormant(name)
+				? ` ○ not connected · ${tools}, connects on first use`
+				: ` ○ not connected · ${tools} cached`,
+		);
 	}
 
 	/**
@@ -1357,7 +1367,11 @@ export class MCPCommandController {
 				return;
 			}
 
-			const { config } = found;
+			// `config` is the file entry: what `enabled: false` is a statement
+			// about, and what a write-back edits. The connection is made from
+			// `connectionConfig`, the same entry with its `${VAR}`
+			// placeholders expanded as discovery expands them.
+			const { config, connectionConfig } = found;
 			if (config.enabled === false) {
 				this.ctx.mcpTestEscapeHandlers.delete(handleEscape);
 				this.ctx.showError(`Server "${name}" is disabled. Run /mcp enable ${name} first.`);
@@ -1392,11 +1406,11 @@ export class MCPCommandController {
 			// Resolve auth config if needed
 			let resolvedConfig: MCPServerConfig;
 			if (this.ctx.mcpManager) {
-				resolvedConfig = await this.ctx.mcpManager.prepareConfig(config);
+				resolvedConfig = await this.ctx.mcpManager.prepareConfig(connectionConfig);
 			} else {
 				const tempManager = new MCPManager(getProjectDir());
 				tempManager.setAuthStorage(this.ctx.session.modelRegistry.authStorage);
-				resolvedConfig = await tempManager.prepareConfig(config);
+				resolvedConfig = await tempManager.prepareConfig(connectionConfig);
 			}
 
 			// Create temporary connection
@@ -1423,7 +1437,32 @@ export class MCPCommandController {
 			}
 
 			lines.push("");
-			await this.#syncManagerConnection(name, config);
+			if (connection) {
+				const testConnection = connection;
+				connection = undefined;
+				const closing = disconnectServer(testConnection);
+				const managerStatus = this.ctx.mcpManager?.getConnectionStatus(name);
+				if (managerStatus === "disconnected" || (managerStatus === "connecting" && config.lazy)) {
+					// The manager is about to open its own connection (a lazy seed,
+					// which can follow an automatic attempt still in flight, or an
+					// eager connect). Close this temporary one first: a server that
+					// permits only one active client (or holds a singleton lock) would
+					// otherwise see it still open while that connect competes for the
+					// same slot, and every retry in its ladder can fail. Session
+					// termination can hang (an HTTP server that never answers its
+					// DELETE, up to the configured timeout, or forever with
+					// `timeout: 0`), so the wait is bounded; the close carries on in
+					// the background.
+					await withTimeout(closing, TESTED_SERVER_CLOSE_WAIT_MS, "MCP test connection close timed out").catch(
+						() => {},
+					);
+				} else {
+					// Nothing will compete for the slot: never hold the result on it.
+					void closing.catch(() => {});
+				}
+			}
+			const note = describeTestedServerSync(name, await this.#syncManagerConnection(name));
+			if (note) lines.push(theme.fg("warning", `⚠ ${note.problem}`), `  ${note.next}`, "");
 			this.#showMessage(lines.join("\n"));
 		} catch (error) {
 			if (abortController.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
@@ -1603,9 +1642,10 @@ export class MCPCommandController {
 				await removeManagedMcpOAuthCredential(authStorage, currentAuth.credentialId);
 			}
 			// Also drop this profile's url-keyed binding so the server is truly
-			// signed out even when the config carries no auth block. Runtime
-			// discovery expands `${...}` URL values before MCPManager looks up the
-			// deterministic credential row, so unauth must clear that same key.
+			// signed out even when the config carries no auth block. The raw
+			// entry is the right input: `mcpOAuthCredentialIdsForServerUrl`
+			// returns the id for the expanded URL *and* for the literal one, so
+			// a row written before the URL became a `${VAR}` is cleared too.
 			let removedUrlKeyedCredential = false;
 			if ((found.config.type === "http" || found.config.type === "sse") && found.config.url) {
 				removedUrlKeyedCredential = await removeManagedMcpOAuthCredentials(
@@ -1800,9 +1840,7 @@ export class MCPCommandController {
 			return;
 		}
 
-		const { configs, sources } = await loadAllMCPConfigs(getProjectDir(), {
-			extensionRoots: this.ctx.session.effectiveExtensionRoots,
-		});
+		const { configs, sources } = await loadAllMCPConfigs(getProjectDir(), this.#discoveryOptions());
 		const config = configs[name];
 		if (!config) {
 			await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
@@ -1856,12 +1894,7 @@ export class MCPCommandController {
 		clearFsCache();
 
 		// Rediscover and connect, mirroring startup's discovery filters.
-		const result = await this.ctx.mcpManager.discoverAndConnect({
-			enableProjectConfig: cfgMcpEnableProjectConfig.get(this.ctx.settings),
-			filterExa: true,
-			filterBrowser: this.ctx.session.getEvalPreludes().some(definition => definition.name === "browser"),
-			extensionRoots: this.ctx.session.effectiveExtensionRoots,
-		});
+		const result = await this.ctx.mcpManager.discoverAndConnect(this.#discoveryOptions());
 		await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
 
 		this.#showMCPConnectionErrors(result.errors);

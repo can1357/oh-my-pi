@@ -1,6 +1,14 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
+import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
+import { createExtensionDashboardRuntime } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/dashboard-runtime";
 import { applyMcpToggleRuntime } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/mcp-runtime";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 function stubCustomTool(name: string): CustomTool {
 	return {
@@ -109,4 +117,59 @@ describe("applyMcpToggleRuntime", () => {
 		]);
 		expect(connected).toEqual([]);
 	});
+});
+
+test("dashboard MCP enable includes the session's explicit extension roots", async () => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-dashboard-mcp-root-"));
+	const project = path.join(root, "project");
+	const extension = path.join(root, "extension");
+	const home = path.join(root, "home");
+	const originalHome = process.env.HOME;
+	try {
+		await fs.mkdir(path.join(project, ".git"), { recursive: true });
+		await fs.mkdir(home, { recursive: true });
+		await Bun.write(
+			path.join(extension, "package.json"),
+			JSON.stringify({ name: "dashboard-extension", omp: { extensions: ["./main.ts"] } }),
+		);
+		await Bun.write(path.join(extension, "main.ts"), "export default function (_pi) {}\n");
+		await Bun.write(
+			path.join(extension, ".mcp.json"),
+			JSON.stringify({ mcpServers: { dashboard: { command: "dashboard-mcp" } } }),
+		);
+		process.env.HOME = home;
+		vi.spyOn(os, "homedir").mockReturnValue(home);
+		clearFsCache();
+		const roots: EffectiveExtensionRoots = {
+			explicit: [extension],
+			mode: "explicit-only",
+			configured: [],
+			configuredLevel: "user",
+		};
+		const connected: Array<Record<string, { command?: string }>> = [];
+		const runtime = createExtensionDashboardRuntime({
+			cwd: project,
+			settings: Settings.isolated(),
+			mcpManager: {
+				getConnectionStatus: () => "disconnected",
+				getTools: () => [],
+				disconnectServer: async () => {},
+				connectServers: async (configs: Record<string, { command?: string }>) => {
+					connected.push(configs);
+					return { errors: new Map() };
+				},
+			} as never,
+			extensionRoots: roots,
+		});
+
+		await runtime.applyMcpToggle("dashboard", true);
+
+		expect(connected).toEqual([{ dashboard: expect.objectContaining({ command: "dashboard-mcp" }) }]);
+	} finally {
+		vi.restoreAllMocks();
+		clearFsCache();
+		if (originalHome === undefined) delete process.env.HOME;
+		else process.env.HOME = originalHome;
+		await removeWithRetries(root);
+	}
 });

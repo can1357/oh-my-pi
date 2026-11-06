@@ -92,6 +92,8 @@ export class CredentialPool implements CredentialsApi {
 	#data: Map<string, StoredCredential[]> = new Map();
 	/** Recent bearer fingerprints resolved for each durable OAuth row; used only for delayed usage-limit attribution. */
 	#oauthBearerFingerprints: Map<string, Map<number, string[]>> = new Map();
+	/** The reload a {@link CredentialPool.poll} started for an external commit, while it runs. */
+	#pollReload: Promise<void> | undefined;
 	#credentialDisabledListeners: Set<(event: CredentialDisabledEvent) => void | Promise<void>> = new Set();
 	/**
 	 * Buffer for credential_disabled events fired while no listener is subscribed.
@@ -166,12 +168,26 @@ export class CredentialPool implements CredentialsApi {
 	/**
 	 * Reload state after another process commits to the backing store, then
 	 * notify snapshot consumers even when only credential blocks changed.
+	 *
+	 * The store reports each external commit once, to the first poll that asks.
+	 * A poll that finds no new commit while an earlier poll is still reloading
+	 * for one waits for that reload, so no caller reads the pool before a commit
+	 * the store has already reported is in it.
 	 */
 	async poll(): Promise<boolean> {
 		const pollExternalChanges = this.#store.pollExternalChanges?.bind(this.#store);
-		if (!pollExternalChanges?.()) return false;
+		if (!pollExternalChanges?.()) {
+			if (this.#pollReload) await this.#pollReload;
+			return false;
+		}
 		const previousGeneration = this.#generation;
-		await this.reload();
+		const reload = this.reload();
+		this.#pollReload = reload;
+		try {
+			await reload;
+		} finally {
+			if (this.#pollReload === reload) this.#pollReload = undefined;
+		}
 		if (this.#generation === previousGeneration) this.bump("external-store");
 		return true;
 	}

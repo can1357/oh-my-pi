@@ -38,8 +38,10 @@ import {
 	getProjectPath,
 	getUserPath,
 	loadFilesFromDir,
+	parseMcpBooleanField,
 	resolveUserPath,
 	scanSkillsFromDir,
+	withMcpAsWritten,
 } from "./helpers";
 
 import { cfgCommandsEnableOpencodeProject, cfgCommandsEnableOpencodeUser } from "../extensibility/settings";
@@ -77,6 +79,18 @@ async function loadJsonConfig(
 		return null;
 	}
 	return parsed;
+}
+
+/** Parse OpenCode JSONC before its `{env:...}` / `{file:...}` substitutions. */
+async function loadJsonConfigAsWritten(configPath: string): Promise<Record<string, unknown> | null> {
+	const content = await readFile(configPath);
+	if (!content) return null;
+	try {
+		const parsed: unknown = JSONC.parse(content);
+		return isRecord(parsed) ? parsed : null;
+	} catch {
+		return null;
+	}
 }
 
 /**
@@ -199,6 +213,7 @@ interface OpenCodeMCPConfig {
 	url?: string;
 	headers?: Record<string, string>;
 	enabled?: boolean;
+	lazy?: boolean | string;
 	timeout?: number;
 	oauth?: {
 		clientId?: string;
@@ -271,11 +286,15 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 	// definition and being rejected by mcpCapability.validate.
 	const mergedByName = new Map<string, Record<string, unknown>>();
 	const sourceByName = new Map<string, OpenCodeConfigSource>();
+	const asWrittenByName = new Map<string, Record<string, unknown>>();
 
 	for (const source of getConfigSources(ctx)) {
-		const config = await loadJsonConfig(source.path, configPath => {
-			logger.warn("Failed to parse OpenCode config", { path: configPath });
-		});
+		const [config, asWritten] = await Promise.all([
+			loadJsonConfig(source.path, configPath => {
+				logger.warn("Failed to parse OpenCode config", { path: configPath });
+			}),
+			loadJsonConfigAsWritten(source.path),
+		]);
 		if (!config || !isRecord(config.mcp)) continue;
 
 		for (const name in config.mcp) {
@@ -288,13 +307,21 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			mergedByName.set(name, previous ? mergeConfigRecords(previous, raw) : raw);
 			sourceByName.set(name, source);
 		}
+		if (asWritten && isRecord(asWritten.mcp)) {
+			for (const name in asWritten.mcp) {
+				const entry = asWritten.mcp[name];
+				if (!isRecord(entry)) continue;
+				const previous = asWrittenByName.get(name);
+				asWrittenByName.set(name, previous ? mergeConfigRecords(previous, entry) : entry);
+			}
+		}
 	}
 
 	const items: MCPServer[] = [];
 	for (const [name, config] of mergedByName) {
 		const serverConfig = config as OpenCodeMCPConfig;
 		const source = sourceByName.get(name)!;
-		items.push(buildMCPServer(name, serverConfig, source));
+		items.push(buildMCPServer(name, serverConfig, source, asWrittenByName.get(name)));
 	}
 
 	return { items, warnings };
@@ -312,7 +339,20 @@ function mergeConfigRecords(base: Record<string, unknown>, override: Record<stri
 }
 
 /** Translate one merged OpenCode MCP entry into the canonical MCPServer shape. */
-function buildMCPServer(name: string, serverConfig: OpenCodeMCPConfig, source: OpenCodeConfigSource): MCPServer {
+function buildMCPServer(
+	name: string,
+	serverConfig: OpenCodeMCPConfig,
+	source: OpenCodeConfigSource,
+	asWritten?: Record<string, unknown>,
+): MCPServer {
+	const server = buildMCPServerFields(name, serverConfig, source);
+	return asWritten
+		? withMcpAsWritten(server, buildMCPServerFields(name, asWritten as OpenCodeMCPConfig, source))
+		: server;
+}
+
+/** Map one OpenCode config shape after any required variable substitution. */
+function buildMCPServerFields(name: string, serverConfig: OpenCodeMCPConfig, source: OpenCodeConfigSource): MCPServer {
 	// Determine transport from OpenCode's "type" field
 	let transport: "stdio" | "sse" | "http" | undefined;
 	if (serverConfig.type === "local") {
@@ -336,6 +376,7 @@ function buildMCPServer(name: string, serverConfig: OpenCodeMCPConfig, source: O
 		url: typeof serverConfig.url === "string" ? serverConfig.url : undefined,
 		headers: serverConfig.headers && typeof serverConfig.headers === "object" ? serverConfig.headers : undefined,
 		enabled: serverConfig.enabled,
+		lazy: parseMcpBooleanField(serverConfig.lazy),
 		timeout: typeof serverConfig.timeout === "number" ? serverConfig.timeout : undefined,
 		oauth: normalizeOAuth(serverConfig.oauth),
 		transport,

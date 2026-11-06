@@ -48,6 +48,7 @@ export type McpManagerProtocol = {
 	>;
 	serverInstructions: RpcMethod<[], Map<string, string>>;
 	reconcileBrowserFilter: RpcMethod<[enabled: boolean], void>;
+	explainMissingTool: RpcMethod<[toolName: string, scope: MCPToolScope | undefined], string | undefined>;
 };
 
 /** Worker-side proxy of one main-thread `MCPManager`. */
@@ -118,5 +119,10 @@ export class RemoteMCPManager implements MCPManagerApi {
 
 	reconcileBrowserFilter(enabled: boolean): Promise<void> {
 		return this.#remote.call("reconcileBrowserFilter", enabled);
+	}
+
+	/** The note for `scope`'s view, so a worker session never reads a claim about tools it cannot see. */
+	explainMissingTool(toolName: string, scope?: MCPToolScope): string | undefined {
+		return this.#remote.callSync("explainMissingTool", toolName, scope);
 	}
 }

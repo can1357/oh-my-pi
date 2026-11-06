@@ -613,6 +613,7 @@ export class SelectorController {
 				onMcpToolsChanged: tools => this.ctx.session.refreshMCPTools(tools),
 				browserMcpFilterEnabled: () =>
 					this.ctx.session.getEvalPreludes().some(definition => definition.name === "browser"),
+				extensionRoots: this.ctx.session.effectiveExtensionRoots,
 			}),
 			terminalHeight: this.ctx.ui.terminal.rows,
 			toolSource: {

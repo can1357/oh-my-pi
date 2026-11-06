@@ -24,6 +24,8 @@ import {
 	getProjectPath,
 	getUserPath,
 	loadFilesFromDir,
+	parseMcpBooleanField,
+	withMcpAsWritten,
 } from "./helpers";
 
 const PROVIDER_ID = "windsurf";
@@ -49,6 +51,7 @@ function parseServerConfig(
 		server: {
 			name,
 			enabled: typeof server.enabled === "boolean" ? server.enabled : undefined,
+			lazy: parseMcpBooleanField(server.lazy),
 			command: server.command as string | undefined,
 			args: server.args as string[] | undefined,
 			env: server.env as Record<string, string> | undefined,
@@ -88,7 +91,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 		for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
 			const result = parseServerConfig(name, serverConfig, path, scope);
 			if (result.warning) warnings.push(result.warning);
-			if (result.server) items.push(result.server);
+			if (result.server) items.push(withMcpAsWritten(result.server, serverConfig));
 		}
 	}
 

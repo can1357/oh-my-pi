@@ -30,6 +30,8 @@ import {
 	getProjectPath,
 	getUserPath,
 	loadFilesFromDir,
+	parseMcpBooleanField,
+	withMcpAsWritten,
 } from "./helpers";
 
 const PROVIDER_ID = "cursor";
@@ -55,9 +57,10 @@ function parseMCPServers(
 	const servers = expandEnvVarsDeep(parsed.mcpServers);
 	for (const [name, config] of Object.entries(servers)) {
 		const serverConfig = config as Record<string, unknown>;
-		items.push({
+		const server: MCPServer = {
 			name,
 			enabled: typeof serverConfig.enabled === "boolean" ? serverConfig.enabled : undefined,
+			lazy: parseMcpBooleanField(serverConfig.lazy),
 			command: serverConfig.command as string | undefined,
 			args: serverConfig.args as string[] | undefined,
 			env: serverConfig.env as Record<string, string> | undefined,
@@ -68,7 +71,8 @@ function parseMCPServers(
 				: undefined,
 			timeout: typeof serverConfig.timeout === "number" ? serverConfig.timeout : undefined,
 			_source: createSourceMeta(PROVIDER_ID, path, level),
-		});
+		};
+		items.push(withMcpAsWritten(server, parsed.mcpServers[name]));
 	}
 
 	return { items };

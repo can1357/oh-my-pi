@@ -30,7 +30,7 @@ import {
 	validateAgentSkillFrontmatter,
 } from "./agent-plugin-format";
 import { resolveContainedPath } from "./contained-path";
-import { compareSkillOrder, createSourceMeta, listClaudePluginRoots } from "./helpers";
+import { compareSkillOrder, createSourceMeta, listClaudePluginRoots, withMcpAsWritten } from "./helpers";
 import { listOmpExtensionRoots } from "./omp-extension-roots";
 
 const PROVIDER_ID = "agent-plugins";
@@ -284,7 +284,7 @@ async function loadPluginMCPServers(
 	}
 
 	for (const server of result.servers) {
-		items.push({
+		const item: MCPServer = {
 			// Namespace by plugin name so servers from different plugins cannot
 			// collide in the capability registry (matches claude-plugins).
 			name: `${manifest.name}:${server.name}`,
@@ -302,7 +302,8 @@ async function loadPluginMCPServers(
 			// never expanded and never forwarded to a different origin.
 			...(server.url !== undefined && { headerPolicy: "origin-locked" as const }),
 			_source: createSourceMeta(PROVIDER_ID, mcpPath, candidate.level),
-		});
+		};
+		items.push(withMcpAsWritten(item, server.asWritten));
 	}
 	return { items, warnings };
 }

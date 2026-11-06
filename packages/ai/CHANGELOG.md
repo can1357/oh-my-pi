@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A credential another process stored reaches every `CredentialPool.poll()` caller: a poll that starts while an earlier one is still reloading now waits for that reload instead of returning before the new credential is in the pool ([#18014](https://github.com/can1357/oh-my-pi/pull/18014) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.17.0] - 2026-11-06
 
 ### Added

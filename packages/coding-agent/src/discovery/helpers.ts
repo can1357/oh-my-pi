@@ -9,6 +9,7 @@ import {
 	getPluginsDir,
 	getProjectDir,
 	isEnoent,
+	isRecord,
 	logger,
 	normalizePathForComparison,
 	parseFrontmatter,
@@ -19,6 +20,7 @@ import { isUserSourceEnabled } from "../capability";
 import type { ContextFile } from "../capability/context-file";
 import type { ExtensionModule } from "../capability/extension-module";
 import { invalidate as invalidateFsCache, readDirEntries, readFile } from "../capability/fs";
+import type { MCPServer, MCPServerAsWritten } from "../capability/mcp";
 import {
 	MAIN_AGENT_RULE_NAME,
 	parseRuleAgents,
@@ -165,12 +167,12 @@ export function createSourceMeta(
 	};
 }
 
-export function parseBoolean(value: unknown): boolean | undefined {
+export function parseBoolean(value: unknown, options?: { numeric?: boolean }): boolean | undefined {
 	if (typeof value === "boolean") return value;
 	if (typeof value === "string") {
 		const normalized = value.trim().toLowerCase();
-		if (normalized === "true") return true;
-		if (normalized === "false") return false;
+		if (normalized === "true" || (options?.numeric && normalized === "1")) return true;
+		if (normalized === "false" || (options?.numeric && normalized === "0")) return false;
 	}
 	return undefined;
 }
@@ -182,6 +184,49 @@ export function parseBoolean(value: unknown): boolean | undefined {
 export function parseRequestIdFormat(value: unknown): MCPRequestIdFormat | undefined {
 	if (value === "string" || value === "number") return value;
 	return undefined;
+}
+
+/**
+ * Parse an MCP server boolean field (`enabled`, `lazy`). Accepts real
+ * booleans and the string forms "true"/"false"/"1"/"0" so hand-edited JSON
+ * (env expansion, shell-generated configs) round-trips the same across every
+ * discovery provider; anything else is dropped so a typo falls back to the
+ * default rather than silently taking on the wrong value.
+ */
+export function parseMcpBooleanField(value: unknown): boolean | undefined {
+	return parseBoolean(value, { numeric: true });
+}
+
+const MCP_AS_WRITTEN_FIELDS = [
+	"command",
+	"args",
+	"env",
+	"cwd",
+	"url",
+	"headers",
+	"auth",
+	"oauth",
+] as const satisfies readonly (keyof MCPServerAsWritten)[];
+
+/**
+ * Record on `server` the connection fields that `entry`, its config-file entry
+ * before the provider expanded `${VAR}` placeholders (or read a plugin root),
+ * wrote differently. Only fields the provider set count, and `entry` must use
+ * the {@link MCPServer} field names. The tool cache keys the server's catalog
+ * on these, so a rotated `${TOKEN}` keeps the catalog. Returns `server`.
+ */
+export function withMcpAsWritten<T extends MCPServer>(server: T, entry: unknown): T {
+	if (!isRecord(entry)) return server;
+	const asWritten: Record<string, unknown> = {};
+	let differs = false;
+	for (const field of MCP_AS_WRITTEN_FIELDS) {
+		const written = entry[field];
+		if (server[field] === undefined || written === undefined || Bun.deepEquals(written, server[field])) continue;
+		asWritten[field] = written;
+		differs = true;
+	}
+	if (differs) server.asWritten = asWritten as MCPServerAsWritten;
+	return server;
 }
 
 /**

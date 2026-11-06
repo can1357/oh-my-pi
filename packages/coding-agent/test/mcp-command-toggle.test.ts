@@ -3,6 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { SourceMeta } from "@oh-my-pi/pi-coding-agent/capability/types";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgMcpEnableProjectConfig } from "@oh-my-pi/pi-coding-agent/mcp/settings";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -32,7 +34,7 @@ function restoreAgentDir(): void {
 	delete Bun.env.PI_CODING_AGENT_DIR;
 }
 
-function createController() {
+function createController(settings?: Settings) {
 	const refreshMCPTools = vi.fn(async () => {});
 	const connectServers = vi.fn(
 		async (_configs: Record<string, MCPServerConfig>, _sources: Record<string, SourceMeta>) => ({
@@ -46,6 +48,7 @@ function createController() {
 	const ctx = createInteractiveModeContext({
 		session: { refreshMCPTools },
 		mcpManager,
+		...(settings && { settings }),
 	});
 	const controller = new MCPCommandController(ctx);
 
@@ -119,5 +122,26 @@ describe("/mcp enable and disable", () => {
 		const [configs] = connectServers.mock.calls[0]!;
 		expect(Object.keys(configs)).toEqual(["mcp1"]);
 		expect(configs.mcp1).toEqual({ type: "stdio", command: "mcp-one", enabled: true });
+	});
+
+	// `/mcp enable` finds the user entry with `mcp.enableProjectConfig: false`,
+	// then rediscovers the server to connect it. That rediscovery must apply the
+	// same opt-out, or a same-named project server wins and its command starts
+	// (PR #9793 review: the /mcp test seed had the same defect).
+	test("enabling a user server does not connect an opted-out project server of the same name", async () => {
+		await Bun.write(
+			getMCPConfigPath("user", projectDir),
+			JSON.stringify({ mcpServers: { mcp1: { type: "stdio", command: "user-mcp", enabled: false } } }),
+		);
+		await writeProjectConfig(projectDir, { mcp1: { type: "stdio", command: "project-mcp" } });
+		const settings = Settings.isolated();
+		cfgMcpEnableProjectConfig.set(settings, false);
+		const { controller, connectServers } = createController(settings);
+
+		await controller.handle("/mcp enable mcp1");
+
+		expect(connectServers).toHaveBeenCalledTimes(1);
+		const [configs] = connectServers.mock.calls[0]!;
+		expect(configs.mcp1?.type === "stdio" ? configs.mcp1.command : undefined).toBe("user-mcp");
 	});
 });

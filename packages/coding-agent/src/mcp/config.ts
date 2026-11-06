@@ -7,9 +7,12 @@
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
 import { mcpCapability } from "../capability/mcp";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
+import type { Settings } from "../config/settings";
 import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
 import { readMCPConfigFile } from "./config-writer";
+import { cfgMcpEnableProjectConfig } from "./settings";
+import { attachConfigAsWritten } from "./tool-cache";
 import type { MCPConfigFile, MCPServerConfig } from "./types";
 
 /** Options for loading MCP configs */
@@ -24,6 +27,38 @@ export interface LoadMCPConfigsOptions {
 	extensionRoots?: EffectiveExtensionRoots;
 }
 
+/**
+ * Discovery options shared by startup and every live MCP rediscovery. Reusing
+ * them keeps command and dashboard enables from resurrecting a project server
+ * that `mcp.enableProjectConfig` excluded, or from losing a session extension
+ * root that startup included.
+ */
+export function sessionMcpDiscoveryOptions(
+	settings: Settings,
+	options: { filterBrowser: boolean; extensionRoots?: EffectiveExtensionRoots },
+): LoadMCPConfigsOptions {
+	return {
+		enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
+		filterExa: true,
+		filterBrowser: options.filterBrowser,
+		extensionRoots: options.extensionRoots,
+	};
+}
+
+/** The discovery options a live session loads MCP servers with. */
+export function mcpDiscoveryOptionsForSession(
+	settings: Settings,
+	session: {
+		getEvalPreludes(): readonly { readonly name: string }[];
+		readonly effectiveExtensionRoots: EffectiveExtensionRoots;
+	},
+): LoadMCPConfigsOptions {
+	return sessionMcpDiscoveryOptions(settings, {
+		filterBrowser: session.getEvalPreludes().some(definition => definition.name === "browser"),
+		extensionRoots: session.effectiveExtensionRoots,
+	});
+}
+
 /** Result of loading MCP configs */
 export interface LoadMCPConfigsResult {
 	/** Loaded server configs */
@@ -35,13 +70,22 @@ export interface LoadMCPConfigsResult {
 }
 
 /**
- * Convert canonical MCPServer to legacy MCPServerConfig.
+ * Convert canonical MCPServer to legacy MCPServerConfig. A server whose
+ * provider recorded fields as written ({@link MCPServer.asWritten}) also gets
+ * the config built from them as its tool-cache identity.
  */
 function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
+	const config = buildLegacyConfig(server);
+	if (server.asWritten) attachConfigAsWritten(config, buildLegacyConfig({ ...server, ...server.asWritten }));
+	return config;
+}
+
+function buildLegacyConfig(server: MCPServer): MCPServerConfig {
 	// Determine transport type
 	const transport = server.transport ?? (server.command ? "stdio" : server.url ? "http" : "stdio");
 	const shared = {
 		enabled: server.enabled,
+		lazy: server.lazy,
 		timeout: server.timeout,
 		requestIdFormat: server.requestIdFormat,
 		instructions: server.instructions,

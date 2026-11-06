@@ -1636,6 +1636,40 @@ describe("agentLoop with AgentMessage", () => {
 		expect(result?.isError).toBe(true);
 	});
 
+	it("appends the host's reason when a called tool is missing", async () => {
+		// Observed live: an MCP server failed at startup (HTTP 401, no stored
+		// login), so its tools were never registered, and the model's calls
+		// answered only `not found`. The host knows why; the miss must say it.
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "mcp__slack_read_thread", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const asked: string[] = [];
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			explainMissingTool: name => {
+				asked.push(name);
+				return "MCP server configured but not connected: slack: HTTP 401";
+			},
+		};
+
+		const messages = await agentLoop([createUserMessage("go")], context, config, undefined, mock.stream).result();
+		const result = messages.find((m): m is ToolResultMessage => m.role === "toolResult" && m.toolCallId === "tool-1");
+		const text = (result?.content ?? [])
+			.filter((c): c is { type: "text"; text: string } => c.type === "text")
+			.map(c => c.text)
+			.join("\n");
+
+		expect(text).toContain("Tool mcp__slack_read_thread not found");
+		expect(text).toContain("slack: HTTP 401");
+		expect(asked).toContain("mcp__slack_read_thread");
+		expect(result?.isError).toBe(true);
+	});
+
 	it("ranks the distinctive tail ahead of tools sharing only the generic one", async () => {
 		const toolSchema = type({ path: "string" });
 		const makeTool = (name: string): AgentTool<typeof toolSchema, { path: string }> => ({

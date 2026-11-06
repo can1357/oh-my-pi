@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `explainMissingTool` to `AgentOptions` and `AgentLoopConfig`: the host's reason a called tool name resolves to no tool, appended to the "Tool … not found" error ([#18014](https://github.com/can1357/oh-my-pi/pull/18014) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.17.0] - 2026-11-06
 
 ### Added

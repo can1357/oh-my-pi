@@ -3,6 +3,7 @@ import type { SlashCommandIconName } from "@oh-my-pi/pi-tui/theme/symbols";
 import type { InteractiveModeContext, SubmittedUserInput } from "../modes/types";
 import type { ConversationPosition } from "../modes/utils/conversation-position";
 import type { MCPManager } from "../mcp/manager";
+import type { TestedServerSync } from "../mcp/tested-server";
 import type { MCPServerConfig } from "../mcp/types";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionManager } from "../session/session-manager";
@@ -129,6 +130,13 @@ export interface SlashCommandRuntime {
 	 * those servers resolve like configured ones.
 	 */
 	mcpManager?: MCPManager | undefined;
+	/**
+	 * Hand a server that `/mcp test` just reached to the session's own MCP
+	 * manager (`syncTestedServer`). Provided by hosts whose manager holds
+	 * the session's configured servers (RPC); absent where it holds only
+	 * client-declared ones (ACP), so a test never adds on-disk servers there.
+	 */
+	syncTestedMcpServer?: (name: string) => Promise<TestedServerSync>;
 	notifyTitleChanged?: () => Promise<void> | void;
 	notifySessionPinChanged?: (sessionId: string, pinned: boolean) => Promise<void> | void;
 	/**

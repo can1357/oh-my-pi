@@ -29,7 +29,9 @@ import {
 	expandEnvVarsDeep,
 	getExtensionNameFromPath,
 	loadFilesFromDir,
+	parseMcpBooleanField,
 	scanSkillsFromDir,
+	withMcpAsWritten,
 } from "./helpers";
 import type { Setting } from "../config/registry";
 
@@ -115,9 +117,12 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 		const mcpServers = expandEnvVarsDeep(json.mcpServers);
 		return Object.entries(mcpServers).map(([name, config]) => {
 			const serverConfig = config as Record<string, unknown>;
-			return {
+			const server: MCPServer = {
 				name,
 				enabled: typeof serverConfig.enabled === "boolean" ? serverConfig.enabled : undefined,
+				// Same coercion as the omp mcp.json provider (mcp-json.ts): string
+				// forms arrive both verbatim and via ${ENV_VAR} expansion above.
+				lazy: parseMcpBooleanField(serverConfig.lazy),
 				timeout: typeof serverConfig.timeout === "number" ? serverConfig.timeout : undefined,
 				command: serverConfig.command as string | undefined,
 				args: serverConfig.args as string[] | undefined,
@@ -127,6 +132,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				transport: serverConfig.type as "stdio" | "sse" | "http" | undefined,
 				_source: createSourceMeta(PROVIDER_ID, path, level),
 			};
+			return withMcpAsWritten(server, json.mcpServers?.[name]);
 		});
 	};
 

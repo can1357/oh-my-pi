@@ -34,6 +34,8 @@ import {
 	expandEnvVarsDeep,
 	getProjectPath,
 	getUserPath,
+	parseMcpBooleanField,
+	withMcpAsWritten,
 } from "./helpers";
 
 const PROVIDER_ID = "gemini";
@@ -102,9 +104,10 @@ async function loadMCPFromSettings(
 
 		const raw = config as Record<string, unknown>;
 
-		items.push({
+		const server: MCPServer = {
 			name,
 			enabled: typeof raw.enabled === "boolean" ? raw.enabled : undefined,
+			lazy: parseMcpBooleanField(raw.lazy),
 			command: typeof raw.command === "string" ? raw.command : undefined,
 			args: Array.isArray(raw.args) ? (raw.args as string[]) : undefined,
 			env: raw.env && typeof raw.env === "object" ? (raw.env as Record<string, string>) : undefined,
@@ -115,7 +118,8 @@ async function loadMCPFromSettings(
 				: undefined,
 			timeout: typeof raw.timeout === "number" ? raw.timeout : undefined,
 			_source: createSourceMeta(PROVIDER_ID, path, level),
-		} as MCPServer);
+		};
+		items.push(withMcpAsWritten(server, parsed.mcpServers[name]));
 	}
 
 	return { items, warnings };

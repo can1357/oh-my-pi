@@ -52,7 +52,9 @@ import { requestTextPrediction, textPredictionBackend } from "../../predict/clie
 import { type AgentSession, type NavigateTreeResult, SessionBusyError } from "../../session/agent-session";
 import type { AgentSessionHandle } from "../../session/agent-session-handle";
 import type { MCPManager } from "../../mcp/manager";
+import { mcpDiscoveryOptionsForSession } from "../../mcp/config";
 import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
+import { syncTestedServer } from "../../mcp/tested-server";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import { CACHE_WARMING_MODES } from "../../session/cache-warmer";
 import { findMostRecentNonEmptySession, findRecentSessionContinuation } from "../../session/session-listing";
@@ -1944,6 +1946,16 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					refreshCommands: emitAvailableCommandsUpdate,
 					reloadPlugins: reloadPluginState,
 					mcpManager: options.mcpManager,
+					syncTestedMcpServer: options.mcpManager
+						? mcpName =>
+								syncTestedServer({
+									manager: options.mcpManager!,
+									name: mcpName,
+									cwd: session.sessionManager.getCwd(),
+									discovery: mcpDiscoveryOptionsForSession(session.settings, session),
+									refreshTools: tools => session.refreshMCPTools(tools),
+								})
+						: undefined,
 					reconnectMcpServer: options.mcpManager
 						? async (mcpName, selected) => {
 								const manager = options.mcpManager!;

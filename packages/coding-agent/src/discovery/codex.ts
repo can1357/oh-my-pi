@@ -158,6 +158,7 @@ async function loadTomlConfig(_ctx: LoadContext, path: string): Promise<Record<s
 /** Codex MCP server config format (from config.toml) */
 interface CodexMCPConfig {
 	enabled?: boolean;
+	lazy?: boolean;
 	command?: string;
 	args?: string[];
 	env?: Record<string, string>;
@@ -199,6 +200,7 @@ function extractMCPServersFromToml(
 			// lower-priority source disabled) and remain overridable via the user
 			// force-enable allowlist. Dropping here would defeat both.
 			...(config.enabled === false && { enabled: false }),
+			...(config.lazy !== undefined && { lazy: config.lazy === true }),
 			...(rooted.command !== undefined && { command: rooted.command }),
 			args: config.args,
 			url: config.url,
@@ -238,6 +240,35 @@ function extractMCPServersFromToml(
 		if (Object.keys(headers).length > 0) {
 			server.headers = headers;
 		}
+
+		// A `${VAR}` placeholder stands in for a value the environment
+		// supplied, so that rotating the variable keeps the server's cached
+		// catalog. It may stand in only where a value was actually taken:
+		// each substitution below repeats the condition its counterpart above
+		// applied. Substituting unconditionally made two different effective
+		// configurations hash the same — with `TOKEN` unset,
+		// `env = { TOKEN: "a" }` and `env = { TOKEN: "b" }` both keyed on
+		// `${TOKEN}`, so editing that literal left a lazy server serving the
+		// previous server's catalog.
+		const asWrittenEnv: Record<string, string> = { ...config.env };
+		for (const varName of config.env_vars ?? []) {
+			if (Bun.env[varName] !== undefined) asWrittenEnv[varName] = `\${${varName}}`;
+		}
+		const asWrittenHeaders: Record<string, string> = { ...config.http_headers };
+		for (const [headerName, varName] of Object.entries(config.env_http_headers ?? {})) {
+			if (Bun.env[varName] !== undefined) asWrittenHeaders[headerName] = `\${${varName}}`;
+		}
+		if (config.bearer_token_env_var && Bun.env[config.bearer_token_env_var]) {
+			asWrittenHeaders.Authorization = `Bearer \${${config.bearer_token_env_var}}`;
+		}
+		server.asWritten = {
+			...(config.command !== undefined && { command: config.command }),
+			...(config.args !== undefined && { args: config.args }),
+			...(Object.keys(asWrittenEnv).length > 0 && { env: asWrittenEnv }),
+			...(config.cwd !== undefined && { cwd: config.cwd }),
+			...(config.url !== undefined && { url: config.url }),
+			...(Object.keys(asWrittenHeaders).length > 0 && { headers: asWrittenHeaders }),
+		};
 
 		// Determine transport type (infer from config if not explicit)
 		if (config.url) {
