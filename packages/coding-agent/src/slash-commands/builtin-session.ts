@@ -5,12 +5,12 @@ import type { AgentSession } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import {
 	buildChangelogSummaryPrompt,
+	changelogSummaryMaxBytes,
 	getChangelogPath,
 	parseChangelog,
 	parseChangelogView,
 	renderChangelogEntries,
 	selectChangelogEntries,
-	splitChangelogSummaryArgs,
 } from "../utils/changelog";
 import { formatTokenCount, refreshStatusLine } from "./builtin-modes";
 import { buildContextReportText } from "./helpers/context-report";
@@ -496,9 +496,12 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		],
 		allowArgs: true,
 		handle: async (command, runtime) => {
-			const { summary, range } = splitChangelogSummaryArgs(command.args);
-			if (summary) {
-				const built = await buildChangelogSummaryPrompt(range);
+			const { verb, rest } = parseSubcommand(command.args);
+			if (verb === "summary") {
+				const built = await buildChangelogSummaryPrompt(
+					rest,
+					changelogSummaryMaxBytes(runtime.session.model?.contextWindow),
+				);
 				if ("error" in built) return usage(built.error, runtime);
 				if ("empty" in built) {
 					await runtime.output("No changelog entries found.");
@@ -506,7 +509,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				}
 				return { prompt: built.message };
 			}
-			const view = parseChangelogView(range);
+			const view = parseChangelogView(command.args);
 			if ("error" in view) return usage(view.error, runtime);
 			const changelogPath = getChangelogPath();
 			const allEntries = await parseChangelog(changelogPath);
@@ -519,10 +522,13 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
-			const { summary, range } = splitChangelogSummaryArgs(command.args);
-			if (summary) {
+			const { verb, rest } = parseSubcommand(command.args);
+			if (verb === "summary") {
 				clearSubmittedText(runtime);
-				const built = await buildChangelogSummaryPrompt(range);
+				const built = await buildChangelogSummaryPrompt(
+					rest,
+					changelogSummaryMaxBytes(runtime.ctx.session.model?.contextWindow),
+				);
 				if ("error" in built) {
 					runtime.ctx.showWarning(built.error);
 					return;
@@ -533,7 +539,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				}
 				return { prompt: built.message };
 			}
-			await runtime.ctx.handleChangelogCommand(range);
+			await runtime.ctx.handleChangelogCommand(command.args);
 			clearSubmittedText(runtime);
 		},
 	},

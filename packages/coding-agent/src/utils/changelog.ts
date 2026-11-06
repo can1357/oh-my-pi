@@ -32,6 +32,19 @@ export const CHANGELOG_SUMMARY_MAX_BYTES = 64 * 1024;
 export const CHANGELOG_SUMMARY_TRUNCATION_HINT = "Use `/changelog summary last 1` to review fewer releases.";
 
 /**
+ * Byte cap for the changelog inlined into a summary prompt, scaled to the
+ * session model's context window: the residual prompt shares the window with
+ * the system prompt, tool definitions and history, so a fixed cap can overflow
+ * a small-context model before it renders a digest. A third of the window at
+ * ~4 bytes/token, floored so even narrow windows still inline something;
+ * an unknown window keeps the default cap.
+ */
+export function changelogSummaryMaxBytes(contextWindowTokens: number | undefined | null): number {
+	if (!contextWindowTokens || contextWindowTokens <= 0) return CHANGELOG_SUMMARY_MAX_BYTES;
+	return Math.max(Math.min(CHANGELOG_SUMMARY_MAX_BYTES, Math.floor((contextWindowTokens / 3) * 4)), 4096);
+}
+
+/**
  * Parsed `/changelog` view. `recent` is the bare default; `last` is an explicit count.
  */
 export type ChangelogView = { kind: "full" } | { kind: "recent"; count: number } | { kind: "last"; count: number };
@@ -56,19 +69,6 @@ export function selectChangelogEntries(entries: readonly ChangelogEntry[], view:
 	return view.kind === "full" ? [...entries] : entries.slice(0, view.count);
 }
 
-/**
- * Split `/changelog [summary ...]` arguments. `summary` is recognized as the
- * whole first token; the remainder is a view range (`""`, `full`, `last [N]`).
- */
-export function splitChangelogSummaryArgs(args: string): { summary: boolean; range: string } {
-	const trimmed = args.trim();
-	const first = trimmed.split(/\s+/, 1)[0] ?? "";
-	if (first.toLowerCase() === "summary") {
-		return { summary: true, range: trimmed.slice(first.length).trim() };
-	}
-	return { summary: false, range: trimmed };
-}
-
 /** Human-readable view scope embedded into the summary prompt template. */
 function describeChangelogView(view: ChangelogView): string {
 	if (view.kind === "full") return "the complete changelog";
@@ -83,6 +83,7 @@ function describeChangelogView(view: ChangelogView): string {
  */
 export async function buildChangelogSummaryPrompt(
 	rangeArgs: string,
+	maxBytes: number = CHANGELOG_SUMMARY_MAX_BYTES,
 ): Promise<{ error: string } | { empty: true } | { message: string }> {
 	const view = parseChangelogView(rangeArgs);
 	if ("error" in view) return { error: CHANGELOG_COMMAND_USAGE };
@@ -92,7 +93,7 @@ export async function buildChangelogSummaryPrompt(
 	// the oldest rows drop and the releases the user is most likely reviewing
 	// — the current one — stay in the prompt.
 	const rendered = renderChangelogEntries(entries, {
-		maxBytes: CHANGELOG_SUMMARY_MAX_BYTES,
+		maxBytes,
 		truncationHint: CHANGELOG_SUMMARY_TRUNCATION_HINT,
 		oldestFirst: false,
 	});

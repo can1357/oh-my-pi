@@ -6,6 +6,7 @@ import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-comman
 import {
 	CHANGELOG_COMMAND_USAGE,
 	CHANGELOG_SUMMARY_MAX_BYTES,
+	changelogSummaryMaxBytes,
 	getChangelogPath,
 	parseChangelog,
 	RECENT_CHANGELOG_ENTRY_LIMIT,
@@ -21,7 +22,9 @@ function acpRuntime() {
 	const output = vi.fn((text: string) => {
 		chunks.push(text);
 	});
-	const runtime = { output } as unknown as SlashCommandRuntime;
+	// `session: {}` keeps the summary path's `session.model?.contextWindow`
+	// lookup on an unset model, exercising the default byte cap.
+	const runtime = { output, session: {} } as unknown as SlashCommandRuntime;
 	return { chunks, output, runtime };
 }
 
@@ -57,6 +60,15 @@ describe("/changelog", () => {
 		const full = acpRuntime();
 		await executeAcpBuiltinSlashCommand("/changelog full", full.runtime);
 		expect(versionHeadings(full.chunks.join("\n")).length).toBe(all.length);
+	});
+
+	it("caps the summary prompt to the session model's context budget", () => {
+		expect(changelogSummaryMaxBytes(undefined)).toBe(CHANGELOG_SUMMARY_MAX_BYTES);
+		// 8k token window: a third of the window at ~4 bytes/token.
+		expect(changelogSummaryMaxBytes(8192)).toBe(Math.floor((8192 / 3) * 4));
+		// Narrow windows keep the 4 KiB floor; large windows keep the 64 KiB default.
+		expect(changelogSummaryMaxBytes(2048)).toBe(4096);
+		expect(changelogSummaryMaxBytes(1_000_000)).toBe(CHANGELOG_SUMMARY_MAX_BYTES);
 	});
 
 	it("rejects a zero count and unknown subcommands", async () => {
@@ -143,6 +155,7 @@ describe("/changelog", () => {
 				showWarning: vi.fn(),
 				showStatus: vi.fn(),
 				handleChangelogCommand: vi.fn(async () => {}),
+				session: {},
 			} as unknown as InteractiveModeContext,
 		};
 		const result = await executeBuiltinSlashCommand("/changelog summary last 1", runtime);
