@@ -205,6 +205,17 @@ async fn a_sourced_files_return_trap_runs_before_the_parameters_go_back() {
 			"  trap: 2:[A B] ARGC=[2 2 2] S0=bash F0=f\n  f: 2:[FUN PARAM]\n  trap: 2:[FUN PARAM] \
 			 ARGC=[2 2] S0=bash F0=f\nafter: 2:[p1 p2]\n",
 		),
+		// An argument-less `.` pushes the FILE NAME onto `BASH_ARGV`, and
+		// bash pops that push in `_evalfile`, before the RETURN trap: the
+		// trap sees the caller's levels only. A `.` WITH arguments pushes
+		// those, and `source_builtin` pops them after the trap, so the row
+		// above still shows them. Measured on Bash 5.2.21 and 5.3.0, which
+		// print `ARGC=[2]` here and `ARGC=[2 2]` there.
+		(
+			&[("lib.sh", &format!("{show}:\n"))],
+			"set -- p1 p2\nshopt -s extdebug\n. ./lib.sh\necho \"after: $#:[$*]\"",
+			"  trap: 2:[p1 p2] ARGC=[2] S0= F0=\nafter: 2:[p1 p2]\n",
+		),
 	])
 	.await;
 }

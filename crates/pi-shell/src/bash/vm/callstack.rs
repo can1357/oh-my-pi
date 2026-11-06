@@ -52,22 +52,29 @@ pub enum CallKind {
 	/// name (no arguments) or, under `extdebug`, its arguments.
 	Source {
 		/// `BASH_SOURCE` entry: the file name as given.
-		file:    BString,
+		file:      BString,
 		/// `BASH_LINENO` entry: the line of the `.` command.
-		line:    u32,
+		line:      u32,
 		/// What was pushed onto `BASH_ARGV`.
-		argv:    Option<Vec<BString>>,
+		argv:      Option<Vec<BString>>,
 		/// What the end of the file puts back (`. file args`).
-		restore: Option<Box<SourceSave>>,
+		restore:   Option<Box<SourceSave>>,
 		/// bash runs a `.` file's RETURN trap between `_evalfile`, which
-		/// pops the `FUNCNAME`/`BASH_SOURCE`/`BASH_LINENO` level, and
-		/// `source_builtin`, which puts the positional parameters back and
-		/// pops the `BASH_ARGV` push. While the trap runs this is set: the
-		/// level is out of those three arrays and still on the other two.
-		ended:   bool,
+		/// pops the `FUNCNAME`/`BASH_SOURCE`/`BASH_LINENO` level **and the
+		/// file-name push**, and `source_builtin`, which puts the
+		/// positional parameters back and pops an arguments push. While
+		/// the trap runs this is set: the level is out of those three
+		/// arrays, and out of `BASH_ARGC`/`BASH_ARGV` too unless what it
+		/// pushed there was the `.`'s own arguments. Measured on Bash
+		/// 5.2.21 and 5.3.0: with `. f` the trap sees the caller's two
+		/// levels, with `. f A B` it still sees `C=[2 0] V=[B A]`.
+		ended:     bool,
+		/// The push onto `BASH_ARGV` was the file name, not the `.`'s own
+		/// arguments — so `_evalfile` pops it before the RETURN trap.
+		name_push: bool,
 		/// zsh `FUNCTION_ARGZERO` at the `.`: `$0` while the file runs (the
 		/// file name as given).
-		argzero: Option<BString>,
+		argzero:   Option<BString>,
 	},
 	/// bash's `init_bash_argv`: the positional parameters pushed onto
 	/// `BASH_ARGV` once, before the first function call (or `.` with
@@ -89,8 +96,13 @@ pub struct SourceSave {
 
 impl CallKind {
 	/// The `BASH_ARGV` push, in argument order.
+	///
+	/// A `.` file whose RETURN trap is running (`ended`) has already lost
+	/// its file-name push in bash's `_evalfile`; an arguments push
+	/// survives until `source_builtin`, which runs after the trap.
 	fn argv(&self) -> Option<&[BString]> {
 		match self {
+			Self::Source { ended: true, name_push: true, .. } => None,
 			Self::Function { argv, .. } | Self::Source { argv, .. } => argv.as_deref(),
 			Self::Args(args) => Some(args),
 		}
@@ -368,7 +380,8 @@ pub fn push_source(
 	restore: Option<Box<SourceSave>>,
 	argzero: Option<BString>,
 ) -> Result<(), StoreError> {
-	let argv = if args.is_empty() {
+	let name_push = args.is_empty();
+	let argv = if name_push {
 		Some(vec![file.clone()])
 	} else if state::option(&mut k.root, store, vp, OptId::Extdebug)? {
 		let base = state::positional_ref(&k.root, store, vp)?.to_vec();
@@ -379,7 +392,7 @@ pub fn push_source(
 	};
 	let depth = vp.frames.len() as u32;
 	vp.calls.push(Call {
-		kind: CallKind::Source { file, line, argv, restore, argzero, ended: false },
+		kind: CallKind::Source { file, line, argv, restore, argzero, ended: false, name_push },
 		depth,
 	});
 	Ok(())

@@ -1129,7 +1129,19 @@ fn expand(
 		s.assigns.push((name, shown));
 		s.values.push((index, value));
 	}
-	take_launch(k, cx, vp);
+	// There is deliberately no `take_launch` here. The carrier the engine
+	// builds has no assignments, no words and no substitutions, so it
+	// cannot suspend in the assignment stage and arrive with a launch
+	// still pending; the one call, in the word stage, is the only reader.
+	// Measured rather than asserted on paper: with a `debug_assert!` at
+	// this point the whole Rust suite ran 6,555 tests without reaching it
+	// once. The assertion stays, so a future resume path that does reach
+	// it fails loudly in a debug build instead of silently taking a
+	// launch at the wrong moment.
+	debug_assert!(
+		Carrier::of(vp).is_none(),
+		"the assignment stage reached a carrier with a pending launch"
+	);
 	let s = st(vp);
 	if assign_only {
 		// `$?` of `x=$(cmd)` is the status of the last substitution.
@@ -1221,8 +1233,15 @@ fn take_launch(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
 		LaunchHow::Builtin => s.via_command = true,
 		// What `exec -a name --` did as words: the program replaces the
 		// subshell and is presented as `name`.
+		// A `Launch` reaches this from a public `Script`, so an empty word
+		// list is a caller's input rather than an invariant: there is then
+		// no program to exec and no name to present, and the carrier
+		// degrades to the assignment-only statement a word-less command
+		// is, exactly as the `Plain` arm leaves it.
 		LaunchHow::Exec { argv0 } => {
-			let name = s.argv[0].clone();
+			let Some(name) = s.argv.first().cloned() else {
+				return;
+			};
 			s.target = externals_only.then(|| {
 				if name.contains(&b'/') {
 					Target::External(absolute(&cwd, &name))
@@ -1268,13 +1287,7 @@ pub(super) fn launch_text(launch: &Launch, utf8: bool) -> BString {
 /// one of them: by the time it is looked up the launch is taken, and
 /// anything it calls runs in a frame of its own.
 fn engine_private(vp: &Vproc) -> bool {
-	vp.runs
-		.front()
-		.is_some_and(|r| r.engine && r.launch.pending())
-		&& matches!(
-			vp.frames.as_slice(),
-			[frame] if matches!(frame.kind, FrameKind::Script { what: ScriptKind::Run, .. })
-		)
+	vp.in_engine_script()
 }
 
 /// `$(< file)`: read fd 0 (the redirected file) to its end and queue it

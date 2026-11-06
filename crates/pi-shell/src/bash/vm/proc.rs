@@ -241,6 +241,30 @@ impl VprocZsh {
 }
 
 impl Vproc {
+	/// Whether what is running right now is the engine's own synthetic
+	/// source for a host callout, before that callout's launch has been
+	/// taken: the front run is engine-authored
+	/// ([`Script::engine_source`](super::Script::engine_source)), it
+	/// still carries a launch, and the innermost — and only — frame is
+	/// that run's own script frame.
+	///
+	/// This is the whole boundary of the callout representation: which
+	/// commands resolve without the caller's aliases and function table,
+	/// which unit the engine may install as the carrier, and who may hold
+	/// a [`Carrier`]. It is one function so the three readers cannot
+	/// drift apart. A trap, a function or the operand itself runs a frame
+	/// deeper, so none of them is ever inside it.
+	pub(super) fn in_engine_script(&self) -> bool {
+		self
+			.runs
+			.front()
+			.is_some_and(|r| r.engine && r.launch.pending())
+			&& matches!(
+				self.frames.as_slice(),
+				[frame] if matches!(frame.kind, FrameKind::Script { what: ScriptKind::Run, .. })
+			)
+	}
+
 	/// zsh's current sticky emulation.
 	pub fn sticky(&self) -> Option<&crate::bash::store::Sticky> {
 		self.zsh.as_ref().and_then(|z| z.sticky.as_ref())
@@ -747,6 +771,7 @@ pub struct Coproc {
 
 /// Where the text of the command a vproc runs (`BASH_COMMAND`, the DEBUG
 /// and ERR traps, the trace) comes from.
+#[derive(Clone)]
 pub enum CmdSite {
 	/// A command of a compiled unit: the source bytes its syntax node
 	/// spans, as bash reports the text it parsed.
@@ -757,15 +782,6 @@ pub enum CmdSite {
 	/// vproc). The command the engine built to run them has no words at
 	/// all, so there is nothing of the engine's to report.
 	Text(Box<BString>),
-}
-
-impl Clone for CmdSite {
-	fn clone(&self) -> Self {
-		match self {
-			Self::Node(unit, node) => Self::Node(Arc::clone(unit), *node),
-			Self::Text(text) => Self::Text(text.clone()),
-		}
-	}
 }
 
 impl Vproc {
@@ -896,19 +912,18 @@ impl LaunchSlot {
 pub(super) struct Carrier(());
 
 impl Carrier {
-	/// The proof, if this vproc is running that command right now.
+	/// The proof, if this vproc is running that command right now: the
+	/// engine's own script ([`Vproc::in_engine_script`]) plus the one
+	/// thing that tells the carrier from the other commands of that
+	/// script — the content address of the unit the engine installed.
 	pub(super) fn of(vp: &Vproc) -> Option<Self> {
-		let run = vp.runs.front()?;
-		if !run.engine || !run.launch.pending() {
+		if !vp.in_engine_script() {
 			return None;
 		}
-		let carrier = run.carrier?;
+		let carrier = vp.runs.front()?.carrier?;
 		let [frame] = vp.frames.as_slice() else {
 			return None;
 		};
-		if !matches!(frame.kind, FrameKind::Script { what: ScriptKind::Run, .. }) {
-			return None;
-		}
 		(frame.unit.as_ref()?.id == carrier).then_some(Self(()))
 	}
 }
