@@ -74,6 +74,10 @@ export class TodoWrites {
 	#resolvable = false;
 	/** Queued writes and resolutions not yet settled. Native writes run inline only at zero. */
 	#pending = 0;
+	/** The id the last resolution settled on, with a backend or after falling back to native todos. */
+	#resolvedId: string | undefined;
+	/** A queued write ran since {@link keepLiveListAfterToolResult} last looked. */
+	#queuedWriteSinceSave = false;
 	/** Bumped whenever the list is reset or reloaded; queued writes from an older epoch must not land. */
 	#epoch = 0;
 
@@ -106,12 +110,15 @@ export class TodoWrites {
 	}
 
 	/**
-	 * Whether writes go through the queue: a non-native backend is selected in the main session or
-	 * still active, or queued work has not settled. Otherwise they run inline.
+	 * Whether writes go through the queue: a backend is active, queued work has not settled, or a
+	 * non-native id is selected in the main session and not yet resolved. Otherwise, including after
+	 * an id fell back to native todos, they run inline.
 	 */
 	get queued(): boolean {
 		if (this.#pending > 0 || this.#active) return true;
-		return this.#armed && this.#host.isMainAgent() && isBackendId(cfgTodoBackend.get(this.#host.settings));
+		if (!this.#armed || !this.#host.isMainAgent()) return false;
+		const id = cfgTodoBackend.get(this.#host.settings);
+		return isBackendId(id) && id !== this.#resolvedId;
 	}
 
 	/**
@@ -144,6 +151,7 @@ export class TodoWrites {
 				this.#observeSetting();
 				return this.#queue.run(() => {
 					assertCurrent();
+					this.#queuedWriteSinceSave = true;
 					return write(this.#active, { assertCurrent });
 				});
 			})(),
@@ -177,7 +185,8 @@ export class TodoWrites {
 			guard.assertCurrent();
 			if (!options?.mirrored) todo.setPhases(phases);
 			this.#host.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
-			return phases;
+			// The stored copy: `setPhases` keeps only the fields a todo list holds.
+			return options?.mirrored ? phases : todo.phases;
 		});
 	}
 
@@ -185,9 +194,11 @@ export class TodoWrites {
 	 * Call after saving a `todo` tool result. A queued tool write left the queue before the agent loop
 	 * saved its result, so a commit that ran in between (a `/todo` edit) saved its entry first, and a
 	 * rebuild from the branch would restore the tool's older list. Record the live list again then.
+	 * Native writes run inline, so with no queued write since the last call there is nothing to check.
 	 */
 	keepLiveListAfterToolResult(): void {
-		if (!this.queued) return;
+		if (!this.#queuedWriteSinceSave) return;
+		this.#queuedWriteSinceSave = false;
 		const live = this.#host.todo.phases;
 		if (Bun.deepEquals(getLatestTodoPhasesFromEntries(this.#host.sessionManager.getBranchView()), live)) return;
 		this.#host.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: live });
@@ -291,6 +302,8 @@ export class TodoWrites {
 	 */
 	async #resolve(id: string): Promise<void> {
 		this.#active = undefined;
+		// Runs inside a tracked queue slot, so writes stay queued until this resolution settles.
+		this.#resolvedId = id;
 		const runner = this.#host.extensionRunner();
 		if (!runner || this.#host.isDisposed() || !isBackendId(id)) return;
 		const definition = runner.getTodoBackend(id);

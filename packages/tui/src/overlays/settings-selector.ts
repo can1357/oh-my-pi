@@ -50,7 +50,7 @@ import { getComposerShapeOptions } from "./composer-shape-registry";
 import { bottomBorder, divider, row, topBorder } from "../chrome/overlay-box";
 import { sanitizeDisplayLineField, sanitizeDisplaySingleLine } from "./extensions/display-text";
 import { PluginSettingsComponent, type PluginSettingsHost } from "./plugin-settings";
-import { getSettingDef, getSettingsForTab, type SettingDef, type SubmenuSettingDef } from "./settings-defs";
+import { getSettingDef, getSettingsForTab, type SettingDef } from "./settings-defs";
 import { SnapcompactShapePreview } from "./snapcompact-shape-preview";
 import { themePickerOptions } from "./theme-selector";
 import type { SelectPickerOptions } from "../native/picker";
@@ -561,7 +561,7 @@ function getSettingsTabs(): Tab[] {
 }
 
 /** Supplies the live choices of a submenu setting whose options are only known at runtime. */
-export type RuntimeSettingOptionsProvider = (def: SubmenuSettingDef) => readonly SubmenuOption[];
+export type RuntimeSettingOptionsProvider = () => readonly SubmenuOption[];
 
 /**
  * Dynamic context for settings that need runtime data.
@@ -1594,7 +1594,7 @@ export class SettingsSelectorComponent implements Component {
 		const provider = this.#context.runtimeOptions?.get(def.path);
 		if (!provider) return def.options;
 		// Runtime choices can come from extensions, so sanitize them like other untrusted display text.
-		return provider(def).map(option => ({
+		return provider().map(option => ({
 			...option,
 			label: sanitizeDisplaySingleLine(option.label),
 			description: sanitizeDisplayLineField(option.description),

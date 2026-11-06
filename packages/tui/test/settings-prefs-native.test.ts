@@ -104,7 +104,7 @@ const BACKENDS: RuntimeSettingOptionsProvider = () => [
 	{ value: "ext", label: "Ext\x1b[31m Backend\x1b]0;title\x07", description: "line one\nline\x1b[2J two" },
 ];
 
-function harness(initial: Record<string, unknown> = {}, backends: RuntimeSettingOptionsProvider = BACKENDS): Harness {
+function harness(initial: Record<string, unknown> = {}): Harness {
 	const values = new Map<string, unknown>();
 	for (const entry of ENTRIES) values.set(entry.path, entry.defaultValue);
 	for (const key in initial) values.set(key, initial[key]);
@@ -140,7 +140,7 @@ function harness(initial: Record<string, unknown> = {}, backends: RuntimeSetting
 			plugins,
 			availableThinkingLevels: [],
 			thinkingLevel: undefined,
-			runtimeOptions: new Map([["todo.backend", backends]]),
+			runtimeOptions: new Map([["todo.backend", BACKENDS]]),
 			availableThemes: ["dark", "light", "titanium"],
 			providers: [],
 		},
@@ -231,7 +231,7 @@ describe("settings as a native prefs page", () => {
 		expect(ext.detail).toBe("line one line two");
 	});
 
-	it("shows a runtime row's label and opens its submenu on the stored value", () => {
+	it("opens a runtime row's choice on its stored value and saves the chosen value", () => {
 		const { selector, values, changes } = harness({ "todo.backend": "ext" });
 		send(selector, { type: "activate", key: "", item: "todo.backend" });
 		expect(prefs(selector).props.editing).toEqual({ row: "todo.backend", option: "ext" });

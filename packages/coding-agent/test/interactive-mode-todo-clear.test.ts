@@ -15,14 +15,12 @@ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgTasksTodoClearDelay } from "@oh-my-pi/pi-coding-agent/tools/settings";
-import { flushTodoWrites } from "./helpers/todo-backend";
 
 /**
- * Drains `owner`'s todo write queue, then waits for the reconcile's HUD update to be observable.
+ * Waits for the reconcile's HUD update: the commit settles inline, the HUD follows in its `.then`.
  * The wait yields microtasks only (fake timers stay untouched) and fails loudly if `hudUpdated` never holds.
  */
-async function settleReconcile(owner: AgentSession, hudUpdated: () => boolean): Promise<void> {
-	await flushTodoWrites(owner);
+async function settleReconcile(hudUpdated: () => boolean): Promise<void> {
 	for (let attempt = 0; attempt < 1000 && !hudUpdated(); attempt++) await Promise.resolve();
 	if (!hudUpdated()) throw new Error("Subagent todo reconcile never reached the HUD");
 }
@@ -246,7 +244,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 			detached: true,
 		});
 		vi.advanceTimersByTime(100);
-		await settleReconcile(session, () => mode.todoPhases[0]?.tasks[0]?.status === "completed");
+		await settleReconcile(() => mode.todoPhases[0]?.tasks[0]?.status === "completed");
 		vi.advanceTimersByTime(0);
 		await session.settleInFlightMessagePersistence();
 		await session.sessionManager.flush();
@@ -312,7 +310,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 				detached: true,
 			});
 			vi.advanceTimersByTime(100);
-			await settleReconcile(focusedSession, () => renderTodos(mode).includes("1/2"));
+			await settleReconcile(() => renderTodos(mode).includes("1/2"));
 
 			expect(focusedSession.getTodoPhases()[0]?.tasks[0]?.status).toBe("completed");
 			expect(session.getTodoPhases()).toEqual(mainPhases);
@@ -374,7 +372,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 				detached: true,
 			});
 			vi.advanceTimersByTime(100);
-			await settleReconcile(workerSession, () => renderTodos(mode).includes("1/1"));
+			await settleReconcile(() => renderTodos(mode).includes("1/1"));
 
 			expect(workerSession.getTodoPhases()[0]?.tasks[0]?.status).toBe("completed");
 			expect(session.getTodoPhases()).toEqual(mainPhases);
@@ -412,7 +410,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 			detached: true,
 		});
 		vi.advanceTimersByTime(100);
-		await settleReconcile(session, () => mode.todoPhases[0]?.tasks[0]?.status === "completed");
+		await settleReconcile(() => mode.todoPhases[0]?.tasks[0]?.status === "completed");
 
 		const task = session.getTodoPhases()[0]?.tasks[0];
 		expect(task?.status).toBe("completed");

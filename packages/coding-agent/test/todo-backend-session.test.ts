@@ -22,11 +22,13 @@ import {
 	type TodoParams,
 	USER_TODO_EDIT_CUSTOM_TYPE,
 } from "@oh-my-pi/pi-coding-agent/tools/todo";
+import { TODO_BACKEND_NOTICE_SOURCE } from "@oh-my-pi/pi-coding-agent/tools/todo-backend";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 import {
+	contentsOf,
 	createTodoBackendRecorder,
 	createTodoSession,
 	disposeTodoSession,
@@ -66,7 +68,7 @@ describe("todo backends in a real session", () => {
 	function collectNotices(session: AgentSession): string[] {
 		const notices: string[] = [];
 		session.subscribe(event => {
-			if (event.type === "notice" && event.source === "todo-backend") notices.push(event.message);
+			if (event.type === "notice" && event.source === TODO_BACKEND_NOTICE_SOURCE) notices.push(event.message);
 		});
 		return notices;
 	}
@@ -100,6 +102,25 @@ describe("todo backends in a real session", () => {
 		expect(session.getTodoPhases()).toEqual(list);
 		expect(session.hasPendingDeferredExtensions).toBe(true);
 		expect(await committed).toEqual(list);
+		expect(session.todoWritesQueued).toBe(false);
+	});
+
+	test("a native commit resolves with the stored copy, without fields the list does not keep", async () => {
+		const session = await createSession();
+		// RPC clients send JSON, so a list can carry fields `TodoPhase` does not declare.
+		const sent = [{ name: "W", extra: 1, tasks: [{ content: "a", status: "pending" as const, notes: ["n"] }] }];
+		const input: TodoPhase[] = sent;
+
+		expect(await session.commitTodoPhases(input)).toEqual([
+			{ name: "W", tasks: [{ content: "a", status: "pending" }] },
+		]);
+	});
+
+	test("an unregistered backend id runs writes inline once it fell back to native todos", async () => {
+		const session = await createSession({ backend: "missing" });
+
+		await todo(session, { op: "init", items: ["a"] });
+
 		expect(session.todoWritesQueued).toBe(false);
 	});
 
@@ -138,11 +159,7 @@ describe("todo backends in a real session", () => {
 		const applies = recorder.calls.filter(call => call.method === "apply");
 		expect(overlapped).toBe(false);
 		expect(applies.map(call => call.op)).toEqual(["init", "append", "append"]);
-		expect(applies.map(call => call.phases.flatMap(phase => phase.tasks.map(task => task.content)))).toEqual([
-			["one"],
-			["one", "two"],
-			["one", "two", "three"],
-		]);
+		expect(applies.map(call => contentsOf(call.phases))).toEqual([["one"], ["one", "two"], ["one", "two", "three"]]);
 		expect(applies.at(-1)?.phases).toEqual(session.getTodoPhases());
 	});
 
@@ -532,7 +549,7 @@ export default function(pi) {
 		recorder.beforeApply = undefined;
 		await todo(session, { op: "append", phase: "Tasks", items: ["real"] });
 		const lastApply = recorder.calls.filter(call => call.method === "apply").at(-1);
-		expect(lastApply?.phases.flatMap(phase => phase.tasks.map(task => task.content))).toEqual(["base", "real"]);
+		expect(contentsOf(lastApply?.phases ?? [])).toEqual(["base", "real"]);
 		expect(taskContents(session)).toEqual(["base", "real"]);
 
 		gate.release.resolve();
@@ -677,45 +694,49 @@ export default function(pi) {
 		expect(userTodoEdits(session)).toHaveLength(1);
 	});
 
-	test("a commit that lands while a todo call's result is still unsaved is what a rebuild from the branch restores", async () => {
-		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
-		const gate = hold(recorder, "apply");
-		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in the bundled catalog");
-		const mock = createMockModel({
-			responses: [
-				{
-					content: [
-						{
-							type: "toolCall",
-							id: "todo-call",
-							name: "todo",
-							arguments: { op: "init", items: ["from the tool"] },
-						},
-					],
-					stopReason: "toolUse",
-				},
-				{ content: ["done"] },
-			],
-		});
-		session.agent.streamFn = mock.stream;
-		session.agent.state.model = model;
-		session.agent.getApiKey = () => "test-key";
-		session.modelRegistry.authStorage.keys.setRuntime("anthropic", "test-key");
+	test.each([{ switchToNative: false }, { switchToNative: true }])(
+		"a commit that lands while a todo call's result is still unsaved is what a rebuild from the branch restores (switch to native mid-call: $switchToNative)",
+		async ({ switchToNative }) => {
+			const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
+			const gate = hold(recorder, "apply");
+			const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in the bundled catalog");
+			const mock = createMockModel({
+				responses: [
+					{
+						content: [
+							{
+								type: "toolCall",
+								id: "todo-call",
+								name: "todo",
+								arguments: { op: "init", items: ["from the tool"] },
+							},
+						],
+						stopReason: "toolUse",
+					},
+					{ content: ["done"] },
+				],
+			});
+			session.agent.streamFn = mock.stream;
+			session.agent.state.model = model;
+			session.agent.getApiKey = () => "test-key";
+			session.modelRegistry.authStorage.keys.setRuntime("anthropic", "test-key");
 
-		const turn = session.prompt("make a todo list");
-		await gate.started.promise;
-		const edit = session.commitTodoPhases([
-			{ name: "Edited", tasks: [{ content: "from the /todo edit", status: "pending" }] },
-		]);
-		gate.release.resolve();
-		await Promise.all([turn, edit]);
-		await session.waitForIdle();
+			const turn = session.prompt("make a todo list");
+			await gate.started.promise;
+			if (switchToNative) cfgTodoBackend.override(session.settings, "native");
+			const edit = session.commitTodoPhases([
+				{ name: "Edited", tasks: [{ content: "from the /todo edit", status: "pending" }] },
+			]);
+			gate.release.resolve();
+			await Promise.all([turn, edit]);
+			await session.waitForIdle();
 
-		// Resume, rewind and compaction rebuild the list from the saved branch.
-		const rebuilt = getLatestTodoPhasesFromEntries(session.sessionManager.getBranch());
-		expect(rebuilt.flatMap(phase => phase.tasks.map(task => task.content))).toEqual(["from the /todo edit"]);
-		expect(taskContents(session)).toEqual(["from the /todo edit"]);
-	});
+			// Resume, rewind and compaction rebuild the list from the saved branch.
+			const rebuilt = getLatestTodoPhasesFromEntries(session.sessionManager.getBranch());
+			expect(contentsOf(rebuilt)).toEqual(["from the /todo edit"]);
+			expect(taskContents(session)).toEqual(["from the /todo edit"]);
+		},
+	);
 });

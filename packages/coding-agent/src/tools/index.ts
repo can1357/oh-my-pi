@@ -493,10 +493,10 @@ export interface ToolSession {
 	 */
 	commitTodoPhases?: (update: TodoPhasesUpdate, options?: TodoCommitOptions) => Promise<TodoPhase[] | undefined>;
 	/**
-	 * Run a todo write on the session's serial todo queue (see `AgentSession.runTodoWrite`). `active`
-	 * is the backend resolved when the write starts; `undefined` means native todos. The `todo` tool
-	 * runs compute → backend `apply` → commit inside it. `options.signal` abandons the call without
-	 * releasing the queue slot early.
+	 * Run a todo write (see `AgentSession.runTodoWrite`): inline with native todos, on the session's
+	 * serial todo queue with an extension backend. `active` is the backend resolved when the write
+	 * starts; `undefined` means native todos. The `todo` tool runs compute → backend `apply` → commit
+	 * inside it. `options.signal` abandons a queued call without releasing its slot early.
 	 */
 	runTodoWrite?: <T>(write: TodoWrite<T>, options?: { signal?: AbortSignal }) => Promise<T>;
 	/** Active workpool items whose incremental yields complete the current turn. */
