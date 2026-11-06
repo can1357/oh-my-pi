@@ -27,13 +27,14 @@ struct Fixture {
 
 const FIXTURE: &str = include_str!("fatal-site-matrix.json");
 
-/// Run `script` (its diagnostics discarded) in a fresh shell.
-async fn run(script: &str) -> (String, Option<i32>) {
+/// Run `script` (its diagnostics discarded) in a fresh shell, in `cwd`:
+/// some rows write a script file and source or run it.
+async fn run(script: &str, cwd: &str) -> (String, Option<i32>) {
 	let (tx, rx) = flume::unbounded::<String>();
 	let command = format!("exec 2>/dev/null\n{script}");
 	let result = Shell::new(None)
 		.run(
-			ShellRunOptions { command, ..Default::default() },
+			ShellRunOptions { command, cwd: Some(cwd.to_owned()), ..Default::default() },
 			Some(tx),
 			CancelToken::new(Some(20_000)),
 		)
@@ -46,9 +47,12 @@ async fn run(script: &str) -> (String, Option<i32>) {
 async fn every_site_of_the_jump_model_answers_as_bash_does() {
 	let fixture: Fixture = serde_json::from_str(FIXTURE).expect("fixture");
 	assert!(!fixture.rows.is_empty(), "the fixture has no rows");
+	let dir = std::env::temp_dir().join(format!("fatal-site-matrix-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).expect("scratch directory");
+	let cwd = dir.to_string_lossy().into_owned();
 	let mut wrong = Vec::new();
 	for row in &fixture.rows {
-		let got = run(&row.script).await;
+		let got = run(&row.script, &cwd).await;
 		if got != (row.out.clone(), Some(row.status)) {
 			wrong.push(format!(
 				"{}: got {got:?}, Bash 5.3.0 gives ({:?}, {})",
