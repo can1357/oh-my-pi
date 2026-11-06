@@ -1408,6 +1408,55 @@ describe("TranscriptContainer held blocks", () => {
 		expect(transcript.blockStates()).toEqual(["committed"]);
 	});
 
+	it("keeps a partially visible held frontier held under pressure so displacement survives", () => {
+		const transcript = new TranscriptContainer();
+		const pinned = new Block(["pinned 1", "pinned 2", "pinned 3"], true);
+		const tail = new Block(["tail 1", "tail 2"], true);
+		transcript.addChild(pinned);
+		transcript.addChild(tail);
+		transcript.setBlockHeld(pinned, true);
+
+		// The fitted tail leaves pinned rows inside the viewport: the held
+		// block is the partially visible boundary (walk leftover
+		// room 4 - tailRows 2 - separator 1 = 1 > 0).
+		expect(transcript.renderViewport(80, 4, frame)).toEqual(["pinned 2", "pinned 3", "tail 1", "tail 2"]);
+
+		// Pressure demanding retirement through the partially visible hold
+		// must decline the offer, not commit a card the tracker still means
+		// to displace; the bounded stall is the pinned-frontier watchdog's.
+		expect(transcript.peekFinalizedBatch(80, 4)).toBeUndefined();
+		expect(transcript.isBlockHeld(pinned)).toBe(true);
+		expect(transcript.blockStates()).toEqual(["settled", "settled"]);
+
+		// The hold gates retirement, never removal: the follow-up poll can
+		// still displace the snapshot, leaving no frozen duplicate behind.
+		expect(transcript.canDisplaceBlock(pinned)).toBe(true);
+		transcript.removeChild(pinned);
+		expect(transcript.blockStates()).toEqual(["settled"]);
+	});
+
+	it("releases a held frontier once it is fully scrolled off the viewport", () => {
+		const transcript = new TranscriptContainer();
+		const pinned = new Block(["pinned 1", "pinned 2"], true);
+		const mid = new Block(["mid 1", "mid 2", "mid 3"], true);
+		const tail = new Block(["tail 1", "tail 2", "tail 3"], true);
+		transcript.addChild(pinned);
+		transcript.addChild(mid);
+		transcript.addChild(tail);
+		transcript.setBlockHeld(pinned, true);
+
+		// The fitted mid+tail fill the room exactly, so the held frontier has
+		// no visible rows left (room 7 - tailRows 7 - separator 1 < 0):
+		// pressure releases the hold rather than wedging the frontier.
+		expect(transcript.peekFinalizedBatch(80, 7)).toBeUndefined();
+		expect(transcript.isBlockHeld(pinned)).toBe(false);
+
+		const batch = transcript.peekFinalizedBatch(80, 7)!;
+		expect(batch.rows).toEqual(["pinned 1", "pinned 2", ""]);
+		transcript.acknowledgeFinalizedBatch(batch.id);
+		expect(transcript.blockStates()).toEqual(["committed", "settled", "settled"]);
+	});
+
 	it("flushes through holds on shutdown, retiring the held block committed", () => {
 		const transcript = new TranscriptContainer();
 		const pinned = new Block(["pinned snapshot"], true);

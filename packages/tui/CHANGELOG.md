@@ -22,7 +22,7 @@
 - Fixed the model browser showing Factory Droid's undiscounted credit rate during a Factory promotion (2× instead of 1.6× for GPT-5.6 Sol); rows now show the rate in force and the model details show the next rate and its date ([#16309](https://github.com/can1357/oh-my-pi/pull/16309) by [@will-bogusz](https://github.com/will-bogusz))
 - With two or more `Editor.predictions`, the ghost text follows the first one the draft is a prefix of; a typed draft that equals a shorter one keeps the ghost of a longer one. Once the buffer equals one of them with no ghost (always right after Tab, Right, or the list inserts one), a dim `⇥ N more` hint appears; press Tab to list them all, then Enter, Tab or Right to swap the whole line (never submitting) or Esc to keep it ([#17796](https://github.com/can1357/oh-my-pi/pull/17796) by [@wolfiesch](https://github.com/wolfiesch))
 - F2 now opens the rename dialog in the resume picker in Ghostty, kitty and other terminals using the kitty keyboard protocol; F1 and F4 shortcuts work there too ([#17812](https://github.com/can1357/oh-my-pi/issues/17812)).
-- Fixed repeated `wait` poll cards stacking as duplicate rows during busy turns: the live poll (and todo snapshot) card is now held out of committed history while a follow-up poll can still replace it, so repeated polls read as one persistent card.
+- Fixed repeated `wait` poll cards stacking as duplicate rows during busy turns: the live poll (and todo snapshot) card is now held out of committed history while a follow-up poll can still replace it, so repeated polls read as one persistent card ([#17998](https://github.com/can1357/oh-my-pi/pull/17998) by [@ReKon64](https://github.com/ReKon64)).
 
 ## [18.15.0] - 2026-11-01
 

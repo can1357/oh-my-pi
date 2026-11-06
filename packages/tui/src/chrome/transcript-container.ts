@@ -868,9 +868,11 @@ export class TranscriptContainer extends Container {
 		let liveRows = 0;
 		let keep = 0;
 		let fits = true;
+		let frontierHeight = 0;
 		for (let cursor = live.length - 1; cursor >= 0; cursor--) {
 			const candidate = live[cursor]!;
 			const height = this.#liveBlock(candidate.entry, candidate.index, width).rows.length;
+			if (candidate.index === this.#frontier) frontierHeight = height;
 			if (height > 0) liveRows += height + (liveRows > 0 ? 1 : 0);
 			if (fits) {
 				const next = height > 0 ? tailRows + height + (tailRows > 0 ? 1 : 0) : tailRows;
@@ -940,6 +942,20 @@ export class TranscriptContainer extends Container {
 				}
 			}
 		}
+		// Whether a held frontier demanded through by this walk may release: only
+		// once no row of it is left inside the viewport. `tailRows` froze at the
+		// newest block that overflowed, so with keep === 1 the frontier is that
+		// boundary and `room - tailRows - separator` — the same leftover the
+		// split offer cuts by — is exactly its visible remainder; keep >= 2 puts
+		// it strictly above the boundary; keep === 0 (live-block cap only) has
+		// nothing scrolled off, so a nonzero-height frontier stays fully
+		// visible. Committing a partially visible snapshot would freeze the
+		// card the tracker still means to displace, so the hold stands and the
+		// bounded stall is the pinned-frontier watchdog's to log.
+		const heldFrontierScrolledOff =
+			keep >= 2 ||
+			(keep === 1 && room - tailRows - (tailRows > 0 ? 1 : 0) <= 0) ||
+			(keep === 0 && frontierHeight === 0);
 		let end = this.#frontier;
 		while (end < limit && end < this.#entries.length) {
 			const entry = this.#entries[end]!;
@@ -948,14 +964,15 @@ export class TranscriptContainer extends Container {
 				// A held block the tracker still controls is not a retirement
 				// candidate: committing it would freeze it into the tape and
 				// permanently block the displacement. But a held FRONTIER block
-				// the overflow demands through has scrolled too far behind the
-				// live viewport for displacement to matter, and holding it
-				// would stall retirement (the pinned-frontier wedge) — release
-				// the hold and retire it like any settled block. Shutdown
-				// flush always retires through holds: displacement semantics
-				// end with the session, and a lost tail row is worse than a
-				// stale card.
-				if (end === this.#frontier) entry.held = false;
+				// the overflow demands through once it is fully scrolled off the
+				// live viewport no longer needs the hold — displacement is moot
+				// off-screen, and holding it would stall retirement (the
+				// pinned-frontier wedge) — release the hold and retire it like
+				// any settled block. While any of its rows are still visible the
+				// hold stands (see heldFrontierScrolledOff). Shutdown flush
+				// always retires through holds: displacement semantics end with
+				// the session, and a lost tail row is worse than a stale card.
+				if (end === this.#frontier && heldFrontierScrolledOff) entry.held = false;
 				break;
 			}
 			end++;

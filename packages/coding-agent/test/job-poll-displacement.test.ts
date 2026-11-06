@@ -71,6 +71,66 @@ function trackComponent(components: ToolExecutionComponent[], component: ToolExe
 	return component;
 }
 
+// Shared across the displacement suites; each suite's afterEach seals and
+// drains everything its tests created.
+const created: ToolExecutionComponent[] = [];
+
+function createFixture() {
+	const pendingTools = new Map<string, ToolExecutionHandle>();
+	const ctx = createInteractiveModeContext({ pendingTools });
+	const children = ctx.chatContainer.children;
+	return { controller: new EventController(ctx), ctx, children, pendingTools };
+}
+
+/** Finalized one-row filler block, standing in for the short rows a busy turn streams. */
+function addFiller(ctx: { chatContainer: TranscriptContainer }, label: string): void {
+	ctx.chatContainer.addChild(new Text(label));
+}
+
+/** One retirement frame: commit exactly the settled prefix a `capacity`-row live area loses. */
+function pressureRetire(ctx: { chatContainer: TranscriptContainer }, capacity: number): void {
+	const batch = ctx.chatContainer.peekFinalizedBatch(80, capacity);
+	if (batch !== undefined) ctx.chatContainer.acknowledgeFinalizedBatch(batch.id);
+}
+
+async function runPoll(controller: EventController, children: Component[], toolCallId: string) {
+	await controller.handleEvent({
+		type: "tool_execution_start",
+		toolCallId,
+		toolName: "wait",
+		args: {},
+	});
+	const component = children[children.length - 1] as ToolExecutionComponent;
+	trackComponent(created, component);
+	await controller.handleEvent({
+		type: "tool_execution_end",
+		toolCallId,
+		toolName: "wait",
+		result: pollResult(["running", "running"]),
+		isError: false,
+	});
+	return component;
+}
+
+async function runTodo(controller: EventController, children: Component[], toolCallId: string, items?: string[]) {
+	await controller.handleEvent({
+		type: "tool_execution_start",
+		toolCallId,
+		toolName: "todo",
+		args: { op: "view" },
+	});
+	const component = children[children.length - 1] as ToolExecutionComponent;
+	trackComponent(created, component);
+	await controller.handleEvent({
+		type: "tool_execution_end",
+		toolCallId,
+		toolName: "todo",
+		result: todoResult(items),
+		isError: false,
+	});
+	return component;
+}
+
 describe("wait block lifecycle", () => {
 	const created: ToolExecutionComponent[] = [];
 
@@ -150,8 +210,6 @@ describe("wait block lifecycle", () => {
 });
 
 describe("EventController displaces consecutive waiting polls", () => {
-	const created: ToolExecutionComponent[] = [];
-
 	beforeEach(async () => {
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true });
@@ -163,51 +221,6 @@ describe("EventController displaces consecutive waiting polls", () => {
 		vi.restoreAllMocks();
 		resetSettingsForTest();
 	});
-
-	function createFixture() {
-		const pendingTools = new Map<string, ToolExecutionHandle>();
-		const ctx = createInteractiveModeContext({ pendingTools });
-		const children = ctx.chatContainer.children;
-		return { controller: new EventController(ctx), children, pendingTools };
-	}
-
-	async function runPoll(controller: EventController, children: Component[], toolCallId: string) {
-		await controller.handleEvent({
-			type: "tool_execution_start",
-			toolCallId,
-			toolName: "wait",
-			args: {},
-		});
-		const component = children[children.length - 1] as ToolExecutionComponent;
-		trackComponent(created, component);
-		await controller.handleEvent({
-			type: "tool_execution_end",
-			toolCallId,
-			toolName: "wait",
-			result: pollResult(["running", "running"]),
-			isError: false,
-		});
-		return component;
-	}
-
-	async function runTodo(controller: EventController, children: Component[], toolCallId: string, items?: string[]) {
-		await controller.handleEvent({
-			type: "tool_execution_start",
-			toolCallId,
-			toolName: "todo",
-			args: { op: "view" },
-		});
-		const component = children[children.length - 1] as ToolExecutionComponent;
-		trackComponent(created, component);
-		await controller.handleEvent({
-			type: "tool_execution_end",
-			toolCallId,
-			toolName: "todo",
-			result: todoResult(items),
-			isError: false,
-		});
-		return component;
-	}
 
 	it("removes the previous waiting poll when the next wait call starts", async () => {
 		const { controller, children } = createFixture();
@@ -490,8 +503,6 @@ describe("#12248 completed wait turn replay", () => {
  * a duplicate card instead.
  */
 describe("displacement survives viewport-pressure retirement", () => {
-	const created: ToolExecutionComponent[] = [];
-
 	beforeEach(async () => {
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true });
@@ -503,62 +514,6 @@ describe("displacement survives viewport-pressure retirement", () => {
 		vi.restoreAllMocks();
 		resetSettingsForTest();
 	});
-
-	function createFixture() {
-		const pendingTools = new Map<string, ToolExecutionHandle>();
-		const ctx = createInteractiveModeContext({ pendingTools });
-		const children = ctx.chatContainer.children;
-		return { controller: new EventController(ctx), ctx, children, pendingTools };
-	}
-
-	/** Finalized one-row filler block, standing in for the short rows a busy turn streams. */
-	function addFiller(ctx: { chatContainer: TranscriptContainer }, label: string): void {
-		ctx.chatContainer.addChild(new Text(label));
-	}
-
-	/** One retirement frame: commit exactly the settled prefix a `capacity`-row live area loses. */
-	function pressureRetire(ctx: { chatContainer: TranscriptContainer }, capacity: number): void {
-		const batch = ctx.chatContainer.peekFinalizedBatch(80, capacity);
-		if (batch !== undefined) ctx.chatContainer.acknowledgeFinalizedBatch(batch.id);
-	}
-
-	async function runPoll(controller: EventController, children: Component[], toolCallId: string) {
-		await controller.handleEvent({
-			type: "tool_execution_start",
-			toolCallId,
-			toolName: "wait",
-			args: {},
-		});
-		const component = children[children.length - 1] as ToolExecutionComponent;
-		trackComponent(created, component);
-		await controller.handleEvent({
-			type: "tool_execution_end",
-			toolCallId,
-			toolName: "wait",
-			result: pollResult(["running", "running"]),
-			isError: false,
-		});
-		return component;
-	}
-
-	async function runTodo(controller: EventController, children: Component[], toolCallId: string, items?: string[]) {
-		await controller.handleEvent({
-			type: "tool_execution_start",
-			toolCallId,
-			toolName: "todo",
-			args: { op: "view" },
-		});
-		const component = children[children.length - 1] as ToolExecutionComponent;
-		trackComponent(created, component);
-		await controller.handleEvent({
-			type: "tool_execution_end",
-			toolCallId,
-			toolName: "todo",
-			result: todoResult(items),
-			isError: false,
-		});
-		return component;
-	}
 
 	it("displaces the tracked poll even when pressure retired the transcript below it", async () => {
 		const { controller, ctx, children } = createFixture();
@@ -574,6 +529,72 @@ describe("displacement survives viewport-pressure retirement", () => {
 		expect(children).not.toContain(first);
 		expect(children).toContain(second);
 		expect(first.isTranscriptBlockFinalized()).toBe(true);
+	});
+
+	it("keeps the held poll uncommitted while it is the partially visible pressure boundary", async () => {
+		const { controller, ctx, children } = createFixture();
+		for (let i = 0; i < 6; i++) addFiller(ctx, `before ${i}`);
+		const first = await runPoll(controller, children, "t1");
+
+		// Retire the fillers ahead of the poll; the tracked poll becomes the
+		// held live frontier.
+		pressureRetire(ctx, 1);
+		expect(ctx.chatContainer.blockStates().slice(0, 6)).toEqual(Array(6).fill("committed"));
+		for (let i = 0; i < 2; i++) addFiller(ctx, `after ${i}`);
+
+		// The held poll is the partially visible boundary (room 5 - tailRows
+		// 3 - separator 1 = 1 visible row): pressured frames must decline the
+		// retirement instead of freezing the tracked card into the tape —
+		// a committed or emitted poll refuses displacement and the follow-up
+		// wait stacks a duplicate card.
+		pressureRetire(ctx, 5);
+		pressureRetire(ctx, 5);
+		expect(ctx.chatContainer.blockStates()[children.indexOf(first)]).toBe("settled");
+
+		// The follow-up poll still displaces the snapshot; no duplicate ever
+		// reached the committed ledger.
+		const second = await runPoll(controller, children, "t2");
+		expect(children).not.toContain(first);
+		expect(children).toContain(second);
+		expect(first.isTranscriptBlockFinalized()).toBe(true);
+
+		ctx.chatContainer.beginReplay();
+		const replay = ctx.chatContainer.peekReplayBatch(80);
+		const rows = (replay?.rows ?? []).map(row => Bun.stripANSI(row));
+		expect(rows.filter(row => row.includes("waiting on"))).toHaveLength(0);
+	});
+
+	it("keeps the held todo snapshot uncommitted while it is the partially visible pressure boundary", async () => {
+		const { controller, ctx, children } = createFixture();
+		for (let i = 0; i < 4; i++) addFiller(ctx, `before ${i}`);
+		const first = await runTodo(controller, children, "todo-1", ["plan", "read", "fix", "land"]);
+
+		// Retire the fillers ahead of the snapshot; the tracked todo becomes
+		// the held live frontier.
+		pressureRetire(ctx, 1);
+		expect(ctx.chatContainer.blockStates().slice(0, 4)).toEqual(Array(4).fill("committed"));
+
+		// The snapshot straddles the viewport top (room 2 leaves visible
+		// rows of it on screen): pressured frames must decline the retirement
+		// instead of releasing the hold into a split-commit — an emitted or
+		// committed snapshot refuses displacement and the follow-up todo
+		// stacks a duplicate panel.
+		pressureRetire(ctx, 2);
+		pressureRetire(ctx, 2);
+		expect(ctx.chatContainer.blockStates()[children.indexOf(first)]).toBe("settled");
+		expect(ctx.chatContainer.emittedStableRows()[children.indexOf(first)]).toBe(0);
+
+		// The follow-up todo still displaces the snapshot; no duplicate ever
+		// reached the committed ledger.
+		const second = await runTodo(controller, children, "todo-2", ["fix", "test"]);
+		expect(children).not.toContain(first);
+		expect(children).toContain(second);
+		expect(first.isTranscriptBlockFinalized()).toBe(true);
+
+		ctx.chatContainer.beginReplay();
+		const replay = ctx.chatContainer.peekReplayBatch(80);
+		const rows = (replay?.rows ?? []).map(row => Bun.stripANSI(row));
+		expect(rows.filter(row => row.includes("Todo") && row.includes("tasks"))).toHaveLength(0);
 	});
 
 	it("displaces the tracked todo snapshot under the same pressure", async () => {
@@ -636,8 +657,6 @@ describe("displacement survives viewport-pressure retirement", () => {
  * so the sealed block could never retire as ordinary history.
  */
 describe("held completion settle and seal-abandon release tracked polls", () => {
-	const created: ToolExecutionComponent[] = [];
-
 	beforeEach(async () => {
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true });
@@ -649,43 +668,6 @@ describe("held completion settle and seal-abandon release tracked polls", () => 
 		vi.restoreAllMocks();
 		resetSettingsForTest();
 	});
-
-	function createFixture() {
-		const pendingTools = new Map<string, ToolExecutionHandle>();
-		const ctx = createInteractiveModeContext({ pendingTools });
-		const children = ctx.chatContainer.children;
-		return { controller: new EventController(ctx), ctx, children, pendingTools };
-	}
-
-	/** Finalized one-row filler block, standing in for the short rows a busy turn streams. */
-	function addFiller(ctx: { chatContainer: TranscriptContainer }, label: string): void {
-		ctx.chatContainer.addChild(new Text(label));
-	}
-
-	/** One retirement frame: commit exactly the settled prefix a `capacity`-row live area loses. */
-	function pressureRetire(ctx: { chatContainer: TranscriptContainer }, capacity: number): void {
-		const batch = ctx.chatContainer.peekFinalizedBatch(80, capacity);
-		if (batch !== undefined) ctx.chatContainer.acknowledgeFinalizedBatch(batch.id);
-	}
-
-	async function runPoll(controller: EventController, children: Component[], toolCallId: string) {
-		await controller.handleEvent({
-			type: "tool_execution_start",
-			toolCallId,
-			toolName: "wait",
-			args: {},
-		});
-		const component = children[children.length - 1] as ToolExecutionComponent;
-		trackComponent(created, component);
-		await controller.handleEvent({
-			type: "tool_execution_end",
-			toolCallId,
-			toolName: "wait",
-			result: pollResult(["running", "running"]),
-			isError: false,
-		});
-		return component;
-	}
 
 	it("tracks a poll settled from a held completion so a follow-up wait displaces it", async () => {
 		const { controller, children } = createFixture();
