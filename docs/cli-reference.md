@@ -153,6 +153,19 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 | `--warn-cost <usd>`        | Warn once when the session's spend, subagents included, reaches this many USD. Overrides `session.warnCost`.                                                                                         |
 | `--max-cost <usd>`         | Stop sending model requests once the session's spend reaches this many USD; a request already in flight can carry spend past it. Overrides `session.maxCost`.                                        |
 
+#### Inter-terminal agent networking (fork)
+
+| Flag                      | Description                                                                                                                                              |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--a2a-port <port>`       | Pin the A2A bridge to this loopback port for the run (overrides `a2a.port`; `0` = pick a free port). Starts the bridge even when `a2a.enabled` is `false`. |
+| `--a2a-name <name>`       | Public name for this terminal's agents in the A2A network for the run (overrides `a2a.name`; peers see `a2a:<name>` and the agent card carries it).        |
+| `--no-a2a-auto-register` | Skip registering live local A2A bridges as spawnable `a2a:` agents at session start (one-run `a2a.autoRegister: false`).                                  |
+
+With the fork defaults (`a2a.enabled: true`, `a2a.port: 0`) no flag is needed:
+every terminal starts a bridge on a free port and auto-registers its peers.
+See [settings](./settings.md#inter-terminal-agent-networking-a2a) and
+[Agent Teams (planned)](./agent-teams.md).
+
 #### Extensions, hooks, skills, and rules
 
 | Flag                              | Description                                                                                                                                                                               |
@@ -189,6 +202,16 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 | ----------------- | --------------------------------------------- |
 | `--help`, `-h`    | Show help for `omp` or a subcommand and exit. |
 | `--version`, `-v` | Print the installed version and exit.         |
+
+#### Smoke test (fork)
+
+`--smoke-test` pings every worker/subprocess daemon and exits with
+`smoke-test: ok`: a minimal end-to-end probe that catches the silent
+worker-load and bundled-asset regressions which hit compiled binaries and the
+npm CLI bundle (version/help paths never load worker modules, so this is the
+smallest test that proves those distribution-only paths work; wired into the
+install CI). It does not exercise A2A, IrcBus, or workflow — the full test
+suites cover those.
 
 ### Headless / print mode
 

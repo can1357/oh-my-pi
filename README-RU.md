@@ -62,6 +62,10 @@ omp --a2a-port 0        # терминал C: ...
 
 Расширения могут спавнить сабагентов (`pi.spawnSubagent({agent, prompt})`) с правами обычного сабагента и общим лимитом concurrency. Кандидат в upstream-PR.
 
+### 9. Agent Teams
+
+`.omp/teams/<имя>.md` — декларативная команда (members + хэндлы + общий workspace); `/team start` спавнит участников полноценными сессиями с устойчивыми хэндлами (`agent://<хэндл>`), прямым общением teammate↔teammate и общим TASKS.md; гейт `team.enabled`. [docs/agent-teams.md](./docs/agent-teams.md).
+
 ## Сводка настроек
 
 | Настройка | Default | Описание |
