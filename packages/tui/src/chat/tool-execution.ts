@@ -57,10 +57,12 @@ import {
 	formatStatusIcon,
 	replaceTabs,
 	resolveImageOptions,
+	shortenPath,
 } from "../render/render-utils";
 import type { XdevMountedState } from "../tools/xdev";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../render/index";
 import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
+import { type ToolRunCall, toolRunOf } from "./tool-run";
 import { FenceFigure } from "./fence-figure";
 import { SpotlightNotices } from "./spotlight";
 import { sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
@@ -989,9 +991,15 @@ export class ToolExecutionComponent extends Container {
 			this.#toolName !== "todo" &&
 			!isBackgroundAsyncRunning &&
 			(pendingCallConsumesSpinner || partialResultConsumesSpinner);
+		// A collapsed title row draws its own spinner glyph for any live call.
+		const isLiveTitleRow =
+			(this.rendersCollapsedTitleRow() || toolRunOf(this)?.collapsed() === true) &&
+			this.#nativeStatus() === "running" &&
+			!isBackgroundAsyncRunning;
 		// TSP terminals clock spinners themselves; the frame counter is ANSI-only.
 		const needsSpinner =
-			!isNativeRendering() && (isStreamingArgs || isLivePartialTool || this.#displaceableByToolName === "wait");
+			!isNativeRendering() &&
+			(isStreamingArgs || isLivePartialTool || isLiveTitleRow || this.#displaceableByToolName === "wait");
 		if (needsSpinner && !this.#spinnerActive) {
 			const frameCount = theme.spinnerFrames.length;
 			const frame = sharedSpinnerFrame(frameCount);
@@ -1091,11 +1099,22 @@ export class ToolExecutionComponent extends Container {
 
 	/** Hold visible results until their figures and Kitty images are ready for immutable scrollback. */
 	isTranscriptBlockPending(): boolean {
+		// A collapsed title row never draws the figure, so its raster cannot gate history.
+		if (chatTranscriptDisplayPreferences.collapsedToolTitles && !this.#expanded) return false;
+		if (toolRunOf(this)?.collapsed()) return false;
 		return (
 			this.#toolActivityVisible &&
 			this.#presentation.shown.mode === "full" &&
 			((this.#showImages && this.#kittyConversionsAwaited.size > 0) || this.#figure?.pending === true)
 		);
+	}
+
+	/**
+	 * Whether the block draws only its one-row title (`display.collapsedToolTitles`,
+	 * not expanded). Such a row is compact, so it packs against compact neighbors.
+	 */
+	rendersCollapsedTitleRow(): boolean {
+		return chatTranscriptDisplayPreferences.collapsedToolTitles && !this.#expanded && this.#toolActivityVisible;
 	}
 
 	/**
@@ -1110,7 +1129,21 @@ export class ToolExecutionComponent extends Container {
 		// A parked background task's call already returned; job frames that land
 		// while it is still live keep updating it, but it must not gate history.
 		if (this.#parkedBackground) return true;
-		return !this.#isPartial;
+		return !this.#isPartial && (toolRunOf(this)?.tailFinalized(this) ?? true);
+	}
+
+	/** Task cards stay out of tool runs: their live subagent rows are click targets of their own. */
+	toolRunCalls(): readonly ToolRunCall[] | undefined {
+		if (this.#toolName === "task" || this.#presentation.shown.mode === "hidden") return undefined;
+		const { label, detail } = this.#titleParts();
+		const status = (
+			{ pending: "pending", running: "running", done: "success", error: "error", cancelled: "warning" } as const
+		)[this.#nativeStatus()];
+		return [{ label, detail, status }];
+	}
+
+	isToolRunExpanded(): boolean {
+		return this.#expanded;
 	}
 
 	/**
@@ -1119,6 +1152,8 @@ export class ToolExecutionComponent extends Container {
 	 * Callers intersect with the live registry, which decides focusability.
 	 */
 	getClickFocusAgentIds(): string[] {
+		const run = toolRunOf(this);
+		if (run?.clickable()) return [run.clickId];
 		if (this.#toolName !== "task") return [];
 		return taskCardAgentIds(this.#result?.details);
 	}
@@ -1195,6 +1230,7 @@ export class ToolExecutionComponent extends Container {
 	setExpanded(expanded: boolean): void {
 		if (this.#expanded !== expanded) this.#blockVersion++;
 		this.#expanded = expanded;
+		this.#updateSpinnerAnimation();
 		this.#updateDisplay();
 	}
 
@@ -1251,7 +1287,9 @@ export class ToolExecutionComponent extends Container {
 		if (!this.#toolActivityVisible || this.#allocation === 0 || (this.#toolName === "wait" && this.#isBenignSkip())) {
 			return false;
 		}
-		return this.#presentation.shown.mode === "compact";
+		const mode = this.#presentation.shown.mode;
+		if (mode !== "hidden" && toolRunOf(this)?.collapsed()) return true;
+		return mode === "compact" || (mode === "full" && this.rendersCollapsedTitleRow());
 	}
 
 	/** The file paths this call targets (edit/write/apply_patch args), display-relative. */
@@ -1630,6 +1668,8 @@ export class ToolExecutionComponent extends Container {
 	override invalidate(): void {
 		super.invalidate();
 		this.#updateDisplay();
+		// The title-mode setting may have flipped; spinner needs follow it.
+		this.#updateSpinnerAnimation();
 	}
 
 	#updateDisplay(): void {
@@ -1685,12 +1725,19 @@ export class ToolExecutionComponent extends Container {
 		}
 		const presentation = this.#presentation.draw();
 		if (presentation.mode === "hidden") return [];
+		const runRows = toolRunOf(this)?.rowsFor(this, width, this.#allocation);
+		if (runRows !== undefined) return runRows;
 		if (presentation.mode === "compact") {
 			// A squeezed allocation keeps the head (identity, spinner) and as many rows as fit.
 			return compactRows(this.#compactText(width), presentation, width, this.#compactGlyph()).slice(
 				0,
 				this.#allocation,
 			);
+		}
+		if (this.rendersCollapsedTitleRow()) {
+			this.#firstResultViewportRepaintShapePainted = false;
+			this.#partialResultShapePainted = false;
+			return this.#renderTitleRow(width);
 		}
 		let lines = super.render(width);
 		if (this.#allocation < 3) {
@@ -1741,6 +1788,31 @@ export class ToolExecutionComponent extends Container {
 		return [truncateToWidth(`${theme.fg("dim", "╭─")} ${text}`, width), theme.fg("dim", "╰")];
 	}
 
+	/** One row per call: status glyph, tool label, primary target. Ctrl+O restores the full card. */
+	#renderTitleRow(width: number): readonly string[] {
+		const status = (
+			{ pending: "pending", running: "running", done: "success", error: "error", cancelled: "warning" } as const
+		)[this.#nativeStatus()];
+		const { label, detail: target } = this.#titleParts();
+		const detail = target ? theme.fg("muted", ` · ${target}`) : "";
+		return [
+			truncateToWidth(
+				`${formatStatusIcon(status, theme, this.#spinnerFrame)} ${theme.fg("toolTitle", theme.bold(label))}${detail}`,
+				width,
+			),
+		];
+	}
+
+	/** Sanitized one-line label and primary target, shared by the title row and tool-run summaries. */
+	#titleParts(): { label: string; detail: string | undefined } {
+		const summary = this.#activitySummary();
+		const target = (summary.detail ?? "").replace(/\s+/g, " ").trim();
+		return {
+			label: sanitizeText(summary.label).replace(/\s+/g, " "),
+			detail: target ? sanitizeText(target) : undefined,
+		};
+	}
+
 	#activitySummary(): ToolActivitySummary {
 		this.#renderState.renderContext ??= this.#buildRenderContext();
 		const summary = this.#renderer?.activitySummary?.(this.#args, {
@@ -1757,10 +1829,12 @@ export class ToolExecutionComponent extends Container {
 			return this.#isRunning() ? { ...summary, detail: "running" } : summary;
 		}
 		if (isRecord(this.#args)) {
-			for (const key of ["command", "path", "input"] as const) {
+			// A search's query or pattern names the call better than its path.
+			for (const key of ["command", "query", "pattern", "pat", "url", "path", "input"] as const) {
 				const value = this.#args[key];
 				if (typeof value === "string" && value.length > 0) {
-					return { label: this.#toolLabel, detail: value.split("\n", 1)[0] };
+					const detail = value.split("\n", 1)[0]!;
+					return { label: this.#toolLabel, detail: key === "path" ? shortenPath(detail) : detail };
 				}
 			}
 		}

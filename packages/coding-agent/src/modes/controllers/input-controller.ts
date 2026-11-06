@@ -30,6 +30,7 @@ import { HistorySearchComponent } from "@oh-my-pi/pi-tui/overlays/history-search
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { isToolRunClickId, toggleToolRun } from "@oh-my-pi/pi-tui/chat/tool-run";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 import {
 	chipLabel,
@@ -85,6 +86,8 @@ import { cfgCycleOrder } from "../../config/model-settings";
 import {
 	cfgBareExitOnEmptySession,
 	cfgBareSlashCommands,
+	cfgDisplayCollapsedToolTitles,
+	cfgDisplayGroupToolCalls,
 	cfgDisplayHideToolActivity,
 	cfgDoubleEscapeAction,
 	cfgEmojiAutocomplete,
@@ -946,6 +949,12 @@ export class InputController {
 	#focusClickedAgent(screenRow: number): void {
 		const candidates = this.#viewportCandidates(screenRow);
 		if (candidates.length === 0) return;
+		// A tool-run row toggles that run between its summary and its calls, in the live viewport.
+		const toolRunId = candidates.find(isToolRunClickId);
+		if (toolRunId !== undefined) {
+			if (toggleToolRun(toolRunId)) this.ctx.ui.requestRender();
+			return;
+		}
 		const refs = AgentRegistry.global().list();
 		const scoped = refs.filter(ref => candidates.includes(ref.id));
 		// A live agent wins over the expander sentinel: task names are
@@ -3091,6 +3100,7 @@ export class InputController {
 				child.setExpanded(false);
 			} else if (child instanceof AssistantMessageComponent) {
 				child.setToolResultImagesVisible(!this.ctx.hideToolActivity);
+				if (!this.ctx.hideToolActivity) child.setExpanded(false);
 			}
 		}
 		this.ctx.chatContainer.setToolActivityVisible(!this.ctx.hideToolActivity);
@@ -3109,9 +3119,12 @@ export class InputController {
 				child.setExpanded(expanded);
 			}
 		}
-		// Toggling expansion mutates every live block; blocks already committed to
-		// terminal history stay at their committed presentation.
-		this.ctx.ui.requestRender(true);
+		// Title mode and tool runs hide tool bodies in committed history too, so Ctrl+O must replay
+		// it; otherwise blocks already committed to terminal history keep their presentation.
+		const replay =
+			cfgDisplayCollapsedToolTitles.get(this.ctx.settings) || cfgDisplayGroupToolCalls.get(this.ctx.settings);
+		if (replay) this.ctx.ui.resetDisplay();
+		else this.ctx.ui.requestRender(true);
 	}
 
 	toggleThinkingBlockVisibility(): void {

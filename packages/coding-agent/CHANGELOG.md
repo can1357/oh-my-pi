@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `display.collapsedToolTitles`: collapsed tool calls render as one title row (status, tool, target such as the command or path) with no output, diff or file preview, and the turn's metrics row tucked directly under it; expanding (Ctrl+O) restores the full cards ([#16726](https://github.com/can1357/oh-my-pi/pull/16726) by [@Quentin-M](https://github.com/Quentin-M))
+- Added `display.groupToolCalls`: back-to-back tool calls fold into one summary row (`✓ 12 tool calls  Read ×3 · Edit ×4 · Bash ×2`) that names the running call while the run is live; Ctrl+O expands every run, and a click expands one when `tui.mouse` is on ([#16726](https://github.com/can1357/oh-my-pi/pull/16726) by [@Quentin-M](https://github.com/Quentin-M))
+
 ## [18.17.0] - 2026-11-06
 
 ### Added
