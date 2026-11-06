@@ -62,8 +62,10 @@ async function resolveMentionPath(
 	// mention that does not resolve to an existing file or directory is prose, not a file
 	// reference. Fuzzy/prefix guessing here previously dragged in unrelated same-named
 	// files; that disambiguation belongs to the selector's display, not post-send.
-	const absolutePath = resolveReadPath(filePath, cwd);
+	// Resolution itself can throw (an internal-scheme URL such as `@local://x` is not a
+	// filesystem path), so it stays inside the try: an unresolvable mention is prose too.
 	try {
+		const absolutePath = resolveReadPath(filePath, cwd);
 		await Bun.file(absolutePath).stat();
 		return { resolvedPath: filePath, absolutePath };
 	} catch {

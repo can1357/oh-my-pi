@@ -68,6 +68,9 @@ await tab.close();
 | `persist`             | Default `false`; opt out of settle-freeze and idle-close management. On a tab omp opened through the relay, also keep it open in the user's Chrome after the session ends. Explicit reuse by the owning session can change it. |
 | `timeout`             | Seconds; default 30, capped by positive `tools.maxTimeout`, then clamped to 1–300. First-use Chromium installation is outside the open deadline. An open that runs out names the step it stalled in: launching or connecting to the browser, closing a tab to reopen it, or opening the tab.                                                                                                                                                                     |
 
+If Chrome detaches the relay during an open's navigation and omp reattaches to the same page, the open returns that tab with a recovery notice instead of closing it. Check its current page before repeating the navigation; reattachment does not reload it or retry input that may already have landed.
+If reattachment uses up the budget before navigation starts, the open still fails but keeps the recovered tab available through `browser.tab(name)`.
+
 Reopening with init scripts, a download directory, a user-agent override, or `ignore_https_errors: true` recycles an existing tab so those worker-init options can take effect.
 
 ### Direct tab helpers
@@ -83,7 +86,7 @@ Direct helpers cross the host bridge and return real structured values. The comp
 - Emulation: `emulate`, `devices`.
 - Clipboard: `clipboardRead`, `clipboardWrite`, `clipboardCopy`, `clipboardPaste`.
 - Storage: `cookies`, `setCookies`, `clearCookies`, `storage`, `setStorage`, `clearStorage`, `saveState`, `loadState`.
-- Initialization/downloads: `addInitScript`, `removeInitScript`, `initScripts`, `waitForDownload`, `downloads`.
+- Initialization/downloads: `addInitScript`, `removeInitScript`, `initScripts`, `waitForDownload`, `downloads`. `waitForDownload` holds the tab until a download finishes, so another call on the tab fails as busy while it waits, and on a tab opened without `downloads` a download started before the first wait is not tracked. Start the wait and the step that downloads in one run: `tab.run("const download = tab.waitForDownload(); await tab.click('#export'); return await download;")`.
 - Diagnostics: `console`, `errors`, `clearConsole`, `traceStart`, `traceStop`, `profileStart`, `profileStop`, `metrics`.
 - Recording: `recordStart`, `recordStop`, `recordRestart`, `recording`.
 - Web Vitals/React: `vitals`, `reactEnable`, `reactTree`, `reactInspect`, `reactRenders`, `reactSuspense`; call `reactEnable` before other `react*` helpers (it installs the hook and reloads).

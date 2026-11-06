@@ -5,7 +5,10 @@
 //! `print -f`, with zsh's argument reuse, `%N$` specifiers, `%b %q %n`,
 //! arithmetic numeric arguments and its messages).
 //!
-//! Not provided: `-P` (prompt expansion), `-z` (the ZLE buffer stack),
+//! `-P` expands prompt escapes ([`expand_prompt`], `prompt.c`); `-D`
+//! abbreviates named directories.
+//!
+//! Not provided: `-z` (the ZLE buffer stack),
 //! `-s`/`-S` (the history list) and `-p` (zsh coprocesses): they fail
 //! loudly.
 //!
@@ -21,7 +24,7 @@ use super::{
 	zsh_quote::{self, Charset, QuoteOpts},
 };
 use crate::bash::{
-	diag::Diag,
+	store::{Key, KeyBuf, MiscKey, Record},
 	syntax::zsh::{
 		tok,
 		tok::{at, head, span, tail},
@@ -75,11 +78,12 @@ fn strtoul(s: &[u8]) -> (usize, usize) {
 }
 
 /// The character classification builtins use: `MULTIBYTE` in a UTF-8
-/// locale, `PRINT_EIGHT_BIT`.
+/// locale, `PRINT_EIGHT_BIT`, and the interactive history character.
 pub fn charset(ctx: &mut Ctx<'_, '_>) -> Result<Charset, super::Need> {
 	let utf8 = isset(ctx, ZshOpt::Multibyte)?
 		&& crate::bash::vm::locale::is_utf8(ctx.k, ctx.cx.store, ctx.vp);
-	Ok(Charset { utf8, print_eight: isset(ctx, ZshOpt::Printeightbit)? })
+	let (bang, bang_special) = params::bang_quoting(&mut ctx.k.root, ctx.cx.store, ctx.vp);
+	Ok(Charset { utf8, print_eight: isset(ctx, ZshOpt::Printeightbit)?, bang, bang_special })
 }
 
 /// Number of characters of `s` (bytes outside UTF-8; an invalid byte
@@ -140,24 +144,23 @@ fn zexpandtabs(
 			_ => {},
 		}
 		at_start = false;
-		let n = if utf8 {
-			bstr::decode_utf8(tail(s, i)).1.max(1)
+		// zsh: a character takes its display width (`WCWIDTH`); an
+		// invalid byte one column.
+		let (n, cols) = if utf8 {
+			match bstr::decode_utf8(tail(s, i)) {
+				(Some(c), n) => {
+					(n, usize::try_from(crate::bash::vm::zsh::wcwidth::wcwidth(c)).unwrap_or(0))
+				},
+				(None, _) => (1, 1),
+			}
 		} else {
-			1
+			(1, 1)
 		};
 		out.extend_from_slice(span(s, i, i + n));
-		startpos += 1;
+		startpos += cols;
 		i += n;
 	}
 	startpos
-}
-
-/// The shell state `print -P` prompt escapes read.
-fn prompt_env(ctx: &mut Ctx<'_, '_>) -> Result<Result<PromptEnv, Diag>, super::Need> {
-	let site = ctx.k.zsh_site(ctx.cx, ctx.vp, ctx.line);
-	let percent = isset(ctx, ZshOpt::Promptpercent)?;
-	let bang = isset(ctx, ZshOpt::Promptbang)?;
-	zx(ctx, |ex| prompt_env_ex(ex, site, percent, bang))
 }
 
 /// The shell state prompt escapes read (zsh `promptexpand`'s globals),
@@ -172,21 +175,124 @@ pub fn prompt_env_ex(
 	percent: bool,
 	bang: bool,
 ) -> X<PromptEnv> {
+	prompt_env_for(ex, site, percent, bang, None)
+}
+
+/// Whether format `fm` has an escape that abbreviates the current
+/// directory (`%~`, `%c`, `%.` and their `%(…)` tests): zsh calls `finddir`
+/// (and so the `zsh_directory_name` hook) only for those.
+fn uses_named_dirs(fm: &[u8]) -> bool {
+	let mut i = 0;
+	while i < fm.len() {
+		if fm[i] == b'%' {
+			i += 1;
+			while matches!(fm.get(i), Some(b'-' | b'0'..=b'9' | b'(')) {
+				i += 1;
+			}
+			if matches!(fm.get(i), Some(b'~' | b'c' | b'.')) {
+				return true;
+			}
+		}
+		i += 1;
+	}
+	false
+}
+
+/// [`prompt_env_ex`] for format `fm` (raw): the named directory prefix of
+/// the current directory is looked up only when `fm` uses it (`None`:
+/// always).
+///
+/// # Errors
+/// A store failure reading the parameters; the directory name hook to run.
+pub fn prompt_env_for(
+	ex: &mut Expander<'_, '_>,
+	site: (BString, u32),
+	percent: bool,
+	bang: bool,
+	fm: Option<&[u8]>,
+) -> X<PromptEnv> {
+	use crate::bash::vm::{state, zsh::nameddir};
 	let (scriptname, lineno) = site;
 	let user = ex.cx.host.user();
-	let now_ns = ex.cx.host.now_ns();
-	let secs = i64::try_from(now_ns / 1_000_000_000).unwrap_or(i64::MAX);
-	let nanos = u32::try_from(now_ns % 1_000_000_000).unwrap_or(0);
+	// `%D`, `%T`, `%*`: the wall clock; `now_ns` is monotonic.
+	let wall = ex.cx.host.wall();
+	let (secs, nanos) = (wall.secs, wall.nanos);
+	let elapsed =
+		i64::try_from(ex.cx.host.now_ns().saturating_sub(ex.k.start_ns) / 1_000_000_000).unwrap_or(0);
+	let mb = params::mb(ex)?;
 	let tz = params::getparam(ex, b"TZ")?
 		.filter(|p| p.flags.bits() & super::zsh_typeset::PM_EXPORTED != 0)
-		.map(|p| p.strval());
+		.map(|p| p.strval(mb));
 	let (offset, abbr) = ex.cx.host.tz_offset(tz.as_ref().map(|t| t.as_bstr()), secs);
-	let shlvl = params::getsparam(ex, b"SHLVL")?
-		.and_then(|v| v.to_str().ok().and_then(|s| s.trim().parse().ok()))
-		.unwrap_or(0);
+	let int = |v: Option<BString>| -> Option<i64> {
+		v.and_then(|v| v.to_str().ok().and_then(|s| s.trim().parse().ok()))
+	};
+	let shlvl = int(params::getsparam(ex, b"SHLVL")?).unwrap_or(0);
+	let columns = int(params::getsparam(ex, b"COLUMNS")?)
+		.and_then(|c| usize::try_from(c).ok())
+		.filter(|&c| c > 0)
+		.unwrap_or(80);
+	let pwd = ex.vp.cwd.clone();
+	let pwd_named = if fm.is_none_or(uses_named_dirs) {
+		nameddir::finddir(ex, &pwd)?
+	} else {
+		None
+	};
+	let (flineno, scriptfile) = script_file(ex)?;
+	let mut zopt = |o: ZshOpt| state::zsh_option(&mut ex.k.root, ex.cx.store, ex.vp, o);
+	let singleline = zopt(ZshOpt::Singlelinezle)?;
+	let multibyte = zopt(ZshOpt::Multibyte)?;
+	let print_eight = zopt(ZshOpt::Printeightbit)?;
+	let charset = super::zsh_quote::Charset {
+		utf8: multibyte && crate::bash::vm::locale::is_utf8(ex.k, ex.cx.store, ex.vp),
+		print_eight,
+		..Charset::default()
+	};
+	let term = {
+		let term = params::getsparam(ex, b"TERM")?.unwrap_or_default();
+		let terminfo = params::getsparam(ex, b"TERMINFO")?;
+		let terminfo_dirs = params::getsparam(ex, b"TERMINFO_DIRS")?;
+		let home = params::getsparam(ex, b"HOME")?;
+		let tenv = crate::bash::vm::zsh::terminfo_db::TermEnv {
+			terminfo:      terminfo.as_deref().map(|v| v.as_slice()),
+			terminfo_dirs: terminfo_dirs.as_deref().map(|v| v.as_slice()),
+			home:          home.as_deref().map(|v| v.as_slice()),
+		};
+		zsh_prompt::TermCaps::load(&term, &tenv)
+	};
+	let mut seqs = zsh_prompt::ColourSeqs::default();
+	for h in params::getaparam(ex, b"zle_highlight")?.unwrap_or_default() {
+		let slots: [(&[u8], bool, usize); 6] = [
+			(b"fg_start_code:", true, 0),
+			(b"fg_default_code:", true, 1),
+			(b"fg_end_code:", true, 2),
+			(b"bg_start_code:", false, 0),
+			(b"bg_default_code:", false, 1),
+			(b"bg_end_code:", false, 2),
+		];
+		for (prefix, fg, slot) in slots {
+			if let Some(code) = h.strip_prefix(prefix) {
+				let v = BString::from(getkeystring(code, getkey::KEYS_BINDKEY).0);
+				if fg {
+					seqs.fg[slot] = v;
+				} else {
+					seqs.bg[slot] = v;
+				}
+			}
+		}
+	}
+	let nearcolor = if super::zsh_module::loaded(ex.cx.store, ex.vp, b"zsh/nearcolor")? {
+		Some(super::zsh_mod_nearcolor::getnearestcolor as zsh_prompt::NearColour)
+	} else {
+		None
+	};
+	let txtattr = match state::record(ex.cx.store, ex.vp, Key::Misc(MiscKey::ZshTxtAttr))? {
+		Some(Record::Misc(v)) => v.to_str().ok().and_then(|s| s.parse().ok()).unwrap_or(0),
+		_ => 0,
+	};
 	Ok(PromptEnv {
-		pwd: ex.vp.cwd.clone(),
-		home: params::getsparam(ex, b"HOME")?,
+		pwd,
+		pwd_named,
 		lastval: ex.vp.status,
 		euid: user.euid,
 		egid: user.gid,
@@ -196,10 +302,160 @@ pub fn prompt_env_ex(
 		psvar: params::getaparam(ex, b"psvar")?.unwrap_or_default(),
 		depth: params::getaparam(ex, b"funcstack")?.map_or(0, |f| f.len()),
 		lineno,
+		flineno,
 		scriptname,
+		scriptfile,
 		now: (secs, nanos, offset, abbr),
+		elapsed,
 		percent,
 		bang,
+		histnum: super::history::zsh::curhist(&ex.k.root, ex.cx.store, ex.vp)?,
+		jobs: crate::bash::vm::jobctl::job_count(ex.vp),
+		tty: params::getsparam(ex, b"TTY")?.unwrap_or_default(),
+		columns,
+		cmdstack: Vec::new(),
+		rstring: None,
+		big_rstring: None,
+		term,
+		singleline,
+		seqs,
+		nearcolor,
+		txtattr,
+		charset,
+	})
+}
+
+/// zsh's `%I` and `%x` sources: inside a function, the line in its file
+/// and the file it was defined in; else `None` and the running script
+/// file (zsh's `scriptfilename`, or `$0` for a `-c` string).
+fn script_file(ex: &mut Expander<'_, '_>) -> X<(Option<u32>, BString)> {
+	use crate::bash::vm::proc::{FrameKind, ScriptKind};
+	let mut in_function = None;
+	for f in ex.vp.frames.iter().rev() {
+		match &f.kind {
+			FrameKind::Function { .. } => {
+				in_function = Some(ex.line);
+				break;
+			},
+			FrameKind::Script { what: ScriptKind::Source | ScriptKind::Run, .. } => break,
+			_ => {},
+		}
+	}
+	Ok((in_function, scriptfilename(ex.k, ex.cx.store, ex.vp)?))
+}
+
+/// zsh's `scriptfilename` in `vp`: the file the innermost running function
+/// was defined in, else the file being sourced or run, else `zsh` for a
+/// `-c` string (zsh `parseopts`), else `$0` (standard input).
+///
+/// # Errors
+/// A store failure reading `$0`.
+pub fn scriptfilename(
+	k: &crate::bash::vm::Kernel,
+	store: &mut dyn crate::bash::store::StateStore,
+	vp: &crate::bash::vm::proc::Vproc,
+) -> Result<BString, crate::bash::store::StoreError> {
+	use crate::bash::vm::{
+		callstack::CallKind,
+		proc::{FrameKind, ScriptKind},
+		state,
+	};
+	let mut seen_function = false;
+	for f in vp.frames.iter().rev() {
+		match &f.kind {
+			FrameKind::Function { .. } if !seen_function => {
+				seen_function = true;
+				let file = vp.calls.iter().rev().find_map(|c| match &c.kind {
+					CallKind::Function { file, .. } if !file.is_empty() => Some(file.clone()),
+					_ => None,
+				});
+				if let Some(file) = file {
+					return Ok(file);
+				}
+			},
+			FrameKind::Script { what: ScriptKind::Source, .. } => {
+				let file = vp.calls.iter().rev().find_map(|c| match &c.kind {
+					CallKind::Source { file, .. } => Some(file.clone()),
+					_ => None,
+				});
+				return Ok(file.unwrap_or_else(|| BString::from("zsh")));
+			},
+			FrameKind::Script { what: ScriptKind::Run, .. } => {
+				let link = vp.runs.front().and_then(|r| r.chain.links.first());
+				match link.map(|l| &l.origin) {
+					Some(crate::bash::event::Origin::File(path)) => return Ok(path.clone()),
+					Some(crate::bash::event::Origin::Command) => return Ok(BString::from("zsh")),
+					_ => break,
+				}
+			},
+			_ => {},
+		}
+	}
+	state::dollar0(store, vp, &k.argv0)
+}
+
+/// zsh `promptexpand(s, ns, …)` with the shell's state: `PROMPT_SUBST`
+/// substitutions (when `opts` says so), then the prompt escapes; the
+/// attribute state it leaves is kept for the next expansion. `opts`:
+/// `(PROMPT_PERCENT, PROMPT_BANG, PROMPT_SUBST)`, `None` for the shell's
+/// options. `ns`: keep zsh's markers ([`zsh_prompt::promptexpand_ns`]).
+///
+/// # Errors
+/// A command substitution or hook to run first, a store failure.
+pub fn expand_prompt(
+	ex: &mut Expander<'_, '_>,
+	s: &[u8],
+	opts: Option<(bool, bool, bool)>,
+	ns: bool,
+) -> X<Vec<u8>> {
+	expand_prompt_in(ex, s, opts, ns, Vec::new())
+}
+
+/// [`expand_prompt`] with `cmdstack` (zsh's command stack, outermost
+/// first) for `%_`: `PS4` in the trace of a command inside `if`, `for`, ….
+///
+/// # Errors
+/// As [`expand_prompt`].
+pub fn expand_prompt_in(
+	ex: &mut Expander<'_, '_>,
+	s: &[u8],
+	opts: Option<(bool, bool, bool)>,
+	ns: bool,
+	cmdstack: Vec<&'static str>,
+) -> X<Vec<u8>> {
+	use crate::bash::vm::state;
+	let (percent, bang, subst) = if let Some(o) = opts {
+		o
+	} else {
+		let mut zopt = |o: ZshOpt| state::zsh_option(&mut ex.k.root, ex.cx.store, ex.vp, o);
+		(zopt(ZshOpt::Promptpercent)?, zopt(ZshOpt::Promptbang)?, zopt(ZshOpt::Promptsubst)?)
+	};
+	let text = if subst {
+		let status = ex.vp.status;
+		let t = prompt_subst(ex, s)?;
+		ex.vp.status = status;
+		t
+	} else {
+		s.to_vec()
+	};
+	let site = ex.k.zsh_site(ex.cx, ex.vp, ex.line);
+	let mut env = prompt_env_for(ex, site, percent, bang, Some(&text))?;
+	env.cmdstack = cmdstack;
+	let e = zsh_prompt::promptexpand_ns(&text, &env);
+	if e.txtattr != env.txtattr {
+		let rec = (e.txtattr != 0).then(|| Record::Misc(BString::from(e.txtattr.to_string())));
+		state::store_record(
+			&mut ex.k.root,
+			ex.cx.store,
+			ex.vp,
+			KeyBuf::Misc(MiscKey::ZshTxtAttr),
+			rec,
+		);
+	}
+	Ok(if ns {
+		e.text
+	} else {
+		zsh_prompt::strip_markers(&e.text)
 	})
 }
 
@@ -338,41 +594,29 @@ pub fn print(ctx: &mut Ctx<'_, '_>, ops: &mut Ops, args: &[BString], func: Func)
 			k += 1;
 		}
 	}
-	if ops.isset(b'P') {
-		let env = match prompt_env(ctx)? {
-			Ok(env) => env,
+	if ops.isset(b'P') || ops.isset(b'D') {
+		let (prompt, dirs) = (ops.isset(b'P'), ops.isset(b'D'));
+		let line = ctx.line;
+		let r = zx(ctx, |ex| {
+			ex.line = line;
+			words
+				.iter()
+				.map(|w| {
+					let mut w = if prompt {
+						expand_prompt(ex, w, None, false)?
+					} else {
+						w.clone()
+					};
+					if dirs {
+						w = crate::bash::vm::zsh::nameddir::abbreviate(ex, &w)?.into();
+					}
+					Ok(w)
+				})
+				.collect::<X<Vec<_>>>()
+		})?;
+		match r {
+			Ok(w) => words = w,
 			Err(d) => return zerr(ctx, d),
-		};
-		if isset(ctx, ZshOpt::Promptsubst)? {
-			let r = zx(ctx, |ex| {
-				words
-					.iter()
-					.map(|w| prompt_subst(ex, w))
-					.collect::<X<Vec<_>>>()
-			})?;
-			match r {
-				Ok(w) => words = w,
-				Err(d) => return zerr(ctx, d),
-			}
-		}
-		for w in &mut words {
-			*w = zsh_prompt::promptexpand(w, &env);
-		}
-	}
-	if ops.isset(b'D') {
-		let home = zx(ctx, |ex| params::getsparam(ex, b"HOME"))?;
-		let home = match home {
-			Ok(h) => h,
-			Err(d) => return zerr(ctx, d),
-		};
-		if let Some(home) = home.filter(|h| !h.is_empty() && h.as_slice() != b"/") {
-			for w in &mut words {
-				if w.starts_with(&home) && matches!(w.get(home.len()), None | Some(b'/')) {
-					let mut t = b"~".to_vec();
-					t.extend_from_slice(tail(w, home.len()));
-					*w = t;
-				}
-			}
 		}
 	}
 	if ops.isset(b'o') || ops.isset(b'O') {
@@ -429,12 +673,13 @@ pub fn print(ctx: &mut Ctx<'_, '_>, ops: &mut Ops, args: &[BString], func: Func)
 			return finish(ctx, sink, out);
 		}
 		if ops.isset(b'z') {
-			ctx.diag(Diag::Unsupported { what: "print -z (the ZLE buffer stack)".into() });
-			return done(1);
+			// zsh `zpushnode(bufstack, sepjoin(args, NULL, 0))`.
+			let line = BString::from(words.join(&b" "[..]));
+			crate::bash::vm::zle::vared::push_line(ctx, line);
+			return done(0);
 		}
 		if ops.isset(b's') || ops.isset(b'S') {
-			ctx.diag(Diag::Unsupported { what: "print -s (the zsh history list)".into() });
-			return done(1);
+			return super::history::zfc::print_s(ctx, &words, ops.isset(b'S'));
 		}
 		let sep = if ops.isset(b'l') {
 			b'\n'
@@ -481,10 +726,7 @@ pub fn print(ctx: &mut Ctx<'_, '_>, ops: &mut Ops, args: &[BString], func: Func)
 		}
 		return finish(ctx, sink, out);
 	};
-	if ops.isset(b'z') || ops.isset(b's') {
-		ctx.diag(Diag::Unsupported { what: "print -z/-s with a format".into() });
-		return done(1);
-	}
+	let to_bufstack = ops.isset(b'z');
 	let visarr = match &sink {
 		Sink::Var(name) => {
 			let base: Vec<u8> = name
@@ -535,6 +777,15 @@ pub fn print(ctx: &mut Ctx<'_, '_>, ops: &mut Ops, args: &[BString], func: Func)
 			vals.push(BString::from(tail(&out, start)));
 			if let Err(d) = zx(ctx, |ex| params::assignaparam(ex, &name, vals, 0))? {
 				return zerr(ctx, d);
+			}
+		},
+		// zsh: the formatted text is the next editor line.
+		_ if to_bufstack => crate::bash::vm::zle::vared::push_line(ctx, BString::from(out)),
+		// zsh: the formatted text becomes one history event.
+		_ if ops.isset(b's') || ops.isset(b'S') => {
+			let r = super::history::zfc::print_s_text(ctx, out)?;
+			if r.status != 0 {
+				return Ok(r);
 			}
 		},
 		sink => {
@@ -1035,8 +1286,11 @@ impl Printf<'_, '_, '_> {
 						}
 					},
 					b'q' => {
-						let q =
-							zsh_quote::quotestring_backslash(curarg.unwrap_or_default(), true, self.quote);
+						// zsh: `curarg ? quotestring(curarg, QT_BACKSLASH_SHOWNULL)
+						// : &nullstr`, a missing argument is no text at all.
+						let q = curarg.map_or_else(Vec::new, |a| {
+							zsh_quote::quotestring_backslash(a, true, self.quote)
+						});
 						let lb = prec.map_or(q.len(), |p| p.min(q.len()));
 						emit(&mut self.out, b"", head(&q, lb), width, f, false);
 					},
@@ -1059,9 +1313,12 @@ impl Printf<'_, '_, '_> {
 					},
 					_ => {
 						let end = (c + 1).min(fmt.len());
+						// zsh prints the directive as a C string: up to a NUL.
+						let dir = span(fmt, start, end);
+						let dir = dir.split(|&b| b == 0).next().unwrap_or(dir);
 						self
 							.ctx
-							.usage(format!("{}: invalid directive", BStr::new(span(fmt, start, end))));
+							.usage(format!("{}: invalid directive", BStr::new(dir)));
 						return Ok(Err(1));
 					},
 				}

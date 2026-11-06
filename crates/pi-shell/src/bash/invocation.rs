@@ -51,6 +51,15 @@ pub const SYS_PROFILE: &str = "/etc/profile";
 /// bash's `PATH` when the environment has none (`DEFAULT_PATH_VALUE`).
 pub const DEFAULT_PATH: &str = "/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:.";
 
+/// [`DEFAULT_PATH`] joined with the shell's `$PATH` separator.
+pub const fn default_path(platform: crate::bash::ids::Platform) -> &'static str {
+	if matches!(platform, crate::bash::ids::Platform::Windows) {
+		"/usr/local/bin;/usr/local/sbin;/usr/bin;/usr/sbin;/bin;/sbin;."
+	} else {
+		DEFAULT_PATH
+	}
+}
+
 /// `bash -o` / `bash -O` as the last argument: bash lists the options (the
 /// values at that point of the parse) and goes on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,14 +226,14 @@ impl InvocationError {
 }
 
 /// The mode `--emulate NAME` starts: zsh's `emulate` picks by first letter
-/// (`r`-prefixed names skip it; `c`sh is unsupported, `k`sh, `s`h and
-/// `b`ash are its sh emulation, anything else zsh). obash adds `bash`
-/// itself when the shell is not started as zsh (`zsh` is false).
-const fn emulated_mode(name: &[u8], zsh: bool) -> Result<ModeId, InvocationError> {
+/// (`r`-prefixed names skip it; `c`sh, `k`sh, `s`h and `b`ash (its sh
+/// emulation), anything else zsh). obash adds `bash` itself when the shell
+/// is not started as zsh (`zsh` is false).
+const fn emulated_mode(name: &[u8], zsh: bool) -> ModeId {
 	if !zsh {
 		match name {
-			b"bash" => return Ok(ModeId::Bash),
-			b"sh" => return Ok(ModeId::Sh),
+			b"bash" => return ModeId::Bash,
+			b"sh" => return ModeId::Sh,
 			_ => {},
 		}
 	}
@@ -233,14 +242,12 @@ const fn emulated_mode(name: &[u8], zsh: bool) -> Result<ModeId, InvocationError
 		[c, ..] => *c,
 		[] => 0,
 	};
-	Ok(match c {
-		b'c' => {
-			return Err(InvocationError::Unsupported { what: Cow::Borrowed("csh emulation") });
-		},
+	match c {
+		b'c' => ModeId::ZshCsh,
 		b'k' => ModeId::Ksh,
 		b's' | b'b' => ModeId::ZshSh,
 		_ => ModeId::Zsh,
-	})
+	}
 }
 
 /// The base name of `path` (after the last `/`).
@@ -274,6 +281,17 @@ impl ShellArgs {
 	/// options, then letters and `-o` names, then a missing `-c` command,
 	/// then `-O` names.
 	pub fn parse(argv: &[BString]) -> Result<Self, InvocationError> {
+		Self::parse_exe(argv, b"")
+	}
+
+	/// [`Self::parse`] for the executable at `exe`: when its base name is
+	/// `zsh`, the shell is zsh whatever `argv[0]` says (`exec -a NAME zsh`),
+	/// emulating by the first letter of `NAME` (zsh `emulate(zsh_name)`).
+	///
+	/// # Errors
+	///
+	/// As [`Self::parse`].
+	pub fn parse_exe(argv: &[BString], exe: &[u8]) -> Result<Self, InvocationError> {
 		let argv0 = argv
 			.first()
 			.cloned()
@@ -296,10 +314,11 @@ impl ShellArgs {
 		let name_mode = match base {
 			b"zsh" => Some(ModeId::Zsh),
 			b"ksh" => Some(ModeId::Ksh),
+			_ if base_name(exe) == b"zsh" => Some(emulated_mode(base, true)),
 			_ => None,
 		};
 		let (mode, first) = match emulate {
-			Some((name, first)) => (emulated_mode(name, name_mode.is_some())?, first),
+			Some((name, first)) => (emulated_mode(name, name_mode.is_some()), first),
 			None => (name_mode.unwrap_or(ModeId::Bash), 1),
 		};
 		if mode.dialect() == Dialect::Zsh {
@@ -721,8 +740,26 @@ impl ShellArgs {
 		home: &[u8],
 		interactive: bool,
 	) -> Result<Vec<Vec<BString>>, InvocationError> {
+		self.startup_files_with(env, home, interactive, true)
+	}
+
+	/// [`Self::startup_files`], leaving out an interactive shell's rc files
+	/// (`~/.bashrc` or `--rcfile`, `$ENV`; `/etc/zshrc`, `.zshrc`) unless
+	/// `rc`: a [`crate::bash::Profile::Tool`] shell's nested `bash -i` or
+	/// `zsh -i` does not set up the user's completion and history.
+	///
+	/// # Errors
+	///
+	/// As [`Self::startup_files`].
+	pub fn startup_files_with(
+		&self,
+		env: &[(BString, BString)],
+		home: &[u8],
+		interactive: bool,
+		rc: bool,
+	) -> Result<Vec<Vec<BString>>, InvocationError> {
 		if self.mode.dialect() == Dialect::Zsh {
-			return Ok(self.zsh_startup_files(env, home, interactive));
+			return Ok(self.zsh_startup_files(env, home, interactive, rc));
 		}
 		let posix = self.posix_at_start(env);
 		let privileged = self
@@ -778,12 +815,12 @@ impl ShellArgs {
 				norc = true;
 				profile(&mut files);
 			}
-			if !self.sh && !norc {
+			if rc && !self.sh && !norc {
 				files.push(vec![self.rcfile.clone().unwrap_or_else(|| tilde("/.bashrc"))]);
-			} else if self.sh && !privileged {
+			} else if rc && self.sh && !privileged {
 				env_file(b"ENV", &mut files)?;
 			}
-		} else if !privileged {
+		} else if rc && !privileged {
 			env_file(b"ENV", &mut files)?;
 		}
 		Ok(files)
@@ -797,6 +834,7 @@ impl ShellArgs {
 		env: &[(BString, BString)],
 		home: &[u8],
 		interactive: bool,
+		rc: bool,
 	) -> Vec<Vec<BString>> {
 		let set = |opt: ZshOpt, default: bool| {
 			self
@@ -832,7 +870,7 @@ impl ShellArgs {
 		files.push(user(".zshenv"));
 		for (when, sys, own) in [
 			(login, "/etc/zprofile", ".zprofile"),
-			(interactive, "/etc/zshrc", ".zshrc"),
+			(interactive && rc, "/etc/zshrc", ".zshrc"),
 			(login, "/etc/zlogin", ".zlogin"),
 		] {
 			if when {
@@ -1140,6 +1178,18 @@ mod tests {
 			(OptId::Noglob, true),
 			(OptId::Checkhash, true),
 		]);
+	}
+
+	#[test]
+	fn zsh_executable_stays_zsh_under_another_argv0() {
+		let a = ShellArgs::parse_exe(&argv(&["foo*", "-fc", ":"]), b"/x/Src/zsh").unwrap();
+		assert_eq!((a.mode, a.dollar0.as_slice()), (ModeId::Zsh, &b"foo*"[..]));
+		let a = ShellArgs::parse_exe(&argv(&["", "-fc", ":"]), b"/x/zsh").unwrap();
+		assert_eq!(a.mode, ModeId::Zsh);
+		let a = ShellArgs::parse_exe(&argv(&["sh", "-c", ":"]), b"/x/zsh").unwrap();
+		assert_eq!(a.mode, ModeId::ZshSh);
+		let a = ShellArgs::parse_exe(&argv(&["foo", "-c", ":"]), b"/x/obash").unwrap();
+		assert_eq!(a.mode, ModeId::Bash);
 	}
 
 	#[test]

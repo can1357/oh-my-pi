@@ -7,7 +7,11 @@ import { createJsonParsePlugin } from "./json-parse-plugin";
 import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
 
 /** Native runtime dependencies always resolved from the on-demand install instead of embedded into compiled binaries. */
-export const COMPILED_EXTERNAL_DEPENDENCIES: readonly string[] = Object.freeze(["fastembed", "onnxruntime-node"]);
+export const COMPILED_EXTERNAL_DEPENDENCIES: readonly string[] = Object.freeze([
+	"@huggingface/transformers",
+	"fastembed",
+	"onnxruntime-node",
+]);
 
 /** Inputs shared by local and release coding-agent binary builds. */
 export interface CodingAgentCompileOptions {
@@ -17,8 +21,6 @@ export interface CodingAgentCompileOptions {
 	readonly entrypoint: string;
 	/** Absolute standalone executable output path. */
 	readonly outfile: string;
-	/** Concrete Transformers.js version baked into the tiny-model worker. */
-	readonly transformersVersion: string;
 	/**
 	 * Native addon target embedded for the runtime loader to extract; `null`
 	 * compiles without one (probe builds that never load the addon).
@@ -51,7 +53,6 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 			files: options.native ? await embeddedAddonFiles(options.native) : {},
 			define: {
 				"process.env.PI_COMPILED": JSON.stringify("true"),
-				"process.env.PI_TINY_TRANSFORMERS_VERSION": JSON.stringify(options.transformersVersion),
 				"process.env.PI_DOCS_EMBED": JSON.stringify((await buildDocsIndexPayload()).payload),
 			},
 			// Precompiled bytecode skips parsing the ~20 MB bundle at boot:

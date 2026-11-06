@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { enableUserSource } from "@oh-my-pi/pi-coding-agent/capability";
 import { type ContextFile, contextFileCapability } from "@oh-my-pi/pi-coding-agent/capability/context-file";
+import type { Skill } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initializeWithSettings, loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { isShadowedExtension } from "@oh-my-pi/pi-tui/overlays/extensions/types";
@@ -106,6 +108,36 @@ describe("disabledExtensions runtime filtering", () => {
 		expect(runtime.items.map(file => path.basename(file.path))).toContain("AGENTS.md");
 		expect(agents?.state).toBe("active");
 		expect(gemini?.state).toBe("disabled");
+	});
+
+	test("shows the enabled agents skill when an opted-out Claude skill has the same name", async () => {
+		const name = "shared-skill";
+		const claudeFile = path.join(tempHomeDir, ".claude", "skills", name, "SKILL.md");
+		const agentsFile = path.join(tempHomeDir, ".agents", "skills", name, "SKILL.md");
+		await fs.mkdir(path.dirname(claudeFile), { recursive: true });
+		await fs.mkdir(path.dirname(agentsFile), { recursive: true });
+		await fs.writeFile(claudeFile, "---\ndescription: Claude version\n---\n\n# Shared skill\n");
+		await fs.writeFile(agentsFile, "---\ndescription: Agents version\n---\n\n# Shared skill\n");
+
+		const runtime = await loadCapability<Skill>("skills", { cwd: tempDir });
+		const dashboard = (await loadAllExtensions(tempDir, [])).filter(extension => extension.id === `skill:${name}`);
+		const claude = dashboard.find(extension => extension.path === claudeFile);
+		const agents = dashboard.find(extension => extension.path === agentsFile);
+
+		expect(runtime.items.find(skill => skill.name === name)?.path).toBe(agentsFile);
+		expect(claude?.state).toBe("disabled");
+		expect(claude?.disabledReason).toBe("user-opt-in");
+		expect(agents?.state).toBe("active");
+		expect(agents && isShadowedExtension(agents)).toBe(false);
+
+		enableUserSource("claude");
+		const enabledRuntime = await loadCapability<Skill>("skills", { cwd: tempDir });
+		const enabledDashboard = (await loadAllExtensions(tempDir, [])).filter(
+			extension => extension.id === `skill:${name}`,
+		);
+		expect(enabledRuntime.items.find(skill => skill.name === name)?.path).toBe(claudeFile);
+		expect(enabledDashboard.find(extension => extension.path === claudeFile)?.state).toBe("active");
+		expect(enabledDashboard.find(extension => extension.path === agentsFile)?.state).toBe("shadowed");
 	});
 
 	test("deduplicates against the caller's session-local disabled list, not global settings", async () => {

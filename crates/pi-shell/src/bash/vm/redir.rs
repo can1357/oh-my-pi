@@ -238,7 +238,12 @@ fn target_text(
 		},
 		RedirTargetIr::HereDoc { text, quoted: false } => {
 			let mode = super::exec::mode_of(vp);
-			let tunit = match k.engine.text_unit(text, TextKind::HereDoc, mode) {
+			let tunit = match k.engine.text_unit(
+				text,
+				TextKind::HereDoc,
+				mode,
+				k.mask.contains(crate::bash::event::EventKind::UnitCompiled),
+			) {
 				Ok(u) => u,
 				Err(e) => {
 					// bash reports the script line after the document.
@@ -364,7 +369,7 @@ fn target_fd(
 				return var_fd(k, vp, cx, name)
 					.ok_or_else(|| Diag::AmbiguousRedirect { word: name.clone() });
 			}
-			let fd = vp.fds.lowest_free(10);
+			let fd = super::jobctl::lowest_free_fd(k, vp, 10);
 			assign_fd_var(k, vp, cx, name, fd, line)?;
 			Ok(fd)
 		},
@@ -413,6 +418,14 @@ fn var_fd(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, name: &[u8]) -> Optio
 			state::Deref::Circular => return None,
 		};
 	let index = index.as_deref().map(|i| i.as_slice());
+	// zsh `{1}>&-`: a positional parameter (a `zle -F` handler closing the
+	// fd it was given).
+	if index.is_none() && !base.is_empty() && base.iter().all(u8::is_ascii_digit) {
+		let n: usize = std::str::from_utf8(&base).ok()?.parse().ok()?;
+		let args = state::positional_ref(&k.root, cx.store, vp).ok()?;
+		let text = args.get(n.checked_sub(1)?)?;
+		return std::str::from_utf8(text).ok()?.trim().parse().ok();
+	}
 	let var = state::lookup(&k.root, cx.store, vp, &base)
 		.ok()
 		.flatten()?
@@ -514,7 +527,7 @@ fn install(
 			// readonly one leaves the file created); a parked open keeps
 			// its slot free, so the fd is the same on resume.
 			let fd = match &r.fd {
-				RedirFdIr::Var(_) => vp.fds.lowest_free(10),
+				RedirFdIr::Var(_) => super::jobctl::lowest_free_fd(k, vp, 10),
 				_ => target_fd(k, vp, cx, r, false, line).map_err(|d| fail(k, vp, cx, line, d))?,
 			};
 			// bash moves a `{var}` fd to 10 or above with `F_DUPFD`, which
@@ -826,8 +839,8 @@ fn seed_pipeline(vp: &mut Vproc, unit: &Unit) {
 	let Some(f) = vp.frames.last() else {
 		return;
 	};
-	let base =
-		matches!(f.kind, FrameKind::Stage) || (vp.frames.len() == 1 && f.kind == FrameKind::Subshell);
+	let base = matches!(f.kind, FrameKind::Stage)
+		|| (vp.frames.len() == 1 && matches!(f.kind, FrameKind::Subshell | FrameKind::Job { .. }));
 	if !base {
 		return;
 	}
@@ -921,7 +934,7 @@ fn zsh_target_fd(
 					name.as_bstr()
 				)));
 			}
-			Ok(vp.fds.lowest_free(10))
+			Ok(super::jobctl::lowest_free_fd(k, vp, 10))
 		},
 	}
 }
@@ -980,6 +993,17 @@ fn zsh_flags(
 	Ok(write.with(OpenFlags::TRUNC))
 }
 
+/// `/dev/tty` in a vproc whose session has a terminal of its own (a `zpty`
+/// command's, [`super::proc::VprocZsh::ctty`]): that terminal. zsh's
+/// forked child opens its controlling terminal there; this process's
+/// `/dev/tty` would be the shell's.
+fn session_tty(vp: &Vproc, path: &[u8]) -> Option<FdRef> {
+	if path != b"/dev/tty" {
+		return None;
+	}
+	vp.zsh.as_deref().and_then(|z| z.ctty.0.clone())
+}
+
 /// Open `path` with `flags` (pollable) for a zsh redirection; a failure is
 /// zsh's `ERRNO: path`.
 fn zsh_open(
@@ -990,6 +1014,9 @@ fn zsh_open(
 	flags: OpenFlags,
 	line: u32,
 ) -> Result<FdRef, Halt> {
+	if let Some(h) = session_tty(vp, path) {
+		return Ok(h);
+	}
 	if let Some(src) = dev_fd(path) {
 		return vp
 			.fds
@@ -1303,6 +1330,12 @@ fn open_into(
 	flags: OpenFlags,
 	line: u32,
 ) -> Result<(), Halt> {
+	if let Some(h) = session_tty(vp, path) {
+		for &fd in fds {
+			set_fd(vp, fd, Some(h.clone()));
+		}
+		return Ok(());
+	}
 	if let Some(src) = dev_fd(path) {
 		let Some(h) = vp.fds.get(src).cloned().filter(FdRef::is_open) else {
 			k.diag(cx, vp, line, Diag::Io {

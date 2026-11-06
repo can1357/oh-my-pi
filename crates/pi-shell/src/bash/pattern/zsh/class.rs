@@ -77,7 +77,7 @@ pub(super) enum SetItem {
 
 /// zsh `range_type`: the `PP_*` code of the class name `name`, or
 /// [`PP_UNKWN`].
-pub(super) fn range_type(name: &[u8]) -> u8 {
+pub(crate) fn range_type(name: &[u8]) -> u8 {
 	COLON_STUFFS
 		.split(|&c| c == b' ')
 		.position(|n| n == name)
@@ -96,6 +96,20 @@ pub(super) fn matchrange(set: &[SetItem], ch: u32, zmb: Zmb, mb: bool, env: &Cha
 		SetItem::Class(pp) if mb => wide_class(pp, ch, env),
 		SetItem::Class(pp) => byte_class(pp, ch, env),
 	})
+}
+
+/// zsh `colon_stuffs[pp - PP_FIRST]`: the name of the `[:name:]` class
+/// `pp` (`PP_ALPHA..=PP_INVALID`).
+pub(crate) fn pp_name(pp: u8) -> Option<&'static [u8]> {
+	COLON_STUFFS
+		.split(|&c| c == b' ')
+		.nth(usize::from(pp).checked_sub(1)?)
+}
+
+/// `mb_patmatchrange`'s test of the code point `ch` against the
+/// `[:name:]` class `pp` (completion matchers).
+pub(crate) fn mb_class(pp: u8, ch: u32, env: &CharEnv) -> bool {
+	wide_class(pp, ch, env)
 }
 
 /// A `[:name:]` test of the byte `ch` (zsh `patmatchrange`: `<ctype.h>`

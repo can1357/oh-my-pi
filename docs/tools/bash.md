@@ -66,6 +66,7 @@ The tool returns a `text` content block plus optional `details` and image blocks
    - delivered through `onUpdate` / async job manager, not the initial return.
    - running updates contain tail text and `details.async.state: "running"` only after the job is considered backgrounded.
    - completion/failure updates carry final text and `details.async.state: "completed" | "failed"`. A non-zero exit or timeout is recorded as a failed background job.
+   - the `async-result` follow-up names the job by its command on one line (line breaks as `\n`, the middle elided past 400 characters): `Background job <id> (<command>) has completed.`, or `── Job <id> (<command>) ──` in a batch.
 - Failure:
    - cancellation, missing exit status, validation failures, and intercepted commands throw `ToolError` / `ToolAbortError`; timeouts return an error result.
 

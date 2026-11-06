@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/omp-stats",
-  "version": "18.16.0",
+  "version": "18.17.0",
   "description": "Local observability dashboard for omp AI usage statistics",
   "homepage": "https://omp.sh",
   "author": {
@@ -36,7 +36,7 @@
     "build": "bun run build.ts",
     "dev": "bun run src/index.ts",
     "check": "oxlint . && oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run check:types",
-    "check:types": "tsgo -p tsconfig.json --noEmit && tsgo -p tsconfig.client.json --noEmit",
+    "check:types": "bun check --no-script -p tsconfig.json && bun check --no-script -p tsconfig.client.json",
     "lint": "oxlint .",
     "fix": "oxlint --fix --fix-suggestions . && bun run fmt",
     "fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts'"

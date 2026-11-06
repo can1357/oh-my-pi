@@ -109,18 +109,6 @@ export function runsAgent(command: string): boolean {
 	return segments(command).some(s => AGENT_SEGMENT.test(s));
 }
 
-/** A pipeline stage that keeps only the lines it was told to (`grep`, `rg`, `sed -n 10,40p`, `awk '/x/'`). */
-const FILTER_STAGE = /^(?:\w+=\S*\s+)*(?:grep|egrep|rg|ag|sed\s+-n|awk)\b/;
-
-/**
- * The command's output is lines the agent already picked: its last segment searches or selects (`grep -n f x.c`,
- * `git show m:x.c | grep -A12 y`, `sed -n '99,130p' doc.md`).
- */
-export function narrowsOutput(command: string): boolean {
-	const last = segments(command).filter(Boolean).at(-1) ?? "";
-	return last.split("|").some(stage => FILTER_STAGE.test(stage.trim()));
-}
-
 /** The command or read path reads text a shaped result saved (`artifact://N`): the agent paging hidden lines back in. */
 export function isPageBack(command: string): boolean {
 	return command.includes("artifact://");
@@ -202,19 +190,13 @@ export function readTargets(command: string): ReadTarget[] {
 	return targets;
 }
 
-/** A file a read target names: the path as written (glob expanded) and its real absolute path. */
-export interface ResolvedFile {
-	path: string;
-	abs: string;
-}
-
 const expandHome = (p: string) => (p === "~" || p.startsWith("~/") ? path.join(os.homedir(), p.slice(1)) : p);
 
 /**
- * The files `target` prints, resolved against `cwd` after its `cd` segments, globs expanded in shell order.
- * Missing files and directories are left out.
+ * The real absolute paths of the files `target` prints, resolved against `cwd` after its `cd` segments, globs expanded
+ * in shell order. Missing files and directories are left out.
  */
-export async function resolveTarget(target: ReadTarget, cwd: string): Promise<ResolvedFile[]> {
+export async function resolveTarget(target: ReadTarget, cwd: string): Promise<string[]> {
 	let dir = cwd;
 	for (const cd of target.cds) dir = path.resolve(dir, expandHome(cd));
 	const arg = expandHome(target.arg);
@@ -234,11 +216,11 @@ export async function resolveTarget(target: ReadTarget, cwd: string): Promise<Re
 		}
 		names.sort();
 	} else names = [arg];
-	const out: ResolvedFile[] = [];
+	const out: string[] = [];
 	for (const name of names) {
 		try {
 			const abs = await fs.realpath(path.resolve(dir, name));
-			if ((await fs.stat(abs)).isFile()) out.push({ path: name, abs });
+			if ((await fs.stat(abs)).isFile()) out.push(abs);
 		} catch {
 			// A path the command named but that does not exist (or is unreadable) prints nothing to match.
 		}

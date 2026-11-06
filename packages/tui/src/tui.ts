@@ -281,7 +281,9 @@ export interface Component {
 	 * an overlay: the sheet's `role` (Tern styles `omp.overlay.*` roles as
 	 * glass sheets, so the component's own root must not draw a second frame),
 	 * `head` spans for the sheet's title row, and `size`/`anchor` overriding
-	 * the ones derived from the overlay options.
+	 * the ones derived from the overlay options. `size` is a width class: on a
+	 * narrow pane the backend fills it only when the described content is tall
+	 * (see `NativeBackend`).
 	 */
 	nativeOverlay?: {
 		role?: string;
@@ -655,6 +657,18 @@ export class Container implements Component {
 		this.#nativeNode = col(this.#nativeChildren);
 		return this.#nativeNode;
 	}
+}
+
+/**
+ * `component`'s own native description, or `null` when it draws as rendered rows: it has no
+ * `describe`, answers `null`, or is a Container subclass that paints its own rows but inherits the
+ * plain column description, which would lose that rendering.
+ */
+export function ownDescription(component: Component, cx: DescribeContext): NativeNode | null {
+	const describe = component.describe;
+	if (describe === undefined) return null;
+	if (describe === Container.prototype.describe && component.render !== Container.prototype.render) return null;
+	return describe.call(component, cx);
 }
 
 interface HardwareCursorState {

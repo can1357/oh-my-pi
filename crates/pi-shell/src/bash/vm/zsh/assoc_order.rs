@@ -75,15 +75,66 @@ impl ZHash {
 	/// The table a stored associative array stands for: `items` in zsh
 	/// iteration order, the bucket count from `attrs` ([`Attrs::base`]).
 	pub fn from_stored(items: &[(BString, BString)], attrs: Attrs) -> Self {
-		let grown = attrs.base().min(8);
-		let hsize = INITIAL_BUCKETS << (2 * u32::from(grown));
+		Self::from_items(items.iter().cloned(), INITIAL_BUCKETS, attrs.base())
+	}
+
+	/// Rebuild a stored associative array by moving its owned entries.
+	pub fn from_owned(items: Vec<(BString, BString)>, attrs: Attrs) -> Self {
+		Self::from_items(items, INITIAL_BUCKETS, attrs.base())
+	}
+
+	/// An empty table of `initial` buckets (zsh `newhashtable(initial, …)`).
+	pub fn with_buckets(initial: usize) -> Self {
+		Self { buckets: vec![Vec::new(); initial.max(1)], count: 0, grown: 0 }
+	}
+
+	/// The table of a hash table created with `initial` buckets that grew
+	/// `grown` times, `items` being its entries in iteration order.
+	pub fn from_items(
+		items: impl IntoIterator<Item = (BString, BString)>,
+		initial: usize,
+		grown: u8,
+	) -> Self {
+		let grown = grown.min(8);
+		let hsize = initial.max(1) << (2 * u32::from(grown));
 		let mut buckets = vec![Vec::new(); hsize];
+		let mut count = 0;
 		for (k, v) in items {
-			if let Some(chain) = buckets.get_mut(bucket(k, hsize)) {
-				chain.push((k.clone(), v.clone()));
+			if let Some(chain) = buckets.get_mut(bucket(&k, hsize)) {
+				chain.push((k, v));
+				count += 1;
 			}
 		}
-		Self { buckets, count: items.len(), grown }
+		Self { buckets, count, grown }
+	}
+
+	/// Growth steps since creation (the bucket count is the initial one
+	/// times `4^grown`).
+	pub const fn grown(&self) -> u8 {
+		self.grown
+	}
+
+	/// The entries in zsh iteration order (`scanhashtable`, unsorted).
+	pub fn iter(&self) -> impl Iterator<Item = &(BString, BString)> {
+		self.buckets.iter().flatten()
+	}
+
+	/// zsh `emptyhashtable`: every entry removed, the bucket count kept.
+	pub fn clear(&mut self) {
+		for chain in &mut self.buckets {
+			chain.clear();
+		}
+		self.count = 0;
+	}
+
+	/// Number of entries.
+	pub const fn len(&self) -> usize {
+		self.count
+	}
+
+	/// Whether the table has no entries.
+	pub const fn is_empty(&self) -> bool {
+		self.count == 0
 	}
 
 	/// zsh `addhashnode2`: replace the value of a known key in place, link

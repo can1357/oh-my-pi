@@ -38,6 +38,7 @@ import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
+import type { ShellTrace } from "@oh-my-pi/pi-wire";
 import { checkBashInterception } from "./bash-interceptor";
 import { rewriteGitWorktreeAdd } from "./bash-worktree-rewrite";
 import { canUseInteractiveBashPty } from "./bash-pty-selection";
@@ -75,8 +76,9 @@ import {
 	cfgBashInterceptorPatterns,
 	cfgBashPatterns,
 } from "../exec/settings";
+import { cfgDisplayShellVisualization } from "../modes/settings";
 import { cfgSkillful } from "../session/settings";
-import { cfgWorktreeClone } from "../task/settings";
+import { cfgWorktreeClone, ovnfsCommand } from "../task/settings";
 import { nativeShapingOff, shapeToolText, shapingExperiment } from "../spotlight";
 import { SPOTLIGHT_FULL_OUTPUT_MAX_BYTES } from "../spotlight/types";
 import type { SpotlightDetails } from "@oh-my-pi/pi-tui/chat/spotlight";
@@ -437,6 +439,7 @@ interface ManagedBashJobHandle {
 	jobId: string;
 	completion: Promise<ManagedBashJobCompletion>;
 	getLatestText: () => string;
+	getLatestTrace: () => ShellTrace | undefined;
 	/** Notices for this call's results, including one added once the run starts (temporary shell). */
 	notices: readonly string[];
 	/** Hand the call's card to the job: later frames carry `details.async` and the last one settles it. */
@@ -818,6 +821,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		}
 		if (options.replies?.length) details.replies = [...options.replies];
 		if (shaped?.spotlight) details.spotlight = shaped.spotlight;
+		// Native history is bounded; retain it whole so persisted calls remain replayable.
+		const trace = "trace" in result ? result.trace : undefined;
+		if (trace) details.trace = trace;
 
 		// Final-defense inline cap config, shared by the timeout and normal
 		// completion paths. The sink already bounds inline bodies to the spill
@@ -921,11 +927,17 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		jobId: string,
 		previewText: string,
 		timeoutSec: number | undefined,
-		options: { requestedTimeoutSec?: number; notices?: readonly string[]; replies?: readonly string[] } = {},
+		options: {
+			requestedTimeoutSec?: number;
+			notices?: readonly string[];
+			replies?: readonly string[];
+			trace?: ShellTrace;
+		} = {},
 	): AgentToolResult<BashToolDetails> {
 		const details: BashToolDetails = {
 			async: { state: "running", jobId, type: "bash" },
 		};
+		if (options.trace) details.trace = options.trace;
 		if (options.replies?.length) details.replies = [...options.replies];
 		if (timeoutSec === undefined) {
 			details.timeoutDisabled = true;
@@ -996,10 +1008,15 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const completion = Promise.withResolvers<ManagedBashJobCompletion>();
 		const notices = [...(options.notices ?? [])];
 		const replies: string[] = [];
+		// The run's live trace; cleared once the result carries the final bounded snapshot.
+		let liveTrace: ShellTrace | undefined;
 		// While the call waits on the run, every frame of its card carries the replies so far and the
 		// transcript draws the new ones. A backgrounded job's frames carry none: the call's result already did.
-		const withReplies = (details: BashProgressDetails): BashProgressDetails =>
-			!backgrounded && replies.length > 0 ? { ...details, replies: [...replies] } : details;
+		// Every frame of a live run carries its latest trace.
+		const withReplies = (details: BashProgressDetails): BashProgressDetails => {
+			const withTrace = liveTrace && details.trace === undefined ? { ...details, trace: liveTrace } : details;
+			return !backgrounded && replies.length > 0 ? { ...withTrace, replies: [...replies] } : withTrace;
+		};
 		// Replies reach the user only while the call waits on the run: once it returns, nothing draws them.
 		const onReply = (text: string): void => {
 			if (backgrounded) {
@@ -1047,6 +1064,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						timeout: options.timeoutMs ?? 0,
 						signal: runSignal,
 						gitGuard: cfgBashGitGuard.get(this.session.settings),
+						ovnfs: ovnfsCommand(this.session.settings),
 						// Bound to the job's own signal: the job outlives the call that started it.
 						filesystem: this.#urlFilesystem(runSignal, options.approvalTier, onReply).shellFilesystem(),
 						artifactPath,
@@ -1055,6 +1073,15 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						onPreview: text => {
 							void report(text, { output: text, async: { state: "running", jobId, type: "bash" } });
 						},
+						onTrace: cfgDisplayShellVisualization.get(this.session.settings)
+							? trace => {
+									liveTrace = trace;
+									void report(latestText, {
+										output: latestText,
+										async: { state: "running", jobId, type: "bash" },
+									});
+								}
+							: undefined,
 						onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 						streams,
 						onStart: probe => {
@@ -1063,6 +1090,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						onSessionShellBusy: () => notices.push(SESSION_SHELL_BUSY_NOTICE),
 					}).finally(() => {
 						pids = NO_PIDS;
+						liveTrace = undefined;
 						outputTap.close();
 					});
 					if (result.artifactError) latestProgressDetails = { meta: { artifactError: result.artifactError } };
@@ -1130,6 +1158,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			jobId,
 			completion: completion.promise,
 			getLatestText: () => latestText,
+			getLatestTrace: () => liveTrace ?? latestProgressDetails?.trace,
 			notices,
 			background: () => {
 				backgrounded = true;
@@ -1160,14 +1189,22 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const sessionId = this.session.getSessionId?.() ?? undefined;
 		const sessionEnv = this.#sessionEnv(toolCallId);
 
-		// Extract a leading `cd <path> && ...` into cwd when the model ignores the
-		// cwd parameter. The scanner captures only a single path token and defers
-		// to the shell for anything else (redirects, extra args, shell expansion),
-		// so it never absorbs shell syntax like `cd /tmp 2>/dev/null && ...` into
-		// the structured cwd. Constrained to a top-level `&&` on the first line.
+		// Extract a leading `cd <path> && ...` / `cd <path>; ...` into cwd when the
+		// model ignores the cwd parameter. The scanner captures only a single path
+		// token and defers to the shell for anything else (redirects, extra args,
+		// shell expansion), so it never absorbs shell syntax like
+		// `cd /tmp 2>/dev/null && ...` into the structured cwd. `&&` always hoists:
+		// a missing directory fails early, as the shell would short-circuit. `;`
+		// runs the rest even when `cd` fails, so it hoists only onto an existing host
+		// directory; anything else (URL targets included) stays with the shell.
 		if (!cwd) {
 			const cd = extractLeadingCdTarget(command);
-			if (cd) {
+			const hoist =
+				cd?.separator === "&&" ||
+				(cd?.separator === ";" &&
+					!InternalUrlRouter.instance().canHandle(cd.path) &&
+					(await fs.promises.stat(resolveToCwd(cd.path, this.session.cwd)).catch(() => null))?.isDirectory());
+			if (cd && hoist) {
 				cwd = cd.path;
 				command = cd.rest;
 			}
@@ -1342,6 +1379,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
 				requestedTimeoutSec,
 				notices: pendingNotices,
+				trace: job.getLatestTrace(),
 			});
 		}
 
@@ -1387,6 +1425,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
 					requestedTimeoutSec,
 					notices: pendingNotices,
+					trace: job.getLatestTrace(),
 				});
 			}
 			// The job was registered as foreground-backed: hidden from listings and
@@ -1424,6 +1463,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				requestedTimeoutSec,
 				notices,
 				replies: job.replies,
+				trace: job.getLatestTrace(),
 			});
 		}
 
@@ -1743,11 +1783,15 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// Each frame of the card repeats the latest preview with the replies so far; the transcript draws the new ones.
 		const replies: string[] = [];
 		let preview = "";
+		let trace: ShellTrace | undefined;
 		const emitFrame = onUpdate
 			? () =>
 					onUpdate({
 						content: [{ type: "text", text: preview }],
-						details: replies.length > 0 ? { replies: [...replies] } : {},
+						details: {
+							...(replies.length > 0 ? { replies: [...replies] } : {}),
+							...(trace ? { trace } : {}),
+						},
 					})
 			: undefined;
 		const result: BashResult | BashInteractiveResult = interactiveUi
@@ -1774,6 +1818,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					timeout: timeoutMs ?? 0,
 					signal,
 					gitGuard: cfgBashGitGuard.get(this.session.settings),
+					ovnfs: ovnfsCommand(this.session.settings),
 					filesystem: this.#urlFilesystem(signal, approvalTier, text => {
 						replies.push(text);
 						emitFrame?.();
@@ -1787,6 +1832,13 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 								emitFrame();
 							}
 						: undefined,
+					onTrace:
+						emitFrame && cfgDisplayShellVisualization.get(this.session.settings)
+							? next => {
+									trace = next;
+									emitFrame();
+								}
+							: undefined,
 					onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 					onSessionShellBusy: () => pendingNotices.push(SESSION_SHELL_BUSY_NOTICE),
 				});

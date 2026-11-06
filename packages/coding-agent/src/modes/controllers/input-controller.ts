@@ -1032,6 +1032,11 @@ export class InputController {
 			pasteImage: image =>
 				this.#pasteImageIntoFocus(sink => sink.attach(image, `Unsupported pasted image format: ${image.mimeType}`)),
 			showStatus: message => this.ctx.showStatus(message),
+			pasteNative: () => {
+				if (!this.#clipboardIsTerminalLocal()) return false;
+				void this.handleImagePaste();
+				return true;
+			},
 		});
 		this.ctx.ui.addInputListener(data => (this.#enhancedPaste?.handleInput(data) ? { consume: true } : undefined));
 		this.ctx.ui.addStartListener(() => this.#enhancedPaste?.enable());
@@ -1108,7 +1113,7 @@ export class InputController {
 			// agent-core queue.
 			if (!text && !hasPendingImages && this.ctx.session.isStreaming) {
 				if (this.ctx.session.hasInterruptibleInput) {
-					const aborting = this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
+					const aborting = this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true });
 					await aborting;
 					this.ctx.updatePendingMessagesDisplay();
 					this.ctx.ui.requestRender();
@@ -1626,7 +1631,7 @@ export class InputController {
 			images && this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
 		if (!text && !images) {
 			if (target.isStreaming && target.hasInterruptibleInput) {
-				const aborting = target.abort({ reason: USER_INTERRUPT_LABEL });
+				const aborting = target.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true });
 				await aborting;
 				this.ctx.updatePendingMessagesDisplay();
 				this.ctx.ui.requestRender();
@@ -3103,7 +3108,8 @@ export class InputController {
 
 	setToolsExpanded(expanded: boolean): void {
 		this.ctx.toolOutputExpanded = expanded;
-		for (const child of this.ctx.chatContainer.children) {
+		// `!`/`$` runs queued while the agent streams join the transcript later.
+		for (const child of [...this.ctx.chatContainer.children, ...this.ctx.pendingShellContainer.children]) {
 			if (isExpandable(child)) {
 				child.setExpanded(expanded);
 			}
