@@ -18,6 +18,7 @@ import {
 	attachPageWithTimeout,
 	findFreeCdpPort,
 	findReusableCdp,
+	gracefulKillTreeOnce,
 	pickElectronTarget,
 	probeCdpStatus,
 	resolveSpawnArgs,
@@ -296,7 +297,7 @@ describe("pickElectronTarget", () => {
 				restoreWait?.();
 				await prelude.invoke({ action: "close", name }, context).catch(() => {});
 				if (attached) await releaseBrowser(attached, { kill: false });
-				child.kill();
+				await gracefulKillTreeOnce(child.pid);
 				await child.exited;
 				await fs.rm(root, { recursive: true, force: true });
 			}
@@ -568,7 +569,7 @@ describe("pickElectronTarget", () => {
 			} finally {
 				await invoke({ action: "close", name: ownedName, kill: true }).catch(() => {});
 				await invoke({ action: "close", name: borrowedName, kill: true }).catch(() => {});
-				child.kill();
+				await gracefulKillTreeOnce(child.pid);
 				await child.exited;
 				await fs.rm(root, { recursive: true, force: true });
 			}
@@ -699,7 +700,7 @@ describe("pickElectronTarget", () => {
 				});
 			} finally {
 				await invoke({ action: "close", name }).catch(() => {});
-				child.kill();
+				await gracefulKillTreeOnce(child.pid);
 				await child.exited;
 				await fs.rm(root, { recursive: true, force: true });
 			}
