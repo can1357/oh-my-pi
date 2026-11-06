@@ -1158,6 +1158,25 @@ describe("ModelRegistry", () => {
 			});
 		});
 
+		test("unscoped Vercel relay override keeps judges on the relay /typesafe surface", () => {
+			const relayRegistry = readonlyRegistry({
+				providers: {
+					"vercel-ai-gateway": {
+						baseUrl: "http://127.0.0.1:7700/agents/vercel/v1",
+						auth: "none",
+					},
+				},
+			});
+			expect(relayRegistry.find("vercel-ai-gateway", "typesafe-ai/jev")).toMatchObject({
+				api: "typesafe",
+				baseUrl: "http://127.0.0.1:7700/agents/vercel/typesafe",
+			});
+			expect(relayRegistry.find("vercel-ai-gateway", "anthropic/claude-opus-5")).toMatchObject({
+				api: "anthropic-messages",
+				baseUrl: "http://127.0.0.1:7700/agents/vercel/v1",
+			});
+		});
+
 		test("a custom model baseUrl keeps its own host and does not scope the provider", () => {
 			const directHostRegistry = readonlyRegistry({
 				providers: {

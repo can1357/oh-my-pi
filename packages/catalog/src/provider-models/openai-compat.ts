@@ -4088,32 +4088,68 @@ function normalizeVercelAiGatewayBaseUrls(rawBaseUrl: string | undefined): { bas
 	};
 }
 
+/**
+ * Vercel's System One surface lives at `/typesafe` under the gateway root, a
+ * sibling of the `/v1` chat root; derive it so a custom gateway base URL keeps
+ * the judges' `typesafeWire` target (`{base}/v1/systemone`) aligned.
+ */
+export function vercelAiGatewayTypesafeBaseUrl(gatewayBaseUrl: string): string {
+	const base = gatewayBaseUrl.replace(/\/+$/g, "");
+	return `${base.endsWith("/v1") ? base.slice(0, -"/v1".length) : base}/typesafe`;
+}
+
 export function vercelAiGatewayModelManagerOptions(
 	config?: VercelAiGatewayModelManagerConfig,
-): ModelManagerOptions<"anthropic-messages"> {
+): ModelManagerOptions<"anthropic-messages" | "typesafe"> {
 	const apiKey = config?.apiKey;
 	const { baseUrl, catalogBaseUrl } = normalizeVercelAiGatewayBaseUrls(config?.baseUrl);
 	return {
 		providerId: "vercel-ai-gateway",
 		fetchDynamicModels: () =>
-			fetchOpenAICompatibleModels({
+			fetchOpenAICompatibleModels<"anthropic-messages" | "typesafe">({
 				api: "anthropic-messages",
 				provider: "vercel-ai-gateway",
 				baseUrl: catalogBaseUrl,
 				apiKey,
 				filterModel: (entry: OpenAICompatibleModelRecord) => {
+					// Decision models (`type: "evaluation"`) answer System One on the
+					// `/typesafe` surface (verified 2026-11-05); chat rows keep the
+					// tool-use gate.
+					if (entry.type === "evaluation") return true;
 					const tags = entry.tags;
 					return Array.isArray(tags) && tags.includes("tool-use");
 				},
 				mapModel: (
 					entry: OpenAICompatibleModelRecord,
-					defaults: ModelSpec<"anthropic-messages">,
-					_context: OpenAICompatibleModelMapperContext<"anthropic-messages">,
-				): ModelSpec<"anthropic-messages"> => {
+					defaults: ModelSpec<"anthropic-messages" | "typesafe">,
+					_context: OpenAICompatibleModelMapperContext<"anthropic-messages" | "typesafe">,
+				): ModelSpec<"anthropic-messages" | "typesafe"> => {
 					const pricing = entry.pricing as Record<string, unknown> | undefined;
 					const tags = Array.isArray(entry.tags) ? (entry.tags as string[]) : [];
 					const reportedMaxTokens = typeof entry.max_tokens === "number" ? entry.max_tokens : defaults.maxTokens;
 					const modelId = typeof entry.id === "string" ? entry.id : defaults.id;
+					if (entry.type === "evaluation") {
+						return {
+							...defaults,
+							api: "typesafe",
+							kind: "judge",
+							baseUrl: vercelAiGatewayTypesafeBaseUrl(baseUrl),
+							reasoning: false,
+							input: tags.includes("vision") ? ["text", "image"] : ["text"],
+							supportsTools: false,
+							cost: {
+								input: (toNumber(pricing?.input) ?? 0) * 1_000_000,
+								output: 0,
+								cacheRead: 0,
+								cacheWrite: 0,
+							},
+							contextWindow:
+								typeof entry.context_window === "number" && entry.context_window > 0
+									? entry.context_window
+									: defaults.contextWindow,
+							maxTokens: null,
+						};
+					}
 					const maxTokens =
 						modelId === "meta/muse-spark-1.2-contributor" && typeof reportedMaxTokens === "number"
 							? Math.min(reportedMaxTokens, 131_072)

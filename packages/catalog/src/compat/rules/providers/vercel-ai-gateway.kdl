@@ -7,6 +7,58 @@ provider "vercel-ai-gateway" {
 		env "VERCEL_AI_GATEWAY_API_KEY"
 	}
 
+	// Decision models (`type: "evaluation"` on `/v1/models`) answer System One
+	// on the `/typesafe` surface: `POST {baseUrl}/typesafe/v1/systemone` with
+	// the canonical `{state, model, questions}` body and snake_case usage
+	// (verified 2026-11-05). The discovery mapper pins them to `api:
+	// "typesafe"`; these seeds are the offline fallback (verified-live ids
+	// only: laya + scaledown answered 200, jev routed to typesafe-ai but the
+	// probe key's free tier gates it). Limits/pricing copied verbatim from
+	// `/v1/models` (max_tokens is 0 upstream: unknown, so omitted).
+	seed api="typesafe" base-url="https://ai-gateway.vercel.sh/typesafe" bundle="always" {
+		model "convaiinnovations/laya" name="Laya" {
+			reasoning #false
+			input "text"
+			cost input=0.0105 output=0 cache-read=0 cache-write=0
+			limits context=8192
+			supports-tools #false
+		}
+		model "scaledown/scaledown-classify-1" name="Classify-1" {
+			reasoning #false
+			input "text"
+			cost input=0.05 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "typesafe-ai/jev" name="Jev" {
+			reasoning #false
+			input "text"
+			cost input=0.042 output=0 cache-read=0 cache-write=0
+			limits context=32000
+			supports-tools #false
+		}
+	}
+
+	// residue: seed rows carry no kind; discovery pins every `type:
+	// "evaluation"` row to judge, and this pins the seeded ids (the
+	// evaluation bit is outside taxonomy's reach).
+	models "convaiinnovations/laya" "scaledown/scaledown-classify-1" "typesafe-ai/jev" {
+		kind "judge"
+	}
+	// residue: same Jev 1.13/1.14 weights as the first-party and OpenRouter
+	// rows, so the same native image bounds; `typesafe-ai/jev` stays text
+	// until Vercel tags it vision.
+	models "typesafe-ai/jev-1.13.0" "typesafe-ai/jev-1.14.0" {
+		judgment-image-input {
+			mime-types "image/png,image/jpeg"
+			max-bytes 16777216
+			min-pixels 78400
+			max-pixels 2458624
+			min-side 280
+			max-side 1568
+		}
+	}
+
 	// residue: the bare `deepseek/*` namespace rides the Anthropic route, whose
 	// ladder is the generic five-tier scale.
 	models "deepseek/*" {

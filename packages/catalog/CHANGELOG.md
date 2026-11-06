@@ -10,6 +10,7 @@
 
 - Added `nextBuildPriceChange(cost, now)` to identify when a model's dated pricing card may change, allowing callers to safely reuse earlier builds until that time.
 - Added the `selector-revision-suffix` catalog axis for Google Vertex, so `google-vertex/claude-opus-4-8` resolves exactly to `claude-opus-4-8@default`.
+- Added Vercel AI Gateway decision models as native judges: `type: "evaluation"` rows are discovered as `typesafe` judges on the gateway's `/typesafe` surface, selectable via the `judge` role ([#13511](https://github.com/can1357/oh-my-pi/issues/13511)).
 
 ### Changed
 

@@ -3,7 +3,10 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { isVertexExpressOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
-import { openrouterDecisionsBaseUrl } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import {
+	openrouterDecisionsBaseUrl,
+	vercelAiGatewayTypesafeBaseUrl,
+} from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { apiServesKind, modelKind, type ModelKind, runnerApiKind } from "@oh-my-pi/pi-catalog/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
@@ -38,19 +41,25 @@ export interface ProviderOverride {
  * (docs/models.md): every model under the provider rides the auth-gateway,
  * so the gateway `baseUrl` follows the transport regardless of the model's
  * own API — a model must never end up pi-native on a catalog upstream host
- * (#2555). An unscoped override names the OpenRouter `/api/v1` chat root, so
- * Decisions models move to its `/api/alpha` sibling on the same host.
+ * (#2555). An unscoped override names the chat root, so judge rows on a
+ * sibling surface move with it: OpenRouter Decisions models to the `/api/v1`
+ * root's `/api/alpha` sibling, Vercel judges to the gateway root's
+ * `/typesafe` sibling.
  */
 export function resolveProviderBaseUrl<TApi extends Api>(
 	modelApi: TApi,
 	modelBaseUrl: string | undefined,
 	override: Pick<ProviderOverride, "baseUrl" | "baseUrlApis" | "transport"> | undefined,
+	provider?: string,
 ): string | undefined {
 	if (override?.baseUrl === undefined) return modelBaseUrl;
 	if (override.transport === "pi-native") return override.baseUrl;
 	if (override.baseUrlApis !== undefined && !override.baseUrlApis.includes(modelApi)) return modelBaseUrl;
 	if (override.baseUrlApis === undefined && modelApi === "openrouter-decisions") {
 		return openrouterDecisionsBaseUrl(override.baseUrl);
+	}
+	if (override.baseUrlApis === undefined && provider === "vercel-ai-gateway" && modelApi === "typesafe") {
+		return vercelAiGatewayTypesafeBaseUrl(override.baseUrl);
 	}
 	return override.baseUrl;
 }
@@ -97,7 +106,12 @@ export function mergeDiscoveredModel<TApi extends Api>(
 		const supportsTools = model.supportsTools ?? existing.supportsTools;
 		const merged = buildModel({
 			...toModelSpec(model),
-			baseUrl: resolveProviderBaseUrl(model.api, model.baseUrl ?? existing.baseUrl, providerOverride),
+			baseUrl: resolveProviderBaseUrl(
+				model.api,
+				model.baseUrl ?? existing.baseUrl,
+				providerOverride,
+				model.provider,
+			),
 			headers: undefined,
 			resolveHeaders: createConfigHeaderResolver(
 				[
@@ -123,7 +137,7 @@ export function mergeDiscoveredModel<TApi extends Api>(
 	if (providerOverride) {
 		const merged = buildModel({
 			...toModelSpec(model),
-			baseUrl: resolveProviderBaseUrl(model.api, model.baseUrl, providerOverride),
+			baseUrl: resolveProviderBaseUrl(model.api, model.baseUrl, providerOverride, model.provider),
 			headers: undefined,
 			resolveHeaders: createConfigHeaderResolver([model.resolveHeaders ?? model.headers, providerOverride.headers], {
 				authHeader: providerOverride.authHeader,
