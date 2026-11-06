@@ -39,10 +39,11 @@ pub fn command_text(cmd: &Command) -> Vec<u8> {
 /// zsh `JOBTEXTSIZE - 1`: the end of `getjobtext`'s buffer.
 const JOB_LIMIT: usize = 79;
 
-/// zsh `getjobtext`: the one-line text a job started from `list` shows
-/// (`jobs`, `$jobtexts`): separators instead of newlines, function bodies
-/// as `{ ... }`, here-documents as here-strings, words that do not fit in
-/// zsh's 80-byte buffer dropped.
+/// zsh `getjobtext`: the one-line text a job started from `list` shows.
+///
+/// Used by `jobs` and `$jobtexts`: separators instead of newlines, function
+/// bodies as `{ ... }`, here-documents as here-strings, words that do not fit
+/// in zsh's 80-byte buffer dropped.
 pub fn getjobtext(list: &List) -> Vec<u8> {
 	let mut t = Text::new(Vec::new(), 0, 0);
 	t.job = true;

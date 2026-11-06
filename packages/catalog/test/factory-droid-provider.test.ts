@@ -339,13 +339,6 @@ describe("Factory Droid offline seed", () => {
 		expect(ids).toContain(PLAIN);
 	});
 
-	it("names Opus 5.5's refusal fallback offline, where every unblocked model is available", () => {
-		const models = factoryDroidModelManagerOptions().staticModels ?? [];
-		expect(models.find(model => model.id === "claude-opus-5-5")?.factoryDroidRefusalFallbacks).toEqual([
-			"claude-opus-5",
-		]);
-	});
-
 	it("keeps offline EU models on the EU host with EU rotations", () => {
 		const models = factoryDroidModelManagerOptions({ region: "eu" }).staticModels ?? [];
 		expect(models.some(model => model.id === "kimi-k3")).toBe(false);

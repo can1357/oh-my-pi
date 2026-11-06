@@ -1195,7 +1195,7 @@ pub fn zsh_startup_values(
 	if !user.home.is_empty() {
 		out.push((&b"HOME"[..], Var::scalar(user.home.clone(), Attrs::EXPORT), false));
 	}
-	out.push((&b"LOGNAME"[..], Var::scalar(user.name.clone(), Attrs::EXPORT), false));
+	out.push((&b"LOGNAME"[..], Var::scalar(user.name, Attrs::EXPORT), false));
 	let (_, release, machine) = cx.host.uname().unwrap_or_default();
 	let macos = cfg!(target_os = "macos");
 	// The configure-time `MACHTYPE`, `VENDOR` and `OSTYPE` of the system's
@@ -1230,8 +1230,7 @@ pub fn zsh_startup_values(
 		.host
 		.terminal()
 		.and_then(|t| t.open_controlling().ok().flatten())
-		.map(|s| s.name)
-		.unwrap_or_default();
+		.map_or_default(|s| s.name);
 	// `HOST` is set before the environment is imported, the others after.
 	let cputype = if !machine.is_empty() {
 		machine
