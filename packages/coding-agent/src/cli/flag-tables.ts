@@ -260,12 +260,9 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 		result.export = value;
 	},
 	"--title": (result, value) => {
-		// A blank title names nothing and `setSessionName` would drop it without a
-		// word, leaving the launcher to believe it named the session.
-		if (value.trim() === "") {
-			result.invalidFlagValues.push("Invalid --title value: a session title cannot be blank.");
-			return;
-		}
+		// Cleaned and checked for blankness in `buildSessionOptions`, against
+		// `SessionManager.cleanTitle` — this table may not reach session code, and
+		// a second notion of blank here would disagree with the one that counts.
 		result.title = value;
 	},
 	"--hook": (result, value) => {

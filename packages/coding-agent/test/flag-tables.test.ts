@@ -305,14 +305,12 @@ describe("restartArgv (/restart relaunch argv)", () => {
 	});
 });
 describe("--title", () => {
-	it("takes the name as its value, and refuses a blank one rather than naming nothing", () => {
+	it("takes the name as its value verbatim, leaving cleaning to the session manager", () => {
 		expect(parseArgs(["--title", "ShellPortAudit lane"]).title).toBe("ShellPortAudit lane");
-
-		// `setSessionName` drops a blank title without a word, so the launcher
-		// would believe it had named the session. Report it instead.
-		const blank = parseArgs(["--title", "   "]);
-		expect(blank.title).toBeUndefined();
-		expect(blank.invalidFlagValues).toHaveLength(1);
+		// Not trimmed or rejected here: `buildSessionOptions` cleans and refuses
+		// with `SessionManager.cleanTitle`, which is the notion of blank that
+		// decides whether `setSessionName` keeps the title.
+		expect(parseArgs(["--title", "  spaced  "]).title).toBe("  spaced  ");
 	});
 });
 describe("--restore", () => {

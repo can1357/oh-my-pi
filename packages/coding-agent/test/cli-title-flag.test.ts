@@ -138,4 +138,24 @@ describe("omp --title", () => {
 		expect(unnamed.sessionName).toBeNull();
 		expect(unnamed.titleSource).toBeNull();
 	}, 90_000);
+
+	// Whitespace and control characters alike: `SessionManager.cleanTitle` turns
+	// both into nothing, and `setSessionName` would then drop the title and
+	// return false without a word, leaving the launcher to believe it had named
+	// the session. The launch refuses instead. `trim()` calls the second of
+	// these a title, which is why the check asks the cleaner rather than
+	// carrying its own notion of blank.
+	test.each([
+		["whitespace", "   "],
+		["control characters", "\u0001\u0002"],
+	])(
+		"refuses a %s title instead of naming nothing",
+		async (_label, title) => {
+			const refused = await resumeWithTitle(title);
+
+			expect(refused.error?.name).toBe("CliUsageError");
+			expect(refused.sessionName).toBeUndefined();
+		},
+		90_000,
+	);
 });
