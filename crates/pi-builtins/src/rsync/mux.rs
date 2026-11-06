@@ -24,10 +24,11 @@
 //! connection itself (a [`ReadProbe`], upstream's zero-timeout poll), and bytes
 //! only move at those decision points; with the in-process pipe sized like a
 //! socketpair, what one side sees at a refill depends only on what the other side
-//! wrote before it, as between upstream's processes. A read that blocks on an empty
-//! connection first arms it ([`InputPoll::arm`]): like a process woken from poll by
-//! the first write, it gets that write alone, even if the connection thread runs
-//! only after the peer wrote more.
+//! wrote before it, as between upstream's processes. A refill that finds nothing
+//! waiting, and a read that blocks on an empty connection, arm it
+//! ([`InputPoll::arm`]): like a process woken from poll by the first write, the next
+//! read gets that write alone, even if the reading threads run only after the peer
+//! wrote more.
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
@@ -662,6 +663,13 @@ impl MuxWriter {
 	/// sent since the last pass.
 	pub(crate) fn output_pending(&self) -> bool {
 		self.shared.msgs_written.load(Ordering::Relaxed) || self.data_pending()
+	}
+
+	/// Whether the next output pass depends on input already waiting: messages were
+	/// sent since the last pass and data is buffered, which that pass keeps back only
+	/// when input is waiting (see `refill_flush`).
+	pub(crate) fn pass_depends_on_input(&self) -> bool {
+		self.shared.msgs_written.load(Ordering::Relaxed) && self.data_pending()
 	}
 
 	/// Whether output is pending and the output thread completes a write call
@@ -1549,9 +1557,10 @@ pub(crate) trait InputPoll: Send + Sync {
 	/// Whether input (or its end) is waiting right now.
 	fn waiting(&self) -> bool;
 
-	/// The reader is about to block on a connection that holds nothing: the read
-	/// it requests returns what the next write delivers, as a process blocked in
-	/// upstream's poll wakes for it, however late the connection thread runs.
+	/// The reader found nothing waiting and will read next: its next read returns
+	/// just what the next write delivers, as a process polling in upstream's
+	/// `perform_io` wakes for it, however late the reading threads run. No-op while
+	/// input is waiting.
 	fn arm(&self) {}
 }
 
@@ -1850,15 +1859,26 @@ impl MuxReader {
 				return Err(clone_io_error(err));
 			}
 			if !refilled {
-				// perform_io: one output pass, then the input that is waiting.
+				// perform_io: one poll, then the waiting input is read before the
+				// output pass writes, so the read never holds what the pass's own
+				// output prompts.
 				let ready = st.input_waiting() || st.inner_done();
+				if ready {
+					st = sh.read_now(st);
+				} else if let Some(probe) = &st.probe {
+					// Nothing waiting: from here on this side polls, so the first
+					// write the peer makes is what its next read returns.
+					probe.arm();
+				}
 				drop(st);
 				self.run_refill(ready)?;
 				st = sh.lock();
 				refilled = true;
 				drained = !ready;
 				passed_msgs = st.msgs_seen;
-				st = sh.read_now(st);
+				if !ready {
+					st = sh.read_now(st);
+				}
 				continue;
 			}
 			if st.inner_done() && !st.more_possible() && st.request.is_none() {

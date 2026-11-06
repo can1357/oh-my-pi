@@ -909,14 +909,20 @@ impl<'a> Gen<'a> {
 		self.inc() && !self.seen_eof && queued < MIN_FILECNT_LOOKAHEAD as usize
 	}
 
-	/// Before a refill for a list the sender sends unconditionally, waits — without
-	/// an output pass — until the receiver has delivered something. Upstream's
-	/// sender has those lists on the socket before the generator starts, and its
-	/// receiver forwards them while the generator works through the list before;
-	/// the refill then finds them waiting (so a pass that writes messages keeps the
-	/// data back) however this process's threads are scheduled.
+	/// Before a refill for a list the sender sends unconditionally, when that refill's
+	/// output pass depends on input already waiting (messages sent since the last pass,
+	/// data buffered), waits — without the pass — until the receiver has delivered
+	/// something. Upstream's sender has those lists on the socket before the generator
+	/// starts, and its receiver forwards them while the generator works through the
+	/// list before; the refill then finds them waiting and keeps the data back after
+	/// the messages, however this process's threads are scheduled. A pass that writes
+	/// regardless is not delayed.
 	fn await_list(&mut self) -> Result<(), RsyncError> {
-		if !self.inbox.is_empty() || !self.delivered.is_empty() || !self.next_list_unconditional() {
+		if !self.inbox.is_empty()
+			|| !self.delivered.is_empty()
+			|| !self.out.pass_depends_on_input()
+			|| !self.next_list_unconditional()
+		{
 			return Ok(());
 		}
 		let mut last_idle = Instant::now();
