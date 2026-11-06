@@ -2370,10 +2370,11 @@ async function writeDrained(stream: NodeJS.WriteStream, text: string, claimError
 	// write the stream's `error` listeners are held aside and restored
 	// afterwards. A receipt that cannot be delivered is a lost receipt; it is
 	// never a reason to call a failed run successful.
-	const displaced = claimErrors ? stream.listeners("error") : [];
-	for (const listener of displaced) stream.removeListener("error", listener as (...args: never[]) => void);
+	type ErrorListener = (error: Error) => void;
+	const displaced = (claimErrors ? stream.listeners("error") : []) as ErrorListener[];
+	for (const listener of displaced) stream.removeListener("error", listener);
 	const restore = (): void => {
-		for (const listener of displaced) stream.on("error", listener as (...args: never[]) => void);
+		for (const listener of displaced) stream.on("error", listener);
 	};
 	// `true` means the stream handed the bytes straight to the kernel:
 	// nothing is queued, so there is nothing to wait for. `false` means they
