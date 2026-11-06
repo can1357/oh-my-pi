@@ -994,3 +994,41 @@ describe("A2A bearer token", () => {
 		}
 	});
 });
+
+describe("local bridge registry", () => {
+	it("registers the bridge and prunes dead pids on read", async () => {
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "a2a-reg-"));
+		try {
+			const handle = await startA2aServer({
+				settings: Settings.isolated(),
+				agentDir,
+				port: 0,
+				registry: new FakeRegistry([]).asApi(),
+				bus: new FakeBus(),
+			});
+			handles.push(handle);
+			// registry file written with this process's entry
+			const raw = JSON.parse(await fs.readFile(path.join(agentDir, "a2a-bridges.json"), "utf8")) as Array<{
+				pid: number;
+				port: number;
+			}>;
+			expect(raw.some(entry => entry.pid === process.pid && entry.port === handle.port)).toBe(true);
+			// readLiveBridges excludes self
+			const { readLiveBridges } = await import("@oh-my-pi/pi-coding-agent/a2a/server");
+			expect((await readLiveBridges(agentDir)).size).toBe(0);
+			// a dead pid entry is pruned (not returned)
+			await fs.writeFile(
+				path.join(agentDir, "a2a-bridges.json"),
+				JSON.stringify([{ pid: 999999, port: 1234, startedAt: 1 }]),
+			);
+			expect((await readLiveBridges(agentDir)).size).toBe(0);
+		} finally {
+			await fs.rm(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("accepts port 0 and reports the bound port", () => {
+		const result = parseArgs(["--a2a-port", "0"]);
+		expect(result.a2aPort).toBe(0);
+	});
+});

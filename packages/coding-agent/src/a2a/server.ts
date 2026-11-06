@@ -439,7 +439,64 @@ export async function startA2aServer(options: StartA2aServerOptions): Promise<A2
 		token,
 		card,
 	});
+	await registerLocalBridge({
+		agentDir: options.agentDir ?? options.settings.getAgentDir(),
+		port: handle.port,
+		token,
+	});
 	return handle;
+}
+
+/** One registry entry for a locally running bridge; written under <agent dir>. */
+export interface LocalBridgeEntry {
+	pid: number;
+	port: number;
+	startedAt: number;
+}
+
+function localBridgesPath(agentDir: string): string {
+	return path.join(agentDir, "a2a-bridges.json");
+}
+
+/** Record this bridge in the machine-local discovery registry (best effort). */
+async function registerLocalBridge(options: { agentDir: string; port: number; token: string }): Promise<void> {
+	try {
+		const file = localBridgesPath(options.agentDir);
+		const existing = await readLiveBridges(options.agentDir);
+		existing.set(process.pid, { pid: process.pid, port: options.port, startedAt: Date.now() });
+		await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+		await fs.writeFile(
+			file,
+			`${JSON.stringify([...existing.values()])}
+`,
+			{ mode: 0o600 },
+		);
+	} catch {
+		// Discovery is best effort; a failed write never blocks the bridge.
+	}
+}
+
+/** Live local bridges: entries whose pid still exists, this process excluded. */
+export async function readLiveBridges(agentDir: string): Promise<Map<number, LocalBridgeEntry>> {
+	const map = new Map<number, LocalBridgeEntry>();
+	try {
+		const raw = await fs.readFile(localBridgesPath(agentDir), "utf8");
+		const entries = JSON.parse(raw) as LocalBridgeEntry[];
+		if (!Array.isArray(entries)) return map;
+		for (const entry of entries) {
+			if (typeof entry?.pid !== "number" || typeof entry?.port !== "number") continue;
+			if (entry.pid === process.pid) continue;
+			try {
+				process.kill(entry.pid, 0);
+			} catch {
+				continue; // dead pid: pruned by not being re-written
+			}
+			map.set(entry.pid, entry);
+		}
+	} catch {
+		// missing or unreadable registry: no bridges
+	}
+	return map;
 }
 
 /** Process-global wiring used by the CLI: the shared registry plus its IRC bus. */

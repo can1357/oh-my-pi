@@ -7,6 +7,7 @@
  * spawn of one to the remote JSON-RPC endpoint instead of a local subagent.
  */
 import { addA2aAgentsFromUrl } from "../a2a/agent-bridge";
+import { readLiveBridges } from "../a2a/server";
 import { cardRequiresBearer } from "../a2a/client";
 import { commandConsumed, parseSubcommand, usage } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";
@@ -14,6 +15,7 @@ import type { SlashCommandSpec } from "./types";
 const USAGE = [
 	"Usage:",
 	"  /a2a add <url> [--token <token>]  register the skills of a remote agent card",
+	"  /a2a auto [--token <token>]      register every live local bridge (a2a-bridges.json)",
 	"  /a2a list                        show the registered remote agents",
 	"  /a2a remove <name>               forget one (`a2a:<skill>` or `<skill>`)",
 ].join("\n");
@@ -70,6 +72,38 @@ export const BUILTIN_A2A_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					agent => `${agent.name}  —  ${agent.description}  (${agent.url}, card ${agent.cardName})`,
 				);
 				await runtime.output(lines.join("\n"));
+				return commandConsumed();
+			}
+			if (verb === "auto") {
+				const parsed = parseAddArgs(rest);
+				if (parsed.error) return usage(parsed.error, runtime);
+				const token = parsed.token;
+				try {
+					const live = await readLiveBridges(runtime.settings.getAgentDir());
+					if (live.size === 0) {
+						await runtime.output("No other live local A2A bridges found.");
+						return commandConsumed();
+					}
+					const lines: string[] = [];
+					for (const entry of live.values()) {
+						const url = `http://127.0.0.1:${entry.port}/`;
+						try {
+							const result = await addA2aAgentsFromUrl({
+								url,
+								token,
+								bridge,
+								agentDir: runtime.settings.getAgentDir(),
+								settings: runtime.settings,
+							});
+							lines.push(`${url} — ${result.added.map(a => a.name).join(", ")}`);
+						} catch (error) {
+							lines.push(`${url} — failed: ${error instanceof Error ? error.message : String(error)}`);
+						}
+					}
+					await runtime.output(lines.join("\n"));
+				} catch (error) {
+					await runtime.output(`a2a auto failed: ${error instanceof Error ? error.message : String(error)}`);
+				}
 				return commandConsumed();
 			}
 			if (verb === "add") {
