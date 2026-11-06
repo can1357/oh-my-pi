@@ -10,7 +10,9 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { buildSubagentSystemPrompt } from "@oh-my-pi/pi-coding-agent/task/system-prompt";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import {
@@ -65,6 +67,16 @@ async function eventually<T>(read: () => T, done: (value: T) => boolean): Promis
 		value = read();
 	}
 	return value;
+}
+
+function expectServerInstructions(prompt: string): void {
+	expect(prompt).toContain(SERVER_INSTRUCTIONS);
+	expect(prompt).toContain("server-controlled and may not be verified");
+}
+
+async function expectMcpToolResult(session: AgentSession, callId: string): Promise<void> {
+	const result = await session.getToolByName(MCP_TOOL_NAME)?.execute(callId, {});
+	expect(result?.content.find(part => part.type === "text")?.text).toBe(TOOL_RESULT);
 }
 
 describe("createAgentSession MCP server instructions (deferred UI)", () => {
@@ -123,6 +135,77 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 		mock.restore();
 	});
 
+	async function withMinimalSession(
+		settings: Settings,
+		enableMCP: boolean,
+		verify: (prompt: string, session: AgentSession) => void | Promise<void>,
+	): Promise<void> {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableLsp: false,
+			skipPythonPreflight: true,
+			enableMCP,
+			appendSystemPrompt: USER_APPEND_MARKER,
+			systemPrompt: (defaultPrompt, runtimeInstructions) =>
+				buildSubagentSystemPrompt(
+					defaultPrompt,
+					"minimal-task",
+					{
+						agent: "Inspect the fixture.",
+						context: "",
+						planReference: "",
+						planReferencePath: "",
+						worktree: "",
+						outputSchema: undefined,
+						outputSchemaOverridesAgent: false,
+					},
+					runtimeInstructions,
+				),
+		});
+		try {
+			await verify(session.systemPrompt.join("\n"), session);
+		} finally {
+			await session.dispose();
+		}
+	}
+
+	it("keeps callable MCP server protocols in a minimal prompt without inherited user instructions", async () => {
+		await withMinimalSession(
+			Settings.isolated({ "mcp.startupTimeoutMs": 0, "tools.xdev": false, inlineToolDescriptors: "off" }),
+			true,
+			async (rendered, session) => {
+				expectServerInstructions(rendered);
+				expect(rendered).not.toContain(USER_APPEND_MARKER);
+				await expectMcpToolResult(session, "minimal-server-protocol-call");
+			},
+		);
+	}, 20_000);
+
+	for (const enabled of [true, false]) {
+		it(`keeps the opaque-token contract only with active secret obfuscation (${enabled})`, async () => {
+			await withMinimalSession(Settings.isolated({ "secrets.enabled": enabled }), false, rendered => {
+				if (enabled) {
+					expect(rendered).toContain(
+						"`$$HASH$$`, `$$HASH:CASE$$`, `$$NAME_HASH:CASE$$` output tokens: opaque strings.",
+					);
+				} else {
+					expect(rendered).not.toContain("$$HASH$$");
+				}
+				expect(rendered).not.toContain(USER_APPEND_MARKER);
+			});
+		}, 20_000);
+	}
+
 	it("omits an opted-out server's instructions and the empty heading, and keeps its tools", async () => {
 		await Bun.write(
 			path.join(tempDir, ".mcp.json"),
@@ -152,8 +235,7 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			const prompt = session.systemPrompt.join("\n");
 			expect(prompt).not.toContain(SERVER_INSTRUCTIONS);
 			expect(prompt).not.toContain("## MCP Server Instructions");
-			const result = await session.getToolByName(MCP_TOOL_NAME)?.execute("opted-out-instructions-call", {});
-			expect(result?.content.find(part => part.type === "text")?.text).toBe(TOOL_RESULT);
+			await expectMcpToolResult(session, "opted-out-instructions-call");
 		} finally {
 			await session.dispose();
 		}
@@ -225,7 +307,7 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 				text => text.includes(SERVER_INSTRUCTIONS) && text.includes(DO_THING_ROUTE),
 			);
 
-			expect(prompt).toContain(SERVER_INSTRUCTIONS);
+			expectServerInstructions(prompt);
 			// The instructions are framed under the MCP section, and guidance keeps
 			// the escaped original tool name while routing through the exact
 			// normalized name actually mounted in the live xd:// registry.

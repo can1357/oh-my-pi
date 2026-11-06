@@ -31,6 +31,7 @@ import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { resolveClaudePaths } from "../config/claude-paths";
 import type { MCPRequestIdFormat } from "../mcp/types";
+import type { SystemPromptPreset } from "../task/types";
 import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { normalizeToolNames } from "../tools/builtin-names";
 
@@ -294,6 +295,7 @@ export function parseModelList(value: unknown): string[] | undefined {
 export interface ParsedAgentFields {
 	name: string;
 	description: string;
+	systemPreset?: SystemPromptPreset;
 	tools?: string[];
 	spawns?: string[] | "*";
 	model?: string[];
@@ -331,6 +333,12 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	if (normalizedName === MAIN_AGENT_RULE_NAME || normalizedName === SUB_AGENT_RULE_NAME) {
 		return null;
 	}
+
+	const rawSystemPreset = frontmatter.systemPreset;
+	if (rawSystemPreset !== undefined && rawSystemPreset !== "minimal-task") {
+		throw new Error("Invalid systemPreset: " + String(rawSystemPreset) + '. Expected "minimal-task".');
+	}
+	const systemPreset = rawSystemPreset as SystemPromptPreset | undefined;
 
 	// Only absent or null tools select defaults; malformed restrictions must not widen access.
 	const rawTools = frontmatter.tools;
@@ -395,6 +403,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	return {
 		name,
 		description,
+		systemPreset,
 		tools,
 		spawns,
 		model,

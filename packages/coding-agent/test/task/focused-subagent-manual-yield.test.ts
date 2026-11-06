@@ -3,20 +3,26 @@
  * peer-woken, queued and async continuations without adopting peer-only replies.
  */
 import { afterEach, beforeEach, expect, it, vi } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi, type MockHandler } from "@oh-my-pi/pi-ai/providers/mock";
+import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { cfgInlineToolDescriptors } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgToolsXdev } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
+import type { ContextFile } from "@oh-my-pi/pi-coding-agent/capability/context-file";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { localSession } from "../helpers/local-session";
@@ -24,6 +30,16 @@ import { localSession } from "../helpers/local-session";
 const AGENT_ID = "FocusedYield";
 const PARENT_ID = "Main";
 const MOCK_API_SOURCE = "test/focused-subagent-manual-yield";
+const mountedTool: CustomTool = {
+	name: "mounted_probe",
+	label: "Mounted probe",
+	description: "mounted probe description sentinel",
+	parameters: type({ value: type("string").describe("mounted value sentinel") }),
+	loadMode: "discoverable",
+	async execute() {
+		return { content: [{ type: "text", text: "ok" }] };
+	},
+};
 const ENV_KEYS = ["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
 
 let savedEnv: Record<string, string | undefined> = {};
@@ -97,7 +113,16 @@ function resultForLatestPrompt(messages: ReadonlyArray<{ role: string; content: 
 }
 
 /** Starts an idle child with an accepted result and records subsequent parent deliveries. */
-async function spawnKeptAliveChild(options?: { handler?: MockHandler; structured?: boolean; enableIrc?: boolean }) {
+async function spawnKeptAliveChild(options?: {
+	handler?: MockHandler;
+	structured?: boolean;
+	enableIrc?: boolean;
+	systemPreset?: "minimal-task";
+	agentId?: string;
+	settings?: Settings;
+}) {
+	const agentId = options?.agentId ?? AGENT_ID;
+	const systemPreset = options?.systemPreset;
 	// Under the isolated HOME: project discovery walks up from cwd and stops at os.homedir(). On Windows
 	// os.tmpdir() lives under the real home, so a cwd outside the fake HOME would walk into the real
 	// ~/.omp and load the developer's installed plugins as project plugins.
@@ -109,6 +134,27 @@ async function spawnKeptAliveChild(options?: { handler?: MockHandler; structured
 	const authStorage = createInMemoryAuthStorage();
 	authStorage.keys.setRuntime("mock", "test-key");
 	const modelRegistry = new ModelRegistry(authStorage);
+	const inheritedContextFile = {
+		path: path.join(cwd, "PROJECT_SENTINEL.md"),
+		content: "PROJECT_SENTINEL",
+		level: "project",
+		_source: {} as never,
+	} as ContextFile;
+	const inheritedRule = {
+		name: "RULE_SENTINEL",
+		path: path.join(cwd, "RULE_SENTINEL.md"),
+		content: "RULE_SENTINEL",
+		alwaysApply: true,
+		_source: {} as never,
+	} as Rule;
+	const inheritedSkill = {
+		name: "SKILL_SENTINEL",
+		description: "SKILL_SENTINEL",
+		filePath: path.join(cwd, "SKILL_SENTINEL.md"),
+		baseDir: cwd,
+		source: "test",
+	};
+	await Bun.write(inheritedSkill.filePath, "# SKILL_SENTINEL\n\nSkill body sentinel.");
 	const mock = createMockModel({
 		handler:
 			options?.handler ??
@@ -137,43 +183,66 @@ async function spawnKeptAliveChild(options?: { handler?: MockHandler; structured
 		const result = await runSubprocess({
 			cwd,
 			artifactsDir,
-			agent: { name: "task", description: "test", systemPrompt: "test", tools: ["read"], source: "bundled" },
+			agent: {
+				name: "task",
+				description: "test",
+				systemPrompt: "CHILD_ROLE_SENTINEL",
+				tools: ["read"],
+				systemPreset,
+				source: "bundled",
+			},
 			task: "report",
 			index: 0,
-			id: AGENT_ID,
+			id: agentId,
 			parentAgentId: PARENT_ID,
 			asyncJobManager: manager,
 			structured: options?.structured,
 			modelOverride: "mock/mock-model",
 			authStorage,
 			modelRegistry,
-			settings: Settings.isolated({
-				"task.agentIdleTtlMs": 0,
-				"compaction.enabled": false,
-				"retry.enabled": false,
-				"todo.enabled": false,
-				"todo.reminders": false,
-				"advisor.enabled": false,
-				modelRoles: { default: "mock/mock-model" },
-			}),
+			settings:
+				options?.settings ??
+				Settings.isolated({
+					"task.agentIdleTtlMs": 0,
+					"compaction.enabled": false,
+					"retry.enabled": false,
+					"todo.enabled": false,
+					"todo.reminders": false,
+					"advisor.enabled": false,
+					inlineToolDescriptors: "on",
+					modelRoles: { default: "mock/mock-model" },
+				}),
 			enableLsp: false,
 			enableMCP: false,
+			customTools: [mountedTool],
 			enableIrc: options?.enableIrc ?? false,
+			contextFiles: [inheritedContextFile],
+			rules: [inheritedRule],
+			skills: [inheritedSkill],
+			autoloadSkills: [inheritedSkill],
 		});
 		expect(result.exitCode).toBe(0);
 	} catch (error) {
 		close();
 		throw error;
 	}
-	const artifact = path.join(artifactsDir, `${AGENT_ID}.md`);
+	const artifact = path.join(artifactsDir, `${agentId}.md`);
 	if (options?.structured === false) expect(await Bun.file(artifact).text()).toContain("INITIAL_FINAL");
 	else expect(await Bun.file(artifact).text()).toContain("initial result");
-	const session = AgentRegistry.global().get(AGENT_ID)?.session;
+	const session = AgentRegistry.global().get(agentId)?.session;
 	if (!session) {
 		close();
 		throw new Error("kept-alive subagent has no live session");
 	}
-	return { session: localSession(session), artifact, deliveries, firstDelivery: firstDelivery.promise, close, mock };
+	return {
+		session: localSession(session),
+		artifact,
+		deliveries,
+		firstDelivery: firstDelivery.promise,
+		close,
+		[Symbol.dispose]: close,
+		mock,
+	};
 }
 
 it("a focused manual prompt's yield rewrites the artifact and notifies the parent", async () => {
@@ -188,6 +257,66 @@ it("a focused manual prompt's yield rewrites the artifact and notifies the paren
 	} finally {
 		child.close();
 	}
+}, 15_000);
+
+it("minimal-task omits inherited prompt and autoload skill content while default retains it", async () => {
+	using normal = await spawnKeptAliveChild();
+	using minimal = await spawnKeptAliveChild({ systemPreset: "minimal-task", agentId: "MinimalYield" });
+	const normalText = normal.mock.calls.map(call => (call.context.systemPrompt ?? []).join("\n")).join("\n");
+	const minimalText = minimal.mock.calls.map(call => (call.context.systemPrompt ?? []).join("\n")).join("\n");
+	const normalMessages = JSON.stringify(normal.mock.calls.map(call => call.context.messages));
+	const minimalMessages = JSON.stringify(minimal.mock.calls.map(call => call.context.messages));
+	expect(normalText).toContain("PROJECT_SENTINEL");
+	expect(normalText).toContain("RULE_SENTINEL");
+	expect(normalText).toContain("SKILL_SENTINEL");
+	expect(normalMessages).toContain("Skill body sentinel");
+	expect(normalText).toContain("CHILD_ROLE_SENTINEL");
+	expect(minimalText).not.toContain("PROJECT_SENTINEL");
+	expect(minimalText).not.toContain("RULE_SENTINEL");
+	expect(minimalText).not.toContain("SKILL_SENTINEL");
+	expect(minimalMessages).not.toContain("Skill body sentinel");
+	expect(minimalText).toContain("CHILD_ROLE_SENTINEL");
+	const normalTools = normal.mock.calls.flatMap(call => call.context.tools ?? []);
+	const minimalTools = minimal.mock.calls.flatMap(call => call.context.tools ?? []);
+	const normalYieldTool = normalTools.find(tool => tool.name === "yield");
+	const minimalYieldTool = minimalTools.find(tool => tool.name === "yield");
+	expect(normalYieldTool).toBeDefined();
+	expect(minimalYieldTool).toBeDefined();
+	expect(normalYieldTool?.description).toBe("");
+	expect(minimalYieldTool?.description).toContain("Submit subagent output");
+	expect(normalTools.some(tool => tool.name === "mounted_probe")).toBe(false);
+	const minimalMountedTool = minimalTools.find(tool => tool.name === "mounted_probe");
+	expect(minimalMountedTool).toBeDefined();
+	expect(minimalMountedTool?.description).toContain("mounted probe description sentinel");
+	expect(JSON.stringify(minimalMountedTool?.parameters)).toContain("mounted value sentinel");
+	expect(JSON.stringify(minimalYieldTool?.parameters)).toContain("Optional result type");
+}, 15_000);
+
+it("warm revival keeps ordinary descendants on the original live prompt preferences", async () => {
+	using minimal = await spawnKeptAliveChild({ systemPreset: "minimal-task" });
+	const rootSettings = minimal.session.settings.overlayParent()!;
+	const lifecycle = AgentLifecycleManager.global();
+	await lifecycle.park(AGENT_ID);
+	const revived = localSession(await lifecycle.ensureLive(AGENT_ID));
+	using ordinary = await spawnKeptAliveChild({ agentId: "Ordinary", settings: revived.settings });
+	const tools = ordinary.mock.calls.flatMap(call => call.context.tools ?? []);
+	expect(tools.find(tool => tool.name === "yield")?.description).toBe("");
+	expect(tools.some(tool => tool.name === "mounted_probe")).toBe(false);
+	cfgInlineToolDescriptors.override(rootSettings, "off");
+	cfgToolsXdev.override(rootSettings, false);
+	expect(cfgInlineToolDescriptors.get(ordinary.session.settings)).toBe("off");
+	expect(cfgToolsXdev.get(ordinary.session.settings)).toBe(false);
+	// An ordinary child's restored preference link must survive its own park as well.
+	await lifecycle.park("Ordinary");
+	cfgInlineToolDescriptors.override(rootSettings, "on");
+	cfgToolsXdev.override(rootSettings, true);
+	const restoredOrdinary = localSession(await lifecycle.ensureLive("Ordinary"));
+	expect(cfgInlineToolDescriptors.get(restoredOrdinary.settings)).toBe("on");
+	expect(cfgToolsXdev.get(restoredOrdinary.settings)).toBe(true);
+	cfgInlineToolDescriptors.override(rootSettings, "off");
+	cfgToolsXdev.override(rootSettings, false);
+	expect(cfgInlineToolDescriptors.get(restoredOrdinary.settings)).toBe("off");
+	expect(cfgToolsXdev.get(restoredOrdinary.settings)).toBe(false);
 }, 15_000);
 
 it("a prompt typed while the previous turn awaits owned background work reports each turn's own result", async () => {

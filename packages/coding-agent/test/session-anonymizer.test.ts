@@ -166,6 +166,22 @@ describe("SessionAnonymizer", () => {
 		expect(at(toolResult, "message", "details")).toEqual({ matchCount: 1, searchPath: cwd });
 	});
 
+	test("preserves the minimal task preset in session metadata", () => {
+		const anonymizer = new SessionAnonymizer();
+		const result = anonymizer.entry({
+			type: "session_init",
+			systemPreset: "minimal-task",
+			task: "task",
+		});
+		expect(result).toMatchObject({ type: "session_init", systemPreset: "minimal-task" });
+		expect(JSON.stringify(result)).toContain('"systemPreset":"minimal-task"');
+		const toolResult = anonymizer.entry({
+			type: "message",
+			message: { role: "toolResult", toolName: "task", details: { systemPreset: "minimal-task" } },
+		});
+		expect(at(toolResult, "message", "details", "systemPreset")).toBe("minimal-task");
+	});
+
 	test("preserves the suppressed Bash timing flag", () => {
 		const anonymizer = new SessionAnonymizer();
 		const result = anonymizer.entry({

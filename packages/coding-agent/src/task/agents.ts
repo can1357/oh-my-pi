@@ -16,7 +16,7 @@ import taskMd from "../prompts/agents/task.md" with { type: "text" };
 import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
-import type { AgentDefinition } from "./types";
+import type { AgentDefinition, SystemPromptPreset } from "./types";
 
 interface AgentFrontmatter {
 	name: string;
@@ -25,6 +25,7 @@ interface AgentFrontmatter {
 	spawns?: string;
 	model?: string | string[];
 	thinkingLevel?: string;
+	systemPreset?: SystemPromptPreset;
 	blocking?: boolean;
 	prewalk?: boolean | string;
 	advisor?: boolean | string;
