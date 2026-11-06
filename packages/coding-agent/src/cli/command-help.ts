@@ -201,3 +201,7 @@ export const usageHelp = {
 export const worktreeHelp = {
 	description: "List or clear managed Git and ovnfs worktrees, or add a linked Git worktree at a path",
 } satisfies CommandMetadata;
+
+export const providersHelp = {
+	description: "List provider cooldowns, probe recovery now, or explicitly clear a cooldown",
+} satisfies CommandMetadata;
