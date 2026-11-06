@@ -1176,9 +1176,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#deferredTitle: { sessionId: string; declined: boolean; replied: boolean; words: number } | undefined;
 	/** What the next automatic title names (see {@link #maybeStartTitle}). */
 	#titleInput: TitleInput | undefined;
-	/** Whether the transcript this session resumed with may still arm
-	 *  {@link #titleInput} once (see {@link #adoptResumedTitleInput}). */
-	#resumeTitlePending = false;
+	/** The session whose carried transcript may still arm {@link #titleInput}
+	 *  once (see {@link #adoptResumedTitleInput}). `undefined` once spent, and a
+	 *  mismatch after `/new` or a switch means this is no longer that session. */
+	#resumeTitleSessionId: string | undefined;
 	/** Operator prompts since the last title check, toward `title.refreshAfterPrompts`. */
 	#titleDrift: { sessionId: string; prompts: number } | undefined;
 	#titleProviderSessionId: string | undefined;
@@ -2429,8 +2430,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#autoTitle = config.autoTitle === true;
 		// A session built over a transcript was resumed. Its relaunch may send no
 		// operator message at all, so record that the carried transcript still owes
-		// this session one title try; {@link #adoptResumedTitleInput} spends it.
-		this.#resumeTitlePending = this.#autoTitle && config.agent.state.messages.length > 0;
+		// THIS session one title try; {@link #adoptResumedTitleInput} spends it.
+		// Keyed by session id, so `/new` and a switch leave the entitlement behind
+		// with the transcript that earned it, and a rolled-back switch keeps it.
+		this.#resumeTitleSessionId =
+			this.#autoTitle && config.agent.state.messages.length > 0 ? this.sessionManager.getSessionId() : undefined;
 		this.#transformContext = config.transformContext ?? (messages => messages);
 		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
 		this.#onPayload = config.onPayload;
@@ -11247,18 +11251,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * is what {@link #advanceDeferredTitle} already retitles from.
 	 *
 	 * The bound is one title request per resumed session, the same budget one
-	 * operator message buys: the flag is spent on the first reply whatever the
-	 * outcome, so a decline, a refusal or an unnameable transcript costs one call
-	 * and no more, and a session that never replies costs none. A session that is
-	 * already named (including one named by `--title`) spends nothing.
+	 * operator message buys: the entitlement is spent on the first reply whatever
+	 * the outcome, so a decline, a refusal or an unnameable transcript costs one
+	 * call and no more, and a session that never replies costs none. A session
+	 * that is already named (including one named by `--title`) spends nothing,
+	 * and so does a session this one replaced through `/new` or a switch.
 	 */
 	#adoptResumedTitleInput(): void {
-		if (!this.#resumeTitlePending) return;
-		this.#resumeTitlePending = false;
+		const sessionId = this.sessionManager.getSessionId();
+		if (this.#resumeTitleSessionId !== sessionId) return;
+		this.#resumeTitleSessionId = undefined;
 		if (!this.#autoTitle || this.sessionName || this.#titleInput || $env.PI_NO_TITLE) return;
 		const text = this.#buildReplanTitleContext();
 		if (!text || isLowSignalTitleInput(text)) return;
-		this.#titleInput = { sessionId: this.sessionManager.getSessionId(), text, replied: false, tried: false };
+		this.#titleInput = { sessionId, text, replied: false, tried: false };
 	}
 
 	/**

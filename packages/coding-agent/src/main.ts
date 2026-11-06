@@ -601,6 +601,10 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			interactivePrompts: factoryOptions?.interactivePrompts,
 			deferUsageReserveConfirmation: true,
 			enableMCP: false,
+			// `--title` names the launch's own session once. An ACP host opens a
+			// fresh `session/new` for every conversation, and inheriting the launch
+			// name would stamp the same title on all of them.
+			sessionTitle: undefined,
 			titleSystemPrompt,
 			eventBus,
 			preloadedExtensions: trustedExtensions,

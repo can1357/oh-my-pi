@@ -62,6 +62,9 @@ const declineTitleFork = createMockModel({ handler: { content: ["<title/>"] } })
 /** Plain titles: a card request would double every title-model call and hide the bound under test. */
 const PLAIN_TITLES = { "title.icons": "boring" };
 
+/** The model every session here runs, and the one a switched-to transcript records. */
+const TEST_MODEL_ID = "claude-sonnet-4-5";
+
 /**
  * A real on-disk transcript of a session that did work and was killed: a `<file>`
  * brief, an assistant turn, and — unless `title` says otherwise — no title.
@@ -95,14 +98,32 @@ async function writeThinTranscript(dir: string): Promise<string> {
 	return file;
 }
 
+/** A second real on-disk transcript, untitled and with work of its own. */
+async function writeOtherTranscript(dir: string): Promise<string> {
+	const file = path.join(dir, "other.jsonl");
+	const manager = await SessionManager.open(file, dir);
+	// A switch restores the target's recorded model, and refuses the switch when
+	// it cannot; the mock assistant turns carry no model a registry would know.
+	manager.appendModelChange(`anthropic/${TEST_MODEL_ID}`);
+	manager.appendMessage({
+		role: "user",
+		content: [{ type: "text", text: "port the broken-pipe tests to the new builtins and report" }],
+		attribution: "user",
+		timestamp: Date.now(),
+	});
+	manager.appendMessage(createAssistantMessage(PRIOR_WORK));
+	await manager.flush();
+	return file;
+}
+
 /** Reopen `file` the way a relaunch does, and build the session that carries its transcript. */
 async function resume(file: string, settings: Record<string, unknown> = {}): Promise<AgentSession> {
 	const sessionManager = await SessionManager.open(file);
 	const restored = sessionManager.buildSessionContext();
 	authStorage = await AuthStorage.create(":memory:");
 	authStorage.keys.setRuntime("anthropic", "test-key");
-	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-	if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+	const model = getBundledModel("anthropic", TEST_MODEL_ID);
+	if (!model) throw new Error(`Expected ${TEST_MODEL_ID} model to exist`);
 	const main: MockModel = createMockModel({
 		responses: [{ content: [RESUMED_REPLY] }, { content: [RESUMED_REPLY] }, { content: [RESUMED_REPLY] }],
 	});
@@ -220,6 +241,26 @@ describe("AgentSession names a resumed session that carries no operator message"
 
 		await wake(target);
 		await wake(target);
+		await wake(target);
+
+		expect(target.sessionName).toBeUndefined();
+		expect(titleModel).not.toHaveBeenCalled();
+	});
+
+	it("spends the entitlement on the session that earned it, not on one switched to later", async () => {
+		// The carried transcript earns ONE session a title try. Without that
+		// binding the entitlement is a process-wide coupon: a session switched to
+		// before the first reply spends it and gets named, while the same switch
+		// after one reply does not — the same action naming a session or not,
+		// depending on history. Switching is not a resume, and is not covered.
+		const earned = await writeDeadTranscript(tmpDir!);
+		const other = await writeOtherTranscript(tmpDir!);
+		const target = await resume(earned);
+		const titleModel = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValue(createAssistantMessage("<title>Rebase the ShellPortAudit pull requests</title>"));
+
+		expect(await target.switchSession(other)).toBe(true);
 		await wake(target);
 
 		expect(target.sessionName).toBeUndefined();
