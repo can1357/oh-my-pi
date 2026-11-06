@@ -1446,14 +1446,16 @@ mod shfmt {
 					for arm in &cs.arms {
 						let plo = arm.patterns.first().map_or(at, |w| w.span.lo);
 						// An arm with no body ends after the `)` that closes
-						// its patterns, which the parser recorded: in alias
-						// text there is no byte after the last pattern.
+						// its patterns, which the parser recorded. Where it
+						// recorded none — zsh's `(x)` arm reads its `)` on
+						// another branch — the arm ends at its last pattern:
+						// a byte past it is a byte of whatever follows, and
+						// in text an alias expanded it is not the arm's at
+						// all.
 						let body_end = arm.body.items.last().map_or_else(
 							|| {
-								arm.rparen.map_or_else(
-									|| arm.patterns.last().map_or(plo, |w| w.span.hi + 1),
-									|r| r.hi,
-								)
+								arm.rparen
+									.map_or_else(|| arm.patterns.last().map_or(plo, |w| w.span.hi), |r| r.hi)
 							},
 							|it| it.and_or.span.hi,
 						);
@@ -1554,7 +1556,10 @@ mod shfmt {
 							V::Obj(vec![
 								("Pos", p(name.span.lo)),
 								("End", p(name.span.hi)),
-								("Parts", V::Arr(vec![self.lit(name.span.lo, name.span.hi, true)])),
+								(
+									"Parts",
+									V::Arr(vec![self.lit_value(name.span.lo, name.span.hi, &name.text)]),
+								),
 							]),
 						));
 					}

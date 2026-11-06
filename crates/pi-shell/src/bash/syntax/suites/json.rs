@@ -503,6 +503,12 @@ const SAMPLES: &[Sample] = &[
 	bash(b"case x in x) esac"),
 	bash(b"case x in a) echo a ;; *) esac"),
 	bash(b"case x in (a|b) echo a ;; esac"),
+	// A `case` arm is one variant with two parser branches: zsh records an
+	// arm's `)` on the branch `a)` takes and not on the branch `(a)` takes,
+	// so one sample per variant reached only the first.
+	bash(b"case x in (x) esac"),
+	zsh(b"case x in (x) esac"),
+	zsh(b"case x in x) esac"),
 	bash(b"(( 1 + 1 ))"),
 	bash(b"[[ -n a ]]"),
 	bash(b"[[ ( ! a ) && b ]]"),
@@ -798,4 +804,37 @@ fn alias_expanded_nodes_export_ranges_that_contain_their_children() {
 		"these samples no longer fault, so they are this change's now, not the word change's: {}",
 		clean_siblings.join(", ")
 	);
+}
+
+#[test]
+fn an_exported_name_carries_the_text_the_parser_read() {
+	// The containment walk checks a node's RANGE, never the text it
+	// exports, so a node can carry a correct span around the wrong bytes:
+	// the coprocess name was built by slicing the source between the
+	// recorded offsets, which is the parser's buffer only when the name
+	// holds no quoting and came from the source. A consumer that reads
+	// `Value` to learn the coprocess's name — the variable it must read
+	// the file descriptors from — gets the wrong name.
+	let value = |src: &[u8], program: &Program| -> String {
+		let json = to_json(src, program, JsonDialect::Shfmt, Offsets::Bytes);
+		let shfmt: serde_json::Value = serde_json::from_str(&json).unwrap();
+		shfmt["Stmts"][0]["Cmd"]["Name"]["Parts"][0]["Value"]
+			.as_str()
+			.unwrap_or("<missing>")
+			.to_owned()
+	};
+
+	// A line continuation inside the name: bash joins it, so the
+	// coprocess is `foo` and the two source bytes are not part of it.
+	let src = b"coproc f\\\noo { :; }\n".as_slice();
+	let program = parse_all(src, Features::NONE).expect("the coprocess parses");
+	assert_eq!(
+		value(src, &program),
+		"foo",
+		"the name is the text the parser read, not the source slice"
+	);
+
+	// The same name through an alias, where the source holds none of it.
+	let sample = bash(b"coproc named { :; }");
+	assert_eq!(value(sample.src, &parse_sample(&sample)), "named");
 }
