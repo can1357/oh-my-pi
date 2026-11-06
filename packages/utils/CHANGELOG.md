@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `readSalvageableRows()` skipping every readable row trapped between two separate damaged regions, so damaged-store recovery of input history, session titles, and recaps keeps the rows that were still readable ([#16144](https://github.com/can1357/oh-my-pi/pull/16144) by [@jchanghong023](https://github.com/jchanghong023))
+
 ## [18.17.0] - 2026-11-06
 
 ### Added
