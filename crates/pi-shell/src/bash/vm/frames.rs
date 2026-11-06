@@ -434,6 +434,21 @@ fn scratch_image(
 			.push(Lost::Pending { vpid, kind: FileKind::Socket }),
 		_ => {},
 	}
+	// The open of the redirection being applied is the same contract. A step
+	// that may be started again is re-issued after the restore; `noclobber`'s
+	// exclusive create may not be, because it may already have created the
+	// file, and the create that replaced it would meet that file and refuse
+	// to overwrite it. Such a step is reported lost rather than restarted as
+	// if nothing had begun.
+	if let Some(open) = sc.io.as_deref().and_then(|io| io.redir.opening.as_deref()) {
+		if open.reissuable() {
+			report.reissued_fs += 1;
+		} else {
+			report
+				.lost
+				.push(Lost::Pending { vpid, kind: FileKind::Regular });
+		}
+	}
 	let io = sc.io.as_deref();
 	ScratchImage {
 		ext_live: matches!(sc.live, Live::Ext(_)),

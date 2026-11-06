@@ -1030,7 +1030,7 @@ fn zsh_open(
 			FsPoll::Pending(mut p) => {
 				let r = p.poll(&mut tcx);
 				if r.is_pending() {
-					io(vp).redir.opening = Some(Box::new(PendingOpen::Open(p)));
+					io(vp).redir.opening = Some(Box::new(PendingOpen::Open { p, create: false }));
 				}
 				r
 			},
@@ -1382,8 +1382,8 @@ enum OpenStep {
 ///
 /// The step is the state: nothing has to be recovered from an error.
 pub(crate) enum PendingOpen {
-	/// [`OpenStep::Open`].
-	Open(Box<dyn FsPending<Box<dyn File>>>),
+	/// [`OpenStep::Open`]; `create` is `noclobber`'s exclusive create.
+	Open { p: Box<dyn FsPending<Box<dyn File>>>, create: bool },
 	/// [`OpenStep::Reopen`].
 	Reopen(Box<dyn FsPending<Box<dyn File>>>),
 	/// [`OpenStep::Judge`].
@@ -1396,8 +1396,25 @@ impl PendingOpen {
 	/// open of theirs is always this one.
 	fn ordinary(&mut self) -> Option<&mut dyn FsPending<Box<dyn File>>> {
 		match self {
-			Self::Open(p) => Some(p.as_mut()),
-			Self::Reopen(..) | Self::Judge { .. } => None,
+			Self::Open { p, create: false } => Some(p.as_mut()),
+			Self::Open { .. } | Self::Reopen(..) | Self::Judge { .. } => None,
+		}
+	}
+
+	/// Whether this step may be dropped now and started again later, which
+	/// is what a snapshot does with a pending filesystem operation
+	/// ([`FsPending::reissuable`]).
+	///
+	/// `noclobber`'s exclusive create may NOT: it may already have created
+	/// the file, and the create that replaces it would meet that file,
+	/// refuse to overwrite it and lose the command's output. A step that
+	/// answers `false` here is reported lost rather than silently started
+	/// again ([`super::frames`]).
+	pub(crate) fn reissuable(&self) -> bool {
+		match self {
+			Self::Open { create: true, .. } => false,
+			Self::Open { p, .. } | Self::Reopen(p) => p.reissuable(),
+			Self::Judge { stat, .. } => stat.reissuable(),
 		}
 	}
 }
@@ -1452,11 +1469,11 @@ fn judge_unopenable(st: std::io::Result<Stat>, err: std::io::Error) -> Settled {
 
 /// Poll the step in flight: `Ok` is what it settled on or the step after
 /// it, `Err` gives the step back, still in flight.
-fn poll_step(p: PendingOpen, tcx: &mut Context<'_>, excl: bool) -> Result<Step, PendingOpen> {
+fn poll_step(p: PendingOpen, tcx: &mut Context<'_>) -> Result<Step, PendingOpen> {
 	match p {
-		PendingOpen::Open(mut f) => match f.poll(tcx) {
-			Poll::Pending => Err(PendingOpen::Open(f)),
-			Poll::Ready(r) => Ok(after_open(excl, r)),
+		PendingOpen::Open { mut p, create } => match p.poll(tcx) {
+			Poll::Pending => Err(PendingOpen::Open { p, create }),
+			Poll::Ready(r) => Ok(after_open(create, r)),
 		},
 		PendingOpen::Reopen(mut f) => match f.poll(tcx) {
 			Poll::Pending => Err(PendingOpen::Reopen(f)),
@@ -1484,7 +1501,7 @@ fn start_stage(
 	let started = match stage {
 		OpenStep::Open => match cx.host.fs().open(BStr::new(abs), flags, mode) {
 			FsPoll::Ready(r) => return after_open(excl, r),
-			FsPoll::Pending(p) => PendingOpen::Open(p),
+			FsPoll::Pending(p) => PendingOpen::Open { p, create: excl },
 		},
 		OpenStep::Reopen => match cx.host.fs().open(BStr::new(abs), OpenFlags::WRITE, mode) {
 			FsPoll::Ready(r) => return after_reopen(r),
@@ -1495,7 +1512,7 @@ fn start_stage(
 			FsPoll::Pending(stat) => PendingOpen::Judge { stat, err },
 		},
 	};
-	keep(vp, poll_step(started, tcx, excl))
+	keep(vp, poll_step(started, tcx))
 }
 
 /// Keep a step that is still in flight in the redirection's progress.
@@ -1586,7 +1603,7 @@ fn open_into(
 	let mut tcx = Context::from_waker(&k.waker);
 	// Resume the step in flight, or start the first one.
 	let mut step = if let Some(p) = io(vp).redir.opening.take() {
-		keep(vp, poll_step(*p, &mut tcx, excl))
+		keep(vp, poll_step(*p, &mut tcx))
 	} else if excl && early_refusal(cx, &abs) {
 		Step::Done(Settled::Refused)
 	} else {

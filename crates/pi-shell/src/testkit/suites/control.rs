@@ -2,13 +2,13 @@
 
 use crate::{
 	bash::{
-		Budget, Cx, Engine, EngineConfig, Incompatibility, MemStore, RestoreError, RestoreOpts,
+		Budget, Cx, Engine, EngineConfig, Incompatibility, Lost, MemStore, RestoreError, RestoreOpts,
 		Script, Shell, SigTarget, Signal, StateStore, Step, store::BlobSlot,
 	},
 	testkit::{
-		FakeHost, Fault, Rig,
+		FakeHost, Fault, MemFs, Rig,
 		fault::skeleton_init,
-		run::{Stop, advance},
+		run::{Stop, advance, advance_or_blocked},
 	},
 };
 
@@ -169,4 +169,55 @@ fn restore_drop_frames_abandons_the_running_script_with_255() {
 		shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget::default()),
 		Step::Done { run, status: 255 } if run == id
 	));
+}
+
+/// A `noclobber` exclusive create still in flight when the shell is
+/// snapshotted may already have created the file. The restore starts the
+/// open again, meets that file and refuses to overwrite it, so the
+/// redirection's output is gone: the snapshot must report that pending open
+/// as lost rather than count it among the operations it re-issues, which is
+/// the contract every other pending filesystem operation already keeps
+/// ([`crate::bash::fs::FsPending::reissuable`]).
+#[test]
+fn a_pending_noclobber_create_is_reported_lost_not_reissued() {
+	for op in [">", "&>", ">&"] {
+		let engine = Engine::new(EngineConfig::default());
+		// Every filesystem answer arrives late, so the create is still in
+		// flight at the snapshot.
+		let mut host = FakeHost::new().with_fs(MemFs::with_latency(5, 1.0, 30_000));
+		let mut store = MemStore::new();
+		let mut shell =
+			Shell::create(&engine, &mut Cx { host: &mut host, store: &mut store }, skeleton_init(&[]))
+				.unwrap();
+		let script = format!("set -C; echo hi {op}/new");
+		let id = shell.submit(Script::command(script.as_bytes()));
+		assert_eq!(
+			advance_or_blocked(&mut shell, &mut host, &mut store, id, Budget {
+				max_ops: 10_000,
+				max_ns:  u64::MAX,
+			}),
+			Stop::Blocked,
+			"{op}: the create is still in flight"
+		);
+		shell.control().request_suspend();
+		loop {
+			let step = shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget::default());
+			match step {
+				Step::SuspendReady => break,
+				Step::Blocked | Step::Yield => {},
+				other => panic!("{op}: suspend drains to a safepoint, got {other:?}"),
+			}
+		}
+		let report = shell
+			.externalize(&mut Cx { host: &mut host, store: &mut store })
+			.unwrap();
+		assert!(
+			report
+				.lost
+				.iter()
+				.any(|l| matches!(l, Lost::Pending { .. })),
+			"{op}: the pending create is reported lost, got {:?}",
+			report.lost
+		);
+	}
 }
