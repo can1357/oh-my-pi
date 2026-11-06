@@ -521,4 +521,39 @@ describe("the tool cache keys a discovered server on its config as written", () 
 			expect(await forwardedCache.get(name, rotated)).toEqual([TOOL]);
 		});
 	}
+
+	/**
+	 * Round 9 (Anthropic arm, B2). Codex roots a relative `command`/`cwd`
+	 * against the directory of the `config.toml` that declared it, so two
+	 * projects writing the same entry spawn two different programs in two
+	 * different directories. The as-written identity recorded them raw, and
+	 * the cache key is the server name alone, so the two shared one entry and
+	 * the second project started with the first project's catalogue mounted —
+	 * which for a `lazy` server is the whole tool list it serves.
+	 */
+	test("codex: two projects declaring one server name with a relative command keep separate catalogues", async () => {
+		const other = path.join(dirs.root, "other-project");
+		await fs.mkdir(path.join(other, ".git"), { recursive: true });
+		const toml = ["[mcp_servers.aw]", 'command = "./bin/aw"', 'cwd = "srv"', ""].join("\n");
+		await Bun.write(path.join(dirs.project, ".codex", "config.toml"), toml);
+		await Bun.write(path.join(other, ".codex", "config.toml"), toml);
+
+		clearFsCache();
+		const [name, here] = findServer((await loadAllMCPConfigs(dirs.project, { filterExa: false })).configs);
+		clearFsCache();
+		const [, there] = findServer((await loadAllMCPConfigs(other, { filterExa: false })).configs);
+
+		// Two different programs, each in its own working directory: whatever
+		// the file says, these are not the same server.
+		const stdio = (config: MCPServerConfig) =>
+			config.type === "stdio" ? { command: config.command, cwd: config.cwd } : undefined;
+		expect(stdio(here)?.command).toContain(path.join("project", ".codex", "srv", "bin", "aw"));
+		expect(stdio(there)?.command).toContain(path.join("other-project", ".codex", "srv", "bin", "aw"));
+
+		const cache = new MCPToolCache(memoryStorage().storage);
+		await cache.set(name, here, [TOOL]);
+		expect(await cache.get(name, there)).toBeNull();
+		// The project that wrote the entry still hits its own.
+		expect(await cache.get(name, here)).toEqual([TOOL]);
+	});
 });

@@ -4,7 +4,7 @@
 
 ### Added
 
-- `MCPRuntimeSnapshot.dormant` and the optional `MCPRuntimeSource.isServerDormant()`: in `/extensions`, a not-connected MCP server that still has a cached catalog reads `N tools · connects on first use` only while nothing has tried it, `N tools cached` once a connect has failed, and `unavailable` only when it really has no tools ([#9793](https://github.com/can1357/oh-my-pi/pull/9793) by [@sjawhar](https://github.com/sjawhar))
+- `MCPRuntimeSnapshot.dormant` and `MCPRuntimeSource.isServerDormant()`: in `/extensions`, a not-connected MCP server that still has a cached catalog reads `N tools · connects on first use` only while nothing has tried it, `N tools cached` once a connect has failed, and `unavailable` only when it really has no tools ([#9793](https://github.com/can1357/oh-my-pi/pull/9793) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.17.0] - 2026-11-06
 

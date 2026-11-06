@@ -45,6 +45,11 @@ import { createMCPProxyTools } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { createXdevState } from "@oh-my-pi/pi-coding-agent/tools";
 import { xdevDocs } from "@oh-my-pi/pi-coding-agent/tools/xdev";
+import {
+	formatMcpListHint,
+	type MCPServerDisplay,
+	snapshotMcpRuntime,
+} from "@oh-my-pi/pi-tui/overlays/extensions/mcp-runtime";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { MARKER_ENV, RENAME_TOOL, RENAMED_TOOL } from "./fixtures/renaming-mcp";
 
@@ -173,6 +178,63 @@ function startLoginRequiredServer(options: { onRefusedPost?: () => Promise<void>
 		},
 	});
 	return { url: `http://127.0.0.1:${server.port}/mcp`, state, stop: () => server.stop(true) };
+}
+
+interface FlakyServer {
+	readonly url: string;
+	/** `down` 503s every request; `initializes` counts handshakes that reached the handler. */
+	readonly state: { down: boolean; initializes: number };
+	stop(): void;
+}
+
+/**
+ * Streamable HTTP MCP server that answers 503 while `state.down` and serves
+ * `ping` once it is not. Counting handshakes is the point: a status line that
+ * promises a connect is only true if the endpoint sees one.
+ */
+function startFlakyServer(): FlakyServer {
+	const state = { down: true, initializes: 0 };
+	const server = Bun.serve({
+		port: 0,
+		hostname: "127.0.0.1",
+		async fetch(request) {
+			if (state.down) {
+				return Response.json(
+					{ jsonrpc: "2.0", id: null, error: { code: -32000, message: "service_unavailable" } },
+					{ status: 503 },
+				);
+			}
+			if (request.method === "GET") return new Response(null, { status: 405 });
+			if (request.method === "DELETE") return new Response(null, { status: 200 });
+			const message = (await request.json()) as { id?: number | string; method: string };
+			if (message.id === undefined) return new Response(null, { status: 202 });
+			let result: unknown = {};
+			if (message.method === "initialize") {
+				state.initializes += 1;
+				result = {
+					protocolVersion: "2025-11-25",
+					capabilities: { tools: {} },
+					serverInfo: { name: "flaky", version: "1" },
+				};
+			} else if (message.method === "tools/list") {
+				result = { tools: [PING_DEF] };
+			} else if (message.method === "tools/call") {
+				result = { content: [{ type: "text", text: "pong" }] };
+			}
+			return Response.json({ jsonrpc: "2.0", id: message.id, result }, { headers: { "Mcp-Session-Id": "s1" } });
+		},
+	});
+	return { url: `http://127.0.0.1:${server.port}/mcp`, state, stop: () => server.stop(true) };
+}
+
+/** The `/extensions` hint the dashboard renders for `name` from the live manager. */
+function extensionsHint(manager: MCPManager, name: string): string {
+	const display: MCPServerDisplay = {
+		name,
+		transport: "http",
+		_source: { provider: "native", path: "mcp.json", level: "project" },
+	};
+	return formatMcpListHint(snapshotMcpRuntime(display, manager));
 }
 
 /** Resolve once `name` is registered, however late the reconnect lands. */
@@ -525,12 +587,106 @@ describe("MCP server that is not connected", () => {
 			await connectionEstablished(lazyManager, "dormant");
 			expect(lazyManager.isServerDormant("dormant")).toBe(false);
 
-			// A name the manager holds no config for was never tried either.
-			expect(lazyManager.isServerDormant("never-configured")).toBe(true);
+			// A name the manager holds no config for connects on nothing. The
+			// predicate says so itself rather than leaving it to each
+			// renderer's separate tool-count check.
+			expect(lazyManager.isServerDormant("never-configured")).toBe(false);
 		} finally {
 			await lazyManager.disconnectAll();
 			lazyServer.stop();
 			await otherSession.credentials.remove(mcpOAuthCredentialId(lazyServer.url));
+			await session.credentials.poll();
+		}
+	}, 30_000);
+
+	/**
+	 * Round 9 (Anthropic arm, B1). The dormancy predicate is bound to the
+	 * definition the manager holds; the crash-storm breaker is keyed on the
+	 * server's *name*. Replacing a failed server's definition retires its
+	 * failure record and makes it dormant again, while the name-keyed
+	 * reconnect history still refuses the connect the status line now
+	 * promises — so the endpoint is healthy, the line says "connects on
+	 * first use", and no `initialize` ever reaches the wire.
+	 *
+	 * Driven end to end through `connectServers` and a real loopback server,
+	 * because that is the only way to show both halves: that the sentence is
+	 * true, and that the connect it promises actually happens.
+	 */
+	it("connects a lazy server whose definition was replaced while its reconnects were suspended", async () => {
+		const endpoint = startFlakyServer();
+		const first: MCPHttpServerConfig = { type: "http", url: endpoint.url, timeout: 2_000, lazy: true };
+		const cache = new MCPToolCache(memoryStorage());
+		await cache.set("storm", first, [PING_DEF]);
+		const replaced = new MCPManager(tempDir, cache, undefined, SINGLE_ATTEMPT);
+		replaced.setAuthStorage(session);
+		const deferred = () => replaced.getTools().find(tool => tool.mcpServerName === "storm") as DeferredMCPTool;
+		try {
+			await replaced.connectServers({ storm: first }, {});
+			expect(deferred()).toBeInstanceOf(DeferredMCPTool);
+			expect(replaced.isServerDormant("storm")).toBe(true);
+
+			// Ordinary model traffic against a 503 endpoint: one call more
+			// than the burst limit, each of them a non-manual reconnect.
+			for (let call = 0; call <= BURST_LIMIT; call++) {
+				await deferred().execute(`down-${call}`, {}, undefined, {} as CustomToolContext, undefined);
+			}
+			expect(replaced.isServerDormant("storm")).toBe(false);
+			expect(extensionsHint(replaced, "storm")).toBe("1 tool cached");
+
+			// The definition is replaced by one that makes the same
+			// connection: `timeout` is policy, so the catalogue survives in
+			// the tool cache, and the failure record retires with the object
+			// it was recorded against.
+			const second: MCPHttpServerConfig = { ...first, timeout: 2_001 };
+			await replaced.connectServers({ storm: second }, {});
+			expect(extensionsHint(replaced, "storm")).toBe("1 tool · connects on first use");
+
+			// Whatever the line says, the first use has to make it true.
+			endpoint.state.down = false;
+			const result = await deferred().execute("up-1", {}, undefined, {} as CustomToolContext, undefined);
+			expect({
+				initializes: endpoint.state.initializes,
+				isError: result.isError === true,
+				status: replaced.getConnectionStatus("storm"),
+				after: extensionsHint(replaced, "storm"),
+			}).toEqual({ initializes: 1, isError: false, status: "connected", after: "1 tool" });
+		} finally {
+			await replaced.disconnectAll();
+			endpoint.stop();
+		}
+	}, 60_000);
+
+	/**
+	 * Round 9 (Anthropic arm, B5). `#liveConnectFailure`'s "and it is
+	 * disconnected right now" term survived deletion with every suite green,
+	 * at this head and at its parent. A reconnect in flight is the state
+	 * that distinguishes it: the record of the last attempt is still there
+	 * and still describes the definition the manager holds, but the server
+	 * is being tried again — so the note must not tell the model it is down,
+	 * and must say so again the moment that attempt settles.
+	 */
+	it("leaves a down server out of the note while its reconnect is in flight", async () => {
+		const refusing = startLoginRequiredServer();
+		const held = new MCPManager(tempDir, null, undefined, SINGLE_ATTEMPT);
+		held.setAuthStorage(session);
+		try {
+			await held.connectServers({ heldserver: { type: "http", url: refusing.url, timeout: 2_000 } }, {});
+			await held.waitForStartup(GUARD_MS);
+			expect(held.getConnectionStatus("heldserver")).toBe("disconnected");
+			expect(held.explainMissingTool("mcp__heldserver_ping")).toContain("heldserver");
+
+			// Start a second attempt and read the note before it settles: no
+			// await in between, so the reconnect is still registered.
+			const inFlight = held.reconnectServer("heldserver", { manual: true });
+			expect(held.getConnectionStatus("heldserver")).toBe("connecting");
+			expect(held.explainMissingTool("mcp__heldserver_ping")).toBeUndefined();
+
+			await inFlight;
+			expect(held.getConnectionStatus("heldserver")).toBe("disconnected");
+			expect(held.explainMissingTool("mcp__heldserver_ping")).toContain("heldserver");
+		} finally {
+			await held.disconnectAll();
+			refusing.stop();
 			await session.credentials.poll();
 		}
 	}, 30_000);

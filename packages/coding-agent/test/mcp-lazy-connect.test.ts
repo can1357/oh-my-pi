@@ -115,10 +115,11 @@ describe("MCP lazy connect", () => {
 	});
 
 	// `/extensions` joins discovery config to the live manager through
-	// `snapshotMcpRuntime(server, mcpManager)`, and `isServerDormant` is
-	// optional on `MCPRuntimeSource`: a manager that stopped answering it
-	// would still type-check and silently downgrade every dormant server's
-	// hint. Both arms are rendered from a real manager for that reason.
+	// `snapshotMcpRuntime(server, mcpManager)`. The type requires the manager
+	// to answer `isServerDormant`, so a source cannot quietly stop; what the
+	// type cannot check is that the manager's answer matches the state a
+	// reader can see. Both arms are rendered from a real manager for that
+	// reason.
 	it("renders the /extensions hint for a dormant and for a failed lazy server from the live manager", async () => {
 		const config = lazyConfig(path.join(workDir, "spawned.marker"));
 		const broken: MCPStdioServerConfig = {

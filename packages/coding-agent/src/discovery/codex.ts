@@ -262,10 +262,20 @@ function extractMCPServersFromToml(
 			asWrittenHeaders.Authorization = `Bearer \${${config.bearer_token_env_var}}`;
 		}
 		server.asWritten = {
-			...(config.command !== undefined && { command: config.command }),
+			// Rooted, not raw. The tool cache keys a catalogue on the server
+			// name alone, and `./bin/aw` under two projects' `.codex` dirs is
+			// two different programs in two different working directories —
+			// recording the written form made them hash alike, so the second
+			// project mounted the first one's catalogue. The config dir is
+			// not a value anything rotates: it is where the file is, so
+			// `rooted` belongs in the identity exactly as it belongs in the
+			// connection. A bare executable (`npx`) is left alone by
+			// `resolvePluginStdioPaths` here as it is above, so the common
+			// entry still hashes on what was written.
+			...(rooted.command !== undefined && { command: rooted.command }),
 			...(config.args !== undefined && { args: config.args }),
 			...(Object.keys(asWrittenEnv).length > 0 && { env: asWrittenEnv }),
-			...(config.cwd !== undefined && { cwd: config.cwd }),
+			...(rooted.cwd !== undefined && { cwd: rooted.cwd }),
 			...(config.url !== undefined && { url: config.url }),
 			...(Object.keys(asWrittenHeaders).length > 0 && { headers: asWrittenHeaders }),
 		};

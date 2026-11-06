@@ -77,6 +77,7 @@ function connectedSource(): MCPRuntimeSource {
 	};
 	return {
 		getConnectionStatus: () => "connected",
+		isServerDormant: () => false,
 		getConnection: () => conn,
 		getTools: () =>
 			conn.tools!.map(tool => ({
@@ -168,6 +169,7 @@ describe("MCP inspector runtime join", () => {
 		const panel = new InspectorPanel();
 		panel.setMcpSource({
 			getConnectionStatus: () => "disconnected",
+			isServerDormant: () => false,
 			getConnection: () => undefined,
 			getTools: () => [],
 		});
@@ -205,6 +207,7 @@ describe("MCP inspector runtime join", () => {
 		const panel = new InspectorPanel();
 		panel.setMcpSource({
 			getConnectionStatus: () => "connected",
+			isServerDormant: () => false,
 			getConnection: () => ({
 				name: "github",
 				config: { command: "/usr/bin/github-mcp-server" },
@@ -244,6 +247,7 @@ describe("MCP inspector runtime join", () => {
 		const panel = new InspectorPanel();
 		panel.setMcpSource({
 			getConnectionStatus: name => (name === "github" || name === "linear" ? "connected" : "disconnected"),
+			isServerDormant: () => false,
 			getConnection: name => {
 				if (name === "github") {
 					return {
@@ -330,6 +334,7 @@ describe("MCP list runtime join", () => {
 		const list = new ExtensionList([mcpExtension()], {
 			mcpSource: {
 				getConnectionStatus: () => "disconnected",
+				isServerDormant: () => false,
 				getConnection: () => undefined,
 				getTools: () => [],
 			},

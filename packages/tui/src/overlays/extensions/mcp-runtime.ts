@@ -84,8 +84,9 @@ export interface MCPRuntimeSnapshot {
 	/**
 	 * The server is configured, not connected, and nothing has tried it yet —
 	 * so invoking one of its cached tools connects it. False whenever that
-	 * cannot be established, including for a server whose last connect failed:
-	 * its catalog stays registered too, and invoking it is refused.
+	 * cannot be established, including for a server whose last connect
+	 * failed: its catalog stays registered too, and nothing can be promised
+	 * about the next attempt.
 	 */
 	dormant: boolean;
 	tools: MCPRuntimeCatalogItem[];
@@ -100,8 +101,13 @@ export interface MCPRuntimeSnapshot {
 /** Narrow manager surface so tests can stub without constructing MCPManager. */
 export interface MCPRuntimeSource {
 	getConnectionStatus(name: string): "connected" | "connecting" | "disconnected";
-	/** See {@link MCPRuntimeSnapshot.dormant}; absent in a source that cannot answer it. */
-	isServerDormant?(name: string): boolean;
+	/**
+	 * See {@link MCPRuntimeSnapshot.dormant}. Required, not optional: one
+	 * manager answers this and `/mcp list` asks it unconditionally, so a
+	 * source that could leave it out would render a different sentence from
+	 * the same state.
+	 */
+	isServerDormant(name: string): boolean;
 	getConnection(name: string): MCPConnectionDisplay | undefined;
 	getTools(): Array<{
 		mcpServerName?: string;
@@ -234,9 +240,7 @@ export function snapshotMcpRuntime(
 	return {
 		...base,
 		health,
-		// Only a source that tracks connect attempts can answer this; one that
-		// cannot leaves the hint neutral rather than promising a connect.
-		dormant: health === "disconnected" && (manager.isServerDormant?.(server.name) ?? false),
+		dormant: health === "disconnected" && manager.isServerDormant(server.name),
 		...identity,
 		instructions: sanitizeDisplayField(connection?.instructions),
 		tools,
@@ -270,8 +274,11 @@ export function formatMcpListHint(snapshot: MCPRuntimeSnapshot): string {
 			const tools = `${snapshot.tools.length} tool${snapshot.tools.length === 1 ? "" : "s"}`;
 			// Tools registered without a connection are a cached catalog, which
 			// a server whose last connect failed keeps too. Only a dormant one
-			// connects when a tool of its is invoked; the other refuses until
-			// `/mcp reconnect`, so it gets a hint that claims nothing.
+			// has been tried by nothing, so only for it is the next invocation
+			// a first connect; for the other nothing can be promised about the
+			// next attempt, and while the breaker is open it is refused
+			// outright until `/mcp reconnect` — so that one gets a hint that
+			// claims nothing.
 			return snapshot.dormant ? `${tools} · connects on first use` : `${tools} cached`;
 		}
 		case "connected": {

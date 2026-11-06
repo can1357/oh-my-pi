@@ -64,6 +64,8 @@ function connection(overrides: Partial<MCPConnectionDisplay> = {}): MCPConnectio
 function sourceFor(status: "connected" | "connecting" | "disconnected", conn?: MCPConnectionDisplay): MCPRuntimeSource {
 	return {
 		getConnectionStatus: () => status,
+		// A source answers this or it is not a source; see `MCPRuntimeSource`.
+		isServerDormant: () => false,
 		getConnection: () => conn,
 		getTools: () =>
 			(conn?.tools ?? []).map(tool => ({
@@ -136,11 +138,14 @@ describe("snapshotMcpRuntime", () => {
 	// A disconnected server with registered tools is serving a cached catalog.
 	// That alone says nothing about what invoking one of them does: the manager
 	// keeps a failed server's catalog registered on purpose, and for that one
-	// the call is refused until `/mcp reconnect`. Only the source's dormancy
-	// answer may turn the hint into a promise to connect.
-	const cachedCatalog = (dormant: boolean | undefined): MCPRuntimeSource => ({
+	// nothing can be promised about the next attempt, which while the breaker
+	// is open is refused outright. Only the source's dormancy answer may turn
+	// the hint into a promise to connect, and every source owes one —
+	// `isServerDormant` is required on `MCPRuntimeSource`, so there is no
+	// third "cannot answer" arm for a source to fall into.
+	const cachedCatalog = (dormant: boolean): MCPRuntimeSource => ({
 		getConnectionStatus: () => "disconnected",
-		...(dormant === undefined ? {} : { isServerDormant: () => dormant }),
+		isServerDormant: () => dormant,
 		getConnection: () => undefined,
 		getTools: () => [{ mcpServerName: "github", mcpToolName: "search_code", description: "Search code." }],
 	});
@@ -156,9 +161,6 @@ describe("snapshotMcpRuntime", () => {
 		const failed = snapshotMcpRuntime(server(), cachedCatalog(false));
 		expect(failed.dormant).toBe(false);
 		expect(formatMcpListHint(failed)).toBe("1 tool cached");
-
-		// A source that cannot answer is not evidence of dormancy either.
-		expect(formatMcpListHint(snapshotMcpRuntime(server(), cachedCatalog(undefined)))).toBe("1 tool cached");
 
 		// No tools at all is still the one case with nothing to report.
 		const empty = snapshotMcpRuntime(server(), sourceFor("disconnected"));

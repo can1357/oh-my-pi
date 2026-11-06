@@ -189,6 +189,16 @@ export interface FoundMcpServer {
 	 *
 	 * The whole entry is expanded, not a chosen subset, because that is what
 	 * discovery does; a subset would test a configuration no provider builds.
+	 *
+	 * Expansion only, though — not discovery's mapping. A provider also
+	 * coerces and filters what it has expanded, and this does neither: a
+	 * `timeout: "${T}"` reaches here as the string `"1234"` where `native`
+	 * discovery would make it the number `1234` and `mcp-json` would drop it
+	 * as a non-number, and the same holds for `enabled`, `lazy` and
+	 * `requestIdFormat`. Reproducing that would mean choosing one provider's
+	 * mapper for a file this lookup found by path, and the fields it would
+	 * change are connection *policy* — how long the probe waits, not which
+	 * endpoint it contacts — which is what this field exists to get right.
 	 */
 	connectionConfig: MCPServerConfig;
 	/** Live-manager entry that lives in no writable config file; writes go to user scope. */

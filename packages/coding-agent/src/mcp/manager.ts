@@ -1153,7 +1153,7 @@ export class MCPManager implements MCPManagerApi {
 				// exit) about a server nobody asked to connect yet. A lazy config
 				// that fails validation stays in the set and reports its error.
 				this.#startupServers.delete(name);
-				this.#serverConfigs.set(name, config);
+				this.#holdServerConfig(name, config);
 				lazyServers.push({ name, config });
 				continue;
 			}
@@ -1174,7 +1174,7 @@ export class MCPManager implements MCPManagerApi {
 			// and falls back to cached/deferred tools. A new config supersedes any
 			// retry schedule still trying to bring back the old one.
 			this.#forgetLostServer(name);
-			this.#serverConfigs.set(name, config);
+			this.#holdServerConfig(name, config);
 			const connectionEpoch = this.#epoch;
 			const connectSignal = this.#connectAbort.signal;
 
@@ -1751,27 +1751,62 @@ export class MCPManager implements MCPManagerApi {
 	}
 
 	/**
-	 * Whether `name` is dormant: not connected, and with no failure recorded
-	 * against the definition the manager holds for it now — so nothing has
-	 * tried it yet under that definition, and the next tool call is its first
-	 * attempt. This is the only thing a renderer may say "connects on first
-	 * use" from.
+	 * Whether `name` is dormant: configured, not connected, and with no
+	 * failure recorded against the definition the manager holds for it now —
+	 * so nothing has tried it yet under that definition, and the next tool
+	 * call is its first attempt. This is the only thing a renderer may say
+	 * "connects on first use" from.
 	 *
 	 * Registered tools are not that evidence. `#doReconnect` keeps a failed
 	 * server's catalog registered on purpose, and so does the crash-storm
 	 * breaker (see {@link MCPManager.#tripReconnectBreaker}), so a cached
 	 * catalog without a connection is equally what a server that is refusing
-	 * every connect leaves behind — and for that one the invocation is
-	 * refused and `/mcp reconnect` is what recovers it.
+	 * every connect leaves behind — and for that one nothing can be promised
+	 * about the next attempt, and while the breaker is open the attempt is
+	 * refused outright.
 	 *
 	 * The recorded failure is what separates the two, read through the same
 	 * {@link MCPManager.#liveConnectFailure} that
 	 * {@link MCPManager.explainMissingTool} partitions on, so a one-line
 	 * status and the unavailable-servers note cannot disagree about which
-	 * servers are down.
+	 * servers are down. For that record to answer for the breaker too, the
+	 * breaker's name-keyed window must not outlive the definition that
+	 * filled it; {@link MCPManager.#holdServerConfig} is what makes the two
+	 * retire together, and without it this predicate promised a connect the
+	 * breaker went on refusing.
+	 *
+	 * The first term is the predicate's own configured-server guard, rather
+	 * than one borrowed from each renderer's tool count: a name nobody
+	 * declared connects on nothing.
 	 */
 	isServerDormant(name: string): boolean {
-		return this.getConnectionStatus(name) === "disconnected" && this.#liveConnectFailure(name) === undefined;
+		return (
+			this.#serverConfigs.has(name) &&
+			this.getConnectionStatus(name) === "disconnected" &&
+			this.#liveConnectFailure(name) === undefined
+		);
+	}
+
+	/**
+	 * Hold `config` as the definition for `name`, and — when it replaces a
+	 * different one — drop that name's crash-burst history with it.
+	 *
+	 * Everything else that is "about a definition" is bound to the object
+	 * (see {@link McpStartupFailure}); the breaker's window is keyed on the
+	 * name alone, deliberately, so that an auth handler refreshing the config
+	 * on every challenge cannot storm by handing out new objects. What it
+	 * must not survive is a definition the *user* replaced: that one has
+	 * crashed nothing, and inheriting the previous one's bursts is the same
+	 * mistake as inheriting its error text. Left in, it refused the very
+	 * connect the retired failure record had just licensed
+	 * {@link MCPManager.isServerDormant} to promise.
+	 *
+	 * The auth handler's own refreshed config in `#doReconnect` is installed
+	 * directly, not through here, for the reason above.
+	 */
+	#holdServerConfig(name: string, config: MCPServerConfig): void {
+		if (this.#serverConfigs.get(name) !== config) this.#reconnectHistory.delete(name);
+		this.#serverConfigs.set(name, config);
 	}
 
 	/**
@@ -1966,7 +2001,7 @@ export class MCPManager implements MCPManagerApi {
 	 * starting a fresh one against the new definition.
 	 */
 	updateServerConfig(name: string, config: MCPServerConfig): Promise<MCPServerConnection | null> | undefined {
-		this.#serverConfigs.set(name, config);
+		this.#holdServerConfig(name, config);
 		const connection = this.#connections.get(name);
 		if (connection) connection.config = config;
 		this.#forgetLostServer(name);

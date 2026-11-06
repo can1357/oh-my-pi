@@ -1245,9 +1245,11 @@ export class MCPCommandController {
 		const tools = `${toolCount} tool${toolCount === 1 ? "" : "s"}`;
 		// Tools registered without a connection are a cached catalog, which a
 		// server whose last connect failed keeps too (`MCPManager.isServerDormant`).
-		// Only a dormant server connects when one of them is invoked; for the
-		// other the invocation is refused and `/mcp reconnect` is the recovery,
-		// so its badge counts the catalog and claims nothing more.
+		// Only a dormant server is one nothing has tried yet, so only of that
+		// one can the next invocation be called its first connect; for the
+		// other nothing can be promised about the next attempt, and while the
+		// breaker is open the attempt is refused outright and `/mcp reconnect`
+		// is the recovery. Its badge counts the catalog and claims nothing more.
 		return theme.fg(
 			"muted",
 			manager.isServerDormant(name)
