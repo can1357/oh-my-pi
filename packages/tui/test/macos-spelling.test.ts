@@ -227,6 +227,21 @@ describe("macOS spelling feature gates", () => {
 		expect(spellingGuesses).not.toHaveBeenCalled();
 	});
 
+	it("judges an autocorrect candidate on the same line the undercurl pass checks", async () => {
+		const autocorrectWord = mock(async () => "received");
+		const provider = new MacOSSpellingProvider(
+			backend({ checkSpelling: async () => [{ start: 0, length: 8 }], autocorrectWord }),
+			true,
+		);
+		provider.setFeatures({ typoDetection: false, autocorrect: true });
+
+		expect(await provider.tryAutocorrect(["alpha bravo", "recieved and more"], 1, 9)).toEqual({
+			replaceLen: 9,
+			insert: "received ",
+		});
+		expect(autocorrectWord).toHaveBeenCalledWith("recieved and more", 0, 8);
+	});
+
 	it("never autocorrects or underlines a registered magic keyword", async () => {
 		setMagicKeywords([{ word: "workflowz", hue: [30, 150] }]);
 		try {
