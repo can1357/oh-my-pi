@@ -83,7 +83,7 @@ omp --a2a-port 0        # терминал C: ...
 # откат на оригинальный omp:
 ln -sf ../install/global/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js ~/.bun/bin/omp
 # обновление форк-бинарника после правок:
-cd ~/Documents/oh-my-pi && bun run build && rsync -a packages/coding-agent/dist/omp ~/.local/lib/omp-fork/omp
+cd ~/Documents/LAB/oh-my-pi && bun run build && rsync -a packages/coding-agent/dist/omp ~/.local/lib/omp-fork/omp
 ```
 
 ## Качество
