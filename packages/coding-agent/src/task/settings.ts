@@ -164,20 +164,6 @@ export const cfgTaskIsolationApply = register({
 	},
 });
 
-export const cfgOvnfsEnabled = register({
-	id: "ovnfs.enabled",
-	protocolDefault: ["rpc", "acp"],
-	type: "boolean",
-	default: true,
-	ui: {
-		tab: "tasks",
-		group: "Isolation",
-		label: "ovnfs (experimental)",
-		description:
-			"When the ovnfs binary is found, use ovnfs checkouts (copy-on-write views of a folder, ready in about a second at any size) whenever a separate copy is needed: the system prompt tells agents to open checkouts instead of git worktrees or copies, and isolated subagents (when allowed, with `isolation.backend` on auto) run in checkouts instead of native clones",
-	},
-});
-
 export const cfgOvnfsPath = register({
 	id: "ovnfs.path",
 	type: "string",
@@ -186,18 +172,18 @@ export const cfgOvnfsPath = register({
 		tab: "tasks",
 		group: "Isolation",
 		label: "ovnfs Binary",
-		description: "ovnfs executable for `ovnfs.enabled`; unset looks for `ovnfs` on PATH",
+		description:
+			"ovnfs executable; unset looks for `ovnfs` on PATH. When it is found, ovnfs checkouts (copy-on-write views of a folder, ready in about a second at any size) serve every separate copy: the system prompt tells agents to open checkouts instead of git worktrees or copies, and isolated subagents (when allowed, with `isolation.backend` on auto) run in checkouts instead of native clones",
 	},
 });
 
 /**
  * The ovnfs command agents and isolated subagents use (`ovnfs.path`, else `ovnfs`),
- * or `undefined` when `ovnfs.enabled` is off or that binary is not found. Read by the
- * system prompt (checkout guidance), the bash git guard, and the task runner
- * (ovnfs-backed isolation when `isolation.backend` is auto).
+ * or `undefined` when that binary is not found. Read by the system prompt (checkout
+ * guidance), the bash git guard, `grep`/`glob` (searches through the daemon), and the
+ * task runner (ovnfs-backed isolation when `isolation.backend` is auto).
  */
 export function ovnfsCommand(settings: Settings): string | undefined {
-	if (!cfgOvnfsEnabled.get(settings)) return undefined;
 	const command = cfgOvnfsPath.get(settings)?.trim() || "ovnfs";
 	return $which(command) ? command : undefined;
 }

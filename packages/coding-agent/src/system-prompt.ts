@@ -57,7 +57,7 @@ import {
 	cfgInlineToolDescriptors,
 	cfgPersonality,
 } from "./session/settings";
-import { cfgOvnfsEnabled, cfgOvnfsPath, cfgTaskBatch, cfgTaskEager } from "./task/settings";
+import { cfgOvnfsPath, cfgTaskBatch, cfgTaskEager } from "./task/settings";
 import {
 	cfgAsyncEnabled,
 	cfgOutEnabled,
@@ -96,7 +96,6 @@ export const cfgSystemPromptInputs = combine({
 	taskEager: cfgTaskEager,
 	taskBatch: cfgTaskBatch,
 	// Separate-checkout guidance names the ovnfs command.
-	ovnfsEnabled: cfgOvnfsEnabled,
 	ovnfsPath: cfgOvnfsPath,
 	// Rule bucketing (TTSR registrations, rulebook, always-apply) runs at rebuild time.
 	ttsrEnabled: cfgTtsrEnabled,
@@ -611,7 +610,7 @@ export interface BuildSystemPromptOptions {
 	xdevDocs?: string;
 	/** Whether Auto-QA grievance reporting is enabled; renders the `xd://report_issue` note. */
 	autoQaEnabled?: boolean;
-	/** ovnfs command when `ovnfs.enabled` and the binary is found (`ovnfsCommand`); renders the separate-checkout guidance. */
+	/** ovnfs command when its binary is found (`ovnfsCommand`); renders the separate-checkout guidance. */
 	ovnfs?: string;
 	/** Whether active `write` is restricted to xd:// dispatch and the plan artifact sandbox. */
 	writeTransportOnly?: boolean;
