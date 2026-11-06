@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A `models.yml` that names an input modality the catalog does not know yet (for example `video`) ignores that modality and keeps loading, instead of aborting startup ([#17419](https://github.com/can1357/oh-my-pi/pull/17419) by [@jonasboos](https://github.com/jonasboos)).
+
 ## [18.17.0] - 2026-11-06
 
 ### Added

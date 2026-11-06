@@ -55,6 +55,17 @@ describe("ModelRegistry.create() factory (F6)", () => {
 		expect(mtime2).toBe(mtime1);
 	});
 
+	test("a migrated models.yml is readable by its owner only", async () => {
+		const yml = path.join(tempDir.path(), "models.yml");
+		const json = path.join(tempDir.path(), "models.json");
+		await Bun.write(json, JSON.stringify({ providers: { custom: { apiKey: "sk-test" } } }));
+
+		const cf = new ConfigFile("models", ModelsConfigSchema, yml);
+		cf.tryLoad();
+		// The migrated file can hold inline API keys, so it is published owner-only.
+		expect(fs.statSync(yml).mode & 0o777).toBe(0o600);
+	});
+
 	test("ConfigFile migrates legacy models.json containing comments", async () => {
 		const yml = path.join(tempDir.path(), "models.yml");
 		const json = path.join(tempDir.path(), "models.json");

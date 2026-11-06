@@ -54,7 +54,7 @@ import { generateCodexAttestation } from "../live/attestation";
 import { redactUrlForLog } from "../mcp/json-rpc";
 import type { AuthStorage } from "../session/auth-storage";
 import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
-import type { ConfigError, ConfigFile } from "./config-file";
+import type { ConfigError, ConfigFile, LoadResult } from "./config-file";
 import {
 	buildCustomModelOverlay,
 	type CustomModelDefinitionLike,
@@ -370,6 +370,10 @@ export class ModelRegistry {
 	#configError: ConfigError | undefined = undefined;
 	#warnedCompatKeys = new Set<string>();
 	#configWarnings: string[] = [];
+	/** Cached models.yml load last copied into {@link #configWarnings}. */
+	#publishedModelsLoad?: LoadResult<ModelsConfig>;
+	/** Findings copied from {@link #publishedModelsLoad}, replaced when a new load is published. */
+	#publishedModelsFileWarnings: string[] = [];
 	#modelsConfigFile: ConfigFile<ModelsConfig>;
 	#lastStaticLoadMtime: number | null = null;
 	#registeredProviderSources: Set<string> = new Set();
@@ -1308,6 +1312,28 @@ export class ModelRegistry {
 		return warnings;
 	}
 
+	#publishModelsFileWarnings(result: LoadResult<ModelsConfig>): void {
+		// The same cached load is what every registry in the process reads.
+		// Publish when that object changes, and replace the findings copied
+		// from the previous one: `omp models refresh` force-reparses before
+		// anything drains #configWarnings, and a second registry must still
+		// see the modality warning the first one already published.
+		if (result === this.#publishedModelsLoad) return;
+		this.#publishedModelsLoad = result;
+		if (this.#publishedModelsFileWarnings.length > 0) {
+			const published = new Set(this.#publishedModelsFileWarnings);
+			this.#configWarnings = this.#configWarnings.filter(warning => !published.has(warning));
+			this.#publishedModelsFileWarnings = [];
+		}
+		if (result.status !== "ok") return;
+		const prefix = `${this.#modelsConfigFile.path()}: `;
+		for (const warning of result.warnings) {
+			const message = `${prefix}${warning}`;
+			this.#publishedModelsFileWarnings.push(message);
+			this.#configWarnings.push(message);
+		}
+	}
+
 	#loadModels() {
 		this.#resetStaticComposition();
 		// Load custom config first (to know which providers to override).
@@ -2034,7 +2060,9 @@ export class ModelRegistry {
 				found: false,
 			};
 		}
-		const { value, error, status } = this.#modelsConfigFile.tryLoad();
+		const loaded = this.#modelsConfigFile.tryLoad();
+		this.#publishModelsFileWarnings(loaded);
+		const { value, error, status } = loaded;
 
 		if (status === "error") {
 			return {
