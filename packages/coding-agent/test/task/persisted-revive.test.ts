@@ -139,6 +139,7 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 		},
 		subscribeRunState: () => () => {},
 		getLastAssistantMessage: () => lastAssistant,
+		getAgentId: () => undefined,
 		extensionRunner,
 	} as unknown as AgentSession;
 	return {

@@ -486,3 +486,24 @@ export class AgentRegistry implements AgentRegistryApi {
 		}
 	}
 }
+
+/** Every id transitively reachable from `rootId` by following `AgentRef.parentId` links, plus `rootId` itself. */
+export function collectAgentFamily(registry: AgentRegistryApi, rootId: string): ReadonlySet<string> {
+	const childrenByParent = new Map<string, string[]>();
+	for (const ref of registry.list()) {
+		if (ref.parentId === undefined) continue;
+		const siblings = childrenByParent.get(ref.parentId);
+		if (siblings) siblings.push(ref.id);
+		else childrenByParent.set(ref.parentId, [ref.id]);
+	}
+	const family = new Set<string>([rootId]);
+	const queue = [rootId];
+	for (let i = 0; i < queue.length; i++) {
+		for (const childId of childrenByParent.get(queue[i]) ?? []) {
+			if (family.has(childId)) continue;
+			family.add(childId);
+			queue.push(childId);
+		}
+	}
+	return family;
+}

@@ -9,9 +9,74 @@
 import { toError } from "@oh-my-pi/pi-utils";
 import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
-import type { ExtensionError, ExtensionMode, ExtensionUIContext } from "../extensibility/extensions/types";
+import type {
+	ExtensionActions,
+	ExtensionAgentInfo,
+	ExtensionError,
+	ExtensionMode,
+	ExtensionUIContext,
+} from "../extensibility/extensions/types";
+import { AgentLifecycleManager } from "../registry/agent-lifecycle";
+import { type AgentRef, AgentRegistry, collectAgentFamily, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
+
+function toExtensionAgentInfo(ref: AgentRef): ExtensionAgentInfo {
+	return {
+		id: ref.id,
+		status: ref.status,
+		kind: ref.kind,
+		...(ref.sessionFile === null ? {} : { sessionFile: ref.sessionFile }),
+	};
+}
+
+export interface ExtensionAgentActionsScope {
+	/**
+	 * Restrict `list`/`get`/`ensureLive`/`prompt` to this agent id and its
+	 * registry descendants. A subagent id is only unique within its owning
+	 * top-level session's tree, so an unscoped view would let one session's
+	 * extension inspect, revive, or message another session's agent in a host
+	 * that runs several concurrent top-level sessions in one process.
+	 */
+	scopeAgentId?: string;
+}
+
+/** Actions backing {@link ExtensionAPI.agents}, scoped to one session's own registry family. */
+export function createExtensionAgentActions(
+	scope: ExtensionAgentActionsScope = {},
+): Required<Pick<ExtensionActions, "agentsList" | "agentsGet" | "agentsEnsureLive" | "agentsPrompt">> {
+	const registry = AgentRegistry.global();
+	const { scopeAgentId } = scope;
+	const inScope = (id: string): boolean =>
+		scopeAgentId === undefined || collectAgentFamily(registry, scopeAgentId).has(id);
+	return {
+		agentsList: () => {
+			if (scopeAgentId === undefined) return registry.list().map(toExtensionAgentInfo);
+			const family = collectAgentFamily(registry, scopeAgentId);
+			return registry
+				.list()
+				.filter(ref => family.has(ref.id))
+				.map(toExtensionAgentInfo);
+		},
+		agentsGet: id => {
+			if (!inScope(id)) return undefined;
+			const ref = registry.get(id);
+			return ref ? toExtensionAgentInfo(ref) : undefined;
+		},
+		agentsEnsureLive: async id => {
+			if (!inScope(id)) throw new Error(`Agent "${id}" is not visible to this session.`);
+			await AgentLifecycleManager.global().ensureLive(id);
+			const ref = registry.get(id);
+			if (!ref) throw new Error(`agent ${id} not in registry after revive`);
+			return toExtensionAgentInfo(ref);
+		},
+		agentsPrompt: async (id, text, agentOptions) => {
+			if (!inScope(id)) throw new Error(`Agent "${id}" is not visible to this session.`);
+			const liveSession = await AgentLifecycleManager.global().ensureLive(id);
+			await liveSession.prompt(text, { streamingBehavior: agentOptions?.deliverAs ?? "steer" });
+		},
+	};
+}
 
 /** Action name for an extension-originated send failure. */
 export type ExtensionSendAction = "extension_send" | "extension_send_user";
@@ -120,6 +185,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			appendEntry: (customType, data) => {
 				session.sessionManager.appendCustomEntry(customType, data);
 			},
+			...createExtensionAgentActions({ scopeAgentId: session.getAgentId() ?? MAIN_AGENT_ID }),
 			setLabel: (targetId, label) => {
 				session.sessionManager.appendLabelChange(targetId, label);
 			},

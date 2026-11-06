@@ -450,6 +450,7 @@ describe("reportPromptResult", () => {
 			let extensionActions: ExtensionActions | undefined;
 			const extensionUserMessages = new RpcExtensionUserMessageTracker();
 			const session = {
+				getAgentId: () => undefined,
 				extensionRunner: {
 					initialize: (actions: ExtensionActions) => {
 						extensionActions = actions;
@@ -536,6 +537,7 @@ describe("initializeExtensions markAgentInvokingMessage", () => {
 		let markCount = 0;
 		let sentOptions: { triggerTurn?: boolean } | undefined;
 		const session = {
+			getAgentId: () => undefined,
 			extensionRunner: {
 				initialize: (actions: ExtensionActions) => {
 					extensionActions = actions;
@@ -585,6 +587,7 @@ describe("initializeExtensions invokingTask rejection safety", () => {
 		let extensionActions: ExtensionActions | undefined;
 		const extensionUserMessages = new RpcExtensionUserMessageTracker();
 		const session = {
+			getAgentId: () => undefined,
 			extensionRunner: {
 				initialize: (actions: ExtensionActions) => {
 					extensionActions = actions;

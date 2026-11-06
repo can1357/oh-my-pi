@@ -1801,6 +1801,41 @@ export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family exte
 		? "flex" | "priority"
 		: ServiceTier;
 
+/** An agent registry entry visible to an extension. */
+export interface ExtensionAgentInfo {
+	/** Registry id, which for a subagent is the name its spawn allocated. */
+	id: string;
+	status: "running" | "idle" | "parked" | "aborted";
+	kind: "main" | "sub" | "advisor";
+	sessionFile?: string;
+}
+
+/**
+ * Named registry agents available to an extension, scoped to the calling
+ * session: its own agent and that agent's registry descendants. Agents of
+ * other sessions in the same process are never visible, whatever id is
+ * passed — a subagent id is only unique within its own session's tree, and
+ * a host may run several top-level sessions at once.
+ */
+export interface ExtensionAgentsApi {
+	/** Snapshot of the agents visible to this session. */
+	list(): ExtensionAgentInfo[];
+	/** The visible agent with this registry id, or `undefined`. */
+	get(id: string): ExtensionAgentInfo | undefined;
+	/**
+	 * Revive a parked, idle or killed (`aborted`) agent to a live session.
+	 * Resolves when the agent is live; rejects when the agent is not visible
+	 * to this session, or with the underlying error when it has no ref or no
+	 * reviver.
+	 */
+	ensureLive(id: string): Promise<ExtensionAgentInfo>;
+	/**
+	 * Deliver a follow-up turn to a visible live or revivable agent, without
+	 * going through the hub UI.
+	 */
+	prompt(id: string, text: string, options?: { deliverAs?: "steer" | "followUp" }): Promise<void>;
+}
+
 /**
  * What holds a keyboard chord, as reported by {@link ExtensionAPI.getShortcutConflict}.
  *
@@ -1839,6 +1874,9 @@ export interface ExtensionAPI {
 
 	/** Injected pi-coding-agent exports for accessing SDK utilities */
 	pi: typeof PiCodingAgent;
+
+	/** Named registry agents visible to this session. */
+	agents: ExtensionAgentsApi;
 
 	// =========================================================================
 	// Event Subscription
@@ -2362,6 +2400,18 @@ export type SendUserMessageHandler = (
 
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
 
+export type AgentsListHandler = () => ExtensionAgentInfo[];
+
+export type AgentsGetHandler = (id: string) => ExtensionAgentInfo | undefined;
+
+export type AgentsEnsureLiveHandler = (id: string) => Promise<ExtensionAgentInfo>;
+
+export type AgentsPromptHandler = (
+	id: string,
+	text: string,
+	options?: { deliverAs?: "steer" | "followUp" },
+) => Promise<void>;
+
 export type GetActiveToolsHandler = () => string[];
 
 export type GetAllToolsHandler = () => ToolInfo[];
@@ -2398,6 +2448,10 @@ export interface ExtensionActions {
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
 	appendEntry: AppendEntryHandler;
+	agentsList?: AgentsListHandler;
+	agentsGet?: AgentsGetHandler;
+	agentsEnsureLive?: AgentsEnsureLiveHandler;
+	agentsPrompt?: AgentsPromptHandler;
 	setLabel: (targetId: string, label: string | undefined) => void;
 	getActiveTools: GetActiveToolsHandler;
 	getAllTools: GetAllToolsHandler;
@@ -2454,6 +2508,10 @@ export interface ExtensionCommandContextActions {
 /** Full runtime = state + actions, including host-compatible service-tier fallbacks. */
 export interface ExtensionRuntime extends ExtensionRuntimeState, ExtensionActions {
 	getServiceTiers: GetServiceTiersHandler;
+	agentsList: AgentsListHandler;
+	agentsGet: AgentsGetHandler;
+	agentsEnsureLive: AgentsEnsureLiveHandler;
+	agentsPrompt: AgentsPromptHandler;
 	setServiceTier: SetServiceTierHandler;
 }
 
