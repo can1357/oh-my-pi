@@ -57,15 +57,23 @@ const SYSTEM_DIRS: &[&str] = &[];
 /// assumption: anybody who can turn it into a directory of programs has
 /// already replaced the test.
 ///
-/// `current_exe` failing is the one case left, and a host that cannot
-/// name the binary it is running has nothing better to offer; the root
-/// directory stands in there because whatever else it is, it is not the
-/// working directory.
+/// The binary's path still has to be a legal `PATH` entry, and the
+/// question is asked of the function that would reject it rather than of
+/// a hardcoded character — the same check the directories above get. It
+/// is not hypothetical: a binary under a directory named `a::b` produces
+/// an **empty** entry between the colons, which is the working directory
+/// again, and the test went green on an `sh` planted there.
+///
+/// `current_exe` failing, or naming a path no `PATH` can carry, leaves
+/// the root directory: whatever else it is, it is not the working
+/// directory, and a host that cannot name the binary it is running has
+/// nothing better to offer.
 fn no_programs() -> OsString {
-	std::env::current_exe().map_or_else(
-		|_| OsString::from(std::path::MAIN_SEPARATOR_STR),
-		PathBuf::into_os_string,
-	)
+	std::env::current_exe()
+		.ok()
+		.map(PathBuf::into_os_string)
+		.filter(|path| std::env::join_paths([path]).is_ok())
+		.unwrap_or_else(|| OsString::from(std::path::MAIN_SEPARATOR_STR))
 }
 
 /// The `PATH` the test process gets, instead of the caller's: the
