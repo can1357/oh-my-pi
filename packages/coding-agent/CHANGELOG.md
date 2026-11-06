@@ -18,6 +18,7 @@
 - Extensions and RPC clients can start live voice sessions using their own WebRTC peer, including phone-browser clients, through ctx.startLive({ sdpOffer }) or live_connect.
 - Extensions can customize assistant-text rendering and rerender individual replies through the opt-in extensionRenderers.assistantText setting, and can register interactive link schemes with extension callbacks and renderer fallbacks.
 - /debug reports now include session-logs.txt containing all log records written by the reporting session and its subagents for the current day.
+- Unscoped Vercel AI Gateway `baseUrl` overrides keep decision-model judges on the gateway's `/typesafe` sibling surface instead of the chat root ([#13511](https://github.com/can1357/oh-my-pi/issues/13511)).
 
 ### Changed
 

@@ -50,7 +50,7 @@ export function resolveProviderBaseUrl<TApi extends Api>(
 	modelApi: TApi,
 	modelBaseUrl: string | undefined,
 	override: Pick<ProviderOverride, "baseUrl" | "baseUrlApis" | "transport"> | undefined,
-	provider?: string,
+	provider: string,
 ): string | undefined {
 	if (override?.baseUrl === undefined) return modelBaseUrl;
 	if (override.transport === "pi-native") return override.baseUrl;
