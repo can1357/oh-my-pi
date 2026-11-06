@@ -19,23 +19,76 @@ pub(super) enum Send {
 	Probe,
 	/// A signal.
 	Signal(Signal),
+	/// A valid platform signal number with no canonical name.
+	Number(u8),
 }
 
 impl Send {
 	pub(super) const fn signal(self) -> Option<Signal> {
 		match self {
-			Self::Probe => None,
+			Self::Probe | Self::Number(_) => None,
 			Self::Signal(sig) => Some(sig),
 		}
 	}
 }
 
-/// A signal operand: a number (0 probes) or a name with or without `SIG`.
-fn parse_signal(spec: &[u8], platform: Platform) -> Option<Send> {
-	if !spec.is_empty() && spec.iter().all(u8::is_ascii_digit) && spec.iter().all(|&c| c == b'0') {
+/// Bash validates numbers against NSIG, independently of its canonical name
+/// table. All kill spellings use this decoder; listing also maps exit statuses.
+fn parse_signal(spec: &[u8], platform: Platform, prefix: bool, listing: bool) -> Option<Send> {
+	if let Ok(number) = std::str::from_utf8(spec.trim_ascii()).ok()?.parse::<i64>() {
+		let number = if listing && number > 128 {
+			number - 128
+		} else {
+			number
+		};
+		let max = match platform {
+			Platform::Linux => 64,
+			Platform::MacOs | Platform::Windows => 31,
+		};
+		return match number {
+			0 => Some(Send::Probe),
+			1.. if number <= max => {
+				let n = u8::try_from(number).ok()?;
+				Some(Signal::from_number(n, platform).map_or(Send::Number(n), Send::Signal))
+			},
+			_ => None,
+		};
+	}
+	if spec.eq_ignore_ascii_case(b"EXIT") {
 		return Some(Send::Probe);
 	}
-	Signal::parse_spec(spec, platform).map(Send::Signal)
+	let unprefixed = if spec
+		.get(..3)
+		.is_some_and(|s| s.eq_ignore_ascii_case(b"SIG"))
+	{
+		&spec[3..]
+	} else {
+		spec
+	};
+	// decode_signal handles RTMIN offsets with valid_number before its
+	// SIG-prefix permission check. RTMAX offsets must instead match one
+	// of initialize_signames' canonical entries.
+	if platform == Platform::Linux
+		&& unprefixed
+			.get(..6)
+			.is_some_and(|s| s.eq_ignore_ascii_case(b"RTMIN+"))
+	{
+		let offset = std::str::from_utf8(unprefixed[6..].trim_ascii())
+			.ok()?
+			.parse::<i64>()
+			.ok()
+			.and_then(|n| u8::try_from(n).ok())?;
+		return (offset <= 30)
+			.then(|| Signal::from_number(34 + offset, platform).map(Send::Signal))
+			.flatten();
+	}
+	let name = if prefix { unprefixed } else { spec };
+	Signal::iter()
+		.find(|sig| {
+			let canonical: &'static str = (*sig).into();
+			sig.number(platform) != 0 && name.eq_ignore_ascii_case(canonical.as_bytes())
+		})
+		.map(Send::Signal)
 }
 
 /// Why a target could not be signalled.
@@ -55,54 +108,56 @@ pub(super) enum TargetError {
 /// `kill [-s sig | -n num | -sig] pid|%job …`, `kill -l [sig …]`.
 pub fn kill(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	let platform = ctx.k.engine.config().platform;
-	let mut send = Send::Signal(Signal::Term);
+	let prefix = !ctx.option(crate::bash::store::OptId::Posix)?;
+	let mut send = Some(Send::Signal(Signal::Term));
+	let mut spec: &[u8] = b"TERM";
+	let mut saw_signal = false;
+	let mut listing = false;
 	let mut i = 0;
-	if let Some(first) = args.first() {
-		let first = first.as_slice();
-		if first == b"-l" || first == b"-L" {
-			return list(ctx, &args[1..]);
-		}
-		if first == b"--" {
-			i = 1;
-		} else if first.starts_with(b"-s") || first.starts_with(b"-n") {
-			let attached = &first[2..];
-			let spec = if attached.is_empty() {
-				let Some(spec) = args.get(1) else {
-					ctx.usage(format!("{}: option requires an argument", first.as_bstr()));
-					return done(2);
-				};
-				i = 2;
-				spec.as_slice()
-			} else {
-				i = 1;
-				attached
-			};
-			let numeric = first[1] == b'n';
-			let parsed = if numeric && !spec.iter().all(u8::is_ascii_digit) {
-				None
-			} else {
-				parse_signal(spec, platform)
-			};
-			let Some(parsed) = parsed else {
-				ctx.diag(Diag::InvalidSignal { cmd: "kill".into(), spec: spec.into() });
+	// kill_builtin finishes option decoding before it signals any operand.
+	// Even a lone '-' is a signal specification (the invalid empty name).
+	while let Some(word) = args.get(i).map(|a| a.as_slice()) {
+		if word == b"-l" || word == b"-L" {
+			listing = true;
+			i += 1;
+		} else if word == b"--" {
+			i += 1;
+			break;
+		} else if word == b"-s" || word == b"-n" {
+			let Some(value) = args.get(i + 1) else {
+				ctx.usage(format!("{}: option requires an argument", word.as_bstr()));
 				return done(1);
 			};
-			send = parsed;
-			if args.get(i).is_some_and(|a| a.as_slice() == b"--") {
-				i += 1;
-			}
-		} else if first.starts_with(b"-") && first.len() > 1 {
-			let Some(parsed) = parse_signal(&first[1..], platform) else {
-				ctx.diag(Diag::InvalidSignal { cmd: "kill".into(), spec: first[1..].into() });
-				return done(1);
-			};
-			send = parsed;
-			i = 1;
-			if args.get(i).is_some_and(|a| a.as_slice() == b"--") {
-				i += 1;
-			}
+			spec = value;
+			send = parse_signal(spec, platform, prefix, false);
+			saw_signal = true;
+			i += 2;
+		} else if (word.starts_with(b"-s") && word.get(2).is_some_and(u8::is_ascii_alphabetic))
+			|| (word.starts_with(b"-n") && word.get(2).is_some_and(u8::is_ascii_digit))
+		{
+			spec = &word[2..];
+			send = parse_signal(spec, platform, prefix, false);
+			saw_signal = true;
+			i += 1;
+		} else if word == b"-?" {
+			ctx.builtin_usage();
+			return done(2);
+		} else if word.starts_with(b"-") && !saw_signal {
+			spec = &word[1..];
+			send = parse_signal(spec, platform, prefix, false);
+			saw_signal = true;
+			i += 1;
+		} else {
+			break;
 		}
 	}
+	if listing {
+		return list(ctx, &args[i..]);
+	}
+	let Some(send) = send else {
+		ctx.diag(Diag::InvalidSignal { cmd: "kill".into(), spec: spec.into() });
+		return done(1);
+	};
 	if i == args.len() {
 		ctx.builtin_usage();
 		return done(2);
@@ -111,8 +166,11 @@ pub fn kill(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	for arg in &args[i..] {
 		match target(ctx, arg, send, None) {
 			Ok(Some(target)) => {
-				if let Some(sig) = send.signal() {
-					ControlHandle(ctx.k.ctl.clone()).signal(target, sig);
+				let ctl = ControlHandle(ctx.k.ctl.clone());
+				match send {
+					Send::Probe => {},
+					Send::Signal(sig) => ctl.signal(target, sig),
+					Send::Number(n) => ctl.signal_number(target, n),
 				}
 			},
 			Ok(None) => {},
@@ -154,29 +212,29 @@ pub(super) fn target(
 			Some(posix) => super::zsh_jobs::getjob(ctx, arg, posix).ok_or(TargetError::Reported)?,
 			None => super::jobs::spec(ctx, arg).map_err(|_| TargetError::NoSuchJob)?,
 		};
-		let job = ctx.vp.jobs.get_mut(number).ok_or(TargetError::NoSuchJob)?;
-		if matches!(job.state, JobState::Done(_))
-			|| matches!(
-				ctx.k.proc_state(ctx.cx.store, job.vpid),
-				Some(crate::bash::vm::ProcState::Exited(_))
-			) {
-			return Err(TargetError::NoSuchJob);
-		}
-		// bash `kill_pid`: continuing a stopped job by `kill` acts like `bg`
-		// (the job runs, the current job stays).
-		if send == Send::Signal(Signal::Cont) && matches!(job.state, JobState::Stopped(_)) {
-			job.state = JobState::Running;
-			job.notified = true;
-		}
-		return Ok(Some(SigTarget::Job(job.id)));
+		return job_target(ctx, number, send);
 	}
 	let pid = std::str::from_utf8(arg)
 		.ok()
 		.and_then(|s| s.parse::<i32>().ok())
 		.ok_or(TargetError::NotAnId)?;
 	let base = ctx.k.engine.config().vpid_base;
-	// A job's (or `$!`'s) program OS pid names the job's vproc: the signal
-	// reaches the program through it, and the job's state follows.
+	// kill_pid interprets pid < -1 as a process group. Only job-control
+	// jobs own such a group; a job without job control must still use the
+	// host's killpg path, not jobspec expansion.
+	if pid < -1
+		&& let Some(number) = ctx
+			.vp
+			.jobs
+			.by_pid(pid.unsigned_abs())
+			.filter(|job| job.control)
+			.map(|job| job.number)
+	{
+		return job_target(ctx, number, send);
+	}
+	// Preserve the selected vproc on the bus. The VM's shared recipient
+	// classification forwards engine-only wrappers, not script-written
+	// shells, and chooses the same scope for named and numeric signals.
 	let named = u32::try_from(pid)
 		.ok()
 		.filter(|&p| p > 0)
@@ -196,19 +254,41 @@ pub(super) fn target(
 		Ok(_) if live.is_some() => Ok(live.map(SigTarget::Vpid)),
 		// A finished job's program pid may already name another process.
 		Ok(p) if p >= base || named.is_some_and(|v| v.0 != p) => Err(TargetError::NoSuchProcess),
-		_ => ctx
-			.cx
-			.host
-			.signal_process(pid, send.signal())
-			.map(|()| None)
-			.map_err(TargetError::Host),
+		_ => match send {
+			Send::Number(n) => ctx.cx.host.signal_process_number(pid, n),
+			_ => ctx.cx.host.signal_process(pid, send.signal()),
+		}
+		.map(|()| None)
+		.map_err(TargetError::Host),
 	}
+}
+
+fn job_target(
+	ctx: &mut Ctx<'_, '_>,
+	number: u32,
+	send: Send,
+) -> Result<Option<SigTarget>, TargetError> {
+	let job = ctx.vp.jobs.get_mut(number).ok_or(TargetError::NoSuchJob)?;
+	if matches!(job.state, JobState::Done(_))
+		|| matches!(
+			ctx.k.proc_state(ctx.cx.store, job.vpid),
+			Some(crate::bash::vm::ProcState::Exited(_))
+		) {
+		return Err(TargetError::NoSuchJob);
+	}
+	// kill_pid treats a kill-continued stopped group like bg.
+	if send == Send::Signal(Signal::Cont) && matches!(job.state, JobState::Stopped(_)) {
+		job.state = JobState::Running;
+		job.notified = true;
+	}
+	Ok(Some(SigTarget::Job(job.id)))
 }
 
 /// `kill -l [sig …]`: the signal table, or names for numbers (statuses
 /// above 128 map to their signal) and numbers for names.
 pub fn list(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	let platform = ctx.k.engine.config().platform;
+	let prefix = !ctx.option(crate::bash::store::OptId::Posix)?;
 	if args.is_empty() {
 		let mut signals: Vec<_> = Signal::iter().filter(|s| s.number(platform) != 0).collect();
 		signals.sort_by_key(|s| s.number(platform));
@@ -238,21 +318,21 @@ pub fn list(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	}
 	let mut status = 0;
 	for spec in args {
-		let number = std::str::from_utf8(spec)
-			.ok()
-			.and_then(|s| s.parse::<u16>().ok());
-		let sig = match number {
-			Some(n) => {
-				let n = if n > 128 { n - 128 } else { n };
-				u8::try_from(n)
-					.ok()
-					.and_then(|n| Signal::from_number(n, platform))
+		let numeric = spec
+			.trim_ascii()
+			.first()
+			.is_some_and(|c| c.is_ascii_digit() || matches!(c, b'+' | b'-'));
+		match parse_signal(spec, platform, prefix, true) {
+			Some(send) if numeric => match send {
+				Send::Probe => ctx.out(b"EXIT\n"),
+				Send::Signal(sig) => ctx.out(format!("{sig}\n").as_bytes()),
+				Send::Number(_) => {},
 			},
-			None => Signal::parse_spec(spec, platform),
-		};
-		match sig {
-			Some(sig) if number.is_some() => ctx.out(format!("{sig}\n").as_bytes()),
-			Some(sig) => ctx.out(format!("{}\n", sig.number(platform)).as_bytes()),
+			Some(send) => {
+				ctx.out(
+					format!("{}\n", send.signal().map_or(0, |sig| sig.number(platform))).as_bytes(),
+				);
+			},
 			None => {
 				ctx.diag(Diag::InvalidSignal { cmd: "kill".into(), spec: spec.clone() });
 				status = 1;
