@@ -66,7 +66,7 @@ pub fn logins() -> io::Result<Logins> {
 					user: field(&u.ut_user),
 					line: field(&u.ut_line),
 					host: field(&u.ut_host),
-					time: i64::from(u.ut_tv.tv_sec),
+					time: u.ut_tv.tv_sec,
 				});
 			}
 		}

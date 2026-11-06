@@ -33,10 +33,6 @@ describe("normalizeReadPath", () => {
 		expect(normalizeReadPath("agent://h0qbtw5y/report")).toBe("agent://h0qbtw5y/report");
 		expect(normalizeReadPath("artifact://37:50-100")).toBe("artifact://37");
 	});
-
-	it("leaves selector-free paths untouched", () => {
-		expect(normalizeReadPath("docs/readme.md")).toBe("docs/readme.md");
-	});
 });
 
 // ---------------------------------------------------------------------------

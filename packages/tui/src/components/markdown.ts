@@ -1762,7 +1762,8 @@ export function getMarkdownLinkUrls(text: string): string[] {
  * Each function takes text and returns styled text with ANSI codes.
  */
 export interface MarkdownTheme {
-	heading: (text: string) => string;
+	/** Color a heading; `depth` is its level, 1–6. Bold/underline/`#` prefix are already applied. */
+	heading: (text: string, depth: number) => string;
 	link: (text: string) => string;
 	linkUrl: (text: string) => string;
 	/** Resolve the OSC 8 destination without changing visible text; undefined preserves the authored URL. */
@@ -1778,6 +1779,15 @@ export interface MarkdownTheme {
 	italic: (text: string) => string;
 	strikethrough: (text: string) => string;
 	underline: (text: string) => string;
+	/**
+	 * Style `**strong**` spans, including their weight. Omitted → {@link bold}.
+	 * A theme that colors them owns the span's foreground over a `proseFg` default.
+	 */
+	strong?: (text: string) => string;
+	/** Style `*emphasis*` spans, including their slant. Omitted → {@link italic}; colors win like {@link strong}. */
+	emphasis?: (text: string) => string;
+	/** Style table header cells, including their weight. Omitted → {@link bold}; colors win like {@link strong}. */
+	tableHeader?: (text: string) => string;
 	highlightCode?: (code: string, lang?: string) => string[];
 	/**
 	 * Create a stateful incremental highlighter for one streaming code fence.
@@ -3285,7 +3295,7 @@ export class Markdown implements Component {
 
 	#renderSignature(width: number, paddingX: number): RenderSignature {
 		const bgColorProbe = this.#defaultTextStyle?.bgColor ? this.#defaultTextStyle.bgColor("\x01") : "";
-		const headingProbe = this.#theme.heading("");
+		const headingProbe = this.#theme.heading("", 1);
 		return {
 			width,
 			paddingX,
@@ -3971,7 +3981,9 @@ export class Markdown implements Component {
 					const plainWidth = visibleWidth(headingPlainText);
 					if (plainWidth > 0 && 2 * plainWidth <= width) {
 						const sizedHeading = encodeTextSizedHeading(headingPlainText, 2);
-						lines.push(renderedLine(this.#theme.heading(this.#theme.bold(this.#theme.underline(sizedHeading)))));
+						lines.push(
+							renderedLine(this.#theme.heading(this.#theme.bold(this.#theme.underline(sizedHeading)), 1)),
+						);
 						lines.push(renderedLine("")); // reserve the heading's second visual row
 						if (nextTokenType && nextTokenType !== "space") {
 							lines.push(renderedLine("")); // Add spacing after headings (unless space token follows)
@@ -3980,11 +3992,11 @@ export class Markdown implements Component {
 					}
 				}
 				if (headingLevel === 1) {
-					styledHeading = this.#theme.heading(this.#theme.bold(this.#theme.underline(headingText)));
+					styledHeading = this.#theme.heading(this.#theme.bold(this.#theme.underline(headingText)), 1);
 				} else if (headingLevel === 2) {
-					styledHeading = this.#theme.heading(this.#theme.bold(headingText));
+					styledHeading = this.#theme.heading(this.#theme.bold(headingText), 2);
 				} else {
-					styledHeading = this.#theme.heading(this.#theme.bold(headingPrefix + headingText));
+					styledHeading = this.#theme.heading(this.#theme.bold(headingPrefix + headingText), headingLevel);
 				}
 				lines.push(renderedLine(styledHeading));
 				if (nextTokenType && nextTokenType !== "space") {
@@ -4261,15 +4273,23 @@ export class Markdown implements Component {
 
 				case "strong": {
 					markHtmlItemWhenContent(plainInlineTokens(token.tokens || []));
-					const boldContent = this.#renderInlineTokens(token.tokens || [], resolvedStyleContext);
-					result += this.#theme.bold(boldContent) + stylePrefix;
+					// A themed role owns the span's color, so prose runs inside drop a `proseFg` default.
+					const context = this.#theme.strong
+						? this.#proseFgExemptContext(resolvedStyleContext)
+						: resolvedStyleContext;
+					const content = this.#renderInlineTokens(token.tokens || [], context);
+					result += (this.#theme.strong ? this.#theme.strong(content) : this.#theme.bold(content)) + stylePrefix;
 					break;
 				}
 
 				case "em": {
-					const italicContent = this.#renderInlineTokens(token.tokens || [], resolvedStyleContext);
 					markHtmlItemWhenContent(plainInlineTokens(token.tokens || []));
-					result += this.#theme.italic(italicContent) + stylePrefix;
+					const context = this.#theme.emphasis
+						? this.#proseFgExemptContext(resolvedStyleContext)
+						: resolvedStyleContext;
+					const content = this.#renderInlineTokens(token.tokens || [], context);
+					result +=
+						(this.#theme.emphasis ? this.#theme.emphasis(content) : this.#theme.italic(content)) + stylePrefix;
 					break;
 				}
 
@@ -4802,8 +4822,9 @@ export class Markdown implements Component {
 		lines.push(`${t.topLeft}${h}${topBorderCells.join(`${h}${t.teeDown}${h}`)}${h}${t.topRight}`);
 
 		// Render header with wrapping
+		const headerStyleContext = this.#theme.tableHeader ? this.#proseFgExemptContext(styleContext) : styleContext;
 		const headerCellLines: string[][] = token.header.map((cell, i) => {
-			const text = this.#renderInlineTokens(cell.tokens || [], styleContext);
+			const text = this.#renderInlineTokens(cell.tokens || [], headerStyleContext);
 			return this.#wrapCellText(text, columnWidths[i]);
 		});
 		const headerLineCount = Math.max(...headerCellLines.map(c => c.length));
@@ -4812,7 +4833,7 @@ export class Markdown implements Component {
 			const rowParts = headerCellLines.map((cellLines, colIdx) => {
 				const text = cellLines[lineIdx] || "";
 				const padded = this.#alignCellText(text, columnWidths[colIdx], columnAligns[colIdx] ?? null);
-				return this.#theme.bold(padded);
+				return this.#theme.tableHeader ? this.#theme.tableHeader(padded) : this.#theme.bold(padded);
 			});
 			lines.push(`${v} ${rowParts.join(` ${v} `)} ${v}`);
 		}
@@ -4925,12 +4946,16 @@ function renderInlineTokens(tokens: Token[], mdTheme: MarkdownTheme, applyText: 
 					result += applyText(normalizeHtmlEntitiesForTerminal(token.text));
 				}
 				break;
-			case "strong":
-				result += mdTheme.bold(renderInlineTokens(token.tokens || [], mdTheme, applyText)) + styleReset;
+			case "strong": {
+				const content = renderInlineTokens(token.tokens || [], mdTheme, applyText);
+				result += (mdTheme.strong ? mdTheme.strong(content) : mdTheme.bold(content)) + styleReset;
 				break;
-			case "em":
-				result += mdTheme.italic(renderInlineTokens(token.tokens || [], mdTheme, applyText)) + styleReset;
+			}
+			case "em": {
+				const content = renderInlineTokens(token.tokens || [], mdTheme, applyText);
+				result += (mdTheme.emphasis ? mdTheme.emphasis(content) : mdTheme.italic(content)) + styleReset;
 				break;
+			}
 			case "codespan":
 				result += mdTheme.code(token.text) + styleReset;
 				break;
