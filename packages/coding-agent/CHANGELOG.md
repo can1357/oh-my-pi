@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `bash.allowedEnvVars` and per-rule `env` lists on `bash.patterns` to allow specified leading `KEY=VALUE` environment variable prefixes on `allow` rules without duplicating rules for each variable combination, and stripped leading environment assignments when evaluating `deny` and `prompt` rules ([#18351](https://github.com/can1357/oh-my-pi/pull/18351) by [@asuffield](https://github.com/asuffield))
 - Added `skills.manualSkills` glob patterns to keep skills available manually while hiding them from the model catalog, without editing their `SKILL.md` files ([#18114](https://github.com/can1357/oh-my-pi/pull/18114) by [@Shadorain](https://github.com/Shadorain))
 - Added Keenable as a web search engine (`web/keenable`). It uses `KEENABLE_API_KEY` or a stored `keenable` credential when present; an explicit selection without a key uses Keenable's keyless public endpoint ([#17953](https://github.com/can1357/oh-my-pi/pull/17953) by [@KGKallasmaa](https://github.com/KGKallasmaa))
 - Bash commands now visualize execution incrementally in Raw or Python-like Pseudo, with variable values beside their latest setter and bounded replay history for foreground and background jobs; PTY and user-shell runs retain their plain command view.

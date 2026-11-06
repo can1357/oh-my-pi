@@ -166,6 +166,19 @@ export const cfgBashPatterns = register({
 	},
 });
 
+export const cfgBashAllowedEnvVars = register({
+	id: "bash.allowedEnvVars",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+	ui: {
+		tab: "shell",
+		group: "Bash",
+		label: "Bash Allowed Environment Variables",
+		description:
+			"Environment variable names (or '*' wildcards) allowed as leading KEY=VALUE prefixes when matching bash.patterns allow rules.",
+	},
+});
+
 // Bash interceptor
 export const cfgBashInterceptorEnabled = register({
 	id: "bashInterceptor.enabled",

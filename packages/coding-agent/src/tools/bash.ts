@@ -66,6 +66,7 @@ import {
 	cfgToolsMaxTimeout,
 } from "./settings";
 import {
+	cfgBashAllowedEnvVars,
 	cfgBashAllowCompoundCommands,
 	cfgBashAutoBackgroundEnabled,
 	cfgBashAutoBackgroundThresholdMs,
@@ -243,7 +244,10 @@ type BashPatternApproval = "allow" | "deny" | "prompt";
 interface BashApprovalPatternRule {
 	match: string;
 	approval: BashPatternApproval;
+	env?: string[];
 }
+
+const ENV_ASSIGNMENT_PREFIX_RE = /^([A-Za-z_][A-Za-z0-9_]*)\+?=/u;
 
 function normalizeBashApprovalPattern(value: string): string {
 	return value.trim().replace(/\s+/gu, " ");
@@ -263,6 +267,14 @@ function normalizeBashPatternApproval(value: unknown): BashPatternApproval | und
 	return BASH_PATTERN_APPROVAL_VALUES.has(normalized) ? (normalized as BashPatternApproval) : undefined;
 }
 
+function normalizeBashAllowedEnvList(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	return value
+		.filter((entry): entry is string => typeof entry === "string")
+		.map(entry => normalizeBashApprovalPattern(entry))
+		.filter(entry => entry.length > 0);
+}
+
 function getBashApprovalPatternRules(value: unknown): BashApprovalPatternRule[] {
 	if (!Array.isArray(value)) return [];
 	return value
@@ -272,7 +284,9 @@ function getBashApprovalPatternRules(value: unknown): BashApprovalPatternRule[] 
 			if (typeof record.match !== "string") return undefined;
 			const match = normalizeBashApprovalPattern(record.match);
 			const approval = normalizeBashPatternApproval(record.approval);
-			return match.length > 0 && approval ? { match, approval } : undefined;
+			const env = normalizeBashAllowedEnvList(record.env);
+			if (match.length === 0 || !approval) return undefined;
+			return env.length > 0 ? { match, approval, env } : { match, approval };
 		})
 		.filter((rule): rule is BashApprovalPatternRule => !!rule);
 }
@@ -283,14 +297,83 @@ function commandMatchesBashApprovalPattern(command: string, pattern: string): bo
 	return bashApprovalPatternToRegExp(pattern).test(normalizedCommand);
 }
 
+function skipBashApprovalShellWord(command: string, start: number): number | null {
+	let inSingle = false;
+	let inDouble = false;
+	for (let i = start; i < command.length; i++) {
+		const ch = command[i];
+		if (inSingle) {
+			if (ch === "'") inSingle = false;
+			continue;
+		}
+		if (inDouble) {
+			if (ch === "\\") {
+				if (i + 1 >= command.length) return null;
+				i++;
+				continue;
+			}
+			if (ch === '"') inDouble = false;
+			continue;
+		}
+		if (ch === "'") {
+			inSingle = true;
+			continue;
+		}
+		if (ch === '"') {
+			inDouble = true;
+			continue;
+		}
+		if (ch === "\\") {
+			if (i + 1 >= command.length) return null;
+			i++;
+			continue;
+		}
+		if (ch === " " || ch === "\t") return i;
+	}
+	return inSingle || inDouble ? null : command.length;
+}
+
+function stripAllowedLeadingEnvAssignments(command: string, allowedEnvPatterns: readonly string[]): string | undefined {
+	if (allowedEnvPatterns.length === 0) return undefined;
+	let index = 0;
+	let foundAssignment = false;
+	while (index < command.length) {
+		while (command[index] === " " || command[index] === "\t") index++;
+		const match = ENV_ASSIGNMENT_PREFIX_RE.exec(command.slice(index));
+		if (!match) break;
+		const varName = match[1];
+		if (!allowedEnvPatterns.some(pattern => commandMatchesBashApprovalPattern(varName, pattern))) {
+			break;
+		}
+		const wordEnd = skipBashApprovalShellWord(command, index + match[0].length);
+		if (wordEnd === null) return undefined;
+		foundAssignment = true;
+		index = wordEnd;
+	}
+	if (!foundAssignment) return undefined;
+	const remainder = command.slice(index).trimStart();
+	return remainder.length > 0 ? remainder : undefined;
+}
+
 // `deny`/`prompt` rules are matched per segment so a dangerous command buried in
-// a compound line (`cd x && rm -rf /`, `sleep 1 & rm -rf /`) is still caught.
+// a compound line (`cd x && rm -rf /`, `sleep 1 & rm -rf /`) is still caught,
+// including when prefixed by leading `NAME=value` environment assignments.
 // Reuse the shared shell tokenizer so segmentation stays in one place and honors
 // every command boundary (`;`, `&&`, `||`, `|`, `&`, subshells, newlines).
 function bashCommandSegments(command: string): string[] {
-	return tokenizeShellSegments(command)
-		.map(segment => segment.join(" "))
-		.filter(segment => segment.length > 0);
+	const candidates: string[] = [];
+	for (const words of tokenizeShellSegments(command)) {
+		if (words.length === 0) continue;
+		candidates.push(words.join(" "));
+		let firstCmdIndex = 0;
+		while (firstCmdIndex < words.length && ENV_ASSIGNMENT_PREFIX_RE.test(words[firstCmdIndex])) {
+			firstCmdIndex++;
+		}
+		if (firstCmdIndex > 0 && firstCmdIndex < words.length) {
+			candidates.push(words.slice(firstCmdIndex).join(" "));
+		}
+	}
+	return candidates;
 }
 
 // `deny`/`prompt` matching: the rule fires when its glob matches the whole
@@ -307,10 +390,17 @@ function commandSegmentMatchesBashApprovalPattern(command: string, pattern: stri
 // vouch for the ENTIRE command and never rides a compound line (shell control
 // syntax could smuggle an unsafe segment past a narrow allow), while `deny` and
 // `prompt` fire on any matching segment so they mean what they appear to.
-function bashApprovalRuleMatches(command: string, rule: BashApprovalPatternRule): boolean {
+function bashApprovalRuleMatches(
+	command: string,
+	rule: BashApprovalPatternRule,
+	allowedEnvVars: readonly string[] = [],
+): boolean {
 	if (rule.approval === "allow") {
 		if (hasBashApprovalShellControl(command)) return false;
-		return commandMatchesBashApprovalPattern(command, rule.match);
+		if (commandMatchesBashApprovalPattern(command, rule.match)) return true;
+		const effectiveEnv = rule.env ? [...rule.env, ...allowedEnvVars] : allowedEnvVars;
+		const stripped = stripAllowedLeadingEnvAssignments(command, effectiveEnv);
+		return stripped !== undefined && commandMatchesBashApprovalPattern(stripped, rule.match);
 	}
 	return commandSegmentMatchesBashApprovalPattern(command, rule.match);
 }
@@ -318,8 +408,9 @@ function bashApprovalRuleMatches(command: string, rule: BashApprovalPatternRule)
 function findBashApprovalPatternRule(
 	command: string,
 	rules: readonly BashApprovalPatternRule[],
+	allowedEnvVars: readonly string[] = [],
 ): BashApprovalPatternRule | undefined {
-	return rules.find(rule => bashApprovalRuleMatches(command, rule));
+	return rules.find(rule => bashApprovalRuleMatches(command, rule, allowedEnvVars));
 }
 
 async function saveBashOriginalArtifact(session: ToolSession, originalText: string): Promise<string | undefined> {
@@ -551,6 +642,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			return { tier: "exec", override: true, policy: "deny", reason: interception.replace(/^Blocked:\s*/u, "") };
 		}
 		const patternRules = getBashApprovalPatternRules(cfgBashPatterns.get(this.session.settings));
+		const allowedEnvVars = normalizeBashAllowedEnvList(cfgBashAllowedEnvVars.get(this.session.settings));
 		const shell = cfgBashAllowCompoundCommands.get(this.session.settings)
 			? this.session.settings.getShellConfig().shell
 			: undefined;
@@ -574,7 +666,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				}
 			}
 		} else {
-			patternRule = findBashApprovalPatternRule(command, patternRules);
+			patternRule = findBashApprovalPatternRule(command, patternRules, allowedEnvVars);
 		}
 		if (patternRule?.approval === "deny") {
 			return {
@@ -592,7 +684,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			let promptRule: BashApprovalPatternRule | undefined = patternRule;
 			let hasUnmatchedSegment = false;
 			for (const segment of compoundSegments) {
-				const segmentRule = findBashApprovalPatternRule(segment.text, patternRules);
+				const segmentRule = findBashApprovalPatternRule(segment.text, patternRules, allowedEnvVars);
 				if (segmentRule?.approval === "deny") {
 					return {
 						tier: "exec",
