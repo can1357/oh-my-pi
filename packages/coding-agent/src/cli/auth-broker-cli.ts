@@ -2,7 +2,8 @@
  * `omp auth-broker` command handlers.
  *
  * Sub-verbs:
- *   - `serve [--bind=…] [--trust-proxy-headers]` — boots the broker against the local SQLite store.
+ *   - `serve [--bind=…] [--trust-proxy-headers]` — boots the broker against the local SQLite store,
+ *     accepting the bearer token file plus one client token per `auth-broker.tokens/<name>.token`.
  *   - `token` / `token --regenerate` — manages the bearer token file.
  *   - `login <provider> [--via=user@host]` — logs into a provider locally, or
  *     via SSH tunnel into a remote broker host.
@@ -34,7 +35,7 @@ import {
 import { AuthBrokerClient, DEFAULT_AUTH_BROKER_BIND, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
 import { refreshOAuthToken } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
-import { $which, APP_NAME, getAgentDbPath, getConfigRootDir, logger, VERSION } from "@oh-my-pi/pi-utils";
+import { $which, APP_NAME, getAgentDbPath, getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
 import { $ } from "bun";
@@ -100,6 +101,27 @@ async function ensureToken(): Promise<string> {
 }
 
 /**
+ * Client bearer tokens `serve` accepts besides the token file: one per `<name>.token` in `dir`
+ * (blank files skipped), so each client machine gets its own token and losing one revokes only
+ * that file. A missing directory is none. Read at startup: restart `serve` after a change.
+ */
+export async function readClientTokens(dir: string): Promise<{ name: string; token: string }[]> {
+	let entries: string[];
+	try {
+		entries = await fs.readdir(dir);
+	} catch (err) {
+		if (isEnoent(err)) return [];
+		throw err;
+	}
+	const clients: { name: string; token: string }[] = [];
+	for (const entry of entries.filter(e => e.endsWith(".token")).sort()) {
+		const token = await readTokenFile(path.join(dir, entry));
+		if (token) clients.push({ name: entry.slice(0, -".token".length), token });
+	}
+	return clients;
+}
+
+/**
  * OAuth refresh handler for `omp auth-broker serve`'s {@link AuthStorage}.
  *
  * The vault holds provider OAuth rows AND OMP-managed `mcp_oauth:*` rows.
@@ -144,6 +166,8 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 
 	const bind = flags.bind ?? DEFAULT_AUTH_BROKER_BIND;
 	const token = await ensureToken();
+	const clientsDir = path.join(getConfigRootDir(), "auth-broker.tokens");
+	const clients = await readClientTokens(clientsDir);
 	const dbPath = getAgentDbPath();
 	const store = await SqliteAuthCredentialStore.open(dbPath);
 	const storage = createBrokerAuthStorage(store);
@@ -151,12 +175,15 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	const handle = startAuthBroker({
 		storage,
 		bind,
-		bearerTokens: [token],
+		bearerTokens: [token, ...clients.map(client => client.token)],
 		trustProxyHeaders: flags.trustProxyHeaders,
 		version: VERSION,
 	});
 	logger.info("auth-broker listening", { url: handle.url });
 	logger.info("auth-broker bearer token loaded", { path: getTokenFilePath(), mode: "0600" });
+	if (clients.length > 0) {
+		logger.info("auth-broker client tokens loaded", { dir: clientsDir, names: clients.map(client => client.name) });
+	}
 
 	const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
 		logger.info("auth-broker shutting down", { signal });
