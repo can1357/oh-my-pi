@@ -3,6 +3,7 @@ import * as path from "node:path";
 
 import { getProjectDir, isRecord, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import type { AgentRef, AgentRegistryApi } from "../../registry/agent-registry";
 import type { ToolSession } from "../../tools";
 import {
 	abortReasonError,
@@ -25,6 +26,8 @@ import {
 	createKernelSessionRegistry,
 	formatSessionKernelTimeoutAnnotation,
 	formatSessionTimeoutAnnotation,
+	type KernelIdleShutdownDecision,
+	type KernelIdleShutdownPolicy,
 	type KernelSession,
 	type KernelSessionRegistryContext,
 	normalizeKernelSessionCwd,
@@ -84,6 +87,8 @@ export interface PythonExecutorOptions {
 	kernelOwnerId?: string;
 	/** Kernel mode (session reuse vs per-call) */
 	kernelMode?: PythonKernelMode;
+	/** Idle milliseconds after which a retained session kernel shuts down; 0 or absent keeps it alive. */
+	kernelIdleShutdownMs?: number | KernelIdleShutdownPolicy;
 	/**
 	 * Explicit interpreter path (`python.interpreter` resolved from the
 	 * session's settings). Skips automatic runtime discovery when set.
@@ -339,6 +344,7 @@ async function replaceSessionKernel(
 			session.kernel = next;
 			session.generation += 1;
 			deferred.resolve(next);
+			context.kernelReplaced(session);
 		} catch (err) {
 			deferred.reject(err);
 		} finally {
@@ -352,6 +358,51 @@ async function shutdownInvalidatedSession(session: PythonSession): Promise<Kerne
 	const replacement = session.replacement;
 	if (replacement) await replacement.promise.catch(() => undefined);
 	return await session.kernel.shutdown();
+}
+
+const IDLE_TOOL_PROBE_TIMEOUT_MS = 5_000;
+
+function descendsFrom(registry: AgentRegistryApi, ref: AgentRef, ancestorId: string): boolean {
+	const visited = new Set<string>();
+	let parentId = ref.parentId;
+	while (parentId !== undefined && !visited.has(parentId)) {
+		if (parentId === ancestorId) return true;
+		visited.add(parentId);
+		parentId = registry.get(parentId)?.parentId;
+	}
+	return false;
+}
+
+/** Whether any agent whose tool session used this kernel has a running subagent below it. */
+function ownerHasRunningSubagent(session: PythonSession): boolean {
+	for (const toolSession of session.stateSessions) {
+		const registry = toolSession.agentRegistry;
+		const agentId = toolSession.getAgentId?.();
+		if (!registry || !agentId) continue;
+		for (const ref of registry.list()) {
+			if (ref.status === "running" && ref.id !== agentId && descendsFrom(registry, ref, agentId)) return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * Subagents reach `@tool` functions through this kernel, so an idle shutdown would
+ * drop tools they were handed. An unreadable tool registry keeps the kernel.
+ */
+async function allowIdleShutdown(session: PythonSession): Promise<KernelIdleShutdownDecision> {
+	if (ownerHasRunningSubagent(session)) return false;
+	const kernel = session.kernel;
+	if (!kernel.isAlive()) return false;
+	const execution = await kernel.invokeTool(
+		{ op: "describe", names: [] },
+		{ id: Snowflake.next(), timeoutMs: IDLE_TOOL_PROBE_TIMEOUT_MS },
+	);
+	if (execution.status !== "ok" || execution.cancelled) return false;
+	const envelope = execution.reply;
+	if (!isRecord(envelope) || envelope.ok !== true || !Array.isArray(envelope.tools)) return false;
+	if (envelope.tools.length > 0) return "until-activity";
+	return !ownerHasRunningSubagent(session);
 }
 
 async function acquireLiveSessionKernel(
@@ -478,6 +529,8 @@ const sessionRegistry = createKernelSessionRegistry<PythonKernel, PythonExecutor
 	},
 	shutdownSession: session => shutdownInvalidatedSession(session),
 	validateKernel: (session, kernel) => session.kernel === kernel,
+	idleShutdownSetting: "python.kernelIdleShutdownSeconds",
+	canShutdownIdle: allowIdleShutdown,
 });
 
 interface PythonToolRequestOutcome {
@@ -504,12 +557,28 @@ async function invokePythonToolRequest(
 	options: PythonToolInvokeOptions,
 ): Promise<PythonToolRequestOutcome> {
 	const cwd = normalizeKernelSessionCwd(options.cwd);
-	const kernel = sessionRegistry.peekLiveKernel(cwd, {
+	const identity: PythonExecutorOptions = {
 		cwd,
 		sessionId: options.sessionId,
 		interpreter: options.interpreter,
 		kernelOwnerId: options.kernelOwnerId,
-	});
+	};
+	const release = sessionRegistry.tryHoldSession(cwd, identity);
+	if (!release) throw new EvalKernelNotRunningError("Python");
+	try {
+		return await invokeOnHeldSession(request, options, cwd, identity);
+	} finally {
+		release();
+	}
+}
+
+async function invokeOnHeldSession(
+	request: PythonToolRequest,
+	options: PythonToolInvokeOptions,
+	cwd: string,
+	identity: PythonExecutorOptions,
+): Promise<PythonToolRequestOutcome> {
+	const kernel = sessionRegistry.peekLiveKernel(cwd, identity);
 	if (!kernel) throw new EvalKernelNotRunningError("Python");
 
 	const bridgeOptions: PythonExecutorOptions = {
@@ -589,33 +658,51 @@ export async function disposeKernelSessionsByOwner(ownerId: string): Promise<voi
 export async function shadowPlanPythonIfPresent(options: {
 	cwd: string;
 	sessionId: string;
+	interpreter?: string;
 	kernelOwnerId?: string;
 	code: string;
 	timeoutMs?: number;
 }): Promise<PythonShadowPlan | null> {
 	const cwd = normalizeKernelSessionCwd(options.cwd);
-	const session = sessionRegistry.getPresentSession(cwd, {
+	const identity = {
 		sessionId: options.sessionId,
+		interpreter: options.interpreter,
 		kernelOwnerId: options.kernelOwnerId,
-	});
-	if (!session?.kernel.isAlive()) return null;
-	return await session.kernel.shadowPlan(options.code, options.timeoutMs);
+	};
+	const release = sessionRegistry.tryHoldSession(cwd, identity);
+	if (!release) return null;
+	try {
+		const session = sessionRegistry.getPresentSession(cwd, identity);
+		if (!session?.kernel.isAlive()) return null;
+		return await session.kernel.shadowPlan(options.code, options.timeoutMs);
+	} finally {
+		release();
+	}
 }
 
 /** Captures the current retained-namespace token without planning or starting a kernel. */
 export async function snapshotPythonNamespaceIfPresent(options: {
 	cwd: string;
 	sessionId: string;
+	interpreter?: string;
 	kernelOwnerId?: string;
 	timeoutMs?: number;
 }): Promise<Pick<PythonShadowSnapshot, "revision" | "digest"> | null> {
 	const cwd = normalizeKernelSessionCwd(options.cwd);
-	const session = sessionRegistry.getPresentSession(cwd, {
+	const identity = {
 		sessionId: options.sessionId,
+		interpreter: options.interpreter,
 		kernelOwnerId: options.kernelOwnerId,
-	});
-	if (!session?.kernel.isAlive()) return null;
-	return await session.kernel.snapshotUserNamespace(options.timeoutMs);
+	};
+	const release = sessionRegistry.tryHoldSession(cwd, identity);
+	if (!release) return null;
+	try {
+		const session = sessionRegistry.getPresentSession(cwd, identity);
+		if (!session?.kernel.isAlive()) return null;
+		return await session.kernel.snapshotUserNamespace(options.timeoutMs);
+	} finally {
+		release();
+	}
 }
 
 export async function executePythonWithKernel(

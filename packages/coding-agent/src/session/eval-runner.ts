@@ -2,7 +2,7 @@ import type { Agent } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import { disposeVmContextsByOwner } from "../eval/js/context-manager";
-import { namespaceSessionId as namespacePythonSessionId } from "../eval/py";
+import { namespaceSessionId as namespacePythonSessionId, pythonKernelIdleShutdownPolicy } from "../eval/py";
 import {
 	disposeKernelSessionsByOwner,
 	executePython as executePythonCommand,
@@ -78,6 +78,7 @@ export class EvalRunner {
 				sessionId: namespacePythonSessionId(this.getSessionId()),
 				kernelOwnerId: this.#kernelOwnerId,
 				kernelMode: cfgPythonKernelMode.get(this.#host.settings),
+				kernelIdleShutdownMs: pythonKernelIdleShutdownPolicy(this.#host.settings),
 				interpreter: cfgPythonInterpreter.get(this.#host.settings)?.trim() || undefined,
 				onChunk,
 				signal: abortController.signal,

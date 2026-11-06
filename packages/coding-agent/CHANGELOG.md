@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `python.kernelIdleShutdownSeconds` shuts a retained Python kernel down after that many idle seconds (default `0`, off); the next eval call starts a fresh kernel and reports the restart. Kernels holding `@tool` tools or serving running subagents stay alive ([#17729](https://github.com/can1357/oh-my-pi/pull/17729) by [@iliaal](https://github.com/iliaal)).
+
 ### Fixed
 
 - Hindsight `retain` and `learn` memories are no longer lost when delivery fails or omp exits: they are kept on disk, retried, and delivered by the next session without duplicates ([#18176](https://github.com/can1357/oh-my-pi/pull/18176) by [@alphastorm](https://github.com/alphastorm))

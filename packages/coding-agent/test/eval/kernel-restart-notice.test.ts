@@ -5,6 +5,7 @@ import { disposeAllKernelSessions } from "@oh-my-pi/pi-coding-agent/eval/py/exec
 import { getEvalState } from "@oh-my-pi/pi-coding-agent/eval/state";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
+import { waitFor } from "../helpers/wait-for";
 
 type Language = "py" | "js";
 
@@ -13,11 +14,14 @@ const NOTICE: Record<Language, string> = {
 	js: "Kernel restarted: the previous JS worker is dead; state is unavailable. Re-run needed setup",
 };
 
-function makeSession(evalSessionId: string): ToolSession {
+function makeSession(evalSessionId: string, idleShutdownSeconds = 0): ToolSession {
 	return {
 		cwd: process.cwd(),
 		hasUI: false,
-		settings: Settings.isolated({ "async.enabled": false }),
+		settings: Settings.isolated({
+			"async.enabled": false,
+			"python.kernelIdleShutdownSeconds": idleShutdownSeconds,
+		}),
 		getSessionFile: () => null,
 		getSessionSpawns: () => null,
 		getEvalSessionId: () => evalSessionId,
@@ -104,6 +108,37 @@ describe("eval kernel restart notice", () => {
 	afterEach(async () => {
 		await Promise.all([disposeAllVmContexts(), disposeAllKernelSessions()]);
 	});
+
+	it("py: retains state before the idle timeout and distinguishes its restart from a subsequent crash", async () => {
+		const session = makeSession(`restart-notice-idle-${crypto.randomUUID()}`, 1);
+		const tool = new EvalTool(session);
+		const first = await run(tool, "py", `${SET_VALUE.py}\n${PID_CELL.py}`);
+		expectNoNotice(first);
+		const retained = await run(tool, "py", READ_VALUE.py);
+		expectNoNotice(retained);
+		expect(retained.text).toContain("42");
+		await waitFor(
+			() =>
+				getEvalState(session)?.runtimes.some(runtime => runtime.language === "python" && !runtime.alive) === true,
+			"the Python kernel did not shut down after its idle timeout",
+			15_000,
+		);
+
+		const afterIdle = await run(tool, "py", `print('state retained', 'restart_probe' in globals())\n${PID_CELL.py}`);
+		expect(afterIdle.isError).toBe(false);
+		expect(afterIdle.text).toContain("was shut down after being idle (python.kernelIdleShutdownSeconds)");
+		expect(afterIdle.text).not.toContain("kernel is dead");
+		expect(afterIdle.text).toContain("state retained False");
+		expect(pidOf(afterIdle)).not.toBe(pidOf(first));
+		const afterIdleNext = await run(tool, "py", PID_CELL.py);
+		expectNoNotice(afterIdleNext);
+		expect(pidOf(afterIdleNext)).toBe(pidOf(afterIdle));
+		await killRuntime(session, "py", pidOf(afterIdle));
+
+		const afterCrash = await run(tool, "py", "print('after crash')");
+		expectNotice(afterCrash, "py");
+		expect(afterCrash.text).not.toContain("python.kernelIdleShutdownSeconds");
+	}, 120_000);
 
 	for (const language of ["py", "js"] as const) {
 		it(`${language}: the first cell after the runtime is killed between cells says its state is gone`, async () => {

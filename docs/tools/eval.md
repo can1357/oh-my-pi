@@ -252,9 +252,10 @@ With `eval.tools.enabled` (default on), a cell can turn a function into a tool o
 
 - Prelude helpers may read/write files and call arbitrary registered tools; JS exposes network-capable `fetch`.
 - Python uses a retained subprocess kernel speaking framed local IPC. JavaScript uses an isolated subprocess, with a Bun Worker fallback; if both fail to start, the call fails without executing code on the host thread.
-- Retained runtimes have no heartbeat or idle timer; they survive calls until reset, owner disposal (`EvalRunner.disposeKernels()` calls `disposeKernelSessionsByOwner` and `disposeVmContextsByOwner` keyed by `kernelOwnerId`, in `packages/coding-agent/src/session/eval-runner.ts`), or process exit.
+- Retained runtimes survive calls until reset, owner disposal (`EvalRunner.disposeKernels()` calls `disposeKernelSessionsByOwner` and `disposeVmContextsByOwner` keyed by `kernelOwnerId`, in `packages/coding-agent/src/session/eval-runner.ts`), or process exit. Python also supports opt-in idle shutdown through `python.kernelIdleShutdownSeconds`; its default is `0` (off).
 - Cancellation is destructive when needed: JS terminates its worker; managed kernels interrupt and may escalate to shutdown. A reset is likewise destructive to concurrent work sharing that backend session.
 - A retained runtime that dies between cells (crash, kill, out-of-memory, or a cancel/timeout that ended it) is replaced on the next call; the first cell to run on the replacement opens with `Kernel restarted: the previous Python kernel is dead; state is unavailable. …` (`JS worker` for JavaScript), once per replacement. A `reset` or owner disposal gives no notice.
+- After intentional Python idle shutdown, the replacement notice instead says `Kernel restarted: the previous Python kernel was shut down after being idle (python.kernelIdleShutdownSeconds); state is unavailable. …`. Re-run any setup you need. Idle means no running cell, kernel tool call, or speculative read; threads, servers, and background tasks started by completed cells do not prevent shutdown. Kernels holding `@tool` tools or serving running subagents stay alive.
 - Eval-driven `agent()` children stay registered as keep-alive agents; owner teardown cancels their jobs, releases completion handles/judgment batches, and closes the owner's work pools.
 
 ## Limits and errors

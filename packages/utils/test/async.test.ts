@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
-import { MAX_TIMER_DELAY_MS, sleepLong } from "@oh-my-pi/pi-utils/async";
+import { MAX_TIMER_DELAY_MS, scheduleLong, sleepLong } from "@oh-my-pi/pi-utils/async";
 
 function mockMonotonicScheduler(elapsedForWait: (delayMs: number) => number = delayMs => delayMs) {
 	const startedAt = 10_000;
@@ -15,6 +15,7 @@ function mockMonotonicScheduler(elapsedForWait: (delayMs: number) => number = de
 }
 
 afterEach(() => {
+	vi.useRealTimers();
 	vi.restoreAllMocks();
 });
 
@@ -64,5 +65,63 @@ describe("sleepLong", () => {
 
 		await expect(sleepLong(0, controller.signal)).rejects.toThrow("The operation was aborted");
 		expect(clock.wait).not.toHaveBeenCalled();
+	});
+});
+
+describe("scheduleLong", () => {
+	function captureTimers() {
+		const armed: Array<{ delayMs: number; timer: NodeJS.Timeout }> = [];
+		const original = globalThis.setTimeout;
+		vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void, delayMs: number) => {
+			const timer = original(handler, delayMs);
+			armed.push({ delayMs, timer });
+			return timer;
+		}) as typeof setTimeout);
+		return armed;
+	}
+
+	it("fires once at the deadline past the native timer limit without arming an overflowing timer", () => {
+		vi.useFakeTimers();
+		const armed = captureTimers();
+		const callback = vi.fn();
+		const delayMs = MAX_TIMER_DELAY_MS + 1_000;
+
+		scheduleLong(callback, delayMs);
+		vi.advanceTimersByTime(delayMs - 1);
+		expect(callback).not.toHaveBeenCalled();
+		vi.advanceTimersByTime(1);
+		expect(callback).toHaveBeenCalledTimes(1);
+		vi.advanceTimersByTime(MAX_TIMER_DELAY_MS);
+
+		expect(callback).toHaveBeenCalledTimes(1);
+		expect(armed.length).toBeGreaterThan(1);
+		for (const { delayMs: armedMs } of armed) expect(armedMs).toBeLessThanOrEqual(MAX_TIMER_DELAY_MS);
+	});
+
+	it("keeps every pending chunk unref'd, including one re-armed after a premature wake", async () => {
+		const armed = captureTimers();
+		let now = 0;
+		vi.spyOn(performance, "now").mockImplementation(() => now);
+		const fired = Promise.withResolvers<void>();
+
+		scheduleLong(() => fired.resolve(), 5, { unref: true });
+		expect(armed.at(-1)?.timer.hasRef()).toBe(false);
+		while (armed.length < 2) await Bun.sleep(1);
+		// The mocked clock has not moved, so the last armed chunk is still pending.
+		expect(armed.at(-1)?.timer.hasRef()).toBe(false);
+		now = 5;
+		await fired.promise;
+	});
+
+	it("cancels a pending callback after its first chunk re-armed", () => {
+		vi.useFakeTimers();
+		const callback = vi.fn();
+
+		const cancel = scheduleLong(callback, MAX_TIMER_DELAY_MS + 1_000);
+		vi.advanceTimersByTime(MAX_TIMER_DELAY_MS);
+		cancel();
+		vi.advanceTimersByTime(MAX_TIMER_DELAY_MS);
+
+		expect(callback).not.toHaveBeenCalled();
 	});
 });

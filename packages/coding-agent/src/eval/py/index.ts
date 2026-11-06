@@ -1,3 +1,4 @@
+import type { ScopeLike } from "../../config/registry";
 import type { ToolSession } from "../../tools";
 import {
 	type BackendAvailability,
@@ -9,14 +10,23 @@ import {
 import { namespaceSessionId as sharedNamespace, toExecutorBackendResult } from "../backend-helpers";
 import type { BackendProbeOptions } from "../probe";
 import { defaultEvalSessionId } from "../session-id";
+import type { KernelIdleShutdownPolicy } from "../kernel-session-registry";
 import { executePython, type PythonExecutorOptions } from "./executor";
 import { checkPythonKernelAvailability } from "./kernel";
-import { cfgPythonInterpreter, cfgPythonKernelMode } from "../settings";
+import { cfgPythonInterpreter, cfgPythonKernelIdleShutdownSeconds, cfgPythonKernelMode } from "../settings";
 
 const PYTHON_SESSION_PREFIX = "python:";
 
 export function namespaceSessionId(sessionId: string): string {
 	return sharedNamespace(sessionId, PYTHON_SESSION_PREFIX);
+}
+
+/** Live `python.kernelIdleShutdownSeconds` for `scope`, so a retained kernel follows later setting changes. */
+export function pythonKernelIdleShutdownPolicy(scope: ScopeLike): KernelIdleShutdownPolicy {
+	return {
+		getMs: () => cfgPythonKernelIdleShutdownSeconds.get(scope) * 1000,
+		listen: onChange => cfgPythonKernelIdleShutdownSeconds.listen(scope, onChange),
+	};
 }
 
 function readInterpreterSetting(session: ToolSession): string | undefined {
@@ -57,6 +67,7 @@ export default {
 			signal: opts.signal,
 			sessionId: identity.sessionId,
 			kernelMode,
+			kernelIdleShutdownMs: pythonKernelIdleShutdownPolicy(opts.session),
 			interpreter: identity.interpreter,
 			sessionFile: opts.sessionFile,
 			artifactsDir: opts.session.getArtifactsDir?.() ?? undefined,

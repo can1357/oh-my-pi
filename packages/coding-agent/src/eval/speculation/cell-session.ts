@@ -12,7 +12,7 @@ import type { RuntimeCallIdentity } from "../js/shared/runtime";
 import { shadowSnapshotDigest } from "../js/shared/runtime";
 import type { JsStatusEvent } from "../js/shared/types";
 import { bridgeValueFromToolResult } from "../js/tool-bridge";
-import { namespaceSessionId as namespacePythonSessionId } from "../py";
+import { namespaceSessionId as namespacePythonSessionId, resolvePythonKernelIdentity } from "../py";
 import { shadowPlanPythonIfPresent, snapshotPythonNamespaceIfPresent } from "../py/executor";
 import { type ShadowClaimKey, ShadowClaimStore } from "./claim-store";
 import { EvalArgsStreamDecoder } from "./eval-args-stream";
@@ -214,6 +214,7 @@ export class EvalShadowCellSession implements ToolSpeculationStreamSession {
 				const snapshot = await snapshotPythonNamespaceIfPresent({
 					cwd: this.#options.cwd,
 					sessionId: namespacePythonSessionId(this.#options.sessionId),
+					interpreter: resolvePythonKernelIdentity(this.#options.session).interpreter,
 					kernelOwnerId: this.#options.kernelOwnerId,
 				});
 				if (!snapshot) return false;
@@ -337,6 +338,7 @@ export class EvalShadowCellSession implements ToolSpeculationStreamSession {
 			const projected = await shadowPlanPythonIfPresent({
 				cwd: this.#options.cwd,
 				sessionId: namespacePythonSessionId(this.#options.sessionId),
+				interpreter: resolvePythonKernelIdentity(this.#options.session).interpreter,
 				kernelOwnerId: this.#options.kernelOwnerId,
 				code,
 			});

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `scheduleLong`, a cancellable callback timer for delays past the native timer limit, with an `unref` option ([#17729](https://github.com/can1357/oh-my-pi/pull/17729) by [@iliaal](https://github.com/iliaal))
+
 ## [18.17.0] - 2026-11-06
 
 ### Added

@@ -114,3 +114,23 @@ export const cfgPythonInterpreter = register({
 			"Optional path to an exact Python executable. When set, automatic Python runtime discovery is skipped.",
 	},
 });
+
+export const cfgPythonKernelIdleShutdownSeconds = register({
+	id: "python.kernelIdleShutdownSeconds",
+	type: "number",
+	default: 0,
+	ui: {
+		tab: "shell",
+		group: "Eval & Runtimes",
+		label: "Python Kernel Idle Shutdown",
+		description:
+			"Seconds without a running cell, tool call, or speculative read before shutdown. Background threads, servers, and tasks do not count as activity and are stopped. The next eval starts a fresh kernel. Kernels holding @tool tools or serving running subagents stay alive. 0 disables.",
+		options: [
+			{ value: "0", label: "Off" },
+			{ value: "300", label: "5 minutes" },
+			{ value: "900", label: "15 minutes" },
+			{ value: "1800", label: "30 minutes" },
+			{ value: "3600", label: "1 hour" },
+		],
+	},
+});

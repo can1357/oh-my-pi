@@ -1,3 +1,5 @@
+import { withTimeout } from "@oh-my-pi/pi-utils";
+
 /**
  * Await `promise` and return its rejection reason; fail if it resolves.
  *
@@ -15,6 +17,15 @@ export async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
 		return error;
 	}
 	throw new Error("Expected promise to reject, but it resolved");
+}
+
+/**
+ * The rejection reason of `promise`, failing if it resolves or is still pending
+ * after `ms`, so a wait that ignores cancellation fails the assertion instead of
+ * the test timeout.
+ */
+export async function rejectionWithin(promise: Promise<unknown>, ms: number): Promise<unknown> {
+	return await rejectionOf(withTimeout(promise, ms, `promise still pending after ${ms}ms`));
 }
 
 /**

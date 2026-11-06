@@ -86,8 +86,8 @@ export interface KernelExecutorBaseOptions {
 	bridgeSessionId?: string;
 	artifactId?: string;
 	artifactPath?: string;
-	/** Set by the kernel session registry; true when this cell is the first on a replacement for a dead kernel. */
-	claimKernelRestartNotice?: () => boolean;
+	/** Claims the restart notice for the first cell served by a replacement kernel. */
+	claimKernelRestartNotice?: () => string | undefined;
 }
 
 /** Normalised execution result produced by {@link executeWithKernelBase}. */
@@ -109,8 +109,9 @@ export interface KernelExecutionResult {
 }
 
 /** Mirrors the `eval-state-context` reminder wording so agents recognise it. */
-export function formatKernelRestartNotice(runtimeLabel: string): string {
-	return `Kernel restarted: the previous ${runtimeLabel} is dead; state is unavailable. Re-run needed setup: variables, imports and definitions from earlier cells are gone.`;
+export function formatKernelRestartNotice(runtimeLabel: string, idleShutdownSetting?: string): string {
+	const reason = idleShutdownSetting ? `was shut down after being idle (${idleShutdownSetting})` : "is dead";
+	return `Kernel restarted: the previous ${runtimeLabel} ${reason}; state is unavailable. Re-run needed setup: variables, imports and definitions from earlier cells are gone.`;
 }
 
 /** Minimal kernel surface the base executor drives, satisfied by every backend kernel. */
@@ -527,9 +528,7 @@ export async function executeWithKernelBase<
 				})
 			: null;
 
-	const restartNotice = options?.claimKernelRestartNotice?.()
-		? formatKernelRestartNotice(`${errorLogLabel} kernel`)
-		: undefined;
+	const restartNotice = options?.claimKernelRestartNotice?.();
 	try {
 		if (restartNotice) sink.push(`${restartNotice}\n`);
 		if (remainingMs !== undefined && remainingMs <= 0) {
