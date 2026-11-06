@@ -210,6 +210,9 @@ describe("copy-before-clobber: a file this session did not create", () => {
 		expect(await Bun.file(path.join(tempDir, "register.md")).text()).toBe("gone\n");
 		expect(resultText(result)).toContain("could not be copied aside");
 		expect(resultText(result)).toContain("not recoverable from here");
+		// The quoted errno message carries the store path; the home directory must
+		// not ride into the model's context with it.
+		expect(resultText(result)).not.toContain(os.homedir());
 	});
 
 	test("an edit create that overwrites a file keeps it, and does not claim it afterwards", async () => {
@@ -327,8 +330,11 @@ describe("copy-before-clobber: a file this session did not create", () => {
 	test("a completed day over the budget is swept even when its index does not account for it", async () => {
 		// 33 x 64 MiB of sparse copies, none named by the index and all in a
 		// subdirectory: the two shapes that let a day outlive the budget while the
-		// index was trusted for sizes.
-		const old = path.join(getClobberBackupsDir(), "2026-10-30");
+		// index was trusted for sizes. The day is two days back rather than a
+		// literal, so it stays a budget test instead of ageing into a retention one.
+		const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+		const day = `${twoDaysAgo.getFullYear()}-${`${twoDaysAgo.getMonth() + 1}`.padStart(2, "0")}-${`${twoDaysAgo.getDate()}`.padStart(2, "0")}`;
+		const old = path.join(getClobberBackupsDir(), day);
 		const nested = path.join(old, "nested");
 		await fs.mkdir(nested, { recursive: true });
 		for (let i = 0; i < 33; i++) {
@@ -343,6 +349,26 @@ describe("copy-before-clobber: a file this session did not create", () => {
 		await new WriteTool(makeSession(tempDir)).execute("clobber", { path: "register.md", content: "gone\n" });
 
 		expect(await Bun.file(path.join(nested, "copy-0.md")).exists()).toBe(false);
+		expect(await backupFiles()).toHaveLength(1);
+	});
+
+	test("a completed day whose index alone is over the budget is swept", async () => {
+		// The count gate reasons from the per-file cap, and the index is the one
+		// file no cap applies to. Left uncounted, a day of any size rides under it.
+		const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+		const day = `${twoDaysAgo.getFullYear()}-${`${twoDaysAgo.getMonth() + 1}`.padStart(2, "0")}-${`${twoDaysAgo.getDate()}`.padStart(2, "0")}`;
+		const old = path.join(getClobberBackupsDir(), day);
+		await fs.mkdir(old, { recursive: true });
+		const kept = path.join(old, "copy.md");
+		await fs.writeFile(kept, "small\n");
+		const index = path.join(old, "index.jsonl");
+		await fs.writeFile(index, `${JSON.stringify({ bytes: 1, to: kept })}\n`);
+		await fs.truncate(index, 3 * 1024 * 1024 * 1024);
+		await fs.writeFile(path.join(tempDir, "register.md"), DOOMED);
+
+		await new WriteTool(makeSession(tempDir)).execute("clobber", { path: "register.md", content: "gone\n" });
+
+		expect(await Bun.file(kept).exists()).toBe(false);
 		expect(await backupFiles()).toHaveLength(1);
 	});
 });

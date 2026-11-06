@@ -31,7 +31,7 @@
 import * as fs from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import * as path from "node:path";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { shortenEmbeddedPaths, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { getClobberBackupsDir, getSessionsDir, pathIsWithin } from "@oh-my-pi/pi-utils/dirs";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import * as logger from "@oh-my-pi/pi-utils/logger";
@@ -294,15 +294,34 @@ interface DayEntry {
 	name: string;
 }
 
-/** Every regular file under `dayDir`, at any depth. Unreadable day: empty. */
+/**
+ * Every regular file under `dayDir`, at any depth, walked by hand rather than
+ * with a recursive `readdir`: that follows a symlinked directory, so a link
+ * dropped into the store would have the sweep walking and stat-ing a tree
+ * outside it, and a link loop would throw `ELOOP` and make the whole day weigh
+ * nothing. Links are skipped, so a day weighs what it itself holds.
+ *
+ * Unreadable directory: what was read so far.
+ */
 async function dayEntries(dayDir: string): Promise<DayEntry[]> {
-	try {
-		const found = await fs.readdir(dayDir, { withFileTypes: true, recursive: true });
-		return found.filter(e => e.isFile()).map(e => ({ dir: e.parentPath, name: e.name }));
-	} catch (error) {
-		if (!isEnoent(error)) logger.debug("Clobber backup day unreadable", { dayDir, error: String(error) });
-		return [];
+	const found: DayEntry[] = [];
+	const pending = [dayDir];
+	while (pending.length > 0) {
+		const dir = pending.pop()!;
+		let listed;
+		try {
+			listed = await fs.readdir(dir, { withFileTypes: true });
+		} catch (error) {
+			if (!isEnoent(error)) logger.debug("Clobber backup day unreadable", { dir, error: String(error) });
+			continue;
+		}
+		for (const entry of listed) {
+			if (entry.isSymbolicLink()) continue;
+			if (entry.isDirectory()) pending.push(path.join(dir, entry.name));
+			else if (entry.isFile()) found.push({ dir, name: entry.name });
+		}
 	}
+	return found;
 }
 
 /** Stores already swept today, keyed by store root: one sweep per store per process per day. */
@@ -327,15 +346,22 @@ async function sweepStore(root: string, today: string): Promise<void> {
 		}
 		if (day !== today) kept.push(day);
 	}
-	// A copy cannot exceed the per-file cap, so a count is an upper bound and a
-	// small store is proved under budget without a single `stat`. Only a store
-	// that might be over pays for an exact walk.
+	// Every copy passed the per-file cap before it landed, so counting them is
+	// an upper bound and an ordinary store is proved under budget without a
+	// single `stat`. The per-day index is the one file no cap applies to, so it
+	// is measured. Anything else a hand dropped into the store is assumed to be
+	// a copy, which is where this bound stops being a guarantee.
 	const entries = new Map<string, DayEntry[]>();
 	let ceiling = 0;
 	for (const day of kept) {
-		const found = await dayEntries(path.join(root, day));
+		const dayDir = path.join(root, day);
+		const found = await dayEntries(dayDir);
 		entries.set(day, found);
-		ceiling += found.length * MAX_BACKUP_BYTES;
+		const indexes = found.filter(e => e.dir === dayDir && e.name === INDEX_NAME);
+		for (const index of indexes) {
+			ceiling += (await fs.stat(path.join(index.dir, index.name)).catch(() => undefined))?.size ?? 0;
+		}
+		ceiling += (found.length - indexes.length) * MAX_BACKUP_BYTES;
 	}
 	if (ceiling <= STORE_BUDGET_BYTES) return;
 	let total = 0;
@@ -404,7 +430,8 @@ export async function backupBeforeClobber(
 		// store that is briefly untidy.
 		try {
 			// The name alone cannot say where the bytes came from; the day's index
-			// can, and the sweep reads it instead of stat-ing every entry.
+			// can. The sweep does not read it — it weighs the directory itself —
+			// but a person recovering a file a week later needs it.
 			await fs.appendFile(
 				path.join(dayDir, INDEX_NAME),
 				`${JSON.stringify({ at: now.toISOString(), reason, from: target, to: destination, bytes: size })}\n`,
@@ -459,6 +486,9 @@ export function clobberBackupNote(backup: ClobberBackup | undefined, displayPath
 		case "too-large":
 			return `[Backup] ${displayPath}: ${why}, but its previous ${backup.bytes} bytes were over the ${MAX_BACKUP_BYTES}-byte backup limit, so they are not recoverable from here`;
 		case "failed":
-			return `[Backup] ${displayPath}: ${why}, but its previous content could not be copied aside (${shortenPath(backup.error)}), so it is not recoverable from here`;
+			// The message quotes a path inside a sentence, where `shortenPath` —
+			// which only matches a string that IS a path — would leave the home
+			// directory in the model's context.
+			return `[Backup] ${displayPath}: ${why}, but its previous content could not be copied aside (${shortenEmbeddedPaths(backup.error)}), so it is not recoverable from here`;
 	}
 }
