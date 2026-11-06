@@ -147,9 +147,11 @@ impl File for PipeReader {
 			return Poll::Pending;
 		}
 		let n = buf.len().min(s.buf.len());
-		for (dst, src) in buf.iter_mut().zip(s.buf.drain(..n)) {
-			*dst = src;
-		}
+		let (front, back) = s.buf.as_slices();
+		let split = n.min(front.len());
+		buf[..split].copy_from_slice(&front[..split]);
+		buf[split..n].copy_from_slice(&back[..n - split]);
+		s.buf.drain(..n);
 		s.wake_all();
 		Poll::Ready(Ok(n))
 	}

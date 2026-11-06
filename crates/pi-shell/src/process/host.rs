@@ -3,6 +3,7 @@
 use std::{
 	hash::{BuildHasher, RandomState},
 	io::{self, IsTerminal, Write},
+	sync::Arc,
 	task::{Context, Poll},
 	time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -28,6 +29,8 @@ pub struct NativeHost {
 	fs:        Box<dyn Fs>,
 	spawner:   NativeSpawner,
 	events:    Option<Box<dyn Write>>,
+	/// A run observer (`obash --trace`).
+	sink:      Option<Arc<dyn crate::bash::EventSink>>,
 	start:     Instant,
 	random:    RandomState,
 	draws:     u64,
@@ -119,6 +122,7 @@ impl NativeHost {
 				..SpawnConfig::default()
 			}),
 			events,
+			sink: None,
 			start: Instant::now()
 				.checked_sub(Duration::from_nanos(elapsed_ns))
 				.unwrap_or_else(Instant::now),
@@ -171,6 +175,12 @@ impl NativeHost {
 	/// Flush the event sink.
 	pub fn flush(&mut self) -> io::Result<()> {
 		self.events.as_mut().map_or(Ok(()), |w| w.flush())
+	}
+
+	/// Forward every event to `sink` as well (the caller sets the shell's
+	/// event mask to cover what it wants).
+	pub fn set_event_sink(&mut self, sink: Option<Arc<dyn crate::bash::EventSink>>) {
+		self.sink = sink;
 	}
 }
 
@@ -411,6 +421,9 @@ impl crate::bash::Host for NativeHost {
 			let _ = serde_json::to_writer(&mut *w, ev)
 				.map_err(io::Error::from)
 				.and_then(|()| w.write_all(b"\n"));
+		}
+		if let Some(sink) = &self.sink {
+			sink.event(ev);
 		}
 		Verdict::Continue
 	}

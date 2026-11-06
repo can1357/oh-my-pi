@@ -903,6 +903,22 @@ const CONVERSATION_ENTRY_TYPES: Record<string, true> = {
 	reset_boundary: true,
 };
 
+/**
+ * True for an entry whose type is in {@link CONVERSATION_ENTRY_TYPES}, other than
+ * an eval-state snapshot (a `custom_message` at startup, a `message` after a
+ * compaction): an entry that marks when the conversation last moved.
+ */
+export function movesConversation(entry: { type?: unknown; customType?: unknown; message?: object }): boolean {
+	if (typeof entry.type !== "string" || !Object.hasOwn(CONVERSATION_ENTRY_TYPES, entry.type)) return false;
+	const customType =
+		entry.type === "custom_message"
+			? entry.customType
+			: entry.message && "customType" in entry.message
+				? entry.message.customType
+				: undefined;
+	return customType !== EVAL_STATE_CONTEXT_TYPE;
+}
+
 /** The newest conversation entry of a session file. */
 interface SessionActivity {
 	/** Epoch milliseconds of the entry. */
@@ -912,11 +928,9 @@ interface SessionActivity {
 }
 
 /**
- * The newest entry in `session` whose type is in {@link CONVERSATION_ENTRY_TYPES},
- * other than an eval-state snapshot (a `custom_message` at startup, a `message`
- * after a compaction): when the conversation last moved, not when a process
- * last wrote. Falls back to the header's creation time, and to `-Infinity`
- * for an unreadable file.
+ * The newest entry in `session` that {@link movesConversation}: when the
+ * conversation last moved, not when a process last wrote. Falls back to the
+ * header's creation time, and to `-Infinity` for an unreadable file.
  */
 async function lastActivity(session: SessionInfo, storage: SessionStorage): Promise<SessionActivity> {
 	for (let window = ACTIVITY_TAIL_BYTES; ; window *= 4) {
@@ -946,9 +960,7 @@ async function lastActivity(session: SessionInfo, storage: SessionStorage): Prom
 			}
 			// The header carries the session id, not an entry id; the creation time below covers it.
 			reachedHeader = entry.type === "session";
-			if (typeof entry.type !== "string" || !Object.hasOwn(CONVERSATION_ENTRY_TYPES, entry.type)) continue;
-			const customType = entry.type === "custom_message" ? entry.customType : entry.message?.customType;
-			if (customType === EVAL_STATE_CONTEXT_TYPE) continue;
+			if (!movesConversation(entry)) continue;
 			const time = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
 			if (Number.isFinite(time)) return { time, id: typeof entry.id === "string" ? entry.id : undefined };
 		}
