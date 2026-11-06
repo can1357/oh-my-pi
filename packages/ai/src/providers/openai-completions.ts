@@ -1437,9 +1437,10 @@ const streamOpenAICompletionsOnce = (
 					premiumRequestsTotal,
 					output.timestamp,
 					parseFireworksCachedPromptTokens(responseHeaders),
-					// A capacity recovery moved the turn onto the peer SKU, which has
-					// its own price; `undefined` keeps the model's own card.
-					resolveServiceTierPeerCost(model, serviceTierCapacityRetry),
+					// A capacity recovery moved the turn off the row's SKU, and the
+					// route that was accepted has its own price; `undefined` keeps the
+					// model's own card.
+					resolveServiceTierPeerCost(model, serviceTierCapacityRetry, activeRequestParams?.model),
 				);
 				sawUsagePayload = true;
 				awaitTrailingUsageDetails = !hasPositiveCacheReadTokenField(rawUsage);

@@ -1523,11 +1523,17 @@ export function canRerouteServiceTierCapacity(
  * reporting the row's. Returns `undefined` when nothing changes.
  */
 export function resolveServiceTierPeerCost(
-	model: Pick<Model, "provider" | "cost">,
+	model: Pick<Model, "id" | "provider" | "cost">,
 	retry: ServiceTierCapacityRetry | undefined,
+	sentModelId: unknown,
 ): Model["cost"] | undefined {
+	// A recovery is what licenses looking past the row's own card at all.
 	if (retry?.model === undefined || !isGeneratedProvider(model.provider)) return undefined;
-	return getBundledModel(model.provider, retry.model)?.cost;
+	// Price the route the host accepted, not the one the recovery picked: an
+	// `onPayload` hook may have chosen a third model after the reroute, and the
+	// charge follows what was sent.
+	if (typeof sentModelId !== "string" || sentModelId === model.id) return undefined;
+	return getBundledModel(model.provider, sentModelId)?.cost;
 }
 
 /**

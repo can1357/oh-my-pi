@@ -499,6 +499,70 @@ describe("service-tier capacity refusals", () => {
 		);
 	});
 
+	it("responses: a turn a hook re-routed after recovery is billed at the model that served it", async () => {
+		// The recovery picks a peer, but an `onPayload` hook can send somewhere
+		// else entirely on a later rebuild. The charge follows the route the host
+		// accepted — pricing the remembered peer under-reports a dearer model.
+		const served = getBundledModel("openai", "gpt-6-astra");
+		const peer = getBundledModel("openai", "gpt-6.1-sol");
+		const { fetch, sent } = recordingFetch(entry => {
+			if (entry.model.endsWith("-flex")) return tierUnavailable();
+			if (sent.length === 2) return strictToolsRejection();
+			return responsesOk();
+		});
+		const message = await collect(
+			streamOpenAIResponses(
+				responsesModel("gpt-6.1-sol-flex"),
+				{ ...context, tools: [echoTool] },
+				{
+					apiKey: "k",
+					fetch,
+					onPayload: payload => {
+						const body = payload as { model?: unknown };
+						return body.model === "gpt-6.1-sol" ? { ...body, model: "gpt-6-astra" } : body;
+					},
+				},
+			),
+		);
+		expect(message.stopReason).toBe("stop");
+		expect(sent.at(-1)?.model).toBe("gpt-6-astra");
+		expect(message.usage.cost.total).toBeCloseTo((served.cost.input + served.cost.output) / 1_000_000, 12);
+		// Neither the remembered peer's card nor the refused row's.
+		expect(message.usage.cost.total).not.toBeCloseTo((peer.cost.input + peer.cost.output) / 1_000_000, 12);
+		expect(message.usage.cost.total).not.toBeCloseTo(
+			(TIER_ROUTE_COST.input + TIER_ROUTE_COST.output) / 1_000_000,
+			12,
+		);
+	});
+
+	it("completions: a turn a hook re-routed after recovery is billed at the model that served it", async () => {
+		const served = getBundledModel("openai", "gpt-6-astra");
+		const peer = getBundledModel("openai", "gpt-6.1-sol");
+		const { fetch, sent } = recordingFetch(entry => {
+			if (entry.model.endsWith("-flex")) return tierUnavailable();
+			if (sent.length === 2) return strictToolsRejection();
+			return completionsOk();
+		});
+		const message = await collect(
+			streamOpenAICompletions(
+				completionsModel("gpt-6.1-sol-flex"),
+				{ ...context, tools: [echoTool] },
+				{
+					apiKey: "k",
+					fetch,
+					onPayload: payload => {
+						const body = payload as { model?: unknown };
+						return body.model === "gpt-6.1-sol" ? { ...body, model: "gpt-6-astra" } : body;
+					},
+				},
+			),
+		);
+		expect(message.stopReason).toBe("stop");
+		expect(sent.at(-1)?.model).toBe("gpt-6-astra");
+		expect(message.usage.cost.total).toBeCloseTo((served.cost.input + served.cost.output) / 1_000_000, 12);
+		expect(message.usage.cost.total).not.toBeCloseTo((peer.cost.input + peer.cost.output) / 1_000_000, 12);
+	});
+
 	it("responses: a peer the bundle does not carry leaves the refused row's own card in place", async () => {
 		// The peer id is a route, not a price: a row discovered off a gateway has
 		// no bundled sibling to read a card from. Reporting the row's own rate is
