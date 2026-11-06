@@ -103,9 +103,12 @@ use crate::bash::{
 /// a conditional group the offset after its `)`, and version 20 records
 /// every compound command's own keyword and operator offsets (`do`, `done`,
 /// `then`, `fi`, `else`, `in`, `esac`, the arm terminators, the arithmetic
-/// header, and each closing `)`, `}`, `))` and `]]`), and version 21 adds
-/// the `)` that closes a `case` arm's patterns.
-pub const IR_VERSION: u32 = 21;
+/// header, and each closing `)`, `}`, `))` and `]]`), version 21 adds
+/// the `)` that closes a `case` arm's patterns, and version 22 records
+/// zsh's `repeat` body keyword and the `}` and `always` of a `try`, and
+/// makes the arithmetic-`for` header and its `))` plain fields, since
+/// every parser reads them.
+pub const IR_VERSION: u32 = 22;
 
 /// Opcodes.
 #[derive(

@@ -673,7 +673,7 @@ impl Ctx<'_> {
 		if self.lx.tok == T::Dinpar {
 			let header_lo = self.lx.lo;
 			let mut exprs = Vec::with_capacity(3);
-			let mut rparen = None;
+			let mut rparen = header_lo;
 			let mut header_hi = self.lx.hi;
 			for want in [T::Dinpar, T::Dinpar, T::Doutpar] {
 				self.zshlex();
@@ -681,7 +681,7 @@ impl Ctx<'_> {
 					return self.yyerr();
 				}
 				if want == T::Doutpar {
-					rparen = Some(self.lx.lo);
+					rparen = self.lx.lo;
 					header_hi = self.lx.hi;
 				}
 				let (src, span) = self.tw();
@@ -700,7 +700,7 @@ impl Ctx<'_> {
 				cond,
 				step,
 				body,
-				header: Some(Span::new(header_lo, header_hi)),
+				header: Span::new(header_lo, header_hi),
 				rparen,
 				do_pos,
 				braces,
@@ -716,7 +716,7 @@ impl Ctx<'_> {
 		let ona = self.noaliases;
 		self.noaliases = true;
 		loop {
-			vars.push(plain(&self.lx.buf));
+			vars.push(Name { text: plain(&self.lx.buf), span: self.tok_span() });
 			self.zshlex();
 			if self.lx.tok != T::String || self.lx.buf == b"in" || sel {
 				break;
@@ -759,7 +759,7 @@ impl Ctx<'_> {
 		self.skip_seps();
 		let (body, do_pos, braces) = self.loop_body(csh, Loop::For)?;
 		let mut vars = vars.into_iter();
-		let var = vars.next().unwrap_or_default();
+		let var = vars.next().map_or_else(Vec::new, |n| n.text);
 		let f =
 			For { var, extra_vars: vars.collect(), var_span, words, body, in_pos, do_pos, braces };
 		Some(if sel {
@@ -1027,8 +1027,8 @@ impl Ctx<'_> {
 		self.ps.incmdpos = true;
 		self.zshlex();
 		self.skip_seps();
-		let (body, ..) = self.loop_body(false, Loop::Repeat)?;
-		Some(CommandKind::Repeat(Repeat { count, body }))
+		let (body, do_pos, _) = self.loop_body(false, Loop::Repeat)?;
+		Some(CommandKind::Repeat(Repeat { count, body, do_pos }))
 	}
 
 	/// zsh `par_subsh`: `( list )`, `{ list }`, `{ list } always { list }`.
@@ -1044,10 +1044,12 @@ impl Ctx<'_> {
 		if self.lx.tok != close_tok {
 			return self.yyerr();
 		}
-		self.cmd_close = Some(self.lx.lo);
+		let rbrace = self.lx.lo;
+		self.cmd_close = Some(rbrace);
 		self.ps.incmdpos = !zsh_construct;
 		self.zshlex();
 		if otok == T::Inbrace && self.lx.tok == T::String && self.lx.buf == b"always" {
+			let always_pos = self.lx.lo;
 			self.ps.incmdpos = true;
 			loop {
 				self.zshlex();
@@ -1069,7 +1071,7 @@ impl Ctx<'_> {
 			}
 			self.cmd_close = Some(self.lx.lo);
 			self.zshlex();
-			return Some(CommandKind::Try(Try { body: list, always }));
+			return Some(CommandKind::Try(Try { body: list, always, rbrace, always_pos }));
 		}
 		Some(if otok == T::Inpar {
 			CommandKind::Subshell(list)
@@ -1140,11 +1142,13 @@ impl Ctx<'_> {
 				self.lx.tok = T::Inbrace;
 				break;
 			}
-			names.push(plain(&self.lx.buf));
+			names.push(Name { text: plain(&self.lx.buf), span: self.tok_span() });
 			self.zshlex();
 		}
 		self.ps.incmdpos = true;
+		let mut parens = false;
 		if self.lx.tok == T::Inoutpar {
+			parens = true;
 			self.zshlex();
 		}
 		self.skip_seps();
@@ -1158,11 +1162,15 @@ impl Ctx<'_> {
 			return Some(CommandKind::AnonFunc(AnonFunc { body: Box::new(body), args, traced }));
 		}
 		let mut names = names.into_iter();
-		let name = names.next().unwrap_or_default();
+		let name = names
+			.next()
+			.unwrap_or(Name { text: Vec::new(), span: self.tok_span() });
 		Some(CommandKind::FuncDef(FuncDef {
-			name,
+			name: name.text,
+			name_span: name.span,
 			extra_names: names.collect(),
 			keyword: true,
+			parens,
 			traced,
 			body: Box::new(body),
 		}))
@@ -1436,13 +1444,19 @@ impl Ctx<'_> {
 							traced: false,
 						}));
 					} else {
-						let mut names = words.iter().map(word_text);
-						let name = names.next().unwrap_or_default();
+						let mut names = words
+							.iter()
+							.map(|w| Name { text: word_text(w), span: w.span });
+						let name = names
+							.next()
+							.unwrap_or(Name { text: Vec::new(), span: self.tok_span() });
 						let extra_names = names.collect();
 						func = Some(CommandKind::FuncDef(FuncDef {
-							name,
+							name: name.text,
+							name_span: name.span,
 							extra_names,
 							keyword: false,
+							parens: true,
 							traced: false,
 							body: Box::new(body),
 						}));

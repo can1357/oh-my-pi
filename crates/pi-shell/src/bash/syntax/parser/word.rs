@@ -395,10 +395,10 @@ impl<'s> Parser<'s> {
 				{
 					// Subscript of an assignment (`a[i]=`) or of a compound
 					// array element (`[k]=v`), read as a group.
-					let sub_lo = self.off();
 					self.bump();
-					// After the `[`, from the cursor: in alias text it is
-					// `sub_lo`, because the cursor does not advance there.
+					// The byte after the `[`, read from the cursor: in text an
+					// alias expanded that is the `[`'s own offset, because the
+					// cursor does not advance there.
 					let sub_inner = self.off();
 					acc.lit.push(b'[');
 					acc.flush();
@@ -1200,9 +1200,8 @@ impl<'s> Parser<'s> {
 		};
 		let mut index = None;
 		if matches!(name, ParamName::Var(_)) && self.peek() == Some(b'[') {
-			let lo = self.off();
 			self.bump();
-			// After the `[`, from the cursor: in alias text it is `lo`.
+			// The byte after the `[`, read from the cursor, as above.
 			let ilo = self.off();
 			let at = self.peek();
 			if matches!(at, Some(b'@' | b'*')) && self.peek_at(1) == Some(b']') {

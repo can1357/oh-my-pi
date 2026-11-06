@@ -549,7 +549,7 @@ impl<'a> Bp<'a> {
 			CommandKind::Coproc(c) => {
 				self.put(b"coproc ");
 				if !matches!(c.body.kind, CommandKind::Simple(_)) {
-					self.put(c.name.as_deref().unwrap_or(b"COPROC"));
+					self.put(c.name.as_ref().map_or(&b"COPROC"[..], |n| &n.text));
 					self.put(b" ");
 				}
 				self.skip_this_indent += 1;
@@ -593,7 +593,7 @@ impl<'a> Bp<'a> {
 		self.put(&f.var);
 		for v in &f.extra_vars {
 			self.put(b" ");
-			self.put(v);
+			self.put(&v.text);
 		}
 		self.put(b" in ");
 		match &f.words {
@@ -904,7 +904,7 @@ impl<'a> Bp<'a> {
 	fn extra_names(&mut self, f: &FuncDef) {
 		for n in &f.extra_names {
 			self.put(b" ");
-			self.put(n);
+			self.put(&n.text);
 		}
 	}
 
@@ -1464,7 +1464,7 @@ impl<'a> Compact<'a> {
 				self.put(&f.var);
 				for v in &f.extra_vars {
 					self.put(b" ");
-					self.put(v);
+					self.put(&v.text);
 				}
 				if let Some(words) = &f.words {
 					self.put(b" in");
@@ -1532,7 +1532,7 @@ impl<'a> Compact<'a> {
 				self.put(&f.name);
 				for n in &f.extra_names {
 					self.put(b" ");
-					self.put(n);
+					self.put(&n.text);
 				}
 				self.put(b" () ");
 				self.command(&f.body);
@@ -1540,7 +1540,7 @@ impl<'a> Compact<'a> {
 			CommandKind::Coproc(c) => {
 				self.put(b"coproc ");
 				if let Some(name) = &c.name {
-					self.put(name);
+					self.put(&name.text);
 					self.put(b" ");
 				}
 				self.command(&c.body);

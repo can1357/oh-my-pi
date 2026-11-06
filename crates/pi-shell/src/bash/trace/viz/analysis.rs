@@ -351,7 +351,7 @@ impl<'a> Walker<'a> {
 			CommandKind::For(loop_) | CommandKind::Select(loop_) => {
 				self.writes.insert(text(&loop_.var));
 				for name in &loop_.extra_vars {
-					self.writes.insert(text(name));
+					self.writes.insert(text(&name.text));
 				}
 				if let Some(words) = &loop_.words {
 					for word in words {
@@ -383,7 +383,7 @@ impl<'a> Walker<'a> {
 				let arity = self.function_arity.pop().unwrap_or(0);
 				self.result.functions.insert(text(&function.name), arity);
 				for name in &function.extra_names {
-					self.result.functions.insert(text(name), arity);
+					self.result.functions.insert(text(&name.text), arity);
 				}
 			},
 			CommandKind::Coproc(coproc) => {

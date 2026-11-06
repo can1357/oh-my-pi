@@ -407,7 +407,8 @@ mod native {
 			CommandKind::For(fr) | CommandKind::Select(fr) => {
 				f.push(("var", s(&fr.var)));
 				if !fr.extra_vars.is_empty() {
-					f.push(("extra_vars", V::Arr(fr.extra_vars.iter().map(|v| s(v)).collect())));
+					let names = fr.extra_vars.iter().map(|v| s(&v.text)).collect();
+					f.push(("extra_vars", V::Arr(names)));
 				}
 				f.push(("var_span", m.span(fr.var_span)));
 				f.push(("words", fr.words.as_ref().map_or(V::Null, |w| words(m, w))));
@@ -457,14 +458,15 @@ mod native {
 			CommandKind::FuncDef(fd) => {
 				f.push(("name", s(&fd.name)));
 				if !fd.extra_names.is_empty() {
-					f.push(("extra_names", V::Arr(fd.extra_names.iter().map(|n| s(n)).collect())));
+					let names = fd.extra_names.iter().map(|n| s(&n.text)).collect();
+					f.push(("extra_names", V::Arr(names)));
 				}
 				f.push(("keyword", V::Bool(fd.keyword)));
 				f.push(("body", command(m, &fd.body)));
 				b"function"
 			},
 			CommandKind::Coproc(cp) => {
-				f.push(("name", cp.name.as_ref().map_or(V::Null, |n| s(n))));
+				f.push(("name", cp.name.as_ref().map_or(V::Null, |n| s(&n.text))));
 				f.push(("body", command(m, &cp.body)));
 				b"coproc"
 			},
@@ -782,8 +784,6 @@ mod shfmt {
 		do_pos: Option<u32>,
 		/// The body is a `{ … }` group.
 		braces: bool,
-		/// End of the loop head, for the fallback scan.
-		after:  u32,
 	}
 
 	/// What every arm of one `if` shares.
@@ -1340,28 +1340,32 @@ mod shfmt {
 				_ => c.span.hi,
 			};
 			let p = |o| self.m.pos(o);
-			// The closing token's own offset, as the parser recorded it. A
-			// command the parser synthesized rather than read has none; the
-			// source then holds its closer in the last `n` bytes.
-			let close = |n: u32| p(c.close.unwrap_or(hi.saturating_sub(n)));
+			// The closing token's own offset is the parser's to record. A
+			// command it synthesized rather than read has none, and the
+			// export then carries none: subtracting a byte from the span's
+			// end invents a position that text an alias expanded has not
+			// got, and lands inside a neighbouring node.
+			let close = |f: &mut Vec<(&'static str, V)>, key: &'static str| {
+				if let Some(at) = c.close {
+					f.push((key, p(at)));
+				}
+			};
 			let v = match &c.kind {
 				CommandKind::Simple(sc) => return self.simple(sc),
-				CommandKind::Brace(l) => V::Obj(vec![
-					("Type", s(b"Block")),
-					("Pos", p(lo)),
-					("End", p(hi)),
-					("Lbrace", p(lo)),
-					("Rbrace", close(1)),
-					("Stmts", self.list(l)),
-				]),
-				CommandKind::Subshell(l) => V::Obj(vec![
-					("Type", s(b"Subshell")),
-					("Pos", p(lo)),
-					("End", p(hi)),
-					("Lparen", p(lo)),
-					("Rparen", close(1)),
-					("Stmts", self.list(l)),
-				]),
+				CommandKind::Brace(l) => {
+					let mut f =
+						vec![("Type", s(b"Block")), ("Pos", p(lo)), ("End", p(hi)), ("Lbrace", p(lo))];
+					close(&mut f, "Rbrace");
+					f.push(("Stmts", self.list(l)));
+					V::Obj(f)
+				},
+				CommandKind::Subshell(l) => {
+					let mut f =
+						vec![("Type", s(b"Subshell")), ("Pos", p(lo)), ("End", p(hi)), ("Lparen", p(lo))];
+					close(&mut f, "Rparen");
+					f.push(("Stmts", self.list(l)));
+					V::Obj(f)
+				},
 				CommandKind::If(i) => self.if_clause(
 					&IfClause {
 						hi,
@@ -1374,18 +1378,16 @@ mod shfmt {
 					lo,
 				),
 				CommandKind::While(w) => {
-					let do_pos = w.do_pos.unwrap_or_else(|| {
-						let cond_end = w.cond.items.last().map_or(lo, |it| it.and_or.span.hi);
-						self.find(cond_end, b"do")
-					});
 					let mut f = vec![
 						("Type", s(b"WhileClause")),
 						("Pos", p(lo)),
 						("End", p(hi)),
 						("WhilePos", p(lo)),
-						("DoPos", p(do_pos)),
-						("DonePos", close(4)),
 					];
+					if let Some(at) = w.do_pos {
+						f.push(("DoPos", p(at)));
+					}
+					close(&mut f, "DonePos");
 					if w.until {
 						f.push(("Until", V::Bool(true)));
 					}
@@ -1408,14 +1410,13 @@ mod shfmt {
 						),
 						("Name", self.lit_value(fr.var_span.lo, fr.var_span.hi, &fr.var)),
 					];
-					let (extra, mut after) = self.extra_names(fr.var_span.hi, &fr.extra_vars);
-					if let Some(extra) = extra {
+					if let Some(extra) = self.extra_names(&fr.extra_vars) {
 						iter.push(("ExtraNames", extra));
 					}
 					if let Some(ws) = &fr.words {
-						let in_pos = fr.in_pos.unwrap_or_else(|| self.find(after, b"in"));
-						iter.push(("InPos", p(in_pos)));
-						after = ws.last().map_or(in_pos + 2, |w| w.span.hi);
+						if let Some(at) = fr.in_pos {
+							iter.push(("InPos", p(at)));
+						}
 						if !ws.is_empty() {
 							iter.push(("Items", V::Arr(ws.iter().map(|w| self.word(w, false)).collect())));
 						}
@@ -1428,24 +1429,18 @@ mod shfmt {
 							select,
 							do_pos: fr.do_pos,
 							braces: fr.braces,
-							after,
 						},
 						V::Obj(iter),
 						&fr.body,
 					)
 				},
 				CommandKind::ArithFor(a) => {
-					let header = a.header.unwrap_or_else(|| {
-						let lp = self.find(lo + 3, b"((");
-						Span::new(lp, self.find(a.step.span.hi, b"))") + 2)
-					});
-					let rp = a.rparen.unwrap_or_else(|| header.hi.saturating_sub(2));
 					let mut l = vec![
 						("Type", s(b"CStyleLoop")),
-						("Pos", p(header.lo)),
-						("End", p(header.hi)),
-						("Lparen", p(header.lo)),
-						("Rparen", p(rp)),
+						("Pos", p(a.header.lo)),
+						("End", p(a.header.hi)),
+						("Lparen", p(a.header.lo)),
+						("Rparen", p(a.rparen)),
 					];
 					for (k, t) in [("Init", &a.init), ("Cond", &a.cond), ("Post", &a.step)] {
 						if let Some(x) = self.arith(t) {
@@ -1460,18 +1455,14 @@ mod shfmt {
 							select: false,
 							do_pos: a.do_pos,
 							braces: a.braces,
-							after: header.hi,
 						},
 						V::Obj(l),
 						&a.body,
 					)
 				},
 				CommandKind::Case(cs) => {
-					let in_pos = cs
-						.in_pos
-						.unwrap_or_else(|| self.find(cs.word.span.hi, b"in"));
 					let mut items = Vec::new();
-					let mut at = in_pos + 2;
+					let mut at = lo;
 					for arm in &cs.arms {
 						let plo = arm.patterns.first().map_or(at, |w| w.span.lo);
 						// An arm with no body ends after the `)` that closes
@@ -1510,50 +1501,35 @@ mod shfmt {
 						items.push(V::Obj(f));
 						at = end;
 					}
-					let mut f = vec![
-						("Type", s(b"CaseClause")),
-						("Pos", p(lo)),
-						("End", p(hi)),
-						("Case", p(lo)),
-						("In", p(in_pos)),
-						("Esac", close(4)),
-						("Word", self.word(&cs.word, false)),
-					];
+					let mut f =
+						vec![("Type", s(b"CaseClause")), ("Pos", p(lo)), ("End", p(hi)), ("Case", p(lo))];
+					if let Some(at) = cs.in_pos {
+						f.push(("In", p(at)));
+					}
+					close(&mut f, "Esac");
+					f.push(("Word", self.word(&cs.word, false)));
 					if !items.is_empty() {
 						f.push(("Items", V::Arr(items)));
 					}
 					V::Obj(f)
 				},
 				CommandKind::Arith(a) => {
-					let mut f = vec![
-						("Type", s(b"ArithmCmd")),
-						("Pos", p(lo)),
-						("End", p(hi)),
-						("Left", p(lo)),
-						("Right", close(2)),
-					];
+					let mut f =
+						vec![("Type", s(b"ArithmCmd")), ("Pos", p(lo)), ("End", p(hi)), ("Left", p(lo))];
+					close(&mut f, "Right");
 					if let Some(x) = self.arith(a) {
 						f.push(("X", x));
 					}
 					V::Obj(f)
 				},
-				CommandKind::Cond(e) => V::Obj(vec![
-					("Type", s(b"TestClause")),
-					("Pos", p(lo)),
-					("End", p(hi)),
-					("Left", p(lo)),
-					("Right", close(2)),
-					("X", self.test(e)),
-				]),
+				CommandKind::Cond(e) => {
+					let mut f =
+						vec![("Type", s(b"TestClause")), ("Pos", p(lo)), ("End", p(hi)), ("Left", p(lo))];
+					close(&mut f, "Right");
+					f.push(("X", self.test(e)));
+					V::Obj(f)
+				},
 				CommandKind::FuncDef(fd) => {
-					let name_lo = if fd.keyword {
-						self.skip_ws(fwd(lo, c.span.hi, 8))
-					} else {
-						lo
-					};
-					let name_hi = fwd(name_lo, c.span.hi, fd.name.len() as u32);
-					let (extra, names_hi) = self.extra_names(name_hi, &fd.extra_names);
-					let parens = self.at(self.skip_ws(names_hi)) == b'(';
 					let mut f = vec![
 						("Type", s(b"FuncDecl")),
 						("Pos", p(lo)),
@@ -1563,11 +1539,11 @@ mod shfmt {
 					if fd.keyword {
 						f.push(("RsrvWord", V::Bool(true)));
 					}
-					if parens {
+					if fd.parens {
 						f.push(("Parens", V::Bool(true)));
 					}
-					f.push(("Name", self.lit_value(name_lo, name_hi, &fd.name)));
-					if let Some(extra) = extra {
+					f.push(("Name", self.lit_value(fd.name_span.lo, fd.name_span.hi, &fd.name)));
+					if let Some(extra) = self.extra_names(&fd.extra_names) {
 						f.push(("ExtraNames", extra));
 					}
 					let (bc, bend) = self.command(&fd.body);
@@ -1593,16 +1569,12 @@ mod shfmt {
 						("Coproc", p(lo)),
 					];
 					if let Some(name) = &cp.name {
-						// `skip_ws` scans the source, which holds nothing of
-						// a coproc the parser read from alias text.
-						let nlo = self.skip_ws(fwd(lo, c.span.hi, 6)).clamp(lo, c.span.hi);
-						let nhi = fwd(nlo, c.span.hi, name.len() as u32);
 						f.push((
 							"Name",
 							V::Obj(vec![
-								("Pos", p(nlo)),
-								("End", p(nhi)),
-								("Parts", V::Arr(vec![self.lit(nlo, nhi, true)])),
+								("Pos", p(name.span.lo)),
+								("End", p(name.span.hi)),
+								("Parts", V::Arr(vec![self.lit(name.span.lo, name.span.hi, true)])),
 							]),
 						));
 					}
@@ -1610,29 +1582,32 @@ mod shfmt {
 					return (Some(V::Obj(f)), c.span.hi);
 				},
 				CommandKind::Repeat(r) => {
-					let do_pos = self.find(r.count.span.hi, b"do");
-					V::Obj(vec![
+					let mut f = vec![
 						("Type", s(b"RepeatClause")),
 						("Pos", p(lo)),
 						("End", p(hi)),
 						("RepeatPos", p(lo)),
 						("Count", self.word(&r.count, true)),
-						("DoPos", p(do_pos)),
-						("Do", self.list(&r.body)),
-					])
+					];
+					if let Some(at) = r.do_pos {
+						f.push(("DoPos", p(at)));
+					}
+					close(&mut f, "DonePos");
+					f.push(("Do", self.list(&r.body)));
+					V::Obj(f)
 				},
 				CommandKind::Try(t) => {
-					let body_end = t.body.items.last().map_or(lo + 1, |it| it.and_or.span.hi);
-					let rbrace = self.find(body_end, b"}");
-					let always = self.find(rbrace + 1, b"always");
-					V::Obj(vec![
+					let mut f = vec![
 						("Type", s(b"TryClause")),
 						("Pos", p(lo)),
 						("End", p(hi)),
 						("Body", self.list(&t.body)),
-						("AlwaysPos", p(always)),
+						("Rbrace", p(t.rbrace)),
+						("AlwaysPos", p(t.always_pos)),
 						("Always", self.list(&t.always)),
-					])
+					];
+					close(&mut f, "AlwaysEnd");
+					V::Obj(f)
 				},
 				CommandKind::AnonFunc(a) => {
 					let mut f = vec![("Type", s(b"AnonFuncDecl")), ("Pos", p(lo)), ("End", p(hi))];
@@ -1659,49 +1634,37 @@ mod shfmt {
 		}
 
 		/// zsh's extra loop variables or function names written after the
-		/// first one (which ends at `from`): their `Lit`s (`None` when there
-		/// are none) and the end of the last.
-		fn extra_names(&self, from: u32, names: &[Vec<u8>]) -> (Option<V>, u32) {
-			if names.is_empty() {
-				return (None, from);
-			}
-			let mut at = from;
-			let lits = names
-				.iter()
-				.map(|n| {
-					let lo = self.skip_ws(at);
-					at = lo + n.len() as u32;
-					self.lit_value(lo, at, n)
-				})
-				.collect();
-			(Some(V::Arr(lits)), at)
+		/// first one: their `Lit`s, at the spans the parser read them at,
+		/// or `None` when there are none.
+		fn extra_names(&self, names: &[Name]) -> Option<V> {
+			(!names.is_empty()).then(|| {
+				V::Arr(
+					names
+						.iter()
+						.map(|n| self.lit_value(n.span.lo, n.span.hi, &n.text))
+						.collect(),
+				)
+			})
 		}
 
 		fn for_clause(&self, c: &ForClause, lp: V, body: &List) -> V {
 			let p = |o| self.m.pos(o);
-			let (do_pos, braces) = match c.do_pos {
-				Some(at) => (at, c.braces),
-				None => {
-					let at = self.find(c.after, b"do");
-					let braces = self.at(at) != b'd';
-					(if braces { self.find(c.after, b"{") } else { at }, braces)
-				},
-			};
-			let done = c
-				.close
-				.unwrap_or_else(|| c.hi.saturating_sub(if braces { 1 } else { 4 }));
 			let mut f = vec![
 				("Type", s(b"ForClause")),
 				("Pos", p(c.lo)),
 				("End", p(c.hi)),
 				("ForPos", p(c.lo)),
-				("DoPos", p(do_pos)),
-				("DonePos", p(done)),
 			];
+			if let Some(at) = c.do_pos {
+				f.push(("DoPos", p(at)));
+			}
+			if let Some(at) = c.close {
+				f.push(("DonePos", p(at)));
+			}
 			if c.select {
 				f.push(("Select", V::Bool(true)));
 			}
-			if braces {
+			if c.braces {
 				f.push(("Braces", V::Bool(true)));
 			}
 			f.push(("Loop", lp));
@@ -1714,11 +1677,6 @@ mod shfmt {
 			let Some((arm, rest)) = arms.split_first() else {
 				return V::Null;
 			};
-			let then_pos = arm.then_pos.unwrap_or_else(|| {
-				let cond_end = arm.cond.items.last().map_or(pos, |it| it.and_or.span.hi);
-				self.find(cond_end, b"then")
-			});
-			let fi = c.close.unwrap_or(c.hi.saturating_sub(2));
 			let mut f = Vec::new();
 			if typed {
 				f.push(("Type", s(b"IfClause")));
@@ -1726,30 +1684,32 @@ mod shfmt {
 			f.push(("Pos", p(pos)));
 			f.push(("End", p(c.hi)));
 			f.push(("Position", p(pos)));
-			f.push(("ThenPos", p(then_pos)));
-			f.push(("FiPos", p(fi)));
+			if let Some(at) = arm.then_pos {
+				f.push(("ThenPos", p(at)));
+			}
+			if let Some(at) = c.close {
+				f.push(("FiPos", p(at)));
+			}
 			f.push(("Cond", self.list(&arm.cond)));
 			f.push(("Then", self.list(&arm.body)));
-			let body_end = arm
-				.body
-				.items
-				.last()
-				.map_or(then_pos + 4, |it| it.and_or.span.hi);
+			// A short form writes no `elif`/`else` keyword for the parser to
+			// record; the clause then starts at the first node it holds,
+			// which is an offset the parser did read.
 			if let Some((next, _)) = rest.split_first() {
-				let elif = next.kw_pos.unwrap_or_else(|| self.find(body_end, b"elif"));
+				let elif = next
+					.kw_pos
+					.unwrap_or_else(|| next.cond.items.first().map_or(pos, |it| it.and_or.span.lo));
 				f.push(("Else", self.if_clause(c, rest, false, elif)));
 			} else if let Some(e) = c.else_body {
-				let epos = c.else_pos.unwrap_or_else(|| self.find(body_end, b"else"));
-				f.push((
-					"Else",
-					V::Obj(vec![
-						("Pos", p(epos)),
-						("End", p(c.hi)),
-						("Position", p(epos)),
-						("FiPos", p(fi)),
-						("Then", self.list(e)),
-					]),
-				));
+				let epos = c
+					.else_pos
+					.unwrap_or_else(|| e.items.first().map_or(pos, |it| it.and_or.span.lo));
+				let mut g = vec![("Pos", p(epos)), ("End", p(c.hi)), ("Position", p(epos))];
+				if let Some(at) = c.close {
+					g.push(("FiPos", p(at)));
+				}
+				g.push(("Then", self.list(e)));
+				f.push(("Else", V::Obj(g)));
 			}
 			V::Obj(f)
 		}

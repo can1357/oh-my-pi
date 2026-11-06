@@ -708,7 +708,7 @@ impl Lower {
 				let mut var = BString::from(f.var.as_slice());
 				for extra in &f.extra_vars {
 					var.push(b'\n');
-					var.extend_from_slice(extra);
+					var.extend_from_slice(&extra.text);
 				}
 				self.unit.names.push(var);
 				let at = self.emit(Opcode::ForIn, list, name, id);
@@ -877,7 +877,7 @@ impl Lower {
 				// zsh `f g () { … }`: every name gets the body.
 				for name in &f.extra_names {
 					let mut more = self.unit.funcs[func as usize].clone();
-					more.name = func_name(name, self.unit.mode);
+					more.name = func_name(&name.text, self.unit.mode);
 					self.unit.funcs.push(more);
 					let at = self.unit.funcs.len() as u32 - 1;
 					let pc = self.emit(Opcode::FuncDef, at, 0, id);
@@ -890,7 +890,7 @@ impl Lower {
 				self
 					.unit
 					.names
-					.push(c.name.as_deref().unwrap_or(&b"COPROC"[..]).into());
+					.push(c.name.as_ref().map_or(&b"COPROC"[..], |n| &n.text).into());
 				let spawn = self.unit.spawns.len() as u32;
 				self.unit.spawns.push(SpawnIr {
 					kind:   SpawnKind::Coproc { name },
@@ -1532,7 +1532,7 @@ fn zsh_funcdef_words(cmd: &syn::Command, f: &syn::FuncDef, mode: ModeId) -> Opti
 		return None;
 	}
 	let toks = std::iter::once(&f.name)
-		.chain(&f.extra_names)
+		.chain(f.extra_names.iter().map(|n| &n.text))
 		.map(|n| syn::zsh::parse_subst_string(&tok::metafy(n)).ok())
 		.collect::<Option<Vec<_>>>()?;
 	let expands = |t: &Vec<u8>| {
@@ -1893,7 +1893,7 @@ mod tests {
 			1, 0, 1, 99, 15, 39, 40, 1, 0, 1, 100, 1, 29, 0, 0, 0, 0, 0,
 		];
 
-		assert_eq!((crate::bash::ir::IR_VERSION, deferred.as_slice()), (21, WIRE.as_slice()));
+		assert_eq!((crate::bash::ir::IR_VERSION, deferred.as_slice()), (22, WIRE.as_slice()));
 	}
 
 	#[test]
