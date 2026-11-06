@@ -8,12 +8,13 @@ use bstr::{BStr, BString, ByteSlice};
 use super::{Ctx, Need, R, done, number, opts};
 use crate::bash::{
 	diag::Diag,
-	event::{ASSIGN_PREVIEW_BYTES, AssignScope, EventData, EventKind, assign_preview, utf8_floor},
+	event::{ASSIGN_PREVIEW_BYTES, AssignScope, EventData, EventKind, assign_preview},
 	ids::IntrinsicId,
 	ir::{self, FuncIr},
 	store::{
 		Attrs, Elem, Key, KeyBuf, MiscKey, OptId, OptKind, Record, StoreError, Table, VarValue,
 	},
+	text,
 	vm::{
 		Cx, Kernel,
 		exec::{self, Flow},
@@ -120,23 +121,23 @@ pub fn emit_assignment_at(
 
 /// The engine's array assignment display, bounded before any copying.
 fn assignment_preview<'a>(values: impl Iterator<Item = &'a [u8]>) -> (BString, usize) {
+	// One byte past the preview tells `text::cut` whether the join was cut.
+	const KEEP: usize = ASSIGN_PREVIEW_BYTES + 1;
 	let mut shown = BString::default();
 	let mut full_len = 0usize;
 	for (index, value) in values.enumerate() {
 		if index != 0 {
 			full_len = full_len.saturating_add(1);
-			if shown.len() < ASSIGN_PREVIEW_BYTES {
+			if shown.len() < KEEP {
 				shown.push(b' ');
 			}
 		}
 		full_len = full_len.saturating_add(value.len());
-		let kept = value.len().min(ASSIGN_PREVIEW_BYTES - shown.len());
+		let kept = value.len().min(KEEP - shown.len());
 		shown.extend_from_slice(&value[..kept]);
 	}
-	if shown.len() < full_len {
-		let end = utf8_floor(&shown);
-		shown.truncate(end);
-	}
+	let end = text::cut(&shown, ASSIGN_PREVIEW_BYTES).len();
+	shown.truncate(end);
 	(shown, full_len)
 }
 

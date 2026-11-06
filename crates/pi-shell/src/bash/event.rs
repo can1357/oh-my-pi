@@ -33,23 +33,9 @@ use crate::bash::{
 /// Most value bytes an [`EventData::Assign`] carries.
 pub(crate) const ASSIGN_PREVIEW_BYTES: usize = 256;
 
-/// `value` cut to [`ASSIGN_PREVIEW_BYTES`] for [`EventData::Assign`], never
-/// inside a UTF-8 character.
+/// `value` as an [`EventData::Assign`] carries it.
 pub(crate) fn assign_preview(value: &[u8]) -> &[u8] {
-	if value.len() <= ASSIGN_PREVIEW_BYTES {
-		return value;
-	}
-	&value[..utf8_floor(&value[..ASSIGN_PREVIEW_BYTES])]
-}
-
-/// Length of the cut `bytes` without the partial UTF-8 character its end
-/// split, so a cut text value still serializes as text ([`text::Text`]).
-/// Bytes invalid before the end are kept: the value was never text.
-pub(crate) const fn utf8_floor(bytes: &[u8]) -> usize {
-	match std::str::from_utf8(bytes) {
-		Err(e) if e.error_len().is_none() => e.valid_up_to(),
-		_ => bytes.len(),
-	}
+	text::cut(value, ASSIGN_PREVIEW_BYTES)
 }
 
 /// One event.
@@ -823,7 +809,7 @@ pub enum EventData<'a> {
 		/// Name.
 		#[serde(serialize_with = "text::bytes")]
 		name:     &'a BStr,
-		/// Value, truncated to 256 bytes.
+		/// Value, cut to [`ASSIGN_PREVIEW_BYTES`] on a character boundary.
 		#[serde(serialize_with = "text::bytes")]
 		value:    &'a BStr,
 		/// Full value length.
