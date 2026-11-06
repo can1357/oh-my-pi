@@ -23,6 +23,7 @@
 
 ### Fixed
 
+- Fixed a shell diagnostic raised inside a sourced file naming the shell instead of that file, and a command or file name that is not UTF-8 printing as U+FFFD ([#18246](https://github.com/can1357/oh-my-pi/pull/18246) by [@sjawhar](https://github.com/sjawhar))
 - Fixed `$!` in command substitutions, subshells and pipeline stages to name the parent's last background job, as in Bash ([#18107](https://github.com/can1357/oh-my-pi/pull/18107) by [@sjawhar](https://github.com/sjawhar))
 - Fixed Windows `rsync` treating a one-letter daemon host like `h::module` as a drive path ([#18048](https://github.com/can1357/oh-my-pi/pull/18048) by [@jchanghong023](https://github.com/jchanghong023))
 - Fixed history saves hanging when a stale lock cannot be removed.
