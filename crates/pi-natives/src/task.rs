@@ -805,6 +805,62 @@ mod tests {
 		});
 	}
 
+	/// The same contract through the boundary that actually occurs in the
+	/// addon: the host runtime shutting down, which is where napi tears its
+	/// own runtime down (at the last `MODULE_COUNT`). A review probe proved
+	/// base stops the walk here and `3510dd16` did not; this commits that
+	/// contract so it is defended by the suite rather than by a throwaway.
+	#[test]
+	fn host_runtime_shutdown_stops_the_walk() {
+		use std::{
+			sync::{
+				Arc,
+				atomic::{AtomicBool, Ordering},
+			},
+			thread::sleep,
+			time::Duration,
+		};
+
+		let host = tokio::runtime::Builder::new_multi_thread()
+			.worker_threads(1)
+			.enable_all()
+			.build()
+			.unwrap();
+		let started = Arc::new(AtomicBool::new(false));
+		let ran_on = Arc::new(AtomicBool::new(false));
+		let started_probe = Arc::clone(&started);
+		let ran_on_probe = Arc::clone(&ran_on);
+
+		host.spawn(run_filesystem_future(
+			"shutdown",
+			CancelToken::new(None, None),
+			Fs::native(),
+			move |_fs| async move {
+				started_probe.store(true, Ordering::SeqCst);
+				// The yield point a walker has between directories.
+				tokio::time::sleep(Duration::from_millis(200)).await;
+				ran_on_probe.store(true, Ordering::SeqCst);
+				Ok(1_u32)
+			},
+		));
+		for _ in 0..200 {
+			if started.load(Ordering::SeqCst) {
+				break;
+			}
+			sleep(Duration::from_millis(5));
+		}
+		assert!(started.load(Ordering::SeqCst), "the walk never started");
+
+		// What napi does at teardown: stop the host without waiting for it.
+		host.shutdown_background();
+		sleep(Duration::from_millis(400));
+		assert!(
+			!ran_on.load(Ordering::SeqCst),
+			"the walk ran on after the host runtime shut down, so teardown leaves filesystem work \
+			 running"
+		);
+	}
+
 	#[test]
 	fn queued_filesystem_workers_settle_on_abort_and_timeout() {
 		use std::{
