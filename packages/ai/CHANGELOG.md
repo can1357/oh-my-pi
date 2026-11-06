@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Provider errors retain machine-readable type and code for availability routing.
+
 ## [18.17.0] - 2026-11-06
 
 ### Added

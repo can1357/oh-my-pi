@@ -627,6 +627,9 @@ export function streamFactoryDroidGemini(
 			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
+			output.errorType = result.errorType;
+			output.errorCode = result.errorCode;
+			output.errorResetAt = result.errorResetAt;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
 			output.duration = performance.now() - startTime;

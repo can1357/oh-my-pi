@@ -1,5 +1,8 @@
+import { extractRetryHint } from "@oh-my-pi/pi-utils";
 import type { Api } from "../types";
 import { callerAbortReason } from "./abort";
+import { OpenAIHttpError } from "./classes";
+import { MissingApiKeyError } from "./auth";
 import type { AbortSourceTracker } from "../utils/abort";
 import type { CapturedHttpErrorResponse, RawHttpRequestDump } from "../utils/http-inspector";
 import { classify, classifyMessage, status } from "./flags";
@@ -29,6 +32,9 @@ export interface FinalizeResult {
 	id: number;
 	/** HTTP status, from the error or the captured response. */
 	status: number | undefined;
+	errorType?: string;
+	errorCode?: string;
+	errorResetAt?: number;
 	/** `"aborted"` when the caller cancelled, otherwise `"error"`. */
 	stopReason: "aborted" | "error";
 	/** User-facing message: a local abort reason, else the caller's abort reason, else from {@link formatMessage}. */
@@ -76,8 +82,38 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 		errorStatus: currentStatus,
 	});
 
+	const raw =
+		error !== null && typeof error === "object"
+			? (error as { code?: unknown; type?: unknown; headers?: Headers })
+			: undefined;
+	const body =
+		opts.capturedErrorResponse?.bodyJson ?? (error instanceof OpenAIHttpError ? error.captured.bodyJson : undefined);
+	const envelope =
+		body !== null && typeof body === "object"
+			? (body as { error?: unknown; type?: unknown; code?: unknown; param?: unknown })
+			: undefined;
+	const detail =
+		envelope?.error !== null && typeof envelope?.error === "object"
+			? (envelope.error as { type?: unknown; code?: unknown; param?: unknown })
+			: envelope;
+	const errorType =
+		typeof detail?.type === "string" ? detail.type : typeof raw?.type === "string" ? raw.type : undefined;
+	const errorCode =
+		typeof detail?.code === "string"
+			? detail.code
+			: typeof detail?.param === "string"
+				? detail.param
+				: typeof raw?.code === "string"
+					? raw.code
+					: error instanceof MissingApiKeyError
+						? "missing_api_key"
+						: undefined;
+	const resetDelay = extractRetryHint(opts.capturedErrorResponse?.headers ?? raw?.headers);
 	return {
 		id,
+		errorResetAt: resetDelay === undefined ? undefined : Date.now() + resetDelay,
+		errorType,
+		errorCode,
 		status: currentStatus,
 		stopReason: aborted ? "aborted" : "error",
 		message,
