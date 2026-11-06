@@ -38,7 +38,6 @@ import { strictestApproval, truncateForPrompt } from "../tools/approval";
 import {
 	backupBeforeClobber,
 	clobberBackupNote,
-	drainClobberNotes,
 	forgetOwnWrite,
 	insureBeforeRewrite,
 	noteOwnWrite,
@@ -573,11 +572,6 @@ export class EditTool implements AgentTool<TInput> {
 			if (this.#sessions.get(toolCallId) === open) this.#sessions.delete(toolCallId);
 			this.#streamedArgs.delete(toolCallId);
 		}
-		// Copies the batch flush took on this call's behalf, for files earlier
-		// calls of the batch committed. Those calls have already returned, so
-		// this is the only result that can carry them.
-		clobberNotes.push(...drainClobberNotes(this.session));
-
 		if (outcome.isError) {
 			return {
 				content: [{ type: "text", text: [outcome.text, ...clobberNotes].join("\n") }],

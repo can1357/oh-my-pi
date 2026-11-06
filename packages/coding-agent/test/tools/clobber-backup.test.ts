@@ -753,7 +753,12 @@ describe("copy-before-clobber: a record must not claim bytes this session never 
 		const backups = await backupFiles();
 		expect(backups.map(backup => path.basename(backup)).some(name => name.endsWith("-a.js"))).toBe(true);
 		expect(await Promise.all(backups.map(backup => Bun.file(backup).text()))).toContain(foreign);
-		expect(resultText(flushed)).toContain("[Backup]");
+		// Deliberately NOT announced. The call that committed this file has
+		// returned, and the queue that would have carried the note to this one
+		// stranded notes when a flush entry threw and handed one logical
+		// session's copies to the next. The bytes are in the store under the
+		// day's index; the result does not name them.
+		expect(resultText(flushed)).not.toContain("[Backup]");
 	});
 
 	test.skipIf($which("ruff") === null)(
