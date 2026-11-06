@@ -3036,6 +3036,8 @@ export class TUI extends Container {
 		// cadence, not the ceiling. Input that triggers no render leaves the latch for the next frame
 		// to consume at the 30 fps floor once; harmless.
 		this.#inputRenderPending = true;
+		// The frame echoing this key may go out ahead of credit-held output.
+		if (this.#nativeLive) this.#native!.noteInput();
 
 		if (
 			this.#heldInput !== undefined &&

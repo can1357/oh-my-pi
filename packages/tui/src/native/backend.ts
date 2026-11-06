@@ -11,9 +11,14 @@
  * and the next inline frame catches up.
  *
  * Flow control. At most `credits` frames per surface are unacknowledged. A
- * render while blocked only marks the surface dirty; the next `ack` reconciles
- * once against the last sent state, so every intermediate change coalesces
- * into one frame (`set`s merged, `text append`s joined).
+ * render while blocked only marks the surface dirty (without describing the
+ * transcript); the next `ack` reconciles once against the last sent state, so
+ * every intermediate change coalesces into one frame (`set`s merged, `text
+ * append`s joined). User input (a key, a pointer event) may send one frame
+ * past the credits, then one per `STALLED_FRAME_MS`, so typing echoes while
+ * streaming output holds them. A terminal that leaves a frame unanswered for
+ * `STALLED_ACK_MS` is stalled: frames go out without credits, at most one per
+ * `STALLED_FRAME_MS` (input immediately), until it acknowledges one again.
  *
  * Blobs. Each image's bytes reach the terminal once per connection. A
  * terminal with the `blobs` feature is asked first which it already holds:
@@ -123,6 +128,10 @@ const DEFAULT_SCHEDULER: RenderScheduler = {
 const RECENT_FRAMES = 64;
 /** An unanswered frame older than this no longer holds rendering back. */
 const STALLED_ACK_MS = 5000;
+/** Least spacing of frames to a stalled surface: changes keep showing, coalesced, without flooding the terminal. */
+const STALLED_FRAME_MS = 200;
+/** Frames user input may send past a surface's credits at once; further input frames are spaced by `STALLED_FRAME_MS`. */
+const INPUT_CREDITS = 1;
 /** Role of the session's surfaces; a screen page may name its own. */
 const SESSION_ROLE = "omp.session";
 /** A `blobs` query unanswered this long counts its ids as missing: they go inline. */
@@ -248,8 +257,10 @@ class Surface {
 	unacked: number[] = [];
 	/** Send time of the oldest frame left unanswered when the current stall began; cleared by the next ack. */
 	stalledSince: number | undefined;
-	/** Credit resets since {@link stalledSince}. */
-	stallResets = 0;
+	/** Frames sent without credits since {@link stalledSince}. */
+	stalledFrames = 0;
+	/** Send time of the last frame. */
+	lastSent = 0;
 	focus: string | null = null;
 	dirty = false;
 
@@ -308,8 +319,10 @@ export class NativeBackend {
 	#recordPath: string | undefined;
 	#stats: boolean;
 	#scheduler: RenderScheduler;
-	/** Wakes a render when the oldest unacked frame of a credit-blocked surface turns stalled. */
+	/** Wakes a render when a credit-blocked surface may send again (stall, or frame spacing). */
 	#stallTimer: RenderTimer | undefined;
+	/** When {@link #stallTimer} fires, on the scheduler's clock. */
+	#stallTimerDue = 0;
 	#recent: TspFrame[] = [];
 	#sawResize = false;
 	#live = false;
@@ -325,6 +338,8 @@ export class NativeBackend {
 	/** Bumped when the connection resets or stops, so blob cache writes finishing later are dropped. */
 	#blobEpoch = 0;
 	#unbindMotion: (() => void) | undefined;
+	/** User input arrived since the last frame: the next one may use {@link INPUT_CREDITS} (see {@link noteInput}). */
+	#inputPending = false;
 
 	constructor(host: NativeHost, hello: TspHello, options: NativeBackendOptions = {}) {
 		this.#host = host;
@@ -437,7 +452,7 @@ export class NativeBackend {
 		surface.unacked = [];
 		surface.acked = surface.seq;
 		surface.stalledSince = undefined;
-		surface.stallResets = 0;
+		surface.stalledFrames = 0;
 		surface.focus = null;
 		surface.dirty = false;
 		this.#write("o", { id: surface.id, mode: "inline", title: "omp", role: SESSION_ROLE, adopt: true });
@@ -517,18 +532,27 @@ export class NativeBackend {
 				this.#screen = null;
 			}
 			surface = this.#inline;
+			// A credit-blocked surface sends nothing: skip describing the
+			// transcript until the ack (or the stall timer) renders again.
+			if (!this.#hasCredit(surface)) {
+				this.#pruneOverlayNodes(overlays);
+				surface.dirty = true;
+				this.#armStallTimer(surface);
+				return;
+			}
 			const described = this.#host.describeSurface(this.#cx);
 			main = described.main;
 			dock = described.dock;
 			layer = overlays.map(overlay => this.#overlayNode(overlay));
 		}
 		this.#pruneOverlayNodes(overlays);
-		if (!this.#hasCredit(surface)) {
+		if (fullscreen >= 0 && !this.#hasCredit(surface)) {
 			surface.dirty = true;
 			this.#armStallTimer(surface);
 			return;
 		}
 		surface.dirty = false;
+		this.#inputPending = false;
 		const ops = surface.reconciler.reconcile({ main, dock, layer }, this.#cx);
 		const focused = this.#host.focused();
 		const focus = focused ? surface.reconciler.focusTarget(focused) : null;
@@ -569,6 +593,14 @@ export class NativeBackend {
 		return this.#recent.slice(-count);
 	}
 
+	/**
+	 * User input (a key) reached a component: the frame that echoes it may go
+	 * out past the credits, or ahead of a stalled surface's frame spacing.
+	 */
+	noteInput(): void {
+		this.#inputPending = true;
+	}
+
 	#applyHello(hello: TspHello): void {
 		this.#limit = hello.apc !== undefined && hello.apc > 0 ? hello.apc : TSP_DEFAULT_APC_LIMIT;
 		this.#credits = hello.credits !== undefined && hello.credits > 0 ? hello.credits : TSP_DEFAULT_CREDITS;
@@ -592,34 +624,51 @@ export class NativeBackend {
 	}
 
 	#hasCredit(surface: Surface): boolean {
+		const now = this.#scheduler.now();
+		const spaced = now - surface.lastSent >= STALLED_FRAME_MS;
+		if (surface.stalledSince !== undefined) return this.#inputPending || spaced;
 		if (surface.unacked.length < this.#credits) return true;
+		// Input never waits on acks for long: past its extra credit it is only
+		// spaced out, so a key typed before a stall is detected still shows.
+		if (this.#inputPending && (surface.unacked.length < this.#credits + INPUT_CREDITS || spaced)) return true;
 		const oldest = surface.unacked[0]!;
-		if (this.#scheduler.now() - oldest < STALLED_ACK_MS) return false;
-		// One warning per stall: a terminal that never acks would otherwise log one every `STALLED_ACK_MS`.
-		if (surface.stalledSince === undefined) {
-			surface.stalledSince = oldest;
-			logger.warn("TSP: terminal stopped acknowledging frames; resuming without credits", {
-				sf: surface.id,
-				s: surface.seq,
-				acked: surface.acked,
-			});
-		}
-		surface.stallResets++;
+		if (now - oldest < STALLED_ACK_MS) return false;
+		// A terminal that stopped answering keeps getting frames, spaced out,
+		// until it acks one sent from here on: holding every change for another
+		// `STALLED_ACK_MS` each time would leave the screen (and typed input)
+		// frozen for as long as the stall lasts. Frames unanswered so far are
+		// written off, so a late ack for one of them does not end the stall.
+		surface.stalledSince = oldest;
+		surface.stalledFrames = 0;
 		surface.unacked = [];
 		surface.acked = surface.seq;
+		logger.warn("TSP: terminal stopped acknowledging frames; sending without credits until it acks again", {
+			sf: surface.id,
+			s: surface.seq,
+		});
 		return true;
 	}
 
-	/** Render again once `surface`'s oldest unacked frame counts as stalled, in case no ack ever arrives. */
+	/**
+	 * Render again once `surface` may send: when its oldest unacked frame
+	 * counts as stalled (in case no ack ever arrives), or, while stalled or
+	 * holding input, once the frame spacing has passed. An armed timer is
+	 * moved earlier, never later.
+	 */
 	#armStallTimer(surface: Surface): void {
-		if (this.#stallTimer) return;
-		const delay = surface.unacked[0]! + STALLED_ACK_MS - this.#scheduler.now();
+		const due =
+			surface.stalledSince !== undefined || this.#inputPending
+				? surface.lastSent + STALLED_FRAME_MS
+				: surface.unacked[0]! + STALLED_ACK_MS;
+		if (this.#stallTimer && this.#stallTimerDue <= due) return;
+		this.#stallTimer?.cancel();
+		this.#stallTimerDue = due;
 		this.#stallTimer = this.#scheduler.scheduleRender(
 			() => {
 				this.#stallTimer = undefined;
 				this.#host.requestRender();
 			},
-			Math.max(0, delay),
+			Math.max(0, due - this.#scheduler.now()),
 		);
 	}
 
@@ -630,7 +679,11 @@ export class NativeBackend {
 
 	#sendFrame(surface: Surface, ops: readonly TspOp[]): void {
 		surface.seq++;
-		surface.unacked.push(this.#scheduler.now());
+		surface.lastSent = this.#scheduler.now();
+		// A stalled surface's frames aren't counted against its credits; its
+		// first ack ends the stall and credits restart from there.
+		if (surface.stalledSince === undefined) surface.unacked.push(surface.lastSent);
+		else surface.stalledFrames++;
 		const frame: TspFrame = { sf: surface.id, s: surface.seq, ops };
 		if (surface.doc) {
 			const errors = surface.doc.applyFrame(frame);
@@ -793,10 +846,10 @@ export class NativeBackend {
 					logger.debug("TSP: terminal acknowledging frames again", {
 						sf: surface.id,
 						stalledMs: this.#scheduler.now() - surface.stalledSince,
-						resets: surface.stallResets,
+						frames: surface.stalledFrames,
 					});
 					surface.stalledSince = undefined;
-					surface.stallResets = 0;
+					surface.stalledFrames = 0;
 				}
 				this.#clearStallTimer();
 				if (surface.dirty) this.#host.requestRender();
@@ -841,6 +894,7 @@ export class NativeBackend {
 			case "edit":
 			case "undo":
 			case "send":
+				this.#inputPending = true;
 				this.#routeUiEvent(event);
 				return;
 			case "focus": {

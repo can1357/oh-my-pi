@@ -26,6 +26,18 @@ class Probe implements Component {
 	}
 }
 
+/** A focusable field whose text is every key it received. */
+class KeyProbe extends Probe {
+	text = "";
+	constructor() {
+		super(node("text", { text: "" }));
+	}
+	handleInput(data: string): void {
+		this.text += data;
+		this.current = node("text", { text: this.text });
+	}
+}
+
 let harness: TspHarness | undefined;
 afterEach(() => {
 	harness?.stop();
@@ -74,33 +86,145 @@ describe("native backend", () => {
 		expect(h.byId(id)?.p).toEqual({ text: "one two three", stream: true });
 	});
 
-	it("warns once for a stall that spans several credit resets, then logs how long it lasted when acks return", async () => {
+	it("keeps sending to a stalled terminal, spaced and coalesced, warns once, then logs the stall when acks return", async () => {
 		const stream = new Probe(md("", { stream: true }));
 		harness = await TspHarness.start(tui => tui.addChild(stream), { credits: 2, autoAck: false });
 		const h = harness;
+		const id = nativeComponentId(stream);
 		const logged: LogEvent[] = [];
 		const unregister = registerLogSink(event => {
 			if (event.message.startsWith("TSP: terminal")) logged.push(event);
 		});
 		try {
-			let text = "";
-			const stalls = 4;
-			for (let stall = 0; stall < stalls; stall++) {
-				for (let frame = 0; frame < 2; frame++) {
-					text += ` ${stall}.${frame}`;
-					stream.current = md(text, { stream: true });
-					await h.render();
-				}
-				h.stall(5000);
+			stream.current = md("a", { stream: true });
+			await h.render();
+			stream.current = md("a b", { stream: true });
+			await h.render();
+			h.stall(5000);
+			const sent = h.frames.length;
+			expect(h.byId(id)?.p).toEqual({ text: "a b", stream: true });
+
+			// Stalled: no further `STALLED_ACK_MS` hold per frame, only the frame spacing.
+			stream.current = md("a b c", { stream: true });
+			await h.render();
+			stream.current = md("a b c d", { stream: true });
+			await h.render();
+			expect(h.frames.length).toBe(sent);
+			h.stall(199);
+			expect(h.frames.length).toBe(sent);
+			h.stall(1);
+			expect(opsOf(h, sent)).toEqual([["text", id, "append", " c d"]]);
+			for (const token of [" e", " f", " g"]) {
+				stream.current = md(`a b c d${token}`, { stream: true });
+				await h.render();
+				h.stall(200);
 			}
+			expect(h.frames.length).toBe(sent + 4);
+
 			h.terminal.ackAll();
 			h.flush();
+			// Credits are back: two frames go out without waiting.
+			for (const token of [" h", " i", " j"]) {
+				stream.current = md(`a b c d g${token}`, { stream: true });
+				await h.render();
+			}
+			expect(h.frames.length).toBe(sent + 6);
 		} finally {
 			unregister();
 		}
 		expect(logged.map(event => event.level)).toEqual(["warn", "debug"]);
 		expect(logged[0]?.message).toContain("stopped acknowledging");
-		expect(logged[1]?.context).toMatchObject({ stalledMs: 20_000, resets: 4 });
+		expect(logged[1]?.context).toMatchObject({ stalledMs: 5800, frames: 5 });
+		expect(h.errors).toEqual([]);
+	});
+
+	it("echoes keys past the credits that streaming output holds: one frame at once, then spaced", async () => {
+		const stream = new Probe(md("", { stream: true }));
+		const field = new KeyProbe();
+		harness = await TspHarness.start(
+			tui => {
+				tui.addChild(stream);
+				tui.addChild(field);
+				tui.setFocus(field);
+			},
+			{ credits: 2, autoAck: false },
+		);
+		const h = harness;
+		const fieldId = nativeComponentId(field);
+		stream.current = md("one", { stream: true });
+		await h.render();
+		stream.current = md("one two", { stream: true });
+		await h.render();
+		const sent = h.frames.length;
+
+		h.terminal.send("x");
+		h.flush();
+		expect(h.frames.length).toBe(sent + 1);
+		expect(h.byId(fieldId)?.p).toEqual({ text: "x" });
+		expect(h.byId(nativeComponentId(stream))?.p).toEqual({ text: "one two", stream: true });
+
+		// The input credit is spent: the next key waits for the frame spacing, not for an ack.
+		h.terminal.send("y");
+		h.flush();
+		expect(h.frames.length).toBe(sent + 1);
+		h.stall(199);
+		expect(h.frames.length).toBe(sent + 1);
+		h.stall(1);
+		expect(h.frames.length).toBe(sent + 2);
+		expect(h.byId(fieldId)?.p).toEqual({ text: "xy" });
+		expect(h.errors).toEqual([]);
+	});
+
+	it("echoes a key to a stalled terminal without waiting for the frame spacing", async () => {
+		const stream = new Probe(md("", { stream: true }));
+		const field = new KeyProbe();
+		harness = await TspHarness.start(
+			tui => {
+				tui.addChild(stream);
+				tui.addChild(field);
+				tui.setFocus(field);
+			},
+			{ credits: 2, autoAck: false },
+		);
+		const h = harness;
+		stream.current = md("one", { stream: true });
+		await h.render();
+		stream.current = md("one two", { stream: true });
+		await h.render();
+		h.stall(5000);
+		const sent = h.frames.length;
+
+		h.terminal.send("x");
+		h.flush();
+		expect(h.frames.length).toBe(sent + 1);
+		expect(h.byId(nativeComponentId(field))?.p).toEqual({ text: "x" });
+	});
+
+	it("does not describe the session surface while it is out of credits", async () => {
+		const stream = new Probe(md("", { stream: true }));
+		let described = 0;
+		const provider = {
+			renderFrame: () => ({ viewport: [] }),
+			acknowledgeHistory: () => {},
+			describeSurface: () => {
+				described++;
+				return { main: [stream], dock: [] };
+			},
+		};
+		harness = await TspHarness.start(tui => tui.setFrameProvider(provider), { credits: 2, autoAck: false });
+		const h = harness;
+		stream.current = md("one", { stream: true });
+		await h.render();
+		const before = described;
+		for (const text of ["one two", "one two three", "one two three four"]) {
+			stream.current = md(text, { stream: true });
+			await h.render();
+		}
+		expect(described).toBe(before);
+		h.terminal.ackAll();
+		h.flush();
+		expect(described).toBe(before + 1);
+		expect(h.byId(nativeComponentId(stream))?.p).toEqual({ text: "one two three four", stream: true });
 	});
 
 	it("routes pointer events to the component that described the node, with its keypath and item key", async () => {
