@@ -98,9 +98,10 @@ interface DefinitionBase {
 	/**
 	 * Array entries may be objects scoping values to working-directory prefixes
 	 * (`{ path(s)/pathPrefix(es), values | items | <valuesKey> }`, see `config/settings.ts`);
-	 * `valuesKey` names the domain-specific alias for the values list (e.g. `models`).
+	 * `valuesKey` names the domain-specific alias for the values list (e.g. `models`, `patterns`),
+	 * and `itemType` selects whether unscoped/nested entries are strings (default) or rule objects.
 	 */
-	pathScoped?: { valuesKey: string };
+	pathScoped?: { valuesKey: string; itemType?: "string" | "object" };
 	/**
 	 * Protocol hosts (RPC/ACP embedders) that start from this setting's default rather than the local
 	 * user's interactive preference: at startup the default is pinned as a runtime override unless

@@ -19,6 +19,11 @@ import { cfgTaskMaxConcurrency } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { cfgEvalPy } from "@oh-my-pi/pi-coding-agent/eval/settings";
 import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgSearxngBasicPassword, cfgSearxngEndpoint } from "@oh-my-pi/pi-coding-agent/web/settings";
+import {
+	cfgBashInterceptorPatterns,
+	cfgBashPatterns,
+	DEFAULT_BASH_INTERCEPTOR_RULES,
+} from "@oh-my-pi/pi-coding-agent/exec/settings";
 
 const tick = () => Promise.resolve();
 
@@ -426,5 +431,69 @@ describe("settings registry", () => {
 		).toThrow("Invalid task.agentCompactionThresholdOverrides.scout");
 		expect(() => Settings.isolated({ temperature: "hot" })).toThrow("Invalid value for temperature");
 		expect(cfgModelRoles.get(Settings.isolated({ modelRoles: { smol: "a/b" } }))).toEqual({ smol: "a/b" });
+	});
+
+	it("resolves path-scoped object entries in bash.patterns and bashInterceptor.patterns across cwd changes", async () => {
+		const dir = TempDir.createSync("@omp-path-scoped-bash-");
+		try {
+			const agentDir = path.join(dir.path(), "agent");
+			const repoA = path.join(dir.path(), "repo-a");
+			const repoASub = path.join(repoA, "packages", "sub");
+			const repoB = path.join(dir.path(), "repo-b");
+			fs.mkdirSync(repoASub, { recursive: true });
+			fs.mkdirSync(repoB, { recursive: true });
+
+			await Bun.write(
+				path.join(agentDir, "config.yml"),
+				YAML.stringify({
+					bash: {
+						patterns: [
+							{
+								path: repoA,
+								patterns: [{ match: "make lint*", approval: "allow" }],
+							},
+							{
+								paths: [repoA],
+								match: "rm -rf *",
+								approval: "deny",
+							},
+							{
+								paths: [repoB],
+								patterns: [{ match: "cargo test*", approval: "allow" }],
+							},
+							{ match: "git status*", approval: "allow" },
+						],
+					},
+					bashInterceptor: {
+						patterns: [
+							{
+								pathPrefix: repoA,
+								patterns: [{ pattern: "^\\s*repo-a-tool\\b", tool: "read", message: "Use read in repo-a." }],
+							},
+						],
+					},
+				}),
+			);
+
+			const settings = await Settings.loadIsolated({ cwd: repoASub, agentDir });
+			expect(cfgBashPatterns.get(settings)).toEqual([
+				{ match: "make lint*", approval: "allow" },
+				{ match: "rm -rf *", approval: "deny" },
+				{ match: "git status*", approval: "allow" },
+			]);
+			expect(cfgBashInterceptorPatterns.get(settings)).toEqual([
+				{ pattern: "^\\s*repo-a-tool\\b", tool: "read", message: "Use read in repo-a." },
+				...DEFAULT_BASH_INTERCEPTOR_RULES,
+			]);
+
+			await settings.reloadForCwd(repoB);
+			expect(cfgBashPatterns.get(settings)).toEqual([
+				{ match: "cargo test*", approval: "allow" },
+				{ match: "git status*", approval: "allow" },
+			]);
+			expect(cfgBashInterceptorPatterns.get(settings)).toEqual(DEFAULT_BASH_INTERCEPTOR_RULES);
+		} finally {
+			await dir.remove();
+		}
 	});
 });
