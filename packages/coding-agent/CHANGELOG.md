@@ -12,7 +12,7 @@
 - On Windows, `grep`, `glob` and isolated subagents no longer flash a console window when they query or start the ovnfs daemon.
 ### Added
 
-- The ask dialog's "Other" answer box, hook editors, and extension editor prompts now get macOS spelling assistance (typo undercurls, Tab completions, on-space autocorrect), following the `spelling.*` settings and updating live when they change ([#12517](https://github.com/can1357/oh-my-pi/pull/12517) by [@aleister1102](https://github.com/aleister1102))
+- The ask dialog's "Other" answer box and hook editors now get macOS spelling assistance (typo undercurls, Tab completions, on-space autocorrect), following the `spelling.*` settings when opened; open hook editors also update live when those settings change ([#12517](https://github.com/can1357/oh-my-pi/pull/12517) by [@aleister1102](https://github.com/aleister1102))
 
 ## [18.17.0] - 2026-11-06
 

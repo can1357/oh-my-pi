@@ -149,6 +149,15 @@ export class ExtensionUiController {
 		for (const dispose of this.#composerShapeDisposers.splice(0)) dispose();
 	}
 
+	/** Spelling options for hook and ask answer editors, read from the current settings. */
+	#spellingFeatures() {
+		return {
+			typoDetection: cfgSpellingTypoDetection.get(this.ctx.settings),
+			autocomplete: cfgSpellingAutocomplete.get(this.ctx.settings),
+			autocorrect: cfgSpellingAutocorrect.get(this.ctx.settings),
+		};
+	}
+
 	/**
 	 * Redraw every transcript component of the reply sent at `timestamp` (one per tool-call segment),
 	 * and the link browser's copy while it is open. A plain terminal cannot repaint rows it already
@@ -889,11 +898,7 @@ export class ExtensionUiController {
 					{
 						promptStyle: true,
 						externalEditor: editDialogExternally,
-						spellingFeatures: {
-							typoDetection: this.ctx.settings ? cfgSpellingTypoDetection.get(this.ctx.settings) : true,
-							autocomplete: this.ctx.settings ? cfgSpellingAutocomplete.get(this.ctx.settings) : "auto",
-							autocorrect: this.ctx.settings ? cfgSpellingAutocorrect.get(this.ctx.settings) : false,
-						},
+						spellingFeatures: this.#spellingFeatures(),
 						question: prompt.question,
 						...options,
 					},
@@ -1294,11 +1299,7 @@ export class ExtensionUiController {
 				{
 					...editorOptions,
 					externalEditor: editDialogExternally,
-					spellingFeatures: {
-						typoDetection: this.ctx.settings ? cfgSpellingTypoDetection.get(this.ctx.settings) : true,
-						autocomplete: this.ctx.settings ? cfgSpellingAutocomplete.get(this.ctx.settings) : "auto",
-						autocorrect: this.ctx.settings ? cfgSpellingAutocorrect.get(this.ctx.settings) : false,
-					},
+					spellingFeatures: this.#spellingFeatures(),
 				},
 			);
 			this.ctx.closeLinkBrowser();

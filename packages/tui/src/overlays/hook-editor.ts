@@ -179,8 +179,8 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 				this.#spelling.getWordReplacements(lines, cursorLine, cursorCol),
 		});
 		this.setSpellingFeatures({
-			typoDetection: options?.spellingFeatures?.typoDetection ?? true,
-			autocomplete: options?.spellingFeatures?.autocomplete ?? "auto",
+			typoDetection: options?.spellingFeatures?.typoDetection ?? false,
+			autocomplete: options?.spellingFeatures?.autocomplete ?? "off",
 			autocorrect: options?.spellingFeatures?.autocorrect ?? false,
 		});
 		if (this.#promptStyle) {
@@ -318,14 +318,6 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 	setSpellingFeatures(features: SpellingFeatures): void {
 		this.#spelling.setFeatures({ typoDetection: features.typoDetection, autocorrect: features.autocorrect });
 		this.#wordCompletion.setMethod(features.autocomplete);
-	}
-
-	get editor(): Editor {
-		return this.#editor;
-	}
-
-	get spellingProvider(): MacOSSpellingProvider {
-		return this.#spelling;
 	}
 
 	/** Keep the nested editor's software/hardware cursor mode aligned with the dialog focus target. */

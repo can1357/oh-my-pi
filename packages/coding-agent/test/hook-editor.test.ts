@@ -2,10 +2,12 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { afterEach, beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
+import { MacOSSpellingProvider } from "@oh-my-pi/pi-tui/prompt/macos-spelling";
 import type { DescribeContext } from "@oh-my-pi/pi-tui/native/node";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CURSOR_MARKER, isFocusable, setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
 
 beforeAll(async () => {
@@ -77,6 +79,7 @@ function createControllerContext() {
 		editorContainer,
 		ui,
 		hookEditor: undefined,
+		settings: Settings.isolated(),
 		closeLinkBrowser: () => {},
 		rerenderInLinkBrowser: () => {},
 		rebuildTranscriptScrollback: () => {},
@@ -86,23 +89,17 @@ function createControllerContext() {
 }
 
 describe("HookEditorComponent default (hook) mode", () => {
-	it("configures spelling provider on the inner editor with default or custom options", () => {
+	it("passes spelling options to the macOS provider, with every feature off when omitted", () => {
+		const setFeatures = vi.spyOn(MacOSSpellingProvider.prototype, "setFeatures");
 		const onSubmit = vi.fn();
 		const onCancel = vi.fn();
-		const tui = createTui();
-		const component = new HookEditorComponent(tui, "Prompt", undefined, onSubmit, onCancel);
-		expect(typeof component.editor.onTextAssistApplied).toBe("function");
-		component.editor.onTextAssistApplied?.();
-		expect(tui.requestRender).toHaveBeenCalled();
-
-		const componentCustom = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, onCancel, {
-			spellingFeatures: {
-				typoDetection: false,
-				autocomplete: "auto",
-				autocorrect: false,
-			},
+		new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, onCancel, {
+			spellingFeatures: { typoDetection: true, autocomplete: "auto", autocorrect: true },
 		});
-		expect(componentCustom.spellingProvider).toBeDefined();
+		expect(setFeatures).toHaveBeenLastCalledWith({ typoDetection: true, autocorrect: true });
+
+		new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, onCancel);
+		expect(setFeatures).toHaveBeenLastCalledWith({ typoDetection: false, autocorrect: false });
 	});
 
 	it("inserts a newline on Enter instead of submitting immediately", () => {
