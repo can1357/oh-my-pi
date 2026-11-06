@@ -104,11 +104,24 @@ fn layer_switches_keep_original_and_structural_chips() {
 #[test]
 fn condition_arm_outcomes_use_each_actual_test() {
 	let fixture = Fixture::new("if false; then echo no; elif true; then echo yes; fi");
-	let CommandKind::If(branch) = &fixture.root(0).kind else {
+	let CommandKind::If(branch) = fixture.root(0).kind() else {
 		panic!("if")
 	};
-	let first = NodeKey::engine(0, branch.arms[0].cond.items[0].and_or.first.stages[0].cmd.id);
-	let second = NodeKey::engine(0, branch.arms[1].cond.items[0].and_or.first.stages[0].cmd.id);
+	let test = |k: usize| {
+		let cond = branch.arms().nth(k).unwrap().cond;
+		cond
+			.items()
+			.first()
+			.unwrap()
+			.and_or()
+			.first()
+			.stages()
+			.first()
+			.unwrap()
+			.id()
+	};
+	let first = NodeKey::engine(0, test(0));
+	let second = NodeKey::engine(0, test(1));
 	let history = [
 		expanded(1, first, ResolvedKind::Intrinsic),
 		end(2, first, 1),
@@ -151,17 +164,27 @@ fn arithmetic_uses_engine_expression_semantics_and_faithful_loop_control() {
 fn actual_local_units_preserve_pending_tail_and_raw_literal_leaf_projection() {
 	use crate::bash::trace::syntax::SourceParent;
 	let mut fixture = Fixture::new("bash -c 'echo inner\nread x'");
-	let CommandKind::Simple(parent) = &fixture.root(0).kind else {
+	let CommandKind::Simple(parent) = fixture.root(0).kind() else {
 		panic!("shell launch")
 	};
-	let word = &parent.words[2];
-	let parent = SourceParent { unit: 0, node: word.id.0, lo: word.span.lo, hi: word.span.hi };
+	let word = parent.words().get(2).unwrap();
+	let span = word.span();
+	let parent = SourceParent { unit: 0, node: word.id().0, lo: span.lo, hi: span.hi };
 	let child = Fixture::new("echo inner\nread x");
 	let Fixture { script: _, mut units, cache: _ } = child;
 	let mut first = units.remove(0);
 	first.syntax.parent = Some(parent);
-	let active = NodeKey::engine(1, match &first.syntax.tree {
-		SyntaxTree::List(list) => list.items[0].and_or.first.stages[0].cmd.id,
+	let active = NodeKey::engine(1, match first.syntax.tree.view() {
+		Root::List(list) => list
+			.items()
+			.first()
+			.unwrap()
+			.and_or()
+			.first()
+			.stages()
+			.first()
+			.unwrap()
+			.id(),
 		_ => panic!("child list"),
 	});
 	fixture.units.push(first);
@@ -216,12 +239,21 @@ fn actual_local_units_preserve_pending_tail_and_raw_literal_leaf_projection() {
 fn negated_and_until_predicates_have_real_boolean_outcomes() {
 	for (script, until) in [("if ! false; then :; fi", false), ("until false; do :; done", true)] {
 		let fixture = Fixture::new(script);
-		let condition = match &fixture.root(0).kind {
-			CommandKind::If(branch) => &branch.arms[0].cond,
-			CommandKind::While(loop_) => &loop_.cond,
+		let condition = match fixture.root(0).kind() {
+			CommandKind::If(branch) => branch.arms().next().unwrap().cond,
+			CommandKind::While(loop_) => loop_.cond(),
 			_ => panic!("condition"),
 		};
-		let key = NodeKey::engine(0, condition.items[0].and_or.first.stages[0].cmd.id);
+		let first = condition
+			.items()
+			.first()
+			.unwrap()
+			.and_or()
+			.first()
+			.stages()
+			.first()
+			.unwrap();
+		let key = NodeKey::engine(0, first.id());
 		let events = [expanded(1, key, ResolvedKind::Intrinsic), end(2, key, 1)];
 		let p = fixture.present(&events, &Options { cursor: Some(2), ..Options::default() });
 		assert_eq!(p.rows[0].meta.as_deref(), Some("↳"), "until={until}");

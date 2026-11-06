@@ -79,6 +79,11 @@ const SLICE: u32 = 1024;
 /// bash version this engine implements (`$BASH_VERSION`).
 pub const BASH_VERSION: &str = "5.3.0(1)-release";
 
+/// Largest buffer a kernel keeps for reuse (the spare syntax tree, the unit
+/// blob encoder): every ordinary command fits, and a huge one's buffers are
+/// freed instead of held for the shell's lifetime.
+const SPARE_BUFFER_BYTES: usize = 1 << 20;
+
 /// Engine types are `Send`; hosts move shells between threads.
 const _: () = {
 	const fn send<T: Send>() {}
@@ -449,6 +454,10 @@ pub struct Kernel {
 	pub pseudo_traps:       exec::PseudoTraps,
 	/// Re-parsed `${ ;}` bodies ([`exec::NoforkUnits`]); not imaged.
 	pub nofork_units:       exec::NoforkUnits,
+	/// Syntax-tree buffers of the last command run, lent to the next parse
+	/// ([`Parser::recycle`](crate::bash::syntax::Parser::recycle); at most
+	/// [`SPARE_BUFFER_BYTES`], see [`Kernel::keep_spare_tree`]); not imaged.
+	pub spare_tree:         crate::bash::syntax::Tree,
 	/// The arithmetic this shell evaluated last ([`arith::Recent`]); not
 	/// imaged.
 	pub arith_recent:       arith::Recent,
@@ -550,6 +559,7 @@ impl Kernel {
 			startup: Vec::new(),
 			pseudo_traps: exec::PseudoTraps::default(),
 			nofork_units: HashMap::new(),
+			spare_tree: crate::bash::syntax::Tree::default(),
 			arith_recent: arith::Recent::default(),
 			clock: None,
 			null_input: None,
@@ -639,12 +649,23 @@ impl Kernel {
 			.map_err(StoreError::Encode)
 			.and_then(|buf| {
 				let put = store.put_blob(crate::bash::store::BlobSlot::Unit(unit.id), &buf);
-				self.blob_buf = buf;
+				if buf.capacity() <= SPARE_BUFFER_BYTES {
+					self.blob_buf = buf;
+				}
 				put
 			});
 		if let Err(err) = written {
 			self.written.remove(&unit.id);
 			self.fail(err);
+		}
+	}
+
+	/// Lend `tree`'s buffers to the next parse ([`Kernel::spare_tree`]),
+	/// unless they outgrew [`SPARE_BUFFER_BYTES`]: one huge command's tree
+	/// is freed rather than held for the shell's lifetime.
+	pub(crate) fn keep_spare_tree(&mut self, tree: crate::bash::syntax::Tree) {
+		if tree.heap_bytes() <= SPARE_BUFFER_BYTES {
+			self.spare_tree = tree;
 		}
 	}
 
