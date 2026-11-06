@@ -58,6 +58,8 @@ All tokens below are required in `colors` except `thinkingMax` (falls back to `t
 
 `mdHeading`, `mdLink`, `mdLinkUrl`, `mdCode`, `mdCodeBlock`, `mdCodeBlockBorder`, `mdQuote`, `mdQuoteBorder`, `mdHr`, `mdListBullet`
 
+With the `tui.colorfulMarkdown` setting on (the default), headings, `**strong**`, `*emphasis*`, inline code and table headers take their colors from the theme's `terminal.ansi` palette instead of `mdHeading`/`mdCode` and plain bold/italic: H1 magenta, H2 yellow, H3–H6 blue, strong/emphasis magenta, inline code green, table headers yellow. All hues come from one palette so they stay distinct. Turning the setting off restores `mdHeading` for every level, `mdCode`, and uncolored bold/italic.
+
 ### Tool diff + syntax highlighting (12)
 
 `toolDiffAdded`, `toolDiffRemoved`, `toolDiffContext`,
@@ -82,6 +84,10 @@ Used for HTML export theming helpers:
 - `export.infoBg`
 
 If omitted, export code derives defaults from resolved theme colors.
+
+### `terminal` section (optional)
+
+Describes the terminal the theme was made for, for hosts that paint the terminal themselves (Tern); omp never sets the terminal's colors. `terminal.ansi` (exactly 16 entries, ANSI 0–15) is also the palette colorful Markdown paints from; a theme without it falls back to the terminal's own ANSI colors.
 
 ### `symbols` section (optional)
 

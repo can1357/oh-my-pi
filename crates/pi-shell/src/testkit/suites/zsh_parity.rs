@@ -737,9 +737,17 @@ fn funcs_commands_lists_every_entry_of_path() {
 	let st = rig.run(Script::command(src.as_bytes().to_vec()), Fault::None);
 	assert_eq!(
 		String::from_utf8_lossy(&rig.host.stdout.bytes()),
-		"ztst.zsh 1 \
-		 /tmp/ctst/plain\nplain=/tmp/ctst/plain\nsub=/tmp/ctst/sub\nztst.zsh=/tmp/ctst/ztst.zsh\\
-		 nplain=/tmp/ctst/plain\nsub=/tmp/ctst/sub\nztst.zsh=/tmp/ctst/ztst.zsh\n0\nztst.zsh\n"
+		concat!(
+			"ztst.zsh 1 /tmp/ctst/plain\n",
+			"plain=/tmp/ctst/plain\n",
+			"sub=/tmp/ctst/sub\n",
+			"ztst.zsh=/tmp/ctst/ztst.zsh\n",
+			"plain=/tmp/ctst/plain\n",
+			"sub=/tmp/ctst/sub\n",
+			"ztst.zsh=/tmp/ctst/ztst.zsh\n",
+			"0\n",
+			"ztst.zsh\n",
+		)
 	);
 	assert_eq!((String::from_utf8_lossy(&rig.host.stderr.bytes()).as_ref(), st), ("", 0));
 }
@@ -759,6 +767,11 @@ fn expandmb_quoting_backslashes_the_history_character() {
 
 #[test]
 fn expandmb_sorting_follows_lc_collate() {
+	// The expected order is en_US.UTF-8's; hosts without that locale sort
+	// bytewise.
+	if crate::sys::langinfo::Collator::new(b"en_US.UTF-8").is_none() {
+		return;
+	}
 	let (out, err, st) = zsh(
 		"LANG=en_US.UTF-8; a=(oracle.py oracle_ob.py drive.py B a b10 b9); print ${(o)a}; print \
 		 ${(On)a}; LC_COLLATE=C; print ${(o)a}",

@@ -285,37 +285,36 @@ pub fn perform(
 			}
 		},
 		FdProbe::Accept { fd, slot } => {
-			let polled = match &mut sc.live {
-				Live::Fd(live) => match &mut **live {
+			let polled = if let Live::Fd(live) = &mut sc.live {
+				match &mut **live {
 					FdLive::Accept(fut) => fut.poll(tcx),
 					_ => Poll::Ready(Err(bad_fd())),
-				},
-				_ => {
-					let handle = match vp.fds.get(*fd) {
-						Some(h) if h.is_open() => h.os_handle(),
-						_ => return Ok(err(&bad_fd())),
-					};
-					let Some(handle) = handle else {
-						// An engine object (a pipe, a document) is no socket.
-						#[cfg(unix)]
-						return Ok(err(&io::Error::from_raw_os_error(libc::ENOTSOCK)));
-						#[cfg(not(unix))]
-						return Ok(err(&unsupported()));
-					};
-					match cx.host.sockets() {
-						None => Poll::Ready(Err(unsupported())),
-						Some(s) => match s.accept(handle) {
-							FsPoll::Ready(r) => Poll::Ready(r),
-							FsPoll::Pending(mut fut) => {
-								let polled = fut.poll(tcx);
-								if polled.is_pending() {
-									sc.live = Live::Fd(Box::new(FdLive::Accept(fut)));
-								}
-								polled
-							},
+				}
+			} else {
+				let handle = match vp.fds.get(*fd) {
+					Some(h) if h.is_open() => h.os_handle(),
+					_ => return Ok(err(&bad_fd())),
+				};
+				let Some(handle) = handle else {
+					// An engine object (a pipe, a document) is no socket.
+					#[cfg(unix)]
+					return Ok(err(&io::Error::from_raw_os_error(libc::ENOTSOCK)));
+					#[cfg(not(unix))]
+					return Ok(err(&unsupported()));
+				};
+				match cx.host.sockets() {
+					None => Poll::Ready(Err(unsupported())),
+					Some(s) => match s.accept(handle) {
+						FsPoll::Ready(r) => Poll::Ready(r),
+						FsPoll::Pending(mut fut) => {
+							let polled = fut.poll(tcx);
+							if polled.is_pending() {
+								sc.live = Live::Fd(Box::new(FdLive::Accept(fut)));
+							}
+							polled
 						},
-					}
-				},
+					},
+				}
 			};
 			match polled {
 				Poll::Ready(Ok(Accepted { file, peer })) => {
