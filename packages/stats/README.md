@@ -47,7 +47,7 @@ omp stats --json
 
 ### Allowed hosts
 
-The dashboard answers only requests whose `Host` is loopback (`127.0.0.1`, `localhost`, `[::1]`), its bind address, or a name allowed with `--allowed-host` / `OMP_STATS_ALLOWED_HOSTS`; any other `Host` gets `421`. Entries are bare names, `*.suffix` or `name:port` — never URLs — and a malformed entry stops startup. On a wildcard bind (`0.0.0.0`, `::`), loopback names are accepted only from this machine, so reaching it from elsewhere needs an allowed host.
+The dashboard answers only requests whose `Host` is loopback (`127.0.0.1`, `localhost`, `[::1]`), its bind address, or a name allowed with `--allowed-host` / `OMP_STATS_ALLOWED_HOSTS`; any other `Host` gets `421`. Entries are bare names or `*.suffix` — never URLs, and no port, since the dashboard listens on one — and a malformed entry stops startup. On a wildcard bind (`0.0.0.0`, `::`), loopback names are accepted only from this machine, so reaching it from elsewhere needs an allowed host.
 
 A dashboard already running on the port is reused only when it serves the same allowed hosts; otherwise it keeps running and the new one listens on another port.
 

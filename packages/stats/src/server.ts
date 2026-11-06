@@ -209,20 +209,20 @@ export interface AllowedHosts {
 
 function invalidAllowedHost(entry: string): Error {
 	return new Error(
-		`Invalid allowed host ${JSON.stringify(entry)}: expected a bare host name such as "mybox.tailnet.ts.net", ` +
-			`"*.example.net" or "host:port" (no scheme, path, userinfo or whitespace)`,
+		`Invalid allowed host ${JSON.stringify(entry)}: expected a bare host name such as "mybox.tailnet.ts.net" ` +
+			`or "*.example.net" (no scheme, port, path, userinfo or whitespace)`,
 	);
 }
 
-/** Validate one `--allowed-host` entry: `[*.]host[:port]` only. */
+/**
+ * Validate one `--allowed-host` entry: `[*.]host` only. A dashboard listens on one port, so a
+ * port in the entry would restrict nothing; it is refused rather than silently ignored.
+ */
 function parseAllowedEntry(rawEntry: string): { wildcard: boolean; hostname: string } {
 	const entry = rawEntry.trim();
 	const wildcard = entry.startsWith("*.");
-	const rest = wildcard ? entry.slice(2) : entry;
-	const portMatch = /:(\d{1,5})$/.exec(rest);
-	const hostPart = portMatch ? rest.slice(0, portMatch.index) : rest;
-	if (portMatch && Number(portMatch[1]) > 65535) throw invalidAllowedHost(rawEntry);
-	if (!hostPart.startsWith("[") && hostPart.includes(":")) throw invalidAllowedHost(rawEntry);
+	const hostPart = wildcard ? entry.slice(2) : entry;
+	if (hostPart.startsWith("[") ? !hostPart.endsWith("]") : hostPart.includes(":")) throw invalidAllowedHost(rawEntry);
 	const hostname = normalizeHostName(hostPart);
 	if (!hostname || (wildcard && hostname.startsWith("["))) throw invalidAllowedHost(rawEntry);
 	return { wildcard, hostname };
@@ -673,10 +673,12 @@ const EVENT_HEARTBEAT_MS = 15_000;
 /**
  * Server-sent events of {@link LiveStatus}: the current status immediately,
  * then every change (sync progress, data version bumps, indexing backlog).
- * Read-only: ingest is owned by the server's lifetime (see `startServer`), never by a request.
+ * Disconnects unsubscribe, so ingest winds down once no page is listening.
  */
 function liveEventStream(headers: Record<string, string>, signal: AbortSignal): Response {
 	const live = statsLive();
+	// Ingest starts when the first page connects, not when the server binds.
+	live.start();
 	const encoder = new TextEncoder();
 	let cleanup = () => {};
 	const stream = new ReadableStream<Uint8Array>({
@@ -724,7 +726,7 @@ export interface StatsServerHandle {
 }
 
 // Dashboards this process already bound, keyed by requested and bound
-// `hostname:port`. A second in-process start (e.g. `/trace` twice in one
+// `hostname:port#allowedHostsKey`. A second in-process start (e.g. `/trace` twice in one
 // session, or a caller passing back a fallback port) must return the live
 // handle: probing our own port can time out under load and would then start
 // yet another dashboard on a fallback port.
@@ -764,8 +766,7 @@ export async function startServer(
 	}
 	await ensureClientBuild();
 	const register = (server: Server<undefined>): StatsServerHandle => {
-		// Ingest runs for as long as any dashboard in this process is bound; `/api/events` only observes it.
-		if (liveServers++ === 0) statsLive().start();
+		liveServers++;
 		let stopped = false;
 		const boundPort = server.port ?? port;
 		const keys =

@@ -4,11 +4,11 @@
 
 ### Breaking Changes
 
-- The `omp stats` and `/stats` dashboards refuse requests under any `Host` other than loopback, the bind address, or an allowed host (`421`), and refuse cross-site API requests (`403`); to open one under a LAN or Tailscale name, pass `omp stats --allowed-host <name>` or set `OMP_STATS_ALLOWED_HOSTS` ([#18334](https://github.com/can1357/oh-my-pi/pull/18334) by [@eggpeat](https://github.com/eggpeat))
+- The `omp stats` and `/stats` dashboards refuse requests under any `Host` other than loopback, the bind address, or an allowed host (`421`), and refuse cross-site API requests (`403`); to open one under a LAN or Tailscale name, pass `--allowed-host <name>` to `omp stats` or `/stats`, or set `OMP_STATS_ALLOWED_HOSTS` ([#18334](https://github.com/can1357/oh-my-pi/pull/18334) by [@eggpeat](https://github.com/eggpeat))
 
 ### Added
 
-- Added `--allowed-host <name>` to `omp stats` (repeatable; `*.example.net` matches subdomains) for serving the dashboard under extra host names, such as a Tailscale Serve name ([#18334](https://github.com/can1357/oh-my-pi/pull/18334) by [@eggpeat](https://github.com/eggpeat))
+- Added `--allowed-host <name>` to `omp stats` and `/stats` (repeatable; `*.example.net` matches subdomains) for serving the dashboard under extra host names, such as a Tailscale Serve name ([#18334](https://github.com/can1357/oh-my-pi/pull/18334) by [@eggpeat](https://github.com/eggpeat))
 - Added `skills.manualSkills` glob patterns to keep skills available manually while hiding them from the model catalog, without editing their `SKILL.md` files ([#18114](https://github.com/can1357/oh-my-pi/pull/18114) by [@Shadorain](https://github.com/Shadorain))
 - Added Keenable as a web search engine (`web/keenable`). It uses `KEENABLE_API_KEY` or a stored `keenable` credential when present; an explicit selection without a key uses Keenable's keyless public endpoint ([#17953](https://github.com/can1357/oh-my-pi/pull/17953) by [@KGKallasmaa](https://github.com/KGKallasmaa))
 - Bash commands now visualize execution incrementally in Raw or Python-like Pseudo, with variable values beside their latest setter and bounded replay history for foreground and background jobs; PTY and user-shell runs retain their plain command view.

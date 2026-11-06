@@ -143,9 +143,9 @@ async function raw(port: number, host: string, head: string): Promise<{ status: 
 }
 
 describe("cross-site gate on API reads", () => {
-	it("does not start a sync from /api/events and rejects cross-site event requests", async () => {
+	it("rejects cross-site event requests before they can start a sync", async () => {
 		const { base, port } = await start();
-		const spy = spyOn(statsLive(), "requestSync");
+		const spy = spyOn(statsLive(), "requestSync").mockImplementation(() => {});
 		try {
 			expect(await status(`${base}/api/events`, { headers: { "Sec-Fetch-Site": "cross-site" } })).toBe(403);
 			expect(
@@ -153,9 +153,9 @@ describe("cross-site gate on API reads", () => {
 			).toBe(403);
 			expect(await status(`${base}/api/events`, { headers: { Origin: `http://127.0.0.1:${port + 1}` } })).toBe(403);
 			expect(spy).not.toHaveBeenCalled();
-			// A same-origin page may still subscribe, and subscribing is read-only.
+			// A same-origin page still subscribes, and its first connection starts ingest.
 			expect(await status(`${base}/api/events`, { headers: { "Sec-Fetch-Site": "same-origin" } })).toBe(200);
-			expect(spy).not.toHaveBeenCalled();
+			expect(spy).toHaveBeenCalled();
 		} finally {
 			spy.mockRestore();
 		}
@@ -262,6 +262,10 @@ describe("--allowed-host validation", () => {
 			"host .example",
 			"host.example:80:90",
 			"host.example:http",
+			// One listener, one port: a port would restrict nothing, so it is refused, not ignored.
+			"other.example:8443",
+			"*.wild.example:8443",
+			"[2001:db8::1]:8443",
 			"a..example",
 			"*.",
 			"*",
@@ -269,7 +273,7 @@ describe("--allowed-host validation", () => {
 			expect(() => buildAllowedHosts("127.0.0.1", [entry])).toThrow(/allowed host/i);
 		}
 		expect(() =>
-			buildAllowedHosts("127.0.0.1", ["host.example", "*.wild.example", "other.example:8443"]),
+			buildAllowedHosts("127.0.0.1", ["host.example", "*.wild.example", "[2001:db8::1]"]),
 		).not.toThrow();
 	});
 

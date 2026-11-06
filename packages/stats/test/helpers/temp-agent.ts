@@ -18,7 +18,6 @@ import { afterEach, beforeEach } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
 import { closeDb } from "@oh-my-pi/omp-stats/db";
-import { statsLive } from "@oh-my-pi/omp-stats/live";
 import { getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 const XDG_KEYS = ["XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"] as const;
@@ -46,17 +45,7 @@ export function installStatsTestIsolation(prefix: string): StatsTestIsolation {
 		setAgentDir(path.join(os.homedir(), configDir, "agent"));
 	});
 
-	afterEach(async () => {
-		// A dashboard started by the test begins ingest on bind; let that sync finish before the DB goes away.
-		const live = statsLive();
-		if (live.status().sync.phase === "syncing") {
-			const { promise, resolve } = Promise.withResolvers<void>();
-			const unsubscribe = live.subscribe(status => {
-				if (status.sync.phase !== "syncing") resolve();
-			});
-			await promise;
-			unsubscribe();
-		}
+	afterEach(() => {
 		closeDb();
 		if (originalConfigDir === undefined) {
 			delete process.env.PI_CONFIG_DIR;

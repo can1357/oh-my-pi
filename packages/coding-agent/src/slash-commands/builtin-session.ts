@@ -447,7 +447,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		name: "stats",
 		icon: "stats",
 		description: "Launch the local stats dashboard",
-		inlineHint: "[--port <port>] [--host <host>]",
+		inlineHint: "[--port <port>] [--host <host>] [--allowed-host <name>]...",
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			const parsed = parseStatsDashboardArgs(command.args);

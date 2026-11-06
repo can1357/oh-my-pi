@@ -13,7 +13,6 @@
 ### Changed
 
 - The dashboard refuses cross-site API requests (`403`), and starting a sync now needs the `X-Omp-Stats-Action` header like its other actions ([#18334](https://github.com/can1357/oh-my-pi/pull/18334) by [@eggpeat](https://github.com/eggpeat))
-- Background session ingest starts with the dashboard instead of when a page first connects ([#18334](https://github.com/can1357/oh-my-pi/pull/18334) by [@eggpeat](https://github.com/eggpeat))
 - A dashboard still running from an older omp is replaced instead of reused, so the new host checks take effect ([#18334](https://github.com/can1357/oh-my-pi/pull/18334) by [@eggpeat](https://github.com/eggpeat))
 
 ### Fixed

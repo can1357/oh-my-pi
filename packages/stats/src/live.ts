@@ -2,7 +2,7 @@
  * Live ingest for a running dashboard: background session sync, rollup
  * refresh, and a status stream the client subscribes to (`/api/events`).
  *
- * The dashboard never waits for ingest. {@link StatsLive.start} (called when the server binds) kicks a full
+ * The dashboard never waits for ingest. {@link StatsLive.start} kicks a full
  * sync in the background and watches the sessions directory; changed
  * transcripts are re-synced (only those files) shortly after they are written.
  * Every batch that changes stored rows bumps {@link LiveStatus.version}
