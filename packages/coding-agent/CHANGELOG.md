@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `grep -e` and `rg -e` in the bash tool accept patterns that start with `-` (e.g. `grep -e "--canary"`) instead of failing with an unknown-option error.
+
 ## [18.17.0] - 2026-11-06
 
 ### Added
