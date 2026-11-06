@@ -1,1 +1,1 @@
-`agent://<id>`: latest completed output (status + progress while unpublished); nested IDs dotted, `/key/index` JSON path; write = message{{#unless subagent}}, `agent://all` broadcast only{{/unless}}.
+`agent://<id>`: latest completed output (status + progress while unpublished); nested IDs dotted, `/key/index` JSON path; write = message{{#unless subagent}}, `agent://all` broadcast only{{/unless}}. Bare `agent://` (no id) lists every agent you can see: local session peers and remote `a2a:*` agents of other live terminals.
