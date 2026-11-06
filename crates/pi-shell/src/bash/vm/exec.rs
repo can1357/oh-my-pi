@@ -2239,21 +2239,6 @@ pub fn assign_jump(vp: &mut Vproc, cx: &mut Cx<'_>) -> Flow {
 	Flow::Exit(jump_status(cx, vp, JumpCode::AssignDiscard))
 }
 
-/// Any OTHER failure of an assignment statement (`readonly r=1; r=2`, a
-/// nameref that cannot bind): the same jump from the same
-/// status-preserving site, except that `errexit` does raise `ERREXIT` in
-/// its place. That one difference is all that separates it from
-/// [`assign_jump`], and both bashes show it: inside an EXIT trap's action
-/// `set -e; trap 'r=2' EXIT; exit 7` is 7 and `set -e; trap ':; r=2' EXIT;
-/// exit 7` is 1 (the status at the site, a zero raised to 1), while the
-/// arithmetic form is 7 either way.
-pub fn assignment_jump(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Flow {
-	if errexit_jump(k, cx, vp) {
-		return Flow::Exit(jump_status(cx, vp, JumpCode::Errexit));
-	}
-	assign_jump(vp, cx)
-}
-
 /// Whether `vp` runs a `-c` string as the shell itself (a nested shell,
 /// depth 0, is its own `-c` shell).
 fn shell_command(cx: &mut Cx<'_>, vp: &Vproc) -> bool {
