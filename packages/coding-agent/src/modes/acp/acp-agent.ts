@@ -1739,9 +1739,13 @@ export class AcpAgent implements Agent {
 		const record = this.#createManagedSessionRecord(session, setToolUIContext, protocolSessionId);
 		// Registered before extensions start: a `session_start` handler can already replace the durable session.
 		session.registerSessionChangeCallback(() => this.#rememberHandleSession(record));
-		session.setClientBridge(
-			createAcpClientBridge(this.#connection, record.protocolSessionId, this.#clientCapabilities),
-		);
+		session.setClientBridge({
+			...createAcpClientBridge(this.#connection, record.protocolSessionId, this.#clientCapabilities),
+			get deferAgentInitiatedTurns() {
+				const promptTurn = record.promptTurn;
+				return !promptTurn || promptTurn.settled || promptTurn.cancelRequested;
+			},
+		});
 		// Client-declared servers live in `record.mcpManager`, not the session's
 		// own (ACP sessions run with `enableMCP: false`); read it live so every
 		// reconfiguration's `refreshMCPTools` rebuild renders its instructions.
