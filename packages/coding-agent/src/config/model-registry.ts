@@ -1062,9 +1062,16 @@ export class ModelRegistry {
 		if (this.#configReload) return this.#configReload;
 		if (this.#ignoreLocalModelConfig) return Promise.resolve(false);
 		const stamp = this.#modelsConfigFile.getStamp();
-		if (stamp === this.#loadedConfigStamp || (stamp !== null && stamp === this.#rejectedConfigStamp)) {
+		if (stamp === this.#loadedConfigStamp) {
+			// The version this catalog was built from is the one on disk again, so an edit rejected in
+			// between is gone with it and its error no longer describes the file.
+			if (this.#rejectedConfigStamp !== null && this.#rejectedConfigStamp !== stamp) {
+				this.#rejectedConfigStamp = null;
+				this.#configError = undefined;
+			}
 			return Promise.resolve(false);
 		}
+		if (stamp !== null && stamp === this.#rejectedConfigStamp) return Promise.resolve(false);
 		this.#modelsConfigFile.invalidate();
 		const probe = this.#modelsConfigFile.tryLoad();
 		if (probe.status === "error") {
@@ -1463,7 +1470,7 @@ export class ModelRegistry {
 	#loadModels() {
 		// The stamp the rebuild that called us read the file at, else the file's current one. `null`
 		// is a stamp of its own (the file was missing), so only `undefined` means none was taken.
-		const configStamp =
+		let configStamp =
 			this.#pendingConfigStamp !== undefined ? this.#pendingConfigStamp : this.#modelsConfigFile.getStamp();
 		this.#pendingConfigStamp = undefined;
 		this.#resetStaticComposition();
@@ -1496,6 +1503,12 @@ export class ModelRegistry {
 			this.#applyHardcodedModelPolicies(this.#loadCachedDiscoverableModels()),
 		);
 		this.#lastStaticLoadMtime = this.#modelsConfigFile.getMtimeMs();
+		// A file that appeared between that stamp and the read: the catalog is the file's, not the
+		// missing file's, so record the version it actually came from or a later deletion looks
+		// like no change at all.
+		if (configStamp === null && this.#lastLoadedModelsConfig !== undefined) {
+			configStamp = this.#modelsConfigFile.getStamp();
+		}
 		this.#loadedConfigStamp = configStamp;
 		// The config #loadCustomModels built from: the file's own parse when it loaded, the last one
 		// that loaded while a later edit does not, and nothing once the file is gone.
@@ -3791,7 +3804,7 @@ export class ModelRegistry {
 	find(provider: string, modelId: string): Model<Api> | undefined {
 		if (this.#isProviderDisabled(provider)) return undefined;
 		const model = resolveProviderModelReference(provider, modelId, this.#modelsForProviderLookup(provider));
-		if (model) this.#handOut(model, modelId);
+		if (model) this.#handOut(model, modelId, true);
 		return model;
 	}
 
@@ -3880,10 +3893,15 @@ export class ModelRegistry {
 	}
 
 	/** Record that `model` (looked up as `ref`) was handed out under the current configuration. */
-	#handOut(model: Model<Api>, ref: string): void {
-		if (!this.#handedOut.has(model)) {
+	#handOut(model: Model<Api>, ref: string, selected = false): void {
+		const held = this.#handedOut.get(model);
+		if (!held) {
 			this.#handedOut.set(model, { ref, entry: model, digests: this.#providerConfigDigests });
+			return;
 		}
+		// An enumeration tags a collapsed model by its own id; a later explicit lookup names the
+		// variant the caller selected, and that is the reference a rebind and the catalog check need.
+		if (selected && held.ref !== ref) this.#handedOut.set(model, { ...held, ref });
 	}
 
 	#handOutAll<T extends Model<Api>[]>(models: T): T {
