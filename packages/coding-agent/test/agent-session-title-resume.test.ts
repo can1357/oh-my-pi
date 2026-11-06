@@ -266,4 +266,30 @@ describe("AgentSession names a resumed session that carries no operator message"
 		expect(target.sessionName).toBeUndefined();
 		expect(titleModel).not.toHaveBeenCalled();
 	});
+
+	it("does not revive the resumed transcript's try when its request is interrupted", async () => {
+		// An interrupt revives an operator message's try, because the operator can
+		// send it again. A transcript cannot be sent again, and reviving it let
+		// every later wake start another request: three wakes, three calls, past
+		// the one this resume is allowed.
+		const file = await writeDeadTranscript(tmpDir!);
+		const target = await resume(file, { "title.generator": "tiny" });
+		const request = Promise.withResolvers<ai.AssistantMessage>();
+		let calls = 0;
+		vi.spyOn(ai, "completeSimple").mockImplementation(() => {
+			calls++;
+			return request.promise;
+		});
+
+		await wake(target);
+		expect(calls).toBe(1);
+		// `abort()` cancels the in-flight title request and rotates its controller.
+		await target.abort();
+		request.resolve(createAssistantMessage("<title>Rebase the ShellPortAudit pull requests</title>"));
+		await wake(target);
+		await wake(target);
+
+		expect(target.sessionName).toBeUndefined();
+		expect(calls).toBe(1);
+	});
 });

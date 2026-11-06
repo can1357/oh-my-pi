@@ -5015,8 +5015,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Named by the launch, before anything can generate a name: a replacement
 		// process inherits the name its predecessor was known by, and every
 		// automatic path — which runs only while the session is unnamed — stands down.
-		if (options.sessionTitle) {
-			await sessionManager.setSessionName(options.sessionTitle, "user");
+		// Cleaned here as well as in `buildSessionOptions`, because an embedder
+		// calling this directly gets no CLI validation and `setSessionName` drops a
+		// title that cleans away to nothing without a word.
+		if (options.sessionTitle !== undefined) {
+			const title = SessionManager.cleanTitle(options.sessionTitle);
+			if (title) await sessionManager.setSessionName(title, "user");
+			else
+				logger.warn("sessionTitle holds no title; the session stays unnamed", {
+					sessionTitle: options.sessionTitle,
+				});
 		}
 
 		// Advisors share this session's extension runner (for the approval gate
