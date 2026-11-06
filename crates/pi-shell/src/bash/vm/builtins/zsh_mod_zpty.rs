@@ -152,7 +152,7 @@ pub struct Progress {
 }
 
 impl Progress {
-	fn new() -> Self {
+	const fn new() -> Self {
 		Self {
 			buf:     Vec::new(),
 			used:    0,
@@ -207,7 +207,7 @@ fn alive(ctx: &mut Ctx<'_, '_>, vpid: Vpid) -> bool {
 }
 
 /// One byte from `fd` without waiting.
-fn read1(ctx: &mut Ctx<'_, '_>, fd: i32) -> Rd {
+fn read1(ctx: &Ctx<'_, '_>, fd: i32) -> Rd {
 	let h = ctx.vp.fds.handle(fd);
 	let mut tcx = Context::from_waker(&ctx.k.waker);
 	let mut b = [0u8; 1];
@@ -221,7 +221,7 @@ fn read1(ctx: &mut Ctx<'_, '_>, fd: i32) -> Rd {
 }
 
 /// The next byte for `cmd`: a parked read's end of input first.
-fn next_byte(ctx: &mut Ctx<'_, '_>, cmd: &mut PtyCmd) -> Rd {
+fn next_byte(ctx: &Ctx<'_, '_>, cmd: &mut PtyCmd) -> Rd {
 	if std::mem::take(&mut cmd.eof) {
 		return Rd::Eof;
 	}
@@ -230,7 +230,7 @@ fn next_byte(ctx: &mut Ctx<'_, '_>, cmd: &mut PtyCmd) -> Rd {
 
 /// Whether input is available on `fd` (zsh's `select` with a zero
 /// timeout in `ptyread`).
-fn ready(ctx: &mut Ctx<'_, '_>, fd: i32) -> bool {
+fn ready(ctx: &Ctx<'_, '_>, fd: i32) -> bool {
 	let h = ctx.vp.fds.handle(fd);
 	let mut tcx = Context::from_waker(&ctx.k.waker);
 	h.is_open() && h.poll_read(&mut tcx, &mut []).is_ready()
@@ -277,7 +277,7 @@ fn settle(ctx: &mut Ctx<'_, '_>, cmd: &mut PtyCmd) -> Result<(), Need> {
 }
 
 /// Park `cmd` on a one-byte read.
-fn park(cmd: &mut PtyCmd, at_read: bool) -> Need {
+const fn park(cmd: &mut PtyCmd, at_read: bool) -> Need {
 	let part = cmd.parts;
 	cmd.parts = cmd.parts.wrapping_add(1);
 	cmd.wait = Some(Parked { part, at_read });
@@ -716,28 +716,27 @@ fn ptyread(
 	// read's result (end of input included), not `checkptycmd`'s.
 	let resume_at_read = cmd.progress.is_some() && cmd.wait.is_some_and(|w| w.at_read);
 	settle(ctx, cmd)?;
-	let mut p = match cmd.progress.take() {
-		Some(p) => p,
-		None => {
-			let mut p = Progress::new();
-			if !cmd.old.is_empty() {
-				p.buf = std::mem::take(&mut cmd.old);
-				p.used = p.buf.iter().map(|&c| if imeta(c) { 2 } else { 1 }).sum();
-				p.blen = 256 + p.used;
+	let mut p = if let Some(p) = cmd.progress.take() {
+		p
+	} else {
+		let mut p = Progress::new();
+		if !cmd.old.is_empty() {
+			p.buf = std::mem::take(&mut cmd.old);
+			p.used = p.buf.iter().map(|&c| if imeta(c) { 2 } else { 1 }).sum();
+			p.blen = 256 + p.used;
+		}
+		if let Some(c) = cmd.read.take() {
+			// zsh stores the byte at the end but then counts one byte:
+			// what was kept from before is cut to its first byte.
+			if p.buf.is_empty() {
+				p.buf.push(c);
+			} else {
+				p.buf.truncate(1);
 			}
-			if let Some(c) = cmd.read.take() {
-				// zsh stores the byte at the end but then counts one byte:
-				// what was kept from before is cut to its first byte.
-				if p.buf.is_empty() {
-					p.buf.push(c);
-				} else {
-					p.buf.truncate(1);
-				}
-				p.used = 1;
-				p.seen = true;
-			}
-			p
-		},
+			p.used = 1;
+			p.seen = true;
+		}
+		p
 	};
 	let matchok = match p.matched {
 		Some(m) => m,
@@ -754,10 +753,11 @@ fn ptyread(
 		cmd.old = std::mem::take(&mut p.buf);
 		return done(1);
 	}
-	let mut ret = i32::from(cmd.fin) + 1;
-	if p.seen && (prog.is_none() || matchok || !mustmatch) {
-		ret = 0;
-	}
+	let ret = if p.seen && (prog.is_none() || matchok || !mustmatch) {
+		0
+	} else {
+		i32::from(cmd.fin) + 1
+	};
 	if let Some(param) = args.first() {
 		// Kept until stored: a parameter assignment that must run a
 		// substitution first re-runs the builtin.
@@ -850,25 +850,22 @@ fn read_loop(
 				}
 			}
 		}
-		match prog {
-			None => {
-				if p.ret <= 0 || (!args.is_empty() && p.buf.last() == Some(&b'\n')) {
+		if prog.is_none() {
+			if p.ret <= 0 || (!args.is_empty() && p.buf.last() == Some(&b'\n')) {
+				return Ok(false);
+			}
+		} else {
+			if p.ret < 0 && !p.again {
+				return Ok(false);
+			}
+			if p.ret == 0 {
+				// zsh spins on a pty that reads end of input while its
+				// command lives; the engine must not.
+				p.zeros += 1;
+				if p.zeros > 1 {
 					return Ok(false);
 				}
-			},
-			Some(_) => {
-				if p.ret < 0 && !p.again {
-					return Ok(false);
-				}
-				if p.ret == 0 {
-					// zsh spins on a pty that reads end of input while its
-					// command lives; the engine must not.
-					p.zeros += 1;
-					if p.zeros > 1 {
-						return Ok(false);
-					}
-				}
-			},
+			}
 		}
 		if p.used >= READ_MAX {
 			return Ok(false);

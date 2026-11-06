@@ -20,6 +20,8 @@
 //! [`TtyWriter::dead`] and drops all queued output; the JS side maps that to
 //! its terminal-disconnected teardown.
 
+#[cfg(unix)]
+use std::os::fd::{BorrowedFd, IntoRawFd};
 use std::{
 	sync::{
 		Arc,
@@ -28,8 +30,6 @@ use std::{
 	thread::JoinHandle,
 	time::{Duration, Instant},
 };
-#[cfg(unix)]
-use std::os::fd::{BorrowedFd, IntoRawFd};
 
 use napi::{Error, JsString, Result};
 use napi_derive::napi;

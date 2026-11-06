@@ -686,7 +686,9 @@ mod tests {
 		// SAFETY: getpgrp has no preconditions.
 		let host = unsafe { libc::getpgrp() };
 		let sync = run_sync(dir.path(), &args, SYNC_TIMEOUT).expect("sync runner");
-		let spawned = run(dir.path(), &args, &RunOptions::default()).await.expect("async runner");
+		let spawned = run(dir.path(), &args, &RunOptions::default())
+			.await
+			.expect("async runner");
 		for out in [sync, spawned] {
 			assert_eq!(out.exit_code, 0, "alias failed: {out:?}");
 			let pgid: i32 = out.stdout.trim().parse().expect("pgid");
