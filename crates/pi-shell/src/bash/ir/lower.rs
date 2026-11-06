@@ -1,6 +1,6 @@
 //! AST → IR lowering.
 
-use bstr::BString;
+use bstr::{BString, ByteSlice};
 
 use super::{
 	AssignOp, AssignVal, CaseIr, Cmd, ComsubForm, CondIr, ElemIr, FuncDefinition, FuncIr, NodeInfo,
@@ -38,7 +38,7 @@ pub fn lower(
 	mode: ModeId,
 	features: syn::Features,
 ) -> Result<Unit, &'static str> {
-	lower_command(cc, src, mode, features, false)
+	lower_command(cc, src, mode, features, false, None)
 }
 
 /// Lower a command while retaining parsed function bodies for their first call.
@@ -48,15 +48,60 @@ pub(crate) fn lower_deferred(
 	mode: ModeId,
 	features: syn::Features,
 ) -> Result<Unit, &'static str> {
-	lower_command(cc, src, mode, features, true)
+	lower_command(cc, src, mode, features, true, None)
 }
 
+/// [`lower_deferred`] with the command's source-context hasher
+/// ([`replay_hasher`]) and the id it names the command by ([`replay_id`])
+/// already computed.
+pub(crate) fn lower_deferred_hashed(
+	cc: &syn::CompleteCommand,
+	src: &[u8],
+	mode: ModeId,
+	features: syn::Features,
+	source_hash: blake3::Hasher,
+	id: super::UnitId,
+) -> Result<Unit, &'static str> {
+	lower_command(cc, src, mode, features, true, Some((source_hash, Some(id))))
+}
+
+/// The source-context hasher of a source-replayable command, whose unit
+/// [`lower_deferred`] names by that context alone
+/// ([`Unit::seal_source_from`]); `None` for other commands.
+pub(crate) fn replay_hasher(
+	cc: &syn::CompleteCommand,
+	src: &[u8],
+	mode: ModeId,
+	features: syn::Features,
+) -> Option<blake3::Hasher> {
+	if !cc.source_replay {
+		return None;
+	}
+	let aliases: Vec<(BString, BString)> = cc
+		.aliases
+		.iter()
+		.map(|a| (a.name.as_slice().into(), a.value.as_slice().into()))
+		.collect();
+	Some(super::source_hasher(mode, features.bits(), cc.span.slice(src), &aliases, cc.line))
+}
+
+/// The id [`lower_deferred`] gives the source-replayable command whose
+/// source-context hasher is `h`, known without lowering it.
+pub(crate) fn replay_id(h: &blake3::Hasher) -> super::UnitId {
+	let mut h = h.clone();
+	h.update(b"syntax");
+	super::UnitId(*h.finalize().as_bytes())
+}
+
+/// Lower `cc`. `source_hash`: its source-context hasher, with the id it
+/// names a source-replayable command by, when the caller has them.
 fn lower_command(
 	cc: &syn::CompleteCommand,
 	src: &[u8],
 	mode: ModeId,
 	features: syn::Features,
 	deferred: bool,
+	source_hash: Option<(blake3::Hasher, Option<super::UnitId>)>,
 ) -> Result<Unit, &'static str> {
 	let bytes = cc.span.slice(src);
 	let mut unit = Unit::empty(bytes, mode, features.bits());
@@ -72,7 +117,8 @@ fn lower_command(
 			cc.node_count as usize
 		];
 	}
-	let mut l = Lower::new(unit, cc.span.lo, features);
+	let (source_hash, replay_id) = source_hash.map_or((None, None), |(h, id)| (Some(h), id));
+	let mut l = Lower::new(unit, cc.span.lo, features, source_hash);
 	l.deferred = deferred;
 	l.source_replay = cc.source_replay;
 	for w in &cc.warnings {
@@ -81,10 +127,10 @@ fn lower_command(
 	}
 	l.list(&cc.list)?;
 	l.emit(Opcode::End, 0, 0, 0);
-	if deferred && cc.source_replay {
-		l.unit.seal_source_from(l.source_hash);
-	} else {
-		l.unit.seal_from(l.source_hash);
+	match replay_id {
+		Some(id) if deferred && cc.source_replay => l.unit.seal_source_as(id),
+		_ if deferred && cc.source_replay => l.unit.seal_source_from(l.source_hash),
+		_ => l.unit.seal_from(l.source_hash),
 	}
 	Ok(l.unit)
 }
@@ -99,7 +145,7 @@ pub fn lower_text(
 	mode: ModeId,
 	features: syn::Features,
 ) -> Result<Unit, &'static str> {
-	let mut l = Lower::new(Unit::empty(text, mode, features.bits()), 0, features);
+	let mut l = Lower::new(Unit::empty(text, mode, features.bits()), 0, features, None);
 	l.text = true;
 	l.emit(Opcode::End, 0, 0, 0);
 	l.word(word)?;
@@ -151,7 +197,7 @@ pub fn lower_compound(
 		NodeInfo { kind: NodeKind::Word, lo: 0, hi: 0, line: 0, col: 1 };
 		cc.node_count as usize
 	];
-	let mut l = Lower::new(unit, cc.span.lo, features);
+	let mut l = Lower::new(unit, cc.span.lo, features, None);
 	l.emit(Opcode::End, 0, 0, 0);
 	let elems = l.elems(elems)?;
 	// Substitution bodies are blocks skipped by a jump to the code after
@@ -337,7 +383,7 @@ pub(crate) fn materialize(unit: &Unit, observed: bool) -> Option<Unit> {
 	body.deferred = None;
 	let features = syn::Features::from_bits(body.features);
 	let root = body.root?;
-	let mut lower = Lower::new(body, base, features);
+	let mut lower = Lower::new(body, base, features, None);
 	lower.deferred = true;
 	lower.command(&cmd).ok()?;
 	lower.emit(Opcode::End, 0, 0, root);
@@ -377,8 +423,8 @@ struct Lower {
 	source_replay: bool,
 	/// Absolute offset of the unit's first byte.
 	base:          u32,
-	/// Unit-relative offsets of line starts.
-	line_starts:   Vec<u32>,
+	/// Line starts of the unit's source, found as nodes ask for them.
+	lines:         Lines,
 	/// Depth of condition contexts.
 	cond:          u32,
 	features:      syn::Features,
@@ -388,28 +434,70 @@ struct Lower {
 	text:          bool,
 }
 
+/// The line starts of a unit's source (unit-relative offsets), scanned on
+/// demand: a node's line needs only the text before it, and a definition
+/// whose body is deferred records nodes at its start alone.
+#[derive(Clone)]
+struct Lines {
+	/// Offsets of the line starts found so far; the first line starts at 0.
+	starts:  Vec<u32>,
+	/// The source before this offset has been scanned.
+	scanned: usize,
+}
+
+impl Default for Lines {
+	fn default() -> Self {
+		Self { starts: vec![0], scanned: 0 }
+	}
+}
+
+impl Lines {
+	/// The 0-based line and 1-based column of offset `lo` in `src`.
+	fn line_col(&mut self, src: &[u8], lo: u32) -> (u32, u32) {
+		// A line starting at or before `lo` follows a newline before it.
+		let end = (lo as usize).min(src.len());
+		while self.scanned < end {
+			match src[self.scanned..end].find_byte(b'\n') {
+				Some(i) => {
+					let nl = self.scanned + i;
+					self.starts.push(nl as u32 + 1);
+					self.scanned = nl + 1;
+				},
+				None => self.scanned = end,
+			}
+		}
+		let line = self.starts.partition_point(|&s| s <= lo).saturating_sub(1);
+		(line as u32, lo - self.starts[line] + 1)
+	}
+}
+
 type R = Result<(), &'static str>;
 type Idx = Result<u32, &'static str>;
 
 impl Lower {
-	fn new(unit: Unit, base: u32, features: syn::Features) -> Self {
-		let mut line_starts = vec![0u32];
-		line_starts.extend(
-			unit
-				.source
-				.iter()
-				.enumerate()
-				.filter(|&(_, &c)| c == b'\n')
-				.map(|(i, _)| i as u32 + 1),
+	fn new(
+		unit: Unit,
+		base: u32,
+		features: syn::Features,
+		source_hash: Option<blake3::Hasher>,
+	) -> Self {
+		// A supplied hasher was built from the command (`replay_hasher`),
+		// not from this unit: the two must hash one context, or the cache
+		// key and every id sealed from it name the wrong source.
+		debug_assert!(
+			source_hash
+				.as_ref()
+				.is_none_or(|h| h.finalize() == unit.source_hasher().finalize()),
+			"a precomputed source context matches the unit's"
 		);
-		let source_hash = unit.source_hasher();
+		let source_hash = source_hash.unwrap_or_else(|| unit.source_hasher());
 		Self {
 			unit,
 			source_hash,
 			deferred: false,
 			source_replay: false,
 			base,
-			line_starts,
+			lines: Lines::default(),
 			cond: 0,
 			features,
 			text: false,
@@ -445,11 +533,7 @@ impl Lower {
 
 	fn node(&mut self, id: syn::NodeId, kind: NodeKind, span: syn::Span) {
 		let span = span.rebase(self.base);
-		let line = self
-			.line_starts
-			.partition_point(|&s| s <= span.lo)
-			.saturating_sub(1);
-		let col = span.lo - self.line_starts[line] + 1;
+		let (line, col) = self.lines.line_col(&self.unit.source, span.lo);
 		if self.unit.nodes.len() <= id.0 as usize {
 			self.unit.nodes.resize(id.0 as usize + 1, NodeInfo {
 				kind: NodeKind::Word,
@@ -459,8 +543,7 @@ impl Lower {
 				col:  1,
 			});
 		}
-		self.unit.nodes[id.0 as usize] =
-			NodeInfo { kind, lo: span.lo, hi: span.hi, line: line as u32, col };
+		self.unit.nodes[id.0 as usize] = NodeInfo { kind, lo: span.lo, hi: span.hi, line, col };
 	}
 
 	fn list(&mut self, list: &syn::List) -> R {
@@ -935,7 +1018,7 @@ impl Lower {
 			deferred:      false,
 			source_replay: false,
 			base:          self.base,
-			line_starts:   self.line_starts.clone(),
+			lines:         self.lines.clone(),
 			cond:          0,
 			features:      self.features,
 			text:          false,
