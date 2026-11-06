@@ -27,6 +27,10 @@ enum Mode {
 	/// syntax errors in a `.` file name that file and its line. Filter only
 	/// the two no-terminal job-control notices, keeping every diagnostic line.
 	Interactive,
+	/// A forced-interactive invocation reading a noninteractive file input.
+	InteractiveFile,
+	/// Setup supplies a script operand, including a FIFO or binary bytes.
+	Operand,
 }
 
 /// One case: what Bash 5.3.0 writes for `script` after `setup`, byte for byte.
@@ -97,10 +101,17 @@ async fn observe(row: &Row) -> (i32, Vec<u8>, Vec<u8>, String) {
 			let read = |p: &Path| std::fs::read(p).unwrap_or_default();
 			(result.exit_code.unwrap_or(-1), read(&out), read(&err), home)
 		},
-		Mode::Interactive => {
+		Mode::Interactive | Mode::InteractiveFile => {
+			let args = if row.mode == Mode::InteractiveFile {
+				std::fs::write(dir.path().join("script.sh"), format!("{}\n", row.script))
+					.expect("write the case script");
+				vec!["--norc", "--noprofile", "-i", "script.sh"]
+			} else {
+				vec!["--norc", "--noprofile", "-i", "-c", row.script]
+			};
 			let done = Command::new(env!("CARGO_BIN_EXE_obash"))
 				.arg0("bash")
-				.args(["--norc", "--noprofile", "-i", "-c", row.script])
+				.args(args)
 				.current_dir(dir.path())
 				.env_clear()
 				.envs(&env)
@@ -118,12 +129,17 @@ async fn observe(row: &Row) -> (i32, Vec<u8>, Vec<u8>, String) {
 				.collect();
 			(done.status.code().unwrap_or(-1), done.stdout, stderr, home)
 		},
-		Mode::ScriptFile => {
-			std::fs::write(dir.path().join("script.sh"), format!("{}\n", row.script))
-				.expect("write the case script");
+		Mode::ScriptFile | Mode::Operand => {
+			let operand = if row.mode == Mode::Operand {
+				row.script
+			} else {
+				std::fs::write(dir.path().join("script.sh"), format!("{}\n", row.script))
+					.expect("write the case script");
+				"script.sh"
+			};
 			let done = Command::new(env!("CARGO_BIN_EXE_obash"))
 				.arg0("bash")
-				.arg("script.sh")
+				.arg(operand)
 				.current_dir(dir.path())
 				.env_clear()
 				.envs(&env)
@@ -724,6 +740,96 @@ const ROWS: &[Row] = &[
 		status: 1,
 		stdout: b"",
 		stderr: b"bash: eval: line 1: syntax error near unexpected token `)'\nbash: eval: line 1: `)'\n",
+	},
+	// src-operand-nul-80 (operand)
+	Row {
+		id: "src-operand-nul-80",
+		setup: r#"printf ':                                                                               \000\ncd ./missing\n' > run.sh"#,
+		mode: Mode::Operand,
+		script: "run.sh",
+		status: 1,
+		stdout: b"",
+		stderr: b"run.sh: line 2: cd: ./missing: No such file or directory\n",
+	},
+	// src-operand-nul-127 (operand)
+	Row {
+		id: "src-operand-nul-127",
+		setup: r#"printf ':                                                                                                                              \000\ncd ./missing\n' > run.sh"#,
+		mode: Mode::Operand,
+		script: "run.sh",
+		status: 1,
+		stdout: b"",
+		stderr: b"run.sh: line 2: cd: ./missing: No such file or directory\n",
+	},
+	// src-operand-elf-fifo (operand)
+	Row {
+		id: "src-operand-elf-fifo",
+		setup: r#"mkfifo run.sh; chmod 755 run.sh; (printf '\177ELF text\n' > run.sh) </dev/null >/dev/null 2>&1 &"#,
+		mode: Mode::Operand,
+		script: "run.sh",
+		status: 127,
+		stdout: b"",
+		stderr: b"run.sh: line 1: $'\\177ELF': command not found\n",
+	},
+	// src-fallback-nul80-control (c)
+	Row {
+		id: "src-fallback-nul80-control",
+		setup: r#"printf ':                                                                               \000\ncd ./missing\n' > v; chmod 755 v"#,
+		mode: Mode::Dashc,
+		script: r#"./v; printf "fallback:%s\n" "$?""#,
+		status: 0,
+		stdout: b"fallback:126\n",
+		stderr: b"bash: line 1: ./v: cannot execute binary file: Exec format error\n",
+	},
+	// int-comsub-eval-child (i)
+	Row {
+		id: "int-comsub-eval-child",
+		setup: "",
+		mode: Mode::Interactive,
+		script: r#"x=$(eval ")"); :"#,
+		status: 0,
+		stdout: b"",
+		stderr: b"bash: eval: line 1: syntax error near unexpected token `)'\nbash: eval: line 1: `)'\n",
+	},
+	// int-file-token (ifile)
+	Row {
+		id: "int-file-token",
+		setup: "",
+		mode: Mode::InteractiveFile,
+		script: ")",
+		status: 2,
+		stdout: b"",
+		stderr: b"bash: script.sh: line 1: syntax error near unexpected token `)'\nbash: script.sh: line 1: `)'\n",
+	},
+	// int-file-cd (ifile)
+	Row {
+		id: "int-file-cd",
+		setup: "",
+		mode: Mode::InteractiveFile,
+		script: "cd ./missing",
+		status: 1,
+		stdout: b"",
+		stderr: b"bash: cd: ./missing: No such file or directory\n",
+	},
+	// src-script-exit-source-stack (file)
+	Row {
+		id: "src-script-exit-source-stack",
+		setup: r#"printf '. ./f2\n' > f1; printf '. ./f3\n' > f2; printf 'exit 7\n' > f3"#,
+		mode: Mode::ScriptFile,
+		script: "trap 'cd ./exitmissing' EXIT; . ./f1",
+		status: 7,
+		stdout: b"",
+		stderr: b"./f1: line 1: cd: ./exitmissing: No such file or directory\n",
+	},
+	// src-byte-source-read (c)
+	Row {
+		id: "src-byte-source-read",
+		setup: "",
+		mode: Mode::Dashc,
+		script: r#". $'./a\377b'"#,
+		status: 1,
+		stdout: b"",
+		stderr: b"bash: line 1: ./a\xffb: No such file or directory\n",
 	},
 ];
 
