@@ -141,14 +141,10 @@ fn bind_locked(path: PathBuf) -> Result<(std::os::unix::net::UnixListener, Bound
 			IpcError::io(&error, &format!("open {}", Path::new(&lock_path).display()))
 		})?;
 	loop {
-		// SAFETY: `lock` owns a live descriptor for this call; `flock` only
-		// changes the advisory lock of its open file description.
-		if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } == 0 {
-			break;
-		}
-		let error = io::Error::last_os_error();
-		if error.kind() != io::ErrorKind::Interrupted {
-			return Err(IpcError::io(&error, "lock bind sidecar"));
+		match lock.lock() {
+			Ok(()) => break,
+			Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
+			Err(error) => return Err(IpcError::io(&error, "lock bind sidecar")),
 		}
 	}
 
@@ -266,10 +262,7 @@ fn socket_address(path: &OsStr) -> io::Result<(libc::sockaddr_un, libc::socklen_
 /// shared relocation directory must additionally be a real directory owned by
 /// us with no group/other access.
 fn prepare_parent(path: &Path) -> Result<(), IpcError> {
-	let Some(parent) = path
-		.parent()
-		.filter(|parent| !parent.as_os_str().is_empty())
-	else {
+	let Some(parent) = path.parent().filter(|parent| !parent.is_empty()) else {
 		return Ok(());
 	};
 	let euid = euid();

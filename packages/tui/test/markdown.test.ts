@@ -189,6 +189,39 @@ describe("Markdown component", () => {
 			expect(plainLines.join("")).toContain("x");
 		});
 
+		it("renders a table inside an ordered list item under its continuation indent", () => {
+			const source = `10. **Keep:**
+
+    | Part | Why |
+    |---|---|
+    | pi | MIT |
+11. Next item`;
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+			const lines = markdown.render(30).map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(lines[0]).toBe("10. Keep:");
+			expect(lines.filter(line => line.startsWith("    |"))).toHaveLength(2);
+			expect(lines.some(line => line.includes("pi") && line.includes("MIT"))).toBe(true);
+			expect(lines.at(-1)).toBe("11. Next item");
+			expect(lines.every(line => visibleWidth(line) <= 30)).toBe(true);
+		});
+
+		it("keeps a narrow list-item table visible as raw markdown", () => {
+			const source = `10. Keep:
+
+    | Part | Why |
+    |---|---|
+    | pi | MIT |`;
+			const lines = new Markdown(source, 0, 0, defaultMarkdownTheme)
+				.render(10)
+				.map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(lines[0]).toBe("10. Keep:");
+			expect(lines.slice(1).join("\n")).toContain("Part");
+			expect(lines.slice(1).join("\n")).toContain("MIT");
+			expect(lines.every(line => visibleWidth(line) <= 10)).toBe(true);
+		});
+
 		it("should maintain numbering when code blocks are not indented (LLM output)", () => {
 			// When code blocks aren't indented, marked parses each item as a separate list.
 			// We use token.start to preserve the original numbering.
@@ -2300,6 +2333,40 @@ describe("Module-level LRU render cache", () => {
 		const closed = stripVTControlCharacters(markdown.render(80).join("\n"));
 		expect(closed).toContain("F<def f():>");
 		expect(pushes).toEqual(["def f():\n", "    x = 1\n"]);
+	});
+
+	it("settles an open fence's finished lines so a long block can retire", () => {
+		// A fenced block never reaches a "\n\n" boundary, so the block walk alone
+		// settles nothing for it and a long streamed SQL/log block stays in the
+		// mutable viewport, losing every row that leaves the screen (#9780).
+		clearRenderCache();
+		const markdown = new Markdown("```sql\nSELECT 1;\nSELECT 2;\nSELECT 3;", 0, 0, defaultMarkdownTheme);
+		markdown.transientRenderCache = true;
+		markdown.render(80);
+		// The last two lines stay live: the newest is still being written, and the
+		// cut keeps one more so the publisher always has a tail to extend.
+		expect(markdown.getLastRenderStableText()).toBe("```sql\nSELECT 1;\n");
+
+		markdown.setText("```sql\nSELECT 1;\nSELECT 2;\nSELECT 3;\nSELECT 4;");
+		markdown.render(80);
+		expect(markdown.getLastRenderStableText()).toBe("```sql\nSELECT 1;\nSELECT 2;\n");
+	});
+
+	it("clears the settled fence text when a non-append edit rewinds it", () => {
+		// Regression: the stored prefix survived a rewind, so every later frame
+		// failed the prefix check and the block stayed unretirable for the rest
+		// of the stream.
+		clearRenderCache();
+		const markdown = new Markdown("```sql\nold\nrow\n", 0, 0, defaultMarkdownTheme);
+		markdown.transientRenderCache = true;
+		markdown.render(80);
+		expect(markdown.getLastRenderStableText()).toBe("```sql\nold\n");
+
+		markdown.setText("```sql\nnew\nrow\n");
+		markdown.render(80);
+		markdown.setText("```sql\nnew\nrow\nthird\nfourth\n");
+		markdown.render(80);
+		expect(markdown.getLastRenderStableText()).toBe("```sql\nnew\nrow\nthird\n");
 	});
 
 	it("keeps an open fence plain when the highlight stream factory rejects the language", () => {

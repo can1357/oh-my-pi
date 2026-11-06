@@ -1,11 +1,13 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { carriesReasoning } from "@oh-my-pi/pi-catalog/compat/reasoning-carry";
+import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { renderDemotedThinking } from "../dialect/demotion";
 import type {
 	Api,
 	AssistantMessage,
 	DeveloperMessage,
+	KnownApi,
 	Message,
 	Model,
 	ToolCall,
@@ -527,6 +529,47 @@ export function isSameModelTurn(
 }
 
 /**
+ * Whether an API's encoder runs {@link transformMessages} against the target
+ * model itself, so {@link isSameModelTurn} decides what replays. Agent proxies
+ * encode through an inner model or their own path; extension APIs are not
+ * listed and count as `false`. Exhaustive, so a new API must decide.
+ */
+const DIRECT_REPLAY_APIS: Record<KnownApi, boolean> = {
+	"openai-completions": true,
+	"openai-responses": true,
+	openrouter: true,
+	"openai-codex-responses": true,
+	"azure-openai-responses": true,
+	"anthropic-messages": true,
+	"bedrock-converse-stream": true,
+	"google-generative-ai": true,
+	"google-gemini-cli": true,
+	"google-vertex": true,
+	"ollama-chat": true,
+	"apple-foundation-models": true,
+	"cursor-agent": false,
+	"factory-droid-agent": false,
+	"gitlab-duo-agent": false,
+	"devin-agent": false,
+};
+
+/**
+ * Whether {@link transformMessages} certainly drops `turn`'s opaque reasoning
+ * payload (thinking signatures, redacted thinking) on its way to `model`:
+ * another model's turn on a directly encoded wire keeps neither, except
+ * Anthropic-messages to Anthropic-messages, where deployment and signing
+ * rules may keep them. `false` when the payload may survive.
+ */
+export function dropsForeignReasoningPayload(
+	turn: Pick<AssistantMessage, "provider" | "api" | "model">,
+	model: Pick<Model, "provider" | "api" | "id">,
+): boolean {
+	if ((DIRECT_REPLAY_APIS as Partial<Record<Api, boolean>>)[model.api] !== true) return false;
+	if (model.api === "anthropic-messages" && turn.api === "anthropic-messages") return false;
+	return !isSameModelTurn(turn, model);
+}
+
+/**
  * Targets that have proven they read unsigned foreign thinking when replayed
  * natively. This is a semantic-carry allowlist only: OpenAI-compatible
  * `reasoning_content` schema requirements and llama.cpp cache-prefix replay are
@@ -541,6 +584,31 @@ function targetReadsForeignThinking(model: Model, compat: Model["compat"]): bool
 	if (!("thinkingFormat" in compat)) return false;
 	if (compat.requiresThinkingAsText) return false;
 	return model.reasoning && compat.thinkingFormat === "zai";
+}
+
+/**
+ * Whether chat completions (`convertMessages`) writes the model's own past
+ * thinking under `compat`: as Mistral content parts, demoted text, or a
+ * reasoning field. Otherwise it drops it.
+ */
+export function completionsSendsOwnThinking(
+	model: { reasoning?: boolean },
+	compat: Pick<
+		ResolvedOpenAICompat,
+		| "mistralReasoningContentParts"
+		| "requiresThinkingAsText"
+		| "requiresReasoningContentForToolCalls"
+		| "thinkingFormat"
+		| "replayReasoningContent"
+	>,
+): boolean {
+	return Boolean(
+		compat.mistralReasoningContentParts ||
+		compat.requiresThinkingAsText ||
+		compat.requiresReasoningContentForToolCalls ||
+		(compat.thinkingFormat === "zai" && model.reasoning) ||
+		compat.replayReasoningContent,
+	);
 }
 
 /**
@@ -565,13 +633,7 @@ function targetReplaysPlaintextReasoning(model: Model, compat: Model["compat"]):
 	if (!("requiresReasoningContentForToolCalls" in compat)) return false;
 	switch (model.api) {
 		case "openai-completions":
-			return (
-				!compat.requiresThinkingAsText &&
-				(compat.mistralReasoningContentParts === true ||
-					compat.requiresReasoningContentForToolCalls ||
-					compat.thinkingFormat === "zai" ||
-					compat.replayReasoningContent)
-			);
+			return !compat.requiresThinkingAsText && completionsSendsOwnThinking(model, compat);
 		case "openrouter":
 			return !compat.filterReasoningHistory && compat.requiresReasoningContentForToolCalls;
 		case "openai-responses":

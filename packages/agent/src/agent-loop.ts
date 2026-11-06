@@ -53,7 +53,7 @@ import {
 	signalListLabel,
 } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { isDsmlLeakRecoveryTarget, removeDsmlToolMarkupLeak } from "@oh-my-pi/pi-ai/utils/dsml-leak";
-import { cloneJsonTree, logger, sanitizeText, structuredCloneJSON } from "@oh-my-pi/pi-utils";
+import { cloneJsonTree, logger, sanitizeText, structuredCloneJSON, toError } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { LiveSteeringChannel } from "./live-steering";
 import { agentPauseGate } from "./pause";
@@ -109,7 +109,17 @@ import {
 	isSoftToolRequirement,
 	SPECULATIVE_STREAM_SESSION,
 } from "./types";
-import { yieldIfDue } from "./utils/yield";
+
+async function waitForProcessPause(config: AgentLoopConfig, signal?: AbortSignal): Promise<void> {
+	try {
+		while (agentPauseGate.paused && !signal?.aborted) {
+			config.onPauseChange?.(true);
+			await agentPauseGate.waitUntilResumed(signal);
+		}
+	} finally {
+		config.onPauseChange?.(false);
+	}
+}
 /** Stop-details marker for a provider error after assistant content/tool args already streamed. */
 export const STREAM_INTERRUPTED_AFTER_CONTENT_STOP_DETAIL = "stream_interrupted_after_content";
 
@@ -933,7 +943,8 @@ export function normalizeMessagesForProvider(
 	});
 }
 
-const INTENT_FIELD_DESCRIPTION = "concise intent";
+/** Schema description of the injected `i` field when neither `PI_INTENT_DESC` nor the caller sets one. */
+const DEFAULT_INTENT_FIELD_DESCRIPTION = "concise intent";
 const INTENT_SCHEMA_UNION_KEYS = ["anyOf", "oneOf"] as const;
 
 // Memoize injection per input schema identity: normalizeTools runs on every
@@ -943,26 +954,30 @@ const INTENT_SCHEMA_UNION_KEYS = ["anyOf", "oneOf"] as const;
 // the whole catalog per request). The injected object is shared across
 // requests — the same profile as the intent-off path, where parameters IS the
 // shared memoized wire schema (see schema-immutability.test.ts). One stamp
-// key per (mode, describeIntent) variant; index 0 = bare, 1 = described.
-const INTENT_STAMPS = {
-	require: [Symbol("intent:require"), Symbol("intent:require:described")],
-	optional: [Symbol("intent:optional"), Symbol("intent:optional:described")],
-} as const;
+// key per (mode, description) variant, "" keying the bare one: agents in one
+// process may describe `i` differently over the same shared tool schemas.
+const INTENT_STAMPS = { require: new Map<string, symbol>(), optional: new Map<string, symbol>() } as const;
 
 function memoizedInjectIntentIntoSchema(
 	schema: Record<string, unknown>,
 	mode: "require" | "optional",
-	describeIntent: boolean,
+	description: string | undefined,
 ): unknown {
-	return stamp(schema, INTENT_STAMPS[mode][describeIntent ? 1 : 0], host =>
-		injectIntentIntoSchema(host, mode, describeIntent),
-	);
+	const stamps = INTENT_STAMPS[mode];
+	const variant = description ?? "";
+	let key = stamps.get(variant);
+	if (!key) {
+		key = Symbol(`intent:${mode}`);
+		stamps.set(variant, key);
+	}
+	return stamp(schema, key, host => injectIntentIntoSchema(host, mode, description));
 }
 
+/** `schema` with the `i` field first (and required in `require` mode); `description` unset injects it bare. */
 function injectIntentIntoSchema(
 	schema: unknown,
-	mode: "require" | "optional" = "require",
-	describeIntent = true,
+	mode: "require" | "optional",
+	description: string | undefined,
 ): unknown {
 	if (!schema || typeof schema !== "object" || Array.isArray(schema)) return schema;
 	const schemaRecord = schema as Record<string, unknown>;
@@ -985,7 +1000,7 @@ function injectIntentIntoSchema(
 			if (!Array.isArray(variants)) continue;
 			return {
 				...schemaRecord,
-				[key]: variants.map(variant => injectIntentIntoSchema(variant, mode, describeIntent)),
+				[key]: variants.map(variant => injectIntentIntoSchema(variant, mode, description)),
 			};
 		}
 	}
@@ -1009,9 +1024,7 @@ function injectIntentIntoSchema(
 	return {
 		...schemaRecord,
 		properties: {
-			[INTENT_FIELD]: describeIntent
-				? { type: "string", description: INTENT_FIELD_DESCRIPTION }
-				: { type: "string" },
+			[INTENT_FIELD]: description === undefined ? { type: "string" } : { type: "string", description },
 			...properties,
 		},
 		...(mode === "require" ? { required: [...required, INTENT_FIELD] } : {}),
@@ -1021,6 +1034,8 @@ function injectIntentIntoSchema(
 export interface NormalizeToolsOptions {
 	/** Inject the `i` intent field into tool schemas (subject to `PI_NO_INTENT`). */
 	injectIntent: boolean;
+	/** Schema description of the injected `i` field; `PI_INTENT_DESC` overrides it. Default `concise intent`. */
+	intentDescription?: string;
 	/** Strip descriptions from the wire specs when the catalog rides in the system prompt. */
 	pruneDescriptions?: boolean;
 }
@@ -1028,6 +1043,7 @@ export interface NormalizeToolsOptions {
 export function normalizeTools(tools: AgentContext["tools"], options: NormalizeToolsOptions): Context["tools"] {
 	const pruneDescriptions = options.pruneDescriptions === true;
 	const injectIntent = options.injectIntent && Bun.env.PI_NO_INTENT !== "1";
+	const intentDescription = Bun.env.PI_INTENT_DESC || options.intentDescription || DEFAULT_INTENT_FIELD_DESCRIPTION;
 	return tools?.map(t => {
 		const intentMode = resolveIntentMode(t.intent);
 		const doInjectIntent =
@@ -1036,17 +1052,19 @@ export function normalizeTools(tools: AgentContext["tools"], options: NormalizeT
 		// specs without their descriptions (top-level + nested schema annotations)
 		// so they are not duplicated on the wire. Strip the STABLE wire schema (the
 		// memoized `stripSchemaDescriptions` result is reused across requests), then
-		// re-inject `i` (without its hint, which `describeIntent: false` omits) so
+		// re-inject `i` (without its hint, which an unset description omits) so
 		// intent tracing keeps the field while no descriptions ride the wire.
 		if (pruneDescriptions) {
 			const stripped = stripSchemaDescriptions(toolWireSchema(t));
 			const parameters = (
-				doInjectIntent ? memoizedInjectIntentIntoSchema(stripped, intentMode, false) : stripped
+				doInjectIntent ? memoizedInjectIntentIntoSchema(stripped, intentMode, undefined) : stripped
 			) as TSchema;
 			return { ...t, parameters, description: "" };
 		}
 		const wire = toolWireSchema(t);
-		const parameters = (doInjectIntent ? memoizedInjectIntentIntoSchema(wire, intentMode, true) : wire) as TSchema;
+		const parameters = (
+			doInjectIntent ? memoizedInjectIntentIntoSchema(wire, intentMode, intentDescription) : wire
+		) as TSchema;
 		const description = t.description ?? "";
 		const examplesBlock = renderToolExamples({ ...t, parameters }, doInjectIntent ? INTENT_FIELD : undefined);
 		const finalDescription = examplesBlock ? `${description}\n\n${examplesBlock}` : description;
@@ -1059,13 +1077,6 @@ function resolveIntentMode(intent: AgentTool["intent"]): "require" | "optional" 
 	if (intent === "optional" || intent === "omit") return intent;
 	return "require";
 }
-
-/**
- * Longest `i` value accepted as an intent. The injected field is described as
- * a "concise intent" (INTENT_FIELD_DESCRIPTION); anything past this is a tool
- * payload the model put in the wrong field, not a label.
- */
-const MAX_INTENT_LENGTH = 200;
 
 function extractIntent(args: Record<string, unknown>): { intent?: string; strippedArgs: Record<string, unknown> } {
 	const { [INTENT_FIELD]: intent, ...strippedArgs } = args;
@@ -1125,6 +1136,9 @@ interface StepCounter {
 	count: number;
 }
 
+/** Largest setTimeout delay before 32-bit overflow (Node/Bun fire in ~1 ms past this). */
+const MAX_TIMER_MS = 2_147_483_647;
+
 function isDeadlineExceeded(deadline: number | undefined): boolean {
 	return deadline !== undefined && Date.now() >= deadline;
 }
@@ -1181,7 +1195,7 @@ function resolveAsides(entries: AsideMessage[] | undefined): AgentMessage[] {
 			if (message) out.push(message);
 		}
 	} catch (error) {
-		discardAsides(out, error instanceof Error ? error : new Error(String(error)));
+		discardAsides(out, toError(error));
 		throw error;
 	}
 	return out;
@@ -1211,16 +1225,17 @@ async function runLoopBody(
 ): Promise<void> {
 	let deadlineTimer: Timer | undefined;
 	if (config.deadline !== undefined) {
+		const deadline = config.deadline;
 		const deadlineAbortController = new AbortController();
 		const deadlineReason = new DOMException("Deadline exceeded", "TimeoutError");
-		const delay = config.deadline - Date.now();
-		if (delay <= 0) {
-			deadlineAbortController.abort(deadlineReason);
-		} else {
-			deadlineTimer = setTimeout(() => {
-				deadlineAbortController.abort(deadlineReason);
-			}, delay);
-		}
+		// setTimeout overflows past 2^31-1 ms and fires in ~1 ms, so a valid `--max-time 600h`
+		// aborted the first turn at once: wait in bounded slices and recheck the deadline.
+		const armDeadline = (): void => {
+			const delay = deadline - Date.now();
+			if (delay <= 0) deadlineAbortController.abort(deadlineReason);
+			else deadlineTimer = setTimeout(armDeadline, Math.min(delay, MAX_TIMER_MS));
+		};
+		armDeadline();
 		signal = signal ? AbortSignal.any([signal, deadlineAbortController.signal]) : deadlineAbortController.signal;
 	}
 
@@ -1232,6 +1247,25 @@ async function runLoopBody(
 	// `liveAccepted` reached the model inside it, `liveDeferred` did not.
 	let liveAccepted: AgentMessage[] = [];
 	let liveDeferred: AgentMessage[] = [];
+	const endAbortedBeforeModel = async (messages: AgentMessage[], turnOpen: boolean): Promise<boolean> => {
+		if (!signal?.aborted || !config.isUndeliveredQueuedMessage) return false;
+		const undelivered = new Set(messages.filter(message => config.isUndeliveredQueuedMessage?.(message)));
+		for (const list of [currentContext.messages, newMessages]) {
+			for (let i = list.length - 1; i >= 0; i--) {
+				if (undelivered.has(list[i])) list.splice(i, 1);
+			}
+		}
+		if (!turnOpen) stream.push({ type: "turn_start" });
+		emitInputMessages(
+			stream,
+			messages.filter(message => !undelivered.has(message)),
+		);
+		const aborted = emitAbortedAssistantMessage(null, false, new Set(), currentContext, config, stream, signal);
+		newMessages.push(aborted);
+		await emitTurnEnd(stream, currentContext, aborted, [], config, signal, { willContinue: false });
+		endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+		return true;
+	};
 	try {
 		let messagesToEmit = [...initialMessages];
 		if (isDeadlineExceeded(config.deadline)) {
@@ -1245,6 +1279,7 @@ async function runLoopBody(
 		try {
 			pendingMessages = signal?.aborted ? [] : (await config.getSteeringMessages?.(signal)) || [];
 		} catch (error) {
+			if (signal?.aborted && (await endAbortedBeforeModel(messagesToEmit, false))) return;
 			stream.push({ type: "turn_start" });
 			emitInputMessages(stream, messagesToEmit);
 			throw error;
@@ -1321,13 +1356,10 @@ async function runLoopBody(
 					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
 					return;
 				}
-				// Yield at the top of each iteration to prevent busy-wait when
-				// the agent loop is executing tool calls back-to-back.
-				await yieldIfDue();
 				// Park at the turn boundary while the process-wide pause gate is
 				// engaged (host /pause). An external abort releases the park so a
 				// cancelled run still unwinds while everything else stays frozen.
-				if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(signal);
+				if (agentPauseGate.paused) await waitForProcessPause(config, signal);
 
 				// Build the provider-bound context before opening the turn. Queue
 				// messages are added now but their events remain deferred until
@@ -1346,10 +1378,19 @@ async function runLoopBody(
 
 				let preparedProviderCall: PreparedProviderCall;
 				let gateResult: AgentPreModelCallResult;
+				const emitTurnInputs = () => {
+					emitInputMessages(
+						stream,
+						signal?.aborted
+							? turnMessages.filter(message => !config.isUndeliveredQueuedMessage?.(message))
+							: turnMessages,
+					);
+				};
 				try {
 					if (config.syncContextBeforeModelCall) {
 						await config.syncContextBeforeModelCall(currentContext, signal);
 					}
+					if (signal?.aborted && (await endAbortedBeforeModel(turnMessages, turnOpen))) return;
 
 					if (!directiveResolvedForTurn) {
 						const directive = signal?.aborted ? undefined : config.getToolChoice?.();
@@ -1378,16 +1419,19 @@ async function runLoopBody(
 					}
 
 					preparedProviderCall = await prepareProviderCall(currentContext, config, signal);
+					if (signal?.aborted && (await endAbortedBeforeModel(turnMessages, turnOpen))) return;
 					preparedProviderCall.liveSteering = openLiveSteering(config, signal, preparedProviderCall);
 					gateResult = (await config.beforeModelCall?.(preparedProviderCall.context, signal)) || undefined;
 				} catch (error) {
+					if (signal?.aborted && (await endAbortedBeforeModel(turnMessages, turnOpen))) return;
 					if (!turnOpen) {
 						stream.push({ type: "turn_start" });
-						emitInputMessages(stream, turnMessages);
+						emitTurnInputs();
 						turnOpen = true;
 					}
 					throw error;
 				}
+				if (signal?.aborted && (await endAbortedBeforeModel(turnMessages, turnOpen))) return;
 				if (config.beforeModelCall && signal?.aborted) {
 					gateResult = { stop: true };
 				}
@@ -1431,14 +1475,15 @@ async function runLoopBody(
 
 				if (!turnOpen) {
 					stream.push({ type: "turn_start" });
-					emitInputMessages(stream, turnMessages);
 					turnOpen = true;
 				}
 
 				// Stream assistant response
 				let recovered: HarmonyRecoveredToolCall | undefined;
 				let message: AssistantMessage;
+				let inputsEmitted = false;
 				try {
+					if (agentPauseGate.paused) await waitForProcessPause(config, signal);
 					message = await streamAssistantResponse(
 						currentContext,
 						config,
@@ -1452,6 +1497,11 @@ async function runLoopBody(
 						hostToolChoice,
 						softRequirementState.forcedToolChoice,
 						preparedProviderCall,
+						() => {
+							if (config.isUndeliveredQueuedMessage) signal?.throwIfAborted();
+							emitTurnInputs();
+							inputsEmitted = true;
+						},
 						message => {
 							const finalToolCalls = message.content.filter(
 								(content): content is Extract<AssistantMessage["content"][number], { type: "toolCall" }> =>
@@ -1478,6 +1528,10 @@ async function runLoopBody(
 					harmonyRetryAttempt = 0;
 					harmonyTruncateResumeCount = 0;
 				} catch (err) {
+					if (!inputsEmitted) {
+						if (signal?.aborted && (await endAbortedBeforeModel(turnMessages, turnOpen))) return;
+						emitTurnInputs();
+					}
 					if (!(err instanceof HarmonyLeakInterruption)) throw err;
 					if (err.recovered) {
 						if (harmonyTruncateResumeCount >= 2) {
@@ -1789,7 +1843,7 @@ async function runLoopBody(
 						: [...live, ...((await config.getSteeringMessages?.(signal)) || [])];
 					if (hasMoreToolCalls) {
 						// Mid-work: fold any non-interrupting asides into the next turn alongside steering.
-						const asides = signal?.aborted ? [] : resolveAsides(await config.getAsideMessages?.());
+						const asides = signal?.aborted ? [] : resolveAsides(await config.getAsideMessages?.("work"));
 						pendingMessages = asides.length > 0 ? [...steering, ...asides] : steering;
 					} else {
 						// Stop boundary: only steering (live user input) forces another turn here. Leave
@@ -1817,7 +1871,7 @@ async function runLoopBody(
 			// above and this yield point (e.g. queued while onBeforeYield ran). Without
 			// this poll it would strand in the queue until the next manual prompt.
 			const lateSteering = signal?.aborted ? [] : (await config.getSteeringMessages?.(signal)) || [];
-			const asideMessages = signal?.aborted ? [] : resolveAsides(await config.getAsideMessages?.());
+			const asideMessages = signal?.aborted ? [] : resolveAsides(await config.getAsideMessages?.("stop"));
 			const followUpMessages = signal?.aborted ? [] : (await config.getFollowUpMessages?.(signal)) || [];
 			if (lateSteering.length > 0 || asideMessages.length > 0 || followUpMessages.length > 0) {
 				// Set as pending so the inner loop processes them before stopping.
@@ -1952,6 +2006,7 @@ async function prepareProviderCall(
 		config.appendOnlyContext.syncMessages(normalizedMessages);
 		llmContext = config.appendOnlyContext.build(context, {
 			intentTracing: !!config.intentTracing,
+			intentDescription: config.intentDescription,
 			pruneToolDescriptions,
 		});
 	} else {
@@ -1960,10 +2015,14 @@ async function prepareProviderCall(
 			messages: normalizedMessages,
 			tools: normalizeTools(context.tools, {
 				injectIntent: !!config.intentTracing,
+				intentDescription: config.intentDescription,
 				pruneDescriptions: pruneToolDescriptions,
 			}),
 		};
 	}
+	// Before the transform too, so a request-size clamp in it measures the withdrawn definitions the provider
+	// re-declares; recomputed below against what the transform returns.
+	if (config.sentToolDefinitions) llmContext = config.sentToolDefinitions.withInactiveTools(llmContext);
 	if (config.transformProviderContext) {
 		llmContext = await config.transformProviderContext(llmContext, model);
 	}
@@ -1979,10 +2038,9 @@ async function prepareProviderCall(
 		};
 	}
 	// After `transformProviderContext`, so the recorded definitions are exactly what the provider receives.
-	if (config.sentToolDefinitions && llmContext.tools) {
-		config.sentToolDefinitions.record(llmContext.tools);
-		const inactiveTools = config.sentToolDefinitions.inactiveFor(llmContext.messages, llmContext.tools);
-		if (inactiveTools) llmContext = { ...llmContext, inactiveTools };
+	if (config.sentToolDefinitions) {
+		if (llmContext.tools) config.sentToolDefinitions.record(llmContext.tools);
+		llmContext = config.sentToolDefinitions.withInactiveTools(llmContext);
 	}
 	return { model, context: llmContext, promptToolWireTools, ownedDialect };
 }
@@ -2004,6 +2062,7 @@ async function streamAssistantResponse(
 	hostToolChoice?: ToolChoice,
 	forcedToolChoice?: ToolChoice,
 	prepared?: PreparedProviderCall,
+	onProviderStart?: () => void,
 	canDispatchFinalToolCalls?: (message: AssistantMessage) => boolean,
 ): Promise<AssistantMessage> {
 	const providerCall = prepared ?? (await prepareProviderCall(context, config, signal));
@@ -2148,6 +2207,7 @@ async function streamAssistantResponse(
 
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
+			onProviderStart?.();
 			let response = await streamFunction(model, llmContext, {
 				...config,
 				apiKey,
@@ -2362,10 +2422,6 @@ async function streamAssistantResponse(
 					if (requestSignal?.aborted) {
 						return await finishAbortedStream();
 					}
-
-					// Yield to the event loop periodically to prevent busy-wait
-					// when the LLM is streaming chunks faster than the loop can rest.
-					await yieldIfDue();
 
 					if (event.type === "toolcall_start") {
 						const block = event.partial.content[event.contentIndex];
@@ -2774,14 +2830,7 @@ function buildToolCallAbortMessages(
  *  `signal.reason` is the default `AbortError` `DOMException`) falls back to the
  *  generic sentinel that downstream renderers treat as "no specific reason". */
 export function abortReasonText(signal: AbortSignal | undefined): string {
-	const scopedReason = toolScopedAbortReason(signal);
-	if (scopedReason) return scopedReason.message;
-	const reason = signal?.reason;
-	if (typeof reason === "string" && reason.trim().length > 0) return reason;
-	if (reason instanceof Error && reason.name !== "AbortError" && reason.message.trim().length > 0) {
-		return reason.message;
-	}
-	return "Request was aborted";
+	return toolScopedAbortReason(signal)?.message ?? AIError.callerAbortReason(signal) ?? "Request was aborted";
 }
 
 function emitAbortedAssistantMessage(
@@ -3104,11 +3153,6 @@ async function prepareToolCallDispatch(
 				? { intent: undefined, strippedArgs: argsForExecution }
 				: extractIntent(toolCall.arguments);
 			argsForExecution = strippedArgs;
-			if (intent !== undefined && intent.length > MAX_INTENT_LENGTH && tool) {
-				entry.args = strippedArgs;
-				entry.validationErrorMessage = `\`${INTENT_FIELD}\` is a short intent label (at most ${MAX_INTENT_LENGTH} chars); the value you sent is ${intent.length} chars. The tool was not run. Put that content in the tool's own parameters and retry with a brief \`${INTENT_FIELD}\`.`;
-				continue;
-			}
 			if (intent) {
 				toolCall.intent = intent;
 			} else if (typeof tool?.intent === "function") {
@@ -3345,6 +3389,7 @@ async function executeToolCalls(
 			tool,
 			args,
 			interruptible,
+			handlesToolInterrupt: interruptible && tool?.handlesToolInterrupt === true,
 			signal: interruptible ? interruptibleSignal : nonInterruptibleSignal,
 			started: false,
 			result: undefined as AgentToolResult<any> | undefined,
@@ -3362,6 +3407,22 @@ async function executeToolCalls(
 			transformError: prepared.transformError,
 		};
 	});
+
+	// Derive batch readiness from existing dispatch records, not extra participants.
+	const refreshPauseState = (): void => {
+		config.onPauseChange?.(
+			agentPauseGate.paused &&
+				!signal?.aborted &&
+				!speculationCoordinator?.isRunning &&
+				records.some(record => !record.started && !record.skipped && !record.toolResultMessage) &&
+				!records.some(record => record.started && !record.toolResultMessage),
+		);
+	};
+	if (speculationCoordinator) speculationCoordinator.onIdle = refreshPauseState;
+
+	const isToolAborted = (record: (typeof records)[number]): boolean =>
+		signal?.aborted === true ||
+		(record.signal.aborted && !(record.handlesToolInterrupt && record.signal.reason === TOOL_INTERRUPT_ABORT_REASON));
 
 	const checkAsideInterrupts = async (): Promise<void> => {
 		// Asides only fire once: an interrupt already recorded on interruptState
@@ -3393,7 +3454,7 @@ async function executeToolCalls(
 		// also cascades: the freshly detached job's own completion re-triggers
 		// this check for the next command, so millisecond-long commands chain
 		// into separate background deliveries (#12869).
-		if (source === "irc" && softInterrupts) steeringSoftController.abort();
+		if (source === "irc" && softInterrupts) steeringSoftController.abort("irc");
 	};
 
 	const checkSteering = async (): Promise<void> => {
@@ -3425,14 +3486,14 @@ async function executeToolCalls(
 			// interruptMode is "wait") raises the cooperative soft signal for
 			// everything else: the boundary dequeue
 			// below injects the message as soon as running tools finish (or
-			// background themselves), and not-yet-started interruptible waits
-			// are skipped. Idempotent — a second steer poll after the abort is
-			// a no-op.
+			// background themselves). Not-yet-started interruptible tools are
+			// skipped unless they can drain the queued wake. Idempotent — a
+			// second steer poll after the abort is a no-op.
 			if (!steeringAbortController.signal.aborted) {
 				interruptState.triggered = true;
 				interruptState.source = steeringSource ?? "unknown";
 				steeringAbortController.abort(TOOL_INTERRUPT_ABORT_REASON);
-				if (softInterrupts) steeringSoftController.abort();
+				if (softInterrupts) steeringSoftController.abort(interruptState.source);
 			}
 			return;
 		}
@@ -3490,8 +3551,8 @@ async function executeToolCalls(
 	};
 
 	const runTool = async (record: (typeof records)[number], index: number): Promise<void> => {
-		// A pending interrupt preempts not-yet-started *interruptible* waits so
-		// the message injects promptly instead of sitting out a `wait`.
+		// A pending interrupt preempts not-yet-started interruptible tools,
+		// except receivers that drain the wake with an already-aborted signal.
 		// Non-interruptible work is never skipped, whatever the source: the
 		// expensive part — generating the call — is already paid, the tool
 		// itself is cheap, and a skip only makes the model re-emit the same
@@ -3501,7 +3562,7 @@ async function executeToolCalls(
 		// the parent steers mid-stream (#10645). The steer still injects at the
 		// batch boundary; the cooperative soft signal lets long-running tools
 		// step aside on their own.
-		if (interruptState.triggered && record.interruptible) {
+		if (interruptState.triggered && record.interruptible && !record.handlesToolInterrupt) {
 			// Skip both span emission and the collector orphan record here. The
 			// tail sweep below (after `Promise.allSettled`) is the single path
 			// that handles "no result message was produced" — it calls
@@ -3513,7 +3574,11 @@ async function executeToolCalls(
 		// Park before starting this tool while the process-wide pause gate is
 		// engaged. Tools already executing are unaffected (pausing never aborts);
 		// a batch interrupted mid-pause unwinds via the signal checks below.
-		if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(record.signal);
+		while (agentPauseGate.paused && !record.signal.aborted) {
+			refreshPauseState();
+			await agentPauseGate.waitUntilResumed(record.signal);
+		}
+		config.onPauseChange?.(false);
 
 		const { toolCall, tool } = record;
 		// Validation (and the beforeToolCall hook) ran in the prepare phase; a
@@ -3531,14 +3596,14 @@ async function executeToolCalls(
 			return;
 		}
 		const effectiveArgs = record.args;
-		if (record.signal.aborted) {
+		if (isToolAborted(record)) {
 			record.skipped = true;
 			recordSkippedTool(telemetry, {
 				toolCallId: toolCall.id,
 				toolName: toolCall.name,
 				status: "aborted",
 			});
-			emitToolResult(record, createToolSignalAbortedResult(record.signal), true);
+			emitToolResult(record, createToolSignalAbortedResult(signal?.aborted ? signal : record.signal), true);
 			return;
 		}
 		record.started = true;
@@ -3566,17 +3631,19 @@ async function executeToolCalls(
 		let caughtError: unknown;
 		let completedToolExecution = false;
 		let executionStarted = false;
+		const abortBeforeToolExecution = (): boolean => {
+			if (!isToolAborted(record)) return false;
+			result = createToolSignalAbortedResult(signal?.aborted ? signal : record.signal);
+			isError = true;
+			return true;
+		};
 
 		await runInActiveSpan(toolSpan, async () => {
 			try {
 				if (!tool) {
 					throw new Error(formatToolNotFoundMessage(toolCall.name, tools, suggestFallbackToolNames?.()));
 				}
-				if (record.signal.aborted) {
-					result = createToolSignalAbortedResult(record.signal);
-					isError = true;
-					return;
-				}
+				if (abortBeforeToolExecution()) return;
 
 				if (record.prepareError !== undefined) throw record.prepareError;
 				if (record.blocked) {
@@ -3587,6 +3654,9 @@ async function executeToolCalls(
 					record.executionArgs ??
 					(transformToolCallArguments ? transformToolCallArguments(effectiveArgs, toolCall.name) : effectiveArgs);
 				record.args = executionArgs;
+				// A transform or awaited claim can cancel the external run after
+				// a queued wake already fixed the combined signal's reason.
+				if (abortBeforeToolExecution()) return;
 
 				const speculativeOutcome = speculationCoordinator
 					? await speculationCoordinator.claim(tool, toolCall, executionArgs)
@@ -3603,6 +3673,7 @@ async function executeToolCalls(
 				}
 
 				if (!completedToolExecution) {
+					if (abortBeforeToolExecution()) return;
 					// The cooperative steering signal and the passive-context sink
 					// ride the loop-owned ToolCallContext (surfacing as
 					// `ctx.toolCall.*`); the host surfaces the sink on the context it
@@ -3627,9 +3698,12 @@ async function executeToolCalls(
 					} else if (streamSession && !streamSession.contextIndependent) {
 						await streamSession.discard("outer tool context cannot carry stream speculation");
 					}
-					executionStarted = true;
 					let rawResult: unknown;
 					try {
+						// Context construction and stream cleanup can also cancel;
+						// nothing may await or call host code after this final check.
+						if (abortBeforeToolExecution()) return;
+						executionStarted = true;
 						rawResult = await tool.execute(
 							toolCall.id,
 							executionArgs,
@@ -3709,10 +3783,10 @@ async function executeToolCalls(
 		const interrupted = interruptState.triggered;
 		const perToolAborted = record.signal.aborted;
 		const abortedDuringExecution = perToolAborted && isError && !completedToolExecution;
-		if (record.interruptible && interrupted && abortedDuringExecution) {
+		if (record.interruptible && interrupted && abortedDuringExecution && !signal?.aborted) {
 			// Queued steering/asides abort only interruptible tools. An external
-			// user abort can also fail a non-interruptible tool (e.g. cancelled
-			// ask); keep its actual error instead of attributing it to the queue.
+			// user abort takes priority even if a queued interrupt fixed the
+			// combined signal's reason first; keep the actual cancellation error.
 			record.skipped = true;
 			emitToolResult(record, createSkippedToolResult(interruptState.source, executionStarted), true);
 		} else {
@@ -3769,7 +3843,7 @@ async function executeToolCalls(
 		(softInterrupts || records.some(record => record.interruptible)) &&
 		(hasSteeringMessages !== undefined || hasAsidePeek);
 	// Live-taken steering is already pending: interrupt before any call starts
-	// so not-yet-started interruptible waits are skipped outright.
+	// so interruptible tools skip or drain the queued wake without blocking.
 	if (liveSteering.length > 0) await checkSteering();
 	const eventDrivenSteeringWatch =
 		watchSteeringWhileRunning && config.waitForSteeringMessages !== undefined && hasSteeringMessages !== undefined;
@@ -3847,7 +3921,13 @@ async function executeToolCalls(
 			concurrency = concurrencyMode ?? "shared";
 		}
 		const start = concurrency === "exclusive" ? Promise.all([lastExclusive, ...sharedTasks]) : lastExclusive;
-		const task = start.then(() => runTool(record, index));
+		const task = start.then(async () => {
+			try {
+				await runTool(record, index);
+			} finally {
+				refreshPauseState();
+			}
+		});
 		tasks.push(task);
 		if (concurrency === "exclusive") {
 			lastExclusive = task;
@@ -3859,13 +3939,12 @@ async function executeToolCalls(
 	try {
 		await Promise.allSettled(tasks);
 	} finally {
+		if (speculationCoordinator) speculationCoordinator.onIdle = undefined;
+		config.onPauseChange?.(false);
 		steeringWatchAbortController.abort();
 		await steeringWatchPromise?.catch(() => undefined);
 		clearInterval(steeringWatchTimer);
 	}
-	// Yield after batch tool execution to let GC and I/O catch up,
-	// especially when tool results are large (e.g. bash output).
-	await yieldIfDue();
 
 	for (const record of records) {
 		if (!record.toolResultMessage) {

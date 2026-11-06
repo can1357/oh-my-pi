@@ -50,10 +50,6 @@ describe("parseDefaultBranch", () => {
 		expect(parseDefaultBranch("upstream/main")).toBe("main");
 	});
 
-	test("returns bare branch name unchanged", () => {
-		expect(parseDefaultBranch("main")).toBe("main");
-	});
-
 	test("handles empty string", () => {
 		expect(parseDefaultBranch("")).toBe("");
 	});

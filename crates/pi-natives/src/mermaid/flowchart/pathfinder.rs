@@ -212,10 +212,7 @@ pub fn merge_path(path: Vec<GridCoord>) -> Vec<GridCoord> {
 
 	let mut merged = Vec::with_capacity(path.len());
 	merged.push(path[0]);
-	for index in 1..path.len() - 1 {
-		let previous = path[index - 1];
-		let current = path[index];
-		let next = path[index + 1];
+	for &[previous, current, next] in path.array_windows() {
 		let previous_step = (current.x - previous.x, current.y - previous.y);
 		let next_step = (next.x - current.x, next.y - current.y);
 		if previous_step != next_step {

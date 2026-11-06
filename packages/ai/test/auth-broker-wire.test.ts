@@ -196,6 +196,15 @@ describe("auth-broker wire surface", () => {
 		}
 	});
 
+	test("GET /v1/usage forwards an encoded provider filter and keeps aggregate requests unfiltered", async () => {
+		const reports = vi.spyOn(storage!.usage, "reports").mockResolvedValue([]);
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		await client.fetchUsage({ provider: "custom/provider + alias" });
+		expect(reports.mock.calls[0]?.[0]?.provider).toBe("custom/provider + alias");
+		await client.fetchUsage();
+		expect(reports.mock.calls[1]?.[0]?.provider).toBeUndefined();
+	});
+
 	test("GET /v1/usage outlives the base timeout for a serialized account batch", async () => {
 		vi.useFakeTimers();
 		const response = Promise.withResolvers<Response>();

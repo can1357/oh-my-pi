@@ -5,6 +5,25 @@ use std::{
 	process::Command,
 };
 
+// Unify features with runtime dependencies shared by build scripts and macros.
+use bitflags as _;
+use crc32fast as _;
+use data_encoding as _;
+use either as _;
+use fastrand as _;
+use flate2 as _;
+use foldhash as _;
+use hashbrown as _;
+use indexmap as _;
+use libc as _;
+use peg_runtime as _;
+use rand_core as _;
+use serde as _;
+use serde_core as _;
+use serde_json as _;
+use simd_adler32 as _;
+use zlib_rs as _;
+
 fn main() {
 	napi_build::setup();
 	build_syntax_set();

@@ -1,9 +1,14 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
+import * as path from "node:path";
 import type { Api, AssistantMessage, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import { adoptFactoryReplay } from "@oh-my-pi/pi-ai/providers/factory-droid/gemini";
 import { convertCodexResponsesMessages } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { convertMessages } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import type { OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import * as natives from "@oh-my-pi/pi-natives";
 import { Agent } from "../src/agent";
 import type { SessionMessageEntry } from "../src/compaction/entries";
@@ -88,6 +93,32 @@ describe("countTokens with modes", () => {
 		const claude = new Tokenizer({ tokenizer: "claude-v47" });
 		const generic = new Tokenizer({});
 		expect(claude.countTokens("hello world", "strict")).not.toBe(generic.countTokens("hello world", "strict"));
+	});
+
+	test("counts a model without a known tokenizer family in o200k_base outside the test env", async () => {
+		// Addresses and ids, as in reverse-engineering sessions: a bytes/4 guess counts about half of it.
+		const text = "0x1a6ba80e4 1914F733-4AF2-3AD7-9061-CA21FFC33841 initWithString: ".repeat(50);
+		const child = Bun.spawn(
+			[
+				process.execPath,
+				"-e",
+				`import { Tokenizer } from ${JSON.stringify(path.join(import.meta.dir, "../src/tokenizer"))};
+				process.stdout.write(String(new Tokenizer({}).countTokens(${JSON.stringify(text)})));`,
+			],
+			{ env: { ...process.env, NODE_ENV: "production" }, stdout: "pipe" },
+		);
+		const counted = Number(await new Response(child.stdout).text());
+		expect(await child.exited).toBe(0);
+		expect(counted).toBe(natives.countTokens(text, natives.Encoding.O200kBase));
+		expect(counted).toBeGreaterThan(Buffer.byteLength(text) / 3);
+	});
+
+	test("counts GPT-4 in cl100k_base, not the o200k_base default", () => {
+		const gpt4 = getBundledModel("openai", "gpt-4");
+		const text = "Привет, как дела? Сегодня хорошая погода.";
+		const counted = new Tokenizer(gpt4).countTokens(text, "strict");
+		expect(counted).toBe(natives.countTokens(text, natives.Encoding.Cl100kBase));
+		expect(counted).toBeGreaterThan(natives.countTokens(text, natives.Encoding.O200kBase));
 	});
 
 	test("counts current fragment values without merging boundaries or retaining mutable arrays", () => {
@@ -270,6 +301,135 @@ describe("Ollama chat history estimate", () => {
 	});
 });
 
+// Contract: a chat-completions request without a reasoning slot drops the
+// model's own past thinking, so the context estimate (and the compaction
+// triggers built on it) must not count it; thinking the request carries still
+// counts (#15797).
+describe("chat-completions history estimate", () => {
+	const THINKING = "Let me reason about the call sites carefully. ".repeat(400);
+	const toolCall = { type: "toolCall", id: "call_1", name: "read", arguments: { path: "a.ts" } } as const;
+
+	function completionsModel(
+		id: string,
+		compat: Partial<OpenAICompat> & { replayReasoningContent: boolean },
+		reasoning = true,
+	): Model<"openai-completions"> {
+		return buildModel({
+			id,
+			name: id,
+			api: "openai-completions",
+			provider: "my-host",
+			baseUrl: "http://my-server.example:8000/v1",
+			reasoning,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262_144,
+			maxTokens: 32_768,
+			compat: { thinkingFormat: "qwen-chat-template", ...compat },
+		});
+	}
+
+	function thinkingTurn(from: Model, thinkingSignature: string): AssistantMessage {
+		return {
+			role: "assistant",
+			content: [{ type: "thinking", thinking: THINKING, thinkingSignature }, toolCall],
+			api: from.api,
+			provider: from.provider,
+			model: from.id,
+			usage: {
+				input: 100,
+				output: 3_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 3_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 1,
+		};
+	}
+
+	const dropping = completionsModel("Qwen3.8-27B", { replayReasoningContent: false });
+	const replaying = completionsModel("Qwen3.8-27B", { replayReasoningContent: true });
+	const floor = { excludeEncryptedReasoning: true };
+	const toolCallOnly = new Tokenizer(dropping).countMessage({ ...thinkingTurn(dropping, "x"), content: [toolCall] });
+
+	test.each([
+		{ name: "replay off", model: dropping, carried: false },
+		{ name: "replay on", model: replaying, carried: true },
+		{
+			name: "replay only in the thinking view",
+			model: completionsModel("Qwen3.8-27B", {
+				replayReasoningContent: false,
+				whenThinking: { replayReasoningContent: true },
+			}),
+			carried: true,
+		},
+		{
+			name: "Mistral content parts",
+			model: completionsModel("Qwen3.8-27B", { replayReasoningContent: false, mistralReasoningContentParts: true }),
+			carried: true,
+		},
+		{
+			name: "thinking as text",
+			model: completionsModel("Qwen3.8-27B", { replayReasoningContent: false, requiresThinkingAsText: true }),
+			carried: true,
+		},
+		{
+			name: "reasoning content required for tool calls",
+			model: completionsModel("Qwen3.8-27B", {
+				replayReasoningContent: false,
+				requiresReasoningContentForToolCalls: true,
+			}),
+			carried: true,
+		},
+		{
+			name: "Z.AI on a reasoning model",
+			model: completionsModel("Qwen3.8-27B", { replayReasoningContent: false, thinkingFormat: "zai" }),
+			carried: true,
+		},
+		{
+			name: "Z.AI on a non-reasoning model",
+			model: completionsModel("Qwen3.8-27B", { replayReasoningContent: false, thinkingFormat: "zai" }, false),
+			carried: false,
+		},
+		// Another model's thinking reaches the request demoted to text.
+		{
+			name: "another model's turn",
+			model: dropping,
+			from: completionsModel("other-model", { replayReasoningContent: false }),
+			carried: true,
+		},
+		// LiteLLM replays a raw signature's thinking in `thinking_blocks`.
+		{ name: "a raw LiteLLM signature", model: dropping, signature: "EqQBCkgIARABGAIiQL", carried: true },
+	])("counts thinking only when a request carries it: $name", ({ model, from, signature, carried }) => {
+		const turn = thinkingTurn(from ?? model, signature ?? "reasoning_content");
+		const views = [model.compat, model.compat.whenThinking].filter(view => view !== undefined);
+		const messages = transformMessages([turn], model);
+		const sent = views.some(view =>
+			JSON.stringify(convertMessages(model, { messages }, view)).includes(THINKING.trim()),
+		);
+		expect(sent).toBe(carried);
+
+		const tokenizer = new Tokenizer(model);
+		if (carried) {
+			expect(tokenizer.countMessage(turn, floor)).toBeGreaterThan(toolCallOnly + 1000);
+		} else {
+			expect(tokenizer.countMessage(turn)).toBe(toolCallOnly);
+			expect(tokenizer.countMessage(turn, floor)).toBe(toolCallOnly);
+		}
+	});
+
+	test("recounts after the replay policy changes", () => {
+		const turn = thinkingTurn(dropping, "reasoning_content");
+		const agent = new Agent({ initialState: { model: dropping, systemPrompt: [], tools: [], messages: [] } });
+		expect(agent.tokenizer.countMessage(turn, floor)).toBe(toolCallOnly);
+		expect(agent.tokenizer.countsAlike(replaying)).toBe(false);
+		agent.setModel(replaying);
+		expect(agent.tokenizer.countMessage(turn, floor)).toBeGreaterThan(toolCallOnly + 1000);
+	});
+});
+
 // Contract: a replayed signed thinking block costs what the reading model bills
 // for it: Claude rebuilds the full reasoning from the signature and bills it at
 // the size the turn billed as output; other readers are charged the
@@ -435,6 +595,48 @@ describe("countMessage replayed thinking", () => {
 		const model = reader("google", "gemini-3-pro-preview");
 		expect(new Tokenizer(model).countMessage(signedTurn(model, VISIBLE, SIGNATURE))).toBe(VISIBLE_TOKENS + 1000);
 	});
+
+	// The signature is charged exactly when the request encoder keeps it: what
+	// `transformMessages` (after Factory's Gemini adoption pass) leaves on the turn.
+	function keptSignature(model: Model, turn: AssistantMessage): boolean {
+		const history =
+			model.api === "factory-droid-agent"
+				? [adoptFactoryReplay(turn, model as Model<"factory-droid-agent">)]
+				: [turn];
+		return transformMessages(history, model).some(
+			message =>
+				message.role === "assistant" &&
+				message.content.some(block => block.type === "thinking" && block.thinkingSignature === SIGNATURE),
+		);
+	}
+	const gemini = reader("google", "gemini-3-pro-preview");
+	// Factory serves this id on its Gemini generate wire.
+	const factoryGemini = {
+		...gemini,
+		id: "gemini-3.8-flash",
+		api: "factory-droid-agent",
+		provider: "factory-droid",
+	} as Model;
+	const glm = getBundledModel("zai", "glm-5.3") as Model;
+	test.each([
+		["a Claude turn to Gemini", gemini, reader("anthropic", "claude-opus-5-5"), false],
+		["another Gemini model's turn to Gemini", gemini, reader("google", "gemini-3-flash-preview"), false],
+		["a Claude turn to Factory Gemini", factoryGemini, reader("anthropic", "claude-opus-5-5"), false],
+		["Factory Gemini's own turn", factoryGemini, { ...factoryGemini, api: "google-generative-ai" }, true],
+		["a Gemini CLI turn to Factory Gemini", factoryGemini, { ...gemini, api: "google-gemini-cli" }, true],
+		["another GLM's turn to a compatible Anthropic endpoint", glm, getBundledModel("zai", "glm-5.2") as Model, true],
+		[
+			"a MiniMax turn to a compatible Anthropic endpoint",
+			glm,
+			getBundledModel("minimax", "MiniMax-M3") as Model,
+			true,
+		],
+	] as const)("charges the signature of %s only when the request keeps it", (_case, model, from, kept) => {
+		const turn = signedTurn(from, VISIBLE, SIGNATURE);
+		expect(keptSignature(model, turn)).toBe(kept);
+		expect(new Tokenizer(model).countMessage(turn)).toBe(VISIBLE_TOKENS + (kept ? 1000 : 0));
+		expect(new Tokenizer(model).countMessage(turn, { excludeEncryptedReasoning: true })).toBe(VISIBLE_TOKENS);
+	});
 });
 
 // Contract: an assistant turn's native Responses history replays its reasoning
@@ -586,11 +788,14 @@ describe("replayed Responses reasoning", () => {
 		// The reasoning item still goes on the wire, so the turn is not free.
 		expect(wireReasoning(unreported)).toBe(1);
 		const tokenizer = new Tokenizer(sol);
-		// Its only price is the ciphertext, counted as a reader that re-encodes the turn counts it.
-		const reencoding = new Tokenizer(otherCodex);
-		expect(tokenizer.countMessage(unreported)).toBe(reencoding.countMessage(unreported));
-		expect(tokenizer.countMessage(unreported)).toBeGreaterThan(visibleTokens(tokenizer));
+		// Its only price is the ciphertext, counted as text.
+		expect(tokenizer.countMessage(unreported)).toBe(
+			visibleTokens(tokenizer) + tokenizer.countTokens(JSON.stringify(reasoningItem)),
+		);
 		expect(tokenizer.countMessage(unreported, floored)).toBe(visibleTokens(tokenizer));
+		// Another model re-encodes the turn without its reasoning: neither price applies.
+		const reencoding = new Tokenizer(otherCodex);
+		expect(reencoding.countMessage(unreported)).toBe(visibleTokens(reencoding));
 	});
 
 	test("follows a cold Responses session, which rebuilds encrypted reasoning out of the request", async () => {

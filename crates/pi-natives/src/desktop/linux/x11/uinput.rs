@@ -136,7 +136,7 @@ impl UInputDevice {
 		// the slice is bounded to its exact size.
 		let bytes = unsafe {
 			std::slice::from_raw_parts(
-				(&event as *const InputEvent).cast::<u8>(),
+				(&raw const event).cast::<u8>(),
 				std::mem::size_of::<InputEvent>(),
 			)
 		};

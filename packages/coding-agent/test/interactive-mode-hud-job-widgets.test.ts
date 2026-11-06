@@ -4,6 +4,7 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -24,7 +25,7 @@ function prop(node: NativeNode | TspPropNode | NativeChild | undefined, name: st
 }
 
 const decode: JobWidgetView = {
-	title: "verb-bench · decode",
+	title: "loadtest · decode",
 	headline: { text: "186 tok/s", label: "decode", trend: { text: "▲ 15%", tone: "success" } },
 	blocks: [
 		{
@@ -48,7 +49,7 @@ const evalRun: JobWidgetView = {
 	updatedAt: 1_000,
 };
 
-describe("InteractiveMode HUD jobs segment with job widgets", () => {
+describe("InteractiveMode HUD pills", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let session: AgentSession;
@@ -105,7 +106,7 @@ describe("InteractiveMode HUD jobs segment with job widgets", () => {
 		expect(spark?.p).toMatchObject({ kind: "spark", min: 0, max: 220 });
 		expect(prop(spark, "series")).toHaveLength(16);
 		expect(prop(segment, "title")).toBe(
-			"2 jobs running  /jobs\nbg_1  eval · per model — trials 7/9 trials\nbg_2  verb-bench · decode — decode 186 tok/s ▲ 15%",
+			"2 jobs running  /jobs\nbg_1  eval · per model — trials 7/9 trials\nbg_2  loadtest · decode — decode 186 tok/s ▲ 15%",
 		);
 		const card = prop(segment, "hovercard") as TspPropNode;
 		expect(card).toMatchObject({ k: "col", p: { role: "omp.jobs.hovercard" } });
@@ -129,5 +130,30 @@ describe("InteractiveMode HUD jobs segment with job widgets", () => {
 		const segment = jobsSegment()!;
 		expect(prop(segment, "hovercard")).toBeUndefined();
 		expect(prop(segment, "title")).toBe("1 job running  /jobs");
+	});
+
+	it("keeps a clickable idle agents segment after the last subagent finishes, and drops it once none remain", () => {
+		const registry = AgentRegistry.global();
+		const id = "hud-finished-sub";
+		const agentsSegment = (): NativeNode | undefined => {
+			mode.syncRunningSubagentBadge({ requestRender: false });
+			return nodes(mode.describeHudPills()).find(
+				node => node.key === "agents" && prop(node, "role") === "omp.hud.seg",
+			);
+		};
+		try {
+			registry.register({ id, displayName: id, kind: "sub", session: null, status: "running" });
+			expect(prop(agentsSegment(), "title")).toStartWith("1 agent running");
+
+			registry.setStatus(id, "idle");
+			const idle = agentsSegment();
+			expect(prop(idle, "actions")).toEqual({ click: "agents.open" });
+			expect(prop(idle, "title")).toStartWith("No agents running · 1 in this session");
+
+			registry.unregister(id);
+			expect(agentsSegment()).toBeUndefined();
+		} finally {
+			registry.unregister(id);
+		}
 	});
 });

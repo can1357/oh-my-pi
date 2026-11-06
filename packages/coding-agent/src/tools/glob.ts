@@ -6,6 +6,7 @@ import * as natives from "@oh-my-pi/pi-natives";
 import { formatGroupedPaths, hasFsCode, isEnoent, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter, sessionResolveContext } from "../internal-urls";
 import { InternalUrlFilesystem, type UrlFileStat } from "../internal-urls/url-filesystem";
+import { glob as ovnfsGlob } from "../ovnfs/search";
 import globDescription from "../prompts/tools/glob.md" with { type: "text" };
 import { truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
@@ -31,7 +32,7 @@ import { ToolAbortError, throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 
-import { cfgTaskDisabledAgents } from "../task/settings";
+import { cfgTaskDisabledAgents, ovnfsCommand } from "../task/settings";
 
 const findSchema = type({
 	"path?": "string",
@@ -71,6 +72,8 @@ export interface GlobOperationsOptions {
 	hidden: boolean;
 	/** Honour gitignore files. Resolved from the caller's `gitignore`, defaulting to true. */
 	gitignore: boolean;
+	/** Restrict matches to this entry type, including symlinks to that type. */
+	fileType?: natives.FileType;
 	/** Aborts when the caller cancels or when the tool's scan deadline expires.
 	 * Backends are expected to stop on it; the tool does not wait for one that
 	 * does not, but it still stops reporting at the deadline. */
@@ -97,8 +100,8 @@ export interface GlobToolOptions {
 	operations?: GlobOperations;
 	/** Remap slash-only paths to the session cwd before root-search validation. */
 	rootPathAlias?: boolean;
-	/** Native glob binding. Override only in tests. */
-	nativeGlob?: typeof natives.glob;
+	/** Glob backend (`natives.glob`, answered by the ovnfs daemon inside its mount). Override only in tests. */
+	nativeGlob?: typeof ovnfsGlob;
 	/** Filesystem stat used before native scans. Override only in tests. */
 	stat?: typeof fs.promises.stat;
 	/** Native and user-facing scan timeout. Override only in tests. */
@@ -109,6 +112,7 @@ interface GlobTarget {
 	searchPath: string;
 	globPattern: string;
 	hasGlob: boolean;
+	directoryOnly?: boolean;
 }
 
 interface NativePreparedTarget {
@@ -163,7 +167,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 
 	readonly #customOps?: GlobOperations;
 	readonly #rootPathAlias: boolean;
-	readonly #nativeGlob: typeof natives.glob;
+	readonly #nativeGlob: typeof ovnfsGlob;
 	readonly #stat: typeof fs.promises.stat;
 	readonly #timeoutMs: number;
 	#descriptionKey = -1;
@@ -175,7 +179,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	) {
 		this.#customOps = options?.operations;
 		this.#rootPathAlias = options?.rootPathAlias === true;
-		this.#nativeGlob = options?.nativeGlob ?? natives.glob;
+		this.#nativeGlob = options?.nativeGlob ?? ovnfsGlob;
 		this.#stat = options?.stat ?? fs.promises.stat;
 		this.#timeoutMs = options?.timeoutMs ?? DEFAULT_GLOB_TIMEOUT_MS;
 		if (!Number.isFinite(this.#timeoutMs) || this.#timeoutMs <= 0) {
@@ -221,7 +225,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			const internalRouter = InternalUrlRouter.instance();
 			// Internal URLs resolve inside the native walk, bounded by the tier this call was approved at.
 			const urlFilesystem = new InternalUrlFilesystem({
-				context: sessionResolveContext(this.session, { signal }),
+				context: sessionResolveContext(this.session, { signal, containSkillPaths: true }),
 				tier: resolveToolTier(this, params),
 			});
 			const normalizedPatterns = aliasResolvedPatterns.map(pattern => internalRouter.normalize(pattern));
@@ -256,6 +260,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						searchPath: target.basePath,
 						globPattern: target.globPattern,
 						hasGlob: target.hasGlob,
+						directoryOnly: target.directoryOnly,
 					}))
 				: [
 						(() => {
@@ -264,6 +269,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 								searchPath: resolveSearchBase(parsed.basePath, this.session.cwd),
 								globPattern: parsed.globPattern,
 								hasGlob: parsed.hasGlob,
+								directoryOnly: parsed.directoryOnly,
 							};
 						})(),
 					];
@@ -430,6 +436,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 							if (stat.timedOut) return [] as string[];
 							if (stat.value.isFile()) return [formatScopePath(target.searchPath)];
 						}
+						const fileType = target.directoryOnly ? natives.FileType.Dir : undefined;
 						const results = await runCustom(
 							Promise.resolve(
 								customOps.glob(target.globPattern, target.searchPath, {
@@ -437,12 +444,13 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 									limit: effectiveLimit,
 									hidden: includeHidden,
 									gitignore: useGitignore,
+									fileType,
 									signal: combinedSignal,
 								}),
 							),
 						);
 						if (results.timedOut) return [] as string[];
-						return results.value.map(matchPath => formatMatchPath(matchPath, target.searchPath));
+						return results.value.map(matchPath => formatMatchPath(matchPath, target.searchPath, fileType));
 					}),
 				);
 				const seen = new Set<string>();
@@ -568,6 +576,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						{
 							pattern: target.globPattern,
 							path: target.searchPath,
+							fileType: target.directoryOnly ? natives.FileType.Dir : undefined,
 							hidden: includeHidden,
 							maxResults: effectiveLimit,
 							sortByMtime: true,
@@ -579,11 +588,13 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 							// native auto-recursion so `dir/*` does not silently match
 							// `dir/sub/nested.ts`.
 							recursive: false,
+							followLinks: target.searchPath.startsWith("skill://"),
 							signal: combinedSignal,
 							timeoutMs,
 							filesystem: urlFilesystem.shellFilesystem(),
 						},
 						makeOnMatch(formatTargetMatch),
+						ovnfsCommand(this.session.settings),
 					);
 					throwIfAborted(signal);
 					const out: Array<{ path: string; mtime: number }> = [];
