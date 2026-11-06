@@ -56,6 +56,11 @@ function getDisplayTurns(record: BtwHistoryRecord): readonly BtwHistoryTurn[] {
 	return record.title === undefined ? turns : [{ ...turns[0]!, question: record.title }, ...turns.slice(1)];
 }
 
+/** Whether two timestamps fall on the same calendar day in the local time zone. */
+function isSameLocalDay(a: number | Date, b: number | Date): boolean {
+	return new Date(a).toDateString() === new Date(b).toDateString();
+}
+
 interface BtwHistoryPanelOptions {
 	records: readonly BtwHistoryRecord[];
 	onClose: () => void;
@@ -242,6 +247,15 @@ export class BtwHistoryPanel implements Component, Focusable {
 		minute: "2-digit",
 		hourCycle: "h23",
 	});
+	readonly #dayFormat = new Intl.DateTimeFormat("en", { month: "short", day: "numeric" });
+	readonly #yearDayFormat = new Intl.DateTimeFormat("en", { month: "short", day: "numeric", year: "numeric" });
+
+	/** A history row's stamp: the time for a question asked today, its date (and year, if not this one) before. */
+	#listStamp(timestamp: number, now: Date): string {
+		const date = new Date(timestamp);
+		if (isSameLocalDay(date, now)) return this.#timeFormat.format(date);
+		return (date.getFullYear() === now.getFullYear() ? this.#dayFormat : this.#yearDayFormat).format(date);
+	}
 
 	constructor(options: BtwHistoryPanelOptions) {
 		this.#options = options;
@@ -750,9 +764,10 @@ export class BtwHistoryPanel implements Component, Focusable {
 	 * reader has the keys the selection rests (`omp.btw.list.idle`).
 	 */
 	#describeList(): NativeNode {
+		const now = new Date();
 		const items = this.#records.map(record => {
 			const followUps = record.followUps?.length ?? 0;
-			const detail: TspSpan[] = [span(this.#timeFormat.format(record.createdAt), "mono")];
+			const detail: TspSpan[] = [span(this.#listStamp(record.createdAt, now), "mono")];
 			if (followUps > 0) detail.push(span(` · ${followUps} follow-up${followUps === 1 ? "" : "s"}`));
 			const status = describeStatus(getBtwLatestTurn(record).status);
 			// The question is markdown: its `code` reads as mono, without the backticks.
@@ -774,7 +789,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 	#describeThread(record: BtwHistoryRecord): NativeNode {
 		const turns = getDisplayTurns(record);
 		const children: NativeChild[] = turns.map((turn, index) =>
-			this.#describeTurn(turn, index, `turn-${index}`, this.#injectBlock(record, turn, index)),
+			this.#describeTurn(turn, index, `turn-${index}`, this.#injectBlock(record, turn, index), record.createdAt),
 		);
 		if (this.#composer) children.push(this.#describeComposer(this.#composer));
 		return node("col", { role: "omp.btw.thread" }, children, "thread");
@@ -797,11 +812,25 @@ export class BtwHistoryPanel implements Component, Focusable {
 		return state && { parts, state };
 	}
 
-	#describeTurn(turn: BtwHistoryTurn, index: number, key: string, block: InjectBlock | undefined): NativeNode {
+	#describeTurn(
+		turn: BtwHistoryTurn,
+		index: number,
+		key: string,
+		block: InjectBlock | undefined,
+		topicCreatedAt: number,
+	): NativeNode {
+		// A follow-up asked on the topic's day needs only its time; a later one needs its date too.
 		const meta: TspSpan[] =
 			index === 0
 				? [span(this.#dateFormat.format(turn.createdAt))]
-				: [span("Follow-up · "), span(this.#timeFormat.format(turn.createdAt))];
+				: [
+						span("Follow-up · "),
+						span(
+							(isSameLocalDay(turn.createdAt, topicCreatedAt) ? this.#timeFormat : this.#dateFormat).format(
+								turn.createdAt,
+							),
+						),
+					];
 		const status = describeStatus(turn.status);
 		if (status) meta.push(span("  ·  "), ...status);
 		// The question stays markdown so its inline code and links render.
@@ -909,6 +938,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 		this.#listScroll = Math.min(selection.scrollOffset, Math.max(0, this.#records.length - this.#listHeight));
 		const contentWidth = contentRowWidth(width, this.#records.length * rowSpan, height);
 		const lines: string[] = [];
+		const now = new Date();
 		for (
 			let index = this.#listScroll;
 			index < Math.min(this.#records.length, this.#listScroll + this.#listHeight);
@@ -918,7 +948,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 			const selected = index === selectedIndex;
 			const status = STATUS[getBtwLatestTurn(record).status];
 			const cursor = selected ? theme.fg(this.#focus === "list" ? "accent" : "muted", theme.nav.cursor) : " ";
-			const time = theme.fg("dim", this.#timeFormat.format(record.createdAt));
+			const time = theme.fg("dim", this.#listStamp(record.createdAt, now));
 			const badge = theme.fg(status.color, status.label);
 			const prefix = `${cursor} ${time} ${badge} `;
 			const question = sanitizeDisplayLine(getBtwTopicLabel(record));
