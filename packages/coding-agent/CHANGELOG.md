@@ -4,7 +4,7 @@
 
 ### Breaking Changes
 
-- `omp gc --apply` no longer reclaims unreferenced blobs by default (`gc.blobs` is now off), so an ordinary maintenance run checkpoints the database WAL files and cannot delete a session's data at all. Deciding that a blob is unreferenced means reading every session that could refer to it, and a session can be created, forked, moved to a sibling or appended to while that reading happens, so the answer describes a tree that no longer exists. Pass `--blobs`, or set `gc.blobs` in any configuration layer, on a machine whose sessions are quiescent ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --apply` no longer reclaims unreferenced blobs by default (`gc.blobs` is now off); the cold-session archive phase is unaffected and still runs on default settings, and `omp gc --wal --apply` remains the command that checkpoints the databases and runs no other phase whatever is configured. Deciding that a blob is unreferenced means reading every session that could refer to it, and a session can be created, forked, moved to a sibling or appended to while that reading happens, so the answer describes a tree that no longer exists. Pass `--blobs`, or set `gc.blobs` in any configuration layer, on a machine whose sessions are quiescent ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 
