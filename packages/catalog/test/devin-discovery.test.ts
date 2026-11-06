@@ -939,38 +939,42 @@ describe("devin catalog pricing", () => {
 	const inputRateAt = (model: Model<Api>, timestamp: number) =>
 		calculateUncachedInputCost(model.cost, 1_000_000, timestamp);
 
-	it("keeps SWE-2 Flash billing separate from SWE-2 and Fast across their promo cutoffs", () => {
-		// SWE-2 Flash was billed at SWE-2 rates, 7.5x its real price.
+	it("keeps SWE-2 Flash, SWE-2 and SWE-2 Fast billing separate across their promo cutoffs", () => {
+		// SWE-2 Flash was billed at SWE-2 rates, 7.5x its real price, and SWE-2 Fast at half its own.
 		const now = Date.parse("2026-11-06T00:00:00Z");
 		const clock = spyOn(Date, "now").mockReturnValue(now);
 		try {
-			for (const [id, promoEnds, promo, list] of [
+			// Each family's logical id and a raw effort uid that arrives without family metadata.
+			for (const [ids, promoEnds, promo, list] of [
 				[
-					"swe-2-flash",
+					["swe-2-flash", "swe-2-flash-max"],
 					Date.parse("2026-11-18T18:00:00Z"),
 					{ input: 0.075, output: 0.375, cacheRead: 0.0075, cacheWrite: 0.09375 },
 					{ input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
 				],
 				[
-					"swe-2",
+					["swe-2", "swe-2-high"],
 					PROMO_ENDS,
 					{ input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite: 0 },
 					{ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 },
 				],
 				[
-					"swe-2-fast",
+					// No dated card: Devin publishes no end date or list price for SWE-2 Fast.
+					["swe-2-fast", "swe-2-high-lightning"],
 					PROMO_ENDS,
-					{ input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite: 0 },
-					{ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 },
+					{ input: 1, output: 5, cacheRead: 0.1, cacheWrite: 0 },
+					{ input: 1, output: 5, cacheRead: 0.1, cacheWrite: 0 },
 				],
 			] as const) {
-				const model = buildModel(spec(id));
-				expect(model.cost).toMatchObject(promo);
-				expect(getEffectiveTokenCost(model.cost, now)).toMatchObject(promo);
-				expect(getEffectiveTokenCost(model.cost, promoEnds - 1)).toMatchObject(promo);
-				expect(getEffectiveTokenCost(model.cost, promoEnds)).toMatchObject(list);
-				// A dated card is not a peak/off-peak tariff.
-				expect(getTimeBasedPricingPeriod(model.cost, promoEnds)).toBeUndefined();
+				for (const id of ids) {
+					const model = buildModel(spec(id));
+					expect(model.cost).toMatchObject(promo);
+					expect(getEffectiveTokenCost(model.cost, now)).toMatchObject(promo);
+					expect(getEffectiveTokenCost(model.cost, promoEnds - 1)).toMatchObject(promo);
+					expect(getEffectiveTokenCost(model.cost, promoEnds)).toMatchObject(list);
+					// A dated card is not a peak/off-peak tariff.
+					expect(getTimeBasedPricingPeriod(model.cost, promoEnds)).toBeUndefined();
+				}
 			}
 		} finally {
 			clock.mockRestore();

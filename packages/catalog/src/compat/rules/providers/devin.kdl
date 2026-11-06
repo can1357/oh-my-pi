@@ -47,9 +47,9 @@ provider "devin" {
 	// Desktop/CLI through 2026-11-30. Account-specific token rates stay intact.
 
 	// SWE-2 promo ends at 2027-01-01 08:00 UTC (midnight Pacific after 2026-12-31).
-	// No separate SWE-2 Fast price is published; preserve the SWE-2 fallback
-	// for the discovered `swe-2-fast` lane.
-	models "swe-2" "swe-2-fast" {
+	// residue: the family's logical id plus its raw effort uids, which stay
+	// standalone when a row arrives without `modelFamilyMetadata`.
+	models "swe-2" "swe-2-medium" "swe-2-high" "swe-2-max" {
 		cost-fallback {
 			input 0.5
 			output 2.5
@@ -67,10 +67,25 @@ provider "devin" {
 		}
 	}
 
+	// SWE-2 Fast (wire uids `swe-2-<effort>-lightning`): the docs publish no
+	// price, but GetCliModelConfigs reports $1 input / $0.10 cached input /
+	// $5 output (2026-11-06), twice SWE-2's promo rate. No end date or list
+	// price is published for it.
+	// residue: the logical fast lane plus its raw uids, as for SWE-2 above.
+	models "swe-2-fast" "swe-2-medium-lightning" "swe-2-high-lightning" "swe-2-max-lightning" {
+		cost-fallback {
+			input 1
+			output 5
+			cache-read 0.1
+			cache-write 0
+		}
+	}
+
 	// SWE-2 Flash: enterprise promo is 25% off until 2026-11-18 18:00 UTC.
-	// All three variants then use the same list price; discovery exposes the
+	// All three variants then use the same list price. Discovery exposes the
 	// family as `swe-2-flash`, distinct from SWE-2 and Fusion pairings.
-	models "swe-2-flash" {
+	// residue: the logical id plus its raw effort uids, as for SWE-2 above.
+	models "swe-2-flash" "swe-2-flash-medium" "swe-2-flash-high" "swe-2-flash-max" {
 		cost-fallback {
 			input 0.075
 			output 0.375
