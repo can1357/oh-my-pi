@@ -1061,8 +1061,15 @@ describe("MCP server that is not connected", () => {
 	 * that automatic reconnects are suspended — without taking the 401's
 	 * login recovery with it. An emitter that made no attempt refused no
 	 * credential, so it has nothing to say about one.
+	 *
+	 * R5-b revised what the note may claim while that is true, and added
+	 * the storm itself to what this defends. The recovery survives — the
+	 * server is still named as one whose login is awaited — but it is
+	 * awaited, not under way: the check the old wording promised "now" was
+	 * being refused on arrival by the very breaker whose error sits in the
+	 * same sentence.
 	 */
-	it("keeps a 401's login recovery in the note when the breaker suspends reconnects", async () => {
+	it("says a suspended login check is suspended, and still refuses the storm", async () => {
 		const refusing = startLoginRequiredServer();
 		const storm = new MCPManager(tempDir, null, undefined, SINGLE_ATTEMPT);
 		storm.setAuthStorage(session);
@@ -1075,16 +1082,115 @@ describe("MCP server that is not connected", () => {
 			for (let attempt = 0; attempt <= BURST_LIMIT; attempt++) {
 				await storm.reconnectServer("remote");
 			}
+			// Still a breaker: the next automatic reconnect is refused, not made.
+			expect(await storm.reconnectServer("remote")).toBeNull();
 
 			const note = storm.explainMissingTool("mcp__remote_ping");
 			expect(note).toContain("automatic reconnects suspended");
-			expect(note).toContain("omp is checking now whether a login was stored for remote");
+			expect(note).toContain("Automatic reconnects are suspended for remote");
+			expect(note).toContain("that check resumes");
+			expect(note).not.toContain("omp is checking now");
 		} finally {
 			await storm.disconnectAll();
 			refusing.stop();
 			await session.credentials.poll();
 		}
 	}, 30_000);
+
+	/**
+	 * R5-a. The recovery probe used to perpetuate the breaker it was
+	 * waiting on: `reconnectServer` records the attempt against the crash
+	 * window on the very call it refuses, and every missing-tool lookup
+	 * re-armed the probe, so the window never drained. A model that cannot
+	 * find a tool asks again — a lookup a second is ordinary — and measured
+	 * at that rate, 33 lookups over 33 s produced 33 refusals, no POST at
+	 * all, and a credential that was usable the whole time: a manual
+	 * `/mcp reconnect` connected at once and `ping` answered.
+	 *
+	 * Real HTTP and two `AuthStorage` handles on one `agent.db`, because
+	 * the recovery is a real handshake with a login written by another
+	 * process, and the breaker reads `Date.now()`: faking the clock would
+	 * decide the answer this test exists to ask.
+	 */
+	it("recovers under a missing-tool lookup every second, despite the breaker", async () => {
+		const probing = startLoginRequiredServer();
+		const credentialId = mcpOAuthCredentialId(probing.url);
+		const watched = new MCPManager(tempDir, null, undefined, SINGLE_ATTEMPT);
+		watched.setAuthStorage(session);
+		try {
+			await watched.connectServers({ remote: { type: "http", url: probing.url, timeout: 2_000 } }, {});
+			await watched.waitForStartup(GUARD_MS);
+			expect(watched.getConnectionStatus("remote")).toBe("disconnected");
+
+			// Lookups never stop, and until the eighth one another process
+			// rewrites the login every second, so every lookup finds a
+			// credential the last attempt did not send — which is exactly
+			// what arms the probe. The eighth stores one that works.
+			let connectedAt = -1;
+			for (let miss = 0; miss < 45 && connectedAt < 0; miss++) {
+				await otherSession.credentials.set(credentialId, {
+					type: "oauth",
+					access: miss < 8 ? `rotated-${miss}` : GOOD_TOKEN,
+					refresh: "unused-refresh",
+					expires: Date.now() + 3_600_000,
+				});
+				watched.explainMissingTool("mcp__remote_ping");
+				await Bun.sleep(1_000);
+				if (watched.getConnectionStatus("remote") === "connected") connectedAt = miss;
+			}
+
+			// One window after the attempts that filled it, not never, and
+			// past the burst limit: the lookups it survived are the ones
+			// that used to refresh the window by being refused.
+			expect(connectedAt).toBeGreaterThanOrEqual(BURST_LIMIT);
+			expect(probing.state.authorizedPosts).toBeGreaterThan(0);
+			expect(watched.explainMissingTool("mcp__remote_ping")).toBeUndefined();
+		} finally {
+			await watched.disconnectAll();
+			probing.stop();
+			await otherSession.credentials.remove(credentialId);
+			await session.credentials.poll();
+		}
+	}, 120_000);
+
+	/**
+	 * R5-a, the cadence below the burst limit. Three attempts per sliding
+	 * window are not a storm, so nothing is ever suspended and the server
+	 * comes back on the first lookup after the login lands. Kept beside the
+	 * one-a-second case because the fix must not pay for the fast cadence
+	 * by slowing the ordinary one.
+	 */
+	it("recovers on the first lookup after the login lands at a slower cadence", async () => {
+		const probing = startLoginRequiredServer();
+		const credentialId = mcpOAuthCredentialId(probing.url);
+		const watched = new MCPManager(tempDir, null, undefined, SINGLE_ATTEMPT);
+		watched.setAuthStorage(session);
+		try {
+			await watched.connectServers({ remote: { type: "http", url: probing.url, timeout: 2_000 } }, {});
+			await watched.waitForStartup(GUARD_MS);
+
+			let connectedAt = -1;
+			for (let miss = 0; miss < 4 && connectedAt < 0; miss++) {
+				await otherSession.credentials.set(credentialId, {
+					type: "oauth",
+					access: miss < 2 ? `rotated-${miss}` : GOOD_TOKEN,
+					refresh: "unused-refresh",
+					expires: Date.now() + 3_600_000,
+				});
+				watched.explainMissingTool("mcp__remote_ping");
+				await Bun.sleep(10_000);
+				if (watched.getConnectionStatus("remote") === "connected") connectedAt = miss;
+			}
+
+			expect(connectedAt).toBe(2);
+			expect(probing.state.authorizedPosts).toBeGreaterThan(0);
+		} finally {
+			await watched.disconnectAll();
+			probing.stop();
+			await otherSession.credentials.remove(credentialId);
+			await session.credentials.poll();
+		}
+	}, 120_000);
 
 	/**
 	 * R4-b, the other side of the same guard. `.mcp.json` is the other
@@ -1196,4 +1302,103 @@ describe("MCP server that is not connected", () => {
 			await removeWithRetries(workDir);
 		}
 	}, 30_000);
+});
+
+/**
+ * What one missing tool may cost the model's context.
+ *
+ * Round 3 bounded each field of the note at 256 code points, which is not
+ * a bound on the note: it names every server that is down. These servers
+ * fail on a command that does not exist, so a thousand of them cost one
+ * spawn error each and no process at all.
+ */
+describe("MCP unavailable-servers note, bounded", () => {
+	/** The per-field cap in `src/mcp/startup-events.ts`, mirrored so this runs against older revisions. */
+	const FIELD_CHARS = 256;
+	/** The whole-note cap, same file, same reason. */
+	const NOTE_CHARS = 4_096;
+	const MISSING_BINARY: MCPStdioServerConfig = {
+		type: "stdio",
+		command: "/nonexistent/omp-no-such-binary",
+		args: [],
+		timeout: 2_000,
+	};
+
+	async function noteFor(names: readonly string[]): Promise<{ note: string; close: () => Promise<void> }> {
+		const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-note-"));
+		const manager = new MCPManager(workDir, null, undefined, SINGLE_ATTEMPT);
+		const servers: Record<string, MCPStdioServerConfig> = {};
+		for (const name of names) servers[name] = { ...MISSING_BINARY };
+		await manager.connectServers(servers, {});
+		await manager.waitForStartup(60_000);
+		return {
+			note: manager.explainMissingTool("mcp__anything_ping") ?? "",
+			close: async () => {
+				await manager.disconnectAll();
+				await removeWithRetries(workDir);
+			},
+		};
+	}
+
+	/**
+	 * R5-c. Measured by this very case at `b4dc4bd2`: a thousand servers
+	 * whose names are 300 code points each rendered a 341,190-character
+	 * note — every field inside its cap, the note hundreds of times larger
+	 * than the tool call it was explaining.
+	 */
+	it("names what fits and counts what it left out", async () => {
+		const names = Array.from({ length: 1_000 }, (_, index) => `s${index}-${"x".repeat(300)}`);
+		const { note, close } = await noteFor(names);
+		try {
+			expect([...note].length).toBeLessThanOrEqual(NOTE_CHARS);
+			// A reader can tell this list from a complete one, and by how much.
+			const omitted = /and (\d+) more/.exec(note);
+			expect(omitted).not.toBeNull();
+			const listed = names.length - Number(omitted?.[1]);
+			expect(listed).toBeGreaterThan(0);
+			expect(note).toContain("s0-");
+			// Every listed name is whole or elided, never half a note.
+			expect(note).toContain("A person can sign an OAuth server in with `/mcp reauth <server>`");
+		} finally {
+			await close();
+		}
+	}, 120_000);
+
+	/**
+	 * R5-d. A name is cut at a grapheme boundary or not at all. Cutting on
+	 * the 256th code point took the accent off the last letter of one name
+	 * and left the other's emoji as a woman and a dangling zero-width
+	 * joiner, both of which the model reads as a different name than the
+	 * one it must type after `/mcp reconnect`.
+	 */
+	it("drops a combining mark and an emoji sequence whole, never split", async () => {
+		const accented = `${"a".repeat(255)}e\u0301`;
+		const emoji = `${"b".repeat(254)}\u{1F469}\u200D\u{1F4BB}`;
+		const { note, close } = await noteFor([accented, emoji]);
+		try {
+			expect(note).toContain(`${"a".repeat(255)}…`);
+			expect(note).not.toContain(`${"a".repeat(255)}e`);
+			expect(note).toContain(`${"b".repeat(254)}…`);
+			expect(note).not.toContain("\u200D");
+			expect(note).not.toContain("\u{1F469}");
+		} finally {
+			await close();
+		}
+	}, 60_000);
+
+	/**
+	 * R5-e. The cap kept 256 code points and then appended the marker, so
+	 * an elided field was 257. A bound that the thing it bounds exceeds by
+	 * one is not a bound.
+	 */
+	it("spends exactly the cap on an elided field, marker included", async () => {
+		const { note, close } = await noteFor(["x".repeat(300)]);
+		try {
+			const field = /x+…/.exec(note)?.[0] ?? "";
+			expect([...field].length).toBe(FIELD_CHARS);
+			expect(note).not.toContain("x".repeat(FIELD_CHARS));
+		} finally {
+			await close();
+		}
+	}, 60_000);
 });

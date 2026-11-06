@@ -1624,12 +1624,20 @@ export class MCPManager implements MCPManagerApi {
 	 * place this process polls the shared credential store, and the per-call
 	 * reconnect of a deferred tool never does. That check runs in the
 	 * background and never delays the answer.
+	 *
+	 * While the crash-storm breaker is refusing a server's reconnects there
+	 * is no check to start: it would be refused on arrival, and arming it
+	 * anyway is what used to keep the breaker's window full (see
+	 * `#reconnectsSuspended`). Such a server is reported as one whose login
+	 * check resumes with its reconnects, which is what will happen, instead
+	 * of one being checked now, which is not.
 	 */
 	explainMissingTool(toolName: string): string | undefined {
 		if (!toolName.startsWith(MCP_TOOL_NAME_PREFIX)) return undefined;
 		const unmounted: McpConnectionFailure[] = [];
 		const servingCachedTools: McpConnectionFailure[] = [];
 		const awaitingLogin: string[] = [];
+		const loginCheckSuspended: string[] = [];
 		for (const serverName of this.#startupFailures.keys()) {
 			const failure = this.#liveFailure(serverName);
 			if (!failure) continue;
@@ -1642,11 +1650,15 @@ export class MCPManager implements MCPManagerApi {
 			if (this.#tools.some(tool => tool.mcpServerName === serverName)) servingCachedTools.push(reported);
 			else unmounted.push(reported);
 			if (!failure.authRefused) continue;
+			if (this.#reconnectsSuspended(serverName)) {
+				loginCheckSuspended.push(serverName);
+				continue;
+			}
 			awaitingLogin.push(serverName);
 			void this.#reconnectWithStoredLogin(serverName);
 		}
 		return unmounted.length + servingCachedTools.length > 0
-			? formatMCPUnavailableServersNote(unmounted, servingCachedTools, awaitingLogin)
+			? formatMCPUnavailableServersNote({ unmounted, servingCachedTools, awaitingLogin, loginCheckSuspended })
 			: undefined;
 	}
 
@@ -1691,6 +1703,16 @@ export class MCPManager implements MCPManagerApi {
 	 * from becoming a reconnect storm — an unchanged credential means the
 	 * only login available is the refused one, so the poll happens and the
 	 * handshake does not.
+	 *
+	 * A probe the breaker would refuse is not made at all. `reconnectServer`
+	 * records the attempt against the crash window on the very call it
+	 * refuses, so this recovery — armed again by every missing-tool lookup,
+	 * and a model that cannot find a tool asks repeatedly — kept the window
+	 * it was waiting on full: measured at a lookup per second, 33 lookups
+	 * over 33 s produced 33 refusals, no handshake, and a credential that
+	 * was usable the whole time (a manual `/mcp reconnect` connected at
+	 * once). Asking first and standing down leaves the record armed, so a
+	 * later lookup recovers once the window drains.
 	 */
 	async #reconnectWithStoredLogin(name: string): Promise<void> {
 		if (this.#loginChecks.has(name)) return;
@@ -1702,6 +1724,12 @@ export class MCPManager implements MCPManagerApi {
 			if (!config || !failure?.authRefused || this.getConnectionStatus(name) !== "disconnected") return;
 			const stored = mcpStoredLoginIdentity(lookupMcpOAuthCredential(this.#authStorage, config));
 			if (stored === failure.login) return;
+			if (this.#reconnectsSuspended(name)) {
+				logger.debug("MCP login changed since the server failed; automatic reconnects are suspended", {
+					path: `mcp:${name}`,
+				});
+				return;
+			}
 			logger.debug("MCP login changed since the server failed; reconnecting", { path: `mcp:${name}` });
 			await this.reconnectServer(name);
 		} catch (error) {
@@ -2011,6 +2039,38 @@ export class MCPManager implements MCPManagerApi {
 	}
 
 	/**
+	 * The reconnects of `name` still inside the crash window at `now`, pruned
+	 * in place. The one owner of the window arithmetic:
+	 * {@link MCPManager.#tripReconnectBreaker} appends to what this returns,
+	 * `#reconnectsSuspended` only counts it, and neither spells the rule out
+	 * a second time.
+	 */
+	#recentReconnects(name: string, now: number): number[] {
+		const previous = this.#reconnectHistory.get(name);
+		if (!previous) return [];
+		const recent = previous.filter(ts => now - ts < RECONNECT_BURST_WINDOW_MS);
+		if (recent.length === previous.length) return previous;
+		if (recent.length === 0) this.#reconnectHistory.delete(name);
+		else this.#reconnectHistory.set(name, recent);
+		return recent;
+	}
+
+	/**
+	 * Whether a non-manual reconnect of `name` would be refused right now —
+	 * asked by callers that have something better to do than be refused.
+	 *
+	 * {@link MCPManager.#tripReconnectBreaker} counts the call it refuses,
+	 * which is right for a crash storm (each crash is a crash) and wrong for
+	 * a recovery probe that only wanted to know whether it could run: the
+	 * probe kept re-arming the window it was waiting on, so a credential
+	 * another process had already fixed never got through. A caller that
+	 * asks and stands down records nothing, and the window drains.
+	 */
+	#reconnectsSuspended(name: string): boolean {
+		return this.#recentReconnects(name, Date.now()).length >= RECONNECT_BURST_LIMIT;
+	}
+
+	/**
 	 * Record a reconnect attempt against the per-server crash window and report
 	 * whether the circuit breaker is now open. Sliding window: entries older
 	 * than {@link RECONNECT_BURST_WINDOW_MS} are pruned before the new
@@ -2019,8 +2079,7 @@ export class MCPManager implements MCPManagerApi {
 	 */
 	#tripReconnectBreaker(name: string): boolean {
 		const now = Date.now();
-		const previous = this.#reconnectHistory.get(name) ?? [];
-		const recent = previous.filter(ts => now - ts < RECONNECT_BURST_WINDOW_MS);
+		const recent = this.#recentReconnects(name, now);
 		recent.push(now);
 		this.#reconnectHistory.set(name, recent);
 

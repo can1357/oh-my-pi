@@ -7,6 +7,7 @@ import {
 	TRUNCATE_LENGTHS,
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui/render/render-utils";
+import { getSegmenter } from "@oh-my-pi/pi-tui/utils";
 import unavailableServersTemplate from "../prompts/tools/mcp-unavailable-servers.md" with { type: "text" };
 
 export const MCP_CONNECTION_STATUS_EVENT_CHANNEL = "mcp:connection-status";
@@ -49,13 +50,123 @@ export type McpConnectionStatusSnapshot = {
  */
 const MCP_STATUS_FIELD_CHARS = 256;
 
-/** `text` cut to `maxChars` code points, with an explicit elision marker. */
+/**
+ * Longest the whole unavailable-servers note may be, in code points.
+ *
+ * {@link MCP_STATUS_FIELD_CHARS} bounds one field, which is not a bound on
+ * the note: the note names every server that is down, so it grew without
+ * limit in their number. Measured with names of zero-width code points:
+ * 1 server rendered 2,499 UTF-16 units, 10 rendered 21,042, 100 rendered
+ * 206,262, and 1,000 rendered 2,056,662 units (1,045,442 code points) in
+ * about 489 ms — the thing explaining one missing tool, orders of
+ * magnitude larger than the context it is explaining.
+ *
+ * 4096 because one listed server costs at most three capped fields plus
+ * their punctuation (≈ 790 code points), so even an all-pathological list
+ * still names five servers in full, while realistic entries (≈ 60 code
+ * points) put around sixty of them in one note — more servers than any
+ * configuration these renderers have been seen against. In tokens that is
+ * roughly a thousand: the size of one large tool result, which is what
+ * this note competes with for the context it is written into. Whatever
+ * does not fit is replaced by a count of what was left out, so a
+ * truncated list is never read as a complete one.
+ */
+const MCP_STATUS_NOTE_CHARS = 4_096;
+
+/** Marks a field or a list that one of the bounds above cut short. */
+const ELISION_MARKER = "…";
+/** Between bare server names. */
+const NAME_SEPARATOR = ", ";
+/** Between `name [config: path]: error` entries. */
+const ENTRY_SEPARATOR = "; ";
+
+const GRAPHEMES = getSegmenter();
+
+/** `text` measured in code points, without materialising them. */
+function countChars(text: string): number {
+	let chars = 0;
+	for (const _ of text) chars++;
+	return chars;
+}
+
+const ELISION_MARKER_CHARS = countChars(ELISION_MARKER);
+
+/**
+ * `text` within `maxChars` code points — the marker included, so the bound
+ * is the bound — cut only at a grapheme boundary.
+ *
+ * Code points rather than UTF-16 units because a cut between a surrogate
+ * pair leaves a lone surrogate in the model's context. Grapheme clusters
+ * rather than code points because a cut inside one is the same defect one
+ * level up: cutting at 256 took the accent off `é` (`e` + U+0301) at the
+ * end of a name, and left `👩‍💻` as `👩` with a dangling zero-width joiner
+ * in front of the marker. A cluster that does not fit is dropped whole.
+ *
+ * Two names that differ only past `maxChars` render alike. That is the
+ * accepted cost of bounding what one name can spend of the model's
+ * context, and `docs/mcp-runtime-lifecycle.md` says so.
+ */
 function elideBeyondChars(text: string, maxChars: number): string {
+	// UTF-16 units are never fewer than code points, so this fast path is exact.
 	if (text.length <= maxChars) return text;
-	// Code points, not UTF-16 units: a cut between a surrogate pair would
-	// leave a lone surrogate in the model's context.
-	const points = [...text];
-	return points.length <= maxChars ? text : `${points.slice(0, maxChars).join("")}…`;
+	if (countChars(text) <= maxChars) return text;
+	const budget = maxChars - ELISION_MARKER_CHARS;
+	let kept = 0;
+	let used = 0;
+	for (const { segment, index } of GRAPHEMES.segment(text)) {
+		const size = countChars(segment);
+		if (used + size > budget) break;
+		used += size;
+		kept = index + segment.length;
+	}
+	return `${text.slice(0, kept)}${ELISION_MARKER}`;
+}
+
+/**
+ * `items` rendered into at most `budget` code points, with a tail naming
+ * how many were left out: `alpha, beta, and 998 more`.
+ *
+ * Rendering is lazy, so a note that lists five of a thousand down servers
+ * sanitises five: the cost of the bound stays off the ordinary path, where
+ * everything fits.
+ *
+ * The bound is exact. When not even the first entry fits whole it is
+ * elided to what there is, rather than taken over budget or dropped: a
+ * list that named nobody would leave the model a count and no server to
+ * act on.
+ */
+function joinWithinBudget<T>(
+	items: readonly T[],
+	render: (item: T) => string,
+	separator: string,
+	budget: number,
+): { text: string; chars: number } {
+	if (items.length === 0) return { text: "", chars: 0 };
+	// Reserved against the largest count this list could report, so the
+	// tail itself is never what pushes the note past the bound.
+	const reserved = separator.length + `and ${items.length} more`.length;
+	const taken: string[] = [];
+	let chars = 0;
+	for (const item of items) {
+		const rendered = render(item);
+		const cost = countChars(rendered) + (taken.length > 0 ? separator.length : 0);
+		const isLast = taken.length === items.length - 1;
+		if (chars + cost + (isLast ? 0 : reserved) > budget) break;
+		taken.push(rendered);
+		chars += cost;
+	}
+	if (taken.length === 0) {
+		const allowance = budget - (items.length > 1 ? reserved : 0);
+		if (allowance > 0) {
+			const only = elideBeyondChars(render(items[0]!), allowance);
+			taken.push(only);
+			chars += countChars(only);
+		}
+	}
+	const omitted = items.length - taken.length;
+	if (omitted === 0) return { text: taken.join(separator), chars };
+	const tail = taken.length > 0 ? `${separator}and ${omitted} more` : `and ${omitted} more`;
+	return { text: `${taken.join(separator)}${tail}`, chars: chars + tail.length };
 }
 
 function sanitizeMcpStatusText(value: string, maxWidth?: number): string {
@@ -79,15 +190,17 @@ function sanitizeMcpStatusText(value: string, maxWidth?: number): string {
  * wrong, and two longer names that share a prefix render as the same
  * string, so the note cannot even say which server it means. Server names
  * come from config files and have no length limit; control characters,
- * tabs, newlines and home paths are removed above, and
- * {@link MCP_STATUS_FIELD_CHARS} still bounds what one name can cost.
+ * tabs, newlines and home paths are removed above,
+ * {@link MCP_STATUS_FIELD_CHARS} bounds what one name can cost, and
+ * {@link MCP_STATUS_NOTE_CHARS} bounds what all of them together can.
  */
 function sanitizeMcpServerName(serverName: string, whole = false): string {
 	return sanitizeMcpStatusText(serverName, whole ? undefined : TRUNCATE_LENGTHS.SHORT);
 }
 
-function formatServerList(serverNames: readonly string[], whole = false): string {
-	return serverNames.map(name => sanitizeMcpServerName(name, whole)).join(", ");
+/** Names for the one-line status, where each is capped at its width. */
+function formatServerList(serverNames: readonly string[]): string {
+	return serverNames.map(name => sanitizeMcpServerName(name)).join(NAME_SEPARATOR);
 }
 
 function formatServerCount(count: number): string {
@@ -119,13 +232,13 @@ export function formatMCPConnectionStatusMessage(snapshot: McpConnectionStatusSn
 			parts.push(`Connected: ${formatServerList(connectedServers)}.`);
 		}
 		if (failedServers.length > 0) {
-			parts.push(`Failed: ${failedServers.map(failure => formatFailedServer(failure)).join("; ")}.`);
+			parts.push(`Failed: ${failedServers.map(failure => formatFailedServer(failure)).join(ENTRY_SEPARATOR)}.`);
 		}
 		parts.push(`Still connecting: ${formatServerList(pendingServers)}…`);
 		return parts.join(" ");
 	}
 	if (failedServers.length > 0) {
-		const failureText = failedServers.map(failure => formatFailedServer(failure)).join("; ");
+		const failureText = failedServers.map(failure => formatFailedServer(failure)).join(ENTRY_SEPARATOR);
 		if (connectedServers.length === 0) {
 			return `MCP ${formatServerCount(failedServers.length)} failed to connect: ${failureText}`;
 		}
@@ -135,6 +248,18 @@ export function formatMCPConnectionStatusMessage(snapshot: McpConnectionStatusSn
 		return `Connected to MCP ${formatServerCount(connectedServers.length)}: ${formatServerList(connectedServers)}.`;
 	}
 	return "";
+}
+
+/** The servers an unavailable-tool note has to account for. */
+export interface McpUnavailableServers {
+	/** Down, with no tools of theirs in the registry. */
+	readonly unmounted: readonly McpConnectionFailure[];
+	/** Down while the catalog cached from an earlier connect stays mounted. */
+	readonly servingCachedTools: readonly McpConnectionFailure[];
+	/** Listed servers whose stored login the caller is checking right now. */
+	readonly awaitingLogin: readonly string[];
+	/** Listed servers whose login check waits for reconnects to resume. */
+	readonly loginCheckSuspended: readonly string[];
 }
 
 /**
@@ -154,28 +279,58 @@ export function formatMCPConnectionStatusMessage(snapshot: McpConnectionStatusSn
  * explains the miss, is that the cache predates the failure and a tool the
  * server has added or renamed since is not in it.
  *
- * `awaitingLogin` names the listed servers whose last attempt the server
- * refused with an auth challenge and that the caller is checking the
- * credential store for now; only they get the sentence saying omp
- * reconnects a server once a login it has not tried turns up.
+ * A server whose last attempt was refused with an auth challenge is in
+ * exactly one of the last two lists, and they say different things because
+ * different things are true. `awaitingLogin` is being checked against the
+ * credential store as this note is written. `loginCheckSuspended` is not:
+ * the crash-storm breaker is refusing its reconnects, so the check that
+ * would act on a login found there cannot run yet. Promising both the same
+ * check would describe, for the second, something that is being refused on
+ * arrival.
  *
  * Server names are rendered whole here, unlike in the status line: the note
  * ends by telling the model to type `/mcp reconnect <server>`. Whole means
- * at full width, not unbounded — every field is still capped at
- * {@link MCP_STATUS_FIELD_CHARS} code points, so the note the model reads
- * grows with the number of servers that are down and with nothing else.
+ * at full width, not unbounded — every field is capped at
+ * {@link MCP_STATUS_FIELD_CHARS} code points and the note itself at
+ * {@link MCP_STATUS_NOTE_CHARS}, past which a list stops and says how many
+ * servers it did not name.
  */
-export function formatMCPUnavailableServersNote(
-	unmounted: readonly McpConnectionFailure[],
-	servingCachedTools: readonly McpConnectionFailure[],
-	awaitingLogin: readonly string[],
-): string {
-	return prompt.render(unavailableServersTemplate, {
+export function formatMCPUnavailableServersNote(servers: McpUnavailableServers): string {
+	const { unmounted, servingCachedTools, awaitingLogin, loginCheckSuspended } = servers;
+	const counts = {
 		single: unmounted.length === 1,
-		servers: unmounted.map(failure => formatFailedServer(failure, true)).join("; "),
 		cachedSingle: servingCachedTools.length === 1,
-		cachedServers: servingCachedTools.map(failure => formatFailedServer(failure, true)).join("; "),
-		awaitingLogin: formatServerList(awaitingLogin, true),
+		suspendedSingle: loginCheckSuspended.length === 1,
+	};
+	// What the note costs before a single server is named, measured by
+	// rendering it with a one-code-point stand-in wherever a list will go:
+	// the sections that fire for the real lists are exactly these.
+	let pending = [unmounted, servingCachedTools, awaitingLogin, loginCheckSuspended].filter(
+		list => list.length > 0,
+	).length;
+	const skeleton = prompt.render(unavailableServersTemplate, {
+		...counts,
+		servers: unmounted.length > 0 ? "x" : "",
+		cachedServers: servingCachedTools.length > 0 ? "x" : "",
+		awaitingLogin: awaitingLogin.length > 0 ? "x" : "",
+		suspendedLogin: loginCheckSuspended.length > 0 ? "x" : "",
+	});
+	let budget = Math.max(0, MCP_STATUS_NOTE_CHARS - (countChars(skeleton) - pending));
+	// Each list takes an equal share of what is left and hands back what it
+	// does not spend, so one pathological group cannot starve the others.
+	const take = <T>(items: readonly T[], render: (item: T) => string, separator: string): string => {
+		if (items.length === 0) return "";
+		const { text, chars } = joinWithinBudget(items, render, separator, Math.floor(budget / pending));
+		budget -= chars;
+		pending -= 1;
+		return text;
+	};
+	return prompt.render(unavailableServersTemplate, {
+		...counts,
+		servers: take(unmounted, failure => formatFailedServer(failure, true), ENTRY_SEPARATOR),
+		cachedServers: take(servingCachedTools, failure => formatFailedServer(failure, true), ENTRY_SEPARATOR),
+		awaitingLogin: take(awaitingLogin, name => sanitizeMcpServerName(name, true), NAME_SEPARATOR),
+		suspendedLogin: take(loginCheckSuspended, name => sanitizeMcpServerName(name, true), NAME_SEPARATOR),
 	});
 }
 
