@@ -124,6 +124,10 @@ describe("detectTerminalId", () => {
 		expect(detectTerminalId({ TERM_PROGRAM: "rio", COLORTERM: "truecolor" })).toBe("rio");
 	});
 
+	it("recognizes tern via TERM_PROGRAM despite its plain xterm TERM", () => {
+		expect(detectTerminalId({ TERM_PROGRAM: "tern", TERM: "xterm-256color", COLORTERM: "truecolor" })).toBe("tern");
+	});
+
 	it("maps rio to kitty graphics with verified hyperlink capability", () => {
 		// Reporter-verified (#12205): kitty graphics + true color. Hyperlinks
 		// verified against rio 0.5.28's published escape sequence support plus a

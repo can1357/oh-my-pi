@@ -34,7 +34,7 @@
 
 There is no `env` input. Every command and named service also gets `PI_SESSION_ID`, `PI_SESSION_FILE` (the transcript's absolute path, empty when the session is not persisted), and `PI_TOOL_CALL_ID` (the id of the running `bash` call), read when the call starts; see [environment variables](../environment-variables.md#set-by-the-bash-tool). Named services otherwise inherit the configured shell environment; put command-specific assignments in `command`.
 
-Without `name`, `pty`, or a client terminal, commands run in the embedded POSIX-compatible brush shell, even when `shellPath` points to PowerShell or another external shell. `shellPath` selects the external shell for named services, supported terminal routes, and interactive `!` commands; a bash path may still supply environment and rc snapshots to the embedded session. To use PowerShell syntax in a plain tool call, invoke `pwsh -Command '...'` explicitly, quoting so brush preserves PowerShell's `$` variables.
+Without `name`, `pty`, or a client terminal, commands run in the embedded bash engine (bash 5.3 semantics), even when `shellPath` points to PowerShell or another external shell. `shellPath` selects the external shell for named services, supported terminal routes, and interactive `!` commands; a bash path may still supply environment and rc snapshots to the embedded session. To use PowerShell syntax in a plain tool call, invoke `pwsh -Command '...'` explicitly, quoting so the embedded shell preserves PowerShell's `$` variables.
 
 Named service example:
 
@@ -66,6 +66,7 @@ The tool returns a `text` content block plus optional `details` and image blocks
    - delivered through `onUpdate` / async job manager, not the initial return.
    - running updates contain tail text and `details.async.state: "running"` only after the job is considered backgrounded.
    - completion/failure updates carry final text and `details.async.state: "completed" | "failed"`. A non-zero exit or timeout is recorded as a failed background job.
+   - the `async-result` follow-up names the job by its command on one line (line breaks as `\n`, the middle elided past 400 characters): `Background job <id> (<command>) has completed.`, or `── Job <id> (<command>) ──` in a batch.
 - Failure:
    - cancellation, missing exit status, validation failures, and intercepted commands throw `ToolError` / `ToolAbortError`; timeouts return an error result.
 

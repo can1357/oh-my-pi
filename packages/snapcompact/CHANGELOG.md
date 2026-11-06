@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.17.0] - 2026-11-06
+
+### Fixed
+
+- `compact()` now keeps image content from pre-16.1.0 archived histories in the dropped-history summary.
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

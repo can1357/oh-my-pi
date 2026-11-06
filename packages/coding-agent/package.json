@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-coding-agent",
-	"version": "18.16.0",
+	"version": "18.17.0",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"keywords": [
 		"agent",
@@ -518,7 +518,7 @@
 	"scripts": {
 		"build": "bun scripts/build-binary.ts",
 		"check": "oxlint . && oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run check:types",
-		"check:types": "tsgo -p tsconfig.json --noEmit",
+		"check:types": "bun check --no-script -p tsconfig.json",
 		"lint": "oxlint .",
 		"test": "bun ../../scripts/ci-test-ts.ts coding-agent-heavy --full",
 		"fix": "oxlint --fix --fix-suggestions . && bun run fmt",
@@ -559,10 +559,6 @@
 	},
 	"devDependencies": {
 		"@types/bun": "catalog:"
-	},
-	"optionalDependencies": {
-		"@huggingface/transformers": "catalog:",
-		"sherpa-onnx-node": "1.13.2"
 	},
 	"engines": {
 		"bun": ">=1.4.4"

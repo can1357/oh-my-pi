@@ -40,7 +40,9 @@ import {
 	getMnemopiSessionState,
 	loadMnemopi,
 	loadMnemopiCore,
+	type MnemopiBankStats,
 	MnemopiSessionState,
+	type MnemopiSessionStateApi,
 	requireMnemopi,
 	requireMnemopiCore,
 	setMnemopiSessionState,
@@ -90,7 +92,7 @@ export function resolveMemoryCompletionInput(
 async function installMnemopiState(
 	session: AgentSession,
 	config: MnemopiBackendConfig,
-	inherited?: MnemopiSessionState,
+	inherited?: MnemopiSessionStateApi,
 ): Promise<MnemopiSessionState> {
 	const state = new MnemopiSessionState({
 		sessionId: session.sessionId,
@@ -225,13 +227,9 @@ export const mnemopiBackend: MemoryBackend = {
 
 	async stats(agentDir, _cwd, session): Promise<string | undefined> {
 		await Promise.all([loadMnemopi(), loadMnemopiCore()]);
-		const { targets, owned } = createStatsTargets(agentDir, session);
-		try {
-			if (targets.length === 0) return undefined;
-			return renderMnemopiStats(targets);
-		} finally {
-			for (const memory of owned) memory.close();
-		}
+		const banks = collectBankStats(agentDir, session);
+		if (banks.length === 0) return undefined;
+		return renderMnemopiStats(banks);
 	},
 
 	async diagnose(agentDir, _cwd, session): Promise<string | undefined> {
@@ -263,21 +261,17 @@ export const mnemopiBackend: MemoryBackend = {
 			};
 		}
 
-		const { targets, owned } = createStatsTargets(agentDir, session);
-		try {
-			if (targets.length === 0) {
-				return {
-					backend: "mnemopi",
-					active: false,
-					writable: false,
-					searchable: false,
-					message: "Mnemopi backend is configured but not initialised for this session.",
-				};
-			}
-			return summarizeMnemopiStatus(targets, session);
-		} finally {
-			for (const memory of owned) memory.close();
+		const banks = collectBankStats(agentDir, session);
+		if (banks.length === 0) {
+			return {
+				backend: "mnemopi",
+				active: false,
+				writable: false,
+				searchable: false,
+				message: "Mnemopi backend is configured but not initialised for this session.",
+			};
 		}
+		return summarizeMnemopiStatus(banks, session);
 	},
 
 	async search({ session }, query, options) {
@@ -352,31 +346,23 @@ export const mnemopiBackend: MemoryBackend = {
 	},
 };
 
-interface MnemopiStatsTarget {
-	bank: string;
-	memory: Mnemopi;
-}
-
-function createStatsTargets(
-	agentDir: string,
-	session: AgentSession | undefined,
-): { targets: MnemopiStatsTarget[]; owned: Mnemopi[] } {
-	return withLoopPhase("mnemopi.open", () => {
-		const state = getMnemopiSessionState(session);
-		if (state) {
-			return {
-				targets: dedupeStatsTargets([state.getScopedRetainTarget(), ...state.getScopedRecallTargets()]),
-				owned: [],
-			};
-		}
-		if (!session) return { targets: [], owned: [] };
-		const config = loadMnemopiConfig(session.settings, agentDir);
-		const targets = getMnemopiScopedBanks(config).map(bank => ({
-			bank,
-			memory: createStatsMemory(config, bank),
-		}));
-		return { targets, owned: targets.map(target => target.memory) };
-	});
+/**
+ * Stats of the session's scoped banks: through its live state (an alias's come from the
+ * parent's banks), else from stores opened for this read and closed again.
+ */
+function collectBankStats(agentDir: string, session: AgentSession | undefined): MnemopiBankStats[] {
+	const state = getMnemopiSessionState(session);
+	if (state) return withLoopPhase("mnemopi.open", () => state.getScopedStats());
+	if (!session) return [];
+	const config = loadMnemopiConfig(session.settings, agentDir);
+	const owned = withLoopPhase("mnemopi.open", () =>
+		getMnemopiScopedBanks(config).map(bank => ({ bank, memory: createStatsMemory(config, bank) })),
+	);
+	try {
+		return owned.map(({ bank, memory }) => ({ bank, stats: memory.getStats() }));
+	} finally {
+		for (const { memory } of owned) memory.close();
+	}
 }
 
 function createStatsMemory(config: MnemopiBackendConfig, bank: string): Mnemopi {
@@ -401,28 +387,16 @@ function resolveBankDbPath(config: MnemopiBackendConfig, bank: string): string {
 	return new BankManager(path.dirname(config.dbPath)).getBankDbPath(bank);
 }
 
-function dedupeStatsTargets(targets: readonly MnemopiStatsTarget[]): MnemopiStatsTarget[] {
-	const seen = new Set<string>();
-	const unique: MnemopiStatsTarget[] = [];
-	for (const target of targets) {
-		if (seen.has(target.bank)) continue;
-		seen.add(target.bank);
-		unique.push(target);
-	}
-	return unique;
-}
-
-function renderMnemopiStats(targets: readonly MnemopiStatsTarget[]): string {
+function renderMnemopiStats(banks: readonly MnemopiBankStats[]): string {
 	const lines = [
 		"# Mnemopi Memory Stats",
 		"",
 		"| Bank | Working | Episodic | Triples | Last memory | Database |",
 		"|---|---:|---:|---:|---|---|",
 	];
-	for (const target of targets) {
-		const stats = target.memory.getStats();
+	for (const { bank, stats } of banks) {
 		lines.push(
-			`| ${escapeMarkdownTableCell(target.bank)} | ${statCount(stats.beam.working_memory)} | ${statCount(
+			`| ${escapeMarkdownTableCell(bank)} | ${statCount(stats.beam.working_memory)} | ${statCount(
 				stats.beam.episodic_memory,
 			)} | ${stats.beam.triples.total} | ${escapeMarkdownTableCell(stats.last_memory ?? "never")} | ${escapeMarkdownTableCell(shortenPath(stats.database))} |`,
 		);
@@ -431,7 +405,7 @@ function renderMnemopiStats(targets: readonly MnemopiStatsTarget[]): string {
 }
 
 function summarizeMnemopiStatus(
-	targets: readonly MnemopiStatsTarget[],
+	banks: readonly MnemopiBankStats[],
 	session: AgentSession | undefined,
 ): MemoryBackendStatus {
 	let workingCount = 0;
@@ -439,8 +413,7 @@ function summarizeMnemopiStatus(
 	let tripleCount = 0;
 	let lastMemory: string | undefined;
 	let database: string | undefined;
-	for (const target of targets) {
-		const stats = target.memory.getStats();
+	for (const { stats } of banks) {
 		workingCount += statCount(stats.beam.working_memory);
 		episodicCount += statCount(stats.beam.episodic_memory);
 		tripleCount += stats.beam.triples.total;
@@ -455,8 +428,8 @@ function summarizeMnemopiStatus(
 		writable: true,
 		searchable: true,
 		scope: primary?.config.scoping,
-		retainBank: primary?.getScopedRetainTarget().bank ?? targets[0]?.bank,
-		recallBanks: primary?.getScopedRecallTargets().map(target => target.bank) ?? targets.map(target => target.bank),
+		retainBank: primary?.getScopedRetainTarget().bank ?? banks[0]?.bank,
+		recallBanks: primary?.getScopedRecallTargets().map(target => target.bank) ?? banks.map(({ bank }) => bank),
 		workingCount,
 		episodicCount,
 		tripleCount,
@@ -712,7 +685,7 @@ async function resolveMnemopiProviderOptions(
 	}
 }
 
-function getMnemopiSessionStateFromParent(options: MemoryBackendStartOptions): MnemopiSessionState | undefined {
+function getMnemopiSessionStateFromParent(options: MemoryBackendStartOptions): MnemopiSessionStateApi | undefined {
 	const parent = options.parentMnemopiSessionState;
 	return parent?.aliasOf ?? parent;
 }

@@ -3,9 +3,10 @@ import * as path from "node:path";
 
 import { getProjectDir, isRecord, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import type { AgentRef, AgentRegistry } from "../../registry/agent-registry";
+import type { AgentRef, AgentRegistryApi } from "../../registry/agent-registry";
 import type { ToolSession } from "../../tools";
 import {
+	abortReasonError,
 	buildManagedKernelEnv,
 	buildManagedKernelEnvPatch,
 	createCancelledKernelResult,
@@ -361,7 +362,7 @@ async function shutdownInvalidatedSession(session: PythonSession): Promise<Kerne
 
 const IDLE_TOOL_PROBE_TIMEOUT_MS = 5_000;
 
-function descendsFrom(registry: AgentRegistry, ref: AgentRef, ancestorId: string): boolean {
+function descendsFrom(registry: AgentRegistryApi, ref: AgentRef, ancestorId: string): boolean {
 	const visited = new Set<string>();
 	let parentId = ref.parentId;
 	while (parentId !== undefined && !visited.has(parentId)) {
@@ -537,10 +538,18 @@ interface PythonToolRequestOutcome {
 	envelope: unknown;
 }
 
-function pythonToolError(execution: KernelExecuteResult): string {
-	const error = execution.error;
-	if (!error) return "Python tool request failed";
-	return error.value || error.name || "Python tool request failed";
+/** Why a tool request produced no usable reply, or `undefined` when it completed. */
+function pythonToolFailure(execution: KernelExecuteResult, signal: AbortSignal | undefined): string | undefined {
+	if (execution.status === "error") {
+		const error = execution.error;
+		return error?.value || error?.name || "Python tool request failed";
+	}
+	// The caller's abort settles the request without waiting for the runner's reply.
+	if (execution.cancelled) {
+		if (execution.timedOut) return "Python tool request timed out";
+		return abortReasonError(signal?.reason, "Python tool request was cancelled").message;
+	}
+	return undefined;
 }
 
 async function invokePythonToolRequest(
@@ -602,7 +611,8 @@ export async function describePythonTools(
 	options: PythonToolInvokeOptions,
 ): Promise<{ tools: EvalToolDescriptor[]; missing: string[] }> {
 	const { execution, envelope } = await invokePythonToolRequest({ op: "describe", names }, options);
-	if (execution.status === "error") throw new Error(pythonToolError(execution));
+	const failure = pythonToolFailure(execution, options.signal);
+	if (failure) throw new Error(failure);
 	if (!isRecord(envelope) || envelope.ok !== true) {
 		throw new Error("Python tool describe request returned an invalid response");
 	}
@@ -628,7 +638,8 @@ export async function callPythonTool(
 	options: PythonToolInvokeOptions,
 ): Promise<EvalToolInvokeResult> {
 	const { execution, envelope } = await invokePythonToolRequest({ op: "call", name, args }, options);
-	if (execution.status === "error") return { ok: false, error: pythonToolError(execution) };
+	const failure = pythonToolFailure(execution, options.signal);
+	if (failure) return { ok: false, error: failure };
 	if (!isRecord(envelope) || envelope.ok !== true || !("value" in envelope)) {
 		return { ok: false, error: "Python tool call returned an invalid response" };
 	}
