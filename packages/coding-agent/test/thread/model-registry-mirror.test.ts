@@ -476,6 +476,63 @@ describe("worker model registry mirror", () => {
 		expect(await probe.find(registry, "unit-file-provider", "file-model")).toBeDefined();
 	});
 
+	/** `models.yml` text defining one provider with one model. */
+	function fileProvider(provider: string, model: string): string {
+		return [
+			"providers:",
+			`  ${provider}:`,
+			`    baseUrl: https://${provider}.example.invalid/v1`,
+			"    apiKey: FILE_KEY",
+			"    api: openai-completions",
+			"    models:",
+			`      - id: ${model}`,
+			"        reasoning: false",
+			"        input: [text]",
+			"",
+		].join("\n");
+	}
+
+	it("gives the mirror main's models.yml when the reload happens inside a runtime registration change", async () => {
+		const modelsPath = path.join(dir, "models.yml");
+		fs.writeFileSync(modelsPath, fileProvider("unit-file-provider", "file-model"));
+		const next = new Date(fs.statSync(modelsPath).mtimeMs + 1_000);
+		fs.utimesSync(modelsPath, next, next);
+		expect(await registry.reloadIfConfigChanged()).toBe(true);
+		expect(await probe.find(registry, "unit-file-provider", "file-model")).toBeDefined();
+
+		// A valid edit main has not read yet, then a runtime change whose rebuild reads it.
+		fs.writeFileSync(modelsPath, fileProvider("unit-file-later", "later-model"));
+		fs.utimesSync(modelsPath, new Date(next.getTime() + 1_000), new Date(next.getTime() + 1_000));
+		registry.registerProvider(PROVIDER, runtimeConfig({ apiKeys: [], aborted: false }), SOURCE);
+		registry.unregisterProvider(PROVIDER);
+		await flushToMirrors();
+
+		// Whatever main ended up with, the mirror serves the same catalog rather than its own read.
+		expect(registry.find("unit-file-later", "later-model")).toBeDefined();
+		expect(await probe.find(registry, "unit-file-later", "later-model")).toBeDefined();
+		expect(registry.find("unit-file-provider", "file-model")).toBeUndefined();
+		expect(await probe.find(registry, "unit-file-provider", "file-model")).toBeUndefined();
+	});
+
+	it("keeps a deleted models.yml deleted on the mirror when a runtime change rebuilds and a broken file lands", async () => {
+		const modelsPath = path.join(dir, "models.yml");
+		fs.writeFileSync(modelsPath, fileProvider("unit-file-provider", "file-model"));
+		const next = new Date(fs.statSync(modelsPath).mtimeMs + 1_000);
+		fs.utimesSync(modelsPath, next, next);
+		expect(await registry.reloadIfConfigChanged()).toBe(true);
+		expect(await probe.find(registry, "unit-file-provider", "file-model")).toBeDefined();
+
+		// The file is gone when a runtime change rebuilds, and a half-written one replaces it after.
+		fs.rmSync(modelsPath);
+		registry.registerProvider(PROVIDER, runtimeConfig({ apiKeys: [], aborted: false }), SOURCE);
+		registry.unregisterProvider(PROVIDER);
+		fs.writeFileSync(modelsPath, "providers:\n  unit-file-provider: [unterminated\n");
+		await flushToMirrors();
+
+		expect(registry.find("unit-file-provider", "file-model")).toBeUndefined();
+		expect(await probe.find(registry, "unit-file-provider", "file-model")).toBeUndefined();
+	});
+
 	it("reloads an edited models.yml on main when the worker asks, so main and the mirror both serve the edit", async () => {
 		const modelsPath = path.join(dir, "models.yml");
 		expect(await probe.find(registry, "unit-file-provider", "file-model")).toBeUndefined();

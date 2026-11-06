@@ -433,6 +433,30 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(await registry.getApiKeyForProvider("gateway")).toBeUndefined();
 	});
 
+	test("reloadIfConfigChanged reports the edit it rejected through getError, as refreshIfStale does", async () => {
+		writeRawModelsJson({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9991",
+				api: "openai-completions",
+				apiKey: "first-key",
+				models: [{ id: "first-model", reasoning: false, input: ["text"] }],
+			},
+		});
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		expect(await registry.reloadIfConfigChanged()).toBe(false);
+		expect(registry.getError()).toBeUndefined();
+
+		fs.writeFileSync(modelsJsonPath, '{"providers": {"gateway": {"baseUrl": ');
+		const next = new Date(fs.statSync(modelsJsonPath).mtimeMs + 1_000);
+		fs.utimesSync(modelsJsonPath, next, next);
+		expect(await registry.reloadIfConfigChanged()).toBe(false);
+
+		// The catalog is the last one that loaded, and the rejected edit is visible to callers.
+		expect(registry.find("gateway", "first-model")).toBeDefined();
+		expect(await registry.getApiKeyForProvider("gateway")).toBe("first-key");
+		expect(registry.getError()?.message).toContain("Failed to load config file models");
+	});
+
 	test("reloadIfConfigChanged folds a models config edit into a running registry and keeps the last good one when an edit does not load", async () => {
 		const gateway = (compat?: Record<string, unknown>) => ({
 			gateway: {

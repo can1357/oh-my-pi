@@ -402,6 +402,8 @@ export class ModelRegistry {
 	#lastStaticLoadMtime: number | null = null;
 	/** File version (see `ConfigFile.getStamp`) the static catalog was last built from. */
 	#loadedConfigStamp: string | null = null;
+	/** The file version a rebuild in progress read the file at, so a later edit is not recorded as loaded. */
+	#pendingConfigStamp: string | null | undefined;
 	/** A models.yml version that failed to load; skipped until the file changes again. */
 	#rejectedConfigStamp: string | null = null;
 	#configReload?: Promise<boolean>;
@@ -1067,6 +1069,9 @@ export class ModelRegistry {
 		const probe = this.#modelsConfigFile.tryLoad();
 		if (probe.status === "error") {
 			this.#rejectedConfigStamp = stamp;
+			// The catalog is the last one that loaded; getError() says why the newer file is not in it,
+			// as the same rejection through #loadCustomModels does.
+			this.#configError = probe.error;
 			logger.warn("models.yml changed on disk but does not load; keeping the last good model catalog", {
 				error: probe.error?.message,
 			});
@@ -1332,22 +1337,25 @@ export class ModelRegistry {
 			// Models config unchanged since last load; reloading would be redundant.
 			return;
 		}
-		// A live reload already parsed and validated the file; re-reading it could pick up a half-written edit.
-		if (!options?.configLoaded) this.#modelsConfigFile.invalidate();
-		// Inside a runtime-change entry point the mirror replays the reload with the change itself. The
-		// change carries the parse this reload uses, so a mirror never reads a later version of the file.
-		if (this.#mirrorChangeDepth === 0) {
-			const loaded = this.#modelsConfigFile.tryLoad();
-			// An edit that does not load leaves the catalog on the last config that loaded, so the
-			// mirror rebuilds from that one too; a file that is gone clears both sides.
-			const config =
-				loaded.status === "ok"
-					? loaded.value
-					: loaded.status === "error"
-						? (this.#lastLoadedModelsConfig ?? null)
-						: null;
-			this.#recordMirrorChange({ kind: "reload", config });
-		}
+		// Taken before the read, so an edit that lands during this rebuild is still a change at the
+		// next check rather than one the catalog is wrongly recorded as holding.
+		this.#pendingConfigStamp = this.#modelsConfigFile.getStamp();
+		// A live reload already parsed and validated the file; re-reading it could pick up a half-written
+		// edit. A mirror never reads the file at all: its config is the one its owner adopted into it.
+		if (!options?.configLoaded && !this.#owner) this.#modelsConfigFile.invalidate();
+		// Every rebuild carries the parse it uses to the mirrors, including one nested in a runtime
+		// change: the mirror replays that change too, and without the parse its own rebuild would read
+		// a later version of the file (or, for a deleted file, keep a config its owner has dropped).
+		const loaded = this.#modelsConfigFile.tryLoad();
+		// An edit that does not load leaves the catalog on the last config that loaded, so the
+		// mirror rebuilds from that one too; a file that is gone clears both sides.
+		const config =
+			loaded.status === "ok"
+				? loaded.value
+				: loaded.status === "error"
+					? (this.#lastLoadedModelsConfig ?? null)
+					: null;
+		this.#recordMirrorChange({ kind: "reload", config });
 		let preservedRuntimeState:
 			| {
 					models: Model<Api>[];
@@ -1453,8 +1461,9 @@ export class ModelRegistry {
 	}
 
 	#loadModels() {
-		// Taken before the read, so an edit landing during it reads as a change at the next check.
-		const configStamp = this.#modelsConfigFile.getStamp();
+		// The stamp the rebuild that called us read the file at, else the file's current one.
+		const configStamp = this.#pendingConfigStamp ?? this.#modelsConfigFile.getStamp();
+		this.#pendingConfigStamp = undefined;
 		this.#resetStaticComposition();
 		// Load custom config first (to know which providers to override).
 		const {
