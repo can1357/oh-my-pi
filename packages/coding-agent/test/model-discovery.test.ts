@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -26,6 +26,7 @@ import {
 	discoverOpenAIModelsList,
 	discoveryProbeTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/config/model-discovery";
+import { ConfigFile } from "@oh-my-pi/pi-coding-agent/config/config-file";
 import { kNoAuth, ModelRegistry, type ModelRegistryOwner } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resolveCliModel } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { ProviderDiscoverySchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema";
@@ -455,6 +456,54 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(registry.find("gateway", "first-model")).toBeDefined();
 		expect(await registry.getApiKeyForProvider("gateway")).toBe("first-key");
 		expect(registry.getError()?.message).toContain("Failed to load config file models");
+	});
+
+	test("an edit that lands after a reload's parse is still seen by the next check", async () => {
+		const gateway = (modelId: string) => ({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9991",
+				api: "openai-completions",
+				apiKey: `${modelId}-key`,
+				models: [{ id: modelId, reasoning: false, input: ["text"] }],
+			},
+		});
+		const touch = () => {
+			const next = new Date(fs.statSync(modelsJsonPath).mtimeMs + 1_000);
+			fs.utimesSync(modelsJsonPath, next, next);
+		};
+		writeRawModelsJson(gateway("first-model"));
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		writeRawModelsJson(gateway("second-model"));
+		touch();
+
+		// A writer lands a third version between the reload's parse and the rebuild that follows it.
+		// The catalog is built from the second; recording it under the third's file version would
+		// make that version compare equal for ever, so the third edit would never be applied.
+		const realTryLoad = ConfigFile.prototype.tryLoad;
+		let landed = false;
+		const spy = spyOn(ConfigFile.prototype, "tryLoad").mockImplementation(function (this: ConfigFile<unknown>) {
+			const result = realTryLoad.call(this);
+			if (!landed && this.path() === modelsJsonPath) {
+				landed = true;
+				writeRawModelsJson(gateway("third-model"));
+				touch();
+			}
+			return result;
+		});
+		let reloaded: boolean;
+		try {
+			reloaded = await registry.reloadIfConfigChanged();
+		} finally {
+			spy.mockRestore();
+		}
+		expect(landed).toBe(true);
+		expect(reloaded).toBe(true);
+		expect(registry.find("gateway", "second-model")).toBeDefined();
+
+		expect(await registry.reloadIfConfigChanged()).toBe(true);
+		expect(registry.find("gateway", "third-model")).toBeDefined();
+		expect(registry.find("gateway", "second-model")).toBeUndefined();
+		expect(await registry.getApiKeyForProvider("gateway")).toBe("third-model-key");
 	});
 
 	test("reloadIfConfigChanged folds a models config edit into a running registry and keeps the last good one when an edit does not load", async () => {

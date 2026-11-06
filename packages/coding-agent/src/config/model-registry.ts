@@ -1053,7 +1053,7 @@ export class ModelRegistry {
 			return Promise.resolve(false);
 		}
 		this.#rejectedConfigStamp = null;
-		const reload = this.#rebuildFromLoadedConfig().then(
+		const reload = this.#rebuildFromLoadedConfig(stamp).then(
 			() => true,
 			error => {
 				logger.warn("models.yml reload failed; keeping the catalog built so far", {
@@ -1068,11 +1068,15 @@ export class ModelRegistry {
 		return this.#configReload;
 	}
 
-	/** Offline rebuild from the config parse already cached in {@link ModelsConfigFile}. */
-	async #rebuildFromLoadedConfig(): Promise<void> {
-		// The rebuild records the version it loaded; the stamp read before it would overwrite that
-		// with a file state the catalog may not hold.
-		this.#reloadStaticModels({ force: true, configLoaded: true });
+	/**
+	 * Offline rebuild from the config parse already cached in {@link ModelsConfigFile}. `configStamp`
+	 * is the file version read *before* that parse: the rebuild must record it rather than take its
+	 * own, because a writer between the parse and the rebuild would otherwise have the catalog
+	 * recorded under a version it does not hold, and that version is already on disk — so no later
+	 * check would ever see the edit.
+	 */
+	async #rebuildFromLoadedConfig(configStamp: string | null): Promise<void> {
+		this.#reloadStaticModels({ force: true, configLoaded: true, configStamp });
 		this.#suppressedSelectors.clear();
 		await this.#refreshRuntimeDiscoveries("offline");
 	}
@@ -1303,6 +1307,8 @@ export class ModelRegistry {
 		force?: boolean;
 		preserveRuntimeDiscovery?: boolean;
 		configLoaded?: boolean;
+		/** The file version the caller's already-cached parse was read at; see `#rebuildFromLoadedConfig`. */
+		configStamp?: string | null;
 	}): void {
 		const currentMtime = this.#modelsConfigFile.getMtimeMs();
 		const staticConfigUnchanged = currentMtime === this.#lastStaticLoadMtime;
@@ -1310,9 +1316,11 @@ export class ModelRegistry {
 			// Models config unchanged since last load; reloading would be redundant.
 			return;
 		}
-		// Taken before the read, so an edit that lands during this rebuild is still a change at the
-		// next check rather than one the catalog is wrongly recorded as holding.
-		this.#pendingConfigStamp = this.#modelsConfigFile.getStamp();
+		// The version the parse this rebuild uses was read at: the caller's when it already parsed,
+		// else the file's now — taken before the read, so an edit that lands during this rebuild is
+		// still a change at the next check rather than one the catalog is wrongly recorded as holding.
+		this.#pendingConfigStamp =
+			options?.configStamp !== undefined ? options.configStamp : this.#modelsConfigFile.getStamp();
 		// A live reload already parsed and validated the file; re-reading it could pick up a half-written
 		// edit. A mirror never reads the file at all: its config is the one its owner adopted into it.
 		if (!options?.configLoaded && !this.#owner) this.#modelsConfigFile.invalidate();
