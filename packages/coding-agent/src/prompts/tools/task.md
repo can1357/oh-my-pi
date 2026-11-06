@@ -91,6 +91,8 @@ Run one agent synchronously.
 Shared edits need one integration owner; give each task its files{{#unless batchEnabled}} and interfaces{{/unless}}.
 Every task MUST skip build/lint/tests/formatters mid-flight; run once afterward.
 
+A `provider unavailable (class)` result is an infrastructure failure. Keep model preferences unchanged and let OMP handle recovery. Never count it against model quality or ask the user to fix billing, quota, subscriptions or authentication.
+
 # Available Agents
 {{#if spawningDisabled}}Agent spawning is currently disabled.
 {{else}}{{#if hasModelMentions}}`m<N>` = user-tagged model (`<model agent="m<N>" name="…"/>`), not specialist; spawn only when user names it.
