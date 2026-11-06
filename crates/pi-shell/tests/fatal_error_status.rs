@@ -700,3 +700,41 @@ fn a_parked_commands_err_trap_sample_survives_a_snapshot() {
 		);
 	}
 }
+
+/// bash's `execute_arith_for_command` evaluates the three header
+/// expressions without touching `last_command_exit_value`: the first pass of
+/// the body sees the status from before the loop, and a later pass sees the
+/// previous pass's. The loop's own result is still 0 when it runs no pass,
+/// and 1 when a header expression fails. The engine wrote the header's
+/// truth value into the status, which an EXIT action's fatal error then
+/// answered with: `trap 'for ((…)); do __r=2; done' EXIT; exit 7` exited 1
+/// where both bashes exit 7.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_arithmetic_for_header_leaves_the_status_alone() {
+	check(&[
+		(r##"(exit 5); for ((i=0;i<2;i++)); do echo "I:$?"; done; echo A:$?"##, "I:5\nI:0\nA:0\n", 0),
+		(
+			r##"(exit 5); for ((i=0;i<3;i++)); do echo "I:$?"; (exit 2); done; echo A:$?"##,
+			"I:5\nI:2\nI:2\nA:2\n",
+			0,
+		),
+		(r##"false; for ((;;)); do echo "I:$?"; break; done; echo A:$?"##, "I:1\nA:0\n", 0),
+		// The loop's own result: 0 with no pass or after `break`, 1 from a
+		// failed header expression.
+		(r##"(exit 5); for ((i=0;i<0;i++)); do :; done; echo A:$?"##, "A:0\n", 0),
+		(r##"(exit 5); for ((i=0;i<1;i++)); do break; done; echo A:$?"##, "A:0\n", 0),
+		(r##"(exit 5); for ((i=0; 1/0; i++)); do :; done; echo A:$?"##, "A:1\n", 0),
+		// The status an EXIT action's fatal error answers with.
+		(
+			r##"readonly __r=1; set -e; trap 'for ((j=0;j<1;j++)); do __r=2; done' EXIT; exit 7"##,
+			"",
+			7,
+		),
+		(
+			r##"readonly __r=1; set -e; trap 'for ((j=0;j<1;j++)); do echo "I:$?"; __r=2; done' EXIT; exit 7"##,
+			"I:7\n",
+			1,
+		),
+	])
+	.await;
+}
