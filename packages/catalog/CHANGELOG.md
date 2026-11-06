@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Cursor hiding models that AvailableModels serves but GetUsableModels omits (GLM 5.3, Grok 4.7) ([#18248](https://github.com/can1357/oh-my-pi/pull/18248) by [@joseotaviorf](https://github.com/joseotaviorf))
+
 ## [18.17.0] - 2026-11-06
 
 ### Added
