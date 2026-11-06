@@ -332,10 +332,12 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 	}
 
 	if (limits.length === 0) return null;
+	const observedAt = Date.now();
+	for (const limit of limits) limit.observedAt = observedAt;
 
 	const report: UsageReport = {
 		provider: params.provider,
-		fetchedAt: Date.now(),
+		fetchedAt: observedAt,
 		limits,
 		metadata: {
 			endpoint: url,
@@ -371,6 +373,21 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 /** Fetches the account-wide quota windows for ZAI credentials. */
 export const zaiUsageProvider: UsageProvider = {
 	id: "zai",
+	governorAllowance(params, report, context) {
+		if (!context.modelId || !params.baseUrl) return undefined;
+		let url: URL;
+		try {
+			url = new URL(params.baseUrl);
+		} catch {
+			return undefined;
+		}
+		// This endpoint is the coding-plan transport; the general endpoint is PAYG.
+		if (url.origin !== "https://api.z.ai" || url.pathname.replace(/\/+$/, "") !== "/api/coding/paas/v4") {
+			return undefined;
+		}
+		const limits = getZaiCredentialLimits(report);
+		return limits.length > 0 ? limits.map(limit => limit.id) : undefined;
+	},
 	cacheVersion: 2,
 	fetchUsage: fetchZaiUsage,
 	supports: params =>

@@ -517,6 +517,7 @@ import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
+import { SessionUsageRouting } from "./usage-routing";
 import { YieldQueue } from "./yield-queue";
 
 export * from "./agent-session-events";
@@ -554,6 +555,7 @@ import {
 	cfgProvidersAntigravityEndpoint,
 	cfgRetryModelFallback,
 	cfgRetryUsageAwareFallback,
+	cfgUsageGovernorEnabled,
 	cfgSampling,
 	cfgSkillful,
 	cfgTierAdvisor,
@@ -1278,6 +1280,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	// Model registry for API key resolution
 	#modelRegistry: ModelRegistry;
+	#usageRouting?: SessionUsageRouting;
+	#usageRoutingRole?: string;
 	/** Main thread only: spots streaming spawning tool calls so a subagent worker boots ahead of dispatch. */
 	readonly #spawnSignal = isMainThread() ? new SubagentSpawnSignal() : undefined;
 	/** Creation-time permission for switchSession to keep the current model when a target's saved model is unrestorable. */
@@ -2146,6 +2150,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#modelRegistry = config.modelRegistry;
 		this.#allowSessionModelFallback = config.allowSessionModelFallback === true;
 		this.#disableModelFallback = config.disableModelFallback === true;
+		const usageRouting = new SessionUsageRouting(this.settings, this.#modelRegistry);
+		this.#usageRouting = usageRouting;
+		this.#usageRoutingRole = config.routingRole;
+		this.addDisposer(() => usageRouting.dispose());
 		this.#interactivePrompts = config.interactivePrompts !== false;
 		this.#extensionRoots =
 			config.extensionRoots ??
@@ -2331,6 +2339,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			sessionManager: this.sessionManager,
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
+			usageRouting,
+			routingRole: () =>
+				config.routingRole ?? this.sessionManager.getLastModelChangeRole({ skipEphemeral: true }) ?? "default",
 			configWarnings: this.configWarnings,
 			model: () => this.model,
 			contextFitsModel: (model, excludedMessage) => this.#maintenance.contextFitsModel(model, excludedMessage),
@@ -2374,7 +2385,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		});
 		this.#detachUsageBeforeQueueDequeue = this.agent.addBeforeQueuedMessageDequeueHook(async signal => {
 			if (
-				!cfgRetryUsageAwareFallback.get(this.settings) ||
+				(!cfgRetryUsageAwareFallback.get(this.settings) && !cfgUsageGovernorEnabled.get(this.settings)) ||
 				(this.#usagePreflightReadyForNextModelCall && this.#usagePreflightReadyModel === this.model)
 			) {
 				return;
@@ -2386,7 +2397,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		});
 		this.agent.prepareQueuedMessages = this.#prepareQueuedUserMessages;
 		this.#detachUsageBeforeModelCall = this.agent.addBeforeModelCallHook(async signal => {
-			if (!cfgRetryUsageAwareFallback.get(this.settings)) return;
+			if (!cfgRetryUsageAwareFallback.get(this.settings) && !cfgUsageGovernorEnabled.get(this.settings)) return;
 			if (this.#usagePreflightReadyForNextModelCall) {
 				const checkedModel = this.#usagePreflightReadyModel;
 				this.#usagePreflightReadyForNextModelCall = false;
@@ -5457,7 +5468,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					return { status: "skipped", reason: "post-restore-unavailable" };
 				}
 			}
-			if (cfgRetryUsageAwareFallback.get(this.settings)) {
+			if (cfgRetryUsageAwareFallback.get(this.settings) || cfgUsageGovernorEnabled.get(this.settings)) {
 				if (!(await this.#runQueuedUsageAwarePreflight(signal))) {
 					return { status: "skipped", reason: "session-unavailable" };
 				}
@@ -6495,6 +6506,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *  MCP discovery task in sdk.ts) must not touch the session past this point. */
 	get isDisposed(): boolean {
 		return this.#isDisposed;
+	}
+	get usageRoutingContext(): { routingScopeId: string; routingRevision: number; routingRole: string } | undefined {
+		const scope = this.#usageRouting?.refresh();
+		if (!scope) return undefined;
+		return {
+			routingScopeId: scope.id,
+			routingRevision: scope.revision,
+			routingRole:
+				this.#usageRoutingRole ?? this.sessionManager.getLastModelChangeRole({ skipEphemeral: true }) ?? "default",
+		};
+	}
+	async applyStartupUsageRouting(): Promise<void> {
+		if (cfgUsageGovernorEnabled.get(this.settings)) {
+			await this.#recovery.maybeApplyUsageAwareFallback(new AbortController().signal);
+		}
 	}
 
 	markMovedFromEmptySessionFile(sessionFile: string): void {

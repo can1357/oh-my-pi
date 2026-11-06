@@ -79,9 +79,10 @@ export interface UsagePacing {
 	/** Pacing of one account under the background reserve, from its already-fetched report. */
 	pacing(
 		provider: string,
-		credential: OAuthCredential,
+		credential: AuthCredential,
 		usage: UsageReport,
 		context: CredentialRankingContext,
+		baseUrl?: string,
 	): UsagePacingMeasure;
 }
 
@@ -115,6 +116,10 @@ export class CredentialSelector {
 
 	constructor(deps: CredentialSelectorDeps) {
 		this.#deps = deps;
+	}
+
+	noteResolvedApiKey(provider: string, credential: ApiKeyCredential, value: string | undefined): void {
+		this.#deps.usage.noteResolvedApiKey(provider, credential, value);
 	}
 
 	/** Restart round-robin assignments after a provider's credential set changes. */
@@ -229,6 +234,7 @@ export class CredentialSelector {
 		const nowMs = Date.now();
 		const { strategy } = args;
 		const ranked: RankedApiKeyCandidate[] = [];
+		const pacingByIndex = new Map<number, UsagePacingMeasure>();
 		const usageTimeout = Math.max(5000, this.#deps.usage.requestTimeoutMs * 1.5);
 		const usagePromise: Promise<Array<UsageRankingResult<ApiKeyCredential> | null>> = Promise.all(
 			args.order.map(async idx => {
@@ -299,6 +305,18 @@ export class CredentialSelector {
 			const secondary = windows?.secondary;
 			const usageMeasured = primary !== undefined || secondary !== undefined;
 			const primaryUncapped = primary === undefined && secondary !== undefined;
+			if (usage && this.#deps.pacing?.active) {
+				pacingByIndex.set(
+					selection.index,
+					this.#deps.pacing.pacing(
+						args.provider,
+						selection.credential,
+						usage,
+						args.rankingContext,
+						args.options?.baseUrl,
+					),
+				);
+			}
 			ranked.push({
 				selection,
 				usage,
@@ -317,6 +335,18 @@ export class CredentialSelector {
 				primaryRequiredDrain: windowRequiredDrain(primary, nowMs, strategy.windowDefaults.primaryMs),
 				orderPos,
 			});
+		}
+		const available = ranked.filter(candidate => !candidate.blocked);
+		if (
+			available.length > 1 &&
+			available.every(candidate => pacingByIndex.get(candidate.selection.index)?.measured === true)
+		) {
+			for (const candidate of available) {
+				const pacing = pacingByIndex.get(candidate.selection.index)!;
+				candidate.reserveMeasured = true;
+				candidate.pacedUntil = pacing.pacedUntil;
+				candidate.inReserve = pacing.pacedUntil !== undefined;
+			}
 		}
 		return orderUsageRankedCandidates(ranked, false);
 	}

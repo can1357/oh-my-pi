@@ -1002,11 +1002,30 @@ export const cfgUsageGovernorInteractiveReserve = register({
 	},
 });
 
+export const cfgUsageGovernorRoleProtection = register({
+	id: "usageGovernor.roleProtection",
+	type: "enum",
+	values: ["off", "prefer-alternatives"] as const,
+	default: "prefer-alternatives",
+	ui: {
+		tab: "model",
+		group: "Usage Governor",
+		label: "Role Protection",
+		description: "Prefer independent included allowances for roles with more alternatives.",
+		condition: "usageGovernorEnabled",
+		options: [
+			{ value: "off", label: "Off", description: "Do not prefer routes by role" },
+			{ value: "prefer-alternatives", label: "Prefer alternatives", description: "Protect less flexible roles" },
+		],
+	},
+});
+
 /** Usage governor policy (`usageGovernor.*`). */
 export const cfgUsageGovernor = combine({
 	enabled: cfgUsageGovernorEnabled,
 	leadPct: cfgUsageGovernorLeadPct,
 	interactiveReserve: cfgUsageGovernorInteractiveReserve,
+	roleProtection: cfgUsageGovernorRoleProtection,
 });
 
 /** Usage governor policy (`usageGovernor.*`) in the shape the pi-ai admission seam reads. */
@@ -1016,6 +1035,7 @@ export function usageGovernorConfig(settings: ScopeLike): UsageGovernorConfig {
 		enabled: policy.enabled,
 		lead: policy.leadPct / 100,
 		interactiveReserve: policy.interactiveReserve,
+		roleProtection: policy.roleProtection,
 	};
 }
 

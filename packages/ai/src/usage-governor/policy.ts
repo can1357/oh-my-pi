@@ -26,6 +26,7 @@ const ROLLING_RESET_LABELS: Record<string, true> = { tick: true, regen: true };
 export interface ApplicableWindow {
 	/** Quota identity shared by duplicate rows and routing-specific copies (see {@link quotaKey}). */
 	quotaKey: string;
+	limitId?: string;
 	/** Usage window id (for example `5h`, `7d`), or the limit id when the window has no id. */
 	windowId: string;
 	/** Display label for the window. */
@@ -110,13 +111,14 @@ export function applicableWindows(input: {
 				limitId: limit.id,
 				accountIdentity: input.accountIdentity,
 			}),
+			limitId: limit.id,
 			windowId,
 			label: window.label || limit.label,
 			resetsAt,
 			durationMs: windowDuration(limit, window, defaults, strategy),
 			usedFraction: usedFractionOf(limit),
 			exhausted: isUsageLimitExhausted(limit),
-			fetchedAt: report.fetchedAt,
+			fetchedAt: limit.observedAt ?? 0,
 			generation: governorGeneration(resetsAt),
 		});
 	}

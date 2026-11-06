@@ -236,6 +236,7 @@ import {
 	findRetryFallbackCandidates,
 	installRetryFallbackRole,
 	type RetryFallbackResolutionContext,
+	resolveAuthorizedRetryFallbackChainKey,
 	resolveRetryFallbackChainKey,
 } from "./session/retry-fallback-chains";
 import { describeUsageFallback } from "./session/retry-fallback-reason";
@@ -392,6 +393,7 @@ import {
 	cfgTierGoogle,
 	cfgTierOpenai,
 	usageGovernorConfig,
+	cfgUsageGovernorEnabled,
 } from "./session/settings";
 import { cfgInterruptMode } from "./modes/settings";
 import { cfgFollowUpMode } from "./modes/settings";
@@ -3292,12 +3294,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						const originalModel =
 							availableOriginal.model ??
 							parseModelPattern(originalSelector, allEnabledModels, matchPreferences).model;
-						const chainKey = resolveRetryFallbackChainKey(
-							fallbackContext,
-							originalSelector,
-							originalModel,
-							resolved.configuredRole,
-						);
+						const chainKey = (
+							cfgUsageGovernorEnabled.get(settings)
+								? resolveAuthorizedRetryFallbackChainKey
+								: resolveRetryFallbackChainKey
+						)(fallbackContext, originalSelector, originalModel, resolved.configuredRole);
 						if (!chainKey) return primaryPatterns;
 						const parsedOriginal = parseModelString(originalSelector, {
 							allowMaxSuffix: true,
@@ -3365,6 +3366,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				if (
 					((modelFallbackEnabled && (hasUsageFallbackCandidate || usageFallbackTriggered)) ||
 						usageReservePolicy === "fail-closed") &&
+					!cfgUsageGovernorEnabled.get(settings) &&
 					cfgRetryUsageAwareFallback.get(settings)
 				) {
 					let usageHealth: ModelUsageHealth | undefined;
@@ -3583,7 +3585,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							modelMatchPreferences,
 						).model)
 					: parseModelPattern(originalSelector, modelRegistry.getAll(), modelMatchPreferences).model;
-				const chainKey = resolveRetryFallbackChainKey(fallbackContext, originalSelector, originalModel, "default");
+				const chainKey = (
+					cfgUsageGovernorEnabled.get(settings)
+						? resolveAuthorizedRetryFallbackChainKey
+						: resolveRetryFallbackChainKey
+				)(fallbackContext, originalSelector, originalModel, "default");
 				if (!chainKey) return false;
 				const retryFallback: InitialRetryFallbackState = {
 					role: chainKey,
@@ -4785,11 +4791,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		};
 		const turnUsageContext = (): UsageRequestContext => ({
 			...turnUsageBase,
+			...session?.usageRoutingContext,
 			role: usageRole(),
 			sessionId: session?.sessionId,
 		});
 		const attributedUsage = (source: UsageRequestSource, interactive: boolean) => (): UsageRequestContext => ({
 			source,
+			...session?.usageRoutingContext,
 			role: usageRole(),
 			interactive,
 			sessionId: session?.sessionId,
@@ -5149,6 +5157,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
 			disableModelFallback: options.disableModelFallback,
+			routingRole:
+				options.usageContext?.routingRole ?? modelPatternRetryFallbackRole ?? options.modelPatternFallbackRole,
 			initialRetryFallback,
 			deferRetryFallbackValidation: options.deferRetryFallbackValidation,
 			prewalk,
@@ -5277,6 +5287,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			autoTitle: options.autoTitle === true && !isSubagentSession,
 		});
 		hasSession = true;
+		await session.applyStartupUsageRouting();
 		// The session now owns its cost gate; the interactive TUI starts compression after its first frame.
 		if (options.deferSkillDescriptionCompression !== true) skillDescriptions.startCompression();
 		credentialNoticeSession = session;

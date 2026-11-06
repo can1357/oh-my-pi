@@ -217,6 +217,8 @@ export interface AgentSessionConfig {
 	 * startup fallback, are not affected.
 	 */
 	disableModelFallback?: boolean;
+	/** Role controlling routing, distinct from the displayed request role. */
+	routingRole?: string;
 	/** Retry chain ownership when startup selected one of its fallback entries. */
 	initialRetryFallback?: InitialRetryFallbackState;
 	/** Skip retry.fallbackChains validation at construction; the host calls `validateRetryFallbackChains()` later. */

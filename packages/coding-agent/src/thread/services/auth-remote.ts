@@ -80,6 +80,9 @@ import type {
 	UsageGovernorConfig,
 	UsageGovernorEvent,
 	UsageGovernorStatus,
+	UsageRouteEvaluation,
+	UsageRouteEvaluationRequest,
+	UsageRoutingScope,
 	GovernorApi,
 } from "@oh-my-pi/pi-ai";
 import { DEFAULT_USAGE_PROVIDERS } from "@oh-my-pi/pi-ai/usage/registry";
@@ -429,6 +432,10 @@ class RemoteSessions implements SessionsApi {
 		this.#availability = availability;
 	}
 
+	selected(provider: string, sessionId: string): { credentialId: number; explicit: boolean } | undefined {
+		return this.#remote.callSync("sessions.selected", provider, sessionId);
+	}
+
 	pin(provider: string, sessionId: string, credentialId: number, options?: { restoredAtMs?: number }): boolean {
 		return this.#remote.callSync("sessions.pin", provider, sessionId, credentialId, options);
 	}
@@ -522,8 +529,8 @@ class RemoteUsage implements UsageApi {
 		return this.#remote.callSync("usage.reportingModelIds", provider, modelIds, reports);
 	}
 	setProvider(provider: Provider, usageProvider: UsageProvider, apiKey?: string): void {
-		// The main thread calls these hooks synchronously while ranking and ingesting headers.
-		if (usageProvider.parseRateLimitHeaders || usageProvider.supports) {
+		// The main thread calls these hooks synchronously while ranking, ingesting headers, and evaluating allowances.
+		if (usageProvider.parseRateLimitHeaders || usageProvider.supports || usageProvider.governorAllowance) {
 			throw new Error(
 				`Usage provider ${provider} has synchronous hooks and must be registered on the main thread, not a subagent worker`,
 			);
@@ -637,8 +644,8 @@ class RemoteBlocks implements BlocksApi {
 /**
  * Worker half of the main thread's usage governor. `config` is read once at construction and then
  * follows the `config` events, so `active` stays synchronous on the dispatch path. The same
- * subscription carries wait events to every local listener; nothing else crosses the link until a
- * request is admitted.
+ * subscription carries wait events to every local listener. Scope changes and route evaluation
+ * cross the link only when the caller invokes them.
  */
 class RemoteGovernor implements GovernorApi {
 	readonly #remote: AuthRemote;
@@ -655,6 +662,15 @@ class RemoteGovernor implements GovernorApi {
 	}
 	get active(): boolean {
 		return this.#config.enabled;
+	}
+	setRoutingScope(scope: UsageRoutingScope): void {
+		this.#remote.callSync("governor.setRoutingScope", scope);
+	}
+	removeRoutingScope(scopeId: string): void {
+		this.#remote.callSync("governor.removeRoutingScope", scopeId);
+	}
+	evaluateRoutes(request: UsageRouteEvaluationRequest, signal?: AbortSignal): Promise<UsageRouteEvaluation> {
+		return this.#remote.call("governor.evaluateRoutes", request, signal);
 	}
 	configure(config: UsageGovernorConfig): void {
 		this.#config = config;

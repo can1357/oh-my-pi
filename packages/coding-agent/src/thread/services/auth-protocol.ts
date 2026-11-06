@@ -74,6 +74,9 @@ import type {
 	UsageGovernorConfig,
 	UsageGovernorEvent,
 	UsageGovernorStatus,
+	UsageRouteEvaluation,
+	UsageRouteEvaluationRequest,
+	UsageRoutingScope,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
 import type { ModelRefreshStrategy } from "@oh-my-pi/pi-catalog/model-manager";
@@ -217,6 +220,10 @@ export type AuthStorageProtocol = {
 		AuthCredentialSnapshotEntry
 	>;
 
+	"sessions.selected": RpcMethod<
+		[provider: string, sessionId: string],
+		{ credentialId: number; explicit: boolean } | undefined
+	>;
 	"sessions.pin": RpcMethod<
 		[provider: string, sessionId: string, credentialId: number, options?: { restoredAtMs?: number }],
 		boolean
@@ -286,6 +293,12 @@ export type AuthStorageProtocol = {
 	/** Sync read of the live config; the listener receives the config and wait events that follow it. */
 	"governor.config": RpcMethod<[listener?: (event: UsageGovernorEvent) => void], UsageGovernorConfig>;
 	"governor.configure": RpcMethod<[config: UsageGovernorConfig], void>;
+	"governor.setRoutingScope": RpcMethod<[scope: UsageRoutingScope], void>;
+	"governor.removeRoutingScope": RpcMethod<[scopeId: string], void>;
+	"governor.evaluateRoutes": RpcMethod<
+		[request: UsageRouteEvaluationRequest, signal?: AbortSignal],
+		UsageRouteEvaluation
+	>;
 	"governor.admit": RpcMethod<[request: UsageAdmissionRequest, signal?: AbortSignal], UsageAdmissionGrant | undefined>;
 	"governor.settle": RpcMethod<[grantId: string, outcome: UsageAdmissionOutcome], void>;
 	"governor.status": RpcMethod<[options?: { provider?: string; waitLimit?: number }], UsageGovernorStatus>;

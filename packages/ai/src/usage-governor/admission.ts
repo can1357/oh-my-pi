@@ -21,10 +21,7 @@ export function currentUsageAdmission(): UsageAdmission | undefined {
 export interface UsageAdmissionCall {
 	/** Stored credential row serving the send, when known. */
 	credentialId?: number;
-	/**
-	 * The static bearer about to be sent. It is used only when `credentialId` is absent, and it leaves
-	 * this module only as a fingerprint.
-	 */
+	/** The bearer about to be sent, passed to the governor only as a fingerprint. */
 	bearer?: string;
 	provider?: string;
 	modelId?: string;
@@ -40,7 +37,7 @@ function admissionRequest(call: UsageAdmissionCall): UsageAdmissionRequest {
 		baseUrl: call.baseUrl,
 		context: call.context,
 	};
-	if (call.credentialId === undefined && call.bearer) request.bearerFingerprint = fingerprintBearer(call.bearer);
+	if (call.bearer) request.bearerFingerprint = fingerprintBearer(call.bearer);
 	return request;
 }
 

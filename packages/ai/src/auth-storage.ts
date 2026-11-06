@@ -268,6 +268,7 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 			config: options.governor?.config ?? DISABLED_USAGE_GOVERNOR_CONFIG,
 			source: () => ({
 				pool: this.#modules.pool,
+				affinity: this.#modules.sessions,
 				usage: this.#modules.usage,
 				policies: this.#policies,
 				strategies: options.rankingStrategyResolver ?? defaultRankingStrategy,

@@ -94,9 +94,13 @@ interface HeldLease {
 	readonly lease: SessionRestrictionLease;
 }
 
+/** Scope IDs are unique per storage across workers, so one peer cannot replace or remove another's scope. */
+const routingScopeOwners = new WeakMap<AuthStorage, Map<string, PeerAuthState>>();
+
 /** Main-side auth state of one worker, released when it exits. */
 class PeerAuthState {
 	readonly leases = new Map<number, HeldLease>();
+	readonly routingScopes = new Map<AuthStorage, Set<string>>();
 	readonly subscriptions = new Set<() => void>();
 	readonly mirrorHost = Promise.withResolvers<MirrorHost>();
 	readonly lifetime = new AbortController();
@@ -115,6 +119,16 @@ class PeerAuthState {
 
 	release(): void {
 		this.lifetime.abort();
+		for (const [storage, scopes] of this.routingScopes) {
+			const owners = routingScopeOwners.get(storage);
+			for (const id of scopes) {
+				if (owners?.get(id) !== this) continue;
+				storage.governor.removeRoutingScope(id);
+				owners.delete(id);
+			}
+			if (owners?.size === 0) routingScopeOwners.delete(storage);
+		}
+		this.routingScopes.clear();
 		for (const held of this.leases.values())
 			held.storage.sessions.unrestrict(held.provider, held.sessionId, held.lease);
 		this.leases.clear();
@@ -249,6 +263,7 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 		"oauth.policy": (storage, provider, identity) => storage.oauth.policy(provider, identity),
 		"oauth.refresh": (storage, id, signal, options) => storage.oauth.refresh(id, signal, options),
 
+		"sessions.selected": (storage, provider, sessionId) => storage.sessions.selected(provider, sessionId),
 		"sessions.pin": (storage, provider, sessionId, credentialId, options) =>
 			storage.sessions.pin(provider, sessionId, credentialId, options),
 		"sessions.inherit": (storage, source, target, table) =>
@@ -340,6 +355,40 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 			return storage.governor.config;
 		},
 		"governor.configure": (storage, config) => storage.governor.configure(config),
+		"governor.setRoutingScope": (storage, scope) => {
+			if (state.lifetime.signal.aborted) throw new Error("Worker has exited");
+			let owners = routingScopeOwners.get(storage);
+			const owner = owners?.get(scope.id);
+			if (owner && owner !== state) throw new Error("Routing scope is owned by another worker");
+			storage.governor.setRoutingScope(scope);
+			if (!owners) {
+				owners = new Map();
+				routingScopeOwners.set(storage, owners);
+			}
+			owners.set(scope.id, state);
+			let scopes = state.routingScopes.get(storage);
+			if (!scopes) {
+				scopes = new Set();
+				state.routingScopes.set(storage, scopes);
+			}
+			scopes.add(scope.id);
+		},
+		"governor.removeRoutingScope": (storage, scopeId) => {
+			const owners = routingScopeOwners.get(storage);
+			if (owners?.get(scopeId) !== state) return;
+			storage.governor.removeRoutingScope(scopeId);
+			owners.delete(scopeId);
+			if (owners.size === 0) routingScopeOwners.delete(storage);
+			const scopes = state.routingScopes.get(storage);
+			scopes?.delete(scopeId);
+			if (scopes?.size === 0) state.routingScopes.delete(storage);
+		},
+		"governor.evaluateRoutes": (storage, request, signal) => {
+			const owner = routingScopeOwners.get(storage)?.get(request.scopeId);
+			if (owner && owner !== state) throw new Error("Routing scope is owned by another worker");
+			const lifetime = state.lifetime.signal;
+			return storage.governor.evaluateRoutes(request, signal ? AbortSignal.any([signal, lifetime]) : lifetime);
+		},
 		"governor.admit": async (storage, request, signal) => {
 			const lifetime = state.lifetime.signal;
 			const grant = await storage.governor.admit(request, signal ? AbortSignal.any([signal, lifetime]) : lifetime);

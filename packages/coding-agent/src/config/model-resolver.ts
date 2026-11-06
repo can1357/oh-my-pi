@@ -1844,7 +1844,7 @@ export async function resolveModelOverrideWithAuthFallback(
 	modelRegistry: ModelLookupRegistry & Pick<ModelRegistry, "getApiKey">,
 	settings?: Settings,
 	sessionId?: string,
-	options?: { exactOnly?: boolean },
+	options?: { exactOnly?: boolean; allowParentFallback?: boolean },
 ): Promise<{
 	model?: Model<Api>;
 	thinkingLevel?: ConfiguredThinkingLevel;
@@ -1877,6 +1877,7 @@ export async function resolveModelOverrideWithAuthFallback(
 			return { ...candidate, authFallbackUsed: false };
 		}
 	}
+	if (options?.allowParentFallback === false) return { ...primary, authFallbackUsed: false };
 
 	const fallback = resolveModelOverride([parentActiveModelPattern], lookupRegistry, settings);
 	if (!fallback.model) {

@@ -446,6 +446,7 @@ export class KeyCascade implements KeysApi {
 				? this.#deps.pool.entries(provider)[loginApiKeySelection.index]?.id
 				: undefined;
 			const apiKey = await this.#deps.overrides.resolve(loginApiKeySelection.credential.key);
+			this.#deps.selector.noteResolvedApiKey(provider, loginApiKeySelection.credential, apiKey);
 			if (apiKey !== undefined && credentialId !== undefined) onCredentialId?.(credentialId);
 			return apiKey;
 		}
@@ -472,6 +473,7 @@ export class KeyCascade implements KeysApi {
 			}
 			const credentialId = onCredentialId ? this.#deps.pool.entries(provider)[apiKeySelection.index]?.id : undefined;
 			const apiKey = await this.#deps.overrides.resolve(apiKeySelection.credential.key);
+			this.#deps.selector.noteResolvedApiKey(provider, apiKeySelection.credential, apiKey);
 			if (apiKey !== undefined && credentialId !== undefined) onCredentialId?.(credentialId);
 			return apiKey;
 		}

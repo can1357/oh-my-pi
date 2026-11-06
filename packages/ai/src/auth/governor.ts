@@ -6,9 +6,10 @@
  * never writes an `auth_credential_blocks` row. A wait is pacing, not a provider block.
  */
 import * as fs from "node:fs";
+import { createHash } from "node:crypto";
 import { logger, sleepUntil } from "@oh-my-pi/pi-utils";
 import type { Provider } from "../types";
-import type { CredentialRankingContext, CredentialRankingStrategy, UsageReport } from "../usage";
+import type { CredentialRankingContext, CredentialRankingStrategy, UsageCredential, UsageReport } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
 import {
 	type EvaluatedLedgerWindow,
@@ -20,6 +21,7 @@ import {
 import {
 	admissionVerdict,
 	applicableWindows,
+	GOVERNOR_STALE_MS,
 	type ApplicableWindow,
 	evaluateWindow,
 	reserveFraction,
@@ -36,7 +38,13 @@ import {
 	type UsageGovernorStatus,
 	type UsageGovernorWaitRecord,
 	type UsageGovernorWindowStatus,
+	type UsageRouteAccountEvaluation,
+	type UsageRouteEvaluation,
+	type UsageRouteEvaluationRequest,
+	type UsageRouteTarget,
+	type UsageRoutingScope,
 } from "../usage-governor/types";
+import { fingerprintBearer } from "./bearer-fingerprint";
 import type { AccountPolicies } from "./policy";
 import type { CredentialPool, StoredCredential } from "./pool";
 import type { AuthCredential, UsageApi } from "./types";
@@ -54,6 +62,7 @@ export interface CredentialGovernorSource {
 	readonly pool: CredentialPool;
 	readonly usage: UsageApi;
 	readonly policies: AccountPolicies;
+	readonly affinity?: { permits(provider: string, sessionId: string, credentialId: number): boolean };
 	readonly strategies: RankingStrategyResolver;
 }
 
@@ -90,6 +99,7 @@ export class CredentialGovernor implements GovernorApi {
 	readonly #source: () => CredentialGovernorSource;
 	readonly #now: () => number;
 	readonly #listeners = new Set<(event: UsageGovernorEvent) => void>();
+	readonly #scopes = new Map<string, UsageRoutingScope>();
 	#config: UsageGovernorConfig;
 	#ledger: UsageLedger | undefined;
 	#degradedReason: string | undefined;
@@ -114,6 +124,157 @@ export class CredentialGovernor implements GovernorApi {
 	configure(config: UsageGovernorConfig): void {
 		this.#config = config;
 		this.#emit({ kind: "config", config });
+	}
+
+	setRoutingScope(scope: UsageRoutingScope): void {
+		const current = this.#scopes.get(scope.id);
+		if (current && scope.revision < current.revision) throw new Error("Usage routing scope revision regressed");
+		if (current && scope.revision === current.revision && JSON.stringify(current) !== JSON.stringify(scope)) {
+			throw new Error("Usage routing scope changed without a new revision");
+		}
+		this.#scopes.set(scope.id, structuredClone(scope));
+	}
+
+	removeRoutingScope(scopeId: string): void {
+		this.#scopes.delete(scopeId);
+	}
+
+	async evaluateRoutes(request: UsageRouteEvaluationRequest, signal?: AbortSignal): Promise<UsageRouteEvaluation> {
+		signal?.throwIfAborted();
+		const scope = this.#scopes.get(request.scopeId);
+		if (!scope || scope.revision !== request.revision) throw new Error("Usage routing scope revision mismatch");
+		const role = scope.roles.find(item => item.role === request.role);
+		if (!role || request.targets.some(target => !role.targets.some(allowed => sameTarget(target, allowed)))) {
+			throw new Error("Usage routing targets do not belong to this role");
+		}
+		const source = this.#source();
+		const now = this.#now();
+		const evaluate = (target: UsageRouteTarget): UsageRouteAccountEvaluation[] =>
+			source.pool.entries(target.provider).map(row => {
+				const unknown: UsageRouteAccountEvaluation = {
+					selector: target.selector,
+					credentialId: row.id,
+					eligibility: "unknown",
+					allowance: "unknown",
+					quotaKeys: [],
+					state: "unknown",
+					protectedFor: [],
+				};
+				if (!this.active || !source.affinity) return unknown;
+				if (!source.affinity.permits(target.provider, request.sessionId, row.id)) {
+					return { ...unknown, eligibility: "ineligible" };
+				}
+				const credential =
+					source.usage.resolvedUsageCredential?.(target.provider, row.credential) ??
+					(row.credential.type === "oauth" ? buildUsageCredential(row.credential) : undefined);
+				const report = source.usage.cachedReport(target.provider, row.credential, { baseUrl: target.baseUrl });
+				const provider = source.usage.providerFor(target.provider);
+				if (!credential || !report || !provider?.governorAllowance) return unknown;
+				const context = { modelId: target.modelId };
+				const params = { provider: target.provider, credential, baseUrl: target.baseUrl };
+				if (provider.supports && !provider.supports(params)) return { ...unknown, eligibility: "ineligible" };
+				const gate = source.strategies(target.provider)?.planGate?.(context)?.(report);
+				if (gate === false) return { ...unknown, eligibility: "ineligible" };
+				if (source.strategies(target.provider)?.planGate?.(context) && gate !== true) return unknown;
+				const ids = provider.governorAllowance(params, report, context);
+				if (!ids || ids.length === 0 || new Set(ids).size !== ids.length) return unknown;
+				const limits = ids.map(id => report.limits.find(limit => limit.id === id));
+				if (
+					limits.some(
+						limit =>
+							!limit ||
+							!limit.observedAt ||
+							limit.observedAt > now ||
+							now - limit.observedAt > GOVERNOR_STALE_MS,
+					)
+				)
+					return unknown;
+				const windows = this.#applicable(target.provider, row.credential, report, context, now, credential);
+				if (
+					windows.length !== ids.length ||
+					windows.some(window => !window.limitId || !ids.includes(window.limitId))
+				)
+					return unknown;
+				const evaluated = this.#inspect(
+					windows.map(window => ({
+						...window,
+						reserve: this.#reserveFor(source, target.provider, row.credential, false),
+					})),
+					now,
+				);
+				if (evaluated.some(window => window.decision.state === "unknown" || window.decision.state === "stale"))
+					return unknown;
+				const verdict = admissionVerdict(
+					evaluated.map(window => window.decision),
+					now,
+				);
+				const state = evaluated.some(window => window.decision.state === "closed")
+					? "closed"
+					: evaluated.some(window => window.decision.state === "paced")
+						? "paced"
+						: "open";
+				const resets = report.resetCredits;
+				const expiry =
+					resets?.eligible === true &&
+					resets.observedAt !== undefined &&
+					resets.observedAt <= now &&
+					now - resets.observedAt <= GOVERNOR_STALE_MS
+						? resets.credits
+								?.filter(
+									credit =>
+										credit.usable === true &&
+										(credit.remainingCount ?? 0) > 0 &&
+										ids.every(id => credit.clears?.includes(id)) &&
+										credit.expiresAt !== undefined &&
+										Number.isFinite(Date.parse(credit.expiresAt)) &&
+										Date.parse(credit.expiresAt) > now,
+								)
+								.map(credit => Date.parse(credit.expiresAt!))
+								.sort((a, b) => a - b)[0]
+						: undefined;
+				return {
+					...unknown,
+					eligibility: "eligible",
+					allowance: windows.some(window => window.exhausted || (window.usedFraction ?? 0) >= 1)
+						? "spent"
+						: "included",
+					state,
+					quotaKeys: windows.map(window => createHash("sha256").update(window.quotaKey).digest("base64url")),
+					admissibleAtMs: verdict.admissibleAtMs,
+					resetTieBreakExpiresAtMs: expiry,
+				};
+			});
+		const byRole = new Map(scope.roles.map(plan => [plan.role, plan.targets.flatMap(evaluate)]));
+		const accounts = request.targets.flatMap(evaluate);
+		if (this.#config.roleProtection !== "off") {
+			for (const account of accounts) {
+				if (account.eligibility !== "eligible" || account.allowance !== "included" || account.state !== "open")
+					continue;
+				const current = byRole.get(request.role) ?? [];
+				const independent = current.some(
+					other =>
+						other.eligibility === "eligible" &&
+						other.allowance === "included" &&
+						other.state === "open" &&
+						other.quotaKeys.every(key => !account.quotaKeys.includes(key)),
+				);
+				if (!independent) continue;
+				account.protectedFor = scope.roles
+					.filter(plan => plan.role !== request.role)
+					.filter(plan => {
+						const opportunities = (byRole.get(plan.role) ?? []).filter(
+							other =>
+								other.eligibility === "eligible" && other.allowance === "included" && other.state === "open",
+						);
+						return (
+							opportunities.some(other => other.quotaKeys.some(key => account.quotaKeys.includes(key))) &&
+							!opportunities.some(other => other.quotaKeys.every(key => !account.quotaKeys.includes(key)))
+						);
+					})
+					.map(plan => plan.role);
+			}
+		}
+		return { scopeId: scope.id, revision: scope.revision, accounts };
 	}
 
 	onEvent(listener: (event: UsageGovernorEvent) => void): () => void {
@@ -192,10 +353,25 @@ export class CredentialGovernor implements GovernorApi {
 		credential: AuthCredential,
 		usage: UsageReport,
 		context: CredentialRankingContext,
+		baseUrl?: string,
 	): { measured: boolean; pacedUntil?: number } {
 		if (!this.active) return { measured: false };
 		const now = this.#now();
 		const source = this.#source();
+		if (credential.type === "api_key") {
+			const resolved = source.usage.resolvedUsageCredential?.(provider, credential);
+			const adapter = source.usage.providerFor(provider);
+			const ids =
+				resolved && adapter?.governorAllowance?.({ provider, credential: resolved, baseUrl }, usage, context);
+			if (
+				!ids?.length ||
+				ids.some(id => {
+					const limit = usage.limits.find(item => item.id === id);
+					return !limit?.observedAt || limit.observedAt > now || now - limit.observedAt > GOVERNOR_STALE_MS;
+				})
+			)
+				return { measured: false };
+		}
 		const applicable = this.#applicable(provider, credential, usage, context, now);
 		if (applicable.length === 0) return { measured: false };
 		const reserve = this.#reserveFor(source, provider, credential, false);
@@ -225,7 +401,6 @@ export class CredentialGovernor implements GovernorApi {
 		for (const provider of source.pool.providers()) {
 			if (options.provider !== undefined && provider !== options.provider) continue;
 			for (const row of source.pool.entries(provider)) {
-				if (row.credential.type !== "oauth") continue;
 				const report = source.usage.cachedReport(provider, row.credential);
 				if (!report) continue;
 				const applicable = this.#applicable(provider, row.credential, report, {}, now);
@@ -301,28 +476,48 @@ export class CredentialGovernor implements GovernorApi {
 		const found = this.#findRow(source, request);
 		if (!found) return undefined;
 		const { provider, row } = found;
-		if (row.credential.type !== "oauth") return undefined;
+		const credential =
+			row.credential.type === "api_key"
+				? source.usage.resolvedUsageCredential?.(provider, row.credential)
+				: undefined;
+		if (row.credential.type === "api_key") {
+			const bearer = credential?.apiKey;
+			if (!bearer || !request.bearerFingerprint || fingerprintBearer(bearer) !== request.bearerFingerprint)
+				return undefined;
+		}
 		const report = source.usage.cachedReport(provider, row.credential, { baseUrl: request.baseUrl });
 		if (!report) return undefined;
-		const applicable = this.#applicable(provider, row.credential, report, { modelId: request.modelId }, now);
+		const context = { modelId: request.modelId };
+		const applicable = this.#applicable(provider, row.credential, report, context, now, credential);
 		if (applicable.length === 0) return undefined;
+		if (row.credential.type === "api_key") {
+			const adapter = source.usage.providerFor(provider);
+			const ids =
+				credential &&
+				adapter?.governorAllowance?.({ provider, credential, baseUrl: request.baseUrl }, report, context);
+			if (
+				!ids?.length ||
+				ids.some(id => {
+					const limit = report.limits.find(item => item.id === id);
+					return !limit?.observedAt || limit.observedAt > now || now - limit.observedAt > GOVERNOR_STALE_MS;
+				}) ||
+				applicable.some(window => !window.limitId || !ids.includes(window.limitId))
+			)
+				return undefined;
+		}
 		const interactive = request.context?.interactive === true;
 		const reserve = this.#reserveFor(source, provider, row.credential, interactive);
 		return { provider, row, windows: applicable.map(window => ({ ...window, reserve })) };
 	}
 
-	/** The stored row a request names, by credential id or else by bearer fingerprint (in-memory pool only). */
+	/** Resolve only an explicitly attributed stored row; matching bearer bytes is not provenance. */
 	#findRow(
 		source: CredentialGovernorSource,
 		request: UsageAdmissionRequest,
 	): { provider: Provider; row: StoredCredential } | undefined {
 		for (const provider of source.pool.providers()) {
 			if (request.provider !== undefined && provider !== request.provider) continue;
-			const id =
-				request.credentialId ??
-				(request.bearerFingerprint === undefined
-					? undefined
-					: source.pool.idForBearerFingerprint(provider, request.bearerFingerprint));
+			const id = request.credentialId;
 			if (id === undefined) continue;
 			const row = source.pool.entries(provider).find(entry => entry.id === id);
 			if (row) return { provider, row };
@@ -336,6 +531,7 @@ export class CredentialGovernor implements GovernorApi {
 		report: UsageReport,
 		context: CredentialRankingContext,
 		now: number,
+		resolved?: UsageCredential,
 	): ApplicableWindow[] {
 		const strategy: CredentialRankingStrategy | undefined = this.#source().strategies(provider);
 		return applicableWindows({
@@ -344,7 +540,11 @@ export class CredentialGovernor implements GovernorApi {
 			context,
 			nowMs: now,
 			provider,
-			accountIdentity: usageCacheIdentity(buildUsageCredential(credential)),
+			accountIdentity: usageCacheIdentity(
+				resolved ??
+					this.#source().usage.resolvedUsageCredential?.(provider, credential) ??
+					buildUsageCredential(credential),
+			),
 		});
 	}
 
@@ -542,7 +742,7 @@ function windowStatus(
 	return {
 		provider,
 		credentialId,
-		quotaKey: window.quotaKey,
+		quotaKey: createHash("sha256").update(window.quotaKey).digest("base64url"),
 		label: window.label,
 		state: decision.state,
 		usedFraction: window.usedFraction,
@@ -556,4 +756,13 @@ function windowStatus(
 		admissibleAtMs: gated && decision.admissibleAtMs > now ? decision.admissibleAtMs : undefined,
 		bankedResets,
 	};
+}
+
+function sameTarget(left: UsageRouteTarget, right: UsageRouteTarget): boolean {
+	return (
+		left.selector === right.selector &&
+		left.provider === right.provider &&
+		left.modelId === right.modelId &&
+		left.baseUrl === right.baseUrl
+	);
 }

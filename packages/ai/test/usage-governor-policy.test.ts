@@ -169,6 +169,7 @@ describe("quota identity and sharedGroup", () => {
 	const limit = (id: string, used: number, sharedGroup?: string): UsageLimit => ({
 		id,
 		label: "5h",
+		observedAt: NOW,
 		scope: { provider: "p", accountId: "A", ...(sharedGroup ? { sharedGroup } : {}) },
 		window: { id: "5h", label: "5 Hour", durationMs: DURATION, resetsAt: NOW + DURATION },
 		amount: { unit: "percent", usedFraction: used },

@@ -33,7 +33,7 @@ export interface UsageGovernorConfig {
 export interface UsageAdmissionRequest {
 	/** Stored credential row id, when known. */
 	credentialId?: number;
-	/** SHA-256 base64url fingerprint of the bearer, only when `credentialId` is absent. */
+	/** SHA-256 base64url fingerprint of the outbound bearer, including when verifying a credential id. */
 	bearerFingerprint?: string;
 	/** Provider id; resolved from the row when absent. */
 	provider?: string;

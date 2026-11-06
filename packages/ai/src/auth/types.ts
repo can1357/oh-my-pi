@@ -12,6 +12,7 @@ import type {
 	ClientUsageReport,
 	ClientUsageSummary,
 	CredentialRankingStrategy,
+	UsageCredential,
 	UsageHistoryEntry,
 	UsageHistoryQuery,
 	UsageLogger,
@@ -1190,6 +1191,8 @@ export type SessionRestrictionLease = symbol;
 
 /** Session credential affinity operations. */
 export interface SessionsApi {
+	/** Last stored credential recorded for this session, if still permitted. Does not resolve a bearer. */
+	selected(provider: string, sessionId: string): { credentialId: number; explicit: boolean } | undefined;
 	/**
 	 * Pin one stored OAuth account as this session's preferred credential.
 	 *
@@ -1262,11 +1265,10 @@ export interface UsageApi {
 		baseUrlResolver?: (provider: Provider) => string | undefined;
 		signal?: AbortSignal;
 	}): Promise<UsageReport[] | null>;
-	/**
-	 * Last good usage report already cached for an OAuth credential, read without any network call, refresh,
-	 * prune or block reconciliation. Returns `null` when no report is cached or the credential is not OAuth.
-	 */
+	/** Read the last good report for a known credential without resolving references or fetching. */
 	cachedReport(provider: Provider, credential: AuthCredential, options?: { baseUrl?: string }): UsageReport | null;
+	/** Previously resolved on an ordinary auth or usage path; absent means identity is unknown. */
+	resolvedUsageCredential?(provider: Provider, credential: AuthCredential): UsageCredential | undefined;
 	/** Ingest provider usage limits from response headers. */
 	ingestHeaders(
 		provider: Provider,
