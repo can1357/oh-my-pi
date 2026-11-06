@@ -432,6 +432,16 @@ Remote rows can supply current limits, pricing, modalities, and capability flags
 
 Fresh cached snapshots avoid a network request. If refresh fails, OMP keeps the last usable cached snapshot and marks it stale; without a cache, it falls back to the bundled catalog. Provider discovery state records `source` (`bundled`, `models.dev`, `provider`, or `cache`) and `fetchedAt` so callers can distinguish current remote data from an offline fallback.
 
+## Provider availability
+
+Model roles, pools and fallback chains express preference. Billing and credential failures do not rewrite them. All selection paths use the registry's shared availability gate, including subagents and audit selection.
+
+OMP stores provider failures in `provider-cooldowns.json` in its shared data directory. Structured status, type and code distinguish quota, empty balance, missing entitlement and authentication failures. Catalog discovery failures have a separate temporary state and retain known model entries. Records include first/last seen and failed-call count.
+
+Known quota resets restore availability at the reset time. Otherwise one process holds a short probe lease and runs a bounded, one-token request, with backoff from five minutes to one hour. Discovery recovery retries the catalog. Authentication recovery requires changed credentials or re-login. A successful recovery clears the shared state for every process. When all session candidates are unavailable, the session waits for recovery; a child attempt reports an infrastructure failure.
+
+Availability transitions use user notices. Hosts can also set `providers.availabilityNoticeCommand` to an executable path; OMP sends one JSON event on stdin with `provider`, `available`, `class`, `since` (Unix milliseconds) and `failedCallCount`. The command receives no model prompt or credential. Notices stay outside model context.
+
 ## Provider and model identity
 
 The registry retains concrete `provider` + `id` identities. Use an exact
