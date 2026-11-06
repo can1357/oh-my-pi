@@ -2687,9 +2687,9 @@ describe("RelayBridge focus emulation", () => {
 		const nextConn = bridge.cdpConnected(next);
 		const targetsId = ++msgSeq;
 		bridge.cdpMessage(nextConn, JSON.stringify({ id: targetsId, method: "Target.getTargets" }));
-		expect(next.messages.find(message => message.id === targetsId)?.result?.targetInfos).toEqual([
-			expect.objectContaining({ attached: false }),
-		]);
+		expect(next.messages.find(message => message.id === targetsId)).toMatchObject({
+			result: { targetInfos: [{ attached: false }] },
+		});
 		const reattachId = ++msgSeq;
 		bridge.cdpMessage(
 			nextConn,
