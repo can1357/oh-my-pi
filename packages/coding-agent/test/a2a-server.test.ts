@@ -939,7 +939,9 @@ describe("A2A agent card discovery", () => {
 	it("serves discovery descriptions and never AgentDefinition system prompts", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-a2a-card-"));
 		try {
-			const registry = new FakeRegistry([makeRef({ id: "leaky", displayName: "Leaky Agent" })]);
+			const registry = new FakeRegistry([
+				makeRef({ id: "leaky", displayName: "Leaky Agent", kind: "sub", status: "running" }),
+			]);
 			const definition: AgentDefinition = {
 				name: "leaky",
 				description: "Leaky agent description",
@@ -1117,5 +1119,39 @@ describe("A2A reply envelope", () => {
 			}),
 		});
 		expect(bodies).toEqual(["plain text"]);
+	});
+});
+
+describe("agent card skill filtering", () => {
+	it("lists only the main agent and running subagents; finished workers stay off the card", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-a2a-filter-"));
+		try {
+			const registry = new FakeRegistry([
+				makeRef({ id: "Main", displayName: "Main", kind: "main", status: "running" }),
+				makeRef({ id: "LiveWorker", displayName: "Live Worker", kind: "sub", status: "running" }),
+				makeRef({ id: "DoneWorker", displayName: "Done Worker", kind: "sub", status: "idle" }),
+				makeRef({ id: "ParkedWorker", displayName: "Parked Worker", kind: "sub", status: "parked" }),
+				makeRef({ id: "AbortedWorker", displayName: "Aborted Worker", kind: "sub", status: "aborted" }),
+			]);
+			const handle = await startA2aServer({
+				settings: Settings.isolated(),
+				agentDir: dir,
+				port: 0,
+				registry: registry.asApi(),
+				bus: new FakeBus(),
+			});
+			handles.push(handle);
+			const body = (await (await fetch(`${handle.url}${AGENT_CARD_PATH}`)).json()) as {
+				skills: Array<{ id: string }>;
+			};
+			const ids = body.skills.map(skill => skill.id);
+			expect(ids).toContain("Main");
+			expect(ids).toContain("LiveWorker");
+			expect(ids).not.toContain("DoneWorker");
+			expect(ids).not.toContain("ParkedWorker");
+			expect(ids).not.toContain("AbortedWorker");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
 	});
 });

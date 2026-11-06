@@ -424,9 +424,15 @@ export async function startA2aServer(options: StartA2aServerOptions): Promise<A2
 		options.card ??
 		(async (): Promise<AgentCard> => {
 			const descriptions = await loadDescriptions();
+			// Only the main agent and LIVE (running) subagents are exposed as
+			// skills: idle/parked subagents are finished one-shot workers whose
+			// transcript survives, but advertising them floods every peer's
+			// roster with dead a2a: entries (ImplTask1, reviewers, scouts…).
+			// A finished subagent is still reachable directly by agent id;
+			// only the card stops shouting about it.
 			const skills = registry
 				.list()
-				.filter(ref => ref.kind !== "advisor")
+				.filter(ref => ref.kind === "main" || ref.status === "running")
 				.map(ref => ({
 					id: identity !== undefined && ref.id === MAIN_AGENT_ID ? identity : ref.id,
 					displayName: ref.displayName,
