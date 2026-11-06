@@ -11,11 +11,10 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use pi_vfs::{BlockingFs, File, OpenOptions, TempOptions};
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Utility, format_usage, matches_parser};
 
 const OPT_APPEND: &str = "append";
 const ARG_FILE: &str = "file";
@@ -171,11 +170,6 @@ fn create_sibling_temp(fs: &BlockingFs, target: &Path) -> io::Result<(PathBuf, F
 		.random_len(16)
 		.mode(0o666);
 	fs.create_temp(dir, &options)
-}
-
-/// Creates the `sponge` builtin registration.
-pub(crate) fn sponge_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Sponge, SE>()
 }
 
 #[cfg(test)]

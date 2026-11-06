@@ -35,7 +35,7 @@ export interface JudgmentWire {
 	 */
 	target(baseUrl: string, model: string, key: string): JudgmentTarget;
 	/** Request body for `model`, with optional asset context for dialects that preserve references. */
-	encode(request: JudgmentRequest, model: string, imageAssets?: JudgmentImageAssets): unknown;
+	encode(request: JudgmentRequest, model: string, imageAssets?: JudgmentImageAssets): Record<string, unknown>;
 	/** Headers this dialect adds to requests that carry images. */
 	imageHeaders?: Readonly<Record<string, string>>;
 	/** Image input this dialect accepts; absent means text-only. */

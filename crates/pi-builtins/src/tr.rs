@@ -4,11 +4,10 @@
 
 use std::{ffi::OsString, io::{BufReader, Write}};
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 use uucore::display::Quotable;
 
-use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes};
 use operation::{
 	DeleteOperation, Sequence, SqueezeOperation, SymbolTranslator, TranslateOperation, flush_output,
 	translate_input,
@@ -60,7 +59,7 @@ pub fn process_single_char_replace(
 	source_char: u8,
 	target_char: u8,
 ) {
-	let count = bytecount::count(input, source_char);
+	let count = memchr::memchr_iter(source_char, input).count();
 	if count == 0 {
 		output.extend_from_slice(input);
 	} else if count == input.len() {
@@ -76,7 +75,7 @@ pub fn process_single_char_replace(
 
 /// SIMD-optimized delete operation for single character
 pub fn process_single_delete(input: &[u8], output: &mut Vec<u8>, delete_char: u8) {
-	let count = bytecount::count(input, delete_char);
+	let count = memchr::memchr_iter(delete_char, input).count();
 	if count == 0 {
 		output.extend_from_slice(input);
 	} else if count < input.len() {
@@ -1024,11 +1023,6 @@ fn app() -> Command {
 				.num_args(1..)
 				.value_parser(value_parser!(OsString)),
 		)
-}
-
-/// Creates the `tr` builtin registration.
-pub(crate) fn tr_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Tr, SE>()
 }
 
 #[cfg(test)]

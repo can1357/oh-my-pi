@@ -1,3 +1,4 @@
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createEvalCustomTools, describeEvalTools } from "../task/eval-tools";
 import { invalidModelSelectorReason, resolveEffectiveSubagentPolicy } from "../task/structured-subagent";
@@ -22,12 +23,8 @@ export type EvalWorkpoolResult =
 	| WorkPoolPeekResult
 	| { dropped: string[] };
 
-function isUnknownRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
 function requireRecord(args: unknown): Record<string, unknown> {
-	if (!isUnknownRecord(args)) throw new ToolError("workpool() arguments must be an object");
+	if (!isRecord(args)) throw new ToolError("workpool() arguments must be an object");
 	return args;
 }
 

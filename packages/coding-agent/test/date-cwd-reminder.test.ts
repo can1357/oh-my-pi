@@ -8,7 +8,10 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
+	createSessionDateCwdReminderJournal,
 	DateCwdReminderInjector,
+	type DateCwdReminderJournal,
+	type DateCwdReminderPlacement,
 	isDateCwdReminderControl,
 	renderDateCwdReminder,
 } from "@oh-my-pi/pi-coding-agent/session/date-cwd-reminder";
@@ -635,6 +638,371 @@ describe("date-cwd-reminder", () => {
 			expect(rolled.messages[4]?.content).toBe(`${renderDateCwdReminder("2026-08-15", "/work")}\n\nfork turn`);
 			expect(again.messages[3]?.content).toBe(rolled.messages[4]!.content);
 		});
+
+		describe("with a journal", () => {
+			const wireOf = (context: Context) =>
+				context.messages.map(message => JSON.stringify([message.role, message.content]));
+			const createJournal = () => {
+				const placements: DateCwdReminderPlacement[] = [];
+				let loads = 0;
+				const journal: DateCwdReminderJournal = {
+					load: () => {
+						loads++;
+						return placements;
+					},
+					record: placement => {
+						placements.push(placement);
+					},
+				};
+				return { placements, journal, loads: () => loads };
+			};
+
+			it("sends an earlier injector's turns with the reminders they were sent with", () => {
+				const { journal } = createJournal();
+				const first: Message = { role: "user", content: "first", timestamp: 1 };
+				const toolTurn = createAssistantMessage("calling a tool");
+				const toolResult: Message = {
+					role: "toolResult",
+					toolCallId: "call-1",
+					toolName: "read",
+					content: [{ type: "text", text: "notes" }],
+					isError: false,
+					timestamp: 3,
+				};
+				const earlier = new DateCwdReminderInjector(journal);
+				earlier.transform({ systemPrompt: ["system"], messages: [first] }, "2026-08-14", "/work");
+				// The date rolls over mid tool loop: the continuation carries it as a developer turn.
+				const sent = earlier.transform(
+					{ systemPrompt: ["system"], messages: [first, toolTurn, toolResult] },
+					"2026-08-15",
+					"/work",
+				);
+				const reply = createAssistantMessage("done");
+				const next: Message = { role: "user", content: "next", timestamp: 5 };
+
+				// A resumed session or a revived subagent: a new process, days later.
+				const resumed = new DateCwdReminderInjector(journal).transform(
+					{ systemPrompt: ["system"], messages: [first, toolTurn, toolResult, reply, next] },
+					"2026-08-17",
+					"/work",
+				);
+
+				expect(wireOf(resumed).slice(0, sent.messages.length)).toEqual(wireOf(sent));
+				expect(isDateCwdReminderControl(resumed.messages[3]!)).toBe(true);
+				expect(resumed.messages.at(-1)?.content).toBe(`${renderDateCwdReminder("2026-08-17", "/work")}\n\nnext`);
+			});
+
+			it("records each reminder it places once", () => {
+				const { placements, journal } = createJournal();
+				const injector = new DateCwdReminderInjector(journal);
+				const first: Message = { role: "user", content: "first", timestamp: 1 };
+				const second: Message = { role: "user", content: "second", timestamp: 3 };
+				injector.transform({ systemPrompt: ["system"], messages: [first] }, "2026-08-14", "/work");
+				injector.transform({ systemPrompt: ["system"], messages: [first] }, "2026-08-14", "/work");
+				injector.transform(
+					{ systemPrompt: ["system"], messages: [first, createAssistantMessage("a"), second] },
+					"2026-08-15",
+					"/work",
+				);
+
+				expect(placements).toEqual([
+					{
+						conversation: "user:1:",
+						turn: "user:1:",
+						reminder: renderDateCwdReminder("2026-08-14", "/work"),
+						placement: "prefix",
+						firstTurn: expect.any(String),
+					},
+					{
+						conversation: "user:1:",
+						turn: "user:3:",
+						reminder: renderDateCwdReminder("2026-08-15", "/work"),
+						placement: "prefix",
+					},
+				]);
+			});
+
+			it("dates the first turn today when the journal has no reminder for it", () => {
+				const { journal } = createJournal();
+				const out = new DateCwdReminderInjector(journal).transform(
+					{
+						systemPrompt: ["system"],
+						messages: [{ role: "user", content: "old", timestamp: 1 }, createAssistantMessage("a")],
+					},
+					"2026-08-17",
+					"/work",
+				);
+
+				expect(out.messages[0]?.content).toBe(`${renderDateCwdReminder("2026-08-17", "/work")}\n\nold`);
+			});
+
+			it("keeps the date of a turn whose request was interrupted before any reply", () => {
+				const { journal } = createJournal();
+				const first: Message = { role: "user", content: "first", timestamp: 1 };
+				const sent = new DateCwdReminderInjector(journal).transform(
+					{ systemPrompt: ["system"], messages: [first] },
+					"2026-08-14",
+					"/work",
+				);
+
+				const resumed = new DateCwdReminderInjector(journal).transform(
+					{ systemPrompt: ["system"], messages: [first] },
+					"2026-08-16",
+					"/work",
+				);
+
+				expect(wireOf(resumed).slice(0, 1)).toEqual(wireOf(sent));
+				expect(resumed.messages.at(-1)).toMatchObject({
+					role: "developer",
+					content: renderDateCwdReminder("2026-08-16", "/work"),
+				});
+			});
+
+			it("sends a switched-in transcript's turns with the reminders that transcript recorded", () => {
+				// Two forks of one session share their first turn; only the second fork sent `branch`.
+				const first: Message = { role: "user", content: "first", timestamp: 1 };
+				const branch: Message = { role: "user", content: "branch", timestamp: 7 };
+				const forks: Record<string, DateCwdReminderPlacement[]> = {
+					one: [],
+					two: [
+						{
+							conversation: "user:1:",
+							turn: "user:1:",
+							reminder: renderDateCwdReminder("2026-08-14", "/work"),
+							placement: "prefix",
+						},
+						{
+							conversation: "user:1:",
+							turn: "user:7:",
+							reminder: renderDateCwdReminder("2026-08-15", "/work"),
+							placement: "prefix",
+						},
+					],
+				};
+				let current = "one";
+				const journal: DateCwdReminderJournal = {
+					load: () => forks[current]!,
+					record: placement => {
+						forks[current]!.push(placement);
+					},
+					scope: () => current,
+				};
+				const injector = new DateCwdReminderInjector(journal);
+				injector.transform({ systemPrompt: ["system"], messages: [first] }, "2026-08-14", "/work");
+
+				current = "two";
+				const switched = injector.transform(
+					{
+						systemPrompt: ["system"],
+						messages: [
+							first,
+							createAssistantMessage("a"),
+							branch,
+							createAssistantMessage("b"),
+							{ role: "user", content: "next", timestamp: 9 },
+						],
+					},
+					"2026-08-16",
+					"/work",
+				);
+
+				expect(switched.messages[2]?.content).toBe(`${renderDateCwdReminder("2026-08-15", "/work")}\n\nbranch`);
+				expect(switched.messages[4]?.content).toBe(`${renderDateCwdReminder("2026-08-16", "/work")}\n\nnext`);
+			});
+
+			it("sends a sibling branch's turns with their own reminders after a tree move", () => {
+				using tempDir = TempDir.createSync("@pi-date-cwd-tree-");
+				const sessionManager = SessionManager.inMemory(tempDir.path());
+				const journal = () => createSessionDateCwdReminderJournal(sessionManager);
+				const send = (injector: DateCwdReminderInjector, messages: Message[], date: string) =>
+					injector.transform({ systemPrompt: ["system"], messages }, date, "/work");
+				const first: Message = { role: "user", content: "first", timestamp: 1 };
+				const reply = createAssistantMessage("a");
+				const sideB: Message = { role: "user", content: "side b", timestamp: 7 };
+				const replyB = createAssistantMessage("b");
+				const sideA: Message = { role: "user", content: "side a", timestamp: 8 };
+				const earlier = new DateCwdReminderInjector(journal());
+				sessionManager.appendMessage(first);
+				send(earlier, [first], "2026-08-14");
+				const forkPoint = sessionManager.appendMessage(reply);
+				sessionManager.appendMessage(sideB);
+				const sentB = send(earlier, [first, reply, sideB], "2026-08-15");
+				const leafB = sessionManager.appendMessage(replyB);
+				sessionManager.branch(forkPoint);
+				sessionManager.appendMessage(sideA);
+
+				// Reopened later: the new process serves branch A, then the tree moves to branch B.
+				const resumed = new DateCwdReminderInjector(journal());
+				send(resumed, [first, reply, sideA], "2026-08-16");
+				sessionManager.branch(leafB);
+				const next: Message = { role: "user", content: "next", timestamp: 9 };
+				sessionManager.appendMessage(next);
+				const moved = send(resumed, [first, reply, sideB, replyB, next], "2026-08-16");
+
+				expect(wireOf(moved).slice(0, 3)).toEqual(wireOf(sentB));
+				expect(moved.messages[4]?.content).toBe(`${renderDateCwdReminder("2026-08-16", "/work")}\n\nnext`);
+			});
+
+			it("sends turns another process appended with that process's reminders after a reload", () => {
+				using tempDir = TempDir.createSync("@pi-date-cwd-reload-");
+				const sessionManager = SessionManager.inMemory(tempDir.path());
+				const send = (injector: DateCwdReminderInjector, messages: Message[], date: string) =>
+					injector.transform({ systemPrompt: ["system"], messages }, date, "/work");
+				const first: Message = { role: "user", content: "first", timestamp: 1 };
+				const reply = createAssistantMessage("a");
+				const second: Message = { role: "user", content: "second", timestamp: 5 };
+				const secondReply = createAssistantMessage("b");
+				const here = new DateCwdReminderInjector(createSessionDateCwdReminderJournal(sessionManager));
+				sessionManager.appendMessage(first);
+				send(here, [first], "2026-08-14");
+				sessionManager.appendMessage(reply);
+
+				// Another process continues the same session the next day; this one then reloads it.
+				const elsewhere = new DateCwdReminderInjector(createSessionDateCwdReminderJournal(sessionManager));
+				sessionManager.appendMessage(second);
+				const sentElsewhere = send(elsewhere, [first, reply, second], "2026-08-15");
+				sessionManager.appendMessage(secondReply);
+				const third: Message = { role: "user", content: "third", timestamp: 9 };
+				sessionManager.appendMessage(third);
+				const reloaded = send(here, [first, reply, second, secondReply, third], "2026-08-15");
+
+				expect(wireOf(reloaded).slice(0, 3)).toEqual(wireOf(sentElsewhere));
+				expect(reloaded.messages[4]?.content).toBe("third");
+			});
+
+			it("starts the history after /clear afresh even when its first turn repeats an earlier one", () => {
+				using tempDir = TempDir.createSync("@pi-date-cwd-clear-");
+				const sessionManager = SessionManager.inMemory(tempDir.path());
+				const injector = new DateCwdReminderInjector(createSessionDateCwdReminderJournal(sessionManager));
+				// A context hook's static bootstrap message opens both histories.
+				const before: Message = { role: "user", content: "BOOTSTRAP", timestamp: 1 };
+				sessionManager.appendMessage(before);
+				injector.transform({ systemPrompt: ["system"], messages: [before] }, "2026-08-14", "/work");
+				sessionManager.appendMessage(createAssistantMessage("a"));
+				sessionManager.appendResetBoundary();
+
+				const after = injector.transform(
+					{ systemPrompt: ["system"], messages: [{ role: "user", content: "BOOTSTRAP", timestamp: 50 }] },
+					"2026-08-16",
+					"/work",
+				);
+
+				expect(after.messages[0]?.content).toBe(`${renderDateCwdReminder("2026-08-16", "/work")}\n\nBOOTSTRAP`);
+			});
+
+			it("resends a retained turn with its own reminder after a compaction renumbered it", () => {
+				const { journal } = createJournal();
+				const earlier = new DateCwdReminderInjector(journal);
+				const user: Message = { role: "user", content: "ok", timestamp: 1 };
+				earlier.transform({ systemPrompt: ["system"], messages: [user] }, "2026-08-14", "/work");
+				// Two same-millisecond turns: the second is `user:1:#1` and takes the new date.
+				earlier.transform(
+					{ systemPrompt: ["system"], messages: structuredClone([user, createAssistantMessage("a"), user]) },
+					"2026-08-15",
+					"/work",
+				);
+				// The compaction drops the first, so the survivor is `user:1:` now.
+				const summary: Message = { role: "user", content: "summary", timestamp: 3 };
+				const compacted = earlier.transform(
+					{ systemPrompt: ["system"], messages: [summary, structuredClone(user)] },
+					"2026-08-15",
+					"/work",
+				);
+				const reply = createAssistantMessage("b");
+
+				const resumed = new DateCwdReminderInjector(journal).transform(
+					{
+						systemPrompt: ["system"],
+						messages: [summary, structuredClone(user), reply, { role: "user", content: "next", timestamp: 5 }],
+					},
+					"2026-08-16",
+					"/work",
+				);
+
+				expect(wireOf(resumed).slice(0, 2)).toEqual(wireOf(compacted));
+				expect(compacted.messages[1]?.content).toBe(`${renderDateCwdReminder("2026-08-15", "/work")}\n\nok`);
+			});
+
+			it("leaves out a dropped turn's developer reminder after a compaction renumbered its twin", () => {
+				const { journal } = createJournal();
+				const earlier = new DateCwdReminderInjector(journal);
+				const user: Message = { role: "user", content: "first", timestamp: 1 };
+				const result: Message = {
+					role: "toolResult",
+					toolCallId: "call-1",
+					toolName: "read",
+					content: [{ type: "text", text: "same" }],
+					isError: false,
+					timestamp: 2,
+				};
+				const call = createAssistantMessage("a");
+				earlier.transform({ systemPrompt: ["system"], messages: [user] }, "2026-08-14", "/work");
+				// The date rolls over mid tool loop: the reminder follows the first of two identical results.
+				earlier.transform(
+					{ systemPrompt: ["system"], messages: structuredClone([user, call, result]) },
+					"2026-08-15",
+					"/work",
+				);
+				earlier.transform(
+					{ systemPrompt: ["system"], messages: structuredClone([user, call, result, call, result]) },
+					"2026-08-15",
+					"/work",
+				);
+				// The compaction drops the first result; its twin now holds the key it had.
+				const summary: Message = { role: "user", content: "summary", timestamp: 3 };
+				const compacted = earlier.transform(
+					{ systemPrompt: ["system"], messages: structuredClone([summary, call, result]) },
+					"2026-08-15",
+					"/work",
+				);
+
+				const resumed = new DateCwdReminderInjector(journal).transform(
+					{
+						systemPrompt: ["system"],
+						messages: structuredClone([summary, call, result, createAssistantMessage("b")]),
+					},
+					"2026-08-15",
+					"/work",
+				);
+
+				expect(compacted.messages.map(message => message.role)).toEqual(["user", "assistant", "toolResult"]);
+				expect(wireOf(resumed).slice(0, 3)).toEqual(wireOf(compacted));
+				expect(resumed.messages.map(message => message.role)).toEqual([
+					"user",
+					"assistant",
+					"toolResult",
+					"assistant",
+				]);
+			});
+
+			it("finds a first turn a context hook re-creates on every request, without reading the journal each time", () => {
+				const { journal, loads } = createJournal();
+				let stamp = 1000;
+				const history: Message[] = [{ role: "user", content: "task", timestamp: 1 }];
+				const send = (injector: DateCwdReminderInjector, date: string) =>
+					injector.transform(
+						{
+							systemPrompt: ["system"],
+							messages: [{ role: "user", content: "BOOTSTRAP", timestamp: stamp++ }, ...history],
+						},
+						date,
+						"/work",
+					);
+				const earlier = new DateCwdReminderInjector(journal);
+				let sent = send(earlier, "2026-08-14");
+				for (let request = 0; request < 5; request++) {
+					history.push(createAssistantMessage(`call ${request}`));
+					sent = send(earlier, "2026-08-14");
+				}
+				expect(loads()).toBe(1);
+				history.push(createAssistantMessage("done"), { role: "user", content: "next", timestamp: 50 });
+
+				const resumed = send(new DateCwdReminderInjector(journal), "2026-08-16");
+
+				expect(wireOf(resumed).slice(0, sent.messages.length)).toEqual(wireOf(sent));
+				expect(resumed.messages.at(-1)?.content).toBe(`${renderDateCwdReminder("2026-08-16", "/work")}\n\nnext`);
+			});
+		});
 	});
 });
 
@@ -1036,6 +1404,82 @@ describe("date-cwd reminder on the provider wire", () => {
 			]);
 			expect(wire[2]!.at(-1)).toBe(reminder);
 			expect(wire[3]!.filter(message => message === reminder)).toHaveLength(1);
+		} finally {
+			setSystemTime();
+			authStorage.close();
+		}
+	});
+
+	it("resends the first user turn with its own date when the session is reopened on a later day", async () => {
+		using tempDir = TempDir.createSync("@pi-date-cwd-reminder-");
+		const api = "test-date-cwd-reminder-reopen";
+		const contexts: Context[] = [];
+		registerCustomApi(api, (_model, context) => {
+			contexts.push(context);
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") });
+			});
+			return stream;
+		});
+		const model = buildModel({
+			id: "date-cwd-reminder-reopen",
+			name: "Date cwd reminder reopen",
+			api,
+			provider: "managed-primary",
+			baseUrl: "https://api.example.com/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		authStorage.keys.setRuntime(model.provider, "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		// A resumed session and a revived subagent both build a new session over the transcript.
+		const open = (sessionManager: SessionManager) =>
+			createAgentSession({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				sessionManager,
+				authStorage,
+				modelRegistry,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				model,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+				taskDepth: 1,
+				agentId: "SubAgent",
+			});
+
+		try {
+			setSystemTime(new Date(2026, 7, 14, 10));
+			const { session: first } = await open(SessionManager.create(tempDir.path(), tempDir.join("sessions")));
+			const sessionFile = first.sessionManager.getSessionFile()!;
+			await first.sendUserMessage("first");
+			await first.dispose();
+
+			setSystemTime(new Date(2026, 7, 16, 10));
+			const { session: reopened } = await open(await SessionManager.open(sessionFile));
+			sessions.push(reopened);
+			await reopened.sendUserMessage("second");
+
+			expect(contexts).toHaveLength(2);
+			const wire = contexts.map(context =>
+				context.messages.map(message => JSON.stringify([message.role, message.content])),
+			);
+			expect(wire[1]!.slice(0, wire[0]!.length)).toEqual(wire[0]!);
+			expect(contexts[1]!.messages.at(-1)?.content).toEqual([
+				{ type: "text", text: renderDateCwdReminder("2026-08-16", normalizePromptPath(tempDir.path())) },
+				{ type: "text", text: "second" },
+			]);
 		} finally {
 			setSystemTime();
 			authStorage.close();

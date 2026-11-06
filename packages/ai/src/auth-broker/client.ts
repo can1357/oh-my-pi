@@ -327,7 +327,7 @@ export class AuthBrokerClient {
 		signal?: AbortSignal,
 		reason?: OAuthRefreshReason,
 	): Promise<CredentialRefreshResponse> {
-		const suffix = reason === "auth-recovery" ? "?reason=auth-recovery" : "";
+		const suffix = reason ? `?reason=${reason}` : "";
 		return this.#request<CredentialRefreshResponse>("POST", `/v1/credential/${id}/refresh${suffix}`, {
 			schema: "credentialRefreshResponseSchema",
 			signal,

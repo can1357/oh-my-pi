@@ -3,10 +3,9 @@
  *
  * Replaces `google-auth-library` with a direct WebCrypto + REST implementation.
  * Sources, in priority order:
- *   1. `GOOGLE_APPLICATION_CREDENTIALS` env → file with `type: "service_account"` (RS256 JWT exchange)
- *     or `type: "authorized_user"` (refresh-token exchange).
+ *   1. `GOOGLE_APPLICATION_CREDENTIALS` env → service account, user, or workforce ADC file.
  *   2. gcloud user ADC: `%APPDATA%\gcloud\application_default_credentials.json` on Windows,
- *     `~/.config/gcloud/application_default_credentials.json` elsewhere (authorized_user flow).
+ *     `~/.config/gcloud/application_default_credentials.json` elsewhere.
  *   3. GCE / Cloud Run metadata server (`metadata.google.internal`).
  *
  * Tokens are cached per source key and refreshed `GOOGLE_VERTEX_REFRESH_SKEW_MS` before expiry
@@ -45,6 +44,14 @@ interface AuthorizedUserCredentials {
 	refresh_token: string;
 }
 
+interface ExternalAccountAuthorizedUserCredentials {
+	type: "external_account_authorized_user";
+	client_id: string;
+	client_secret: string;
+	refresh_token: string;
+	token_url: string;
+}
+
 interface ImpersonatedServiceAccountCredentials {
 	type: "impersonated_service_account";
 	service_account_impersonation_url: string;
@@ -52,16 +59,28 @@ interface ImpersonatedServiceAccountCredentials {
 	delegates?: string[];
 }
 
-type AdcFileCredentials = ServiceAccountCredentials | AuthorizedUserCredentials | ImpersonatedServiceAccountCredentials;
+type AdcFileCredentials =
+	| ServiceAccountCredentials
+	| AuthorizedUserCredentials
+	| ExternalAccountAuthorizedUserCredentials
+	| ImpersonatedServiceAccountCredentials;
 
 interface TokenResponse {
 	access_token: string;
 	expires_in: number;
 	token_type?: string;
+	/** Replacement refresh token; STS may rotate workforce refresh tokens on exchange. */
+	refresh_token?: string;
 }
 
 const tokenCache = new Map<string, CachedToken>();
 const inflight = new Map<string, Promise<string>>();
+/**
+ * Latest workforce refresh token, keyed by the token stored in the ADC file. The file is never
+ * rewritten here when STS rotates the token, so later refreshes must use the replacement;
+ * a re-login writes a new file token and bypasses the stale entry.
+ */
+const rotatedRefreshTokens = new Map<string, string>();
 
 function getRefreshSkewMs(): number {
 	return $envpos("GOOGLE_VERTEX_REFRESH_SKEW_MS", 60_000);
@@ -168,6 +187,19 @@ async function exchangeRefreshToken(
 	return postForToken(OAUTH_TOKEN_URL, body, signal, fetchImpl);
 }
 
+async function exchangeWorkforceRefreshToken(
+	creds: ExternalAccountAuthorizedUserCredentials,
+	signal: AbortSignal | undefined,
+	fetchImpl: FetchImpl,
+): Promise<TokenResponse> {
+	const refreshToken = rotatedRefreshTokens.get(creds.refresh_token) ?? creds.refresh_token;
+	const body = new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken });
+	const authorization = `Basic ${Buffer.from(`${creds.client_id}:${creds.client_secret}`, "utf8").toString("base64")}`;
+	const token = await postForToken(creds.token_url, body, signal, fetchImpl, { Authorization: authorization });
+	if (token.refresh_token) rotatedRefreshTokens.set(creds.refresh_token, token.refresh_token);
+	return token;
+}
+
 async function fetchMetadataToken(
 	signal: AbortSignal | undefined,
 	fetchImpl: FetchImpl,
@@ -192,10 +224,11 @@ async function postForToken(
 	body: URLSearchParams,
 	signal: AbortSignal | undefined,
 	fetchImpl: FetchImpl,
+	extraHeaders?: Record<string, string>,
 ): Promise<TokenResponse> {
 	const response = await fetchImpl(url, {
 		method: "POST",
-		headers: { "Content-Type": "application/x-www-form-urlencoded" },
+		headers: { "Content-Type": "application/x-www-form-urlencoded", ...extraHeaders },
 		body: body.toString(),
 		signal,
 	});
@@ -217,6 +250,7 @@ async function resolveAccessTokenUncached(
 	const adc = await loadAdcCredentials();
 	if (adc) {
 		const creds = adc.creds;
+		const credentialType: string = creds.type;
 		let token: TokenResponse;
 
 		if (creds.type === "impersonated_service_account") {
@@ -228,10 +262,16 @@ async function resolveAccessTokenUncached(
 				throw new RangeError(`Cannot extract target principal from ${creds.service_account_impersonation_url}`);
 			}
 
-			const sourceToken =
-				creds.source_credentials.type === "service_account"
-					? await exchangeJwtForToken(creds.source_credentials, signal, fetchImpl)
-					: await exchangeRefreshToken(creds.source_credentials, signal, fetchImpl);
+			const sourceCredentials = creds.source_credentials;
+			const sourceType: string = sourceCredentials.type;
+			let sourceToken: TokenResponse;
+			if (sourceCredentials.type === "service_account") {
+				sourceToken = await exchangeJwtForToken(sourceCredentials, signal, fetchImpl);
+			} else if (sourceCredentials.type === "authorized_user") {
+				sourceToken = await exchangeRefreshToken(sourceCredentials, signal, fetchImpl);
+			} else {
+				throw new AIError.ConfigurationError(`Unsupported ADC credential type: ${sourceType}`);
+			}
 
 			const response = await fetchImpl(
 				`https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${targetPrincipal}:generateAccessToken`,
@@ -260,11 +300,14 @@ async function resolveAccessTokenUncached(
 			const data = (await response.json()) as { accessToken: string; expireTime: string };
 			const expiresIn = Math.max(0, Math.floor((new Date(data.expireTime).getTime() - Date.now()) / 1000));
 			token = { access_token: data.accessToken, expires_in: expiresIn, token_type: "Bearer" };
+		} else if (creds.type === "service_account") {
+			token = await exchangeJwtForToken(creds, signal, fetchImpl);
+		} else if (creds.type === "authorized_user") {
+			token = await exchangeRefreshToken(creds, signal, fetchImpl);
+		} else if (creds.type === "external_account_authorized_user") {
+			token = await exchangeWorkforceRefreshToken(creds, signal, fetchImpl);
 		} else {
-			token =
-				creds.type === "service_account"
-					? await exchangeJwtForToken(creds, signal, fetchImpl)
-					: await exchangeRefreshToken(creds, signal, fetchImpl);
+			throw new AIError.ConfigurationError(`Unsupported ADC credential type: ${credentialType}`);
 		}
 		return { source: adc.source, token };
 	}
@@ -334,4 +377,5 @@ export async function getVertexAccessToken(options?: { signal?: AbortSignal; fet
 export function __resetVertexTokenCache(): void {
 	tokenCache.clear();
 	inflight.clear();
+	rotatedRefreshTokens.clear();
 }

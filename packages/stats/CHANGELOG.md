@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [18.17.0] - 2026-11-06
+
+### Fixed
+
+- Frustration no longer counts agent-attributed messages as user messages; history is corrected on next sync ([#18183](https://github.com/can1357/oh-my-pi/issues/18183)).
+- Sessions sync promptly while an `omp stats` dashboard page is open, without repeated page refreshes during full sync.
+
+## [18.16.0] - 2026-11-02
+
+### Fixed
+
+- Fixed Stats staying at an empty snapshot when the final ingest update arrives during an in-flight dashboard request ([#17754](https://github.com/can1357/oh-my-pi/issues/17754)).
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

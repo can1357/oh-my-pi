@@ -436,6 +436,19 @@ impl GitRepo {
 		Ok(summary)
 	}
 
+	/// Whether the repository's own config file contains `key`, without
+	/// includes, global configuration, or environment overrides. Never invokes
+	/// git.
+	pub fn config_has_local(&self, key: &str) -> Result<bool> {
+		let path = self.info().common_dir.join("config");
+		if !path.exists() {
+			return Ok(false);
+		}
+		let config = gix::config::File::from_path_no_includes(path, gix::config::Source::Local)
+			.map_err(|e| Error::backend("git config", e))?;
+		Ok(config.string(key).is_some())
+	}
+
 	/// Read a scalar git config value.
 	pub fn config_get(&self, key: &str) -> Result<Option<String>> {
 		if self.is_reftable() {

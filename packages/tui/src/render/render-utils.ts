@@ -293,9 +293,8 @@ export { formatAge, formatBytes, formatCount, formatDuration, formatNumber, plur
 export function formatStatusIcon(status: ToolUIStatus, theme: Theme, spinnerFrame?: number): string {
 	switch (status) {
 		case "success":
-			return theme.styledSymbol("status.success", "success");
 		case "done":
-			return theme.styledSymbol("status.done", "success");
+			return theme.styledSymbol("status.success", "success");
 		case "error":
 			return theme.styledSymbol("status.error", "error");
 		case "warning":
@@ -387,11 +386,6 @@ export function capPreviewLines(
 	const hint = options.expandHint === false ? "" : formatExpandHint(theme, false, true);
 	const marker = `… ${hidden} earlier ${pluralize("line", hidden)}${hint ? ` ${hint}` : ""}`;
 	return [`${options.prefix ?? ""}${theme.fg("dim", marker)}`, ...visible];
-}
-
-/** Join metadata with the theme separator and muted styling. */
-export function formatMeta(meta: string[], theme: Theme): string {
-	return meta.length > 0 ? ` ${theme.fg("muted", meta.join(theme.sep.dot))}` : "";
 }
 
 function sanitizeErrorText(message: string | undefined): string {
@@ -487,7 +481,10 @@ export function formatCodeFrameLine(
 // Tool UI Helpers
 // =============================================================================
 
-/** Status states supported by shared tool renderer icons. */
+/**
+ * Status states supported by shared tool renderer icons. `done` is a deprecated
+ * alias of `success`, kept for extension renderers.
+ */
 export type ToolUIStatus = "success" | "done" | "error" | "warning" | "info" | "pending" | "running" | "aborted";
 /** Semantic foreground colors used by tool renderer labels. */
 export type ToolUIColor = "success" | "error" | "warning" | "accent" | "muted";

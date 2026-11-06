@@ -22,8 +22,10 @@ import * as path from "node:path";
 import { isPromise } from "node:util/types";
 import { getLogsDir, localDay } from "./dirs";
 import { RotatingFileSink } from "./logger/rotating-file";
+import { isPidAlive } from "./pid";
 import { setStderrRedirectTarget } from "./stderr-guard";
 import { drainModuleLoadEvents } from "./timing-buffer";
+import { isRecord } from "./type-guards";
 /** Severity names accepted by the centralized logger. */
 export type LogLevel = "error" | "warn" | "info" | "debug";
 
@@ -38,7 +40,102 @@ export interface LogEvent {
 /** Receives each structured log event after the local transport path runs. */
 export type LogSink = (event: LogEvent) => void;
 
+/**
+ * Destination that takes this thread's log records in place of its own
+ * transports and sinks (a worker thread routing records to the main thread's
+ * logger); see {@link setLogForwarder}.
+ */
+export interface LogForwarder {
+	/**
+	 * Take one record. Its context is already merged over the enclosing
+	 * {@link withContext} fields and reduced to plain JSON data, so it survives
+	 * a structured clone; `timestamp` is when the record was logged.
+	 */
+	emit(event: LogEvent): void;
+	/** Write every record emitted so far on the receiving side; backs {@link flush}. */
+	flush(): void;
+}
+
 const logSinks = new Set<LogSink>();
+
+/** Set by {@link setLogForwarder}: records go there instead of to local transports and sinks. */
+let logForwarder: LogForwarder | undefined;
+
+/**
+ * Route every later record logged on this thread to `forwarder` instead of the
+ * local transports and sinks, which then stay unused (no log file is opened);
+ * {@link flush} asks the forwarder to flush. `undefined` restores local logging.
+ * For worker threads, whose main thread owns the process log file.
+ */
+export function setLogForwarder(forwarder: LogForwarder | undefined): void {
+	logForwarder = forwarder;
+}
+
+/**
+ * Log a record another thread forwarded (see {@link setLogForwarder}): written
+ * to the local transports with its own timestamp, then handed to the sinks. Its
+ * context is taken as is; the caller's enclosing {@link withContext} is not
+ * merged in. On a thread that forwards itself, the record is forwarded on.
+ */
+export function emitForeign(event: LogEvent): void {
+	const forwarder = logForwarder;
+	if (forwarder) {
+		try {
+			forwarder.emit(event);
+		} catch {
+			// Forwarding is as best-effort as local writes.
+		}
+		return;
+	}
+	try {
+		emitLocally(event.level, event.message, event.context, event.timestamp);
+	} catch {
+		// Silently ignore logging failures
+	}
+	dispatchToSinks(event);
+}
+
+/** Forward one record logged on this thread; never throws. */
+function forwardRecord(
+	forwarder: LogForwarder,
+	level: LogLevel,
+	message: string,
+	context: Record<string, unknown> | undefined,
+): void {
+	try {
+		forwarder.emit({ level, message, context: forwardableContext(context), timestamp: new Date() });
+	} catch {
+		// Forwarding is as best-effort as local writes.
+	}
+}
+
+/**
+ * The call's context merged over the enclosing {@link withContext} fields (call
+ * fields win, as for sinks), as plain JSON data: errors become
+ * `{ name, message, stack, … }` exactly as in the log file. A context that
+ * cannot be serialized (a cycle, a bigint) is dropped from the record.
+ */
+function forwardableContext(context: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+	// An Error passed as the context carries its fields as non-enumerable properties.
+	let merged = context instanceof Error ? errorToRecord(context) : context;
+	const scoped = logContextStorage.getStore();
+	if (scoped) {
+		try {
+			merged = { ...scoped, ...merged };
+		} catch {
+			// A throwing getter must not turn a log call into a failure; keep the call's own fields.
+		}
+	}
+	if (merged === undefined) return undefined;
+	try {
+		const parsed: unknown = JSON.parse(
+			mayContainError(merged) ? JSON.stringify(merged, jsonReplacer) : JSON.stringify(merged),
+		);
+		return isRecord(parsed) ? parsed : undefined;
+	} catch {
+		return undefined;
+	}
+}
 
 /** Register an out-of-band log sink and return a disposer. */
 export function registerLogSink(sink: LogSink): () => void {
@@ -61,7 +158,11 @@ function emitToSinks(level: LogLevel, message: string, context: Record<string, u
 			// A throwing getter must not turn a log call into a failure; sinks get the call's own fields.
 		}
 	}
-	const event: LogEvent = { level, message, context: merged, timestamp: new Date() };
+	dispatchToSinks({ level, message, context: merged, timestamp: new Date() });
+}
+
+function dispatchToSinks(event: LogEvent): void {
+	if (logSinks.size === 0) return;
 	for (const sink of logSinks) {
 		try {
 			sink(event);
@@ -80,15 +181,6 @@ const LEGACY_LOG_PATTERN = /^omp\.(\d{4}-\d{2}-\d{2})\.log(?:\.\d+)?(?:\.gz)?$/;
 const LEGACY_AUDIT_PATTERN = /^\.[0-9a-f]{8,}-audit\.json$/;
 const RETAINED_STALE_LOGS_PER_PROCESS_DAY = 1;
 const RETAINED_STALE_LOG_DAYS = 5;
-
-function processIsRunning(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return !(error instanceof Error && "code" in error && (error.code === "ESRCH" || error.code === "EINVAL"));
-	}
-}
 
 /**
  * Retain one newest completed-process log per process/day within the current
@@ -133,7 +225,7 @@ function pruneStaleProcessLogs(dir: string): void {
 		const logMatch = PROCESS_LOG_PATTERN.exec(entry.name);
 		const auditMatch = PROCESS_AUDIT_PATTERN.exec(entry.name);
 		const pidText = logMatch?.[2] ?? auditMatch?.[1];
-		if (!pidText || processIsRunning(Number(pidText))) continue;
+		if (!pidText || isPidAlive(Number(pidText))) continue;
 
 		if (auditMatch) {
 			removeBestEffort(entryPath);
@@ -207,19 +299,21 @@ function ensureDir(dir: string): string {
  * forensic logs showed only an opaque empty object.
  */
 function jsonReplacer(_key: string, value: unknown): unknown {
-	if (value instanceof Error) {
-		const out: Record<string, unknown> = {
-			name: value.name,
-			message: value.message,
-			stack: value.stack,
-		};
-		// Preserve `.cause` and any custom enumerable fields the caller attached.
-		const errAsRecord = value as unknown as Record<string, unknown>;
-		for (const k in errAsRecord) out[k] = errAsRecord[k];
-		if (value.cause !== undefined) out.cause = value.cause;
-		return out;
-	}
-	return value;
+	return value instanceof Error ? errorToRecord(value) : value;
+}
+
+/** An Error's fields as a plain object: name, message, stack, enumerable extras, and `cause`. */
+function errorToRecord(value: Error): Record<string, unknown> {
+	const out: Record<string, unknown> = {
+		name: value.name,
+		message: value.message,
+		stack: value.stack,
+	};
+	// Preserve `.cause` and any custom enumerable fields the caller attached.
+	const errAsRecord = value as unknown as Record<string, unknown>;
+	for (const k in errAsRecord) out[k] = errAsRecord[k];
+	if (value.cause !== undefined) out.cause = value.cause;
+	return out;
 }
 
 // Values visited by the Error pre-scan before falling back to the replacer.
@@ -286,12 +380,16 @@ export function withoutContext<T>(fn: () => T): T {
 	return logContextStorage.exit(fn);
 }
 
-/** Serialize one log record: timestamp, level, pid, message, then context fields. */
+/**
+ * Serialize one log record: timestamp, level, pid, message, then the `scoped`
+ * ({@link withContext}) fields and the context fields.
+ */
 function formatLogRecord(
 	level: LogLevel,
 	message: string,
 	context: Record<string, unknown> | undefined,
 	timestamp: string,
+	scoped: Readonly<Record<string, unknown>> | undefined,
 ): string {
 	const metadata =
 		!FORMAT_TOKEN_PATTERN.test(message) && context !== null && typeof context === "object" ? context : undefined;
@@ -301,7 +399,6 @@ function formatLogRecord(
 		pid: process.pid,
 		message: metadata?.message ? `${message} ${metadata.message}` : message,
 	};
-	const scoped = logContextStorage.getStore();
 	if (scoped) {
 		for (const key of Object.keys(scoped)) {
 			if (key !== "level" && key !== "timestamp" && key !== "message") entry[key] = scoped[key];
@@ -378,7 +475,8 @@ function resolveFileLevelRank(): number {
  */
 export function flush(): void {
 	try {
-		activeTransports?.file?.flush();
+		if (logForwarder) logForwarder.flush();
+		else activeTransports?.file?.flush();
 	} catch {
 		// Flushing diagnostics must never mask the caller's own work or failure.
 	}
@@ -413,13 +511,25 @@ function getLocalTransports(): LocalTransports {
 	return activeTransports;
 }
 
-function emitLocally(level: LogLevel, message: string, context: Record<string, unknown> | undefined): void {
+/**
+ * Write one record to the local transports. A `foreignTimestamp` marks a record
+ * another thread logged ({@link emitForeign}): it keeps that time and gets no
+ * {@link withContext} fields of this call stack, while the file still rotates by
+ * the current day so a late record cannot reopen an earlier day's file.
+ */
+function emitLocally(
+	level: LogLevel,
+	message: string,
+	context: Record<string, unknown> | undefined,
+	foreignTimestamp?: Date,
+): void {
 	const transports = getLocalTransports();
 	const rank = LOG_LEVEL_RANK[level];
 	const file = rank <= transports.fileLevelRank ? transports.file : undefined;
 	if (!file && !transports.console) return;
 	const now = new Date();
-	const line = formatLogRecord(level, message, context, formatLocalTimestamp(now));
+	const scoped = foreignTimestamp ? undefined : logContextStorage.getStore();
+	const line = formatLogRecord(level, message, context, formatLocalTimestamp(foreignTimestamp ?? now), scoped);
 	file?.write(line, rank <= IMMEDIATE_FLUSH_RANK || exiting, localDay(now));
 	if (transports.console) fs.writeSync(1, `${line}${os.EOL}`);
 }
@@ -446,6 +556,7 @@ export function setTransports(opts: { console?: boolean; file?: boolean | string
  * @param context - The context to log.
  */
 export function error(message: string, context?: Record<string, unknown>): void {
+	if (logForwarder) return forwardRecord(logForwarder, "error", message, context);
 	try {
 		emitLocally("error", message, context);
 	} catch {
@@ -460,6 +571,7 @@ export function error(message: string, context?: Record<string, unknown>): void 
  * @param context - The context to log.
  */
 export function warn(message: string, context?: Record<string, unknown>): void {
+	if (logForwarder) return forwardRecord(logForwarder, "warn", message, context);
 	try {
 		emitLocally("warn", message, context);
 	} catch {
@@ -474,6 +586,7 @@ export function warn(message: string, context?: Record<string, unknown>): void {
  * @param context - The context to log.
  */
 export function info(message: string, context?: Record<string, unknown>): void {
+	if (logForwarder) return forwardRecord(logForwarder, "info", message, context);
 	try {
 		emitLocally("info", message, context);
 	} catch {
@@ -488,6 +601,7 @@ export function info(message: string, context?: Record<string, unknown>): void {
  * @param context - The context to log.
  */
 export function debug(message: string, context?: Record<string, unknown>): void {
+	if (logForwarder) return forwardRecord(logForwarder, "debug", message, context);
 	try {
 		emitLocally("debug", message, context);
 	} catch {
