@@ -27,6 +27,8 @@ import type { AppendOnlyContextManager } from "./append-only-context";
 import type { AgentRunCoverage, AgentRunSummary } from "./run-collector";
 import type { SentToolDefinitions } from "./sent-tool-definitions";
 import type { AgentTelemetryConfig } from "./telemetry";
+/** Marks session-only attribution that an embedding stream wrapper may enrich. */
+export const PROVISIONAL_USAGE_CONTEXT = Symbol("provisional-usage-context");
 
 /** Stream function - can return sync or Promise for async config lookup */
 export type StreamFn = (
@@ -191,6 +193,8 @@ export interface PreparedModelAuth {
 	model: Model;
 	apiKey: ApiKey | undefined;
 	resolved: ApiKeyResolution;
+	/** Issuing transcript, distinct from the provider's cache/session identity. */
+	usageSessionId?: string;
 }
 
 /** Request-local auth preparation, used before a governed model request. */

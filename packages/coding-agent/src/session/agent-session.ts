@@ -133,7 +133,6 @@ import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mod
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	disabledProviderIds,
-	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	type ResolvedModelRoleValue,
 	resolveCliModel,
@@ -460,7 +459,7 @@ import {
 	toRestoredQueuedMessage,
 } from "./queued-messages";
 import { checkCodexBalance, readResetMarker, resetLockPath, withResetFence } from "./reset-fence";
-import type { ServingModel } from "./retry-fallback-chains";
+import { formatRetryFallbackSelector, type ServingModel } from "./retry-fallback-chains";
 import {
 	type AdvisorCatchupOptions,
 	type AdvisorStats,
@@ -2391,15 +2390,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		});
 		const configureGovernedPreparation = () => {
 			this.agent.prepareModelCallAuth = cfgUsageGovernorEnabled.get(this.settings)
-				? (model, resolveCurrent, signal) =>
-						this.#recovery.prepareGovernedModelCall(
+				? async (model, resolveCurrent, signal) => {
+						const usageSessionId = this.sessionId;
+						const prepared = await this.#recovery.prepareGovernedModelCall(
 							model,
 							resolveCurrent,
 							this.#usageRoutingRole
 								? { kind: "role", role: this.#usageRoutingRole }
-								: { kind: "model", selector: formatModelStringWithRouting(model) },
+								: { kind: "model", selector: formatRetryFallbackSelector(model, this.thinkingLevel) },
 							signal,
-						)
+						);
+						return prepared ? { ...prepared, usageSessionId } : undefined;
+					}
 				: undefined;
 		};
 		configureGovernedPreparation();
@@ -13618,6 +13620,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const previousUsagePreflightReadyForNextModelCall = this.#usagePreflightReadyForNextModelCall;
 		const previousUsagePreflightReadyModel = this.#usagePreflightReadyModel;
 		const previousModel = this.model;
+		const previousUsageRoutingRole = this.#usageRoutingRole;
 		const previousThinkingLevel = this.thinkingLevel;
 		const previousAutoThinking = this.isAutoThinking;
 		const previousAutoResolvedLevel = this.autoResolvedThinkingLevel();
@@ -13723,6 +13726,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						: `Could not restore model ${targetModelStrings[0]}`;
 				}
 			}
+			this.#usageRoutingRole = explicitModel
+				? undefined
+				: options?.keepModel
+					? previousUsageRoutingRole
+					: this.sessionManager.getLastModelChangeRole({ skipEphemeral: true });
 			// The first build used the departing model's frame budget; size the
 			// archive for the model this session is about to adopt.
 			if (targetModel && frameDataBytesBudget(targetModel) !== frameDataBytesBudget(this.model)) {
@@ -13877,9 +13885,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (options?.onModelFallback) options.onModelFallback(modelFallbackWarning);
 				else this.emitNotice("warning", modelFallbackWarning);
 			}
+			this.#recovery.clearActiveRetryFallback();
 			return true;
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);
+			this.#usageRoutingRole = previousUsageRoutingRole;
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
 			this.#memory.rekeyForCurrentSessionId();

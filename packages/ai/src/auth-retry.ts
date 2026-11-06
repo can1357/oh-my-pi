@@ -4,7 +4,12 @@ import * as AIError from "./error";
 import { isAuthRetryableError, isInvalidatedOAuthTokenError } from "./error/auth-classify";
 import { isAccountPolicyError, isUsageLimit } from "./error/flags";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
-import { admitSend, currentUsageAdmission, type UsageAdmissionCall } from "./usage-governor/admission";
+import {
+	admitSend,
+	currentUsageAdmission,
+	type UsageAdmissionCall,
+	validateSendRoute,
+} from "./usage-governor/admission";
 import type { UsageRequestContext, UsageRouteBinding } from "./usage-governor/types";
 
 /**
@@ -319,17 +324,17 @@ async function admittedSend<T>(
 	signal: AbortSignal | undefined,
 	run: () => Promise<T>,
 ): Promise<T> {
-	if (currentUsageAdmission()?.active !== true) return run();
+	if (currentUsageAdmission()?.active !== true && !call.usageRouteBinding) return run();
 	const send = await admitSend(call, signal);
-	if (send === undefined) return run();
-	if (signal?.aborted) {
-		send.settle("not-sent");
-		throw signal.reason;
-	}
+	if (send === undefined && !call.usageRouteBinding) return run();
+	let sent = false;
 	try {
+		if (signal?.aborted) throw signal.reason;
+		validateSendRoute(call);
+		sent = true;
 		return await run();
 	} finally {
-		send.settle("sent");
+		send?.settle(sent ? "sent" : "not-sent");
 	}
 }
 
@@ -366,16 +371,21 @@ export async function withAuth<T>(
 ): Promise<T> {
 	const isAuthError = opts?.isAuthError ?? isAuthRetryableError;
 	const missingKey = (): Error => new AIError.MissingApiKeyError(undefined, opts?.missingKeyMessage);
-	// The stored credential row each resolved bearer came from, so every attempt admits under its own row.
-	const credentialByBearer = new Map<string, number | undefined>();
+	// Keep the binding with its bearer and credential, including on retry resolutions.
+	const resolutionByBearer = new Map<string, { credentialId?: number; usageRouteBinding?: UsageRouteBinding }>();
 	const recordResolved = (resolved: ApiKeyResolution): void => {
 		const bearer = resolvedApiKeyBearer(resolved);
 		if (bearer === undefined) return;
-		credentialByBearer.set(bearer, typeof resolved === "string" ? undefined : resolved?.credentialId);
+		resolutionByBearer.set(
+			bearer,
+			typeof resolved === "string"
+				? {}
+				: { credentialId: resolved?.credentialId, usageRouteBinding: resolved?.usageRouteBinding },
+		);
 	};
 	const runAttempt = (key: string): Promise<T> => {
-		const credentialId = credentialByBearer.get(key);
-		return admittedSend({ ...opts?.usage, credentialId, bearer: key }, opts?.signal, () => attempt(key));
+		const resolution = resolutionByBearer.get(key);
+		return admittedSend({ ...opts?.usage, ...resolution, bearer: key }, opts?.signal, () => attempt(key));
 	};
 
 	if (!isApiKeyResolver(key)) {
@@ -405,7 +415,7 @@ export async function withAuth<T>(
 	try {
 		return await runAttempt(initialKey);
 	} catch (error) {
-		if (!isAuthError(error)) throw error;
+		if (resolutionByBearer.get(initialKey)?.usageRouteBinding || !isAuthError(error)) throw error;
 		lastError = error;
 	}
 
@@ -415,7 +425,7 @@ export async function withAuth<T>(
 		try {
 			return await runAttempt(nextKey);
 		} catch (error) {
-			if (!isAuthError(error)) throw error;
+			if (resolutionByBearer.get(nextKey)?.usageRouteBinding || !isAuthError(error)) throw error;
 			lastError = error;
 		}
 	}

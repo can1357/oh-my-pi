@@ -405,9 +405,10 @@ type UsageLimitOutcome = {
 
 /** Owns terminal-stop recovery, automatic retries, and fallback routing. */
 export class TurnRecovery {
-	private governedRoute?: UsageRouteCandidate;
+	#governedRoute?: UsageRouteCandidate;
+	#governedRouteStale = false;
 
-	private async resolveGovernedRoute(
+	async #resolveGovernedRoute(
 		candidate: UsageRouteCandidate,
 		model: Model,
 		signal?: AbortSignal,
@@ -447,18 +448,60 @@ export class TurnRecovery {
 		signal?: AbortSignal,
 	): Promise<PreparedModelAuth | undefined> {
 		if (!cfgUsageGovernorEnabled.get(this.#host.settings)) return undefined;
-		const pending = this.governedRoute;
+		const pending = this.#governedRoute;
 		if (
 			pending &&
 			pending.target.provider === model.provider &&
 			pending.target.modelId === model.id &&
 			pending.target.baseUrl === model.baseUrl
 		) {
-			const bound = await this.resolveGovernedRoute(pending, model, signal);
-			if (!bound) throw new UsageRouteInvalidatedError();
+			const currentScope = this.#host.usageRouting?.refresh?.();
+			if (
+				!this.#governedRouteStale &&
+				currentScope &&
+				(currentScope.id !== pending.scopeId || currentScope.revision !== pending.revision)
+			) {
+				this.#governedRouteStale = true;
+				throw new UsageRouteInvalidatedError();
+			}
+			let candidate = pending;
+			if (this.#governedRouteStale) {
+				const owner = pending.owner;
+				const evaluation = await this.#host.usageRouting?.evaluate(owner, this.#host.sessionId(), signal);
+				const plan =
+					owner.kind === "role"
+						? evaluation?.scope.roles.find(item => item.role === owner.role)
+						: evaluation?.scope.models?.find(item => item.selector === owner.selector);
+				const target = plan?.targets.find(
+					item =>
+						item.selector === pending.target.selector &&
+						item.provider === model.provider &&
+						item.modelId === model.id &&
+						item.baseUrl === model.baseUrl,
+				);
+				const account = evaluation?.accounts.find(
+					item =>
+						item.selector === target?.selector &&
+						item.credentialId === pending.credentialId &&
+						item.eligibility === "eligible" &&
+						item.allowance === "included" &&
+						item.state === "open" &&
+						item.quotaKeys.length > 0,
+				);
+				if (!evaluation || !target || !account) throw new UsageRouteInvalidatedError();
+				candidate = { ...pending, revision: evaluation.scope.revision, target };
+			}
+			const bound = await this.#resolveGovernedRoute(candidate, model, signal);
+			if (!bound) {
+				this.#governedRouteStale = true;
+				throw new UsageRouteInvalidatedError();
+			}
+			this.#governedRoute = candidate;
+			this.#governedRouteStale = false;
 			return bound;
 		}
-		this.governedRoute = undefined;
+		this.#governedRoute = undefined;
+		this.#governedRouteStale = false;
 		const current = await resolveCurrent();
 		if (!cfgRetryModelFallback.get(this.#host.settings) || this.#host.modelFallbackDisabled?.()) return current;
 		const credentialId = typeof current.resolved === "object" ? current.resolved?.credentialId : undefined;
@@ -507,7 +550,7 @@ export class TurnRecovery {
 			if (ceiling !== undefined && !modelSupportsEffortCeiling(next, ceiling)) continue;
 			let prepared: PreparedModelAuth | undefined;
 			try {
-				prepared = await this.resolveGovernedRoute(route, next, signal);
+				prepared = await this.#resolveGovernedRoute(route, next, signal);
 			} catch {
 				signal?.throwIfAborted();
 				continue;
@@ -524,7 +567,8 @@ export class TurnRecovery {
 				},
 			);
 			if (!applied) continue;
-			this.governedRoute = route;
+			this.#governedRoute = route;
+			this.#governedRouteStale = false;
 			return prepared;
 		}
 		return current;
@@ -971,6 +1015,7 @@ export class TurnRecovery {
 		const id = this.#classifyRetryMessage(message);
 		const activeModel = this.#host.model();
 		if (!activeModel || !AIError.is(id, AIError.Flag.UsageLimit)) return false;
+		if (cfgUsageGovernorEnabled.get(this.#host.settings) && message.credentialId === undefined) return false;
 
 		let recorded = this.#usageLimitOutcomes.get(message);
 		if (!recorded) {
@@ -982,6 +1027,7 @@ export class TurnRecovery {
 					activeModel.provider,
 					this.#host.sessionId(),
 					{
+						credentialId: message.credentialId,
 						retryAfterMs,
 						// Provider-stated timing only when the error text parsed;
 						// the 30-minute fallback is a guess.
@@ -2023,7 +2069,8 @@ export class TurnRecovery {
 
 	/** Clears fallback ownership after an explicit model change or a restore. */
 	clearActiveRetryFallback(): void {
-		this.governedRoute = undefined;
+		this.#governedRoute = undefined;
+		this.#governedRouteStale = false;
 		this.#activeRetryFallback = undefined;
 		this.#fallbackRoutedFor = undefined;
 	}
@@ -2509,10 +2556,10 @@ export class TurnRecovery {
 			if (!sourceModel || !this.#host.usageRouting) return false;
 			const routingRole = this.#host.routingRole?.();
 			const owner: UsageRoutingOwner =
-				this.governedRoute?.owner ??
+				this.#governedRoute?.owner ??
 				(routingRole
 					? { kind: "role", role: routingRole }
-					: { kind: "model", selector: formatModelStringWithRouting(sourceModel) });
+					: { kind: "model", selector: formatRetryFallbackSelector(sourceModel, this.#host.thinkingLevel()) });
 			governorCandidates = await this.#host.usageRouting.candidates(
 				owner,
 				this.#host.sessionId(),
@@ -2636,7 +2683,7 @@ export class TurnRecovery {
 				if (governorEnabled) {
 					for (const route of governorCandidates.filter(item => item.target.selector === selector.raw)) {
 						try {
-							governedAuth = await this.resolveGovernedRoute(
+							governedAuth = await this.#resolveGovernedRoute(
 								route,
 								candidate,
 								this.#retryAbortController?.signal,
@@ -2661,7 +2708,7 @@ export class TurnRecovery {
 					apiKey: typeof governedAuth?.resolved === "object" ? governedAuth.resolved.apiKey : undefined,
 					reason: `Request failed: ${failedMessage.errorMessage ?? "provider returned an error without details"}`,
 				});
-				if (applied && governedCandidate) this.governedRoute = governedCandidate;
+				if (applied && governedCandidate) this.#governedRoute = governedCandidate;
 				// Redemption replays the refused request's frozen `system` and `tools`. If the
 				// swap rebuilt either, the fallback model would be prompted with, and call tools
 				// through, a surface the agent no longer runs: send a fresh request instead.
@@ -3104,7 +3151,11 @@ export class TurnRecovery {
 		const currentSelector = currentModel
 			? formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel())
 			: undefined;
-		if (accountPolicyDenial && currentModel) {
+		if (
+			accountPolicyDenial &&
+			currentModel &&
+			(!cfgUsageGovernorEnabled.get(this.#host.settings) || message.credentialId !== undefined)
+		) {
 			const accountPolicyKey = `${currentModel.provider}/${currentModel.id}`;
 			const rotationsRemaining =
 				this.#accountPolicyRotationsRemaining.get(accountPolicyKey) ??
@@ -3120,6 +3171,7 @@ export class TurnRecovery {
 				switchedCredential = (
 					await this.#host.modelRegistry.authStorage.limits.rotate(currentModel.provider, this.#host.sessionId(), {
 						error: errorMessage,
+						credentialId: message.credentialId,
 						modelId: currentModel.id,
 						signal: rotateAbortController.signal,
 						waitForSibling: rotationsRemaining > 0,

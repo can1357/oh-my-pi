@@ -10,7 +10,12 @@
  * OpenRouter never saw `providers.openrouterVariant`, breaking sticky routing
  * and OpenRouter response-cache hits across advisor calls.
  */
-import { fitOutputTokensToContextWindow, type StreamFn, Tokenizer } from "@oh-my-pi/pi-agent-core";
+import {
+	fitOutputTokensToContextWindow,
+	PROVISIONAL_USAGE_CONTEXT,
+	type StreamFn,
+	Tokenizer,
+} from "@oh-my-pi/pi-agent-core";
 import { type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import type { UsageRequestContext } from "@oh-my-pi/pi-ai/usage-governor/types";
@@ -173,6 +178,13 @@ export function createSettingsAwareStreamFn(
 			tokenizers.set(tokenizerKey, tokenizer);
 		}
 		const maxTokens = fitOutputTokensToContextWindow(model, context, streamOptions?.maxTokens, tokenizer);
+		const suppliedUsage = streamOptions?.usageContext;
+		const sessionUsage =
+			!suppliedUsage || PROVISIONAL_USAGE_CONTEXT in suppliedUsage ? slowModeContext?.usageContext?.() : undefined;
+		const usageContext =
+			suppliedUsage && PROVISIONAL_USAGE_CONTEXT in suppliedUsage && sessionUsage
+				? { ...sessionUsage, sessionId: suppliedUsage.sessionId }
+				: (suppliedUsage ?? sessionUsage);
 		const merged: SimpleStreamOptions = {
 			...streamOptions,
 			maxTokens,
@@ -185,7 +197,7 @@ export function createSettingsAwareStreamFn(
 			streamIdleTimeoutMs: streamOptions?.streamIdleTimeoutMs ?? streamIdleTimeoutMs,
 			maxRetryDelayMs: streamOptions?.maxRetryDelayMs ?? cfgRetryMaxDelayMs.get(settings),
 			maxInFlightRequests,
-			usageContext: streamOptions?.usageContext ?? slowModeContext?.usageContext?.(),
+			usageContext,
 			loopGuard: {
 				enabled: cfgModelLoopGuardEnabled.get(settings),
 				checkAssistantContent: cfgModelLoopGuardCheckAssistantContent.get(settings),

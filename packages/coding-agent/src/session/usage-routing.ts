@@ -23,7 +23,7 @@ export class SessionUsageRouting {
 	#revision = 0;
 	#signature = "";
 	#scope: UsageRoutingScope | undefined;
-	private readonly modelSelectors = new Set<string>();
+	readonly #modelSelectors = new Set<string>();
 	#disposed = false;
 	readonly #unsubscribe: () => void;
 
@@ -93,7 +93,7 @@ export class SessionUsageRouting {
 			chains: Object.fromEntries(Object.entries(chains).filter(([key]) => key === "default" || key.includes("/"))),
 			getModelRole: () => undefined,
 		};
-		const models = [...this.modelSelectors].map(selector => {
+		const models = [...this.#modelSelectors].map(selector => {
 			const first = resolveModelOverride([selector], this.registry, this.settings).model;
 			const key = resolveRetryFallbackChainKey(modelContext, selector, first);
 			const entries = key
@@ -116,7 +116,7 @@ export class SessionUsageRouting {
 		signal?: AbortSignal,
 	): Promise<{ scope: UsageRoutingScope; accounts: readonly UsageRouteAccountEvaluation[] } | undefined> {
 		const actualOwner: UsageRoutingOwner = typeof owner === "string" ? { kind: "role", role: owner } : owner;
-		if (actualOwner.kind === "model") this.modelSelectors.add(actualOwner.selector);
+		if (actualOwner.kind === "model") this.#modelSelectors.add(actualOwner.selector);
 		const scope = this.refresh();
 		const plan =
 			actualOwner.kind === "role"

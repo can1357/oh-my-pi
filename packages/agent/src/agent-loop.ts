@@ -108,6 +108,7 @@ import {
 	ASIDE_MESSAGE_COMMIT,
 	ASIDE_MESSAGE_DISCARD,
 	isSoftToolRequirement,
+	PROVISIONAL_USAGE_CONTEXT,
 	SPECULATIVE_STREAM_SESSION,
 } from "./types";
 
@@ -2229,6 +2230,13 @@ async function streamAssistantResponse(
 			baseUrl: model.baseUrl,
 		});
 	};
+	const provisionalUsage = providerCall.auth?.usageSessionId
+		? {
+				sessionId: providerCall.auth.usageSessionId,
+				source: "unattributed" as const,
+				[PROVISIONAL_USAGE_CONTEXT]: true,
+			}
+		: undefined;
 
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
@@ -2236,6 +2244,7 @@ async function streamAssistantResponse(
 			let response = await streamFunction(model, llmContext, {
 				...config,
 				apiKey,
+				usageContext: config.usageContext ?? provisionalUsage,
 				metadata: resolvedMetadata,
 				toolChoice: effectiveToolChoice,
 				reasoning: effectiveReasoning,
