@@ -4,11 +4,11 @@
 
 ### Breaking Changes
 
-- `omp gc --apply` no longer reclaims unreferenced blobs by default (`gc.blobs` is now off); the cold-session archive phase is unaffected and still runs on default settings, and `omp gc --wal --apply` remains the command that checkpoints the databases and runs no other phase whatever is configured. Deciding that a blob is unreferenced means reading every session that could refer to it, and a session can be created, forked, moved to a sibling or appended to while that reading happens, so the answer describes a tree that no longer exists. Pass `--blobs`, or set `gc.blobs` in any configuration layer, on a machine whose sessions are quiescent ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- **`omp gc --apply` no longer reclaims unreferenced blobs by default** (`gc.blobs` is now off), because the sweep can delete a blob a readable session still references when sessions are being written. Pass `--blobs`, or set `gc.blobs` in any configuration layer, on a machine whose sessions are quiescent. Cold-session archiving is unchanged and still runs on default settings ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 
-- A reclaiming `omp gc` run now delivers its data-loss warning to stderr and waits for the kernel to take the bytes **before** the first blob is unlinked, and carries the same text on the result so `--json` shows it too; a run whose later phase fails now still reports what it already deleted instead of exiting 1 with empty output ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- A reclaiming `omp gc` run now prints its data-loss warning before it deletes anything rather than after, shows it under `--json` as well as in text, and still reports what it deleted when a later phase fails instead of exiting 1 with no output. A run that cannot take the gc lock no longer prints a summary saying it applied anything ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 
 ### Added
 

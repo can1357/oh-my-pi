@@ -2405,8 +2405,14 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 		});
 	} catch (error) {
 		// What the run did before it failed, on the same stream and in the
-		// same shape as a run that did not.
-		report();
+		// same shape as a run that did not — but only once this run was the
+		// one holding the lock. A failure before the callback starts, a held
+		// `gc.lock` above all, means no phase ran and there is nothing to
+		// report: printing the skeleton there said `GC applied (<dir>)`, and
+		// emitted a nominal JSON result, for a run that did nothing at all.
+		// `lockPath` is set as the callback's first act, so it is exactly the
+		// record of whether this run got that far.
+		if (next.lockPath !== "") report();
 		throw error;
 	}
 	report();
