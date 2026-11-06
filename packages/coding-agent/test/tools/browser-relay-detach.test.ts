@@ -492,7 +492,7 @@ describe("relay tabs Chrome detaches omp from", () => {
 	);
 
 	it.skipIf(!CHROMIUM_AVAILABLE)(
-		"re-adopts a kept relay tab and reads it without a navigation or detach",
+		"re-adopts a kept relay tab after release and reads the state left on it",
 		async () => {
 			await openRelayTab();
 			for (let attempt = 0; attempt < 4; attempt++) {
