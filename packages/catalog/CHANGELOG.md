@@ -16,6 +16,7 @@
 
 ### Fixed
 
+- Fixed Mistral discovery listing embedding, OCR, moderation, transcription, and speech models as chat models; only rows with `capabilities.completion_chat` are offered, with context, image input, and reasoning read from the row
 - Fixed newly published Azure models missing after catalog refresh ([#18173](https://github.com/can1357/oh-my-pi/issues/18173), [#18174](https://github.com/can1357/oh-my-pi/pull/18174) by [@dunkpi](https://github.com/dunkpi))
 - Fixed Factory Droid hiding models when the live-routing family default yields no usable upstream; explicit empty per-model routes still hide them ([#17862](https://github.com/can1357/oh-my-pi/pull/17862) by [@will-bogusz](https://github.com/will-bogusz))
 
