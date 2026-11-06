@@ -1,4 +1,4 @@
-import type { ToolLoadMode } from "@oh-my-pi/pi-agent-core";
+import type { ToolLoadModes } from "./load-mode";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { combine, register } from "../config/registry";
 import { cfgAutolearnEnabled } from "../autolearn/settings";
@@ -1012,7 +1012,7 @@ export const cfgAsyncWidgets = register({
 	},
 });
 
-const EMPTY_TOOL_LOAD_MODES: Readonly<Record<string, ToolLoadMode>> = {};
+const EMPTY_TOOL_LOAD_MODES: ToolLoadModes = {};
 
 export const cfgToolsLoadMode = register({
 	id: "tools.loadMode",
@@ -1020,16 +1020,15 @@ export const cfgToolsLoadMode = register({
 	default: EMPTY_TOOL_LOAD_MODES,
 	validate: raw => {
 		if (raw === undefined) return;
-		if (!isRecord(raw) || Object.values(raw).some(mode => mode !== "essential" && mode !== "discoverable")) {
-			throw new Error("tools.loadMode must map tool names to 'essential' or 'discoverable'.");
+		if (!isRecord(raw) || Object.values(raw).some(mode => mode !== "essential")) {
+			throw new Error("tools.loadMode must map tool names to 'essential'.");
 		}
 	},
 	ui: {
 		tab: "tools",
 		group: "Discovery & MCP",
-		label: "Tool Load Modes",
-		description:
-			"Per-tool overrides; matching the default is a no-op. Essential pins full docs; switching essential tools to discoverable keeps their names with short schemas and on-demand docs.",
+		label: "Essential Tool Overrides",
+		description: "Keep selected enabled tools top-level with full schemas instead of mounting them under xd://.",
 	},
 });
 

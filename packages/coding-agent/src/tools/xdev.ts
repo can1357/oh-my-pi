@@ -37,8 +37,6 @@ import {
 	validateAgentToolArguments,
 } from "@oh-my-pi/pi-agent-core";
 import { type Tool as AiTool, jsonSchemaToTypeScript, toolWireSchema } from "@oh-my-pi/pi-ai";
-import { prompt } from "@oh-my-pi/pi-utils";
-import directCallTemplate from "../prompts/tools/direct-call.md" with { type: "text" };
 import { schemaDeclaresIntentField } from "../utils/tool-schema";
 import { stripXdUrlPrefix, XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { truncateHeadBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
@@ -112,8 +110,8 @@ export interface XdevDispatch {
 	inner?: unknown;
 }
 
-function renderDocs(inst: Tool, heading = "#", descriptionCap?: number, direct = false): string {
-	const schema = jsonSchemaToTypeScript(toolWireSchema(inst as AiTool, inst.parameters));
+function renderDocs(inst: Tool, heading = "#", descriptionCap?: number): string {
+	const schema = jsonSchemaToTypeScript(toolWireSchema(inst as AiTool));
 	let description = inst.description ?? "";
 	if (descriptionCap !== undefined && description.length > descriptionCap) {
 		description = `${description.slice(0, descriptionCap).trimEnd()}… (full docs: read ${XD_URL_PREFIX}${inst.name})`;
@@ -127,9 +125,7 @@ function renderDocs(inst: Tool, heading = "#", descriptionCap?: number, direct =
 		"```ts",
 		`type Args = ${schema};`,
 		"```",
-		direct
-			? prompt.render(directCallTemplate, { name: inst.name }).trim()
-			: `Execute by writing JSON to ${XD_URL_PREFIX}${inst.name}.`,
+		`Execute by writing JSON to ${XD_URL_PREFIX}${inst.name}.`,
 	].join("\n");
 }
 
@@ -209,7 +205,7 @@ function sanitizeCatalogSummary(summary: string, maxBytes?: number): string {
 	return `${body}${SUMMARY_ELLIPSIS}`;
 }
 
-export function promptCatalogSummary(inst: Tool, maxBytes?: number): string {
+function promptCatalogSummary(inst: Tool, maxBytes?: number): string {
 	const summary =
 		toolSummary(inst)
 			.split("\n")
@@ -323,11 +319,6 @@ export function xdevListing(state: XdevState): string {
 /** Docs + schema for any enabled tool. */
 export function xdevDocs(state: XdevState, name: string): string {
 	return renderDocs(resolveRequiredXdevTool(state, name));
-}
-
-/** Full documentation for an enabled tool that is called directly. */
-export function directToolDocs(tool: Tool): string {
-	return renderDocs(tool, "#", undefined, true);
 }
 
 /** Mounted-device placement in the system prompt: inlined docs sections, then one-line catalog entries. */

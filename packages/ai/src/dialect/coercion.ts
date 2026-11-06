@@ -33,7 +33,7 @@ export function buildStringArgsResolver(tools: readonly InbandTool[] = []): (too
 
 export function resolveToolSchema(tool: InbandTool): Record<string, unknown> {
 	try {
-		return toolWireSchema(tool, tool.parameters);
+		return toolWireSchema(tool);
 	} catch {
 		const params = tool.parameters;
 		return params && typeof params === "object" && !Array.isArray(params) ? (params as Record<string, unknown>) : {};

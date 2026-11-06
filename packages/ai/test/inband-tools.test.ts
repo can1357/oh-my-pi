@@ -1,5 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import { type } from "@oh-my-pi/omptype";
 import type { AssistantMessage, Context, ToolCall, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import {
@@ -232,54 +231,6 @@ describe("in-band tool dialects", () => {
 			expect(calls[0]!.arguments).toEqual({ path: "src/a.ts", count: 2 });
 		}
 	});
-
-	it.each(["anthropic", "glm"] as const)(
-		"preserves deferred string arguments while streaming %s calls with full schemas",
-		dialect => {
-			for (const parameters of [
-				type({ code: "string", count: "number", enabled: "boolean", values: "number[]" }),
-				{
-					type: "object",
-					properties: {
-						code: { type: "string" },
-						count: { type: "number" },
-						enabled: { type: "boolean" },
-						values: { type: "array", items: { type: "number" } },
-					},
-					required: ["code", "count", "enabled", "values"],
-				},
-			]) {
-				const tools: NonNullable<Context["tools"]> = [
-					{
-						name: "eval",
-						description: "Evaluate code",
-						parameters,
-						wireParameters: { type: "object", properties: {}, additionalProperties: true },
-					},
-				];
-				for (const code of ["[1,2]", '"x"']) {
-					const text =
-						dialect === "anthropic"
-							? `<function_calls><invoke name="eval"><parameter name="code">${code}</parameter><parameter name="count">2</parameter><parameter name="enabled">true</parameter><parameter name="values">[1,2]</parameter></invoke></function_calls>`
-							: `<tool_call>eval\n<arg_key>code</arg_key><arg_value>${code}</arg_value>\n<arg_key>count</arg_key><arg_value>2</arg_value>\n<arg_key>enabled</arg_key><arg_value>true</arg_value>\n<arg_key>values</arg_key><arg_value>[1,2]</arg_value>\n</tool_call>`;
-					const scanner = createInbandScanner(dialect, { tools });
-					const events: InbandScanEvent[] = [];
-					for (const char of text) events.push(...scanner.feed(char));
-					events.push(...scanner.flush());
-
-					const calls = toolEnds(events);
-					expect(calls).toHaveLength(1);
-					expect(calls[0]?.arguments).toEqual({ code, count: 2, enabled: true, values: [1, 2] });
-					expect(
-						parameterDeltaEvents(events)
-							.filter(event => event.key === "code")
-							.map(event => event.delta)
-							.join(""),
-					).toBe(code);
-				}
-			}
-		},
-	);
 
 	it("streams keyed parameter argument deltas before the final XML-family tool end", () => {
 		for (const { dialect, chunks } of XML_PARAMETER_STREAMS) {

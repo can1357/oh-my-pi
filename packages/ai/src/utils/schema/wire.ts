@@ -591,16 +591,14 @@ export function arkToWireSchema(schema: Type): Record<string, unknown> {
 }
 
 /**
- * Resolve a tool's provider parameters (or an explicit schema override) to JSON
- * Schema. ArkType schemas are converted and cached; legacy TypeBox / raw JSON
- * Schema parameters are upgraded to draft 2020-12 and cached.
+ * Resolve a tool's parameters to a JSON Schema object suitable for sending
+ * over the wire. ArkType schemas are converted and cached; legacy TypeBox /
+ * raw JSON Schema parameters are upgraded to draft 2020-12 and cached.
  */
-export function toolWireSchema(
-	tool: Tool,
-	parameters: TSchema = tool.wireParameters ?? tool.parameters,
-): Record<string, unknown> {
-	if (isArkSchema(parameters)) return arkToWireSchema(parameters);
-	return stamp(parameters as Record<string, unknown>, kJsonWireSchema, p => {
+export function toolWireSchema(tool: Tool): Record<string, unknown> {
+	const params: TSchema = tool.parameters;
+	if (isArkSchema(params)) return arkToWireSchema(params);
+	return stamp(params as Record<string, unknown>, kJsonWireSchema, p => {
 		// Legacy schemas may carry non-cloneable metadata (helper functions); the JSON
 		// fallback drops it the same way the wire serializer always has.
 		const raw = isArkJsonAst(p) ? arkJsonAstToWire(p) : structuredCloneJSON(p);
@@ -689,6 +687,5 @@ export function stripToolDescriptions(tools: readonly Tool[]): Tool[] {
 		...tool,
 		description: "",
 		parameters: stripSchemaDescriptions(toolWireSchema(tool)),
-		wireParameters: undefined,
 	}));
 }

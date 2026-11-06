@@ -21,7 +21,6 @@ import type {
 } from "@oh-my-pi/pi-agent-core/types";
 import { ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD, SPECULATIVE_STREAM_SESSION } from "@oh-my-pi/pi-agent-core/types";
 import type { AssistantMessage, AssistantMessageEvent, Context, Message, ToolResultMessage } from "@oh-my-pi/pi-ai";
-import { toolWireSchema } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { kCursorExecResolved, setStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -453,7 +452,7 @@ describe("agentLoop with AgentMessage", () => {
 		expect(mock.calls).toHaveLength(2);
 	});
 
-	it.each([false, true])("preserves tool-owned `i` (wireParameters=%s)", async deferred => {
+	it("keeps a schema-owned `i` argument for the tool under intent tracing", async () => {
 		// A tool that declares `i` as a real parameter owns the field: intent
 		// tracing must not strip it from the executed arguments.
 		const toolSchema = type({ label: "string", i: "string" });
@@ -463,7 +462,6 @@ describe("agentLoop with AgentMessage", () => {
 			label: "Demo",
 			description: "Demo tool",
 			parameters: toolSchema,
-			...(deferred ? { wireParameters: { type: "object", properties: {}, additionalProperties: true } } : {}),
 			async execute(_toolCallId, params) {
 				executed.push(params);
 				return { content: [{ type: "text", text: "ok" }] };
@@ -753,75 +751,13 @@ describe("agentLoop with AgentMessage", () => {
 		expect(contexts[1]?.index).toBe(1);
 	});
 
-	it("advertises loose parameters but rejects missing full arguments and executes a typed recovery", async () => {
-		const parameters = type({ path: "string", count: "number" });
-		const executed: Array<typeof parameters.infer> = [];
-		const tool: AgentTool<typeof parameters> = {
-			name: "deferred",
-			label: "Deferred",
-			description: "Read xd://deferred for details.",
-			parameters,
-			wireParameters: { type: "object", properties: {}, additionalProperties: true },
-			async execute(_id, args) {
-				executed.push(args);
-				return { content: [{ type: "text", text: "ok" }] };
-			},
-		};
-		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
-		const mock = createMockModel({
-			responses: [
-				{
-					content: [
-						{ type: "toolCall", id: "missing", name: tool.name, arguments: { count: 1, i: "Reading file" } },
-					],
-				},
-				{
-					content: [
-						{
-							type: "toolCall",
-							id: "valid",
-							name: tool.name,
-							arguments: { path: "input.txt", count: 2, i: "Reading file" },
-						},
-					],
-				},
-				{ content: ["done"] },
-			],
-		});
-		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter, intentTracing: true };
-		const messages = await agentLoop([createUserMessage("read")], context, config, undefined, mock.stream).result();
-		const advertised = mock.calls[0]?.context.tools?.[0];
-		if (!advertised) throw new Error("expected provider tool");
-		const schema = toolWireSchema(advertised);
-		expect(advertised.wireParameters).toBeUndefined();
-		expect(Object.keys(schema.properties as object)).toEqual([INTENT_FIELD]);
-		expect(schema.required).toEqual([INTENT_FIELD]);
-		expect(schema.additionalProperties).toBe(true);
-		const results = messages.filter((message): message is ToolResultMessage => message.role === "toolResult");
-		expect(results).toHaveLength(2);
-		expect(results[0].isError).toBe(true);
-		const failure = JSON.parse(toolResultText(results[0]));
-		expect(failure.error).toContain('Validation failed for tool "deferred"');
-		expect(failure.error).toContain("path");
-		expect(failure.parameters).toEqual(toolWireSchema(tool, parameters));
-		expect(failure.parameters.required).toEqual(expect.arrayContaining(["count", "path"]));
-		expect(results[1].isError).toBe(false);
-		expect(executed).toEqual([{ path: "input.txt", count: 2 }]);
-		const call = messages
-			.filter((message): message is AssistantMessage => message.role === "assistant")
-			.flatMap(message => message.content)
-			.find(block => block.type === "toolCall" && block.id === "valid");
-		expect(call?.type === "toolCall" && call.intent).toBe("Reading file");
-	});
-
-	it.each([false, true])("rejects malformed JSON without raw args (wireParameters=%s)", async deferred => {
+	it("surfaces validation error for malformed JSON parse sentinels without leaking __rawJson", async () => {
 		const toolSchema = type({ value: "string" });
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {
 			name: "echo",
 			label: "Echo",
 			description: "Echo tool",
 			parameters: toolSchema,
-			...(deferred ? { wireParameters: { type: "object", additionalProperties: true } } : {}),
 			async execute() {
 				return { content: [] };
 			},
@@ -877,7 +813,7 @@ describe("agentLoop with AgentMessage", () => {
 		expect(toolStart.args.__parseError).toBeDefined(); // keeps __parseError for visibility of parse failure
 	});
 
-	it.each([false, true])("rejects malformed JSON before lenient execution (wireParameters=%s)", async deferred => {
+	it("reports malformed JSON to the model instead of running a lenient tool with empty args", async () => {
 		const toolSchema = type({ value: "string" });
 		const executed: unknown[] = [];
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {
@@ -885,7 +821,6 @@ describe("agentLoop with AgentMessage", () => {
 			label: "Echo",
 			description: "Echo tool",
 			parameters: toolSchema,
-			...(deferred ? { wireParameters: { type: "object", additionalProperties: true } } : {}),
 			lenientArgValidation: true,
 			async execute(_toolCallId, params) {
 				executed.push(params);

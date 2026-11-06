@@ -470,7 +470,6 @@ export function toolReadsSkillUris(
 export function projectSystemPromptToolMetadata(
 	tools: Map<string, AgentTool>,
 	projection: SystemPromptToolMetadataProjection,
-	present?: (tool: AgentTool) => AgentTool,
 ): Map<string, SystemPromptToolMetadata> {
 	const metadata = new Map<string, SystemPromptToolMetadata>();
 	const addTool = (name: string, tool: AgentTool): void => {
@@ -484,11 +483,10 @@ export function projectSystemPromptToolMetadata(
 		};
 
 		if (projection.mode === "full") {
-			const presented = present?.(tool) ?? tool;
-			const descriptionValue = override?.description ?? presented.description;
+			const descriptionValue = override?.description ?? tool.description;
 			metadataEntry.description = typeof descriptionValue === "string" ? descriptionValue : "";
-			metadataEntry.parameters = presented.wireParameters ?? presented.parameters;
-			metadataEntry.examples = presented.examples;
+			metadataEntry.parameters = tool.parameters;
+			metadataEntry.examples = tool.examples;
 		}
 		if ((override?.readsSkillUris ?? toolReadsSkillUris(tool)) === true) metadataEntry.readsSkillUris = true;
 

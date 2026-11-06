@@ -4,7 +4,6 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { normalizeTools } from "@oh-my-pi/pi-agent-core/agent-loop";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core/types";
-import { toolWireSchema } from "@oh-my-pi/pi-ai";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
 const toolSchema = type({
@@ -192,65 +191,6 @@ describe("normalizeTools — omit-intent tools", () => {
 		expect(out?.parameters).toMatchObject({ type: "object" });
 		expect(hasField(out?.parameters, "path")).toBe(true);
 		expect(hasField(out?.parameters, "nested")).toBe(true);
-	});
-});
-
-describe("normalizeTools — provider-only schemas", () => {
-	it("preserves injected intent and stable loose provider parameters across repeated normalization", () => {
-		const wireParameters = {
-			type: "object",
-			properties: {},
-			additionalProperties: true,
-			description: "loose schema",
-		};
-		const tool = { ...makeTool(), wireParameters };
-		for (const injectIntent of [false, true]) {
-			for (const pruneDescriptions of [false, true]) {
-				const options = { injectIntent, pruneDescriptions };
-				const first = normalizeTools([tool], options)?.[0];
-				const second = normalizeTools([tool], options)?.[0];
-				if (!first || !second) throw new Error("expected normalized tools");
-				expect(first.wireParameters).toBeUndefined();
-				expect(first.parameters).toBe(second.parameters);
-				const providerSchema = toolWireSchema(first);
-				expect(providerSchema).toBe(toolWireSchema(second));
-				expect(providerSchema.properties).toEqual(
-					injectIntent
-						? {
-								[INTENT_FIELD]: {
-									type: "string",
-									...(pruneDescriptions ? {} : { description: expect.any(String) }),
-								},
-							}
-						: {},
-				);
-				expect(providerSchema.required).toEqual(injectIntent ? [INTENT_FIELD] : undefined);
-				expect(providerSchema.additionalProperties).toBe(true);
-				expect(providerSchema.description).toBe(pruneDescriptions ? undefined : "loose schema");
-			}
-		}
-		expect(tool.parameters).toBe(toolSchema);
-		expect(tool.wireParameters).toBe(wireParameters);
-	});
-
-	it("checks intent ownership against full parameters, not the loose provider schema", () => {
-		const parameters = type({ path: "string", i: "number" });
-		const tool: AgentTool<typeof parameters> = {
-			name: "owned-intent",
-			label: "Owned intent",
-			description: "Tool with numeric intent",
-			parameters,
-			wireParameters: { type: "object", properties: {}, additionalProperties: true },
-			async execute() {
-				return { content: [{ type: "text", text: "ok" }] };
-			},
-		};
-		for (const pruneDescriptions of [false, true]) {
-			const normalized = normalizeTools([tool], { injectIntent: true, pruneDescriptions })?.[0];
-			if (!normalized) throw new Error("expected normalized tool");
-			expect(toolWireSchema(normalized).properties).toEqual({});
-			expect(toolWireSchema(normalized).required).toBeUndefined();
-		}
 	});
 });
 

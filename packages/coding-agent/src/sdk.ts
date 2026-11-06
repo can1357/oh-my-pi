@@ -324,7 +324,7 @@ import {
 } from "./job-widgets";
 import { createBrowserPrelude } from "./tools/browser";
 import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
-import { presentTool, toolLoadMode, warnToolLoadModes } from "./tools/load-mode";
+import { toolLoadMode, warnToolLoadModes } from "./tools/load-mode";
 import { createComputerPrelude } from "./tools/computer";
 import { createRatchetPrelude } from "./ratchet/prelude-definition";
 import { createArchivePrelude } from "./archive/prelude-definition";
@@ -1706,7 +1706,6 @@ const CAPTURE_ADVERTISED_KEYS = [
 	"name",
 	"description",
 	"parameters",
-	"wireParameters",
 	"strict",
 	"deferLoading",
 	"customFormat",
@@ -2923,7 +2922,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 								warnToolLoadModes(
 									toolRegistry,
 									cfgToolsLoadMode.get(settings),
-									builtInRegistryToolNames.has("read") && liveSession.getEnabledToolNames().includes("read"),
 									message => {
 										liveSession.configWarnings.push(message);
 										liveSession.emitNotice("warning", message, "tools.loadMode");
@@ -4412,7 +4410,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				nativeTools && !inlineToolDescriptors
 					? { mode: "compact", toolNames: [...toolNames, ...mountedPromptToolNames] }
 					: { mode: "full" },
-				tool => presentTool(tool, toolLoadMode(tool, cfgToolsLoadMode.get(settings), toolNames.includes("read"))),
 			);
 			const defaultPrompt = await buildSystemPromptInternal({
 				cwd: promptCwd,
@@ -4601,7 +4598,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		warnToolLoadModes(
 			toolRegistry,
 			initialLoadModes,
-			xdevReadAvailable,
 			message => toolLoadModeWarnings.push(message),
 			isMCPDiscoveryPending(),
 		);
@@ -4768,10 +4764,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		};
 
 		const initialTools = initialToolNames
-			.map(name => {
-				const tool = toolRegistry.get(name);
-				return tool ? presentTool(tool, toolLoadMode(tool, initialLoadModes, xdevReadAvailable)) : undefined;
-			})
+			.map(name => toolRegistry.get(name))
 			.filter((tool): tool is AgentTool => tool !== undefined);
 
 		// `model` is final here: deferred patterns, auth fallback, and extension

@@ -1047,7 +1047,7 @@ export function normalizeTools(tools: AgentContext["tools"], options: NormalizeT
 	return tools?.map(t => {
 		const intentMode = resolveIntentMode(t.intent);
 		const doInjectIntent =
-			injectIntent && intentMode !== "omit" && !schemaDefinesProperty(toolWireSchema(t, t.parameters), INTENT_FIELD);
+			injectIntent && intentMode !== "omit" && !schemaDefinesProperty(toolWireSchema(t), INTENT_FIELD);
 		// When the full catalog is rendered into the system prompt, ship the tool
 		// specs without their descriptions (top-level + nested schema annotations)
 		// so they are not duplicated on the wire. Strip the STABLE wire schema (the
@@ -1059,7 +1059,7 @@ export function normalizeTools(tools: AgentContext["tools"], options: NormalizeT
 			const parameters = (
 				doInjectIntent ? memoizedInjectIntentIntoSchema(stripped, intentMode, undefined) : stripped
 			) as TSchema;
-			return { ...t, parameters, wireParameters: undefined, description: "" };
+			return { ...t, parameters, description: "" };
 		}
 		const wire = toolWireSchema(t);
 		const parameters = (
@@ -1068,7 +1068,7 @@ export function normalizeTools(tools: AgentContext["tools"], options: NormalizeT
 		const description = t.description ?? "";
 		const examplesBlock = renderToolExamples({ ...t, parameters }, doInjectIntent ? INTENT_FIELD : undefined);
 		const finalDescription = examplesBlock ? `${description}\n\n${examplesBlock}` : description;
-		return { ...t, parameters, wireParameters: undefined, description: finalDescription };
+		return { ...t, parameters, description: finalDescription };
 	});
 }
 
@@ -1917,7 +1917,7 @@ async function emitHarmonyAudit(
 interface PreparedProviderCall {
 	model: Model;
 	context: Context;
-	promptToolParseTools: Context["tools"];
+	promptToolWireTools: Context["tools"];
 	ownedDialect: Dialect | undefined;
 	/** Steering source offered to the provider for this call. */
 	liveSteering?: LiveSteeringChannel;
@@ -2027,32 +2027,13 @@ async function prepareProviderCall(
 		llmContext = await config.transformProviderContext(llmContext, model);
 	}
 
-	let promptToolArgumentTools: Context["tools"];
+	let promptToolWireTools: Context["tools"];
 	if (ownedDialect && llmContext.tools && llmContext.tools.length > 0) {
-		const promptToolWireTools = llmContext.tools;
-		promptToolArgumentTools = promptToolWireTools;
-		if (context.tools?.some(tool => tool.wireParameters)) {
-			const executionTools = new Map(context.tools.map(tool => [tool.name, tool]));
-			promptToolArgumentTools = promptToolWireTools.map(tool => {
-				const executionTool = executionTools.get(tool.name);
-				if (!executionTool?.wireParameters) return tool;
-				const full = toolWireSchema(executionTool, executionTool.parameters);
-				const intentMode = resolveIntentMode(executionTool.intent);
-				const doInjectIntent =
-					intentMode !== "omit" &&
-					schemaDefinesProperty(toolWireSchema(tool), INTENT_FIELD) &&
-					!schemaDefinesProperty(full, INTENT_FIELD);
-				const parameters = (
-					doInjectIntent ? memoizedInjectIntentIntoSchema(full, intentMode, undefined) : full
-				) as TSchema;
-				// Argument parsing and history rendering need full types; the advertised catalog stays short.
-				return { ...tool, parameters, wireParameters: undefined };
-			});
-		}
+		promptToolWireTools = llmContext.tools;
 		llmContext = {
 			...llmContext,
 			systemPrompt: [...(llmContext.systemPrompt ?? []), renderInbandToolPrompt(promptToolWireTools, ownedDialect)],
-			messages: encodeInbandToolHistory(llmContext.messages, ownedDialect, promptToolArgumentTools),
+			messages: encodeInbandToolHistory(llmContext.messages, ownedDialect, promptToolWireTools),
 			tools: undefined,
 		};
 	}
@@ -2061,7 +2042,7 @@ async function prepareProviderCall(
 		if (llmContext.tools) config.sentToolDefinitions.record(llmContext.tools);
 		llmContext = config.sentToolDefinitions.withInactiveTools(llmContext);
 	}
-	return { model, context: llmContext, promptToolParseTools: promptToolArgumentTools, ownedDialect };
+	return { model, context: llmContext, promptToolWireTools, ownedDialect };
 }
 
 /**
@@ -2085,7 +2066,7 @@ async function streamAssistantResponse(
 	canDispatchFinalToolCalls?: (message: AssistantMessage) => boolean,
 ): Promise<AssistantMessage> {
 	const providerCall = prepared ?? (await prepareProviderCall(context, config, signal));
-	const { model, context: llmContext, promptToolParseTools, ownedDialect } = providerCall;
+	const { model, context: llmContext, promptToolWireTools, ownedDialect } = providerCall;
 
 	const streamFunction = streamFn || streamSimple;
 
@@ -2242,7 +2223,7 @@ async function streamAssistantResponse(
 				cursorOnToolResult: collectCursorToolResult,
 				liveSteering: providerCall.liveSteering,
 			});
-			if (promptToolParseTools && ownedDialect) {
+			if (promptToolWireTools && ownedDialect) {
 				// Re-materialize in-band tool-call text as native toolCall content blocks
 				// so the rest of the loop executes them unchanged. When the model starts
 				// fabricating tool results, the abort callback cancels the provider — unless
@@ -2250,7 +2231,7 @@ async function streamAssistantResponse(
 				// the fabricated continuation is discarded without aborting.
 				response = wrapInbandToolStream(
 					response,
-					promptToolParseTools,
+					promptToolWireTools,
 					ownedDialect,
 					() => promptToolAbortController?.abort(),
 					config.abortOnFabricatedToolResult ?? true,
@@ -3167,8 +3148,7 @@ async function prepareToolCallDispatch(
 		let argsForExecution = toolCall.arguments as Record<string, unknown>;
 		if (intentTracing) {
 			// A schema-owned `i` is a tool argument, never a harness intent.
-			const ownsIntent =
-				tool !== undefined && schemaDefinesProperty(toolWireSchema(tool, tool.parameters), INTENT_FIELD);
+			const ownsIntent = tool !== undefined && schemaDefinesProperty(toolWireSchema(tool), INTENT_FIELD);
 			const { intent, strippedArgs } = ownsIntent
 				? { intent: undefined, strippedArgs: argsForExecution }
 				: extractIntent(toolCall.arguments);

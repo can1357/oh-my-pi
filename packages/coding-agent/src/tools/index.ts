@@ -78,7 +78,7 @@ import { TodoTool } from "./todo";
 import { WriteTool } from "./write";
 import { WaitTool } from "./wait";
 import { isMountableUnderXdev, resolveXdevTool, type XdevState } from "./xdev";
-import { presentTool, toolLoadMode } from "./load-mode";
+import { toolLoadMode } from "./load-mode";
 import { YieldTool } from "./yield";
 
 import {
@@ -983,8 +983,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		else session.isToolActive = name => finalActiveNames.has(name);
 	}
 
-	const readAvailable = tools.some(tool => tool.name === "read");
-	return tools.map(tool => presentTool(tool, toolLoadMode(tool, loadModes, readAvailable)));
+	return tools;
 }
 
 export type { AskToolDetails, QuestionResult } from "@oh-my-pi/pi-tui/tools/ask";

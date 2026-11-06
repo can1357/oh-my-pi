@@ -1,5 +1,4 @@
-import { type ToolCall, toolWireSchema, validateToolArguments } from "@oh-my-pi/pi-ai";
-import * as AIError from "@oh-my-pi/pi-ai/error";
+import { type ToolCall, validateToolArguments } from "@oh-my-pi/pi-ai";
 import type { AgentTool } from "./types";
 
 /**
@@ -31,21 +30,7 @@ export function validateAgentToolArguments(
 		return tool.lenientArgValidation ? withoutSentinels(validated) : validated;
 	} catch (error) {
 		const args: unknown = toolCall.arguments;
-		if (!tool.lenientArgValidation) {
-			// Parse failures and ordinary tools keep their existing error contract.
-			// A deferred schema mismatch carries recovery data, not prompt instructions.
-			if (
-				tool.wireParameters !== undefined &&
-				error instanceof AIError.ValidationError &&
-				!(args !== null && typeof args === "object" && "__parseError" in args)
-			) {
-				throw new AIError.ValidationError(
-					JSON.stringify({ error: error.message, parameters: toolWireSchema(tool, tool.parameters) }),
-					{ cause: error },
-				);
-			}
-			throw error;
-		}
+		if (!tool.lenientArgValidation) throw error;
 		if (args === null || typeof args !== "object" || Array.isArray(args)) return args as ToolCall["arguments"];
 		if (source === "parsed" && "__parseError" in args) throw error;
 		const fallback = { ...(args as Record<string, unknown>) };

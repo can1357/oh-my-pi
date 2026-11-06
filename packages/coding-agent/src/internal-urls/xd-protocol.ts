@@ -8,7 +8,7 @@ import type { ToolSession } from "../tools";
 import { resolveToolTier } from "../tools/approval";
 import { dispatchReportIssueDevice, reportIssueDeviceUsage } from "../tools/report-tool-issue";
 import { dispatchResolutionDevice, resolutionDeviceUsage } from "../tools/resolve";
-import { directToolDocs, dispatchXdevTool, resolveXdevTool, xdevDocs, xdevListing } from "../tools/xdev";
+import { dispatchXdevTool, resolveXdevTool, xdevDocs, xdevListing } from "../tools/xdev";
 import type {
 	InternalResource,
 	InternalUrl,
@@ -118,10 +118,6 @@ export class XdProtocolHandler implements ProtocolHandler {
 	#usage(session: ToolSession, name: string | null): string {
 		if (name === REPORT_ISSUE_DEVICE_NAME) return reportIssueDeviceUsage();
 		if (name && isResolutionDeviceName(name)) return resolutionDeviceUsage(name);
-		if (name && session.isToolActive?.(name)) {
-			const tool = session.getToolByName?.(name);
-			if (tool) return directToolDocs(tool);
-		}
 		const xdev = session.xdev;
 		if (!xdev) throw new ToolError(NOT_MOUNTED);
 		return name === null ? xdevListing(xdev) : xdevDocs(xdev, name);

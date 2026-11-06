@@ -2,10 +2,6 @@
 
 ## [Unreleased]
 
-### Added
-
-- Tools can advertise lightweight parameters while keeping full execution schemas; strict schema-validation errors include the full schema, while lenient tools retain their own error handling ([#16874](https://github.com/can1357/oh-my-pi/pull/16874) by [@ultravioletcatastrophe](https://github.com/ultravioletcatastrophe))
-
 ## [18.17.0] - 2026-11-06
 
 ### Added
