@@ -81,6 +81,13 @@ describe("latexToUnicode ANSI colors", () => {
 		expect(latexToUnicode(String.raw`\color{red}\xrightarrow[n]{x}`)).toBe(`${fg("#ff0000")}→ˣₙ${FG_RESET}`);
 	});
 
+	it("restores the active color after an environment body", () => {
+		setTrueColor(true);
+		expect(latexToUnicode(String.raw`\begin{pmatrix}\color{red}a\end{pmatrix}b`)).toBe(
+			`(${fg("#ff0000")}a${FG_RESET})b`,
+		);
+	});
+
 	it("resets bold and italic inside textnormal", () => {
 		const rendered = latexToUnicode(String.raw`\textbf{\textit{A\textnormal{B}C}}`);
 

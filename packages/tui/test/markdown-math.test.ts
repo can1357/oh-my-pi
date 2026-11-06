@@ -1,7 +1,16 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { Markdown, renderInlineMarkdown } from "../src/components/markdown";
 import { defaultMarkdownTheme } from "./test-themes.js";
+import { setTerminalTextSizing, TERMINAL } from "../src/terminal-capabilities";
+
+const originalTrueColor = TERMINAL.trueColor;
+const originalTextSizing = TERMINAL.textSizing;
+
+afterEach(() => {
+	Object.assign(TERMINAL, { trueColor: originalTrueColor });
+	setTerminalTextSizing(originalTextSizing);
+});
 
 /** Render markdown and return non-empty, ANSI-stripped, right-trimmed lines. */
 function renderLines(md: string, width = 100): string[] {
@@ -114,6 +123,7 @@ describe("Markdown math rendering", () => {
 	});
 
 	it("preserves ANSI styles through Markdown math wrappers", () => {
+		Object.assign(TERMINAL, { trueColor: true });
 		const markdown = String.raw`$\boxed{\textcolor{red}{x}}+y_{\textit{word}}+\textcolor{red}{\sqrt[n]{x}}$
 
 $$\textbf{\frac{a}{b}}$$`;
@@ -125,5 +135,16 @@ $$\textbf{\frac{a}{b}}$$`;
 		expect(rendered).toContain(`${red}ⁿ√x\x1b[39m`);
 		expect(rendered).toContain("\x1b[1ma\x1b[22m");
 		expect(rendered).toContain("\x1b[1mb\x1b[22m");
+	});
+
+	it("sized headings draw the same bytes for styled and plain inline math", () => {
+		Object.assign(TERMINAL, { trueColor: true });
+		setTerminalTextSizing(true);
+		const plain = new Markdown("# x", 0, 0, defaultMarkdownTheme).render(100).join("\n");
+		const styled = new Markdown(String.raw`# $\textcolor{red}{x}$`, 0, 0, defaultMarkdownTheme)
+			.render(100)
+			.join("\n");
+
+		expect(styled).toBe(plain);
 	});
 });

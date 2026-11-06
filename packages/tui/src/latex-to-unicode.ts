@@ -1974,7 +1974,8 @@ class LatexParser {
 			this.#optionalRawArgument();
 			if (this.#s[this.#i] === "{") this.#rawArgument(); // column count
 		}
-		const fallback = this.#renderStyle(style);
+		const outerForeground = this.#foreground;
+		const outerBackground = this.#background;
 		const body: Rendered = [];
 		while (this.#i < this.#s.length) {
 			if (this.#s.startsWith("\\end", this.#i)) {
@@ -1984,6 +1985,8 @@ class LatexParser {
 			}
 			appendRendered(body, this.#node(style));
 		}
+		this.#foreground = outerForeground;
+		this.#background = outerBackground;
 		let renderedBody = trimRendered(body);
 		if (
 			env === "cases" ||
@@ -2000,7 +2003,8 @@ class LatexParser {
 		}
 		const delims = ENV_DELIMS[env];
 		if (!delims) return renderedBody;
-		return concatRendered(styledText(delims[0], fallback), renderedBody, styledText(delims[1], fallback));
+		const current = this.#renderStyle(style);
+		return concatRendered(styledText(delims[0], current), renderedBody, styledText(delims[1], current));
 	}
 
 	/** A separator space when the next glyph is alphanumeric or a command. */
