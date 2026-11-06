@@ -15,7 +15,12 @@ import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { isEnoent, pathIsWithin } from "@oh-my-pi/pi-utils";
 
-import type { MarketplaceCatalogMetadata, MarketplacePluginEntry, PluginSource } from "./types";
+import {
+	isBarePluginSource,
+	type MarketplaceCatalogMetadata,
+	type MarketplacePluginEntry,
+	type PluginSource,
+} from "./types";
 
 const GIT_CLONE_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -55,9 +60,7 @@ export async function validatePluginSource(
 ): Promise<string | undefined> {
 	const { source } = entry;
 	if (typeof source === "string") {
-		const resolved = resolveRelativeSourcePath(source, context);
-		await verifyDirExists(resolved, `Plugin source directory does not exist: "${resolved}"`);
-		return resolved;
+		return resolveRelativeDir(source, context);
 	}
 
 	switch (source.source) {
@@ -91,41 +94,74 @@ export async function validatePluginSource(
 
 // ── Relative string source ("./plugins/foo") ────────────────────────
 
-function resolveRelativeSourcePath(
+function relativeSourceCandidates(
 	source: string,
 	context: Pick<ResolveContext, "marketplaceClonePath" | "catalogMetadata">,
-): string {
-	// Bare name (no "/", not "."-prefixed): resolves under `metadata.pluginRoot`.
-	// Sources starting with "./" are relative to the marketplace root and ignore it.
-	const isBareName = !source.includes("/") && !source.startsWith(".");
+): { root: string; primary: string; fallback?: string } {
+	const isBareName = isBarePluginSource(source);
 	if (!isBareName && !source.startsWith("./")) {
 		throw new Error(`Relative plugin source paths must start with "./" — got: "${source}"`);
 	}
-	if (!context.marketplaceClonePath) {
+	const root = context.marketplaceClonePath;
+	if (!root) {
 		throw new Error(`Cannot resolve relative source "${source}": marketplaceClonePath is required`);
 	}
 
 	const pluginRoot = context.catalogMetadata?.pluginRoot;
-	if (isBareName && !pluginRoot) {
-		throw new Error(`Bare plugin source "${source}" requires metadata.pluginRoot in the marketplace catalog`);
+	if (isBareName) {
+		if (!pluginRoot) {
+			throw new Error(`Bare plugin source "${source}" requires metadata.pluginRoot in the marketplace catalog`);
+		}
+		return { root, primary: `./${path.join(pluginRoot, source)}` };
 	}
-	const relativePath = isBareName && pluginRoot ? `./${path.join(pluginRoot, source)}` : source;
-	const resolved = path.resolve(context.marketplaceClonePath, relativePath);
-	if (!pathIsWithin(context.marketplaceClonePath, resolved)) {
-		throw new Error(
-			`Plugin source "${source}" resolves outside marketplace root ("${context.marketplaceClonePath}")`,
-		);
+	// "./" sources are marketplace-root relative. Catalogs that set pluginRoot previously had it
+	// prepended, so fall back to pluginRoot/<rest> only when the root-relative path is absent.
+	return {
+		root,
+		primary: source,
+		fallback: pluginRoot ? `./${path.join(pluginRoot, source.slice(2))}` : undefined,
+	};
+}
+
+function containedPath(root: string, relativePath: string, source: string): string {
+	const resolved = path.resolve(root, relativePath);
+	if (!pathIsWithin(root, resolved)) {
+		throw new Error(`Plugin source "${source}" resolves outside marketplace root ("${root}")`);
 	}
 	return resolved;
+}
+
+/** Resolve a string source to an existing plugin directory inside the marketplace root. */
+async function resolveRelativeDir(
+	source: string,
+	context: Pick<ResolveContext, "marketplaceClonePath" | "catalogMetadata">,
+): Promise<string> {
+	const { root, primary, fallback } = relativeSourceCandidates(source, context);
+	let resolved = containedPath(root, primary, source);
+	if (fallback !== undefined && (await isMissingDir(resolved))) {
+		resolved = containedPath(root, fallback, source);
+	}
+	await verifyDirExists(resolved, `Plugin source directory does not exist: "${resolved}"`);
+	return resolved;
+}
+
+/** True when `dirPath` is absent or not a directory; other stat failures propagate. */
+async function isMissingDir(dirPath: string): Promise<boolean> {
+	try {
+		return !(await fs.stat(dirPath)).isDirectory();
+	} catch (err) {
+		if (isEnoent(err)) {
+			return true;
+		}
+		throw err;
+	}
 }
 
 async function resolveRelativeSource(
 	source: string,
 	context: ResolveContext,
 ): Promise<{ dir: string; tempCloneRoot?: string }> {
-	const resolved = resolveRelativeSourcePath(source, context);
-	await verifyDirExists(resolved, `Plugin source directory does not exist: "${resolved}"`);
-	return { dir: resolved };
+	return { dir: await resolveRelativeDir(source, context) };
 }
 
 // ── Object source variants ──────────────────────────────────────────

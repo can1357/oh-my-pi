@@ -11,6 +11,7 @@
 - The bash execution visualization keeps updating, and saved traces still restore, after a command handles bytes that aren't valid UTF-8 (e.g. `v=$(printf '\377')`)
 - On Windows, `grep`, `glob` and isolated subagents no longer flash a console window when they query or start the ovnfs daemon.
 - Fixed marketplace plugin installs failing with a doubled `plugins/plugins/...` path when a catalog sets `metadata.pluginRoot` and its sources already start with `./`; `pluginRoot` now applies only to bare source names ([#18276](https://github.com/can1357/oh-my-pi/pull/18276) by [@aleister1102](https://github.com/aleister1102))
+- Fixed marketplace plugin installs failing with a doubled `plugins/plugins/...` path when a catalog sets `metadata.pluginRoot` and its sources already start with `./`; `pluginRoot` now applies to bare source names, and `./` sources resolve from the marketplace root, falling back to `pluginRoot` only when that path does not exist ([#18276](https://github.com/can1357/oh-my-pi/pull/18276) by [@aleister1102](https://github.com/aleister1102))
 
 ## [18.17.0] - 2026-11-06
 
