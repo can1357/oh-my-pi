@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
+import { toolWireSchema } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -114,7 +115,7 @@ function fakeServers() {
 	};
 }
 
-async function createDeferredSession() {
+async function createDeferredSession(settings?: Settings) {
 	const servers = fakeServers();
 	const root = TempDir.createSync("@pi-mcp-first-turn-");
 	cleanups.push(() => root.removeSync());
@@ -129,11 +130,13 @@ async function createDeferredSession() {
 		modelRegistry: new ModelRegistry(auth),
 		model: mock,
 		sessionManager: SessionManager.inMemory(root.path()),
-		settings: Settings.isolated({
-			"compaction.enabled": false,
-			"retry.enabled": false,
-			"todo.enabled": false,
-		}),
+		settings:
+			settings ??
+			Settings.isolated({
+				"compaction.enabled": false,
+				"retry.enabled": false,
+				"todo.enabled": false,
+			}),
 		disableExtensionDiscovery: true,
 		skills: [],
 		contextFiles: [],
@@ -161,6 +164,46 @@ async function createDeferredSession() {
 }
 
 describe("createAgentSession deferred MCP discovery and the first turn", () => {
+	it("defers MCP load-mode warnings until discovery settles without hiding genuinely missing tools", async () => {
+		const missingMCPTool = "mcp__missing_lookup";
+		const { session, servers } = await createDeferredSession(
+			Settings.isolated({
+				"compaction.enabled": false,
+				"retry.enabled": false,
+				"todo.enabled": false,
+				"tools.loadMode": {
+					[MCP_TOOL_NAME]: "essential",
+					[missingMCPTool]: "essential",
+					unknown_tool: "essential",
+				},
+			}),
+		);
+		const startupWarnings = session.configWarnings.filter(message => message.startsWith("tools.loadMode."));
+		expect(startupWarnings).toEqual([expect.stringContaining("tools.loadMode.unknown_tool")]);
+		expect(session.getToolByName(MCP_TOOL_NAME)).toBeUndefined();
+		const notices: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice" && event.source === "tools.loadMode") notices.push(event.message);
+		});
+		await session.setActiveToolsByName(session.getEnabledToolNames());
+		expect(notices).toEqual([]);
+
+		servers.closeStartupWindow(probeTools());
+		await session.prompt("hello");
+		expect(session.getActiveToolNames()).toContain(MCP_TOOL_NAME);
+		expect(session.getMountedXdevToolNames()).not.toContain(MCP_TOOL_NAME);
+		const request = await session.agent.buildSideRequestContext([]);
+		const connectedTool = request.tools?.find(tool => tool.name === MCP_TOOL_NAME);
+		expect(connectedTool && toolWireSchema(connectedTool).properties).toHaveProperty("q");
+		expect(notices).toEqual([expect.stringContaining(`tools.loadMode.${missingMCPTool}`)]);
+		expect(session.configWarnings.filter(message => message.startsWith("tools.loadMode."))).toEqual([
+			...startupWarnings,
+			expect.stringContaining(`tools.loadMode.${missingMCPTool}`),
+		]);
+		await session.setActiveToolsByName(session.getEnabledToolNames());
+		expect(notices).toHaveLength(1);
+	});
+
 	it("holds the first turn until in-flight discovery lands so its request carries the MCP routes", async () => {
 		const { session, servers, systemPrompts, turnsStarted } = await createDeferredSession();
 		const started = () => turnsStarted() > 0;

@@ -161,6 +161,8 @@ interface SessionToolsOptions {
 	presentationPinnedToolNames?: ReadonlySet<string>;
 	/** MCP tool names whose current registry entries came from the manager snapshot. */
 	mcpManagerToolNames?: Iterable<string>;
+	/** Unknown MCP names cannot be checked until their discovery completes. */
+	isMCPDiscoveryPending?: () => boolean;
 	ensureWriteRegistered?: () => Promise<boolean>;
 	isDeviceOnlyWrite?: () => boolean;
 	setDeviceOnlyWrite?: (enabled: boolean) => void;
@@ -475,6 +477,7 @@ export class SessionTools {
 	 */
 	readonly #deviceOnlyWriteTransportAvailable: boolean;
 	#ensureGoalRegistered: SessionToolsOptions["ensureGoalRegistered"];
+	readonly #isMCPDiscoveryPending: SessionToolsOptions["isMCPDiscoveryPending"];
 	#reconcileSettingsGatedTools: SessionToolsOptions["reconcileSettingsGatedTools"];
 	#skills: Skill[];
 	#skillWarnings: SkillWarning[];
@@ -502,6 +505,7 @@ export class SessionTools {
 		this.#createThinkTool = options.createThinkTool;
 		this.#builtInToolNames = new Set(options.builtInToolNames ?? []);
 		this.#mcpManagerToolNames = new Set(options.mcpManagerToolNames ?? []);
+		this.#isMCPDiscoveryPending = options.isMCPDiscoveryPending;
 		if (options.mcpManagerToolNames === undefined) {
 			for (const name of this.#toolRegistry.keys()) {
 				if (isMCPToolName(name)) this.#mcpManagerToolNames.add(name);
@@ -1344,8 +1348,12 @@ export class SessionTools {
 		const isPresentationPinned = (name: string): boolean =>
 			this.#presentationPinnedToolNames?.has(name) === true || this.#runtimeSelectedToolNames?.has(name) === true;
 		const loadModes = cfgToolsLoadMode.get(this.#host.settings);
-		warnToolLoadModes(this.#toolRegistry, loadModes, xdevReadAvailable, message =>
-			this.#host.emitNotice("warning", message, "tools.loadMode"),
+		warnToolLoadModes(
+			this.#toolRegistry,
+			loadModes,
+			xdevReadAvailable,
+			message => this.#host.emitNotice("warning", message, "tools.loadMode"),
+			this.#isMCPDiscoveryPending?.() === true,
 		);
 		const mountCandidates = selectedTools.filter(
 			({ name, tool }) =>

@@ -670,6 +670,8 @@ Strict tools still validate against their full execution schema and include it i
 
 Overrides never enable disabled tools or widen an explicit `--tools`/SDK `toolNames` selection. `read`, `write`, `todo`, `ask`, `grep`, `web_search`, lifecycle-controlled `think`, `goal`, and `yield`, and tools using custom grammars or native provider facilities retain their full definitions. Unknown names and ignored `discoverable` overrides warn once per configured name/value; changing or removing an entry re-arms its warning. `read` must be enabled to use short definitions.
 
+MCP names are not flagged as unknown while discovery or initial server connections are still pending.
+
 Individual built-in tools and Eval preludes are toggled by their own keys, e.g. `bash.enabled`, `launch.enabled`, `eval.py`, `eval.js`, `glob.enabled`, `grep.enabled`, `fetch.enabled`, `browser.enabled`, `computer.enabled`, `ratchet.enabled` (default `false`; the `ratchet(flow)` eval/hillclimb prelude, which `/ratchet` turns on for the current session only), `archive.enabled` (default `true`; the read-only `archive` eval prelude over prompt history, recent projects, past sessions, and recaps), `astEdit.enabled`, `astGrep.enabled`, `find.enabled` (`auto`/`on`/`off`; `auto` enables `find` only when the `judge` role resolves to a native TypeSafe jev model), and `web_search.enabled`. Image questions use `read <image>?q=<question>` and honor `images.questionTimeoutMs`.
 
 ### Window-scoped computer use

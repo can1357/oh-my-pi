@@ -2843,6 +2843,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const customTools: CustomTool[] = [];
 		const initialMcpManagerTools: CustomTool[] = [];
 		let startDeferredMCPDiscovery: ((liveSession: AgentSession) => void) | undefined;
+		const isMCPDiscoveryPending = () =>
+			startDeferredMCPDiscovery !== undefined ||
+			(mcpManager instanceof MCPManager && mcpManager.hasPendingStartup());
 		const onMCPStatus = (event: McpConnectionStatusEvent) => {
 			if (!options.hasUI || cfgStartupQuiet.get(settings)) return;
 			if (event.type === "connecting" && event.serverNames.length === 0) return;
@@ -2914,6 +2917,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 								path: ".mcp.json",
 								error: error instanceof Error ? error.message : String(error),
 							});
+						} finally {
+							startDeferredMCPDiscovery = undefined;
+							if (!liveSession.isDisposed) {
+								warnToolLoadModes(
+									toolRegistry,
+									cfgToolsLoadMode.get(settings),
+									builtInRegistryToolNames.has("read") && liveSession.getEnabledToolNames().includes("read"),
+									message => {
+										liveSession.configWarnings.push(message);
+										liveSession.emitNotice("warning", message, "tools.loadMode");
+									},
+									isMCPDiscoveryPending(),
+								);
+							}
 						}
 					})();
 					liveSession.setPendingMCPDiscovery(discovery);
@@ -4581,8 +4598,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		const initialLoadModes = cfgToolsLoadMode.get(settings);
 		const toolLoadModeWarnings: string[] = [];
-		warnToolLoadModes(toolRegistry, initialLoadModes, xdevReadAvailable, message =>
-			toolLoadModeWarnings.push(message),
+		warnToolLoadModes(
+			toolRegistry,
+			initialLoadModes,
+			xdevReadAvailable,
+			message => toolLoadModeWarnings.push(message),
+			isMCPDiscoveryPending(),
 		);
 
 		// Partition the initial enabled set for the xd:// transport. Tool instances
@@ -5160,6 +5181,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			interactivePrompts: options.interactivePrompts,
 			rebindModelAfterDiscovery: options.model === undefined || options.rebindModelAfterDiscovery === true,
 			toolRegistry,
+			isMCPDiscoveryPending,
 			reconcileBrowserMcpFilter: mcpManager
 				? async enabled => {
 						await mcpManager.reconcileBrowserFilter(enabled);

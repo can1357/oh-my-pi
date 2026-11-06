@@ -2,7 +2,7 @@ import type { AgentTool, ToolLoadMode } from "@oh-my-pi/pi-agent-core";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { applyToolProxy } from "../extensibility/tool-proxy";
 import discoverableTemplate from "../prompts/tools/discoverable.md" with { type: "text" };
-import { BUILTIN_TOOL_NAMES, HIDDEN_TOOL_NAMES } from "./builtin-names";
+import { BUILTIN_TOOL_NAMES, HIDDEN_TOOL_NAMES, isMCPToolName } from "./builtin-names";
 import { defaultLoadModeForToolName } from "./essential-tools";
 import { promptCatalogSummary, XDEV_KEEP_TOP_LEVEL, XDEV_TRANSPORT_TOOLS } from "./xdev";
 
@@ -54,6 +54,7 @@ export function warnToolLoadModes(
 	modes: ToolLoadModes,
 	readAvailable: boolean,
 	onWarning?: (message: string) => void,
+	mcpDiscoveryPending = false,
 ): void {
 	let warned = warnedModes.get(tools);
 	if (warned) {
@@ -65,8 +66,10 @@ export function warnToolLoadModes(
 		const tool = tools.get(name);
 		if (tool && mode === defaultLoadModeForToolName(tool.name, tool.loadMode)) continue;
 		let reason: string | undefined;
-		if (!tool && !KNOWN_BUILTINS.has(name)) reason = "tool is not registered";
-		else if (mode === "discoverable" && tool && isPinned(tool)) {
+		if (!tool && !KNOWN_BUILTINS.has(name)) {
+			if (mcpDiscoveryPending && isMCPToolName(name)) continue;
+			reason = "tool is not registered";
+		} else if (mode === "discoverable" && tool && isPinned(tool)) {
 			reason = "tool is pinned to its full definition";
 		} else if (mode === "discoverable" && tool && !readAvailable) {
 			reason = "read must be enabled to discover full documentation";
