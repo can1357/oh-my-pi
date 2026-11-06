@@ -34,10 +34,12 @@ import { InternalUrlRouter } from "../../internal-urls/router";
 import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
 import { resolveExtensionDirectory } from "./directory-resolution";
+import { ExpectedReplies } from "./expected-replies";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 import { getAllPluginExtensionPaths } from "../plugins/loader";
 
 import { resolvePath, withHostGuard } from "../utils";
+import { ExtensionRegistrations } from "./registrations";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import { notifyTranscriptPresentersChanged } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import type {
@@ -47,6 +49,7 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 	ExtensionFactory,
+	ExtensionReplies,
 	ExtensionRuntime as IExtensionRuntime,
 	LoadExtensionsResult,
 	MessageRenderer,
@@ -123,6 +126,7 @@ export class ExtensionRuntimeNotInitializedError extends Error {
 export class ExtensionRuntime implements IExtensionRuntime {
 	flagValues = new Map<string, boolean | string>();
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }> = [];
+	readonly expectedReplies = new ExpectedReplies();
 
 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void {
 		this.pendingProviderRegistrations.push({ name, config, sourceId });
@@ -214,9 +218,34 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		config: ProviderConfig;
 		sourceId: string;
 	}> = [];
+	/**
+	 * Expectations go to the session's store and follow this load (see `Extension.registrations`):
+	 * they stop counting while it is suspended, and go with it at teardown.
+	 */
+	readonly replies: ExtensionReplies = {
+		expect: (peerId, options) => {
+			const registrations = this.extension.registrations;
+			// A callback the torn-down load left behind records nothing, so no `wait` ever blocks on it.
+			if (registrations?.released) return () => {};
+			const expectation = this.runtime.expectedReplies.expect(peerId, {
+				promised: options?.promised,
+				suspended: registrations?.suspended,
+			});
+			const untrack = registrations?.add(expectation);
+			return () => {
+				// Released by the extension itself: untracked, so a long-lived load does not accumulate them.
+				untrack?.();
+				expectation.release();
+			};
+		},
+	};
 
 	get pi() {
 		return getCodingAgentApi();
+	}
+
+	get expectedReplies(): ExpectedReplies {
+		return this.runtime.expectedReplies;
 	}
 
 	constructor(
@@ -241,6 +270,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		const list = this.extension.handlers.get(event) ?? [];
 		list.push(handler);
 		this.extension.handlers.set(event, list);
+	}
+
+	onSuspensionChange(listener: (suspended: boolean) => void): () => void {
+		return this.extension.registrations?.onSuspensionChange(listener) ?? (() => {});
 	}
 
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void {
@@ -466,6 +499,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		commands: new Map(),
 		flags: new Map(),
 		shortcuts: new Map(),
+		registrations: new ExtensionRegistrations(),
 	};
 }
 
@@ -478,6 +512,7 @@ async function runExtensionFactory(
 	factory: ExtensionFactory,
 	api: ExtensionAPI,
 	runtime: IExtensionRuntime,
+	extension: Extension,
 ): Promise<void> {
 	const providerRegistrationCheckpoint = [...runtime.pendingProviderRegistrations];
 
@@ -489,6 +524,8 @@ async function runExtensionFactory(
 			runtime.pendingProviderRegistrations.length,
 			...providerRegistrationCheckpoint,
 		);
+		// The failed load never joins a runner, so nothing else would release what it registered.
+		extension.registrations?.release();
 		throw error;
 	}
 }
@@ -530,7 +567,7 @@ async function bindExtension(
 	try {
 		const extension = createExtension(extensionPath, imported.resolvedPath);
 		const api = new ConcreteExtensionAPI(extension, runtime, cwd, eventBus);
-		await withHostGuard(() => runExtensionFactory(factory, api, runtime));
+		await withHostGuard(() => runExtensionFactory(factory, api, runtime, extension));
 
 		return { extension, error: null };
 	} catch (err) {
@@ -551,7 +588,7 @@ export async function loadExtensionFromFactory(
 ): Promise<Extension> {
 	const extension = createExtension(name, name);
 	const api = new ConcreteExtensionAPI(extension, runtime, cwd, eventBus);
-	await runExtensionFactory(factory, api, runtime);
+	await runExtensionFactory(factory, api, runtime, extension);
 	return extension;
 }
 

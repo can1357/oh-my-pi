@@ -470,6 +470,7 @@ export async function emitSessionShutdownEvent(extensionRunner: ExtensionRunner 
 	} finally {
 		extensionRunner.disposeFileFallbacks();
 		extensionRunner.clearManagedTimers();
+		extensionRunner.releaseExtensionRegistrations();
 	}
 }
 
@@ -790,6 +791,8 @@ export class ExtensionRunner {
 		this.#createAnnotations = createAnnotations;
 		this.#getAsyncJobSnapshotFn = getAsyncJobSnapshot ?? (() => null);
 		this.runtime.getShortcutConflict = (shortcut, extensionPath) => this.getShortcutConflict(shortcut, extensionPath);
+		// A load suspended by a failed startup (see `createAgentSession`) acts again once a session adopts it.
+		for (const extension of extensions) extension.registrations?.setSuspended(false);
 	}
 
 	/**
@@ -1226,6 +1229,10 @@ export class ExtensionRunner {
 				resumed.push(extension);
 			}
 		}
+		// Out-of-session registrations follow the load: they stop acting while it is suspended and
+		// act again on resume, like its handlers, tools and commands.
+		for (const extension of suspended) extension.registrations?.setSuspended(true);
+		for (const extension of resumed) extension.registrations?.setSuspended(false);
 		if (suspended.length > 0 || resumed.length > 0) {
 			const active = this.#loadOrder.filter(extension => !this.#suspendedExtensions.has(extension));
 			this.extensions.splice(0, this.extensions.length, ...active);
@@ -1823,6 +1830,14 @@ export class ExtensionRunner {
 	 */
 	clearManagedTimers(): void {
 		this.#managedTimers.clearAll();
+	}
+
+	/**
+	 * Release the out-of-session registrations of every loaded extension, suspended ones included
+	 * (see {@link Extension.registrations}). Called on session shutdown.
+	 */
+	releaseExtensionRegistrations(): void {
+		for (const extension of this.getLoadedExtensions()) extension.registrations?.release();
 	}
 
 	/**

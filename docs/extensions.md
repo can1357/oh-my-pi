@@ -66,6 +66,26 @@ Important constraint from `loader.ts`:
 - `pi.exec()` is directly available during load; provider registration is queued until session setup
 - child sessions reuse imported factories but bind fresh APIs and extension registrations; module-level variables remain shared across those sessions
 
+### Suspension and teardown
+
+A live `disabledExtensions` edit suspends a loaded extension in place instead of unloading it: it keeps its module state, but stops contributing event handlers, tools, commands, renderers, link schemes and file fallbacks until it is resumed. Its factory and `session_start` do not run again on resume. What an extension registers outside its session state through the extension API (for example URL schemes or expected replies) follows the same rule: it stops acting while the load is suspended and acts again on resume. It is released when the load is torn down: on session shutdown, when the factory throws, or when the session goes away before a startup-deferred extension is bound. Anything registered after teardown is released immediately. When `createAgentSession` fails before its session exists, the loads it created itself are torn down, but loads the caller passed in `preloadedExtensions` are only suspended, since the caller may retry with them (the interactive auto-resume fallback does); the session that adopts them resumes them. Once the session exists, a startup failure disposes it, which ends every load like any session end (`session_shutdown` runs), preloaded ones included: their module state has seen the shutdown, so they are not reused.
+
+A suspended extension receives no events, so it cannot learn about its suspension from `on(...)`. `pi.onSuspensionChange(listener)` calls `listener(true)` when this load is suspended and `listener(false)` when it is resumed. Use it to pause work the extension drives itself, such as a socket or a timer. It returns the unsubscribe, and listeners are dropped when the load is torn down:
+
+```ts
+export default function (pi: ExtensionAPI) {
+	let socket: Socket | undefined;
+	pi.on("session_start", () => {
+		socket = connect();
+	});
+	pi.onSuspensionChange(suspended => {
+		if (suspended) socket?.end();
+		else socket = connect();
+	});
+	pi.on("session_shutdown", () => socket?.end());
+}
+```
+
 ## Quick start
 
 ```ts
@@ -128,6 +148,8 @@ Core methods:
 - `getServiceTiers`, `setServiceTier`
 - `registerProvider`, `unregisterProvider`
 - `registerFileWriteFallback`, `registerFileDeleteFallback`
+- `onSuspensionChange`
+- `replies.expect` (replies `wait` blocks for)
 - `events` (shared event bus)
 
 `ExtensionAPI` methods retain their extension binding when destructured or passed as callbacks.
@@ -355,6 +377,98 @@ Payloads passed to `pi.sendMessage` are normalized before delivery
 re-exported by `session/messages.ts`): non-object payloads are coerced to string
 content under the default custom type, missing `customType`/`attribution` fields
 are defaulted, and invalid content collapses to an empty string.
+
+### Expected replies (`pi.replies`)
+
+`pi.replies.expect(peerId, options?)` records that this session's agent awaits a reply from a peer
+the built-in tools cannot see, such as an agent in another process reached through a bridge.
+`peerId` is an opaque display id (for example `@murmur/leia`); it need not name a registered agent.
+It returns the release function.
+
+- While an expectation is unreleased, `wait` blocks for the reply instead of returning "Nothing to
+  wait for". A message reaching the agent mid-wait, such as the answer injected with
+  `deliverAs: "steer"`, ends the wait as usual; a wait that runs out names the peers still awaited.
+- Expect before you send, since an answer can arrive before the send returns, and release at once
+  if the send fails.
+- Release once the answer has reached the transcript (its `message_start` event), or when the peer
+  is gone. `sendMessage` and `sendUserMessage` only queue the answer; a release right after them
+  would end a blocked `wait` with "no longer owes a reply" before the steer could interrupt it.
+  Releasing the last expectation a blocked `wait` depended on ends it, naming the peer. Release is
+  idempotent, and each `expect` call is its own expectation.
+- An expectation counts only in the agent run it was recorded in, like an unanswered IRC question.
+  `{ promised: true }` marks a peer that promised a later answer (like an IRC progress note): it
+  stays awaited in later runs until released.
+- Expectations belong to this session: another session's `wait` never sees them. They follow the
+  extension load (see [Suspension and teardown](#suspension-and-teardown)): while a live
+  `disabledExtensions` edit suspends it they stop counting, so a `wait` blocked only on them ends,
+  and on resume the unreleased ones count again. Teardown (session shutdown, a factory that throws)
+  releases them, and an `expect` made after it records nothing.
+
+The bridge pattern: expect when the agent asks a remote peer. Each answer that reaches the
+transcript settles one question, the oldest, since each `expect` call is its own expectation. A
+failed send withdraws only its own expectation, and a peer that leaves releases all of its.
+
+```ts
+const PEER_ANSWER = "peer-answer";
+const awaiting = new Map<string, Array<() => void>>();
+/** Record that `peer` owes an answer; the returned function withdraws just this one. */
+const expectAnswer = (peer: string): (() => void) => {
+	const undo = pi.replies.expect(peer);
+	const queue = awaiting.get(peer) ?? [];
+	queue.push(undo);
+	awaiting.set(peer, queue);
+	return () => {
+		const index = queue.indexOf(undo);
+		if (index !== -1) queue.splice(index, 1);
+		undo();
+	};
+};
+/** An answer from `peer` reached the transcript: it settles that peer's oldest question. */
+const answered = (peer: string) => awaiting.get(peer)?.shift()?.();
+/** The peer is gone: nothing it owes can arrive any more. */
+const peerLeft = (peer: string) => {
+	for (const undo of awaiting.get(peer)?.splice(0) ?? []) undo();
+	awaiting.delete(peer);
+};
+
+pi.registerTool({
+	name: "ask_peer",
+	label: "Ask peer",
+	description: "Ask a peer agent in another process",
+	parameters: z.object({ peer: z.string(), question: z.string() }),
+	async execute(_id, { peer, question }) {
+		// Expect first: the answer can arrive before the send resolves.
+		const withdraw = expectAnswer(peer);
+		try {
+			await bridge.send(peer, question);
+		} catch (error) {
+			withdraw();
+			throw error;
+		}
+		return { content: [{ type: "text", text: `Asked ${peer}. Call wait for the answer.` }] };
+	},
+});
+
+bridge.onAnswer((peer, text) => {
+	// Queued only: the steer still has to end a running `wait`, so release on delivery below.
+	pi.sendMessage(
+		{ customType: PEER_ANSWER, content: `${peer} replied: ${text}`, display: true, details: { peer } },
+		{ deliverAs: "steer", triggerTurn: true },
+	);
+});
+
+pi.on("message_start", async event => {
+	const message = event.message;
+	if (message.role !== "custom" || message.customType !== PEER_ANSWER) return;
+	const peer: unknown =
+		typeof message.details === "object" && message.details !== null
+			? Reflect.get(message.details, "peer")
+			: undefined;
+	if (typeof peer === "string") answered(peer);
+});
+
+bridge.onPeerLeft(peerLeft);
+```
 
 ## 2) Handler context (`ExtensionContext`)
 

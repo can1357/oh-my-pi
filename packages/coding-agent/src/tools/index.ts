@@ -11,6 +11,7 @@ import type { Settings } from "../config/settings";
 import { EditTool } from "../edit";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
+import type { ExpectedReplies } from "../extensibility/extensions/expected-replies";
 import type {
 	BeforeSubagentSpawnEvent,
 	BeforeSubagentSpawnEventResult,
@@ -410,6 +411,8 @@ export interface ToolSession {
 	pendingFullWriteDescription?: boolean;
 	/** Agent registry for IRC routing across live sessions. */
 	agentRegistry?: AgentRegistryApi;
+	/** Replies this session's extensions expect for its agent (`pi.replies.expect`); `wait` blocks on them. */
+	expectedReplies?: ExpectedReplies;
 	/** Idle→parked→revive lifecycle owner; lets explicit cancellation stop a non-job-backed agent registration. Default: AgentLifecycleManager.global(). */
 	agentLifecycle?: () => AgentLifecycleApi;
 	/** Get artifacts directory for artifact:// URLs */
