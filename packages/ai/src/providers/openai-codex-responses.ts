@@ -154,6 +154,7 @@ import {
 	hasExecutableIncompleteResponsesToolCalls,
 	mapOpenAIResponsesStopReason,
 	normalizeOpenAIPromptCacheKey,
+	pickUnrecordedResponsesToolCalls,
 	populateResponsesUsageFromResponse,
 	promoteResponsesToolUseStopReason,
 	settleReasoningSummary,
@@ -4202,13 +4203,11 @@ function createCodexHeaders(
 	} else {
 		headers.delete(OPENAI_HEADERS.ATTESTATION);
 	}
-	const betaHeader =
-		transport === "websocket"
-			? OPENAI_HEADER_VALUES.BETA_RESPONSES_WEBSOCKETS_V2
-			: OPENAI_HEADER_VALUES.BETA_RESPONSES;
+	// codex-rs sends `OpenAI-Beta` only on the WebSocket handshake; HTTP carries none.
 	headers.delete(OPENAI_HEADERS.BETA);
-	headers.delete("openai-beta");
-	headers.set(OPENAI_HEADERS.BETA, betaHeader);
+	if (transport === "websocket") {
+		headers.set(OPENAI_HEADERS.BETA, OPENAI_HEADER_VALUES.BETA_RESPONSES_WEBSOCKETS_V2);
+	}
 	headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
 	headers.set(OPENAI_HEADERS.VERSION, codexClientVersion);
 	headers.set("User-Agent", USER_AGENT);
@@ -4379,6 +4378,22 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 						model.supportsComputerUse === true
 							? sanitizedHistoryItems
 							: unrollCodexComputerItems(sanitizedHistoryItems, model.compat.supportsImageDetailOriginal);
+					const missingCalls = pickUnrecordedResponsesToolCalls(assistantMsg, historyItems);
+					if (missingCalls.length > 0) {
+						const rebuilt = convertResponsesAssistantMessage(
+							{ ...assistantMsg, content: missingCalls },
+							model,
+							msgIndex,
+							knownCallIds,
+							false,
+							customCallIds,
+							false,
+							true,
+							undefined,
+							computerCallIds,
+						);
+						rawReplayItems.push(...rebuilt);
+					}
 					const replayItems = escapeControlTokens ? escapeReplayedControlTokens(rawReplayItems) : rawReplayItems;
 					for (const item of replayItems) {
 						if (item.type === "custom_tool_call") {
