@@ -66,7 +66,7 @@ use crate::bash::{
 	event::{AssignScope, Event, EventData, EventMask, Origin, OriginChain, OriginLink},
 	fd::{FdOrigin, FdRef, FdTable},
 	fs::File,
-	host::{EnvView, ExtProc, Host, StdFd, Verdict},
+	host::{EnvView, ExtProc, Host, SignalScope, StdFd, Verdict},
 	ids::{CallId, CmdTag, JobId, ModeId, RunId, ToolRef, UnitId, Vpid},
 	ir::{self, Unit},
 	signal::{DefaultAction, SigTarget, Signal},
@@ -1198,7 +1198,7 @@ pub fn zsh_startup_values(
 	if !user.home.is_empty() {
 		out.push((&b"HOME"[..], Var::scalar(user.home.clone(), Attrs::EXPORT), false));
 	}
-	out.push((&b"LOGNAME"[..], Var::scalar(user.name.clone(), Attrs::EXPORT), false));
+	out.push((&b"LOGNAME"[..], Var::scalar(user.name, Attrs::EXPORT), false));
 	let (_, release, machine) = cx.host.uname().unwrap_or_default();
 	let macos = cfg!(target_os = "macos");
 	// The configure-time `MACHTYPE`, `VENDOR` and `OSTYPE` of the system's
@@ -1233,8 +1233,7 @@ pub fn zsh_startup_values(
 		.host
 		.terminal()
 		.and_then(|t| t.open_controlling().ok().flatten())
-		.map(|s| s.name)
-		.unwrap_or_default();
+		.map_or_default(|s| s.name);
 	// `HOST` is set before the environment is imported, the others after.
 	let cputype = if !machine.is_empty() {
 		machine
@@ -2035,7 +2034,7 @@ impl Shell {
 							match &mut sc.live {
 								Live::Task(task) => task.signal(sig),
 								Live::Ext(ext) => {
-									let _ = ext.signal(sig);
+									let _ = ext.signal(sig, SignalScope::Group);
 									let _ = ext.cont();
 								},
 								_ => {},
@@ -2079,7 +2078,10 @@ impl Shell {
 		}
 		if req & SIGNAL != 0 {
 			for (target, sig) in self.k.ctl.take_signals() {
-				self.deliver(cx, target, sig);
+				match sig {
+					control::SignalRequest::Named(sig) => self.deliver(cx, target, sig),
+					control::SignalRequest::Number(number) => self.deliver_number(cx, target, number),
+				}
 			}
 		}
 		if req & PAUSE != 0 && !self.k.paused {
@@ -2117,13 +2119,18 @@ impl Shell {
 				match &mut sc.live {
 					Live::Task(t) => t.signal(sig),
 					Live::Ext(e) => {
-						let _ = e.signal(sig);
+						let _ = e.signal(sig, SignalScope::Group);
 						let _ = e.cont();
 					},
 					_ => {},
 				}
 			}
 		}
+		self.finish_kill(cx, i, status);
+	}
+
+	fn finish_kill(&mut self, cx: &mut Cx<'_>, i: usize, status: i32) {
+		let p = &mut self.procs[i];
 		exec::unwind(&mut self.k.root, cx.store, p, 0);
 		while state::drop_scope(&mut self.k.root, cx.store, p) {}
 		p.out.clear();
@@ -2235,13 +2242,27 @@ impl Shell {
 		}
 	}
 
-	/// Deliver a virtual signal to its target or its configured trap.
-	fn deliver(&mut self, cx: &mut Cx<'_>, target: SigTarget, sig: Signal) {
-		let root = (self.procs[0].vpid, self.procs[0].mode);
-		self
-			.k
-			.emit(cx, root, None, EventData::Signal { sig, target });
-		let platform = self.k.engine.config().platform;
+	/// A pipeline's public pid names its last stage, not the virtual shell
+	/// that waits for the stages. Peel only transparent wrappers: a shell
+	/// running commands of its own must still receive its own signal.
+	fn process_recipient(&self, mut vpid: Vpid) -> Vpid {
+		while let Some(child) = self
+			.procs
+			.iter()
+			.find(|p| p.vpid == vpid)
+			.filter(|p| transparent(p, true) == Some(false))
+			.and_then(|p| p.frames.last()?.scratch.as_ref()?.children.last())
+		{
+			vpid = child.0;
+		}
+		vpid
+	}
+
+	fn signal_hits(&mut self, target: SigTarget) -> (SignalScope, Vec<usize>) {
+		let target = match target {
+			SigTarget::Vpid(vpid) => SigTarget::Vpid(self.process_recipient(vpid)),
+			other => other,
+		};
 		let job = match target {
 			SigTarget::Job(id) => self
 				.procs
@@ -2252,8 +2273,8 @@ impl Shell {
 			_ => None,
 		};
 		let job_root = job.map(|(v, _)| v);
-		// kill_pid uses the process group only for job-control jobs. The
-		// own-pipeline rule applies to every signal, including KILL and STOP.
+		// Only job-control jobs own a process group; otherwise walk the
+		// job's own pipeline, not its members' foreground children.
 		let group = job.is_some_and(|(_, control)| control);
 		let members = job_root.filter(|_| !group).map(|v| self.job_members(v));
 		let mut hits: Vec<usize> = (0..self.procs.len())
@@ -2269,6 +2290,58 @@ impl Shell {
 			})
 			.collect();
 		self.callout_trees(&mut hits);
+		let scope = if !group && matches!(target, SigTarget::Vpid(_) | SigTarget::Job(_)) {
+			SignalScope::Process
+		} else {
+			SignalScope::Group
+		};
+		(scope, hits)
+	}
+
+	/// Unnamed numbers cannot be caught: deliver to native replacements, or
+	/// end the shell image itself without touching trap keys or pending bits.
+	fn deliver_number(&mut self, cx: &mut Cx<'_>, target: SigTarget, number: u8) {
+		let (scope, hits) = self.signal_hits(target);
+		for &i in hits.iter().rev() {
+			let program = transparent(&self.procs[i], !matches!(target, SigTarget::Vpid(_)));
+			let alone = scope == SignalScope::Process && program != Some(true);
+			if !alone {
+				for frame in &mut self.procs[i].frames {
+					if let Some(Live::Ext(ext)) = frame.scratch.as_mut().map(|sc| &mut sc.live) {
+						let _ = ext.signal_number(number, scope);
+					}
+				}
+			}
+			if program.is_some() {
+				if self.procs[i].stopped {
+					continue_signalled(&mut self.procs[i], scope);
+					self.job_changed(cx, self.procs[i].vpid, None);
+				}
+				continue;
+			}
+			if alone {
+				let owner = self.procs[i].vpid;
+				for frame in &mut self.procs[i].frames {
+					if let Some(sc) = frame.scratch.as_mut()
+						&& matches!(sc.live, Live::Ext(_))
+						&& let Live::Ext(child) = std::mem::replace(&mut sc.live, Live::None)
+					{
+						self.surviving_externals.push((owner, child));
+					}
+				}
+			}
+			self.finish_kill(cx, i, 128 + i32::from(number));
+		}
+	}
+
+	/// Deliver a virtual signal to its target or its configured trap.
+	fn deliver(&mut self, cx: &mut Cx<'_>, target: SigTarget, sig: Signal) {
+		let root = (self.procs[0].vpid, self.procs[0].mode);
+		self
+			.k
+			.emit(cx, root, None, EventData::Signal { sig, target });
+		let platform = self.k.engine.config().platform;
+		let (scope, hits) = self.signal_hits(target);
 		// Vprocs this signal stopped or continued (job states follow).
 		let mut changed: Vec<(Vpid, Option<Signal>)> = Vec::new();
 		for &i in hits.iter().rev() {
@@ -2289,9 +2362,7 @@ impl Shell {
 			let terminating = trap.is_none() && sig.default_action() == DefaultAction::Terminate;
 			// A process signal reaches the shell image, not its foreground
 			// command. Only a program in that image's place owns the signal.
-			let alone = !group
-				&& matches!(target, SigTarget::Vpid(_) | SigTarget::Job(_))
-				&& program != Some(true);
+			let alone = scope == SignalScope::Process && program != Some(true);
 			if (target != SigTarget::Vpid(root.0) || program == Some(true)) && !terminating {
 				for frame in &mut self.procs[i].frames {
 					if let Some(sc) = frame.scratch.as_mut() {
@@ -2305,7 +2376,7 @@ impl Shell {
 								}
 							},
 							Live::Ext(ext) if !alone => {
-								let _ = ext.signal(sig);
+								let _ = ext.signal(sig, scope);
 							},
 							_ => {},
 						}
@@ -2327,13 +2398,13 @@ impl Shell {
 				if lone {
 					for frame in &mut p.frames {
 						if let Some(Live::Ext(ext)) = frame.scratch.as_mut().map(|sc| &mut sc.live) {
-							let _ = ext.signal(sig);
+							let _ = ext.signal(sig, scope);
 						}
 					}
 				}
 				if stopped {
 					// Bash's kill_pid continues a stopped job it signals.
-					set_stopped(p, false, true);
+					continue_signalled(p, scope);
 					changed.push((p.vpid, None));
 				}
 				continue;
@@ -2387,7 +2458,8 @@ impl Shell {
 					if p.stopped != stop {
 						changed.push((p.vpid, stop.then_some(sig)));
 					}
-					set_stopped(p, stop, !alone);
+					// The selected native recipients already received this signal.
+					set_stopped(p, stop, false);
 				},
 				DefaultAction::Ignore => {},
 			}
@@ -2668,6 +2740,16 @@ fn transparent(p: &Vproc, children: bool) -> Option<bool> {
 fn set_stopped(p: &mut Vproc, on: bool, externals: bool) {
 	p.stopped = on;
 	pause_handles(p, on, externals);
+}
+
+/// Resume the same native recipients as the signal, not their whole groups.
+fn continue_signalled(p: &mut Vproc, scope: SignalScope) {
+	for frame in &mut p.frames {
+		if let Some(Live::Ext(ext)) = frame.scratch.as_mut().map(|sc| &mut sc.live) {
+			let _ = ext.signal(Signal::Cont, scope);
+		}
+	}
+	set_stopped(p, false, false);
 }
 
 /// Pause or resume the shell's work, and externals only when targeted.

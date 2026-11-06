@@ -218,10 +218,16 @@ impl crate::bash::Host for NativeHost {
 	}
 
 	fn signal_process(&mut self, pid: i32, signal: Option<crate::bash::Signal>) -> io::Result<()> {
+		self.signal_process_number(
+			pid,
+			signal.map_or(0, |sig| sig.number(crate::bash::Platform::current())),
+		)
+	}
+
+	fn signal_process_number(&mut self, pid: i32, number: u8) -> io::Result<()> {
 		#[cfg(unix)]
 		{
-			let number =
-				signal.map_or(0, |sig| i32::from(sig.number(crate::bash::Platform::current())));
+			let number = i32::from(number);
 			// SAFETY: kill accepts integer process and signal numbers.
 			if unsafe { libc::kill(pid, number) } == 0 {
 				Ok(())
@@ -231,7 +237,7 @@ impl crate::bash::Host for NativeHost {
 		}
 		#[cfg(not(unix))]
 		{
-			let _ = (pid, signal);
+			let _ = (pid, number);
 			Err(io::ErrorKind::Unsupported.into())
 		}
 	}
@@ -465,8 +471,16 @@ impl ExtProc for SignalsOnExit {
 		self.child.pgid()
 	}
 
-	fn signal(&mut self, sig: crate::bash::Signal) -> io::Result<()> {
-		self.child.signal(sig)
+	fn signal(
+		&mut self,
+		sig: crate::bash::Signal,
+		scope: crate::bash::SignalScope,
+	) -> io::Result<()> {
+		self.child.signal(sig, scope)
+	}
+
+	fn signal_number(&mut self, number: u8, scope: crate::bash::SignalScope) -> io::Result<()> {
+		self.child.signal_number(number, scope)
 	}
 
 	fn stop(&mut self) -> io::Result<()> {

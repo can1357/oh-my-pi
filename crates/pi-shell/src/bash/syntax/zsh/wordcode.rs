@@ -1,4 +1,6 @@
-//! zsh's word code compiler: a port of the code-emitting half of zsh 5.9
+//! zsh's word code compiler.
+//!
+//! A port of the code-emitting half of zsh 5.9
 //! `Src/parse.c` (`parse_list`, `par_list`, `par_sublist`, `par_pline`,
 //! `par_cmd`, `par_for`, `par_case`, `par_if`, `par_while`, `par_repeat`,
 //! `par_subsh`, `par_funcdef`, `par_time`, `par_dinbrack`, `par_simple`,
@@ -42,7 +44,7 @@ pub struct Eprog {
 
 impl Eprog {
 	/// zsh's `len - npats * sizeof(Patprog)`: bytes of code and strings.
-	pub fn byte_len(&self) -> usize {
+	pub const fn byte_len(&self) -> usize {
 		self.prog.len() * 4 + self.strs.len()
 	}
 }
@@ -377,7 +379,7 @@ impl<'c, 's> Wc<'c, 's> {
 	// ---- buffer ---------------------------------------------------------
 
 	/// `ecsoffs`.
-	fn ecsoffs(&self) -> u32 {
+	const fn ecsoffs(&self) -> u32 {
 		self.strs.len() as u32
 	}
 
@@ -393,7 +395,7 @@ impl<'c, 's> Wc<'c, 's> {
 	/// zsh `ecispace`: `n` free slots at `p`.
 	fn ecispace(&mut self, p: usize, n: usize) {
 		let p = p.min(self.ec.len());
-		self.ec.splice(p..p, core::iter::repeat(0).take(n));
+		self.ec.splice(p..p, std::iter::repeat_n(0, n));
 		self.ecadjusthere(p, n as isize);
 	}
 
@@ -476,7 +478,7 @@ impl<'c, 's> Wc<'c, 's> {
 
 	/// The current token string (`tokstr`).
 	fn tokstr(&self) -> Vec<u8> {
-		self.cx.tokstr().map(<[u8]>::to_vec).unwrap_or_default()
+		self.cx.tokstr().map_or_default(<[u8]>::to_vec)
 	}
 
 	/// zsh `bld_eprog`.
@@ -1268,7 +1270,7 @@ impl<'c, 's> Wc<'c, 's> {
 	/// The start of a function body's own string table and pattern count
 	/// (zsh's `ecnfunc++; ecssub = so = ecsoffs; onp = ecnpats; ecnpats =
 	/// 0;`): `(so, oecssub, onp)`.
-	fn enter_function(&mut self) -> (u32, u32, u32) {
+	const fn enter_function(&mut self) -> (u32, u32, u32) {
 		let oecssub = self.ecssub;
 		self.ecnfunc += 1;
 		let so = self.ecsoffs();
@@ -1280,7 +1282,7 @@ impl<'c, 's> Wc<'c, 's> {
 
 	/// zsh's restore of the enclosing string table on an error in a
 	/// function body.
-	fn abort_function(&mut self, oldlineno: u32, oecssub: u32, onp: u32) {
+	const fn abort_function(&mut self, oldlineno: u32, oecssub: u32, onp: u32) {
 		self.cx.line = self.cx.line.wrapping_add(oldlineno);
 		self.ecnpats = onp;
 		self.ecssub = oecssub;
@@ -1448,13 +1450,12 @@ impl<'c, 's> Wc<'c, 's> {
 		}
 		// zsh `equalsplit` over the (possibly cut) name.
 		let head = &s[..name_end];
-		match head.iter().position(|&c| c == b'=') {
-			Some(e) => Some((head[..e].to_vec(), head[e + 1..].to_vec(), plus)),
-			None => {
-				self.undefined = Some("an assignment word without `='");
-				self.cx.lx.tok = T::Lexerr;
-				None
-			},
+		if let Some(e) = head.iter().position(|&c| c == b'=') {
+			Some((head[..e].to_vec(), head[e + 1..].to_vec(), plus))
+		} else {
+			self.undefined = Some("an assignment word without `='");
+			self.cx.lx.tok = T::Lexerr;
+			None
 		}
 	}
 
@@ -1679,10 +1680,11 @@ impl<'c, 's> Wc<'c, 's> {
 					}
 					let saved = self.enter_function();
 					let (_, oecssub, onp) = saved;
+					// The body's own complexity; the outer `c` stays the command's.
+					let mut body_c = false;
 					if self.cx.lx.tok == T::Inbrace {
-						let mut c = false;
 						self.lex();
-						self.par_list(&mut c);
+						self.par_list(&mut body_c);
 						if self.cx.lx.tok != T::Outbrace {
 							self.abort_function(oldlineno, oecssub, onp);
 							self.yyerror_at(oecused);
@@ -1694,11 +1696,10 @@ impl<'c, 's> Wc<'c, 's> {
 						}
 						self.lex();
 					} else {
-						let mut c = false;
 						let ll = self.ecadd(0);
 						let sl = self.ecadd(0);
 						self.ecadd(wcb_pipe(WC_PIPE_END, 0));
-						if !self.par_cmd(&mut c, argc == 0) {
+						if !self.par_cmd(&mut body_c, argc == 0) {
 							self.yyerror_at(oecused);
 							return 0;
 						}
@@ -1706,8 +1707,8 @@ impl<'c, 's> Wc<'c, 's> {
 							self.cx.ps.incmdpos = false;
 						}
 						let skip = self.ec.len() - 1 - sl;
-						self.set_sublist_code(sl, WC_SUBLIST_END, 0, skip, c);
-						self.set_list_code(ll, Z_SYNC | Z_END, c);
+						self.set_sublist_code(sl, WC_SUBLIST_END, 0, skip, body_c);
+						self.set_list_code(ll, Z_SYNC | Z_END, body_c);
 					}
 					self.leave_function(p, argc as usize, saved, 0);
 					if argc == 0 {
@@ -1846,14 +1847,12 @@ impl<'c, 's> Wc<'c, 's> {
 					return 0;
 				}
 			},
-			REDIR_READWRITE => {
-				if matches!(at(&name, 0), INANG | OUTANGPROC) && at(&name, 1) == INPAR {
-					ty = if at(&name, 0) == INANG {
-						REDIR_INPIPE
-					} else {
-						REDIR_OUTPIPE
-					};
-				}
+			REDIR_READWRITE if matches!(at(&name, 0), INANG | OUTANGPROC) && at(&name, 1) == INPAR => {
+				ty = if at(&name, 0) == INANG {
+					REDIR_INPIPE
+				} else {
+					REDIR_OUTPIPE
+				};
 			},
 			_ => {},
 		}
@@ -2072,12 +2071,11 @@ impl<'c, 's> Wc<'c, 's> {
 		}
 		if at(a, 2) == 0 && b"abcdefgknoprstuvwxzhLONGS".contains(&a[1]) {
 			self.ecadd(wcb_cond(u32::from(a[1]), 0));
-			self.ecstr(b);
 		} else {
 			self.ecadd(wcb_cond(COND_MOD, 1));
 			self.ecstr(a);
-			self.ecstr(b);
 		}
+		self.ecstr(b);
 		true
 	}
 
@@ -2104,14 +2102,12 @@ impl<'c, 's> Wc<'c, 's> {
 		} else if is_dash(at(b, 0)) {
 			if let Some(t0) = get_cond_num(tail(b, 1)) {
 				self.ecadd(wcb_cond(t0 + COND_NT, 0));
-				self.ecstr(a);
-				self.ecstr(c);
 			} else {
 				self.ecadd(wcb_cond(COND_MODI, 0));
 				self.ecstr(b);
-				self.ecstr(a);
-				self.ecstr(c);
 			}
+			self.ecstr(a);
+			self.ecstr(c);
 		} else if is_dash(at(a, 0)) && at(a, 1) != 0 {
 			self.ecadd(wcb_cond(COND_MOD, 2));
 			self.ecstr(a);

@@ -806,10 +806,12 @@ mod tests {
 
 		let mut env: Vec<(BString, BString)> = std::env::vars_os()
 			.filter(|(name, _)| {
-				!["PI_SMART_GIT", "PI_GIT_GUARD"].contains(&name.to_str().unwrap_or(""))
+				!["PI_SMART_GIT", "PI_GIT_GUARD", "PI_GIT_GUARD_OVNFS"]
+					.contains(&name.to_str().unwrap_or(""))
 			})
 			.map(|(k, v)| (BString::from(k.as_bytes()), BString::from(v.as_bytes())))
 			.collect();
+		env.push(("PI_GIT_GUARD_OVNFS".into(), "".into()));
 		for name in ["PI_SMART_GIT", "PI_GIT_GUARD"] {
 			let on = if layers.contains(&name) { "1" } else { "0" };
 			env.push((name.into(), on.into()));

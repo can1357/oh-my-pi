@@ -374,20 +374,15 @@ pub fn read_bytes(
 		let Some(ed) = super::editor_mut(ctx.vp) else {
 			return Ok(ReadBytes::Got(Vec::new(), true));
 		};
-		let base = match exec::resume_base(ed, owner) {
-			Some(b) => b,
-			None => {
-				let acc = ed.read_acc.get_or_insert_with(Vec::new);
-				if enough(acc) {
-					let acc = ed.read_acc.take().unwrap_or_default();
-					return Ok(ReadBytes::Got(acc, false));
-				}
-				exec::push_root(
-					ed,
-					Task::Key(exec::KeyTask::new(exec::KeyMode::Byte(timeout_cs))),
-					owner,
-				)
-			},
+		let base = if let Some(b) = exec::resume_base(ed, owner) {
+			b
+		} else {
+			let acc = ed.read_acc.get_or_insert_with(Vec::new);
+			if enough(acc) {
+				let acc = ed.read_acc.take().unwrap_or_default();
+				return Ok(ReadBytes::Got(acc, false));
+			}
+			exec::push_root(ed, Task::Key(exec::KeyTask::new(exec::KeyMode::Byte(timeout_cs))), owner)
 		};
 		match exec::drive(ctx.k, ctx.cx, ctx.vp, base) {
 			Drive::Done(Got::Byte(Some(b))) => {
@@ -422,15 +417,14 @@ fn drive_task(ctx: &mut Ctx<'_, '_>, task: impl FnOnce(&super::Zle) -> Task) -> 
 	let Some(z) = ctx.vp.zle.as_deref_mut() else {
 		return done(1);
 	};
-	let base = match z.ed.as_deref().and_then(|ed| exec::resume_base(ed, owner)) {
-		Some(b) => b,
-		None => {
-			let t = task(z);
-			let Some(ed) = z.ed.as_deref_mut() else {
-				return done(1);
-			};
-			exec::push_root(ed, t, owner)
-		},
+	let base = if let Some(b) = z.ed.as_deref().and_then(|ed| exec::resume_base(ed, owner)) {
+		b
+	} else {
+		let t = task(z);
+		let Some(ed) = z.ed.as_deref_mut() else {
+			return done(1);
+		};
+		exec::push_root(ed, t, owner)
 	};
 	match exec::drive(ctx.k, ctx.cx, ctx.vp, base) {
 		Drive::Done(Got::Status(s)) => done(s),
@@ -529,18 +523,17 @@ fn flags(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 fn fd(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 	let mut fd = 0;
 	if let Some(a) = args.first() {
-		match a
+		if let Some(n) = a
 			.to_str()
 			.ok()
 			.and_then(|s| s.parse::<i32>().ok())
 			.filter(|&n| n >= 0)
 		{
-			Some(n) => fd = n,
-			None => {
-				let n = nice(ctx, a)?;
-				ctx.usage(format!("Bad file descriptor number for -F: {n}"));
-				return done(1);
-			},
+			fd = n;
+		} else {
+			let n = nice(ctx, a)?;
+			ctx.usage(format!("Bad file descriptor number for -F: {n}"));
+			return done(1);
 		}
 	}
 	if ops.isset(b'L') || args.is_empty() {
@@ -580,15 +573,12 @@ fn fd(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 		}
 		return done(0);
 	}
-	match zle.watches.iter().position(|w| w.fd == fd) {
-		Some(i) => {
-			zle.watches.remove(i);
-			done(0)
-		},
-		None => {
-			ctx.usage(format!("No handler installed for fd {fd}"));
-			done(1)
-		},
+	if let Some(i) = zle.watches.iter().position(|w| w.fd == fd) {
+		zle.watches.remove(i);
+		done(0)
+	} else {
+		ctx.usage(format!("No handler installed for fd {fd}"));
+		done(1)
 	}
 }
 
@@ -728,20 +718,16 @@ fn call(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	};
 	let saved_zmod = mult.map(|m| {
 		let saved = ed.zmod;
-		match m {
-			Some(n) => {
-				ed.zmod.mult = n;
-				ed.zmod.flags |= super::modflags::MULT;
-			},
-			None => {
-				ed.zmod.mult = 1;
-				ed.zmod.flags &= !super::modflags::MULT;
-			},
+		if let Some(n) = m {
+			ed.zmod.mult = n;
+			ed.zmod.flags |= super::modflags::MULT;
+		} else {
+			ed.zmod.mult = 1;
+			ed.zmod.flags &= !super::modflags::MULT;
 		}
 		saved
 	});
-	let mut restore_keymap = None;
-	if let Some(km) = keymap {
+	let restore_keymap = if let Some(km) = keymap {
 		let old = ed.keymap.clone();
 		if exec::selectkeymap(&z.keymaps, ed, &km, false).is_err() {
 			if let Some(saved) = saved_zmod {
@@ -749,8 +735,10 @@ fn call(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			}
 			return done(1);
 		}
-		restore_keymap = Some(old);
-	}
+		Some(old)
+	} else {
+		None
+	};
 	let mut t = ExecTask::from_zle(z, wname, rest, setbindk, setlbindk);
 	t.restore_zmod = saved_zmod;
 	t.restore_keymap = restore_keymap;
