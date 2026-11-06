@@ -617,7 +617,8 @@
 		{
 			"id": "construct-simple-fatal_unset-top_posix-clean",
 			"axes": [
-				"context:top_posix"
+				"context:top_posix",
+				"raiser:fatal_unset"
 			],
 			"script": "readonly __r=1\ndeclare -i __I\ndeclare -a __A\n__body() { : ${__miss?BOOM}; }\nset -o posix; __body; echo \"E:$?\"",
 			"out": "",
@@ -635,7 +636,8 @@
 		{
 			"id": "construct-simple-fatal_unset-top_posix_errexit-clean",
 			"axes": [
-				"context:top_posix_errexit"
+				"context:top_posix_errexit",
+				"raiser:fatal_unset"
 			],
 			"script": "readonly __r=1\ndeclare -i __I\ndeclare -a __A\n__body() { : ${__miss?BOOM}; }\nset -o posix; set -e; __body; echo \"E:$?\"",
 			"out": "",
@@ -653,7 +655,8 @@
 		{
 			"id": "construct-simple-fatal_unset-exit_trap_posix-clean",
 			"axes": [
-				"context:exit_trap_posix"
+				"context:exit_trap_posix",
+				"raiser:fatal_unset"
 			],
 			"script": "readonly __r=1\ndeclare -i __I\ndeclare -a __A\n__body() { : ${__miss?BOOM}; }\nset -o posix; trap '__body' EXIT; exit 7",
 			"out": "",
@@ -714,6 +717,33 @@
 			"status": 0
 		},
 		{
+			"id": "construct-simple-fatal_nounset-top_posix-clean",
+			"axes": [
+				"raiser:fatal_nounset"
+			],
+			"script": "readonly __r=1\ndeclare -i __I\ndeclare -a __A\n__body() { set -u; : $__miss; }\nset -o posix; __body; echo \"E:$?\"",
+			"out": "",
+			"status": 127
+		},
+		{
+			"id": "construct-simple-fatal_nounset-top_posix_errexit-clean",
+			"axes": [
+				"raiser:fatal_nounset"
+			],
+			"script": "readonly __r=1\ndeclare -i __I\ndeclare -a __A\n__body() { set -u; : $__miss; }\nset -o posix; set -e; __body; echo \"E:$?\"",
+			"out": "",
+			"status": 1
+		},
+		{
+			"id": "construct-simple-fatal_nounset-exit_trap_posix-clean",
+			"axes": [
+				"raiser:fatal_nounset"
+			],
+			"script": "readonly __r=1\ndeclare -i __I\ndeclare -a __A\n__body() { set -u; : $__miss; }\nset -o posix; trap '__body' EXIT; exit 7",
+			"out": "",
+			"status": 7
+		},
+		{
 			"id": "construct-simple-discard_readonly-top-clean",
 			"axes": [
 				"raiser:discard_readonly"
@@ -757,6 +787,33 @@
 			"script": "readonly __r=1\ndeclare -i __I\ndeclare -a __A\n__body() { __r=2; }\n( __body ); echo \"E:$?\"",
 			"out": "E:1\n",
 			"status": 0
+		},
+		{
+			"id": "construct-simple-discard_readonly-top_posix-clean",
+			"axes": [
+				"raiser:discard_readonly"
+			],
+			"script": "readonly __r=1\ndeclare -i __I\ndeclare -a __A\n__body() { __r=2; }\nset -o posix; __body; echo \"E:$?\"",
+			"out": "",
+			"status": 127
+		},
+		{
+			"id": "construct-simple-discard_readonly-top_posix_errexit-clean",
+			"axes": [
+				"raiser:discard_readonly"
+			],
+			"script": "readonly __r=1\ndeclare -i __I\ndeclare -a __A\n__body() { __r=2; }\nset -o posix; set -e; __body; echo \"E:$?\"",
+			"out": "",
+			"status": 1
+		},
+		{
+			"id": "construct-simple-discard_readonly-exit_trap_posix-clean",
+			"axes": [
+				"raiser:discard_readonly"
+			],
+			"script": "readonly __r=1\ndeclare -i __I\ndeclare -a __A\n__body() { __r=2; }\nset -o posix; trap '__body' EXIT; exit 7",
+			"out": "",
+			"status": 7
 		},
 		{
 			"id": "construct-simple-assign_int-top-clean",
@@ -804,6 +861,33 @@
 			"status": 0
 		},
 		{
+			"id": "construct-simple-assign_int-top_posix-clean",
+			"axes": [
+				"raiser:assign_int"
+			],
+			"script": "readonly __r=1\ndeclare -i __I\ndeclare -a __A\n__body() { __I=bad!; }\nset -o posix; __body; echo \"E:$?\"",
+			"out": "",
+			"status": 1
+		},
+		{
+			"id": "construct-simple-assign_int-top_posix_errexit-clean",
+			"axes": [
+				"raiser:assign_int"
+			],
+			"script": "readonly __r=1\ndeclare -i __I\ndeclare -a __A\n__body() { __I=bad!; }\nset -o posix; set -e; __body; echo \"E:$?\"",
+			"out": "",
+			"status": 1
+		},
+		{
+			"id": "construct-simple-assign_int-exit_trap_posix-clean",
+			"axes": [
+				"raiser:assign_int"
+			],
+			"script": "readonly __r=1\ndeclare -i __I\ndeclare -a __A\n__body() { __I=bad!; }\nset -o posix; trap '__body' EXIT; exit 7",
+			"out": "",
+			"status": 7
+		},
+		{
 			"id": "construct-simple-assign_subscript-top-clean",
 			"axes": [
 				"raiser:assign_subscript"
@@ -849,6 +933,33 @@
 			"status": 0
 		},
 		{
+			"id": "construct-simple-assign_subscript-top_posix-clean",
+			"axes": [
+				"raiser:assign_subscript"
+			],
+			"script": "readonly __r=1\ndeclare -i __I\ndeclare -a __A\n__body() { __A[bad!]=3; }\nset -o posix; __body; echo \"E:$?\"",
+			"out": "",
+			"status": 1
+		},
+		{
+			"id": "construct-simple-assign_subscript-top_posix_errexit-clean",
+			"axes": [
+				"raiser:assign_subscript"
+			],
+			"script": "readonly __r=1\ndeclare -i __I\ndeclare -a __A\n__body() { __A[bad!]=3; }\nset -o posix; set -e; __body; echo \"E:$?\"",
+			"out": "",
+			"status": 1
+		},
+		{
+			"id": "construct-simple-assign_subscript-exit_trap_posix-clean",
+			"axes": [
+				"raiser:assign_subscript"
+			],
+			"script": "readonly __r=1\ndeclare -i __I\ndeclare -a __A\n__body() { __A[bad!]=3; }\nset -o posix; trap '__body' EXIT; exit 7",
+			"out": "",
+			"status": 7
+		},
+		{
 			"id": "construct-simple-arith_word-top-clean",
 			"axes": [
 				"raiser:arith_word"
@@ -892,6 +1003,33 @@
 			"script": "readonly __r=1\ndeclare -i __I\ndeclare -a __A\n__body() { : $((1/0)); }\n( __body ); echo \"E:$?\"",
 			"out": "E:1\n",
 			"status": 0
+		},
+		{
+			"id": "construct-simple-arith_word-top_posix-clean",
+			"axes": [
+				"raiser:arith_word"
+			],
+			"script": "readonly __r=1\ndeclare -i __I\ndeclare -a __A\n__body() { : $((1/0)); }\nset -o posix; __body; echo \"E:$?\"",
+			"out": "",
+			"status": 127
+		},
+		{
+			"id": "construct-simple-arith_word-top_posix_errexit-clean",
+			"axes": [
+				"raiser:arith_word"
+			],
+			"script": "readonly __r=1\ndeclare -i __I\ndeclare -a __A\n__body() { : $((1/0)); }\nset -o posix; set -e; __body; echo \"E:$?\"",
+			"out": "",
+			"status": 127
+		},
+		{
+			"id": "construct-simple-arith_word-exit_trap_posix-clean",
+			"axes": [
+				"raiser:arith_word"
+			],
+			"script": "readonly __r=1\ndeclare -i __I\ndeclare -a __A\n__body() { : $((1/0)); }\nset -o posix; trap '__body' EXIT; exit 7",
+			"out": "",
+			"status": 7
 		},
 		{
 			"id": "declare-Declare0-declaration-top-clean",
