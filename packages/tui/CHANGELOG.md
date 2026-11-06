@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Terminals in the Herdr app (herdr-core, `HC_TERMINAL_ID`/`HC_TERMINAL_SOCKET`) are recognized as `herdr-core`, separate from the Herdr TUI, while rendering stays on the direct-terminal path ([#18271](https://github.com/can1357/oh-my-pi/pull/18271) by [@matteoantoci](https://github.com/matteoantoci))
+
 ## [18.17.0] - 2026-11-06
 
 ### Breaking Changes
