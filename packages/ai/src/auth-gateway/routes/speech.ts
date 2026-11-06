@@ -12,13 +12,13 @@ import {
 	recordGatewayUsage,
 	resolveGatewayApiKey,
 } from "../dispatch";
-import { gatewayResponseHeaders, resolveClientIdentity } from "../http";
+import { gatewayResponseHeaders, resolveClientIdentity, codedErrorResponse } from "../http";
 
 export async function handleSpeech(bootOpts: AuthGatewayRouteOptions, req: Request, peer: string): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
 	const controller = mirrorRequestAbort(req);
-	const aborted = (): Response => speechWire.formatError(499, "request_aborted", "client closed request");
+	const aborted = (): Response => codedErrorResponse(499, "request_aborted", "client closed request");
 	if (controller.signal.aborted) return aborted();
 
 	let body: unknown;
@@ -26,7 +26,7 @@ export async function handleSpeech(bootOpts: AuthGatewayRouteOptions, req: Reque
 		body = await req.json();
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();
-		return speechWire.formatError(400, "invalid_request_error", `Invalid JSON body: ${String(error)}`);
+		return codedErrorResponse(400, "invalid_request_error", `Invalid JSON body: ${String(error)}`);
 	}
 	if (controller.signal.aborted) return aborted();
 
@@ -35,11 +35,11 @@ export async function handleSpeech(bootOpts: AuthGatewayRouteOptions, req: Reque
 		parsed = speechWire.parseRequest(body, req.headers);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
-		return speechWire.formatError(400, "invalid_request_error", message);
+		return codedErrorResponse(400, "invalid_request_error", message);
 	}
 
 	const model = bootOpts.resolveModel(parsed.modelId);
-	if (!model) return speechWire.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
+	if (!model) return codedErrorResponse(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	if (!isSpeechApi(model.api)) {
 		const route =
 			model.kind === "image"
@@ -52,14 +52,14 @@ export async function handleSpeech(bootOpts: AuthGatewayRouteOptions, req: Reque
 		const message = route
 			? `Model ${parsed.modelId} does not synthesize speech; use POST ${route}`
 			: `Model ${parsed.modelId} does not synthesize speech`;
-		return speechWire.formatError(400, "invalid_request_error", message);
+		return codedErrorResponse(400, "invalid_request_error", message);
 	}
 
 	const client = resolveClientIdentity(req.headers);
 	const sessionId = deterministicUuid(`speech\u0000${model.provider}/${model.id}`);
 	const apiKey = await resolveGatewayApiKey(bootOpts, model, sessionId, controller.signal, peer);
 	if (controller.signal.aborted) return aborted();
-	if ("status" in apiKey) return speechWire.formatError(apiKey.status, apiKey.type, apiKey.message);
+	if ("status" in apiKey) return codedErrorResponse(apiKey.status, apiKey.type, apiKey.message);
 
 	logger.info("auth-gateway request", {
 		requestId,
@@ -92,10 +92,10 @@ export async function handleSpeech(bootOpts: AuthGatewayRouteOptions, req: Reque
 		// Adapter validation is a client error: the wire schema admits values the
 		// adapter cannot serve, and the classifier would bill them as a 502.
 		if (error instanceof ValidationError) {
-			return speechWire.formatError(400, "invalid_request_error", error.message);
+			return codedErrorResponse(400, "invalid_request_error", error.message);
 		}
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway speech failed", { format: "speech", error: classified.message, peer });
-		return speechWire.formatError(classified.status, classified.type, classified.message);
+		return codedErrorResponse(classified.status, classified.type, classified.message);
 	}
 }

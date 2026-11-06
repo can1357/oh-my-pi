@@ -1,8 +1,8 @@
 <system-notice>
 {{#if multiple}}{{jobs.length}} background jobs have completed. Resume your work using the results below.
 
-{{else}}Background job {{jobs.[0].jobId}} has completed. Resume your work using the result below.
-{{/if}}{{#each jobs}}{{#if @root.multiple}}── Job {{this.jobId}}{{#if this.label}} ({{this.label}}){{/if}} ──
+{{else}}Background job {{jobs.[0].jobId}}{{#if jobs.[0].namedByCommand}} ({{jobs.[0].headerLabel}}){{/if}} has completed. Resume your work using the result below.
+{{/if}}{{#each jobs}}{{#if @root.multiple}}── Job {{this.jobId}}{{#if this.headerLabel}} ({{this.headerLabel}}){{/if}} ──
 {{/if}}{{this.result}}{{#if this.showAgentUrl}}
 
 Agent: agent://{{this.agentUrlId}}, history://{{this.agentUrlId}}{{/if}}{{#if this.showHistoryUrl}}

@@ -159,6 +159,41 @@ export const cfgTaskIsolationApply = register({
 	},
 });
 
+export const cfgOvnfsEnabled = register({
+	id: "ovnfs.enabled",
+	protocolDefault: ["rpc", "acp"],
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tasks",
+		group: "Isolation",
+		label: "ovnfs (experimental)",
+		description:
+			"Use ovnfs checkouts (copy-on-write views of a folder, ready in about a second at any size) whenever a separate copy is needed: the system prompt tells agents to open checkouts instead of git worktrees or copies, and isolated subagents (when allowed) run in checkouts instead of native clones",
+	},
+});
+
+export const cfgOvnfsPath = register({
+	id: "ovnfs.path",
+	type: "string",
+	default: undefined,
+	ui: {
+		tab: "tasks",
+		group: "Isolation",
+		label: "ovnfs Binary",
+		description: "ovnfs executable for `ovnfs.enabled`; unset uses `ovnfs` on PATH",
+	},
+});
+
+/**
+ * The ovnfs command agents and isolated subagents use, or `undefined` when
+ * `ovnfs.enabled` is off. Read by the system prompt (checkout guidance) and the
+ * task runner (ovnfs-backed isolation).
+ */
+export function ovnfsCommand(settings: Settings): string | undefined {
+	return cfgOvnfsEnabled.get(settings) ? cfgOvnfsPath.get(settings)?.trim() || "ovnfs" : undefined;
+}
+
 export const cfgTaskIsolationMerge = register({
 	id: "task.isolation.merge",
 	protocolDefault: ["rpc", "acp"],
@@ -391,6 +426,39 @@ export const cfgTaskMaxConcurrency = register({
 			{ value: "16", label: "16 tasks" },
 			{ value: "32", label: "32 tasks" },
 			{ value: "64", label: "64 tasks" },
+		],
+	},
+});
+
+function validateWorkerThreads(value: unknown): void {
+	if (value === undefined || (typeof value === "number" && Number.isSafeInteger(value) && value >= 0)) return;
+	throw new Error(
+		`Invalid task.workerThreads: expected a non-negative integer (0 runs subagents on the main thread), got ${Bun.inspect(value)}.`,
+	);
+}
+
+/**
+ * Upper bound on worker threads hosting subagents; how many are used follows the number of
+ * concurrent subagents (`allowedSubagentWorkers`). 0 keeps every subagent on the main thread.
+ */
+export const cfgTaskWorkerThreads = register({
+	id: "task.workerThreads",
+	protocolDefault: ["rpc", "acp"],
+	type: "number",
+	default: 4,
+	validate: validateWorkerThreads,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Subagent Worker Threads",
+		description:
+			"Maximum worker threads for subagents. Up to 8 concurrent subagents run on the main thread; at 9 one worker joins, and one more each time the count doubles (18, 36, 72). Workers stop a minute after no subagent is live in them; 0 keeps every subagent on the main thread",
+		options: [
+			{ value: "0", label: "Main thread only" },
+			{ value: "1", label: "Up to 1 worker" },
+			{ value: "2", label: "Up to 2 workers" },
+			{ value: "4", label: "Up to 4 workers", description: "Default" },
+			{ value: "8", label: "Up to 8 workers" },
 		],
 	},
 });

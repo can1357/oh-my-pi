@@ -10,6 +10,7 @@ const config = {
 	bankId: null,
 	bankIdPrefix: "",
 	scoping: "global",
+	globalScope: false,
 	bankMission: "",
 	retainMission: null,
 	autoRecall: true,

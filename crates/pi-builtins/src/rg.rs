@@ -22,7 +22,6 @@ use std::{
 };
 
 use clap::{ArgAction, Parser, ValueEnum};
-use futures::{StreamExt, stream};
 use grep_cli::DecompressionMatcher;
 use grep_matcher::{Captures, LineTerminator, Matcher};
 use grep_pcre2::{RegexMatcher as PcreMatcher, RegexMatcherBuilder as PcreMatcherBuilder};
@@ -1778,7 +1777,7 @@ fn dir_search<M: Clone>(
 	})
 }
 
-/// Searches the files below `root` on parallel workers, writing each file's
+/// Searches the files below `root` ([`exec::adaptive`]: inline, then on parallel workers), writing each file's
 /// output in path order.
 #[allow(
 	clippy::too_many_arguments,
@@ -1803,16 +1802,14 @@ async fn search_dir<M: Matcher<Captures: Send> + Clone + Send + Sync + 'static, 
 	else {
 		return Ok(SearchOutcome { any_match: false, had_error });
 	};
-	let workers = if cli.line_buffered && !cli.no_line_buffered {
-		1
-	} else {
-		parallelism
-	};
+	let line_buffered = cli.line_buffered && !cli.no_line_buffered;
+	let workers = if line_buffered { 1 } else { parallelism };
 	let halt = HaltOnDrop::new();
 	let shared = dir_search(host, cli, matcher, searcher, operand, root, show_names, opts, &halt, false);
 	let mut any_match = false;
 	let mut failed = None;
-	let mut results = exec::ordered(stream::iter(paths), workers, workers, || shared.worker(), {
+	let mut pace = host.output_pace();
+	let mut results = exec::adaptive(paths.into_iter(), workers, exec::INLINE_BUDGET, || shared.worker(), {
 		let shared = Arc::clone(&shared);
 		move |mut worker: Worker, path: PathBuf| {
 			let shared = Arc::clone(&shared);
@@ -1829,7 +1826,15 @@ async fn search_dir<M: Matcher<Captures: Send> + Clone + Send + Sync + 'static, 
 			break;
 		}
 		let _ = host.stderr.write_all(&found.err);
-		if let Err(error) = deliver(host, out).await {
+		let delivered = if line_buffered || !results.next_ready() {
+			deliver(host, out).await
+		} else {
+			match out.flush() {
+				Ok(()) => host.pace_output(&mut pace).await,
+				Err(error) => Err(error),
+			}
+		};
+		if let Err(error) = delivered {
 			failed = Some(error);
 			break;
 		}
@@ -2612,13 +2617,4 @@ mod tests {
 		let err = capture.err();
 		assert!(err.contains("rg: big: pattern file larger than 256 MiB"), "{err}");
 	}
-}
-
-use brush_core::{ShellExtensions, builtins::Registration};
-
-use crate::host::async_util;
-
-/// Creates the ripgrep-compatible `rg` builtin registration.
-pub(crate) fn rg_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	async_util::<Rg, SE>()
 }

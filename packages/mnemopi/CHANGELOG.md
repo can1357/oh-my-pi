@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Development installs reuse fastembed’s ONNX Runtime instead of installing a duplicate native runtime.
+
 ## [18.14.2] - 2026-10-31
 
 ### Fixed

@@ -8,6 +8,7 @@ interface TestOptions {
 	reset?: boolean;
 	signal?: AbortSignal;
 	deadlineMs?: number;
+	claimKernelRestartNotice?: () => boolean;
 }
 
 interface TestResult {
@@ -486,4 +487,89 @@ describe("kernel session recovery", () => {
 			await registry.disposeAll();
 		}
 	});
+});
+
+describe("kernel restart notice claim", () => {
+	/** A cell in `failBeforeStart` throws before claiming (as a failing prelude does); one in `failAfterStart` claims, then throws. */
+	function claimingRegistry(options?: {
+		unconfirmedShutdown?: boolean;
+		failBeforeStart?: string[];
+		failAfterStart?: string[];
+	}) {
+		const { kernels, registry } = createFakeRegistry(
+			async (_kernel, code, runOptions) => {
+				if (options?.failBeforeStart?.includes(code)) throw new Error(`${code}: prelude failed`);
+				const restarted = runOptions.claimKernelRestartNotice?.() ?? false;
+				if (options?.failAfterStart?.includes(code)) throw new Error(`${code}: failed after start`);
+				return { cancelled: false, value: restarted ? "notice" : "none" };
+			},
+			async kernel => {
+				if (!options?.unconfirmedShutdown) return;
+				kernel.shutdown = async () => {
+					kernel.alive = false;
+					kernel.shutdowns += 1;
+					return { confirmed: false };
+				};
+			},
+		);
+		const cell = async (code: string, extra?: Partial<TestOptions>): Promise<string> =>
+			(await registry.executeOnSession(code, "/tmp", { sessionId: "claimed", ...extra })).value;
+		return { kernels, registry, cell };
+	}
+
+	it("gives the notice to the first cell on a replacement for a kernel that died between cells, once", async () => {
+		const { kernels, registry, cell } = claimingRegistry();
+		try {
+			expect(await cell("first")).toBe("none");
+			expect(await cell("second")).toBe("none");
+			kernels[0]!.alive = false;
+			expect(await cell("after death")).toBe("notice");
+			expect(await cell("after notice")).toBe("none");
+			expect(kernels).toHaveLength(2);
+		} finally {
+			await registry.disposeAll();
+		}
+	});
+
+	it("leaves the notice for the next cell when a cell fails before it starts", async () => {
+		const { kernels, registry, cell } = claimingRegistry({ failBeforeStart: ["prelude"] });
+		try {
+			expect(await cell("first")).toBe("none");
+			kernels[0]!.alive = false;
+			await expect(cell("prelude")).rejects.toThrow("prelude failed");
+			expect(await cell("next")).toBe("notice");
+			expect(await cell("after notice")).toBe("none");
+		} finally {
+			await registry.disposeAll();
+		}
+	});
+
+	it("does not hand the notice back when the cell that claimed it throws after it starts", async () => {
+		const { kernels, registry, cell } = claimingRegistry({ failAfterStart: ["throws"] });
+		try {
+			expect(await cell("first")).toBe("none");
+			kernels[0]!.alive = false;
+			await expect(cell("throws")).rejects.toThrow("failed after start");
+			expect(await cell("next")).toBe("none");
+		} finally {
+			await registry.disposeAll();
+		}
+	});
+
+	for (const disposal of ["disposeAll", "disposeByOwner"] as const) {
+		it(`does not give the notice after ${disposal} restores a record whose shutdown was unconfirmed`, async () => {
+			const { kernels, registry, cell } = claimingRegistry({ unconfirmedShutdown: true });
+			try {
+				expect(await cell("first", { kernelOwnerId: "owner" })).toBe("none");
+				if (disposal === "disposeAll") await registry.disposeAll();
+				else await registry.disposeByOwner("owner");
+				expect(kernels[0]?.alive).toBe(false);
+				expect(await cell("after disposal", { kernelOwnerId: "owner" })).toBe("none");
+				expect(kernels).toHaveLength(2);
+			} finally {
+				for (const kernel of kernels) kernel.shutdown = FakeKernel.prototype.shutdown;
+				await registry.disposeAll();
+			}
+		});
+	}
 });

@@ -649,8 +649,8 @@ export interface UsageDashboardOptions {
 export function formatActivityErrorDetail(error: string, homeDir = os.homedir()): string {
 	let text = replaceTabs(sanitizeText(error)).replace(/\s+/g, " ").trim();
 	if (homeDir) {
-		const escaped = homeDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-		const forward = homeDir.replaceAll("\\", "/").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const escaped = RegExp.escape(homeDir);
+		const forward = RegExp.escape(homeDir.replaceAll("\\", "/"));
 		text = text.replace(new RegExp(`${escaped}|${forward}`, "gi"), "~");
 	}
 	return text.replace(/\.+$/, "");
@@ -1056,7 +1056,7 @@ export class UsageDashboardComponent implements Component {
 		const refreshHint = this.#options.refresh ? "r refresh · " : "";
 		const hint =
 			this.#view === "detail"
-				? `${scrollHint}${refreshHint}${cancel} back`
+				? `${scrollHint}${refreshHint}${formatKeyHint("tab")} overview · ${cancel} back`
 				: `${scrollHint}${refreshHint}${formatKeyHint("enter")} details · ${cancel} close`;
 		this.#panel.title = title;
 		this.#header.setLines([checkedText ? theme.fg("dim", checkedText) : ""]);
@@ -1802,10 +1802,11 @@ export class UsageDashboardComponent implements Component {
 			void this.#refresh();
 			return;
 		}
-		if (
-			this.#view === "overview" &&
-			(matchesKey(data, "return") || matchesKey(data, "tab") || matchesKey(data, "d"))
-		) {
+		if (matchesKey(data, "tab")) {
+			this.#setView(this.#view === "overview" ? "detail" : "overview");
+			return;
+		}
+		if (this.#view === "overview" && (matchesKey(data, "return") || matchesKey(data, "d"))) {
 			this.#setView("detail");
 			return;
 		}
