@@ -12,6 +12,7 @@ import type {
 	AnthropicSlowModeFailure,
 	AnthropicSlowModeRetry,
 	AnthropicSlowModeSignal,
+	ApiKeyConfig,
 	ApiKeyResolver,
 	AuthAccountPolicy,
 	AuthAccountPolicyConfig,
@@ -329,7 +330,7 @@ class RemoteKeys implements KeysApi {
 		this.invalidate();
 		this.#remote.notify("keys.removeRuntime", provider);
 	}
-	setConfig(provider: string, apiKeyConfig: string, options?: { fallback?: boolean }): void {
+	setConfig(provider: string, apiKeyConfig: ApiKeyConfig, options?: { fallback?: boolean }): void {
 		this.invalidate();
 		this.#remote.notify("keys.setConfig", provider, apiKeyConfig, options);
 	}

@@ -691,7 +691,7 @@ Extensions can register providers at runtime (`pi.registerProvider(...)`), inclu
 When requesting a key for a provider, effective order is:
 
 1. Runtime override (CLI `--api-key`)
-2. Config override (`models.yml` `providers.<name>.apiKey`)
+2. Config override (`models.yml` `providers.<name>.apiKey`; a list is tried in order, see below)
 3. Stored OAuth credential (with refresh)
 4. Login-sourced stored API key
 5. Extension-registered config fallback (`keys.setConfig(..., { fallback: true })`)
@@ -705,6 +705,17 @@ in `models.yml` belong to tier 2, not this fallback tier.
 
 - Value is first treated as an environment variable name.
 - If the env var is unset or empty, the literal string is used as the token.
+- A non-empty list of such values is an ordered set of keys for the provider. Requests send the first entry that is not blocked and resolves to a non-empty value, so an entry whose `!command` fails or prints nothing is skipped. When the provider rejects an entry with an auth failure (401/403) or a usage/quota limit, that entry is blocked for the same time a stored credential would be (the provider's reset hint, else 60 seconds) and the request retries on the next entry. Once the block expires the earlier entry is used again. If every entry is blocked, the first one is sent anyway and the request fails the way a single rejected key does. Blocks are kept in memory for the current process.
+
+```yaml
+providers:
+   mistral:
+      apiKey:
+         - "!pass show mistral/primary" # used while it works
+         - MISTRAL_BACKUP_API_KEY # used only while the primary is rejected
+```
+
+A list cannot be combined with `authHeader: true`; that header is injected per model and does not rotate.
 
 If `authHeader: true` and provider `apiKey` is set, models get:
 

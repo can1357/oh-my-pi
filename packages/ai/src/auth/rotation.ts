@@ -235,6 +235,12 @@ export class RateLimits implements LimitsApi {
 		options?: MarkUsageLimitOptions,
 	): Promise<UsageLimitMarkResult> {
 		await this.#deps.pool.adoptExternalChanges();
+		const requestedConfigBlockUntilMs = Date.now() + (options?.retryAfterMs ?? DEFAULT_BLOCK_MS);
+		const configMark =
+			options?.credentialId === undefined
+				? this.#deps.overrides.blockConfigEntry(provider, options?.apiKey, requestedConfigBlockUntilMs)
+				: undefined;
+		if (configMark) return { ...configMark, requestedBlockedUntilMs: requestedConfigBlockUntilMs };
 		const sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
 			credentialId: options?.credentialId,
 			apiKey: options?.apiKey,
@@ -409,7 +415,24 @@ export class RateLimits implements LimitsApi {
 		const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
 		const exactCursorModelPolicy = AIError.isCursorPlanAccountPolicyError(error, provider);
 		const accountPolicy = exactCursorModelPolicy || AIError.isAccountPolicyError(error);
-		if (!accountPolicy && (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message))) {
+		const usageLimit = !accountPolicy && (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message));
+		// A models.yml key list rotates to its next entry with the same block
+		// durations stored credentials get: the provider's reset hint for a usage
+		// limit, else the default backoff.
+		if (options?.credentialId === undefined) {
+			const retryAfterMs = usageLimit ? extractProviderRetryHint(provider, message) : undefined;
+			const configMark = this.#deps.overrides.blockConfigEntry(
+				provider,
+				options?.apiKey,
+				Date.now() + (retryAfterMs ?? DEFAULT_BLOCK_MS),
+			);
+			if (configMark) {
+				return usageLimit || accountPolicy
+					? awaitSiblingUnblock(configMark, options?.signal, options?.waitForSibling)
+					: { switched: configMark.switched };
+			}
+		}
+		if (usageLimit) {
 			// Thread the provider-specified reset window (e.g. Devin "Your limit
 			// will reset in 13 minutes") into the block duration so the credential
 			// is not reselected and hammered while the cap remains active.

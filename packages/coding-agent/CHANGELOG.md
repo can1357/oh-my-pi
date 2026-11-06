@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `models.yml` `providers.<id>.apiKey` accepts a list of keys in priority order: the first is used while it works, and later ones only while an earlier key is rejected (401/403) or out of quota
+
 ## [18.17.0] - 2026-11-06
 
 ### Added

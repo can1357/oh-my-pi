@@ -9,6 +9,7 @@ import type { SessionAffinity } from "./affinity";
 import type { CredentialPool } from "./pool";
 import type { CredentialSelector, OAuthResolutionResult } from "./select";
 import type {
+	ApiKeyConfig,
 	AuthApiKeyOptions,
 	AuthPeekOptions,
 	AuthCredential,
@@ -17,6 +18,7 @@ import type {
 	KeysApi,
 	LimitsApi,
 	OAuthRequestIdentity,
+	UsageLimitMarkResult,
 } from "./types";
 
 /**
@@ -31,9 +33,17 @@ async function defaultConfigValueResolver(config: string): Promise<string | unde
 /** Runtime (--api-key) and config (models.yml) key overrides plus the config-value resolver. */
 export class KeyOverrides {
 	#runtimeOverrides: Map<string, string> = new Map();
-	#configOverrides: Map<string, string> = new Map();
-	#configFallbacks: Map<string, string> = new Map();
+	#configOverrides: Map<string, ApiKeyConfig> = new Map();
+	#configFallbacks: Map<string, ApiKeyConfig> = new Map();
 	#configValueResolver: (config: string) => Promise<string | undefined>;
+	// Ordered key lists: state is keyed by the entry's config text, not its
+	// position, so a models.yml reload neither loses nor misattributes blocks.
+	/** Provider -> list entry -> blocked-until epoch ms. */
+	#entryBlocks: Map<string, Map<string, number>> = new Map();
+	/** Provider -> list entry -> the key it last resolved to (matches a rejected bearer to its entry). */
+	#entryKeys: Map<string, Map<string, string>> = new Map();
+	/** Provider -> list entry that served the latest resolve. */
+	#lastServedEntry: Map<string, string> = new Map();
 
 	constructor(resolver?: (config: string) => Promise<string | undefined>) {
 		this.#configValueResolver = resolver ?? defaultConfigValueResolver;
@@ -58,18 +68,100 @@ export class KeyOverrides {
 		return this.#runtimeOverrides.get(provider);
 	}
 
-	configKey(provider: string): string | undefined {
+	configKey(provider: string): ApiKeyConfig | undefined {
 		return this.#configOverrides.get(provider);
 	}
 
 	/** Config value consulted only after stored OAuth/login credentials. */
-	fallbackKey(provider: string): string | undefined {
+	fallbackKey(provider: string): ApiKeyConfig | undefined {
 		return this.#configFallbacks.get(provider);
 	}
 
 	/** Resolve a config value (env var name, "!command", literal) to the secret. */
 	resolve(config: string): Promise<string | undefined> {
 		return this.#configValueResolver(config);
+	}
+
+	/** Resolve the provider's config override (`configKey`) to the key a request should send. */
+	resolveConfigKey(provider: string): Promise<string | undefined> {
+		return this.#resolveConfig(provider, this.#configOverrides.get(provider));
+	}
+
+	/** Resolve the provider's config fallback (`fallbackKey`) to the key a request should send. */
+	resolveFallbackKey(provider: string): Promise<string | undefined> {
+		return this.#resolveConfig(provider, this.#configFallbacks.get(provider));
+	}
+
+	/**
+	 * A single value resolves as-is. A list yields its first unblocked entry
+	 * that resolves to a non-empty key; when every entry is blocked, the first
+	 * one that resolves is sent anyway, so the request fails the way a single
+	 * rejected key does instead of reporting a missing key.
+	 */
+	async #resolveConfig(provider: string, config: ApiKeyConfig | undefined): Promise<string | undefined> {
+		if (config === undefined) return undefined;
+		if (typeof config === "string") return this.#configValueResolver(config);
+		const now = Date.now();
+		for (const blockedPass of [false, true]) {
+			for (const entry of config) {
+				if ((this.#entryBlockedUntil(provider, entry, now) !== undefined) !== blockedPass) continue;
+				const key = await this.#configValueResolver(entry);
+				if (!key) continue;
+				let keys = this.#entryKeys.get(provider);
+				if (!keys) {
+					keys = new Map();
+					this.#entryKeys.set(provider, keys);
+				}
+				keys.set(entry, key);
+				this.#lastServedEntry.set(provider, entry);
+				return key;
+			}
+		}
+		return undefined;
+	}
+
+	#entryBlockedUntil(provider: string, entry: string, now: number): number | undefined {
+		const blocks = this.#entryBlocks.get(provider);
+		const until = blocks?.get(entry);
+		if (until === undefined) return undefined;
+		if (until > now) return until;
+		blocks?.delete(entry);
+		return undefined;
+	}
+
+	/**
+	 * Block the config key-list entry that served `apiKey` (the entry that
+	 * served the latest resolve when omitted) until `untilMs`, longest wins.
+	 * Reports whether another entry is free now, else when the soonest frees up.
+	 * Returns `undefined` when the provider's active key is not a config list
+	 * or no entry served the failed key, so stored-credential rotation applies.
+	 */
+	blockConfigEntry(provider: string, apiKey: string | undefined, untilMs: number): UsageLimitMarkResult | undefined {
+		if (this.#runtimeOverrides.has(provider)) return undefined;
+		const config = this.#configOverrides.get(provider) ?? this.#configFallbacks.get(provider);
+		if (config === undefined || typeof config === "string") return undefined;
+		const keys = this.#entryKeys.get(provider);
+		const entry =
+			apiKey === undefined
+				? this.#lastServedEntry.get(provider)
+				: config.find(candidate => keys?.get(candidate) === apiKey);
+		if (entry === undefined || !config.includes(entry)) return undefined;
+		const now = Date.now();
+		let blocks = this.#entryBlocks.get(provider);
+		if (!blocks) {
+			blocks = new Map();
+			this.#entryBlocks.set(provider, blocks);
+		}
+		const blockedUntilMs = Math.max(this.#entryBlockedUntil(provider, entry, now) ?? 0, untilMs);
+		blocks.set(entry, blockedUntilMs);
+		let retryAtMs: number | undefined;
+		for (const sibling of config) {
+			if (sibling === entry) continue;
+			const siblingUntil = this.#entryBlockedUntil(provider, sibling, now);
+			if (siblingUntil === undefined) return { switched: true, blockedUntilMs };
+			if (retryAtMs === undefined || siblingUntil < retryAtMs) retryAtMs = siblingUntil;
+		}
+		return { switched: false, retryAtMs, blockedUntilMs };
 	}
 
 	/**
@@ -102,7 +194,7 @@ export class KeyOverrides {
 	 * this so their default key reference (e.g. an unset env-var name, which
 	 * resolves to its literal text) cannot shadow the key the user logged in with.
 	 */
-	setConfig(provider: string, apiKeyConfig: string, options?: { fallback?: boolean }): void {
+	setConfig(provider: string, apiKeyConfig: ApiKeyConfig, options?: { fallback?: boolean }): void {
 		if (options?.fallback) {
 			this.#configOverrides.delete(provider);
 			this.#configFallbacks.set(provider, apiKeyConfig);
@@ -261,9 +353,8 @@ export class KeyCascade implements KeysApi {
 			return runtimeKey;
 		}
 
-		const configKey = this.#deps.overrides.configKey(provider);
-		if (configKey !== undefined) {
-			return await this.#deps.overrides.resolve(configKey);
+		if (this.#deps.overrides.configKey(provider) !== undefined) {
+			return await this.#deps.overrides.resolveConfigKey(provider);
 		}
 
 		await this.#deps.pool.adoptExternalChanges();
@@ -305,8 +396,9 @@ export class KeyCascade implements KeysApi {
 			return this.#deps.overrides.resolve(loginApiKeySelection.credential.key);
 		}
 
-		const fallbackKey = this.#deps.overrides.fallbackKey(provider);
-		if (fallbackKey !== undefined) return this.#deps.overrides.resolve(fallbackKey);
+		if (this.#deps.overrides.fallbackKey(provider) !== undefined) {
+			return this.#deps.overrides.resolveFallbackKey(provider);
+		}
 
 		const envKey = getEnvApiKey(provider);
 		if (envKey) return envKey;
@@ -400,9 +492,8 @@ export class KeyCascade implements KeysApi {
 				`No API key for provider: ${provider} (session ${sessionId} is restricted to its OAuth account pool, but models.yml configures an apiKey for this provider, and pooled OAuth tokens are never sent past it)`,
 			);
 		}
-		const configKey = restricted ? undefined : this.#deps.overrides.configKey(provider);
-		if (configKey !== undefined) {
-			return this.#deps.overrides.resolve(configKey);
+		if (!restricted && this.#deps.overrides.configKey(provider) !== undefined) {
+			return this.#deps.overrides.resolveConfigKey(provider);
 		}
 
 		// Precedence: a deliberate OAuth/login credential wins, then an explicit env var,
@@ -455,8 +546,9 @@ export class KeyCascade implements KeysApi {
 		// suppresses account_uuid for this session.
 		if (sessionId) this.#deps.affinity.forget(provider, sessionId);
 
-		const fallbackKey = this.#deps.overrides.fallbackKey(provider);
-		if (fallbackKey !== undefined) return this.#deps.overrides.resolve(fallbackKey);
+		if (this.#deps.overrides.fallbackKey(provider) !== undefined) {
+			return this.#deps.overrides.resolveFallbackKey(provider);
+		}
 
 		const envKey = getEnvApiKey(provider);
 		if (envKey) return envKey;
@@ -603,7 +695,7 @@ export class KeyCascade implements KeysApi {
 		this.#deps.overrides.removeRuntime(provider);
 	}
 
-	setConfig(provider: string, apiKeyConfig: string, options?: { fallback?: boolean }): void {
+	setConfig(provider: string, apiKeyConfig: ApiKeyConfig, options?: { fallback?: boolean }): void {
 		this.#deps.overrides.setConfig(provider, apiKeyConfig, options);
 	}
 

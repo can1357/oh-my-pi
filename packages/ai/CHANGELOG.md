@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `keys.setConfig` accepts an ordered list of key references; requests use the first unblocked entry, and `limits.rotate`/`limits.markReached` block a rejected entry so the next one serves until the block expires
+
 ## [18.17.0] - 2026-11-06
 
 ### Added
