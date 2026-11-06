@@ -32,8 +32,12 @@
 - Fixed collaboration input disappearing when the local relay queue refuses admission during join, leave, closure, or overload. Reconnect backlogs remain supported; admitted prompts are not automatically replayed after later transport errors, and rejected batches return in submission order. Refused detached host-only builtins retain their images and links beside newer drafts ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed queued prompts and attachments disappearing when compaction or a session change cancels credential lookup beside a newer draft; cancellation recovery no longer clears a newer submission's UI ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed ovnfs searches ignoring cancellation while waiting for the daemon handshake, without cancelling other callers sharing the connection ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- Hindsight `retain` and `learn` memories are no longer lost when delivery fails or omp exits: they are kept on disk, retried, and delivered by the next session without duplicates ([#18176](https://github.com/can1357/oh-my-pi/pull/18176) by [@alphastorm](https://github.com/alphastorm))
+- Fixed Hindsight outbox delivery observing partially published retain calls, batch items arriving out of order when file timestamps tie, and expired quarantine files surviving drains without new rejections ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed the session crashing with `Native shell returned an invalid execution trace` when a bash command assigned a long value containing multi-byte characters such as Chinese text ([#18259](https://github.com/can1357/oh-my-pi/issues/18259))
 - `grep -e` and `rg -e` in the bash tool accept patterns that start with `-` (e.g. `grep -e "--canary"`) instead of failing with an unknown-option error.
+- The bash execution visualization keeps updating, and saved traces still restore, after a command handles bytes that aren't valid UTF-8 (e.g. `v=$(printf '\377')`)
+- On Windows, `grep`, `glob` and isolated subagents no longer flash a console window when they query or start the ovnfs daemon.
 
 ## [18.17.0] - 2026-11-06
 
