@@ -110,6 +110,8 @@ export interface UsageRoutingScope {
 	id: string;
 	revision: number;
 	roles: readonly UsageRoleRoutePlan[];
+	/** Model-owned envelopes for explicitly selected requests without a named role. */
+	models?: readonly { selector: string; targets: readonly UsageRouteTarget[] }[];
 }
 
 /** Request to evaluate a role's already-authorized routes without resolving a bearer. */
@@ -117,6 +119,8 @@ export interface UsageRouteEvaluationRequest {
 	scopeId: string;
 	revision: number;
 	role: string;
+	/** Explicit authorization owner; omitted preserves the role-owned contract. */
+	owner?: UsageRoutingOwner;
 	sessionId: string;
 	targets: readonly UsageRouteTarget[];
 }
