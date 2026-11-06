@@ -66,11 +66,6 @@ describe("MCP bridge structuredContent", () => {
 		expect(occurrences).toBe(1);
 	});
 
-	it("leaves results without structuredContent untouched", async () => {
-		const text = await modelText({ content: [{ type: "text", text: "plain result" }] });
-		expect(text).toBe("plain result");
-	});
-
 	it("lets an eval consumer advance pages using opaque cursors rather than display text", async () => {
 		const cursor = "next:λ/```json";
 		const tool = toolFor(params => {

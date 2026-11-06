@@ -691,12 +691,13 @@ fn num(n: impl std::fmt::Display) -> BString {
 pub fn param(ex: &mut Expander<'_, '_>, sp: Special, name: &[u8]) -> X<Param> {
 	let value = get(ex, sp)?;
 	let mut flags = sp.flags();
-	let mut base = 0;
-	if sp == Special::Seconds {
+	let base = if sp == Special::Seconds {
 		let (ty, b) = seconds_type(ex)?;
 		flags = flags.without(PmFlags::INTEGER).with(ty);
-		base = b;
-	}
+		b
+	} else {
+		0
+	};
 	let value = value.unwrap_or_else(|| {
 		flags = flags.with(PmFlags::UNSET);
 		match flags.type_bits() {
@@ -1042,9 +1043,9 @@ pub fn get(ex: &mut Expander<'_, '_>, sp: Special) -> X<Option<PValue>> {
 			crate::bash::vm::builtins::zsh_mod_sched::scheduled_events(ex.cx.store, ex.vp)?,
 		))),
 		Special::Example(p) => crate::bash::vm::builtins::zsh_mod_example::param_get(ex, p),
-		Special::Curses(p) => crate::bash::vm::builtins::zsh_mod_curses::param_get(ex, p),
-		Special::Zle(z) => crate::bash::vm::zle::params::get(ex, z),
-		Special::Comp(c) => crate::bash::vm::zle::comp::complete::get(ex, c),
+		Special::Curses(p) => Ok(Some(crate::bash::vm::builtins::zsh_mod_curses::param_get(ex, p))),
+		Special::Zle(z) => Ok(crate::bash::vm::zle::params::get(ex, z)),
+		Special::Comp(c) => Ok(crate::bash::vm::zle::comp::complete::get(ex, c)),
 		Special::TiedArray(Tie::ZshEvalContext) => Ok(Some(PValue::Array(eval_context(ex.vp)))),
 		Special::TiedScalar(Tie::ZshEvalContext) => {
 			scalar(BString::from(eval_context(ex.vp).join(&b":"[..])))
@@ -1218,7 +1219,10 @@ pub fn get(ex: &mut Expander<'_, '_>, sp: Special) -> X<Option<PValue>> {
 		Special::EpochSeconds => scalar(num(ex.cx.host.wall().secs)),
 		Special::EpochRealtime => {
 			let now = ex.cx.host.wall();
-			scalar(BString::from(format!("{:.10}", now.secs as f64 + f64::from(now.nanos) * 1e-9)))
+			scalar(BString::from(format!(
+				"{:.10}",
+				f64::mul_add(f64::from(now.nanos), 1e-9, now.secs as f64)
+			)))
 		},
 		Special::Epochtime => {
 			let now = ex.cx.host.wall();
@@ -1485,28 +1489,27 @@ fn funcstack_levels(ex: &Expander<'_, '_>) -> Vec<FuncLevel> {
 		.filter(|c| !matches!(c.kind, CallKind::Args(_)));
 	let mut out: Vec<FuncLevel> = Vec::new();
 	for c in calls {
-		let (caller, base) = match out.last() {
-			Some(p) => (p.name.clone(), if p.source { 0 } else { p.flineno }),
-			None => {
-				let top = match &c.kind {
-					// A `.` file at the top: the script's name (`zsh` for a
-					// `-c` string).
-					CallKind::Source { .. } => {
-						match ex
-							.vp
-							.runs
-							.front()
-							.and_then(|r| r.chain.links.first())
-							.map(|l| &l.origin)
-						{
-							Some(Origin::File(path)) => path.clone(),
-							_ => BString::from("zsh"),
-						}
-					},
-					_ => ex.k.argv0.clone(),
-				};
-				(top, 0)
-			},
+		let (caller, base) = if let Some(p) = out.last() {
+			(p.name.clone(), if p.source { 0 } else { p.flineno })
+		} else {
+			let top = match &c.kind {
+				// A `.` file at the top: the script's name (`zsh` for a
+				// `-c` string).
+				CallKind::Source { .. } => {
+					match ex
+						.vp
+						.runs
+						.front()
+						.and_then(|r| r.chain.links.first())
+						.map(|l| &l.origin)
+					{
+						Some(Origin::File(path)) => path.clone(),
+						_ => BString::from("zsh"),
+					}
+				},
+				_ => ex.k.argv0.clone(),
+			};
+			(top, 0)
 		};
 		out.push(match &c.kind {
 			CallKind::Function { name, file, line, .. } => FuncLevel {
@@ -1801,7 +1804,7 @@ fn set_functions(ex: &mut Expander<'_, '_>, value: PValue) -> X<()> {
 ///
 /// # Errors
 /// That failure.
-pub fn check_id_prefix(ex: &mut Expander<'_, '_>, name: &[u8], value: &[u8]) -> X<()> {
+pub fn check_id_prefix(ex: &Expander<'_, '_>, name: &[u8], value: &[u8]) -> X<()> {
 	match lookup(name) {
 		Some(sp @ (Special::Uid | Special::Euid | Special::Gid | Special::Egid)) => {
 			set_id(ex, sp, super::params::parse_int(value))
@@ -1814,7 +1817,7 @@ pub fn check_id_prefix(ex: &mut Expander<'_, '_>, name: &[u8], value: &[u8]) -> 
 /// friends. An unprivileged shell may only keep the ids it has (anything
 /// else is `EPERM`, a fatal `failed to change user ID`); really changing
 /// the shell's identity is not supported.
-fn set_id(ex: &mut Expander<'_, '_>, sp: Special, want: i64) -> X<()> {
+fn set_id(ex: &Expander<'_, '_>, sp: Special, want: i64) -> X<()> {
 	let user = ex.cx.host.user();
 	let (what, have) = match sp {
 		Special::Uid => ("user ID", i64::from(user.uid)),
@@ -1903,7 +1906,10 @@ pub fn unset(ex: &mut Expander<'_, '_>, sp: Special, name: &[u8]) -> X<()> {
 		// zsh/langinfo has no unset function: the association stays.
 		Special::Langinfo => Ok(()),
 		Special::Zle(z) => crate::bash::vm::zle::params::unset(ex, z),
-		Special::Comp(c) => crate::bash::vm::zle::comp::complete::unset(ex, c),
+		Special::Comp(c) => {
+			crate::bash::vm::zle::comp::complete::unset(ex, c);
+			Ok(())
+		},
 		Special::Example(p) => crate::bash::vm::builtins::zsh_mod_example::param_unset(ex, p),
 		_ if sp.readonly() => Err(Stop::Fail(Diag::Readonly { name: BString::from(name) })),
 		// zsh/parameter's unset functions change nothing (`unset dirstack`

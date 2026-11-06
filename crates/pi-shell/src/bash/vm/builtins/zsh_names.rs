@@ -1032,13 +1032,13 @@ pub fn functions(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString], _func: Func
 			ctx.diag(Diag::Unsupported { what: "autoload -w (word code files)".into() });
 			returnval = 1;
 		} else if let Some(r) = ctx.function(a)? {
-			if flagged != Attrs::NONE {
+			if flagged == Attrs::NONE {
+				print_func(ctx, a, &r, pflags, expand, &mut out)?;
+			} else {
 				ctx.store_record(KeyBuf::Func(a.clone()), Some(apply(r)));
 				if check_autoload(ctx, ops, a)? != 0 {
 					returnval = 1;
 				}
-			} else {
-				print_func(ctx, a, &r, pflags, expand, &mut out)?;
 			}
 		} else if on.contains(Attrs::ZSH_UNDEFINED) {
 			// `/dir/name` for a function that exists: its flags change,
@@ -1183,7 +1183,12 @@ fn check_autoload(ctx: &mut Ctx<'_, '_>, ops: &Ops, name: &[u8]) -> Result<i32, 
 	if !file.is_empty() {
 		let found = {
 			let mut ask = |p: Probe| ctx.probe(p);
-			crate::bash::vm::command::getfpfunc::<Need>(&mut ask, &cwd, name, &[file.clone()])?
+			crate::bash::vm::command::getfpfunc::<Need>(
+				&mut ask,
+				&cwd,
+				name,
+				std::slice::from_ref(&file),
+			)?
 		};
 		if !matches!(found, crate::bash::vm::command::FpFound::None) {
 			return Ok(0);
@@ -1208,7 +1213,6 @@ fn check_autoload(ctx: &mut Ctx<'_, '_>, ops: &Ops, name: &[u8]) -> Result<i32, 
 		}
 	};
 	if let Some(dir) = dir {
-		let attrs = attrs;
 		let rec = Record::Func { mode, sticky, source, unit, attrs, file: dir };
 		ctx.store_record(KeyBuf::Func(BString::from(name)), Some(rec));
 		return Ok(0);
@@ -1368,10 +1372,8 @@ fn math_functions(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 			3
 		} else if f.max != if f.min != 0 { f.min } else { -1 } {
 			2
-		} else if f.min != 0 {
-			1
 		} else {
-			0
+			i32::from(f.min != 0)
 		};
 		out.extend_from_slice(b"functions -M");
 		if f.string {
@@ -1432,12 +1434,11 @@ fn math_functions(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 		}
 		let mut rest = args[1..].iter();
 		if let Some(a) = rest.next() {
-			match zstrtol(a).filter(|&n| n >= 0) {
-				Some(n) => min = i32::try_from(n).unwrap_or(i32::MAX),
-				None => {
-					ctx.usage(format!("-M: invalid min number of arguments: {}", a.as_bstr()));
-					return done(1);
-				},
+			if let Some(n) = zstrtol(a).filter(|&n| n >= 0) {
+				min = i32::try_from(n).unwrap_or(i32::MAX);
+			} else {
+				ctx.usage(format!("-M: invalid min number of arguments: {}", a.as_bstr()));
+				return done(1);
 			}
 			if string && min != 1 {
 				ctx.usage("-Ms: must take a single string argument");
@@ -1445,12 +1446,11 @@ fn math_functions(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 			}
 			max = min;
 			if let Some(a) = rest.next() {
-				match zstrtol(a).filter(|&n| n >= -1 && (n == -1 || n >= i64::from(min))) {
-					Some(n) => max = i32::try_from(n).unwrap_or(i32::MAX),
-					None => {
-						ctx.usage(format!("-M: invalid max number of arguments: {}", a.as_bstr()));
-						return done(1);
-					},
+				if let Some(n) = zstrtol(a).filter(|&n| n >= -1 && (n == -1 || n >= i64::from(min))) {
+					max = i32::try_from(n).unwrap_or(i32::MAX);
+				} else {
+					ctx.usage(format!("-M: invalid max number of arguments: {}", a.as_bstr()));
+					return done(1);
 				}
 				if string && max != 1 {
 					ctx.usage("-Ms: must take a single string argument");
@@ -1674,12 +1674,7 @@ fn whence_one(
 /// zsh `print_if_link`: for an absolute `s`, ` -> ` and where it leads:
 /// with `all` each step of the symbolic links met resolving it one at a
 /// time (zsh `xsymlinks`), else its real path (zsh `chrealpath`).
-fn print_if_link(
-	ctx: &mut Ctx<'_, '_>,
-	s: &[u8],
-	all: bool,
-	out: &mut Vec<u8>,
-) -> Result<(), Need> {
+fn print_if_link(ctx: &Ctx<'_, '_>, s: &[u8], all: bool, out: &mut Vec<u8>) -> Result<(), Need> {
 	if s.first() != Some(&b'/') {
 		return Ok(());
 	}

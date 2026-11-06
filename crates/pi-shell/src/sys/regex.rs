@@ -21,7 +21,9 @@ pub enum RegexFail {
 	Exec(String),
 }
 
-/// zsh/regex's match: compile `pattern` as `regcomp(REG_EXTENDED)` (`icase`
+/// zsh/regex's match.
+///
+/// Compile `pattern` as `regcomp(REG_EXTENDED)` (`icase`
 /// adds `REG_ICASE`) in a UTF-8 (`utf8`) or the C locale and run it on
 /// `subject`. Both are C strings to the library: each ends at its first
 /// NUL byte. `Ok(None)` when it does not match; otherwise the byte ranges
@@ -62,10 +64,10 @@ mod native {
 	#[repr(C)]
 	#[allow(dead_code, reason = "the C layout; only `re_nsub` is read")]
 	struct RegexT {
-		re_magic: c_int,
-		re_nsub:  usize,
-		re_endp:  *const c_char,
-		re_g:     *mut c_void,
+		magic:   c_int,
+		re_nsub: usize,
+		re_endp: *const c_char,
+		re_g:    *mut c_void,
 	}
 
 	/// `regoff_t`.
