@@ -71,10 +71,12 @@ pub fn error_text(src: &[u8], argv0: &[u8], origin_is_command: bool, e: &ParseEr
 	msg
 }
 
-/// `--pretty-print FILE` (bash's `pretty_print_loop`): every command
-/// as bash's `make_command_string` prints it; a blank or comment-only line
-/// between commands, and the end of the input, print one empty line (never
-/// two in a row). A syntax error is reported and ends it (status 1).
+/// `--pretty-print FILE` (bash's `pretty_print_loop`).
+///
+/// Every command as bash's `make_command_string` prints it; a blank or
+/// comment-only line between commands, and the end of the input, print one
+/// empty line (never two in a row). A syntax error is reported and ends it
+/// (status 1).
 pub fn pretty_print(src: &[u8], argv0: &[u8]) -> u8 {
 	let mut out = io::stdout().lock();
 	let mut parser = Parser::new(src, Features::NONE, NO_ALIASES);

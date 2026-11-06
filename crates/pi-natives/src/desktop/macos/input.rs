@@ -2866,8 +2866,8 @@ fn stamp_now(event: &CGEvent) {
 	// SAFETY: `event` is a live CGEvent. Quartz event timestamps count
 	// nanoseconds of system uptime.
 	unsafe {
-		set_event_timestamp(std::ptr::from_ref::<CGEvent>(event).cast_mut(), control::uptime_ns())
-	};
+		set_event_timestamp(std::ptr::from_ref::<CGEvent>(event).cast_mut(), control::uptime_ns());
+	}
 }
 
 fn background_scroll(

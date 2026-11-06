@@ -665,7 +665,6 @@ const fn isprint(c: u8) -> bool {
 /// zsh `quotestring`: `s` quoted in style `how` (the surrounding quotes
 /// of [`Qt::Single`], [`Qt::Double`] and [`Qt::Dollars`] are the
 /// caller's).
-#[expect(clippy::too_many_lines, reason = "a faithful port of one C function")]
 #[allow(clippy::many_single_char_names, reason = "a direct port of zsh's quotestring")]
 pub fn quotestring(s: &[u8], how: Qt, o: QuoteOpts) -> Vec<u8> {
 	quotestring_comma(s, how, o, false)

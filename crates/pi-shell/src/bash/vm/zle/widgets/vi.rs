@@ -38,7 +38,7 @@ pub struct ViChange {
 /// The vi state zsh keeps in globals ([`Zle::vi`]): what outlives a
 /// line (the last change, marks, the last find) and the change being
 /// recorded.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct ViState {
 	/// zsh `lastvichg`: the change `vi-repeat-change` repeats (`None`:
 	/// zsh's `lastvichg.buf == NULL`).
@@ -64,22 +64,6 @@ pub struct ViState {
 	pub vimarkcs:   [usize; 27],
 	/// zsh `vimarkline`: their history lines (0: unset).
 	pub vimarkline: [i64; 27],
-}
-
-impl Default for ViState {
-	fn default() -> Self {
-		Self {
-			lastvichg:  None,
-			curvichg:   None,
-			vichgflag:  0,
-			viinrepeat: 0,
-			vfindchar:  None,
-			vfinddir:   0,
-			tailadd:    0,
-			vimarkcs:   [0; 27],
-			vimarkline: [0; 27],
-		}
-	}
 }
 
 /// zsh's `mark == -1` while an operator reads its motion: no motion has
@@ -118,7 +102,7 @@ pub fn unrecord_bytes(zle: &mut Zle, n: usize) {
 /// The start of zsh `execzlefunc`: whether a change is already being
 /// recorded (`nestedvichg`) and whether this widget starts a repeat
 /// (`isrepeat`).
-pub fn exec_begin(zle: &mut Zle) -> (bool, bool) {
+pub const fn exec_begin(zle: &mut Zle) -> (bool, bool) {
 	let vi = &mut zle.vi;
 	let nested = vi.vichgflag != 0;
 	let isrepeat = vi.viinrepeat == 3;
@@ -354,7 +338,7 @@ fn range_key(r: Range, next: RangeNext) -> WResult {
 		}
 		// zsh `execzlefunc(k2, zlenoargs, 1, 0)`: `$WIDGET` is the motion
 		// while it runs.
-		let saved = std::mem::replace(&mut zw.ed.bindk, Some(name.clone()));
+		let saved = zw.ed.bindk.replace(name.clone());
 		then(Await::Widget { name, args: Vec::new() }, move |zw, got| {
 			zw.ed.bindk = saved;
 			let mut r = r;
@@ -627,12 +611,13 @@ pub fn vichange_widget(zw: &mut Zw<'_, '_>) -> WResult {
 pub fn viyank(zw: &mut Zw<'_, '_>) -> WResult {
 	vichange(zw, 1);
 	getvirange(zw, false, |zw, c2| {
-		let mut ret = 1;
-		if let Some(c2) = c2 {
+		let ret = if let Some(c2) = c2 {
 			let cs = zw.ed.cs;
 			utils::cut(zw.zle, zw.ed, cs, c2 - cs, cutflags::YANK);
-			ret = 0;
-		}
+			0
+		} else {
+			1
+		};
 		let ed = &mut *zw.ed;
 		if ed.ls.vilinerange && ed.ls.lastcol != -1 {
 			let x = utils::findeol(ed);

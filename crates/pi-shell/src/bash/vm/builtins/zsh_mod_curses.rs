@@ -32,7 +32,7 @@ use crate::bash::{
 	FdRef, OsHandle, SetWhen, TermFlag, Termios,
 	event::WaitKey,
 	vm::{
-		expand::{Expander, X},
+		expand::Expander,
 		proc::{Probe, ProbeResult, Vproc},
 		zsh::{
 			params::{self, PValue},
@@ -60,7 +60,7 @@ pub enum CursesParam {
 
 impl CursesParam {
 	/// The parameter named `name`.
-	pub fn lookup(name: &[u8]) -> Option<Self> {
+	pub const fn lookup(name: &[u8]) -> Option<Self> {
 		Some(match name {
 			b"zcurses_colors" => Self::Colors,
 			b"zcurses_attrs" => Self::Attrs,
@@ -217,13 +217,10 @@ impl ZcErr {
 }
 
 /// The value of a zsh/curses parameter.
-///
-/// # Errors
-/// None; [`X`] for the specials' signature.
-pub fn param_get(ex: &mut Expander<'_, '_>, p: CursesParam) -> X<Option<PValue>> {
+pub fn param_get(ex: &Expander<'_, '_>, p: CursesParam) -> PValue {
 	let names = |list: &[&str]| PValue::Array(list.iter().map(|n| BString::from(*n)).collect());
 	let c = ex.vp.zsh.as_deref().and_then(|z| z.curses.as_deref());
-	Ok(Some(match p {
+	match p {
 		CursesParam::Colors => names(&COLORS.map(|c| c.0)),
 		CursesParam::Attrs => names(&ATTRS.map(|a| a.0)),
 		CursesParam::Keycodes => names(&KEYS.map(|k| k.0)),
@@ -236,7 +233,7 @@ pub fn param_get(ex: &mut Expander<'_, '_>, p: CursesParam) -> X<Option<PValue>>
 		CursesParam::PairCount => {
 			PValue::Scalar(BString::from(c.map_or(0, |c| c.color_pairs).to_string()))
 		},
-	}))
+	}
 }
 
 /// The module's state, taken out of the vproc while a subcommand works.
@@ -332,7 +329,7 @@ fn flush(ctx: &mut Ctx<'_, '_>, c: &mut Curses) {
 
 /// Write curses' buffered output now (before `input` waits for a key):
 /// parks while the terminal does not take it.
-fn flush_now(ctx: &mut Ctx<'_, '_>, c: &mut Curses) -> Result<(), Need> {
+fn flush_now(ctx: &Ctx<'_, '_>, c: &mut Curses) -> Result<(), Need> {
 	let h = ctx.vp.fds.handle(1);
 	let mut tcx = Context::from_waker(&ctx.k.waker);
 	while !c.pending.is_empty() {
@@ -407,7 +404,7 @@ pub fn zcurses(ctx: &mut Ctx<'_, '_>, _ops: &super::zsh_args::Ops, args: &[BStri
 fn run(ctx: &mut Ctx<'_, '_>, c: &mut Curses, name: &str, args: &[BString]) -> R {
 	match name {
 		"init" => {
-			if let Some(t) = c.curses_tty.clone() {
+			if let Some(t) = c.prog_tty.clone() {
 				set_tty(ctx, &t);
 			}
 			done(0)
@@ -561,7 +558,7 @@ fn init(ctx: &mut Ctx<'_, '_>) -> R {
 		prog.min = 1;
 		prog.time = 0;
 		set_tty(ctx, &prog);
-		c.curses_tty = get_tty(ctx).or(Some(prog));
+		c.prog_tty = get_tty(ctx).or(Some(prog));
 	}
 	c.saved_tty = saved;
 	put(ctx.vp, c);
@@ -589,7 +586,7 @@ fn end(ctx: &mut Ctx<'_, '_>, c: &mut Curses) -> R {
 /// ncurses `doupdate`, re-entering curses mode after `end`.
 fn update(ctx: &mut Ctx<'_, '_>, c: &mut Curses) -> Result<(), Need> {
 	if c.ended
-		&& let Some(t) = c.curses_tty.clone()
+		&& let Some(t) = c.prog_tty.clone()
 	{
 		set_tty(ctx, &t);
 	}
@@ -677,7 +674,7 @@ fn delwin(ctx: &mut Ctx<'_, '_>, c: &mut Curses, args: &[BString]) -> R {
 }
 
 /// zsh `zccmd_position`.
-fn position(ctx: &mut Ctx<'_, '_>, c: &mut Curses, args: &[BString]) -> R {
+fn position(ctx: &mut Ctx<'_, '_>, c: &Curses, args: &[BString]) -> R {
 	let Some(w) = window(ctx, c, &args[0]) else {
 		return done(1);
 	};
@@ -837,7 +834,7 @@ fn scroll(ctx: &mut Ctx<'_, '_>, c: &mut Curses, args: &[BString]) -> R {
 
 /// zsh `zccmd_querychar`: the character at the cursor, its color pair and
 /// attributes into `reply` (or the given array).
-fn querychar(ctx: &mut Ctx<'_, '_>, c: &mut Curses, args: &[BString]) -> R {
+fn querychar(ctx: &mut Ctx<'_, '_>, c: &Curses, args: &[BString]) -> R {
 	let Some(w) = window(ctx, c, &args[0]) else {
 		return done(1);
 	};
@@ -902,7 +899,7 @@ fn resize(ctx: &mut Ctx<'_, '_>, c: &mut Curses, args: &[BString]) -> R {
 	}
 	flush(ctx, c);
 	if do_save {
-		c.curses_tty = get_tty(ctx);
+		c.prog_tty = get_tty(ctx);
 	}
 	done(0)
 }
@@ -1014,14 +1011,13 @@ fn read_key(
 				.iter()
 				.any(|k| k.0.len() > seq.len() && k.0.starts_with(&seq));
 			let next = if longer { r.byte(ctx, escdelay)? } else { None };
-			match next {
-				Some(b) => seq.push(b),
-				None => {
-					if let Some(name) = exact {
-						return Ok(Some((Got::Key(name), seq)));
-					}
-					break;
-				},
+			if let Some(b) = next {
+				seq.push(b);
+			} else {
+				if let Some(name) = exact {
+					return Ok(Some((Got::Key(name), seq)));
+				}
+				break;
 			}
 		}
 		// Not a key: the first byte is the character, the rest is read
@@ -1100,7 +1096,7 @@ struct MouseEvent {
 fn decode_x10(report: [u8; 3], pressed: &mut u32) -> u32 {
 	let intro = u32::from(report[0]);
 	let mut bstate = 0;
-	if intro & 96 == 96 {
+	if intro & 0x60 == 0x60 {
 		// A wheel: only its first "button" (4) in a 32-bit mask.
 		if intro & 3 == 0 {
 			bstate = mouse::bit(4, mouse::PRESSED);
@@ -1219,12 +1215,11 @@ fn mouse_run(
 		let mut report = [0u8; 3];
 		let mut complete = true;
 		for b in &mut report {
-			match r.byte(ctx, escdelay)? {
-				Some(v) => *b = v,
-				None => {
-					complete = false;
-					break;
-				},
+			if let Some(v) = r.byte(ctx, escdelay)? {
+				*b = v;
+			} else {
+				complete = false;
+				break;
 			}
 		}
 		if complete {
@@ -1339,7 +1334,7 @@ fn input(ctx: &mut Ctx<'_, '_>, c: &mut Curses, args: &[BString]) -> R {
 	if c.ended || c.needs_refresh(w) {
 		c.noutrefresh(w);
 		if c.ended
-			&& let Some(t) = c.curses_tty.clone()
+			&& let Some(t) = c.prog_tty.clone()
 		{
 			set_tty(ctx, &t);
 		}
@@ -1363,14 +1358,15 @@ fn input(ctx: &mut Ctx<'_, '_>, c: &mut Curses, args: &[BString]) -> R {
 		c.fifo = r.fifo;
 		return done(1);
 	};
-	let mut events = None;
-	if let (Got::Key(k), Some(keys)) = (&got, &keys)
+	let events = if let (Got::Key(k), Some(keys)) = (&got, &keys)
 		&& k == "MOUSE"
 		&& want_mouse
 		&& c.mouse_on
 	{
-		events = Some(mouse_run(ctx, &mut r, keys, escdelay, c.mouse_moves)?);
-	}
+		Some(mouse_run(ctx, &mut r, keys, escdelay, c.mouse_moves)?)
+	} else {
+		None
+	};
 	c.fifo = r.fifo;
 	let (text, key) = match got {
 		Got::Char(b) => (BString::from(b), BString::default()),

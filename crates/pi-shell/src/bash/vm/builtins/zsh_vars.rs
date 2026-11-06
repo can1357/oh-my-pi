@@ -751,6 +751,10 @@ pub fn assign_zsh_loop_var(
 	}
 }
 
+/// `read_zle`'s answer: the bytes, then two status flags; `Err` is the
+/// outcome to return while the editor runs a frame.
+type ZleRead = Result<(Vec<u8>, bool, bool), Outcome>;
+
 /// `read -k`/`-q` through the active editor (zsh `bin_read`'s `izle`:
 /// `ZLE_CMD_GET_KEY` per byte): `nchars` characters (UTF-8 ones when
 /// `utf8`). The prompt goes out first. `Err` is the outcome to return
@@ -761,7 +765,7 @@ fn read_zle(
 	utf8: bool,
 	timeout_ns: Option<u64>,
 	prompt: Option<&[u8]>,
-) -> Result<Result<(Vec<u8>, bool, bool), Outcome>, Need> {
+) -> Result<ZleRead, Need> {
 	use crate::bash::vm::zle::builtin::{ReadBytes, read_bytes, reading_bytes};
 	if !reading_bytes(ctx.vp)
 		&& let Some(p) = prompt
