@@ -605,7 +605,7 @@ export class EditTool implements AgentTool<TInput> {
 				// its own repaired file is copied aside under "did not create it".
 				if (repaired) {
 					getEditStore(this.session).invalidate(snapshot.path);
-					await noteOwnWrite(this.session, snapshot.path, false);
+					await noteOwnWrite(this.session, snapshot.path);
 				}
 			} catch (error) {
 				logger.warn("Edit auto-repair failed", {
@@ -733,7 +733,7 @@ export class EditTool implements AgentTool<TInput> {
 		if (request.op === "delete") {
 			// Before the unlink: once the leaf is gone the path no longer resolves
 			// to the key the record was filed under.
-			forgetOwnWrite(this.session, request.path);
+			await forgetOwnWrite(this.session, request.path);
 			await deleteFileWithFallback(request.path, Bun.file(request.path));
 			if (this.session.enableLsp ?? true) {
 				await notifyWorkspaceWatchedFiles(
@@ -793,9 +793,9 @@ export class EditTool implements AgentTool<TInput> {
 			}
 			await writeFileWithFallback(request.moveTo, request.content);
 			if (mode !== undefined) await chmodMovedFile(request.moveTo, mode);
-			forgetOwnWrite(this.session, request.path);
+			await forgetOwnWrite(this.session, request.path);
 			await deleteFileWithFallback(request.path, Bun.file(request.path));
-			await noteOwnWrite(this.session, request.moveTo, !destinationExisted);
+			await noteOwnWrite(this.session, request.moveTo);
 			if (this.session.enableLsp ?? true) {
 				await notifyWorkspaceWatchedFiles(
 					this.session.cwd,
@@ -832,7 +832,7 @@ export class EditTool implements AgentTool<TInput> {
 		if (bridge) {
 			// The editor wrote it, so this session owns it on the same terms as a
 			// local write; without this its own next write is copied aside.
-			await noteOwnWrite(this.session, request.path, existedBefore === false);
+			await noteOwnWrite(this.session, request.path);
 			return { written: bridge.text };
 		}
 
@@ -867,7 +867,7 @@ export class EditTool implements AgentTool<TInput> {
 				return this.#deferredDiagnostics.begin(request.path);
 			},
 		);
-		await noteOwnWrite(this.session, request.path, created);
+		await noteOwnWrite(this.session, request.path);
 
 		if (preWriteBytes !== undefined) {
 			// Fail when a content-changing write left disk at the pre-image. Compare

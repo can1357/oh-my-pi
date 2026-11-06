@@ -38,6 +38,31 @@ function resultText(result: { content: { type: string; text?: string }[] }): str
 	return result.content.flatMap(block => (block.type === "text" && block.text ? [block.text] : [])).join("\n");
 }
 
+/** The store's directory name for `date`, the same shape the module writes. */
+function dayKey(date: Date): string {
+	return `${date.getFullYear()}-${`${date.getMonth() + 1}`.padStart(2, "0")}-${`${date.getDate()}`.padStart(2, "0")}`;
+}
+
+/** A completed day, far enough back to be swept by the budget but not by retention. */
+function completedDay(): string {
+	return dayKey(new Date(Date.now() - 2 * 24 * 60 * 60 * 1000));
+}
+
+/**
+ * Wait for the detached sweep to remove `target`. The sweep is filesystem work
+ * the tool call deliberately does not await, and it exposes no promise to hook,
+ * so there is no signal to wait on and no timer to fake: the condition itself is
+ * the signal. Polls rather than sleeping a guessed duration, and names the file
+ * it was waiting for when it gives up.
+ */
+async function untilGone(target: string, timeoutMs = 10_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (await Bun.file(target).exists()) {
+		if (Date.now() > deadline) throw new Error(`still present after ${timeoutMs}ms: ${target}`);
+		await Bun.sleep(5);
+	}
+}
+
 /** Every regular file in the backup store, excluding the per-day index. */
 async function backupFiles(): Promise<string[]> {
 	const root = getClobberBackupsDir();
@@ -215,7 +240,7 @@ describe("copy-before-clobber: a file this session did not create", () => {
 		expect(resultText(result)).not.toContain(os.homedir());
 	});
 
-	test("an edit create that overwrites a file keeps it, and does not claim it afterwards", async () => {
+	test("an edit create that overwrites a file copies it aside, then owns it", async () => {
 		const target = path.join(tempDir, "register.md");
 		await fs.writeFile(target, DOOMED);
 		const session = makeSession(tempDir);
@@ -228,9 +253,11 @@ describe("copy-before-clobber: a file this session did not create", () => {
 		expect(created.isError).toBeFalsy();
 		expect(await Bun.file(target).text()).toBe("replacement\n");
 		expect(await Bun.file((await backupFiles())[0]!).text()).toBe(DOOMED);
-		// Overwriting a file is not authoring it: the next write is insured too.
-		await new WriteTool(session).execute("rewrite", { path: "register.md", content: "gone\n" });
-		expect(await backupFiles()).toHaveLength(2);
+		// The pre-session content is safe now, so the session's own later writes
+		// to this file destroy only its own output and are not copied again.
+		const second = await new WriteTool(session).execute("rewrite", { path: "register.md", content: "gone\n" });
+		expect(await backupFiles()).toHaveLength(1);
+		expect(resultText(second)).not.toContain("[Backup]");
 	});
 
 	test("a copy whose index entry cannot be written is still reported as saved", async () => {
@@ -330,11 +357,8 @@ describe("copy-before-clobber: a file this session did not create", () => {
 	test("a completed day over the budget is swept even when its index does not account for it", async () => {
 		// 33 x 64 MiB of sparse copies, none named by the index and all in a
 		// subdirectory: the two shapes that let a day outlive the budget while the
-		// index was trusted for sizes. The day is two days back rather than a
-		// literal, so it stays a budget test instead of ageing into a retention one.
-		const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
-		const day = `${twoDaysAgo.getFullYear()}-${`${twoDaysAgo.getMonth() + 1}`.padStart(2, "0")}-${`${twoDaysAgo.getDate()}`.padStart(2, "0")}`;
-		const old = path.join(getClobberBackupsDir(), day);
+		// index was trusted for sizes.
+		const old = path.join(getClobberBackupsDir(), completedDay());
 		const nested = path.join(old, "nested");
 		await fs.mkdir(nested, { recursive: true });
 		for (let i = 0; i < 33; i++) {
@@ -348,16 +372,14 @@ describe("copy-before-clobber: a file this session did not create", () => {
 		// Any backup triggers the day's first sweep.
 		await new WriteTool(makeSession(tempDir)).execute("clobber", { path: "register.md", content: "gone\n" });
 
-		expect(await Bun.file(path.join(nested, "copy-0.md")).exists()).toBe(false);
+		await untilGone(path.join(nested, "copy-0.md"));
 		expect(await backupFiles()).toHaveLength(1);
 	});
 
 	test("a completed day whose index alone is over the budget is swept", async () => {
 		// The count gate reasons from the per-file cap, and the index is the one
 		// file no cap applies to. Left uncounted, a day of any size rides under it.
-		const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
-		const day = `${twoDaysAgo.getFullYear()}-${`${twoDaysAgo.getMonth() + 1}`.padStart(2, "0")}-${`${twoDaysAgo.getDate()}`.padStart(2, "0")}`;
-		const old = path.join(getClobberBackupsDir(), day);
+		const old = path.join(getClobberBackupsDir(), completedDay());
 		await fs.mkdir(old, { recursive: true });
 		const kept = path.join(old, "copy.md");
 		await fs.writeFile(kept, "small\n");
@@ -368,7 +390,7 @@ describe("copy-before-clobber: a file this session did not create", () => {
 
 		await new WriteTool(makeSession(tempDir)).execute("clobber", { path: "register.md", content: "gone\n" });
 
-		expect(await Bun.file(kept).exists()).toBe(false);
+		await untilGone(kept);
 		expect(await backupFiles()).toHaveLength(1);
 	});
 
@@ -376,9 +398,7 @@ describe("copy-before-clobber: a file this session did not create", () => {
 		// A source another writer extends between the cap's `stat` and the copy
 		// lands a copy above the cap. The count gate would charge it 64 MiB
 		// forever; the mark is what makes it get measured instead.
-		const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
-		const day = `${twoDaysAgo.getFullYear()}-${`${twoDaysAgo.getMonth() + 1}`.padStart(2, "0")}-${`${twoDaysAgo.getDate()}`.padStart(2, "0")}`;
-		const old = path.join(getClobberBackupsDir(), day);
+		const old = path.join(getClobberBackupsDir(), completedDay());
 		await fs.mkdir(old, { recursive: true });
 		const grew = path.join(old, "120000000-abcdef12-grew.md.oversize");
 		await fs.writeFile(grew, "x");
@@ -388,8 +408,53 @@ describe("copy-before-clobber: a file this session did not create", () => {
 
 		await new WriteTool(makeSession(tempDir)).execute("clobber", { path: "register.md", content: "gone\n" });
 
-		expect(await Bun.file(grew).exists()).toBe(false);
+		await untilGone(grew);
 		expect(await backupFiles()).toHaveLength(1);
+	});
+
+	test("editing a file this session did not create copies it once, not once per edit", async () => {
+		// The ordinary path in a coding session: repeated edits to a tracked file
+		// nobody in this session authored. The first edit insures the content that
+		// was there before; every edit after that destroys only this session's own
+		// previous edit, which is not what the copy exists to protect.
+		await fs.writeFile(path.join(tempDir, "register.md"), DOOMED);
+		const tool = new EditTool(makeSession(tempDir), "patch");
+
+		const first = await tool.execute("edit-1", {
+			path: "register.md",
+			edits: [{ op: "update", diff: "@@\n-register entry 1\n+edited once" }],
+		});
+		const second = await tool.execute("edit-2", {
+			path: "register.md",
+			edits: [{ op: "update", diff: "@@\n-register entry 2\n+edited twice" }],
+		});
+		const third = await tool.execute("edit-3", {
+			path: "register.md",
+			edits: [{ op: "update", diff: "@@\n-register entry 3\n+edited thrice" }],
+		});
+
+		expect([first, second, third].every(result => !result.isError)).toBe(true);
+		const backups = await backupFiles();
+		expect(backups).toHaveLength(1);
+		expect(await Bun.file(backups[0]!).text()).toBe(DOOMED);
+		expect(resultText(first)).toContain("[Backup]");
+		expect(resultText(second)).not.toContain("[Backup]");
+		expect(resultText(third)).not.toContain("[Backup]");
+	});
+
+	test("the setting turns the whole thing off, and the write still lands", async () => {
+		const target = path.join(tempDir, "register.md");
+		await fs.writeFile(target, DOOMED);
+		const session = makeSession(tempDir);
+		session.settings = Settings.isolated({ "edit.mode": "patch", "edit.clobberBackup": false });
+
+		const result = await new WriteTool(session).execute("clobber", { path: "register.md", content: "gone\n" });
+
+		expect(await Bun.file(target).text()).toBe("gone\n");
+		expect(await backupFiles()).toHaveLength(0);
+		expect(resultText(result)).not.toContain("[Backup]");
+		// Nothing is left behind either: no store directory is created at all.
+		expect(await Bun.file(getClobberBackupsDir()).exists()).toBe(false);
 	});
 
 	test("a multibyte name leaves room for the oversize mark", async () => {

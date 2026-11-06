@@ -785,7 +785,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					await fs.rm(tmpPath, { force: true }).catch(() => {});
 					throw new ToolError(error instanceof Error ? error.message : String(error));
 				}
-				await noteOwnWrite(this.session, finalPath, !exists);
+				await noteOwnWrite(this.session, finalPath);
 
 				const outputPath = `${archiveDisplay}:${resolvedArchivePath.archiveSubPath}`;
 				const writeLine = `Successfully wrote ${contentBytes} bytes to ${outputPath}`;
@@ -1192,7 +1192,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				if (clobberNote) {
 					resultText += `\n${clobberNote}`;
 				}
-				await noteOwnWrite(this.session, absolutePath, !existing);
+				await noteOwnWrite(this.session, absolutePath);
 				return {
 					content: [{ type: "text", text: resultText }],
 					details: { resolvedPath: absolutePath, madeExecutable: madeExecutable || undefined },
@@ -1216,7 +1216,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			if (stripped) {
 				resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
 			}
-			await noteOwnWrite(this.session, absolutePath, !existing);
+			await noteOwnWrite(this.session, absolutePath);
 			// A non-final batch entry returns before the batch's formatter runs: claim nothing yet.
 			const conventionNote =
 				batchRequest?.flush === false ? undefined : textFileConventionNote(applied, finalContent);

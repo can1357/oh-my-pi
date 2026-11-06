@@ -28,12 +28,13 @@
  * rewrites large files all day keeps every copy until tomorrow's sweep — and a
  * single file past the per-file cap is reported rather than copied.
  */
-import * as fs from "node:fs/promises";
-import { realpathSync } from "node:fs";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { shortenEmbeddedPaths, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { getClobberBackupsDir, getSessionsDir, pathIsWithin } from "@oh-my-pi/pi-utils/dirs";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
+import type { Settings } from "../config/settings";
+import { cfgEditClobberBackup } from "../edit/settings";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 
 /** Day directories older than this are swept. Two weeks outlives a weekend plus the week it takes to notice. */
@@ -107,6 +108,7 @@ export interface ClobberBackupOwner {
 /** The session facts a backup decision needs. A structural subset of `ToolSession`. */
 export interface ClobberBackupSession extends ClobberBackupOwner {
 	cwd: string;
+	settings: Settings;
 	getSessionFile?: () => string | null;
 	getSessionId?: () => string | null;
 }
@@ -137,7 +139,7 @@ const realPathMemo = new Map<string, string>();
 const REAL_PATH_MEMO_MAX = 64;
 
 /** `target` with every symlink resolved, or its lexically resolved form when it cannot be. */
-function realPath(target: string, memoize: boolean): string {
+async function realPath(target: string, memoize: boolean): Promise<string> {
 	const resolved = path.resolve(target);
 	if (memoize) {
 		const hit = realPathMemo.get(resolved);
@@ -145,7 +147,7 @@ function realPath(target: string, memoize: boolean): string {
 	}
 	let real: string;
 	try {
-		real = realpathSync.native(resolved);
+		real = await fs.promises.realpath(resolved);
 	} catch {
 		real = resolved;
 	}
@@ -170,17 +172,17 @@ function realPath(target: string, memoize: boolean): string {
  * owns nothing under the root, so every write there is insured. That is the
  * safe direction: it copies more, never less.
  */
-function isForeignSessionDirectory(session: ClobberBackupSession, realTarget: string): boolean {
+async function isForeignSessionDirectory(session: ClobberBackupSession, realTarget: string): Promise<boolean> {
 	let sessionsRoot: string;
 	try {
-		sessionsRoot = realPath(getSessionsDir(), true);
+		sessionsRoot = await realPath(getSessionsDir(), true);
 	} catch {
 		return false;
 	}
 	if (!pathIsWithin(sessionsRoot, realTarget)) return false;
 	const sessionFile = session.getSessionFile?.();
 	if (sessionFile) {
-		const own = realPath(sessionFile, true);
+		const own = await realPath(sessionFile, true);
 		if (own === realTarget) return false;
 		const ownArtifacts = own.endsWith(".jsonl") ? own.slice(0, -".jsonl".length) : own;
 		if (pathIsWithin(ownArtifacts, realTarget)) return false;
@@ -189,12 +191,12 @@ function isForeignSessionDirectory(session: ClobberBackupSession, realTarget: st
 }
 
 /** The reason this mutation needs insuring, or `undefined` when it destroys only this session's own work. */
-function clobberReason(
+async function clobberReason(
 	session: ClobberBackupSession,
 	realTarget: string,
 	stat: WrittenFile,
-): ClobberReason | undefined {
-	if (isForeignSessionDirectory(session, realTarget)) return "foreign-session-dir";
+): Promise<ClobberReason | undefined> {
+	if (await isForeignSessionDirectory(session, realTarget)) return "foreign-session-dir";
 	const written = createdFiles(session).byPath.get(realTarget);
 	if (!written) return "not-created-here";
 	// Same path is not enough: another writer may have replaced the content, or
@@ -211,24 +213,28 @@ function clobberReason(
 }
 
 /**
- * Remember what `absolutePath` looks like now, so a later rewrite of a file
- * this session authored is not insured against. Call it after the bytes are on
- * disk. `created` says the mutation brought the file into existence; without it
- * this only refreshes a record the session already holds, so a file someone
- * else made never becomes "ours" by being written to.
+ * Record what `absolutePath` looks like now, after this session's bytes are on
+ * disk, so the session's own later writes to it are not insured again.
+ *
+ * It records on EVERY successful write, not only on one that created the file.
+ * The first write to a file the session did not create is already copied aside
+ * at that point, and what later writes destroy is that first write's output —
+ * this session's own intermediate state, which is not what the copy exists to
+ * protect. Recording only creations made the ordinary case the expensive one: a
+ * file that existed before the session never earned a record, so every edit of
+ * it copied the whole file again and spent a line of the model's context saying
+ * so. Twenty edits of one tracked file meant twenty copies.
+ *
+ * The record still revokes itself: {@link clobberReason} compares size, mtime,
+ * ctime and inode, so anything another writer does to the file between this
+ * session's writes brings the insurance straight back.
  */
-export async function noteOwnWrite(
-	session: ClobberBackupSession,
-	absolutePath: string,
-	created: boolean,
-): Promise<void> {
+export async function noteOwnWrite(session: ClobberBackupSession, absolutePath: string): Promise<void> {
 	try {
-		const target = realPath(absolutePath, false);
-		const files = createdFiles(session);
-		if (!created && !files.byPath.has(target)) return;
-		const stat = await fs.stat(target).catch(() => undefined);
+		const target = await realPath(absolutePath, false);
+		const stat = await fs.promises.stat(target).catch(() => undefined);
 		if (!stat?.isFile()) return;
-		files.byPath.set(target, {
+		createdFiles(session).byPath.set(target, {
 			size: stat.size,
 			mtimeMs: stat.mtimeMs,
 			ctimeMs: stat.ctimeMs,
@@ -239,9 +245,9 @@ export async function noteOwnWrite(
 	}
 }
 
-/** Forget a path this session created, for a caller that then deleted or moved it away. */
-export function forgetOwnWrite(session: ClobberBackupSession, absolutePath: string): void {
-	session.clobberCreatedPaths?.byPath.delete(realPath(absolutePath, false));
+/** Forget a path this session wrote, for a caller that then deleted or moved it away. */
+export async function forgetOwnWrite(session: ClobberBackupSession, absolutePath: string): Promise<void> {
+	session.clobberCreatedPaths?.byPath.delete(await realPath(absolutePath, false));
 }
 
 /** Longest entry name a POSIX filesystem accepts, in bytes. */
@@ -286,7 +292,7 @@ function dayKey(now: Date): string {
 /** Day directories of the store, oldest first. Unreadable store: empty. */
 async function listDayDirs(root: string): Promise<string[]> {
 	try {
-		const entries = await fs.readdir(root, { withFileTypes: true });
+		const entries = await fs.promises.readdir(root, { withFileTypes: true });
 		return entries
 			.filter(entry => entry.isDirectory() && DAY_DIR_RE.test(entry.name))
 			.map(entry => entry.name)
@@ -314,7 +320,7 @@ async function listDayDirs(root: string): Promise<string[]> {
 async function dayBytes(dayDir: string, entries: readonly DayEntry[]): Promise<number> {
 	let total = 0;
 	for (const entry of entries) {
-		total += (await fs.stat(path.join(entry.dir, entry.name)).catch(() => undefined))?.size ?? 0;
+		total += (await fs.promises.stat(path.join(entry.dir, entry.name)).catch(() => undefined))?.size ?? 0;
 	}
 	return total;
 }
@@ -341,7 +347,7 @@ async function dayEntries(dayDir: string): Promise<DayEntry[]> {
 		const dir = pending.pop()!;
 		let listed;
 		try {
-			listed = await fs.readdir(dir, { withFileTypes: true });
+			listed = await fs.promises.readdir(dir, { withFileTypes: true });
 		} catch (error) {
 			if (!isEnoent(error)) logger.debug("Clobber backup day unreadable", { dir, error: String(error) });
 			continue;
@@ -370,7 +376,7 @@ async function sweepStore(root: string, today: string): Promise<void> {
 	const kept: string[] = [];
 	for (const day of await listDayDirs(root)) {
 		if (day < cutoffKey && day !== today) {
-			await fs.rm(path.join(root, day), { recursive: true, force: true }).catch(error => {
+			await fs.promises.rm(path.join(root, day), { recursive: true, force: true }).catch(error => {
 				logger.debug("Clobber backup age sweep failed", { day, error: String(error) });
 			});
 			continue;
@@ -395,7 +401,7 @@ async function sweepStore(root: string, today: string): Promise<void> {
 			e => (e.dir === dayDir && e.name === INDEX_NAME) || e.name.endsWith(OVERSIZE_SUFFIX),
 		);
 		for (const entry of measured) {
-			ceiling += (await fs.stat(path.join(entry.dir, entry.name)).catch(() => undefined))?.size ?? 0;
+			ceiling += (await fs.promises.stat(path.join(entry.dir, entry.name)).catch(() => undefined))?.size ?? 0;
 		}
 		ceiling += (found.length - measured.length) * MAX_BACKUP_BYTES;
 	}
@@ -409,7 +415,7 @@ async function sweepStore(root: string, today: string): Promise<void> {
 	}
 	for (const day of kept) {
 		if (total <= STORE_BUDGET_BYTES) break;
-		await fs.rm(path.join(root, day), { recursive: true, force: true }).catch(error => {
+		await fs.promises.rm(path.join(root, day), { recursive: true, force: true }).catch(error => {
 			logger.debug("Clobber backup budget sweep failed", { day, error: String(error) });
 		});
 		total -= sizes.get(day) ?? 0;
@@ -429,20 +435,26 @@ export async function backupBeforeClobber(
 	session: ClobberBackupSession,
 	absolutePath: string,
 ): Promise<ClobberBackup | undefined> {
+	// One gate for every caller rather than one per call site: a site that
+	// forgets it would write to the user's disk against their setting, and there
+	// is no result a reader could use to notice. `noteOwnWrite` still records
+	// while this is off, so turning it back on mid-session does not then treat
+	// files the session has been writing all along as someone else's.
+	if (!cfgEditClobberBackup.get(session.settings)) return undefined;
 	let reason: ClobberReason | undefined;
 	let target = path.resolve(absolutePath);
 	let size = 0;
 	try {
 		// The stat comes first: an absent path (the common `create`) answers the
 		// whole question without resolving anything.
-		const stat = await fs.stat(target).catch(error => {
+		const stat = await fs.promises.stat(target).catch(error => {
 			if (isEnoent(error)) return undefined;
 			throw error;
 		});
 		if (!stat?.isFile() || stat.size === 0) return undefined;
 		size = stat.size;
-		target = realPath(target, false);
-		reason = clobberReason(session, target, {
+		target = await realPath(target, false);
+		reason = await clobberReason(session, target, {
 			size: stat.size,
 			mtimeMs: stat.mtimeMs,
 			ctimeMs: stat.ctimeMs,
@@ -456,17 +468,17 @@ export async function backupBeforeClobber(
 		const root = getClobberBackupsDir();
 		const dayDir = path.join(root, day);
 		let destination = path.join(dayDir, backupFileName(now, path.basename(target)));
-		await fs.mkdir(dayDir, { recursive: true });
+		await fs.promises.mkdir(dayDir, { recursive: true });
 		// A reflink where the filesystem has one, a plain copy everywhere else —
 		// never a hard link, which the in-place truncate below would follow.
-		await fs.copyFile(target, destination, fs.constants.COPYFILE_FICLONE);
+		await fs.promises.copyFile(target, destination, fs.constants.COPYFILE_FICLONE);
 		// What landed is what the index and the note must report: the size above
 		// was read before the copy, and a source another writer extended in
 		// between is both larger than that and larger than the cap allowed.
-		size = (await fs.stat(destination).catch(() => undefined))?.size ?? size;
+		size = (await fs.promises.stat(destination).catch(() => undefined))?.size ?? size;
 		if (size > MAX_BACKUP_BYTES) {
 			const marked = `${destination}${OVERSIZE_SUFFIX}`;
-			const renamed = await fs
+			const renamed = await fs.promises
 				.rename(destination, marked)
 				.then(() => true)
 				.catch(error => {
@@ -486,7 +498,7 @@ export async function backupBeforeClobber(
 			// The name alone cannot say where the bytes came from; the day's index
 			// can. The sweep does not read it — it weighs the directory itself —
 			// but a person recovering a file a week later needs it.
-			await fs.appendFile(
+			await fs.promises.appendFile(
 				path.join(dayDir, INDEX_NAME),
 				`${JSON.stringify({ at: now.toISOString(), reason, from: target, to: destination, bytes: size })}\n`,
 			);
@@ -498,10 +510,14 @@ export async function backupBeforeClobber(
 		}
 		// Outside the index's catch: an unwritable index must not also stop
 		// retention and the budget from being enforced on a store that is still
-		// taking copies.
+		// taking copies. Detached, because the caller is a tool call the model is
+		// waiting on and the sweep is housekeeping whose result nothing reads: it
+		// walks every kept day and, past the count gate, stats every file in them.
+		// `sweptStores` is set before the await, so a second backup in the same
+		// process and day does not start a second walk.
 		if (sweptStores.get(root) !== day) {
 			sweptStores.set(root, day);
-			await sweepStore(root, day).catch(error => {
+			void sweepStore(root, day).catch(error => {
 				logger.warn("Clobber backup sweep failed", { root, error: String(error) });
 			});
 		}
