@@ -94,6 +94,8 @@ export interface BashToolDetails {
 	 * Pairs with {@link trace}: the traced script is the command after hoisting.
 	 */
 	cwd?: string;
+	/** `;` when the hoisted leading cd was `cd <dir>;`, so the card redraws it as written; absent means `&&`. */
+	cdSeparator?: ";";
 	/** What the session's Spotlight shaping did to the output. */
 	spotlight?: SpotlightDetails;
 	/** Live ACP update only; completed results refer to released terminals. */
@@ -240,6 +242,8 @@ export interface BashRenderArgs {
 	env?: Record<string, unknown>;
 	timeout?: number;
 	cwd?: string;
+	/** How the `cd <dir>` prefix joins the command: `;` as written by the model, else `&&`. */
+	cdSeparator?: ";";
 	__partialJson?: string;
 	[key: string]: unknown;
 }
@@ -303,7 +307,7 @@ export function bashCommandPrefix(args: BashRenderArgs, uiTheme: Theme): string 
 	const displayWorkdir = formatToolWorkingDirectory(args.cwd, getProjectDir());
 	const envAssignments = formatBashEnvAssignments(getBashEnvForDisplay(args));
 	const prefixParts = ["$"];
-	if (displayWorkdir) prefixParts.push(`cd ${shellVizText(displayWorkdir)} &&`);
+	if (displayWorkdir) prefixParts.push(cdPrefix(displayWorkdir, args.cdSeparator));
 	if (envAssignments) prefixParts.push(envAssignments);
 	return uiTheme.fg("dim", `${prefixParts.join(" ")} `);
 }
@@ -316,10 +320,15 @@ export function formatBashCommandText(args: BashRenderArgs): string {
 	const displayWorkdir = formatToolWorkingDirectory(args.cwd, getProjectDir());
 	const envAssignments = formatBashEnvAssignments(getBashEnvForDisplay(args));
 	const parts: string[] = [];
-	if (displayWorkdir) parts.push(`cd ${shellVizText(displayWorkdir)} &&`);
+	if (displayWorkdir) parts.push(cdPrefix(displayWorkdir, args.cdSeparator));
 	if (envAssignments) parts.push(envAssignments);
 	parts.push(replaceTabs(sanitizeText(args.command || "…")));
 	return parts.join(" ");
+}
+
+/** `cd <dir> &&`, or `cd <dir>;` when the model wrote the hoisted cd with `;`. */
+function cdPrefix(displayWorkdir: string, separator: ";" | undefined): string {
+	return `cd ${shellVizText(displayWorkdir)}${separator ?? " &&"}`;
 }
 
 /** Bash output with the LLM-facing notices (background, exit, wall time, artifact, truncation) removed. */
@@ -489,7 +498,7 @@ function visualCommandLines(
  * hoisted any leading `cd`, so its directory comes from the result, not the raw args.
  */
 function executedScriptArgs(args: BashRenderArgs, details: BashToolDetails | undefined): BashRenderArgs {
-	return details?.cwd === undefined ? args : { ...args, cwd: details.cwd };
+	return details?.cwd === undefined ? args : { ...args, cwd: details.cwd, cdSeparator: details.cdSeparator };
 }
 
 /** Builds a shell transcript renderer with caller-supplied command labels. */
