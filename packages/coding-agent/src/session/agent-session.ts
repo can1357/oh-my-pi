@@ -13726,11 +13726,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						: `Could not restore model ${targetModelStrings[0]}`;
 				}
 			}
+			const restoredUsageRole = this.sessionManager.getLastModelChangeRole({ skipEphemeral: true });
 			this.#usageRoutingRole = explicitModel
 				? undefined
 				: options?.keepModel
 					? previousUsageRoutingRole
-					: this.sessionManager.getLastModelChangeRole({ skipEphemeral: true });
+					: restoredUsageRole === "temporary"
+						? undefined
+						: restoredUsageRole;
 			// The first build used the departing model's frame budget; size the
 			// archive for the model this session is about to adopt.
 			if (targetModel && frameDataBytesBudget(targetModel) !== frameDataBytesBudget(this.model)) {

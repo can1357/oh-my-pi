@@ -615,15 +615,16 @@ Retry model fallback is not context promotion. `contextPromotion.enabled: false`
 
 ### Usage governor
 
-Opt-in pacing of paid quota across the agent processes on this machine. The governor waits a request that would take its OAuth account past the allowance line, using cached usage windows only. See [Usage governor](./usage-governor.md) for the model, coverage and limits.
+Opt-in pacing of eligible paid quota across the agent processes on this machine, using cached usage windows and matching stored credential identity. Eligible stored API keys can be paced as well as OAuth credentials. Unknown or stale evidence does not hold explicit requests or attract proactive switching. See [Usage governor](./usage-governor.md) for provider coverage, routing and limits.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `usageGovernor.enabled` | boolean | `false` | Turns admission and governed account ranking on. Off creates no ledger file and leaves the dispatch path unchanged. |
 | `usageGovernor.leadPct` | number, 0 to 100 | `25` | Share of a window's allowance usable ahead of linear pacing at the window start. It decays to 0 at reset. |
-| `usageGovernor.interactiveReserve` | `hold` or `spend` | `hold` | `hold`: foreground requests keep the account reserve. An interactive turn that cannot send waits, or moves to the role's next model when `retry.usageAwareFallback` is on. `spend`: foreground requests may use the reserve. |
+| `usageGovernor.interactiveReserve` | `hold` or `spend` | `hold` | `hold`: foreground requests keep the account reserve and may wait or use an eligible authorized alternative. `spend`: foreground requests may use the reserve. |
+| `usageGovernor.roleProtection` | `off` or `prefer-alternatives` | `prefer-alternatives` | Prefer independent included allowances when another role has fewer verified open alternatives. |
 
-`retry.usageReservePct` is also the governor's reset target, and `auth.accountPolicies[].reservePct` overrides it per account. The governor never chooses a model or provider.
+`retry.usageReservePct` is also the governor's reset target, and `auth.accountPolicies[].reservePct` overrides it per account. Governed fallback stays within the requesting role's authorized chain or an explicit model's authorized targets. It does not authorize additional spending or reset redemption.
 
 ### Tools and approvals
 

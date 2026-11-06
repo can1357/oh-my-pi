@@ -5143,6 +5143,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// path below (issue #9553): a large advisor transcript would otherwise
 		// block createAgentSession for tens of seconds while the whole file is
 		// streamed and parsed on the main thread.
+		const restoredUsageRole = sessionManager.getLastModelChangeRole({ skipEphemeral: true });
 		session = new AgentSession({
 			cacheWarmer,
 			costGate: options.costGate,
@@ -5161,9 +5162,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				options.usageContext?.routingRole ??
 				modelPatternRetryFallbackRole ??
 				options.modelPatternFallbackRole ??
-				(!hasExplicitModel
-					? (sessionManager.getLastModelChangeRole({ skipEphemeral: true }) ?? "default")
-					: undefined),
+				(!hasExplicitModel && restoredUsageRole !== "temporary" ? (restoredUsageRole ?? "default") : undefined),
 			initialRetryFallback,
 			deferRetryFallbackValidation: options.deferRetryFallbackValidation,
 			prewalk,

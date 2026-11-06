@@ -1415,13 +1415,12 @@ function streamSimpleRequest<TApi extends Api>(
 					},
 				);
 				if (nextKey === undefined) break;
-				if (usageRouteBinding && !nextBinding) {
-					outer.fail(new UsageRouteInvalidatedError());
-					return;
-				}
 				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity, nextBinding);
 				if (!next) return;
 				failure = next;
+				// A binding authorizes only the attempt that carried it, including
+				// when it was obtained during retry rather than initial resolution.
+				if (nextBinding) break;
 			}
 			emitFailure(failure);
 		})();

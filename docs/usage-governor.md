@@ -1,6 +1,6 @@
 # Usage governor
 
-The usage governor paces paid quota across the agent processes on one machine. It is off by default. When `usageGovernor.enabled` is `true`, each request sent with a stored OAuth credential of this agent directory is checked before it leaves the process. The check reads the cached usage window for that account. If sending now would take the account past its allowance line, the request waits until the line catches up. Waits end when the request is aborted.
+The usage governor paces eligible paid quota across the agent processes on one machine. It is off by default. When `usageGovernor.enabled` is `true`, eligible requests using a stored credential of this agent directory are checked against cached usage windows. If sending now would take the account past its allowance line, the request waits until the line catches up. Waits end when the request is aborted.
 
 The governor is a forecast built from cached data. It does not guarantee that a request succeeds, that a provider limit is never reached, or that a wait ends before a reset.
 
@@ -11,6 +11,7 @@ The governor is a forecast built from cached data. It does not guarantee that a 
 | `usageGovernor.enabled`            | boolean              | `false` | Turns admission and governed account ranking on. Off creates no ledger file and leaves the dispatch path unchanged.     |
 | `usageGovernor.leadPct`            | number, 0 to 100     | `25`    | Share of a window's allowance usable ahead of linear pacing at the window start. It decays to 0 at reset.                |
 | `usageGovernor.interactiveReserve` | `hold` or `spend`    | `hold`  | Whether foreground requests may use the account reserve. See [Interactive reserve](#interactive-reserve-hold-or-spend). |
+| `usageGovernor.roleProtection` | `off` or `prefer-alternatives` | `prefer-alternatives` | Prefer independent included allowances when another role has fewer verified open alternatives. |
 
 Two existing settings also shape the governor:
 
@@ -39,18 +40,20 @@ The governor never generates work to consume quota. A request is never sent earl
 
 ## Account routing
 
-The governor ranks accounts inside `CredentialSelector`. Accounts whose window is open rank ahead of paced ones, and paced accounts rank ahead of closed ones. Within the paced group, the account that becomes admissible first is preferred, so a forced wait is the shortest available. Credits (extra usage) are never preferred over paced included usage.
+The governor evaluates eligible accounts and configured fallback targets using cached evidence. Open included allowances are preferred; paced accounts can be compared by their admissible time. With `roleProtection: prefer-alternatives`, it can favor an independent open allowance for a flexible role when another role depends on the shared allowance. Set it to `off` to disable that preference. Protection is a preference, not a reservation or a guarantee.
 
-The governor chooses no model and no provider. Model fallback chains and `retry.usageAwareFallback` behave as before and still use the static reserve. A role's configured chain is never widened.
+When enabled, governed fallback can select a model and account within the requesting role's authorized configured chain, subject to the enabled-model and disabled-provider settings. It does not widen that chain. Explicit model requests remain bounded by their own authorized targets. Unknown routes do not attract proactive switching. With the governor off, the existing `retry.usageAwareFallback` behavior applies.
 
 ## Interactive reserve: hold or spend
 
-- `hold` (default): every request keeps the reserve. An interactive turn that cannot be sent waits until it is admissible, and the wait can be aborted. `retry.usageAwareFallback` can still move the turn to the role's next model before it is sent, if that setting is on.
+- `hold` (default): every request keeps the reserve. An interactive turn that cannot be sent waits until it is admissible, and the wait can be aborted. Governed routing may choose an eligible alternative within the authorized chain.
 - `spend`: a request a person is waiting on in the foreground may use the reserve. Background and subagent requests keep it.
 
 ## Coverage
 
-Admitted when the governor is enabled. Each of these goes through admission when it is sent with a stored credential of this agent directory:
+Stored API keys are not categorically excluded: an eligible key can be paced when its identity, provider, endpoint, model and cached quota evidence can be matched. Keys without that evidence fail open.
+
+These paths enter admission when the governor is enabled and the request has a matching stored credential. A path entering admission does not mean its provider or account has a usable quota window:
 
 - All chat dispatch through `stream`, `streamSimple`, `complete` and `completeSimple` in any thread: main and subagent turns, `/btw` and IRC side turns, handoff, local compaction, branch summary, advisors, cache-warm replays, autolearn capture, titles, commit inference, prompted judges and classifiers, memories, mnemopi extract, speech enhancement, auto-repair, eval completions, image questions, skill-description compression, annotate summary, and custom extension APIs dispatched by pi-ai.
 - All `withAuth` sends: native judgment, remote compaction (V1, V2 and endpoint), images, speech, embeddings, transcription, rerank and video.
@@ -60,7 +63,6 @@ Admitted when the governor is enabled. Each of these goes through admission when
 Not admitted:
 
 - Bearers that are not stored credentials of this agent directory: environment, runtime and config keys, `auth: none` providers, and pi-native gateway bearers. The auth gateway builds its own storage and is not registered.
-- API-key credential rows, such as coding plans. API-key selection records no bearer fingerprint, so these are not yet governed.
 - Provider-internal transport retries inside one dispatch (`maxHttpAttempts`, `providerRetryWait`). They share the grant of the dispatch they belong to.
 - Extension code that calls `fetch` outside pi-ai.
 - Usage probes, token refresh, model discovery, and connection prewarm `HEAD` requests. They are not inference.
@@ -72,19 +74,21 @@ A governor wait is not a provider block. It writes no `auth_credential_blocks` r
 
 ## Unknown, stale and degraded states
 
-- `unknown`: there is no cached usage report for the account. It never holds a request, and the status shows it as unknown.
+- `unknown`: required identity, provider eligibility, model or cached usage evidence is missing or cannot be verified. An explicit request is not held on that basis, but an unknown route is not a proactive switching target.
 - `stale`: the cached snapshot is older than 15 minutes. It never holds a request either. Its last values are shown with their age.
 - Degraded ledger: the shared ledger is busy past its timeout or hits an error. Admission is skipped for that request, so it is sent ungoverned. The status shows `degraded` with the reason, and the next admission retries after 30 seconds. The governor fails open. It never blocks a request because its own storage is unhealthy.
 
 ## Banked resets
 
-Banked resets are rate-limit resets a provider has saved for an account. The status and the usage reports show how many there are, how many are redeemable, whether one is eligible now, and when the soonest expires. They are labelled "not counted".
+Banked resets are rate-limit resets a provider has saved for an account. Status and usage reports show available reset information labelled "not counted". For otherwise comparable eligible routes, fresh evidence of an eligible usable reset that clears all applicable limits and has a future expiry can be used as a routing tie-break.
 
-The governor never counts a banked reset as allowance, never redeems one, and never changes credit or extra-usage settings. Existing reset behaviour, including any `autoRedeem` setting, is unchanged. To spend a reset, use `omp usage reset` or `/usage reset` as before.
+The governor never counts a banked reset as allowance, never redeems one, and never changes credit or extra-usage settings. Routing does not authorize new spending or redemption. Existing reset behaviour, including any `autoRedeem` setting, is unchanged. To spend a reset, use `omp usage reset` or `/usage reset` as before.
 
 ## Limits
 
 - The coverage is cooperative. Only processes on this machine, with this agent directory and the governor enabled, see each other's reservations. Other profiles, machines and applications appear only through the usage snapshots they produce.
+- Built-in governed allowance adapters are currently limited to OpenAI Codex and Z.AI. Codex requires OAuth and cached evidence that paid overage is disabled; Z.AI requires its coding-plan endpoint and applicable cached limits. Other providers, unsupported endpoints, and reports that cannot establish eligibility remain unknown.
+- Routing uses cached reports, not a fresh network probe. It requires a matching stored credential and identity, an applicable model and endpoint, and all required limit observations to be current and no older than 15 minutes. Broker mode without local cache entries cannot establish those facts.
 - The governor paces against the cached snapshot. The provider's own state can be ahead of or behind that snapshot, and a snapshot is trusted for up to 15 minutes.
 - The governor reads cached snapshots only. It never fetches usage, refreshes a token, reloads the credential pool, or contacts the provider to decide a wait.
 - The governor adds no model routing. It cannot widen a role's fallback chain or choose a cheaper model.
