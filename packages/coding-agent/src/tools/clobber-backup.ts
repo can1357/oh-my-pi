@@ -107,6 +107,13 @@ export interface ClobberCreatedFiles {
 /** Owner of the per-session created-file record. Lives on the `ToolSession` the way the edit store does. */
 export interface ClobberBackupOwner {
 	clobberCreatedPaths?: ClobberCreatedFiles;
+	/**
+	 * Notes from copies taken by a writer with no tool result of its own — the
+	 * deferred LSP batch flush, which rewrites files committed by tool calls that
+	 * have already returned. The call that triggers the flush drains them into
+	 * its own result, because there is nowhere else honest to put them.
+	 */
+	clobberPendingNotes?: string[];
 }
 
 /** The session facts a backup decision needs. A structural subset of `ToolSession`. */
@@ -618,4 +625,37 @@ export function clobberBackupNote(backup: ClobberBackup | undefined, displayPath
 			// directory in the model's context.
 			return `[Backup] ${displayPath}: ${why}, but its previous content could not be copied aside (${shortenEmbeddedPaths(backup.error)}), so it is not recoverable from here`;
 	}
+}
+
+/**
+ * Copy aside whatever `absolutePath` holds before a writer with no tool result
+ * of its own replaces it, and hold the note for whichever call drains it.
+ *
+ * The deferred LSP batch flush is that writer: it commits each file during the
+ * tool call that requested it, then post-processes every file in the batch when
+ * a later call flushes, and its formatter rewrites whatever is on disk by then.
+ * Between those two moments another process can replace the file, and the flush
+ * would destroy content nobody in this session wrote. Every other writer in
+ * this feature copies before it writes; this is how the flush does too.
+ *
+ * On the ordinary path the file is still the session's own, `clobberReason`
+ * says so, and this costs two `stat`s and two `realpath`s and copies nothing.
+ */
+export async function insureBeforeRewrite(session: ClobberBackupSession, absolutePath: string): Promise<void> {
+	const note = clobberBackupNote(await backupBeforeClobber(session, absolutePath), shortenPath(absolutePath));
+	if (note === undefined) return;
+	(session.clobberPendingNotes ??= []).push(note);
+}
+
+/**
+ * Take the notes left by {@link insureBeforeRewrite} and clear them. The call
+ * that triggered the flush reports them: the calls that committed those files
+ * have already returned, so amending their results is not available, and a
+ * buffer nobody drains is a copy the model is never told about.
+ */
+export function drainClobberNotes(session: ClobberBackupSession): string[] {
+	const pending = session.clobberPendingNotes;
+	if (pending === undefined || pending.length === 0) return [];
+	session.clobberPendingNotes = [];
+	return pending;
 }

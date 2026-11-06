@@ -700,10 +700,60 @@ describe("copy-before-clobber: a record must not claim bytes this session never 
 		await tool.execute("flush", { path: "b.md", content: "other\n" }, undefined, undefined, flush);
 		const destroyed = await tool.execute("destroy", { path: "a.md", content: "gone\n" });
 
+		// With no formatter the flush writes nothing, so the copy is the destroying
+		// write's and the note rides on its result. What the contract requires is
+		// that the bytes survive somewhere and that the model is told; a second
+		// copy of the same pre-image, if the flush also insured it, is the safe
+		// direction on a path an external writer had already entered.
 		const backups = await backupFiles();
-		expect(backups).toHaveLength(1);
-		expect(await Bun.file(backups[0]!).text()).toBe(DOOMED);
+		expect(backups.length).toBeGreaterThanOrEqual(1);
+		for (const backup of backups) expect(await Bun.file(backup).text()).toBe(DOOMED);
 		expect(resultText(destroyed)).toContain("[Backup]");
+	});
+
+	test.skipIf(BIOME === null)("the flush copies aside foreign bytes before its formatter rewrites them", async () => {
+		// The flush's input is whatever is on disk when it runs, not what the
+		// committing call wrote. A process that replaced the file between the two
+		// calls has content here that nothing else holds a copy of, and the
+		// formatter is about to rewrite it. The copy has to be taken before that
+		// write, and reported on the call that triggered the flush, because the
+		// call that committed the file has already returned.
+		await Bun.write(path.join(tempDir, "biome.json"), "{}\n");
+		await Bun.write(path.join(tempDir, "lsp.json"), JSON.stringify({ servers: { biome: { command: BIOME } } }));
+		const session = makeSession(tempDir);
+		session.enableLsp = true;
+		session.settings = Settings.isolated({
+			"edit.mode": "patch",
+			"lsp.formatOnWrite": true,
+			"lsp.diagnosticsOnWrite": false,
+			"lsp.diagnosticsOnEdit": false,
+		});
+		const tool = new WriteTool(session);
+		const target = path.join(tempDir, "a.js");
+		const foreign = "const FOREIGN_SECRET={value:4321};\n";
+
+		await tool.execute(
+			"first",
+			{ path: "a.js", content: "const x = 1;\n" },
+			undefined,
+			undefined,
+			batchContext("foreign", 0),
+		);
+		await fs.writeFile(target, foreign);
+		const flushed = await tool.execute(
+			"flush",
+			{ path: "b.js", content: "const y = 2;\n" },
+			undefined,
+			undefined,
+			batchContext("foreign", 1),
+		);
+
+		// The formatter really did rewrite the foreign content at the flush.
+		expect(await Bun.file(target).text()).not.toBe(foreign);
+		const backups = await backupFiles();
+		expect(backups.map(backup => path.basename(backup)).some(name => name.endsWith("-a.js"))).toBe(true);
+		expect(await Promise.all(backups.map(backup => Bun.file(backup).text()))).toContain(foreign);
+		expect(resultText(flushed)).toContain("[Backup]");
 	});
 
 	test.skipIf($which("ruff") === null)(

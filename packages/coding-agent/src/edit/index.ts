@@ -38,7 +38,9 @@ import { strictestApproval, truncateForPrompt } from "../tools/approval";
 import {
 	backupBeforeClobber,
 	clobberBackupNote,
+	drainClobberNotes,
 	forgetOwnWrite,
+	insureBeforeRewrite,
 	noteOwnWrite,
 	ownsCurrentContent,
 } from "../tools/clobber-backup";
@@ -188,6 +190,7 @@ function createEditWritethrough(session: ToolSession): WritethroughCallback {
 				transformDiagnostics: deduplicate
 					? (filePath, result) => getDiagnosticsLedger(session).reduce(filePath, result)
 					: undefined,
+				onBeforeFileRewrite: dst => insureBeforeRewrite(session, dst),
 				onFileSettled: dst => noteOwnWrite(session, dst),
 				requestTimeoutSec: cfgLspRequestTimeout.get(session.settings),
 			})
@@ -570,6 +573,10 @@ export class EditTool implements AgentTool<TInput> {
 			if (this.#sessions.get(toolCallId) === open) this.#sessions.delete(toolCallId);
 			this.#streamedArgs.delete(toolCallId);
 		}
+		// Copies the batch flush took on this call's behalf, for files earlier
+		// calls of the batch committed. Those calls have already returned, so
+		// this is the only result that can carry them.
+		clobberNotes.push(...drainClobberNotes(this.session));
 
 		if (outcome.isError) {
 			return {

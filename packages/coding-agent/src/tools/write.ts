@@ -57,7 +57,13 @@ import { routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-br
 import { formatApprovalArguments, truncateForPrompt } from "./approval";
 import { approvalTargetKey } from "./approval-targets";
 import { assertEditableFile } from "./auto-generated-guard";
-import { backupBeforeClobber, clobberBackupNote, noteOwnWrite } from "./clobber-backup";
+import {
+	backupBeforeClobber,
+	clobberBackupNote,
+	drainClobberNotes,
+	insureBeforeRewrite,
+	noteOwnWrite,
+} from "./clobber-backup";
 
 import { isReadTruncationNotice } from "@oh-my-pi/pi-tui/tools/hashline-format";
 import { hasColumnTruncationClause, isColumnTruncationNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
@@ -656,6 +662,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			transformDiagnostics: dedup
 				? (path, result) => getDiagnosticsLedger(this.session).reduce(path, result)
 				: undefined,
+			onBeforeFileRewrite: dst => insureBeforeRewrite(this.session, dst),
 			onFileSettled: dst => noteOwnWrite(this.session, dst),
 			requestTimeoutSec: cfgLspRequestTimeout.get(settings),
 		});
@@ -1229,6 +1236,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			}
 			if (clobberNote) {
 				resultText += `\n${clobberNote}`;
+			}
+			// Copies the batch flush took for files earlier calls of this batch
+			// committed. Those calls have already returned; this result is the
+			// only place left to tell the model where those bytes went.
+			for (const note of drainClobberNotes(this.session)) {
+				resultText += `\n${note}`;
 			}
 			if (!diagnostics.diagnostics) {
 				return {

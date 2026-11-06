@@ -99,10 +99,18 @@ export interface WritethroughOptions {
 	/** `lsp.requestTimeout` in seconds; raises the late-diagnostics wait for slow (cold-starting) servers. */
 	requestTimeoutSec?: number;
 	/**
-	 * Called once per destination a batch flush rewrote, after its final bytes
-	 * are on disk. A batched write commits its file immediately but is formatted
-	 * later, at the flush, so whatever the caller recorded about the file at
-	 * commit time describes bytes the operation did not finish with.
+	 * Called for each destination a batch flush is about to post-process, before
+	 * its formatter can rewrite it. The flush is a writer like any other and its
+	 * input is whatever is on disk at flush time, which another process may have
+	 * replaced since the entry committed — so the caller gets its chance to copy
+	 * those bytes aside first.
+	 */
+	onBeforeFileRewrite?: (dst: string) => Promise<void> | void;
+	/**
+	 * Called once per destination a batch flush may have written, after its final
+	 * bytes are on disk. A batched write commits its file immediately but is
+	 * formatted later, at the flush, so whatever the caller recorded about the
+	 * file at commit time describes bytes the operation did not finish with.
 	 */
 	onFileSettled?: (dst: string) => Promise<void> | void;
 }
@@ -114,6 +122,8 @@ type ResolvedWritethroughOptions = {
 	transformDiagnostics?: (absPath: string, result: FileDiagnosticsResult) => FileDiagnosticsResult;
 	/** Per-server wait budget (ms) for diagnostics delivered late through the deferred channel. */
 	deferredWaitMs: number;
+	/** See {@link WritethroughOptions.onBeforeFileRewrite}. */
+	onBeforeFileRewrite?: (dst: string) => Promise<void> | void;
 	/** See {@link WritethroughOptions.onFileSettled}. */
 	onFileSettled?: (dst: string) => Promise<void> | void;
 };
@@ -194,6 +204,7 @@ function getOrCreateWritethroughBatch(id: string, options: ResolvedWritethroughO
 		existing.options.enableDiagnostics ||= options.enableDiagnostics;
 		existing.options.transformDiagnostics ??= options.transformDiagnostics;
 		existing.options.deferredWaitMs = Math.max(existing.options.deferredWaitMs, options.deferredWaitMs);
+		existing.options.onBeforeFileRewrite ??= options.onBeforeFileRewrite;
 		existing.options.onFileSettled ??= options.onFileSettled;
 		return existing;
 	}
@@ -516,6 +527,10 @@ async function runLspWritethrough(
 				// Custom linters operate on on-disk input; the shared pre-write also
 				// supports implementations that inspect the file before formatting.
 				if (diskContent !== content) await writeContent(content);
+				// Set BEFORE the await, so a format that writes and then fails, or
+				// never returns inside the budget, still counts as having touched
+				// the file. "Did it succeed" is not "did it write".
+				touchedDisk = true;
 				const [formattedContent, capturedVersions] = await Promise.all([
 					formatContent(dst, content, cwd, customLinterServers, operationSignal),
 					minVersionsPromise,
@@ -529,10 +544,8 @@ async function runLspWritethrough(
 				} else {
 					formatter = finalContent !== content ? FileFormatResult.FORMATTED : FileFormatResult.UNCHANGED;
 				}
-				// A custom linter client formats by running its binary over the file
-				// with `--write`, so unless it never ran the file was rewritten —
-				// identical output included.
-				touchedDisk ||= !formattedContent.unsupported;
+				// `formatter` says what the formatting DID; `touchedDisk`, set above
+				// before the call, says that it ran at all.
 				await commitWrite();
 				await notifyWriteCommitted(operationSignal);
 				if (changeType === FileChangeType.Created) {
@@ -557,6 +570,7 @@ async function runLspWritethrough(
 
 				// 2. Format in-memory via LSP
 				if (enableFormat) {
+					touchedDisk = true;
 					const formatted = await formatContent(dst, content, cwd, lspServers, operationSignal);
 					finalContent = formatted.content;
 					if (formatted.failed) {
@@ -679,6 +693,12 @@ async function flushWritethroughBatch(
 				onDeferredDiagnostics: bundle.onDeferredDiagnostics,
 				signal: bundle.signal,
 			} as const);
+		// Before anything rewrites this entry: the flush's input is whatever is on
+		// disk now, not what the committing call wrote, so a process that replaced
+		// it since has content here that nothing else holds a copy of. Every other
+		// writer in this feature copies before it writes; so does this one. On the
+		// ordinary path the file is still the caller's own and nothing is copied.
+		if (entry.dst !== requestedDst) await options.onBeforeFileRewrite?.(entry.dst);
 		const diag = await runLspWritethrough(
 			entry.dst,
 			content,
@@ -691,13 +711,13 @@ async function flushWritethroughBatch(
 			{ contentAlreadyWritten: true },
 		);
 		finalContents.set(entry.dst, diag.finalContent);
-		// Only a destination this flush actually wrote. Equal text is no evidence
-		// that nothing was written — a custom linter formats by running its
-		// binary with `--write` — and claiming a file this flush merely READ
-		// would hand the caller whatever another process left there between the
-		// tool calls, a wider hole than the stale record this hook exists to
-		// repair. The entry the caller is waiting on is excluded either way: its
-		// own post-write checks have not run yet.
+		// Whenever the post-processing ran or threw, not only when it changed the
+		// text: a formatter that rewrites a file to the same bytes still rewrote
+		// it, and one that writes and then fails has still written. Claiming a
+		// little more than was written is safe here precisely because the hook
+		// above has already copied aside anything this session did not author.
+		// The entry the caller is waiting on is excluded: its own post-write
+		// checks have not run yet.
 		if (entry.dst !== requestedDst && diag.touchedDisk) await options.onFileSettled?.(entry.dst);
 		bundle?.finalize(diag.diagnostics);
 		results.push(diag.diagnostics);
@@ -717,6 +737,7 @@ export function createLspWritethrough(cwd: string, options?: WritethroughOptions
 		enableFormat: options?.enableFormat ?? false,
 		enableDiagnostics: options?.enableDiagnostics ?? false,
 		transformDiagnostics: options?.transformDiagnostics,
+		onBeforeFileRewrite: options?.onBeforeFileRewrite,
 		onFileSettled: options?.onFileSettled,
 		deferredWaitMs: deferredDiagnosticsWaitMs(options?.requestTimeoutSec),
 	};
