@@ -268,8 +268,10 @@ impl JjWorkspace {
 				let author = commit.author();
 				// jj-lib 0.47 moved timestamps from chrono to jiff. `Zoned`'s own
 				// `Display` appends an IANA annotation in square brackets, so
-				// format explicitly: this is the spelling jj-lib itself uses, and
-				// it reproduces what chrono's `to_rfc3339` emitted.
+				// format explicitly, in the spelling jj-lib itself uses. This is
+				// RFC 3339 as chrono's `to_rfc3339` was, but not byte-identical:
+				// jiff strips trailing zeros from the fractional second, so 100ms
+				// prints `.1` where chrono printed `.100`.
 				let date = author
 					.timestamp
 					.to_zoned()
@@ -1324,7 +1326,14 @@ mod tests {
 	/// very behaviour under test.
 	#[test]
 	fn reading_over_divergent_op_heads_keeps_colocated_workspace_working_copy() {
+		// A silent skip reports `ok`, which a CI row cannot tell from a pass.
+		// On a developer machine without `jj` that is the right trade; in CI it
+		// would claim this regression is covered when nothing ran.
 		if !jj_available() {
+			assert!(
+				std::env::var_os("CI").is_none(),
+				"CI has no jj on PATH, so this test would report a pass for a contract it never ran"
+			);
 			return;
 		}
 		let temp = tempfile::tempdir().unwrap();
@@ -1349,6 +1358,14 @@ mod tests {
 		let op = jj(&main, &["op", "log", "--limit", "1", "--no-graph", "-T", "id"]);
 		jj(&main, &["--at-op", op.trim(), "describe", "-m", "side one"]);
 		jj(&main, &["--at-op", op.trim(), "bookmark", "create", "side", "-r", "@-"]);
+		assert_eq!(
+			fs::read_dir(main.join(".jj/repo/op_heads/heads"))
+				.unwrap()
+				.count(),
+			2,
+			"the setup left a single operation head, so the read has no merge to perform and cannot \
+			 exercise the fix"
+		);
 
 		let repo = crate::detect(&temp.path().join("reader")).unwrap().unwrap();
 		assert_eq!(repo.kind(), crate::VcsKind::Jj);
