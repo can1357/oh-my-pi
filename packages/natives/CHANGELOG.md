@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed the bash tool's execution trace and its checkpoints growing without bound while a script runs many distinct one-shot sources (`eval`, a command substitution of evaluated text, a sourced file whose bytes change, a trap action, an `env NAME=value` prefix): what they keep now follows what the trace can still replay and what a restore needs
+- Fixed the bash tool's execution trace and its checkpoints growing without bound while a script runs many distinct one-shot sources (`eval`, a command substitution of evaluated text, a sourced file whose bytes change, a trap action, an `env NAME=value` prefix): what they keep now follows what the trace can still replay and what a restore needs ([#18321](https://github.com/can1357/oh-my-pi/pull/18321) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.17.0] - 2026-11-06
 
