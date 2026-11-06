@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the ask dialog's Note (button or `n`) annotating the previous question's answer right after a pick moved on; it now always annotates the highlighted answer of the question shown
+
 ## [18.17.0] - 2026-11-06
 
 ### Breaking Changes
