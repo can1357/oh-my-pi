@@ -141,7 +141,12 @@ async function readAgentDirToken(agentDir: string | undefined): Promise<string |
 	}
 }
 
+/** Default cap on skills registered from one peer card (roster flood guard). */
+export const A2A_DEFAULT_MAX_PEER_SKILLS = 8;
+
 export interface AddA2aAgentsOptions {
+	/** Max skills to register from one peer card; default 8 (flood guard). */
+	maxPeerSkills?: number;
 	bridge: A2aAgentBridge;
 	/** Base URL of the remote bridge, or its direct `agent-card.json` URL. */
 	url: string;
@@ -193,9 +198,15 @@ export async function addA2aAgentsFromUrl(options: AddA2aAgentsOptions): Promise
 	const skills = (Array.isArray(card.skills) ? card.skills : []).filter(
 		(skill): skill is AgentCardSkill => isRecord(skill) && typeof skill.id === "string" && skill.id.trim().length > 0,
 	);
+	// Registration cap: a peer advertising a swarm of one-shot workers
+	// (finished subagents listed by an older bridge) would flood this
+	// session's roster with dead a2a: names. Register at most
+	// `a2a.maxPeerSkills` skills per peer — the main/identity skill first,
+	// then the rest in card order.
+	const maxSkills = options.maxPeerSkills ?? A2A_DEFAULT_MAX_PEER_SKILLS;
 	const entries =
 		skills.length > 0
-			? skills.map(skill => {
+			? skills.slice(0, Math.max(1, maxSkills)).map(skill => {
 					const description = [skill.description, skill.name].find(
 						(value): value is string => typeof value === "string" && value.trim().length > 0,
 					);
@@ -330,6 +341,7 @@ export async function autoRegisterLocalBridges(options: {
 	agentDir: string;
 	settings?: Settings;
 	token?: string;
+	maxPeerSkills?: number;
 	signal?: AbortSignal;
 }): Promise<AutoRegisterResult> {
 	const { readLiveBridges } = await import("./server");
@@ -345,6 +357,7 @@ export async function autoRegisterLocalBridges(options: {
 				token: options.token,
 				agentDir: options.agentDir,
 				settings: options.settings,
+				maxPeerSkills: options.maxPeerSkills,
 				signal: options.signal,
 			});
 			registered.set(

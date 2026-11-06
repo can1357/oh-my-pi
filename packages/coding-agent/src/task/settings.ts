@@ -762,6 +762,19 @@ export const cfgSessionRetentionDays = register({
 	},
 });
 
+export const cfgA2aMaxPeerSkills = register({
+	id: "a2a.maxPeerSkills",
+	type: "number",
+	default: 8,
+	ui: {
+		tab: "tasks",
+		group: "A2A",
+		label: "A2A Max Peer Skills",
+		description:
+			"Cap on skills registered from one peer bridge's card; guards the roster against peers advertising swarms of finished one-shot workers",
+	},
+});
+
 export const cfgA2aAutoRegister = register({
 	id: "a2a.autoRegister",
 	type: "boolean",

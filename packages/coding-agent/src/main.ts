@@ -201,6 +201,7 @@ import { cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings"
 import {
 	cfgA2aAutoRegister,
 	cfgA2aEnabled,
+	cfgA2aMaxPeerSkills,
 	cfgA2aName,
 	cfgA2aPort,
 	cfgSessionRetentionDays,
@@ -2750,6 +2751,7 @@ export async function runRootCommand(
 						bridge: session.a2aBridge,
 						agentDir: settingsInstance.getAgentDir(),
 						settings: settingsInstance,
+						maxPeerSkills: cfgA2aMaxPeerSkills.get(settingsInstance),
 					});
 					const count = [...peers.registered.values()].reduce((sum, names) => sum + names.length, 0);
 					if (count > 0) {

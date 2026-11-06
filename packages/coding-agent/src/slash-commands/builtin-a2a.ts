@@ -8,6 +8,7 @@
  */
 import { addA2aAgentsFromUrl } from "../a2a/agent-bridge";
 import { autoRegisterLocalBridges } from "../a2a/agent-bridge";
+import { cfgA2aMaxPeerSkills } from "../task/settings";
 import { cardRequiresBearer } from "../a2a/client";
 import { commandConsumed, parseSubcommand, usage } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";
@@ -114,6 +115,7 @@ export const BUILTIN_A2A_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 						token: parsed.token,
 						agentDir: runtime.settings.getAgentDir(),
 						settings: runtime.settings,
+						maxPeerSkills: cfgA2aMaxPeerSkills.get(runtime.settings),
 						signal: runtime.signal,
 					});
 					const lines = result.added.map(

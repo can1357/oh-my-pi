@@ -607,7 +607,11 @@ describe("two-instance loop (task-9 server as counterparty)", () => {
 
 			const tool = await createTaskTool(bridge);
 			const text = textOf(
-				await tool.execute("tc-a2a-loop", { agent: "a2a:main", task: "run the loop", a2aSpawn: true } as TaskParams),
+				await tool.execute("tc-a2a-loop", {
+					agent: "a2a:main",
+					task: "run the loop",
+					a2aSpawn: true,
+				} as TaskParams),
 			);
 
 			expect(spawns).toHaveLength(1);
@@ -761,5 +765,34 @@ describe("--a2a-name flag", () => {
 	it("parses both --a2a-name value and --a2a-name=value", () => {
 		expect(parseArgs(["--a2a-name", "builder"]).a2aName).toBe("builder");
 		expect(parseArgs(["--a2a-name=reviewer"]).a2aName).toBe("reviewer");
+	});
+});
+
+describe("peer skill registration cap", () => {
+	it("registers at most maxPeerSkills skills from a fat peer card, main first", async () => {
+		const fatSkills = Array.from({ length: 20 }, (_, i) => ({
+			id: i === 0 ? "Main" : `ImplTask${i}`,
+			displayName: i === 0 ? "Main" : `ImplTask${i}`,
+			description: "worker",
+		}));
+		const server = startMockA2a({
+			onRpc: () => ({ jsonrpc: "2.0", id: 1, result: {} }),
+			skills: fatSkills,
+		});
+		try {
+			const bridge = new A2aAgentBridge();
+			await addA2aAgentsFromUrl({ bridge, url: server.url, token: "t", maxPeerSkills: 5 });
+			const names = bridge.list().map(agent => agent.name);
+			expect(names).toHaveLength(5);
+			expect(names[0]).toBe("a2a:Main");
+			expect(names).not.toContain("a2a:ImplTask6");
+		} finally {
+			server.stop();
+		}
+	});
+
+	it("default cap is 8", async () => {
+		const { A2A_DEFAULT_MAX_PEER_SKILLS } = await import("@oh-my-pi/pi-coding-agent/a2a/agent-bridge");
+		expect(A2A_DEFAULT_MAX_PEER_SKILLS).toBe(8);
 	});
 });
