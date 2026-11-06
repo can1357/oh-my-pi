@@ -802,55 +802,58 @@ export function getSkillSlashCommandName(skill: Pick<Skill, "name">): string {
  * through as `args` so the skill sees the full user request.
  */
 export interface ParsedSkillInvocation {
-	/** Bare skill name without the leading `skill:` prefix. */
-	name: string;
-	/** User-supplied arguments (everything outside the `/skill:<name>` token). */
+	/** Registered skill names in draft order, deduplicated, length >= 1. */
+	names: string[];
+	/** User-supplied arguments (everything outside the recognized `/skill:<name>` tokens). */
 	args: string;
-	/** The draft as submitted (trimmed), token in place — drives the transcript layout. */
+	/** The draft as submitted (trimmed); drives the transcript layout. */
 	prompt: string;
 }
 
 /**
- * Detect a `/skill:<name>` invocation in a user draft.
+ * Detect `/skill:<name>` invocations in a user draft.
  *
- * Returns `undefined` when the text contains no skill token. Otherwise:
- *   - Leading form (`/skill:foo bar baz`): name=`foo`, args=`bar baz`.
- *   - Mid-prompt form (`fix the bug /skill:foo focus on auth`): name=`foo`,
- *     args=`fix the bug focus on auth` — the surrounding prose collapsed
- *     into a single args string.
+ * Scans for every `/skill:<name>` token. Unknown tokens are skipped and remain
+ * in `args`. Returns `undefined` when no registered skills are found.
  *
- * Mid-prompt detection is gated by {@link allowsSkillTokens}.
+ * Detection is gated by {@link allowsSkillTokens}.
  */
-export function parseSkillInvocation(text: string): ParsedSkillInvocation | undefined {
-	const trimmedStart = text.trimStart();
-	const prompt = trimmedStart.trimEnd();
-	if (trimmedStart.startsWith("/skill:")) {
-		const spaceIndex = trimmedStart.search(/\s/);
-		const name =
-			spaceIndex === -1 ? trimmedStart.slice("/skill:".length) : trimmedStart.slice("/skill:".length, spaceIndex);
-		if (!name) return undefined;
-		const args = spaceIndex === -1 ? "" : trimmedStart.slice(spaceIndex + 1).trim();
-		return { name, args, prompt };
-	}
-	if (!allowsSkillTokens(trimmedStart)) return undefined;
+export function parseSkillInvocation(
+	text: string,
+	isKnown: (name: string) => boolean = () => true,
+): ParsedSkillInvocation | undefined {
+	if (!allowsSkillTokens(text)) return undefined;
+	const names: string[] = [];
+	const spans: [number, number][] = [];
 	SKILL_TOKEN_RE.lastIndex = 0;
-	const match = SKILL_TOKEN_RE.exec(text);
-	if (!match) return undefined;
-	const tokenStart = match.index + match[1].length;
-	const tokenEnd = match.index + match[0].length;
-	const name = match[2];
-	const before = text.slice(0, tokenStart).trimEnd();
-	const after = text.slice(tokenEnd).trimStart();
-	const args = [before, after]
-		.filter(part => part.length > 0)
-		.join(" ")
-		.trim();
-	return { name, args, prompt };
+	for (const match of text.matchAll(SKILL_TOKEN_RE)) {
+		const name = match[2];
+		if (!isKnown(name)) continue;
+		if (!names.includes(name)) names.push(name);
+		spans.push([match.index + match[1].length, match.index + match[0].length]);
+	}
+	if (names.length === 0) return undefined;
+
+	// Segments between recorded spans
+	const segments: string[] = [];
+	let lastIndex = 0;
+	for (const [start, end] of spans) {
+		segments.push(text.slice(lastIndex, start));
+		lastIndex = end;
+	}
+	segments.push(text.slice(lastIndex));
+
+	const args = segments
+		.map(s => s.trim())
+		.filter(s => s.length > 0)
+		.join(" ");
+	const prompt = text.trim();
+	return { names, args, prompt };
 }
 
 export type SkillInvocationKind = "user" | "autoload";
 
-/** What the user typed around a skill token: `args` feed the template, `prompt` only the transcript. */
+/** What the user typed around skill tokens: `args` feed the template, `prompt` only the transcript. */
 export type SkillPromptInput = Pick<ParsedSkillInvocation, "args"> & Partial<Pick<ParsedSkillInvocation, "prompt">>;
 
 /** Read a skill's instruction body before rendering user-provided arguments. */
@@ -897,63 +900,71 @@ export async function loadSkillPrompt(
 	}
 }
 
-/** Render a loaded skill with user arguments substituted by its static template. */
+/** Read each skill with {@link loadSkillPrompt}, keeping the given order. */
+export function loadSkillPrompts(
+	skills: readonly Pick<Skill, "name" | "filePath" | "baseDir">[],
+	source?: SkillRediscoverySource,
+): Promise<LoadedSkillPrompt[]> {
+	return Promise.all(skills.map(skill => loadSkillPrompt(skill, source)));
+}
+
+function countSkillBodyLines(body: string): number {
+	return body ? body.split("\n").length : 0;
+}
+
+/** Render loaded skills, in order, with user arguments substituted by the static template. */
 export function renderSkillPromptMessage(
-	skill: Pick<Skill, "name" | "filePath" | "baseDir">,
+	loaded: readonly LoadedSkillPrompt[],
 	input: SkillPromptInput,
-	body: string,
 	invocation: SkillInvocationKind = "user",
 	options?: { expandUserArgs?: (args: string) => string },
 ): BuiltSkillPromptMessage {
+	const [first] = loaded;
+	if (!first) throw new Error("A skill prompt needs at least one skill");
 	const trimmedArgs = input.args.trim();
 	const renderedArgs =
 		invocation === "user" && trimmedArgs ? (options?.expandUserArgs?.(trimmedArgs) ?? trimmedArgs) : trimmedArgs;
-	let message: string;
-	if (invocation === "user") {
-		// User-invoked skills announce themselves and expose their skill directory
-		// so the model resolves the skill's own relative paths (scripts/, templates/).
-		message = prompt
-			.render(userInvocationTemplate, {
+	// User-invoked skills announce themselves and expose their skill directory so the model resolves
+	// each skill's relative paths. Autoload skills are hidden, non-user context: they MUST NOT claim
+	// the user invoked them, so they keep the provenance-only format.
+	const message = prompt
+		.render(invocation === "user" ? userInvocationTemplate : autoloadTemplate, {
+			skills: loaded.map(({ skill, body }) => ({
 				name: skill.name,
 				body,
 				baseDir: skill.baseDir,
-				userArgs: renderedArgs || undefined,
-			})
-			.trim();
-	} else {
-		// Autoload skills are hidden, non-user context — they MUST NOT claim the
-		// user invoked them; this keeps the minimal provenance-only format.
-		message = prompt
-			.render(autoloadTemplate, {
-				body,
 				filePath: skill.filePath,
-				userArgs: trimmedArgs || undefined,
-			})
-			.trim();
-	}
+			})),
+			userArgs: renderedArgs || undefined,
+		})
+		.trim();
 	return {
 		message,
 		details: {
-			name: skill.name,
-			path: skill.filePath,
+			name: first.skill.name,
+			path: first.skill.filePath,
 			args: trimmedArgs || undefined,
 			prompt: input.prompt,
-			lineCount: body ? body.split("\n").length : 0,
+			lineCount: countSkillBodyLines(first.body),
+			skills: loaded.map(({ skill, body }) => ({
+				name: skill.name,
+				path: skill.filePath,
+				lineCount: countSkillBodyLines(body),
+			})),
 		},
 	};
 }
 
 /**
- * Load and render a skill prompt without authorizing session-specific model mentions. With
+ * Load and render skill prompts without authorizing session-specific model mentions. With
  * `source`, a stale skill is read from its rediscovered replacement ({@link loadSkillPrompt});
- * `details.path` names the file actually read.
+ * `details` names the files actually read.
  */
 export async function buildSkillPromptMessage(
-	skill: Pick<Skill, "name" | "filePath" | "baseDir">,
+	skills: readonly Pick<Skill, "name" | "filePath" | "baseDir">[],
 	input: SkillPromptInput,
 	invocation: SkillInvocationKind = "user",
 	source?: SkillRediscoverySource,
 ): Promise<BuiltSkillPromptMessage> {
-	const loaded = await loadSkillPrompt(skill, source);
-	return renderSkillPromptMessage(loaded.skill, input, loaded.body, invocation);
+	return renderSkillPromptMessage(await loadSkillPrompts(skills, source), input, invocation);
 }

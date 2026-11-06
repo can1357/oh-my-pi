@@ -5276,7 +5276,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			// Autoload skills via sendCustomMessage (same mechanic as /skill:<name>)
 			if (options.autoloadSkills?.length) {
 				for (const skill of options.autoloadSkills) {
-					const { message, details } = await buildSkillPromptMessage(skill, { args: "" }, "autoload", session);
+					const { message, details } = await buildSkillPromptMessage([skill], { args: "" }, "autoload", session);
 					await session.sendCustomMessage(
 						{
 							customType: SKILL_PROMPT_MESSAGE_TYPE,

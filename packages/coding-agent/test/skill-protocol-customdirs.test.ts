@@ -92,7 +92,7 @@ describe("skill:// resolution honors skills.customDirectories (#7190)", () => {
 			`${makeSkillMd(helper.name, "plugin-b")}Run scripts/helper.ts next to this skill file.\n`,
 		);
 		setActiveSkills(skills);
-		const invocation = await buildSkillPromptMessage(skills[0], { args: "" });
+		const invocation = await buildSkillPromptMessage([skills[0]], { args: "" });
 		expect(invocation.message).toContain(`[Skill directory: ${skills[0].baseDir}]`);
 		const session: ToolSession = {
 			cwd: skills[0].baseDir,
