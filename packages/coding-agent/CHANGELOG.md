@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `tab.errors()` keeps the fields of plain-object and other non-Error rejections, bounded like console arguments, instead of reporting only `Object` ([#16959](https://github.com/can1357/oh-my-pi/issues/16959)) ([#18251](https://github.com/can1357/oh-my-pi/pull/18251) by [@Alex-Wengg](https://github.com/Alex-Wengg))
+
 ## [18.17.0] - 2026-11-06
 
 ### Added
