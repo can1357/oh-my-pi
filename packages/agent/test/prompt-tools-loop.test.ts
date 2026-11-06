@@ -3,6 +3,7 @@ import { type } from "@oh-my-pi/omptype";
 import { agentLoop } from "@oh-my-pi/pi-agent-core/agent-loop";
 import type { AgentContext, AgentLoopConfig, AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core/types";
 import type { AssistantMessage, Context, Message, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { parseInbandToolMessage } from "@oh-my-pi/pi-ai/dialect";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { createUserMessage } from "./helpers";
 
@@ -101,6 +102,87 @@ describe("agentLoop with owned in-band tool calls", () => {
 		expect(internalResult!.toolName).toBe("echo");
 		expect(wireText(internalResult!)).toBe("echoed:hello world");
 	});
+
+	it.each(["none", "synthetic", "owned"] as const)(
+		"executes quoted deferred code with %s intent while keeping the advertised schema short",
+		async intentMode => {
+			const executed: Array<{ code: string; i?: string }> = [];
+			const parameters = intentMode === "owned" ? type({ code: "string", i: "string" }) : type({ code: "string" });
+			const wireParameters = { type: "object", properties: {}, additionalProperties: true };
+			const tool: AgentTool<typeof parameters, { code: string; i?: string }> = {
+				name: "eval",
+				label: "Evaluate",
+				description: "Evaluate code",
+				parameters,
+				wireParameters,
+				async execute(_toolCallId, args) {
+					executed.push(args);
+					return { content: [{ type: "text", text: args.code }], details: args };
+				},
+			};
+			const intentArgument = intentMode === "none" ? "" : '<arg_key>i</arg_key><arg_value>"inspect"</arg_value>\n';
+			const captured: Context[] = [];
+			const mock = createMockModel({
+				responses: [
+					context => {
+						captured.push(context);
+						return {
+							content: [
+								`<tool_call>eval\n${intentArgument}<arg_key>code</arg_key><arg_value>"x"</arg_value>\n</tool_call>`,
+							],
+						};
+					},
+					context => {
+						captured.push(context);
+						return { content: ["done"] };
+					},
+				],
+			});
+			const context: AgentContext = { systemPrompt: [], messages: [], tools: [tool] };
+			const config: AgentLoopConfig = {
+				model: mock.model,
+				convertToLlm: identityConverter,
+				dialect: "glm",
+				intentTracing: intentMode !== "none",
+			};
+
+			const messages = await agentLoop(
+				[createUserMessage("evaluate a quoted string")],
+				context,
+				config,
+				undefined,
+				mock.stream,
+			).result();
+
+			expect(executed).toEqual([intentMode === "owned" ? { code: '"x"', i: '"inspect"' } : { code: '"x"' }]);
+			const assistant = messages.find((message): message is AssistantMessage => message.role === "assistant");
+			const call = assistant?.content.find(block => block.type === "toolCall");
+			expect(call?.arguments).toEqual(intentMode === "none" ? { code: '"x"' } : { code: '"x"', i: '"inspect"' });
+			const result = messages.find((message): message is ToolResultMessage => message.role === "toolResult");
+			expect(result?.isError).toBe(false);
+			expect(wireText(result!)).toBe('"x"');
+			expect(captured[0]?.tools).toBeUndefined();
+			const catalogLine = (captured[0]?.systemPrompt ?? []).join("\n").match(/^\{"type":"function".*$/m)?.[0];
+			if (!catalogLine) throw new Error("Expected advertised tool catalog");
+			const advertised = JSON.parse(catalogLine) as {
+				function: {
+					parameters: { type: string; properties: Record<string, unknown>; additionalProperties: boolean };
+				};
+			};
+			expect(advertised.function.parameters.type).toBe("object");
+			expect(advertised.function.parameters.additionalProperties).toBe(true);
+			expect(Object.keys(advertised.function.parameters.properties)).toEqual(
+				intentMode === "synthetic" ? ["i"] : [],
+			);
+			const history = captured[1]?.messages.find(
+				(message): message is AssistantMessage => message.role === "assistant",
+			);
+			if (!history) throw new Error("Expected serialized tool-call history");
+			const replayed = parseInbandToolMessage(history, "glm", [tool]);
+			const replayedCall = replayed.content.find(block => block.type === "toolCall");
+			expect(replayedCall?.arguments.code).toBe('"x"');
+		},
+	);
 
 	it("prunes native tool descriptions from the wire when pruneToolDescriptions is set", async () => {
 		const toolSchema = type({ msg: type("string").describe("the message to echo") });

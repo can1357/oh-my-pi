@@ -664,7 +664,9 @@ tools:
 
 Setting a tool to its declared default is a no-op. For example, `lsp: discoverable` keeps LSP under `xd://` when it would normally be mounted; with device mounting disabled, its full top-level definition is unchanged.
 
-Changing an essential tool to `discoverable` keeps it as a normal top-level tool: the model reads `xd://<tool>` for full docs/schema, then calls the tool directly with its ordinary arguments. Runtime validation still uses the full schema and returns it on validation failure. `/force <tool>` continues to work. This also works with `tools.xdev: false`; otherwise, unconfigured tools retain their existing full-schema or mounted-device behavior. `tools.xdevDocs` applies only to mounted devices, not these short native definitions.
+Changing an essential tool to `discoverable` keeps its normal top-level name and ordinary arguments. `read xd://<name>` supplies full docs/schema for any active tool, not only short definitions. `/force <tool>` continues to work. This also works with `tools.xdev: false`; otherwise, unconfigured tools retain their existing full-schema or mounted-device behavior. `tools.xdevDocs` applies only to mounted devices.
+
+Strict tools still validate against their full execution schema and include it in schema-validation errors. Lenient tools such as `task` retain their own normalization, shape checks, and actionable error messages; those errors do not automatically include the full schema.
 
 Overrides never enable disabled tools or widen an explicit `--tools`/SDK `toolNames` selection. `read`, `write`, `todo`, `ask`, `grep`, `web_search`, lifecycle-controlled `think`, `goal`, and `yield`, and tools using custom grammars or native provider facilities retain their full definitions. Unknown names and ignored `discoverable` overrides warn once per configured name/value; changing or removing an entry re-arms its warning. `read` must be enabled to use short definitions.
 

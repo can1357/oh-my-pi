@@ -3,6 +3,7 @@ import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { applyToolProxy } from "../extensibility/tool-proxy";
 import discoverableTemplate from "../prompts/tools/discoverable.md" with { type: "text" };
 import { BUILTIN_TOOL_NAMES, HIDDEN_TOOL_NAMES } from "./builtin-names";
+import { defaultLoadModeForToolName } from "./essential-tools";
 import { promptCatalogSummary, XDEV_KEEP_TOP_LEVEL, XDEV_TRANSPORT_TOOLS } from "./xdev";
 
 export type ToolLoadModes = Readonly<Record<string, ToolLoadMode>>;
@@ -26,7 +27,7 @@ function isPinned(tool: AgentTool): boolean {
 /** Bootstrap/control tools retain their full definitions; overrides never grant tools. */
 export function toolLoadMode(tool: AgentTool, modes: ToolLoadModes, readAvailable = true): ToolLoadMode | undefined {
 	const mode = Object.hasOwn(modes, tool.name) ? modes[tool.name] : undefined;
-	if (mode === (tool.loadMode ?? "essential")) return undefined;
+	if (mode === defaultLoadModeForToolName(tool.name, tool.loadMode)) return undefined;
 	if (mode === "discoverable" && (isPinned(tool) || !readAvailable)) return undefined;
 	return mode;
 }
@@ -37,9 +38,7 @@ export function presentTool<T extends AgentTool>(tool: T, mode: ToolLoadMode | u
 	const cached = shortTools.get(tool);
 	if (cached) return cached as T;
 	const wrapper = {
-		get description(): string {
-			return prompt.render(discoverableTemplate, { name: tool.name, summary: promptCatalogSummary(tool) }).trim();
-		},
+		description: prompt.render(discoverableTemplate, { name: tool.name, summary: promptCatalogSummary(tool) }).trim(),
 		wireParameters: SHORT_PARAMETERS,
 		strict: false,
 		examples: undefined,
@@ -64,7 +63,7 @@ export function warnToolLoadModes(
 	}
 	for (const [name, mode] of Object.entries(modes)) {
 		const tool = tools.get(name);
-		if (tool && mode === (tool.loadMode ?? "essential")) continue;
+		if (tool && mode === defaultLoadModeForToolName(tool.name, tool.loadMode)) continue;
 		let reason: string | undefined;
 		if (!tool && !KNOWN_BUILTINS.has(name)) reason = "tool is not registered";
 		else if (mode === "discoverable" && tool && isPinned(tool)) {

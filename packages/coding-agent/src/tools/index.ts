@@ -983,7 +983,6 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		else session.isToolActive = name => finalActiveNames.has(name);
 	}
 
-	if (!cfgToolsLoadMode.isConfigured(session.settings)) return tools;
 	const readAvailable = tools.some(tool => tool.name === "read");
 	return tools.map(tool => presentTool(tool, toolLoadMode(tool, loadModes, readAvailable)));
 }

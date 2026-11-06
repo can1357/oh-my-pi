@@ -171,7 +171,7 @@ describe("settings-gated tools in a live session", () => {
 		}
 	});
 
-	it("warns once per ignored value without granting disabled tools", async () => {
+	it("retains startup warnings and rearms ignored values without granting disabled tools", async () => {
 		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const settings = Settings.isolated({
 			"grep.enabled": false,
@@ -187,6 +187,16 @@ describe("settings-gated tools in a live session", () => {
 			warn.mock.calls.filter(([message]) => message.includes(`tools.loadMode.${name}`)).length;
 		expect(warningCount("read")).toBe(1);
 		expect(warningCount("unknown_tool")).toBe(1);
+		expect(warningCount("grep")).toBe(0);
+		expect(warningCount("task")).toBe(0);
+		const startupWarnings = session.configWarnings.filter(message => message.startsWith("tools.loadMode."));
+		expect(startupWarnings).toHaveLength(2);
+		expect(startupWarnings).toEqual(
+			expect.arrayContaining([
+				expect.stringContaining("tools.loadMode.read"),
+				expect.stringContaining("tools.loadMode.unknown_tool"),
+			]),
+		);
 		const notices: string[] = [];
 		session.subscribe(event => {
 			if (event.type === "notice" && event.source === "tools.loadMode") notices.push(event.message);
@@ -198,6 +208,7 @@ describe("settings-gated tools in a live session", () => {
 		expect(warningCount("read")).toBe(1);
 		expect(warningCount("unknown_tool")).toBe(1);
 		expect(notices).toEqual([]);
+		expect(session.configWarnings.filter(message => message.startsWith("tools.loadMode."))).toEqual(startupWarnings);
 
 		const modes = { grep: "essential", read: "discoverable", task: "discoverable" } as const;
 		cfgToolsLoadMode.override(settings, { ...modes, unknown_tool: "discoverable" });
@@ -205,6 +216,7 @@ describe("settings-gated tools in a live session", () => {
 		expect(warningCount("read")).toBe(1);
 		expect(warningCount("unknown_tool")).toBe(2);
 		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain("tools.loadMode.unknown_tool");
 		cfgToolsLoadMode.override(settings, modes);
 		await settle(session);
 		cfgToolsLoadMode.override(settings, { ...modes, unknown_tool: "discoverable" });
@@ -212,6 +224,7 @@ describe("settings-gated tools in a live session", () => {
 		expect(warningCount("read")).toBe(1);
 		expect(warningCount("unknown_tool")).toBe(3);
 		expect(notices).toHaveLength(2);
+		expect(notices[1]).toContain("tools.loadMode.unknown_tool");
 	});
 
 	it("serves full native-tool parameters even when device mounting is disabled", async () => {

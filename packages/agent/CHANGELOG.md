@@ -2,15 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Tools can advertise lightweight parameters while keeping full execution schemas; strict schema-validation errors include the full schema, while lenient tools retain their own error handling ([#16874](https://github.com/can1357/oh-my-pi/pull/16874) by [@ultravioletcatastrophe](https://github.com/ultravioletcatastrophe))
+
 ## [18.17.0] - 2026-11-06
 
 ### Added
 
 - Added `Agent.queuedMessageGate` to filter queued messages before delivery and observe claimed messages returned undelivered.
 - Added `wireToolsFingerprint()`, returning a hash of the tool specs sent with a request.
-### Added
-
-- Tool calls advertised with lightweight parameters retain full runtime validation and receive the complete schema on validation failure ([#16874](https://github.com/can1357/oh-my-pi/pull/16874) by [@ultravioletcatastrophe](https://github.com/ultravioletcatastrophe))
 
 ## [18.16.0] - 2026-11-02
 

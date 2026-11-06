@@ -1917,7 +1917,7 @@ async function emitHarmonyAudit(
 interface PreparedProviderCall {
 	model: Model;
 	context: Context;
-	promptToolWireTools: Context["tools"];
+	promptToolParseTools: Context["tools"];
 	ownedDialect: Dialect | undefined;
 	/** Steering source offered to the provider for this call. */
 	liveSteering?: LiveSteeringChannel;
@@ -2027,13 +2027,32 @@ async function prepareProviderCall(
 		llmContext = await config.transformProviderContext(llmContext, model);
 	}
 
-	let promptToolWireTools: Context["tools"];
+	let promptToolArgumentTools: Context["tools"];
 	if (ownedDialect && llmContext.tools && llmContext.tools.length > 0) {
-		promptToolWireTools = llmContext.tools;
+		const promptToolWireTools = llmContext.tools;
+		promptToolArgumentTools = promptToolWireTools;
+		if (context.tools?.some(tool => tool.wireParameters)) {
+			const executionTools = new Map(context.tools.map(tool => [tool.name, tool]));
+			promptToolArgumentTools = promptToolWireTools.map(tool => {
+				const executionTool = executionTools.get(tool.name);
+				if (!executionTool?.wireParameters) return tool;
+				const full = toolWireSchema(executionTool, executionTool.parameters);
+				const intentMode = resolveIntentMode(executionTool.intent);
+				const doInjectIntent =
+					intentMode !== "omit" &&
+					schemaDefinesProperty(toolWireSchema(tool), INTENT_FIELD) &&
+					!schemaDefinesProperty(full, INTENT_FIELD);
+				const parameters = (
+					doInjectIntent ? memoizedInjectIntentIntoSchema(full, intentMode, undefined) : full
+				) as TSchema;
+				// Argument parsing and history rendering need full types; the advertised catalog stays short.
+				return { ...tool, parameters, wireParameters: undefined };
+			});
+		}
 		llmContext = {
 			...llmContext,
 			systemPrompt: [...(llmContext.systemPrompt ?? []), renderInbandToolPrompt(promptToolWireTools, ownedDialect)],
-			messages: encodeInbandToolHistory(llmContext.messages, ownedDialect, promptToolWireTools),
+			messages: encodeInbandToolHistory(llmContext.messages, ownedDialect, promptToolArgumentTools),
 			tools: undefined,
 		};
 	}
@@ -2042,7 +2061,7 @@ async function prepareProviderCall(
 		if (llmContext.tools) config.sentToolDefinitions.record(llmContext.tools);
 		llmContext = config.sentToolDefinitions.withInactiveTools(llmContext);
 	}
-	return { model, context: llmContext, promptToolWireTools, ownedDialect };
+	return { model, context: llmContext, promptToolParseTools: promptToolArgumentTools, ownedDialect };
 }
 
 /**
@@ -2066,7 +2085,7 @@ async function streamAssistantResponse(
 	canDispatchFinalToolCalls?: (message: AssistantMessage) => boolean,
 ): Promise<AssistantMessage> {
 	const providerCall = prepared ?? (await prepareProviderCall(context, config, signal));
-	const { model, context: llmContext, promptToolWireTools, ownedDialect } = providerCall;
+	const { model, context: llmContext, promptToolParseTools, ownedDialect } = providerCall;
 
 	const streamFunction = streamFn || streamSimple;
 
@@ -2223,7 +2242,7 @@ async function streamAssistantResponse(
 				cursorOnToolResult: collectCursorToolResult,
 				liveSteering: providerCall.liveSteering,
 			});
-			if (promptToolWireTools && ownedDialect) {
+			if (promptToolParseTools && ownedDialect) {
 				// Re-materialize in-band tool-call text as native toolCall content blocks
 				// so the rest of the loop executes them unchanged. When the model starts
 				// fabricating tool results, the abort callback cancels the provider — unless
@@ -2231,7 +2250,7 @@ async function streamAssistantResponse(
 				// the fabricated continuation is discarded without aborting.
 				response = wrapInbandToolStream(
 					response,
-					promptToolWireTools,
+					promptToolParseTools,
 					ownedDialect,
 					() => promptToolAbortController?.abort(),
 					config.abortOnFabricatedToolResult ?? true,

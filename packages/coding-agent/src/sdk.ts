@@ -4580,7 +4580,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		hasRegistered = options.expectedAgentRef === undefined || options.expectedAgentRef === null;
 
 		const initialLoadModes = cfgToolsLoadMode.get(settings);
-		warnToolLoadModes(toolRegistry, initialLoadModes, xdevReadAvailable);
+		const toolLoadModeWarnings: string[] = [];
+		warnToolLoadModes(toolRegistry, initialLoadModes, xdevReadAvailable, message =>
+			toolLoadModeWarnings.push(message),
+		);
 
 		// Partition the initial enabled set for the xd:// transport. Tool instances
 		// remain in the canonical map; only presentation names move between layers.
@@ -5246,6 +5249,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			titleSystemPrompt: options.titleSystemPrompt,
 			autoTitle: options.autoTitle === true && !isSubagentSession,
 		});
+		// Startup notices predate UI subscriptions; retain them for the initial config-warning header.
+		session.configWarnings.push(...toolLoadModeWarnings);
 		hasSession = true;
 		// The session now owns its cost gate; the interactive TUI starts compression after its first frame.
 		if (options.deferSkillDescriptionCompression !== true) skillDescriptions.startCompression();
