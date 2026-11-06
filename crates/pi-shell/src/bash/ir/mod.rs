@@ -1056,12 +1056,24 @@ pub(crate) fn compile(
 /// ([`UnitSyntax`](crate::bash::trace::syntax::UnitSyntax)) instead of leaving
 /// the reader to recover it from a source.
 pub(crate) fn launch_unit(mode: ModeId, features: u32, dups: &[(u32, u32)]) -> Unit {
+	use std::sync::Arc;
+
+	use crate::bash::{
+		syntax::{
+			Command as SynCommand, CommandKind as SynCommandKind, NodeId as SynNodeId,
+			Redir as SynRedir, RedirFd as SynRedirFd, RedirOp as SynRedirOp,
+			RedirTarget as SynRedirTarget, Simple as SynSimple, Span as SynSpan, Word as SynWord,
+			WordPart as SynWordPart,
+		},
+		trace::syntax::{SyntaxTree as SynTree, UnitSyntax as SynUnitSyntax},
+	};
+
 	let text: Vec<u8> = dups
 		.iter()
 		.flat_map(|&(fd, to)| format!("{fd}>&{to}").into_bytes())
 		.collect();
 	let mut unit = Unit::empty(&text, mode, features);
-	let span = crate::bash::syntax::Span { lo: 0, hi: text.len() as u32 };
+	let span = SynSpan { lo: 0, hi: text.len() as u32 };
 	unit.nodes =
 		vec![NodeInfo { kind: NodeKind::Simple, lo: 0, hi: text.len() as u32, line: 0, col: 1 }];
 	unit.lists = vec![Vec::new()];
@@ -1092,14 +1104,14 @@ pub(crate) fn launch_unit(mode: ModeId, features: u32, dups: &[(u32, u32)]) -> U
 					node,
 					..Word::default()
 				});
-				syn_redirs.push(crate::bash::syntax::Redir {
-					span:   crate::bash::syntax::Span { lo, hi: at },
-					fd:     Some(crate::bash::syntax::RedirFd::Num(fd)),
-					op:     crate::bash::syntax::RedirOp::DupOut,
-					target: crate::bash::syntax::RedirTarget::Word(crate::bash::syntax::Word {
-						id:    crate::bash::syntax::NodeId(node),
-						span:  crate::bash::syntax::Span { lo: word_lo, hi: at },
-						parts: vec![crate::bash::syntax::WordPart::Lit(target.into_bytes())],
+				syn_redirs.push(SynRedir {
+					span:   SynSpan { lo, hi: at },
+					fd:     Some(SynRedirFd::Num(fd)),
+					op:     SynRedirOp::DupOut,
+					target: SynRedirTarget::Word(SynWord {
+						id:    SynNodeId(node),
+						span:  SynSpan { lo: word_lo, hi: at },
+						parts: vec![SynWordPart::Lit(target.into_bytes())],
 					}),
 				});
 				RedirIr {
@@ -1133,18 +1145,14 @@ pub(crate) fn launch_unit(mode: ModeId, features: u32, dups: &[(u32, u32)]) -> U
 		},
 	];
 	unit.seal();
-	let command = crate::bash::syntax::Command {
-		id: crate::bash::syntax::NodeId(0),
+	let command = SynCommand {
+		id: SynNodeId(0),
 		span,
-		kind: crate::bash::syntax::CommandKind::Simple(crate::bash::syntax::Simple::default()),
+		kind: SynCommandKind::Simple(SynSimple::default()),
 		redirs: syn_redirs,
 	};
-	let _ = unit.trace_syntax.set(std::sync::Arc::new(
-		crate::bash::trace::syntax::UnitSyntax::new(
-			0,
-			crate::bash::trace::syntax::SyntaxTree::Command(std::sync::Arc::new(command)),
-		)
-		.with_context(mode, features),
+	let _ = unit.trace_syntax.set(Arc::new(
+		SynUnitSyntax::new(0, SynTree::Command(Arc::new(command))).with_context(mode, features),
 	));
 	unit
 }

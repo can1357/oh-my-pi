@@ -56,9 +56,15 @@ use crate::bash::{
 /// Version of the [`Image`] layout; part of the header and the build id.
 /// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
 /// variant: an exec target holds it by index. 30 is what
-/// `can1357/oh-my-pi#18172` ships, which this branch merges; 31 adds each
-/// vproc's `argv_init` and each call's `pop_args` obligation, so a popped
-/// argument base stays initialized across restores.
+/// `can1357/oh-my-pi#18172` ships, which this branch merges: each vproc
+/// gains `args_set`, each run gains the launch a host callout's carrier
+/// command runs with its fd duplications and dispatch, whether the run's
+/// source is the engine's own, the content address of the command the
+/// engine built for it, and whether a `.` file's push was its file name;
+/// `BASH_COMMAND` may be a callout operand's text rather than a unit's
+/// syntax node. 31 adds each vproc's `argv_init` and each call's
+/// `pop_args` obligation, so a popped argument base stays initialized
+/// across restores.
 pub const FRAMES_VERSION: u32 = 31;
 
 const MAGIC: [u8; 4] = *b"OBF1";

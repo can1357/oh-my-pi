@@ -1098,17 +1098,15 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		// or read, and its content address — not a name — is what lets
 		// [`Carrier`] recognise it. It is installed once: `carrier` is set
 		// here and the frame pops on the next pass.
-		let carrier_dups = if matches!(
-			vp.frames.as_slice(),
-			[frame] if matches!(frame.kind, FrameKind::Script { what: ScriptKind::Run, .. })
-		) {
-			vp.runs
-				.front()
-				.filter(|r| r.engine && r.launch.pending() && r.carrier.is_none())
-				.map(|r| r.launch.dups())
-		} else {
-			None
-		};
+		let carrier_dups = vp
+			.in_engine_script()
+			.then(|| {
+				vp.runs
+					.front()
+					.filter(|r| r.carrier.is_none())
+					.map(|r| r.launch.dups())
+			})
+			.flatten();
 		if let Some(dups) = carrier_dups {
 			let unit = k.engine.intern(ir::launch_unit(mode, feat.bits(), &dups));
 			if let Some(run) = vp.runs.front_mut() {
