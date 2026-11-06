@@ -25,6 +25,7 @@ import { BtwInjectAnswer, type BtwInjectState, describeBtwInjectAnswer } from ".
 import { compactImageMarkers, formatVisionMarker } from "../prompt/composer-attachments";
 import { extractImagePastePathsFromText } from "../prompt/custom-editor";
 import { BracketedPasteHandler } from "../bracketed-paste";
+import { routeSgrMouseInput, type SgrMouseEvent } from "../mouse";
 import { getMarkdownTheme, type ThemeColor, theme } from "../theme/theme";
 import {
 	matchesSelectCancel,
@@ -192,6 +193,9 @@ export class BtwHistoryPanel implements Component, Focusable {
 	#native: BtwHistoryNativeMemo | undefined;
 	/** The last answer-pane scroll key, forwarded natively (see {@link NativeNode.scroll}). */
 	#scroll: NativeScroll | undefined;
+	/** Frame rows above the body and whether the last frame split into two panes; the wheel hit-tests against them. */
+	#bodyTop = 0;
+	#wide = false;
 	readonly #detail = new ScrollView([], {
 		height: 1,
 		scrollbar: "auto",
@@ -506,6 +510,10 @@ export class BtwHistoryPanel implements Component, Focusable {
 	}
 
 	handleInput(data: string): void {
+		// SGR reports arrive as input while this page holds focus; without this
+		// branch the wheel moved nothing here, although the other scrolling
+		// sheets follow it (and the composer would have typed the bytes).
+		if (routeSgrMouseInput(data, event => this.#routeWheel(event))) return;
 		if (this.#composer) {
 			const paste = this.#pasteHandler.process(data);
 			if (paste.handled) {
@@ -595,6 +603,32 @@ export class BtwHistoryPanel implements Component, Focusable {
 		else if (!this.#detail.handleScrollKey(data)) return false;
 		if (by) this.#scroll = { by, n: (this.#scroll?.n ?? 0) + 1 };
 		this.#followLatest = matchesKey(data, "end");
+		return true;
+	}
+
+	/**
+	 * A wheel notch over the body follows the pointer: over the history list it
+	 * moves the selection, over the reader it scrolls the answer three rows.
+	 * A narrow frame shows one pane, so the wheel follows that one. The pane
+	 * split decides by column because both panes share the body rows.
+	 */
+	#routeWheel(event: SgrMouseEvent): boolean {
+		if (event.wheel === null) return false;
+		const line = event.row - this.#bodyTop;
+		// A notch on the frame chrome or the rows below the body (navigation,
+		// actions, composer) belongs to no pane, in either layout.
+		if (line < 0 || line >= this.#bodyHeightLast) return false;
+		const overList = this.#wide ? this.#split.locate(line, event.col)?.pane === "left" : this.#focus === "list";
+		if (overList) {
+			// A follow-up composer holds the record it was opened for; moving the
+			// selection would show one topic while Enter submits to another.
+			if (this.#composer) return true;
+			this.#select(this.#selectedIndex() + event.wheel);
+		} else {
+			this.#detail.scroll(event.wheel * 3);
+			this.#followLatest = false;
+		}
+		this.#options.requestRender();
 		return true;
 	}
 
@@ -1104,6 +1138,10 @@ export class BtwHistoryPanel implements Component, Focusable {
 			this.#detail.scrollToBottom();
 			detail = this.#detail.render(detailWidth);
 		}
+		// Wheel hit-testing reads the geometry of the frame it already shows.
+		this.#bodyTop = framed ? 2 : height >= 3 ? 1 : 0;
+		this.#wide = wide;
+		this.#bodyHeightLast = bodyHeight;
 		const lines: string[] = [];
 		if (framed) {
 			lines.push(topBorder(width, "BTW history"));
@@ -1112,7 +1150,6 @@ export class BtwHistoryPanel implements Component, Focusable {
 			lines.push(truncateToWidth(this.#focusLabel(this.#focus), width));
 		}
 		if (framed) {
-			this.#bodyHeightLast = bodyHeight;
 			this.#detailCache = detail ?? [];
 			this.#listCache = wide || this.#focus === "list" ? this.#renderList(listWidth, bodyHeight) : [];
 			this.#split.setHeight(bodyHeight);
