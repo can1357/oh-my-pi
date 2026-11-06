@@ -4702,11 +4702,11 @@ fn is_enoexec(err: &std::io::Error) -> bool {
 
 /// bash `check_binary_file`: a NUL before the first newline in the first
 /// 80 bytes.
-pub(crate) fn looks_binary(text: &[u8]) -> bool {
+fn looks_binary(text: &[u8], elf_magic: bool) -> bool {
 	let head = &text[..text.len().min(80)];
 	// An ELF image is binary however it reads: bash checks its magic before
-	// looking for a NUL.
-	if head.starts_with(b"\x7fELF") {
+	// looking for a NUL. zsh has no such rule.
+	if elf_magic && head.starts_with(b"\x7fELF") {
 		return true;
 	}
 	let line = head
@@ -4747,7 +4747,7 @@ fn run_script_file(
 		},
 		Ok(_) => BString::default(),
 	};
-	if looks_binary(&text) {
+	if looks_binary(&text, vp.mode.dialect() != crate::bash::ids::Dialect::Zsh) {
 		let name = st(vp).argv[0].clone();
 		k.diag(cx, vp, line, Diag::BinaryFile { name });
 		let s = st(vp);
@@ -5131,9 +5131,13 @@ mod tests {
 	// bytes) makes a file binary.
 	#[test]
 	fn binary_check_looks_at_the_first_line_only() {
-		assert!(!looks_binary(b"(echo \"$1\")\n"));
-		assert!(looks_binary(b"\x7fELF\x02\x01\x01\0\0"));
-		assert!(!looks_binary(b"echo hi\n\0binary after the first line"));
-		assert!(!looks_binary(b""));
+		assert!(!looks_binary(b"(echo \"$1\")\n", true));
+		assert!(looks_binary(b"\x7fELF\x02\x01\x01\0\0", true));
+		assert!(!looks_binary(b"echo hi\n\0binary after the first line", true));
+		assert!(!looks_binary(b"", true));
+		// bash refuses an ELF image whose first line holds no NUL; zsh, which
+		// has no ELF rule, runs it as text (its own `$'\177ELF'` report).
+		assert!(looks_binary(b"\x7fELF text\n", true));
+		assert!(!looks_binary(b"\x7fELF text\n", false));
 	}
 }

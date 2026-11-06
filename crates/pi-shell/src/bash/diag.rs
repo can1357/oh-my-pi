@@ -548,6 +548,9 @@ pub struct DiagSite<'a> {
 	/// The text being read is a `.` file, so a syntax error in it is not the
 	/// `-c` string's and bash does not print `-c`.
 	pub sourced:    bool,
+	/// An interactive shell, which bash names by itself and reports without a
+	/// line number (`interactive_shell` guards both in `error_prefix`).
+	pub interactive: bool,
 	/// The locale is UTF-8 (which bytes print as they are in names).
 	pub utf8:       bool,
 }
@@ -589,8 +592,10 @@ pub fn render(diag: &Diag, site: DiagSite<'_>) -> Vec<u8> {
 	if syntax && !site.sourced && matches!(site.origin, Origin::Command) {
 		out.extend_from_slice(b": -c");
 	}
-	out.extend_from_slice(b": line ");
-	out.extend_from_slice(site.line.format_into(&mut fmt::NumBuffer::new()).as_bytes());
+	if !site.interactive {
+		out.extend_from_slice(b": line ");
+		out.extend_from_slice(site.line.format_into(&mut fmt::NumBuffer::new()).as_bytes());
+	}
 	out.extend_from_slice(b": ");
 	message(diag, site.utf8, &mut out);
 	out.push(b'\n');
