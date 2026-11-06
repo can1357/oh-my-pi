@@ -5,13 +5,15 @@
 //! builtins above stay platform-agnostic. The platform queries themselves —
 //! procfs parsing, pidfds, libproc, Toolhelp, process handles — live in
 //! [`sys`], which `pi-shell`'s identity-pinned process references
-//! (`pi_shell::process`) are built on too, so each query has one
+//! (`pi_shell::proctree`) are built on too, so each query has one
 //! implementation and a platform fix lands once.
 
 // Consumers (`ps`, `top`, `pgrep`, `pkill`, `pidwait`, `kill`) are each
 // feature-gated, so a build with only some of them enabled legitimately uses
 // only part of this API.
 #![allow(dead_code, reason = "consumed by the feature-gated process builtins")]
+
+use std::time::Duration;
 
 /// Whether a process reference is still live.
 ///
@@ -23,6 +25,20 @@ pub enum ProcessStatus {
 	Running,
 	/// The referenced process has exited or is no longer observable.
 	Exited,
+}
+
+/// A process's accumulated CPU time, split the way the kernel accounts it.
+#[derive(Clone, Copy, Debug)]
+pub struct CpuTimes {
+	pub user:   Duration,
+	pub system: Duration,
+}
+
+impl CpuTimes {
+	/// User plus system time: `ps`'s TIME column and `top`'s CPU share.
+	pub fn total(self) -> Duration {
+		self.user.saturating_add(self.system)
+	}
 }
 
 /// One thread of a process, as `ps -M` lists it.
@@ -40,8 +56,8 @@ pub struct ThreadInfo {
 	/// Policy letter Apple `ps -M` appends to the priority: `T` timesharing,
 	/// `R` round-robin, `F` FIFO.
 	pub policy:      Option<char>,
-	pub user_time:   Option<std::time::Duration>,
-	pub system_time: Option<std::time::Duration>,
+	pub user_time:   Option<Duration>,
+	pub system_time: Option<Duration>,
 	/// Kernel-decayed recent CPU share on macOS; lifetime average elsewhere.
 	pub cpu_percent: Option<f64>,
 }
@@ -185,7 +201,7 @@ pub mod sys {
 mod proc_snapshot {
 	use std::{collections::HashMap, fs, os::fd::AsFd, time::Duration};
 
-	use super::{ProcessStatus, ThreadInfo, sys};
+	use super::{CpuTimes, ProcessStatus, ThreadInfo, sys};
 
 	#[derive(Clone)]
 	pub struct ProcInfo {
@@ -365,9 +381,10 @@ mod proc_snapshot {
 			sys::pidfd_send_signal(pidfd.as_fd(), signal)
 		}
 
-		pub fn cpu_time(&self) -> Option<Duration> {
-			let ticks = clock_ticks()?;
-			Some(Duration::from_secs_f64((self.stat.utime + self.stat.stime) as f64 / ticks as f64))
+		pub fn cpu_times(&self) -> Option<CpuTimes> {
+			let ticks = clock_ticks()? as f64;
+			let seconds = |value: u64| Duration::from_secs_f64(value as f64 / ticks);
+			Some(CpuTimes { user: seconds(self.stat.utime), system: seconds(self.stat.stime) })
 		}
 
 		pub fn resident_bytes(&self) -> Option<u64> {
@@ -649,10 +666,20 @@ mod proc_snapshot {
 		collections::HashMap,
 		ffi::CStr,
 		path::Path,
+		sync::LazyLock,
 		time::{Duration, SystemTime, UNIX_EPOCH},
 	};
 
-	use super::{ProcessStatus, ThreadInfo, sys};
+	use super::{CpuTimes, ProcessStatus, ThreadInfo, sys};
+
+	#[allow(deprecated)]
+	static TIMEBASE: LazyLock<Option<(u32, u32)>> = LazyLock::new(|| {
+		let mut info = libc::mach_timebase_info_data_t { numer: 0, denom: 0 };
+		// SAFETY: info points to a writable Mach timebase record.
+		let status = unsafe { libc::mach_timebase_info(&raw mut info) };
+		(status == libc::KERN_SUCCESS && info.numer != 0 && info.denom != 0)
+			.then_some((info.numer, info.denom))
+	});
 
 	/// `proc_pidinfo` flavor listing a task's thread handles; absent from `libc`.
 	const PROC_PIDLISTTHREADS: libc::c_int = 6;
@@ -864,9 +891,21 @@ mod proc_snapshot {
 			unsafe { libc::kill(self.pid(), signal) == 0 }
 		}
 
-		pub fn cpu_time(&self) -> Option<Duration> {
+		pub fn cpu_times(&self) -> Option<CpuTimes> {
 			let task = self.task.as_ref()?;
-			Some(Duration::from_nanos(task.pti_total_user.saturating_add(task.pti_total_system)))
+			let (numer, denom) = (*TIMEBASE)?;
+			// PROC_PIDTASKINFO CPU counters are Mach absolute-time ticks, not nanoseconds.
+			let duration = |ticks: u64| {
+				let nanos = u128::from(ticks) * u128::from(numer) / u128::from(denom);
+				Some(Duration::new(
+					u64::try_from(nanos / 1_000_000_000).ok()?,
+					(nanos % 1_000_000_000) as u32,
+				))
+			};
+			Some(CpuTimes {
+				user:   duration(task.pti_total_user)?,
+				system: duration(task.pti_total_system)?,
+			})
 		}
 
 		pub fn resident_bytes(&self) -> Option<u64> {
@@ -1024,6 +1063,47 @@ mod proc_snapshot {
 			)
 		};
 		(actual >= size_of::<libc::proc_taskinfo>() as i32).then_some(info)
+	}
+
+	#[cfg(test)]
+	mod tests {
+		use std::time::{Duration, Instant};
+
+		use super::{CpuTimes, ProcInfo};
+
+		fn process_cpu() -> Duration {
+			ProcInfo::from_pid(std::process::id() as i32)
+				.and_then(|process| process.cpu_times())
+				.map(CpuTimes::total)
+				.expect("process CPU time")
+		}
+
+		fn usage_cpu() -> Duration {
+			// SAFETY: rusage is an integer record that may be zero-initialized.
+			let mut usage = unsafe { std::mem::zeroed::<libc::rusage>() };
+			// SAFETY: usage is a valid writable rusage record.
+			assert_eq!(unsafe { libc::getrusage(libc::RUSAGE_SELF, &raw mut usage) }, 0);
+			let micros = (usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) as u64 * 1_000_000
+				+ (usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) as u64;
+			Duration::from_micros(micros)
+		}
+
+		#[test]
+		fn process_cpu_time_matches_system_usage_after_work() {
+			let before = process_cpu();
+			let usage_before = usage_cpu();
+			let start = Instant::now();
+			while start.elapsed() < Duration::from_millis(150) {
+				std::hint::spin_loop();
+			}
+			let usage_delta = usage_cpu() - usage_before;
+			let delta = process_cpu() - before;
+			assert!(usage_delta > Duration::from_millis(20), "insufficient CPU time: {usage_delta:?}");
+			assert!(
+				delta.abs_diff(usage_delta) < Duration::from_millis(40).max(usage_delta / 4),
+				"process CPU time {delta:?} differs from getrusage {usage_delta:?}"
+			);
+		}
 	}
 }
 
@@ -1453,7 +1533,7 @@ mod proc_snapshot {
 	};
 
 	use super::{
-		ProcessStatus, ThreadInfo,
+		CpuTimes, ProcessStatus, ThreadInfo,
 		sys::{self, FileTime, ProcessEntry},
 	};
 
@@ -1675,9 +1755,9 @@ mod proc_snapshot {
 				&& sys::terminate(&handle)
 		}
 
-		pub fn cpu_time(&self) -> Option<Duration> {
+		pub fn cpu_times(&self) -> Option<CpuTimes> {
 			let (_, kernel, user) = sys::process_times(&self.handle)?;
-			Some(ticks_duration(kernel.saturating_add(user)))
+			Some(CpuTimes { user: ticks_duration(user), system: ticks_duration(kernel) })
 		}
 
 		pub fn resident_bytes(&self) -> Option<u64> {

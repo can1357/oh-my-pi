@@ -21,6 +21,7 @@ export const SEARCH_PROVIDER_LABELS = {
 	zai: "Z.AI",
 	exa: "Exa",
 	tinyfish: "TinyFish",
+	keenable: "Keenable",
 	jina: "Jina",
 	kagi: "Kagi",
 	tavily: "Tavily",

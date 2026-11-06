@@ -262,18 +262,30 @@ impl AtSpiAx {
 		connection: &atspi::AccessibilityConnection,
 		app: &ObjectRefOwned,
 	) -> Result<Vec<ObjectRefOwned>, String> {
+		Self::top_levels(connection.connection(), app).await
+	}
+
+	/// `app`'s children that are top-level windows.
+	async fn top_levels(
+		connection: &atspi::zbus::Connection,
+		app: &ObjectRefOwned,
+	) -> Result<Vec<ObjectRefOwned>, String> {
 		let proxy = app
-			.as_accessible_proxy(connection.connection())
+			.as_accessible_proxy(connection)
 			.await
 			.map_err(|err| err.to_string())?;
 		let children = proxy.get_children().await.map_err(|err| err.to_string())?;
 		let mut frames = Vec::new();
 		for child in children {
 			let child_proxy = child
-				.as_accessible_proxy(connection.connection())
+				.as_accessible_proxy(connection)
 				.await
 				.map_err(|err| err.to_string())?;
-			if matches!(child_proxy.get_role().await, Ok(Role::Frame | Role::Dialog | Role::Window)) {
+			if child_proxy
+				.get_role()
+				.await
+				.is_ok_and(|role| top_level_role(role, true))
+			{
 				frames.push(child);
 			}
 		}
@@ -318,6 +330,54 @@ impl AtSpiAx {
 			.build()
 			.await
 			.map_err(|err| err.to_string())
+	}
+
+	/// The top-level window holding `object`. Follows ownership, never screen
+	/// containment: overlapping windows and same-process dialogs are distinct
+	/// input destinations.
+	async fn top_level(
+		connection: &atspi::zbus::Connection,
+		mut object: ObjectRefOwned,
+	) -> CoreResult<ObjectRefOwned> {
+		for _ in 0..64 {
+			let proxy = object
+				.as_accessible_proxy(connection)
+				.await
+				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window owner: {err}")))?;
+			let role = proxy
+				.get_role()
+				.await
+				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window role: {err}")))?;
+			if top_level_role(role, false) {
+				return Ok(object);
+			}
+			let parent = proxy
+				.parent()
+				.await
+				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window parent: {err}")))?;
+			if top_level_role(role, true) && Self::is_application(connection, &parent).await {
+				return Ok(object);
+			}
+			if parent.is_null() || parent == object {
+				break;
+			}
+			drop(proxy);
+			object = parent;
+		}
+		Err(DesktopError::ax_failed("AT-SPI element has no identifiable top-level window"))
+	}
+
+	async fn is_application(connection: &atspi::zbus::Connection, object: &ObjectRefOwned) -> bool {
+		if object.is_null() {
+			return false;
+		}
+		let Ok(proxy) = object.as_accessible_proxy(connection).await else {
+			return false;
+		};
+		proxy
+			.get_role()
+			.await
+			.is_ok_and(|role| role == Role::Application)
 	}
 
 	async fn find_focused(
@@ -368,6 +428,18 @@ fn native_window_for_frame(windows: &[DesktopWindow], pid: u32, title: &str) -> 
 		));
 	}
 	Ok(first.id.clone())
+}
+
+/// Whether `role` marks a top-level window: `Frame`, `Dialog` and `Window`
+/// anywhere, and `FileChooser` as a child of the application. GTK3 gives its
+/// Open and Save dialogs that role and gives it to the file chooser widget
+/// inside them too.
+const fn top_level_role(role: Role, child_of_application: bool) -> bool {
+	match role {
+		Role::Frame | Role::Dialog | Role::Window => true,
+		Role::FileChooser => child_of_application,
+		_ => false,
+	}
 }
 
 /// Generic press means activation, not action zero (GTK4 text views put
@@ -484,51 +556,32 @@ impl AxBackend for AtSpiAx {
 	}
 
 	fn window_id(&mut self, h: &AxHandle, windows: &[DesktopWindow]) -> CoreResult<String> {
-		let mut object = Self::object(h).clone();
+		let object = Self::object(h).clone();
 		self.rt.block_on(async {
-			// Follow ownership, never screen containment: overlapping windows and
-			// same-process dialogs are distinct input destinations.
-			for _ in 0..64 {
-				let proxy = object
-					.as_accessible_proxy(self.connection.connection())
-					.await
-					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window owner: {err}")))?;
-				let role = proxy
-					.get_role()
-					.await
-					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window role: {err}")))?;
-				if matches!(role, Role::Frame | Role::Dialog | Role::Window) {
-					let id = atspi_window_id(&object);
-					if windows.iter().any(|window| window.id == id) {
-						return Ok(id);
-					}
-					let name = object
-						.name()
-						.ok_or_else(|| DesktopError::ax_failed("AT-SPI window has no bus owner"))?;
-					let dbus = atspi::zbus::fdo::DBusProxy::new(self.connection.connection())
-						.await
-						.map_err(|err| DesktopError::ax_failed(err.to_string()))?;
-					let pid = dbus
-						.get_connection_unix_process_id(name.clone().into())
-						.await
-						.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window pid: {err}")))?;
-					let title = proxy
-						.name()
-						.await
-						.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window title: {err}")))?;
-					return native_window_for_frame(windows, pid, &title);
-				}
-				let parent = proxy
-					.parent()
-					.await
-					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window parent: {err}")))?;
-				if parent.is_null() || parent == object {
-					break;
-				}
-				drop(proxy);
-				object = parent;
+			let connection = self.connection.connection();
+			let object = Self::top_level(connection, object).await?;
+			let id = atspi_window_id(&object);
+			if windows.iter().any(|window| window.id == id) {
+				return Ok(id);
 			}
-			Err(DesktopError::ax_failed("AT-SPI element has no identifiable top-level window"))
+			let name = object
+				.name()
+				.ok_or_else(|| DesktopError::ax_failed("AT-SPI window has no bus owner"))?;
+			let dbus = atspi::zbus::fdo::DBusProxy::new(connection)
+				.await
+				.map_err(|err| DesktopError::ax_failed(err.to_string()))?;
+			let pid = dbus
+				.get_connection_unix_process_id(name.clone().into())
+				.await
+				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window pid: {err}")))?;
+			let title = object
+				.as_accessible_proxy(connection)
+				.await
+				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window owner: {err}")))?
+				.name()
+				.await
+				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window title: {err}")))?;
+			native_window_for_frame(windows, pid, &title)
 		})
 	}
 
@@ -1013,6 +1066,83 @@ mod tests {
 			.map(|w| w.window.id.as_str())
 			.collect();
 		assert_eq!(ids, ["-8"]);
+	}
+
+	#[test]
+	fn file_dialogs_are_top_levels_only_under_the_application() {
+		use atspi::zbus::{
+			connection::Builder as ConnectionBuilder, interface, zvariant::OwnedObjectPath,
+		};
+
+		/// An `org.a11y.atspi.Accessible` node with its role, parent and
+		/// children.
+		struct Node {
+			role:     Role,
+			parent:   &'static str,
+			children: Vec<&'static str>,
+		}
+
+		#[interface(name = "org.a11y.atspi.Accessible")]
+		impl Node {
+			fn get_role(&self) -> u32 {
+				self.role as u32
+			}
+
+			fn get_children(&self) -> Vec<(String, OwnedObjectPath)> {
+				let object = |path: &&str| (PEER.to_owned(), OwnedObjectPath::try_from(*path).unwrap());
+				self.children.iter().map(object).collect()
+			}
+
+			#[zbus(property)]
+			fn parent(&self) -> (String, OwnedObjectPath) {
+				(PEER.to_owned(), OwnedObjectPath::try_from(self.parent).unwrap())
+			}
+		}
+
+		const PEER: &str = ":1.7";
+		let rt = Builder::new_current_thread().enable_all().build().unwrap();
+		let (top_levels, owners) = rt.block_on(async {
+			let (client, server) = tokio::net::UnixStream::pair().unwrap();
+			// A file dialog holding its own chooser widget, and a frame that
+			// embeds one.
+			let tree = [
+				("/app", Role::Application, "/org/a11y/atspi/null", vec!["/dialog", "/frame"]),
+				("/dialog", Role::FileChooser, "/app", vec!["/filler"]),
+				("/filler", Role::Filler, "/dialog", vec!["/widget"]),
+				("/widget", Role::FileChooser, "/filler", vec!["/open"]),
+				("/open", Role::Button, "/widget", vec![]),
+				("/frame", Role::Frame, "/app", vec!["/embedded"]),
+				("/embedded", Role::FileChooser, "/frame", vec!["/ok"]),
+				("/ok", Role::Button, "/embedded", vec![]),
+			];
+			let mut server = ConnectionBuilder::unix_stream(server)
+				.server(atspi::zbus::Guid::generate())
+				.unwrap()
+				.p2p();
+			for (path, role, parent, children) in tree {
+				server = server
+					.serve_at(path, Node { role, parent, children })
+					.unwrap();
+			}
+			let client = ConnectionBuilder::unix_stream(client).p2p().build();
+			let (server, client) = tokio::try_join!(server.build(), client).unwrap();
+			let object = |path| ObjectRefOwned::from_static_str_unchecked(PEER, path);
+			let path = |object: ObjectRefOwned| object.path_as_str().to_owned();
+			let top_levels = AtSpiAx::top_levels(&client, &object("/app")).await;
+			let mut owners = Vec::new();
+			for element in ["/open", "/dialog", "/ok"] {
+				owners.push(
+					AtSpiAx::top_level(&client, object(element))
+						.await
+						.map(path)
+						.ok(),
+				);
+			}
+			drop(server);
+			(top_levels.map(|items| items.into_iter().map(path).collect::<Vec<_>>()), owners)
+		});
+		assert_eq!(top_levels, Ok(vec!["/dialog".to_owned(), "/frame".to_owned()]));
+		assert_eq!(owners, [Some("/dialog".into()), Some("/dialog".into()), Some("/frame".into())]);
 	}
 
 	#[test]

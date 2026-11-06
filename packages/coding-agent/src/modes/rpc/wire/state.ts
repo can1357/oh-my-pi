@@ -179,6 +179,10 @@ export const stateDefs = {
 		"minimized?": JSON_OBJECT,
 		"workingDir?": "string",
 		"images?": "ImageContent[]",
+		"trace?": doc(
+			JSON_OBJECT,
+			"The embedded shell's final `ShellTrace` of the run; only when the caller asked for one.",
+		),
 	},
 	LineRange: { first: "number.integer", last: "number.integer" },
 	FastModeResult: { enabled: "boolean", active: "boolean" },

@@ -98,6 +98,8 @@ impl<'s> ZshParser<'s> {
 			cx.msgs.clear();
 			cx.errflag = false;
 			cx.lexstop = false;
+			cx.cmdstack.clear();
+			cx.eof_stack = None;
 			let (ok, items) = cx.parse_event_top();
 			if ok && !cx.errflag {
 				let lo = items.first().map_or(0, |i| i.and_or.span.lo);
@@ -123,6 +125,26 @@ impl<'s> ZshParser<'s> {
 				return None;
 			}
 		}
+	}
+
+	/// zsh's `cmdstack` (`CS_*` codes, outermost first; name them with
+	/// [`super::cmdname`]) when the input ran out in the last event parsed:
+	/// the constructs `PS2`'s `%_` shows when interactive zsh asks for
+	/// another line (`if then`, `for dquote cmdsubst`, `cmdand`,
+	/// `heredoc`).
+	///
+	/// Describes the event the last [`ZshParser::next_command`] call parsed,
+	/// until the next call; empty when the input never ran out in that
+	/// event or ran out with nothing open. Non-empty means interactive zsh
+	/// would have asked for another line, whatever the call returned: `None`,
+	/// an error at the end of the input, or a command whose here-document
+	/// the end of input cut short (`cat <<E` → `heredoc`). As
+	/// for zsh, the source should end with the newline of the last line
+	/// read: without it, end of input can be met (and recorded) while a
+	/// token is still being read, before the construct it ends is open
+	/// (`a |`).
+	pub fn cmdstack(&self) -> &[u8] {
+		self.cx.eof_stack.as_deref().unwrap_or_default()
 	}
 
 	/// The error for the messages zsh printed.

@@ -44,6 +44,7 @@ use std::{
 		Arc, OnceLock,
 		atomic::{AtomicBool, Ordering},
 	},
+	time::{Duration, Instant},
 };
 
 use futures::{
@@ -236,6 +237,42 @@ impl StdoutFile {
 	/// Whether `path` on `fs` is this file.
 	pub async fn is(&self, fs: &pi_vfs::Fs, path: &Path) -> bool {
 		fs.metadata(path).await.is_ok_and(|candidate| self.0.same_file(&candidate))
+	}
+}
+
+/// Pending output at which [`Host::pace_output`] delivers.
+const PACED_BYTES: usize = 32 * 1024;
+
+/// Longest [`Host::pace_output`] holds output back.
+const PACED_INTERVAL: Duration = Duration::from_millis(10);
+
+/// Calls of [`Host::pace_output`] between its clock reads.
+const PACED_CLOCK_STRIDE: u32 = 64;
+
+/// When a loop paced by [`Host::pace_output`] last delivered its output, and
+/// its calls since the last clock read. Made by [`Host::output_pace`].
+pub(crate) struct OutputPace {
+	since:  Instant,
+	calls:  u32,
+	/// Output to a terminal is delivered per unit, as it is produced.
+	paced:  bool,
+}
+
+impl OutputPace {
+	/// A pace whose interval starts now.
+	fn restart(paced: bool) -> Self {
+		Self { since: Instant::now(), calls: 0, paced }
+	}
+
+	/// Whether [`PACED_INTERVAL`] has passed since the last delivery, read
+	/// once every [`PACED_CLOCK_STRIDE`] calls.
+	fn interval_passed(&mut self) -> bool {
+		self.calls += 1;
+		if self.calls < PACED_CLOCK_STRIDE {
+			return false;
+		}
+		self.calls = 0;
+		self.since.elapsed() >= PACED_INTERVAL
 	}
 }
 
@@ -986,6 +1023,42 @@ impl Host {
 		self.drain_output(false).await
 	}
 
+	/// [`Host::flush_output`] for a loop whose next unit of output follows
+	/// without waiting (a walk, a search of listed files): delivers once
+	/// [`PACED_BYTES`] are pending or [`PACED_INTERVAL`] has passed since
+	/// `pace` last delivered, so a pipe's reader wakes per batch rather than
+	/// per unit. A loop about to wait on anything else calls
+	/// [`Host::flush_output`] first.
+	///
+	/// # Errors
+	///
+	/// As for [`Host::flush_output`].
+	pub async fn pace_output(&self, pace: &mut OutputPace) -> io::Result<()> {
+		let Some(streams) = &self.async_out else {
+			return Ok(());
+		};
+		if pace.paced
+			&& streams.stdout.pending_len() < PACED_BYTES
+			&& streams.stderr.pending_len() < PACED_BYTES
+			&& !pace.interval_passed()
+		{
+			return Ok(());
+		}
+		let delivered = self.flush_output().await;
+		*pace = OutputPace::restart(pace.paced);
+		delivered
+	}
+
+	/// The pace of a [`Host::pace_output`] loop starting now. Output to a
+	/// terminal is not held back.
+	pub fn output_pace(&self) -> OutputPace {
+		let terminal = self
+			.async_out
+			.as_ref()
+			.is_some_and(|streams| streams.stdout.is_terminal() || streams.stderr.is_terminal());
+		OutputPace::restart(!terminal)
+	}
+
 	/// Delivers pending output: all of it when `full`, else as
 	/// [`Host::flush_output`].
 	async fn drain_output(&self, full: bool) -> io::Result<()> {
@@ -1600,7 +1673,10 @@ impl Destination {
 /// That last one matters more than it looks: the host process's fd 2 belongs to
 /// the TUI, so a child left with inherited stderr writes straight into the
 /// rendered frame. [`ChildEnv::command`] therefore always pipes stderr, and
-/// [`ChildEnv::forward_stderr`] drains it to the command's own fd 2.
+/// [`ChildEnv::forward_stderr`] drains it to the command's own fd 2. For the
+/// same reason the child leads a new session without a controlling terminal,
+/// the embedded shell's policy for externals: `rsync`'s `ssh` would otherwise
+/// prompt on (and read keystrokes from) the user's terminal under the TUI.
 #[derive(Clone)]
 pub(crate) struct ChildEnv {
 	cwd:    PathBuf,
@@ -1619,7 +1695,8 @@ fn native_working_dir<'a>(filesystem: &BlockingFs, cwd: &'a Path) -> io::Result<
 
 impl ChildEnv {
 	/// Builds a `Command` for `program` with the shell's working directory and
-	/// environment, and with stderr piped.
+	/// environment, stderr piped, and (unix) in a new session with no
+	/// controlling terminal, so a `/dev/tty` open fails instead of prompting.
 	///
 	/// Stdin and stdout are left untouched for the caller to wire; they default
 	/// to inherited, so a caller that leaves them alone MUST redirect them.
@@ -1631,6 +1708,8 @@ impl ChildEnv {
 			.env_clear()
 			.envs(self.env.iter().map(|(k, v)| (k, v)))
 			.stderr(std::process::Stdio::piped());
+		#[cfg(unix)]
+		std::os::unix::process::CommandExt::setsid(&mut command, true);
 		Ok(command)
 	}
 

@@ -184,6 +184,11 @@ impl AsyncOut {
 		self.shared.handle.is_terminal()
 	}
 
+	/// Bytes written and not yet delivered.
+	pub fn pending_len(&self) -> usize {
+		self.shared.pending.lock().len()
+	}
+
 	/// Delivers the pending bytes: all of them when `full` or when the
 	/// destination is not a regular file, else only once 64 KiB are pending.
 	/// Returns at once when nothing is due.

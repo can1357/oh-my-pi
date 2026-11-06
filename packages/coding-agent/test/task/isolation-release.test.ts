@@ -6,7 +6,7 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
-import { runIsolatedSubprocess } from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
+import { nativeWorkspace, runIsolatedSubprocess } from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import * as worktreeModule from "@oh-my-pi/pi-coding-agent/task/worktree";
 import * as natives from "@oh-my-pi/pi-natives";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
@@ -102,7 +102,7 @@ async function commitsAcrossRelease(id: string, runEndPatch: string, releasePatc
 			id,
 		},
 		context: { repoRoot: "/repo" },
-		preferredBackend: undefined,
+		openWorkspace: nativeWorkspace(undefined),
 		agentId: id,
 		mergeMode: "branch",
 		artifactsDir,

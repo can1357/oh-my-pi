@@ -10,8 +10,6 @@ import type {
 	SpotlightAdjustedTool,
 	SpotlightCompounding,
 	SpotlightCoverageRow,
-	SpotlightEditGate,
-	SpotlightEditGateReads,
 	SpotlightEstimate,
 	SpotlightHeatPosition,
 	SpotlightRanking,
@@ -24,7 +22,6 @@ import type {
 import type { Call, Evaluated, Result, SessionAnalysis } from "./spotlight-aggregator";
 import {
 	BOOTSTRAP_MIN_SESSIONS,
-	bootstrapInterval,
 	bootstrapRatio,
 	bootstrapRounds,
 	jointSamples,
@@ -73,9 +70,8 @@ export interface SessionMoney {
 	spotlightUsd: number;
 }
 
-/** One baseline stratum's cuts and holdouts (see {@link stratumKey}). */
+/** One tool's cuts and holdouts. */
 interface ToolCell {
-	tool: SpotlightTool;
 	cuts: number;
 	recovered: number;
 	holdouts: number;
@@ -83,12 +79,12 @@ interface ToolCell {
 	baseline: number;
 }
 
-/** Cells by stratum key. */
-type StratumCells = Map<string, ToolCell>;
+/** Cells by tool. */
+type ToolCells = Map<SpotlightTool, ToolCell>;
 
 interface AdjustedSession {
 	money: SessionMoney;
-	tools: StratumCells;
+	tools: ToolCells;
 }
 
 /** Intervals of the adjusted net's statistics; `excess` by tool, in the order the tools were given. */
@@ -99,66 +95,41 @@ interface AdjustedIntervals {
 	excess: Pick<SpotlightEstimate, "lo" | "hi">[];
 }
 
-function emptyToolCell(tool: SpotlightTool): ToolCell {
-	return { tool, cuts: 0, recovered: 0, holdouts: 0, baseline: 0 };
+function emptyToolCell(): ToolCell {
+	return { cuts: 0, recovered: 0, holdouts: 0, baseline: 0 };
 }
 
-/**
- * The holdout baseline's stratum of a result: reads split by whether the agent was likely to edit them (edit-likely
- * cuts are measured against edit-likely holdouts, the rest against the rest); every other tool is one stratum.
- */
-function stratumKey(tool: SpotlightTool, result: Result): string {
-	return tool === "read" ? `read\0${result.editLikely === true ? "edit" : "other"}` : tool;
-}
-
-/** The cell of `result`'s stratum in `cells`, created empty when missing. */
-function stratumCell(cells: StratumCells, tool: SpotlightTool, result: Result): ToolCell {
-	const key = stratumKey(tool, result);
-	let cell = cells.get(key);
+/** The cell of `tool` in `cells`, created empty when missing. */
+function toolCell(cells: ToolCells, tool: SpotlightTool): ToolCell {
+	let cell = cells.get(tool);
 	if (!cell) {
-		cell = emptyToolCell(tool);
-		cells.set(key, cell);
+		cell = emptyToolCell();
+		cells.set(tool, cell);
 	}
 	return cell;
 }
 
-/**
- * Would-be recovered tokens per held-out cut of each stratum of summed cells: its own holdouts' rate from
- * {@link MIN_HOLDOUTS} on, else its tool's rate over all its holdouts (0 without any).
- */
-function stratumBaselines(cells: StratumCells): Map<string, number> {
-	const byTool = new Map<SpotlightTool, [number, number]>();
-	for (const cell of cells.values()) {
-		const sum = byTool.get(cell.tool) ?? [0, 0];
-		sum[0] += cell.baseline;
-		sum[1] += cell.holdouts;
-		byTool.set(cell.tool, sum);
-	}
-	const perCut = new Map<string, number>();
-	for (const [key, cell] of cells) {
-		const [baseline, holdouts] = byTool.get(cell.tool) ?? [0, 0];
-		perCut.set(
-			key,
-			cell.holdouts >= MIN_HOLDOUTS ? cell.baseline / cell.holdouts : holdouts > 0 ? baseline / holdouts : 0,
-		);
-	}
-	return perCut;
+/** Would-be recovered tokens per held-out cut of a cell: its holdouts' rate, 0 without any. */
+function baselinePerCut(cell: ToolCell): number {
+	return cell.holdouts > 0 ? cell.baseline / cell.holdouts : 0;
 }
 
 /**
- * Per-cut holdout baselines of the range's evaluated results (see {@link stratumBaselines}): what a cut of `tool`
- * like `result` gets fetched back anyway.
+ * Per-cut holdout baselines of the range's evaluated results (see {@link baselinePerCut}): what a cut of `tool`
+ * gets fetched back anyway.
  */
-export function holdoutBaselines(evaluated: readonly Evaluated[]): (tool: SpotlightTool, result: Result) => number {
-	const cells: StratumCells = new Map();
+export function holdoutBaselines(evaluated: readonly Evaluated[]): (tool: SpotlightTool) => number {
+	const cells: ToolCells = new Map();
 	for (const { call, result, tool } of evaluated) {
 		if (!result.holdout) continue;
-		const cell = stratumCell(cells, tool, result);
+		const cell = toolCell(cells, tool);
 		cell.holdouts++;
 		cell.baseline += call.baselineTokens;
 	}
-	const perCut = stratumBaselines(cells);
-	return (tool, result) => perCut.get(stratumKey(tool, result)) ?? 0;
+	return tool => {
+		const cell = cells.get(tool);
+		return cell ? baselinePerCut(cell) : 0;
+	};
 }
 
 export function emptyAdjusted(): SpotlightAdjusted {
@@ -171,25 +142,17 @@ export function emptyAdjusted(): SpotlightAdjusted {
 	};
 }
 
-/** Excess per tool of summed cells: Σ over its strata of max(0, recovered − baseline per cut × cuts). */
-function excessOf(cells: StratumCells): Map<SpotlightTool, number> {
-	const perCut = stratumBaselines(cells);
+/** Excess per tool of summed cells: max(0, recovered − baseline per cut × cuts). */
+function excessOf(cells: ToolCells): Map<SpotlightTool, number> {
 	const excess = new Map<SpotlightTool, number>();
-	for (const [key, cell] of cells) {
-		const stratum = Math.max(0, cell.recovered - (perCut.get(key) ?? 0) * cell.cuts);
-		excess.set(cell.tool, (excess.get(cell.tool) ?? 0) + stratum);
-	}
+	for (const [tool, cell] of cells) excess.set(tool, Math.max(0, cell.recovered - baselinePerCut(cell) * cell.cuts));
 	return excess;
 }
 
-/** Add `cells` into `into`, stratum by stratum. */
-function addCells(into: StratumCells, cells: StratumCells): void {
-	for (const [key, cell] of cells) {
-		let sum = into.get(key);
-		if (!sum) {
-			sum = emptyToolCell(cell.tool);
-			into.set(key, sum);
-		}
+/** Add `cells` into `into`, tool by tool. */
+function addCells(into: ToolCells, cells: ToolCells): void {
+	for (const [tool, cell] of cells) {
+		const sum = toolCell(into, tool);
 		sum.cuts += cell.cuts;
 		sum.recovered += cell.recovered;
 		sum.holdouts += cell.holdouts;
@@ -203,7 +166,7 @@ function sumOf(values: Iterable<number>): number {
 	return sum;
 }
 
-function recoveredOf(cells: StratumCells): number {
+function recoveredOf(cells: ToolCells): number {
 	let recovered = 0;
 	for (const cell of cells.values()) recovered += cell.recovered;
 	return recovered;
@@ -211,9 +174,8 @@ function recoveredOf(cells: StratumCells): number {
 
 /**
  * Holdout-adjusted net savings: each tool's applied cuts (scored and score-free) recover tokens; held-out would-be
- * cuts of the same tool and stratum (reads: edit-likely or not, see {@link stratumBaselines}) show how many the agent
- * fetches back anyway. Intervals resample experiment sessions jointly. `byTool` lists `tools` in their order, its
- * baseline the tool's over all its holdouts.
+ * cuts of the same tool show how many the agent fetches back anyway. Intervals resample experiment sessions
+ * jointly. `byTool` lists `tools` in their order.
  */
 export function computeAdjusted(
 	evaluated: readonly Evaluated[],
@@ -227,7 +189,7 @@ export function computeAdjusted(
 	for (const { call, result, analysis, tool } of evaluated) {
 		const session = sessions.get(analysis.session.session_file);
 		if (!session || (!result.shortened && !result.holdout)) continue;
-		const cell = stratumCell(session.tools, tool, result);
+		const cell = toolCell(session.tools, tool);
 		if (result.shortened) {
 			cell.cuts++;
 			cell.recovered += recoveredTokens(call);
@@ -237,7 +199,7 @@ export function computeAdjusted(
 		}
 	}
 	const list = [...sessions.values()];
-	const totals: StratumCells = new Map();
+	const totals: ToolCells = new Map();
 	for (const session of list) addCells(totals, session.tools);
 	const excess = excessOf(totals);
 	const excessTotal = sumOf(excess.values());
@@ -247,23 +209,11 @@ export function computeAdjusted(
 		interval ? { value, ...interval } : { value, lo: null, hi: null };
 
 	const byTool: SpotlightAdjustedTool[] = tools.map((tool, k) => {
-		const cell = emptyToolCell(tool);
-		for (const stratum of totals.values()) {
-			if (stratum.tool !== tool) continue;
-			cell.cuts += stratum.cuts;
-			cell.recovered += stratum.recovered;
-			cell.holdouts += stratum.holdouts;
-		}
+		const cell = totals.get(tool) ?? emptyToolCell();
 		const pairs: [number, number][] = [];
 		for (const session of list) {
-			let baseline = 0;
-			let holdouts = 0;
-			for (const own of session.tools.values()) {
-				if (own.tool !== tool) continue;
-				baseline += own.baseline;
-				holdouts += own.holdouts;
-			}
-			if (holdouts > 0) pairs.push([baseline, holdouts]);
+			const own = session.tools.get(tool);
+			if (own && own.holdouts > 0) pairs.push([own.baseline, own.holdouts]);
 		}
 		return {
 			tool,
@@ -287,43 +237,34 @@ export function computeAdjusted(
 	};
 }
 
-/** Numbers per stratum in {@link adjustedIntervals}' flat cell runs: index, cuts, recovered, holdouts, baseline. */
+/** Numbers per cell in {@link adjustedIntervals}' flat cell runs: tool index, cuts, recovered, holdouts, baseline. */
 const RUN_FIELDS = 5;
 
 /**
  * Intervals of the adjusted net's statistics from one joint bootstrap over the sessions: each round resamples them
- * and applies {@link excessOf}'s rule to the summed strata. Strata and tools are indices and each session's cells one
- * flat run, so a round adds numbers instead of merging maps.
+ * and applies {@link excessOf}'s rule to the summed cells. Tools are indices and each session's cells one flat run,
+ * so a round adds numbers instead of merging maps.
  */
 function adjustedIntervals(list: readonly AdjustedSession[], tools: readonly SpotlightTool[]): AdjustedIntervals {
-	const strata = new Map<string, number>();
-	const stratumTool: number[] = [];
 	const toolIndex = new Map<SpotlightTool, number>();
 	const runs: number[] = [];
 	const starts = new Uint32Array(list.length + 1);
 	list.forEach((session, i) => {
 		starts[i] = runs.length;
-		for (const [key, cell] of session.tools) {
-			let stratum = strata.get(key);
-			if (stratum === undefined) {
-				stratum = strata.size;
-				strata.set(key, stratum);
-				let tool = toolIndex.get(cell.tool);
-				if (tool === undefined) {
-					tool = toolIndex.size;
-					toolIndex.set(cell.tool, tool);
-				}
-				stratumTool.push(tool);
+		for (const [tool, cell] of session.tools) {
+			let index = toolIndex.get(tool);
+			if (index === undefined) {
+				index = toolIndex.size;
+				toolIndex.set(tool, index);
 			}
-			runs.push(stratum, cell.cuts, cell.recovered, cell.holdouts, cell.baseline);
+			runs.push(index, cell.cuts, cell.recovered, cell.holdouts, cell.baseline);
 		}
 	});
 	starts[list.length] = runs.length;
 	const toolSlot = tools.map(tool => toolIndex.get(tool) ?? -1);
 
-	// cuts, recovered, holdouts, baseline per stratum; baseline and holdouts per tool.
-	const cells = new Float64Array(strata.size * 4);
-	const toolSums = new Float64Array(toolIndex.size * 2);
+	// cuts, recovered, holdouts, baseline per tool.
+	const cells = new Float64Array(toolIndex.size * 4);
 	const toolExcess = new Float64Array(toolIndex.size);
 	const total = jointSamples();
 	const net = jointSamples();
@@ -350,28 +291,15 @@ function adjustedIntervals(list: readonly AdjustedSession[], tools: readonly Spo
 				cells[cell + 3] += runs[at + 4];
 			}
 		}
-		toolSums.fill(0);
-		toolExcess.fill(0);
-		for (let s = 0; s < stratumTool.length; s++) {
-			toolSums[stratumTool[s] * 2] += cells[s * 4 + 3];
-			toolSums[stratumTool[s] * 2 + 1] += cells[s * 4 + 2];
-		}
 		let sum = 0;
 		let recovered = 0;
-		for (let s = 0; s < stratumTool.length; s++) {
-			const tool = stratumTool[s];
-			const holdouts = cells[s * 4 + 2];
-			const toolHoldouts = toolSums[tool * 2 + 1];
-			const perCut =
-				holdouts >= MIN_HOLDOUTS
-					? cells[s * 4 + 3] / holdouts
-					: toolHoldouts > 0
-						? toolSums[tool * 2] / toolHoldouts
-						: 0;
-			const stratum = Math.max(0, cells[s * 4 + 1] - perCut * cells[s * 4]);
-			toolExcess[tool] += stratum;
-			sum += stratum;
-			recovered += cells[s * 4 + 1];
+		for (let t = 0; t < toolIndex.size; t++) {
+			const holdouts = cells[t * 4 + 2];
+			const perCut = holdouts > 0 ? cells[t * 4 + 3] / holdouts : 0;
+			const toolSum = Math.max(0, cells[t * 4 + 1] - perCut * cells[t * 4]);
+			toolExcess[t] = toolSum;
+			sum += toolSum;
+			recovered += cells[t * 4 + 1];
 		}
 		total[r] = sum;
 		net[r] = saved - sum;
@@ -598,7 +526,7 @@ interface StepSums {
  */
 export function computeSteps(
 	evaluated: readonly Evaluated[],
-	baselineOf: (tool: SpotlightTool, result: Result) => number,
+	baselineOf: (tool: SpotlightTool) => number,
 	tools: readonly SpotlightTool[],
 ): SpotlightStepCell[] {
 	const cuts = evaluated.filter(item => item.result.shortened);
@@ -628,7 +556,7 @@ export function computeSteps(
 		cell.cuts++;
 		cell.savedTokens += item.result.savedTokens;
 		cell.recoveredTokens += recoveredTokens(item.call);
-		cell.anyway += baselineOf(item.tool, item.result);
+		cell.anyway += baselineOf(item.tool);
 		if (Number.isFinite(item.call.seq)) {
 			const file = item.analysis.session.session_file;
 			const pair = cell.fetchBacks.get(file) ?? [0, 0];
@@ -736,180 +664,4 @@ export function computeCoverage(
 			share: total > 0 ? entry.chars / total : 0,
 		}))
 		.sort((a, b) => b.tokens - a.tokens || a.tool.localeCompare(b.tool));
-}
-
-// ---------------------------------------------------------------------------
-// Edit-aware gate
-// ---------------------------------------------------------------------------
-
-/** One session's edit-likely reads. */
-interface EditGateSession {
-	cut: number;
-	cutFetched: number;
-	cutTurns: number;
-	gated: number;
-	heldOut: number;
-	wholeFetched: number;
-	wholeTurns: number;
-	/** The cuts' saving, carried and priced; their recoveries' tokens and carried price; their fetch-back requests' cost. */
-	savedUsd: number;
-	recovered: number;
-	recoveryUsd: number;
-	cutTurnUsd: number;
-	spotlightUsd: number;
-	/** Would-be recovered tokens of the held-out edit-likely reads. */
-	baseline: number;
-	/** Held-out reads of any kind and their would-be recovered tokens: the fallback baseline. */
-	readHoldouts: number;
-	readBaseline: number;
-}
-
-function emptyEditGateSession(): EditGateSession {
-	return {
-		cut: 0,
-		cutFetched: 0,
-		cutTurns: 0,
-		gated: 0,
-		heldOut: 0,
-		wholeFetched: 0,
-		wholeTurns: 0,
-		savedUsd: 0,
-		recovered: 0,
-		recoveryUsd: 0,
-		cutTurnUsd: 0,
-		spotlightUsd: 0,
-		baseline: 0,
-		readHoldouts: 0,
-		readBaseline: 0,
-	};
-}
-
-function addEditGateSession(into: EditGateSession, from: EditGateSession): void {
-	for (const key of Object.keys(into) as (keyof EditGateSession)[]) into[key] += from[key];
-}
-
-/**
- * Holdout-adjusted net $ per 100 cuts of summed sessions: the cuts' saving, less the share of their recovered tokens'
- * price beyond what edit-likely reads fetch back anyway (would-be recovered tokens per held-out edit-likely read from
- * {@link MIN_HOLDOUTS} of them on, else per held-out read, as in {@link computeAdjusted}), less the share of their
- * fetch-back-only requests' cost beyond the rate of such requests of the reads shown whole, less their Spotlight
- * bill; null without cuts.
- */
-function editGateNetPer100(sum: EditGateSession): number | null {
-	if (sum.cut === 0) return null;
-	const whole = sum.gated + sum.heldOut;
-	const baselinePerCut =
-		sum.heldOut >= MIN_HOLDOUTS
-			? sum.baseline / sum.heldOut
-			: sum.readHoldouts > 0
-				? sum.readBaseline / sum.readHoldouts
-				: 0;
-	const turnsPerCut = whole > 0 ? sum.wholeTurns / whole : 0;
-	const excessShare = (actual: number, perCut: number) =>
-		actual > 0 ? Math.max(0, actual - perCut * sum.cut) / actual : 0;
-	const recoveryUsd = sum.recoveryUsd * excessShare(sum.recovered, baselinePerCut);
-	const turnUsd = sum.cutTurnUsd * excessShare(sum.cutTurns, turnsPerCut);
-	return ((sum.savedUsd - recoveryUsd - turnUsd - sum.spotlightUsd) * 100) / sum.cut;
-}
-
-export function emptyEditGate(): SpotlightEditGate {
-	return { reads: null, editLikelyShare: null };
-}
-
-/**
- * Edit-likely reads cut against those shown whole (gated or held out), over reads with a recorded call.
- * `fetchBackTurns`: each result's share of fetch-back-only requests and their cost by the uniform fetch-back rule, so
- * cut and whole reads are counted alike.
- */
-export function computeEditGate(
-	evaluated: readonly Evaluated[],
-	fetchBackTurns: ReadonlyMap<Call, { turns: number; usd: number }>,
-): SpotlightEditGate {
-	const sessions = new Map<string, EditGateSession>();
-	let reads = 0;
-	let editLikely = 0;
-	for (const { call, result, analysis, tool } of evaluated) {
-		if (tool !== "read") continue;
-		reads++;
-		const likely = result.editLikely === true;
-		if (likely) editLikely++;
-		const whole = result.gated || result.holdout;
-		const measured = likely && (result.shortened || whole);
-		if ((!measured && !result.holdout) || !Number.isFinite(call.seq)) continue;
-		const file = analysis.session.session_file;
-		let session = sessions.get(file);
-		if (!session) {
-			session = emptyEditGateSession();
-			sessions.set(file, session);
-		}
-		if (result.holdout) {
-			session.readHoldouts++;
-			session.readBaseline += call.baselineTokens;
-		}
-		if (!measured) continue;
-		const fetched = call.fetchBackGap !== null ? 1 : 0;
-		const turns = fetchBackTurns.get(call);
-		if (whole) {
-			if (result.gated) session.gated++;
-			else {
-				session.heldOut++;
-				session.baseline += call.baselineTokens;
-			}
-			session.wholeFetched += fetched;
-			session.wholeTurns += turns?.turns ?? 0;
-			continue;
-		}
-		session.cut++;
-		session.cutFetched += fetched;
-		session.cutTurns += turns?.turns ?? 0;
-		session.cutTurnUsd += turns?.usd ?? 0;
-		session.savedUsd += call.savedCarryUsd;
-		session.spotlightUsd += result.spotlightUsd;
-		for (const recovered of call.recoveredBy) {
-			session.recovered += recovered.tokens;
-			session.recoveryUsd += recovered.recoveryCarryUsd;
-		}
-	}
-
-	const editLikelyShare = reads > 0 ? editLikely / reads : null;
-	const list = [...sessions.values()];
-	// Sessions with only other reads' holdouts carry just the fallback baseline.
-	if (!list.some(session => session.cut + session.gated + session.heldOut > 0))
-		return { reads: null, editLikelyShare };
-	const sum = emptyEditGateSession();
-	for (const session of list) addEditGateSession(sum, session);
-	const whole = sum.gated + sum.heldOut;
-	const net = editGateNetPer100(sum);
-	const gate: SpotlightEditGateReads = {
-		cut: sum.cut,
-		gated: sum.gated,
-		heldOut: sum.heldOut,
-		cutFetchBack: bootstrapRatio(
-			list.filter(session => session.cut > 0).map(session => [session.cutFetched, session.cut]),
-			"editGate:cut",
-		),
-		wholeFetchBack: bootstrapRatio(
-			list.flatMap(session => {
-				const n = session.gated + session.heldOut;
-				return n > 0 ? [[session.wholeFetched, n] as const] : [];
-			}),
-			"editGate:whole",
-		),
-		cutTurnsPer100: sum.cut > 0 ? (sum.cutTurns * 100) / sum.cut : 0,
-		wholeTurnsPer100: whole > 0 ? (sum.wholeTurns * 100) / whole : 0,
-		cutNetUsdPer100:
-			net === null || list.length < BOOTSTRAP_MIN_SESSIONS
-				? { value: net, lo: null, hi: null }
-				: {
-						value: net,
-						...bootstrapInterval("editGate:net", random => {
-							const sample = emptyEditGateSession();
-							for (let i = 0; i < list.length; i++) {
-								addEditGateSession(sample, list[Math.floor(random() * list.length)]);
-							}
-							return editGateNetPer100(sample);
-						}),
-					},
-	};
-	return { reads: gate, editLikelyShare };
 }

@@ -35,6 +35,14 @@ interface PendingBashMessage {
 	message: BashExecutionMessage;
 }
 
+export interface BashExecuteOptions {
+	excludeFromContext?: boolean;
+	useUserShell?: boolean;
+	pty?: BashPtyOptions;
+	/** Receives the `bashExecution` message the run is recorded as, once it is persisted or queued for a mid-turn flush. */
+	onRecorded?: (message: BashExecutionMessage) => void;
+}
+
 /** Ownership snapshot spanning a session or branch transition. */
 export interface BashSessionTransition {
 	oldTarget: BashSessionTarget;
@@ -76,7 +84,7 @@ export class BashRunner {
 	async executeBash(
 		command: string,
 		onChunk?: (chunk: string) => void,
-		options?: { excludeFromContext?: boolean; useUserShell?: boolean; pty?: BashPtyOptions },
+		options?: BashExecuteOptions,
 	): Promise<BashResult> {
 		const target = this.#captureSessionTarget();
 		let targetTransferred = false;
@@ -348,13 +356,18 @@ export class BashRunner {
 		target: BashSessionTarget,
 		command: string,
 		result: BashResult,
-		options?: { excludeFromContext?: boolean },
+		options?: BashExecuteOptions,
 	): Promise<void> {
 		const message = this.#createMessage(command, result, options);
 		if (this.#host.isStreaming() && target === this.#sessionTarget) {
 			this.#pendingMessages.push({ target, message });
-			return;
+		} else {
+			await this.#appendOwnedMessage(target, message);
 		}
-		await this.#appendOwnedMessage(target, message);
+		try {
+			options?.onRecorded?.(message);
+		} catch (error) {
+			logger.error("bash onRecorded callback failed", { error: String(error) });
+		}
 	}
 }

@@ -5,8 +5,10 @@
 //! (`getkeystring`) and case changes (`hist.c` `casemodify`).
 //!
 //! Every string here is a zsh string: metafied ([`META`] pairs stand for
-//! one byte) and possibly tokenized. The engine runs zsh in its C locale
-//! semantics: a character is a byte (a metafied pair counts once).
+//! one byte) and possibly tokenized. Character stepping takes `mb`, zsh's
+//! `isset(MULTIBYTE)` in a UTF-8 locale ([`super::params::mb`]): with it a
+//! character is a UTF-8 sequence (zsh `MB_METACHARLEN`), without it a byte
+//! (a metafied pair counts once).
 //!
 //! Ported from zsh 5.9 (MIT-style licence, Copyright (c) 1992-1997 Paul
 //! Falstad and the zsh development group).
@@ -34,25 +36,57 @@ pub fn word_list(list: &'static [u8]) -> impl Iterator<Item = &'static [u8]> {
 	list.split(|&c| c == b' ')
 }
 
-/// Bytes of the character at `s[i..]` (zsh `MB_METACHARLEN` in a
-/// single-byte locale): a metafied pair is one character.
-pub const fn charlen(s: &[u8], i: usize) -> usize {
-	if i < s.len() && s[i] == META && i + 1 < s.len() {
-		2
-	} else {
-		1
-	}
+/// Bytes of the character at `s[i..]` (zsh `MB_METACHARLEN`): a UTF-8
+/// sequence with `mb`, else a byte (a metafied pair is one character).
+/// 1 at the end.
+pub fn charlen(s: &[u8], i: usize, mb: bool) -> usize {
+	mb_metacharlenconv(s, i, mb).0.max(1)
 }
 
 /// Characters in `s` (zsh `MB_METASTRLEN`).
-pub const fn strlen_chars(s: &[u8]) -> usize {
+pub fn strlen_chars(s: &[u8], mb: bool) -> usize {
 	let mut n = 0;
 	let mut i = 0;
 	while i < s.len() {
-		i += charlen(s, i);
+		i += charlen(s, i, mb);
 		n += 1;
 	}
 	n
+}
+
+/// zsh `mb_metacharlenconv`: the length in metafied bytes and the code of
+/// the character at `s[i..]`; `None` for a token or a byte that starts no
+/// valid UTF-8 sequence (then one character long), length 0 at the end.
+/// Without `mb` every (possibly metafied) byte is a character.
+pub fn mb_metacharlenconv(s: &[u8], i: usize, mb: bool) -> (usize, Option<u32>) {
+	let c = at(s, i);
+	if i >= s.len() {
+		return (0, None);
+	}
+	if !mb || c <= 0x7f {
+		return if c == META && i + 1 < s.len() {
+			(2, Some(u32::from(s[i + 1] ^ 32)))
+		} else {
+			(1, Some(u32::from(c)))
+		};
+	}
+	crate::bash::syntax::zsh::mb_metacharlenconv(s, i)
+}
+
+/// A delimiter character at `s[i..]` (zsh `MB_METACHARLENCONV` with a
+/// `WEOF` result taken as the byte): its length and code; `(0, 0)` at the
+/// end.
+pub fn delim_at(s: &[u8], i: usize, mb: bool) -> (usize, u32) {
+	let (n, wc) = mb_metacharlenconv(s, i, mb);
+	(n, wc.unwrap_or_else(|| u32::from(char_at(s, i))))
+}
+
+/// The character at `s[i..]` as a `char` (with `mb`, a decoded UTF-8
+/// sequence; else the byte), and its length; `None` for a token or an
+/// invalid sequence.
+pub fn mb_char_at(s: &[u8], i: usize, mb: bool) -> (usize, Option<char>) {
+	let (n, wc) = mb_metacharlenconv(s, i, mb);
+	(n.max(1), wc.and_then(char::from_u32))
 }
 
 /// The byte a character at `s[i..]` stands for (a metafied pair decoded).
@@ -64,19 +98,7 @@ pub const fn char_at(s: &[u8], i: usize) -> u8 {
 	}
 }
 
-/// zsh `iident`: a character of an identifier (ASCII letters, digits, `_`).
-pub const fn iident(c: u8) -> bool {
-	c.is_ascii_alphanumeric() || c == b'_'
-}
-
-/// zsh `itype_end(s, IIDENT, 0)` from `from`: the end of the identifier.
-pub const fn ident_end(s: &[u8], from: usize) -> usize {
-	let mut i = from;
-	while i < s.len() && iident(s[i]) {
-		i += 1;
-	}
-	i
-}
+pub use crate::bash::syntax::zsh::{ident_end, iident};
 
 /// zsh `IUSER`: a character of a user name (`~user`).
 const fn iuser(c: u8) -> bool {
@@ -115,21 +137,27 @@ pub const fn iblank(c: u8) -> bool {
 /// The separator classes zsh derives from `$IFS` (`inittyptab`'s `ISEP`
 /// and `IWSEP`): every `IFS` character separates; a blank one (space,
 /// tab, newline) that is not doubled is whitespace, whose runs count as
-/// one separator.
-#[derive(Clone, Copy, Debug)]
+/// one separator. Non-ASCII `IFS` characters separate only with `mb`
+/// (zsh's `ifs_wide`); they are never whitespace.
+#[derive(Clone, Debug)]
 pub struct Seps {
-	sep:  [u64; 4],
-	wsep: [u64; 4],
+	sep:    [u64; 4],
+	wsep:   [u64; 4],
+	/// The non-ASCII `IFS` characters (zsh `ifs_wide`), with `mb` only.
+	wide:   Vec<u32>,
+	/// Characters are UTF-8 sequences (zsh `isset(MULTIBYTE)`).
+	pub mb: bool,
 }
 
 impl Seps {
-	/// The classes of the metafied `IFS` value `ifs`.
-	pub fn new(ifs: &[u8]) -> Self {
-		let mut me = Self { sep: [0; 4], wsep: [0; 4] };
+	/// The classes of the metafied `IFS` value `ifs`; `mb` as for
+	/// [`charlen`].
+	pub fn new(ifs: &[u8], mb: bool) -> Self {
+		let mut me = Self { sep: [0; 4], wsep: [0; 4], wide: Vec::new(), mb };
 		let mut i = 0;
 		while i < ifs.len() {
 			let c = char_at(ifs, i);
-			let n = charlen(ifs, i);
+			let n = charlen(ifs, i, false);
 			if c.is_ascii() {
 				if inblank(c) {
 					if ifs.get(i + n) == Some(&c) {
@@ -141,6 +169,23 @@ impl Seps {
 				set_bit(&mut me.sep, c);
 			}
 			i += n;
+		}
+		// zsh `set_widearray`: no wide separators unless every character
+		// converts.
+		if mb {
+			let mut i = 0;
+			while i < ifs.len() {
+				let (n, wc) = mb_metacharlenconv(ifs, i, true);
+				match wc {
+					Some(w) if w > 0x7f => me.wide.push(w),
+					Some(_) => {},
+					None => {
+						me.wide.clear();
+						break;
+					},
+				}
+				i += n.max(1);
+			}
 		}
 		me
 	}
@@ -155,9 +200,22 @@ impl Seps {
 		self.wsep[(c >> 6) as usize] & (1 << (c & 63)) != 0
 	}
 
-	/// Whether the character at `s[i..]` is a separator (tokens never are).
-	const fn sep_at(&self, s: &[u8], i: usize) -> bool {
-		!is_tok(s[i]) && self.isep(char_at(s, i))
+	/// Whether the character at `s[i..]` is a separator (zsh
+	/// `WC_ZISTYPE(c, ISEP)` after `MB_METACHARLENCONV`; tokens never are).
+	pub fn sep_at(&self, s: &[u8], i: usize) -> bool {
+		if is_tok(s[i]) {
+			return false;
+		}
+		match mb_metacharlenconv(s, i, self.mb).1 {
+			Some(w) if w <= 0x7f => u8::try_from(w).is_ok_and(|c| self.isep(c)),
+			Some(w) => self.wide.contains(&w),
+			None => false,
+		}
+	}
+
+	/// [`charlen`] under this `IFS`'s `mb`.
+	pub fn charlen(&self, s: &[u8], i: usize) -> usize {
+		charlen(s, i, self.mb)
 	}
 
 	/// Whether the character at `s[i..]` is a whitespace separator.
@@ -172,10 +230,11 @@ const fn set_bit(set: &mut [u64; 4], c: u8) {
 }
 
 /// zsh `skipwsep`: skip whitespace separators from `*i`; the count.
-pub const fn skipwsep(seps: &Seps, s: &[u8], i: &mut usize) -> usize {
+/// (Whitespace separators are ASCII, so bytes suffice.)
+pub fn skipwsep(seps: &Seps, s: &[u8], i: &mut usize) -> usize {
 	let mut n = 0;
 	while *i < s.len() && seps.wsep_at(s, *i) {
-		*i += charlen(s, *i);
+		*i += charlen(s, *i, false);
 		n += 1;
 	}
 	n
@@ -190,14 +249,14 @@ fn findsep(seps: &Seps, s: &[u8], i: &mut usize, sep: Option<&[u8]>) -> i32 {
 			let start = *i;
 			let mut t = *i;
 			while t < s.len() && !seps.sep_at(s, t) {
-				t += charlen(s, t);
+				t += seps.charlen(s, t);
 			}
 			*i = t;
 			i32::from(t > start)
 		},
 		Some([]) => {
 			if *i < s.len() {
-				*i += charlen(s, *i);
+				*i += seps.charlen(s, *i);
 				1
 			} else {
 				-1
@@ -209,7 +268,7 @@ fn findsep(seps: &Seps, s: &[u8], i: &mut usize, sep: Option<&[u8]>) -> i32 {
 				if tail(s, *i).starts_with(sep) {
 					return i32::from(n > 0);
 				}
-				*i += charlen(s, *i);
+				*i += seps.charlen(s, *i);
 				n += 1;
 			}
 			-1
@@ -233,7 +292,7 @@ pub fn findword(seps: &Seps, s: &[u8], i: &mut usize, sep: Option<&[u8]>) -> Opt
 	}
 	let mut t = *i;
 	while t < s.len() && seps.sep_at(s, t) {
-		t += charlen(s, t);
+		t += seps.charlen(s, t);
 	}
 	*i = t;
 	findsep(seps, s, i, None);
@@ -269,7 +328,7 @@ pub fn wordcount(seps: &Seps, s: &[u8], sep: Option<&[u8]>, mul: i32) -> usize {
 	}
 	while i < s.len() {
 		if seps.sep_at(s, i) {
-			i += charlen(s, i);
+			i += seps.charlen(s, i);
 			if mul <= 0 {
 				skipwsep(seps, s, &mut i);
 			}
@@ -304,7 +363,7 @@ pub fn spacesplit(seps: &Seps, s: &[u8], allownull: bool) -> Vec<Vec<u8>> {
 	}
 	while i < s.len() {
 		if seps.sep_at(s, i) {
-			i += charlen(s, i);
+			i += seps.charlen(s, i);
 			skipwsep(seps, s, &mut i);
 		}
 		t = i;
@@ -345,8 +404,8 @@ pub fn sepsplit(seps: &Seps, s: &[u8], sep: Option<&[u8]>, allownull: bool) -> V
 
 /// zsh `sepjoin`: the elements joined with `sep`, or with the first
 /// character of `IFS` (`ifs`; a space when unset or when it starts with
-/// one).
-pub fn sepjoin(items: &[Vec<u8>], sep: Option<&[u8]>, ifs: Option<&[u8]>) -> Vec<u8> {
+/// one); `mb` as for [`charlen`].
+pub fn sepjoin(items: &[Vec<u8>], sep: Option<&[u8]>, ifs: Option<&[u8]>, mb: bool) -> Vec<u8> {
 	let first;
 	let sep: &[u8] = match sep {
 		Some(s) => s,
@@ -355,7 +414,7 @@ pub fn sepjoin(items: &[Vec<u8>], sep: Option<&[u8]>, ifs: Option<&[u8]>) -> Vec
 			// the terminating NUL).
 			Some([]) => b"",
 			Some(ifs) if ifs[0] != b' ' => {
-				first = head(ifs, charlen(ifs, 0));
+				first = head(ifs, charlen(ifs, 0, mb));
 				first
 			},
 			_ => b" ",
@@ -401,14 +460,24 @@ pub enum CaseMod {
 	Caps,
 }
 
-/// zsh `casemodify` (single-byte branch).
-pub fn casemodify(s: &[u8], how: CaseMod) -> Vec<u8> {
+/// zsh `casemodify`; `mb` as for [`charlen`].
+pub fn casemodify(s: &[u8], how: CaseMod, mb: bool) -> Vec<u8> {
+	if mb {
+		return casemodify_mb(s, how);
+	}
 	let mut out = Vec::with_capacity(s.len());
 	let mut nextupper = true;
 	let mut i = 0;
 	while i < s.len() {
+		// A token (a tokenized word's `(`, `*`, …) stays a token.
+		if s[i] != META && is_tok(s[i]) {
+			out.push(s[i]);
+			i += 1;
+			nextupper = true;
+			continue;
+		}
 		let mut c = char_at(s, i);
-		i += charlen(s, i);
+		i += charlen(s, i, false);
 		match how {
 			CaseMod::Lower => c = c.to_ascii_lowercase(),
 			CaseMod::Upper => c = c.to_ascii_uppercase(),
@@ -424,6 +493,65 @@ pub fn casemodify(s: &[u8], how: CaseMod) -> Vec<u8> {
 			},
 		}
 		push_char(&mut out, c);
+	}
+	out
+}
+
+/// The one-character case mapping of `c` (C `towupper`/`towlower`): a
+/// mapping to several characters (`ß` → `SS`) leaves `c` alone.
+fn single_case(c: char, upper: bool) -> char {
+	let pick = |it: &mut dyn Iterator<Item = char>| match (it.next(), it.next()) {
+		(Some(m), None) => m,
+		_ => c,
+	};
+	if upper {
+		pick(&mut c.to_uppercase())
+	} else {
+		pick(&mut c.to_lowercase())
+	}
+}
+
+/// zsh `casemodify`'s `MULTIBYTE` branch: UTF-8 characters change case;
+/// tokens and invalid bytes are copied and end a word.
+fn casemodify_mb(s: &[u8], how: CaseMod) -> Vec<u8> {
+	let mut out = Vec::with_capacity(s.len());
+	let mut nextupper = true;
+	let mut i = 0;
+	while i < s.len() {
+		let (len, wc) = mb_char_at(s, i, true);
+		let Some(c) = wc else {
+			out.extend_from_slice(span(s, i, i + len));
+			i += len;
+			nextupper = true;
+			continue;
+		};
+		let m = match how {
+			CaseMod::Lower => single_case(c, false),
+			CaseMod::Upper => single_case(c, true),
+			CaseMod::Caps => {
+				if c != '\0' && super::wcwidth::wcwidth(c) == 0 {
+					// zsh `IS_COMBINING`: part of the previous character.
+					c
+				} else if !c.is_alphanumeric() {
+					nextupper = true;
+					c
+				} else if nextupper {
+					nextupper = false;
+					single_case(c, true)
+				} else {
+					single_case(c, false)
+				}
+			},
+		};
+		if m == c {
+			out.extend_from_slice(span(s, i, i + len));
+		} else {
+			let mut buf = [0; 4];
+			for &b in m.encode_utf8(&mut buf).as_bytes() {
+				push_char(&mut out, b);
+			}
+		}
+		i += len;
 	}
 	out
 }
@@ -466,6 +594,30 @@ pub struct QuoteOpts {
 	pub magic_equal_subst: bool,
 	/// `EXTENDED_GLOB`.
 	pub extended_glob:     bool,
+	/// zsh `bangchar` under `BANGHIST` (`histchars[0]`; 0: none or
+	/// `BANGHIST` off): `$'…'` quoting backslashes it.
+	pub bang:              u8,
+	/// The `bang` character is `ISPECIAL` (zsh `ZTF_BANGCHAR`: an
+	/// interactive shell reading its standard input): the other styles
+	/// quote it too ([`super::params::bang_quoting`]).
+	pub bang_special:      bool,
+	/// `MULTIBYTE` in a UTF-8 locale ([`super::params::mb`]): a printable
+	/// UTF-8 character is no `$'…'` escape.
+	pub mb:                bool,
+}
+
+/// zsh `MB_METACHARLENCONV` then `WC_ISPRINT`: the length of the
+/// character at `s[u..]` and whether it prints (with `mb`, a UTF-8
+/// character that is no control character; without, a printable ASCII
+/// byte).
+fn printable_at(s: &[u8], u: usize, mb: bool) -> (usize, bool) {
+	let (n, wc) = mb_metacharlenconv(s, u, mb);
+	let printable = match wc {
+		Some(w) if w < 0x80 => u8::try_from(w).is_ok_and(isprint),
+		Some(w) if mb => char::from_u32(w).is_some_and(|c| !c.is_control()),
+		_ => false,
+	};
+	(n.max(1), printable)
 }
 
 /// zsh `addunprintable`: `$'…'` escapes of the bytes `s[a..b]`.
@@ -513,9 +665,15 @@ const fn isprint(c: u8) -> bool {
 /// zsh `quotestring`: `s` quoted in style `how` (the surrounding quotes
 /// of [`Qt::Single`], [`Qt::Double`] and [`Qt::Dollars`] are the
 /// caller's).
-#[expect(clippy::too_many_lines, reason = "a faithful port of one C function")]
 #[allow(clippy::many_single_char_names, reason = "a direct port of zsh's quotestring")]
 pub fn quotestring(s: &[u8], how: Qt, o: QuoteOpts) -> Vec<u8> {
+	quotestring_comma(s, how, o, false)
+}
+
+/// [`quotestring`] with `,` special as well when `comma` is set (zsh's
+/// `makecommaspecial(1)`, which completion turns on inside braces).
+#[allow(clippy::many_single_char_names, reason = "a direct port of zsh's quotestring")]
+pub fn quotestring_comma(s: &[u8], how: Qt, o: QuoteOpts, comma: bool) -> Vec<u8> {
 	let (how, shownull) = match how {
 		Qt::BackslashShownull => (Qt::Backslash, true),
 		Qt::SingleOptional => (how, true),
@@ -530,10 +688,10 @@ pub fn quotestring(s: &[u8], how: Qt, o: QuoteOpts) -> Vec<u8> {
 			u += 1;
 		}
 		while u < s.len() {
-			let n = charlen(s, u);
+			let (n, printable) = printable_at(s, u, o.mb);
 			let c = char_at(s, u);
-			if isprint(c) && !is_meta(c) {
-				if c == b'\\' || c == b'\'' {
+			if printable {
+				if c == b'\\' || c == b'\'' || (o.bang != 0 && c == o.bang) {
 					v.push(b'\\');
 				}
 				v.extend_from_slice(span(s, u, u + n));
@@ -603,13 +761,16 @@ pub fn quotestring(s: &[u8], how: Qt, o: QuoteOpts) -> Vec<u8> {
 				u += 1;
 			}
 			continue;
-		} else if ispecial(c)
+		} else if (ispecial(c)
+			|| (comma && c == b',')
+			|| (o.bang_special && o.bang != 0 && c == o.bang))
 			&& ((c != b'=' && c != b'~')
 				|| u == 0
 				|| (o.magic_equal_subst && matches!(s[u - 1], b'=' | b':'))
 				|| (c == b'~' && o.extended_glob))
 			&& (how == Qt::Backslash
 				|| how == Qt::SingleOptional
+				|| (o.bang != 0 && c == o.bang && how != Qt::Single)
 				|| (how == Qt::Double && matches!(c, b'$' | b'`' | b'"' | b'\\'))
 				|| (how == Qt::Single && c == b'\''))
 		{
@@ -678,9 +839,8 @@ pub fn quotestring(s: &[u8], how: Qt, o: QuoteOpts) -> Vec<u8> {
 			}
 			continue;
 		}
-		let n = charlen(s, u);
-		let ch = char_at(s, u);
-		if isprint(ch) {
+		let (n, printable) = printable_at(s, u, o.mb);
+		if printable {
 			if dobackslash {
 				v.push(b'\\');
 			}
@@ -726,18 +886,37 @@ fn nicechar(c: u8, out: &mut Vec<u8>) {
 }
 
 /// zsh `nicedupstring`: every character of `s` shown visibly
-/// (`${(V)x}`).
-pub fn nicedupstring(s: &[u8]) -> Vec<u8> {
+/// (`${(V)x}`); with `mb` (zsh `mb_niceformat`) a printable UTF-8
+/// character stays as it is, another becomes `^X`, `\uXXXX` or
+/// `\UXXXXXXXX` (zsh `wcs_nicechar`).
+pub fn nicedupstring(s: &[u8], mb: bool) -> Vec<u8> {
 	let mut out = Vec::with_capacity(s.len());
 	let mut i = 0;
 	while i < s.len() {
+		if mb
+			&& !is_tok(s[i])
+			&& let (n, Some(ch)) = mb_char_at(s, i, true)
+		{
+			let code = u32::from(ch);
+			if !ch.is_control() {
+				out.extend_from_slice(span(s, i, i + n));
+			} else if code >= 0x10000 {
+				out.extend_from_slice(format!("\\U{code:08x}").as_bytes());
+			} else if code >= 0x100 {
+				out.extend_from_slice(format!("\\u{code:04x}").as_bytes());
+			} else {
+				nicechar(u8::try_from(code).unwrap_or(b'?'), &mut out);
+			}
+			i += n;
+			continue;
+		}
 		let c = if is_tok(s[i]) && s[i] <= crate::bash::syntax::zsh::tok::COMMA {
 			tok_char(s[i]).unwrap_or(s[i])
 		} else {
 			char_at(s, i)
 		};
 		nicechar(c, &mut out);
-		i += charlen(s, i);
+		i += charlen(s, i, false);
 	}
 	out
 }
@@ -757,6 +936,10 @@ pub mod getkey {
 	pub const DOLLAR_QUOTE: u32 = 1 << 4;
 	/// zsh `GETKEYS_DOLLARS_QUOTE`.
 	pub const DOLLARS_QUOTE: u32 = OCTAL_ESC | EMACS | DOLLAR_QUOTE;
+	/// The locale's charset is single-byte ASCII (`C`): a `\u`/`\U` code
+	/// point above 127 cannot be encoded (zsh's `wctomb` fails) and sets
+	/// [`super::KeyString::range_err`].
+	pub const NARROW: u32 = 1 << 12;
 	/// zsh `GETKEYS_SEP` (`(p)` flag arguments).
 	pub const SEP: u32 = OCTAL_ESC | EMACS;
 	/// `GETKEY_PRINTF_PERCENT`: a `%` produced by a numeric escape is
@@ -781,13 +964,16 @@ pub mod getkey {
 pub struct KeyString {
 	/// The decoded text: metafied with [`getkey::DOLLAR_QUOTE`], raw
 	/// bytes otherwise.
-	pub text:     Vec<u8>,
+	pub text:      Vec<u8>,
 	/// With [`getkey::DOLLAR_QUOTE`]: the input bytes consumed, up to and
 	/// including the closing quote.
-	pub consumed: usize,
+	pub consumed:  usize,
 	/// With [`getkey::BACKSLASH_C`]: a `\c` ended the text (`print` and
 	/// `echo` stop all output there).
-	pub cut:      bool,
+	pub cut:       bool,
+	/// With [`getkey::NARROW`]: a code point did not convert (zsh's
+	/// `character not in range` error).
+	pub range_err: bool,
 }
 
 /// zsh `getkeystring`: decode the escapes of `s` (metafied) as `how`
@@ -798,6 +984,7 @@ pub fn getkeystring(s: &[u8], how: u32) -> KeyString {
 	use crate::bash::syntax::zsh::tok::SNULL;
 	let dq = how & getkey::DOLLAR_QUOTE != 0;
 	let mut out = Vec::with_capacity(s.len());
+	let mut range_err = false;
 	let mut i = 0;
 	let mut meta = 0u8;
 	let mut control = false;
@@ -854,7 +1041,7 @@ pub fn getkeystring(s: &[u8], how: u32) -> KeyString {
 					i -= 1;
 				},
 				b'c' if how & getkey::BACKSLASH_C != 0 => {
-					return KeyString { text: out, consumed: i + 1, cut: true };
+					return KeyString { text: out, consumed: i + 1, cut: true, range_err };
 				},
 				b'u' | b'U' => {
 					let mut wval: u32 = 0;
@@ -868,7 +1055,9 @@ pub fn getkeystring(s: &[u8], how: u32) -> KeyString {
 							_ => break,
 						}
 					}
-					if let Some(ch) = char::from_u32(wval) {
+					if how & getkey::NARROW != 0 && wval > 0x7f {
+						range_err = true;
+					} else if let Some(ch) = char::from_u32(wval) {
 						let mut buf = [0; 4];
 						cur.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
 					}
@@ -933,7 +1122,7 @@ pub fn getkeystring(s: &[u8], how: u32) -> KeyString {
 			if how & getkey::POSIX_STRINGS != 0 {
 				cut_at_nul(&mut out);
 			}
-			return KeyString { text: out, consumed: i + 1, cut: false };
+			return KeyString { text: out, consumed: i + 1, cut: false, range_err };
 		} else if c == b'^' && !control && how & getkey::CTRL != 0 && i + 1 < s.len() {
 			control = true;
 			i += 1;
@@ -971,7 +1160,7 @@ pub fn getkeystring(s: &[u8], how: u32) -> KeyString {
 	if dq && how & getkey::POSIX_STRINGS != 0 {
 		cut_at_nul(&mut out);
 	}
-	KeyString { text: out, consumed: s.len(), cut: false }
+	KeyString { text: out, consumed: s.len(), cut: false, range_err }
 }
 
 /// zsh `getkeystring` under `POSIX_STRINGS`: the metafied `out` ends
@@ -1029,23 +1218,45 @@ mod tests {
 
 	#[test]
 	fn spacesplit_keeps_empty_fields_for_non_whitespace_separators() {
-		let seps = Seps::new(b":");
+		let seps = Seps::new(b":", false);
 		assert_eq!(ws(&spacesplit(&seps, b"a::b", true)), [&b"a"[..], b"", b"b"]);
-		let seps = Seps::new(DEFAULT_IFS);
+		let seps = Seps::new(DEFAULT_IFS, false);
 		assert_eq!(ws(&spacesplit(&seps, b"  a  b ", true)), [&b"a"[..], b"b"]);
 	}
 
 	#[test]
+	fn spacesplit_on_wide_separators_needs_multibyte() {
+		let ifs = "«»".as_bytes();
+		let s = "a«b»c".as_bytes();
+		let seps = Seps::new(ifs, true);
+		assert_eq!(ws(&spacesplit(&seps, s, true)), [&b"a"[..], b"b", b"c"]);
+		let seps = Seps::new(ifs, false);
+		assert_eq!(ws(&spacesplit(&seps, s, true)), [s]);
+	}
+
+	#[test]
+	fn multibyte_character_lengths() {
+		let s = "té€".as_bytes();
+		assert_eq!(strlen_chars(s, true), 3);
+		assert_eq!(strlen_chars(s, false), 6);
+		assert_eq!(charlen(s, 1, true), 2);
+		assert_eq!(charlen(s, 3, true), 3);
+		// A stray continuation byte is one character.
+		assert_eq!(charlen(&[0xa9, b'x'], 0, true), 1);
+	}
+
+	#[test]
 	fn sepsplit_on_a_string_separator() {
-		let seps = Seps::new(DEFAULT_IFS);
+		let seps = Seps::new(DEFAULT_IFS, false);
 		assert_eq!(ws(&sepsplit(&seps, b"a::b::", Some(b"::"), true)), [&b"a"[..], b"b", b""]);
 	}
 
 	#[test]
 	fn sepjoin_uses_the_first_ifs_character() {
 		let items = vec![b"a".to_vec(), b"b".to_vec()];
-		assert_eq!(sepjoin(&items, None, Some(b":x")), b"a:b");
-		assert_eq!(sepjoin(&items, None, None), b"a b");
+		assert_eq!(sepjoin(&items, None, Some(b":x"), false), b"a:b");
+		assert_eq!(sepjoin(&items, None, None, false), b"a b");
+		assert_eq!(sepjoin(&items, None, Some("«x".as_bytes()), true), "a«b".as_bytes());
 	}
 
 	#[test]
@@ -1091,6 +1302,22 @@ mod tests {
 
 	#[test]
 	fn casemodify_capitalizes_words() {
-		assert_eq!(casemodify(b"hello wORLD", CaseMod::Caps), b"Hello World");
+		assert_eq!(casemodify(b"hello wORLD", CaseMod::Caps, false), b"Hello World");
+	}
+
+	#[test]
+	fn casemodify_multibyte() {
+		use crate::bash::syntax::zsh::tok::{metafy, unmetafy};
+		// zsh strings are metafied (`É` is c3 89, and 0x89 is a meta byte).
+		let cm = |s: &str, how| {
+			String::from_utf8(unmetafy(&casemodify(&metafy(s.as_bytes()), how, true))).unwrap()
+		};
+		assert_eq!(cm("l'état c'est moi", CaseMod::Caps), "L'État C'Est Moi");
+		assert_eq!(cm("ténébreux", CaseMod::Caps), "Ténébreux");
+		assert_eq!(cm("øpened", CaseMod::Upper), "ØPENED");
+		// `ß` has no one-character upper case.
+		assert_eq!(cm("ß", CaseMod::Upper), "ß");
+		// Without multibyte only ASCII changes.
+		assert_eq!(casemodify("é".as_bytes(), CaseMod::Upper, false), "é".as_bytes());
 	}
 }

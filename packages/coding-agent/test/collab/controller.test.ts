@@ -334,7 +334,6 @@ describe("interactive collaboration startup", () => {
 			undefined,
 			undefined,
 			undefined,
-			undefined,
 			new Composer({ terminal: new VirtualTerminal() }),
 		);
 		spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
@@ -355,7 +354,6 @@ describe("interactive collaboration startup", () => {
 			mode = new InteractiveMode(
 				testSession.session,
 				"test",
-				undefined,
 				undefined,
 				undefined,
 				undefined,
@@ -402,7 +400,6 @@ describe("interactive collaboration startup", () => {
 		mode = new InteractiveMode(
 			testSession.session,
 			"test",
-			undefined,
 			undefined,
 			undefined,
 			undefined,
@@ -508,7 +505,6 @@ describe("interactive collaboration startup", () => {
 		mode = new InteractiveMode(
 			testSession.session,
 			"test",
-			undefined,
 			undefined,
 			undefined,
 			undefined,
@@ -964,7 +960,7 @@ describe("CollabController", () => {
 		state.transitionWaited = waiting.resolve;
 		controller.autoStart();
 		await waiting.promise;
-		ctx.collabGuest = new CollabGuestLink(ctx);
+		Object.assign(ctx, { collabGuest: new CollabGuestLink(ctx) });
 		state.transition = undefined;
 		gate.resolve();
 		await controller.idle();

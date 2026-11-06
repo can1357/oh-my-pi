@@ -169,7 +169,7 @@ it("eval applies a custom-wire patch exactly once through the canonical tool's A
 		"tools.approval": { edit: "prompt" },
 	});
 	toolSession.getToolForEvalBridge = name => session!.getToolForEvalBridge(name);
-	toolSession.getEvalBridgeToolNames = () => session!.getEvalBridgeToolNames();
+	toolSession.getAdvertisedEvalToolNames = () => session!.getAdvertisedEvalToolNames();
 	await Bun.write(tempDir.join("eval-wire-old.txt"), "old\n");
 	const input =
 		"*** Begin Patch\n*** Add File: eval-wire.txt\n+ok\n*** Delete File: eval-wire-old.txt\n*** End Patch\n";

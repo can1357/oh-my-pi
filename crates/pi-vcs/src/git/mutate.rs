@@ -989,6 +989,7 @@ fn run_commit_hook(repository: &GitRepo, name: &str, args: &[&OsStr]) -> Result<
 	};
 	#[cfg(not(windows))]
 	let mut command = Command::new(&hook);
+	super::cli::detach_from_terminal(&mut command);
 	let output = command
 		.args(args)
 		.current_dir(repository.root())
