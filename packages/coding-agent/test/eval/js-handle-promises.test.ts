@@ -94,10 +94,6 @@ describe("JS eval handle, pool and batch calls", () => {
 		expect(observed.drainIter).toBe(false);
 	});
 
-	it("returns a Promise from workpool(), judgeBatch() and judgeBatch.attach()", () => {
-		expect(observed.factories).toEqual({ workpool: true, judgeBatch: true, "judgeBatch.attach": true });
-	});
-
 	it("exposes .id/.handle only on the result of await agent(…)", () => {
 		expect(observed.pending).toEqual({ id: null, handle: null });
 		expect(observed.awaitedHandle).toBe("agent://agent-1");

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.17.0] - 2026-11-06
+
 ### Fixed
 
 - Frustration no longer counts agent-attributed messages as user messages; history is corrected on next sync ([#18183](https://github.com/can1357/oh-my-pi/issues/18183)).
