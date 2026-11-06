@@ -1,16 +1,14 @@
 /**
- * Drives the production wiring of the macOS stderr guard against a rotating
- * sink: the guard adopts the sink's active file, and the sink's `onRotate`
- * hook re-points fd 2 when a local-day rotation moves the active file.
- *
- * Runs in a subprocess — it mutates fd 2 — with the fixed-date preload
- * supplying the clock via `OMP_LOGGER_TEST_NOW`.
+ * Drives terminal output isolation against a rotating sink. Runs in a PTY
+ * subprocess: fd 1/2 are redirected while the fixed-date preload supplies
+ * the clock via `OMP_LOGGER_TEST_NOW`.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getLogPath } from "../../src/dirs";
 import { RotatingFileSink } from "../../src/logger/rotating-file";
-import { restoreTerminalStderr, setStderrRedirectTarget, suppressTerminalStderr } from "../../src/stderr-guard";
+import { setStderrRedirectTarget } from "../../src/stderr-guard";
+import { restoreTerminalOutput, suppressTerminalOutput } from "../../src/terminal-output-guard";
 
 const directory = process.argv[2];
 const nextDay = process.argv[3];
@@ -24,32 +22,35 @@ const sink = new RotatingFileSink({
 	maxFiles: 5,
 	onRotate: setStderrRedirectTarget,
 });
+sink.openForExternalWrites();
 
 sink.write(JSON.stringify({ message: "startup-day record" }));
 const startupFile = fs.readdirSync(directory).find(name => name.endsWith(".log"))!;
 // Resolved on the startup day: it must name the file the sink just opened.
 const logPathBasename = path.basename(getLogPath(new Date(), process.pid));
 
-// No explicit redirectPath: the guard must adopt the file the sink reported.
-const forced = suppressTerminalStderr({ force: true });
+// Adopt the sink's active file; never derive a second date-based destination.
+const isolated = suppressTerminalOutput() !== null;
+fs.writeSync(1, "startup-stdout-marker\n");
 fs.writeSync(2, "startup-day-marker\n");
 
 process.env.OMP_LOGGER_TEST_NOW = nextDay;
 sink.write(JSON.stringify({ message: "next-day record" }));
 const currentFile = fs.readdirSync(directory).find(name => name.endsWith(".log") && name !== startupFile);
 fs.writeSync(2, "next-day-marker\n");
+fs.writeSync(1, "next-stdout-marker\n");
 
-restoreTerminalStderr();
-// Terminal ownership is back with the shell: a rotation must only record the
-// new path, never dup2 it over the restored fd 2.
+restoreTerminalOutput();
+// Rotation after release must not redirect either descriptor again.
 process.env.OMP_LOGGER_TEST_NOW = thirdDay;
 sink.write(JSON.stringify({ message: "third-day record" }));
-fs.writeSync(2, "restored\n");
+fs.writeSync(2, "stderr-restored\n");
+fs.writeSync(1, "stdout-restored\n");
 sink.close();
 
 process.stdout.write(
 	JSON.stringify({
-		forced,
+		isolated,
 		logPathBasename,
 		startupFile,
 		currentFile,

@@ -24,6 +24,8 @@ export interface RotatingFileOptions {
 	 * Without it every record is written as it arrives.
 	 */
 	readonly batch?: RotatingFileBatchOptions;
+	/** Test seam: clock for day keys and rollover decisions. */
+	readonly now?: () => Date;
 	/**
 	 * Called with the new active file path whenever the sink opens a different
 	 * file — first write, local-day rotation, and size rotation alike.
@@ -31,6 +33,7 @@ export interface RotatingFileOptions {
 	 * Consumers that hold their own descriptor on the active log (the macOS
 	 * stderr guard dup2s it onto fd 2) use this to follow the sink instead of
 	 * staying pinned to a file the sink later prunes.
+	 * Throwing rejects the replacement: retain the working target and retry later.
 	 */
 	readonly onRotate?: (filePath: string) => void;
 }
@@ -38,11 +41,11 @@ export interface RotatingFileOptions {
 /**
  * Synchronous append sink with local-day and size rotation plus bounded retention.
  *
- * Construction performs no filesystem I/O: the first file is created when the
- * first record is written out, so a process that never logs leaves nothing on
- * disk. Every file name embeds the owning process's suffix (its PID), so the
- * set of files this sink created is tracked in memory; files left by earlier
- * processes are pruned by name pattern in the logger, not by this sink.
+ * Construction performs no filesystem I/O. Files are opened when records are
+ * flushed or an external writer explicitly acquires a target. Every file name
+ * embeds the owning process's suffix (its PID); created and adopted files are
+ * tracked in memory. Shared retention for earlier processes lives in
+ * process-log.ts.
  *
  * With {@link RotatingFileOptions.batch}, records are buffered and written in
  * one `write` per batch. Buffered bytes already count toward the active file's
@@ -56,14 +59,19 @@ export class RotatingFileSink {
 	readonly #maxBytes: number;
 	readonly #maxFiles: number;
 	readonly #batch: RotatingFileBatchOptions | undefined;
+	readonly #now: () => Date;
 	readonly #onRotate: ((filePath: string) => void) | undefined;
-	/** Files this sink created, oldest first. */
+	/** Files this sink created or adopted, oldest first. */
 	readonly #files: string[] = [];
 	#activeDay: string | undefined;
 	#activeIndex = 0;
 	#activePath: string | undefined;
 	/** Size of the active file including buffered records not yet written. */
 	#activeBytes = 0;
+	/** Last wall-clock external-size sample; see #selectFile. */
+	#lastExternalCheckMs = 0;
+	/** Cadence timer so external growth rotates even with no records. */
+	#externalWatchTimer: NodeJS.Timeout | undefined;
 	#closed = false;
 	// Held append fd: one descriptor per active file instead of
 	// open+write+close per line. It is reopened on rotation and closed on
@@ -82,16 +90,19 @@ export class RotatingFileSink {
 		this.#maxFiles = options.maxFiles;
 		this.#batch = options.batch;
 		this.#onRotate = options.onRotate;
+		this.#now = options.now ?? (() => new Date());
 	}
 
 	#openFd(filePath: string): void {
-		this.#closeFd();
-		this.#fd = fs.openSync(filePath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND);
+		const fd = fs.openSync(filePath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND, 0o600);
 		try {
 			this.#onRotate?.(filePath);
-		} catch {
-			// A rotation observer must never break logging.
+		} catch (error) {
+			fs.closeSync(fd);
+			throw error;
 		}
+		this.#closeFd();
+		this.#fd = fd;
 	}
 
 	#closeFd(): void {
@@ -112,7 +123,7 @@ export class RotatingFileSink {
 	 * record's `localDay` key, so callers that already took the record's `Date`
 	 * reuse it.
 	 */
-	write(line: string, flushNow = false, day = localDay(new Date())): void {
+	write(line: string, flushNow = false, day = localDay(this.#now())): void {
 		if (this.#closed) return;
 		this.#selectFile(day);
 		const record = `${line}${os.EOL}`;
@@ -166,6 +177,7 @@ export class RotatingFileSink {
 	/** Write buffered records, then stop accepting records. */
 	close(): void {
 		if (this.#closed) return;
+		this.stopWatchingExternalWrites();
 		try {
 			this.flush();
 		} catch {
@@ -177,35 +189,117 @@ export class RotatingFileSink {
 
 	#selectFile(day: string): void {
 		const dayChanged = day !== this.#activeDay;
-		if (!dayChanged && this.#activeBytes <= this.#maxBytes) return;
-		// The buffered records belong to the current file: write them there, then
-		// close its descriptor BEFORE the next file is registered, because
-		// registration prunes beyond maxFiles — on Windows the pruned
-		// predecessor cannot be deleted while still open, which would leak it.
-		this.flush();
-		this.#closeFd();
-		if (dayChanged) {
-			this.#activeDay = day;
-			this.#activeIndex = 0;
-			this.#setActivePath(day, 0);
+		const hadPriorSelection = this.#activeDay !== undefined;
+		if (!dayChanged && this.#activePath) {
+			// fd 1/2 can be redirected onto the active log (terminal-output-guard);
+			// those raw writes bypass write(), so the real file must be trusted over
+			// the counter — but sampled at the batching cadence, not once per record:
+			// high-volume logging must not pay a blocking stat per write.
+			const now = Date.now();
+			if (now - this.#lastExternalCheckMs >= (this.#batch?.intervalMs ?? 1_000)) {
+				this.#lastExternalCheckMs = now;
+				try {
+					this.#activeBytes = Math.max(this.#activeBytes, fs.statSync(this.#activePath).size);
+				} catch {
+					// Active file missing or not yet chosen; keep the counter.
+				}
+			}
+			if (this.#activeBytes <= this.#maxBytes) return;
 		}
-		while (this.#activeBytes > this.#maxBytes) {
-			this.#activeIndex++;
-			this.#setActivePath(day, this.#activeIndex);
+		// Flush to the old target, but retain its selection and fd until the
+		// successor opens. A failed timer rotation must retry, not strand raw
+		// writers on an untracked predecessor or prune their only working file.
+		this.flush();
+		let index = dayChanged ? 0 : this.#activeIndex;
+		let filePath: string;
+		let bytes: number;
+		const adoptedFiles: string[] = [];
+		for (;;) {
+			const suffix = index === 0 ? "" : `.${index}`;
+			filePath = path.join(this.#directory, `${this.#filenamePrefix}.${day}.${this.#filenameSuffix}.log${suffix}`);
+			try {
+				bytes = fs.statSync(filePath).size;
+				adoptedFiles.push(filePath);
+			} catch {
+				bytes = 0;
+			}
+			if (bytes <= this.#maxBytes) break;
+			index++;
+		}
+		if (index > 0 || (dayChanged && hadPriorSelection)) {
+			try {
+				this.#openFd(filePath);
+			} catch (err) {
+				// A blocked successor must not reject records while the previous
+				// descriptor still works. Keep its selection so future ticks retry.
+				if (this.#fd === undefined) throw err;
+				return;
+			}
+		}
+		this.#activeDay = day;
+		this.#activeIndex = index;
+		this.#activePath = filePath;
+		this.#activeBytes = bytes;
+		this.#lastExternalCheckMs = Date.now();
+		// Opening closed the predecessor and notified external owners before
+		// retention tries to unlink it (required on Windows).
+		for (const adopted of adoptedFiles) this.#registerFile(adopted);
+		if (this.#fd !== undefined) this.#registerFile(filePath);
+	}
+
+	/** Select/open the canonical file before an external writer receives its path. */
+	openForExternalWrites(): string {
+		if (this.#closed) throw new Error("Cannot acquire a closed log sink");
+		this.#selectFile(localDay(this.#now()));
+		const activePath = this.#activePath!;
+		if (this.#fd === undefined) {
+			this.#registerFile(activePath);
+			this.#openFd(activePath);
+		}
+		this.#startExternalWatch();
+		return activePath;
+	}
+
+	/** Stop idle sampling; diagnostic-only owners may also retire the held fd. */
+	stopWatchingExternalWrites(closeFile = false): void {
+		if (this.#externalWatchTimer !== undefined) {
+			clearInterval(this.#externalWatchTimer);
+			this.#externalWatchTimer = undefined;
+		}
+		if (closeFile) {
+			try {
+				this.flush();
+			} catch {
+				// A failed diagnostic flush must not prevent releasing its descriptor.
+			} finally {
+				this.#closeFd();
+			}
 		}
 	}
 
-	#setActivePath(day: string, index: number): void {
-		const suffix = index === 0 ? "" : `.${index}`;
-		this.#activePath = path.join(
-			this.#directory,
-			`${this.#filenamePrefix}.${day}.${this.#filenameSuffix}.log${suffix}`,
-		);
-		try {
-			this.#activeBytes = fs.statSync(this.#activePath).size;
-		} catch {
-			this.#activeBytes = 0;
-		}
+	/**
+	 * fd 1/2 redirected onto the active log keep appending even when no logger
+	 * record arrives (an inherited child can be the only producer), so the
+	 * size cap needs a cadence independent of `write()`. Each tick runs the
+	 * same throttled sample `#selectFile` applies per record.
+	 */
+	#startExternalWatch(): void {
+		if (this.#externalWatchTimer !== undefined || this.#closed) return;
+		const intervalMs = this.#batch?.intervalMs ?? 1_000;
+		this.#externalWatchTimer = setInterval(() => {
+			try {
+				this.checkExternalGrowth();
+			} catch {
+				// A background check has no caller to report to; logging never throws.
+			}
+		}, intervalMs);
+		this.#externalWatchTimer.unref();
+	}
+
+	/** Run the external-size sample and rotate if the cap is exceeded. */
+	checkExternalGrowth(): void {
+		if (this.#closed) return;
+		this.#selectFile(localDay(this.#now()));
 	}
 
 	#registerFile(filePath: string): void {
