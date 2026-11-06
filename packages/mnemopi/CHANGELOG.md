@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed `sleep` consolidation summaries ignoring the configured LLM: the session state now awaits LLM sleep summaries (`sleepAsync` / `sleepAllSessionsAsync`), falling back to the deterministic aaak summary when no LLM is configured or the call fails ([#18274](https://github.com/can1357/oh-my-pi/pull/18274) by [@aleister1102](https://github.com/aleister1102))
+- Fixed `sleep` consolidation ignoring the configured LLM: sleep summaries now use the configured model, falling back to the deterministic aaak summary when no LLM is configured or the call fails ([#18274](https://github.com/can1357/oh-my-pi/pull/18274) by [@aleister1102](https://github.com/aleister1102))
 
 ## [18.17.0] - 2026-11-06
 

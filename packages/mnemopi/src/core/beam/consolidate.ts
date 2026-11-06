@@ -6,7 +6,7 @@ import { aaakEncode } from "../aaak";
 import { REGEX_EXTRACTION_MAX_INPUT_CHARS } from "../entities";
 import { EpisodicGraph } from "../episodic-graph";
 import { type ExtractedFactCategories, heuristicExtractFacts } from "../extraction";
-import { summarizeMemories } from "../local-llm";
+import { chunkMemoriesByBudget, summarizeMemories } from "../local-llm";
 import { clampVeracity, VERACITY_WEIGHTS, type Veracity, VeracityConsolidator } from "../veracity-consolidation";
 import { scheduleEmbedding } from "./helpers";
 import type { BeamMemoryState, BeamStats, JsonValue, MemoriaRetrieveResult, Metadata, SleepResult } from "./types";
@@ -136,11 +136,15 @@ async function buildLlmSleepSummary(
 ): Promise<SleepSummaryResult> {
 	const maxChars = normalizedMaxEpisodeChars(beam);
 	const memories = chunk.items.map(item => rowValue(item, "content") ?? "").filter(Boolean);
+	// summarizeMemories drops any memory larger than the prompt budget, and the chunk's rows are
+	// still claimed. Take the LLM path only when every memory fits; otherwise summarize deterministically.
 	let llmSummary: string | null = null;
-	try {
-		llmSummary = (await summarizeMemories(memories, source))?.trim() ?? null;
-	} catch {
-		llmSummary = null;
+	if (memories.length > 0 && chunkMemoriesByBudget(memories, source).flat().length === memories.length) {
+		try {
+			llmSummary = (await summarizeMemories(memories, source))?.trim() ?? null;
+		} catch {
+			llmSummary = null;
+		}
 	}
 	if (llmSummary) {
 		const truncated = llmSummary.length > maxChars;
@@ -1117,34 +1121,37 @@ function eligibleWorkingRows(beam: BeamMemoryState, sessionId: string): Row[] {
 	);
 }
 
-export function sleep(beam: BeamMemoryState, dryRun = false): SleepResult {
-	let rows = eligibleWorkingRows(beam, sourceSession(beam));
-	if (rows.length === 0)
-		return { dry_run: dryRun, status: "no_op", message: "No old working memories to consolidate" };
-	if (!dryRun) {
-		const claimTs = isoNow();
-		const ids = rows.map(row => rowValue(row, "id")).filter((id): id is string => id !== null);
-		const placeholders = ids.map(() => "?").join(",");
-		beam.db.run(
-			`UPDATE working_memory SET consolidated_at = ? WHERE id IN (${placeholders}) AND consolidated_at IS NULL`,
-			[claimTs, ...ids],
-		);
-		const claimed = new Set(
-			asRows(
-				beam.db
-					.query(`SELECT id FROM working_memory WHERE id IN (${placeholders}) AND consolidated_at = ?`)
-					.all(...ids, claimTs),
-			).map(row => rowValue(row, "id")),
-		);
-		if (claimed.size === 0)
-			return {
-				dry_run: false,
-				status: "no_op",
-				message: "All eligible rows claimed by concurrent sleep",
-			};
-		rows = rows.filter(row => claimed.has(rowValue(row, "id")));
-	}
+type SleepPlanChunk = {
+	source: string;
+	chunk: SleepChunk;
+	ids: string[];
+	scope: string;
+	validUntil: string | null;
+	veracity: ReturnType<typeof aggregateEpisodicVeracity>;
+};
 
+type SleepTotals = {
+	consolidatedIds: string[];
+	summariesCreated: number;
+	llmUsed: boolean;
+};
+
+class SleepClaimConflict extends Error {}
+
+function noEligibleSleep(dryRun: boolean): SleepResult {
+	return { dry_run: dryRun, status: "no_op", message: "No old working memories to consolidate" };
+}
+
+function newSleepTotals(): SleepTotals {
+	return { consolidatedIds: [], summariesCreated: 0, llmUsed: false };
+}
+
+function deterministicSleepSummary(beam: BeamMemoryState, source: string, chunk: SleepChunk): SleepSummaryResult {
+	return { ...buildSleepSummary(beam, source, chunk), llmUsed: false, method: "aaak" };
+}
+
+/** Groups eligible rows by source and splits them into the chunks each sleep variant summarizes. */
+function planSleepChunks(beam: BeamMemoryState, rows: readonly Row[]): SleepPlanChunk[] {
 	const grouped = new Map<string, Row[]>();
 	for (const row of rows) {
 		const source = rowValue(row, "source") ?? "unknown";
@@ -1152,12 +1159,9 @@ export function sleep(beam: BeamMemoryState, dryRun = false): SleepResult {
 		if (group) group.push(row);
 		else grouped.set(source, [row]);
 	}
-
-	const consolidatedIds: string[] = [];
-	let summariesCreated = 0;
+	const plan: SleepPlanChunk[] = [];
 	for (const [source, items] of grouped) {
 		for (const chunk of splitSleepItems(beam, source, items)) {
-			const ids = chunk.items.map(item => rowValue(item, "id")).filter((id): id is string => id !== null);
 			let scope = "session";
 			let validUntil: string | null = null;
 			for (const item of chunk.items) {
@@ -1165,33 +1169,88 @@ export function sleep(beam: BeamMemoryState, dryRun = false): SleepResult {
 				const itemValidUntil = rowValue(item, "valid_until");
 				if (itemValidUntil && (validUntil === null || itemValidUntil < validUntil)) validUntil = itemValidUntil;
 			}
-			const sleepSummary = buildSleepSummary(beam, source, chunk);
-			const metadata: Metadata = { original_count: chunk.items.length, source, llm_used: false };
-			if (sleepSummary.truncated) {
-				metadata.truncated = true;
-				metadata.original_chars = sleepSummary.originalChars;
-				metadata.max_chars = sleepSummary.maxChars;
-			}
-			const summary = sleepSummary.summary;
-			if (!dryRun) {
-				consolidateToEpisodic(beam, summary, ids, "sleep_consolidation", 0.6, {
-					scope,
-					validUntil,
-					veracity: aggregateEpisodicVeracity(chunk.items.map(item => rowValue(item, "veracity") ?? "unknown")),
-					metadata,
-				});
-			}
-			consolidatedIds.push(...ids);
-			summariesCreated++;
+			plan.push({
+				source,
+				chunk,
+				ids: chunk.items.map(item => rowValue(item, "id")).filter((id): id is string => id !== null),
+				scope,
+				validUntil,
+				veracity: aggregateEpisodicVeracity(chunk.items.map(item => rowValue(item, "veracity") ?? "unknown")),
+			});
 		}
+	}
+	return plan;
+}
+
+/**
+ * Claims the chunk's rows and writes its episodic summary in one transaction, so a row is
+ * never marked consolidated without its summary. Returns false, and writes nothing, when a
+ * concurrent sleep already claimed any of the rows.
+ */
+function commitSleepChunk(beam: BeamMemoryState, plan: SleepPlanChunk, summary: SleepSummaryResult): boolean {
+	const claimTs = isoNow();
+	const placeholders = plan.ids.map(() => "?").join(",");
+	try {
+		beam.db.transaction(() => {
+			beam.db.run(
+				`UPDATE working_memory SET consolidated_at = ? WHERE id IN (${placeholders}) AND consolidated_at IS NULL`,
+				[claimTs, ...plan.ids],
+			);
+			const claimed = asRows(
+				beam.db
+					.query(`SELECT id FROM working_memory WHERE id IN (${placeholders}) AND consolidated_at = ?`)
+					.all(...plan.ids, claimTs),
+			).length;
+			if (claimed !== plan.ids.length) throw new SleepClaimConflict();
+			const metadata: Metadata = {
+				original_count: plan.chunk.items.length,
+				source: plan.source,
+				llm_used: summary.llmUsed,
+				method: summary.method,
+			};
+			if (summary.truncated) {
+				metadata.truncated = true;
+				metadata.original_chars = summary.originalChars;
+				metadata.max_chars = summary.maxChars;
+			}
+			consolidateToEpisodic(beam, summary.summary, plan.ids, "sleep_consolidation", 0.6, {
+				scope: plan.scope,
+				validUntil: plan.validUntil,
+				veracity: plan.veracity,
+				metadata,
+			});
+		})();
+		return true;
+	} catch (error) {
+		if (error instanceof SleepClaimConflict) return false;
+		throw error;
+	}
+}
+
+function applySleepChunk(
+	beam: BeamMemoryState,
+	plan: SleepPlanChunk,
+	summary: SleepSummaryResult,
+	dryRun: boolean,
+	totals: SleepTotals,
+): void {
+	if (!dryRun && !commitSleepChunk(beam, plan, summary)) return;
+	totals.llmUsed = totals.summariesCreated === 0 ? summary.llmUsed : totals.llmUsed && summary.llmUsed;
+	totals.consolidatedIds.push(...plan.ids);
+	totals.summariesCreated++;
+}
+
+function finishSleep(beam: BeamMemoryState, dryRun: boolean, totals: SleepTotals): SleepResult {
+	if (!dryRun && totals.consolidatedIds.length === 0) {
+		return { dry_run: false, status: "no_op", message: "All eligible rows claimed by concurrent sleep" };
 	}
 	if (!dryRun) {
 		beam.db.run(
 			`INSERT INTO consolidation_log (session_id, items_consolidated, summary_preview, created_at) VALUES (?, ?, ?, ?)`,
 			[
 				sourceSession(beam),
-				consolidatedIds.length,
-				`${summariesCreated} summaries (aaak) from ${consolidatedIds.length} items`,
+				totals.consolidatedIds.length,
+				`${totals.summariesCreated} summaries (${totals.llmUsed ? "llm" : "aaak"}) from ${totals.consolidatedIds.length} items`,
 				isoNow(),
 			],
 		);
@@ -1200,131 +1259,56 @@ export function sleep(beam: BeamMemoryState, dryRun = false): SleepResult {
 	return {
 		dry_run: dryRun,
 		status: dryRun ? "dry_run" : "consolidated",
-		items_consolidated: consolidatedIds.length,
-		summaries_created: summariesCreated,
+		items_consolidated: totals.consolidatedIds.length,
+		summaries_created: totals.summariesCreated,
 		conflicts_resolved: 0,
-		llm_used: 0,
-		method: "aaak",
-		consolidated_ids: consolidatedIds,
+		llm_used: totals.llmUsed ? 1 : 0,
+		method: totals.llmUsed ? "llm" : "aaak",
+		consolidated_ids: totals.consolidatedIds,
 		degradation,
 	};
 }
+
+export function sleep(beam: BeamMemoryState, dryRun = false): SleepResult {
+	const rows = eligibleWorkingRows(beam, sourceSession(beam));
+	if (rows.length === 0) return noEligibleSleep(dryRun);
+	const totals = newSleepTotals();
+	for (const plan of planSleepChunks(beam, rows)) {
+		applySleepChunk(beam, plan, deterministicSleepSummary(beam, plan.source, plan.chunk), dryRun, totals);
+	}
+	return finishSleep(beam, dryRun, totals);
+}
+
+/**
+ * Async sleep: each chunk's summary is awaited before its rows are claimed (see
+ * commitSleepChunk), so an interrupted call leaves those rows eligible for the next pass.
+ */
 async function sleepCore(
 	beam: BeamMemoryState,
 	dryRun: boolean,
-	summarize: (
-		beam: BeamMemoryState,
-		source: string,
-		chunk: SleepChunk,
-	) => SleepSummaryResult | Promise<SleepSummaryResult>,
+	summarize: (beam: BeamMemoryState, source: string, chunk: SleepChunk) => Promise<SleepSummaryResult>,
 ): Promise<SleepResult> {
-	let rows = eligibleWorkingRows(beam, sourceSession(beam));
-	if (rows.length === 0) {
-		return { dry_run: dryRun, status: "no_op", message: "No old working memories to consolidate" };
+	const rows = eligibleWorkingRows(beam, sourceSession(beam));
+	if (rows.length === 0) return noEligibleSleep(dryRun);
+	const totals = newSleepTotals();
+	for (const plan of planSleepChunks(beam, rows)) {
+		// Dry runs never call the model; they count the chunks a real pass would summarize.
+		const summary = dryRun
+			? deterministicSleepSummary(beam, plan.source, plan.chunk)
+			: await summarize(beam, plan.source, plan.chunk);
+		applySleepChunk(beam, plan, summary, dryRun, totals);
 	}
-	if (!dryRun) {
-		const claimTs = isoNow();
-		const ids = rows.map(row => rowValue(row, "id")).filter((id): id is string => id !== null);
-		const placeholders = ids.map(() => "?").join(",");
-		beam.db.run(
-			`UPDATE working_memory SET consolidated_at = ? WHERE id IN (${placeholders}) AND consolidated_at IS NULL`,
-			[claimTs, ...ids],
-		);
-		const claimed = new Set(
-			asRows(
-				beam.db
-					.query(`SELECT id FROM working_memory WHERE id IN (${placeholders}) AND consolidated_at = ?`)
-					.all(...ids, claimTs),
-			).map(row => rowValue(row, "id")),
-		);
-		if (claimed.size === 0) {
-			return {
-				dry_run: false,
-				status: "no_op",
-				message: "All eligible rows claimed by concurrent sleep",
-			};
-		}
-		rows = rows.filter(row => claimed.has(rowValue(row, "id")));
-	}
-
-	const grouped = new Map<string, Row[]>();
-	for (const row of rows) {
-		const source = rowValue(row, "source") ?? "unknown";
-		const group = grouped.get(source);
-		if (group) group.push(row);
-		else grouped.set(source, [row]);
-	}
-
-	const consolidatedIds: string[] = [];
-	let summariesCreated = 0;
-	let llmUsed = true;
-	for (const [source, items] of grouped) {
-		for (const chunk of splitSleepItems(beam, source, items)) {
-			const ids = chunk.items.map(item => rowValue(item, "id")).filter((id): id is string => id !== null);
-			let scope = "session";
-			let validUntil: string | null = null;
-			for (const item of chunk.items) {
-				if (rowValue(item, "scope") === "global") scope = "global";
-				const itemValidUntil = rowValue(item, "valid_until");
-				if (itemValidUntil && (validUntil === null || itemValidUntil < validUntil)) validUntil = itemValidUntil;
-			}
-			const sleepSummary = await summarize(beam, source, chunk);
-			llmUsed = llmUsed && sleepSummary.llmUsed;
-			const metadata: Metadata = {
-				original_count: chunk.items.length,
-				source,
-				llm_used: sleepSummary.llmUsed,
-				method: sleepSummary.method,
-			};
-			if (sleepSummary.truncated) {
-				metadata.truncated = true;
-				metadata.original_chars = sleepSummary.originalChars;
-				metadata.max_chars = sleepSummary.maxChars;
-			}
-			if (!dryRun) {
-				consolidateToEpisodic(beam, sleepSummary.summary, ids, "sleep_consolidation", 0.6, {
-					scope,
-					validUntil,
-					veracity: aggregateEpisodicVeracity(chunk.items.map(item => rowValue(item, "veracity") ?? "unknown")),
-					metadata,
-				});
-			}
-			consolidatedIds.push(...ids);
-			summariesCreated++;
-		}
-	}
-	if (!dryRun) {
-		beam.db.run(
-			`INSERT INTO consolidation_log (session_id, items_consolidated, summary_preview, created_at) VALUES (?, ?, ?, ?)`,
-			[
-				sourceSession(beam),
-				consolidatedIds.length,
-				`${summariesCreated} summaries (${llmUsed ? "llm" : "aaak"}) from ${consolidatedIds.length} items`,
-				isoNow(),
-			],
-		);
-	}
-	const degradation = degradeEpisodic(beam, dryRun);
-	return {
-		dry_run: dryRun,
-		status: dryRun ? "dry_run" : "consolidated",
-		items_consolidated: consolidatedIds.length,
-		summaries_created: summariesCreated,
-		conflicts_resolved: 0,
-		llm_used: llmUsed ? 1 : 0,
-		method: llmUsed ? "llm" : "aaak",
-		consolidated_ids: consolidatedIds,
-		degradation,
-	};
+	return finishSleep(beam, dryRun, totals);
 }
+
 export function sleepAsync(beam: BeamMemoryState, dryRun = false): Promise<SleepResult> {
 	return sleepCore(beam, dryRun, buildLlmSleepSummary);
 }
 
-export function sleepAllSessions(beam: BeamMemoryState, dryRun = false): SleepResult {
+function listSleepSessions(beam: BeamMemoryState): Row[] {
 	const ttl = beam.config?.workingMemoryTtlHours ?? 24;
 	const cutoff = cutoffIso(Math.floor(ttl / 2), 60 * 60 * 1000);
-	const sessions = asRows(
+	return asRows(
 		beam.db
 			.query(
 				`SELECT session_id, COUNT(*) AS eligible FROM working_memory
@@ -1332,96 +1316,49 @@ export function sleepAllSessions(beam: BeamMemoryState, dryRun = false): SleepRe
 			)
 			.all(cutoff),
 	);
-	if (sessions.length === 0) {
-		return {
-			dry_run: dryRun,
-			status: "no_op",
-			message: "No old working memories to consolidate",
-			sessions_scanned: 0,
-			sessions_consolidated: 0,
-			items_consolidated: 0,
-			summaries_created: 0,
-			llm_used: 0,
-			errors: 0,
-			session_results: [],
-		};
-	}
-	const originalSession = beam.sessionId;
-	const results: Row[] = [];
-	let items = 0;
-	let summaries = 0;
-	let consolidated = 0;
-	for (const row of sessions) {
-		const sessionId = rowValue(row, "session_id") ?? "default";
-		const scoped = Object.create(Object.getPrototypeOf(beam)) as BeamMemoryState;
-		Object.assign(scoped, beam, { sessionId, channelId: sessionId });
-		const result = sleep(scoped, dryRun) as Row;
-		result.session_id = sessionId;
-		result.eligible = row.eligible;
-		results.push(result);
-		if (result.status === "consolidated" || result.status === "dry_run") consolidated++;
-		items += Number(result.items_consolidated ?? 0);
-		summaries += Number(result.summaries_created ?? 0);
-	}
-	const degradation = degradeEpisodic(beam, dryRun);
+}
+
+function sessionSleepBeam(beam: BeamMemoryState, sessionId: string): BeamMemoryState {
+	const scoped = Object.create(Object.getPrototypeOf(beam)) as BeamMemoryState;
+	Object.assign(scoped, beam, { sessionId, channelId: sessionId });
+	return scoped;
+}
+
+function tagSessionResult(result: Row, sessionId: string, eligible: unknown): Row {
+	result.session_id = sessionId;
+	result.eligible = eligible;
+	return result;
+}
+
+function noSleepSessions(dryRun: boolean): SleepResult {
 	return {
 		dry_run: dryRun,
-		status: dryRun ? "dry_run" : items > 0 ? "consolidated" : "no_op",
-		sessions_scanned: sessions.length,
-		sessions_consolidated: consolidated,
-		items_consolidated: items,
-		summaries_created: summaries,
+		status: "no_op",
+		message: "No old working memories to consolidate",
+		sessions_scanned: 0,
+		sessions_consolidated: 0,
+		items_consolidated: 0,
+		summaries_created: 0,
 		llm_used: 0,
 		errors: 0,
-		error_details: [],
-		session_results: results,
-		degradation,
-		original_session: originalSession,
+		session_results: [],
 	};
 }
-export async function sleepAllSessionsAsync(beam: BeamMemoryState, dryRun = false): Promise<SleepResult> {
-	const ttl = beam.config?.workingMemoryTtlHours ?? 24;
-	const cutoff = cutoffIso(Math.floor(ttl / 2), 60 * 60 * 1000);
-	const sessions = asRows(
-		beam.db
-			.query(
-				`SELECT session_id, COUNT(*) AS eligible FROM working_memory
-		 WHERE timestamp < ? AND consolidated_at IS NULL GROUP BY session_id ORDER BY MIN(timestamp) ASC`,
-			)
-			.all(cutoff),
-	);
-	if (sessions.length === 0) {
-		return {
-			dry_run: dryRun,
-			status: "no_op",
-			message: "No old working memories to consolidate",
-			sessions_scanned: 0,
-			sessions_consolidated: 0,
-			items_consolidated: 0,
-			summaries_created: 0,
-			llm_used: 0,
-			errors: 0,
-			session_results: [],
-		};
-	}
-	const originalSession = beam.sessionId;
-	const results: Row[] = [];
+
+function sleepAllSessionsResult(
+	beam: BeamMemoryState,
+	dryRun: boolean,
+	sessions: readonly Row[],
+	results: Row[],
+	llmUsed: boolean,
+): SleepResult {
 	let items = 0;
 	let summaries = 0;
 	let consolidated = 0;
-	let llmUsed = true;
-	for (const row of sessions) {
-		const sessionId = rowValue(row, "session_id") ?? "default";
-		const scoped = Object.create(Object.getPrototypeOf(beam)) as BeamMemoryState;
-		Object.assign(scoped, beam, { sessionId, channelId: sessionId });
-		const result = (await sleepAsync(scoped, dryRun)) as Row;
-		result.session_id = sessionId;
-		result.eligible = row.eligible;
-		results.push(result);
+	for (const result of results) {
 		if (result.status === "consolidated" || result.status === "dry_run") consolidated++;
 		items += Number(result.items_consolidated ?? 0);
 		summaries += Number(result.summaries_created ?? 0);
-		llmUsed = llmUsed && Number(result.llm_used ?? 0) === 1;
 	}
 	const degradation = degradeEpisodic(beam, dryRun);
 	return {
@@ -1436,9 +1373,35 @@ export async function sleepAllSessionsAsync(beam: BeamMemoryState, dryRun = fals
 		error_details: [],
 		session_results: results,
 		degradation,
-		original_session: originalSession,
+		original_session: beam.sessionId,
 	};
 }
+
+export function sleepAllSessions(beam: BeamMemoryState, dryRun = false): SleepResult {
+	const sessions = listSleepSessions(beam);
+	if (sessions.length === 0) return noSleepSessions(dryRun);
+	const results: Row[] = [];
+	for (const row of sessions) {
+		const sessionId = rowValue(row, "session_id") ?? "default";
+		const result = sleep(sessionSleepBeam(beam, sessionId), dryRun) as Row;
+		results.push(tagSessionResult(result, sessionId, row.eligible));
+	}
+	return sleepAllSessionsResult(beam, dryRun, sessions, results, false);
+}
+
+export async function sleepAllSessionsAsync(beam: BeamMemoryState, dryRun = false): Promise<SleepResult> {
+	const sessions = listSleepSessions(beam);
+	if (sessions.length === 0) return noSleepSessions(dryRun);
+	const results: Row[] = [];
+	for (const row of sessions) {
+		const sessionId = rowValue(row, "session_id") ?? "default";
+		const result = (await sleepAsync(sessionSleepBeam(beam, sessionId), dryRun)) as Row;
+		results.push(tagSessionResult(result, sessionId, row.eligible));
+	}
+	const llmUsed = results.every(result => Number(result.llm_used ?? 0) === 1);
+	return sleepAllSessionsResult(beam, dryRun, sessions, results, llmUsed);
+}
+
 export function getConsolidationLog(beam: BeamMemoryState, limit = 10): Row[] {
 	return asRows(
 		beam.db

@@ -530,4 +530,71 @@ describe("async LLM-backed sleep", () => {
 			db.close();
 		}
 	});
+
+	it("dry run does not call the configured completion or write rows", async () => {
+		const db = openDatabase(":memory:", { create: true, readwrite: true });
+		let calls = 0;
+		const memory = new Mnemopi({
+			db,
+			sessionId: "llm-sleep-dry-run",
+			noEmbeddings: true,
+			llm: {
+				complete: async () => {
+					calls++;
+					return "unused summary";
+				},
+			},
+		});
+		try {
+			const id = memory.remember("Keep the old server online until verification passes", {
+				source: "conversation",
+				extract: false,
+			});
+			db.run("UPDATE working_memory SET timestamp = ?, created_at = ? WHERE id = ?", [oldIso(), oldIso(), id]);
+			const result = await memory.sleepAsync(true);
+			expect(result.dry_run).toBe(true);
+			expect(calls).toBe(0);
+			expect(db.query("SELECT COUNT(*) AS count FROM episodic_memory").get()).toEqual({ count: 0 });
+			expect(db.query("SELECT consolidated_at FROM working_memory WHERE id = ?").get(id)).toEqual({
+				consolidated_at: null,
+			});
+		} finally {
+			memory.close();
+			db.close();
+		}
+	});
+
+	it("keeps rows unclaimed until their summary is produced", async () => {
+		const db = openDatabase(":memory:", { create: true, readwrite: true });
+		let claimedDuringSummary: unknown = "not called";
+		const memory = new Mnemopi({
+			db,
+			sessionId: "llm-sleep-claim-order",
+			noEmbeddings: true,
+			llm: {
+				complete: async () => {
+					claimedDuringSummary = db.query("SELECT consolidated_at FROM working_memory LIMIT 1").get() as {
+						consolidated_at: string | null;
+					};
+					return "The user decided to keep the old server online.";
+				},
+			},
+		});
+		try {
+			const id = memory.remember("Keep the old server online until verification passes", {
+				source: "conversation",
+				extract: false,
+			});
+			db.run("UPDATE working_memory SET timestamp = ?, created_at = ? WHERE id = ?", [oldIso(), oldIso(), id]);
+			const result = await memory.sleepAsync(false);
+			expect(claimedDuringSummary).toEqual({ consolidated_at: null });
+			expect(result.llm_used).toBe(1);
+			expect(db.query("SELECT consolidated_at FROM working_memory WHERE id = ?").get(id)).toEqual({
+				consolidated_at: expect.any(String),
+			});
+		} finally {
+			memory.close();
+			db.close();
+		}
+	});
 });
