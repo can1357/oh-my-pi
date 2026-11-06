@@ -56,7 +56,7 @@ await sessionManager.ensureOnDisk();
 
 const composer = new Composer();
 composer.start();
-const mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, undefined, composer);
+const mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, composer);
 mode.ui.terminal.write("x".repeat(4 * 1024 * 1024));
 
 // Registered last, so it runs first in the exit cleanup; it only reports.
