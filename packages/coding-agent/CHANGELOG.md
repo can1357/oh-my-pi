@@ -10,7 +10,7 @@
 - `grep -e` and `rg -e` in the bash tool accept patterns that start with `-` (e.g. `grep -e "--canary"`) instead of failing with an unknown-option error.
 - The bash execution visualization keeps updating, and saved traces still restore, after a command handles bytes that aren't valid UTF-8 (e.g. `v=$(printf '\377')`)
 - On Windows, `grep`, `glob` and isolated subagents no longer flash a console window when they query or start the ovnfs daemon.
-- Fixed `ask` notes landing on the previous question's answer when added right after moving on; Note now always annotates the question shown
+- Fixed `ask` notes landing on the previous question's answer when added right after moving on; Note now always annotates the question shown ([#18317](https://github.com/can1357/oh-my-pi/pull/18317) by [@DonMikone](https://github.com/DonMikone))
 
 ## [18.17.0] - 2026-11-06
 
